@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, eventsUrl, setShareToken, withShareToken, type Session } from './api';
+import { api, eventsUrl, insightApi, setShareToken, withShareToken, type Session } from './api';
+import { setInstance } from './instance';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -100,5 +101,128 @@ describe('web api adapter', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: null })
     });
+  });
+});
+
+describe('insightApi 会话分析', () => {
+  afterEach(() => setInstance(undefined));
+
+  it('details 带可选 snapshotId，GET 走实例路径且不触发分析', async () => {
+    const data = { status: { sessionId: 's1', refreshState: 'idle', availability: 'none', freshness: 'unknown', currentSnapshotId: null }, summary: null, manifest: null, hostEvidence: null };
+    const fetcher = vi.fn(async () => ({ ok: true, json: async () => data }));
+    vi.stubGlobal('fetch', fetcher);
+    await expect(insightApi.details('s1')).resolves.toEqual(data);
+    expect(fetcher).toHaveBeenLastCalledWith('/api/sessions/s1/insight', { credentials: 'same-origin', cache: 'no-store', signal: undefined });
+    await insightApi.details('s/1', 'snap_2');
+    expect(fetcher).toHaveBeenLastCalledWith('/api/sessions/s%2F1/insight?snapshotId=snap_2', { credentials: 'same-origin', cache: 'no-store', signal: undefined });
+  });
+
+  it('refresh 发空 JSON body，cancel 走 DELETE', async () => {
+    const fetcher = vi.fn(async (url: string) => ({
+      ok: true,
+      json: async () => url.includes('refresh/') ? { success: true, state: 'cancelled' } : { requestId: 'req_1', state: 'queued' }
+    }));
+    vi.stubGlobal('fetch', fetcher);
+    await insightApi.refresh('s1');
+    expect(fetcher).toHaveBeenCalledWith('/api/sessions/s1/insight/refresh', {
+      credentials: 'same-origin', method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}'
+    });
+    await insightApi.cancel('s1', 'req_1');
+    expect(fetcher).toHaveBeenCalledWith('/api/sessions/s1/insight/refresh/req_1', { credentials: 'same-origin', method: 'DELETE' });
+  });
+
+  it('events 固定 snapshotId 与分页筛选参数，不跨快照混页', async () => {
+    const fetcher = vi.fn(async () => ({ ok: true, json: async () => ({ snapshotId: 'snap_1', items: [], nextCursor: null, totalMatching: 0 }) }));
+    vi.stubGlobal('fetch', fetcher);
+    await insightApi.events('s1', { snapshotId: 'snap_1', kind: 'tool_call', result: 'failure', cursor: 'cur_1', limit: 200 });
+    expect(fetcher).toHaveBeenCalledWith(
+      '/api/sessions/s1/insight/events?snapshotId=snap_1&limit=200&cursor=cur_1&kind=tool_call&result=failure',
+      { credentials: 'same-origin', cache: 'no-store', signal: undefined }
+    );
+    // limit 缺省为 100。
+    await insightApi.events('s1', { snapshotId: 'snap_1' });
+    expect(fetcher).toHaveBeenLastCalledWith('/api/sessions/s1/insight/events?snapshotId=snap_1&limit=100', { credentials: 'same-origin', cache: 'no-store', signal: undefined });
+  });
+
+  it('summary 把 cohort 过滤与分组序列化进查询串', async () => {
+    const fetcher = vi.fn(async () => ({ ok: true, json: async () => ({ candidateSessions: 0, withSnapshot: 0, withoutSnapshot: 0, partialSnapshots: 0, failedRefreshes: 0, staleSnapshots: 0, freshnessUnknown: 0, groups: [], sessions: [], nextCursor: null }) }));
+    vi.stubGlobal('fetch', fetcher);
+    await insightApi.summary({ workspace: 'repo', agentId: 'a1', usage: 'explicit', includeArchived: false, groupBy: 'agent', limit: 50 });
+    expect(fetcher).toHaveBeenCalledWith(
+      '/api/insights/summary?workspace=repo&agentId=a1&usage=explicit&includeArchived=false&groupBy=agent&limit=50',
+      { credentials: 'same-origin', cache: 'no-store', signal: undefined }
+    );
+  });
+
+  it('compare 用 POST body 指定两侧 sessionId + snapshotId', async () => {
+    const fetcher = vi.fn(async () => ({ ok: true, json: async () => ({ comparable: false, incomparableReasons: [], metricDiffs: {} }) }));
+    vi.stubGlobal('fetch', fetcher);
+    const body = { left: { sessionId: 's1', snapshotId: 'p1' }, right: { sessionId: 's2', snapshotId: 'p2' } };
+    await insightApi.compare(body);
+    expect(fetcher).toHaveBeenCalledWith('/api/insights/compare', {
+      credentials: 'same-origin', method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: undefined
+    });
+  });
+
+  it('所有分析请求在远端实例下都走 /api/instances/<id> 代理前缀', async () => {
+    setInstance('tag');
+    const fetcher = vi.fn(async (url: string) => ({ ok: true, json: async () => ({ [url]: true }) }));
+    vi.stubGlobal('fetch', fetcher);
+    await insightApi.details('s1');
+    await insightApi.summary({ groupBy: 'workspace' });
+    const urls = fetcher.mock.calls.map(call => call[0] as string);
+    expect(urls).toContain('/api/instances/tag/sessions/s1/insight');
+    expect(urls).toContain('/api/instances/tag/insights/summary?groupBy=workspace');
+  });
+
+  it('exportReport 用实例路径 POST 并按 Content-Disposition 得到 Blob 文件名', async () => {
+    setInstance('tag');
+    const fetcher = vi.fn(async () => ({
+      ok: true,
+      headers: new Headers({ 'Content-Disposition': "attachment; filename=\"session-insight-s1-2026-10-03.md\"" }),
+      blob: async () => new Blob(['# report'], { type: 'text/markdown' })
+    }));
+    vi.stubGlobal('fetch', fetcher);
+    const result = await insightApi.exportReport({ kind: 'session', sessionId: 's1', snapshotId: 'p1', format: 'markdown' });
+    expect(fetcher).toHaveBeenCalledWith('/api/instances/tag/insights/export', {
+      credentials: 'same-origin', method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'session', sessionId: 's1', snapshotId: 'p1', format: 'markdown' })
+    });
+    expect(result.filename).toBe('session-insight-s1-2026-10-03.md');
+    expect(result.blob.type).toBe('text/markdown');
+  });
+
+  it('exportReport 无 Content-Disposition 时用安全回退文件名', async () => {
+    const fetcher = vi.fn(async () => ({ ok: true, headers: new Headers(), blob: async () => new Blob(['<html/>'], { type: 'text/html' }) }));
+    vi.stubGlobal('fetch', fetcher);
+    const result = await insightApi.exportReport({
+      kind: 'comparison',
+      left: { sessionId: 's1', snapshotId: 'p1' },
+      right: { sessionId: 's2', snapshotId: 'p2' },
+      format: 'html'
+    });
+    expect(result.filename).toBe('session-insight-comparison.html');
+  });
+
+  it('分析请求 401 触发未授权事件，错误体解析为 ApiError', async () => {
+    const listener = vi.fn();
+    window.addEventListener('dutydeck:unauthorized', listener);
+    const fetcher = vi.fn(async () => ({ ok: false, status: 401, json: async () => ({ error: { code: 'INSIGHT_FORBIDDEN', message: '需要管理员权限' } }) }));
+    vi.stubGlobal('fetch', fetcher);
+    await expect(insightApi.details('s1')).rejects.toMatchObject({ code: 'INSIGHT_FORBIDDEN', status: 401 });
+    expect(listener).toHaveBeenCalled();
+    window.removeEventListener('dutydeck:unauthorized', listener);
+  });
+
+  it('exportReport 失败时解析 JSON 错误，不把错误响应当文件下载', async () => {
+    const fetcher = vi.fn(async () => ({
+      ok: false,
+      status: 429,
+      clone: () => ({ json: async () => ({ error: { code: 'INSIGHT_QUEUE_FULL', message: '队列已满' } }) }),
+      json: async () => ({ error: { code: 'INSIGHT_QUEUE_FULL', message: '队列已满' } })
+    }));
+    vi.stubGlobal('fetch', fetcher);
+    await expect(insightApi.exportReport({ kind: 'session', sessionId: 's1', snapshotId: 'p1', format: 'html' }))
+      .rejects.toMatchObject({ code: 'INSIGHT_QUEUE_FULL', status: 429 });
   });
 });

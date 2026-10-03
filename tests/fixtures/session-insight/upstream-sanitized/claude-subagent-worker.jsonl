@@ -1,0 +1,2 @@
+{"type":"user","uuid":"su-1","timestamp":"2026-08-30T12:00:00Z","sessionId":"claude-root","agentId":"worker-agent","cwd":"/users/example/project","isSidechain":true,"message":{"id":"sub-user","role":"user","content":"subagent prompt"}}
+{"type":"assistant","uuid":"sa-1","timestamp":"2026-08-30T12:00:01Z","sessionId":"claude-root","agentId":"worker-agent","isSidechain":true,"message":{"id":"sub-assistant","role":"assistant","usage":{"input_tokens":10,"output_tokens":5},"content":"done"}}

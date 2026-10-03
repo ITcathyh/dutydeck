@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createHash } from 'node:crypto';
-import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
+import { createHash, randomUUID } from 'node:crypto';
+import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
 import { canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName } from '@dutydeck/shared';
 import { AcpxAdapter, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dutydeck/transports';
@@ -14,6 +14,11 @@ import { localOnlyDriverContext } from './driver-context.js';
 import { WorkspaceManager } from './workspace.js';
 import { repositoryFingerprint, VerificationManager } from './verification.js';
 import { owner, RevokedOperation, SessionMutations, type Owner } from './ownership.js';
+import {
+  INSIGHT_INSTANCE_ID_CONFIG_KEY,
+  canonicalizeDataRoot,
+  createTranscriptSourceKeys
+} from './session-insight-source.js';
 
 function isSameOrIntersectingPath(a: string, b: string): boolean {
   if (a === b) return true;
@@ -23,6 +28,25 @@ function isSameOrIntersectingPath(a: string, b: string): boolean {
 }
 
 const STOP_BLOCK_PREFIX = 'runtime_driver_stop_block:';
+
+/** 启动期（资源尚未 ready）driver transcript source 观察的有界缓冲上限。 */
+const INSIGHT_SOURCE_MAX_PENDING = 64;
+
+/** 一条 transcript source 订阅的冻结上下文与启动期 pending 缓冲。 */
+interface InsightSourceSubscription {
+  readonly sessionId: string;
+  readonly driverInstanceId: string;
+  readonly generation: number;
+  readonly owner: Owner;
+  readonly driver: AgentDriver;
+  /** 取消 driver 侧订阅的回调（subscribe 返回后填充）。 */
+  unsubscribe?: () => void;
+  /** false=启动期，观察入 pending；true=资源 ready 后，观察直接核验入队。 */
+  ready: boolean;
+  /** ready 前的有界观察缓冲，按到达顺序，采纳后 flush 一次。 */
+  pending: DriverTranscriptSourceObservation[];
+}
+
 const isTaskFenceRevocation = (error: unknown): error is RuntimeError => error instanceof RuntimeError
   && (error.code === 'SESSION_AUTOMATION_TASK_REVOKED' || error.code === 'SESSION_AUTOMATION_TASK_STALE_HEAD' || error.code === 'WORK_ITEM_TASK_REVOKED');
 
@@ -63,6 +87,13 @@ interface AttemptTools {
 // 驱动契约类型统一从 @dutydeck/shared 导出（driver.ts 是跨团队冻结契约），
 // 本包不再自定义 AgentDriver / DriverFactory / NormalizedDriverEvent。
 export type { AgentDriver, DriverFactory, NormalizedDriverEvent };
+
+// Session Insight 来源 key 计算规则与稳定实例 ID 配置键，供 resolver (T3d) 复用同一规则。
+export {
+  createTranscriptSourceKeys,
+  canonicalizeDataRoot,
+  INSIGHT_INSTANCE_ID_CONFIG_KEY
+} from './session-insight-source.js';
 
 export interface PtyRetirementControl {
   capture(session: Session): unknown | Promise<unknown>;
@@ -167,6 +198,12 @@ export class DutydeckRuntime {
   /** Sessions whose persistent pane is gone; cleared when a driver is next built for them. */
   private readonly missingTerminals = new Set<string>();
   private execution?: BoundExecutionRepository;
+  /** Session Insight live 来源写入器，initialize 建立真实 claim 后绑定一次。 */
+  private insightWriter?: import('@dutydeck/shared').SessionInsightLiveSourcesWriter;
+  /** 本实例稳定 ID（configs: insight.instance_id），重启不变；sourceSessionKey 的组成部分。 */
+  private insightInstanceId?: string;
+  /** 每个 driver 一条 transcript source 订阅状态（含启动期有界 pending 缓冲）。 */
+  private readonly insightSourceSubs = new WeakMap<AgentDriver, InsightSourceSubscription>();
   private readonly attemptRefs = new WeakMap<Owner, AttemptRef & SessionFence>();
   private readonly eventScope = new AsyncLocalStorage<AttemptRef & SessionFence | SessionFence>();
   private readonly localResources: LocalDriverLedger;
@@ -473,6 +510,8 @@ export class DutydeckRuntime {
       }
       this.binding = this.repos.control.attachRuntime(this.runtimeInstanceId);
       this.execution = this.repos.execution.bind(this.binding);
+      // 复用刚建立的真实 claim 绑定 insight live 来源写入器；不再 attachRuntime。
+      this.insightWriter = this.repos.insight.bindSources(this.binding);
       return this.initializationContext.run(true, () => this.mutations.run(this.initializationOwner, async () => {
         await this.initializeOnce(agents);
         this.mutations.check();
@@ -495,6 +534,7 @@ export class DutydeckRuntime {
     return this.initializationRun;
   }
   private async initializeOnce(agents: AgentConfig[]) {
+    await this.ensureInsightInstanceId();
     const blockedVerifications = await this.verifications.interruptRunning();
     this.mutations.check();
     this.blockedVerificationSessions.clear();
@@ -596,6 +636,9 @@ export class DutydeckRuntime {
       driver = this.factory(configured, session.protocol, this.onDriverEvent(session, generation),
         code => { if (this.mutations.valid(lifecycle) && this.sessionGenerations.get(session.id) === generation) this.notifyDriverExit(session.id, code); },
         session.id, localOnlyDriverContext(this.fence(session), resource.resourceId));
+      // attach 前订阅；attach 失败 / 未采纳时由 finally 取消。
+      // local-only anchor 是子资源行 id（= resource.resourceId），不是 identity.identityId。
+      this.subscribeInsightSources(session, driver, generation, lifecycle, resource.resourceId);
       attached = await this.driverOperation(driver, () => Promise.resolve(driver!.attachTerminal?.(receipt.identity) ?? false));
       if (!attached) return false;
       this.mutations.check();
@@ -608,12 +651,15 @@ export class DutydeckRuntime {
         this.localResources.adopt(this.fence(session), options, observed, driver!);
         this.drivers.set(session.id, driver!); this.attachedTerminals.add(driver!);
       });
+      // attach 采纳提交后 flush 启动期 pending 观察。
+      this.flushInsightSources(driver);
       return true;
     } catch (error) {
       await this.emit(session.id, 'status', { state: 'terminal_recovery_deferred', message: 'Original idle Herdr terminal identity could not be verified; resource remains blocked' });
       return false;
     } finally {
       if (driver && this.drivers.get(session.id) !== driver) {
+        this.unsubscribeInsightSources(driver);
         driver.prepareForDaemonShutdown?.(true);
         await driver.stop();
       }
@@ -651,6 +697,9 @@ export class DutydeckRuntime {
       code => { if (attached) this.notifyDriverExit(session.id, code); }, session.id,
       localOnlyDriverContext(this.fence(session), resource.resourceId));
     if (!driver.recover) return false;
+    // attach/recover 前订阅；未采纳（!attached）时在 finally 取消。
+    // local-only anchor 是子资源行 id（= resource.resourceId），不是 identity.identityId。
+    this.subscribeInsightSources(session, driver, generation, token, resource.resourceId);
     let notifyAttached!: () => void;
     const ready = new Promise<void>(resolve => { notifyAttached = resolve; });
     const running = this.mutations.run(token, async () => {
@@ -692,6 +741,8 @@ export class DutydeckRuntime {
           });
         }));
         if (!attached) return;
+        // recover 采纳提交后（资源 live、driver 已入 this.drivers）flush 启动期 pending 观察。
+        this.flushInsightSources(driver);
         await this.flushDriverEvents(session.id);
         if (!this.completedTurns.has(attempt.attemptId)) throw new RuntimeError('DRIVER_RESULT_INCOMPLETE', 'Recovered turn has no completed result', 409);
         const result = this.turnOutput(ref);
@@ -707,6 +758,8 @@ export class DutydeckRuntime {
           message: 'Original PTY identity or transcript could not be verified; the submitted task remains unresolved' });
         // Failed handshake cleanup detaches its temporary capture and never kills the original pane.
       } finally {
+        // 未采纳的临时 driver 不进 this.drivers，其来源订阅在此取消，杜绝迟到回调。
+        if (!attached) this.unsubscribeInsightSources(driver);
         if (this.attempts.get(session.id) === token) {
           this.attempts.delete(session.id); this.activeTasks.delete(session.id); this.activeTurns.delete(session.id);
         }
@@ -1037,7 +1090,7 @@ export class DutydeckRuntime {
       let attached: boolean;
       try { attached = await driver.attachTerminal?.() ?? false; }
       catch (error) { await this.discardUnattachedTerminal(id, driver); throw error; }
-      if (attached) { this.localResources.ready(driver); await this.persistTerminalReceipt(session, driver); this.attachedTerminals.add(driver); return driver; }
+      if (attached) { this.localResources.ready(driver); await this.persistTerminalReceipt(session, driver); this.attachedTerminals.add(driver); this.flushInsightSources(driver); return driver; }
       await this.discardUnattachedTerminal(id, driver); this.missingTerminals.add(id); return undefined;
     }).catch(error => { if (error instanceof RevokedOperation) return undefined; throw error; });
   }
@@ -1855,12 +1908,19 @@ export class DutydeckRuntime {
     let startBegan = false;
     try {
       this.localResources.returned(resource, driver);
+      // start() 前订阅来源观察。driverInstanceId 必须与 T2 anchor 严格一致：
+      // controlled 是 lifecycle operation 行 id（context.driverInstanceId）；
+      // local-only 是 local_only 子资源行 id（localOnlyDriverContext 传入的 resourceId，
+      // 同样等于 context.driverInstanceId），不是资源 identity.identityId。
+      this.subscribeInsightSources(session, driver, generation, lifecycle, resource.context.driverInstanceId);
       if (start) {
         startBegan = true;
         const starting = Promise.resolve().then(() => driver.start());
         const settled = starting.then(async () => {
           this.localResources.settled(driver);
           await this.mutations.run(undefined, () => this.mutations.write(session.id, async () => { this.localResources.ready(driver); await this.persistTerminalReceipt(session, driver); }));
+          // 资源 created 事务提交后，flush 启动期 pending 的 launch/native 观察。
+          this.flushInsightSources(driver);
         }, error => { this.localResources.settled(driver); throw error; });
         await this.driverOperation(driver, () => settled);
       } else this.localResources.settled(driver);
@@ -1879,8 +1939,186 @@ export class DutydeckRuntime {
       throw error;
     }
   }
+
+  /**
+   * 在真实 claim 建立后初始化一次本实例稳定 ID（configs: insight.instance_id）。
+   * 只有已落库的值可采集：已有值复用；缺失才 CAS 写一次 UUID。
+   * CAS 失败（并发）必须重新读取已落库值；若仍读不到则保持 undefined（安全降级，
+   * 不采集来源），绝不用仅进程内 generated 冒充稳定 ID。
+   */
+  private async ensureInsightInstanceId(): Promise<void> {
+    const existing = await this.repos.config.get(INSIGHT_INSTANCE_ID_CONFIG_KEY);
+    if (existing) { this.insightInstanceId = existing; return; }
+    const generated = randomUUID();
+    const committed = await this.repos.config.compareAndSet?.(INSIGHT_INSTANCE_ID_CONFIG_KEY, undefined, generated);
+    if (committed) { this.insightInstanceId = generated; return; }
+    // 只能采信另一个 runtime 已落库的同值；读不到就不采集。
+    this.insightInstanceId = (await this.repos.config.get(INSIGHT_INSTANCE_ID_CONFIG_KEY)) ?? undefined;
+  }
+
+  /**
+   * 在 start/attach 前订阅 driver 的 transcript source 观察。
+   * driverInstanceId 必须与 T2 anchor 严格一致（绝不新造 ID）：
+   *  - controlled-v1（ACP）：lifecycle operation 行 id（context.driverInstanceId）。
+   *  - local-only（PTY）：local_only 子资源行 id（context.driverInstanceId，即 resourceId）。
+   *
+   * 启动期（资源尚未 created / 当前 driver 尚未就绪）driver 就可能上报 launch / native
+   * 观察；这些观察先进有界 pending 缓冲，driver 被采纳且资源 ready 后由
+   * flushInsightSources 落库，绝不静默丢弃。换 driver / stop / 未采纳时整段缓冲随订阅取消丢弃。
+   */
+  private subscribeInsightSources(
+    session: Session,
+    driver: AgentDriver,
+    generation: number,
+    lifecycleOwner: Owner,
+    driverInstanceId: string
+  ): void {
+    if (!driver.subscribeTranscriptSource) return;
+    // 同 driver 重复订阅（不应发生）时先取消旧的，避免重复回调。
+    this.insightSourceSubs.get(driver)?.unsubscribe?.();
+    const sub: InsightSourceSubscription = {
+      sessionId: session.id,
+      driverInstanceId,
+      generation,
+      owner: lifecycleOwner,
+      driver,
+      ready: false,
+      pending: []
+    };
+    const unsubscribe = driver.subscribeTranscriptSource(observation => {
+      this.acceptInsightSourceObservation(sub, observation);
+    });
+    sub.unsubscribe = unsubscribe;
+    this.insightSourceSubs.set(driver, sub);
+  }
+
+  private unsubscribeInsightSources(driver: AgentDriver): void {
+    const sub = this.insightSourceSubs.get(driver);
+    if (!sub) return;
+    this.insightSourceSubs.delete(driver);
+    // 取消即作废启动期缓冲（未采纳 / 已换 driver / stop），杜绝迟到回调落库。
+    sub.pending.length = 0;
+    if (sub.unsubscribe) { try { sub.unsubscribe(); } catch { /* 取消失败不影响 stop / 结算。 */ } }
+  }
+
+  /**
+   * 接收一条观察：ready 前入有界缓冲；ready 后直接异步核验并入队。
+   * 不做 setTimeout 轮询——ready 由 reconnect / attach 采纳路径显式触发 flush。
+   */
+  private acceptInsightSourceObservation(
+    sub: InsightSourceSubscription,
+    raw: DriverTranscriptSourceObservation
+  ): void {
+    if (!sub.ready) {
+      if (sub.pending.length >= INSIGHT_SOURCE_MAX_PENDING) sub.pending.shift();
+      sub.pending.push(raw);
+      return;
+    }
+    void this.processInsightSourceObservation(sub, raw).catch(() => {});
+  }
+
+  /**
+   * driver 已采纳、资源 created 后调用：标记 ready 并把启动期缓冲按序 flush。
+   * 在 mutations.write 内调用（localResources.ready 同一事务之后），此时当前 run 已确定。
+   */
+  private flushInsightSources(driver: AgentDriver): void {
+    const sub = this.insightSourceSubs.get(driver);
+    if (!sub || sub.ready) return;
+    sub.ready = true;
+    const pending = sub.pending.splice(0);
+    for (const raw of pending) this.acceptInsightSourceObservation(sub, raw);
+  }
+
+  /**
+   * 单条 driver 来源观察的受控写路径（设计 3.2）：
+   *  1. 回调入口的 sub 已冻结 session/driverInstance/generation/owner/driver。
+   *  2. realpath(dataRoot) 等异步核验在 mutation 写队列之外完成；await 前后都复查 fence，
+   *     因此跨 replace / claim revoke 的 in-flight 回调在 await 后被丢弃。
+   *  3. mutations.run(owner) → mutations.write(sessionId) 内：先 await 读当前 ledger session
+   *     （此读在 fence 复查之前），随后同步复查 owner/generation/当前 driver 并用当前 runId
+   *     组装 observation，紧接着在无 await 的同一同步段 appendObserved；T2 在同一 BEGIN IMMEDIATE
+   *     内再 validateClaim 并核对 run / 资源归属 / native identity。
+   * 失败只记脱敏诊断，绝不抛出影响任务结算；不升级 driver 的 proofKind。
+   */
+  private async processInsightSourceObservation(
+    sub: InsightSourceSubscription,
+    raw: DriverTranscriptSourceObservation
+  ): Promise<void> {
+    try {
+      // await 前的活 fence 快照；realpath 挂起期间若被 revoke / 换 driver，await 后复查即丢弃。
+      if (!this.insightFenceLive(sub)) return;
+      const instanceId = this.insightInstanceId;
+      if (!this.binding || !this.insightWriter || !instanceId) return;
+      // 异步 realpath 在写队列外；仅核准非密钥 dataRoot 元信息。
+      const canonicalRoot = await canonicalizeDataRoot(raw.dataRoot);
+      // await 后复查：owner / generation / 当前 driver 任一变化（replace、revoke、stop）都丢弃。
+      if (!this.insightFenceLive(sub)) return;
+      const keys = createTranscriptSourceKeys(
+        instanceId,
+        raw.client,
+        canonicalRoot,
+        raw.nativeSessionId ?? null,
+        raw.streamIdentity
+      );
+      // mutations.run(owner) 建立 owner ALS scope 并包裹整个 write Promise；write 把同步事务排进
+      // 该 session 的串行尾队。
+      void this.mutations.run(sub.owner, () =>
+        this.mutations.write(sub.sessionId, async () => {
+          // 读当前 ledger session（fence 复查之前允许的唯一 await）：activeRunId 以提交瞬间为准，
+          // 不能用回调捕获时可能已过期的 run。
+          const currentSession = await this.repos.sessions.get(sub.sessionId);
+          if (!currentSession) return;
+          // 以下内存 fence 复查到 appendObserved 位于同一同步段，中间无 await。
+          if (
+            this.shuttingDown
+            || !this.mutations.valid(sub.owner)
+            || this.sessionGenerations.get(sub.sessionId) !== sub.generation
+            || this.drivers.get(sub.sessionId) !== sub.driver
+          ) {
+            return;
+          }
+          const observation: TranscriptSourceObservation = {
+            ...raw,
+            dataRoot: canonicalRoot,
+            sessionId: sub.sessionId,
+            activeRunId: currentSession.runId,
+            driverInstanceId: sub.driverInstanceId,
+            ...(keys ? { sourceSessionKey: keys.sourceSessionKey, sourceKey: keys.sourceKey } : {})
+          };
+          // T2 在同一 BEGIN IMMEDIATE 内再 validateClaim 并核对 run / 资源归属 / native identity。
+          this.insightWriter!.appendObserved(observation);
+        })
+      ).catch((error: unknown) => {
+        this.logInsightSourceDiagnostic(error, raw.observationId, sub.sessionId);
+      });
+    } catch (error) {
+      this.logInsightSourceDiagnostic(error, raw.observationId, sub.sessionId);
+    }
+  }
+
+  /**
+   * 同步复查一条订阅的 fence 是否仍活（不访问数据库、不产生 await）：
+   * 未 shutdown、owner 未 revoke、generation 未变、当前 driver 仍是订阅对象且已 ready。
+   */
+  private insightFenceLive(sub: InsightSourceSubscription): boolean {
+    return !this.shuttingDown
+      && this.mutations.valid(sub.owner)
+      && this.sessionGenerations.get(sub.sessionId) === sub.generation
+      && this.drivers.get(sub.sessionId) === sub.driver;
+  }
+
+  /** 只记 requestId / observationId / 错误码级别诊断，不打印路径或 JSONL。 */
+  private logInsightSourceDiagnostic(error: unknown, observationId: string, sessionId: string): void {
+    const code = error instanceof RuntimeError ? error.code : 'INSIGHT_SOURCE_OBSERVE_FAILED';
+    this.options.log?.warn(
+      { sessionId, observationId, code },
+      'session insight source observation not persisted'
+    );
+  }
+
   private async stopDriver(id: string, driver: AgentDriver, discardSession = false, shutdown = false) {
     this.localResources.get(driver)?.controlled?.revoke();
+    this.unsubscribeInsightSources(driver);
     let stopError: unknown;
     try { await driver.stop(discardSession ? { discardSession: true } : undefined); } catch (error) { stopError = error; }
     while (this.driverOperations.get(driver)?.size) await Promise.allSettled([...this.driverOperations.get(driver)!]);
@@ -2488,6 +2726,8 @@ export class DutydeckRuntime {
       });
       this.localResources.ready(driver);
       await this.persistTerminalReceipt(session, driver);
+      // resume 复用既有 native 资源，ready 后 flush 启动期 pending 观察。
+      this.flushInsightSources(driver);
       const target=owned?.options;
       if(owned?.controlled&&target&&driver.nativeConfiguration){owned.options={permissionMode:target.permissionMode,...driver.nativeConfiguration()};await this.changeDriverConfiguration(session,driver,()=>target,undefined,true);}
       await this.saveState(session, 'idle');

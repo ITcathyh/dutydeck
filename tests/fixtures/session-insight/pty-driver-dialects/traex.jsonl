@@ -1,0 +1,1 @@
+{"type": "event_msg", "payload": {"type": "agent_message", "message": "sanitized answer", "phase": "final_answer"}}

@@ -1,0 +1,4 @@
+{"timestamp":"2026-10-03T10:01:00Z","type":"session_meta","payload":{"id":"synthetic-codex-no-reset","cwd":"/workspace/synthetic"}}
+{"timestamp":"2026-10-03T10:01:01Z","type":"event_msg","payload":{"type":"user_message","message":"prompt before unexpected drop"}}
+{"timestamp":"2026-10-03T10:01:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"output_tokens":20,"total_tokens":170},"model_context_window":200}}}
+{"timestamp":"2026-10-03T10:01:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15},"model_context_window":200}}}

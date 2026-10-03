@@ -476,6 +476,7 @@ export interface RepositoryBundle {
   scheduleWatermarks: import('./schedule-foundation.js').ScheduleWatermarkRepository;
   scheduleLeases: import('./schedule-foundation.js').ScheduleLeaseRepository;
   archivedHammerIntegrations: import('./schedule-foundation.js').ArchivedHammerIntegrationRepository;
+  insight: import('./session-insight-repository.js').SessionInsightRepository;
   close(): void;
 }
 
@@ -514,3 +515,5 @@ export * from './session-name.js';
 export * from './session-usage.js';
 
 export * from './memory-jobs.js';
+export * from './session-insight.js';
+export * from './session-insight-repository.js';

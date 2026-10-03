@@ -27,3 +27,5 @@ export {
 } from '@dutydeck/session-backends';
 
 export { readCodexSessionUsage } from './transcript/codex.js';
+
+export { claudeDataDir, codexHome, traeHome } from './cli-paths.js';

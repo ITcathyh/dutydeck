@@ -131,7 +131,26 @@ export interface TestServerInstance {
   request: (method: string, path: string, body?: unknown) => Promise<{ status: number; headers: Headers; json?: any; text: string }>;
 }
 
-export async function launchIsolatedTestServer(prefix = 'dutydeck-acc-'): Promise<TestServerInstance> {
+export interface LaunchIsolatedTestServerOptions {
+  prefix?: string;
+  extraEnv?: NodeJS.ProcessEnv;
+  agents?: any[];
+  serverArgs?: string[];
+  beforeLaunch?: (context: {
+    dataDir: string;
+    serverHome: string;
+    binDir: string;
+    sourceRepo: string;
+    claudeDataDir: string;
+  }) => Promise<{ agents?: any[]; extraEnv?: NodeJS.ProcessEnv; serverArgs?: string[] } | void> | { agents?: any[]; extraEnv?: NodeJS.ProcessEnv; serverArgs?: string[] } | void;
+}
+
+export async function launchIsolatedTestServer(
+  prefixOrOptions: string | LaunchIsolatedTestServerOptions = 'dutydeck-acc-'
+): Promise<TestServerInstance> {
+  const options: LaunchIsolatedTestServerOptions =
+    typeof prefixOrOptions === 'string' ? { prefix: prefixOrOptions } : (prefixOrOptions ?? {});
+  const prefix = options.prefix ?? 'dutydeck-acc-';
   const dataDir = mkdtempSync(join(tmpdir(), prefix));
   const serverHome = join(dataDir, 'home');
   const binDir = join(dataDir, 'bin');
@@ -232,7 +251,18 @@ export async function launchIsolatedTestServer(prefix = 'dutydeck-acc-'): Promis
       builtin: false,
       version: 'mock-1.0'
     };
-    serverEnv.DUTYDECK_AGENTS_JSON = JSON.stringify([mockAgent]);
+
+    // beforeLaunch 在 server spawn 之前执行：专属 fixture 可在此生成自定义 CLI、
+    // 准备数据目录并返回要注册的 agents / 环境变量 / 启动参数。
+    const hookResult = options.beforeLaunch
+      ? await options.beforeLaunch({ dataDir, serverHome, binDir, sourceRepo, claudeDataDir })
+      : undefined;
+    const resolvedAgents = hookResult?.agents ?? options.agents ?? [mockAgent];
+    const resolvedExtraEnv = { ...options.extraEnv, ...hookResult?.extraEnv };
+    const resolvedServerArgs = [...(options.serverArgs ?? []), ...(hookResult?.serverArgs ?? [])];
+
+    serverEnv.DUTYDECK_AGENTS_JSON = JSON.stringify(resolvedAgents);
+    Object.assign(serverEnv, resolvedExtraEnv);
 
     const port = await getAvailablePort();
     const baseUrl = `http://127.0.0.1:${port}`;
@@ -248,7 +278,8 @@ export async function launchIsolatedTestServer(prefix = 'dutydeck-acc-'): Promis
         sourceRepo,
         '--database',
         join(dataDir, 'dutydeck.db'),
-        '--no-lark-listen'
+        '--no-lark-listen',
+        ...resolvedServerArgs
       ],
       {
         cwd: sourceRepo,
