@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { toAcpNotifications } from '@agentclientprotocol/claude-agent-acp';
 import { normalizeAcpxEvent } from '@dutydeck/acp-client';
 import type { AgentEvent } from '@dutydeck/shared';
-import { isRestartInterruption, larkHeldReason, larkLastActivityAt, larkRedispatchAgentNote, larkReplayUnsafeReason } from './turn-redispatch.js';
+import { isRestartInterruption, larkHeldReason, larkInterruptionSummary, larkLastActivityAt, larkRedispatchAgentNote, larkRedispatchCardNote, larkRedispatchedCardMarkdown, larkReplayUnsafeReason } from './turn-redispatch.js';
 
 let calls = 0;
 const tool = (name: string, input?: unknown, type: 'tool_call' | 'tool_result' = 'tool_call', id = `call_${++calls}`): AgentEvent => ({
@@ -53,9 +53,38 @@ describe('被重启切断的一轮能不能安全重投', () => {
       bash('curl -I https://example.com && curl -m 10 --retry 2 -A dutydeck https://example.com'),
       bash('git -C /work diff --stat && git branch --show-current'),
       codex("rg -n 'foo' apps && cat README.md"),
-      codex('ls -la')
+      codex('ls -la'),
+      bash('git log --oneline -3 --format=%H -- src && git show --stat HEAD~1 && git blame -L 1,20 src/a.ts && git shortlog -sn'),
+      bash("rg -n -A3 --glob '*.ts' -e foo src | sort -k2 -n | uniq -c && LC_ALL=C sort -u a.txt && xxd -l 64 a.bin && date +%F && tree -L 2 src")
     ];
     expect(larkReplayUnsafeReason(events)).toBeUndefined();
+  });
+
+  // 评审报告 OCR-02 的复现：程序名只读、参数会执行别的程序或写文件。表外参数一律按写处理。
+  it.each([
+    ['rg --pre ./pre.sh needle input.txt', '执行过 rg'],
+    ["rg --pre-glob '*.txt' --pre=./pre.sh needle", '执行过 rg'],
+    ['rg --unknown-flag needle', '执行过 rg'],
+    ['rg -e $PATTERN src', '执行过 rg'],
+    ['RIPGREP_CONFIG_PATH=./rc rg needle', '执行过 rg'],
+    ['sort -o output.txt input.txt', '执行过 sort'],
+    ['sort --compress-program=./pre.sh big.txt', '执行过 sort'],
+    ['uniq input.txt output.txt', '执行过 uniq'],
+    ['xxd -r input.hex output.bin', '执行过 xxd'],
+    ['xxd input.bin output.hex', '执行过 xxd'],
+    ['tree -o tree.txt src', '执行过 tree'],
+    ['date -s 2020-01-01', '执行过 date'],
+    ['find . -name a -fprint out.txt', '执行过 find'],
+    ['less README.md', '执行过 less'],
+    ['git diff --output=output.patch', '执行过 git diff'],
+    ['git -c diff.external=./pre.sh diff --ext-diff', '执行过 git'],
+    ['git log -p --ext-diff', '执行过 git log'],
+    ['git shortlog -n --output=out.txt', '执行过 git shortlog'],
+    ['git grep -nO needle', '执行过 git grep'],
+    ['GIT_EXTERNAL_DIFF=./pre.sh git diff', '执行过 git']
+  ])('只读程序带了执行程序、写文件或表外的参数按不安全处理：%s', (command, reason) => {
+    expect(larkReplayUnsafeReason([bash(command)])).toBe(reason);
+    expect(larkReplayUnsafeReason([codex(command)])).toBe(reason);
   });
 
   it('内置 Claude ACP 适配器产生的只读工具调用（标题形如 Read /work/alerts.md）不算外部副作用', () => {
@@ -127,21 +156,38 @@ describe('被重启切断的一轮能不能安全重投', () => {
     expect(larkLastActivityAt([])).toBeUndefined();
   });
 
-  it('停下的原因：副作用优先，其次中断时间较早或取不到，最后是重投满', () => {
-    expect(larkHeldReason({ count: 0, unsafeReason: '执行过 git push', stale: 'old' })).toBe('这一轮执行过 git push，可能已产生外部副作用，没有自动重投。');
-    expect(larkHeldReason({ count: 0, stale: 'old' })).toBe('中断时间较早，没有自动重投。');
-    expect(larkHeldReason({ count: 1, stale: 'unknown' })).toBe('无法确认中断时间，没有自动重投。此前已重投 1 次。');
-    expect(larkHeldReason({ count: 2 })).toBe('已重投 2 次仍被重启打断，不再自动重投。');
+  it('停下的原因：副作用优先，其次 Agent 没确认停下，再次中断时间较早或取不到，最后是自动继续满', () => {
+    expect(larkHeldReason({ count: 0, unsafeReason: '执行过 git push', stale: 'old', running: true })).toBe('这一轮执行过 git push，可能已经对外生效，所以没有自动继续。');
+    expect(larkHeldReason({ count: 0, running: true, stale: 'old' })).toBe('Agent 还没确认停下，所以没有自动结束这一轮。');
+    expect(larkHeldReason({ count: 0, stale: 'old' })).toBe('中断已经超过 1 小时，所以没有自动继续。');
+    expect(larkHeldReason({ count: 1, stale: 'unknown' })).toBe('不知道是什么时候中断的，所以没有自动继续。此前已自动继续 1 次。');
+    expect(larkHeldReason({ count: 2 })).toBe('已经自动继续 2 次仍被重启打断，不再自动继续。');
   });
 
-  it('Agent 说明区分原会话续做与新会话重做', () => {
+  it('停下的那一轮按原因码说一句人话；没有原因码的旧记录按服务重启处理', () => {
+    expect(larkInterruptionSummary(undefined)).toBe('上一轮因服务重启中断，不确定是否做完。');
+    expect(larkInterruptionSummary('DAEMON_SHUTDOWN')).toBe('上一轮因服务重启中断，不确定是否做完。');
+    expect(larkInterruptionSummary('DRIVER_INPUT_UNCONFIRMED', 'Claude Code')).toBe('上一轮 Claude Code 没确认收到消息，可能没开始执行。');
+    expect(larkInterruptionSummary('AGENT_IDLE_TIMEOUT', 'Codex')).toBe('上一轮 Codex 长时间没有任何输出，已停止等待，不确定是否做完。');
+    expect(larkInterruptionSummary('AGENT_LOGIN_REQUIRED', 'Claude Code')).toBe('上一轮 Claude Code 没登录，没有处理这条消息。');
+    expect(larkInterruptionSummary('SOMETHING_ELSE')).toBe('上一轮执行中断，不确定是否做完。');
+  });
+
+  it('Agent 说明区分原会话续做与新会话重做，也区分服务重启与其他中断', () => {
     const resumed = larkRedispatchAgentNote({ count: 1, resumed: true, auto: true });
-    expect(resumed).toContain('服务重启打断了上一轮');
-    expect(resumed).toContain('请从停下处继续');
-    expect(resumed).toContain('重复任何对外操作');
-    expect(resumed).toContain('第 1/2 次自动重投');
+    expect(resumed).toContain('服务刚才重启，请从中断处继续，不要重复已经完成的操作。');
+    expect(resumed).toContain('先检查上一轮是不是已经做过');
     const fresh = larkRedispatchAgentNote({ count: 2, resumed: false, auto: true });
     expect(fresh).toContain('之前的动作可能已经生效');
-    expect(fresh).not.toContain('请从停下处继续');
+    expect(fresh).not.toContain('请从中断处继续');
+    const replayed = larkRedispatchAgentNote({ count: 1, resumed: true, auto: false, code: 'DRIVER_INPUT_UNCONFIRMED' });
+    expect(replayed).toContain('上一轮被中断了，用户选择重新执行，请从中断处继续');
+    expect(replayed).not.toContain('服务刚才重启');
+  });
+
+  it('卡上的说明：自动继续写次数，重新执行写按钮', () => {
+    expect(larkRedispatchCardNote({ count: 1, resumed: true, auto: true })).toBe('服务更新中断，已自动继续（第 1/2 次），在原对话里接着做。');
+    expect(larkRedispatchCardNote({ count: 1, resumed: false, auto: false })).toBe('已按「重新执行」重新执行，原对话无法恢复，在新会话里重新执行。');
+    expect(larkRedispatchedCardMarkdown({ count: 1, resumed: true, auto: false, code: 'AGENT_IDLE_TIMEOUT' }, '')).not.toContain('服务重启');
   });
 });

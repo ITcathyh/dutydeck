@@ -1,8 +1,11 @@
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import {
+  AGENT_IDLE_TIMEOUT,
+  AGENT_LOGIN_REQUIRED,
   DriverDetachedError,
   DriverRecoveryError,
   type AgentConfig,
+  type AgentIdleTimeoutData,
   type AgentDriver,
   type DriverTurnRecovery,
   type NormalizedDriverEvent,
@@ -413,7 +416,10 @@ export class PtyCliDriver implements AgentDriver {
         this.emitEvent({ type: 'status', data: { state: 'input_receipt', phase: 'pending' } });
         receiptTimer = setTimeout(() => {
           if (this.activeSubmission !== submission) return;
-          const error = new DriverRecoveryError('Native input receipt was not observed within 90 seconds; submission remains unknown and original process is preserved');
+          // 没登录的 Claude 不写用户记录、只在屏幕上回一句 Not logged in，原因码改成 AGENT_LOGIN_REQUIRED，运行时据此标记 Agent 不可用。
+          const loggedOut = this.adapter.screenLoginRequiredPattern?.test(this.snapshot?.viewportText() ?? '');
+          if (loggedOut) this.emitEvent({ type: 'error', data: { message: 'Agent 未登录，没有处理这条消息', code: AGENT_LOGIN_REQUIRED, retryable: false } });
+          const error = new DriverRecoveryError('Native input receipt was not observed within 90 seconds; submission remains unknown and original process is preserved', loggedOut ? AGENT_LOGIN_REQUIRED : 'DRIVER_INPUT_UNCONFIRMED');
           this.cancelSubmission(submission, error); this.turnWriteReject?.(error);
         }, 90_000);
         receiptTimer.unref();
@@ -572,6 +578,20 @@ export class PtyCliDriver implements AgentDriver {
       throw this.rejectRecovery(`Could not reattach original PTY turn: ${err instanceof Error ? err.message : String(err)}`);
     }
     return completion;
+  }
+
+  /**
+   * 没有在执行的轮次：不在提交或等结果，最新状态行不是进行中或后台等待，状态栏不忙，屏幕底部是空输入框。
+   * 适配器认不出空输入框时返回 false。
+   */
+  isIdle(): boolean {
+    const screen = this.snapshot?.viewportText();
+    if (this.stopped || this.turnActive || this.activeSubmission || !screen || !this.adapter.isIdleScreen) return false;
+    const { screenActivityPattern: activity, backgroundWaitPattern: background, completionPattern: completion, screenCancelledPattern: cancelled } = this.adapter;
+    const statusLine = screen.split('\n').reverse().find(line => activity?.test(line) || background?.test(line) || completion?.test(line) || cancelled?.test(line));
+    if (statusLine && (activity?.test(statusLine) || background?.test(statusLine))) return false;
+    if (this.adapter.screenBusyPattern?.test(screen.split('\n').slice(-6).join('\n')) || this.screenWaitsForHuman()) return false;
+    return this.adapter.isIdleScreen(screen);
   }
 
   async interrupt(): Promise<void> {
@@ -1270,7 +1290,11 @@ export class PtyCliDriver implements AgentDriver {
           || await this.turnCpu.active(this.processIds())) this.lastProgressAt = Date.now();
         if (!this.turnActive || this.stopped || this.turnReject !== waiter) return;
         if (Date.now() < this.lastProgressAt + timeout) { this.scheduleTurnDeadline(); return; }
-        const error = new DriverRecoveryError(`PTY turn has no verified activity for ${this.agent.timeout} seconds; original process preserved for recovery`);
+        const error = new DriverRecoveryError(`PTY turn has no verified activity for ${this.agent.timeout} seconds; original process preserved for recovery`, AGENT_IDLE_TIMEOUT);
+        // 和 ACP 的无进展超时同一个原因码：带分钟数的 error 先于本轮结束投递。
+        const timeoutMinutes = Math.max(1, Math.round(this.agent.timeout / 60));
+        const idle: AgentIdleTimeoutData = { message: `${timeoutMinutes} 分钟没有任何输出，已停止`, code: AGENT_IDLE_TIMEOUT, timeoutMinutes, retryable: true };
+        this.emitEvent({ type: 'error', data: idle });
         this.turnActive = false;
         this.cancelActiveSubmission(error); this.turnWriteReject?.(error);
         this.turnReject?.(error); this.turnReject = null; this.turnResolve = null;

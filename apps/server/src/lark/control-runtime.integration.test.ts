@@ -117,7 +117,7 @@ describe('Feishu controls with real Runtime, SQLite and PTY driver', () => {
     await coordinator.reconcile(config);
     const card = service.update.mock.calls.at(-1)![0] as any;
     expect(card).toMatchObject({ state: 'queued', statusLabel: '排队受阻', readOnly: false });
-    expect(card.markdown).toContain('上次停止执行进程未成功');
+    expect(card.markdown).toContain('上次停止 Agent 没有成功');
     expect(card.markdown).toContain('/cancel');
     // 没有入站记录与持久化认领时转不了新会话：不渲染按钮，正文也不提。
     expect(card.capabilities).not.toHaveProperty('canRelaunch');
@@ -173,7 +173,7 @@ describe('Feishu controls with real Runtime, SQLite and PTY driver', () => {
     const { describeLarkTaskRecovery } = await import('./task-recovery.js');
     const described = await describeLarkTaskRecovery(h.runtime, h.session.id, h.queued.id, 'queued');
     expect(described.label).toBe('排队受阻');
-    expect(described.markdown).toContain('任务启动检查未通过');
+    expect(described.markdown).toContain('开始执行前的检查没通过');
     expect(described.markdown).not.toContain('可在 Dutydeck Web 查看记录');
     expect(described.markdown).toContain('/cancel');
 
@@ -194,8 +194,8 @@ describe('Feishu controls with real Runtime, SQLite and PTY driver', () => {
     };
     const recovery = await describeLarkTaskRecovery(mockRuntime as any, 's1', 't1', 'queued');
     expect(recovery.label).toBe('排队受阻');
-    expect(recovery.markdown).toContain('原执行进程尚未确认安全停止');
-    expect(recovery.markdown).toContain('任务启动检查未通过');
+    expect(recovery.markdown).toContain('上一轮的 Agent 还没确认停下');
+    expect(recovery.markdown).toContain('开始执行前的检查没通过');
     expect(recovery.markdown).not.toContain('Dutydeck Web');
   });
 });

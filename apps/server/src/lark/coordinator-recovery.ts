@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { describeLarkTaskRecovery, larkRecoveryRetainedNote } from './task-recovery.js';
+import { describeLarkTaskRecovery, larkContinuePrompt, larkIdleTimeoutMinutes, larkQuietSettledNote, larkRecoveryRetainedNote, larkReliability } from './task-recovery.js';
 import type { LarkInboxRecord } from './task-inbox.js';
 import type { LarkLaunchOptions } from './new-session.js';
-import type { AgentEvent, ChannelMapping, Session, TaskRecord } from '@dutydeck/shared';
+import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, type AgentEvent, type ChannelMapping, type Session, type TaskRecord } from '@dutydeck/shared';
 import { larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
 import { larkPendingVerificationKey, parseLarkPendingVerifications } from './auto-verification.js';
 import { LarkServiceError } from './service.js';
@@ -11,6 +11,7 @@ import { performLarkCardReconcile, type LarkInterruptedTurn } from './reconciler
 import {
   isRestartInterruption,
   larkHeldWebNote,
+  larkInterruptionSummary,
   larkLastActivityAt,
   larkRedispatchedCardMarkdown,
   larkRedispatchLimit,
@@ -19,7 +20,7 @@ import {
   larkReplayUnsafeReason,
   type LarkHeldCause
 } from './turn-redispatch.js';
-import { isLarkCardActionAvailable, larkRelaunchLabels, type LarkCardActionState } from './card-actions.js';
+import { isLarkCardActionAvailable, larkRelaunchLabels, larkReplayLabels, type LarkCardActionState } from './card-actions.js';
 import { larkGroupKey, listPersistedLarkSessions, resolveLarkSession } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
@@ -30,6 +31,11 @@ import { LarkCoordinatorCards } from './coordinator-cards.js';
 // 「在新会话中执行」的转交，以及服务重启切断那一轮的重投。
 
 const redispatchKey = (appId: string, taskId: string, turn: number) => `lark.redispatch.${appId}.${taskId}.${turn}`;
+/** Agent 停下后自动结束的那一轮：原因码与 Agent 名，结果卡据此补说明、给「在原对话继续」。 */
+const settledKey = (appId: string, taskId: string, turn: number) => `lark.settled.${appId}.${taskId}.${turn}`;
+/** 「在原对话继续」的认领，同一张卡同一轮只受理一次。 */
+const continueKey = (appId: string, taskId: string, turn: number) => `lark.continue.${appId}.${taskId}.${turn}`;
+type LarkContinueCause = { code?: string; agent?: string; minutes?: number; settled?: boolean };
 /** 与 `dutydeck recovery` 同一个身份：重投前把旧一轮记为结果未知是安装者级的账本决定。 */
 const larkRecoveryOwner = { kind: 'installation_owner', id: 'installation_owner' } as const;
 
@@ -68,8 +74,12 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       terminalDecoration: async (mapping, saved, effective) => {
         const restored = this.restoredCardTask(effective, mapping, saved);
         const verification = await this.verificationView(restored, effective, saved.state as LarkCardActionState);
-        return { elements: verification.element ? [verification.element] : [],
-          cardInput: { capabilities: { ...this.capabilitiesForTask(restored), ...verification.capabilities, ...await this.resultActionCapabilities(restored, effective, saved.state) } } };
+        const events = saved.state === 'failed' && saved.runtime_task_id
+          ? eventsForRuntimeTask(await this.runtime.getEvents?.(mapping.sessionId) ?? [], saved.runtime_task_id) : [];
+        const cause = await this.continueCause(config.appId, mapping.externalId, saved.turn ?? 0, saved.scope_id, saved.state, events);
+        return { elements: [...cause?.settled ? [{ tag: 'markdown', element_id: 'recovery_note', content: larkQuietSettledNote(cause) }] : [], ...verification.element ? [verification.element] : []],
+          cardInput: { capabilities: { ...this.capabilitiesForTask(restored), ...verification.capabilities, ...await this.resultActionCapabilities(restored, effective, saved.state),
+            ...cause ? { canContinueInPlace: true } : {} } } };
       }
     });
     unresolved += await this.workflows?.reconcile(config.appId) ?? 0;
@@ -117,6 +127,10 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     await this.pins?.reconcile({ appId: config.appId, activeTaskIds: [...this.tasks.keys()] })
       .catch(error => this.log.warn({ error, appId: config.appId }, '飞书置顶对账失败，不影响任务执行'));
     this.scheduleTaskAgentPoll(config);
+    // 服务启动时查一次默认 Agent 的登录状态（不调模型）：没登录就先记上，第一条请求直接得到说明，不用白等。
+    const agentId = config.defaultAgentId;
+    if (agentId) void larkReliability(this.runtime).checkAgentAvailability?.(agentId, { force: true })
+      ?.catch(error => this.log.warn({ error, agentId }, 'Agent 登录状态检查失败'));
     const unresolved = await this.reconcile(config);
     if (unresolved > 0) this.scheduleReconcile();
     return unresolved;
@@ -371,7 +385,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         materialPrompt = resumed ? saved.retry_material_prompt : undefined;
         await this.inbox!.update(inbox, { event: relaunchEvent, state: 'received', turn: claim.turn + 1, sessionId: session.id,
           cardId: undefined, taskId: undefined, materials: undefined,
-          redispatch: claim.redispatch && { count: claim.redispatch.count, resumed, auto: claim.redispatch.auto },
+          redispatch: claim.redispatch && { count: claim.redispatch.count, resumed, auto: claim.redispatch.auto, ...claim.redispatch.code ? { code: claim.redispatch.code } : {} },
           request: { prompt: saved.prompt, scopeId, resources: inbox.request?.resources ?? [], ...(materialPrompt ? { materialPrompt } : {}) } });
       } catch (error) {
         this.log.warn({ error, taskId: claim.taskId }, '转到新会话失败，已回滚');
@@ -464,12 +478,18 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   }
 
   /**
-   * 服务重启切断的一轮（原因码为结果未知）：对账遇到「需要核对」的一轮先问这里。
+   * 结果未知的一轮：对账遇到「需要核对」的一轮先问这里。
    *
+   * 服务重启切断的（原因码为重启类）：
    * - 原执行进程没确认停止（会话有资源阻塞或停止阻塞）时它可能还在跑：不重投，照旧留给人核对。
    * - 这一轮已记录的操作里有可能对外生效的（replay_unsafe）、最后一次活动距今超过 larkRedispatchMaxAgeMs（或取不到时间），
-   *   或已自动重投满 larkRedispatchLimit 次：停下，卡上给「重新执行」「放弃」。
+   *   或已自动重投满 larkRedispatchLimit 次：停下，卡上给「在原对话继续」「重新执行」「放弃」。
    * - 其余自动从入站记录重投：原会话还在就把旧一轮记为结果未知、在原会话续做；原会话已结束则走转交流程开新会话。
+   *
+   * 其他原因（没确认收到消息、无进展超时没确认停下、没登录等，A2）：
+   * - 这一轮还有资源阻塞：照旧留给人核对。
+   * - Agent 已停下（runtime 确认空闲）且没有可能对外生效的操作：自动结束这一轮（settleQuietTurn），会话照常接下一条消息。
+   * - 否则停下，卡上给三个按钮；Agent 当时没确认停下的，之后每次对账再看一眼，停下了就自动结束。
    *
    * 重投记录按 App + 原消息 + 轮次落库（redispatchKey），并发的对账、重启后的对账与按钮点击读到的都是这一条。
    */
@@ -480,7 +500,16 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     const key = redispatchKey(config.appId, mapping.externalId, turn);
     const raw = await store.get(key);
     const record = raw ? JSON.parse(raw) as LarkRelaunchClaim : undefined;
-    if (record?.phase === 'held') return { kind: 'hold', ...record.redispatch! };
+    if (record?.phase === 'held') {
+      const cause = record.redispatch!;
+      if (cause.running && !cause.unsafeReason && this.agentQuiet(mapping.sessionId)
+        && await this.settleQuietTurn(config.appId, mapping, runtimeTask.id, turn, cause)) {
+        // 卡上的「重新执行」「放弃」随之失效。
+        await store.compareAndSet(key, raw, JSON.stringify({ ...record, phase: 'moved' }));
+        return { kind: 'handled' };
+      }
+      return { kind: 'hold', ...cause };
+    }
     if (record?.phase === 'failed') return undefined;
     if (record?.phase === 'claimed' && record.boot !== this.relaunchBoot) {
       // 上一个进程半路退出：入站记录还停在这一轮就由本进程接着做完；已经交出去的，由它的重放接着执行。
@@ -491,12 +520,15 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     }
     if (record) return { kind: 'handled' };
     const inbox = await this.redispatchInbox(config.appId, mapping, saved);
-    if (!inbox) return undefined;
     const inspection = await this.runtime.inspectExecutionRecovery(mapping.sessionId, larkRecoveryOwner);
     const attempt = inspection.tasks.find(item => item.taskId === runtimeTask.id)?.attempt;
-    if (attempt?.state !== 'reconcile_required' || !isRestartInterruption(attempt.reconcileReason?.code)) return undefined;
-    if (inspection.blockers.length || inspection.stopBlock) return undefined;
-    const count = inbox.redispatch?.count ?? 0;
+    if (attempt?.state !== 'reconcile_required' || inspection.stopBlock) return undefined;
+    const code = attempt.reconcileReason?.code;
+    const restart = isRestartInterruption(code);
+    if (restart && (!inbox || inspection.blockers.length)) return undefined;
+    // 运行中的执行进程本身不算阻塞（getTaskRecovery 已排除可复用的）；前面另有结果未知的一轮也不算，它自己会被这里处理。
+    if (!restart && (await this.runtime.getTaskRecovery?.(mapping.sessionId, runtimeTask.id))?.blockers.some(block => block.code !== 'PREVIOUS_RESULT_UNKNOWN') !== false) return undefined;
+    const count = inbox?.redispatch?.count ?? 0;
     let unsafeReason: string | undefined;
     let own: AgentEvent[] = [];
     try {
@@ -508,9 +540,23 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       this.log.warn({ error, taskId: mapping.externalId }, '读取被切断那一轮的执行记录失败，按可能有外部副作用处理');
       unsafeReason = '的执行记录读取失败';
     }
+    const agent = await this.resolveAgentName(config);
+    if (!restart) {
+      const quiet = this.agentQuiet(mapping.sessionId);
+      const cause: LarkHeldCause = { count, ...(unsafeReason ? { unsafeReason } : {}), ...(code ? { code } : {}), agent, ...(quiet ? {} : { running: true }) };
+      if (quiet && !unsafeReason && await this.settleQuietTurn(config.appId, mapping, runtimeTask.id, turn, cause)) return { kind: 'handled' };
+      if (!inbox) return undefined;
+      const held: LarkRelaunchClaim = { id: randomUUID(), boot: this.relaunchBoot, phase: 'held', action: 'rerun_in_new_session', appId: config.appId,
+        taskId: mapping.externalId, turn, chatId: saved.chat_id, cardMessageId: saved.card_message_id ?? '', taskName: saved.task_name,
+        sessionId: mapping.sessionId, runtimeTaskId: runtimeTask.id, operatorOpenId: saved.sender_open_id ?? '',
+        redispatch: { ...cause, resumed: false, auto: true } };
+      if (await store.compareAndSet(key, undefined, JSON.stringify(held))) await this.publishRedispatchNote(mapping.sessionId, larkHeldWebNote(cause));
+      return { kind: 'hold', ...cause };
+    }
+    if (!inbox) return undefined;
     const lastActivity = larkLastActivityAt(own, attempt.createdAt);
     const stale = lastActivity === undefined ? 'unknown' : Date.now() - lastActivity > larkRedispatchMaxAgeMs ? 'old' : undefined;
-    const cause: LarkHeldCause = { count, ...(unsafeReason ? { unsafeReason } : {}), ...(stale ? { stale } : {}) };
+    const cause: LarkHeldCause = { count, ...(unsafeReason ? { unsafeReason } : {}), ...(stale ? { stale } : {}), ...(code ? { code } : {}), agent };
     const base: LarkRelaunchClaim = { id: randomUUID(), boot: this.relaunchBoot, phase: 'held', action: 'rerun_in_new_session', appId: config.appId,
       taskId: mapping.externalId, turn, chatId: saved.chat_id, cardMessageId: saved.card_message_id ?? '', taskName: saved.task_name,
       sessionId: mapping.sessionId, runtimeTaskId: runtimeTask.id, operatorOpenId: saved.sender_open_id ?? '',
@@ -541,7 +587,8 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     const session = await this.runtime.getSession(base.sessionId);
     const resumed = Boolean(session && !session.archivedAt && session.state !== 'stopped');
     const claim: LarkRelaunchClaim = { ...base, id: randomUUID(), boot: this.relaunchBoot, phase: 'claimed',
-      ...(next.operatorOpenId ? { operatorOpenId: next.operatorOpenId } : {}), redispatch: { count: next.count, resumed, auto: next.auto } };
+      ...(next.operatorOpenId ? { operatorOpenId: next.operatorOpenId } : {}),
+      redispatch: { count: next.count, resumed, auto: next.auto, ...base.redispatch?.code ? { code: base.redispatch.code } : {} } };
     if (!await this.workflowOptions.store!.compareAndSet!(key, previousRaw, JSON.stringify(claim))) return false;
     // 先写说明再动账本：旧一轮记为结果未知之后，排在后面的任务会马上开跑，那时写的说明会记进它的输出。
     await this.publishRedispatchNote(base.sessionId, larkRedispatchWebNote(claim.redispatch!));
@@ -565,14 +612,200 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     this.performRelaunch(config, effective, key, current, saved, inbox.event, false);
   }
 
-  /** 把旧一轮记为结果未知（不是失败），原会话的队列随之放行。同一 decisionId 重复记只回放。 */
-  private async settleInterruptedAttempt(sessionId: string, taskId: string, decisionId: string, evidence: string) {
+  /**
+   * 把旧一轮记为结果未知（不是失败），原会话的队列随之放行。同一 decisionId 重复记只回放。
+   * Agent 停下后自动结束的一轮记为中断或失败（outcome）。
+   */
+  private async settleInterruptedAttempt(sessionId: string, taskId: string, decisionId: string, evidence: string, outcome: 'unknown' | 'interrupted' | 'failed' = 'unknown') {
     const inspection = await this.runtime.inspectExecutionRecovery!(sessionId, larkRecoveryOwner);
     const attempt = inspection.tasks.find(item => item.taskId === taskId)?.attempt;
     if (!attempt) throw new Error('原任务记录不存在。');
     if (attempt.state === 'settled') return;
-    await this.runtime.confirmExecutionRecovery!(sessionId, { runId: inspection.runId, taskId, attemptId: attempt.attemptId, expectedRevision: attempt.revision,
-      decisionId, action: 'confirm_result', outcome: 'unknown', evidenceRefs: [evidence], resourceChecks: inspection.resourceChecks }, larkRecoveryOwner);
+    try {
+      await this.runtime.confirmExecutionRecovery!(sessionId, { runId: inspection.runId, taskId, attemptId: attempt.attemptId, expectedRevision: attempt.revision,
+        decisionId, action: 'confirm_result', outcome, evidenceRefs: [evidence], resourceChecks: inspection.resourceChecks }, larkRecoveryOwner);
+    } catch (error) {
+      // 会话的驱动还连着（没重启过）：账本把它算作没停下的进程。驱动确认空闲时改由运行时按空闲收口，否则照旧报错。
+      const settleIdle = larkReliability(this.runtime).settleIdleAttempt;
+      if (!settleIdle || (error as { code?: unknown }).code !== 'SESSION_RESOURCE_BLOCKED') throw error;
+      await settleIdle.call(this.runtime, sessionId, { taskId, decisionId, outcome, evidenceRefs: [evidence] }, larkRecoveryOwner);
+    }
+  }
+
+  private agentQuiet(sessionId: string) { return larkReliability(this.runtime).inspectAgentQuiescence?.(sessionId) === 'idle'; }
+
+  /**
+   * Agent 已停下、这一轮也没有可能对外生效的操作（A2）：按中断结束，无进展超时与没登录按失败；会话照常接下一条消息。
+   * 先记下原因，结果卡据此补说明。记不上（执行资源未确认停止）时返回 false，照旧停下等人选。
+   */
+  private async settleQuietTurn(appId: string, mapping: ChannelMapping, runtimeTaskId: string, turn: number, cause: LarkHeldCause) {
+    await this.workflowOptions.store!.set(settledKey(appId, mapping.externalId, turn), JSON.stringify({ code: cause.code, agent: cause.agent }));
+    const outcome = cause.code === AGENT_IDLE_TIMEOUT || cause.code === AGENT_LOGIN_REQUIRED ? 'failed' : 'interrupted';
+    try {
+      await this.settleInterruptedAttempt(mapping.sessionId, runtimeTaskId, `lark_quiet:${mapping.externalId}:${turn}`, 'lark_agent_quiet', outcome);
+      return true;
+    } catch (error) {
+      this.log.warn({ error, taskId: mapping.externalId }, 'Agent 已停下的一轮未能自动结束，留给人选择');
+      return false;
+    }
+  }
+
+  /** 失败或中断的这一轮能不能「在原对话继续」：Agent 停下后自动结束的（settled），或无进展超时停下的。不能时返回 undefined。 */
+  protected async continueCause(appId: string, taskId: string, turn: number, scopeId: string | undefined, state: string, events: AgentEvent[]): Promise<LarkContinueCause | undefined> {
+    if (!this.inbox || !scopeId || scopeId.startsWith('message:') || !['failed', 'interrupted'].includes(state)) return undefined;
+    const raw = await this.workflowOptions.store?.get(settledKey(appId, taskId, turn));
+    if (raw) return { ...JSON.parse(raw) as { code?: string; agent?: string }, settled: true };
+    const minutes = larkIdleTimeoutMinutes(events);
+    return minutes === undefined ? undefined : { code: AGENT_IDLE_TIMEOUT, minutes };
+  }
+
+  /** 这条消息的话题能不能「在原对话继续」：要有人能续聊的 scope（不是单条消息）和入站记录。 */
+  protected continuableScope(task: LarkTask) { return Boolean(this.inbox && task.scopeId && !task.scopeId.startsWith('message:')); }
+
+  /** 会话里还没核对、挡着后面消息的那几轮（结果未知且没记为结果未知）。 */
+  protected async unresolvedTurns(sessionId: string) {
+    const tasks = await this.runtime.getTasks?.(sessionId) ?? [];
+    const pending = tasks.filter(task => task.status === 'reconcile_required');
+    const recoveries = await Promise.all(pending.map(task => this.runtime.getTaskRecovery?.(sessionId, task.id).catch(() => undefined)));
+    return pending.filter((_task, index) => recoveries[index] && !recoveries[index]!.resolvedUnknown);
+  }
+
+  /**
+   * 结果未知停下的那一轮按没做完处理（「在原对话继续」或在话题里说「继续」）：记为结果未知，原会话的队列随之放行；
+   * 重投记录记为已转走，对账不再停在这一轮；旧卡改成「已在原对话继续」并去掉按钮。返回这一轮的原因码。
+   */
+  protected async closeUnresolvedTurn(config: StoredLarkConfig, sessionId: string, runtimeTaskId: string): Promise<LarkContinueCause> {
+    const inspection = await this.runtime.inspectExecutionRecovery!(sessionId, larkRecoveryOwner);
+    const code = inspection.tasks.find(item => item.taskId === runtimeTaskId)?.attempt?.reconcileReason?.code;
+    const { mapping, saved } = await this.cardTaskFor(config.appId, sessionId, runtimeTaskId);
+    // 无进展超时没确认停下的那一轮：接续说明写上几分钟没有输出。
+    const minutes = code === AGENT_IDLE_TIMEOUT ? larkIdleTimeoutMinutes(eventsForRuntimeTask(await this.runtime.getEvents?.(sessionId) ?? [], runtimeTaskId)) : undefined;
+    const turn = saved?.turn ?? 0;
+    await this.settleInterruptedAttempt(sessionId, runtimeTaskId, `lark_continue:${mapping?.externalId ?? runtimeTaskId}:${turn}`, 'lark_continue_in_place');
+    if (!mapping || !saved) return { code, ...minutes ? { minutes } : {} };
+    const store = this.workflowOptions.store!;
+    const key = redispatchKey(config.appId, mapping.externalId, turn);
+    const raw = await store.get(key);
+    const record: LarkRelaunchClaim = raw ? JSON.parse(raw) : { id: randomUUID(), boot: this.relaunchBoot, phase: 'moved', action: 'rerun_in_new_session', appId: config.appId,
+      taskId: mapping.externalId, turn, chatId: saved.chat_id, cardMessageId: saved.card_message_id ?? '', taskName: saved.task_name, sessionId, runtimeTaskId,
+      operatorOpenId: saved.sender_open_id ?? '' };
+    if (record.phase === 'held' || !raw) await store.compareAndSet!(key, raw, JSON.stringify({ ...record, phase: 'moved' }));
+    if (saved.card_message_id) {
+      await this.service.update({
+        cardKind: 'process', messageId: saved.card_message_id, taskId: mapping.externalId, taskName: saved.task_name, turn, sessionId,
+        state: 'reconcile_required', statusLabel: '结果未知', readOnly: true,
+        capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false },
+        agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config),
+        ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
+        markdown: `**已在原对话继续**\n\n${larkInterruptionSummary(code, record.redispatch?.agent)}已按没做完处理，在原来的会话里让 Agent 接着做，进度见新的任务卡。`
+      }).catch(error => this.log.warn({ error, taskId: mapping.externalId }, '结果未知的旧卡未能更新为已在原对话继续'));
+    }
+    return { code, ...minutes ? { minutes } : {}, ...record.redispatch?.agent ? { agent: record.redispatch.agent } : {} };
+  }
+
+  /** 某个 runtime 任务当前那一轮的卡片映射（按 runtime_task_id 找）。 */
+  protected async cardTaskFor(appId: string, sessionId: string, runtimeTaskId: string) {
+    const mapping = (await this.cardMappings?.list(larkCardChannel(appId)) ?? []).find(item => item.sessionId === sessionId && item.extra
+      && (JSON.parse(item.extra) as PersistedLarkCardTask).runtime_task_id === runtimeTaskId);
+    return { mapping, saved: mapping?.extra ? JSON.parse(mapping.extra) as PersistedLarkCardTask : undefined };
+  }
+
+  /** 已经失败或中断的这一轮能不能「在原对话继续」，按 runtime 任务找（话题里说「继续」时用）。 */
+  protected async runtimeTaskContinueCause(appId: string, task: TaskRecord) {
+    const { mapping, saved } = await this.cardTaskFor(appId, task.sessionId, task.id);
+    if (!mapping || !saved) return undefined;
+    const events = task.status === 'failed' ? eventsForRuntimeTask(await this.runtime.getEvents?.(task.sessionId) ?? [], task.id) : [];
+    return this.continueCause(appId, mapping.externalId, saved.turn ?? 0, saved.scope_id, task.status, events);
+  }
+
+  /**
+   * 「在原对话继续」（continue_in_place）：不重放原请求，在原会话里让 Agent 接着做。
+   * - 结果未知停下的那一轮：先按没做完处理（closeUnresolvedTurn），再代发一句「继续」交给原会话，Agent 收到的是按原因写的接续说明。
+   * - 无进展超时停下、或 Agent 停下后自动结束的那一轮（已是失败或中断）：直接代发「继续」。
+   * - 排在结果未知那一轮后面的排队消息：只把挡在前面的那几轮按没做完处理，这条消息随后就在原对话里执行。
+   * 回调值只用来定位原消息与轮次；门禁与「重新执行」同一套：发起人隔离、入口权限、托管群操作权、他人任务二次确认。
+   */
+  protected async continueInPlaceAction(taskId: string, turn: number | undefined, operatorOpenId?: string, context?: { messageId?: string; chatId?: string }) {
+    const store = this.workflowOptions.store;
+    const appId = this.reconcileConfig?.appId;
+    const label = larkReplayLabels.continue_in_place;
+    if (!operatorOpenId || !context?.messageId || !context.chatId || !appId || !store?.compareAndSet || !this.cardMappings || !this.inbox || turn === undefined) {
+      return { type: 'warning', content: '此卡当前不可操作，请回原话题发送 /status 查看任务' };
+    }
+    try {
+      const config = await readLarkConfig(store, appId);
+      if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法执行此操作' };
+      const mapping = await this.cardMappings.get(larkCardChannel(appId), taskId);
+      const saved = mapping?.extra ? JSON.parse(mapping.extra) as PersistedLarkCardTask : undefined;
+      if (!mapping || !saved || saved.app_id !== appId || saved.chat_id !== context.chatId || (saved.turn ?? 0) !== turn || !saved.runtime_task_id
+        || ![saved.card_message_id, saved.final_message_id].includes(context.messageId) || !saved.scope_id || saved.scope_id.startsWith('message:')) {
+        return { type: 'warning', content: '此卡已失效，请在最新的任务卡上操作' };
+      }
+      const runtimeTask = (await this.runtime.getTasks?.(mapping.sessionId))?.find(item => item.id === saved.runtime_task_id);
+      if (!runtimeTask) return { type: 'warning', content: '原任务记录不存在，请重新发送这条请求' };
+      const unresolved = await this.unresolvedTurns(mapping.sessionId);
+      const own = unresolved.some(task => task.id === runtimeTask.id);
+      const queued = runtimeTask.status === 'queued' && unresolved.length > 0;
+      if (!own && !queued && !['failed', 'interrupted'].includes(runtimeTask.status)) {
+        return { type: 'warning', content: '这一轮现在不需要继续，请发送 /status 查看最新状态' };
+      }
+      if (!larkScopeContinuesFor(saved.scope_id, operatorOpenId)) return { type: 'warning', content: '这个会话按发起人隔离，只有发起人本人可以操作，未执行' };
+      const chatType = saved.chat_type ?? 'group';
+      const effective = chatType === 'group' && this.groupManager ? await this.groupManager.resolved(config, saved.chat_id) : config;
+      if (!await this.currentAccess(effective, saved.chat_id, chatType, operatorOpenId, 'task.create', undefined, operatorOpenId)
+        || effective.managedGroup && !await this.isOperatorAllowed(effective, operatorOpenId, saved.chat_id, mapping.sessionId)) {
+        return { type: 'warning', content: '当前账号没有在这个话题发起任务的权限，未执行' };
+      }
+      await this.requireExecution('listener', 'task.create');
+      await this.requireExecution('session', 'task.create');
+      if (!this.foreignActionConfirmed(operatorOpenId, saved.sender_open_id, `${taskId}|${turn}|continue_in_place`)) {
+        return { type: 'warning', content: '该任务由他人发起，再次点击同一按钮以确认操作' };
+      }
+      const key = continueKey(appId, taskId, turn);
+      const raw = await store.get(key);
+      const previous = raw ? JSON.parse(raw) as { phase: 'claimed' | 'done' | 'failed'; boot: string } : undefined;
+      if (previous?.phase === 'done' || previous?.phase === 'claimed' && previous.boot === this.relaunchBoot) {
+        return { type: 'success', content: `已经「${label}」了，进度见话题里的任务卡` };
+      }
+      const claim = JSON.stringify({ phase: 'claimed', boot: this.relaunchBoot, operator: operatorOpenId });
+      if (!await store.compareAndSet(key, raw, claim)) return { type: 'warning', content: '正在处理，请勿重复点击' };
+      try {
+        if (queued) {
+          for (const task of unresolved) await this.closeUnresolvedTurn(config, mapping.sessionId, task.id);
+        } else {
+          const events = runtimeTask.status === 'failed' ? eventsForRuntimeTask(await this.runtime.getEvents?.(mapping.sessionId) ?? [], runtimeTask.id) : [];
+          const cause = own ? await this.closeUnresolvedTurn(config, mapping.sessionId, runtimeTask.id)
+            : await this.continueCause(appId, taskId, turn, saved.scope_id, runtimeTask.status, events) ?? {};
+          await this.submitContinuation(config, saved, operatorOpenId, context.messageId, `${taskId}:${turn}`, cause);
+        }
+      } catch (error) {
+        await store.compareAndSet(key, claim, JSON.stringify({ phase: 'failed', boot: this.relaunchBoot })).catch(() => undefined);
+        throw error;
+      }
+      await store.compareAndSet(key, claim, JSON.stringify({ phase: 'done', boot: this.relaunchBoot })).catch(() => undefined);
+      return { type: 'success', content: queued ? '上一轮已按没做完处理，这条消息接着在原对话里执行' : '已在原对话继续，新一轮的进度见话题里的任务卡' };
+    } catch (error) {
+      this.log.warn({ error, taskId }, '在原对话继续失败');
+      return { type: 'warning', content: error instanceof LarkServiceError ? error.message : '暂时无法继续，请稍后重试' };
+    }
+  }
+
+  /**
+   * 代发一句「继续」并交给原会话：与结果卡续问同一条路（代发消息、预登记入站记录、handle），
+   * 入站记录里预先写好接续说明（materialPrompt），Agent 不会再读话题上下文，也不会收到原请求。
+   */
+  private async submitContinuation(config: StoredLarkConfig, saved: PersistedLarkCardTask, operator: string, anchorMessageId: string, digest: string, cause: LarkContinueCause) {
+    const prompt = '继续';
+    const echo = await this.service.replyText({ messageId: anchorMessageId, ...(saved.thread_id ? { replyInThread: true } : {}),
+      text: `「${larkReplayLabels.continue_in_place}」${prompt}`, idempotencyKey: `continue_${digest}`.slice(0, 50) });
+    const event: LarkMessageEvent = {
+      messageId: echo.messageId, chatId: saved.chat_id, chatType: saved.chat_type ?? 'group',
+      ...(saved.thread_id ? { threadId: saved.thread_id } : {}), createTime: String(Date.now()),
+      messageType: 'text', content: JSON.stringify({ text: `@_user_1 ${prompt}` }), senderOpenId: operator, senderType: 'user',
+      mentions: [{ key: '@_user_1', name: config.name?.trim() || 'Dutydeck', ...(this.botOpenId ? { openId: this.botOpenId } : {}), mentionedType: 'bot' }]
+    };
+    if (!await this.inbox!.seed(config.appId, event, { prompt, scopeId: saved.scope_id!, resources: [], materialPrompt: larkContinuePrompt(cause) })) return;
+    void this.handle(event, config).catch(error => this.log.error({ error, messageId: event.messageId }, '在原对话继续失败'));
   }
 
   /** 原会话时间线上的说明，Web 上能看到重投次数与原因。写不进去只留日志，不影响重投本身。 */

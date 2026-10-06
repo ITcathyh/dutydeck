@@ -44,6 +44,13 @@ describe('PTY verified inactivity deadline', () => {
     expect(f.events.some(event => event.type === 'completed')).toBe(false);
     expect(f.events.some(event => event.data.state === 'turn_timeout')).toBe(true);
   });
+  it('reports the inactivity deadline as AGENT_IDLE_TIMEOUT with minutes, not as an unknown driver result', async () => {
+    const f = await fixture(), turn = await send(f.driver);
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(await turn.result).toMatchObject({ name: 'DriverRecoveryError', code: 'AGENT_IDLE_TIMEOUT' });
+    expect(f.events.filter(event => event.type === 'error').map(event => event.data))
+      .toEqual([{ message: '1 分钟没有任何输出，已停止', code: 'AGENT_IDLE_TIMEOUT', timeoutMinutes: 1, retryable: true }]);
+  });
   it('does not allow endless spinner redraws or identical tool results to extend the deadline', async () => {
     const f = await fixture(), turn = await send(f.driver);
     for (let at = 0; at < 8; at++) {

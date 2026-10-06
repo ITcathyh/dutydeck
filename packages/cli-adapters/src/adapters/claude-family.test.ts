@@ -27,6 +27,19 @@ const composer = [
   '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
 ].join('\n');
 
+// 以下底部几行取自开发机上 Claude Code 的 tmux 画面（capture-pane 原样，历史内容省略）。
+const rule = '─'.repeat(120);
+const loggedOutFooter = [rule, '❯\u00a0', rule,
+  `  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents${' '.repeat(30)}Not logged in · Run /login`,
+  `${' '.repeat(81)}✔ Update installed · Restart to apply`].join('\n');
+const idleScreens = {
+  clearHint: ['✻ Churned for 17m 53s · done 2:33 PM', `${' '.repeat(80)}new task? /clear to save 156.2k tokens`, rule, '❯\u00a0', rule,
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents'].join('\n'),
+  loggedOut: ['  ⎿  Not logged in · Please run /login', '✻ Crunched for 0s · done 11:37 PM', loggedOutFooter].join('\n'),
+  manual: ['✻ Worked for 13s · done Sunday 8:39 AM', rule, '❯\u00a0', rule, '  ⏸ manual mode on · ? for shortcuts · ← for agents'].join('\n'),
+  auto: ['● {"actions":[{"op":"noop"}]}', '✻ Cooked for 9s · done 12:19 PM', rule, '❯\u00a0', rule, '  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents'].join('\n'),
+};
+
 class TrustBackend implements PtyLike {
   screen: string;
   readonly writes: string[] = [];
@@ -127,6 +140,12 @@ describe('Claude family startup trust confirmation', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('accepts a resumed composer whose footer carries right-aligned login text and a trailing update notice', async () => {
+    const backend = new TrustBackend(`Previous answer\n${loggedOutFooter}`);
+    await prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd, permissionMode: 'full-trust' });
+    expect(backend.writes).toEqual([]);
+  });
+
   it('requires a screen reader instead of blindly submitting', async () => {
     await expect(prepareClaudeFamilyInput({ write: () => {} }, { sessionId: 'sid', cwd, permissionMode: 'full-trust' }))
       .rejects.toThrow('screen reader');
@@ -178,5 +197,23 @@ describe('Claude family startup trust confirmation', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('Claude family idle screen', () => {
+  const adapter = createClaudeFamilyAdapter('claude-code');
+  it.each(Object.entries(idleScreens))('recognizes the empty composer at the bottom (%s)', (_name, screen) => {
+    expect(adapter.isIdleScreen!(`❯ old request\nPrevious answer\n${screen}`)).toBe(true);
+  });
+  it('accepts the startup placeholder composer', () => {
+    expect(adapter.isIdleScreen!(placeholderComposer)).toBe(true);
+  });
+  it.each([
+    ['an unsubmitted draft', idleScreens.clearHint.replace('❯\u00a0', '❯ 把参数补进单元')],
+    ['a permission menu', 'Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel'],
+    ['a composer that is not at the bottom', `${idleScreens.manual}\nmore output\nline 2\nline 3\nline 4`],
+    ['history only', '❯ old request\nPrevious answer'],
+  ])('does not treat %s as idle', (_name, screen) => {
+    expect(adapter.isIdleScreen!(screen)).toBe(false);
   });
 });

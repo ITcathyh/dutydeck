@@ -215,7 +215,8 @@ describe('ACP instance revocation', () => {
     await new Promise(resolve => setImmediate(resolve));
     expect(stopped).toBe(false); expect(existsSync(envFile)).toBe(true);
     tail.resolve(); await stopping;
-    expect(consumers).toBe(1); expect(events).toEqual([]); expect(existsSync(envFile)).toBe(false);
+    // 超时后迟到的 old text 不投递；只有取消没确认时发出的无进展原因码。
+    expect(consumers).toBe(1); expect(events).toEqual([{ type: 'error', data: expect.objectContaining({ code: 'AGENT_IDLE_TIMEOUT' }) }]); expect(existsSync(envFile)).toBe(false);
   });
 
   it('retains a visible close failure and forbids all implicit revival paths', async () => {

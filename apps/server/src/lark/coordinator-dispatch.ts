@@ -6,7 +6,7 @@ import { redactTraceText } from './secret-redaction.js';
 import { OnlineProcessCard, type CardUpdateOutcome } from './online-process-card.js';
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import { mergeGroupTaskWatermark } from './group-task-context.js';
-import { describeLarkTaskRecovery, larkStallNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
+import { describeLarkTaskRecovery, larkAgentUnavailableText, larkQuietSettledNote, larkReliability, larkStallNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import { validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
 import { collectLarkTaskContext } from './task-context.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
@@ -886,6 +886,19 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       await clearAcknowledgement();
       return;
     }
+    // A1：Agent 已知不可用（没登录、凭据失效）时不开新一轮，直接在话题里说清楚怎么修。
+    // 每次有新消息（用户重发）都先跑一次不调模型的状态命令复查，修好了就照常执行。
+    const reliability = larkReliability(this.runtime);
+    const unavailable = !resumeTask && !task.restoring && reliability.getAgentAvailability?.(session.agentId)
+      ? await reliability.checkAgentAvailability?.(session.agentId).catch(() => reliability.getAgentAvailability?.(session!.agentId)) : undefined;
+    if (unavailable) {
+      task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
+      await this.failPendingInbox(task, unavailable.reason);
+      await this.service.replyText({ messageId: event.messageId, ...(event.threadId?.trim() ? { replyInThread: true } : {}),
+        text: larkAgentUnavailableText(config.name?.trim() || 'Dutydeck', unavailable), idempotencyKey: `unavailable_${event.messageId}_${currentTurn}`.slice(0, 50) });
+      await clearAcknowledgement();
+      return;
+    }
     task.sessionId = session.id;
     task.newSessionNote = takeLarkNewSessionNote(session);
     const legacyUpgradeNote = task.group.legacyUpgradeSessionId === session.id
@@ -993,7 +1006,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       const queuedAhead = queueTasks && queuedAheadOf(queueTasks, task.runtimeTaskId);
       const recovery = task.sessionId && task.runtimeTaskId && ['queued', 'reconcile_required', 'legacy_unresolved'].includes(state)
         ? await describeLarkTaskRecovery(this.runtime, task.sessionId, task.runtimeTaskId, state, queuedAhead,
-          { relaunch: await this.relaunchReady(config.appId, task.id, state, task.turn), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }) : undefined;
+          { relaunch: await this.relaunchReady(config.appId, task.id, state, task.turn), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
+            continueInPlace: this.continuableScope(task) }) : undefined;
       const notifyRecovery = async () => {
         if (!recovery?.blocked || !task.sessionId || !task.runtimeTaskId) return undefined;
         // 提醒卡上没有按钮也没有详情链接，正文按不提这两者重新生成。
@@ -1104,7 +1118,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 结束后的过程卡收成一行，原因与按钮交给随后发的结果卡：只贴表情的模式下成功不会再发结果消息，
         // 失败、中断、取消总会发。
         ...(terminal && !(state === 'completed' && completionReactionOnly) ? { resultFollows: true } : {}),
-        capabilities: { ...this.capabilitiesForTask(task), ...(recovery?.relaunch ? { canRelaunch: true } : {}), ...turnOptions?.capabilities },
+        capabilities: { ...this.capabilitiesForTask(task), ...(recovery?.relaunch ? { canRelaunch: true } : {}), ...(recovery?.continueInPlace ? { canContinueInPlace: true } : {}), ...turnOptions?.capabilities },
         ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
         elements
       });
@@ -1161,8 +1175,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           && await readGitCodeSignature(session.cwd) !== codeSignatureBefore;
         const verification = await this.verificationView(task, config, state, changedCode);
         const resultActions = await this.resultActionCapabilities(task, config, state);
+        const continueCause = await this.continueCause(config.appId, task.id, currentTurn, task.scopeId, state, task.events);
         const gitStatus = changedCode ? await this.readGitStatusLine(state, session.cwd ?? cardContext.workspace) : undefined;
         const elements = [
+          ...(continueCause?.settled ? [{ tag: 'markdown', element_id: 'recovery_note', content: larkQuietSettledNote(continueCause) }] : []),
           ...(explicit ? [] : task.steered ? [{ tag: 'markdown', element_id: 'steer_note', content: task.steerNote ?? steeringOutcomeText(task.steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events, { state, agentName: cardContext.agentName })),
           ...(context && this.workflows ? await this.workflows.result(context, '') : []),
           ...(verification.element ? [verification.element] : []),
@@ -1177,7 +1193,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           ...cardContext, cardKind: 'result' as const, state, taskId: task.id, taskName: conclusionTitle ?? taskTitle,
           sessionId: task.sessionId, turn: currentTurn, readOnly: true,
           elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,
-          capabilities: { ...this.capabilitiesForTask(task), ...verification.capabilities, ...resultActions },
+          capabilities: { ...this.capabilitiesForTask(task), ...verification.capabilities, ...resultActions, ...(continueCause ? { canContinueInPlace: true } : {}) },
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
         };
         const result = await completeExplicitFinal(this.workflowOptions.store, this.service, finalContext, resultCardInput, elements) ?? await sendLarkResult(this.service, {
@@ -1484,6 +1500,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
             task.state = 'running';
             void update('running').finally(scheduleHeartbeat);
           } else if (record.status === 'reconcile_required' || record.status === 'legacy_unresolved') {
+            // 同一轮再次报需要核对（多是已收口为结果未知）：卡片交给对账，不盖掉「已在原对话继续」「已放弃」这类收尾。
+            if (task.state === record.status) { this.scheduleReconcile(); return; }
             active = false;
             heartbeatActive = false;
             task.state = record.status;
@@ -1556,7 +1574,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 先提交 queued UI，再消费订阅期间缓存的 running 事件，杜绝 running→queued 闪回。
         if (runtimeTask.status === 'queued' && task.state === 'queued' && !task.steered) {
           const recovery = await describeLarkTaskRecovery(this.runtime, session.id, runtimeTask.id, 'queued', runtimeTask.queuedAhead,
-            { relaunch: await this.relaunchReady(config.appId, task.id, 'queued', task.turn), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
+            { relaunch: await this.relaunchReady(config.appId, task.id, 'queued', task.turn), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
+              continueInPlace: this.continuableScope(task) });
           const turnOptions = await this.queuedTurnOptions(task, recovery, await this.runtime.getTasks?.(session.id).catch(() => undefined), runtimeTask.queuedAhead)
             .catch(error => { this.log.warn({ error, runtimeTaskId }, '读取排队卡的插队与审批信息失败，本次按普通排队卡呈现'); return undefined; });
           const queueMarkdown = withCardNotes(turnOptions?.approval?.markdown ?? recovery.markdown, recovery.blocked);
@@ -1566,7 +1585,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
             if (!task.cardMessageId || silentProgress || task.progressFrozen) await update('queued');
             else await processCard!.update({ ...cardContext, cardKind: 'process', messageId: task.cardMessageId, permissionMode: larkPermissionMode(config), state: 'queued', statusLabel: recovery.label, taskId: task.id, taskName: taskTitle, markdown: queueMarkdown,
               ...(turnOptions?.approval ? { elements: this.queuedApprovalElements(task, turnOptions.approval.record, queueMarkdown) } : {}),
-              sessionId: task.sessionId, turn: task.turn, capabilities: { ...this.capabilitiesForTask(task), ...(recovery.relaunch ? { canRelaunch: true } : {}), ...turnOptions?.capabilities }, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
+              sessionId: task.sessionId, turn: task.turn, capabilities: { ...this.capabilitiesForTask(task), ...(recovery.relaunch ? { canRelaunch: true } : {}), ...(recovery.continueInPlace ? { canContinueInPlace: true } : {}), ...turnOptions?.capabilities }, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
             if (this.stopped || task.turn !== currentTurn) return;
             await this.saveCardTask(task, 'queued');
           } catch (error) {
