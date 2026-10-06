@@ -35,7 +35,10 @@ async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions[
     listMessages: vi.fn(async () => ({ items: [], hasMore: false })),
     listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })),
     addReaction: vi.fn(async () => ({ reactionId: 'reaction' })), deleteReaction: vi.fn(async () => {}), listOwnReactions: vi.fn(async () => []),
-    sendText: vi.fn(async (_input: { text: string }) => ({ messageId: 'om_result', chatId: scope.chatId })),
+    // 定时产出现在以带按钮的卡片发送，正文在 elements 里。
+    send: vi.fn(async (_input: { chatId: string; elements?: unknown[] }) => ({ messageId: 'om_result', chatId: scope.chatId })),
+    reply: vi.fn(async () => ({ messageId: 'om_card_reply', chatId: scope.chatId })),
+    update: vi.fn(async () => ({ messageId: 'om_result', chatId: scope.chatId })),
     replyText: vi.fn(async () => ({ messageId: 'om_reply', chatId: scope.chatId }))
   };
   const groups = new LarkGroupManager(repos, { client: () => client as any });
@@ -316,8 +319,8 @@ it.each(['ask', undefined] as const)('runs unattended %s delegations through rea
   const events = await f.repos.events.listWindow(session.id, { limit: 100 });
   expect(events.some(event => event.type === 'permission_request' && (event.data as { status?: string }).status === 'pending')).toBe(false);
   await f.collaboration.scheduler.tick(); await f.collaboration.scheduler.tick();
-  expect(f.client.sendText).toHaveBeenCalledOnce();
-  expect(f.client.sendText.mock.calls[0]![0]).toMatchObject({ text: expect.stringContaining('deny') });
+  expect(f.client.send).toHaveBeenCalledOnce();
+  expect(JSON.stringify(f.client.send.mock.calls[0]![0].elements)).toContain('deny');
   const tasks = await f.runtime.getTasks(session.id);
   expect(tasks).toHaveLength(1);
   expect(f.repos.execution.getTaskExecution(tasks[0]!.id)?.attempts).toEqual([expect.objectContaining({ state: 'settled', outcome: 'completed' })]);
@@ -389,8 +392,11 @@ it('uses real saved group bindings, runs one frozen background task and delivers
   call.finish('仍缺最终核对。');
   await eventually(async () => (await f.repos.tasks.listBySession(call.sessionId)).every(task => !['queued', 'running'].includes(task.status)));
   await f.collaboration.scheduler.tick(); await f.collaboration.scheduler.tick();
-  expect(f.client.sendText).toHaveBeenCalledTimes(1);
-  expect(f.client.sendText.mock.calls[0]?.[0]).toMatchObject({ chatId: scope.chatId, text: '仍缺最终核对。' });
+  expect(f.client.send).toHaveBeenCalledTimes(1);
+  expect(f.client.send.mock.calls[0]?.[0]).toMatchObject({ chatId: scope.chatId, cardKind: 'result' });
+  expect(JSON.stringify(f.client.send.mock.calls[0]?.[0].elements)).toContain('仍缺最终核对。');
+  // 产出卡带 [暂停] [停止] 和调整时间提示，按钮值指向这个委托。
+  expect(JSON.stringify(f.client.send.mock.calls[0]?.[0].elements)).toMatch(/"dutydeck_mandate":"pause"[\s\S]*"dutydeck_mandate":"stop"[\s\S]*改成每天 9 点/);
   expect(f.calls).toHaveLength(1);
 });
 
@@ -406,7 +412,7 @@ it.each([
   await f.collaboration.scheduler.tick();
   expect(await execution()).toMatchObject({ status: 'failed', error: refusal });
   expect(f.calls).toHaveLength(0);
-  expect(f.client.sendText).not.toHaveBeenCalled();
+  expect(f.client.send).not.toHaveBeenCalled();
 });
 
 it('physically stops the original task after cancellation and rejects forged or revoked identities', async () => {
@@ -417,7 +423,7 @@ it('physically stops the original task after cancellation and rejects forged or 
   await expect(f.runtime.stop(id, { kind: 'channel', appId: 'cli_foreign', id: 'ou_alice' })).rejects.toBeDefined();
   await f.collaboration.service.updateMandate(scope, 'ou_alice', mandate.id, { expectedRevision: mandate.revision, status: 'cancelled' });
   await f.collaboration.scheduler.tick();
-  expect(f.stopped).toContain(id); expect(f.client.sendText).not.toHaveBeenCalled();
+  expect(f.stopped).toContain(id); expect(f.client.send).not.toHaveBeenCalled();
   expect((await f.collaboration.riskPolicy(id))?.policy).toMatchObject({ authorized: false, pattern: '.*' });
   expect(await f.collaboration.authorize(scope, 'ou_alice', 'manage')).toBe(false);
   expect(await f.collaboration.authorize(scope, installationOwnerTaskActor, 'manage')).toBe(true);
@@ -458,7 +464,7 @@ it('keeps one real background execution while toggling delivery and resumes only
   await eventually(async () => (await f.repos.tasks.listBySession(call.sessionId)).every(task => !['queued', 'running'].includes(task.status)));
   await f.collaboration.scheduler.tick(); await f.collaboration.scheduler.tick();
   expect(await f.repos.collaboration.listActions(scope)).toEqual(expect.arrayContaining([expect.objectContaining({kind: 'schedule_delivery', status: 'succeeded'})]));
-  expect(f.client.sendText).toHaveBeenCalledTimes(1); expect(f.calls).toHaveLength(1);
+  expect(f.client.send).toHaveBeenCalledTimes(1); expect(f.calls).toHaveLength(1);
 });
 
 it('applies the live execution gate to registered external actions, including local owner calls', async () => {
@@ -468,4 +474,77 @@ it('applies the live execution gate to registered external actions, including lo
   await f.groups.save(scope.appId, scope.chatId, { expectedRevision: f.group.binding!.revision, patch: { state: 'disabled' } });
   await expect(f.collaboration.extensions.execute('document-export', scope, installationOwnerTaskActor, 'export-one', {})).rejects.toMatchObject({ code: 'COLLABORATION_FORBIDDEN' });
   expect(execute).not.toHaveBeenCalled();
+});
+
+const cronBody = (id: string) => ({ id, goal: '总结本群今天的研发进展', mode: 'agent', prompt: '总结本群当天有来源的进展', condition: 'always', trigger: { kind: 'cron', expression: '0 18 * * 1-5' }, timezone: 'Asia/Shanghai' });
+const cardJson = (call: unknown[] | undefined) => JSON.stringify((call?.[0] as { elements?: unknown[] } | undefined)?.elements ?? []);
+const click = (f: Awaited<ReturnType<typeof fixture>>, value: Record<string, unknown>, operator: string, messageId = 'om_result') => f.collaboration.mandateCards.callback(scope.appId, value, operator, { messageId, chatId: scope.chatId });
+
+it('asks for confirmation before an agent-created mandate takes effect, and only the requester or an operator can confirm', async () => {
+  const f = await fixture();
+  const first = await f.collaboration.mandateCards.request(scope, 'ou_alice', cronBody('daily'), {}) as { pendingConfirmation: boolean; message: string; confirmationId: string };
+  expect(first).toMatchObject({ pendingConfirmation: true, message: expect.stringContaining('已发确认卡，等用户确认后生效') });
+  expect(await f.repos.collaboration.listMandates(scope)).toEqual([]);
+  expect(f.client.send).toHaveBeenCalledOnce();
+  const card = cardJson(f.client.send.mock.calls[0]);
+  expect(card).toContain('总结本群今天的研发进展'); expect(card).toContain('工作日每天 18:00'); expect(card).toContain('本群'); expect(card).toContain('直到你取消');
+  expect(f.client.send.mock.calls[0]![0]).toMatchObject({ chatId: scope.chatId, statusLabel: '待确认' });
+  // Agent 重试同一个请求不会重复发卡。
+  await f.collaboration.mandateCards.request(scope, 'ou_alice', cronBody('daily'), {});
+  expect(f.client.send).toHaveBeenCalledOnce();
+  const confirm = { dutydeck_mandate: 'confirm', ref: first.confirmationId };
+  await expect(click(f, confirm, 'ou_bob')).rejects.toMatchObject({ code: 'MANDATE_CARD_FORBIDDEN' });
+  expect(await f.repos.collaboration.listMandates(scope)).toEqual([]);
+  expect(await click(f, confirm, 'ou_alice')).toContain('已确认');
+  const [mandate] = await f.repos.collaboration.listMandates(scope);
+  expect(mandate).toMatchObject({ status: 'active', requesterId: 'ou_alice', goal: '总结本群今天的研发进展' });
+  expect(f.client.update).toHaveBeenLastCalledWith(expect.objectContaining({ messageId: 'om_result', statusLabel: '已确认' }));
+  expect(await click(f, confirm, 'ou_alice')).toContain('已经确认过了');
+  expect(await f.repos.collaboration.listMandates(scope)).toHaveLength(1);
+});
+
+it('lets the requester cancel a pending mandate and posts the confirmation card into the original thread', async () => {
+  const f = await fixture();
+  const pending = await f.collaboration.mandateCards.request(scope, 'ou_alice', cronBody('cancelled'), { threadRootMessageId: 'om_root' }) as { confirmationId: string };
+  expect(f.client.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_root', replyInThread: true }));
+  expect(f.client.send).not.toHaveBeenCalled();
+  expect(await click(f, { dutydeck_mandate: 'cancel', ref: pending.confirmationId }, 'ou_alice', 'om_card_reply')).toContain('已取消');
+  expect(f.client.update).toHaveBeenLastCalledWith(expect.objectContaining({ statusLabel: '已取消' }));
+  await expect(click(f, { dutydeck_mandate: 'confirm', ref: pending.confirmationId }, 'ou_alice', 'om_card_reply')).resolves.toContain('已经取消了');
+  expect(await f.repos.collaboration.listMandates(scope)).toEqual([]);
+});
+
+it('delivers each run as a card with pause, resume and stop that redraw the same message', async () => {
+  const f = await fixture(); const { mandate } = await f.create(); f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  expect(f.calls[0]!.prompt).toContain('最多 10 条');
+  expect(f.calls[0]!.prompt).toContain('不要写材料范围');
+  f.calls[0]!.finish('新增两条进展。');
+  await eventually(async () => (await f.repos.tasks.listBySession(f.calls[0]!.sessionId)).every(task => !['queued', 'running'].includes(task.status)));
+  await f.collaboration.scheduler.tick(); await f.collaboration.scheduler.tick();
+  expect(f.client.send).toHaveBeenCalledOnce();
+  const delivered = cardJson(f.client.send.mock.calls[0]);
+  expect(delivered).toContain('"dutydeck_mandate":"pause"'); expect(delivered).not.toContain('"dutydeck_mandate":"resume"'); expect(delivered).toContain('"dutydeck_mandate":"stop"');
+  expect(delivered).toContain('改成每天 9 点'); expect(delivered).toContain('可调整时间');
+  const redrawn = () => f.client.update.mock.calls.at(-1)![0] as { statusLabel?: string; elements: unknown[]; messageId: string };
+  await expect(click(f, { dutydeck_mandate: 'pause', ref: mandate.id }, 'ou_bob')).rejects.toMatchObject({ code: 'MANDATE_CARD_FORBIDDEN' });
+  expect(await click(f, { dutydeck_mandate: 'pause', ref: mandate.id }, 'ou_alice')).toContain('已暂停');
+  expect((await f.repos.collaboration.getMandate(scope, mandate.id))?.status).toBe('paused');
+  expect(redrawn()).toMatchObject({ messageId: 'om_result', statusLabel: '已暂停' });
+  expect(JSON.stringify(redrawn().elements)).toContain('新增两条进展。'); expect(JSON.stringify(redrawn().elements)).toContain('"dutydeck_mandate":"resume"');
+  expect(await click(f, { dutydeck_mandate: 'resume', ref: mandate.id }, 'ou_alice')).toContain('已恢复');
+  expect((await f.repos.collaboration.getMandate(scope, mandate.id))?.status).toBe('active');
+  expect(redrawn().statusLabel).toBeUndefined(); expect(JSON.stringify(redrawn().elements)).toContain('"dutydeck_mandate":"pause"');
+  // 停止不再二次确认，点一下就停，卡片标注已停止且不再有按钮。
+  expect(await click(f, { dutydeck_mandate: 'stop', ref: mandate.id }, 'ou_alice')).toContain('已停止');
+  expect((await f.repos.collaboration.getMandate(scope, mandate.id))?.status).toBe('cancelled');
+  expect(redrawn()).toMatchObject({ statusLabel: '已停止' }); expect(JSON.stringify(redrawn().elements)).not.toContain('dutydeck_mandate');
+  expect(await click(f, { dutydeck_mandate: 'resume', ref: mandate.id }, 'ou_alice')).toContain('已经停止');
+  expect((await f.repos.collaboration.getMandate(scope, mandate.id))?.status).toBe('cancelled');
+});
+
+it('rejects mandate card clicks from a different chat', async () => {
+  const f = await fixture(); const { mandate } = await f.create();
+  await expect(f.collaboration.mandateCards.callback(scope.appId, { dutydeck_mandate: 'stop', ref: mandate.id }, 'ou_alice', { messageId: 'om_x', chatId: 'oc_other' })).rejects.toMatchObject({ code: 'MANDATE_CARD_STALE' });
+  expect((await f.repos.collaboration.getMandate(scope, mandate.id))?.status).toBe('active');
 });

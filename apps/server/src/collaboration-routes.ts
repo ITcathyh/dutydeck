@@ -18,6 +18,8 @@ export interface CollaborationRouteOptions {
   extensions: CollaborationExtensions;
   prepareSettings?(scope: CollaborationScope, patch: z.infer<typeof updateCollaborationSettingsInputSchema>): Promise<z.infer<typeof updateCollaborationSettingsInputSchema>>;
   onChange?(scope: CollaborationScope): Promise<void>;
+  /** Agent 发起的委托创建：不立即生效，改发确认卡，用户确认后才创建。未提供时直接创建。 */
+  confirmMandate?(scope: CollaborationScope, actorId: string, body: unknown, origin: { threadRootMessageId?: string }): Promise<unknown>;
 }
 const feedbackSchema = z.object({ correction: z.string().trim().min(1).max(4000), expectedAction: z.enum(['silent', 'reply', 'act']).optional() }).strict();
 const replaySchema = z.object({ decisionIds: z.array(z.string().min(1)).min(1).max(50), policyVersion: z.string().min(1).max(64).optional() }).strict();
@@ -29,7 +31,7 @@ function parse<S extends z.ZodTypeAny>(schema: S, value: unknown): z.output<S> {
 
 export async function registerCollaborationRoutes(app: FastifyInstance, options: CollaborationRouteOptions) {
   const repo = options.service.repositories.collaboration;
-  type Context = { scope: CollaborationScope; actorId: string; taskId?: string };
+  type Context = { scope: CollaborationScope; actorId: string; taskId?: string; origin?: { threadRootMessageId?: string } };
   const managementContext = async (request: FastifyRequest): Promise<Context> => {
     const actorId = await options.authorizeManagement(request);
     if (!actorId) throw new RuntimeError('COLLABORATION_FORBIDDEN', '需要群管理权限。', 403);
@@ -44,7 +46,7 @@ export async function registerCollaborationRoutes(app: FastifyInstance, options:
     const session = await options.runtime.getSession(sessionId);
     const binding = session && larkAgentSessionBinding(session);
     if (!binding || binding.chatType !== 'group' || session?.sourceId?.split(':')[3] === 'collaboration') throw new RuntimeError('COLLABORATION_SCOPE_REQUIRED', '请在群内的当前指令中管理委托。', 403);
-    return { scope: { appId: binding.appId, chatId: binding.chatId }, actorId: active.actorId, taskId: active.taskId };
+    return { scope: { appId: binding.appId, chatId: binding.chatId }, actorId: active.actorId, taskId: active.taskId, origin: binding.threadRootMessageId ? { threadRootMessageId: binding.threadRootMessageId } : {} };
   };
   const createInput = (context: Context, body: unknown) => {
     const input = parse(z.object({ id: z.string().trim().min(1).max(128) }).passthrough(), body);
@@ -74,7 +76,10 @@ export async function registerCollaborationRoutes(app: FastifyInstance, options:
       await changed(ctx.scope); return result;
     });
     app.post(`${base}/mandates`, async request => {
-      const ctx = await context(request); const result = await options.service.createMandate(ctx.scope, ctx.actorId, createInput(ctx, request.body));
+      const ctx = await context(request);
+      // 只有 Agent 通道带 taskId；Web 管理端是用户自己在页面上操作，保持立即创建。
+      if (ctx.taskId && options.confirmMandate) return options.confirmMandate(ctx.scope, ctx.actorId, createInput(ctx, request.body), ctx.origin ?? {});
+      const result = await options.service.createMandate(ctx.scope, ctx.actorId, createInput(ctx, request.body));
       await changed(ctx.scope); return result;
     });
     app.patch<{ Params: { appId?: string; chatId?: string; id: string } }>(`${base}/mandates/:id`, async request => {

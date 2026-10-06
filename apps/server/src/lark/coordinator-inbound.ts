@@ -1943,6 +1943,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         return { type: 'success', content: await codebase.requestFix(subscription.id, { failureKey: workflow.failure, cardMessageId: context.messageId }, operatorOpenId) };
       } catch (error) { return { type: 'error', content: error instanceof Error ? error.message : String(error) }; }
     }
+    // 定时委托的确认卡 / 产出卡按钮（确认、取消、暂停、恢复、停止）；权限与状态判断都在 mandateCards 内。
+    if (workflow && typeof workflow.dutydeck_mandate === 'string') {
+      const cards = this.workflowOptions.automation?.mandateCards;
+      if (!cards || !this.reconcileConfig) return { type: 'error', content: '这张卡片已失效。' };
+      try { return { type: 'success', content: await cards.callback(this.reconcileConfig.appId, workflow, operatorOpenId, { messageId: context?.messageId, chatId: context?.chatId }) }; }
+      catch (error) { return { type: 'error', content: error instanceof Error ? error.message : String(error) }; }
+    }
     if (workflow && typeof workflow.dutydeck_work_item === 'string') {
       if (!this.workflowOptions.workbench || !this.reconcileConfig || !context) return { type: 'error', content: '目标卡片已失效。' };
       try { return { type: 'success', content: await this.workflowOptions.workbench.callback(workflow, operatorOpenId, context, this.reconcileConfig) }; }
