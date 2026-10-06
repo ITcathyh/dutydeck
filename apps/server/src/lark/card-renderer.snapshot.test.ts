@@ -55,7 +55,7 @@ describe('renderLarkCardElements 视觉快照', () => {
     const bodyJson = JSON.stringify(card.body);
     expect(bodyJson).toContain('正在分析需求，先跑一遍测试。');
     expect(bodyJson).toContain('pnpm test');
-    expect(bodyJson).toContain('已用时 2s');
+    expect(bodyJson).toContain('已用时 2 秒');
     expect(card.body.elements.some((el: any) => el.element_id === 'task_action_row')).toBe(true);
     expect(card.body.elements.some((el: any) => el.element_id === 'trace_group_0')).toBe(true);
   });
@@ -75,7 +75,7 @@ describe('renderLarkCardElements 视觉快照', () => {
     expect(bodyJson).toContain('全部通过。');
     expect(bodyJson).toContain('pnpm test');
     expect(bodyJson).toContain('125 passed');
-    expect(bodyJson).toContain('用时 2s');
+    expect(bodyJson).toContain('用时 2 秒');
     expect(card.body.elements.some((el: any) => el.element_id === 'final_output')).toBe(true);
     expect(card.body.elements.some((el: any) => el.element_id === 'trace_overview')).toBe(true);
   });

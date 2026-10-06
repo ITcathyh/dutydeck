@@ -29,13 +29,13 @@
                   "light_mode": "rgba(254,241,241,1)",
                   "dark_mode": "rgba(64,32,32,1)"
                 },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
                 "trace_success": {
                   "light_mode": "rgba(46,161,33,1)",
                   "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
                 },
                 "trace_running": {
                   "light_mode": "rgba(36,91,219,1)",
@@ -44,7 +44,7 @@
               }
             },
             "summary": {
-              "content": "已接收 · 看一下今天的发布流水线为什么卡住了"
+              "content": "进行中 · 看一下今天的发布流水线为什么卡住了"
             }
           },
           "body": {
@@ -93,19 +93,19 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock"
+              "content": "Mock · 排队中"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "已接收"
+                  "content": "进行中"
                 },
-                "color": "neutral"
+                "color": "blue"
               }
             ],
-            "template": "grey",
+            "template": "blue",
             "padding": "10px 12px 8px 12px"
           }
         }
@@ -129,13 +129,13 @@
                   "light_mode": "rgba(254,241,241,1)",
                   "dark_mode": "rgba(64,32,32,1)"
                 },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
                 "trace_success": {
                   "light_mode": "rgba(46,161,33,1)",
                   "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
                 },
                 "trace_running": {
                   "light_mode": "rgba(36,91,219,1)",
@@ -144,7 +144,7 @@
               }
             },
             "summary": {
-              "content": "已失败 · 看一下今天的发布流水线为什么卡住了"
+              "content": "失败 · 看一下今天的发布流水线为什么卡住了"
             }
           },
           "body": {
@@ -153,125 +153,73 @@
             "padding": "10px 12px 10px 12px",
             "elements": [
               {
-                "tag": "markdown",
-                "element_id": "execution_alert_0",
-                "content": "模型服务返回 529：当前负载过高，请稍后重试",
-                "text_size": "normal",
-                "margin": "6px 0px 8px 0px",
-                "icon": {
-                  "tag": "standard_icon",
-                  "token": "warning_outlined",
-                  "color": "red"
-                }
-              },
-              {
-                "tag": "column_set",
-                "element_id": "trace_group_0",
-                "flex_mode": "none",
-                "horizontal_spacing": "8px",
+                "tag": "collapsible_panel",
+                "element_id": "task_overview",
+                "expanded": false,
+                "direction": "vertical",
+                "vertical_spacing": "4px",
+                "padding": "0px",
                 "margin": "0px",
-                "columns": [
+                "header": {
+                  "title": {
+                    "tag": "markdown",
+                    "content": "<font color='red'>失败</font><font color='grey'> · <耗时></font><font color='grey'> · 原因见下条</font>",
+                    "text_size": "normal",
+                    "icon": {
+                      "tag": "standard_icon",
+                      "token": "close_outlined",
+                      "color": "red"
+                    }
+                  },
+                  "vertical_align": "center",
+                  "icon": {
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                    "color": "grey",
+                    "size": "14px 14px"
+                  },
+                  "icon_position": "right",
+                  "icon_expanded_angle": -180
+                },
+                "elements": [
                   {
-                    "tag": "column",
-                    "width": "weighted",
-                    "weight": 1,
-                    "vertical_align": "top",
-                    "elements": [
+                    "tag": "column_set",
+                    "element_id": "trace_group_0",
+                    "flex_mode": "none",
+                    "horizontal_spacing": "8px",
+                    "margin": "0px",
+                    "columns": [
                       {
-                        "tag": "markdown",
-                        "content": "开始检查发布流水线。",
-                        "text_size": "notation",
-                        "margin": "0px",
-                        "icon": {
-                          "tag": "standard_icon",
-                          "token": "done_outlined",
-                          "color": "grey"
-                        }
-                      }
-                    ]
-                  }
-                ]
-              },
-              {
-                "tag": "column_set",
-                "element_id": "task_action_row",
-                "flex_mode": "none",
-                "horizontal_spacing": "4px",
-                "vertical_align": "center",
-                "margin": "0px",
-                "columns": [
-                  {
-                    "tag": "column",
-                    "width": "weighted",
-                    "weight": 1,
-                    "vertical_align": "center",
-                    "elements": [
-                      {
-                        "tag": "markdown",
-                        "element_id": "task_meta",
-                        "content": "<font color='grey'>用时 <耗时></font><font color='grey'> · </font><font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
-                        "text_size": "notation",
-                        "margin": "0px"
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 1,
+                        "vertical_align": "top",
+                        "elements": [
+                          {
+                            "tag": "markdown",
+                            "content": "开始检查发布流水线。",
+                            "text_size": "notation",
+                            "margin": "0px",
+                            "icon": {
+                              "tag": "standard_icon",
+                              "token": "done_outlined",
+                              "color": "grey"
+                            }
+                          }
+                        ]
                       }
                     ]
                   },
                   {
-                    "tag": "column",
-                    "width": "auto",
-                    "vertical_align": "center",
-                    "elements": [
-                      {
-                        "tag": "button",
-                        "text": {
-                          "tag": "plain_text",
-                          "content": "重试"
-                        },
-                        "type": "primary_text",
-                        "icon": {
-                          "tag": "standard_icon",
-                          "token": "refresh_outlined",
-                          "color": "blue"
-                        },
-                        "behaviors": [
-                          {
-                            "type": "callback",
-                            "value": {
-                              "action": "retry",
-                              "task_id": "om_in_1",
-                              "turn": "1"
-                            }
-                          }
-                        ],
-                        "margin": "0px",
-                        "element_id": "retry"
-                      }
-                    ]
+                    "tag": "markdown",
+                    "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                    "text_size": "notation",
+                    "text_align": "right",
+                    "margin": "0px"
                   }
                 ]
               }
             ]
-          },
-          "header": {
-            "title": {
-              "tag": "plain_text",
-              "content": "看一下今天的发布流水线为什么卡住了"
-            },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
-            },
-            "text_tag_list": [
-              {
-                "tag": "text_tag",
-                "text": {
-                  "tag": "plain_text",
-                  "content": "已失败"
-                },
-                "color": "red"
-              }
-            ],
-            "template": "red",
-            "padding": "10px 12px 8px 12px"
           }
         }
       },
@@ -298,13 +246,13 @@
                   "light_mode": "rgba(254,241,241,1)",
                   "dark_mode": "rgba(64,32,32,1)"
                 },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
                 "trace_success": {
                   "light_mode": "rgba(46,161,33,1)",
                   "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
                 },
                 "trace_running": {
                   "light_mode": "rgba(36,91,219,1)",
@@ -313,7 +261,7 @@
               }
             },
             "summary": {
-              "content": "已失败 · 看一下今天的发布流水线为什么卡住了"
+              "content": "失败 · 看一下今天的发布流水线为什么卡住了"
             }
           },
           "body": {
@@ -398,7 +346,7 @@
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "已失败"
+                  "content": "失败"
                 },
                 "color": "red"
               }

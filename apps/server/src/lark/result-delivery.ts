@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { COMPLETION_REACTION_EMOJI, reactionDedupeKey, type ReactionRecord } from './reaction-records.js';
 import { isLarkReplyTargetUnavailable } from './api-gate.js';
-import { buildLarkCard, larkCardFinalOutputText, larkCardResultMarkdown, LarkServiceError, type LarkCardInput, type LarkCardService } from './service.js';
+import { buildLarkCard, larkCardFinalOutputText, larkCardShownResult, LarkServiceError, type LarkCardInput, type LarkCardService } from './service.js';
 
 // Live delivery and restart reconciliation share one provider UUID per process card.
 export const larkResultKey = (processMessageId: string) =>
@@ -148,14 +148,16 @@ export async function prepareLarkResult(
   const resultInput = { ...input, cardKind: 'result' as const };
   const output = resultInput.elements.find(element => element.element_id === 'final_output')?.content;
   const card = buildLarkCard(resultInput);
-  // 长结论在卡上拆成「开头 + 折叠」两段，按拼起来的全文判断整份结论是否都在卡上；卡面改写过图片语法，按改写后的原文比。
+  // 长结论在卡上拆成「开头 + 折叠」两段，按拼起来的全文判断整份结论是否都在卡上；卡面改写过图片和本机路径链接、
+  // 拿走了「需要你：」行，按改写后的文字比。
   // 表格数超过飞书上限的卡一定会被拒收，同样按放不下处理。
   const fits = !forceAttachment && (!output || typeof output === 'string'
-    && larkCardFinalOutputText(card.body.elements as Array<Record<string, unknown>>) === larkCardResultMarkdown(output) && withinTableLimits(card.body.elements));
+    && larkCardFinalOutputText(card.body.elements as Array<Record<string, unknown>>) === larkCardShownResult(output) && withinTableLimits(card.body.elements));
   let attachmentMessageId: string | undefined;
   if (forceAttachment) resultInput.idempotencyKey = `result_d_${createHash('sha256').update(input.idempotencyKey).digest('hex').slice(0, 40)}`;
   if (!fits) {
-    const filename = `${(input.taskName?.trim() || '执行结果').replace(/[\\/:*?"<>|\r\n]/g, '_').slice(0, 60)}.md`;
+    // 附件名用结果卡标题（结论第一句）：去掉文件名里不能出现的字符，群里看到的是一个能读懂的名字。
+    const filename = `${(input.taskName ?? '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60).replace(/[. ]+$/, '') || '执行结果'}.md`;
     const acceptance = input.elements.some(element => element.element_id === 'workflow_accept')
       ? '\n\n---\n\n结果验收：回复本文件消息「验收通过」即可确认；需要修改时，回复本文件消息并说明修改要求。'
       : '';
@@ -164,10 +166,14 @@ export async function prepareLarkResult(
       idempotencyKey: `result_file_${createHash('sha256').update(input.idempotencyKey).digest('hex').slice(0, 36)}`
     }, log, store, beforeSend);
     attachmentMessageId = file.messageId;
+    const head = Array.from(String(output)).slice(0, 700).join('');
+    // 节选可能切在代码块中间，补上收尾的围栏。
+    const excerpt = (head.match(/^\s*(?:```|~~~)/gm)?.length ?? 0) % 2 ? `${head}…\n\`\`\`` : `${head}…`;
     // An exact excerpt is not a business-outcome summary. Keep it explicitly
-    // labelled and plain text; never infer success from a finished agent turn.
+    // labelled; never infer success from a finished agent turn.
     resultInput.elements = [
-      { tag: 'div', element_id: 'final_output', text: { tag: 'plain_text', content: `正文开头节选（非完整结论）：\n${Array.from(String(output)).slice(0, 1000).join('')}…` } },
+      // 节选按 Markdown 渲染：卡面不再露出 ---、###、** 这些符号。
+      { tag: 'markdown', element_id: 'final_output', text_align: 'left', text_size: 'normal_v2', margin: '0px', content: `**正文开头节选（非完整结论）**\n\n${excerpt}` },
       { tag: 'div', element_id: 'result_attachment', text: { tag: 'plain_text', content: `完整正文已发送为附件「${filename}」。未完成事项与下一步请以全文为准；可引用本卡或附件反馈。` } },
       // 验证状态行必须跟着摘要卡走：结果转成附件后，卡上只剩节选，
       // 「这份结论有没有被平台验证过」比节选本身更需要留在能看见的地方。

@@ -204,7 +204,8 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     const process = structuredClone(h.cards.get('om_card_1'));
     const file = structuredClone(h.cards.get('om_card_2'));
     const summary = structuredClone(h.cards.get('om_card_3'));
-    expect(summary.taskName).toBe('生成长结果');
+    // 结果卡标题是结论第一句，不是用户原话。
+    expect(summary.taskName).toBe('开头');
     expect(JSON.stringify(summary)).toContain('正文开头节选');
     expect(JSON.stringify(summary)).not.toContain('workflow_accept');
     expect(JSON.stringify(file)).not.toContain('workflow_accept');

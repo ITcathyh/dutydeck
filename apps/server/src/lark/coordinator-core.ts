@@ -17,6 +17,7 @@ import { isBotSenderType, isGroupChat } from './card-mentions.js';
 import { LarkPinManager } from './pin-manager.js';
 import type { LoginLinkStore } from '../auth/auth.js';
 import { larkReplyContext, type LarkChatModeResolver } from './session-resolver.js';
+import { larkCardFollowUpTitle } from './card-actions.js';
 import { larkCommandEcho } from './commands.js';
 import { escapeLarkPromptEcho } from './queue-summary.js';
 import type { ListenerLog, LarkMessageEvent, LarkRuntime } from './listener.js';
@@ -57,10 +58,21 @@ export const withoutLeadingBotMention = (prompt: string, botName?: string) => {
   return text;
 };
 /**
- * 卡片标题：去掉开头对本机器人的 @。卡片回复在原消息下面，标题第一眼读到机器人自己的名字
- * 是噪声；@ 别的机器人是原话的一部分，保留。
+ * 过程卡标题：用户原话，去掉对本机器人的所有 @ 和「[图片]」这类占位——卡片回复在原消息下面，
+ * 标题里读到机器人自己的名字、一串占位都是噪声；@ 别人是原话的一部分，保留。
+ * 一键续问代发的固定提示词不当标题，用那个按钮的名字（「对外回复版」「详细版」）。
  */
-export const larkTaskTitle = (prompt: string, botName?: string) => (withoutLeadingBotMention(prompt, botName) || prompt.trim()).slice(0, 80);
+export const larkTaskTitle = (prompt: string, botName?: string) => {
+  const plain = withoutLeadingBotMention(prompt, botName) || prompt.trim();
+  const followUp = larkCardFollowUpTitle(plain);
+  if (followUp) return followUp;
+  const mention = botName?.trim() ? `@${botName.trim()}` : '';
+  // 整词比较：@bdev-flashy 不是在 @ bdev-flash。
+  const cleaned = plain.replace(/\[(?:图片|文件|视频|语音|表情|表情包)\]/g, ' ')
+    .split(/\s+/).filter(word => !mention || word !== mention).join(' ').trim();
+  // 去掉之后什么都不剩（只发了一张图、只 @ 了机器人）时给个中性的名字，不把占位写回标题。
+  return (cleaned || '新请求').slice(0, 80);
+};
 /**
  * 续聊规则与在原位置发言一致：按发送人隔离的会话（user:）只有发起人本人发言才会回到它；
  * 话题、整群与私聊会话由在原位置发言的人共用。message: 是缺身份时的一次性会话，谁也续不上。

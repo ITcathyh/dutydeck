@@ -37,13 +37,12 @@ describe('Lark card service', () => {
   it('renders a completed Card 2.0 with a clear task header, status, and compact footer', () => {
     const card = buildLarkCard({ agentName: 'Business Agent', workspace: '/srv/repo', permissionMode: 'full-trust', state: 'completed', taskName: 'Release', taskId: '42', elapsedSeconds: 65, markdown: '**done**' });
     expect(card.schema).toBe('2.0');
-    // 这三个色值既当状态圆点又当状态文字，取的是白底上可读的飞书语义色。
-    // 失败色曾是低饱和土黄（对比度约 2:1），当文字时几乎读不出来。
+    // 这两个色值既当状态圆点又当状态文字，取的是白底上可读的飞书语义色；步骤级的失败改用灰色，不再有醒目的失败色。
     expect(card.config.style.color).toMatchObject({
       trace_success: { light_mode: expect.stringContaining('46,161,33') },
-      trace_failure: { light_mode: expect.stringContaining('163,77,0') },
       trace_running: { light_mode: expect.stringContaining('36,91,219') }
     });
+    expect(card.config.style.color).not.toHaveProperty('trace_failure');
     expect(card.header).toMatchObject({
       title: { tag: 'plain_text', content: 'Release' },
       subtitle: { tag: 'plain_text', content: 'Business Agent' },
@@ -54,7 +53,7 @@ describe('Lark card service', () => {
     expect(card.body.elements[0].content).toBe('**done**');
     // 耗时改由页脚承担。Agent 名已经在 header 副标题里，页脚不写第二遍；
     // 本例没有 webBaseUrl，所以页脚只剩耗时这一列。
-    expect(byId(card, 'task_elapsed').content).toContain('用时 1m 5s');
+    expect(byId(card, 'task_elapsed').content).toContain('用时 1 分 5 秒');
     expect(JSON.stringify(card)).not.toContain('text_tag');
     const rendered = JSON.stringify(card);
     expect(rendered).not.toContain("<font color='grey'>Business Agent</font>");
@@ -125,7 +124,7 @@ describe('Lark card service', () => {
     expect(footer.tag).toBe('column_set');
     const firstColMarkdown = footer.columns[0].elements[0];
     expect(firstColMarkdown.element_id).toBe('task_elapsed');
-    expect(firstColMarkdown.content).toBe("<font color='grey'>用时 1m 15s · </font><at id=ou_alice></at>");
+    expect(firstColMarkdown.content).toBe("<font color='grey'>用时 1 分 15 秒 · </font><at id=ou_alice></at>");
     const secondColMarkdown = footer.columns[1].elements[0];
     expect(secondColMarkdown.content).toContain('[查看详情](https://web.example.com/sessions/ses_1)');
   });
@@ -162,7 +161,7 @@ describe('Lark card service', () => {
     expect(footer.tag).toBe('column_set');
     const firstColMarkdown = footer.columns[0].elements[0];
     expect(firstColMarkdown.element_id).toBe('task_elapsed');
-    expect(firstColMarkdown.content).toBe("<font color='grey'>用时 1m 15s</font>");
+    expect(firstColMarkdown.content).toBe("<font color='grey'>用时 1 分 15 秒</font>");
     const secondColMarkdown = footer.columns[1].elements[0];
     expect(secondColMarkdown.content).toContain('[查看详情](https://web.example.com/sessions/ses_1)');
   });
@@ -196,10 +195,10 @@ describe('Lark card service', () => {
     const loading1: any = buildLarkCard({ state: 'running', elapsedSeconds: 1 });
     expect(loading0.header).toMatchObject({ template: 'blue', title: { content: 'Dutydeck' } });
     expect(byId(loading0, 'task_status')).toMatchObject({ tag: 'div', icon: { tag: 'standard_icon', token: 'loading_outlined', color: 'grey' } });
-    // 0 秒不写耗时：这一格要么是首帧、要么是这张卡不会再更新，「已用时 0s」两种情况下都是假信息。
+    // 0 秒不写耗时：这一格要么是首帧、要么是这张卡不会再更新，「已用时 0 秒」两种情况下都是假信息。
     expect(byId(loading0, 'task_status').text.content).not.toContain('已用时');
     expect(byId(loading0, 'task_status').text.content).toContain('执行中');
-    expect(byId(loading1, 'task_status').text.content).toContain('已用时 1s');
+    expect(byId(loading1, 'task_status').text.content).toContain('已用时 1 秒');
     expect(byId(loading0, 'task_status').text.text_size).toBe('small');
     expect(buildLarkCard({ state: 'running', taskName: '任务摘要' }).header.title).toMatchObject({ tag: 'plain_text', content: '任务摘要' });
     expect(byId(loading1, 'task_status').icon.token).toBe('loading_outlined');
@@ -300,7 +299,7 @@ describe('Lark card service', () => {
     // 已完成的卡撤掉状态行，结论因此坐在第一位；耗时退到页脚。
     expect(statusIndex).toBe(-1);
     expect(finalIndex).toBe(0);
-    expect(byId(card, 'task_elapsed').content).toContain('用时 1m 37s');
+    expect(byId(card, 'task_elapsed').content).toContain('用时 1 分 37 秒');
     expect(card.body.elements[overviewIndex]).toMatchObject({ tag: 'collapsible_panel', expanded: false });
     expect(card.body.elements[overviewIndex].header.title.content).toBe('执行记录');
     expect(card.body.elements[overviewIndex].header.title.text_size).toBe('notation');
@@ -319,7 +318,7 @@ describe('Lark card service', () => {
     expect(waiting.header.template).toBe('orange');
     expect(buildLarkCard({ state: 'running', taskName: '确认本次操作' }).header.template).toBe('blue');
     // 审批卡由 workflow-interactions 一次性投递，之后不再心跳。执行中态照常写耗时的话，
-    // 这张卡会永久挂着一个「已用时 0s」。
+    // 这张卡会永久挂着一个「已用时 0 秒」。
     expect(byId(waiting, 'task_status').text.content).not.toContain('已用时');
 
     // 提问卡问的是问题，不是让人去批。「等待审批」是 trace 自证那条路径的推断文案，
@@ -330,10 +329,10 @@ describe('Lark card service', () => {
     expect(asking.config.summary.content).toContain('等待回答');
     expect(JSON.stringify(asking)).not.toContain('等待审批');
 
-    // 终态同理：「已处理」要留下，而这类卡从不传耗时，「已用时 0s」是永远不会变的假信息。
+    // 终态同理：「已处理」要留下，而这类卡从不传耗时，「已用时 0 秒」是永远不会变的假信息。
     const closed: any = buildLarkCard({ state: 'completed', statusLabel: '已处理', readOnly: true, taskName: '确认本次操作' });
     expect(byId(closed, 'task_status').text.content).toContain('已处理');
-    expect(JSON.stringify(closed)).not.toContain('0s');
+    expect(JSON.stringify(closed)).not.toContain('0 秒');
     expect(byId(closed, 'task_elapsed')).toBeUndefined();
   });
 
@@ -345,7 +344,7 @@ describe('Lark card service', () => {
     expect(byId(firstFrame, 'task_status').text.content).not.toContain('已用时');
     // 攒够耗时之后交回给图标，标签退场。
     const ticking: any = buildLarkCard({ state: 'running', taskName: '构建服务端', elapsedSeconds: 12 });
-    expect(byId(ticking, 'task_status').text.content).toContain('已用时 12s');
+    expect(byId(ticking, 'task_status').text.content).toContain('已用时 12 秒');
     expect(byId(ticking, 'task_status').text.content).not.toContain('执行中');
   });
 
@@ -354,7 +353,7 @@ describe('Lark card service', () => {
     // 已完成没有状态行可言：色带已中性、结果就在下面，「已完成」只会挤掉结果。
     // 失败和取消仍然要说，读者据此决定是否重试。
     expect(byId(buildLarkCard({ state: 'completed', elements: trace }), 'task_status')).toBeUndefined();
-    expect(byId(buildLarkCard({ state: 'completed', elapsedSeconds: 97, elements: trace }), 'task_elapsed').content).toContain('用时 1m 37s');
+    expect(byId(buildLarkCard({ state: 'completed', elapsedSeconds: 97, elements: trace }), 'task_elapsed').content).toContain('用时 1 分 37 秒');
     // 没有耗时可报时页脚不编一个：终态的「0s」不会再变，是永久留在卡上的假信息。
     expect(byId(buildLarkCard({ state: 'completed', elements: trace }), 'task_elapsed')).toBeUndefined();
     expect(byId(buildLarkCard({ state: 'completed', elements: trace }), 'trace_overview').header.title.content).not.toContain('部分失败');

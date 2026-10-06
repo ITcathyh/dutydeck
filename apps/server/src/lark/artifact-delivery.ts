@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
-import { basename, relative, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { basename, isAbsolute, relative, resolve } from 'node:path';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { AgentGroupToolError } from './agent-tools.js';
 
@@ -21,12 +22,19 @@ const keyFor = (sessionId: string, key: string) => `lark.artifact_delivery.${ses
 const stableKey = (sessionId: string, source: string, target: ArtifactTarget, image: boolean) => `artifact-${createHash('sha256').update(JSON.stringify({ sessionId, source, target, image })).digest('hex').slice(0, 40)}`;
 const providerUuidFor = (sessionId: string, key: string) => `dutydeck-${createHash('sha256').update(`${sessionId}\0${key}`).digest('hex').slice(0, 40)}`;
 
+const insideRoot = (root: string, path: string) => {
+  const inner = relative(root, path);
+  return inner !== '..' && !inner.startsWith('../') && !isAbsolute(inner);
+};
+
 export async function readArtifact(cwd: string, input: string, image: boolean) {
   const root = await realpath(cwd);
+  // 会话工作目录之外，系统临时目录也可以发：Agent 常把分析结果写在 /tmp 下。范围一律按解析掉符号链接之后的真实路径判断。
+  const roots = [root, await realpath(tmpdir()).catch(() => undefined)].filter((item): item is string => Boolean(item));
+  const withinScope = (path: string) => roots.some(item => insideRoot(item, path));
   const supplied = resolve(root, input);
   const canonical = await realpath(supplied).catch(() => { throw new AgentGroupToolError('ARTIFACT_NOT_FOUND', '要发送的文件不存在或无法解析。', 404); });
-  const canonicalRelative = relative(root, canonical);
-  if (canonicalRelative === '..' || canonicalRelative.startsWith('../')) throw new AgentGroupToolError('ARTIFACT_PATH_OUT_OF_SCOPE', '只能发送当前会话工作目录内的文件。', 403);
+  if (!withinScope(canonical)) throw new AgentGroupToolError('ARTIFACT_PATH_OUT_OF_SCOPE', '只能发送当前会话工作目录或系统临时目录内的文件。', 403);
   const handle = await open(canonical, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0)).catch(() => { throw new AgentGroupToolError('ARTIFACT_OPEN_FAILED', '无法安全打开要发送的文件。', 400); });
   try {
     // O_NOFOLLOW protects only the final component. Anchor the already-opened
@@ -34,8 +42,7 @@ export async function readArtifact(cwd: string, input: string, image: boolean) {
     // directory cannot redirect this fd outside the session cwd.
     if (process.platform !== 'linux') throw new AgentGroupToolError('ARTIFACT_OPEN_FAILED', '当前平台无法安全验证已打开文件的工作目录范围。', 400);
     const opened = await realpath(`/proc/self/fd/${handle.fd}`).catch(() => { throw new AgentGroupToolError('ARTIFACT_OPEN_FAILED', '无法安全验证已打开文件的工作目录范围。', 400); });
-    const openedRelative = relative(root, opened);
-    if (openedRelative === '..' || openedRelative.startsWith('../')) throw new AgentGroupToolError('ARTIFACT_PATH_OUT_OF_SCOPE', '只能发送当前会话工作目录内的文件。', 403);
+    if (!withinScope(opened)) throw new AgentGroupToolError('ARTIFACT_PATH_OUT_OF_SCOPE', '只能发送当前会话工作目录或系统临时目录内的文件。', 403);
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size <= 0) throw new AgentGroupToolError('ARTIFACT_NOT_REGULAR_FILE', '只能发送非空普通文件。', 400);
     const limit = image ? artifactImageLimit : artifactFileLimit;

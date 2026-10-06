@@ -29,13 +29,13 @@
                   "light_mode": "rgba(254,241,241,1)",
                   "dark_mode": "rgba(64,32,32,1)"
                 },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
                 "trace_success": {
                   "light_mode": "rgba(46,161,33,1)",
                   "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
                 },
                 "trace_running": {
                   "light_mode": "rgba(36,91,219,1)",
@@ -44,7 +44,7 @@
               }
             },
             "summary": {
-              "content": "已接收 · 把登录修复推上去"
+              "content": "进行中 · 把登录修复推上去"
             }
           },
           "body": {
@@ -93,19 +93,19 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock"
+              "content": "Mock · 排队中"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "已接收"
+                  "content": "进行中"
                 },
-                "color": "neutral"
+                "color": "blue"
               }
             ],
-            "template": "grey",
+            "template": "blue",
             "padding": "10px 12px 8px 12px"
           }
         }
@@ -129,13 +129,13 @@
                   "light_mode": "rgba(254,241,241,1)",
                   "dark_mode": "rgba(64,32,32,1)"
                 },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
                 "trace_success": {
                   "light_mode": "rgba(46,161,33,1)",
                   "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
                 },
                 "trace_running": {
                   "light_mode": "rgba(36,91,219,1)",
@@ -144,7 +144,7 @@
               }
             },
             "summary": {
-              "content": "结果未知 · 把登录修复推上去"
+              "content": "中断 · 把登录修复推上去"
             }
           },
           "body": {
@@ -176,7 +176,7 @@
                       {
                         "tag": "markdown",
                         "element_id": "task_meta",
-                        "content": "<font color='grey'>已运行 <耗时></font><font color='grey'> · </font><font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
                         "text_size": "notation",
                         "margin": "0px"
                       }
@@ -257,19 +257,19 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock"
+              "content": "Mock · 结果未知"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "结果未知"
+                  "content": "中断"
                 },
-                "color": "orange"
+                "color": "neutral"
               }
             ],
-            "template": "orange",
+            "template": "grey",
             "padding": "10px 12px 8px 12px"
           }
         }
@@ -306,13 +306,13 @@
                   "light_mode": "rgba(254,241,241,1)",
                   "dark_mode": "rgba(64,32,32,1)"
                 },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
                 "trace_success": {
                   "light_mode": "rgba(46,161,33,1)",
                   "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
                 },
                 "trace_running": {
                   "light_mode": "rgba(36,91,219,1)",
@@ -321,7 +321,7 @@
               }
             },
             "summary": {
-              "content": "已放弃 · 把登录修复推上去"
+              "content": "中断 · 把登录修复推上去"
             }
           },
           "body": {
@@ -370,19 +370,19 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock"
+              "content": "Mock · 已放弃"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "已放弃"
+                  "content": "中断"
                 },
-                "color": "orange"
+                "color": "neutral"
               }
             ],
-            "template": "orange",
+            "template": "grey",
             "padding": "10px 12px 8px 12px"
           }
         }

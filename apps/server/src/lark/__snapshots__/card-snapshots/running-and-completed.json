@@ -29,13 +29,13 @@
                   "light_mode": "rgba(254,241,241,1)",
                   "dark_mode": "rgba(64,32,32,1)"
                 },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
                 "trace_success": {
                   "light_mode": "rgba(46,161,33,1)",
                   "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
                 },
                 "trace_running": {
                   "light_mode": "rgba(36,91,219,1)",
@@ -44,7 +44,7 @@
               }
             },
             "summary": {
-              "content": "已接收 · 把登录页的错误提示改成中文"
+              "content": "进行中 · 把登录页的错误提示改成中文"
             }
           },
           "body": {
@@ -93,19 +93,19 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock"
+              "content": "Mock · 排队中"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "已接收"
+                  "content": "进行中"
                 },
-                "color": "neutral"
+                "color": "blue"
               }
             ],
-            "template": "grey",
+            "template": "blue",
             "padding": "10px 12px 8px 12px"
           }
         }
@@ -129,13 +129,13 @@
                   "light_mode": "rgba(254,241,241,1)",
                   "dark_mode": "rgba(64,32,32,1)"
                 },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
                 "trace_success": {
                   "light_mode": "rgba(46,161,33,1)",
                   "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
                 },
                 "trace_running": {
                   "light_mode": "rgba(36,91,219,1)",
@@ -144,7 +144,7 @@
               }
             },
             "summary": {
-              "content": "执行中 · 先看一下登录页现在的错误提示。"
+              "content": "进行中 · 先看一下登录页现在的错误提示。"
             }
           },
           "body": {
@@ -196,7 +196,7 @@
                     "element_id": "current_now",
                     "text_size": "notation",
                     "margin": "0px 0px 0px 20px",
-                    "content": "<font color='grey'>正在：login/errors.ts</font>"
+                    "content": "<font color='grey'>正在：修改文件：login/errors.ts</font>"
                   },
                   {
                     "tag": "markdown",
@@ -319,7 +319,7 @@
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "执行中"
+                  "content": "进行中"
                 },
                 "color": "blue"
               }
@@ -353,13 +353,13 @@
                   "light_mode": "rgba(254,241,241,1)",
                   "dark_mode": "rgba(64,32,32,1)"
                 },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
                 "trace_success": {
                   "light_mode": "rgba(46,161,33,1)",
                   "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
                 },
                 "trace_running": {
                   "light_mode": "rgba(36,91,219,1)",
@@ -368,7 +368,7 @@
               }
             },
             "summary": {
-              "content": "已完成 · 把登录页的错误提示改成中文"
+              "content": "完成 · 把登录页的错误提示改成中文"
             }
           },
           "body": {
@@ -387,7 +387,7 @@
                 "header": {
                   "title": {
                     "tag": "markdown",
-                    "content": "<font color='green'>已完成</font><font color='grey'> · 共 2 步</font><font color='grey'> · 结果见下条</font>",
+                    "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font><font color='grey'> · 读文件 1 个、改文件 1 个</font>",
                     "text_size": "normal",
                     "icon": {
                       "tag": "standard_icon",
@@ -470,13 +470,13 @@
                   "light_mode": "rgba(254,241,241,1)",
                   "dark_mode": "rgba(64,32,32,1)"
                 },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
                 "trace_success": {
                   "light_mode": "rgba(46,161,33,1)",
                   "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
                 },
                 "trace_running": {
                   "light_mode": "rgba(36,91,219,1)",
@@ -485,7 +485,7 @@
               }
             },
             "summary": {
-              "content": "运行完成 · 把登录页的错误提示改成中文"
+              "content": "已把登录页的错误提示改成中文：密码错误时显示「密码错误」"
             }
           },
           "body": {
@@ -618,7 +618,7 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "把登录页的错误提示改成中文"
+              "content": "已把登录页的错误提示改成中文：密码错误时显示…"
             },
             "subtitle": {
               "tag": "plain_text",
@@ -629,7 +629,7 @@
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "运行完成"
+                  "content": "完成"
                 },
                 "color": "green"
               }

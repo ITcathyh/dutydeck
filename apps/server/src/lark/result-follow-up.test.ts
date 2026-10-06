@@ -161,27 +161,26 @@ describe('结果卡一键续问', () => {
     expect(followUpLabels(summary)).toEqual(['给我对外回复', '再详细点']);
   });
 
-  it('点击等同于在原话题回复固定文本：进入同一个会话的下一轮', async () => {
+  it('点击等同于在原话题回复结果卡一条固定文本：进入同一个会话的下一轮，话题里不多出一条回显', async () => {
     const h = await harness();
     const first = await h.run(event('om_1', '查一下登录为什么慢'));
     // 话题会话由在话题里发言的人共用：别的群成员点也等同于他在话题里回复。
     const value = callbackOf(h.card(first.final_message_id!), 'ask_reply');
     expect(await h.click(value, 'ou_bob', first)).toMatchObject({ type: 'success' });
 
-    expect(h.service.replyText).toHaveBeenCalledTimes(1);
-    const echoInput = h.service.replyText.mock.calls[0]![0];
-    expect(echoInput).toMatchObject({ messageId: first.final_message_id, replyInThread: true });
-    const echoId = (await h.service.replyText.mock.results[0]!.value).messageId as string;
-
-    const followUp = await h.result(echoId);
+    // 不再代发一条「「给我对外回复」+提示词」的文本：新一轮直接锚在结果卡上。
+    const anchor = first.final_message_id!;
+    const followUp = await h.result(anchor);
+    expect(h.service.replyText).not.toHaveBeenCalled();
     expect(followUp.sessionId).toBe(first.sessionId);
     expect(followUp.prompt).toBe(larkCardFollowUpPrompt('ask_reply'));
     expect(followUp.sender_open_id).toBe('ou_bob');
     expect(followUp.scope_id).toBe(first.scope_id);
     expect(h.prompts).toHaveLength(2);
     expect(h.prompts[1]).toContain(larkCardFollowUpPrompt('ask_reply'));
-    // 新一轮的卡片回复在代发的那条消息下面，留在原话题里。
-    expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: echoId, replyInThread: true }));
+    // 新一轮的过程卡回复在结果卡下面，留在原话题里；过程卡和结果卡的标题是按钮名，不是那段提示词。
+    expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: anchor, replyInThread: true, taskName: '对外回复版' }));
+    expect(h.cards.get(followUp.final_message_id!)).toMatchObject({ cardKind: 'result', taskName: '对外回复版' });
     // 点击不改原结果卡：原卡只在投递时写过一次。
     expect(h.service.update.mock.calls.some(([input]: any[]) => input.messageId === first.final_message_id)).toBe(false);
     // 续问的结果卡还能接着问，但不会被当成重复请求提议定时。
@@ -189,13 +188,21 @@ describe('结果卡一键续问', () => {
     expect(followUpLabels(next)).toEqual(['给我对外回复', '再详细点']);
   });
 
+  it('「再详细点」那一轮的过程卡与结果卡标题是「详细版」', async () => {
+    const h = await harness();
+    const first = await h.run(event('om_1', '查一下登录为什么慢'));
+    expect(await h.click(callbackOf(h.card(first.final_message_id!), 'ask_detail'), 'ou_alice', first)).toMatchObject({ type: 'success' });
+    const followUp = await h.result(first.final_message_id!);
+    expect(h.cards.get(followUp.final_message_id!)).toMatchObject({ cardKind: 'result', taskName: '详细版' });
+    expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: first.final_message_id, cardKind: 'process', taskName: '详细版' }));
+  });
+
   it('已经发出的老卡片上的「说人话」点了照常提交', async () => {
     const h = await harness();
     const saved = await h.run(event('om_1', '查一下登录为什么慢'));
     const value = { action: 'ask_plain', task_id: 'om_1', turn: String(saved.turn) };
     expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'success' });
-    const echoId = (await h.service.replyText.mock.results[0]!.value).messageId as string;
-    expect((await h.result(echoId)).prompt).toBe(larkCardFollowUpPrompt('ask_plain'));
+    expect((await h.result(saved.final_message_id!)).prompt).toBe(larkCardFollowUpPrompt('ask_plain'));
   });
 
   it('无权限时不提交：白名单外的成员、按发送人隔离的会话里的旁人', async () => {
@@ -203,7 +210,6 @@ describe('结果卡一键续问', () => {
     const saved = await restricted.run(event('om_1', '查一下登录为什么慢'));
     const value = callbackOf(restricted.card(saved.final_message_id!), 'ask_reply');
     expect(await restricted.click(value, 'ou_bob', saved)).toMatchObject({ type: 'warning', content: expect.stringContaining('白名单') });
-    expect(restricted.service.replyText).not.toHaveBeenCalled();
     expect(restricted.prompts).toHaveLength(1);
 
     // 普通群不在话题里时按发送人隔离会话：旁人在原位置发言会进他自己的会话，续问因此只接发起人本人。
@@ -212,9 +218,11 @@ describe('结果卡一键续问', () => {
     expect(flat.scope_id).toBe('user:ou_alice');
     const flatValue = callbackOf(legacy.card(flat.final_message_id!), 'ask_reply');
     expect(await legacy.click(flatValue, 'ou_bob', flat)).toMatchObject({ type: 'warning', content: expect.stringContaining('发起人本人') });
-    expect(legacy.service.replyText).not.toHaveBeenCalled();
+    expect(legacy.prompts).toHaveLength(1);
     expect(await legacy.click(flatValue, 'ou_alice', flat)).toMatchObject({ type: 'success' });
-    expect(legacy.service.replyText).toHaveBeenCalledWith(expect.not.objectContaining({ replyInThread: true }));
+    await vi.waitFor(() => expect(legacy.service.reply.mock.calls.some(([input]: any[]) => input.messageId === flat.final_message_id)).toBe(true));
+    const reply = legacy.service.reply.mock.calls.map(([input]: any[]) => input).find((input: any) => input.messageId === flat.final_message_id);
+    expect(reply).not.toHaveProperty('replyInThread');
   });
 
   it('话题里发过 /new 之后，旧结果卡不再接受续问', async () => {
@@ -224,76 +232,60 @@ describe('结果卡一键续问', () => {
     await h.coordinator.handle(event('om_new', '/new'), h.config);
     await vi.waitFor(async () => expect((await h.runtime.getSession(saved.sessionId))?.state).toBe('stopped'), { timeout: 10_000 });
     expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'warning', content: expect.stringContaining('会话已结束') });
-    expect(h.service.replyText).not.toHaveBeenCalled();
     expect(h.prompts).toHaveLength(1);
   });
 
-  it('重复点击、回调重投与重启后再点，都只提交一轮', async () => {
+  it('重复点击、回调重投与重启后再点，都只提交一轮；一张结果卡只续问一次', async () => {
     const h = await harness();
     const saved = await h.run(event('om_1', '查一下登录为什么慢'));
     const value = callbackOf(h.card(saved.final_message_id!), 'ask_reply');
     const [left, right] = await Promise.all([h.click(value, 'ou_alice', saved), h.click(value, 'ou_alice', saved)]);
     expect([left, right].filter(item => item.type === 'success')).toHaveLength(1);
     expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'warning', content: expect.stringContaining('已经提交过') });
-    const echoId = (await h.service.replyText.mock.results[0]!.value).messageId as string;
-    await h.result(echoId);
-    // 代发的那条消息已被 handle 认领并受理：重启后的 recoverable 不会再重放它。
-    await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get(`lark.inbox.cli_followup.${echoId}`))!).state).toBe('accepted'), { timeout: 10_000 });
+    const anchor = saved.final_message_id!;
+    await h.result(anchor);
+    // 这条消息已被 handle 认领并受理：重启后的 recoverable 不会再重放它。
+    await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get(`lark.inbox.cli_followup.${anchor}`))!).state).toBe('accepted'), { timeout: 10_000 });
 
     await h.restart();
     expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'warning', content: expect.stringContaining('已经提交过') });
-    expect(h.service.replyText).toHaveBeenCalledTimes(1);
     expect(h.prompts).toHaveLength(2);
-    // 同一张卡上的另一个按钮是另一条追问，照常提交。
-    expect(await h.click(callbackOf(h.card(saved.final_message_id!), 'ask_detail'), 'ou_alice', saved)).toMatchObject({ type: 'success' });
-    await vi.waitFor(() => expect(h.prompts).toHaveLength(3), { timeout: 10_000 });
+    // 新一轮锚在这张结果卡上，同一张卡上的另一个按钮也算同一次追问：想再问请在新一轮的结果卡上点。
+    expect(await h.click(callbackOf(h.card(saved.final_message_id!), 'ask_detail'), 'ou_alice', saved)).toMatchObject({ type: 'warning', content: expect.stringContaining('已经提交过') });
+    expect(h.prompts).toHaveLength(2);
   });
 
-  it('上个进程在代发前退出：重启后再点由这次点击接手，只提交一轮', async () => {
+  it('上个进程在登记之前退出：重启后再点由这次点击接手，只提交一轮', async () => {
     const h = await harness();
     const saved = await h.run(event('om_1', '查一下登录为什么慢'));
     const value = callbackOf(h.card(saved.final_message_id!), 'ask_reply');
-    // 第一次点击卡在代发消息上，进程随即退出（dutydeck restart 只等运行中的任务，不等卡片回调）。
-    h.service.replyText.mockImplementationOnce(() => new Promise<never>(() => {}));
+    // 第一次点击认领之后卡在登记上，进程随即退出（dutydeck restart 只等运行中的任务，不等卡片回调）。
+    const seed = vi.spyOn((h.coordinator as any).inbox, 'seed').mockImplementationOnce(() => new Promise<never>(() => {}));
     void h.click(value, 'ou_alice', saved);
-    await vi.waitFor(() => expect(h.service.replyText).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(seed).toHaveBeenCalledTimes(1));
     await h.restart();
 
     expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'success' });
-    expect(h.service.replyText).toHaveBeenCalledTimes(2);
-    // 重做沿用同一个幂等键：上个进程其实已经发出去的话，飞书不会再发第二条。
-    expect(h.service.replyText.mock.calls[1]![0].idempotencyKey).toBe(h.service.replyText.mock.calls[0]![0].idempotencyKey);
-    const echoId = (await h.service.replyText.mock.results[1]!.value).messageId as string;
-    expect((await h.result(echoId)).prompt).toBe(larkCardFollowUpPrompt('ask_reply'));
+    expect((await h.result(saved.final_message_id!)).prompt).toBe(larkCardFollowUpPrompt('ask_reply'));
     expect(h.prompts).toHaveLength(2);
     expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'warning', content: expect.stringContaining('已经提交过') });
     expect(h.prompts).toHaveLength(2);
   });
 
-  it('上个进程代发之后退出：接手沿用那条消息；已登记进 inbox 的不再提交', async () => {
+  it('上个进程登记之后、标记完成之前退出：接手时认出已登记，不提交第二次', async () => {
     const h = await harness();
     const saved = await h.run(event('om_1', '查一下登录为什么慢'));
     const value = callbackOf(h.card(saved.final_message_id!), 'ask_detail');
-    h.service.replyText.mockImplementationOnce(() => new Promise<never>(() => {}));
-    void h.click(value, 'ou_alice', saved);
-    await vi.waitFor(() => expect(h.service.replyText).toHaveBeenCalledTimes(1));
-    await h.restart();
-    // 上个进程已代发出 om_echo_sent 并记进认领，还没来得及登记进 inbox 就退出了。
-    const [row] = await h.repos.config.list!('lark.result_follow_up.cli_followup.');
-    await h.repos.config.set(row!.key, JSON.stringify({ ...JSON.parse(row!.value), message_id: 'om_echo_sent' }));
-
     expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'success' });
-    expect(h.service.replyText).toHaveBeenCalledTimes(1);
-    expect((await h.result('om_echo_sent')).prompt).toBe(larkCardFollowUpPrompt('ask_detail'));
-    await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get('lark.inbox.cli_followup.om_echo_sent'))!).state).toBe('accepted'), { timeout: 10_000 });
+    const anchor = saved.final_message_id!;
+    expect((await h.result(anchor)).prompt).toBe(larkCardFollowUpPrompt('ask_detail'));
+    await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get(`lark.inbox.cli_followup.${anchor}`))!).state).toBe('accepted'), { timeout: 10_000 });
     expect(h.prompts).toHaveLength(2);
 
-    // 登记进 inbox 之后、标记完成之前退出：接手时认出这条消息已经登记，不提交第二次。
     const [done] = await h.repos.config.list!('lark.result_follow_up.cli_followup.');
     await h.repos.config.set(done!.key, JSON.stringify({ ...JSON.parse(done!.value), phase: 'claimed', boot: 'previous-boot' }));
     await h.restart();
     expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'warning', content: expect.stringContaining('已经提交过') });
-    expect(h.service.replyText).toHaveBeenCalledTimes(1);
     expect(h.prompts).toHaveLength(2);
   });
 });

@@ -123,7 +123,10 @@ describe('Feishu controls with real Runtime, SQLite and PTY driver', () => {
     expect(card.capabilities).not.toHaveProperty('canRelaunch');
     expect(card.markdown).not.toContain('在新会话中');
     expect(card.markdown).toContain('管理员可以用 `dutydeck recovery` 命令核对');
-    expect(JSON.stringify(buildLarkCard(card))).toContain('排队等待');
+    // 排队受阻显示为「中断」；没有停下的时刻就不写时长，不再显示一直累加的「排队等待」。
+    const blocked = buildLarkCard(card) as any;
+    expect(blocked.header.text_tag_list[0].text.content).toBe('中断');
+    expect(JSON.stringify(blocked)).not.toContain('排队等待');
     const status = await (coordinator as any).describeChatStatus(config, h.session.id);
     expect(status).toContain('需要核对');
     expect(status).toContain('排队受阻');
