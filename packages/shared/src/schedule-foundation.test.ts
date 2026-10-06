@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   archivedHammerIntegrationSchema,
   buildScheduleTaskRunIntent,
+  describeScheduleTrigger,
   previewNextSchedule,
   scheduleDefinitionSchema,
   scheduleGenerationSchema,
   scheduleOccurrenceSchema,
   scheduleReadiness,
+  scheduleTriggerPeriod,
   type ScheduleDefinition
 } from './schedule-foundation.js';
 
@@ -68,5 +70,34 @@ describe('Schedule foundation safety contracts', () => {
     });
     expect(hammer.executorState).toBe('unavailable');
     expect(() => archivedHammerIntegrationSchema.parse({ ...hammer, executorState: 'available', arbitraryConfig: {} })).toThrow();
+  });
+});
+
+describe('describeScheduleTrigger', () => {
+  const cron = (expression: string, timezone = 'Asia/Shanghai') => describeScheduleTrigger({ kind: 'cron', expression }, timezone);
+  it('writes common cron rules in plain Chinese', () => {
+    expect(cron('0 18 * * 1-5')).toBe('工作日每天 18:00');
+    expect(cron('30 9 * * *')).toBe('每天 09:30');
+    expect(cron('0 9,18 * * *')).toBe('每天 09:00、18:00');
+    expect(cron('0 10 * * 1,3')).toBe('每周一、三 10:00');
+    expect(cron('0 10 * * 6,0')).toBe('周末每天 10:00');
+    expect(cron('0 9 1,15 * *')).toBe('每月 1、15 日 09:00');
+    expect(cron('*/30 * * * *')).toBe('每天每 30 分钟');
+    expect(cron('0 */2 * * 1-5')).toBe('工作日每 2 小时整点');
+    expect(cron('0 18 * * 1-5', 'America/New_York')).toBe('工作日每天 18:00（时区 America/New_York）');
+  });
+  it('keeps unrecognised cron text instead of guessing', () => {
+    expect(cron('0 9 1 * 1')).toBe('按 cron「0 9 1 * 1」');
+    expect(cron('0-59/5 0-23/2 * * *')).toContain('cron');
+  });
+  it('describes one-off and interval triggers and picks the period word for an empty result', () => {
+    expect(describeScheduleTrigger({ kind: 'at', localDateTime: '2026-10-07T09:00:00' }, 'Asia/Shanghai')).toBe('2026-10-07 09:00 执行一次');
+    expect(describeScheduleTrigger({ kind: 'interval', everySeconds: 1800, anchorAt: timestamp })).toBe('每 30 分钟');
+    expect(describeScheduleTrigger({ kind: 'interval', everySeconds: 7200, anchorAt: timestamp })).toBe('每 2 小时');
+    expect(describeScheduleTrigger({ kind: 'interval', everySeconds: 86_400, anchorAt: timestamp })).toBe('每天');
+    expect(scheduleTriggerPeriod({ kind: 'cron', expression: '0 18 * * 1-5' })).toBe('今天');
+    expect(scheduleTriggerPeriod({ kind: 'cron', expression: '0 18 * * 5' })).toBe('本周');
+    expect(scheduleTriggerPeriod({ kind: 'cron', expression: '0 9 1 * *' })).toBe('本月');
+    expect(scheduleTriggerPeriod({ kind: 'interval', everySeconds: 600, anchorAt: timestamp })).toBe('这段时间');
   });
 });

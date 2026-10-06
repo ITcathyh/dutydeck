@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { ZodError } from 'zod';
 import { createRepositories } from '@dutydeck/storage';
 import { RuntimeError, type Session } from '@dutydeck/shared';
@@ -16,7 +16,7 @@ import { runCollaboration } from './collaboration-cli.js';
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0)) await close(); });
 const scope = { appId: 'cli_one', chatId: 'oc_one' };
-async function fixture() {
+async function fixture(extra: { confirmMandate?: NonNullable<Parameters<typeof registerCollaborationRoutes>[1]['confirmMandate']> } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'collaboration-routes-'));
   const repos = createRepositories(join(directory, 'test.db'));
   const now = new Date().toISOString();
@@ -33,7 +33,7 @@ async function fixture() {
   const app = Fastify();
   app.setErrorHandler((error, _request, reply) => reply.code(error instanceof ZodError ? 400 : (error as RuntimeError).statusCode ?? 500).send({ error: { code: (error as RuntimeError).code, message: error.message } }));
   await registerCollaborationRoutes(app, { service, runtime, tools, authorizeManagement: async request => request.headers.authorization === 'Bearer management' ? 'owner' : undefined,
-    bootstrap: async () => {}, extensions: new CollaborationExtensions({ repository: repos.collaboration, authorize }), evaluation: new CollaborationEvaluation({ repository: repos.collaboration, evaluate: async () => ({ action: 'silent', reason: '', evidenceIds: [] }) }) });
+    bootstrap: async () => {}, extensions: new CollaborationExtensions({ repository: repos.collaboration, authorize }), evaluation: new CollaborationEvaluation({ repository: repos.collaboration, evaluate: async () => ({ action: 'silent', reason: '', evidenceIds: [] }) }), ...extra });
   cleanups.push(async () => { capabilities.close(); await app.close(); repos.close(); await rm(directory, { recursive: true, force: true }); });
   const headers = () => ({ authorization: `Bearer ${env.dutydeck_group_tools_token}`, 'x-dutydeck-work-turn': capabilities.workbenchTurnToken(session.id, taskId) });
   return { repos, app, env, headers, capabilities, changeTask() { taskId = 'task-two'; }, endTask() { actorId = undefined; } };
@@ -93,4 +93,18 @@ it('sends CLI requests with the active turn and stable create id through the rea
   expect(await runCollaboration('followup-create', undefined, options)).toEqual(first);
   await expect(runCollaboration('followup-create', undefined, { ...options, json: '{"goal":"missing id"}' })).rejects.toThrow('稳定 id');
   await expect(runCollaboration('followup-create', undefined, { ...options, turn: 'stale' })).rejects.toMatchObject({ statusCode: 403 });
+});
+
+it('routes agent mandate creation to the confirmation card instead of creating it, while the management route still creates immediately', async () => {
+  const confirmMandate = vi.fn(async () => ({ pendingConfirmation: true, message: '已发确认卡，等用户确认后生效。' }));
+  const f = await fixture({ confirmMandate });
+  const body = { id: 'daily', goal: '每天总结', mode: 'agent', prompt: '总结', trigger: { kind: 'cron', expression: '0 18 * * 1-5' }, timezone: 'Asia/Shanghai' };
+  const response = await f.app.inject({ method: 'POST', url: '/api/lark/agent-tools/collaboration/mandates', headers: f.headers(), payload: body });
+  expect(response.statusCode).toBe(200);
+  expect(response.json()).toMatchObject({ pendingConfirmation: true, message: expect.stringContaining('已发确认卡') });
+  expect(confirmMandate).toHaveBeenCalledWith(scope, 'ou_alice', expect.objectContaining({ goal: '每天总结', id: expect.not.stringMatching(/^daily$/) }), {});
+  expect(await f.repos.collaboration.listMandates(scope)).toEqual([]);
+  // Web 管理端是用户自己在页面操作，不走确认卡；这里只验证没有被拦到确认流程。
+  await f.app.inject({ method: 'POST', url: '/api/lark/groups/cli_one/oc_one/collaboration/mandates', headers: { authorization: 'Bearer management' }, payload: body });
+  expect(confirmMandate).toHaveBeenCalledOnce();
 });
