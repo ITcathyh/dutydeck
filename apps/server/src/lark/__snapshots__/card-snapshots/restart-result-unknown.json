@@ -154,7 +154,7 @@
             "elements": [
               {
                 "tag": "markdown",
-                "content": "**结果未知**\n\n服务重启打断了这一轮，执行结果未知。这一轮执行过 git push，可能已产生外部副作用，没有自动重投。确认再做一次不会重复造成影响后点「重新执行」，不再需要就点「放弃」。原任务已保留，可在 Web 详情里核对。\n\n发送 `/status` 查看最新状态。",
+                "content": "**结果未知**\n\n上一轮因服务重启中断，不确定是否做完。这一轮执行过 git push，可能已经对外生效，所以没有自动继续。可以点「在原对话继续」让 Agent 接着做；确认再做一遍不会重复造成影响，可以点「重新执行」；不需要了就点「放弃」。\n\n发送 `/status` 查看最新状态。",
                 "text_align": "left",
                 "text_size": "normal_v2",
                 "margin": "0px"
@@ -179,6 +179,38 @@
                         "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
                         "text_size": "notation",
                         "margin": "0px"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "在原对话继续"
+                        },
+                        "type": "primary_text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "reply_outlined",
+                          "color": "blue"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "continue_in_place",
+                              "task_id": "om_in_1",
+                              "turn": "1"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "continue_in_place"
                       }
                     ]
                   },

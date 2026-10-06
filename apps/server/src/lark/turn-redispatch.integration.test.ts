@@ -190,7 +190,7 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     await until(() => h.prompts.length === 2);
     const replay = h.prompts[1]!;
     expect(replay.sessionId).toBe(sessionId);
-    for (const phrase of ['[Dutydeck 重启恢复 · 系统说明]', '服务重启打断了上一轮', '请从停下处继续', '重复任何对外操作', '第 1/2 次自动重投', '整理本周报警并回复群里']) {
+    for (const phrase of ['[Dutydeck 重启恢复 · 系统说明]', '服务刚才重启，请从中断处继续，不要重复已经完成的操作。', '先检查上一轮是不是已经做过', '整理本周报警并回复群里']) {
       expect(replay.prompt).toContain(phrase);
     }
     expect(replay.prompt.indexOf('[Dutydeck 重启恢复 · 系统说明]')).toBeLessThan(replay.prompt.indexOf('[用户请求]'));
@@ -205,13 +205,13 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     await until(() => h.lastUpdate(oldCardId)?.statusLabel === '结果未知');
     const oldCard = h.lastUpdate(oldCardId);
     expect(oldCard).toMatchObject({ state: 'reconcile_required', readOnly: true, sessionId });
-    expect(oldCard.markdown).toContain('已自动重投（第 1/2 次）');
-    expect(oldCard.markdown).toContain('在原会话中继续');
+    expect(oldCard.markdown).toContain('服务更新中断，已自动继续（第 1/2 次）');
+    expect(oldCard.markdown).toContain('已在原对话里接着做');
     expect(callbackButtonCount(oldCard)).toBe(0);
-    expect(h.current().service.reply).toHaveBeenCalledWith(expect.objectContaining({ turn: 2, markdown: expect.stringContaining('第 1/2 次自动重投') }));
+    expect(h.current().service.reply).toHaveBeenCalledWith(expect.objectContaining({ turn: 2, markdown: expect.stringContaining('服务更新中断，已自动继续（第 1/2 次）') }));
     expect(await h.inbox()).toMatchObject({ turn: 2, redispatch: { count: 1, resumed: true, auto: true } });
     expect((await h.mapping()).saved).toMatchObject({ turn: 2, earlier_message_ids: expect.arrayContaining([oldCardId]) });
-    expect(await h.timelineNotes(sessionId)).toEqual([expect.stringContaining('已自动重投（第 1/2 次）')]);
+    expect(await h.timelineNotes(sessionId)).toEqual([expect.stringContaining('已自动继续（第 1/2 次）')]);
 
     // 再对账、再重启：这一轮已经完成，不会再发第三次。
     await h.current().coordinator.reconcile(h.config);
@@ -230,13 +230,14 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     await until(() => h.prompts.length === 2);
     const replay = h.prompts[1]!;
     expect(replay.sessionId).not.toBe(sessionId);
-    for (const phrase of ['[Dutydeck 重启恢复 · 系统说明]', '原会话无法恢复', '之前的动作可能已经生效', '第 1/2 次自动重投', '整理本周报警并回复群里']) {
+    for (const phrase of ['[Dutydeck 重启恢复 · 系统说明]', '原会话无法恢复', '之前的动作可能已经生效', '整理本周报警并回复群里']) {
       expect(replay.prompt).toContain(phrase);
     }
-    expect(replay.prompt).not.toContain('请从停下处继续');
+    expect(replay.prompt).not.toContain('请从中断处继续');
     expect(await h.inbox()).toMatchObject({ turn: 2, sessionId: replay.sessionId, redispatch: { count: 1, resumed: false, auto: true } });
     await until(() => h.lastUpdate(oldCardId)?.statusLabel === '结果未知');
-    expect(h.lastUpdate(oldCardId).markdown).toContain('已自动重投（第 1/2 次），原会话无法恢复，已在本话题的新会话中重新执行');
+    expect(h.lastUpdate(oldCardId).markdown).toContain('服务更新中断，已自动继续（第 1/2 次）');
+    expect(h.lastUpdate(oldCardId).markdown).toContain('原对话无法恢复，已在本话题的新会话中重新执行');
     expect(callbackButtonCount(h.lastUpdate(oldCardId))).toBe(0);
     expect((await h.mapping()).sessionId).toBe(replay.sessionId);
     // 旧一轮没记上，原样留给管理员核对；新会话这一轮照常跑完，之后不再重投。
@@ -251,11 +252,11 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     h.agentState.hang = false;
     await h.restartAged(h.minutesEarlier(59));
     await until(() => h.prompts.length === 2);
-    expect(h.prompts[1]!.prompt).toContain('第 1/2 次自动重投');
+    expect(h.prompts[1]!.prompt).toContain('服务刚才重启，请从中断处继续');
     expect(await h.inbox()).toMatchObject({ turn: 2, redispatch: { count: 1, resumed: true, auto: true } });
   });
 
-  it('最后一次活动超过 60 分钟：不自动重投，停在结果未知，说明中断时间较早并给「重新执行」「放弃」；重新执行照常可用', async () => {
+  it('最后一次活动超过 60 分钟：不自动重投，停在结果未知，说明中断时间较早并给「在原对话继续」「重新执行」「放弃」；重新执行照常可用', async () => {
     const h = await interruptedTopic({ tools: [{ type: 'tool_call', data: { id: 'call_read', name: 'Read', status: 'completed', input: { file_path: '/work/alerts.md' } } }] });
     h.agentState.hang = false;
     const daemon = await h.restartAged(h.minutesEarlier(61));
@@ -267,16 +268,18 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     expect(h.prompts).toHaveLength(1);
     const card = h.lastUpdate(cardId);
     expect(card).toMatchObject({ state: 'reconcile_required', readOnly: false, capabilities: expect.objectContaining({ canReplay: true }) });
-    expect(card.markdown).toContain('中断时间较早，没有自动重投');
+    expect(card.markdown).toContain('上一轮因服务重启中断，不确定是否做完。中断已经超过 1 小时，所以没有自动继续。');
+    expect(card.capabilities).toMatchObject({ canContinueInPlace: true });
     const rendered = JSON.stringify(buildLarkCard(card));
-    for (const phrase of ['重新执行', '放弃']) expect(rendered).toContain(phrase);
-    expect(await h.timelineNotes(sessionId)).toEqual([expect.stringContaining('中断时间较早，没有自动重投')]);
+    for (const phrase of ['在原对话继续', '重新执行', '放弃']) expect(rendered).toContain(phrase);
+    expect(await h.timelineNotes(sessionId)).toEqual([expect.stringContaining('中断已经超过 1 小时，所以没有自动继续')]);
     expect(JSON.parse(await daemon.repos.config.get('lark.redispatch.app.om_first.1') ?? '{}')).toMatchObject({ phase: 'held', redispatch: { count: 0, stale: 'old' } });
 
     const value = callbackValueOf(card, 'replay_turn');
     expect(await daemon.coordinator.handleAction(value, 'ou_alice', { messageId: cardId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
     await until(() => h.prompts.length === 2);
-    expect(h.prompts[1]).toMatchObject({ sessionId, prompt: expect.stringContaining('按「重新执行」重投') });
+    expect(h.prompts[1]).toMatchObject({ sessionId, prompt: expect.stringContaining('服务刚才重启，请从中断处继续') });
+    await until(() => h.lastUpdate(cardId)?.markdown?.includes('已按「重新执行」重新执行'));
   });
 
   it('这一轮的时间取不到：按不自动重投处理', async () => {
@@ -288,7 +291,7 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     await until(() => h.lastUpdate(cardId)?.statusLabel === '结果未知');
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(h.prompts).toHaveLength(1);
-    expect(h.lastUpdate(cardId).markdown).toContain('无法确认中断时间，没有自动重投');
+    expect(h.lastUpdate(cardId).markdown).toContain('不知道是什么时候中断的，所以没有自动继续');
     expect(h.lastUpdate(cardId).capabilities).toMatchObject({ canReplay: true });
     expect(JSON.parse(await daemon.repos.config.get('lark.redispatch.app.om_first.1') ?? '{}')).toMatchObject({ phase: 'held', redispatch: { stale: 'unknown' } });
   });
@@ -301,7 +304,7 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     await h.restart();
     await until(() => h.prompts.length === 3);
     await h.accepted(3);
-    expect(h.prompts[2]!.prompt).toContain('第 2/2 次自动重投');
+    expect(await h.inbox()).toMatchObject({ turn: 3, redispatch: { count: 2, auto: true } });
 
     const daemon = await h.restart();
     const { sessionId, saved } = await h.mapping();
@@ -312,10 +315,10 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     const card = h.lastUpdate(cardId);
     expect(card).toMatchObject({ state: 'reconcile_required', readOnly: false, capabilities: expect.objectContaining({ canReplay: true }) });
     expect(card.capabilities.canRelaunch).toBeUndefined();
-    expect(card.markdown).toContain('已重投 2 次仍被重启打断，不再自动重投');
+    expect(card.markdown).toContain('已经自动继续 2 次仍被重启打断，不再自动继续');
     const rendered = JSON.stringify(buildLarkCard(card));
-    for (const phrase of ['重新执行', '放弃']) expect(rendered).toContain(phrase);
-    expect(await h.timelineNotes(sessionId)).toContainEqual(expect.stringContaining('已重投 2 次仍被重启打断'));
+    for (const phrase of ['在原对话继续', '重新执行', '放弃']) expect(rendered).toContain(phrase);
+    expect(await h.timelineNotes(sessionId)).toContainEqual(expect.stringContaining('已经自动继续 2 次仍被重启打断'));
     // 对账反复跑也只停在这里，不会偷偷再投。
     await daemon.coordinator.reconcile(h.config);
     expect(h.prompts).toHaveLength(3);
@@ -348,7 +351,7 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(h.prompts).toHaveLength(1);
     const card = h.lastUpdate(cardId);
-    expect(card.markdown).toContain('这一轮执行过 git push，可能已产生外部副作用，没有自动重投');
+    expect(card.markdown).toContain('这一轮执行过 git push，可能已经对外生效，所以没有自动继续');
     expect(card.markdown).not.toContain('origin master');
     expect(card.capabilities).toMatchObject({ canReplay: true });
     // 旧一轮原样留着：没有被记成失败，也没有被记成结果未知以外的任何东西。
@@ -367,9 +370,9 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     const results = await Promise.all([1, 2].map(() => daemon.coordinator.handleAction(value, 'ou_bob', context)));
     expect(results.filter(result => result?.type === 'success')).toHaveLength(1);
     await until(() => h.prompts.length === 2);
-    expect(h.prompts[1]).toMatchObject({ sessionId, prompt: expect.stringContaining('按「重新执行」重投') });
-    expect(h.prompts[1]!.prompt).toContain('请从停下处继续');
-    await until(() => h.lastUpdate(cardId)?.markdown?.includes('已按「重新执行」重投'));
+    expect(h.prompts[1]).toMatchObject({ sessionId, prompt: expect.stringContaining('服务刚才重启，请从中断处继续') });
+    expect(h.prompts[1]!.prompt).toContain('整理本周报警并回复群里');
+    await until(() => h.lastUpdate(cardId)?.markdown?.includes('已按「重新执行」重新执行'));
     expect(callbackButtonCount(h.lastUpdate(cardId))).toBe(0);
     expect(await h.inbox()).toMatchObject({ turn: 2, event: { senderOpenId: 'ou_bob' }, redispatch: { count: 1, auto: false } });
     expect(await daemon.coordinator.handleAction(value, 'ou_bob', context)).toMatchObject({ type: 'warning' });

@@ -89,9 +89,11 @@ describe.runIf(existsSync('/proc/self/stat'))('ACP idle cancellation with a real
     const outcome = await adapter.send(prompt).then(() => 'resolved', error => error);
     return { elapsed: Date.now() - started, outcome, events };
   };
-  const cancelled = (result: Awaited<ReturnType<typeof run>>) => result.outcome === 'resolved'
-    ? result.events.some(event => event.type === 'completed' && event.data.stopReason === 'cancelled')
-    : (result.outcome as { code?: string }).code === 'AGENT_IDLE_TIMEOUT';
+  // 无进展超时按失败结束（不是用户中断）：取消确认时 completed 的 stopReason 是 idle_timeout，两种收尾都先发原因码 error。
+  const cancelled = (result: Awaited<ReturnType<typeof run>>) => result.events.some(event => event.type === 'error' && event.data.code === 'AGENT_IDLE_TIMEOUT')
+    && (result.outcome === 'resolved'
+      ? result.events.some(event => event.type === 'completed' && event.data.stopReason === 'idle_timeout')
+      : (result.outcome as { code?: string }).code === 'AGENT_IDLE_TIMEOUT');
 
   it('lets a CPU-busy tool run past the timeout and cancels it at the hard limit', async () => {
     const result = await run('busy tool');

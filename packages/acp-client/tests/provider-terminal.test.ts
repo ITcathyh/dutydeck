@@ -29,7 +29,8 @@ describe('typed provider terminal failure through real ACP and Runtime', () => {
     } finally { await adapter.stop(); await rm(cwd, { recursive: true, force: true }); }
   });
 
-  it('settles heartbeat-only timeout as interrupted only after a real cancelled prompt response', async () => {
+  // 无进展超时不是用户中断：真实的取消响应回来后按失败结算，原因码 AGENT_IDLE_TIMEOUT 带分钟数留在 error 事件里。
+  it('settles heartbeat-only timeout as an idle-timeout failure only after a real cancelled prompt response', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-provider-cancel-'));
     const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0 });
@@ -37,8 +38,10 @@ describe('typed provider terminal failure through real ACP and Runtime', () => {
     try {
       await runtime.initialize([agent]); const session = await runtime.start({ agentId: agent.id });
       const task = await runtime.send(session.id, 'heartbeat');
-      expect(task.status).toBe('interrupted');
-      expect(repos.execution.getTaskExecution(task.id)?.currentAttempt).toMatchObject({ state: 'settled', outcome: 'interrupted', settlement: { stopReason: 'cancelled' } });
+      expect(task.status).toBe('failed');
+      expect(repos.execution.getTaskExecution(task.id)?.currentAttempt).toMatchObject({ state: 'settled', outcome: 'failed', settlement: { stopReason: 'idle_timeout' } });
+      expect((await runtime.getEvents(session.id)).filter(event => event.type === 'error').map(event => event.data))
+        .toEqual([{ message: '1 分钟没有任何输出，已停止', code: 'AGENT_IDLE_TIMEOUT', timeoutMinutes: 1, retryable: true }]);
       expect((await runtime.send(session.id, 'normal')).status).toBe('completed');
     } finally { await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); }
   });

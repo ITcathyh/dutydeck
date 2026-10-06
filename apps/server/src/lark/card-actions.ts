@@ -22,7 +22,7 @@ export type LarkCardElement = Record<string, any>;
  * 回调型操作。查看详情平时是直接打开 webUrl 的链接，不是回调；
  * 只有 Web 要求登录时才是回调 detail（服务端给管理员私信一次性登录链接）。
  */
-export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify' | 'use_verification_command' | 'run_in_new_session' | 'rerun_in_new_session' | 'replay_turn' | 'abandon_turn' | 'ask_plain' | 'ask_reply' | 'ask_detail' | 'schedule_daily' | 'detail'
+export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify' | 'use_verification_command' | 'run_in_new_session' | 'rerun_in_new_session' | 'continue_in_place' | 'replay_turn' | 'abandon_turn' | 'ask_plain' | 'ask_reply' | 'ask_detail' | 'schedule_daily' | 'detail'
   | 'steer_promote'
   | 'steer_inject';
 
@@ -64,6 +64,11 @@ export interface LarkCardCapabilities {
    * coordinator 持有这一轮的重投记录时才置位，缺省即不给按钮。
    */
   canReplay?: boolean;
+  /**
+   * 「在原对话继续」：在原来的会话里发一句「接着做」，不重放原请求。给结果未知停下的一轮、无进展超时停下的一轮，
+   * 以及排在结果未知那一轮后面的排队消息（先把那一轮记为结果未知，再让这条在原对话里继续）。缺省即不给按钮。
+   */
+  canContinueInPlace?: boolean;
   /**
    * 结果卡的一键续问（给我对外回复 / 再详细点）。coordinator 确认会话仍可续聊、
    * 去重键能落库时才置位；缺省即不给按钮。
@@ -125,7 +130,7 @@ const clockTime = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 /** 转到新会话的两个按钮文案。task-recovery.ts 的恢复说明引用同一份常量，正文里提到的按钮名与卡上一致。 */
 export const larkRelaunchLabels = { run_in_new_session: '在新会话中执行', rerun_in_new_session: '在新会话中重新执行' } as const;
 /** 重启切断那一轮的两个按钮文案，task-recovery.ts 的说明引用同一份。 */
-export const larkReplayLabels = { replay_turn: '重新执行', abandon_turn: '放弃' } as const;
+export const larkReplayLabels = { continue_in_place: '在原对话继续', replay_turn: '重新执行', abandon_turn: '放弃' } as const;
 
 type LarkCardActionDefinition = {
   action: LarkCardActionName;
@@ -317,6 +322,19 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     states: ['reconcile_required', 'legacy_unresolved'],
     capable: capabilities => capabilities.canRelaunch === true,
     primary: false
+  },
+  {
+    action: 'continue_in_place',
+    elementId: 'continue_in_place',
+    label: larkReplayLabels.continue_in_place,
+    hint: '在原来的会话里让 Agent 接着做，不重新发送原请求',
+    buttonType: 'primary_text',
+    icon: 'reply_outlined',
+    states: ['queued', 'reconcile_required', 'failed', 'interrupted'],
+    capable: capabilities => capabilities.canContinueInPlace === true,
+    primary: false,
+    // 结果卡上的结论不变，只是在同一会话开下一轮，与续问同口径。
+    readOnlyReceipt: true
   },
   {
     action: 'replay_turn',
