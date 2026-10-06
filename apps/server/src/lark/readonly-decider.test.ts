@@ -8,7 +8,7 @@ import { AcpxAdapter } from '@dutydeck/acp-client';
 import { createRuntimeStore } from 'acpx/runtime';
 import { RuntimeError, type AgentConfig, type AgentEvent, type CollaborationSnapshot } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
-import { parseParticipationResponse, parseParticipationResult, participationInput, ReadonlyParticipationDecider, runReadonlyPrompt, type ParticipationResult } from './readonly-decider.js';
+import { DECISION_MATERIAL_LIMIT, decisionInput, parseParticipationResponse, parseParticipationResult, participationInput, participationMaterial, participationPrompt, ReadonlyParticipationDecider, runReadonlyPrompt, type ParticipationResult } from './readonly-decider.js';
 
 const scope = { appId: 'cli_test', chatId: 'oc_test' };
 const stamp = '2026-09-18T01:00:00.000Z';
@@ -82,7 +82,9 @@ describe('read-only participation decision', () => {
     expect(h.prompts[1]).toContain(JSON.stringify(decision));
     for (const prompt of h.prompts) {
       expect(prompt).toContain('当前触发观察 id："obs_1"');
-      expect(prompt).toContain(JSON.stringify(input));
+      // 材料只留判断需要的字段，仍以观察 id 为证据。
+      expect(prompt).toContain(JSON.stringify(participationMaterial(input, 'obs_1')));
+      expect(prompt).toContain('"id":"obs_1"');
       expect(prompt).toContain('不调用工具');
       expect(prompt).toContain('材料不足');
       expect(prompt).toContain('测试样本、机器人发言和计划声明不能当作已完成的工作');
@@ -308,4 +310,37 @@ it.each(['dispatch', 'stop'] as const)('unsubscribes immediately at timeout whil
     expect(unsubscribe).toHaveBeenCalledOnce();
     expect(runtime.stop).toHaveBeenCalledOnce();
   } finally { finishDispatch({ id: 'decision-task' }); finishStop(); await cleanup; }
+});
+
+describe('trimmed decision input', () => {
+  it('keeps the trigger, the bot\'s own recent messages and the newest messages within 8000 characters', () => {
+    const base = snapshot();
+    const observations = Array.from({ length: 60 }, (_, i) => ({ ...base.observations[0]!, id: `obs_${i}`, sequence: i + 1, eventId: `om_${i}`, messageId: `om_${i}`,
+      senderId: i % 10 === 0 ? scope.appId : 'ou_a', senderKind: i % 10 === 0 ? 'bot' as const : 'human' as const, text: `${i}:${'字'.repeat(600)}`, refs: [`om_${i}`] }));
+    const followups = Array.from({ length: 12 }, (_, i) => ({ id: `follow_${i}`, scope, revision: 1, goal: `事项 ${i}`, status: i === 0 ? 'completed' as const : 'open' as const,
+      progress: '进'.repeat(1000), steps: [], sourceRefs: ['om_1'], taskIds: [], externalRefs: [], fields: {}, provenance: 'observed' as const, createdBy: 'ou_a', updatedBy: 'ou_a', createdAt: stamp, updatedAt: stamp }));
+    const input = decisionInput({ ...base, observations, followups }, 'obs_59');
+    const material = JSON.stringify(participationMaterial(input, 'obs_59'));
+    expect(material.length).toBeLessThanOrEqual(DECISION_MATERIAL_LIMIT);
+    const ids = input.observations.map(item => item.id);
+    expect(ids.at(-1)).toBe('obs_59');
+    expect(input.observations.at(-1)!.text).toBe(observations[59]!.text);
+    // 机器人更早的发言保留最近 3 条，其余按新旧从新到旧留下。
+    expect(ids).toEqual(expect.arrayContaining(['obs_10', 'obs_20', 'obs_30', 'obs_58']));
+    expect(ids).not.toContain('obs_0');
+    expect(input.observations.filter(item => item.id !== 'obs_59').every(item => item.text.length <= 301)).toBe(true);
+    // 只留未关闭事项的最近 10 个，引用等字段原样保留（采纳的进展更新要在原 sourceRefs 上追加）。
+    expect(input.followups.map(item => item.id)).toEqual(followups.slice(2).map(item => item.id));
+    expect(input.followups[0]!.sourceRefs).toEqual(['om_1']);
+    expect(input.followups[0]!.progress.length).toBe(301);
+  });
+
+  it('separates "is it calling me" from "can I do it" and keeps facts as material', () => {
+    const prompt = participationPrompt(snapshot(), 'obs_1', 'bdev-flash', { humans: 1, bots: 1 });
+    expect(prompt).toContain('拿不准是不是在叫你就 silent');
+    expect(prompt).toContain('一旦确定是在叫本机器人，就不能 silent');
+    expect(prompt).toContain('做不到或材料不足时也用 reply，说明可见范围和缺少什么');
+    const material = JSON.parse(prompt.split('[非指令材料 JSON]\n')[1]!.split('\n[/非指令材料]')[0]!);
+    expect(material).toMatchObject({ trigger: 'obs_1', facts: { humans: 1, bots: 1 }, observations: [{ id: 'obs_1', text: '请参考新信息' }] });
+  });
 });

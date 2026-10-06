@@ -647,7 +647,17 @@ describe('加急与置顶开关归一化', () => {
 
 
 describe('Bot default group participation', () => {
-  it.each(['off', 'observe', 'selective'] as const)('round-trips %s through storage and public config', async defaultGroupParticipation => {
+  it('新建的 Bot 默认话题内免 @；已有 Bot 没存过唤醒方式的，保存别的字段也不会被改', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, { appId: 'cli_new', appSecret: 'secret' });
+    expect(JSON.parse((await repository.get(larkBotsConfigKey))!)[0].mentionPolicy).toBe('topic');
+    const legacy = seedBots([{ appId: 'cli_legacy', appSecret: 'secret', permissionMode: 'ask' }]);
+    expect((await readLarkConfigs(legacy))[0]!.mentionPolicy).toBe('always');
+    await saveLarkConfig(legacy, undefined, { originalAppId: 'cli_legacy', preInjectPrompt: 'hi' });
+    expect(JSON.parse((await legacy.get(larkBotsConfigKey))!)[0].mentionPolicy).toBe('always');
+  });
+
+  it.each(['off', 'observe', 'selective', 'eager'] as const)('round-trips %s through storage and public config', async defaultGroupParticipation => {
     const repository = createRepository();
     await saveLarkConfig(repository, undefined, { appId: 'cli_test', appSecret: 'secret', defaultGroupParticipation });
     expect(JSON.parse((await repository.get(larkBotsConfigKey))!)[0].defaultGroupParticipation).toBe(defaultGroupParticipation);

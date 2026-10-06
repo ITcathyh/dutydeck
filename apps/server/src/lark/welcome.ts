@@ -8,11 +8,12 @@
 //    硬约束是「同一 chat 重启/重复事件不重发」，发卡失败的代价（少一次欢迎）小于重发打扰。
 // 4. 本模块不 import service.ts（网络层），发送动作由调用方以 send 回调注入。
 
+import { participationLevelLabels, participationLevelOf } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 
 export type WelcomeRouting = Pick<StoredLarkConfig, 'mentionPolicy' | 'p2pMode' | 'groupReplyMode'> & {
   chatMode?: 'group' | 'topic' | 'p2p';
-  participation?: 'off' | 'observe' | 'selective';
+  participation?: 'off' | 'observe' | 'selective' | 'eager';
   unavailableReason?: string;
   /**
    * 本群所有成员都能让机器人执行任务（托管群 access=all_chat_members/值班，
@@ -88,13 +89,19 @@ export function buildWelcomeCardContent(input: {
     const policy = routing?.mentionPolicy ?? 'always';
     const direct = policy === 'never' || policy === 'ambient';
     const trigger = direct ? '' : '@我 ';
+    const participation = routing?.participation ?? 'off';
+    // 参与强度由唤醒方式和群参与模式合成，卡上先写档位，再写具体怎么叫我。
+    const level = participationLevelLabels[participationLevelOf(policy, participation)];
+    const topicLine = policy === 'topic' ? '在我已接手的原任务话题内续聊可直接回复。' : '';
     const usage = [
       ...(routing?.unavailableReason ? [`当前尚不能执行任务：${routing.unavailableReason} 请管理员确认群配置生效后，再使用下面的示例。`] : []),
-      routing?.participation === 'selective' ? '本群已开启 **Tag 按需参与**：普通消息会先判断是否需要回复，决定回复时会添加 **OK** 处理标记。明确需要我执行任务时，可以 **@我**。'
-        : routing?.participation === 'observe' ? '本群普通消息只会被观察，不会自动回复。明确需要我执行任务时，可以 **@我**。'
-        : policy === 'always' ? '每条任务消息和续聊都需要 **@我**。'
-        : policy === 'topic' ? '新任务先 **@我**；在我已接手的原任务话题内续聊可直接回复。'
-        : '本群普通消息也会触发任务；请直接发送完整请求。其他机器人仍需明确 @我。',
+      participation === 'selective' ? `本群参与强度：**按需**（Tag 按需参与）。没 @我 的普通消息会先判断是否需要回复（是不是在叫我），决定回复时会添加 **OK** 处理标记。${topicLine}明确需要我执行任务时，可以 **@我**。`
+        : participation === 'eager' ? `本群参与强度：**积极**。除了明显是对别人说的、只有表情或致谢的消息，群里的消息我都会接，不用 @我。${topicLine}`
+        : participation === 'observe' ? '本群普通消息只会被观察，不会自动回复。明确需要我执行任务时，可以 **@我**。'
+        : policy === 'always' ? `本群参与强度：**${level}**。每条任务消息和续聊都需要 **@我**。`
+        : policy === 'topic' ? `本群参与强度：**${level}**。新任务先 **@我**；在我已接手的原任务话题内续聊可直接回复。`
+        : `本群参与强度：**${level}**。本群普通消息也会触发任务；请直接发送完整请求。其他机器人仍需明确 @我。`,
+      '想调整接话方式，可以 @我 说「积极点」「按需」「话题里不用@」或「只在@时回」，有权限的人点确认后生效。',
       `例如：\`${trigger}帮我查看项目状态\`；帮助：\`${trigger}/help\`。`,
       routing?.chatMode === 'topic' || ['new-topic', 'chat-topic'].includes(routing?.groupReplyMode ?? '')
         ? '继续任务请回原任务话题回复；新任务请另发顶层消息。'

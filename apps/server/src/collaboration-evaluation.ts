@@ -1,5 +1,9 @@
 import {
   collaborationSnapshotSchema,
+  DECIDER_META_KEY,
+  deciderMetaOf,
+  feedbackLabelOf,
+  type CollaborationDeciderMeta,
   type CollaborationRepository,
   type CollaborationScope,
   type CollaborationSnapshot,
@@ -8,9 +12,11 @@ import {
 
 export interface CollaborationEvaluationOptions {
   repository: CollaborationRepository;
+  /** meta 是原判定的来源说明（规则名、触发消息、当时查到的事实），回放按它先跑规则层。 */
   evaluate: (
     snapshot: CollaborationSnapshot,
-    policyVersion: string
+    policyVersion: string,
+    meta?: CollaborationDeciderMeta
   ) => Promise<{
     action: DecisionAction;
     reason: string;
@@ -96,7 +102,8 @@ export class CollaborationEvaluation {
   private readonly repository: CollaborationRepository;
   private readonly evaluate: (
     snapshot: CollaborationSnapshot,
-    policyVersion: string
+    policyVersion: string,
+    meta?: CollaborationDeciderMeta
   ) => Promise<{
     action: DecisionAction;
     reason: string;
@@ -139,6 +146,8 @@ export class CollaborationEvaluation {
       const feedbacks = await this.repository.listFeedback(scope, decisionId);
       const latestCorrection = [...feedbacks].reverse().find(f => f.expectedAction !== undefined);
       const expected: DecisionAction = latestCorrection?.expectedAction ?? decision.action;
+      // 自动标签：漏接只要求这次不再沉默（reply 或 act 都算接住）；误插的 expectedAction 就是 silent。
+      const missedLabel = latestCorrection !== undefined && feedbackLabelOf(latestCorrection) === 'missed';
 
       // 2. inputSnapshot 缺失 → missing（主控拍板：inputSnapshot 直接就是 snapshot）
       const rawSnapshot = decision.inputSnapshot as unknown;
@@ -150,7 +159,9 @@ export class CollaborationEvaluation {
         continue;
       }
 
-      const snapshotData = rawSnapshot as Record<string, unknown>;
+      // 判定来源说明不是快照的一部分，解析前拿掉，单独交给回放。
+      const { [DECIDER_META_KEY]: _decider, ...snapshotData } = rawSnapshot as Record<string, unknown>;
+      const meta = deciderMetaOf(decision);
 
       // 关键字段缺失 → missing，保留具体 reason，不调用 evaluate
       if (!snapshotData.settings || !Array.isArray(snapshotData.observations)) {
@@ -253,7 +264,7 @@ export class CollaborationEvaluation {
 
       let actualOutcome: { action: DecisionAction; reason: string; evidenceIds: string[] };
       try {
-        actualOutcome = await this.evaluate(snapshot, targetPolicyVersion);
+        actualOutcome = await this.evaluate(snapshot, targetPolicyVersion, meta);
       } catch (err: unknown) {
         mark(
           {
@@ -349,14 +360,16 @@ export class CollaborationEvaluation {
       }
 
       // 动作不符 → failed
-      if (actualOutcome.action !== expected) {
+      if (missedLabel ? actualOutcome.action === 'silent' : actualOutcome.action !== expected) {
         mark(
           {
             decisionId,
             status: 'failed',
             expected,
             actual: actualOutcome.action,
-            reason: `Action mismatch: expected '${expected}', got '${actualOutcome.action}' (${actualOutcome.reason})`
+            reason: missedLabel
+              ? `Action mismatch: missed decision expects a response, got 'silent' (${actualOutcome.reason})`
+              : `Action mismatch: expected '${expected}', got '${actualOutcome.action}' (${actualOutcome.reason})`
           },
           'failed'
         );

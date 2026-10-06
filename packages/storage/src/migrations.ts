@@ -597,8 +597,26 @@ export const migrations: Migration[] = [
     CREATE INDEX task_steering_task ON task_steering_operations(task_id);
   `); } },
   { version: 33, name: 'memory_jobs', up: createMemoryJobSchema },
-  { version: 34, name: 'session_insight_cache', up: createSessionInsightSchema }
+  { version: 34, name: 'session_insight_cache', up: createSessionInsightSchema },
+  // 参与强度新增「积极」档（participation = 'eager'）。v20 把三种取值写进了 CHECK，SQLite 改不了约束，只能重建表。
+  { version: 35, name: 'collaboration_participation_eager', up: allowEagerParticipation }
 ]
+
+/** 让 collaboration_settings 接受 'eager'；已经接受（或表不存在）时什么都不做。 */
+export function allowEagerParticipation(db: Database.Database): void {
+  const existing = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'collaboration_settings'").get() as { sql?: string } | undefined
+  if (!existing?.sql || existing.sql.includes("'eager'")) return
+  const constraint = "participation IN ('off', 'observe', 'selective')"
+  if (!existing.sql.includes(constraint)) throw new Error('COLLABORATION_SETTINGS_SCHEMA_UNKNOWN')
+  const rebuilt = existing.sql
+    .replace(constraint, "participation IN ('off', 'observe', 'selective', 'eager')")
+    .replace(/CREATE TABLE (IF NOT EXISTS )?"?collaboration_settings"?/, 'CREATE TABLE collaboration_settings_eager')
+  const columns = (db.pragma('table_info(collaboration_settings)') as Array<{ name: string }>).map(entry => `"${entry.name}"`).join(', ')
+  db.exec(rebuilt)
+  db.exec(`INSERT INTO collaboration_settings_eager (${columns}) SELECT ${columns} FROM collaboration_settings`)
+  db.exec('DROP TABLE collaboration_settings')
+  db.exec('ALTER TABLE collaboration_settings_eager RENAME TO collaboration_settings')
+}
 
 const INHERIT_PRESENTATION_OVERRIDE = {
   structuredAskCards: { mode: 'inherit' },

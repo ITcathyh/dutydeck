@@ -163,7 +163,9 @@ describe('group participation with persistent repository and real runtime', () =
       expect(groupPhases.map(item => item.phase)).toEqual(['decision', 'response']);
       expect(groupPhases[1]!.snapshot).toEqual(groupPhases[0]!.snapshot);
       for (const { snapshot, sessionId } of groupPhases) {
-        expect(snapshot.observations.filter(item => item.origin === 'live')).toEqual([expect.objectContaining({ scope, messageId, text })]);
+        // 交给模型的材料只在顶层带一次 scope，每条观察不再重复。
+        expect(snapshot.scope).toEqual(scope);
+        expect(snapshot.observations.filter(item => item.origin === 'live')).toEqual([expect.objectContaining({ messageId, text })]);
         expect(await runtime.getSession(sessionId)).toMatchObject({ permissionMode: 'deny-all', state: 'stopped' });
       }
       expect((await repos.collaboration.listDecisions(scope))[0]).toMatchObject({ status: 'sent', response: `回答：${text}` });

@@ -125,6 +125,15 @@ export function classifyUsage(session: Pick<Session, 'source' | 'sourceId'>, req
   return { category: 'background', origin: session.source.slice(0, 64) };
 }
 
+/**
+ * 群参与判定（lark-decision）和回复生成（lark-response）会话的用量，给 /status 的参与行用。
+ * PTY 等拿不到成本的会话只有条数，费用记为未知，不能当 0 加总。
+ */
+export async function participationUsage(repo: Pick<RepositoryBundle['usage'], 'listEntries'>, scope: { appId: string; chatId: string }, since: string) {
+  const entries = (await repo.listEntries({ since, appId: scope.appId, chatId: scope.chatId })).filter(entry => entry.origin === 'decision' || entry.origin === 'response');
+  return { entries: entries.length, costUsd: entries.reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0), unknown: entries.filter(entry => entry.costUsd === undefined).length };
+}
+
 export function usageMonthStart(now: Date) { return new Date(now.getFullYear(), now.getMonth(), 1); }
 const monthKey = (now: Date) => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 const usd = (value: number) => `$${value.toFixed(2)}`;
