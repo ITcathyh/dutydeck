@@ -263,6 +263,19 @@ describe('群分工：接话人与告警初筛', () => {
     expect((screen.getByLabelText('级别关键字') as HTMLInputElement).value).toBe('P0，P1');
   });
 
+  it('当前档收不到没 @ 的消息时，把接话人设成本 Bot 被拒绝，照原话显示怎么做，草稿保留', async () => {
+    const user = userEvent.setup();
+    getOverview.mockResolvedValue(makeOverview(makeSettings(), { duty: duty() }));
+    const reason = '本 Bot 在这个群现在是「只在 @ 时」，收不到没 @ 的消息，当不了接话人。请先在上面的参与模式里选「按需参与」或「积极参与」并保存设置，再把接话人设成本 Bot。';
+    const update = vi.spyOn(collaborationApi, 'updateDuty').mockRejectedValueOnce(new ApiError(reason, 'COLLABORATION_RESPONDER_NOT_LISTENING', 409));
+    renderPanel();
+    await user.selectOptions(await screen.findByLabelText('接话人'), 'self');
+    await user.click(screen.getByRole('button', { name: '保存分工' }));
+    await waitFor(() => expect(update).toHaveBeenCalledOnce());
+    expect(await screen.findByText(reason)).toBeTruthy();
+    expect((screen.getByLabelText('接话人') as HTMLSelectElement).value).toBe('self');
+  });
+
   it('旧版实例不返回分工时不显示这一块', async () => {
     renderPanel();
     await screen.findByLabelText('长期指令');
