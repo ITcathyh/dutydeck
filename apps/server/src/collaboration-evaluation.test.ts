@@ -676,6 +676,32 @@ describe('CollaborationEvaluation', () => {
     expect(replayRes.results[0].status).toBe('passed');
   });
 
+  it('strips the decider meta before schema validation and hands it to the replay', async () => {
+    const meta = { kind: 'rule', rule: 'single_human', trigger: { id: 'obs_valid_1', senderId: 'user_1' }, facts: { level: 'selective', humans: 1 } };
+    const { evaluation, repo, evaluate } = setupEvaluation(async () => ({ action: 'act', reason: '规则：群里只有你一个人', evidenceIds: ['obs_valid_1'] }));
+    await repo.recordDecision({ id: 'dec_rule', scope: scopeA, contextRevision: 1, policyVersion: 'v1', action: 'act', reason: '群里只有你一个人', evidenceIds: ['obs_valid_1'],
+      status: 'sent', inputSnapshot: { ...makeSnapshot(), decider: meta } as unknown as Record<string, unknown>, createdAt: '2026-09-18T10:00:00.000Z' });
+    const result = await evaluation.replay(scopeA, { decisionIds: ['dec_rule'] });
+    expect(result.results[0]).toMatchObject({ status: 'passed', expected: 'act', actual: 'act' });
+    expect(evaluate.mock.calls[0]![0]).not.toHaveProperty('decider');
+    expect(evaluate.mock.calls[0]![2]).toEqual(meta);
+  });
+
+  it.each([
+    ['missed', '[漏接] 10:00 判为不接，2 分钟内同一个人又 @ 了机器人。', 'act', 'reply', 'passed'],
+    ['missed', '[漏接] 10:00 判为不接，2 分钟内同一个人又 @ 了机器人。', 'act', 'silent', 'failed'],
+    ['intrusive', '[误插] 主动回复后被回「没问你」。', 'silent', 'silent', 'passed'],
+    ['intrusive', '[误插] 主动回复后被回「没问你」。', 'silent', 'reply', 'failed']
+  ] as const)('replays the automatic %s label: expected %s, model %s → %s', async (_label, correction, expectedAction, actual, status) => {
+    const { evaluation, repo } = setupEvaluation(async () => ({ action: actual, reason: '回放', evidenceIds: actual === 'silent' ? [] : ['obs_valid_1'] }));
+    const original = expectedAction === 'act' ? 'silent' : 'reply';
+    await repo.recordDecision({ id: 'dec_label', scope: scopeA, contextRevision: 1, policyVersion: 'v1', action: original, reason: '原判定', evidenceIds: ['obs_valid_1'],
+      status: 'sent', inputSnapshot: makeSnapshot() as unknown as Record<string, unknown>, createdAt: '2026-09-18T10:00:00.000Z' });
+    await repo.addFeedback({ id: 'feedback_label', scope: scopeA, decisionId: 'dec_label', actorId: 'user_1', correction, expectedAction, createdAt: '2026-09-18T10:02:00.000Z' });
+    const result = await evaluation.replay(scopeA, { decisionIds: ['dec_label'] });
+    expect(result.results[0]).toMatchObject({ status, expected: expectedAction, actual });
+  });
+
   it('guarantees strictly read-only execution: deliver/execute are never touched and data remains unchanged', async () => {
     const deliverSpy = vi.fn();
     const executeSpy = vi.fn();

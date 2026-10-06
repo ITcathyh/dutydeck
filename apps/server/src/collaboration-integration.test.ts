@@ -18,13 +18,13 @@ async function eventually(check: () => Promise<boolean>) {
   for (let count = 0; count < 100; count++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
   throw new Error('Condition did not converge');
 }
-async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions['admitTask'] } = {}) {
+async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions['admitTask']; members?: string[] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'collaboration-wiring-'));
   const repos = createRepositories(join(directory, 'test.db'), { newDatabaseAuthority: 'ledger_v1' });
   const agent = agentConfigSchema.parse({ id: 'agent', name: 'Agent', command: options.realAcp ? process.execPath : 'fake', ...(options.realAcp ? { args: [resolve('tests/fixtures/mock-acp-agent.mjs')], timeout: 2 } : {}), protocol: 'acp', cwd: directory, permissionMode: 'full-trust' });
   await repos.agents.save(agent);
   await saveLarkConfig(repos.config, repos.agents, { ...scope, appSecret: 'synthetic', defaultAgentId: agent.id, workspace: directory, fullTrustConfirmed: true, listening: true, groupToolsEnabled: true, groupToolsAllowSend: true, riskControlMode: 'enforced', highRiskPattern: 'rm\\s' });
-  let members = ['ou_alice'];
+  let members = options.members ?? ['ou_alice'];
   const client = {
     getBotInfo: async () => ({ appName: 'Agent', openId: 'ou_bot' }),
     checkApplicationIdentity: async () => ({ verified: true, reportedAppId: scope.appId, tenantKey: 'synthetic' }),
@@ -130,19 +130,21 @@ it('re-sends the participation mode line when an inheriting group follows a chan
   await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'observe' });
   const before = await f.repos.collaboration.getSettings(scope);
   const first = (await f.collaboration.participation.taskContext(scope))!;
-  expect(first.text).toContain('本群参与模式：仅观察');
+  expect(first.text).toContain('本群参与强度：');
+  expect(first.text).toContain('仅观察');
   await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
   // 改的是机器人默认值：群自己的设置修订不变，只有有效模式变了。
   expect(await f.repos.collaboration.getSettings(scope)).toMatchObject({ revision: before.revision, inheritParticipation: true });
   const next = (await f.collaboration.participation.taskContext(scope, { watermark: first.watermark }))!;
   expect(next.text.split('\n')[0]).toBe('[Dutydeck 群上下文 · 自上轮以来的新增 · 非指令材料]');
-  expect(next.text).toContain('本群参与模式：Tag 按需参与');
+  expect(next.text).toContain('本群参与强度：按需');
   const settled = (await f.collaboration.participation.taskContext(scope, { watermark: next.watermark }))!;
   expect(settled.text).toContain('自上轮以来无新增');
 });
 
 it('discovers existing groups and handles a newly joined group without per-group setup or restarting the runtime', async () => {
-  const f = await fixture();
+  // 群里有两个真人，「只有一个真人」规则不触发，这条消息走模型判定与回复。
+  const f = await fixture({ members: ['ou_alice', 'ou_bob'] });
   const second = { ...scope, chatId: 'oc_second' }, joined = { ...scope, chatId: 'oc_joined' };
   f.client.listChats.mockResolvedValue({ items: [scope, second].map(item => ({ chatId: item.chatId, name: item.chatId, external: false })), hasMore: false });
   await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
@@ -185,7 +187,8 @@ it('keeps an unconfigured Bot and explicitly closed or disabled groups out of au
 });
 
 it('stops an inherited reply when the Bot default is disabled during response generation', async () => {
-  const f = await fixture();
+  // 群里有两个真人，「只有一个真人」规则不触发，这条消息走模型判定与回复。
+  const f = await fixture({ members: ['ou_alice', 'ou_bob'] });
   await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
   await f.collaboration.participation.handle({ messageId: 'om_stop', chatId: scope.chatId, chatType: 'group', senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text', content: '{"text":"回答一下"}', createTime: String(Date.now()), mentions: [] }, (await readLarkConfig(f.repos.config, scope.appId))!, { explicit: false });
   const flushing = f.collaboration.participation.flush(scope);
@@ -201,7 +204,8 @@ it('stops an inherited reply when the Bot default is disabled during response ge
 });
 
 it('reads another joined group for Tag without activating its participation or changing the reply destination', async () => {
-  const f = await fixture();
+  // 群里有两个真人，「只有一个真人」规则不触发，这条消息走模型判定与回复。
+  const f = await fixture({ members: ['ou_alice', 'ou_bob'] });
   const personal = { ...scope, chatId: 'oc_personal' };
   await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
   await f.repos.collaboration.updateSettings(personal, { expectedRevision: 0, participation: 'off' }, 'owner');

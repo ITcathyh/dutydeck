@@ -1,6 +1,7 @@
 import { OptionalModelOverrides } from './OptionalModelOverrides';
 import type { LarkSetupTarget } from '../app-route';
 import { useState, useMemo } from 'react';
+import { participationLevelBehaviors, participationLevelFields, participationLevelLabels, participationLevelOf, participationLevels, type ParticipationLevel } from '@dutydeck/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Bot,
@@ -191,6 +192,11 @@ export function BotManagement({
     if (!activeBot) return undefined;
     return drafts[activeBot.appId] ?? initialDraft(activeBot);
   }, [activeBot, drafts]);
+
+  // 参与强度由两个底层字段合成；组合恰好是某一档的写法时才算「整档」。
+  const botLevel: ParticipationLevel = participationLevelOf(currentDraft?.mentionPolicy, currentDraft?.defaultGroupParticipation ?? 'off');
+  const botLevelFields = participationLevelFields(botLevel);
+  const botLevelExact = currentDraft?.mentionPolicy === botLevelFields.mentionPolicy && currentDraft?.defaultGroupParticipation === botLevelFields.participation;
 
   const updateCurrentDraft = (patch: Partial<BotDraft>) => {
     if (!activeAppId || !currentDraft) return;
@@ -625,24 +631,27 @@ export function BotManagement({
                     </Select>
                   </div>
 
+                  {/*
+                    参与强度：一个选项同时写唤醒方式和默认群参与模式。两个底层字段仍在下方「分别设置」里，
+                    组合不是四档之一时如实标出，选一档才会改写。
+                  */}
                   <div>
-                    <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-mention">
-                      群里怎样才唤醒
+                    <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-participation-level">
+                      群里接话方式
                     </label>
                     <Select
-                      id="bot-mention"
-                      value={currentDraft.mentionPolicy}
-                      onChange={e => updateCurrentDraft({ mentionPolicy: e.target.value as any })}
+                      id="bot-participation-level"
+                      value={botLevel}
+                      onChange={e => {
+                        const fields = participationLevelFields(e.target.value as ParticipationLevel);
+                        updateCurrentDraft({ mentionPolicy: fields.mentionPolicy, defaultGroupParticipation: fields.participation as BotDraft['defaultGroupParticipation'] });
+                      }}
                     >
-                      <option value="always">每次都要 @ 它</option>
-                      <option value="topic">新话题要 @，同一话题里可以直接说</option>
-                      {/*
-                        never 与 ambient 都是「不用 @」。原先这里把 never 写成
-                        「从不响应」，与运行时相反——那会让人以为选它等于关掉这个群。
-                      */}
-                      <option value="ambient">群里任何消息都响应</option>
-                      <option value="never">不用 @ 也会响应</option>
+                      {participationLevels.map(level => <option key={level} value={level}>{participationLevelLabels[level]}</option>)}
                     </Select>
+                    <p className="mt-1.5 text-caption text-subtle">
+                      {participationLevelBehaviors[botLevel]}。{botLevelExact ? '' : '当前是自定义组合，选一档会同时改写下方两项。'}群里也可以 @ 它说「积极点」「按需」来调整单个群。
+                    </p>
                   </div>
                 </div>
 
@@ -671,23 +680,50 @@ export function BotManagement({
                   </Field>
                 </div>
 
-                <div>
-                  <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-default-group-participation">
-                    默认群参与模式
-                  </label>
-                  <Select
-                    id="bot-default-group-participation"
-                    value={currentDraft.defaultGroupParticipation}
-                    onChange={e => updateCurrentDraft({ defaultGroupParticipation: e.target.value as BotDraft['defaultGroupParticipation'] })}
-                  >
-                    <option value="off">关闭</option>
-                    <option value="observe">仅观察</option>
-                    <option value="selective">Tag 按需参与</option>
-                  </Select>
+                <details className="rounded-lg border border-subtle p-3">
+                  <summary className="cursor-pointer text-caption font-medium text-secondary">分别设置唤醒方式和群参与模式（高级）</summary>
+                  <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-mention">
+                        群里怎样才唤醒
+                      </label>
+                      <Select
+                        id="bot-mention"
+                        value={currentDraft.mentionPolicy}
+                        onChange={e => updateCurrentDraft({ mentionPolicy: e.target.value as any })}
+                      >
+                        <option value="always">每次都要 @ 它</option>
+                        <option value="topic">新话题要 @，同一话题里可以直接说</option>
+                        {/*
+                          never 与 ambient 都是「不用 @」。原先这里把 never 写成
+                          「从不响应」，与运行时相反——那会让人以为选它等于关掉这个群。
+                        */}
+                        <option value="ambient">群里任何消息都响应</option>
+                        <option value="never">不用 @ 也会响应</option>
+                      </Select>
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-default-group-participation">
+                        默认群参与模式
+                      </label>
+                      <Select
+                        id="bot-default-group-participation"
+                        value={currentDraft.defaultGroupParticipation}
+                        onChange={e => updateCurrentDraft({ defaultGroupParticipation: e.target.value as BotDraft['defaultGroupParticipation'] })}
+                      >
+                        <option value="off">关闭</option>
+                        <option value="observe">仅观察</option>
+                        <option value="selective">Tag 按需参与</option>
+                        <option value="eager">积极参与</option>
+                      </Select>
+                    </div>
+                  </div>
                   <p className="mt-1.5 text-caption text-subtle">
-                    选择「Tag 按需参与」后，所有群默认先判断普通消息是否需要回复；决定回复时用 OK 标记开始处理。群可单独覆盖。关闭时沿用唤醒规则，仅观察时不自动回复普通消息。
+                    选择「Tag 按需参与」后，所有群默认先判断普通消息是否需要回复；决定回复时用 OK 标记开始处理。「积极参与」除了明显对别人说的、表情和致谢，群里真人的消息都接。群可单独覆盖。关闭时沿用唤醒规则，仅观察时不自动回复普通消息。
                   </p>
-                  {currentDraft.defaultGroupParticipation !== 'off' && (!currentDraft.groupToolsEnabled || currentDraft.defaultGroupParticipation === 'selective' && !currentDraft.groupToolsAllowSend) && (
+                </details>
+                <div>
+                  {currentDraft.defaultGroupParticipation !== 'off' && (!currentDraft.groupToolsEnabled || currentDraft.defaultGroupParticipation !== 'observe' && !currentDraft.groupToolsAllowSend) && (
                     <p className="mt-1.5 text-caption text-warning">
                       此模式需要在高级设置开启「允许它读取群聊内容」；Tag 回复还需要「允许它主动往群里发消息」。当前权限尚未满足。
                     </p>

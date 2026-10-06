@@ -15,16 +15,21 @@ import {
 import {
   api,
   ApiError,
+  collaborationApi,
   type Agent,
+  type CollaborationOverview,
+  type CollaborationSettings,
   type LarkBotConfig,
   type ManagedGroupBot,
   type RoleChange
 } from '../api';
 import type {
   GroupBinding,
+  ParticipationLevel,
   PresentationOverride,
   RoleAssignment
 } from '@dutydeck/shared';
+import { participationLevelBehaviors, participationLevelFields, participationLevelLabels, participationLevelOf, participationLevels } from '@dutydeck/shared';
 import { Badge, Banner, Button, Card, EmptyState, Input, Select, Spinner } from './primitives';
 import { AgentSelect, CompactSelect } from './CompactSelect';
 import { DirectoryPicker } from './DirectoryPicker';
@@ -637,6 +642,46 @@ export function GroupManagement({
   const botConfig = editingAppId ? botsMap.get(editingAppId) : undefined;
   const botDisplayName = botConfig?.name || editingAppId || 'Bot';
 
+  /*
+    本群参与强度：一个选项同时写群级唤醒方式覆盖和本群参与模式，选后立即生效。
+    两个底层字段仍可在「提及唤醒规则」和下方协作设置里分别调整。与协作面板共用同一份概览查询。
+  */
+  const levelOverviewQuery = useQuery<CollaborationOverview>({
+    queryKey: ['collaboration-overview', editingAppId, activeChatId],
+    queryFn: () => collaborationApi.getOverview(editingAppId!, activeChatId!),
+    enabled: Boolean(editingAppId && activeChatId),
+    retry: false
+  });
+  const groupSettings = levelOverviewQuery.data?.snapshot.settings;
+  const botDefaultLevel = participationLevelOf(botConfig?.mentionPolicy, botConfig?.defaultGroupParticipation ?? 'off');
+  const groupLevelValue: ParticipationLevel | 'inherit' | '' = !groupSettings || !activeBotEntry ? ''
+    : activeBotEntry.binding?.routingOverride.mentionPolicy.mode !== 'set' && groupSettings.inheritParticipation ? 'inherit'
+    : participationLevelOf(activeBotEntry.effective?.routing.mentionPolicy.value as LarkBotConfig['mentionPolicy'], groupSettings.participation);
+  const levelMutation = useMutation({
+    mutationFn: async ({ appId, chatId, level, binding, settings }: { appId: string; chatId: string; level: ParticipationLevel | 'inherit'; binding?: GroupBinding; settings: CollaborationSettings }) => {
+      const fields = level === 'inherit' ? undefined : participationLevelFields(level);
+      const mentionPolicy: GroupBinding['routingOverride']['mentionPolicy'] = fields ? { mode: 'set', value: fields.mentionPolicy } : { mode: 'inherit' };
+      if (JSON.stringify(binding?.routingOverride.mentionPolicy ?? { mode: 'inherit' }) !== JSON.stringify(mentionPolicy)) {
+        await api.updateGroupBotBinding(appId, chatId, { expectedRevision: binding?.revision ?? 0,
+          patch: { routingOverride: { groupReplyMode: binding?.routingOverride.groupReplyMode ?? { mode: 'inherit' }, mentionPolicy } } });
+      }
+      await collaborationApi.updateSettings(appId, chatId, fields
+        ? { expectedRevision: settings.revision, participation: fields.participation }
+        : { expectedRevision: settings.revision, inheritParticipation: true });
+    },
+    onSuccess: (_result, variables) => {
+      void qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
+      void qc.invalidateQueries({ queryKey: ['collaboration-overview', variables.appId, variables.chatId] });
+      toastStore.push({ kind: 'success', key: `level-${variables.appId}-${variables.chatId}`, title: '接话方式已更新',
+        description: variables.level === 'inherit' ? '本群跟随 Bot 默认。' : `${participationLevelLabels[variables.level]}：${participationLevelBehaviors[variables.level]}。` });
+    },
+    onError: (error: unknown, variables) => {
+      void qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
+      void qc.invalidateQueries({ queryKey: ['collaboration-overview', variables.appId, variables.chatId] });
+      toastStore.push({ kind: 'error', key: `level-${variables.appId}-${variables.chatId}`, title: '接话方式没有改成', description: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-canvas">
       {/* 顶部标头 */}
@@ -1060,6 +1105,28 @@ export function GroupManagement({
                   {/* 2. 消息触发与回复行为 */}
                   <div className="space-y-4 border-t border-subtle pt-4">
                     <h4 className="text-body font-semibold text-primary">触发与回复</h4>
+                    <div>
+                      <label className="mb-1 block text-caption font-medium text-secondary" htmlFor="group-participation-level">
+                        接话方式
+                      </label>
+                      <Select
+                        id="group-participation-level"
+                        value={groupLevelValue}
+                        disabled={!groupSettings || isDirty || levelMutation.isPending}
+                        onChange={e => {
+                          if (!editingAppId || !activeChatId || !groupSettings) return;
+                          levelMutation.mutate({ appId: editingAppId, chatId: activeChatId, level: e.target.value as ParticipationLevel | 'inherit', binding: activeBotEntry.binding, settings: groupSettings });
+                        }}
+                      >
+                        {!groupSettings && <option value="">读取中…</option>}
+                        <option value="inherit">跟随 Bot 默认（{participationLevelLabels[botDefaultLevel]}）</option>
+                        {participationLevels.map(level => <option key={level} value={level}>{participationLevelLabels[level]}</option>)}
+                      </Select>
+                      <p className="mt-1 text-meta text-subtle">
+                        {groupLevelValue && groupLevelValue !== 'inherit' ? `${participationLevelBehaviors[groupLevelValue]}。` : groupLevelValue === 'inherit' ? `${participationLevelBehaviors[botDefaultLevel]}。` : ''}
+                        {isDirty ? '先保存或放弃本群的其他修改，再切换接话方式。' : '选择后立即生效，同时改写本群的唤醒方式和参与模式。'}
+                      </p>
+                    </div>
                     <div className="grid gap-4 sm:grid-cols-2">
                       <div>
                         <label className="mb-1 block text-caption font-medium text-secondary">

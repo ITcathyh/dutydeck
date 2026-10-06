@@ -17,7 +17,7 @@ export type RiskControlMode = typeof riskControlModes[number];
 export interface StoredLarkConfig {
   revision?: number;
   mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
-  defaultGroupParticipation?: 'off' | 'observe' | 'selective';
+  defaultGroupParticipation?: 'off' | 'observe' | 'selective' | 'eager';
   /** Runtime-only resolved group context; never serialized in the Bot configuration. */
   managedGroup?: { bindingId: string; revision: number; principalId?: string };
   appId: string;
@@ -424,10 +424,10 @@ const normalizeGroupReplyMode = (value: unknown): StoredLarkConfig['groupReplyMo
   value === 'chat' || value === 'shared' || value === 'new-topic' || value === 'chat-topic' ? value : undefined;
 
 const normalizeDefaultGroupParticipation = (value: unknown): NonNullable<StoredLarkConfig['defaultGroupParticipation']> =>
-  value === 'observe' || value === 'selective' ? value : 'off';
+  value === 'observe' || value === 'selective' || value === 'eager' ? value : 'off';
 
 export const larkMemoryEnabled = (config: Pick<StoredLarkConfig, 'memoryEnabled' | 'defaultGroupParticipation'>): boolean =>
-  config.memoryEnabled ?? normalizeDefaultGroupParticipation(config.defaultGroupParticipation) === 'selective';
+  config.memoryEnabled ?? ['selective', 'eager'].includes(normalizeDefaultGroupParticipation(config.defaultGroupParticipation));
 
 const normalizeBrand = (value: unknown): 'feishu' | 'lark' | undefined =>
   value === 'feishu' || value === 'lark' ? value : undefined;
@@ -718,7 +718,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (input.mentionPolicy !== undefined && !['always', 'topic', 'never', 'ambient'].includes(input.mentionPolicy)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '提及方式无效。', 400);
   }
-  if (input.defaultGroupParticipation !== undefined && !['off', 'observe', 'selective'].includes(input.defaultGroupParticipation)) {
+  if (input.defaultGroupParticipation !== undefined && !['off', 'observe', 'selective', 'eager'].includes(input.defaultGroupParticipation)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '默认群参与模式无效。', 400);
   }
   if (input.executionMode !== undefined && !['single', 'layered'].includes(input.executionMode)) {
@@ -745,7 +745,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const listening = input.listening ?? current?.listening ?? false;
   const groupToolsEnabled = input.groupToolsEnabled ?? current?.groupToolsEnabled ?? false;
   const groupToolsAllowSend = groupToolsEnabled && (input.groupToolsAllowSend ?? current?.groupToolsAllowSend ?? false);
-  const memoryEnabled = input.memoryEnabled ?? current?.memoryEnabled ?? (input.defaultGroupParticipation === 'selective');
+  const memoryEnabled = input.memoryEnabled ?? current?.memoryEnabled ?? (input.defaultGroupParticipation === 'selective' || input.defaultGroupParticipation === 'eager');
   const memoryAutoExtract = input.memoryAutoExtract ?? current?.memoryAutoExtract ?? true;
   const memoryAgentId = input.memoryAgentId === undefined ? current?.memoryAgentId : input.memoryAgentId.trim() || undefined;
   const memoryModel = input.memoryModel === undefined ? current?.memoryModel : input.memoryModel.trim() || undefined;
@@ -825,7 +825,8 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   }
   const config: StoredLarkConfig = {
     revision: (current?.revision ?? (current ? 1 : 0)) + 1,
-    mentionPolicy: input.mentionPolicy ?? current?.mentionPolicy ?? 'always',
+    // 新建的 Bot 默认在自己接手的话题里免 @；已有 Bot 读出来时总带着自己的取值，这里不会改动它们。
+    mentionPolicy: input.mentionPolicy ?? current?.mentionPolicy ?? 'topic',
     defaultGroupParticipation: input.defaultGroupParticipation ?? current?.defaultGroupParticipation ?? 'off',
     appId,
     appSecret,

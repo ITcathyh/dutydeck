@@ -57,7 +57,8 @@ type ActiveTab = 'settings' | 'followups' | 'mandates' | 'actions' | 'decisions'
 const participationLabels: Record<CollaborationParticipation, { title: string; desc: string }> = {
   off: { title: '保持原行为 (off)', desc: '沿用原群参与规则' },
   observe: { title: '只观察 (observe)', desc: '记录群聊事件上下文与候选，但不主动发言' },
-  selective: { title: '按需参与 (selective)', desc: '有充分根据且获得授权时，主动提供协作与反馈' }
+  selective: { title: '按需参与 (selective)', desc: '有充分根据且获得授权时，主动提供协作与反馈' },
+  eager: { title: '积极参与 (eager)', desc: '除了明显对别人说的、表情和致谢，群里真人的消息都接' }
 };
 
 const isRevisionConflict = (error: unknown) =>
@@ -803,7 +804,7 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
                 <div className="text-body font-semibold text-primary">参与模式</div>
                 {currentSettings && <p className="text-caption text-subtle">当前生效：{participationLabels[currentSettings.participation].title}</p>}
                 <div className="grid gap-3 sm:grid-cols-2">
-                  {(['inherit', 'off', 'observe', 'selective'] as const).map(mode => {
+                  {(['inherit', 'off', 'observe', 'selective', 'eager'] as const).map(mode => {
                     const selected = mode === 'inherit' ? draft.inheritParticipation : !draft.inheritParticipation && draft.participation === mode;
                     return (
                       <button

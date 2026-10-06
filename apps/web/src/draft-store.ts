@@ -40,7 +40,7 @@ export type BotDraft = {
   idleCompactHours: string;
   groupReplyMode: '' | 'chat' | 'shared' | 'new-topic' | 'chat-topic';
   mentionPolicy: 'always' | 'topic' | 'never' | 'ambient';
-  defaultGroupParticipation: 'off' | 'observe' | 'selective';
+  defaultGroupParticipation: 'off' | 'observe' | 'selective' | 'eager';
   preInjectPrompt: string;
   listening: boolean;
   groupToolsEnabled: boolean;
