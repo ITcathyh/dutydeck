@@ -4,8 +4,9 @@ import type { LifecycleFetch } from '../workbench-fetch.js';
 import type { PermissionMode } from '@dutydeck/shared';
 import type { ContactIdType, ContactUser } from './owner-identity.js';
 import { executeWithLarkGate, resolveLarkGateConfig, LarkCircuitOpenError } from './api-gate.js';
-import { buildLarkCardActions, buildLarkCardDetailButton, buildLarkCardFollowUpActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
+import { buildLarkCardActions, buildLarkCardDetailButton, buildLarkCardFollowUpActions, buildLarkContinueButton, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
 import { larkSessionDetailUrl } from './detail-link.js';
+import { larkConclusionHeadline, larkElapsedLabel, larkStoppedAtLabel, larkUserStatus } from './card-status.js';
 
 /**
  * 从响应头解析飞书要求的等待时长（ms）。Retry-After 与 x-ogw-ratelimit-reset 的
@@ -37,6 +38,13 @@ export interface LarkCardInput {
   sessionId?: string;
   webBaseUrl?: string;
   elapsedSeconds?: number;
+  /** 排队第几位（从 1 起）：排队中的卡把它写在副标题里。 */
+  queuePosition?: number;
+  /**
+   * 任务停下来的时刻（卡住、排队受阻、待核对）。这类状态不再显示一直累加的「已运行」，
+   * 改写「停在 HH:MM」；没有这个时刻就什么都不写。
+   */
+  stoppedAt?: string | number;
   markdown?: string;
   elements?: Array<Record<string, unknown>>;
   retryable?: boolean;
@@ -252,13 +260,6 @@ const statePresentation = {
   reconcile_required: { title: '需要核对', color: 'orange', template: 'orange', tagColor: 'orange' },
   legacy_unresolved: { title: '需要核对', color: 'orange', template: 'orange', tagColor: 'orange' }
 } as const;
-const elapsedLabel = (seconds: number) => {
-  const value = Math.max(0, Math.floor(seconds));
-  if (value < 60) return `${value}s`;
-  const minutes = Math.floor(value / 60);
-  const rest = value % 60;
-  return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
-};
 const clipCardField = (value: string, limit: number) => {
   const characters = Array.from(value);
   return characters.length <= limit ? value : `${characters.slice(0, Math.max(1, limit - 1)).join('')}…`;
@@ -341,18 +342,44 @@ const foldLongResult = (element: Record<string, unknown>): Array<Record<string, 
 
 /**
  * 飞书卡片的 Markdown 图片只认上传后的 img_ key，目标是网址或本地路径时整张卡会被拒收（200570）。
- * 结果卡上把这类图片语法改成普通链接（网址）或文字（其他），代码块和行内代码里的原样保留。
- * 只改卡面：落库的结果元素和附件仍是原文。
+ * 结果卡上把这类图片语法改成普通链接（网址）或文字（其他）。
+ * 指向本机路径的链接（目标以 / ~ file:// 开头，或没有协议且不是 http(s)）在手机上点不开，
+ * 降级为行内代码文字；http(s) 与 mailto: 这类带协议的链接不变。
+ * 代码块和行内代码里的原样保留。只改卡面：落库的结果元素和附件仍是原文。
  */
 export const larkCardResultMarkdown = (text: string) => {
   let inFence = false;
+  const localTarget = (target: string) => /^(?:[/~]|file:\/\/)/i.test(target) || (!/^[a-z][a-z0-9+.-]*:/i.test(target) && !target.startsWith('//'));
   return text.split('\n').map(line => {
     if (/^\s*(?:```|~~~)/.test(line)) { inFence = !inFence; return line; }
     if (inFence) return line;
-    return line.split(/(`[^`]*`)/).map((part, index) => index % 2 ? part : part.replace(/!\[([^\]\n]*)\]\(\s*([^)\s]+)(?:\s+"[^"\n]*")?\s*\)/g,
-      (image, alt: string, target: string) => target.startsWith('img_') ? image : /^https?:\/\//i.test(target) ? `[${alt || target}](${target})` : alt || target)).join('');
+    return line.split(/(`[^`]*`)/).map((part, index) => index % 2 ? part : part
+      .replace(/!\[([^\]\n]*)\]\(\s*([^)\s]+)(?:\s+"[^"\n]*")?\s*\)/g,
+        (image, alt: string, target: string) => target.startsWith('img_') ? image : /^https?:\/\//i.test(target) ? `[${alt || target}](${target})` : alt || target)
+      .replace(/(?<!!)\[([^\]\n]*)\]\(\s*([^)\s]+)(?:\s+"[^"\n]*")?\s*\)/g,
+        (link, label: string, target: string) => localTarget(target) ? `\`${(label || target).replaceAll('`', "'")}\`` : link)).join('');
   }).join('\n');
 };
+
+const needsYouLine = /^\s*(?:[-*+]\s+)?(?:\*\*)?需要你[：:]/;
+/** 结论里以「需要你：」开头的行：卡上单独渲染成醒目块，不留在正文里（代码块里的不算）。 */
+export const larkCardNeedsYou = (text: string): { body: string; needs: string[] } => {
+  let inFence = false;
+  const needs: string[] = [];
+  const kept = text.split('\n').filter(line => {
+    if (/^\s*(?:```|~~~)/.test(line)) { inFence = !inFence; return true; }
+    if (inFence || !needsYouLine.test(line)) return true;
+    needs.push(line.replace(/^\s*(?:[-*+]\s+)?/, '').trim());
+    return false;
+  });
+  if (!needs.length) return { body: text, needs };
+  const body = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  // 整段结论都是「需要你」行时保持原样：不能让结论正文变空。
+  return body ? { body, needs } : { body: text, needs: [] };
+};
+
+/** 结果卡上结论正文实际展示的文字：卡面改写之后，再拿掉「需要你：」行。 */
+export const larkCardShownResult = (text: string) => larkCardNeedsYou(larkCardResultMarkdown(text)).body;
 
 /** 卡上实际展示的完整结论：开头一段加上折叠里的其余部分。 */
 export const larkCardFinalOutputText = (elements: Array<Record<string, unknown>>) => {
@@ -561,9 +588,16 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const actionButtonColumns = actionButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }));
   const isProcessCard = input.cardKind === 'process';
   const isResultCard = input.cardKind === 'result';
-  // 结果卡的续问行（给我对外回复 / 再详细点 / 每天自动执行）放在正文之后：
+  // 成功的过程卡总是收成一行回执；失败、中断、取消只有在确认会另发结果卡时才收，
+  // 不然这张卡就是用户看到的唯一一张，不能把原因和按钮拿掉。
+  const collapsedProcess = isProcessCard && (state === 'completed'
+    || (input.resultFollows === true && (state === 'failed' || state === 'interrupted' || state === 'cancelled')));
+  // 一轮因长时间没有输出被停掉时，结果卡上多一个「继续」（renderer 放的 execution_alert_idle_timeout 是它的凭据）。
+  const continueButton = isResultCard && input.elements?.some(element => element?.element_id === 'execution_alert_idle_timeout')
+    ? buildLarkContinueButton(actionContext) : undefined;
+  // 结果卡的续问行（继续 / 给我对外回复 / 再详细点 / 每天自动执行 / 使用这个验证命令）放在正文之后：
   // 读者看完结论才会接着问。流式排布，窄屏上按钮自动折行，不挤成一排。
-  const followUpButtons = isResultCard ? buildLarkCardFollowUpActions(actionContext) : [];
+  const followUpButtons = isResultCard ? [...(continueButton ? [continueButton] : []), ...buildLarkCardFollowUpActions(actionContext)] : [];
   const followUpRow = followUpButtons.length ? [{
     tag: 'column_set', element_id: 'result_follow_up_row', flex_mode: 'flow', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
     columns: followUpButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }))
@@ -591,7 +625,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   // 调用方显式给了 statusLabel 时状态行会保留，耗时也就还在正文里，页脚不能再写一遍。
   // process 布局的耗时在底部那一行（task_meta）里，页脚不重复渲染耗时。
   const hasElapsed = !isProcessCard && state === 'completed' && elapsedSeconds > 0 && !explicitStatusLabel;
-  const elapsedText = hasElapsed ? `用时 ${elapsedLabel(elapsedSeconds)}` : undefined;
+  const elapsedText = hasElapsed ? `用时 ${larkElapsedLabel(elapsedSeconds)}` : undefined;
   const parts: string[] = [];
   if (footerMention) parts.push(footerMention);
   if (elapsedText) parts.push(elapsedText);
@@ -660,6 +694,15 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const statusTagLabel = (waiting: boolean) => waiting && !explicitStatusLabel
     ? (input.awaitingAnswer ? '等待回答' : '等待审批')
     : liveTitle;
+  // 过程卡与结果卡只有 5 个用户可见状态（card-status.ts），具体原因进副标题。
+  const userStatusFor = (waiting: boolean) => larkUserStatus({
+    state, waiting, awaitingAnswer: input.awaitingAnswer === true,
+    ...(input.statusLabel?.trim() ? { label: input.statusLabel } : {}),
+    ...(input.queuePosition ? { queuePosition: input.queuePosition } : {})
+  });
+  const stoppedText = larkStoppedAtLabel(input.stoppedAt);
+  // 任务停在中间（卡住、受阻、待核对）时，从开始到现在的时长一直在涨，没有意义：改写停下的时刻。
+  const headerSubtitle = (reason: string | undefined) => clipCardField(reason ? `${agentName} · ${reason}` : agentName, 96);
   const grey = (text: string) => `<font color='grey'>${text}</font>`;
   const detailLink = footerDetailUrl && !detailButton ? grey(`[查看详情](${footerDetailUrl})`) : '';
   // 过程卡的底部一行：左边是耗时、步数和详情入口，右边是操作按钮（详情是按钮时排在最后）。
@@ -707,7 +750,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       // 其余终态仍然渲染：失败和取消要让读者据此决定是否重试，而那不是默认预期。
       // 「已用时 0s」不是信息：它要么是首帧、要么是这张卡根本不会再更新（审批卡、提问卡
       // 都由 workflow-interactions 一次性投递，没有心跳）。0 一律不写。
-      const elapsedText = elapsedSeconds > 0 ? `已用时 ${elapsedLabel(elapsedSeconds)}` : '';
+      const elapsedText = isResultCard && userStatusFor(waitingForApproval).stopped ? stoppedText ?? ''
+        : elapsedSeconds > 0 ? `已用时 ${larkElapsedLabel(elapsedSeconds)}` : '';
       // 执行中的卡上，状态行右边就跟着一个转圈的 loading 图标，它本身已经说明任务在跑；
       // 再挂一个「执行中」标签，是同一件事的第三遍（还有一遍在聊天列表的 summary 里）。
       // 排队中和等待审批没有这个图标，状态必须由文字承担，标签保留。
@@ -790,12 +834,31 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       // 省掉——已完成的卡走的就是这条路。
       const taskHeader = actionButtons.length ? buttonRow : showStatusRow && statusElement ? [statusElement] : [];
       // 结果卡的长文只露出开头，其余收进折叠面板：群里一条消息不该占满好几屏。
-      const shownFinal = isResultCard ? finalElements.map(element => element.element_id === 'final_output' && typeof element.content === 'string'
-        ? { ...element, content: larkCardResultMarkdown(element.content) } : element).flatMap(foldLongResult) : finalElements;
+      // 「需要你：」开头的行从正文里拿出来，单独放在结论下面的醒目块里。
+      let needs: string[] = [];
+      const shownFinal = isResultCard ? finalElements.map(element => {
+        if (element.element_id !== 'final_output' || typeof element.content !== 'string') return element;
+        const shown = larkCardNeedsYou(larkCardResultMarkdown(element.content));
+        needs = shown.needs;
+        return { ...element, content: shown.body };
+      }).flatMap(foldLongResult) : finalElements;
+      const needsBlock = needs.length ? [{
+        tag: 'interactive_container', element_id: 'need_you', behaviors: [], background_style: 'attention_bg', has_border: false,
+        corner_radius: '8px', padding: '8px 10px 8px 10px', margin: '0px', direction: 'vertical', vertical_spacing: '2px',
+        elements: needs.map(line => ({
+          tag: 'markdown', text_size: 'normal', margin: '0px',
+          content: `**需要你：**${line.replace(/^(?:\*\*)?需要你[：:](?:\*\*)?\s*/, '')}`,
+          icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'orange' }
+        }))
+      }] : [];
+      // 失败的结果卡带上最后没有恢复的失败步骤：过程卡收成一行之后，原因只在这里写。
+      const failureBlock = isResultCard && state === 'failed' ? sourceElements.filter(element => element.element_id === 'failure_step') : [];
       return [
         ...taskHeader,
         ...attentionElements,
+        ...failureBlock,
         ...shownFinal,
+        ...needsBlock,
         ...traceSection,
         ...otherElements,
         ...followUpRow
@@ -823,7 +886,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     const otherElements = mainElements.filter(element => !processExternalClaimed.has(element));
     const stepsText = stepsTextOf(sourceElements);
     const newestFirst = (items: Array<Record<string, unknown>>) => [...items].reverse();
-    const elapsedText = elapsedSeconds > 0 ? elapsedLabel(elapsedSeconds) : '';
+    const elapsedText = elapsedSeconds > 0 ? larkElapsedLabel(elapsedSeconds) : '';
     // 终态卡可能是用运行中那一帧重绘的（终态更新被拒、对账补画）：那一帧的当前阶段还带着
     // 加载图标和「正在：…」，任务已经停了，这两样都得拿掉。
     const settled = (items: Array<Record<string, unknown>>) => items.map(item => {
@@ -836,12 +899,15 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       return stage;
     });
 
-    if (state === 'completed') {
-      // 完成后过程卡让位给结果：收成一行不带标题栏的回执，阶段记录收进这一行的折叠里。
-      // 「结果见下条」只在调用方确认会另发结果时写——只贴表情的模式下没有下一条。
-      const receiptTitle = `<font color='green'>已完成</font>${[stepsText, input.resultFollows ? '结果见下条' : '']
-        .filter(Boolean).map(part => grey(` · ${part}`)).join('')}`;
-      const receiptIcon = { tag: 'standard_icon', token: 'done_outlined', color: 'green' };
+    if (collapsedProcess) {
+      // 结束后过程卡让位给结果：收成一行不带标题栏的回执（状态 · 用时 · 按类别的步骤计数），
+      // 阶段记录收进这一行的折叠里。失败、中断时原因写在随后发的结果卡上，这里只说「原因见下条」，
+      // 不再出现两张同状态的完整卡；那条的按钮（重试等）也只留在结果卡上。
+      const receiptColor = state === 'completed' ? 'green' : state === 'failed' ? 'red' : 'grey';
+      const receiptTitle = `<font color='${receiptColor}'>${userStatusFor(false).label}</font>${[
+        elapsedSeconds > 0 ? larkElapsedLabel(elapsedSeconds) : '', stepsText, state === 'completed' ? '' : '原因见下条'
+      ].filter(Boolean).map(part => grey(` · ${part}`)).join('')}`;
+      const receiptIcon = { tag: 'standard_icon', token: state === 'completed' ? 'done_outlined' : 'close_outlined', color: receiptColor };
       // 只有一个阶段时摊平：阶段标题作为普通一行，接着是它的内容，展开回执后不用再点开一层。
       const single = traceElements.length === 1 ? traceElements[0]! : undefined;
       const singleHeader = single?.header as Record<string, unknown> | undefined;
@@ -851,7 +917,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       const listed: Array<Record<string, unknown>> = [
         ...stages,
         ...omissionElements,
-        // 「结果见单独的结果消息」由回执标题按 resultFollows 表达，这里不再重复，也不在没有下一条时乱说。
+        // 「结果见单独的结果消息」不在这里重复，也不在没有下一条时乱说。
         ...otherElements.filter(element => element.element_id !== 'trace_empty'),
         ...(detailButton ? [detailButton] : detailLink ? [{ tag: 'markdown', content: detailLink, text_size: 'notation', text_align: 'right', margin: '0px' }] : [])
       ];
@@ -868,8 +934,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       return [
         receipt,
         ...(traceElements.length ? [] : listed),
-        ...attentionElements,
-        ...actionRow([])
+        ...(state === 'completed' ? [...attentionElements, ...actionRow([])] : [])
       ];
     }
 
@@ -931,19 +996,25 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       ...newestFirst(historyGroups),
       ...omissionElements,
       ...otherElements,
-      ...actionRow([elapsedText && grey(`${state === 'queued' ? '排队等待' : '已运行'} ${elapsedText}`), stepsText && grey(stepsText), detailLink], detailButton)
+      ...actionRow([
+        userStatusFor(waitingForApproval).stopped ? (stoppedText ? grey(stoppedText) : '')
+          : elapsedText && grey(`${state === 'queued' ? '排队等待' : '已运行'} ${elapsedText}`),
+        stepsText && grey(stepsText), detailLink
+      ], detailButton)
     ];
   };
   const assemble = (mainElements: Array<Record<string, unknown>>) => {
     const waitingForApproval = state === 'running' && hasPendingApproval(mainElements);
-    const statusLabel = statusTagLabel(waitingForApproval);
-    // 会话列表里的预览：执行中显示当前在做什么（旁白，没有旁白时是最新一步），
-    // 不点进群就能看到进度；其余状态是「状态 · 任务名」。
+    const userStatus = userStatusFor(waitingForApproval);
+    const statusLabel = isProcessCard || isResultCard ? userStatus.label : statusTagLabel(waitingForApproval);
+    // 会话列表里的预览：执行中显示当前在做什么（旁白，没有旁白时是最新一步）；
+    // 结果卡显示结论第一句，不点进卡片就知道结果，拿不到结论时退回「状态 · 任务名」。
     const progress = isProcessCard && state === 'running' && !waitingForApproval
       ? plainCardText(findCardElement(mainElements, 'current_title')?.content) : '';
-    const summaryTitle = isProcessCard || isResultCard
+    const conclusion = isResultCard ? larkConclusionHeadline(findCardElement(mainElements, 'final_output')?.content, 40) : undefined;
+    const summaryTitle = conclusion ?? (isProcessCard || isResultCard
       ? `${statusLabel} · ${progress || taskName}`
-      : `${taskName} · ${statusLabel}`;
+      : `${taskName} · ${statusLabel}`);
     // 标题只占一行：卡片回复在原消息下面，用户原话已经在引用里，标题只需要让人认出是哪件事。
     const headerTitle = isProcessCard || isResultCard ? clipTitleWidth(compactTaskName || 'Dutydeck') : (compactTaskName || 'Dutydeck');
 
@@ -953,15 +1024,14 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         update_multi: true,
         width_mode: 'default',
         streaming_mode: state === 'running',
-        // 语义色：绿=好 / 蓝=进行中 / 橙=要注意。失败色和执行中色会当状态文字用
-        // （`● 失败`、`● 执行中`），所以必须在白底上可读——原先的失败色是低饱和土黄，
-        // 对比度约 2:1，当文字时几乎读不出来，也和 errorAlert 的红色形不成层级。
-        // 成功色只当圆点用（成功不再渲染文字后缀），按图形元素的 3:1 要求取值。
+        // 语义色：绿=好 / 蓝=进行中 / 橙=要注意。执行中色会当状态文字用（`● 执行中`），
+        // 所以必须在白底上可读。成功色只当圆点用（成功不再渲染文字后缀），按图形元素的 3:1 要求取值。
+        // 步骤级的失败只是过程，用灰色；红色留给任务真的失败（failure_bg 与红色标题栏）。
         style: { color: {
           current_bg: { light_mode: 'rgba(240,245,253,1)', dark_mode: 'rgba(30,40,56,1)' },
           failure_bg: { light_mode: 'rgba(254,241,241,1)', dark_mode: 'rgba(64,32,32,1)' },
+          attention_bg: { light_mode: 'rgba(255,246,232,1)', dark_mode: 'rgba(66,48,24,1)' },
           trace_success: { light_mode: 'rgba(46,161,33,1)', dark_mode: 'rgba(118,204,142,1)' },
-          trace_failure: { light_mode: 'rgba(163,77,0,1)', dark_mode: 'rgba(255,178,102,1)' },
           trace_running: { light_mode: 'rgba(36,91,219,1)', dark_mode: 'rgba(124,202,242,1)' }
         } },
         summary: { content: summaryTitle }
@@ -981,8 +1051,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ]
       }
     };
-    // 完成后的过程卡是一行回执，不带标题栏：群里一个任务只留结果卡这一张「重」卡。
-    if (isProcessCard && state === 'completed') return baseCard;
+    // 结束后的过程卡是一行回执，不带标题栏：群里一个任务只留结果卡这一张「重」卡。
+    if (collapsedProcess) return baseCard;
     return {
       ...baseCard,
       header: {
@@ -990,11 +1060,11 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         // 副标题只承载「谁在跑这个任务」。执行宿主（Claude Code / Codex / …）会改变
         // 读者怎么理解结果、去哪排查，是这一行唯一有信息量的东西；
         // 「· Agent 任务」每张卡都一样，只会把它冲淡。页脚不再重复第二遍。
-        subtitle: { tag: 'plain_text', content: agentName },
+        subtitle: { tag: 'plain_text', content: isProcessCard || isResultCard ? headerSubtitle(userStatus.reason) : agentName },
         // 任务卡的状态放在标题栏右侧：扫一眼就知道「在跑 / 等人 / 结束了没有」，正文里不再另起一行说。
         // 审批、提问这类通用卡片仍由正文状态行表达。
-        ...(isProcessCard || isResultCard ? { text_tag_list: [{ tag: 'text_tag', text: { tag: 'plain_text', content: statusLabel }, color: waitingForApproval ? 'orange' : presentation.tagColor }] } : {}),
-        template: waitingForApproval ? 'orange' : presentation.template,
+        ...(isProcessCard || isResultCard ? { text_tag_list: [{ tag: 'text_tag', text: { tag: 'plain_text', content: statusLabel }, color: userStatus.tagColor }] } : {}),
+        template: isProcessCard || isResultCard ? userStatus.template : waitingForApproval ? 'orange' : presentation.template,
         padding: '10px 12px 8px 12px'
       }
     };
@@ -1062,25 +1132,28 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const hardFallbackOmission = { tag: 'markdown', element_id: 'dutydeck_hard_fallback_omission', content: `卡片内容超过飞书安全预算，详细内容已收起。${hardFallbackHint}`, text_size: 'normal' };
   if (isProcessCard || isResultCard) {
     // 与正常布局同形：状态在标题栏标签里，完成的过程卡只留一行回执、不带标题栏。
-    const statusLabel = statusTagLabel(waitingForApproval);
-    const receiptOnly = isProcessCard && state === 'completed';
-    const meta = !receiptOnly && elapsedSeconds > 0
-      ? [{ tag: 'markdown', element_id: 'task_meta', content: grey(`${state === 'queued' ? '排队等待' : '用时'} ${elapsedLabel(elapsedSeconds)}`), text_size: 'notation', margin: '0px' }]
+    const userStatus = userStatusFor(waitingForApproval);
+    const statusLabel = userStatus.label;
+    const receiptOnly = collapsedProcess;
+    const metaText = userStatus.stopped ? stoppedText
+      : elapsedSeconds > 0 ? `${state === 'queued' ? '排队等待' : '用时'} ${larkElapsedLabel(elapsedSeconds)}` : undefined;
+    const meta = !receiptOnly && metaText
+      ? [{ tag: 'markdown', element_id: 'task_meta', content: grey(metaText), text_size: 'notation', margin: '0px' }]
       : [];
     return {
       schema: '2.0',
       ...(receiptOnly ? {} : { header: {
         title: { tag: 'plain_text', content: clipTitleWidth(compactTaskName || 'Dutydeck') },
-        subtitle: { tag: 'plain_text', content: agentName },
-        text_tag_list: [{ tag: 'text_tag', text: { tag: 'plain_text', content: statusLabel }, color: waitingForApproval ? 'orange' : presentation.tagColor }],
-        template: waitingForApproval ? 'orange' : presentation.template,
+        subtitle: { tag: 'plain_text', content: headerSubtitle(userStatus.reason) },
+        text_tag_list: [{ tag: 'text_tag', text: { tag: 'plain_text', content: statusLabel }, color: userStatus.tagColor }],
+        template: userStatus.template,
         padding: '10px 12px 8px 12px'
       } }),
       config: { update_multi: true, width_mode: 'default', streaming_mode: false, summary: { content: `${statusLabel} · ${taskName}` } },
       body: {
         direction: 'vertical', padding: '10px 12px',
         elements: [
-          ...(receiptOnly ? [{ tag: 'markdown', element_id: 'task_overview', content: "<font color='green'>已完成</font>", text_size: 'normal', margin: '0px', icon: { tag: 'standard_icon', token: 'done_outlined', color: 'green' } }] : []),
+          ...(receiptOnly ? [{ tag: 'markdown', element_id: 'task_overview', content: `<font color='${state === 'completed' ? 'green' : state === 'failed' ? 'red' : 'grey'}'>${statusLabel}</font>`, text_size: 'normal', margin: '0px', icon: { tag: 'standard_icon', token: state === 'completed' ? 'done_outlined' : 'close_outlined', color: state === 'completed' ? 'green' : state === 'failed' ? 'red' : 'grey' } }] : []),
           hardFallbackOmission,
           ...(detailButton ? [detailButton] : []),
           ...meta
@@ -1095,7 +1168,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     body: {
       direction: 'vertical', padding: '10px 12px',
       elements: [
-        { tag: 'markdown', content: `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>${elapsedSeconds > 0 ? `　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>` : ''}`, text_size: 'small' },
+        { tag: 'markdown', content: `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>${elapsedSeconds > 0 ? `　<font color='grey'>已用时 ${larkElapsedLabel(elapsedSeconds)}</font>` : ''}`, text_size: 'small' },
         hardFallbackOmission,
         ...(detailButton ? [detailButton] : [])
       ]
@@ -1458,7 +1531,10 @@ export class LarkCardService {
   async replyImage(input: LarkMediaReplyInput): Promise<LarkMessageResult> { return this.replyMedia(input, 'image', { image_key: required(input.imageKey, 'imageKey') }); }
 
   private async uploadMedia(path: string, field: string, typeField: string, type: string, input: LarkUploadInput, responseKey: string) {
-    const form = new FormData(); form.append(typeField, type); form.append(field, new Blob([input.data]), required(input.filename, 'filename'));
+    const form = new FormData(); form.append(typeField, type);
+    // 飞书的文件上传接口要求 file_name 表单字段，只写在文件部件的文件名里时，群里看到的附件名是随机 UUID。
+    if (field === 'file') form.append('file_name', required(input.filename, 'filename'));
+    form.append(field, new Blob([input.data]), required(input.filename, 'filename'));
     const payload = await this.requestForm(path, form);
     const key = payload.data?.[responseKey];
     if (!key) throw new LarkServiceError('INVALID_LARK_RESPONSE', `Lark upload response did not include ${responseKey}`, 502);

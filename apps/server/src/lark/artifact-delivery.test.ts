@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, rename, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { execFile as execFileCallback } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,26 +25,49 @@ function configs(values = new Map<string, string>()) { return { get: async (k: s
 const execFile = promisify(execFileCallback);
 
 describe('artifact delivery', () => {
-  it('reads original bytes only from the canonical workspace and rejects escapes', async () => {
+  // 系统临时目录本身也是允许发送的范围，「范围外」要选一个既不在会话目录、也不在临时目录下的位置：仓库工作目录。
+  const outsideDir = () => mkdtemp(join(process.cwd(), '.artifact-outside-'));
+
+  it('reads original bytes only from the workspace or the system temp directory and rejects escapes', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); await mkdir(join(cwd, 'nested'));
-    const bytes = new Uint8Array([0, 255, 1, 2]); await writeFile(join(cwd, 'nested', 'a.bin'), bytes); await writeFile(join(tmpdir(), 'dutydeck-outside.bin'), 'x');
-    await expect(readArtifact(cwd, 'nested/a.bin', false)).resolves.toMatchObject({ data: bytes, fingerprint: createHash('sha256').update(bytes).digest('hex') });
-    await expect(readArtifact(cwd, '../dutydeck-outside.bin', false)).rejects.toMatchObject({ code: 'ARTIFACT_PATH_OUT_OF_SCOPE' });
-    await symlink(join(tmpdir(), 'dutydeck-outside.bin'), join(cwd, 'escape'));
-    await expect(readArtifact(cwd, 'escape', false)).rejects.toMatchObject({ code: 'ARTIFACT_PATH_OUT_OF_SCOPE' });
+    const outside = await outsideDir();
+    try {
+      const bytes = new Uint8Array([0, 255, 1, 2]); await writeFile(join(cwd, 'nested', 'a.bin'), bytes); await writeFile(join(outside, 'outside.bin'), 'x');
+      await expect(readArtifact(cwd, 'nested/a.bin', false)).resolves.toMatchObject({ data: bytes, fingerprint: createHash('sha256').update(bytes).digest('hex') });
+      await expect(readArtifact(cwd, join(outside, 'outside.bin'), false)).rejects.toMatchObject({ code: 'ARTIFACT_PATH_OUT_OF_SCOPE' });
+      await symlink(join(outside, 'outside.bin'), join(cwd, 'escape'));
+      await expect(readArtifact(cwd, 'escape', false)).rejects.toMatchObject({ code: 'ARTIFACT_PATH_OUT_OF_SCOPE' });
+    } finally { await rm(outside, { recursive: true, force: true }); }
+  });
+
+  it('delivers a file under the system temp directory, but not through a symlink that leaves it', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); const sibling = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-sibling-'));
+    const outside = await outsideDir();
+    try {
+      await writeFile(join(sibling, 'analysis.md'), '# 分析'); await writeFile(join(outside, 'secret.md'), 'secret');
+      await expect(readArtifact(cwd, join(sibling, 'analysis.md'), false)).resolves.toMatchObject({ filename: 'analysis.md' });
+      // 临时目录里的符号链接指向范围外时，按解析后的真实路径判断，仍然拒绝。
+      await symlink(join(outside, 'secret.md'), join(sibling, 'leak.md'));
+      await expect(readArtifact(cwd, join(sibling, 'leak.md'), false)).rejects.toMatchObject({ code: 'ARTIFACT_PATH_OUT_OF_SCOPE' });
+      // 大小限制不变。
+      await writeFile(join(sibling, 'big.bin'), new Uint8Array(10 * 1024 * 1024 + 1));
+      await expect(readArtifact(cwd, join(sibling, 'big.bin'), true)).rejects.toMatchObject({ code: 'ARTIFACT_TOO_LARGE' });
+    } finally { await rm(outside, { recursive: true, force: true }); }
   });
 
   it('rejects a swapped parent directory before upload can read an outside file', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); const outside = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-outside-'));
-    await mkdir(join(cwd, 'sub')); await writeFile(join(cwd, 'sub', 'report.txt'), 'inside'); await writeFile(join(outside, 'report.txt'), 'outside');
-    const client = { uploadFile: vi.fn(), uploadImage: vi.fn(), sendFile: vi.fn(), sendImage: vi.fn() };
-    // This hook is installed by the fs mock below immediately before open(),
-    // after readArtifact has canonicalized cwd/sub/report.txt.
-    fsHook.beforeOpen = async () => { await rename(join(cwd, 'sub'), join(cwd, 'kept')); await symlink(outside, join(cwd, 'sub')); };
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); const outside = await outsideDir();
     try {
-      await expect(deliverArtifact({ configs: configs(), sessionId: 'ses_swap', cwd, client, path: 'sub/report.txt', target: { chatId: 'oc_group' }, image: false })).rejects.toMatchObject({ code: 'ARTIFACT_PATH_OUT_OF_SCOPE' });
-      expect(client.uploadFile).not.toHaveBeenCalled();
-    } finally { fsHook.beforeOpen = undefined; }
+      await mkdir(join(cwd, 'sub')); await writeFile(join(cwd, 'sub', 'report.txt'), 'inside'); await writeFile(join(outside, 'report.txt'), 'outside');
+      const client = { uploadFile: vi.fn(), uploadImage: vi.fn(), sendFile: vi.fn(), sendImage: vi.fn() };
+      // This hook is installed by the fs mock below immediately before open(),
+      // after readArtifact has canonicalized cwd/sub/report.txt.
+      fsHook.beforeOpen = async () => { await rename(join(cwd, 'sub'), join(cwd, 'kept')); await symlink(outside, join(cwd, 'sub')); };
+      try {
+        await expect(deliverArtifact({ configs: configs(), sessionId: 'ses_swap', cwd, client, path: 'sub/report.txt', target: { chatId: 'oc_group' }, image: false })).rejects.toMatchObject({ code: 'ARTIFACT_PATH_OUT_OF_SCOPE' });
+        expect(client.uploadFile).not.toHaveBeenCalled();
+      } finally { fsHook.beforeOpen = undefined; }
+    } finally { await rm(outside, { recursive: true, force: true }); }
   });
 
   it('uses a persisted upload key after send failure and never sends a duplicate success', async () => {

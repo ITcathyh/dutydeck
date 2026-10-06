@@ -70,7 +70,7 @@ describe('compactTrace 精简过程卡', () => {
     expect(done.columns).toHaveLength(1);
     expect(done.columns[0].elements[0]).toMatchObject({ content: '先看配置文件。', icon: { token: 'done_outlined', color: 'grey' } });
     expect(failed).toMatchObject({ tag: 'column_set', element_id: 'trace_group_1' });
-    expect(failed.columns[0].elements[0].icon).toMatchObject({ token: 'close_outlined', color: 'red' });
+    expect(failed.columns[0].elements[0].icon).toMatchObject({ token: 'close_outlined', color: 'grey' });
 
     // 当前阶段保持 interactive_container 约定，不再套底色。
     const current = groups[2]!;
@@ -80,13 +80,14 @@ describe('compactTrace 精简过程卡', () => {
     expect(title.content).toBe('**根据失败信息修复。**');
     expect(components(current).find(element => element.element_id === 'current_head').columns).toHaveLength(1);
     expect(components(current).find(element => element.element_id === 'current_elapsed')).toBeUndefined();
-    // 有旁白时另起一行写最新一步；它失败了就直接标红。
+    // 有旁白时另起一行写最新一步；它失败了用灰色标出（步骤级的失败不用醒目颜色）。
     expect(components(current).find(element => element.element_id === 'current_now').content)
-      .toBe("<font color='red'>失败：pnpm vitest run</font>");
+      .toBe("<font color='grey'>失败：运行测试：pnpm vitest run</font>");
     const steps = components(current).find(element => element.element_id === 'current_steps').content as string;
-    const counted = [...steps.matchAll(/<text_tag color='neutral'>[^<]+ (\d+)<\/text_tag>/g)].reduce((sum, match) => sum + Number(match[1]), 0);
+    const counted = [...steps.matchAll(/<text_tag color='neutral'>(?!失败)[^<]+ (\d+)<\/text_tag>/g)].reduce((sum, match) => sum + Number(match[1]), 0);
     expect(counted).toBe(2);
-    expect(steps).toContain("<text_tag color='red'>失败 1</text_tag>");
+    // 步骤级的失败不用红色，用中性标签。
+    expect(steps).toContain("<text_tag color='neutral'>失败 1</text_tag>");
     // 终端回显不渲染为独立条目，也不计入步骤数。
     expect(serialized).not.toContain('终端输出');
   });
@@ -97,11 +98,11 @@ describe('compactTrace 精简过程卡', () => {
       event(2, 'tool_call', t2, { id: 'b', name: 'Bash', input: { command: 'pnpm build' }, status: 'running', startedAt: t2 })
     ];
     const elements = renderLarkProcessElements(events, compactConfig, false);
-    expect(components(elements).find(element => element.element_id === 'current_title').content).toBe('**pnpm build**');
+    expect(components(elements).find(element => element.element_id === 'current_title').content).toBe('**运行命令：pnpm build**');
     expect(components(elements).some(element => element.element_id === 'current_now')).toBe(false);
 
     const card: any = buildLarkCard({ cardKind: 'process', state: 'running', taskName: '构建', elapsedSeconds: 9, elements });
-    expect(card.config.summary.content).toBe('执行中 · pnpm build');
+    expect(card.config.summary.content).toBe('进行中 · 运行命令：pnpm build');
   });
 
   it('完成态：每个阶段一行并带耗时，无工具条目', () => {
@@ -163,7 +164,7 @@ describe('compactTrace 精简过程卡', () => {
     expect(activityEl.content).toBe("<font color='grey'>最近活动 15:30</font>");
   });
 
-  it('awaitingAnswer 为 true 时，状态显示「等待回答」', () => {
+  it('awaitingAnswer 为 true 时，状态显示「需要你处理」，原因写在副标题', () => {
     const elements = renderLarkProcessElements(multiStageEvents, compactConfig, false);
     const card: any = buildLarkCard({
       cardKind: 'process',
@@ -173,8 +174,9 @@ describe('compactTrace 精简过程卡', () => {
       elements
     });
     expect(card.header.template).toBe('orange');
-    expect(card.header.text_tag_list[0].text.content).toBe('等待回答');
-    expect(card.config.summary.content).toContain('等待回答');
+    expect(card.header.text_tag_list[0].text.content).toBe('需要你处理');
+    expect(card.header.subtitle.content).toContain('等待回答');
+    expect(card.config.summary.content).toContain('需要你处理');
   });
 });
 

@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { larkInsideGitRepository } from './auto-verification.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -17,6 +19,27 @@ export async function readGitSnapshot(cwd: string): Promise<LarkGitSnapshot | un
     const head = (await git(['rev-parse', '--short', 'HEAD'])).trim();
     const lines = (await git(['status', '--short'])).split('\n').filter(line => line.trim().length > 0);
     return { branch, head, status: lines.slice(0, 10), statusTotal: lines.length };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 工作目录当前的代码状态签名：HEAD、未提交改动的文件清单和每个文件的增删行数合起来取摘要。
+ * 一轮开始和结束各取一次，两次不同就说明这一轮改了这个仓库（提交、改文件、新增文件都算）。
+ * 比整库内容指纹（验证记录用的那个）便宜得多，每一轮都取得起；.dutydeck 下的平台数据不算。
+ * 不是 git 仓库、git 失败或超时时返回 undefined，调用方按「不知道」处理。
+ */
+export async function readGitCodeSignature(cwd: string | undefined): Promise<string | undefined> {
+  // 不是仓库就不必起 git 进程：每一轮都会问到这里。
+  if (!cwd || !larkInsideGitRepository(cwd)) return undefined;
+  try {
+    const git = async (args: string[]) => (await execFileAsync('git', args, { cwd, timeout: 5000, maxBuffer: 16 * 1024 * 1024 })).stdout;
+    const platformData = /(?:^|[\s/])\.dutydeck(?:\/|$)/;
+    const head = (await git(['rev-parse', '--verify', 'HEAD'])).trim();
+    const status = (await git(['status', '--porcelain=v1', '-z'])).split('\0').filter(entry => entry && !platformData.test(entry));
+    const numstat = (await git(['diff', 'HEAD', '--numstat', '-z'])).split('\0').filter(entry => entry && !platformData.test(entry));
+    return createHash('sha256').update(JSON.stringify([head, status, numstat])).digest('hex');
   } catch {
     return undefined;
   }

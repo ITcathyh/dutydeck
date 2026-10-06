@@ -1318,14 +1318,16 @@ describe('Tag 群上下文按会话增量注入', () => {
 });
 
 describe('卡片标题', () => {
-  it('去掉开头对本机器人的 @，@ 别的机器人和正文里的 @ 保留', () => {
+  it('去掉所有对本机器人的 @ 和「[图片]」占位，@ 别的机器人保留', () => {
     expect(larkTaskTitle('@bdev-flash 详细总结下群聊', 'bdev-flash')).toBe('详细总结下群聊');
     expect(larkTaskTitle('@bdev-flash @bdev-flash  重跑一次', 'bdev-flash')).toBe('重跑一次');
     expect(larkTaskTitle('@other-bot 帮我看下', 'bdev-flash')).toBe('@other-bot 帮我看下');
     expect(larkTaskTitle('@bdev-flashy 帮我看下', 'bdev-flash')).toBe('@bdev-flashy 帮我看下');
-    expect(larkTaskTitle('请 @bdev-flash 看下', 'bdev-flash')).toBe('请 @bdev-flash 看下');
-    // 只有 @ 没有正文时保留原话，标题不能是空的；没有机器人名时不动。
-    expect(larkTaskTitle('@bdev-flash', 'bdev-flash')).toBe('@bdev-flash');
+    expect(larkTaskTitle('请 @bdev-flash 看下', 'bdev-flash')).toBe('请 看下');
+    expect(larkTaskTitle('@bdev-flash [图片]', 'bdev-flash')).toBe('新请求');
+    expect(larkTaskTitle('@bdev-flash 看下这张图 [图片] 和 [图片]', 'bdev-flash')).toBe('看下这张图 和');
+    // 只有 @ 或占位、没有正文时给个中性的名字，标题不能是空的；没有机器人名时不动。
+    expect(larkTaskTitle('@bdev-flash', 'bdev-flash')).toBe('新请求');
     expect(larkTaskTitle('@bdev-flash 做事')).toBe('@bdev-flash 做事');
     expect(larkTaskTitle(`@bdev-flash ${'长'.repeat(100)}`, 'bdev-flash')).toHaveLength(80);
   });

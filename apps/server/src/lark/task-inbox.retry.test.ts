@@ -38,7 +38,7 @@ async function harness(firstCardFailures: number) {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-first-card-retry-'));
   const repositories = createRepositories(join(directory, 'state.db'));
   await repositories.config.set(larkBotsConfigKey, JSON.stringify([config]));
-  const session = { id: 'ses_first_card', agentId: 'codex', state: 'idle', cwd: '/tmp', protocol: 'acp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
+  const session = { id: 'ses_first_card', agentId: 'codex', state: 'idle', cwd: '/', protocol: 'acp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
   const listeners: Array<(event: AgentEvent) => void> = [];
   const runtime = {
     start: vi.fn(async () => session), getSession: vi.fn(async () => session),

@@ -436,10 +436,10 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
   }
 
   /**
-   * 一键续问：等同于操作人在原话题里回复一条固定文本。飞书回复接口只认真实消息，而任务的过程卡、
-   * 结果投递与重启恢复都锚在「发起请求的那条消息」上，所以先由机器人在结果卡下代发这段话，
-   * 再把它当作操作人的消息交给 handle，唤醒、授权、排队与会话复用全部走原路。
-   * 请求原文与所属 scope 预先写进 inbox：handle 不会按代发消息的形态重新解析它，续问一定回到这张卡的会话。
+   * 一键续问：等同于操作人在原话题里回复结果卡一条固定文本。飞书回复接口只认真实消息，而任务的过程卡、
+   * 结果投递与重启恢复都锚在「发起请求的那条消息」上，所以把结果卡本身当作这条消息，
+   * 把固定文本当作操作人的消息交给 handle，唤醒、授权、排队与会话复用全部走原路；话题里不再多出一条回显。
+   * 请求原文与所属 scope 预先写进 inbox：handle 不会按这条消息的形态重新解析它，续问一定回到这张卡的会话。
    */
   protected async submitResultFollowUp(parsed: LarkCardActionValue, operatorOpenId?: string, context?: { messageId?: string; chatId?: string }) {
     try {
@@ -455,36 +455,31 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       const store = this.workflowOptions.store!;
       const label = larkCardActionLabel(parsed.action, capabilities)!;
       const prompt = larkCardFollowUpPrompt(parsed.action)!;
-      const digest = resultActionDigest(task.id, task.turn, parsed.action);
+      // 一张结果卡只能续问一次（不分哪个按钮）：新一轮挂在这张卡下面，卡的消息 ID 就是它的锚点。
+      const digest = resultActionDigest(task.id, task.turn, 'follow_up');
       const key = followUpClaimKey(config.appId, digest);
-      const duplicate = { type: 'warning', content: `「${label}」已经提交过，请看下方的新一轮结果。` };
+      const duplicate = { type: 'warning', content: '这张卡已经提交过一次追问，请看下方的新一轮结果。' };
       const busy = { type: 'warning', content: `「${label}」正在提交，请勿重复点击。` };
       const raw = await store.get(key);
       const previous = raw ? JSON.parse(raw) as LarkFollowUpClaim : undefined;
       // 重复点击、回调重投、重启后再点都落在这里：本进程正在做的只回执，上个进程留下的未完成认领由这次点击接手。
       if (previous?.phase === 'submitted') return duplicate;
       if (previous?.phase === 'claimed' && previous.boot === this.relaunchBoot) return busy;
-      // 代发的消息已经登记进 inbox：重启恢复会接着处理它，这里只补记阶段，不提交第二次。
+      // 已经登记进 inbox：重启恢复会接着处理它，这里只补记阶段，不提交第二次。
       if (previous?.message_id && await store.get(`lark.inbox.${config.appId}.${previous.message_id}`)) {
         await store.compareAndSet!(key, raw, JSON.stringify({ ...previous, phase: 'submitted' }));
         return duplicate;
       }
-      let claim: LarkFollowUpClaim = { boot: this.relaunchBoot, phase: 'claimed', operator_open_id: operator, claimed_at: new Date().toISOString(),
-        ...(previous?.message_id ? { message_id: previous.message_id } : {}) };
+      const claim: LarkFollowUpClaim = { boot: this.relaunchBoot, phase: 'claimed', operator_open_id: operator, claimed_at: new Date().toISOString(),
+        message_id: target.resultMessageId };
       if (!await store.compareAndSet!(key, raw, JSON.stringify(claim))) return busy;
       let event: LarkMessageEvent;
       let seeded: boolean;
       try {
-        // 上次已代发、没来得及登记的，沿用那条消息，不发第二条。
-        if (!claim.message_id) {
-          const echo = await this.service.replyText({ messageId: target.resultMessageId, ...(saved.thread_id ? { replyInThread: true } : {}),
-            text: `「${label}」${prompt}`, idempotencyKey: `followup_${digest}` });
-          const sent: LarkFollowUpClaim = { ...claim, message_id: echo.messageId };
-          if (!await store.compareAndSet!(key, JSON.stringify(claim), JSON.stringify(sent))) throw new Error('续问认领已被接手。');
-          claim = sent;
-        }
+        // 不在话题里回显一条「「再详细点」+提示词」：新一轮直接作为对结果卡的回复，锚在结果卡上，
+        // 唤醒、授权、排队与会话复用仍走原路，标题由 larkTaskTitle 按按钮名给出（「对外回复版」「详细版」）。
         event = {
-          messageId: claim.message_id!, chatId: saved.chat_id, chatType: saved.chat_type ?? 'group',
+          messageId: target.resultMessageId, chatId: saved.chat_id, chatType: saved.chat_type ?? 'group',
           ...(saved.thread_id ? { threadId: saved.thread_id } : {}), createTime: String(Date.now()),
           messageType: 'text', content: JSON.stringify({ text: `@_user_1 ${prompt}` }), senderOpenId: operator, senderType: 'user',
           // 按钮本身就是对机器人说话：带上 @机器人，唤醒走显式 @ 的原路，不必为 mentionPolicy 特判。
@@ -492,7 +487,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
         };
         seeded = await this.inbox.seed(config.appId, event, { prompt, scopeId: target.scopeId, resources: [] });
       } catch (error) {
-        // 没能登记成待处理消息：认领记为失败，用户能再点一次。已代发的消息号留在认领里，重点时沿用。
+        // 没能登记成待处理消息：认领记为失败，用户能再点一次。
         await store.compareAndSet!(key, JSON.stringify(claim), JSON.stringify({ ...claim, phase: 'failed' })).catch(() => undefined);
         throw error;
       }
@@ -602,10 +597,10 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
    * 唯一例外是工作区第一次跑完任务时带上推断出的候选命令，只提议保存，不给「运行验证」。
    * canRun 与 canVerify 是同一个判断，渲染端与回调端因此不可能给出不同答案。
    */
-  protected async verificationView(task: LarkTask, config: StoredLarkConfig, state: LarkCardActionState): Promise<{ element?: LarkCardElement; canRun: boolean; capabilities: Pick<LarkCardCapabilities, 'canVerify' | 'verificationSuggestion'> }> {
+  protected async verificationView(task: LarkTask, config: StoredLarkConfig, state: LarkCardActionState, changedCode = false): Promise<{ element?: LarkCardElement; canRun: boolean; capabilities: Pick<LarkCardCapabilities, 'canVerify' | 'verificationSuggestion'> }> {
     const command = config.verificationCommand?.trim();
     if (!command) {
-      const suggestion = state === 'completed' ? await this.verificationSuggestion(task, config).catch(error => {
+      const suggestion = state === 'completed' ? await this.verificationSuggestion(task, config, changedCode).catch(error => {
         this.log.warn({ error, taskId: task.id }, '推断候选验证命令失败，结果卡不提议');
         return undefined;
       }) : undefined;
@@ -674,12 +669,14 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
   }
 
   /**
-   * 没配验证命令的机器人，在工作区第一次有任务跑完时提议一个候选命令（只读基准上的项目文件推断）。
+   * 没配验证命令的机器人，在工作区第一次有改了代码的任务跑完时提议一个候选命令（只读基准上的项目文件推断）。
    * 每个工作区只推断一次：登记键先认领再推断，之后的结果卡只读一次登记键，不再起 git 进程。
    * 结论随 final_card_input 落库，之后的重绘与回调都读这个结论。
    */
-  private async verificationSuggestion(task: LarkTask, config: StoredLarkConfig): Promise<string | undefined> {
+  private async verificationSuggestion(task: LarkTask, config: StoredLarkConfig, changedCode: boolean): Promise<string | undefined> {
     if (task.finalCardInput) return (task.finalCardInput.capabilities as LarkCardCapabilities | undefined)?.verificationSuggestion;
+    // 只有本轮改了代码才提议保存验证命令：问答、排查类的轮次出现这个按钮是噪声。
+    if (!changedCode) return undefined;
     const store = this.workflowOptions.store;
     if (!store?.compareAndSet || !task.sessionId || !this.runtime.runVerification) return undefined;
     const session = await this.runtime.getSession(task.sessionId);

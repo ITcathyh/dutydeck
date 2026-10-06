@@ -29,13 +29,13 @@
                   "light_mode": "rgba(254,241,241,1)",
                   "dark_mode": "rgba(64,32,32,1)"
                 },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
                 "trace_success": {
                   "light_mode": "rgba(46,161,33,1)",
                   "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
                 },
                 "trace_running": {
                   "light_mode": "rgba(36,91,219,1)",
@@ -44,7 +44,7 @@
               }
             },
             "summary": {
-              "content": "已接收 · 总结一下这周的发布情况"
+              "content": "进行中 · 总结一下这周的发布情况"
             }
           },
           "body": {
@@ -93,19 +93,19 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock"
+              "content": "Mock · 排队中"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "已接收"
+                  "content": "进行中"
                 },
-                "color": "neutral"
+                "color": "blue"
               }
             ],
-            "template": "grey",
+            "template": "blue",
             "padding": "10px 12px 8px 12px"
           }
         }
@@ -129,13 +129,13 @@
                   "light_mode": "rgba(254,241,241,1)",
                   "dark_mode": "rgba(64,32,32,1)"
                 },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
                 "trace_success": {
                   "light_mode": "rgba(46,161,33,1)",
                   "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
                 },
                 "trace_running": {
                   "light_mode": "rgba(36,91,219,1)",
@@ -144,7 +144,7 @@
               }
             },
             "summary": {
-              "content": "已完成 · 总结一下这周的发布情况"
+              "content": "完成 · 总结一下这周的发布情况"
             }
           },
           "body": {
@@ -155,7 +155,7 @@
               {
                 "tag": "markdown",
                 "element_id": "task_overview",
-                "content": "<font color='green'>已完成</font><font color='grey'> · 结果见下条</font>",
+                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
                 "text_size": "normal",
                 "margin": "0px",
                 "icon": {
@@ -198,13 +198,13 @@
                   "light_mode": "rgba(254,241,241,1)",
                   "dark_mode": "rgba(64,32,32,1)"
                 },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
                 "trace_success": {
                   "light_mode": "rgba(46,161,33,1)",
                   "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
                 },
                 "trace_running": {
                   "light_mode": "rgba(36,91,219,1)",
@@ -213,7 +213,7 @@
               }
             },
             "summary": {
-              "content": "运行完成 · 总结一下这周的发布情况"
+              "content": "工作已完成"
             }
           },
           "body": {
@@ -346,7 +346,7 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "总结一下这周的发布情况"
+              "content": "工作已完成"
             },
             "subtitle": {
               "tag": "plain_text",
@@ -357,7 +357,7 @@
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "运行完成"
+                  "content": "完成"
                 },
                 "color": "green"
               }

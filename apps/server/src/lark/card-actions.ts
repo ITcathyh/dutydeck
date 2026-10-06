@@ -163,6 +163,8 @@ type LarkCardActionDefinition = {
   retired?: boolean;
   /** 一键续问提交的固定文本：点击等同于在原话题里回复这段话。 */
   prompt?: string;
+  /** 续问那一轮的过程卡、结果卡标题：标题不用那段固定提示词。 */
+  title?: string;
   /** 文案要带入能力里的数据时使用（目前只有定时按钮的 HH:MM）。 */
   dynamicLabel?: (capabilities: LarkCardCapabilities) => string;
   /** 是否为该状态的唯一主操作；主操作排在最前，视觉上最突出。 */
@@ -254,7 +256,9 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     states: ['completed'],
     capable: capabilities => Boolean(capabilities.verificationSuggestion?.trim()),
     primary: false,
-    readOnlyReceipt: true
+    readOnlyReceipt: true,
+    // 不是这一轮要读者做的主要操作：放在卡片底部的操作区，不占顶部。
+    followUpRow: true
   },
   {
     action: 'steer_promote',
@@ -349,6 +353,7 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     readOnlyReceipt: true,
     followUpRow: true,
     retired: true,
+    title: '大白话版',
     prompt: '用不含术语的大白话重新说一遍上面的结论：先一句话说结论，再说影响和要不要处理。不要重新调查。'
   },
   {
@@ -363,6 +368,7 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     primary: false,
     readOnlyReceipt: true,
     followUpRow: true,
+    title: '对外回复版',
     prompt: '根据上面的结论，写一段可以直接转发给同事或群里的回复：三到五句，先说结论和影响，再说需要对方做什么；不含代码路径和命令。不要重新调查。'
   },
   {
@@ -377,6 +383,7 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     primary: false,
     readOnlyReceipt: true,
     followUpRow: true,
+    title: '详细版',
     prompt: '在上面结论的基础上展开细节和证据，补充你认为不够确定的地方。'
   },
   {
@@ -486,6 +493,12 @@ export function isLarkCardFollowUpPrompt(text: string): boolean {
   return larkCardActionDefinitions.some(definition => definition.prompt === resolved);
 }
 
+/** 这段文本是某个续问按钮代发的固定提示词时，返回那一轮的标题（「对外回复版」「详细版」）；否则 undefined。 */
+export function larkCardFollowUpTitle(text: string): string | undefined {
+  const resolved = text.trim();
+  return larkCardActionDefinitions.find(definition => definition.prompt === resolved)?.title;
+}
+
 /** 按钮文案：带时刻的定时按钮用动态文案，其余一律是静态常量。 */
 export function larkCardActionLabel(action: LarkCardActionName, capabilities: LarkCardCapabilities): string | undefined {
   const definition = definitionFor(action);
@@ -572,6 +585,25 @@ export function buildLarkCardFollowUpActions(context: LarkCardActionContext): La
     });
   }
   return elements.slice(0, larkCardActionBudget.maxButtons);
+}
+
+/**
+ * 「继续」：一轮因长时间没有输出被停掉后，在原对话里接着做。
+ * 动作 id 由恢复流程在本文件的能力表里注册并处理；这里只负责把按钮画出来，不依赖那条注册。
+ */
+export const LARK_CONTINUE_IN_PLACE_ACTION = 'continue_in_place';
+export function buildLarkContinueButton(context: { taskId: string; turn: number }): LarkCardElement | undefined {
+  const taskId = normalizedTaskId(context.taskId);
+  if (!taskId) return undefined;
+  return {
+    tag: 'button',
+    text: { tag: 'plain_text', content: '继续' },
+    type: 'primary_text',
+    icon: { tag: 'standard_icon', token: 'repeat_outlined', color: 'blue' },
+    behaviors: [{ type: 'callback', value: { action: LARK_CONTINUE_IN_PLACE_ACTION, task_id: taskId, turn: String(normalizedTurn(context.turn)) } }],
+    margin: '0px',
+    element_id: LARK_CONTINUE_IN_PLACE_ACTION
+  };
 }
 
 /**

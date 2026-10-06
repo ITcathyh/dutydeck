@@ -302,6 +302,7 @@ const traceElapsed = (startedAt?: string, completedAt?: string) => {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
+  if (minutes >= 60) return minutes % 60 ? `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分` : `${Math.floor(minutes / 60)} 小时`;
   return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
 };
 const escapeCardInline = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -389,16 +390,27 @@ const toolPresentation = (entry: TraceEntry) => {
   // ['path','file_path'] 递归到 a.ts 判成 true，标题就退化成一个裸的 /srv/repo。
   const selfEvidentDetail = Boolean(command || url || (path && path === firstValue(data.input, ['path', 'file_path'])));
   const status = String(data.status ?? (entry.type === 'tool_result' ? 'completed' : 'running')).toLowerCase();
-  const failed = /fail|error|reject|cancel/.test(status);
+  // grep / rg / find / test 这类命令「没有匹配」时以非零码退出，那是答案不是故障：
+  // 命令属于这一类、输出里又没有报错字样时，不按失败算。
+  const outputText = data.output === undefined ? '' : typeof data.output === 'string' ? data.output : JSON.stringify(data.output);
+  const noMatchExit = /^(?:sudo\s+)?(?:grep|egrep|fgrep|rg|find|test|\[|diff|cmp)(?:\s|$)/.test(stripEnvAssignments(command ?? '').trim())
+    || /^(?:grep|glob|search)$/.test(normalized);
+  const benignNonZeroExit = /fail|error/.test(status) && noMatchExit
+    && !/(?:error|fatal|denied|no such file|not found|cannot|can't|invalid|unrecognized|usage:|timed? ?out)/i.test(outputText);
+  const failed = /fail|error|reject|cancel/.test(status) && !benignNonZeroExit;
   const running = /running|pending|started|in_progress/.test(status);
+  // 步骤标题只用人话：英文的工具描述（"Search for … in home directory"）不进标题，
+  // 中文描述保留——它比「分类 + 命令」更能说清这一步在做什么。
+  const readableDescription = description && /[\u4e00-\u9fff]/.test(description) ? description : undefined;
   return {
     kind,
     action: redactTraceText(action),
-    description: description ? redactTraceText(description) : description,
+    description: readableDescription ? redactTraceText(readableDescription) : undefined,
     detail,
     statusLabel: failed ? '失败' : running ? '执行中' : '已完成',
     statusColor: failed ? 'yellow' : running ? 'orange' : 'green',
-    indicatorColor: failed ? 'trace_failure' : running ? 'trace_running' : 'trace_success',
+    // 普通的工具失败不用醒目颜色：任务真的失败时有红色标题栏，步骤级的失败只是过程。
+    indicatorColor: failed ? 'grey' : running ? 'trace_running' : 'trace_success',
     elapsed: traceElapsed(data.startedAt ?? entry.timestamp, running ? undefined : data.completedAt ?? entry.timestamp),
     selfEvidentDetail,
     fullDetail,
@@ -414,11 +426,23 @@ const toolPresentation = (entry: TraceEntry) => {
 
 type ToolPresentation = ReturnType<typeof toolPresentation>;
 
-// 一句话说清这一步在做什么：工具自带的描述优先，其次是自解释的命令/路径，最后才是分类名。
-// 与 toolPanel 的标题同一套取舍，只是不转义——调用方各自按落点转义。
+// 一句话说清这一步在做什么：中文描述优先，其次是「分类：关键对象」（运行命令：bytedcli babi bill cost list），
+// 对象说不清自己时只写分类名。与 toolPanel 的标题同一套取舍，只是不转义——调用方各自按落点转义。
 const toolHeadline = (tool: ToolPresentation) => tool.description
-  || (tool.selfEvidentDetail ? tool.detail : '')
-  || tool.action;
+  || (tool.selfEvidentDetail && tool.detail ? `${tool.action}：${tool.detail}` : tool.action);
+
+// 步骤的计数与单位：「运行命令 31 次、读文件 12 个」。
+const toolKindCount: Record<TraceToolKind, [label: string, unit: string]> = {
+  command: ['运行命令', '次'], read: ['读文件', '个'], edit: ['改文件', '个'], search: ['搜索', '次'], web: ['联网', '次'],
+  git: ['Git 操作', '次'], test: ['运行测试', '次'], data: ['查询数据', '次'], agent: ['Agent 协作', '次'], tool: ['调用工具', '次']
+};
+
+// 最终没有恢复的失败：同一阶段里后面有同类调用成功的（失败后重试成功）不算。
+// 与 toolPresentation 里的「无匹配退出不算失败」合在一起，就是卡上「有失败」的全部来源。
+const unresolvedFailureFlags = (tools: ToolPresentation[]) => tools.map((tool, index) =>
+  tool.statusLabel === '失败' && !tools.slice(index + 1).some(next => next.kind === tool.kind && next.statusLabel === '已完成'));
+
+const groupToolEntries = (group: TraceGroup) => group.actions.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result');
 
 const toolKindLabel: Record<TraceToolKind, string> = {
   command: '命令', read: '读文件', edit: '改文件', search: '搜索', web: '网页',
@@ -536,13 +560,12 @@ const toolPanel = (entry: TraceEntry, index: string | number, margin = '0px 0px 
   // 此时「运行命令」这四个字正是唯一能说清那是工作目录的东西。
   const description = tool.description ? escapeCardInline(truncateInline(tool.description, 72)) : '';
   const detail = escapeCardInline(tool.detail || '');
-  const headline = description
-    || (tool.selfEvidentDetail ? detail : '')
-    || escapeCardInline(truncateInline(tool.action, 72));
+  const action = escapeCardInline(truncateInline(tool.action, 72));
+  const headline = description || (tool.selfEvidentDetail && detail ? `${action}：${detail}` : action);
   // 描述已经用人话说清这一步在做什么，后面再拼一段命令只是把同一件事用机器语言重讲，
   // 而它通常比描述长得多——标题被撑成两行，真正要读的那半句反倒退到第一行末尾。
   // 命令不会丢：它就在展开区的输入里。没有描述时命令仍要留在标题上，那时它是唯一线索。
-  const detailSuffix = detail && detail !== headline && !description ? `　<font color='grey'>${detail}</font>` : '';
+  const detailSuffix = detail && !tool.selfEvidentDetail && !description ? `　<font color='grey'>${detail}</font>` : '';
   const elapsedSuffix = tool.elapsed ? `　<font color='grey'>${tool.elapsed}</font>` : '';
   // 成功是默认预期。每条都点一个绿灯，等于把「没有异常」重复 N 遍，
   // 还会让真正需要人看的那一个失败灯淹在同色的一排里。只有失败和执行中值得占这个位置。
@@ -605,6 +628,20 @@ const traceGroups = (entries: TraceEntry[]): TraceGroup[] => {
   return groups;
 };
 
+// 没有 Agent 旁白的阶段（PTY 版 Agent 很少上报中间旁白）：148 步的任务展开后只有 1 行，什么也看不出来。
+// 结束后按「工具类别」自动分段，每段的标题写类别和第一个操作对象；运行中仍是一个阶段，当前阶段本来就在滚动。
+const splitGroupByToolKind = (group: TraceGroup): TraceGroup[] => {
+  if (group.narratives.length) return [group];
+  const kinds = [...new Set(groupToolEntries(group).map(entry => toolPresentation(entry).kind))];
+  if (kinds.length < 2) return [group];
+  const parts: TraceGroup[] = kinds.map(() => ({ narratives: [], actions: [] }));
+  for (const entry of group.actions) {
+    const isTool = entry.type === 'tool_call' || entry.type === 'tool_result';
+    parts[isTool ? kinds.indexOf(toolPresentation(entry).kind) : 0]!.actions.push(entry);
+  }
+  return parts;
+};
+
 const historyGroupPanel = (
   group: TraceGroup,
   index: number,
@@ -616,14 +653,15 @@ const historyGroupPanel = (
   const records = stageRecords(group.actions, keepScreenFallback);
   const tools = records.flatMap(record => record.kind === 'tool' ? [record.entry] : []);
   const statuses = tools.map(entry => toolPresentation(entry));
-  const failedCount = statuses.filter(item => item.statusLabel === '失败').length;
+  // 只标最终没有恢复的失败；失败后同类调用成功的不算。
+  const failedCount = unresolvedFailureFlags(statuses).filter(Boolean).length;
   const succeededCount = statuses.filter(item => item.statusLabel === '已完成').length;
   const runningCount = statuses.filter(item => item.statusLabel === '执行中').length;
   const hasFailed = failedCount > 0;
   const status = hasFailed && succeededCount > 0
-    ? { label: '有失败', color: 'trace_failure' }
+    ? { label: '有失败', color: 'grey' }
     : hasFailed
-      ? { label: '失败', color: 'trace_failure' }
+      ? { label: '失败', color: 'grey' }
       : runningCount > 0 ? { label: '执行中', color: 'trace_running' }
       : { label: '已完成', color: 'green' };
 
@@ -637,9 +675,9 @@ const historyGroupPanel = (
   // 「读取文件 · lark-cli im +chat-messages-list --chat-id oc_f34138…」：分类名重复了左边的
   // 图标，命令被截断在参数中间，三个不同的阶段因此渲染出三行几乎一样的标题。
   // 命令留在展开区，那里才是查细节的地方。
+  // 没有旁白的阶段（按工具类别自动分出来的段）带上这一类一共几次：「读文件：memory/MEMORY.md　等 12 个」。
   const mainTitle = narrativeText
-    || primaryTool?.description
-    || (primaryTool ? `${primaryTool.action}${primaryTool.selfEvidentDetail && primaryTool.detail ? ` · ${primaryTool.detail}` : ''}` : '')
+    || (primaryTool ? `${toolHeadline(primaryTool)}${statuses.length > 1 ? `　等 ${statuses.length} ${statuses.every(item => item.kind === primaryTool.kind) ? toolKindCount[primaryTool.kind][1] : '步'}` : ''}` : '')
     || (records.some(record => record.kind === 'terminal') ? '终端输出' : '')
     || (group.narratives.some(e => e.type === 'thinking') ? '分析与规划' : '执行过程');
 
@@ -666,7 +704,7 @@ const historyGroupPanel = (
         { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'top', elements: [{
           tag: 'markdown', content: `${preview}${suffix}`, text_size: 'notation', margin: '0px',
           icon: allFailed
-            ? { tag: 'standard_icon', token: 'close_outlined', color: 'red' }
+            ? { tag: 'standard_icon', token: 'close_outlined', color: 'grey' }
             : { tag: 'standard_icon', token: 'done_outlined', color: 'grey' }
         }] },
         ...(elapsed ? [{ tag: 'column', width: 'auto', vertical_align: 'top', elements: [
@@ -765,16 +803,15 @@ const currentRunningStagePanel = (group: TraceGroup, index: number, showFallback
   // 工具摘要的内容，再拼一次等于同一条命令连着出现两行。
   const currentTitle = narrativeText
     ? truncateInline(narrativeText, narrativeLimit)
-    : (primaryTool?.description ? truncateInline(primaryTool.description, 92)
-      : primaryTool ? primaryTool.action : '正在执行…');
+    : (primaryTool ? truncateInline(toolHeadline(primaryTool), 92) : '正在执行…');
 
-  const failedCount = toolPresentations.filter(item => item.statusLabel === '失败').length;
+  const failedCount = unresolvedFailureFlags(toolPresentations).filter(Boolean).length;
   const succeededCount = toolPresentations.filter(item => item.statusLabel === '已完成').length;
   const hasFailed = failedCount > 0;
   const stageStatus = hasFailed && succeededCount > 0
-    ? { label: '有失败', color: 'trace_failure' }
+    ? { label: '有失败', color: 'grey' }
     : hasFailed
-      ? { label: '失败', color: 'trace_failure' }
+      ? { label: '失败', color: 'grey' }
       : toolPresentations.some(item => item.statusLabel === '执行中') ? { label: '执行中', color: 'trace_running' }
       : { label: '已完成', color: 'green' };
 
@@ -810,7 +847,7 @@ const currentRunningStagePanel = (group: TraceGroup, index: number, showFallback
       elements.push({
         tag: 'markdown', element_id: 'current_now', text_size: 'notation', margin: indent,
         content: latest.statusLabel === '失败'
-          ? `<font color='red'>失败：${step}</font>`
+          ? `<font color='grey'>失败：${step}</font>`
           : `<font color='grey'>${latest.statusLabel === '执行中' ? '正在' : '最近一步'}：${step}</font>`
       });
     }
@@ -819,7 +856,7 @@ const currentRunningStagePanel = (group: TraceGroup, index: number, showFallback
       const counts = new Map<string, number>();
       for (const tool of toolPresentations) counts.set(toolKindLabel[tool.kind], (counts.get(toolKindLabel[tool.kind]) ?? 0) + 1);
       const chips = [...counts].map(([label, count]) => `<text_tag color='neutral'>${label} ${count}</text_tag>`);
-      if (failedCount > 0) chips.push(`<text_tag color='red'>失败 ${failedCount}</text_tag>`);
+      if (failedCount > 0) chips.push(`<text_tag color='neutral'>失败 ${failedCount}</text_tag>`);
       elements.push({ tag: 'markdown', element_id: 'current_steps', content: chips.join(' '), text_size: 'notation', margin: indent });
     }
     const activityClock = lastActivityAt ? shanghaiClock(lastActivityAt) : undefined;
@@ -890,7 +927,7 @@ const failureStepElement = (entry: TraceEntry): LarkCardElement => {
   const headline = toolHeadline(tool);
   const facts = [
     // 标题已经是这条命令/路径本身时不再重复一遍。
-    tool.selfEvidentDetail && tool.detail && tool.detail !== headline ? code(tool.detail) : '',
+    tool.selfEvidentDetail && tool.detail && !headline.includes(tool.detail) ? code(tool.detail) : '',
     tool.elapsed,
     errorLine ? `${alertLine ? '报错' : '输出末行'} ${code(truncateInline(errorLine, 120))}` : ''
   ].filter(Boolean).join(' · ');
@@ -988,6 +1025,33 @@ const contextPressureElement = (events: AgentEvent[]): LarkCardElement | undefin
   return { tag: 'markdown', element_id: 'context_hint', content: `${parts.join('，')}，可用 /new --handoff 带交接开新会话。`, text_size: 'notation', margin: '4px 0px 0px 0px' };
 };
 
+// 结束后的步骤计数：按类别从多到少，最多 4 类；最终没有恢复的失败另写一项。
+const toolCountSummary = (groups: TraceGroup[]) => {
+  const counts = new Map<TraceToolKind, number>();
+  let unresolved = 0;
+  for (const group of groups) {
+    const tools = groupToolEntries(group).map(toolPresentation);
+    for (const tool of tools) counts.set(tool.kind, (counts.get(tool.kind) ?? 0) + 1);
+    unresolved += unresolvedFailureFlags(tools).filter(Boolean).length;
+  }
+  const kinds = [...counts].sort((left, right) => right[1] - left[1]).slice(0, 4)
+    .map(([kind, count]) => `${toolKindCount[kind][0]} ${count} ${toolKindCount[kind][1]}`);
+  return [...kinds, ...(unresolved ? [`未恢复的失败 ${unresolved} 次`] : [])].join('、');
+};
+
+/** 一轮因「连续 N 分钟没有任何输出」被停止的原因码，由任务失败原因携带（分钟数跟在码后面）。 */
+export const LARK_AGENT_IDLE_TIMEOUT_CODE = 'AGENT_IDLE_TIMEOUT';
+function larkIdleTimeout(events: AgentEvent[]): { minutes?: number } | undefined {
+  for (const event of [...events].reverse()) {
+    if (event.type !== 'error' && event.type !== 'task') continue;
+    const text = JSON.stringify(event.data ?? {});
+    if (!text.includes(LARK_AGENT_IDLE_TIMEOUT_CODE)) continue;
+    const minutes = /AGENT_IDLE_TIMEOUT\D{0,12}(\d+)/.exec(text)?.[1] ?? /"(?:idleMinutes|idle_minutes|minutes)"\s*:\s*"?(\d+)/.exec(text)?.[1];
+    return minutes && Number(minutes) > 0 ? { minutes: Number(minutes) } : {};
+  }
+  return undefined;
+}
+
 export function renderLarkCardElements(
   events: AgentEvent[],
   config: Pick<StoredLarkConfig, 'traceLimit' | 'hideTraceOnComplete' | 'compactTrace'>,
@@ -995,7 +1059,9 @@ export function renderLarkCardElements(
   compensation = false,
   /** 保留入参以免改动全部调用点；下一步提示移除后渲染不再按会话类型分叉。 */
   _chatType?: string,
-  view: 'combined' | 'process' | 'result' = 'combined'
+  view: 'combined' | 'process' | 'result' = 'combined',
+  /** 结果卡按任务终态补内容：失败时带上最后没恢复的失败步骤；agentName 用于「没有任何输出」那句。 */
+  resultOptions: { state?: string; agentName?: string } = {}
 ): LarkCardElement[] {
   const effectiveLastActivityAt = events.at(-1)?.timestamp;
   const compact = config.compactTrace === true;
@@ -1013,6 +1079,7 @@ export function renderLarkCardElements(
   const lastActivityIndex = lastIndex(entry => entry.type !== 'text' && entry.type !== 'raw_terminal');
   const finalFollowsActivity = finalMessageIndex > lastActivityIndex;
   const finalMessage = finalMessageIndex >= 0 && finalFollowsActivity ? entries[finalMessageIndex] : undefined;
+  const idleTimeout = view === 'result' ? larkIdleTimeout(events) : undefined;
   const finalText = view === 'result' ? redactTraceText(String(finalMessage?.data.text ?? '')).trim() : truncateTrace(finalMessage?.data.text, 6_000);
   const activityEntries = entries.filter(entry => entry !== finalMessage || !finalFollowsActivity);
   const permissionEntries = activityEntries.filter(entry => entry.type === 'permission_request');
@@ -1022,7 +1089,7 @@ export function renderLarkCardElements(
   // 不控制卡片视觉密度；否则默认 50 会把运行态重新变成日志墙。
   // 若在 entry 级别切片，滑动窗口可能切断 group 边界，导致 group 数量随新事件到来而跳变。
   // 按 group 级别裁剪后，卡片始终保留最近且完整的阶段。
-  const allGroups = traceGroups(traceEntries);
+  const allGroups = completed ? traceGroups(traceEntries).flatMap(splitGroupByToolKind) : traceGroups(traceEntries);
   const groups = allGroups.slice(-visibleTraceGroupLimit);
   const omittedGroupCount = allGroups.length - groups.length;
   const elements: LarkCardElement[] = [];
@@ -1034,22 +1101,41 @@ export function renderLarkCardElements(
   elements.push(...errorEntries.map(errorAlert));
   if (finalText && view !== 'process') {
     elements.push({ tag: 'markdown', element_id: 'final_output', content: completed ? finalText : `**当前进展**\n\n${finalText}`, text_align: 'left', text_size: 'normal_v2', margin: '0px' });
+  } else if (completed && view !== 'process' && idleTimeout) {
+    // 一轮因长时间没有输出被停掉：原因写清楚，而不是「结果不完整」。「继续」按钮由 buildLarkCard 按这个 id 补上。
+    const silence = idleTimeout.minutes ? `${idleTimeout.minutes} 分钟` : '很长时间';
+    elements.push({
+      tag: 'markdown', element_id: 'execution_alert_idle_timeout', content: `${resultOptions.agentName?.trim() || 'Agent'} ${silence}没有任何输出，已停止`,
+      text_size: 'normal', margin: '6px 0px 8px 0px', icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'red' }
+    });
   } else if (completed && view !== 'process' && errorEntries.length === 0) {
     elements.push({ tag: 'markdown', element_id: 'result_missing', content: "<text_tag color='orange'>结果不完整</text_tag>　Agent 未返回最终输出，可直接要求 Agent 总结本轮结论。", text_size: 'normal', margin: '4px 0px' });
   }
   const contextHint = completed && view !== 'process' ? contextPressureElement(events) : undefined;
   if (contextHint) elements.push(contextHint);
 
-  if (view === 'result') return elements;
-
-  // 全部阶段的步骤总数（含卡上省略掉的更早阶段），由 service 放进底部那一行。
-  const toolCount = traceEntries.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result').length;
-  if (toolCount) elements.push({ tag: 'markdown', element_id: 'trace_steps', content: `共 ${toolCount} 步`, text_size: 'notation', margin: '0px' });
-  if (completed) {
-    const lastFailed = [...traceEntries].reverse().find(entry =>
-      (entry.type === 'tool_call' || entry.type === 'tool_result') && toolPresentation(entry).statusLabel === '失败');
-    if (lastFailed) elements.push(failureStepElement(lastFailed));
+  // 最后一个没有恢复的失败步骤（同一阶段里之后有同类调用成功的，不算）。
+  const lastUnresolvedFailure = (() => {
+    for (const group of [...allGroups].reverse()) {
+      const tools = groupToolEntries(group);
+      const flags = unresolvedFailureFlags(tools.map(toolPresentation));
+      const index = flags.lastIndexOf(true);
+      if (index >= 0) return tools[index];
+    }
+    return undefined;
+  })();
+  if (view === 'result') {
+    if (resultOptions.state === 'failed' && lastUnresolvedFailure) elements.push(failureStepElement(lastUnresolvedFailure));
+    return elements;
   }
+
+  // 全部阶段的步骤（含卡上省略掉的更早阶段），由 service 放进底部那一行：运行中写总步数，
+  // 结束后写按类别的计数（运行命令 31 次、读文件 12 个），再加上最终没有恢复的失败数。
+  const toolEntries = traceEntries.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result');
+  if (toolEntries.length) {
+    elements.push({ tag: 'markdown', element_id: 'trace_steps', content: completed ? toolCountSummary(allGroups) : `共 ${toolEntries.length} 步`, text_size: 'notation', margin: '0px' });
+  }
+  if (completed && lastUnresolvedFailure) elements.push(failureStepElement(lastUnresolvedFailure));
 
   if (groups.length) {
     if (completed) {
@@ -1082,8 +1168,8 @@ export function renderLarkCardElements(
 export const renderLarkProcessElements = (events: AgentEvent[], config: Pick<StoredLarkConfig, 'traceLimit' | 'hideTraceOnComplete' | 'compactTrace'>, terminal = false) =>
   renderLarkCardElements(events, config, terminal, false, undefined, 'process');
 
-export const renderLarkResultElements = (events: AgentEvent[]) =>
-  renderLarkCardElements(events, { hideTraceOnComplete: true }, true, false, undefined, 'result');
+export const renderLarkResultElements = (events: AgentEvent[], options: { state?: string; agentName?: string } = {}) =>
+  renderLarkCardElements(events, { hideTraceOnComplete: true }, true, false, undefined, 'result', options);
 
 export function renderLarkResultTextElements(text: string): LarkCardElement[] {
   const finalText = redactTraceText(text).trim();

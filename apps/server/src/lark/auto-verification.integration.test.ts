@@ -195,7 +195,7 @@ describe('改了代码就自动验证', () => {
     expect(h.runVerification).toHaveBeenCalledTimes(1);
     expect(h.runVerification).toHaveBeenCalledWith(expect.any(String), { command: 'test -f work.txt' }, 'ou_alice');
     const built = buildLarkCard((await h.resultCard('om_1')).card);
-    expect(built.header.text_tag_list[0].text.content).toBe('运行完成');
+    expect(built.header.text_tag_list[0].text.content).toBe('完成');
     // 已有记录能证明当前代码：不再给「运行验证」，也不发返修。
     expect(callbackValues(built).map(value => value.action)).not.toContain('verify');
     expect(h.service.replyText).not.toHaveBeenCalled();
