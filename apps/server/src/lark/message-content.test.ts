@@ -190,3 +190,31 @@ describe('parseLarkMessageContent', () => {
     });
   });
 });
+
+describe('转发卡片里的图片', () => {
+  it('把卡片 1.0 里的 img_key 作为图片资源交给下载流程，并按 key 去重', async () => {
+    const content = JSON.stringify({
+      header: { title: { tag: 'plain_text', content: 'Redis 告警' } },
+      elements: [
+        { tag: 'markdown', content: 'CPU 持续偏高' },
+        { tag: 'img', img_key: 'img_v3_trend', alt: { tag: 'plain_text', content: '趋势图' } },
+        { tag: 'column_set', columns: [{ tag: 'column', elements: [{ tag: 'img', img_key: 'img_v3_trend' }, { tag: 'img', img_key: 'img_v3_other' }] }] }
+      ]
+    });
+    const result = await parseLarkMessageContent('interactive', content);
+    expect(result.resources).toEqual([
+      { key: 'img_v3_trend', type: 'image', label: '卡片图片 1', fromCard: true },
+      { key: 'img_v3_other', type: 'image', label: '卡片图片 2', fromCard: true }
+    ]);
+    expect(result.text).toContain('Redis 告警');
+    expect(result.text).toContain('[卡片图片 1] [卡片图片 2]');
+  });
+
+  it('json_card 形状（property.img_key）同样识别，每条消息最多 4 张并注明被略过的张数', async () => {
+    const images = Array.from({ length: 6 }, (_, index) => ({ tag: 'img', property: { img_key: `img_${index}` } }));
+    const content = JSON.stringify({ json_card: JSON.stringify({ schema: 2, body: { property: { elements: images } } }) });
+    const result = await parseLarkMessageContent('interactive', content);
+    expect(result.resources.map(resource => resource.key)).toEqual(['img_0', 'img_1', 'img_2', 'img_3']);
+    expect(result.text).toContain('卡片里还有 2 张图片未读取');
+  });
+});
