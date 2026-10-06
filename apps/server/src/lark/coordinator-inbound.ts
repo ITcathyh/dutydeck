@@ -16,7 +16,7 @@ import { larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, readLarkC
 import type { LarkMessageResource } from './message-content.js';
 import { LarkServiceError } from './service.js';
 import { isLarkDeterministicFailure } from './api-gate.js';
-import { larkRedispatchMaxAgeMs } from './turn-redispatch.js';
+import { larkRecoveryNoticeExpired, larkRedispatchMaxAgeMs } from './turn-redispatch.js';
 import { eventsForRuntimeTask, loadLarkTaskWindow, renderLarkResultElements, steeringOutcomeText, renderLarkRecordExport, terminalTaskStates, type LarkCardElement } from './card-renderer.js';
 import { sendLarkFile } from './result-delivery.js';
 import { larkResultDeliveryIssues } from './reconciler.js';
@@ -109,7 +109,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       try {
         await this.inbox!.update(record, { state: 'failed', error: '重启后无法确认命令是否完成；如未生效，请重新发送。' });
         const actor = record.event.senderOpenId;
-        if (actor && await this.currentAccess(config, record.event.chatId, record.event.chatType, actor, 'task.view_result')) {
+        // 旧命令（larkRecoveryNoticeExpired）只记失败，不在群里回复。
+        const receivedAt = Number(record.event.createTime) || Date.parse(record.receivedAt ?? '');
+        if (actor && !larkRecoveryNoticeExpired(receivedAt) && await this.currentAccess(config, record.event.chatId, record.event.chatType, actor, 'task.view_result')) {
           await this.workflowReply(record.event, config, '重启后无法确认这条命令是否完成。如结果未生效，请重新发送该命令。', { failed: true }).catch(error => this.log.warn({ error }, '命令恢复回执发送失败'));
         }
       } catch (error) {
@@ -157,7 +159,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   /**
    * 恢复一条上次没处理完的入站消息。handle 会重新检查当前配置和成员身份，凭据从不重放。
    * - 超过恢复年龄上限（与重投同一个 larkRedispatchMaxAgeMs）：不再执行，标 failed，
-   *   像孤儿命令一样给仍有权限的发送人回一句，提示重新发送。
+   *   像孤儿命令一样给仍有权限的发送人回一句，提示重新发送；旧消息（larkRecoveryNoticeExpired）不回。
    * - 平台明确拒绝（机器人不在群里、群已解散、没有权限）：标 failed 并写原因，重试也不会成功。
    * - 网络、5xx、超时这类瞬时失败：交还记录，退避后在后台重试，不丢；过了年龄上限按上一条收口。
    */
@@ -171,7 +173,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       try {
         await this.inbox!.update(record, { state: 'failed', error: `重启后超过 ${hours} 小时仍未执行，不再自动执行。` });
         const actor = record.event.senderOpenId;
-        if (actor && await this.currentAccess(config, record.event.chatId, record.event.chatType, actor, 'task.view_result')) {
+        if (actor && !larkRecoveryNoticeExpired(receivedAt) && await this.currentAccess(config, record.event.chatId, record.event.chatType, actor, 'task.view_result')) {
           await this.workflowReply(record.event, config, `服务重启后，这条请求已超过 ${hours} 小时没有执行，不会再自动执行。如仍需要，请重新发送。`,
             { failed: true, taskName: '请求未执行' });
         }

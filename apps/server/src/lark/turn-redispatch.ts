@@ -16,6 +16,14 @@ export const larkRedispatchLimit = 2;
  * 保持 1 小时：升级重启通常几分钟内完成，单人使用时 1 小时内的中断仍在用户的注意范围里。
  */
 export const larkRedispatchMaxAgeMs = 60 * 60_000;
+/**
+ * 对账遇到的一轮最后一次活动距今超过这个时长就按旧的一轮处理，只原地改原来的卡、不往群里发新消息：几天前的任务在群里冒出新消息，群里其他人会收到与眼前无关的通知。
+ * 保持 24 小时：重启打断的一轮通常几分钟内就会被对账处理，一天内的中断仍可能有人在等结果。
+ */
+export const larkRecoveryNoticeMaxAgeMs = 24 * 60 * 60_000;
+/** 旧的一轮：最后一次活动（毫秒）距今超过 larkRecoveryNoticeMaxAgeMs，取不到时间的也算。 */
+export const larkRecoveryNoticeExpired = (lastActivity?: number) =>
+  lastActivity === undefined || Number.isNaN(lastActivity) || Date.now() - lastActivity > larkRecoveryNoticeMaxAgeMs;
 
 /** 重启切断的一轮。运行时（markOrphanedAttempt / recoverPersistentTurn）对这两个原因码一视同仁。 */
 export const isRestartInterruption = (code?: string) => code === 'PREVIOUS_RUNTIME_RESULT_UNKNOWN' || code === 'DAEMON_SHUTDOWN';

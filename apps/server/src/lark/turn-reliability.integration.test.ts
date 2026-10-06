@@ -111,13 +111,14 @@ async function topic(options: { agentStatusCheck?: () => Promise<'logged_in' | '
     }
   }) as any;
   const probe = () => ({ protocol: 'acp' as const, available: true, pause: false, resume: true });
-  /** 一个服务进程；restart 按守护进程重启的顺序关停再打开，跑一次启动对账。 */
-  const boot = async (first: boolean) => {
+  /** 一个服务进程；restart 按守护进程重启的顺序关停再打开，跑一次启动对账。age 在启动对账之前改写运行时读到的时间。 */
+  const boot = async (first: boolean, age?: (runtime: DutydeckRuntime) => void) => {
     const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
     if (first) await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
     const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe, driverFactory: factory,
       ...(options.agentStatusCheck ? { agentStatusCheck: options.agentStatusCheck } : {}) } as any);
     await runtime.initialize([agent]);
+    age?.(runtime);
     const service = feishu();
     const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any, Math.random, 'ou_bot',
       undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
@@ -130,7 +131,27 @@ async function topic(options: { agentStatusCheck?: () => Promise<'logged_in' | '
     if (!daemon) return;
     daemon.coordinator.stop(); await daemon.runtime.shutdown(); daemon.repos.close(); daemon = undefined;
   };
-  const restart = async () => { await shutdown(); daemon = await boot(false); };
+  /**
+   * 服务重启。age 改写重启前留下的时间（事件时间、这一轮与排队任务的开始时间），模拟「这些是多久以前的」，返回空串表示取不到；
+   * 启动时账本补记的事件保持原样。
+   */
+  const restart = async (age?: (value: string) => string) => {
+    await shutdown();
+    const cutAt = Date.now();
+    if (age) await new Promise(resolve => setTimeout(resolve, 5));
+    daemon = await boot(false, age && (runtime => {
+      const at = (value: string) => Date.parse(value) <= cutAt ? age(value) : value;
+      const getEvents = runtime.getEvents.bind(runtime);
+      const getTasks = runtime.getTasks.bind(runtime);
+      const inspect = runtime.inspectExecutionRecovery.bind(runtime);
+      vi.spyOn(runtime, 'getEvents').mockImplementation(async (...args) => (await getEvents(...args)).map(event => ({ ...event, timestamp: at(event.timestamp) })));
+      vi.spyOn(runtime, 'getTasks').mockImplementation(async (...args) => (await getTasks(...args)).map(task => ({ ...task, createdAt: at(task.createdAt) })));
+      vi.spyOn(runtime, 'inspectExecutionRecovery').mockImplementation(async (...args) => {
+        const result = await inspect(...args);
+        return { ...result, tasks: result.tasks.map(task => task.attempt ? { ...task, attempt: { ...task.attempt, createdAt: at(task.attempt.createdAt) } } : task) };
+      });
+    }));
+  };
   cleanups.push(async () => { await shutdown(); await rm(cwd, { recursive: true, force: true }); });
   const d = () => daemon!;
 
@@ -153,6 +174,7 @@ async function topic(options: { agentStatusCheck?: () => Promise<'logged_in' | '
     get runtime() { return d().runtime; }, get repos() { return d().repos; }, get service() { return d().service; }, get coordinator() { return d().coordinator; } };
 }
 type Topic = Awaited<ReturnType<typeof topic>>;
+const daysEarlier = (days: number) => (value: string) => new Date(Date.parse(value) - days * 86_400_000).toISOString();
 
 /** 第一条消息停在「结果未知」（原因码 DRIVER_INPUT_UNCONFIRMED），然后跑一次对账。 */
 async function unconfirmedTurn(h: Topic, tools: NormalizedDriverEvent[] = []) {
@@ -294,6 +316,84 @@ describe('服务启动时按同样规则处理已有记录', () => {
     expect(JSON.stringify(result.card.elements)).toContain('Agent 已经停下，这一轮也没有做过可能对外生效的操作，已自动结束。');
     expect(result.card.capabilities).toMatchObject({ canContinueInPlace: true });
     expect(h.prompts).toHaveLength(1);
+  });
+
+  /** 旧的一轮（最后活动超过 24 小时或取不到）：启动对账自动结束，不发任何新消息，原卡原地改成终态；话题里的下一条消息照常在原对话执行。 */
+  const settlesQuietly = async (age: (value: string) => string) => {
+    const h = await topic();
+    h.agentState.idle = false;
+    await unconfirmedTurn(h);
+    const { sessionId, saved } = await h.mapping();
+    const cardId = saved.card_message_id!;
+    await h.restart(age);
+    await until(async () => (await h.tasks())[0]?.status === 'interrupted');
+    expect(JSON.parse(await h.repos.config.get('lark.settled.app.om_first.1') ?? '{}')).toMatchObject({ stale: true });
+    await h.coordinator.reconcile(h.config);
+    await until(() => h.lastUpdate(cardId)?.state === 'interrupted');
+    expect(h.lastUpdate(cardId)).toMatchObject({ cardKind: 'process', readOnly: true });
+    expect(JSON.stringify(h.lastUpdate(cardId).elements)).toContain('服务重启前没有完成，已自动结束。');
+    expect((await h.mapping()).saved).toMatchObject({ final_message_id: cardId, final_delivery_state: 'delivered', progress_frozen: true });
+    await h.coordinator.reconcile(h.config);
+    expect(h.service.send).toHaveBeenCalledTimes(0);
+    expect(h.service.reply).toHaveBeenCalledTimes(0);
+    expect(h.service.replyText).toHaveBeenCalledTimes(0);
+
+    await h.send('om_second', '看一下今天的发布');
+    await until(async () => (await h.repos.channelMappings.get('lark-card:app', 'om_second')) !== undefined
+      && (await h.tasks('om_second')).some(task => task.status === 'completed'));
+    expect((await h.mapping('om_second')).sessionId).toBe(sessionId);
+    expect(h.prompts).toHaveLength(2);
+  };
+
+  it('最后活动在 3 天前的一轮：Agent 已停下、没有对外操作，启动对账自动结束但不发任何新消息，原卡原地改成终态；下一条消息照常执行', async () => {
+    await settlesQuietly(daysEarlier(3));
+  });
+
+  it('取不到最后活动时间的一轮按旧的一轮处理：同样自动结束、不发新消息', async () => {
+    await settlesQuietly(() => '');
+  });
+
+  it('最后活动在 3 天前、执行过 git push 的一轮：启动对账不发新消息，原卡原地给「在原对话继续」「重新执行」「放弃」', async () => {
+    const h = await topic();
+    h.steps.push({ kind: 'unconfirmed', tools: [push] });
+    await h.send('om_first', '整理本周报警并回复群里');
+    await until(async () => (await h.repos.channelMappings.get('lark-card:app', 'om_first')) !== undefined
+      && (await h.tasks()).some(task => task.status === 'reconcile_required'));
+    const cardId = (await h.mapping()).saved.card_message_id!;
+    await h.restart(daysEarlier(3));
+    await until(() => h.lastUpdate(cardId)?.statusLabel === '结果未知');
+    const card = h.lastUpdate(cardId);
+    expect(card.markdown).toContain('这一轮执行过 git push，可能已经对外生效，所以没有自动继续。');
+    expect(card.capabilities).toMatchObject({ canReplay: true, canContinueInPlace: true });
+    expect(buttonTexts(card)).toEqual(expect.arrayContaining(['在原对话继续', '重新执行', '放弃']));
+    await h.coordinator.reconcile(h.config);
+    expect((await h.tasks())[0]).toMatchObject({ status: 'reconcile_required' });
+    expect(h.service.send).toHaveBeenCalledTimes(0);
+    expect(h.service.reply).toHaveBeenCalledTimes(0);
+    expect(h.service.replyText).toHaveBeenCalledTimes(0);
+  });
+
+  it('旧的一轮后面还排着旧消息：不自动结束（否则旧消息会马上执行），也不发新消息，原卡原地给三个按钮', async () => {
+    const h = await topic();
+    h.steps.push({ kind: 'unconfirmed' });
+    await h.send('om_first', '整理本周报警并回复群里');
+    await until(async () => (await h.repos.channelMappings.get('lark-card:app', 'om_first')) !== undefined
+      && (await h.tasks()).some(task => task.status === 'reconcile_required'));
+    await h.send('om_second', '看一下今天的发布');
+    await until(async () => (await h.repos.channelMappings.get('lark-card:app', 'om_second')) !== undefined
+      && (await h.tasks('om_second')).some(task => task.status === 'queued'));
+    const cardId = (await h.mapping()).saved.card_message_id!;
+    await h.restart(daysEarlier(3));
+    await until(() => h.lastUpdate(cardId)?.statusLabel === '结果未知');
+    expect(buttonTexts(h.lastUpdate(cardId))).toEqual(expect.arrayContaining(['在原对话继续', '重新执行', '放弃']));
+    await h.coordinator.reconcile(h.config);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect((await h.tasks()).map(task => task.status)).toEqual(['reconcile_required', 'queued']);
+    expect(await h.repos.config.get('lark.settled.app.om_first.1')).toBeUndefined();
+    expect(h.prompts).toHaveLength(1);
+    expect(h.service.send).toHaveBeenCalledTimes(0);
+    expect(h.service.reply).toHaveBeenCalledTimes(0);
+    expect(h.service.replyText).toHaveBeenCalledTimes(0);
   });
 });
 

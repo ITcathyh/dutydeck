@@ -38,6 +38,8 @@ export const larkContinuePrompt = (cause: { code?: string; minutes?: number }) =
 /** Agent 停下后自动结束的那一轮，结果卡上补的说明。 */
 export const larkQuietSettledNote = (cause: { code?: string; agent?: string }) =>
   `${larkInterruptionSummary(cause.code, cause.agent)}Agent 已经停下，这一轮也没有做过可能对外生效的操作，已自动结束。直接发下一条消息就会在原对话里继续。`;
+/** 旧的一轮在对账时自动结束：不发结果卡，原来的过程卡原地改成终态，写上这一句。 */
+export const larkStaleSettledNote = '服务重启前没有完成，已自动结束。';
 
 /** 运行时上这次新增的可选能力。listener.ts 的 LarkRuntime 不在这次改动范围内，按可选能力读取。 */
 export type LarkRuntimeReliability = {

@@ -100,6 +100,21 @@ describe('启动恢复入站消息：单条失败不影响初始化和监听建�
     } finally { h.close(); }
   });
 
+  it('fails a record or orphaned command older than a day without replying in the chat', async () => {
+    const runTurn = vi.spyOn(LarkMessageCoordinator.prototype as any, 'runTurn').mockResolvedValue(undefined);
+    const dayAgo = String(Date.now() - 25 * 60 * 60_000);
+    const h = await harness([{ event: groupMessage('om_old', 'oc_old', { createTime: dayAgo }) },
+      { event: groupMessage('om_old_command', 'oc_old', { createTime: dayAgo, content: JSON.stringify({ text: '@_user_1 /status' }) }), state: 'command' }], async () => allowed);
+    try {
+      await h.coordinator.initializeWorkflows(config);
+      expect(await h.stored('om_old')).toMatchObject({ state: 'failed', error: expect.stringContaining('1 小时') });
+      expect(await h.stored('om_old_command')).toMatchObject({ state: 'failed' });
+      expect(runTurn).not.toHaveBeenCalled();
+      expect(h.service.send).not.toHaveBeenCalled();
+      expect(h.service.reply).not.toHaveBeenCalled();
+    } finally { h.close(); }
+  });
+
   it('does not let an orphaned command receipt that cannot check membership fail initialization', async () => {
     const h = await harness([{ event: groupMessage('om_command', 'oc_down', { content: JSON.stringify({ text: '@_user_1 /status' }) }), state: 'command' }],
       async () => { throw membersUnavailable(); });
