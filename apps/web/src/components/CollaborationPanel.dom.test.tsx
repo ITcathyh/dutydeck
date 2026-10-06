@@ -217,6 +217,59 @@ describe('协作设置保存与版本冲突', () => {
   });
 });
 
+describe('群分工：接话人与告警初筛', () => {
+  const duty = (patch: Partial<NonNullable<CollaborationOverview['duty']>> = {}): NonNullable<CollaborationOverview['duty']> => ({
+    scope: { appId: 'cli_a', chatId: 'oc_a' }, revision: 2, updatedAt: now, ...patch
+  });
+
+  it('把接话人设成本 Bot 只提交接话人；声明没发出去时提示', async () => {
+    const user = userEvent.setup();
+    getOverview.mockResolvedValue(makeOverview(makeSettings(), { duty: duty({ responder: { appId: 'cli_flash', name: 'bdev-flash', since: now } }) }));
+    const update = vi.spyOn(collaborationApi, 'updateDuty').mockResolvedValue({ duty: duty({ revision: 3, responder: { appId: 'cli_a', since: now } }), announced: false });
+    renderPanel();
+    const select = await screen.findByLabelText('接话人');
+    expect((select as HTMLSelectElement).value).toBe('other');
+    expect(screen.getByRole('option', { name: 'bdev-flash（另一个机器人，在群里声明的）' })).toBeTruthy();
+    // 没在群里确认过订阅：不能在 Web 上开启。
+    expect((screen.getByRole('checkbox', { name: /告警初筛/ }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: '保存分工' }) as HTMLButtonElement).disabled).toBe(true);
+    await user.selectOptions(select, 'self');
+    await user.click(screen.getByRole('button', { name: '保存分工' }));
+    await waitFor(() => expect(update).toHaveBeenCalledOnce());
+    expect(update).toHaveBeenCalledWith('cli_a', 'oc_a', { expectedRevision: 2, responder: 'self' });
+    expect(await screen.findByText(/群里的接话人声明没发出去.*@本 Bot 说「你负责接话」重发声明/)).toBeTruthy();
+  });
+
+  it('改告警级别只提交订阅，沿用来源名字；开启时来源不能为空；版本冲突照实说', async () => {
+    const user = userEvent.setup();
+    const alarm = { enabled: true, sources: [{ appId: 'cli_alarm', name: '监控' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3, requesterId: 'ou_admin' };
+    getOverview.mockResolvedValue(makeOverview(makeSettings(), { duty: duty({ alarm }) }));
+    const update = vi.spyOn(collaborationApi, 'updateDuty').mockRejectedValueOnce(new ApiError('stale', 'COLLABORATION_REVISION_CONFLICT', 409));
+    renderPanel();
+    const levels = await screen.findByLabelText('级别关键字');
+    expect((levels as HTMLInputElement).value).toBe('P0');
+    expect(screen.getByText(/以在群里确认订阅的人（ou_admin）的名义发起/)).toBeTruthy();
+    await user.clear(screen.getByLabelText('来源机器人 app_id'));
+    expect(screen.getByText('开启时至少填一个来源')).toBeTruthy();
+    expect((screen.getByRole('button', { name: '保存分工' }) as HTMLButtonElement).disabled).toBe(true);
+    await user.type(screen.getByLabelText('来源机器人 app_id'), 'cli_alarm, cli_new');
+    await user.clear(levels);
+    await user.type(levels, 'P0，P1');
+    await user.click(screen.getByRole('button', { name: '保存分工' }));
+    await waitFor(() => expect(update).toHaveBeenCalledOnce());
+    expect(update).toHaveBeenCalledWith('cli_a', 'oc_a', { expectedRevision: 2,
+      alarm: { enabled: true, sources: [{ appId: 'cli_alarm', name: '监控' }, { appId: 'cli_new' }], levels: ['P0', 'P1'], dedupeHours: 6, maxPerHour: 3 } });
+    expect(await screen.findByText('群分工已被修改，请放弃修改后重新编辑。')).toBeTruthy();
+    expect((screen.getByLabelText('级别关键字') as HTMLInputElement).value).toBe('P0，P1');
+  });
+
+  it('旧版实例不返回分工时不显示这一块', async () => {
+    renderPanel();
+    await screen.findByLabelText('长期指令');
+    expect(screen.queryByLabelText('接话人')).toBeNull();
+  });
+});
+
 describe('事项 (Followup) 新建、重试与进展编辑', () => {
   it('新建事项失败重试提交相同 id 与深等 payload，steps 包含稳定 id', async () => {
     const user = userEvent.setup();

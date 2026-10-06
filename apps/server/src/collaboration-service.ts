@@ -72,10 +72,10 @@ export class CollaborationService {
     // 机器人回合是纯记账行，每群每小时最多 6 条却没有可读内容；不滤掉的话
     // 默认 50 条的判定历史几小时后就只剩它们，真正的判定看不见了。闸门记录保留：
     // 那一条写着「为什么不再出声」，正是操作者要看的。
-    const [snapshot, followups, records, allDecisions, actions, activities, feedback] = await Promise.all([repo.snapshot(scope), repo.listFollowups(scope), repo.listMandates(scope), repo.listDecisions(scope, DECISION_WINDOW_LIMIT), repo.listActions(scope), repo.listActivities(scope), repo.listFeedback(scope)]);
+    const [snapshot, followups, records, allDecisions, actions, activities, feedback, duty] = await Promise.all([repo.snapshot(scope), repo.listFollowups(scope), repo.listMandates(scope), repo.listDecisions(scope, DECISION_WINDOW_LIMIT), repo.listActions(scope), repo.listActivities(scope), repo.listFeedback(scope), repo.getDuty(scope)]);
     const decisions = allDecisions.filter(item => !isBotTurnRecord(item)).slice(0, 50);
     const mandates = await Promise.all(records.map(async mandate => ({ ...mandate, schedule: await this.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId), nextDueAt: (await this.repositories.scheduleWatermarks.get(mandate.scheduleDefinitionId))?.nextDueAt })));
-    return { snapshot, followups, mandates, decisions, actions, activities, feedback, usage: await this.usage(scope, snapshot) };
+    return { snapshot, followups, mandates, decisions, actions, activities, feedback, duty, usage: await this.usage(scope, snapshot) };
   }
   /**
    * 本小时用量。判定要花模型调用，observe 影子模式同样花却从不发言，
