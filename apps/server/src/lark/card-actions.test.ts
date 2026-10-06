@@ -51,6 +51,23 @@ const callbackButtons = (elements: LarkCardElement[]) =>
 const callbackValue = (element: LarkCardElement) =>
   element.behaviors.find((behavior: any) => behavior.type === 'callback').value;
 
+describe('飞书卡片操作按钮：在原对话继续', () => {
+  it('只在声明 canContinueInPlace 时出现，排在「重新执行」「放弃」前面；排队卡和只读结果卡上同样可用', () => {
+    expect(availableLarkCardActions(context('reconcile_required', {}, { canReplay: true }))).not.toContain('continue_in_place');
+    expect(availableLarkCardActions(context('reconcile_required', {}, { canReplay: true, canContinueInPlace: true }))).toEqual(['continue_in_place', 'replay_turn', 'abandon_turn']);
+    expect(labels(buildLarkCardActions(context('reconcile_required', {}, { canReplay: true, canContinueInPlace: true })))).toEqual(['在原对话继续', '重新执行', '放弃']);
+    expect(availableLarkCardActions(context('queued', {}, { canContinueInPlace: true }))).toContain('continue_in_place');
+    expect(availableLarkCardActions(context('failed', { readOnly: true }, { canContinueInPlace: true }))).toContain('continue_in_place');
+    expect(availableLarkCardActions(context('failed', { readOnly: true }))).not.toContain('continue_in_place');
+    expect(availableLarkCardActions(context('completed', { readOnly: true }, { canContinueInPlace: true }))).not.toContain('continue_in_place');
+    const button = callbackButtons(buildLarkCardActions(context('interrupted', { readOnly: true, turn: 2 }, { canContinueInPlace: true })))
+      .find(element => element.element_id === 'continue_in_place')!;
+    expect(callbackValue(button)).toEqual({ action: 'continue_in_place', task_id: 'om_task_1', turn: '2' });
+    expect(parseLarkCardActionValue(callbackValue(button))).toMatchObject({ action: 'continue_in_place', taskId: 'om_task_1', turn: 2 });
+    expect(larkCardActionHint('continue_in_place')).toBe('在原来的会话里让 Agent 接着做，不重新发送原请求');
+  });
+});
+
 describe('飞书卡片操作按钮：转到新会话', () => {
   it('只在声明 canRelaunch 时出现：排队受阻给「在新会话中执行」，需要核对给「在新会话中重新执行」', () => {
     expect(availableLarkCardActions(context('queued', {}, { canRelaunch: true }))).toEqual(['cancel', 'refresh', 'run_in_new_session']);

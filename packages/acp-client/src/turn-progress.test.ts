@@ -59,6 +59,7 @@ describe('ACP meaningful progress and human wait', () => {
     expect(h.turn.cancel).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(2_000);
     expect(h.outcome()).toMatchObject({ code: 'AGENT_IDLE_TIMEOUT' });
+    expect(h.events.filter(event => event.type === 'error')).toEqual([{ type: 'error', data: expect.objectContaining({ code: 'AGENT_IDLE_TIMEOUT', timeoutMinutes: 1 }) }]);
     h.finish({ status: 'cancelled', stopReason: 'cancelled' }); await h.sending;
     await vi.advanceTimersByTimeAsync(0);
     expect(h.events.some(event => event.type === 'completed')).toBe(false);
@@ -112,7 +113,12 @@ describe('ACP meaningful progress and human wait', () => {
     expect(h.turn.cancel).toHaveBeenCalledTimes(1); expect(h.outcome()).toBe('pending');
     h.finish({ status: 'cancelled', stopReason: 'cancelled' }); await h.sending;
     expect(h.outcome()).toBe('resolved');
-    expect(h.events).toContainEqual({ type: 'completed', data: { stopReason: 'cancelled' } });
+    // 无进展超时不是用户中断：先发带分钟数的原因码，再按 idle_timeout 结束（运行时据此记为失败）。
+    expect(h.events.slice(-2)).toEqual([
+      { type: 'error', data: { message: '1 分钟没有任何输出，已停止', code: 'AGENT_IDLE_TIMEOUT', timeoutMinutes: 1, retryable: true } },
+      { type: 'completed', data: { stopReason: 'idle_timeout' } }
+    ]);
+    expect(h.events).not.toContainEqual({ type: 'completed', data: { stopReason: 'cancelled' } });
     expect(vi.getTimerCount()).toBe(0);
   });
 

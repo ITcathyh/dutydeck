@@ -89,6 +89,10 @@ export interface CliAdapter {
   backgroundWaitPattern?: RegExp;
   idleToBusyPattern?: RegExp;
   readyPattern?: RegExp;
+  /** CLI 在屏幕上报告没登录（输入没被受理时 driver 用它区分原因）。 */
+  screenLoginRequiredPattern?: RegExp;
+  /** 屏幕底部是空的当前输入框（CLI 在等新输入）。只认得出就返回 true；忙碌状态栏由 driver 另行排除。 */
+  isIdleScreen?(screen: string): boolean;
   staticBusyPattern?: RegExp;
   staticBusyClearPattern?: RegExp;
   /** 返回要注入到首轮 prompt 前的上下文块（无则 undefined） */

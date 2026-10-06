@@ -70,10 +70,19 @@ export class DriverDetachedError extends Error {
   constructor() { super('Driver detached for Dutydeck daemon shutdown'); this.name = 'DriverDetachedError'; }
 }
 
-/** The original turn cannot be safely identified or attached; do not replay its prompt. */
+/** The original turn cannot be safely identified or attached; do not replay its prompt. code 进入 reconcileReason.code。 */
 export class DriverRecoveryError extends Error {
-  constructor(message: string) { super(message); this.name = 'DriverRecoveryError'; }
+  constructor(message: string, readonly code?: string) { super(message); this.name = 'DriverRecoveryError'; }
 }
+
+/**
+ * 无进展超时：一轮连续这么久没有实质输出，驱动停下了它（ACP 取消，PTY 不再等待）。不是用户中断。
+ * 驱动发一条 error 事件，data 为 AgentIdleTimeoutData；取消没确认时轮次进入 reconcile_required，原因码也是它。
+ */
+export const AGENT_IDLE_TIMEOUT = 'AGENT_IDLE_TIMEOUT';
+/** Agent 自己报告没登录（PTY 的 Claude 回「Not logged in · Please run /login」）：error 事件的 code，也是 reconcileReason.code。 */
+export const AGENT_LOGIN_REQUIRED = 'AGENT_LOGIN_REQUIRED';
+export interface AgentIdleTimeoutData { message: string; code: typeof AGENT_IDLE_TIMEOUT; timeoutMinutes: number; retryable: true }
 
 /**
  * 各事件类型的 data 形态（与 acp-client 的 normalizeAcpxEvent 输出对齐）：
@@ -84,7 +93,7 @@ export class DriverRecoveryError extends Error {
  *  tool_result        { id, name?, output?, status: 'completed'|'failed', completedAt? }
  *  permission_request { id, toolCallId?, title, options?: {id,label,kind?}[], status: 'pending' }
  *  status             { state: string, ... }                  非消息态（compaction/usage/commands），时间线与卡片不渲染为消息
- *  error              { message: string, detail? }
+ *  error              { message: string, detail?, code?, retryable? }   code 如 AGENT_IDLE_TIMEOUT（见 AgentIdleTimeoutData）
  *  completed          { stopReason?: string }                 一轮结束；'max_tokens'|'truncated' 视为 failed
  *  task               TaskRecord                               任务记录更新（运行时内部使用，driver 不发）
  *  raw_terminal       { text: string }                        未解析的终端输出，兜底通道，永不丢数据
@@ -120,6 +129,11 @@ export interface AgentDriver {
   steer?(prompt: string): Promise<DriverSteeringOutcome>;
   /** 中断当前轮次（保留会话，可再 send）。 */
   interrupt(): Promise<void>;
+  /**
+   * 可选：此刻确认没有在执行的轮次（ACP 没有在途 prompt；PTY 屏幕回到空输入框）。拿不准返回 false。
+   * 结果未知的一轮靠它判断 Agent 是否已经停下。
+   */
+  isIdle?(): boolean;
   /** 重连/恢复持久会话；受控驱动的新增资源使用本次显式许可。 */
   resume(operation?: OperationPermit): Promise<void>;
   /** Capture the output boundary before submitting a new turn, if recoverable. */
