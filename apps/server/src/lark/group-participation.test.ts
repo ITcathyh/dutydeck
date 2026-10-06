@@ -1409,6 +1409,64 @@ describe('告警初筛和多机器人群的接话人', () => {
     expect(h.service.replyText).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_quiet', text: responderReleaseText('cli_test') }));
   });
 
+  const responderCard = async (h: Awaited<ReturnType<typeof harness>>) => (await h.repository.listActions(scope)).find(item => item.kind === 'confirm.group_responder')!;
+
+  it('只在 @ 时的 Bot 被说「你来接话」：卡上写明先调到按需，确认后先调档再认领并发声明', async () => {
+    const applyLevel = vi.fn(async () => {});
+    const h = await harness('off', { applyLevel, canOperate: async (_scope, operator, requester) => operator === requester });
+    await h.coordinator.initializeWorkflows(config);
+    Object.assign(h.service, { listChatMembers: members(3, bots) });
+    await h.coordinator.handle(atBot('om_resp', '你来接话'), config);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
+    expect(cardText(h, 0)).toContain('我现在只在 @ 时回复，确认后调到「按需」并负责接话：由我（cli_test）接本群没 @ 机器人的消息。');
+    expect(await confirmCard(h, (await responderCard(h)).id)).toMatchObject({ type: 'success',
+      content: expect.stringMatching(/^本群已改成「按需」：.+。本群没 @ 机器人的消息改由我接。已在群里发了声明/) });
+    expect(applyLevel).toHaveBeenCalledExactlyOnceWith(scope, 'selective', 'ou_a');
+    expect((await h.repository.getDuty(scope)).responder).toMatchObject({ appId: scope.appId });
+    expect(h.service.replyText).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_resp', text: responderClaimText('cli_test') }));
+    expect(applyLevel.mock.invocationCallOrder[0]).toBeLessThan(h.service.replyText.mock.invocationCallOrder[0]!);
+  });
+
+  it('调档失败时整张卡不生效：不记接话人、不发声明', async () => {
+    const applyLevel = vi.fn(async () => { throw new RuntimeError('LARK_CONFIG_WRITE_FAILED', '写入群配置失败', 500); });
+    const h = await harness('off', { applyLevel, canOperate: async (_scope, operator, requester) => operator === requester });
+    await h.coordinator.initializeWorkflows(config);
+    await h.coordinator.handle(atBot('om_resp', '你来接话'), config);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
+    expect(await confirmCard(h, (await responderCard(h)).id)).toEqual({ type: 'error', content: '没有改成：写入群配置失败' });
+    expect((await h.repository.getDuty(scope)).responder).toBeUndefined();
+    expect(h.service.replyText).not.toHaveBeenCalled();
+  });
+
+  it('Web 把只在 @ 时的 Bot 设成接话人：接口拒绝并说明先调参与模式，不替人调档、不发声明；清掉接话人照常', async () => {
+    const applyLevel = vi.fn(async () => {});
+    const h = await harness('off', { applyLevel });
+    await expect(h.participation.updateDuty(scope, { expectedRevision: 0, responder: 'self' }, 'owner')).rejects.toMatchObject({ code: 'COLLABORATION_RESPONDER_NOT_LISTENING', statusCode: 409,
+      message: '本 Bot 在这个群现在是「只在 @ 时」，收不到没 @ 的消息，当不了接话人。请先在上面的参与模式里选「按需参与」或「积极参与」并保存设置，再把接话人设成本 Bot。' });
+    expect(applyLevel).not.toHaveBeenCalled();
+    expect(h.service.sendText).not.toHaveBeenCalled();
+    expect((await h.repository.getDuty(scope)).revision).toBe(0);
+    expect(await h.participation.updateDuty(scope, { expectedRevision: 0, responder: null }, 'owner')).toMatchObject({ duty: { revision: 1 } });
+  });
+
+  it('本 Bot 已经是按需或积极时照旧：卡上不提调档，确认后不调档；Web 设成本 Bot 照常声明', async () => {
+    for (const mode of ['selective', 'eager'] as const) {
+      const applyLevel = vi.fn(async () => {});
+      const h = await harness(mode, { applyLevel, canOperate: async (_scope, operator, requester) => operator === requester });
+      await h.coordinator.initializeWorkflows(config);
+      Object.assign(h.service, { listChatMembers: members(3, bots) });
+      await h.coordinator.handle(atBot('om_resp', '你来接话'), config);
+      await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
+      expect(cardText(h, 0)).toContain('由我（cli_test）接本群没 @ 机器人的消息');
+      expect(cardText(h, 0)).not.toContain('确认后调到');
+      expect(await confirmCard(h, (await responderCard(h)).id)).toMatchObject({ type: 'success', content: expect.stringMatching(/^本群没 @ 机器人的消息改由我接。/) });
+      expect(applyLevel).not.toHaveBeenCalled();
+      expect((await h.repository.getDuty(scope)).responder).toMatchObject({ appId: scope.appId });
+      expect(await h.participation.updateDuty(scope, { expectedRevision: 1, responder: null }, 'owner')).toMatchObject({ announced: true });
+      expect(await h.participation.updateDuty(scope, { expectedRevision: 2, responder: 'self' }, 'owner')).toMatchObject({ announced: true, duty: { responder: { appId: scope.appId } } });
+    }
+  });
+
   it('Web 改分工：设成本 Bot 或清掉时在群里声明；没在群里确认过的订阅不能开启，改来源沿用原确认人', async () => {
     const h = await harness('selective');
     const alarm = { enabled: true, sources: [alarmSource], levels: [], dedupeHours: 6, maxPerHour: 3 };
