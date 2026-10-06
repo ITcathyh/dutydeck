@@ -770,7 +770,7 @@ Examples:
     .action(options => handlers.update?.(options));
 
   program.command('deploy')
-    .description('Deploy a built checkout as a versioned release: drain, switch releases/current, restart, health-check, and roll back on failure')
+    .description('Deploy a built checkout as a versioned release: drain, switch releases/current, restart, health-check, and roll back only if the database schema is unchanged (never restore an old database snapshot)')
     .option('--source <directory>', 'Built Dutydeck checkout to deploy (default: the repository containing the current directory)')
     .option('--unit <unit>', 'systemd user unit that runs releases/current (default: dutydeck.service, or "unit" from --runtime deployment.json)')
     .option('--runtime <directory>', 'Bot runtime directory whose deployment.json supplies the address, database and unit')

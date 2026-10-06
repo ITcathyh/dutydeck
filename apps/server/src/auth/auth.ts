@@ -203,6 +203,17 @@ export function signSessionShareToken(secret: string, sessionId: string): string
   return createHmac('sha256', secret).update(`dutydeck-session-share-v1\0${sessionId}`).digest('base64url');
 }
 
+/** 验证固定会话的分享凭据；读取当前密钥，不继承其他访问权限。 */
+export async function isValidSessionShareCredential(
+  presented: unknown,
+  sessionId: string,
+  getShareSecret: AuthMiddlewareOptions['getShareSecret'],
+): Promise<boolean> {
+  if (typeof presented !== 'string' || !presented || !getShareSecret) return false;
+  const secret = await getShareSecret();
+  return Boolean(secret) && tokensEqual(presented, signSessionShareToken(secret!, sessionId));
+}
+
 /** 从 Authorization 头提取 Bearer token；缺失或格式不对返回 undefined */
 export function extractBearerToken(authorization: string | undefined): string | undefined {
   if (!authorization) return undefined;
@@ -322,8 +333,7 @@ async function isSharedSessionRead(request: FastifyRequest, options: AuthMiddlew
   const token = (request.query as Record<string, unknown> | undefined)?.[SHARE_TOKEN_QUERY_KEY];
   const sessionId = (request.params as { id?: unknown } | undefined)?.id;
   if (typeof token !== 'string' || !token || typeof sessionId !== 'string' || !sessionId) return false;
-  const secret = await options.getShareSecret();
-  return Boolean(secret) && tokensEqual(token, signSessionShareToken(secret!, sessionId));
+  return isValidSessionShareCredential(token, sessionId, options.getShareSecret);
 }
 
 const accessMode = (options: AuthMiddlewareOptions): 'local' | 'token' | 'open' =>

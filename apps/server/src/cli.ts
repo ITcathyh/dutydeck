@@ -217,7 +217,7 @@ const DEPLOY_TITLES: Record<DeployResult['status'], string> = {
   deployed: '已部署',
   staged: '已准备发布目录并切换 current（未重启）',
   rolled_back: '部署失败，已切回上一版',
-  rollback_failed: '部署失败，切回上一版后服务仍不健康',
+  rollback_failed: '部署失败，自动回滚未完成；请查看原因并人工恢复',
   failed: '部署失败',
   refused: '未部署',
   unit: '已生成 unit'

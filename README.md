@@ -405,7 +405,8 @@ dutydeck restart
 # 重启某个 systemd unit 托管的运行时（如 bot 运行时）
 dutydeck restart --unit dutydeck-tag-ccflash.service
 
-# 把已构建的检出目录发布为不可变版本：排空 → 切换 releases/current → 重启 → 健康检查，不通过自动切回上一版。
+# 把已构建的检出目录发布为不可变版本：排空 → 切换 releases/current → 重启 → 健康检查；失败后停服，确认数据库 schema 未变才切回上一版。
+# 始终保留当前数据库；schema 变化或无法核实时停止自动回滚，current 保持新版，按 manifest 中的原因和备份位置人工恢复。
 # unit 须运行 releases/current/dist/cli.js，可用 --print-unit 生成；设置 DUTYDECK_DEPLOY_WINDOW（如 10:00-11:00,16:00-17:00）可限制部署时段
 # 成功后只留最新 5 个发布目录和 deploy 自己写的部署记录（含数据库备份），current、上一版和仍被运行中进程引用的不删
 dutydeck deploy --source /path/to/checkout
