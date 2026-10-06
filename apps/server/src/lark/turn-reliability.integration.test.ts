@@ -306,6 +306,9 @@ describe('无进展超时（A4）', () => {
     expect((await h.tasks())[0]!.status).toBe('failed');
     const result = (await h.resultCard())!;
     expect(result.card).toMatchObject({ state: 'failed', capabilities: expect.objectContaining({ canContinueInPlace: true }) });
+    const ids = JSON.stringify(buildLarkCard(result.card)).match(/"element_id":"continue_in_place"/g) ?? [];
+    expect(ids).toHaveLength(1);
+    expect(buttonTexts(result.card).filter(text => text === '在原对话继续')).toHaveLength(1);
     expect(await h.coordinator.handleAction(callbackValueOf(result.card, 'continue_in_place'), 'ou_alice', { messageId: result.messageId, chatId: 'oc_group' }))
       .toMatchObject({ type: 'success' });
     await until(() => h.prompts.length === 2);

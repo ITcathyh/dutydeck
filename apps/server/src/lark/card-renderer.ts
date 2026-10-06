@@ -437,10 +437,13 @@ const toolKindCount: Record<TraceToolKind, [label: string, unit: string]> = {
   git: ['Git 操作', '次'], test: ['运行测试', '次'], data: ['查询数据', '次'], agent: ['Agent 协作', '次'], tool: ['调用工具', '次']
 };
 
-// 最终没有恢复的失败：同一阶段里后面有同类调用成功的（失败后重试成功）不算。
+// 最终没有恢复的失败：同一阶段里后面重试了同一个操作（同类、同命令或对象）并成功的才算恢复。
+// 只看同类不行：git push 失败后 git status 成功，不能把推送失败藏掉。
 // 与 toolPresentation 里的「无匹配退出不算失败」合在一起，就是卡上「有失败」的全部来源。
+const sameOperation = (a: ToolPresentation, b: ToolPresentation) =>
+  a.kind === b.kind && a.action === b.action && a.fullDetail === b.fullDetail && a.description === b.description;
 const unresolvedFailureFlags = (tools: ToolPresentation[]) => tools.map((tool, index) =>
-  tool.statusLabel === '失败' && !tools.slice(index + 1).some(next => next.kind === tool.kind && next.statusLabel === '已完成'));
+  tool.statusLabel === '失败' && !tools.slice(index + 1).some(next => sameOperation(tool, next) && next.statusLabel === '已完成'));
 
 const groupToolEntries = (group: TraceGroup) => group.actions.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result');
 

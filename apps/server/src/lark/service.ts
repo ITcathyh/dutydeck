@@ -4,7 +4,7 @@ import type { LifecycleFetch } from '../workbench-fetch.js';
 import type { PermissionMode } from '@dutydeck/shared';
 import type { ContactIdType, ContactUser } from './owner-identity.js';
 import { executeWithLarkGate, resolveLarkGateConfig, LarkCircuitOpenError } from './api-gate.js';
-import { buildLarkCardActions, buildLarkCardDetailButton, buildLarkCardFollowUpActions, buildLarkContinueButton, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
+import { buildLarkCardActions, buildLarkCardDetailButton, buildLarkCardFollowUpActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
 import { larkSessionDetailUrl } from './detail-link.js';
 import { larkConclusionHeadline, larkElapsedLabel, larkStoppedAtLabel, larkUserStatus } from './card-status.js';
 
@@ -592,12 +592,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   // 不然这张卡就是用户看到的唯一一张，不能把原因和按钮拿掉。
   const collapsedProcess = isProcessCard && (state === 'completed'
     || (input.resultFollows === true && (state === 'failed' || state === 'interrupted' || state === 'cancelled')));
-  // 一轮因长时间没有输出被停掉时，结果卡上多一个「继续」（renderer 放的 execution_alert_idle_timeout 是它的凭据）。
-  const continueButton = isResultCard && input.elements?.some(element => element?.element_id === 'execution_alert_idle_timeout')
-    ? buildLarkContinueButton(actionContext) : undefined;
   // 结果卡的续问行（继续 / 给我对外回复 / 再详细点 / 每天自动执行 / 使用这个验证命令）放在正文之后：
   // 读者看完结论才会接着问。流式排布，窄屏上按钮自动折行，不挤成一排。
-  const followUpButtons = isResultCard ? [...(continueButton ? [continueButton] : []), ...buildLarkCardFollowUpActions(actionContext)] : [];
+  const followUpButtons = isResultCard ? buildLarkCardFollowUpActions(actionContext) : [];
   const followUpRow = followUpButtons.length ? [{
     tag: 'column_set', element_id: 'result_follow_up_row', flex_mode: 'flow', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
     columns: followUpButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }))

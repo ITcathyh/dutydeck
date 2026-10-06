@@ -606,25 +606,6 @@ export function buildLarkCardFollowUpActions(context: LarkCardActionContext): La
 }
 
 /**
- * 「继续」：一轮因长时间没有输出被停掉后，在原对话里接着做。
- * 动作 id 由恢复流程在本文件的能力表里注册并处理；这里只负责把按钮画出来，不依赖那条注册。
- */
-export const LARK_CONTINUE_IN_PLACE_ACTION = 'continue_in_place';
-export function buildLarkContinueButton(context: { taskId: string; turn: number }): LarkCardElement | undefined {
-  const taskId = normalizedTaskId(context.taskId);
-  if (!taskId) return undefined;
-  return {
-    tag: 'button',
-    text: { tag: 'plain_text', content: '继续' },
-    type: 'primary_text',
-    icon: { tag: 'standard_icon', token: 'repeat_outlined', color: 'blue' },
-    behaviors: [{ type: 'callback', value: { action: LARK_CONTINUE_IN_PLACE_ACTION, task_id: taskId, turn: String(normalizedTurn(context.turn)) } }],
-    margin: '0px',
-    element_id: LARK_CONTINUE_IN_PLACE_ACTION
-  };
-}
-
-/**
  * 页脚「查看详情」的回调按钮；detail 不可用时返回 undefined，调用方照旧渲染直接打开 webUrl 的链接。
  * 按钮本身不带 URL：服务端按平台给出的消息 ID 查账本、核对管理员后，才把登录链接私信给点击人。
  */

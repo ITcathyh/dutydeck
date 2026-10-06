@@ -1569,4 +1569,17 @@ describe('公开执行记录的可执行入口', () => {
     expect(JSON.stringify(card)).toContain('待用户扫码');
     expect(renderLarkRecordExport(events)).toContain('temporary failure');
   });
+
+  it('只有重试的是同一个操作才算恢复：git push 失败后 git status 成功仍显示失败', () => {
+    // 结果卡只在失败态讲最后一个没有恢复的失败步骤。
+    const failureStep = (events: AgentEvent[]) => byId(buildLarkCard({ cardKind: 'result', state: 'failed', elements: renderLarkResultElements(events, { state: 'failed' }) }), 'failure_step');
+    const push = makeEvent(1, 'tool_result', { id: 'push', name: 'Bash', input: { command: 'git push origin master' }, output: 'rejected', status: 'failed' });
+    const status = makeEvent(2, 'tool_result', { id: 'status', name: 'Bash', input: { command: 'git status' }, output: 'clean', status: 'completed' });
+    expect(failureStep([push, status])).toBeDefined();
+    const rerun = makeEvent(2, 'tool_result', { id: 'push2', name: 'Bash', input: { command: 'git push origin master' }, output: 'ok', status: 'completed' });
+    expect(failureStep([push, rerun])).toBeUndefined();
+    const readA = makeEvent(1, 'tool_result', { id: 'a', name: 'Read', input: { file_path: '/repo/a.ts' }, output: 'ENOENT', status: 'failed' });
+    const readB = makeEvent(2, 'tool_result', { id: 'b', name: 'Read', input: { file_path: '/repo/b.ts' }, output: 'ok', status: 'completed' });
+    expect(failureStep([readA, readB])).toBeDefined();
+  });
 });
