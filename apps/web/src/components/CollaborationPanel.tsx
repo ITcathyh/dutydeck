@@ -43,6 +43,7 @@ import {
   Tabs,
   Textarea
 } from './primitives';
+import { GroupDutySettings } from './GroupDutySettings';
 
 export type CollaborationPanelProps = {
   appId: string;
@@ -917,6 +918,15 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
                 </div>
               </div>
             </>
+          )}
+          {overviewQuery.data?.duty && (
+            <GroupDutySettings
+              appId={appId}
+              chatId={chatId}
+              botName={botName}
+              duty={overviewQuery.data.duty}
+              onSaved={() => queryClient.invalidateQueries({ queryKey })}
+            />
           )}
         </div>
       )}

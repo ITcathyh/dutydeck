@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 
 export function createCollaborationSchema(db: Database.Database): void {
+  createCollaborationDutySchema(db);
   db.exec(`
     CREATE TABLE IF NOT EXISTS collaboration_scopes (
       app_id TEXT NOT NULL,
@@ -176,5 +177,21 @@ export function createCollaborationSchema(db: Database.Database): void {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS collab_activities_scope ON collaboration_activities(app_id, chat_id, created_at DESC);
+  `);
+}
+
+/** v36：每个 Bot 在群里的分工（告警初筛订阅、接话人）。新库在 v20 就建好，旧库由 v36 补上。 */
+export function createCollaborationDutySchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS collaboration_duties (
+      app_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      revision INTEGER NOT NULL CHECK (revision >= 1),
+      responder_json TEXT CHECK (responder_json IS NULL OR json_valid(responder_json)),
+      alarm_json TEXT CHECK (alarm_json IS NULL OR json_valid(alarm_json)),
+      updated_by TEXT NOT NULL CHECK (length(updated_by) <= 128),
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (app_id, chat_id)
+    );
   `);
 }

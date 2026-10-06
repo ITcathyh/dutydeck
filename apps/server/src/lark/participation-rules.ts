@@ -7,8 +7,9 @@
 import type { CollaborationFollowup, CollaborationMandate, CollaborationObservation, ParticipationLevel } from '@dutydeck/shared';
 
 export type ParticipationRule =
-  | 'calls_name' | 'reply_to_self' | 'owned_item' | 'follow_up' | 'single_human' | 'eager_default'
-  | 'mentions_other' | 'reply_to_other' | 'emoji_only' | 'short_thanks' | 'bot_sender';
+  | 'calls_name' | 'reply_to_self' | 'owned_topic' | 'owned_item' | 'follow_up' | 'single_human' | 'eager_default'
+  | 'mentions_other' | 'reply_to_other' | 'emoji_only' | 'short_thanks' | 'bot_sender'
+  | 'calls_other' | 'topic_of_other' | 'not_responder' | 'no_responder';
 
 export interface RuleVerdict { action: 'addressed' | 'silent'; rule: ParticipationRule; reason: string }
 
@@ -16,6 +17,7 @@ export interface RuleVerdict { action: 'addressed' | 'silent'; rule: Participati
 export const participationRuleReasons: Record<ParticipationRule, string> = {
   calls_name: '消息直接叫了我的名字',
   reply_to_self: '消息回复的是我发的消息',
+  owned_topic: '消息在我接手的话题里',
   owned_item: '消息提到了我负责的委托或事项',
   follow_up: '我刚在这里说过话，你紧接着又说了，没有别人插进来',
   single_human: '群里只有你一个人，消息也没有 @ 别人',
@@ -24,7 +26,11 @@ export const participationRuleReasons: Record<ParticipationRule, string> = {
   reply_to_other: '那条消息是在回复别人',
   emoji_only: '那条消息只有表情',
   short_thanks: '那条消息只是致谢或确认',
-  bot_sender: '那条消息是机器人发的'
+  bot_sender: '那条消息是机器人发的',
+  calls_other: '那条消息叫的是群里另一个机器人',
+  topic_of_other: '那个话题是发给别人或别的机器人的',
+  not_responder: '本群指定了别的机器人接没 @ 的消息，我只接 @ 和自己接手的话题',
+  no_responder: '本群有多个机器人、还没指定接话人，没 @ 的消息我先不接'
 };
 
 export interface RuleRecentActivity {
@@ -49,6 +55,14 @@ export interface RuleContext {
   parent?: 'self' | 'sender' | 'other';
   /** 消息所在话题的根消息是本机器人发的（例如委托产出）。 */
   threadRootSelf?: boolean;
+  /** 消息所在话题是本机器人接手的（话题里有本机器人的会话，例如告警初筛）。 */
+  ownedTopic?: boolean;
+  /** 消息所在话题的根消息是别的机器人发的，或 @ 的是别人。只在多机器人群里查。 */
+  threadRootOther?: boolean;
+  /** 消息开头叫的是群里另一个机器人的名字。只在多机器人群里查。 */
+  callsOther?: boolean;
+  /** 本群的接话人是谁；没指定时不填。 */
+  responder?: 'self' | 'other';
   /** 本机器人负责的委托、事项名称。 */
   ownedNames: string[];
   hasActiveMandates: boolean;
@@ -119,18 +133,24 @@ export function evaluateParticipationRules(ctx: RuleContext): RuleVerdict | unde
   if (ctx.senderKind !== 'human') return verdict('silent', 'bot_sender');
   const text = stripMentionPlaceholders(ctx.text);
   if (callsBotName(text, botNameTokens(ctx.botNames))) return verdict('addressed', 'calls_name');
+  if (ctx.callsOther) return verdict('silent', 'calls_other');
   if (ctx.mentionsOther) return verdict('silent', 'mentions_other');
   if (onlyEmoji(text, ctx.messageType)) return verdict('silent', 'emoji_only');
   if (shortThanks(text)) return verdict('silent', 'short_thanks');
   if (ctx.parent === 'self' || !ctx.parent && ctx.threadRootSelf) return verdict('addressed', 'reply_to_self');
+  if (!ctx.parent && ctx.ownedTopic) return verdict('addressed', 'owned_topic');
   if (ctx.parent === 'other') return verdict('silent', 'reply_to_other');
+  // 多机器人群：每条没 @ 的消息最多一个机器人接。别人的话题不接；不是接话人的只接上面这些明确叫自己的。
+  const crowded = (ctx.members?.bots ?? 0) > 1;
+  if (crowded && !ctx.parent && ctx.threadRootOther) return verdict('silent', 'topic_of_other');
+  if (ctx.responder === 'other') return verdict('silent', 'not_responder');
+  if (crowded && ctx.responder !== 'self') return verdict('silent', 'no_responder');
   if (mentionsOwnedName(text, ctx.ownedNames)) return verdict('addressed', 'owned_item');
   if (ctx.level === 'eager') return verdict('addressed', 'eager_default');
   const recent = ctx.recent;
   const justSpoke = recent?.lastSelfAt !== undefined && ctx.at - recent.lastSelfAt >= 0 && ctx.at - recent.lastSelfAt <= FOLLOW_UP_WINDOW_MS;
   if (justSpoke && ctx.hasActiveMandates && deicticTask.test(text)) return verdict('addressed', 'owned_item');
   if (justSpoke && !recent!.humanBetween && recent!.partners.includes(ctx.senderId)) return verdict('addressed', 'follow_up');
-  // 多个机器人同群时谁来接由接话人约定决定，这里只在本机器人独自在群时生效。
   if (ctx.members && ctx.members.humans === 1 && ctx.members.bots <= 1) return verdict('addressed', 'single_human');
   return undefined;
 }
@@ -151,6 +171,10 @@ export type RuleFacts = {
   partner?: boolean;
   humans?: number;
   bots?: number;
+  ownedTopic?: boolean;
+  threadRootOther?: boolean;
+  callsOther?: boolean;
+  responder?: 'self' | 'other';
 };
 
 /** 本机器人负责的委托与事项：名称供点名匹配，有生效委托时「这个任务」才算指它。 */
@@ -170,6 +194,8 @@ export function ruleContextOf(trigger: CollaborationObservation, owned: { names:
     mentionsOther: trigger.refs.some(ref => ref === 'dutydeck:mention:other' || ref === 'dutydeck:mention:unknown') || /@_all/.test(trigger.text),
     botNames, ownedNames: owned.names, hasActiveMandates: owned.hasActiveMandates, level: facts.level,
     ...(facts.parent ? { parent: facts.parent } : {}), ...(facts.threadRootSelf ? { threadRootSelf: true } : {}),
+    ...(facts.ownedTopic ? { ownedTopic: true } : {}), ...(facts.threadRootOther ? { threadRootOther: true } : {}),
+    ...(facts.callsOther ? { callsOther: true } : {}), ...(facts.responder ? { responder: facts.responder } : {}),
     ...(facts.lastSelfAgoMs !== undefined ? { recent: { lastSelfAt: at - facts.lastSelfAgoMs, humanBetween: Boolean(facts.humanBetween), partners: facts.partner ? [senderId] : [] } } : {}),
     ...(facts.humans !== undefined ? { members: { humans: facts.humans, bots: facts.bots ?? 0 } } : {})
   };

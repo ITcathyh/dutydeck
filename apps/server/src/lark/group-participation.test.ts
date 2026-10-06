@@ -12,6 +12,7 @@ import type { LarkMessageEvent } from './listener.js';
 import type { StoredLarkConfig } from './config.js';
 import type { ParticipationResult } from './readonly-decider.js';
 import { LarkContextBootstrap } from './context-bootstrap.js';
+import { responderClaimText, responderReleaseText } from './group-duty.js';
 
 const scope = { appId: 'cli_test', chatId: 'oc_test' };
 const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'test', listening: true, defaultAgentId: 'mock', workspace: '/tmp', fullTrustConfirmed: true,
@@ -1152,5 +1153,302 @@ describe('rule layer, participation levels and corrections (pilot sentences)', (
     expect(readParticipationUsage).toHaveBeenCalledWith(scope, expect.any(String));
     readParticipationUsage.mockResolvedValue({ entries: 2, costUsd: 0.0123, unknown: 0 });
     expect(await h.participation.describe(scope)).toContain('花费 $0.01');
+  });
+});
+
+describe('告警初筛和多机器人群的接话人', () => {
+  const alarmSource = { appId: 'cli_alarm', name: '监控' };
+  const bots = [{ name: 'bdev-flash', appId: 'cli_flash' }, { name: 'Bot', appId: scope.appId }];
+  /** 群成员：humans 个真人，加上 botList 里的机器人。 */
+  const members = (humans: number, botList: Array<{ name: string; appId: string }> = [bots[1]!]) => vi.fn(async () => ({ items: [
+    ...Array.from({ length: humans }, (_, i) => ({ memberId: `ou_${i}`, memberType: 'user' as const, name: `用户${i}` })),
+    ...botList.map(bot => ({ memberId: bot.appId, memberType: 'bot' as const, name: bot.name, appId: bot.appId }))], hasMore: false, securityLimited: false }));
+  /** 消息详情：机器人发的消息按 app_id 报发送者；om_sent 是本机器人开话题的那条回复。 */
+  const details = (senders: Record<string, string>) => vi.fn(async (id: string) => ({ messageId: id, chatId: scope.chatId, messageType: 'text', createTime: '1789707600000', rawContent: '{}',
+    sender: id === 'om_sent' ? { id: scope.appId, idType: 'app_id', type: 'app' } : senders[id] ? { id: senders[id], idType: 'app_id', type: 'app' } : { id: 'ou_x', type: 'user' },
+    mentions: [], deleted: false, updated: false, ...(id === 'om_sent' ? { threadId: 'omt_alarm' } : {}) }));
+  const fromBot = (id: string, text: string, openId: string, patch: Partial<LarkMessageEvent> = {}) => message(id, text, { senderType: 'app', senderOpenId: openId, ...patch });
+  const atBot = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}) => message(id, `@_user_1 ${text}`, { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }], ...patch });
+  const subscribe = (h: Awaited<ReturnType<typeof harness>>, patch: Record<string, unknown> = {}) => h.repository.updateDuty(scope, { expectedRevision: 0,
+    alarm: { enabled: true, sources: [alarmSource], levels: ['P0', 'P1'], dedupeHours: 6, maxPerHour: 3, requesterId: 'ou_admin', ...patch } }, 'ou_admin');
+  const alarmRecords = async (h: Awaited<ReturnType<typeof harness>>) => Object.fromEntries((await h.repository.listDecisions(scope))
+    .filter(item => (item.inputSnapshot as { gate?: string }).gate === 'alarm_triage')
+    .map(item => [(item.inputSnapshot as { decider: { trigger: { messageId: string } } }).decider.trigger.messageId, [item.action, item.status, (item.inputSnapshot as { alarm: { outcome: string } }).alarm.outcome]]));
+  const ruleOf = (decision: { inputSnapshot: Record<string, unknown> }) => (decision.inputSnapshot as { decider?: { rule?: string } }).decider?.rule;
+  const dispatchTo = (h: Awaited<ReturnType<typeof harness>>) => {
+    const dispatched: LarkMessageEvent[] = [];
+    h.participation.setDispatcher(scope.appId, (event, current) => { dispatched.push(event); return h.coordinator.adopt(event, current); });
+    return dispatched;
+  };
+
+  it('订阅来源发的告警：不调模型，在告警下开话题，以确认人的名义走 @ 机器人的同一条路径起初筛', async () => {
+    const h = await harness('selective');
+    await subscribe(h);
+    Object.assign(h.service, { getMessage: details({ om_alarm_1: 'cli_alarm' }) });
+    const dispatched = dispatchTo(h);
+    await h.coordinator.handle(fromBot('om_alarm_1', '【P1】订单服务错误率 12% 超过阈值', 'ou_alarm'), config); await h.participation.flush(scope);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    expect(h.decide).not.toHaveBeenCalled();
+    expect(h.service.replyText).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_alarm_1', replyInThread: true,
+      text: '收到「监控」的告警，开始初筛。在这个话题里直接追问就行，不用 @。' }));
+    expect(dispatched).toEqual([expect.objectContaining({ messageId: 'om_alarm_1', rootId: 'om_alarm_1', threadId: 'omt_alarm', senderOpenId: 'ou_admin', senderType: 'user',
+      triage: expect.stringContaining('[告警初筛] 下面是「监控」在群里发的告警') })]);
+    const prompt = String(h.runtime.send.mock.calls[0]!.find(arg => typeof arg === 'string' && arg.includes('[告警初筛]')));
+    expect(prompt).toMatch(/1\. 判断：真异常 \/ 误报 \/ 待确认[\s\S]*4\. 可直接转发[\s\S]*\[告警原文\]\n【P1】订单服务错误率 12% 超过阈值/);
+    expect(await alarmRecords(h)).toEqual({ om_alarm_1: ['act', 'sent', 'triaged'] });
+    // 平台重推同一条消息不再起任务。
+    await h.coordinator.handle(fromBot('om_alarm_1', '【P1】订单服务错误率 12% 超过阈值', 'ou_alarm'), config); await h.participation.flush(scope);
+    expect(h.runtime.send).toHaveBeenCalledOnce();
+  });
+
+  it('只在 @ 时的群也初筛，开话题时提示追问要 @', async () => {
+    const h = await harness('off');
+    await subscribe(h);
+    Object.assign(h.service, { getMessage: details({ om_alarm_1: 'cli_alarm' }) });
+    dispatchTo(h);
+    await h.coordinator.handle(fromBot('om_alarm_1', '【P0】支付服务超时', 'ou_alarm'), config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ text: '收到「监控」的告警，开始初筛。追问请 @ 我。' }));
+  });
+
+  it('级别不符、重复、超过每小时上限都不起任务，各记一条；在告警下问「为什么没回」能查到', async () => {
+    const h = await harness('selective', { canOperate: async () => true });
+    await subscribe(h, { maxPerHour: 2 });
+    Object.assign(h.service, { getMessage: details({ om_alarm_1: 'cli_alarm', om_alarm_2: 'cli_alarm', om_alarm_3: 'cli_alarm', om_alarm_4: 'cli_alarm', om_alarm_5: 'cli_alarm' }) });
+    dispatchTo(h);
+    const alarms = [['om_alarm_1', '【P1】订单服务错误率 12% 超过阈值 10:01'], ['om_alarm_2', '【P3】日志量偏高'], ['om_alarm_3', '【P1】订单服务错误率 30% 超过阈值 10:20'],
+      ['om_alarm_4', '【P0】支付服务超时 5 次'], ['om_alarm_5', '【P1】库存服务告警']] as const;
+    for (const [id, text] of alarms) { await h.coordinator.handle(fromBot(id, text, 'ou_alarm'), config); await h.participation.flush(scope); }
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledTimes(2));
+    expect(h.decide).not.toHaveBeenCalled();
+    expect(await alarmRecords(h)).toEqual({ om_alarm_1: ['act', 'sent', 'triaged'], om_alarm_2: ['silent', 'suppressed', 'level'], om_alarm_3: ['silent', 'suppressed', 'duplicate'],
+      om_alarm_4: ['act', 'sent', 'triaged'], om_alarm_5: ['silent', 'suppressed', 'rate_limited'] });
+    await h.coordinator.handle(atBot('om_why', '刚才为什么没回', { parentId: 'om_alarm_3', rootId: 'om_alarm_3' }), config);
+    await vi.waitFor(() => expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_why',
+      text: expect.stringMatching(/^\d\d:\d\d 那条告警我没分析：同一条告警在去重窗口内已经分析过。$/) })));
+    await h.coordinator.handle(atBot('om_why_2', '刚才为什么没回'), config);
+    await vi.waitFor(() => expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_why_2',
+      text: expect.stringMatching(/另外，\d\d:\d\d 那条告警「.+」我没分析：/) })));
+    expect(await h.participation.describe(scope)).toContain('**告警初筛**：来源 监控（cli_alarm）；级别只看 P0、P1；同一条告警 6 小时内只分析一次，每小时最多 2 条；今天分析 2 条，跳过 3 条');
+  });
+
+  it('真人消息和非订阅来源的机器人消息照旧：不初筛，真人消息照常判定', async () => {
+    const h = await harness('selective');
+    await subscribe(h);
+    Object.assign(h.service, { getMessage: details({ om_other_bot: 'cli_other' }) });
+    dispatchTo(h);
+    await h.coordinator.handle(fromBot('om_other_bot', '【P1】订单服务错误率 12% 超过阈值', 'ou_other_bot'), config); await h.participation.flush(scope);
+    await h.coordinator.handle(message('om_human', '【P1】订单服务错误率 12% 超过阈值'), config); await h.participation.flush(scope);
+    expect(await alarmRecords(h)).toEqual({});
+    expect(h.service.replyText).not.toHaveBeenCalled();
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    expect(h.decide).toHaveBeenCalledOnce();
+    expect(h.decide.mock.calls[0]![2]).toBe(h.decide.mock.calls[0]![1].observations.find(item => item.messageId === 'om_human')!.id);
+  });
+
+  it('@ 它说「告警来了先帮我初筛，只看 P0」：来源取最近发言最多的机器人，确认卡确认后生效；再说关闭也要确认', async () => {
+    const h = await harness('selective', { canOperate: async (_scope, operator, requester) => operator === requester });
+    await h.coordinator.initializeWorkflows(config);
+    const recent = (id: string, sender: string) => ({ messageId: id, chatId: scope.chatId, messageType: 'text', rawContent: '{"text":"x"}', createTime: '1789707500000',
+      sender: { id: sender, type: sender.startsWith('cli_') ? 'app' : 'user' }, mentions: [], deleted: false, updated: false });
+    h.service.listChatMessages.mockImplementation(async () => ({ items: [recent('m1', 'cli_alarm'), recent('m2', 'ou_a'), recent('m3', 'cli_alarm'), recent('m4', 'cli_other'), recent('m5', scope.appId)], hasMore: false }));
+    Object.assign(h.service, { listChatMembers: members(2, [{ name: '监控机器人', appId: 'cli_alarm' }, bots[1]!]) });
+    await h.coordinator.handle(atBot('om_sub', '告警来了先帮我初筛，只看 P0'), config);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
+    expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_sub', statusLabel: '待确认', elements: expect.arrayContaining([expect.objectContaining({
+      content: expect.stringContaining('来源 监控机器人（cli_alarm）；级别只看 P0；同一条告警 6 小时内只分析一次，每小时最多 3 条。告警来了我在告警话题里先做初筛，任务以确认人的名义发起。最近在本群发过消息的机器人还有：cli_other') })]) }));
+    const confirmId = async (kind: string) => (await h.repository.listActions(scope)).filter(item => item.kind === kind).at(0)!.id;
+    const value = { dutydeck_confirm: 'confirm', confirm_id: await confirmId('confirm.alarm_subscription'), chat_id: scope.chatId };
+    expect(await h.coordinator.handleAction(value, 'ou_b', { messageId: 'om_card', chatId: scope.chatId })).toMatchObject({ type: 'warning' });
+    expect((await h.repository.getDuty(scope)).alarm).toBeUndefined();
+    expect(await h.coordinator.handleAction(value, 'ou_a', { messageId: 'om_card', chatId: scope.chatId })).toMatchObject({ type: 'success', content: expect.stringContaining('已开启告警初筛') });
+    expect((await h.repository.getDuty(scope)).alarm).toEqual({ enabled: true, sources: [{ appId: 'cli_alarm', name: '监控机器人' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3, requesterId: 'ou_a' });
+
+    await h.coordinator.handle(atBot('om_unsub', '关闭告警初筛'), config);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledTimes(2));
+    const actions = (await h.repository.listActions(scope)).filter(item => item.kind === 'confirm.alarm_subscription');
+    const off = actions.find(item => (item.payload as { payload: { enabled: boolean } }).payload.enabled === false)!;
+    expect(await h.coordinator.handleAction({ dutydeck_confirm: 'confirm', confirm_id: off.id, chat_id: scope.chatId }, 'ou_a', { messageId: 'om_card', chatId: scope.chatId }))
+      .toMatchObject({ type: 'success', content: expect.stringContaining('已关闭本群告警初筛') });
+    expect((await h.repository.getDuty(scope)).alarm).toMatchObject({ enabled: false, sources: [{ appId: 'cli_alarm' }], levels: ['P0'] });
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    expect(h.decide).not.toHaveBeenCalled();
+  });
+
+  it('多机器人群没指定接话人：没 @ 的消息不接也不调模型，@ 它照常接，/status 和「为什么没回」说明怎么指定', async () => {
+    const h = await harness('eager', { canOperate: async () => true });
+    Object.assign(h.service, { listChatMembers: members(3, bots) });
+    dispatchTo(h);
+    await h.coordinator.handle(message('om_plain', '今天下午三点发版'), config); await h.participation.flush(scope);
+    expect(h.decide).not.toHaveBeenCalled();
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    expect((await h.repository.listDecisions(scope)).map(item => [item.action, ruleOf(item)])).toEqual([['silent', 'no_responder']]);
+    await h.coordinator.handle(atBot('om_at', '帮我看下发布单'), config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    expect(await h.participation.describe(scope)).toContain('**接话人**：未指定。本群有 2 个机器人，没 @ 的消息我先不接；要我接，@我 说「你负责接话」');
+    await h.coordinator.handle(atBot('om_why', '刚才为什么没回'), config);
+    await vi.waitFor(() => expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_why',
+      text: expect.stringContaining('那条「今天下午三点发版」我没接：本群有多个机器人、还没指定接话人，没 @ 的消息我先不接。要我接，@我 说「你负责接话」。') })));
+  });
+
+  it('单机器人群照旧：积极档没 @ 的消息照常接；订阅的告警来源机器人不算第二个机器人', async () => {
+    for (const subscribed of [false, true]) {
+      const h = await harness('eager');
+      if (subscribed) await subscribe(h);
+      Object.assign(h.service, { listChatMembers: subscribed ? members(3, [{ name: '监控', appId: 'cli_alarm' }, bots[1]!]) : members(3) });
+      dispatchTo(h);
+      await h.coordinator.handle(message('om_plain', '今天下午三点发版'), config); await h.participation.flush(scope);
+      await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+      expect((await h.repository.listDecisions(scope)).map(item => [item.action, ruleOf(item)])).toEqual([['act', 'eager_default']]);
+      expect(await h.participation.describe(scope)).not.toContain('接话人');
+    }
+  });
+
+  it('收到别的机器人的接话人声明就让出：没 @ 的消息和告警都不接，@ 它照常；卸任后恢复，过时的声明不生效', async () => {
+    const h = await harness('eager');
+    await subscribe(h);
+    Object.assign(h.service, { listChatMembers: members(3, bots), getMessage: details({ om_claim: 'cli_flash', om_release: 'cli_flash', om_stale: 'cli_old', om_alarm_1: 'cli_alarm' }) });
+    dispatchTo(h);
+    await h.coordinator.handle(fromBot('om_claim', responderClaimText('bdev-flash'), 'ou_flash'), config); await h.participation.flush(scope);
+    expect((await h.repository.getDuty(scope)).responder).toEqual({ appId: 'cli_flash', name: 'bdev-flash', since: new Date(1789707600000).toISOString() });
+    await h.coordinator.handle(fromBot('om_stale', responderClaimText('old-bot'), 'ou_old', { createTime: '1789707500000' }), config); await h.participation.flush(scope);
+    expect((await h.repository.getDuty(scope)).responder?.appId).toBe('cli_flash');
+
+    await h.coordinator.handle(message('om_plain', '今天下午三点发版'), config); await h.participation.flush(scope);
+    await h.coordinator.handle(fromBot('om_alarm_1', '【P1】订单服务错误率 12% 超过阈值', 'ou_alarm'), config); await h.participation.flush(scope);
+    expect(h.decide).not.toHaveBeenCalled();
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    expect((await h.repository.listDecisions(scope)).find(item => ruleOf(item) === 'not_responder')).toMatchObject({ action: 'silent' });
+    expect(await alarmRecords(h)).toEqual({ om_alarm_1: ['silent', 'suppressed', 'not_responder'] });
+    expect(await h.participation.describe(scope)).toContain('**接话人**：bdev-flash，没 @ 机器人的消息由它接，我只接 @ 和自己接手的话题');
+
+    await h.coordinator.handle(atBot('om_at', '帮我看下发布单'), config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    await h.coordinator.handle(fromBot('om_release', responderReleaseText('bdev-flash'), 'ou_flash'), config); await h.participation.flush(scope);
+    expect((await h.repository.getDuty(scope)).responder).toBeUndefined();
+  });
+
+  it('@ 它说「你来接话」：确认卡确认后记成接话人并在群里声明；点名别的机器人时不发卡', async () => {
+    const h = await harness('selective', { canOperate: async (_scope, operator, requester) => operator === requester });
+    await h.coordinator.initializeWorkflows(config);
+    Object.assign(h.service, { listChatMembers: members(3, bots) });
+    await h.coordinator.handle(atBot('om_resp', '你来接话'), config);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
+    expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_resp', statusLabel: '待确认',
+      elements: expect.arrayContaining([expect.objectContaining({ content: expect.stringContaining('由我（cli_test）接本群没 @ 机器人的消息') })]) }));
+    const confirmId = (await h.repository.listActions(scope)).find(item => item.kind === 'confirm.group_responder')!.id;
+    expect(await h.coordinator.handleAction({ dutydeck_confirm: 'confirm', confirm_id: confirmId, chat_id: scope.chatId }, 'ou_a', { messageId: 'om_card', chatId: scope.chatId }))
+      .toMatchObject({ type: 'success', content: expect.stringContaining('已在群里发了声明') });
+    expect((await h.repository.getDuty(scope)).responder).toMatchObject({ appId: scope.appId, name: 'cli_test' });
+    expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_resp', text: responderClaimText('cli_test') }));
+    // 已经是接话人时再说一次：直接回一条声明（之前没发出去或别的实例错过时能补上），不再发卡。
+    await h.coordinator.handle(atBot('om_resp_again', '你来接话'), config);
+    await vi.waitFor(() => expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_resp_again', text: responderClaimText('cli_test') })));
+
+    // 成为接话人后，多机器人群里没 @ 的消息照常走判定。
+    await h.coordinator.handle(message('om_q', '这个报错大家见过吗'), config); await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledOnce();
+    // 没 @ 任何机器人地点名 flash：本机器人不发卡也不出声。
+    await h.coordinator.handle(message('om_flash', '这个群由 flash 负责接话'), config); await h.participation.flush(scope);
+    expect(h.service.reply).toHaveBeenCalledOnce();
+    expect(h.decide).toHaveBeenCalledOnce();
+    expect(h.runtime.send).not.toHaveBeenCalled();
+  });
+
+  const levelCards = async (h: Awaited<ReturnType<typeof harness>>) => (await h.repository.listActions(scope)).filter(item => item.kind === 'confirm.participation_level');
+  const confirmCard = (h: Awaited<ReturnType<typeof harness>>, id: string) =>
+    h.coordinator.handleAction({ dutydeck_confirm: 'confirm', confirm_id: id, chat_id: scope.chatId }, 'ou_a', { messageId: 'om_card', chatId: scope.chatId });
+  const cardText = (h: Awaited<ReturnType<typeof harness>>, call: number) => JSON.stringify(h.service.reply.mock.calls[call]);
+
+  it('多机器人群没有接话人时调到积极：卡上写明由我接，确认后调档并发接话人声明', async () => {
+    const applyLevel = vi.fn(async () => {});
+    const h = await harness('selective', { applyLevel, canOperate: async (_scope, operator, requester) => operator === requester });
+    await h.coordinator.initializeWorkflows(config);
+    Object.assign(h.service, { listChatMembers: members(3, bots) });
+    await h.coordinator.handle(atBot('om_level', '积极点'), config);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
+    expect(cardText(h, 0)).toContain('本群有多个机器人，确认后由我负责接没 @ 的消息，并在群里发接话人声明。');
+    const [card] = await levelCards(h);
+    expect(await confirmCard(h, card!.id)).toMatchObject({ type: 'success', content: expect.stringContaining('没 @ 机器人的消息由我接，已在群里发了接话人声明') });
+    expect(applyLevel).toHaveBeenCalledExactlyOnceWith(scope, 'eager', 'ou_a');
+    expect((await h.repository.getDuty(scope)).responder).toMatchObject({ appId: scope.appId, name: 'cli_test' });
+    expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_level', text: responderClaimText('cli_test') }));
+  });
+
+  it('调档时群里已有别的接话人就不抢：发卡后别人先声明的，确认时也不抢', async () => {
+    const applyLevel = vi.fn(async () => {});
+    const h = await harness('selective', { applyLevel, canOperate: async (_scope, operator, requester) => operator === requester });
+    await h.coordinator.initializeWorkflows(config);
+    Object.assign(h.service, { listChatMembers: members(3, bots), getMessage: details({ om_claim: 'cli_flash' }) });
+    await h.coordinator.handle(atBot('om_level', '积极点'), config);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
+    await h.coordinator.handle(fromBot('om_claim', responderClaimText('bdev-flash'), 'ou_flash', { createTime: String(Date.now()) }), config);
+    expect(await confirmCard(h, (await levelCards(h))[0]!.id)).toMatchObject({ type: 'success', content: expect.stringContaining('发卡后「bdev-flash」已成为本群接话人，没 @ 的消息仍由它接') });
+    expect(applyLevel).toHaveBeenCalledOnce();
+    expect((await h.repository.getDuty(scope)).responder?.appId).toBe('cli_flash');
+    expect(h.service.replyText).not.toHaveBeenCalled();
+
+    await h.coordinator.handle(atBot('om_level_2', '积极点'), config);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledTimes(2));
+    expect(cardText(h, 1)).toContain('本群接话人是「bdev-flash」，没 @ 的消息仍由它接；要改由我接，@我 说「你负责接话」。');
+    expect((await levelCards(h)).map(item => (item.payload as { payload: Record<string, unknown> }).payload)).toContainEqual({ level: 'eager' });
+  });
+
+  it('本 Bot 是接话人时调到只在 @ 时：卡上写明会卸任，确认后调档并发卸任声明', async () => {
+    const applyLevel = vi.fn(async () => {});
+    const h = await harness('selective', { applyLevel, canOperate: async (_scope, operator, requester) => operator === requester });
+    await h.coordinator.initializeWorkflows(config);
+    Object.assign(h.service, { listChatMembers: members(3, bots) });
+    await h.repository.updateDuty(scope, { expectedRevision: 0, responder: { appId: scope.appId, name: 'cli_test', since: new Date().toISOString() } }, 'owner');
+    await h.coordinator.handle(atBot('om_quiet', '只在@时回'), config);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
+    expect(cardText(h, 0)).toContain('我现在是本群接话人，确认后在群里发卸任声明，没 @ 的消息不再由我接。');
+    expect(await confirmCard(h, (await levelCards(h))[0]!.id)).toMatchObject({ type: 'success', content: expect.stringContaining('我不再接没 @ 机器人的消息，已在群里发了卸任声明') });
+    expect(applyLevel).toHaveBeenCalledExactlyOnceWith(scope, 'mention', 'ou_a');
+    expect((await h.repository.getDuty(scope)).responder).toBeUndefined();
+    expect(h.service.replyText).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_quiet', text: responderReleaseText('cli_test') }));
+  });
+
+  it('Web 改分工：设成本 Bot 或清掉时在群里声明；没在群里确认过的订阅不能开启，改来源沿用原确认人', async () => {
+    const h = await harness('selective');
+    const alarm = { enabled: true, sources: [alarmSource], levels: [], dedupeHours: 6, maxPerHour: 3 };
+    await expect(h.participation.updateDuty(scope, { expectedRevision: 0, alarm }, 'owner')).rejects.toMatchObject({ code: 'COLLABORATION_ALARM_REQUESTER_REQUIRED', statusCode: 409 });
+    const claimed = await h.participation.updateDuty(scope, { expectedRevision: 0, responder: 'self' }, 'owner');
+    expect(claimed).toMatchObject({ announced: true, duty: { revision: 1, responder: { appId: scope.appId, name: 'cli_test' } } });
+    expect(h.service.sendText).toHaveBeenCalledWith(expect.objectContaining({ chatId: scope.chatId, text: responderClaimText('cli_test') }));
+    await expect(h.participation.updateDuty(scope, { expectedRevision: 0, responder: null }, 'owner')).rejects.toMatchObject({ code: 'COLLABORATION_REVISION_CONFLICT' });
+    // 已经是本 Bot 时再存一次不重复声明。
+    expect(await h.participation.updateDuty(scope, { expectedRevision: 1, responder: 'self' }, 'owner')).not.toHaveProperty('announced');
+
+    await h.repository.updateDuty(scope, { expectedRevision: 2, alarm: { ...alarm, requesterId: 'ou_admin' } }, 'ou_admin');
+    const edited = await h.participation.updateDuty(scope, { expectedRevision: 3, alarm: { ...alarm, levels: ['P0'] } }, 'owner');
+    expect(edited.duty.alarm).toEqual({ ...alarm, levels: ['P0'], requesterId: 'ou_admin' });
+    const released = await h.participation.updateDuty(scope, { expectedRevision: 4, responder: null }, 'owner');
+    expect(released).toMatchObject({ announced: true });
+    expect(released.duty.responder).toBeUndefined();
+    expect(h.service.sendText).toHaveBeenLastCalledWith(expect.objectContaining({ text: responderReleaseText('cli_test') }));
+    expect(h.service.sendText).toHaveBeenCalledTimes(2);
+  });
+
+  it('在自己接手的话题里没 @ 的追问照常接；别的机器人的话题不接', async () => {
+    const run = async (ownsTopic: boolean) => {
+      const h = await harness('selective');
+      Object.assign(h.service, { listChatMembers: members(3, bots), getMessage: details({ om_alarm_1: 'cli_alarm' }) });
+      const groupManager = { resolved: async (current: StoredLarkConfig) => ({ ...current, mentionPolicy: 'topic' as const }), ownsTopic: vi.fn(async () => ownsTopic),
+        authorize: async () => ({ allowed: true }), hasActiveSession: async () => false, highRiskOpenIds: async () => [], recordRun: async () => {} };
+      const coordinator = new LarkMessageCoordinator(h.runtime as any, h.service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, undefined,
+        async () => 'group', undefined, groupManager as any, { participation: h.participation });
+      cleanups.push(() => coordinator.stop());
+      h.participation.setDispatcher(scope.appId, (event, current) => coordinator.adopt(event, current));
+      await coordinator.handle(message('om_follow', '那要不要回滚', { threadId: 'omt_alarm', rootId: 'om_alarm_1', parentId: 'om_alarm_1' }), config); await h.participation.flush(scope);
+      expect(h.decide).not.toHaveBeenCalled();
+      return { h, decisions: (await h.repository.listDecisions(scope)).map(item => [item.action, ruleOf(item)]) };
+    };
+    const owner = await run(true);
+    expect(owner.decisions).toEqual([['act', 'owned_topic']]);
+    await vi.waitFor(() => expect(owner.h.runtime.send).toHaveBeenCalledOnce());
+    const other = await run(false);
+    expect(other.decisions).toEqual([['silent', 'topic_of_other']]);
+    expect(other.h.runtime.send).not.toHaveBeenCalled();
   });
 });

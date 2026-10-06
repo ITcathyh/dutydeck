@@ -113,6 +113,36 @@ describe('Collaboration Storage Repository', () => {
     });
   });
 
+  describe('Group Duty (alarm subscription & responder)', () => {
+    it('defaults to revision 0, updates with CAS, keeps omitted fields, clears null fields, and does not advance contextRevision', async () => {
+      const repos = createRepositories(':memory:');
+      try {
+        const collab = repos.collaboration;
+        expect(await collab.getDuty(scopeA)).toEqual({ scope: scopeA, revision: 0, updatedAt: expect.any(String) });
+        const alarm = { enabled: true, sources: [{ appId: 'cli_alarm', name: '监控' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3, requesterId: 'ou_admin' };
+        const first = await collab.updateDuty(scopeA, { expectedRevision: 0, alarm }, 'ou_admin');
+        expect(first).toMatchObject({ revision: 1, alarm });
+        expect(first.responder).toBeUndefined();
+        await expect(collab.updateDuty(scopeA, { expectedRevision: 0, responder: null }, 'ou_admin')).rejects.toMatchObject({ code: 'COLLABORATION_REVISION_CONFLICT', statusCode: 409 });
+
+        const responder = { appId: 'cli_app_a', name: 'flash', since: isoTime1 };
+        const second = await collab.updateDuty(scopeA, { expectedRevision: 1, responder }, 'ou_admin');
+        expect(second).toMatchObject({ revision: 2, responder, alarm });
+        const cleared = await collab.updateDuty(scopeA, { expectedRevision: 2, alarm: null }, 'ou_admin');
+        expect(cleared).toMatchObject({ revision: 3, responder });
+        expect(cleared.alarm).toBeUndefined();
+        expect(await collab.getDuty(scopeA)).toEqual(cleared);
+
+        expect(await collab.getDuty(scopeB)).toMatchObject({ revision: 0 });
+        expect((await collab.snapshot(scopeA)).contextRevision).toBe(0);
+        expect((await collab.listActivities(scopeA)).map(item => item.summary)).toEqual(['Updated group duty', 'Updated group duty', 'Updated group duty']);
+        await expect(collab.updateDuty(scopeA, { expectedRevision: 3, alarm: { ...alarm, dedupeHours: 0 } }, 'ou_admin')).rejects.toThrow();
+      } finally {
+        repos.close();
+      }
+    });
+  });
+
   describe('Observation Deduplication, Revision Edit, and Pruning Retention', () => {
     it('deduplicates identical observation without advancing sequence or contextRevision', async () => {
       const repos = createRepositories(':memory:');

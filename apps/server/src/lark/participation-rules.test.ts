@@ -22,8 +22,9 @@ describe('participation rules', () => {
     const text = '总结下这个文档要做的事情 https://bytedance.larkoffice.com/docx/AbCdEf123';
     expect(rule({ text, members: { humans: 1, bots: 1 } })).toMatchObject({ action: 'addressed', rule: 'single_human' });
     expect(rule({ text, members: { humans: 1, bots: 0 } })).toMatchObject({ action: 'addressed', rule: 'single_human' });
-    expect(rule({ text, members: { humans: 1, bots: 2 } })).toBeUndefined();
-    expect(rule({ text, members: { humans: 1, bots: 2 }, level: 'eager' })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
+    expect(rule({ text, members: { humans: 1, bots: 2 } })).toMatchObject({ action: 'silent', rule: 'no_responder' });
+    expect(rule({ text, members: { humans: 1, bots: 2 }, level: 'eager' })).toMatchObject({ action: 'silent', rule: 'no_responder' });
+    expect(rule({ text, members: { humans: 1, bots: 2 }, level: 'eager', responder: 'self' })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
     expect(rule({ text, members: { humans: 3, bots: 1 } })).toBeUndefined();
     expect(rule({ text })).toBeUndefined();
   });
@@ -66,6 +67,30 @@ describe('participation rules', () => {
     expect(rule({ text: '完成容量评估这件事什么时候好', ownedNames: ['完成容量评估'] })).toMatchObject({ action: 'addressed', rule: 'owned_item' });
     expect(rule({ level: 'eager' })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
     expect(rule({ level: 'eager', mentionsOther: true })).toMatchObject({ action: 'silent', rule: 'mentions_other' });
+  });
+});
+
+describe('多机器人群的接话人', () => {
+  const crowded = { members: { humans: 3, bots: 2 } };
+  it('没指定接话人时没 @ 的消息都不接；单机器人群和成员数未知时不受影响', () => {
+    expect(rule({ ...crowded, level: 'eager' })).toMatchObject({ action: 'silent', rule: 'no_responder' });
+    expect(rule({ members: { humans: 3, bots: 1 }, level: 'eager' })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
+    expect(rule({ level: 'eager' })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
+  });
+
+  it('接话人是自己时照常接，是别人时只接叫自己的', () => {
+    expect(rule({ ...crowded, level: 'eager', responder: 'self' })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
+    expect(rule({ ...crowded, level: 'eager', responder: 'other' })).toMatchObject({ action: 'silent', rule: 'not_responder' });
+    expect(rule({ ...crowded, responder: 'other', text: 'flash 帮我看下' })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
+    expect(rule({ ...crowded, responder: 'other', parent: 'self' })).toMatchObject({ action: 'addressed', rule: 'reply_to_self' });
+    expect(rule({ ...crowded, responder: 'other', ownedTopic: true })).toMatchObject({ action: 'addressed', rule: 'owned_topic' });
+  });
+
+  it('接话人也不抢别的机器人的话：叫别的机器人、别人的话题都不接', () => {
+    expect(rule({ ...crowded, level: 'eager', responder: 'self', callsOther: true })).toMatchObject({ action: 'silent', rule: 'calls_other' });
+    expect(rule({ ...crowded, level: 'eager', responder: 'self', threadRootOther: true })).toMatchObject({ action: 'silent', rule: 'topic_of_other' });
+    expect(rule({ level: 'eager', threadRootOther: true })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
+    expect(rule({ ...crowded, level: 'eager', responder: 'self', threadRootOther: true, ownedTopic: true })).toMatchObject({ action: 'addressed', rule: 'owned_topic' });
   });
 });
 

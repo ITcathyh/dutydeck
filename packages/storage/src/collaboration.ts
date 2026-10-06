@@ -5,6 +5,7 @@ import {
   collaborationActivitySchema,
   collaborationBootstrapSchema,
   collaborationDecisionSchema,
+  collaborationDutySchema,
   collaborationFeedbackSchema,
   collaborationFollowupSchema,
   collaborationMandateSchema,
@@ -18,6 +19,7 @@ import {
   listObservationsOptionsSchema,
   observeCollaborationInputSchema,
   updateActionInputSchema,
+  updateCollaborationDutyInputSchema,
   updateCollaborationSettingsInputSchema,
   updateDecisionInputSchema,
   updateFollowupInputSchema,
@@ -28,6 +30,7 @@ import {
   type CollaborationActivity,
   type CollaborationBootstrap,
   type CollaborationDecision,
+  type CollaborationDuty,
   type CollaborationFeedback,
   type CollaborationFollowup,
   type CollaborationMandate,
@@ -42,6 +45,7 @@ import {
   type ListObservationsOptions,
   type ObserveCollaborationInput,
   type UpdateActionInput,
+  type UpdateCollaborationDutyInput,
   type UpdateCollaborationSettingsInput,
   type UpdateDecisionInput,
   type UpdateFollowupInput,
@@ -203,6 +207,25 @@ function rowToSettings(row: SettingsRow): CollaborationSettings {
     maxDecisionsPerHour: row.max_decisions_per_hour,
     retentionDays: row.retention_days,
     policyVersion: row.policy_version,
+    updatedAt: row.updated_at
+  });
+}
+
+interface DutyRow {
+  app_id: string;
+  chat_id: string;
+  revision: number;
+  responder_json: string | null;
+  alarm_json: string | null;
+  updated_at: string;
+}
+
+function rowToDuty(row: DutyRow): CollaborationDuty {
+  return collaborationDutySchema.parse({
+    scope: { appId: row.app_id, chatId: row.chat_id },
+    revision: row.revision,
+    ...(row.responder_json ? { responder: JSON.parse(row.responder_json) } : {}),
+    ...(row.alarm_json ? { alarm: JSON.parse(row.alarm_json) } : {}),
     updatedAt: row.updated_at
   });
 }
@@ -563,6 +586,34 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
 
         advanceContextRevision(sqlite, scope);
         return newSettings;
+      })();
+    },
+
+    async getDuty(scope: CollaborationScope): Promise<CollaborationDuty> {
+      const row = sqlite.prepare('SELECT * FROM collaboration_duties WHERE app_id = ? AND chat_id = ?').get(scope.appId, scope.chatId) as DutyRow | undefined;
+      return row ? rowToDuty(row) : collaborationDutySchema.parse({ scope, revision: 0, updatedAt: DEFAULT_SETTINGS_UPDATED_AT });
+    },
+
+    async updateDuty(scope: CollaborationScope, patch: UpdateCollaborationDutyInput, actorId: string): Promise<CollaborationDuty> {
+      const validated = updateCollaborationDutyInputSchema.parse(patch);
+      return sqlite.transaction(() => {
+        const row = sqlite.prepare('SELECT * FROM collaboration_duties WHERE app_id = ? AND chat_id = ?').get(scope.appId, scope.chatId) as DutyRow | undefined;
+        const current = row ? rowToDuty(row) : undefined;
+        const revision = current?.revision ?? 0;
+        if (validated.expectedRevision !== revision) {
+          throw new RuntimeError('COLLABORATION_REVISION_CONFLICT', `Duty revision conflict: expected ${validated.expectedRevision}, current ${revision}`, 409);
+        }
+        const responder = validated.responder === undefined ? current?.responder : validated.responder ?? undefined;
+        const alarm = validated.alarm === undefined ? current?.alarm : validated.alarm ?? undefined;
+        const duty = collaborationDutySchema.parse({ scope, revision: revision + 1, ...(responder ? { responder } : {}), ...(alarm ? { alarm } : {}), updatedAt: now() });
+        sqlite.prepare(`
+          INSERT INTO collaboration_duties (app_id, chat_id, revision, responder_json, alarm_json, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(app_id, chat_id) DO UPDATE SET revision = excluded.revision, responder_json = excluded.responder_json,
+            alarm_json = excluded.alarm_json, updated_by = excluded.updated_by, updated_at = excluded.updated_at
+        `).run(scope.appId, scope.chatId, duty.revision, responder ? JSON.stringify(responder) : null, alarm ? JSON.stringify(alarm) : null, actorId.slice(0, 128), duty.updatedAt);
+        recordActivity(sqlite, { id: makeId('act'), scope, entityKind: 'settings', entityId: `${scope.appId}:${scope.chatId}:duty`.slice(0, 128), revision: duty.revision,
+          actorId, sourceRefs: [], provenance: 'confirmed', summary: 'Updated group duty', createdAt: duty.updatedAt });
+        return duty;
       })();
     },
 
