@@ -126,6 +126,17 @@ export class CollaborationService {
     if (!next) throw new RuntimeError('COLLABORATION_SCHEDULE_TIME_PASSED', `一次性执行时间已过或不可用，计划未${operation}。请选择未来的执行时间。`, 400);
     return next.scheduledForUtc;
   }
+  /** 只校验、不落库：Agent 发起的创建先发确认卡，用户确认后才调用 createMandate。 */
+  async prepareMandate(scope: CollaborationScope, actorId: string, body: unknown) {
+    await this.require(scope, actorId, 'write');
+    const input = createMandateSchema.parse(body);
+    if (input.condition !== 'always' && !await this.followup(scope, input.followupId)) throw new RuntimeError('COLLABORATION_CONDITION_INVALID', 'This condition requires a follow-up', 400);
+    const refs = await this.options.resolveScheduleScope(scope);
+    const delivery = input.delivery ?? { mode: 'chat' as const, chatRef: scope.chatId, continuation: 'chat_root' as const };
+    if (delivery.chatRef !== scope.chatId || delivery.rootMessageRef && (!this.options.validateDelivery || !await this.options.validateDelivery(scope, delivery))) throw new RuntimeError('COLLABORATION_DESTINATION_CONFLICT', 'Delivery must remain in the authorized chat', 400);
+    this.nextOneOff({ id: idFor(scope, input.id), ...refs, name: input.goal.slice(0, 200), trigger: input.trigger, timezone: input.timezone, dstPolicy: { gap: 'skip', overlap: 'first' }, delivery, payloadRef: binding({ id: input.id, scope, revision: 1 }), sourceOwnership: 'dutydeck', sourceNamespace: 'collaboration', sourceScheduleRef: idFor(scope, input.id), sourceEnabled: false }, '创建');
+    return { ...input, delivery };
+  }
   async createMandate(scope: CollaborationScope, actorId: string, body: unknown) {
     await this.require(scope, actorId, 'write');
     const input = createMandateSchema.parse(body), id = input.id;

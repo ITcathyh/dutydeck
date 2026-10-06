@@ -433,3 +433,18 @@ describe('F2-5: 定时结果卡「停用此计划」按钮与标题', () => {
     });
   });
 });
+
+describe('定时委托卡片按钮回调', () => {
+  it('把确认、暂停、停止等点击交给 mandateCards，并把拒绝原因原样回给点击者', async () => {
+    const h = await testHarness();
+    const context = { messageId: 'om_result_card', chatId: 'oc_group' };
+    const value = { dutydeck_mandate: 'stop', ref: 'mandate-1' };
+    expect(await h.coordinator.handleAction(value, 'ou_alice', context)).toMatchObject({ type: 'error', content: '这张卡片已失效。' });
+    const callback = vi.fn(async () => '已停止，这个定时任务不会再执行。');
+    h.automation.mandateCards = { callback };
+    expect(await h.coordinator.handleAction(value, 'ou_alice', context)).toEqual({ type: 'success', content: '已停止，这个定时任务不会再执行。' });
+    expect(callback).toHaveBeenCalledWith('cli_test_app', value, 'ou_alice', context);
+    callback.mockRejectedValueOnce(new Error('只有发起人或有操作权限的人能处理这个定时任务。'));
+    expect(await h.coordinator.handleAction(value, 'ou_bob', context)).toMatchObject({ type: 'error', content: '只有发起人或有操作权限的人能处理这个定时任务。' });
+  });
+});

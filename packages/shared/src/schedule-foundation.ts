@@ -425,3 +425,55 @@ export function buildScheduleTaskRunIntent(definition: ScheduleDefinition, gener
     blockerCodes: blockers.map(blocker => blocker.code)
   };
 }
+
+const weekdayLabels = ['日', '一', '二', '三', '四', '五', '六'] as const;
+const clock = (hour: number, minute: number) => `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+
+/** 展开 5 段 cron；写法超出常见范围时返回 undefined，由调用方退回原文。 */
+function describeCron(expression: string): { when: string; period: string } | undefined {
+  const fields = expression.trim().split(/\s+/);
+  if (fields.length !== 5) return undefined;
+  let minutes: number[], hours: number[], days: number[], months: number[], weekdays: number[];
+  try {
+    minutes = [...cronField(fields[0]!, 0, 59)].sort((a, b) => a - b); hours = [...cronField(fields[1]!, 0, 23)].sort((a, b) => a - b);
+    days = [...cronField(fields[2]!, 1, 31)].sort((a, b) => a - b); months = [...cronField(fields[3]!, 1, 12)].sort((a, b) => a - b);
+    weekdays = [...cronField(fields[4]!, 0, 7, true)].sort((a, b) => a - b);
+  } catch { return undefined; }
+  const dayWild = fields[2] === '*', weekdayWild = fields[4] === '*' || weekdays.length === 7;
+  if (!dayWild && !weekdayWild) return undefined;
+  // 时间部分：每 N 分钟 / 每 N 小时 / 具体几点几分。
+  let time: string;
+  if (fields[1] === '*' && fields[0]!.startsWith('*/')) time = `每 ${fields[0]!.slice(2)} 分钟`;
+  else if (fields[0]!.length <= 2 && minutes.length === 1 && fields[1]!.startsWith('*/')) time = `每 ${fields[1]!.slice(2)} 小时${minutes[0] ? `（每次过 ${minutes[0]} 分）` : '整点'}`;
+  else if (hours.length * minutes.length <= 6) time = hours.flatMap(hour => minutes.map(minute => clock(hour, minute))).join('、');
+  else return undefined;
+  const everyFewMinutes = time.startsWith('每 ');
+  const monthText = months.length === 12 ? '' : `${months.join('、')} 月`;
+  let day: string, period = '今天';
+  if (!dayWild) { day = monthText ? `${monthText} ${days.join('、')} 日` : `每月 ${days.join('、')} 日`; period = '本月'; }
+  else if (weekdayWild) day = monthText ? `${monthText}每天` : '每天';
+  else if (weekdays.join() === '1,2,3,4,5') day = `${monthText}工作日${everyFewMinutes ? '' : '每天'}`;
+  else if (weekdays.join() === '0,6') day = `${monthText}周末${everyFewMinutes ? '' : '每天'}`;
+  else { day = `${monthText}每周${weekdays.map(weekday => weekdayLabels[weekday]).join('、')}`; period = '本周'; }
+  return { when: everyFewMinutes ? `${day}${time}` : `${day} ${time}`, period };
+}
+
+/** 把触发规则写成给用户看的人话，例如「工作日每天 18:00」；认不出的 cron 原样带出，不猜。 */
+export function describeScheduleTrigger(trigger: ScheduleTrigger, timezone?: string): string {
+  const zone = timezone && timezone !== 'Asia/Shanghai' ? `（时区 ${timezone}）` : '';
+  if (trigger.kind === 'at') return `${trigger.localDateTime.slice(0, 16).replace('T', ' ')} 执行一次${zone}`;
+  if (trigger.kind === 'interval') {
+    const seconds = trigger.everySeconds;
+    const every = seconds % 86_400 === 0 ? (seconds === 86_400 ? '每天' : `每 ${seconds / 86_400} 天`) : seconds % 3_600 === 0 ? `每 ${seconds / 3_600} 小时` : `每 ${Math.round(seconds / 60)} 分钟`;
+    return `${every}${zone}`;
+  }
+  const described = describeCron(trigger.expression);
+  return `${described?.when ?? `按 cron「${trigger.expression}」`}${zone}`;
+}
+
+/** 「没有新增」该说哪个周期：按触发频率取今天、本周或本月。 */
+export function scheduleTriggerPeriod(trigger: ScheduleTrigger): string {
+  if (trigger.kind === 'cron') return describeCron(trigger.expression)?.period ?? '这段时间';
+  if (trigger.kind === 'interval') return trigger.everySeconds >= 28 * 86_400 ? '本月' : trigger.everySeconds >= 7 * 86_400 ? '本周' : trigger.everySeconds >= 86_400 ? '今天' : '这段时间';
+  return '这次';
+}
