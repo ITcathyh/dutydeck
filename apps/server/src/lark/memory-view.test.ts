@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
@@ -16,6 +16,7 @@ import {
   renderLedgerJsonl,
   renderLarkMemoryInjection,
   renderMemoryIndex,
+  stableMemoryCommand,
   renderTopicFile
 } from './memory-view.js';
 
@@ -399,5 +400,54 @@ describe('shared group pool view', () => {
     const block = renderLarkMemoryInjection('# 会话记忆索引\n- 事实', { command: 'dutydeck', directory: '/app/memory/cli_bot/groups', shared: true });
     expect(block).toContain('范围：这是本机器人所在各群共享的记忆；标「其他群」的条目来自其他群，只是背景，不代表本群的约定。');
     expect(renderLarkMemoryInjection('# 会话记忆索引\n- 事实', { command: 'dutydeck', directory: '/app/memory/cli_bot/oc_p2p' })).not.toContain('各群共享');
+  });
+});
+
+describe('按相关性注入记忆', () => {
+  const redis = (id: string, day: number) => entry(id, 'redis-alerts', `Redis 集群 ${id} 连接数告警阈值调整过，处理记录见工单${'详情'.repeat(50)}`, 'extraction', day);
+  const pool = [
+    ...Array.from({ length: 9 }, (_, index) => redis(`mem_r${index}`, 10 + index)),
+    entry('mem_pref', 'communication', '用户喜欢先看结论再看过程', 'extraction', 1),
+    entry('mem_user', 'general', '线上发布前必须先在 BOE 验证', 'user', 2),
+    entry('mem_gate', 'asteratestgate', 'AsterGate 使用指南放在 docs/aster-gate.md', 'agent', 3)
+  ];
+
+  it('无关主题只列名字，用户原话和偏好类主题始终带上，相关条目入选，总量不超过 1200 字', () => {
+    const result = renderMemoryIndex(pool, dummyState, { query: '帮我写 AsterGate 使用指南', budget: 1200 });
+    expect(result.text.length).toBeLessThanOrEqual(1200);
+    expect(result.ids.sort()).toEqual(['mem_gate', 'mem_pref', 'mem_user']);
+    expect(result.text).toContain('其他主题：redis-alerts（需要时用 memory search）');
+    expect(result.text).not.toContain('连接数告警');
+    expect(result.overBudget).toBe(false);
+  });
+
+  it('请求提到相关内容时按重合度带上对应条目', () => {
+    const result = renderMemoryIndex(pool, dummyState, { query: 'Redis 集群 mem_r3 连接数告警怎么处理', budget: 1200 });
+    expect(result.ids).toContain('mem_r3');
+    expect(result.text.length).toBeLessThanOrEqual(1200);
+  });
+
+  it('不给 query 时保持原有按时间选取的行为', () => {
+    const result = renderMemoryIndex(pool, dummyState);
+    expect(result.ids.length).toBeGreaterThan(3);
+    expect(result.text).not.toContain('其他主题：');
+  });
+});
+
+describe('stableMemoryCommand', () => {
+  it('current 指向同一个 release 时改写成 releases/current，否则保持原样', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-releases-'));
+    try {
+      const releases = join(root, 'releases');
+      await mkdir(join(releases, '20261006-abc123', 'dist'), { recursive: true });
+      await mkdir(join(releases, '20261001-old999', 'dist'), { recursive: true });
+      await symlink(join(releases, '20261006-abc123'), join(releases, 'current'));
+      const command = (release: string) => `'/usr/bin/node' '${releases}/${release}/dist/cli.js'`;
+      expect(stableMemoryCommand(command('20261006-abc123'))).toBe(`'/usr/bin/node' '${releases}/current/dist/cli.js'`);
+      expect(stableMemoryCommand(command('20261001-old999'))).toBe(command('20261001-old999'));
+      expect(stableMemoryCommand(command('current'))).toBe(command('current'));
+      expect(stableMemoryCommand('dutydeck')).toBe('dutydeck');
+      expect(stableMemoryCommand(`'/usr/bin/node' '/nonexistent/releases/x/dist/cli.js'`)).toBe(`'/usr/bin/node' '/nonexistent/releases/x/dist/cli.js'`);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 });
