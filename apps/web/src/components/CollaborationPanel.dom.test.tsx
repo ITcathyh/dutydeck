@@ -158,6 +158,18 @@ describe('协作设置保存与版本冲突', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /跟随机器人默认/ }).getAttribute('aria-pressed')).toBe('true'));
   });
 
+  it('可以显式选积极参与', async () => {
+    const user = userEvent.setup();
+    const settings = makeSettings({ participation: 'selective' });
+    getOverview.mockResolvedValue(makeOverview(settings));
+    const update = vi.spyOn(collaborationApi, 'updateSettings').mockResolvedValue({ settings: { ...settings, participation: 'eager' } });
+    renderPanel();
+    await user.click(await screen.findByRole('button', { name: /积极参与/ }));
+    await user.click(screen.getByRole('button', { name: '保存设置' }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update.mock.calls[0]![2]).toMatchObject({ inheritParticipation: false, participation: 'eager' });
+  });
+
   it('保存时带当前 expectedRevision，409 冲突保留草稿而不是谎报成功', async () => {
     const user = userEvent.setup();
     const updateSettings = vi

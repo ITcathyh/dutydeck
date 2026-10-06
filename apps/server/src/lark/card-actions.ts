@@ -652,3 +652,33 @@ export function parseLarkCardActionValue(value: unknown): LarkCardActionValue | 
     : undefined;
   return { action: definition.action, taskId, ...(turn === undefined ? {} : { turn }) };
 }
+
+/**
+ * 通用确认卡：一句话说明要改什么，配「确认」「取消」两个按钮。改参与强度、告警订阅等需要人点头的群级变更共用它；
+ * 回调值只带确认单编号和群 ID，确认单内容一律以服务端存档为准，不信回调里的其他字段。
+ */
+export interface LarkConfirmValue { decision: 'confirm' | 'cancel'; confirmId: string; chatId: string }
+const maxConfirmIdLength = 128;
+
+export function buildLarkConfirmElements(input: { confirmId: string; chatId: string; body: string; pending: boolean }): LarkCardElement[] {
+  const body: LarkCardElement = { tag: 'markdown', element_id: 'confirm_body', content: input.body, text_align: 'left', text_size: 'normal_v2', margin: '0px' };
+  if (!input.pending || !input.confirmId || input.confirmId.length > maxConfirmIdLength) return [body];
+  const button = (decision: LarkConfirmValue['decision'], label: string, type: string): LarkCardElement => ({
+    tag: 'button', element_id: `confirm_${decision}`, type, text: { tag: 'plain_text', content: label },
+    behaviors: [{ type: 'callback', value: { dutydeck_confirm: decision, confirm_id: input.confirmId, chat_id: input.chatId } }]
+  });
+  return [body, { tag: 'column_set', element_id: 'confirm_actions', flex_mode: 'none', horizontal_spacing: '8px', columns: [
+    { tag: 'column', width: 'auto', elements: [button('confirm', '确认', 'primary')] },
+    { tag: 'column', width: 'auto', elements: [button('cancel', '取消', 'default')] }
+  ] }];
+}
+
+export function parseLarkConfirmValue(value: unknown): LarkConfirmValue | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const decision = record.dutydeck_confirm;
+  const confirmId = typeof record.confirm_id === 'string' ? record.confirm_id.trim() : '';
+  const chatId = typeof record.chat_id === 'string' ? record.chat_id.trim() : '';
+  if (decision !== 'confirm' && decision !== 'cancel' || !confirmId || confirmId.length > maxConfirmIdLength || !chatId.startsWith('oc_')) return undefined;
+  return { decision, confirmId, chatId };
+}

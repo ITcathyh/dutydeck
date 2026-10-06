@@ -180,7 +180,7 @@ interface SettingsRow {
   app_id: string;
   chat_id: string;
   revision: number;
-  participation: 'off' | 'observe' | 'selective';
+  participation: 'off' | 'observe' | 'selective' | 'eager';
   participation_inherited: number;
   instructions: string;
   notifications_paused: number;

@@ -737,6 +737,41 @@ describe('Bot 默认群参与模式', () => {
   });
 });
 
+describe('Bot 群里接话方式', () => {
+  it('四档选择同时改写唤醒方式和默认群参与模式', async () => {
+    const user = userEvent.setup();
+    let bot: LarkBotConfig = { ...mockBot };
+    vi.spyOn(api, 'larkConfig').mockImplementation(async () => ({ configured: true, bots: [bot], listeningDisabled: false }));
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const save = vi.spyOn(api, 'saveLarkConfig').mockImplementation(async () => {
+      bot = { ...bot, revision: 4, mentionPolicy: 'topic', defaultGroupParticipation: 'eager' };
+      return { configured: true, bots: [bot], listeningDisabled: false };
+    });
+    renderWithClient(<BotManagement selectedAppId={bot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>);
+    const level = await screen.findByRole('combobox', { name: '群里接话方式' }) as HTMLSelectElement;
+    expect(level.value).toBe('mention');
+    expect(screen.getByText(/只处理 @ 我的消息/)).toBeTruthy();
+    await user.selectOptions(level, 'eager');
+    expect((screen.getByRole('combobox', { name: '群里怎样才唤醒' }) as HTMLSelectElement).value).toBe('topic');
+    expect((screen.getByRole('combobox', { name: '默认群参与模式' }) as HTMLSelectElement).value).toBe('eager');
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ originalAppId: bot.appId, mentionPolicy: 'topic', defaultGroupParticipation: 'eager' })));
+    await waitFor(() => expect((screen.getByRole('combobox', { name: '群里接话方式' }) as HTMLSelectElement).value).toBe('eager'));
+  });
+
+  it('旧组合不是四档之一时如实说明，选一档才改写', async () => {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, defaultGroupParticipation: 'observe' }], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>);
+    const level = await screen.findByRole('combobox', { name: '群里接话方式' }) as HTMLSelectElement;
+    expect(level.value).toBe('mention');
+    expect(screen.getByText(/当前是自定义组合，选一档会同时改写下方两项/)).toBeTruthy();
+    expect(screen.queryByText(/有未保存的修改/)).toBeNull();
+  });
+});
+
 describe('Bot 执行方式', () => {
   const agents: Agent[] = [
     { id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'ask' },
