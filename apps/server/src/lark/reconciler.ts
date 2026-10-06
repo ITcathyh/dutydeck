@@ -85,8 +85,8 @@ export async function performLarkCardReconcile(input: {
   /** 卡住的任务能否在卡上给「在新会话中执行」按钮，与 coordinator 回调端同一个判定（按 message_id 读映射与入站记录）。缺省不给。 */
   relaunchReady?: (taskId: string, status: string, turn: number) => Promise<boolean>;
   /**
-   * 「需要核对」的一轮先交给它：服务重启切断的轮次自动重投。handled 表示已交给重投流程或已放弃，这里不再重绘；
-   * hold 表示停下等人在卡上选「重新执行」「放弃」；undefined 照旧按需要核对处理。
+   * 「需要核对」的一轮先交给它：服务重启切断的轮次自动重投，Agent 已停下的其他中断自动结束。handled 表示已交给重投流程、已自动结束或已放弃，这里不再重绘；
+   * hold 表示停下等人在卡上选「在原对话继续」「重新执行」「放弃」；undefined 照旧按需要核对处理。
    */
   interruptedTurn?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord) => Promise<LarkInterruptedTurn | undefined>;
   /** Web 要求登录：重绘的过程卡上「查看详情」是回调按钮。结果卡的这项能力由 terminalDecoration 带上。 */
@@ -187,13 +187,17 @@ export async function performLarkCardReconcile(input: {
           ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status, undefined, {
             relaunch: !hold && await input.relaunchReady?.(mapping.externalId, runtimeTask.status, persisted.turn ?? 0) === true,
             ...(hold ? { interrupted: { ...hold, buttons: !cardless } } : {}),
+            // 排在结果未知那一轮后面的排队消息：卡上给「在原对话继续」，按钮要能找到有人能续聊的话题。
+            ...(!cardless && persisted.scope_id && !persisted.scope_id.startsWith('message:') ? { continueInPlace: true } : {}),
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }) : undefined;
         const state = runtimeTask.status === 'reconcile_required' || runtimeTask.status === 'legacy_unresolved'
           ? runtimeTask.status : runtimeTask.status === 'queued' ? 'queued' : 'running';
         const canCancel = state === 'queued' && Boolean(runtime.cancelQueued && persisted.sender_open_id);
         const canRelaunch = recovery?.relaunch === true;
         const canReplay = Boolean(hold) && recovery?.label === '结果未知' && !cardless;
-        const actionable = canCancel || canRelaunch || canReplay;
+        // 停下等人选的一轮，入站记录与话题都在（同 canReplay），就能在原对话继续。
+        const canContinueInPlace = canReplay || recovery?.continueInPlace === true;
+        const actionable = canCancel || canRelaunch || canReplay || canContinueInPlace;
         // Repaint whenever durable recovery facts change, including older cards
         // already marked read-only. Never retain an old thinking/queued trace.
         const statusKey = JSON.stringify([state, recovery?.markdown, canCancel]);
@@ -224,9 +228,11 @@ export async function performLarkCardReconcile(input: {
             permissionMode: larkPermissionMode(config), state,
             ...(recovery ? { statusLabel: recovery.label } : {}),
             taskId: mapping.externalId, taskName: persisted.task_name,
-            elapsedSeconds: Math.max(0, (Date.now() - persisted.started_at) / 1_000),
+            // 停在需要核对的一轮不再计时：用时停在 runtime 最后一次改它的时候。
+            elapsedSeconds: Math.max(0, ((state === 'reconcile_required' || state === 'legacy_unresolved' ? Date.parse(runtimeTask.updatedAt) || Date.now() : Date.now()) - persisted.started_at) / 1_000),
             sessionId: mapping.sessionId, readOnly: !actionable, turn: persisted.turn ?? 0,
-            capabilities: { canCancelQueued: canCancel, canInterrupt: false, canRetry: false, canRefresh: false, ...(canRelaunch ? { canRelaunch: true } : {}), ...(canReplay ? { canReplay: true } : {}) },
+            capabilities: { canCancelQueued: canCancel, canInterrupt: false, canRetry: false, canRefresh: false, ...(canRelaunch ? { canRelaunch: true } : {}), ...(canReplay ? { canReplay: true } : {}),
+              ...(canContinueInPlace ? { canContinueInPlace: true } : {}) },
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             markdown: recovery?.markdown ?? RECOVERY_TRACKING_NOTE
           });

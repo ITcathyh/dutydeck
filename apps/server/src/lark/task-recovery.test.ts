@@ -58,11 +58,11 @@ describe('durable task recovery notices', () => {
     const runtime = { getTaskRecovery: vi.fn(async () => ({ status: 'reconcile_required', resolvedUnknown: true, blockers: [] as Array<{ code: string }> })) } as any;
     const settled = await describeLarkTaskRecovery(runtime, 'session', 'task', 'reconcile_required');
     expect(settled).toMatchObject({ blocked: false, label: '已核对，结果未确认' });
-    expect(settled.markdown).toContain('可以继续发送新请求');
+    expect(settled.markdown).toContain('可以直接发新消息继续');
     runtime.getTaskRecovery.mockResolvedValue({ resolvedUnknown: true, blockers: [{ code: 'DRIVER_RESOURCE_UNSAFE' }] });
     const blocked = await describeLarkTaskRecovery(runtime, 'session', 'task', 'reconcile_required');
     expect(blocked.blocked).toBe(true);
-    expect(blocked.markdown).not.toContain('可以继续发送新请求');
+    expect(blocked.markdown).not.toContain('可以直接发新消息继续');
   });
 
   it('offers the new-session buttons only when the card renders them and the task is stuck, without dead-end advice', async () => {

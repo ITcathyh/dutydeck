@@ -915,7 +915,7 @@ describe('过期审批跟随权威恢复状态', () => {
       await expect(workflow.respond(responseInput(record, { action: 'approve' }))).rejects.toThrow('原任务已保留');
       recovery.mockResolvedValue({ status: 'reconcile_required', blockers: [], resolvedUnknown: true });
       await workflow.reconcile('app_one');
-      expect(JSON.stringify(vi.mocked(service.update).mock.calls.at(-1))).toContain('可以继续发送新请求');
+      expect(JSON.stringify(vi.mocked(service.update).mock.calls.at(-1))).toContain('可以直接发新消息继续');
       await expect(workflow.respond(responseInput(record, { action: 'approve' }))).rejects.toThrow('结果未确认');
       expect(resolvePermission).not.toHaveBeenCalled();
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }

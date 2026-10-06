@@ -11,6 +11,7 @@ import { executionTaskId } from '@dutydeck/storage';
 import { PersistentEventPublisher, type SubscribeOptions, type EventListener } from './persistent-event-publisher.js';
 import { digest, eventJson, DriverConfigurationLedger, LocalDriverLedger, type ExecutionOptions } from './ledger.js';
 import { localOnlyDriverContext } from './driver-context.js';
+import { agentAuthFailure, agentLoginProblem, defaultAgentStatusCheck, type AgentStatusCheck, type AgentUnavailable } from './agent-availability.js';
 import { WorkspaceManager } from './workspace.js';
 import { repositoryFingerprint, VerificationManager } from './verification.js';
 import { owner, RevokedOperation, SessionMutations, type Owner } from './ownership.js';
@@ -150,6 +151,8 @@ export interface RuntimeOptions {
   log?: { warn(data: Record<string, unknown>, message: string): void };
   /** 会话里有 Agent 的提问在等人回答（relay ask）：与待审批一样是人工等待，这期间不判这一轮可能卡住。 */
   awaitingAnswer?: (sessionId: string) => boolean;
+  /** 不调模型的登录状态检查，缺省见 agent-availability.ts。只在 checkAgentAvailability 里调用。 */
+  agentStatusCheck?: AgentStatusCheck;
 }
 
 /** 已确认投递的任务完成；明确未投递才回队列，failed 保留未知状态等待恢复。 */
@@ -220,6 +223,9 @@ export class DutydeckRuntime {
   private readonly attemptTools = new Map<string, AttemptTools>();
   private readonly sendWaiters = new Set<() => void>();
   private readonly queueBlocked = new Set<string>();
+  /** 按 Agent 记的不可用标记（没登录、凭据失效），只在进程内；见 checkAgentAvailability。 */
+  private readonly agentUnavailable = new Map<string, AgentUnavailable>();
+  private readonly agentChecks = new Map<string, Promise<AgentUnavailable | undefined>>();
   private readonly drivers = new Map<string, AgentDriver>();
   private readonly activeTurns = new Set<string>();
   private readonly activeTasks = new Map<string, TaskRecord>();
@@ -1144,6 +1150,47 @@ export class DutydeckRuntime {
 
 
 
+  private async noteAgentFailure(agentId: string, failure: { code?: unknown; detailCode?: unknown; message?: unknown }) {
+    const kind = agentAuthFailure(failure);
+    const agent = kind && await this.repos.agents.get(agentId).catch(() => undefined);
+    if (agent) this.agentUnavailable.set(agentId, { ...agentLoginProblem(agent, kind!), at: new Date().toISOString() });
+  }
+  /** Agent 当前的不可用标记；没有标记即可用。 */
+  getAgentAvailability(agentId: string): AgentUnavailable | undefined { return this.agentUnavailable.get(agentId); }
+  /**
+   * 复查 Agent 是否可用：有标记时（用户重发、标记超过 5 分钟）或 force（服务启动）时跑不调模型的状态命令。
+   * 确认已登录清掉标记，确认未登录记上或刷新标记，说不准保持原样；这个 Agent 没有状态命令时清掉标记，让这次真实请求当检查。
+   * 返回检查后的标记。同一个 Agent 同时只跑一次。
+   */
+  async checkAgentAvailability(agentId: string, options: { force?: boolean } = {}): Promise<AgentUnavailable | undefined> {
+    if (!options.force && !this.agentUnavailable.has(agentId)) return undefined;
+    const running = this.agentChecks.get(agentId);
+    if (running) return running;
+    const check = (async () => {
+      const agent = await this.repos.agents.get(agentId);
+      const pending = agent && (this.options.agentStatusCheck ?? defaultAgentStatusCheck)(agent);
+      if (!agent || !pending) { this.agentUnavailable.delete(agentId); return undefined; }
+      const state = await pending.catch(() => 'unknown' as const);
+      if (state === 'logged_in') this.agentUnavailable.delete(agentId);
+      else if (state === 'logged_out') this.agentUnavailable.set(agentId, { ...agentLoginProblem(agent, 'login'), at: new Date().toISOString() });
+      return this.agentUnavailable.get(agentId);
+    })().finally(() => this.agentChecks.delete(agentId));
+    this.agentChecks.set(agentId, check);
+    return check;
+  }
+  /**
+   * 会话的 Agent 此刻是否停下：本进程还有这个会话的轮次在跑为 busy；驱动确认没有在途轮次为 idle；
+   * 没有驱动时（比如服务重启后），执行进程都已确认退出或从没建起来也是 idle；驱动说不准、或还有没确认退出的进程（可能是还没接回的持久终端）为 unknown。
+   */
+  inspectAgentQuiescence(id: string): 'idle' | 'busy' | 'unknown' {
+    if (this.attempts.has(id) || this.activeTurns.has(id) || this.drains.has(id)) return 'busy';
+    const driver = this.drivers.get(id);
+    if (driver) return !driver.isDetachedForShutdown?.() && driver.isIdle?.() ? 'idle' : 'unknown';
+    if (this.blockedDrivers.has(id)) return 'unknown';
+    return this.repos.execution.getResources(id).every(resource => resource.kind === 'operation' || resource.purpose === 'acp_native_context'
+      || resource.stage === 'not_created' || resource.observations.at(-1)?.state === 'gone') ? 'idle' : 'unknown';
+  }
+
   private requireRecoveryOwner(actor: ExecutionActor) {
     if (executionActorSchema.parse(actor).kind !== 'installation_owner') throw new RuntimeError('RECOVERY_OWNER_REQUIRED', 'Installation owner authorization is required', 403);
   }
@@ -1326,6 +1373,30 @@ export class DutydeckRuntime {
     });
   }
 
+
+  /**
+   * 结果未知的一轮，在会话的驱动还连着、确认空闲时收口（飞书「在原对话继续」、Agent 已停下的自动收口）。
+   * 人工收口（confirmExecutionRecovery）要求执行进程都已停下，而连着的驱动正是这个会话接着要用的进程；
+   * 这里只在驱动确认空闲、没有在途操作、除本会话可复用的驱动外没有不安全资源时，以安装者身份记一次收口，其余情况拒绝。
+   */
+  async settleIdleAttempt(id: string, input: { taskId: string; decisionId: string; outcome: 'unknown' | 'interrupted' | 'failed'; evidenceRefs: string[] }, actor: ExecutionActor) {
+    this.assertReady(); this.requireRecoveryOwner(actor);
+    return this.mutations.run(owner(id, this.transitions.get(id) ?? this.transition(id)), async () => {
+      const { session, driver } = await this.active(id);
+      const attempt = this.repos.execution.getTaskExecution(input.taskId)?.currentAttempt;
+      if (!attempt || attempt.sessionId !== id) throw new RuntimeError('TASK_NOT_FOUND', 'Task not found in this session', 404);
+      if (attempt.state === 'settled' && attempt.settlement?.kind === 'manual' && attempt.settlement.decision.decisionId === input.decisionId) return { replayed: true };
+      if (attempt.state !== 'reconcile_required') throw new RuntimeError('ATTEMPT_NOT_RECONCILE_REQUIRED', 'Only a result-unknown attempt can be settled here', 409);
+      if (this.recoveryInFlight(id) || !driver || driver.isDetachedForShutdown?.() || !driver.isIdle?.()) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'The agent has not confirmed it is idle', 409);
+      this.assertResources(id, true);
+      const f = this.attemptFence({ sessionId: id, runId: session.runId, taskId: input.taskId, attemptId: attempt.attemptId });
+      await this.mutations.write(id, async () => this.wake(this.bound().settleAttempt(f, `recovery:${input.decisionId}`, { kind: 'manual', outcome: input.outcome,
+        decision: { decisionId: input.decisionId, actor, action: 'confirm_result', evidenceRefs: input.evidenceRefs, resourceChecks: [] } })));
+      if (this.lifecycle(id).revoked) this.lifecycles.set(id, owner(id, this.transitions.get(id) ?? this.transition(id)));
+      this.queueBlocked.delete(id); await this.projectQueue(id); this.scheduleQueue(id);
+      return { replayed: false };
+    });
+  }
 
   async runVerification(id: string, input: VerificationCommandInput, actorId?: string): Promise<VerificationResponse> {
     return this.scoped(id, async () => {
@@ -1522,6 +1593,7 @@ export class DutydeckRuntime {
       await this.artifact('savePermission', session.id, data).catch(() => {});
     } else if (event.type === 'error') {
       if (scope && isAttemptRef(scope)) this.turnErrors.set(scope.attemptId, data.message);
+      await this.noteAgentFailure(session.agentId, data);
       await this.artifact('saveError', session.id, data.message, data.detail).catch(() => {});
     }
   }
@@ -2245,8 +2317,10 @@ export class DutydeckRuntime {
     const token = this.mutations.current()!;
     const ref = this.attemptRefs.get(token)!;
     this.activeTurns.add(id); this.completedTurns.delete(ref.attemptId);
+    let agentId: string | undefined;
     try {
       const { session } = await this.active(id);
+      agentId = session.agentId;
       const input = this.acceptedInput(task);
       await this.authorize(id, task.executionContext?.actorId, true);
       await this.mutations.wait(() => this.options.authorizeTask?.(session, task, 'prepare') ?? Promise.resolve());
@@ -2312,7 +2386,9 @@ export class DutydeckRuntime {
       if (!this.completedTurns.has(ref.attemptId)) throw new RuntimeError('DRIVER_RESULT_INCOMPLETE', 'Driver returned without a completed result', 409);
       const result = this.turnOutput(ref);
       await this.mutations.write(id, async () => this.wake(this.bound().settleAttempt(this.attemptFence(ref), `settlement:${submissionId}`, { kind: 'driver_result', submissionId, outcome: result.status, outputDigest: result.outputDigest, stopReason: result.stopReason, complete: true })));
+      if (result.status === 'completed') this.agentUnavailable.delete(session.agentId);
     } catch (error) {
+      if (agentId) await this.noteAgentFailure(agentId, { message: error instanceof Error ? error.message : String(error), code: (error as { code?: unknown } | undefined)?.code });
       // Stop owns revoked attempts and retains its claim until this cleanup finishes.
       if (this.mutations.valid(token)) {
         await this.flushDriverEvents(id).catch(() => {});

@@ -15,5 +15,5 @@ export const RECOVERY_TRACKING_NOTE = 'Dutydeck 已恢复任务状态，正在�
  * 语义：守护进程重启期间任务曾排队/中断，状态已恢复。
  */
 export function replayedRecoveryNote(): string {
-  return '守护进程重启期间本任务曾排队或中断，状态已恢复，将继续跟踪执行进度。';
+  return '服务重启期间这一轮在排队或被中断，状态已恢复，会继续跟踪进度。';
 }

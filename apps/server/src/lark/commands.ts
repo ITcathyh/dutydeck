@@ -749,6 +749,15 @@ export function routeLarkCommand(text: unknown, context: LarkCommandContext): La
  * 拖进这个纯模块），因此**不回显任何 Agent / 工具输出**——只回显用户自己输入的参数，
  * 并且必须限长。命令名本身已被 {@link parseSlashCommand} 的字符集约束，天然安全。
  */
+const availabilityClock = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+
+/** /status 里 Agent 能不能用的那一行；不可用时写原因和记下的时间（北京时间）。 */
+export function larkAgentAvailabilityLine(unavailable?: { reason: string; at: string }): string {
+  if (!unavailable) return '**Agent 状态**：可用';
+  const at = Object.fromEntries(availabilityClock.formatToParts(Date.parse(unavailable.at)).map(part => [part.type, part.value]));
+  return `**Agent 状态**：不可用（${unavailable.reason}，${at.month}-${at.day} ${at.hour}:${at.minute}）`;
+}
+
 export function larkCommandEcho(value: unknown, limit = 120): string {
   const text = (typeof value === 'string' ? value : '')
     // 控制字符会破坏卡片渲染，先统一换成空格再折叠。

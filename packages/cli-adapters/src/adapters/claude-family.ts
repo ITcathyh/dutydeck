@@ -121,19 +121,33 @@ export function pushClaudeFamilyBypassArgs(args: string[], permissionMode: Adapt
   );
 }
 
+const screenLines = (screen: string) => screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
+// 2.1.287 paints an empty composer's hint as `❯ Try "…"`. Require
+// its complete matching box, so arbitrary drafts/history are not readiness.
+const emptyComposerLine = (lines: string[], index: number) => lines[index] === '❯'
+  || (/^❯\s+Try "[^"\r\n]+"$/.test(lines[index] ?? '') && /^─{8,}$/.test(lines[index - 1] ?? '')
+    && lines[index + 1] === lines[index - 1]);
+/**
+ * 输入框下方的权限模式状态栏：⏵⏵ bypass permissions / auto mode / accept edits、⏸ manual / plan mode、? for shortcuts。
+ * 右侧可能并排「Not logged in · Run /login」「new task? /clear to save …」。
+ */
+const MODE_FOOTER_RE = /^(?:(?:⏵⏵|⏸) [a-z ]+ on\b|\? for shortcuts\b)/;
+/**
+ * 屏幕底部是当前的空输入框：分隔线、空的 ❯、同样的分隔线，紧接权限模式状态栏，之后最多一行 ✔ 开头的通知（「✔ Update installed · Restart to apply」）。
+ * 只认底部这一个框，历史里的 ❯、没提交的草稿、框下面还有别的输出都不算。
+ */
+function emptyComposerAtBottom(lines: string[]): boolean {
+  const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
+  return footer >= 3 && MODE_FOOTER_RE.test(lines[footer]!) && /^─{8,}$/.test(lines[footer - 1]!)
+    && lines[footer - 3] === lines[footer - 1] && emptyComposerLine(lines, footer - 2);
+}
+
 function isComposerScreen(screen: string): boolean {
-  const lines = screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
-  // 2.1.287 paints an empty composer's hint as `❯ Try "…"`. Require
-  // its complete matching box, so arbitrary drafts/history are not readiness.
-  const composerLine = (line: string, index: number) => line === '❯'
-    || (/^❯\s+Try "[^"\r\n]+"$/.test(line) && /^─{8,}$/.test(lines[index - 1] ?? '')
-      && lines[index + 1] === lines[index - 1]);
-  const footer = lines.slice(-4);
+  const lines = screenLines(screen);
+  const composerLine = (_line: string, index: number) => emptyComposerLine(lines, index);
   // Resuming long history can scroll the version banner out of capture-pane.
   // Accept only the complete current empty composer, never a lone historical prompt glyph.
-  const resumedComposer = footer.length === 4 && /^─{8,}$/.test(footer[0]!)
-    && composerLine(footer[1]!, lines.length - 3) && footer[2] === footer[0]
-    && /^(?:⏵⏵ bypass permissions on \(shift\+tab to cycle\)(?: · ← for agents)?|\? for shortcuts)$/.test(footer[3]!);
+  const resumedComposer = emptyComposerAtBottom(lines);
   const choiceMenu = lines.some((line, index) => /^(?:Permission required|Do you want to (?:proceed|allow)|Select an option|Enter to select)\b/i.test(line)
     && lines.slice(index + 1, index + 4).some(choice => /^❯\s+\S/.test(choice)));
   return lines.filter(composerLine).length === 1
@@ -276,5 +290,8 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     screenActivityPattern: /^\s*[*·✢✳✶✻✽]\s+\p{L}[\p{L} '-]*(?:…|\.{3})(?:[ \t].*)?$/u,
     backgroundWaitPattern: CLAUDE_FAMILY_BACKGROUND_WAIT_RE,
     readyPattern: /❯/,
+    isIdleScreen: screen => emptyComposerAtBottom(screenLines(screen)),
+    // 回复行「⎿  Not logged in · Please run /login」与状态栏右侧「Not logged in · Run /login」。
+    screenLoginRequiredPattern: /\bNot logged in · (?:Please run|Run) \/login\b/,
   };
 }

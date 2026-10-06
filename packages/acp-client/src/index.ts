@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs
 import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
-import { claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson } from '@dutydeck/shared';
+import { AGENT_IDLE_TIMEOUT, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
 import { PROCESS_CPU_MIN_WINDOW_MS, ProcessTreeCpu } from './process-cpu.js';
@@ -185,7 +185,7 @@ export interface AcpxAdapterOptions { context?: import('@dutydeck/shared').Drive
 type SessionAgentConfig = AgentConfig & { reasoningEffort?: string };
 
 export class AgentIdleTimeoutError extends Error {
-  readonly code = 'AGENT_IDLE_TIMEOUT';
+  readonly code = AGENT_IDLE_TIMEOUT;
   constructor(readonly timeoutMs: number) {
     super(`Agent 连续 ${Math.ceil(timeoutMs / 1_000)} 秒无实质进展，已请求取消本轮任务`);
     this.name = 'AgentIdleTimeoutError';
@@ -615,6 +615,13 @@ export class AcpxAdapter implements AgentDriver {
       let rejectIdle!: (error: Error) => void;
       const idle = new Promise<never>((_resolve, reject) => { rejectIdle = reject; });
       const clearIdle = () => { if (timer) clearTimeout(timer); timer = undefined; };
+      // 无进展超时不是用户中断：先发带分钟数的 error（原因码 AGENT_IDLE_TIMEOUT），取消确认后这一轮按失败结束。
+      const reportIdleTimeout = () => {
+        if (maintenance || this.stopped) return;
+        const timeoutMinutes = Math.max(1, Math.round(silentMs / 60_000));
+        const data: AgentIdleTimeoutData = { message: `${timeoutMinutes} 分钟没有任何输出，已停止`, code: AGENT_IDLE_TIMEOUT, timeoutMinutes, retryable: true };
+        this.options.onEvent({ type: 'error', data });
+      };
       const expire = () => {
         timedOut = true;
         this.turnCancelling = true;
@@ -625,7 +632,11 @@ export class AcpxAdapter implements AgentDriver {
         void this.resourceOperation(() => turn.cancel({ reason: error.message })).catch(() => undefined);
         // A cancel RPC only requests termination. Give the original stream a
         // bounded chance to return an authoritative cancelled prompt result.
-        cancellationDeadline = setTimeout(() => { cancellationExpired = true; rejectIdle(error); }, 2_000);
+        cancellationDeadline = setTimeout(() => {
+          cancellationExpired = true;
+          try { reportIdleTimeout(); } catch { /* 投递失败不影响按超时收尾 */ }
+          rejectIdle(error);
+        }, 2_000);
       };
       const expireUnlessBusy = () => {
         if (this.cpu.sample(this.processIds()) !== 'active' || silentMs >= deferLimitMs) { expire(); return; }
@@ -685,13 +696,19 @@ export class AcpxAdapter implements AgentDriver {
             }
             throw new Error(outcome.error.message);
           }
-          if (timedOut && outcome.status !== 'cancelled' && outcome.stopReason !== 'cancelled') throw new AgentIdleTimeoutError(silentMs);
+          if (timedOut && outcome.status !== 'cancelled' && outcome.stopReason !== 'cancelled') {
+            if (!cancellationExpired) reportIdleTimeout();
+            throw new AgentIdleTimeoutError(silentMs);
+          }
           if (maintenance) {
             this.assertActive();
             if (timedOut || cancellationExpired) throw new Error('Context compaction cancellation was not confirmed');
             compactCancelled = outcome.status === 'cancelled' || outcome.stopReason === 'cancelled';
             if (!compactCancelled && outcome.stopReason && outcome.stopReason !== 'end_turn') throw new Error(`Context compaction ended without success: ${outcome.stopReason}`);
-          } else if (!this.stopped && !cancellationExpired) this.options.onEvent({ type: 'completed', data: { stopReason: outcome.stopReason ?? outcome.status } });
+          } else if (!this.stopped && !cancellationExpired) {
+            if (timedOut) reportIdleTimeout();
+            this.options.onEvent({ type: 'completed', data: { stopReason: timedOut ? 'idle_timeout' : outcome.stopReason ?? outcome.status } });
+          }
         } finally {
           finished = true;
           for (const resolve of this.pendingPermissions.values()) resolve({ outcome: 'reject_once' });
@@ -811,6 +828,8 @@ export class AcpxAdapter implements AgentDriver {
     if (outcome === 'injected' || outcome === 'startedNewTurn' || outcome === 'promptRequired') return outcome;
     throw new Error(`Agent ${this.agent.id} did not accept the steering message (${String(outcome)})`);
   }
+  /** 没有在途、在收尾或在压缩的 prompt。 */
+  isIdle() { return !this.stopped && !this.sending && !this.turn && !this.timedOutStream && !this.compacting; }
   async interrupt() {
     this.interruptVersion++;
     this.turnCancelling = true;
