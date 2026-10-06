@@ -93,6 +93,11 @@ export interface LarkMessageEvent {
   senderOpenId?: string;
   senderType?: string;
   mentions: Array<{ key: string; name: string; openId?: string; mentionedType?: string }>;
+  /**
+   * 告警订阅命中后由群参与合成的初筛请求：值是放在告警原文前的初筛约定。这类事件以订阅确认人的身份、
+   * 在告警话题里发起，随入站记录持久化，重启恢复时照样按初筛处理。
+   */
+  triage?: string;
 }
 
 export interface LarkListener {

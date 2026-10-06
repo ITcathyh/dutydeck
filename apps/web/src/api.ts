@@ -501,6 +501,31 @@ export type CollaborationSettings = {
   updatedAt: string;
 };
 
+export type AlarmSubscription = {
+  enabled: boolean;
+  sources: Array<{ appId: string; name?: string }>;
+  levels: string[];
+  dedupeHours: number;
+  maxPerHour: number;
+  requesterId?: string;
+};
+
+/** 本 Bot 在群里的分工：接话人和告警初筛订阅。 */
+export type CollaborationDuty = {
+  scope: CollaborationScope;
+  revision: number;
+  responder?: { appId: string; name?: string; since: string };
+  alarm?: AlarmSubscription;
+  updatedAt: string;
+};
+
+/** 接话人只能设成本 Bot（self）或清掉（null）；订阅的确认人不能在 Web 上改。 */
+export type UpdateCollaborationDutyInput = {
+  expectedRevision: number;
+  responder?: 'self' | null;
+  alarm?: Omit<AlarmSubscription, 'requesterId'> | null;
+};
+
 export type CollaborationObservation = {
   id: string;
   scope: CollaborationScope;
@@ -657,6 +682,8 @@ export type CollaborationOverview = {
   actions: CollaborationAction[];
   activities: CollaborationActivity[];
   feedback: CollaborationFeedback[];
+  /** 旧版实例不返回。 */
+  duty?: CollaborationDuty;
 };
 
 export type UpdateCollaborationSettingsInput = {
@@ -756,6 +783,11 @@ export const collaborationApi = {
   updateSettings: (appId: string, chatId: string, body: UpdateCollaborationSettingsInput) =>
     json<{ settings: CollaborationSettings }>(
       `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/settings`,
+      { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+    ),
+  updateDuty: (appId: string, chatId: string, body: UpdateCollaborationDutyInput) =>
+    json<{ duty: CollaborationDuty; announced?: boolean }>(
+      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/duty`,
       { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
     ),
   createFollowup: (appId: string, chatId: string, body: CreateCollaborationFollowupInput) =>

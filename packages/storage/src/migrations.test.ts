@@ -54,11 +54,12 @@ const BUSINESS_TABLES = [
   'insight_sources',
   'insight_snapshots',
   'insight_events',
-  'insight_refresh'
+  'insight_refresh',
+  'collaboration_duties'
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -711,6 +712,36 @@ describe('storage migrations', () => {
     expect(() => db.prepare(`INSERT INTO collaboration_settings VALUES ('cli_live', 'oc_dup', 1, 'eager', '', 0, 6, 30, 'v1', 'x', 60, 0)`).run()).toThrow(/UNIQUE|PRIMARY/)
     allowEagerParticipation(db)
     db.close()
+  })
+
+  it('v36 给 v35 旧库补上群分工表，原有协作设置原样保留', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'collaboration-v36-'))
+    temporaryDirectories.push(directory)
+    const path = join(directory, 'v35.sqlite')
+    const db = new Database(path)
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const at = '2026-10-05T00:00:00.000Z'
+    withMigrationTransaction(db, () => {
+      for (const migration of migrations.filter(item => item.version <= 35)) { migration.up(db); db.prepare('INSERT INTO schema_migrations VALUES (?, ?)').run(migration.version, at) }
+    })
+    // 现在的 v20 建表时顺带建了分工表；删掉才能还原线上 v35 旧库的形态。
+    db.exec('DROP TABLE collaboration_duties')
+    db.prepare(`INSERT INTO collaboration_settings (app_id, chat_id, revision, participation, participation_inherited, instructions, notifications_paused, max_proactive_per_hour, max_decisions_per_hour, retention_days, policy_version, updated_at) VALUES ('cli_v35', 'oc_v35', 4, 'eager', 0, '旧指令', 0, 3, 40, 30, 'v1', ?)`).run(at)
+    db.close()
+
+    const repos = createRepositories(path)
+    try {
+      const scope = { appId: 'cli_v35', chatId: 'oc_v35' }
+      expect(await repos.collaboration.getSettings(scope)).toMatchObject({ participation: 'eager', inheritParticipation: false, instructions: '旧指令', revision: 4, maxDecisionsPerHour: 40 })
+      expect(await repos.collaboration.getDuty(scope)).toMatchObject({ scope, revision: 0 })
+      const duty = await repos.collaboration.updateDuty(scope, { expectedRevision: 0, responder: { appId: 'cli_v35', since: at } }, 'ou_admin')
+      expect(duty).toMatchObject({ revision: 1, responder: { appId: 'cli_v35' } })
+      expect((await repos.collaboration.getSettings(scope)).revision).toBe(4)
+    } finally { repos.close() }
+    const migrated = new Database(path)
+    expect(appliedVersions(migrated)).toEqual(ALL_VERSIONS)
+    expect(tableNames(migrated)).toContain('collaboration_duties')
+    migrated.close()
   })
 
   it('v23 把旧库里 inherit-only 的群呈现覆盖升级成逐字段结构，并补齐两项 Bot 呈现默认', () => {

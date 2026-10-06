@@ -6,7 +6,7 @@ import { afterEach, expect, it } from 'vitest';
 import { ZodError } from 'zod';
 import { createRepositories } from '@dutydeck/storage';
 import { RuntimeError, type Session } from '@dutydeck/shared';
-import { registerCollaborationRoutes } from './collaboration-routes.js';
+import { registerCollaborationRoutes, type CollaborationRouteOptions } from './collaboration-routes.js';
 import { CollaborationService } from './collaboration-service.js';
 import { CollaborationExtensions } from './collaboration-extensions.js';
 import { CollaborationEvaluation } from './collaboration-evaluation.js';
@@ -16,7 +16,7 @@ import { runCollaboration } from './collaboration-cli.js';
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0)) await close(); });
 const scope = { appId: 'cli_one', chatId: 'oc_one' };
-async function fixture() {
+async function fixture(extra: Partial<CollaborationRouteOptions> = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'collaboration-routes-'));
   const repos = createRepositories(join(directory, 'test.db'));
   const now = new Date().toISOString();
@@ -33,7 +33,7 @@ async function fixture() {
   const app = Fastify();
   app.setErrorHandler((error, _request, reply) => reply.code(error instanceof ZodError ? 400 : (error as RuntimeError).statusCode ?? 500).send({ error: { code: (error as RuntimeError).code, message: error.message } }));
   await registerCollaborationRoutes(app, { service, runtime, tools, authorizeManagement: async request => request.headers.authorization === 'Bearer management' ? 'owner' : undefined,
-    bootstrap: async () => {}, extensions: new CollaborationExtensions({ repository: repos.collaboration, authorize }), evaluation: new CollaborationEvaluation({ repository: repos.collaboration, evaluate: async () => ({ action: 'silent', reason: '', evidenceIds: [] }) }) });
+    bootstrap: async () => {}, extensions: new CollaborationExtensions({ repository: repos.collaboration, authorize }), evaluation: new CollaborationEvaluation({ repository: repos.collaboration, evaluate: async () => ({ action: 'silent', reason: '', evidenceIds: [] }) }), ...extra });
   cleanups.push(async () => { capabilities.close(); await app.close(); repos.close(); await rm(directory, { recursive: true, force: true }); });
   const headers = () => ({ authorization: `Bearer ${env.dutydeck_group_tools_token}`, 'x-dutydeck-work-turn': capabilities.workbenchTurnToken(session.id, taskId) });
   return { repos, app, env, headers, capabilities, changeTask() { taskId = 'task-two'; }, endTask() { actorId = undefined; } };
@@ -80,6 +80,24 @@ it('validates management auth, scoped paths and optimistic revisions through HTT
   expect(cleared.statusCode).toBe(200); expect(cleared.json().followup.progress).toBe('');
   const denied = await f.app.inject({ method: 'PATCH', url: '/api/lark/agent-tools/collaboration/settings', headers: f.headers(), payload: { expectedRevision: 0, participation: 'selective' } });
   expect(denied.statusCode).toBe(403);
+});
+it('group duty: overview shows it, management PATCH validates the body and needs a wired handler', async () => {
+  const url = '/api/lark/groups/cli_one/oc_one/collaboration';
+  const headers = { authorization: 'Bearer management' };
+  const unwired = await fixture();
+  expect((await unwired.app.inject({ url, headers })).json().duty).toMatchObject({ scope, revision: 0 });
+  expect((await unwired.app.inject({ method: 'PATCH', url: `${url}/duty`, headers, payload: { expectedRevision: 0, responder: 'self' } })).statusCode).toBe(503);
+  const calls: unknown[][] = [];
+  const f = await fixture({ updateDuty: async (...args) => { calls.push(args); return { duty: { revision: 1 } }; } });
+  const patch = (payload: unknown, withAuth = true) => f.app.inject({ method: 'PATCH', url: `${url}/duty`, ...(withAuth ? { headers } : {}), payload: payload as object });
+  expect((await patch({ expectedRevision: 0, responder: 'self' }, false)).statusCode).toBe(403);
+  expect((await patch({ expectedRevision: 0, responder: 'cli_other' })).statusCode).toBe(400);
+  const alarm = { enabled: true, sources: [{ appId: 'cli_alarm' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3 };
+  expect((await patch({ expectedRevision: 0, alarm: { ...alarm, requesterId: 'ou_bob' } })).statusCode).toBe(400);
+  expect(calls).toEqual([]);
+  const saved = await patch({ expectedRevision: 0, responder: null, alarm });
+  expect(saved.statusCode).toBe(200); expect(saved.json()).toEqual({ duty: { revision: 1 } });
+  expect(calls).toEqual([[scope, { expectedRevision: 0, responder: null, alarm }, 'owner']]);
 });
 it('sends CLI requests with the active turn and stable create id through the real route', async () => {
   const f = await fixture();
