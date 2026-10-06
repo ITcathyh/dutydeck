@@ -119,7 +119,7 @@ export class CollaborationBackground {
       await input.assertCurrent();
       record = await this.repo.updateAction(scope, record.id, { expectedRevision: record.revision, status: 'sending' });
       try {
-        await this.options.runtime.dispatch(session.id, request.prompt, request.mode, request.prompt, undefined, record.requesterId, request.key, request.skills, request);
+        await this.options.runtime.dispatchRequest(request);
       } catch (error) {
         if (!this.options.repositories.execution.getAcceptedTask(taskId)) {
           // 预算上限在接收前就拒绝了，确定没有执行：按失败收尾，不留成待核对。

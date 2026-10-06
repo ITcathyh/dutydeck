@@ -1,0 +1,381 @@
+{
+  "schemaVersion": 1,
+  "requestId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "engineVersion": "0.1.0",
+  "parserVersion": "v3",
+  "metricVersion": "v1",
+  "files": [
+    {
+      "sourceKey": "src_claude_main_01",
+      "client": "claude",
+      "sha256": "4eca389acf9738934ae7fdc35a2ef4dfc34dcad94e90530fad96b2ad906006e3",
+      "nativeSessionId": "claude-shared-session",
+      "streamIdentity": {
+        "kind": "main",
+        "nativeAgentId": null
+      },
+      "nativeRunId": null,
+      "parentNativeSessionId": null,
+      "status": "ok",
+      "errorCode": null,
+      "metrics": {
+        "inputUncached": {
+          "value": 120,
+          "quality": "exact",
+          "status": "available",
+          "evidenceCount": 1,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "cacheRead": {
+          "value": null,
+          "quality": "unknown",
+          "status": "unavailable",
+          "evidenceCount": 0,
+          "missingCount": 1,
+          "reasonCodes": ["CACHE_BUCKET_OMITTED"]
+        },
+        "cacheWrite": {
+          "value": null,
+          "quality": "unknown",
+          "status": "unavailable",
+          "evidenceCount": 0,
+          "missingCount": 1,
+          "reasonCodes": ["CACHE_BUCKET_OMITTED"]
+        },
+        "output": {
+          "value": 30,
+          "quality": "exact",
+          "status": "available",
+          "evidenceCount": 1,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "reasoningOutput": {
+          "value": null,
+          "quality": "unknown",
+          "status": "unavailable",
+          "evidenceCount": 0,
+          "missingCount": 1,
+          "reasonCodes": ["NO_REASONING_EVIDENCE"]
+        },
+        "totalTracked": {
+          "value": null,
+          "quality": "unknown",
+          "status": "partial",
+          "evidenceCount": 1,
+          "missingCount": 1,
+          "reasonCodes": ["CACHE_BUCKETS_UNVERIFIED"]
+        },
+        "rawInput": {
+          "value": 120,
+          "quality": "observed",
+          "status": "available",
+          "evidenceCount": 1,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "rawOutput": {
+          "value": 30,
+          "quality": "observed",
+          "status": "available",
+          "evidenceCount": 1,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "rawTotal": {
+          "value": null,
+          "quality": "unknown",
+          "status": "unavailable",
+          "evidenceCount": 0,
+          "missingCount": 1,
+          "reasonCodes": ["SOURCE_TOTAL_OMITTED"]
+        },
+        "peakContext": {
+          "value": 150,
+          "quality": "observed",
+          "status": "available",
+          "evidenceCount": 1,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "contextWindow": {
+          "value": null,
+          "quality": "unknown",
+          "status": "unavailable",
+          "evidenceCount": 0,
+          "missingCount": 1,
+          "reasonCodes": ["NO_CONTEXT_WINDOW_METADATA"]
+        },
+        "elapsedDurationMs": {
+          "value": 1000,
+          "quality": "observed",
+          "status": "available",
+          "evidenceCount": 2,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "activeDurationMs": {
+          "value": 1000,
+          "quality": "observed",
+          "status": "available",
+          "evidenceCount": 2,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "idleDurationMs": {
+          "value": 0,
+          "quality": "heuristic",
+          "status": "available",
+          "evidenceCount": 2,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "pairedToolDurationMs": {
+          "value": null,
+          "quality": "unavailable",
+          "status": "unavailable",
+          "evidenceCount": 0,
+          "missingCount": 1,
+          "reasonCodes": ["NO_PAIRED_TOOLS"]
+        },
+        "userTurns": {
+          "value": 1,
+          "quality": "exact",
+          "status": "available",
+          "evidenceCount": 1,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "assistantTurns": {
+          "value": 1,
+          "quality": "exact",
+          "status": "available",
+          "evidenceCount": 1,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "toolCalls": {
+          "value": 1,
+          "quality": "exact",
+          "status": "available",
+          "evidenceCount": 1,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "toolFailures": {
+          "value": 0,
+          "quality": "exact",
+          "status": "available",
+          "evidenceCount": 1,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "toolSuccesses": {
+          "value": 0,
+          "quality": "exact",
+          "status": "available",
+          "evidenceCount": 1,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "toolUnknowns": {
+          "value": 1,
+          "quality": "exact",
+          "status": "available",
+          "evidenceCount": 1,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "toolFailureRate": {
+          "value": null,
+          "quality": "unavailable",
+          "status": "unavailable",
+          "evidenceCount": 0,
+          "missingCount": 1,
+          "reasonCodes": ["NO_DETERMINABLE_CALLS"]
+        },
+        "compactionCount": {
+          "value": 0,
+          "quality": "exact",
+          "status": "available",
+          "evidenceCount": 0,
+          "missingCount": 0,
+          "reasonCodes": []
+        },
+        "subagentCount": {
+          "value": 1,
+          "quality": "observed",
+          "status": "partial",
+          "evidenceCount": 1,
+          "missingCount": 0,
+          "reasonCodes": ["SUBAGENT_FILE_UNVERIFIED"]
+        }
+      },
+      "models": [],
+      "trace": [
+        {
+          "eventId": "src_claude_main_01:u-main-1:user:0",
+          "sourceKey": "src_claude_main_01",
+          "nativeSessionId": "claude-shared-session",
+          "nativeRunId": null,
+          "lineNumber": 1,
+          "byteOffset": 0,
+          "subeventIndex": 0,
+          "nativeEventId": "u-main-1",
+          "timestamp": "2026-10-03T10:05:00Z",
+          "timeQuality": "observed",
+          "kind": "user_message",
+          "callId": null,
+          "parentCallId": null,
+          "toolName": null,
+          "resultStatus": null,
+          "durationMs": null,
+          "tokens": null,
+          "rawUsage": null,
+          "inputExcerpt": "dispatch task to subagent",
+          "outputExcerpt": null,
+          "errorExcerpt": null,
+          "evidenceRefs": [],
+          "hostEventRef": null,
+          "isSnapshotLocalId": false
+        },
+        {
+          "eventId": "src_claude_main_01:a-main-1:assistant:0",
+          "sourceKey": "src_claude_main_01",
+          "nativeSessionId": "claude-shared-session",
+          "nativeRunId": null,
+          "lineNumber": 2,
+          "byteOffset": 272,
+          "subeventIndex": 0,
+          "nativeEventId": "a-main-1",
+          "timestamp": "2026-10-03T10:05:01Z",
+          "timeQuality": "observed",
+          "kind": "tool_call",
+          "callId": "tool-sub-1",
+          "parentCallId": null,
+          "toolName": "Agent",
+          "resultStatus": "unknown",
+          "durationMs": {
+            "value": null,
+            "quality": "unavailable",
+            "status": "unavailable",
+            "evidenceCount": 0,
+            "missingCount": 1,
+            "reasonCodes": ["UNPAIRED_TOOL_CALL"]
+          },
+          "tokens": {
+            "inputUncached": 120,
+            "cacheRead": null,
+            "cacheWrite": null,
+            "output": 30,
+            "reasoning": null,
+            "total": null
+          },
+          "rawUsage": {
+            "dialect": "claude_message_snapshot",
+            "inputTokens": 120,
+            "outputTokens": 30,
+            "totalTokens": null,
+            "observedDelta": 150,
+            "baselineStatus": "zero_confirmed"
+          },
+          "inputExcerpt": "{\"subagent\":\"worker\"}",
+          "outputExcerpt": null,
+          "errorExcerpt": null,
+          "evidenceRefs": ["tool-sub-1"],
+          "hostEventRef": null,
+          "isSnapshotLocalId": false
+        }
+      ],
+      "pulseBuckets": [
+        {
+          "startAt": "2026-10-03T10:05:00Z",
+          "endAt": "2026-10-03T10:05:02Z",
+          "tokens": {
+            "inputUncached": {
+              "value": 120,
+              "quality": "exact",
+              "status": "available",
+              "evidenceCount": 1,
+              "missingCount": 0,
+              "reasonCodes": []
+            },
+            "cacheRead": {
+              "value": null,
+              "quality": "unknown",
+              "status": "unavailable",
+              "evidenceCount": 0,
+              "missingCount": 1,
+              "reasonCodes": ["CACHE_BUCKET_OMITTED"]
+            },
+            "cacheWrite": {
+              "value": null,
+              "quality": "unknown",
+              "status": "unavailable",
+              "evidenceCount": 0,
+              "missingCount": 1,
+              "reasonCodes": ["CACHE_BUCKET_OMITTED"]
+            },
+            "output": {
+              "value": 30,
+              "quality": "exact",
+              "status": "available",
+              "evidenceCount": 1,
+              "missingCount": 0,
+              "reasonCodes": []
+            },
+            "reasoning": {
+              "value": null,
+              "quality": "unknown",
+              "status": "unavailable",
+              "evidenceCount": 0,
+              "missingCount": 1,
+              "reasonCodes": ["NO_REASONING_EVIDENCE"]
+            },
+            "total": {
+              "value": null,
+              "quality": "unknown",
+              "status": "partial",
+              "evidenceCount": 1,
+              "missingCount": 1,
+              "reasonCodes": ["CACHE_BUCKETS_UNVERIFIED"]
+            }
+          },
+          "sampleCount": 1,
+          "missingCount": 0
+        }
+      ],
+      "coverage": {
+        "rawLines": 2,
+        "parsedLines": 2,
+        "ignoredLines": 0,
+        "errorLines": 0,
+        "timeRange": {
+          "start": "2026-10-03T10:05:00Z",
+          "end": "2026-10-03T10:05:01Z"
+        },
+        "missingTimestampCount": 0,
+        "disorderedTimestampCount": 0,
+        "retainedTraceCount": 2,
+        "omittedTraceCount": 0,
+        "omittedTraceByCategory": {},
+        "tokenSamplesAvailable": 1,
+        "tokenSamplesMissing": 0,
+        "subagentDiscovery": "partial",
+        "inheritedHistory": "none"
+      },
+      "relationship": {
+        "kind": "none",
+        "parentNativeSessionId": null,
+        "parentNativeAgentId": null,
+        "evidenceRefs": []
+      },
+      "aggregation": {
+        "eligibility": "eligible",
+        "reasonCodes": []
+      }
+    }
+  ],
+  "warnings": []
+}

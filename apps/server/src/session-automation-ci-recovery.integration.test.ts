@@ -115,9 +115,9 @@ describe('SessionAutomation real CI recovery across a true SQLite close and a br
 
     // 接受后响应丢失：真实 dispatch 已 accept 并启动本地 JSONL 子进程（收件一次），
     // 但向 Automation 抛网络分区错误。不能为模拟崩溃篡改产品 close。
-    const realDispatch = runtime.dispatch.bind(runtime);
-    const dispatchSpy = vi.spyOn(runtime, 'dispatch');
-    dispatchSpy.mockImplementation(async (...args: Parameters<typeof runtime.dispatch>) => {
+    const realDispatch = runtime.dispatchRequest.bind(runtime);
+    const dispatchSpy = vi.spyOn(runtime, 'dispatchRequest');
+    dispatchSpy.mockImplementation(async (...args: Parameters<typeof runtime.dispatchRequest>) => {
       const result = await realDispatch(...args);
       throw new Error('response lost: network partition after acceptance');
     });

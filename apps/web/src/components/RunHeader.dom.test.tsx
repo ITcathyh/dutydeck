@@ -13,7 +13,7 @@ const queued: Task = { id: 't1', sessionId: 's1', prompt: '补充测试', status
 
 describe('RunHeader', () => {
   it('集中展示 workspace、任务状态、下一步与队列', () => {
-    render(<RunHeader session={session} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[queued]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    render(<RunHeader session={session} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[queued]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     expect(screen.getByText('dutydeck')).toBeTruthy();
     expect(screen.getByRole('heading', { name: '优化飞书任务卡片' })).toBeTruthy();
     expect(screen.getByText('思考中')).toBeTruthy();
@@ -27,7 +27,7 @@ describe('RunHeader', () => {
 
   it('任务控制保持可达', async () => {
     const user = userEvent.setup(); const onInterrupt = vi.fn(); const onArchive = vi.fn();
-    render(<RunHeader session={session} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={onInterrupt} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={onArchive} onToggleRaw={() => {}}/>);
+    render(<RunHeader session={session} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={onInterrupt} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={onArchive} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     await user.click(screen.getByRole('button', { name: '中断当前任务' }));
     await user.click(screen.getByRole('button', { name: '归档任务' }));
     expect(onInterrupt).toHaveBeenCalledTimes(1);
@@ -35,16 +35,27 @@ describe('RunHeader', () => {
     expect((screen.getByRole('button', { name: '原始日志' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it('「分析」按钮始终可达（含归档只读任务），点击打开会话分析', async () => {
+    const user = userEvent.setup(); const onOpenInsight = vi.fn();
+    const { rerender } = render(<RunHeader session={session} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={onOpenInsight}/>);
+    const button = screen.getByRole('button', { name: /会话分析/ });
+    await user.click(button);
+    expect(onOpenInsight).toHaveBeenCalledTimes(1);
+    // 归档只读任务也允许查看分析（只读能力，不改变任务）。
+    rerender(<RunHeader session={{ ...session, archivedAt: '2026-08-30T00:00:00.000Z' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={onOpenInsight}/>);
+    expect(screen.getByRole('button', { name: /会话分析/ })).toBeTruthy();
+  });
+
   it('failed / stopped 任务可调用真实 restart 操作', async () => {
     const user = userEvent.setup(); const onRestart = vi.fn();
-    render(<RunHeader session={{ ...session, state: 'failed' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={onRestart} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    render(<RunHeader session={{ ...session, state: 'failed' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={onRestart} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     await user.click(screen.getByRole('button', { name: '重新启动' }));
     expect(onRestart).toHaveBeenCalledTimes(1);
   });
 
   it('长任务目标视觉截断但为辅助技术和悬停保留完整文本', () => {
     const goal = '大规模优化并重构整个项目，使用户可以从飞书高效指挥任务并完成端到端验收';
-    render(<RunHeader session={session} agent={agent} taskPrompt={`  ${goal}  `} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    render(<RunHeader session={session} agent={agent} taskPrompt={`  ${goal}  `} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     const heading = screen.getByRole('heading', { name: goal });
     expect(heading.className).toContain('truncate');
     expect(heading.getAttribute('title')).toBe(goal);
@@ -58,7 +69,7 @@ describe('RunHeader', () => {
 describe('RunHeader 归档态状态视觉与只读约束', () => {
   const archivedAt = '2026-08-30T00:00:00.000Z';
   function renderHeader(overrides: Partial<Session>, restarting = false) {
-    const { container } = render(<RunHeader session={{ ...session, ...overrides }} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={restarting} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    const { container } = render(<RunHeader session={{ ...session, ...overrides }} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={restarting} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     // 状态条的圆点是唯一带 aria-label 的 span，文案在它右边的 <strong> 里。
     return { dot: container.querySelector('span[aria-label]')!, statusText: container.querySelector('strong')! };
   }
@@ -92,7 +103,7 @@ describe('RunHeader 归档态状态视觉与只读约束', () => {
 
   it('未归档 + failed：「重新启动」按钮照旧在，别把正常恢复路径改没了', async () => {
     const user = userEvent.setup(); const onRestart = vi.fn();
-    render(<RunHeader session={{ ...session, state: 'failed' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={onRestart} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    render(<RunHeader session={{ ...session, state: 'failed' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={onRestart} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     await user.click(screen.getByRole('button', { name: '重新启动' }));
     expect(onRestart).toHaveBeenCalledTimes(1);
     expect(screen.getByText('失败')).toBeTruthy();
@@ -115,7 +126,7 @@ describe('RunHeader 归档态状态视觉与只读约束', () => {
 describe('RunHeader 失败详情', () => {
   const error = 'spawn codex ENOENT: 未找到可执行文件';
   function renderHeader(overrides: Partial<Session>) {
-    return render(<RunHeader session={{ ...session, ...overrides }} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    return render(<RunHeader session={{ ...session, ...overrides }} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
   }
 
   it('失败任务在详情页显示脱敏后的失败详情', () => {
@@ -139,31 +150,31 @@ describe('RunHeader 失败详情', () => {
   it('普通会话渲染「重命名会话」按钮，点击调用 onRename；source 为 work_item 时不显示', async () => {
     const user = userEvent.setup();
     const onRename = vi.fn();
-    const { rerender } = render(<RunHeader session={session} agent={agent} onRename={onRename} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    const { rerender } = render(<RunHeader session={session} agent={agent} onRename={onRename} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
 
     const renameBtn = screen.getByRole('button', { name: '重命名会话' });
     expect(renameBtn).toBeTruthy();
     await user.click(renameBtn);
     expect(onRename).toHaveBeenCalledTimes(1);
 
-    rerender(<RunHeader session={{ ...session, source: 'work_item' }} agent={agent} onRename={onRename} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    rerender(<RunHeader session={{ ...session, source: 'work_item' }} agent={agent} onRename={onRename} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     expect(screen.queryByRole('button', { name: '重命名会话' })).toBeNull();
   });
 
   it('标题优先展示 session.name，无 name 时回退到 taskPrompt 或未命名任务', () => {
-    const { rerender } = render(<RunHeader session={{ ...session, name: '自建看板会话' }} agent={agent} taskPrompt="原始指令提示" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    const { rerender } = render(<RunHeader session={{ ...session, name: '自建看板会话' }} agent={agent} taskPrompt="原始指令提示" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     expect(screen.getByRole('heading', { name: '自建看板会话' })).toBeTruthy();
 
-    rerender(<RunHeader session={session} agent={agent} taskPrompt="原始指令提示" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    rerender(<RunHeader session={session} agent={agent} taskPrompt="原始指令提示" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     expect(screen.getByRole('heading', { name: '原始指令提示' })).toBeTruthy();
 
-    rerender(<RunHeader session={session} agent={agent} taskPrompt="" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    rerender(<RunHeader session={session} agent={agent} taskPrompt="" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     expect(screen.getByRole('heading', { name: '未命名任务' })).toBeTruthy();
   });
 
   it('状态条显示本任务累计用量（含子步骤与估算），没有用量数据时如实说明', () => {
     const totals = { entries: 1, costUsd: 0.5, estimatedCostUsd: 0, inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, unavailable: 0 };
-    const props = { agent, streamStatus: 'open' as const, queuedTasks: [], rawVisible: false, rawAvailable: false, restarting: false, onInterrupt() {}, onRestart() {}, onOpenPrompt() {}, onArchive() {}, onToggleRaw() {} };
+    const props = { agent, streamStatus: 'open' as const, queuedTasks: [], rawVisible: false, rawAvailable: false, restarting: false, onInterrupt() {}, onRestart() {}, onOpenPrompt() {}, onArchive() {}, onToggleRaw() {}, onOpenInsight() {} };
     const { rerender } = render(<RunHeader session={session} {...props} usage={{ own: totals, subSteps: { ...totals, costUsd: 0.25, estimatedCostUsd: 0.25 } }}/>);
     expect(screen.getByText('本任务累计 $0.75（含子步骤 $0.25，含估算 $0.25）').getAttribute('title')).toBe('输入 2,000 · 输出 40 · 缓存读 0 · 缓存写 0 token');
     const none = { ...totals, costUsd: 0, inputTokens: 0, outputTokens: 0 };

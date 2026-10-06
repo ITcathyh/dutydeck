@@ -601,11 +601,11 @@ describe('immutable task prompt preparation', () => {
     const first = open(database, { prepareTaskPrompt: prepare, authorizeExecution, sessionPrompt: (_session, prompt) => `[run]\n${prompt}` });
     await first.runtime.initialize([agent]); const session = await first.runtime.start({ agentId: agent.id, cwd: source });
     const envelope: TaskRequestV1 = { version: 1, namespace: 'runtime', sessionId: session.id, key: 'delivery-1', prompt: 'do work', mode: 'queue', actor: { kind: 'installation_owner', id: 'installation_owner' }, skills: ['skill-a'], options: {}, sources: [], sourcePayload: { agentPrompt: 'channel prompt', skills: ['skill-a'] } };
-    const accepted = await first.runtime.dispatch(session.id, 'do work', 'queue', 'channel prompt', undefined, 'installation_owner', 'delivery-1', ['skill-a'], envelope);
+    const accepted = await first.runtime.dispatchRequest(envelope, { agentPrompt: 'channel prompt' });
     // The redelivered request reuses the accepted Task by its immutable envelope
     // even though the caller now passes freshly downloaded prompt bytes; the
     // frozen snapshot wins and prepare is not re-run.
-    const replay = await first.runtime.dispatch(session.id, 'do work', 'queue', 'channel prompt changed but ignored by replay', undefined, 'installation_owner', 'delivery-1', ['skill-a'], envelope);
+    const replay = await first.runtime.dispatchRequest(envelope, { agentPrompt: 'channel prompt changed but ignored by replay' });
     expect(replay).toMatchObject({ id: accepted.id, replayed: true }); expect(prepare).toHaveBeenCalledOnce();
     expect(accepted.skillDeliveries).toEqual([expect.objectContaining({ name: 'skill-a', path: skill, mode: 'prompt' })]);
     expect(accepted).not.toHaveProperty('executionContext');
@@ -663,7 +663,7 @@ describe('immutable task prompt preparation', () => {
       }
     }, sent);
     await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: agent.id, cwd: source });
-    const task = await h.runtime.dispatch(session.id, 'will be revoked');
+    const task = await h.runtime.dispatchRequest({ version: 1, namespace: 'runtime', sessionId: session.id, key: 'revoked', prompt: 'will be revoked', mode: 'queue', actor: { kind: 'installation_owner', id: 'installation_owner' }, skills: [], options: {}, sources: [], sourcePayload: {} });
     await started; revoked = true; releasePrompt();
     // A stale-HEAD authorization rejection happens before submission, so the
     // frozen ledger settles the unsubmitted Attempt as cancelled (not interrupted).

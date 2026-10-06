@@ -5,7 +5,7 @@ import { RuntimeError, type RepositoryBundle, type Session, type TaskRecord } fr
 import { executionTaskId } from '@dutydeck/storage';
 import { z } from 'zod';
 import { tokensEqual } from './auth/auth.js';
-import type { SessionAutomationRuntime } from './session-automation.js';
+import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { readAttemptResult } from './task-results.js';
 
 const run = promisify(execFile);
@@ -108,7 +108,7 @@ export interface CodebaseWebhookResponse { statusCode: number; body: Record<stri
 
 export interface CodebaseCiServiceOptions {
   repositories: Pick<RepositoryBundle, 'config' | 'tasks' | 'ciWebhook'> & { execution: Pick<RepositoryBundle['execution'], 'getTaskExecution' | 'getAttemptEvents'> };
-  runtime: Pick<SessionAutomationRuntime, 'getSession' | 'dispatch'>;
+  runtime: Pick<DutydeckRuntime, 'getSession' | 'dispatch'>;
   secret: string;
   prepareDelivery?: (sessionId: string, id: string) => Promise<void>;
   notify?: (sessionId: string, id: string, notice: CodebaseCiNotice) => Promise<string | undefined>;

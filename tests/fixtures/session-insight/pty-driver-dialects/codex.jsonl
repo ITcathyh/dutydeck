@@ -1,0 +1,1 @@
+{"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "sanitized-turn", "last_agent_message": "sanitized answer"}}

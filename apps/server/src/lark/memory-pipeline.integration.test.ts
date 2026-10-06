@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
-import { RuntimeError, type AgentConfig, type PermissionMode } from '@dutydeck/shared';
+import type { AgentConfig, PermissionMode } from '@dutydeck/shared';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -34,7 +34,7 @@ type MemoryReply = { text: string; delayMs?: number };
 /** 记忆会话的 start 入参；用例用它断言权限模式与复用次数。 */
 type StartInput = { agentId: string; cwd?: string; model?: string; permissionMode?: PermissionMode };
 
-async function harness(options: { now?: () => Date; timeoutMs?: number; agentModel?: string; userAnswer?: string; startGuard?: (input: StartInput) => void } = {}) {
+async function harness(options: { now?: () => Date; timeoutMs?: number; agentModel?: string; userAnswer?: string; protocol?: AgentConfig['protocol'] } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-memory-pipeline-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
@@ -46,7 +46,7 @@ async function harness(options: { now?: () => Date; timeoutMs?: number; agentMod
   });
 
   const runtime = new DutydeckRuntime(repos, {
-    probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
+    probe: configured => ({ protocol: configured.id === 'memory' ? options.protocol ?? 'acp' : 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _onExit, sessionId) => {
       const driver: AgentDriver = {
         start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
@@ -70,9 +70,9 @@ async function harness(options: { now?: () => Date; timeoutMs?: number; agentMod
   });
   const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false,
     ...(options.agentModel ? { model: options.agentModel } : {}) };
-  await runtime.initialize([agent]);
+  await runtime.initialize([agent, ...(options.protocol ? [{ ...agent, id: 'memory', protocol: options.protocol }] : [])]);
 
-  const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true, memoryEnabled: true,
+  const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', ...(options.protocol ? { memoryAgentId: 'memory' } : {}), permissionMode: 'ask', listening: true, memoryEnabled: true,
     fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1_000, hideTraceOnComplete: false,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off' };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
@@ -102,14 +102,21 @@ async function harness(options: { now?: () => Date; timeoutMs?: number; agentMod
   // 只有 interrupt 走替身：超时用例要断言管线确实发了中断，又不能让真实中断与 mock driver 的
   // 延迟回复互相抢同一个任务的终态。
   const memoryInterrupt = vi.fn(async (_id: string, _taskId?: string, _actor?: string) => ({ interrupted: false, reason: 'test_unconfirmed' }));
-  // start 也走替身：记录每次入参，并让用例模拟 runtime 拒绝某个权限模式（PTY 类 Agent）。
+  // 记录实际新建会话的入参；预检、稳定会话和请求接收均使用真实 runtime。
   const startCalls: StartInput[] = [];
   const pipeline = new LarkMemoryPipeline({
     runtime: {
-      start: input => { startCalls.push(input); options.startGuard?.(input); return runtime.start(input); },
+      start: input => runtime.start(input),
+      resolveMemorySessionInput: input => runtime.resolveMemorySessionInput(input),
+      startMemorySession: async (input, id, beforeStart) => {
+        if (!await repos.sessions.get(id)) startCalls.push(input);
+        return runtime.startMemorySession(input, id, beforeStart);
+      },
+      lookupAcceptedTask: request => runtime.lookupAcceptedTask(request),
       listAgents: () => runtime.listAgents(),
       listSessions: () => runtime.listSessions(),
-      dispatch: (id, prompt, mode, agentPrompt) => runtime.dispatch(id, prompt, mode, agentPrompt),
+      dispatch: (...args) => runtime.dispatch(...args),
+      dispatchRequest: (...args) => runtime.dispatchRequest(...args),
       getTasks: id => runtime.getTasks(id),
       getTaskRecovery: (id, taskId) => runtime.getTaskRecovery(id, taskId),
       getSessionTaskRecovery: id => runtime.getSessionTaskRecovery(id),
@@ -120,6 +127,7 @@ async function harness(options: { now?: () => Date; timeoutMs?: number; agentMod
     },
     now: options.now,
     controlActorId: 'installation_owner',
+    jobs: repos.memoryJobs, policyConfig: repos.config,
     repos: { execution: repos.execution },
     store,
     projection,
@@ -134,7 +142,7 @@ async function harness(options: { now?: () => Date; timeoutMs?: number; agentMod
     { store: repos.config, memory: { store, projection, command: 'dutydeck', pipeline } }
   );
   await coordinator.initializeWorkflows(config);
-  cleanups.push(async () => { coordinator.stop(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
+  cleanups.push(async () => { coordinator.stop(); await runtime.shutdown(); await projection.write(scope); repos.close(); await rm(cwd, { recursive: true, force: true }); });
 
   const setConfig = async (patch: Partial<StoredLarkConfig>) => {
     const next = { ...config, ...patch };
@@ -211,6 +219,11 @@ describe('Lark memory pipeline through the coordinator', () => {
     expect(state.lastRun).toMatchObject({ kind: 'extraction', ok: true, added: 1, rejected: 0 });
     await h.waitIdle();
 
+    const [job] = await h.repos.memoryJobs.listScope(scope);
+    expect(job).toMatchObject({ kind: 'extraction', state: 'settled', mode: 'compatible' });
+    expect(job!.receipt!.consumedTaskIds).toContain(saved!.taskId);
+    expect(job!.requests).toHaveLength(1);
+
     // 记忆会话与用户会话相互独立，且以 deny-all 运行。
     const memorySession = (await h.runtime.listSessions()).find(session => session.source === 'lark-memory');
     expect(memorySession).toMatchObject({ sourceId: 'cli_memory:groups:memory', permissionMode: 'deny-all' });
@@ -270,8 +283,7 @@ describe('Lark memory pipeline through the coordinator', () => {
     expect(h.memoryPrompts.find(prompt => prompt.includes('后台提取'))).toContain(`- ${rule.id}：不要记任何人的薪资`);
     const saved = await h.store.list(scope);
     expect(saved.map(entry => entry.content)).toEqual(['部署脚本在 scripts/deploy.sh']);
-    expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ rejected: [expect.objectContaining({ reason: `命中「不许记」规则 ${rule.id}` })] }), '会话记忆提取有条目未通过门禁');
-    // 拒绝原因进日志，被拒的内容本身不进。
+    // 持久作业记录拒绝计数，被拒的内容不进日志。
     expect(JSON.stringify(h.log.warn.mock.calls)).not.toContain('薪资是 30k');
     // 记下的事实挂在证据轮次上：该轮的结果卡与 Web 任务详情据此列出「新记下」。
     const [chatSession] = (await h.runtime.listSessions()).filter(session => session.source === 'lark');
@@ -383,6 +395,28 @@ describe('Lark memory pipeline through the coordinator', () => {
     expect(h.memoryPrompts.filter(prompt => prompt.includes('后台整理'))).toHaveLength(1);
   });
 
+  it('/memory consolidate consumes pending coordinator turns through durable extraction and consolidation jobs', async () => {
+    const h = await harness();
+    const config = await h.setConfig({ memoryAutoExtract: false });
+    h.setResponder(prompt => ({ text: prompt.includes('后台提取')
+      ? jsonBlock({ facts: [{ content: '手动整理保留中文回复约定', topic: 'preferences', evidence: prompt.match(/### 轮次 (\S+)/)![1] }] })
+      : jsonBlock({ actions: [{ op: 'noop' }] }) }));
+    await h.runTurns(2, config);
+    await vi.waitFor(async () => expect((await h.store.getState(scope)).pendingTurns).toHaveLength(2));
+    const taskIds = (await h.store.getState(scope)).pendingTurns!.map(turn => turn.taskId);
+    expect(await h.repos.memoryJobs.listScope(scope)).toEqual([]);
+    await h.coordinator.handle(event('om_manual_pending', '/memory consolidate'), config);
+    expect(h.lastCardText()).toContain('已开始整理');
+    await vi.waitFor(async () => expect((await h.store.getState(scope)).lastRun).toMatchObject({ kind: 'consolidation', ok: true }));
+    await h.waitIdle();
+    const jobs = await h.repos.memoryJobs.listScope(scope);
+    expect(jobs.map(job => job.kind).sort()).toEqual(['consolidation', 'extraction']);
+    expect(jobs.every(job => job.state === 'settled' && job.requests.length === 1)).toBe(true);
+    expect(jobs.find(job => job.kind === 'extraction')!.receipt!.consumedTaskIds).toEqual(taskIds);
+    expect((await h.store.getState(scope)).pendingTurns).toEqual([]);
+    expect((await h.store.list(scope))[0]).toMatchObject({ content: '手动整理保留中文回复约定', createdBy: 'ou_alice' });
+  });
+
   it('并发记账不互相覆盖，同一轮次重放也不重复计数', async () => {
     const h = await harness();
     // 关掉自动触发，隔离出纯记账行为：否则第 3 轮会顺手把 pendingTurns 消费掉。
@@ -461,15 +495,8 @@ describe('Lark memory pipeline through the coordinator', () => {
     expect(after.some(session => session.model === 'cheap-model')).toBe(true);
   });
 
-  it('PTY 类 Agent 拒绝 deny-all 时降级成 ask 重试一次', async () => {
-    const h = await harness({
-      // PTY CLI 只认 ask / full-trust：runtime 对 deny-all 抛 PERMISSION_MODE_UNSUPPORTED。
-      startGuard: input => {
-        if (input.permissionMode === 'deny-all') {
-          throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY Agent only supports ask (approve in the terminal) or explicit full-trust mode', 422);
-        }
-      }
-    });
+  it('PTY CLI 经能力预检以 ask 启动并复用持久作业会话', async () => {
+    const h = await harness({ protocol: 'pty-cli' });
     h.setResponder(prompt => {
       if (!prompt.includes('后台提取')) return { text: jsonBlock({ actions: [{ op: 'noop' }] }) };
       const taskId = prompt.match(/### 轮次 (\S+)/)?.[1] ?? 'unknown';
@@ -481,28 +508,27 @@ describe('Lark memory pipeline through the coordinator', () => {
       expect((await h.store.getState(scope)).lastRun).toMatchObject({ kind: 'extraction', ok: true, added: 1 });
     }, { timeout: 10_000 });
 
-    expect(h.startCalls.map(call => call.permissionMode)).toEqual(['deny-all', 'ask']);
+    expect(h.startCalls.map(call => call.permissionMode)).toEqual(['ask']);
     const memorySession = (await h.runtime.listSessions()).find(session => session.source === 'lark-memory');
     expect(memorySession).toMatchObject({ permissionMode: 'ask' });
 
-    // 降级后的 ask 会话要能被复用，不能每轮再试一次 deny-all。
+    // 已预检的 ask 会话可复用，不再试探不支持的权限模式。
     await h.runTurns(3);
     await vi.waitFor(async () => {
       expect((await h.store.getState(scope)).pendingTurns ?? []).toEqual([]);
     }, { timeout: 10_000 });
-    expect(h.startCalls).toHaveLength(2);
+    expect(h.startCalls).toHaveLength(1);
   });
 
-  it('两种权限模式都起不来时记 MEMORY_AGENT_UNSUPPORTED 并清掉 running', async () => {
-    const h = await harness({
-      startGuard: () => { throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'Legacy PTY transport cannot enforce a permission posture', 422); }
-    });
+  it('Legacy PTY 在建作业前拒绝不支持的权限模式并清掉 running', async () => {
+    const h = await harness({ protocol: 'pty' });
     await h.coordinator.handle(event('om_remember', '/remember 这个群的回复统一用中文'), h.config);
     await vi.waitFor(() => expect(h.lastCardText()).toContain('已记住'));
 
     const run = await h.pipeline.runConsolidation(scope);
     expect(run).toMatchObject({ kind: 'consolidation', ok: false, error: 'MEMORY_AGENT_UNSUPPORTED' });
-    expect(h.startCalls.map(call => call.permissionMode)).toEqual(['deny-all', 'ask']);
+    expect(h.startCalls).toEqual([]);
+    expect(await h.repos.memoryJobs.listScope(scope)).toEqual([]);
 
     const state = await h.store.getState(scope);
     expect(state.running).toBeUndefined();
@@ -646,8 +672,9 @@ describe('Lark memory pipeline through the coordinator', () => {
 
   it('被门禁拒绝的凭据不会原文进日志，也不会回灌重试 prompt', async () => {
     const h = await harness();
-    // 三个出口各埋一个凭据：fact 的 content、fact 的 evidence、整理动作的 id 与 op。
-    const secrets = ['abc123DEADBEEFabc123DEADBEEF', 'hunter2', 'sk-LIVE-9f8e7d', '身份证 11010119900307'];
+    // 凭据分别出现在 fact 内容、证据和动作 id；普通无效 op 仍作为返修候选。
+    const secrets = ['abc123DEADBEEFabc123DEADBEEF', 'hunter2', 'sk-LIVE-9f8e7d'];
+    const invalidAction = '把记忆改成 身份证 11010119900307';
     h.setResponder(prompt => {
       if (prompt.includes('后台提取')) {
         const taskId = prompt.match(/### 轮次 (\S+)/)?.[1] ?? 'unknown';
@@ -658,7 +685,7 @@ describe('Lark memory pipeline through the coordinator', () => {
       }
       return { text: jsonBlock({ actions: [
         { op: 'retire', id: `用户的 api_key=${secrets[2]}` },
-        { op: `把记忆改成 ${secrets[3]}`, id: 'mem_00000000' }
+        { op: invalidAction, id: 'mem_00000000' }
       ] }) };
     });
 
@@ -684,12 +711,13 @@ describe('Lark memory pipeline through the coordinator', () => {
     );
     const retryPrompts = h.memoryPrompts.filter(prompt => prompt.includes('违规清单：'));
     expect(retryPrompts).toHaveLength(1);
+    // 持久作业带上候选动作帮助返修；凭据会脱敏，普通无效动作保留但不进入日志。
+    expect(retryPrompts[0]).toContain(invalidAction);
+    expect(logged).not.toContain(invalidAction);
     for (const secret of secrets) {
       expect(logged).not.toContain(secret);
       expect(retryPrompts[0]).not.toContain(secret);
     }
-    expect(logged).toContain('内容疑似包含凭据');
-    expect(logged).toContain('evidence 不是本次输入里的轮次 taskId');
   });
 
   it('回答过长时保留末尾结论，并在 prompt 里标明只给了一段', async () => {
@@ -812,7 +840,7 @@ describe('shared group pool through the pipeline', () => {
 });
 
 describe('stuck memory session after a daemon restart', () => {
-  it('重启后原执行未知且归档失败时阻塞补跑，旧输出不被读取', async () => {
+  it('重启后原执行未知时复用原持久作业并阻塞补跑，旧输出不被读取', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-memory-restart-'));
     cleanups.push(() => rm(cwd, { recursive: true, force: true }));
     const file = join(cwd, 'state.db');
@@ -854,10 +882,17 @@ describe('stuck memory session after a daemon restart', () => {
       const starts: StartInput[] = [];
       const pipeline = new LarkMemoryPipeline({
         runtime: {
-          start: input => { starts.push(input); return runtime.start(input); },
+          start: input => runtime.start(input),
+          resolveMemorySessionInput: input => runtime.resolveMemorySessionInput(input),
+          startMemorySession: async (input, id, beforeStart) => {
+            if (!await repos.sessions.get(id)) starts.push(input);
+            return runtime.startMemorySession(input, id, beforeStart);
+          },
+          lookupAcceptedTask: request => runtime.lookupAcceptedTask(request),
           listAgents: () => runtime.listAgents(),
           listSessions: () => runtime.listSessions(),
-          dispatch: (id, prompt, mode, agentPrompt) => runtime.dispatch(id, prompt, mode, agentPrompt),
+          dispatch: (...args) => runtime.dispatch(...args),
+          dispatchRequest: (...args) => runtime.dispatchRequest(...args),
           getTasks: id => runtime.getTasks(id),
           getTaskRecovery: (id, taskId) => runtime.getTaskRecovery(id, taskId),
           getSessionTaskRecovery: id => runtime.getSessionTaskRecovery(id),
@@ -867,6 +902,7 @@ describe('stuck memory session after a daemon restart', () => {
           subscribe: (id, listener) => runtime.subscribe(id, listener)
         },
         controlActorId: 'installation_owner',
+        jobs: repos.memoryJobs, policyConfig: repos.config,
         repos: { execution: repos.execution },
         store, projection,
         readConfig: async appId => (await readLarkConfigs(repos.config)).find(bot => bot.appId === appId),
@@ -885,6 +921,7 @@ describe('stuck memory session after a daemon restart', () => {
     const stuckRun = first.pipeline.runConsolidation(scope);
     await vi.waitFor(() => expect(memoryPrompts).toHaveLength(1), { timeout: 10_000 });
     const [stuck] = await memorySessions(first.runtime);
+    const [frozenJob] = await first.repos.memoryJobs.listScope(scope);
     await first.runtime.shutdown();
     await stuckRun.catch(() => undefined);
     first.repos.close();
@@ -901,6 +938,10 @@ describe('stuck memory session after a daemon restart', () => {
     expect(memoryPrompts).toHaveLength(1);
     expect((await second.store.list(scope)).map(entry => entry.id)).toEqual([poisonId]);
     expect(await second.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });
+    const recoveredJobs = await second.repos.memoryJobs.listScope(scope);
+    expect(recoveredJobs).toHaveLength(1);
+    expect(recoveredJobs[0]).toMatchObject({ id: frozenJob!.id, sessionId: frozenJob!.sessionId, requests: frozenJob!.requests });
+    expect(recoveredJobs[0]!.receipt).toBeUndefined();
     expect(second.starts).toHaveLength(0);
     expect(memoryPrompts).toHaveLength(1);
 
@@ -937,12 +978,13 @@ describe('unchanged memory consolidation admission', () => {
   it('does not mark concurrent facts as consolidated and preserves concurrent writes on a mutating plan', async () => {
     const h = await harness();
     const original = await h.store.add(scope, { content: '已有约定使用中文', topic: 'conventions', source: 'user' });
-    const before = larkMemoryFingerprint(await h.store.list(scope));
+    const before = (await h.store.getState(scope)).lastConsolidationHash;
     h.setResponder(() => ({ text: jsonBlock({ actions: [{ op: 'noop' }] }), delayMs: 200 }));
     const running = h.pipeline.runConsolidation(scope);
     await vi.waitFor(() => expect(h.memoryPrompts).toHaveLength(1));
     await h.store.add(scope, { content: '运行期间新增事实', topic: 'conventions', source: 'user' });
-    expect(await running).toMatchObject({ ok: true });
+    // 持久作业对 noop 也核对冻结版本，不能把已过期的快照标记为成功整理。
+    expect(await running).toMatchObject({ ok: false, error: 'MEMORY_CONCURRENT_CHANGE' });
     const state = await h.store.getState(scope);
     expect(state.lastConsolidationHash).toBe(before);
     expect(state.lastConsolidationHash).not.toBe(larkMemoryFingerprint(await h.store.list(scope)));

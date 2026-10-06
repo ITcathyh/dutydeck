@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -59,3 +59,23 @@ mkdirSync(assetsDir, { recursive: true });
 cpSync(resolve(serverRoot, 'src/lark/assets/dutydeck-bouncing-ball.webp'), resolve(assetsDir, 'dutydeck-bouncing-ball.webp'));
 cpSync(resolve(serverRoot, 'src/lark/assets/SVG-SPINNERS-LICENSE.txt'), resolve(assetsDir, 'SVG-SPINNERS-LICENSE.txt'));
 cpSync(resolve(workspaceRoot, 'THIRD_PARTY_NOTICES.md'), resolve(assetsDir, 'THIRD_PARTY_NOTICES.md'));
+
+const engineBuildDir = resolve(serverRoot, '.engine-build');
+const engineDistDir = resolve(assetsDir, 'session-insight');
+if (existsSync(engineBuildDir)) {
+  mkdirSync(engineDistDir, { recursive: true });
+  cpSync(engineBuildDir, engineDistDir, { recursive: true });
+  const targets = ['linux-amd64', 'linux-arm64', 'darwin-amd64', 'darwin-arm64'];
+  for (const target of targets) {
+    const binPath = resolve(engineDistDir, target, 'session-insight');
+    if (existsSync(binPath)) {
+      chmodSync(binPath, 0o755);
+    }
+  }
+  const noticesFile = resolve(workspaceRoot, 'THIRD_PARTY_NOTICES.md');
+  if (existsSync(noticesFile)) {
+    cpSync(noticesFile, resolve(engineDistDir, 'THIRD_PARTY_NOTICES.md'));
+  }
+} else {
+  console.warn('[build] Note: apps/server/.engine-build not found. Session Insight engine will be unavailable in distribution.');
+}
