@@ -15,6 +15,7 @@ import {
   normalizeLarkMemoryTopic,
   renderLarkMemoryList,
   renderLarkMemoryStatus,
+  renderLarkMemoryStatusLine,
   type LarkMemoryEntry,
   type LarkMemoryState,
   type LarkMemoryStatus
@@ -722,5 +723,22 @@ describe('/memory receipt for shared pools and background status', () => {
       lastRun: { kind: 'extraction', at: '2026-09-25T01:00:00.000Z', ok: true, added: 2, superseded: 0, retired: 0, retopiced: 0, rejected: 1 } });
     expect(ok).toContain('- 上次运行：提取 · 2026-09-25 01:00 · 成功，新增 2 条，拒绝 1 条');
     expect(ok).toContain('- 正在运行：提取（开始于 2026-09-25 01:02）');
+  });
+});
+
+describe('renderLarkMemoryStatusLine', () => {
+  const base: LarkMemoryStatus = { appId: 'cli_bot', pool: 'groups', shared: true, liveEntries: 3, topics: 1, pendingTurns: 0 };
+  const run = (ok: boolean, error?: string): NonNullable<LarkMemoryStatus['lastRun']> => ({ kind: 'extraction', at: '2026-10-05T08:30:00.000Z', ok, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0, ...(error ? { error } : {}) });
+
+  it('列出最近成功更新时间和最近失败的时间与原因', () => {
+    const line = renderLarkMemoryStatusLine({ ...base, lastExtractionAt: '2026-10-04T01:00:00.000Z', lastConsolidationAt: '2026-10-04T09:00:00.000Z', lastRun: run(false, 'MEMORY_RUN_TIMEOUT'), lastFailureAt: { extraction: '2026-10-05T08:30:00.000Z' } });
+    expect(line).toBe('**记忆**：上次更新 2026-10-04 09:00；最近失败：提取 2026-10-05 08:30（MEMORY_RUN_TIMEOUT（记忆会话运行超时））');
+  });
+
+  it('没有失败或没运行过时给出对应文案；非运行错误码不暴露细节', () => {
+    expect(renderLarkMemoryStatusLine(base)).toBe('**记忆**：上次更新 尚未更新；最近无失败');
+    expect(renderLarkMemoryStatusLine({ ...base, lastRun: run(true), lastExtractionAt: '2026-10-05T08:30:00.000Z' })).toBe('**记忆**：上次更新 2026-10-05 08:30；最近无失败');
+    expect(renderLarkMemoryStatusLine({ ...base, lastRun: run(false, 'ENOENT: /data00/private') })).toContain('运行异常（详见服务日志）');
+    expect(renderLarkMemoryStatusLine({ ...base, lastFailureAt: { consolidation: '2026-10-03T00:00:00.000Z' } })).toContain('整理 2026-10-03 00:00（原因未记录）');
   });
 });

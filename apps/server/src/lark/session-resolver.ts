@@ -166,6 +166,7 @@ export async function materializeLarkResources(messageId: string, prompt: string
   if (!resources.length) return prompt;
   const directory = join(tmpdir(), 'dutydeck', 'lark-resources', messageId.replace(/[^a-zA-Z0-9_-]/g, '_'));
   const notes: string[] = [];
+  let failedCardImages = 0;
   for (const resource of resources) {
     try {
       const downloaded = await withLarkContextReadTimeout(service.downloadMessageResource(messageId, resource.key, resource.type), '附件下载');
@@ -185,9 +186,12 @@ export async function materializeLarkResources(messageId: string, prompt: string
       notes.push(`- ${resource.label}已下载到本地：${path}。请使用本地文件读取工具查看。${gifHint ? ` ${gifHint}` : ''}`);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      // 卡片图片只是附带的配图：汇总成一句，不要求 Agent 逐张向用户道歉。
+      if (resource.fromCard) { failedCardImages++; continue; }
       notes.push(`- ${resource.label}下载失败：${reason}。你无法读取该附件；请在回复中明确告知用户。${resourceFailureGuidance(error)}`);
     }
   }
+  if (failedCardImages) notes.push(`- 卡片图片 ${failedCardImages} 张未能下载，请仅依据卡片文字继续，不必中断任务。`);
   return `${prompt}\n\n[Dutydeck 飞书附件处理结果]\n${notes.join('\n')}`.trim();
 }
 

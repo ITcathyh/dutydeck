@@ -5,6 +5,8 @@ export interface LarkMessageResource {
   type: LarkResourceType;
   label: string;
   fileName?: string;
+  /** 来自转发卡片里的图片；下载失败时只汇总一句，不逐张要求 Agent 告知用户。 */
+  fromCard?: boolean;
 }
 
 export interface ParsedLarkMessage {
@@ -29,6 +31,27 @@ const asRecord = (value: unknown): Record<string, any> | undefined => value && t
   ? value as Record<string, any>
   : undefined;
 
+/** 每条卡片消息最多取几张图片。 */
+export const MAX_CARD_IMAGES = 4;
+
+/** 深度优先收集卡片里 img 组件的 img_key（卡片 1.0 与 json_card 两种形状），按出现顺序去重。 */
+const collectCardImageKeys = (root: unknown): string[] => {
+  const keys: string[] = [];
+  const visit = (value: unknown, depth: number) => {
+    if (depth > 16 || !value || typeof value !== 'object') return;
+    if (Array.isArray(value)) { for (const item of value) visit(item, depth + 1); return; }
+    const node = value as Record<string, any>;
+    if (node.tag === 'img' || node.tag === 'image') {
+      const property = asRecord(node.property);
+      const key = [node.img_key, node.image_key, property?.img_key, property?.image_key].find(item => typeof item === 'string' && item.trim());
+      if (key && !keys.includes(key.trim())) keys.push(key.trim());
+    }
+    for (const child of Object.values(node)) visit(child, depth + 1);
+  };
+  visit(root, 0);
+  return keys;
+};
+
 const parseJson = (content: string): Record<string, any> | undefined => {
   try { return asRecord(JSON.parse(content)); }
   catch { return undefined; }
@@ -49,13 +72,13 @@ export async function parseLarkMessageContent(
 
   const resources: LarkMessageResource[] = [];
   const seenResources = new Set<string>();
-  const addResource = (type: LarkResourceType, keyValue: unknown, fileNameValue?: unknown) => {
+  const addResource = (type: LarkResourceType, keyValue: unknown, fileNameValue?: unknown, cardLabel?: string) => {
     const key = String(keyValue ?? '').trim();
     if (!key || seenResources.has(`${type}:${key}`)) return '';
     seenResources.add(`${type}:${key}`);
     const fileName = String(fileNameValue ?? '').trim() || undefined;
-    const label = resourceLabel(type, fileName);
-    resources.push({ key, type, label, ...(fileName ? { fileName } : {}) });
+    const label = cardLabel ?? resourceLabel(type, fileName);
+    resources.push({ key, type, label, ...(fileName ? { fileName } : {}), ...(cardLabel ? { fromCard: true } : {}) });
     return `[${label}]`;
   };
 
@@ -123,7 +146,15 @@ export async function parseLarkMessageContent(
     const body = (Array.isArray(bodyElements)
       ? bodyElements.map(renderNode).map(value => value.trim()).filter(Boolean).join('\n\n')
       : renderNode(bodyElements)).trim();
-    const sections = [title, subtitle, body].filter(Boolean);
+    // 转发的告警卡片常带趋势图：和普通图片消息一样交给下载流程，最多 MAX_CARD_IMAGES 张。
+    const imageKeys = collectCardImageKeys(card);
+    const imageMarkers: string[] = [];
+    for (const [index, imageKey] of imageKeys.slice(0, MAX_CARD_IMAGES).entries()) {
+      const marker = addResource('image', imageKey, undefined, `卡片图片 ${index + 1}`);
+      if (marker) imageMarkers.push(marker);
+    }
+    if (imageKeys.length > MAX_CARD_IMAGES) imageMarkers.push(`（卡片里还有 ${imageKeys.length - MAX_CARD_IMAGES} 张图片未读取）`);
+    const sections = [title, subtitle, body, imageMarkers.join(' ')].filter(Boolean);
     return { text: sections.join('\n\n') || '收到一张没有可读文本的飞书卡片。', resources };
   }
 
