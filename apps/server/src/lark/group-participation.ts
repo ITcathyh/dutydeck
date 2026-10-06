@@ -70,6 +70,8 @@ const OWNED_TOPIC_REF = 'dutydeck:owned-topic';
 type BotMember = { name: string; appId?: string; openId?: string };
 type Members = { humans: number; bots: number; botList: BotMember[] };
 const activeModes = new Set(['selective', 'eager']);
+/** 当不了接话人的档（只在 @ 时、话题内免 @）怎么跟人说。 */
+const deafLevelText = (level: ParticipationLevel) => level === 'mention' ? '我现在只在 @ 时回复' : `我现在是「${participationLevelLabels[level]}」，不接没 @ 的消息`;
 const clock = (at: string) => { const date = new Date(at); return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`; };
 const snippet = (text: string | undefined) => { const plain = stripMentionPlaceholders(text ?? ''); return plain.length > 20 ? `${plain.slice(0, 20)}…` : plain; };
 const botName = (config: StoredLarkConfig) => config.name ?? config.displayName ?? config.appId;
@@ -165,8 +167,14 @@ export class LarkGroupParticipation {
       apply: async (record, operator) => {
         const config = await this.options.readConfig(record.scope.appId, record.scope.chatId);
         if (!config) throw new RuntimeError('LARK_CONFIG_NOT_FOUND', '机器人配置已不可用。', 409);
+        // 卡上说了先调到按需：接话人要收得到没 @ 的消息。调档失败就整张卡不生效，不留下收不到消息的接话人。
+        const raise = record.payload.level === 'selective' && !activeModes.has(await this.level(record.scope));
+        if (raise) {
+          if (!this.options.applyLevel) throw new RuntimeError('COLLABORATION_LEVEL_UNAVAILABLE', '这个群暂时不能在群里改参与强度，请在 Dutydeck Web 的群设置里调整。', 409);
+          await this.options.applyLevel(record.scope, 'selective', operator);
+        }
         const announced = await this.claimResponder(record.scope, config, operator, record.replyTo);
-        return `本群没 @ 机器人的消息改由我接。${announced ? '已在群里发了声明，其他 Dutydeck 机器人收到后只接 @ 和自己接手的话题。' : '群里的声明没发出去，其他机器人可能还不知道；请稍后 @我 再说一次「你负责接话」，我会重发声明。'}`;
+        return `${raise ? `本群已改成「按需」：${participationLevelBehaviors.selective}。` : ''}本群没 @ 机器人的消息改由我接。${announced ? '已在群里发了声明，其他 Dutydeck 机器人收到后只接 @ 和自己接手的话题。' : '群里的声明没发出去，其他机器人可能还不知道；请稍后 @我 再说一次「你负责接话」，我会重发声明。'}`;
       }
     });
   }
@@ -891,6 +899,11 @@ export class LarkGroupParticipation {
     if (current.revision !== patch.expectedRevision) throw new RuntimeError('COLLABORATION_REVISION_CONFLICT', '群分工已变化，请刷新后再改。', 409);
     const config = await this.options.readConfig(scope.appId, scope.chatId);
     if (!config) throw new RuntimeError('LARK_CONFIG_NOT_FOUND', '机器人配置已不可用。', 409);
+    // 当前档收不到没 @ 的消息时不能当接话人，也不在这里替人调档。
+    const level = patch.responder === 'self' ? await this.level(scope) : undefined;
+    if (level && !activeModes.has(level)) {
+      throw new RuntimeError('COLLABORATION_RESPONDER_NOT_LISTENING', `本 Bot 在这个群现在是「${participationLevelLabels[level]}」，收不到没 @ 的消息，当不了接话人。请先在上面的参与模式里选「按需参与」或「积极参与」并保存设置，再把接话人设成本 Bot。`, 409);
+    }
     const wasSelf = current.responder?.appId === scope.appId;
     const responder: UpdateCollaborationDutyInput['responder'] = patch.responder === undefined ? undefined
       : patch.responder === null ? null : wasSelf ? current.responder : { appId: scope.appId, name: botName(config), since: this.now().toISOString() };
@@ -1103,14 +1116,22 @@ export class LarkGroupParticipation {
       if (input.addressed) await this.replyText(config, event, `好的，等「${target}」在群里确认后，没 @ 的消息交给它接。`, key);
       return true;
     }
-    if ((await this.options.repository.getDuty(scope)).responder?.appId === scope.appId) {
+    // 接话人要收得到没 @ 的消息：当前档不接时，确认卡同时把档调到按需。
+    const level = await this.level(scope);
+    const deaf = !activeModes.has(level);
+    if (deaf && !this.options.applyLevel) {
+      await this.replyText(config, event, `${deafLevelText(level)}，当不了接话人；这个群暂时不能在群里改参与强度，请先在 Dutydeck Web 的群设置里把参与模式调到按需或积极，再说一次「你负责接话」。`, key);
+      return true;
+    }
+    if (!deaf && (await this.options.repository.getDuty(scope)).responder?.appId === scope.appId) {
       // 已经是接话人：回复本身就是一条声明，之前声明没发出去或别的实例错过了，这样能补上。
       await this.replyText(config, event, responderClaimText(botName(config)), key);
       return true;
     }
     const record = await this.confirmations.request({ kind: RESPONDER_CONFIRM_KIND, scope, requesterId: sender,
       replyTo: { messageId: event.messageId, ...(event.threadId ? { threadId: event.threadId } : {}) }, title: '指定接话人',
-      summary: `由我（${botName(config)}）接本群没 @ 机器人的消息。确认后我在群里发一条声明，其他 Dutydeck 机器人收到后只接 @ 和自己接手的话题。`, payload: {} });
+      summary: `${deaf ? `${deafLevelText(level)}，确认后调到「按需」并负责接话：` : ''}由我（${botName(config)}）接本群没 @ 机器人的消息。确认后我在群里发一条声明，其他 Dutydeck 机器人收到后只接 @ 和自己接手的话题。`,
+      payload: deaf ? { level: 'selective' } : {} });
     if (!record) await this.replyText(config, event, '确认卡没发出去，请稍后再说一次，或在 Dutydeck Web 的群设置里指定。', key);
     return true;
   }
