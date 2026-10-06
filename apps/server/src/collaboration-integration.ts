@@ -13,6 +13,7 @@ import { LarkTeamContextReader } from './lark/team-context.js';
 import { larkExecutionConfirmed, readLarkConfig, type StoredLarkConfig } from './lark/config.js';
 import type { LarkGroupManager } from './lark/group-management.js';
 import { createLarkCardService, type LarkCardService } from './lark/service.js';
+import { MandateCards } from './collaboration-mandate-cards.js';
 
 export interface CollaborationIntegrationOptions {
   repositories: RepositoryBundle;
@@ -155,6 +156,13 @@ export function createCollaborationIntegration(options: CollaborationIntegration
       return { policy: { enabled: true, authorized: false, pattern: '.*', reason: '后台委托已变更或失去授权。' } };
     }
   };
+  const onChange = async (scope: CollaborationScope) => {
+    void participation.bootstrap(scope).catch(error => options.log?.warn({ error }, '群上下文初始化未完成'));
+    await scheduler.tick();
+  };
+  const mandateCards = new MandateCards({ service, config: repos.config, onChange, log: options.log,
+    client: async scope => { const config = await readLarkConfig(repos.config, scope.appId); if (!config) throw new RuntimeError('COLLABORATION_GROUP_REQUIRED', '请先同步并配置此群。', 403); return client(config); },
+    canOperate: async (scope, operatorId) => operatorId === installationOwnerTaskActor || policy(scope, operatorId, 'run.interrupt').catch(() => false) });
   const scheduler = new ScheduleExecutor({ repositories: repos, service, authorize,
     executeAgent: input => background.execute(input), cancelAgent: input => background.cancel(input),
     deliver: async input => {
@@ -164,10 +172,9 @@ export function createCollaborationIntegration(options: CollaborationIntegration
       return deliveries.run(input.scope, input.actionId, async () => {
       await input.assertCurrent();
       const idempotencyKey = createHash('sha256').update(input.actionId).digest('hex').slice(0, 32);
-      const result = delivery.mode === 'thread' && delivery.rootMessageRef
-        ? await client(config).replyText({ messageId: delivery.rootMessageRef, replyInThread: true, text: input.text, idempotencyKey })
-        : await client(config).sendText({ chatId: input.scope.chatId, text: input.text, idempotencyKey });
-      return { receipt: result.messageId };
+      // 产出是带暂停/停止按钮的卡片，用户在消息上就能管这个委托。
+      const messageId = await mandateCards.deliver({ client: client(config), scope: input.scope, delivery, mandate: input.mandate, text: input.text, idempotencyKey });
+      return { receipt: messageId };
       });
     }
   });
@@ -202,13 +209,10 @@ export function createCollaborationIntegration(options: CollaborationIntegration
       return decider.resolve(config, { ...snapshot, settings: { ...snapshot.settings, policyVersion: version, instructions } });
     }
   });
-  return { service, scheduler, background, participation, extensions, evaluation, authorize, prepareSettings, riskPolicy,
+  return { service, scheduler, background, participation, extensions, evaluation, authorize, prepareSettings, riskPolicy, mandateCards,
     // 执行 Agent 按需检索跨群资料，门槛与原先预注入 teamContext 相同：来源群开启群参与且可观察。
     teamSearch: { reader: teamContext, available: (scope: CollaborationScope) => scopeGrant(scope, 'observe') },
-    onChange: async (scope: CollaborationScope) => {
-      void participation.bootstrap(scope).catch(error => options.log?.warn({ error }, '群上下文初始化未完成'));
-      await scheduler.tick();
-    },
+    onChange,
     async prune() {
       for (const bot of await repos.channelBots.list()) {
         const owner = await groups.owner(bot.externalAppId); if (!owner) continue;

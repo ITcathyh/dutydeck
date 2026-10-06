@@ -243,6 +243,8 @@ export class SessionAutomationService {
   /** GitHub 路径本身不强制令牌；这里只回答部署者有没有配置 GitHub 提供方，供 /ci 判断「未配置」。 */
   get githubConfigured() { return Boolean(this.options.githubToken); }
   get codebase() { return this.options.codebase; }
+  /** 群委托的确认卡与产出卡按钮处理；群协作集成装配好后挂上，飞书卡片回调经此进入。 */
+  mandateCards?: { callback(appId: string, value: Record<string, unknown>, operatorId: string | undefined, context: { messageId?: string; chatId?: string }): Promise<string> };
 
   private requireStore() {
     if (!this.options.repositories.config.compareAndSet || !this.options.repositories.config.list) {
