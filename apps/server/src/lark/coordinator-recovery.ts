@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { describeLarkTaskRecovery, larkContinuePrompt, larkIdleTimeoutMinutes, larkQuietSettledNote, larkRecoveryRetainedNote, larkReliability } from './task-recovery.js';
+import { describeLarkTaskRecovery, larkContinuePrompt, larkIdleTimeoutMinutes, larkQuietSettledNote, larkRecoveryRetainedNote, larkReliability, larkStaleSettledNote } from './task-recovery.js';
 import type { LarkInboxRecord } from './task-inbox.js';
 import type { LarkLaunchOptions } from './new-session.js';
 import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, type AgentEvent, type ChannelMapping, type Session, type TaskRecord } from '@dutydeck/shared';
@@ -13,6 +13,7 @@ import {
   larkHeldWebNote,
   larkInterruptionSummary,
   larkLastActivityAt,
+  larkRecoveryNoticeExpired,
   larkRedispatchedCardMarkdown,
   larkRedispatchLimit,
   larkRedispatchMaxAgeMs,
@@ -31,7 +32,7 @@ import { LarkCoordinatorCards } from './coordinator-cards.js';
 // 「在新会话中执行」的转交，以及服务重启切断那一轮的重投。
 
 const redispatchKey = (appId: string, taskId: string, turn: number) => `lark.redispatch.${appId}.${taskId}.${turn}`;
-/** Agent 停下后自动结束的那一轮：原因码与 Agent 名，结果卡据此补说明、给「在原对话继续」。 */
+/** Agent 停下后自动结束的那一轮：原因码与 Agent 名，结果卡据此补说明、给「在原对话继续」。旧的一轮另记 stale，对账据此不发结果卡。 */
 const settledKey = (appId: string, taskId: string, turn: number) => `lark.settled.${appId}.${taskId}.${turn}`;
 /** 「在原对话继续」的认领，同一张卡同一轮只受理一次。 */
 const continueKey = (appId: string, taskId: string, turn: number) => `lark.continue.${appId}.${taskId}.${turn}`;
@@ -59,6 +60,11 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       deliveryStore: this.workflowOptions.store,
       relaunchReady: (taskId, status, turn) => this.relaunchReady(config.appId, taskId, status, turn),
       interruptedTurn: (mapping, saved, runtimeTask) => this.redispatchInterruptedTurn(config, mapping, saved, runtimeTask),
+      staleTurn: (sessionId, runtimeTask) => this.staleTurn(sessionId, runtimeTask),
+      quietTerminalNote: async (mapping, saved) => {
+        const raw = await this.workflowOptions.store?.get(settledKey(config.appId, mapping.externalId, saved.turn ?? 0));
+        return raw && (JSON.parse(raw) as { stale?: boolean }).stale ? larkStaleSettledNote : undefined;
+      },
       ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}),
       // 呈现开关可以按群覆盖，对账必须按记录所属会话解析后再决定怎么补发，
       // 否则重启后群里的静默/只贴表情配置全部失效。解析失败退回 Bot 级配置。
@@ -489,6 +495,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
    * 其他原因（没确认收到消息、无进展超时没确认停下、没登录等，A2）：
    * - 这一轮还有资源阻塞：照旧留给人核对。
    * - Agent 已停下（runtime 确认空闲）且没有可能对外生效的操作：自动结束这一轮（settleQuietTurn），会话照常接下一条消息。
+   *   旧的一轮（larkRecoveryNoticeExpired）结束时不发结果卡，只把原来的卡原地改成终态。
    * - 否则停下，卡上给三个按钮；Agent 当时没确认停下的，之后每次对账再看一眼，停下了就自动结束。
    *
    * 重投记录按 App + 原消息 + 轮次落库（redispatchKey），并发的对账、重启后的对账与按钮点击读到的都是这一条。
@@ -503,7 +510,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     if (record?.phase === 'held') {
       const cause = record.redispatch!;
       if (cause.running && !cause.unsafeReason && this.agentQuiet(mapping.sessionId)
-        && await this.settleQuietTurn(config.appId, mapping, runtimeTask.id, turn, cause)) {
+        && await this.settleQuietTurn(config.appId, mapping, runtimeTask.id, turn, cause, await this.staleTurn(mapping.sessionId, runtimeTask))) {
         // 卡上的「重新执行」「放弃」随之失效。
         await store.compareAndSet(key, raw, JSON.stringify({ ...record, phase: 'moved' }));
         return { kind: 'handled' };
@@ -541,10 +548,11 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       unsafeReason = '的执行记录读取失败';
     }
     const agent = await this.resolveAgentName(config);
+    const lastActivity = larkLastActivityAt(own, attempt.createdAt);
     if (!restart) {
       const quiet = this.agentQuiet(mapping.sessionId);
       const cause: LarkHeldCause = { count, ...(unsafeReason ? { unsafeReason } : {}), ...(code ? { code } : {}), agent, ...(quiet ? {} : { running: true }) };
-      if (quiet && !unsafeReason && await this.settleQuietTurn(config.appId, mapping, runtimeTask.id, turn, cause)) return { kind: 'handled' };
+      if (quiet && !unsafeReason && await this.settleQuietTurn(config.appId, mapping, runtimeTask.id, turn, cause, larkRecoveryNoticeExpired(lastActivity))) return { kind: 'handled' };
       if (!inbox) return undefined;
       const held: LarkRelaunchClaim = { id: randomUUID(), boot: this.relaunchBoot, phase: 'held', action: 'rerun_in_new_session', appId: config.appId,
         taskId: mapping.externalId, turn, chatId: saved.chat_id, cardMessageId: saved.card_message_id ?? '', taskName: saved.task_name,
@@ -554,7 +562,6 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       return { kind: 'hold', ...cause };
     }
     if (!inbox) return undefined;
-    const lastActivity = larkLastActivityAt(own, attempt.createdAt);
     const stale = lastActivity === undefined ? 'unknown' : Date.now() - lastActivity > larkRedispatchMaxAgeMs ? 'old' : undefined;
     const cause: LarkHeldCause = { count, ...(unsafeReason ? { unsafeReason } : {}), ...(stale ? { stale } : {}), ...(code ? { code } : {}), agent };
     const base: LarkRelaunchClaim = { id: randomUUID(), boot: this.relaunchBoot, phase: 'held', action: 'rerun_in_new_session', appId: config.appId,
@@ -635,11 +642,25 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   private agentQuiet(sessionId: string) { return larkReliability(this.runtime).inspectAgentQuiescence?.(sessionId) === 'idle'; }
 
   /**
+   * 旧的一轮（larkRecoveryNoticeExpired）。最后一次活动与重投同一个取法：这一轮执行记录的事件，没有就用开始时间；
+   * 还没开始执行的（排队）用进队时间。读不到按旧的一轮处理。
+   */
+  private async staleTurn(sessionId: string, task: TaskRecord) {
+    try {
+      const attempt = (await this.runtime.inspectExecutionRecovery?.(sessionId, larkRecoveryOwner))?.tasks.find(item => item.taskId === task.id)?.attempt;
+      const events = attempt ? (await this.runtime.getEvents?.(sessionId) ?? []).filter(event => event.attemptId === attempt.attemptId) : [];
+      return larkRecoveryNoticeExpired(larkLastActivityAt(events, attempt?.createdAt ?? task.createdAt));
+    } catch { return true; }
+  }
+
+  /**
    * Agent 已停下、这一轮也没有可能对外生效的操作（A2）：按中断结束，无进展超时与没登录按失败；会话照常接下一条消息。
    * 先记下原因，结果卡据此补说明。记不上（执行资源未确认停止）时返回 false，照旧停下等人选。
+   * 旧的一轮（stale）另记一笔，对账据此不发结果卡；会话里还排着旧消息时不结束、返回 false，否则它们会马上开始执行。
    */
-  private async settleQuietTurn(appId: string, mapping: ChannelMapping, runtimeTaskId: string, turn: number, cause: LarkHeldCause) {
-    await this.workflowOptions.store!.set(settledKey(appId, mapping.externalId, turn), JSON.stringify({ code: cause.code, agent: cause.agent }));
+  private async settleQuietTurn(appId: string, mapping: ChannelMapping, runtimeTaskId: string, turn: number, cause: LarkHeldCause, stale: boolean) {
+    if (stale && (await this.runtime.getTasks?.(mapping.sessionId) ?? []).some(task => task.status === 'queued' && larkRecoveryNoticeExpired(Date.parse(task.createdAt)))) return false;
+    await this.workflowOptions.store!.set(settledKey(appId, mapping.externalId, turn), JSON.stringify({ code: cause.code, agent: cause.agent, ...stale ? { stale: true } : {} }));
     const outcome = cause.code === AGENT_IDLE_TIMEOUT || cause.code === AGENT_LOGIN_REQUIRED ? 'failed' : 'interrupted';
     try {
       await this.settleInterruptedAttempt(mapping.sessionId, runtimeTaskId, `lark_quiet:${mapping.externalId}:${turn}`, 'lark_agent_quiet', outcome);

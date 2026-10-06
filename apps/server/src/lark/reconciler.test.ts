@@ -1113,6 +1113,49 @@ describe('恢复异常通知与人工核验结果', () => {
     } finally { repos.close(); }
   });
 
+  it.each(['silent', 'frozen', 'missing', 'unupdatable'])('%s process card of a stale turn gets no recovery notice', async mode => {
+    const repos = createRepositories(':memory:');
+    try {
+      const task = { id: 'recovery-task', sessionId: 'session', status: 'reconcile_required', prompt: 'prompt', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as TaskRecord;
+      const mapping = createMapping('recovery-map', 'om_request', 'session', { runtime_task_id: task.id, turn: 2,
+        reply_message_id: 'om_request', reply_in_thread: true, ...(mode === 'frozen' ? { progress_frozen: true } : {}),
+        ...(mode === 'missing' ? { card_message_id: undefined } : {}) });
+      const runtime = { getTasks: vi.fn(async () => [task]), getEvents: vi.fn(async () => []),
+        getTaskRecovery: vi.fn(async () => ({ status: task.status, blockers: [{ code: 'DRIVER_RESOURCE_UNSAFE' }] })) };
+      const service = { update: vi.fn(async () => ({ messageId: 'om_card' })), reply: vi.fn(async () => ({ messageId: 'om_notice' })), send: vi.fn() };
+      if (mode === 'unupdatable') service.update.mockRejectedValueOnce(new LarkServiceError('LARK_OPENAPI_ERROR', 'expired', 502, { upstreamCode: 230031 }));
+      const staleTurn = vi.fn(async () => true);
+      await performLarkCardReconcile({ runtime: runtime as any, service: service as any, cardMappings: createMemoryChannelMappingRepo([mapping]) as any,
+        log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, config, channel: 'lark-card:cli_test', deliveryStore: repos.config,
+        resolveConfig: async () => ({ ...config, silentProgress: mode === 'silent' }), staleTurn });
+      expect(staleTurn).toHaveBeenCalledWith('session', task);
+      expect(service.reply).not.toHaveBeenCalled();
+      expect(service.send).not.toHaveBeenCalled();
+    } finally { repos.close(); }
+  });
+
+  it.each([true, false])('a turn ended without a result card is closed in place (process card: %s) and never sent', async withCard => {
+    const task = { id: 'quiet-task', sessionId: 'session', status: 'interrupted', prompt: 'prompt', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as TaskRecord;
+    const mapping = createMapping('quiet-map', 'om_request', 'session', { runtime_task_id: task.id, state: 'reconcile_required', turn: 1,
+      reply_message_id: 'om_request', ...(withCard ? {} : { card_message_id: undefined }) });
+    const cardMappings = createMemoryChannelMappingRepo([mapping]);
+    const service = { update: vi.fn(async () => ({ messageId: 'om_card_om_request' })), reply: vi.fn(), send: vi.fn() };
+    const input = { runtime: { getTasks: vi.fn(async () => [task]), getEvents: vi.fn(async () => []) } as any, service: service as any,
+      cardMappings: cardMappings as any, log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, config, channel: 'lark-card:cli_test',
+      quietTerminalNote: async () => '服务重启前没有完成，已自动结束。' };
+    expect(await performLarkCardReconcile(input)).toBe(0);
+    expect(await performLarkCardReconcile(input)).toBe(0);
+    expect(service.reply).not.toHaveBeenCalled();
+    expect(service.send).not.toHaveBeenCalled();
+    expect(service.update).toHaveBeenCalledTimes(withCard ? 1 : 0);
+    if (withCard) {
+      expect(service.update.mock.calls[0]![0]).toMatchObject({ cardKind: 'process', messageId: 'om_card_om_request', state: 'interrupted', readOnly: true });
+      expect(JSON.stringify((service.update.mock.calls[0]![0] as any).elements)).toContain('服务重启前没有完成，已自动结束。');
+    }
+    expect(JSON.parse(cardMappings.mappings[0]!.extra!)).toMatchObject({ state: 'interrupted',
+      ...(withCard ? { final_message_id: 'om_card_om_request', final_delivery_state: 'delivered', progress_frozen: true } : { final_delivery_state: 'reaction' }) });
+  });
+
   it('retries a failed notice on a frozen card without patching or changing its original destination', async () => {
     const repos = createRepositories(':memory:');
     try {
