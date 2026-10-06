@@ -107,6 +107,13 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
       upstream.on('response', response => {
         // 对方要登录说明它不是 --local-only 启动的；原样回 401 会让浏览器以为主服务掉了登录。
         reply.raw.writeHead(response.statusCode === 401 && !sharedRead ? 502 : response.statusCode ?? 502, withoutHeaders(response.headers, DROPPED_RESPONSE_HEADERS));
+        if (sharedRead) {
+          // A revoked peer stream is destroyed rather than ended. pipe() does
+          // not forward this premature close to the browser on its own.
+          const disconnect = () => reply.raw.destroy();
+          response.once('aborted', disconnect).once('error', disconnect);
+          response.once('close', () => { if (!response.complete) disconnect(); });
+        }
         response.pipe(reply.raw);
       });
       upstream.on('error', error => {

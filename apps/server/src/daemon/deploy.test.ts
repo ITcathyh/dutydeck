@@ -1,4 +1,6 @@
-import type { SqliteDriverCheck, SqliteDriverCheckOptions } from '@dutydeck/storage';
+import { createRepositories, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
+import { DutydeckRuntime } from '@dutydeck/runtime';
+import type { AgentConfig } from '@dutydeck/shared';
 import Database from 'better-sqlite3';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
@@ -38,12 +40,14 @@ interface CliBehaviour {
   versionExit?: number;
   /** 这个版本认识的最高迁移版本：启动时像真服务一样，库比它新就以 DATABASE_SCHEMA_TOO_NEW 退出，否则补上缺的迁移。 */
   knownSchema?: number;
+  executeQueued?: boolean;
 }
 
 /** 假的 dist/cli.js：--version 前先加载 dep-a（它再加载 dep-b），否则起一个回答排空、任务数、健康检查的 HTTP 服务。 */
 function cliSource(behaviour: CliBehaviour) {
   return `import a from 'dep-a';
 import { createServer } from 'node:http';
+import { appendFileSync } from 'node:fs';
 if (process.argv.includes('--version')) { console.log('0.0.3'); process.exit(${behaviour.versionExit ?? 0}); }
 ${behaviour.knownSchema === undefined ? '' : `const { default: Database } = await import(${JSON.stringify(betterSqliteUrl)});
 const db = new Database(process.argv[process.argv.indexOf('--database') + 1]);
@@ -51,6 +55,10 @@ db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY K
 const applied = db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get().version;
 if (applied > ${behaviour.knownSchema}) { console.error('DATABASE_SCHEMA_TOO_NEW'); process.exit(1); }
 for (let version = applied + 1; version <= ${behaviour.knownSchema}; version++) db.prepare('INSERT INTO schema_migrations VALUES (?, ?)').run(version, 'test');
+${behaviour.executeQueued ? `for (const task of db.prepare("SELECT id FROM tasks WHERE status = 'queued'").all()) {
+  appendFileSync(process.argv[process.argv.indexOf('--database') + 1] + '.effects', task.id + '\\n');
+  db.prepare("UPDATE tasks SET status = 'completed' WHERE id = ?").run(task.id);
+}` : ''}
 `}const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
 createServer((req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
@@ -240,7 +248,7 @@ describe('dutydeck deploy', () => {
     expect(JSON.parse(readFileSync(broken.manifest!, 'utf8'))).toMatchObject({ status: 'rolled_back', new_pid: await service.mainPid(), database_restored: false });
     // deployment.json 仍记着上一版
     expect(JSON.parse(readFileSync(join(bot, 'deployment.json'), 'utf8')).release).toBe(first.release);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('切回'));
+    expect(info).toHaveBeenCalledWith(expect.stringContaining('切回'));
     // 回滚后不清理旧发布目录和部署记录
     expect(broken.pruned).toBeUndefined();
     expect(broken.prunedRecords).toBeUndefined();
@@ -294,7 +302,7 @@ describe('dutydeck deploy', () => {
   }, 60_000);
 
   it('备份失败时先停止续租再退出排空，之后不再续租', async () => {
-    await runDeploy({ source, runtime: bot }, deps());
+    const first = await runDeploy({ source, runtime: bot }, deps());
     nextCommit(source);
     const requests = recordRequests();
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
@@ -308,6 +316,8 @@ describe('dutydeck deploy', () => {
         }
       }));
       expect(result).toMatchObject({ ok: false, status: 'failed' });
+      expect(realpathSync(join(releases, 'current'))).toBe(first.release);
+      expect(service.ran).toEqual([first.release]);
       requests.phase = 'after';
       vi.advanceTimersByTime(3 * DRAIN_INTERVAL_MS);
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -319,16 +329,22 @@ describe('dutydeck deploy', () => {
     ]);
   }, 60_000);
 
-  it('新版本跑了迁移后没通过健康检查：停服务，另存回滚前的库，用部署前的备份恢复，旧版本才能启动', async () => {
-    nextCommit(source, { knownSchema: 24 });
+  it('新版本执行排队任务并迁移后健康失败：保留执行事实、停止服务且不切回旧版', async () => {
+    const initial = new Database(database);
+    initial.exec("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT);");
+    initial.close();
+    nextCommit(source, { knownSchema: 24, executeQueued: true });
     const first = await runDeploy({ source, runtime: bot }, deps());
     expect(first, first.error).toMatchObject({ ok: true, status: 'deployed' });
-    nextCommit(source, { knownSchema: 27, health: 503 });
+    const queued = new Database(database);
+    queued.exec("INSERT INTO tasks VALUES ('queued-before-deploy', 'queued');");
+    queued.close();
+    nextCommit(source, { knownSchema: 27, health: 503, executeQueued: true });
     const schema = (file: string) => {
       const db = new Database(file, { readonly: true, fileMustExist: true });
       try { return (db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number }).version; } finally { db.close(); }
     };
-    // 记下每次停、启服务时库的迁移版本：停服务时库还没被恢复，旧版本启动时已经恢复
+    // 新版已经执行过排队任务：旧快照不能覆盖这条执行事实。
     const order: string[] = [];
     const tracked = {
       ...service,
@@ -338,21 +354,26 @@ describe('dutydeck deploy', () => {
 
     const broken = await runDeploy({ source, runtime: bot }, deps({ service: tracked, healthTimeoutMs: 2_500 }));
 
-    expect(broken, broken.error).toMatchObject({ ok: false, status: 'rolled_back', previousRelease: first.release });
-    expect(broken.error).toContain('数据库已用部署前的备份恢复');
-    expect(service.ran).toEqual([first.release, broken.release, first.release]);
-    expect(order).toEqual(['restart 24', 'stop 27', 'restart 24']);
-    expect(broken.pid).toBe(await service.mainPid());
-    expect(schema(database)).toBe(24);
+    expect(readFileSync(`${database}.effects`, 'utf8').trim().split('\n')).toEqual(['queued-before-deploy']);
+    expect(broken, broken.error).toMatchObject({ ok: false, status: 'rollback_failed', previousRelease: first.release });
+    expect(broken.error).toContain('人工恢复');
+    expect(service.ran).toEqual([first.release, broken.release]);
+    expect(order).toEqual(['restart 24', 'stop 27']);
+    expect(await service.mainPid()).toBeUndefined();
+    expect(realpathSync(join(releases, 'current'))).toBe(broken.release);
+    expect(schema(database)).toBe(27);
+    const latest = new Database(database, { readonly: true });
+    expect(latest.prepare('SELECT status FROM tasks WHERE id = ?').get('queued-before-deploy')).toEqual({ status: 'completed' });
+    latest.close();
     const manifest = JSON.parse(readFileSync(broken.manifest!, 'utf8'));
     expect(manifest).toMatchObject({
-      status: 'rolled_back', database_restored: true, schema_version_before: 24, schema_version_at_rollback: 27,
+      status: 'rollback_failed', database_restored: false, schema_version_before: 24, schema_version_at_rollback: 27,
       database_before_rollback: join(dirname(broken.manifest!), 'dutydeck.db.before-rollback')
     });
     expect(schema(manifest.database_before_rollback)).toBe(27);
   }, 60_000);
 
-  it('回滚用备份恢复数据库时，备份之后收到的飞书消息会从库里消失：按会话各回一条提醒核对后重发', async () => {
+  it('迁移失败保留备份之后收到的请求和配置，不发可能重复执行的重发提醒', async () => {
     nextCommit(source, { knownSchema: 24 });
     const first = await runDeploy({ source, runtime: bot }, deps());
     expect(first, first.error).toMatchObject({ ok: true, status: 'deployed' });
@@ -388,29 +409,208 @@ describe('dutydeck deploy', () => {
         if (++backups === 1) {
           put(database, [
             inbox('om_a1', 'oc_a', 'received', '100'), inbox('om_a2', 'oc_a', 'accepted', '200'),
-            inbox('om_t1', 'oc_a', 'command', '150', 'omt_topic'), inbox('om_denied', 'oc_c', 'failed', '120')
+            inbox('om_t1', 'oc_a', 'command', '150', 'omt_topic'), inbox('om_denied', 'oc_c', 'failed', '120'),
+            ['new-setting', 'after-backup']
           ]);
         }
       }
     }));
 
-    expect(broken, broken.error).toMatchObject({ ok: false, status: 'rolled_back' });
+    expect(broken, broken.error).toMatchObject({ ok: false, status: 'rollback_failed' });
     const manifest = JSON.parse(readFileSync(broken.manifest!, 'utf8'));
-    expect(manifest.database_restored).toBe(true);
-    // 复现：恢复后的库里只剩备份时就有的那条，备份之后收到的只留在另存的回滚前的库里
-    expect(inboxKeys(database)).toEqual(['lark.inbox.cli_deploy.om_before']);
-    expect(inboxKeys(manifest.database_before_rollback)).toEqual(['om_a1', 'om_a2', 'om_before', 'om_denied', 'om_t1'].map(id => `lark.inbox.cli_deploy.${id}`));
-    // 每个受影响的会话只回一条，回在其中最后收到的那条消息下；已回过拒绝回执的不算
-    expect(replies.map(reply => reply.path).sort()).toEqual(['/open-apis/im/v1/messages/om_a2/reply', '/open-apis/im/v1/messages/om_t1/reply']);
-    const topic = replies.find(reply => reply.path.includes('om_t1'))!;
-    expect(topic.body).toMatchObject({ msg_type: 'text', reply_in_thread: true });
-    for (const reply of replies) expect(JSON.parse(String(reply.body.content)).text).toContain('执行状态不确定，请核对后重发');
-    expect(manifest.uncertain_conversations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ app_id: 'cli_deploy', chat_id: 'oc_a', message_id: 'om_a2', messages: 2, notified: true }),
-      expect.objectContaining({ app_id: 'cli_deploy', chat_id: 'oc_a', thread_id: 'omt_topic', message_id: 'om_t1', messages: 1, notified: true })
-    ]));
+    expect(manifest.database_restored).toBe(false);
+    const expectedKeys = ['om_a1', 'om_a2', 'om_before', 'om_denied', 'om_t1'].map(id => `lark.inbox.cli_deploy.${id}`);
+    expect(inboxKeys(database)).toEqual(expectedKeys);
+    expect(inboxKeys(manifest.database_before_rollback)).toEqual(expectedKeys);
+    const latest = new Database(database, { readonly: true });
+    expect(latest.prepare('SELECT value FROM configs WHERE key = ?').get('new-setting')).toEqual({ value: 'after-backup' });
+    latest.close();
+    expect(replies).toEqual([]);
+    expect(broken.error).not.toContain('重发');
+    expect(service.ran).toEqual([first.release, broken.release]);
+    expect(realpathSync(join(releases, 'current'))).toBe(broken.release);
     expect(JSON.stringify(manifest)).not.toContain('deploy-secret');
   }, 60_000);
+
+  it.each([
+    'same-schema', 'ddl-during-stop', 'migration-set-changed', 'current-unreadable', 'current-missing',
+    'backup-missing', 'backup-unreadable', 'backup-schema-changed', 'initial-schema-unknown', 'initial-database-missing',
+    'preservation-failed', 'stop-failed', 'stop-still-running', 'stop-threw', 'stop-check-threw',
+    'no-persistent-database', 'memory-database'
+  ])('回滚边界：%s', async scenario => {
+    const first = await runDeploy({ source, runtime: bot, restart: false }, deps());
+    nextCommit(source);
+    if (scenario === 'initial-database-missing') rmSync(database);
+    // 部署元数据不能证明服务没有持久库；受控服务仍会写真实 database 文件。
+    if (scenario === 'no-persistent-database' || scenario === 'memory-database') {
+      writeFileSync(join(bot, 'deployment.json'), JSON.stringify({ address: `http://127.0.0.1:${port}`, ...(scenario === 'memory-database' ? { databasePath: ':memory:' } : {}) }));
+    }
+    let clock = Date.now(), pid: number | undefined, backup: string | undefined, stopping = false;
+    const ran: string[] = [], copies: Array<[string, string]> = [];
+    const put = (sql: string) => { const db = new Database(database); try { db.exec(sql); } finally { db.close(); } };
+    if (scenario === 'migration-set-changed') put('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); INSERT INTO schema_migrations VALUES (1), (2)');
+    const stopFailure = scenario.startsWith('stop-');
+    const controlled = {
+      mainPid: async () => {
+        if (stopping && scenario === 'stop-check-threw') throw new Error('cannot inspect service');
+        return pid;
+      },
+      restart: async () => {
+        ran.push(realpathSync(join(releases, 'current')));
+        pid = 1_000_000 + ran.length;
+        if (ran.length === 1) {
+          put("CREATE TABLE IF NOT EXISTS configs (key TEXT PRIMARY KEY, value TEXT); INSERT OR REPLACE INTO configs VALUES ('accepted-after-backup', 'retained')");
+          if (scenario === 'current-unreadable') writeFileSync(database, 'unreadable current database');
+          if (scenario === 'current-missing') rmSync(database);
+          if (scenario === 'backup-missing') rmSync(backup!);
+          if (scenario === 'backup-unreadable') writeFileSync(backup!, 'unreadable backup');
+          if (scenario === 'backup-schema-changed') {
+            const changed = new Database(backup!); changed.exec('CREATE TABLE changed_backup(id)'); changed.close();
+          }
+          if (scenario === 'preservation-failed') put('CREATE TABLE new_schema(id)');
+          if (scenario === 'migration-set-changed') put('DELETE FROM schema_migrations WHERE version = 1');
+        }
+        return undefined;
+      },
+      stop: vi.fn(async () => {
+        stopping = true;
+        // A migration can finish after the health check but before stop completes.
+        if (scenario === 'ddl-during-stop') put('CREATE TABLE late_schema(id)');
+        if (scenario === 'stop-failed') return 'stop denied';
+        if (scenario === 'stop-threw') throw new Error('stop failed');
+        if (scenario !== 'stop-still-running') pid = undefined;
+        return undefined;
+      }),
+      resetFailed: vi.fn(async () => {})
+    };
+    const result = await runDeploy({ source, runtime: bot }, deps({
+      service: controlled, now: () => clock, healthTimeoutMs: 1,
+      sleep: async () => { clock += 1000; },
+      fetch: async () => Response.json({ ok: ran.length > 1 }, { status: ran.length > 1 ? 200 : 503 }),
+      backupDatabase: async (from, to) => {
+        copies.push([from, to]);
+        if (copies.length === 1) backup = to;
+        if (copies.length > 1 && scenario === 'preservation-failed') throw new Error('disk full');
+        const db = new Database(from, { readonly: true, fileMustExist: true });
+        try { await db.backup(to); } finally { db.close(); }
+        if (copies.length === 1 && scenario === 'initial-schema-unknown') writeFileSync(to, 'unreadable initial backup');
+      }
+    }));
+    const compatible = scenario === 'same-schema';
+    expect(result.status, result.error).toBe(compatible ? 'rolled_back' : 'rollback_failed');
+    expect(ran).toEqual(compatible ? [result.release, first.release] : [result.release]);
+    expect(realpathSync(join(releases, 'current'))).toBe(compatible ? first.release : result.release);
+    expect(controlled.stop).toHaveBeenCalledOnce();
+    expect(controlled.resetFailed).toHaveBeenCalledTimes(compatible ? 1 : 0);
+    expect(copies.every(([, to]) => to !== database)).toBe(true);
+    const manifest = JSON.parse(readFileSync(result.manifest!, 'utf8'));
+    expect(manifest.database_restored).toBe(false);
+    if (!compatible) {
+      expect(result.error).toContain('人工恢复');
+      expect(result.error).not.toContain('已切回');
+      expect(result.error).not.toContain('重发');
+      expect(manifest.rollback_blocked_reason).toEqual(expect.any(String));
+      expect(manifest.rollback_service_stopped).toBe(!stopFailure);
+      if (!stopFailure) expect(await controlled.mainPid()).toBeUndefined();
+    }
+    if (stopFailure) {
+      expect(copies).toHaveLength(1);
+      expect(manifest.schema_version_at_rollback).toBeUndefined();
+    }
+    if (scenario === 'no-persistent-database' || scenario === 'memory-database') {
+      expect(result.error).toContain('无法验证目标数据库');
+      expect(copies).toEqual([]);
+      expect(manifest.schema_version_at_rollback).toBeUndefined();
+    }
+    if (scenario === 'preservation-failed') expect(manifest.database_preservation_error).toBe('disk full');
+    if (scenario === 'current-unreadable') expect(readFileSync(database, 'utf8')).toBe('unreadable current database');
+    else if (scenario === 'current-missing') expect(existsSync(database)).toBe(false);
+    else {
+      const db = new Database(database, { readonly: true });
+      expect(db.prepare('SELECT value FROM configs WHERE key = ?').get('accepted-after-backup')).toEqual({ value: 'retained' });
+      db.close();
+    }
+  });
+
+  it('真实 Runtime 执行后部署失败：保留 attempt、提交事实及新请求，重开当前数据库不重放旧任务', async () => {
+    rmSync(database);
+    const agent: AgentConfig = { id: 'deploy-fixture', name: 'Deploy fixture', command: process.execPath, args: [], protocol: 'acp', cwd: tmp, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
+    const effects: string[] = [];
+    let current: { runtime: DutydeckRuntime; repos: ReturnType<typeof createRepositories> } | undefined;
+    const open = () => {
+      const repos = createRepositories(database, { mode: 'runtime', newDatabaseAuthority: 'ledger_v1' });
+      const runtime = new DutydeckRuntime(repos, {
+        driverIdleTimeoutMs: 0,
+        driverFactory: (_config, _protocol, emit, _exit, sessionId) => ({
+          start: async () => {},
+          send: async () => {
+            effects.push(runtime.getActiveTaskContext(sessionId!)!.taskId);
+            emit({ type: 'text', data: { text: 'done' } });
+            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+          },
+          stop: async () => {}, isStopped: async () => true, interrupt: async () => {}, resume: async () => {}
+        })
+      });
+      return current = { runtime, repos };
+    };
+    const close = async () => { if (current) { await current.runtime.shutdown(); current.repos.close(); current = undefined; } };
+    try {
+      const original = open();
+      await original.runtime.initialize([agent]);
+      original.runtime.setQueueHeld(true);
+      const session = await original.runtime.start({ agentId: agent.id });
+      const queued = await original.runtime.dispatch(session.id, 'execute once');
+      expect(queued.status).toBe('queued');
+      await close();
+      const first = await runDeploy({ source, runtime: bot, restart: false }, deps());
+      nextCommit(source);
+      let pid: number | undefined, clock = Date.now(), addedId: string | undefined;
+      let completedAttempt: unknown;
+      const ran: string[] = [];
+      const controlled = {
+        mainPid: async () => pid,
+        restart: async () => {
+          ran.push(realpathSync(join(releases, 'current')));
+          pid = 1_000_000 + ran.length;
+          const upgraded = open();
+          await upgraded.runtime.initialize([agent]);
+          await vi.waitFor(() => expect(upgraded.repos.execution.getTaskExecution(queued.id)?.task.status).toBe('completed'));
+          completedAttempt = upgraded.repos.execution.getTaskExecution(queued.id)!.currentAttempt;
+          expect(completedAttempt).toMatchObject({ state: 'settled', outcome: 'completed' });
+          expect(completedAttempt).not.toMatchObject({ submissionState: 'not_submitted' });
+          upgraded.runtime.setQueueHeld(true);
+          addedId = (await upgraded.runtime.dispatch(session.id, 'accepted after backup')).id;
+          await upgraded.repos.config.set('after-backup', 'retained');
+          const migration = new Database(database);
+          migration.exec('CREATE TABLE deployment_new_schema (id INTEGER PRIMARY KEY)');
+          migration.close();
+          return undefined;
+        },
+        stop: async () => { await close(); pid = undefined; return undefined; }
+      };
+      const result = await runDeploy({ source, runtime: bot }, deps({
+        service: controlled, now: () => clock, healthTimeoutMs: 1,
+        sleep: async () => { clock += 1000; }, fetch: async () => Response.json({ ok: false }, { status: 503 })
+      }));
+      expect(result.status, result.error).toBe('rollback_failed');
+      expect(ran).toEqual([result.release]);
+      expect(result.previousRelease).toBe(first.release);
+      expect(effects).toEqual([queued.id]);
+      const recovered = open();
+      recovered.runtime.setQueueHeld(true);
+      await recovered.runtime.initialize([agent]);
+      const execution = recovered.repos.execution.getTaskExecution(queued.id)!;
+      expect(execution.task.status).toBe('completed');
+      expect(execution.attempts).toHaveLength(1);
+      expect(execution.currentAttempt).toEqual(completedAttempt);
+      expect(await recovered.repos.config.get('after-backup')).toBe('retained');
+      expect((await recovered.repos.tasks.get(addedId!))?.status).toBe('queued');
+      recovered.runtime.setQueueHeld(false);
+      await vi.waitFor(() => expect(recovered.repos.execution.getTaskExecution(addedId!)?.task.status).toBe('completed'));
+      expect(effects).toEqual([queued.id, addedId]);
+      expect(recovered.repos.execution.getTaskExecution(queued.id)!.currentAttempt).toEqual(completedAttempt);
+    } finally { await close(); }
+  });
 
   it('试加载失败时不切换、不重启，删掉这个发布目录', async () => {
     const first = await runDeploy({ source, runtime: bot }, deps());

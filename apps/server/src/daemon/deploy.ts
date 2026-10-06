@@ -6,14 +6,13 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readF
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOSTART_LINUX_UNIT } from '../autostart/autostart.js';
 import type { DeployCliOptions } from '../cli-program.js';
-import { larkBotsConfigKey, readLarkConfigs } from '../lark/config.js';
-import { createLarkCardService } from '../lark/service.js';
 import { pidAlive } from './daemon.js';
 import { DRAIN_INTERVAL_MS, drainRuntime, systemdServiceControl, unitRuntime, waitForServiceHealth, type DaemonCommandDeps, type DrainResult, type RuntimeEndpoint, type ServiceControl, type UnitRuntime } from './command.js';
 
 /**
  * `dutydeck deploy`：把一个已构建好的检出目录做成不可变的发布目录，排空后切换 `current` 并重启，
- * 健康检查不过就切回上一版再重启。unit 的 ExecStart 须运行 `<releases>/current/dist/cli.js`，
+ * 健康检查不过时，停服务并确认数据库 schema 未变才切回上一版；始终保留当前数据库。
+ * unit 的 ExecStart 须运行 `<releases>/current/dist/cli.js`，
  * `--print-unit` 按现有 unit 生成这样一份。
  *
  *   <releases>/<时间>-<sha>/                  dist、public、package.json 与生产依赖
@@ -236,13 +235,23 @@ async function backupSqlite(source: string, target: string): Promise<void> {
 
 const sha256 = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
 
-/** 库里已经应用到的迁移版本（schema_migrations 的最大值），没有这张表时为 0；打不开返回 undefined。 */
-function schemaVersion(file: string): number | undefined {
+/** 比较持久 schema 和迁移集合，不比较任务、配置等运行数据；打不开或迁移记录非法时拒绝自动回滚。 */
+function databaseSchema(file: string): { version: number; fingerprint: string } | undefined {
   try {
     const db = new Database(file, { readonly: true, fileMustExist: true });
     try {
-      if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get()) return 0;
-      return (db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get() as { version: number }).version;
+      return db.transaction(() => {
+        const schema = db.prepare('SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name').all();
+        const versions = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get()
+          ? (db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as Array<{ version: number }>).map(row => row.version)
+          : [];
+        if (versions.some(version => !Number.isSafeInteger(version) || version < 0)) return undefined;
+        const userVersion = db.pragma('user_version', { simple: true });
+        return {
+          version: versions.at(-1) ?? 0,
+          fingerprint: createHash('sha256').update(JSON.stringify({ schema, versions, userVersion })).digest('hex')
+        };
+      })();
     } finally {
       db.close();
     }
@@ -446,108 +455,31 @@ function keepDraining(drain: DrainResult, pid: number | undefined): () => Promis
   };
 }
 
-/**
- * 回滚前按需恢复数据库：新版本可能已经跑了迁移，旧版本见到更新的库会以 DATABASE_SCHEMA_TOO_NEW 拒绝启动。
- * 迁移版本和部署前的备份不同（或读不出来）时停服务，把当前库另存为「回滚前」，再用部署前的备份覆盖；
- * 版本没变就不动数据库。返回失败原因；另存失败时不覆盖当前库。
- */
-async function restoreDatabaseForRollback(
-  service: ServiceControl, database: string, backup: string, record: string, manifest: Record<string, unknown>, deps: DeployDeps, info: (message: string) => void
+/** 已确认停服后才调用；部署前快照只用于兼容检查和人工恢复，绝不覆盖当前数据库。 */
+async function checkDatabaseForRollback(
+  database: string, record: string, manifest: Record<string, unknown>, deps: DeployDeps
 ): Promise<string | undefined> {
-  const before = typeof manifest.schema_version_before === 'number' ? manifest.schema_version_before : undefined;
-  const current = schemaVersion(database);
-  manifest.schema_version_at_rollback = current ?? null;
-  if (before === undefined) return `读不出部署前备份 ${backup} 的迁移版本，没有恢复数据库。`;
-  if (current === before) return undefined;
-  info(`库的迁移版本从 ${before} 变成了 ${current ?? '（读不出）'}，停服务，另存当前库后用部署前的备份恢复。`);
-  const stopped = await service.stop();
-  if (stopped) return `停服务失败，没有恢复数据库：${stopped}`;
-  const copy = deps.backupDatabase ?? backupSqlite;
+  const current = databaseSchema(database);
+  manifest.schema_version_at_rollback = current?.version ?? null;
+  manifest.schema_fingerprint_at_rollback = current?.fingerprint ?? null;
+  const backup = typeof manifest.database_backup === 'string' ? manifest.database_backup : undefined;
+  const before = backup ? databaseSchema(backup) : undefined;
+  let reason: string | undefined;
+  if (!before || before.fingerprint !== manifest.schema_fingerprint_before) reason = `部署前的数据库 schema 无法核实（备份：${backup ?? '缺失'}）。`;
+  else if (!current) reason = `读不出当前数据库 ${database} 的 schema。`;
+  else if (current.fingerprint !== before.fingerprint) reason = `数据库 schema 已变化（迁移版本 ${before.version} → ${current.version}）。`;
+  if (!reason) return undefined;
+
+  // 另存供排障使用；失败也绝不恢复旧快照或启动旧版。
   const beforeRollback = join(record, `${basename(database)}.before-rollback`);
   try {
-    await copy(database, beforeRollback);
+    await (deps.backupDatabase ?? backupSqlite)(database, beforeRollback);
+    manifest.database_before_rollback = beforeRollback;
   } catch (error) {
-    return `另存回滚前的数据库失败，没有恢复：${message(error)}`;
+    manifest.database_preservation_error = message(error);
+    reason += `另存当前数据库失败：${message(error)}。`;
   }
-  manifest.database_before_rollback = beforeRollback;
-  try {
-    await copy(backup, database);
-  } catch (error) {
-    return `用部署前的备份恢复数据库失败（回滚前的库已另存为 ${beforeRollback}）：${message(error)}`;
-  }
-  manifest.database_restored = true;
-  return undefined;
-}
-
-// ─── 回滚后提醒 ──────────────────────────────────────────────────────────────
-
-/** 飞书入站消息记录的键前缀，与 lark/task-inbox.ts 一致：`lark.inbox.<appId>.<messageId>`。 */
-const LARK_INBOX_PREFIX = 'lark.inbox.';
-const UNCERTAIN_NOTICE = '服务刚回滚到上一个版本，最近发来的请求执行状态不确定，请核对后重发。';
-
-interface UncertainConversation { appId: string; chatId: string; threadId?: string; messageId: string; createTime: number; messages: number }
-
-function configRows(file: string, prefix: string): Array<{ key: string; value: string }> {
-  const db = new Database(file, { readonly: true, fileMustExist: true });
-  try {
-    return db.prepare('SELECT key, value FROM configs WHERE substr(key, 1, length(?)) = ?').all(prefix, prefix) as Array<{ key: string; value: string }>;
-  } finally {
-    db.close();
-  }
-}
-
-/**
- * 用部署前的备份恢复数据库后，备份之后收到的飞书消息只留在另存的回滚前的库里：服务再也看不到它们，
- * 既不执行也不回复。按会话（机器人 + 群 + 话题）归并，每个会话记最后收到的那条；已经回过失败回执的不算。
- */
-function uncertainConversations(beforeRollback: string, restored: string): UncertainConversation[] {
-  const kept = new Set(configRows(restored, LARK_INBOX_PREFIX).map(row => row.key));
-  const conversations = new Map<string, UncertainConversation>();
-  for (const row of configRows(beforeRollback, LARK_INBOX_PREFIX)) {
-    if (kept.has(row.key)) continue;
-    let record: { appId?: unknown; state?: unknown; event?: { messageId?: unknown; chatId?: unknown; threadId?: unknown; createTime?: unknown } };
-    try { record = JSON.parse(row.value); } catch { continue; }
-    const { appId, state, event } = record;
-    if (typeof appId !== 'string' || state === 'failed' || typeof event?.messageId !== 'string' || typeof event.chatId !== 'string') continue;
-    const threadId = typeof event.threadId === 'string' && event.threadId ? event.threadId : undefined;
-    const key = JSON.stringify([appId, event.chatId, threadId ?? '']);
-    const createTime = Number(event.createTime) || 0;
-    const previous = conversations.get(key);
-    const latest = !previous || createTime >= previous.createTime;
-    conversations.set(key, {
-      appId, chatId: event.chatId, ...(threadId ? { threadId } : {}),
-      messageId: latest ? event.messageId : previous.messageId, createTime: latest ? createTime : previous.createTime,
-      messages: (previous?.messages ?? 0) + 1
-    });
-  }
-  return [...conversations.values()];
-}
-
-/** 每个受影响的会话回一条纯文本。机器人凭据取回滚前的库，它是最新的。 */
-async function notifyUncertainConversations(conversations: UncertainConversation[], beforeRollback: string, deps: DeployDeps, serviceHealthy: boolean) {
-  const raw = configRows(beforeRollback, larkBotsConfigKey).find(row => row.key === larkBotsConfigKey)?.value;
-  const bots = await readLarkConfigs({ get: async key => key === larkBotsConfigKey ? raw : undefined, set: async () => {} }, { readOnly: true });
-  const results: Array<Record<string, unknown> & { notified: boolean }> = [];
-  for (const conversation of conversations) {
-    const bot = bots.find(item => item.appId === conversation.appId);
-    // 上一版没起来时不提醒重发：发了也没人接，只记进 manifest 供人工核对。
-    let error = !serviceHealthy ? '上一版没有恢复健康，没有发提醒' : bot ? undefined : '找不到这个机器人的配置';
-    if (!error && bot) {
-      try {
-        await createLarkCardService(deps.env ?? process.env, deps.fetch ?? fetch, bot).replyText({
-          messageId: conversation.messageId, ...(conversation.threadId ? { replyInThread: true } : {}),
-          text: UNCERTAIN_NOTICE, idempotencyKey: `rollback_${conversation.messageId}`.slice(0, 50)
-        });
-      } catch (sendError) {
-        error = message(sendError);
-      }
-    }
-    results.push({
-      app_id: conversation.appId, chat_id: conversation.chatId, ...(conversation.threadId ? { thread_id: conversation.threadId } : {}),
-      message_id: conversation.messageId, messages: conversation.messages, notified: !error, ...(error ? { error } : {})
-    });
-  }
-  return results;
+  return reason;
 }
 
 async function restartAndCheck(service: ServiceControl, previousPid: number | undefined, address: string | undefined, deps: DeployDeps) {
@@ -670,7 +602,9 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
     try {
       await (deps.backupDatabase ?? backupSqlite)(database, backup);
       manifest.database_backup = backup;
-      manifest.schema_version_before = schemaVersion(backup) ?? null;
+      const schema = databaseSchema(backup);
+      manifest.schema_version_before = schema?.version ?? null;
+      manifest.schema_fingerprint_before = schema?.fingerprint ?? null;
     } catch (error) {
       await stopRenewing();
       await drain.release?.();
@@ -688,33 +622,34 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
     prune();
     return finish('deployed', { new_pid: started.pid });
   }
-  if (!previousRelease) return finish('failed', { error: `新版本没有通过健康检查，也没有上一版可以切回。原因：${started.error}` });
-
-  warn(`新版本没有通过健康检查，切回 ${basename(previousRelease)} 并重启。原因：${started.error}`);
-  pointCurrent(target.releases, previousRelease);
   manifest.database_restored = false;
-  const restoreError = database && typeof manifest.database_backup === 'string'
-    ? await restoreDatabaseForRollback(service, database, manifest.database_backup, record, manifest, deps, info)
-    : undefined;
-  if (restoreError) warn(restoreError);
-  await service.resetFailed?.();
-  const back = await restartAndCheck(service, await service.mainPid(), target.endpoint.address, deps);
-  let lostNote = '';
-  if (database && manifest.database_restored === true && typeof manifest.database_before_rollback === 'string') {
-    try {
-      const conversations = uncertainConversations(manifest.database_before_rollback, database);
-      if (conversations.length > 0) {
-        const results = await notifyUncertainConversations(conversations, manifest.database_before_rollback, deps, back.ok);
-        manifest.uncertain_conversations = results;
-        lostNote = `备份之后收到的飞书消息随恢复丢失，涉及 ${conversations.length} 个会话，已在其中 ${results.filter(item => item.notified).length} 个回复提醒核对后重发，明细见 manifest 的 uncertain_conversations。`;
-        info(lostNote);
-      }
-    } catch (error) {
-      warn(`核对备份之后收到的飞书消息失败：${message(error)}`);
-    }
+  manifest.rollback_service_stopped = false;
+  const blocked = (reason: string) => finish('rollback_failed', {
+    rollback_blocked_reason: reason,
+    error: `新版本没有通过健康检查：${started.error}自动回滚已停止：${reason}未切回上一版，数据库未恢复旧快照。需要人工恢复；数据库路径：${database ?? '未知'}，部署前备份：${manifest.database_backup ?? '无'}，部署记录：${manifestPath}。`
+  });
+  warn(`新版本没有通过健康检查，先停服务并检查回滚兼容性。原因：${started.error}`);
+  try {
+    const stopped = await service.stop();
+    if (stopped) return blocked(`停服务失败：${stopped}。`);
+    const remainingPid = await service.mainPid();
+    if (remainingPid !== undefined) return blocked(`停服务后仍有主进程 ${remainingPid}。`);
+  } catch (error) {
+    return blocked(`无法确认服务已停止：${message(error)}。`);
   }
-  const restoreNote = (restoreError ? `数据库：${restoreError}` : manifest.database_restored ? '数据库已用部署前的备份恢复。' : '') + lostNote;
+  manifest.rollback_service_stopped = true;
+  if (!previousRelease) return finish('failed', { error: `新版本没有通过健康检查，服务已停止，也没有上一版可以切回。保留当前数据库，需要人工恢复。原因：${started.error}` });
+
+  const databaseError = database && database !== ':memory:'
+    ? await checkDatabaseForRollback(database, record, manifest, deps)
+    : '无法验证目标数据库路径及其 schema，不能据此认定没有持久数据库。';
+  if (databaseError) return blocked(databaseError);
+
+  info(`服务已停止，数据库 schema 兼容；切回 ${basename(previousRelease)}，使用当前数据库重启。`);
+  pointCurrent(target.releases, previousRelease);
+  await service.resetFailed?.();
+  const back = await restartAndCheck(service, undefined, target.endpoint.address, deps);
   return back.ok
-    ? finish('rolled_back', { new_pid: back.pid, error: `新版本 ${id} 没有通过健康检查，已切回 ${basename(previousRelease)}。原因：${started.error}${restoreNote}` })
-    : finish('rollback_failed', { error: `新版本没有通过健康检查，切回 ${basename(previousRelease)} 后仍不健康。新版本：${started.error}上一版：${back.error}${restoreNote}` });
+    ? finish('rolled_back', { new_pid: back.pid, error: `新版本 ${id} 没有通过健康检查，已切回 ${basename(previousRelease)}，保留当前数据库。原因：${started.error}` })
+    : finish('rollback_failed', { error: `新版本没有通过健康检查，切回 ${basename(previousRelease)} 后仍不健康，数据库未恢复旧快照。新版本：${started.error}上一版：${back.error}` });
 }

@@ -866,7 +866,7 @@ export interface ServiceControl {
   mainPid(): Promise<number | undefined>;
   /** 重启服务；失败时返回原因。 */
   restart(): Promise<string | undefined>;
-  /** 停服务；失败时返回原因。回滚要恢复数据库时用，停下后再用 restart 启动。 */
+  /** 停服务并等待停止完成；失败时返回原因。成功返回后服务必须保持停止，直到显式 restart。 */
   stop(): Promise<string | undefined>;
   /** 清掉失败计数（systemd 的 start-limit）；回滚前用，免得刚才的崩溃循环挡住回滚。 */
   resetFailed?(): Promise<void>;

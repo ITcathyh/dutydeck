@@ -15,7 +15,7 @@ import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
-import { registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
+import { isValidSessionShareCredential, SHARE_TOKEN_QUERY_KEY, registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
 import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProvider } from './terminal/terminal-ws.js';
 import { isSharedInstanceRead, registerInstanceProxy, rewriteSharedSessionProxyUrl, type PeerInstance } from './instance-proxy.js';
 import { isRelayCapabilityRequest, registerRelayRoutes, type RelayRoutesOptions } from './relay-routes.js';
@@ -401,6 +401,13 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     let closed = false;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let sharePoll: ReturnType<typeof setInterval> | undefined;
+    let shareDeadline: ReturnType<typeof setTimeout> | undefined;
+    let shareCheck: Promise<boolean> | undefined;
+    let cancelShareCheck: (() => void) | undefined;
+    const shared = Boolean(options.auth) && Object.prototype.hasOwnProperty.call(request.query, SHARE_TOKEN_QUERY_KEY);
+    const shareToken = (request.query as Record<string, unknown>)[SHARE_TOKEN_QUERY_KEY];
+    const sharedSessionId = request.params.id;
     let delivered = after;
     let replaying = true;
     let unsubscribe = () => {};
@@ -414,6 +421,10 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       replaying = false;
       pendingLive.length = 0;
       if (heartbeat) clearInterval(heartbeat);
+      if (sharePoll) clearInterval(sharePoll);
+      if (shareDeadline) clearTimeout(shareDeadline);
+      cancelShareCheck?.();
+      cancelShareCheck = undefined;
       unsubscribe();
       for (const close of drainClosers) close();
       drainClosers.clear();
@@ -434,15 +445,44 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       reply.raw.once('drain', onDrain);
       if (closed || reply.raw.destroyed) onClose();
     });
-    const writeChunk = async (chunk: string) => {
-      if (closed || reply.raw.destroyed) return false;
-      return reply.raw.write(chunk) || await waitForDrain();
-    };
-    const writeEvent = (event: any) => writeChunk(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-    const disconnectSlowClient = () => {
+    const disconnect = () => {
       cleanup();
       reply.raw.destroy();
     };
+    // Read the current persisted secret, including rotations made by another
+    // process. One in-flight check and a deadline also bound a stalled getter.
+    const checkShare = (): Promise<boolean> => {
+      if (closed) return Promise.resolve(false);
+      if (shareCheck) return shareCheck;
+      shareDeadline = setTimeout(disconnect, 1_000);
+      shareCheck = (async () => {
+        try {
+          const valid = await Promise.race([
+            isValidSessionShareCredential(shareToken, sharedSessionId, options.auth!.getShareSecret),
+            new Promise<boolean>(resolve => { cancelShareCheck = () => resolve(false); })
+          ]);
+          if (closed) return false;
+          if (!valid) disconnect();
+          return valid && !closed;
+        } catch {
+          disconnect();
+          return false;
+        } finally {
+          if (shareDeadline) clearTimeout(shareDeadline);
+          shareDeadline = undefined;
+          shareCheck = undefined;
+          cancelShareCheck = undefined;
+        }
+      })();
+      return shareCheck;
+    };
+    const writeChunk = async (chunk: string) => {
+      if (shared && !await checkShare()) return false;
+      if (closed || reply.raw.destroyed) return false;
+      const drained = reply.raw.write(chunk) || await waitForDrain();
+      return drained && !closed && !reply.raw.destroyed;
+    };
+    const writeEvent = (event: any) => writeChunk(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
     const pumpLive = () => {
       if (livePump || closed || replaying) return;
       livePump = (async () => {
@@ -452,14 +492,14 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
           if (!await writeEvent(event)) return;
           delivered = event.sequence;
         }
-      })().finally(() => {
+      })().catch(disconnect).finally(() => {
         livePump = undefined;
         if (!closed && pendingLive.length > 0) pumpLive();
       });
     };
     const enqueueLive = (event: any) => {
       if (closed || event.sequence <= delivered) return;
-      if (pendingLive.length >= maxPendingLive) return disconnectSlowClient();
+      if (pendingLive.length >= maxPendingLive) return disconnect();
       pendingLive.push(event);
       pumpLive();
     };
@@ -471,6 +511,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     // Install cleanup before the replay await. A client can disconnect while
     // storage is still reading, and Node will not replay an already-fired close.
     request.raw.once('close', cleanup);
+    if (shared) sharePoll = setInterval(() => { if (!closed && !shareCheck) void checkShare(); }, 1_000);
     try {
       if (!await writeChunk(': connected\n\n')) return;
       // A fresh stream only needs the latest visible window; reconnects page
@@ -507,7 +548,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       reply.raw.end();
       throw error;
     }
-    if (!closed) heartbeat = setInterval(() => { if (!closed && !reply.raw.writableNeedDrain) reply.raw.write(': heartbeat\n\n'); }, 15_000);
+    if (!closed) heartbeat = setInterval(() => { if (!closed && !reply.raw.writableNeedDrain) void writeChunk(': heartbeat\n\n').catch(disconnect); }, 15_000);
   });
 
   if (options.webRoot) {
