@@ -428,6 +428,13 @@ async function harness(options: { config?: Partial<StoredLarkConfig>; turns?: Tu
   };
   const snapshot = async (name: string) => {
     expect(feishu.unexpected).toEqual([]);
+    // 飞书要求同一张卡内组件 ID 唯一，重复会整张卡被拒收。
+    const elementIds = (value: unknown): string[] => Array.isArray(value) ? value.flatMap(elementIds)
+      : value && typeof value === 'object' ? Object.entries(value).flatMap(([key, child]) => key === 'element_id' && typeof child === 'string' ? [child] : elementIds(child)) : [];
+    for (const step of timeline) for (const request of (step as { requests?: Array<{ content?: unknown }> }).requests ?? []) {
+      const ids = elementIds(request.content);
+      expect(ids.filter((id, index) => ids.indexOf(id) !== index), `${name} 卡内 element_id 重复`).toEqual([]);
+    }
     await expect(`${normalize(JSON.stringify(timeline, null, 2), root)}\n`).toMatchFileSnapshot(`./__snapshots__/card-snapshots/${name}.json`);
   };
   return {
