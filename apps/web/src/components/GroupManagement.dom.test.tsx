@@ -1010,6 +1010,49 @@ describe('GroupManagement 保存期间切换对象与继续编辑', () => {
     })));
   });
 
+  describe('接话方式（参与强度）', () => {
+    const overview = (participation: 'off' | 'selective', inheritParticipation: boolean): CollaborationOverview => ({
+      snapshot: { scope: { appId: 'cli_dev', chatId: 'oc_chat_1' }, contextRevision: 1,
+        settings: { scope: { appId: 'cli_dev', chatId: 'oc_chat_1' }, revision: 5, participation, inheritParticipation, instructions: '', notificationsPaused: false,
+          maxProactivePerHour: 6, retentionDays: 30, policyVersion: 'v1', updatedAt: '2026-09-18T00:00:00.000Z' },
+        observations: [], followups: [], mandates: [] },
+      followups: [], mandates: [], decisions: [], actions: [], activities: [], feedback: []
+    });
+
+    it('一个选项同时改写本群唤醒方式覆盖和参与模式，选后立即生效', async () => {
+      const user = userEvent.setup();
+      stubBaseQueries();
+      vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: mockGroups });
+      vi.spyOn(collaborationApi, 'getOverview').mockResolvedValue(overview('off', true));
+      const saveBinding = vi.spyOn(api, 'updateGroupBotBinding').mockResolvedValue(mockGroups[0]!.bots[0]!);
+      const updateSettings = vi.spyOn(collaborationApi, 'updateSettings').mockResolvedValue({ settings: overview('selective', false).snapshot.settings });
+      renderWithClient(<GroupManagement selectedChatId="oc_chat_1" selectedAppId="cli_dev" onSelectGroup={() => {}} onNavigateToBot={() => {}} agents={mockAgents} />);
+      const level = await screen.findByRole('combobox', { name: '接话方式' }) as HTMLSelectElement;
+      await waitFor(() => expect(level.disabled).toBe(false));
+      expect(level.value).toBe('inherit');
+      expect(screen.getByRole('option', { name: '跟随 Bot 默认（只在 @ 时）' })).toBeTruthy();
+      await user.selectOptions(level, 'selective');
+      await waitFor(() => expect(updateSettings).toHaveBeenCalledWith('cli_dev', 'oc_chat_1', { expectedRevision: 5, participation: 'selective' }));
+      expect(saveBinding).toHaveBeenCalledWith('cli_dev', 'oc_chat_1', { expectedRevision: 2,
+        patch: { routingOverride: { groupReplyMode: { mode: 'inherit' }, mentionPolicy: { mode: 'set', value: 'topic' } } } });
+      expect(saveBinding.mock.invocationCallOrder[0]).toBeLessThan(updateSettings.mock.invocationCallOrder[0]!);
+    });
+
+    it('本群还有没保存的修改时先不让切换', async () => {
+      const user = userEvent.setup();
+      stubBaseQueries();
+      vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: mockGroups });
+      vi.spyOn(collaborationApi, 'getOverview').mockResolvedValue(overview('off', true));
+      renderWithClient(<GroupManagement selectedChatId="oc_chat_1" selectedAppId="cli_dev" onSelectGroup={() => {}} onNavigateToBot={() => {}} agents={mockAgents} />);
+      const level = await screen.findByRole('combobox', { name: '接话方式' }) as HTMLSelectElement;
+      await waitFor(() => expect(level.disabled).toBe(false));
+      await user.click(screen.getByRole('button', { name: /群工具与值班设置/ }));
+      await user.click(screen.getByRole('checkbox', { name: /启用本群 Oncall 模式/ }));
+      expect(level.disabled).toBe(true);
+      expect(screen.getByText(/先保存或放弃本群的其他修改，再切换接话方式/)).toBeTruthy();
+    });
+  });
+
   describe('通用协作面板集成', () => {
     const collabOverview = (appId: string, chatId: string): CollaborationOverview => ({
       snapshot: {

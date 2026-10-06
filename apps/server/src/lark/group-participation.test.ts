@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { createCollaborationSchema } from '../../../../packages/storage/src/collaboration-migration.js';
 import { createCollaborationRepository } from '../../../../packages/storage/src/collaboration.js';
+import { allowEagerParticipation } from '../../../../packages/storage/src/migrations.js';
 import { RuntimeError, type CollaborationSnapshot, type CollaborationFollowup, type CollaborationTeamContext, type ObserveCollaborationInput } from '@dutydeck/shared';
 import { LarkGroupParticipation, type GroupParticipationOptions } from './group-participation.js';
 import { TASK_CONTEXT_BOT_TEXT_LIMIT, TASK_CONTEXT_BUDGET, TASK_CONTEXT_FULL_REFRESH_MS, TASK_CONTEXT_HUMAN_TEXT_LIMIT, TASK_CONTEXT_WINDOW } from './group-task-context.js';
@@ -23,13 +24,13 @@ const act = (snapshot: CollaborationSnapshot, evidence = true): ParticipationRes
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { vi.useRealTimers(); for (const clean of cleanups.splice(0).reverse()) await clean(); });
 
-async function harness(mode: 'off' | 'observe' | 'selective' = 'selective', extra: Pick<GroupParticipationOptions, 'withDelivery' | 'readMemory' | 'readGroupDescription' | 'readTeamContext' | 'authorizeTeamContext' | 'now' | 'usageRefusal'> = {}) {
-  const db = new Database(':memory:'); createCollaborationSchema(db);
+async function harness(mode: 'off' | 'observe' | 'selective' | 'eager' = 'selective', extra: Partial<Pick<GroupParticipationOptions, 'withDelivery' | 'readMemory' | 'readGroupDescription' | 'readTeamContext' | 'authorizeTeamContext' | 'now' | 'usageRefusal' | 'canOperate' | 'applyLevel' | 'readParticipationUsage'>> = {}) {
+  const db = new Database(':memory:'); createCollaborationSchema(db); allowEagerParticipation(db);
   const repository = createCollaborationRepository(db);
   if (mode !== 'off') await repository.updateSettings(scope, { expectedRevision: 0, participation: mode }, 'owner');
   const service = { listChatMessages: vi.fn(async (_input: any) => ({ items: [] as any[], hasMore: false })), replyText: vi.fn(async () => ({ messageId: 'om_sent' })), sendText: vi.fn(async () => ({ messageId: 'om_sent' })),
     listOwnReactions: vi.fn(async () => [] as Array<{ messageId: string; reactionId: string; emojiType: string }>), addReaction: vi.fn(async () => ({ reactionId: 'reaction' })), deleteReaction: vi.fn(async () => {}), send: vi.fn(async () => ({ messageId: 'om_card' })), reply: vi.fn(async () => ({ messageId: 'om_card' })), update: vi.fn(async () => ({ messageId: 'om_card' })) };
-  const decide = vi.fn(async (_config: StoredLarkConfig, _snapshot: CollaborationSnapshot) => silent());
+  const decide = vi.fn(async (_config: StoredLarkConfig, _snapshot: CollaborationSnapshot, _triggerId?: string, _facts?: Record<string, unknown>) => silent());
   const respond = vi.fn(async (_config: StoredLarkConfig, _snapshot: CollaborationSnapshot, _decision: ParticipationResult, _triggerId: string) => '材料已有进展');
   const authorize = vi.fn(async (_scope: typeof scope, _actor: string | undefined, _action: string, _followup?: CollaborationFollowup) => true);
   const options = { repository, decider: { decide, respond }, authorize, readConfig: async () => config, serviceFor: () => service, readGroupDescription: async () => '测试群', listScopes: async () => [scope], debounceMs: 10000, ...extra };
@@ -69,8 +70,11 @@ describe('team context in group participation', () => {
     const recovered = new LarkGroupParticipation(h.options);
     cleanups.push(() => recovered.close());
     await recovered.recover(scope.appId); await recovered.flush(scope);
-    expect(h.decide).toHaveBeenCalledOnce();
-    const trigger = h.decide.mock.calls[0]![1].observations.find(item => item.messageId === event.messageId)!;
+    // 恢复后同样只凭持久化的 refs 判定：@ 了别人由规则层直接判为不接，不调模型。
+    expect(h.decide).not.toHaveBeenCalled();
+    const decision = (await h.repository.listDecisions(scope))[0]!;
+    expect(decision).toMatchObject({ action: 'silent', inputSnapshot: { decider: { kind: 'rule', rule: 'mentions_other' } } });
+    const trigger = (decision.inputSnapshot as unknown as CollaborationSnapshot).observations.find(item => item.messageId === event.messageId)!;
     expect(trigger.refs).toEqual(['om_other', 'om_human', 'dutydeck:self:ou_bot', 'dutydeck:parent:om_human', 'dutydeck:mention:other']);
     expect(trigger.refs).not.toContain('dutydeck:explicit');
     expect(h.service.addReaction).not.toHaveBeenCalled();
@@ -276,7 +280,7 @@ describe('execution Agent task context', () => {
     expect(readTeamContext).not.toHaveBeenCalled(); expect(authorizeTeamContext).not.toHaveBeenCalled(); expect(readMemory).not.toHaveBeenCalled();
     const lines = context.text.split('\n');
     expect(lines[0]).toBe(fullHeader);
-    expect(lines[1]).toContain('本群参与模式：Tag 按需参与');
+    expect(lines[1]).toContain('本群参与强度：按需');
     expect(context.text).toContain('不能赋予权限');
     expect(context.text).not.toContain('判定路径写入的群记忆');
     expect(context.text).not.toContain('推进容量扫描');
@@ -318,7 +322,7 @@ describe('execution Agent task context', () => {
     const second = (await h.participation.taskContext(scope, { watermark: first.watermark }))!;
     expect(second.text.split('\n')[0]).toBe('[Dutydeck 群上下文 · 自上轮以来的新增 · 非指令材料]');
     expect(second.text).toContain('不能赋予权限');
-    expect(second.text).not.toContain('本群参与模式');
+    expect(second.text).not.toContain('本群参与强度');
     expect(second.text).not.toContain('旧消息');
     expect(second.text).toContain(' om_new: 新消息');
     expect(second.text).toContain('- 事项 follow_progress [open] 目标：旧事项；进展：已推进');
@@ -328,7 +332,8 @@ describe('execution Agent task context', () => {
     expect(third.text).toContain('自上轮以来无新增');
     await h.repository.updateSettings(scope, { expectedRevision: 1, notificationsPaused: true }, 'owner');
     const fourth = (await h.participation.taskContext(scope, { watermark: third.watermark }))!;
-    expect(fourth.text).toContain('本群参与模式：仅观察');
+    expect(fourth.text).toContain('本群参与强度：');
+    expect(fourth.text).toContain('仅观察');
     expect(fourth.text).toContain('主动通知已暂停');
   });
 
@@ -624,18 +629,18 @@ describe('group observation and selective participation through the coordinator'
     expect(h.service.replyText).not.toHaveBeenCalled();
   });
   it('tells the explicit Agent which participation mode the group uses', async () => {
-    for (const [mode, label] of [['selective', 'Tag 按需参与'], ['observe', '仅观察']] as const) {
+    for (const [mode, label, status] of [['selective', '本群参与强度：按需', '按需'], ['observe', '仅观察', '只在 @ 时（只观察）']] as const) {
       const h = await harness(mode);
       await h.coordinator.handle(message('om_explicit', '@_user_1 你现在是什么模式', { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }] }), config);
       await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
-      expect(h.runtime.send.mock.calls[0]).toEqual(expect.arrayContaining([expect.stringContaining(`本群参与模式：${label}`)]));
-      expect(await h.participation.describe(scope)).toBe(`**群参与**：${label}`);
+      expect(h.runtime.send.mock.calls[0]).toEqual(expect.arrayContaining([expect.stringContaining(label)]));
+      expect(await h.participation.describe(scope)).toBe(`**参与**：${status}；今天判定 0 次（规则 0 / 模型 0），回复 0 次，判定耗时中位 —，花费 $0.00`);
     }
   });
   it('summarizes paused notifications for /status', async () => {
     const h = await harness();
     await h.repository.updateSettings(scope, { expectedRevision: 1, notificationsPaused: true }, 'owner');
-    expect(await h.participation.describe(scope)).toBe('**群参与**：Tag 按需参与 · 主动通知已暂停');
+    expect(await h.participation.describe(scope)).toBe('**参与**：按需；今天判定 0 次（规则 0 / 模型 0），回复 0 次，判定耗时中位 —，花费 $0.00 · 主动通知已暂停');
   });
   it('acknowledges only after deciding to reply, before generation, and clears the exact reaction after sending', async () => {
     const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
@@ -949,7 +954,10 @@ describe('early participation admission and on-demand team reads', () => {
       await h.participation.handle(message(id, text), config, { explicit: false, botOpenId: 'ou_bot' });
       await h.participation.flush(scope);
     }
-    expect(h.decide).toHaveBeenCalledTimes(2);
+    // 「谢谢」由规则层判为不接，不调模型；另一条普通消息照常交给模型，它请求的检索也被忽略。
+    expect(h.decide).toHaveBeenCalledOnce();
+    expect((await h.repository.listDecisions(scope)).map(item => (item.inputSnapshot as { decider?: { kind: string; rule?: string } }).decider)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'rule', rule: 'short_thanks' }), expect.objectContaining({ kind: 'model' })]));
     expect(listChats).not.toHaveBeenCalled(); expect(remote).not.toHaveBeenCalled();
     expect(observations.mock.calls).toEqual([[scope, { limit: 1000 }]]);
     expect(followups).not.toHaveBeenCalled();
@@ -963,4 +971,186 @@ it('explains an automatic task cap reached between classification and response a
   await h.participation.handle(message(), config, { explicit: false, botOpenId: 'ou_bot' });
   await h.participation.flush(scope);
   expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ text: '自动任务月度次数已达上限' }));
+});
+
+
+describe('rule layer, participation levels and corrections (pilot sentences)', () => {
+  const members = (humans: number, bots = 1) => vi.fn(async () => ({ items: [
+    ...Array.from({ length: humans }, (_, i) => ({ memberId: `ou_${i}`, memberType: 'user' as const, name: `用户${i}` })),
+    ...Array.from({ length: bots }, (_, i) => ({ memberId: `cli_${i}`, memberType: 'bot' as const, name: `机器人${i}` }))], hasMore: false, securityLimited: false }));
+  const deciderOf = (decision: { inputSnapshot: Record<string, unknown> }) =>
+    (decision.inputSnapshot as { decider?: { kind: string; rule?: string; facts?: Record<string, unknown>; durationMs?: number; trigger?: Record<string, unknown> } }).decider;
+  const atBot = (id: string, text: string) => message(id, `@_user_1 ${text}`, { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }] });
+  const confirmIdOf = async (h: Awaited<ReturnType<typeof harness>>) => (await h.repository.listActions(scope)).find(item => item.kind === 'confirm.participation_level')!.id;
+
+  it('试点原句：单人群里没 @ 的「总结下这个文档要做的事情 <链接>」按一次 @ 交给执行，不调模型', async () => {
+    const h = await harness('selective');
+    Object.assign(h.service, { listChatMembers: members(1) });
+    h.participation.setDispatcher(scope.appId, (event, current) => h.coordinator.adopt(event, current));
+    await h.coordinator.handle(message('om_doc', '总结下这个文档要做的事情 https://bytedance.larkoffice.com/docx/AbCdEf123'), config);
+    await h.participation.flush(scope);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    expect(h.decide).not.toHaveBeenCalled();
+    const [decision] = await h.repository.listDecisions(scope);
+    expect(decision).toMatchObject({ action: 'act', status: 'sent', reason: '群里只有你一个人，消息也没有 @ 别人' });
+    expect(deciderOf(decision!)).toMatchObject({ kind: 'rule', rule: 'single_human', facts: { level: 'selective', humans: 1, bots: 1 }, trigger: { messageId: 'om_doc', senderId: 'ou_a' } });
+    expect((await h.repository.listActions(scope)).find(item => item.kind === 'participation.addressed')).toMatchObject({ status: 'succeeded', payload: { messageId: 'om_doc' } });
+    expect(h.service.replyText).not.toHaveBeenCalled();
+    expect(await h.participation.describe(scope)).toContain('今天判定 1 次（规则 1 / 模型 0），回复 1 次');
+  });
+
+  it('试点原句：机器人发完总结 28 秒后「关掉这个总结任务」，算在叫它', async () => {
+    const h = await harness('selective');
+    Object.assign(h.service, { listChatMembers: members(2) });
+    await h.repository.createMandate({ scope, goal: '每天 18 点总结群里的讨论', requesterId: 'ou_a', scheduleDefinitionId: 'schedule_summary', mode: 'agent', prompt: '总结今天的讨论' });
+    h.service.listChatMessages.mockImplementation(async () => ({ items: [{ messageId: 'om_summary', chatId: scope.chatId, messageType: 'text', rawContent: '{"text":"今日讨论总结：……"}',
+      createTime: String(Number(message().createTime) - 28_000), sender: { id: scope.appId, type: 'app' }, mentions: [], deleted: false, updated: false }], hasMore: false }));
+    h.participation.setDispatcher(scope.appId, (event, current) => h.coordinator.adopt(event, current));
+    await h.coordinator.handle(message('om_close', '关掉这个总结任务'), config);
+    await h.participation.flush(scope);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    expect(h.decide).not.toHaveBeenCalled();
+    const [decision] = await h.repository.listDecisions(scope);
+    expect(decision).toMatchObject({ action: 'act', status: 'sent' });
+    expect(deciderOf(decision!)).toMatchObject({ kind: 'rule', rule: 'owned_item', facts: { lastSelfAgoMs: 28_000, humanBetween: false, humans: 2 } });
+  });
+
+  it('引用回复机器人的消息算在叫它；引用别人的消息不接', async () => {
+    const h = await harness('selective');
+    Object.assign(h.service, { getMessage: vi.fn(async (id: string) => ({ messageId: id, chatId: scope.chatId, messageType: 'text', createTime: '1789707500000', rawContent: '{}',
+      sender: id === 'om_bot_reply' ? { id: scope.appId, type: 'app' } : { id: 'ou_b', type: 'user' }, mentions: [], deleted: false, updated: false })) });
+    h.participation.setDispatcher(scope.appId, (event, current) => h.coordinator.adopt(event, current));
+    await h.coordinator.handle(message('om_quote', '这个结论的依据是什么', { parentId: 'om_bot_reply', rootId: 'om_bot_reply' }), config);
+    await h.participation.flush(scope);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    await h.coordinator.handle(message('om_peer', '我同意', { parentId: 'om_b_said', rootId: 'om_b_said' }), config);
+    await h.participation.flush(scope);
+    expect(h.decide).not.toHaveBeenCalled();
+    expect(h.runtime.send).toHaveBeenCalledOnce();
+    expect((await h.repository.listDecisions(scope)).map(item => [item.action, deciderOf(item)?.rule, deciderOf(item)?.facts?.parent]))
+      .toEqual(expect.arrayContaining([['act', 'reply_to_self', 'self'], ['silent', 'reply_to_other', 'other']]));
+  });
+
+  it('积极档：没 @ 别人的真人消息都接，@ 别人和致谢不接', async () => {
+    const h = await harness('eager');
+    Object.assign(h.service, { listChatMembers: members(3) });
+    h.participation.setDispatcher(scope.appId, (event, current) => h.coordinator.adopt(event, current));
+    await h.coordinator.handle(message('om_plain', '今天下午三点发版'), config); await h.participation.flush(scope);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    await h.coordinator.handle(message('om_other', '@_user_1 你看下', { mentions: [{ key: '@_user_1', name: '小王', openId: 'ou_wang' }] }), config); await h.participation.flush(scope);
+    await h.coordinator.handle(message('om_thanks', '谢谢'), config); await h.participation.flush(scope);
+    expect(h.decide).not.toHaveBeenCalled();
+    expect(h.runtime.send).toHaveBeenCalledOnce();
+    expect((await h.repository.listDecisions(scope)).map(item => [item.action, deciderOf(item)?.rule]))
+      .toEqual(expect.arrayContaining([['act', 'eager_default'], ['silent', 'mentions_other'], ['silent', 'short_thanks']]));
+    expect(await h.participation.level(scope)).toBe('eager');
+  });
+
+  it('规则拿不准的交给模型：只给精简材料和群成员数，记下判定耗时', async () => {
+    const h = await harness('selective');
+    Object.assign(h.service, { listChatMembers: members(2) });
+    await h.coordinator.handle(message('om_q', '这个报错大家见过吗'), config); await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledOnce();
+    expect(h.decide.mock.calls[0]![3]).toEqual({ humans: 2, bots: 1 });
+    const trigger = h.decide.mock.calls[0]![1].observations.find(item => item.messageId === 'om_q')!;
+    expect(h.decide.mock.calls[0]![2]).toBe(trigger.id);
+    const [decision] = await h.repository.listDecisions(scope);
+    expect(deciderOf(decision!)).toMatchObject({ kind: 'model', facts: { level: 'selective', humans: 2 }, trigger: { messageId: 'om_q', senderId: 'ou_a' } });
+    expect(typeof deciderOf(decision!)!.durationMs).toBe('number');
+  });
+
+  it('@ 它说「积极点」：发确认卡，有权限的人确认后才改，同一张卡只生效一次', async () => {
+    const applyLevel = vi.fn(async () => {});
+    const h = await harness('selective', { applyLevel, canOperate: async (_scope, operator, requester) => operator === requester || operator === 'ou_admin' });
+    await h.coordinator.initializeWorkflows(config);
+    await h.coordinator.handle(atBot('om_level', '积极点'), config);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
+    expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_level', statusLabel: '待确认',
+      elements: expect.arrayContaining([expect.objectContaining({ content: expect.stringContaining('把本群改成「积极」') })]) }));
+    const value = { dutydeck_confirm: 'confirm', confirm_id: await confirmIdOf(h), chat_id: scope.chatId };
+    expect(await h.coordinator.handleAction(value, 'ou_b', { messageId: 'om_card', chatId: scope.chatId })).toMatchObject({ type: 'warning' });
+    expect(applyLevel).not.toHaveBeenCalled();
+    expect(await h.coordinator.handleAction(value, 'ou_a', { messageId: 'om_card', chatId: scope.chatId })).toMatchObject({ type: 'success', content: expect.stringContaining('积极') });
+    expect(applyLevel).toHaveBeenCalledExactlyOnceWith(scope, 'eager', 'ou_a');
+    expect(h.service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_card', statusLabel: '已确认' }));
+    expect(await h.coordinator.handleAction(value, 'ou_admin', { messageId: 'om_card', chatId: scope.chatId })).toMatchObject({ type: 'info' });
+    expect(applyLevel).toHaveBeenCalledOnce();
+    // 改档短语由群参与直接回应，不建任务。
+    expect(h.runtime.send).not.toHaveBeenCalled();
+  });
+
+  it('已经是这一档时直接说明；取消只能由发起人或有权限的人点', async () => {
+    const applyLevel = vi.fn(async () => {});
+    const h = await harness('selective', { applyLevel, canOperate: async (_scope, operator, requester) => operator === requester });
+    await h.coordinator.initializeWorkflows(config);
+    await h.coordinator.handle(atBot('om_same', '按需'), config);
+    await vi.waitFor(() => expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_same', text: expect.stringContaining('本群已经是「按需」') })));
+    await h.coordinator.handle(atBot('om_quiet', '只在@时回'), config);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
+    const cancel = { dutydeck_confirm: 'cancel', confirm_id: await confirmIdOf(h), chat_id: scope.chatId };
+    expect(await h.coordinator.handleAction(cancel, 'ou_b', { messageId: 'om_card', chatId: scope.chatId })).toMatchObject({ type: 'warning' });
+    expect(await h.coordinator.handleAction(cancel, 'ou_a', { messageId: 'om_card', chatId: scope.chatId })).toEqual({ type: 'info', content: '已取消，没有改动。' });
+    expect(h.service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_card', statusLabel: '已取消' }));
+    expect(applyLevel).not.toHaveBeenCalled();
+    expect(h.runtime.send).not.toHaveBeenCalled();
+  });
+
+  it('没接上权限校验时，改档短语按普通 @ 交给 Agent', async () => {
+    const h = await harness('selective');
+    await h.coordinator.handle(atBot('om_level', '积极点'), config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    expect(h.service.reply).not.toHaveBeenCalledWith(expect.objectContaining({ statusLabel: '待确认' }));
+  });
+
+  it('判为不接后同一个人 @ 它问「刚才为什么没回」：不调模型直接说明原因，并记一笔漏接', async () => {
+    const h = await harness('selective', { canOperate: async () => true });
+    Object.assign(h.service, { listChatMembers: members(2) });
+    h.decide.mockImplementation(async () => ({ action: 'silent', reason: '泛问，没有指明问谁', evidenceIds: [], updates: [] }));
+    await h.coordinator.handle(message('om_q', '这个报错大家见过吗'), config); await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledOnce();
+    await h.coordinator.handle(atBot('om_why', '刚才为什么没回'), config);
+    await vi.waitFor(() => expect(h.service.replyText).toHaveBeenCalledOnce());
+    expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_why',
+      text: expect.stringContaining('那条「这个报错大家见过吗」我没接：我判断不是在叫我（泛问，没有指明问谁）') }));
+    expect(h.decide).toHaveBeenCalledOnce();
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    const silentDecision = (await h.repository.listDecisions(scope)).find(item => item.action === 'silent')!;
+    expect(await h.repository.listFeedback(scope, silentDecision.id)).toEqual([expect.objectContaining({ actorId: 'ou_a', expectedAction: 'act', correction: expect.stringMatching(/^\[漏接\] /) })]);
+  });
+
+  it('规则判的不接（@ 了别人）之后再 @ 它不算漏接；为什么没回照实说明', async () => {
+    const h = await harness('selective', { canOperate: async () => true });
+    await h.coordinator.handle(message('om_other', '@_user_2 你看下', { mentions: [{ key: '@_user_2', name: '小王', openId: 'ou_wang' }] }), config); await h.participation.flush(scope);
+    await h.coordinator.handle(atBot('om_why', '为什么不回我'), config);
+    await vi.waitFor(() => expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_why', text: expect.stringContaining('我没接：那条消息 @ 了别人') })));
+    const [decision] = await h.repository.listDecisions(scope);
+    expect(await h.repository.listFeedback(scope, decision!.id)).toEqual([]);
+    expect(h.decide).not.toHaveBeenCalled();
+  });
+
+  it('主动回复后被回「没问你」：记一笔误插，不再交给模型或 Agent', async () => {
+    const h = await harness('selective');
+    Object.assign(h.service, { listChatMembers: members(2) });
+    h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    await h.coordinator.handle(message('om_q', '这个报错大家见过吗'), config); await h.participation.flush(scope);
+    expect(h.service.replyText).toHaveBeenCalledOnce();
+    await h.coordinator.handle(message('om_no', '没问你', { parentId: 'om_sent', rootId: 'om_q' }), config); await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledOnce();
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    const replied = (await h.repository.listDecisions(scope)).find(item => item.action === 'reply')!;
+    expect(await h.repository.listFeedback(scope, replied.id)).toEqual([expect.objectContaining({ actorId: 'ou_a', expectedAction: 'silent', correction: '[误插] 主动回复后被回「没问你」。' })]);
+  });
+
+  it('/status 的参与行：档位、今天的规则与模型判定次数、回复次数、耗时中位数和花费', async () => {
+    const readParticipationUsage = vi.fn(async () => ({ entries: 2, costUsd: 0, unknown: 2 }));
+    const h = await harness('selective', { readParticipationUsage });
+    Object.assign(h.service, { listChatMembers: members(2) });
+    h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    await h.coordinator.handle(message('om_q', '这个报错大家见过吗'), config); await h.participation.flush(scope);
+    await h.coordinator.handle(message('om_thanks', '谢谢'), config); await h.participation.flush(scope);
+    expect(await h.participation.describe(scope)).toMatch(/^\*\*参与\*\*：按需；今天判定 2 次（规则 1 \/ 模型 1），回复 1 次，判定耗时中位 \d+\.\d 秒，花费 未知$/);
+    expect(readParticipationUsage).toHaveBeenCalledWith(scope, expect.any(String));
+    readParticipationUsage.mockResolvedValue({ entries: 2, costUsd: 0.0123, unknown: 0 });
+    expect(await h.participation.describe(scope)).toContain('花费 $0.01');
+  });
 });

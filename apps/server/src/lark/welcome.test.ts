@@ -235,6 +235,25 @@ describe('欢迎卡使用生效群参与模式', () => {
     expect(disabled).toEqual(original);
   });
 
+  it('积极档说明不用 @，并告诉用户怎么调整接话方式', () => {
+    const card = buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'topic', participation: 'eager' } });
+    expect(card.markdown).toContain('本群参与强度：**积极**');
+    expect(card.markdown).toContain('不用 @我');
+    expect(card.markdown).toContain('「积极点」「按需」「话题里不用@」或「只在@时回」');
+    expect(card.markdown).not.toContain('每条任务消息和续聊都需要');
+    expect(card.markdown).not.toContain('OK');
+  });
+
+  it.each([['always', '只在 @ 时'], ['topic', '话题内免 @'], ['never', '积极'], ['ambient', '积极']] as const)('%s 写明当前档位「%s」', (mentionPolicy, label) => {
+    expect(buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy } }).markdown).toContain(`本群参与强度：**${label}**`);
+  });
+
+  it('按需档在话题内免 @ 时说明话题内可直接回复', () => {
+    expect(buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'topic', participation: 'selective' } }).markdown)
+      .toContain('本群参与强度：**按需**（Tag 按需参与）。没 @我 的普通消息会先判断是否需要回复');
+    expect(buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'topic', participation: 'selective' } }).markdown).toContain('原任务话题内续聊可直接回复');
+  });
+
   it('私聊不受群参与模式影响', () => {
     expect(buildWelcomeCardContent({ chatType: 'p2p', routing: { participation: 'selective' } }))
       .toEqual(buildWelcomeCardContent({ chatType: 'p2p' }));

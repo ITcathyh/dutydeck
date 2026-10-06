@@ -6,8 +6,35 @@ export const collaborationScopeSchema = z.object({
 }).strict();
 export type CollaborationScope = z.infer<typeof collaborationScopeSchema>;
 
-export const collaborationParticipationModes = ['off', 'observe', 'selective'] as const;
+export const collaborationParticipationModes = ['off', 'observe', 'selective', 'eager'] as const;
 export type CollaborationParticipationMode = (typeof collaborationParticipationModes)[number];
+
+/**
+ * 参与强度：群里不 @ 时机器人什么时候接话。它由唤醒方式（mentionPolicy）和群参与模式两个底层字段合成，
+ * 只决定接不接话，不改变任何权限边界。
+ */
+export const participationLevels = ['mention', 'topic', 'selective', 'eager'] as const;
+export type ParticipationLevel = (typeof participationLevels)[number];
+export const participationLevelLabels: Record<ParticipationLevel, string> = { mention: '只在 @ 时', topic: '话题内免 @', selective: '按需', eager: '积极' };
+export const participationLevelBehaviors: Record<ParticipationLevel, string> = {
+  mention: '只处理 @ 我的消息',
+  topic: '新任务要 @ 我，我接手的话题里直接回复就行',
+  selective: '没 @ 我的消息先判断是不是在叫我，是才接',
+  eager: '除了明显是对别人说的、表情和致谢，群里真人的消息我都接，适合单人群'
+};
+type LevelMentionPolicy = 'always' | 'topic' | 'never' | 'ambient';
+/** 旧配置自动落到最接近的档位：never / ambient 本来就不需要 @，按「积极」说明。 */
+export function participationLevelOf(mentionPolicy: LevelMentionPolicy | undefined, participation: CollaborationParticipationMode): ParticipationLevel {
+  if (participation === 'eager' || participation === 'selective') return participation;
+  if (mentionPolicy === 'never' || mentionPolicy === 'ambient') return 'eager';
+  return mentionPolicy === 'topic' ? 'topic' : 'mention';
+}
+/** 档位写回的两个底层字段。 */
+export function participationLevelFields(level: ParticipationLevel): { mentionPolicy: 'always' | 'topic'; participation: CollaborationParticipationMode } {
+  if (level === 'mention') return { mentionPolicy: 'always', participation: 'off' };
+  if (level === 'topic') return { mentionPolicy: 'topic', participation: 'off' };
+  return { mentionPolicy: 'topic', participation: level };
+}
 
 export const collaborationSettingsSchema = z.object({
   scope: collaborationScopeSchema,
@@ -368,13 +395,36 @@ export const USAGE_CAP_GATE = 'usage_cap';
 /** 不代表一次模型判定的记录标记，统计判定用量时必须全部排除。 */
 const nonDecisionGates = new Set<string>([DECISION_BUDGET_GATE, BOT_TURN_RECORD, BOT_LOOP_GATE, USAGE_CAP_GATE]);
 const gateOf = (item: Pick<CollaborationDecision, 'inputSnapshot'>) => String((item.inputSnapshot as { gate?: unknown }).gate ?? '');
+/** 判定记录是否是闸门留痕（预算、成本上限、机器人回合），不是对某条消息的判断。 */
+export const isDecisionGate = (item: Pick<CollaborationDecision, 'inputSnapshot'>): boolean => nonDecisionGates.has(gateOf(item));
+
+/**
+ * 判定来源，存在 inputSnapshot.decider 里；inputSnapshot 其余部分仍是可回放的判定输入。
+ * rule 是规则层直接给出的结论（没调模型），model 是调了模型的判定，durationMs 是那次模型调用的耗时。
+ * trigger 记下被判定的那条人类消息，漏接标记和「为什么没回」据此找回原消息；facts 是规则用到的外部事实（如群成员数），回放时照用。
+ */
+export interface CollaborationDeciderMeta {
+  kind: 'rule' | 'model';
+  rule?: string;
+  durationMs?: number;
+  trigger?: { id: string; messageId?: string; senderId?: string; threadId?: string; text?: string };
+  facts?: Record<string, string | number | boolean>;
+}
+export const DECIDER_META_KEY = 'decider';
+export function deciderMetaOf(item: Pick<CollaborationDecision, 'inputSnapshot'>): CollaborationDeciderMeta | undefined {
+  const meta = (item.inputSnapshot as Record<string, unknown>)[DECIDER_META_KEY];
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return undefined;
+  const kind = (meta as { kind?: unknown }).kind;
+  return kind === 'rule' || kind === 'model' ? meta as CollaborationDeciderMeta : undefined;
+}
 
 /**
  * 统计窗口内真正跑过模型的判定条数。
  * 被闸门挡下的记录必须排除：否则一旦超限，后续每条消息都会再记一条，用量永远降不回来。
+ * 规则层的结论没有调模型，同样不占判定预算。
  */
 export function countDecisionUsage(decisions: Array<Pick<CollaborationDecision, 'createdAt' | 'inputSnapshot'>>, sinceMs: number): number {
-  return decisions.filter(item => Date.parse(item.createdAt) >= sinceMs && !nonDecisionGates.has(gateOf(item))).length;
+  return decisions.filter(item => Date.parse(item.createdAt) >= sinceMs && !nonDecisionGates.has(gateOf(item)) && deciderMetaOf(item)?.kind !== 'rule').length;
 }
 
 /**
@@ -429,6 +479,18 @@ export const collaborationFeedbackSchema = z.object({
   createdAt: z.string().datetime()
 }).strict();
 export type CollaborationFeedback = z.infer<typeof collaborationFeedbackSchema>;
+
+/**
+ * 自动记录的纠正标签写在 correction 开头：漏接（判沉默后很快又被 @）期望回应，误插（主动回复被嫌弃）期望沉默。
+ * 回放评测按标签判：漏接只要求不再沉默，不区分 reply 与 act。
+ */
+export const MISSED_FEEDBACK_PREFIX = '[漏接]';
+export const INTRUSIVE_FEEDBACK_PREFIX = '[误插]';
+export function feedbackLabelOf(feedback: Pick<CollaborationFeedback, 'correction'>): 'missed' | 'intrusive' | undefined {
+  if (feedback.correction.startsWith(MISSED_FEEDBACK_PREFIX)) return 'missed';
+  if (feedback.correction.startsWith(INTRUSIVE_FEEDBACK_PREFIX)) return 'intrusive';
+  return undefined;
+}
 
 export const createFeedbackInputSchema = z.object({
   id: z.string().min(1).max(128).optional(),

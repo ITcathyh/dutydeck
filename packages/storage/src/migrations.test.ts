@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { AgentConfig, MemoryJob } from '@dutydeck/shared'
 import { createRepositories, PRE_V10_BACKUP_SUFFIX } from './index.js'
-import { migrations, runMigrations, withMigrationTransaction } from './migrations.js'
+import { allowEagerParticipation, migrations, runMigrations, withMigrationTransaction } from './migrations.js'
 import { createCiWebhookRepository } from './ci-webhook.js'
 import { createUsageLedgerRepository } from './usage-ledger.js'
 import { createMemoryJobRepository } from './memory-jobs.js'
@@ -58,7 +58,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -653,6 +653,64 @@ describe('storage migrations', () => {
     expect(migrated.prepare('SELECT participation_inherited FROM collaboration_settings').all())
       .toEqual([{ participation_inherited: 0 }, { participation_inherited: 0 }, { participation_inherited: 0 }])
     migrated.close()
+  })
+
+  it('v35 让群参与接受「积极」档，重建表时原样保留已有设置和继承标记', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'collaboration-v35-'))
+    temporaryDirectories.push(directory)
+    const path = join(directory, 'v34.sqlite')
+    const db = new Database(path)
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const at = '2026-10-01T00:00:00.000Z'
+    withMigrationTransaction(db, () => {
+      for (const migration of migrations.filter(item => item.version <= 34)) { migration.up(db); db.prepare('INSERT INTO schema_migrations VALUES (?, ?)').run(migration.version, at) }
+    })
+    const insertSql = `INSERT INTO collaboration_settings (app_id, chat_id, revision, participation, participation_inherited, instructions, notifications_paused, max_proactive_per_hour, max_decisions_per_hour, retention_days, policy_version, updated_at) VALUES ('cli_v34', ?, 2, ?, ?, '旧指令', 1, 3, 40, 30, 'v1', ?)`
+    const insert = db.prepare(insertSql)
+    insert.run('oc_off', 'off', 1, at); insert.run('oc_observe', 'observe', 0, at); insert.run('oc_selective', 'selective', 0, at)
+    expect(() => insert.run('oc_eager', 'eager', 0, at)).toThrow(/CHECK/)
+    const before = db.prepare('SELECT * FROM collaboration_settings ORDER BY chat_id').all()
+    runMigrations(db)
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+    expect(db.prepare('SELECT * FROM collaboration_settings ORDER BY chat_id').all()).toEqual(before)
+    db.prepare(insertSql).run('oc_eager', 'eager', 0, at)
+    expect(() => db.prepare(insertSql).run('oc_bad', 'loud', 0, at)).toThrow(/CHECK/)
+    runMigrations(db)
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+    db.close()
+    const repos = createRepositories(path)
+    try {
+      expect(await repos.collaboration.getSettings({ appId: 'cli_v34', chatId: 'oc_eager' })).toMatchObject({ participation: 'eager', inheritParticipation: false })
+      expect(await repos.collaboration.getSettings({ appId: 'cli_v34', chatId: 'oc_off' })).toMatchObject({ participation: 'off', inheritParticipation: true, maxDecisionsPerHour: 40, notificationsPaused: true })
+    } finally { repos.close() }
+  })
+
+  it('v35 能升级线上库的真实表结构（后加的列追加在建表语句末尾）', () => {
+    const db = new Database(':memory:')
+    // 线上库 collaboration_settings 的建表语句原文：v22、v24 用 ALTER TABLE 追加了两列。
+    db.exec(`CREATE TABLE collaboration_settings (
+      app_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+      participation TEXT NOT NULL CHECK (participation IN ('off', 'observe', 'selective')),
+      instructions TEXT NOT NULL CHECK (length(instructions) <= 8000),
+      notifications_paused INTEGER NOT NULL CHECK (notifications_paused IN (0, 1)),
+      max_proactive_per_hour INTEGER NOT NULL CHECK (max_proactive_per_hour >= 0 AND max_proactive_per_hour <= 60),
+      retention_days INTEGER NOT NULL CHECK (retention_days >= 1 AND retention_days <= 365),
+      policy_version TEXT NOT NULL CHECK (length(policy_version) <= 64),
+      updated_at TEXT NOT NULL, max_decisions_per_hour INTEGER NOT NULL DEFAULT 60 CHECK (max_decisions_per_hour >= 0 AND max_decisions_per_hour <= 500), participation_inherited INTEGER NOT NULL DEFAULT 0 CHECK (participation_inherited IN (0, 1)),
+      PRIMARY KEY (app_id, chat_id)
+    )`)
+    db.prepare(`INSERT INTO collaboration_settings VALUES ('cli_live', 'oc_live', 4, 'selective', '指令', 0, 6, 30, 'v1', '2026-09-25T00:00:00.000Z', 20, 1)`).run()
+    const before = db.prepare('SELECT * FROM collaboration_settings').all()
+    allowEagerParticipation(db)
+    expect(db.prepare('SELECT * FROM collaboration_settings').all()).toEqual(before)
+    expect(columnNames(db, 'collaboration_settings')).toEqual(['app_id', 'chat_id', 'revision', 'participation', 'instructions', 'notifications_paused', 'max_proactive_per_hour', 'retention_days', 'policy_version', 'updated_at', 'max_decisions_per_hour', 'participation_inherited'])
+    db.prepare(`UPDATE collaboration_settings SET participation = 'eager' WHERE chat_id = 'oc_live'`).run()
+    expect(() => db.prepare(`INSERT INTO collaboration_settings VALUES ('cli_live', 'oc_dup', 1, 'eager', '', 0, 6, 30, 'v1', 'x', 60, 0)`).run()).not.toThrow()
+    expect(() => db.prepare(`INSERT INTO collaboration_settings VALUES ('cli_live', 'oc_dup', 1, 'eager', '', 0, 6, 30, 'v1', 'x', 60, 0)`).run()).toThrow(/UNIQUE|PRIMARY/)
+    allowEagerParticipation(db)
+    db.close()
   })
 
   it('v23 把旧库里 inherit-only 的群呈现覆盖升级成逐字段结构，并补齐两项 Bot 呈现默认', () => {

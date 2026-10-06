@@ -112,7 +112,7 @@ export type LarkBotConfig = {
   idleCompactHours?: number;
   groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
   mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
-  defaultGroupParticipation?: 'off' | 'observe' | 'selective';
+  defaultGroupParticipation?: 'off' | 'observe' | 'selective' | 'eager';
 };
 export type LarkConfig = { configured: boolean; bots: LarkBotConfig[]; listeningDisabled: boolean };
 
@@ -429,7 +429,7 @@ export const api = {
     idleCompactHours?: number;
     groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
     mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
-    defaultGroupParticipation?: 'off' | 'observe' | 'selective';
+    defaultGroupParticipation?: 'off' | 'observe' | 'selective' | 'eager';
   }) => json<LarkConfig>('/api/lark/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   deleteLarkConfig: (appId: string) => json<LarkConfig>(`/api/lark/config/${encodeURIComponent(appId)}`, { method: 'DELETE' }),
   managementGroups: () => json<{ groups: ManagedGroup[] }>('/api/lark/management/groups', { cache: 'no-store' }),
@@ -486,7 +486,7 @@ export type CollaborationScope = {
   chatId: string;
 };
 
-export type CollaborationParticipation = 'off' | 'observe' | 'selective';
+export type CollaborationParticipation = 'off' | 'observe' | 'selective' | 'eager';
 
 export type CollaborationSettings = {
   scope: CollaborationScope;

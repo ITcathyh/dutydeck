@@ -560,8 +560,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const pendingAskContinuation = Boolean(!recovering && !explicit && await this.continuesPendingAsk(event, config));
     const requestContinuation = Boolean(this.workflowOptions.participation && !recovering && !explicit && !pendingAskContinuation && await this.continuesOwnRequest(event, config));
     const addressed = explicit || requestContinuation;
-    const participation = await this.workflowOptions.participation?.handle(event, config, { explicit: addressed || pendingAskContinuation || commandInteraction, botOpenId: this.botOpenId });
+    // 话题内免 @ 续聊也算在叫它，可以直接改档或问「为什么没回」；是否接手仍按下方原规则。
+    const topicContinuation = Boolean(continuedTopic) && !botSender;
+    const participation = await this.workflowOptions.participation?.handle(event, config, { explicit: addressed || pendingAskContinuation || commandInteraction, botOpenId: this.botOpenId,
+      addressed: (addressed || topicContinuation) && !recognizedCommand && !recovering });
     if (this.handledMessages.has(event.messageId)) return;
+    // 改档短语、「为什么没回」已由群参与直接回应；「没问你」这类纠正只记录，不当成新请求。
+    if (participation?.handled) return;
     // 定向机器人交接仍走下方循环门禁和访问授权，不作为人类显式指令或主动判定。
     if (participation?.enabled && !addressed && !pendingAskContinuation && !commandInteraction && !(botSender && legacyWake)) return;
     const shouldWake = legacyWake || adopted || pendingAskContinuation || Boolean(participation?.enabled && requestContinuation);
@@ -1688,6 +1693,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
 
   async handleAction(value: unknown, operatorOpenId?: string, context?: { messageId?: string; chatId?: string; actionTag?: string; option?: string }) {
     const workflow = value as Record<string, unknown> | null;
+    // 群级变更确认卡（如参与强度）：改什么、谁发起都以存档的确认单为准，谁能确认由各种类自己校验。
+    if (workflow && typeof workflow === 'object' && 'dutydeck_confirm' in workflow) {
+      const participation = this.workflowOptions.participation;
+      const result = participation && this.reconcileConfig ? await participation.confirmations.handle(this.reconcileConfig.appId, value, operatorOpenId, context) : undefined;
+      return result ?? { type: 'warning', content: '这张确认卡已失效。' };
+    }
     if (workflow && workflow.dutydeck_export_trace === 'download') {
       if (!operatorOpenId || !context?.messageId || !context.chatId || !this.reconcileConfig || !this.cardMappings || !this.runtime.getEvents) {
         return { type: 'error', content: '记录入口已失效，请在原任务卡上操作。' };

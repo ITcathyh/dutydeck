@@ -1,14 +1,16 @@
 import { CollaborationDelivery } from './collaboration-delivery.js';
 import { createHash } from 'node:crypto';
-import { canonicalExecutionJson, installationOwnerTaskActor, RuntimeError, type CollaborationScope, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
+import { canonicalExecutionJson, installationOwnerTaskActor, participationLevelFields, participationLevelOf, RuntimeError, type CollaborationScope, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { CollaborationService, type CollaborationAuthorization } from './collaboration-service.js';
 import { ScheduleExecutor } from './schedule-executor.js';
 import { CollaborationBackground } from './collaboration-background.js';
 import { CollaborationExtensions } from './collaboration-extensions.js';
 import { CollaborationEvaluation } from './collaboration-evaluation.js';
-import { LarkGroupParticipation } from './lark/group-participation.js';
+import { LarkGroupParticipation, memberFacts } from './lark/group-participation.js';
 import { ReadonlyParticipationDecider } from './lark/readonly-decider.js';
+import { evaluateParticipationRules, ownedItems, ruleContextOf, type RuleFacts } from './lark/participation-rules.js';
+import { participationUsage } from './usage-ledger.js';
 import { LarkTeamContextReader } from './lark/team-context.js';
 import { larkExecutionConfirmed, readLarkConfig, type StoredLarkConfig } from './lark/config.js';
 import type { LarkGroupManager } from './lark/group-management.js';
@@ -98,6 +100,20 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     repository: repos.collaboration, decider, readConfig, serviceFor: client, readMemory: options.readMemory, usageRefusal: options.usageRefusal, log: options.log,
     readTeamContext: (scope, query) => teamContext.read(scope, query),
     authorizeTeamContext: (scope, context) => teamContext.authorize(scope, context),
+    // 发起人本人能对机器人说话就能处理自己的请求；替别人确认要本群操作员或管理员（run.interrupt 的现有授权）。
+    canOperate: async (scope, operator, requester) => (await groups.authorize(scope.appId, scope.chatId, operator, 'run.interrupt', undefined, { taskRequesterOpenId: requester }).catch(() => undefined))?.allowed === true,
+    // 档位写回两个底层字段：唤醒方式写群级覆盖，参与模式写本群设置。都写成本群自己的值，Bot 默认以后再变也不影响这个群。
+    applyLevel: async (scope, level, actorId) => {
+      const { binding } = await known(scope);
+      const fields = participationLevelFields(level);
+      const override = binding.routingOverride.mentionPolicy;
+      if (override.mode !== 'set' || override.value !== fields.mentionPolicy) {
+        await groups.save(scope.appId, scope.chatId, { expectedRevision: binding.revision, patch: { routingOverride: { ...binding.routingOverride, mentionPolicy: { mode: 'set', value: fields.mentionPolicy } } } });
+      }
+      const settings = await repos.collaboration.getSettings(scope);
+      await repos.collaboration.updateSettings(scope, { expectedRevision: settings.revision, participation: fields.participation }, actorId);
+    },
+    readParticipationUsage: (scope, since) => participationUsage(stored.usage, scope, since),
     authorize: async (scope, actorId, action, followup) => {
       if (action === 'observe' || action === 'deliver') return scopeGrant(scope, action);
       if (!actorId || !followup || !await authorize(scope, actorId, 'write')) return false;
@@ -189,7 +205,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     return { ...patch, policyVersion: version };
   };
   const evaluation = new CollaborationEvaluation({ repository: repos.collaboration,
-    evaluate: async (snapshot, version) => {
+    evaluate: async (snapshot, version, meta) => {
       const config = await readConfig(snapshot.scope.appId, snapshot.scope.chatId);
       if (!config) throw new RuntimeError('COLLABORATION_REPLAY_UNAVAILABLE', '原 Agent 配置已不可用。', 409);
       if (snapshot.teamContext && !await teamContext.authorize(snapshot.scope, snapshot.teamContext)) throw new RuntimeError('COLLABORATION_CONTEXT_REVOKED', '原跨群材料当前已无读取权限。', 403);
@@ -199,7 +215,14 @@ export function createCollaborationIntegration(options: CollaborationIntegration
         if (!saved) throw new RuntimeError('COLLABORATION_POLICY_MISSING', '没有此版本的完整策略快照。', 409);
         instructions = (JSON.parse(saved) as { instructions: string }).instructions;
       }
-      return decider.resolve(config, { ...snapshot, settings: { ...snapshot.settings, policyVersion: version, instructions } });
+      // 与实时判定同一顺序：规则层先判（用当时查到的事实），拿不准才交给模型。旧记录没有事实时只跑不依赖外部事实的规则。
+      const trigger = meta?.trigger && snapshot.observations.find(item => item.id === meta.trigger!.id);
+      if (trigger) {
+        const facts = { level: participationLevelOf(config.mentionPolicy, snapshot.settings.participation), ...meta?.facts } as RuleFacts;
+        const verdict = evaluateParticipationRules(ruleContextOf(trigger, ownedItems(snapshot.mandates, snapshot.followups), [config.name, config.displayName].filter((name): name is string => Boolean(name)), facts));
+        if (verdict) return { action: verdict.action === 'addressed' ? 'act' as const : 'silent' as const, reason: `规则：${verdict.reason}`, evidenceIds: [trigger.id] };
+      }
+      return decider.resolve(config, { ...snapshot, settings: { ...snapshot.settings, policyVersion: version, instructions } }, memberFacts((meta?.facts ?? {}) as Partial<RuleFacts>), trigger?.id);
     }
   });
   return { service, scheduler, background, participation, extensions, evaluation, authorize, prepareSettings, riskPolicy,
