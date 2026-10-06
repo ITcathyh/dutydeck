@@ -29,6 +29,7 @@ import { registerSessionAutomationRoutes, type SessionAutomationRouteOptions } f
 import { registerIdentityPreflightRoutes, type IdentityPreflightRouteOptions } from './identity-preflight-routes.js';
 import { registerCiHookRoutes, type CiHookRouteOptions } from './ci-hook-routes.js';
 import { registerUsageRoutes, type UsageRouteOptions } from './usage-routes.js';
+import { registerSessionInsightRoutes, type SessionInsightRouteOptions } from './session-insight-routes.js';
 
 const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -68,6 +69,12 @@ export interface BuildAppOptions {
   sessionNames?: SessionNameRouteOptions;
   collaboration?: CollaborationRouteOptions;
   usage?: UsageRouteOptions;
+  /**
+   * 会话分析 API（/api/sessions/:id/insight*、/api/insights/*）。
+   * 未提供或未提供 authorize 时所有分析路由 fail-closed（403）；
+   * authorize 通过但 service 缺失时返回 503。由 service.ts 注入安装管理员校验。
+   */
+  insight?: SessionInsightRouteOptions;
   workItems?: WorkItemRouteOptions;
   workItemTools?: WorkItemToolsOptions;
   memoryTools?: LarkMemoryToolsOptions;
@@ -165,6 +172,9 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     authorize: (request, sessionId) => requireSessionExecution(request, sessionId, 'session', 'task.view_result') });
   if (options.collaboration) await registerCollaborationRoutes(app, options.collaboration);
   if (options.usage) registerUsageRoutes(app, options.usage, (request, sessionId) => requireSessionExecution(request, sessionId, 'session', 'task.view_result'));
+  // 无论是否提供 insight 选项都注册：缺 authorize/service 时由路由层 fail-closed，
+  // 不依赖 service.ts 是否已接线，share 白名单也不包含分析路径。
+  registerSessionInsightRoutes(app, options.insight);
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });
   app.get<{ Querystring: { excludeSessionId?: string } }>('/api/system/activity', async request => {

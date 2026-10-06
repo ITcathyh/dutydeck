@@ -3,8 +3,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { UsageBackgroundBudget, UsageCap, UsageCategory } from '@dutydeck/shared';
 import { api, type LarkBotConfig, type UsageSummaryWindow, type UsageTotalsResponse as UsageTotals, type UsageGroupResponse as UsageGroup } from '../api';
 import { Banner, Button, Card, EmptyState, Field, Input, Select, Spinner, Tabs } from './primitives';
+import { SessionInsightOverview } from './SessionInsightOverview';
 
 type UsageRange = 'month' | 'week';
+export type UsageView = 'cost' | 'insight';
 
 const categoryLabels: Record<UsageCategory, string> = { explicit: '显式请求', proactive: '主动介入', scheduled: '定时', background: '后台' };
 const usd = (value: number) => `$${value.toFixed(2)}`;
@@ -33,18 +35,46 @@ function UsageList({ title, rows, label }: { title: string; rows: UsageGroup[]; 
 }
 
 // 用量汇总与月度上限都跨所有 Bot，服务端只对安装管理员开放；只在「用量与成本」打开时挂载。
-export function UsageOverview({ bots }: { bots: LarkBotConfig[] }) {
+export function UsageOverview({ bots, initialView = 'cost', onViewChange, onOpenSession, onCompare }: {
+  bots: LarkBotConfig[];
+  /** 深链 panel=usage&view=insight 恢复到会话分析 tab；缺省为费用 tab。 */
+  initialView?: UsageView;
+  onViewChange?(view: UsageView): void;
+  onOpenSession?(sessionId: string): void;
+  onCompare?(leftSessionId: string, rightSessionId: string): void;
+}) {
+  const [view, setView] = useState<UsageView>(initialView);
   const [range, setRange] = useState<UsageRange>('month');
   const summary = useQuery({ queryKey: ['usage-summary'], queryFn: api.usageSummary, retry: false, refetchInterval: 30_000, refetchIntervalInBackground: false });
   const groups = useQuery({ queryKey: ['lark-management-groups'], queryFn: api.managementGroups, staleTime: 30_000, enabled: bots.length > 0 });
   const botName = (appId?: string) => appId ? bots.find(bot => bot.appId === appId)?.name ?? appId : '未归属 Bot（Web 任务等）';
   const chatName = (chatId?: string) => chatId ? groups.data?.groups.find(group => group.chatId === chatId)?.name ?? chatId : '';
 
-  if (summary.isPending) return <Spinner label="正在读取用量…"/>;
-  if (summary.isError) return <Banner tone="danger" action={{ label: '重试', onClick: () => void summary.refetch() }}>用量读取失败：{summary.error.message}</Banner>;
+  const changeView = (next: UsageView) => { setView(next); onViewChange?.(next); };
+  const viewTabs = <Tabs<UsageView>
+    value={view}
+    onChange={changeView}
+    label="用量与成本视图"
+    items={[{ id: 'cost', label: '费用' }, { id: 'insight', label: '会话分析' }]}
+  />;
+
+  // 会话分析 tab 不依赖费用查询：费用接口失败或 pending 都不应阻塞分析汇总。
+  if (view === 'insight') {
+    return <div className="space-y-4">
+      {viewTabs}
+      <SessionInsightOverview
+        onOpenSession={sessionId => onOpenSession?.(sessionId)}
+        onCompare={(left, right) => onCompare?.(left, right)}
+      />
+    </div>;
+  }
+
+  if (summary.isPending) return <div className="space-y-4">{viewTabs}<Spinner label="正在读取用量…"/></div>;
+  if (summary.isError) return <div className="space-y-4">{viewTabs}<Banner tone="danger" action={{ label: '重试', onClick: () => void summary.refetch() }}>用量读取失败：{summary.error.message}</Banner></div>;
   const window: UsageSummaryWindow = summary.data[range];
 
   return <div className="space-y-5">
+    {viewTabs}
     <Tabs<UsageRange> value={range} onChange={setRange} label="统计区间" items={[{ id: 'month', label: '本月' }, { id: 'week', label: '近 7 天' }]}/>
     <Card as="section" tone="muted" padding="md" className="space-y-1" aria-label="合计">
       <p className="text-caption text-secondary">{range === 'month' ? '本月' : '近 7 天'}合计（自 {new Date(window.since).toLocaleString('zh-CN', { hour12: false })}）</p>

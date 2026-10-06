@@ -64,17 +64,7 @@ type AuthorizationResult = boolean | PolicyDecision;
 
 export interface SessionAutomationRuntime {
   getSession(id: string): Promise<Session | undefined>;
-  dispatch(
-    sessionId: string,
-    prompt: string,
-    mode: 'queue',
-    agentPrompt: string,
-    riskPolicy: undefined,
-    actorId: string | undefined,
-    idempotencyKey: string,
-    skillRequests?: string[],
-    supplied?: TaskRequestV1
-  ): Promise<{ id: string; status: string }>;
+  dispatchRequest(request: TaskRequestV1): Promise<{ id: string; status: string }>;
 }
 
 export interface AutomationDeliveryContext {
@@ -1101,7 +1091,7 @@ export class SessionAutomationService {
         occurrenceWithAdmission = { raw: JSON.stringify(withAdmission), value: withAdmission };
       }
     }
-    await this.dispatchOccurrence(occurrenceWithAdmission, schedule, request, taskId, taskIdVersion, actor);
+    await this.dispatchOccurrence(occurrenceWithAdmission, schedule, request, taskId, taskIdVersion);
     await this.advanceSchedule(schedule, occurrence.scheduledForUtc);
   }
 
@@ -1110,8 +1100,7 @@ export class SessionAutomationService {
     schedule: SessionSchedule,
     request: TaskRequestV1,
     taskId: string,
-    taskIdVersion: 'v1' | 'legacy',
-    actor: ExecutionActor
+    taskIdVersion: 'v1' | 'legacy'
   ) {
     const occurrence = stored.value;
     // 重投先查接受事实，命中只补同一映射，不再读 HEAD/材料、不重拼 prompt。
@@ -1144,9 +1133,8 @@ export class SessionAutomationService {
       taskIdVersion,
       generation: occurrence.generation
     });
-    const actorId = actor.kind === 'unspecified' ? undefined : actor.id;
     try {
-      const task = await this.options.runtime.dispatch(occurrence.sessionId, request.prompt, 'queue', request.prompt, undefined, actorId, request.key, request.skills, request);
+      const task = await this.options.runtime.dispatchRequest(request);
       if (task.id !== taskId) throw new RuntimeError('SESSION_AUTOMATION_TASK_CONFLICT', 'Runtime task identity did not match the fixed admission', 409);
       await this.markOccurrenceAccepted(stored, task.id);
     } catch (error) {
@@ -1431,9 +1419,8 @@ export class SessionAutomationService {
       taskIdVersion,
       generation: CI_BINDING_GENERATION
     });
-    const actorId = actor.kind === 'unspecified' ? undefined : actor.id;
     try {
-      const task = await this.options.runtime.dispatch(record.sessionId, request.prompt, 'queue', request.prompt, undefined, actorId, request.key, request.skills, request);
+      const task = await this.options.runtime.dispatchRequest(request);
       if (task.id !== taskId) throw new RuntimeError('SESSION_AUTOMATION_TASK_CONFLICT', 'Runtime task identity did not match the fixed admission', 409);
       await this.markCiAccepted(record.id, task.id);
     } catch (error) {

@@ -4,11 +4,12 @@ import { dirname, join } from 'node:path';
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
-import type { AgentConfig, AgentDriver, DriverSteeringOutcome, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
+import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
 import { claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson } from '@dutydeck/shared';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
 import { PROCESS_CPU_MIN_WINDOW_MS, ProcessTreeCpu } from './process-cpu.js';
+import { acpDataRoot, buildLaunchObservation, buildNativeObservation, inferAcpInsightClient, resolveAcpChildEnvironment } from './transcript-source.js';
 
 // 归一化事件类型统一从 @dutydeck/shared re-export，保证 ACP driver 与 PTY driver 用同一类型。
 export type { NormalizedDriverEvent };
@@ -245,6 +246,14 @@ export class AcpxAdapter implements AgentDriver {
   private unconfirmedLauncherExit = false;
   private nativeIdentity?: NativeContextIdentity;
   private currentConfiguration?: {model?: string; reasoningEffort?: string};
+  // 会话分析来源采集（设计 §3.1）：只在内存中向订阅者发非密钥元信息，不写库、
+  // 不进 AgentEvent。观察一旦发出即不可变快照，订阅时重放；stop 后不再回调。
+  private readonly insightClient: InsightClient | null;
+  private readonly transcriptListeners = new Set<(observation: DriverTranscriptSourceObservation) => void>();
+  private readonly transcriptObservations: DriverTranscriptSourceObservation[] = [];
+  // 本次 ensureHandle 在真实 spawn 边界冻结出的 launch 上下文，供 onPrepared 在
+  // native.confirmed 成功后追加同一来源的身份关联。spawn 事件先于 onPrepared。
+  private preparedLaunch?: { dataRoot: string; observed: boolean; launchKind: 'created' | 'attached'; cwd: string };
   get resourceCapabilities() {const strict=this.options.context?.protocol==='controlled-v1';return {observe:true,originalObjectStop:true,identityBoundStop:false,nativeContextRestore:strict,activeTurnAttach:false,configurationAck:strict,creationDefaults:strict};}
   private readonly sdkCreations = new Map<object, { promise: Promise<void>; resolve(): void }>();
 
@@ -253,6 +262,7 @@ export class AcpxAdapter implements AgentDriver {
     this.permissionMode = agent.permissionMode;
     this.sessionStore = createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') });
     this.launch = prepareAcpxAgentLaunch(agent, { runtimeDirectory: join(cwd, '.dutydeck', 'runtime-env'), sessionKey: this.sessionKey });
+    this.insightClient = inferAcpInsightClient(agent);
     const registry = createAgentRegistry({ overrides: { [agent.id]: this.launch.command } });
     this.runtime = createAcpRuntime({
       cwd,
@@ -310,6 +320,49 @@ export class AcpxAdapter implements AgentDriver {
     });
   }
 
+  /**
+   * 订阅会话分析来源观察（可选驱动能力，设计 §3.1）。订阅时先同步重放已有
+   * 不可变快照；返回的取消函数调用后该 listener 不再收到任何回调。listener
+   * 抛错只影响自身，绝不影响 driver 执行或其他订阅者。
+   */
+  subscribeTranscriptSource(listener: (observation: DriverTranscriptSourceObservation) => void): () => void {
+    if (typeof listener !== 'function') throw new Error('TRANSCRIPT_LISTENER_REQUIRED');
+    // 历史快照不可变且为私有元信息，late subscriber 一律完整重放；即使 driver
+    // 已 stop，重放只读快照也是安全的。
+    for (const observation of this.transcriptObservations) {
+      try { listener(observation); } catch { /* listener 自身故障不影响 driver */ }
+    }
+    if (this.stopped) return () => undefined;
+    this.transcriptListeners.add(listener);
+    return () => { this.transcriptListeners.delete(listener); };
+  }
+
+  private emitTranscriptObservation(observation: DriverTranscriptSourceObservation) {
+    if (this.stopped) return;
+    this.transcriptObservations.push(observation);
+    for (const listener of this.transcriptListeners) {
+      try { listener(observation); } catch { /* listener 异常不得影响 driver 执行 */ }
+    }
+  }
+
+  /**
+   * 在 acpx 真实 spawn 事件边界，用与实际启动路径同构的最终环境确定性冻结非密钥
+   * dataRoot（不扫描宿主 /proc）。create 在真实 spawn 边界给 launch_observed；
+   * attach 恒为 inferred，不替历史 launch 环境背书。
+   */
+  private emitLaunchObservation(launchKind: 'created' | 'attached') {
+    if (!this.insightClient) return;
+    const cwd = this.agent.cwd ?? process.cwd();
+    try {
+      const childEnv = resolveAcpChildEnvironment(this.agent, this.launch, envLauncherPath());
+      const dataRoot = acpDataRoot(this.insightClient, childEnv);
+      const observed = launchKind === 'created';
+      const observation = buildLaunchObservation({ client: this.insightClient, launchKind, observed, dataRoot, cwd });
+      this.preparedLaunch = { dataRoot, observed, launchKind, cwd };
+      this.emitTranscriptObservation(observation);
+    } catch { /* 来源采集失败只静默降级，不改变启动/任务结算 */ }
+  }
+
   private observeProcess(event: AcpRuntimeProcessEvent) {
     if (event.phase === 'creation-started') {
       let resolve!: () => void;
@@ -334,6 +387,11 @@ export class AcpxAdapter implements AgentDriver {
     this.processes.set(child, exited);
     if (child.exitCode != null || child.signalCode != null) { exited(); return; }
     child.once('exit', exited); child.on('error', failed);
+    // acpx 真实 spawn 出 agent 进程（含 env-launcher 包装层）的边界：此刻用同构
+    // 最终环境冻结非密钥 dataRoot。该事件先于 strict onPrepared 触发。
+    if (event.kind === 'agent') {
+      this.emitLaunchObservation(this.options.context?.mode === 'attach' ? 'attached' : 'created');
+    }
   }
   async isStopped(): Promise<boolean> {
     // Only SDK-direct agent/probe and host-terminal children are covered. This
@@ -471,7 +529,41 @@ export class AcpxAdapter implements AgentDriver {
     if(context?.protocol==='controlled-v1') {
       const native=context.native;
       if(!native||!this.runtime.createStrictSession||!this.runtime.restoreStrictSession)throw new Error('NATIVE_CONTEXT_PROTOCOL_UNSUPPORTED');
-      const onPrepared=(identity:NativeContextIdentity,configuration:{model?:string;reasoningEffort?:string})=>{this.assertActive();native.confirmed(identity);this.nativeIdentity=identity;this.currentConfiguration={...configuration};};
+      const onPrepared=(identity:NativeContextIdentity,configuration:{model?:string;reasoningEffort?:string})=>{
+        this.assertActive();
+        // native.confirmed 必须先成功；它抛错时不得追加任何 native 关联观察，
+        // 错误继续传播使本次 prepare 失败（设计 §3.1）。
+        native.confirmed(identity);
+        this.nativeIdentity=identity;this.currentConfiguration={...configuration};
+        // 只在身份确认成功后，基于本次 spawn 的 prepared launch 上下文追加同一来源。
+        try {
+          const preparedContext = this.preparedLaunch;
+          const client = this.insightClient;
+          if (preparedContext && client) {
+            // 经与 configureNative 同一受控接口取本次确认的 nativeContextRef；取不到
+            // （非受控或 prepare 拒绝）时省略，绝不伪造。
+            let nativeContextRef: unknown;
+            try {
+              nativeContextRef = context.prepareSubmission({
+                taskId: 'transcript_source', attemptId: 'transcript_source',
+                submissionId: identity.nativeCreationId, prompt: '',
+                executionOptions: { permissionMode: this.permissionMode }
+              }).nativeContextRef;
+            } catch { nativeContextRef = undefined; }
+            // 只有 ACP _meta 显式给出的 agentSessionId 才是 CLI/日志 session ID；
+            // acpxRecordId / backendSessionId 都不能顶替（设计 §3.1）。
+            this.emitTranscriptObservation(buildNativeObservation({
+              client,
+              launchKind: preparedContext.launchKind,
+              observed: preparedContext.observed,
+              dataRoot: preparedContext.dataRoot,
+              cwd: preparedContext.cwd,
+              ...(nativeContextRef !== undefined ? { nativeContextRef } : {}),
+              ...(identity.agentSessionId ? { agentSessionId: identity.agentSessionId } : {})
+            }));
+          }
+        } catch { /* 观察失败不影响 native.confirmed 结果与任务结算 */ }
+      };
       const input={...this.sessionInput(),resourceScope:this.scope(context.rootOperation),onPrepared};
       if(native.expected)handle=await this.runtime.restoreStrictSession({...input,expected:native.expected});
       else {
@@ -735,6 +827,8 @@ export class AcpxAdapter implements AgentDriver {
   stop(options: { discardSession?: boolean } = {}): Promise<void> {
     if (this.stopping) return this.stopping;
     this.stopped = true;
+    // 取消后不再向任何订阅者回调（历史快照仍可被新订阅者只读重放）。
+    this.transcriptListeners.clear();
     this.idleWatch?.clear();
     this.revocation.abort();
     for (const resolve of this.pendingPermissions.values()) resolve({ outcome: 'reject_once' });

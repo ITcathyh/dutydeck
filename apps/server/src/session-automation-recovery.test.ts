@@ -100,8 +100,9 @@ function ledgerRuntime(repos: Repos, harnessSession: HarnessSession): RecoveryRu
   const runtime: RecoveryRuntime = {
     dispatches,
     async getSession(id) { return repos.sessions.get(id); },
-    async dispatch(sessionId, _prompt, _mode, _agentPrompt, _risk, _actorId, _idempotencyKey, _skills, supplied) {
+    async dispatchRequest(supplied) {
       if (!supplied) throw new Error('Automation dispatch must reuse the frozen request');
+      const sessionId = supplied.sessionId;
       const committed = bound(repos).acceptTask({ sessionId, runId: harnessSession.runId }, supplied, acceptedInput(supplied), 'back');
       dispatches.push(committed.task!);
       return { id: committed.task!.id, status: committed.task!.status };
@@ -235,10 +236,10 @@ describe('SessionAutomation independent-review regression fixes', () => {
     await scheduled(h);
     const entered = deferred();
     const gate = deferred();
-    const original = (h.service as unknown as { options: { runtime: SessionAutomationRuntime } }).options.runtime.dispatch;
+    const original = (h.service as unknown as { options: { runtime: SessionAutomationRuntime } }).options.runtime.dispatchRequest;
     (h.service as unknown as { options: { runtime: SessionAutomationRuntime } }).options.runtime = {
       ...(h.service as unknown as { options: { runtime: SessionAutomationRuntime } }).options.runtime,
-      dispatch: async () => { entered.resolve(); await gate.promise; throw new Error('old dispatch stopped'); }
+      dispatchRequest: async () => { entered.resolve(); await gate.promise; throw new Error('old dispatch stopped'); }
     };
     const ticking = h.service.tick();
     await entered.promise;
@@ -250,7 +251,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
     h.now.value = new Date('2026-09-12T00:02:01Z');
     const restored = new SessionAutomationService({
       repositories: h.repositories,
-      runtime: { getSession: async (id: string) => h.repositories.sessions.get(id), dispatch: original },
+      runtime: { getSession: async (id: string) => h.repositories.sessions.get(id), dispatchRequest: original },
       authorize: async () => true,
       clock: () => h.now.value
     });
@@ -276,10 +277,10 @@ describe('SessionAutomation independent-review regression fixes', () => {
     const entered = deferred();
     const gate = deferred();
     const serviceOptions = h.service as unknown as { options: { runtime: SessionAutomationRuntime } };
-    const original = serviceOptions.options.runtime.dispatch;
+    const original = serviceOptions.options.runtime.dispatchRequest;
     serviceOptions.options.runtime = {
       ...serviceOptions.options.runtime,
-      dispatch: async () => { entered.resolve(); await gate.promise; throw new Error('old dispatch stopped'); }
+      dispatchRequest: async () => { entered.resolve(); await gate.promise; throw new Error('old dispatch stopped'); }
     };
     const ticking = h.service.tick();
     await entered.promise;
@@ -288,7 +289,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
       h.now.value = new Date('2026-09-12T00:00:31Z');
       const restored = new SessionAutomationService({
         repositories: h.repositories,
-        runtime: { getSession: async (id: string) => h.repositories.sessions.get(id), dispatch: original },
+        runtime: { getSession: async (id: string) => h.repositories.sessions.get(id), dispatchRequest: original },
         authorize: async () => true,
         githubFetch: vi.fn(async () => githubResponse(head, [{ id: 12, conclusion: 'success' }])) as typeof fetch,
         clock: () => h.now.value
@@ -309,17 +310,12 @@ describe('SessionAutomation independent-review regression fixes', () => {
     const h = await fixture();
     await scheduled(h);
     const serviceOptions = h.service as unknown as { options: { runtime: SessionAutomationRuntime } };
-    const original = serviceOptions.options.runtime.dispatch;
+    const original = serviceOptions.options.runtime.dispatchRequest;
     serviceOptions.options.runtime = {
       ...serviceOptions.options.runtime,
-      dispatch: async (...args: Parameters<SessionAutomationRuntime['dispatch']>) => {
-        const otherArgs = [...args] as Parameters<SessionAutomationRuntime['dispatch']>;
-        const request = args[8]!;
-        otherArgs[1] = 'OTHER-PRODUCER';
-        otherArgs[3] = 'OTHER-PRODUCER';
-        otherArgs[8] = { ...request, prompt: 'OTHER-PRODUCER', sourcePayload: { ...(request.sourcePayload as object), agentPrompt: 'OTHER-PRODUCER' } };
-        await original(...otherArgs);
-        return original(...args);
+      dispatchRequest: async request => {
+        await original({ ...request, prompt: 'OTHER-PRODUCER', sourcePayload: { ...(request.sourcePayload as object), agentPrompt: 'OTHER-PRODUCER' } });
+        return original(request);
       }
     };
     await h.service.tick();
@@ -668,17 +664,12 @@ describe('SessionAutomation independent-review regression fixes', () => {
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const sub = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     const serviceOptions = h.service as unknown as { options: { runtime: SessionAutomationRuntime } };
-    const original = serviceOptions.options.runtime.dispatch;
+    const original = serviceOptions.options.runtime.dispatchRequest;
     serviceOptions.options.runtime = {
       ...serviceOptions.options.runtime,
-      dispatch: async (...args: Parameters<SessionAutomationRuntime['dispatch']>) => {
-        const otherArgs = [...args] as Parameters<SessionAutomationRuntime['dispatch']>;
-        const request = args[8]!;
-        otherArgs[1] = 'OTHER-CI';
-        otherArgs[3] = 'OTHER-CI';
-        otherArgs[8] = { ...request, prompt: 'OTHER-CI', sourcePayload: { ...(request.sourcePayload as object), agentPrompt: 'OTHER-CI' } };
-        await original(...otherArgs);
-        return original(...args);
+      dispatchRequest: async request => {
+        await original({ ...request, prompt: 'OTHER-CI', sourcePayload: { ...(request.sourcePayload as object), agentPrompt: 'OTHER-CI' } });
+        return original(request);
       }
     };
     await h.service.tick();

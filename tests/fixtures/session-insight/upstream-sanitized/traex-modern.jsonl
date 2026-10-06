@@ -1,0 +1,13 @@
+{"timestamp":"2026-08-30T10:00:00Z","type":"session_meta","payload":{"id":"traex-modern-root","cwd":"/tmp/traex-project","model_provider":"trae","source":"cli"}}
+{"timestamp":"2026-08-30T10:00:00Z","type":"turn_context","payload":{"model":"traex-test"}}
+{"timestamp":"2026-08-30T10:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"inspect the project"}}
+{"timestamp":"2026-08-30T10:00:02Z","type":"history_mutation","payload":{"operation":"append","commit_id":"commit-1","turn_id":"turn-1","items":[{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"go test ./...\"}","call_id":"call-1"}]}}
+{"timestamp":"2026-08-30T10:00:03Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"call-1","exit_code":0,"status":"completed","stdout":"ok","completed_at_ms":1788084003000,"turn_id":"turn-1"}}
+{"timestamp":"2026-08-30T10:00:04Z","type":"history_mutation","payload":{"operation":"append","commit_id":"commit-2","turn_id":"turn-1","items":[{"type":"function_call_output","call_id":"call-1","output":"ok"}]}}
+{"timestamp":"2026-08-30T10:00:05Z","type":"event_msg","payload":{"type":"agent_reasoning_raw_content","text":"PRIVATE_REASONING"}}
+{"timestamp":"2026-08-30T10:00:06Z","type":"event_msg","payload":{"type":"agent_message","message":"tests passed"}}
+{"timestamp":"2026-08-30T10:00:07Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"cache_creation_input_tokens":7,"output_tokens":10,"reasoning_output_tokens":3},"last_token_usage":{"total_tokens":90},"model_context_window":200}}}
+{"timestamp":"2026-08-30T10:00:08Z","type":"event_msg","payload":{"type":"sub_agent_activity","event_id":"subagent-1","kind":"started"}}
+{"timestamp":"2026-08-30T10:00:09Z","type":"inter_agent_communication","payload":{"kind":"final_answer"}}
+{"timestamp":"2026-08-30T10:00:10Z","type":"history_mutation","payload":{"operation":"replace","commit_id":"commit-3","turn_id":"turn-1","items":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"replacement context"}]}]}}
+{"timestamp":"2026-08-30T10:00:11Z","type":"history_mutation","payload":{"operation":"rollback","commit_id":"commit-4","turn_id":"turn-1","target_commit_id":"commit-2"}}

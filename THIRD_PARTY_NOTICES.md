@@ -82,3 +82,14 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
+
+---
+
+## 3. Session Insight (待授权 / 本地联调)
+
+- **项目来源**: https://github.com/ITcathyh/session-insight
+- **固定参考版本**: commit `0bf5f1c95e89384f6379357aa515d385b2bf4e1e`
+- **使用范围**: 内置或分发的预编译二进制执行文件（`dist/assets/session-insight/*/session-insight`）
+- **许可与分发声明**:
+  上游原项目标注为 `Private project. Not licensed for redistribution.`，尚未提供开源许可证或公开发布授权。
+  目前仅用于本地联调与测试，未经授权不得随正式发行包对外分发。待权利人确认授权后补齐许可证全文。

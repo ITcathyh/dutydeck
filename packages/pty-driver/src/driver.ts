@@ -20,6 +20,7 @@ import { buildSessionMarker, resolveCliSessionId, hasPinnedClaudeSession, claude
 import { hostname } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { ClaudeSettings } from './claude-settings.js';
+import { TranscriptSourceTracker, freezeTranscriptSource, verifyLaunchedTranscript } from './transcript-source.js';
 
 export interface PtyCliDriverOptions {
   agent: AgentConfig;
@@ -152,6 +153,9 @@ export class PtyCliDriver implements AgentDriver {
   private lastOutputAt = 0;
   /** createTerminalStream 订阅者集合，driver 级持有，rewire 后继续生效。 */
   private readonly terminalSubscribers = new Set<(data: string) => void>();
+  /** Session Insight 来源观察（design §3.1）。Driver 级持有：reattach/rewire
+   *  不重建；只有真正 spawn/respawn 追加 launch。 */
+  private readonly transcriptSources = new TranscriptSourceTracker();
   /** 当前后端里 CLI 进程的进程号，按后端实例缓存：tmux 每问一次都要同步起一个 tmux 子进程。 */
   private backendPid: { backend: SessionBackend; pid: number } | undefined;
 
@@ -225,10 +229,12 @@ export class PtyCliDriver implements AgentDriver {
     if (nativeSessionId && resumeFragment) {
       this.cliSessionId = nativeSessionId;
       this.lastArgs = this.claudeSettings.args(this.agent.args, this.buildResumeArgs(nativeSessionId, resumeFragment), this.cwd, this.agent.env);
+      const spawnEnv = this.spawnEnv();
       await this.backend.spawn(this.agent.command, this.lastArgs, {
-        cwd: this.cwd, cols: DEFAULT_COLS, rows: DEFAULT_ROWS, env: this.spawnEnv(),
+        cwd: this.cwd, cols: DEFAULT_COLS, rows: DEFAULT_ROWS, env: spawnEnv,
       });
       check();
+      this.recordTranscriptLaunch(spawnEnv);
       (await this.wire(this.backend));
       (await this.markResumed());
       return;
@@ -243,14 +249,63 @@ export class PtyCliDriver implements AgentDriver {
       env: this.agent.env,
     }), this.cwd, this.agent.env);
     this.started = true;
+    const spawnEnv = this.spawnEnv();
     await this.backend.spawn(this.agent.command, this.lastArgs, {
       cwd: this.cwd,
       cols: DEFAULT_COLS,
       rows: DEFAULT_ROWS,
-      env: this.spawnEnv(),
+      env: spawnEnv,
     });
     check();
+    this.recordTranscriptLaunch(spawnEnv);
     (await this.wire(this.backend));
+  }
+
+  /**
+   * Freeze the transcript data root at a REAL spawn/respawn boundary, from
+   * the exact final env handed to the child (same object passed to
+   * backend.spawn). Never called on constructor/attach/resume/reattach: a new
+   * driver's current env says nothing about an adopted old process. Emission
+   * failures are diagnostic only and never break the launch.
+   */
+  private recordTranscriptLaunch(env: Record<string, string>): void {
+    try {
+      const binding = freezeTranscriptSource(this.adapter.id, env);
+      if (!binding) return;
+      const launch = this.transcriptSources.recordLaunch(binding, this.cwd);
+      // A resumed CLI already has its transcript on disk; verify immediately.
+      // A fresh launch verifies again once prompt #1 is persisted (see the
+      // post-flush check in wire()'s idle path).
+      this.verifyTranscriptLaunch(launch.observationId, binding.client, binding.dataRoot);
+    } catch {
+      // Insight collection must never interrupt a task.
+    }
+  }
+
+  /** Append content-verified native identity for the current launch. Reading
+   *  files here never throws into the driver. */
+  private verifyTranscriptLaunch(
+    launchObservationId: string,
+    client: import('@dutydeck/shared').InsightClient,
+    dataRoot: string,
+  ): void {
+    try {
+      const verified = verifyLaunchedTranscript(client, dataRoot, {
+        sessionId: this.sessionId,
+        cwd: this.cwd,
+      });
+      if (verified) this.transcriptSources.recordIdentity(launchObservationId, verified);
+    } catch {
+      // Best-effort content verification; an unreadable tree stays unverified.
+    }
+  }
+
+  /** Re-check the current launch after a transcript flush — by then prompt
+   *  #1 (with the marker) is persisted for a fresh spawn. */
+  private verifyPendingTranscriptLaunches(): void {
+    for (const pending of this.transcriptSources.pendingLaunches()) {
+      this.verifyTranscriptLaunch(pending.observationId, pending.client, pending.dataRoot);
+    }
   }
 
   /** spawn 环境，首次调用时算好并缓存。resume-without-start 也走这里。 */
@@ -837,6 +892,14 @@ export class PtyCliDriver implements AgentDriver {
     catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
   }
 
+  /** Subscribe to non-secret transcript-source observations (design §3.1).
+   *  Replays past observations to late subscribers; the returned function
+   *  unsubscribes. The driver fills no session/run/driver/key ids — the
+   *  runtime does. Listener errors are isolated. */
+  subscribeTranscriptSource(listener: (observation: import('@dutydeck/shared').DriverTranscriptSourceObservation) => void): () => void {
+    return this.transcriptSources.subscribe(listener);
+  }
+
   createTerminalStream(): TerminalStream {
     const local = new Set<(data: string) => void>();
     return {
@@ -992,6 +1055,9 @@ export class PtyCliDriver implements AgentDriver {
           this.idleDetector?.seedReadyEvidence();
           return;
         }
+        // Prompt #1 (with the session marker) is now persisted: content-verify
+        // the current launch's native identity. No-op once verified.
+        this.verifyPendingTranscriptLaunches();
         if (this.holdForBackgroundWork(statusLine)) {
           this.idleDetector?.reset();
           this.idleDetector?.seedReadyEvidence();
@@ -1549,12 +1615,13 @@ export class PtyCliDriver implements AgentDriver {
     const backend = previousBackend instanceof HerdrBackend ? previousBackend.fork() : tmuxName !== undefined ? new TmuxBackend(tmuxName, { ownerId }) : new PtyBackend();
     this.backend = backend;
     this.lastArgs = launchArgs;
+    const respawnEnv = this.spawnEnv();
     try {
       await backend.spawn(this.agent.command, this.lastArgs, {
         cwd: this.cwd,
         cols: DEFAULT_COLS,
         rows: DEFAULT_ROWS,
-        env: this.spawnEnv(),
+        env: respawnEnv,
       });
       if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) throw new Error('PTY respawn cancelled by lifecycle change');
     } catch (error) {
@@ -1564,6 +1631,7 @@ export class PtyCliDriver implements AgentDriver {
       }
       throw error;
     }
+    this.recordTranscriptLaunch(respawnEnv);
     (await this.wire(backend));
   }
 }

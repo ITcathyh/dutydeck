@@ -307,6 +307,8 @@ describe('GET /api/lark/bots/:appId/memory/status', () => {
       runtime: {} as any,
       controlActorId: 'actor',
       repos: {} as any,
+      jobs: {} as any,
+      policyConfig: config,
       store,
       projection: {} as any,
       readConfig: vi.fn(),

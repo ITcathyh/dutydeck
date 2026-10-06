@@ -11,25 +11,41 @@ import { LarkMemoryPipeline } from './memory-pipeline.js';
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 const scope = { appId: 'app', chatId: 'groups', pool: 'groups' };
-async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars = 1000000) {
+async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars = 1000000, timeoutMs?: number) {
   const dir = await mkdtemp(join(tmpdir(), 'memory-jobs-'));
   const repos = createRepositories(join(dir, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
   let reply = (_prompt: string) => ({ actions: [{ op: 'noop' }] });
   let duringSend = async () => {};
-  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0, workspaceRoot: join(dir,'work'), probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (_config,_protocol,emit) => ({ start: async () => {}, stop: async () => {}, isStopped: async () => true, interrupt: async () => {}, send: async prompt => {
-    prompts.push(prompt); await duringSend(); emit({ type: 'text', data: { text: '```json\n'+JSON.stringify(reply(prompt))+'\n```' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } });
-  } }) });
+  let duringInterrupt = () => {};
+  const runtime = new DutydeckRuntime(repos, {
+    cleanupIntervalMs: 0, workspaceRoot: join(dir, 'work'),
+    probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
+    driverFactory: (_config, _protocol, emit) => {
+      let interrupted = false;
+      return {
+        start: async () => {}, stop: async () => {}, isStopped: async () => true,
+        interrupt: async () => { interrupted = true; duringInterrupt(); },
+        send: async prompt => {
+          interrupted = false;
+          prompts.push(prompt);
+          await duringSend();
+          emit({ type: 'text', data: { text: '```json\n' + JSON.stringify(reply(prompt)) + '\n```' } });
+          emit({ type: 'completed', data: { stopReason: interrupted ? 'cancelled' : 'end_turn' } });
+        }
+      };
+    }
+  });
   await runtime.initialize([agentConfigSchema.parse({ id: 'agent', name: 'Agent', command: 'fake', protocol: 'acp', cwd: dir, model: 'verified-model', reasoningEffort: 'medium' })]);
   const config = { appId: 'app', memoryEnabled: true, memoryAutoExtract: false, defaultAgentId: 'agent' } as any;
   await repos.config.set('lark.bots', JSON.stringify([config]));
   await repos.config.set('token_efficiency', JSON.stringify({ mode, memoryProfiles: [{ agentId: 'agent', protocol: 'acp', model: 'verified-model', reasoningEffort: 'medium', maxInputChars, verificationRef: 'test_fixture_only' }] }));
   const store = new LarkMemoryStore(repos.config);
   const projection = new LarkMemoryProjection(store, join(dir,'memory'));
-  const pipeline = new LarkMemoryPipeline({ runtime, repos: { execution: repos.execution }, jobs: repos.memoryJobs, policyConfig: repos.config, controlActorId: 'installation_owner', store, projection, readConfig: async () => JSON.parse((await repos.config.get('lark.bots'))!)[0], log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
+  const pipeline = new LarkMemoryPipeline({ runtime, timeoutMs, repos: { execution: repos.execution }, jobs: repos.memoryJobs, policyConfig: repos.config, controlActorId: 'installation_owner', store, projection, readConfig: async () => JSON.parse((await repos.config.get('lark.bots'))!)[0], log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
   cleanups.push(async () => { await runtime.shutdown(); repos.close(); await rm(dir,{ recursive: true, force: true }); });
   await store.add(scope, { content: '保留完整来源和日期。', source: 'extraction', topic: 'general', chatId: 'other', taskId: 'evidence' });
-  return { repos, runtime, store, projection, pipeline, prompts, setReply: (value: typeof reply) => { reply = value; }, setDuringSend: (value: typeof duringSend) => { duringSend = value; } };
+  return { repos, runtime, store, projection, pipeline, prompts, setReply: (value: typeof reply) => { reply = value; }, setDuringSend: (value: typeof duringSend) => { duringSend = value; }, setDuringInterrupt: (value: typeof duringInterrupt) => { duringInterrupt = value; } };
 }
 it.each(['legacy','optimized'] as const)('%s jobs apply noop receipts and choose their frozen session lifecycle', async mode => {
   const h = await harness(mode);
@@ -67,8 +83,8 @@ it('rebuilds projection after commit without invoking the model or applying twic
 });
 it('recovers uncertain dispatch by looking up the same accepted request', async () => {
   const h = await harness();
-  const original = h.runtime.dispatch.bind(h.runtime);
-  vi.spyOn(h.runtime,'dispatch').mockImplementationOnce(async (...args) => { await original(...args); throw new Error('reply lost'); });
+  const original = h.runtime.dispatchRequest.bind(h.runtime);
+  vi.spyOn(h.runtime,'dispatchRequest').mockImplementationOnce(async (...args) => { await original(...args); throw new Error('reply lost'); });
   expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:false });
   await vi.waitFor(async () => expect((await h.runtime.getTasks((await h.repos.memoryJobs.listScope(scope))[0].sessionId))[0].status).toBe('completed'));
   expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:true });
@@ -249,4 +265,69 @@ it('recognizes the recovered receipt claim after settling crashes before releasi
   expect((await h.store.getState(scope)).running).toBeUndefined();
   expect(await h.repos.memoryJobs.listScope(scope)).toHaveLength(2);
   expect(h.prompts).toHaveLength(2);
+});
+
+it('bounds a late accepted dispatch, retains the original job, and confirms timeout cleanup through the runtime', async () => {
+  const h = await harness('legacy', 1000000, 100);
+  const original = (await h.store.list(scope))[0]!;
+  h.setReply(() => ({ actions: [{ op: 'retire', id: original.id }] } as any));
+  let releaseReply!: () => void;
+  const reply = new Promise<void>(resolve => { releaseReply = resolve; });
+  h.setDuringSend(() => reply);
+  h.setDuringInterrupt(() => releaseReply());
+  let releaseDispatch!: () => void;
+  const dispatchReply = new Promise<void>(resolve => { releaseDispatch = resolve; });
+  const dispatch = h.runtime.dispatchRequest.bind(h.runtime);
+  const delayed = vi.spyOn(h.runtime, 'dispatchRequest').mockImplementation(async (...args) => {
+    const accepted = await dispatch(...args);
+    await dispatchReply;
+    return accepted;
+  });
+  const interrupt = vi.spyOn(h.runtime, 'interrupt');
+  try {
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RUN_TIMEOUT' });
+    const [job] = await h.repos.memoryJobs.listScope(scope);
+    expect(job).toMatchObject({ state: 'running', requests: [expect.any(Object)] });
+    expect((await h.store.getState(scope)).running).toBeDefined();
+    expect(await h.pipeline.requestConsolidation(scope)).toBe('running');
+    releaseDispatch();
+    await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined());
+    expect(delayed).toHaveBeenCalledOnce();
+    const accepted = h.runtime.lookupAcceptedTask(job!.requests[0]!)!;
+    expect(interrupt).toHaveBeenCalledExactlyOnceWith(job!.sessionId, accepted.task.id, 'installation_owner');
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(job!.sessionId))[0]!.status).toBe('interrupted'));
+    releaseReply();
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    expect((await h.store.list(scope)).map(entry => entry.id)).toContain(original.id);
+    expect((await h.repos.memoryJobs.listScope(scope))[0]!.receipt).toBeUndefined();
+    // A retry settles the same interrupted request instead of dispatching another turn.
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RUN_FAILED' });
+    expect(delayed).toHaveBeenCalledOnce();
+    expect(await h.repos.memoryJobs.listScope(scope)).toHaveLength(1);
+  } finally {
+    releaseDispatch();
+    releaseReply();
+  }
+});
+
+it('keeps a timed out preparation job and resumes its stable session without a second job', async () => {
+  const h = await harness('legacy', 1000000, 100);
+  const write = h.projection.write.bind(h.projection);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  vi.spyOn(h.projection, 'write').mockImplementationOnce(async target => { await gate; return write(target); });
+  try {
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RUN_TIMEOUT' });
+    const [job] = await h.repos.memoryJobs.listScope(scope);
+    expect(job).toMatchObject({ state: 'prepared', requests: [] });
+    expect(await h.pipeline.requestConsolidation(scope)).toBe('running');
+    release();
+    await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined());
+    expect(h.prompts).toEqual([]);
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+    const jobs = await h.repos.memoryJobs.listScope(scope);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({ id: job!.id, sessionId: job!.sessionId, state: 'settled' });
+    expect(h.prompts).toHaveLength(1);
+  } finally { release(); }
 });
