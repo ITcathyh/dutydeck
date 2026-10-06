@@ -1126,6 +1126,22 @@ function describeMemoryError(error?: string) {
   return ` \`${error}\`（${memoryErrorText(error) ?? '未知错误'}）`;
 }
 
+/**
+ * /status 里的一行记忆状态：最近一次成功的提取或整理时间，以及各类后台任务最近一次失败的时间和原因。
+ * 只有「该类任务最近一次运行失败」时才有失败记录（成功后清除），原因只在最近一次运行就是它时才知道。
+ */
+export function renderLarkMemoryStatusLine(status: LarkMemoryStatus): string {
+  const updatedAt = [status.lastExtractionAt, status.lastConsolidationAt].filter((value): value is string => Boolean(value)).sort().at(-1);
+  const failures = new Map<string, { at: string; reason: string }>();
+  for (const [kind, at] of Object.entries(status.lastFailureAt ?? {})) if (at) failures.set(kind, { at, reason: '原因未记录' });
+  const run = status.lastRun;
+  if (run && !run.ok) failures.set(run.kind, { at: run.at, reason: larkMemoryErrorLabel(run.error) });
+  const failureText = failures.size
+    ? `最近失败：${[...failures].map(([kind, item]) => `${runKindLabels[kind as 'extraction' | 'consolidation']} ${formatTime(item.at)}（${item.reason}）`).join('、')}`
+    : '最近无失败';
+  return `**记忆**：上次更新 ${updatedAt ? formatTime(updatedAt) : '尚未更新'}；${failureText}`;
+}
+
 /** /memory 回执末尾的后台运行状态：上次运行及其结果、待提取轮次、上次提取与整理时间。 */
 export function renderLarkMemoryStatus(status: LarkMemoryStatus): string {
   const run = status.lastRun;

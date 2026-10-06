@@ -10,7 +10,7 @@ import { validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session
 import { collectLarkTaskContext } from './task-context.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type LarkMemoryScope } from './memory.js';
-import { renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
+import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
 import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
@@ -918,7 +918,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         else {
           let context: Awaited<ReturnType<typeof collectLarkTaskContext>>;
           try {
-            context = await withLarkContextReadTimeout(collectLarkTaskContext({ event, prompt, resources: task.resources, service: this.service, ...previous }), '话题上下文读取');
+            context = await withLarkContextReadTimeout(collectLarkTaskContext({ event, prompt, resources: task.resources, service: this.service, selfAppId: config.appId, ...previous }), '话题上下文读取');
           } catch (error) { await failContextRead(error, session); return; }
           if (this.stopped || task.turn !== currentTurn || await this.supersededTurn(task, session)) return;
           materialPrompt = context.agentPrompt;
@@ -1333,7 +1333,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           }
         }
 
-        const index = renderMemoryIndex(entries, state, { ...(shared ? { currentChatId: event.chatId } : {}), sharedEntries });
+        const index = renderMemoryIndex(entries, state, { ...(shared ? { currentChatId: event.chatId } : {}), sharedEntries, query: materialPrompt.slice(0, 2_000), budget: relevantMemoryBudget });
         const memoryBlock = renderLarkMemoryInjection(index.text, {
           command: command ?? 'dutydeck',
           directory: projection.directoryFor(scope),

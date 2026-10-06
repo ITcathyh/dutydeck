@@ -378,3 +378,21 @@ describe('resolveLarkSession ask posture', () => {
     expect(runtime.stop).toHaveBeenNthCalledWith(2, pty.id);
   });
 });
+
+describe('materializeLarkResources 卡片图片', () => {
+  it('卡片图片下载失败只汇总一句，不阻断其余图片', async () => {
+    const service = { downloadMessageResource: vi.fn(async (_messageId: string, key: string) => {
+      if (key !== 'img_ok') throw new Error('boom');
+      return { data: new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]), contentType: 'image/gif' };
+    }) };
+    const resources = [
+      { key: 'img_ok', type: 'image' as const, label: '卡片图片 1', fromCard: true },
+      { key: 'img_bad1', type: 'image' as const, label: '卡片图片 2', fromCard: true },
+      { key: 'img_bad2', type: 'image' as const, label: '卡片图片 3', fromCard: true }
+    ];
+    const result = await materializeLarkResources('om_card', '排查告警', resources, service);
+    expect(result).toContain('卡片图片 1已下载到本地');
+    expect(result).toContain('卡片图片 2 张未能下载');
+    expect(result).not.toContain('你无法读取该附件');
+  });
+});
