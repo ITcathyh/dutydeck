@@ -527,13 +527,17 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (inbox) await this.inbox!.update(inbox, { state: 'failed', error: reason });
   }
 
-  /** 群参与判定为 act 时，按发送者本人的显式请求走同一条授权、领取与执行路径。 */
+  /** 群参与判定为 act、或告警订阅起初筛时，按发送者本人的显式请求走同一条授权、领取与执行路径。 */
   adopt(event: LarkMessageEvent, config: StoredLarkConfig) {
     return this.handle(event, config, false, true);
   }
 
   /** retrying：首卡重试重新走入站处理时传入原任务，按它触发时的 epoch 判断 /new。 */
   async handle(event: LarkMessageEvent, config: StoredLarkConfig, recovering = false, adopted = false, retrying?: LarkTask) {
+    // 告警初筛的消息已由群参与观察和判过，这里不再观察、不过机器人回合门禁（订阅自带去重和每小时上限）；
+    // 发起人不是这条消息的发送者，要按群成员重新确认。重启恢复时同样按受理处理。
+    const triage = event.triage;
+    if (triage) adopted = true;
     if (this.workflowOptions.store) {
       const current = await readLarkConfig(this.workflowOptions.store, config.appId);
       if (!current?.listening) return;
@@ -576,8 +580,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const addressed = explicit || requestContinuation;
     // 话题内免 @ 续聊也算在叫它，可以直接改档或问「为什么没回」；是否接手仍按下方原规则。
     const topicContinuation = Boolean(continuedTopic) && !botSender;
-    const participation = await this.workflowOptions.participation?.handle(event, config, { explicit: addressed || pendingAskContinuation || commandInteraction, botOpenId: this.botOpenId,
-      addressed: (addressed || topicContinuation) && !recognizedCommand && !recovering });
+    const participation = triage ? undefined : await this.workflowOptions.participation?.handle(event, config, { explicit: addressed || pendingAskContinuation || commandInteraction, botOpenId: this.botOpenId,
+      addressed: (addressed || topicContinuation) && !recognizedCommand && !recovering, ownedTopic: topicContinuation });
     if (this.handledMessages.has(event.messageId)) return;
     // 改档短语、「为什么没回」已由群参与直接回应；「没问你」这类纠正只记录，不当成新请求。
     if (participation?.handled) return;
@@ -588,7 +592,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     // 约束，访问控制在没配成员名单时又对机器人一律放行，所以刷屏回路只能在这里封口。
     // 判定失败按挡下处理：门禁读不到状态时放行等于把回路重新打开。
     // 被挡下的回合只留门禁记录，绝不向群里发消息——那本身就是噪音。
-    if (shouldWake && event.chatType === 'group' && this.workflowOptions.participation) {
+    if (shouldWake && event.chatType === 'group' && this.workflowOptions.participation && !triage) {
       let botTurnGate: string | undefined;
       try {
         botTurnGate = await this.workflowOptions.participation.guardBotTurn(event, config, { botOpenId: this.botOpenId });
@@ -602,7 +606,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       }
     }
     if (shouldWake && event.chatType === 'group' && this.groupManager) {
-      const decision = await this.groupManager.authorize(config.appId, event.chatId, event.senderOpenId, entryAction, undefined, { memberObserved: !recovering });
+      const decision = await this.groupManager.authorize(config.appId, event.chatId, event.senderOpenId, entryAction, undefined, { memberObserved: !recovering && !triage });
       if (decision && !decision.allowed) {
         await this.rejectIncoming(event, config, decision.code === 'talk_required' ? '当前账号没有此群的任务访问权限。' : decision.reason, addressed);
         return;
@@ -658,6 +662,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       if (inbox) await this.inbox!.update(inbox, { state: 'failed', error: '消息解析失败' });
       return;
     }
+    if (triage) prompt = `${triage}\n${prompt}`;
     if (inbox?.request) { prompt = inbox.request.prompt; resources = inbox.request.resources; scopeId = inbox.request.scopeId; }
     // 这条曾并入前一条排队消息：先按合并意图收口，决定执行合并后的原文还是自己的原文（见 resumeMergedInbox）。
     if (inbox?.request && inbox.mergeFrom) prompt = await this.resumeMergedInbox(inbox);

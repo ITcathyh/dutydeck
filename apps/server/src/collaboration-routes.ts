@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { RuntimeError, collaborationScopeSchema, updateCollaborationSettingsInputSchema, updateFollowupInputSchema, type CollaborationScope } from '@dutydeck/shared';
+import { RuntimeError, alarmSubscriptionSchema, collaborationScopeSchema, updateCollaborationSettingsInputSchema, updateFollowupInputSchema, type CollaborationScope } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { CollaborationService } from './collaboration-service.js';
 import type { CollaborationEvaluation } from './collaboration-evaluation.js';
@@ -20,7 +20,15 @@ export interface CollaborationRouteOptions {
   onChange?(scope: CollaborationScope): Promise<void>;
   /** Agent 发起的委托创建：不立即生效，改发确认卡，用户确认后才创建。未提供时直接创建。 */
   confirmMandate?(scope: CollaborationScope, actorId: string, body: unknown, origin: { threadRootMessageId?: string }): Promise<unknown>;
+  /** Web 改群分工（接话人、告警初筛订阅），见 LarkGroupParticipation.updateDuty。 */
+  updateDuty?(scope: CollaborationScope, patch: z.infer<typeof dutyPatchSchema>, actorId: string): Promise<unknown>;
 }
+/** 接话人只能设成本 Bot（self）或清掉（null）；告警订阅的确认人不能在 Web 上改。 */
+const dutyPatchSchema = z.object({
+  expectedRevision: z.number().int().min(0),
+  responder: z.literal('self').nullable().optional(),
+  alarm: alarmSubscriptionSchema.omit({ requesterId: true }).nullable().optional()
+}).strict();
 const feedbackSchema = z.object({ correction: z.string().trim().min(1).max(4000), expectedAction: z.enum(['silent', 'reply', 'act']).optional() }).strict();
 const replaySchema = z.object({ decisionIds: z.array(z.string().min(1)).min(1).max(50), policyVersion: z.string().min(1).max(64).optional() }).strict();
 function parse<S extends z.ZodTypeAny>(schema: S, value: unknown): z.output<S> {
@@ -100,6 +108,13 @@ export async function registerCollaborationRoutes(app: FastifyInstance, options:
       await options.bootstrap(ctx.scope); return { bootstrap: await repo.getBootstrap(ctx.scope) };
     });
   }
+  // 群分工只在 Web 群设置里改，Agent 工具不改。
+  app.patch('/api/lark/groups/:appId/:chatId/collaboration/duty', async request => {
+    const ctx = await managementContext(request);
+    await options.service.require(ctx.scope, ctx.actorId, 'manage');
+    if (!options.updateDuty) throw new RuntimeError('COLLABORATION_DUTY_UNAVAILABLE', '当前服务不能修改群分工。', 503);
+    return options.updateDuty(ctx.scope, parse(dutyPatchSchema, request.body), ctx.actorId);
+  });
   // Each installed source must independently authenticate and derive its scope.
   app.post<{ Params: { sourceId: string } }>('/api/collaboration/events/:sourceId', async request => {
     const headers = Object.fromEntries(Object.entries(request.headers).map(([key, value]) => [key, typeof value === 'string' ? value : undefined]));

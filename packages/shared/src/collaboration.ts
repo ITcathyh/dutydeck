@@ -70,6 +70,54 @@ export const updateCollaborationSettingsInputSchema = z.object({
 });
 export type UpdateCollaborationSettingsInput = z.infer<typeof updateCollaborationSettingsInputSchema>;
 
+/**
+ * 告警初筛订阅：来源 Bot 在本群发的消息命中后不走参与判定，直接在告警话题里起一个初筛任务。
+ * 每个 Bot 实例各存一份，只管自己。
+ */
+export const alarmSubscriptionSchema = z.object({
+  enabled: z.boolean(),
+  /** 来源 Bot：appId 用来匹配消息发送者，name 只用于展示。 */
+  sources: z.array(z.object({ appId: z.string().trim().min(1).max(128), name: z.string().trim().max(128).optional() }).strict()).max(20),
+  /** 级别关键字（如 P0、critical），告警文本包含任一个才分析，不分大小写；空表示不过滤。 */
+  levels: z.array(z.string().trim().min(1).max(32)).max(20),
+  /** 同一条告警（指纹相同）多少小时内只分析一次。 */
+  dedupeHours: z.number().int().min(1).max(168),
+  maxPerHour: z.number().int().min(1).max(30),
+  /** 初筛任务以谁的名义发起：在群里确认订阅的人（open_id）。没有时不起任务。 */
+  requesterId: z.string().trim().min(1).max(128).optional()
+}).strict();
+export type AlarmSubscription = z.infer<typeof alarmSubscriptionSchema>;
+export const ALARM_DEDUPE_HOURS = 6;
+export const ALARM_MAX_PER_HOUR = 3;
+
+/** 接话人：多 Bot 群里没 @ 任何 Bot 的消息只由它判定和回复。since 是生效时间，收到更早的声明时不回退。 */
+export const groupResponderSchema = z.object({
+  appId: z.string().trim().min(1).max(128),
+  name: z.string().trim().max(128).optional(),
+  since: z.string().datetime()
+}).strict();
+export type GroupResponder = z.infer<typeof groupResponderSchema>;
+
+/** 本 Bot 在群里的分工：告警初筛订阅和它所知的接话人。 */
+export const collaborationDutySchema = z.object({
+  scope: collaborationScopeSchema,
+  revision: z.number().int().min(0),
+  responder: groupResponderSchema.optional(),
+  alarm: alarmSubscriptionSchema.optional(),
+  updatedAt: z.string().datetime()
+}).strict();
+export type CollaborationDuty = z.infer<typeof collaborationDutySchema>;
+
+/** null 表示清掉，不传表示不改。 */
+export const updateCollaborationDutyInputSchema = z.object({
+  expectedRevision: z.number().int().min(0),
+  responder: groupResponderSchema.nullable().optional(),
+  alarm: alarmSubscriptionSchema.nullable().optional()
+}).strict().refine(input => input.responder !== undefined || input.alarm !== undefined, {
+  message: 'At least one field must be updated'
+});
+export type UpdateCollaborationDutyInput = z.infer<typeof updateCollaborationDutyInputSchema>;
+
 export const senderKinds = ['human', 'bot', 'system'] as const;
 export type SenderKind = (typeof senderKinds)[number];
 
@@ -391,12 +439,15 @@ export const BOT_TURN_LIMIT_PER_HOUR = 6;
 export const BOT_LOOP_DEPTH_LIMIT = 3;
 /** 标记「月度成本上限已用满，未判定」。没有调用模型，不计入判定预算。 */
 export const USAGE_CAP_GATE = 'usage_cap';
+/** 标记「告警订阅对一条来源 Bot 消息的处理」：起了初筛任务或因级别、重复、上限跳过。不调模型，不是参与判定。 */
+export const ALARM_TRIAGE_RECORD = 'alarm_triage';
 
 /** 不代表一次模型判定的记录标记，统计判定用量时必须全部排除。 */
-const nonDecisionGates = new Set<string>([DECISION_BUDGET_GATE, BOT_TURN_RECORD, BOT_LOOP_GATE, USAGE_CAP_GATE]);
+const nonDecisionGates = new Set<string>([DECISION_BUDGET_GATE, BOT_TURN_RECORD, BOT_LOOP_GATE, USAGE_CAP_GATE, ALARM_TRIAGE_RECORD]);
 const gateOf = (item: Pick<CollaborationDecision, 'inputSnapshot'>) => String((item.inputSnapshot as { gate?: unknown }).gate ?? '');
-/** 判定记录是否是闸门留痕（预算、成本上限、机器人回合），不是对某条消息的判断。 */
+/** 判定记录是否是闸门留痕（预算、成本上限、机器人回合、告警订阅），不是参与判定对某条人类消息的判断。 */
 export const isDecisionGate = (item: Pick<CollaborationDecision, 'inputSnapshot'>): boolean => nonDecisionGates.has(gateOf(item));
+export const isAlarmRecord = (item: Pick<CollaborationDecision, 'inputSnapshot'>): boolean => gateOf(item) === ALARM_TRIAGE_RECORD;
 
 /**
  * 判定来源，存在 inputSnapshot.decider 里；inputSnapshot 其余部分仍是可回放的判定输入。
@@ -595,6 +646,8 @@ export type CollaborationSnapshot = z.infer<typeof collaborationSnapshotSchema>;
 export interface CollaborationRepository {
   getSettings(scope: CollaborationScope): Promise<CollaborationSettings>;
   updateSettings(scope: CollaborationScope, patch: UpdateCollaborationSettingsInput, actorId: string): Promise<CollaborationSettings>;
+  getDuty(scope: CollaborationScope): Promise<CollaborationDuty>;
+  updateDuty(scope: CollaborationScope, patch: UpdateCollaborationDutyInput, actorId: string): Promise<CollaborationDuty>;
   observe(input: ObserveCollaborationInput): Promise<{ observation: CollaborationObservation; created: boolean; changed: boolean; contextRevision: number }>;
   listObservations(scope: CollaborationScope, options?: ListObservationsOptions): Promise<CollaborationObservation[]>;
   snapshot(scope: CollaborationScope, limit?: number): Promise<CollaborationSnapshot>;
