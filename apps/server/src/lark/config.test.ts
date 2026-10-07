@@ -808,3 +808,24 @@ describe('idle context compaction settings', () => {
     expect(config).toMatchObject({ idleCompactEnabled: false, idleCompactHours: 24 });
   });
 });
+
+describe('ADHD 友好输出开关', () => {
+  it('旧配置缺字段按关闭处理，显式打开落库，再保存未带开关时继承，非布尔值拒绝', async () => {
+    const repository = seedBots([{ appId: 'cli_adhd', appSecret: 'secret' }, { appId: 'cli_dirty', appSecret: 'secret', adhdMode: 'yes' }]);
+    const [legacy, dirty] = await readLarkConfigs(repository);
+    expect(legacy!.adhdMode).toBe(false);
+    expect(dirty!.adhdMode).toBe(false);
+    expect(publicLarkConfig(legacy!).adhdMode).toBe(false);
+
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_adhd', adhdMode: true });
+    expect(JSON.parse((await repository.get(larkBotsConfigKey))!)[0]).toMatchObject({ adhdMode: true });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_adhd', preInjectPrompt: 'hi' });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ adhdMode: true, preInjectPrompt: 'hi' });
+    expect(publicLarkConfig((await readLarkConfigs(repository))[0]!).adhdMode).toBe(true);
+
+    await expect(saveLarkConfig(repository, undefined, { originalAppId: 'cli_adhd', adhdMode: 'on' as unknown as boolean }))
+      .rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', statusCode: 400 });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_adhd', adhdMode: false });
+    expect((await readLarkConfigs(repository))[0]!.adhdMode).toBe(false);
+  });
+});

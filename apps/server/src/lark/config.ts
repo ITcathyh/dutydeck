@@ -125,6 +125,8 @@ export interface StoredLarkConfig {
   completionReactionOnly: boolean;
   /** 中间进展完全静默，只保留最终结果，默认关闭。可被群级 presentationOverride 覆盖。 */
   silentProgress: boolean;
+  /** ADHD 友好输出，默认关闭；打开后每轮飞书任务在用户请求前注入 larkAdhdModePrompt。 */
+  adhdMode?: boolean;
   allowedUsers: LarkAllowedUser[];
   allowedEmails: string[];
   allowedBots: LarkAllowedUser[];
@@ -222,6 +224,7 @@ export interface SaveLarkConfigInput {
   compactTrace?: boolean;
   completionReactionOnly?: boolean;
   silentProgress?: boolean;
+  adhdMode?: boolean;
   allowedUsers?: LarkAllowedUser[];
   allowedEmails?: string[];
   allowedBots?: LarkAllowedUser[];
@@ -298,6 +301,7 @@ export interface PublicLarkConfig {
   compactTrace: boolean;
   completionReactionOnly: boolean;
   silentProgress: boolean;
+  adhdMode: boolean;
   allowedUsers: LarkAllowedUser[];
   allowedEmails: string[];
   allowedBots: LarkAllowedUser[];
@@ -581,6 +585,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     compactTrace: parsed.compactTrace !== false,
     completionReactionOnly: parsed.completionReactionOnly === true,
     silentProgress: parsed.silentProgress === true,
+    adhdMode: parsed.adhdMode === true,
     allowedUsers: normalizeAllowedUsers(parsed.allowedUsers),
     allowedEmails: normalizeEmails(parsed.allowedEmails),
     allowedBots: normalizeAllowedUsers(parsed.allowedBots),
@@ -680,6 +685,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   compactTrace: config.compactTrace !== false,
   completionReactionOnly: config.completionReactionOnly === true,
   silentProgress: config.silentProgress === true,
+  adhdMode: config.adhdMode === true,
   allowedUsers: config.allowedUsers,
   allowedEmails: config.allowedEmails,
   allowedBots: config.allowedBots,
@@ -727,6 +733,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (input.idleCompactEnabled !== undefined && typeof input.idleCompactEnabled !== 'boolean') {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '空闲后自动压缩上下文开关必须为布尔值。', 400);
   }
+  if (input.adhdMode !== undefined && typeof input.adhdMode !== 'boolean') {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', 'ADHD 友好输出开关必须为布尔值。', 400);
+  }
   if (input.idleCompactHours !== undefined && (!Number.isSafeInteger(input.idleCompactHours) || input.idleCompactHours < 1)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '空闲时长必须是至少 1 小时的整数。', 400);
   }
@@ -764,6 +773,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const compactTrace = input.compactTrace ?? current?.compactTrace ?? true;
   const completionReactionOnly = input.completionReactionOnly ?? current?.completionReactionOnly ?? false;
   const silentProgress = input.silentProgress ?? current?.silentProgress ?? false;
+  const adhdMode = input.adhdMode ?? current?.adhdMode ?? false;
   const defaultModel = input.defaultModel === undefined ? current?.defaultModel : input.defaultModel.trim() || undefined;
   const defaultReasoningEffort = input.defaultReasoningEffort === undefined ? current?.defaultReasoningEffort : input.defaultReasoningEffort.trim() || undefined;
   const fullTrustConfirmed = input.fullTrustConfirmed ?? current?.fullTrustConfirmed ?? false;
@@ -877,6 +887,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     compactTrace,
     completionReactionOnly,
     silentProgress,
+    adhdMode,
     allowedUsers,
     allowedEmails,
     allowedBots,

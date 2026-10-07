@@ -4,6 +4,7 @@ import type { StoredLarkConfig } from './config.js';
 import type { LarkLongConnectionListenerOptions } from './listener.js';
 import { isLarkMessageRateLimit, larkRateLimitBackoffMs, LarkLongConnectionListener, LarkLongConnectionListenerPool, LarkMessageCoordinator, patchRejectedCardDelta } from './listener.js';
 import { buildLarkCard, LarkServiceError } from './service.js';
+import { larkAdhdModePrompt } from './adhd-mode.js';
 
 // 仅「监听接入层」用例需要截获 SDK 的事件注册；其余协调器用例直接构造 coordinator，
 // 不受此 mock 影响（它们传入的是手写 service 替身，永不实例化 lark.Client）。
@@ -1606,6 +1607,29 @@ describe('Lark message coordinator', () => {
     expect(runtime.send.mock.calls[0]?.[2]).toContain('[Dutydeck 预注入 Prompt]\n始终使用中文回答。');
     expect(runtime.send.mock.calls[0]?.[2]).toContain('请 rm -rf 临时目录');
     expect(runtime.send.mock.calls[0]?.[3]).toEqual(expect.objectContaining({ enabled: true, authorized: false, actorEmail: 'user@example.com' }));
+  });
+
+  it('injects the ADHD output rules only for bots that enable them', async () => {
+    const promptFor = async (adhdMode?: boolean) => {
+      const runtime = {
+        start: vi.fn(async () => session), getSession: vi.fn(async () => session),
+        subscribe: vi.fn(() => vi.fn()), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
+      };
+      const service = {
+        addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })), send: vi.fn(async () => ({ messageId: 'om_card' })),
+        deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
+      };
+      const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+      coordinator.handle({ messageId: 'om_adhd', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"修一下登录"}', senderOpenId: 'ou_user', mentions: [] }, adhdMode === undefined ? config : { ...config, adhdMode });
+      await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
+      return String(runtime.send.mock.calls[0]?.[2]);
+    };
+    const enabled = await promptFor(true);
+    expect(enabled.indexOf('[飞书结果说明]')).toBeGreaterThanOrEqual(0);
+    expect(enabled.indexOf('[飞书结果说明]')).toBeLessThan(enabled.indexOf(larkAdhdModePrompt));
+    expect(enabled.indexOf(larkAdhdModePrompt)).toBeLessThan(enabled.indexOf('[用户请求]'));
+    expect(await promptFor()).not.toContain('[Dutydeck 输出模式 · ADHD 友好]');
+    expect(await promptFor(false)).not.toContain('[Dutydeck 输出模式 · ADHD 友好]');
   });
 
   it('treats an empty high-risk list as every user from the normal whitelist', async () => {
