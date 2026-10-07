@@ -502,15 +502,65 @@
             "padding": "10px 12px 10px 12px",
             "elements": [
               {
-                "tag": "div",
-                "element_id": "task_status",
-                "width": "auto",
+                "tag": "column_set",
+                "element_id": "task_action_row",
+                "flex_mode": "none",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
                 "margin": "0px",
-                "text": {
-                  "tag": "lark_md",
-                  "content": "<font color='grey'>已用时 <耗时></font>",
-                  "text_size": "small"
-                }
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "div",
+                        "element_id": "task_status",
+                        "width": "auto",
+                        "margin": "0px",
+                        "text": {
+                          "tag": "lark_md",
+                          "content": "<font color='grey'>已用时 <耗时></font>",
+                          "text_size": "small"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "重试"
+                        },
+                        "type": "primary_text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "refresh_outlined",
+                          "color": "blue"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "retry",
+                              "task_id": "om_in_1",
+                              "turn": "1"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "retry"
+                      }
+                    ]
+                  }
+                ]
               },
               {
                 "tag": "markdown",

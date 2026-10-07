@@ -67,8 +67,9 @@ export class LarkConfirmCards {
     try {
       const config = await this.options.readConfig(input.scope.appId, input.scope.chatId);
       if (!config?.listening) throw new Error('机器人未在监听');
+      // 等人点的卡按进行中且等人处理来画（橙色），与审批卡、定时委托确认卡一致。
       const card = await this.options.serviceFor(config).reply({ messageId: input.replyTo.messageId, replyInThread: Boolean(input.replyTo.threadId),
-        state: 'completed', readOnly: true, retryable: false, taskName: input.title, statusLabel: '待确认', awaitingHuman: true,
+        state: 'running', readOnly: true, retryable: false, taskName: input.title, statusLabel: '待确认', awaitingHuman: true,
         elements: buildLarkConfirmElements({ confirmId: id, chatId: input.scope.chatId, body: input.summary, pending: true }), idempotencyKey: id.slice(0, 50) });
       const saved = await repo.updateAction(input.scope, id, { expectedRevision: begun.action.revision, status: 'intent', receipt: card.messageId });
       return recordOf(saved);
@@ -126,7 +127,7 @@ export class LarkConfirmCards {
     if (!record.cardMessageId) return true;
     try {
       const config = await this.options.readConfig(record.scope.appId, record.scope.chatId);
-      if (config) await this.options.serviceFor(config).update({ messageId: record.cardMessageId, state: status === 'failed' ? 'failed' : 'completed', readOnly: true, retryable: false,
+      if (config) await this.options.serviceFor(config).update({ messageId: record.cardMessageId, state: status === 'failed' ? 'failed' : status === 'suppressed' ? 'interrupted' : 'completed', readOnly: true, retryable: false,
         taskName: record.title, statusLabel: label, elements: buildLarkConfirmElements({ confirmId: record.id, chatId: record.scope.chatId, body, pending: false }) });
     } catch (updateError) {
       // 卡片没刷新不影响结果，结果已经写进确认单；按钮再点会提示已处理。

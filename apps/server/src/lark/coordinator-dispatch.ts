@@ -1191,7 +1191,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           ? larkConclusionHeadline((elements.find(element => element.element_id === 'final_output') as { content?: unknown } | undefined)?.content) : undefined;
         const resultCardInput = {
           ...cardContext, cardKind: 'result' as const, state, taskId: task.id, taskName: conclusionTitle ?? taskTitle,
-          sessionId: task.sessionId, turn: currentTurn, readOnly: true,
+          // 只有完成的结果卡是只读收据；失败、中断、取消时过程卡已收成一行，「重试」只能放在这张卡上。
+          sessionId: task.sessionId, turn: currentTurn, readOnly: state === 'completed',
           elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,
           capabilities: { ...this.capabilitiesForTask(task), ...verification.capabilities, ...resultActions, ...(continueCause ? { canContinueInPlace: true } : {}) },
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})

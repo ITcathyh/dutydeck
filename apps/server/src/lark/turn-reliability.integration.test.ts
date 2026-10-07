@@ -437,6 +437,21 @@ describe('无进展超时、取消没确认（A4）', () => {
   });
 });
 
+describe('失败的结果卡带「重试」', () => {
+  it('过程卡收成一行后，结果卡上的「重试」按原请求重新执行', async () => {
+    const h = await topic();
+    h.steps.push({ kind: 'idle_timeout' });
+    await h.send('om_first', '整理本周报警并回复群里');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && Boolean(await h.resultCard()));
+    const result = (await h.resultCard())!;
+    expect(buttonTexts(result.card)).toEqual(expect.arrayContaining(['重试', '在原对话继续']));
+    expect(await h.coordinator.handleAction(callbackValueOf(result.card, 'retry'), 'ou_alice', { messageId: result.messageId, chatId: 'oc_group' }))
+      .toMatchObject({ type: 'success' });
+    await until(() => h.prompts.length === 2);
+    expect(h.prompts[1]!.prompt).toContain('整理本周报警并回复群里');
+  });
+});
+
 describe('Agent 不可用（A1）', () => {
   it('没登录：之后的消息不开新一轮，直接说明怎么修；/status 显示不可用；状态命令确认登录后照常执行', async () => {
     const states: Array<'logged_in' | 'logged_out'> = ['logged_out', 'logged_in'];
