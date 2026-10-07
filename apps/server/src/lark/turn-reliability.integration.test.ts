@@ -450,6 +450,20 @@ describe('失败的结果卡带「重试」', () => {
     await until(() => h.prompts.length === 2);
     expect(h.prompts[1]!.prompt).toContain('整理本周报警并回复群里');
   });
+
+  it('服务重启后点结果卡上的「重试」：提示改说「重来」，说了就按原请求重新执行', async () => {
+    const h = await topic();
+    h.steps.push({ kind: 'idle_timeout' });
+    await h.send('om_first', '整理本周报警并回复群里');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && Boolean(await h.resultCard()));
+    const result = (await h.resultCard())!;
+    await h.restart();
+    expect(await h.coordinator.handleAction(callbackValueOf(result.card, 'retry'), 'ou_alice', { messageId: result.messageId, chatId: 'oc_group' }))
+      .toMatchObject({ type: 'warning', content: expect.stringContaining('说「重来」或发送 /retry') });
+    await h.send('om_again', '重来');
+    await until(() => h.prompts.length === 2);
+    expect(h.prompts[1]!.prompt).toContain('整理本周报警并回复群里');
+  });
 });
 
 describe('Agent 不可用（A1）', () => {
