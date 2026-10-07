@@ -389,6 +389,8 @@ export interface ConfigRepository {
   get(key: string): Promise<string | undefined>;
   set(key: string, value: string): Promise<void>;
   compareAndSet?(key: string, expected: string | undefined, value: string): Promise<boolean>;
+  /** CAS 删除 state=ignored 的飞书 Inbox 记录；其他配置键不可使用此清理入口。 */
+  remove?(key: string, expected: string): Promise<boolean>;
   list?(prefix: string): Promise<Array<{ key: string; value: string }>>;
 }
 export interface ChannelMapping { id: string; channel: string; externalId: string; sessionId: string; extra?: string | null; createdAt: string }

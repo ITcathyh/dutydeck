@@ -364,6 +364,10 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private inputUuid: string | undefined;
   private readonly inputEntries = new Set<string>();
   private inputError: NormalizedDriverEvent | undefined;
+  private terminalScope = false;
+  private turnTerminal = false;
+  private restoringTurn = false;
+  private receiptEntry: unknown;
 
   constructor(opts: ClaudeTranscriptTailerOptions) {
     const explicit = opts.transcriptPath;
@@ -386,10 +390,19 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
           ? resolveOnce
           : () => resolveClaudeTranscriptPath(opts.cwd, opts.env),
       mapEntry: entry => {
+        const nativeInput = claudeInputText(entry) !== undefined && entry.isSidechain !== true;
+        const notification = entry.turnOrigin === 'task_notification' || entry.origin?.kind === 'task-notification';
+        // A recovery cursor is captured before submission. Its first fresh
+        // business input supplies the same boundary as an exact live receipt.
+        if (this.restoringTurn && nativeInput && !notification) {
+          this.bindInput(entry); this.restoringTurn = false;
+        } else if (nativeInput && !notification && entry !== this.receiptEntry) {
+          this.terminalScope = false; this.turnTerminal = false;
+        }
         if (this.inputUuid && entry.isSidechain !== true) {
           // A different native user input starts another turn, even when it
           // follows our history. Its errors cannot settle our submission.
-          if (claudeInputText(entry) !== undefined && entry.uuid !== this.inputUuid) {
+          if (nativeInput && !notification && entry.uuid !== this.inputUuid) {
             this.inputEntries.clear(); this.turnError = undefined; this.inputError = undefined;
           } else if (typeof entry.uuid === 'string' && this.inputEntries.has(entry.parentUuid)) {
             this.inputEntries.add(entry.uuid);
@@ -397,6 +410,25 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         }
         const pending = claudePendingBackgroundWork(entry);
         if (pending !== undefined) this.backgroundWork = pending;
+        const terminal = pending === 0 || (entry.type === 'assistant'
+          && (['end_turn', 'stop_sequence'].includes(entry.message?.stop_reason)
+            || (entry.message?.model === '<synthetic>' && entry.isApiErrorMessage !== true)));
+        const bound = this.terminalScope && entry.isSidechain !== true
+          && (this.inputUuid ? this.inputEntries.has(entry.uuid)
+            : entry.parentUuid === undefined || this.inputEntries.has(entry.parentUuid));
+        // Legacy inputs can lack UUIDs. Keep their fresh non-terminal chain,
+        // but never let an unrelated terminal introduce its own ancestry.
+        if (this.terminalScope && !this.inputUuid && entry.isSidechain !== true && typeof entry.uuid === 'string' && (!terminal || bound)) {
+          this.inputEntries.add(entry.uuid);
+        }
+        if (bound) {
+          if (notification || (pending !== undefined && pending > 0)) this.turnTerminal = false;
+          else if (terminal) {
+            this.turnTerminal = true;
+          } else if (entry.type === 'assistant') {
+            this.turnTerminal = false;
+          }
+        }
         const apiError = claudeApiError(entry);
         if (apiError) {
           // Right after a text step the runtime already completes the turn (a
@@ -420,10 +452,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
       },
       inputText: claudeInputText,
       onInputReceipt: entry => {
-        this.inputUuid = typeof entry.uuid === 'string' ? entry.uuid : undefined;
-        this.inputEntries.clear();
-        this.lastActivity = undefined; this.turnError = undefined; this.inputError = undefined;
-        if (this.inputUuid) this.inputEntries.add(this.inputUuid);
+        this.bindInput(entry);
       },
       pollIntervalMs: opts.pollIntervalMs,
       /**
@@ -443,21 +472,39 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
        * does.)
        */
       watchForSwitch: !explicit,
+      resetMapping: () => {
+        this.terminalScope = false; this.turnTerminal = false;
+        this.inputUuid = undefined; this.inputEntries.clear(); this.receiptEntry = undefined; this.restoringTurn = false;
+      },
     });
   }
 
   start(): void { this.tailer.start(); }
   flush(): Promise<void> { return this.tailer.flush(); }
   checkpoint(): TranscriptCursor { return this.tailer.checkpoint(); }
-  restore(cursor: TranscriptCursor): void { this.tailer.restore(cursor); }
+  restore(cursor: TranscriptCursor): void {
+    this.tailer.restore(cursor);
+    this.terminalScope = false; this.turnTerminal = false; this.restoringTurn = true;
+  }
   stop(): void { this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
   onProgress(cb: () => void): void { this.tailer.onProgress(cb); }
   waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
+    this.terminalScope = false; this.turnTerminal = false; this.restoringTurn = false;
+    this.receiptEntry = undefined;
     this.inputUuid = undefined; this.inputEntries.clear(); this.inputError = undefined;
     return this.tailer.waitForInput(prompt, signal);
   }
   pendingBackgroundWork(): number { return this.backgroundWork; }
+  hasTurnTerminal(): boolean { return this.turnTerminal; }
+  private bindInput(entry: any): void {
+    this.receiptEntry = entry;
+    this.terminalScope = true; this.turnTerminal = false;
+    this.inputUuid = typeof entry.uuid === 'string' ? entry.uuid : undefined;
+    this.inputEntries.clear();
+    this.lastActivity = undefined; this.turnError = undefined; this.inputError = undefined;
+    if (this.inputUuid) this.inputEntries.add(this.inputUuid);
+  }
   resetBackgroundWork(): void { this.backgroundWork = 0; }
   takeTurnError(): NormalizedDriverEvent | undefined {
     const error = this.turnError;

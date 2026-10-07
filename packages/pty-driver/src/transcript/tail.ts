@@ -53,6 +53,9 @@ export interface TranscriptEventSource {
   /** A native terminal error whose ancestry is bound to the exact input
    * receipt. It may finish the submitted turn without terminal screen evidence. */
   takeInputError?(): NormalizedDriverEvent | undefined;
+  /** Native terminal marker belonging to the current exact input receipt or
+   * recovery cursor. Output text alone is not terminal evidence. */
+  hasTurnTerminal?(): boolean;
 }
 
 /** Loose shape of a parsed JSONL entry — mappers narrow per CLI schema. */

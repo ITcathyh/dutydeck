@@ -237,6 +237,7 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
       data: { code: 'claude_api_rate_limit', message: expect.stringContaining('额度约在 9:40pm (Asia/Shanghai) 重置') },
     });
     // Nothing carries over into the next turn.
+    submitted = false;
     const next = driver.send('再试一次');
     await waitForSubmission();
     answer(transcript, '这次成功了。');

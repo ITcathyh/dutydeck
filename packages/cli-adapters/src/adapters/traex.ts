@@ -15,8 +15,7 @@ const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 // 验证过（0.201.1-alpha.5 … 0.201.2-alpha.2）：
 //  - spinner 帧：连续字符串 "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 //  - spinner 标签集 1（思考/工作轮换）与集 2（审批/排队）
-// traex 从 Codex fork 时删掉了 "esc to interrupt" 页脚提示，所以 Codex 的
-// 双锚点 pattern 在这里不成立。
+// 新版本也会显示行首 "esc to interrupt"；旧版本仍只显示 spinner/排队状态。
 const TRAEX_SPINNER_FRAMES = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 
 const TRAEX_SPINNER_LABELS = [
@@ -46,11 +45,14 @@ const TRAEX_SPINNER_LABELS = [
   'Working…',
   'Working on it…',
   'Queued for capacity',
+  'Queued for next turn',
 ] as const;
 
 /** 行锚定的独立排队提示串，active busy pattern 与 pre-idle 静态 latch 共用。 */
 const TRAEX_QUEUE_STATIC_ARMS = [
   'Queued for capacity',
+  'Queued for next turn',
+  'esc to interrupt',
   "Too many requests right now\\. You're in the queue",
 ];
 
@@ -69,7 +71,7 @@ const TRAEX_ACTIVE_BUSY_PATTERN = new RegExp(
  */
 const TRAEX_STATIC_BUSY_PATTERN = new RegExp(
   [
-    `[${TRAEX_SPINNER_FRAMES}][ \\t]?Queued for capacity`,
+    `[${TRAEX_SPINNER_FRAMES}][ \\t]?Queued for (?:capacity|next turn)`,
     ...TRAEX_QUEUE_STATIC_ARMS.map(arm => `(?:^|[\\n\\r])[ \\t]*${arm}`),
   ].join('|'),
   'i',
@@ -125,6 +127,7 @@ export function createTraexAdapter(): CliAdapter {
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
+      await pollScreenReady(backend, 'TraeX', { busyPattern: TRAEX_ACTIVE_BUSY_PATTERN });
       prompt = prompt.replace(/\r\n?/g, '\n');
       // 与 Codex 相同的 bracketed-paste 策略：多行消息不能被内嵌 \n 拆成多个 turn。
       if (backend.pasteText) {

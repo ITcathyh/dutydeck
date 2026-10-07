@@ -126,10 +126,17 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
       const f = fixture();
       const backend = new TmuxBackend(f.name, { ownerId: f.ownerId });
       const adapter = { ...createCliAdapter(adapterId)!, buildArgs: () => [], prepareInput: undefined };
+      const agent = config(f.cwd);
+      if (adapterId === 'traex') {
+        // This case tests transport rejection after readiness, so render an
+        // initialized composer in the real pane instead of a shell prompt.
+        agent.args = ['-c', "printf '%s\\n' 'TraeX' '❯ Ask TraeCode CLI' 'Context 100% left'; sleep 30"];
+      }
       const events: NormalizedDriverEvent[] = [];
-      const driver = new PtyCliDriver({ agent: config(f.cwd), adapter, backend, onEvent(event) { events.push(event); }, onExit() {}, sessionId });
+      const driver = new PtyCliDriver({ agent, adapter, backend, onEvent(event) { events.push(event); }, onExit() {}, sessionId });
       try {
         await driver.start();
+        if (adapterId === 'traex') await waitFor(async () => expect(await backend.captureCurrentScreen()).toContain('Context 100% left'));
         await driver.checkpoint();
         const writes = vi.spyOn(backend, 'write');
         const enters = vi.spyOn(backend, 'sendSpecialKeys');

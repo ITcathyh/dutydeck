@@ -24,6 +24,63 @@ const openDatabase = async () => {
 };
 
 describe('persistent Lark task inbox', () => {
+  it('durably captures before routing, preserves the first payload, and recovers in receipt order', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const inbox = new LarkTaskInbox(repositories.config);
+      const original = message({ messageId: 'om_z', content: '{"text":"original"}' });
+      const captures = await Promise.all([inbox.capture('app_one', original), inbox.capture('app_one', { ...original, content: '{"text":"replacement"}' })]);
+      expect(captures.filter(Boolean)).toHaveLength(1);
+      expect(await inbox.lookup('app_one', original.messageId)).toMatchObject({ state: 'unrouted', event: original });
+      await inbox.capture('app_one', message({ messageId: 'om_a' }));
+      const restarted = new LarkTaskInbox(repositories.config);
+      expect((await restarted.recoverable('app_one')).map(record => record.event.messageId)).toEqual(['om_z', 'om_a']);
+      const claimed = await restarted.claim('app_one', { ...original, content: '{"text":"forged"}' });
+      expect(claimed).toMatchObject({ state: 'received', event: original });
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('bounds ignored retention without deleting active receipts or allowing CAS deletion to remove a changed record', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const inbox = new LarkTaskInbox(repositories.config);
+      const active = await inbox.capture('app_one', message({ messageId: 'active' }));
+      for (let index = 0; index < 5; index++) {
+        const record = (await inbox.capture('app_one', message({ messageId: `ignored_${index}` })))!;
+        await inbox.update(record, { state: 'ignored' });
+      }
+      await inbox.pruneIgnored('app_one', 2);
+      expect((await repositories.config.list!('lark.inbox.app_one.')).map(row => JSON.parse(row.value).state).sort()).toEqual(['ignored', 'ignored', 'unrouted']);
+      expect(await inbox.lookup('app_one', 'active')).toEqual(active);
+      const row = (await repositories.config.list!('lark.inbox.app_one.')).find(row => JSON.parse(row.value).state === 'ignored')!;
+      await repositories.config.set(row.key, JSON.stringify({ ...JSON.parse(row.value), state: 'accepted' }));
+      expect(await repositories.config.remove!(row.key, row.value)).toBe(false);
+      await expect(repositories.config.remove!('lark.inbox.app_one.active', JSON.stringify(active))).rejects.toThrow();
+      for (const key of ['lark.bots', 'runtime_native_context:session', 'bot.process', 'migration.marker']) await expect(repositories.config.remove!(key, '{}')).rejects.toThrow();
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('keeps at most 5000 recent ignored receipts and removes 24-hour-old ignored records without touching received inputs', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const inbox = new LarkTaskInbox(repositories.config);
+      await inbox.claim('app_one', message({ messageId: 'received' }));
+      const at = new Date().toISOString();
+      for (let index = 0; index < 5001; index++) {
+        const event = message({ messageId: `ignored_${index}` });
+        await repositories.config.set(`lark.inbox.app_one.${event.messageId}`, JSON.stringify({ appId: 'app_one', event, boot: '', state: 'ignored', receivedAt: at, receiptOrder: index }));
+      }
+      await repositories.config.set('lark.inbox.app_one.expired', JSON.stringify({ appId: 'app_one', event: message({ messageId: 'expired' }), boot: '', state: 'ignored', receivedAt: new Date(Date.now() - 86_400_001).toISOString() }));
+      await inbox.pruneIgnored('app_one');
+      const rows = await repositories.config.list!('lark.inbox.app_one.');
+      expect(rows).toHaveLength(5001);
+      expect(rows.filter(row => JSON.parse(row.value).state === 'ignored')).toHaveLength(5000);
+      expect(await inbox.lookup('app_one', 'expired')).toBeUndefined();
+      expect(await inbox.lookup('app_one', 'ignored_0')).toBeUndefined();
+      expect(await inbox.lookup('app_one', 'received')).toMatchObject({ state: 'received' });
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('claims a same-app message once even under concurrent claims, while apps stay isolated', async () => {
     const { directory, repositories } = await openDatabase();
     try {

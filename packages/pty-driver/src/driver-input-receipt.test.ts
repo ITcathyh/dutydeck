@@ -41,12 +41,68 @@ beforeEach(async () => {
 });
 afterEach(async () => { await driver.stop(); vi.useRealTimers(); rmSync(directory, { recursive: true, force: true }); });
 
+it('publishes a final written 400ms after the completion check before its only completed event', async () => {
+  const { pending } = await arm();
+  receipt(prompts[0]!);
+  appendFileSync(transcript, line({ type: 'assistant', message: { role: 'assistant', stop_reason: null,
+    content: [{ type: 'text', text: 'intermediate commentary' }] } }));
+  await vi.advanceTimersByTimeAsync(350);
+  output(screen(finalScreen));
+  await vi.advanceTimersByTimeAsync(600);
+  expect(events.filter(event => event.type === 'completed')).toHaveLength(0);
+  // Independent of send resolving: the real late-final reproduction waited
+  // 400ms after the premature completion at roughly 500ms from this screen.
+  await vi.advanceTimersByTimeAsync(300);
+  answer();
+  await vi.advanceTimersByTimeAsync(1_000); await pending;
+  expect(events.filter(event => ['text', 'completed'].includes(event.type)).map(event => [event.type, event.data.text]))
+    .toEqual([['text', 'intermediate commentary'], ['text', 'fixture answer'], ['completed', undefined]]);
+});
+
+it('bounds markerless legacy completion even with agent timeout disabled', async () => {
+  const { pending } = await arm(); receipt(prompts[0]!);
+  appendFileSync(transcript, line({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'legacy answer' }] } }));
+  await vi.advanceTimersByTimeAsync(350); output(screen(finalScreen));
+  await vi.advanceTimersByTimeAsync(600); expect(events.filter(event => event.type === 'completed')).toHaveLength(0);
+  await vi.advanceTimersByTimeAsync(3_000); await pending;
+  expect(events.filter(event => ['text', 'completed'].includes(event.type)).map(event => event.type)).toEqual(['text', 'completed']);
+});
+
+it('accepts a duration-only terminal as soon as it arrives after commentary', async () => {
+  const { pending } = await arm(); receipt(prompts[0]!);
+  appendFileSync(transcript, line({ type: 'assistant', message: { role: 'assistant', stop_reason: null, content: [{ type: 'text', text: 'answer' }] } }));
+  await vi.advanceTimersByTimeAsync(350); output(screen(finalScreen));
+  await vi.advanceTimersByTimeAsync(600); expect(events.filter(event => event.type === 'completed')).toHaveLength(0);
+  appendFileSync(transcript, line({ type: 'system', subtype: 'turn_duration' }));
+  await vi.advanceTimersByTimeAsync(800); await pending;
+  expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+});
+
+it('does not let a stopped terminal wait complete from a late final', async () => {
+  const { pending } = await arm(); receipt(prompts[0]!);
+  appendFileSync(transcript, line({ type: 'assistant', message: { role: 'assistant', stop_reason: null, content: [{ type: 'text', text: 'commentary' }] } }));
+  await vi.advanceTimersByTimeAsync(350); output(screen(finalScreen)); await vi.advanceTimersByTimeAsync(600);
+  await driver.stop(); await expect(pending).rejects.toThrow('Driver stopped');
+  answer(); await vi.advanceTimersByTimeAsync(4_000);
+  expect(events.filter(event => event.type === 'completed')).toHaveLength(0);
+});
+
+it('preserves synthetic provider failure without the compatibility wait', async () => {
+  const { pending } = await arm(); receipt(prompts[0]!);
+  appendFileSync(transcript, line({ type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'No model reply' }] } }));
+  await vi.advanceTimersByTimeAsync(350); output(screen(finalScreen));
+  await vi.advanceTimersByTimeAsync(600); await pending;
+  expect(events.filter(event => ['text', 'error', 'completed'].includes(event.type)).map(event => event.type)).toEqual(['error', 'completed']);
+});
+
 it('holds completion ahead of receipt and rechecks the final screen without another PTY redraw', async () => {
   const { pending } = await arm('中文👩‍💻\r\nsecond'); let done = false; void pending.then(() => { done = true; });
   answer(); output(screen(finalScreen)); await vi.advanceTimersByTimeAsync(4_000);
   expect(events.some(event => event.type === 'text')).toBe(true);
   expect(events.filter(event => event.type === 'completed')).toHaveLength(0); expect(done).toBe(false);
-  receipt(prompts[0]!.replace(/\r\n?/g, '\n')); await vi.advanceTimersByTimeAsync(1_000); await pending;
+  // The terminal predates the exact receipt, so only the bounded legacy
+  // compatibility path can close this intentionally reordered dialect.
+  receipt(prompts[0]!.replace(/\r\n?/g, '\n')); await vi.advanceTimersByTimeAsync(3_000); await pending;
   expect(phases()).toEqual(['pending', 'confirmed']); expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
   expect(events.findIndex(event => event.data?.phase === 'confirmed')).toBeLessThan(events.findIndex(event => event.type === 'completed'));
 });
@@ -125,7 +181,7 @@ it('does not let a late receipt from a cancelled generation release the next sub
   const second = await arm('new');
   receipt('old'); answer(); output(screen(finalScreen)); await vi.advanceTimersByTimeAsync(4_000);
   expect(phases()).toEqual(['pending']); expect(events.filter(event => event.type === 'completed')).toHaveLength(0);
-  receipt(prompts[0]!); await vi.advanceTimersByTimeAsync(1_000); await second.pending;
+  receipt(prompts[0]!); await vi.advanceTimersByTimeAsync(3_000); await second.pending;
   expect(phases()).toEqual(['pending', 'confirmed']); expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
 });
 

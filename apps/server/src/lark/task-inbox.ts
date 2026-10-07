@@ -6,11 +6,15 @@ import type { LarkContextCursor } from './task-context.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkRedispatchInfo } from './turn-redispatch.js';
 
+export type LarkInboxAdoption = Pick<LarkMessageEvent, 'senderOpenId' | 'senderType' | 'triage' | 'rootId' | 'threadId' | 'parentId'>;
 export interface LarkInboxRecord {
   appId: string;
   event: LarkMessageEvent;
+  /** 已验证编辑或内部告警派生时保留原始输入；event 用于重新路由或执行。 */
+  originalEvent?: LarkMessageEvent;
   boot: string;
-  state: 'received' | 'accepted' | 'command' | 'failed';
+  state: 'unrouted' | 'ignored' | 'received' | 'accepted' | 'command' | 'failed';
+  receiptOrder?: number;
   /** 首次落库时间。任务通道的合成事件没有 createTime，启动恢复靠它判断记录是否过期。 */
   receivedAt?: string;
   sessionId?: string;
@@ -44,16 +48,60 @@ export const isLarkFirstCardUndelivered = (error: unknown) => error instanceof E
 export class LarkTaskInbox {
   private readonly boot = randomUUID();
   private readonly updates = new WeakMap<LarkInboxRecord, Promise<void>>();
+  private receiptOrder = 0;
   constructor(private readonly store: ConfigRepository) {
     if (!store.compareAndSet || !store.list) throw new Error('Lark inbox requires persistent CAS and prefix listing');
   }
-  async claim(appId: string, event: LarkMessageEvent): Promise<LarkInboxRecord | undefined> {
+  /** ACK 前仅做本地 CAS；重投不能替换原文，也不能重复启动路由。写入异常直接交给 SDK。 */
+  async capture(appId: string, event: LarkMessageEvent): Promise<LarkInboxRecord | undefined> {
+    const { triage: _untrustedTriage, ...original } = event;
+    const key = prefix(appId) + event.messageId;
+    for (;;) {
+      const raw = await this.store.get(key);
+      const old = raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
+      if (old && (old.state !== 'unrouted' || old.boot === this.boot)) return undefined;
+      const next: LarkInboxRecord = { ...(old ?? { appId, event: original, state: 'unrouted', receivedAt: new Date().toISOString(), receiptOrder: ++this.receiptOrder }), boot: this.boot };
+      if (await this.store.compareAndSet!(key, raw, JSON.stringify(next))) return next;
+    }
+  }
+  async lookup(appId: string, messageId: string): Promise<LarkInboxRecord | undefined> {
+    const raw = await this.store.get(prefix(appId) + messageId);
+    return raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
+  }
+  async ownUnrouted(record: LarkInboxRecord) {
+    const next = { ...record, boot: this.boot };
+    return await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next)) ? next : undefined;
+  }
+  /** 已验证编辑可重开 ignored 或已交还的 unrouted；正在认领/已受理的记录不替换。 */
+  async reopenIgnored(appId: string, event: LarkMessageEvent) {
+    const { triage: _untrustedTriage, ...original } = event;
+    const old = await this.lookup(appId, event.messageId);
+    if (!old || (old.state !== 'ignored' && (old.state !== 'unrouted' || old.boot))) return;
+    const next: LarkInboxRecord = { appId, event: original, originalEvent: old.originalEvent ?? old.event,
+      state: 'unrouted', boot: '', receivedAt: new Date().toISOString(), receiptOrder: ++this.receiptOrder };
+    await this.store.compareAndSet!(prefix(appId) + event.messageId, JSON.stringify(old), JSON.stringify(next));
+  }
+  /** 普通群消息只保留短命去重回执；未路由、已受理和命令记录绝不参与清理。 */
+  async pruneIgnored(appId: string, limit = 5_000) {
+    if (!this.store.remove) return;
+    const rows = (await this.store.list!(prefix(appId))).map(row => ({ ...row, record: JSON.parse(row.value) as LarkInboxRecord }))
+      .filter(row => row.record.state === 'ignored')
+      .sort((a, b) => Date.parse(b.record.receivedAt ?? '') - Date.parse(a.record.receivedAt ?? '') || (b.record.receiptOrder ?? 0) - (a.record.receiptOrder ?? 0));
+    for (const [index, row] of rows.entries()) {
+      if (index >= limit || Date.now() - Date.parse(row.record.receivedAt ?? '') > 86_400_000) await this.store.remove(row.key, row.value);
+    }
+  }
+  async claim(appId: string, event: LarkMessageEvent, allowIgnored = false, adoption?: LarkInboxAdoption): Promise<LarkInboxRecord | undefined> {
     const key = prefix(appId) + event.messageId;
     const raw = await this.store.get(key);
     const old = raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
-    if (old && (old.state !== 'received' || old.boot === this.boot)) return undefined;
+    if (old && old.state !== 'unrouted' && !(allowIgnored && old.state === 'ignored') && (old.state !== 'received' || old.boot === this.boot)) return undefined;
     // Always replay the originally persisted request, never replacement event content.
-    const next: LarkInboxRecord = { ...(old ?? { appId, event, state: 'received' as const, receivedAt: new Date().toISOString() }), boot: this.boot };
+    const next: LarkInboxRecord = { ...(old ?? { appId, event, receivedAt: new Date().toISOString() }), state: 'received', boot: this.boot };
+    if (adoption) {
+      next.originalEvent = old?.originalEvent ?? old?.event;
+      next.event = { ...next.event, ...adoption };
+    }
     return await this.store.compareAndSet!(key, raw, JSON.stringify(next)) ? next : undefined;
   }
   /**
@@ -66,11 +114,11 @@ export class LarkTaskInbox {
     return this.store.compareAndSet!(prefix(appId) + event.messageId, undefined, JSON.stringify(record));
   }
   /**
-   * 交还本进程的认领：boot 置空，仍是 received。本进程稍后重试时 claim 能重新认领；
+   * 交还本进程的认领：boot 置空，保留 unrouted/received。本进程稍后可重新认领；
    * 进程先退出的话，重启后 recoverable 也会把它捞回来。记录已被改动时返回 undefined。
    */
   async release(record: LarkInboxRecord): Promise<LarkInboxRecord | undefined> {
-    if (record.state !== 'received') return undefined;
+    if (record.state !== 'received' && record.state !== 'unrouted') return undefined;
     const next: LarkInboxRecord = { ...record, boot: '' };
     return await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next)) ? next : undefined;
   }
@@ -107,6 +155,7 @@ export class LarkTaskInbox {
   }
   async recoverable(appId: string): Promise<LarkInboxRecord[]> {
     return (await this.store.list!(prefix(appId))).map(row => JSON.parse(row.value) as LarkInboxRecord)
-      .filter(record => record.state === 'received' && record.boot !== this.boot);
+      .filter(record => (record.state === 'received' || record.state === 'unrouted') && record.boot !== this.boot)
+      .sort((a, b) => Date.parse(a.receivedAt ?? '') - Date.parse(b.receivedAt ?? '') || (a.receiptOrder ?? 0) - (b.receiptOrder ?? 0));
   }
 }

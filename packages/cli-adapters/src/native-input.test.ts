@@ -1,6 +1,9 @@
 import { expect, it, vi } from 'vitest';
 import { createCliAdapter } from './factory.js';
 import { isInputReady } from './adapters/screen-ready-helper.js';
+import { readFileSync } from 'node:fs';
+
+const traexReady = (JSON.parse(readFileSync(new URL('./fixtures/traex-startup/native.json', import.meta.url), 'utf8')) as { loaded: string }).loaded;
 
 // Captured footer/composer shape from Codex 0.159.3's native resume smoke;
 // workspace, conversation title and response are harmless fixture values.
@@ -19,7 +22,8 @@ it.each(['codex', 'traex'])('%s pastes one normalized message and preserves Unic
   vi.useFakeTimers();
   try {
     const adapter = createCliAdapter(id), writes: string[] = [], keys: string[] = [];
-    const pending = adapter.writeInput({ write(data) { writes.push(data); }, pasteText(text) { writes.push(text); }, sendSpecialKeys(...value) { keys.push(...value); } }, '中文👩‍💻\u200c\u200b\r\nsecond\rthird');
+    const pending = adapter.writeInput({ readScreen: () => id === 'traex' ? traexReady : ready,
+      write(data) { writes.push(data); }, pasteText(text) { writes.push(text); }, sendSpecialKeys(...value) { keys.push(...value); } }, '中文👩‍💻\u200c\u200b\r\nsecond\rthird');
     await vi.advanceTimersByTimeAsync(1000); await pending;
     expect(writes).toEqual(['中文👩‍💻\u200c\u200b\nsecond\nthird']); expect(keys).toEqual(['Enter']);
     expect(adapter.capabilities.nativeInputReceipt).toBe(true);
