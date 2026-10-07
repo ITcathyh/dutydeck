@@ -13,6 +13,7 @@ import type { StoredLarkConfig } from './config.js';
 import type { ParticipationResult } from './readonly-decider.js';
 import { LarkContextBootstrap } from './context-bootstrap.js';
 import { responderClaimText, responderReleaseText } from './group-duty.js';
+import { buildLarkCard } from './service.js';
 
 const scope = { appId: 'cli_test', chatId: 'oc_test' };
 const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'test', listening: true, defaultAgentId: 'mock', workspace: '/tmp', fullTrustConfirmed: true,
@@ -1068,12 +1069,16 @@ describe('rule layer, participation levels and corrections (pilot sentences)', (
     await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
     expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_level', statusLabel: '待确认',
       elements: expect.arrayContaining([expect.objectContaining({ content: expect.stringContaining('把本群改成「积极」') })]) }));
+    // 等人点的确认卡和审批卡一样是橙色，确认后才变绿。
+    const templateOf = (input: unknown) => (buildLarkCard(input as Parameters<typeof buildLarkCard>[0]) as { header: { template: string } }).header.template;
+    expect(templateOf(h.service.reply.mock.calls[0]![0])).toBe('orange');
     const value = { dutydeck_confirm: 'confirm', confirm_id: await confirmIdOf(h), chat_id: scope.chatId };
     expect(await h.coordinator.handleAction(value, 'ou_b', { messageId: 'om_card', chatId: scope.chatId })).toMatchObject({ type: 'warning' });
     expect(applyLevel).not.toHaveBeenCalled();
     expect(await h.coordinator.handleAction(value, 'ou_a', { messageId: 'om_card', chatId: scope.chatId })).toMatchObject({ type: 'success', content: expect.stringContaining('积极') });
     expect(applyLevel).toHaveBeenCalledExactlyOnceWith(scope, 'eager', 'ou_a');
     expect(h.service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_card', statusLabel: '已确认' }));
+    expect(templateOf(h.service.update.mock.calls.at(-1)![0])).toBe('green');
     expect(await h.coordinator.handleAction(value, 'ou_admin', { messageId: 'om_card', chatId: scope.chatId })).toMatchObject({ type: 'info' });
     expect(applyLevel).toHaveBeenCalledOnce();
     // 改档短语由群参与直接回应，不建任务。
@@ -1092,6 +1097,8 @@ describe('rule layer, participation levels and corrections (pilot sentences)', (
     expect(await h.coordinator.handleAction(cancel, 'ou_b', { messageId: 'om_card', chatId: scope.chatId })).toMatchObject({ type: 'warning' });
     expect(await h.coordinator.handleAction(cancel, 'ou_a', { messageId: 'om_card', chatId: scope.chatId })).toEqual({ type: 'info', content: '已取消，没有改动。' });
     expect(h.service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_card', statusLabel: '已取消' }));
+    // 取消按中断画成灰色，不和「完成」同色。
+    expect((buildLarkCard(h.service.update.mock.calls.at(-1)![0] as Parameters<typeof buildLarkCard>[0]) as { header: { template: string } }).header.template).toBe('grey');
     expect(applyLevel).not.toHaveBeenCalled();
     expect(h.runtime.send).not.toHaveBeenCalled();
   });

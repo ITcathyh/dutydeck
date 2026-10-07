@@ -213,7 +213,7 @@
               }
             },
             "summary": {
-              "content": "工作已完成"
+              "content": "完成 · 总结一下这周的发布情况"
             }
           },
           "body": {
@@ -346,7 +346,7 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "工作已完成"
+              "content": "总结一下这周的发布情况"
             },
             "subtitle": {
               "tag": "plain_text",

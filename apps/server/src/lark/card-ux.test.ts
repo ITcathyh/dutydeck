@@ -47,6 +47,15 @@ describe('larkConclusionHeadline', () => {
     expect(larkConclusionHeadline(undefined)).toBeUndefined();
   });
 
+  it('skips narration and empty sentences, falling back after three', () => {
+    expect(larkConclusionHeadline('正在整理本周的报警。本周报警整理完成，按插话只列了 P0 级别。')).toBe('本周报警整理完成，按插话只列了 P0 级别');
+    expect(larkConclusionHeadline('先看一下日志。\n\n根因是磁盘满了。')).toBe('根因是磁盘满了');
+    expect(larkConclusionHeadline('工作已完成。')).toBeUndefined();
+    expect(larkConclusionHeadline('好的。正在处理。开始检查。已修复登录超时。')).toBeUndefined();
+    expect(larkConclusionHeadline('已完成：升级依赖')).toBe('已完成：升级依赖');
+    expect(larkConclusionHeadline('开始时间改成 9 点了。')).toBe('开始时间改成 9 点了');
+  });
+
   it('truncates long sentences with an ellipsis', () => {
     const headline = larkConclusionHeadline('字'.repeat(200), 40)!;
     expect(Array.from(headline)).toHaveLength(40);

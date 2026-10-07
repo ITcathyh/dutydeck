@@ -785,7 +785,7 @@
               }
             },
             "summary": {
-              "content": "正在整理本周的报警"
+              "content": "本周报警整理完成，按插话只列了 P0 级别"
             }
           },
           "body": {
@@ -918,7 +918,7 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "正在整理本周的报警"
+              "content": "本周报警整理完成，按插话只列了 P0 级别"
             },
             "subtitle": {
               "tag": "plain_text",

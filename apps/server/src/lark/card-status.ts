@@ -100,14 +100,19 @@ export function larkStoppedAtLabel(at: string | number | Date | undefined, now: 
 // 只是个栏目名、没有内容的行不当结论；超长结论转附件后卡上的节选标签同理。
 const headingOnly = /^(?:结论|总结|摘要|概述|小结|tl;?dr|正文开头节选（非完整结论）)[:：]?$/i;
 const needsYouLine = /^(?:\*\*)?需要你[：:]/;
+// 过程话（「正在整理…」「先看一下…」）和空话（「工作已完成」）不当标题：最多看前 3 句，都不行就回退到原来的说法。
+const narrationSentence = /^(?:我|让我|下面|接下来)?(?:正在|准备|先来|先看|先查|来看|看看|开始(?:检查|排查|处理|分析|整理|执行|看|查|修))/;
+const emptySentence = /^(?:好的?|收到|明白|ok|done|(?:工作|任务|全部|都)?(?:已经|已)?(?:完成|做完|搞定|处理完|处理好)了?)$/i;
+const headlineCandidates = 3;
 
 /**
- * 结论第一句：去掉 Markdown 符号，取第一个有内容的行的第一句，超过 maxChars 截断加省略号。
- * 代码块、表格、分隔线和「需要你：」行不参与；取不到时返回 undefined，调用方回退到原来的说法。
+ * 结论第一句：去掉 Markdown 符号，取第一个有内容的句子，超过 maxChars 截断加省略号。
+ * 代码块、表格、分隔线和「需要你：」行不参与，过程话和空话跳过；取不到时返回 undefined，调用方回退到原来的说法。
  */
 export function larkConclusionHeadline(markdown: unknown, maxChars = 120): string | undefined {
   if (typeof markdown !== 'string') return undefined;
   let inFence = false;
+  let skipped = 0;
   for (const raw of markdown.split('\n')) {
     const line = raw.trim();
     if (/^(?:```|~~~)/.test(line)) { inFence = !inFence; continue; }
@@ -120,11 +125,19 @@ export function larkConclusionHeadline(markdown: unknown, maxChars = 120): strin
       .replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&')
       .replace(/\s+/g, ' ').trim();
     if (!text || headingOnly.test(text)) continue;
-    const end = text.search(/[。！？；]|[.!?;](?=\s|$)/u);
-    const sentence = (end >= 0 ? text.slice(0, end + (/[！？!?]/.test(text[end]!) ? 1 : 0)) : text).trim();
-    if (!sentence) continue;
-    const characters = Array.from(sentence);
-    return characters.length <= maxChars ? sentence : `${characters.slice(0, Math.max(1, maxChars - 1)).join('').trimEnd()}…`;
+    let rest = text;
+    while (rest) {
+      const end = rest.search(/[。！？；]|[.!?;](?=\s|$)/u);
+      const sentence = (end >= 0 ? rest.slice(0, end + (/[！？!?]/.test(rest[end]!) ? 1 : 0)) : rest).trim();
+      rest = end >= 0 ? rest.slice(end + 1).trim() : '';
+      if (!sentence) continue;
+      if (narrationSentence.test(sentence) || emptySentence.test(sentence.replace(/[！？!?]+$/u, ''))) {
+        if (++skipped >= headlineCandidates) return undefined;
+        continue;
+      }
+      const characters = Array.from(sentence);
+      return characters.length <= maxChars ? sentence : `${characters.slice(0, Math.max(1, maxChars - 1)).join('').trimEnd()}…`;
+    }
   }
   return undefined;
 }
