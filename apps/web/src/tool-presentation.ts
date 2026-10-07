@@ -55,28 +55,6 @@ export function toolPresentation(data: TimelineEvent['data']): { kind: ToolKind;
   return { kind: 'tool', label: toolDisplayName(data), detail };
 }
 
-export function summarizeTools(events: TimelineEvent[]) {
-  const counts = new Map<ToolKind, { count: number; label: string }>();
-  for (const event of events) {
-    if (event.type !== 'tool_call' && event.type !== 'tool_result') continue;
-    const presentation = toolPresentation(event.data);
-    const current = counts.get(presentation.kind);
-    counts.set(presentation.kind, { count: (current?.count ?? 0) + 1, label: presentation.label });
-  }
-  return [...counts].map(([kind, { count, label }]) => {
-    if (kind === 'terminal') return `运行了${count > 1 ? ` ${count} 条` : ''}命令`;
-    if (kind === 'read') return `读取了${count > 1 ? ` ${count} 个` : ''}文件`;
-    if (kind === 'edit') return `编辑了${count > 1 ? ` ${count} 个` : ''}文件`;
-    if (kind === 'search') return `搜索了${count > 1 ? ` ${count} 次` : ''}内容`;
-    if (kind === 'web') return `访问了${count > 1 ? ` ${count} 个` : ''}网页`;
-    if (kind === 'git') return `执行了${count > 1 ? ` ${count} 次` : ''} Git 操作`;
-    if (kind === 'test') return `运行了${count > 1 ? ` ${count} 次` : ''}测试`;
-    if (kind === 'database') return `查询了${count > 1 ? ` ${count} 次` : ''}数据`;
-    if (kind === 'agent') return label === 'Agent 群协作' ? `进行了${count > 1 ? ` ${count} 次` : ''} Agent 群协作` : `调用了${count > 1 ? ` ${count} 个` : ''} Agent`;
-    return `使用了${count > 1 ? ` ${count} 次` : ''}${label}`;
-  }).join(' · ');
-}
-
 export function toolActionLabel(presentation: ReturnType<typeof toolPresentation>, terminal: boolean) {
   const prefix = terminal ? '已' : '正在';
   if (presentation.kind === 'terminal') return `${prefix}运行命令`;

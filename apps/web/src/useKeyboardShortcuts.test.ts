@@ -5,9 +5,7 @@ import {
   CHORD_TIMEOUT_MS,
   detectPlatform,
   formatShortcutKeys,
-  isChordKeys,
   isEditableTarget,
-  matchesShortcut,
   shortcutAvailability,
   shortcutDefinitions,
   useKeyboardShortcuts,
@@ -69,32 +67,53 @@ describe('formatShortcutKeys', () => {
   });
 });
 
-describe('matchesShortcut', () => {
+describe('快捷键事件匹配', () => {
   it('mac 用 metaKey 解析 Mod，不接受 ctrlKey', () => {
-    expect(matchesShortcut(new KeyboardEvent('keydown', { key: 'k', metaKey: true }), 'Mod+K', 'mac')).toBe(true);
-    expect(matchesShortcut(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }), 'Mod+K', 'mac')).toBe(false);
+    const palette = vi.fn();
+    renderShortcuts({ handlers: { 'command-palette': palette }, options: macOptions });
+    press('k', { metaKey: true });
+    expect(palette).toHaveBeenCalledTimes(1);
+    press('k', { ctrlKey: true });
+    expect(palette).toHaveBeenCalledTimes(1);
   });
 
   it('非 mac 用 ctrlKey 解析 Mod，不接受 metaKey', () => {
-    expect(matchesShortcut(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }), 'Mod+K', 'other')).toBe(true);
-    expect(matchesShortcut(new KeyboardEvent('keydown', { key: 'k', metaKey: true }), 'Mod+K', 'other')).toBe(false);
+    const palette = vi.fn();
+    renderShortcuts({ handlers: { 'command-palette': palette }, options: pcOptions });
+    press('k', { ctrlKey: true });
+    expect(palette).toHaveBeenCalledTimes(1);
+    press('k', { metaKey: true });
+    expect(palette).toHaveBeenCalledTimes(1);
   });
 
   it('多余修饰键不算命中：Mod+Shift+K 不等于 Mod+K', () => {
-    expect(matchesShortcut(new KeyboardEvent('keydown', { key: 'k', metaKey: true, shiftKey: true }), 'Mod+K', 'mac')).toBe(false);
-    expect(matchesShortcut(new KeyboardEvent('keydown', { key: 'k', metaKey: true, altKey: true }), 'Mod+K', 'mac')).toBe(false);
+    const palette = vi.fn();
+    renderShortcuts({ handlers: { 'command-palette': palette }, options: macOptions });
+    press('k', { metaKey: true, shiftKey: true });
+    expect(palette).not.toHaveBeenCalled();
+    press('k', { metaKey: true, altKey: true });
+    expect(palette).not.toHaveBeenCalled();
   });
 
   it('输入法组字中的事件一律不命中', () => {
-    const composing = new KeyboardEvent('keydown', { key: 'n' });
-    Object.defineProperty(composing, 'isComposing', { value: true });
-    expect(matchesShortcut(composing, 'n', 'other')).toBe(false);
+    const create = vi.fn();
+    renderShortcuts({ handlers: { 'create-task': create }, options: pcOptions });
+    const composing = new KeyboardEvent('keydown', { key: 'n', bubbles: true, cancelable: true, isComposing: true });
+    act(() => { document.body.dispatchEvent(composing); });
+    expect(create).not.toHaveBeenCalled();
+    expect(composing.defaultPrevented).toBe(false);
   });
 
-  it('和弦无法由单个事件命中', () => {
-    expect(matchesShortcut(new KeyboardEvent('keydown', { key: 'g' }), 'g t', 'other')).toBe(false);
-    expect(isChordKeys('g t')).toBe(true);
-    expect(isChordKeys('Mod+K')).toBe(false);
+  it('和弦等待第二个事件，Mod 组合键只需一个事件', () => {
+    const goTaskCenter = vi.fn();
+    const palette = vi.fn();
+    renderShortcuts({ handlers: { 'go-task-center': goTaskCenter, 'command-palette': palette }, options: macOptions });
+    press('g');
+    expect(goTaskCenter).not.toHaveBeenCalled();
+    press('t');
+    expect(goTaskCenter).toHaveBeenCalledTimes(1);
+    press('k', { metaKey: true });
+    expect(palette).toHaveBeenCalledTimes(1);
   });
 });
 

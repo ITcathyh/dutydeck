@@ -4,7 +4,6 @@ import { workspaceName } from './workspace-model';
 
 export type TaskSearchField = 'goal' | 'workspace' | 'agent';
 export type TaskSearchMatch = { session: Session; score: number; fields: TaskSearchField[] };
-export type TaskSearchHaystack = Record<TaskSearchField, string>;
 export type TaskSearchInput = { sessions: Session[]; summaries: Record<string, RunSummary>; agents: Agent[]; query: string };
 
 // 排序规则（打分只依赖文本，与当前时间无关，便于测试与预期一致）：
@@ -39,12 +38,6 @@ export function taskSearchCandidates(session: Session, summary?: RunSummary, age
     workspace: unique([workspaceName(sourceCwd), sourceCwd, workspaceName(cwd), cwd]),
     agent: unique([agent?.name, session.agentId])
   };
-}
-
-/** 归一化后的字段检索文本（候选串以空格连接）；查询词不含空格，因此不会跨候选串误命中。 */
-export function taskSearchHaystack(session: Session, summary?: RunSummary, agent?: Agent): TaskSearchHaystack {
-  const candidates = taskSearchCandidates(session, summary, agent);
-  return { goal: candidates.goal.join(' '), workspace: candidates.workspace.join(' '), agent: candidates.agent.join(' ') };
 }
 
 function bestIndex(term: string, values: string[]): number {

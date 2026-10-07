@@ -98,7 +98,7 @@ export interface AgentIdleTimeoutData { message: string; code: typeof AGENT_IDLE
  *  task               TaskRecord                               任务记录更新（运行时内部使用，driver 不发）
  *  raw_terminal       { text: string }                        未解析的终端输出，兜底通道，永不丢数据
  *
- * tool_call 与 tool_result 靠 id 关联（runtime 的 correlateToolCalls 按 id 合并）。
+ * tool_call 与 tool_result 靠 id 关联（runtime 按 id 合并）。
  */
 
 export type DriverSteeringOutcome = 'injected' | 'startedNewTurn' | 'promptRequired' | 'unsupported';

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Agent, RunSummary, Session } from './api';
-import { normalizeSearchQuery, searchTasks, taskSearchHaystack, taskSearchTerms } from './task-search';
+import { normalizeSearchQuery, searchTasks, taskSearchCandidates, taskSearchTerms } from './task-search';
 
 // 检索模型是纯函数：中文没有空格，所以基线必须是「大小写折叠后的子串匹配」而不是按空白分词；
 // 多词查询是 AND，词可以散落在不同字段。这里盯住的是最容易回归的四件事：
@@ -39,32 +39,32 @@ describe('normalizeSearchQuery', () => {
   });
 });
 
-describe('taskSearchHaystack', () => {
+describe('taskSearchCandidates', () => {
   it('工作区同时收录短名与完整 cwd，Agent 同时收录展示名与原始 id', () => {
-    const haystack = taskSearchHaystack(session('1', { cwd: '/repo/API', agentId: 'claude-code' }), summary('1', '修复登录超时'), agents[1]);
-    expect(haystack.goal).toBe('修复登录超时');
-    expect(haystack.workspace).toBe('api /repo/api');
-    expect(haystack.agent).toBe('claude code claude-code');
+    const candidates = taskSearchCandidates(session('1', { cwd: '/repo/API', agentId: 'claude-code' }), summary('1', '修复登录超时'), agents[1]);
+    expect(candidates.goal).toEqual(['修复登录超时']);
+    expect(candidates.workspace).toEqual(['api', '/repo/api']);
+    expect(candidates.agent).toEqual(['claude code', 'claude-code']);
   });
 
   it('goal 候选同时包含 session.name 与原 summary.prompt', () => {
-    const haystack = taskSearchHaystack(session('1', { name: '自定义发布任务' }), summary('1', '修复登录超时'));
-    expect(haystack.goal).toBe('自定义发布任务 修复登录超时');
+    const candidates = taskSearchCandidates(session('1', { name: '自定义发布任务' }), summary('1', '修复登录超时'));
+    expect(candidates.goal).toEqual(['自定义发布任务', '修复登录超时']);
   });
 
   it('没有任务目标时用 fallback 标题占位，而不是空串', () => {
-    expect(taskSearchHaystack(session('1', { source: 'lark' })).goal).toBe('来自飞书的任务');
-    expect(taskSearchHaystack(session('2'), summary('2', '   ')).goal).toBe('尚未获取任务目标');
+    expect(taskSearchCandidates(session('1', { source: 'lark' })).goal).toEqual(['来自飞书的任务']);
+    expect(taskSearchCandidates(session('2'), summary('2', '   ')).goal).toEqual(['尚未获取任务目标']);
   });
 
   it('独立 worktree 任务同时可按源项目目录和实际执行目录检索', () => {
-    const haystack = taskSearchHaystack(session('1', {
+    const candidates = taskSearchCandidates(session('1', {
       cwd: '/home/u/.dutydeck/workspaces/ses_one',
       workspaceMode: 'worktree',
       workspaceSourceCwd: '/repo/project'
     }));
     // 源项目短名/全路径在前（项目导航口径），实际执行目录仍可被检索到。
-    expect(haystack.workspace).toBe('project /repo/project ses_one /home/u/.dutydeck/workspaces/ses_one');
+    expect(candidates.workspace).toEqual(['project', '/repo/project', 'ses_one', '/home/u/.dutydeck/workspaces/ses_one']);
   });
 });
 

@@ -47,7 +47,6 @@ import {
   createDutydeckPersistentBackend,
   createPtyCliDriver,
   PTY_AGENT_CONTRIBUTIONS,
-  type BackendProbes,
 } from '@dutydeck/pty-driver';
 import { claudeDataDir, codexHome, traeHome } from '@dutydeck/pty-driver';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
@@ -185,11 +184,8 @@ export { configuredRootsForSession, createInsightResolver };
 
 /** Production PTY-CLI policy: persistent tmux or a hard failure, never an
  * implicit downgrade to the in-process PtyBackend. */
-export function createProductionPtyBackend(
-  sessionId: string,
-  probes?: BackendProbes,
-) {
-  return createDutydeckPersistentBackend(sessionId, probes);
+export function createProductionPtyBackend(sessionId: string) {
+  return createDutydeckPersistentBackend(sessionId);
 }
 
 export async function startLocalServer(options: StartLocalServerOptions = {}): Promise<LocalServer> {

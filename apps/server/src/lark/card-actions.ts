@@ -136,10 +136,8 @@ type LarkCardActionDefinition = {
   action: LarkCardActionName;
   /** 复用既有 element_id，保证历史测试与快照的定位方式不变。 */
   elementId: string;
-  /** 按钮文案。飞书按钮列很窄，长文案会折行，所以短标签 + hint 分工。 */
+  /** 按钮文案。 */
   label: string;
-  /** 「动作 + 对象 + 预期结果」的完整说明，供卡片用 markdown 补充（schema 2.0 拒绝 note 标签，ErrCode 200861）。 */
-  hint: string;
   /**
    * 操作按钮一律无边框：它们是正文之后的次要控件，带边框或红框会比正文还抢眼。
    * 语义由文案和图标承担；只有失败后的「重试」是这张卡要读者做的下一步，用蓝字点出。
@@ -204,7 +202,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'cancel',
     elementId: 'cancel',
     label: '取消',
-    hint: '取消排队任务，Agent 不会开始执行',
     buttonType: 'text',
     icon: 'close-small_outlined',
     states: ['queued'],
@@ -215,7 +212,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'interrupt',
     elementId: 'interrupt',
     label: '中断',
-    hint: '中断当前执行，已完成的步骤会保留',
     buttonType: 'text',
     icon: 'stop_outlined',
     states: ['running'],
@@ -226,7 +222,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'retry',
     elementId: 'retry',
     label: '重试',
-    hint: '查看失败详情，修正后重新运行',
     buttonType: 'primary_text',
     // 与「刷新」同一个图标：两者的可用状态不相交，不会同时出现在一张卡上。
     icon: 'refresh_outlined',
@@ -240,7 +235,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'verify',
     elementId: 'verify',
     label: '运行验证',
-    hint: '在工作目录执行已配置的验证命令，记录退出码与代码指纹',
     buttonType: 'text',
     icon: 'safe-pass_outlined',
     // 排队/执行中不给：验证要求会话空闲，runtime 会直接回 SESSION_BUSY。
@@ -254,7 +248,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'use_verification_command',
     elementId: 'use_verification_command',
     label: '使用这个验证命令',
-    hint: '把推断出的验证命令保存到机器人配置，之后改了代码会自动验证',
     buttonType: 'text',
     icon: 'safe-pass_outlined',
     // 只保存配置，卡上已交付的结论不变，所以能出现在收据上。候选命令只在跑完的卡上推断。
@@ -269,7 +262,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'steer_promote',
     elementId: 'steer_promote',
     label: '中断当前这一轮，先做这条',
-    hint: '把这条提到队首，并中断正在执行的那一轮',
     buttonType: 'text',
     icon: 'stop_outlined',
     states: ['queued'],
@@ -281,7 +273,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'steer_inject',
     elementId: 'steer_inject',
     label: '插进当前这一轮',
-    hint: '把这条送进正在执行的那一轮，不另起一轮',
     buttonType: 'text',
     icon: 'reply_outlined',
     states: ['queued'],
@@ -292,7 +283,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'refresh',
     elementId: 'refresh',
     label: '刷新',
-    hint: '立即拉取任务最新状态，卡片心跳受频率限制可能滞后',
     buttonType: 'text',
     icon: 'refresh_outlined',
     // 只在非终态提供：终态已经收敛，刷新不会带来新信息。
@@ -304,7 +294,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'run_in_new_session',
     elementId: 'run_in_new_session',
     label: larkRelaunchLabels.run_in_new_session,
-    hint: '取消这条排队请求，在本话题的新会话中执行原文；原会话留给管理员核对',
     buttonType: 'primary_text',
     icon: 'add-chat_outlined',
     // 只给排队受阻的请求：它从未开始执行，换到新会话不会重复任何操作。
@@ -316,7 +305,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'rerun_in_new_session',
     elementId: 'rerun_in_new_session',
     label: larkRelaunchLabels.rerun_in_new_session,
-    hint: '原执行结果未确认，重新执行可能把已经做过的操作再做一次',
     buttonType: 'primary_text',
     icon: 'repeat_outlined',
     states: ['reconcile_required', 'legacy_unresolved'],
@@ -327,7 +315,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'continue_in_place',
     elementId: 'continue_in_place',
     label: larkReplayLabels.continue_in_place,
-    hint: '在原来的会话里让 Agent 接着做，不重新发送原请求',
     buttonType: 'primary_text',
     icon: 'reply_outlined',
     states: ['queued', 'reconcile_required', 'failed', 'interrupted'],
@@ -340,7 +327,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'replay_turn',
     elementId: 'replay_turn',
     label: larkReplayLabels.replay_turn,
-    hint: '服务重启打断的这一轮再执行一次，已经做过的操作可能重复',
     buttonType: 'primary_text',
     icon: 'repeat_outlined',
     states: ['reconcile_required'],
@@ -351,7 +337,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'abandon_turn',
     elementId: 'abandon_turn',
     label: larkReplayLabels.abandon_turn,
-    hint: '不再执行这一轮，执行结果保持未知',
     buttonType: 'text',
     icon: 'close-small_outlined',
     states: ['reconcile_required'],
@@ -362,7 +347,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'ask_plain',
     elementId: 'ask_plain',
     label: '说人话',
-    hint: '用大白话重述上面的结论，先说结论再说影响，不重新调查',
     buttonType: 'text',
     icon: 'chat_outlined',
     states: ['completed'],
@@ -378,7 +362,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'ask_reply',
     elementId: 'ask_reply',
     label: '给我对外回复',
-    hint: '按上面的结论写一段能直接转发给同事或群里的回复，不重新调查',
     buttonType: 'text',
     icon: 'reply_outlined',
     states: ['completed'],
@@ -393,7 +376,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'ask_detail',
     elementId: 'ask_detail',
     label: '再详细点',
-    hint: '在上面结论的基础上展开细节和证据，补充不够确定的地方',
     buttonType: 'text',
     icon: 'details_outlined',
     states: ['completed'],
@@ -408,7 +390,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'schedule_daily',
     elementId: 'schedule_daily',
     label: '每天自动执行',
-    hint: '在这个话题里每天同一时间自动执行这条请求，结果回报到这里',
     buttonType: 'text',
     icon: 'time_outlined',
     states: ['completed'],
@@ -422,7 +403,6 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     action: 'detail',
     elementId: 'detail',
     label: '查看详情',
-    hint: '机器人管理员会收到一条私信，内含 10 分钟内有效的 Web 登录链接',
     buttonType: 'text',
     icon: 'file-link-text_outlined',
     // 与原来的页脚链接一样，任何状态都能看详情。
@@ -493,11 +473,6 @@ export function availableLarkCardActions(context: LarkCardActionContext): LarkCa
     .filter(definition => !definition.retired && isLarkCardActionAvailable(definition.action, context))
     .sort((left, right) => rank(right) - rank(left))
     .map(definition => definition.action);
-}
-
-/** 供卡片正文补充「动作 + 对象 + 预期结果」的完整说明，禁止只靠颜色或短标签表意。 */
-export function larkCardActionHint(action: LarkCardActionName): string | undefined {
-  return definitionFor(action)?.hint;
 }
 
 /** 一键续问提交的固定文本；不是续问操作时返回 undefined。 */

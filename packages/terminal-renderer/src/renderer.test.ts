@@ -100,17 +100,6 @@ describe('TerminalSnapshot', () => {
     expect(text).toContain('CURRENT_PROMPT');
     snap.dispose();
   });
-
-  it('snapshot() reports changed=false on identical text', async () => {
-    const snap = new TerminalSnapshot(80, 5);
-    snap.write('stable content\r\n');
-    await flush();
-    expect(snap.snapshot().changed).toBe(true);
-    expect(snap.snapshot().changed).toBe(false);
-    snap.markNewTurn();
-    expect(snap.snapshot().changed).toBe(true);
-    snap.dispose();
-  });
 });
 
 it('serializes history, cursor, alternate screen and mouse encoding at the queued boundary', async () => {

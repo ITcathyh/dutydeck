@@ -283,9 +283,6 @@ importers:
       '@dutydeck/acp-client':
         specifier: workspace:*
         version: link:../acp-client
-      '@dutydeck/runtime':
-        specifier: workspace:*
-        version: link:../agent-runtime
       '@dutydeck/shared':
         specifier: workspace:*
         version: link:../shared

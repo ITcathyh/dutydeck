@@ -269,18 +269,12 @@ describe('server access mode', () => {
 
 describe('production PTY backend injection', () => {
   it('always selects a namespaced, owned tmux backend for Dutydeck sessions', () => {
-    const backend = createProductionPtyBackend('ses/test:one', {
-      isAvailable: (kind: string) => kind === 'tmux',
-      probeSession: () => 'missing',
-    });
+    const backend = createProductionPtyBackend('ses/test:one');
 
     expect(backend.kind).toBe('tmux');
     expect(backend.sessionName).toMatch(/^dutydeck-ses-test-one-[a-f0-9]{16}$/);
     expect(backend.ownerId).toBe('dutydeck:ses/test:one');
-    expect(createProductionPtyBackend('ses/test:one', {
-      isAvailable: (kind: string) => kind === 'tmux',
-      probeSession: () => 'missing',
-    }).sessionName).toBe(backend.sessionName);
+    expect(createProductionPtyBackend('ses/test:one').sessionName).toBe(backend.sessionName);
   });
 
   it('fails loudly instead of downgrading production sessions to PtyBackend', async () => {

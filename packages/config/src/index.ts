@@ -1,7 +1,6 @@
 import { agentConfigSchema, type AgentConfig } from '@dutydeck/shared';
 import { listAcpxBuiltinAgents } from '@dutydeck/acp-client';
 import { commandExists } from '@dutydeck/transports';
-import type { DriverFactory, RuntimeOptions } from '@dutydeck/runtime';
 import { z } from 'zod';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -104,20 +103,4 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContribution
     cleanupIntervalMs: env.DUTYDECK_CLEANUP_INTERVAL_MS ? Number(env.DUTYDECK_CLEANUP_INTERVAL_MS) : undefined,
     agents: [...agents.values()]
   });
-}
-
-/**
- * 把 AppConfig 映射成 DutydeckRuntime 的 RuntimeOptions 子集（server 组装时与 sessionEnvironment/sessionPrompt 等 spread 合并）。
- * ptyDriverFactory 是函数、不能进 zod 校验的 AppConfig，经此注入点透传（由 server 从 @dutydeck/pty-driver 组装）。
- */
-export function createRuntimeOptions(
-  config: AppConfig,
-  options: { ptyDriverFactory?: DriverFactory } = {}
-): Pick<RuntimeOptions, 'acpxCommand' | 'driverIdleTimeoutMs' | 'cleanupIntervalMs' | 'ptyDriverFactory'> {
-  return {
-    acpxCommand: config.acpxCommand,
-    driverIdleTimeoutMs: config.driverIdleTimeoutMs,
-    cleanupIntervalMs: config.cleanupIntervalMs,
-    ptyDriverFactory: options.ptyDriverFactory
-  };
 }

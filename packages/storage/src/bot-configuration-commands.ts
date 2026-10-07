@@ -30,6 +30,7 @@ import {
 } from '@dutydeck/shared';
 import {
   runConfigurationCommand,
+  invalidateBotFacts,
   nextConfigurationRevision,
   type ConfigurationCommand
 } from './configuration-transaction.js';
@@ -41,28 +42,6 @@ export type ConfigurationCommands = Pick<
 
 function fail(code: string, message: string, status = 409): never {
   throw new RuntimeError(code, `${code}: ${message}`, status);
-}
-
-function invalidateBotFacts(db: Database.Database, botId: string, now: string, errorCode: string): void {
-  const chatFacts = db.prepare('SELECT id, revision FROM remote_chat_facts WHERE channel_bot_id = ? AND invalidated_at IS NULL').all(botId) as Array<{ id: string; revision: number }>;
-  for (const fact of chatFacts) {
-    const nextRev = nextConfigurationRevision(fact.revision);
-    db.prepare(`
-      UPDATE remote_chat_facts
-      SET revision = ?, expires_at = ?, invalidated_at = ?, error_code = ?, updated_at = ?
-      WHERE id = ?
-    `).run(nextRev, now, now, errorCode, now, fact.id);
-  }
-
-  const idFacts = db.prepare('SELECT id, revision FROM remote_identity_facts WHERE channel_bot_id = ?').all(botId) as Array<{ id: string; revision: number }>;
-  for (const fact of idFacts) {
-    const nextRev = nextConfigurationRevision(fact.revision);
-    db.prepare(`
-      UPDATE remote_identity_facts
-      SET revision = ?, expires_at = CASE WHEN checked_at > ? THEN checked_at ELSE ? END, error_code = ?, updated_at = ?
-      WHERE id = ?
-    `).run(nextRev, now, now, errorCode, now, fact.id);
-  }
 }
 
 function createCommand(db: Database.Database): ConfigurationCommand<CreateBotV2, BotSnapshot> {

@@ -111,9 +111,6 @@ const parseStep = (raw: string): Step => {
 
 const parseKeys = (keys: string): Step[] => keys.trim().split(/\s+/).filter(Boolean).map(parseStep);
 
-/** keys 是否为需要依次按下的和弦（如 'g t'）。 */
-export const isChordKeys = (keys: string): boolean => parseKeys(keys).length > 1;
-
 /** Mod 之外没有其它修饰键的单键（含 Shift+字母），在输入框内必须完全沉默。 */
 const holdsCommandModifier = (step: Step) => step.mod || step.ctrl || step.meta || step.alt;
 
@@ -140,16 +137,6 @@ function matchesStep(event: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 
   if (event.altKey !== step.alt) return false;
   if (step.shift !== undefined && event.shiftKey !== step.shift) return false;
   return true;
-}
-
-/**
- * 单个事件是否命中 keys。和弦（'g t'）无法由单个事件命中，一律返回 false，
- * 和弦的分步识别只发生在 useKeyboardShortcuts 内部的缓冲里。
- */
-export function matchesShortcut(event: KeyboardEvent, keys: string, platform: ShortcutPlatform = detectPlatform()): boolean {
-  if (event.isComposing) return false;
-  const steps = parseKeys(keys);
-  return steps.length === 1 && matchesStep(event, steps[0]!, platform);
 }
 
 const macModifierLabels: Record<string, string> = { mod: '⌘', meta: '⌘', cmd: '⌘', ctrl: '⌃', control: '⌃', alt: '⌥', option: '⌥', shift: '⇧' };

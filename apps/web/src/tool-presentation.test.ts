@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { elapsedMilliseconds, formatElapsed, groupToolActivityRows, summarizeTools, toolActionLabel, toolDescription, toolPresentation } from './tool-presentation';
+import { elapsedMilliseconds, formatElapsed, groupToolActivityRows, toolActionLabel, toolDescription, toolPresentation } from './tool-presentation';
 
 const event = (id: string, name: string, input: unknown) => ({ id, sequence: 1, type: 'tool_result', timestamp: '2026-01-01T00:00:00.000Z', data: { id, name, input, status: 'completed' } });
 
@@ -11,12 +11,12 @@ describe('tool presentation', () => {
     expect(toolPresentation({ name: 'Terminal', input: { command: 'dutydeck group messages --limit 20' } })).toMatchObject({ kind: 'agent', label: 'Agent 群协作' });
   });
 
-  it('summarizes a batch without exposing lifecycle event noise', () => {
-    expect(summarizeTools([
+  it('labels completed operations with their concrete tool kinds', () => {
+    expect([
       event('one', 'Terminal', { command: 'pwd' }),
       event('two', 'Terminal', { command: 'pnpm test' }),
       event('three', 'Read', { path: 'README.md' })
-    ])).toBe('运行了命令 · 运行了测试 · 读取了文件');
+    ].map(item => toolActionLabel(toolPresentation(item.data), true))).toEqual(['已运行命令', '已运行测试', '已读取文件']);
     expect(toolActionLabel(toolPresentation({ name: 'Terminal', input: { command: 'pwd' } }), true)).toBe('已运行命令');
   });
 

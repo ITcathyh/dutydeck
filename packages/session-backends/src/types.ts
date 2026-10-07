@@ -15,9 +15,9 @@ export interface SpawnOptions {
 }
 
 export interface SessionBackend {
-  readonly kind: 'pty' | 'tmux' | 'herdr' | 'zellij' | 'zmx';
+  readonly kind: 'pty' | 'tmux' | 'herdr';
   /**
-   * The multiplexer session this backend is bound to (tmux/zellij/zmx session
+   * The multiplexer session this backend is bound to (tmux/Herdr session
    * name), or undefined for backends with no addressable session (pty).
    *
    * This is the ONLY supported way to ask a backend which session it owns.
