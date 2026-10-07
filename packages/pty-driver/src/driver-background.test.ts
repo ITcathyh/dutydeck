@@ -20,7 +20,9 @@ const finalScreen = fixture('final-screen.txt');
 const records = fixture('transcript.jsonl').trimEnd().split('\n');
 const pendingRecord = records.findIndex(line => JSON.parse(line).pendingBackgroundAgentCount === 1);
 const turnOne = records.slice(0, 3);
-const dispatch = records.slice(3, pendingRecord + 1);
+// writeInput supplies the exact current receipt; the recorded first user is
+// the same submission with its original prompt/timestamp, not another turn.
+const dispatch = records.slice(4, pendingRecord + 1);
 const followUp = records.slice(pendingRecord + 1);
 const repaint = (text: string) => `\x1b[2J\x1b[H${text.replaceAll('\n', '\r\n')}`;
 // The agent panel redraws only its elapsed-seconds cell, once per second.
@@ -188,7 +190,9 @@ describe('PTY completion while Claude background agents are still running', () =
     expect(processKey).toBeDefined();
     append([JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Current turn answer.' }] } })]);
     output(repaint(turnOneScreen));
-    await vi.advanceTimersByTimeAsync(600);
+    // This legacy fixture has output and a completion screen, but no native
+    // terminal field, so it closes through the bounded compatibility window.
+    await vi.advanceTimersByTimeAsync(3_000);
     await first.pending;
     submitted = false;
     const second = await send();

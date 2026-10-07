@@ -25,6 +25,7 @@ import { buildRepairConfirmCard } from './repair.js';
 import { TERMINAL_PROTOCOL_NOTE } from './protocol-hints.js';
 import { replayedRecoveryNote } from './recovery-notes.js';
 import { reactionDedupeKey } from './reaction-records.js';
+import { LarkTaskInbox } from './task-inbox.js';
 import { LARK_COMMON_TENANT_SCOPES, LARK_REQUIRED_EVENTS } from './open-platform-configurator.js';
 
 // /repair 唯一的外部依赖（扫码会话 + 开放平台 client）整体 mock，测试不触网、不真实发布。
@@ -842,6 +843,34 @@ describe('复核回归：queue_summary 是瞬态读数，不冻结进 last_succe
 });
 
 describe('飞书输入明确反馈与提问生命周期', () => {
+  it('unrouted recovery answers a current live ask without another @ and never starts a replacement task', async () => {
+    const h = await harness('hang');
+    await h.coordinator.handle(event('om_live_task', '等我的回答'), h.config);
+    await vi.waitFor(() => expect(h.send).toHaveBeenCalledOnce());
+    const [session] = await h.runtime.listSessions();
+    const waiting = h.broker.register({ sessionId: session!.id, question: '选哪个？', choices: [{ label: '继续' }], timeoutMs: 60_000 });
+    await vi.waitFor(async () => expect((await h.interactions()).some(item => item.kind === 'ask' && item.state === 'pending')).toBe(true));
+    const record = (await new LarkTaskInbox(h.repos.config).capture(h.config.appId, event('om_live_answer', '继续', { mentions: [], parentId: 'om_root' })))!;
+    await (h.coordinator as any).recoverInbound(record, h.config);
+    expect(await waiting).toMatchObject({ status: 'answered', answer: '继续' });
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(await h.runtime.getTasks(session!.id)).toHaveLength(1);
+  });
+
+  it('an expired ask cannot authorize an unmentioned unrouted answer', async () => {
+    const h = await harness('hang');
+    await h.coordinator.handle(event('om_old_task', '等我的回答'), h.config);
+    await vi.waitFor(() => expect(h.send).toHaveBeenCalledOnce());
+    const [session] = await h.runtime.listSessions();
+    const waiting = h.broker.register({ sessionId: session!.id, question: '选哪个？', choices: [{ label: '继续' }], timeoutMs: 1_000 });
+    expect(await waiting).toMatchObject({ status: 'expired' });
+    const record = (await new LarkTaskInbox(h.repos.config).capture(h.config.appId, event('om_old_answer', '继续', { mentions: [], parentId: 'om_root' })))!;
+    await (h.coordinator as any).recoverInbound(record, h.config);
+    expect(await new LarkTaskInbox(h.repos.config).lookup(h.config.appId, 'om_old_answer')).toMatchObject({ state: 'ignored' });
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(await h.runtime.getTasks(session!.id)).toHaveLength(1);
+  });
+
   it('真实 broker 超时后一个心跳内关闭卡；点击与引用旧卡均不新建任务', async () => {
     const h = await harness('hang', { configPatch: { structuredAskCards: true } });
     await h.coordinator.handle(event('om_expiry_task', '等我的回答'), h.config);
@@ -1141,6 +1170,14 @@ describe('群参与开启时的话题续问与转交执行', () => {
     await h.waitDelivered(2);
     expect(h.send).toHaveBeenCalledTimes(2);
     expect(h.send.mock.calls[1]?.[0]).toContain('再补充一下兼容旧配置');
+    expect(inputFor(handle, 'om_follow')).toMatchObject({ explicit: true });
+  });
+  it('unrouted recovery keeps the live own-request continuation without forcing adoption', async () => {
+    const { h, handle } = await start();
+    const record = (await new LarkTaskInbox(h.repos.config).capture(h.config.appId, followUp()))!;
+    await (h.coordinator as any).recoverInbound(record, h.config);
+    await h.waitDelivered(2);
+    expect(h.send).toHaveBeenCalledTimes(2);
     expect(inputFor(handle, 'om_follow')).toMatchObject({ explicit: true });
   });
 

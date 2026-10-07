@@ -161,6 +161,49 @@ describe('relay send — reaches the event stream', () => {
 });
 
 describe('relay ask — blocking round trip over HTTP', () => {
+  it.each([
+    ['requiredContract', { question: 'q', requiredContract: 'approval' }, 'RELAY_INVALID_ASK'],
+    ['approvers', { question: 'q', approvers: ['owner'] }, 'RELAY_INVALID_ASK'],
+    ['array body', [], 'RELAY_INVALID_ASK'],
+    ['string body', 'q', 'RELAY_INVALID_ASK'],
+    ['number body', 1, 'RELAY_INVALID_ASK'],
+    ['boolean body', true, 'RELAY_INVALID_ASK'],
+    // The route's existing null-body fallback becomes an empty object, still rejected with 400.
+    ['null body', null, 'RELAY_QUESTION_REQUIRED'],
+    ['number question', { question: 1 }, 'RELAY_QUESTION_REQUIRED'],
+    ['string multiple', { question: 'q', choices: [{ label: 'yes' }], multiple: 'true' }, 'RELAY_INVALID_MULTIPLE'],
+    ['null timeout', { question: 'q', timeoutMs: null }, 'RELAY_INVALID_TIMEOUT']
+  ])('returns 400 for %s without creating a question or event', async (_name, payload, code) => {
+    const { app, capabilities, broker, runtime } = await harness();
+    let settled = false;
+    const response = app.inject({ method: 'POST', url: '/api/relay/sessions/self/ask', headers: { ...auth(capabilities.tokenFor('ses_a')), 'content-type': 'application/json' }, payload: JSON.stringify(payload) }).then(result => {
+      settled = true;
+      return result;
+    });
+    await vi.waitFor(() => expect(settled || broker.listPending().length > 0).toBe(true));
+    try {
+      expect(broker.listPending()).toEqual([]);
+      expect(runtime.events).toEqual([]);
+      const result = await response;
+      expect(result.statusCode).toBe(400);
+      expect(result.json().error.code).toBe(code);
+    } finally {
+      broker.close();
+      await response;
+    }
+  });
+
+  it('keeps token and session authentication for invalid ask payloads', async () => {
+    const { app, capabilities, broker, runtime } = await harness({ ses_a: session('ses_a'), ses_b: session('ses_b') });
+    const payload = { question: 'q', approvers: ['owner'] };
+    for (const headers of [{}, auth('garbage'), auth(capabilities.tokenFor('ses_b'))]) {
+      const response = await app.inject({ method: 'POST', url: '/api/relay/sessions/ses_a/ask', headers, payload });
+      expect(response.statusCode).toBe(401);
+    }
+    expect(broker.listPending()).toEqual([]);
+    expect(runtime.events).toEqual([]);
+  });
+
   it('holds the response open until the user answers, then returns the answer', async () => {
     const { app, capabilities, broker, runtime } = await harness();
 

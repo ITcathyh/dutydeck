@@ -818,7 +818,8 @@ describe('全适配器横切契约', () => {
     for (const id of EXPECTED_IDS) {
       const adapter = createCliAdapter(id);
       const writes: string[] = [];
-      await adapter.writeInput({ write: data => { writes.push(data); return true; } }, 'hello');
+      await adapter.writeInput({ write: data => { writes.push(data); return true; },
+        readScreen: () => 'TraeX\n❯ Ask TraeCode CLI\nContext 100% left' }, 'hello');
       const joined = writes.join('');
       expect(joined.length, `${id} 应向裸 PTY 写入内容`).toBeGreaterThan(0);
       // pass-through 壳（riff/mojo）由后端负责提交语义，不追加 \r。

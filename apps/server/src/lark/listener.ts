@@ -253,17 +253,10 @@ export class LarkLongConnectionListener implements LarkListener {
       });
     }
     const dispatcher = new lark.EventDispatcher({ loggerLevel: lark.LoggerLevel.warn }).register({
-      'im.message.receive_v1': event => {
+      'im.message.receive_v1': async event => {
         const message = event.message;
         this.log.info({ messageId: message.message_id, chatId: message.chat_id, chatType: message.chat_type }, '收到飞书消息事件');
-        // 私聊首次消息欢迎：只发一次（kv 去重），失败不抛错，且绝不等待它、不阻断消息 dispatch。
-        // 群聊普通消息不发欢迎；bot 入群欢迎走 im.chat.member.bot.added_v1。
-        if (message.chat_type === 'p2p' && message.chat_id) {
-          this.welcome?.welcomeP2pChat(message.chat_id).catch(error => {
-            this.log.error({ error, chatId: message.chat_id }, '处理飞书私聊欢迎失败，继续派发消息');
-          });
-        }
-        coordinator?.handle({
+        await coordinator?.receive({
           messageId: message.message_id,
           chatId: message.chat_id,
           chatType: message.chat_type,
@@ -276,9 +269,13 @@ export class LarkLongConnectionListener implements LarkListener {
           ...(event.sender?.sender_id?.open_id ? { senderOpenId: event.sender.sender_id.open_id } : {}),
           ...(event.sender?.sender_type ? { senderType: event.sender.sender_type } : {}),
           mentions: (message.mentions ?? []).map(mention => ({ key: mention.key, name: mention.name, ...(mention.id.open_id ? { openId: mention.id.open_id } : {}), ...(mention.mentioned_type ? { mentionedType: mention.mentioned_type } : {}) }))
-        }, this.config ?? config).catch(error => {
-          this.log.error({ error, messageId: message.message_id, chatId: message.chat_id }, '处理飞书消息事件失败');
-        });
+        }, this.config ?? config);
+        // 欢迎独立于接收，存储失败穿透 SDK；远程欢迎失败不会改变已经落库的接收结果。
+        if (message.chat_type === 'p2p' && message.chat_id) {
+          void Promise.resolve().then(() => this.welcome?.welcomeP2pChat(message.chat_id)).catch(error => {
+            this.log.error({ error, chatId: message.chat_id }, '处理飞书私聊欢迎失败，继续派发消息');
+          });
+        }
       },
       // 平台重复推送的同一次点击只处理一次，重推直接返回第一次的结果。
       'card.action.trigger': (event: any) => this.cardCallbacks.run(larkCardCallbackKeys(event), async () => {
@@ -358,7 +355,7 @@ export class LarkLongConnectionListener implements LarkListener {
             this.log.info({ messageId: eventMessageId }, '编辑消息不满足触发条件（已删除/非人类/未显式@本bot等），忽略');
             return;
           }
-          await coordinator.handle(editedEvent, this.config ?? config).catch(error => {
+          await coordinator.handleEdited(editedEvent, this.config ?? config).catch(error => {
             this.log.error({ error, messageId: eventMessageId, chatId: editedEvent!.chatId }, '处理飞书消息编辑事件失败');
           });
         })();

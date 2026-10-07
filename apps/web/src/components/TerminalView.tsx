@@ -74,7 +74,8 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
       setScrolledUp(term.buffer.active.viewportY < term.buffer.active.baseY);
     });
     // 容器尺寸为 0（如隐藏的 tab）时 fit 会抛错，忽略即可
-    const tryFit = () => { try { fit.fit(); } catch { /* 容器尚未可见，等下次 ResizeObserver 回调 */ } };
+    // 只读视图保留快照的 ANSI 网格；fit 会改行列数，且不能向托管 PTY 请求 resize。
+    const tryFit = () => { if (readOnly) return; try { fit.fit(); } catch { /* 容器尚未可见，等下次 ResizeObserver 回调 */ } };
     tryFit();
 
     let ws: WebSocket | undefined;
@@ -85,7 +86,7 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
     let restoring = false;
 
     const sendResize = () => {
-      if (!waitingForSnapshot && !restoring && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      if (!readOnly && !waitingForSnapshot && !restoring && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
     };
     const sendInput = (data: string) => {
       if (!readOnly && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data }));
@@ -139,7 +140,7 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
     const inputDisposable = term.onData(data => sendInput(data));
 
     // 容器尺寸变化时：先按新宽度复算字号（字号换档字宽就变，反过来 fit 出来的是旧字号下的列数），
-    // 再 fit 并把新的行列数通知服务端
+    // 可写视图再 fit 并把新的行列数通知服务端；只读视图只更新字号。
     const observer = new ResizeObserver(() => {
       if (restoring) return;
       const next = terminalFontSize(host.clientWidth);

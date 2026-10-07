@@ -102,6 +102,7 @@ export class PtyCliDriver implements AgentDriver {
   private turnHasTranscriptResult = false;
   private turnInputConfirmed = false;
   private awaitingTranscriptResult = false;
+  private transcriptTerminalWaitAt: number | undefined;
   /** 本轮开始时间——用于启动宽限期：CLI 初始化期间 PTY 静止，
    *  idle 检测会误判，宽限期内禁止 completed。 */
   private turnStartedAt = 0;
@@ -376,6 +377,7 @@ export class PtyCliDriver implements AgentDriver {
       this.turnHasTranscriptResult = false;
       this.turnInputConfirmed = false;
       this.awaitingTranscriptResult = false;
+      this.transcriptTerminalWaitAt = undefined;
       this.turnStartedAt = Date.now();
       this.startTurnDeadline();
       this.awaitingRecoveryTranscript = false;
@@ -531,6 +533,7 @@ export class PtyCliDriver implements AgentDriver {
     this.turnHasOutput = false;
     this.turnHasTranscriptResult = false;
     this.awaitingTranscriptResult = false;
+    this.transcriptTerminalWaitAt = undefined;
     this.turnStartedAt = 0;
     this.startTurnDeadline();
     this.awaitingRecoveryTranscript = true;
@@ -1083,7 +1086,6 @@ export class PtyCliDriver implements AgentDriver {
           this.idleDetector?.seedReadyEvidence();
           return;
         }
-        this.clearBackgroundHold();
         const turnError = this.transcript?.takeTurnError?.();
         // A native user receipt proves submission, while a PTY redraw only
         // proves screen activity. Keep the turn open if its assistant record
@@ -1093,6 +1095,21 @@ export class PtyCliDriver implements AgentDriver {
           this.awaitingTranscriptResult = true;
           return;
         }
+        if (this.adapter.capabilities.nativeInputReceipt && this.transcript?.hasTurnTerminal
+          && !this.transcript.hasTurnTerminal() && !turnError && !this.interruptPending && !this.backgroundHoldExpired
+          && !this.adapter.screenCancelledPattern?.test(statusLine ?? '')) {
+          this.transcriptTerminalWaitAt ??= Date.now();
+          // Legacy Claude dialects omit terminal markers. After a bounded
+          // drain window retain the existing output + completion-screen
+          // contract; elapsed time is not an observed native terminal.
+          if (Date.now() - this.transcriptTerminalWaitAt < 2_000) {
+            this.awaitingTranscriptResult = true;
+            this.idleDetector?.reset(); this.idleDetector?.seedReadyEvidence();
+            this.checkRenderedCompletion();
+            return;
+          }
+        }
+        this.clearBackgroundHold();
         this.turnActive = false;
         this.clearTurnDeadline();
         // The runtime fails a turn whose last step is not text but has no
@@ -1215,7 +1232,10 @@ export class PtyCliDriver implements AgentDriver {
         // 标记本轮已有实质输出或结构化失败，解除 idle 闸门。
         if (e.type === 'text' || e.type === 'thinking' || e.type === 'tool_call' || e.type === 'tool_result' || e.type === 'error') {
           this.turnHasOutput = true;
-          if (this.turnActive) this.turnHasTranscriptResult = e.type === 'text' || e.type === 'error';
+          if (this.turnActive) {
+            this.turnHasTranscriptResult = e.type === 'text' || e.type === 'error';
+            this.transcriptTerminalWaitAt = undefined;
+          }
           this.awaitingRecoveryTranscript = false;
         }
         this.emitEvent(e);

@@ -139,6 +139,87 @@ describe('relay send', () => {
 });
 
 describe('relay ask', () => {
+  it.each([
+    ['requiredContract', { question: 'q', requiredContract: 'approval' }, 'RELAY_INVALID_ASK'],
+    ['approvers', { question: 'q', approvers: ['owner'] }, 'RELAY_INVALID_ASK'],
+    ['null body', null, 'RELAY_INVALID_ASK'],
+    ['array body', [], 'RELAY_INVALID_ASK'],
+    ['string body', 'q', 'RELAY_INVALID_ASK'],
+    ['number body', 123, 'RELAY_INVALID_ASK'],
+    ['undefined body', undefined, 'RELAY_INVALID_ASK'],
+    ['number question', { question: 123 }, 'RELAY_QUESTION_REQUIRED'],
+    ['null question', { question: null }, 'RELAY_QUESTION_REQUIRED'],
+    ['object question', { question: {} }, 'RELAY_QUESTION_REQUIRED'],
+    ['string multiple', { question: 'q', multiple: 'true' }, 'RELAY_INVALID_MULTIPLE'],
+    ['number multiple', { question: 'q', multiple: 1 }, 'RELAY_INVALID_MULTIPLE'],
+    ['null multiple', { question: 'q', multiple: null }, 'RELAY_INVALID_MULTIPLE'],
+    ['string timeout', { question: 'q', timeoutMs: '1000' }, 'RELAY_INVALID_TIMEOUT'],
+    ['null timeout', { question: 'q', timeoutMs: null }, 'RELAY_INVALID_TIMEOUT'],
+    ['boolean timeout', { question: 'q', timeoutMs: true }, 'RELAY_INVALID_TIMEOUT']
+  ])('rejects %s before registering or publishing', async (_name, input, code) => {
+    const { published, publisher } = recordingPublisher();
+    const broker = new RelayAskBroker(publisher);
+    const registry = new RelayCapabilityRegistry(sessionLookup({ ses_a: liveSession('ses_a') }), 'http://x', 'secret');
+    const service = new RelayService(registry, publisher, broker);
+    const outcome = service.ask(bearer(registry.tokenFor('ses_a')), 'ses_a', input as any).then(
+      value => ({ value }), error => ({ error })
+    );
+    // Let the real async capability resolution and broker registration run.
+    await new Promise(resolve => setImmediate(resolve));
+    try {
+      expect(broker.listPending()).toEqual([]);
+      expect(published).toEqual([]);
+      expect(await outcome).toMatchObject({ error: { code, statusCode: 400 } });
+    } finally {
+      broker.close();
+      await outcome;
+    }
+  });
+
+  it('authenticates invalid ask bodies before validation', async () => {
+    const { published, publisher } = recordingPublisher();
+    const broker = new RelayAskBroker(publisher);
+    const registry = new RelayCapabilityRegistry(sessionLookup({ ses_a: liveSession('ses_a'), ses_b: liveSession('ses_b') }), 'http://x', 'secret');
+    const service = new RelayService(registry, publisher, broker);
+    await expect(service.ask(undefined, 'ses_a', null as any)).rejects.toMatchObject({ code: 'RELAY_CONTEXT_REQUIRED', statusCode: 401 });
+    await expect(service.ask(bearer(registry.tokenFor('ses_b')), 'ses_a', { question: 'q', approvers: [] } as any)).rejects.toMatchObject({ code: 'RELAY_UNAUTHORIZED', statusCode: 401 });
+    expect(broker.listPending()).toEqual([]);
+    expect(published).toEqual([]);
+  });
+
+  it('retains choices normalization for null, empty, and numeric values in single-choice asks', async () => {
+    const { published, publisher } = recordingPublisher();
+    const broker = new RelayAskBroker(publisher);
+    const registry = new RelayCapabilityRegistry(sessionLookup({ ses_a: liveSession('ses_a') }), 'http://x', 'secret');
+    const service = new RelayService(registry, publisher, broker);
+    const pending = service.ask(bearer(registry.tokenFor('ses_a')), 'ses_a', {
+      question: '  选一个  ', multiple: false, timeoutMs: 1_000,
+      choices: [{ label: ' a ', value: null }, { label: 'b', value: '' }, { label: 'c', value: 123 }]
+    } as any);
+    await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+    const record = broker.listPending()[0]!;
+    expect(record.question).toBe('选一个');
+    expect(record.choices).toEqual([{ label: 'a' }, { label: 'b' }, { label: 'c', value: '123' }]);
+    expect(record.multiple).toBeUndefined();
+    expect(published[0]).toMatchObject({ choices: record.choices });
+    await service.answer('ses_a', record.id, { answer: '123' });
+    await expect(pending).resolves.toMatchObject({ status: 'answered', answer: '123' });
+  });
+
+  it('retains the question length and timeout limits at the service boundary', async () => {
+    const { published, publisher } = recordingPublisher();
+    const broker = new RelayAskBroker(publisher);
+    const registry = new RelayCapabilityRegistry(sessionLookup({ ses_a: liveSession('ses_a') }), 'http://x', 'secret');
+    const service = new RelayService(registry, publisher, broker);
+    const auth = bearer(registry.tokenFor('ses_a'));
+    await expect(service.ask(auth, 'ses_a', { question: 'x'.repeat(32_001) })).rejects.toMatchObject({ code: 'RELAY_QUESTION_REQUIRED', statusCode: 413 });
+    for (const timeoutMs of [0, 999, 3_600_001, 1.5, NaN, Infinity]) {
+      await expect(service.ask(auth, 'ses_a', { question: 'q', timeoutMs })).rejects.toMatchObject({ code: 'RELAY_INVALID_TIMEOUT', statusCode: 400 });
+    }
+    expect(broker.listPending()).toEqual([]);
+    expect(published).toEqual([]);
+  });
+
   it('blocks until answered and returns the answer', async () => {
     const { published, publisher } = recordingPublisher();
     const broker = new RelayAskBroker(publisher);

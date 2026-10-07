@@ -9,6 +9,26 @@ export interface RelaySendInput { text?: string }
 export interface RelayAskInput { question?: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }
 export interface RelayAnswerInput { answer?: string }
 
+function requireAskInput(input: unknown): asserts input is RelayAskInput {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new RelayError('RELAY_INVALID_ASK', '提问请求必须是对象。', 400);
+  }
+  const fields = ['question', 'timeoutMs', 'choices', 'multiple'];
+  if (Object.keys(input).some(key => !fields.includes(key))) {
+    throw new RelayError('RELAY_INVALID_ASK', '提问请求仅支持 question、timeoutMs、choices、multiple。', 400);
+  }
+  const record = input as Record<string, unknown>;
+  if (record.question !== undefined && typeof record.question !== 'string') {
+    throw new RelayError('RELAY_QUESTION_REQUIRED', '提问内容必须是字符串。', 400);
+  }
+  if (record.timeoutMs !== undefined && typeof record.timeoutMs !== 'number') {
+    throw new RelayError('RELAY_INVALID_TIMEOUT', '超时必须是整数毫秒。', 400);
+  }
+  if (record.multiple !== undefined && typeof record.multiple !== 'boolean') {
+    throw new RelayError('RELAY_INVALID_MULTIPLE', 'multiple 必须是布尔值。', 400);
+  }
+}
+
 function requireText(value: string | undefined, code: string, label: string) {
   const text = value?.trim();
   if (!text) throw new RelayError(code, `${label}不能为空。`, 400);
@@ -38,8 +58,9 @@ export class RelayService {
   }
 
   /** 阻塞提问：Promise 直到被回答/超时/取消才 resolve（HTTP 响应因此被扣住） */
-  async ask(authorization: string | undefined, sessionId: string | undefined, input: RelayAskInput): Promise<RelayAskOutcome> {
+  async ask(authorization: string | undefined, sessionId: string | undefined, input: unknown): Promise<RelayAskOutcome> {
     const capability = await this.capabilities.resolve(relayBearerToken(authorization), sessionId);
+    requireAskInput(input);
     const question = requireText(input.question, 'RELAY_QUESTION_REQUIRED', '提问内容');
     return this.broker.register({
       sessionId: capability.sessionId, question, timeoutMs: input.timeoutMs,

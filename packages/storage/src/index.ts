@@ -359,6 +359,10 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       }
     },
     config: {
+      async remove(key, expected) {
+        if (!key.startsWith('lark.inbox.') || JSON.parse(expected)?.state !== 'ignored') throw new RuntimeError('CONFIG_DELETE_NOT_SUPPORTED', 'Only ignored Lark inbox receipts can be removed', 409);
+        return sqlite.prepare('DELETE FROM configs WHERE key = ? AND value = ?').run(key, expected).changes === 1;
+      },
       async get(key) { return db.select().from(configs).where(eq(configs.key, key)).get()?.value; },
       async set(key, value) { assertBotProcessConfigWrite(sqlite, key, value); if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409); db.insert(configs).values({ key, value }).onConflictDoUpdate({ target: configs.key, set: { value } }).run(); },
       async list(prefix) {
