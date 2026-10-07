@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
@@ -203,6 +204,8 @@ describe('read-only participation decision', () => {
   });
 
   it('rejects an actual ACP write permission request without interactive approval and persists snake_case session options', async () => {
+    vi.stubEnv('BOTMUX_SESSION_ID', 'sentinel-outer-session');
+    cleanup.push(() => vi.unstubAllEnvs());
     const cwd = await mkdtemp(join(tmpdir(), 'participation-acp-'));
     const fixture = join(cwd, 'decision-agent.mjs');
     const original = await readFile(resolve('tests/fixtures/mock-acp-agent.mjs'), 'utf8');
@@ -214,11 +217,23 @@ describe('read-only participation decision', () => {
     await adapter.start(); await adapter.send('request permission');
     const text = events.filter(event => event.type === 'text').map(event => event.data.text).join('');
     const result = parseParticipationResult(text, snapshot());
-    expect(result.reason).toContain('deny');
+    expect(JSON.parse(result.reason)).toEqual({ outcome: 'selected', optionId: 'deny' });
+    const environmentFile = join(cwd, '.dutydeck', 'runtime-env', `${createHash('sha256').update('participation_decision').digest('hex')}.json`);
+    expect(JSON.parse(await readFile(environmentFile, 'utf8'))).toEqual({ mock_permission_probe: 'enabled' });
     await adapter.stop();
     const persisted = await createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') }).load('participation_decision');
-    expect(persisted?.acpx?.session_options?.env).toEqual({ mock_permission_probe: 'enabled' });
-    expect(Object.keys(persisted!.acpx!.session_options!).every(key => /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(key))).toBe(true);
+    expect(persisted?.acpx?.session_options?.env).toEqual({
+      mock_permission_probe: 'enabled',
+      dutydeck_agent_env_file: environmentFile,
+      // The digest covers only bridged keys, not the complete environment file.
+      dutydeck_agent_env_digest: createHash('sha256').update('{}').digest('hex')
+    });
+    const assertSnakeCaseKeys = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return;
+      if (!Array.isArray(value)) for (const key of Object.keys(value)) expect(key).toMatch(/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/);
+      Object.values(value).forEach(assertSnakeCaseKeys);
+    };
+    assertSnakeCaseKeys(persisted!.acpx!.session_options!);
     expect(persisted?.acpx?.session_options?.env ?? {}).not.toHaveProperty('dutydeck_group_tools_token');
     expect(events.some(event => event.type === 'permission_request' && event.data.status === 'pending')).toBe(false);
   });
