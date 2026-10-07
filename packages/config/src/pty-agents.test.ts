@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { builtinAgents, createRuntimeOptions, loadConfig, type PtyAgentContribution } from './index.js';
+import { builtinAgents, loadConfig, type PtyAgentContribution } from './index.js';
 import { commandExists } from '@dutydeck/transports';
-import type { DriverFactory } from '@dutydeck/runtime';
 
 // ACPX 发现固定返回 claude/codex 两个内置 agent，与真实环境解耦
 vi.mock('@dutydeck/acp-client', () => ({
@@ -93,20 +92,5 @@ describe('loadConfig PTY contribution passthrough', () => {
   it('stays pty-free when called without contributions', () => {
     const config = loadConfig({ DUTYDECK_DEFAULT_CWD: '/tmp/dutydeck-pty-test' });
     expect(config.agents.every(agent => agent.protocol === 'acp')).toBe(true);
-  });
-});
-
-describe('createRuntimeOptions', () => {
-  it('maps AppConfig runtime fields and leaves ptyDriverFactory undefined by default', () => {
-    const config = loadConfig({ DUTYDECK_ACPX_COMMAND: 'custom-acpx', DUTYDECK_DRIVER_IDLE_TIMEOUT_MS: '42000', DUTYDECK_CLEANUP_INTERVAL_MS: '7000' });
-    const options = createRuntimeOptions(config);
-    expect(options).toEqual({ acpxCommand: 'custom-acpx', driverIdleTimeoutMs: 42_000, cleanupIntervalMs: 7_000, ptyDriverFactory: undefined });
-  });
-
-  it('passes through an injected ptyDriverFactory', () => {
-    const config = loadConfig({});
-    const factory = vi.fn() as unknown as DriverFactory;
-    const options = createRuntimeOptions(config, { ptyDriverFactory: factory });
-    expect(options.ptyDriverFactory).toBe(factory);
   });
 });

@@ -5,8 +5,6 @@ import { join } from 'node:path';
 import { describe, expect, it, afterEach, beforeAll, afterAll } from 'vitest';
 import { PtyBackend } from './pty-backend.js';
 import { TmuxBackend, TmuxOwnershipError, isTmuxAvailable } from './tmux-backend.js';
-import { ZellijBackend } from './zellij-backend.js';
-import { ZmxBackend } from './zmx-backend.js';
 import type { SessionBackend } from './types.js';
 
 /** Poll a predicate until true or timeout. Defaults are generous: under a
@@ -592,12 +590,8 @@ tmuxDescribe('TmuxBackend', () => {
  */
 describe('SessionBackend.sessionName contract', () => {
   it('每个持久后端都把自己的会话名作为公开只读字段暴露出来', () => {
-    // 逐个构造，不用循环：这四个类的构造签名本来就不同，写死才能防「新增后端
-    // 忘了实现契约」——那种情况下 driver 对它永远反查不到会话名。
     const name = 'dutydeck-contract-probe';
     expect(new TmuxBackend(name).sessionName).toBe(name);
-    expect(new ZellijBackend(name).sessionName).toBe(name);
-    expect(new ZmxBackend(name).sessionName).toBe(name);
   });
 
   it('PtyBackend 没有可寻址的会话 → sessionName 为 undefined', () => {

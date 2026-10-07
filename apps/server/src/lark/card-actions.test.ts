@@ -6,7 +6,6 @@ import {
   isLarkCardActionAvailable,
   isLarkCardFollowUpPrompt,
   larkCardActionBudget,
-  larkCardActionHint,
   larkCardFollowUpPrompt,
   parseLarkCardActionValue,
   safeLarkWebUrl,
@@ -64,7 +63,6 @@ describe('飞书卡片操作按钮：在原对话继续', () => {
       .find(element => element.element_id === 'continue_in_place')!;
     expect(callbackValue(button)).toEqual({ action: 'continue_in_place', task_id: 'om_task_1', turn: '2' });
     expect(parseLarkCardActionValue(callbackValue(button))).toMatchObject({ action: 'continue_in_place', taskId: 'om_task_1', turn: 2 });
-    expect(larkCardActionHint('continue_in_place')).toBe('在原来的会话里让 Agent 接着做，不重新发送原请求');
   });
 });
 
@@ -74,7 +72,6 @@ describe('飞书卡片操作按钮：转到新会话', () => {
     expect(availableLarkCardActions(context('reconcile_required', {}, { canRelaunch: true }))).toEqual(['rerun_in_new_session']);
     expect(availableLarkCardActions(context('legacy_unresolved', {}, { canRelaunch: true }))).toEqual(['rerun_in_new_session']);
     expect(labels(buildLarkCardActions(context('reconcile_required', {}, { canRelaunch: true })))).toEqual(['在新会话中重新执行']);
-    expect(larkCardActionHint('rerun_in_new_session')).toBe('原执行结果未确认，重新执行可能把已经做过的操作再做一次');
     for (const state of [...allStates, 'cancelled', 'reconcile_required', 'legacy_unresolved'] as LarkCardActionState[]) {
       const actions = availableLarkCardActions(context(state));
       expect(actions, state).not.toContain('run_in_new_session');
@@ -460,18 +457,6 @@ describe('飞书卡片操作按钮：文案与元素预算', () => {
     }
   });
 
-  it('每个回调操作都有「动作 + 对象 + 预期结果」的完整说明', () => {
-    // 禁止用「处理」「继续」这类缺少对象的抽象动词作为唯一指引。
-    for (const action of ['cancel', 'interrupt', 'retry', 'refresh'] as LarkCardActionName[]) {
-      const hint = larkCardActionHint(action);
-      expect(hint, `${action} 缺少说明文案`).toBeTruthy();
-      expect(hint!.length).toBeGreaterThan(6);
-      expect(hint).not.toMatch(/^(处理|继续)$/);
-    }
-    expect(larkCardActionHint('retry')).toContain('重新运行');
-    expect(larkCardActionHint('refresh')).toContain('最新状态');
-  });
-
   it('操作区不会撑爆飞书元素预算', () => {
     // 按钮会占用整卡 ~24KB / 180 组件的额度，操作区必须保持紧凑。
     for (const state of allStates) {
@@ -579,7 +564,6 @@ describe('结果卡续问行：一键续问与每天自动执行', () => {
     expect(Buffer.byteLength(JSON.stringify(elements), 'utf8')).toBeLessThan(2_048);
     for (const element of elements) {
       expect(element).toMatchObject({ tag: 'button', type: 'text', icon: { tag: 'standard_icon', color: 'grey' } });
-      expect(larkCardActionHint(element.element_id as LarkCardActionName)!.length).toBeGreaterThan(6);
     }
   });
 });

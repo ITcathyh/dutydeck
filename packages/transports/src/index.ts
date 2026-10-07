@@ -16,8 +16,6 @@ import type {
 } from '@dutydeck/shared';
 import { normalizeAcpxEvent, type NormalizedDriverEvent } from '@dutydeck/acp-client';
 
-export interface ProbeMatrix { acp: boolean; jsonl: boolean; pipe: boolean; pty: boolean }
-
 function isExecutableFilePosix(filePath: string): boolean {
   try {
     const stats = fs.statSync(filePath);

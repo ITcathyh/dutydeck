@@ -1,5 +1,7 @@
+import { renderHook } from '@testing-library/react';
+import { useTheme } from './useTheme';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyThemePreference, isThemePreference, readStoredTheme, readThemeColor, resolveTheme, systemPrefersDark, THEME_STORAGE_KEY, themeLabels, writeStoredTheme } from './theme';
+import { applyThemePreference, isThemePreference, readStoredTheme, readThemeColor, resolveTheme, THEME_STORAGE_KEY, themeLabels, writeStoredTheme } from './theme';
 
 const mockMatchMedia = (dark: boolean) => {
   window.matchMedia = vi.fn().mockReturnValue({ matches: dark, addEventListener: vi.fn(), removeEventListener: vi.fn() }) as unknown as typeof window.matchMedia;
@@ -63,15 +65,22 @@ describe('主题偏好模型', () => {
     const original = window.matchMedia;
     // @ts-expect-error 故意移除以模拟不支持 matchMedia 的环境
     window.matchMedia = undefined;
-    expect(systemPrefersDark()).toBe(false);
+    const { result } = renderHook(() => useTheme());
+    expect(result.current.systemDark).toBe(false);
+    expect(result.current.resolved).toBe('light');
     window.matchMedia = original;
   });
 
   it('能读到系统深色偏好', () => {
     mockMatchMedia(true);
-    expect(systemPrefersDark()).toBe(true);
+    const dark = renderHook(() => useTheme());
+    expect(dark.result.current.systemDark).toBe(true);
+    expect(dark.result.current.resolved).toBe('dark');
+    dark.unmount();
     mockMatchMedia(false);
-    expect(systemPrefersDark()).toBe(false);
+    const light = renderHook(() => useTheme());
+    expect(light.result.current.systemDark).toBe(false);
+    expect(light.result.current.resolved).toBe('light');
   });
 
   it('读不到 CSS 变量时回落到兜底色，供 xterm 等运行时使用', () => {

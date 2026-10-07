@@ -12,7 +12,6 @@
 import xtermHeadless, { type ITerminalAddon } from '@xterm/headless';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import type { TerminalScreen } from '@dutydeck/shared';
-import { createHash } from 'node:crypto';
 
 const { Terminal } = xtermHeadless;
 
@@ -84,7 +83,6 @@ function readViewportText(
  */
 export class TerminalSnapshot {
   private terminal: InstanceType<typeof Terminal>;
-  private lastHash = '';
   private readonly serializer = new SerializeAddon();
   private sgrMouse = false;
   private cursorVisible = true;
@@ -173,23 +171,6 @@ export class TerminalSnapshot {
       text = (line?.translateToString(false) ?? '') + text;
     }
     return cleanBoxDrawing(text).trim();
-  }
-
-  /**
-   * Filtered viewport text with change detection — `changed` is false when
-   * the text is byte-identical to the previous snapshot() call.
-   */
-  snapshot(): { content: string; changed: boolean } {
-    const content = this.text();
-    const hash = createHash('md5').update(content).digest('hex');
-    const changed = hash !== this.lastHash;
-    this.lastHash = hash;
-    return { content, changed };
-  }
-
-  /** Reset the change-detection hash so the next snapshot registers as changed. */
-  markNewTurn(): void {
-    this.lastHash = '';
   }
 
   /** Expose the underlying xterm-headless instance (PNG rendering, etc.). */

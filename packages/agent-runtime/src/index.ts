@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
 import { canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName } from '@dutydeck/shared';
 import { AcpxAdapter, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
-import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dutydeck/transports';
+import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import type { SteeringRecoveryDecision, SteeringOperation, PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverSteeringOutcome, ExecutionActor, ResourceCheckRef, SessionFence, TaskAttempt, TaskExecutionProjection, TaskRequestV1 } from '@dutydeck/shared';
@@ -53,23 +53,6 @@ const isTaskFenceRevocation = (error: unknown): error is RuntimeError => error i
 
 function isAttemptRef(ref: SessionFence): ref is SessionFence & AttemptRef {
   return 'attemptId' in ref && 'taskId' in ref && typeof ref.attemptId === 'string' && typeof ref.taskId === 'string';
-}
-
-export function selectProtocol(probes: ProbeMatrix): 'acp' | 'jsonl' | 'pipe' | 'pty' {
-  if (probes.acp) return 'acp';
-  if (probes.jsonl) return 'jsonl';
-  if (probes.pipe) return 'pipe';
-  return 'pty';
-}
-
-export function correlateToolCalls(events: Array<NormalizedDriverEvent | undefined>) {
-  const calls = new Map<string, ToolCallData>();
-  for (const event of events) {
-    if (!event || (event.type !== 'tool_call' && event.type !== 'tool_result')) continue;
-    const data = eventJson(event.data) as unknown as ToolCallData;
-    calls.set(data.id, mergeToolCall(data, calls.get(data.id)));
-  }
-  return calls;
 }
 
 function mergeToolCall(data: ToolCallData, previous?: ToolCallData): ToolCallData {

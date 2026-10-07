@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { applyThemePreference, readStoredTheme, resolveTheme, systemPrefersDark, writeStoredTheme, type ResolvedTheme, type ThemePreference } from './theme';
+import { applyThemePreference, readStoredTheme, resolveTheme, writeStoredTheme, type ResolvedTheme, type ThemePreference } from './theme';
+import { useMediaQuery } from './useMediaQuery';
 
 export type ThemeController = {
   preference: ThemePreference;
@@ -15,17 +16,7 @@ export type ThemeController = {
  */
 export function useTheme(): ThemeController {
   const [preference, setPreferenceState] = useState<ThemePreference>(() => typeof window === 'undefined' ? 'system' : readStoredTheme());
-  const [systemDark, setSystemDark] = useState(() => typeof window === 'undefined' ? false : systemPrefersDark());
-
-  useEffect(() => {
-    if (typeof window.matchMedia !== 'function') return;
-    const media = window.matchMedia('(prefers-color-scheme: dark)');
-    const update = () => setSystemDark(media.matches);
-    update();
-    // Safari 14 之前只有 addListener，但本项目其他 matchMedia 用法同样只用 addEventListener，保持一致。
-    media.addEventListener('change', update);
-    return () => media.removeEventListener('change', update);
-  }, []);
+  const systemDark = useMediaQuery('(prefers-color-scheme: dark)');
 
   useEffect(() => { applyThemePreference(preference); }, [preference]);
 

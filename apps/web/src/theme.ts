@@ -32,13 +32,6 @@ export function writeStoredTheme(preference: ThemePreference): void {
   } catch { /* 存储不可用时静默降级，不打断主题选择 */ }
 }
 
-/** 系统是否为深色；matchMedia 在测试环境可能缺失，缺失时按浅色处理。 */
-export function systemPrefersDark(): boolean {
-  if (typeof window.matchMedia !== 'function') return false;
-  try { return window.matchMedia('(prefers-color-scheme: dark)').matches; }
-  catch { return false; }
-}
-
 export const resolveTheme = (preference: ThemePreference, systemDark: boolean): ResolvedTheme =>
   preference === 'system' ? (systemDark ? 'dark' : 'light') : preference;
 

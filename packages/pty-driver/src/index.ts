@@ -5,7 +5,6 @@ export type { PtyAgentContribution } from './contributions.js';
 export {
   createDutydeckPersistentBackend,
   dutydeckPtySessionName,
-  type BackendProbes,
 } from './persistent-backend.js';
 export {
   createTranscriptTailer,

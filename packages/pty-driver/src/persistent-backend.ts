@@ -1,9 +1,5 @@
 import { createHash } from 'node:crypto';
-import {
-  defaultBackendProbes,
-  TmuxBackend,
-  type BackendProbes,
-} from '@dutydeck/session-backends';
+import { TmuxBackend } from '@dutydeck/session-backends';
 
 /**
  * Stable, Dutydeck-only tmux namespace. The hash keeps arbitrary/custom
@@ -18,14 +14,9 @@ export function dutydeckPtySessionName(sessionId: string): string {
 
 /** Production PTY-CLI policy: persistent tmux or a hard failure, never an
  * implicit downgrade to the in-process PtyBackend. */
-export function createDutydeckPersistentBackend(
-  sessionId: string,
-  _probes: BackendProbes = defaultBackendProbes,
-): TmuxBackend {
+export function createDutydeckPersistentBackend(sessionId: string): TmuxBackend {
   const sessionName = dutydeckPtySessionName(sessionId);
   // Construction is synchronous; start() performs asynchronous tri-state and
   // ownership probes before launch. There is never an implicit PTY fallback.
   return new TmuxBackend(sessionName, { ownerId: `dutydeck:${sessionId}` });
 }
-
-export type { BackendProbes };
