@@ -8,7 +8,7 @@ import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExpl
 import { mergeGroupTaskWatermark } from './group-task-context.js';
 import { describeLarkTaskRecovery, larkAgentUnavailableText, larkQuietSettledNote, larkReliability, larkStallNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import { validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
-import { collectLarkTaskContext } from './task-context.js';
+import { collectLarkTaskContext, larkMaterialMessageIds } from './task-context.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type LarkMemoryScope } from './memory.js';
 import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
@@ -65,6 +65,12 @@ const queuedAheadOf = (tasks: TaskRecord[], taskId?: string) => {
   const index = tasks.findIndex(item => item.id === taskId);
   return index < 0 ? undefined : tasks.slice(0, index).filter(item => item.status === 'queued').length;
 };
+/**
+ * 每轮的结果写法。第一句会被 larkConclusionHeadline 取作结果卡标题和通知预览，所以要求它就是结论。
+ * 只有机器人能往群里发文件时才提 send-file。
+ */
+const larkResultGuidance = (groupSend: boolean) => `[飞书结果说明] 最终输出会原样显示在飞书结果卡上，读者多在手机上看。第一句直接给结论：做事类写做成了什么、还差什么，排查类写根因或判断；这句会成为卡片标题和通知预览，不要用开场白或过程话开头。之后按需给证据、影响、下一步和交付入口，术语准确且让读者能理解。等待用户操作或外部批准时写明尚未完成，不把本轮结束写成目标完成。需要用户操作时单独写一行「需要你：…」，卡片会把它显示成醒目块。用户要求转述或结果需要协同时，再附一段可直接转发的短文。${groupSend ? '交付文件用 group send-file 发到群里，' : ''}不要在结果里给本机路径链接（手机上点不开）。用户明确指定的格式优先。`;
+
 /** 被并入下一条的排队卡原位改成的说明。 */
 const mergedCardNote = '**已并入下一条**\n\n这条内容会和你紧接着发的消息一起执行，进度见新的任务卡。';
 /** 排队卡上那条审批的摘要：取审批记录里的命令行，没有就取标题。记录生成时已按审批卡的规则脱敏。 */
@@ -1256,8 +1262,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     injected.push(`[Dutydeck 机器人身份]
 - 机器人名称：${config.name ?? config.appId}
 - App ID：${config.appId}${session.cwd ? `\n- 工作区：${session.cwd}` : ''}`);
-    injected.push('[飞书结果说明] 先用一句话回答问题或说明完成情况，再按需给证据、影响、下一步和交付入口。术语应准确且让读者能理解。等待用户操作或外部批准时说明尚未完成，不把本轮结束写成目标完成。用户要求转述或结果需要协同时，再附可直接转发的短段。用户明确指定的格式优先。需要用户操作时，单独写一行「需要你：…」，卡片会把它显示成醒目块。交付文件用 send-file 发到群里，不要在结果里给本机路径链接（手机上点不开）。');
-    if (config.adhdMode) injected.push(larkAdhdModePrompt);
+    // 顺序：身份 → 群上下文、记忆这类长材料 → 管理者指令和输出规则 → 当前消息 → 用户请求。
+    // 规则紧挨着请求，不会被前面上万字的群上下文冲淡。
+    let groupInstructions = '';
     // 群上下文按运行时会话增量注入，水位只在确认 prompt 已提交给 Agent 后推进。运行时对外只暴露任务状态：
     // running 在领取时就发，此时可能还在准备、尚未提交；completed / interrupted 只能来自已提交轮次的驱动结果
     // 或人工确认，failed 分不清是否提交过。所以只认这两种终态；其余终态、准备失败或重放旧任务都保留旧水位，
@@ -1274,7 +1281,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         const store = this.workflowOptions.store;
         const watermarkKey = `lark.group-context.${config.appId}.${session.id}`;
         const watermark = await store?.get(watermarkKey);
-        const observedContext = await withLarkContextReadTimeout(this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, { triggerMessageId: event.messageId, watermark, groupTools: config.groupToolsEnabled }), '群上下文读取');
+        const materialMessageIds = larkMaterialMessageIds(materialParts, event.chatId);
+        const observedContext = await withLarkContextReadTimeout(this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, { triggerMessageId: event.messageId, watermark, groupTools: config.groupToolsEnabled, materialMessageIds }), '群上下文读取');
         if (observedContext) {
           injected.push(observedContext.text);
           if (observedContext.promptParts) knownParts.set(observedContext.text, observedContext.promptParts);
@@ -1291,8 +1299,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
             throw new Error('群上下文水位写回多次冲突');
           };
         }
-        const instructions = await withLarkContextReadTimeout(this.workflowOptions.participation.instructions({ appId: config.appId, chatId: event.chatId }), '群长期指令读取');
-        if (instructions.trim()) injected.push(`[Dutydeck 群长期指令 · 管理者配置]\n${instructions.trim()}`);
+        groupInstructions = (await withLarkContextReadTimeout(this.workflowOptions.participation.instructions({ appId: config.appId, chatId: event.chatId }), '群长期指令读取')).trim();
       } catch (error) {
         if (this.stopped || task.turn !== currentTurn || await closeSupersededPreparedTurn()) return;
         this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '执行前读取群上下文失败');
@@ -1305,13 +1312,12 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       }
     }
     if (this.stopped || task.turn !== currentTurn || await closeSupersededPreparedTurn()) return;
-    if (config.preInjectPrompt?.trim()) injected.push(`[Dutydeck 预注入 Prompt]\n${config.preInjectPrompt.trim()}`);
     // 会话记忆随 agentPrompt 一起冻结进任务账本：事后能核对这一轮 Agent 看到的是哪几条记忆。
     // 读取失败只丢本轮注入并留日志，不阻断任务。注入了哪几条另记一份，供 Web 任务详情查看。
     let memoryTurn: { scope: LarkMemoryScope; ids: string[] } | undefined;
     if (larkMemoryEnabled(config) && this.workflowOptions.memory) {
       try {
-        const { store, projection, command } = this.workflowOptions.memory;
+        const { store } = this.workflowOptions.memory;
         const scope = larkMemoryScope(config.appId, event.chatId, event.chatType);
         const shared = isLarkGroupMemoryPool(scope);
         // 没有注入任何条目也要记：本轮 Agent 保存的、后台从本轮提取的记忆都按这份记录找到记忆池。
@@ -1367,11 +1373,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         }
 
         const index = renderMemoryIndex(entries, state, { ...(shared ? { currentChatId: event.chatId } : {}), sharedEntries, query: materialPrompt.slice(0, 2_000), budget: relevantMemoryBudget });
-        const memoryBlock = renderLarkMemoryInjection(index.text, {
-          command: command ?? 'dutydeck',
-          directory: projection.directoryFor(scope),
-          shared
-        });
+        const memoryBlock = renderLarkMemoryInjection(index.text, { shared });
         if (memoryBlock) {
           injected.push(memoryBlock);
           memoryTurn.ids = index.ids;
@@ -1381,16 +1383,16 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         injected.push('[Dutydeck 会话记忆状态] 会话记忆读取超时或失败，本轮未注入记忆；不要把未读到的内容判断为不存在。');
       }
     }
-    if (event.chatType === 'group' && config.groupToolsEnabled && config.groupToolsAllowSend) {
-      injected.push(`[Dutydeck 飞书当前消息 · 系统上下文]
-- 当前消息 message_id：${event.messageId}
-- 当前消息 thread_id：${event.threadId?.trim() || '事件未提供'}
-- 回答本轮提问直接输出最终内容，由运行时按会话设置交付到原消息范围；不使用普通 group send 重复发送。
-- 中途进展/询问使用可用的 session send/ask，遵守展示设置。确需独立发送且延续此消息时，--reply-to 使用 ${event.messageId}；独立公告不加 --reply-to/--in-thread。
-- reply-to 只能使用 om_* message_id，不能使用 omt_* thread_id。`);
-    }
+    const groupSend = Boolean(config.groupToolsEnabled && config.groupToolsAllowSend);
+    if (groupInstructions) injected.push(`[Dutydeck 群长期指令 · 管理者配置]\n${groupInstructions}`);
+    if (config.preInjectPrompt?.trim()) injected.push(`[Dutydeck 预注入 Prompt]\n${config.preInjectPrompt.trim()}`);
+    injected.push(larkResultGuidance(groupSend));
+    if (config.adhdMode) injected.push(larkAdhdModePrompt);
     if (riskControlEnabled && !highRiskAuthorized) injected.push(`[Dutydeck 安全策略 · 自动注入]\n当前飞书发送人不在高危操作允许名单中。禁止执行匹配以下正则的操作，也不要通过脚本、子进程、MCP 或其他等价方式绕过：\n${highRiskPattern}\n如果用户要求此类操作，请明确说明已被 Dutydeck 安全策略阻止。`);
     if (task.redispatch) injected.push(larkRedispatchAgentNote(task.redispatch));
+    if (event.chatType === 'group' && groupSend) {
+      injected.push(`[Dutydeck 飞书当前消息 · 系统上下文] message_id：${event.messageId}；thread_id：${event.threadId?.trim() || '事件未提供'}。需要独立发送并接在这条消息下时用 --reply-to ${event.messageId}；--reply-to 只能用 om_* message_id，不能用 omt_* thread_id。`);
+    }
     const agentPrompt = injected.length ? `${injected.join('\n\n')}\n\n[用户请求]\n${materialPrompt}` : materialPrompt;
     const promptParts: PromptPart[] = injected.flatMap((content, index) => {
       const parts = knownParts.get(content) ?? [{ kind: content.startsWith('[Dutydeck 群长期指令') || content.startsWith('[Dutydeck 预注入 Prompt') || content.startsWith('[Dutydeck 安全策略') || content === larkAdhdModePrompt ? 'host_rules' as const

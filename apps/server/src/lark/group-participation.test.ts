@@ -290,7 +290,11 @@ describe('execution Agent task context', () => {
     expect(lines).toContain(`[09-25 10:00] 本机器人(bot) om_card: 结果卡片${'长'.repeat(TASK_CONTEXT_BOT_TEXT_LIMIT - 4)}…`);
     expect(lines).toContain(`[09-25 10:01] cli_peer(bot) om_peer: 另一个机器人${'播'.repeat(TASK_CONTEXT_BOT_TEXT_LIMIT - 6)}…`);
     expect(lines).toContain(`[09-25 10:02] ou_a(human) om_long: ${'长'.repeat(TASK_CONTEXT_HUMAN_TEXT_LIMIT)}…`);
-    expect(lines).toContain(`[09-25 10:03] ou_a(human) om_ask: 请帮我整理 ${'需'.repeat(1500)}`);
+    expect(lines).toContain('[09-25 10:03] ou_a(human) om_ask: （本轮请求，正文见下方用户请求）');
+    expect(context.text).not.toContain('请帮我整理');
+    const deduped = (await h.participation.taskContext(scope, { triggerMessageId: 'om_ask', materialMessageIds: new Set(['om_long']) }))!;
+    expect(deduped.text.split('\n')).toContain('[09-25 10:02] ou_a(human) om_long: （正文见下方用户请求后的参考材料）');
+    expect(deduped.text.length).toBeLessThan(context.text.length - TASK_CONTEXT_HUMAN_TEXT_LIMIT + 100);
     expect(lines).toContain('- 事项 follow_capacity [open] 目标：完成容量评估；负责人：ou_a；步骤 1/2 已完成');
   });
 

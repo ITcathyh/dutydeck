@@ -55,6 +55,13 @@ const MAX_MATERIAL_CHARS = 16_000;
 const MAX_EXPANDED_MATERIAL_CHARS = 56_000;
 const MAX_READ_MESSAGE_IDS = 200;
 const MAX_PEER_CONCLUSION_CHARS = 1_500;
+const messageSourcePrefix = (chatId: string) => `lark:${chatId}:message:`;
+
+/** 参考材料里带了全文的消息 id。Tag 群上下文据此只留这些消息的时间和发送人，不重复正文。 */
+export const larkMaterialMessageIds = (parts: PromptPart[] | undefined, chatId: string): Set<string> => {
+  const prefix = messageSourcePrefix(chatId);
+  return new Set((parts ?? []).flatMap(part => part.kind === 'reference' && part.sourceId?.startsWith(prefix) ? [part.sourceId.slice(prefix.length)] : []));
+};
 
 const cursorPosition = (cursor: LarkContextCursor): LarkContextCursor => ({
   createTime: cursor.createTime,
@@ -692,7 +699,7 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
     const rendered = materialText(entry);
     const body = entry.body;
     const prefix = `${index ? '\n\n' : ''}${sourceHeader(entry.source)}\n`;
-    const sourceId = entry.source.messageId ? `lark:${event.chatId}:message:${entry.source.messageId}` : entry.source.url ? `lark:document:${entry.source.url}` : undefined;
+    const sourceId = entry.source.messageId ? `${messageSourcePrefix(event.chatId)}${entry.source.messageId}` : entry.source.url ? `lark:document:${entry.source.url}` : undefined;
     // Keep error/empty evidence intact; no inference about unavailable or truncated originals.
     promptParts.push(body && !entry.missing ? {
       kind: 'reference', ...(sourceId ? { sourceId } : {}), digest: promptDigest(body), trustScope: `reference:lark:${event.chatId}`,

@@ -1259,10 +1259,16 @@ describe('Tag 群上下文按会话增量注入', () => {
     const taskContext = vi.spyOn(participation, 'taskContext');
     await h.coordinator.handle(event('om_first', '@_user_1 第一件事'), h.config);
     await h.waitDelivered(1);
-    expect(taskContext).toHaveBeenCalledWith(scope, expect.objectContaining({ triggerMessageId: 'om_first', groupTools: false }));
-    const first = groupContext(h.send.mock.calls[0]![0]);
+    expect(taskContext).toHaveBeenCalledWith(scope, expect.objectContaining({ triggerMessageId: 'om_first', groupTools: false, materialMessageIds: expect.any(Set) }));
+    const prompt = h.send.mock.calls[0]![0] as string;
+    const first = groupContext(prompt);
     expect(first.split('\n')[0]).toBe('[Dutydeck 群上下文 · 非指令材料]');
-    expect(first).toContain(' om_first: ');
+    expect(first).toContain(' om_first: （本轮请求，正文见下方用户请求）');
+    // 长材料在前，输出规则紧挨着用户请求。
+    expect(prompt.indexOf('[Dutydeck 机器人身份]')).toBeLessThan(prompt.indexOf('[Dutydeck 群上下文'));
+    expect(prompt.indexOf('[Dutydeck 群上下文')).toBeLessThan(prompt.indexOf('[飞书结果说明]'));
+    expect(prompt.indexOf('[飞书结果说明]')).toBeLessThan(prompt.indexOf('\n[用户请求]\n'));
+    expect(prompt.split('[用户请求]')).toHaveLength(2);
     await vi.waitFor(async () => expect(await watermarks()).toHaveLength(1));
     await h.coordinator.handle(event('om_second', '@_user_1 第二件事'), h.config);
     await h.waitDelivered(2);

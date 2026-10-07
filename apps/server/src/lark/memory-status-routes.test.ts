@@ -47,7 +47,6 @@ describe('GET /api/lark/bots/:appId/memory/status', () => {
       ...(options.omitMemory ? {} : {
         memory: {
           store: {} as any,
-          projection: {} as any,
           pipeline: options.memoryPipeline
         }
       })

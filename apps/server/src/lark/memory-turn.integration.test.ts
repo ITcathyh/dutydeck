@@ -69,7 +69,7 @@ async function harness(patch: Partial<StoredLarkConfig> = {}) {
   const memoryStore = new LarkMemoryStore(repos.config, { onChange: scope => projection.write(scope) });
   projection = new LarkMemoryProjection(memoryStore, join(cwd, 'memory'), log);
   const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings,
-    async () => 'group', undefined, undefined, { store: repos.config, memory: { store: memoryStore, projection, command: 'dutydeck' } });
+    async () => 'group', undefined, undefined, { store: repos.config, memory: { store: memoryStore } });
   await coordinator.initializeWorkflows(config);
   cleanups.push(async () => {
     coordinator.stop();

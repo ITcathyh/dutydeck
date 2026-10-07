@@ -46,9 +46,10 @@ export class HerdrSessions {
   environmentFor(sessionId: string): Record<string, string> {
     return { [herdrSessionEnvKey]: this.nameFor(sessionId), [herdrCommandEnvKey]: `${this.options.command} session herdr --` };
   }
-  prompt(): string {
-    if (!this.binary) return 'Herdr 未安装，本会话的侧边子任务工作空间不可用；继续使用现有 Agent 完成普通任务。';
-    return `Herdr 侧边子任务入口：${this.options.command} session herdr --help；帮助无需服务或凭证。使用 prepare 获取专属 session/workspace/pane 的真实 ID，再按需分派。你是外部 ACP/tmux 主 Agent，不伪造 HERDR_*、不用 --current、不操作用户 default session。必须原样使用完整绑定前缀；停止侧边任务前确认可中断。`;
+  /** 未安装时不注入任何文字；用法和限制都在 session herdr --help 里。command 传简写时由调用方保证上文定义过它。 */
+  prompt(command = this.options.command): string {
+    if (!this.binary) return '';
+    return `Herdr 侧边子任务：先看 ${command} session herdr --help 再用。你是外部 ACP/tmux 主 Agent，不伪造 HERDR_*、不用 --current、不操作用户 default session。`;
   }
   private serial<T>(name: string, work: () => Promise<T>): Promise<T> {
     const result = (this.tails.get(name) ?? Promise.resolve()).catch(() => {}).then(work);

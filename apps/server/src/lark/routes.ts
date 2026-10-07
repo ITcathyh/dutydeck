@@ -15,7 +15,6 @@ import { installLarkHook, larkHookStatus } from './security-hooks.js';
 import { registerLarkAgentToolRoutes } from './agent-tools-routes.js';
 import type { LarkAgentToolsService } from './agent-tools.js';
 import { larkMemoryErrorLabel, type LarkMemoryStore } from './memory.js';
-import type { LarkMemoryProjection } from './memory-view.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import { OpenPlatformConfigurationJobManager } from './open-platform-jobs.js';
 import { isValidLarkAppId, larkSlashCommandDefinitions } from './open-platform-configurator.js';
@@ -46,8 +45,6 @@ export interface LarkRoutesOptions {
   openPlatformJobs?: Pick<OpenPlatformConfigurationJobManager, 'start' | 'get'>;
   memory?: {
     store: LarkMemoryStore;
-    projection: LarkMemoryProjection;
-    command?: string;
     pipeline?: LarkMemoryPipeline;
   };
   /** StoredLarkConfig is the isolated legacy path during the compatibility period. */

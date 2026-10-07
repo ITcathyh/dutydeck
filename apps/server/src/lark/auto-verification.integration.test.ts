@@ -26,7 +26,6 @@ import { buildLarkCard } from './service.js';
 import { LARK_VERIFICATION_ELEMENT_ID } from './card-renderer.js';
 import { larkPendingVerificationKey, parseLarkPendingVerifications } from './auto-verification.js';
 import { larkMemoryScope, LarkMemoryStore } from './memory.js';
-import { LarkMemoryProjection } from './memory-view.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -120,7 +119,7 @@ async function harness(options: { verificationCommand?: string; files?: Record<s
     if (first) await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
     // 记忆投影目录同样放在仓库外面。
     const memoryStore = options.memory ? new LarkMemoryStore(repos.config) : undefined;
-    const memory = memoryStore ? { store: memoryStore, projection: new LarkMemoryProjection(memoryStore, join(root, 'memory'), log), command: 'dutydeck' } : undefined;
+    const memory = memoryStore ? { store: memoryStore } : undefined;
     if (options.managed) {
       const client = {
         getBotInfo: async () => ({ appName: 'Dock', openId: 'ou_bot' }),

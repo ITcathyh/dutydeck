@@ -23,7 +23,6 @@ import { larkBotsConfigKey, larkExecutionIdentity, type StoredLarkConfig } from 
 import type { PersistedLarkCardTask } from './coordinator.js';
 import { LarkLongConnectionListener } from './listener.js';
 import { larkMemoryScope, LarkMemoryStore } from './memory.js';
-import { LarkMemoryProjection } from './memory-view.js';
 
 // 注册到 EventDispatcher 的处理函数，就是线上收到事件时调用的那一个。
 const larkSdk = vi.hoisted(() => ({ handlers: {} as Record<string, (event: any) => unknown> }));
@@ -309,7 +308,7 @@ async function harness(options: { config?: Partial<StoredLarkConfig>; turns?: Tu
     const listener = new LarkLongConnectionListener(log, {
       fetcher: feishu.fetcher as typeof fetch, env: gateEnv, runtime, cardMappings: repos.channelMappings, workflowStore: repos.config,
       relayBroker: broker, usage: ledger, chatModeResolver: async () => 'group',
-      ...(memoryStore ? { memory: { store: memoryStore, projection: new LarkMemoryProjection(memoryStore, join(root, 'memory'), log), command: 'dutydeck' } } : {})
+      ...(memoryStore ? { memory: { store: memoryStore } } : {})
     });
     await listener.start(config);
     // 与服务关闭同一组动作：停飞书监听、关提问通道、停运行时、关库。
