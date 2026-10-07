@@ -32,7 +32,7 @@ export interface SettingsCliInput {
   yes?: boolean;
 }
 
-type FieldKind = 'boolean' | 'integer' | 'integer|null' | 'string' | 'list' | 'json' | 'override' | readonly string[];
+type FieldKind = 'boolean' | 'integer' | 'integer|null' | 'string' | 'list' | 'users' | 'json' | 'override' | readonly string[];
 
 type BotField = Exclude<keyof SaveLarkConfigRequest,
   'stage' | 'originalAppId' | 'expectedRevision' | 'appId' | 'appSecret' | 'name' | 'env' | 'startupCommands' | 'gateEnabled' | 'softGateEnabled' | 'hardGateEnabled' | 'hookTrustConfirmed'>;
@@ -54,11 +54,13 @@ export const botFields = {
   hideTraceOnComplete: 'boolean', compactTrace: 'boolean', completionReactionOnly: 'boolean', silentProgress: 'boolean', adhdMode: 'boolean',
   urgentEnabled: 'boolean', urgentThresholdMs: 'integer|null', urgentMaxPerHourPerChat: 'integer|null',
   pinLongTasks: 'boolean', pinAfterMs: 'integer|null',
-  allowedUsers: 'json', allowedUserNames: 'list', allowedEmails: 'list',
-  allowedBots: 'json', allowedBotNames: 'list', peerBotsAllowed: 'boolean',
-  highRiskAllowedUsers: 'json', highRiskAllowedUserNames: 'list', highRiskAllowedEmails: 'list',
+  allowedUsers: 'users', allowedUserNames: 'list', allowedEmails: 'list',
+  allowedBots: 'users', allowedBotNames: 'list', peerBotsAllowed: 'boolean',
+  highRiskAllowedUsers: 'users', highRiskAllowedUserNames: 'list', highRiskAllowedEmails: 'list',
   highRiskPattern: 'string', riskControlMode: ['off', 'guidance', 'enforced']
 } satisfies Record<BotField, FieldKind>;
+// 这些键和 App Secret 走 Lark 校验那一步（解析姓名、核对 open_id 属于本应用）；其余键要走 Agent 设置那一步的校验（如完全信任确认），不能同一次提交。
+const larkStageFields = ['allowedUserNames', 'allowedBotNames', 'allowedUsers', 'allowedEmails', 'allowedBots'];
 
 // 群设置分三处保存：群绑定、群协作、接话分工；一条 set 命令按键分发。
 const bindingFields = {
@@ -76,7 +78,7 @@ export const groupFields = { ...bindingFields, roleChanges: 'json', ...collabora
 
 const describeKind = (kind: FieldKind) => typeof kind !== 'string' ? kind.join('|') : {
   boolean: 'true|false', integer: 'integer', 'integer|null': 'integer|null', string: 'text',
-  list: 'a,b,c|JSON array', json: 'JSON', override: 'inherit|clear|<value>|JSON'
+  list: 'a,b,c|JSON array', users: 'JSON array of {"openId":"ou_...","name":"..."}', json: 'JSON', override: 'inherit|clear|<value>|JSON'
 }[kind];
 
 export const fieldsHelp = (fields: Record<string, FieldKind>) =>
@@ -93,7 +95,17 @@ function parseValue(key: string, raw: string, kind: FieldKind): unknown {
     throw invalid();
   }
   if (kind === 'string') return raw;
-  if (kind === 'list') return raw.trim().startsWith('[') ? json() : raw.split(',').map(item => item.trim()).filter(Boolean);
+  // 服务端会静默丢掉格式不对的名单条目，名单变空就等于不限制，所以这里先拦住。
+  if (kind === 'list') {
+    const list = raw.trim().startsWith('[') ? json() : raw.split(',').map(item => item.trim()).filter(Boolean);
+    if (Array.isArray(list) && list.every(item => typeof item === 'string')) return list;
+    throw invalid();
+  }
+  if (kind === 'users') {
+    const users = json();
+    if (Array.isArray(users) && users.every(user => user && typeof user === 'object' && typeof user.openId === 'string' && user.openId.trim().startsWith('ou_') && (user.name === undefined || typeof user.name === 'string'))) return users;
+    throw invalid();
+  }
   if (kind === 'override') return raw.trim().startsWith('{') ? json() : raw === 'inherit' || raw === 'clear' ? { mode: raw } : { mode: 'set', value: raw };
   return json();
 }
@@ -149,6 +161,12 @@ async function findBot(request: Request, appId: string) {
   return bot;
 }
 
+function larkStageOnly(fields: Record<string, unknown>, what: string) {
+  const others = Object.keys(fields).filter(key => !larkStageFields.includes(key));
+  if (others.length) throw new SettingsCliError('SETTINGS_KEYS_CONFLICT', `Set ${others.join(', ')} with a separate \`bot set\`; ${what} only takes ${larkStageFields.join(', ')}`);
+  return fields;
+}
+
 async function saveBot(request: Request, body: Record<string, unknown>, appId: string) {
   const saved = await request('PUT', '/api/lark/config', body) as { bots: PublicBot[] };
   return { bot: saved.bots.find(item => item.appId === appId) };
@@ -156,12 +174,14 @@ async function saveBot(request: Request, body: Record<string, unknown>, appId: s
 
 async function findGroup(request: Request, chatId: string, appId?: string): Promise<{ group: ManagedGroup; bot: ManagedGroupBot }> {
   const { groups } = await request('GET', '/api/lark/management/groups') as { groups: ManagedGroup[] };
-  const group = groups.find(item => item.chatId === chatId);
-  if (!group) throw new SettingsCliError('SETTINGS_GROUP_NOT_FOUND', `Group ${chatId} is unknown here; run \`dutydeck settings group sync <app-id>\` first`);
-  const bot = appId ? group.bots.find(item => item.appId === appId) : group.bots.length === 1 ? group.bots[0] : undefined;
-  if (bot) return { group, bot };
+  // 没有租户标识时同一个群按 Bot 分成多条，要合起来找。
+  const entries = groups.filter(item => item.chatId === chatId);
+  if (!entries.length) throw new SettingsCliError('SETTINGS_GROUP_NOT_FOUND', `Group ${chatId} is unknown here; run \`dutydeck settings group sync <app-id>\` first`);
+  const bots = entries.flatMap(item => item.bots);
+  const bot = appId ? bots.find(item => item.appId === appId) : bots.length === 1 ? bots[0] : undefined;
+  if (bot) return { group: entries[0]!, bot };
   if (appId) throw new SettingsCliError('SETTINGS_GROUP_BOT_NOT_FOUND', `Bot ${appId} is not in group ${chatId}`);
-  throw new SettingsCliError('SETTINGS_APP_REQUIRED', `Group ${chatId} has several bots; pass --app ${group.bots.map(item => item.appId).join('|')}`);
+  throw new SettingsCliError('SETTINGS_APP_REQUIRED', `Group ${chatId} has several bots; pass --app ${bots.map(item => item.appId).join('|')}`);
 }
 
 const collaborationPath = (appId: string, chatId: string) => `/api/lark/groups/${path(appId)}/${path(chatId)}/collaboration`;
@@ -182,7 +202,8 @@ async function setGroup(request: Request, input: SettingsCliInput) {
   const { bot } = await findGroup(request, chatId, input.appId);
   const applied: string[] = [];
   try {
-    if (Object.keys(patch).length || roleChanges !== undefined) {
+    // 群协作和接话要求群已有绑定；还没有时先按机器人默认值建一个，与在 dashboard 保存群配置相同。
+    if (Object.keys(patch).length || roleChanges !== undefined || !bot.binding) {
       await request('PUT', `/api/lark/bots/${path(bot.appId)}/groups/${path(chatId)}`, { expectedRevision: bot.binding?.revision ?? 0, patch, ...(roleChanges !== undefined ? { roleChanges } : {}) });
       applied.push('binding');
     }
@@ -226,19 +247,16 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
     case 'bot-add': {
       const appId = required(input.appId, 'App ID');
       if (!input.appSecret) throw new SettingsCliError('SETTINGS_APP_SECRET_REQUIRED', 'Pass the App Secret with --app-secret-fd');
-      const fields = parsePairs(input.pairs ?? [], botFields, 'dutydeck settings bot set --help');
-      // 新机器人只能走 Lark 校验那一步；高风险名单的姓名要用已保存的机器人去解析。
-      if ('highRiskAllowedUserNames' in fields) throw new SettingsCliError('SETTINGS_KEYS_CONFLICT', 'Set highRiskAllowedUserNames with `bot set` after the bot is added');
+      const fields = larkStageOnly(parsePairs(input.pairs ?? [], botFields, 'dutydeck settings bot set --help'), 'bot add');
       return saveBot(request, { stage: 'lark', expectedRevision: 0, ...fields, appId, appSecret: input.appSecret }, appId);
     }
     case 'bot-set': {
       const appId = required(input.appId, 'App ID');
       if (!input.pairs?.length && !input.appSecret) throw new SettingsCliError('SETTINGS_ARGUMENT_REQUIRED', 'Pass at least one key=value or --app-secret-fd');
       const fields = parsePairs(input.pairs ?? [], botFields, 'dutydeck settings bot set --help');
+      const larkStage = input.appSecret !== undefined || larkStageFields.some(key => key in fields);
+      if (larkStage) larkStageOnly(fields, 'an App Secret or member list change');
       const bot = await findBot(request, appId);
-      // 与 dashboard 一致：凭据和成员姓名走 Lark 校验那一步，其余走 Agent 设置那一步（含完全信任确认）。
-      const larkStage = input.appSecret !== undefined || 'allowedUserNames' in fields || 'allowedBotNames' in fields;
-      if (larkStage && 'highRiskAllowedUserNames' in fields) throw new SettingsCliError('SETTINGS_KEYS_CONFLICT', 'Set highRiskAllowedUserNames in a separate command from allowedUserNames, allowedBotNames or a new App Secret');
       return saveBot(request, { stage: larkStage ? 'lark' : 'agent', originalAppId: appId, expectedRevision: bot.revision ?? 1, ...fields, ...(input.appSecret ? { appSecret: input.appSecret } : {}) }, appId);
     }
     case 'bot-remove': {
