@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { larkFailureKind } from './api-gate.js';
 import { isLarkMessageUnupdatable } from './card-renderer.js';
 import type { ConfigRepository, ChannelMapping } from '@dutydeck/shared';
 import type { PersistedLarkCardTask } from './coordinator.js';
@@ -15,7 +16,7 @@ export interface ExplicitFinalContext { scope: ExplicitFinalScope; taskName: str
 type Elements = Array<Record<string, any>>;
 interface FinalRecord {
   version: 1; status: 'pending' | 'failed' | 'delivered'; scope: ExplicitFinalScope; content: string; provider_uuid: string;
-  task_name: string; message_id?: string; attachment_message_id?: string; elements?: Elements;
+  task_name: string; delivery_unknown?: boolean; message_id?: string; attachment_message_id?: string; elements?: Elements;
 }
 const locks = new WeakMap<ConfigRepository, Map<string, Promise<unknown>>>();
 export async function withExplicitFinalLock<T>(store: ConfigRepository | undefined, taskId: string, action: () => Promise<T>): Promise<T> {
@@ -95,13 +96,24 @@ const log = { warn: (..._args: any[]) => {} };
 async function deliver(store: ConfigRepository, service: LarkCardService, record: FinalRecord) {
   if (record.message_id) return record;
   let providerFailed = false;
+  let deliveryUnknown = record.delivery_unknown === true;
+  let attachmentMessageId: string | undefined;
   const strictService = new Proxy(service, { get(target, property, receiver) {
     const value = Reflect.get(target, property, receiver);
     if (!['send', 'reply', 'uploadFile', 'sendFile', 'replyFile'].includes(String(property)) || typeof value !== 'function') return value;
-    return async (...args: unknown[]) => { try { return await value.apply(target, args); } catch (error) { providerFailed = true; throw error; } };
+    return async (...args: unknown[]) => {
+      try {
+        const result = await value.apply(target, args);
+        if (['sendFile', 'replyFile'].includes(String(property))) attachmentMessageId = result?.messageId;
+        return result;
+      } catch (error) {
+        providerFailed = true;
+        if (larkFailureKind(error) === 'unknown') deliveryUnknown = true;
+        throw error;
+      }
+    };
   } });
   let sent: Awaited<ReturnType<typeof sendLarkResult>>;
-  let attachmentMessageId: string | undefined;
   try {
     const prepared = await prepareLarkResult(strictService, targetFor(record.scope), {
       state: 'running', cardKind: 'result', statusLabel: '答复已送达，执行尚未结束', readOnly: true,
@@ -114,7 +126,10 @@ async function deliver(store: ConfigRepository, service: LarkCardService, record
     attachmentMessageId = prepared.attachmentMessageId;
     sent = await sendLarkResult(strictService, targetFor(record.scope), prepared.input, log, store);
   } catch (error) {
-    if (providerFailed && !attachmentMessageId) await store.set(keyFor(record.scope), JSON.stringify({ ...record, status: 'failed' }));
+    // An unknown response may already have delivered the answer. Keep that
+    // uncertainty across retries, even if a later attempt is clearly rejected.
+    if (deliveryUnknown) await store.set(keyFor(record.scope), JSON.stringify({ ...record, delivery_unknown: true }));
+    else if (providerFailed && !attachmentMessageId) await store.set(keyFor(record.scope), JSON.stringify({ ...record, status: 'failed' }));
     throw error;
   }
   if (!sent.messageId?.trim()) throw new Error('Explicit final provider returned no message ID');

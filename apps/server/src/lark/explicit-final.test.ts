@@ -255,7 +255,7 @@ describe('explicit final: real tools, runtime, coordinator and SQLite', () => {
 
   it.each(['reply', 'replyFile'] as const)('never falls back from failed strict %s to the group main conversation', async method => {
     const h = await harness({ text: method === 'replyFile' ? '长正文'.repeat(20000) : 'answer' });
-    h.service[method].mockRejectedValueOnce(new Error('provider failure'));
+    h.service[method].mockRejectedValueOnce(new LarkServiceError('LARK_OPENAPI_ERROR', 'provider failure', 502, { upstreamHttpStatus: 400, upstreamCode: 230028 }));
     await expect(h.sendFinal()).rejects.toThrow('provider failure');
     expect(h.service.send).not.toHaveBeenCalled();
     expect(h.service.sendFile).not.toHaveBeenCalled();
@@ -410,6 +410,65 @@ it('retries a failed terminal PATCH on restart without sending the answer again'
   try { await restarted.reconcile(h.config); expect((await h.persisted()).final_message_id).toBe(sent.messageId); }
   finally { restarted.stop(); }
   expect(resultSends(h)).toHaveLength(1);
+});
+
+it.each(['completion', 'restart'])('keeps an accepted explicit final with a lost response on the same UUID through %s', async recovery => {
+  const h = await harness();
+  const reply = h.service.reply.getMockImplementation()!;
+  h.service.reply.mockImplementationOnce(async input => {
+    await reply(input);
+    throw new LarkServiceError('LARK_NETWORK_ERROR', 'response lost after acceptance', 502);
+  });
+  await expect(h.sendFinal()).rejects.toThrow('response lost after acceptance');
+  const [firstId] = [...h.cards].find(([, input]) => input.cardKind === 'result')!;
+  const uuid = resultSends(h)[0]!.idempotencyKey;
+  expect(JSON.parse((await h.repos.config.list!('lark.explicit_final.'))[0]!.value).status).toBe('pending');
+  if (recovery === 'restart') h.coordinator.stop();
+  h.release();
+  if (recovery === 'completion') await h.resultCard();
+  else {
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(h.session.id))[0]?.status).toBe('completed'));
+    const restarted = h.createCoordinator();
+    try { await restarted.reconcile(h.config); } finally { restarted.stop(); }
+  }
+  expect((await h.persisted()).final_message_id).toBe(firstId);
+  expect(resultSends(h)).toHaveLength(2);
+  expect(resultSends(h).every(input => input.idempotencyKey === uuid && input.messageId === 'om_origin')).toBe(true);
+  expect([...h.cards.values()].filter(input => input.cardKind === 'result')).toHaveLength(1);
+});
+
+it('a definite rejection on a later retry does not erase an earlier unknown delivery', async () => {
+  const h = await harness();
+  const reply = h.service.reply.getMockImplementation()!;
+  h.service.reply.mockImplementationOnce(async input => {
+    await reply(input);
+    throw new LarkServiceError('LARK_NETWORK_ERROR', 'lost response', 502);
+  });
+  await expect(h.sendFinal()).rejects.toThrow('lost response');
+  const uuid = resultSends(h)[0]!.idempotencyKey;
+  h.service.reply.mockRejectedValueOnce(new LarkServiceError('LARK_OPENAPI_ERROR', 'rejected retry', 502,
+    { upstreamHttpStatus: 400, upstreamCode: 230028 }));
+  await expect(h.sendFinal()).rejects.toThrow('rejected retry');
+  expect(JSON.parse((await h.repos.config.list!('lark.explicit_final.'))[0]!.value).status).toBe('pending');
+  h.release();
+  await h.resultCard();
+  expect(resultSends(h)).toHaveLength(3);
+  expect(resultSends(h).every(input => input.idempotencyKey === uuid)).toBe(true);
+  expect([...h.cards.values()].filter(input => input.cardKind === 'result')).toHaveLength(1);
+});
+
+it('keeps partial attachment delivery pending after the provider clearly rejects the summary', async () => {
+  const h = await harness({ text: 'long answer '.repeat(6000) });
+  h.service.reply.mockRejectedValueOnce(new LarkServiceError('LARK_OPENAPI_ERROR', 'summary rejected', 502,
+    { upstreamHttpStatus: 400, upstreamCode: 230028 }));
+  await expect(h.sendFinal()).rejects.toThrow('summary rejected');
+  expect(h.service.replyFile).toHaveBeenCalledTimes(1);
+  expect(JSON.parse((await h.repos.config.list!('lark.explicit_final.'))[0]!.value).status).toBe('pending');
+  const uuid = resultSends(h)[0]!.idempotencyKey;
+  h.release();
+  await h.resultCard();
+  expect(resultSends(h).every(input => input.idempotencyKey === uuid)).toBe(true);
+  expect(h.service.replyFile).toHaveBeenCalledTimes(1);
 });
 
 it('recovers a provider success whose summary receipt write failed, using the same provider UUID after restart', async () => {

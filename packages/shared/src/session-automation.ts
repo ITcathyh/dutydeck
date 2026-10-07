@@ -9,6 +9,7 @@ import {
   type TaskAdmissionV1
 } from './task-execution.js';
 
+const observedRunAttempts = z.array(z.object({ id: z.number().int().nonnegative(), attempt: z.number().int().positive() }).strict()).max(100);
 const timestamp = z.string().datetime({ offset: true });
 const repository = z.object({ owner: z.string().min(1), name: z.string().min(1), slug: z.string().min(3) }).strict();
 const delivery = z.object({
@@ -33,7 +34,8 @@ export const sessionScheduleConditionSchema = z.discriminatedUnion('kind', [
     workflow: z.string().trim().min(1).max(255).optional(),
     repository,
     headSha: z.string().regex(/^[a-f0-9]{40}$/),
-    observedRunIds: z.array(z.number().int().nonnegative()).max(100)
+    observedRunIds: z.array(z.number().int().nonnegative()).max(100),
+    observedRunAttempts: observedRunAttempts.optional()
   }).strict()
 ]);
 export type SessionScheduleCondition = z.infer<typeof sessionScheduleConditionSchema>;
@@ -119,6 +121,7 @@ export const sessionScheduleOccurrenceV2Schema = z.object({
   scheduledForUtc: timestamp,
   conditionStatus: z.enum(['pending', 'passed', 'skipped', 'error', 'invalidated']),
   conditionObservedRunIds: z.array(z.number().int().nonnegative()).max(100).optional(),
+  conditionObservedRunAttempts: observedRunAttempts.optional(),
   runStatus: z.enum(['pending', 'accepted', 'completed', 'failed', 'interrupted', 'skipped', 'error', 'invalidated', 'blocked']),
   taskId: z.string().optional(),
   taskStartedAt: timestamp.optional(),

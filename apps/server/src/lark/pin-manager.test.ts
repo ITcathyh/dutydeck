@@ -179,7 +179,15 @@ describe('LarkPinManager', () => {
 
     // Must not throw
     const result = await manager.reconcile({ appId: 'app_test', activeTaskIds: [] });
-    expect(result.unpinned).toEqual(['om_fail']);
+    expect(result.unpinned).toEqual([]);
+    expect(JSON.parse(map.get('lark.pin.app_test.om_fail')!)).toMatchObject({ status: 'pinned' });
+    expect(JSON.parse(map.get('lark.pin.app_test.om_fail')!)).not.toHaveProperty('unpinnedAt');
+    expect(manager.isPinned('om_fail')).toBe(true);
+    vi.mocked(service.unpin).mockResolvedValue(undefined);
+    const restarted = new LarkPinManager(service, { store });
+    expect(await restarted.reconcile({ appId: 'app_test', activeTaskIds: [] })).toEqual({ unpinned: ['om_fail'], retained: [] });
+    expect(service.unpin).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(map.get('lark.pin.app_test.om_fail')!)).toMatchObject({ status: 'unpinned', unpinnedAt: expect.any(String) });
     expect(warn).toHaveBeenCalled();
   });
 });

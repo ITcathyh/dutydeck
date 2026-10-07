@@ -435,7 +435,8 @@ export class SessionAutomationService {
       ...(input.workflow ? { workflow: input.workflow } : {}),
       repository: resolved.repository,
       headSha: resolved.headSha,
-      observedRunIds: runs.map(run => run.id)
+      observedRunIds: runs.map(run => run.id),
+      observedRunAttempts: runs.map(run => ({ id: run.id, attempt: run.runAttempt }))
     };
   }
 
@@ -955,6 +956,7 @@ export class SessionAutomationService {
     let conditionError = occurrence.error;
     if (occurrence.conditionStatus === 'pending' && schedule.condition.kind === 'github_new_failure') {
       let observed: number[] | undefined;
+      let observedAttempts: SessionScheduleOccurrenceV2['conditionObservedRunAttempts'];
       try {
         const condition = schedule.condition;
         const resolved = await resolveGithubHead(session!.cwd);
@@ -963,9 +965,12 @@ export class SessionAutomationService {
         }
         const runs = await this.github.listCompletedRuns(condition.repository, condition.headSha, condition.workflow);
         const seen = new Set(condition.observedRunIds);
-        const newRuns = runs.filter(run => !seen.has(run.id));
+        const attempts = new Map(condition.observedRunAttempts?.map(run => [run.id, run.attempt]));
+        // 旧记录只有 ID：首轮为这些 ID 补齐当前 attempt，不重放历史失败。
+        const newRuns = runs.filter(run => !seen.has(run.id) || attempts.has(run.id) && run.runAttempt > attempts.get(run.id)!);
         conditionStatus = newRuns.some(run => run.conclusion && failureConclusions.has(run.conclusion)) ? 'passed' : 'skipped';
         observed = runs.map(run => run.id);
+        observedAttempts = runs.map(run => ({ id: run.id, attempt: run.runAttempt }));
       } catch (error) {
         conditionStatus = 'error';
         conditionError = errorMessage(error);
@@ -982,7 +987,7 @@ export class SessionAutomationService {
         ...working.value,
         revision: working.value.revision + 1,
         conditionStatus,
-        ...(observed !== undefined ? { conditionObservedRunIds: observed } : {}),
+        ...(observed !== undefined ? { conditionObservedRunIds: observed, conditionObservedRunAttempts: observedAttempts } : {}),
         ...(conditionError ? { error: conditionError } : {}),
         updatedAt: iso(this.clock())
       });
@@ -990,9 +995,12 @@ export class SessionAutomationService {
       working = { raw: JSON.stringify(evaluated), value: evaluated };
     }
     const persistedCondition = schedule.condition;
-    if (persistedCondition.kind === 'github_new_failure' && working.value.conditionObservedRunIds?.some(id => !persistedCondition.observedRunIds.includes(id))) {
+    if (persistedCondition.kind === 'github_new_failure' && working.value.conditionObservedRunIds) {
       const observedRunIds = [...new Set([...persistedCondition.observedRunIds, ...working.value.conditionObservedRunIds])].sort((a, b) => a - b).slice(-100);
-      const updated = sessionScheduleSchema.parse({ ...schedule, condition: { ...persistedCondition, observedRunIds } });
+      const attempts = new Map(persistedCondition.observedRunAttempts?.map(run => [run.id, run.attempt]));
+      for (const run of working.value.conditionObservedRunAttempts ?? []) attempts.set(run.id, Math.max(attempts.get(run.id) ?? 0, run.attempt));
+      const observedRunAttempts = observedRunIds.filter(id => attempts.has(id)).map(id => ({ id, attempt: attempts.get(id)! }));
+      const updated = sessionScheduleSchema.parse({ ...schedule, condition: { ...persistedCondition, observedRunIds, observedRunAttempts } });
       if (!await this.replace(scheduleKey(schedule.id), scheduleStored.raw, updated)) {
         await this.finishOccurrence(working, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule changed while its condition was evaluated' });
         return;

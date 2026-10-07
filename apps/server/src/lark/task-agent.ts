@@ -22,6 +22,7 @@
 //    （project=task, version=v2）。register_agent 的请求体飞书没有公开，因此这里一个
 //    字段都不猜，由调用方透传。本模块与其测试绝不触达真实飞书接口。
 
+import { randomUUID } from 'node:crypto';
 import type { StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 
@@ -81,6 +82,8 @@ export interface LarkTaskDispatch {
   taskGuid: string;
   /** 幂等落库键。 */
   ledgerKey: string;
+  /** CAS receipt for releasing only this claim. */
+  claimValue?: string;
   /** 已包裹不可信标注的提示词。 */
   prompt: string;
   /** 合成的入站事件，交给 coordinator 的消息入口原样处理。 */
@@ -276,6 +279,9 @@ async function listAssignedTasks(client: LarkTaskAgentClient, pageSize: number):
   return collected;
 }
 
+// Storage runtime control excludes other live processes sharing this database.
+const taskAgentBoot = randomUUID();
+
 /**
  * 通道入口：未启用时一个请求都不发；启用时读取任务并逐条认领。
  * 认领成功（CAS 写入落库）才返回派发请求——重复轮询、并发轮询、进程重启都只派发一次。
@@ -294,6 +300,8 @@ export async function claimLarkTaskDispatches(input: {
   config?: LarkTaskAgentChannelConfig;
   log?: LarkTaskAgentLog;
   now?: () => number;
+  /** Durable inbox is the handoff receipt; only orphaned claims may be reclaimed. */
+  hasHandoff?: (dispatch: LarkTaskDispatch) => Promise<boolean>;
 }): Promise<LarkTaskAgentIntakeResult> {
   const config = input.config ?? resolveLarkTaskAgentConfig(input.env);
   if (!config.enabled) return disabled(input.appId, 'not_enabled', input.log);
@@ -304,35 +312,46 @@ export async function claimLarkTaskDispatches(input: {
   const now = input.now ?? Date.now;
   const dispatches: LarkTaskDispatch[] = [];
   const skipped: string[] = [];
-  for (const task of await listAssignedTasks(input.client, config.pageSize)) {
-    const dispatch = buildLarkTaskDispatch({ appId: input.appId, task, chatId: config.chatId });
-    const record = JSON.stringify({
-      taskGuid: task.guid,
-      messageId: dispatch.event.messageId,
-      summary: task.summary,
-      // 这一刻只是「认领」，还没有交给 coordinator：交接失败的调用方要调
-      // releaseLarkTaskClaim 把认领退回，否则这条任务会被永久当成已派发。
-      claimedAt: new Date(now()).toISOString()
-    });
-    // 先按「键不存在」认领；退回过的记录是空串标记，两者一视同仁。
-    const claimed = await input.store.compareAndSet(dispatch.ledgerKey, undefined, record)
-      || await input.store.compareAndSet(dispatch.ledgerKey, releasedClaim, record);
-    if (claimed) dispatches.push(dispatch);
-    else skipped.push(task.guid);
+  try {
+    for (const task of await listAssignedTasks(input.client, config.pageSize)) {
+      const dispatch = buildLarkTaskDispatch({ appId: input.appId, task, chatId: config.chatId });
+      const current = await input.store.get(dispatch.ledgerKey);
+      let activeClaim = false;
+      if (current) {
+        try { activeClaim = !input.hasHandoff || JSON.parse(current).boot === taskAgentBoot; }
+        catch { activeClaim = true; }
+      }
+      if (activeClaim || await input.hasHandoff?.(dispatch)) {
+        skipped.push(task.guid);
+        continue;
+      }
+      const record = JSON.stringify({
+        taskGuid: task.guid, messageId: dispatch.event.messageId, summary: task.summary,
+        claimedAt: new Date(now()).toISOString(),
+        // Shared by coordinators in this process: do not steal an in-flight handoff.
+        ...(input.hasHandoff ? { boot: taskAgentBoot } : {})
+      });
+      if (await input.store.compareAndSet(dispatch.ledgerKey, current, record)) dispatches.push({ ...dispatch, claimValue: record });
+      else skipped.push(task.guid);
+    }
+  } catch (error) {
+    // A partial batch has not reached the caller and cannot be handed off.
+    for (const dispatch of dispatches) await releaseLarkTaskClaim(input.store, dispatch.ledgerKey, dispatch.claimValue)
+      .catch(releaseError => input.log?.warn({ error: releaseError, taskGuid: dispatch.taskGuid }, '退回飞书任务认领失败'));
+    throw error;
   }
   return { status: 'ready', dispatches, skipped };
 }
 
 /**
  * 退回一次认领：调用方没能把 dispatch 交给 coordinator（交接抛错、或在交接前失败）时
- * 调用，下一轮轮询会重新派发这条任务。不调用它的后果不是重复派发，而是这条任务被永久
- * 当成已派发、静默丢活。
+ * 调用，下一轮轮询会重新派发这条任务。进程中断留下的认领由新进程核对 inbox 后接手。
  *
  * ConfigRepository 没有删除接口，所以退回写的是空串标记；认领时把空串与「键不存在」
  * 一视同仁。只在记录仍是传入的那条时才退回，避免抹掉别人后写的状态。
  */
-export async function releaseLarkTaskClaim(store: LarkTaskAgentLedger, ledgerKey: string): Promise<boolean> {
-  const current = await store.get(ledgerKey);
+export async function releaseLarkTaskClaim(store: LarkTaskAgentLedger, ledgerKey: string, claimValue?: string): Promise<boolean> {
+  const current = claimValue ?? await store.get(ledgerKey);
   if (current === undefined || current === releasedClaim) return false;
   return await store.compareAndSet!(ledgerKey, current, releasedClaim);
 }

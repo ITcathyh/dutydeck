@@ -1209,3 +1209,81 @@ describe('App 会话分析深链与导航', () => {
     expect(window.location.search).toBe('?panel=insight');
   });
 });
+
+describe('App pending composer mutations', () => {
+  const queuedTask = (id: string) => ({ id, sessionId: 's1', prompt: id, status: 'queued', createdAt: '2026-08-30T00:00:00Z', updatedAt: '2026-08-30T00:00:00Z' });
+
+  function setup() {
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1', 'thinking'), session('s2')], summaries: [summary('s1', 'first session'), summary('s2', 'second session')] });
+  }
+
+  it.each([
+    ['cancelQueued', true], ['cancelQueued', false], ['steerQueued', true], ['steerQueued', false]
+  ] as const)('%s freezes the queue only until the request settles (success=%s)', async (operation, success) => {
+    setup();
+    const queued = [queuedTask('q1'), queuedTask('q2')];
+    vi.mocked(api.tasks).mockResolvedValue(queued);
+    let resolve!: (value: Awaited<ReturnType<typeof api.cancelQueued>>) => void;
+    let reject!: (error: Error) => void;
+    const request = vi.spyOn(api, operation).mockImplementation(() => new Promise((done, fail) => { resolve = done; reject = fail; }));
+    renderApp();
+    await screen.findByRole('button', { name: '取消排队：q1' });
+    const firstAction = operation === 'cancelQueued' ? screen.getByRole('button', { name: '取消排队：q1' }) : screen.getAllByRole('button', { name: '打断当前任务并执行' })[0];
+    await userEvent.click(firstAction);
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    const remainingRow = () => screen.getByRole('button', { name: '取消排队：q2' }).parentElement!;
+    for (const button of within(remainingRow()).getAllByRole('button')) expect(button.hasAttribute('disabled')).toBe(true);
+    await userEvent.click(screen.getByRole('button', { name: '取消排队：q2' }));
+    expect(request).toHaveBeenCalledTimes(1);
+    const result = { ...queued[0], status: operation === 'cancelQueued' ? 'cancelled' : 'running' };
+    if (success) vi.mocked(api.tasks).mockResolvedValue([result, queued[1]]);
+    await act(async () => { if (success) resolve(result); else reject(new Error('queue request failed')); });
+    await waitFor(() => {
+      for (const button of within(remainingRow()).getAllByRole('button')) expect(button.hasAttribute('disabled')).toBe(false);
+    });
+    const cancel = operation === 'cancelQueued' ? request : vi.spyOn(api, 'cancelQueued');
+    cancel.mockResolvedValue({ ...queued[1], status: 'cancelled' });
+    await userEvent.click(screen.getByRole('button', { name: '取消排队：q2' }));
+    await waitFor(() => expect(cancel).toHaveBeenLastCalledWith('s1', 'q2'));
+  });
+
+  async function addFile(path: string) {
+    fireEvent.change(screen.getByRole('textbox', { name: '消息' }), { target: { value: '/file' } });
+    await userEvent.click(screen.getByRole('button', { name: /\/file/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: '本地文件路径' }), { target: { value: path } });
+    await userEvent.click(screen.getByRole('button', { name: '引用' }));
+  }
+
+  it.each(['text', 'references', 'new references', 'unchanged', 'failure', 'session'] as const)('preserves the appropriate draft after a delayed send: %s', async change => {
+    setup();
+    let resolve!: (value: Awaited<ReturnType<typeof api.send>>) => void;
+    let reject!: (error: Error) => void;
+    const send = vi.spyOn(api, 'send').mockImplementation(() => new Promise((done, fail) => { resolve = done; reject = fail; }));
+    const { client } = renderApp();
+    await screen.findByRole('textbox', { name: '消息' });
+    await addFile('/tmp/first.ts');
+    const input = () => screen.getByRole('textbox', { name: '消息' }) as HTMLTextAreaElement;
+    fireEvent.change(input(), { target: { value: '  first instruction  ' } });
+    await userEvent.click(await screen.findByRole('button', { name: '发送消息' }));
+    await waitFor(() => expect(send).toHaveBeenCalledWith('s1', '/file /tmp/first.ts\n\nfirst instruction', 'queue', []));
+    if (change === 'text') fireEvent.change(input(), { target: { value: 'second unsent draft' } });
+    if (change === 'references') await userEvent.click(screen.getByRole('button', { name: '移除引用 first.ts' }));
+    if (change === 'new references') {
+      await addFile('/tmp/second.ts');
+      fireEvent.change(input(), { target: { value: '  first instruction  ' } });
+    }
+    if (change === 'session') {
+      const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
+      await userEvent.click(within(navigation).getByRole('button', { name: /second session/ }));
+      fireEvent.change(input(), { target: { value: 'other session draft' } });
+      await addFile('/tmp/second.ts');
+      fireEvent.change(input(), { target: { value: 'other session draft' } });
+    }
+    await act(async () => { if (change === 'failure') reject(new Error('send failed')); else resolve({ accepted: true, task: queuedTask('sent') }); });
+    await waitFor(() => expect(client.isMutating()).toBe(0));
+    await waitFor(() => expect(input().value).toBe(change === 'unchanged' ? '' : change === 'text' ? 'second unsent draft' : change === 'session' ? 'other session draft' : '  first instruction  '));
+    expect(Boolean(screen.queryByRole('button', { name: '移除引用 first.ts' }))).toBe(change === 'text' || change === 'failure' || change === 'new references');
+    expect(Boolean(screen.queryByRole('button', { name: '移除引用 second.ts' }))).toBe(change === 'session' || change === 'new references');
+  });
+});
