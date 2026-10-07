@@ -54,6 +54,14 @@ describe('settings CLI against the real bot routes', () => {
     await expect(run('bot-set', { appId: 'cli_a', pairs: ['adhdMode=yes'] })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID', message: 'adhdMode expects true|false' });
     await expect(run('bot-set', { appId: 'cli_a', pairs: ['mentionPolicy=sometimes'] })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
     await expect(run('bot-set', { appId: 'cli_a', pairs: ['adhdMode=true', 'adhdMode=false'] })).rejects.toMatchObject({ code: 'SETTINGS_KEY_DUPLICATE' });
+    // 服务端会静默丢掉这些条目，名单变空就等于不限制访问。
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['allowedUsers=["ou_owner"]'] })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['allowedUsers=[{"openId":"on_union"}]'] })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['allowedEmails=[1]'] })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    // 换凭据或改成员名单时不经过完全信任确认，其余键要分开提交。
+    await expect(run('bot-set', { appId: 'cli_a', appSecret: 'new-secret', pairs: ['permissionMode=full-trust'] })).rejects.toMatchObject({ code: 'SETTINGS_KEYS_CONFLICT' });
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['allowedUserNames=张三', 'listening=true'] })).rejects.toMatchObject({ code: 'SETTINGS_KEYS_CONFLICT' });
+    await expect(run('bot-add', { appId: 'cli_new', appSecret: 's', pairs: ['defaultAgentId=codex'] })).rejects.toMatchObject({ code: 'SETTINGS_KEYS_CONFLICT' });
     expect(fetcher).not.toHaveBeenCalled();
   });
 
@@ -81,10 +89,10 @@ describe('settings CLI requests', () => {
     return call && JSON.parse(call[1].body);
   };
   const groupBot = (appId: string, revision?: number) => ({ appId, membership: 'member', validity: 'valid', roles: [], applied: true, ...(revision ? { binding: { revision, state: 'staged', oncall: false } } : {}) });
-  const groupApi = (bots: unknown[], failOn?: string) => vi.fn(async (url: URL, init: RequestInit) => {
+  const groupApi = (bots: unknown[], failOn?: string, groups = [{ key: 'k', chatId: 'oc_1', name: '值班群', bots }]) => vi.fn(async (url: URL, init: RequestInit) => {
     const key = `${init.method} ${url.pathname}`;
     if (key === failOn) return json({ error: { code: 'COLLABORATION_REVISION_CONFLICT', message: '群协作设置已变化' } }, 409);
-    if (key === 'GET /api/lark/management/groups') return json({ groups: [{ key: 'k', chatId: 'oc_1', name: '值班群', bots }] });
+    if (key === 'GET /api/lark/management/groups') return json({ groups });
     if (key.startsWith('GET /api/lark/groups/')) return json({ snapshot: { settings: { revision: 7 } }, duty: { revision: 3 } });
     return json({});
   });
@@ -103,6 +111,25 @@ describe('settings CLI requests', () => {
     await run(fetcher, 'group-set', { chatId: 'oc_1', pairs: ['reasoningOverride=clear'] });
     expect(bodyOf(fetcher, 'PUT', '/api/lark/bots/cli_a/groups/oc_1')).toEqual({ expectedRevision: 0, patch: { reasoningOverride: { mode: 'clear' } } });
     expect(fetcher.mock.calls.filter(([, init]) => init.method === 'PATCH')).toHaveLength(0);
+  });
+
+  it('sends raw owner open_ids through the Lark step that checks they belong to this app', async () => {
+    const fetcher = vi.fn(async () => json({ configured: true, bots: [{ appId: 'cli_a', revision: 4 }] }));
+    await run(fetcher, 'bot-set', { appId: 'cli_a', pairs: ['allowedUsers=[{"openId":"ou_owner","name":"Owner"}]'] });
+    expect(bodyOf(fetcher, 'PUT', '/api/lark/config')).toEqual({ stage: 'lark', originalAppId: 'cli_a', expectedRevision: 4, allowedUsers: [{ openId: 'ou_owner', name: 'Owner' }] });
+  });
+
+  it('creates the binding first when only collaboration settings are given for a new group', async () => {
+    const fetcher = groupApi([groupBot('cli_a')]);
+    expect((await run(fetcher, 'group-set', { chatId: 'oc_1', pairs: ['participation=selective'] })).applied).toEqual(['binding', 'collaboration']);
+    expect(bodyOf(fetcher, 'PUT', '/api/lark/bots/cli_a/groups/oc_1')).toEqual({ expectedRevision: 0, patch: {} });
+  });
+
+  it('finds every bot of a group even when the group is listed once per bot', async () => {
+    const fetcher = groupApi([], undefined, [{ key: 'a', chatId: 'oc_1', name: '值班群', bots: [groupBot('cli_a', 1)] }, { key: 'b', chatId: 'oc_1', name: '值班群', bots: [groupBot('cli_b', 2)] }]);
+    await expect(run(fetcher, 'group-set', { chatId: 'oc_1', pairs: ['oncall=true'] })).rejects.toMatchObject({ code: 'SETTINGS_APP_REQUIRED' });
+    await run(fetcher, 'group-set', { chatId: 'oc_1', appId: 'cli_b', pairs: ['oncall=true'] });
+    expect(bodyOf(fetcher, 'PUT', '/api/lark/bots/cli_b/groups/oc_1')).toEqual({ expectedRevision: 2, patch: { oncall: true } });
   });
 
   it('asks for --app when several bots share a group', async () => {

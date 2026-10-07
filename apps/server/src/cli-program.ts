@@ -699,7 +699,7 @@ Examples:
     .option('--app-secret-fd <fd>', 'Also replace the App Secret, read from this file descriptor (0 = stdin)'))
     .addHelpText('after', fieldsHelp(botFields))
     .action((appId, pairs, options, command) => runSettings('bot-set', command, { appId, pairs, appSecretFd: options.appSecretFd }));
-  withTarget(botSettings.command('add <app-id> [key=value...]').description('Bind an existing Feishu/Lark app as a bot; keys as in `bot set`')
+  withTarget(botSettings.command('add <app-id> [key=value...]').description('Bind an existing Feishu/Lark app as a bot; may also set allowedUserNames, allowedBotNames, allowedUsers, allowedEmails, allowedBots')
     .requiredOption('--app-secret-fd <fd>', 'Read the App Secret from this file descriptor (0 = stdin)'))
     .action((appId, pairs, options, command) => runSettings('bot-add', command, { appId, pairs, appSecretFd: options.appSecretFd }));
   withTarget(botSettings.command('remove <app-id>').description('Delete a bot with its saved credentials and settings')
