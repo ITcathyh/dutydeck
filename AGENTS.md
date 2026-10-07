@@ -11,3 +11,6 @@
 
 重启线上服务用 `dutydeck restart`，它会等正在执行的任务结束；不要直接用 `systemctl --user restart dutydeck.service`。只有 restart 等待超时、并且确认可以中断这些任务时，才用 `dutydeck restart --force`。在 Agent 会话里执行 `dutydeck restart` 时会自动排除当前会话自己那一轮，不必为「命令本身占着一个 running 任务」而加 --force。
 
+## Dashboard 设置与 CLI 同步
+
+Dashboard 上能改的设置都要能用 `dutydeck settings` 改（`apps/server/src/settings-cli.ts`），用户靠它让 Agent 管理配置。新增或修改 dashboard 的设置项、取值范围或保存接口时，在同一个改动里更新对应的 `dutydeck settings` 命令、键表和 `settings-cli.test.ts`；新的设置面板要加对应命令。机器人、群配置、群协作和接话的键表用 `satisfies` 绑定了服务端保存接口的类型，接口加字段而键表没加会编译失败；枚举取值和新面板没有这层检查，要自己核对。
