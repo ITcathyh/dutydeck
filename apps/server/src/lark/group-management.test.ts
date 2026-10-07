@@ -42,6 +42,11 @@ describe('live group configuration', () => {
   });
   afterEach(async () => { repos?.close(); await rm(dir, { recursive: true, force: true }); });
 
+  it('names the invalid field when a group patch has the wrong shape', async () => {
+    await expect(manager.save('cli_one', 'oc_one', { expectedRevision: 0, patch: { modelOverride: 'gpt-5.5' } }))
+      .rejects.toMatchObject({ code: 'INVALID_GROUP_CONFIG', message: expect.stringContaining('patch.modelOverride') });
+  });
+
   it.each([
     { read: 'inherit', discover: 'inherit', send: 'inherit' },
     { read: 'inherit', discover: 'inherit', send: 'deny' },

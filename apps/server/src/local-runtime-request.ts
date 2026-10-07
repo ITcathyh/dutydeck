@@ -16,7 +16,7 @@ export interface LocalRuntimeErrorSpec {
   localRuntimeRequired: string;
   requestFailed: string;
   localRuntimeRequiredMessage?: string;
-  requestFailedMessage?: (status: number) => string;
+  requestFailedMessage?: (status: number, serverMessage?: string) => string;
 }
 
 export interface LocalRuntimeRequestOptions {
@@ -89,8 +89,9 @@ export async function executeLocalRuntimeRequest(
 
   if (!response.ok) {
     const code = typeof result?.error?.code === 'string' ? result.error.code : errorSpec.requestFailed;
+    const serverMessage = typeof result?.error?.message === 'string' ? result.error.message : undefined;
     const message = errorSpec.requestFailedMessage
-      ? errorSpec.requestFailedMessage(response.status)
+      ? errorSpec.requestFailedMessage(response.status, serverMessage)
       : `Request failed with HTTP ${response.status}`;
     throw createError(code, message);
   }
