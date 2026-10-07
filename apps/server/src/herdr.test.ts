@@ -67,7 +67,7 @@ describe('dedicated Herdr sessions', () => {
   });
   it('keeps missing Herdr optional and returns an explicit unavailable error', async () => {
     const manager = new HerdrSessions({database:'/tmp/no-herdr.db',signingSecret:'fixture',command:'/runtime/cli',env:{PATH:'/nonexistent'}});
-    expect(manager.prompt()).toContain('Herdr 未安装');
+    expect(manager.prompt()).toBe('');
     await expect(manager.prepare({id:'chat',cwd:'/tmp'})).rejects.toMatchObject({code:'HERDR_UNAVAILABLE'});
   });
 });

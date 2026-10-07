@@ -63,9 +63,7 @@ export async function registerWorkItemTools(app: FastifyInstance, options: WorkI
   });
 }
 
-export const workbenchAgentPrompt = (command = 'dutydeck work', confirmation = false) => `[Dutydeck 目标编排]
-多 Agent、可重复流程或分阶段等待用 ${command}；先读此命令加 --help，含完整 JSON、隔离、等待与审查协议。普通单步工作直接完成。
-${confirmation ? '计划接收后为 awaiting_confirmation，用户点确认卡「开始执行」前不派发；' : '目标编号仅表示计划已接收；'}不表示成果已完成。简述分工和编号后结束本轮，不轮询、不重复创建或群发报告。后台步骤独立，只分享必要材料；并行改代码用 worktree，shared 不隔离写入。不能代用户确认、回答等待或批准权限。`;
+export const workbenchAgentPrompt = (command = 'dutydeck work', confirmation = false) => `[Dutydeck 目标编排] 多 Agent 协作、可重复流程或分阶段等待用 ${command}，先读它的 --help（JSON、隔离、等待与审查协议）；普通单步工作直接完成。${confirmation ? '计划接收后为 awaiting_confirmation，要等用户点确认卡「开始执行」才派发。' : ''}收到目标编号只表示计划已接收，简述分工和编号后结束本轮，不轮询、不重复创建或群发报告；不能代用户确认、回答等待或批准权限。`;
 
 export const layeredWorkbenchPrompt = (command = 'dutydeck work', confirmation = false) => `[Dutydeck 分层协作]
 你是本话题 PMO：问答、查询、总结和一次性小事可自行完成；改代码、测试、多步或多人工作通过 ${command} delegate --file <JSON文件> 交给 Leader。先读此命令的 --help 获取简报协议；Leader 看不到话题历史，需提供必要事实、约束与验收标准，勿附秘密。

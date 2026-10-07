@@ -88,9 +88,25 @@ describe('read-only participation decision', () => {
       expect(prompt).toContain('"id":"obs_1"');
       expect(prompt).toContain('不调用工具');
       expect(prompt).toContain('材料不足');
-      expect(prompt).toContain('测试样本、机器人发言和计划声明不能当作已完成的工作');
     }
+    // 回复怎么写只在回复生成里说；判定 prompt 不带。没有事项和外群资料时也不带对应规则。
+    expect(h.prompts[0]).not.toContain('测试样本、机器人发言和计划声明不能当作已完成的工作');
+    expect(h.prompts[1]).toContain('测试样本、机器人发言和计划声明不能当作已完成的工作');
+    expect(h.prompts[0]).not.toContain('progress/steps');
+    expect(h.prompts[0]).not.toContain('teamContext 是宿主');
     expect(h.prompts[1]).toContain('不声称已执行工具、修改状态或查看快照以外的材料');
+  });
+
+  it('adds the follow-up update rule and schema only when the material has follow-ups', () => {
+    const plain = participationPrompt(snapshot(), 'obs_1', 'Bot');
+    expect(plain).not.toContain('progress/steps');
+    expect(plain).not.toContain('"updates"');
+    expect(plain).not.toContain('不等于外部飞书任务系统');
+    const withFollowup = { ...snapshot(), followups: [{ id: 'f1', scope, revision: 1, goal: '跟进容量评估', status: 'open', progress: '', steps: [{ id: 's1', label: '收集', status: 'open' }], sourceRefs: [], externalRefs: [], taskIds: [], fields: {}, createdAt: stamp, updatedAt: stamp }] } as unknown as CollaborationSnapshot;
+    const prompt = participationPrompt(withFollowup, 'obs_1', 'Bot');
+    expect(prompt).toContain('可提出已有事项的 progress/steps 更新');
+    expect(prompt).toContain('"updates":[{"followupId"');
+    expect(prompt).toContain('群内个人待办是群材料里的事项，不等于外部飞书任务系统');
   });
 
   it('keeps resolve as decision-only evaluation', async () => {

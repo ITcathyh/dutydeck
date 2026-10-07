@@ -683,7 +683,7 @@ describe('Agent Handoff & Reply-Agent integration suite', () => {
     // 1. 虽然 mapping 尚未落盘（返回 undefined），只要配置了 finalTaskContext provider + group + send + active attempt，Prompt 仍注入正确的本轮 token 命令
     const prompt = await tools.promptForSession(session, 'base prompt');
     const expectedTurn = capabilities.finalTurnToken('ses_a', 't1', 'a1');
-    expect(prompt).toContain(`group handoff <目标bot名称/appId/openId> '<交接内容>' --turn ${expectedTurn}`);
+    expect(prompt).toContain(`group handoff <机器人名称/appId/openId> '<目标、代码版本、工作区、读写边界和验收>' --turn ${expectedTurn}`);
     expect(prompt).toContain(`group reply-agent '<交付结果>' --turn ${expectedTurn}`);
 
     // 2. 此时若模型立即调用 handoff 工具，运行时由于 mapping 尚未就绪明确返回 FINAL_MAPPING_UNAVAILABLE

@@ -418,7 +418,7 @@ describe('renderLarkMemoryList', () => {
 
 describe('larkMemoryToolsPrompt', () => {
   it('contains search, show, and write policy rules', () => {
-    expect(larkMemoryToolsPrompt('dutydeck')).toContain('dutydeck memory --help');
+    expect(larkMemoryToolsPrompt('dutydeck')).toContain('dutydeck memory search/show/list');
     expect(larkMemoryToolsPrompt('dutydeck')).toContain('仅用户明确要求记住/忘记时写入');
     expect(larkMemoryToolsPrompt('dutydeck')).toContain('可能过时');
     const prompt = memoryToolsHelp('dutydeck');

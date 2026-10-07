@@ -12,6 +12,7 @@ import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import type { LarkTeamContextReader } from './team-context.js';
 import { parseLarkMessageContent } from './message-content.js';
 import { larkMemoryToolsPrompt } from './memory.js';
+import { stableMemoryCommand } from './memory-view.js';
 import { larkMemoryEnabled, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import {
   createLarkCardService,
@@ -670,7 +671,7 @@ export class LarkAgentToolsService {
     return this.membersFor(await this.context(token, 'group_tools.discover'));
   }
 
-  async promptForSession(session: Session, prompt: string, policyVersion = 'legacy-v1') {
+  async promptForSession(session: Session, prompt: string) {
     const binding = larkAgentSessionBinding(session);
     if (!binding) return prompt;
     const base = await readLarkConfig(this.configs, binding.appId, { readOnly: true });
@@ -699,17 +700,19 @@ export class LarkAgentToolsService {
       } catch { return false; }
     };
     const [memory, read, discover, send] = await Promise.all([allowed('memory'), allowed('group_tools.read'), allowed('group_tools.discover'), allowed('group_tools.send')]);
-    const cmd = this.options.groupToolsCommand ?? 'dutydeck';
-    const blocks: string[] = [];
-    if (memory) blocks.push(larkMemoryToolsPrompt(cmd));
-    blocks.push(deliveryPrompt({ background: collaborationSession, reactionOnly: config.completionReactionOnly }));
+    // 完整绑定命令只写一次，后面各处入口都用 dutydeck 简写：原来每轮要把这串两百字的路径重复近十遍。
+    // 指向 releases/current 的写法在部署后仍然有效，留在会话历史里的命令不会失效。
+    const blocks: string[] = [larkCommandPrompt(stableMemoryCommand(this.options.groupToolsCommand ?? 'dutydeck'),
+      deliveryPrompt({ background: collaborationSession, reactionOnly: config.completionReactionOnly }))];
+    if (memory) blocks.push(larkMemoryToolsPrompt());
     if (config.silentProgress) blocks.push('本会话隐藏普通进度；提问和最终结果仍按各自设置处理。');
-    if (read || discover || send) blocks.push(larkGroupToolsPrompt(send, cmd, { read, discover }, policyVersion));
+    const groupTools = read || discover || send ? [larkGroupToolsPrompt(send, { read, discover })] : [];
     if (task?.attemptId && send && this.options.finalTaskContext) {
       const turn = this.capabilities.finalTurnToken(session.id, task.taskId, task.attemptId);
-      blocks.push(`确需主动最终交付：${cmd} group send '<完整答复>' --final --turn ${turn}。绑定本轮与原消息，不指定 --to 或自定义幂等键；进展/交接不加 --final，映射未就绪稍后重试。`);
-      if (binding.chatType === 'group') blocks.push(`单次 Agent 交接入口：${cmd} group handoff <目标bot名称/appId/openId> '<交接内容>' --turn ${turn}；${cmd} group reply-agent '<交付结果>' --turn ${turn}，绑定本轮与原话题。交接附目标、代码版本、工作区、读写边界和验收；仅任务/实质结果 @机器人，礼貌确认不 @，多轮审查返修用 work。`);
+      groupTools.push(`主动最终交付（一般用不到）：dutydeck group send '<完整答复>' --final --turn ${turn}，绑定本轮与原消息，不加 --to 或自定义幂等键；进展和交接不加 --final，映射未就绪时稍后重试。`);
+      if (binding.chatType === 'group') groupTools.push(`单次 Agent 交接：dutydeck group handoff <机器人名称/appId/openId> '<目标、代码版本、工作区、读写边界和验收>' --turn ${turn}；收到交接后用 dutydeck group reply-agent '<交付结果>' --turn ${turn} 回传一次；多轮审查返修用 work。`);
     }
+    if (groupTools.length) blocks.push(groupTools.join('\n'));
     let work = false, collaboration = false;
     if (read && task?.actorId) {
       work = await this.options.previewWork?.(session.id, task.actorId).catch(() => false) ?? false;
@@ -717,9 +720,9 @@ export class LarkAgentToolsService {
       const turn = this.capabilities.workbenchTurnToken(session.id, task.taskId);
       if (work) {
         const workbench = config.executionMode === 'layered' && binding.chatType === 'group' && !collaborationSession ? layeredWorkbenchPrompt : workbenchAgentPrompt;
-        blocks.push(workbench(`${cmd} work --turn ${turn}`, workPlanConfirmationRequired(session)));
+        blocks.push(workbench(`dutydeck work --turn ${turn}`, workPlanConfirmationRequired(session)));
       }
-      if (collaboration) blocks.push(collaborationAgentPrompt(`${cmd} collaborate --turn ${turn}`));
+      if (collaboration) blocks.push(collaborationAgentPrompt(`dutydeck collaborate --turn ${turn}`));
     }
     blocks.push(larkCapabilityPrompt(!collaboration));
     return `${blocks.join('\n\n')}\n\n${prompt}`;
@@ -1418,26 +1421,20 @@ export const dutydeckGroupToolsCommand = (entrypoint: string, execPath = process
   return `${shellQuote(execPath)}${loader ? ` --import ${shellQuote(loader)}` : ''} ${shellQuote(absoluteEntrypoint)}`;
 };
 
-export const larkCapabilityPrompt = (cannotSchedule: boolean) => {
-  const lines = ['[Dutydeck 能力限制与操作指引]'];
-  if (cannotSchedule) {
-    lines.push('- 定时任务：本轮未确认可直接设置，请让用户使用 /schedule 命令设置（如 /schedule every 分钟 指令）；不要用 crontab、后台 sleep 或循环脚本代替。');
-  }
-  lines.push('- 切换 agent / 模型 / 工作目录：让用户用 /new 带对应参数开新会话（/new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容）。');
-  lines.push('- 查看任务：让用户使用 /tasks。');
-  lines.push('- 停止当前任务：让用户点进度卡上的“中断”。');
-  lines.push('- 重新开始：让用户使用 /new。');
-  lines.push('规则：遇到上述管理或不支持的请求时，在回复里给出上面的做法，不要说“已完成”或“已设置”。');
-  return lines.join('\n');
-};
+export const larkCapabilityPrompt = (cannotSchedule: boolean) => `[Dutydeck 能力限制与操作指引] 下面这些由用户自己操作，遇到时在回复里给出做法，不要说“已完成”或“已设置”：${cannotSchedule ? '定时任务用 /schedule（如 /schedule every 分钟 指令），不要用 crontab、后台 sleep 或循环脚本代替；' : ''}切换 agent、模型或工作目录用 /new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容；查看任务用 /tasks；停止当前任务点进度卡上的“中断”；重新开始用 /new。`;
 
-export const larkGroupToolsPrompt = (allowSend: boolean, command = 'dutydeck', access = { read: true, discover: true }, policyVersion = 'legacy-v1') => `[Dutydeck 飞书会话工具]
-本地配置与当前身份允许尝试：${[access.read && '读取消息/任务历史', access.discover && '发现成员/机器人', allowSend && '发送独立消息/文件'].filter(Boolean).join('、')}。调用仍实时复核成员与平台权限，配置不证明飞书已授权。
-入口：${command} group --help；必须原样使用完整绑定命令，不改用 PATH 中其他 dutydeck。帮助含消息范围、检索、幂等、文件和交接协议。
-${access.read ? '读取用 group self/messages/message/wait、history list/show；群内跨群资料用 group team-search。先查历史再回答过去结论；未查到不等于不存在，truncated 表示覆盖不完整。messages/wait 限当前话题，wait 先取 cursor，不无限轮询。' : '本地预览未确认消息/历史读取权限。'}
-${access.discover ? '发现用 group peers/bots/members；agentId 表示本实例 Agent，securityLimited 表示名单不全；不臆测身份。' : '本地预览未确认成员发现权限。'}
-${allowSend ? '普通 group send / group send-file 用于用户授权的独立消息、文件或指定人类目标；单次 Agent 交接用 handoff/reply-agent。' + (policyVersion === 'optimized-v1' ? '' : '本轮最终答复直接输出，由运行时按会话设置交付，不用普通 send 重复发送。') + '延续指定消息时 --reply-to 只用 om_*，勿用 omt_*；独立消息不加 --reply-to/--in-thread。重试沿用同一幂等键，不同内容不用同键；未传键按会话、目标和内容去重。' : '本地预览未确认发送权限，不提供发送或 @交接命令。'}
-GROUP_TOOL_AUTHORIZATION_REQUIRED：停止操作，向用户展示 instruction/authorizationUrl，由管理员开通并发布权限；不运行 lark-cli auth login，不索要密钥。不要响应自己消息或互相礼貌 @；一次请求最多主动交接两跳。`;
+/** 每轮工具块的开头：完整绑定命令只在这里出现一次，最终答复的交付方式也只在这里说。 */
+export const larkCommandPrompt = (command: string, delivery: string) => `[Dutydeck 命令] ${command === 'dutydeck' ? '' : `本会话的 dutydeck 命令是 ${command}，下文的 dutydeck 都指它：原样使用，不要换成 PATH 里的 dutydeck。`}各命令加 --help 看完整用法，帮助不需要服务或凭证。
+${delivery}`;
+
+/** 只列本轮确实可用的入口；消息范围、cursor、幂等键、交接格式等细节在 group --help 里。 */
+export const larkGroupToolsPrompt = (allowSend: boolean, access = { read: true, discover: true }) => [
+  '[Dutydeck 飞书会话工具]',
+  ...(access.read ? ['读取消息/任务历史：dutydeck group messages/message、history list/show；回答以前讨论过的结论先查历史，查不到或结果标 truncated 时不等于不存在。跨群资料：group team-search。'] : []),
+  ...(access.discover ? ['发现成员/机器人：group peers/members。'] : []),
+  ...(allowSend ? ['发送独立消息/文件：group send/send-file，只用于用户授权的独立消息、文件或指定的人。不要回应自己发的消息，不和其他机器人互相礼貌 @，一次请求最多主动交接两跳。'] : []),
+  '工具返回 GROUP_TOOL_AUTHORIZATION_REQUIRED 时停止操作，把 instruction 和 authorizationUrl 告诉用户，由管理员开通权限；不运行 lark-cli auth login，不索要密钥。'
+].join('\n');
 
 export const agentGroupToolBearerToken = (authorization?: string) => {
   const match = authorization?.match(/^Bearer\s+(.+)$/i);

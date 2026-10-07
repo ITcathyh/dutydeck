@@ -5,7 +5,6 @@ import { LarkWorkflowInteractions, type LarkInteraction, type LarkInteractionCon
 import { LarkTaskInbox } from './task-inbox.js';
 import type { LarkLaunchOptions } from './new-session.js';
 import { LarkMemoryStore } from './memory.js';
-import { LarkMemoryProjection } from './memory-view.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import type { LarkGroupManager } from './group-management.js';
 import type { ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision } from '@dutydeck/shared';
@@ -150,8 +149,6 @@ export abstract class LarkCoordinatorCore {
       workbench?: import('./workbench.js').LarkWorkbench;
       memory?: {
         store: LarkMemoryStore;
-        projection: LarkMemoryProjection;
-        command?: string;
         pipeline?: LarkMemoryPipeline;
       };
       /** Web 要求登录时提供；「查看详情」据此改为给管理员私信一次性登录链接。 */

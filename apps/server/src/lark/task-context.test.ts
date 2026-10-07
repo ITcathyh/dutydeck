@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkCardService, LarkChatMessage } from './service.js';
 import type { LarkMessageResource } from './message-content.js';
-import { collectLarkTaskContext, type CollectLarkTaskContextInput } from './task-context.js';
+import { collectLarkTaskContext, larkMaterialMessageIds, type CollectLarkTaskContextInput } from './task-context.js';
 
 type FakeService = Pick<LarkCardService, 'getMessage' | 'getMessageItems' | 'listChatMessages'> & {
   readDocument?: (url: string) => Promise<{ url: string; title?: string; text: string; links?: string[]; linkTitles?: Array<{ url: string; title: string }>; linkError?: string }>;
@@ -132,6 +132,9 @@ describe('collectLarkTaskContext', () => {
     expect(result.agentPrompt).not.toContain('别的话题');
     expect(result.agentPrompt).not.toContain('别的群');
     expect(result.cursor).toEqual({ createTime: 1400, messageId: 'om_new' });
+    // 带了全文的话题消息可以交给群上下文去重；当前请求不在材料里，由群上下文另行处理。
+    expect([...larkMaterialMessageIds(result.promptParts, 'oc_group')].sort()).toEqual(['om_new', 'om_old']);
+    expect(larkMaterialMessageIds(result.promptParts, 'oc_other').size).toBe(0);
   });
 
   it('uses seconds at the API boundary and carries an asc page token across a same-second page', async () => {
