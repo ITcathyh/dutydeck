@@ -163,6 +163,7 @@ The Lark Bot is the primary driver for Dutydeck. Once bound, you can steer entir
 - **Continuing Conversations**: Once finished, simply reply to the result card or send a follow-up message to continue within the same session.
 - **Inline Approvals**: When the agent attempts a privileged action (e.g., editing files, running bash commands), an interactive card allows you to click **Approve** or **Reject**.
 - **Answering Clarifications**: If an agent needs more context, answer directly via the question card or type `/answer <card_id> <reply>`.
+- **ADHD-Friendly Output**: Tick "ADHD 友好输出" in the bot settings and that bot's Lark task replies follow the [i-have-adhd](https://github.com/ayghri/i-have-adhd) rules: the first line is the conclusion or the action you need to take, multi-step work is numbered, lists stay at five items per group, replies end with a single next step, and there are no openers or pleasantries. Off by default; takes effect from the next turn after saving. Tag read-only replies and background scheduled mandates are not affected.
 
 ### 2. Common Lark Commands
 

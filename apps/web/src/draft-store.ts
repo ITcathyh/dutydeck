@@ -42,6 +42,7 @@ export type BotDraft = {
   mentionPolicy: 'always' | 'topic' | 'never' | 'ambient';
   defaultGroupParticipation: 'off' | 'observe' | 'selective' | 'eager';
   preInjectPrompt: string;
+  adhdMode: boolean;
   listening: boolean;
   groupToolsEnabled: boolean;
   groupToolsAllowSend: boolean;

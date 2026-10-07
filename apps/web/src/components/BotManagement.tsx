@@ -57,6 +57,7 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     mentionPolicy: bot.mentionPolicy ?? 'always',
     defaultGroupParticipation: bot.defaultGroupParticipation ?? 'off',
     preInjectPrompt: bot.preInjectPrompt ?? '',
+    adhdMode: bot.adhdMode ?? false,
     listening: bot.listening ?? true,
     groupToolsEnabled: bot.groupToolsEnabled ?? false,
     groupToolsAllowSend: bot.groupToolsAllowSend ?? false,
@@ -89,6 +90,7 @@ function hasDraftChanges(original: LarkBotConfig, draft: BotDraft): boolean {
   if ((original.mentionPolicy ?? 'always') !== draft.mentionPolicy) return true;
   if ((original.defaultGroupParticipation ?? 'off') !== draft.defaultGroupParticipation) return true;
   if ((original.preInjectPrompt ?? '') !== draft.preInjectPrompt) return true;
+  if ((original.adhdMode ?? false) !== draft.adhdMode) return true;
   if ((original.listening ?? true) !== draft.listening) return true;
   if ((original.groupToolsEnabled ?? false) !== draft.groupToolsEnabled) return true;
   if ((original.groupToolsAllowSend ?? false) !== draft.groupToolsAllowSend) return true;
@@ -270,6 +272,7 @@ export function BotManagement({
       mentionPolicy: draft.mentionPolicy,
       defaultGroupParticipation: draft.defaultGroupParticipation,
       preInjectPrompt: draft.preInjectPrompt,
+      adhdMode: draft.adhdMode,
       listening: draft.listening,
       groupToolsEnabled: draft.groupToolsEnabled,
       groupToolsAllowSend: draft.groupToolsAllowSend,
@@ -795,6 +798,21 @@ export function BotManagement({
                       )}
                     </>
                   )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="flex items-center gap-2 text-caption">
+                    <input
+                      type="checkbox"
+                      checked={currentDraft.adhdMode}
+                      onChange={e => updateCurrentDraft({ adhdMode: e.target.checked })}
+                      className="rounded border-default text-action focus:ring-action"
+                    />
+                    <span>ADHD 友好输出</span>
+                  </label>
+                  <p className="text-caption text-subtle">
+                    回复第一行就给结论或要你做的事，多步骤编号，列表不超过 5 项，结尾只留一个下一步，不写开场白和客套话。规则改编自 i-have-adhd，保存后从下一轮任务开始生效。
+                  </p>
                 </div>
 
                 <Field label="每次任务前自动加一句话" hint="可选。会在每一轮对话前附加给 Agent，用来固定语言、格式或注意事项。">

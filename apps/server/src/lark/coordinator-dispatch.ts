@@ -12,6 +12,7 @@ import { collectLarkTaskContext } from './task-context.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type LarkMemoryScope } from './memory.js';
 import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
+import { larkAdhdModePrompt } from './adhd-mode.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
 import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
@@ -1256,6 +1257,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
 - 机器人名称：${config.name ?? config.appId}
 - App ID：${config.appId}${session.cwd ? `\n- 工作区：${session.cwd}` : ''}`);
     injected.push('[飞书结果说明] 先用一句话回答问题或说明完成情况，再按需给证据、影响、下一步和交付入口。术语应准确且让读者能理解。等待用户操作或外部批准时说明尚未完成，不把本轮结束写成目标完成。用户要求转述或结果需要协同时，再附可直接转发的短段。用户明确指定的格式优先。需要用户操作时，单独写一行「需要你：…」，卡片会把它显示成醒目块。交付文件用 send-file 发到群里，不要在结果里给本机路径链接（手机上点不开）。');
+    if (config.adhdMode) injected.push(larkAdhdModePrompt);
     // 群上下文按运行时会话增量注入，水位只在确认 prompt 已提交给 Agent 后推进。运行时对外只暴露任务状态：
     // running 在领取时就发，此时可能还在准备、尚未提交；completed / interrupted 只能来自已提交轮次的驱动结果
     // 或人工确认，failed 分不清是否提交过。所以只认这两种终态；其余终态、准备失败或重放旧任务都保留旧水位，
@@ -1391,7 +1393,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     if (task.redispatch) injected.push(larkRedispatchAgentNote(task.redispatch));
     const agentPrompt = injected.length ? `${injected.join('\n\n')}\n\n[用户请求]\n${materialPrompt}` : materialPrompt;
     const promptParts: PromptPart[] = injected.flatMap((content, index) => {
-      const parts = knownParts.get(content) ?? [{ kind: content.startsWith('[Dutydeck 群长期指令') || content.startsWith('[Dutydeck 预注入 Prompt') || content.startsWith('[Dutydeck 安全策略') ? 'host_rules' as const
+      const parts = knownParts.get(content) ?? [{ kind: content.startsWith('[Dutydeck 群长期指令') || content.startsWith('[Dutydeck 预注入 Prompt') || content.startsWith('[Dutydeck 安全策略') || content === larkAdhdModePrompt ? 'host_rules' as const
         : content.startsWith('[Dutydeck 会话记忆') ? 'memory' as const : 'dynamic_context' as const,
         sourceId: `lark:${config.appId}:${event.chatId}:injection:${index}`, digest: promptDigest(content), trustScope: 'host', content }];
       return parts.map((part, partIndex) => ({ ...part, prefix: `${partIndex === 0 && index ? '\n\n' : ''}${part.prefix ?? ''}` }));

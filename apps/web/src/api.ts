@@ -83,6 +83,8 @@ export type LarkBotConfig = {
   completionReactionOnly?: boolean;
   /** 中间进展静默，只保留最终结果；旧服务端缺省按关闭处理。 */
   silentProgress?: boolean;
+  /** ADHD 友好输出；旧服务端缺省按关闭处理。 */
+  adhdMode?: boolean;
   /** 卡片长时间无人处理时发加急提醒；服务端恒返回布尔，旧服务端缺省按关闭处理。 */
   urgentEnabled?: boolean;
   /** 触发加急的等待时长；服务端未配置时字段缺席，按模块默认处理。 */
@@ -402,6 +404,7 @@ export const api = {
     groupCardMention?: boolean;
     completionReactionOnly?: boolean;
     silentProgress?: boolean;
+    adhdMode?: boolean;
     urgentEnabled?: boolean;
     /** null = 清回模块默认（前端清空输入框就送 null）；undefined = 不改这一项。 */
     urgentThresholdMs?: number | null;

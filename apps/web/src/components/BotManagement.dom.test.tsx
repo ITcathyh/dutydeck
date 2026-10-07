@@ -973,3 +973,20 @@ describe('idle context compaction configuration', () => {
     expect((screen.getByRole('spinbutton', { name: '空闲时长（小时）' }) as HTMLInputElement).value).toBe('72');
   });
 });
+
+describe('ADHD 友好输出', () => {
+  it('旧配置默认不勾选，勾选后保存带上 adhdMode', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, revision: 4, adhdMode: true }], listeningDisabled: false });
+    renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>);
+    const toggle = await screen.findByRole('checkbox', { name: 'ADHD 友好输出' }) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    await user.click(toggle);
+    expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ originalAppId: mockBot.appId, adhdMode: true, expectedRevision: 3 })));
+  });
+});
