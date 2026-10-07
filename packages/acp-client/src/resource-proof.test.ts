@@ -19,11 +19,25 @@ async function setup(extra: Record<string, any> = {}) {
   runtime.options.onProcess = (event: any) => { events.push(event); observer?.(event); };
   cleanup.push(async () => {
     await writeFile(join(cwd, 'release'), 'ready'); await writeFile(join(cwd, 'version-release'), 'ready');
-    for (const event of events) if (event.phase === 'spawned' && event.child.exitCode === null && event.child.signalCode === null) event.child.kill('SIGKILL');
+    await Promise.all(events.filter(event => event.phase === 'spawned' && event.child.pid && event.child.spawnargs).map(async event => {
+      const child = event.child;
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      child.kill('SIGTERM');
+      await expect.poll(() => child.exitCode !== null || child.signalCode !== null, { timeout: 3_000 }).toBe(true);
+    }));
     await adapter.stop().catch(() => undefined);
     await rm(cwd, { recursive: true, force: true });
   });
   return { adapter, runtime, cwd, events, children: () => events.filter(event => event.phase === 'spawned'), probe: () => (adapter as any).isStopped?.() };
+}
+
+async function killFixtureAgent(cwd: string, child: ChildProcess) {
+  const calls = (await readFile(join(cwd, 'calls.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const pid = calls.findLast(call => call.method === 'spawn').pid;
+  process.kill(pid, 'SIGKILL');
+  await expect.poll(() => child.exitCode !== null || child.signalCode !== null).toBe(true);
+  // The launcher must finish its own group cleanup, not be killed with its Agent.
+  if (child.pid !== pid) expect(child.signalCode).toBeNull();
 }
 
 describe('ACP physical resource proof', () => {
@@ -39,12 +53,13 @@ describe('ACP physical resource proof', () => {
   });
 
   it('does not equate SDK close success with a live process having exited', async () => {
-    const { adapter, runtime, children, probe } = await setup(); await adapter.start();
+    const { adapter, runtime, children, probe, cwd } = await setup(); await adapter.start();
+    expect(children()).toHaveLength(1);
     const close = vi.spyOn(runtime, 'close').mockResolvedValue(undefined);
     await adapter.stop();
     expect(await probe()).toBe(false);
     const child = children()[0].child;
-    close.mockRestore(); child.kill('SIGKILL');
+    close.mockRestore(); await killFixtureAgent(cwd, child);
     await expect.poll(probe).toBe(true);
   });
 
@@ -126,10 +141,11 @@ describe('ACP physical resource proof', () => {
   });
 
   it('can later prove exit after stop reported an error, without changing that error', async () => {
-    const { adapter, runtime, children, probe } = await setup(); await adapter.start();
+    const { adapter, runtime, children, probe, cwd } = await setup(); await adapter.start();
+    expect(children()).toHaveLength(1);
     vi.spyOn(runtime, 'close').mockRejectedValue(new Error('close failed'));
     await expect(adapter.stop()).rejects.toThrow('close failed'); expect(await probe()).toBe(false);
-    children()[0].child.kill('SIGKILL'); await expect.poll(probe).toBe(true);
+    await killFixtureAgent(cwd, children()[0].child); await expect.poll(probe).toBe(true);
     await expect(adapter.stop()).rejects.toThrow('close failed');
   });
 
