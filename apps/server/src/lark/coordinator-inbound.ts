@@ -2124,7 +2124,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const task = this.tasks.get(taskId) ?? (action === 'cancel'
       ? await this.restoreQueuedCardAction(taskId, parsed.turn, context)
       : action === 'verify' || action === 'use_verification_command' ? await this.restoreVerifyCardAction(taskId, parsed.turn, context) : undefined);
-    if (!task) return { type: 'warning', content: '此卡当前不可操作，请回原话题发送 /status 或 /cancel 查看和处理任务' };
+    // 结果卡活过服务重启，「重试」回调却只在内存里找任务；/retry 和「重来」从持久化记录恢复原请求，重启后照样可用。
+    if (!task) return { type: 'warning', content: action === 'retry' ? '这张卡上的「重试」已失效，请在原话题里说「重来」或发送 /retry 重新执行' : '此卡当前不可操作，请回原话题发送 /status 或 /cancel 查看和处理任务' };
 
     /**
      * 这次点击属于哪一轮。
