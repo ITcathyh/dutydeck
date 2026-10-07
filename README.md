@@ -444,9 +444,29 @@ dutydeck autostart disable  # 移除开机自启
 
 ---
 
-### 4. 主终端后端设置
+### 4. 用命令行改设置
 
-Dashboard → Agent 设置 → 主终端后端可选择 tmux（默认）或 Herdr。设置只影响当前实例中新建的 `pty-cli` 会话；现有会话保留原后端，ACP 继续使用 ACP。Web 和各机器人运行时使用独立数据库，请切换到目标实例设置。
+Dashboard 上机器人、群聊、用量上限和主终端后端的设置，都可以用 `dutydeck settings` 读取和修改，便于交给 Agent 管理。每条命令输出一行 JSON。默认作用于 `dutydeck status` 显示的实例；`--instance <id>` 经它转发到同机的其他实例（与 Dashboard 切换实例相同），也可以用 `--url` 加 `--database` 直接指定。
+
+| Dashboard | 命令 |
+|---|---|
+| 机器人 | `settings bot list / show / set / add / remove / install-hook` |
+| 群聊（群配置、群协作、接话） | `settings group list / show / set / members / sync` |
+| 用量上限 | `settings usage show / set-cap / remove-cap` |
+| 主终端后端 | `settings terminal-backend` |
+| 整理分组 | `workspace-groups` |
+
+```bash
+dutydeck settings instances                                  # 列出 --instance 可用的实例
+dutydeck settings bot show cli_xxx --instance tag            # 查看机器人的全部设置
+dutydeck settings bot set cli_xxx adhdMode=true mentionPolicy=topic
+dutydeck settings group set oc_xxx modelOverride=gpt-5.5 participation=selective
+dutydeck settings usage set-cap 50 --app cli_xxx
+```
+
+`set` 只改给出的键，其余保持原值；可用的键和取值见 `dutydeck settings bot set --help`、`dutydeck settings group set --help`。服务端拒绝时，错误里带的是 Dashboard 上同样的原因。App Secret 只从文件描述符读取（`--app-secret-fd 0` 表示标准输入），不出现在命令行参数里。任务自动化（定时任务、CI 订阅）和高级草稿暂不支持命令行设置。
+
+主终端后端在 Dashboard → Agent 设置中可选择 tmux（默认）或 Herdr。设置只影响当前实例中新建的 `pty-cli` 会话；现有会话保留原后端，ACP 继续使用 ACP。Web 和各机器人运行时使用独立数据库，请切换到目标实例设置。
 
 ```bash
 # 查询；指定正在运行的目标实例及其数据库

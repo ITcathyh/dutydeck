@@ -23,7 +23,7 @@ import type { LoginLinkStore } from '../auth/auth.js';
 
 type LarkSendRequest = LarkSendInput & { bot?: LarkBotConfigInput; botAppId?: string };
 type LarkUpdateRequest = LarkUpdateInput & { bot?: LarkBotConfigInput; botAppId?: string };
-type SaveLarkConfigRequest = SaveLarkConfigInput & { allowedUserNames?: string[]; allowedBotNames?: string[]; highRiskAllowedUserNames?: string[] };
+export type SaveLarkConfigRequest = SaveLarkConfigInput & { allowedUserNames?: string[]; allowedBotNames?: string[]; highRiskAllowedUserNames?: string[] };
 
 export interface LarkRoutesOptions {
   participation?: LarkGroupParticipation;

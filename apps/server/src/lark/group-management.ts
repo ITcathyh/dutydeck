@@ -39,6 +39,7 @@ const buildRunContext = (session: Session, config: StoredLarkConfig, event: Pick
   };
 };
 const patchSchema = groupBindingSchema.pick({ agentOverride: true, workspaceOverride: true, modelOverride: true, reasoningOverride: true, routingOverride: true, accessOverride: true, groupToolsOverride: true, presentationOverride: true, oncall: true, state: true }).partial();
+export type GroupConfigPatch = z.infer<typeof patchSchema>;
 /** Bot 级呈现默认；群级 presentationOverride 逐字段覆盖它。 */
 const presentationDefaults = (config: StoredLarkConfig): PresentationSettings => ({
   structuredAskCards: config.structuredAskCards !== false,
@@ -280,7 +281,7 @@ export class LarkGroupManager {
 
   async save(appId: string, chatId: string, body: unknown, requireParticipationDefault = false) {
     const parsed = saveSchema.safeParse(body);
-    if (!parsed.success) throw new RuntimeError('INVALID_GROUP_CONFIG', '群配置字段或版本无效。', 400);
+    if (!parsed.success) throw new RuntimeError('INVALID_GROUP_CONFIG', `群配置字段或版本无效：${parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`, 400);
     const input = parsed.data;
     const config = await this.config(appId);
     if (requireParticipationDefault && (!config.listening || !config.defaultGroupParticipation || config.defaultGroupParticipation === 'off')) {

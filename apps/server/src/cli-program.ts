@@ -2,6 +2,7 @@ import { workbenchHelp, layeredWorkbenchHelp, collaborationHelp, groupToolsHelp,
 import type { RecoveryCliOptions, RecoveryOperation } from './recovery-cli.js';
 import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
 import type { SessionNamesAction } from './session-names-cli.js';
+import { botFields, fieldsHelp, groupFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { Command } from 'commander';
 import { DatabaseCliError } from './database-cli.js';
 
@@ -183,6 +184,9 @@ export interface SessionNamesCommandOptions {
   json?: boolean;
 }
 
+/** App Secret 只从文件描述符读入，不出现在命令行参数里。 */
+export type SettingsCommandInput = Omit<SettingsCliInput, 'appSecret'> & { appSecretFd?: string };
+
 export interface CliHandlers {
   recovery?(operation: RecoveryOperation, sessionId: string, options: RecoveryCliOptions): void | Promise<void>;
   collaborate?(operation: string, id: string | undefined, options: { json?: string; file?: string; turn?: string }): void | Promise<void>;
@@ -233,6 +237,7 @@ export interface CliHandlers {
   memoryAdd?(content: string, options?: { topic?: string }): void | Promise<void>;
   memoryRemove?(id: string): void | Promise<void>;
   terminalBackend?(value: string | undefined, options: { url?: string; database?: string }): void | Promise<void>;
+  settings?(action: SettingsAction, input: SettingsCommandInput): void | Promise<void>;
   sessionHerdr?(args: string[]): void | Promise<void>;
   sessionSend?(text: string): void | Promise<void>;
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
@@ -655,12 +660,87 @@ Routing guidance:
   // 通用回传通道：任何来源的会话内 CLI 都能使用，不限飞书。
   // 与 `dutydeck group send` 分层并存——group 面向飞书群里的其他人/机器人，
   // session 面向「发起本会话的用户」，落点是会话事件流（Web 时间线 / 卡片）。
-  const settings = program.command('settings').description('Settings for the targeted Dutydeck runtime');
+  const settings = program.command('settings').description('Read and change what the dashboard configures, on the targeted local runtime').addHelpText('after', `
+Every command prints one JSON line. Without --url/--database it targets the runtime shown by \`dutydeck status\`;
+--instance <id> reaches a peer instance through that runtime, like the dashboard's instance switcher.
+Values: true|false, integers, null to restore a default, comma lists or JSON arrays, JSON objects.
+
+Examples:
+  $ dutydeck settings instances
+  $ dutydeck settings bot list --instance tag
+  $ dutydeck settings bot show cli_xxx
+  $ dutydeck settings bot set cli_xxx adhdMode=true mentionPolicy=topic
+  $ dutydeck settings group set oc_xxx modelOverride=gpt-5.5 oncall=true participation=selective
+  $ dutydeck settings usage set-cap 50 --app cli_xxx`);
   settings.command('terminal-backend [tmux|herdr]')
     .description('Get/set the primary terminal backend for NEW pty-cli sessions in this runtime; ACP stays ACP, existing sessions keep their backend')
     .option('--url <url>', 'Target local runtime URL (requires its exact --database)')
     .option('--database <path>', 'Exact database of the target runtime')
     .action((value, _options, command) => { const options = command.optsWithGlobals(); return handlers.terminalBackend?.(value, { url: options.url, database: options.database }); });
+  const withTarget = (command: Command) => command
+    .option('--instance <id>', 'Peer instance id from `dutydeck settings instances`')
+    .option('--url <url>', 'Exact local runtime URL; requires --database')
+    .option('--database <path>', 'Exact runtime database, opened read-only for its auth token');
+  const runSettings = (action: SettingsAction, command: Command, input: SettingsCommandInput = {}) => {
+    const { instance, url, database } = command.optsWithGlobals();
+    return handlers.settings?.(action, { instance, url, database, ...input });
+  };
+  withTarget(settings.command('instances').description('List peer instances that --instance can reach'))
+    .action((_options, command) => runSettings('instances', command));
+  withTarget(settings.command('agents').description('List the Agents that bot and group settings can select'))
+    .action((_options, command) => runSettings('agents', command));
+
+  const botSettings = settings.command('bot').description('Bot settings (dashboard: 机器人)');
+  withTarget(botSettings.command('list').description('List bots on the runtime'))
+    .action((_options, command) => runSettings('bot-list', command));
+  withTarget(botSettings.command('show <app-id>').description('Print every setting of a bot; the App Secret is never printed'))
+    .action((appId, _options, command) => runSettings('bot-show', command, { appId }));
+  withTarget(botSettings.command('set <app-id> [key=value...]').description('Change bot settings; keys not given keep their values')
+    .option('--app-secret-fd <fd>', 'Also replace the App Secret, read from this file descriptor (0 = stdin)'))
+    .addHelpText('after', fieldsHelp(botFields))
+    .action((appId, pairs, options, command) => runSettings('bot-set', command, { appId, pairs, appSecretFd: options.appSecretFd }));
+  withTarget(botSettings.command('add <app-id> [key=value...]').description('Bind an existing Feishu/Lark app as a bot; keys as in `bot set`')
+    .requiredOption('--app-secret-fd <fd>', 'Read the App Secret from this file descriptor (0 = stdin)'))
+    .action((appId, pairs, options, command) => runSettings('bot-add', command, { appId, pairs, appSecretFd: options.appSecretFd }));
+  withTarget(botSettings.command('remove <app-id>').description('Delete a bot with its saved credentials and settings')
+    .option('--yes', 'Confirm the deletion'))
+    .action((appId, options, command) => runSettings('bot-remove', command, { appId, yes: options.yes === true }));
+  withTarget(botSettings.command('install-hook <app-id>').description('Install the high-risk command hook for the bot Agent; needed before riskControlMode=enforced')
+    .option('--pattern <regex>', 'High-risk command pattern; defaults to the saved one'))
+    .action((appId, options, command) => runSettings('bot-install-hook', command, { appId, pattern: options.pattern }));
+
+  const groupSettings = settings.command('group').description('Per-group settings of each bot (dashboard: 群聊)');
+  withTarget(groupSettings.command('list').description('List synced groups and the binding of each bot')
+    .option('--app <app-id>', 'Only groups of this bot'))
+    .action((options, command) => runSettings('group-list', command, { appId: options.app }));
+  withTarget(groupSettings.command('show <chat-id>').description('Print a group binding, its effective settings, collaboration settings and duty')
+    .option('--app <app-id>', 'Bot to show when several bots share the group'))
+    .action((chatId, options, command) => runSettings('group-show', command, { chatId, appId: options.app }));
+  withTarget(groupSettings.command('set <chat-id> <key=value...>').description('Change group settings; keys not given keep their values')
+    .option('--app <app-id>', 'Bot to change when several bots share the group'))
+    .addHelpText('after', `${fieldsHelp(groupFields)}
+Object values take the JSON shape printed by \`group show\`. agentOverride, workspaceOverride, modelOverride
+and reasoningOverride also accept inherit, clear or a plain value. roleChanges and accessOverride use
+principal ids from \`group members\`.`)
+    .action((chatId, pairs, options, command) => runSettings('group-set', command, { chatId, pairs, appId: options.app }));
+  withTarget(groupSettings.command('members <chat-id>').description('List group members with the principal ids used by accessOverride and roleChanges')
+    .option('--app <app-id>', 'Bot to ask when several bots share the group')
+    .option('--page-token <token>', 'Next page token from the previous result'))
+    .action((chatId, options, command) => runSettings('group-members', command, { chatId, appId: options.app, pageToken: options.pageToken }));
+  withTarget(groupSettings.command('sync <app-id>').description('Refresh the groups a bot is in; needed before configuring a new group'))
+    .action((appId, _options, command) => runSettings('group-sync', command, { appId }));
+
+  const usageSettings = settings.command('usage').description('Usage summary and monthly cost caps (dashboard: 用量)');
+  withTarget(usageSettings.command('show').description('Print usage of this month and week, and the caps'))
+    .action((_options, command) => runSettings('usage-show', command));
+  withTarget(usageSettings.command('set-cap <monthly-usd>').description('Set the monthly cost cap of a bot, or of one group with --chat')
+    .requiredOption('--app <app-id>', 'Bot')
+    .option('--chat <chat-id>', 'Group (oc_...)'))
+    .action((amount, options, command) => runSettings('usage-set-cap', command, { amount, appId: options.app, chatId: options.chat }));
+  withTarget(usageSettings.command('remove-cap').description('Remove the monthly cost cap of a bot, or of one group with --chat')
+    .requiredOption('--app <app-id>', 'Bot')
+    .option('--chat <chat-id>', 'Group (oc_...)'))
+    .action((options, command) => runSettings('usage-remove-cap', command, { appId: options.app, chatId: options.chat }));
 
   const session = program.command('session').enablePositionalOptions().description('Relay messages to the user who owns the current Dutydeck session');
   session.command('list')
@@ -937,6 +1017,8 @@ Examples:
   $ dutydeck session ask "要继续发布吗？"
   $ dutydeck migrate discover --source-home /tmp/legacy-fixture --json
   $ dutydeck migrate plan --source-home /tmp/legacy-fixture --output /tmp/redacted-plan.json
+  $ dutydeck settings bot list
+  $ dutydeck settings bot set cli_xxx mentionPolicy=topic
   $ dutydeck workspace-groups list
   $ dutydeck workspace-groups create "项目 A"
   $ dutydeck workspace-groups move <group-id> --directory /path/to/repo
