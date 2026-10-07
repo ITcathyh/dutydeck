@@ -16,6 +16,7 @@ const REDISPATCH_AFTER_MS = 2 * 60_000;
 /** 每个失败任务只保留日志末尾，交给 Agent 的是有界证据而不是整份日志。 */
 const LOG_TAIL_CHARS = 3_000;
 const MAX_FAILURES = 10;
+const MAX_PENDING_PIPELINES = 16;
 
 export const codebaseFixLimits = { rounds: 3, sameError: 2, files: 10, lines: 300 } as const;
 export const webhookTimestampToleranceMs = 5 * 60_000;
@@ -25,6 +26,16 @@ const terminalTaskStatuses = new Set(['completed', 'failed', 'interrupted', 'can
 const activeStatuses = new Set(['waiting', 'failed', 'running']);
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const timestamp = z.string().datetime({ offset: true });
+
+const pendingPipelineSchema = z.object({
+  key: z.string().min(1),
+  event: z.object({
+    kind: z.literal('pipeline'), repository: z.string(), branch: z.string().optional(), mrIid: z.number().optional(),
+    headSha: sha, state: z.enum(['success', 'failed']), pipelineId: z.string().optional(), url: z.string().optional(),
+    operator: z.string().optional(), occurredAt: z.number().optional(),
+    failures: z.array(z.object({ job: z.string().optional(), stage: z.string().optional(), reason: z.string().optional(), log: z.string().optional() }).strict()).max(MAX_FAILURES)
+  }).strict()
+}).strict();
 
 const subscriptionSchema = z.object({
   schemaVersion: z.literal(1),
@@ -37,6 +48,8 @@ const subscriptionSchema = z.object({
   mrIid: z.number().int().positive().optional(),
   headSha: sha,
   autoFix: z.boolean(),
+  mrClosed: z.enum(['merge', 'close']).optional(),
+  pendingPipelines: z.array(pendingPipelineSchema).max(MAX_PENDING_PIPELINES).optional(),
   status: z.enum(['waiting', 'failed', 'running', 'passed', 'stopped', 'closed', 'cancelled', 'expired']),
   rounds: z.number().int().nonnegative(),
   /** 错误指纹 → 出现次数；同一提交上的重跑不重复计数。 */
@@ -511,17 +524,36 @@ export class CodebaseCiService {
     catch (error) { events.releaseEvent(eventKey, expiresAt); throw error; }
   }
 
-  private async handleEvent(event: CodebaseCiEvent, eventKey: string) {
+  private async handleEvent(event: CodebaseCiEvent, eventKey: string, subscriptionId?: string) {
     let matched = 0;
-    for (const item of await this.list()) {
-      const value = item.value;
-      if (!activeStatuses.has(value.status) || value.repository.toLowerCase() !== event.repository.toLowerCase()) continue;
-      const sameTarget = value.mrIid !== undefined && event.mrIid !== undefined ? value.mrIid === event.mrIid : event.branch === value.branch;
-      if (!sameTarget) continue;
-      if (event.kind === 'merge_request') { matched += 1; await this.onMergeRequest(item, event); continue; }
-      if (event.headSha !== value.headSha) continue;
-      matched += 1;
-      await this.onPipeline(item, event, eventKey);
+    for (const listed of await this.list()) {
+      if (subscriptionId && listed.value.id !== subscriptionId) continue;
+      let item: Stored | undefined = listed;
+      // 事件已领取去重键；CAS 冲突必须重读，不能把尚未保存的结果确认掉。
+      while (item) {
+        const value = item.value;
+        if (!activeStatuses.has(value.status) || value.repository.toLowerCase() !== event.repository.toLowerCase()) break;
+        const sameTarget = value.mrIid !== undefined && event.mrIid !== undefined ? value.mrIid === event.mrIid : event.branch === value.branch;
+        if (!sameTarget) break;
+        if (event.kind === 'merge_request') {
+          if (await this.onMergeRequest(item, event)) { matched += 1; break; }
+        } else {
+          if (value.mrClosed) break;
+          if (event.headSha !== value.headSha) {
+            if (value.status !== 'running' || value.task?.kind !== 'fix' || !event.headSha) break;
+            if (event.occurredAt !== undefined && event.occurredAt < Date.parse(value.task.startedAt ?? value.createdAt) - 1_000) break;
+            const previous = value.pendingPipelines?.find(pending => pending.event.headSha === event.headSha);
+            if (previous?.event.occurredAt !== undefined && event.occurredAt !== undefined && previous.event.occurredAt > event.occurredAt) break;
+            const { eventId: _eventId, ...pipeline } = event;
+            const pending = pendingPipelineSchema.parse({ key: eventKey, event: pipeline });
+            const pendingPipelines = [...(value.pendingPipelines ?? []).filter(entry => entry.event.headSha !== event.headSha), pending];
+            // 不淘汰已确认接收的结果；释放当前事件的去重键，让发送方在结算后重试。
+            if (pendingPipelines.length > MAX_PENDING_PIPELINES) throw new RuntimeError('CI_WEBHOOK_PENDING_LIMIT', 'Pending repair results are full; retry after the repair settles', 503);
+            if (await this.save(item, { ...value, pendingPipelines })) { matched += 1; break; }
+          } else if (await this.onPipeline(item, event, eventKey)) { matched += 1; break; }
+        }
+        item = await this.read(value.id);
+      }
     }
     return matched;
   }
@@ -529,27 +561,27 @@ export class CodebaseCiService {
   private async onMergeRequest(item: Stored, event: CodebaseCiEvent) {
     const value = item.value;
     const mrIid = value.mrIid ?? event.mrIid;
+    if (value.mrClosed) return true;
     if (event.state !== 'merge' && event.state !== 'close') {
-      if (value.mrIid === undefined && mrIid !== undefined) await this.save(item, { ...value, mrIid });
-      return;
+      return value.mrIid !== undefined || mrIid === undefined || Boolean(await this.save(item, { ...value, mrIid }));
     }
-    // 进行中的任务照常收尾，收尾后自然等到过期。
-    if (value.status === 'running') return;
     const reason = event.state === 'merge' ? `MR${mrIid ? ` !${mrIid}` : ''} 已合入，停止等待 CI。` : `MR${mrIid ? ` !${mrIid}` : ''} 已关闭，停止等待 CI。`;
-    const saved = await this.save(item, { ...value, mrIid, status: 'closed', reason });
+    // 保留当前任务及绑定以便正常收尾；MR 终态阻止新的 CI 续作。
+    const saved = await this.save(item, { ...value, mrIid, mrClosed: event.state, pendingPipelines: undefined, status: value.status === 'running' ? 'running' : 'closed', reason });
     if (saved) await this.notice(saved.value, { key: `${value.id}:closed`, title: 'CI 等待已结束', markdown: reason });
+    return Boolean(saved);
   }
 
   private async onPipeline(item: Stored, event: CodebaseCiEvent, eventKey: string) {
     const value = item.value;
     // 续作或修复进行中：同一提交迟到或重复的结果不再触发。
-    if (value.status === 'running') return;
-    if (event.state === 'success') { await this.startTask(item, 'continue', value.actorId, continuePrompt(value, event), value.rounds); return; }
+    if (value.status === 'running' || value.mrClosed) return true;
+    if (event.state === 'success') return this.startTask(item, 'continue', value.actorId, continuePrompt(value, event), value.rounds);
     const fingerprint = failureFingerprint(event.failures);
     const rerun = value.failure?.sha === value.headSha && value.failure.fingerprint === fingerprint;
     const seen = (value.fingerprints[fingerprint] ?? 0) + (rerun ? 0 : 1);
     const failed: CodebaseCiSubscription = {
-      ...value, status: 'failed', reason: undefined, fingerprints: { ...value.fingerprints, [fingerprint]: seen },
+      ...value, status: 'failed', reason: undefined, pendingPipelines: undefined, fingerprints: { ...value.fingerprints, [fingerprint]: seen },
       failure: {
         key: eventKey, sha: value.headSha, fingerprint, summary: failureSummary(event.failures), evidence: failureEvidence(event.failures),
         ...(event.pipelineId ? { pipelineId: event.pipelineId } : {}), ...(event.url ? { url: event.url } : {}), ...(event.operator ? { operator: event.operator } : {}),
@@ -557,18 +589,19 @@ export class CodebaseCiService {
       }
     };
     const saved = await this.save(item, failed);
-    if (!saved) return;
-    if (seen >= codebaseFixLimits.sameError) { await this.stop(saved, `同一个错误第 ${seen} 次出现（指纹 ${fingerprint}），不再自动修复。`); return; }
-    if (value.rounds >= codebaseFixLimits.rounds) { await this.stop(saved, `已经修了 ${value.rounds} 轮仍然失败，不再自动修复。`); return; }
-    if (value.autoFix) { await this.startFix(saved, value.actorId); return; }
+    if (!saved) return false;
+    if (seen >= codebaseFixLimits.sameError) { await this.stop(saved, `同一个错误第 ${seen} 次出现（指纹 ${fingerprint}），不再自动修复。`); return true; }
+    if (value.rounds >= codebaseFixLimits.rounds) { await this.stop(saved, `已经修了 ${value.rounds} 轮仍然失败，不再自动修复。`); return true; }
+    if (value.autoFix) { await this.startFix(saved, value.actorId); return true; }
     const cardMessageId = await this.notice(saved.value, {
       key: `${value.id}:failure:${eventKey}`, title: 'CI 失败', failed: true,
       markdown: failureMarkdown(saved.value, `Codebase 流水线失败。点下方按钮交给 Agent 按规则修复：最多 ${codebaseFixLimits.rounds} 轮；同一错误出现 ${codebaseFixLimits.sameError} 次、每轮改动超过 ${codebaseFixLimits.files} 个文件或 ${codebaseFixLimits.lines} 行、head SHA 变化时会停下。`),
       action: { label: '交给 Agent 修', value: { dutydeck_ci_fix: value.id, failure: eventKey } }
     });
-    if (!cardMessageId) return;
+    if (!cardMessageId) return true;
     const latest = await this.read(value.id);
     if (latest?.value.failure?.key === eventKey) await this.save(latest, { ...latest.value, failure: { ...latest.value.failure, cardMessageId } });
+    return true;
   }
 
   /** 动手前的第一次核对：本地分支 HEAD 必须仍是失败流水线的提交。 */
@@ -590,7 +623,7 @@ export class CodebaseCiService {
     const key = `ci-webhook:${value.id}:${kind}:${round}:${short(value.headSha)}`;
     const id = executionTaskId('runtime', value.sessionId, key);
     const saved = await this.save(stored, {
-      ...value, status: 'running', rounds: round, reason: undefined,
+      ...value, status: 'running', rounds: round, reason: undefined, pendingPipelines: undefined,
       task: { id, key, kind, round, baseSha: value.headSha, prompt, ...(actorId ? { actorId } : {}) }
     });
     if (!saved) return false;
@@ -656,6 +689,11 @@ export class CodebaseCiService {
         await this.save(item, { ...value, status: 'expired' });
         continue;
       }
+      if (value.status === 'waiting' && value.pendingPipelines?.length) {
+        const pending = value.pendingPipelines.find(entry => entry.event.headSha === value.headSha);
+        if (pending) await this.handleEvent(pending.event, pending.key, value.id);
+        continue;
+      }
       if (value.status !== 'running' || !value.task) continue;
       const task = await this.options.repositories.tasks.get?.(value.task.id);
       if (!task) {
@@ -686,6 +724,10 @@ export class CodebaseCiService {
   private async settle(stored: Stored, task: TaskRecord) {
     const value = stored.value;
     const current = value.task!;
+    if (value.mrClosed) {
+      await this.save(stored, { ...value, status: 'closed', task: undefined, pendingPipelines: undefined });
+      return;
+    }
     const output = this.output(value.sessionId, task.id);
     const label = taskStatusLabels[task.status] ?? task.status;
     if (current.kind === 'continue') {
@@ -695,9 +737,11 @@ export class CodebaseCiService {
     }
     const checked = await this.checkRound(value, current, task).catch(error => ({ headSha: undefined, message: `无法核对第 ${current.round} 轮的修复提交：${errorMessage(error)}，已停止。` }));
     const saved = await this.save(stored, checked.headSha
-      ? { ...value, status: 'waiting', headSha: checked.headSha, failure: undefined, task: undefined, reason: checked.message }
-      : { ...value, status: 'stopped', task: undefined, reason: checked.message });
+      ? { ...value, status: 'waiting', headSha: checked.headSha, failure: undefined, task: undefined, pendingPipelines: value.pendingPipelines?.filter(entry => entry.event.headSha === checked.headSha), reason: checked.message }
+      : { ...value, status: 'stopped', task: undefined, pendingPipelines: undefined, reason: checked.message });
     if (saved) await this.notice(saved.value, { key: `${value.id}:settle:${task.id}`, title: `CI 修复第 ${current.round} 轮结果`, markdown: checked.message, failed: !checked.headSha, output });
+    const pending = saved?.value.pendingPipelines?.[0];
+    if (pending) await this.handleEvent(pending.event, pending.key, value.id);
   }
 
   /** 修复任务结束后的核对：新提交在失败提交之上、改动规模不超限、已普通推送到 origin。 */

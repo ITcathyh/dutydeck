@@ -199,6 +199,8 @@ export class LarkPinManager {
           await this.service.unpin(record.messageId);
         } catch (err) {
           this.log?.warn?.({ err, messageId: record.messageId }, '收敛取消僵尸置顶失败');
+          this.pinnedCards.add(record.messageId);
+          continue;
         }
         this.pinnedCards.delete(record.messageId);
         record.status = 'unpinned';

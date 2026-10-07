@@ -14,7 +14,7 @@ import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
-import { __testOnly_resetLarkTaskAgentNotices, larkTaskAgentLedgerKey, larkTaskAgentMessageId, larkTaskAgentPaths } from './task-agent.js';
+import { claimLarkTaskDispatches, __testOnly_resetLarkTaskAgentNotices, larkTaskAgentLedgerKey, larkTaskAgentMessageId, larkTaskAgentPaths } from './task-agent.js';
 
 const assignedTask = (guid: string, summary = '修一下登录报错') => ({
   guid, summary, description: '线上登录接口偶发 500，请定位并修复。',
@@ -73,8 +73,9 @@ async function harness(options: { tasks?: unknown[] } = {}) {
     })
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
+  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
     undefined, repos.channelMappings, async () => 'p2p', undefined, undefined, { store: repos.config });
+  const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
   cleanups.push(async () => { coordinator.stop(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
 
@@ -84,7 +85,7 @@ async function harness(options: { tasks?: unknown[] } = {}) {
   };
   const steps = () => openApiCalls.filter(call => call.path === larkTaskAgentPaths.appendTaskSteps)
     .flatMap(call => ((call.body as any)?.task_steps ?? []).map((step: any) => step.content as string));
-  return { repos, runtime, config, coordinator, service, cards, log, openApiCalls, enable, steps };
+  return { repos, runtime, config, coordinator, createCoordinator, service, cards, log, openApiCalls, enable, steps };
 }
 
 describe('飞书任务智能体通道接线', () => {
@@ -131,6 +132,100 @@ describe('飞书任务智能体通道接线', () => {
     h.enable();
     expect(await h.coordinator.pollLarkTaskDispatches(h.config)).toBe(1);
     expect(await h.coordinator.pollLarkTaskDispatches(h.config)).toBe(0);
+    expect(await h.coordinator.pollLarkTaskDispatches(h.config)).toBe(0);
+  });
+
+  it('stopping after A releases unhanded B and a fresh coordinator handles only B', async () => {
+    const h = await harness({ tasks: [assignedTask('guid_a'), assignedTask('guid_b')] });
+    h.enable();
+    const handle = h.coordinator.handle.bind(h.coordinator);
+    vi.spyOn(h.coordinator, 'handle').mockImplementation(async (...args) => {
+      await handle(...args);
+      await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get(`lark.inbox.${h.config.appId}.${args[0].messageId}`))!).state).toBe('accepted'));
+      h.coordinator.stop();
+    });
+    expect(await h.coordinator.pollLarkTaskDispatches(h.config)).toBe(1);
+    expect(await h.repos.config.get(larkTaskAgentLedgerKey(h.config.appId, 'guid_b'))).toBe('');
+    const restarted = h.createCoordinator();
+    const nextHandle = vi.spyOn(restarted, 'handle');
+    try {
+      expect(await restarted.pollLarkTaskDispatches(h.config)).toBe(1);
+      expect(nextHandle).toHaveBeenCalledTimes(1);
+      expect(nextHandle.mock.calls[0]![0].messageId).toBe(larkTaskAgentMessageId('guid_b'));
+      expect(await restarted.pollLarkTaskDispatches(h.config)).toBe(0);
+      for (const guid of ['guid_a', 'guid_b']) {
+        await vi.waitFor(async () => {
+          const raw = await h.repos.config.get(`lark.inbox.${h.config.appId}.${larkTaskAgentMessageId(guid)}`);
+          expect(JSON.parse(raw!).state).toBe('accepted');
+        });
+      }
+    } finally { restarted.stop(); }
+  });
+
+  it('recovers old claims left before inbox handoff while preserving A already in the inbox', async () => {
+    const h = await harness({ tasks: [assignedTask('guid_crash_a'), assignedTask('guid_crash_b')] });
+    h.enable();
+    const intake = await claimLarkTaskDispatches({ appId: h.config.appId, client: h.service, store: h.repos.config, botConfig: h.config });
+    expect(intake.status).toBe('ready');
+    if (intake.status !== 'ready') throw new Error('intake disabled');
+    await h.coordinator.handle(intake.dispatches[0]!.event, h.config);
+    // Both claims have the legacy shape; B has no inbox because the process died before handle.
+    expect(JSON.parse((await h.repos.config.get(intake.dispatches[1]!.ledgerKey))!).claimedAt).toBeTruthy();
+    h.coordinator.stop();
+    const restarted = h.createCoordinator();
+    const handle = vi.spyOn(restarted, 'handle');
+    try {
+      expect(await restarted.pollLarkTaskDispatches(h.config)).toBe(1);
+      expect(handle).toHaveBeenCalledTimes(1);
+      expect(handle.mock.calls[0]![0].messageId).toBe(larkTaskAgentMessageId('guid_crash_b'));
+      expect(await restarted.pollLarkTaskDispatches(h.config)).toBe(0);
+    } finally { restarted.stop(); }
+  });
+
+  it('does not steal another coordinator claim while its inbox handoff is in flight', async () => {
+    const h = await harness({ tasks: [assignedTask('guid_inflight')] });
+    h.enable();
+    let resume!: () => void;
+    const gate = new Promise<void>(resolve => { resume = resolve; });
+    const handle = h.coordinator.handle.bind(h.coordinator);
+    const firstHandle = vi.spyOn(h.coordinator, 'handle').mockImplementation(async (...args) => { await gate; await handle(...args); });
+    const first = h.coordinator.pollLarkTaskDispatches(h.config);
+    await vi.waitFor(() => expect(firstHandle).toHaveBeenCalledTimes(1));
+    const other = h.createCoordinator();
+    const otherHandle = vi.spyOn(other, 'handle');
+    try {
+      expect(await other.pollLarkTaskDispatches(h.config)).toBe(0);
+      expect(otherHandle).not.toHaveBeenCalled();
+    } finally { resume(); other.stop(); }
+    expect(await first).toBe(1);
+  });
+
+  it('reclaims a prior process claim only when it has no durable inbox receipt', async () => {
+    const h = await harness({ tasks: [assignedTask('guid_previous_boot')] });
+    h.enable();
+    const key = larkTaskAgentLedgerKey(h.config.appId, 'guid_previous_boot');
+    await h.repos.config.set(key, JSON.stringify({ taskGuid: 'guid_previous_boot',
+      messageId: larkTaskAgentMessageId('guid_previous_boot'), claimedAt: new Date().toISOString(), boot: 'previous-process' }));
+    expect(await h.coordinator.pollLarkTaskDispatches(h.config)).toBe(1);
+    const current = JSON.parse((await h.repos.config.get(key))!);
+    expect(current.boot).not.toBe('previous-process');
+    // Simulate another restart after successful handoff: the older owner must not cause redispatch.
+    await h.repos.config.set(key, JSON.stringify({ ...current, boot: 'previous-process' }));
+    expect(await h.coordinator.pollLarkTaskDispatches(h.config)).toBe(0);
+  });
+
+  it('releases a partial batch when persistent claiming fails before handoff', async () => {
+    const h = await harness({ tasks: [assignedTask('guid_partial_a'), assignedTask('guid_partial_b')] });
+    h.enable();
+    const compareAndSet = h.repos.config.compareAndSet!.bind(h.repos.config);
+    const claim = vi.spyOn(h.repos.config, 'compareAndSet').mockImplementation(async (key, expected, value) => {
+      if (key === larkTaskAgentLedgerKey(h.config.appId, 'guid_partial_b')) throw new Error('claim write failed');
+      return compareAndSet(key, expected, value);
+    });
+    await expect(h.coordinator.pollLarkTaskDispatches(h.config)).rejects.toThrow('claim write failed');
+    expect(await h.repos.config.get(larkTaskAgentLedgerKey(h.config.appId, 'guid_partial_a'))).toBe('');
+    claim.mockRestore();
+    expect(await h.coordinator.pollLarkTaskDispatches(h.config)).toBe(2);
     expect(await h.coordinator.pollLarkTaskDispatches(h.config)).toBe(0);
   });
 

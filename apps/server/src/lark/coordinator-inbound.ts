@@ -471,7 +471,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
    * 拉取分配给本机器人的飞书任务并逐条交给消息入口。返回本轮真正派出去的条数。
    *
    * 认领与交接必须成对：claimLarkTaskDispatches 先把任务在账本上认领下来，交接抛错时
-   * 这里必须把认领退回，否则这条任务会被永久当成已派发、静默丢活。
+   * 这里把尚未进入持久化 inbox 的认领退回；进程中断的遗留认领由下一进程接手。
    */
   async pollLarkTaskDispatches(config: StoredLarkConfig): Promise<number> {
     const store = this.workflowOptions.store;
@@ -479,19 +479,28 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (this.taskAgentRun) return this.taskAgentRun;
     const run = (async () => {
       const intake = await claimLarkTaskDispatches({
-        appId: config.appId, client: this.service, store, botConfig: config, log: this.log
+        appId: config.appId, client: this.service, store, botConfig: config, log: this.log,
+        hasHandoff: dispatch => store.get(`lark.inbox.${config.appId}.${dispatch.event.messageId}`).then(Boolean)
       });
       if (intake.status !== 'ready') return 0;
       let dispatched = 0;
-      for (const dispatch of intake.dispatches) {
-        if (this.stopped) break;
-        try {
-          await this.handle(dispatch.event, config);
-          dispatched++;
-        } catch (error) {
-          this.log.warn({ error, taskGuid: dispatch.taskGuid }, '飞书任务交接失败，已退回认领等待下一轮重派');
-          await releaseLarkTaskClaim(store, dispatch.ledgerKey)
-            .catch(releaseError => this.log.error({ error: releaseError, taskGuid: dispatch.taskGuid }, '退回飞书任务认领失败，这条任务不会被再次派发'));
+      try {
+        for (const dispatch of intake.dispatches) {
+          if (this.stopped) break;
+          try {
+            await this.handle(dispatch.event, config);
+            if (await store.get(`lark.inbox.${config.appId}.${dispatch.event.messageId}`)) dispatched++;
+          } catch (error) {
+            this.log.warn({ error, taskGuid: dispatch.taskGuid }, '飞书任务交接失败，未入站任务等待下一轮重派');
+          }
+        }
+      } finally {
+        // The inbox owns handed-off tasks, including received tasks awaiting recovery.
+        // Release every remaining claim on stop, early handle return, or failure.
+        for (const dispatch of intake.dispatches) {
+          if (await store.get(`lark.inbox.${config.appId}.${dispatch.event.messageId}`)) continue;
+          await releaseLarkTaskClaim(store, dispatch.ledgerKey, dispatch.claimValue)
+            .catch(error => this.log.error({ error, taskGuid: dispatch.taskGuid }, '退回飞书任务认领失败'));
         }
       }
       return dispatched;

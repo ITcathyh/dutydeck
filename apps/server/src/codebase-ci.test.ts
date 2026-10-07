@@ -54,21 +54,6 @@ async function repository() {
   return { cwd, head: () => git('rev-parse', 'HEAD'), commit };
 }
 
-function memoryConfig() {
-  const rows = new Map<string, string>();
-  return {
-    rows,
-    async get(key: string) { return rows.get(key); },
-    async set(key: string, value: string) { rows.set(key, value); },
-    async compareAndSet(key: string, expected: string | undefined, value: string) {
-      if (rows.get(key) !== expected) return false;
-      rows.set(key, value);
-      return true;
-    },
-    async list(prefix: string) { return [...rows].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value })); }
-  };
-}
-
 async function fixture(options: { autoFix?: boolean } = {}) {
   const repo = await repository();
   const now = { value: Date.parse('2026-09-25T08:00:00.000Z') };
@@ -88,14 +73,16 @@ async function fixture(options: { autoFix?: boolean } = {}) {
   };
   const notices: CodebaseCiNotice[] = [];
   const notify = vi.fn(async (_sessionId: string, _id: string, notice: CodebaseCiNotice) => { notices.push(notice); return `om_card_${notices.length}`; });
-  const config = memoryConfig();
   const database = createRepositories(':memory:');
   cleanups.push(async () => database.close());
+  const config = database.config;
   const ciWebhook = database.ciWebhook;
-  const service = new CodebaseCiService({
+  const createService = () => new CodebaseCiService({
     repositories: { config, ciWebhook, tasks: { get: async (id: string) => tasks.get(id), save: async () => {}, listBySession: async () => [] }, execution: { getTaskExecution: () => undefined, getAttemptEvents: () => [] } as any },
     runtime, secret, notify, clock: () => new Date(now.value)
   });
+  let service = createService();
+  const restart = async () => { await service.close(); service = createService(); return service; };
   const subscription = (await service.subscribe(session.id, { autoFix: options.autoFix ?? true }, 'ou_owner'))!;
   const post = (body: Record<string, unknown>, headers: Record<string, string> = {}) => service.receive({
     rawBody: Buffer.from(JSON.stringify(body)),
@@ -112,7 +99,7 @@ async function fixture(options: { autoFix?: boolean } = {}) {
     await service.tick();
   };
   const current = async () => (await service.get(subscription.id))!;
-  return { repo, now, session, tasks, dispatches, runtime, notices, config, ciWebhook, service, subscription, post, pipeline, finishLatest, current };
+  return { repo, now, session, tasks, dispatches, runtime, notices, config, ciWebhook, service, restart, subscription, post, pipeline, finishLatest, current };
 }
 
 const unitFailure = [{ job: 'unit-test', stage: 'test', reason: 'script_failure', log: '2026-09-25T08:00:01Z FAIL src/math.test.ts > adds\nAssertionError: expected 3 to be 4' }];
@@ -379,4 +366,192 @@ describe('CI 失败卡「交给 Agent 修」', () => {
     await f.service.cancel(f.session.id, f.subscription.id);
     await expect(f.service.authorizeTask([...f.tasks.values()][0]!, 'prepare')).rejects.toMatchObject({ code: 'CI_WEBHOOK_TASK_REVOKED' });
   });
+});
+
+
+describe('Codebase repair event ordering regressions', () => {
+  it('OCR-04 resumes exactly once after early success survives service reconstruction', async () => {
+    const f = await fixture();
+    const base = await f.repo.head();
+    await f.post(f.pipeline(base, 'failed', unitFailure));
+    await f.service.authorizeTask([...f.tasks.values()][0]!, 'submit');
+    const fixed = await f.repo.commit();
+    const success = f.pipeline(fixed, 'success', [], 'early-success');
+    await f.post(success);
+    await f.post(f.pipeline('f'.repeat(40), 'success'));
+    await f.post(f.pipeline(base, 'success'));
+    const restored = await f.restart();
+    expect(await f.post(success)).toMatchObject({ body: { duplicate: true } });
+    await f.finishLatest();
+    expect(await f.current()).toMatchObject({ status: 'running', headSha: fixed, task: { kind: 'continue' } });
+    expect(f.dispatches).toHaveLength(2);
+    await Promise.all([restored.tick(), f.post(success)]);
+    expect(f.dispatches).toHaveLength(2);
+    await f.finishLatest();
+    expect(await f.current()).toMatchObject({ status: 'passed' });
+  });
+
+  it.each(['close', 'merge'])('OCR-05 retains MR %s through repair and service reconstruction', async action => {
+    const f = await fixture();
+    await f.post(f.pipeline(await f.repo.head(), 'failed', unitFailure));
+    const repair = [...f.tasks.values()][0]!;
+    await f.service.authorizeTask(repair, 'submit');
+    await f.post({ id: `terminal-${action}`, type: 'codebase.merge_request', repository: 'group/repo', branch: 'feat/ci', mr: 12, action });
+    const restored = await f.restart();
+    expect(await f.current()).toMatchObject({ status: 'running', task: { id: repair.id } });
+    await expect(restored.authorizeTask(repair, 'prepare')).resolves.toBeUndefined();
+    expect(f.ciWebhook.taskSubscription(repair.id)).toBe(f.subscription.id);
+    const fixed = await f.repo.commit();
+    await f.post(f.pipeline(fixed, 'success'));
+    await f.finishLatest();
+    expect(await f.current()).toMatchObject({ status: 'closed', mrIid: 12 });
+    expect(f.ciWebhook.taskSubscription(repair.id)).toBeUndefined();
+    await f.post(f.pipeline(fixed, 'failed', lintFailure));
+    await restored.tick();
+    expect(f.dispatches).toHaveLength(1);
+  });
+});
+
+
+describe('Codebase durable event conflicts', () => {
+  it('OCR-04 retries pending-result CAS conflicts instead of acknowledging a lost event', async () => {
+    const f = await fixture();
+    await f.post(f.pipeline(await f.repo.head(), 'failed', unitFailure));
+    const fixed = await f.repo.commit();
+    const cas = f.config.compareAndSet!.bind(f.config);
+    let conflicted = false;
+    vi.spyOn(f.config, 'compareAndSet').mockImplementation(async (key, expected, next) => {
+      if (!conflicted && JSON.parse(next).pendingPipelines?.length) {
+        conflicted = true;
+        const previous = JSON.parse(expected!);
+        await cas(key, expected, JSON.stringify({ ...previous, revision: previous.revision + 1, mrIid: 12 }));
+      }
+      return cas(key, expected, next);
+    });
+    await f.post(f.pipeline(fixed, 'success'));
+    expect(conflicted).toBe(true);
+    await f.finishLatest();
+    expect(f.dispatches).toHaveLength(2);
+    expect(await f.current()).toMatchObject({ status: 'running', task: { kind: 'continue' }, mrIid: 12 });
+  });
+
+  it('OCR-04 retains an early failure through a settle CAS conflict and starts one next repair', async () => {
+    const f = await fixture();
+    await f.post(f.pipeline(await f.repo.head(), 'failed', unitFailure));
+    const fixed = await f.repo.commit();
+    const failure = f.pipeline(fixed, 'failed', lintFailure);
+    const cas = f.config.compareAndSet!.bind(f.config);
+    let conflicted = false;
+    vi.spyOn(f.config, 'compareAndSet').mockImplementation(async (key, expected, next) => {
+      if (!conflicted && JSON.parse(next).status === 'waiting') {
+        conflicted = true;
+        await f.post(failure);
+      }
+      return cas(key, expected, next);
+    });
+    await f.finishLatest();
+    const restored = await f.restart();
+    await restored.tick();
+    expect(f.dispatches).toHaveLength(2);
+    expect(await f.current()).toMatchObject({ status: 'running', rounds: 2, task: { kind: 'fix', baseSha: fixed } });
+    expect(await f.post(failure)).toMatchObject({ body: { duplicate: true } });
+    expect(f.dispatches).toHaveLength(2);
+  });
+
+  it('OCR-04 recovers a crash after settling but before consuming the persisted success', async () => {
+    const f = await fixture();
+    await f.post(f.pipeline(await f.repo.head(), 'failed', unitFailure));
+    const fixed = await f.repo.commit();
+    await f.post(f.pipeline(fixed, 'success'));
+    const cas = f.config.compareAndSet!.bind(f.config);
+    let crashed = false;
+    vi.spyOn(f.config, 'compareAndSet').mockImplementation(async (key, expected, next) => {
+      const saved = await cas(key, expected, next);
+      if (saved && !crashed && JSON.parse(next).status === 'waiting') {
+        crashed = true;
+        throw new Error('crash after settle persistence');
+      }
+      return saved;
+    });
+    await expect(f.finishLatest()).rejects.toThrow('crash after settle persistence');
+    const restored = await f.restart();
+    await restored.tick();
+    expect(f.dispatches).toHaveLength(2);
+    expect(await f.current()).toMatchObject({ task: { kind: 'continue' } });
+  });
+
+  it('OCR-04 ignores unrelated targets, old events and unconfirmed SHAs, with bounded persistence', async () => {
+    const f = await fixture();
+    const base = await f.repo.head();
+    await f.post(f.pipeline(base, 'failed', unitFailure));
+    await f.service.authorizeTask([...f.tasks.values()][0]!, 'submit');
+    const fixed = await f.repo.commit();
+    await f.post({ ...f.pipeline(fixed, 'success'), repository: 'other/repo' });
+    await f.post({ ...f.pipeline(fixed, 'success'), branch: 'other/branch' });
+    await f.post({ ...f.pipeline(fixed, 'success'), timestamp: new Date(f.now.value - 60_000).toISOString() });
+    await f.post(f.pipeline(base, 'success'));
+    expect((await f.current()).pendingPipelines).toBeUndefined();
+    for (let index = 1; index <= 16; index += 1) await f.post(f.pipeline(index.toString(16).padStart(40, '0'), 'success'));
+    const success = f.pipeline(fixed, 'success');
+    await expect(f.post(success)).rejects.toMatchObject({ code: 'CI_WEBHOOK_PENDING_LIMIT', statusCode: 503 });
+    expect((await f.current()).pendingPipelines).toHaveLength(16);
+    await f.finishLatest();
+    expect(f.dispatches).toHaveLength(1);
+    expect(await f.current()).toMatchObject({ status: 'waiting', headSha: fixed, pendingPipelines: [] });
+    expect(await f.post(success)).toMatchObject({ body: { accepted: true, matched: 1 } });
+    expect(f.dispatches).toHaveLength(2);
+  });
+
+  it.each(['close', 'merge'])('OCR-05 preserves %s when it races repair settlement', async action => {
+    const f = await fixture();
+    await f.post(f.pipeline(await f.repo.head(), 'failed', unitFailure));
+    const fixed = await f.repo.commit();
+    await f.post(f.pipeline(fixed, 'success'));
+    const cas = f.config.compareAndSet!.bind(f.config);
+    let conflicted = false;
+    vi.spyOn(f.config, 'compareAndSet').mockImplementation(async (key, expected, next) => {
+      if (!conflicted && JSON.parse(next).status === 'waiting') {
+        conflicted = true;
+        await f.post({ id: `racing-${action}`, type: 'codebase.merge_request', repository: 'group/repo', branch: 'feat/ci', mr: 12, action });
+      }
+      return cas(key, expected, next);
+    });
+    await f.finishLatest();
+    const restored = await f.restart();
+    await restored.tick();
+    await f.post(f.pipeline(fixed, 'failed', lintFailure));
+    expect(f.dispatches).toHaveLength(1);
+    expect(await f.current()).toMatchObject({ status: 'closed', mrIid: 12 });
+  });
+
+  it('OCR-05 retries the terminal-event CAS when a pipeline is saved concurrently', async () => {
+    const f = await fixture();
+    await f.post(f.pipeline(await f.repo.head(), 'failed', unitFailure));
+    const fixed = await f.repo.commit();
+    const cas = f.config.compareAndSet!.bind(f.config);
+    let conflicted = false;
+    vi.spyOn(f.config, 'compareAndSet').mockImplementation(async (key, expected, next) => {
+      if (!conflicted && JSON.parse(next).mrClosed) {
+        conflicted = true;
+        await f.post(f.pipeline(fixed, 'success'));
+      }
+      return cas(key, expected, next);
+    });
+    await f.post({ id: 'racing-close', type: 'codebase.merge_request', repository: 'group/repo', branch: 'feat/ci', mr: 12, action: 'close' });
+    await f.finishLatest();
+    expect(f.dispatches).toHaveLength(1);
+    expect(await f.current()).toMatchObject({ status: 'closed', mrIid: 12 });
+  });
+});
+
+
+it('OCR-04 consumes retained results only for their original subscription', async () => {
+  const f = await fixture();
+  await f.post(f.pipeline(await f.repo.head(), 'failed', unitFailure));
+  const fixed = await f.repo.commit();
+  await f.post(f.pipeline(fixed, 'success'));
+  const later = (await f.service.subscribe(f.session.id, { autoFix: true }, 'ou_owner'))!;
+  await f.finishLatest();
+  expect(f.dispatches).toHaveLength(2);
+  expect(await f.service.get(later.id)).toMatchObject({ status: 'waiting' });
 });

@@ -15,6 +15,7 @@ import type {
   ChildPermit
 } from '@dutydeck/shared';
 import { normalizeAcpxEvent, type NormalizedDriverEvent } from '@dutydeck/acp-client';
+import { childEnvironment } from '@dutydeck/shared/child-environment';
 
 function isExecutableFilePosix(filePath: string): boolean {
   try {
@@ -519,7 +520,7 @@ export class JsonlTransport implements AgentDriver {
       rawChild = this.spawnChild(
         this.agent.command,
         this.agent.args,
-        { cwd: this.agent.cwd, env: { ...process.env, ...this.agent.env }, detached: POSIX }
+        { cwd: this.agent.cwd, env: childEnvironment(process.env, this.agent.env), detached: POSIX }
       );
     } catch (spawnSyncError) {
       if (controlled && childPermit) {

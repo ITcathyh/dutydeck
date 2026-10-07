@@ -32,7 +32,7 @@ async function gitRepository() {
   return cwd;
 }
 
-function githubResponse(headSha: string, runs: Array<{ id: number; conclusion?: string; name?: string; status?: string }> = []) {
+function githubResponse(headSha: string, runs: Array<{ id: number; conclusion?: string; name?: string; status?: string; attempt?: number | null }> = []) {
   return new Response(JSON.stringify({ total_count: runs.length, workflow_runs: runs.map(item => ({
     id: item.id,
     name: item.name ?? 'CI',
@@ -40,7 +40,7 @@ function githubResponse(headSha: string, runs: Array<{ id: number; conclusion?: 
     head_sha: headSha,
     status: item.status ?? 'completed',
     conclusion: item.conclusion ?? null,
-    run_attempt: 1,
+    run_attempt: item.attempt === null ? undefined : item.attempt ?? 1,
     html_url: `https://github.com/octo/repo/actions/runs/${item.id}`,
     created_at: '2026-09-12T00:00:00Z',
     updated_at: '2026-09-12T00:01:00Z'
@@ -296,6 +296,79 @@ describe('SessionAutomationService schedules', () => {
     await h.service.tick();
     expect((await h.service.listBySession(h.session.id)).occurrences.find(item => item.scheduledForUtc === '2026-09-12T00:02:00.000Z')).toMatchObject({ conditionStatus: 'error', runStatus: 'error' });
     expect(h.dispatches).toHaveLength(0);
+  });
+
+  it('OCR-07 dispatches a failed rerun once and remembers its attempt across reconstruction', async () => {
+    const responses: Response[] = [];
+    const request = vi.fn(async () => responses.shift()!) as typeof fetch;
+    const h = await fixture({ fetch: request });
+    const head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
+    responses.push(githubResponse(head, [{ id: 10, conclusion: 'success', attempt: 1 }]));
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'github_new_failure' } }, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt: 2 }]));
+    await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
+    h.settleTask(h.dispatches[0]!.id);
+    await h.service.tick();
+    await h.service.close();
+    const restored = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, githubFetch: request, clock: () => new Date(h.now.value) });
+    cleanups.push(() => restored.close());
+    h.now.value = new Date('2026-09-12T00:02:01.000Z');
+    responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt: 2 }]));
+    await restored.tick();
+    expect(h.dispatches).toHaveLength(1);
+    expect((await restored.listBySession(h.session.id)).occurrences.at(-1)).toMatchObject({ conditionStatus: 'skipped', runStatus: 'skipped' });
+  });
+
+  it('OCR-07 baselines legacy run IDs without replaying existing failures, then detects the next attempt', async () => {
+    const responses: Response[] = [];
+    const request = vi.fn(async () => responses.shift()!) as typeof fetch;
+    const h = await fixture({ fetch: request });
+    const head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
+    responses.push(githubResponse(head, [{ id: 10, conclusion: 'success' }]));
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'github_new_failure' } }, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    const key = `session_automation/schedule/${created.id}`;
+    const legacy = JSON.parse((await h.repositories.config.get(key))!);
+    delete legacy.condition.observedRunAttempts;
+    await h.repositories.config.set(key, JSON.stringify(legacy));
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt: 5 }]));
+    await h.service.tick();
+    expect(h.dispatches).toHaveLength(0);
+    expect(JSON.parse((await h.repositories.config.get(key))!).condition).toMatchObject({ observedRunIds: [10], observedRunAttempts: [{ id: 10, attempt: 5 }] });
+    h.now.value = new Date('2026-09-12T00:02:01.000Z');
+    responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt: 6 }]));
+    await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it('OCR-07 treats missing attempts as attempt one and never replays a lower attempt', async () => {
+    const responses: Response[] = [];
+    const request = vi.fn(async () => responses.shift()!) as typeof fetch;
+    const h = await fixture({ fetch: request });
+    const head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
+    responses.push(githubResponse(head, [{ id: 10, conclusion: 'success', attempt: null }]));
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'github_new_failure' } }, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt: null }]));
+    await h.service.tick();
+    expect(h.dispatches).toHaveLength(0);
+    h.now.value = new Date('2026-09-12T00:02:01.000Z');
+    responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt: 2 }]));
+    await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
+    h.settleTask(h.dispatches[0]!.id);
+    await h.service.tick();
+    for (const [index, attempt] of [null, 2].entries()) {
+      h.now.value = new Date(`2026-09-12T00:0${index + 3}:01.000Z`);
+      responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt }]));
+      await h.service.tick();
+    }
+    expect(h.dispatches).toHaveLength(1);
   });
 
   it('detects a newly completed failure even when its run ID predates an observed success', async () => {
