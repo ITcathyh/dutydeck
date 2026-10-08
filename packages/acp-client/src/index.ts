@@ -9,6 +9,7 @@ import { AGENT_IDLE_TIMEOUT, claudeRateLimits, permissionDisplayText, taskExecut
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
 import { PROCESS_CPU_MIN_WINDOW_MS, ProcessTreeCpu } from './process-cpu.js';
+import { currentReleasePath } from './release-path.js';
 import { acpDataRoot, buildLaunchObservation, buildNativeObservation, inferAcpInsightClient, resolveAcpChildEnvironment } from './transcript-source.js';
 
 // 归一化事件类型统一从 @dutydeck/shared re-export，保证 ACP driver 与 PTY driver 用同一类型。
@@ -18,17 +19,21 @@ export { testRegexWithTimeout };
 export { ProcessTreeCpu, type ProcessTreeActivity } from './process-cpu.js';
 export interface AcpxBuiltinAgent { id: string; argv: string[] }
 
-function claudeLauncherPath() {
+// 进程内只算一次：启动时写进会话记录的路径和之后逐字比对用的是同一个值，部署中途 current 换了也不跟着变。
+const agentsFiles = new Map<string, string>();
+function agentsFile(name: string) {
+  const cached = agentsFiles.get(name);
+  if (cached) return cached;
   const moduleDirectory = dirname(fileURLToPath(import.meta.url));
-  const adjacent = join(moduleDirectory, 'agents', 'claude-acp.mjs');
-  return existsSync(adjacent) ? adjacent : join(moduleDirectory, '..', 'agents', 'claude-acp.mjs');
+  const adjacent = join(moduleDirectory, 'agents', name);
+  const path = currentReleasePath(existsSync(adjacent) ? adjacent : join(moduleDirectory, '..', 'agents', name));
+  agentsFiles.set(name, path);
+  return path;
 }
 
-function envLauncherPath() {
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
-  const adjacent = join(moduleDirectory, 'agents', 'env-launcher.mjs');
-  return existsSync(adjacent) ? adjacent : join(moduleDirectory, '..', 'agents', 'env-launcher.mjs');
-}
+function claudeLauncherPath() { return agentsFile('claude-acp.mjs'); }
+
+function envLauncherPath() { return agentsFile('env-launcher.mjs'); }
 
 const persistedEnvKey = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 const bridgedAgentEnvFileKey = 'dutydeck_agent_env_file';
@@ -510,7 +515,7 @@ export class AcpxAdapter implements AgentDriver {
         && JSON.stringify(record?.agentArgv) !== JSON.stringify(wrapped)) {
         // Transport markers identify a prior Dutydeck bridge, but never grant
         // authority to execute an unverified launcher from another release.
-        throw new Error('ACP_LAUNCHER_VERSION_CHANGED: 旧会话启动器版本变化，无法自动核验；原会话记录已保留。');
+        throw new Error('ACP_LAUNCHER_VERSION_CHANGED: 旧会话启动器版本变化，无法自动核验；原会话记录已保留，发 /new 开新会话后重试。');
       }
       // A prior empty bridge remains a bridge after ambient cleanup. Only
       // recognize this exact installed launcher/agent argv and account digest.
