@@ -208,6 +208,30 @@ describe('普通群：续接后的话题按话题共享处理唤醒', () => {
     expect(await h.sessionOf('om_plain')).toBe(original);
   });
 
+  it("mentionPolicy='topic' 时话题里只 @ 了别人的消息不算在叫原主人", async () => {
+    const h = await harness({ configPatch: { mentionPolicy: 'topic' } });
+    await h.coordinator.handle(top('om_task', '整理方案'), h.config);
+    await h.delivered('om_task');
+    await h.coordinator.handle(inThread('om_follow', '继续', 'om_task'), h.config);
+    await h.delivered('om_follow');
+    const sent = h.send.mock.calls.length;
+
+    // 在 A 的话题里叫 B 一起查：B 接，A 不接也不回卡。
+    await h.coordinator.handle(inThread('om_peer', '你也一起查', 'om_task', {
+      mentions: [{ key: '@_user_1', name: 'Peer', openId: 'ou_peer_bot' }]
+    }), h.config);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(h.send.mock.calls.length).toBe(sent);
+    expect(h.service.reply.mock.calls.some(([input]) => (input as any).taskId === 'om_peer')).toBe(false);
+
+    // 同时 @ 了原主人照常接。
+    await h.coordinator.handle(inThread('om_both', '你们一起查', 'om_task', {
+      content: JSON.stringify({ text: '@_user_1 @_user_2 你们一起查' }),
+      mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }, { key: '@_user_2', name: 'Peer', openId: 'ou_peer_bot' }]
+    }), h.config);
+    await h.delivered('om_both');
+  });
+
   it('群参与开启时，发起人在自己任务的话题里不 @ 也算继续和机器人对话', async () => {
     const handle = vi.fn(async () => ({ enabled: true, instructions: '' }));
     const participation = { handle, mode: async () => 'selective', guardBotTurn: async () => undefined, taskContext: async () => '', instructions: async () => '' } as unknown as LarkGroupParticipation;
