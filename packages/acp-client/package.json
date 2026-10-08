@@ -27,7 +27,11 @@
     "src/process-cpu.ts",
     "dist/process-cpu.js",
     "dist/process-cpu.js.map",
-    "dist/process-cpu.d.ts"
+    "dist/process-cpu.d.ts",
+    "src/release-path.ts",
+    "dist/release-path.js",
+    "dist/release-path.js.map",
+    "dist/release-path.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
