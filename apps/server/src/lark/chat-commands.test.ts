@@ -470,6 +470,15 @@ describe('/grant 与 /revoke 在聊天里开通对话权限', () => {
     expect((await h.groupManager!.groupAccess('cli_cmd', 'oc_group'))!.override.mode).toBe('owner_only');
   });
 
+  it("话题内免 @ 时，在接过的话题里不 @ 机器人发 /grant @成员 也生效（@ 是命令参数，不是在叫别人）", async () => {
+    const h = await harness({ managedGroup: true, configPatch: { mentionPolicy: 'topic' } });
+    await grantRole(h);
+    await h.dispatch('om_task', '整理方案', 'ou_bob');
+    await h.coordinator.handle(event('om_grant', '/grant @Alice', { senderOpenId: 'ou_bob',
+      mentions: [{ key: '@_user_2', name: 'Alice', openId: 'ou_alice', mentionedType: 'user' }] }), h.config);
+    expect((await h.groupManager!.groupAccess('cli_cmd', 'oc_group'))!.override.mode).toBe('allowlist');
+  });
+
   it('/grant @成员 按 open_id 解析进名单，/revoke @成员 反向移出', async () => {
     const h = await harness({ managedGroup: true });
     await grantRole(h);
