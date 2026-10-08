@@ -437,6 +437,14 @@ const toolKindCount: Record<TraceToolKind, [label: string, unit: string]> = {
   git: ['Git 操作', '次'], test: ['运行测试', '次'], data: ['查询数据', '次'], agent: ['Agent 协作', '次'], tool: ['调用工具', '次']
 };
 
+// 一组步骤里次数最多的那类动作加次数（并列时取先出现的）：「运行命令 23 次」。
+const dominantKindCount = (tools: ToolPresentation[]) => {
+  const counts = new Map<TraceToolKind, number>();
+  for (const tool of tools) counts.set(tool.kind, (counts.get(tool.kind) ?? 0) + 1);
+  const [kind, count] = [...counts].reduce((best, item) => item[1] > best[1] ? item : best);
+  return `${toolKindCount[kind][0]} ${count} ${toolKindCount[kind][1]}`;
+};
+
 // 最终没有恢复的失败：同一阶段里后面重试了同一个操作（同类、同命令或对象）并成功的才算恢复。
 // 只看同类不行：git push 失败后 git status 成功，不能把推送失败藏掉。
 // 与 toolPresentation 里的「无匹配退出不算失败」合在一起，就是卡上「有失败」的全部来源。
@@ -678,9 +686,10 @@ const historyGroupPanel = (
   // 「读取文件 · lark-cli im +chat-messages-list --chat-id oc_f34138…」：分类名重复了左边的
   // 图标，命令被截断在参数中间，三个不同的阶段因此渲染出三行几乎一样的标题。
   // 命令留在展开区，那里才是查细节的地方。
-  // 没有旁白的阶段（按工具类别自动分出来的段）带上这一类一共几次：「读文件：memory/MEMORY.md　等 12 个」。
+  // 没有旁白、又有多步的阶段，写这一组里次数最多的那类动作和次数：「运行命令 23 次」。
+  // 第一条命令原文说不清整组在做什么；只有一步时才用那一步自己的标题。
   const mainTitle = narrativeText
-    || (primaryTool ? `${toolHeadline(primaryTool)}${statuses.length > 1 ? `　等 ${statuses.length} ${statuses.every(item => item.kind === primaryTool.kind) ? toolKindCount[primaryTool.kind][1] : '步'}` : ''}` : '')
+    || (statuses.length > 1 ? dominantKindCount(statuses) : primaryTool ? toolHeadline(primaryTool) : '')
     || (records.some(record => record.kind === 'terminal') ? '终端输出' : '')
     || (group.narratives.some(e => e.type === 'thinking') ? '分析与规划' : '执行过程');
 
@@ -1028,18 +1037,43 @@ const contextPressureElement = (events: AgentEvent[]): LarkCardElement | undefin
   return { tag: 'markdown', element_id: 'context_hint', content: `${parts.join('，')}，可用 /new --handoff 带交接开新会话。`, text_size: 'notation', margin: '4px 0px 0px 0px' };
 };
 
+const unresolvedFailureCount = (groups: TraceGroup[]) => groups.reduce(
+  (sum, group) => sum + unresolvedFailureFlags(groupToolEntries(group).map(toolPresentation)).filter(Boolean).length, 0);
+
 // 结束后的步骤计数：按类别从多到少，最多 4 类；最终没有恢复的失败另写一项。
 const toolCountSummary = (groups: TraceGroup[]) => {
   const counts = new Map<TraceToolKind, number>();
-  let unresolved = 0;
+  const unresolved = unresolvedFailureCount(groups);
   for (const group of groups) {
-    const tools = groupToolEntries(group).map(toolPresentation);
-    for (const tool of tools) counts.set(tool.kind, (counts.get(tool.kind) ?? 0) + 1);
-    unresolved += unresolvedFailureFlags(tools).filter(Boolean).length;
+    for (const tool of groupToolEntries(group).map(toolPresentation)) counts.set(tool.kind, (counts.get(tool.kind) ?? 0) + 1);
   }
   const kinds = [...counts].sort((left, right) => right[1] - left[1]).slice(0, 4)
     .map(([kind, count]) => `${toolKindCount[kind][0]} ${count} ${toolKindCount[kind][1]}`);
   return [...kinds, ...(unresolved ? [`未恢复的失败 ${unresolved} 次`] : [])].join('、');
+};
+
+// 收起回执那一行的「做了什么」：Agent 最近一句中间旁白（执行中显示在过程卡上的那类文字），
+// 去掉开头的「正在」和结尾的省略号，按显示宽度裁到约 40 个汉字（汉字算 2）。最终输出不在分组里，不会取到它。
+// 没有旁白（PTY 版 Agent 很少上报）时返回 undefined，回执退回步骤计数。
+const receiptNarrationWidth = 80;
+const receiptNarration = (groups: TraceGroup[]) => {
+  const latest = groups.flatMap(group => group.narratives).filter(entry => entry.type === 'text').at(-1);
+  const sentence = redactTraceText(String(latest?.data.text ?? '')).split('\n').map(line => line.trim()).find(Boolean)
+    ?.replace(/[*`]/g, '').split(/[。！？!?]/)[0]?.replace(/^正在/, '').replace(/[\s.…：:，,、；;]+$/u, '').trim();
+  if (!sentence) return undefined;
+  let width = 0;
+  let clipped = '';
+  for (const char of sentence) {
+    width += char.charCodeAt(0) <= 0xff ? 1 : 2;
+    if (width > receiptNarrationWidth) {
+      // 括号补充说明被截在半截时整段丢掉，不留一个没关的括号。
+      const open = Math.max(clipped.lastIndexOf('（'), clipped.lastIndexOf('('));
+      const unclosed = open > Math.max(clipped.lastIndexOf('）'), clipped.lastIndexOf(')'));
+      return escapeCardInline(`${(unclosed ? clipped.slice(0, open) : clipped).replace(/[\s，、；：,;:]+$/u, '')}…`);
+    }
+    clipped += char;
+  }
+  return escapeCardInline(sentence);
 };
 
 /** 一轮因「连续 N 分钟没有任何输出」被停止的原因码，由任务失败原因携带（分钟数跟在码后面）。 */
@@ -1137,6 +1171,12 @@ export function renderLarkCardElements(
   const toolEntries = traceEntries.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result');
   if (toolEntries.length) {
     elements.push({ tag: 'markdown', element_id: 'trace_steps', content: completed ? toolCountSummary(allGroups) : `共 ${toolEntries.length} 步`, text_size: 'notation', margin: '0px' });
+  }
+  // 回执收起时的一句话；原来的完整计数 trace_steps 由 service 挪进展开区第一行。
+  const narration = completed && toolEntries.length ? receiptNarration(allGroups) : undefined;
+  if (narration) {
+    const unresolved = unresolvedFailureCount(allGroups);
+    elements.push({ tag: 'markdown', element_id: 'trace_summary', content: unresolved ? `${narration} · 有 ${unresolved} 步没成功` : narration, text_size: 'notation', margin: '0px' });
   }
   if (completed && lastUnresolvedFailure) elements.push(failureStepElement(lastUnresolvedFailure));
 
