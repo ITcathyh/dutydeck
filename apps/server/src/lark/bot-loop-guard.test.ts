@@ -166,7 +166,8 @@ describe('Tag托管群与引用工作流的机器人边界', () => {
     if (allowed) {
       await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
       expect(groupManager.recordRun).toHaveBeenCalled();
-      expect(h.service.addReaction).toHaveBeenCalledOnce();
+      // 只数收到时那一枚 OK：这一轮结束时还会另贴一枚状态表情。
+      expect(h.service.addReaction.mock.calls.filter(call => (call as unknown[])[1] === 'OK')).toHaveLength(1);
     } else {
       expect(h.runtime.start).not.toHaveBeenCalled(); expect(h.runtime.send).not.toHaveBeenCalled();
       expect(h.service.addReaction).not.toHaveBeenCalled();

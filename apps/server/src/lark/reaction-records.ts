@@ -22,12 +22,18 @@ export const ACCEPTANCE_REACTION_EMOJI = {
 export type AcceptanceAction = keyof typeof ACCEPTANCE_REACTION_EMOJI;
 
 /**
- * 「完成时只贴表情」贴在**原始请求消息**上的 emoji_type 短名。
+ * 一轮完成时贴在**原始请求消息**上的 emoji_type 短名。
  *
  * 与验收对勾同字形但不同位置、不同语义：验收贴在结果附件上，这一枚贴在用户那条请求上，
- * 意思只有一个——这一轮做完了。开关关闭时永不出现，失败终态也永不出现（失败仍发结果卡）。
+ * 意思只有一个——这一轮做完了。「完成时只贴表情」开关打开时它代替结果卡，关闭时跟在结果卡之后。
  */
 export const COMPLETION_REACTION_EMOJI = 'CheckMark';
+
+/**
+ * 一轮失败或中断（不含用户自己取消、停下）时贴在原始请求消息上的 emoji_type 短名：红色叉号，
+ * 与 'CheckMark' 同在官方表「符号」一栏。话题列表里不点进去就能看出这件事没成；失败仍照发结果卡。
+ */
+export const FAILURE_REACTION_EMOJI = 'CrossMark';
 
 /** 取验收决议对应的 emoji_type 短名；未知 action 返回 undefined，由调用方放弃 reaction。 */
 export function reactionEmojiForAcceptance(action: string): string | undefined {
@@ -47,9 +53,11 @@ export function reactionDedupeKey(appId: string, messageId: string, emojiType: s
 export interface ReactionRecord {
   messageId: string;
   emojiType: string;
-  /** addReaction 回传的 reaction_id，保留以便将来撤销；本期只写不删。 */
+  /** addReaction 回传的 reaction_id，换贴另一枚状态表情时按它撤销。 */
   reactionId: string;
   createdAt: string;
+  /** 已撤销：同一条消息之后又有新终态，换成了另一枚状态表情。带这个字段的记录不再算「已贴」。 */
+  removedAt?: string;
 }
 
 /**

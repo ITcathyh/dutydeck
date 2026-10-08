@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentEvent } from '@dutydeck/shared';
 import { loadLarkTaskEvents, renderLarkProcessElements, renderLarkResultElements } from './card-renderer.js';
-import { larkResultKey, patchLarkCard, sendLarkFile, sendLarkResult } from './result-delivery.js';
+import { deliverLarkStatusReaction, larkResultKey, patchLarkCard, sendLarkFile, sendLarkResult } from './result-delivery.js';
+import { COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI, reactionDedupeKey } from './reaction-records.js';
 import { buildLarkCard, LarkCardService, LarkServiceError } from './service.js';
 import { sendTaskCard } from './coordinator-core.js';
 
@@ -364,5 +365,53 @@ describe('durable multi-message result delivery', () => {
     expect(await sendLarkResult(service as any, target, original, log, repos.config)).toEqual(result);
     expect(service.reply).toHaveBeenCalledTimes(calls);
     expect(providerMessages.size).toBe(2);
+  });
+});
+
+describe('原消息上的状态表情', () => {
+  const setup = async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dutydeck-status-reaction-'));
+    const repos = createRepositories(join(dir, 'state.db'));
+    cleanups.push(async () => { repos.close(); await rm(dir, { recursive: true, force: true }); });
+    let next = 0;
+    const service = {
+      addReaction: vi.fn(async (messageId: string, emojiType: string) => ({ messageId, emojiType, reactionId: `r_${++next}_${emojiType}` })),
+      deleteReaction: vi.fn(async (_messageId: string, _reactionId: string) => {})
+    };
+    const react = (completed: boolean) => deliverLarkStatusReaction(service, { appId: 'cli_app', messageId: 'om_req', completed }, log, repos.config);
+    return { repos, service, react };
+  };
+
+  it('完成贴对勾、失败贴叉号，对账重入不重复贴', async () => {
+    const h = await setup();
+    expect(await h.react(false)).toBe(true);
+    expect(await h.react(false)).toBe(true);
+    expect(h.service.addReaction.mock.calls).toEqual([['om_req', FAILURE_REACTION_EMOJI]]);
+    expect(h.service.deleteReaction).not.toHaveBeenCalled();
+  });
+
+  it('同一条消息之后又有新终态：先撤旧的再贴新的，来回切换始终只留一枚', async () => {
+    const h = await setup();
+    await h.react(false);
+    await h.react(true);
+    expect(h.service.deleteReaction.mock.calls).toEqual([['om_req', `r_1_${FAILURE_REACTION_EMOJI}`]]);
+    expect(h.service.addReaction.mock.calls.map(([, emoji]) => emoji)).toEqual([FAILURE_REACTION_EMOJI, COMPLETION_REACTION_EMOJI]);
+    // 撤掉的那一枚记作已撤销，再失败一次可以重新贴上，不会被幂等键挡住。
+    await h.react(false);
+    expect(h.service.deleteReaction.mock.calls.at(-1)).toEqual(['om_req', `r_2_${COMPLETION_REACTION_EMOJI}`]);
+    expect(h.service.addReaction.mock.calls.map(([, emoji]) => emoji)).toEqual([FAILURE_REACTION_EMOJI, COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI]);
+    expect(JSON.parse((await h.repos.config.get(reactionDedupeKey('cli_app', 'om_req', COMPLETION_REACTION_EMOJI)))!).removedAt).toBeTruthy();
+    expect(JSON.parse((await h.repos.config.get(reactionDedupeKey('cli_app', 'om_req', FAILURE_REACTION_EMOJI)))!)).toMatchObject({ reactionId: `r_3_${FAILURE_REACTION_EMOJI}` });
+  });
+
+  it('贴表情失败只告警、返回 false，不抛给调用方；撤旧失败时照贴新的', async () => {
+    const h = await setup();
+    h.service.addReaction.mockRejectedValueOnce(new Error('rate limited'));
+    expect(await h.react(true)).toBe(false);
+    expect(await h.repos.config.get(reactionDedupeKey('cli_app', 'om_req', COMPLETION_REACTION_EMOJI))).toBeUndefined();
+    expect(await h.react(true)).toBe(true);
+    h.service.deleteReaction.mockRejectedValueOnce(new Error('network'));
+    expect(await h.react(false)).toBe(true);
+    expect(h.service.addReaction.mock.calls.at(-1)).toEqual(['om_req', FAILURE_REACTION_EMOJI]);
   });
 });

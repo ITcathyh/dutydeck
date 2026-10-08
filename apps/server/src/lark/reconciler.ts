@@ -18,11 +18,12 @@ import {
   steeringOutcomeText,
   terminalTaskStates
 } from './card-renderer.js';
-import { deliverLarkCompletionReaction, larkResultKey, larkSilentResultAnchor, sendLarkResult } from './result-delivery.js';
+import { deliverLarkStatusReaction, larkResultKey, larkSilentResultAnchor, sendLarkResult } from './result-delivery.js';
 import { RECOVERY_TRACKING_NOTE } from './recovery-notes.js';
 import { isLarkDeterministicFailure } from './api-gate.js';
 import { redactTraceText } from './secret-redaction.js';
 import { senderGroupMention } from './card-mentions.js';
+import { larkTaskAgentGuid } from './task-agent.js';
 import type { ListenerLog, LarkRuntime } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 import type { LarkHeldCause } from './turn-redispatch.js';
@@ -365,8 +366,8 @@ export async function performLarkCardReconcile(input: {
           // 完成时只贴表情：重启补发同样不发结果卡，只补那一枚表情。
           // 失败/中断/取消照旧补发结果卡——重启不是把失败藏起来的理由。
           if (!explicit && completed && effective.completionReactionOnly === true) {
-            reactionDelivered = await deliverLarkCompletionReaction(
-              service, { appId: persisted.app_id, messageId: mapping.externalId }, log, input.deliveryStore);
+            reactionDelivered = await deliverLarkStatusReaction(
+              service, { appId: persisted.app_id, messageId: mapping.externalId, completed: true }, log, input.deliveryStore);
           } else if (resultDue && !quietNote) {
           // P0-4：重启对账补发的结果/失败/中断卡与实时链路同口径 @ 发起人；idempotencyKey
           // 保证消息不重发，@ 也不会重复。开关按群覆盖后的生效配置取值（与实时链路一致），
@@ -402,6 +403,12 @@ export async function performLarkCardReconcile(input: {
               resultCallbackFailed = true;
               log.warn({ error: callbackError, messageId: persisted.card_message_id, finalMessageId, sessionId: mapping.sessionId, externalId: mapping.externalId }, '执行结果回调写入失败，稍后重试');
             }
+          }
+          // 补发结果后同实时链路一样在原消息上贴状态表情。用户自己取消、停下的不贴；旧的一轮也不贴，
+          // 重启时不给几天前的消息补表情。贴失败只 warn，幂等键保证对账重入不重复贴。
+          if (state !== 'cancelled' && !runtimeTask.interruptedByActor && !larkTaskAgentGuid(mapping.externalId)
+            && !await input.staleTurn?.(mapping.sessionId, runtimeTask)) {
+            await deliverLarkStatusReaction(service, { appId: persisted.app_id, messageId: mapping.externalId, completed }, log, input.deliveryStore);
           }
           }
         } catch (error) {
