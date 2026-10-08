@@ -25,7 +25,7 @@ import {
   renderLarkResultElements,
   type LarkCardElement
 } from './card-renderer.js';
-import { deliverLarkCompletionReaction, larkResultKey, larkSilentResultAnchor, sendLarkResult } from './result-delivery.js';
+import { deliverLarkStatusReaction, larkResultKey, larkSilentResultAnchor, sendLarkResult } from './result-delivery.js';
 import { larkRedispatchAgentNote, larkRedispatchCardNote } from './turn-redispatch.js';
 import { larkCommandEcho, parseSlashCommand } from './commands.js';
 import { escapeLarkPromptEcho, renderQueueSummaryElement, QUEUE_SUMMARY_ELEMENT_ID } from './queue-summary.js';
@@ -1146,7 +1146,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 终态先撤置顶：轮次校验之后再撤，重试开的新一轮会让上一轮的进度卡永远挂在置顶里。
         await this.unpinTaskCard(task);
         if (this.stopped || task.turn !== currentTurn) return;
-        const runtimeTask = state === 'completed' && task.sessionId && task.runtimeTaskId
+        // 中断时也要读：账本上记了操作人的是有人主动停下的，不贴失败表情。
+        const runtimeTask = (state === 'completed' || state === 'interrupted') && task.sessionId && task.runtimeTaskId
           ? (await this.runtime.getTasks?.(task.sessionId))?.find(item => item.id === task.runtimeTaskId) : undefined;
         const finalContext = state === 'completed' && task.sessionId ? explicitFinalContext(
           { externalId: task.id, sessionId: task.sessionId }, {
@@ -1160,7 +1161,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 只对成功终态生效——失败/中断/取消仍必须发结果卡，一个表情等于把失败藏起来。
         // 任务通道的合成事件没有可贴的原消息，只能照常发结果卡，否则用户什么也收不到。
         if (!explicit && completionReactionOnly && state === 'completed' && !larkTaskAgentGuid(event.messageId)) {
-          const reacted = await deliverLarkCompletionReaction(this.service, { appId: config.appId, messageId: event.messageId }, this.log, this.workflowOptions.store);
+          const reacted = await deliverLarkStatusReaction(this.service, { appId: config.appId, messageId: event.messageId, completed: true }, this.log, this.workflowOptions.store);
           if (this.stopped || task.turn !== currentTurn) return;
           // 贴失败就不记「已交付」：这枚表情是用户唯一能看到的完成信号，交给对账重试。
           if (reacted) {
@@ -1219,6 +1220,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           this.log.warn({ error, taskId: task.id }, '结果已送达，验收绑定等待对账补齐');
           this.scheduleReconcile();
         });
+        // 结果送达后在原消息上留一枚状态表情，话题列表里不点进去就能看出成没成；用户自己取消、停下的不贴。
+        // 贴失败只 warn：结果卡已经送达。
+        if (state !== 'cancelled' && !task.interruptRequested && !runtimeTask?.interruptedByActor && !larkTaskAgentGuid(event.messageId)) {
+          await deliverLarkStatusReaction(this.service, { appId: config.appId, messageId: event.messageId, completed: state === 'completed' }, this.log, this.workflowOptions.store);
+        }
         if (this.stopped || task.turn !== currentTurn) return;
         await this.saveCardTask(task, state);
         if (context && this.workflows) {

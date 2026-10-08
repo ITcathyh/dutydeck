@@ -5,7 +5,7 @@ import type { StoredLarkConfig } from './config.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 import { larkResultDeliveryIssues, performLarkCardReconcile } from './reconciler.js';
 import { LarkServiceError } from './service.js';
-import { COMPLETION_REACTION_EMOJI } from './reaction-records.js';
+import { COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI } from './reaction-records.js';
 
 const config: StoredLarkConfig = {
   appId: 'cli_test', appSecret: 'secret', workspace: '/workspace', defaultAgentId: 'codex',
@@ -980,7 +980,8 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
       resolveConfig: async () => ({ ...config, completionReactionOnly: true })
     });
 
-    expect(h.service.addReaction).not.toHaveBeenCalled();
+    // 不贴完成对勾；结果卡送达后在原消息上贴失败叉号。
+    expect(h.service.addReaction.mock.calls).toEqual([['om_req_fail', FAILURE_REACTION_EMOJI]]);
     expect(h.service.send).toHaveBeenCalledTimes(1);
     expect(JSON.parse(h.cardMappings.mappings[0]!.extra!).final_delivery_state).toBe('delivered');
   });
@@ -1074,9 +1075,57 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
       config, channel: 'lark-card:cli_test'
     });
 
-    expect(h.service.addReaction).not.toHaveBeenCalled();
+    // 补发结果卡之后同实时链路一样在原消息上贴完成对勾。
+    expect(h.service.addReaction.mock.calls).toEqual([['om_req_plain', COMPLETION_REACTION_EMOJI]]);
     expect(h.service.send).toHaveBeenCalledTimes(1);
     expect(h.service.update).toHaveBeenCalled();
+  });
+
+  it('重启补发结果时，旧的一轮不补贴状态表情，近期的一轮照贴', async () => {
+    for (const stale of [true, false]) {
+      const task = { ...completedTask(`ses-stale-${stale}`), status: 'failed' as const };
+      const mapping = createMapping(`map-stale-${stale}`, `om_req_stale_${stale}`, task.sessionId, { runtime_task_id: task.id, state: 'running', turn: 1 });
+      const h = reconcileHarness([mapping], { [task.sessionId]: [task] });
+      const staleTurn = vi.fn(async () => stale);
+      await performLarkCardReconcile({
+        runtime: h.runtime as any, service: h.service as any, cardMappings: h.cardMappings as any, log: h.log as any,
+        config, channel: 'lark-card:cli_test', staleTurn
+      });
+      expect(h.service.send).toHaveBeenCalledTimes(1);
+      expect(staleTurn).toHaveBeenCalledWith(task.sessionId, task);
+      expect(h.service.addReaction.mock.calls, `stale=${stale}`).toEqual(stale ? [] : [[`om_req_stale_${stale}`, FAILURE_REACTION_EMOJI]]);
+    }
+  });
+
+  it('结果早已送达的历史轮次在重启对账时不补贴', async () => {
+    const task = { ...completedTask('ses-history'), status: 'failed' as const };
+    const mapping = createMapping('map-history', 'om_req_history', 'ses-history', {
+      runtime_task_id: task.id, state: 'failed', turn: 1, final_delivery_state: 'delivered', final_message_id: 'om_old_result'
+    });
+    const h = reconcileHarness([mapping], { 'ses-history': [task] });
+    await performLarkCardReconcile({
+      runtime: h.runtime as any, service: h.service as any, cardMappings: h.cardMappings as any, log: h.log as any,
+      config, channel: 'lark-card:cli_test', staleTurn: async () => false
+    });
+    expect(h.service.send).not.toHaveBeenCalled();
+    expect(h.service.addReaction).not.toHaveBeenCalled();
+  });
+
+  it('用户自己取消或停下的一轮补发结果时不贴表情', async () => {
+    const tasks = [
+      { ...completedTask('ses-cancelled'), status: 'cancelled' as const },
+      { ...completedTask('ses-stopped'), status: 'interrupted' as const, interruptedByActor: 'ou_alice' }
+    ];
+    for (const task of tasks) {
+      const mapping = createMapping(`map-${task.sessionId}`, `om_req_${task.sessionId}`, task.sessionId, { runtime_task_id: task.id, state: 'running', turn: 1 });
+      const h = reconcileHarness([mapping], { [task.sessionId]: [task] });
+      await performLarkCardReconcile({
+        runtime: h.runtime as any, service: h.service as any, cardMappings: h.cardMappings as any, log: h.log as any,
+        config, channel: 'lark-card:cli_test', staleTurn: async () => false
+      });
+      expect(h.service.send).toHaveBeenCalledTimes(1);
+      expect(h.service.addReaction, task.status).not.toHaveBeenCalled();
+    }
   });
 });
 

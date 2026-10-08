@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { ConfigRepository } from '@dutydeck/shared';
-import { COMPLETION_REACTION_EMOJI, reactionDedupeKey, type ReactionRecord } from './reaction-records.js';
+import { COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI, reactionDedupeKey, type ReactionRecord } from './reaction-records.js';
 import { isLarkReplyTargetUnavailable } from './api-gate.js';
 import { buildLarkCard, larkCardFinalOutputText, larkCardShownResult, LarkServiceError, type LarkCardInput, type LarkCardService } from './service.js';
 
@@ -14,33 +14,49 @@ export const larkResultKey = (processMessageId: string) =>
  */
 export const larkSilentResultAnchor = (taskId: string, turn: number | undefined) => `silent:${taskId}:${turn ?? 0}`;
 
+const saveReactionRecord = async (store: ConfigRepository | undefined, key: string, expected: string | undefined, record: ReactionRecord) => {
+  if (store?.compareAndSet) await store.compareAndSet(key, expected, JSON.stringify(record));
+  else await store?.set(key, JSON.stringify(record));
+};
+
 /**
- * 完成时只贴表情：对原始请求消息贴一次完成表情。
+ * 一轮结束时在原始请求消息上贴状态表情：完成贴对勾，失败或中断贴叉号。
+ * 同一条消息只留一枚：之后又有新终态（在原卡上重试后完成）时，先撤掉上一枚再贴这一枚。
  *
- * 先查 kv 幂等键再调平台再写回，重启对账反复进入时命中即返，绝不重复打表情。
+ * 先查 kv 幂等键再调平台再写回，重启对账反复进入时命中即返，绝不重复打表情；撤掉的记录标 removedAt，之后还能再贴。
  *
- * 返回是否确实送达：这一枚表情是开关打开后用户唯一能看到的完成信号，贴失败还记成
- * 「已交付」，用户就什么都收不到了。失败只 warn（不抛），由调用方留给对账重试。
+ * 返回是否确实送达：「完成时只贴表情」打开时对勾是用户唯一能看到的完成信号，贴失败还记成
+ * 「已交付」，用户就什么都收不到了。失败只 warn（不抛），由调用方决定是否留给对账重试。
  */
-export async function deliverLarkCompletionReaction(
-  service: Pick<LarkCardService, 'addReaction'>,
-  input: { appId: string; messageId: string },
+export async function deliverLarkStatusReaction(
+  service: Pick<LarkCardService, 'addReaction' | 'deleteReaction'>,
+  input: { appId: string; messageId: string; completed: boolean },
   log: DeliveryLog,
   store?: ConfigRepository
 ): Promise<boolean> {
-  const key = reactionDedupeKey(input.appId, input.messageId, COMPLETION_REACTION_EMOJI);
+  const [emojiType, previousEmoji] = input.completed
+    ? [COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI] : [FAILURE_REACTION_EMOJI, COMPLETION_REACTION_EMOJI];
+  const key = reactionDedupeKey(input.appId, input.messageId, emojiType);
   try {
-    if (await store?.get(key)) return true;
-    const result = await service.addReaction(input.messageId, COMPLETION_REACTION_EMOJI);
-    const record: ReactionRecord = {
-      messageId: result.messageId, emojiType: COMPLETION_REACTION_EMOJI,
-      reactionId: result.reactionId, createdAt: new Date().toISOString()
-    };
-    if (store?.compareAndSet) await store.compareAndSet(key, undefined, JSON.stringify(record));
-    else await store?.set(key, JSON.stringify(record));
+    const saved = await store?.get(key);
+    if (saved && !(JSON.parse(saved) as ReactionRecord).removedAt) return true;
+    const previousKey = reactionDedupeKey(input.appId, input.messageId, previousEmoji);
+    const previousRaw = await store?.get(previousKey);
+    const previous = previousRaw ? JSON.parse(previousRaw) as ReactionRecord : undefined;
+    if (previous && !previous.removedAt) {
+      // 撤不掉也照贴新的：两枚并存总比停在过时的那一枚好。
+      try {
+        await service.deleteReaction(input.messageId, previous.reactionId);
+        await saveReactionRecord(store, previousKey, previousRaw, { ...previous, removedAt: new Date().toISOString() });
+      } catch (error) { log.warn({ error, key: previousKey }, '撤掉上一枚状态表情失败'); }
+    }
+    const result = await service.addReaction(input.messageId, emojiType);
+    await saveReactionRecord(store, key, saved, {
+      messageId: result.messageId, emojiType, reactionId: result.reactionId, createdAt: new Date().toISOString()
+    });
     return true;
   } catch (error) {
-    log.warn({ error, key }, '完成表情写入失败，等待对账重试');
+    log.warn({ error, key }, '状态表情写入失败');
     return false;
   }
 }

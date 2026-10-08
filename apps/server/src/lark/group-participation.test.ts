@@ -414,7 +414,8 @@ describe('group observation and selective participation through the coordinator'
     const h = await harness('off');
     await h.coordinator.handle(message(), { ...config, mentionPolicy: 'ambient' });
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
-    expect(h.service.addReaction).toHaveBeenCalledOnce();
+    // 只数收到时那一枚 OK：这一轮结束时还会另贴一枚状态表情。
+    expect(h.service.addReaction.mock.calls.filter(call => (call as unknown[])[1] === 'OK')).toHaveLength(1);
     expect(await h.repository.listObservations(scope)).toEqual([]);
     expect(h.decide).not.toHaveBeenCalled();
   });

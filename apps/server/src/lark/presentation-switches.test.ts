@@ -14,7 +14,7 @@ import type { AgentConfig } from '@dutydeck/shared';
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
-import { COMPLETION_REACTION_EMOJI } from './reaction-records.js';
+import { COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI } from './reaction-records.js';
 import { buildLarkCard } from './service.js';
 import type { LarkMessageEvent } from './listener.js';
 
@@ -27,14 +27,18 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }], ...patch
 });
 
-/** normal = 正常完成；unresolved = 工具没回结果，终态按失败处理；permission = 发一张待决审批卡后挂住。 */
-type HarnessMode = 'normal' | 'unresolved' | 'permission';
+/**
+ * normal = 正常完成；unresolved = 工具没回结果，终态按失败处理；permission = 发一张待决审批卡后挂住；
+ * failThenPass = 第一轮按 unresolved 失败，之后的轮次正常完成；hang = 一直执行到被中断。
+ */
+type HarnessMode = 'normal' | 'unresolved' | 'permission' | 'failThenPass' | 'hang';
 
 async function harness(mode: HarnessMode = 'normal', configPatch: Partial<StoredLarkConfig> = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-presentation-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let release: (() => void) | undefined;
   const gate = new Promise<void>(done => { release = done; });
+  let sends = 0;
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
@@ -42,15 +46,21 @@ async function harness(mode: HarnessMode = 'normal', configPatch: Partial<Stored
         start: async () => {},
         resume: async () => {},
         stop: async () => {},
-        interrupt: async () => {},
+        interrupt: async () => { if (mode === 'hang') release?.(); },
         send: async () => {
+          sends++;
+          if (mode === 'hang') {
+            await gate;
+            emit({ type: 'completed', data: { stopReason: 'cancelled' } });
+            return;
+          }
           if (mode === 'permission') {
             emit({ type: 'permission_request', data: { id: 'native_permission', title: '修改文件', status: 'pending', options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } });
             await gate;
             emit({ type: 'completed', data: { stopReason: 'end_turn' } });
             return;
           }
-          if (mode === 'unresolved') {
+          if (mode === 'unresolved' || (mode === 'failThenPass' && sends === 1)) {
             emit({ type: 'tool_call', data: { id: 'call_1', title: '写文件', status: 'in_progress' } });
             emit({ type: 'completed', data: { stopReason: 'end_turn' } });
             return;
@@ -106,6 +116,8 @@ async function harness(mode: HarnessMode = 'normal', configPatch: Partial<Stored
   const sentCards = () => [...service.reply.mock.calls, ...service.send.mock.calls].map(([input]) => input as any);
   const cardsOfKind = (kind: 'process' | 'result') => sentCards().filter(input => input?.cardKind === kind);
   const completionReactions = () => service.addReaction.mock.calls.filter(([, emoji]) => emoji === COMPLETION_REACTION_EMOJI);
+  /** 结束时贴在原消息上的状态表情（不含收到时那一枚 OK）。 */
+  const statusReactions = () => service.addReaction.mock.calls.filter(([, emoji]) => emoji === COMPLETION_REACTION_EMOJI || emoji === FAILURE_REACTION_EMOJI);
   const mappings = async () => (await repos.channelMappings.list(channel))
     .map(mapping => JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask);
   const settled = async (messageId: string) => vi.waitFor(async () => {
@@ -116,18 +128,18 @@ async function harness(mode: HarnessMode = 'normal', configPatch: Partial<Stored
   }, { timeout: 5_000 }).then(saved => { void messageId; return saved; });
 
   return { repos, runtime, config, coordinator, createCoordinator, service, log, channel,
-    sentCards, cardsOfKind, completionReactions, mappings, settled, releaseGate: () => release?.() };
+    sentCards, cardsOfKind, completionReactions, statusReactions, mappings, settled, releaseGate: () => release?.() };
 }
 
 describe('完成时只贴表情（completionReactionOnly）', () => {
-  it('默认关闭时逐条保持既有行为：过程卡 + 结果卡，且不贴完成表情', async () => {
+  it('默认关闭时过程卡 + 结果卡，结果送达后在原消息上贴一枚完成对勾', async () => {
     const h = await harness();
     await h.coordinator.handle(event('om_default', '做一件事'), h.config);
     await h.settled('om_default');
 
     expect(h.cardsOfKind('process')).toHaveLength(1);
     expect(h.cardsOfKind('result')).toHaveLength(1);
-    expect(h.completionReactions()).toHaveLength(0);
+    expect(h.statusReactions()).toEqual([['om_default', COMPLETION_REACTION_EMOJI]]);
     // 会另发结果卡：回执收成一行「完成 · 用时 · 步骤计数」，不再单独写「结果见下条」。
     const completedUpdate = h.service.update.mock.calls.map(([input]) => input as any).find(input => input.state === 'completed');
     expect(completedUpdate).toMatchObject({ cardKind: 'process', resultFollows: true });
@@ -161,6 +173,64 @@ describe('完成时只贴表情（completionReactionOnly）', () => {
     expect(h.cardsOfKind('result')).toHaveLength(1);
     expect(h.cardsOfKind('result')[0]).toMatchObject({ state: 'failed' });
     expect(h.completionReactions()).toHaveLength(0);
+  });
+});
+
+describe('原消息上的状态表情', () => {
+  it('失败终态先发结果卡，再在原消息上贴失败叉号', async () => {
+    const h = await harness('unresolved');
+    await h.coordinator.handle(event('om_failed', '做一件事'), h.config);
+    const saved = await h.settled('om_failed');
+
+    expect(saved.state).toBe('failed');
+    expect(h.statusReactions()).toEqual([['om_failed', FAILURE_REACTION_EMOJI]]);
+    const resultCall = h.service.reply.mock.calls.findIndex(([input]) => (input as any)?.cardKind === 'result');
+    const reactionCall = h.service.addReaction.mock.calls.findIndex(([, emoji]) => emoji === FAILURE_REACTION_EMOJI);
+    expect(h.service.reply.mock.invocationCallOrder[resultCall]).toBeLessThan(h.service.addReaction.mock.invocationCallOrder[reactionCall]!);
+  });
+
+  it('在原卡上重试后完成：先撤掉叉号再贴对勾，原消息上只留一枚', async () => {
+    const h = await harness('failThenPass');
+    await h.coordinator.handle(event('om_retry', '做一件事'), h.config);
+    const first = await h.settled('om_retry');
+    expect(first.state).toBe('failed');
+
+    expect(await h.coordinator.handleAction({ action: 'retry', task_id: 'om_retry', turn: String(first.turn) }, 'ou_alice',
+      { messageId: first.card_message_id, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
+    await vi.waitFor(async () => {
+      const [saved] = await h.mappings();
+      expect(saved).toMatchObject({ turn: first.turn! + 1, state: 'completed', final_delivery_state: 'delivered' });
+    }, { timeout: 5_000 });
+
+    expect(h.statusReactions()).toEqual([['om_retry', FAILURE_REACTION_EMOJI], ['om_retry', COMPLETION_REACTION_EMOJI]]);
+    expect(h.service.deleteReaction).toHaveBeenCalledWith('om_retry', `reaction_om_retry_${FAILURE_REACTION_EMOJI}`);
+  });
+
+  it('用户自己停下的一轮不贴表情', async () => {
+    const h = await harness('hang');
+    await h.coordinator.handle(event('om_stop', '做一件事'), h.config);
+    await vi.waitFor(async () => expect(await h.coordinator.handleAction({ action: 'interrupt', task_id: 'om_stop', turn: '1' }, 'ou_alice'))
+      .toMatchObject({ type: 'success' }), { timeout: 5_000 });
+    const saved = await h.settled('om_stop');
+
+    expect(['interrupted', 'cancelled']).toContain(saved.state);
+    expect(h.cardsOfKind('result')).toHaveLength(1);
+    expect(h.statusReactions()).toHaveLength(0);
+  });
+
+  it('贴表情失败不挡结果卡：结果照常记为已送达', async () => {
+    const h = await harness();
+    h.service.addReaction.mockImplementation(async (messageId: string, emojiType = 'OK') => {
+      if (emojiType !== 'OK') throw new Error('reaction API unavailable');
+      return { messageId, reactionId: `reaction_${messageId}_${emojiType}` };
+    });
+    await h.coordinator.handle(event('om_react_fail', '做一件事'), h.config);
+    const saved = await h.settled('om_react_fail');
+
+    expect(saved.final_delivery_state).toBe('delivered');
+    expect(saved.final_message_id).toBeTruthy();
+    expect(h.cardsOfKind('result')).toHaveLength(1);
+    expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ key: expect.stringContaining(COMPLETION_REACTION_EMOJI) }), '状态表情写入失败');
   });
 });
 
