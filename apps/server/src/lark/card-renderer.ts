@@ -125,8 +125,14 @@ function compactTraceEntries(events: AgentEvent[]): TraceEntry[] {
   return result;
 }
 
+const isTaskRunningEvent = (event: AgentEvent, taskId: string) => event.type === 'task'
+  && (event.data as any)?.task?.id === taskId && (event.data as any).task.status === 'running';
+
 export function eventsForRuntimeTask(events: AgentEvent[], taskId: string) {
-  const start = events.findIndex(event => event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === taskId);
+  let start = events.findIndex(event => event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === taskId);
+  // 用户原话在提交给 Agent 时才写入，提交前就失败的轮次没有这一条，改从它开始运行的那条任务事件算起。
+  // 不能退回整段会话：过程卡会数上以前所有轮次的步骤，结果卡会把上一轮的答案当成这一轮的结果。
+  if (start < 0) start = events.findIndex(event => isTaskRunningEvent(event, taskId));
   if (start < 0) return events;
   const endOffset = events.slice(start + 1).findIndex(event => {
     if (event.type !== 'task') return false;
@@ -153,7 +159,8 @@ export async function loadLarkTaskWindow(
   // until the task boundary is present so the result cannot lose its beginning.
   for (;;) {
     const events = await runtime.getRecentEvents(sessionId, limit);
-    if (events.length < limit || events.some(event => event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === taskId)) return events;
+    if (events.length < limit || events.some(event => event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === taskId
+      || isTaskRunningEvent(event, taskId))) return events;
     limit *= 2;
   }
 }

@@ -252,6 +252,12 @@ describe('Runtime uses the execution ledger', () => {
     expect(result.status).toBe('failed');
     expect(attempt.submissionState).toBe('not_submitted');
     expect(attempt.settlement).toMatchObject({ kind: 'not_submitted', reason: 'This driver cannot prove a context-preserving configuration reset before submission' });
+    // 原因同时写成本轮的错误事件，排在终态之前，结果卡才能显示为什么失败。
+    const events = await h.runtime.getEvents(h.session.id);
+    const failure = events.findIndex(event => event.type === 'error' && (event.data as any).message === 'This driver cannot prove a context-preserving configuration reset before submission');
+    const settled = events.findIndex(event => event.type === 'task' && (event.data as any).task?.id === result.id && (event.data as any).task.status === 'failed');
+    expect(failure).toBeGreaterThanOrEqual(0);
+    expect(failure).toBeLessThan(settled);
     expect(h.runtime.getDriver(h.session.id)).toBe(original); expect(h.children).toHaveLength(1); expect(h.sent).toEqual([]);
     expect((await h.runtime.getSession(h.session.id))?.model).toBe('default-model');
     expect((await h.runtime.send(h.session.id, 'default')).status).toBe('completed');
