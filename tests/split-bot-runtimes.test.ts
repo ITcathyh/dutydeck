@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { createRepositories } from '../packages/storage/src/index.js';
 import { currentProcessIdentity } from '../packages/storage/src/process-identity.js';
 import { DutydeckRuntime } from '../packages/agent-runtime/src/index.js';
-import { deliverLarkCompletionReaction, larkResultKey, sendLarkFile } from '../apps/server/src/lark/result-delivery.js';
+import { deliverLarkStatusReaction, larkResultKey, sendLarkFile } from '../apps/server/src/lark/result-delivery.js';
 import { split } from '../scripts/split-bot-runtimes.mts';
 
 const dirs: string[] = [];
@@ -132,9 +132,9 @@ describe('offline bot partitions', () => {
         const earlierResultKey = `result_${'f'.repeat(39)}${session === 'a' ? 'a' : 'b'}`;
         await repos.config.set(`lark.delivery.${earlierResultKey}.summary`, JSON.stringify({ messageId: `om_old_result_${session}`, elements: [] }));
         await repos.config.set(`lark.explicit_final.${session}`, JSON.stringify({ provider_uuid: final, scope: { app_id: appId, session_id: session } }));
-        const service = { uploadFile: async () => `file_${session}`, sendFile: async () => ({ messageId: `om_attachment_${session}` }), addReaction: async (messageId: string) => ({ messageId, reactionId: `reaction_${session}` }) };
+        const service = { uploadFile: async () => `file_${session}`, sendFile: async () => ({ messageId: `om_attachment_${session}` }), addReaction: async (messageId: string) => ({ messageId, reactionId: `reaction_${session}` }), deleteReaction: async () => {} };
         for (const providerId of [result, final, earlierResultKey]) await sendLarkFile(service as any, { chatId: 'oc_shared' }, { data: Buffer.from('history'), filename: 'result.md', idempotencyKey: `result_file_${createHash('sha256').update(providerId).digest('hex').slice(0, 36)}` }, { warn: vi.fn() }, repos.config);
-        expect(await deliverLarkCompletionReaction(service, { appId: appId!, messageId: 'om_shared_history_root' }, { warn: vi.fn() }, repos.config)).toBe(true);
+        expect(await deliverLarkStatusReaction(service, { appId: appId!, messageId: 'om_shared_history_root', completed: true }, { warn: vi.fn() }, repos.config)).toBe(true);
         keys.set(appId!, (await repos.config.list!('lark.')).map(r => r.key).filter(key => key !== 'lark.bots' && ![...keys.values()].flat().includes(key)));
       }
     } finally { repos.close(); }
