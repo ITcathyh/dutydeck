@@ -809,9 +809,9 @@ export function restoreSession(sessionId: string) {
 
     const completed = buildLarkCard({ cardKind: 'process', state: 'completed', elements });
     expect(JSON.stringify(completed)).not.toContain('missing.json');
-    // 收起行改成「做了什么」（最近一句旁白 + 没成功的步数）；完整计数挪到展开区第一行。
+    // 收起行改成「做了什么」（第一句旁白 + 没成功的步数）；完整计数挪到展开区第一行。
     const receipt = byId(completed, 'task_overview');
-    expect(receipt.header.title.content).toContain('阶段 7：继续执行 · 有 1 步没成功');
+    expect(receipt.header.title.content).toContain('阶段 0：检查配置 · 有 1 步没成功');
     expect(receipt.header.title.content).not.toContain('运行命令');
     expect(receipt.elements[0]).toMatchObject({ element_id: 'trace_counts' });
     expect(receipt.elements[0].content).toContain('运行命令 7 次、读文件 1 个、未恢复的失败 1 次');
@@ -1394,8 +1394,9 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
       expect(card.config.summary.content).toBe(`${state === 'completed' ? '完成' : '失败'} · 大任务`);
       if (state === 'completed') {
         expect(card.header).toBeUndefined();
-        // 收起行是最近一句旁白；原来在收起行里的计数现在是展开区第一行。
-        expect(byId(card, 'task_overview').header.title.content).toContain('第 12 阶段');
+        // 收起行是第一句旁白；原来在收起行里的计数现在是展开区第一行。
+        expect(byId(card, 'task_overview').header.title.content).toContain('第 1 阶段');
+        expect(byId(card, 'task_overview').header.title.content).not.toContain('第 12 阶段');
         expect(byId(card, 'trace_counts').content).toContain('运行命令 12 次');
       } else {
         expect(card.header).toMatchObject({ title: { content: '大任务' }, subtitle: { content: 'Codex' } });
@@ -1642,6 +1643,19 @@ describe('过程卡回执：一句话说做了什么', () => {
     expect(title).not.toContain('之后再说别的');
     expect(title).not.toContain('有 0 步');
     expect(title).not.toContain('没成功');
+  });
+
+  it('有多句旁白：收起行用本轮第一句，不是最后一句', () => {
+    const events = [
+      makeEvent(1, 'text', { text: '先把登录页的报错查清再改。' }),
+      ...bash('a', 'ls', 'completed', 2),
+      makeEvent(5, 'text', { text: '改完了，再跑一下测试确认。' }),
+      ...bash('b', 'pnpm test', 'completed', 6),
+      makeEvent(9, 'text', { text: '全部通过。' })
+    ];
+    const title: string = receiptOf(events).receipt.header.title.content;
+    expect(title).toContain(' · 先把登录页的报错查清再改');
+    expect(title).not.toContain('再跑一下测试');
   });
 
   it('没有旁白：收起行退回步骤计数（含未恢复的失败），展开区没有额外的计数行', () => {

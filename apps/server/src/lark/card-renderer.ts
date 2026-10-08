@@ -1052,13 +1052,14 @@ const toolCountSummary = (groups: TraceGroup[]) => {
   return [...kinds, ...(unresolved ? [`未恢复的失败 ${unresolved} 次`] : [])].join('、');
 };
 
-// 收起回执那一行的「做了什么」：Agent 最近一句中间旁白（执行中显示在过程卡上的那类文字），
+// 收起回执那一行的「做了什么」：Agent 本轮第一句中间旁白（开始动手时说的打算，执行中显示在过程卡上的那类文字；
+// 越往后的旁白越是收尾的小步骤，说不出这一轮做了什么），
 // 去掉开头的「正在」和结尾的省略号，按显示宽度裁到约 40 个汉字（汉字算 2）。最终输出不在分组里，不会取到它。
 // 没有旁白（PTY 版 Agent 很少上报）时返回 undefined，回执退回步骤计数。
 const receiptNarrationWidth = 80;
 const receiptNarration = (groups: TraceGroup[]) => {
-  const latest = groups.flatMap(group => group.narratives).filter(entry => entry.type === 'text').at(-1);
-  const sentence = redactTraceText(String(latest?.data.text ?? '')).split('\n').map(line => line.trim()).find(Boolean)
+  const first = groups.flatMap(group => group.narratives).find(entry => entry.type === 'text' && String(entry.data.text ?? '').trim());
+  const sentence = redactTraceText(String(first?.data.text ?? '')).split('\n').map(line => line.trim()).find(Boolean)
     ?.replace(/[*`]/g, '').split(/[。！？!?]/)[0]?.replace(/^正在/, '').replace(/[\s.…：:，,、；;]+$/u, '').trim();
   if (!sentence) return undefined;
   let width = 0;
