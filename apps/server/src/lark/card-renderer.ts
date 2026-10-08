@@ -130,8 +130,9 @@ const isTaskRunningEvent = (event: AgentEvent, taskId: string) => event.type ===
 
 export function eventsForRuntimeTask(events: AgentEvent[], taskId: string) {
   let start = events.findIndex(event => event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === taskId);
-  // 用户原话在提交给 Agent 时才写入，提交前就失败的轮次没有这一条，改从它开始运行的那条任务事件算起。
+  // 用户原话在提交给 Agent 时才写入，提交前就失败的轮次没有这一条，改从它第一次进入运行的那条任务事件算起。
   // 不能退回整段会话：过程卡会数上以前所有轮次的步骤，结果卡会把上一轮的答案当成这一轮的结果。
+  // 提交后、回答结束时还会再记「运行中」，所以只有窗口取到原话为止（loadLarkTaskWindow）时这条退路才可靠。
   if (start < 0) start = events.findIndex(event => isTaskRunningEvent(event, taskId));
   if (start < 0) return events;
   const endOffset = events.slice(start + 1).findIndex(event => {
@@ -159,8 +160,7 @@ export async function loadLarkTaskWindow(
   // until the task boundary is present so the result cannot lose its beginning.
   for (;;) {
     const events = await runtime.getRecentEvents(sessionId, limit);
-    if (events.length < limit || events.some(event => event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === taskId
-      || isTaskRunningEvent(event, taskId))) return events;
+    if (events.length < limit || events.some(event => event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === taskId)) return events;
     limit *= 2;
   }
 }
