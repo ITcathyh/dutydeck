@@ -656,7 +656,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const mentionPolicy = config.mentionPolicy ?? 'always';
     const topicScope = mentionPolicy === 'topic' && this.groupManager ? await resolveLarkScopeId(event, config, this.chatModeResolver) : undefined;
     // 续接了发起人顶层会话的话题没有自己的会话，续接的会话还在就同样算机器人接过的话题。
-    const continuedTopic = topicScope && this.groupManager
+    // 只 @ 了别人（另一个 Bot 或同事）的消息是在叫别人，即使在自己接过的话题里也让路，同 ambient。
+    const continuedTopic = topicScope && this.groupManager && (mentionsBot || !event.mentions.length)
       ? await this.groupManager.ownsTopic(config, event, topicScope) || Boolean(await this.threadContinuation(event, config, topicScope)) : false;
     // ambient 与 never 的区别在这里：ambient 在消息指名了别人时让路，只接没有指名任何人的消息。
     // 本分支已排除 mentionsBot，所以此处出现的任何 mention 都是「点了别人」。
