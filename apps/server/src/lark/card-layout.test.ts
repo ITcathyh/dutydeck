@@ -809,7 +809,12 @@ export function restoreSession(sessionId: string) {
 
     const completed = buildLarkCard({ cardKind: 'process', state: 'completed', elements });
     expect(JSON.stringify(completed)).not.toContain('missing.json');
-    expect(byId(completed, 'task_overview').header.title.content).toContain('运行命令 7 次、读文件 1 个');
+    // 收起行改成「做了什么」（最近一句旁白 + 没成功的步数）；完整计数挪到展开区第一行。
+    const receipt = byId(completed, 'task_overview');
+    expect(receipt.header.title.content).toContain('阶段 7：继续执行 · 有 1 步没成功');
+    expect(receipt.header.title.content).not.toContain('运行命令');
+    expect(receipt.elements[0]).toMatchObject({ element_id: 'trace_counts' });
+    expect(receipt.elements[0].content).toContain('运行命令 7 次、读文件 1 个、未恢复的失败 1 次');
   });
 
   it('17. 终端输出掐中间时，被掐掉那段里的报错行单独保留', () => {
@@ -1389,7 +1394,9 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
       expect(card.config.summary.content).toBe(`${state === 'completed' ? '完成' : '失败'} · 大任务`);
       if (state === 'completed') {
         expect(card.header).toBeUndefined();
-        expect(byId(card, 'task_overview').header.title.content).toContain('运行命令 12 次');
+        // 收起行是最近一句旁白；原来在收起行里的计数现在是展开区第一行。
+        expect(byId(card, 'task_overview').header.title.content).toContain('第 12 阶段');
+        expect(byId(card, 'trace_counts').content).toContain('运行命令 12 次');
       } else {
         expect(card.header).toMatchObject({ title: { content: '大任务' }, subtitle: { content: 'Codex' } });
       }
@@ -1581,5 +1588,117 @@ describe('公开执行记录的可执行入口', () => {
     const readA = makeEvent(1, 'tool_result', { id: 'a', name: 'Read', input: { file_path: '/repo/a.ts' }, output: 'ENOENT', status: 'failed' });
     const readB = makeEvent(2, 'tool_result', { id: 'b', name: 'Read', input: { file_path: '/repo/b.ts' }, output: 'ok', status: 'completed' });
     expect(failureStep([readA, readB])).toBeDefined();
+  });
+});
+
+describe('过程卡回执：一句话说做了什么', () => {
+  const bash = (id: string, command: string, status: 'completed' | 'failed', sequence: number) => [
+    makeEvent(sequence, 'tool_call', { id, name: 'Bash', input: { command }, status: 'running' }),
+    makeEvent(sequence + 1, 'tool_result', { id, name: 'Bash', input: { command }, output: status === 'failed' ? 'command not found' : 'ok', status })
+  ];
+  // 10-08 bdev-flash 那张卡的形态：23 次命令（其中 2 次没恢复的失败）、搜索、改文件，Agent 只说过一句旁白。
+  const sampleEvents = (narration?: string) => {
+    const events: AgentEvent[] = narration ? [makeEvent(1, 'text', { text: narration })] : [];
+    let sequence = 2;
+    for (let index = 0; index < 21; index++) { events.push(...bash(`ok_${index}`, `step_${index}`, 'completed', sequence)); sequence += 2; }
+    events.push(...bash('bad_1', 'which lark-cli || echo "not in path"', 'failed', sequence), ...bash('bad_2', 'lark-cli --version', 'failed', sequence + 2));
+    sequence += 4;
+    events.push(
+      makeEvent(sequence, 'tool_result', { id: 'grep_1', name: 'Grep', input: { pattern: 'dutydeck' }, output: 'a.ts', status: 'completed' }),
+      makeEvent(sequence + 1, 'tool_result', { id: 'edit_1', name: 'Edit', input: { file_path: '/repo/a.ts' }, output: 'ok', status: 'completed' }),
+      makeEvent(sequence + 2, 'text', { text: '已经改好，可以试一下。' })
+    );
+    return events;
+  };
+  const receiptOf = (events: AgentEvent[]) => {
+    const elements = boundLarkCardElements(renderLarkProcessElements(events, config, true));
+    const card: any = buildLarkCard({ cardKind: 'process', state: 'completed', taskName: '检索', elapsedSeconds: 345, elements });
+    return { elements, card, receipt: byId(card, 'task_overview') };
+  };
+
+  it('有旁白：收起行是「完成 · 用时 · 旁白 · 有 N 步没成功」，去掉「正在」和省略号，完整计数在展开区第一行', () => {
+    const { receipt } = receiptOf(sampleEvents('正在通过 GitHub API 及全网检索闲鱼管理相关开源项目（过滤 Star > 100，覆盖自动发货、自动回复、监控等）...'));
+    // 括号补充说明被裁在半截时整段不要，不留没关的括号。
+    expect(receipt.header.title.content).toBe(
+      "<font color='green'>完成</font><font color='grey'> · 5 分 45 秒</font>"
+      + "<font color='grey'> · 通过 GitHub API 及全网检索闲鱼管理相关开源项目… · 有 2 步没成功</font>"
+    );
+    expect(receipt.header.title.content).not.toContain('未恢复的失败');
+    expect(receipt.elements[0]).toMatchObject({ tag: 'markdown', element_id: 'trace_counts' });
+    expect(receipt.elements[0].content).toBe("<font color='grey'>运行命令 23 次、搜索 1 次、改文件 1 个、未恢复的失败 2 次</font>");
+  });
+
+  it('旁白按约 40 个汉字宽裁剪；没有失败时不带尾巴；只取第一句', () => {
+    const long = '先梳理仓库里所有和飞书卡片渲染相关的模块再逐个核对每一处调用方的参数是否一致然后统一修改完毕之后补测试。之后再说别的';
+    const { receipt } = receiptOf([
+      makeEvent(1, 'text', { text: long }),
+      ...bash('a', 'ls', 'completed', 2),
+      makeEvent(9, 'text', { text: '完成。' })
+    ]);
+    const title: string = receipt.header.title.content;
+    const shown = title.match(/ · (先梳理[^<]*)<\/font>$/)![1]!;
+    expect(shown.endsWith('…')).toBe(true);
+    expect(Array.from(shown).length).toBeLessThanOrEqual(41);
+    expect(title).not.toContain('之后再说别的');
+    expect(title).not.toContain('有 0 步');
+    expect(title).not.toContain('没成功');
+  });
+
+  it('没有旁白：收起行退回步骤计数（含未恢复的失败），展开区没有额外的计数行', () => {
+    const { receipt } = receiptOf(sampleEvents());
+    expect(receipt.header.title.content).toBe(
+      "<font color='green'>完成</font><font color='grey'> · 5 分 45 秒</font>"
+      + "<font color='grey'> · 运行命令 23 次、搜索 1 次、改文件 1 个、未恢复的失败 2 次</font>"
+    );
+    expect(byId(receipt, 'trace_counts')).toBeUndefined();
+  });
+
+  it('中间旁白不会跑进结果卡：最终输出只取最后一次动作之后的那段', () => {
+    const events = sampleEvents('先查一下现状再决定怎么改。');
+    const result = renderLarkResultElements(events, { state: 'completed' });
+    expect(byId(result, 'final_output').content).toBe('已经改好，可以试一下。');
+    expect(JSON.stringify(result)).not.toContain('先查一下现状');
+    // 过程卡的最终输出判定同源，旁白留在过程里。
+    expect(byId(renderLarkProcessElements(events, config, true), 'final_output')).toBeUndefined();
+  });
+
+  it('没有旁白的分组：标题是这一组里次数最多的动作加次数，不再是第一条命令原文', () => {
+    // 阶段 0 没有旁白：1 次读文件、3 次命令，次数最多的是命令；阶段 1 有旁白。
+    const events: AgentEvent[] = [
+      makeEvent(1, 'tool_result', { id: 'r1', name: 'Read', input: { file_path: '/repo/a.ts' }, output: 'x', status: 'completed' }),
+      ...bash('c1', 'which lark-cli || echo "not in path"', 'completed', 2),
+      ...bash('c2', 'pnpm install', 'completed', 4),
+      ...bash('c3', 'pnpm build', 'completed', 6),
+      makeEvent(10, 'text', { text: '开始改文件' }),
+      makeEvent(11, 'tool_result', { id: 'e1', name: 'Edit', input: { file_path: '/repo/a.ts' }, output: 'ok', status: 'completed' })
+    ];
+    const elements = renderLarkCardElements(events, config, false);
+    const title: string = byId(elements, 'trace_group_0').header.title.content;
+    expect(title).toContain('运行命令 3 次');
+    expect(title).not.toContain('which lark-cli');
+    expect(title).not.toContain('等 ');
+    // 只有一步的分组仍用这一步自己的标题。
+    const single = renderLarkCardElements([bash('s1', 'pnpm build', 'completed', 1)[1]!, makeEvent(5, 'text', { text: '再来' }), makeEvent(6, 'tool_result', { id: 's2', name: 'Edit', input: { file_path: '/repo/a.ts' }, output: 'ok', status: 'completed' })], config, false);
+    expect(byId(single, 'trace_group_0').header?.title.content ?? byId(single, 'trace_group_0').content).toContain('pnpm build');
+  });
+
+  it('执行中和失败/中断：过程卡不变，仍是步骤计数，不出现旁白回执', () => {
+    const events = sampleEvents('先查一下现状再决定怎么改。');
+    const running = renderLarkProcessElements(events, config);
+    expect(byId(running, 'trace_summary')).toBeUndefined();
+    expect(byId(running, 'trace_steps').content).toMatch(/^共 \d+ 步$/);
+    const runningCard: any = buildLarkCard({ cardKind: 'process', state: 'running', taskName: '检索', elapsedSeconds: 30, elements: boundLarkCardElements(running) });
+    expect(JSON.stringify(runningCard)).not.toContain('trace_counts');
+    expect(JSON.stringify(runningCard)).not.toContain('没成功');
+
+    const terminal = boundLarkCardElements(renderLarkProcessElements(events, config, true));
+    for (const state of ['failed', 'cancelled'] as const) {
+      const card: any = buildLarkCard({ cardKind: 'process', state, taskName: '检索', elapsedSeconds: 345, resultFollows: true, elements: terminal });
+      const title: string = byId(card, 'task_overview').header.title.content;
+      expect(title).toContain('运行命令 23 次、搜索 1 次、改文件 1 个、未恢复的失败 2 次');
+      expect(title).toContain('原因见下条');
+      expect(title).not.toContain('先查一下现状');
+      expect(JSON.stringify(card)).not.toContain('trace_counts');
+    }
   });
 });

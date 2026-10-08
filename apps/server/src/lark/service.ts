@@ -458,7 +458,7 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
     const groupIndex = mainElements.findIndex(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
     if (groupIndex < 0) {
       // 步骤总数和最后失败的步骤很小，照样带上；它们也不能被当成正文。
-      const meta = mainElements.filter(element => element.element_id === 'trace_steps' || element.element_id === 'failure_step');
+      const meta = mainElements.filter(element => ['trace_steps', 'trace_summary', 'failure_step'].includes(String(element.element_id)));
       const fallbackText = String((mainElements.find(element => element.element_id === 'final_output') as any)?.content
         ?? (mainElements.find(element => element.tag === 'markdown' && !meta.includes(element)) as any)?.content ?? '内容过长');
       return [
@@ -683,9 +683,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   // 渲染器附带的元数据不按原位置渲染：步骤总数进底部那一行，最后失败的步骤只放在失败卡上。
   // 旧快照里的「执行中曾有 N 个步骤失败」在这里一并拿掉——对账、验收会用存下来的元素重绘，
   // 只在渲染器里不再生成是不够的。
-  const metaIds = new Set(['trace_steps', 'failure_step', 'evidence']);
-  const stepsTextOf = (elements: Array<Record<string, unknown>>) => {
-    const found = elements.find(element => element.element_id === 'trace_steps');
+  const metaIds = new Set(['trace_steps', 'trace_summary', 'failure_step', 'evidence']);
+  const metaTextOf = (elements: Array<Record<string, unknown>>, id: string) => {
+    const found = elements.find(element => element.element_id === id);
     return typeof found?.content === 'string' ? found.content : '';
   };
   const statusTagLabel = (waiting: boolean) => waiting && !explicitStatusLabel
@@ -881,7 +881,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       ...traceElements
     ]);
     const otherElements = mainElements.filter(element => !processExternalClaimed.has(element));
-    const stepsText = stepsTextOf(sourceElements);
+    const stepsText = metaTextOf(sourceElements, 'trace_steps');
+    // 完成的回执收起时写「做了什么」（Agent 旁白）；没有旁白或不是完成态时仍是步骤计数。
+    const summaryText = state === 'completed' ? metaTextOf(sourceElements, 'trace_summary') : '';
     const newestFirst = (items: Array<Record<string, unknown>>) => [...items].reverse();
     const elapsedText = elapsedSeconds > 0 ? larkElapsedLabel(elapsedSeconds) : '';
     // 终态卡可能是用运行中那一帧重绘的（终态更新被拒、对账补画）：那一帧的当前阶段还带着
@@ -902,7 +904,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       // 不再出现两张同状态的完整卡；那条的按钮（重试等）也只留在结果卡上。
       const receiptColor = state === 'completed' ? 'green' : state === 'failed' ? 'red' : 'grey';
       const receiptTitle = `<font color='${receiptColor}'>${userStatusFor(false).label}</font>${[
-        elapsedSeconds > 0 ? larkElapsedLabel(elapsedSeconds) : '', stepsText, state === 'completed' ? '' : '原因见下条'
+        elapsedSeconds > 0 ? larkElapsedLabel(elapsedSeconds) : '', summaryText || stepsText, state === 'completed' ? '' : '原因见下条'
       ].filter(Boolean).map(part => grey(` · ${part}`)).join('')}`;
       const receiptIcon = { tag: 'standard_icon', token: state === 'completed' ? 'done_outlined' : 'close_outlined', color: receiptColor };
       // 只有一个阶段时摊平：阶段标题作为普通一行，接着是它的内容，展开回执后不用再点开一层。
@@ -912,6 +914,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ? [...(singleHeader?.title ? [singleHeader.title as Record<string, unknown>] : []), ...single.elements as Array<Record<string, unknown>>]
         : settled(newestFirst(traceElements));
       const listed: Array<Record<string, unknown>> = [
+        // 收起行换成了旁白，完整的步骤计数放在展开后的第一行。
+        ...(summaryText && stepsText && traceElements.length ? [{ tag: 'markdown', element_id: 'trace_counts', content: grey(stepsText), text_size: 'notation', margin: '0px' }] : []),
         ...stages,
         ...omissionElements,
         // 「结果见单独的结果消息」不在这里重复，也不在没有下一条时乱说。

@@ -387,7 +387,7 @@
                 "header": {
                   "title": {
                     "tag": "markdown",
-                    "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font><font color='grey'> · 读文件 1 个、改文件 1 个</font>",
+                    "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font><font color='grey'> · 先看一下登录页现在的错误提示</font>",
                     "text_size": "normal",
                     "icon": {
                       "tag": "standard_icon",
@@ -406,6 +406,13 @@
                   "icon_expanded_angle": -180
                 },
                 "elements": [
+                  {
+                    "tag": "markdown",
+                    "element_id": "trace_counts",
+                    "content": "<font color='grey'>读文件 1 个、改文件 1 个</font>",
+                    "text_size": "notation",
+                    "margin": "0px"
+                  },
                   {
                     "tag": "column_set",
                     "element_id": "trace_group_0",
