@@ -111,6 +111,12 @@ export async function parseLarkMessageContent(
       return addResource('file', node.file_key, node.file_name ?? node.name);
     }
     if (tag === 'emotion') return String(node.emoji_type ?? node.text ?? '[表情]');
+    // 告警卡的「服务 / 集群 / 规则 / 报警时间」放在 div 的 fields 里，一项一行。
+    const fields = node.fields ?? property?.fields;
+    if (Array.isArray(fields)) {
+      return [node.text ?? property?.text, ...fields.map(field => asRecord(field)?.text ?? field)]
+        .map(value => renderNode(value).trim()).filter(Boolean).join('\n');
+    }
     return renderNode(node.children ?? node.elements ?? property?.children ?? property?.elements ?? node.content ?? node.text ?? property?.content ?? '');
   };
 

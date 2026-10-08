@@ -95,6 +95,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       ...(task.lastSuccessfulElements?.length ? { last_successful_elements: task.lastSuccessfulElements } : {}),
       // 没有进展也写这个键（序列化时省略）：同一轮合并写时要能清掉旧的进展。
       verification_auto: task.autoVerification,
+      ...(task.alertRecall ? { alert_recall: task.alertRecall } : {}),
       ...(task.event.chatType === 'group' ? {
         reply_message_id: task.event.messageId,
         ...(task.event.threadId?.trim() ? { reply_in_thread: true } : {})
