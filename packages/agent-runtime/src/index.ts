@@ -2375,6 +2375,11 @@ export class DutydeckRuntime {
       // Stop owns revoked attempts and retains its claim until this cleanup finishes.
       if (this.mutations.valid(token)) {
         await this.flushDriverEvents(id).catch(() => {});
+        // 提交前失败时 Agent 没产生任何事件，原因只记在结算上；先补一条错误事件，结果卡和 Web 才写得出为什么失败。
+        const unsubmitted = this.repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.attemptId === ref.attemptId);
+        if (unsubmitted && unsubmitted.state !== 'settled' && unsubmitted.submissionState === 'not_submitted' && !isTaskFenceRevocation(error)) {
+          await this.emit(id, 'error', { message: error instanceof Error ? error.message : String(error) }).catch(() => {});
+        }
         await this.mutations.write(id, async () => {
           const attempt = this.repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.attemptId === ref.attemptId);
           if (!attempt || attempt.state === 'settled') return;
