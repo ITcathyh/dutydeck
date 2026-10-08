@@ -135,15 +135,16 @@ describe('findLarkAlertRecall', () => {
 const recall: LarkAlertRecall = { date: '9-22', headline: 'lark.svc.file 突发流量尖刺触发分片代理限流', url: 'https://applink.feishu.cn/client/thread/open?open_chat_id=oc_group&open_thread_id=omt_0922' };
 
 describe('alert recall text', () => {
-  it('tells the Agent the earlier conclusion and asks for a comparison', () => {
-    expect(larkAlertRecallPrompt(recall)).toBe('[Dutydeck 上次同一告警] 9-22 在这个群查过：lark.svc.file 突发流量尖刺触发分片代理限流。先对照上次结论，说明这次相同和不同的地方。');
-    expect(larkAlertRecallPrompt({ ...recall, headline: '根因已定位。' })).toContain('查过：根因已定位。先对照');
+  it('tells the Agent the earlier conclusion and asks it to check the target first', () => {
+    expect(larkAlertRecallPrompt(recall)).toBe('[Dutydeck 上次同一告警规则] 9-22 在这个群查过同一条告警规则：lark.svc.file 突发流量尖刺触发分片代理限流。'
+      + '先核对这次的服务、集群是否和上次相同；相同就对照上次结论说明异同，不同就按新告警排查，不要沿用上次的根因。');
+    expect(larkAlertRecallPrompt({ ...recall, headline: '根因已定位。' })).toContain('告警规则：根因已定位。先核对');
   });
 
   it('puts one line on top of the process card while running and after it collapses', () => {
-    const line = `📎 9-22 同一告警：lark.svc.file 突发流量尖刺触发分片代理限流 · [查看](${recall.url})`;
+    const line = `📎 9-22 同一告警规则：lark.svc.file 突发流量尖刺触发分片代理限流 · [查看](${recall.url})`;
     expect(larkAlertRecallLine(recall)).toBe(line);
-    expect(larkAlertRecallLine({ date: '9-22', headline: '结论' })).toBe('📎 9-22 同一告警：结论');
+    expect(larkAlertRecallLine({ date: '9-22', headline: '结论' })).toBe('📎 9-22 同一告警规则：结论');
     const running = buildLarkCard({ cardKind: 'process', state: 'running', taskId: 'task_1', markdown: '正在思考中…', alertRecall: recall }) as any;
     expect(running.body.elements[0]).toMatchObject({ element_id: 'alert_recall', content: line });
     const collapsed = buildLarkCard({ cardKind: 'process', state: 'completed', taskId: 'task_1', resultFollows: true, alertRecall: recall,
@@ -227,8 +228,8 @@ describe('alert recall in a Lark turn', () => {
       mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }] };
     await coordinator.handle(event, config);
 
-    await vi.waitFor(() => expect(receivedAgentPrompt).toContain('[Dutydeck 上次同一告警] 9-22 在这个群查过：lark.svc.file 突发流量尖刺触发分片代理限流。'));
-    expect(receivedAgentPrompt.indexOf('[Dutydeck 上次同一告警]')).toBeLessThan(receivedAgentPrompt.indexOf('[用户请求]'));
+    await vi.waitFor(() => expect(receivedAgentPrompt).toContain('[Dutydeck 上次同一告警规则] 9-22 在这个群查过同一条告警规则：lark.svc.file 突发流量尖刺触发分片代理限流。先核对'));
+    expect(receivedAgentPrompt.indexOf('[Dutydeck 上次同一告警规则]')).toBeLessThan(receivedAgentPrompt.indexOf('[用户请求]'));
     const expected = { date: '9-22', headline: 'lark.svc.file 突发流量尖刺触发分片代理限流', url: expect.stringContaining('open_thread_id=omt_0922') };
     expect(service.reply.mock.calls[0]![0]).toMatchObject({ cardKind: 'process', alertRecall: expected });
     const saved = (await repos.channelMappings.list('lark-card:cli_bot')).find(mapping => mapping.externalId === 'om_0925_req');

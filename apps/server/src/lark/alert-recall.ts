@@ -111,10 +111,10 @@ export function findLarkAlertRecall(input: {
   return { date: `${parts.find(part => part.type === 'month')?.value}-${parts.find(part => part.type === 'day')?.value}`, headline: found.headline, ...(url ? { url } : {}) };
 }
 
-/** 注入给 Agent 的一小段。 */
+/** 注入给 Agent 的一小段。旧记录没有服务字段时只按规则标题认，可能是另一个库报的同一规则，所以先让 Agent 核对对象。 */
 export const larkAlertRecallPrompt = (recall: LarkAlertRecall) =>
-  `[Dutydeck 上次同一告警] ${recall.date} 在这个群查过：${recall.headline.replace(/[。.]$/u, '')}。先对照上次结论，说明这次相同和不同的地方。`;
+  `[Dutydeck 上次同一告警规则] ${recall.date} 在这个群查过同一条告警规则：${recall.headline.replace(/[。.]$/u, '')}。先核对这次的服务、集群是否和上次相同；相同就对照上次结论说明异同，不同就按新告警排查，不要沿用上次的根因。`;
 
 /** 过程卡顶部那一行。 */
 export const larkAlertRecallLine = (recall: LarkAlertRecall) =>
-  `📎 ${recall.date} 同一告警：${recall.headline}${recall.url ? ` · [查看](${recall.url})` : ''}`;
+  `📎 ${recall.date} 同一告警规则：${recall.headline}${recall.url ? ` · [查看](${recall.url})` : ''}`;
