@@ -209,6 +209,9 @@ describe('原消息上的状态表情', () => {
   it('用户自己停下的一轮不贴表情', async () => {
     const h = await harness('hang');
     await h.coordinator.handle(event('om_stop', '做一件事'), h.config);
+    // 还在排队时点中断走的是取消排队（不发结果卡），要等这一轮真正开跑再点。
+    await vi.waitFor(() => expect([...h.service.reply.mock.calls, ...h.service.update.mock.calls]
+      .some(([input]) => (input as any)?.taskId === 'om_stop' && (input as any)?.state === 'running')).toBe(true), { timeout: 5_000 });
     await vi.waitFor(async () => expect(await h.coordinator.handleAction({ action: 'interrupt', task_id: 'om_stop', turn: '1' }, 'ou_alice'))
       .toMatchObject({ type: 'success' }), { timeout: 5_000 });
     const saved = await h.settled('om_stop');
