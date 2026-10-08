@@ -631,6 +631,19 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect(answerCards()).toHaveLength(1);
   });
 
+  it('心跳反复 notify：卡面没变不再 PATCH，飞书拒绝更新后也不每秒重试', async () => {
+    const f = await fixture();
+    const { card } = await startWaitingWork(f);
+    const { LarkServiceError } = await import('./service.js');
+    f.client.update.mockImplementation(async () => { throw new LarkServiceError('LARK_OPENAPI_ERROR', 'message update expired', 502, { upstreamCode: 230031 }); });
+    const patches = () => f.client.update.mock.calls.filter(([input]: any[]) => input.messageId === card.messageId).length;
+    const idle = () => vi.waitFor(() => expect((f.work as any).effects.size).toBe(0));
+    await f.work.tick();
+    await vi.waitFor(() => expect(patches()).toBe(1));
+    for (let index = 0; index < 3; index++) { await f.work.tick(); await idle(); }
+    expect(patches()).toBe(1);
+  });
+
   it('P0-3：表单回调一次性 CAS 推进 waiting 步骤；listener 未合入 form_value 时 fail-closed', async () => {
     const f = await fixture();
     const { parentId, workId, card } = await startWaitingWork(f);

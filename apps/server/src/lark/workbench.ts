@@ -321,6 +321,8 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
 export class LarkWorkbench {
   private readonly http = createWorkbenchFetch();
   private closed = false;
+  /** 每张工作台卡最近一次心跳 PATCH 的卡面摘要，键是消息 ID。 */
+  private readonly patchedContent = new Map<string, string>();
   close() { this.closed = true; this.http.close(); }
   private assertOpen() { if (this.closed) throw new RuntimeError('WORKBENCH_CLOSED', '工作台已关闭', 503); }
 
@@ -450,6 +452,11 @@ export class LarkWorkbench {
       let saved: { workId?: string; chatId?: string } | null;
       try { saved = JSON.parse(card.extra ?? 'null'); } catch { continue; }
       if (saved?.workId !== item.id) continue;
+      // 1 秒心跳会反复走到这里：卡面没变就不再 PATCH，PATCH 失败（如超过飞书的更新期限）也等卡面变了再试，
+      // 否则停在受阻、失败的目标会每秒调一次飞书接口，直到进程退出。
+      const content = digest(JSON.stringify(await this.cardInput(item, config, requests)));
+      if (this.patchedContent.get(card.externalId) === content) return;
+      this.patchedContent.set(card.externalId, content);
       await this.patchWorkCard(item, saved.chatId ?? card.externalId, config, card.externalId, requests);
       return;
     }
