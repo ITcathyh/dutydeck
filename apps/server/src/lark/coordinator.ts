@@ -7,6 +7,7 @@ import type { LarkMessageResource } from './message-content.js';
 import type { LarkCardElement } from './card-renderer.js';
 import type { LarkRedispatchInfo } from './turn-redispatch.js';
 import type { LarkMessageEvent } from './listener.js';
+import type { LarkAlertRecall } from './alert-recall.js';
 import { LarkCoordinatorInbound } from './coordinator-inbound.js';
 
 // 飞书消息协调器（从 listener.ts 拆分）：按群/话题串行化任务轮次、驱动 Agent 会话、
@@ -106,6 +107,8 @@ export type LarkTask = {
   queuedApproval?: string;
   /** 执行卡上正标着「可能卡住」；提示出现或撤销时，心跳据此重绘同一会话的排队卡。 */
   stallNoted?: boolean;
+  /** 同一告警上一次在这个群的结论：注入给 Agent，过程卡顶部挂一行。 */
+  alertRecall?: LarkAlertRecall;
 };
 export type PersistedLarkCardTask = {
   result_feedback_state?: string;
@@ -157,6 +160,8 @@ export type PersistedLarkCardTask = {
   earlier_message_ids?: string[];
   /** 结果卡上自动验证的进展，重绘时验证状态行照它写。 */
   verification_auto?: LarkAutoVerificationProgress;
+  /** 过程卡顶部「上一次同一告警」那一行，对账重绘时照它画。 */
+  alert_recall?: LarkAlertRecall;
 };
 export { larkTaskTitle } from './coordinator-core.js';
 

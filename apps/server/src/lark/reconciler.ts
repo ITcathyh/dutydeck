@@ -144,6 +144,7 @@ export async function performLarkCardReconcile(input: {
         try {
           await service.update({
             ...processContext,
+            ...(persisted.alert_recall ? { alertRecall: persisted.alert_recall } : {}),
             cardKind: 'process',
             messageId: persisted.card_message_id,
             permissionMode: larkPermissionMode(config),
@@ -232,7 +233,7 @@ export async function performLarkCardReconcile(input: {
         }
         if (persisted.recovery_status_key !== statusKey) try {
           await service.update({
-            ...processContext, cardKind: 'process', messageId: persisted.card_message_id,
+            ...processContext, ...(persisted.alert_recall ? { alertRecall: persisted.alert_recall } : {}), cardKind: 'process', messageId: persisted.card_message_id,
             permissionMode: larkPermissionMode(config), state,
             ...(recovery ? { statusLabel: recovery.label } : {}),
             taskId: mapping.externalId, taskName: persisted.task_name,
@@ -296,6 +297,7 @@ export async function performLarkCardReconcile(input: {
         try {
           await service.update({
             ...processContext,
+            ...(persisted.alert_recall ? { alertRecall: persisted.alert_recall } : {}),
             cardKind: 'process',
             messageId: cardMessageId,
             permissionMode: larkPermissionMode(config),
@@ -329,6 +331,7 @@ export async function performLarkCardReconcile(input: {
         try {
           await service.update({
             ...processContext,
+            ...(persisted.alert_recall ? { alertRecall: persisted.alert_recall } : {}),
             cardKind: 'process',
             messageId: cardMessageId,
             permissionMode: larkPermissionMode(config),

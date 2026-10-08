@@ -9,6 +9,7 @@ import { mergeGroupTaskWatermark } from './group-task-context.js';
 import { describeLarkTaskRecovery, larkAgentUnavailableText, larkQuietSettledNote, larkReliability, larkStallNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import { validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
 import { collectLarkTaskContext, larkMaterialMessageIds } from './task-context.js';
+import { findLarkAlertRecall, larkAlertKey, larkAlertRecallPrompt, type LarkAlertRecall } from './alert-recall.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type LarkMemoryScope } from './memory.js';
 import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
@@ -754,7 +755,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       task.prompt = await materializeLarkResources(event.messageId, task.prompt, task.resources, this.service);
       task.resources = [];
     }
-    const cardContext = { agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
+    const cardContext: { agentName: string; permissionMode: ReturnType<typeof larkPermissionMode>; workspace?: string; alertRecall?: LarkAlertRecall } = { agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
     const clearAcknowledgement = () => this.clearAcknowledgementReaction(task);
     const failContextRead = async (error: unknown, activeSession?: Session) => {
       if (this.stopped || task.turn !== currentTurn || await this.supersededTurn(task, activeSession)) return;
@@ -969,6 +970,17 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       : [];
     if (!resumeTask) task.startedAt = Date.now();
     task.interruptRequested = false;
+    // 材料里有告警卡、这个 Bot 之前在本群别的话题查过同一告警：上次的结论带给 Agent，过程卡顶部挂一行。读不到只少这一项。
+    task.alertRecall = undefined;
+    if (this.cardMappings && larkAlertKey(materialPrompt)) {
+      try {
+        task.alertRecall = findLarkAlertRecall({ materialPrompt, chatId: event.chatId, scopeId: task.scopeId, before: task.startedAt!,
+          mappings: await this.cardMappings.list(larkCardChannel(config.appId)), brand: config.brand, webBaseUrl: config.webBaseUrl });
+      } catch (error) {
+        this.log.warn({ error, taskId: task.id }, '查找上次同一告警失败，本轮不带上次结论');
+      }
+      if (task.alertRecall) cardContext.alertRecall = task.alertRecall;
+    }
     // An accepted task keeps its original card and mapping while reattaching.
     if (!resumeTask) {
       const initialElements = boundLarkCardElements(renderLarkProcessElements([], config));
@@ -1389,6 +1401,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         injected.push('[Dutydeck 会话记忆状态] 会话记忆读取超时或失败，本轮未注入记忆；不要把未读到的内容判断为不存在。');
       }
     }
+    if (task.alertRecall) injected.push(larkAlertRecallPrompt(task.alertRecall));
     const groupSend = Boolean(config.groupToolsEnabled && config.groupToolsAllowSend);
     if (groupInstructions) injected.push(`[Dutydeck 群长期指令 · 管理者配置]\n${groupInstructions}`);
     if (config.preInjectPrompt?.trim()) injected.push(`[Dutydeck 预注入 Prompt]\n${config.preInjectPrompt.trim()}`);
