@@ -642,6 +642,26 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     await vi.waitFor(() => expect(patches()).toBe(1));
     for (let index = 0; index < 3; index++) { await f.work.tick(); await idle(); }
     expect(patches()).toBe(1);
+    // 隔 5 分钟再试一次：临时失败能自己恢复，永久失败也只是每 5 分钟一次。
+    vi.setSystemTime(Date.now() + 301_000);
+    try { await f.work.tick(); await idle(); } finally { vi.useRealTimers(); }
+    expect(patches()).toBe(2);
+  });
+
+  it('按钮回调 PATCH 过的卡，下一次心跳按当前内容再画一次', async () => {
+    const f = await fixture();
+    const { card } = await startWaitingWork(f);
+    const patches = () => f.client.update.mock.calls.filter(([input]: any[]) => input.messageId === card.messageId).length;
+    const idle = () => vi.waitFor(() => expect((f.work as any).effects.size).toBe(0));
+    await f.work.tick();
+    await vi.waitFor(() => expect(patches()).toBe(1));
+    await f.work.tick(); await idle();
+    expect(patches()).toBe(1);
+    await f.coordinator.handleAction({ ...findButton(card, 'show') }, 'ou_alice', { messageId: card.messageId, chatId: 'oc_group' });
+    await vi.waitFor(() => expect(patches()).toBe(2));
+    await vi.waitFor(async () => { await f.work.tick(); await idle(); expect(patches()).toBe(3); });
+    await f.work.tick(); await idle();
+    expect(patches()).toBe(3);
   });
 
   it('P0-3：表单回调一次性 CAS 推进 waiting 步骤；listener 未合入 form_value 时 fail-closed', async () => {

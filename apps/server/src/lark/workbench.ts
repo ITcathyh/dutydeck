@@ -321,8 +321,8 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
 export class LarkWorkbench {
   private readonly http = createWorkbenchFetch();
   private closed = false;
-  /** 每张工作台卡最近一次心跳 PATCH 的卡面摘要，键是消息 ID。 */
-  private readonly patchedContent = new Map<string, string>();
+  /** 每张工作台卡最近一次心跳 PATCH 的卡面摘要，键是消息 ID；PATCH 失败时带上下次重试的时间。 */
+  private readonly patchedContent = new Map<string, { content: string; retryAt?: number }>();
   close() { this.closed = true; this.http.close(); }
   private assertOpen() { if (this.closed) throw new RuntimeError('WORKBENCH_CLOSED', '工作台已关闭', 503); }
 
@@ -452,12 +452,13 @@ export class LarkWorkbench {
       let saved: { workId?: string; chatId?: string } | null;
       try { saved = JSON.parse(card.extra ?? 'null'); } catch { continue; }
       if (saved?.workId !== item.id) continue;
-      // 1 秒心跳会反复走到这里：卡面没变就不再 PATCH，PATCH 失败（如超过飞书的更新期限）也等卡面变了再试，
+      // 1 秒心跳会反复走到这里：卡面没变就不再 PATCH；PATCH 失败（网络抖动、超过飞书的更新期限）隔 5 分钟再试。
       // 否则停在受阻、失败的目标会每秒调一次飞书接口，直到进程退出。
       const content = digest(JSON.stringify(await this.cardInput(item, config, requests)));
-      if (this.patchedContent.get(card.externalId) === content) return;
-      this.patchedContent.set(card.externalId, content);
-      await this.patchWorkCard(item, saved.chatId ?? card.externalId, config, card.externalId, requests);
+      const last = this.patchedContent.get(card.externalId);
+      if (last?.content === content && (last.retryAt === undefined || Date.now() < last.retryAt)) return;
+      const patched = await this.patchWorkCard(item, saved.chatId ?? card.externalId, config, card.externalId, requests);
+      this.patchedContent.set(card.externalId, patched ? { content } : { content, retryAt: Date.now() + 300_000 });
       return;
     }
   }
@@ -690,7 +691,10 @@ export class LarkWorkbench {
     const fallbackKey = `work_${digest(`${context.messageId}\0${updated.revision}\0${JSON.stringify(value)}`).slice(0, 40)}`;
     // 先让回调在 3 秒 SLA 内回 toast；PATCH 与回退新发在后台完成，失败只告警不改变 toast 语义。
     void (async () => {
-      if (!stale && await this.patchWorkCard(updated, context.chatId!, config, context.messageId!, requests)) return;
+      const patched = !stale && await this.patchWorkCard(updated, context.chatId!, config, context.messageId!, requests);
+      // 回调 PATCH 可能比心跳晚到、把卡改回较早的快照；清掉心跳的记录，下一次心跳按当前内容再画一次。
+      this.patchedContent.delete(context.messageId!);
+      if (patched) return;
       await this.send(updated, target, config, fallbackKey, requests);
     })().catch(error => this.options.log.warn({ error, workId: updated.id }, '目标卡片刷新失败'));
     return toast;
