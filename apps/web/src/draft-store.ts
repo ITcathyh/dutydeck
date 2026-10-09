@@ -41,6 +41,8 @@ export type BotDraft = {
   groupReplyMode: '' | 'chat' | 'shared' | 'new-topic' | 'chat-topic';
   mentionPolicy: 'always' | 'topic' | 'never' | 'ambient';
   defaultGroupParticipation: 'off' | 'observe' | 'selective' | 'eager';
+  roleTitle: string;
+  roleScope: string;
   preInjectPrompt: string;
   adhdMode: boolean;
   listening: boolean;

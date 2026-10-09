@@ -10,8 +10,9 @@
 
 import { participationLevelLabels, participationLevelOf } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
+import { formatRoleWelcomeIntro } from './role-format.js';
 
-export type WelcomeRouting = Pick<StoredLarkConfig, 'mentionPolicy' | 'p2pMode' | 'groupReplyMode'> & {
+export type WelcomeRouting = Pick<StoredLarkConfig, 'mentionPolicy' | 'p2pMode' | 'groupReplyMode' | 'roleTitle' | 'roleScope'> & {
   chatMode?: 'group' | 'topic' | 'p2p';
   participation?: 'off' | 'observe' | 'selective' | 'eager';
   unavailableReason?: string;
@@ -84,7 +85,7 @@ export function buildWelcomeCardContent(input: {
   const commandLines = picked.map(command => `**\`/${command.name}\`**　${command.summary}`);
 
   if (input.chatType === 'group') {
-    const intro = '我是 **Dutydeck**，可以在群里帮你跑任务、盯进度并把结果发回本群。';
+    const intro = formatRoleWelcomeIntro(input.routing);
     const routing = input.routing;
     const policy = routing?.mentionPolicy ?? 'always';
     const direct = policy === 'never' || policy === 'ambient';
@@ -93,10 +94,19 @@ export function buildWelcomeCardContent(input: {
     // 参与强度由唤醒方式和群参与模式合成，卡上先写档位，再写具体怎么叫我。
     const level = participationLevelLabels[participationLevelOf(policy, participation)];
     const topicLine = policy === 'topic' ? '在我已接手的原任务话题内续聊可直接回复。' : '';
+    const hasScope = Boolean(routing?.roleScope?.trim());
     const usage = [
       ...(routing?.unavailableReason ? [`当前尚不能执行任务：${routing.unavailableReason} 请管理员确认群配置生效后，再使用下面的示例。`] : []),
-      participation === 'selective' ? `本群参与强度：**按需**（Tag 按需参与）。没 @我 的普通消息会先判断是否需要回复（是不是在叫我），决定回复时会添加 **OK** 处理标记。${topicLine}明确需要我执行任务时，可以 **@我**。`
-        : participation === 'eager' ? `本群参与强度：**积极**。除了明显是对别人说的、只有表情或致谢的消息，群里的消息我都会接，不用 @我。${topicLine}`
+      participation === 'selective' ? (
+        hasScope
+          ? `本群参与强度：**按需**（Tag 按需参与）。没 @我 的普通消息里，明确叫我、或负责范围内需要处理的消息才会接，决定回复时会添加 **OK** 处理标记；范围外请 **@我**。${topicLine}明确需要我执行任务时，可以 **@我**。`
+          : `本群参与强度：**按需**（Tag 按需参与）。没 @我 的普通消息会先判断是否需要回复（是不是在叫我），决定回复时会添加 **OK** 处理标记。${topicLine}明确需要我执行任务时，可以 **@我**。`
+      )
+        : participation === 'eager' ? (
+        hasScope
+          ? `本群参与强度：**积极**。除了明显是对别人说的、只有表情或致谢的消息，明确叫我、或负责范围内需要处理的消息我才会接；范围外请 **@我**。${topicLine}`
+          : `本群参与强度：**积极**。除了明显是对别人说的、只有表情或致谢的消息，群里的消息我都会接，不用 @我。${topicLine}`
+      )
         : participation === 'observe' ? '本群普通消息只会被观察，不会自动回复。明确需要我执行任务时，可以 **@我**。'
         : policy === 'always' ? `本群参与强度：**${level}**。每条任务消息和续聊都需要 **@我**。`
         : policy === 'topic' ? `本群参与强度：**${level}**。新任务先 **@我**；在我已接手的原任务话题内续聊可直接回复。`

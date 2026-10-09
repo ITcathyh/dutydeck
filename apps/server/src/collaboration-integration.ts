@@ -1,6 +1,6 @@
 import { CollaborationDelivery } from './collaboration-delivery.js';
 import { createHash } from 'node:crypto';
-import { canonicalExecutionJson, installationOwnerTaskActor, participationLevelFields, participationLevelOf, RuntimeError, type CollaborationScope, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
+import { canonicalExecutionJson, installationOwnerTaskActor, participationLevelFields, participationLevelOf, RuntimeError, type CollaborationRepository, type CollaborationScope, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { CollaborationService, type CollaborationAuthorization } from './collaboration-service.js';
 import { ScheduleExecutor } from './schedule-executor.js';
@@ -76,9 +76,9 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     } catch { return false; }
   };
   const previewAuthorize: CollaborationAuthorization = (scope, actorId, action) => authorize(scope, actorId, action, true);
-  const scopeGrant = async (scope: CollaborationScope, action: 'observe' | 'deliver') => {
+  const scopeGrant = async (scope: CollaborationScope, action: 'observe' | 'deliver', settingsRepository: Pick<CollaborationRepository, 'getSettings'> = repos.collaboration) => {
     try {
-      const settings = await repos.collaboration.getSettings(scope);
+      const settings = await settingsRepository.getSettings(scope);
       if (settings.participation === 'off' || (action === 'deliver' && settings.notificationsPaused)) return false;
       await live(scope);
       // The owner enabled participation either for this group or in the Bot defaults.
@@ -90,6 +90,25 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     if (!config || !chatId) return config;
     return groups.resolved(config, chatId);
   };
+  const roleParticipationSettings = async (settings: CollaborationSettings): Promise<CollaborationSettings> => {
+    if (settings.participation !== 'off') return settings;
+    const config = await readLarkConfig(stored.config, settings.scope.appId, { readOnly: true });
+    if (!config?.roleScope?.trim()) return settings;
+    const resolved = await groups.resolved(config, settings.scope.chatId, true);
+    if (resolved.mentionPolicy === 'never' || resolved.mentionPolicy === 'ambient') {
+      return { ...settings, participation: 'eager' };
+    }
+    return settings;
+  };
+  const roleParticipationRepo: CollaborationRepository = {
+    ...repos.collaboration,
+    getSettings: async scope => roleParticipationSettings(await repos.collaboration.getSettings(scope)),
+    updateSettings: async (scope, patch, actor) => roleParticipationSettings(await repos.collaboration.updateSettings(scope, patch, actor)),
+    snapshot: async (scope, limit) => {
+      const snapshot = await repos.collaboration.snapshot(scope, limit);
+      return { ...snapshot, settings: await roleParticipationSettings(snapshot.settings) };
+    }
+  };
   const decider = new ReadonlyParticipationDecider({ runtime, repos: { execution: repos.execution }, workspaceRoot: options.workspaceRoot });
   const teamContext = new LarkTeamContextReader({
     repository: repos.collaboration, readConfig: appId => readLarkConfig(repos.config, appId), serviceFor: client,
@@ -98,7 +117,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   const deliveries = new CollaborationDelivery(repos.collaboration);
   const participation = new LarkGroupParticipation({
     withDelivery: (scope, actionId, send) => deliveries.run(scope, actionId, send),
-    repository: repos.collaboration, decider, readConfig, serviceFor: client, readMemory: options.readMemory, usageRefusal: options.usageRefusal, log: options.log,
+    repository: roleParticipationRepo, decider, readConfig, serviceFor: client, readMemory: options.readMemory, usageRefusal: options.usageRefusal, log: options.log,
     readTeamContext: (scope, query) => teamContext.read(scope, query),
     authorizeTeamContext: (scope, context) => teamContext.authorize(scope, context),
     // 发起人本人能对机器人说话就能处理自己的请求；替别人确认要本群操作员或管理员（run.interrupt 的现有授权）。
@@ -116,7 +135,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     },
     readParticipationUsage: (scope, since) => participationUsage(stored.usage, scope, since),
     authorize: async (scope, actorId, action, followup) => {
-      if (action === 'observe' || action === 'deliver') return scopeGrant(scope, action);
+      if (action === 'observe' || action === 'deliver') return scopeGrant(scope, action, roleParticipationRepo);
       if (!actorId || !followup || !await authorize(scope, actorId, 'write')) return false;
       return followup.createdBy === actorId || followup.ownerId === actorId || await authorize(scope, actorId, 'manage');
     },
@@ -222,14 +241,19 @@ export function createCollaborationIntegration(options: CollaborationIntegration
         if (!saved) throw new RuntimeError('COLLABORATION_POLICY_MISSING', '没有此版本的完整策略快照。', 409);
         instructions = (JSON.parse(saved) as { instructions: string }).instructions;
       }
+      const replayConfig: StoredLarkConfig = {
+        ...config,
+        roleTitle: meta?.roleTitle,
+        roleScope: meta?.roleScope
+      };
       // 与实时判定同一顺序：规则层先判（用当时查到的事实），拿不准才交给模型。旧记录没有事实时只跑不依赖外部事实的规则。
       const trigger = meta?.trigger && snapshot.observations.find(item => item.id === meta.trigger!.id);
       if (trigger) {
-        const facts = { level: participationLevelOf(config.mentionPolicy, snapshot.settings.participation), ...meta?.facts } as RuleFacts;
-        const verdict = evaluateParticipationRules(ruleContextOf(trigger, ownedItems(snapshot.mandates, snapshot.followups), [config.name, config.displayName].filter((name): name is string => Boolean(name)), facts));
+        const facts = { level: participationLevelOf(replayConfig.mentionPolicy, snapshot.settings.participation), ...meta?.facts } as RuleFacts;
+        const verdict = evaluateParticipationRules(ruleContextOf(trigger, ownedItems(snapshot.mandates, snapshot.followups), [replayConfig.name, replayConfig.displayName].filter((name): name is string => Boolean(name)), facts, replayConfig.roleScope));
         if (verdict) return { action: verdict.action === 'addressed' ? 'act' as const : 'silent' as const, reason: `规则：${verdict.reason}`, evidenceIds: [trigger.id] };
       }
-      return decider.resolve(config, { ...snapshot, settings: { ...snapshot.settings, policyVersion: version, instructions } }, memberFacts((meta?.facts ?? {}) as Partial<RuleFacts>), trigger?.id);
+      return decider.resolve(replayConfig, { ...snapshot, settings: { ...snapshot.settings, policyVersion: version, instructions } }, memberFacts((meta?.facts ?? {}) as Partial<RuleFacts>), trigger?.id);
     }
   });
   return { service, scheduler, background, participation, extensions, evaluation, authorize, prepareSettings, riskPolicy, mandateCards,

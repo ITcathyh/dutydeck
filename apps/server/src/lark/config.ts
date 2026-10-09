@@ -66,6 +66,14 @@ export interface StoredLarkConfig {
    * 自定义展示名（备注名），纯展示字段，不影响路由与进程身份。trim 后空串 → undefined。
    */
   displayName?: string;
+  /**
+   * 角色名称（纯展示与提示词），如「告警值班」。trim 后空串 → undefined。
+   */
+  roleTitle?: string;
+  /**
+   * 负责范围，如「报警和告警排查」。trim 后空串 → undefined。
+   */
+  roleScope?: string;
   preInjectPrompt: string;
   listening: boolean;
   groupToolsEnabled: boolean;
@@ -185,6 +193,10 @@ export interface SaveLarkConfigInput {
   brand?: 'feishu' | 'lark';
   /** 自定义展示名（纯展示）；归一化时 trim，空白串丢弃。 */
   displayName?: string;
+  /** 角色名称；归一化时 trim，空白串丢弃。未提供时保留原值。 */
+  roleTitle?: string;
+  /** 负责范围；归一化时 trim，空白串丢弃。未提供时保留原值。 */
+  roleScope?: string;
   preInjectPrompt?: string;
   listening?: boolean;
   groupToolsEnabled?: boolean;
@@ -269,6 +281,8 @@ export interface PublicLarkConfig {
   groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
   brand?: 'feishu' | 'lark';
   displayName?: string;
+  roleTitle?: string;
+  roleScope?: string;
   preInjectPrompt: string;
   listening: boolean;
   activeListening: boolean;
@@ -474,6 +488,12 @@ const normalizeDisplayName = (value: unknown): string | undefined => {
   return trimmed || undefined;
 };
 
+const normalizeRoleField = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+};
+
 const isRiskControlMode = (value: unknown): value is RiskControlMode =>
   riskControlModes.includes(value as RiskControlMode);
 
@@ -529,6 +549,8 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
   const startupCommands = normalizeStartupCommands(parsed.startupCommands);
   const brand = normalizeBrand(parsed.brand);
   const displayName = normalizeDisplayName(parsed.displayName);
+  const roleTitle = normalizeRoleField(parsed.roleTitle);
+  const roleScope = normalizeRoleField(parsed.roleScope);
   return {
     appId: parsed.appId.trim(),
     revision: Number.isInteger(parsed.revision) && Number(parsed.revision) > 0 ? parsed.revision : 1,
@@ -556,6 +578,8 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(startupCommands ? { startupCommands } : {}),
     ...(brand ? { brand } : {}),
     ...(displayName ? { displayName } : {}),
+    ...(roleTitle ? { roleTitle } : {}),
+    ...(roleScope ? { roleScope } : {}),
     preInjectPrompt: String(parsed.preInjectPrompt ?? '').trim(),
     listening: parsed.listening === true,
     groupToolsEnabled: parsed.groupToolsEnabled === true,
@@ -655,6 +679,8 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   ...(config.groupReplyMode ? { groupReplyMode: config.groupReplyMode } : {}),
   ...(config.brand ? { brand: config.brand } : {}),
   ...(config.displayName ? { displayName: config.displayName } : {}),
+  ...(config.roleTitle ? { roleTitle: config.roleTitle } : {}),
+  ...(config.roleScope ? { roleScope: config.roleScope } : {}),
   ...(config.verificationCommand ? { verificationCommand: config.verificationCommand } : {}),
   urgentEnabled: config.urgentEnabled === true,
   ...(config.urgentThresholdMs !== undefined ? { urgentThresholdMs: config.urgentThresholdMs } : {}),
@@ -785,6 +811,8 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const startupCommands = input.startupCommands === undefined ? current?.startupCommands : normalizeStartupCommands(input.startupCommands);
   const brand = input.brand === undefined ? current?.brand : normalizeBrand(input.brand);
   const displayName = input.displayName === undefined ? current?.displayName : normalizeDisplayName(input.displayName);
+  const roleTitle = input.roleTitle === undefined ? current?.roleTitle : normalizeRoleField(input.roleTitle);
+  const roleScope = input.roleScope === undefined ? current?.roleScope : normalizeRoleField(input.roleScope);
   const verificationCommand = input.verificationCommand === undefined ? current?.verificationCommand : input.verificationCommand.trim() || undefined;
   const urgentEnabled = input.urgentEnabled ?? current?.urgentEnabled ?? false;
   // 三个阈值都用 null 表示「清回模块默认」，与 traceLimit 同一口径；不传才是继承现值。
@@ -856,6 +884,8 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     ...(startupCommands ? { startupCommands } : {}),
     ...(brand ? { brand } : {}),
     ...(displayName ? { displayName } : {}),
+    ...(roleTitle ? { roleTitle } : {}),
+    ...(roleScope ? { roleScope } : {}),
     idleCompactEnabled: input.idleCompactEnabled ?? current?.idleCompactEnabled ?? true,
     idleCompactHours: input.idleCompactHours ?? current?.idleCompactHours ?? defaultLarkIdleCompactHours,
     preInjectPrompt,

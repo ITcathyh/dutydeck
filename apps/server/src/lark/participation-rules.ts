@@ -51,6 +51,8 @@ export interface RuleContext {
   /** 消息 @ 了本机器人以外的人或机器人（包括 @所有人）。 */
   mentionsOther: boolean;
   botNames: string[];
+  /** 角色负责范围（设置后只绕过4条默认接话规则，交给模型按范围判定）。 */
+  roleScope?: string;
   /** 消息引用回复的那条消息是谁发的；没引用或查不到时不填。 */
   parent?: 'self' | 'sender' | 'other';
   /** 消息所在话题的根消息是本机器人发的（例如委托产出）。 */
@@ -143,15 +145,16 @@ export function evaluateParticipationRules(ctx: RuleContext): RuleVerdict | unde
   // 多机器人群：每条没 @ 的消息最多一个机器人接。别人的话题不接；不是接话人的只接上面这些明确叫自己的。
   const crowded = (ctx.members?.bots ?? 0) > 1;
   if (crowded && !ctx.parent && ctx.threadRootOther) return verdict('silent', 'topic_of_other');
-  if (ctx.responder === 'other') return verdict('silent', 'not_responder');
-  if (crowded && ctx.responder !== 'self') return verdict('silent', 'no_responder');
+  const hasScope = Boolean(ctx.roleScope?.trim());
+  if (!hasScope && ctx.responder === 'other') return verdict('silent', 'not_responder');
+  if (!hasScope && crowded && ctx.responder !== 'self') return verdict('silent', 'no_responder');
   if (mentionsOwnedName(text, ctx.ownedNames)) return verdict('addressed', 'owned_item');
-  if (ctx.level === 'eager') return verdict('addressed', 'eager_default');
+  if (!hasScope && ctx.level === 'eager') return verdict('addressed', 'eager_default');
   const recent = ctx.recent;
   const justSpoke = recent?.lastSelfAt !== undefined && ctx.at - recent.lastSelfAt >= 0 && ctx.at - recent.lastSelfAt <= FOLLOW_UP_WINDOW_MS;
   if (justSpoke && ctx.hasActiveMandates && deicticTask.test(text)) return verdict('addressed', 'owned_item');
   if (justSpoke && !recent!.humanBetween && recent!.partners.includes(ctx.senderId)) return verdict('addressed', 'follow_up');
-  if (ctx.members && ctx.members.humans === 1 && ctx.members.bots <= 1) return verdict('addressed', 'single_human');
+  if (!hasScope && ctx.members && ctx.members.humans === 1 && ctx.members.bots <= 1) return verdict('addressed', 'single_human');
   return undefined;
 }
 
@@ -184,7 +187,7 @@ export function ownedItems(mandates: CollaborationMandate[], followups: Collabor
 }
 
 /** 用一条观察和查到的事实组装规则上下文；实时判定和回放共用。 */
-export function ruleContextOf(trigger: CollaborationObservation, owned: { names: string[]; hasActiveMandates: boolean }, botNames: string[], facts: RuleFacts): RuleContext {
+export function ruleContextOf(trigger: CollaborationObservation, owned: { names: string[]; hasActiveMandates: boolean }, botNames: string[], facts: RuleFacts, roleScope?: string): RuleContext {
   const occurred = Date.parse(trigger.occurredAt);
   const at = occurred > 0 ? occurred : Date.parse(trigger.receivedAt);
   const senderId = trigger.senderId ?? '';
@@ -193,6 +196,7 @@ export function ruleContextOf(trigger: CollaborationObservation, owned: { names:
     // 走到判定的消息都没有 @ 本机器人，所以出现任何 @ 都是在点别人。
     mentionsOther: trigger.refs.some(ref => ref === 'dutydeck:mention:other' || ref === 'dutydeck:mention:unknown') || /@_all/.test(trigger.text),
     botNames, ownedNames: owned.names, hasActiveMandates: owned.hasActiveMandates, level: facts.level,
+    ...(roleScope !== undefined ? { roleScope } : {}),
     ...(facts.parent ? { parent: facts.parent } : {}), ...(facts.threadRootSelf ? { threadRootSelf: true } : {}),
     ...(facts.ownedTopic ? { ownedTopic: true } : {}), ...(facts.threadRootOther ? { threadRootOther: true } : {}),
     ...(facts.callsOther ? { callsOther: true } : {}), ...(facts.responder ? { responder: facts.responder } : {}),

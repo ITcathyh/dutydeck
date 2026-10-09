@@ -42,6 +42,7 @@ export const botFields = {
   workspace: 'string', workspaceAliases: 'json', webBaseUrl: 'string', webMobileReachable: 'boolean', displayName: 'string', brand: ['feishu', 'lark'],
   defaultAgentId: 'string', defaultModel: 'string', defaultReasoningEffort: 'string',
   permissionMode: ['ask', 'approve-reads', 'full-trust'], fullTrustConfirmed: 'boolean',
+  roleTitle: 'string', roleScope: 'string',
   preInjectPrompt: 'string', verificationCommand: 'string', listening: 'boolean',
   mentionPolicy: ['always', 'topic', 'never', 'ambient'], defaultGroupParticipation: ['off', 'observe', 'selective', 'eager'],
   p2pMode: ['chat', 'thread'], groupReplyMode: ['chat', 'shared', 'new-topic', 'chat-topic'],

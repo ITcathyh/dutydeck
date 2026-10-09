@@ -990,3 +990,87 @@ describe('ADHD 友好输出', () => {
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ originalAppId: mockBot.appId, adhdMode: true, expectedRevision: 3 })));
   });
 });
+
+describe('BotManagement 角色设置', () => {
+  const stubQueries = () => {
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+  };
+
+  it('旧配置没有角色字段时输入框为空且不提示未保存', async () => {
+    stubQueries();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>);
+    await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
+    expect((screen.getByLabelText('角色名称') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('负责范围') as HTMLTextAreaElement).value).toBe('');
+    expect((screen.getByLabelText('做法') as HTMLTextAreaElement).value).toBe('提示词');
+    expect(screen.queryByText(/有未保存的修改/)).toBeNull();
+  });
+
+  it('编辑角色名称、负责范围、做法后保存启用，保存带上三个字段，保存后内容仍可见', async () => {
+    const user = userEvent.setup();
+    stubQueries();
+    let savedBot: LarkBotConfig = { ...mockBot };
+    vi.spyOn(api, 'larkConfig').mockImplementation(async () => ({ configured: true, bots: [savedBot], listeningDisabled: false }));
+    const save = vi.spyOn(api, 'saveLarkConfig').mockImplementation(async input => {
+      savedBot = {
+        ...savedBot,
+        revision: savedBot.revision! + 1,
+        roleTitle: input.roleTitle,
+        roleScope: input.roleScope,
+        preInjectPrompt: input.preInjectPrompt ?? savedBot.preInjectPrompt
+      };
+      return { configured: true, bots: [savedBot], listeningDisabled: false };
+    });
+    renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>);
+    await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
+
+    await user.type(screen.getByLabelText('角色名称'), '告警值班');
+    await user.type(screen.getByLabelText('负责范围'), '报警和告警排查');
+    const practice = screen.getByLabelText('做法');
+    await user.clear(practice);
+    await user.type(practice, '给出确定的根因和影响');
+
+    expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({
+      roleTitle: '告警值班',
+      roleScope: '报警和告警排查',
+      preInjectPrompt: '给出确定的根因和影响',
+      expectedRevision: 3
+    })));
+
+    await waitFor(() => expect((screen.getByLabelText('角色名称') as HTMLInputElement).value).toBe('告警值班'));
+    expect((screen.getByLabelText('负责范围') as HTMLTextAreaElement).value).toBe('报警和告警排查');
+    expect((screen.getByLabelText('做法') as HTMLTextAreaElement).value).toBe('给出确定的根因和影响');
+  });
+
+  it('清空角色名称和负责范围后保存，发送空串', async () => {
+    const user = userEvent.setup();
+    const roleBot: LarkBotConfig = {
+      ...mockBot,
+      roleTitle: '告警值班',
+      roleScope: '报警和告警排查',
+      preInjectPrompt: '给出确定的根因和影响'
+    };
+    stubQueries();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [roleBot], listeningDisabled: false });
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [{ ...roleBot, revision: 4, roleTitle: '', roleScope: '' }], listeningDisabled: false });
+    renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>);
+    await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
+
+    await user.clear(screen.getByLabelText('角色名称'));
+    await user.clear(screen.getByLabelText('负责范围'));
+
+    expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({
+      roleTitle: '',
+      roleScope: '',
+      preInjectPrompt: '给出确定的根因和影响'
+    })));
+  });
+});

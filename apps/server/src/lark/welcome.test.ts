@@ -259,3 +259,51 @@ describe('欢迎卡使用生效群参与模式', () => {
       .toEqual(buildWelcomeCardContent({ chatType: 'p2p' }));
   });
 });
+
+describe('欢迎卡展示角色', () => {
+  it('有名称和负责范围：介绍名称，并说明只接范围内的事', () => {
+    const card = buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'always', roleTitle: '告警值班', roleScope: '报警和告警排查' } });
+    expect(card.markdown.startsWith('我是「告警值班」，负责：报警和告警排查。没 @ 我的消息里，我只接这些范围内的事；其他事请 @ 我。')).toBe(true);
+    expect(card.elements[0]!.content).toContain('我是「告警值班」');
+  });
+
+  it('只有名称：显示名称，但不宣称按范围接话', () => {
+    const card = buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'always', roleTitle: '告警值班' } });
+    expect(card.markdown).toContain('我是「告警值班」');
+    expect(card.markdown).not.toContain('我只接这些范围内的事');
+  });
+
+  it('只有负责范围：说明按范围接话，但不编造名称', () => {
+    const card = buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'always', roleScope: '报警和告警排查' } });
+    expect(card.markdown).toContain('负责：报警和告警排查。没 @ 我的消息里，我只接这些范围内的事；其他事请 @ 我。');
+    expect(card.markdown).toContain('我是 **Dutydeck**');
+  });
+
+  it('没有角色：沿用原文案', () => {
+    expect(buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'always' } }))
+      .toEqual(buildWelcomeCardContent({ chatType: 'group' }));
+  });
+
+  it('有 scope 且 eager 档：保留对别人说/表情致谢边界，说明范围处理，不承诺「我都会接」', () => {
+    const card = buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'topic', participation: 'eager', roleTitle: '告警值班', roleScope: '报警和告警排查' } });
+    expect(card.markdown).toContain('除了明显是对别人说的、只有表情或致谢的消息，明确叫我、或负责范围内需要处理的消息我才会接；范围外请 **@我**。');
+    expect(card.markdown).not.toContain('群里的消息我都会接');
+    expect(card.markdown).not.toContain('不用 @我');
+  });
+
+  it('有 scope 且 selective 档：说明明确叫我或范围处理，范围外请 @', () => {
+    const card = buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'always', participation: 'selective', roleTitle: '告警值班', roleScope: '报警和告警排查' } });
+    expect(card.markdown).toContain('没 @我 的普通消息里，明确叫我、或负责范围内需要处理的消息才会接，决定回复时会添加 **OK** 处理标记；范围外请 **@我**。');
+  });
+
+  it('title-only 或无 scope 在 eager/selective 下不产生范围接话承诺，保持原有行为说明', () => {
+    const eagerTitleOnly = buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'topic', participation: 'eager', roleTitle: '助手' } });
+    expect(eagerTitleOnly.markdown).toContain('群里的消息我都会接，不用 @我');
+
+    const eagerNoRole = buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'topic', participation: 'eager' } });
+    expect(eagerNoRole.markdown).toContain('群里的消息我都会接，不用 @我');
+
+    const observeWithScope = buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'ambient', participation: 'observe', roleScope: '报警排查' } });
+    expect(observeWithScope.markdown).toContain('本群普通消息只会被观察，不会自动回复。明确需要我执行任务时，可以 **@我**。');
+  });
+});

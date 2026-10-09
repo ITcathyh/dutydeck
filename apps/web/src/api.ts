@@ -48,6 +48,8 @@ export type LarkBotConfig = {
   defaultReasoningEffort?: string;
   fullTrustConfirmed: boolean;
   permissionMode?: 'ask' | 'approve-reads' | 'full-trust';
+  roleTitle?: string;
+  roleScope?: string;
   preInjectPrompt: string;
   listening: boolean;
   activeListening: boolean;
@@ -385,6 +387,8 @@ export const api = {
     defaultReasoningEffort?: string;
     fullTrustConfirmed?: boolean;
     permissionMode?: 'ask' | 'approve-reads' | 'full-trust';
+    roleTitle?: string;
+    roleScope?: string;
     preInjectPrompt?: string;
     listening?: boolean;
     groupToolsEnabled?: boolean;

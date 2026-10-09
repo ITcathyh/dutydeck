@@ -13,6 +13,7 @@ import {
   botSnapshotSchema,
   channelBotPolicyPatchV2Schema,
   channelBotPolicyPresentationV2Schema,
+  channelBotPolicyExecutionV2Schema,
   channelBotPolicyV2Schema,
   channelBotV2Schema,
   createBotV2Schema,
@@ -2204,6 +2205,43 @@ describe('Bot Configuration V2 Schemas and Contracts', () => {
           }
         })
       ).toThrow();
+    });
+  });
+
+  describe('13. Execution policy roleTitle and roleScope fields', () => {
+    it('accepts roleTitle and roleScope in channelBotPolicyExecutionV2Schema', () => {
+      const baseExecution = {
+        permissionMode: 'full-trust' as const,
+        preInjectPrompt: '做法说明',
+        highRiskAccess: {
+          p2p: { mode: 'entry_authorized' as const },
+          managedGroup: { mode: 'entry_authorized' as const },
+          newGroup: { mode: 'entry_authorized' as const }
+        },
+        riskControlMode: 'off' as const,
+        highRiskPattern: 'rm -rf'
+      };
+
+      const parsed = channelBotPolicyExecutionV2Schema.parse({
+        ...baseExecution,
+        roleTitle: '告警值班',
+        roleScope: '负责告警和排查'
+      });
+      expect(parsed.roleTitle).toBe('告警值班');
+      expect(parsed.roleScope).toBe('负责告警和排查');
+
+      // accepts null and undefined
+      const parsedNullable = channelBotPolicyExecutionV2Schema.parse({
+        ...baseExecution,
+        roleTitle: null,
+        roleScope: null
+      });
+      expect(parsedNullable.roleTitle).toBeNull();
+      expect(parsedNullable.roleScope).toBeNull();
+
+      const parsedOmitted = channelBotPolicyExecutionV2Schema.parse(baseExecution);
+      expect(parsedOmitted.roleTitle).toBeUndefined();
+      expect(parsedOmitted.roleScope).toBeUndefined();
     });
   });
 });
