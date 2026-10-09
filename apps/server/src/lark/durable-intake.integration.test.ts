@@ -351,24 +351,29 @@ it('recovers a trusted triage receipt after SIGKILL immediately after claim, pre
 
 it('routes a subscribed bot alarm through real group participation and its trusted triage dispatcher', async () => {
   const h = await harness(); const scope = { appId: config.appId, chatId: 'oc_group' };
+  const roleConfig: StoredLarkConfig = { ...config, roleTitle: '告警值班', roleScope: '报警和告警排查' };
   const original = message({ senderOpenId: 'cli_alarm', senderType: 'app', mentions: [], content: '{"text":"P0 original alarm"}' });
   const alarmService = { ...h.service, replyText: vi.fn(async () => ({ messageId: 'om_intro' })),
     getMessage: vi.fn(async () => ({ threadId: 'omt_alarm' })) };
   const decide = vi.fn(async () => ({ action: 'silent' as const, reason: '', evidenceIds: [], updates: [] }));
   const participation = new LarkGroupParticipation({ repository: h.repositories.collaboration, decider: { decide, respond: async () => '' },
-    authorize: async () => true, readConfig: async () => config, serviceFor: () => alarmService,
+    authorize: async () => true, readConfig: async () => roleConfig, serviceFor: () => alarmService,
     listScopes: async () => [scope], readGroupDescription: async () => '', log: h.log });
   cleanups.push(() => participation.close());
-  const groupManager = { resolved: vi.fn(async () => config), authorize: vi.fn(async (_app: string, _chat: string, actor: string) => ({ allowed: actor === 'ou_admin' })) };
+  const groupManager = { resolved: vi.fn(async () => roleConfig), authorize: vi.fn(async (_app: string, _chat: string, actor: string) => ({ allowed: actor === 'ou_admin' })) };
   const coordinator = h.createCoordinator({ participation, groupManager });
   participation.setDispatcher(config.appId, (event, current) => coordinator.adopt(event, current));
   await h.repositories.collaboration.updateDuty(scope, { expectedRevision: 0, alarm: { enabled: true,
     sources: [{ appId: 'cli_alarm', name: '监控' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3, requesterId: 'ou_admin' } }, 'ou_admin');
-  await coordinator.receive(original, config);
+  await coordinator.receive(original, roleConfig);
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', originalEvent: original,
     event: { senderOpenId: 'ou_admin', senderType: 'user', rootId: original.messageId, threadId: 'omt_alarm', triage: expect.stringContaining('[告警初筛]') },
     request: { scopeId: `thread:${original.messageId}`, prompt: expect.stringContaining('P0 original alarm') } }));
   expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect(h.runtime.dispatch.mock.calls[0]?.[5]).toBe('ou_admin');
+  // 告警初筛与普通 @ 请求走同一条派发路径，角色注入也在其中：角色块是宿主规则，位于初筛材料之前。
+  const agentPrompt = String(h.runtime.dispatch.mock.calls[0]?.[3]);
+  expect(agentPrompt).toContain('[Dutydeck 角色 · 管理者配置]\n你在群里的角色是「告警值班」，负责：报警和告警排查');
+  expect(agentPrompt.indexOf('[Dutydeck 角色 · 管理者配置]')).toBeLessThan(agentPrompt.indexOf('[告警初筛]'));
   expect(decide).not.toHaveBeenCalled();
 });
 

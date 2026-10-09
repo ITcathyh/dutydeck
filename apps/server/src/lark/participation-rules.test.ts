@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { botNameTokens, callsBotName, evaluateParticipationRules, participationIntentOf, type RuleContext } from './participation-rules.js';
+import { botNameTokens, callsBotName, evaluateParticipationRules, participationIntentOf, ruleContextOf, type RuleContext } from './participation-rules.js';
 
 const at = Date.parse('2026-10-06T10:00:00.000Z');
 const ctx = (patch: Partial<RuleContext> = {}): RuleContext => ({
@@ -113,5 +113,65 @@ describe('participation intents', () => {
     expect(participationIntentOf('积极点评估一下这三个方案的风险和成本好吗')).toBeUndefined();
     expect(participationIntentOf('为什么没回滚这次发布')).toBeUndefined();
     expect(participationIntentOf('帮我看看为什么这个服务不回包，日志在群公告里')).toBeUndefined();
+  });
+});
+
+describe('roleScope 负责范围绕过规则与兼容', () => {
+  const crowded = { members: { humans: 3, bots: 2 } };
+  const scope = '报警与线上排查';
+
+  it('有 roleScope 时仅绕过 not_responder、no_responder、eager_default、single_human 四条规则', () => {
+    // 1. no_responder：多机器人群未指定接话人，无 scope 沉默，有 scope 绕过交给模型（返回 undefined）
+    expect(rule({ ...crowded, level: 'selective' })).toMatchObject({ action: 'silent', rule: 'no_responder' });
+    expect(rule({ ...crowded, level: 'selective', roleScope: scope })).toBeUndefined();
+
+    // 2. not_responder：多机器人群接话人为别人，无 scope 沉默，有 scope 绕过交给模型（返回 undefined）
+    expect(rule({ ...crowded, responder: 'other' })).toMatchObject({ action: 'silent', rule: 'not_responder' });
+    expect(rule({ ...crowded, responder: 'other', roleScope: scope })).toBeUndefined();
+
+    // 3. eager_default：积极档，无 scope 直接接，有 scope 绕过交给模型（返回 undefined）
+    expect(rule({ level: 'eager' })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
+    expect(rule({ level: 'eager', roleScope: scope })).toBeUndefined();
+
+    // 4. single_human：单人群，无 scope 直接接，有 scope 绕过交给模型（返回 undefined）
+    expect(rule({ members: { humans: 1, bots: 1 } })).toMatchObject({ action: 'addressed', rule: 'single_human' });
+    expect(rule({ members: { humans: 1, bots: 1 }, roleScope: scope })).toBeUndefined();
+  });
+
+  it('有 roleScope 时仍严格保留其余明确规则', () => {
+    // 叫名字：仍直接接
+    expect(rule({ text: 'flash 帮我看下报警', roleScope: scope })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
+    // 别人的话题：仍直接沉默
+    expect(rule({ ...crowded, threadRootOther: true, roleScope: scope })).toMatchObject({ action: 'silent', rule: 'topic_of_other' });
+    // @ 别人：仍直接沉默
+    expect(rule({ mentionsOther: true, roleScope: scope })).toMatchObject({ action: 'silent', rule: 'mentions_other' });
+    // 机器人发送：仍直接沉默
+    expect(rule({ senderKind: 'bot', text: '【报警】cpu 高', roleScope: scope })).toMatchObject({ action: 'silent', rule: 'bot_sender' });
+    // 回复自己：仍直接接
+    expect(rule({ parent: 'self', roleScope: scope })).toMatchObject({ action: 'addressed', rule: 'reply_to_self' });
+    // 表情与简短致谢：仍直接沉默
+    expect(rule({ text: '[OK]', roleScope: scope })).toMatchObject({ action: 'silent', rule: 'emoji_only' });
+    expect(rule({ text: '好的谢谢', roleScope: scope })).toMatchObject({ action: 'silent', rule: 'short_thanks' });
+  });
+
+  it('无 roleScope 或空白 scope 时保持原有规则行为', () => {
+    for (const emptyScope of [undefined, '', '   ']) {
+      expect(rule({ ...crowded, level: 'selective', roleScope: emptyScope })).toMatchObject({ action: 'silent', rule: 'no_responder' });
+      expect(rule({ ...crowded, responder: 'other', roleScope: emptyScope })).toMatchObject({ action: 'silent', rule: 'not_responder' });
+      expect(rule({ level: 'eager', roleScope: emptyScope })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
+      expect(rule({ members: { humans: 1, bots: 1 }, roleScope: emptyScope })).toMatchObject({ action: 'addressed', rule: 'single_human' });
+    }
+  });
+
+  it('ruleContextOf 支持传入第 5 个可选参数 roleScope', () => {
+    const trigger = { id: 'obs_1', scope: { appId: 'cli_a', chatId: 'oc_1' }, sequence: 1, source: 'lark.message', eventId: 'om_1', occurredAt: '2026-10-09T00:00:00Z', receivedAt: '2026-10-09T00:00:00Z', senderId: 'ou_1', senderKind: 'human' as const, text: '告警排查', refs: [], origin: 'live' as const, missing: [], revision: 1 };
+    const owned = { names: [], hasActiveMandates: false };
+    const facts = { level: 'selective' as const };
+
+    const ctxWithScope = ruleContextOf(trigger, owned, ['flash'], facts, '告警排查');
+    expect(ctxWithScope.roleScope).toBe('告警排查');
+
+    const ctxWithoutScope = ruleContextOf(trigger, owned, ['flash'], facts);
+    expect(ctxWithoutScope.roleScope).toBeUndefined();
   });
 });

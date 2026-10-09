@@ -278,6 +278,8 @@ export const highRiskPatternSchema = z.string().superRefine((val, ctx) => {
 
 export const channelBotPolicyExecutionV2Schema = z.object({
   permissionMode: z.enum(permissionModes),
+  roleTitle: z.string().nullable().optional(),
+  roleScope: z.string().nullable().optional(),
   preInjectPrompt: z.string().nullable().optional(),
   highRiskAccess: entryRulesSchema(highRiskRuleSchema),
   riskControlMode: z.enum(riskControlModes),

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { createCollaborationSchema } from '../../../../packages/storage/src/collaboration-migration.js';
 import { createCollaborationRepository } from '../../../../packages/storage/src/collaboration.js';
 import { allowEagerParticipation } from '../../../../packages/storage/src/migrations.js';
-import { RuntimeError, type CollaborationSnapshot, type CollaborationFollowup, type CollaborationTeamContext, type ObserveCollaborationInput } from '@dutydeck/shared';
+import { deciderMetaOf, RuntimeError, type CollaborationSnapshot, type CollaborationFollowup, type CollaborationTeamContext, type ObserveCollaborationInput } from '@dutydeck/shared';
 import { LarkGroupParticipation, type GroupParticipationOptions } from './group-participation.js';
 import { TASK_CONTEXT_BOT_TEXT_LIMIT, TASK_CONTEXT_BUDGET, TASK_CONTEXT_FULL_REFRESH_MS, TASK_CONTEXT_HUMAN_TEXT_LIMIT, TASK_CONTEXT_WINDOW } from './group-task-context.js';
 import { LarkMessageCoordinator } from './coordinator.js';
@@ -1520,5 +1520,293 @@ describe('告警初筛和多机器人群的接话人', () => {
     const other = await run(false);
     expect(other.decisions).toEqual([['silent', 'topic_of_other']]);
     expect(other.h.runtime.send).not.toHaveBeenCalled();
+  });
+});
+
+describe('角色在群参与的实时判定接线', () => {
+  const bots = [{ name: 'bdev-flash', appId: 'cli_flash' }, { name: 'Bot', appId: scope.appId }];
+  const members = (humans: number, botList: Array<{ name: string; appId: string }> = [bots[1]!]) => vi.fn(async () => ({ items: [
+    ...Array.from({ length: humans }, (_, i) => ({ memberId: `ou_${i}`, memberType: 'user' as const, name: `用户${i}` })),
+    ...botList.map(bot => ({ memberId: bot.appId, memberType: 'bot' as const, name: bot.name, appId: bot.appId }))], hasMore: false, securityLimited: false }));
+  const roleConfig: StoredLarkConfig = {
+    ...config,
+    roleTitle: '告警值班',
+    roleScope: '报警和告警排查'
+  };
+
+  it('有 scope 时多 Bot、别的接话人、单人 eager 均绕过规则进入 decider，元数据记录当时的 role', async () => {
+    let currentConfig = roleConfig;
+    const h = await harness('selective', { readConfig: async () => currentConfig });
+    Object.assign(h.service, { listChatMembers: members(3, bots) });
+
+    // 1. 多 Bot 未指定接话人：无 scope 时会判 no_responder，有 scope 时绕过规则进入 decider
+    await h.coordinator.handle(message('om_multi', '线上告警排查一下'), currentConfig);
+    await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledOnce();
+    const dec1 = (await h.repository.listDecisions(scope)).find(d => deciderMetaOf(d)?.trigger?.messageId === 'om_multi');
+    expect(deciderMetaOf(dec1!)!).toMatchObject({
+      kind: 'model',
+      roleTitle: '告警值班',
+      roleScope: '报警和告警排查'
+    });
+
+    // 2. 接话人是别人：更新 duty.responder 为 cli_flash，无 scope 会判 not_responder，有 scope 时进入 decider
+    await h.repository.updateDuty(scope, { expectedRevision: 0, responder: { appId: 'cli_flash', name: 'bdev-flash', since: new Date().toISOString() } }, 'owner');
+    await h.coordinator.handle(message('om_other_resp', '又一个报错看一下'), currentConfig);
+    await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledTimes(2);
+    const dec2 = (await h.repository.listDecisions(scope)).find(d => deciderMetaOf(d)?.trigger?.messageId === 'om_other_resp');
+    expect(deciderMetaOf(dec2!)!).toMatchObject({
+      kind: 'model',
+      roleTitle: '告警值班',
+      roleScope: '报警和告警排查'
+    });
+
+    // 3. 单人 eager：改成 eager 模式，单人群；无 scope 会直接判 eager_default 为 act，有 scope 时进入 decider
+    await h.repository.updateSettings(scope, { expectedRevision: 1, participation: 'eager' }, 'owner');
+    Object.assign(h.service, { listChatMembers: members(1) });
+    await h.coordinator.handle(message('om_single_eager', '单人闲聊'), currentConfig);
+    await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledTimes(3);
+
+    // 4. 配置变化后新判定记录反映新 role，旧记录保持不变
+    currentConfig = { ...config, roleTitle: '普通助手' }; // 去掉 roleScope
+    await h.coordinator.handle(message('om_plain_single', '单人闲聊2'), currentConfig);
+    await h.participation.flush(scope);
+    const decisions = await h.repository.listDecisions(scope);
+    const decOld = decisions.find(d => deciderMetaOf(d)?.roleScope === '报警和告警排查');
+    expect(decOld).toBeDefined();
+    expect(deciderMetaOf(decOld!)?.roleTitle).toBe('告警值班');
+    const decNew = decisions.find(d => (d.inputSnapshot as any)?.observations?.some((o: any) => o.messageId === 'om_plain_single'));
+    expect(deciderMetaOf(decNew!)?.roleScope).toBeUndefined();
+    expect(deciderMetaOf(decNew!)?.roleTitle).toBe('普通助手');
+  });
+
+  it('有 scope 时明确规则仍保持生效：@他人 与 别人的话题 保持 silent，规则元数据记录当时的 role', async () => {
+    const h = await harness('selective', { readConfig: async () => roleConfig });
+    Object.assign(h.service, { listChatMembers: members(3, bots) });
+
+    // 1. @ 他人
+    const mentionOtherEvent = message('om_mention_other', '@_user_2 你看下', {
+      mentions: [{ key: '@_user_2', name: '小李', openId: 'ou_other' }]
+    });
+    await h.coordinator.handle(mentionOtherEvent, roleConfig);
+    await h.participation.flush(scope);
+    expect(h.decide).not.toHaveBeenCalled();
+    const decMention = (await h.repository.listDecisions(scope))[0]!;
+    expect(deciderMetaOf(decMention)!).toMatchObject({
+      kind: 'rule',
+      rule: 'mentions_other',
+      roleTitle: '告警值班',
+      roleScope: '报警和告警排查'
+    });
+    expect(decMention.action).toBe('silent');
+
+    // 2. 别人的话题 (threadRootOther)
+    const threadOtherEvent = message('om_thread_other', '继续讨论', {
+      threadId: 'omt_other_root',
+      rootId: 'om_other_root',
+      parentId: 'om_other_root'
+    });
+    h.service.listChatMessages.mockResolvedValueOnce({ items: [], hasMore: false });
+    Object.assign(h.service, {
+      getMessage: vi.fn(async (id: string) => ({
+        messageId: id,
+        chatId: scope.chatId,
+        messageType: 'text',
+        createTime: '1789707600000',
+        rawContent: '{}',
+        sender: { id: 'cli_flash', idType: 'app_id', type: 'app' },
+        mentions: [],
+        deleted: false,
+        updated: false
+      }))
+    });
+    await h.coordinator.handle(threadOtherEvent, roleConfig);
+    await h.participation.flush(scope);
+    expect(h.decide).not.toHaveBeenCalled();
+    const decThread = (await h.repository.listDecisions(scope)).find(d => deciderMetaOf(d)?.rule === 'topic_of_other')!;
+    expect(decThread).toBeDefined();
+    expect(deciderMetaOf(decThread)!).toMatchObject({
+      kind: 'rule',
+      rule: 'topic_of_other',
+      roleTitle: '告警值班',
+      roleScope: '报警和告警排查'
+    });
+    expect(decThread.action).toBe('silent');
+  });
+});
+
+describe('角色注入与 /status 展示', () => {
+  const atBot = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}) =>
+    message(id, `@_user_1 ${text}`, { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }], ...patch });
+  const roleConfig: StoredLarkConfig = { ...config, roleTitle: '告警值班', roleScope: '报警和告警排查、服务异常定位',
+    preInjectPrompt: '排查告警要给出确定的根因和影响，不要停在现象' };
+  const dispatchPrompt = (h: Awaited<ReturnType<typeof harness>>) =>
+    String(h.runtime.send.mock.calls[0]!.find(arg => typeof arg === 'string' && arg.includes('[Dutydeck')));
+
+  it('执行 prompt 里角色在群长期指令前，群长期指令在做法（预注入 Prompt）前，且包含授权不改变说明', async () => {
+    const h = await harness('observe');
+    await h.repository.updateSettings(scope, { expectedRevision: 1, instructions: '群里讨论用中文' }, 'owner');
+    await h.coordinator.handle(message('om_role', '@_user_1 看下这个报警', { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }] }), roleConfig);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    const prompt = dispatchPrompt(h);
+    const roleAt = prompt.indexOf('[Dutydeck 角色 · 管理者配置]');
+    const instructionsAt = prompt.indexOf('[Dutydeck 群长期指令 · 管理者配置]');
+    const practiceAt = prompt.indexOf('[Dutydeck 预注入 Prompt]');
+    expect(roleAt).toBeGreaterThanOrEqual(0);
+    expect(instructionsAt).toBeGreaterThan(roleAt);
+    expect(practiceAt).toBeGreaterThan(instructionsAt);
+    expect(prompt).toContain('你在群里的角色是「告警值班」，负责：报警和告警排查、服务异常定位');
+    expect(prompt).toContain('明确向你派发的任务即使在负责范围外也照常处理，角色不改变现有权限。');
+    expect(prompt).toContain('[Dutydeck 群长期指令 · 管理者配置]\n群里讨论用中文');
+    expect(prompt).toContain('[Dutydeck 预注入 Prompt]\n排查告警要给出确定的根因和影响，不要停在现象');
+  });
+
+  it('@ 它做负责范围外的事也照常派发执行，角色不拦截、不拒绝', async () => {
+    const h = await harness('observe');
+    await h.coordinator.handle(message('om_outside', '@_user_1 帮我订个明天的会议室', { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }] }), roleConfig);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    const prompt = dispatchPrompt(h);
+    expect(prompt).toContain('[Dutydeck 角色 · 管理者配置]');
+    expect(prompt).toContain('帮我订个明天的会议室');
+    expect(prompt).not.toContain('不在我负责');
+  });
+
+  it('/status 在参与行前显示角色；没有角色时不显示角色行', async () => {
+    const h = await harness();
+    h.options.readConfig = vi.fn(async () => roleConfig);
+    const withRole = await h.participation.describe(scope);
+    expect(withRole.split('\n\n')[0]).toBe('**角色**：告警值班，负责：报警和告警排查、服务异常定位');
+    expect(withRole).toContain('\n\n**参与**：');
+
+    h.options.readConfig = vi.fn(async () => config);
+    const withoutRole = await h.participation.describe(scope);
+    expect(withoutRole.startsWith('**参与**：')).toBe(true);
+    expect(withoutRole).not.toContain('**角色**');
+  });
+
+  it('有 scope 时确认卡与成功回复说明范围接话；无 scope 和 title-only 保留原 behavior', async () => {
+    const applyLevel = vi.fn(async () => {});
+    const h = await harness('selective', { applyLevel, canOperate: async (_scope, operator, requester) => operator === requester });
+    h.options.readConfig = vi.fn(async () => roleConfig);
+    await h.coordinator.initializeWorkflows(roleConfig);
+    await h.coordinator.handle(atBot('om_eager', '积极点'), roleConfig);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
+    const cardContent = JSON.stringify(h.service.reply.mock.calls[0]);
+    expect(cardContent).toContain('明确叫我、或负责范围内需要处理的消息我才会接；范围外请 @我');
+    expect(cardContent).not.toContain('群里真人的消息我都接');
+
+    const [card] = (await h.repository.listActions(scope)).filter(item => item.kind === 'confirm.participation_level');
+    const result = await h.coordinator.handleAction({ dutydeck_confirm: 'confirm', confirm_id: card!.id, chat_id: scope.chatId }, 'ou_a', { messageId: 'om_card', chatId: scope.chatId });
+    expect(result).toMatchObject({ type: 'success', content: expect.stringContaining('明确叫我、或负责范围内需要处理的消息我才会接；范围外请 @我') });
+
+    // title-only 与无 scope 保持旧文案
+    const titleOnlyConfig = { ...config, roleTitle: '普通助手' };
+    h.options.readConfig = vi.fn(async () => titleOnlyConfig);
+    await h.coordinator.handle(atBot('om_title_eager', '积极点'), titleOnlyConfig);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledTimes(2));
+    const titleCardContent = JSON.stringify(h.service.reply.mock.calls[1]);
+    expect(titleCardContent).toContain('除了明显是对别人说的、表情和致谢，群里真人的消息我都接，适合单人群');
+  });
+
+  it('taskContext 在有 scope 时使用角色描述，不向执行注入全接承诺；无 scope 保留旧文案', async () => {
+    const h = await harness('eager');
+    h.options.readConfig = vi.fn(async () => roleConfig);
+    const contextWithRole = await h.participation.taskContext(scope);
+    expect(contextWithRole?.text).toContain('明确叫我、或负责范围内需要处理的消息我才会接；范围外请 @我');
+    expect(contextWithRole?.text).not.toContain('群里真人的消息我都接');
+
+    h.options.readConfig = vi.fn(async () => config);
+    const contextWithoutRole = await h.participation.taskContext(scope);
+    expect(contextWithoutRole?.text).toContain('除了明显是对别人说的、表情和致谢，群里真人的消息我都接，适合单人群');
+  });
+
+  it('dutyLines 和改档 note 在有 scope 且接话人是别人或多 Bot 未指定时，不作「先不接」或「只接@」绝对承诺', async () => {
+    const applyLevel = vi.fn(async () => {});
+    const h = await harness('selective', { applyLevel, canOperate: async (_scope, operator, requester) => operator === requester });
+    const bots = [{ name: 'bdev-flash', appId: 'cli_flash' }, { name: 'Bot', appId: scope.appId }];
+    const membersMock = vi.fn(async () => ({ items: [
+      { memberId: 'ou_1', memberType: 'user' as const, name: '用户1' },
+      ...bots.map(bot => ({ memberId: bot.appId, memberType: 'bot' as const, name: bot.name, appId: bot.appId }))
+    ], hasMore: false, securityLimited: false }));
+    Object.assign(h.service, { listChatMembers: membersMock });
+    h.options.readConfig = vi.fn(async () => roleConfig);
+
+    // 1. 多 Bot 未指定接话人
+    const descUnassigned = await h.participation.describe(scope);
+    expect(descUnassigned).toContain('我仍按负责范围判断未明确叫我的消息，明确叫我照常处理');
+    expect(descUnassigned).toContain('要将接话人设为我');
+    expect(descUnassigned).toContain('我负责的范围不变');
+    expect(descUnassigned).not.toContain('要我全面接话');
+    expect(descUnassigned).not.toContain('没 @ 的消息我先不接');
+
+    // 2. 接话人是别人
+    await h.repository.updateDuty(scope, { expectedRevision: 0, responder: { appId: 'cli_flash', name: 'bdev-flash', since: new Date().toISOString() } }, 'owner');
+    const descOther = await h.participation.describe(scope);
+    expect(descOther).toContain('**接话人**：bdev-flash，没 @ 机器人的消息由它接；我仍按负责范围判断未明确叫我的消息，明确叫我照常处理');
+    expect(descOther).not.toContain('我只接 @ 和自己接手的话题');
+
+    // 3. 改档 note
+    await h.coordinator.initializeWorkflows(roleConfig);
+    await h.coordinator.handle(atBot('om_note_test', '积极点'), roleConfig);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalled());
+    const noteCardContent = JSON.stringify(h.service.reply.mock.calls);
+    expect(noteCardContent).toContain('没 @ 的消息仍由它接，但我仍按负责范围接话');
+    expect(noteCardContent).toContain('要将接话人设为我');
+    expect(noteCardContent).toContain('我负责的范围不变');
+    expect(noteCardContent).not.toContain('要改由我全面接话');
+
+    // 4. 无 scope 时旧文案保持
+    h.options.readConfig = vi.fn(async () => config);
+    const descWithoutRole = await h.participation.describe(scope);
+    expect(descWithoutRole).toContain('**接话人**：bdev-flash，没 @ 机器人的消息由它接，我只接 @ 和自己接手的话题');
+  });
+
+  it('有 scope 时本 Bot 已是接话人，/status 与认领确认卡/成功回执不无条件声称全接；无 scope 保留原文案', async () => {
+    // 有 scope：本 Bot 已是接话人
+    const h = await harness('selective', { canOperate: async (_scope, operator, requester) => operator === requester });
+    h.options.readConfig = vi.fn(async () => roleConfig);
+    await h.repository.updateDuty(scope, { expectedRevision: 0, responder: { appId: scope.appId, name: 'cli_test', since: new Date().toISOString() } }, 'owner');
+    const descSelf = await h.participation.describe(scope);
+    expect(descSelf).toContain('**接话人**：我。没 @ 机器人的消息由我按负责范围判断是否接，明确叫我照常处理');
+    expect(descSelf).not.toContain('本群没 @ 机器人的消息由我接');
+
+    // 认领确认卡 summary 与确认成功回执：有 scope 时按范围措辞
+    await h.coordinator.initializeWorkflows(roleConfig);
+    Object.assign(h.service, { listChatMembers: vi.fn(async () => ({ items: [
+      { memberId: 'ou_1', memberType: 'user' as const, name: '用户1' },
+      { memberId: 'cli_flash', memberType: 'bot' as const, name: 'bdev-flash', appId: 'cli_flash' },
+      { memberId: scope.appId, memberType: 'bot' as const, name: 'cli_test', appId: scope.appId }
+    ], hasMore: false, securityLimited: false })) });
+    // 先清掉接话人，让「你来接话」发认领确认卡
+    await h.repository.updateDuty(scope, { expectedRevision: 1, responder: null }, 'owner');
+    await h.coordinator.handle(atBot('om_claim', '你来接话'), roleConfig);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
+    const claimCard = JSON.stringify(h.service.reply.mock.calls[0]);
+    expect(claimCard).toContain('由我（cli_test）按负责范围判断接本群没 @ 机器人的消息，明确叫我照常处理。');
+    expect(claimCard).not.toContain('由我（cli_test）接本群没 @ 机器人的消息。');
+    const confirmId = (await h.repository.listActions(scope)).find(item => item.kind === 'confirm.group_responder')!.id;
+    const confirmed = await h.coordinator.handleAction({ dutydeck_confirm: 'confirm', confirm_id: confirmId, chat_id: scope.chatId }, 'ou_a', { messageId: 'om_card', chatId: scope.chatId });
+    expect(confirmed).toMatchObject({ type: 'success', content: expect.stringContaining('本群没 @ 机器人的消息改由我按负责范围判断是否接，明确叫我照常处理。') });
+    expect(String((confirmed as any).content)).not.toContain('本群没 @ 机器人的消息改由我接。');
+
+    // 无 scope：认领卡与成功回执保留原文案
+    const h2 = await harness('selective', { canOperate: async (_scope, operator, requester) => operator === requester });
+    await h2.coordinator.initializeWorkflows(config);
+    Object.assign(h2.service, { listChatMembers: vi.fn(async () => ({ items: [
+      { memberId: 'ou_1', memberType: 'user' as const, name: '用户1' },
+      { memberId: 'cli_flash', memberType: 'bot' as const, name: 'bdev-flash', appId: 'cli_flash' },
+      { memberId: scope.appId, memberType: 'bot' as const, name: 'cli_test', appId: scope.appId }
+    ], hasMore: false, securityLimited: false })) });
+    await h2.coordinator.handle(atBot('om_claim2', '你来接话'), config);
+    await vi.waitFor(() => expect(h2.service.reply).toHaveBeenCalledOnce());
+    expect(JSON.stringify(h2.service.reply.mock.calls[0])).toContain('由我（cli_test）接本群没 @ 机器人的消息。');
+    const confirmId2 = (await h2.repository.listActions(scope)).find(item => item.kind === 'confirm.group_responder')!.id;
+    await expect(h2.coordinator.handleAction({ dutydeck_confirm: 'confirm', confirm_id: confirmId2, chat_id: scope.chatId }, 'ou_a', { messageId: 'om_card', chatId: scope.chatId }))
+      .resolves.toMatchObject({ type: 'success', content: expect.stringContaining('本群没 @ 机器人的消息改由我接。') });
+    // 无 scope 时本 Bot 是接话人的 /status 原文案
+    await h2.repository.updateDuty(scope, { expectedRevision: (await h2.repository.getDuty(scope)).revision, responder: { appId: scope.appId, name: 'cli_test', since: new Date().toISOString() } }, 'owner');
+    expect(await h2.participation.describe(scope)).toContain('**接话人**：我，本群没 @ 机器人的消息由我接');
   });
 });

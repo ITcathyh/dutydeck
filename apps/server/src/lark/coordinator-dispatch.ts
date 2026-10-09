@@ -17,6 +17,7 @@ import { larkAdhdModePrompt } from './adhd-mode.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
 import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
+import { formatRolePrompt } from './role-format.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError } from './service.js';
 import {
   loadLarkTaskEvents,
@@ -1403,6 +1404,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
     if (task.alertRecall) injected.push(larkAlertRecallPrompt(task.alertRecall));
     const groupSend = Boolean(config.groupToolsEnabled && config.groupToolsAllowSend);
+    const rolePrompt = formatRolePrompt(config);
+    if (rolePrompt) injected.push(rolePrompt);
     if (groupInstructions) injected.push(`[Dutydeck 群长期指令 · 管理者配置]\n${groupInstructions}`);
     if (config.preInjectPrompt?.trim()) injected.push(`[Dutydeck 预注入 Prompt]\n${config.preInjectPrompt.trim()}`);
     injected.push(larkResultGuidance(groupSend));
@@ -1414,7 +1417,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
     const agentPrompt = injected.length ? `${injected.join('\n\n')}\n\n[用户请求]\n${materialPrompt}` : materialPrompt;
     const promptParts: PromptPart[] = injected.flatMap((content, index) => {
-      const parts = knownParts.get(content) ?? [{ kind: content.startsWith('[Dutydeck 群长期指令') || content.startsWith('[Dutydeck 预注入 Prompt') || content.startsWith('[Dutydeck 安全策略') || content === larkAdhdModePrompt ? 'host_rules' as const
+      const parts = knownParts.get(content) ?? [{ kind: content.startsWith('[Dutydeck 角色 · 管理者配置') || content.startsWith('[Dutydeck 群长期指令') || content.startsWith('[Dutydeck 预注入 Prompt') || content.startsWith('[Dutydeck 安全策略') || content === larkAdhdModePrompt ? 'host_rules' as const
         : content.startsWith('[Dutydeck 会话记忆') ? 'memory' as const : 'dynamic_context' as const,
         sourceId: `lark:${config.appId}:${event.chatId}:injection:${index}`, digest: promptDigest(content), trustScope: 'host', content }];
       return parts.map((part, partIndex) => ({ ...part, prefix: `${partIndex === 0 && index ? '\n\n' : ''}${part.prefix ?? ''}` }));

@@ -460,6 +460,8 @@ export interface CollaborationDeciderMeta {
   durationMs?: number;
   trigger?: { id: string; messageId?: string; senderId?: string; threadId?: string; text?: string };
   facts?: Record<string, string | number | boolean>;
+  roleTitle?: string;
+  roleScope?: string;
 }
 export const DECIDER_META_KEY = 'decider';
 export function deciderMetaOf(item: Pick<CollaborationDecision, 'inputSnapshot'>): CollaborationDeciderMeta | undefined {

@@ -56,6 +56,8 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     groupReplyMode: bot.groupReplyMode ?? '',
     mentionPolicy: bot.mentionPolicy ?? 'always',
     defaultGroupParticipation: bot.defaultGroupParticipation ?? 'off',
+    roleTitle: bot.roleTitle ?? '',
+    roleScope: bot.roleScope ?? '',
     preInjectPrompt: bot.preInjectPrompt ?? '',
     adhdMode: bot.adhdMode ?? false,
     listening: bot.listening ?? true,
@@ -89,6 +91,8 @@ function hasDraftChanges(original: LarkBotConfig, draft: BotDraft): boolean {
   if ((original.groupReplyMode ?? '') !== draft.groupReplyMode) return true;
   if ((original.mentionPolicy ?? 'always') !== draft.mentionPolicy) return true;
   if ((original.defaultGroupParticipation ?? 'off') !== draft.defaultGroupParticipation) return true;
+  if ((original.roleTitle ?? '') !== draft.roleTitle) return true;
+  if ((original.roleScope ?? '') !== draft.roleScope) return true;
   if ((original.preInjectPrompt ?? '') !== draft.preInjectPrompt) return true;
   if ((original.adhdMode ?? false) !== draft.adhdMode) return true;
   if ((original.listening ?? true) !== draft.listening) return true;
@@ -271,6 +275,8 @@ export function BotManagement({
       groupReplyMode: draft.groupReplyMode || undefined,
       mentionPolicy: draft.mentionPolicy,
       defaultGroupParticipation: draft.defaultGroupParticipation,
+      roleTitle: draft.roleTitle,
+      roleScope: draft.roleScope,
       preInjectPrompt: draft.preInjectPrompt,
       adhdMode: draft.adhdMode,
       listening: draft.listening,
@@ -815,15 +821,6 @@ export function BotManagement({
                   </p>
                 </div>
 
-                <Field label="每次任务前自动加一句话" hint="可选。会在每一轮对话前附加给 Agent，用来固定语言、格式或注意事项。">
-                  <Textarea
-                    rows={2}
-                    value={currentDraft.preInjectPrompt}
-                    onChange={e => updateCurrentDraft({ preInjectPrompt: e.target.value })}
-                    placeholder="可选，例如：在回复前先用中文确认要点"
-                  />
-                </Field>
-
                 <div className="space-y-3 border-t border-subtle pt-4">
                   <h4 className="text-caption font-semibold text-primary">会话记忆</h4>
                   <label className="flex items-center gap-2 text-caption">
@@ -940,6 +937,42 @@ export function BotManagement({
                   )}
                   <p className="text-caption text-subtle">各群共享同一份记忆，私聊各自独立；仅作为参考内容注入，不授予操作权限。</p>
                 </div>
+              </Card>
+
+              {/* 区块：角色 */}
+              <Card padding="lg" className="space-y-4">
+                <div>
+                  <h3 className="text-body font-semibold text-primary">角色</h3>
+                  <p className="mt-0.5 text-caption text-subtle">
+                    不填写负责范围时保持现有接话行为；@ 仍可处理其他请求。
+                  </p>
+                </div>
+
+                <Field label="角色名称" hint="一句话说明机器人的定位。">
+                  <Input
+                    value={currentDraft.roleTitle}
+                    onChange={e => updateCurrentDraft({ roleTitle: e.target.value })}
+                    placeholder="可选，例如：告警值班"
+                  />
+                </Field>
+
+                <Field label="负责范围" hint="一句话写清它负责哪些事；留空时不按范围接话。">
+                  <Textarea
+                    rows={2}
+                    value={currentDraft.roleScope}
+                    onChange={e => updateCurrentDraft({ roleScope: e.target.value })}
+                    placeholder="可选，例如：报警和告警（ualarm、L 级功能报警、🚨 开头的告警卡）、服务异常与线上问题排查、告警统计与降噪"
+                  />
+                </Field>
+
+                <Field label="做法" hint="在每一轮对话前附加给 Agent，用来固定执行规范与注意事项。">
+                  <Textarea
+                    rows={3}
+                    value={currentDraft.preInjectPrompt}
+                    onChange={e => updateCurrentDraft({ preInjectPrompt: e.target.value })}
+                    placeholder="可选，例如：排查告警要给出确定的根因和影响，不要停在现象"
+                  />
+                </Field>
               </Card>
 
               {/* 区块 2：参与的群聊 */}

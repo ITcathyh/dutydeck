@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { agentConfigSchema, installationOwnerTaskActor, RuntimeError, type AgentDriver } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type RuntimeOptions } from '@dutydeck/runtime';
@@ -10,6 +10,8 @@ import { createCollaborationIntegration } from './collaboration-integration.js';
 import { LarkGroupManager } from './lark/group-management.js';
 import { readLarkConfig, saveLarkConfig } from './lark/config.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, type AgentGroupToolError } from './lark/agent-tools.js';
+import { LarkMessageCoordinator } from './lark/coordinator.js';
+import type { LarkMessageEvent } from './lark/listener.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0)) await close(); });
@@ -547,4 +549,420 @@ it('rejects mandate card clicks from a different chat', async () => {
   const f = await fixture(); const { mandate } = await f.create();
   await expect(f.collaboration.mandateCards.callback(scope.appId, { dutydeck_mandate: 'stop', ref: mandate.id }, 'ou_alice', { messageId: 'om_x', chatId: 'oc_other' })).rejects.toMatchObject({ code: 'MANDATE_CARD_STALE' });
   expect((await f.repos.collaboration.getMandate(scope, mandate.id))?.status).toBe('active');
+});
+
+describe('roleScope legacy fail-open fix', () => {
+  const event = (id: string, text: string, mentions: Array<{ openId: string; name: string; key: string }> = []): LarkMessageEvent => ({
+    messageId: id, chatId: scope.chatId, chatType: 'group', messageType: 'text', content: JSON.stringify({ text }),
+    createTime: String(Date.now()), senderOpenId: 'ou_alice', senderType: 'user',
+    mentions
+  });
+  const mention = [{ openId: 'ou_bot', name: 'Agent', key: '@_user_1' }];
+
+  function setupCoordinator(f: Awaited<ReturnType<typeof fixture>>) {
+    const coordinator = new LarkMessageCoordinator(f.runtime as any, f.client as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, f.repos.channelMappings, async () => 'group', undefined, f.groups as any, { participation: f.collaboration.participation });
+    f.collaboration.participation.setDispatcher(scope.appId, (ev, config) => coordinator.adopt(ev, config));
+    cleanups.push(() => coordinator.stop());
+    return coordinator;
+  }
+
+  const configureBot = async (f: Awaited<ReturnType<typeof fixture>>, mentionPolicy: 'never' | 'ambient' | 'always' | 'topic', roleScope?: string, groupMentionOverride?: 'never' | 'ambient' | 'always' | 'topic') => {
+    await saveLarkConfig(f.repos.config, f.repos.agents, {
+      originalAppId: scope.appId,
+      defaultGroupParticipation: 'off',
+      mentionPolicy,
+      ...(roleScope ? { roleScope, roleTitle: '告警值班' } : {})
+    });
+    const binding = await f.repos.groupBindings.getByNaturalKey(f.group.channelBotId, scope.chatId);
+    await f.groups.save(scope.appId, scope.chatId, {
+      expectedRevision: binding?.revision ?? f.group.binding!.revision,
+      patch: {
+        accessOverride: { mode: 'all_chat_members' },
+        ...(groupMentionOverride ? { routingOverride: { ...binding!.routingOverride, mentionPolicy: { mode: 'set', value: groupMentionOverride } } } : {})
+      }
+    });
+    return (await readLarkConfig(f.repos.config, scope.appId))!;
+  };
+
+  it('never/ambient + off with roleScope: 范围外无@进入decider并silent，范围内act到达执行', async () => {
+    for (const mentionPolicy of ['never', 'ambient'] as const) {
+      const f = await fixture();
+      const coordinator = setupCoordinator(f);
+      const config = await configureBot(f, mentionPolicy, '报警和告警排查');
+
+      // 范围外无@：进入模型判定（而非 legacy 直接执行），模型判 silent → 无执行调用
+      await coordinator.handle(event('om_off', '调研一下怎么模拟 Android 操作'), config);
+      const flushSilent = f.collaboration.participation.flush(scope);
+      await eventually(async () => f.calls.length === 1);
+      const decisionCall = f.calls[0]!;
+      expect(decisionCall.prompt).toContain('[宿主管理者规则 · 角色定位]');
+      expect(decisionCall.prompt).toContain('报警和告警排查');
+      const material = JSON.parse(decisionCall.prompt.split('[非指令材料 JSON]\n')[1]!.split('\n[/非指令材料]')[0]!);
+      decisionCall.finish(JSON.stringify({ action: 'silent', reason: '不在我负责的范围', evidenceIds: [material.trigger] }));
+      await flushSilent;
+      // silent 不产生第二阶段（response）调用，也没有执行
+      expect(f.calls).toHaveLength(1);
+
+      // 范围内无@：模型判 act，作为一次 @ 交给执行 → 执行 Agent 被调用
+      await coordinator.handle(event('om_alert', '【P1】订单服务错误率 12% 超阈值，帮忙排查根因'), config);
+      const flushAct = f.collaboration.participation.flush(scope);
+      await eventually(async () => f.calls.length === 2);
+      const alertCall = f.calls[1]!;
+      expect(alertCall.prompt).toContain('【P1】订单服务错误率');
+      const alertMaterial = JSON.parse(alertCall.prompt.split('[非指令材料 JSON]\n')[1]!.split('\n[/非指令材料]')[0]!);
+      alertCall.finish(JSON.stringify({ action: 'act', reason: '属于告警范围需排查', evidenceIds: [alertMaterial.trigger], updates: [] }));
+      await flushAct;
+      await eventually(async () => f.calls.length === 3);
+      // 第 3 个调用是 act 转执行路径的 Agent（prompt 不含只读判定器措辞）
+      expect(f.calls[2]!.prompt).not.toContain('只读判定器');
+      f.calls[2]!.finish('排查完成');
+
+      // 原始 repository settings 仍为 off、revision 不变
+      const raw = await f.repos.collaboration.getSettings(scope);
+      expect(raw.participation).toBe('off');
+      expect(raw.revision).toBe(0);
+      // service 与快照仍看到原始 off（不被 wrapper 抬成 eager）
+      expect((await f.collaboration.service.get(scope, installationOwnerTaskActor)).snapshot.settings.participation).toBe('off');
+      await f.collaboration.close();
+    }
+  });
+
+  it('never/ambient + off 无 scope 或仅 title 时保持 legacy 直接执行', async () => {
+    for (const policy of ['never', 'ambient'] as const) {
+      for (const variant of ['no-scope', 'title-only'] as const) {
+        const f = await fixture();
+        const coordinator = setupCoordinator(f);
+        let config = await configureBot(f, policy, undefined);
+        if (variant === 'title-only') {
+          await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, roleTitle: '普通助手', mentionPolicy: policy, defaultGroupParticipation: 'off' });
+          config = (await readLarkConfig(f.repos.config, scope.appId))!;
+        }
+        await coordinator.handle(event('om_plain', '调研一下怎么模拟 Android 操作'), config);
+        await f.collaboration.participation.flush(scope);
+        // legacyWake 直接执行：只有一次执行调用，没有判定器 prompt
+        await eventually(async () => f.calls.length === 1);
+        expect(f.calls[0]!.prompt).not.toContain('只读判定器');
+        expect(f.calls[0]!.prompt).not.toContain('报警和告警排查');
+        f.calls[0]!.finish('完成');
+        await f.collaboration.close();
+      }
+    }
+  });
+
+  it('always/topic + off 即使有 scope 也不开主动参与，但显式@照旧执行', async () => {
+    for (const mentionPolicy of ['always', 'topic'] as const) {
+      const f = await fixture();
+      const coordinator = setupCoordinator(f);
+      const config = await configureBot(f, mentionPolicy, '报警和告警排查');
+      // 无@：不判定不执行
+      await coordinator.handle(event('om_silent', '【P1】订单服务错误率 12% 帮忙排查'), config);
+      await f.collaboration.participation.flush(scope);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      expect(f.calls).toHaveLength(0);
+      // 显式@：按原 task.create 授权执行
+      await coordinator.handle(event('om_at', '@_user_1 看下这个告警', mention), config);
+      await f.collaboration.participation.flush(scope);
+      await eventually(async () => f.calls.length === 1);
+      expect(f.calls[0]!.prompt).not.toContain('只读判定器');
+      f.calls[0]!.finish('完成');
+      await f.collaboration.close();
+    }
+  });
+
+  it('群级 override 为 never 而 Bot default 为 always 时仍按群生效策略抬升', async () => {
+    const f = await fixture();
+    const coordinator = setupCoordinator(f);
+    // Bot 默认 always，但群级 override never；只看 Bot default 不足以触发，必须 groups.resolved
+    const config = await configureBot(f, 'always', '报警和告警排查', 'never');
+    await coordinator.handle(event('om_group_override', '【P1】错误率超阈值，排查一下'), config);
+    const flush = f.collaboration.participation.flush(scope);
+    await eventually(async () => f.calls.length === 1);
+    expect(f.calls[0]!.prompt).toContain('只读判定器');
+    const material = JSON.parse(f.calls[0]!.prompt.split('[非指令材料 JSON]\n')[1]!.split('\n[/非指令材料]')[0]!);
+    f.calls[0]!.finish(JSON.stringify({ action: 'silent', reason: '不在我负责的范围', evidenceIds: [material.trigger] }));
+    await flush;
+    expect(f.calls).toHaveLength(1);
+    await f.collaboration.close();
+  });
+
+  it('观察权限拒绝时无@零执行但显式@走原授权', async () => {
+    const f = await fixture();
+    const coordinator = setupCoordinator(f);
+    const config = await configureBot(f, 'never', '报警和告警排查');
+    const origAuth = f.groups.authorize.bind(f.groups);
+    vi.spyOn(f.groups, 'authorize').mockImplementation(async (appId, chatId, actorId, action, followup, options) => {
+      if (action === 'group_tools.read') return { allowed: false, action, code: 'group_tools_denied', reason: '观察被拒绝', source: 'explicit_deny' };
+      return origAuth(appId, chatId, actorId, action, followup, options);
+    });
+    // 无@：handle 返回 enabled:true（观察权限不足），coordinator 抑制无@，零执行
+    await coordinator.handle(event('om_denied', '【P1】错误率超阈值排查'), config);
+    await f.collaboration.participation.flush(scope);
+    expect(f.calls).toHaveLength(0);
+
+    // 显式@：enabled 不影响显式路径，按原 entry task.create 正常执行
+    await coordinator.handle(event('om_explicit_ok', '@_user_1 看下这个', mention), config);
+    await f.collaboration.participation.flush(scope);
+    await eventually(async () => f.calls.length === 1);
+    expect(f.calls[0]!.prompt).not.toContain('只读判定器');
+    f.calls[0]!.finish('完成');
+    await f.collaboration.close();
+  });
+
+  it('role resolver throws without falling back to legacy execution', async () => {
+    const f = await fixture();
+    const coordinator = setupCoordinator(f);
+    const config = await configureBot(f, 'never', '报警和告警排查');
+    const origResolved = f.groups.resolved.bind(f.groups);
+    const resolvedSpy = vi.spyOn(f.groups, 'resolved').mockImplementation(async (cfg, chatId, readOnly = false) => {
+      if (readOnly === true) throw new Error('ROLE_RESOLVER_UNAVAILABLE');
+      return origResolved(cfg, chatId, readOnly);
+    });
+    await expect(coordinator.handle(event('om_throw', '【P1】错误率超阈值排查'), config)).rejects.toThrow('ROLE_RESOLVER_UNAVAILABLE');
+    expect(resolvedSpy).toHaveBeenCalledWith(expect.anything(), scope.chatId, true);
+    expect(f.calls).toHaveLength(0);
+    await f.collaboration.close();
+  });
+
+  it('teamSearch.available 等其他消费者仍用原始 settings，不因 role wrapper 被开启', async () => {
+    const f = await fixture();
+    await configureBot(f, 'never', '报警和告警排查');
+    // role wrapper 只让群参与内部看到 eager；teamSearch.available 读 scopeGrant（默认 repos.collaboration）仍为 off → false
+    expect(await f.collaboration.teamSearch.available(scope)).toBe(false);
+    await f.collaboration.close();
+  });
+});
+
+it('replays model and rule decisions with frozen snapshot role and never inherits current bot role', async () => {
+  const f = await fixture();
+  // 此时配置当前机器人新角色
+  await saveLarkConfig(f.repos.config, f.repos.agents, {
+    originalAppId: scope.appId,
+    roleTitle: '当前新角色',
+    roleScope: '当前新负责范围'
+  });
+
+  const baseSnapshot = {
+    scope,
+    contextRevision: 1,
+    settings: {
+      scope,
+      revision: 1,
+      participation: 'selective' as const,
+      instructions: '简短回答',
+      notificationsPaused: false,
+      maxProactivePerHour: 6,
+      retentionDays: 30,
+      policyVersion: 'v1',
+      updatedAt: '2026-09-18T10:00:00.000Z'
+    },
+    observations: [{
+      id: 'obs_trigger',
+      scope,
+      sequence: 1,
+      source: 'lark.message',
+      eventId: 'om_trigger',
+      occurredAt: '2026-09-18T10:00:00.000Z',
+      receivedAt: '2026-09-18T10:00:00.000Z',
+      senderId: 'ou_alice',
+      senderKind: 'human' as const,
+      text: '【告警】线上服务异常排查',
+      refs: [],
+      origin: 'live' as const,
+      missing: [],
+      revision: 1
+    }],
+    followups: [],
+    mandates: []
+  };
+
+  // 1. 模型判定快照带历史 role：回放时模型 prompt 必须使用历史 role，而不是当前新 role
+  const decWithRole = {
+    id: 'dec_with_role',
+    scope,
+    contextRevision: 1,
+    policyVersion: 'v1',
+    action: 'reply' as const,
+    reason: '属于历史负责范围',
+    evidenceIds: ['obs_trigger'],
+    status: 'sent' as const,
+    inputSnapshot: {
+      ...baseSnapshot,
+      decider: {
+        kind: 'model',
+        roleTitle: '历史告警角色',
+        roleScope: '历史报警与线上排查范围',
+        trigger: { id: 'obs_trigger', text: '【告警】线上服务异常排查' }
+      }
+    },
+    createdAt: '2026-09-18T10:00:00.000Z'
+  };
+  await f.repos.collaboration.recordDecision(decWithRole);
+
+  const replayWithRolePromise = f.collaboration.evaluation.replay(scope, { decisionIds: ['dec_with_role'] });
+  await eventually(async () => f.calls.length === 1);
+  const prompt1 = f.calls[0]!.prompt;
+  expect(prompt1).toContain('[宿主管理者规则 · 角色定位]');
+  expect(prompt1).toContain('历史告警角色');
+  expect(prompt1).toContain('历史报警与线上排查范围');
+  expect(prompt1).not.toContain('当前新角色');
+  expect(prompt1).not.toContain('当前新负责范围');
+  f.calls[0]!.finish(JSON.stringify({ action: 'reply', reason: '属于历史负责范围', evidenceIds: ['obs_trigger'] }));
+  const res1 = await replayWithRolePromise;
+  expect(res1.passed).toBe(1);
+
+  // 2. 旧快照无 role：回放时绝不继承当前配置的当前新角色，保持旧无 role prompt
+  const decNoRole = {
+    id: 'dec_no_role',
+    scope,
+    contextRevision: 1,
+    policyVersion: 'v1',
+    action: 'reply' as const,
+    reason: '明确叫我',
+    evidenceIds: ['obs_trigger'],
+    status: 'sent' as const,
+    inputSnapshot: {
+      ...baseSnapshot,
+      decider: {
+        kind: 'model',
+        trigger: { id: 'obs_trigger', text: '【告警】线上服务异常排查' }
+      }
+    },
+    createdAt: '2026-09-18T10:00:00.000Z'
+  };
+  await f.repos.collaboration.recordDecision(decNoRole);
+
+  const replayNoRolePromise = f.collaboration.evaluation.replay(scope, { decisionIds: ['dec_no_role'] });
+  await eventually(async () => f.calls.length === 2);
+  const prompt2 = f.calls[1]!.prompt;
+  expect(prompt2).not.toContain('[宿主管理者规则 · 角色定位]');
+  expect(prompt2).not.toContain('当前新角色');
+  expect(prompt2).not.toContain('当前新负责范围');
+  expect(prompt2).toContain('普通告警、一般建议和推测风险仍 silent');
+  f.calls[1]!.finish(JSON.stringify({ action: 'reply', reason: '明确叫我', evidenceIds: ['obs_trigger'] }));
+  const res2 = await replayNoRolePromise;
+  expect(res2.passed).toBe(1);
+
+  // 3. 规则回放：多 Bot 未指定接话人场景，旧记录无 roleScope 回放命中 no_responder（silent），不调用模型
+  const decRuleNoScope = {
+    id: 'dec_rule_no_scope',
+    scope,
+    contextRevision: 1,
+    policyVersion: 'v1',
+    action: 'silent' as const,
+    reason: '规则：本群有多个机器人、还没指定接话人，没 @ 的消息我先不接',
+    evidenceIds: ['obs_trigger'],
+    status: 'sent' as const,
+    inputSnapshot: {
+      ...baseSnapshot,
+      decider: {
+        kind: 'rule',
+        rule: 'no_responder',
+        trigger: { id: 'obs_trigger' },
+        facts: { humans: 3, bots: 2, level: 'selective' }
+      }
+    },
+    createdAt: '2026-09-18T10:00:00.000Z'
+  };
+  await f.repos.collaboration.recordDecision(decRuleNoScope);
+  const resRule = await f.collaboration.evaluation.replay(scope, { decisionIds: ['dec_rule_no_scope'] });
+  expect(resRule.passed).toBe(1);
+  // 没有触发新的模型调用（依然停在 calls.length === 2）
+  expect(f.calls).toHaveLength(2);
+});
+
+describe('CollaborationBackground - Bot role in scheduled execution', () => {
+  it('injects bot role before preInjectPrompt and group instructions, freezing the prompt across subsequent ticks', async () => {
+    const f = await fixture();
+    await saveLarkConfig(f.repos.config, f.repos.agents, {
+      originalAppId: scope.appId,
+      roleTitle: '监控值班助手',
+      roleScope: '巡检报警与异常排查',
+      preInjectPrompt: '系统置顶：安全操作规程。'
+    });
+    await f.collaboration.service.updateSettings(scope, installationOwnerTaskActor, {
+      expectedRevision: 0,
+      instructions: '群内长期指令：精炼回答。'
+    });
+    await f.create('scheduled-role', '统计服务错误率');
+    f.advance();
+    await f.collaboration.scheduler.tick();
+    await eventually(async () => f.calls.length === 1);
+
+    const prompt = f.calls[0]!.prompt;
+    const expectedRole = '[Dutydeck 角色 · 管理者配置]\n你在群里的角色是「监控值班助手」，负责：巡检报警与异常排查';
+    expect(prompt).toContain(expectedRole);
+    expect(prompt).toContain('系统置顶：安全操作规程。');
+    expect(prompt).toContain('群内长期指令：精炼回答。');
+    expect(prompt).toContain('统计服务错误率');
+
+    const roleIdx = prompt.indexOf(expectedRole);
+    const preInjectIdx = prompt.indexOf('系统置顶：安全操作规程。');
+    const instructionsIdx = prompt.indexOf('群内长期指令：精炼回答。');
+    const mandateIdx = prompt.indexOf('统计服务错误率');
+    expect(roleIdx).toBeLessThan(preInjectIdx);
+    expect(preInjectIdx).toBeLessThan(instructionsIdx);
+    expect(instructionsIdx).toBeLessThan(mandateIdx);
+
+    // 执行中修改当前 role 配置
+    await saveLarkConfig(f.repos.config, f.repos.agents, {
+      originalAppId: scope.appId,
+      roleTitle: '已修改的角色名',
+      roleScope: '已修改的范围'
+    });
+    f.advance();
+    await f.collaboration.scheduler.tick();
+
+    // 只有一次 driver 调用（任务正在执行中，不会重复分发）
+    expect(f.calls).toHaveLength(1);
+    const action = (await f.repos.collaboration.listActions(scope)).find(a => a.kind === 'agent_execution');
+    expect((action?.payload as any)?.request?.prompt).toContain(expectedRole);
+    expect((action?.payload as any)?.request?.prompt).not.toContain('已修改的角色名');
+  });
+
+  it('keeps legacy prompt ordering and compatibility when bot has no role configured', async () => {
+    const f = await fixture();
+    await saveLarkConfig(f.repos.config, f.repos.agents, {
+      originalAppId: scope.appId,
+      preInjectPrompt: '系统置顶：原始预置提示。'
+    });
+    await f.collaboration.service.updateSettings(scope, installationOwnerTaskActor, {
+      expectedRevision: 0,
+      instructions: '群长期指令：标准输出。'
+    });
+    await f.create('scheduled-no-role', '普通周期巡检');
+    f.advance();
+    await f.collaboration.scheduler.tick();
+    await eventually(async () => f.calls.length === 1);
+
+    const prompt = f.calls[0]!.prompt;
+    expect(prompt).not.toContain('[Dutydeck 角色 · 管理者配置]');
+    const preInjectIdx = prompt.indexOf('系统置顶：原始预置提示。');
+    const instructionsIdx = prompt.indexOf('群长期指令：标准输出。');
+    const mandateIdx = prompt.indexOf('普通周期巡检');
+    expect(preInjectIdx).toBeLessThan(instructionsIdx);
+    expect(instructionsIdx).toBeLessThan(mandateIdx);
+  });
+
+  it('does not restrict out-of-scope mandates and completes the execution lifecycle normally', async () => {
+    const f = await fixture();
+    await saveLarkConfig(f.repos.config, f.repos.agents, {
+      originalAppId: scope.appId,
+      roleTitle: '前端性能专员',
+      roleScope: '页面加载速度和首屏渲染'
+    });
+    await f.create('scheduled-out-of-scope', '后端数据库慢日志统计');
+    f.advance();
+    await f.collaboration.scheduler.tick();
+    await eventually(async () => f.calls.length === 1);
+
+    const call = f.calls[0]!;
+    expect(call.prompt).toContain('前端性能专员');
+    expect(call.prompt).toContain('后端数据库慢日志统计');
+
+    call.finish('慢日志分析完毕，一切正常。');
+    await f.collaboration.scheduler.tick();
+
+    const action = (await f.repos.collaboration.listActions(scope)).find(a => a.kind === 'agent_execution');
+    expect(action?.status).toBe('succeeded');
+  });
 });

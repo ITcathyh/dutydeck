@@ -48,6 +48,46 @@ describe('settings CLI against the real bot routes', () => {
     expect((await run('bot-list')).bots).toEqual([expect.objectContaining({ appId: 'cli_a', defaultAgentId: 'codex', listening: false })]);
   });
 
+  it('reads, writes, partially preserves, and clears roleTitle and roleScope', async () => {
+    const { repos, run } = await botRuntime();
+    // 写入 roleTitle 和 roleScope
+    const setRes = await run('bot-set', {
+      appId: 'cli_a',
+      pairs: ['roleTitle=告警值班', 'roleScope=负责全部告警与线上排查']
+    });
+    expect(setRes.bot).toMatchObject({
+      appId: 'cli_a',
+      roleTitle: '告警值班',
+      roleScope: '负责全部告警与线上排查'
+    });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({
+      roleTitle: '告警值班',
+      roleScope: '负责全部告警与线上排查'
+    });
+    const showRes = await run('bot-show', { appId: 'cli_a' });
+    expect(showRes.bot).toMatchObject({
+      roleTitle: '告警值班',
+      roleScope: '负责全部告警与线上排查'
+    });
+
+    // 局部更新其他字段，roleTitle 和 roleScope 保持不变
+    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=新做法'] });
+    const showPreserved = await run('bot-show', { appId: 'cli_a' });
+    expect(showPreserved.bot).toMatchObject({
+      roleTitle: '告警值班',
+      roleScope: '负责全部告警与线上排查',
+      preInjectPrompt: '新做法'
+    });
+
+    // 传入空值清空
+    await run('bot-set', { appId: 'cli_a', pairs: ['roleTitle=', 'roleScope='] });
+    const showCleared = await run('bot-show', { appId: 'cli_a' });
+    expect((showCleared.bot as any).roleTitle).toBeUndefined();
+    expect((showCleared.bot as any).roleScope).toBeUndefined();
+    expect(showCleared.bot).not.toHaveProperty('roleTitle');
+    expect(showCleared.bot).not.toHaveProperty('roleScope');
+  });
+
   it('rejects unknown keys and bad values before sending anything', async () => {
     const { fetcher, run } = await botRuntime();
     await expect(run('bot-set', { appId: 'cli_a', pairs: ['adhdmode=true'] })).rejects.toMatchObject({ code: 'SETTINGS_KEY_UNKNOWN' });

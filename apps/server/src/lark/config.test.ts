@@ -829,3 +829,67 @@ describe('ADHD 友好输出开关', () => {
     expect((await readLarkConfigs(repository))[0]!.adhdMode).toBe(false);
   });
 });
+
+describe('roleTitle 与 roleScope 角色配置字段', () => {
+  it('支持真实保存、读回、trim、公开配置可见、局部保留与空白清空', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, {
+      appId: 'cli_role',
+      appSecret: 'secret',
+      roleTitle: '  告警值班  ',
+      roleScope: '  报警与线上问题排查  '
+    });
+
+    const [created] = await readLarkConfigs(repository);
+    expect(created).toMatchObject({
+      roleTitle: '告警值班',
+      roleScope: '报警与线上问题排查'
+    });
+    const pubCreated = publicLarkConfig(created);
+    expect(pubCreated.roleTitle).toBe('告警值班');
+    expect(pubCreated.roleScope).toBe('报警与线上问题排查');
+
+    // 局部更新：不传 roleTitle / roleScope 时保留原值
+    await saveLarkConfig(repository, undefined, {
+      originalAppId: 'cli_role',
+      preInjectPrompt: '排查告警给出确定的根因'
+    });
+    const [preserved] = await readLarkConfigs(repository);
+    expect(preserved).toMatchObject({
+      roleTitle: '告警值班',
+      roleScope: '报警与线上问题排查',
+      preInjectPrompt: '排查告警给出确定的根因'
+    });
+    expect(publicLarkConfig(preserved).roleTitle).toBe('告警值班');
+    expect(publicLarkConfig(preserved).roleScope).toBe('报警与线上问题排查');
+
+    // 空白更新：传空白串清空
+    await saveLarkConfig(repository, undefined, {
+      originalAppId: 'cli_role',
+      roleTitle: '   ',
+      roleScope: ''
+    });
+    const [cleared] = await readLarkConfigs(repository);
+    expect(cleared.roleTitle).toBeUndefined();
+    expect(cleared.roleScope).toBeUndefined();
+    const pubCleared = publicLarkConfig(cleared);
+    expect(pubCleared.roleTitle).toBeUndefined();
+    expect(pubCleared.roleScope).toBeUndefined();
+    expect(pubCleared).not.toHaveProperty('roleTitle');
+    expect(pubCleared).not.toHaveProperty('roleScope');
+  });
+
+  it('旧配置缺失或非法类型时归一化为 undefined', async () => {
+    const repository = seedBots([
+      { appId: 'cli_legacy', appSecret: 'secret' },
+      { appId: 'cli_invalid', appSecret: 'secret', roleTitle: 123 as any, roleScope: null as any }
+    ]);
+    const [legacy, invalid] = await readLarkConfigs(repository);
+    expect(legacy!.roleTitle).toBeUndefined();
+    expect(legacy!.roleScope).toBeUndefined();
+    expect(invalid!.roleTitle).toBeUndefined();
+    expect(invalid!.roleScope).toBeUndefined();
+    expect(publicLarkConfig(legacy!)).not.toHaveProperty('roleTitle');
+    expect(publicLarkConfig(legacy!)).not.toHaveProperty('roleScope');
+  });
+});
