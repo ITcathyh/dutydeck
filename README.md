@@ -1,14 +1,16 @@
 # Dutydeck
 
 <p align="center">
-  <strong>本地优先的 AI Agent 工程工作台与飞书指挥台</strong><br>
-  <em>Local-First AI Agent Engineering Workbench & Lark Bridge</em>
+  <strong>本地优先的 AI Agent 研发工作台与飞书指挥台</strong><br>
+  <em>把跑在你开发机上的 Claude Code / Codex / CLI 编码智能体，变成随时待命、团队协同的飞书研发队友与 Web 工作台</em>
 </p>
 
 <p align="center">
+  <a href="#why-dutydeck">💡 为什么选 Dutydeck</a> •
+  <a href="#key-highlights">✨ 核心亮点</a> •
   <a href="#quick-start">⚡ 快速上手</a> •
   <a href="#lark-guide">🤖 飞书指挥台</a> •
-  <a href="#web-console">🖥️ Web 控制台</a> •
+  <a href="#web-console">🖥️ Web 工作台</a> •
   <a href="#agent-config">⚙️ Agent 配置</a> •
   <a href="#cli-reference">🛠️ CLI 速查</a> •
   <a href="#faq">❓ FAQ</a>
@@ -20,280 +22,268 @@
 
 ---
 
-## 📖 简介与核心价值
+## 📖 项目简介
 
-**Dutydeck** 是一个本地优先（Local-First）的个人与团队 Agent 研发工作台。它将你开发机或服务器上运行的编码智能体（如 Claude Code、Codex、各类 ACP Agent 及命令行 CLI）无缝桥接到**飞书**与 **Web 仪表盘**中。
+**Dutydeck** 是一个专为开发者和工程团队打造的本地优先（Local-First）AI Agent 研发工作台。
 
-你不需要随时守在终端前盯代码生成——无论是在工位、会议室还是通勤途中，只需在飞书私聊发送工程目标，或在群聊中 `@机器人`，Agent 就会在本机的独立沙箱中开始作业。
+它通过守护进程，将你本地开发机或远程服务器上运行的编码智能体（如 Claude Code、Codex、各类标准 ACP Agent 及命令行 CLI），无缝接入**飞书（Lark）**与 **Web 仪表盘**。
+
+你不再需要全程坐在电脑前紧盯终端输出。无论是在工位写业务代码、在会议室开会，还是在下班通勤路上，只要在飞书发一条消息，Agent 就会在本地的独立沙箱中安全作业，自动跑测试验证，并将长文成果与验证证据直接推送到你的手机上。
 
 ```text
-┌───────────────── 交互界面 (Interfaces) ─────────────────┐
-│  📱 飞书移动端 / 桌面端 (Lark/Feishu)    🌐 Web 深度工作台  │
-│  · 目标下达 / 实时进度卡片              · 任务概览与多维度筛选 │
-│  · 一键审批 / 追问交互                  · 实时增量日志 & 终端 │
-│  · 长期记忆 / 群聊定时交办              · Git Worktree 隔离管 │
-└────────────────────────────┬────────────────────────────┘
-                             │ (WebSocket / SSE / Card 2.0)
-┌────────────────────────────▼────────────────────────────┐
-│              Dutydeck 本地守护进程 (Local Daemon)        │
-│  · 任务排队、中断、恢复与调度        · 敏感操作权限门禁 (ask) │
-│  · 跨会话长期记忆提取与整理          · 自动化命令验证与证据留存│
-│  · SQLite 事务持久化 (零状态丢失)    · GitHub Actions 自动续作 │
-└────────────────────────────┬────────────────────────────┘
-                             │ (ACP Protocol / PTY Adapter)
-┌────────────────────────────▼────────────────────────────┐
-│              本机 Agent 运行时 (Local Engines)           │
-│  · Claude Code (原生 / CPA 网关)    · ACP Agents (acpx)  │
-│  · 自定义 CLI 适配器                · 独立 Git Worktree   │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────── 交互界面 (Interfaces) ────────────────────────┐
+│  📱 飞书移动端 / 桌面端 (Lark/Feishu)         🌐 Web 深度工作台       │
+│  · 随时随地派活，任务卡片流式刷新             · 任务全局看板与状态流转│
+│  · 遇到危险操作手机一键审批                   · 真实终端 Xterm 全量回放│
+│  · 跨会话长期记忆与自然语言定时委托           · Git Worktree 沙箱管控 │
+└───────────────────────────────────┬───────────────────────────────────┘
+                                    │ (WebSocket / SSE / Card 2.0)
+┌───────────────────────────────────▼───────────────────────────────────┐
+│                     Dutydeck 本地守护进程 (Local Daemon)               │
+│  · 任务排队、抢占与中断调度                   · 敏感操作权限门禁 (ask) │
+│  · 自动化真机验证门禁 (Verification Gate)     · 长期记忆自动提取与整理 │
+│  · SQLite 事务持久化 (零状态丢失)             · CI / Codebase 流水线续作│
+└───────────────────────────────────┬───────────────────────────────────┘
+                                    │ (ACP Protocol / PTY Adapter)
+┌───────────────────────────────────▼───────────────────────────────────┐
+│                     本机 Agent 运行时 (Local Engines)                  │
+│  · Claude Code (原生 / CPA 代理网关)          · 标准 ACP Agents (acpx) │
+│  · 自定义 CLI 脚本与适配器                    · 独立 Git Worktree 目录 │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
-### 为什么选择 Dutydeck？
+---
+
+## 💡 为什么选择 Dutydeck？（核心价值与场景） <a id="why-dutydeck"></a>
+
+很多开发者习惯直接在终端跑 `claude` 或其他 CLI 编程助手，但日常工程落地中往往会遇到以下阻碍：
 
 | 痛点场景 | 传统终端 CLI 使用方式 | Dutydeck 体验 |
 |---|---|---|
-| **随地交办** | 必须打开电脑终端，人离席任务即断 | 手机飞书直接发需求，异步作业，结果自动卡片推送 |
-| **高危操作控制** | 要么全局跳过风险不可控，要么中断卡住 | 飞书卡片一键点击「批准/拒绝」，精准管控每个危险指令 |
-| **多任务与代码冲突** | 在当前分支直接改写，容易污染未提交代码 | 默认自动创建独立的 Git Worktree 沙箱，零污染安全作业 |
-| **质量验证** | Agent 声称“单测已通过”，难以佐证真实性 | 服务端真实验证命令，记录退出码、执行时长与代码指纹 |
-| **团队协同与记忆** | 每次开启新会话都要反复灌输项目规范 | 跨会话长期记忆自动沉淀，群聊按需参与，定时总结汇报 |
+| **移动交办与异步等待** | 必须守在电脑屏幕前；离席或断开 SSH，任务立即中断 | 手机飞书发一句话直接派活，后台持续执行，结果以富文本卡片自动回传 |
+| **高危操作管控** | 要么全局开启 YOLO 跳过确认（风险不可控），要么频繁弹窗卡死执行 | 飞书卡片弹出「批准/拒绝」按钮，在手机上一键点击放行，兼顾效率与安全 |
+| **代码冲突与脏工作区** | 直接改写当前分支，容易污染未暂存的本地改动 | 自动从当前提交派生独立的 **Git Worktree 沙箱**，完全不干扰主工作区 |
+| **代码交付质量验证** | Agent 声称“单测已全部通过”，往往存在假通过或漏跑 | **服务端真机执行测试命令**，留存退出码、耗时与代码指纹，失败自动打回返修 |
+| **团队协同与项目记忆** | 每次开启新会话都要重新输入规范；无法在团队群协助排障 | **跨会话持久记忆**自动沉淀；进群支持观察与按需回复，甚至用自然语言交办定时任务 |
+| **流水线无人值守** | Git 推送后需要手动盯着 CI 结果，挂了再拉起 Agent 修 | 监听 GitHub Actions 与 Codebase Webhook，流水线失败**自动唤醒 Agent 自愈修复** |
 
 ---
 
-## ✨ 核心特性
+## ✨ 六大核心亮点 <a id="key-highlights"></a>
 
-- 🤖 **飞书全功能指挥台**：私聊/群聊下达任务、持久化进度流、敏感操作交互式卡片审批、追问直答，超长产物自动打包为 Markdown 附件交付。
-- 🛡️ **安全权限姿态（Permission Posture）**：默认 `ask`（高危操作实时审批）；支持 `approve-reads`、`deny-all`，仅在完全受信任的无人值守工作区使用 `full-trust`。
-- 🌿 **Git Worktree 沙箱隔离**：基于当前提交自动派生独立分支与工作目录，保障宿主未提交改动安全；归档时支持严格的安全清理检测。
-- 🧪 **真实验证与工程证据**：支持关联自动化验证命令（测试、构建、Lint），服务端真实执行并持久化退出码与执行输出，拒绝“虚假通过”。
-- 🧠 **跨会话长期记忆**：每个聊天独立维系长期记忆。支持 `/remember` 人工沉淀，后台每 3 轮自动提取关键事实并定期整理去重。
-- 👥 **群聊协作与自然语言委托**：支持观察（`observe`）与按需参与（`selective`）；支持自然语言设定持续委托（如“每天18点总结进展”）。
-- 🔌 **通用 Agent 协议生态**：深度集成 `acpx@0.13.0` 标准 ACP 协议，提供 PTY 适配器驱动 Claude Code 及自定义命令行脚本。
-- 🎛️ **极简运维与自愈诊断**：提供 `dutydeck setup`（引导安装）、`dutydeck doctor`（带修复建议的环境诊断）和 `dutydeck autostart`（开机自启）。
+### 1. 📱 飞书全功能指挥台：移动端无缝协同
+- **动态流式卡片**：在私聊或群聊中下达指令，任务状态、当前阶段、执行耗时实时更新。
+- **手机一键审批**：遇到写文件、删目录或高危 Shell 调用时，卡片即时弹出审批选项，点一次即可放行。
+- **长文本产物自动打包**：超长代码或详尽分析文档自动打包为 Markdown 附件交付，阅读不折叠。
+- **ADHD 友好输出模式**：首行直给结论与行动项，清单严格按组拆分，不讲废话客套话。
+
+### 2. 🌿 Git Worktree 物理级沙箱：零污染工作区
+- **主目录绝对安全**：你正在本地写着大需求，突然需要修复线上紧急 Bug？无需 `git stash` 或切分支，Dutydeck 自动从当前 HEAD 派生独立 Git Worktree 沙箱进行修改。
+- **严苛的安全清理门禁**：任务归档时，自动检查是否存在未提交改动、未合并的分支 Commit 及占用进程，确认无安全风险后才允许释放目录。
+
+### 3. 🧪 铁证级真机验证门禁（Verification Gate）
+- **告别模型幻觉**：Agent 说“测试已跑通”不可轻信。Dutydeck 会在宿主机工作区实际运行测试命令（如 `pnpm test` 或 `go test ./...`）。
+- **完整证据留存**：记录命令退出码、耗时、标准输出与代码哈希指纹。
+- **自动返修闭环**：验证不通过时，自动抓取失败日志作为上下文打回 Agent 发起针对性返修（最多 2 轮），省去人工介入。
+
+### 4. 🧠 跨会话长期记忆系统
+- **记忆不丢失**：每个私聊或群聊独立维护持久化记忆库，重启或开启新会话（`/new`）不丢失。
+- **主动记录与自动提取**：支持人工发送 `/remember` 固化团队规范；后台每 3 轮轻量提取环境事实与偏好，每 8 轮自动合并去重。
+- **按需注入上下文**：任务开启时注入精简记忆索引，执行中 Agent 可通过命令检索完整细节。
+
+### 5. 👥 团队群聊智能搭子与持续委托
+- **按需参与（Selective）**：不会在群内刷屏打扰，仅在明确求助、紧迫风险或特定上下文时发言。
+- **少 @ 一次交互**：在你发起的话题内继续追问无需重复 `@机器人`，10 分钟内补 `@` 自动认领刚才发出的需求。
+- **自然语言定时委托**：在群聊直接交办“每天 18:00 总结本群今日进展”，守护进程精准定时执行并汇报。
+- **分层协作模式**：支持配置 PMO 接收需求、Leader 拆解方案、Worker 具体落地并自动回传验收。
+
+### 6. 🔄 CI / Codebase 流水线自愈闭环
+- **GitHub Actions 轮询**：发送 `/ci wait`，后台自动跟进构建状态，失败即时唤醒 Agent。
+- **Codebase Webhook 监听**：原生支持企业内 Codebase / GitLab MR 与流水线事件（具备 HMAC-SHA256 签名与防重放机制），流水线挂掉后自动执行受限代码自愈修复。
 
 ---
 
-## ⚡ 快速上手 <a id="quick-start"></a>
+## ⚡ 3 分钟快速上手 <a id="quick-start"></a>
 
 ### 1. 环境准备
 
 - **Node.js**：`>= 22.12.0`
 - **包管理器**：`pnpm >= 11`
-- **Agent CLI**：本机已安装并登录 Claude Code 或其它 ACP 兼容的 CLI。
+- **已安装的 Agent CLI**：本机已安装 Claude Code（`claude`）或其他支持 ACP / CLI 的智能体。
 
-### 2. 安装与配置
+### 2. 全局安装与配置
 
-推荐全局安装 CLI 并使用交互式向导完成配置：
+推荐使用全局 CLI 配合交互式向导，向导会自动探测本机可用的 Agent、设置默认工作目录并引导配置飞书机器人：
 
 ```bash
 # 全局安装 Dutydeck
 pnpm add -g @byted/dutydeck --registry=http://bnpm.byted.org
 
-# 运行交互式配置向导（自动探测 Agent、设定默认工作区、可选接入飞书）
+# 运行交互式配置向导（支持幂等重入）
 dutydeck setup
 ```
 
-> **向导特性**：`dutydeck setup` 具备幂等性，检测到既有配置时会询问保留或更新，中途退出不会残留半份配置。脚本与 CI 中可通过参数非交互运行：
-> ```bash
-> dutydeck setup --cwd /path/to/project --port 4310 --skip-lark --yes
-> ```
+> **自动化部署提示**：CI 或无人值守脚本中可通过参数直接跳过交互：  
+> `dutydeck setup --cwd /path/to/project --port 4310 --skip-lark --yes`
 
-### 3. 启动服务
+### 3. 启动守护进程与状态检查
 
 ```bash
 # 启动后台守护进程
 dutydeck start
 
-# 查看运行状态
-dutydeck status
-
-# 运行健康检查（遇错会给出明确的补救命令）
+# 运行健康诊断（若有问题会输出一键复制执行的修复命令）
 dutydeck doctor
+
+# 查看守护进程运行状态
+dutydeck status
 ```
 
-启动完成后，打开浏览器访问控制台：
+启动成功后，浏览器访问控制台：
 - **Web 控制台**：`http://127.0.0.1:4310`（本机访问默认免密）
 
 ---
 
-### 💡 源码开发模式
+### 💡 源码二次开发与调试模式
 
-如果你希望基于源码进行二次开发或调试：
+如果你希望参与 Dutydeck 本身的代码开发或进行深度定制：
 
 ```bash
-# 1. 克隆代码并安装依赖
+# 1. 克隆代码仓库并安装依赖
 git clone https://github.com/bytedance/dutydeck.git
 cd dutydeck
 pnpm install
 
-# 2. 准备环境变量文件（可直接跑 dutydeck setup 或复制模版）
+# 2. 配置环境变量
 cp .env.example .env
 
-# 3. 启动开发模式（前后端热重载）
+# 3. 启动前后端热重载开发模式
 pnpm dev
 ```
 
-在开发模式下：
+本地开发地址：
 - **Web 前端**：`http://127.0.0.1:4311`
-- **后端 API**：`http://127.0.0.1:4310`（Vite 会自动将请求反向代理到该端口）
+- **后端 API**：`http://127.0.0.1:4310`（前端请求自动反向代理到此端口）
 
 ---
 
-## 🤖 飞书指挥台使用指南 <a id="lark-guide"></a>
+## 🤖 飞书指挥台实战指南 <a id="lark-guide"></a>
 
-飞书机器人是 Dutydeck 最核心的使用入口。绑定机器人后，你即可在飞书中以对话形式驱动完整的研发流程。
+飞书机器人是 Dutydeck 最常用的交互入口。
 
-### 1. 发起与交互流程
+### 1. 经典任务交互流程
 
 ```text
-[在飞书发消息] ──────► [收到确认表情: 👌] ──────► [推送动态进度卡片]
-                                                    │
-┌────────────────── Agent 遇到高危操作或提问 ◄───────┘
+[在飞书发送需求] ──────► [机器人贴反馈表情: 👌] ──────► [推送动态进度卡片]
+                                                             │
+┌────────────────── Agent 遇到写操作或疑问确认 ◄──────────────┘
 ▼
-[卡片弹出审批按钮: 批准 / 拒绝] 或 [收到问题卡片: 点击回复]
+[卡片弹出审批按钮: 批准 / 拒绝] 或 [收到提问卡片: 回复答复]
 │
 ▼
-[任务执行结束] ──────► [原进度卡冻结] ──────► [发送独立结果卡 (长文带附件)]
+[任务执行完毕] ──────► [自动运行本地测试验证] ──────► [推送最终结果卡片与附件]
 ```
 
-- **发起任务**：在私聊中直接发送需求；在群聊中按协作策略触发（默认 `@机器人` 并附带任务内容）。
-- **追加与调整**：上一轮完成后，直接回复结果卡片或在私聊中发消息，Agent 会在相同上下文中继续推进。
-- **在线审批**：遇到高危操作（如写文件、执行 Shell），卡片提供「批准一次」和「拒绝」按钮，点击即时下达指示。
-- **解答追问**：Agent 遇到不明确需求主动提问时，直接回复问题卡片或使用 `/answer <编号> <内容>`。
-- **ADHD 友好输出**：在机器人设置勾选「ADHD 友好输出」后，这个机器人的飞书任务回复改按 [i-have-adhd](https://github.com/ayghri/i-have-adhd) 的规则写：第一行给结论或要你做的事，多步骤编号，列表每组不超过 5 项，结尾只留一个下一步，不写开场白和客套话。默认关闭，保存后从下一轮任务开始生效；Tag 的只读插话和后台定时委托不受影响。
+1. **下达任务**：私聊直接说需求；群聊 `@机器人 任务描述`。
+2. **跟进反馈**：机器人接单后自动在原消息添加 `👌` 表情，并发送流式进度卡片。
+3. **在线审批**：遇到高危特权操作，卡片呈现「批准一次」与「拒绝」，在手机上直接点击操作。
+4. **澄清答复**：Agent 遇到模糊需求发来问题卡片时，直接回复卡片或使用 `/answer <编号> <内容>`。
+5. **交付验收**：执行完毕后推送结果卡片，包含代码改动、验证命令输出（通过/未通过/未验证）以及超长 Markdown 产物。
 
-### 2. 常用飞书命令速查
+---
+
+### 2. 常用飞书命令速查表
 
 | 指令 | 示例 | 作用说明 |
 |---|---|---|
-| `/help` | `/help` | 查看当前群或私聊中可用的指令帮助 |
-| `/new` | `/new -- 修复登录接口超时的 bug` | 结束上一段上下文，并在当前工作区开启新任务 |
-| `/new (高级)` | `/new --cwd "/data/app" --workspace worktree -- 优化性能` | 指定工作目录，并开启独立 Git Worktree 沙箱 |
-| `/new --handoff` | `/new --handoff 先补登录重试的测试` | 结束上一段上下文，新会话首轮带上交接：旧会话链接、最近 3 轮结果摘录、git 快照和备注（服务端拼接，不调用模型摘要）；可接 `-- 需求内容` |
-| `/tasks` | `/tasks 1` | 查看当前会话发起的任务列表（进行中、待审批、已完成） |
-| `/approve` | `/approve <卡片编号>` | 批准敏感工具调用（等同于点击卡片上的批准按钮） |
+| `/help` | `/help` | 查看当前会话中可用的帮助与命令列表 |
+| `/new` | `/new -- 优化登录接口的查询耗时` | 开启全新会话，隔离前序上下文 |
+| `/new (指定沙箱)` | `/new --cwd "/data/app" --workspace worktree -- 重构模块` | 指定工作路径，并在独立的 Git Worktree 沙箱中作业 |
+| `/new --handoff` | `/new --handoff 补齐重试逻辑单测` | 开启新会话并自动带上前一会话的改动快照与上下文交接 |
+| `/tasks` | `/tasks` | 分页查看当前会话发起的任务列表与当前状态 |
+| `/approve` | `/approve <卡片编号>` | 批准敏感工具调用（等同于点击卡片上的「批准」按钮） |
 | `/reject` | `/reject <卡片编号>` | 拒绝敏感工具调用 |
-| `/answer` | `/answer <卡片编号> 使用方案A` | 回复 Agent 提出的需求澄清或确认项 |
+| `/answer` | `/answer <卡片编号> 选择方案 B` | 回复 Agent 提出的澄清问题 |
 | `/cancel` | `/cancel` | 中断当前正在执行的任务 |
 | `/retry` | `/retry` | 重新执行上一轮失败或中断的任务 |
-| `/remember` | `/remember 测试命令必须使用 pnpm test` | 为当前聊天保存一条跨会话长期记忆 |
-| `/memory` | `/memory 1` | 分页查看本聊天的长期记忆条目 |
-| `/forget` | `/forget <记忆ID>` | 标记删除指定记忆条目 |
-| `/ci` | `/ci wait build.yml`、`/ci fix` | 等待 GitHub Actions 或 Codebase 流水线结果并自动续作；Codebase 失败可按规则交给 Agent 修复 |
+| `/remember` | `/remember 严禁直接 push 到 master 分支` | 手动为当前聊天沉淀一条长期跨会话记忆 |
+| `/memory` | `/memory 1` | 查看当前聊天持久化的记忆列表 |
+| `/forget` | `/forget <记忆ID>` | 标记删除指定的记忆条目 |
+| `/ci` | `/ci wait build.yml` 或 `/ci fix` | 监听 GitHub Actions / Codebase 构建，失败可交由 Agent 自动修复 |
 
-> **`/new` 选项语法规则**：使用参数时，必须在需求文本前加上 `--` 隔开，例如：  
-> `/new --cwd "/path/to/repo" --model "gemini-3.8-flash-high" --effort "high" --workspace worktree -- 需求内容`
-
----
-
-### 3. 会话长期记忆
-
-Dutydeck 为每个聊天（私聊或群聊独立隔离）维护一份持久化记忆库，重启或 `/new` 不会丢失。
-
-1. **常驻注入**：每轮任务开头，系统会将精简后的记忆索引（`MEMORY.md`，≤ 3000 字）注入 Agent 上下文。
-2. **主动存取**：用户可用 `/remember <内容>` 显式写入；Agent 在执行中需要更深细节时可通过工具调用 `memory show` 或 `memory search` 按需拉取。
-3. **自动化提取与整理**：
-   - 每完成 **3 轮**任务，系统会在独立后台只读运行一次轻量 Agent，自动提取跨任务依然有效的偏好、约定与环境事实；
-   - 每累计 **8 轮**任务（或索引接近满额），自动触发一轮归拢整理，合并同类项并淘汰过期知识。
-   - 提取过程配备确定性规则门禁，确保绝不泄露凭据、绝不改写用户原文。可在聊天中发送 `/memory consolidate` 手动触发。
+> **提示**：`/new` 若带有选项参数，请在选项与正文之间使用 `--` 分隔，例如：  
+> `/new --workspace worktree --model "claude-sonnet-5-5" -- 修复单测`
 
 ---
 
-### 4. 群聊按需参与与持续委托
+### 3. 群聊协作机制深度解析
 
-在团队群中，你可以将机器人配置为智能研发搭子：
+把 Dutydeck 机器人拉进团队群后，它能扮演高情商的研发协作者：
 
-- **Bot 默认模式**：在机器人设置中选择「默认群参与模式」，未单独配置的现有群和新加入的群都会继承，保存后生效。群内可显式关闭或改回「跟随机器人默认」；已有群的独立配置会保留。观察需要群聊读取权限，Tag 回复还需要主动发送权限。
-- **团队上下文**：同一个 Bot 可以结合它已加入且允许读取的其他群回答，例如在测试群询问「看看个人待办群」。按群名和问题检索已读记录、近期消息、跟进事项与群记忆，回答保留来源；部分读取或检索截断会标明范围。跨群读取不会自动开启来源群的主动参与。
-- **三种参与模式**：
-  - `off`：仅在被明确 `@机器人` 时响应交办，不主动插话。
-  - `observe`：默默观察群聊上下文与讨论，积累背景知识，但绝不主动发言。
-  - `selective`：按需参与。未 @ 时默认安静；仅在明确叫机器人帮忙、可靠续问，或有充分证据的紧迫风险需要立即提醒时回复；这类求助需要读链接、调用工具或修改委托时，按一次 @ 交给执行 Agent。群友问答、泛问、进度和致谢不插话；不确定时不回复、不贴确认表情。
-- **少 @ 一次**：开启观察或按需参与后，回复你自己 @ 机器人的请求或机器人给你的回复不用再 @，在机器人已接手、由你发起的话题里继续说也不用再 @；别人的消息、@ 了其他人或回复其他人消息的，仍按上面的规则判断。在群里发完请求忘了 @，10 分钟内单独补一个 @，机器人直接处理你刚才那条消息，不再要求确认。`/status` 会显示当前群的参与模式。
-- **处理状态与并发**：决定回复后在源消息加 `OK` 表情，生成并发送回复后移除；无需回复时保持静默。不同群独立处理，同群按顺序处理，尚未接下的连发消息会合并判断。
-- **分层协作执行方式**：在机器人设置的「执行方式」选择「分层协作」并指定 Leader 与 Worker 后，被 @ 的默认 Agent 当 PMO 负责接待和答复，改代码、跑测试这类任务写成简报交给 Leader；Leader 只读拆解并指派 Worker，最后由 Leader 验收，结果回到原话题。只在群聊生效，计划要点「开始执行」才派发。
-- **Agent 单次交接与回传（handoff / reply-agent）**：群聊中支持机器人之间的轻量任务交接与单次回传工具，严格绑定同话题与当前轮次 turn 凭证。交接在原话题 @ 目标并附带目标与边界；处理完成后通过 reply-agent 回传实质结果并 @ 发起方。Agent 应仅在交接任务和回传实质结果时 @ 对方；礼貌确认不应再次 @，以免循环唤醒。多步分工或多轮返修走 `/work` 编排。
-- **自然语言定时与持续委托**：用自然语言设置定时任务，需要在群聊里并且开启群工具；否则请用 /schedule 命令。
-  - `@机器人 记录一个待办：明天下午 17:00 前提交发布单。`
-  - `@机器人 每天工作日 18:00 总结本群今天的研发进展发到群里，直到我取消。`
-  - `@机器人 跟进刚才的构建状态，每两小时检查一次，若失败则提醒我。`
+- **三种群参与模式**：
+  - `off`：仅在被明确 `@机器人` 时响应交办，平时完全静音。
+  - `observe`：默默监听群聊技术讨论，沉淀群内工程背景，绝不主动发言。
+  - `selective`（按需参与）：平时保持安静；仅在识别到明确求助、紧迫线上风险或可靠追问时主动回答。
+- **少 @ 一次的人性化机制**：
+  - 在机器人已认领的话题内，你作为发起人继续回复无需重复 `@`；
+  - 刚在群里发了长篇需求忘了 `@`？在 10 分钟内单独发送一个 `@机器人`，机器人会自动认领前一条消息开始处理！
+- **自然语言定时与持续委托**：
+  - `@机器人 提醒我明天下午 17:00 提交发布单。`
+  - `@机器人 每个工作日 18:00 汇总今天群内的开发进展并发在群里。`
+- **分层协作（Leader-Worker）**：
+  - 复杂任务交办后，负责接待的 Agent 整理任务简报交给 Leader；Leader 负责拆解只读方案并指派 Worker 改写代码，最终由 Leader 验收回传原话题。
 
 ---
 
-### 5. 接入飞书机器人
+### 4. 接入飞书机器人
 
-#### 途径 A：Web 界面一键自动创建（最推荐）
-1. 访问 Web 控制台（`http://127.0.0.1:4310`），在首屏点击 **「新增机器人」**。
-2. 输入机器人名称，点击 **「创建机器人」**。
-3. 界面会复用本机已登录的飞书开发者凭据（或展示扫码登录）。系统通过飞书开放平台一键模版自动创建应用、配置所需事件与权限、发布版本并保存密钥至本地。
-4. 选定工作目录与执行 Agent 后即可一键接通。
+#### 方式 A：Web 控制台一键自动接入（最推荐）
+1. 浏览器打开 Web 控制台（`http://127.0.0.1:4310`），点击首屏右上角 **「新增机器人」**。
+2. 填写机器人名称，点击 **「创建机器人」**。
+3. 系统自动复用当前机器已有的飞书开发者登录态（或引导扫码），通过开放平台模版自动创建应用、配置事件订阅与权限、一键发布版本并持久化密钥。
+4. 关联默认目录与 Agent 即可立即投产。
 
-#### 途径 B：CLI 命令行快速接入
+#### 方式 B：CLI 命令行快速接入
 ```bash
 # 创建并接入新机器人
 dutydeck lark create "研发助手" --agent ccflash --listen
 
-# 绑定已有自建应用（自动补齐权限与长连接配置）
+# 绑定已有自建应用
 dutydeck setup --lark-app-id cli_xxxxxxxx
 ```
 
 ---
 
-## 🖥️ Web 工作台与工程闭环 <a id="web-console"></a>
+## 🖥️ Web 工作台与自动化闭环 <a id="web-console"></a>
 
-Web 工作台为你提供全维度的任务视察、代码沙箱管理与自动化流转。
+Web 工作台专为深度排查、全景把控与工程资产治理设计。
 
-### 1. 任务看板与状态流转
-- 状态按 **「待你处理」**（等审批/等回答）、**「进行中」**、**「已完成」** 和 **「已归档」** 清晰分层展示。
-- 任务卡片突出核心步骤、工具调用折叠、最终回答与耗时指标；右侧面板可按需展开原始终端全量输出（Xterm 真实回放）。
-- 当 Agent 忙碌时，新提交的指令支持排队缓冲，也支持**「立即介入（Interrupt & Preempt）」**。
+### 1. 全局任务看板与终端回放
+- 任务按 **「待处理」**（等待审批/待回答）、**「进行中」**、**「已完成」** 和 **「已归档」** 清晰分层。
+- 卡片突出显示核心耗时、工具调用明细与最终产物；展开右侧面板可查看 **Xterm 实时全量终端回放**。
+- 支持新指令排队缓冲，以及紧急情况下的**「立即中断抢占（Interrupt）」**。
 
-### 2. Git Worktree 独立沙箱
-在 Web 创建任务或通过飞书指定 `--workspace worktree` 时，系统会从源仓库当前 Commit 派生一个独立的临时 Git 工作树：
-- **互不干扰**：主目录写代码、跑本地服务不受任何影响，避免分支切换污染。
-- **安全清理门禁**：归档后清理工作区时，Dutydeck 会执行极其严苛的自动化检查：
-  - 确认无未提交代码（含未跟踪与忽略文件）；
-  - 确认无未合并到主分支的新增 Commit；
-  - 确认无子模块冲突且无运行中的进程占用。
-  - 确认通过后安全释放目录，保留 Git 分支与全部操作历史。
+### 2. 真实自动化验证与自动打回
+- 配置机器人的验证命令（如 `pnpm test`、`go test ./...`）后，每当任务修改了代码，服务端自动在沙箱中执行。
+- 结果卡片展示 **「验证通过」**、**「验证未通过」** 或 **「验证已过期」**。
+- 若执行失败，截断后的报错输出会自动作为下一轮返修提示喂回 Agent，进行全自动闭环修复。
 
-### 3. 真实验证命令（Verification Gate）
-飞书机器人配置了验证命令（例如 `pnpm test` 或 `go test ./...`）后，一轮任务跑完、且这一轮改了代码时（worktree 看相对派生它的 Commit 有没有改动，共享目录看本轮开始和结束时的代码指纹是否变化），系统自动执行这条命令；结果卡上也可以点「运行验证」手动执行：
-- **真实环境**：在对应的任务工作目录下真实执行，限制最长超时（默认 5 分钟）与输出大小（128 KiB）。
-- **留存铁证**：记录退出码、执行时间、输出摘要与代码指纹。结果卡标题栏只写「运行完成」，验证状态单独一行：验证通过 / 验证未通过 / 未验证；验证之后代码又被修改的，旧证据自动失效，标「验证已过期」。自动验证执行中服务重启的，重启后卡片改标「验证被中断」，可点「运行验证」重跑。
-- **自动返修**：命令失败时，把截断后的失败输出作为一轮返修发回 Agent，同一条请求最多返修 2 轮，仍失败则标「验证未通过」。命令不存在、启动失败、超时等验证工具本身的问题同样算未通过，但不发回返修。
-- **候选命令**：还没配验证命令的机器人，工作区第一次有任务跑完时，系统按基准分支（worktree 派生它的 Commit，共享目录是仓库默认分支）上的 `package.json`（test / typecheck 脚本）、`Makefile`（test 目标）或 `go.mod` 推断一个候选命令，在结果卡上点「使用这个验证命令」即可保存到机器人配置。
-
-### 4. GitHub Actions 自动续作
-当代码推送到远端仓库后，无需肉眼盯 CI：
-- 页面或飞书执行 `/ci wait [workflow]`。
-- Dutydeck 后台每分钟轮询 GitHub API（需配置 `DUTYDECK_GITHUB_TOKEN`）。
-- 一旦指定或所有 Workflow 构建结束，Dutydeck 会自动唤醒 Agent，在当前上下文中追加指令进行修复或下发结果通知。
-
-### 5. Codebase 流水线续作与修复
-配置 `DUTYDECK_CODEBASE_WEBHOOK_SECRET` 并重启后，Dutydeck 在 `POST /api/hooks/codebase` 接收 Codebase MR 与流水线事件。该路径不走 Web 登录，由路由自己校验：
-- 令牌：请求头 `X-Dutydeck-Token`、`Authorization: Bearer <密钥>`，或 URL 参数 `?token=<密钥>`（只能填 URL 的平台用；请求日志只记路径）。
-- 签名：`X-Dutydeck-Signature: sha256=<hex>`，为 HMAC-SHA256(密钥, `<X-Dutydeck-Timestamp>.<原始请求体>`)。
-- 时间戳：`X-Dutydeck-Timestamp`（Unix 秒）或载荷里的事件时间，与本机时间相差超过 5 分钟即拒绝。签名模式必须带 `X-Dutydeck-Timestamp`；令牌模式可以不带，此时只靠去重防重放。
-- 去重：`X-Dutydeck-Event-Id` 或载荷的 `id` / `event_id`，缺省时按请求体哈希；24 小时内的重复投递只确认、不处理，过期记录会被删除。
-
-在 origin 为 `code.byted.org` 的会话里执行 `/ci wait`：失败时发送失败卡，点「交给 Agent 修」开始修复；执行 `/ci fix`：失败时直接交给 Agent 修复。流水线通过时投递续作任务，MR 合入或关闭后停止等待。修复规则：最多 3 轮；同一错误指纹出现 2 次即停；每轮最多改 10 个文件、300 行；动手前和推送前各核对一次 head SHA；CI 日志作为不可信输入包在标记里交给 Agent；不合入、不 approve、不 force push。任务以部署者身份执行，事件里的操作人只做记录。
-
-载荷支持 DutyDeck 信封 `{ id, type: "codebase.pipeline" | "codebase.merge_request", timestamp, repository, branch, mr, sha, status 或 action, pipeline: { id, url }, operator, failures: [{ job, stage, reason, log }] }`，也按 GitLab 风格解析 `object_kind: pipeline | merge_request`。
+### 3. Codebase / GitLab Webhook 自动化续作
+Dutydeck 可以在 `POST /api/hooks/codebase` 接收 MR 和流水线变更事件：
+- **安全鉴权**：支持请求头 Token、Bearer Token、HMAC-SHA256 签名校验与 24 小时去重防重放。
+- **自动触发自愈**：在配置了 Webhook 的会话中输入 `/ci fix`，流水线挂掉后自动拉起 Agent 分析修复。具备严格防护：单次故障最多修复 3 轮、同一报错指纹遇 2 次即停、每轮限制改动文件数与行数、推送前校验 Commit SHA，不合入、不强制推送。
 
 ---
 
-## ⚙️ Agent 配置与扩展 <a id="agent-config"></a>
+## ⚙️ Agent 配置与权限姿态 <a id="agent-config"></a>
 
-Dutydeck 既支持标准的 ACP (Agent Client Protocol) 协议，也支持通过 PTY 模拟终端直接驱动市面上已有的命令行 Agent。
+Dutydeck 既支持原生的 ACP（Agent Client Protocol）协议，也支持通过 PTY 模拟终端驱动市面上已有的各类 CLI Agent。
 
 ### 1. 自定义 Agent 配置 (`DUTYDECK_AGENTS_JSON`)
 
-可以通过环境变量 `DUTYDECK_AGENTS_JSON` 注入自定义 Agent 列表。
+通过设置环境变量 `DUTYDECK_AGENTS_JSON`，你可以注册任意自定义 Agent。
 
-#### 示例：接入 Claude Code (经由公司内部 CPA / 自定义网关)
-如果你的团队内部搭建了 Claude Code 代理网关（例如 Claude Proxy API），可以通过以下配置直接接入：
-
+#### 示例：接入 Claude Code (经由代理网关 / 公司 CPA)
 ```json
 [
   {
@@ -303,37 +293,34 @@ Dutydeck 既支持标准的 ACP (Agent Client Protocol) 协议，也支持通过
     "adapterId": "claude-code",
     "command": "claude",
     "args": ["--settings", "/home/username/.claude/ccflash.settings.json"],
-    "model": "gemini-3.8-flash-high",
+    "model": "claude-sonnet-5-5",
     "permissionMode": "ask"
   }
 ]
 ```
 
-配套的 `ccflash.settings.json` 示例：
+配套的独立配置文件 `ccflash.settings.json`：
 ```json
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8320",
-    "ANTHROPIC_AUTH_TOKEN": "your-proxy-token",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "gemini-3.8-flash-high",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gemini-3.8-flash-high",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gemini-3.8-flash-high"
+    "ANTHROPIC_AUTH_TOKEN": "your-proxy-token"
   }
 }
 ```
 
-> **最佳实践提示**：
-> - 建议通过 `--settings` 参数独立指定配置文件，而**不要**动态改写全局 `~/.claude/settings.json`，防止多任务并发时配置互相踩踏。
-> - `command` 字段必须是可执行文件绝对路径或在系统 `PATH` 中的二进制名，不可使用 Shell alias。
+> **最佳实践**：
+> - 推荐使用 `--settings` 指定独立配置文件，避免动态篡改全局 `~/.claude/settings.json` 引发多任务冲突。
+> - `command` 字段必须是二进制绝对路径或系统 `PATH` 中的可执行程序，不能使用 shell alias。
 
-#### 示例：接入自定义 ACP Agent
+#### 示例：接入标准 ACP Agent
 ```json
 [
   {
     "id": "custom-acp",
     "name": "My Custom ACP",
     "protocol": "acp",
-    "command": "/usr/local/bin/my-agent-acp",
+    "command": "/usr/local/bin/my-acp-agent",
     "args": ["serve"],
     "permissionMode": "ask"
   }
@@ -344,12 +331,12 @@ Dutydeck 既支持标准的 ACP (Agent Client Protocol) 协议，也支持通过
 
 ### 2. 权限姿态对比 (Permission Posture)
 
-| 权限模式 | 行为表现 | 适用场景 |
+| 权限模式 | 行为特征 | 推荐场景 |
 |---|---|---|
-| `ask` (默认) | 遇到写文件、Shell 执行等操作时，挂起任务并在飞书与 Web 推送实时审批 | 默认推荐，兼顾灵活性与绝对安全 |
-| `approve-reads` | 自动允许所有只读请求（如读文件、查看目录），写操作与执行命令仍需批准 | 适合主要做代码分析、排查 Bug 的场景 |
-| `deny-all` | 自动拒绝任何需要特权的操作 | 纯只读探索，杜绝一切变更 |
-| `full-trust` | 自动跳过全部权限确认（相当于 YOLO / 纯无人值守模式） | **仅限**你完全信任、隔离良好的自动化构建沙箱 |
+| `ask` **(默认推荐)** | 遇到写文件、Shell 执行等特权操作时，任务挂起并在飞书/Web 推送审批 | 绝大多数日常开发，兼顾便捷与最高安全性 |
+| `approve-reads` | 自动允许所有读操作（读文件、列目录），只有写操作和命令执行需审批 | 侧重代码审查、问题分析与 Bug 排查 |
+| `deny-all` | 自动拒绝一切特权操作 | 纯只读探索模式，绝对保证零改动 |
+| `full-trust` | 跳过所有确认直接放行（相当于无人值守 YOLO 模式） | **仅限**高安全性隔离沙箱或无人值守自动化流水线 |
 
 ---
 
@@ -357,175 +344,123 @@ Dutydeck 既支持标准的 ACP (Agent Client Protocol) 协议，也支持通过
 
 | 环境变量 | 默认值 | 作用说明 |
 |---|---|---|
-| `DUTYDECK_HOST` | `127.0.0.1` | 监听地址；若需局域网访问设为 `0.0.0.0` |
-| `DUTYDECK_PORT` | `4310` | 守护进程监听端口 |
-| `DUTYDECK_LOCAL_ONLY` | `false` | 设为 `true` 时强制锁定仅本机可连 |
-| `DUTYDECK_AUTH` | `true` | 是否启用 Access Token 鉴权（仅填小写 `false` 关闭） |
-| `DUTYDECK_DEFAULT_CWD` | 当前启动路径 | 默认的工作区绝对路径 |
-| `DUTYDECK_DATABASE_URL` | `<cwd>/.dutydeck/dutydeck.db` | 本地 SQLite 存储路径 |
-| `DUTYDECK_AGENTS_JSON` | `[]` | 自定义 Agent 扩展配置列表 |
-| `DUTYDECK_GITHUB_TOKEN` | - | 用于 GitHub Actions 状态轮询的个人访问令牌 |
-| `DUTYDECK_CODEBASE_WEBHOOK_SECRET` | - | Codebase webhook（`/api/hooks/codebase`）的令牌与签名密钥；未设置时不开放该入口 |
+| `DUTYDECK_HOST` | `127.0.0.1` | 服务监听 IP（若需局域网访问设为 `0.0.0.0`） |
+| `DUTYDECK_PORT` | `4310` | 守护进程 Web 与 API 端口 |
+| `DUTYDECK_AUTH` | `true` | 是否启用 Token 访问鉴权（填 `false` 关闭） |
+| `DUTYDECK_DEFAULT_CWD` | 启动路径 | 默认的工作区绝对路径 |
+| `DUTYDECK_DATABASE_URL` | `<cwd>/.dutydeck/dutydeck.db` | 本地 SQLite 存储数据库文件路径 |
+| `DUTYDECK_AGENTS_JSON` | `[]` | 自定义 Agent 注册列表 |
+| `DUTYDECK_GITHUB_TOKEN` | - | GitHub Actions 状态轮询 Token |
+| `DUTYDECK_CODEBASE_WEBHOOK_SECRET` | - | Codebase Webhook 的令牌与 HMAC 签名密钥 |
 | `LARK_APP_ID` | - | 飞书应用 App ID |
-| `LARK_APP_SECRET` | - | 飞书应用 App Secret（持久化存储在服务端） |
+| `LARK_APP_SECRET` | - | 飞书应用 App Secret |
 
 ---
 
-## 🛡️ 远程访问与安全性
+## 🛠️ CLI 与运维速查 <a id="cli-reference"></a>
 
-1. **默认零暴露**：Dutydeck 默认仅监听 `127.0.0.1`，不向外网暴露任何端口。
-2. **局域网与远程访问**：
-   - 使用 `dutydeck start --host 0.0.0.0` 开放外网或局域网访问。
-   - 远程访问默认强制开启 **Token 认证**。首次启动时终端会打印安全 Token，后续可通过以下命令查询或轮换：
-     ```bash
-     dutydeck auth token          # 查看当前 Token
-     dutydeck auth token --rotate # 轮换并注销旧会话
-     ```
-   - 登录凭证仅通过严格的 `HttpOnly; SameSite=Strict` Cookie 存储在浏览器中，杜绝 XSS 泄露。
-3. **免密模式警告 (`--no-auth`)**：
-   - 仅在已具备前置身份网关（如 SSO / 反向代理认证）的可信内部网络下，才可使用 `--no-auth`。
-   - **切勿**将 `--no-auth` 的服务直接映射到公网，否则任何人均可借由 Agent 获得宿主机 Shell 权限！
-
----
-
-## 🛠️ 运维与 CLI 速查 <a id="cli-reference"></a>
-
-### 1. 守护进程管理
-
-`dutydeck` 默认作为系统后台守护进程常驻运行：
+### 1. 守护进程日常管理
 
 ```bash
 # 启动守护进程
 dutydeck start [--cwd /path] [--port 4310] [--host 0.0.0.0]
 
-# 查看状态（包含 PID、监听地址、日志路径）
+# 查看服务状态（包含 PID、端口、日志位置）
 dutydeck status
 
-# 重启守护进程：先排空（新消息照常排队、暂不开始执行），等正在执行的任务结束再重启
+# 平滑重启服务（先排空正在执行的任务再重启）
 dutydeck restart
-# 重启某个 systemd unit 托管的运行时（如 bot 运行时）
-dutydeck restart --unit dutydeck-tag-ccflash.service
-
-# 把已构建的检出目录发布为不可变版本：排空 → 切换 releases/current → 重启 → 健康检查；失败后停服，确认数据库 schema 未变才切回上一版。
-# 始终保留当前数据库；schema 变化或无法核实时停止自动回滚，current 保持新版，按 manifest 中的原因和备份位置人工恢复。
-# unit 须运行 releases/current/dist/cli.js，可用 --print-unit 生成；设置 DUTYDECK_DEPLOY_WINDOW（如 10:00-11:00,16:00-17:00）可限制部署时段
-# 成功后只留最新 5 个发布目录和 deploy 自己写的部署记录（含数据库备份），current、上一版和仍被运行中进程引用的不删
-dutydeck deploy --source /path/to/checkout
 
 # 停止守护进程
 dutydeck stop
 
-# 更新全局包并自动平滑重启服务
+# 更新全局 Dutydeck 包并自动重启
 dutydeck update
-```
 
-单 bot 进程使用分库后的数据库启动：`dutydeck start --foreground --database /path/to/bot.db --bot-app-id cli_xxx`。数据库中的 `dutydeck.bot_process` 绑定必须与参数一致；已迁出的源库会拒绝启动。每个进程使用独立的数据库、端口、systemd unit 和 `WorkingDirectory`，并设置 `DUTYDECK_DAEMON_DIR=<WorkingDirectory>/.dutydeck/daemon`，使状态、日志和重启命令定位到当前 bot。`--cwd` 只指定 Agent 工作目录。普通未分库部署的启动方式不变。
-
-
-### 2. 健康检查与环境排障 (`doctor`)
-
-遇到服务异常、无法连接或配置疑惑时，第一步运行：
-
-```bash
+# 一键排障诊断（检测端口占用、SQLite 读写、Agent 可执行性、飞书长连接等）
 dutydeck doctor
 ```
 
-`doctor` 会全面检测：Node 版本、守护进程存活、端口占用、SQLite 读写、工作区权限、已注册 Agent 可执行性、飞书长连接监听状态等。**每一项失败都会附带一行可直接复制执行的修复命令。**
-
-### 3. 开机自启动管理 (`autostart`)
-
-无需手动编写 plist 或 service 文件：
+### 2. 生产级版本发布与部署 (`deploy`)
 
 ```bash
-dutydeck autostart enable   # 注册开机自启（macOS launchd / Linux systemd --user）
-dutydeck autostart status   # 查看自启配置状态
-dutydeck autostart disable  # 移除开机自启
+# 把构建后的检出目录发布为不可变版本：排空 → 切换 releases/current → 重启 → 健康检查；失败安全回滚
+dutydeck deploy --source /path/to/checkout
 ```
+- **部署窗口保护**：可通过环境变量 `DUTYDECK_DEPLOY_WINDOW`（例如 `10:00-11:00,16:00-17:00`）限制自动部署时段。
+- **数据安全回滚**：自动保留最新 5 个发布版本和数据库备份；若检测到数据库 Schema 变更，自动停止回滚以保护业务数据。
+- **单 Bot 独立进程隔离**：支持单 bot 专属数据库独立拉起：`dutydeck start --foreground --database /path/to/bot.db --bot-app-id cli_xxx`。
+
+### 3. 开机自启设置 (`autostart`)
+
+无需手动手写 systemd 服务或 launchd plist 文件：
+
+```bash
+dutydeck autostart enable   # 注册开机自启（Linux systemd --user / macOS launchd）
+dutydeck autostart status   # 查看自启状态
+dutydeck autostart disable  # 关闭自启
+```
+
+### 4. 命令行管理配置 (`dutydeck settings`)
+
+Web 控制台里的全部机器人设置、群聊策略与用量配额，均可通过命令行直接修改，便于脚本化与 Agent 自我管理：
+
+| 控制台模块 | CLI 命令 |
+|---|---|
+| **机器人设置** | `dutydeck settings bot list / show / set / add / remove / install-hook` |
+| **群聊协作策略** | `dutydeck settings group list / show / set / members / sync` |
+| **每日用量上限** | `dutydeck settings usage show / set-cap / remove-cap` |
+| **主终端后端** | `dutydeck settings terminal-backend [tmux|herdr]` |
+| **工作区分组** | `dutydeck workspace-groups` |
+
+常用命令示例：
+```bash
+dutydeck settings bot show cli_xxx                           # 查看机器人全部配置
+dutydeck settings bot set cli_xxx adhdMode=true              # 开启 ADHD 友好模式
+dutydeck settings group set oc_xxx participation=selective   # 设置群聊按需参与
+dutydeck settings usage set-cap 50 --app cli_xxx             # 设置每日用量上限
+```
+
+### 5. 终端后端与 Herdr 侧边子任务空间
+
+- **主终端后端切换**：在 `tmux`（默认）与 `Herdr`（Linux, >= 0.9.0）之间灵活选择，设置后新建的 `pty-cli` 会话自动生效。
+- **会话专属 Herdr 侧边工作空间**：主 Agent 可通过环境注入的 `$dutydeck_herdr_command` 派发并行子任务。每个会话获得专属 named session，支持在侧边独立 pane 运行命令、抓取日志与并发探索，不阻塞主任务。
+
+### 4. 远程访问与安全策略
+
+- **默认绝对安全**：Dutydeck 默认只监听 `127.0.0.1`，不向外部公网暴露。
+- **局域网/内网穿透访问**：
+  - 启动时指定 `--host 0.0.0.0`；
+  - 首次启动终端会生成高强度安全 Token，远程连接必须使用该 Token 鉴权；
+  - 查看或轮换 Token：
+    ```bash
+    dutydeck auth token          # 查看当前 Token
+    dutydeck auth token --rotate # 轮换 Token 并强制登出全部旧会话
+    ```
+- **警惕 `--no-auth`**：切勿将开启 `--no-auth` 的服务暴露至公网，否则外部人员可能借由 Agent 获得宿主机系统执行权限。
 
 ---
-
-### 4. 用命令行改设置
-
-Dashboard 上机器人、群聊、用量上限和主终端后端的设置，都可以用 `dutydeck settings` 读取和修改，便于交给 Agent 管理。每条命令输出一行 JSON。默认作用于 `dutydeck status` 显示的实例；`--instance <id>` 经它转发到同机的其他实例（与 Dashboard 切换实例相同），也可以用 `--url` 加 `--database` 直接指定。
-
-| Dashboard | 命令 |
-|---|---|
-| 机器人 | `settings bot list / show / set / add / remove / install-hook` |
-| 群聊（群配置、群协作、接话） | `settings group list / show / set / members / sync` |
-| 用量上限 | `settings usage show / set-cap / remove-cap` |
-| 主终端后端 | `settings terminal-backend` |
-| 整理分组 | `workspace-groups` |
-
-```bash
-dutydeck settings instances                                  # 列出 --instance 可用的实例
-dutydeck settings bot show cli_xxx --instance tag            # 查看机器人的全部设置
-dutydeck settings bot set cli_xxx adhdMode=true mentionPolicy=topic
-dutydeck settings group set oc_xxx modelOverride=gpt-5.5 participation=selective
-dutydeck settings usage set-cap 50 --app cli_xxx
-```
-
-`set` 只改给出的键，其余保持原值；可用的键和取值见 `dutydeck settings bot set --help`、`dutydeck settings group set --help`。服务端拒绝时，错误里带的是 Dashboard 上同样的原因。App Secret 只从文件描述符读取（`--app-secret-fd 0` 表示标准输入），不出现在命令行参数里。任务自动化（定时任务、CI 订阅）和高级草稿暂不支持命令行设置。
-
-主终端后端在 Dashboard → Agent 设置中可选择 tmux（默认）或 Herdr。设置只影响当前实例中新建的 `pty-cli` 会话；现有会话保留原后端，ACP 继续使用 ACP。Web 和各机器人运行时使用独立数据库，请切换到目标实例设置。
-
-```bash
-# 查询；指定正在运行的目标实例及其数据库
-dutydeck settings terminal-backend --url http://127.0.0.1:4401 --database /path/to/runtime/dutydeck.db
-# 设置新会话后端
-dutydeck settings terminal-backend herdr --url http://127.0.0.1:4401 --database /path/to/runtime/dutydeck.db
-dutydeck settings terminal-backend tmux --url http://127.0.0.1:4401 --database /path/to/runtime/dutydeck.db
-```
-
-Herdr 主终端需要 Linux 和 Herdr >= 0.9。未安装、不可执行或身份验证失败会明确报错，不会自动回退到 tmux。主 Agent 在独立 named server 的真实 pane 中运行，使用 Herdr 注入的实际 `HERDR_*` 上下文；daemon 重启验证原进程身份后重新连接，已提交任务不会重复发送。
-
-### 5. 会话专属 Herdr 子任务工作空间
-
-安装 Herdr 0.9.0 或兼容版本后，主 Agent 可用 Herdr 派发侧边子任务。每个 Dutydeck 会话获得独立 named session，名称按安装数据库、机器人身份、持久签名密钥和会话 ID 派生；首次调用才创建，后续调用与 daemon 重启复用。
-
-Agent 每轮收到完整入口前缀；环境中的 `dutydeck_herdr_command` 是同一个入口。下面命令在 Dutydeck Agent 的工具 shell 内执行（先把返回的真实 ID 替换到后续命令）：
-
-```bash
-# eval 用于执行 Dutydeck 提供的已引用绝对路径前缀；不要改用 PATH 中的 dutydeck。
-eval "$dutydeck_herdr_command prepare"
-# 返回 session_name、socket_path、workspace_id、root_pane_id；首次创建通常是 w1、w1:p1。
-eval "$dutydeck_herdr_command pane split w1:p1 --direction right --no-focus"
-eval "$dutydeck_herdr_command pane run w1:p2 'echo dutydeck-herdr-ready'"
-eval "$dutydeck_herdr_command pane read w1:p2 --source recent-unwrapped --lines 40"
-# 确认任务可中断后停止本会话专属 server，保留保存状态。
-eval "$dutydeck_herdr_command stop"
-```
-
-入口使用现有会话凭证固定路由，使用宿主实际 socket 路径，因此 Agent 覆盖 HOME/XDG_CONFIG_HOME 也不会改路由；支持专属 session 内的 workspace/tab/pane/agent CLI 操作；禁止 `--session`、`--remote`、`--machine`、`--current` 和全局 session/server 管理命令。ACP/tmux 主 Agent 是外部调用方，不伪造 `HERDR_ENV` 或 `HERDR_PANE_ID`；选择 Herdr 主终端时使用真实 pane 上下文。侧边工作空间与主终端分别隔离；未安装 Herdr 会在侧边入口 prompt 中说明，不影响 tmux/ACP 普通任务。
-
-关闭 daemon、停止/归档主会话或回收主 Agent 都不会自动终止侧边任务。入口需要运行中的 daemon 和有效会话凭证；失去凭证后，可在宿主终端按先前返回的名称清理：`herdr session stop dutydeck-<摘要>`；确认不再需要保存状态后再执行 `herdr session delete dutydeck-<摘要>`。只清理自己的专属名称，不使用 `default`。Herdr server 停止后保存布局；shell 进程会结束，Agent 恢复取决于 Herdr 的集成和配置，不保证任务自动续跑。
 
 ## ❓ 常见问题与排障 (FAQ) <a id="faq"></a>
 
-### Q1: 飞书发消息后，机器人没有加 `👌` 表情，也没有任何反应？
-- **排查步骤**：
-  1. 运行 `dutydeck doctor` 检查飞书长连接（Lark Listen）是否正常。
-  2. 确认在飞书开发者后台该应用已开启 **「机器人」** 能力，并启用了长连接模式接收事件（`im.message.receive_v1`）。
-  3. 检查机器人是否已经加入对应的私聊或群聊；在群聊中确认是否已 `@机器人`。
+### Q1: 在飞书给机器人发消息，机器人没有任何反应，也没贴 `👌` 表情？
+1. 运行 `dutydeck doctor`，检查输出中「飞书长连接（Lark Listen）」一栏是否正常。
+2. 登录飞书开放平台后台，检查该应用是否已开启 **「机器人能力」**，且事件订阅方式为 **长连接**（已订阅 `im.message.receive_v1` 事件）。
+3. 检查机器人是否已被拉入对应的群聊；在群聊中确认消息是否包含了 `@机器人`。
 
 ### Q2: 提示 `Persisted key policy violation` 错误？
-- **原因**：内部 ACPX 持久化键名要求全小写 `snake_case`。
-- **解决**：不要把大写的环境变量名直接写入 ACPX session 配置；Agent Dock 群聊工具的运行时变量使用 `dutydeck_group_tools_url` 和 `dutydeck_group_tools_token`。
+- **原因**：内部 ACPX 持久化键名规范强制要求使用全小写的 `snake_case`。
+- **解决**：不要将大写环境变量名直接写入 ACPX session 配置；Agent Dock 群聊工具的运行时变量使用 `dutydeck_group_tools_url` 和 `dutydeck_group_tools_token`。
 
-### Q3: 提示 `Agent command not found` 或找不到可执行文件？
-- **原因**：守护进程运行在独立的进程环境中，不会加载交互式 Shell 的 `~/.bashrc` 或 `~/.zshrc` 中的 `alias`。
-- **解决**：在 `DUTYDECK_AGENTS_JSON` 中，`command` 请填写可执行文件的绝对物理路径（例如 `/home/user/.nvm/versions/node/v22.x/bin/claude`），不要使用别名。
+### Q3: 提示 `Agent command not found` 或找不到可执行程序？
+- **原因**：后台守护进程处于非交互式子进程环境，不会读取 `~/.bashrc` 或 `~/.zshrc` 中的 `alias`。
+- **解决**：在 `DUTYDECK_AGENTS_JSON` 中，`command` 请填写可执行文件的绝对物理路径（例如 `/usr/local/bin/claude`），严禁使用别名。
 
-### Q4: 如何在多机器、多群组间共享 Dutydeck？
-- 可以在 Web 控制台中绑定多个飞书机器人；每个机器人可以绑定独立的默认工作区和 Agent，甚至指派给不同的业务研发群组，互不冲突。
-
----
-
-## 📚 进阶架构与开发文档
-
-- [端到端测试与验收矩阵规范](tests/e2e/README.md)
+### Q4: 能否在同一台机器上运行多个机器人？
+- 可以。在 Web 控制台可以添加多个飞书机器人；每个机器人可以绑定独立的默认工作区路径、Agent 引擎和飞书应用凭据，分别服务于不同的业务或研发群组。
 
 ---
 
-## 📄 许可证与第三方声明 (License)
+## 📄 开源许可证与协议 (License)
 
-Dutydeck 核心代码采用开源授权协议。部分协议桥接与终端实现演进自早期内部工程原型，完整第三方依赖与开源许可证声明请参阅 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。
+Dutydeck 核心代码采用开源授权协议。完整第三方依赖与开源许可证声明请参阅 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。
