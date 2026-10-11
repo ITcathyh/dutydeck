@@ -120,6 +120,7 @@ export interface RuntimeOptions {
   probe?: typeof probeAgent;
   driverIdleTimeoutMs?: number;
   cleanupIntervalMs?: number;
+  configureAgent?: (agent: AgentConfig) => Promise<AgentConfig>;
   sessionEnvironment?: (session: Session) => Record<string, string>;
   selectPromptPolicy?: (session: Session, request: TaskRequestV1) => Promise<{ version: 'legacy-v1' | 'optimized-v1'; diagnosticReason?: string }>;
   sessionPrompt?: (session: Session, prompt: string, context?: TaskExecutionContext) => string | { prompt: string; diagnostics?: PromptSourceDiagnostics } | Promise<string | { prompt: string; diagnostics?: PromptSourceDiagnostics }>;
@@ -485,7 +486,8 @@ export class DutydeckRuntime {
       this.enqueueDriverEvent(session, event, generation, attempt ?? lifecycle);
     };
   }
-  private configureAgentForSession(agent: AgentConfig, session: Session): AgentConfig {
+  private async configureAgentForSession(agent: AgentConfig, session: Session): Promise<AgentConfig> {
+    if (this.options.configureAgent) agent = await this.mutations.wait(() => this.options.configureAgent!(agent));
     return {
       ...agent,
       cwd: session.cwd,
@@ -620,7 +622,7 @@ export class DutydeckRuntime {
       || resource.runId !== session.runId || resource.identity?.identityId !== receipt.identityId || resource.observations.at(-1)?.state === 'gone'
       || this.resourceBlockers(session.id).some(block => block.code !== 'DRIVER_RESOURCE_UNSAFE' || block.resourceId !== resource.resourceId)) return false;
     const agent = await this.mutations.wait(() => this.repos.agents.get(session.agentId)); if (!agent) return false;
-    const configured = this.configureAgentForSession(agent, session);
+    const configured = await this.configureAgentForSession(agent, session);
     const options: ExecutionOptions = { permissionMode: configured.permissionMode, ...(configured.model !== undefined ? { model: configured.model } : {}), ...(configured.reasoningEffort !== undefined ? { reasoningEffort: configured.reasoningEffort } : {}) };
     if (canonicalExecutionJson(receipt.options) !== canonicalExecutionJson(options)) return false;
     const workspace = await this.mutations.wait(() => this.workspaces.get(session.id));
@@ -688,7 +690,7 @@ export class DutydeckRuntime {
     const buffered: NormalizedDriverEvent[] = [];
     let attached = false;
     const emit = this.onDriverEvent(session, generation);
-    const driver = this.factory({ ...this.configureAgentForSession(agent, session), ...options }, session.protocol,
+    const driver = this.factory({ ...await this.configureAgentForSession(agent, session), ...options }, session.protocol,
       event => { if (attached) emit(event); else buffered.push(event); },
       code => { if (attached) this.notifyDriverExit(session.id, code); }, session.id,
       localOnlyDriverContext(this.fence(session), resource.resourceId));
@@ -1908,7 +1910,7 @@ export class DutydeckRuntime {
       if(!replacement&&!this.repos.execution.getNativeContext(id))throw new RuntimeError('NATIVE_CONTEXT_PROOF_REQUIRED','The original native context is required',409);
       const unresolved=(await this.mutations.wait(()=>this.repos.tasks.listBySession(id))).some(task=>this.repos.execution.getTaskExecution(task.id)?.attempts.some(attempt=>['preparing','active','reconcile_required','legacy_unresolved'].includes(attempt.state)));
       const agent=await this.mutations.wait(()=>this.repos.agents.get(session.agentId));if(!agent)throw new RuntimeError('AGENT_NOT_FOUND','Unknown agent',404);
-      const configured=this.configureAgentForSession(agent,session),target:ExecutionOptions={permissionMode:configured.permissionMode,...(configured.model!==undefined?{model:configured.model}:{}),...(configured.reasoningEffort!==undefined?{reasoningEffort:configured.reasoningEffort}:{})};
+      const configured=await this.configureAgentForSession(agent,session),target:ExecutionOptions={permissionMode:configured.permissionMode,...(configured.model!==undefined?{model:configured.model}:{}),...(configured.reasoningEffort!==undefined?{reasoningEffort:configured.reasoningEffort}:{})};
       if(!unresolved)await this.saveState(session,'starting');
       let driver:AgentDriver|undefined;
       let operation:Awaited<ReturnType<DriverConfigurationLedger['beginRepair']>>|undefined;
@@ -1947,7 +1949,9 @@ export class DutydeckRuntime {
     if (workspace) await this.mutations.wait(() => this.workspaces.validate(workspace));
     this.assertReplaceable(session.id); this.assertResources(session.id, true);
     const connected = this.drivers.get(session.id); if (connected) return connected;
-    const configured = this.configureAgentForSession(agent, session);
+    const configured = await this.configureAgentForSession(agent, session);
+    this.assertReplaceable(session.id); this.assertResources(session.id, true);
+    const resolved = this.drivers.get(session.id); if (resolved) return resolved;
     const options: ExecutionOptions = executionOptions ?? { permissionMode: configured.permissionMode, ...(configured.model !== undefined ? { model: configured.model } : {}), ...(configured.reasoningEffort !== undefined ? { reasoningEffort: configured.reasoningEffort } : {}) };
     const generation = this.nextSessionGeneration(session.id), lifecycle = this.lifecycle(session.id),startupOwner=this.mutations.current();
     const resource = this.localResources.begin(this.fence(session), options, this.factory.controlledResources?.(session.protocol!) ? {startupValid:()=>this.mutations.valid(startupOwner),valid:()=>this.mutations.valid(lifecycle)&&this.sessionGenerations.get(session.id)===generation,repairConfiguration,executionDomain:`${session.source ?? 'local'}:${session.sourceId ?? ''}`} : undefined);

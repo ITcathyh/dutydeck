@@ -204,6 +204,10 @@ describe('settings CLI requests', () => {
 describe('settings commands', () => {
   it('passes target, ids and key=value pairs to the handler', async () => {
     const settings = vi.fn();
+    await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'agent', 'set', 'claude', 'authMode=bearer', '--api-key-fd', '0', '--instance', 'tag']);
+    expect(settings).toHaveBeenLastCalledWith('agent-set', expect.objectContaining({ agentId: 'claude', pairs: ['authMode=bearer'], apiKeyFd: '0', instance: 'tag' }));
+    await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'agent', 'show', 'claude']);
+    expect(settings).toHaveBeenLastCalledWith('agent-show', expect.objectContaining({ agentId: 'claude' }));
     await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'group', 'set', 'oc_1', 'oncall=true', 'participation=eager', '--app', 'cli_a', '--instance', 'tag']);
     expect(settings).toHaveBeenLastCalledWith('group-set', expect.objectContaining({ chatId: 'oc_1', appId: 'cli_a', instance: 'tag', pairs: ['oncall=true', 'participation=eager'] }));
     await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'bot', 'set', 'cli_a', '--app-secret-fd', '0', '--url', 'http://127.0.0.1:4401', '--database', '/tmp/bot.db']);

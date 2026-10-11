@@ -48,3 +48,14 @@ export async function loadAgentModels(agentId: string, model?: string, refresh =
   writeCachedAgentModels(agentId, model, result);
   return result;
 }
+
+export function clearCachedAgentModels(agentId: string): void {
+  try {
+    const storage = window.localStorage;
+    const prefix = `${CACHE_PREFIX}:${encodeURIComponent(agentId)}:`;
+    for (let index = storage.length - 1; index >= 0; index--) {
+      const key = storage.key(index);
+      if (key?.startsWith(prefix)) storage.removeItem(key);
+    }
+  } catch { /* The cache is optional. */ }
+}

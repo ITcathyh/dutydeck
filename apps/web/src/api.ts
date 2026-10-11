@@ -946,3 +946,10 @@ export const insightApi = {
     return downloadBlob('/api/insights/export', body, fallbackFilename);
   }
 };
+
+export type AgentModelSettings = { agentId: string; model: string; baseUrl: string; authMode: 'bearer' | 'api-key'; hasApiKey: boolean; apiKeyAvailable: boolean; appliesTo: 'next_process' };
+export type AgentModelSettingsPatch = { model?: string; baseUrl?: string; authMode?: 'bearer' | 'api-key'; apiKey?: string; clearApiKey?: boolean };
+export const agentModelSettingsApi = {
+  get: (id: string) => json<AgentModelSettings>(`/api/agents/${encodeURIComponent(id)}/model-settings`, { cache: 'no-store' }),
+  set: (id: string, body: AgentModelSettingsPatch) => json<AgentModelSettings>(`/api/agents/${encodeURIComponent(id)}/model-settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+};

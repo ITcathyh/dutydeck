@@ -1,0 +1,34 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { agentModelSettingsApi } from '../api';
+import { writeCachedAgentModels, readCachedAgentModels } from '../model-cache';
+import { AgentModelSettings } from './AgentModelSettings';
+
+afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear(); });
+it('saves service settings, retains a blank key, clears keys and invalidates model choices', async () => {
+  const state = { agentId: 'claude', model: 'old-model', baseUrl: 'https://old.example', authMode: 'bearer' as const, hasApiKey: true, apiKeyAvailable: true, appliesTo: 'next_process' as const };
+  vi.spyOn(agentModelSettingsApi, 'get').mockResolvedValue(state);
+  const set = vi.spyOn(agentModelSettingsApi, 'set').mockImplementation(async (_id, patch) => ({ ...state, ...patch, hasApiKey: !patch.clearApiKey }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['agent-models', 'claude', 'old'], { models: [{ id: 'old', name: 'Old' }] });
+  writeCachedAgentModels('claude', 'old', { models: [{ id: 'old', name: 'Old' }], reasoningEfforts: [] });
+  render(<QueryClientProvider client={client}><AgentModelSettings agentId="claude"/></QueryClientProvider>);
+  await userEvent.click(screen.getByText('模型服务配置'));
+  const key = await screen.findByLabelText('API Key');
+  expect(key.getAttribute('type')).toBe('password'); expect((key as HTMLInputElement).value).toBe('');
+  await userEvent.clear(screen.getByLabelText('服务地址')); await userEvent.type(screen.getByLabelText('服务地址'), 'https://new.example');
+  await userEvent.selectOptions(screen.getByLabelText('认证方式'), 'api-key');
+  await userEvent.click(screen.getByRole('button', { name: '保存模型配置' }));
+  await waitFor(() => expect(set).toHaveBeenCalledWith('claude', { baseUrl: 'https://new.example', authMode: 'api-key' }));
+  await screen.findByRole('status');
+  expect(readCachedAgentModels('claude', 'old')).toBeUndefined(); expect(client.getQueryData(['agent-models', 'claude', 'old'])).toBeUndefined();
+  await userEvent.type(key, 'SECRET_CANARY'); await userEvent.click(screen.getByRole('button', { name: '保存模型配置' }));
+  await waitFor(() => expect(set).toHaveBeenLastCalledWith('claude', { apiKey: 'SECRET_CANARY', clearApiKey: false }));
+  await waitFor(() => expect((key as HTMLInputElement).value).toBe(''));
+  expect(document.body.textContent).not.toContain('SECRET_CANARY');
+  await userEvent.click(screen.getByRole('button', { name: '清除 API Key' }));
+  await waitFor(() => expect(set).toHaveBeenLastCalledWith('claude', { clearApiKey: true }));
+  await waitFor(() => expect(screen.queryByRole('button', { name: '清除 API Key' })).toBeNull());
+});

@@ -1,3 +1,4 @@
+import { AgentModelSettings } from './AgentModelSettings';
 import { currentInstance } from '../instance';
 import type { LarkSetupTarget } from '../app-route';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
@@ -208,6 +209,7 @@ function AgentSection({ agents, legacyBots, onCreateTask, onOpenLarkSetup }: { a
         <p className="mt-1 text-meta text-subtle">{agent.version ? `${agent.version} · ` : ''}{agent.protocol === 'pty-cli' ? '终端 CLI' : agent.protocol.toUpperCase()}</p>
         {/* 「已绑定」不是「已连接」：这里只数了 defaultAgentId 指向本 Agent 的 Bot，没有读任何监听状态。 */}
         <div className="mt-3 grid grid-cols-2 gap-2 text-caption text-secondary"><div className="rounded-md bg-muted p-2">默认权限<br/><strong className="text-primary">{permissionLabel(agent.permissionMode)}</strong></div><div className="rounded-md bg-muted p-2">飞书 Bot<br/><strong className="text-primary">{boundBots.length ? `${boundBots.length} 个已绑定` : '尚未绑定'}</strong></div></div>
+        {['claude', 'claude-code'].includes(agent.id) && <AgentModelSettings agentId={agent.id}/>}
         <div className="mt-3 flex gap-2"><Button variant="primary" className="flex-1" onClick={() => onCreateTask(agent.id)}>用它创建任务</Button><Button variant="secondary" onClick={() => onOpenLarkSetup()}>{boundBots.length ? '管理 Bot' : '连接 Bot'}</Button></div>
       </Card>;
     })}</div>}

@@ -1,3 +1,4 @@
+import type { AgentModelSettingsPatch } from './agent-model-settings.js';
 import type { UpdateCollaborationSettingsInput } from '@dutydeck/shared';
 import type { CollaborationRouteOptions } from './collaboration-routes.js';
 import type { GroupConfigPatch, ManagedGroup, ManagedGroupBot } from './lark/group-management.js';
@@ -12,7 +13,7 @@ export class SettingsCliError extends Error {
 }
 
 export type SettingsAction =
-  | 'instances' | 'agents'
+  | 'instances' | 'agents' | 'agent-show' | 'agent-set'
   | 'bot-list' | 'bot-show' | 'bot-add' | 'bot-set' | 'bot-remove' | 'bot-install-hook'
   | 'group-list' | 'group-show' | 'group-set' | 'group-members' | 'group-sync'
   | 'usage-show' | 'usage-set-cap' | 'usage-remove-cap';
@@ -26,6 +27,8 @@ export interface SettingsCliInput {
   chatId?: string;
   pairs?: string[];
   appSecret?: string;
+  agentId?: string;
+  apiKey?: string;
   pattern?: string;
   amount?: string;
   pageToken?: string;
@@ -36,6 +39,8 @@ type FieldKind = 'boolean' | 'integer' | 'integer|null' | 'string' | 'list' | 'u
 
 type BotField = Exclude<keyof SaveLarkConfigRequest,
   'stage' | 'originalAppId' | 'expectedRevision' | 'appId' | 'appSecret' | 'name' | 'env' | 'startupCommands' | 'gateEnabled' | 'softGateEnabled' | 'hardGateEnabled' | 'hookTrustConfirmed'>;
+
+export const agentFields = { model: 'string', baseUrl: 'string', authMode: ['bearer', 'api-key'], clearApiKey: 'boolean' } satisfies Record<Exclude<keyof AgentModelSettingsPatch, 'apiKey'>, FieldKind>;
 
 /** dashboard 能保存的 Bot 字段。satisfies 保证保存接口新增字段时这里编译不过，CLI 不会漏项。 */
 export const botFields = {
@@ -237,6 +242,12 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
   switch (action) {
     case 'instances': return request('GET', '/api/instances');
     case 'agents': return { agents: await request('GET', '/api/agents') };
+    case 'agent-show': return request('GET', `/api/agents/${path(required(input.agentId, 'Agent ID'))}/model-settings`);
+    case 'agent-set': {
+      const values = parsePairs(input.pairs ?? [], agentFields, 'dutydeck settings agent set --help');
+      if (!Object.keys(values).length && input.apiKey === undefined) throw new SettingsCliError('SETTINGS_ARGUMENT_REQUIRED', 'Pass at least one key=value or --api-key-fd');
+      return request('PUT', `/api/agents/${path(required(input.agentId, 'Agent ID'))}/model-settings`, { ...values, ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}) });
+    }
     case 'bot-list': {
       const config = await request('GET', '/api/lark/config') as { bots: PublicBot[]; listeningDisabled?: boolean };
       return {

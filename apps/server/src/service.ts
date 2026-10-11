@@ -1,3 +1,4 @@
+import { AgentModelSettings } from './agent-model-settings.js';
 import { sessionUsageSnapshot } from './session-usage.js';
 import { HerdrBackend } from '@dutydeck/session-backends';
 import { TerminalSettings, primaryHerdrBinary } from './terminal-settings.js';
@@ -231,6 +232,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     if (metadata.provider !== localFileSecretProviderName) return 'unchecked' as const;
     return localSecretProvider?.inspect(metadata.referenceKey).availability ?? 'unreadable' as const;
   };
+  const agentModelSettings = new AgentModelSettings(repos, config.agents, localSecretProvider);
   const env = options.env ?? process.env;
   const identityPreflightProbe = localSecretProvider ? new LarkIdentityPreflightProbe({
     secretProvider: localSecretProvider,
@@ -367,6 +369,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     log: { warn: (details, message) => app?.log.warn(details, message) }
   });
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
+    configureAgent: agent => agentModelSettings.resolve(agent),
     ptyRetirement: createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }, session => primaryHerdrBackend(session.id)),
     admitTask: (session, request) => usageLedger.admit(session, request),
     recordUsage: (session, attempt, reading) => usageLedger.record(session, attempt, reading),
@@ -555,7 +558,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     setupCleanup.push(() => collaboration?.close());
     automation.mandateCards = collaboration.mandateCards;
     await relayBroker.initialize();
-    await runtime.initialize(config.agents);
+    await runtime.initialize(await agentModelSettings.defaultsForBoot(config.agents));
     const webRoot = options.webRoot ?? fileURLToPath(new URL('../public', import.meta.url));
     const memoryRoot = config.databaseUrl === ':memory:'
       ? join(tmpdir(), 'dutydeck-memory')
@@ -593,6 +596,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     };
     app = await buildApp(runtime, {
     terminalSettings,
+    agentModelSettings,
       ...(insightService
         ? { insight: { service: insightService, authorize: async request => Boolean(await resolveInstallationPrincipal(request)) } }
         : {}),

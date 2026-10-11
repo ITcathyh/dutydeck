@@ -302,3 +302,15 @@ describe('Claude settings composition', () => {
     }
   });
 });
+
+it.each(['bearer', 'api-key'] as const)('overrides competing Claude settings with exclusive %s credentials without changing the user file', mode => {
+  const { cwd, helper } = fixture();
+  const original = { env: { ANTHROPIC_API_KEY: 'old-api', ANTHROPIC_AUTH_TOKEN: 'old-token', CLAUDE_CODE_USE_BEDROCK: '1' } };
+  const user = join(cwd, 'user.json'); writeFileSync(user, JSON.stringify(original));
+  const explicit = { ANTHROPIC_API_KEY: mode === 'api-key' ? 'new-key' : '', ANTHROPIC_AUTH_TOKEN: mode === 'bearer' ? 'new-key' : '', CLAUDE_CODE_OAUTH_TOKEN: '', CLAUDE_CODE_USE_BEDROCK: '0', CLAUDE_CODE_USE_VERTEX: '0', CLAUDE_CODE_USE_FOUNDRY: '0', ANTHROPIC_BASE_URL: 'https://new.example' };
+  const args = helper.args(['--settings', user], [], cwd, explicit);
+  const file = args[args.indexOf('--settings') + 1];
+  expect(JSON.parse(readFileSync(file, 'utf8')).env).toEqual(explicit);
+  expect(statSync(file).mode & 0o777).toBe(0o600);
+  expect(JSON.parse(readFileSync(user, 'utf8'))).toEqual(original);
+});

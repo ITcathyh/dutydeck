@@ -366,3 +366,15 @@ export class LocalFileLarkCredentialResolver {
     }
   }
 }
+
+/** Only agent launch/probe wiring resolves this value; management returns status. */
+export class LocalFileAgentApiKeyResolver {
+  constructor(private readonly provider: LocalFileSecretProvider) {}
+  async withApiKey<T>(referenceKey: string, use: (apiKey: string) => T | Promise<T>): Promise<T> {
+    const read = runtimeReaders.get(this.provider);
+    if (!read) throw new SecretProviderError('SECRET_RUNTIME_BOUNDARY_REQUIRED', 'Agent API key resolution requires a local provider');
+    const value = read(referenceKey);
+    try { return await use(value.toString('utf8')); }
+    finally { value.fill(0); }
+  }
+}

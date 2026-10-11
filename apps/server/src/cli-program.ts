@@ -2,7 +2,7 @@ import { workbenchHelp, layeredWorkbenchHelp, collaborationHelp, groupToolsHelp,
 import type { RecoveryCliOptions, RecoveryOperation } from './recovery-cli.js';
 import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
 import type { SessionNamesAction } from './session-names-cli.js';
-import { botFields, fieldsHelp, groupFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
+import { agentFields, botFields, fieldsHelp, groupFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { Command } from 'commander';
 import { DatabaseCliError } from './database-cli.js';
 
@@ -185,7 +185,7 @@ export interface SessionNamesCommandOptions {
 }
 
 /** App Secret 只从文件描述符读入，不出现在命令行参数里。 */
-export type SettingsCommandInput = Omit<SettingsCliInput, 'appSecret'> & { appSecretFd?: string };
+export type SettingsCommandInput = Omit<SettingsCliInput, 'appSecret' | 'apiKey'> & { appSecretFd?: string; apiKeyFd?: string };
 
 export interface CliHandlers {
   recovery?(operation: RecoveryOperation, sessionId: string, options: RecoveryCliOptions): void | Promise<void>;
@@ -689,6 +689,14 @@ Examples:
     .action((_options, command) => runSettings('instances', command));
   withTarget(settings.command('agents').description('List the Agents that bot and group settings can select'))
     .action((_options, command) => runSettings('agents', command));
+
+  const agentSettings = settings.command('agent').description('Claude Code model service settings (dashboard: Agent)');
+  withTarget(agentSettings.command('show <agent-id>').description('Show model service settings; the API Key is never printed'))
+    .action((agentId, _options, command) => runSettings('agent-show', command, { agentId }));
+  withTarget(agentSettings.command('set <agent-id> [key=value...]').description('Apply when the next Agent process starts; recreate running sessions for immediate use. Empty model/baseUrl restores CLI defaults')
+    .option('--api-key-fd <fd>', 'Replace API Key from this file descriptor (0 = stdin); omitted keeps it'))
+    .addHelpText('after', fieldsHelp(agentFields))
+    .action((agentId, pairs, options, command) => runSettings('agent-set', command, { agentId, pairs, apiKeyFd: options.apiKeyFd }));
 
   const botSettings = settings.command('bot').description('Bot settings (dashboard: 机器人)');
   withTarget(botSettings.command('list').description('List bots on the runtime'))

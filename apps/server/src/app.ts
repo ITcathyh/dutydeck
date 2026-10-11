@@ -1,3 +1,4 @@
+import type { AgentModelSettings } from './agent-model-settings.js';
 import type { TerminalSettings } from './terminal-settings.js';
 import { registerRecoveryRoutes, type RecoveryRouteOptions } from './recovery-routes.js';
 import { registerWorkspaceGroupRoutes, type WorkspaceGroupRouteOptions } from './workspace-group-routes.js';
@@ -63,6 +64,7 @@ export interface SessionExecutionPolicy {
 }
 
 export interface BuildAppOptions {
+  agentModelSettings?: AgentModelSettings;
   terminalSettings?: TerminalSettings;
   recovery?: RecoveryRouteOptions;
   workspaceGroups?: WorkspaceGroupRouteOptions;
@@ -213,11 +215,21 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       return options.terminalSettings!.set(request.body);
     });
   }
+  if (options.agentModelSettings) {
+    app.get<{ Params: { id: string } }>('/api/agents/:id/model-settings', async request => {
+      if (!options.sessionNames || !await options.sessionNames.authorize(request)) throw new RuntimeError('AGENT_SETTINGS_OWNER_REQUIRED', 'Installation owner authorization is required', 403);
+      return options.agentModelSettings!.get(request.params.id);
+    });
+    app.put<{ Params: { id: string }; Body: unknown }>('/api/agents/:id/model-settings', async request => {
+      if (!options.sessionNames || !await options.sessionNames.authorize(request)) throw new RuntimeError('AGENT_SETTINGS_OWNER_REQUIRED', 'Installation owner authorization is required', 403);
+      return options.agentModelSettings!.set(request.params.id, request.body);
+    });
+  }
   app.get('/api/agents', async () => (await runtime.listAgents()).map(toPublicAgent));
   app.get<{ Params: { id: string }; Querystring: { model?: string; refresh?: string } }>('/api/agents/:id/models', async request => {
     const agent = (await runtime.listAgents()).find(item => item.id === request.params.id);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${request.params.id}`, 404);
-    return discoverAgentModels(agent, request.query.model?.trim() || undefined, request.query.refresh === '1' || request.query.refresh === 'true');
+    return discoverAgentModels(await options.agentModelSettings?.resolve(agent) ?? agent, request.query.model?.trim() || undefined, request.query.refresh === '1' || request.query.refresh === 'true');
   });
   app.get('/api/sessions', async request => {
     const sessions = await runtime.listSessions();

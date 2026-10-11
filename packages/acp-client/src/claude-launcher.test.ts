@@ -47,4 +47,17 @@ describe('Claude ACP launcher', () => {
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({ token: 'explicit-token', base: 'https://project.example', model: 'local-model', bedrock: '1', awsProfile: 'dutydeck-test', executable: claude });
   });
+  it.each(['bearer', 'api-key'] as const)('keeps explicit %s credentials exclusive over user and project cloud settings', async mode => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-auth-')); dirs.push(root);
+    await mkdir(join(root, '.claude'));
+    const file = join(root, '.claude', 'settings.json');
+    const original = JSON.stringify({ env: { ANTHROPIC_API_KEY: 'old-api-key', ANTHROPIC_AUTH_TOKEN: 'old-bearer', CLAUDE_CODE_OAUTH_TOKEN: 'old-oauth', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1', CLAUDE_CODE_USE_FOUNDRY: '1', ANTHROPIC_BASE_URL: 'https://old.example' } });
+    await writeFile(file, original);
+    const inspect = `process.stdout.write(JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)|CLAUDE_CODE_(OAUTH_TOKEN|USE_BEDROCK|USE_VERTEX|USE_FOUNDRY))$/.test(key)))))`;
+    const explicit = { ANTHROPIC_API_KEY: mode === 'api-key' ? 'new-key' : '', ANTHROPIC_AUTH_TOKEN: mode === 'bearer' ? 'new-key' : '', CLAUDE_CODE_OAUTH_TOKEN: '', CLAUDE_CODE_USE_BEDROCK: '0', CLAUDE_CODE_USE_VERTEX: '0', CLAUDE_CODE_USE_FOUNDRY: '0', ANTHROPIC_BASE_URL: 'https://new.example' };
+    const result = spawnSync(process.execPath, [resolve('packages/acp-client/agents/claude-acp.mjs')], { cwd: root, env: { ...process.env, ...explicit, CLAUDE_CONFIG_DIR: join(root, '.claude'), DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath, DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]) }, encoding: 'utf8' });
+    expect(result.status).toBe(0); expect(JSON.parse(result.stdout)).toEqual(explicit);
+    expect(await readFile(file, 'utf8')).toBe(original);
+  });
+
 });

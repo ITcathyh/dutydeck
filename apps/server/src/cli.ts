@@ -436,9 +436,10 @@ async function main() {
     memoryAdd: async (content, options) => { output(await runMemoryAdd(content, options)); },
     memoryRemove: async id => { output(await runMemoryRemove(id)); },
     terminalBackend: async (value, options) => { output(await runTerminalSettingsCli(value, options)); },
-    settings: async (action, { appSecretFd, ...input }) => {
+    settings: async (action, { appSecretFd, apiKeyFd, ...input }) => {
       const appSecret = appSecretFd === undefined ? undefined : (await readSecretValue({ valueFd: appSecretFd })).toString('utf8').trim();
-      output(await runSettingsCli(action, { ...input, ...(appSecret !== undefined ? { appSecret } : {}) }));
+      const apiKey = apiKeyFd === undefined ? undefined : (await readSecretValue({ valueFd: apiKeyFd })).toString('utf8').trim();
+      output(await runSettingsCli(action, { ...input, ...(apiKey !== undefined ? { apiKey } : {}), ...(appSecret !== undefined ? { appSecret } : {}) }));
     },
     sessionHerdr: async args => { await runHerdrCli(args); },
     sessionSend: async text => { output(await runSessionSend(text)); },
