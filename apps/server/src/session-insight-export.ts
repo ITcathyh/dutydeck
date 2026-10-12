@@ -499,6 +499,93 @@ function evidenceSummaryText(selection: EvidenceSelection): string {
   return `${selection.rows.length} 条（${parts.join(' / ')}）${notes.length > 0 ? `；省略：${notes.join('，')}` : ''}`;
 }
 
+type TableCell = string | number | null;
+
+const SOURCE_HEADERS = ['来源', '客户端', '范围/状态', '流', '模型', '行数', '日志时间范围', 'Token 样本', '子 Agent 发现', '继承历史', '省略 Trace', '合计口径'];
+const EVIDENCE_HEADERS = ['类别', '事件 ID', '时间', '工具', '事件', '结果', '耗时', 'Token 总量', '入/出', '摘录'];
+const METRIC_DIFF_HEADERS = ['指标', '左侧', '右侧', '差值', '百分比变动', '说明'];
+
+/** 「实际模型」一格由各渲染器自行给出，MD 与 HTML 的空值写法不同。 */
+function overviewRows(snapshot: SessionInsightSnapshotRecord, sources: SourceRow[], models: string): TableCell[][] {
+  const summary = snapshot.summary;
+  return [
+    ['会话', snapshot.sessionId],
+    ['快照时间', snapshot.createdAt],
+    ['日志时间范围', sources.length > 0 ? sources.map(s => s.traceRange).join('；') : '未知'],
+    ['范围版本', summary.scopeVersion],
+    ['绑定修订', snapshot.manifest.bindingRevision],
+    ['实际模型', `${models}${summary.isMultiModel ? '（多模型）' : ''}`],
+    ['质量总览', { recorded: '已记录', derived_or_estimated: '推导或估计', unavailable: '不可用' }[summary.qualityOverview]],
+    ['payloadBytes', snapshot.payloadBytes]
+  ];
+}
+
+function sourceTableRows(sources: SourceRow[]): TableCell[][] {
+  return sources.map(row => [
+    row.sourceKey, row.client, row.scope, row.stream, row.models, row.lines,
+    row.traceRange, row.tokenSamples, row.subagent, row.inherited, row.omittedTraces, row.aggregation
+  ]);
+}
+
+function evidenceTableRows(evidence: EvidenceSelection): TableCell[][] {
+  return evidence.rows.map(row => [
+    EVIDENCE_CATEGORY_LABELS[row.category],
+    row.eventId,
+    textOrUnknown(row.time),
+    row.tool,
+    row.kindLabel,
+    row.statusLabel,
+    row.duration,
+    row.tokensTotal,
+    row.inputOutput,
+    row.excerpt
+  ]);
+}
+
+function versionRows(snapshot: SessionInsightSnapshotRecord): TableCell[][] {
+  return [
+    ['schemaVersion', snapshot.versions.schemaVersion],
+    ['engineVersion', snapshot.versions.engineVersion],
+    ['parserVersion', snapshot.versions.parserVersion],
+    ['metricVersion', snapshot.versions.metricVersion],
+    ['redactionVersion', snapshot.versions.redactionVersion],
+    ['scopeVersion', snapshot.summary.scopeVersion]
+  ];
+}
+
+function comparisonOverviewRows(left: SessionInsightSnapshotRecord, right: SessionInsightSnapshotRecord): TableCell[][] {
+  return [
+    ['会话', left.sessionId, right.sessionId],
+    ['快照', left.snapshotId, right.snapshotId],
+    ['快照时间', left.createdAt, right.createdAt],
+    ['metricVersion', left.versions.metricVersion, right.versions.metricVersion],
+    ['范围版本', left.summary.scopeVersion, right.summary.scopeVersion]
+  ];
+}
+
+function metricDiffRows(comparison: SessionInsightCompareResponse): TableCell[][] {
+  return ALL_METRIC_KEYS.map(key => {
+    const diff = comparison.metricDiffs[key]!;
+    let delta = '—';
+    let percent = '—';
+    let note = '';
+    const renderValue = (value: number | null): string => {
+      if (value === null) return '未知';
+      if (key === 'toolFailureRate') return `${(value * 100).toFixed(1)}%`;
+      if (DURATION_KEYS.has(key)) return formatDuration(value);
+      return formatInteger(value);
+    };
+    if (diff.comparable) {
+      if (diff.delta !== null) delta = formatDeltaValue(key, diff.delta);
+      if (diff.isBaselineZero) note = '基线为零';
+      else if (diff.percentChange !== null) percent = formatSigned(diff.percentChange, true);
+    } else {
+      note = diff.reasonCodes.map(compareReasonText).join('，');
+    }
+    return [METRIC_LABELS[key], renderValue(diff.leftValue), renderValue(diff.rightValue), delta, percent, note];
+  });
+}
+
 // ============================================================================
 // Markdown 渲染
 // ============================================================================
@@ -532,34 +619,12 @@ function mdSideSection(indexLabel: string, side: SideModel): string {
 
   lines.push(`## ${indexLabel}：快照 ${escapeMarkdown(snapshot.snapshotId)}`);
   lines.push('');
-  lines.push(
-    mdTable(
-      ['项', '内容'],
-      [
-        ['会话', snapshot.sessionId],
-        ['快照时间', snapshot.createdAt],
-        ['日志时间范围', sources.length > 0 ? sources.map(s => s.traceRange).join('；') : '未知'],
-        ['范围版本', summary.scopeVersion],
-        ['绑定修订', manifest.bindingRevision],
-        ['实际模型', `${summary.models.length > 0 ? summary.models.join(', ') : '未知'}${summary.isMultiModel ? '（多模型）' : ''}`],
-        ['质量总览', { recorded: '已记录', derived_or_estimated: '推导或估计', unavailable: '不可用' }[summary.qualityOverview]],
-        ['payloadBytes', snapshot.payloadBytes]
-      ]
-    )
-  );
+  lines.push(mdTable(['项', '内容'], overviewRows(snapshot, sources, summary.models.length > 0 ? summary.models.join(', ') : '未知')));
   lines.push('');
 
   lines.push('### 来源与覆盖');
   lines.push('');
-  lines.push(
-    mdTable(
-      ['来源', '客户端', '范围/状态', '流', '模型', '行数', '日志时间范围', 'Token 样本', '子 Agent 发现', '继承历史', '省略 Trace', '合计口径'],
-      sources.map(row => [
-        row.sourceKey, row.client, row.scope, row.stream, row.models, row.lines,
-        row.traceRange, row.tokenSamples, row.subagent, row.inherited, row.omittedTraces, row.aggregation
-      ])
-    )
-  );
+  lines.push(mdTable(SOURCE_HEADERS, sourceTableRows(sources)));
   lines.push('');
 
   lines.push('### 核心指标');
@@ -572,23 +637,7 @@ function mdSideSection(indexLabel: string, side: SideModel): string {
   lines.push(`关键证据：${evidenceSummaryText(evidence)}（每快照固定上限 100 条）`);
   lines.push('');
   if (evidence.rows.length > 0) {
-    lines.push(
-      mdTable(
-        ['类别', '事件 ID', '时间', '工具', '事件', '结果', '耗时', 'Token 总量', '入/出', '摘录'],
-        evidence.rows.map(row => [
-          EVIDENCE_CATEGORY_LABELS[row.category],
-          row.eventId,
-          textOrUnknown(row.time),
-          row.tool,
-          row.kindLabel,
-          row.statusLabel,
-          row.duration,
-          row.tokensTotal,
-          row.inputOutput,
-          row.excerpt
-        ])
-      )
-    );
+    lines.push(mdTable(EVIDENCE_HEADERS, evidenceTableRows(evidence)));
     lines.push('');
   }
 
@@ -626,19 +675,7 @@ function mdSideSection(indexLabel: string, side: SideModel): string {
 
   lines.push('### 分析版本');
   lines.push('');
-  lines.push(
-    mdTable(
-      ['项', '值'],
-      [
-        ['schemaVersion', snapshot.versions.schemaVersion],
-        ['engineVersion', snapshot.versions.engineVersion],
-        ['parserVersion', snapshot.versions.parserVersion],
-        ['metricVersion', snapshot.versions.metricVersion],
-        ['redactionVersion', snapshot.versions.redactionVersion],
-        ['scopeVersion', summary.scopeVersion]
-      ]
-    )
-  );
+  lines.push(mdTable(['项', '值'], versionRows(snapshot)));
   lines.push('');
 
   const trailing = manifest.sources
@@ -661,18 +698,7 @@ function renderMarkdownModel(model: ReportModel): string {
   } else {
     parts.push('# 会话分析对比报告');
     parts.push('');
-    parts.push(
-      mdTable(
-        ['项', '左侧', '右侧'],
-        [
-          ['会话', model.left.snapshot.sessionId, model.right.snapshot.sessionId],
-          ['快照', model.left.snapshot.snapshotId, model.right.snapshot.snapshotId],
-          ['快照时间', model.left.snapshot.createdAt, model.right.snapshot.createdAt],
-          ['metricVersion', model.left.snapshot.versions.metricVersion, model.right.snapshot.versions.metricVersion],
-          ['范围版本', model.left.snapshot.summary.scopeVersion, model.right.snapshot.summary.scopeVersion]
-        ]
-      )
-    );
+    parts.push(mdTable(['项', '左侧', '右侧'], comparisonOverviewRows(model.left.snapshot, model.right.snapshot)));
     parts.push('');
     parts.push(
       model.comparison.comparable
@@ -682,36 +708,7 @@ function renderMarkdownModel(model: ReportModel): string {
     parts.push('');
     parts.push('### 指标对比');
     parts.push('');
-    parts.push(
-      mdTable(
-        ['指标', '左侧', '右侧', '差值', '百分比变动', '说明'],
-        ALL_METRIC_KEYS.map(key => {
-          const diff = model.comparison.metricDiffs[key]!;
-          let delta = '—';
-          let percent = '—';
-          let note = '';
-          if (diff.comparable) {
-            if (diff.delta !== null) delta = formatDeltaValue(key, diff.delta);
-            if (diff.isBaselineZero) {
-              percent = '—';
-              note = '基线为零';
-            } else if (diff.percentChange !== null) {
-              percent = formatSigned(diff.percentChange, true);
-            }
-          } else {
-            note = diff.reasonCodes.map(compareReasonText).join('，');
-          }
-          return [
-            METRIC_LABELS[key],
-            diff.leftValue === null ? '未知' : key === 'toolFailureRate' ? `${(diff.leftValue * 100).toFixed(1)}%` : DURATION_KEYS.has(key) ? formatDuration(diff.leftValue) : formatInteger(diff.leftValue),
-            diff.rightValue === null ? '未知' : key === 'toolFailureRate' ? `${(diff.rightValue * 100).toFixed(1)}%` : DURATION_KEYS.has(key) ? formatDuration(diff.rightValue) : formatInteger(diff.rightValue),
-            delta,
-            percent,
-            note
-          ];
-        })
-      )
-    );
+    parts.push(mdTable(METRIC_DIFF_HEADERS, metricDiffRows(model.comparison)));
     parts.push('');
     parts.push(mdSideSection('左侧', { snapshot: model.left.snapshot, evidence: model.left.evidence }));
     parts.push(mdSideSection('右侧', { snapshot: model.right.snapshot, evidence: model.right.evidence }));
@@ -755,29 +752,10 @@ function htmlSideSection(indexLabel: string, side: SideModel): string {
   const parts: string[] = [];
 
   parts.push(`<h2>${escapeHtml(indexLabel)}：快照 ${escapeHtml(snapshot.snapshotId)}</h2>`);
-  parts.push(
-    htmlTable(['项', '内容'], [
-      ['会话', snapshot.sessionId],
-      ['快照时间', snapshot.createdAt],
-      ['日志时间范围', sources.map(s => s.traceRange).join('；') || '未知'],
-      ['范围版本', summary.scopeVersion],
-      ['绑定修订', manifest.bindingRevision],
-      ['实际模型', `${summary.models.join(', ') || '未知'}${summary.isMultiModel ? '（多模型）' : ''}`],
-      ['质量总览', { recorded: '已记录', derived_or_estimated: '推导或估计', unavailable: '不可用' }[summary.qualityOverview]],
-      ['payloadBytes', snapshot.payloadBytes]
-    ])
-  );
+  parts.push(htmlTable(['项', '内容'], overviewRows(snapshot, sources, summary.models.join(', ') || '未知')));
 
   parts.push('<h3>来源与覆盖</h3>');
-  parts.push(
-    htmlTable(
-      ['来源', '客户端', '范围/状态', '流', '模型', '行数', '日志时间范围', 'Token 样本', '子 Agent 发现', '继承历史', '省略 Trace', '合计口径'],
-      sources.map(row => [
-        row.sourceKey, row.client, row.scope, row.stream, row.models, row.lines,
-        row.traceRange, row.tokenSamples, row.subagent, row.inherited, row.omittedTraces, row.aggregation
-      ])
-    )
-  );
+  parts.push(htmlTable(SOURCE_HEADERS, sourceTableRows(sources)));
 
   parts.push('<h3>核心指标</h3>');
   parts.push(htmlMetricsTable(summary.aggregateMetrics, ALL_METRIC_KEYS));
@@ -785,23 +763,7 @@ function htmlSideSection(indexLabel: string, side: SideModel): string {
   parts.push('<h3>关键工具、错误与高 Token 证据</h3>');
   parts.push(`<p class="note">关键证据：${escapeHtml(evidenceSummaryText(evidence))}（每快照固定上限 100 条）</p>`);
   if (evidence.rows.length > 0) {
-    parts.push(
-      htmlTable(
-        ['类别', '事件 ID', '时间', '工具', '事件', '结果', '耗时', 'Token 总量', '入/出', '摘录'],
-        evidence.rows.map(row => [
-          EVIDENCE_CATEGORY_LABELS[row.category],
-          row.eventId,
-          textOrUnknown(row.time),
-          row.tool,
-          row.kindLabel,
-          row.statusLabel,
-          row.duration,
-          row.tokensTotal,
-          row.inputOutput,
-          row.excerpt
-        ])
-      )
-    );
+    parts.push(htmlTable(EVIDENCE_HEADERS, evidenceTableRows(evidence)));
   }
 
   parts.push('<h3>任务目标与宿主验证</h3>');
@@ -829,16 +791,7 @@ function htmlSideSection(indexLabel: string, side: SideModel): string {
   }
 
   parts.push('<h3>分析版本</h3>');
-  parts.push(
-    htmlTable(['项', '值'], [
-      ['schemaVersion', snapshot.versions.schemaVersion],
-      ['engineVersion', snapshot.versions.engineVersion],
-      ['parserVersion', snapshot.versions.parserVersion],
-      ['metricVersion', snapshot.versions.metricVersion],
-      ['redactionVersion', snapshot.versions.redactionVersion],
-      ['scopeVersion', summary.scopeVersion]
-    ])
-  );
+  parts.push(htmlTable(['项', '值'], versionRows(snapshot)));
   const trailing = manifest.sources
     .filter(source => (source.trailingBytes ?? 0) > 0)
     .map(source => `${escapeHtml(source.sourceKey)}:${source.trailingBytes} B`)
@@ -862,45 +815,13 @@ function renderHtmlModel(model: ReportModel): string {
   if (model.kind === 'session') {
     parts.push(htmlSideSection('会话快照', model.side));
   } else {
-    parts.push(
-      htmlTable(['项', '左侧', '右侧'], [
-        ['会话', model.left.snapshot.sessionId, model.right.snapshot.sessionId],
-        ['快照', model.left.snapshot.snapshotId, model.right.snapshot.snapshotId],
-        ['快照时间', model.left.snapshot.createdAt, model.right.snapshot.createdAt],
-        ['metricVersion', model.left.snapshot.versions.metricVersion, model.right.snapshot.versions.metricVersion],
-        ['范围版本', model.left.snapshot.summary.scopeVersion, model.right.snapshot.summary.scopeVersion]
-      ])
-    );
+    parts.push(htmlTable(['项', '左侧', '右侧'], comparisonOverviewRows(model.left.snapshot, model.right.snapshot)));
     const banner = model.comparison.comparable
       ? '两侧指标版本与范围口径一致，下列差值按同一口径计算。'
       : `两侧不可比：${model.comparison.incomparableReasons.map(compareReasonText).join('，')}；不计算数值差值，不把不同任务的差异归因于模型。`;
     parts.push(`<div class="banner">${escapeHtml(banner)}</div>`);
     parts.push('<h3>指标对比</h3>');
-    parts.push(
-      htmlTable(
-        ['指标', '左侧', '右侧', '差值', '百分比变动', '说明'],
-        ALL_METRIC_KEYS.map(key => {
-          const diff = model.comparison.metricDiffs[key]!;
-          let delta = '—';
-          let percent = '—';
-          let note = '';
-          const renderValue = (value: number | null): string => {
-            if (value === null) return '未知';
-            if (key === 'toolFailureRate') return `${(value * 100).toFixed(1)}%`;
-            if (DURATION_KEYS.has(key)) return formatDuration(value);
-            return formatInteger(value);
-          };
-          if (diff.comparable) {
-            if (diff.delta !== null) delta = formatDeltaValue(key, diff.delta);
-            if (diff.isBaselineZero) note = '基线为零';
-            else if (diff.percentChange !== null) percent = formatSigned(diff.percentChange, true);
-          } else {
-            note = diff.reasonCodes.map(compareReasonText).join('，');
-          }
-          return [METRIC_LABELS[key], renderValue(diff.leftValue), renderValue(diff.rightValue), delta, percent, note];
-        })
-      )
-    );
+    parts.push(htmlTable(METRIC_DIFF_HEADERS, metricDiffRows(model.comparison)));
     parts.push(htmlSideSection('左侧', model.left));
     parts.push(htmlSideSection('右侧', model.right));
   }

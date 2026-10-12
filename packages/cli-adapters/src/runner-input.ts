@@ -1,4 +1,5 @@
 import type { PtyLike } from './types.js';
+import { delay } from './adapters/input-settle.js';
 
 /**
  * runner 类适配器的 stdin 分块注入 + 控制行协议。
@@ -16,8 +17,6 @@ import type { PtyLike } from './types.js';
  *
  * 仅 runner 类兼容适配器使用；当前可发现的本机 Agent 不依赖该协议。
  */
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 /** 单次写入的最大字节数，远低于 ~4KB N_TTY 输入缓冲。 */
 export const RUNNER_INPUT_CHUNK_BYTES = 1024;

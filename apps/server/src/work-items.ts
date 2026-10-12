@@ -1,6 +1,6 @@
 import { promptDigest } from './prompt-context.js';
 import { createHash } from 'node:crypto';
-import { canonicalExecutionJson, createWorkItemSchema, executionActorSchema, installationOwnerTaskActor, RuntimeError, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
+import { canonicalExecutionJson, createWorkItemSchema, executionActorSchema, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { readAttemptResult } from './task-results.js';
@@ -125,7 +125,7 @@ export class WorkItemService {
   /** 平台 channel 操作者只能取创建时已验证父 Session 的 App 域；无法核实即拒绝，不补 owner。 */
   private executionActor(parent: Session, actorId: string): ExecutionActor {
     if (actorId === installationOwnerTaskActor) return { kind: 'installation_owner', id: installationOwnerTaskActor };
-    const appId = parent.source === 'lark' ? parent.sourceId?.split(':')[0] : undefined;
+    const appId = parent.source === 'lark' ? parseLarkSourceId(parent.sourceId).appId : undefined;
     if (!appId) throw new RuntimeError('WORK_ITEM_ACTOR_REQUIRED', 'Work item actor domain cannot be verified from the parent session', 403);
     return executionActorSchema.parse({ kind: 'channel', id: actorId, appId });
   }
@@ -478,7 +478,7 @@ export class WorkItemService {
       if (record.actorId === installationOwnerTaskActor) {
         actor = { kind: 'installation_owner', id: installationOwnerTaskActor };
       } else if (parent.source === 'lark') {
-        const appId = parent.sourceId?.split(':')[0];
+        const { appId } = parseLarkSourceId(parent.sourceId);
         if (appId) {
           actor = { kind: 'channel', id: record.actorId, appId };
         }

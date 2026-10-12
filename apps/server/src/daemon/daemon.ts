@@ -228,24 +228,11 @@ export function readDaemonStatus(dir = defaultDaemonDir()): DaemonState | undefi
   }
 }
 
-export function pidFromState(state?: DaemonState): number {
-  return state && Number.isInteger(state.pid) && state.pid > 0 ? state.pid : 0;
-}
-
 /**
  * True when a daemon recorded for `dir` is currently verified and alive.
  */
 export function isDaemonRunning(dir = defaultDaemonDir()): boolean {
   return inspectDaemon(dir).status === 'verified';
-}
-
-/** The PID read straight from the pid file (0 when absent/unreadable). */
-export function readPidFile(dir = defaultDaemonDir()): number {
-  try {
-    return parseInt(readFileSync(join(dir, PID_FILE), 'utf8').trim(), 10) || 0;
-  } catch {
-    return 0;
-  }
 }
 
 function ensureDir(dir: string): void {
@@ -266,11 +253,6 @@ export function clearState(dir: string): void {
   ensureDir(dir);
   writeFileSync(join(dir, STATE_FILE), '', 'utf8');
   writeFileSync(join(dir, PID_FILE), '', 'utf8');
-}
-
-/** Resolved daemon cwd: the recorded cwd, falling back to the supplied one. */
-export function daemonCwd(dir: string, fallback = process.cwd()): string {
-  return readDaemonStatus(dir)?.cwd || fallback;
 }
 
 /** Whether this process is the daemonized child spawned by `dutydeck start`. */

@@ -1,6 +1,7 @@
 import { safeLarkWebUrl } from './card-actions.js';
 import { permissionDisplayText } from '@dutydeck/shared';
 import { larkCommandEcho } from './commands.js';
+import { escapeCardInline, markdownElement } from './card-elements.js';
 
 export interface LarkTaskDashboardPendingApproval {
   /** workflow-interactions 里的交互 id；审批 value 必须带它走 respond 的一次性 CAS。 */
@@ -149,13 +150,6 @@ const relativeTime = (value: unknown, now: number) => {
 // 行 Web 出口与进度卡共用同一份链接校验（card-actions.ts 的 safeLarkWebUrl），
 // 不在本模块另写一套白名单。
 const validAppLink = (value: unknown) => safeLarkWebUrl(typeof value === 'string' ? value : undefined);
-
-const markdown = (elementId: string, content: string) => ({
-  tag: 'markdown', element_id: elementId, content
-});
-
-const escapeCardInline = (value: string) =>
-  value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 
 const MAX_ACTION_TASK_ID_CHARS = 256;
 
@@ -365,7 +359,7 @@ export function buildLarkTaskDashboard(
 
   if (!ordered.length) {
     return {
-      elements: [markdown('task_dashboard_empty', '暂无可查看的任务，可发送目标开始工作。'), navigation(1, 1)],
+      elements: [markdownElement('task_dashboard_empty', '暂无可查看的任务，可发送目标开始工作。'), navigation(1, 1)],
       page: 1,
       totalPages: 1
     };
@@ -380,7 +374,7 @@ export function buildLarkTaskDashboard(
   const sharedAgent = agents.every(Boolean) && new Set(agents).size === 1 ? agents[0] : undefined;
   // 不写「任务导航」标题：卡片 header 已经是这四个字（coordinator.ts 的 workflowReply
   // 用 taskName: '任务导航' 发出这张卡），正文再写一遍就是紧挨着的两行同名标题。
-  const elements: Array<Record<string, any>> = [markdown(
+  const elements: Array<Record<string, any>> = [markdownElement(
     'task_dashboard_header',
     [`第 ${currentPage}/${totalPages} 页，共 ${ordered.length} 项。`,
       sharedWorkspace && `工作区：${escapeCardInline(sharedWorkspace)}`,
@@ -392,14 +386,14 @@ export function buildLarkTaskDashboard(
     if (item.group !== lastGroup) {
       lastGroup = item.group;
       const groupCount = ordered.filter(candidate => candidate.group === item.group).length;
-      elements.push(markdown(`task_dashboard_group_${item.group}`, `**${groupLabels[item.group]}**（${groupCount}）`));
+      elements.push(markdownElement(`task_dashboard_group_${item.group}`, `**${groupLabels[item.group]}**（${groupCount}）`));
     }
     elements.push(taskRow(item, (currentPage - 1) * PAGE_SIZE + index, now, sharedWorkspace, sharedAgent, currentChatId));
   });
 
   const nextPage = currentPage < totalPages ? currentPage + 1 : 1;
   elements.push(navigation(currentPage, totalPages));
-  elements.push(markdown(
+  elements.push(markdownElement(
     'task_dashboard_footer',
     totalPages > 1 ? `发送 \`/tasks ${nextPage}\` 查看${currentPage < totalPages ? '下一页' : '第 1 页'}。` : '发送 `/tasks` 刷新任务列表。'
   ));

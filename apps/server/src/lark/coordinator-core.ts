@@ -20,7 +20,8 @@ import { larkCardFollowUpTitle } from './card-actions.js';
 import { larkCommandEcho } from './commands.js';
 import { escapeLarkPromptEcho } from './queue-summary.js';
 import type { ListenerLog, LarkMessageEvent, LarkRuntime } from './listener.js';
-import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
+import type { LarkGroup, LarkTask } from './coordinator.js';
+import { parseCardTask } from './persisted-card-task.js';
 
 // 飞书消息协调器 · 公共层：实例状态与构造、各层共用的权限判定和工具函数。分层说明见 coordinator.ts。
 
@@ -227,7 +228,7 @@ export abstract class LarkCoordinatorCore {
     if (!config?.listening || !record.event.senderOpenId) return false;
     const mapping = (await this.cardMappings?.list(larkCardChannel(record.appId)))?.find(item => item.externalId === record.event.messageId);
     if (!mapping || mapping.sessionId !== record.sessionId) return false;
-    const saved = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask;
+    const saved = parseCardTask(mapping.extra ?? '{}');
     if (saved.app_id !== record.appId || saved.chat_id !== record.event.chatId || saved.runtime_task_id !== record.taskId
       || saved.turn !== record.turn || saved.sender_open_id !== record.event.senderOpenId) return false;
     const task = (await this.runtime.getTasks?.(record.sessionId))?.find(item => item.id === record.taskId);
@@ -310,7 +311,7 @@ export abstract class LarkCoordinatorCore {
     if (live?.event.senderOpenId) return { requester: live.event.senderOpenId, title: larkTaskTitle(live.prompt, config.name), startedAt: live.startedAt };
     for (const mapping of await this.cardMappings?.list(larkCardChannel(config.appId)) ?? []) {
       if (mapping.sessionId !== target.sessionId) continue;
-      const saved = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask;
+      const saved = parseCardTask(mapping.extra ?? '{}');
       if (saved.app_id === config.appId && saved.chat_id === chatId && saved.runtime_task_id === target.id) {
         return { requester: saved.sender_open_id, title: saved.task_name, startedAt: saved.started_at };
       }

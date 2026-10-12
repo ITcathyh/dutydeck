@@ -1,7 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { buildDutydeckRoutingBlock } from '../shared-hints.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { submitPrompt } from './input-settle.js';
 
 export function createAidenAdapter(): CliAdapter {
   return {
@@ -25,15 +24,7 @@ export function createAidenAdapter(): CliAdapter {
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
-      if (backend.sendText && backend.sendSpecialKeys) {
-        (await backend.sendText(prompt));
-        await delay(200);
-        (await backend.sendSpecialKeys('Enter'));
-      } else {
-        (await backend.write(prompt));
-        await delay(1000);
-        (await backend.write('\r'));
-      }
+      await submitPrompt(backend, prompt);
     },
 
     buildResumeCommand(sessionId: string): string[] {

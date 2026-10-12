@@ -46,6 +46,7 @@ import {
 } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTaskState, LarkTask, PersistedLarkCardTask } from './coordinator.js';
+import { parseCardTask } from './persisted-card-task.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 import { larkCardFollowUpTitle, type LarkCardCapabilities } from './card-actions.js';
 import { type LarkCommandPrompt, larkCardChannel, relaunchRetainedPrefix, relaunchRetainedKey, larkTaskTitle, sendTaskCard, withoutLeadingBotMention } from './coordinator-core.js';
@@ -462,7 +463,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     for (const mapping of mappings) {
       if (mapping.sessionId !== target.sessionId || !mapping.extra) continue;
       let persisted: PersistedLarkCardTask;
-      try { persisted = JSON.parse(mapping.extra) as PersistedLarkCardTask; }
+      try { persisted = parseCardTask(mapping.extra); }
       catch { continue; }
       if (persisted.app_id !== config.appId || persisted.chat_id !== event.chatId) continue;
       if (!persisted.runtime_task_id || persisted.runtime_task_id !== target.id) continue;
@@ -758,17 +759,21 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
     const cardContext: { agentName: string; permissionMode: ReturnType<typeof larkPermissionMode>; workspace?: string; alertRecall?: LarkAlertRecall } = { agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
     const clearAcknowledgement = () => this.clearAcknowledgementReaction(task);
-    const failContextRead = async (error: unknown, activeSession?: Session) => {
-      if (this.stopped || task.turn !== currentTurn || await this.supersededTurn(task, activeSession)) return;
-      this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '执行前读取飞书上下文失败');
+    /** 执行前就失败：结束待办记录、发失败卡、撤掉收到表情。inboxReason 缺省同 taskName。 */
+    const failBeforeRun = async (taskName: string, markdown: string, idempotencyKey: string, options: { inboxReason?: string; readOnly?: true } = {}) => {
       task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
-      await this.failPendingInbox(task, '上下文读取超时或失败');
-      const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, readOnly: true,
-        taskId: task.id, taskName: '上下文读取失败', markdown: '上下文读取超时或失败，Agent 尚未执行。请稍后重新发送请求。',
-        idempotencyKey: `context_failed_${task.id}`.slice(0, 50),
+      await this.failPendingInbox(task, options.inboxReason ?? taskName);
+      const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, ...(options.readOnly ? { readOnly: true } : {}),
+        taskId: task.id, taskName, markdown, idempotencyKey: idempotencyKey.slice(0, 50),
         ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
       task.cardMessageId = card.messageId;
       await clearAcknowledgement();
+    };
+    const failContextRead = async (error: unknown, activeSession?: Session) => {
+      if (this.stopped || task.turn !== currentTurn || await this.supersededTurn(task, activeSession)) return;
+      this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '执行前读取飞书上下文失败');
+      await failBeforeRun('上下文读取失败', '上下文读取超时或失败，Agent 尚未执行。请稍后重新发送请求。', `context_failed_${task.id}`,
+        { inboxReason: '上下文读取超时或失败', readOnly: true });
     };
     // 用户仅 @ 机器人而未发送文字时，拉取最近聊天记录作为上下文，让 Agent 判断用户意图。
     if (!task.prompt.trim()) {
@@ -795,11 +800,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       try {
         trustedPeerBot = Boolean(config.groupToolsEnabled && event.senderOpenId && await this.peerBotAuthorized?.(event.chatId, event.senderOpenId));
       } catch (error) {
-        task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
-        await this.failPendingInbox(task, 'Agent 协作身份校验失败');
-        const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: 'Agent 协作身份校验失败', markdown: withGroupMention(`**无法验证发起交接的 Agent。**\n\n${error instanceof Error ? error.message : String(error)}`), idempotencyKey: `fail_peer_${event.messageId}_${currentTurn}`.slice(0, 50), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
-        task.cardMessageId = card.messageId;
-        await clearAcknowledgement();
+        await failBeforeRun('Agent 协作身份校验失败', withGroupMention(`**无法验证发起交接的 Agent。**\n\n${error instanceof Error ? error.message : String(error)}`), `fail_peer_${event.messageId}_${currentTurn}`);
         return;
       }
     } else if ((!allowedUsers.length && allowedEmails.length) || (riskControlEnabled && !highRiskAllowedUsers.length && highRiskAllowedEmails.length)) {
@@ -808,11 +809,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         actorEmails = await this.service.getUserEmails(event.senderOpenId);
         if (!actorEmails.length) throw new LarkServiceError('LARK_SENDER_EMAIL_EMPTY', '飞书没有返回当前发送人的邮箱字段', 409);
       } catch (error) {
-        task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
-        await this.failPendingInbox(task, '身份解析权限缺失');
-        const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: '身份解析权限缺失', markdown: withGroupMention(larkIdentityPermissionHelp(error, config.appId)), idempotencyKey: `fail_id_${event.messageId}_${currentTurn}`.slice(0, 50), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
-        task.cardMessageId = card.messageId;
-        await clearAcknowledgement();
+        await failBeforeRun('身份解析权限缺失', withGroupMention(larkIdentityPermissionHelp(error, config.appId)), `fail_id_${event.messageId}_${currentTurn}`);
         return;
       }
     }
@@ -825,11 +822,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       ? (!accessRestricted || (peerBotsAllowed && trustedPeerBot) || Boolean(allowedBot))
       : !accessRestricted || (allowedUsers.length ? Boolean(allowedUser) : actorEmails.some(email => allowedEmails.includes(email)));
     if (!allowed) {
-      task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
-      await this.failPendingInbox(task, '访问被拒绝');
-      const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: '访问被拒绝', markdown: withGroupMention('**当前账号不在机器人白名单中。**\n\n如需使用，请联系机器人管理员添加你。'), idempotencyKey: `fail_acl_${event.messageId}_${currentTurn}`.slice(0, 50), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
-      task.cardMessageId = card.messageId;
-      await clearAcknowledgement();
+      await failBeforeRun('访问被拒绝', withGroupMention('**当前账号不在机器人白名单中。**\n\n如需使用，请联系机器人管理员添加你。'), `fail_acl_${event.messageId}_${currentTurn}`);
       return;
     }
     const highRiskAuthorized = botSender

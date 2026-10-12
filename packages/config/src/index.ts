@@ -5,8 +5,6 @@ import { z } from 'zod';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
-export const ACXP_VERSION = '0.13.0';
-
 export const appConfigSchema = z.object({
   host: z.string().default('127.0.0.1'),
   port: z.number().int().positive().default(4310),

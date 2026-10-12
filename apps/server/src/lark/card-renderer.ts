@@ -2,6 +2,7 @@ import type { AgentEvent, VerificationResponse, VerificationStatus } from '@duty
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError } from './service.js';
 import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
+import { collapsiblePanel, escapeCardInline } from './card-elements.js';
 import { maxLarkVerificationRepairRounds, type LarkAutoVerificationNote } from './auto-verification.js';
 
 // 卡片渲染与限流/拒绝判断辅助。
@@ -312,7 +313,6 @@ const traceElapsed = (startedAt?: string, completedAt?: string) => {
   if (minutes >= 60) return minutes % 60 ? `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分` : `${Math.floor(minutes / 60)} 小时`;
   return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
 };
-const escapeCardInline = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 
 const firstValue = (value: unknown, keys: string[]): string | undefined => {
   if (!value || typeof value !== 'object') return undefined;
@@ -545,23 +545,14 @@ const clipTerminalText = (text: string) => {
 };
 const terminalPanel = (record: Extract<StageRecord, { kind: 'terminal' }>, index: string | number, margin = '0px 0px 0px 20px'): LarkCardElement => {
   const clipped = clipTerminalText(record.text);
-  return {
-    tag: 'collapsible_panel', element_id: `trace_tool_${index}`, expanded: false,
-    direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin,
-    header: {
-      title: {
-        tag: 'markdown',
-        // 不写条数：合并去重之后它与面板里实际有多少内容再无关系。40 帧同一块屏幕会
-        // 合并成几行，标题却写着「40 条」，读者会以为剩下的被省略了。
-        content: '终端输出',
-        text_size: 'notation',
-        icon: { tag: 'standard_icon', token: toolIcon('command'), color: 'grey' }
-      },
-      vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '12px 12px' },
-      icon_position: 'right', icon_expanded_angle: -180
-    },
-    elements: [{ tag: 'markdown', content: `\`\`\`text\n${clipped.replaceAll('```', '``\\`')}\n\`\`\``, text_size: 'notation', margin: '0px' }]
-  };
+  return collapsiblePanel(`trace_tool_${index}`, {
+    tag: 'markdown',
+    // 不写条数：合并去重之后它与面板里实际有多少内容再无关系。40 帧同一块屏幕会
+    // 合并成几行，标题却写着「40 条」，读者会以为剩下的被省略了。
+    content: '终端输出',
+    text_size: 'notation',
+    icon: { tag: 'standard_icon', token: toolIcon('command'), color: 'grey' }
+  }, [{ tag: 'markdown', content: `\`\`\`text\n${clipped.replaceAll('```', '``\\`')}\n\`\`\``, text_size: 'notation', margin: '0px' }], { margin, iconSize: '12px 12px' });
 };
 
 const stageRecordPanel = (record: StageRecord, index: string | number, margin = '0px 0px 0px 20px'): LarkCardElement =>
@@ -613,16 +604,8 @@ const toolPanel = (entry: TraceEntry, index: string | number, margin = '0px 0px 
   // 没有可展开内容时不给折叠面板：一个点开只显示「暂无内容」的箭头是空承诺。
   // 正在执行、还没拿到结果的工具本来就只有标题这一行信息，直接平铺即可。
   if (!sections.length) return { ...title, element_id: `trace_tool_${index}`, margin };
-  return {
-    tag: 'collapsible_panel', element_id: `trace_tool_${index}`, expanded: false,
-    direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin,
-    header: {
-      title,
-      vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '12px 12px' },
-      icon_position: 'right', icon_expanded_angle: -180
-    },
-    elements: sections.map(content => ({ tag: 'markdown', content, text_size: 'notation', margin: '0px' }))
-  };
+  return collapsiblePanel(`trace_tool_${index}`, title,
+    sections.map(content => ({ tag: 'markdown', content, text_size: 'notation', margin: '0px' })), { margin, iconSize: '12px 12px' });
 };
 
 const traceGroups = (entries: TraceEntry[]): TraceGroup[] => {
@@ -777,23 +760,8 @@ const historyGroupPanel = (
     return { tag: 'markdown', element_id: `trace_group_${index}`, content: headerTitle, text_size: 'notation', margin: '0px' };
   }
 
-  return {
-    tag: 'collapsible_panel',
-    element_id: `trace_group_${index}`,
-    expanded,
-    direction: 'vertical',
-    vertical_spacing: '2px',
-    padding: '2px 0px 0px 0px',
-    margin: '0px',
-    header: {
-      title: { tag: 'markdown', content: headerTitle, text_size: 'notation' },
-      vertical_align: 'center',
-      icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
-      icon_position: 'right',
-      icon_expanded_angle: -180
-    },
-    elements: actionElements
-  };
+  return collapsiblePanel(`trace_group_${index}`, { tag: 'markdown', content: headerTitle, text_size: 'notation' }, actionElements,
+    { expanded, verticalSpacing: '2px', padding: '2px 0px 0px 0px' });
 };
 
 const shanghaiClock = (at: string | number | Date): string | undefined => {

@@ -6,6 +6,7 @@ import type { ContactIdType, ContactUser } from './owner-identity.js';
 import { executeWithLarkGate, resolveLarkGateConfig, LarkCircuitOpenError } from './api-gate.js';
 import { buildLarkCardActions, buildLarkCardDetailButton, buildLarkCardFollowUpActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
 import { larkSessionDetailUrl } from './detail-link.js';
+import { collapsiblePanel } from './card-elements.js';
 import { larkAlertRecallLine, type LarkAlertRecall } from './alert-recall.js';
 import { larkConclusionHeadline, larkElapsedLabel, larkStoppedAtLabel, larkUserStatus } from './card-status.js';
 
@@ -330,16 +331,8 @@ const foldLongResult = (element: Record<string, unknown>): Array<Record<string, 
   const approx = (restChars >= 1_000 ? Math.round(restChars / 100) * 100 : Math.max(10, Math.round(restChars / 10) * 10)).toLocaleString('en-US');
   return [
     { ...element, content: head },
-    {
-      tag: 'collapsible_panel', element_id: 'final_output_more', expanded: false,
-      direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin: '0px',
-      header: {
-        title: { tag: 'markdown', content: `<font color='grey'>其余内容 · 约 ${approx} 字</font>`, text_size: 'notation' },
-        vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
-        icon_position: 'right', icon_expanded_angle: -180
-      },
-      elements: [{ ...element, element_id: 'final_output_rest', content: rest }]
-    }
+    collapsiblePanel('final_output_more', { tag: 'markdown', content: `<font color='grey'>其余内容 · 约 ${approx} 字</font>`, text_size: 'notation' },
+      [{ ...element, element_id: 'final_output_rest', content: rest }])
   ];
 };
 
@@ -782,16 +775,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
           ...currentGroup,
           elements: [
             ...currentItems.filter(el => !currentTools.includes(el)),
-            {
-              tag: 'collapsible_panel', element_id: 'current_records', expanded: false,
-              direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin: '0px',
-              header: {
-                title: { tag: 'markdown', content: `执行记录（${currentTools.length} 条）`, text_size: 'notation' },
-                vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
-                icon_position: 'right', icon_expanded_angle: -180
-              },
-              elements: currentTools
-            }
+            collapsiblePanel('current_records', { tag: 'markdown', content: `执行记录（${currentTools.length} 条）`, text_size: 'notation' }, currentTools)
           ]
         } : currentGroup;
         const historyGroups = traceElements.filter(el => el !== currentGroup);
@@ -809,19 +793,10 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ];
       } else if (traceElements.length) {
         const recordsExpanded = traceElements.some(el => el.expanded === true);
-        traceSection = [{
-          tag: 'collapsible_panel', element_id: 'trace_overview', expanded: recordsExpanded,
-          direction: 'vertical', vertical_spacing: '2px', padding: '4px 0px 0px 0px', margin: '8px 0px 0px 0px',
-          header: {
-            title: { tag: 'markdown', content: '执行记录', text_size: 'notation' },
-            vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
-            icon_position: 'right', icon_expanded_angle: -180
-          },
-          elements: [
-            ...(omissionNotice ? [omissionNotice] : []),
-            ...traceElements
-          ]
-        }];
+        traceSection = [collapsiblePanel('trace_overview', { tag: 'markdown', content: '执行记录', text_size: 'notation' }, [
+          ...(omissionNotice ? [omissionNotice] : []),
+          ...traceElements
+        ], { expanded: recordsExpanded, verticalSpacing: '2px', margin: '8px 0px 0px 0px' })];
       }
       const buttonRow = [{
         tag: 'column_set', element_id: 'task_action_row', flex_mode: 'none', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
@@ -925,16 +900,10 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ...otherElements.filter(element => element.element_id !== 'trace_empty'),
         ...(detailButton ? [detailButton] : detailLink ? [{ tag: 'markdown', content: detailLink, text_size: 'notation', text_align: 'right', margin: '0px' }] : [])
       ];
-      const receipt = traceElements.length ? {
-        tag: 'collapsible_panel', element_id: 'task_overview', expanded: traceElements.some(el => el.expanded === true),
-        direction: 'vertical', vertical_spacing: '4px', padding: '0px', margin: '0px',
-        header: {
-          title: { tag: 'markdown', content: receiptTitle, text_size: 'normal', icon: receiptIcon },
-          vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
-          icon_position: 'right', icon_expanded_angle: -180
-        },
-        elements: listed
-      } : { tag: 'markdown', element_id: 'task_overview', content: receiptTitle, text_size: 'normal', margin: '0px', icon: receiptIcon };
+      const receipt = traceElements.length
+        ? collapsiblePanel('task_overview', { tag: 'markdown', content: receiptTitle, text_size: 'normal', icon: receiptIcon }, listed,
+          { expanded: traceElements.some(el => el.expanded === true), padding: '0px' })
+        : { tag: 'markdown', element_id: 'task_overview', content: receiptTitle, text_size: 'normal', margin: '0px', icon: receiptIcon };
       return [
         receipt,
         ...(traceElements.length ? [] : listed),
@@ -964,16 +933,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       ...currentGroup,
       elements: [
         ...currentItems.filter(el => !currentTools.includes(el)),
-        {
-          tag: 'collapsible_panel', element_id: 'current_records', expanded: false,
-          direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin: '0px',
-          header: {
-            title: { tag: 'markdown', content: `执行记录（${currentTools.length} 条）`, text_size: 'notation' },
-            vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
-            icon_position: 'right', icon_expanded_angle: -180
-          },
-          elements: currentTools
-        }
+        collapsiblePanel('current_records', { tag: 'markdown', content: `执行记录（${currentTools.length} 条）`, text_size: 'notation' }, currentTools)
       ]
     } : currentGroup;
     // 当前阶段就是正文第一段，不再套一块底色（精简模式本来就没有）。

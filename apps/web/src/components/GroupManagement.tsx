@@ -46,8 +46,6 @@ export type GroupManagementProps = {
   agents: Agent[];
 };
 
-export type { GroupBotDraft };
-
 /*
   群内角色只开放两档，且 can_operate 的范围只到本群。
 
@@ -90,6 +88,19 @@ const PRESENTATION_TOGGLES = [
   { key: 'presentationHideTraceOnComplete', label: '完成后折叠执行过程', hint: '结果卡里是否默认收起执行过程。' },
   { key: 'presentationStructuredAskCards', label: '结构化问答卡片', hint: '问答用结构化组件还是文字选项。' }
 ] as const satisfies ReadonlyArray<{ key: keyof GroupBotDraft; label: string; hint: string }>;
+
+/** 群级呈现里「继承 / 本群设置 + 数字」的两项。顺序即界面顺序。 */
+const PRESENTATION_NUMBER_OVERRIDES = [
+  { modeKey: 'presentationTraceLimitMode', valueKey: 'presentationTraceLimitValue', label: 'Trace 阶段上限', valueLabel: '本群 Trace 阶段上限值', min: 1, max: 200, step: undefined, hint: '心跳卡片最多保留几个执行阶段。' },
+  { modeKey: 'presentationPushIntervalMode', valueKey: 'presentationPushIntervalValue', label: '推送间隔', valueLabel: '本群推送间隔毫秒', min: 500, max: 20000, step: 100, hint: '500-20000 毫秒；改卡片的刷新节奏。' }
+] as const;
+
+/** 群级工具权限的三个下拉。顺序即界面顺序。 */
+const GROUP_TOOL_SELECTS = [
+  { key: 'toolRead', label: '读取工具 (read)' },
+  { key: 'toolDiscover', label: '发现工具 (discover)' },
+  { key: 'toolSend', label: '发送工具 (send)' }
+] as const;
 
 /** 两份群草稿的**用户可编辑内容**是否相同。baseRevision 是元数据，不参与比较。 */
 function sameGroupDraftContent(left: GroupBotDraft, right: GroupBotDraft): boolean {
@@ -217,6 +228,29 @@ function effectiveText(explained: { value?: string; source?: string } | undefine
   if (explained?.source === 'group_clear') return '使用 Agent 默认';
   if (!explained || explained.value === undefined || explained.source === 'unconfigured') return fallback;
   return explained.value;
+}
+
+function ModeRadios<T extends string>({ name, value, options, onChange }: {
+  name: string;
+  value: T;
+  options: ReadonlyArray<readonly [T, string]>;
+  onChange(mode: T): void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-caption">
+      {options.map(([mode, label]) => (
+        <label key={mode} className="flex items-center gap-1 cursor-pointer">
+          <input
+            type="radio"
+            name={name}
+            checked={value === mode}
+            onChange={() => onChange(mode)}
+          />
+          <span>{label}</span>
+        </label>
+      ))}
+    </div>
+  );
 }
 
 export function GroupManagement({
@@ -746,27 +780,16 @@ export function GroupManagement({
               <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-subtle" />
             </div>
             <div className="flex gap-1 text-meta">
-              <button
-                type="button"
-                onClick={() => setFilterType('all')}
-                className={`rounded px-2 py-0.5 ${filterType === 'all' ? 'bg-inverse text-surface font-medium' : 'text-secondary hover:bg-hover'}`}
-              >
-                全部 ({groups.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setFilterType('custom')}
-                className={`rounded px-2 py-0.5 ${filterType === 'custom' ? 'bg-inverse text-surface font-medium' : 'text-secondary hover:bg-hover'}`}
-              >
-                单独配置
-              </button>
-              <button
-                type="button"
-                onClick={() => setFilterType('issues')}
-                className={`rounded px-2 py-0.5 ${filterType === 'issues' ? 'bg-inverse text-surface font-medium' : 'text-secondary hover:bg-hover'}`}
-              >
-                待处理
-              </button>
+              {([['all', `全部 (${groups.length})`], ['custom', '单独配置'], ['issues', '待处理']] as const).map(([type, label]) => (
+                <button
+                  key={type}
+                  type="button"
+                  onClick={() => setFilterType(type)}
+                  className={`rounded px-2 py-0.5 ${filterType === type ? 'bg-inverse text-surface font-medium' : 'text-secondary hover:bg-hover'}`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
           </div>
 
@@ -982,26 +1005,15 @@ export function GroupManagement({
                         <label className="text-caption font-medium text-secondary">
                           执行 Agent
                         </label>
-                        <div className="flex flex-wrap items-center gap-2 text-caption">
-                          <label className="flex items-center gap-1 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="agentMode"
-                              checked={currentDraft.agentMode === 'inherit'}
-                              onChange={() => updateDraft({ agentMode: 'inherit' })}
-                            />
-                            <span>继承 Bot 默认 ({botConfig?.defaultAgentId || '未配置'})</span>
-                          </label>
-                          <label className="flex items-center gap-1 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="agentMode"
-                              checked={currentDraft.agentMode === 'set'}
-                              onChange={() => updateDraft({ agentMode: 'set', agentValue: agents[0]?.id ?? '' })}
-                            />
-                            <span>本群单独设置</span>
-                          </label>
-                        </div>
+                        <ModeRadios
+                          name="agentMode"
+                          value={currentDraft.agentMode}
+                          options={[
+                            ['inherit', `继承 Bot 默认 (${botConfig?.defaultAgentId || '未配置'})`],
+                            ['set', '本群单独设置']
+                          ]}
+                          onChange={mode => updateDraft(mode === 'set' ? { agentMode: mode, agentValue: agents[0]?.id ?? '' } : { agentMode: mode })}
+                        />
                       </div>
                       {currentDraft.agentMode === 'set' && (
                         <div className="pt-1">
@@ -1020,26 +1032,15 @@ export function GroupManagement({
                         <label className="text-caption font-medium text-secondary">
                           工作目录
                         </label>
-                        <div className="flex flex-wrap items-center gap-2 text-caption">
-                          <label className="flex items-center gap-1 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="workspaceMode"
-                              checked={currentDraft.workspaceMode === 'inherit'}
-                              onChange={() => updateDraft({ workspaceMode: 'inherit' })}
-                            />
-                            <span>继承 Bot 默认 ({botConfig?.workspace || '默认'})</span>
-                          </label>
-                          <label className="flex items-center gap-1 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="workspaceMode"
-                              checked={currentDraft.workspaceMode === 'set'}
-                              onChange={() => updateDraft({ workspaceMode: 'set' })}
-                            />
-                            <span>本群单独设置</span>
-                          </label>
-                        </div>
+                        <ModeRadios
+                          name="workspaceMode"
+                          value={currentDraft.workspaceMode}
+                          options={[
+                            ['inherit', `继承 Bot 默认 (${botConfig?.workspace || '默认'})`],
+                            ['set', '本群单独设置']
+                          ]}
+                          onChange={mode => updateDraft({ workspaceMode: mode })}
+                        />
                       </div>
                       {currentDraft.workspaceMode === 'set' && (
                         <DirectoryPicker
@@ -1057,35 +1058,16 @@ export function GroupManagement({
                         <label className="text-caption font-medium text-secondary">
                           模型
                         </label>
-                        <div className="flex flex-wrap items-center gap-2 text-caption">
-                          <label className="flex items-center gap-1 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="modelMode"
-                              checked={currentDraft.modelMode === 'inherit'}
-                              onChange={() => updateDraft({ modelMode: 'inherit' })}
-                            />
-                            <span>继承 Bot 默认</span>
-                          </label>
-                          <label className="flex items-center gap-1 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="modelMode"
-                              checked={currentDraft.modelMode === 'clear'}
-                              onChange={() => updateDraft({ modelMode: 'clear' })}
-                            />
-                            <span>使用 Agent 默认</span>
-                          </label>
-                          <label className="flex items-center gap-1 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="modelMode"
-                              checked={currentDraft.modelMode === 'set'}
-                              onChange={() => updateDraft({ modelMode: 'set' })}
-                            />
-                            <span>本群单独指定</span>
-                          </label>
-                        </div>
+                        <ModeRadios
+                          name="modelMode"
+                          value={currentDraft.modelMode}
+                          options={[
+                            ['inherit', '继承 Bot 默认'],
+                            ['clear', '使用 Agent 默认'],
+                            ['set', '本群单独指定']
+                          ]}
+                          onChange={mode => updateDraft({ modelMode: mode })}
+                        />
                       </div>
                       {currentDraft.modelMode === 'set' && (
                         <CompactSelect
@@ -1448,39 +1430,19 @@ export function GroupManagement({
                         </label>
 
                         <div className="grid gap-3 sm:grid-cols-3 text-caption">
-                          <div>
-                            <label className="mb-1 block font-medium text-secondary">读取工具 (read)</label>
-                            <Select
-                              value={currentDraft.toolRead}
-                              onChange={e => updateDraft({ toolRead: e.target.value as any })}
-                            >
-                              <option value="inherit">继承 Bot 默认</option>
-                              <option value="allow">群级允许</option>
-                              <option value="deny">群级禁止</option>
-                            </Select>
-                          </div>
-                          <div>
-                            <label className="mb-1 block font-medium text-secondary">发现工具 (discover)</label>
-                            <Select
-                              value={currentDraft.toolDiscover}
-                              onChange={e => updateDraft({ toolDiscover: e.target.value as any })}
-                            >
-                              <option value="inherit">继承 Bot 默认</option>
-                              <option value="allow">群级允许</option>
-                              <option value="deny">群级禁止</option>
-                            </Select>
-                          </div>
-                          <div>
-                            <label className="mb-1 block font-medium text-secondary">发送工具 (send)</label>
-                            <Select
-                              value={currentDraft.toolSend}
-                              onChange={e => updateDraft({ toolSend: e.target.value as any })}
-                            >
-                              <option value="inherit">继承 Bot 默认</option>
-                              <option value="allow">群级允许</option>
-                              <option value="deny">群级禁止</option>
-                            </Select>
-                          </div>
+                          {GROUP_TOOL_SELECTS.map(({ key, label }) => (
+                            <div key={key}>
+                              <label className="mb-1 block font-medium text-secondary">{label}</label>
+                              <Select
+                                value={currentDraft[key]}
+                                onChange={e => updateDraft({ [key]: e.target.value as any })}
+                              >
+                                <option value="inherit">继承 Bot 默认</option>
+                                <option value="allow">群级允许</option>
+                                <option value="deny">群级禁止</option>
+                              </Select>
+                            </div>
+                          ))}
                         </div>
 
                         {/* 本群里机器人说多少话。每一项都可以只在这个群改，不影响同一个 Bot 的其他群。 */}
@@ -1502,53 +1464,32 @@ export function GroupManagement({
                                 <div className="mt-1 text-meta text-subtle">{hint}</div>
                               </div>
                             ))}
-                            <div>
-                              <label className="mb-1 block font-medium text-secondary">Trace 阶段上限</label>
-                              <Select
-                                aria-label="Trace 阶段上限"
-                                value={currentDraft.presentationTraceLimitMode}
-                                onChange={e => updateDraft({ presentationTraceLimitMode: e.target.value as 'inherit' | 'set' })}
-                              >
-                                <option value="inherit">继承 Bot 默认</option>
-                                <option value="set">本群单独设置</option>
-                              </Select>
-                              {currentDraft.presentationTraceLimitMode === 'set' && (
-                                <Input
-                                  aria-label="本群 Trace 阶段上限值"
-                                  className="mt-1 font-mono"
-                                  type="number"
-                                  min={1}
-                                  max={200}
-                                  value={currentDraft.presentationTraceLimitValue}
-                                  onChange={e => updateDraft({ presentationTraceLimitValue: e.target.value })}
-                                />
-                              )}
-                              <div className="mt-1 text-meta text-subtle">心跳卡片最多保留几个执行阶段。</div>
-                            </div>
-                            <div>
-                              <label className="mb-1 block font-medium text-secondary">推送间隔</label>
-                              <Select
-                                aria-label="推送间隔"
-                                value={currentDraft.presentationPushIntervalMode}
-                                onChange={e => updateDraft({ presentationPushIntervalMode: e.target.value as 'inherit' | 'set' })}
-                              >
-                                <option value="inherit">继承 Bot 默认</option>
-                                <option value="set">本群单独设置</option>
-                              </Select>
-                              {currentDraft.presentationPushIntervalMode === 'set' && (
-                                <Input
-                                  aria-label="本群推送间隔毫秒"
-                                  className="mt-1 font-mono"
-                                  type="number"
-                                  min={500}
-                                  max={20000}
-                                  step={100}
-                                  value={currentDraft.presentationPushIntervalValue}
-                                  onChange={e => updateDraft({ presentationPushIntervalValue: e.target.value })}
-                                />
-                              )}
-                              <div className="mt-1 text-meta text-subtle">500-20000 毫秒；改卡片的刷新节奏。</div>
-                            </div>
+                            {PRESENTATION_NUMBER_OVERRIDES.map(({ modeKey, valueKey, label, valueLabel, min, max, step, hint }) => (
+                              <div key={modeKey}>
+                                <label className="mb-1 block font-medium text-secondary">{label}</label>
+                                <Select
+                                  aria-label={label}
+                                  value={currentDraft[modeKey]}
+                                  onChange={e => updateDraft({ [modeKey]: e.target.value as 'inherit' | 'set' })}
+                                >
+                                  <option value="inherit">继承 Bot 默认</option>
+                                  <option value="set">本群单独设置</option>
+                                </Select>
+                                {currentDraft[modeKey] === 'set' && (
+                                  <Input
+                                    aria-label={valueLabel}
+                                    className="mt-1 font-mono"
+                                    type="number"
+                                    min={min}
+                                    max={max}
+                                    step={step}
+                                    value={currentDraft[valueKey]}
+                                    onChange={e => updateDraft({ [valueKey]: e.target.value })}
+                                  />
+                                )}
+                                <div className="mt-1 text-meta text-subtle">{hint}</div>
+                              </div>
+                            ))}
                           </div>
                         </div>
                       </div>

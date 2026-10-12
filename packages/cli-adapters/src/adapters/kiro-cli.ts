@@ -1,7 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { delay } from './input-settle.js';
 
 /** 直接信任这三个官方核心工具，而不是 --trust-all-tools。 */
 const TRUSTED_CORE_TOOLS = 'read,write,shell';

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
-import { RuntimeError, type AcceptedTask, type RepositoryBundle, type WorkItem, type WorkPlan } from '@dutydeck/shared';
+import { RuntimeError, parseLarkSourceId, type AcceptedTask, type RepositoryBundle, type WorkItem, type WorkPlan } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { WorkItemService } from '../work-items.js';
 import { leaderReviewStepId, leaderReviewTitle } from '../leader-delegation.js';
@@ -348,7 +348,7 @@ export class LarkWorkbench {
   async prepareDelivery(sessionId: string, workId: string, key: string) {
     const session = await this.runtime.getSession(sessionId);
     if (session?.source !== 'lark') return;
-    const [appId, chatId] = session.sourceId?.split(':') ?? [];
+    const { appId, chatId } = parseLarkSourceId(session.sourceId);
     const storedKey = `workbench.target.${workId}`;
     if (await this.repos.config.get(storedKey)) return;
     let target: Target | undefined = JSON.parse(await this.repos.config.get(originKey(sessionId, key)) ?? 'null') ?? undefined;

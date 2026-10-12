@@ -24,7 +24,6 @@ export const MANAGED_KEYS = [
   'LARK_APP_ID',
   'LARK_APP_SECRET'
 ] as const;
-export type ManagedKey = typeof MANAGED_KEYS[number];
 
 /** 视为机密、任何回显/JSON 里都要掩码的键。 */
 const SECRET_KEYS = new Set<string>(['LARK_APP_SECRET']);
@@ -38,8 +37,6 @@ export function maskSecret(value: string | undefined): string {
   if (!value) return '(未设置)';
   return value.length <= 4 ? '****' : `****${value.slice(-4)}`;
 }
-
-export interface EnvFileEntry { key: string; value: string }
 
 /**
  * 解析 .env。只做 setup 需要的最小解析：`KEY=VALUE`，忽略注释与空行，

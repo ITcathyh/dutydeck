@@ -2,8 +2,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { pollScreenReady } from './screen-ready-helper.js';
 import { buildCwdTrustArgs } from './cwd-trust.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { delay } from './input-settle.js';
 
 /**
  * TRAE CLI（traex / traecli）适配器：Codex 家族，共享 bracketed-paste 输入

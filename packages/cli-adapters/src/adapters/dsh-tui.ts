@@ -1,6 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { submitPrompt } from './input-settle.js';
 
 /**
  * dsh-tui 适配器 —— DeepSeek Harness 的 PTY 驱动全屏 TUI 变体。
@@ -39,15 +38,7 @@ export function createDshTuiAdapter(): CliAdapter {
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
-      if (backend.sendText && backend.sendSpecialKeys) {
-        (await backend.sendText(prompt));
-        await delay(200);
-        (await backend.sendSpecialKeys('Enter'));
-      } else {
-        (await backend.write(prompt));
-        await delay(1000);
-        (await backend.write('\r'));
-      }
+      await submitPrompt(backend, prompt);
     },
 
     // TUI 的 PromptInput 用 `❯ ` 作提示符（turn 进行中变暗但仍在）。它一直可见，

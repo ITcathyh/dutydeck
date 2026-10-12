@@ -1,6 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { delay } from './input-settle.js';
 
 /** OpenCode 原生会话 id 形态：`ses_` + 纯字母数字（CLI 自己铸，dutydeck 钉不了）。
  *  dutydeck 的 `ses_<uuid>` 带连字符，正好被这条规则挡住。 */

@@ -3,6 +3,7 @@ import { RuntimeError, describeScheduleTrigger, type CollaborationMandate, type 
 import type { CollaborationService } from './collaboration-service.js';
 import type { LarkCardService } from './lark/service.js';
 import { renderLarkResultTextElements } from './lark/card-renderer.js';
+import { markdownElement } from './lark/card-elements.js';
 
 // Agent 通过自然语言创建的定时委托不立即生效：先发确认卡，用户点「确认」才创建。
 // 每次定时产出的卡片带暂停/恢复/停止按钮。两类卡片的按钮回调都走 dutydeck_mandate 命名空间。
@@ -42,17 +43,17 @@ const note = (content: string): Element => ({ tag: 'markdown', element_id: 'mand
 export function mandateSummary(input: Pick<PendingInput, 'goal' | 'trigger' | 'timezone' | 'delivery' | 'condition'>): Element {
   const where = input.delivery.mode === 'thread' ? '本话题' : '本群';
   const until = input.trigger.kind === 'at' ? '执行一次后结束' : input.condition === 'always' ? '直到你取消' : '直到关联事项完成，或你取消';
-  return { tag: 'markdown', element_id: 'mandate_summary', content: [
+  return markdownElement('mandate_summary', [
     `**做什么**：${oneLine(input.goal, 200)}`, `**什么时候**：${describeScheduleTrigger(input.trigger, input.timezone)}`, `**发到哪**：${where}`, `**到什么时候为止**：${until}`
-  ].join('\n') };
+  ].join('\n'));
 }
 
 /** 每次定时产出的卡片正文：结果、状态行、按钮、调整提示。停止后不再有按钮和提示。 */
 export function deliveredElements(text: string, mandateId: string, status: DeliveredStatus): Element[] {
   const result = renderLarkResultTextElements(text) as Element[];
-  if (status === 'cancelled') return [...result, { tag: 'markdown', element_id: 'mandate_state', content: '已停止：这个定时任务不会再执行。' }];
+  if (status === 'cancelled') return [...result, markdownElement('mandate_state', '已停止：这个定时任务不会再执行。')];
   return [...result,
-    ...(status === 'paused' ? [{ tag: 'markdown', element_id: 'mandate_state', content: '已暂停：不会再自动发送，点「恢复」继续。' }] : []),
+    ...(status === 'paused' ? [markdownElement('mandate_state', '已暂停：不会再自动发送，点「恢复」继续。')] : []),
     row([button(status === 'paused' ? 'resume' : 'pause', status === 'paused' ? '恢复' : '暂停', mandateId, 'text'), button('stop', '停止', mandateId, 'text')]),
     note(adjustHint)];
 }

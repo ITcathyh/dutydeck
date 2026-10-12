@@ -40,8 +40,6 @@ export type BotManagementProps = {
   larkListeningDisabled?: boolean;
 };
 
-export type { BotDraft };
-
 function initialDraft(bot: LarkBotConfig): BotDraft {
   return {
     // 记下编辑起点的版本，保存时用它做 CAS（不用刷新后的 activeBot.revision）。
@@ -81,37 +79,12 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
 
 function hasDraftChanges(original: LarkBotConfig, draft: BotDraft): boolean {
   // baseRevision 不参与比较：它是元数据，不是用户改的字段。
-  if ((original.workspace ?? '') !== draft.workspace) return true;
-  if ((original.defaultAgentId ?? '') !== draft.defaultAgentId) return true;
-  if ((original.defaultModel ?? '') !== draft.defaultModel) return true;
-  if ((original.defaultReasoningEffort ?? '') !== draft.defaultReasoningEffort) return true;
-  if ((original.p2pMode ?? 'chat') !== draft.p2pMode) return true;
-  if ((original.idleCompactEnabled ?? true) !== draft.idleCompactEnabled) return true;
-  if (String(original.idleCompactHours ?? 24) !== draft.idleCompactHours) return true;
-  if ((original.groupReplyMode ?? '') !== draft.groupReplyMode) return true;
-  if ((original.mentionPolicy ?? 'always') !== draft.mentionPolicy) return true;
-  if ((original.defaultGroupParticipation ?? 'off') !== draft.defaultGroupParticipation) return true;
-  if ((original.roleTitle ?? '') !== draft.roleTitle) return true;
-  if ((original.roleScope ?? '') !== draft.roleScope) return true;
-  if ((original.preInjectPrompt ?? '') !== draft.preInjectPrompt) return true;
-  if ((original.adhdMode ?? false) !== draft.adhdMode) return true;
-  if ((original.listening ?? true) !== draft.listening) return true;
-  if ((original.groupToolsEnabled ?? false) !== draft.groupToolsEnabled) return true;
-  if ((original.groupToolsAllowSend ?? false) !== draft.groupToolsAllowSend) return true;
-  if ((original.memoryEnabled ?? (original.defaultGroupParticipation === 'selective')) !== draft.memoryEnabled) return true;
-  if ((original.memoryAutoExtract ?? true) !== draft.memoryAutoExtract) return true;
-  if ((original.memoryAgentId ?? '') !== draft.memoryAgentId) return true;
-  if ((original.memoryModel ?? '') !== draft.memoryModel) return true;
-  if ((original.decisionAgentId ?? '') !== draft.decisionAgentId) return true;
-  if ((original.decisionModel ?? '') !== draft.decisionModel) return true;
-  if ((original.responseAgentId ?? '') !== draft.responseAgentId) return true;
-  if ((original.responseModel ?? '') !== draft.responseModel) return true;
-  if ((original.executionMode ?? 'single') !== draft.executionMode) return true;
-  if ((original.leaderAgentId ?? '') !== draft.leaderAgentId) return true;
-  if ([...(original.workerAgentIds ?? [])].sort().join('\n') !== [...draft.workerAgentIds].sort().join('\n')) return true;
-  if ((original.riskControlMode ?? 'off') !== draft.riskControlMode) return true;
-  if ((original.highRiskPattern ?? '') !== draft.highRiskPattern) return true;
-  return false;
+  const base = initialDraft(original);
+  const sortedIds = (ids: string[]) => [...ids].sort().join('\n');
+  if (sortedIds(base.workerAgentIds) !== sortedIds(draft.workerAgentIds)) return true;
+  return (Object.keys(base) as Array<keyof BotDraft>).some(
+    key => key !== 'baseRevision' && key !== 'workerAgentIds' && base[key] !== draft[key]
+  );
 }
 
 /** 两份草稿的**用户可编辑内容**是否相同。baseRevision 是元数据，不参与比较。 */

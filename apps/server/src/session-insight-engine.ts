@@ -9,8 +9,6 @@ import { engineVersionInfoSchema, type EngineVersionInfo } from '@dutydeck/share
 // Re-export EngineVersionInfo from shared contract
 export type { EngineVersionInfo };
 
-export type EngineResolveStatus = 'available' | 'unavailable';
-
 export type EngineUnavailableCode =
   | 'UNSUPPORTED_PLATFORM'
   | 'ENGINE_NOT_FOUND'

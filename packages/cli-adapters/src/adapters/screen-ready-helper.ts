@@ -1,8 +1,8 @@
 import type { PtyLike } from '../types.js';
+import { delay } from './input-settle.js';
 
 const STARTUP_POLL_MS = 100;
 const STARTUP_TIMEOUT_MS = 30_000;
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 const LOADING = /^│\s*(?:model|directory):\s*loading\b/i;
 const LOADED_BANNER = /^│[ \t]+model:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│[ \t]*\n│[ \t]+directory:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│$/im;

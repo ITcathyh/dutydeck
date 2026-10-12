@@ -6,11 +6,12 @@ import type { LarkGroupManager } from './group-management.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 import { deliverArtifact, type ArtifactClient } from './artifact-delivery.js';
-import { workPlanConfirmationRequired, type ChannelMapping, type ChannelMappingRepository, type CollaborationObservation, type CollaborationScope, type CollaborationTeamContext, type ConfigRepository, type PolicyAction, type PolicyDecision, type Session, type SessionRepository, type TaskRecord, type TaskRepository } from '@dutydeck/shared';
+import { parseLarkSourceId, workPlanConfirmationRequired, type ChannelMapping, type ChannelMappingRepository, type CollaborationObservation, type CollaborationScope, type CollaborationTeamContext, type ConfigRepository, type PolicyAction, type PolicyDecision, type Session, type SessionRepository, type TaskRecord, type TaskRepository } from '@dutydeck/shared';
 import { readAttemptResult, type AttemptResultRepositories } from '../task-results.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import type { LarkTeamContextReader } from './team-context.js';
 import { parseLarkMessageContent } from './message-content.js';
+import { escapeCardInline } from './card-elements.js';
 import { larkMemoryToolsPrompt } from './memory.js';
 import { stableMemoryCommand } from './memory-view.js';
 import { larkMemoryEnabled, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
@@ -38,18 +39,15 @@ export interface LarkAgentSessionBinding { sessionId: string; appId: string; cha
 
 export function larkAgentSessionBinding(session: Pick<Session, 'id' | 'source' | 'sourceId'>): LarkAgentSessionBinding | undefined {
   if (session.source !== 'lark' || !session.sourceId) return;
-  const parts = session.sourceId.split(':');
-  if (parts.length < 3) return;
-  const appId = parts[0]!;
-  const chatId = parts[1]!;
-  const chatType = parts[2];
+  const { appId, chatId, chatType, scope: rest } = parseLarkSourceId(session.sourceId);
+  if (appId === undefined || chatId === undefined || chatType === undefined) return;
   if (!appId.startsWith('cli_')) return;
   // 飞书 message event 的 chat_id（包括 p2p）是 oc_*；兼容早期把对方 open_id
   // 持久化为 chatId 的 ou_* 记录，避免升级后旧会话突然失去工具能力。
   if (chatType === 'group') {
     if (!chatId.startsWith('oc_')) return;
     // thread 路由可锚到根消息 om_*，不能直接作为原生话题 omt_* 查询。
-    const scope = parts[3] === 'thread' ? parts[4] : undefined;
+    const scope = rest[0] === 'thread' ? rest[1] : undefined;
     return { sessionId: session.id, appId, chatId, chatType: 'group',
       ...(scope?.startsWith('om_') ? { threadRootMessageId: scope } : scope ? { threadId: scope } : {}) };
   }
@@ -349,8 +347,8 @@ const clock = (iso: string) => {
 /** 同一机器人、同一聊天的飞书任务会话；群参与的后台委托会话除外（记忆、判定、leader 会话的 source 不是 lark）。 */
 function inChat(session: Pick<Session, 'source' | 'sourceId'>, binding: LarkAgentSessionBinding) {
   if (session.source !== 'lark' || !session.sourceId) return false;
-  const [appId, chatId, chatType, kind] = session.sourceId.split(':');
-  return appId === binding.appId && chatId === binding.chatId && chatType === binding.chatType && kind !== 'collaboration';
+  const { appId, chatId, chatType, scope } = parseLarkSourceId(session.sourceId);
+  return appId === binding.appId && chatId === binding.chatId && chatType === binding.chatType && scope[0] !== 'collaboration';
 }
 
 /**
@@ -423,7 +421,23 @@ function teamSearchLine(item: CollaborationObservation) {
   return { sender: `${item.senderId ?? '未知'}(${item.senderKind})`, body: flat(item.text) };
 }
 
-const escapeAtName = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+/** handoff / reply-agent 的正文校验：去首尾空白后非空且不超过 20000 字符。 */
+function agentMessageContent(value?: string) {
+  const content = value?.trim();
+  if (!content) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能为空。', 400);
+  if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);
+  return content;
+}
+
+/** 按本机器人的 appId / openId（不区分大小写）判断标识或群机器人是不是自己。 */
+function agentSelfMatchers(appId: string | undefined, openId: string | undefined) {
+  const selfIdentifiers = new Set<string>();
+  if (appId) selfIdentifiers.add(appId.toLowerCase());
+  if (openId) selfIdentifiers.add(openId.toLowerCase());
+  const isSelfIdentifier = (id?: string) => Boolean(id && selfIdentifiers.has(id.toLowerCase()));
+  const isSelfPeer = (p: AgentGroupPeer) => isSelfIdentifier(p.appId) || isSelfIdentifier(p.memberId) || isSelfIdentifier(p.openId);
+  return { isSelfIdentifier, isSelfPeer };
+}
 
 // 无显式幂等键时，按「会话 + 群 + 发送目标（--to 对象 / --reply-to 回复目标）+ 归一化内容」派生
 // 确定性 UUIDv5 形态的去重键，让无 key 的失败重试也命中飞书平台 uuid 去重。
@@ -682,7 +696,7 @@ export class LarkAgentToolsService {
     try { config = await this.options.groupManager?.resolved(base, binding.chatId, true) ?? base; }
     catch { configAvailable = false; }
     const task = this.options.workbenchTask?.(session.id);
-    const collaborationSession = session.sourceId?.split(':')[3] === 'collaboration';
+    const collaborationSession = parseLarkSourceId(session.sourceId).scope[0] === 'collaboration';
     const allowed = async (action: 'group_tools.read' | 'group_tools.discover' | 'group_tools.send' | 'memory') => {
       try {
         // An integration with extra gates must supply its local preview, never invoke its live authorizer here.
@@ -1158,7 +1172,7 @@ export class LarkAgentToolsService {
       if (matches.length > 1) throw new AgentGroupToolError('GROUP_TARGET_AMBIGUOUS', `目标 ${input.to.trim()} 对应多个群成员，请改用 appId 或 openId。`, 409);
       const match = matches[0]!;
       const mentionId = match.openId ?? match.memberId;
-      text = `<at user_id="${mentionId}">${escapeAtName(match.name)}</at> ${content}`;
+      text = `<at user_id="${mentionId}">${escapeCardInline(match.name)}</at> ${content}`;
     }
 
     if (input.replyTo?.trim()) {
@@ -1281,9 +1295,7 @@ export class LarkAgentToolsService {
   async handoff(token: string | undefined, input: { to?: string; content?: string; turn?: string }) {
     const to = input.to?.trim();
     if (!to) throw new AgentGroupToolError('HANDOFF_TARGET_REQUIRED', 'to 目标机器人不能为空。', 400);
-    const content = input.content?.trim();
-    if (!content) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能为空。', 400);
-    if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);
+    const content = agentMessageContent(input.content);
 
     const { context, task, scope } = await this.resolveHandoffScope(token, input.turn);
 
@@ -1291,11 +1303,7 @@ export class LarkAgentToolsService {
     await this.assertMessageScope(context, original, true);
 
     const botInfo = await this.identityFor(context.config);
-    const selfIdentifiers = new Set<string>();
-    if (context.appId) selfIdentifiers.add(context.appId.toLowerCase());
-    if (botInfo.openId) selfIdentifiers.add(botInfo.openId.toLowerCase());
-    const isSelfIdentifier = (id?: string) => Boolean(id && selfIdentifiers.has(id.toLowerCase()));
-    const isSelfPeer = (p: AgentGroupPeer) => isSelfIdentifier(p.appId) || isSelfIdentifier(p.memberId) || isSelfIdentifier(p.openId);
+    const { isSelfIdentifier, isSelfPeer } = agentSelfMatchers(context.appId, botInfo.openId);
 
     const targetLower = to.toLowerCase();
     if (isSelfIdentifier(targetLower)) {
@@ -1329,7 +1337,7 @@ export class LarkAgentToolsService {
 
     const senderBotName = context.config.name ?? botInfo.appName ?? context.appId;
     const mentionId = targetPeer.openId ?? targetPeer.memberId;
-    const text = `<at user_id="${mentionId}">${escapeAtName(targetPeer.name)}</at> [Agent 交接] 来自 ${escapeAtName(senderBotName)} (${context.appId})\n请在原话题内完成任务并使用 reply-agent 回传实质结果（一次回传，无须重复确认）：\n\n${content}`;
+    const text = `<at user_id="${mentionId}">${escapeCardInline(targetPeer.name)}</at> [Agent 交接] 来自 ${escapeCardInline(senderBotName)} (${context.appId})\n请在原话题内完成任务并使用 reply-agent 回传实质结果（一次回传，无须重复确认）：\n\n${content}`;
 
     const targetId = targetPeer.openId ?? targetPeer.appId ?? targetPeer.memberId;
     const idempotencyKey = deterministicAgentActionKey({
@@ -1345,9 +1353,7 @@ export class LarkAgentToolsService {
   }
 
   async replyAgent(token: string | undefined, input: { content?: string; turn?: string }) {
-    const content = input.content?.trim();
-    if (!content) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能为空。', 400);
-    if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);
+    const content = agentMessageContent(input.content);
 
     const { context, task, scope } = await this.resolveHandoffScope(token, input.turn);
 
@@ -1363,11 +1369,7 @@ export class LarkAgentToolsService {
     }
 
     const botInfo = await this.identityFor(context.config);
-    const selfIdentifiers = new Set<string>();
-    if (context.appId) selfIdentifiers.add(context.appId.toLowerCase());
-    if (botInfo.openId) selfIdentifiers.add(botInfo.openId.toLowerCase());
-    const isSelfIdentifier = (id?: string) => Boolean(id && selfIdentifiers.has(id.toLowerCase()));
-    const isSelfPeer = (p: AgentGroupPeer) => isSelfIdentifier(p.appId) || isSelfIdentifier(p.memberId) || isSelfIdentifier(p.openId);
+    const { isSelfIdentifier, isSelfPeer } = agentSelfMatchers(context.appId, botInfo.openId);
 
     const senderId = sender.id.toLowerCase();
     if (isSelfIdentifier(senderId)) {
@@ -1397,7 +1399,7 @@ export class LarkAgentToolsService {
     }
 
     const mentionId = targetPeer.openId ?? targetPeer.memberId;
-    const text = `<at user_id="${mentionId}">${escapeAtName(targetPeer.name)}</at> [Agent 结果]\n任务交付结果如下（这是最终结果，请勿为“收到/谢谢”等礼貌确认再次唤醒）：\n\n${content}`;
+    const text = `<at user_id="${mentionId}">${escapeCardInline(targetPeer.name)}</at> [Agent 结果]\n任务交付结果如下（这是最终结果，请勿为“收到/谢谢”等礼貌确认再次唤醒）：\n\n${content}`;
 
     const targetId = targetPeer.openId ?? targetPeer.appId ?? targetPeer.memberId;
     const idempotencyKey = deterministicAgentActionKey({

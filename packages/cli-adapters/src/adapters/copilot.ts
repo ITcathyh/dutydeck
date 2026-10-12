@@ -1,7 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { submitPrompt } from './input-settle.js';
 
 /**
  * GitHub Copilot CLI（npm `@github/copilot`）适配器。
@@ -42,15 +41,7 @@ export function createCopilotAdapter(): CliAdapter {
       // Copilot 的 Ink TUI 行为同 Gemini/OpenCode：TextInput 组件有异步启动期，
       // 该窗口内的写入可能被静默丢弃；输入框渲染完成后 sendText + Enter 可靠。
       // 没有 cursor 那种 bracketed-paste 折叠，所以走最简单的 write+Enter。
-      if (backend.sendText && backend.sendSpecialKeys) {
-        (await backend.sendText(prompt));
-        await delay(200);
-        (await backend.sendSpecialKeys('Enter'));
-      } else {
-        (await backend.write(prompt));
-        await delay(1000);
-        (await backend.write('\r'));
-      }
+      await submitPrompt(backend, prompt);
     },
 
     /** Copilot 会话完全由 CLI 自己管，dutydeck 的 sessionId 钉不成它的会话 id，

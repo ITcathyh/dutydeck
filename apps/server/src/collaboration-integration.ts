@@ -1,6 +1,6 @@
 import { CollaborationDelivery } from './collaboration-delivery.js';
 import { createHash } from 'node:crypto';
-import { canonicalExecutionJson, installationOwnerTaskActor, participationLevelFields, participationLevelOf, RuntimeError, type CollaborationRepository, type CollaborationScope, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
+import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, participationLevelFields, participationLevelOf, RuntimeError, type CollaborationRepository, type CollaborationScope, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { CollaborationService, type CollaborationAuthorization } from './collaboration-service.js';
 import { ScheduleExecutor } from './schedule-executor.js';
@@ -174,7 +174,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   const background = new CollaborationBackground({ repositories: repos, runtime, authorize, previewAuthorize, resolveConfig: async scope => (await live(scope)).config });
   const riskPolicy = async (sessionId: string, _fallback?: ToolRiskPolicy): Promise<{ policy?: ToolRiskPolicy } | undefined> => {
     const session = await runtime.getSession(sessionId);
-    const [appId, chatId, kind, origin] = session?.sourceId?.split(':') ?? [];
+    const { appId, chatId, chatType: kind, scope: [origin] } = parseLarkSourceId(session?.sourceId);
     if (session?.source !== 'lark' || kind !== 'group' || origin !== 'collaboration' || !appId || !chatId) return;
     try {
       const context = await background.authorizeTool(sessionId, 'group_tools.read');

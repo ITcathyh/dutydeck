@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName } from '@dutydeck/shared';
+import { canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId } from '@dutydeck/shared';
 import { AcpxAdapter, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
@@ -29,6 +29,18 @@ function isSameOrIntersectingPath(a: string, b: string): boolean {
 }
 
 const STOP_BLOCK_PREFIX = 'runtime_driver_stop_block:';
+
+function nativeTargetOf(options: ExecutionOptions): Omit<ExecutionOptions, 'permissionMode'> {
+  return { ...(options.model !== undefined ? { model: options.model } : {}), ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}) };
+}
+
+function executionOptionsOf(options: ExecutionOptions): ExecutionOptions {
+  return { permissionMode: options.permissionMode, ...nativeTargetOf(options) };
+}
+
+function sessionConfigOf(agent: AgentConfig, input: StartSessionInput) {
+  return { cwd: input.cwd ?? agent.cwd ?? process.cwd(), model: input.model ?? agent.model, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode };
+}
 
 /** 启动期（资源尚未 ready）driver transcript source 观察的有界缓冲上限。 */
 const INSIGHT_SOURCE_MAX_PENDING = 64;
@@ -303,7 +315,7 @@ export class DutydeckRuntime {
   private actor(session: Session, actorId?: string): ExecutionActor {
     if (!actorId) return { kind: 'unspecified' };
     if (actorId === 'installation_owner') return { kind: 'installation_owner', id: 'installation_owner' };
-    const appId = session.source === 'lark' ? session.sourceId?.split(':')[0] : undefined;
+    const appId = session.source === 'lark' ? parseLarkSourceId(session.sourceId).appId : undefined;
     if (!appId) throw new RuntimeError('ACTOR_REQUIRED', 'Channel execution requires an explicit request with its App identity', 403);
     return { kind: 'channel', id: actorId, appId };
   }
@@ -321,6 +333,7 @@ export class DutydeckRuntime {
     this.transitions.get(id)?.revoke();
     const token = owner(id); this.transitions.set(id, token); return token;
   }
+  private ownerOf(id: string) { return owner(id, this.transitions.get(id) ?? this.transition(id)); }
   private async scoped<T>(id: string, operation: () => Promise<T>) {
     this.assertReady();
     if (this.shuttingDown) return Promise.reject(new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503));
@@ -623,7 +636,7 @@ export class DutydeckRuntime {
       || this.resourceBlockers(session.id).some(block => block.code !== 'DRIVER_RESOURCE_UNSAFE' || block.resourceId !== resource.resourceId)) return false;
     const agent = await this.mutations.wait(() => this.repos.agents.get(session.agentId)); if (!agent) return false;
     const configured = await this.configureAgentForSession(agent, session);
-    const options: ExecutionOptions = { permissionMode: configured.permissionMode, ...(configured.model !== undefined ? { model: configured.model } : {}), ...(configured.reasoningEffort !== undefined ? { reasoningEffort: configured.reasoningEffort } : {}) };
+    const options: ExecutionOptions = executionOptionsOf(configured);
     if (canonicalExecutionJson(receipt.options) !== canonicalExecutionJson(options)) return false;
     const workspace = await this.mutations.wait(() => this.workspaces.get(session.id));
     if (workspace) await this.mutations.wait(() => this.workspaces.validate(workspace));
@@ -1217,17 +1230,20 @@ export class DutydeckRuntime {
       throw error;
     }
   }
+  private async reopenQueue(id: string) {
+    if (this.lifecycle(id).revoked) this.lifecycles.set(id, this.ownerOf(id));
+    this.queueBlocked.delete(id); await this.projectQueue(id); this.scheduleQueue(id);
+  }
   async probeExecutionRecovery(id: string, runId: string, actor: ExecutionActor) {
     this.assertReady(); this.requireRecoveryOwner(actor);
-    return this.mutations.run(owner(id, this.transitions.get(id) ?? this.transition(id)), async () => {
+    return this.mutations.run(this.ownerOf(id), async () => {
       const { session } = await this.active(id);
       if (session.runId !== runId) throw new RuntimeError('SESSION_RUN_CONFLICT', 'Session run changed', 409);
       if (this.recoveryInFlight(id)) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'Original execution still has an in-flight owner', 409);
       await this.observeAbandonedResources(session);
       await this.clearVerifiedStopBlock(session);
       if (!this.resourceBlockers(id).length) {
-        if (this.lifecycle(id).revoked) this.lifecycles.set(id, owner(id, this.transitions.get(id) ?? this.transition(id)));
-        this.queueBlocked.delete(id); await this.projectQueue(id); this.scheduleQueue(id);
+        await this.reopenQueue(id);
       }
       return this.inspectExecutionRecovery(id, actor);
     });
@@ -1236,7 +1252,7 @@ export class DutydeckRuntime {
     this.assertReady(); this.requireRecoveryOwner(actor);
     const input = ptyRetirementRecoverySchema.parse(raw), control = this.options.ptyRetirement;
     if (!control) throw new RuntimeError('PTY_RETIREMENT_UNAVAILABLE', 'Trusted PTY recovery is not configured', 503);
-    return this.mutations.run(owner(id, this.transitions.get(id) ?? this.transition(id)), async () => {
+    return this.mutations.run(this.ownerOf(id), async () => {
       const { session } = await this.active(id);
       if (session.runId !== input.runId) throw new RuntimeError('SESSION_RUN_CONFLICT', 'Session run changed', 409);
       const key = `runtime_pty_retirement:${id}:${input.decisionId}`;
@@ -1310,8 +1326,7 @@ export class DutydeckRuntime {
       } finally { this.ptyRetirements.delete(id); }
       await this.clearVerifiedStopBlock(session);
       if (!this.resourceBlockers(id).length) {
-        if (this.lifecycle(id).revoked) this.lifecycles.set(id, owner(id, this.transitions.get(id) ?? this.transition(id)));
-        this.queueBlocked.delete(id); await this.projectQueue(id); this.scheduleQueue(id);
+        await this.reopenQueue(id);
       }
       return { replayed, recovery: await this.inspectExecutionRecovery(id, actor) };
     });
@@ -1320,7 +1335,7 @@ export class DutydeckRuntime {
   async confirmSteeringRecovery(id: string, raw: SteeringRecoveryDecision, actor: ExecutionActor) {
     this.assertReady(); this.requireRecoveryOwner(actor);
     const input = steeringRecoveryDecisionSchema.parse(raw);
-    return this.mutations.run(owner(id, this.transitions.get(id) ?? this.transition(id)), async () => {
+    return this.mutations.run(this.ownerOf(id), async () => {
       const {session} = await this.active(id);
       if (session.runId !== input.runId) throw new RuntimeError('SESSION_RUN_CONFLICT', 'Session run changed', 409);
       const operation = this.repos.execution.getTaskExecution(input.taskId)?.steering;
@@ -1328,8 +1343,7 @@ export class DutydeckRuntime {
       if (!replay && this.recoveryInFlight(id)) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'Original execution still has an in-flight owner', 409);
       const result = await this.mutations.write(id, async () => this.wake(this.bound().confirmSteeringRecovery(this.fence(session), input, actor)));
       if (!result.replayed) {
-        if (this.lifecycle(id).revoked) this.lifecycles.set(id, owner(id, this.transitions.get(id) ?? this.transition(id)));
-        this.queueBlocked.delete(id); await this.projectQueue(id); this.scheduleQueue(id);
+        await this.reopenQueue(id);
       }
       return {replayed: result.replayed, task: this.publicTask(result.task!), recovery: await this.inspectExecutionRecovery(id,actor)};
     });
@@ -1338,7 +1352,7 @@ export class DutydeckRuntime {
   async confirmExecutionRecovery(id: string, raw: ExecutionRecoveryDecision, actor: ExecutionActor) {
     this.assertReady(); this.requireRecoveryOwner(actor);
     const input = executionRecoveryDecisionSchema.parse(raw);
-    return this.mutations.run(owner(id, this.transitions.get(id) ?? this.transition(id)), async () => {
+    return this.mutations.run(this.ownerOf(id), async () => {
       const { session } = await this.active(id);
       if (session.runId !== input.runId) throw new RuntimeError('SESSION_RUN_CONFLICT', 'Session run changed', 409);
       const original = this.repos.execution.getTaskExecution(input.taskId)?.attempts.find(attempt => attempt.attemptId === input.attemptId);
@@ -1351,8 +1365,7 @@ export class DutydeckRuntime {
         ? this.bound().retryAttempt(f, decision, input.resourceChecks)
         : this.bound().confirmAttemptRecovery(f, `recovery:${input.decisionId}`, { kind: 'manual', outcome: input.outcome, decision }, input.verifiedOutputText)));
       if (!result.replayed) {
-        if (this.lifecycle(id).revoked) this.lifecycles.set(id, owner(id, this.transitions.get(id) ?? this.transition(id)));
-        this.queueBlocked.delete(id); await this.projectQueue(id); this.scheduleQueue(id);
+        await this.reopenQueue(id);
       }
       return { replayed: result.replayed, task: this.publicTask(result.task!), recovery: await this.inspectExecutionRecovery(id, actor) };
     });
@@ -1366,7 +1379,7 @@ export class DutydeckRuntime {
    */
   async settleIdleAttempt(id: string, input: { taskId: string; decisionId: string; outcome: 'unknown' | 'interrupted' | 'failed'; evidenceRefs: string[] }, actor: ExecutionActor) {
     this.assertReady(); this.requireRecoveryOwner(actor);
-    return this.mutations.run(owner(id, this.transitions.get(id) ?? this.transition(id)), async () => {
+    return this.mutations.run(this.ownerOf(id), async () => {
       const { session, driver } = await this.active(id);
       const attempt = this.repos.execution.getTaskExecution(input.taskId)?.currentAttempt;
       if (!attempt || attempt.sessionId !== id) throw new RuntimeError('TASK_NOT_FOUND', 'Task not found in this session', 404);
@@ -1377,8 +1390,7 @@ export class DutydeckRuntime {
       const f = this.attemptFence({ sessionId: id, runId: session.runId, taskId: input.taskId, attemptId: attempt.attemptId });
       await this.mutations.write(id, async () => this.wake(this.bound().settleAttempt(f, `recovery:${input.decisionId}`, { kind: 'manual', outcome: input.outcome,
         decision: { decisionId: input.decisionId, actor, action: 'confirm_result', evidenceRefs: input.evidenceRefs, resourceChecks: [] } })));
-      if (this.lifecycle(id).revoked) this.lifecycles.set(id, owner(id, this.transitions.get(id) ?? this.transition(id)));
-      this.queueBlocked.delete(id); await this.projectQueue(id); this.scheduleQueue(id);
+      await this.reopenQueue(id);
       return { replayed: false };
     });
   }
@@ -1673,7 +1685,7 @@ export class DutydeckRuntime {
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Background Agent not found', 404);
     const existing = await this.repos.sessions.get(stableSessionId);
     if (existing) {
-      const expected = { source: input.source, sourceId: input.sourceId, agentId: input.agentId, cwd: input.cwd ?? agent.cwd ?? process.cwd(), model: input.model ?? agent.model, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode, systemPrompt: agent.systemPrompt };
+      const expected = { source: input.source, sourceId: input.sourceId, agentId: input.agentId, ...sessionConfigOf(agent, input), systemPrompt: agent.systemPrompt };
       if (Object.entries(expected).some(([key, value]) => (existing[key as keyof Session] ?? undefined) !== (value ?? undefined))) throw new RuntimeError('BACKGROUND_SESSION_CONFLICT', 'Background session immutable configuration changed', 409);
       return existing;
     }
@@ -1686,7 +1698,7 @@ export class DutydeckRuntime {
   }
 
   private sessionCapability(agent: AgentConfig, input: StartSessionInput) {
-    const configured = { ...agent, cwd: input.cwd ?? agent.cwd ?? process.cwd(), model: input.model ?? agent.model, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode };
+    const configured = { ...agent, ...sessionConfigOf(agent, input) };
     return { configured, capability: (this.options.probe ?? probeAgent)(configured, this.options.acpxCommand) };
   }
 
@@ -1715,7 +1727,7 @@ export class DutydeckRuntime {
     const existing = await this.repos.sessions.get(stableSessionId);
     if (existing) {
       const { capability } = this.sessionCapability(agent, input);
-      const expected = { protocol: capability.protocol, workspaceMode: input.workspaceMode ?? 'shared', source: input.source, sourceId: input.sourceId, agentId: input.agentId, cwd: input.cwd ?? agent.cwd ?? process.cwd(), model: input.model ?? agent.model, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode, systemPrompt: agent.systemPrompt };
+      const expected = { protocol: capability.protocol, workspaceMode: input.workspaceMode ?? 'shared', source: input.source, sourceId: input.sourceId, agentId: input.agentId, ...sessionConfigOf(agent, input), systemPrompt: agent.systemPrompt };
       if (Object.entries(expected).some(([key, value]) => ((key === 'workspaceMode' ? existing.workspaceMode ?? 'shared' : existing[key as keyof Session]) ?? undefined) !== (value ?? undefined))) throw new RuntimeError('MEMORY_SESSION_CONFLICT', 'Memory session immutable configuration changed', 409);
       return existing;
     }
@@ -1910,7 +1922,7 @@ export class DutydeckRuntime {
       if(!replacement&&!this.repos.execution.getNativeContext(id))throw new RuntimeError('NATIVE_CONTEXT_PROOF_REQUIRED','The original native context is required',409);
       const unresolved=(await this.mutations.wait(()=>this.repos.tasks.listBySession(id))).some(task=>this.repos.execution.getTaskExecution(task.id)?.attempts.some(attempt=>['preparing','active','reconcile_required','legacy_unresolved'].includes(attempt.state)));
       const agent=await this.mutations.wait(()=>this.repos.agents.get(session.agentId));if(!agent)throw new RuntimeError('AGENT_NOT_FOUND','Unknown agent',404);
-      const configured=await this.configureAgentForSession(agent,session),target:ExecutionOptions={permissionMode:configured.permissionMode,...(configured.model!==undefined?{model:configured.model}:{}),...(configured.reasoningEffort!==undefined?{reasoningEffort:configured.reasoningEffort}:{})};
+      const configured=await this.configureAgentForSession(agent,session),target:ExecutionOptions=executionOptionsOf(configured);
       if(!unresolved)await this.saveState(session,'starting');
       let driver:AgentDriver|undefined;
       let operation:Awaited<ReturnType<DriverConfigurationLedger['beginRepair']>>|undefined;
@@ -1920,7 +1932,7 @@ export class DutydeckRuntime {
         const owned=this.localResources.get(driver)!;
         if(!owned.controlled||!driver.configureNative)throw new RuntimeError('NATIVE_CONFIGURATION_REPAIR_UNSUPPORTED','Driver cannot prove original-context configuration',422);
         operation=await this.mutations.write(id,()=>this.configurations.beginRepair(id,owned.identityId,target,expected,actor));
-        const nativeTarget={...(target.model!==undefined?{model:target.model}:{}),...(target.reasoningEffort!==undefined?{reasoningEffort:target.reasoningEffort}:{})};
+        const nativeTarget=nativeTargetOf(target);
         const proof=await this.driverOperation(driver,()=>driver!.configureNative!({operationId:operation!.operationId,target:nativeTarget}));
         await this.mutations.write(id,async()=>{
           this.mutations.check(lifecycle);this.bound().authorizeNativeContextControl(this.fence(session),actor);
@@ -1952,7 +1964,7 @@ export class DutydeckRuntime {
     const configured = await this.configureAgentForSession(agent, session);
     this.assertReplaceable(session.id); this.assertResources(session.id, true);
     const resolved = this.drivers.get(session.id); if (resolved) return resolved;
-    const options: ExecutionOptions = executionOptions ?? { permissionMode: configured.permissionMode, ...(configured.model !== undefined ? { model: configured.model } : {}), ...(configured.reasoningEffort !== undefined ? { reasoningEffort: configured.reasoningEffort } : {}) };
+    const options: ExecutionOptions = executionOptions ?? executionOptionsOf(configured);
     const generation = this.nextSessionGeneration(session.id), lifecycle = this.lifecycle(session.id),startupOwner=this.mutations.current();
     const resource = this.localResources.begin(this.fence(session), options, this.factory.controlledResources?.(session.protocol!) ? {startupValid:()=>this.mutations.valid(startupOwner),valid:()=>this.mutations.valid(lifecycle)&&this.sessionGenerations.get(session.id)===generation,repairConfiguration,executionDomain:`${session.source ?? 'local'}:${session.sourceId ?? ''}`} : undefined);
     let driver:AgentDriver;
@@ -2253,7 +2265,7 @@ export class DutydeckRuntime {
         const target = operation.target;
         if (owned.options.permissionMode !== target.permissionMode) driver.setPermissionMode!(target.permissionMode);
         if(owned.controlled&&driver.configureNative) {
-          const nativeTarget={...(target.model!==undefined?{model:target.model}:{}),...(target.reasoningEffort!==undefined?{reasoningEffort:target.reasoningEffort}:{})};
+          const nativeTarget=nativeTargetOf(target);
           const proof=await driver.configureNative({operationId:operation.operationId,target:nativeTarget});
           const selected=this.repos.execution.getNativeContext(session.id);
           if(!selected||proof.operationId!==operation.operationId||proof.driverInstanceId!==owned.controlled.driverInstanceId||canonicalExecutionJson(proof.context)!==canonicalExecutionJson(selected.selection.context)||canonicalExecutionJson(proof.target)!==canonicalExecutionJson(nativeTarget))throw new RuntimeError('DRIVER_CONFIGURATION_UNKNOWN','Configuration ACK does not identify the original operation and target',409);
@@ -2481,9 +2493,8 @@ export class DutydeckRuntime {
       await this.mutations.wait(() => this.options.admitTask?.(session, request) ?? Promise.resolve());
       const agent = await this.mutations.wait(() => this.repos.agents.get(session.agentId));
       if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Agent is missing', 404);
-      const executionOptions: ExecutionOptions = { permissionMode: request.options.permissionMode ?? session.permissionMode ?? agent.permissionMode,
-        ...((request.options.model ?? session.model ?? agent.model) !== undefined ? { model: request.options.model ?? session.model ?? agent.model } : {}),
-        ...((request.options.reasoningEffort ?? session.reasoningEffort ?? agent.reasoningEffort) !== undefined ? { reasoningEffort: request.options.reasoningEffort ?? session.reasoningEffort ?? agent.reasoningEffort } : {}) };
+      const executionOptions: ExecutionOptions = executionOptionsOf({ permissionMode: request.options.permissionMode ?? session.permissionMode ?? agent.permissionMode,
+        model: request.options.model ?? session.model ?? agent.model, reasoningEffort: request.options.reasoningEffort ?? session.reasoningEffort ?? agent.reasoningEffort });
       if (request.actor.kind === 'unspecified' && executionOptions.permissionMode === 'full-trust' && session.permissionMode !== 'full-trust') throw new RuntimeError('ACTOR_REQUIRED', 'An unspecified actor cannot enable full trust', 403);
       const payload = request.sourcePayload as { promptPolicyVersion?: unknown; promptParts?: unknown };
       const inherited = payload?.promptPolicyVersion;

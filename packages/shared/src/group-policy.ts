@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
-const timestampSchema = z.string().datetime();
-const opaquePrincipalIdSchema = z.string().regex(/^principal_[A-Za-z0-9_-]+$/, 'Principal IDs must be opaque principal_* identifiers');
+export const timestampSchema = z.string().datetime();
+export const opaquePrincipalIdSchema = z.string().regex(/^principal_[A-Za-z0-9_-]+$/, 'Principal IDs must be opaque principal_* identifiers');
 const irreversibleFingerprintSchema = z.string().regex(/^[a-f0-9]{64}$/, 'Fingerprint must be a lowercase SHA-256 digest');
 const opaqueRemoteBotRefSchema = z.string().regex(/^remote_bot_[a-f0-9]{24,64}$/, 'Bot identity references must be opaque remote_bot_* identifiers');
 const opaqueRemoteTenantRefSchema = z.string().regex(/^remote_tenant_[a-f0-9]{24,64}$/, 'Tenant references must be opaque remote_tenant_* identifiers');
@@ -15,11 +15,11 @@ export const groupToolOverrideModes = ['inherit', 'allow', 'deny'] as const;
 export const roleKinds = ['can_talk', 'can_operate', 'admin'] as const;
 export const operateScopes = ['none', 'own_runs', 'group_runs', 'bot_runs'] as const;
 
-const inheritStringOverrideSchema = z.discriminatedUnion('mode', [
+export const inheritStringOverrideSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('inherit') }).strict(),
   z.object({ mode: z.literal('set'), value: z.string().min(1) }).strict()
 ]);
-const clearableStringOverrideSchema = z.discriminatedUnion('mode', [
+export const clearableStringOverrideSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('inherit') }).strict(),
   z.object({ mode: z.literal('set'), value: z.string().min(1) }).strict(),
   z.object({ mode: z.literal('clear') }).strict()
@@ -28,7 +28,7 @@ const groupReplyOverrideSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('inherit') }).strict(),
   z.object({ mode: z.literal('set'), value: z.enum(groupReplyModes) }).strict()
 ]);
-const mentionOverrideSchema = z.discriminatedUnion('mode', [
+export const mentionOverrideSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('inherit') }).strict(),
   z.object({ mode: z.literal('set'), value: z.enum(mentionPolicies) }).strict()
 ]);

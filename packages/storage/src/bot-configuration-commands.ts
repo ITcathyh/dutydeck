@@ -32,6 +32,7 @@ import {
   runConfigurationCommand,
   invalidateBotFacts,
   nextConfigurationRevision,
+  applyPreparedCredential,
   type ConfigurationCommand
 } from './configuration-transaction.js';
 
@@ -78,53 +79,7 @@ function createCommand(db: Database.Database): ConfigurationCommand<CreateBotV2,
       if (input.preparedCredential) {
         const cred = input.preparedCredential;
         secretId = cred.secretId;
-        if (cred.expectedRevision === 0) {
-          const existingSec = db.prepare('SELECT id FROM secret_refs WHERE id = ?').get(cred.secretId);
-          if (existingSec) {
-            fail('CONFIGURATION_CONFLICT', `SecretRef "${cred.secretId}" already exists for expectedRevision 0`);
-          }
-          db.prepare(`
-            INSERT INTO secret_refs (
-              id, schema_version, revision, kind, provider, reference_key, status, created_at, updated_at
-            ) VALUES (?, 1, 1, 'lark_app_secret', ?, ?, 'configured', ?, ?)
-          `).run(cred.secretId, cred.provider, cred.referenceKey, context.now, context.now);
-        } else {
-          const existingSec = db.prepare('SELECT * FROM secret_refs WHERE id = ?').get(cred.secretId) as {
-            id: string;
-            schema_version: number;
-            revision: number;
-            kind: string;
-            provider: string;
-            reference_key: string;
-            status: string;
-          } | undefined;
-          if (!existingSec) {
-            fail('CONFIGURATION_NOT_FOUND', `Referenced secret "${cred.secretId}" does not exist`, 404);
-          }
-          if (existingSec.revision !== cred.expectedRevision) {
-            fail('CONFIGURATION_REVISION_CONFLICT', `SecretRef revision mismatch: expected ${cred.expectedRevision}, got ${existingSec.revision}`);
-          }
-          if (
-            existingSec.kind !== 'lark_app_secret' ||
-            existingSec.provider !== cred.provider ||
-            existingSec.reference_key !== cred.referenceKey ||
-            existingSec.status !== 'configured'
-          ) {
-            fail('CONFIGURATION_CONFLICT', `SecretRef metadata mismatch for "${cred.secretId}"`);
-          }
-          const mismatchedFingerprints = db.prepare(`
-            SELECT DISTINCT credential_fingerprint AS fp FROM (
-              SELECT credential_fingerprint FROM remote_identity_facts
-              WHERE credential_ref_id = ? AND credential_revision = ? AND credential_fingerprint IS NOT NULL
-              UNION ALL
-              SELECT credential_fingerprint FROM remote_chat_facts
-              WHERE credential_ref_id = ? AND credential_revision = ? AND credential_fingerprint IS NOT NULL
-            ) WHERE fp != ?
-          `).all(cred.secretId, existingSec.revision, cred.secretId, existingSec.revision, cred.fingerprint) as Array<{ fp: string }>;
-          if (mismatchedFingerprints.length > 0) {
-            fail('CONFIGURATION_CONFLICT', `Credential fingerprint mismatch for "${cred.secretId}"`);
-          }
-        }
+        applyPreparedCredential(db, cred, context.now);
       }
 
       db.prepare(`

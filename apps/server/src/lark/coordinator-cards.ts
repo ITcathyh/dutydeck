@@ -12,6 +12,7 @@ import { appendLarkTaskSteps, larkTaskAgentGuid } from './task-agent.js';
 import { findPersistedLarkSession, larkGroupKey, larkSessionConfigKey } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkTaskState, LarkTask, PersistedLarkCardTask } from './coordinator.js';
+import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
 import { larkCardChannel, withoutLeadingBotMention, larkTaskTitle, larkScopeContinuesFor, sendTaskCard } from './coordinator-core.js';
 import { LarkCoordinatorCore } from './coordinator-core.js';
 
@@ -134,7 +135,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
    */
   private mergeCardTaskExtra(previous: string | null | undefined, extra: PersistedLarkCardTask, turn: number, sameSession: boolean): PersistedLarkCardTask {
     try {
-      const parsed = previous ? JSON.parse(previous) as PersistedLarkCardTask : undefined;
+      const parsed = parseOptionalCardTask(previous);
       if (parsed && (parsed.turn ?? 0) === turn) return { ...parsed, ...extra };
       const earlier = [...parsed?.earlier_message_ids ?? [], ...(sameSession ? [parsed?.card_message_id, parsed?.final_message_id] : [])]
         .filter((id): id is string => Boolean(id)).slice(-20);
@@ -175,7 +176,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     if (!record?.cardId) return;
     const mapping = (await this.cardMappings?.list(larkCardChannel(config.appId)))?.find(item => item.externalId === record.event.messageId);
     if (!mapping) return;
-    const saved = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask;
+    const saved = parseCardTask(mapping.extra ?? '{}');
     if (saved.state !== 'completed' || saved.final_delivery_state !== 'delivered'
       || saved.final_message_id !== record.cardId || saved.runtime_task_id !== record.taskId || saved.turn !== record.turn) return;
     // S4：文件型结果先补验收 reaction，再做「状态未变」短路——重启对账靠这个顺序补偿漏写。
@@ -369,7 +370,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
         : (await this.cardMappings.list(larkCardChannel(config.appId))).some(mapping => {
           if (mapping.externalId === task.id) return false;
           try {
-            const other = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask;
+            const other = parseCardTask(mapping.extra ?? '{}');
             return other.app_id === config.appId && other.chat_id === task.event.chatId && other.sender_open_id === requester
               && other.started_at <= startedAt && startedAt - other.started_at <= repeatedRequestWindowMs
               && larkRequestText(other.prompt ?? '', config.name) === request;
@@ -398,7 +399,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     const current = await readLarkConfig(store, this.reconcileConfig.appId);
     if (!current?.listening) return { toast: { type: 'warning', content: '机器人已停用，无法执行此操作' } };
     const mapping = await this.cardMappings.get(larkCardChannel(current.appId), parsed.taskId);
-    const saved = mapping?.extra ? JSON.parse(mapping.extra) as PersistedLarkCardTask : undefined;
+    const saved = parseOptionalCardTask(mapping?.extra);
     if (!mapping || !saved || saved.app_id !== current.appId || saved.chat_id !== context.chatId || saved.final_message_id !== context.messageId
       || saved.state !== 'completed' || saved.final_delivery_state !== 'delivered' || !saved.scope_id) {
       return { toast: { type: 'warning', content: '此卡当前不可操作，请直接 @我 提问。' } };

@@ -2,7 +2,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 import { pinnedSessionUuid } from '../resume-id.js';
 import { relayCommandFrom, relayEnabled } from '@dutydeck/relay';
-import { waitForInputEcho, waitForQuietScreen } from './input-settle.js';
+import { delay, waitForInputEcho, waitForQuietScreen } from './input-settle.js';
 
 /**
  * Claude Code 家族共用实现（claude-code / seed / relay）。
@@ -14,7 +14,6 @@ import { waitForInputEcho, waitForQuietScreen } from './input-settle.js';
  * 完全一致，收敛到这里，避免三份逐字复制各自漂移。
  */
 
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 const STARTUP_POLL_MS = 100;
 const STARTUP_TIMEOUT_MS = 30_000;
 const TRUST_KEY_RETRY_MS = 1_000;

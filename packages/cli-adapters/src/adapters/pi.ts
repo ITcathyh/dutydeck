@@ -1,6 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { submitPrompt } from './input-settle.js';
 
 /** Pi 的活动态 busy 标记：turn 进行中渲染的临时状态行。 */
 const PI_WORKING_PATTERN = /Working\.\.\./;
@@ -51,15 +50,7 @@ export function createPiAdapter(): CliAdapter {
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
-      if (backend.pasteText && backend.sendSpecialKeys) {
-        (await backend.pasteText(prompt));
-        await delay(200);
-        (await backend.sendSpecialKeys('Enter'));
-      } else {
-        (await backend.write('\x1b[200~' + prompt + '\x1b[201~'));
-        await delay(1000);
-        (await backend.write('\r'));
-      }
+      await submitPrompt(backend, prompt, { paste: true, fallbackText: '\x1b[200~' + prompt + '\x1b[201~' });
     },
 
     buildResumeCommand(sessionId: string): string[] {

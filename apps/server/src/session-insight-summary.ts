@@ -101,156 +101,105 @@ function mergeQuality(parts: Metric[]): Metric['quality'] {
   return qualities.size === 1 ? [...qualities][0]! : 'derived';
 }
 
+/** evidence/missing 跨来源安全累加；溢出时封顶为 MAX_SAFE_INTEGER。 */
+function combinedCounts(parts: Metric[]): { evidenceCount: number; missingCount: number } {
+  return {
+    evidenceCount: parts.reduce((acc, p) => safeAdd(acc, p.evidenceCount) ?? Number.MAX_SAFE_INTEGER, 0),
+    missingCount: parts.reduce((acc, p) => safeAdd(acc, p.missingCount) ?? Number.MAX_SAFE_INTEGER, 0)
+  };
+}
+
+function usableParts<T extends Metric>(parts: T[]): T[] {
+  return parts.filter(p => p.value !== null && (p.status === 'available' || p.status === 'partial'));
+}
+
+function usableStatus(usable: Metric[]): 'partial' | 'available' {
+  return usable.some(p => p.status === 'partial') ? 'partial' : 'available';
+}
+
+function withReason(reasons: string[], code: string): string[] {
+  return [...new Set([...reasons, code])].sort();
+}
+
+function unavailableCombined(
+  counts: { evidenceCount: number; missingCount: number },
+  reasonCodes: string[],
+  quality: 'unknown' | 'unavailable' = 'unknown'
+): CountMetric {
+  return { value: null, quality, status: 'unavailable', ...counts, reasonCodes };
+}
+
 /** 合计可加计数指标。只采用 available/partial 且 value 非 null 的观察；
  * 无可用观察 → null（不补零）；安全整数溢出 → null + AGGREGATE_OVERFLOW。 */
 function combineCountMetrics(parts: CountMetric[]): { metric: CountMetric; overflow: boolean } {
-  const evidence = parts.reduce((acc, p) => safeAdd(acc, p.evidenceCount) ?? Number.MAX_SAFE_INTEGER, 0);
-  const missing = parts.reduce((acc, p) => safeAdd(acc, p.missingCount) ?? Number.MAX_SAFE_INTEGER, 0);
-  const cappedEvidence = Math.min(evidence, Number.MAX_SAFE_INTEGER);
-  const cappedMissing = Math.min(missing, Number.MAX_SAFE_INTEGER);
+  const counts = combinedCounts(parts);
   const reasons = unionReasons(parts);
-  const usable = parts.filter(p => p.value !== null && (p.status === 'available' || p.status === 'partial'));
+  const usable = usableParts(parts);
   if (usable.length === 0) {
-    return {
-      metric: {
-        value: null, quality: 'unknown', status: 'unavailable',
-        evidenceCount: cappedEvidence, missingCount: cappedMissing,
-        reasonCodes: reasons.length ? reasons : ['NO_INCLUDED_OBSERVATIONS']
-      },
-      overflow: false
-    };
+    return { metric: unavailableCombined(counts, reasons.length ? reasons : ['NO_INCLUDED_OBSERVATIONS']), overflow: false };
   }
   let total = 0;
   for (const part of usable) {
     const next = safeAdd(total, part.value as number);
-    if (next === null) {
-      return {
-        metric: {
-          value: null, quality: 'unknown', status: 'unavailable',
-          evidenceCount: cappedEvidence, missingCount: cappedMissing,
-          reasonCodes: [...new Set([...reasons, 'AGGREGATE_OVERFLOW'])].sort()
-        },
-        overflow: true
-      };
-    }
+    if (next === null) return { metric: unavailableCombined(counts, withReason(reasons, 'AGGREGATE_OVERFLOW')), overflow: true };
     total = next;
   }
-  const status = usable.some(p => p.status === 'partial') ? 'partial' : 'available';
   return {
-    metric: {
-      value: total, quality: mergeQuality(usable), status,
-      evidenceCount: cappedEvidence, missingCount: cappedMissing, reasonCodes: reasons
-    },
+    metric: { value: total, quality: mergeQuality(usable), status: usableStatus(usable), ...counts, reasonCodes: reasons },
     overflow: false
   };
 }
 
 /** 合计可证明独立的连续时长（paired tool）。必须为有限非负数；仅在非 finite / 无效时标 overflow。 */
 function combineAddableDuration(parts: ContinuousMetric[]): { metric: ContinuousMetric; overflow: boolean } {
-  const evidence = parts.reduce((acc, p) => safeAdd(acc, p.evidenceCount) ?? Number.MAX_SAFE_INTEGER, 0);
-  const missing = parts.reduce((acc, p) => safeAdd(acc, p.missingCount) ?? Number.MAX_SAFE_INTEGER, 0);
-  const cappedEvidence = Math.min(evidence, Number.MAX_SAFE_INTEGER);
-  const cappedMissing = Math.min(missing, Number.MAX_SAFE_INTEGER);
+  const counts = combinedCounts(parts);
   const reasons = unionReasons(parts);
-  const usable = parts.filter(p => p.value !== null && (p.status === 'available' || p.status === 'partial'));
+  const usable = usableParts(parts);
   if (usable.length === 0) {
-    return {
-      metric: {
-        value: null, quality: 'unknown', status: 'unavailable',
-        evidenceCount: cappedEvidence, missingCount: cappedMissing,
-        reasonCodes: reasons.length ? reasons : ['NO_INCLUDED_OBSERVATIONS']
-      },
-      overflow: false
-    };
+    return { metric: unavailableCombined(counts, reasons.length ? reasons : ['NO_INCLUDED_OBSERVATIONS']), overflow: false };
   }
   let total = 0;
   for (const part of usable) {
     const val = part.value as number;
-    if (!Number.isFinite(val) || val < 0) {
-      return {
-        metric: {
-          value: null, quality: 'unknown', status: 'unavailable',
-          evidenceCount: cappedEvidence, missingCount: cappedMissing,
-          reasonCodes: [...new Set([...reasons, 'AGGREGATE_OVERFLOW'])].sort()
-        },
-        overflow: true
-      };
-    }
     const next = total + val;
-    if (!Number.isFinite(next) || next < total) {
-      return {
-        metric: {
-          value: null, quality: 'unknown', status: 'unavailable',
-          evidenceCount: cappedEvidence, missingCount: cappedMissing,
-          reasonCodes: [...new Set([...reasons, 'AGGREGATE_OVERFLOW'])].sort()
-        },
-        overflow: true
-      };
+    if (!Number.isFinite(val) || val < 0 || !Number.isFinite(next) || next < total) {
+      return { metric: unavailableCombined(counts, withReason(reasons, 'AGGREGATE_OVERFLOW')), overflow: true };
     }
     total = next;
   }
-  const status = usable.some(p => p.status === 'partial') ? 'partial' : 'available';
   return {
-    metric: {
-      value: total, quality: mergeQuality(usable), status,
-      evidenceCount: cappedEvidence, missingCount: cappedMissing, reasonCodes: reasons
-    },
+    metric: { value: total, quality: mergeQuality(usable), status: usableStatus(usable), ...counts, reasonCodes: reasons },
     overflow: false
   };
 }
 
 /** 峰值跨来源取最大观测，不相加。 */
 function combineMaxMetric(parts: CountMetric[]): CountMetric {
-  const evidence = parts.reduce((acc, p) => safeAdd(acc, p.evidenceCount) ?? Number.MAX_SAFE_INTEGER, 0);
-  const missing = parts.reduce((acc, p) => safeAdd(acc, p.missingCount) ?? Number.MAX_SAFE_INTEGER, 0);
+  const counts = combinedCounts(parts);
   const reasons = unionReasons(parts);
-  const usable = parts.filter(p => p.value !== null && (p.status === 'available' || p.status === 'partial'));
-  if (usable.length === 0) {
-    return {
-      value: null, quality: 'unknown', status: 'unavailable',
-      evidenceCount: Math.min(evidence, Number.MAX_SAFE_INTEGER),
-      missingCount: Math.min(missing, Number.MAX_SAFE_INTEGER),
-      reasonCodes: reasons.length ? reasons : ['NO_INCLUDED_OBSERVATIONS']
-    };
-  }
+  const usable = usableParts(parts);
+  if (usable.length === 0) return unavailableCombined(counts, reasons.length ? reasons : ['NO_INCLUDED_OBSERVATIONS']);
   return {
     value: Math.max(...usable.map(p => p.value as number)),
     quality: mergeQuality(usable),
-    status: usable.some(p => p.status === 'partial') ? 'partial' : 'available',
-    evidenceCount: Math.min(evidence, Number.MAX_SAFE_INTEGER),
-    missingCount: Math.min(missing, Number.MAX_SAFE_INTEGER),
+    status: usableStatus(usable),
+    ...counts,
     reasonCodes: reasons
   };
 }
 
 /** 上下文窗口是模型/范围元数据：所有来源值一致才保留；不可比或多值时 unknown。 */
 function combineContextWindow(parts: CountMetric[]): CountMetric {
-  const evidence = parts.reduce((acc, p) => safeAdd(acc, p.evidenceCount) ?? Number.MAX_SAFE_INTEGER, 0);
-  const missing = parts.reduce((acc, p) => safeAdd(acc, p.missingCount) ?? Number.MAX_SAFE_INTEGER, 0);
+  const counts = combinedCounts(parts);
   const reasons = unionReasons(parts);
-  const usable = parts.filter(p => p.value !== null && (p.status === 'available' || p.status === 'partial'));
-  if (usable.length === 0) {
-    return {
-      value: null, quality: 'unknown', status: 'unavailable',
-      evidenceCount: Math.min(evidence, Number.MAX_SAFE_INTEGER),
-      missingCount: Math.min(missing, Number.MAX_SAFE_INTEGER),
-      reasonCodes: reasons.length ? reasons : ['NO_INCLUDED_OBSERVATIONS']
-    };
-  }
+  const usable = usableParts(parts);
+  if (usable.length === 0) return unavailableCombined(counts, reasons.length ? reasons : ['NO_INCLUDED_OBSERVATIONS']);
   const distinct = new Set(usable.map(p => p.value as number));
-  if (distinct.size > 1) {
-    return {
-      value: null, quality: 'unknown', status: 'unavailable',
-      evidenceCount: Math.min(evidence, Number.MAX_SAFE_INTEGER),
-      missingCount: Math.min(missing, Number.MAX_SAFE_INTEGER),
-      reasonCodes: [...new Set([...reasons, 'CONTEXT_WINDOW_INCOMPATIBLE'])].sort()
-    };
-  }
+  if (distinct.size > 1) return unavailableCombined(counts, withReason(reasons, 'CONTEXT_WINDOW_INCOMPATIBLE'));
   return {
     value: [...distinct][0]!, quality: mergeQuality(usable),
-    status: usable.some(p => p.status === 'partial') ? 'partial' : 'available',
-    evidenceCount: Math.min(evidence, Number.MAX_SAFE_INTEGER),
-    missingCount: Math.min(missing, Number.MAX_SAFE_INTEGER),
+    status: usableStatus(usable),
+    ...counts,
     reasonCodes: reasons
   };
 }
@@ -266,32 +215,16 @@ function combineFailureRate(sources: FileMetrics[]): ContinuousMetric {
   const known = sources.filter(m =>
     m.toolFailures.value !== null && m.toolFailures.status === 'available'
     && m.toolSuccesses.value !== null && m.toolSuccesses.status === 'available');
-  const evidence = failParts.concat(succParts).reduce((acc, p) => safeAdd(acc, p.evidenceCount) ?? Number.MAX_SAFE_INTEGER, 0);
-  const missing = failParts.concat(succParts).reduce((acc, p) => safeAdd(acc, p.missingCount) ?? Number.MAX_SAFE_INTEGER, 0);
-  if (known.length === 0) {
-    return {
-      value: null, quality: 'unavailable', status: 'unavailable',
-      evidenceCount: Math.min(evidence, Number.MAX_SAFE_INTEGER),
-      missingCount: Math.min(missing, Number.MAX_SAFE_INTEGER),
-      reasonCodes: ['RATE_DENOMINATOR_UNKNOWN']
-    };
-  }
+  const counts = combinedCounts(failParts.concat(succParts));
+  if (known.length === 0) return unavailableCombined(counts, ['RATE_DENOMINATOR_UNKNOWN'], 'unavailable');
   const failures = known.reduce((sum, m) => sum + (m.toolFailures.value as number), 0);
   const successes = known.reduce((sum, m) => sum + (m.toolSuccesses.value as number), 0);
   const denominator = failures + successes;
-  if (denominator === 0) {
-    return {
-      value: null, quality: 'unavailable', status: 'unavailable',
-      evidenceCount: Math.min(evidence, Number.MAX_SAFE_INTEGER),
-      missingCount: Math.min(missing, Number.MAX_SAFE_INTEGER),
-      reasonCodes: ['NO_DETERMINABLE_CALLS']
-    };
-  }
+  if (denominator === 0) return unavailableCombined(counts, ['NO_DETERMINABLE_CALLS'], 'unavailable');
   return {
     value: Number((failures / denominator).toFixed(6)),
     quality: 'derived', status: 'available',
-    evidenceCount: Math.min(evidence, Number.MAX_SAFE_INTEGER),
-    missingCount: Math.min(missing, Number.MAX_SAFE_INTEGER),
+    ...counts,
     reasonCodes: []
   };
 }

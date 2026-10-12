@@ -1,6 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { delay } from './input-settle.js';
 
 /**
  * CoCo（TRAE CLI 的 CoCo 形态）适配器。二进制与 traex 同源，但 TUI 是 Claude

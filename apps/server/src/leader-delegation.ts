@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { z } from 'zod';
-import { RuntimeError, workPlanSchema, type AgentConfig, type RepositoryBundle, type WorkPlan } from '@dutydeck/shared';
+import { parseLarkSourceId, RuntimeError, workPlanSchema, type AgentConfig, type RepositoryBundle, type WorkPlan } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { larkPermissionMode, readLarkConfig } from './lark/config.js';
 import { runReadonlyPrompt } from './lark/readonly-decider.js';
@@ -186,7 +186,7 @@ export class LeaderDelegationService {
   /** 按当前 Bot 配置和操作者权限取 Leader 与可用 Worker。 */
   private async team(parentSessionId: string, actorId: string) {
     const session = await this.options.runtime.getSession(parentSessionId);
-    const appId = session?.source === 'lark' ? session.sourceId?.split(':')[0] : undefined;
+    const appId = session?.source === 'lark' ? parseLarkSourceId(session.sourceId).appId : undefined;
     const config = appId ? await readLarkConfig(this.config, appId) : undefined;
     if (!session || config?.executionMode !== 'layered' || !config.leaderAgentId) throw new RuntimeError('LEADER_DELEGATION_DISABLED', '当前机器人未开启分层协作', 409);
     const agents = await this.options.runtime.listAgents();

@@ -172,6 +172,8 @@ export interface InsightHostEvidenceGateway {
   readTransaction<T>(work: () => T): T;
 }
 
+type FrozenHostEvidence = { raw: HostEvidenceRaw; executions: TaskExecutionProjection[]; accepted: AcceptedTask[] };
+
 export interface InsightEngineRunner {
   runInsightProcess(options: {
     binaryPath: string;
@@ -508,14 +510,7 @@ export class SessionInsightService {
       checkpoint();
 
       // 5. 一次短同步读事务冻结 hostEvidence 所需权威原始行；事务内绝不 await。
-      const frozen = this.hostEvidence.readTransaction(() => {
-        const raw = this.hostEvidence.readHostEvidenceRaw(sessionId);
-        const executions = this.hostEvidence.getSessionExecutions(sessionId);
-        const accepted = raw.tasks
-          .map(task => this.hostEvidence.getAcceptedTask(task.id))
-          .filter((value): value is AcceptedTask => Boolean(value));
-        return { raw, executions, accepted };
-      });
+      const frozen = this.freezeHostEvidence(sessionId);
 
       // 6. T4e 投影 + 脱敏 host evidence（稳定 digest，私有字段不进入）。
       //    统一 canary 上下文：session cwd / dataDir / 本次 tempDir / 本次解析来源的
@@ -529,16 +524,7 @@ export class SessionInsightService {
           ])
         ]
       };
-      const hostEvidence = buildHostEvidenceSnapshot(
-        {
-          capturedAt: frozen.raw.capturedAt,
-          executions: frozen.executions,
-          accepted: frozen.accepted,
-          verifications: this.projectVerifications(frozen.raw.verificationRecords, currentFingerprint),
-          usageEntries: frozen.raw.usageEntries as unknown as UsageLedgerEntry[]
-        },
-        redactionContext
-      );
+      const hostEvidence = this.projectHostEvidence(sessionId, frozen, currentFingerprint, redactionContext);
       checkpoint();
 
       // 7. locator 握手固定引擎版本（cache key 必须含版本）；引擎不可用只让本次分析失败，
@@ -893,25 +879,8 @@ export class SessionInsightService {
   /** details 无快照时现场只读冻结宿主证据（读取时刻事实，非固定分析快照）。 */
   private projectCurrentHostEvidence(sessionId: string): HostEvidenceSnapshot | null {
     try {
-      const frozen = this.hostEvidence.readTransaction(() => {
-        const raw = this.hostEvidence.readHostEvidenceRaw(sessionId);
-        const executions = this.hostEvidence.getSessionExecutions(sessionId);
-        const accepted = raw.tasks
-          .map(task => this.hostEvidence.getAcceptedTask(task.id))
-          .filter((value): value is AcceptedTask => Boolean(value));
-        return { raw, executions, accepted };
-      });
-      return buildHostEvidenceSnapshot(
-        {
-          capturedAt: frozen.raw.capturedAt,
-          executions: frozen.executions,
-          accepted: frozen.accepted,
-          verifications: this.projectVerifications(frozen.raw.verificationRecords, undefined),
-          usageEntries: frozen.raw.usageEntries as unknown as UsageLedgerEntry[]
-        },
-        // host-only 现场投影同样使用统一私有路径上下文（含持久 sources 历史 root/path）。
-        this.buildHostRedactionContext(sessionId, frozen.raw.session.cwd)
-      );
+      const frozen = this.freezeHostEvidence(sessionId);
+      return this.projectHostEvidence(sessionId, frozen, undefined);
     } catch {
       return null;
     }
@@ -922,27 +891,42 @@ export class SessionInsightService {
       const fingerprint = await this.getCurrentFingerprint?.(sessionId).catch(() => undefined);
       // 事务内只同步冻结权威原始行；canonical JSON/hash/脱敏等大计算一律在事务外，
       // 与 runJob 的 freeze→project 顺序保持一致。
-      const frozen = this.hostEvidence.readTransaction(() => {
-        const raw = this.hostEvidence.readHostEvidenceRaw(sessionId);
-        const executions = this.hostEvidence.getSessionExecutions(sessionId);
-        const accepted = raw.tasks
-          .map(task => this.hostEvidence.getAcceptedTask(task.id))
-          .filter((value): value is AcceptedTask => Boolean(value));
-        return { raw, executions, accepted };
-      });
-      return buildHostEvidenceSnapshot(
-        {
-          capturedAt: frozen.raw.capturedAt,
-          executions: frozen.executions,
-          accepted: frozen.accepted,
-          verifications: this.projectVerifications(frozen.raw.verificationRecords, fingerprint),
-          usageEntries: frozen.raw.usageEntries as unknown as UsageLedgerEntry[]
-        },
-        this.buildHostRedactionContext(sessionId, frozen.raw.session.cwd)
-      ).digest;
+      const frozen = this.freezeHostEvidence(sessionId);
+      return this.projectHostEvidence(sessionId, frozen, fingerprint).digest;
     } catch {
       return undefined;
     }
+  }
+
+  /** 一次短同步读事务冻结 hostEvidence 所需权威原始行；事务内绝不 await。 */
+  private freezeHostEvidence(sessionId: string): FrozenHostEvidence {
+    return this.hostEvidence.readTransaction(() => {
+      const raw = this.hostEvidence.readHostEvidenceRaw(sessionId);
+      const executions = this.hostEvidence.getSessionExecutions(sessionId);
+      const accepted = raw.tasks
+        .map(task => this.hostEvidence.getAcceptedTask(task.id))
+        .filter((value): value is AcceptedTask => Boolean(value));
+      return { raw, executions, accepted };
+    });
+  }
+
+  /** 未给 redactionContext 时使用统一私有路径上下文（含持久 sources 历史 root/path）。 */
+  private projectHostEvidence(
+    sessionId: string,
+    frozen: FrozenHostEvidence,
+    currentFingerprint: string | undefined,
+    redactionContext?: RedactionContext
+  ): HostEvidenceSnapshot {
+    return buildHostEvidenceSnapshot(
+      {
+        capturedAt: frozen.raw.capturedAt,
+        executions: frozen.executions,
+        accepted: frozen.accepted,
+        verifications: this.projectVerifications(frozen.raw.verificationRecords, currentFingerprint),
+        usageEntries: frozen.raw.usageEntries as unknown as UsageLedgerEntry[]
+      },
+      redactionContext ?? this.buildHostRedactionContext(sessionId, frozen.raw.session.cwd)
+    );
   }
 
   /** configs 原始核验行 → VerificationResponse；无当前指纹时保守标 stale，绝不默认 fresh。 */

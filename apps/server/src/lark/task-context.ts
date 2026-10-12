@@ -382,11 +382,8 @@ async function collectReferencedParent(
   service: TaskContextService,
   materials: MaterialCollector,
   sources: LarkContextSource[],
-  addResource: (resource: LarkMessageResource, sourceMessageId: string) => void,
   addRead: (messageId: string) => void,
-  documentUrls: string[],
-  documentUrlSet: Set<string>,
-  maxDocuments: number,
+  ingest: (message: LarkChatMessage, parsed: ParsedVerifiedMessage) => void,
   alreadyRead: boolean
 ) {
   const label = `引用消息 ${parentId}`;
@@ -419,18 +416,7 @@ async function collectReferencedParent(
   }
   const verifiedItems = items.filter(item => childInScope(item, event.chatId));
   const parsed = await parseVerifiedMessage(parent, verifiedItems.length ? verifiedItems : undefined);
-  const source: LarkContextSource = { messageId: parent.messageId, label: messageLabel(parent.messageId, parent.sender?.name) };
-  sources.push(source);
-  materials.addMessage(source, parsed.text);
-  for (const resource of parsed.resources) addResource(resource, resource.sourceMessageId);
-  for (const messageId of parsed.messageIds) addRead(messageId);
-  for (const url of findDocumentUrls(parsed.text)) {
-    const key = documentKey(url);
-    if (!documentUrlSet.has(key) && documentUrls.length < maxDocuments) {
-      documentUrlSet.add(key);
-      documentUrls.push(url);
-    }
-  }
+  ingest(parent, parsed);
 }
 
 export async function collectLarkTaskContext(input: CollectLarkTaskContextInput): Promise<CollectLarkTaskContextResult> {
@@ -453,6 +439,20 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
     if (!resource.key || seenResources.has(key)) return;
     seenResources.add(key);
     outputResources.push({ ...resource, sourceMessageId });
+  };
+  const ingest = (message: LarkChatMessage, parsed: ParsedVerifiedMessage) => {
+    const source: LarkContextSource = { messageId: message.messageId, label: messageLabel(message.messageId, message.sender?.name) };
+    sources.push(source);
+    materials.addMessage(source, parsed.text);
+    for (const resource of parsed.resources) addResource(resource, resource.sourceMessageId);
+    for (const messageId of parsed.messageIds) addRead(messageId);
+    for (const url of findDocumentUrls(parsed.text)) {
+      const key = documentKey(url);
+      if (!documentUrlSet.has(key) && documentUrls.length < maxDocuments) {
+        documentUrlSet.add(key);
+        documentUrls.push(url);
+      }
+    }
   };
 
   // The current turn was already consumed by the controller. Keep its
@@ -496,24 +496,13 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
       const candidateItems = parentInItems ? items : [currentParentMessage, ...items];
       const verifiedItems = candidateItems.filter(item => childInScope(item, event.chatId));
       const parsed = await parseVerifiedMessage(currentParentMessage, verifiedItems.length ? verifiedItems : undefined);
-      const source: LarkContextSource = { messageId: currentMessageId, label: messageLabel(currentMessageId, currentParentMessage.sender?.name) };
-      sources.push(source);
-      materials.addMessage(source, parsed.text);
-      for (const resource of parsed.resources) addResource(resource, resource.sourceMessageId);
-      for (const messageId of parsed.messageIds) addRead(messageId);
-      for (const url of findDocumentUrls(parsed.text)) {
-        const key = documentKey(url);
-        if (!documentUrlSet.has(key) && documentUrls.length < maxDocuments) {
-          documentUrlSet.add(key);
-          documentUrls.push(url);
-        }
-      }
+      ingest(currentParentMessage, parsed);
     }
   }
 
   const parentId = trimMessageId(event.parentId);
   if (parentId) {
-    await collectReferencedParent(event, parentId, service, materials, sources, addResource, addRead, documentUrls, documentUrlSet, maxDocuments, readSet.has(parentId));
+    await collectReferencedParent(event, parentId, service, materials, sources, addRead, ingest, readSet.has(parentId));
   }
 
   let nextCursor: LarkContextCursor | undefined = input.cursor;
@@ -576,18 +565,7 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
           parsed = await parseVerifiedMessage(message);
         }
 
-        const source: LarkContextSource = { messageId: message.messageId, label: messageLabel(message.messageId, message.sender?.name) };
-        sources.push(source);
-        materials.addMessage(source, parsed.text);
-        for (const resource of parsed.resources) addResource(resource, resource.sourceMessageId);
-        for (const messageId of parsed.messageIds) addRead(messageId);
-        for (const url of findDocumentUrls(parsed.text)) {
-          const key = documentKey(url);
-          if (!documentUrlSet.has(key) && documentUrls.length < maxDocuments) {
-            documentUrlSet.add(key);
-            documentUrls.push(url);
-          }
-        }
+        ingest(message, parsed);
         lastProcessed = message;
       }
       const position = lastProcessed

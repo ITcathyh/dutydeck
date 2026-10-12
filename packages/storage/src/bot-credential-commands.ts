@@ -26,8 +26,11 @@ import {
   runConfigurationCommand,
   invalidateBotFacts,
   nextConfigurationRevision,
+  applyPreparedCredential,
+  hasFingerprintConflict,
   type ConfigurationCommand
 } from './configuration-transaction.js';
+import type { SecretRefRow } from './bot-configuration-reader.js';
 
 export type BotCredentialCommands = Pick<
   ConfigurationRepository,
@@ -94,53 +97,7 @@ function bindPreparedCredentialCommand(db: Database.Database): ConfigurationComm
       }
 
       const cred = input.prepared;
-      if (cred.expectedRevision === 0) {
-        const existingSec = db.prepare('SELECT id FROM secret_refs WHERE id = ?').get(cred.secretId);
-        if (existingSec) {
-          fail('CONFIGURATION_CONFLICT', `SecretRef "${cred.secretId}" already exists for expectedRevision 0`);
-        }
-        db.prepare(`
-          INSERT INTO secret_refs (
-            id, schema_version, revision, kind, provider, reference_key, status, created_at, updated_at
-          ) VALUES (?, 1, 1, 'lark_app_secret', ?, ?, 'configured', ?, ?)
-        `).run(cred.secretId, cred.provider, cred.referenceKey, context.now, context.now);
-      } else {
-        const existingSec = db.prepare('SELECT * FROM secret_refs WHERE id = ?').get(cred.secretId) as {
-          id: string;
-          schema_version: number;
-          revision: number;
-          kind: string;
-          provider: string;
-          reference_key: string;
-          status: string;
-        } | undefined;
-        if (!existingSec) {
-          fail('CONFIGURATION_NOT_FOUND', `Referenced secret "${cred.secretId}" does not exist`, 404);
-        }
-        if (existingSec.revision !== cred.expectedRevision) {
-          fail('CONFIGURATION_REVISION_CONFLICT', `SecretRef revision mismatch: expected ${cred.expectedRevision}, got ${existingSec.revision}`);
-        }
-        if (
-          existingSec.kind !== 'lark_app_secret' ||
-          existingSec.provider !== cred.provider ||
-          existingSec.reference_key !== cred.referenceKey ||
-          existingSec.status !== 'configured'
-        ) {
-          fail('CONFIGURATION_CONFLICT', `SecretRef metadata mismatch for "${cred.secretId}"`);
-        }
-        const mismatchedFingerprints = db.prepare(`
-          SELECT DISTINCT credential_fingerprint AS fp FROM (
-            SELECT credential_fingerprint FROM remote_identity_facts
-            WHERE credential_ref_id = ? AND credential_revision = ? AND credential_fingerprint IS NOT NULL
-            UNION ALL
-            SELECT credential_fingerprint FROM remote_chat_facts
-            WHERE credential_ref_id = ? AND credential_revision = ? AND credential_fingerprint IS NOT NULL
-          ) WHERE fp != ?
-        `).all(cred.secretId, existingSec.revision, cred.secretId, existingSec.revision, cred.fingerprint) as Array<{ fp: string }>;
-        if (mismatchedFingerprints.length > 0) {
-          fail('CONFIGURATION_CONFLICT', `Credential fingerprint mismatch for "${cred.secretId}"`);
-        }
-      }
+      applyPreparedCredential(db, cred, context.now);
 
       // No-op detection: reference unchanged and prepared metadata matches current configured state and facts
       if (original.bot.credentialRef === cred.secretId) {
@@ -246,15 +203,7 @@ function rotateSharedSecretCommand(db: Database.Database): ConfigurationCommand<
         }
       }
 
-      const existingSec = db.prepare('SELECT * FROM secret_refs WHERE id = ?').get(input.secretId) as {
-        id: string;
-        schema_version: number;
-        revision: number;
-        kind: string;
-        provider: string;
-        reference_key: string;
-        status: string;
-      } | undefined;
+      const existingSec = db.prepare('SELECT * FROM secret_refs WHERE id = ?').get(input.secretId) as SecretRefRow | undefined;
       if (!existingSec) {
         fail('CONFIGURATION_NOT_FOUND', `SecretRef "${input.secretId}" not found`, 404);
       }
@@ -273,17 +222,7 @@ function rotateSharedSecretCommand(db: Database.Database): ConfigurationCommand<
 
       if (isSameLocationAndConfigured) {
         // If current revision has facts with fingerprint, check for fingerprint conflict
-        const mismatchedFingerprints = db.prepare(`
-          SELECT DISTINCT credential_fingerprint AS fp FROM (
-            SELECT credential_fingerprint FROM remote_identity_facts
-            WHERE credential_ref_id = ? AND credential_revision = ? AND credential_fingerprint IS NOT NULL
-            UNION ALL
-            SELECT credential_fingerprint FROM remote_chat_facts
-            WHERE credential_ref_id = ? AND credential_revision = ? AND credential_fingerprint IS NOT NULL
-          ) WHERE fp != ?
-        `).all(input.secretId, existingSec.revision, input.secretId, existingSec.revision, input.prepared.fingerprint) as Array<{ fp: string }>;
-
-        if (mismatchedFingerprints.length > 0) {
+        if (hasFingerprintConflict(db, input.secretId, existingSec.revision, input.prepared.fingerprint)) {
           fail('CONFIGURATION_CONFLICT', 'Fingerprint conflict on identical provider/key, trusted service must prepare new key');
         }
 
@@ -411,17 +350,7 @@ function rotateUnboundSecretCommand(db: Database.Database): ConfigurationCommand
     execute(input, context) {
       assertNoSecretReferences(db, input.prepared.secretId, 'rotate');
 
-      const existingSec = db.prepare('SELECT * FROM secret_refs WHERE id = ?').get(input.prepared.secretId) as {
-        id: string;
-        schema_version: number;
-        revision: number;
-        kind: string;
-        provider: string;
-        reference_key: string;
-        status: string;
-        created_at: string;
-        updated_at: string;
-      } | undefined;
+      const existingSec = db.prepare('SELECT * FROM secret_refs WHERE id = ?').get(input.prepared.secretId) as SecretRefRow | undefined;
       if (!existingSec) {
         fail('CONFIGURATION_NOT_FOUND', `SecretRef "${input.prepared.secretId}" not found`, 404);
       }
@@ -495,17 +424,7 @@ function removeUnboundSecretCommand(db: Database.Database): ConfigurationCommand
     execute(input, _context) {
       assertNoSecretReferences(db, input.secretId, 'remove');
 
-      const existingSec = db.prepare('SELECT * FROM secret_refs WHERE id = ?').get(input.secretId) as {
-        id: string;
-        schema_version: number;
-        revision: number;
-        kind: string;
-        provider: string;
-        reference_key: string;
-        status: string;
-        created_at: string;
-        updated_at: string;
-      } | undefined;
+      const existingSec = db.prepare('SELECT * FROM secret_refs WHERE id = ?').get(input.secretId) as SecretRefRow | undefined;
       if (!existingSec) {
         fail('CONFIGURATION_NOT_FOUND', `SecretRef "${input.secretId}" not found`, 404);
       }

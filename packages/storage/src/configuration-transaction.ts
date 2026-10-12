@@ -2,9 +2,9 @@ import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   RuntimeError, canonicalExecutionJson, managementOperationSchema,
-  type BotSnapshot, type BotConfigChangeKind, type ManagementOperation, type ManagementActor
+  type BotSnapshot, type BotConfigChangeKind, type ManagementOperation, type ManagementActor, type PreparedCredentialRef
 } from '@dutydeck/shared';
-import { createConfigurationReader, canonicalSnapshotJson, computeSnapshotDigest } from './bot-configuration-reader.js';
+import { createConfigurationReader, canonicalSnapshotJson, computeSnapshotDigest, type SecretRefRow } from './bot-configuration-reader.js';
 
 // Internal command implementation contract; never expose this callback through RepositoryBundle.
 export type ConfigurationAccess =
@@ -68,6 +68,53 @@ export function nextConfigurationRevision(revision: number): number {
     fail('CONFIGURATION_REVISION_OVERFLOW', 'A configuration revision cannot be incremented');
   }
   return revision + 1;
+}
+
+export function hasFingerprintConflict(db: Database.Database, secretId: string, revision: number, fingerprint: string): boolean {
+  const mismatchedFingerprints = db.prepare(`
+    SELECT DISTINCT credential_fingerprint AS fp FROM (
+      SELECT credential_fingerprint FROM remote_identity_facts
+      WHERE credential_ref_id = ? AND credential_revision = ? AND credential_fingerprint IS NOT NULL
+      UNION ALL
+      SELECT credential_fingerprint FROM remote_chat_facts
+      WHERE credential_ref_id = ? AND credential_revision = ? AND credential_fingerprint IS NOT NULL
+    ) WHERE fp != ?
+  `).all(secretId, revision, secretId, revision, fingerprint) as Array<{ fp: string }>;
+  return mismatchedFingerprints.length > 0;
+}
+
+/** Inserts the prepared secret (expectedRevision 0) or validates the existing one against the proof. */
+export function applyPreparedCredential(db: Database.Database, cred: PreparedCredentialRef, now: string): void {
+  if (cred.expectedRevision === 0) {
+    const existingSec = db.prepare('SELECT id FROM secret_refs WHERE id = ?').get(cred.secretId);
+    if (existingSec) {
+      fail('CONFIGURATION_CONFLICT', `SecretRef "${cred.secretId}" already exists for expectedRevision 0`);
+    }
+    db.prepare(`
+      INSERT INTO secret_refs (
+        id, schema_version, revision, kind, provider, reference_key, status, created_at, updated_at
+      ) VALUES (?, 1, 1, 'lark_app_secret', ?, ?, 'configured', ?, ?)
+    `).run(cred.secretId, cred.provider, cred.referenceKey, now, now);
+  } else {
+    const existingSec = db.prepare('SELECT * FROM secret_refs WHERE id = ?').get(cred.secretId) as SecretRefRow | undefined;
+    if (!existingSec) {
+      fail('CONFIGURATION_NOT_FOUND', `Referenced secret "${cred.secretId}" does not exist`, 404);
+    }
+    if (existingSec.revision !== cred.expectedRevision) {
+      fail('CONFIGURATION_REVISION_CONFLICT', `SecretRef revision mismatch: expected ${cred.expectedRevision}, got ${existingSec.revision}`);
+    }
+    if (
+      existingSec.kind !== 'lark_app_secret' ||
+      existingSec.provider !== cred.provider ||
+      existingSec.reference_key !== cred.referenceKey ||
+      existingSec.status !== 'configured'
+    ) {
+      fail('CONFIGURATION_CONFLICT', `SecretRef metadata mismatch for "${cred.secretId}"`);
+    }
+    if (hasFingerprintConflict(db, cred.secretId, existingSec.revision, cred.fingerprint)) {
+      fail('CONFIGURATION_CONFLICT', `Credential fingerprint mismatch for "${cred.secretId}"`);
+    }
+  }
 }
 
 export function invalidateBotFacts(db: Database.Database, botId: string, now: string, errorCode: string): void {

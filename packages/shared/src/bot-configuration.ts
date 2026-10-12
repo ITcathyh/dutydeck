@@ -9,20 +9,27 @@ import {
 import type { SecretRefKind, SecretRefMetadata } from './index.js';
 export type { SecretRefKind, SecretRefMetadata };
 import {
+  accessOverrideSchema as accessOverrideSchemaV2,
+  clearableStringOverrideSchema,
   groupBindingStates,
   groupReplyModes,
   groupToolOverrideModes,
+  groupToolsOverrideSchema as groupToolsOverrideSchemaV2,
   inheritPresentationOverride,
+  inheritStringOverrideSchema,
+  mentionOverrideSchema,
   mentionPolicies,
+  opaquePrincipalIdSchema,
   operateScopes,
   policyActions,
   presentationOverrideSchema,
   presentationSettingsSchema,
   roleAssignmentSchema,
+  timestampSchema,
   type PolicyAction,
   type RoleAssignment
 } from './group-policy.js';
-export { roleAssignmentSchema, presentationOverrideSchema, inheritPresentationOverride, type RoleAssignment };
+export { roleAssignmentSchema, presentationOverrideSchema, inheritPresentationOverride, accessOverrideSchemaV2, groupToolsOverrideSchemaV2, type RoleAssignment };
 
 export type GroupBindingState = (typeof groupBindingStates)[number];
 export type GroupReplyMode = (typeof groupReplyModes)[number];
@@ -30,8 +37,6 @@ export type GroupToolOverrideMode = (typeof groupToolOverrideModes)[number];
 export type MentionPolicy = (typeof mentionPolicies)[number];
 export type OperateScope = (typeof operateScopes)[number];
 
-export const timestampSchema = z.string().datetime();
-export const opaquePrincipalIdSchema = z.string().regex(/^principal_[A-Za-z0-9_-]+$/, 'Principal IDs must be opaque principal_* identifiers');
 export const sha256HexSchema = z.string().regex(/^[a-f0-9]{64}$/, 'Digest must be a lowercase SHA-256 64-hex string');
 
 // ============================================================================
@@ -335,48 +340,14 @@ export type GroupBindingStateV2 = (typeof groupBindingStatesV2)[number];
 export const groupAccessProfiles = ['managed_group', 'new_group'] as const;
 export type GroupAccessProfile = (typeof groupAccessProfiles)[number];
 
-export const inheritStringOverrideSchema = z.discriminatedUnion('mode', [
-  z.object({ mode: z.literal('inherit') }).strict(),
-  z.object({ mode: z.literal('set'), value: z.string().min(1) }).strict()
-]);
-
-export const clearableStringOverrideSchema = z.discriminatedUnion('mode', [
-  z.object({ mode: z.literal('inherit') }).strict(),
-  z.object({ mode: z.literal('set'), value: z.string().min(1) }).strict(),
-  z.object({ mode: z.literal('clear') }).strict()
-]);
-
 export const groupReplyOverrideSchemaV2 = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('inherit') }).strict(),
   z.object({ mode: z.literal('set'), value: z.enum(groupReplyModesV2) }).strict()
 ]);
 
-export const mentionOverrideSchema = z.discriminatedUnion('mode', [
-  z.object({ mode: z.literal('inherit') }).strict(),
-  z.object({ mode: z.literal('set'), value: z.enum(mentionPolicies) }).strict()
-]);
-
 export const routingOverrideSchemaV2 = z.object({
   groupReplyMode: groupReplyOverrideSchemaV2,
   mentionPolicy: mentionOverrideSchema
-}).strict();
-
-export const accessOverrideSchemaV2 = z.object({
-  mode: z.enum(['inherit', 'owner_only', 'allowlist', 'all_chat_members', 'disabled']),
-  principalIds: z.array(opaquePrincipalIdSchema).default([])
-}).strict().superRefine((value, context) => {
-  if (value.mode !== 'allowlist' && value.principalIds.length > 0) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ['principalIds'], message: 'principalIds are only valid in allowlist mode' });
-  }
-  if (value.mode === 'allowlist' && value.principalIds.length === 0) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ['principalIds'], message: 'allowlist mode requires at least one principal' });
-  }
-});
-
-export const groupToolsOverrideSchemaV2 = z.object({
-  read: z.enum(groupToolOverrideModes),
-  discover: z.enum(groupToolOverrideModes),
-  send: z.enum(groupToolOverrideModes)
 }).strict();
 
 export const groupBindingV2Schema = z.object({
@@ -1168,7 +1139,6 @@ export type ListVersionsOptionsInput = z.input<typeof listVersionsOptionsSchema>
 
 export const configurationAuthorities = ['legacy', 'v2'] as const;
 export type ConfigurationAuthority = (typeof configurationAuthorities)[number];
-export const configurationAuthoritySchema = z.enum(configurationAuthorities);
 
 export const createUnboundSecretInputSchema = z.object({
   op: managementOperationSchema,

@@ -5,7 +5,7 @@ import { isAbsolute } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
-  RuntimeError, canonicalExecutionJson, createGroupBindingInputSchema, createRoleAssignmentInputSchema, evaluatePolicyAction, installationOwnerTaskActor,
+  RuntimeError, canonicalExecutionJson, parseLarkSourceId, createGroupBindingInputSchema, createRoleAssignmentInputSchema, evaluatePolicyAction, installationOwnerTaskActor,
   groupBindingSchema, remoteChatFactValidity, resolveGroupEffectiveConfig, updateRoleAssignmentInputSchema,
   type ChannelBotGroupPolicy, type EffectiveGroupConfig, type GroupBinding, type PolicyAction,
   type PolicyDecision, type PresentationSettings, type RepositoryBundle, type RoleAssignment, type Session, type ToolRiskPolicy
@@ -506,7 +506,7 @@ export class LarkGroupManager {
       return this.authorize(run.appId, run.chatId, owner ? undefined : actor, action, sessionId, { installationOwner: owner, readOnly, ...(actor && !owner ? { taskRequesterOpenId: actor } : {}) });
     }
     const session = await this.repos.sessions.get(sessionId);
-    const [appId, chatId, chatType] = session?.sourceId?.split(':') ?? [];
+    const { appId, chatId, chatType } = parseLarkSourceId(session?.sourceId);
     if (session?.source !== 'lark' || !appId || !chatId || chatType !== 'group') return undefined;
     return this.authorize(appId, chatId, undefined, action, sessionId, { installationOwner, readOnly });
   }
@@ -528,7 +528,7 @@ export class LarkGroupManager {
       targetScope = { appId: run.appId, chatId: run.chatId, bindingId: run.bindingId };
     } else if (owner) {
       const session = await this.repos.sessions.get(sessionId);
-      const [appId, chatId, chatType, ...scope] = session?.sourceId?.split(':') ?? [];
+      const { appId, chatId, chatType, scope } = parseLarkSourceId(session?.sourceId);
       if (!session || session.source !== 'lark' || !appId || !chatId || chatType !== 'group') return undefined;
       const config = await this.resolved(await this.config(appId), chatId);
       const scopeId = scope.join(':') || chatType;

@@ -21,6 +21,7 @@ import {
 } from './open-platform-configurator.js';
 import { createLarkCardService, LarkServiceError, type LarkCardService } from './service.js';
 import type { LarkCardElement } from './commands.js';
+import { markdownElement } from './card-elements.js';
 
 /** 原生斜杠命令写在机器人租户凭据下，与开放平台控制台会话无关。 */
 export type LarkSlashCommandSyncClient = Pick<LarkCardService, 'syncSlashCommands'>;
@@ -315,10 +316,6 @@ export function parseRepairCardActionValue(value: unknown): { action: 'run'; app
   if (!isValidLarkAppId(rawAppId)) return undefined;
   return { action: 'run', appId: rawAppId };
 }
-
-const markdownElement = (elementId: string, content: string): LarkCardElement => ({
-  tag: 'markdown', element_id: elementId, content
-});
 
 /** /repair 第一次回复的二次确认卡：如实说明将发生什么、发布不可撤销、审核未过不生效。 */
 export function buildRepairConfirmCard(appId: string): RepairCardContent {

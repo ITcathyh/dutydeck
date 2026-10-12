@@ -1,6 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { delay } from './input-settle.js';
 
 /** OpenCode 原生会话 id 形态（V2 与 V1 同规则）：`ses_` + 纯字母数字。 */
 const OPENCODE_SESSION_ID_RE = /^ses_[0-9A-Za-z]+$/;

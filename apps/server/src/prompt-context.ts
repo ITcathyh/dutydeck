@@ -3,9 +3,6 @@ import type { PromptPart, PromptSourceDiagnostics } from '@dutydeck/shared';
 
 export const promptDigest = (content: string) => createHash('sha256').update(content, 'utf8').digest('hex');
 export const promptTemplateVersion = (mode: 'legacy' | 'optimized'): 'legacy-v1' | 'optimized-v1' => mode === 'optimized' ? 'optimized-v1' : 'legacy-v1';
-export function promptPart(kind: PromptPart['kind'], content: string, metadata: Omit<PromptPart, 'kind' | 'content'>): PromptPart {
-  return { kind, content, ...metadata };
-}
 /** A reference retains its own wrapper (identity, time, reason and coverage).
  * Only complete, explicitly versioned snapshots in one trust scope can share a body.
  */

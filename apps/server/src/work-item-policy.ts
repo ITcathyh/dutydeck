@@ -1,4 +1,4 @@
-import { installationOwnerTaskActor, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
+import { installationOwnerTaskActor, parseLarkSourceId, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
 import type { LarkGroupManager } from './lark/group-management.js';
 import { defaultHighRiskPattern, readLarkConfig } from './lark/config.js';
 import { createLarkCardService } from './lark/service.js';
@@ -7,7 +7,7 @@ import { createLarkCardService } from './lark/service.js';
 export async function workItemRiskPolicy(repos: RepositoryBundle, groups: LarkGroupManager, parentSessionId: string, actorId: string, fallback?: ToolRiskPolicy, env: NodeJS.ProcessEnv = process.env, fetcher: typeof globalThis.fetch = globalThis.fetch): Promise<ToolRiskPolicy | undefined> {
   const parent = await repos.sessions.get(parentSessionId);
   if (parent?.source !== 'lark') return fallback;
-  const [appId, chatId, chatType] = parent.sourceId?.split(':') ?? [];
+  const { appId, chatId, chatType } = parseLarkSourceId(parent.sourceId);
   let config = appId ? await readLarkConfig(repos.config, appId) : null;
   if (!config || !chatId) return { enabled: true, authorized: false, pattern: '.*', reason: '原机器人配置已失效' };
   if (chatType === 'group') config = await groups.resolved(config, chatId);
@@ -33,7 +33,7 @@ export async function authorizeWorkItemAgent(repos: RepositoryBundle, groups: La
   const parent = await repos.sessions.get(sessionId);
   if (!parent || !await authorize(sessionId, actorId)) return false;
   if (parent.agentId === agentId || parent.source !== 'lark') return true;
-  const [appId, chatId, chatType] = parent.sourceId?.split(':') ?? [];
+  const { appId, chatId, chatType } = parseLarkSourceId(parent.sourceId);
   if (chatType !== 'group' || !appId || !chatId) return true;
   const config = await readLarkConfig(repos.config, appId);
   if (config?.executionMode === 'layered' && [config.leaderAgentId, ...config.workerAgentIds ?? []].includes(agentId)) return true;
@@ -47,7 +47,7 @@ export async function authorizeWorkItemInteraction(repos: RepositoryBundle, grou
   const parent = await repos.sessions.get(parentSessionId);
   if (!parent) return false;
   if (parent.source !== 'lark') return actorId === installationOwnerTaskActor;
-  const [appId, chatId, chatType] = parent.sourceId?.split(':') ?? [];
+  const { appId, chatId, chatType } = parseLarkSourceId(parent.sourceId);
   if (!appId || !chatId) return false;
   const owner = actorId === installationOwnerTaskActor;
   if (chatType === 'group') {

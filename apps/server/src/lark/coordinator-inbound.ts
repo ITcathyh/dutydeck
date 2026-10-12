@@ -10,7 +10,7 @@ import { redactTraceText } from './secret-redaction.js';
 import { readGitSnapshot } from './git-status.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { isLarkGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
-import type { PolicyAction, Session, TaskRecord } from '@dutydeck/shared';
+import { parseLarkSourceId, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
 import { executeScheduleCommand } from './schedule-command.js';
 import { larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageResource } from './message-content.js';
@@ -42,6 +42,7 @@ import { connectLarkOpenPlatformSession } from './open-platform-session.js';
 import { findLarkThreadContinuation, larkGroupKey, larkSessionConfigKey, parsePrompt, resolveLarkScopeId } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
+import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
 import { type LarkCommandPrompt, larkCardChannel, type LarkRelaunchClaim, larkTaskTitle, sendTaskCard } from './coordinator-core.js';
 import { LarkCoordinatorDispatch } from './coordinator-dispatch.js';
 
@@ -126,7 +127,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     for (const mapping of await this.cardMappings?.list(larkCardChannel(config.appId)) ?? []) {
       if (this.tasks.has(mapping.externalId)) continue;
       try {
-        const saved = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask;
+        const saved = parseCardTask(mapping.extra ?? '{}');
         if (!saved.runtime_task_id || !saved.scope_id || !saved.sender_open_id) continue;
         const runtimeTask = (await this.runtime.getTasks(mapping.sessionId)).find(task => task.id === saved.runtime_task_id);
         if (!runtimeTask || !['running', 'queued'].includes(runtimeTask.status)) continue;
@@ -249,6 +250,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       idempotencyKey: `workflow_reply_${event.messageId}`.slice(0, 50) }, this.log);
   }
 
+  private saveTaskDashboardOrigin(config: StoredLarkConfig, card: { messageId: string }, event: LarkMessageEvent) {
+    return this.workflowOptions.store?.set(`lark.task_dashboard.${config.appId}.${card.messageId}`, JSON.stringify({
+      messageId: event.messageId, chatId: event.chatId, chatType: event.chatType,
+      senderOpenId: event.senderOpenId, messageType: 'text', content: '', mentions: []
+    } satisfies LarkMessageEvent));
+  }
+
   private async taskDashboard(event: LarkMessageEvent, config: StoredLarkConfig, page: number) {
     if (!event.senderOpenId) throw new LarkServiceError('LARK_IDENTITY_REQUIRED', '缺少当前成员身份。', 403);
     const entries: LarkTaskDashboardEntry[] = [];
@@ -256,7 +264,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     // Agent 显示名只查一次；查不到名字就退化成 agentId，绝不留空让读者猜是谁在跑。
     const agentNames = new Map((await this.runtime.listAgents?.().catch(() => []) ?? []).map(agent => [agent.id, agent.name] as const));
     for (const mapping of await this.cardMappings?.list(larkCardChannel(config.appId)) ?? []) {
-      const saved = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask;
+      const saved = parseCardTask(mapping.extra ?? '{}');
       if (saved.app_id !== config.appId || !saved.runtime_task_id) continue;
       if (event.chatType === 'group' ? saved.chat_id !== event.chatId : saved.sender_open_id !== event.senderOpenId) continue;
       if (saved.chat_type !== 'group' && saved.chat_id !== event.chatId) continue;
@@ -315,10 +323,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     try {
       if (parsed?.name === 'tasks') {
         const card = await this.workflowReply(event, config, '', { taskName: '任务导航', elements: await this.taskDashboard(event, config, Number(parsed.args[0] ?? 1)) });
-        await this.workflowOptions.store?.set(`lark.task_dashboard.${config.appId}.${card.messageId}`, JSON.stringify({
-          messageId: event.messageId, chatId: event.chatId, chatType: event.chatType,
-          senderOpenId: event.senderOpenId, messageType: 'text', content: '', mentions: []
-        } satisfies LarkMessageEvent));
+        await this.saveTaskDashboardOrigin(config, card, event);
         return true;
       }
       if (quoted?.kind === 'result' && prompt.trim() === '验收通过') {
@@ -330,7 +335,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       if (quoted?.kind === 'result' && (!parsed || !names.includes(parsed.name))) {
         if (!event.senderOpenId || !await this.authorizeInteraction(quoted, event.senderOpenId, 'run.interrupt')) throw new LarkServiceError('LARK_INTERACTION_DENIED', '当前账号无权修改此任务。', 403);
         const mapping = (await this.cardMappings!.list(larkCardChannel(config.appId))).find(item => item.externalId === quoted.event.messageId)!;
-        const saved = JSON.parse(mapping.extra!) as PersistedLarkCardTask;
+        const saved = parseCardTask(mapping.extra!);
         if (!saved.scope_id) throw new LarkServiceError('LARK_CONTEXT_MISSING', '原任务上下文不可恢复，请发送新的任务目标。', 409);
         if (quoted.state === 'pending') {
           await this.workflows!.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId: quoted.id, action: 'changes' });
@@ -1188,10 +1193,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
             { tag: 'button', element_id: 'status_reject_approval', type: 'danger', text: { tag: 'plain_text', content: '拒绝这条审批' },
               behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'reject', request_id: approval.id, generation: approval.boot } }] }] } : {});
         if (card && approval) {
-          await this.workflowOptions.store?.set(`lark.task_dashboard.${config.appId}.${card.messageId}`, JSON.stringify({
-            messageId: event.messageId, chatId: event.chatId, chatType: event.chatType,
-            senderOpenId: event.senderOpenId, messageType: 'text', content: '', mentions: []
-          } satisfies LarkMessageEvent));
+          await this.saveTaskDashboardOrigin(config, card, event);
         }
         return 'handled';
       }
@@ -1560,7 +1562,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const explicitFinal = async (task: TaskRecord) => {
       const matches = (cards ?? []).flatMap(row => {
         try {
-          const saved = JSON.parse(row.extra ?? '{}') as PersistedLarkCardTask;
+          const saved = parseCardTask(row.extra ?? '{}');
           return row.sessionId === sessionId && saved.runtime_task_id === task.id && saved.chat_id === event.chatId ? [{ row, saved }] : [];
         } catch { return []; }
       });
@@ -1788,7 +1790,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       let card: { externalId: string; sessionId: string; saved: PersistedLarkCardTask } | undefined;
       for (const mapping of await this.cardMappings.list(larkCardChannel(config.appId))) {
         let saved: PersistedLarkCardTask;
-        try { saved = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask; }
+        try { saved = parseCardTask(mapping.extra ?? '{}'); }
         catch { continue; }
         if (saved.app_id !== config.appId || saved.chat_id !== context.chatId
           || ![saved.card_message_id, saved.final_message_id, ...saved.earlier_message_ids ?? []].includes(context.messageId)) continue;
@@ -1893,7 +1895,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
         if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法导出记录。' };
         const mapping = (await this.cardMappings.list(larkCardChannel(config.appId))).find(item => item.externalId === workflow.task_id);
-        const saved = mapping?.extra ? JSON.parse(mapping.extra) as PersistedLarkCardTask : undefined;
+        const saved = parseOptionalCardTask(mapping?.extra);
         if (!mapping || !saved?.runtime_task_id || saved.app_id !== config.appId || saved.chat_id !== context.chatId
           || ![saved.card_message_id, saved.final_message_id].includes(context.messageId)
           || saved.chat_type !== 'group' && saved.sender_open_id !== operatorOpenId
@@ -2123,7 +2125,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法开始修复。' };
         const subscription = await codebase.get(workflow.dutydeck_ci_fix);
         const session = subscription ? await this.runtime.getSession(subscription.sessionId) : undefined;
-        const [appId, chatId] = session?.source === 'lark' ? session.sourceId?.split(':') ?? [] : [];
+        const { appId, chatId } = parseLarkSourceId(session?.source === 'lark' ? session.sourceId : undefined);
         if (!subscription || appId !== config.appId || chatId !== context.chatId) return { type: 'warning', content: '这张 CI 失败卡不属于当前会话。' };
         if (!await this.isOperatorAllowed(config, operatorOpenId, context.chatId, subscription.sessionId)) return { type: 'warning', content: '当前账号没有操作此任务的权限。' };
         return { type: 'success', content: await codebase.requestFix(subscription.id, { failureKey: workflow.failure, cardMessageId: context.messageId }, operatorOpenId) };

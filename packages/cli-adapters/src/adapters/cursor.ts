@@ -1,7 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { delay } from './input-settle.js';
 
 /** 已接收过首次写入的后端：首次写入落在 cursor-agent TUI 启动渲染期，
  *  需要更长的 settle + 节流。按 identity 跟踪，跨适配器实例共享。 */

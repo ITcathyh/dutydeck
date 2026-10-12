@@ -11,7 +11,8 @@ import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { detectImageFormat, gifSequenceHint } from './image-format.js';
 import { LarkServiceError, type LarkCardService } from './service.js';
 import type { LarkChatMode } from './chat-mode.js';
-import type { LarkGroup, PersistedLarkCardTask } from './coordinator.js';
+import type { LarkGroup } from './coordinator.js';
+import { parseCardTask } from './persisted-card-task.js';
 import type { ListenerLog, LarkMessageEvent, LarkRuntime } from './listener.js';
 
 // 会话路由与资源物化辅助（从 listener.ts 拆分）。Third-party attribution: see THIRD_PARTY_NOTICES.md.
@@ -467,7 +468,7 @@ export async function findLarkThreadContinuation(
   const channel = `lark-card:${config.appId}`;
   const root = await mappings.get(channel, rootId);
   if (root?.channel !== channel || root.externalId !== rootId || !root.extra) return undefined;
-  const task = JSON.parse(root.extra) as PersistedLarkCardTask;
+  const task = parseCardTask(root.extra);
   const owner = task.sender_open_id;
   if (task.app_id !== config.appId || task.chat_id !== event.chatId || task.chat_type !== 'group' || task.thread_id
     || !owner || task.scope_id !== `user:${owner}`) return undefined;
@@ -482,7 +483,7 @@ export async function findLarkThreadContinuation(
   if (event.senderOpenId === owner) return session;
   const continued = (await mappings.list(channel)).some(row => {
     if (row.sessionId !== session.id || !row.extra) return false;
-    const saved = JSON.parse(row.extra) as PersistedLarkCardTask;
+    const saved = parseCardTask(row.extra);
     return saved.app_id === config.appId && saved.chat_id === event.chatId && saved.scope_id === scopeId;
   });
   return continued ? session : undefined;

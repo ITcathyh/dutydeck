@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
-import { canonicalExecutionJson, installationOwnerTaskActor, RuntimeError, scheduleTriggerPeriod, taskRequestV1Schema, type CollaborationAction, type CollaborationScope, type ExecutionActor, type RepositoryBundle, type ScheduleTrigger, type Session, type TaskRecord, type TaskRequestV1 } from '@dutydeck/shared';
+import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, scheduleTriggerPeriod, taskRequestV1Schema, type CollaborationAction, type CollaborationScope, type ExecutionActor, type RepositoryBundle, type ScheduleTrigger, type Session, type TaskRecord, type TaskRequestV1 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import { readAttemptResult } from './task-results.js';
 import { scheduleMatchesMandate, type CollaborationAuthorization } from './collaboration-service.js';
@@ -11,7 +11,7 @@ import { formatRolePrompt } from './lark/role-format.js';
 const hash = (value: unknown) => createHash('sha256').update(canonicalExecutionJson(value)).digest('hex');
 const sessionIdFor = (actionId: string) => `ses_collab_${hash(actionId)}`;
 const scopeOf = (session: Session): CollaborationScope | undefined => {
-  const [appId, chatId, kind, origin] = session.sourceId?.split(':') ?? [];
+  const { appId, chatId, chatType: kind, scope: [origin] } = parseLarkSourceId(session.sourceId);
   return session.source === 'lark' && kind === 'group' && origin === 'collaboration' && appId && chatId ? { appId, chatId } : undefined;
 };
 /** 定时产出的篇幅与口径：只写变化，不写材料范围，没有新内容时只回一句。 */

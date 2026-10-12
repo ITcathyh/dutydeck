@@ -1,6 +1,7 @@
 import { larkConclusionHeadline } from './card-status.js';
 import { larkSessionDetailUrl } from './detail-link.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
+import { parseCardTask } from './persisted-card-task.js';
 
 /** 同一个 Bot 在同一个群里上一次处理同一条告警的那一轮：日期、结论第一句和回到那个话题的链接。 */
 export interface LarkAlertRecall {
@@ -96,7 +97,7 @@ export function findLarkAlertRecall(input: {
   let found: { saved: PersistedLarkCardTask; sessionId: string; headline: string } | undefined;
   for (const mapping of input.mappings) {
     let saved: PersistedLarkCardTask;
-    try { saved = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask; }
+    try { saved = parseCardTask(mapping.extra ?? '{}'); }
     catch { continue; }
     if (saved.chat_id !== input.chatId || saved.scope_id === input.scopeId || saved.state !== 'completed') continue;
     if (!(saved.started_at < input.before) || (found && saved.started_at <= found.saved.started_at)) continue;

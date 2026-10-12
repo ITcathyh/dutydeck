@@ -3,6 +3,7 @@ import { larkFailureKind } from './api-gate.js';
 import { isLarkMessageUnupdatable } from './card-renderer.js';
 import type { ConfigRepository, ChannelMapping } from '@dutydeck/shared';
 import type { PersistedLarkCardTask } from './coordinator.js';
+import { parseCardTask } from './persisted-card-task.js';
 import { prepareLarkResult, sendLarkResult, type DeliveryTarget } from './result-delivery.js';
 import type { LarkCardInput, LarkCardService } from './service.js';
 import type { LarkAgentSessionBinding } from './agent-tools.js';
@@ -46,7 +47,7 @@ export function explicitFinalContext(mapping: Pick<ChannelMapping, 'externalId' 
 export async function resolveExplicitFinalContext(rows: ChannelMapping[], binding: LarkAgentSessionBinding, task: { taskId: string; attemptId?: string }): Promise<ExplicitFinalContext | undefined> {
   const matches = rows.flatMap(row => {
     try {
-      const saved = JSON.parse(row.extra ?? '{}') as PersistedLarkCardTask;
+      const saved = parseCardTask(row.extra ?? '{}');
       if (row.channel !== `lark-card:${binding.appId}` || row.sessionId !== binding.sessionId || saved.runtime_task_id !== task.taskId) return [];
       return [{ row, saved }];
     } catch { return []; }

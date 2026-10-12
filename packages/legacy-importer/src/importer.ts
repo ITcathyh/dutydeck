@@ -831,16 +831,11 @@ export async function discoverLegacySource(options: DiscoverLegacyOptions): Prom
     }
     if (!KNOWN_DATA_ENTRY.test(entry.name)) {
       const artifactRef = opaqueRef('artifact', key, path);
-      const metadata = await pathMetadata(path, artifactRef);
-      artifacts.push({
-        artifact_ref: artifactRef,
-        absolute_path: path,
+      await recordOpaqueArtifact(path, {
         kind: 'unknown_data_artifact',
         authority: 'unknown',
         sensitivity: 'business',
         disposition: 'blocked_unknown',
-        size_bytes: metadata.size,
-        source_mode: metadata.mode,
         blocker_codes: ['unknown_artifact'],
         archive_eligible: false,
         excluded_secret: false
@@ -870,9 +865,8 @@ export async function discoverLegacySource(options: DiscoverLegacyOptions): Prom
         archive_eligible: true,
         excluded_secret: false
       });
-      const value = asObject(parseJson(artifact.snapshot!.bytes, artifact.artifact_ref));
-      if (value?.status === 'grilling') workflowDrafts += 1;
-      else workflowDrafts += 1;
+      parseJson(artifact.snapshot!.bytes, artifact.artifact_ref);
+      workflowDrafts += 1;
     }
   }
 
@@ -941,16 +935,11 @@ export async function discoverLegacySource(options: DiscoverLegacyOptions): Prom
     if (KNOWN_HOME_ENTRIES.has(entry.name) || resolve(sourceHome, entry.name) === resolve(dataPath)) continue;
     const path = join(sourceHome, entry.name);
     const artifactRef = opaqueRef('artifact', key, path);
-    const metadata = await pathMetadata(path, artifactRef);
-    artifacts.push({
-      artifact_ref: artifactRef,
-      absolute_path: path,
+    await recordOpaqueArtifact(path, {
       kind: 'unknown_home_artifact',
       authority: 'unknown',
       sensitivity: 'business',
       disposition: 'blocked_unknown',
-      size_bytes: metadata.size,
-      source_mode: metadata.mode,
       blocker_codes: ['unknown_artifact'],
       archive_eligible: false,
       excluded_secret: false

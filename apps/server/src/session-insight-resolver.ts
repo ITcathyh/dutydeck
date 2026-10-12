@@ -20,7 +20,6 @@ import type { Dirent } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import {
   SESSION_INSIGHT_LIMITS,
-  type DriverResource,
   type FileRelationship,
   type InsightClient,
   type NativeContextRef,
@@ -31,7 +30,7 @@ import {
   type TaskAttempt,
   type TranscriptSourceObservation,
 } from '@dutydeck/shared';
-import { buildSessionMarker } from '@dutydeck/pty-driver';
+import { buildSessionMarker, transcriptClientForAdapter } from '@dutydeck/pty-driver';
 
 // ---------------------------------------------------------------------------
 // 公共类型
@@ -147,14 +146,6 @@ const DEFAULT_LIMITS: ResolverScanLimits = {
 };
 
 export const INSIGHT_INSTANCE_ID_CONFIG_KEY = 'insight.instance_id';
-
-const ADAPTER_CLIENT: Record<string, InsightClient> = {
-  'claude-code': 'claude',
-  seed: 'claude',
-  relay: 'claude',
-  codex: 'codex',
-  traex: 'traex',
-};
 
 const NO_RELATIONSHIP: FileRelationship = {
   kind: 'none',
@@ -494,7 +485,7 @@ export class SessionInsightResolver {
     const agent = session.agentId && repositories.agents
       ? await repositories.agents.get(session.agentId).catch(() => undefined)
       : undefined;
-    const agentClient = agent ? ADAPTER_CLIENT[agent.adapterId ?? agent.id] : undefined;
+    const agentClient = agent ? transcriptClientForAdapter(agent.adapterId ?? agent.id) : undefined;
 
     const [observations, resources, executions] = await Promise.all([
       Promise.resolve(repositories.insight.listSources(sessionId)),
@@ -665,7 +656,7 @@ export class SessionInsightResolver {
         agentSessionId?: string;
         backendSessionId?: string;
       };
-      const client = agentClient ?? (identity.agent ? ADAPTER_CLIENT[identity.agent] : undefined);
+      const client = agentClient ?? (identity.agent ? transcriptClientForAdapter(identity.agent) : undefined);
       if (!client) continue;
       const nativeSessionId = typeof identity.agentSessionId === 'string' && identity.agentSessionId.length > 0
         ? identity.agentSessionId
@@ -1627,17 +1618,3 @@ export class SessionInsightResolver {
     return primary?.sourceKey ?? null;
   }
 }
-
-// ---------------------------------------------------------------------------
-// 顶层便捷函数
-// ---------------------------------------------------------------------------
-
-export async function resolveSessionInsightSources(
-  sessionId: string,
-  deps: SessionInsightResolverDependencies,
-  options?: ResolveSessionInsightSourcesOptions
-): Promise<ResolveSessionInsightSourcesResult> {
-  return new SessionInsightResolver(deps).resolveSessionInsightSources(sessionId, options);
-}
-
-export type { DriverResource };

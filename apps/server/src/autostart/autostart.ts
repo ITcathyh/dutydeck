@@ -418,11 +418,6 @@ export function autostartUnitContent(options: AutostartOptions = {}): string {
   return renderDesired(resolveOptions(options));
 }
 
-/** plist / unit 的目标路径（unsupported 平台返回 undefined）。 */
-export function autostartUnitPath(options: AutostartOptions = {}): string | undefined {
-  return resolveOptions(options).unitPath;
-}
-
 // ─── 平台探测 ────────────────────────────────────────────────────────────────
 
 /** `undefined` 表示"探测不出来"，绝不冒充 false —— 见文件头约束 3。 */

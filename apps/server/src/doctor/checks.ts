@@ -15,7 +15,6 @@ import { larkMemoryErrorLabel } from '../lark/memory.js';
 import { larkMemoryPipelineRules } from '../lark/memory-pipeline.js';
 import { larkListenerStatusKey, type LarkListenerStatus } from '../lark/listener-status.js';
 import type {
-  CheckLevel,
   DatabaseProbeResult,
   DoctorAutostartResult,
   DoctorCheck,
@@ -875,9 +874,4 @@ export function summarize(checks: readonly DoctorCheck[]): { ok: number; warn: n
     else if (check.level === 'skip') summary.skip += 1;
   }
   return summary;
-}
-
-/** ui.status 的等级与 CheckLevel 同名的部分可以直接透传。 */
-export function statusLevelFor(level: CheckLevel): 'ok' | 'warn' | 'fail' | 'info' | 'skip' {
-  return level;
 }

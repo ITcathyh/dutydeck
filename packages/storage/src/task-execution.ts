@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  executionActorSchema, acceptedTaskInputSchema, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, steeringRecoveryDecisionSchema, steerableTaskNamespace, RuntimeError,
+  executionActorSchema, acceptedTaskInputSchema, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, steeringRecoveryDecisionSchema, steerableTaskNamespace, parseLarkSourceId, RuntimeError,
   type AcceptedTask, type AcceptedTaskInput, type AgentEvent, type AttemptFence, type BoundExecutionRepository,
   type CommitResult, type DriverResource, type ExecutionBlocker, type ExecutionController, type ExecutionRepository,
   type ExecutionTask, type ExecutionUpgradeCounts, type ExecutionUpgradeSnapshot, type QueueAction, type RecoveryDecisionInput, type ResourceCheckRef, type Session,
@@ -200,7 +200,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     if (r.namespace === 'work_item' && s.source !== 'work_item') fail('TASK_REQUEST_SCOPE_CONFLICT');
     if (r.sessionId !== s.id) fail('TASK_REQUEST_SCOPE_CONFLICT');
     if (s.source === 'lark') {
-      const appId = s.sourceId?.split(':')[0];
+      const { appId } = parseLarkSourceId(s.sourceId);
       if (r.actor.kind === 'unspecified') fail('ACTOR_REQUIRED');
       if (r.actor.kind === 'channel' && r.actor.appId !== appId) fail('TASK_ACTOR_CONFLICT');
     }

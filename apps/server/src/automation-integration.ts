@@ -4,6 +4,7 @@ import {
   canonicalExecutionJson,
   ciSubscriptionV2Schema,
   installationOwnerTaskActor,
+  parseLarkSourceId,
   sessionScheduleOccurrenceV2Schema,
   type AttemptResultV1,
   type ExecutionActor,
@@ -33,7 +34,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     const session = await runtime.getSession(sessionId);
     if (!session || !actorId) return false;
     if (session.source !== 'lark') return session.source !== 'foundation_group_binding' && actorId === installationOwnerTaskActor;
-    const [appId, chatId, chatType] = session.sourceId?.split(':') ?? [];
+    const { appId, chatId, chatType } = parseLarkSourceId(session.sourceId);
     if (!appId || !chatId) return false;
     const config = await readLarkConfig(repos.config, appId, { readOnly });
     if (!config || !config.listening || !larkExecutionConfirmed(config)) return false;
@@ -61,7 +62,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     const session = await runtime.getSession(sessionId);
     if (!session) throw new RuntimeError('AUTOMATION_SESSION_MISSING', '自动任务的会话不存在', 404);
     if (session.source !== 'lark') return;
-    const [appId, chatId] = session.sourceId?.split(':') ?? [];
+    const { appId, chatId } = parseLarkSourceId(session.sourceId);
     if (!appId || !chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '无法确认原会话', 409);
     const key = `automation.delivery-target.${automationId}`;
     type Target = { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean };
@@ -186,7 +187,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
 
     // 4. 校验原 App / chat 目标与权限（以真实核实后的 actor 为准）
     const actualActor = accepted.request.actor;
-    const [appId, chatId] = session.sourceId?.split(':') ?? [];
+    const { appId, chatId } = parseLarkSourceId(session.sourceId);
     if (actualActor.kind === 'channel') {
       if (actualActor.appId !== appId) throw new RuntimeError('AUTOMATION_DELIVERY_REVOKED', '原任务 App 域与 Session 不一致', 403);
     }
@@ -257,7 +258,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
   const onScheduleDisabled = async (schedule: SessionSchedule, reason: string) => {
     const session = await runtime.getSession(schedule.sessionId);
     if (!session || session.source !== 'lark') return;
-    const [appId, chatId] = session.sourceId?.split(':') ?? [];
+    const { appId, chatId } = parseLarkSourceId(session.sourceId);
     const target = JSON.parse(await repos.config.get(`automation.delivery-target.${schedule.id}`) ?? 'null') as { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean } | null;
     const config = appId ? await readLarkConfig(repos.config, appId) : undefined;
     if (!target || !config || target.appId !== appId || target.chatId !== chatId) return;
@@ -282,7 +283,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
   const notify = async (sessionId: string, sourceId: string, notice: CodebaseCiNotice) => {
     const session = await runtime.getSession(sessionId);
     if (!session || session.source !== 'lark') return undefined;
-    const [appId, chatId] = session.sourceId?.split(':') ?? [];
+    const { appId, chatId } = parseLarkSourceId(session.sourceId);
     const target = JSON.parse(await repos.config.get(`automation.delivery-target.${sourceId}`) ?? 'null') as { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean } | null;
     const config = appId ? await readLarkConfig(repos.config, appId) : undefined;
     if (!target || !config || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '自动任务缺少接收时保存的回报位置', 409);

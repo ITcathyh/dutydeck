@@ -1,7 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { buildDutydeckRoutingBlock } from '../shared-hints.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { submitPrompt } from './input-settle.js';
 
 export function createGrokAdapter(): CliAdapter {
   return {
@@ -52,15 +51,7 @@ export function createGrokAdapter(): CliAdapter {
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
       // grok 把字面 \n 当 composer 内的软换行（不是提交），直接发整段即可。
-      if (backend.sendText && backend.sendSpecialKeys) {
-        if ((await backend.sendText(prompt)) === false) return;
-        await delay(200);
-        (await backend.sendSpecialKeys('Enter'));
-      } else {
-        (await backend.write(prompt));
-        await delay(1000);
-        (await backend.write('\r'));
-      }
+      await submitPrompt(backend, prompt, { stopWhenRejected: true });
     },
 
     buildResumeCommand(sessionId: string): string[] {

@@ -1,4 +1,4 @@
-import { validateHighRiskPattern, type AgentRepository, type ConfigRepository } from '@dutydeck/shared';
+import { collaborationParticipationModes, mentionPolicies, riskControlModes, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type RiskControlMode } from '@dutydeck/shared';
 import { isAbsolute } from 'node:path';
 import { hostname, userInfo } from 'node:os';
 import { LarkServiceError } from './service.js';
@@ -11,8 +11,7 @@ export interface LarkAllowedUser {
   name: string;
 }
 
-export const riskControlModes = ['off', 'guidance', 'enforced'] as const;
-export type RiskControlMode = typeof riskControlModes[number];
+export { riskControlModes, type RiskControlMode };
 
 export interface StoredLarkConfig {
   revision?: number;
@@ -747,10 +746,10 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (input.expectedRevision !== undefined && input.expectedRevision !== (current ? current.revision ?? 1 : 0)) {
     throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '此 Bot 已被修改，请比较最新配置后再保存。', 409);
   }
-  if (input.mentionPolicy !== undefined && !['always', 'topic', 'never', 'ambient'].includes(input.mentionPolicy)) {
+  if (input.mentionPolicy !== undefined && !mentionPolicies.includes(input.mentionPolicy)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '提及方式无效。', 400);
   }
-  if (input.defaultGroupParticipation !== undefined && !['off', 'observe', 'selective', 'eager'].includes(input.defaultGroupParticipation)) {
+  if (input.defaultGroupParticipation !== undefined && !collaborationParticipationModes.includes(input.defaultGroupParticipation)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '默认群参与模式无效。', 400);
   }
   if (input.executionMode !== undefined && !['single', 'layered'].includes(input.executionMode)) {

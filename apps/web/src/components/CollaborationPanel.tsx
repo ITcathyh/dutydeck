@@ -109,6 +109,100 @@ type MandatePatch = {
   timezone?: string;
 };
 
+type ScheduleDraft = {
+  triggerType: 'interval' | 'at' | 'cron';
+  intervalMinutes: number;
+  atTime: string;
+  cronExpr: string;
+  timezone: string;
+};
+
+const defaultScheduleDraft: ScheduleDraft = {
+  triggerType: 'interval',
+  intervalMinutes: 60,
+  atTime: '',
+  cronExpr: '0 9 * * *',
+  timezone: 'Asia/Shanghai'
+};
+
+function buildTrigger(draft: ScheduleDraft, anchorAt: string): ScheduleTrigger {
+  if (draft.triggerType === 'interval') {
+    const minutes = Math.floor(draft.intervalMinutes);
+    if (isNaN(minutes) || minutes < 1) {
+      throw new Error('执行间隔必须至少为 1 分钟');
+    }
+    return {
+      kind: 'interval',
+      everySeconds: minutes * 60,
+      anchorAt
+    };
+  }
+  if (draft.triggerType === 'at') {
+    const normalized = normalizeLocalDateTime(draft.atTime);
+    if (!normalized || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/.test(normalized)) {
+      throw new Error('请选择有效的单次触发时间');
+    }
+    return { kind: 'at', localDateTime: normalized };
+  }
+  if (!draft.cronExpr.trim()) {
+    throw new Error('Cron 表达式不能为空');
+  }
+  return { kind: 'cron', expression: draft.cronExpr.trim() };
+}
+
+function TriggerFields({ draft, disabled, cronHint, onChange }: {
+  draft: ScheduleDraft;
+  disabled?: boolean;
+  cronHint: string;
+  onChange(patch: Partial<ScheduleDraft>): void;
+}) {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2">
+      <Field label="触发方式">
+        <Select
+          disabled={disabled}
+          value={draft.triggerType}
+          onChange={e => onChange({ triggerType: e.target.value as 'interval' | 'at' | 'cron' })}
+        >
+          <option value="interval">固定间隔</option>
+          <option value="at">单次指定时间</option>
+          <option value="cron">Cron 表达式</option>
+        </Select>
+      </Field>
+      {draft.triggerType === 'interval' && (
+        <Field label="间隔（分钟，≥1）">
+          <Input
+            disabled={disabled}
+            type="number"
+            min={1}
+            value={draft.intervalMinutes}
+            onChange={e => onChange({ intervalMinutes: Number(e.target.value) })}
+          />
+        </Field>
+      )}
+      {draft.triggerType === 'at' && (
+        <Field label="触发时间">
+          <Input
+            disabled={disabled}
+            type="datetime-local"
+            value={draft.atTime}
+            onChange={e => onChange({ atTime: e.target.value })}
+          />
+        </Field>
+      )}
+      {draft.triggerType === 'cron' && (
+        <Field label="Cron 表达式" hint={cronHint}>
+          <Input
+            disabled={disabled}
+            value={draft.cronExpr}
+            onChange={e => onChange({ cronExpr: e.target.value })}
+          />
+        </Field>
+      )}
+    </div>
+  );
+}
+
 /**
  * 内部实现组件，由外层 CollaborationPanel 按 `${appId}:${chatId}` 的 key 强制重建，
  * 保证切换群 / 切换 Bot 时 query、草稿、对话框、回放结果全部隔离。
@@ -343,13 +437,7 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
   const [newMandateMode, setNewMandateMode] = useState<'notify' | 'agent'>('agent');
   const [newMandatePrompt, setNewMandatePrompt] = useState('');
   const [newMandateFollowupId, setNewMandateFollowupId] = useState('');
-  const [newMandateTriggerType, setNewMandateTriggerType] = useState<'interval' | 'at' | 'cron'>(
-    'interval'
-  );
-  const [newMandateIntervalMinutes, setNewMandateIntervalMinutes] = useState(60);
-  const [newMandateAtTime, setNewMandateAtTime] = useState('');
-  const [newMandateCronExpr, setNewMandateCronExpr] = useState('0 9 * * *');
-  const [newMandateTimezone, setNewMandateTimezone] = useState('Asia/Shanghai');
+  const [newSchedule, setNewSchedule] = useState<ScheduleDraft>(defaultScheduleDraft);
   const [newMandateCondition, setNewMandateCondition] = useState<
     'always' | 'followup_open' | 'no_progress'
   >('always');
@@ -364,11 +452,7 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
     setNewMandateGoal('');
     setNewMandatePrompt('');
     setNewMandateFollowupId('');
-    setNewMandateIntervalMinutes(60);
-    setNewMandateAtTime('');
-    setNewMandateCronExpr('0 9 * * *');
-    setNewMandateTimezone('Asia/Shanghai');
-    setNewMandateTriggerType('interval');
+    setNewSchedule(defaultScheduleDraft);
     setMandateError(null);
   };
 
@@ -385,31 +469,6 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
     if (createMandateMutation.isPending) return;
     setCreateMandateOpen(false);
     resetMandateForm();
-  };
-
-  const buildCreateTrigger = (): ScheduleTrigger => {
-    if (newMandateTriggerType === 'interval') {
-      const minutes = Math.floor(newMandateIntervalMinutes);
-      if (isNaN(minutes) || minutes < 1) {
-        throw new Error('执行间隔必须至少为 1 分钟');
-      }
-      return {
-        kind: 'interval',
-        everySeconds: minutes * 60,
-        anchorAt: mandateFrozenAnchorAt || new Date().toISOString()
-      };
-    }
-    if (newMandateTriggerType === 'at') {
-      const normalized = normalizeLocalDateTime(newMandateAtTime);
-      if (!normalized || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/.test(normalized)) {
-        throw new Error('请选择有效的单次触发时间');
-      }
-      return { kind: 'at', localDateTime: normalized };
-    }
-    if (!newMandateCronExpr.trim()) {
-      throw new Error('Cron 表达式不能为空');
-    }
-    return { kind: 'cron', expression: newMandateCronExpr.trim() };
   };
 
   const createMandateMutation = useMutation({
@@ -434,11 +493,11 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
     try {
       const goal = newMandateGoal.trim();
       const prompt = newMandatePrompt.trim();
-      const timezone = newMandateTimezone.trim();
+      const timezone = newSchedule.timezone.trim();
       if (!goal) throw new Error('委托目标不能为空');
       if (!prompt) throw new Error('执行提示词不能为空');
       if (!timezone) throw new Error('时区不能为空（如 Asia/Shanghai）');
-      const trigger = buildCreateTrigger();
+      const trigger = buildTrigger(newSchedule, mandateFrozenAnchorAt || new Date().toISOString());
 
       const id = mandateStableId || generateStableId('mandate');
       if (!mandateStableId) setMandateStableId(id);
@@ -489,11 +548,7 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
 
   // ---- 委托任务：改期 / 调频对话框 ----
   const [editingScheduleMandate, setEditingScheduleMandate] = useState<CollaborationMandateDetail | null>(null);
-  const [editScheduleTriggerType, setEditScheduleTriggerType] = useState<'interval' | 'at' | 'cron'>('interval');
-  const [editScheduleIntervalMinutes, setEditScheduleIntervalMinutes] = useState(60);
-  const [editScheduleAtTime, setEditScheduleAtTime] = useState('');
-  const [editScheduleCronExpr, setEditScheduleCronExpr] = useState('0 9 * * *');
-  const [editScheduleTimezone, setEditScheduleTimezone] = useState('Asia/Shanghai');
+  const [editSchedule, setEditSchedule] = useState<ScheduleDraft>(defaultScheduleDraft);
   const [editScheduleConflict, setEditScheduleConflict] = useState(false);
   const [editScheduleError, setEditScheduleError] = useState<string | null>(null);
   const [editScheduleAnchorAt, setEditScheduleAnchorAt] = useState('');
@@ -507,45 +562,17 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
     setEditScheduleConflict(false);
     setEditScheduleError(null);
     const trig = mandate.schedule?.trigger;
+    let patch: Partial<ScheduleDraft>;
     if (trig?.kind === 'interval') {
-      setEditScheduleTriggerType('interval');
-      setEditScheduleIntervalMinutes(Math.max(1, Math.round(trig.everySeconds / 60)));
+      patch = { triggerType: 'interval', intervalMinutes: Math.max(1, Math.round(trig.everySeconds / 60)) };
     } else if (trig?.kind === 'at') {
-      setEditScheduleTriggerType('at');
-      setEditScheduleAtTime(trig.localDateTime.slice(0, 16));
+      patch = { triggerType: 'at', atTime: trig.localDateTime.slice(0, 16) };
     } else if (trig?.kind === 'cron') {
-      setEditScheduleTriggerType('cron');
-      setEditScheduleCronExpr(trig.expression);
+      patch = { triggerType: 'cron', cronExpr: trig.expression };
     } else {
-      setEditScheduleTriggerType('interval');
-      setEditScheduleIntervalMinutes(60);
+      patch = { triggerType: 'interval', intervalMinutes: 60 };
     }
-    setEditScheduleTimezone(mandate.schedule?.timezone || 'Asia/Shanghai');
-  };
-
-  const buildEditTrigger = (): ScheduleTrigger => {
-    if (editScheduleTriggerType === 'interval') {
-      const minutes = Math.floor(editScheduleIntervalMinutes);
-      if (isNaN(minutes) || minutes < 1) {
-        throw new Error('执行间隔必须至少为 1 分钟');
-      }
-      return {
-        kind: 'interval',
-        everySeconds: minutes * 60,
-        anchorAt: editScheduleAnchorAt
-      };
-    }
-    if (editScheduleTriggerType === 'at') {
-      const normalized = normalizeLocalDateTime(editScheduleAtTime);
-      if (!normalized || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/.test(normalized)) {
-        throw new Error('请选择有效的单次触发时间');
-      }
-      return { kind: 'at', localDateTime: normalized };
-    }
-    if (!editScheduleCronExpr.trim()) {
-      throw new Error('Cron 表达式不能为空');
-    }
-    return { kind: 'cron', expression: editScheduleCronExpr.trim() };
+    setEditSchedule(prev => ({ ...prev, ...patch, timezone: mandate.schedule?.timezone || 'Asia/Shanghai' }));
   };
 
   const saveEditScheduleMutation = useMutation({
@@ -577,12 +604,12 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
     if (!editingScheduleMandate || saveEditScheduleMutation.isPending || editScheduleConflict) return;
     try {
       if (!editScheduleFrozenPayloadRef.current) {
-        const timezone = editScheduleTimezone.trim();
+        const timezone = editSchedule.timezone.trim();
         if (!timezone) throw new Error('时区不能为空（如 Asia/Shanghai）');
         editScheduleFrozenPayloadRef.current = {
           id: editingScheduleMandate.id,
           expectedRevision: editingScheduleMandate.revision,
-          trigger: buildEditTrigger(),
+          trigger: buildTrigger(editSchedule, editScheduleAnchorAt),
           timezone
         };
       }
@@ -1497,68 +1524,22 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
 
               <div className="space-y-3 rounded-lg border border-subtle bg-muted p-3">
                 <div className="text-caption font-semibold text-primary">调度</div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <Field label="触发方式">
-                    <Select
-                      disabled={isMandateFormFrozen}
-                      value={newMandateTriggerType}
-                      onChange={e => {
-                        setNewMandateTriggerType(e.target.value as 'interval' | 'at' | 'cron');
-                        setMandateError(null);
-                      }}
-                    >
-                      <option value="interval">固定间隔</option>
-                      <option value="at">单次指定时间</option>
-                      <option value="cron">Cron 表达式</option>
-                    </Select>
-                  </Field>
-                  {newMandateTriggerType === 'interval' && (
-                    <Field label="间隔（分钟，≥1）">
-                      <Input
-                        disabled={isMandateFormFrozen}
-                        type="number"
-                        min={1}
-                        value={newMandateIntervalMinutes}
-                        onChange={e => {
-                          setNewMandateIntervalMinutes(Number(e.target.value));
-                          setMandateError(null);
-                        }}
-                      />
-                    </Field>
-                  )}
-                  {newMandateTriggerType === 'at' && (
-                    <Field label="触发时间">
-                      <Input
-                        disabled={isMandateFormFrozen}
-                        type="datetime-local"
-                        value={newMandateAtTime}
-                        onChange={e => {
-                          setNewMandateAtTime(e.target.value);
-                          setMandateError(null);
-                        }}
-                      />
-                    </Field>
-                  )}
-                  {newMandateTriggerType === 'cron' && (
-                    <Field label="Cron 表达式" hint="例如 0 9 * * 1-5 表示工作日每天 9 点。">
-                      <Input
-                        disabled={isMandateFormFrozen}
-                        value={newMandateCronExpr}
-                        onChange={e => {
-                          setNewMandateCronExpr(e.target.value);
-                          setMandateError(null);
-                        }}
-                      />
-                    </Field>
-                  )}
-                </div>
+                <TriggerFields
+                  draft={newSchedule}
+                  disabled={isMandateFormFrozen}
+                  cronHint="例如 0 9 * * 1-5 表示工作日每天 9 点。"
+                  onChange={patch => {
+                    setNewSchedule({ ...newSchedule, ...patch });
+                    setMandateError(null);
+                  }}
+                />
                 <div className="grid gap-3 sm:grid-cols-3">
                   <Field label="时区">
                     <Input
                       disabled={isMandateFormFrozen}
-                      value={newMandateTimezone}
+                      value={newSchedule.timezone}
                       onChange={e => {
-                        setNewMandateTimezone(e.target.value);
+                        setNewSchedule({ ...newSchedule, timezone: e.target.value });
                         setMandateError(null);
                       }}
                     />
@@ -1658,62 +1639,19 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
                 {editScheduleError && <Banner tone="danger">{editScheduleError}</Banner>}
 
                 <fieldset disabled={Boolean(editScheduleFrozenPayloadRef.current) || saveEditScheduleMutation.isPending} className="space-y-3 rounded-lg border border-subtle bg-muted p-3">
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <Field label="触发方式">
-                      <Select
-                        value={editScheduleTriggerType}
-                        onChange={e => {
-                          setEditScheduleTriggerType(e.target.value as 'interval' | 'at' | 'cron');
-                          setEditScheduleError(null);
-                        }}
-                      >
-                        <option value="interval">固定间隔</option>
-                        <option value="at">单次指定时间</option>
-                        <option value="cron">Cron 表达式</option>
-                      </Select>
-                    </Field>
-                    {editScheduleTriggerType === 'interval' && (
-                      <Field label="间隔（分钟，≥1）">
-                        <Input
-                          type="number"
-                          min={1}
-                          value={editScheduleIntervalMinutes}
-                          onChange={e => {
-                            setEditScheduleIntervalMinutes(Number(e.target.value));
-                            setEditScheduleError(null);
-                          }}
-                        />
-                      </Field>
-                    )}
-                    {editScheduleTriggerType === 'at' && (
-                      <Field label="触发时间">
-                        <Input
-                          type="datetime-local"
-                          value={editScheduleAtTime}
-                          onChange={e => {
-                            setEditScheduleAtTime(e.target.value);
-                            setEditScheduleError(null);
-                          }}
-                        />
-                      </Field>
-                    )}
-                    {editScheduleTriggerType === 'cron' && (
-                      <Field label="Cron 表达式" hint="例如 0 9 * * 1-5">
-                        <Input
-                          value={editScheduleCronExpr}
-                          onChange={e => {
-                            setEditScheduleCronExpr(e.target.value);
-                            setEditScheduleError(null);
-                          }}
-                        />
-                      </Field>
-                    )}
-                  </div>
+                  <TriggerFields
+                    draft={editSchedule}
+                    cronHint="例如 0 9 * * 1-5"
+                    onChange={patch => {
+                      setEditSchedule({ ...editSchedule, ...patch });
+                      setEditScheduleError(null);
+                    }}
+                  />
                   <Field label="时区">
                     <Input
-                      value={editScheduleTimezone}
+                      value={editSchedule.timezone}
                       onChange={e => {
-                        setEditScheduleTimezone(e.target.value);
+                        setEditSchedule({ ...editSchedule, timezone: e.target.value });
                         setEditScheduleError(null);
                       }}
                     />

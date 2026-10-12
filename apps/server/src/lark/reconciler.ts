@@ -293,25 +293,26 @@ export async function performLarkCardReconcile(input: {
       // 回执上的「结果见下条」：只贴表情的模式下这次对账不会补发结果消息。
       const resultFollows = completed && effective.completionReactionOnly !== true;
       let deliveredElements = persisted.last_successful_elements;
+      const updateProcessCard = (messageId: string, elements: Array<Record<string, any>>) => service.update({
+        ...processContext,
+        ...(persisted.alert_recall ? { alertRecall: persisted.alert_recall } : {}),
+        cardKind: 'process',
+        messageId,
+        permissionMode: larkPermissionMode(config),
+        state,
+        taskId: mapping.externalId,
+        taskName: persisted.task_name,
+        elapsedSeconds,
+        sessionId: mapping.sessionId,
+        readOnly: true,
+        turn: persisted.turn,
+        ...(resultFollows ? { resultFollows: true } : {}),
+        ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
+        elements
+      });
       for (let attempt = 1; !updated && cardMessageId && attempt <= 3; attempt++) {
         try {
-          await service.update({
-            ...processContext,
-            ...(persisted.alert_recall ? { alertRecall: persisted.alert_recall } : {}),
-            cardKind: 'process',
-            messageId: cardMessageId,
-            permissionMode: larkPermissionMode(config),
-            state,
-            taskId: mapping.externalId,
-            taskName: persisted.task_name,
-            elapsedSeconds,
-            sessionId: mapping.sessionId,
-            readOnly: true,
-            turn: persisted.turn,
-            ...(resultFollows ? { resultFollows: true } : {}),
-            ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-            elements: currentElements
-          });
+          await updateProcessCard(cardMessageId, currentElements);
           updated = true;
           deliveredElements = currentElements;
           break;
@@ -329,23 +330,7 @@ export async function performLarkCardReconcile(input: {
       if (!updated && cardMessageId && contentRejected && Array.isArray(persisted.last_successful_elements) && persisted.last_successful_elements.length) {
         const patchedElements = patchRejectedCardDelta(persisted.last_successful_elements, currentElements);
         try {
-          await service.update({
-            ...processContext,
-            ...(persisted.alert_recall ? { alertRecall: persisted.alert_recall } : {}),
-            cardKind: 'process',
-            messageId: cardMessageId,
-            permissionMode: larkPermissionMode(config),
-            state,
-            taskId: mapping.externalId,
-            taskName: persisted.task_name,
-            elapsedSeconds,
-            sessionId: mapping.sessionId,
-            readOnly: true,
-            turn: persisted.turn,
-            ...(resultFollows ? { resultFollows: true } : {}),
-            ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-            elements: patchedElements
-          });
+          await updateProcessCard(cardMessageId, patchedElements);
           updated = true;
           deliveredElements = patchedElements;
           lastError = undefined;

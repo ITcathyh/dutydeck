@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { AttemptResultV1 } from './task-execution.js';
+import { parseLarkSourceId } from './lark-source-id.js';
 
 const stepId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/);
 export const workStepDefinitionSchema = z.object({
@@ -107,5 +108,5 @@ export interface WorkTemplate { id: string; parentSessionId: string; name: strin
  * 人手输入的命令由调用方显式覆盖，不走这里。
  */
 export function workPlanConfirmationRequired(session: { source?: string | null; sourceId?: string | null }): boolean {
-  return session.source === 'lark' && (session.sourceId ?? '').split(':')[2] === 'group';
+  return session.source === 'lark' && parseLarkSourceId(session.sourceId).chatType === 'group';
 }

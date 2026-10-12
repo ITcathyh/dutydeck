@@ -10,7 +10,7 @@ import type { PtyLike } from '../types.js';
  * 保持原有时序。
  */
 
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+export const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 /** 回显出现前的检查间隔。 */
 const POLL_MS = 50;
 /** 写入前屏幕需连续不变的时长。agentapi 的 ScreenStabilityLength 是 2 秒，这里取 0.5 秒，
@@ -44,5 +44,22 @@ export async function waitForInputEcho(backend: PtyLike, since: number): Promise
     const wait = Math.min(ready, deadline) - Date.now();
     if (wait <= 0) return;
     await delay(wait);
+  }
+}
+
+/**
+ * 写入 prompt 再提交：有按键接口时写入、等 200ms、发 Enter；否则写 fallbackText（默认就是 prompt）、等 1000ms、写 `\r`。
+ * paste 为真时用 pasteText 代替 sendText；stopWhenRejected 为真时 sendText 返回 false 就不再提交。
+ */
+export async function submitPrompt(backend: PtyLike, prompt: string, options: { paste?: boolean; fallbackText?: string; stopWhenRejected?: boolean } = {}): Promise<void> {
+  const input = options.paste ? backend.pasteText : backend.sendText;
+  if (input && backend.sendSpecialKeys) {
+    if ((await input.call(backend, prompt)) === false && options.stopWhenRejected) return;
+    await delay(200);
+    await backend.sendSpecialKeys('Enter');
+  } else {
+    await backend.write(options.fallbackText ?? prompt);
+    await delay(1000);
+    await backend.write('\r');
   }
 }

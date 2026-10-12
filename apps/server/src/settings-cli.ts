@@ -1,5 +1,5 @@
 import type { AgentModelSettingsPatch } from './agent-model-settings.js';
-import type { UpdateCollaborationSettingsInput } from '@dutydeck/shared';
+import { collaborationParticipationModes, groupReplyModes, mentionPolicies, riskControlModes, type UpdateCollaborationSettingsInput } from '@dutydeck/shared';
 import type { CollaborationRouteOptions } from './collaboration-routes.js';
 import type { GroupConfigPatch, ManagedGroup, ManagedGroupBot } from './lark/group-management.js';
 import type { SaveLarkConfigRequest } from './lark/routes.js';
@@ -49,8 +49,8 @@ export const botFields = {
   permissionMode: ['ask', 'approve-reads', 'full-trust'], fullTrustConfirmed: 'boolean',
   roleTitle: 'string', roleScope: 'string',
   preInjectPrompt: 'string', verificationCommand: 'string', listening: 'boolean',
-  mentionPolicy: ['always', 'topic', 'never', 'ambient'], defaultGroupParticipation: ['off', 'observe', 'selective', 'eager'],
-  p2pMode: ['chat', 'thread'], groupReplyMode: ['chat', 'shared', 'new-topic', 'chat-topic'],
+  mentionPolicy: mentionPolicies, defaultGroupParticipation: collaborationParticipationModes,
+  p2pMode: ['chat', 'thread'], groupReplyMode: groupReplyModes,
   idleCompactEnabled: 'boolean', idleCompactHours: 'integer',
   groupToolsEnabled: 'boolean', groupToolsAllowSend: 'boolean',
   memoryEnabled: 'boolean', memoryAutoExtract: 'boolean', memoryAgentId: 'string', memoryModel: 'string',
@@ -63,7 +63,7 @@ export const botFields = {
   allowedUsers: 'users', allowedUserNames: 'list', allowedEmails: 'list',
   allowedBots: 'users', allowedBotNames: 'list', peerBotsAllowed: 'boolean',
   highRiskAllowedUsers: 'users', highRiskAllowedUserNames: 'list', highRiskAllowedEmails: 'list',
-  highRiskPattern: 'string', riskControlMode: ['off', 'guidance', 'enforced']
+  highRiskPattern: 'string', riskControlMode: riskControlModes
 } satisfies Record<BotField, FieldKind>;
 // 这些键和 App Secret 走 Lark 校验那一步（解析姓名、核对 open_id 属于本应用）；其余键要走 Agent 设置那一步的校验（如完全信任确认），不能同一次提交。
 const larkStageFields = ['allowedUserNames', 'allowedBotNames', 'allowedUsers', 'allowedEmails', 'allowedBots'];
@@ -75,7 +75,7 @@ const bindingFields = {
   routingOverride: 'json', accessOverride: 'json', groupToolsOverride: 'json', presentationOverride: 'json'
 } satisfies Record<keyof GroupConfigPatch, FieldKind>;
 const collaborationFields = {
-  participation: ['off', 'observe', 'selective', 'eager'], inheritParticipation: 'boolean', instructions: 'string', notificationsPaused: 'boolean',
+  participation: collaborationParticipationModes, inheritParticipation: 'boolean', instructions: 'string', notificationsPaused: 'boolean',
   maxProactivePerHour: 'integer', maxDecisionsPerHour: 'integer', retentionDays: 'integer', policyVersion: 'string'
 } satisfies Record<Exclude<keyof UpdateCollaborationSettingsInput, 'expectedRevision'>, FieldKind>;
 type DutyPatch = Parameters<NonNullable<CollaborationRouteOptions['updateDuty']>>[1];

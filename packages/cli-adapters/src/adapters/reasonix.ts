@@ -1,7 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { submitPrompt } from './input-settle.js';
 
 /**
  * Reasonix Bubble Tea TUI 适配器。
@@ -36,15 +35,7 @@ export function createReasonixAdapter(): CliAdapter {
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
-      if (backend.sendText && backend.sendSpecialKeys) {
-        if ((await backend.sendText(prompt)) === false) return;
-        await delay(200);
-        (await backend.sendSpecialKeys('Enter'));
-      } else {
-        (await backend.write(prompt));
-        await delay(1000);
-        (await backend.write('\r'));
-      }
+      await submitPrompt(backend, prompt, { stopWhenRejected: true });
     },
 
     /** Reasonix 自己铸会话 id（精简契约下 dutydeck 拿不到精确 id）；收到 dutydeck 的

@@ -8,6 +8,8 @@ import {
   type PolicyDecision,
   type RepositoryBundle,
   type ScheduleDefinition,
+  parseLarkSourceId,
+  type AcceptedTask,
   type Session,
   type TaskRecord,
   type TaskRequestV1,
@@ -120,10 +122,61 @@ function resolveAutomationActor(session: Session | undefined, actorId?: string):
   if (!actorId) return { kind: 'unspecified' };
   if (actorId === 'installation_owner') return { kind: 'installation_owner', id: 'installation_owner' };
   if (session?.source === 'lark') {
-    const appId = session.sourceId?.split(':')[0];
+    const { appId } = parseLarkSourceId(session.sourceId);
     if (appId) return { kind: 'channel', id: actorId, appId };
   }
   return undefined;
+}
+
+function legacyAdmission(accepted: AcceptedTask, taskId = accepted.task.id): TaskAdmissionV1 {
+  return {
+    version: 1,
+    kind: 'legacy_partial',
+    taskIdVersion: accepted.task.digestVersion === 'v1' ? 'v1' : 'legacy',
+    taskId,
+    ...(accepted.request ? { request: accepted.request } : {})
+  };
+}
+
+/** 已有接受事实时沿用其 ID（请求不完整固定为 legacy_partial）；确认未接受时以候选请求 canonical 准入。 */
+function admissionFor(candidate: TaskRequestV1, existing: AcceptedTask | undefined, newTaskId: string): TaskAdmissionV1 {
+  if (!existing) return { version: 1, kind: 'canonical', taskIdVersion: 'v1', taskId: newTaskId, request: candidate };
+  if (existing.replayValidation === 'legacy_partial' || !existing.request || existing.task.digestVersion !== 'v1') return legacyAdmission(existing);
+  return { version: 1, kind: 'canonical', taskIdVersion: 'v1', taskId: existing.task.id, request: existing.request };
+}
+
+type AutomationTaskLabel = 'Scheduled task' | 'CI continuation';
+
+function assertAdmissionMatchesAccepted(label: AutomationTaskLabel, admission: TaskAdmissionV1, accepted: AcceptedTask | undefined) {
+  if (!accepted) return;
+  if (admission.kind === 'canonical') {
+    if (!accepted.request || canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(admission.request)) {
+      throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', `${label} admission conflicts with accepted request`, 403);
+    }
+  } else if (accepted.request && admission.request) {
+    if (canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(admission.request)) {
+      throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', `${label} admission conflicts with accepted request`, 403);
+    }
+  }
+}
+
+/** 核验真实接受 actor 与来源 actor 一致：authorizer 必须使用核实后的原 actor，禁止借用其他 actor */
+function acceptedActorId(label: AutomationTaskLabel, accepted: AcceptedTask | undefined, admission: TaskAdmissionV1, sourceActor: ExecutionActor | undefined, session: Session | undefined) {
+  const actualActor = accepted?.request?.actor ?? admission.request?.actor;
+  if (!actualActor) {
+    throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', `${label} actor cannot be resolved`, 403);
+  }
+  if (sourceActor && canonicalExecutionJson(sourceActor) !== canonicalExecutionJson(actualActor)) {
+    throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', `${label} source actor does not match accepted actor`, 403);
+  }
+  if (actualActor.kind === 'channel') {
+    const sessionAppId = session?.source === 'lark' ? parseLarkSourceId(session.sourceId).appId : undefined;
+    if (!sessionAppId || actualActor.appId !== sessionAppId) {
+      throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Actor app does not match session', 403);
+    }
+  }
+  return actualActor.kind === 'installation_owner' ? 'installation_owner'
+    : actualActor.kind === 'channel' ? actualActor.id : undefined;
 }
 
 function publicSchedule(value: SessionSchedule): PublicSessionSchedule {
@@ -184,6 +237,26 @@ const taskBindingV2CiSchema = z.object({
 
 const taskBindingSchema = z.union([taskBindingV1ScheduleSchema, taskBindingV1CiSchema, taskBindingV2ScheduleSchema, taskBindingV2CiSchema]);
 type TaskBinding = z.infer<typeof taskBindingSchema>;
+type TaskBindingV2 = Extract<TaskBinding, { schemaVersion: 2 }>;
+
+function sameV2Binding(a: TaskBindingV2, b: TaskBindingV2) {
+  if (a.kind === 'schedule' && b.kind === 'schedule') {
+    return a.sessionId === b.sessionId
+      && a.occurrenceId === b.occurrenceId
+      && a.scheduleId === b.scheduleId
+      && a.taskId === b.taskId
+      && a.taskIdVersion === b.taskIdVersion
+      && a.generation === b.generation;
+  }
+  if (a.kind === 'ci' && b.kind === 'ci') {
+    return a.sessionId === b.sessionId
+      && a.subscriptionId === b.subscriptionId
+      && a.taskId === b.taskId
+      && a.taskIdVersion === b.taskIdVersion
+      && a.generation === b.generation;
+  }
+  return false;
+}
 
 function asPreviewDefinition(schedule: Pick<SessionSchedule, 'id' | 'name' | 'trigger' | 'timezone' | 'dstPolicy'>): ScheduleDefinition {
   return {
@@ -298,23 +371,7 @@ export class SessionAutomationService {
     if (!existing) throw new RuntimeError('SESSION_AUTOMATION_TASK_BINDING_CONFLICT', 'Automation task binding disappeared', 409);
 
     if (existing.value.schemaVersion === 2 && binding.schemaVersion === 2) {
-      if (existing.value.kind === 'schedule' && binding.kind === 'schedule'
-        && existing.value.sessionId === binding.sessionId
-        && existing.value.occurrenceId === binding.occurrenceId
-        && existing.value.scheduleId === binding.scheduleId
-        && existing.value.taskId === binding.taskId
-        && existing.value.taskIdVersion === binding.taskIdVersion
-        && existing.value.generation === binding.generation) {
-        return;
-      }
-      if (existing.value.kind === 'ci' && binding.kind === 'ci'
-        && existing.value.sessionId === binding.sessionId
-        && existing.value.subscriptionId === binding.subscriptionId
-        && existing.value.taskId === binding.taskId
-        && existing.value.taskIdVersion === binding.taskIdVersion
-        && existing.value.generation === binding.generation) {
-        return;
-      }
+      if (sameV2Binding(existing.value, binding)) return;
       throw new RuntimeError('SESSION_AUTOMATION_TASK_BINDING_CONFLICT', 'Automation task binding changed', 409);
     }
 
@@ -328,28 +385,13 @@ export class SessionAutomationService {
         && existing.value.occurrenceId === binding.occurrenceId) {
         if (await this.replace(taskBindingKey(taskId), existing.raw, binding)) return;
         const recheck = await this.getRecord(taskBindingKey(taskId), value => taskBindingSchema.parse(value));
-        if (recheck?.value.schemaVersion === 2 && recheck.value.kind === 'schedule'
-          && recheck.value.sessionId === binding.sessionId
-          && recheck.value.occurrenceId === binding.occurrenceId
-          && recheck.value.scheduleId === binding.scheduleId
-          && recheck.value.taskId === binding.taskId
-          && recheck.value.taskIdVersion === binding.taskIdVersion
-          && recheck.value.generation === binding.generation) {
-          return;
-        }
+        if (recheck?.value.schemaVersion === 2 && sameV2Binding(recheck.value, binding)) return;
       } else if (existing.value.kind === 'ci' && binding.kind === 'ci'
         && existing.value.sessionId === binding.sessionId
         && existing.value.subscriptionId === binding.subscriptionId) {
         if (await this.replace(taskBindingKey(taskId), existing.raw, binding)) return;
         const recheck = await this.getRecord(taskBindingKey(taskId), value => taskBindingSchema.parse(value));
-        if (recheck?.value.schemaVersion === 2 && recheck.value.kind === 'ci'
-          && recheck.value.sessionId === binding.sessionId
-          && recheck.value.subscriptionId === binding.subscriptionId
-          && recheck.value.taskId === binding.taskId
-          && recheck.value.taskIdVersion === binding.taskIdVersion
-          && recheck.value.generation === binding.generation) {
-          return;
-        }
+        if (recheck?.value.schemaVersion === 2 && sameV2Binding(recheck.value, binding)) return;
       }
     }
     throw new RuntimeError('SESSION_AUTOMATION_TASK_BINDING_CONFLICT', 'Automation task binding changed', 409);
@@ -654,17 +696,7 @@ export class SessionAutomationService {
         const fixedTaskId = occurrence.taskId;
         if (!fixedTaskId || fixedTaskId !== task.id) throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Scheduled task binding is invalid', 403);
       }
-      if (accepted) {
-        if (occurrence.admission.kind === 'canonical') {
-          if (!accepted.request || canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(occurrence.admission.request)) {
-            throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Scheduled task admission conflicts with accepted request', 403);
-          }
-        } else if (accepted.request && occurrence.admission.request) {
-          if (canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(occurrence.admission.request)) {
-            throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Scheduled task admission conflicts with accepted request', 403);
-          }
-        }
-      }
+      assertAdmissionMatchesAccepted('Scheduled task', occurrence.admission, accepted);
       const schedule = await this.getRecord(scheduleKey(occurrence.scheduleId), value => sessionScheduleSchema.parse(value));
       if (!schedule) throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Scheduled task definition is missing', 403);
       const started = Boolean(occurrence.taskStartedAt || schedule.value.taskStartOccurrenceId === occurrence.id);
@@ -680,22 +712,7 @@ export class SessionAutomationService {
         }
         throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Scheduled task session is no longer active', 403);
       }
-      // 核验真实接受 actor 与来源 actor 一致：authorizer 必须使用核实后的原 actor，禁止借用其他 actor
-      const actualActor = accepted?.request?.actor ?? occurrence.admission.request?.actor;
-      if (!actualActor) {
-        throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Scheduled task actor cannot be resolved', 403);
-      }
-      if (occurrence.actor && canonicalExecutionJson(occurrence.actor) !== canonicalExecutionJson(actualActor)) {
-        throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Scheduled task source actor does not match accepted actor', 403);
-      }
-      if (actualActor.kind === 'channel') {
-        const sessionAppId = session?.source === 'lark' ? session.sourceId?.split(':')[0] : undefined;
-        if (!sessionAppId || actualActor.appId !== sessionAppId) {
-          throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Actor app does not match session', 403);
-        }
-      }
-      const actorId = actualActor.kind === 'installation_owner' ? 'installation_owner'
-        : actualActor.kind === 'channel' ? actualActor.id : undefined;
+      const actorId = acceptedActorId('Scheduled task', accepted, occurrence.admission, occurrence.actor, session);
       try { await this.requireAuthorized(task.sessionId, actorId); }
       catch (error) {
         if (!started) {
@@ -769,17 +786,7 @@ export class SessionAutomationService {
       const fixedTaskId = subscription.taskId;
       if (!fixedTaskId || fixedTaskId !== task.id) throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'CI continuation task binding is invalid', 403);
     }
-    if (accepted) {
-      if (subscription.admission.kind === 'canonical') {
-        if (!accepted.request || canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(subscription.admission.request)) {
-          throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'CI continuation admission conflicts with accepted request', 403);
-        }
-      } else if (accepted.request && subscription.admission.request) {
-        if (canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(subscription.admission.request)) {
-          throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'CI continuation admission conflicts with accepted request', 403);
-        }
-      }
-    }
+    assertAdmissionMatchesAccepted('CI continuation', subscription.admission, accepted);
     const started = Boolean(subscription.taskStartedAt);
     if (!started && (!['dispatching', 'accepted'].includes(subscription.status) || new Date(subscription.expiresAt) <= this.clock())) {
       if (['dispatching', 'accepted'].includes(subscription.status) && new Date(subscription.expiresAt) <= this.clock()) await this.finishCi(subscriptionStored, 'expired', 'CI continuation expired before execution');
@@ -790,21 +797,7 @@ export class SessionAutomationService {
       if (!started) await this.finishCi(subscriptionStored, 'session_inactive', 'Session is no longer active');
       throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'CI continuation session is no longer active', 403);
     }
-    const actualCiActor = accepted?.request?.actor ?? subscription.admission.request?.actor;
-    if (!actualCiActor) {
-      throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'CI continuation actor cannot be resolved', 403);
-    }
-    if (subscription.actor && canonicalExecutionJson(subscription.actor) !== canonicalExecutionJson(actualCiActor)) {
-      throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'CI continuation source actor does not match accepted actor', 403);
-    }
-    if (actualCiActor.kind === 'channel') {
-      const sessionAppId = session?.source === 'lark' ? session.sourceId?.split(':')[0] : undefined;
-      if (!sessionAppId || actualCiActor.appId !== sessionAppId) {
-        throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Actor app does not match session', 403);
-      }
-    }
-    const ciActorId = actualCiActor.kind === 'installation_owner' ? 'installation_owner'
-      : actualCiActor.kind === 'channel' ? actualCiActor.id : undefined;
+    const ciActorId = acceptedActorId('CI continuation', accepted, subscription.admission, subscription.actor, session);
     try { await this.requireAuthorized(task.sessionId, ciActorId); }
     catch (error) {
       if (!started) await this.finishCi(subscriptionStored, 'revoked', errorMessage(error));
@@ -1050,56 +1043,20 @@ export class SessionAutomationService {
         await this.advanceSchedule(schedule, occurrence.scheduledForUtc);
         return;
       }
-      if (existingAccepted) {
-        taskId = existingAccepted.task.id;
-        taskIdVersion = existingAccepted.task.digestVersion === 'v1' ? 'v1' : 'legacy';
-        request = existingAccepted.request ?? candidateRequest;
-        const admission: TaskAdmissionV1 = (existingAccepted.replayValidation === 'legacy_partial' || !existingAccepted.request || existingAccepted.task.digestVersion !== 'v1')
-          ? {
-              version: 1,
-              kind: 'legacy_partial',
-              taskIdVersion,
-              taskId,
-              ...(existingAccepted.request ? { request: existingAccepted.request } : {})
-            }
-          : {
-              version: 1,
-              kind: 'canonical',
-              taskIdVersion: 'v1',
-              taskId,
-              request: existingAccepted.request
-            };
-        const withAdmission = sessionScheduleOccurrenceV2Schema.parse({
-          ...accepted,
-          revision: accepted.revision + 1,
-          admission,
-          actor,
-          taskId,
-          updatedAt: iso(this.clock())
-        });
-        if (!await this.replace(occurrenceKey(occurrence.id), JSON.stringify(accepted), withAdmission)) return;
-        occurrenceWithAdmission = { raw: JSON.stringify(withAdmission), value: withAdmission };
-      } else {
-        // 确认未接受且未冻结 admission：CAS 保存 canonical 请求再补 binding/dispatch
-        taskId = canonicalTaskId('schedule', schedule.sessionId, candidateRequest.key);
-        request = candidateRequest;
-        const admission = {
-          version: 1 as const,
-          kind: 'canonical' as const,
-          taskIdVersion: 'v1' as const,
-          taskId,
-          request: candidateRequest
-        };
-        const withAdmission = sessionScheduleOccurrenceV2Schema.parse({
-          ...accepted,
-          revision: accepted.revision + 1,
-          admission,
-          actor,
-          updatedAt: iso(this.clock())
-        });
-        if (!await this.replace(occurrenceKey(occurrence.id), JSON.stringify(accepted), withAdmission)) return;
-        occurrenceWithAdmission = { raw: JSON.stringify(withAdmission), value: withAdmission };
-      }
+      const admission = admissionFor(candidateRequest, existingAccepted, canonicalTaskId('schedule', schedule.sessionId, candidateRequest.key));
+      taskId = admission.taskId;
+      taskIdVersion = admission.taskIdVersion;
+      request = existingAccepted?.request ?? candidateRequest;
+      const withAdmission = sessionScheduleOccurrenceV2Schema.parse({
+        ...accepted,
+        revision: accepted.revision + 1,
+        admission,
+        actor,
+        ...(existingAccepted ? { taskId } : {}),
+        updatedAt: iso(this.clock())
+      });
+      if (!await this.replace(occurrenceKey(occurrence.id), JSON.stringify(accepted), withAdmission)) return;
+      occurrenceWithAdmission = { raw: JSON.stringify(withAdmission), value: withAdmission };
     }
     await this.dispatchOccurrence(occurrenceWithAdmission, schedule, request, taskId, taskIdVersion);
     await this.advanceSchedule(schedule, occurrence.scheduledForUtc);
@@ -1115,22 +1072,8 @@ export class SessionAutomationService {
     const occurrence = stored.value;
     // 重投先查接受事实，命中只补同一映射，不再读 HEAD/材料、不重拼 prompt。
     const acceptedBefore = this.execution.getAcceptedTask(taskId);
-    if (acceptedBefore) {
-      if (acceptedBefore.request && canonicalRequestDigest(acceptedBefore.request) !== canonicalRequestDigest(request)) {
-        await this.finishOccurrence(stored, { runStatus: 'blocked', blockReason: 'admission_conflict', error: 'The task key already belongs to a different accepted request' });
-        return;
-      }
-      await this.ensureTaskBinding(taskId, {
-        schemaVersion: 2,
-        kind: 'schedule',
-        sessionId: occurrence.sessionId,
-        occurrenceId: occurrence.id,
-        scheduleId: occurrence.scheduleId,
-        taskId,
-        taskIdVersion,
-        generation: occurrence.generation
-      });
-      await this.markOccurrenceAccepted(stored, taskId);
+    if (acceptedBefore?.request && canonicalRequestDigest(acceptedBefore.request) !== canonicalRequestDigest(request)) {
+      await this.finishOccurrence(stored, { runStatus: 'blocked', blockReason: 'admission_conflict', error: 'The task key already belongs to a different accepted request' });
       return;
     }
     await this.ensureTaskBinding(taskId, {
@@ -1143,6 +1086,10 @@ export class SessionAutomationService {
       taskIdVersion,
       generation: occurrence.generation
     });
+    if (acceptedBefore) {
+      await this.markOccurrenceAccepted(stored, taskId);
+      return;
+    }
     try {
       const task = await this.options.runtime.dispatchRequest(request);
       if (task.id !== taskId) throw new RuntimeError('SESSION_AUTOMATION_TASK_CONFLICT', 'Runtime task identity did not match the fixed admission', 409);
@@ -1345,79 +1292,29 @@ export class SessionAutomationService {
         await this.finishCi({ raw: dispatching.raw ?? JSON.stringify(record), value: record }, 'blocked', errorMessage(err));
         return;
       }
-      if (existingAccepted) {
-        taskId = existingAccepted.task.id;
-        taskIdVersion = existingAccepted.task.digestVersion === 'v1' ? 'v1' : 'legacy';
-        request = existingAccepted.request ?? candidateRequest;
-        const admission: TaskAdmissionV1 = (existingAccepted.replayValidation === 'legacy_partial' || !existingAccepted.request || existingAccepted.task.digestVersion !== 'v1')
-          ? {
-              version: 1,
-              kind: 'legacy_partial',
-              taskIdVersion,
-              taskId,
-              ...(existingAccepted.request ? { request: existingAccepted.request } : {})
-            }
-          : {
-              version: 1,
-              kind: 'canonical',
-              taskIdVersion: 'v1',
-              taskId,
-              request: existingAccepted.request
-            };
-        const withAdmission = ciSubscriptionV2Schema.parse({
-          ...record,
-          schemaVersion: 2,
-          revision: record.revision + 1,
-          admission,
-          actor,
-          taskId,
-          updatedAt: iso(this.clock())
-        });
-        const raw = dispatching.raw ?? JSON.stringify(record);
-        if (!await this.replace(ciKey(record.id), raw, withAdmission)) return;
-        record = withAdmission;
-      } else {
-        taskId = canonicalTaskId('automation', record.sessionId, candidateRequest.key);
-        request = candidateRequest;
-        const admission = {
-          version: 1 as const,
-          kind: 'canonical' as const,
-          taskIdVersion: 'v1' as const,
-          taskId,
-          request: candidateRequest
-        };
-        const withAdmission = ciSubscriptionV2Schema.parse({
-          ...record,
-          schemaVersion: 2,
-          revision: record.revision + 1,
-          admission,
-          actor,
-          updatedAt: iso(this.clock())
-        });
-        const raw = dispatching.raw ?? JSON.stringify(record);
-        if (!await this.replace(ciKey(record.id), raw, withAdmission)) return;
-        record = withAdmission;
-      }
+      const admission = admissionFor(candidateRequest, existingAccepted, canonicalTaskId('automation', record.sessionId, candidateRequest.key));
+      taskId = admission.taskId;
+      taskIdVersion = admission.taskIdVersion;
+      request = existingAccepted?.request ?? candidateRequest;
+      const withAdmission = ciSubscriptionV2Schema.parse({
+        ...record,
+        schemaVersion: 2,
+        revision: record.revision + 1,
+        admission,
+        actor,
+        ...(existingAccepted ? { taskId } : {}),
+        updatedAt: iso(this.clock())
+      });
+      const raw = dispatching.raw ?? JSON.stringify(record);
+      if (!await this.replace(ciKey(record.id), raw, withAdmission)) return;
+      record = withAdmission;
     }
 
     const stored: { raw: string; value: CiSubscriptionV2 } = { raw: JSON.stringify(record), value: record };
     // 重投先查接受事实，命中只补同一映射，不再读 HEAD/材料、不重拼 prompt。
     const acceptedBefore = this.execution.getAcceptedTask(taskId);
-    if (acceptedBefore) {
-      if (acceptedBefore.request && canonicalRequestDigest(acceptedBefore.request) !== canonicalRequestDigest(request)) {
-        await this.finishCi(stored, 'blocked', 'The task key already belongs to a different accepted request');
-        return;
-      }
-      await this.ensureTaskBinding(taskId, {
-        schemaVersion: 2,
-        kind: 'ci',
-        sessionId: record.sessionId,
-        subscriptionId: record.id,
-        taskId,
-        taskIdVersion,
-        generation: CI_BINDING_GENERATION
-      });
-      await this.markCiAccepted(record.id, taskId);
+    if (acceptedBefore?.request && canonicalRequestDigest(acceptedBefore.request) !== canonicalRequestDigest(request)) {
+      await this.finishCi(stored, 'blocked', 'The task key already belongs to a different accepted request');
       return;
     }
     await this.ensureTaskBinding(taskId, {
@@ -1429,6 +1326,10 @@ export class SessionAutomationService {
       taskIdVersion,
       generation: CI_BINDING_GENERATION
     });
+    if (acceptedBefore) {
+      await this.markCiAccepted(record.id, taskId);
+      return;
+    }
     try {
       const task = await this.options.runtime.dispatchRequest(request);
       if (task.id !== taskId) throw new RuntimeError('SESSION_AUTOMATION_TASK_CONFLICT', 'Runtime task identity did not match the fixed admission', 409);
@@ -1530,7 +1431,7 @@ export class SessionAutomationService {
         await this.replace(occurrenceKey(value.id), item.raw, blocked);
         return { raw: JSON.stringify(blocked), value: blocked };
       }
-      const admission = { version: 1 as const, kind: 'legacy_partial' as const, taskIdVersion: accepted.task.digestVersion === 'v1' ? 'v1' as const : 'legacy' as const, taskId: value.taskId, ...(accepted.request ? { request: accepted.request } : {}) };
+      const admission = legacyAdmission(accepted, value.taskId);
       const fixed = sessionScheduleOccurrenceV2Schema.parse({ ...value, schemaVersion: 2, revision: value.revision + 1, admission, updatedAt: iso(this.clock()) });
       if (!(await this.replace(occurrenceKey(value.id), item.raw, fixed))) return undefined;
       return { raw: JSON.stringify(fixed), value: fixed };
@@ -1545,13 +1446,7 @@ export class SessionAutomationService {
         let accepted;
         try { accepted = this.execution.lookupAccepted(candidateRequest); } catch { /* conflict */ }
         if (accepted && accepted.task.sessionId === value.sessionId) {
-          const admission: TaskAdmissionV1 = {
-            version: 1,
-            kind: 'legacy_partial',
-            taskIdVersion: accepted.task.digestVersion === 'v1' ? 'v1' : 'legacy',
-            taskId: accepted.task.id,
-            ...(accepted.request ? { request: accepted.request } : {})
-          };
+          const admission = legacyAdmission(accepted);
           const fixed = sessionScheduleOccurrenceV2Schema.parse({
             ...value,
             schemaVersion: 2,
@@ -1581,7 +1476,7 @@ export class SessionAutomationService {
         await this.replace(ciKey(value.id), item.raw, blocked);
         return { raw: JSON.stringify(blocked), value: blocked };
       }
-      const admission = { version: 1 as const, kind: 'legacy_partial' as const, taskIdVersion: accepted.task.digestVersion === 'v1' ? 'v1' as const : 'legacy' as const, taskId: value.taskId, ...(accepted.request ? { request: accepted.request } : {}) };
+      const admission = legacyAdmission(accepted, value.taskId);
       const fixed = ciSubscriptionV2Schema.parse({ ...value, schemaVersion: 2, revision: value.revision + 1, admission, updatedAt: iso(this.clock()) });
       if (!(await this.replace(ciKey(value.id), item.raw, fixed))) return undefined;
       return { raw: JSON.stringify(fixed), value: fixed };
@@ -1593,13 +1488,7 @@ export class SessionAutomationService {
       let accepted;
       try { accepted = this.execution.lookupAccepted(candidateRequest); } catch { /* conflict */ }
       if (accepted && accepted.task.sessionId === value.sessionId) {
-        const admission: TaskAdmissionV1 = {
-          version: 1,
-          kind: 'legacy_partial',
-          taskIdVersion: accepted.task.digestVersion === 'v1' ? 'v1' : 'legacy',
-          taskId: accepted.task.id,
-          ...(accepted.request ? { request: accepted.request } : {})
-        };
+        const admission = legacyAdmission(accepted);
         const fixed = ciSubscriptionV2Schema.parse({
           ...value,
           schemaVersion: 2,

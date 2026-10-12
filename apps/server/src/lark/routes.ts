@@ -4,7 +4,7 @@ import { LarkAppCreationJobManager } from './app-creation.js';
 import { registerLarkAppCreationRoutes } from './app-creation-routes.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
 import { registerLarkGroupManagementRoutes, type LarkGroupManager } from './group-management.js';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { createLarkCardService, LarkServiceError, larkConfigurationStatus, type LarkBotConfigInput, type LarkCardService, type LarkSendInput, type LarkUpdateInput } from './service.js';
@@ -23,6 +23,12 @@ import type { LoginLinkStore } from '../auth/auth.js';
 type LarkSendRequest = LarkSendInput & { bot?: LarkBotConfigInput; botAppId?: string };
 type LarkUpdateRequest = LarkUpdateInput & { bot?: LarkBotConfigInput; botAppId?: string };
 export type SaveLarkConfigRequest = SaveLarkConfigInput & { allowedUserNames?: string[]; allowedBotNames?: string[]; highRiskAllowedUserNames?: string[] };
+
+/** LarkServiceError 按其状态码回给调用方，其他错误原样抛出。 */
+const larkError = (reply: FastifyReply, error: unknown) => {
+  if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+  throw error;
+};
 
 export interface LarkRoutesOptions {
   participation?: LarkGroupParticipation;
@@ -172,16 +178,14 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       const bot = createLarkCardService(env, fetcher, { appId: request.body?.appId, appSecret: request.body?.appSecret, brand: request.body?.brand ?? (await readLarkConfig(options.config, request.body?.appId))?.brand });
       return await bot.getBotInfo();
     } catch (error) {
-      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
-      throw error;
+      return larkError(reply, error);
     }
   });
   app.get<{ Params: { appId: string }; Querystring: { pageToken?: string } }>('/api/lark/bots/:appId/chats', async (request, reply) => {
     try {
       return await (await resolveService(undefined, request.params.appId)).listChats(request.query.pageToken);
     } catch (error) {
-      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
-      throw error;
+      return larkError(reply, error);
     }
   });
   app.get<{ Params: { appId: string } }>('/api/lark/bots/:appId/memory/status', async (request, reply) => {
@@ -212,8 +216,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
         }
       };
     } catch (error) {
-      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
-      throw error;
+      return larkError(reply, error);
     }
   });
   app.get<{ Params: { appId: string; chatId: string }; Querystring: { pageToken?: string } }>('/api/lark/bots/:appId/chats/:chatId/members', async (request, reply) => {
@@ -225,8 +228,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
         ...(request.query.pageToken ? { pageToken: request.query.pageToken } : {})
       });
     } catch (error) {
-      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
-      throw error;
+      return larkError(reply, error);
     }
   });
   app.get<{ Querystring: { appId?: string; agentId?: string } }>('/api/lark/hooks/status', async (request, reply) => {
@@ -256,8 +258,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       if (options.runtime) await options.groupManager?.refreshPolicies(options.runtime);
       return { ...hook, configRevision: saved.find(bot => bot.appId === config.appId)!.revision };
     } catch (error) {
-      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
-      throw error;
+      return larkError(reply, error);
     }
   });
   app.put<{ Body: SaveLarkConfigRequest }>('/api/lark/config', async (request, reply) => {
@@ -359,24 +360,21 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       if (!options.service) service = undefined;
       return publicLarkConfigs(saved, { activeAppIds: listener.activeAppIds, listeningDisabled });
     } catch (error) {
-      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
-      throw error;
+      return larkError(reply, error);
     }
   });
   app.post<{ Body: LarkSendRequest }>('/api/lark/send', async (request, reply) => {
     const { bot, botAppId, ...input } = request.body ?? {};
     try { return await (await resolveService(bot, botAppId)).send(input); }
     catch (error) {
-      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
-      throw error;
+      return larkError(reply, error);
     }
   });
   app.post<{ Body: LarkUpdateRequest }>('/api/lark/update', async (request, reply) => {
     const { bot, botAppId, ...input } = request.body ?? ({} as LarkUpdateRequest);
     try { return await (await resolveService(bot, botAppId)).update(input as LarkUpdateInput); }
     catch (error) {
-      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
-      throw error;
+      return larkError(reply, error);
     }
   });
 }

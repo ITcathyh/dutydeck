@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { executionTaskId } from '@dutydeck/storage';
-import { makeId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type JsonValue } from '@dutydeck/shared';
+import { makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type JsonValue } from '@dutydeck/shared';
 
 const rateSchema = z.object({ inputPerMTok: z.number().nonnegative(), cachedInputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative(), cacheWritePerMTok: z.number().nonnegative().optional(), provider: z.string().trim().min(1).optional() }).strict();
 const pricingSchema = z.object({ version: z.string().trim().min(1).optional(), default: rateSchema, models: z.array(rateSchema.extend({ match: z.string().trim().min(1) }).strict()) }).strict();
@@ -99,7 +99,7 @@ export function measureUsage(input: { reading?: UsageReading; freshTokens: boole
 /** 从会话来源解析 Bot 与群/会话；子步骤等不带这些信息的会话返回空，由根任务补齐。 */
 export function usageScopeOf(session: Pick<Session, 'source' | 'sourceId'>): { appId?: string; chatId?: string; chatType?: string } {
   if (!session.sourceId) return {};
-  const [appId, chatId, kind] = session.sourceId.split(':');
+  const { appId, chatId, chatType: kind } = parseLarkSourceId(session.sourceId);
   if (!appId || !chatId) return {};
   if (session.source === 'lark') return { appId, chatId, chatType: kind };
   if (session.source === 'lark-decision' || session.source === 'lark-response') return { appId, chatId, chatType: 'group' };
@@ -110,7 +110,7 @@ export function usageScopeOf(session: Pick<Session, 'source' | 'sourceId'>): { a
 
 /** 按任务请求与会话来源归类；子步骤（work_item、lark-leader）的类别由调用方沿用根任务。 */
 export function classifyUsage(session: Pick<Session, 'source' | 'sourceId'>, request: TaskRequestV1 | undefined, proactive: boolean): { category: UsageCategory; origin: string } {
-  if (request?.namespace === 'schedule') return { category: 'scheduled', origin: session.sourceId?.split(':')[3] === 'collaboration' ? 'mandate' : 'schedule' };
+  if (request?.namespace === 'schedule') return { category: 'scheduled', origin: parseLarkSourceId(session.sourceId).scope[0] === 'collaboration' ? 'mandate' : 'schedule' };
   if (request?.namespace === 'automation') return { category: 'scheduled', origin: 'ci' };
   if (session.source === 'lark-decision') return { category: 'background', origin: 'decision' };
   if (session.source === 'lark-response') return { category: 'background', origin: 'response' };

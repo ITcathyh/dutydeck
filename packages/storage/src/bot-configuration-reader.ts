@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
+import type { z } from 'zod';
 import {
   RuntimeError,
   canonicalExecutionJson,
@@ -137,7 +138,7 @@ interface FullTrustConfirmationRow {
   revoked_reason: string | null;
 }
 
-interface SecretRefRow {
+export interface SecretRefRow {
   id: string;
   schema_version: number;
   revision: number;
@@ -173,6 +174,35 @@ interface ChangeRow {
 
 function fail(code: string, detail: string, statusCode = 500): never {
   throw new RuntimeError(code, `${code}: ${detail}`, statusCode);
+}
+
+function parseRecord<S extends z.ZodTypeAny>(schema: S, value: unknown, label: string): z.output<S> {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    fail('CONFIGURATION_CORRUPTED_RECORD', `${label}: ${parsed.error.message}`, 500);
+  }
+  return parsed.data;
+}
+
+interface VersionChangeRelation { bot_id: string; revision: number | null; change_kind: string | null }
+
+function assertVersionChangeRelation(
+  botId: string,
+  version: { version_id: string; revision: number; change_sequence: number; change_kind: string },
+  change: VersionChangeRelation | undefined
+): asserts change is VersionChangeRelation {
+  if (!change) {
+    fail('CONFIGURATION_CORRUPTED_RELATION', `Version ${version.version_id} references missing change sequence ${version.change_sequence}`, 500);
+  }
+  if (change.bot_id !== botId) {
+    fail('CONFIGURATION_CORRUPTED_RELATION', `Version ${version.version_id} belongs to bot ${botId} but change sequence ${version.change_sequence} belongs to ${change.bot_id}`, 500);
+  }
+  if (change.revision !== version.revision) {
+    fail('CONFIGURATION_CORRUPTED_RELATION', `Version ${version.version_id} revision ${version.revision} does not match change revision ${change.revision}`, 500);
+  }
+  if (change.change_kind !== version.change_kind) {
+    fail('CONFIGURATION_CORRUPTED_RELATION', `Version ${version.version_id} changeKind ${version.change_kind} does not match change changeKind ${change.change_kind}`, 500);
+  }
 }
 
 function isPositiveSafeInteger(val: unknown): val is number {
@@ -228,7 +258,7 @@ function decodeBotRow(row: ChannelBotRow): ChannelBotV2 {
   assertPositiveSafeInteger(row.authorization_revision, 'authorization_revision', row.id);
   assertPositiveSafeInteger(row.connection_generation, 'connection_generation', row.id);
 
-  const parseResult = channelBotV2Schema.safeParse({
+  return parseRecord(channelBotV2Schema, {
     schemaVersion: row.schema_version,
     id: row.id,
     revision: row.revision,
@@ -244,16 +274,7 @@ function decodeBotRow(row: ChannelBotRow): ChannelBotV2 {
     desiredListenerState: row.desired_listener_state,
     createdAt: row.created_at,
     updatedAt: row.updated_at
-  });
-
-  if (!parseResult.success) {
-    fail(
-      'CONFIGURATION_CORRUPTED_RECORD',
-      `Invalid ChannelBotV2 record ${row.id}: ${parseResult.error.message}`,
-      500
-    );
-  }
-  return parseResult.data;
+  }, `Invalid ChannelBotV2 record ${row.id}`);
 }
 
 function decodePolicyRow(row: ChannelBotPolicyRow): ChannelBotPolicyV2 {
@@ -280,7 +301,7 @@ function decodePolicyRow(row: ChannelBotPolicyRow): ChannelBotPolicyV2 {
   const presentation = parseJsonSafe<any>(row.presentation_json, 'presentation_json', row.id);
   const groupToolsPolicy = parseJsonSafe<any>(row.group_tools_policy_json, 'group_tools_policy_json', row.id);
 
-  const parseResult = channelBotPolicyV2Schema.safeParse({
+  return parseRecord(channelBotPolicyV2Schema, {
     schemaVersion: row.schema_version,
     id: row.id,
     revision: row.revision,
@@ -293,16 +314,7 @@ function decodePolicyRow(row: ChannelBotPolicyRow): ChannelBotPolicyV2 {
     groupToolsPolicy,
     createdAt: row.created_at,
     updatedAt: row.updated_at
-  });
-
-  if (!parseResult.success) {
-    fail(
-      'CONFIGURATION_CORRUPTED_RECORD',
-      `Invalid ChannelBotPolicyV2 record ${row.id}: ${parseResult.error.message}`,
-      500
-    );
-  }
-  return parseResult.data;
+  }, `Invalid ChannelBotPolicyV2 record ${row.id}`);
 }
 
 function decodeBindingRow(row: GroupBindingRow): GroupBindingV2 {
@@ -333,7 +345,7 @@ function decodeBindingRow(row: GroupBindingRow): GroupBindingV2 {
   const presentationOverride = parseJsonSafe<any>(row.presentation_override_json, 'presentation_override_json', row.id);
   const reviewReasons = parseJsonSafe<any>(row.review_reasons_json, 'review_reasons_json', row.id);
 
-  const parseResult = groupBindingV2Schema.safeParse({
+  return parseRecord(groupBindingV2Schema, {
     schemaVersion: row.schema_version,
     id: row.id,
     revision: row.revision,
@@ -354,16 +366,7 @@ function decodeBindingRow(row: GroupBindingRow): GroupBindingV2 {
     reviewReasons,
     createdAt: row.created_at,
     updatedAt: row.updated_at
-  });
-
-  if (!parseResult.success) {
-    fail(
-      'CONFIGURATION_CORRUPTED_RECORD',
-      `Invalid GroupBindingV2 record ${row.id}: ${parseResult.error.message}`,
-      500
-    );
-  }
-  return parseResult.data;
+  }, `Invalid GroupBindingV2 record ${row.id}`);
 }
 
 function decodeRoleRow(row: RoleAssignmentRow): RoleAssignment {
@@ -406,16 +409,7 @@ function decodeRoleRow(row: RoleAssignmentRow): RoleAssignment {
     candidate.expiresAt = row.expires_at;
   }
 
-  const parseResult = roleAssignmentSchema.safeParse(candidate);
-
-  if (!parseResult.success) {
-    fail(
-      'CONFIGURATION_CORRUPTED_RECORD',
-      `Invalid RoleAssignment record ${row.id}: ${parseResult.error.message}`,
-      500
-    );
-  }
-  return parseResult.data;
+  return parseRecord(roleAssignmentSchema, candidate, `Invalid RoleAssignment record ${row.id}`);
 }
 
 function decodeConfirmationRow(row: FullTrustConfirmationRow): FullTrustConfirmation {
@@ -496,15 +490,7 @@ function decodeConfirmationRow(row: FullTrustConfirmationRow): FullTrustConfirma
     fail('CONFIGURATION_CORRUPTED_RECORD', `FullTrustConfirmation ${row.id} has unknown source ${row.source}`, 500);
   }
 
-  const parseResult = fullTrustConfirmationSchema.safeParse(candidate);
-  if (!parseResult.success) {
-    fail(
-      'CONFIGURATION_CORRUPTED_RECORD',
-      `Invalid FullTrustConfirmation record ${row.id}: ${parseResult.error.message}`,
-      500
-    );
-  }
-  return parseResult.data;
+  return parseRecord(fullTrustConfirmationSchema, candidate, `Invalid FullTrustConfirmation record ${row.id}`);
 }
 
 function decodeSecretRefRow(row: SecretRefRow): SecretRefMetadata {
@@ -517,7 +503,7 @@ function decodeSecretRefRow(row: SecretRefRow): SecretRefMetadata {
   }
   assertPositiveSafeInteger(row.revision, 'revision', row.id);
 
-  const parseResult = botSecretRefMetadataSchema.safeParse({
+  return parseRecord(botSecretRefMetadataSchema, {
     schemaVersion: row.schema_version,
     id: row.id,
     revision: row.revision,
@@ -527,16 +513,7 @@ function decodeSecretRefRow(row: SecretRefRow): SecretRefMetadata {
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at
-  });
-
-  if (!parseResult.success) {
-    fail(
-      'CONFIGURATION_CORRUPTED_RECORD',
-      `Invalid SecretRefMetadata record ${row.id}: ${parseResult.error.message}`,
-      500
-    );
-  }
-  return parseResult.data;
+  }, `Invalid SecretRefMetadata record ${row.id}`);
 }
 
 export function createConfigurationReader(db: Database.Database): ConfigurationReader {
@@ -609,17 +586,10 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
       confirmations
     };
 
-    const parseResult = botSnapshotSchema.safeParse(snapshotCandidate);
-    if (!parseResult.success) {
-      fail(
-        'CONFIGURATION_CORRUPTED_RECORD',
-        `BotSnapshot validation failed for ${bot.id}: ${parseResult.error.message}`,
-        500
-      );
-    }
+    const snapshot = parseRecord(botSnapshotSchema, snapshotCandidate, `BotSnapshot validation failed for ${bot.id}`);
 
-    assertSnapshotVersionsSafe(parseResult.data);
-    return parseResult.data;
+    assertSnapshotVersionsSafe(snapshot);
+    return snapshot;
   };
 
   return {
@@ -709,23 +679,16 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
         }>;
 
         return rows.map(r => {
-          if (r.change_bot_id === null) {
-            fail('CONFIGURATION_CORRUPTED_RELATION', `Version ${r.version_id} references missing change sequence ${r.change_sequence}`, 500);
-          }
-          if (r.change_bot_id !== botId) {
-            fail('CONFIGURATION_CORRUPTED_RELATION', `Version ${r.version_id} belongs to bot ${botId} but change sequence ${r.change_sequence} belongs to ${r.change_bot_id}`, 500);
-          }
-          if (r.change_revision !== r.revision) {
-            fail('CONFIGURATION_CORRUPTED_RELATION', `Version ${r.version_id} revision ${r.revision} does not match change revision ${r.change_revision}`, 500);
-          }
-          if (r.change_kind_rel !== r.change_kind) {
-            fail('CONFIGURATION_CORRUPTED_RELATION', `Version ${r.version_id} changeKind ${r.change_kind} does not match change changeKind ${r.change_kind_rel}`, 500);
-          }
+          assertVersionChangeRelation(
+            botId,
+            r,
+            r.change_bot_id === null ? undefined : { bot_id: r.change_bot_id, revision: r.change_revision, change_kind: r.change_kind_rel }
+          );
 
           assertPositiveSafeInteger(r.revision, 'version.revision', r.version_id);
           assertPositiveSafeInteger(r.change_sequence, 'version.changeSequence', r.version_id);
 
-          const parseResult = botConfigurationVersionMetadataSchema.safeParse({
+          return parseRecord(botConfigurationVersionMetadataSchema, {
             versionId: r.version_id,
             botId: r.bot_id,
             revision: r.revision,
@@ -734,15 +697,7 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
             operationId: r.operation_id,
             createdAt: r.created_at,
             snapshotDigest: r.snapshot_digest
-          });
-          if (!parseResult.success) {
-            fail(
-              'CONFIGURATION_CORRUPTED_RECORD',
-              `Corrupted version metadata for ${r.version_id}: ${parseResult.error.message}`,
-              500
-            );
-          }
-          return parseResult.data;
+          }, `Corrupted version metadata for ${r.version_id}`);
         });
       });
 
@@ -776,29 +731,10 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
           WHERE sequence = ?
         `).get(row.change_sequence) as ChangeRow | undefined;
 
-        if (!changeRow) {
-          fail('CONFIGURATION_CORRUPTED_RELATION', `Version ${versionId} references missing change sequence ${row.change_sequence}`, 500);
-        }
-        if (changeRow.bot_id !== botId) {
-          fail('CONFIGURATION_CORRUPTED_RELATION', `Version ${versionId} belongs to bot ${botId} but change sequence ${changeRow.sequence} belongs to ${changeRow.bot_id}`, 500);
-        }
-        if (changeRow.revision !== row.revision) {
-          fail('CONFIGURATION_CORRUPTED_RELATION', `Version ${versionId} revision ${row.revision} does not match change revision ${changeRow.revision}`, 500);
-        }
-        if (changeRow.change_kind !== row.change_kind) {
-          fail('CONFIGURATION_CORRUPTED_RELATION', `Version ${versionId} changeKind ${row.change_kind} does not match change changeKind ${changeRow.change_kind}`, 500);
-        }
+        assertVersionChangeRelation(botId, row, changeRow);
 
         const snapshotJson = parseJsonSafe<any>(row.snapshot_json, 'snapshot_json', row.version_id);
-        const snapshotParsed = botSnapshotSchema.safeParse(snapshotJson);
-        if (!snapshotParsed.success) {
-          fail(
-            'CONFIGURATION_CORRUPTED_RECORD',
-            `Corrupted snapshot in version ${row.version_id}: ${snapshotParsed.error.message}`,
-            500
-          );
-        }
-        const snapshot = snapshotParsed.data;
+        const snapshot = parseRecord(botSnapshotSchema, snapshotJson, `Corrupted snapshot in version ${row.version_id}`);
 
         if (snapshot.bot.id !== botId || snapshot.bot.revision !== row.revision) {
           fail(
@@ -846,15 +782,7 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
           snapshot
         };
 
-        const versionParsed = botConfigurationVersionSchema.safeParse(versionCandidate);
-        if (!versionParsed.success) {
-          fail(
-            'CONFIGURATION_CORRUPTED_RECORD',
-            `Invalid BotConfigurationVersion ${row.version_id}: ${versionParsed.error.message}`,
-            500
-          );
-        }
-        return versionParsed.data;
+        return parseRecord(botConfigurationVersionSchema, versionCandidate, `Invalid BotConfigurationVersion ${row.version_id}`);
       });
 
       return run();
@@ -884,7 +812,7 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
           assertPositiveSafeInteger(r.authorization_revision, 'change.authorizationRevision', String(r.sequence));
           assertPositiveSafeInteger(r.connection_generation, 'change.connectionGeneration', String(r.sequence));
 
-          const parseResult = botConfigChangeSchema.safeParse({
+          return parseRecord(botConfigChangeSchema, {
             sequence: r.sequence,
             botId: r.bot_id,
             changeKind: r.change_kind,
@@ -892,15 +820,7 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
             authorizationRevision: r.authorization_revision,
             connectionGeneration: r.connection_generation,
             timestamp: r.timestamp
-          });
-          if (!parseResult.success) {
-            fail(
-              'CONFIGURATION_CORRUPTED_RECORD',
-              `Corrupted change record sequence ${r.sequence}: ${parseResult.error.message}`,
-              500
-            );
-          }
-          return parseResult.data;
+          }, `Corrupted change record sequence ${r.sequence}`);
         });
       });
 

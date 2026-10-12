@@ -16,13 +16,14 @@ export const agentModelSettingsPatchSchema = z.object({
 export type AgentModelSettingsPatch = z.infer<typeof agentModelSettingsPatchSchema>;
 const storedSchema = z.object({ model: text.optional(), baseUrl: baseUrl.optional(), authMode: z.enum(['bearer', 'api-key']).optional(), referenceKey: z.string().optional() }).strict();
 const key = (id: string) => `dutydeck.agent_model.${id}`;
+const isClaudeCode = (agent: AgentConfig) => ['claude', 'claude-code'].includes(agent.adapterId ?? agent.id);
 
 export class AgentModelSettings {
   constructor(private readonly repos: Pick<RepositoryBundle, 'config' | 'agents'>, private readonly defaults: AgentConfig[], private readonly provider?: LocalFileSecretProvider) {}
   private baseline(id: string) {
     const agent = this.defaults.find(item => item.id === id);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Unknown agent', 404);
-    if (!['claude', 'claude-code'].includes(agent.adapterId ?? agent.id)) throw new RuntimeError('AGENT_MODEL_SETTINGS_UNSUPPORTED', '目前只支持 Claude Code 的模型服务配置', 400);
+    if (!isClaudeCode(agent)) throw new RuntimeError('AGENT_MODEL_SETTINGS_UNSUPPORTED', '目前只支持 Claude Code 的模型服务配置', 400);
     return agent;
   }
   private async read(id: string) { return storedSchema.parse(JSON.parse(await this.repos.config.get(key(id)) ?? '{}')); }
@@ -56,7 +57,7 @@ export class AgentModelSettings {
     return Promise.all(agents.map(async agent => ({ ...agent, model: (await this.read(agent.id)).model || agent.model })));
   }
   async resolve(agent: AgentConfig): Promise<AgentConfig> {
-    if (!['claude', 'claude-code'].includes(agent.adapterId ?? agent.id)) return agent;
+    if (!isClaudeCode(agent)) return agent;
     const saved = await this.read(agent.id);
     if (!saved.referenceKey) return agent;
     const env = { ...agent.env, ...(saved.baseUrl ? { ANTHROPIC_BASE_URL: saved.baseUrl } : {}) };

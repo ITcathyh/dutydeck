@@ -11,6 +11,7 @@
 import { participationLevelLabels, participationLevelOf } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import { formatRoleWelcomeIntro } from './role-format.js';
+import { markdownElement } from './card-elements.js';
 
 export type WelcomeRouting = Pick<StoredLarkConfig, 'mentionPolicy' | 'p2pMode' | 'groupReplyMode' | 'roleTitle' | 'roleScope'> & {
   chatMode?: 'group' | 'topic' | 'p2p';
@@ -57,12 +58,6 @@ const maxWelcomeCommands = 6;
 export function welcomedDedupeKey(appId: string, chatId: string): string {
   return `lark.welcomed.${appId}.${chatId}`;
 }
-
-const markdownElement = (elementId: string, content: string): LarkCardElement => ({
-  tag: 'markdown',
-  element_id: elementId,
-  content
-});
 
 /**
  * 纯卡内容构建。capabilities 缺省时只展示无能力门的 /help——

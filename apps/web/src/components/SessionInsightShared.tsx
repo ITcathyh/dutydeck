@@ -1,5 +1,4 @@
 import type {
-  CountMetric,
   ContinuousMetric,
   FileMetrics,
   InsightAvailability,
@@ -58,9 +57,6 @@ export const metricValueText = (metric: Metric): string => {
   if (metric.value === null) return '未知';
   return metric.value.toLocaleString('zh-CN');
 };
-
-export const formatCount = (metric: CountMetric | null | undefined): string =>
-  !metric ? '未知' : metricValueText(metric);
 
 /** 耗时指标（毫秒）格式化为中文时长；null 为未知。 */
 export const formatDurationMs = (metric: ContinuousMetric | null | undefined): string => {

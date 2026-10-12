@@ -114,10 +114,6 @@ function nextContextSequence(db: Database.Database, scope: CollaborationScope): 
   return updated.context_revision;
 }
 
-function advanceContextRevision(db: Database.Database, scope: CollaborationScope): number {
-  return nextContextSequence(db, scope);
-}
-
 function recordActivity(db: Database.Database, activity: CollaborationActivity): void {
   collaborationActivitySchema.parse(activity);
   db.prepare(`
@@ -177,6 +173,33 @@ function rowToObservation(row: ObservationRow): CollaborationObservation {
     origin: row.origin,
     missing: JSON.parse(row.missing_json),
     revision: row.revision
+  });
+}
+
+function toObservation(
+  id: string,
+  scope: CollaborationScope,
+  sequence: number,
+  input: ObserveCollaborationInput,
+  revision: number
+): CollaborationObservation {
+  return collaborationObservationSchema.parse({
+    id,
+    scope,
+    sequence,
+    source: input.source,
+    eventId: input.eventId,
+    occurredAt: input.occurredAt,
+    receivedAt: input.receivedAt,
+    senderId: input.senderId,
+    senderKind: input.senderKind,
+    threadId: input.threadId,
+    messageId: input.messageId,
+    text: input.text,
+    refs: input.refs,
+    origin: input.origin,
+    missing: input.missing,
+    revision
   });
 }
 
@@ -467,6 +490,25 @@ function rowToActivity(row: ActivityRow): CollaborationActivity {
   });
 }
 
+function defaultSettings(scope: CollaborationScope): CollaborationSettings {
+  return collaborationSettingsSchema.parse({
+    scope,
+    revision: 0,
+    participation: 'off',
+    inheritParticipation: true,
+    instructions: '',
+    notificationsPaused: false,
+    maxProactivePerHour: 6,
+    retentionDays: 30,
+    policyVersion: 'v1',
+    updatedAt: DEFAULT_SETTINGS_UPDATED_AT
+  });
+}
+
+function clampLimit(limit: number | undefined, fallback: number): number {
+  return limit !== undefined && Number.isFinite(limit) && limit > 0 ? Math.min(500, Math.trunc(limit)) : fallback;
+}
+
 export function createCollaborationRepository(sqlite: Database.Database): CollaborationRepository {
   return {
     async getSettings(scope: CollaborationScope): Promise<CollaborationSettings> {
@@ -474,18 +516,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
         .prepare('SELECT * FROM collaboration_settings WHERE app_id = ? AND chat_id = ?')
         .get(scope.appId, scope.chatId) as SettingsRow | undefined;
       if (!row) {
-        return collaborationSettingsSchema.parse({
-          scope,
-          revision: 0,
-          participation: 'off',
-          inheritParticipation: true,
-          instructions: '',
-          notificationsPaused: false,
-          maxProactivePerHour: 6,
-          retentionDays: 30,
-          policyVersion: 'v1',
-          updatedAt: DEFAULT_SETTINGS_UPDATED_AT
-        });
+        return defaultSettings(scope);
       }
       return rowToSettings(row);
     },
@@ -502,18 +533,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           .get(scope.appId, scope.chatId) as SettingsRow | undefined;
         const currentSettings = existingRow
           ? rowToSettings(existingRow)
-          : collaborationSettingsSchema.parse({
-              scope,
-              revision: 0,
-              participation: 'off',
-              inheritParticipation: true,
-              instructions: '',
-              notificationsPaused: false,
-              maxProactivePerHour: 6,
-              retentionDays: 30,
-              policyVersion: 'v1',
-              updatedAt: DEFAULT_SETTINGS_UPDATED_AT
-            });
+          : defaultSettings(scope);
 
         if (validatedPatch.expectedRevision !== currentSettings.revision) {
           throw new RuntimeError(
@@ -584,7 +604,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           createdAt: updatedTime
         });
 
-        advanceContextRevision(sqlite, scope);
+        nextContextSequence(sqlite, scope);
         return newSettings;
       })();
     },
@@ -631,19 +651,6 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
         if (existingRow) {
           const existing = rowToObservation(existingRow);
 
-          // History backfill race: an already-live observation must never be touched
-          // by a history re-read. Return it atomically, unchanged — stale history must
-          // not overwrite newer live text/identity/refs, and no sequence advances.
-          if (existing.origin === 'live' && validatedInput.origin === 'history') {
-            const currentCounter = getOrCreateScope(sqlite, scope);
-            return {
-              observation: existing,
-              created: false,
-              changed: false,
-              contextRevision: currentCounter.context_revision
-            };
-          }
-
           // Only receivedAt differs (delivery redelivery): receivedAt is excluded from
           // the change comparison, so sequence/contextRevision do not advance.
           const hasContentChanged =
@@ -657,7 +664,10 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
             JSON.stringify(existing.missing) !== JSON.stringify(validatedInput.missing) ||
             existing.occurredAt !== validatedInput.occurredAt;
 
-          if (!hasContentChanged) {
+          // History backfill race: an already-live observation must never be touched
+          // by a history re-read. Return it atomically, unchanged — stale history must
+          // not overwrite newer live text/identity/refs, and no sequence advances.
+          if ((existing.origin === 'live' && validatedInput.origin === 'history') || !hasContentChanged) {
             const currentCounter = getOrCreateScope(sqlite, scope);
             return {
               observation: existing,
@@ -702,24 +712,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
             existing.id
           );
 
-          const updatedObs = collaborationObservationSchema.parse({
-            id: existing.id,
-            scope,
-            sequence: newSeq,
-            source: validatedInput.source,
-            eventId: validatedInput.eventId,
-            occurredAt: validatedInput.occurredAt,
-            receivedAt: validatedInput.receivedAt,
-            senderId: validatedInput.senderId,
-            senderKind: validatedInput.senderKind,
-            threadId: validatedInput.threadId,
-            messageId: validatedInput.messageId,
-            text: validatedInput.text,
-            refs: validatedInput.refs,
-            origin: validatedInput.origin,
-            missing: validatedInput.missing,
-            revision: newRevision
-          });
+          const updatedObs = toObservation(existing.id, scope, newSeq, validatedInput, newRevision);
 
           return {
             observation: updatedObs,
@@ -758,24 +751,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           revision
         );
 
-        const createdObs = collaborationObservationSchema.parse({
-          id,
-          scope,
-          sequence: seq,
-          source: validatedInput.source,
-          eventId: validatedInput.eventId,
-          occurredAt: validatedInput.occurredAt,
-          receivedAt: validatedInput.receivedAt,
-          senderId: validatedInput.senderId,
-          senderKind: validatedInput.senderKind,
-          threadId: validatedInput.threadId,
-          messageId: validatedInput.messageId,
-          text: validatedInput.text,
-          refs: validatedInput.refs,
-          origin: validatedInput.origin,
-          missing: validatedInput.missing,
-          revision
-        });
+        const createdObs = toObservation(id, scope, seq, validatedInput, revision);
 
         return {
           observation: createdObs,
@@ -817,7 +793,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
     },
 
     async snapshot(scope: CollaborationScope, limit?: number): Promise<CollaborationSnapshot> {
-      const obsLimit = limit !== undefined && Number.isFinite(limit) && limit > 0 ? Math.min(500, Math.trunc(limit)) : DEFAULT_OBSERVATION_WINDOW;
+      const obsLimit = clampLimit(limit, DEFAULT_OBSERVATION_WINDOW);
 
       return sqlite.transaction(() => {
         const counter = getOrCreateScope(sqlite, scope);
@@ -826,18 +802,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           .get(scope.appId, scope.chatId) as SettingsRow | undefined;
         const settings = settingsRow
           ? rowToSettings(settingsRow)
-          : collaborationSettingsSchema.parse({
-              scope,
-              revision: 0,
-              participation: 'off',
-              inheritParticipation: true,
-              instructions: '',
-              notificationsPaused: false,
-              maxProactivePerHour: 6,
-              retentionDays: 30,
-              policyVersion: 'v1',
-              updatedAt: DEFAULT_SETTINGS_UPDATED_AT
-            });
+          : defaultSettings(scope);
 
         const obsRowsDesc = sqlite.prepare(`
           SELECT * FROM collaboration_observations
@@ -972,7 +937,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           createdAt
         });
 
-        advanceContextRevision(sqlite, scope);
+        nextContextSequence(sqlite, scope);
 
         return collaborationFollowupSchema.parse({
           id,
@@ -1103,7 +1068,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           createdAt: updatedAt
         });
 
-        advanceContextRevision(sqlite, scope);
+        nextContextSequence(sqlite, scope);
 
         return collaborationFollowupSchema.parse({
           id,
@@ -1191,7 +1156,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           createdAt
         });
 
-        advanceContextRevision(sqlite, scope);
+        nextContextSequence(sqlite, scope);
 
         return collaborationMandateSchema.parse({
           id,
@@ -1334,7 +1299,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           createdAt: updatedAt
         });
 
-        advanceContextRevision(sqlite, scope);
+        nextContextSequence(sqlite, scope);
 
         return collaborationMandateSchema.parse({
           id,
@@ -1402,7 +1367,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
     },
 
     async listDecisions(scope: CollaborationScope, limit?: number): Promise<CollaborationDecision[]> {
-      const maxLimit = limit !== undefined && Number.isFinite(limit) && limit > 0 ? Math.min(500, Math.trunc(limit)) : 50;
+      const maxLimit = clampLimit(limit, 50);
       const rows = sqlite.prepare(`
         SELECT * FROM collaboration_decisions
         WHERE app_id = ? AND chat_id = ?
@@ -1603,7 +1568,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
     },
 
     async listActions(scope?: CollaborationScope, limit?: number): Promise<CollaborationAction[]> {
-      const maxLimit = limit !== undefined && Number.isFinite(limit) && limit > 0 ? Math.min(500, Math.trunc(limit)) : 50;
+      const maxLimit = clampLimit(limit, 50);
       if (scope) {
         const rows = sqlite.prepare(`
           SELECT * FROM collaboration_actions
@@ -1724,7 +1689,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
     },
 
     async listActivities(scope: CollaborationScope, limit?: number): Promise<CollaborationActivity[]> {
-      const maxLimit = limit !== undefined && Number.isFinite(limit) && limit > 0 ? Math.min(500, Math.trunc(limit)) : 50;
+      const maxLimit = clampLimit(limit, 50);
       const rows = sqlite.prepare(`
         SELECT * FROM collaboration_activities
         WHERE app_id = ? AND chat_id = ?

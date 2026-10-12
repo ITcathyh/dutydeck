@@ -2,9 +2,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { pollScreenReady } from './screen-ready-helper.js';
 import { buildCwdTrustArgs } from './cwd-trust.js';
-import { waitForInputEcho, waitForQuietScreen } from './input-settle.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { delay, waitForInputEcho, waitForQuietScreen } from './input-settle.js';
 
 /** Codex 活动态 busy 标记：turn 进行中重绘的状态行。 */
 const CODEX_ACTIVE_BUSY_PATTERN = /Working[^\r\n]{0,160}esc to interrupt/i;

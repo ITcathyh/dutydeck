@@ -1,6 +1,5 @@
 import { constants } from 'node:fs';
 import { lstat, open, readdir, realpath, stat } from 'node:fs/promises';
-import { resolve } from 'node:path';
 import { LegacyImportError } from './types.js';
 
 export interface StableFileSnapshot {
@@ -105,8 +104,4 @@ export async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-export function resolveInputPath(base: string, value: string): string {
-  return resolve(base, value);
 }

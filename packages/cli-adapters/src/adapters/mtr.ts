@@ -1,6 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { submitPrompt } from './input-settle.js';
 
 /** mtr 原生会话 id 形态：`ses_` + 纯字母数字。dutydeck 的 `ses_<uuid>` 带连字符，
  *  **不满足**这个形态，必须归一后再传。 */
@@ -45,15 +44,7 @@ export function createMtrAdapter(): CliAdapter {
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
-      if (backend.sendText && backend.sendSpecialKeys) {
-        (await backend.sendText(prompt));
-        await delay(200);
-        (await backend.sendSpecialKeys('Enter'));
-      } else {
-        (await backend.write(prompt));
-        await delay(1000);
-        (await backend.write('\r'));
-      }
+      await submitPrompt(backend, prompt);
     },
 
     buildResumeCommand(sessionId: string): string[] {

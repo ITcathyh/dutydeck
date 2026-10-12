@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { RuntimeError, alarmSubscriptionSchema, collaborationScopeSchema, updateCollaborationSettingsInputSchema, updateFollowupInputSchema, type CollaborationScope } from '@dutydeck/shared';
+import { RuntimeError, alarmSubscriptionSchema, collaborationScopeSchema, parseLarkSourceId, updateCollaborationSettingsInputSchema, updateFollowupInputSchema, type CollaborationScope } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { CollaborationService } from './collaboration-service.js';
 import type { CollaborationEvaluation } from './collaboration-evaluation.js';
@@ -53,7 +53,7 @@ export async function registerCollaborationRoutes(app: FastifyInstance, options:
     options.tools.assertWorkbenchTurn(sessionId, active.taskId, typeof request.headers['x-dutydeck-work-turn'] === 'string' ? request.headers['x-dutydeck-work-turn'] : undefined);
     const session = await options.runtime.getSession(sessionId);
     const binding = session && larkAgentSessionBinding(session);
-    if (!binding || binding.chatType !== 'group' || session?.sourceId?.split(':')[3] === 'collaboration') throw new RuntimeError('COLLABORATION_SCOPE_REQUIRED', '请在群内的当前指令中管理委托。', 403);
+    if (!binding || binding.chatType !== 'group' || parseLarkSourceId(session?.sourceId).scope[0] === 'collaboration') throw new RuntimeError('COLLABORATION_SCOPE_REQUIRED', '请在群内的当前指令中管理委托。', 403);
     return { scope: { appId: binding.appId, chatId: binding.chatId }, actorId: active.actorId, taskId: active.taskId, origin: binding.threadRootMessageId ? { threadRootMessageId: binding.threadRootMessageId } : {} };
   };
   const createInput = (context: Context, body: unknown) => {

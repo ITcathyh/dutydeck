@@ -132,8 +132,6 @@ export const zSafeIntPositive = z
   .positive()
   .refine(n => Number.isSafeInteger(n), { message: 'Must be a positive safe integer' });
 
-export const insightSha256HexSchema = sha256HexSchema;
-
 const utf8ByteLength = (str: string): number => new TextEncoder().encode(str).length;
 
 export const utf8ExcerptSchema = z
@@ -180,21 +178,6 @@ export const continuousMetricSchema = z
   .strict();
 export type ContinuousMetric = z.infer<typeof continuousMetricSchema>;
 
-export const metricSchema = z
-  .object({
-    value: z
-      .number()
-      .nullable()
-      .refine(v => v === null || (Number.isFinite(v) && v >= 0), {
-        message: 'Metric value must be null or finite non-negative number'
-      }),
-    quality: z.enum(insightQualityLevels),
-    status: z.enum(insightMetricStatuses),
-    evidenceCount: zSafeIntNonNegative,
-    missingCount: zSafeIntNonNegative,
-    reasonCodes: z.array(z.string()).default([])
-  })
-  .strict();
 export type Metric = CountMetric | ContinuousMetric;
 
 export function createCountMetric(params: {

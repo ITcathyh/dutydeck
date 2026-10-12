@@ -25,6 +25,7 @@ import { isLarkCardActionAvailable, larkRelaunchLabels, larkReplayLabels, type L
 import { larkGroupKey, listPersistedLarkSessions, resolveLarkSession } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
+import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
 import { larkCardChannel, type LarkRelaunchAction, type LarkRelaunchClaim, relaunchRetainedKey, larkScopeContinuesFor, sendTaskCard } from './coordinator-core.js';
 import { LarkCoordinatorCards } from './coordinator-cards.js';
 
@@ -159,7 +160,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         const latest = mapping ? (await this.runtime.getVerifications?.(mapping.sessionId))?.[0] : undefined;
         // 运行时启动时已把上个进程遗留的执行中记录改成中断；还在执行中，说明是本进程换了监听，验证其实还在跑。
         if (latest?.status === 'running') continue;
-        const saved = mapping?.extra ? JSON.parse(mapping.extra) as PersistedLarkCardTask : undefined;
+        const saved = parseOptionalCardTask(mapping?.extra);
         if (mapping && saved?.final_card_input && (saved.turn ?? 0) === running.turn) {
           const effective = saved.chat_type === 'group' && this.groupManager
             ? await this.groupManager.resolved(config, saved.chat_id).catch(() => config) : config;
@@ -181,7 +182,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     if (!config || !context?.messageId || !context.chatId) return;
     const mapping = await this.cardMappings?.get(larkCardChannel(config.appId), taskId);
     if (!mapping?.extra) return;
-    const saved = JSON.parse(mapping.extra) as PersistedLarkCardTask;
+    const saved = parseCardTask(mapping.extra);
     if (saved.app_id !== config.appId || saved.chat_id !== context.chatId || saved.card_message_id !== context.messageId
       || !saved.sender_open_id || !saved.runtime_task_id || (turn !== undefined && turn !== (saved.turn ?? 0))) return;
     const target = (await this.runtime.getTasks?.(mapping.sessionId))?.find(task => task.id === saved.runtime_task_id);
@@ -204,7 +205,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     if (!config || !context?.messageId || !context.chatId) return;
     const mapping = await this.cardMappings?.get(larkCardChannel(config.appId), taskId);
     if (!mapping?.extra) return;
-    const saved = JSON.parse(mapping.extra) as PersistedLarkCardTask;
+    const saved = parseCardTask(mapping.extra);
     if (saved.app_id !== config.appId || saved.chat_id !== context.chatId || saved.final_message_id !== context.messageId
       || !saved.final_card_input || (turn !== undefined && turn !== (saved.turn ?? 0))) return;
     return this.restoredCardTask(config, { externalId: taskId, sessionId: mapping.sessionId }, saved);
@@ -226,7 +227,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
    */
   private async relaunchSource(appId: string, taskId: string, turn: number) {
     const mapping = await this.cardMappings?.get(larkCardChannel(appId), taskId);
-    const saved = mapping?.extra ? JSON.parse(mapping.extra) as PersistedLarkCardTask : undefined;
+    const saved = parseOptionalCardTask(mapping?.extra);
     if (!mapping || !saved || saved.app_id !== appId || !saved.card_message_id || !saved.runtime_task_id || !saved.prompt?.trim()
       || !saved.scope_id || saved.scope_id.startsWith('message:') || (saved.turn ?? 0) !== turn) return undefined;
     const raw = await this.workflowOptions.store?.get(`lark.inbox.${appId}.${taskId}`);
@@ -446,7 +447,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     const channel = larkCardChannel(claim.appId);
     for (let attempt = 0; attempt < 5; attempt++) {
       const current = await this.cardMappings!.get(channel, claim.taskId);
-      const saved = current?.extra ? JSON.parse(current.extra) as PersistedLarkCardTask : undefined;
+      const saved = parseOptionalCardTask(current?.extra);
       if (!current || !saved || (saved.turn ?? 0) !== claim.turn || Boolean(saved.relaunch_pending) === pending) return;
       const next: PersistedLarkCardTask = { ...saved };
       if (pending) next.relaunch_pending = true;
@@ -727,8 +728,8 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   /** 某个 runtime 任务当前那一轮的卡片映射（按 runtime_task_id 找）。 */
   protected async cardTaskFor(appId: string, sessionId: string, runtimeTaskId: string) {
     const mapping = (await this.cardMappings?.list(larkCardChannel(appId)) ?? []).find(item => item.sessionId === sessionId && item.extra
-      && (JSON.parse(item.extra) as PersistedLarkCardTask).runtime_task_id === runtimeTaskId);
-    return { mapping, saved: mapping?.extra ? JSON.parse(mapping.extra) as PersistedLarkCardTask : undefined };
+      && parseCardTask(item.extra).runtime_task_id === runtimeTaskId);
+    return { mapping, saved: parseOptionalCardTask(mapping?.extra) };
   }
 
   /** 已经失败或中断的这一轮能不能「在原对话继续」，按 runtime 任务找（话题里说「继续」时用）。 */
@@ -757,7 +758,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       const config = await readLarkConfig(store, appId);
       if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法执行此操作' };
       const mapping = await this.cardMappings.get(larkCardChannel(appId), taskId);
-      const saved = mapping?.extra ? JSON.parse(mapping.extra) as PersistedLarkCardTask : undefined;
+      const saved = parseOptionalCardTask(mapping?.extra);
       if (!mapping || !saved || saved.app_id !== appId || saved.chat_id !== context.chatId || (saved.turn ?? 0) !== turn || !saved.runtime_task_id
         || ![saved.card_message_id, saved.final_message_id].includes(context.messageId) || !saved.scope_id || saved.scope_id.startsWith('message:')) {
         return { type: 'warning', content: '此卡已失效，请在最新的任务卡上操作' };
@@ -853,7 +854,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       const raw = await store.get(key);
       const record = raw ? JSON.parse(raw) as LarkRelaunchClaim : undefined;
       const mapping = await this.cardMappings.get(larkCardChannel(appId), taskId);
-      const saved = mapping?.extra ? JSON.parse(mapping.extra) as PersistedLarkCardTask : undefined;
+      const saved = parseOptionalCardTask(mapping?.extra);
       if (!raw || !record?.redispatch || !mapping || !saved || record.chatId !== context.chatId || saved.card_message_id !== context.messageId || (saved.turn ?? 0) !== turn) {
         return { type: 'warning', content: '此卡已失效，请在最新的任务卡上操作' };
       }

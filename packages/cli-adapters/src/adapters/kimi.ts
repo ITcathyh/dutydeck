@@ -1,7 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+import { delay, submitPrompt } from './input-settle.js';
 
 const BRACKETED_PASTE_START = '\x1b[200~';
 const BRACKETED_PASTE_END = '\x1b[201~';
@@ -33,15 +32,7 @@ export function createKimiAdapter(): CliAdapter {
         kimiFirstWriteSeen.add(backend);
         await delay(KIMI_FIRST_WRITE_SETTLE_MS);
       }
-      if (backend.pasteText && backend.sendSpecialKeys) {
-        (await backend.pasteText(prompt));
-        await delay(200);
-        (await backend.sendSpecialKeys('Enter'));
-      } else {
-        (await backend.write(BRACKETED_PASTE_START + prompt + BRACKETED_PASTE_END));
-        await delay(1000);
-        (await backend.write('\r'));
-      }
+      await submitPrompt(backend, prompt, { paste: true, fallbackText: BRACKETED_PASTE_START + prompt + BRACKETED_PASTE_END });
     },
 
     /** Kimi 自己铸会话 id；dutydeck 的 `ses_<uuid>` 不是它的 id → null，

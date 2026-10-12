@@ -7,6 +7,8 @@
 // 普通文本恒定上界约 460 字（标题 + 5 行 × 83 + 换行 + 溢出提示）；含 & < > 的文本
 // 转义后会变长，此时由总长 500 兜底减行（减行后条数计入溢出提示），任何输入都不破限。
 
+import { escapeCardInline } from './card-elements.js';
+
 /** 最多展示的排队条目数。 */
 export const QUEUE_SUMMARY_MAX_ITEMS = 5;
 /** 摘要 markdown 总字符上限。 */
@@ -44,8 +46,7 @@ const normalizeLine = (value: string) => value.replace(/\s+/g, ' ').trim();
  * & < > 转义在截断之后做：避免把 &amp; 这类实体截成半截裸文本。
  * 导出给 /queue 的回执复用：回显同一批 prompt，必须用同一份转义，否则 <at> 会在卡面变成真的 @。
  */
-export const escapeLarkPromptEcho = (value: string) =>
-  value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+export const escapeLarkPromptEcho = escapeCardInline;
 
 /** 按码点截断原文并补省略号：不在 emoji 代理对中间下刀；返回值原文长度 = limit + 1。 */
 const clipCodePoints = (text: string, limit: number): string => {
