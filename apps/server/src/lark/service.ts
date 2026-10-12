@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { LifecycleFetch } from '../workbench-fetch.js';
+import { requestSignal, type LifecycleFetch } from '../workbench-fetch.js';
 import type { PermissionMode } from '@dutydeck/shared';
 import type { ContactIdType, ContactUser } from './owner-identity.js';
 import { executeWithLarkGate, resolveLarkGateConfig, LarkCircuitOpenError } from './api-gate.js';
@@ -1200,11 +1200,17 @@ export const larkIdentityPermissionHelp = (error?: unknown, appId?: string) => {
 
 type Fetch = typeof globalThis.fetch;
 
+/**
+ * 整个进程只建一个：Node 22 会把每个用过 run() 的 AsyncLocalStorage 永久留在全局列表里，之后每新建一个 promise 都要遍历一遍。
+ * LarkCardService 按需频繁新建，每个实例各带一个会让 CPU 和内存随运行时间一直涨。请求预算按 service 实例分开存放。
+ */
+const requestBudgets = new AsyncLocalStorage<ReadonlyMap<LarkCardService, { signal: AbortSignal; remaining: number }>>();
+
 export class LarkCardService {
   private token?: string;
   private tokenExpiresAt = 0;
   private readonly lifecycle = new AbortController();
-  private readonly requests = new AsyncLocalStorage<{ signal: AbortSignal; remaining: number }>();
+  private budget() { return requestBudgets.getStore()?.get(this); }
   private loadingImageKey?: string;
   private loadingImagePromise?: Promise<string | undefined>;
 
@@ -1214,20 +1220,17 @@ export class LarkCardService {
 
   /** Authentication and business retries share one deadline and failed-attempt budget. */
   withRequestBudget<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
-    const current = this.requests.getStore();
+    const current = this.budget();
     if (current) { current.signal.throwIfAborted(); return operation(current.signal); }
     const configured = Number(this.config.env?.LARK_API_REQUEST_TIMEOUT_MS ?? process.env.LARK_API_REQUEST_TIMEOUT_MS);
     const timeoutMs = Number.isFinite(configured) && configured > 0 ? configured : 15_000;
-    const signals = [this.lifecycle.signal, AbortSignal.timeout(timeoutMs)];
-    const inherited = (this.fetcher as LifecycleFetch).signal;
-    if (inherited) signals.push(inherited);
-    const signal = AbortSignal.any(signals);
+    const signal = requestSignal([this.lifecycle.signal, (this.fetcher as LifecycleFetch).signal], timeoutMs);
     signal.throwIfAborted();
-    return this.requests.run({ signal, remaining: resolveLarkGateConfig(this.config.env).retryMaxAttempts + 1 }, () => operation(signal));
+    return requestBudgets.run(new Map(requestBudgets.getStore()).set(this, { signal, remaining: resolveLarkGateConfig(this.config.env).retryMaxAttempts + 1 }), () => operation(signal));
   }
 
   private async fetch(input: string, init: RequestInit): Promise<Response> {
-    const context = this.requests.getStore()!;
+    const context = this.budget()!;
     context.signal.throwIfAborted();
     if (context.remaining <= 0) throw new LarkServiceError('LARK_REQUEST_BUDGET_EXHAUSTED', '飞书请求的总尝试预算已用尽，等待持久化对账重投。', 503);
     try { return await this.fetcher(input, { ...init, signal: context.signal }); }
@@ -1717,7 +1720,7 @@ export class LarkCardService {
         const data = new Uint8Array(await response.arrayBuffer());
         signal.throwIfAborted();
         return { data, ...(contentType ? { contentType } : {}) };
-      }, { env: this.config.env, signal, canRetry: () => this.requests.getStore()!.remaining > 0, onFailure: () => { this.requests.getStore()!.remaining--; } });
+      }, { env: this.config.env, signal, canRetry: () => this.budget()!.remaining > 0, onFailure: () => { this.budget()!.remaining--; } });
     });
   }
 
@@ -1999,10 +2002,10 @@ export class LarkCardService {
           }
           return payload;
         }, { env: options.retry === false ? { ...this.config.env, LARK_API_RETRY_MAX_ATTEMPTS: '0' } : this.config.env, signal,
-          canRetry: () => this.requests.getStore()!.remaining > 0,
-          onFailure: () => { if (options.retry !== false) this.requests.getStore()!.remaining--; } });
+          canRetry: () => this.budget()!.remaining > 0,
+          onFailure: () => { if (options.retry !== false) this.budget()!.remaining--; } });
       } catch (error) {
-        if (this.requests.getStore()!.remaining <= 0 && error instanceof Error) Object.assign(error, { larkRequestExhausted: true });
+        if (this.budget()!.remaining <= 0 && error instanceof Error) Object.assign(error, { larkRequestExhausted: true });
         if (error instanceof LarkCircuitOpenError) {
           throw new LarkServiceError('LARK_CIRCUIT_OPEN', '飞书 OpenAPI 连续失败已触发熔断，暂时停止外发请求。请稍后重试，或检查机器人凭据与网络连通性。', 503, {
             appId: error.appId, openedAt: new Date(error.openedAt).toISOString()

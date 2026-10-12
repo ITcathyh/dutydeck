@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
-import { once } from 'node:events';
+import { getEventListeners, once } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createWorkbenchFetch } from './workbench-fetch.js';
+import { createWorkbenchFetch, requestSignal } from './workbench-fetch.js';
 
 const deferred = () => {
   let resolve!: () => void;
@@ -99,5 +99,33 @@ describe('createWorkbenchFetch', () => {
     (source === 'request' ? requestAbort : initAbort).abort();
     await rejected;
     await disconnected.promise;
+  });
+});
+
+describe('requestSignal', () => {
+  it('follows long-lived signals without adding them to AbortSignal.any and releases them at the deadline', async () => {
+    const lifecycle = new AbortController();
+    const any = vi.spyOn(AbortSignal, 'any');
+    const signal = requestSignal([lifecycle.signal, undefined], 50);
+    expect(any.mock.calls.flat(2)).not.toContain(lifecycle.signal);
+    expect(getEventListeners(lifecycle.signal, 'abort')).toHaveLength(1);
+    await vi.waitFor(() => expect(signal.reason).toMatchObject({ name: 'TimeoutError' }));
+    expect(getEventListeners(lifecycle.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('aborts with the reason of the long-lived signal, including one aborted before the request', () => {
+    const lifecycle = new AbortController();
+    const signal = requestSignal([lifecycle.signal], 15_000);
+    const reason = new Error('closed');
+    lifecycle.abort(reason);
+    expect(signal.reason).toBe(reason);
+    expect(requestSignal([new AbortController().signal, lifecycle.signal], 15_000).reason).toBe(reason);
+  });
+
+  it('keeps the workbench lifecycle signal out of AbortSignal.any for every request', async () => {
+    const any = vi.spyOn(AbortSignal, 'any');
+    for (let index = 0; index < 3; index++) await (await client.fetch(`${baseUrl}/ok`)).text();
+    expect(any).toHaveBeenCalledTimes(3);
+    expect(any.mock.calls.flat(2)).not.toContain(client.fetch.signal);
   });
 });
