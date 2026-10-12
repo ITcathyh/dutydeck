@@ -718,35 +718,48 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
 
   private async recoverLauncherSession(task: LarkTask): Promise<boolean> {
     const { group, config, event } = task;
-    if (task.launcherRecoveryAttempted || !task.runtimeTaskId || !this.cardMappings
-      || this.stopped || task.epoch !== (group.epoch ?? 0) || group.sessionId !== task.sessionId) return false;
+    const notRecovered = (reason: string) => {
+      this.log.info({ reason, taskId: task.id, runtimeTaskId: task.runtimeTaskId, sessionId: task.sessionId }, '未自动更换旧启动器会话');
+      return false;
+    };
+    if (task.launcherRecoveryAttempted) return notRecovered('already_attempted');
+    if (!task.runtimeTaskId) return notRecovered('runtime_task_missing');
+    if (!this.cardMappings) return notRecovered('card_mappings_unavailable');
+    if (this.stopped) return notRecovered('coordinator_stopped');
+    if (task.epoch !== (group.epoch ?? 0)) return notRecovered('scope_epoch_changed');
+    if (group.sessionId !== task.sessionId) return notRecovered('scope_session_changed');
     task.launcherRecoveryAttempted = true;
     task.launcherRecoveryPending = true;
     const previous = { ...task };
     try {
-      // 与 /new 相同的中断权限；新轮还会在 runTurn 中按原发送人重新授权。
-      if (config.managedGroup && !await this.isOperatorAllowed(config, event.senderOpenId, event.chatId, task.sessionId)
-        || await this.currentTurnInterruptDenial(config, event, task.sessionId!)) return false;
+      // 本轮在提交前已失败，无需操作旧会话创建者的权限；只保护别人正在执行的轮次。
+      // 新轮在 runTurn 中按原发送人重新授权。
+      if (await this.currentTurnInterruptDenial(config, event, task.sessionId!)) return notRecovered('current_turn_interrupt_denied');
       await this.saveCardTask(task, 'failed');
       if (task.inbox) await this.inbox!.update(task.inbox, { state: 'failed' });
-      if (this.stopped) return true;
-      if (task.epoch !== (group.epoch ?? 0) || group.sessionId !== task.sessionId) return false;
+      if (this.stopped) { notRecovered('coordinator_stopped'); return true; }
+      if (task.epoch !== (group.epoch ?? 0)) return notRecovered('scope_epoch_changed');
+      if (group.sessionId !== task.sessionId) return notRecovered('scope_session_changed');
       this.cancelUndeliveredRetries(group);
       const retirement = this.retireScopeSession(group, config, event, task.scopeId);
       const epoch = group.epoch!;
       const result = await retirement;
-      if (this.stopped) return true;
-      if (result.retained || group.epoch !== epoch) return false;
+      if (this.stopped) { notRecovered('coordinator_stopped'); return true; }
+      if (result.retained) return notRecovered('session_retained');
+      if (group.epoch !== epoch) return notRecovered('scope_epoch_changed');
       task.epoch = epoch;
       task.launchOptions = undefined;
       task.launcherRecoveryNote = true;
       task.retryable = undefined;
       await this.runTurn(task, true);
+      if (!task.runtimeTaskId || task.runtimeTaskId === previous.runtimeTaskId) {
+        notRecovered(this.stopped ? 'coordinator_stopped' : 'replacement_not_dispatched');
+      }
       return true;
     } catch (error) {
       this.log.warn({ error, taskId: task.id }, '自动更换旧启动器会话失败，交付 /new 指引');
       Object.assign(task, previous, { launcherRecoveryNote: previous.launcherRecoveryNote });
-      return false;
+      return notRecovered('recovery_error');
     } finally {
       task.launcherRecoveryPending = false;
     }

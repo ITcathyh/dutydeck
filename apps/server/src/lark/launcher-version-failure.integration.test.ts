@@ -7,6 +7,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentConfig, DriverContext, DriverFactory } from '@dutydeck/shared';
 import { LarkMessageCoordinator } from './coordinator.js';
+import { LarkGroupManager } from './group-management.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import { LARK_LAUNCHER_RECOVERY_NOTE } from './card-renderer.js';
@@ -76,11 +77,12 @@ const groupMessage = (id: string): LarkMessageEvent => ({
   mentions: [{ key: '@_user_1', name: 'Dutydeck', openId: 'ou_bot' }]
 });
 
-async function setup(prepareError: Error | ((sessionId: string) => Promise<void>)) {
+async function setup(prepareError: Error | ((sessionId: string) => Promise<void>), managedGroup = false) {
   const cwd = await mkdtemp(join(tmpdir(), 'dd-launcher-changed-'));
   const config: StoredLarkConfig = {
     appId: 'app', appSecret: 'fixture', name: 'Dutydeck', workspace: cwd, defaultAgentId: 'launcher-fixture',
     fullTrustConfirmed: true, listening: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false,
+    ...(managedGroup ? { groupReplyMode: 'shared' as const } : {}),
     groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 60_000, hideTraceOnComplete: false,
     allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
     highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'danger', riskControlMode: 'off'
@@ -112,14 +114,32 @@ async function setup(prepareError: Error | ((sessionId: string) => Promise<void>
     if (prepareError instanceof Error) throw prepareError;
     await prepareError(sessionId);
   }, sent);
+  let groupManager: LarkGroupManager | undefined;
   const runtime = new DutydeckRuntime(repos, {
     driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
-    driverFactory: factory
+    driverFactory: factory,
+    ...(managedGroup ? { authorizeExecution: (sessionId: string, actorId?: string) => groupManager!.prepareTurn(sessionId, actorId) } : {})
   });
-  const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any,
-    Math.random, 'ou_bot', undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
   await runtime.initialize([agent]);
+  if (managedGroup) {
+    groupManager = new LarkGroupManager(repos, { client: () => ({
+      getBotInfo: async () => ({ appName: config.appId, openId: 'ou_bot' }),
+      checkApplicationIdentity: async () => ({ verified: true, reportedAppId: config.appId, tenantKey: 'synthetic-tenant' }),
+      listChats: async () => ({ items: [{ chatId: 'oc_group', name: 'Launcher 群', chatMode: 'group' }], hasMore: false }),
+      listChatMembers: async () => ({ items: [
+        { memberId: 'ou_owner', openId: 'ou_owner', name: 'Owner', memberType: 'user' },
+        { memberId: 'ou_alice', openId: 'ou_alice', name: 'Alice', memberType: 'user' },
+        { memberId: 'ou_peer_bot', openId: 'ou_peer_bot', name: 'Peer bot', memberType: 'bot' }
+      ], hasMore: false, securityLimited: false }),
+      getUserEmails: async () => []
+    }) as any });
+    await groupManager.sync(config.appId);
+    await groupManager.save(config.appId, 'oc_group', { expectedRevision: 0, patch: { accessOverride: { mode: 'all_chat_members' } } });
+  }
+  const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const coordinator = new LarkMessageCoordinator(runtime, service as any, log,
+    Math.random, 'ou_bot', undefined, repos.channelMappings, undefined, undefined, groupManager, { store: repos.config });
   await coordinator.initializeWorkflows(config);
 
   const until = async (check: () => boolean | Promise<boolean>) => {
@@ -127,7 +147,7 @@ async function setup(prepareError: Error | ((sessionId: string) => Promise<void>
     throw new Error('condition not reached');
   };
   return {
-    cwd, config, repos, runtime, coordinator, issued, service, prepared, sent, until, factory, agent,
+    cwd, config, repos, runtime, coordinator, issued, service, prepared, sent, until, factory, agent, groupManager, log,
     async teardown() { coordinator.stop(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); },
     async runTurn(id: string, patch: Partial<LarkMessageEvent> = {}) {
       await coordinator.handle({ ...groupMessage(id), ...patch }, config);
@@ -143,6 +163,98 @@ async function setup(prepareError: Error | ((sessionId: string) => Promise<void>
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+
+it.each([
+  { senderType: 'app', senderOpenId: 'ou_peer_bot' },
+  { senderType: 'user', senderOpenId: 'ou_alice' }
+])('托管群 $senderType 发送者续聊别人创建的旧会话时能自动换新', async sender => {
+  let count = 0;
+  const h = await setup(async () => { if (++count === 2) throw new Error(LAUNCHER_ERROR); }, true);
+  cleanups.push(() => h.teardown());
+  const top = { rootId: undefined, threadId: undefined };
+  const old = await h.runTurn('om_owner', { ...top, senderOpenId: 'ou_owner' });
+  expect((await h.groupManager!.resolved(h.config, 'oc_group')).managedGroup).toBeDefined();
+  // 可以派发自己的请求，但没有操作旧会话创建者任务的权限。
+  expect(await h.groupManager!.authorize('app', 'oc_group', sender.senderOpenId, 'task.create', old.sessionId)).toMatchObject({ allowed: true });
+  expect(await h.groupManager!.authorize('app', 'oc_group', sender.senderOpenId, 'run.interrupt', old.sessionId)).toMatchObject({ allowed: false, code: 'operate_scope_required' });
+  const authorize = vi.spyOn(h.groupManager!, 'authorize');
+  const { task, resultInput } = await h.runTurn('om_managed_launcher', { ...top, ...sender });
+  expect(task.status).toBe('completed');
+  expect(resultInput.sessionId).not.toBe(old.sessionId);
+  expect((await h.runtime.getSession(old.sessionId))?.state).toBe('stopped');
+  expect(h.prepared).toEqual([old.sessionId, old.sessionId, resultInput.sessionId]);
+  expect(h.sent.filter(item => item.sessionId === resultInput.sessionId)).toHaveLength(1);
+  expect((await h.repos.tasks.get!(task.id))?.executionContext?.actorId).toBe(sender.senderOpenId);
+  expect(authorize.mock.calls.filter(call => call[2] === sender.senderOpenId && call[3] === 'task.create' && call.length === 5)).toHaveLength(2);
+  expect(h.issued.filter(input => input.cardKind === 'result' && input.taskId === 'om_managed_launcher').map(input => input.state)).toEqual(['completed']);
+  expect(h.service.update.mock.calls.filter(([input]) => input.taskId === 'om_managed_launcher').some(([input]) =>
+    JSON.stringify(buildLarkCard(input)).includes(LARK_LAUNCHER_RECOVERY_NOTE))).toBe(true);
+});
+
+it('失败事件先于 dispatch 返回时先缓存，取得任务号后仍能自动换新', async () => {
+  let count = 0;
+  const h = await setup(async () => { if (++count === 1) throw new Error(LAUNCHER_ERROR); });
+  cleanups.push(() => h.teardown());
+  const dispatch = h.runtime.dispatch.bind(h.runtime);
+  let failedTaskId: string | undefined;
+  vi.spyOn(h.runtime, 'dispatch').mockImplementationOnce(async (...args) => {
+    let failed!: (taskId: string) => void;
+    const failure = new Promise<string>(resolve => { failed = resolve; });
+    const unsubscribe = h.runtime.subscribe(args[0], event => {
+      const task = event.type === 'task' ? (event.data as any)?.task : undefined;
+      if (task?.status === 'failed') failed(task.id);
+    });
+    try {
+      const accepted = await dispatch(...args);
+      failedTaskId = await failure;
+      expect(failedTaskId).toBe(accepted.id);
+      expect(h.issued.some(input => input.cardKind === 'result')).toBe(false);
+      return accepted;
+    } finally { unsubscribe(); }
+  });
+  const { task, resultInput } = await h.runTurn('om_early_failure');
+  expect(failedTaskId).toBeDefined();
+  expect(task.status).toBe('completed');
+  expect(h.prepared).toHaveLength(2);
+  expect(h.prepared[0]).not.toBe(h.prepared[1]);
+  expect(h.sent).toHaveLength(1);
+  expect(h.issued.filter(input => input.cardKind === 'result')).toEqual([resultInput]);
+});
+
+it('托管群已有别人的下一轮在执行时不换会话，并记录拒绝原因', async () => {
+  let fail!: () => void;
+  const failureGate = new Promise<void>(resolve => { fail = resolve; });
+  let finishOther!: () => void;
+  const otherGate = new Promise<void>(resolve => { finishOther = resolve; });
+  let otherStarted!: () => void;
+  const otherRunning = new Promise<void>(resolve => { otherStarted = resolve; });
+  let count = 0;
+  const h = await setup(async () => {
+    if (++count === 2) { await failureGate; throw new Error(LAUNCHER_ERROR); }
+    if (count === 3) { otherStarted(); await otherGate; }
+  }, true);
+  cleanups.push(() => h.teardown());
+  cleanups.push(async () => { fail(); otherStarted(); finishOther(); });
+  const top = { rootId: undefined, threadId: undefined };
+  const old = await h.runTurn('om_guard_owner', { ...top, senderOpenId: 'ou_owner' });
+  const stop = vi.spyOn(h.runtime, 'stop');
+  // 暂停终态读事件，等下一条真正开始执行，再检查能否换会话。
+  const getRecentEvents = h.runtime.getRecentEvents.bind(h.runtime);
+  vi.spyOn(h.runtime, 'getRecentEvents').mockImplementationOnce(async (...args) => {
+    await otherRunning; return getRecentEvents(...args);
+  });
+  await h.coordinator.handle({ ...groupMessage('om_guard_failed'), ...top }, h.config);
+  await h.coordinator.handle({ ...groupMessage('om_guard_running'), ...top, senderOpenId: 'ou_owner' }, h.config);
+  await h.until(async () => (await h.runtime.getTasks(old.sessionId)).some(task => task.status === 'queued'));
+  fail();
+  await h.until(() => h.issued.some(input => input.cardKind === 'result' && input.taskId === 'om_guard_failed'));
+  expect(stop).not.toHaveBeenCalled();
+  expect((await h.runtime.getTasks(old.sessionId)).some(task => task.status === 'running')).toBe(true);
+  expect(h.log.info).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_guard_failed', reason: 'current_turn_interrupt_denied' }), '未自动更换旧启动器会话');
+  expect(h.issued.find(input => input.cardKind === 'result' && input.taskId === 'om_guard_failed').state).toBe('failed');
+  finishOther();
+  await h.until(() => h.issued.some(input => input.cardKind === 'result' && input.taskId === 'om_guard_running'));
+});
 
 it('新会话仍因启动器失败：只自动换一次，结果无错误码和重试，回调仍拒绝', async () => {
   const h = await setup(new Error(LAUNCHER_ERROR));
@@ -160,6 +272,7 @@ it('新会话仍因启动器失败：只自动换一次，结果无错误码和�
   expect(new Set(h.prepared).size).toBe(2);
   expect(h.sent).toHaveLength(0);
   expect(h.issued.filter(input => input.cardKind === 'result')).toHaveLength(1);
+  expect(h.log.info).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_launcher', reason: 'already_attempted' }), '未自动更换旧启动器会话');
   expect(resultInput.state).toBe('failed');
   expect(resultInput.capabilities.canRetry).toBe(false);
   expect(hasRetryButton(resultInput)).toBe(false);
@@ -260,6 +373,7 @@ it('结束旧会话失败时不重发，仍交付无重试的 /new 指引', asyn
   vi.spyOn(h.runtime, 'stop').mockRejectedValueOnce(new Error('stop unavailable'));
   const { resultInput } = await h.runTurn('om_cannot_replace');
   expect(h.prepared).toHaveLength(1);
+  expect(h.log.info).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_cannot_replace', reason: 'recovery_error' }), '未自动更换旧启动器会话');
   expect(hasRetryButton(resultInput)).toBe(false);
   const card = JSON.stringify(buildLarkCard(resultInput));
   expect(card).toContain('发送 /new');
@@ -338,9 +452,11 @@ it.each(['retire', 'start'] as const)('换会话的 %s 阶段重启：只恢复�
   await h.until(() => entered);
   await h.coordinator.reconcile(h.config);
   expect(h.issued.filter(input => input.cardKind === 'result')).toHaveLength(0);
+  const tasks = [...(h.coordinator as any).tasks.values()];
   h.coordinator.stop();
   release();
-  await h.until(() => [...(h.coordinator as any).tasks.values()].every((task: any) => !task.launcherRecoveryPending));
+  await h.until(() => tasks.every((task: any) => !task.launcherRecoveryPending));
+  expect(h.log.info).toHaveBeenCalledWith(expect.objectContaining({ taskId: `om_restart_${stage}`, reason: 'coordinator_stopped' }), '未自动更换旧启动器会话');
   await h.runtime.shutdown();
   const runtime = new DutydeckRuntime(h.repos, { driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: h.factory });
