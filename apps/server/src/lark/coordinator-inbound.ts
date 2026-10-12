@@ -145,6 +145,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           group, inbox: adopted, state: 'queued', events: [], turn: (saved.turn ?? 1) - 1, scopeId: saved.scope_id, epoch: group.epoch ?? 0,
           retryMaterialPrompt: saved.retry_material_prompt, sessionId: mapping.sessionId, cardMessageId: saved.card_message_id,
           runtimeTaskId: runtimeTask.id, startedAt: saved.started_at, lastSuccessfulElements: saved.last_successful_elements,
+          launcherRecoveryNote: saved.launcher_recovery_note,
           progressFrozen: saved.progress_frozen, resumeTask: runtimeTask, restoring: true };
         this.tasks.set(task.id, task);
         this.handledMessages.add(task.id);
@@ -882,7 +883,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   }
 
   /** /new 结束了这个会话：撤销其中等待重试的请求。入站记录由 /new 作废待执行请求时一并标成不再执行。 */
-  private cancelUndeliveredRetries(group: LarkGroup) {
+  protected cancelUndeliveredRetries(group: LarkGroup) {
     for (const { task, cancel } of [...this.undeliveredPending.values()]) {
       if (task.group !== group) continue;
       cancel();

@@ -9,13 +9,13 @@ import type { AgentConfig, DriverContext, DriverFactory } from '@dutydeck/shared
 import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
+import { LARK_LAUNCHER_RECOVERY_NOTE } from './card-renderer.js';
 import { buildLarkCard } from './service.js';
 
 /**
  * 旧会话启动器版本变化（ACP_LAUNCHER_VERSION_CHANGED）发生在任务提交前：
  * 真实 Runtime + SQLite，受控 ACP driver 在 prepareTurn（落「已提交」意图之前）抛错，
- * attempt 结算为 not_submitted/failed。验证结果卡不给「重试」、给 /new 说明，
- * 且普通的提交前失败仍然可重试。
+ * attempt 结算为 not_submitted/failed。验证自动换新只执行一次、卡片呈现与失败降级。
  */
 
 const LAUNCHER_ERROR = 'ACP_LAUNCHER_VERSION_CHANGED: 旧会话启动器版本变化，无法自动核验；原会话记录已保留，发 /new 开新会话后重试。';
@@ -28,8 +28,8 @@ const components = (value: any): any[] => {
 const hasRetryButton = (input: any) => components(buildLarkCard(input)).some(el => el.tag === 'button' && el.element_id === 'retry');
 
 /** 受控 ACP driver：在提交前的 prepareTurn 抛出调用方指定的错误。 */
-function controlledFactory(prepareError: Error): DriverFactory {
-  const factory: DriverFactory = (configured, _protocol, _onEvent, _onExit, _sessionId, context) => {
+function controlledFactory(prepare: (sessionId: string) => Promise<void>, sent: Array<{ sessionId: string; prompt: string }>): DriverFactory {
+  const factory: DriverFactory = (configured, _protocol, emit, _onExit, sessionId, context) => {
     const ctx = context as DriverContext;
     return {
       start: async () => {
@@ -43,9 +43,15 @@ function controlledFactory(prepareError: Error): DriverFactory {
         }
       },
       // markSubmissionPending 之前的准备阶段抛错：attempt 仍是 not_submitted。
-      prepareTurn: async () => { throw prepareError; },
+      prepareTurn: async () => prepare(sessionId),
       prepareSubmission: input => ctx.prepareSubmission(input),
-      send: async () => {},
+      send: async input => {
+        const prompt = typeof input === 'string' ? input : input.prompt;
+        sent.push({ sessionId, prompt });
+        if (typeof input !== 'string') input.onAccepted({ submissionId: input.submissionId, kind: 'provider_accepted', provider: 'acp', receiptRef: `prompt-result:${input.submissionId}`, digest: input.inputDigest });
+        emit({ type: 'text', data: { text: '请求已完成' } });
+        emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+      },
       interrupt: async () => {},
       resume: async () => {},
       stop: async () => {},
@@ -70,7 +76,7 @@ const groupMessage = (id: string): LarkMessageEvent => ({
   mentions: [{ key: '@_user_1', name: 'Dutydeck', openId: 'ou_bot' }]
 });
 
-async function setup(prepareError: Error) {
+async function setup(prepareError: Error | ((sessionId: string) => Promise<void>)) {
   const cwd = await mkdtemp(join(tmpdir(), 'dd-launcher-changed-'));
   const config: StoredLarkConfig = {
     appId: 'app', appSecret: 'fixture', name: 'Dutydeck', workspace: cwd, defaultAgentId: 'launcher-fixture',
@@ -99,7 +105,13 @@ async function setup(prepareError: Error) {
     listChatMessages: vi.fn(async () => ({ items: [], hasMore: false }))
   };
 
-  const factory = controlledFactory(prepareError);
+  const prepared: string[] = [];
+  const sent: Array<{ sessionId: string; prompt: string }> = [];
+  const factory = controlledFactory(async sessionId => {
+    prepared.push(sessionId);
+    if (prepareError instanceof Error) throw prepareError;
+    await prepareError(sessionId);
+  }, sent);
   const runtime = new DutydeckRuntime(repos, {
     driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
@@ -115,15 +127,15 @@ async function setup(prepareError: Error) {
     throw new Error('condition not reached');
   };
   return {
-    cwd, config, repos, runtime, coordinator,
+    cwd, config, repos, runtime, coordinator, issued, service, prepared, sent, until, factory, agent,
     async teardown() { coordinator.stop(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); },
-    async runTurn(id: string) {
-      await coordinator.handle(groupMessage(id), config);
+    async runTurn(id: string, patch: Partial<LarkMessageEvent> = {}) {
+      await coordinator.handle({ ...groupMessage(id), ...patch }, config);
       // 结果卡自带 sessionId，等它出现后再查 runtime task，避免在会话尚未创建时读取。
       await until(() => issued.some(input => input.cardKind === 'result' && input.taskId === id));
       const resultInput = issued.filter(input => input.cardKind === 'result' && input.taskId === id).at(-1)!;
-      await until(async () => (await runtime.getTasks(resultInput.sessionId)).some(task => task.status === 'failed'));
-      const task = (await runtime.getTasks(resultInput.sessionId)).find(item => item.status === 'failed')!;
+      await until(async () => (await runtime.getTasks(resultInput.sessionId)).some(task => task.status === resultInput.state));
+      const task = (await runtime.getTasks(resultInput.sessionId)).find(item => item.status === resultInput.state)!;
       return { task, sessionId: resultInput.sessionId, resultInput };
     }
   };
@@ -132,7 +144,7 @@ async function setup(prepareError: Error) {
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-it('启动器版本变化导致的提交前失败：结果卡无重试、给 /new 说明，回调也拒绝在旧会话重试', async () => {
+it('新会话仍因启动器失败：只自动换一次，结果无错误码和重试，回调仍拒绝', async () => {
   const h = await setup(new Error(LAUNCHER_ERROR));
   cleanups.push(() => h.teardown());
 
@@ -143,14 +155,18 @@ it('启动器版本变化导致的提交前失败：结果卡无重试、给 /ne
   expect(execution.currentAttempt?.outcome).toBe('failed');
   expect(execution.currentAttempt?.submissionState).toBe('not_submitted');
 
-  // 结果卡不提供「重试」，说明改成人话并保留错误码便于排查。
+  // 自动换一次后仍失败，结果卡只保留人话和 /new 指引。
+  expect(h.prepared).toHaveLength(2);
+  expect(new Set(h.prepared).size).toBe(2);
+  expect(h.sent).toHaveLength(0);
+  expect(h.issued.filter(input => input.cardKind === 'result')).toHaveLength(1);
   expect(resultInput.state).toBe('failed');
   expect(resultInput.capabilities.canRetry).toBe(false);
   expect(hasRetryButton(resultInput)).toBe(false);
   const card = JSON.stringify(buildLarkCard(resultInput));
   expect(card).toContain('这个对话的运行环境更新了，旧对话接不上');
   expect(card).toContain('发送 /new 开一个新对话后再发一次请求');
-  expect(card).toContain('ACP_LAUNCHER_VERSION_CHANGED');
+  expect(card).not.toContain('ACP_LAUNCHER_VERSION_CHANGED');
 
   // 回调端同样拒绝，不在旧会话上再跑。
   const response = await h.coordinator.handleAction(
@@ -171,4 +187,227 @@ it('普通的提交前失败仍可重试（防回归）', async () => {
   expect(resultInput.state).toBe('failed');
   expect(resultInput.capabilities.canRetry).toBe(true);
   expect(hasRetryButton(resultInput)).toBe(true);
+});
+
+it('自动换新后普通失败再手动重试，不再显示或持久化换新提示', async () => {
+  let count = 0;
+  const h = await setup(async () => {
+    if (++count === 1) throw new Error(LAUNCHER_ERROR);
+    if (count === 2) throw new Error('prepare phase blew up');
+  });
+  cleanups.push(() => h.teardown());
+  const { resultInput } = await h.runTurn('om_manual_retry');
+  expect(resultInput.turn).toBe(2);
+  expect(hasRetryButton(resultInput)).toBe(true);
+  const saved = async () => JSON.parse((await h.repos.channelMappings.get('lark-card:app', 'om_manual_retry'))!.extra!);
+  await h.until(async () => Boolean((await saved()).final_message_id));
+  expect((await saved()).launcher_recovery_note).toBe(true);
+  expect(h.service.update.mock.calls.some(([input]) => input.turn === 2
+    && JSON.stringify(buildLarkCard(input)).includes(LARK_LAUNCHER_RECOVERY_NOTE))).toBe(true);
+
+  const response = await h.coordinator.handleAction(
+    { action: 'retry', task_id: 'om_manual_retry', turn: String(resultInput.turn) },
+    'ou_alice', { messageId: (await saved()).final_message_id, chatId: 'oc_group' }
+  );
+  expect(response).toMatchObject({ type: 'success', content: '已开始重试' });
+  await h.until(async () => { const record = await saved(); return record.turn === 3 && record.final_delivery_state === 'delivered'; });
+  const frames = [...h.issued, ...h.service.update.mock.calls.map(([input]) => input)]
+    .filter(input => input.cardKind === 'process' && input.turn === 3);
+  expect(frames.length).toBeGreaterThan(1);
+  for (const frame of frames) expect(JSON.stringify(buildLarkCard(frame))).not.toContain(LARK_LAUNCHER_RECOVERY_NOTE);
+  expect(await saved()).not.toHaveProperty('launcher_recovery_note');
+  expect(h.issued.find(input => input.cardKind === 'result' && input.turn === 3)?.state).toBe('completed');
+  expect(h.prepared).toHaveLength(3);
+  expect(h.prepared[2]).toBe(h.prepared[1]);
+});
+
+
+it.each(['topic', 'top'] as const)('%s 启动器失败后复用过程卡换新会话，原请求只提交一次，过程到结束一直带提示', async scope => {
+  let count = 0;
+  const h = await setup(async () => { if (++count === 1) throw new Error(LAUNCHER_ERROR); });
+  cleanups.push(() => h.teardown());
+  const { task, resultInput } = await h.runTurn('om_success', scope === 'top' ? { rootId: undefined, threadId: undefined } : {});
+  expect(task.status).toBe('completed');
+  expect(h.prepared).toHaveLength(2);
+  expect(h.prepared[0]).not.toBe(h.prepared[1]);
+  expect((await h.runtime.getSession(h.prepared[0]!))?.state).toBe('stopped');
+  const oldTasks = await h.runtime.getTasks(h.prepared[0]!);
+  expect(oldTasks).toHaveLength(1);
+  expect(h.repos.execution.getTaskExecution(oldTasks[0]!.id)?.currentAttempt?.submissionState).toBe('not_submitted');
+  expect(h.sent).toHaveLength(1);
+  expect(h.sent[0]!.sessionId).toBe(resultInput.sessionId);
+  expect(task.prompt).toContain('跑一下任务');
+  expect(h.sent[0]!.prompt).toContain('跑一下任务');
+  expect(h.issued.filter(input => input.cardKind === 'result').map(input => input.state)).toEqual(['completed']);
+  const processes = h.issued.filter(input => input.cardKind === 'process');
+  expect(processes).toHaveLength(1);
+  const updates = h.service.update.mock.calls.map(([input]) => input).filter(input => input.cardKind === 'process');
+  expect(updates.some(input => input.state === 'failed')).toBe(false);
+  const replacement = updates.filter(input => input.turn === 2);
+  expect(replacement.length).toBeGreaterThan(1);
+  for (const frame of replacement) {
+    expect(frame.messageId).toBe('om_reply_1');
+    expect(JSON.stringify(buildLarkCard(frame))).toContain(LARK_LAUNCHER_RECOVERY_NOTE);
+  }
+  expect(replacement.at(-1).state).toBe('completed');
+  const final = buildLarkCard(replacement.at(-1)) as any;
+  expect(final.body.elements.some((el: any) => el.content === LARK_LAUNCHER_RECOVERY_NOTE)).toBe(true);
+});
+
+it('结束旧会话失败时不重发，仍交付无重试的 /new 指引', async () => {
+  const h = await setup(new Error(LAUNCHER_ERROR));
+  cleanups.push(() => h.teardown());
+  vi.spyOn(h.runtime, 'stop').mockRejectedValueOnce(new Error('stop unavailable'));
+  const { resultInput } = await h.runTurn('om_cannot_replace');
+  expect(h.prepared).toHaveLength(1);
+  expect(hasRetryButton(resultInput)).toBe(false);
+  const card = JSON.stringify(buildLarkCard(resultInput));
+  expect(card).toContain('发送 /new');
+  expect(card).not.toContain('ACP_LAUNCHER_VERSION_CHANGED');
+});
+
+
+it('新轮按原发送人重新检查权限，不能复用上一轮的授权', async () => {
+  const h = await setup(new Error(LAUNCHER_ERROR));
+  cleanups.push(() => h.teardown());
+  h.config.allowedUsers = [];
+  h.config.allowedEmails = ['alice@example.com'];
+  await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+  h.service.getUserEmails.mockResolvedValueOnce(['alice@example.com']).mockResolvedValue(['revoked@example.com']);
+  const { resultInput } = await h.runTurn('om_recheck');
+  expect(h.service.getUserEmails).toHaveBeenCalledTimes(2);
+  expect(h.service.getUserEmails).toHaveBeenNthCalledWith(2, 'ou_alice');
+  expect(h.prepared).toHaveLength(1);
+  expect(h.sent).toHaveLength(0);
+  expect(hasRetryButton(resultInput)).toBe(false);
+  expect(JSON.stringify(buildLarkCard(resultInput))).toContain('发送 /new');
+});
+
+it('旧会话里其他发送人的排队请求明确取消，不迁移或静默丢掉', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let oldSession: string | undefined;
+  const h = await setup(async sessionId => {
+    oldSession ??= sessionId;
+    if (sessionId === oldSession) { await gate; throw new Error(LAUNCHER_ERROR); }
+  });
+  cleanups.push(() => h.teardown());
+  h.config.allowedUsers = [];
+  await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+  cleanups.push(async () => { release(); });
+  await h.coordinator.handle(groupMessage('om_first'), h.config);
+  await h.until(() => h.prepared.length === 1);
+  await h.coordinator.handle({ ...groupMessage('om_bob'), senderOpenId: 'ou_bob', content: JSON.stringify({ text: '@_user_1 Bob 的任务' }) }, h.config);
+  await h.until(async () => (await h.runtime.getTasks(oldSession!)).some(task => task.status === 'queued'));
+  // 暂停领取队列，确保验证的是换会话时仍排队的请求，避免下一条先领取并同样报错。
+  h.runtime.setQueueHeld(true);
+  release();
+  await h.until(async () => (await h.runtime.getTasks(oldSession!)).some(task => task.status === 'cancelled'));
+  h.runtime.setQueueHeld(false);
+  await h.until(() => h.issued.filter(input => input.cardKind === 'result').length === 2);
+  const bob = (await h.runtime.getTasks(oldSession!)).find(task => task.prompt.includes('Bob'))!;
+  expect(bob.status).toBe('cancelled');
+  const receipt = h.issued.find(input => input.cardKind === 'result' && input.taskId === 'om_bob');
+  expect(receipt.state).toBe('cancelled');
+  expect(JSON.stringify(buildLarkCard(receipt))).toContain('取消');
+  expect(h.sent).toHaveLength(1);
+  expect(h.sent[0]!.prompt).not.toContain('Bob');
+});
+
+it.each(['retire', 'start'] as const)('换会话的 %s 阶段重启：只恢复失败卡，不自动重发', async stage => {
+  const h = await setup(new Error(LAUNCHER_ERROR));
+  cleanups.push(() => h.teardown());
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let entered = false;
+  if (stage === 'retire') {
+    const stop = h.runtime.stop.bind(h.runtime);
+    vi.spyOn(h.runtime, 'stop').mockImplementationOnce(async (...args) => {
+      await stop(...args); entered = true; await gate;
+    });
+  } else {
+    const start = h.runtime.start.bind(h.runtime);
+    let starts = 0;
+    vi.spyOn(h.runtime, 'start').mockImplementation(async (...args) => {
+      const session = await start(...args);
+      if (++starts === 2) { entered = true; await gate; }
+      return session;
+    });
+  }
+  await h.coordinator.handle(groupMessage(`om_restart_${stage}`), h.config);
+  await h.until(() => entered);
+  await h.coordinator.reconcile(h.config);
+  expect(h.issued.filter(input => input.cardKind === 'result')).toHaveLength(0);
+  h.coordinator.stop();
+  release();
+  await h.until(() => [...(h.coordinator as any).tasks.values()].every((task: any) => !task.launcherRecoveryPending));
+  await h.runtime.shutdown();
+  const runtime = new DutydeckRuntime(h.repos, { driverIdleTimeoutMs: 0,
+    probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: h.factory });
+  const recovered = new LarkMessageCoordinator(runtime, h.service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any,
+    Math.random, 'ou_bot', undefined, h.repos.channelMappings, undefined, undefined, undefined, { store: h.repos.config });
+  cleanups.push(async () => { recovered.stop(); await runtime.shutdown(); });
+  await runtime.initialize([h.agent]);
+  await recovered.initializeWorkflows(h.config);
+  await recovered.reconcile(h.config);
+  await recovered.reconcile(h.config);
+  expect(h.prepared).toHaveLength(1);
+  expect(h.sent).toHaveLength(0);
+  const results = h.issued.filter(input => input.cardKind === 'result');
+  expect(results).toHaveLength(1);
+  expect(results[0].state).toBe('failed');
+  expect(hasRetryButton(results[0])).toBe(false);
+  const card = JSON.stringify(buildLarkCard(results[0]));
+  expect(card).toContain('发送 /new');
+  expect(card).not.toContain('ACP_LAUNCHER_VERSION_CHANGED');
+});
+
+
+it('同一旧会话的请求接连失败时，不会重复结束绑定或悄悄丢掉请求', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let oldSession: string | undefined;
+  const h = await setup(async sessionId => {
+    oldSession ??= sessionId;
+    if (sessionId === oldSession) { await gate; throw new Error(LAUNCHER_ERROR); }
+  });
+  cleanups.push(() => h.teardown());
+  cleanups.push(async () => { release(); });
+  h.config.allowedUsers = [];
+  await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+  const stop = vi.spyOn(h.runtime, 'stop');
+  await h.coordinator.handle(groupMessage('om_race_a'), h.config);
+  await h.until(() => h.prepared.length === 1);
+  await h.coordinator.handle({ ...groupMessage('om_race_b'), senderOpenId: 'ou_bob' }, h.config);
+  await h.until(async () => (await h.runtime.getTasks(oldSession!)).some(task => task.status === 'queued'));
+  release();
+  await h.until(() => h.issued.filter(input => input.cardKind === 'result').length === 2);
+  expect(stop).toHaveBeenCalledTimes(1);
+  expect(new Set(h.prepared).size).toBe(2);
+  expect(h.sent).toHaveLength(1);
+  expect(h.issued.filter(input => input.cardKind === 'result').map(input => input.taskId).sort()).toEqual(['om_race_a', 'om_race_b']);
+});
+
+
+it('终态回调读取事件时遇到对账，不会抢先交付旧轮失败卡', async () => {
+  let count = 0;
+  const h = await setup(async () => { if (++count === 1) throw new Error(LAUNCHER_ERROR); });
+  cleanups.push(() => h.teardown());
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  cleanups.push(async () => { release(); });
+  let entered = false;
+  const getRecentEvents = h.runtime.getRecentEvents.bind(h.runtime);
+  vi.spyOn(h.runtime, 'getRecentEvents').mockImplementationOnce(async (...args) => {
+    entered = true; await gate; return getRecentEvents(...args);
+  });
+  await h.coordinator.handle(groupMessage('om_reconcile_race'), h.config);
+  await h.until(() => entered);
+  await h.coordinator.reconcile(h.config);
+  expect(h.issued.filter(input => input.cardKind === 'result')).toHaveLength(0);
+  expect(h.service.update.mock.calls.some(([input]) => input.state === 'failed')).toBe(false);
+  release();
+  await h.until(() => h.issued.some(input => input.cardKind === 'result'));
+  expect(h.issued.filter(input => input.cardKind === 'result').map(input => input.state)).toEqual(['completed']);
+  expect(h.sent).toHaveLength(1);
 });

@@ -63,6 +63,8 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
   }
 
   protected async saveCardTask(task: LarkTask, state = task.state) {
+    // 新轮尚未派发时保留旧失败映射，重启只补失败回执，不能再次自动执行。
+    if (task.launcherRecoveryPending && !task.runtimeTaskId) return;
     await this.persistCardTask(task, state);
     // 任务通道派来的任务：同一处状态汇聚点顺带把进度写成飞书任务记录。
     await this.writeLarkTaskStep(task, state);
@@ -72,6 +74,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     // 静默进展下没有过程卡，映射仍然要落库：没有它，重启后这条任务就彻底失联。
     if (!this.cardMappings || !task.sessionId || !task.startedAt) return;
     const extra: PersistedLarkCardTask = {
+      ...(task.launcherRecoveryNote ? { launcher_recovery_note: true } : {}),
       app_id: task.config.appId,
       sender_open_id: task.event.senderOpenId,
       ...(task.event.senderType ? { sender_type: task.event.senderType } : {}),
@@ -151,6 +154,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
    */
   protected restoredCardTask(config: StoredLarkConfig, mapping: { externalId: string; sessionId: string }, saved: PersistedLarkCardTask): LarkTask {
     return {
+      ...(saved.launcher_recovery_note ? { launcherRecoveryNote: true } : {}),
       id: mapping.externalId, group: { tail: Promise.resolve() }, config, state: saved.state,
       turn: saved.turn ?? 0, epoch: 0, scopeId: saved.scope_id ?? '', prompt: saved.prompt,
       resources: [], events: [], sessionId: mapping.sessionId, startedAt: saved.started_at,

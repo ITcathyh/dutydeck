@@ -78,6 +78,10 @@ export type LarkTask = {
   interruptRequested?: boolean;
   requestUpdate?: (state: Exclude<LarkTaskState, 'interrupting'>, completed?: boolean) => Promise<void>;
   retryable?: boolean;
+  /** 本条请求最多自动换一次；只在当前进程内接着执行。 */
+  launcherRecoveryAttempted?: boolean;
+  launcherRecoveryPending?: boolean;
+  launcherRecoveryNote?: boolean;
   /** 递增的轮次编号，用于防止上一轮的终态回调覆盖重试后的新状态。 */
   turn: number;
   /** 本条消息解析出的会话隔离 scope（与 group key 一致），sessionFor 复用。 */
@@ -111,6 +115,7 @@ export type LarkTask = {
   alertRecall?: LarkAlertRecall;
 };
 export type PersistedLarkCardTask = {
+  launcher_recovery_note?: boolean;
   result_feedback_state?: string;
   retry_material_prompt?: string;
   sender_open_id?: string;

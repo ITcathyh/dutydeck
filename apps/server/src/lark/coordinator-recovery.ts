@@ -58,6 +58,13 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       log: this.log,
       config,
       channel: larkCardChannel(config.appId),
+      skipTask: (id, sessionId, turn) => {
+        const live = this.tasks.get(id);
+        return !this.stopped && Boolean(live && (
+          live.requestUpdate && isLarkLauncherVersionChanged(live.events)
+          || live.launcherRecoveryAttempted && (live.launcherRecoveryPending || live.sessionId !== sessionId || live.turn !== turn)
+        ));
+      },
       deliveryStore: this.workflowOptions.store,
       relaunchReady: (taskId, status, turn) => this.relaunchReady(config.appId, taskId, status, turn),
       interruptedTurn: (mapping, saved, runtimeTask) => this.redispatchInterruptedTurn(config, mapping, saved, runtimeTask),

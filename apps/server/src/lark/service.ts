@@ -897,7 +897,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ...stages,
         ...omissionElements,
         // 「结果见单独的结果消息」不在这里重复，也不在没有下一条时乱说。
-        ...otherElements.filter(element => element.element_id !== 'trace_empty'),
+        ...otherElements.filter(element => element.element_id !== 'trace_empty' && element.element_id !== 'launcher_recovery_note'),
         ...(detailButton ? [detailButton] : detailLink ? [{ tag: 'markdown', content: detailLink, text_size: 'notation', text_align: 'right', margin: '0px' }] : [])
       ];
       const receipt = traceElements.length
@@ -905,6 +905,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
           { expanded: traceElements.some(el => el.expanded === true), padding: '0px' })
         : { tag: 'markdown', element_id: 'task_overview', content: receiptTitle, text_size: 'normal', margin: '0px', icon: receiptIcon };
       return [
+        ...otherElements.filter(element => element.element_id === 'launcher_recovery_note'),
         receipt,
         ...(traceElements.length ? [] : listed),
         ...(state === 'completed' ? [...attentionElements, ...actionRow([])] : [])

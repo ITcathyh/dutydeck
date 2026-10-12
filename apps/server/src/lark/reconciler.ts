@@ -4,6 +4,7 @@ import type { ChannelMapping, ChannelMappingRepository, ConfigRepository, TaskRe
 import { defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, type LarkCardInput, type LarkCardService } from './service.js';
 import {
+  LARK_LAUNCHER_RECOVERY_NOTE,
   eventsForRuntimeTask,
   larkTaskSteering,
   loadLarkTaskWindow,
@@ -94,6 +95,8 @@ export async function performLarkCardReconcile(input: {
   detailLogin?: boolean;
   /** 旧的一轮（见 larkRecoveryNoticeMaxAgeMs）：恢复提醒不另发消息，只原地改卡。缺省都按近期的一轮处理。 */
   staleTurn?: (sessionId: string, runtimeTask: TaskRecord) => Promise<boolean>;
+  /** 在线自动换会话接管的旧轮次不交给对账交付；重启后由旧失败记录正常补发。 */
+  skipTask?: (externalId: string, sessionId: string, turn: number) => boolean;
   /**
    * 这一轮结束时不发结果卡、只把过程卡原地改成终态：返回写在过程卡上的那一句（旧的一轮在对账时自动结束，见 coordinator 的 settleQuietTurn）。
    * 与 absorbQueuedTask 同一个记法：过程卡记作这一轮的收据，没有过程卡记作已交付。
@@ -115,7 +118,7 @@ export async function performLarkCardReconcile(input: {
       const persisted = persistedCardTask(mapping.extra);
       if (!persisted) continue;
       // 这一轮正在转到新会话：旧卡由转交流程收尾，对账既不补发它的终态也不重绘。
-      if (persisted.relaunch_pending) continue;
+      if (persisted.relaunch_pending || input.skipTask?.(mapping.externalId, mapping.sessionId, persisted.turn ?? 0)) continue;
       // 结果卡已判定投递失败，或还在这条映射自己的退避期内：这一轮不再打平台。过程卡也已收敛时整条跳过；
       // 退避中的仍算未解决，让对账循环继续跑到下一次重发。
       // 瞬时失败已持续超过重试窗口：不再打平台，走下面的写回记为失败。
@@ -280,6 +283,7 @@ export async function performLarkCardReconcile(input: {
       const verifiedOutput = state === 'completed'
         ? await verifiedLarkRecoveryOutput(runtime, mapping.sessionId, runtimeTask.id, events) : undefined;
       if (state === 'completed' && !verifiedOutput && hasUnresolvedToolCalls(events)) state = 'failed';
+      if (input.skipTask?.(mapping.externalId, mapping.sessionId, persisted.turn ?? 0)) continue;
       const completed = state === 'completed';
       const quietNote = completed ? undefined : await input.quietTerminalNote?.(mapping, persisted);
       const elapsedSeconds = Math.max(0, (Date.parse(runtimeTask.updatedAt) - persisted.started_at) / 1_000);
@@ -289,7 +293,8 @@ export async function performLarkCardReconcile(input: {
       let lastError: unknown;
       let contentRejected = false;
       const currentElements = boundLarkCardElements([...quietNote ? [{ tag: 'markdown', element_id: 'recovery_note', content: quietNote }] : [],
-        ...renderLarkProcessElements(events, config, true)]);
+        ...renderLarkProcessElements(events, config, true),
+        ...(persisted.launcher_recovery_note ? [{ tag: 'markdown', element_id: 'launcher_recovery_note', content: LARK_LAUNCHER_RECOVERY_NOTE }] : [])]);
       // 回执上的「结果见下条」：只贴表情的模式下这次对账不会补发结果消息。
       const resultFollows = completed && effective.completionReactionOnly !== true;
       let deliveredElements = persisted.last_successful_elements;
@@ -341,6 +346,7 @@ export async function performLarkCardReconcile(input: {
       }
       if (!updated && isLarkMessageUnupdatable(lastError)) updated = true;
       await withExplicitFinalLock(input.deliveryStore, runtimeTask.id, async () => {
+        if (input.skipTask?.(mapping.externalId, mapping.sessionId, persisted.turn ?? 0)) return;
         const finalContext = completed ? explicitFinalContext(mapping, persisted, runtimeTask.currentAttemptId) : undefined;
         const explicit = await hasExplicitFinal(input.deliveryStore, finalContext);
         let finalCardInput: LarkCardInput | undefined;
