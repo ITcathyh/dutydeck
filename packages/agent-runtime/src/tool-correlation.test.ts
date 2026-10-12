@@ -111,6 +111,21 @@ describe('Attempt tool correlation', () => {
     expect(h.artifacts()[0]).toMatchObject({ input: 'first', output: 'final', status: 'completed' });
   });
 
+  it('keeps a finished tool finished when the agent sends a later update without a status', async () => {
+    const h = await fixture(async emit => {
+      emit({ type: 'tool_call', sourceId: 'call', data: { id: 'native', input: 'first', status: 'running' } });
+      emit({ type: 'tool_result', sourceId: 'result', data: { id: 'native', output: 'final', status: 'completed', completedAt: '2026-01-01T00:00:01.000Z' } });
+      // codex-acp 补发的 tool_call_update 没有 status，normalizeAcpxEvent 记成 running。
+      emit({ type: 'tool_call', sourceId: 'late', data: { id: 'native', output: 'final', status: 'running' } });
+      finish(emit);
+    });
+    expect((await h.runtime.send(h.session.id, 'work')).status).toBe('completed');
+    const tools = (await h.runtime.getEvents(h.session.id)).filter(event => event.type === 'tool_call' || event.type === 'tool_result');
+    expect(tools).toHaveLength(3);
+    expect(tools[2]!.data).toMatchObject({ input: 'first', output: 'final', status: 'completed', completedAt: '2026-01-01T00:00:01.000Z' });
+    expect(h.artifacts()).toEqual([tools[2]!.data]);
+  });
+
   it.each(['input', 'raw', 'type'] as const)('rejects a repeated sourceId with changed %s instead of masking it by enrichment', async field => {
     const h = await fixture(async emit => {
       emit({ type: 'tool_call', sourceId: 'same', data: { id: 'native', input: 'original', status: 'running' }, raw: 'original' });

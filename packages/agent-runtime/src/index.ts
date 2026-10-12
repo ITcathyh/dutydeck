@@ -67,9 +67,14 @@ function isAttemptRef(ref: SessionFence): ref is SessionFence & AttemptRef {
   return 'attemptId' in ref && 'taskId' in ref && typeof ref.attemptId === 'string' && typeof ref.taskId === 'string';
 }
 
+const settledToolStatus = (status?: ToolCallData['status']) => status === 'completed' || status === 'failed';
+
 function mergeToolCall(data: ToolCallData, previous?: ToolCallData): ToolCallData {
   const merged = { ...previous, ...data, name: data.name ?? previous?.name ?? 'tool', startedAt: previous?.startedAt ?? data.startedAt ?? now() };
-  if (data.status === 'completed' || data.status === 'failed') merged.completedAt = data.completedAt ?? previous?.completedAt ?? now();
+  // 工具结束后 Agent 还会补发不带状态的更新（codex-acp 实测晚 35 秒），ACP 里这表示状态不变，
+  // 归一化层却记成 running；已结束的工具不能退回执行中，否则整轮收尾时会被当成工具没返回而判失败。
+  if (settledToolStatus(previous?.status) && !settledToolStatus(data.status)) merged.status = previous!.status;
+  if (settledToolStatus(merged.status)) merged.completedAt = data.completedAt ?? previous?.completedAt ?? now();
   else delete merged.completedAt;
   return merged;
 }
