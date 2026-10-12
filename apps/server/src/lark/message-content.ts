@@ -34,8 +34,8 @@ const asRecord = (value: unknown): Record<string, any> | undefined => value && t
 /** 每条卡片消息最多取几张图片。 */
 export const MAX_CARD_IMAGES = 4;
 
-/** 深度优先收集卡片里 img 组件的 img_key（卡片 1.0 与 json_card 两种形状），按出现顺序去重。 */
-const collectCardImageKeys = (root: unknown): string[] => {
+/** 深度优先收集卡片里 img 组件的 img_key（卡片 1.0、json_card 与 raw_card_content 附带的 attachment images），按出现顺序去重。 */
+const collectCardImageKeys = (root: unknown, attachmentImages?: Record<string, any>): string[] => {
   const keys: string[] = [];
   const visit = (value: unknown, depth: number) => {
     if (depth > 16 || !value || typeof value !== 'object') return;
@@ -43,7 +43,19 @@ const collectCardImageKeys = (root: unknown): string[] => {
     const node = value as Record<string, any>;
     if (node.tag === 'img' || node.tag === 'image') {
       const property = asRecord(node.property);
-      const key = [node.img_key, node.image_key, property?.img_key, property?.image_key].find(item => typeof item === 'string' && item.trim());
+      let key = [node.img_key, node.image_key, property?.img_key, property?.image_key].find(item => typeof item === 'string' && item.trim());
+      // raw_card_content 下 img 节点的 imageID 映射到 json_attachment.images 的真实 key。
+      if (!key && attachmentImages) {
+        const imageId = [property?.imageID, property?.imageId, node.imageID, node.imageId]
+          .find(item => item !== undefined && item !== null && String(item).trim());
+        if (imageId !== undefined) {
+          const entry = attachmentImages[String(imageId).trim()];
+          const record = asRecord(entry);
+          key = typeof entry === 'string' && entry.trim()
+            ? entry.trim()
+            : [record?.origin_key, record?.img_key, record?.image_key].find(item => typeof item === 'string' && item.trim());
+        }
+      }
       if (key && !keys.includes(key.trim())) keys.push(key.trim());
     }
     for (const child of Object.values(node)) visit(child, depth + 1);
@@ -70,6 +82,10 @@ export async function parseLarkMessageContent(
   const parsed = parseJson(content);
   if (messageType === 'text') return { text: String(parsed?.text ?? content).trim(), resources: [] };
 
+  const jsonAttachment = asRecord(parsed?.json_attachment);
+  const atUsers = asRecord(jsonAttachment?.at_users);
+  const attachmentImages = asRecord(jsonAttachment?.images);
+
   const resources: LarkMessageResource[] = [];
   const seenResources = new Set<string>();
   const addResource = (type: LarkResourceType, keyValue: unknown, fileNameValue?: unknown, cardLabel?: string) => {
@@ -91,7 +107,7 @@ export async function parseLarkMessageContent(
     const property = asRecord(node.property);
     if (tag === 'text' || tag === 'plain_text' || tag === 'markdown' || tag === 'code' || tag === 'code_block') {
       const content = node.text ?? node.content ?? property?.content ?? property?.text;
-      if (content !== undefined && content !== null && String(content) !== '') return String(content);
+      if (content !== undefined && content !== null && typeof content !== 'object' && String(content) !== '') return String(content);
     }
     if (tag === 'br') return '\n';
     if (tag === 'a') {
@@ -105,17 +121,35 @@ export async function parseLarkMessageContent(
       const href = String(node.href ?? node.url ?? url?.url ?? '');
       return href && href !== text ? `${text} (${href})` : text;
     }
-    if (tag === 'at') return `@${String(node.user_name ?? node.name ?? node.text ?? '')}`;
+    if (tag === 'at') {
+      const explicitName = String(node.user_name ?? node.name ?? property?.user_name ?? property?.userName ?? '').trim();
+      const rawId = String(property?.userID ?? property?.user_id ?? node.user_id ?? node.userID ?? node.text ?? '').trim();
+      let name = explicitName;
+      if (!name && rawId && atUsers) {
+        const byKey = asRecord(atUsers[rawId]);
+        if (byKey?.content) {
+          name = String(byKey.content).trim();
+        } else {
+          const found = Object.values(atUsers).map(asRecord).find(u => u && (u.user_id === rawId || u.mention_key === rawId || u.content === rawId));
+          if (found?.content) name = String(found.content).trim();
+        }
+      }
+      const label = (name || rawId).replace(/^@+/, '');
+      return label ? `@${label}` : '';
+    }
     if (tag === 'img' || tag === 'image') return addResource('image', node.image_key ?? node.file_key, node.file_name);
     if (tag === 'file' || tag === 'media' || tag === 'audio' || tag === 'video') {
       return addResource('file', node.file_key, node.file_name ?? node.name);
     }
     if (tag === 'emotion') return String(node.emoji_type ?? node.text ?? '[表情]');
-    // 告警卡的「服务 / 集群 / 规则 / 报警时间」放在 div 的 fields 里，一项一行。
-    const fields = node.fields ?? property?.fields;
-    if (Array.isArray(fields)) {
-      return [node.text ?? property?.text, ...fields.map(field => asRecord(field)?.text ?? field)]
-        .map(value => renderNode(value).trim()).filter(Boolean).join('\n');
+    // 告警卡的「服务 / 集群 / 规则 / 报警时间」放在 div 的 fields 里，一项一行；正文亦存放于 property.text。
+    if (tag === 'div') {
+      const fields = node.fields ?? property?.fields;
+      if (Array.isArray(fields)) {
+        return [node.text ?? property?.text, ...fields.map(field => asRecord(field)?.text ?? field)]
+          .map(value => renderNode(value).trim()).filter(Boolean).join('\n');
+      }
+      return renderNode(node.children ?? node.elements ?? property?.children ?? property?.elements ?? node.content ?? node.text ?? property?.content ?? property?.text ?? '');
     }
     return renderNode(node.children ?? node.elements ?? property?.children ?? property?.elements ?? node.content ?? node.text ?? property?.content ?? '');
   };
@@ -146,21 +180,26 @@ export async function parseLarkMessageContent(
     const card = rawCard ?? parsed;
     const headerProperty = asRecord(card?.header?.property);
     const bodyProperty = asRecord(card?.body?.property);
-    const title = renderNode(headerProperty?.title ?? card?.header?.title).trim();
+    const title = renderNode(headerProperty?.title ?? card?.header?.title ?? card?.title).trim();
     const subtitle = renderNode(headerProperty?.subtitle ?? card?.header?.subtitle).trim();
     const bodyElements = bodyProperty?.elements ?? card?.body?.elements ?? card?.elements;
     const body = (Array.isArray(bodyElements)
       ? bodyElements.map(renderNode).map(value => value.trim()).filter(Boolean).join('\n\n')
       : renderNode(bodyElements)).trim();
+    const hasBodyElements = Array.isArray(bodyElements)
+      ? bodyElements.length > 0
+      : Boolean(bodyElements && typeof bodyElements === 'object' && Object.keys(bodyElements).length > 0);
     // 转发的告警卡片常带趋势图：和普通图片消息一样交给下载流程，最多 MAX_CARD_IMAGES 张。
-    const imageKeys = collectCardImageKeys(card);
+    const imageKeys = collectCardImageKeys(card, attachmentImages);
     const imageMarkers: string[] = [];
     for (const [index, imageKey] of imageKeys.slice(0, MAX_CARD_IMAGES).entries()) {
       const marker = addResource('image', imageKey, undefined, `卡片图片 ${index + 1}`);
       if (marker) imageMarkers.push(marker);
     }
     if (imageKeys.length > MAX_CARD_IMAGES) imageMarkers.push(`（卡片里还有 ${imageKeys.length - MAX_CARD_IMAGES} 张图片未读取）`);
-    const sections = [title, subtitle, body, imageMarkers.join(' ')].filter(Boolean);
+    const hasImages = imageKeys.length > 0 || resources.some(resource => resource.type === 'image');
+    const unparsedBodyNotice = hasBodyElements && !body && !hasImages ? '（卡片正文未能解析，只读到标题）' : '';
+    const sections = [title, subtitle, body, imageMarkers.join(' '), unparsedBodyNotice].filter(Boolean);
     return { text: sections.join('\n\n') || '收到一张没有可读文本的飞书卡片。', resources };
   }
 

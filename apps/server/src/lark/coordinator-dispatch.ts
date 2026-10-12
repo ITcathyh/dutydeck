@@ -23,6 +23,7 @@ import {
   loadLarkTaskEvents,
   steeringOutcomeText,
   hasUnresolvedToolCalls,
+  isLarkLauncherVersionChanged,
   renderLarkProcessElements,
   renderLarkResultElements,
   type LarkCardElement
@@ -1148,6 +1149,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (task.finalDeliveredTurn === currentTurn && (task.finalMessageId || task.finalDeliveryState === 'reaction')) return Promise.resolve();
       if (terminalDelivery) return terminalDelivery;
       terminalDelivery = withExplicitFinalLock(this.workflowOptions.store, task.runtimeTaskId ?? task.id, async () => {
+        // 旧会话启动器版本变化时，在旧会话上重试必然再失败，只能 /new：标记不可重试。
+        // 必须在 update(state) 之前，过程卡终态帧与结果卡才会一起隐藏「重试」。
+        if (state === 'failed' && isLarkLauncherVersionChanged(task.events)) task.retryable = false;
         await update(state);
         // 终态先撤置顶：轮次校验之后再撤，重试开的新一轮会让上一轮的进度卡永远挂在置顶里。
         await this.unpinTaskCard(task);

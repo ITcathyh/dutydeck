@@ -659,12 +659,17 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       return;
     }
     const mentionPolicy = config.mentionPolicy ?? 'always';
-    const topicScope = mentionPolicy === 'topic' && this.groupManager ? await resolveLarkScopeId(event, config, this.chatModeResolver) : undefined;
+    const participationMode = mentionPolicy !== 'topic' && event.chatType === 'group' && !botSender && this.groupManager
+      ? await this.workflowOptions.participation?.mode({ appId: config.appId, chatId: event.chatId }) : undefined;
+    const topicScope = (mentionPolicy === 'topic' || participationMode === 'selective' || participationMode === 'eager') && this.groupManager
+      ? await resolveLarkScopeId(event, config, this.chatModeResolver) : undefined;
     // 续接了发起人顶层会话的话题没有自己的会话，续接的会话还在就同样算机器人接过的话题。
     // 只 @ 了别人（另一个 Bot 或同事）的消息是在叫别人，即使在自己接过的话题里也让路，同 ambient；
     // 已识别命令里的 @ 是参数（/grant @成员），不算。
-    const continuedTopic = topicScope && this.groupManager && (mentionsBot || !event.mentions.length || recognizedCommand)
+    const ownedTopic = topicScope && this.groupManager && (mentionsBot || !event.mentions.length || recognizedCommand)
       ? await this.groupManager.ownsTopic(config, event, topicScope) || Boolean(await this.threadContinuation(event, config, topicScope)) : false;
+    // 按需、积极档的接手话题只交给群参与规则，不直接唤醒。
+    const continuedTopic = mentionPolicy === 'topic' && ownedTopic;
     // ambient 与 never 的区别在这里：ambient 在消息指名了别人时让路，只接没有指名任何人的消息。
     // 本分支已排除 mentionsBot，所以此处出现的任何 mention 都是「点了别人」。
     const ambientOpen = mentionPolicy === 'ambient' && !event.mentions.length;
@@ -677,7 +682,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const requestContinuation = Boolean(this.workflowOptions.participation && !recovering && !explicit && !pendingAskContinuation && await this.continuesOwnRequest(event, config, Boolean(captured)));
     const addressed = explicit || requestContinuation;
     // 话题内免 @ 续聊也算在叫它，可以直接改档或问「为什么没回」；是否接手仍按下方原规则。
-    const topicContinuation = Boolean(continuedTopic) && !botSender;
+    const topicContinuation = Boolean(ownedTopic) && !botSender;
     const participation = triage ? undefined : await this.workflowOptions.participation?.handle(event, config, { explicit: addressed || pendingAskContinuation || commandInteraction, botOpenId: this.botOpenId,
       addressed: (addressed || topicContinuation) && !recognizedCommand && !recovering, ownedTopic: topicContinuation });
     if (this.handledMessages.has(event.messageId)) return;
@@ -2427,6 +2432,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
 
     if (action === 'retry') {
       if (task.state !== 'failed' && task.state !== 'interrupted' && task.state !== 'cancelled') return { type: 'warning', content: '只有失败、已中断或已取消的任务可以重试' };
+      // 与渲染端同一张表：标记为不可重试（例如旧对话启动器版本变化）时卡上没有「重试」，
+      // 回调端同样拒绝，不在旧会话上再跑一遍注定失败的请求。
+      if (!isLarkCardActionAvailable('retry', {
+        state: task.state, taskId: task.id, turn: task.turn,
+        ...(task.retryable !== undefined ? { retryable: task.retryable } : {}),
+        capabilities: this.capabilitiesForTask(task)
+      })) return { type: 'warning', content: '这个任务不能在当前对话重试，请按卡片上的说明处理' };
       if (!operatorOpenId) return { type: 'warning', content: '缺少操作人身份，无法重试' };
       const retryEvent = { ...task.event, senderOpenId: operatorOpenId, senderType: 'user', senderAppId: undefined };
       const previousState = task.state;

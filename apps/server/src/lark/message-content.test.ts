@@ -217,4 +217,259 @@ describe('转发卡片里的图片', () => {
     expect(result.resources.map(resource => resource.key)).toEqual(['img_0', 'img_1', 'img_2', 'img_3']);
     expect(result.text).toContain('卡片里还有 2 张图片未读取');
   });
+
+  describe('raw_card_content 交互卡片解析', () => {
+    const rawCardSample = {
+      json_card: JSON.stringify({
+        header: {
+          property: {
+            title: { tag: 'plain_text', property: { content: 'demo.svc.file(canary) 内存占用过高' } }
+          }
+        },
+        body: {
+          property: {
+            elements: [
+              {
+                tag: 'div',
+                property: {
+                  text: {
+                    tag: 'markdown',
+                    property: {
+                      elements: [
+                        { tag: 'plain_text', property: { content: 'PSM：demo.svc.file\n环境：canary\n' } },
+                        { tag: 'plain_text', property: { content: '实例状态：已运行 3.23天  (CPU: 44.89% MEM: 60.18%)' } }
+                      ]
+                    }
+                  }
+                }
+              },
+              { tag: 'hr', property: {} },
+              {
+                tag: 'div',
+                property: {
+                  text: {
+                    tag: 'markdown',
+                    property: {
+                      elements: [
+                        { tag: 'plain_text', property: { content: '影响面：最近2分钟内该PSM一共有16个实例处于高负载状态\n分配同学：' } },
+                        { tag: 'at', property: { userID: 'oncall-user@example.com' } },
+                        { tag: 'plain_text', property: { content: '\n错误次数：16060次' } }
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                tag: 'img',
+                property: {
+                  imageID: '109'
+                }
+              }
+            ]
+          }
+        }
+      }),
+      json_attachment: {
+        at_users: {
+          'oncall-user@example.com': {
+            content: '值班同学',
+            user_id: '6544886015083938055'
+          }
+        },
+        images: {
+          '109': {
+            origin_key: 'img_v3_0216d_88e45977-ce9e-4ed8-8e8f-70ead0aca01g'
+          }
+        }
+      },
+      card_schema: 1
+    };
+
+    it('解析 raw_card_content 卡片的 div 正文、替换 at 人名，并将 imageID 映射为真实卡片图片', async () => {
+      const result = await parseLarkMessageContent('interactive', JSON.stringify(rawCardSample));
+      expect(result.text).toContain('demo.svc.file(canary) 内存占用过高');
+      expect(result.text).toContain('实例状态：已运行 3.23天  (CPU: 44.89% MEM: 60.18%)');
+      expect(result.text).toContain('影响面：最近2分钟内该PSM一共有16个实例处于高负载状态');
+      expect(result.text).toContain('错误次数：16060次');
+      expect(result.text).toContain('@值班同学');
+      expect(result.text).toContain('[卡片图片 1]');
+      expect(result.text).not.toContain('卡片正文未能解析');
+      expect(result.resources).toEqual([
+        {
+          key: 'img_v3_0216d_88e45977-ce9e-4ed8-8e8f-70ead0aca01g',
+          type: 'image',
+          label: '卡片图片 1',
+          fromCard: true
+        }
+      ]);
+    });
+
+    it('at 节点在 at_users 换不到人名时保留 @ 加原 id，无任何标识时留空且不报错', async () => {
+      const cardWithAt = {
+        header: { title: { tag: 'plain_text', content: '测试 at' } },
+        body: {
+          elements: [
+            {
+              tag: 'div',
+              property: {
+                text: {
+                  tag: 'markdown',
+                  property: {
+                    elements: [
+                      { tag: 'plain_text', property: { content: '负责人：' } },
+                      { tag: 'at', property: { userID: 'unknown_999' } },
+                      { tag: 'plain_text', property: { content: '，协助：' } },
+                      { tag: 'at', property: {} }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      };
+      const result = await parseLarkMessageContent('interactive', JSON.stringify(cardWithAt));
+      expect(result.text).toContain('负责人：@unknown_999，协助：');
+      expect(result.text).not.toContain('@@');
+    });
+
+    it('卡片本来就只有标题没有正文元素时，不添加正文未能解析提示', async () => {
+      const onlyHeaderCard = {
+        header: { property: { title: { tag: 'plain_text', property: { content: '纯标题告警' } } } }
+      };
+      const result = await parseLarkMessageContent('interactive', JSON.stringify({ json_card: JSON.stringify(onlyHeaderCard) }));
+      expect(result.text).toBe('纯标题告警');
+      expect(result.text).not.toContain('卡片正文未能解析');
+    });
+
+    it('正文元素存在但解析为空时，在结果末尾加一行（卡片正文未能解析，只读到标题）', async () => {
+      const unparsedBodyCard = {
+        header: {
+          property: {
+            title: { tag: 'plain_text', property: { content: '告警卡片' } }
+          }
+        },
+        body: {
+          property: {
+            elements: [
+              { tag: 'unknown_unsupported_widget', property: {} },
+              { tag: 'hr', property: {} }
+            ]
+          }
+        }
+      };
+      const result = await parseLarkMessageContent('interactive', JSON.stringify({ json_card: JSON.stringify(unparsedBodyCard) }));
+      expect(result.text).toBe('告警卡片\n\n（卡片正文未能解析，只读到标题）');
+    });
+
+    it('解析顶层带 title 的简化形态告警卡片，首段为标题且正文与图片照旧', async () => {
+      const alertSample = {
+        title: 'demo.svc.file(canary) 内存占用过高',
+        elements: [
+          [
+            { tag: 'text', text: 'PSM：demo.svc.file\n' },
+            { tag: 'text', text: '实例状态：已运行 3.23天  (CPU: 44.89% MEM: 60.18%)' }
+          ],
+          [
+            { tag: 'text', text: 'high_mem_usage' },
+            { tag: 'img', image_key: 'img_v3_0216d_88e45977-ce9e-4ed8-8e8f-70ead0aca01g' }
+          ]
+        ]
+      };
+      const result = await parseLarkMessageContent('interactive', JSON.stringify(alertSample));
+      const paragraphs = result.text.split('\n\n');
+      expect(paragraphs[0]).toBe('demo.svc.file(canary) 内存占用过高');
+      expect(result.text).toContain('实例状态：已运行 3.23天  (CPU: 44.89% MEM: 60.18%)');
+      expect(result.text).toContain('high_mem_usage[图片]');
+      expect(result.resources).toEqual([
+        {
+          key: 'img_v3_0216d_88e45977-ce9e-4ed8-8e8f-70ead0aca01g',
+          type: 'image',
+          label: '图片'
+        }
+      ]);
+    });
+
+    it('raw 形态只有标题和一个 img 节点时，只出标题和图片标记，不添加未能解析提示行', async () => {
+      const imageOnlyCard = {
+        json_card: JSON.stringify({
+          header: {
+            property: {
+              title: { tag: 'plain_text', property: { content: '趋势告警' } }
+            }
+          },
+          body: {
+            property: {
+              elements: [
+                {
+                  tag: 'img',
+                  property: { imageID: 'img_trend_id' }
+                }
+              ]
+            }
+          }
+        }),
+        json_attachment: {
+          images: {
+            img_trend_id: { origin_key: 'img_v3_trend_key' }
+          }
+        }
+      };
+      const result = await parseLarkMessageContent('interactive', JSON.stringify(imageOnlyCard));
+      expect(result.text).toBe('趋势告警\n\n[卡片图片 1]');
+      expect(result.text).not.toContain('卡片正文未能解析');
+      expect(result.resources).toEqual([
+        {
+          key: 'img_v3_trend_key',
+          type: 'image',
+          label: '卡片图片 1',
+          fromCard: true
+        }
+      ]);
+    });
+
+    it('raw 2.0 正文包含 div 和 button 时，输出包含 div 文字且不包含按钮名', async () => {
+      const cardWithButton = {
+        json_card: JSON.stringify({
+          body: {
+            property: {
+              elements: [
+                {
+                  tag: 'div',
+                  property: {
+                    text: {
+                      tag: 'plain_text',
+                      property: { content: '任务执行失败，请选择下一步操作：' }
+                    }
+                  }
+                },
+                {
+                  tag: 'button',
+                  property: {
+                    text: {
+                      tag: 'plain_text',
+                      property: { content: '重试' }
+                    }
+                  }
+                },
+                {
+                  tag: 'button',
+                  property: {
+                    text: {
+                      tag: 'plain_text',
+                      property: { content: '再详细点' }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        })
+      };
+      const result = await parseLarkMessageContent('interactive', JSON.stringify(cardWithButton));
+      expect(result.text).toContain('任务执行失败，请选择下一步操作：');
+      expect(result.text).not.toContain('重试');
+      expect(result.text).not.toContain('再详细点');
+    });
+  });
 });

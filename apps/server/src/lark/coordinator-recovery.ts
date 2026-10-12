@@ -6,7 +6,7 @@ import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, type AgentEvent, type Channel
 import { larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
 import { larkPendingVerificationKey, parseLarkPendingVerifications } from './auto-verification.js';
 import { LarkServiceError } from './service.js';
-import { eventsForRuntimeTask } from './card-renderer.js';
+import { eventsForRuntimeTask, isLarkLauncherVersionChanged } from './card-renderer.js';
 import { performLarkCardReconcile, type LarkInterruptedTurn } from './reconciler.js';
 import {
   isRestartInterruption,
@@ -83,6 +83,9 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         const verification = await this.verificationView(restored, effective, saved.state as LarkCardActionState);
         const events = saved.state === 'failed' && saved.runtime_task_id
           ? eventsForRuntimeTask(await this.runtime.getEvents?.(mapping.sessionId) ?? [], saved.runtime_task_id) : [];
+        // 旧对话启动器版本变化在旧会话重试必败：重启重建的任务没有内存里的 retryable 标记，
+        // 按同一错误事件补上，补发的结果卡才不带「重试」。
+        if (isLarkLauncherVersionChanged(events)) restored.retryable = false;
         const cause = await this.continueCause(config.appId, mapping.externalId, saved.turn ?? 0, saved.scope_id, saved.state, events);
         return { elements: [...cause?.settled ? [{ tag: 'markdown', element_id: 'recovery_note', content: larkQuietSettledNote(cause) }] : [], ...verification.element ? [verification.element] : []],
           cardInput: { capabilities: { ...this.capabilitiesForTask(restored), ...verification.capabilities, ...await this.resultActionCapabilities(restored, effective, saved.state),

@@ -972,6 +972,15 @@ const permissionAlert = (entry: TraceEntry, index: number): LarkCardElement => {
   };
 };
 
+// 旧会话保存的启动命令与当前版本不一致（acp-client 启动器保护）：在旧会话上重试必然再失败，
+// 只能 /new 开新会话。错误码同时作为结果卡「不可重试」与文案改写的唯一依据。
+export const LARK_LAUNCHER_VERSION_CHANGED_CODE = 'ACP_LAUNCHER_VERSION_CHANGED';
+const larkLauncherVersionChangedHint = '这个对话的运行环境更新了，旧对话接不上。发送 /new 开一个新对话后再发一次请求（旧对话的上下文不会带过去）。';
+export function isLarkLauncherVersionChanged(events: AgentEvent[]): boolean {
+  return events.some(event => event.type === 'error'
+    && String((event.data as { message?: unknown } | undefined)?.message ?? '').startsWith(LARK_LAUNCHER_VERSION_CHANGED_CODE));
+}
+
 // 失败已经由卡片顶部的红色色带和状态行说清楚了，这里再挂一个「执行异常」标签加一句
 // 「需要关注」，是把同一件事说到第四遍，而且「需要关注」没有说明要关注什么。
 // 这一行唯一值得占位置的是失败原因本身，图标承担「这是异常」的语义。
@@ -981,7 +990,10 @@ const errorAlert = (entry: TraceEntry, index: number): LarkCardElement => ({
   // （acp-client/src/index.ts:124 的 `event.message ?? ...`，第三方 agent 回 `{"error":{"message":""}}` 即是），
   // truncateTrace 内部的 trim 又会把纯空白压成空串——两条路都会得到一个 content 为空的
   // markdown，正好出现在任务真的出错的时候。
-  content: truncateTrace(entry.data.message, 1_500) || 'Agent 执行未完全成功',
+  // 启动器版本变化只给「发 /new」的人话，原始那句技术细节收成灰字括号，排查时仍看得到。
+  content: String(entry.data.message ?? '').startsWith(LARK_LAUNCHER_VERSION_CHANGED_CODE)
+    ? `${larkLauncherVersionChangedHint}\n\n<font color='grey'>（${LARK_LAUNCHER_VERSION_CHANGED_CODE}）</font>`
+    : truncateTrace(entry.data.message, 1_500) || 'Agent 执行未完全成功',
   text_size: 'normal', margin: '6px 0px 8px 0px',
   icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'red' }
 });

@@ -1241,6 +1241,109 @@ describe('群参与开启时的话题续问与转交执行', () => {
   });
 });
 
+describe('按需、积极档识别已接手的告警话题', () => {
+  const scope = { appId: 'cli_uxp0', chatId: 'oc_group' };
+  const followUp = (patch: Partial<LarkMessageEvent> = {}) => event('om_follow', '那影响面多大', { mentions: [], parentId: 'om_root', ...patch });
+  const start = async (mode: 'off' | 'observe' | 'selective' | 'eager' = 'selective', seed = true) => {
+    let h!: H;
+    let participation!: LarkGroupParticipation;
+    const decide = vi.fn(async () => ({ action: 'silent' as const, reason: '', evidenceIds: [], updates: [] }));
+    const replyText = vi.fn(async () => ({ messageId: 'om_text' }));
+    h = await harness('normal', { managedGroup: true, configPatch: { mentionPolicy: 'always' }, participation: repos => (participation = new LarkGroupParticipation({
+      repository: repos.collaboration, decider: { decide, respond: async () => '' }, authorize: async () => true,
+      readConfig: async () => h?.config, serviceFor: () => ({ ...h.service, replyText, sendText: replyText,
+        listOwnReactions: async () => [], listChatMembers: async () => ({ items: [
+          { memberId: 'ou_alice', memberType: 'user' }, { memberId: 'ou_bob', memberType: 'user' },
+          { memberId: 'cli_uxp0', memberType: 'bot', appId: 'cli_uxp0', name: 'Dock' },
+          { memberId: 'cli_alarm', memberType: 'bot', appId: 'cli_alarm', name: '监控' }
+        ], hasMore: false }) }), canOperate: async () => true, debounceMs: 10000
+    })) });
+    cleanups.push(() => participation.close());
+    await h.repos.collaboration.updateSettings(scope, { expectedRevision: 0, participation: mode }, 'owner');
+    h.service.getMessage.mockImplementation(async (id: string) => ({
+      messageId: id, chatId: scope.chatId, threadId: 'omt_topic', messageType: 'text', rawContent: '{"text":"告警"}', mentions: [],
+      sender: id === 'om_root' ? { id: 'cli_alarm', type: 'app' } : { id: 'ou_bob', type: 'user' }
+    }));
+    const dispatch = vi.fn((incoming: LarkMessageEvent, current: StoredLarkConfig) => h.coordinator.adopt(incoming, current));
+    participation.setDispatcher(scope.appId, dispatch);
+    if (seed) {
+      await h.coordinator.handle(event('om_takeover', '@_user_1 看下这个告警'), h.config);
+      await h.waitDelivered(1);
+    }
+    const handle = vi.spyOn(participation, 'handle');
+    const ownsTopic = vi.spyOn(h.groupManager!, 'ownsTopic');
+    const threadContinuation = vi.spyOn(h.coordinator as any, 'threadContinuation');
+    return { h, participation, decide, replyText, dispatch, handle, ownsTopic, threadContinuation };
+  };
+
+  it.each(['selective', 'eager'] as const)('%s 经 owned_topic 规则派发，入站不直接唤醒', async mode => {
+    const { h, participation, decide, dispatch, handle, ownsTopic } = await start(mode);
+    await h.coordinator.handle(followUp(), h.config);
+    expect(handle).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_follow' }), expect.anything(),
+      expect.objectContaining({ explicit: false, addressed: true, ownedTopic: true }));
+    expect(ownsTopic).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'thread:om_root');
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(dispatch).not.toHaveBeenCalled();
+    await participation.flush(scope);
+    await h.waitDelivered(2);
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(decide).not.toHaveBeenCalled();
+    expect(await h.repos.collaboration.listDecisions(scope)).toEqual([expect.objectContaining({ action: 'act', status: 'sent',
+      inputSnapshot: expect.objectContaining({ decider: expect.objectContaining({ rule: 'owned_topic', facts: expect.objectContaining({ ownedTopic: true, threadRootOther: true }) }) }) })]);
+    expect(h.send.mock.calls[1]?.[0]).toContain('那影响面多大');
+  });
+
+  it.each(['off', 'observe'] as const)('%s 不增加话题归属查询，也不派发', async mode => {
+    const { h, participation, dispatch, handle, ownsTopic, threadContinuation } = await start(mode);
+    await h.coordinator.handle(followUp(), h.config);
+    expect(handle.mock.calls[0]?.[2]).toMatchObject({ explicit: false, addressed: false, ownedTopic: false });
+    expect(ownsTopic).not.toHaveBeenCalled();
+    expect(threadContinuation).not.toHaveBeenCalled();
+    await participation.flush(scope);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(h.service.addReaction).not.toHaveBeenCalledWith('om_follow', expect.anything());
+  });
+
+  it.each([
+    ['@ 别人', { mentions: [{ key: '@_user_2', name: 'Bob', openId: 'ou_bob' }] }, false, 'mentions_other'],
+    ['回复别人', { parentId: 'om_other' }, true, 'reply_to_other'],
+    ['机器人消息', { senderType: 'app', senderOpenId: 'ou_alarm' }, false, undefined]
+  ] satisfies Array<[string, Partial<LarkMessageEvent>, boolean, string | undefined]>)('%s 仍让路', async (_name, patch, ownedTopic, rule) => {
+    const { h, participation, decide, dispatch, handle } = await start();
+    await h.coordinator.handle(followUp(patch), h.config);
+    expect(handle.mock.calls[0]?.[2]).toMatchObject({ explicit: false, ownedTopic });
+    await participation.flush(scope);
+    if (rule) expect(await h.repos.collaboration.listDecisions(scope)).toEqual([expect.objectContaining({ action: 'silent',
+      inputSnapshot: expect.objectContaining({ decider: expect.objectContaining({ rule }) }) })]);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(decide).not.toHaveBeenCalled();
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(h.service.addReaction).not.toHaveBeenCalledWith('om_follow', expect.anything());
+  });
+
+  it('没有活跃会话的话题不算接手', async () => {
+    const { h, participation, dispatch, handle } = await start('selective', false);
+    await h.coordinator.handle(followUp(), h.config);
+    expect(handle.mock.calls[0]?.[2]).toMatchObject({ addressed: false, ownedTopic: false });
+    await participation.flush(scope);
+    expect(await h.repos.collaboration.listDecisions(scope)).toEqual([expect.objectContaining({ action: 'silent',
+      inputSnapshot: expect.objectContaining({ decider: expect.objectContaining({ rule: 'topic_of_other' }) }) })]);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
+  it.each(['刚才为什么没回', '积极点'])('接手话题内的「%s」交给群参与即时处理', async text => {
+    const { h, participation, dispatch, handle } = await start();
+    await h.coordinator.handle(followUp({ content: JSON.stringify({ text }) }), h.config);
+    expect(handle.mock.calls[0]?.[2]).toMatchObject({ addressed: true, ownedTopic: true });
+    expect(await handle.mock.results[0]!.value).toMatchObject({ handled: true });
+    await participation.flush(scope);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(h.send).toHaveBeenCalledOnce();
+  });
+});
+
 describe('Tag 群上下文按会话增量注入', () => {
   const scope = { appId: 'cli_uxp0', chatId: 'oc_group' };
   const groupContext = (prompt: string) => prompt.split('\n\n').find(block => block.startsWith('[Dutydeck 群上下文')) ?? '';
