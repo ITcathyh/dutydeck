@@ -59,6 +59,7 @@ export function summarizeRuns(runs) {
 const header = (headers, name) => { const value = headers?.[name]; return Array.isArray(value) ? value[0] : value; };
 const digestEqual = (left, right) => timingSafeEqual(createHash('sha256').update(left).digest(), createHash('sha256').update(right).digest());
 const badRequest = message => Object.assign(new Error(message), { statusCode: 400, code: 'WEBHOOK_BODY_INVALID' });
+const sameRepository = (full, slug) => typeof full === 'string' && typeof slug === 'string' && full.toLowerCase() === slug.toLowerCase();
 const time = value => { const parsed = typeof value === 'string' ? Date.parse(value) : NaN; return Number.isFinite(parsed) ? parsed : undefined; };
 
 /**
@@ -120,8 +121,11 @@ export function createGithubProvider(options = {}) {
     if (!payload || typeof payload !== 'object' || !Array.isArray(payload.workflow_runs)) throw new GithubError('GITHUB_RESPONSE_INVALID', 'GitHub API response did not contain workflow runs');
     if (typeof payload.total_count === 'number' && payload.total_count > 100) throw new GithubError('GITHUB_RUN_SET_TOO_LARGE', 'GitHub returned more than 100 workflow runs for this commit');
     const latest = new Map();
+    const slug = repository.slug ?? `${repository.owner}/${repository.name}`;
     for (const value of payload.workflow_runs.slice(0, 100)) {
       if (!value || typeof value !== 'object') continue;
+      // fork 的同名分支、同一提交也会出现在这个列表里，它的结果不能算作本仓库的构建。
+      if (!sameRepository(value.head_repository?.full_name, slug)) continue;
       if (!Number.isSafeInteger(value.id) || typeof value.head_sha !== 'string' || value.head_sha.toLowerCase() !== headSha || typeof value.status !== 'string' || completedOnly && value.status !== 'completed') continue;
       if (typeof value.name !== 'string' || !Number.isSafeInteger(value.workflow_id) || typeof value.html_url !== 'string' || typeof value.created_at !== 'string' || typeof value.updated_at !== 'string') continue;
       let htmlUrl;
@@ -229,7 +233,9 @@ export function createGithubProvider(options = {}) {
 
   /**
    * workflow_run 完成时按这个提交的全部构建汇总：还有没完成的就先不报；全部完成后报 success 或 failed，
-   * 同一汇总结果用同一个 eventId，多条 workflow_run 事件只触发一次。查不到汇总时按单条构建的结论报。
+   * 同一汇总结果用同一个 eventId，多条 workflow_run 事件只触发一次。查不到汇总时只报单条构建的失败，不报成功。
+   * 只认 head 仓库就是本仓库的事件（fork 的同名分支不算）。GitHub 事件没有签名时间，updated_at 只用于排序（timeIsAdvisory），
+   * 重放靠 X-GitHub-Delivery 去重。
    */
   async function parse(webhookRequest) {
     const kind = header(webhookRequest.headers, 'x-github-event');
@@ -245,6 +251,7 @@ export function createGithubProvider(options = {}) {
         : body.action === 'opened' ? 'open' : body.action === 'reopened' ? 'reopen'
         : ['synchronize', 'edited'].includes(body.action) ? 'update' : undefined;
       if (!action) return undefined;
+      if (!sameRepository(pull.head?.repo?.full_name, slug)) return undefined;
       return {
         kind: 'pull_request', repository: slug, state: action,
         ...(typeof pull.head?.ref === 'string' ? { branch: pull.head.ref } : {}),
@@ -253,18 +260,21 @@ export function createGithubProvider(options = {}) {
         ...(typeof pull.html_url === 'string' ? { url: pull.html_url } : {}),
         ...(operator ? { operator } : {}),
         ...(delivery ? { eventId: `delivery:${delivery}` } : {}),
-        ...(time(pull.updated_at) ? { occurredAt: time(pull.updated_at) } : {})
+        ...(time(pull.updated_at) ? { occurredAt: time(pull.updated_at) } : {}),
+        timeIsAdvisory: true
       };
     }
     const run = body.workflow_run;
     if (body.action !== 'completed' || !run || typeof run.head_sha !== 'string') return undefined;
+    if (!sameRepository(run.head_repository?.full_name, slug)) return undefined;
     const headSha = run.head_sha.toLowerCase();
     const base = {
       kind: 'pipeline', repository: slug, headSha,
       ...(typeof run.head_branch === 'string' ? { branch: run.head_branch } : {}),
       ...(Number.isSafeInteger(run.pull_requests?.[0]?.number) ? { pullRequest: run.pull_requests[0].number } : {}),
       ...(operator ? { operator } : {}),
-      ...(time(run.updated_at) ? { occurredAt: time(run.updated_at) } : {})
+      ...(time(run.updated_at) ? { occurredAt: time(run.updated_at) } : {}),
+      timeIsAdvisory: true
     };
     const [owner, name] = slug.split('/');
     let runs;
@@ -277,9 +287,9 @@ export function createGithubProvider(options = {}) {
       const fingerprint = createHash('sha256').update(`${slug}\0${headSha}\0${state}\0${runs.map(item => `${item.id}.${item.attempt}`).join(',')}`).digest('hex');
       return { ...base, state, runId: String(shown.id), url: shown.url, eventId: `aggregate:${fingerprint}` };
     }
-    const result = runResult(run.conclusion);
-    if (result !== 'success' && result !== 'failed') return undefined;
-    return { ...base, state: result, ...(Number.isSafeInteger(run.id) ? { runId: String(run.id) } : {}), ...(typeof run.html_url === 'string' ? { url: run.html_url } : {}), ...(delivery ? { eventId: `delivery:${delivery}` } : {}) };
+    // 汇总查不到时只能确认失败；单个 workflow 成功不代表整个提交通过，等后续事件。
+    if (runResult(run.conclusion) !== 'failed') return undefined;
+    return { ...base, state: 'failed', ...(Number.isSafeInteger(run.id) ? { runId: String(run.id) } : {}), ...(typeof run.html_url === 'string' ? { url: run.html_url } : {}), ...(delivery ? { eventId: `delivery:${delivery}` } : {}) };
   }
 
   return {

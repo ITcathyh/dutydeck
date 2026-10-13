@@ -33,7 +33,9 @@ export const agentConfigSchema = z.object({
   permissionMode: z.enum(permissionModes).default('ask'),
   timeout: z.number().positive().default(600),
   capabilities: z.object({ pause: z.boolean().default(false), resume: z.boolean().default(true) }).default({ pause: false, resume: true }),
-  builtin: z.boolean().default(false)
+  builtin: z.boolean().default(false),
+  /** 由哪个插件提供（`plugin:<name>`）；启动时配置里不再有该插件的 Agent 会被清掉。只由宿主写入。 */
+  origin: z.string().regex(/^plugin:.+/).optional()
 });
 export type AgentConfig = z.infer<typeof agentConfigSchema>;
 

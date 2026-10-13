@@ -426,7 +426,9 @@ export async function resolveLarkSession(
     }
   }
   // 已知是不支持审批的终端模式 Agent 就别先起会话：approve-reads 会被运行时以更难懂的错误拒绝。
-  const configuredAgent = (await runtime.listAgents?.())?.find(item => item.id === config.defaultAgentId);
+  const agents = await runtime.listAgents?.();
+  const configuredAgent = agents?.find(item => item.id === config.defaultAgentId);
+  if (agents && !configuredAgent) throw new LarkServiceError('LARK_AGENT_NOT_FOUND', `默认 Agent「${config.defaultAgentId}」不存在，可能随提供它的插件停用或卸载了。请在 Dutydeck 飞书设置的“Agent 与风险控制”中改选其他 Agent。`, 409);
   if (larkPermissionMode(config) !== 'full-trust' && configuredAgent?.protocol === 'pty-cli'
     && !supportsRemoteApproval({ id: configuredAgent.id, adapterId: configuredAgent.adapterId, protocol: 'pty-cli' })) throw larkApprovalUnsupported(config);
   const session = await runtime.start({

@@ -144,14 +144,14 @@ export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, 
   const defaultCwd = env.DUTYDECK_DEFAULT_CWD ?? process.cwd();
   const agents = new Map(builtinAgents(defaultCwd, ptyContributions).map(agent => [agent.id, agent]));
   const builtinIds = new Set([...listAcpxBuiltinAgents().map(agent => agent.id), ...ptyContributions.map(agent => agent.id)]);
-  const register = (configured: AgentConfig) => {
+  const register = (configured: AgentConfig, plugin = false) => {
     // A custom CLI wrapper may change local settings even for --version.
     const customCli = configured.protocol === 'pty-cli' && configured.adapterId;
     if (!commandExists(configured.command)) return false;
-    agents.set(configured.id, { ...configured, cwd: configured.cwd ?? defaultCwd, version: configured.version ?? (customCli ? undefined : cliVersion(configured.command)) });
+    agents.set(configured.id, { ...configured, ...(plugin ? {} : { origin: undefined }), cwd: configured.cwd ?? defaultCwd, version: configured.version ?? (customCli ? undefined : cliVersion(configured.command)) });
     return true;
   };
-  for (const agent of pluginAgents) if (!builtinIds.has(agent.id)) register(agentConfigSchema.parse(agent));
+  for (const agent of pluginAgents) if (!builtinIds.has(agent.id)) register(agentConfigSchema.parse(agent), true);
   const droppedAgents: DroppedAgent[] = [];
   for (const configured of extra) {
     if (!register(configured)) droppedAgents.push({ id: configured.id, name: configured.name, command: configured.command, reason: 'command_not_found' });

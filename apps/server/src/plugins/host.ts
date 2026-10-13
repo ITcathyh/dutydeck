@@ -119,7 +119,7 @@ export class PluginHost {
   }
 
   /** 插件 agents，先于 DUTYDECK_AGENTS_JSON 合并（同 id 以环境变量为准）。 */
-  get agents(): AgentConfig[] { return this.active.flatMap(({ plugin }) => plugin.agents); }
+  get agents(): AgentConfig[] { return this.active.flatMap(({ entry, plugin }) => plugin.agents.map(agent => ({ ...agent, origin: `plugin:${entry.name}` }))); }
 
   skillRoots(context: { workspaceRoot: string; botAppId?: string }): string[] {
     return this.active.filter(({ entry, plugin }) => plugin.skillsDir && scopeApplies(entry.scope, { cwd: context.workspaceRoot, ...(context.botAppId ? { botAppId: context.botAppId } : {}) }))

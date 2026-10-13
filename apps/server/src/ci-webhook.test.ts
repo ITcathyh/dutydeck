@@ -32,7 +32,7 @@ function fakeProvider(id = 'fake'): CiProvider {
       },
       parse: (request: CiWebhookRequest) => {
         const body = JSON.parse(request.rawBody.toString('utf8'));
-        const common = { repository: body.repository, branch: body.branch, operator: body.operator, eventId: body.id, occurredAt: time(body.timestamp) };
+        const common = { repository: body.repository, branch: body.branch, operator: body.operator, eventId: body.id, occurredAt: time(body.timestamp), ...(body.advisoryTime === true ? { timeIsAdvisory: true } : {}) };
         if (body.type === 'pipeline') return { ...common, kind: 'pipeline', headSha: body.sha, state: body.status, runId: body.pipeline?.id, url: body.pipeline?.url, failures: body.failures };
         if (body.type === 'merge_request') return { ...common, kind: 'pull_request', pullRequest: body.mr, state: body.action };
         return undefined;
@@ -140,6 +140,17 @@ describe('CI webhook 入口：时间戳与去重', () => {
     const staleBody = await f.service.receive('fake', { rawBody: Buffer.from(JSON.stringify({ ...f.pipeline(sha, 'failed', unitFailure), timestamp: stamp })), headers: { 'x-test-token': secret } });
     expect(staleBody).toMatchObject({ statusCode: 401, body: { error: { code: 'WEBHOOK_TIMESTAMP_EXPIRED' } } });
     expect(f.dispatches).toHaveLength(0);
+  });
+
+  it('提供方声明事件时间只用于排序时，旧事件的重投照常接受，同一 event-id 只处理一次', async () => {
+    const f = await fixture({ autoFix: false });
+    const sha = await f.repo.head();
+    const old = { ...f.pipeline(sha, 'failed', unitFailure, 'delivery:d-9'), advisoryTime: true, timestamp: Math.floor(f.now.value / 1_000) - 3_600 };
+    const send = (body: Record<string, unknown>) => f.service.receive('fake', { rawBody: Buffer.from(JSON.stringify(body)), headers: { 'x-test-token': secret } });
+    expect(await send(old)).toMatchObject({ statusCode: 202, body: { accepted: true, matched: 1 } });
+    expect(await send(old)).toMatchObject({ statusCode: 200, body: { duplicate: true } });
+    // 没有声明时同样的旧时间仍按重放拒绝
+    expect(await send({ ...old, id: 'other', advisoryTime: undefined })).toMatchObject({ statusCode: 401, body: { error: { code: 'WEBHOOK_TIMESTAMP_EXPIRED' } } });
   });
 
   it('提供方没给时间时照常处理，只靠 event-id 或请求体去重', async () => {

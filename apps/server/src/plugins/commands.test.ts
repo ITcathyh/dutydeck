@@ -27,6 +27,15 @@ describe('PluginCommandRegistry', () => {
     expect(commands.list({}).filter(command => !command.shortNameAvailable).map(command => command.qualifiedName)).toEqual(['alpha:greet', 'beta:greet']);
   });
 
+  it('keeps Agent-native command names for the Agent and only allows /<plugin>:<name>', () => {
+    const commands = new PluginCommandRegistry([{ name: 'alpha', scope: 'global', commands: ['compact', 'clear', 'init', 'review'].map(name => ({ name, template: `plugin ${name}` })) }]);
+    for (const name of ['compact', 'clear', 'init', 'review']) {
+      expect(commands.expand(`/${name} now`, {})).toBeUndefined();
+      expect(commands.expand(`/alpha:${name} now`, {})).toBe(`plugin ${name}\n\nARGUMENTS: now`);
+    }
+    expect(describePluginCommand(commands.commands[0]!).usage).toBe('/alpha:compact');
+  });
+
   it('scopes commands to their bot', () => {
     const commands = registry();
     expect(commands.expand('/ship', {})).toBeUndefined();

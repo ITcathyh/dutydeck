@@ -152,8 +152,10 @@ export interface CiWebhookEvent {
   failures?: CiFailureLog[];
   /** 用于去重；不给时宿主按请求体哈希去重。 */
   eventId?: string;
-  /** 事件发生时间（毫秒）；给了就做 5 分钟重放窗口检查。 */
+  /** 事件发生时间（毫秒）；给了就做 5 分钟重放窗口检查（`timeIsAdvisory` 除外）。 */
   occurredAt?: number;
+  /** 事件时间不是投递时间（例如 GitHub 的 updated_at，排队、停机后重投会很旧）：只用来排序，不做重放窗口检查，重放靠 eventId 去重。 */
+  timeIsAdvisory?: boolean;
 }
 
 /**

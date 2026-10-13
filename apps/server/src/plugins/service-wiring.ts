@@ -42,6 +42,10 @@ export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
     token: (plugin, id) => host.triggerToken(plugin, id),
     deliver: createTriggerDispatcher({ runtime: { start: input => deps.runtime().start(input), dispatch: (...args) => deps.runtime().dispatch(...args), listSessions: () => deps.runtime().listSessions() },
       readBot: deps.readBot, fallbackAgentId: deps.fallbackAgentId }),
+    isSettled: taskId => {
+      const status = deps.repositories.execution.getTaskExecution(taskId)?.task.status;
+      return !status || ['completed', 'failed', 'interrupted', 'cancelled'].includes(status);
+    },
     dedupe: { claim: (key, now, expiresAt) => deps.repositories.ciWebhook.claimEvent(key, now, expiresAt), release: (key, expiresAt) => deps.repositories.ciWebhook.releaseEvent(key, expiresAt) }
   });
 

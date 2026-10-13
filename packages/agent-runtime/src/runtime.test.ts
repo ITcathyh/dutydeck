@@ -36,6 +36,16 @@ describe('runtime lifecycle acceptance', () => {
     await h.runtime.shutdown(); h.repos.close();
   });
 
+  it('removes agents of plugins that are gone on boot, but keeps env and built-in ones', async () => {
+    const h = harness();
+    await h.repos.agents.save({ ...agent, id: 'from-plugin', name: 'Plugin', origin: 'plugin:gone' });
+    await h.repos.agents.save({ ...agent, id: 'from-env', name: 'Env' });
+    await h.runtime.initialize([agent, { ...agent, id: 'still-there', name: 'Kept', origin: 'plugin:kept' }]);
+    expect((await h.runtime.listAgents()).map(item => item.id).sort()).toEqual(['from-env', 'mock', 'still-there']);
+    await expect(h.runtime.start({ agentId: 'from-plugin' })).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
   it('starts, streams a prompt, and completes while preserving tool correlation', async () => {
     const h = harness({ onSend: emit => { emit({ type: 'thinking', data: { text: 'think' } }); emit({ type: 'tool_call', data: { id: 't', name: 'read', input: '.', status: 'running' } }); emit({ type: 'tool_result', data: { id: 't', name: 'read', output: 'ok', status: 'completed' } }); emit({ type: 'text', data: { text: 'done' } }); } });
     await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: 'mock' }); const result = await h.runtime.send(session.id, 'work');
