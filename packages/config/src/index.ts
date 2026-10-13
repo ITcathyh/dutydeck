@@ -79,10 +79,20 @@ export const builtinAgents = (cwd = process.cwd(), ptyContributions: PtyAgentCon
   return [...acpxAgents, ...ptyAgents].map(agent => ({ ...agent, cwd }));
 };
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = []): AppConfig {
-  const extra = env.DUTYDECK_AGENTS_JSON ? JSON.parse(env.DUTYDECK_AGENTS_JSON) : [];
+/** 与 loadConfig 相同的数据库路径解析；插件目录等需要在 loadConfig 之前知道数据目录的地方用它。 */
+export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return resolve(env.DUTYDECK_DEFAULT_CWD ?? process.cwd(), env.DUTYDECK_DATABASE_URL ?? './.dutydeck/dutydeck.db');
+}
+
+/**
+ * pluginAgents：已启用插件 agents/*.json 的内容，先于 DUTYDECK_AGENTS_JSON 合并，同 id 以环境变量为准；
+ * 插件不能替换内置 Agent（同 id 的插件 Agent 被忽略）。
+ */
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): AppConfig {
   const defaultCwd = env.DUTYDECK_DEFAULT_CWD ?? process.cwd();
   const agents = new Map(builtinAgents(defaultCwd, ptyContributions).map(agent => [agent.id, agent]));
+  const builtinIds = new Set([...listAcpxBuiltinAgents().map(agent => agent.id), ...ptyContributions.map(agent => agent.id)]);
+  const extra = [...pluginAgents.filter(agent => !builtinIds.has(agent.id)), ...(env.DUTYDECK_AGENTS_JSON ? JSON.parse(env.DUTYDECK_AGENTS_JSON) : [])];
   for (const agent of extra) {
     const configured = agentConfigSchema.parse(agent);
     // A custom CLI wrapper may change local settings even for --version.
@@ -95,7 +105,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContribution
     authEnabled: env.DUTYDECK_AUTH === undefined
       ? undefined
       : z.enum(['true', 'false']).parse(env.DUTYDECK_AUTH) === 'true',
-    databaseUrl: resolve(defaultCwd, env.DUTYDECK_DATABASE_URL ?? './.dutydeck/dutydeck.db'),
+    databaseUrl: resolveDatabaseUrl(env),
     acpxCommand: env.DUTYDECK_ACPX_COMMAND,
     driverIdleTimeoutMs: env.DUTYDECK_DRIVER_IDLE_TIMEOUT_MS ? Number(env.DUTYDECK_DRIVER_IDLE_TIMEOUT_MS) : undefined,
     cleanupIntervalMs: env.DUTYDECK_CLEANUP_INTERVAL_MS ? Number(env.DUTYDECK_CLEANUP_INTERVAL_MS) : undefined,

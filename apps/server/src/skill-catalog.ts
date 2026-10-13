@@ -6,23 +6,35 @@ export interface SkillReference {
   name: string;
   description: string;
   path: string;
-  source: 'workspace' | 'user';
+  source: 'workspace' | 'user' | 'plugin';
 }
 
 export interface DiscoverSkillsOptions {
   homeDirectory?: string;
+  /** 会话所属飞书机器人；限定在某个机器人的插件 skills 只对它生效。 */
+  botAppId?: string;
 }
 
 const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'build']);
 
-export function skillRoots(workspaceRoot: string, homeRoot: string): Array<{ path: string; source: SkillReference['source'] }> {
+/** 已启用插件的 skills 根目录，由插件宿主在启动时登记；按工作区和机器人过滤。 */
+export type PluginSkillRootProvider = (context: { workspaceRoot: string; botAppId?: string }) => string[];
+let pluginSkillRoots: PluginSkillRootProvider = () => [];
+export function setPluginSkillRoots(provider: PluginSkillRootProvider): () => void {
+  pluginSkillRoots = provider;
+  return () => { if (pluginSkillRoots === provider) pluginSkillRoots = () => []; };
+}
+
+/** 目录与投递共用的唯一根定义：工作区、用户目录，再加插件。 */
+export function skillRoots(workspaceRoot: string, homeRoot: string, botAppId?: string): Array<{ path: string; source: SkillReference['source'] }> {
   return [
     { path: join(workspaceRoot, '.agents', 'skills'), source: 'workspace' },
     { path: join(workspaceRoot, '.codex', 'skills'), source: 'workspace' },
     { path: join(workspaceRoot, '.claude', 'skills'), source: 'workspace' },
     { path: join(homeRoot, '.agents', 'skills'), source: 'user' },
     { path: join(homeRoot, '.codex', 'skills'), source: 'user' },
-    { path: join(homeRoot, '.claude', 'skills'), source: 'user' }
+    { path: join(homeRoot, '.claude', 'skills'), source: 'user' },
+    ...pluginSkillRoots({ workspaceRoot, ...(botAppId ? { botAppId } : {}) }).map(path => ({ path, source: 'plugin' as const }))
   ];
 }
 
@@ -89,7 +101,7 @@ export async function discoverSkills(
 ): Promise<SkillReference[]> {
   const workspaceRoot = resolve(workspace?.trim() || process.cwd());
   const homeRoot = resolve(options?.homeDirectory?.trim() || homedir());
-  const roots = skillRoots(workspaceRoot, homeRoot);
+  const roots = skillRoots(workspaceRoot, homeRoot, options?.botAppId);
 
   const references = await Promise.all(
     roots.map(async root => {

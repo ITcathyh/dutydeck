@@ -1,0 +1,7 @@
+{
+  "auth": { "type": "token", "header": "x-dutydeck-token" },
+  "target": { "botAppId": "{{config.bot_app_id}}", "chatId": "{{config.chat_id}}", "session": "new" },
+  "prompt": "外部系统发来一条 ping，请简短回复收到并复述其中的消息：\n{{payload.message}}",
+  "dedupeKey": "{{payload.id}}",
+  "maxConcurrent": 2
+}

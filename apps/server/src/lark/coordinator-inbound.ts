@@ -34,6 +34,7 @@ import {
   routeLarkCommand,
   type LarkCommandRoute
 } from './commands.js';
+import { expandLarkPluginCommand, larkPluginCommandHelp } from './plugin-commands.js';
 import { escapeLarkPromptEcho, renderQueueSummary, QUEUE_SUMMARY_MAX_ITEMS } from './queue-summary.js';
 import { senderGroupMention } from './card-mentions.js';
 import { claimLarkTaskDispatches, larkTaskAgentGuid, releaseLarkTaskClaim } from './task-agent.js';
@@ -957,12 +958,18 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     scopeId: string,
     acknowledgementReactionId?: string
   ): Promise<'handled' | string | LarkCommandPrompt | undefined> {
+    // 插件命令展开成 prompt 模板后照普通请求处理（授权与建任务都不变）；内置命令名在安装时已拒绝。
+    const pluginScope = { botAppId: config.appId, ...(config.workspace ? { cwd: config.workspace } : {}) };
+    const pluginPrompt = expandLarkPluginCommand(prompt, pluginScope);
+    if (pluginPrompt !== undefined) return pluginPrompt;
     if (!parseSlashCommand(prompt)) return undefined;
     const botSender = event.senderType === 'app' || event.senderType === 'bot';
     const allowlisted = await this.commandAllowlisted(config, event.chatType, event.chatId, event.senderOpenId, group.sessionId);
+    const pluginCommands = larkPluginCommandHelp(pluginScope);
     const route = routeLarkCommand(prompt, {
       capabilities: this.larkRouteCapabilities(),
-      operator: { kind: botSender ? 'bot' : 'user', allowlisted }
+      operator: { kind: botSender ? 'bot' : 'user', allowlisted },
+      ...(pluginCommands.length ? { pluginCommands } : {})
     });
     if (route.kind === 'not_a_command') return undefined;
     // 未识别命令交回主流程当普通请求处理，命令层已做归一化防止再被当成内置命令。
@@ -2087,7 +2094,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         if (!await this.isOperatorAllowed(config, operatorOpenId, context.chatId)) {
           return { type: 'warning', content: '当前账号无权使用命令帮助。' };
         }
-        const help = renderLarkCommandHelp(this.larkRouteCapabilities(), { page: pageValue.page });
+        const pluginCommands = larkPluginCommandHelp({ botAppId: config.appId, ...(config.workspace ? { cwd: config.workspace } : {}) });
+        const help = renderLarkCommandHelp(this.larkRouteCapabilities(), { page: pageValue.page, ...(pluginCommands.length ? { pluginCommands } : {}) });
         await this.service.update({ messageId: context.messageId, taskId: context.messageId, taskName: help.title,
           state: 'completed', readOnly: true, permissionMode: larkPermissionMode(config), markdown: help.text, elements: help.elements });
         return { type: 'success', content: `帮助第 ${help.page}/${help.totalPages} 页。` };

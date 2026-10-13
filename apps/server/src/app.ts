@@ -31,6 +31,7 @@ import { registerIdentityPreflightRoutes, type IdentityPreflightRouteOptions } f
 import { registerCiHookRoutes, type CiHookRouteOptions } from './ci-hook-routes.js';
 import { registerUsageRoutes, type UsageRouteOptions } from './usage-routes.js';
 import { registerSessionInsightRoutes, type SessionInsightRouteOptions } from './session-insight-routes.js';
+import { isPluginTriggerRequest, registerPluginRoutes, type PluginRouteOptions } from './plugins/routes.js';
 
 const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -83,6 +84,8 @@ export interface BuildAppOptions {
   automation?: SessionAutomationRouteOptions;
   /** CI webhook 入口（/api/hooks/*）；未配置 webhook 密钥时不注册。 */
   ciHooks?: CiHookRouteOptions;
+  /** 插件命令列表与触发器入口（/api/plugins/*）；没有启用的插件时不注册。 */
+  plugins?: PluginRouteOptions;
   webRoot?: string;
   lark?: LarkRoutesOptions;
   system?: SystemRoutesOptions;
@@ -152,6 +155,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         || pathname.startsWith('/api/lark/agent-tools/')
         || isRelayCapabilityRequest(method, pathname)
         || pathname.startsWith('/api/hooks/')
+        || (options.plugins !== undefined && isPluginTriggerRequest(method, pathname))
         || userExempt?.(method, pathname) === true
     });
   }
@@ -167,6 +171,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   await registerScheduleManagementRoutes(app, options.schedule);
   if (options.automation) await registerSessionAutomationRoutes(app, options.automation);
   if (options.ciHooks) await registerCiHookRoutes(app, options.ciHooks);
+  if (options.plugins) await registerPluginRoutes(app, options.plugins);
   if (options.workItems) await registerWorkItemRoutes(app, options.workItems);
   if (options.workItemTools) await registerWorkItemTools(app, options.workItemTools);
   if (options.memoryTools) await registerLarkMemoryTools(app, options.memoryTools);
@@ -323,9 +328,13 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const skillRequests = request.body.skillRequests;
     if (skillRequests !== undefined && (!Array.isArray(skillRequests) || skillRequests.length > 16 || skillRequests.some(path => typeof path !== 'string' || !path.trim() || path.length > 4096))) throw new RuntimeError('INVALID_SKILL_REQUESTS', '请选择目录中的 Skill，最多 16 项', 400);
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'turn.append');
+    // 插件斜杠命令在这里换成模板展开后的 prompt；时间线仍显示用户输入的原文。
+    const pluginPrompt = options.plugins && prompt.startsWith('/')
+      ? options.plugins.commands.expand(prompt, { cwd: (await runtime.getSession(request.params.id))?.cwd }) : undefined;
+    const agentPrompt = pluginPrompt ?? prompt;
     const task = decision?.source === 'owner'
-      ? await runtime.dispatch(request.params.id, prompt, mode, prompt, undefined, installationOwnerTaskActor, undefined, skillRequests)
-      : await runtime.dispatch(request.params.id, prompt, mode, prompt, undefined, undefined, undefined, skillRequests);
+      ? await runtime.dispatch(request.params.id, prompt, mode, agentPrompt, undefined, installationOwnerTaskActor, undefined, skillRequests)
+      : await runtime.dispatch(request.params.id, prompt, mode, agentPrompt, undefined, undefined, undefined, skillRequests);
     if (requested !== 'steer') return reply.code(202).send({ accepted: true, task });
     // 这一条已经开跑（没有排队）也算按正常新一轮处理。
     let steering: { task: unknown; outcome: string; error?: string } = { task, outcome: 'promptRequired' };

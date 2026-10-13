@@ -378,3 +378,16 @@ export class LocalFileAgentApiKeyResolver {
     finally { value.fill(0); }
   }
 }
+
+/** 插件 userConfig 里 sensitive 取值的读取，只在 daemon 加载插件时调用；没设置返回 undefined。 */
+export class LocalFilePluginSecretResolver {
+  constructor(private readonly provider: LocalFileSecretProvider) {}
+  read(referenceKey: string): string | undefined {
+    if (this.provider.inspect(referenceKey).availability === 'missing') return undefined;
+    const read = runtimeReaders.get(this.provider);
+    if (!read) throw new SecretProviderError('SECRET_RUNTIME_BOUNDARY_REQUIRED', 'Plugin secret resolution requires a local provider');
+    const value = read(referenceKey);
+    try { return value.toString('utf8'); }
+    finally { value.fill(0); }
+  }
+}

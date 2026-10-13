@@ -1,0 +1,9 @@
+{
+  "name": "hello",
+  "version": "0.1.0",
+  "description": "Dutydeck 插件示例：一个命令、一个外部触发器、一个记录任务的 hook。",
+  "userConfig": {
+    "bot_app_id": { "description": "触发器投递到的飞书机器人 App ID" },
+    "chat_id": { "description": "触发器投递到的飞书群 chat_id" }
+  }
+}

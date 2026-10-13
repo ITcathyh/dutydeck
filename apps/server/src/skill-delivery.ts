@@ -9,7 +9,7 @@ import { discoverSkills, isPathInside, skillRoots, type SkillReference } from '.
 export interface SkillDelivery {
   name: string;
   path: string;
-  source: 'workspace' | 'user';
+  source: SkillReference['source'];
   digest: string;
   mode: 'prompt';
 }
@@ -23,6 +23,7 @@ export interface PrepareSkillPromptResult {
 
 export interface PrepareSkillPromptOptions {
   homeDirectory?: string;
+  botAppId?: string;
   promptPolicyVersion?: 'legacy-v1' | 'optimized-v1';
   promptParts?: PromptPart[];
 }
@@ -107,13 +108,13 @@ export async function prepareSkillPrompt(
   const workspaceRoot = resolve(cwd?.trim() || process.cwd());
   const homeRoot = resolve(options?.homeDirectory?.trim() || homedir());
 
-  const roots = skillRoots(workspaceRoot, homeRoot);
+  const roots = skillRoots(workspaceRoot, homeRoot, options?.botAppId);
 
   const canonicalRoots = (
     await Promise.all(roots.map(root => realpath(root.path).catch(() => null)))
   ).filter((r): r is string => Boolean(r));
 
-  const catalog = await discoverSkills(workspaceRoot, { homeDirectory: homeRoot });
+  const catalog = await discoverSkills(workspaceRoot, { homeDirectory: homeRoot, ...(options?.botAppId ? { botAppId: options.botAppId } : {}) });
 
   const matchedFromRequests: SkillReference[] = [];
   if (hasExplicitRequests) {

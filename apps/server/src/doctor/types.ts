@@ -172,4 +172,6 @@ export interface DoctorDependencies {
    * 该模块不存在或抛错时该项检查降级为 skip，而不是让整个体检崩掉。
    */
   autostartStatus?: () => Promise<DoctorAutostartResult>;
+  /** 插件检查（入参为数据目录）；默认只读 plugins/ 目录，没有安装插件时不产出任何检查项。 */
+  pluginChecks?: (dataDir: string) => Promise<DoctorCheck[]>;
 }
