@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { type Query, useQueries } from '@tanstack/react-query';
 import { api, ApiError, type RunSummary, type Session } from '../api';
 import { sessionDisplayName } from '../run-summary';
+import { useExperimental } from '../experimental';
 import { Banner, Button, Card, EmptyState, Spinner } from './primitives';
 import { ScheduleFoundationPanel } from './ScheduleFoundationPanel';
 import { scheduleNextExecution, SessionAutomationPanel } from './SessionAutomationPanel';
@@ -14,6 +15,7 @@ export function AutomationOverview({ sessions, summaries = {}, onSelectSession }
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<{ sessionId: string; scheduleId?: string }>();
   const [draftsOpen, setDraftsOpen] = useState(false);
+  const [experimental] = useExperimental();
   const pageCount = Math.max(1, Math.ceil(sessions.length / pageSize));
   const currentPage = Math.min(page, pageCount - 1);
   const pageSessions = sessions.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
@@ -55,11 +57,11 @@ export function AutomationOverview({ sessions, summaries = {}, onSelectSession }
       })}
       {pageCount > 1 && <div className="flex flex-wrap items-center gap-3"><Button disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>上一页</Button><span className="text-caption text-secondary">任务页 {currentPage + 1} / {pageCount} · 每页最多 {pageSize} 个任务</span><Button disabled={currentPage + 1 >= pageCount} onClick={() => setPage(currentPage + 1)}>下一页</Button></div>}
     </section>}
-    <Card as="section" tone="muted" padding="md" className="space-y-2">
+    {experimental && <Card as="section" tone="muted" padding="md" className="space-y-2">
       <h2 className="text-body font-semibold">导入与管理草稿</h2>
       <p className="text-caption text-secondary">仅保存草稿。可维护导入定义和预览触发时间，草稿不会自动执行。</p>
       <Button onClick={() => setDraftsOpen(true)}>管理草稿</Button>
-    </Card>
-    <ScheduleFoundationPanel open={draftsOpen} onClose={() => setDraftsOpen(false)}/>
+    </Card>}
+    {experimental && <ScheduleFoundationPanel open={draftsOpen} onClose={() => setDraftsOpen(false)}/>}
   </div>;
 }

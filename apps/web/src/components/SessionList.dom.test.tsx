@@ -5,11 +5,12 @@ import type { WorkspaceOrganization } from '@dutydeck/shared';
 import type { RunSummary, Session } from '../api';
 import { workbenchViewLabels, workbenchViewOrder } from '../workspace-model';
 import { SessionList, type SessionListProps } from './SessionList';
+import { EXPERIMENTAL_STORAGE_KEY, writeExperimental } from '../experimental';
 
 const baseProps: SessionListProps = { open: false, onClose: () => {}, sessions: [], summaries: {}, sessionsLoading: false, agents: [], larkBots: [], view: 'all', onSelect: () => {}, onNewSession: () => {}, onOpenControlCenter: () => {}, onOpenLarkSetup: () => {}, onOpenGroups: () => {}, onOpenSchedules: () => {} };
 const originalMatchMedia = window.matchMedia;
 
-afterEach(() => { vi.restoreAllMocks(); Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: originalMatchMedia }); });
+afterEach(() => { vi.restoreAllMocks(); window.localStorage.removeItem(EXPERIMENTAL_STORAGE_KEY); Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: originalMatchMedia }); });
 
 describe('SessionList mobile accessibility', () => {
   it('移动侧栏关闭时 inert 且从可访问树隐藏，打开后恢复', () => {
@@ -217,6 +218,7 @@ describe('SessionList 同源 worktree 项目聚合', () => {
  */
 describe('SessionList 功能导航区', () => {
   it('把原先只能深链或三层点击才能到的目的地做成常驻入口', async () => {
+    writeExperimental(true);
     const user = userEvent.setup();
     const onOpenLarkSetup = vi.fn(); const onOpenGroups = vi.fn(); const onOpenSchedules = vi.fn();
     render(<SessionList {...baseProps} open onOpenLarkSetup={onOpenLarkSetup} onOpenGroups={onOpenGroups} onOpenSchedules={onOpenSchedules}/>);
@@ -240,7 +242,14 @@ describe('SessionList 功能导航区', () => {
    * 定时任务入口是真实 session 自动化总览：任务内计划会按时运行，只有导入定义
    * 是草稿，所以 hint 只说「任务执行计划与草稿」，不把整个入口统称「不会自动执行」。
    */
+  it('实验功能默认关闭：不显示群与权限，定时任务的说明不提草稿', () => {
+    render(<SessionList {...baseProps} open/>);
+    expect(screen.queryByRole('button', { name: /群与权限/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /定时任务.*任务执行计划$/ })).toBeTruthy();
+  });
+
   it('群与权限如实标注运行时限制；定时任务只标注导入草稿，不统称不执行', () => {
+    writeExperimental(true);
     render(<SessionList {...baseProps} open/>);
     expect(screen.getByRole('button', { name: /群与权限.*尚未接入运行时/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /定时任务.*任务执行计划与草稿/ })).toBeTruthy();
@@ -297,6 +306,7 @@ describe('SessionList 功能导航区', () => {
    * 导航项高度需满足移动端触控要求（不采用过窄的 36px 档位）。
    */
   it('导航项满足触控下限，且键盘可达', async () => {
+    writeExperimental(true);
     render(<SessionList {...baseProps} open/>);
     for (const name of [/飞书接入/, /群与权限/, /定时任务/]) {
       const item = screen.getByRole('button', { name });

@@ -10,6 +10,7 @@ import { createTaskAffordance, DutydeckIcon } from './ui';
 import { IconButton, Skeleton } from './primitives';
 import { SessionRow } from './SessionRow';
 import { SidebarNav, type SidebarNavGroup } from './SidebarNav';
+import { useExperimental } from '../experimental';
 
 export type SessionListProps = {
   open: boolean;
@@ -122,6 +123,7 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
   // 与这里相反——不命中对别处只是少一点样式，对侧栏却是整块消失，所以这条反向
   // fallback 留在调用点，不去改那个通用 hook。
   const desktop = typeof window === 'undefined' || typeof window.matchMedia !== 'function' ? true : matchesDesktop;
+  const [experimental] = useExperimental();
   const createTask = createTaskAffordance({ agents, agentsLoading, onCreate: onNewSession, onPrepareAgents: onOpenControlCenter });
   const hiddenOnMobile = !desktop && !open;
 
@@ -185,8 +187,9 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
         状态列全，进得去才读得到；而且可用性判定要读 foundationApi/scheduleApi
         的 capabilities，为了给侧栏画个灰按钮就多拉两个查询，代价与收益不成比例。
       */
-      { id: 'groups', label: '群与权限', hint: '策略草稿 · 尚未接入运行时', Icon: Users, onClick: onOpenGroups },
-      { id: 'schedules', label: '定时任务', hint: '任务执行计划与草稿', Icon: CalendarClock, onClick: onOpenSchedules }
+      // 群与权限只有草稿态，收在「实验功能」开关后面；导入草稿同理，关闭时 hint 不提草稿。
+      ...(experimental ? [{ id: 'groups', label: '群与权限', hint: '策略草稿 · 尚未接入运行时', Icon: Users, onClick: onOpenGroups }] : []),
+      { id: 'schedules', label: '定时任务', hint: experimental ? '任务执行计划与草稿' : '任务执行计划', Icon: CalendarClock, onClick: onOpenSchedules }
     ] },
     ...(onOpenUsage ? [{ id: 'usage', title: '成本', items: [
       { id: 'usage', label: '用量与成本', hint: '按 Bot、群、触发人、来源汇总 · 月度上限', Icon: Coins, onClick: onOpenUsage }

@@ -38,6 +38,7 @@ import { ToastViewport } from './components/ToastViewport';
 import { toastStore } from './useToasts';
 import { TopBar } from './components/TopBar';
 import { useTheme } from './useTheme';
+import { useExperimental } from './experimental';
 import { shortcutAvailability, useKeyboardShortcuts, workbenchViewShortcutIds } from './useKeyboardShortcuts';
 import { ShortcutHelpSheet } from './components/ShortcutHelpSheet';
 
@@ -104,7 +105,9 @@ export default function App() {
   // 各走各的，回退键、刷新、分享链接三者立刻打架（见 app-route.ts 的说明）。
   const [location, setLocation] = useState<AppLocation>(currentLocation);
   const route = location.route;
-  const overlay = location.overlay;
+  const [experimental] = useExperimental();
+  // 群与权限只有草稿态：实验功能关闭时，?panel=groups 深链不打开浮层。
+  const overlay = location.overlay?.kind === 'groups' && !experimental ? undefined : location.overlay;
   // 主区一级视图与选中对象。三者都在 URL 里，刷新和分享都能回到同一个对象
   // （app-route.ts 的 nav/appId/chatId）。
   const primaryNav: PrimaryNav = location.nav ?? 'tasks';

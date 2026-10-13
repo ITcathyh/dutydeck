@@ -8,6 +8,7 @@ import {
   Bot,
   CalendarClock,
   ChevronRight,
+  FlaskConical,
   KeyRound,
   MessageSquare,
   Plus,
@@ -19,8 +20,9 @@ import { ApiError, foundationApi, scheduleApi, terminalSettingsApi, type Agent, 
 import { projectLarkBotStatus } from '../lark-status';
 import { Badge, Banner, Button, Card, Dialog, EmptyState, Field, IconButton, Input, Select, Spinner } from './primitives';
 import { permissionLabels } from './ui';
+import { useExperimental } from '../experimental';
 
-export type ControlCenterSection = 'agents' | 'lark' | 'groups' | 'automation';
+export type ControlCenterSection = 'agents' | 'lark' | 'groups' | 'automation' | 'experimental';
 
 type Props = {
   open: boolean;
@@ -46,8 +48,12 @@ const sections: Array<{ id: ControlCenterSection; label: string; description: st
   { id: 'agents', label: 'Agent', description: '准备本机执行者', Icon: Bot },
   { id: 'lark', label: '飞书 Bot', description: '连接消息入口', Icon: MessageSquare },
   { id: 'groups', label: '群与权限', description: '群聊范围与操作权限', Icon: Users },
-  { id: 'automation', label: '自动化', description: '任务计划与草稿', Icon: CalendarClock }
+  { id: 'automation', label: '自动化', description: '任务计划与草稿', Icon: CalendarClock },
+  { id: 'experimental', label: '实验功能', description: '尚未接入运行时的草稿入口', Icon: FlaskConical }
 ];
+
+// 群与权限、自动化两个分区只有草稿态，实验功能关闭时不出现。
+const draftSections: readonly ControlCenterSection[] = ['groups', 'automation'];
 
 /*
   三档就绪语气收进 <Badge>：原来是一个 full 圆角、10px 字号的手写 span，同时违反
@@ -87,17 +93,18 @@ export function ControlCenterModal({
   onOpenSchedules
 }: Props) {
   const queryClient = useQueryClient();
+  const [experimental, setExperimental] = useExperimental();
   const [section, setSection] = useState<ControlCenterSection>(initialSection);
   const [createOpen, setCreateOpen] = useState(false);
   const [displayName, setDisplayName] = useState('');
   const [externalAppId, setExternalAppId] = useState('');
   const [brand, setBrand] = useState<'feishu' | 'lark'>('feishu');
 
-  const capabilities = useQuery({ queryKey: ['foundation-capabilities'], queryFn: foundationApi.capabilities, enabled: open, retry: false });
-  const matrix = useQuery({ queryKey: ['foundation-group-matrix'], queryFn: foundationApi.groupMatrix, enabled: open && capabilities.data?.repositoriesWired === true, retry: false });
-  const secretRefs = useQuery({ queryKey: ['foundation-secret-refs'], queryFn: foundationApi.secretRefs, enabled: open && capabilities.data?.repositoriesWired === true, retry: false });
-  const scheduleCapabilities = useQuery({ queryKey: ['schedule-capabilities'], queryFn: scheduleApi.capabilities, enabled: open, retry: false });
-  const schedules = useQuery({ queryKey: ['schedule-foundation-list'], queryFn: scheduleApi.list, enabled: open && scheduleCapabilities.data?.repositoriesWired === true, retry: false });
+  const capabilities = useQuery({ queryKey: ['foundation-capabilities'], queryFn: foundationApi.capabilities, enabled: open && experimental, retry: false });
+  const matrix = useQuery({ queryKey: ['foundation-group-matrix'], queryFn: foundationApi.groupMatrix, enabled: open && experimental && capabilities.data?.repositoriesWired === true, retry: false });
+  const secretRefs = useQuery({ queryKey: ['foundation-secret-refs'], queryFn: foundationApi.secretRefs, enabled: open && experimental && capabilities.data?.repositoriesWired === true, retry: false });
+  const scheduleCapabilities = useQuery({ queryKey: ['schedule-capabilities'], queryFn: scheduleApi.capabilities, enabled: open && experimental, retry: false });
+  const schedules = useQuery({ queryKey: ['schedule-foundation-list'], queryFn: scheduleApi.list, enabled: open && experimental && scheduleCapabilities.data?.repositoriesWired === true, retry: false });
   const createBot = useMutation({
     mutationFn: () => foundationApi.createChannelBot({ id: newId('channel-bot'), externalAppId: externalAppId.trim(), displayName: displayName.trim(), brand }),
     onSuccess: async () => {
@@ -160,6 +167,9 @@ export function ControlCenterModal({
     嵌套浮层就再也收不到那次按键。
   */
   const busy = createBot.isPending;
+  const visibleSections = sections.filter(item => experimental || !draftSections.includes(item.id));
+  // 深链或旧状态指向被隐藏的分区时回落到 Agent。
+  const activeSection = visibleSections.some(item => item.id === section) ? section : 'agents';
 
   return <Dialog open={open} onClose={onClose} label="Dutydeck 设置与接入" size="xl" closeOnEscape={!busy} closeOnScrim={!busy}>
     <Dialog.Header>
@@ -185,14 +195,15 @@ export function ControlCenterModal({
           /^Agent 准备本机执行者$/），所以 description 那段即使在窄屏隐藏也必须留在
           按钮里；data-dialog-initial-focus 是 useDialogFocus 的入口焦点锚点。
         */}
-        <nav aria-label="设置与接入导航" className="grid grid-cols-2 gap-1 md:grid-cols-1">{sections.map(item => <button key={item.id} type="button" data-dialog-initial-focus={section === item.id ? '' : undefined} aria-current={section === item.id ? 'page' : undefined} onClick={() => setSection(item.id)} className={`flex min-h-12 items-center gap-2 rounded-md px-3 text-left ${section === item.id ? 'bg-surface text-primary shadow-card' : 'text-secondary hover:bg-hover'}`}><item.Icon size={15}/><span className="min-w-0"><strong className="block text-caption font-semibold">{item.label}</strong><span className="hidden truncate text-caption text-subtle md:block">{item.description}</span></span><ChevronRight size={13} className="ml-auto hidden md:block"/></button>)}</nav>
+        <nav aria-label="设置与接入导航" className="grid grid-cols-2 gap-1 md:grid-cols-1">{visibleSections.map(item => <button key={item.id} type="button" data-dialog-initial-focus={activeSection === item.id ? '' : undefined} aria-current={activeSection === item.id ? 'page' : undefined} onClick={() => setSection(item.id)} className={`flex min-h-12 items-center gap-2 rounded-md px-3 text-left ${activeSection === item.id ? 'bg-surface text-primary shadow-card' : 'text-secondary hover:bg-hover'}`}><item.Icon size={15}/><span className="min-w-0"><strong className="block text-caption font-semibold">{item.label}</strong><span className="hidden truncate text-caption text-subtle md:block">{item.description}</span></span><ChevronRight size={13} className="ml-auto hidden md:block"/></button>)}</nav>
       </aside>
 
       <div className="min-h-0 overflow-y-auto p-5">
-        {section === 'agents' && <AgentSection agents={agents} legacyBots={legacyBots} onCreateTask={onCreateTask} onOpenLarkSetup={onOpenLarkSetup}/>}
-        {section === 'lark' && <LarkSection agents={agents} legacyBots={legacyBots} larkListeningDisabled={larkListeningDisabled} larkBotsLoading={larkBotsLoading} larkBotsFailed={larkBotsFailed} larkBotsRetrying={larkBotsRetrying} onRetryLarkBots={onRetryLarkBots} capabilities={capabilities} matrix={matrix} secretRefs={secretRefs} channelBots={channelBots} availableLarkRefs={availableLarkRefs} createOpen={createOpen} setCreateOpen={setCreateOpen} displayName={displayName} setDisplayName={setDisplayName} externalAppId={externalAppId} setExternalAppId={setExternalAppId} brand={brand} setBrand={setBrand} createBot={createBot} onOpenLarkSetup={onOpenLarkSetup}/>}
-        {section === 'groups' && <GroupsSection cells={cells} missingBindings={missingBindings} repositoriesWired={capabilities.data?.repositoriesWired === true} onOpenLarkSetup={onOpenLarkSetup} onOpenGroups={onOpenGroups}/>}
-        {section === 'automation' && <AutomationSection scheduleCount={scheduleCount} capabilities={scheduleCapabilities} onOpenSchedules={onOpenSchedules}/>}
+        {activeSection === 'agents' && <AgentSection agents={agents} legacyBots={legacyBots} onCreateTask={onCreateTask} onOpenLarkSetup={onOpenLarkSetup}/>}
+        {activeSection === 'lark' && <LarkSection agents={agents} legacyBots={legacyBots} larkListeningDisabled={larkListeningDisabled} larkBotsLoading={larkBotsLoading} larkBotsFailed={larkBotsFailed} larkBotsRetrying={larkBotsRetrying} onRetryLarkBots={onRetryLarkBots} capabilities={capabilities} matrix={matrix} secretRefs={secretRefs} channelBots={channelBots} availableLarkRefs={availableLarkRefs} createOpen={createOpen} setCreateOpen={setCreateOpen} displayName={displayName} setDisplayName={setDisplayName} externalAppId={externalAppId} setExternalAppId={setExternalAppId} brand={brand} setBrand={setBrand} createBot={createBot} onOpenLarkSetup={onOpenLarkSetup}/>}
+        {activeSection === 'groups' && <GroupsSection cells={cells} missingBindings={missingBindings} repositoriesWired={capabilities.data?.repositoriesWired === true} onOpenLarkSetup={onOpenLarkSetup} onOpenGroups={onOpenGroups}/>}
+        {activeSection === 'automation' && <AutomationSection scheduleCount={scheduleCount} capabilities={scheduleCapabilities} onOpenSchedules={onOpenSchedules}/>}
+        {activeSection === 'experimental' && <ExperimentalSection enabled={experimental} onChange={setExperimental}/>}
       </div>
     </div>
   </Dialog>;
@@ -266,6 +277,7 @@ function LarkSection({ agents, legacyBots, larkListeningDisabled, larkBotsLoadin
   createBot: { mutate(): void; error: Error | null; isPending: boolean };
   onOpenLarkSetup(target?: LarkSetupTarget): void;
 }) {
+  const [experimental] = useExperimental();
   return <section aria-labelledby="control-lark">
     <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 id="control-lark" className="text-title font-semibold text-primary">飞书 Bot</h3><p className="mt-1 text-caption text-subtle">Bot 负责在飞书收发消息，Agent 负责执行任务。绑定向导会把两者一次连好。</p></div><Button variant="primary" icon={<Plus size={15}/>} onClick={() => onOpenLarkSetup('new')}>{legacyBots.length ? '绑定新 Bot' : '绑定飞书 Bot'}</Button></div>
     {/*
@@ -290,7 +302,7 @@ function LarkSection({ agents, legacyBots, larkListeningDisabled, larkBotsLoadin
         return <Card key={bot.appId} as="article" padding="md"><div className="flex flex-wrap items-center gap-2"><MessageSquare size={15} className="text-action"/><h4 className="text-body font-semibold text-primary">{bot.name}</h4>{statePill(status.label, ready ? 'ready' : 'blocked')}</div><div className="mt-3 grid gap-2 text-caption sm:grid-cols-3"><div className="rounded-md bg-muted p-2 text-subtle">默认 Agent<br/><strong className="text-primary">{agent?.name || bot.defaultAgentId?.trim() || '未选择'}</strong></div><div className="rounded-md bg-muted p-2 text-subtle">工作区<br/><strong className="block truncate text-primary" title={bot.workspace}>{bot.workspace || '使用 Agent 默认目录'}</strong></div><div className="rounded-md bg-muted p-2 text-subtle">消息监听<br/><strong className="text-primary">{status.label}</strong></div></div><Button variant="secondary" className="mt-3" onClick={() => onOpenLarkSetup({ appId: bot.appId })}>{ready ? '管理设置' : '继续设置'}</Button></Card>;
       })}</div>}
 
-    <details className="mt-6 rounded-lg border border-default bg-muted p-4">
+    {experimental && <details className="mt-6 rounded-lg border border-default bg-muted p-4">
       <summary className="cursor-pointer text-caption font-semibold text-secondary">迁移与高级草稿</summary>
       <p className="mt-2 text-caption text-secondary">以下是新控制面迁移草稿，只能离线保存，当前版本不能据此启动 Bot。日常接入请使用上方“绑定飞书 Bot”。</p>
       {(capabilities.isError || matrix.isError || secretRefs.isError) && <div className="mt-3"><Banner tone="danger">高级草稿状态读取失败。<button type="button" className="ml-1 font-semibold underline" onClick={() => { void capabilities.refetch(); void matrix.refetch(); void secretRefs.refetch(); }}>重试</button></Banner></div>}
@@ -314,7 +326,7 @@ function LarkSection({ agents, legacyBots, larkListeningDisabled, larkBotsLoadin
       <div className="mt-3 space-y-2">{channelBots.map(entry => <Card key={entry.bot.id} as="article" padding="sm"><div className="flex flex-wrap items-center gap-2"><Bot size={14}/><strong className="text-caption text-primary">{entry.bot.displayName}</strong>{statePill(`${entry.bot.state} / listener disabled`)}{statePill(entry.bot.credentialStatus === 'configured' ? 'SecretRef ready' : `credential ${entry.bot.credentialStatus}`, entry.bot.credentialStatus === 'configured' ? 'ready' : 'blocked')}</div></Card>)}</div>
       {matrix.isLoading && <div className="mt-3"><Spinner label="正在读取高级草稿…"/></div>}
       <Card padding="sm" className="mt-4"><div className="flex items-center gap-2"><KeyRound size={14}/><h4 className="text-caption font-semibold text-primary">SecretRef metadata</h4><span className="ml-auto text-caption text-subtle">可用 {availableLarkRefs.length}</span></div>{availableLarkRefs.length === 0 && <p className="mt-2 text-caption text-secondary">高级迁移凭据只能通过本机 CLI 写入：<code className="ml-1 rounded-sm bg-inverse px-1.5 py-1 text-on-inverse">dutydeck secret set &lt;ref-id&gt;</code></p>}</Card>
-    </details>
+    </details>}
   </section>;
 }
 
@@ -324,6 +336,15 @@ function GroupsSection({ cells, missingBindings, repositoriesWired, onOpenLarkSe
     {cells.length === 0
       ? <EmptyState tone="guide" icon={<Users size={21}/>} title="还没有可配置的群" description="先完成 Bot 绑定并把机器人加入飞书群，Dutydeck 收到群消息后会在这里展示。" primaryAction={{ label: '检查 Bot 设置', onClick: onOpenLarkSetup }}/>
       : <><div className="mt-4 grid gap-3 sm:grid-cols-3"><Card padding="md" tone="muted"><div className="text-caption font-semibold text-subtle">已配置群</div><div className="mt-1 text-heading font-semibold text-primary">{cells.length - missingBindings}/{cells.length}</div></Card><Card padding="md" tone="muted"><div className="text-caption font-semibold text-subtle">权限原则</div><div className="mt-1 text-body font-semibold text-primary">能聊天 ≠ 能操作终端</div><p className="mt-1 text-caption text-subtle">高风险操作单独授权</p></Card><div className="rounded-lg border border-warning-border bg-warning-soft p-4"><div className="text-caption font-semibold text-warning">高级策略运行时</div><div className="mt-1 text-body font-semibold text-warning">尚未启用</div></div></div><Button variant="primary" className="mt-4 w-full" disabled={!repositoriesWired} onClick={onOpenGroups}><span className="flex w-full items-center justify-between">查看群配置<ArrowRight size={15}/></span></Button></>}
+  </section>;
+}
+
+function ExperimentalSection({ enabled, onChange }: { enabled: boolean; onChange(enabled: boolean): void }) {
+  return <section aria-labelledby="control-experimental">
+    <div><h3 id="control-experimental" className="text-title font-semibold text-primary">实验功能</h3><p className="mt-1 text-caption text-subtle">这些功能还没有接入运行时，只能保存草稿，默认隐藏。开关只保存在当前浏览器。</p></div>
+    <Card padding="md" className="mt-4">
+      <label className="flex items-start gap-3 text-body text-primary"><input type="checkbox" className="mt-1" checked={enabled} onChange={event => onChange(event.target.checked)}/><span><strong className="font-semibold">显示实验功能</strong><span className="mt-1 block text-caption text-secondary">开启后显示：群与权限（策略草稿，不会生效）、定时任务的导入草稿（不会自动执行）、设置里的迁移与高级草稿（只能离线保存）。</span></span></label>
+    </Card>
   </section>;
 }
 

@@ -3,7 +3,7 @@ import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
 import Database from 'better-sqlite3';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -12,7 +12,7 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AutostartCommandOutput } from '../autostart/autostart.js';
 import { DRAIN_INTERVAL_MS } from './command.js';
-import { parseDeployWindows, runDeploy, shanghaiMinuteOfDay, withinDeployWindow, type DeployDeps } from './deploy.js';
+import { parseDeployWindows, runDeploy, runDeployPrune, shanghaiMinuteOfDay, withinDeployWindow, type DeployDeps } from './deploy.js';
 
 const passingSqlite = (options?: SqliteDriverCheckOptions): SqliteDriverCheck => ({ ok: true, execPath: options?.execPath ?? process.execPath });
 
@@ -812,5 +812,138 @@ describe('dutydeck deploy 与 systemd unit', () => {
     const deployed = await runDeploy({ unit: 'dutydeck-tag.service', source: join(tmp, 'nowhere') }, deps);
     expect(deployed).toMatchObject({ ok: false, status: 'refused' });
     expect(deployed.error).toContain('不是 Dutydeck 检出目录');
+  });
+});
+
+describe('dutydeck deploy prune', () => {
+  let tmp: string;
+  let releases: string;
+  let deployments: string;
+  const noProcesses = () => [] as string[];
+
+  beforeEach(() => {
+    tmp = realpathSync(mkdtempSync(join(tmpdir(), 'dutydeck-prune-')));
+    releases = join(tmp, 'releases');
+    deployments = join(tmp, 'deployments');
+    mkdirSync(releases);
+    mkdirSync(deployments);
+  });
+  afterEach(() => { rmSync(tmp, { recursive: true, force: true }); });
+
+  const releaseName = (index: number) => `2026010${index}T000000Z-${String(index).repeat(7)}`;
+  function makeReleases(count: number, size = 8192) {
+    return Array.from({ length: count }, (_, index) => {
+      const dir = join(releases, releaseName(index + 1));
+      write(join(dir, 'dist', 'cli.js'), 'x'.repeat(size));
+      return dir;
+    });
+  }
+  const hoursAgo = (path: string, hours: number) => {
+    const at = new Date(Date.now() - hours * 3_600_000);
+    utimesSync(path, at, at);
+  };
+  const names = (dir: string) => readdirSync(dir).sort();
+
+  it('--dry-run 只报出会删什么和各自大小，不删任何东西', async () => {
+    const rel = makeReleases(8);
+    link(basename(rel[7]!), join(releases, 'current'));
+    const before = names(releases);
+
+    const result = await runDeployPrune({ releases, dryRun: true }, { processPaths: noProcesses });
+
+    expect(result, result.error).toMatchObject({ ok: true, dryRun: true, keep: 5 });
+    // 最新 5 个是 04..08；current=08，上一版取名字上紧邻的 07；03、02、01 超出，全部是预览项
+    expect(result.items.map(item => item.name)).toEqual([releaseName(3), releaseName(2), releaseName(1)]);
+    expect(result.items.every(item => item.kind === 'release' && item.bytes >= 8192)).toBe(true);
+    expect(result.freedBytes).toBe(result.items.reduce((sum, item) => sum + item.bytes, 0));
+    expect(names(releases)).toEqual(before);
+  });
+
+  it('实删只删超出保留个数的旧版本，不删 current、它的上一版和仍被进程引用的', async () => {
+    const rel = makeReleases(8);
+    link(basename(rel[2]!), join(releases, 'current'));
+    // current=03 的部署记录写明上一版是 01（不是名字上紧邻的 02）
+    write(join(deployments, releaseName(3), 'manifest.json'), JSON.stringify({ created_by: 'dutydeck deploy', release: rel[2], previous_release: rel[0] }));
+    // 02 被一个进程引用
+    const processPaths = () => [`dutydeck_relay_command=${rel[1]}/dist/cli.js`];
+
+    const result = await runDeployPrune({ releases }, { processPaths });
+
+    expect(result, result.error).toMatchObject({ ok: true, dryRun: false, inUse: [releaseName(2)] });
+    expect(result.items).toEqual([]);
+    expect(names(releases)).toEqual([...rel.map(dir => basename(dir)), 'current'].sort());
+
+    const tight = await runDeployPrune({ releases, keep: '2' }, { processPaths });
+    // 保留 08、07；03 是 current、01 是上一版、02 被引用，04..06 删除
+    expect(tight.items.map(item => item.name).sort()).toEqual([releaseName(4), releaseName(5), releaseName(6)]);
+    expect(names(releases)).toEqual([releaseName(1), releaseName(2), releaseName(3), releaseName(7), releaseName(8), 'current'].sort());
+  });
+
+  it('看不了进程时不删旧版本；刚改过的 .partial 当作进行中的部署不动，陈旧的才清', async () => {
+    makeReleases(7);
+    mkdirSync(join(releases, '.fresh.partial'));
+    mkdirSync(join(releases, '.stale.partial'));
+    hoursAgo(join(releases, '.stale.partial'), 2);
+
+    const result = await runDeployPrune({ releases }, { processPaths: () => undefined, warn: vi.fn() });
+
+    expect(result.items.map(item => item.name)).toEqual(['.stale.partial']);
+    expect(result.skipped).toEqual(['.fresh.partial']);
+    expect(names(releases)).toEqual(['.fresh.partial', ...Array.from({ length: 7 }, (_, i) => releaseName(i + 1))].sort());
+  });
+
+  it('部署记录默认只清 deploy 写的；--include-unmarked 才算上手工部署的，进行中或仍被引用的不动', async () => {
+    makeReleases(1);
+    const own = Array.from({ length: 3 }, (_, i) => `2026020${i + 1}T000000Z-aaaaaaa`);
+    for (const name of own) write(join(deployments, name, 'manifest.json'), JSON.stringify({ created_by: 'dutydeck deploy' }));
+    const legacy = ['20260901T000000Z', '20260902T000000Z', '20260903T000000Z', '20260904T000000Z'];
+    for (const name of legacy) { write(join(deployments, name, 'database.before.sqlite'), 'y'.repeat(4096)); hoursAgo(join(deployments, name), 48); }
+    hoursAgo(join(deployments, legacy[3]!), 0); // 刚改过、没有 manifest：可能是进行中的部署
+    write(join(deployments, 'current-deployment-path'), 'x');
+    mkdirSync(join(deployments, 'notes'));
+    const processPaths = () => [`cwd=${join(deployments, legacy[0]!)}/main`];
+
+    const plain = await runDeployPrune({ releases, keep: '2' }, { processPaths });
+    expect(plain.items.map(item => item.name)).toEqual([own[0]]);
+    expect(names(deployments)).toEqual([...own.slice(1), ...legacy, 'current-deployment-path', 'notes'].sort());
+
+    const all = await runDeployPrune({ releases, keep: '2', includeUnmarked: true }, { processPaths });
+    // 按名字最新 2 个：legacy[3]（进行中，本就在保留里）、legacy[2]；其余 own[1]、own[2]、legacy[1] 删，legacy[0] 被进程引用
+    expect(all.items.map(item => item.name).sort()).toEqual([own[1], own[2], legacy[1]].sort());
+    expect(all.skipped).toEqual([legacy[0]]);
+    expect(names(deployments)).toEqual([legacy[0]!, legacy[2]!, legacy[3]!, 'current-deployment-path', 'notes'].sort());
+  });
+
+  it('--include-unmarked 看不了进程时不删手工部署的记录', async () => {
+    makeReleases(1);
+    for (const name of ['20260901T000000Z', '20260902T000000Z', '20260903T000000Z']) { write(join(deployments, name, 'f'), 'z'); hoursAgo(join(deployments, name), 48); }
+
+    const result = await runDeployPrune({ releases, keep: '1', includeUnmarked: true }, { processPaths: () => undefined });
+
+    expect(result.items).toEqual([]);
+    expect(result.skipped).toEqual(['20260902T000000Z', '20260901T000000Z']);
+    expect(readdirSync(deployments)).toHaveLength(3);
+  });
+
+  it.skipIf(process.getuid?.() === 0)('单项删不掉时继续清理其余的，并报失败', async () => {
+    makeReleases(7);
+    const stuck = join(releases, releaseName(1), 'dist');
+    chmodSync(stuck, 0o500);
+    try {
+      const result = await runDeployPrune({ releases }, { processPaths: noProcesses });
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain(releaseName(1));
+      expect(result.items.map(item => item.name)).toEqual([releaseName(2)]);
+    } finally {
+      chmodSync(stuck, 0o700);
+    }
+  });
+
+  it('--keep 只接受正整数；发布目录不存在时报错且不创建', async () => {
+    expect(await runDeployPrune({ releases, keep: '0' })).toMatchObject({ ok: false, error: expect.stringContaining('--keep') });
+    expect(await runDeployPrune({ releases, keep: 'x' })).toMatchObject({ ok: false });
+    const missing = join(tmp, 'nope');
+    expect(await runDeployPrune({ releases: missing })).toMatchObject({ ok: false, error: expect.stringContaining('不存在') });
+    expect(existsSync(missing)).toBe(false);
   });
 });

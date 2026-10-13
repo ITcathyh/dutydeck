@@ -5,12 +5,13 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { PublicSessionSchedule } from '@dutydeck/shared';
 import { api, ApiError, scheduleApi, type RunSummary, type Session } from '../api';
 import { AutomationOverview } from './AutomationOverview';
+import { EXPERIMENTAL_STORAGE_KEY, writeExperimental } from '../experimental';
 
 const session: Session = { id: 's1', agentId: 'claude', cwd: '/project/worktree', state: 'completed', runId: 'r', createdAt: '2026-09-12T00:00:00Z', updatedAt: '2026-09-12T00:00:00Z' };
 const schedule: PublicSessionSchedule = { schemaVersion: 1, id: 'plan1', revision: 3, generation: 1, sessionId: session.id, name: '巡检', prompt: '检查构建', trigger: { kind: 'cron', expression: '0 9 * * *' }, timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }, enabled: false, createdAt: session.createdAt, updatedAt: session.updatedAt };
 const empty = { schedules: [], subscriptions: [], occurrences: [] };
 const clients: QueryClient[] = [];
-afterEach(() => { cleanup(); clients.forEach(client => client.clear()); clients.length = 0; vi.restoreAllMocks(); vi.useRealTimers(); });
+afterEach(() => { cleanup(); window.localStorage.removeItem(EXPERIMENTAL_STORAGE_KEY); clients.forEach(client => client.clear()); clients.length = 0; vi.restoreAllMocks(); vi.useRealTimers(); });
 function mount(sessions = [session], summaries: Record<string, RunSummary> = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   clients.push(client);
@@ -70,7 +71,16 @@ describe('automation overview', () => {
     await screen.findByText('此任务暂无定时计划。');
   });
 
+  it('实验功能默认关闭时不显示导入草稿入口', async () => {
+    vi.spyOn(api, 'automation').mockResolvedValue(empty);
+    mount();
+    await screen.findByText('此任务暂无定时计划。');
+    expect(screen.queryByRole('button', { name: '管理草稿' })).toBeNull();
+    expect(screen.queryByText('导入与管理草稿')).toBeNull();
+  });
+
   it('limits reads to the current task page and keeps draft management separate', async () => {
+    writeExperimental(true);
     const read = vi.spyOn(api, 'automation').mockResolvedValue(empty);
     const capabilities = vi.spyOn(scheduleApi, 'capabilities').mockResolvedValue({ schemaVersion: 1, repositoriesWired: false, permissionEvaluatorWired: false, writesEnabled: false, executorWired: false, uiEntryReady: true, readiness: 'repository_unwired', blockers: [] });
     mount(Array.from({ length: 9 }, (_, index) => ({ ...session, id: `s${index + 1}` })));

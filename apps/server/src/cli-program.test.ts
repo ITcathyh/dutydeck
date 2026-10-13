@@ -129,6 +129,16 @@ describe('Dutydeck CLI', () => {
     expect(unit).toHaveBeenCalledWith(expect.objectContaining({ unit: 'dutydeck-tag.service' }));
   });
 
+  it('parses deploy prune options, taking --releases and --json from the parent deploy command too', async () => {
+    const deployPrune = vi.fn(); const deploy = vi.fn();
+    await createCliProgram('0.0.6', { deploy, deployPrune }).parseAsync(['node', 'dutydeck', 'deploy', 'prune', '--releases', '/r', '--keep', '3', '--dry-run', '--include-unmarked', '--json']);
+    expect(deploy).not.toHaveBeenCalled();
+    expect(deployPrune).toHaveBeenCalledWith(expect.objectContaining({ releases: '/r', keep: '3', dryRun: true, includeUnmarked: true, json: true }));
+    const plain = vi.fn();
+    await createCliProgram('0.0.6', { deployPrune: plain }).parseAsync(['node', 'dutydeck', 'deploy', 'prune']);
+    expect(plain).toHaveBeenCalledWith({ dryRun: false, includeUnmarked: false, json: false });
+  });
+
   it('parses deploy options, including --port that the root server options would otherwise capture', async () => {
     const deploy = vi.fn();
     await createCliProgram('0.0.6', { deploy }).parseAsync(['node', 'dutydeck', 'deploy', '--source', '/src', '--runtime', '/bot', '--port', '4311', '--no-restart', '--now', '--drain-timeout', '30']);
