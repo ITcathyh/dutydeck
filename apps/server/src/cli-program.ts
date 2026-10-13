@@ -55,6 +55,17 @@ export interface DeployCliOptions {
   json?: boolean;
 }
 
+/** `dutydeck deploy prune` 的选项。 */
+export interface DeployPruneCliOptions {
+  unit?: string;
+  runtime?: string;
+  releases?: string;
+  keep?: string;
+  dryRun?: boolean;
+  includeUnmarked?: boolean;
+  json?: boolean;
+}
+
 export interface LarkCliOptions {
   state?: string;
   readOnly?: boolean;
@@ -205,6 +216,7 @@ export interface CliHandlers {
   daemonStatus?(options: DoctorCliOptions): void | Promise<void>;
   update?(options: UpdateCliOptions): void | Promise<void>;
   deploy?(options: DeployCliOptions): void | Promise<void>;
+  deployPrune?(options: DeployPruneCliOptions): void | Promise<void>;
   authToken?(options: AuthTokenCliOptions): void | Promise<void>;
   authPasswordSet?(options: AuthPasswordSetCliOptions): void | Promise<void>;
   authShareKeyRotate?(): void | Promise<void>;
@@ -876,7 +888,7 @@ Examples:
     .option('--drain-timeout <seconds>', 'Maximum seconds to wait for running tasks before aborting restart (default: 900)')
     .action(options => handlers.update?.(options));
 
-  program.command('deploy')
+  const deploy = program.command('deploy')
     .description('Deploy a built checkout as a versioned release: drain, switch releases/current, restart, health-check, and roll back only if the database schema is unchanged (never restore an old database snapshot)')
     .option('--source <directory>', 'Built Dutydeck checkout to deploy (default: the repository containing the current directory)')
     .option('--unit <unit>', 'systemd user unit that runs releases/current (default: dutydeck.service, or "unit" from --runtime deployment.json)')
@@ -894,6 +906,26 @@ Examples:
     .action((options, command) => {
       const port = command.optsWithGlobals().port;
       return handlers.deploy?.({ ...options, ...(typeof port === 'string' ? { port } : {}) });
+    });
+
+  deploy.command('prune')
+    .description('Delete old releases and deployment records (including database backups) beyond the newest N; never touches current, its previous release, or releases still referenced by running processes')
+    .option('--unit <unit>', 'systemd user unit that runs releases/current (default: dutydeck.service, or "unit" from --runtime deployment.json)')
+    .option('--runtime <directory>', 'Bot runtime directory whose deployment.json supplies the unit')
+    .option('--releases <directory>', 'Directory holding versioned releases and the current pointer (default: derived from the unit ExecStart)')
+    .option('--keep <count>', 'Newest releases and deployment records to keep (default: 5)')
+    .option('--include-unmarked', 'Also prune deployment records left by manual deployments (no "created_by": "dutydeck deploy" in manifest.json); skipped when still referenced by a process or modified within the last hour')
+    .option('--dry-run', 'List what would be deleted and the disk space it would free, without deleting anything')
+    .option('--json', 'Print the result as a single line of JSON')
+    // 与 deploy 同名的选项会被父命令截获，从合并后的全局选项里取回来。
+    .action((_options, command) => {
+      const merged = command.optsWithGlobals();
+      const text = (value: unknown) => typeof value === 'string' ? value : undefined;
+      return handlers.deployPrune?.({
+        ...(text(merged.unit) ? { unit: text(merged.unit) } : {}), ...(text(merged.runtime) ? { runtime: text(merged.runtime) } : {}),
+        ...(text(merged.releases) ? { releases: text(merged.releases) } : {}), ...(text(merged.keep) ? { keep: text(merged.keep) } : {}),
+        dryRun: merged.dryRun === true, includeUnmarked: merged.includeUnmarked === true, json: merged.json === true
+      });
     });
 
   const auth = program.command('auth').description('Manage access authentication');
@@ -1023,6 +1055,7 @@ Examples:
   $ dutydeck restart --unit dutydeck-tag-ccflash.service
   $ dutydeck deploy --source /path/to/built-checkout
   $ dutydeck deploy --print-unit
+  $ dutydeck deploy prune --dry-run
   $ dutydeck update --dist-tag fix
   $ dutydeck auth token
   $ dutydeck auth token --rotate

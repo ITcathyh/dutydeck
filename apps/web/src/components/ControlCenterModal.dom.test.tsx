@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { foundationApi, scheduleApi, type FoundationCapability, type GroupMatrix, type LarkBotConfig, type ScheduleCapability } from '../api';
 import { ControlCenterModal } from './ControlCenterModal';
+import { EXPERIMENTAL_STORAGE_KEY, writeExperimental } from '../experimental';
 
 const timestamp = '2026-08-30T00:00:00.000Z';
 const foundationReady: FoundationCapability = { schemaVersion: 1, repositoriesWired: true, permissionEvaluatorWired: true, secretInspectorWired: true, runtimeWired: false, writesEnabled: true, readiness: 'offline_management_ready', blockers: [{ code: 'production_execution_unwired', message: 'Runtime missing', action: 'Wire later' }] };
@@ -26,7 +27,7 @@ function renderModal(props: Partial<Parameters<typeof ControlCenterModal>[0]> = 
   return render(<QueryClientProvider client={client}><ControlCenterModal {...defaults} {...props}/></QueryClientProvider>);
 }
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); window.localStorage.removeItem(EXPERIMENTAL_STORAGE_KEY); });
 
 describe('ControlCenterModal information architecture', () => {
   it('closes with Escape so keyboard users are not trapped', async () => {
@@ -48,7 +49,46 @@ describe('ControlCenterModal information architecture', () => {
     }
   });
 
+  it('实验功能默认关闭：不出现群与权限、自动化分区和迁移草稿，也不读取草稿能力', async () => {
+    mocks();
+    renderModal({ legacyBots: [legacyBot] });
+    await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
+    for (const label of ['Agent', '飞书 Bot', '实验功能']) expect(screen.getByRole('button', { name: new RegExp(label) })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /群与权限/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /自动化/ })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: /飞书 Bot/ }));
+    expect(screen.queryByText('迁移与高级草稿')).toBeNull();
+    expect(foundationApi.capabilities).not.toHaveBeenCalled();
+    expect(scheduleApi.capabilities).not.toHaveBeenCalled();
+  });
+
+  it('深链指向被隐藏的草稿分区时回落到 Agent', async () => {
+    mocks();
+    renderModal({ initialSection: 'groups' });
+    expect(await screen.findByRole('heading', { name: 'Agent' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: '群与权限' })).toBeNull();
+  });
+
+  it('在实验功能分区打开开关后，草稿分区与迁移草稿出现', async () => {
+    mocks();
+    renderModal({ legacyBots: [legacyBot] });
+    await userEvent.click(await screen.findByRole('button', { name: /实验功能/ }));
+    const toggle = screen.getByRole('checkbox', { name: /显示实验功能/ }) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    await userEvent.click(toggle);
+    expect(window.localStorage.getItem(EXPERIMENTAL_STORAGE_KEY)).toBe('1');
+    expect(screen.getByRole('button', { name: /群与权限/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /自动化/ })).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /飞书 Bot/ }));
+    expect(await screen.findByText('迁移与高级草稿')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /实验功能/ }));
+    await userEvent.click(screen.getByRole('checkbox', { name: /显示实验功能/ }));
+    expect(window.localStorage.getItem(EXPERIMENTAL_STORAGE_KEY)).toBeNull();
+    expect(screen.queryByRole('button', { name: /群与权限/ })).toBeNull();
+  });
+
   it('shows one progressive control shell, trusted-machine context and actionable SecretRef CLI guidance', async () => {
+    writeExperimental(true);
     mocks();
     renderModal({ legacyBots: [legacyBot] });
     expect(await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeTruthy();
@@ -63,6 +103,7 @@ describe('ControlCenterModal information architecture', () => {
   });
 
   it('creates only a staged ChannelBot identity and never sends a credential value', async () => {
+    writeExperimental(true);
     mocks({ capabilities: foundationReady, bots: [] });
     const create = vi.spyOn(foundationApi, 'createChannelBot').mockResolvedValue(matrix.bots[0]!.bot);
     renderModal({ initialSection: 'lark' });
@@ -87,6 +128,7 @@ describe('ControlCenterModal information architecture', () => {
   });
 
   it('refuses to close on Escape while a staged ChannelBot write is in flight', async () => {
+    writeExperimental(true);
     mocks({ capabilities: foundationReady, bots: [] });
     // 永不 resolve：制造一个稳定的 isPending 态，模拟「写操作还在路上」。
     vi.spyOn(foundationApi, 'createChannelBot').mockImplementation(() => new Promise(() => {}));
@@ -104,6 +146,7 @@ describe('ControlCenterModal information architecture', () => {
   });
 
   it('binds each visible staged-bot label to its control so clicking the label focuses the input', async () => {
+    writeExperimental(true);
     mocks({ capabilities: foundationReady, bots: [] });
     renderModal({ initialSection: 'lark' });
     await userEvent.click(await screen.findByText('迁移与高级草稿'));
@@ -121,6 +164,7 @@ describe('ControlCenterModal information architecture', () => {
   });
 
   it('gives an actionable zero-group path and still routes to automation details', async () => {
+    writeExperimental(true);
     mocks();
     const onOpenLarkSetup = vi.fn(); const onOpenSchedules = vi.fn();
     renderModal({ initialSection: 'groups', onOpenLarkSetup, onOpenSchedules });
@@ -136,6 +180,7 @@ describe('ControlCenterModal information architecture', () => {
     repositoriesWired=false 时主按钮仍可点，只保留「导入草稿不会自动执行」的说明。
   */
   it('任务计划入口不受 Foundation 能力禁用，且只声明导入草稿不自动执行', async () => {
+    writeExperimental(true);
     const scheduleUnwired: ScheduleCapability = { ...scheduleReady, repositoriesWired: false };
     vi.spyOn(foundationApi, 'capabilities').mockResolvedValue(foundationReady);
     vi.spyOn(foundationApi, 'groupMatrix').mockResolvedValue(matrix);

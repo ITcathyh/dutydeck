@@ -11,6 +11,7 @@ import { resetDrafts } from './draft-store';
 import type { EventWindow } from './event-history';
 import { shortcutDefinitions } from './useKeyboardShortcuts';
 import { toastStore } from './useToasts';
+import { EXPERIMENTAL_STORAGE_KEY, writeExperimental } from './experimental';
 
 vi.mock('./useSessionStream', () => ({ useSessionStream: () => 'open' }));
 vi.mock('./components/TerminalView', () => ({ TerminalView: ({ sessionId }: { sessionId: string }) => <div>Terminal {sessionId}</div> }));
@@ -59,6 +60,7 @@ afterEach(() => {
   // 编辑草稿是模块级 store（跨视图存活），不清会让用例互相串草稿。
   resetDrafts();
   toastStore.clear();
+  window.localStorage.removeItem(EXPERIMENTAL_STORAGE_KEY);
   window.history.replaceState(null, '', '/');
 });
 
@@ -708,6 +710,19 @@ describe('可深链浮层的 URL 契约', () => {
     // 标题在侧栏和详情页各出现一次，这里只需确认详情已渲染。
     await waitFor(() => expect(screen.getAllByText('修复登录态').length).toBeGreaterThan(0));
     expect(screen.queryByRole('dialog', { name: /归档/ })).toBeNull();
+  });
+
+  it('实验功能关闭时，?panel=groups 深链不打开群配置浮层；打开后才出现', async () => {
+    window.history.replaceState(null, '', '/?panel=groups');
+    mockAppApi();
+    mockFoundation();
+    renderApp();
+    expect(await screen.findByRole('heading', { name: '今天需要推进什么？' })).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: '群配置与权限' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /群与权限/ })).toBeNull();
+    act(() => writeExperimental(true));
+    expect(await screen.findByRole('dialog', { name: '群配置与权限' })).toBeTruthy();
+    act(() => writeExperimental(false));
   });
 
   it('未知 panel 值不打开任何浮层', async () => {

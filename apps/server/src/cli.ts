@@ -27,7 +27,7 @@ import { daemonRestart, daemonStart, daemonStatus, daemonStop, systemdRestartTar
 import { readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
 import { runNpmForDutydeckUpdate, updateDutydeck } from './update.js';
-import { runDeploy, type DeployResult } from './daemon/deploy.js';
+import { runDeploy, runDeployPrune, type DeployPruneResult, type DeployResult } from './daemon/deploy.js';
 import { loadConfig } from '@dutydeck/config';
 import { createRepositories } from '@dutydeck/storage';
 import { runAuthPasswordSetCommand, runAuthTokenCommand, runShareKeyRotateCommand } from './auth/auth.js';
@@ -250,6 +250,27 @@ function renderDeployResult(result: DeployResult, json: boolean): void {
   if (result.prunedRecords?.removed.length) ui.hint(`清理旧部署记录（含数据库备份）：删除 ${result.prunedRecords.removed.length} 个，腾出 ${Math.round(result.prunedRecords.freedBytes / 1024 / 1024)} MB`);
 }
 
+const PRUNE_KIND_LABELS: Record<DeployPruneResult['items'][number]['kind'], string> = { release: '发布目录', partial: '复制中断的残留', record: '部署记录' };
+const formatBytes = (bytes: number) => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+
+function renderDeployPruneResult(result: DeployPruneResult, json: boolean): void {
+  if (json) {
+    createCliUi().json(result);
+    return;
+  }
+  const ui = createCliUi();
+  const count = result.items.length;
+  const title = !result.ok && result.error && count === 0 ? '清理失败'
+    : result.dryRun ? `预览：将删除 ${count} 项，可释放 ${formatBytes(result.freedBytes)}（没有删除任何东西）`
+      : `已删除 ${count} 项，释放 ${formatBytes(result.freedBytes)}`;
+  ui.status(result.ok ? 'done' : 'fail', title, result.error);
+  if (result.releases) ui.hint(`发布目录：${result.releases}；保留最新 ${result.keep} 个，以及 current 和它的上一版`);
+  for (const item of result.items) ui.hint(`${result.dryRun ? '将删除' : '已删除'} ${PRUNE_KIND_LABELS[item.kind]} ${item.name}（${formatBytes(item.bytes)}）`);
+  if (result.inUse.length) ui.hint(`仍被运行中的进程引用，保留：${result.inUse.join('、')}`);
+  if (result.skipped.length) ui.hint(`可能正在使用或确认不了，没动：${result.skipped.join('、')}`);
+  if (result.dryRun && count) ui.hint('确认无误后去掉 --dry-run 再执行一次。');
+}
+
 async function main() {
   const acpkArgs = acpkPassThroughArgs(process.argv);
   if (acpkArgs) {
@@ -355,6 +376,11 @@ async function main() {
     deploy: async options => {
       const result = await runDeploy(options);
       renderDeployResult(result, options.json === true);
+      if (!result.ok) process.exitCode = 1;
+    },
+    deployPrune: async options => {
+      const result = await runDeployPrune(options);
+      renderDeployPruneResult(result, options.json === true);
       if (!result.ok) process.exitCode = 1;
     },
     authToken: async options => {

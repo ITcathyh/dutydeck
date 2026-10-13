@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOSTART_LINUX_UNIT } from '../autostart/autostart.js';
-import type { DeployCliOptions } from '../cli-program.js';
+import type { DeployCliOptions, DeployPruneCliOptions } from '../cli-program.js';
 import { pidAlive } from './daemon.js';
 import { DRAIN_INTERVAL_MS, drainRuntime, systemdServiceControl, unitRuntime, waitForServiceHealth, type DaemonCommandDeps, type DrainResult, type RuntimeEndpoint, type ServiceControl, type UnitRuntime } from './command.js';
 
@@ -291,23 +291,65 @@ function readProcessPaths(): string[] | undefined {
   return [...paths];
 }
 
+export interface PruneItem { kind: 'release' | 'partial' | 'record'; name: string; bytes: number }
+
+/** 手工清理（`deploy prune`）才用的选项；部署成功后的自动清理不传。 */
+interface PruneOptions {
+  /** 保留最新几个，默认 RELEASES_TO_KEEP。 */
+  keep?: number;
+  /** 只统计，不删除。 */
+  dryRun?: boolean;
+  /** 部署记录里也算上手工部署留下的（没有 deploy 的 created_by 标记），这些只在确认没有进程引用时才删。 */
+  includeUnmarked?: boolean;
+  /** 设了就保护这么久以内改过的 `.partial` 和没有 manifest 的部署记录：它们可能是另一次正在进行的部署。 */
+  protectRecentMs?: number;
+  now?: number;
+  /** 收集逐项明细、跳过的项和删除失败；设了之后单项删除失败不抛出，继续清理其余的。 */
+  report?: { items: PruneItem[]; skipped: string[]; errors: string[] };
+}
+
+const RECORD_NAME = /^\d{8}[T-]/;
+
+function removeEntry(path: string, name: string, kind: PruneItem['kind'], result: { removed: string[]; freedBytes: number }, opts: PruneOptions): void {
+  const bytes = diskUsage(path);
+  if (!opts.dryRun) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+    } catch (error) {
+      if (!opts.report) throw error;
+      opts.report.errors.push(`${name}：${message(error)}`);
+      return;
+    }
+  }
+  result.freedBytes += bytes;
+  result.removed.push(name);
+  opts.report?.items.push({ kind, name, bytes });
+}
+
+const recentlyModified = (path: string, opts: PruneOptions): boolean =>
+  opts.protectRecentMs !== undefined && (opts.now ?? Date.now()) - statSync(path).mtimeMs < opts.protectRecentMs;
+
+function referencedBy(paths: string[], dirs: string[]): boolean {
+  return dirs.some(dir => {
+    const pattern = new RegExp(`${escapeRegExp(dir)}(?![\\w.-])`);
+    return paths.some(path => pattern.test(path));
+  });
+}
+
 /**
  * 删掉更早的发布目录和复制中断留下的 `.<id>.partial`。服务重启后，tmux 里保留下来的 Agent 进程环境变量中
  * 仍是旧版本 cli.js 的路径（dutydeck_relay_command），所以任何运行中进程的 cwd、命令行、环境变量或已映射
  * 文件还引用着的目录都不删；看不了进程就只清 `.partial`。
  */
-function pruneReleases(releases: string, previous: string | undefined, processPaths: () => string[] | undefined, warn: (message: string) => void): PruneResult {
+function pruneReleases(releases: string, previous: string | undefined, processPaths: () => string[] | undefined, warn: (message: string) => void, opts: PruneOptions = {}): PruneResult {
   const result: PruneResult = { removed: [], inUse: [], freedBytes: 0 };
-  const remove = (name: string) => {
-    const path = join(releases, name);
-    result.freedBytes += diskUsage(path);
-    rmSync(path, { recursive: true, force: true });
-    result.removed.push(name);
-  };
   const names = readdirSync(releases, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => entry.name);
-  for (const name of names.filter(name => PARTIAL_NAME.test(name))) remove(name);
+  for (const name of names.filter(name => PARTIAL_NAME.test(name))) {
+    if (recentlyModified(join(releases, name), opts)) opts.report?.skipped.push(name);
+    else removeEntry(join(releases, name), name, 'partial', result, opts);
+  }
   const keep = new Set([currentRelease(releases), previous]);
-  const candidates = names.filter(name => RELEASE_NAME.test(name)).sort().reverse().slice(RELEASES_TO_KEEP).filter(name => !keep.has(join(releases, name)));
+  const candidates = names.filter(name => RELEASE_NAME.test(name)).sort().reverse().slice(opts.keep ?? RELEASES_TO_KEEP).filter(name => !keep.has(join(releases, name)));
   if (candidates.length === 0) return result;
   const paths = processPaths();
   if (!paths) {
@@ -316,31 +358,36 @@ function pruneReleases(releases: string, previous: string | undefined, processPa
   }
   const real = realpathSync(releases);
   for (const name of candidates) {
-    const referenced = [join(releases, name), join(real, name)].some(dir => {
-      const pattern = new RegExp(`${escapeRegExp(dir)}(?![\\w.-])`);
-      return paths.some(path => pattern.test(path));
-    });
-    if (referenced) result.inUse.push(name);
-    else remove(name);
+    if (referencedBy(paths, [join(releases, name), join(real, name)])) result.inUse.push(name);
+    else removeEntry(join(releases, name), name, 'release', result, opts);
   }
   return result;
 }
 
 /**
- * 删掉更早的部署记录（manifest 与数据库备份）。只算 manifest.json 里 created_by 是 DEPLOY_RECORD_CREATOR 的，
+ * 删掉更早的部署记录（manifest 与数据库备份）。默认只算 manifest.json 里 created_by 是 DEPLOY_RECORD_CREATOR 的，
  * 按名字保留最新 RELEASES_TO_KEEP 个；本次的记录还没写 manifest，直接算进去，它和上一版的记录总是保留。
+ * `includeUnmarked` 时手工部署留下的记录（名字以日期开头）也参与排序，但只在确认没有进程引用、也不是刚改过时才删。
  */
-function pruneRecords(deployments: string, current: string, previous: string | undefined): { removed: string[]; freedBytes: number } {
+function pruneRecords(deployments: string, current: string, previous: string | undefined, opts: PruneOptions = {}, processPaths?: () => string[] | undefined): { removed: string[]; freedBytes: number } {
   const result = { removed: [] as string[], freedBytes: 0 };
-  const own = readdirSync(deployments, { withFileTypes: true }).filter(entry => entry.isDirectory() && entry.name !== current).map(entry => entry.name).filter(name => {
+  const marked = (name: string) => {
     try { return JSON.parse(readFileSync(join(deployments, name, 'manifest.json'), 'utf8')).created_by === DEPLOY_RECORD_CREATOR; } catch { return false; }
-  });
-  for (const name of [...own, current].sort().reverse().slice(RELEASES_TO_KEEP)) {
+  };
+  const eligible = readdirSync(deployments, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => entry.name)
+    .filter(name => name === current || marked(name) || (opts.includeUnmarked === true && RECORD_NAME.test(name)));
+  let paths: string[] | undefined;
+  let pathsRead = false;
+  for (const name of eligible.sort().reverse().slice(opts.keep ?? RELEASES_TO_KEEP)) {
     if (name === current || name === previous) continue;
     const path = join(deployments, name);
-    result.freedBytes += diskUsage(path);
-    rmSync(path, { recursive: true, force: true });
-    result.removed.push(name);
+    if (!marked(name)) {
+      // 没有 deploy 的标记：内容不明。没有 manifest 又刚改过的可能是正在进行的部署；还被进程引用的也不动。
+      if (!existsSync(join(path, 'manifest.json')) && recentlyModified(path, opts)) { opts.report?.skipped.push(name); continue; }
+      if (!pathsRead) { paths = processPaths?.(); pathsRead = true; }
+      if (!paths || referencedBy(paths, [path, join(realpathSync(deployments), name)])) { opts.report?.skipped.push(name); continue; }
+    }
+    removeEntry(path, name, 'record', result, opts);
   }
   return result;
 }
@@ -652,4 +699,86 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
   return back.ok
     ? finish('rolled_back', { new_pid: back.pid, error: `新版本 ${id} 没有通过健康检查，已切回 ${basename(previousRelease)}，保留当前数据库。原因：${started.error}` })
     : finish('rollback_failed', { error: `新版本没有通过健康检查，切回 ${basename(previousRelease)} 后仍不健康，数据库未恢复旧快照。新版本：${started.error}上一版：${back.error}` });
+}
+
+// ─── 手工清理 ────────────────────────────────────────────────────────────────
+
+export interface DeployPruneResult {
+  ok: boolean;
+  dryRun: boolean;
+  keep: number;
+  releases?: string;
+  deployments?: string;
+  /** 已删除（dry-run 时是将删除）的项和各自占用的磁盘字节数。 */
+  items: PruneItem[];
+  freedBytes: number;
+  /** 仍被运行中的进程引用而保留的发布目录。 */
+  inUse: string[];
+  /** 可能是正在进行的部署，或内容不明又确认不了有没有进程在用，这次没动。 */
+  skipped: string[];
+  error?: string;
+}
+
+/** 最近改过的 `.partial` 和没有 manifest 的部署记录视为正在进行的部署，手工清理不碰。 */
+const IN_PROGRESS_WINDOW_MS = 60 * 60 * 1000;
+
+/** current 指向的版本的上一版：优先取它的部署记录里写的 previous_release，没有就取名字上紧邻的更早一个。 */
+function rollbackTarget(releases: string, deployments: string): string | undefined {
+  const current = currentRelease(releases);
+  if (!current) return undefined;
+  try {
+    for (const entry of readdirSync(deployments, { withFileTypes: true }).filter(entry => entry.isDirectory())) {
+      try {
+        const manifest = JSON.parse(readFileSync(join(deployments, entry.name, 'manifest.json'), 'utf8')) as Record<string, unknown>;
+        if (typeof manifest.release === 'string' && typeof manifest.previous_release === 'string' && resolve(manifest.release) === current) return manifest.previous_release;
+      } catch { /* 手工部署的记录，没有可读的 manifest */ }
+    }
+  } catch { /* 没有部署记录目录 */ }
+  return readdirSync(releases, { withFileTypes: true }).filter(entry => entry.isDirectory() && RELEASE_NAME.test(entry.name))
+    .map(entry => join(releases, entry.name)).sort().reverse().find(path => path < current);
+}
+
+/**
+ * `dutydeck deploy prune`：对指定目标做一次和部署成功后相同的清理，可指定保留个数，可以只预览。
+ * 永远不删 current、它的上一版和仍被进程引用的版本；不碰 current 以外也不在 releases/deployments 下的任何东西。
+ */
+export async function runDeployPrune(options: DeployPruneCliOptions, deps: DeployDeps = {}): Promise<DeployPruneResult> {
+  const warn = deps.warn ?? defaultWarn;
+  const dryRun = options.dryRun === true;
+  const base: DeployPruneResult = { ok: false, dryRun, keep: RELEASES_TO_KEEP, items: [], freedBytes: 0, inUse: [], skipped: [] };
+  if (options.keep !== undefined) {
+    if (!/^\d+$/.test(options.keep) || Number(options.keep) < 1) return { ...base, error: `--keep 只接受正整数（收到 ${JSON.stringify(options.keep)}）。` };
+    base.keep = Number(options.keep);
+  }
+  let releases: string;
+  if (options.releases) {
+    releases = resolve(options.releases);
+  } else {
+    const target = await resolveTarget({ unit: options.unit, runtime: options.runtime, restart: false }, deps);
+    if ('error' in target) return { ...base, error: target.error };
+    releases = target.releases;
+  }
+  const deployments = join(dirname(releases), 'deployments');
+  if (!existsSync(releases)) return { ...base, releases, deployments, error: `发布目录 ${releases} 不存在。` };
+
+  const report: NonNullable<PruneOptions['report']> = { items: [], skipped: [], errors: [] };
+  const opts: PruneOptions = {
+    keep: base.keep, dryRun, includeUnmarked: options.includeUnmarked === true,
+    protectRecentMs: IN_PROGRESS_WINDOW_MS, now: (deps.now ?? Date.now)(), report
+  };
+  const processPaths = deps.processPaths ?? readProcessPaths;
+  const previous = rollbackTarget(releases, deployments);
+  const current = currentRelease(releases);
+  let inUse: string[] = [];
+  try {
+    inUse = pruneReleases(releases, previous, processPaths, warn, opts).inUse;
+    if (existsSync(deployments)) pruneRecords(deployments, current ? basename(current) : '', previous && basename(previous), opts, processPaths);
+  } catch (error) {
+    report.errors.push(message(error));
+  }
+  return {
+    ...base, ok: report.errors.length === 0, releases, deployments, items: report.items, inUse, skipped: report.skipped,
+    freedBytes: report.items.reduce((total, item) => total + item.bytes, 0),
+    ...(report.errors.length > 0 ? { error: `有 ${report.errors.length} 项没清理成功：${report.errors.join('；')}` } : {})
+  };
 }
