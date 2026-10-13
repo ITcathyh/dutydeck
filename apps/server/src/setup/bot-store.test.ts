@@ -31,6 +31,19 @@ describe('setup 的机器人配置落点', () => {
     expect(bot).toMatchObject({ appId: 'cli_a', appSecret: 'secret-a', defaultAgentId: 'claude', workspace: '/work/project', permissionMode: 'approve-reads', listening: false });
   });
 
+  it('新建机器人的权限模式：Agent 支持飞书审批时为 ask，不支持时退回只读自动放行（不替用户开完全信任）', async () => {
+    const agents = [
+      { id: 'acp', protocol: 'acp' as const },
+      { id: 'claude-pty', protocol: 'pty-cli' as const, adapterId: 'claude-code' },
+      { id: 'other-pty', protocol: 'pty-cli' as const, adapterId: 'codex' }
+    ];
+    for (const [agentId, mode] of [['acp', 'ask'], ['claude-pty', 'ask'], ['other-pty', 'approve-reads']] as const) {
+      const database = tempDatabase();
+      await saveBot({ database, appId: 'cli_a', appSecret: 'secret-a', defaultAgentId: agentId, knownAgents: agents });
+      expect((await stored(database, 'cli_a'))?.permissionMode).toBe(mode);
+    }
+  });
+
   it('重复保存同样的内容是空操作，不增加 revision', async () => {
     const database = tempDatabase();
     const input = { database, appId: 'cli_a', appSecret: 'secret-a', defaultAgentId: 'claude', workspace: '/work/project', knownAgents: known };

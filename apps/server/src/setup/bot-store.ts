@@ -12,14 +12,17 @@
 import { existsSync } from 'node:fs';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentRepository } from '@dutydeck/shared';
-import { readLarkConfig, saveLarkConfig, type SaveLarkConfigInput } from '../lark/config.js';
+import { defaultLarkPermissionMode, readLarkConfig, saveLarkConfig, type SaveLarkConfigInput } from '../lark/config.js';
 
 /**
- * 新建机器人的默认权限模式。lark/config.ts 里目前没有可复用的单一来源（saveLarkConfig 缺省是 full-trust 且需确认，
- * normalizeStoredConfig 内联写了 approve-reads，`lark create` 用 ask），向导先固定为只读自动放行；
- * 统一口径后改这一处引用即可。
+ * 新建机器人的默认权限模式：与 lark/config.ts 的 defaultLarkPermissionMode 同口径，所选 Agent 支持飞书审批时为 ask。
+ * 不支持时那边给 full-trust，但完全信任需要用户显式确认，向导不替用户决定，退回只读自动放行；
+ * 会话启动时 session-resolver 会给出改 full-trust 或换 Agent 的修法。
  */
-const NEW_BOT_PERMISSION_MODE = 'approve-reads' as const;
+const newBotPermissionMode = (agent?: AgentConfig) => {
+  const mode = defaultLarkPermissionMode(agent);
+  return mode === 'full-trust' ? 'approve-reads' as const : mode;
+};
 
 export interface SaveBotInput {
   /** 数据库文件路径。 */
@@ -89,7 +92,7 @@ export const saveBot: SaveBot = async input => {
     const patch: SaveLarkConfigInput = current
       ? { stage: 'lark', originalAppId: input.appId, expectedRevision: current.revision ?? 1 }
       // 新机器人：完全信任需要用户在 Dashboard 或 settings 里显式确认，向导不替用户决定。
-      : { stage: 'lark', expectedRevision: 0, appId: input.appId, permissionMode: NEW_BOT_PERMISSION_MODE };
+      : { stage: 'lark', expectedRevision: 0, appId: input.appId, permissionMode: newBotPermissionMode(input.defaultAgentId ? await agents.get(input.defaultAgentId) : undefined) };
     const saved = await saveLarkConfig(repositories.config, agents, {
       ...patch,
       ...(secret ? { appSecret: secret } : {}),
