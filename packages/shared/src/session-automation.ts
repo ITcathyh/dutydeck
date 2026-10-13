@@ -27,18 +27,36 @@ export const automationBlockReasons = [
 ] as const;
 export type AutomationBlockReason = (typeof automationBlockReasons)[number];
 
-export const sessionScheduleConditionSchema = z.discriminatedUnion('kind', [
+const providerId = z.string().trim().min(1).max(64);
+
+/**
+ * CI 提供方插件化之前只有 GitHub，条件写作 `github_new_failure`。旧记录和旧客户端的输入在读入时
+ * 换成 `ci_new_failure` + `provider: 'github'`，写回时只写新形式。
+ */
+export const LEGACY_GITHUB_PROVIDER_ID = 'github';
+const legacyCondition = (value: unknown) => value && typeof value === 'object' && (value as { kind?: unknown }).kind === 'github_new_failure'
+  ? { ...value, kind: 'ci_new_failure', provider: LEGACY_GITHUB_PROVIDER_ID }
+  : value;
+
+export const sessionScheduleConditionSchema = z.preprocess(legacyCondition, z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('always') }).strict(),
   z.object({
-    kind: z.literal('github_new_failure'),
+    kind: z.literal('ci_new_failure'),
+    provider: providerId,
     workflow: z.string().trim().min(1).max(255).optional(),
     repository,
     headSha: z.string().regex(/^[a-f0-9]{40}$/),
     observedRunIds: z.array(z.number().int().nonnegative()).max(100),
     observedRunAttempts: observedRunAttempts.optional()
   }).strict()
-]);
+]));
 export type SessionScheduleCondition = z.infer<typeof sessionScheduleConditionSchema>;
+
+/** 输入里的 provider 可省略：按工作区 origin 匹配已安装的 CI 插件。 */
+const scheduleConditionInputSchema = z.preprocess(legacyCondition, z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('always') }).strict(),
+  z.object({ kind: z.literal('ci_new_failure'), provider: providerId.optional(), workflow: z.string().trim().min(1).max(255).optional() }).strict()
+]));
 
 export const sessionScheduleSchema = z.object({
   schemaVersion: z.literal(1),
@@ -67,10 +85,7 @@ export const createSessionScheduleInputSchema = z.object({
   trigger: scheduleTriggerSchema,
   timezone: z.string().min(1).max(100),
   dstPolicy: z.object({ gap: z.enum(scheduleDstGapPolicies), overlap: z.enum(scheduleDstOverlapPolicies) }).strict(),
-  condition: z.discriminatedUnion('kind', [
-    z.object({ kind: z.literal('always') }).strict(),
-    z.object({ kind: z.literal('github_new_failure'), workflow: z.string().trim().min(1).max(255).optional() }).strict()
-  ])
+  condition: scheduleConditionInputSchema
 }).strict();
 export type CreateSessionScheduleInput = z.infer<typeof createSessionScheduleInputSchema>;
 
@@ -81,10 +96,7 @@ export const updateSessionScheduleInputSchema = z.object({
   trigger: scheduleTriggerSchema.optional(),
   timezone: z.string().min(1).max(100).optional(),
   dstPolicy: z.object({ gap: z.enum(scheduleDstGapPolicies), overlap: z.enum(scheduleDstOverlapPolicies) }).strict().optional(),
-  condition: z.discriminatedUnion('kind', [
-    z.object({ kind: z.literal('always') }).strict(),
-    z.object({ kind: z.literal('github_new_failure'), workflow: z.string().trim().min(1).max(255).optional() }).strict()
-  ]).optional(),
+  condition: scheduleConditionInputSchema.optional(),
   enabled: z.boolean().optional()
 }).strict().refine(value => Object.keys(value).some(key => key !== 'expectedRevision'), { message: 'At least one field must be updated' });
 export type UpdateSessionScheduleInput = z.infer<typeof updateSessionScheduleInputSchema>;
@@ -168,6 +180,8 @@ export const ciSubscriptionV1Schema = z.object({
   revision: z.number().int().positive(),
   sessionId: z.string().min(1),
   actorId: z.string().min(1).optional(),
+  /** 缺省表示插件化之前的记录，即 GitHub。 */
+  provider: providerId.optional(),
   repository,
   headSha: z.string().regex(/^[a-f0-9]{40}$/),
   workflow: z.string().trim().min(1).max(255).optional(),
@@ -194,6 +208,8 @@ export const ciSubscriptionV2Schema = z.object({
   revision: z.number().int().positive(),
   sessionId: z.string().min(1),
   actorId: z.string().min(1).optional(),
+  /** 缺省表示插件化之前的记录，即 GitHub。 */
+  provider: providerId.optional(),
   repository,
   headSha: z.string().regex(/^[a-f0-9]{40}$/),
   workflow: z.string().trim().min(1).max(255).optional(),
@@ -227,6 +243,8 @@ export const ciSubscriptionSchema = z.discriminatedUnion('schemaVersion', [
 export type CiSubscription = CiSubscriptionV1 | CiSubscriptionV2;
 
 export const subscribeCiInputSchema = z.object({
+  /** 省略时按工作区 origin 匹配。 */
+  provider: providerId.optional(),
   prompt: z.string().trim().min(1).max(20_000).optional(),
   workflow: z.string().trim().min(1).max(255).optional(),
   ttlSeconds: z.number().int().min(60).max(7 * 24 * 60 * 60).default(24 * 60 * 60)
@@ -245,6 +263,16 @@ export type PublicSessionScheduleOccurrence = Omit<
   SessionScheduleOccurrenceV2,
   'taskStartedAt' | 'leaseOwner' | 'leaseExpiresAt' | 'admission' | 'actor' | 'actorId'
 > & { schemaVersion: 1 | 2 };
+
+/** Web 与飞书展示用的已加载 CI 提供方。 */
+export interface PublicCiProvider {
+  id: string;
+  displayName: string;
+  /** 能否查询构建状态（等待 CI、「出现新的失败构建」条件）。 */
+  polling: boolean;
+  /** 是否配置了 webhook（事件驱动的续作与修复）。 */
+  webhook: boolean;
+}
 
 export interface SessionAutomationList {
   schedules: PublicSessionSchedule[];

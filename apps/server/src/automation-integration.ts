@@ -19,7 +19,7 @@ import type { PersistedLarkCardTask } from './lark/coordinator.js';
 import { renderLarkResultTextElements } from './lark/card-renderer.js';
 import { sendLarkResult } from './lark/result-delivery.js';
 import { readAttemptResult } from './task-results.js';
-import type { CodebaseCiNotice } from './codebase-ci.js';
+import type { CiNotice } from './ci-webhook.js';
 import { SessionAutomationService, type AutomationDeliveryContext } from './session-automation.js';
 
 export function createAutomationIntegration(repos: RepositoryBundle, runtime: DutydeckRuntime, groups: LarkGroupManager, options: {
@@ -280,7 +280,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     }, options.log, repos.config);
   };
   /** CI webhook 通知：发到订阅时冻结的回报位置，非飞书会话不发；返回卡片消息 ID，按钮回调据此核对来源。 */
-  const notify = async (sessionId: string, sourceId: string, notice: CodebaseCiNotice) => {
+  const notify = async (sessionId: string, sourceId: string, notice: CiNotice) => {
     const session = await runtime.getSession(sessionId);
     if (!session || session.source !== 'lark') return undefined;
     const { appId, chatId } = parseLarkSourceId(session.sourceId);

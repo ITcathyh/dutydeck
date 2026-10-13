@@ -12,7 +12,8 @@ function service() {
     createSchedule: vi.fn(),
     updateSchedule: vi.fn(),
     subscribeCi: vi.fn(),
-    cancelCi: vi.fn()
+    cancelCi: vi.fn(),
+    listCiProviders: vi.fn(() => [])
   } as unknown as SessionAutomationService;
 }
 
@@ -45,5 +46,18 @@ describe('session automation routes', () => {
     const response = await app.inject({ method: 'POST', url: '/api/sessions/ses_1/automation/ci', payload: {} });
     expect(response.statusCode).toBe(200);
     expect(target.subscribeCi).toHaveBeenCalledWith('ses_1', expect.objectContaining({ ttlSeconds: 86_400 }), 'ou_user');
+  });
+
+  it('lists loaded CI providers for the session, empty when no CI plugin is installed', async () => {
+    const app = Fastify(); apps.push(app);
+    const target = service();
+    const authorize = vi.fn(async () => ({ allowed: true, actorId: 'ou_user' }));
+    await registerSessionAutomationRoutes(app, { service: target, authorize });
+    const empty = await app.inject({ method: 'GET', url: '/api/sessions/ses_1/automation/ci-providers' });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toEqual({ providers: [] });
+    expect(authorize).toHaveBeenCalledWith(expect.any(Object), 'ses_1', 'task.view_result');
+    vi.mocked(target.listCiProviders).mockReturnValue([{ id: 'github', displayName: 'GitHub Actions', polling: true, webhook: false }]);
+    expect((await app.inject({ method: 'GET', url: '/api/sessions/ses_1/automation/ci-providers' })).json()).toEqual({ providers: [{ id: 'github', displayName: 'GitHub Actions', polling: true, webhook: false }] });
   });
 });

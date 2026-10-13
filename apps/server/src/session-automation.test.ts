@@ -8,6 +8,7 @@ import {
   canonicalExecutionJson,
   sessionScheduleOccurrenceSchema,
   type AttemptResultV1,
+  type CiPipelineStatus,
   type RepositoryBundle,
   type RuntimeControlClaim,
   type Session,
@@ -16,6 +17,7 @@ import {
 } from '@dutydeck/shared';
 import { createRepositories, executionTaskId } from '@dutydeck/storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ciProviders, ciStatus, TEST_CI_REMOTE, type StatusMock } from './ci-provider.test-helpers.js';
 import { SessionAutomationService, type SessionAutomationRuntime, type AutomationDeliveryContext } from './session-automation.js';
 
 const run = promisify(execFile);
@@ -28,23 +30,8 @@ async function gitRepository() {
   await run('git', ['-C', cwd, 'config', 'user.email', 'test@example.com']);
   await run('git', ['-C', cwd, 'config', 'user.name', 'Test']);
   await run('git', ['-C', cwd, 'commit', '--allow-empty', '-qm', 'initial']);
-  await run('git', ['-C', cwd, 'remote', 'add', 'origin', 'git@github.com:octo/repo.git']);
+  await run('git', ['-C', cwd, 'remote', 'add', 'origin', TEST_CI_REMOTE]);
   return cwd;
-}
-
-function githubResponse(headSha: string, runs: Array<{ id: number; conclusion?: string; name?: string; status?: string; attempt?: number | null }> = []) {
-  return new Response(JSON.stringify({ total_count: runs.length, workflow_runs: runs.map(item => ({
-    id: item.id,
-    name: item.name ?? 'CI',
-    workflow_id: 9,
-    head_sha: headSha,
-    status: item.status ?? 'completed',
-    conclusion: item.conclusion ?? null,
-    run_attempt: item.attempt === null ? undefined : item.attempt ?? 1,
-    html_url: `https://github.com/octo/repo/actions/runs/${item.id}`,
-    created_at: '2026-09-12T00:00:00Z',
-    updated_at: '2026-09-12T00:01:00Z'
-  })) }), { status: 200, headers: { 'content-type': 'application/json' } });
 }
 
 type Repos = ReturnType<typeof createRepositories>;
@@ -155,7 +142,7 @@ function ledgerRuntime(repos: Repos, harnessSession: HarnessSession, options: { 
   return runtime;
 }
 
-async function fixture(options: { database?: string; clock?: Date; fetch?: typeof fetch; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void>; onScheduleDisabled?: (schedule: any, reason: string) => Promise<void> } = {}) {
+async function fixture(options: { database?: string; clock?: Date; status?: StatusMock; providerId?: string; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void>; onScheduleDisabled?: (schedule: any, reason: string) => Promise<void> } = {}) {
   const directory = options.database ? undefined : await mkdtemp(join(tmpdir(), 'dutydeck-automation-db-'));
   if (directory) cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const database = options.database ?? join(directory!, 'dutydeck.db');
@@ -175,7 +162,7 @@ async function fixture(options: { database?: string; clock?: Date; fetch?: typeo
     repositories,
     runtime: mocked,
     authorize: async () => allowed.value,
-    githubFetch: options.fetch ?? (vi.fn(async () => githubResponse((await run('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout.trim())) as typeof fetch),
+    ciProviders: ciProviders(options.status ?? (vi.fn(async () => ciStatus((await run('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout.trim())) as StatusMock), options.providerId),
     clock: () => new Date(now.value),
     deliver: options.deliver,
     onScheduleDisabled: options.onScheduleDisabled
@@ -273,20 +260,20 @@ describe('SessionAutomationService schedules', () => {
     expect(await h.repositories.tasks.listBySession(h.session.id)).toHaveLength(2);
   });
 
-  it('records GitHub condition skip and error without dispatching', async () => {
-    const responses: Array<Response | Error> = [];
+  it('records CI condition skip and error without dispatching', async () => {
+    const responses: Array<CiPipelineStatus | Error> = [];
     const request = vi.fn(async () => {
       const value = responses.shift();
       if (value instanceof Error) throw value;
       return value!;
-    }) as typeof fetch;
-    const h = await fixture({ fetch: request });
+    }) as StatusMock;
+    const h = await fixture({ status: request });
     const head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
-    responses.push(githubResponse(head, [{ id: 10, conclusion: 'success' }]));
-    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'github_new_failure' } }, 'ou_owner');
+    responses.push(ciStatus(head, [{ id: 10, conclusion: 'success' }]));
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' } }, 'ou_owner');
     await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
     h.now.value = new Date('2026-09-12T00:01:01.000Z');
-    responses.push(githubResponse(head, [{ id: 11, conclusion: 'success' }]));
+    responses.push(ciStatus(head, [{ id: 11, conclusion: 'success' }]));
     await h.service.tick();
     expect((await h.service.listBySession(h.session.id)).occurrences[0]).toMatchObject({ conditionStatus: 'skipped', runStatus: 'skipped' });
     expect(h.dispatches).toHaveLength(0);
@@ -299,88 +286,88 @@ describe('SessionAutomationService schedules', () => {
   });
 
   it('OCR-07 dispatches a failed rerun once and remembers its attempt across reconstruction', async () => {
-    const responses: Response[] = [];
-    const request = vi.fn(async () => responses.shift()!) as typeof fetch;
-    const h = await fixture({ fetch: request });
+    const responses: CiPipelineStatus[] = [];
+    const request = vi.fn(async () => responses.shift()!) as StatusMock;
+    const h = await fixture({ status: request });
     const head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
-    responses.push(githubResponse(head, [{ id: 10, conclusion: 'success', attempt: 1 }]));
-    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'github_new_failure' } }, 'ou_owner');
+    responses.push(ciStatus(head, [{ id: 10, conclusion: 'success', attempt: 1 }]));
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' } }, 'ou_owner');
     await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
     h.now.value = new Date('2026-09-12T00:01:01.000Z');
-    responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt: 2 }]));
+    responses.push(ciStatus(head, [{ id: 10, conclusion: 'failure', attempt: 2 }]));
     await h.service.tick();
     expect(h.dispatches).toHaveLength(1);
     h.settleTask(h.dispatches[0]!.id);
     await h.service.tick();
     await h.service.close();
-    const restored = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, githubFetch: request, clock: () => new Date(h.now.value) });
+    const restored = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, ciProviders: ciProviders(request), clock: () => new Date(h.now.value) });
     cleanups.push(() => restored.close());
     h.now.value = new Date('2026-09-12T00:02:01.000Z');
-    responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt: 2 }]));
+    responses.push(ciStatus(head, [{ id: 10, conclusion: 'failure', attempt: 2 }]));
     await restored.tick();
     expect(h.dispatches).toHaveLength(1);
     expect((await restored.listBySession(h.session.id)).occurrences.at(-1)).toMatchObject({ conditionStatus: 'skipped', runStatus: 'skipped' });
   });
 
   it('OCR-07 baselines legacy run IDs without replaying existing failures, then detects the next attempt', async () => {
-    const responses: Response[] = [];
-    const request = vi.fn(async () => responses.shift()!) as typeof fetch;
-    const h = await fixture({ fetch: request });
+    const responses: CiPipelineStatus[] = [];
+    const request = vi.fn(async () => responses.shift()!) as StatusMock;
+    const h = await fixture({ status: request });
     const head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
-    responses.push(githubResponse(head, [{ id: 10, conclusion: 'success' }]));
-    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'github_new_failure' } }, 'ou_owner');
+    responses.push(ciStatus(head, [{ id: 10, conclusion: 'success' }]));
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' } }, 'ou_owner');
     await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
     const key = `session_automation/schedule/${created.id}`;
     const legacy = JSON.parse((await h.repositories.config.get(key))!);
     delete legacy.condition.observedRunAttempts;
     await h.repositories.config.set(key, JSON.stringify(legacy));
     h.now.value = new Date('2026-09-12T00:01:01.000Z');
-    responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt: 5 }]));
+    responses.push(ciStatus(head, [{ id: 10, conclusion: 'failure', attempt: 5 }]));
     await h.service.tick();
     expect(h.dispatches).toHaveLength(0);
     expect(JSON.parse((await h.repositories.config.get(key))!).condition).toMatchObject({ observedRunIds: [10], observedRunAttempts: [{ id: 10, attempt: 5 }] });
     h.now.value = new Date('2026-09-12T00:02:01.000Z');
-    responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt: 6 }]));
+    responses.push(ciStatus(head, [{ id: 10, conclusion: 'failure', attempt: 6 }]));
     await h.service.tick();
     expect(h.dispatches).toHaveLength(1);
   });
 
   it('OCR-07 treats missing attempts as attempt one and never replays a lower attempt', async () => {
-    const responses: Response[] = [];
-    const request = vi.fn(async () => responses.shift()!) as typeof fetch;
-    const h = await fixture({ fetch: request });
+    const responses: CiPipelineStatus[] = [];
+    const request = vi.fn(async () => responses.shift()!) as StatusMock;
+    const h = await fixture({ status: request });
     const head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
-    responses.push(githubResponse(head, [{ id: 10, conclusion: 'success', attempt: null }]));
-    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'github_new_failure' } }, 'ou_owner');
+    responses.push(ciStatus(head, [{ id: 10, conclusion: 'success', attempt: null }]));
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' } }, 'ou_owner');
     await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
     h.now.value = new Date('2026-09-12T00:01:01.000Z');
-    responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt: null }]));
+    responses.push(ciStatus(head, [{ id: 10, conclusion: 'failure', attempt: null }]));
     await h.service.tick();
     expect(h.dispatches).toHaveLength(0);
     h.now.value = new Date('2026-09-12T00:02:01.000Z');
-    responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt: 2 }]));
+    responses.push(ciStatus(head, [{ id: 10, conclusion: 'failure', attempt: 2 }]));
     await h.service.tick();
     expect(h.dispatches).toHaveLength(1);
     h.settleTask(h.dispatches[0]!.id);
     await h.service.tick();
     for (const [index, attempt] of [null, 2].entries()) {
       h.now.value = new Date(`2026-09-12T00:0${index + 3}:01.000Z`);
-      responses.push(githubResponse(head, [{ id: 10, conclusion: 'failure', attempt }]));
+      responses.push(ciStatus(head, [{ id: 10, conclusion: 'failure', attempt }]));
       await h.service.tick();
     }
     expect(h.dispatches).toHaveLength(1);
   });
 
   it('detects a newly completed failure even when its run ID predates an observed success', async () => {
-    const responses: Response[] = [];
-    const request = vi.fn(async () => responses.shift()!) as typeof fetch;
-    const h = await fixture({ fetch: request });
+    const responses: CiPipelineStatus[] = [];
+    const request = vi.fn(async () => responses.shift()!) as StatusMock;
+    const h = await fixture({ status: request });
     const head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
-    responses.push(githubResponse(head, [{ id: 11, conclusion: 'success' }]));
-    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'github_new_failure' } }, 'ou_owner');
+    responses.push(ciStatus(head, [{ id: 11, conclusion: 'success' }]));
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' } }, 'ou_owner');
     await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
     h.now.value = new Date('2026-09-12T00:01:01.000Z');
-    responses.push(githubResponse(head, [{ id: 11, conclusion: 'success' }, { id: 10, conclusion: 'failure' }]));
+    responses.push(ciStatus(head, [{ id: 11, conclusion: 'success' }, { id: 10, conclusion: 'failure' }]));
     await h.service.tick();
     expect(h.dispatches).toHaveLength(1);
     expect((await h.service.listBySession(h.session.id)).occurrences[0]).toMatchObject({ conditionStatus: 'passed', runStatus: 'accepted' });
@@ -398,29 +385,29 @@ describe('SessionAutomationService schedules', () => {
   });
 
   it('fences a slow condition evaluator after another service takes over its expired lease', async () => {
-    let resolveSlow!: (response: Response) => void;
-    const slow = new Promise<Response>(resolve => { resolveSlow = resolve; });
+    let resolveSlow!: (response: CiPipelineStatus) => void;
+    const slow = new Promise<CiPipelineStatus>(resolve => { resolveSlow = resolve; });
     let calls = 0;
     let head = '';
     const request = vi.fn(async () => {
       calls += 1;
-      if (calls === 1) return githubResponse(head);
+      if (calls === 1) return ciStatus(head);
       if (calls === 2) return slow;
-      return githubResponse(head, [{ id: 20, conclusion: 'failure' }]);
-    }) as typeof fetch;
-    const first = await fixture({ fetch: request });
+      return ciStatus(head, [{ id: 20, conclusion: 'failure' }]);
+    }) as StatusMock;
+    const first = await fixture({ status: request });
     head = (await run('git', ['-C', first.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
-    const created = await first.service.createSchedule(first.session.id, { ...scheduleInput, condition: { kind: 'github_new_failure' } }, 'ou_owner');
+    const created = await first.service.createSchedule(first.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' } }, 'ou_owner');
     await first.service.updateSchedule(first.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
     first.now.value = new Date('2026-09-12T00:01:01.000Z');
     const firstTick = first.service.tick();
     await vi.waitFor(() => expect(calls).toBe(2));
 
-    const second = new SessionAutomationService({ repositories: first.repositories, runtime: first, authorize: async () => true, githubFetch: request, clock: () => new Date(first.now.value) });
+    const second = new SessionAutomationService({ repositories: first.repositories, runtime: first, authorize: async () => true, ciProviders: ciProviders(request), clock: () => new Date(first.now.value) });
     cleanups.push(() => second.close());
     first.now.value = new Date('2026-09-12T00:01:32.000Z');
     await second.tick();
-    resolveSlow(githubResponse(head, [{ id: 20, conclusion: 'failure' }]));
+    resolveSlow(ciStatus(head, [{ id: 20, conclusion: 'failure' }]));
     await firstTick;
 
     expect(await first.repositories.tasks.listBySession(first.session.id)).toHaveLength(1);
@@ -430,20 +417,20 @@ describe('SessionAutomationService schedules', () => {
   });
 
   it('invalidates a slow condition result when the schedule generation changes', async () => {
-    let resolveSlow!: (response: Response) => void;
-    const slow = new Promise<Response>(resolve => { resolveSlow = resolve; });
+    let resolveSlow!: (response: CiPipelineStatus) => void;
+    const slow = new Promise<CiPipelineStatus>(resolve => { resolveSlow = resolve; });
     let calls = 0;
     let head = '';
-    const request = vi.fn(async () => ++calls === 1 ? githubResponse(head) : slow) as typeof fetch;
-    const h = await fixture({ fetch: request });
+    const request = vi.fn(async () => ++calls === 1 ? ciStatus(head) : slow) as StatusMock;
+    const h = await fixture({ status: request });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
-    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'github_new_failure' } }, 'ou_owner');
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' } }, 'ou_owner');
     await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
     h.now.value = new Date('2026-09-12T00:01:01.000Z');
     const ticking = h.service.tick();
     await vi.waitFor(() => expect(calls).toBe(2));
     await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 2, name: 'Changed generation' }, 'ou_owner');
-    resolveSlow(githubResponse(head, [{ id: 21, conclusion: 'failure' }]));
+    resolveSlow(ciStatus(head, [{ id: 21, conclusion: 'failure' }]));
     await ticking;
     expect(h.dispatches).toHaveLength(0);
     expect((await h.service.listBySession(h.session.id)).occurrences[0]).toMatchObject({ conditionStatus: 'invalidated', runStatus: 'invalidated' });
@@ -717,7 +704,7 @@ describe('bounded automatic result delivery', () => {
   });
 });
 
-describe('SessionAutomationService GitHub CI subscriptions', () => {
+describe('SessionAutomationService CI subscriptions', () => {
   it('prepares an immutable delivery destination before saving a new automation record', async () => {
     const h = await fixture();
     const prepared: string[] = [];
@@ -725,6 +712,7 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
       repositories: h.repositories,
       runtime: h,
       authorize: async () => true,
+      ciProviders: ciProviders(),
       prepareDelivery: async (sessionId, id) => {
         expect(sessionId).toBe(h.session.id);
         expect(await h.repositories.config.get(`session_automation/${id.startsWith('ci_') ? 'ci' : 'schedule'}/${id}`)).toBeUndefined();
@@ -739,8 +727,8 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
 
   it('coalesces completed results into one durable continuation and preserves the actor', async () => {
     let head = '';
-    const request = vi.fn(async () => githubResponse(head, [{ id: 41, conclusion: 'success', name: 'lint' }, { id: 42, conclusion: 'failure', name: 'test' }])) as typeof fetch;
-    const h = await fixture({ fetch: request, crashAfterAcceptance: true });
+    const request = vi.fn(async () => ciStatus(head, [{ id: 41, conclusion: 'success', name: 'lint' }, { id: 42, conclusion: 'failure', name: 'test' }])) as StatusMock;
+    const h = await fixture({ status: request, crashAfterAcceptance: true });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const subscription = await h.service.subscribeCi(h.session.id, { workflow: 'ci.yml', ttlSeconds: 600 }, 'ou_owner');
     await h.service.tick();
@@ -749,14 +737,14 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
     expect(task.prompt).toContain('test: failure');
     expect(task.executionContext?.actorId).toBe('ou_owner');
     const listed = (await h.service.listBySession(h.session.id)).subscriptions[0]!;
-    expect(listed).toMatchObject({ id: subscription.id, prompt: 'Review the completed GitHub Actions result and continue the task.', status: 'accepted', completedRunIds: [41, 42], taskId: task.id });
+    expect(listed).toMatchObject({ id: subscription.id, prompt: 'Review the completed Test CI result and continue the task.', status: 'accepted', completedRunIds: [41, 42], taskId: task.id });
     expect(listed).not.toHaveProperty('dispatchPrompt');
   });
 
   it('recovers a dispatching subscription with its exact persisted prompt after restart', async () => {
     let head = '';
-    const request = vi.fn(async () => githubResponse(head, [{ id: 50, conclusion: 'failure', name: 'original result' }])) as typeof fetch;
-    const h = await fixture({ fetch: request });
+    const request = vi.fn(async () => ciStatus(head, [{ id: 50, conclusion: 'failure', name: 'original result' }])) as StatusMock;
+    const h = await fixture({ status: request });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const subscription = await h.service.subscribeCi(h.session.id, { prompt: 'Continue exactly once', ttlSeconds: 600 }, 'ou_owner');
     let release!: () => void;
@@ -765,7 +753,7 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
       getSession: id => h.repositories.sessions.get(id),
       async dispatchRequest() { await blocked; throw new Error('old process stopped'); }
     };
-    const first = new SessionAutomationService({ repositories: h.repositories, runtime: hangingRuntime, authorize: async () => true, githubFetch: request, clock: () => new Date(h.now.value) });
+    const first = new SessionAutomationService({ repositories: h.repositories, runtime: hangingRuntime, authorize: async () => true, ciProviders: ciProviders(request), clock: () => new Date(h.now.value) });
     cleanups.push(() => first.close());
     const firstTick = first.tick();
     await vi.waitFor(async () => {
@@ -775,7 +763,7 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
     const persisted = JSON.parse((await h.repositories.config.get(`session_automation/ci/${subscription.id}`))!) as { dispatchPrompt: string };
 
     h.now.value = new Date('2026-09-12T00:00:31.000Z');
-    const restored = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, githubFetch: vi.fn(async () => githubResponse(head, [{ id: 999, conclusion: 'success', name: 'different later result' }])) as typeof fetch, clock: () => new Date(h.now.value) });
+    const restored = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, ciProviders: ciProviders(vi.fn(async () => ciStatus(head, [{ id: 999, conclusion: 'success', name: 'different later result' }])) as StatusMock), clock: () => new Date(h.now.value) });
     cleanups.push(() => restored.close());
     await restored.tick();
     release();
@@ -791,12 +779,12 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
 
   it('waits while any matching HEAD workflow is still running, then coalesces all terminal runs', async () => {
     let head = '';
-    const responses: Response[] = [];
-    const request = vi.fn(async () => responses.shift()!) as typeof fetch;
-    const h = await fixture({ fetch: request });
+    const responses: CiPipelineStatus[] = [];
+    const request = vi.fn(async () => responses.shift()!) as StatusMock;
+    const h = await fixture({ status: request });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const subscription = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
-    responses.push(githubResponse(head, [
+    responses.push(ciStatus(head, [
       { id: 60, status: 'completed', conclusion: 'success', name: 'lint' },
       { id: 61, status: 'in_progress', name: 'test' }
     ]));
@@ -805,7 +793,7 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
     expect(h.dispatches).toHaveLength(0);
 
     h.now.value = new Date('2026-09-12T00:01:01.000Z');
-    responses.push(githubResponse(head, [
+    responses.push(ciStatus(head, [
       { id: 60, status: 'completed', conclusion: 'success', name: 'lint' },
       { id: 61, status: 'completed', conclusion: 'failure', name: 'test' }
     ]));
@@ -817,8 +805,8 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
 
   it('prevents wake for old HEAD, expired, cancelled, and revoked subscriptions', async () => {
     let head = '';
-    const request = vi.fn(async () => githubResponse(head, [{ id: 1, conclusion: 'success' }])) as typeof fetch;
-    const h = await fixture({ fetch: request });
+    const request = vi.fn(async () => ciStatus(head, [{ id: 1, conclusion: 'success' }])) as StatusMock;
+    const h = await fixture({ status: request });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const stale = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     await run('git', ['-C', h.cwd, 'commit', '--allow-empty', '-qm', 'next']);
@@ -847,7 +835,7 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
 
   it('cancels an accepted queued task at the Runtime execution fence', async () => {
     let head = '';
-    const h = await fixture({ fetch: vi.fn(async () => githubResponse(head, [{ id: 4, conclusion: 'success' }])) as typeof fetch });
+    const h = await fixture({ status: vi.fn(async () => ciStatus(head, [{ id: 4, conclusion: 'success' }])) as StatusMock });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const created = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     await h.service.tick();
@@ -860,7 +848,7 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
 
   it('linearizes CI submission before cancellation and preserves the started turn', async () => {
     let head = '';
-    const h = await fixture({ fetch: vi.fn(async () => githubResponse(head, [{ id: 7, conclusion: 'success' }])) as typeof fetch });
+    const h = await fixture({ status: vi.fn(async () => ciStatus(head, [{ id: 7, conclusion: 'success' }])) as StatusMock });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const created = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     await h.service.tick();
@@ -875,7 +863,7 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
     let head = '';
     const deliver = vi.fn(async () => undefined);
     const h = await fixture({
-      fetch: vi.fn(async () => githubResponse(head, [{ id: 8, conclusion: 'success' }])) as typeof fetch,
+      status: vi.fn(async () => ciStatus(head, [{ id: 8, conclusion: 'success' }])) as StatusMock,
       deliver
     });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
@@ -896,7 +884,7 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
   it('retries only failed result delivery and never dispatches the prompt again', async () => {
     let head = '';
     const deliver = vi.fn().mockRejectedValueOnce(new Error('delivery unavailable')).mockResolvedValue(undefined);
-    const h = await fixture({ fetch: vi.fn(async () => githubResponse(head, [{ id: 5, conclusion: 'success' }])) as typeof fetch, deliver });
+    const h = await fixture({ status: vi.fn(async () => ciStatus(head, [{ id: 5, conclusion: 'success' }])) as StatusMock, deliver });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const subscription = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     await h.service.tick();
@@ -920,5 +908,65 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
     cleanups.push(() => service.close());
     await expect(service.listBySession(h.session.id)).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_AUTH_UNWIRED' });
     await expect(service.subscribeCi(h.session.id, {})).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_AUTH_UNWIRED' });
+  });
+});
+
+
+describe('CI 插件化之前保存的记录', () => {
+  it('旧的 github_new_failure 条件读成 ci_new_failure，并由 github 提供方继续判断', async () => {
+    const responses: CiPipelineStatus[] = [];
+    const request = vi.fn(async () => responses.shift()!) as StatusMock;
+    const h = await fixture({ status: request, providerId: 'github' });
+    const head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
+    responses.push(ciStatus(head, [{ id: 10, conclusion: 'success' }]));
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' } }, 'ou_owner');
+    const key = `session_automation/schedule/${created.id}`;
+    const stored = JSON.parse((await h.repositories.config.get(key))!);
+    expect(stored.condition).toMatchObject({ kind: 'ci_new_failure', provider: 'github', observedRunIds: [10] });
+    const { provider: _provider, ...condition } = stored.condition;
+    await h.repositories.config.set(key, JSON.stringify({ ...stored, condition: { ...condition, kind: 'github_new_failure' } }));
+    expect((await h.service.listBySession(h.session.id)).schedules[0]).toMatchObject({ condition: { kind: 'ci_new_failure', provider: 'github', observedRunIds: [10] } });
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    responses.push(ciStatus(head, [{ id: 10, conclusion: 'success' }, { id: 11, conclusion: 'failure' }]));
+    await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
+    expect((await h.service.listBySession(h.session.id)).occurrences[0]).toMatchObject({ conditionStatus: 'passed', conditionObservedRunIds: [10, 11] });
+  });
+
+  it('没有 provider 字段的 CI 订阅按 github 提供方轮询并续作', async () => {
+    let head = '';
+    const request = vi.fn(async () => ciStatus(head, [{ id: 5, conclusion: 'failure', name: 'test' }])) as StatusMock;
+    const h = await fixture({ status: request, providerId: 'github' });
+    head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
+    const subscription = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
+    const key = `session_automation/ci/${subscription.id}`;
+    const { provider, ...legacy } = JSON.parse((await h.repositories.config.get(key))!);
+    expect(provider).toBe('github');
+    await h.repositories.config.set(key, JSON.stringify(legacy));
+    await h.service.tick();
+    expect(request).toHaveBeenCalledWith({ repository: { owner: 'octo', name: 'repo', slug: 'octo/repo' }, sha: head });
+    const [task] = await h.repositories.tasks.listBySession(h.session.id);
+    expect(task?.prompt).toContain('test: failure');
+    expect((await h.service.listBySession(h.session.id)).subscriptions[0]).toMatchObject({ id: subscription.id, status: 'accepted' });
+  });
+});
+
+describe('没有安装 CI 插件', () => {
+  it('普通定时任务照常工作；CI 条件和等待 CI 给出明确提示，不写入记录', async () => {
+    const h = await fixture();
+    const service = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, clock: () => new Date(h.now.value) });
+    cleanups.push(() => service.close());
+    expect(service.ciConfigured).toBe(false);
+    expect(service.ciWebhook).toBeUndefined();
+    expect(service.listCiProviders()).toEqual([]);
+    await expect(service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner')).rejects.toMatchObject({ code: 'CI_REMOTE_UNSUPPORTED', message: '还没有安装 CI 插件' });
+    await expect(service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' } }, 'ou_owner')).rejects.toMatchObject({ code: 'CI_REMOTE_UNSUPPORTED' });
+    expect((await service.listBySession(h.session.id)).subscriptions).toEqual([]);
+    const created = await service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    await service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await service.tick();
+    expect(h.dispatches).toHaveLength(1);
   });
 });

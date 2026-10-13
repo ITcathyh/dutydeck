@@ -26,8 +26,9 @@ function mount(state = session.state, options: {
       : strUrl.endsWith('/workspace/cleanup') ? (init?.method === 'POST' ? (options.cleanupHandler?.(init) ?? { ok: true, sessionId: 's1', path: '/project/worktree', cleanedAt: '2026-09-14T00:00:00Z' }) : (options.cleanupPreview ?? { sessionId: 's1', path: '/project/worktree', branch: 'dutydeck/session/s1', canClean: true, blockers: [], fingerprint: 'fp_test_123' }))
       : strUrl.endsWith('/workspace') ? (options.workspace ?? { cwd: session.cwd, mode: 'worktree', state: 'ready', branch: 'dutydeck/session/s1' })
       : strUrl.endsWith('/automation') ? { schedules: [], subscriptions: [], occurrences: [] }
+      : strUrl.endsWith('/automation/ci-providers') ? { providers: [{ id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false }] }
       : strUrl.endsWith('/verifications') ? init?.method === 'POST' ? { id: 'v2', status: 'passed' } : [{ id: 'v1', command: 'pnpm test', status: 'passed', stale: true, staleReason: options.missingFingerprint ? 'current_fingerprint_unavailable' : 'code_changed', exitCode: 0, output: 'old evidence', startedAt: session.createdAt }]
-      : { subscription: { id: 'ci1', status: 'waiting' } };
+      : { subscription: { id: 'ci1', status: 'waiting', provider: 'test-ci' } };
     return new Response(JSON.stringify(body), { status: options.evidenceFailure && strUrl.endsWith('/verifications') ? 503 : 200, headers: { 'content-type': 'application/json' } });
   });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -43,11 +44,11 @@ describe('work item delivery panel', () => {
     await user.type(screen.getByLabelText('验证命令'), 'pnpm test');
     await user.click(screen.getByRole('button', { name: '执行验证' }));
     await waitFor(() => expect(requests.some(item => item.url === '/api/sessions/s1/verifications' && item.init?.body === JSON.stringify({ command: 'pnpm test' }))).toBe(true));
-    await user.click(screen.getByText('等待 GitHub Actions 完成'));
+    await user.click(screen.getByText('等待 CI 完成'));
     await user.type(screen.getByLabelText('工作流（可选）'), 'ci.yml');
     await user.click(screen.getByRole('button', { name: '开始等待' }));
     await waitFor(() => expect(requests.some(item => item.url === '/api/sessions/s1/automation/ci' && item.init?.body === JSON.stringify({ workflow: 'ci.yml', ttlSeconds: 86400 }))).toBe(true));
-    expect(screen.getByText('已开始等待当前提交的 GitHub Actions；续作开始前可取消等待。')).toBeTruthy();
+    expect(screen.getByText('已开始等待当前提交的 Test CI；续作开始前可取消等待。')).toBeTruthy();
   });
 
   it('describes unreadable fingerprints without claiming code changed', async () => {

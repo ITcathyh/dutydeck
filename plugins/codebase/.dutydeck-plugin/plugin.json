@@ -1,0 +1,9 @@
+{
+  "name": "codebase",
+  "version": "0.1.0",
+  "description": "字节 Codebase（code.byted.org）流水线与 MR webhook。也是“给内部平台写 CI 插件”的示例。",
+  "providers": "index.mjs",
+  "userConfig": {
+    "webhook_secret": { "description": "Webhook 共享密钥：签名模式做 HMAC 密钥，令牌模式直接比对；填了才启用 POST /api/hooks/codebase", "sensitive": true }
+  }
+}

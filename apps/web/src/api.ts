@@ -12,7 +12,7 @@ import type {
   SessionInsightExportRequest
 } from '@dutydeck/shared';
 import type { CreateWorkItemInput, UnknownTaskAction, UnknownTaskFacts, WorkItem, WorkTemplate } from '@dutydeck/shared';
-import type { WorkspaceMode, WorkspaceResponse, WorkspaceCleanupPreview, WorkspaceCleanupResult, VerificationResponse, VerificationCommandInput, SkillDeliveryMetadata, SessionAutomationList, CreateSessionScheduleInput, UpdateSessionScheduleInput, SubscribeCiInput, SessionSchedule, CiSubscription } from '@dutydeck/shared';
+import type { WorkspaceMode, WorkspaceResponse, WorkspaceCleanupPreview, WorkspaceCleanupResult, VerificationResponse, VerificationCommandInput, SkillDeliveryMetadata, SessionAutomationList, CreateSessionScheduleInput, UpdateSessionScheduleInput, SubscribeCiInput, SessionSchedule, CiSubscription, PublicCiProvider } from '@dutydeck/shared';
 import type { WorkspaceOrganization, WorkspaceOrganizationSnapshot } from '@dutydeck/shared';
 import type { UsageBackgroundBudget, UsageCap, UsageGroup, UsageReport, UsageReportFilter, UsageTaskPage, UsageTotals } from '@dutydeck/shared';
 import type { ArchivedHammerIntegration, ChannelBotGroupPolicy, CreateGroupBindingInput, EffectiveGroupConfig, GroupBinding, PublicAgent, PublicChannelBotFoundation, RemoteChatFact, RoleAssignment, ScheduleBlocker, ScheduleGeneration, SchedulePreview, ScheduleTrigger, ScheduleWatermark, SecretRefMetadata, UpdateChannelBotInput, UpdateGroupBindingInput, UpdateScheduleDefinitionInput } from '@dutydeck/shared';
@@ -347,6 +347,7 @@ export const api = {
   createSchedule: (id: string, input: CreateSessionScheduleInput) => json<{ schedule: SessionSchedule }>(`/api/sessions/${id}/automation/schedules`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   updateSchedule: (id: string, scheduleId: string, input: UpdateSessionScheduleInput) => json<{ schedule: SessionSchedule }>(`/api/sessions/${id}/automation/schedules/${scheduleId}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   subscribeCi: (id: string, input: SubscribeCiInput) => json<{ subscription: CiSubscription }>(`/api/sessions/${id}/automation/ci`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  ciProviders: (id: string) => json<{ providers: PublicCiProvider[] }>(`/api/sessions/${id}/automation/ci-providers`),
   cancelCi: (id: string, subscriptionId: string, expectedRevision: number) => json<{ subscription: CiSubscription }>(`/api/sessions/${id}/automation/ci/${subscriptionId}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision }) }),
   sessionCapabilities: (id: string) => json<SessionCapabilities>(`/api/sessions/${id}/capabilities`),
   workspace: (id: string) => json<WorkspaceResponse | null>(`/api/sessions/${id}/workspace`),

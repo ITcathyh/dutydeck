@@ -61,6 +61,12 @@ export async function registerSessionAutomationRoutes(app: FastifyInstance, opti
     return { schedule: await options.service.updateSchedule(request.params.sessionId, request.params.id, body, actorId) };
   });
 
+  /** 已加载的 CI 提供方；没有 CI 插件时为空列表，Web 据此提示「未安装 CI 插件」。 */
+  app.get<{ Params: { sessionId: string } }>('/api/sessions/:sessionId/automation/ci-providers', async request => {
+    await authorize(request, request.params.sessionId, 'task.view_result');
+    return { providers: options.service.listCiProviders() };
+  });
+
   app.post<{ Params: { sessionId: string } }>('/api/sessions/:sessionId/automation/ci', async request => {
     const actorId = await authorize(request, request.params.sessionId, 'task.create');
     return { subscription: await options.service.subscribeCi(request.params.sessionId, parse(subscribeCiInputSchema, request.body), actorId) };

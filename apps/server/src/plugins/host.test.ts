@@ -61,7 +61,7 @@ describe('PluginHost', () => {
     await writePlugin(join(temp, 'ci'), {
       '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'ci-gitlab', providers: 'index.mjs', userConfig: { base_url: { description: 'url' } } }),
       'index.mjs': `export default function register(api) {
-        api.registerCiProvider({ id: 'gitlab', matchRepository: url => url.includes(api.config.base_url), getPipelineStatus: async () => ({ state: 'success' }), getFailureLogs: async () => [] });
+        api.registerCiProvider({ id: 'gitlab', displayName: 'GitLab CI', matchRepository: url => url.includes(api.config.base_url) ? { owner: 'a', name: 'b', slug: 'a/b' } : undefined, getPipelineStatus: async () => ({ state: 'success', runs: [] }), getFailureLogs: async () => [] });
         api.registerHookHandler('task.received', input => ({ additionalContext: api.plugin.name + ':' + input.payload.prompt }));
       }`
     });
@@ -69,13 +69,13 @@ describe('PluginHost', () => {
     await store.setConfig('ci-gitlab', 'base_url', Buffer.from('gitlab.example.com'));
     const host = await PluginHost.load({ dataDir });
     expect(host.diagnostics).toEqual([]);
-    expect(host.ciProviders.match('git@gitlab.example.com:a/b.git')?.id).toBe('gitlab');
+    expect(host.ciProviders.match('git@gitlab.example.com:a/b.git')?.provider.id).toBe('gitlab');
     expect(host.ciProviders.match('git@github.com:a/b.git')).toBeUndefined();
     expect((await host.hooks.run('task.received', { payload: { prompt: 'hi' } })).additionalContext).toEqual(['ci-gitlab:hi']);
   });
 
   it('skips a plugin whose providers clash, without leaving part of it registered', async () => {
-    const provider = (id: string) => `{ id: '${id}', matchRepository: () => true, getPipelineStatus: async () => ({ state: 'unknown' }), getFailureLogs: async () => [] }`;
+    const provider = (id: string) => `{ id: '${id}', displayName: '${id}', matchRepository: () => ({ owner: 'o', name: 'r', slug: 'o/r' }), getPipelineStatus: async () => ({ state: 'unknown', runs: [] }), getFailureLogs: async () => [] }`;
     await writePlugin(join(temp, 'a'), { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'a-ci', providers: 'index.mjs' }), 'index.mjs': `export default api => { api.registerCiProvider(${provider('shared')}); }` });
     await writePlugin(join(temp, 'b'), { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'b-ci', providers: 'index.mjs' }), 'index.mjs': `export default api => { api.registerCiProvider(${provider('b-only')}); api.registerCiProvider(${provider('shared')}); }` });
     await store.install(join(temp, 'a'), { yes: true });

@@ -97,39 +97,89 @@ export const pluginHookOutputSchema = z.object({
 
 export type PluginHookHandler = (input: PluginHookInput) => PluginHookOutput | void | Promise<PluginHookOutput | void>;
 
+/** 提供方从远端地址解析出的仓库；slug 是平台上的完整路径，例如 `owner/repo` 或 `group/sub/repo`。 */
+export interface CiRepository { owner: string; name: string; slug: string }
+
+/** 一次构建（工作流运行、流水线）。id 在同一仓库内唯一；attempt 是同一 id 的重跑次数，从 1 开始。 */
+export interface CiRun {
+  id: number;
+  name: string;
+  attempt: number;
+  headSha: string;
+  status: 'queued' | 'running' | 'completed';
+  /** 已完成时的归一化结果；`failed` 用于「出现新的失败构建」判断。 */
+  result?: 'success' | 'failed' | 'cancelled' | 'skipped' | 'neutral';
+  /** 平台原始结论，只用于展示。 */
+  conclusion?: string;
+  url: string;
+}
+
+export interface CiPipelineQuery {
+  repository: CiRepository;
+  sha: string;
+  /** 平台上的工作流名、文件名或 ID；不传表示这个提交上的全部构建。 */
+  workflow?: string;
+  /** 只返回已完成的构建。 */
+  completedOnly?: boolean;
+}
+
 export interface CiPipelineStatus {
+  /** 汇总状态：有未完成的为 running，全部完成且有失败为 failed，全部成功为 success，没有构建为 unknown。 */
   state: 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'unknown';
-  runId?: string;
-  url?: string;
-  headSha?: string;
+  runs: CiRun[];
 }
 export interface CiFailureLog { job?: string; stage?: string; reason?: string; log?: string }
 export interface CiPullRequestInput { title: string; body?: string; head: string; base: string; draft?: boolean }
 export interface CiReviewComment { id: string; author?: string; body: string; path?: string; line?: number; url?: string; createdAt?: string }
 export interface CiWebhookRequest { rawBody: Buffer; headers: Record<string, string | string[] | undefined>; query?: Record<string, string | undefined> }
+/** `signedAt`：签名覆盖的时间（毫秒），宿主据此做 5 分钟重放窗口。失败默认 401。 */
+export type CiWebhookVerification = boolean | { ok: true; signedAt?: number } | { ok: false; statusCode?: 400 | 401; code?: string; message?: string };
 export interface CiWebhookEvent {
+  /** pipeline：构建结果；pull_request：合并请求的打开、更新、合入、关闭；review 留给 PR 闭环。 */
   kind: 'pipeline' | 'pull_request' | 'review' | 'other';
+  /** 与 matchRepository 返回的 slug 同一写法。 */
   repository: string;
-  ref?: string;
+  branch?: string;
+  /** 合并请求编号（PR number、MR iid）。 */
+  pullRequest?: number;
   headSha?: string;
-  state?: string;
+  /** pipeline：success、failed（其余值宿主忽略）；pull_request：open、reopen、update、merge、close。 */
+  state: string;
   runId?: string;
-  pullRequest?: string;
+  url?: string;
+  /** 事件里的操作人只做记录，任务身份不随它切换。 */
+  operator?: string;
+  failures?: CiFailureLog[];
+  /** 用于去重；不给时宿主按请求体哈希去重。 */
   eventId?: string;
+  /** 事件发生时间（毫秒）；给了就做 5 分钟重放窗口检查。 */
+  occurredAt?: number;
 }
 
-/** CI 提供方接口初稿（v1 只有注册表，现有 Codebase / GitHub 实现尚未迁移到此接口）。 */
+/**
+ * CI 提供方。核心不认识任何具体平台：`/ci`、自动续作、「出现新的失败构建」条件和
+ * `POST /api/hooks/<id>` 都经这里。可选方法缺失时对应能力不可用。
+ * 方法抛出的错误可带 `statusCode`（4xx 会原样回给调用方）和 `code`。
+ */
 export interface CiProvider {
   id: string;
-  /** 远端地址是否归这个提供方处理，例如 git@github.com:org/repo.git。 */
-  matchRepository(remoteUrl: string): boolean;
-  getPipelineStatus(ref: { repository: string; ref?: string; sha?: string }): Promise<CiPipelineStatus>;
-  getFailureLogs(runId: string): Promise<CiFailureLog[]>;
-  createPullRequest?(repository: string, input: CiPullRequestInput): Promise<{ id: string; url: string }>;
-  listReviewComments?(repository: string, pullRequest: string): Promise<CiReviewComment[]>;
-  postComment?(repository: string, pullRequest: string, body: string): Promise<{ id: string; url?: string }>;
+  /** 给人看的名字，例如「GitHub Actions」；会出现在卡片、提示词和 Web 上。 */
+  displayName: string;
+  /** 合并请求编号的写法，默认 `#<n>`。 */
+  changeRequestLabel?(number: number): string;
+  /** 远端地址归这个提供方时返回仓库，否则 undefined。例如 git@host:org/repo.git。 */
+  matchRepository(remoteUrl: string): CiRepository | undefined;
+  /** 轮询用：`/ci wait`（未配 webhook 时）、Web「等待 CI」、「出现新的失败构建时执行」。 */
+  getPipelineStatus?(query: CiPipelineQuery): Promise<CiPipelineStatus>;
+  /** 失败构建的任务与日志末尾；webhook 事件没带失败明细时宿主用它补齐修复证据。 */
+  getFailureLogs?(repository: CiRepository, runId: string): Promise<CiFailureLog[]>;
+  createPullRequest?(repository: CiRepository, input: CiPullRequestInput): Promise<{ id: string; number: number; url: string }>;
+  listReviewComments?(repository: CiRepository, pullRequest: number): Promise<CiReviewComment[]>;
+  postComment?(repository: CiRepository, pullRequest: number, body: string): Promise<{ id: string; url?: string }>;
+  /** 有 webhook 时 `/ci wait`、`/ci fix` 走事件驱动的续作与修复。 */
   webhook?: {
-    verify(request: CiWebhookRequest): boolean | Promise<boolean>;
+    verify(request: CiWebhookRequest): CiWebhookVerification | Promise<CiWebhookVerification>;
+    /** 不处理的事件返回 undefined；请求体无法解析时抛出带 statusCode 400 的错误。 */
     parse(request: CiWebhookRequest): CiWebhookEvent | undefined | Promise<CiWebhookEvent | undefined>;
   };
 }

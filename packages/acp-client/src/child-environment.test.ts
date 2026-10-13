@@ -15,7 +15,7 @@ it.each([false, true])('isolates real persisted ACP launches and resume (upperca
   const inherited = {
     BOTMUX_SESSION_ID: 'sentinel-old', BYTEDCLI_USER_CLOUD_JWT: 'sentinel-user',
     LARKSUITE_CLI_USER_ACCESS_TOKEN: 'sentinel-lark', LARK_APP_SECRET: 'sentinel-host',
-    DUTYDECK_CODEBASE_WEBHOOK_SECRET: 'sentinel-webhook', dutydeck_group_tools_token: 'sentinel-old-scope',
+    DUTYDECK_WEBHOOK_SECRET: 'sentinel-webhook', dutydeck_group_tools_token: 'sentinel-old-scope',
     dutydeck_relay_token: 'sentinel-old-relay', dutydeck_session_id: 'sentinel-old-session',
     HTTP_PROXY: 'http://sentinel-proxy', NODE_EXTRA_CA_CERTS: '/nonexistent/sentinel-cert',
     HERDR_PANE_ID: 'sentinel:p1', ANTHROPIC_API_KEY: 'sentinel-acp-account'

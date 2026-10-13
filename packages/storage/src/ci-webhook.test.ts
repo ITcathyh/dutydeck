@@ -44,11 +44,11 @@ describe('CI webhook 短期记录', () => {
 
   it('任务绑定删除后不留行', () => {
     const { store, count } = open();
-    store.bindTask('task_1', 'cbci_1', 1);
-    store.bindTask('task_1', 'cbci_other', 2);
-    store.bindTask('task_2', 'cbci_1', 3);
-    expect(store.taskSubscription('task_1')).toBe('cbci_1');
-    expect(store.listTaskBindings()).toEqual([{ taskId: 'task_1', subscriptionId: 'cbci_1', createdAt: 1 }, { taskId: 'task_2', subscriptionId: 'cbci_1', createdAt: 3 }]);
+    store.bindTask('task_1', 'ciw_1', 1);
+    store.bindTask('task_1', 'ciw_other', 2);
+    store.bindTask('task_2', 'ciw_1', 3);
+    expect(store.taskSubscription('task_1')).toBe('ciw_1');
+    expect(store.listTaskBindings()).toEqual([{ taskId: 'task_1', subscriptionId: 'ciw_1', createdAt: 1 }, { taskId: 'task_2', subscriptionId: 'ciw_1', createdAt: 3 }]);
     store.unbindTask('task_1');
     store.unbindTask('task_2');
     expect(store.taskSubscription('task_1')).toBeUndefined();

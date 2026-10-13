@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { PublicSessionSchedule } from '@dutydeck/shared';
+import type { PublicCiProvider, PublicCiSubscription, PublicSessionSchedule } from '@dutydeck/shared';
 import { api, ApiError, type Session } from '../api';
 import { SessionAutomationPanel } from './SessionAutomationPanel';
 
@@ -10,8 +10,10 @@ const session: Session = { id: 's1', agentId: 'a', cwd: '/project/worktree', sta
 const schedule: PublicSessionSchedule = { schemaVersion: 1, id: 'plan1', revision: 3, generation: 1, sessionId: session.id, name: '巡检', prompt: '检查构建', trigger: { kind: 'cron', expression: '*/17 3-9 * 2,7 1-5' }, timezone: 'America/New_York', dstPolicy: { gap: 'shift_forward', overlap: 'second' }, condition: { kind: 'always' }, enabled: false, createdAt: session.createdAt, updatedAt: session.updatedAt };
 const clients: QueryClient[] = [];
 afterEach(() => { cleanup(); clients.forEach(client => client.clear()); clients.length = 0; vi.restoreAllMocks(); });
-function mount(schedules: PublicSessionSchedule[] = []) {
-  const read = vi.spyOn(api, 'automation').mockResolvedValue({ schedules, subscriptions: [], occurrences: [] });
+const testCi: PublicCiProvider = { id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false };
+function mount(schedules: PublicSessionSchedule[] = [], providers: PublicCiProvider[] = [testCi], subscriptions: PublicCiSubscription[] = []) {
+  const read = vi.spyOn(api, 'automation').mockResolvedValue({ schedules, subscriptions, occurrences: [] });
+  vi.spyOn(api, 'ciProviders').mockResolvedValue({ providers });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   clients.push(client);
   render(<QueryClientProvider client={client}><SessionAutomationPanel session={session}/></QueryClientProvider>);
@@ -117,5 +119,40 @@ describe('session automation schedules', () => {
       </QueryClientProvider>
     );
     expect(screen.getByText(/所属任务：a · \/project\/worktree/)).toBeTruthy();
+  });
+});
+
+describe('session automation CI providers', () => {
+  it('没有安装 CI 插件时提示「未安装 CI 插件」，不能发起等待，也不能选 CI 条件', async () => {
+    mount([], []);
+    const subscribe = vi.spyOn(api, 'subscribeCi');
+    const user = userEvent.setup();
+    await user.click(await screen.findByText('等待 CI 完成'));
+    expect(await screen.findByText(/^未安装 CI 插件。/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '开始等待' })).toBeNull();
+    await user.click(screen.getByText('为此任务创建计划'));
+    const option = screen.getByRole('option', { name: 'CI 出现新的失败构建时执行（未安装 CI 插件）' }) as HTMLOptionElement;
+    expect(option.disabled).toBe(true);
+    expect(subscribe).not.toHaveBeenCalled();
+  });
+
+  it('等待记录和提示用插件给的名字，CI 条件按 ci_new_failure 保存', async () => {
+    const waiting = { schemaVersion: 2, id: 'ci_1', revision: 1, sessionId: 's1', provider: 'test-ci', repository: { owner: 'octo', name: 'repo', slug: 'octo/repo' }, headSha: 'a'.repeat(40), prompt: 'p', status: 'waiting', expiresAt: '2026-09-13T00:00:00Z', delivery: { status: 'not_requested', attempts: 0, updatedAt: session.createdAt }, createdAt: session.createdAt, updatedAt: session.updatedAt } as unknown as PublicCiSubscription;
+    mount([], [testCi], [waiting]);
+    expect(await screen.findByText(/Test CI · octo\/repo · aaaaaaaaaaaa/)).toBeTruthy();
+    const subscribe = vi.spyOn(api, 'subscribeCi').mockResolvedValue({ subscription: { ...waiting, id: 'ci_2' } as never });
+    const user = userEvent.setup();
+    await user.click(screen.getByText('等待 CI 完成'));
+    expect(screen.getByText('由 Test CI 查询构建结果。')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '开始等待' }));
+    await waitFor(() => expect(subscribe).toHaveBeenCalledWith('s1', { ttlSeconds: 86400 }));
+    expect(await screen.findByText('已开始等待当前提交的 Test CI；续作开始前可取消等待。')).toBeTruthy();
+    const create = vi.spyOn(api, 'createSchedule').mockResolvedValue({ schedule });
+    await fill('at');
+    fireEvent.change(screen.getByLabelText('指定时区的本地时间'), { target: { value: '2026-10-01T11:20' } });
+    await user.selectOptions(screen.getByLabelText('执行条件'), 'ci_new_failure');
+    await user.type(screen.getByLabelText('检查的工作流（可选）'), 'ci.yml');
+    await user.click(screen.getByRole('button', { name: '保存计划' }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith('s1', expect.objectContaining({ condition: { kind: 'ci_new_failure', workflow: 'ci.yml' } })));
   });
 });

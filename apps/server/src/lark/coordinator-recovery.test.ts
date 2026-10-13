@@ -130,13 +130,14 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     const first = coordinatorFor(runtime, cardService());
     await first.handle(dm('om_initial', '先创建工作项'), config);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
-    const subscription = { id: 'ci_1', revision: 3, repository: { slug: 'owner/repo' }, headSha: 'a'.repeat(40), expiresAt: '2026-09-13T00:00:00.000Z', status: 'waiting' };
-    const automation = { githubConfigured: true, subscribeCi: vi.fn(async () => subscription), listBySession: vi.fn(async () => ({ subscriptions: [subscription] })), cancelCi: vi.fn(async () => ({ ...subscription, status: 'cancelled' })) };
+    const subscription = { id: 'ci_1', revision: 3, provider: 'test-ci', repository: { slug: 'owner/repo' }, headSha: 'a'.repeat(40), expiresAt: '2026-09-13T00:00:00.000Z', status: 'waiting' };
+    const automation = { ciConfigured: true, listCiProviders: () => [{ id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false }], subscribeCi: vi.fn(async () => subscription), listBySession: vi.fn(async () => ({ subscriptions: [subscription] })), cancelCi: vi.fn(async () => ({ ...subscription, status: 'cancelled' })) };
     const service = cardService();
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: automation as any });
     try {
       await coordinator.handle(dm('om_ci_wait', '/ci wait ci.yml'), config);
       await vi.waitFor(() => expect(automation.subscribeCi).toHaveBeenCalledWith('ses_1', { workflow: 'ci.yml' }, 'ou_user_a'));
+      await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '等待 Test CI' })));
       await coordinator.handle(dm('om_ci_list', '/ci'), config);
       await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: 'CI 等待记录', markdown: expect.stringContaining('owner/repo') })));
       await coordinator.handle(dm('om_ci_cancel', '/ci cancel ci_1'), config);
@@ -146,9 +147,32 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     } finally { first.stop(); coordinator.stop(); }
   });
 
-  it('/ci 在没有 GitHub 令牌也没有 Codebase webhook 时回「未配置」和配置方法', async () => {
+  it('/ci wait、/ci fix 在 origin 归配了 webhook 的 CI 插件时走插件订阅，卡片用插件的名字', async () => {
     const { runtime } = persistentRuntime();
-    const automation = { githubConfigured: false, subscribeCi: vi.fn(), listBySession: vi.fn() };
+    const first = coordinatorFor(runtime, cardService());
+    await first.handle(dm('om_initial', '先创建工作项'), config);
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
+    const item = { id: 'ciw_1', providerName: 'Fake CI', repository: 'group/repo', branch: 'feat/ci', headSha: 'b'.repeat(40), autoFix: true, expiresAt: '2026-09-13T00:00:00.000Z' };
+    const ciWebhook = { subscribe: vi.fn(async () => item), get: vi.fn(async (id: string) => id === 'ciw_1' ? item : undefined), cancel: vi.fn(async () => {}), listBySession: vi.fn(async () => []) };
+    const automation = { ciConfigured: true, ciWebhook, listCiProviders: () => [], subscribeCi: vi.fn(), listBySession: vi.fn(async () => ({ subscriptions: [] })) };
+    const service = cardService();
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: automation as any });
+    try {
+      await coordinator.handle(dm('om_ci_fix', '/ci fix'), config);
+      await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '等待 Fake CI', markdown: expect.stringContaining('失败时自动交给 Agent 修复') })));
+      expect(ciWebhook.subscribe).toHaveBeenCalledWith('ses_1', { autoFix: true }, 'ou_user_a');
+      await coordinator.handle(dm('om_ci_cancel', '/ci cancel ciw_1'), config);
+      await vi.waitFor(() => expect(ciWebhook.cancel).toHaveBeenCalledWith('ses_1', 'ciw_1'));
+      ciWebhook.subscribe.mockResolvedValueOnce(undefined as never);
+      await coordinator.handle(dm('om_ci_fix_other', '/ci fix'), config);
+      await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('不归任何配了 webhook 的 CI 插件处理') })));
+      expect(automation.subscribeCi).not.toHaveBeenCalled();
+    } finally { first.stop(); coordinator.stop(); }
+  });
+
+  it('/ci 在没有安装 CI 插件时回「未配置」和安装方法', async () => {
+    const { runtime } = persistentRuntime();
+    const automation = { ciConfigured: false, subscribeCi: vi.fn(), listBySession: vi.fn() };
     const service = cardService();
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: automation as any });
     try {
@@ -156,9 +180,8 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
       await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/ci 未执行' })));
       const markdown = String(service.send.mock.calls.find(([input]: any[]) => input.taskName === '/ci 未执行')?.[0]?.markdown);
       expect(markdown).toContain('CI 续作未配置');
-      expect(markdown).toContain('DUTYDECK_GITHUB_TOKEN');
-      expect(markdown).toContain('DUTYDECK_CODEBASE_WEBHOOK_SECRET');
-      expect(markdown).toContain('/api/hooks/codebase');
+      expect(markdown).toContain('dutydeck plugin install');
+      expect(markdown).toContain('/api/hooks/<插件提供方>');
       expect(automation.subscribeCi).not.toHaveBeenCalled();
     } finally { coordinator.stop(); }
   });
@@ -168,23 +191,23 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     const { runtime, sessions } = persistentRuntime();
     sessions.push({ id: 'ses_ci', agentId: 'codex', state: 'idle', cwd: '/tmp', source: 'lark', sourceId: 'cli_test:oc_group:group', runId: 'run_ci', createdAt: '2026-09-25T00:00:00.000Z', updatedAt: '2026-09-25T00:00:00.000Z' });
     await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
-    const codebase = {
-      get: vi.fn(async (id: string) => id === 'cbci_1' ? { id: 'cbci_1', sessionId: 'ses_ci' } : undefined),
+    const ciWebhook = {
+      get: vi.fn(async (id: string) => id === 'ciw_1' ? { id: 'ciw_1', sessionId: 'ses_ci' } : undefined),
       requestFix: vi.fn(async () => '已交给 Agent 修复（第 1/3 轮）。')
     };
-    const coordinator = new LarkMessageCoordinator(runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { store: repos.config, automation: { codebase } as any });
+    const coordinator = new LarkMessageCoordinator(runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { store: repos.config, automation: { ciWebhook } as any });
     try {
       await coordinator.initializeWorkflows(config);
-      const value = { dutydeck_ci_fix: 'cbci_1', failure: 'failure_key' };
+      const value = { dutydeck_ci_fix: 'ciw_1', failure: 'failure_key' };
       expect(await coordinator.handleAction(value, 'ou_alice', { messageId: 'om_failure_card', chatId: 'oc_group' }))
         .toEqual({ type: 'success', content: '已交给 Agent 修复（第 1/3 轮）。' });
-      expect(codebase.requestFix).toHaveBeenCalledWith('cbci_1', { failureKey: 'failure_key', cardMessageId: 'om_failure_card' }, 'ou_alice');
+      expect(ciWebhook.requestFix).toHaveBeenCalledWith('ciw_1', { failureKey: 'failure_key', cardMessageId: 'om_failure_card' }, 'ou_alice');
       // 别的群转发过来的卡、白名单之外的成员都不能触发修复。
       expect(await coordinator.handleAction(value, 'ou_alice', { messageId: 'om_failure_card', chatId: 'oc_other' })).toMatchObject({ type: 'warning' });
       await repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...config, allowedUsers: [{ openId: 'ou_carol', name: 'Carol' }] }]));
       expect(await coordinator.handleAction(value, 'ou_alice', { messageId: 'om_failure_card', chatId: 'oc_group' }))
         .toEqual({ type: 'warning', content: '当前账号没有操作此任务的权限。' });
-      expect(codebase.requestFix).toHaveBeenCalledOnce();
+      expect(ciWebhook.requestFix).toHaveBeenCalledOnce();
     } finally { coordinator.stop(); repos.close(); }
   });
 
