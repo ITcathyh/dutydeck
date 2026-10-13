@@ -394,7 +394,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       ? async (session, request) => { await usageLedger.admit(session, request); await pluginWiring.hooks.taskReceived(session, request); }
       : (session, request) => usageLedger.admit(session, request),
     recordUsage: (session, attempt, reading) => usageLedger.record(session, attempt, reading),
-    observeTurn: createTurnDiffObserver(repos.config),
+    observeTurn: createTurnDiffObserver(repos.config, { log: { warn: (details, message) => app?.log.warn(details, message) } }),
     authorizeTask: async (session, task, phase) => { await collaboration?.background.authorizeTask(session, task); await automation.authorizeTask(task, phase); await ciWebhook?.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
     authorizeControl: async (sessionId, actor, _action) => {
       if (await workItems.authorizeControl(sessionId, actor)) return;

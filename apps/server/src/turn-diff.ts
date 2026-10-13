@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, lstat, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigRepository, Session } from '@dutydeck/shared';
@@ -16,6 +16,14 @@ import type { ConfigRepository, Session } from '@dutydeck/shared';
 
 /** 单次快照的时限：大仓库宁可没有改动摘要，也不能拖住这一轮。 */
 export const TURN_SNAPSHOT_TIMEOUT_MS = 5_000;
+/**
+ * 快照前检查未跟踪文件（遵守 .gitignore）：`git add -A` 会把它们全部哈希并写进用户仓库的 .git/objects，
+ * 这些对象没有引用、要等 gc 两周后才清。超过下面任一上限时这一轮不拍快照，结果卡上也就没有改动行。
+ * - 单个文件 20 MiB：手写的源码、配置远小于此；更大的基本是构建产物、数据集、安装包，diff 页上也只能显示占位。
+ * - 合计 50 MiB：一轮最多往对象库里多写这么多，同时也是 5 秒时限内能哈希完的量级。
+ * - 2000 个文件：未忽略的 node_modules、构建目录或把整个 $HOME 当仓库时才会到这个数，diff 页也看不过来。
+ */
+export const TURN_SNAPSHOT_UNTRACKED_LIMITS = { fileBytes: 20 * 1024 * 1024, totalBytes: 50 * 1024 * 1024, files: 2_000 };
 /** 分享链接有效期，与 git gc 清理无引用对象的默认期限（两周）一致。 */
 export const TURN_DIFF_LINK_TTL_MS = 14 * 24 * 3_600_000;
 /** diff 页单个文件、整页显示的上限；超过的文件只显示占位，整页超出时后面的文件只列名字。 */
@@ -51,24 +59,73 @@ function git(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; t
 /** 读树对象的 git 参数：固定前缀与路径格式，不受用户 diff 配置（外部 diff、textconv、颜色、noprefix）影响。 */
 const diffArgs = (gitDir: string) => ['--git-dir', gitDir, '-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '-M', '--src-prefix=a/', '--dst-prefix=b/'];
 
-/** 给 cwd 所在仓库的整个工作区拍快照，返回公共 git 目录和树 ID；失败或超时返回 undefined。 */
-export async function snapshotWorkingTree(cwd: string, timeoutMs = TURN_SNAPSHOT_TIMEOUT_MS): Promise<{ gitDir: string; tree: string } | undefined> {
+/** .dutydeck 下是平台数据，不算这一轮的改动。 */
+const snapshotPathspec = ['--', '.', ':(exclude,glob)**/.dutydeck/**'];
+
+/** 未跟踪文件超过上限时返回原因，没超过返回 undefined。 */
+async function untrackedOverLimit(top: string, timeout: number, limits: typeof TURN_SNAPSHOT_UNTRACKED_LIMITS): Promise<string | undefined> {
+  const paths = (await git(['ls-files', '-o', '--exclude-standard', '-z', ...snapshotPathspec], { cwd: top, timeout })).split('\0').filter(Boolean);
+  if (paths.length > limits.files) return `未跟踪文件 ${paths.length} 个，超过 ${limits.files} 个`;
+  let total = 0;
+  for (const path of paths) {
+    const size = (await lstat(join(top, path)).catch(() => undefined))?.size ?? 0;
+    if (size > limits.fileBytes) return `未跟踪文件 ${path} 有 ${size} 字节，超过单个文件上限 ${limits.fileBytes} 字节`;
+    total += size;
+    if (total > limits.totalBytes) return `未跟踪文件合计超过 ${limits.totalBytes} 字节`;
+  }
+  return undefined;
+}
+
+/** git 写对象时的临时文件：松散对象在 objects/xx/tmp_obj_*，大文件直接成包时在 objects/pack/tmp_pack_*、tmp_idx_*。 */
+async function tempObjectFiles(objects: string): Promise<Set<string>> {
+  const found = new Set<string>();
+  const dirs = (await readdir(objects).catch(() => [] as string[])).filter(name => /^[0-9a-f]{2}$/.test(name) || name === 'pack');
+  for (const dir of ['.', ...dirs]) {
+    for (const name of await readdir(join(objects, dir)).catch(() => [] as string[])) if (name.startsWith('tmp_')) found.add(join(objects, dir, name));
+  }
+  return found;
+}
+
+/**
+ * 给 cwd 所在仓库的整个工作区拍快照，返回公共 git 目录和树 ID；失败、超时或未跟踪文件超过上限时返回 undefined，
+ * 不是 git 仓库以外的原因交给 onSkip 记日志。
+ */
+export async function snapshotWorkingTree(cwd: string, timeoutMs = TURN_SNAPSHOT_TIMEOUT_MS, options: { limits?: typeof TURN_SNAPSHOT_UNTRACKED_LIMITS; onSkip?: (reason: string) => void } = {}): Promise<{ gitDir: string; tree: string } | undefined> {
   const deadline = Date.now() + timeoutMs;
-  const remaining = () => deadline - Date.now();
+  // 每一步开始前都核对时限：子进程的超时只管单个命令，几步加起来不能超过这一次快照的时限。
+  const remaining = () => {
+    const left = deadline - Date.now();
+    if (left <= 0) throw new Error('timeout');
+    return left;
+  };
   let scratch: string | undefined;
+  let stage = '定位仓库';
   try {
     const [top, index, gitDir] = (await git(['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-path', 'index', '--git-common-dir'], { cwd, timeout: remaining() })).trim().split('\n');
     if (!top || !index || !gitDir) return undefined;
+    stage = '检查未跟踪文件';
+    const overLimit = await untrackedOverLimit(top, remaining(), options.limits ?? TURN_SNAPSHOT_UNTRACKED_LIMITS);
+    if (overLimit) { options.onSkip?.(overLimit); return undefined; }
     scratch = await mkdtemp(join(tmpdir(), 'dutydeck-turn-diff-'));
     const tempIndex = join(scratch, 'index');
     // 还没有 index（新仓库）时从空 index 开始。
     await copyFile(index, tempIndex).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });
     const env = { ...process.env, GIT_INDEX_FILE: tempIndex, GIT_OPTIONAL_LOCKS: '0' };
-    // .dutydeck 下是平台数据，不算这一轮的改动。
-    await git(['add', '-A', '--', '.', ':(exclude,glob)**/.dutydeck/**'], { cwd: top, env, timeout: remaining() });
+    stage = '写入快照';
+    const objects = join(gitDir, 'objects');
+    const existingTemp = await tempObjectFiles(objects);
+    try {
+      await git(['add', '-A', ...snapshotPathspec], { cwd: top, env, timeout: remaining() });
+    } catch (error) {
+      // 被时限杀掉的 git 来不及收尾，留下的临时对象文件要等 gc 才清。只删这次新出现的，原来就有的不碰。
+      for (const file of await tempObjectFiles(objects)) if (!existingTemp.has(file)) await rm(file, { force: true }).catch(() => {});
+      throw error;
+    }
     const tree = (await git(['write-tree'], { cwd: top, env, timeout: remaining() })).trim();
     return /^[0-9a-f]{40,64}$/.test(tree) ? { gitDir, tree } : undefined;
-  } catch {
+  } catch (error) {
+    // 不是 git 仓库不算异常，不记。
+    if (stage !== '定位仓库') options.onSkip?.(`${stage}失败：${Date.now() >= deadline ? `超过 ${timeoutMs} 毫秒时限` : error instanceof Error ? error.message.split('\n')[0] : String(error)}`);
     return undefined;
   } finally {
     if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => {});
@@ -193,13 +250,16 @@ export async function listTurnDiffRecords(store: ConfigRepository, sessionId: st
  * 接到 runtime 的 observeTurn：start 记开始时的树，end 记结束时的树和改动摘要。
  * 写记录失败与快照失败同样只是没有改动摘要；end 没有对应的 start（重启后接上的一轮）时什么也不记。
  */
-export function createTurnDiffObserver(store: ConfigRepository, options: { timeoutMs?: number; now?: () => Date } = {}) {
+export function createTurnDiffObserver(store: ConfigRepository, options: { timeoutMs?: number; now?: () => Date; limits?: typeof TURN_SNAPSHOT_UNTRACKED_LIMITS;
+  log?: { warn(details: Record<string, unknown>, message: string): void } } = {}) {
   const now = () => (options.now?.() ?? new Date()).toISOString();
   return async (session: Pick<Session, 'id' | 'cwd'>, taskId: string, phase: 'start' | 'end') => {
     if (!session.cwd) return;
     const key = turnDiffKey(session.id, taskId);
+    const snapshotOptions = { ...(options.limits ? { limits: options.limits } : {}),
+      onSkip: (reason: string) => options.log?.warn({ sessionId: session.id, taskId, phase, cwd: session.cwd, reason }, '这一轮没有记录改动范围') };
     if (phase === 'start') {
-      const snapshot = await snapshotWorkingTree(session.cwd, options.timeoutMs);
+      const snapshot = await snapshotWorkingTree(session.cwd, options.timeoutMs, snapshotOptions);
       if (!snapshot) return;
       const record: TurnDiffRecord = { version: 1, sessionId: session.id, taskId, gitDir: snapshot.gitDir, before: snapshot.tree, startedAt: now() };
       await store.set(key, JSON.stringify(record));
@@ -208,7 +268,7 @@ export function createTurnDiffObserver(store: ConfigRepository, options: { timeo
     const raw = await store.get(key);
     if (!raw) return;
     const record = JSON.parse(raw) as TurnDiffRecord;
-    const snapshot = await snapshotWorkingTree(session.cwd, options.timeoutMs);
+    const snapshot = await snapshotWorkingTree(session.cwd, options.timeoutMs, snapshotOptions);
     if (!snapshot || snapshot.gitDir !== record.gitDir) return;
     const summary = snapshot.tree === record.before ? { files: 0, additions: 0, deletions: 0 } : await readTurnDiffSummary(record.gitDir, record.before, snapshot.tree, options.timeoutMs).catch(() => undefined);
     if (!summary) return;
