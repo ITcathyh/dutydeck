@@ -24,7 +24,9 @@ const readOnly = [
   'find . -name "*.ts" -type f', 'git log --oneline -5', 'git -C repo status --short', 'git diff HEAD~1 -- a.ts', 'git branch -a',
   'git branch --list "feat/*"', 'git tag -l', 'git config --get user.name', 'git stash list', 'git worktree list',
   "sed -n '1,80p' src/index.ts", 'sed -n 10p a.txt', 'wc -l a b && echo done', 'cat a.txt > /dev/null 2>&1', 'jq .name package.json',
-  'sort < input.txt | uniq -c', 'cd packages && ls', 'echo "a > b; rm -rf /"', 'tree -L 2', 'ls &>/dev/null', 'test -f a || echo missing',
+  'sort < input.txt | uniq -c', 'cd packages && ls', 'echo "a > b; rm -rf /"', 'tree -L 2', 'ls &>/dev/null', 'ls a || echo missing',
+  'echo x >&2', 'echo x 2>&1 | head', 'ls src/*.ts', 'cat < src/a.ts', "grep -n 'a$' f", "sed -n '$p' f", "rg foo src --glob '*.ts'",
+  "git log --format='%h %s' -3", 'git log --oneline', 'git branch --contains', 'stat -c %s a', 'date +%F',
 ];
 const writes = [
   'touch a.txt', 'rm -rf build', 'echo hi > a.txt', 'echo hi >> a.txt', 'cat a 2> err.log', 'ls &> out.txt', 'cat <<EOF > a\nx\nEOF',
@@ -34,6 +36,14 @@ const writes = [
   'git checkout main', 'git branch -D x', 'git branch new', 'git tag v1', 'git tag -d v1', 'git -c core.pager=x log', 'git diff --output=x',
   'git config user.name x', 'git stash', 'git remote add o u', 'env FOO=1 ls', 'xargs rm < list', 'ls | xargs rm', '{ ls; }', '(touch a)',
   'echo "unterminated', '', 'cat a; touch b', 'ls && touch b', 'ls || touch b', 'ls\ntouch b',
+  // 审查找到的绕过（bash / zsh 实跑都能写文件或执行命令）。
+  'echo x | uniq - out.txt', 'echo x >&2out.txt', "printf -v x '\\x24(touch f)'; echo ${x@P}", "printf -v x '\\x24(touch f)'; echo ${(e)x}",
+  'cat =(touch f)', "ls *(e:'touch f':)",
+  // 同类：展开、注释、下标求值、只有重定向的命令、通配符变选项、长选项缩写、描述符复制后跟文件名。
+  "echo '$(touch f)'", 'echo $HOME', 'echo "$HOME"', 'echo ${HOME}', "echo $'a'", "test -v 'a[$(touch f)]'", 'test -f a', '[ -f a ]', "stat -A 'a[$(touch f)]' f",
+  "ls #'\ntouch b #'", 'cat <*(e:touch:)', "cat <'a b'", '< a.txt', 'ls; < a.txt', 'ls {a,b}', 'rg foo *', 'find * -name x', 'sed -n 1p *',
+  'uniq src/in*', 'uniq -- a b', 'sort --out=x in', 'sort --co=sh in', 'sort -to out in', 'git diff --outp=x', 'git grep -nOvi x',
+  'git branch --list --del x', 'git tag -l --del v1', 'date -s 2020-01-01', 'rg --hostname-bin=x foo', 'rg --pre-g=x foo', 'ls >&1x', 'echo x >&-x',
 ];
 
 describe('plan guard Bash classifier', () => {
