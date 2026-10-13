@@ -319,7 +319,7 @@ describe('PR 跟进：CI 失败', () => {
     expect(await g.service.get(other.id)).toMatchObject({ status: 'stopped', reason: expect.stringContaining('app.ts') });
   });
 
-  it('修复轮改到带有用户未提交内容的文件时不推送，用户的内容不会进 PR；新建的文件照常推送', async () => {
+  it('修复轮改到带有用户未提交内容的文件时不推送，用户的内容不会进 PR；新建的文件也要人处理', async () => {
     const f = await fixture();
     await f.write('README.md', 'readme\nUSER-PRIVATE-UNCOMMITTED\n');
     const pr = await f.open();
@@ -338,9 +338,34 @@ describe('PR 跟进：CI 失败', () => {
     g.state.pipeline = failed(other.headSha!);
     await g.poll();
     await g.finishLatest(() => g.write('src/new.ts', 'export const added = true;\n'));
+    // 新建的文件不在 PR 里，分不清是 Agent 建的还是别处建的，不自动推送。
+    expect(await g.service.get(other.id)).toMatchObject({ status: 'stopped', reason: expect.stringContaining('src/new.ts') });
+    expect(await g.remoteGit('rev-parse', other.branch)).toBe(other.headSha);
+  });
+
+  it('修复轮进行中别处改了 PR 之外的文件时不推送，列出文件并说明怎么继续；只改 PR 里文件的修复照常推送', async () => {
+    const f = await fixture();
+    const pr = await f.open();
+    f.state.pipeline = failed(pr.headSha!);
+    await f.poll();
+    expect(f.dispatches[0]!.prompt).toContain('只改这个 PR 里已有的文件（app.ts）');
+    // Agent 修 app.ts 的同时，共用这个工作目录的另一个话题（或编辑器）改了 README.md。
+    await f.finishLatest(async () => { await f.write('app.ts', 'export const a = 3;\n'); await f.write('README.md', 'readme\nOTHER-SESSION-EDIT-DURING-TURN\n'); });
+    const stopped = (await f.service.get(pr.id))!;
+    expect(stopped).toMatchObject({ status: 'stopped', reason: expect.stringContaining('PR 之外的文件：README.md') });
+    expect(stopped.reason).toContain(`推到 ${pr.branch}`);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+    expect(await f.remoteGit('grep', '-c', 'OTHER-SESSION-EDIT', pr.branch).catch(() => 'none')).toBe('none');
+    expect(f.notices.at(-1)).toMatchObject({ title: 'PR #7 已停止自动跟进', markdown: expect.stringContaining('README.md') });
+
+    const g = await fixture();
+    const other = await g.open();
+    g.state.pipeline = failed(other.headSha!);
+    await g.poll();
+    await g.finishLatest(() => g.write('app.ts', 'export const a = 3;\n'));
     const after = (await g.service.get(other.id))!;
     expect(after).toMatchObject({ status: 'open', ciRounds: 1 });
-    expect(await g.remoteGit('show', `${after.headSha}:src/new.ts`)).toBe('export const added = true;');
+    expect(await g.remoteGit('show', `${after.headSha}:app.ts`)).toBe('export const a = 3;');
   });
 
   it('工作区快照拍不了时说明原因和处理办法，不只说稍后重试', async () => {
