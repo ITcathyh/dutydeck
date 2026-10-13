@@ -123,6 +123,11 @@ export interface RuntimeOptions {
    * 在事件落库之后调用，失败不影响本轮；求差、估算、归类都由宿主负责。
    */
   recordUsage?: (session: Session, attempt: AttemptRef, reading?: Record<string, unknown>) => Promise<void>;
+  /**
+   * 一轮交给驱动之前（start）和驱动返回之后（end）各调一次，宿主据此记下这一轮的改动范围。
+   * 失败不影响本轮；时限由宿主负责。重启后接上的一轮没有 start，也就不调 end。
+   */
+  observeTurn?: (session: Session, taskId: string, phase: 'start' | 'end') => Promise<void>;
   resolveRiskPolicy?: (sessionId: string, fallback?: ToolRiskPolicy) => Promise<ToolRiskPolicy | undefined>;
   acpxCommand?: string;
   driverFactory?: DriverFactory;
@@ -2426,6 +2431,12 @@ export class DutydeckRuntime {
     this.activeTurns.add(id); this.completedTurns.delete(ref.attemptId);
     let agentId: string | undefined;
     let settledSession: Session | undefined;
+    let observed: Session | undefined;
+    const observeEnd = async () => {
+      const session = observed;
+      observed = undefined;
+      if (session) await this.options.observeTurn!(session, task.id, 'end').catch(() => {});
+    };
     try {
       const { session } = await this.active(id);
       agentId = session.agentId; settledSession = session;
@@ -2468,6 +2479,10 @@ export class DutydeckRuntime {
       }
       await this.authorize(id, task.executionContext?.actorId, true);
       await this.mutations.wait(() => this.options.authorizeTask?.(session, task, 'submit') ?? Promise.resolve());
+      if (this.options.observeTurn) {
+        await this.mutations.wait(() => this.options.observeTurn!(session, task.id, 'start').catch(() => {}));
+        observed = session;
+      }
       await this.flushDriverEvents(id);
       await this.emit(id, 'text', { text: task.prompt, role: 'user', taskId: task.id });
       this.mutations.check();
@@ -2491,6 +2506,8 @@ export class DutydeckRuntime {
         });
       } else await this.driverOperation(driver, async () => { if (await compact()) await driver.send(prompt); });
       await this.flushDriverEvents(id);
+      // 结束快照在结算之前：结算事件一到，飞书结果卡就要读这一轮的改动摘要。
+      await this.mutations.wait(observeEnd);
       if (!this.completedTurns.has(ref.attemptId)) throw new RuntimeError('DRIVER_RESULT_INCOMPLETE', 'Driver returned without a completed result', 409);
       const result = this.turnOutput(ref);
       await this.mutations.write(id, async () => this.wake(this.bound().settleAttempt(this.attemptFence(ref), `settlement:${submissionId}`, { kind: 'driver_result', submissionId, outcome: result.status, outputDigest: result.outputDigest, stopReason: result.stopReason, complete: true })));
@@ -2500,6 +2517,7 @@ export class DutydeckRuntime {
       // Stop owns revoked attempts and retains its claim until this cleanup finishes.
       if (this.mutations.valid(token)) {
         await this.flushDriverEvents(id).catch(() => {});
+        await observeEnd();
         // 提交前失败时 Agent 没产生任何事件，原因只记在结算上；先补一条错误事件，结果卡和 Web 才写得出为什么失败。
         const unsubmitted = this.repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.attemptId === ref.attemptId);
         if (unsubmitted && unsubmitted.state !== 'settled' && unsubmitted.submissionState === 'not_submitted' && !isTaskFenceRevocation(error)) {

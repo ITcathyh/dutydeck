@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { X } from 'lucide-react';
 import { api, type Session, type Task, type WorkspaceCleanupPreview } from '../api';
 import { sessionDisplayName } from '../run-summary';
+import { turnDiffPath } from '../app-route';
 import { Banner, Button, Dialog, Field, IconButton, Input, Spinner } from './primitives';
 import { SessionAutomationPanel } from './SessionAutomationPanel';
 
@@ -17,6 +18,7 @@ export function SessionDeliveryPanel({ session, tasks, onClose }: { session: Ses
   const capabilities = useQuery({ queryKey: ['sessionCapabilities', session.id], queryFn: () => api.sessionCapabilities(session.id) });
   const workspace = useQuery({ queryKey: ['workspace', session.id], queryFn: () => api.workspace(session.id) });
   const evidence = useQuery({ queryKey: ['verifications', session.id], queryFn: () => api.verifications(session.id), refetchInterval: 5_000 });
+  const turnDiffs = useQuery({ queryKey: ['turnDiffs', session.id], queryFn: () => api.turnDiffs(session.id) });
   const verify = useMutation({ mutationFn: () => api.verify(session.id, { command: command.trim() }), onSettled: () => { void qc.invalidateQueries({ queryKey: ['verifications', session.id] }); } });
 
   const checkCleanup = useMutation({
@@ -149,6 +151,15 @@ export function SessionDeliveryPanel({ session, tasks, onClose }: { session: Ses
               )}
             </>
           )}
+        </section>
+        <section className="space-y-2">
+          <h3 className="text-body font-semibold">每轮改动</h3>
+          {turnDiffs.error && <Banner tone="danger">{turnDiffs.error.message}</Banner>}
+          {turnDiffs.data && !turnDiffs.data.length && <p className="text-caption text-subtle">还没有改动过文件的轮次。只有在 Git 仓库里执行的轮次才会记录改动。</p>}
+          {[...turnDiffs.data ?? []].reverse().map(item => <a key={item.taskId} href={turnDiffPath(session.id, item.taskId)} className="block rounded-lg border border-default p-3 text-caption hover:bg-hover">
+            <span className="block truncate text-primary">{tasks.find(task => task.id === item.taskId)?.prompt.trim().slice(0, 100) || '这一轮'}</span>
+            <span className="text-secondary">改动 {item.summary.files} 个文件 <span className="text-success">+{item.summary.additions}</span> <span className="text-danger">−{item.summary.deletions}</span> · <span className="text-link">查看改动</span></span>
+          </a>)}
         </section>
         <section className="space-y-2">
           <h3 className="text-body font-semibold">当前连接能力</h3>

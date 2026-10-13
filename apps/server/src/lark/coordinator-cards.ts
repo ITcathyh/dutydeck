@@ -10,6 +10,8 @@ import { larkCommandEcho } from './commands.js';
 import { isFileResultDelivery, reactionDedupeKey, reactionEmojiForAcceptance, type ReactionRecord } from './reaction-records.js';
 import { appendLarkTaskSteps, larkTaskAgentGuid } from './task-agent.js';
 import { findPersistedLarkSession, larkGroupKey, larkSessionConfigKey } from './session-resolver.js';
+import type { LarkConfirmRecord } from './confirm-cards.js';
+import { larkTurnDiffReviewKind } from './turn-diff.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkTaskState, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
@@ -506,6 +508,54 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       this.log.warn({ error, taskId: parsed.taskId, action: parsed.action }, '提交结果卡续问失败');
       return { type: 'error', content: '提交失败，请稍后重试。' };
     }
+  }
+
+  /**
+   * 「查看改动」分享链接上提交的行评论（lark/turn-diff.ts 发的确认卡）：有权限的人点「交给 Agent 修改」才派发。
+   * 谁能点与卡上的「重试」同一口径，还要受续聊规则约束；派发等同于点按钮的人在原话题里回复这张确认卡，
+   * 新一轮的过程卡和结果卡挂在它下面。指令全文在发卡时就已写好（评论标为待评估的评审数据），这里原样交出。
+   */
+  protected registerTurnDiffReview(appId: string) {
+    this.workflowOptions.participation?.confirmations?.register(larkTurnDiffReviewKind(appId), {
+      authorize: async (record, operator) => {
+        const target = await this.turnDiffReviewTarget(record);
+        if (typeof target === 'string') return target;
+        const { config, mapping, saved } = target;
+        if (!saved.scope_id || !larkScopeContinuesFor(saved.scope_id, operator)) return '这个会话只接发起人本人的追问，只有发起人能把评审意见交给 Agent。';
+        return await this.isOperatorAllowed(config, operator, saved.chat_id, mapping.sessionId, saved.sender_open_id)
+          ? true : '只有发起人或有权限的人能把评审意见交给 Agent。';
+      },
+      apply: async (record, operator) => {
+        const target = await this.turnDiffReviewTarget(record);
+        if (typeof target === 'string') throw new RuntimeError('TURN_DIFF_REVIEW_UNAVAILABLE', target, 409);
+        const { current, config, saved } = target;
+        if (!this.inbox || !record.cardMessageId || !saved.scope_id) throw new RuntimeError('TURN_DIFF_REVIEW_UNAVAILABLE', '这张卡缺少派发所需的信息，请直接 @我 处理。', 409);
+        const prompt = String(record.payload.prompt ?? '');
+        const event: LarkMessageEvent = {
+          messageId: record.cardMessageId, chatId: saved.chat_id, chatType: saved.chat_type ?? 'group',
+          ...(saved.thread_id ? { threadId: saved.thread_id } : {}), createTime: String(Date.now()),
+          messageType: 'text', content: JSON.stringify({ text: '@_user_1 按评审意见修改' }), senderOpenId: operator, senderType: 'user',
+          mentions: [{ key: '@_user_1', name: config.name?.trim() || 'Dutydeck', ...(this.botOpenId ? { openId: this.botOpenId } : {}), mentionedType: 'bot' }]
+        };
+        // 按确认卡的消息 ID 登记：同一张卡只会登记一次，重复点击由确认单的状态挡住，这里再兜一层。
+        if (await this.inbox.seed(config.appId, event, { prompt, scopeId: saved.scope_id, resources: [] })) {
+          void this.handle(event, current).catch(error => this.log.error({ error, messageId: event.messageId }, '处理评审意见失败'));
+        }
+        return '已交给 Agent 修改，新一轮的进度和结果会发在这张卡下面。';
+      }
+    });
+  }
+
+  private async turnDiffReviewTarget(record: LarkConfirmRecord) {
+    const store = this.workflowOptions.store;
+    if (!store || !this.cardMappings) return '这张卡已失效。';
+    const current = await readLarkConfig(store, record.scope.appId);
+    if (!current?.listening) return '机器人已停用，无法执行此操作';
+    const mapping = await this.cardMappings.get(larkCardChannel(current.appId), String(record.payload.lark_task_id ?? ''));
+    const saved = parseOptionalCardTask(mapping?.extra);
+    if (!mapping || !saved || saved.app_id !== current.appId || saved.chat_id !== record.scope.chatId || mapping.sessionId !== record.payload.session_id) return '这条任务已不在了，无法转交评审意见。';
+    const config = saved.chat_type === 'group' && this.groupManager ? await this.groupManager.resolved(current, saved.chat_id) : current;
+    return { current, config, mapping, saved };
   }
 
   /**

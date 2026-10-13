@@ -102,6 +102,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   async initializeWorkflows(config: StoredLarkConfig) {
     this.reconcileConfig = config;
     this.applyReminderSettings(config);
+    this.registerTurnDiffReview(config.appId);
     await this.workflows?.initialize(config.appId);
     await this.recoverAutoVerifications(config).catch(error => this.log.warn({ error, appId: config.appId }, '重启后收尾自动验证失败'));
     await this.inbox?.pruneIgnored(config.appId);

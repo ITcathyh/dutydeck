@@ -17,6 +17,7 @@ function mount(state = session.state, options: {
   cleanupHandler?: (init?: RequestInit) => any;
   sessionOverrides?: Partial<Session>;
   tasks?: Task[];
+  turnDiffs?: unknown[];
 } = {}) {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
@@ -26,6 +27,7 @@ function mount(state = session.state, options: {
       : strUrl.endsWith('/workspace/cleanup') ? (init?.method === 'POST' ? (options.cleanupHandler?.(init) ?? { ok: true, sessionId: 's1', path: '/project/worktree', cleanedAt: '2026-09-14T00:00:00Z' }) : (options.cleanupPreview ?? { sessionId: 's1', path: '/project/worktree', branch: 'dutydeck/session/s1', canClean: true, blockers: [], fingerprint: 'fp_test_123' }))
       : strUrl.endsWith('/workspace') ? (options.workspace ?? { cwd: session.cwd, mode: 'worktree', state: 'ready', branch: 'dutydeck/session/s1' })
       : strUrl.endsWith('/automation') ? { schedules: [], subscriptions: [], occurrences: [] }
+      : strUrl.endsWith('/diffs') ? (options.turnDiffs ?? [])
       : strUrl.endsWith('/verifications') ? init?.method === 'POST' ? { id: 'v2', status: 'passed' } : [{ id: 'v1', command: 'pnpm test', status: 'passed', stale: true, staleReason: options.missingFingerprint ? 'current_fingerprint_unavailable' : 'code_changed', exitCode: 0, output: 'old evidence', startedAt: session.createdAt }]
       : { subscription: { id: 'ci1', status: 'waiting' } };
     return new Response(JSON.stringify(body), { status: options.evidenceFailure && strUrl.endsWith('/verifications') ? 503 : 200, headers: { 'content-type': 'application/json' } });
@@ -36,6 +38,17 @@ function mount(state = session.state, options: {
 }
 
 describe('work item delivery panel', () => {
+  it('lists the turns that changed files, newest first, each linking to its diff page', async () => {
+    mount('idle', { tasks: [{ id: 'task_1', sessionId: 's1', prompt: '修登录页', status: 'completed', createdAt: session.createdAt, updatedAt: session.createdAt },
+      { id: 'task_2', sessionId: 's1', prompt: '加测试', status: 'completed', createdAt: session.createdAt, updatedAt: session.createdAt }] as Task[],
+      turnDiffs: [{ taskId: 'task_1', summary: { files: 2, additions: 10, deletions: 3 } }, { taskId: 'task_2', summary: { files: 1, additions: 4, deletions: 0 } }] });
+    const links = await screen.findAllByRole('link', { name: /查看改动/ });
+    expect(links.map(link => [link.getAttribute('href'), link.textContent])).toEqual([
+      ['/diff/s1/task_2', '加测试改动 1 个文件 +4 −0 · 查看改动'],
+      ['/diff/s1/task_1', '修登录页改动 2 个文件 +10 −3 · 查看改动']
+    ]);
+  });
+
   it('shows stale evidence separately from task completion and sends explicit verification and CI requests', async () => {
     const requests = mount();
     const user = userEvent.setup();

@@ -127,6 +127,20 @@ export const sharedSessionFromLocation = (pathname: string, hash: string): { ses
   return { sessionId, token: /^[A-Za-z0-9_-]+$/.test(token) ? token : '' };
 };
 
+/**
+ * 「查看改动」页：`/diff/<会话 ID>/<任务 ID>`。飞书结果卡的链接在 # 片段里带只授权这一轮的 token，
+ * 这时和分享页一样不经过登录；没有片段时是工作台里点进来的，按登录用户打开。
+ */
+export const turnDiffFromLocation = (pathname: string, hash: string): { sessionId: string; taskId: string; token?: string } | undefined => {
+  const match = stripInstancePath(pathname).match(/^\/diff\/([^/]+)\/([^/]+)$/);
+  if (!match?.[1] || !match[2]) return undefined;
+  const decode = (value: string) => { try { return decodeURIComponent(value); } catch { return value; } };
+  const token = hash.replace(/^#/, '');
+  return { sessionId: decode(match[1]), taskId: decode(match[2]), ...(token ? { token: /^[0-9a-z]+\.[A-Za-z0-9_-]+$/.test(token) ? token : '' } : {}) };
+};
+
+export const turnDiffPath = (sessionId: string, taskId: string) => instancePagePath(`/diff/${encodeURIComponent(sessionId)}/${encodeURIComponent(taskId)}`);
+
 /** 反向序列化。route 为 not-found 时无法还原原始路径，调用方不应对它做导航。 */
 export const appLocationPath = ({ route, nav, appId, chatId, overlay }: AppLocation): string => {
   const base = routePath(route);

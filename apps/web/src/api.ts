@@ -307,6 +307,15 @@ export type PublicScheduleDefinition = {
 };
 export type ScheduleDetail = { definition: PublicScheduleDefinition; readiness: { executionEligible: false; nextOccurrence?: SchedulePreview; blockers: ScheduleBlocker[] }; currentGeneration?: ScheduleGeneration; watermark?: ScheduleWatermark };
 export type ScheduleList = { capabilities: ScheduleCapability; schedules: ScheduleDetail[] };
+/** 一轮任务的改动（「查看改动」页），对应服务端 turn-diff.ts。 */
+export type TurnDiffSummary = { files: number; additions: number; deletions: number };
+export type TurnDiffLine = { kind: 'context' | 'add' | 'del'; oldLine?: number; newLine?: number; text: string };
+export type TurnDiffFile = {
+  path: string; oldPath?: string; status: 'added' | 'deleted' | 'modified' | 'renamed'; additions: number; deletions: number;
+  placeholder?: 'binary' | 'too_large' | 'omitted'; hunks: Array<{ header: string; lines: TurnDiffLine[] }>;
+};
+export type TurnDiff = { sessionId: string; taskId: string; title?: string; finishedAt?: string; summary: TurnDiffSummary; files: TurnDiffFile[]; truncated: boolean; access: 'shared' | 'owner' };
+export type TurnDiffCommentInput = { path: string; side: 'old' | 'new'; line: number; body: string };
 export const UNAUTHORIZED_EVENT = 'dutydeck:unauthorized';
 /**
  * 分享页只读一个会话：页面加载时从 # 片段取出分享 token，之后每个请求都在查询串里带上它。
@@ -358,6 +367,9 @@ export const api = {
   workspaceCleanupPreview: (id: string) => json<WorkspaceCleanupPreview>(`/api/sessions/${encodeURIComponent(id)}/workspace/cleanup`, { cache: 'no-store' }),
   cleanWorkspace: (id: string, fingerprint: string) => json<WorkspaceCleanupResult>(`/api/sessions/${encodeURIComponent(id)}/workspace/cleanup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fingerprint }) }),
   verifications: (id: string) => json<VerificationResponse[]>(`/api/sessions/${id}/verifications`),
+  turnDiffs: (id: string) => json<Array<{ taskId: string; summary: TurnDiffSummary; finishedAt?: string }>>(`/api/sessions/${id}/diffs`),
+  turnDiff: (id: string, taskId: string) => json<TurnDiff>(`/api/sessions/${id}/tasks/${taskId}/diff`),
+  submitTurnDiffComments: (id: string, taskId: string, comments: TurnDiffCommentInput[]) => json<{ delivery: 'dispatched' | 'lark_confirmation' }>(`/api/sessions/${id}/tasks/${taskId}/diff/comments`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ comments }) }),
   verify: (id: string, input: VerificationCommandInput) => json<VerificationResponse>(`/api/sessions/${id}/verifications`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   authStatus: () => json<BrowserAuthState>('/api/auth/status', { cache: 'no-store' }),
   login: (token: string) => json<BrowserAuthState>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) }),

@@ -18,3 +18,19 @@ export function larkSessionDetailUrl(webBaseUrl: string, sessionId: string): str
   const path = encodeURIComponent(sessionId);
   return signShareToken ? `${webBaseUrl}/share/${path}#${signShareToken(sessionId)}` : `${webBaseUrl}/sessions/${path}`;
 }
+
+/**
+ * 结果卡「查看改动」的目标地址：/diff/<会话>/<任务>，token 同样放在 # 片段里。token 只授权读这一轮的 diff，
+ * 带到期时间（见 auth.ts 的 signTurnDiffToken）。没有注册签名函数时退回要先登录的同一页面。
+ */
+let signTurnDiffToken: ((sessionId: string, taskId: string) => string) | undefined;
+
+export function setLarkTurnDiffSigner(signer: (sessionId: string, taskId: string) => string): () => void {
+  signTurnDiffToken = signer;
+  return () => { if (signTurnDiffToken === signer) signTurnDiffToken = undefined; };
+}
+
+export function larkTurnDiffUrl(webBaseUrl: string, sessionId: string, taskId: string): string {
+  const path = `${webBaseUrl}/diff/${encodeURIComponent(sessionId)}/${encodeURIComponent(taskId)}`;
+  return signTurnDiffToken ? `${path}#${signTurnDiffToken(sessionId, taskId)}` : path;
+}

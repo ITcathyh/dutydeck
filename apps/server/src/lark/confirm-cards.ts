@@ -25,6 +25,10 @@ export interface LarkConfirmRequest {
   summary: string;
   /** 确认后交给 handler.apply 的内容。 */
   payload: Record<string, string | number | boolean>;
+  /** 同一条消息下要发多张同种类的卡时用它区分；缺省按回复的那条消息去重。 */
+  dedupeKey?: string;
+  /** 确认按钮上的字，缺省「确认」。 */
+  confirmLabel?: string;
 }
 export interface LarkConfirmRecord extends LarkConfirmRequest { id: string; expiresAt: string; cardMessageId?: string }
 export interface LarkConfirmHandler {
@@ -59,7 +63,7 @@ export class LarkConfirmCards {
   async request(input: LarkConfirmRequest): Promise<LarkConfirmRecord | undefined> {
     if (!this.handlers.has(input.kind)) throw new Error(`Unknown confirmation kind: ${input.kind}`);
     const repo = this.options.repository;
-    const id = `confirm_${digest([input.kind, input.scope, input.replyTo.messageId])}`;
+    const id = `confirm_${digest([input.kind, input.scope, input.dedupeKey ?? input.replyTo.messageId])}`;
     const expiresAt = new Date(this.now().getTime() + (this.options.ttlMs ?? 24 * 3_600_000)).toISOString();
     const begun = await repo.beginAction({ id, scope: input.scope, kind: actionKind(input.kind), requesterId: input.requesterId, inputDigest: digest([input.kind, input.payload]),
       payload: { kind: input.kind, title: input.title, summary: input.summary, payload: input.payload, replyTo: input.replyTo, expiresAt } });
@@ -70,7 +74,7 @@ export class LarkConfirmCards {
       // 等人点的卡按进行中且等人处理来画（橙色），与审批卡、定时委托确认卡一致。
       const card = await this.options.serviceFor(config).reply({ messageId: input.replyTo.messageId, replyInThread: Boolean(input.replyTo.threadId),
         state: 'running', readOnly: true, retryable: false, taskName: input.title, statusLabel: '待确认', awaitingHuman: true,
-        elements: buildLarkConfirmElements({ confirmId: id, chatId: input.scope.chatId, body: input.summary, pending: true }), idempotencyKey: id.slice(0, 50) });
+        elements: buildLarkConfirmElements({ confirmId: id, chatId: input.scope.chatId, body: input.summary, pending: true, ...(input.confirmLabel ? { confirmLabel: input.confirmLabel } : {}) }), idempotencyKey: id.slice(0, 50) });
       const saved = await repo.updateAction(input.scope, id, { expectedRevision: begun.action.revision, status: 'intent', receipt: card.messageId });
       return recordOf(saved);
     } catch (error) {

@@ -32,6 +32,7 @@ import { registerCiHookRoutes, type CiHookRouteOptions } from './ci-hook-routes.
 import { registerUsageRoutes, type UsageRouteOptions } from './usage-routes.js';
 import { registerSessionInsightRoutes, type SessionInsightRouteOptions } from './session-insight-routes.js';
 import { isPluginTriggerRequest, registerPluginRoutes, type PluginRouteOptions } from './plugins/routes.js';
+import { registerTurnDiffRoutes, type TurnDiffRouteOptions } from './turn-diff-routes.js';
 
 const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -105,6 +106,8 @@ export interface BuildAppOptions {
   identityPreflight?: IdentityPreflightRouteOptions;
   /** Fail-closed policy edge for sessions associated with a new GroupBinding. */
   executionPolicy?: SessionExecutionPolicy;
+  /** 每一轮的改动（「查看改动」页与行评论）；不传 = 不注册。 */
+  turnDiffs?: TurnDiffRouteOptions;
 }
 
 export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOptions = {}) {
@@ -182,6 +185,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   // 无论是否提供 insight 选项都注册：缺 authorize/service 时由路由层 fail-closed，
   // 不依赖 service.ts 是否已接线，share 白名单也不包含分析路径。
   registerSessionInsightRoutes(app, options.insight);
+  if (options.turnDiffs) registerTurnDiffRoutes(app, runtime, { ...options.turnDiffs, getShareSecret: options.auth?.getShareSecret,
+    authorize: (request, sessionId, action) => requireSessionExecution(request, sessionId, 'session', action) });
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });
   app.get<{ Querystring: { excludeSessionId?: string } }>('/api/system/activity', async request => {

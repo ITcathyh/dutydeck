@@ -42,8 +42,10 @@ import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGro
 import { larkMemoryScope, LarkMemoryStore } from './lark/memory.js';
 import { LarkMemoryProjection } from './lark/memory-view.js';
 import { LarkMemoryPipeline } from './lark/memory-pipeline.js';
-import { getAuthToken, getPasswordHash, getShareLinkSecret, loadOrCreateAuthToken, loadOrCreateShareLinkSecret, signSessionShareToken, tokensEqual, verifyBrowserSession } from './auth/auth.js';
-import { setLarkSessionShareSigner } from './lark/detail-link.js';
+import { getAuthToken, getPasswordHash, getShareLinkSecret, loadOrCreateAuthToken, loadOrCreateShareLinkSecret, signSessionShareToken, signTurnDiffToken, tokensEqual, verifyBrowserSession } from './auth/auth.js';
+import { setLarkSessionShareSigner, setLarkTurnDiffSigner } from './lark/detail-link.js';
+import { createTurnDiffObserver, TURN_DIFF_LINK_TTL_MS } from './turn-diff.js';
+import { requestLarkTurnDiffReview } from './lark/turn-diff.js';
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import {
   createDutydeckPersistentBackend,
@@ -300,7 +302,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   }, 5_000);
   shareSecretRefresh.unref();
   const disposeShareSigner = setLarkSessionShareSigner(sessionId => signSessionShareToken(activeShareSecret, sessionId));
-  setupCleanup.push(() => { clearInterval(shareSecretRefresh); disposeShareSigner(); });
+  const disposeTurnDiffSigner = setLarkTurnDiffSigner((sessionId, taskId) => signTurnDiffToken(activeShareSecret, sessionId, taskId, Date.now() + TURN_DIFF_LINK_TTL_MS));
+  setupCleanup.push(() => { clearInterval(shareSecretRefresh); disposeShareSigner(); disposeTurnDiffSigner(); });
   const resolveInstallationPrincipal = createInstallationPrincipalResolver({
     authEnabled: config.authEnabled,
     mode,
@@ -390,6 +393,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       ? async (session, request) => { await usageLedger.admit(session, request); await pluginWiring.hooks.taskReceived(session, request); }
       : (session, request) => usageLedger.admit(session, request),
     recordUsage: (session, attempt, reading) => usageLedger.record(session, attempt, reading),
+    observeTurn: createTurnDiffObserver(repos.config),
     authorizeTask: async (session, task, phase) => { await collaboration?.background.authorizeTask(session, task); await automation.authorizeTask(task, phase); await codebaseCi?.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
     authorizeControl: async (sessionId, actor, _action) => {
       if (await workItems.authorizeControl(sessionId, actor)) return;
@@ -561,6 +565,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       if (tokenRefresh) clearInterval(tokenRefresh);
       clearInterval(shareSecretRefresh);
       disposeShareSigner();
+      disposeTurnDiffSigner();
       if (automationTimer) clearInterval(automationTimer);
       if (collaborationTimer) clearInterval(collaborationTimer);
       const errors: unknown[] = [...insightCloseErrors];
@@ -706,6 +711,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       executionPolicy: {
         authorize: (request, sessionId, boundary, action) => authorizeSessionRequest(request, sessionId, boundary, action),
       },
+      turnDiffs: { store: repos.config,
+        requestLarkReview: review => requestLarkTurnDiffReview({ configs: repos.config, mappings: repos.channelMappings, confirmations: collaboration?.participation.confirmations }, review) },
     });
     logDroppedAgents(app.log, droppedAgents);
     await app.listen(listenOptions(config));
