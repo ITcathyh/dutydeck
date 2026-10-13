@@ -79,17 +79,69 @@ export const builtinAgents = (cwd = process.cwd(), ptyContributions: PtyAgentCon
   return [...acpxAgents, ...ptyAgents].map(agent => ({ ...agent, cwd }));
 };
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = []): AppConfig {
-  const extra = env.DUTYDECK_AGENTS_JSON ? JSON.parse(env.DUTYDECK_AGENTS_JSON) : [];
+export interface DroppedAgent {
+  id: string;
+  name: string;
+  command: string;
+  reason: 'command_not_found';
+}
+
+export interface LoadedConfig {
+  config: AppConfig;
+  /** DUTYDECK_AGENTS_JSON 中因命令找不到而没有登记的 Agent。 */
+  droppedAgents: DroppedAgent[];
+}
+
+export const AGENTS_JSON_ENV = 'DUTYDECK_AGENTS_JSON';
+
+export class AgentsJsonError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AgentsJsonError';
+  }
+}
+
+const describeError = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+/** 解析 DUTYDECK_AGENTS_JSON；任何失败都点名变量（和出错的条目），而不是只抛 JSON/zod 的原始报错。 */
+function parseAgentsJson(raw: string | undefined): AgentConfig[] {
+  if (!raw) return [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); }
+  catch (error) { throw new AgentsJsonError(`${AGENTS_JSON_ENV} 不是合法 JSON：${describeError(error)}。它必须是写在一行里的 JSON 数组，例如 [{"id":"custom","name":"Custom","command":"/abs/path/agent","protocol":"acp"}]。`); }
+  if (!Array.isArray(parsed)) throw new AgentsJsonError(`${AGENTS_JSON_ENV} 必须是 JSON 数组，收到 ${parsed === null ? 'null' : typeof parsed}。`);
+  return parsed.map((entry, index) => {
+    const result = agentConfigSchema.safeParse(entry);
+    if (result.success) return result.data;
+    const label = entry && typeof entry === 'object' && typeof (entry as { id?: unknown }).id === 'string' ? `（id=${(entry as { id: string }).id}）` : '';
+    const issues = result.error.issues.map(issue => `${issue.path.join('.') || '(根)'}: ${issue.message}`).join('；');
+    throw new AgentsJsonError(`${AGENTS_JSON_ENV} 第 ${index + 1} 项${label}无效：${issues}`);
+  });
+}
+
+/**
+ * 做探测 Agent 命令可用性时该执行的程序。ACP 内置 Agent 的 command 是 `npx` 之类的启动器，
+ * 真正的 CLI 在 agentDetails 里；自定义的 pty-cli 包装命令（有 adapterId）可能在 `--version` 时改动本地设置，
+ * 与 loadConfig 一样不执行，只确认可执行文件存在。
+ */
+export function agentProbeTarget(agent: Pick<AgentConfig, 'id' | 'command' | 'protocol' | 'builtin' | 'adapterId'>): { command: string; execute: boolean } {
+  if (agent.builtin && agent.protocol === 'acp' && agentDetails[agent.id]) return { command: agentDetails[agent.id]!.cli, execute: true };
+  if (!agent.builtin && agent.protocol === 'pty-cli' && agent.adapterId) return { command: agent.command, execute: false };
+  return { command: agent.command, execute: true };
+}
+
+export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = []): LoadedConfig {
+  const extra = parseAgentsJson(env.DUTYDECK_AGENTS_JSON);
   const defaultCwd = env.DUTYDECK_DEFAULT_CWD ?? process.cwd();
   const agents = new Map(builtinAgents(defaultCwd, ptyContributions).map(agent => [agent.id, agent]));
-  for (const agent of extra) {
-    const configured = agentConfigSchema.parse(agent);
+  const droppedAgents: DroppedAgent[] = [];
+  for (const configured of extra) {
     // A custom CLI wrapper may change local settings even for --version.
     const customCli = configured.protocol === 'pty-cli' && configured.adapterId;
     if (commandExists(configured.command)) agents.set(configured.id, { ...configured, cwd: configured.cwd ?? defaultCwd, version: configured.version ?? (customCli ? undefined : cliVersion(configured.command)) });
+    else droppedAgents.push({ id: configured.id, name: configured.name, command: configured.command, reason: 'command_not_found' });
   }
-  return appConfigSchema.parse({
+  const config = appConfigSchema.parse({
     host: env.DUTYDECK_LOCAL_ONLY === 'true' ? '127.0.0.1' : env.DUTYDECK_HOST,
     port: env.DUTYDECK_PORT ? Number(env.DUTYDECK_PORT) : undefined,
     authEnabled: env.DUTYDECK_AUTH === undefined
@@ -101,4 +153,28 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContribution
     cleanupIntervalMs: env.DUTYDECK_CLEANUP_INTERVAL_MS ? Number(env.DUTYDECK_CLEANUP_INTERVAL_MS) : undefined,
     agents: [...agents.values()]
   });
+  return { config, droppedAgents };
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = []): AppConfig {
+  return loadConfigWithDiagnostics(env, ptyContributions).config;
+}
+
+const shellQuote = (value: string) => /^[\w./@+:=-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+
+/** 面向用户的说明：哪个 Agent、哪个命令找不到，以及可复制的修法（改用绝对路径）。 */
+export function describeDroppedAgent(agent: DroppedAgent): { detail: string; remedy: string; command: string } {
+  const quoted = shellQuote(agent.command);
+  if (agent.command.includes('/')) {
+    return {
+      detail: `Agent「${agent.id}」的命令 ${agent.command} 不存在或没有执行权限，未被登记`,
+      remedy: `${AGENTS_JSON_ENV} 里 id=${agent.id} 的 command 指向 ${agent.command}，该文件不存在或不可执行。核对路径并确认有执行权限（chmod +x），改完重启服务。`,
+      command: `ls -l ${quoted}`
+    };
+  }
+  return {
+    detail: `Agent「${agent.id}」的命令 ${agent.command} 在 PATH 里找不到，未被登记`,
+    remedy: `${AGENTS_JSON_ENV} 里 id=${agent.id} 的 command 是 ${agent.command}。用 command -v 查出它的绝对路径，把该项的 command 改成这个绝对路径（找不到就先安装它），然后重启服务。`,
+    command: `command -v ${quoted}`
+  };
 }

@@ -4,7 +4,9 @@
  * 单独成文件的原因：checks.ts 与 doctor.ts 互相需要这些类型，放在任一侧都会形成
  * 循环 import。类型在运行时被擦除，但依赖注入的默认实现是真值，必须避免环。
  */
+import type { DroppedAgent } from '@dutydeck/config';
 import type { CliUi } from '../cli-ui.js';
+import type { EnvLocation } from '../env-location.js';
 
 /** 检查结果等级。与 cli-ui 的 StatusLevel 取交集，可直接透传给 ui.status。 */
 export type CheckLevel = 'ok' | 'warn' | 'fail' | 'skip' | 'info';
@@ -49,8 +51,19 @@ export interface DoctorConfig {
   authEnabled: boolean;
   databaseUrl: string;
   acpxCommand?: string;
-  agents: ReadonlyArray<{ id: string; name: string; command: string; version?: string; protocol?: string }>;
+  agents: ReadonlyArray<{ id: string; name: string; command: string; version?: string; protocol?: string; builtin?: boolean; adapterId?: string }>;
+  /** DUTYDECK_AGENTS_JSON 里因命令找不到而没有登记的 Agent。 */
+  droppedAgents?: ReadonlyArray<DroppedAgent>;
 }
+
+/** 对 Agent CLI 执行一次 `--version` 的结果。 */
+export type AgentProbeResult =
+  | { status: 'ok'; version: string }
+  | { status: 'not_found' }
+  | { status: 'failed'; detail: string }
+  | { status: 'timeout' };
+/** 无副作用的可用性探针：只执行 `<command> --version`，绝不调用模型。 */
+export type AgentProbe = (command: string, timeoutMs: number) => Promise<AgentProbeResult>;
 
 /** daemon 落盘记录中体检需要的字段（对齐 DaemonState）。 */
 export interface DoctorDaemonRecord {
@@ -129,6 +142,12 @@ export interface DoctorFsStat {
 }
 
 export interface DoctorDependencies {
+  /** `.env` 的定位结果。省略且未注入 env 时，按「cwd → daemon 根目录」现查。 */
+  envLocation?: EnvLocation;
+  /** Agent 可用性探针，默认真实执行 `--version`。 */
+  agentProbe?: AgentProbe;
+  /** 单次探针超时（ms），默认 5000。 */
+  agentProbeTimeoutMs?: number;
   /** 渲染目标；默认 createCliUi()。 */
   ui?: CliUi;
   env?: NodeJS.ProcessEnv;

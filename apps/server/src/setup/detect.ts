@@ -7,6 +7,7 @@
 import { accessSync, constants, statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { builtinAgents } from '@dutydeck/config';
+import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver';
 import type { AgentConfig } from '@dutydeck/shared';
 
 export interface DetectedAgent {
@@ -39,7 +40,8 @@ export interface DetectAgentsOptions {
  */
 export function detectAgents(options: DetectAgentsOptions = {}): DetectedAgent[] {
   const cwd = options.cwd ?? process.cwd();
-  const scan = options.scan ?? (target => builtinAgents(target));
+  // 与守护进程同一份候选：ACPX 内置 + PTY 适配器贡献。向导选出的默认 Agent 必须是服务启动后真的会登记的。
+  const scan = options.scan ?? (target => builtinAgents(target, PTY_AGENT_CONTRIBUTIONS));
   return scan(cwd).map(agent => ({
     id: agent.id,
     name: agent.name,

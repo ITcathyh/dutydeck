@@ -23,17 +23,20 @@
  * 快：loadConfig 会 spawn 每个已知 Agent CLI 探版本（秒级），全流程只允许调用
  * 一次，结果由 config 与 agents 两项检查共享；端口探测带超时，绝不挂住。
  */
-import { constants } from 'node:fs';
-import { existsSync } from 'node:fs';
+import { constants, existsSync, readFileSync } from 'node:fs';
 import { access as fsAccess, stat as fsStat } from 'node:fs/promises';
 import { userInfo } from 'node:os';
-import { dirname } from 'node:path';
-import { loadConfig } from '@dutydeck/config';
+import { dirname, resolve } from 'node:path';
+import { parseEnv } from 'node:util';
+import { loadConfigWithDiagnostics } from '@dutydeck/config';
+import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver';
 import { daemonStatus } from '../daemon/command.js';
 import { daemonPaths, readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
 import { accessMode } from '../service.js';
 import { createCliUi, type CliUi } from '../cli-ui.js';
-import { defaultDatabaseProbe, defaultPortProbe } from './probes.js';
+import { locateEnvFile } from '../env-location.js';
+import { defaultAgentProbe, defaultDatabaseProbe, defaultPortProbe } from './probes.js';
+import { agentsToProbe, checkDefaultAgents, checkDroppedAgents, readDefaultAgents } from './agent-checks.js';
 import {
   AUTH_TOKEN_CONFIG_KEY,
   DOCTOR_CONFIG_KEYS,
@@ -47,6 +50,7 @@ import {
   checkDaemon,
   checkDatabase,
   checkDutydeckDir,
+  checkEnvFile,
   checkLark,
   checkLarkListener,
   checkLarkMemory,
@@ -64,6 +68,7 @@ import type {
   DatabaseProbeResult,
   DoctorAutostartResult,
   DoctorCheck,
+  AgentProbeResult,
   DoctorConfig,
   DoctorDependencies,
   DoctorOptions,
@@ -85,6 +90,7 @@ export type {
 export { REQUIRED_NODE_VERSION } from './checks.js';
 
 const DEFAULT_PORT_PROBE_TIMEOUT_MS = 1_000;
+const DEFAULT_AGENT_PROBE_TIMEOUT_MS = 5_000;
 
 /** 动态 import autostart 模块：它可能尚未落地，缺失时该项降级为 skip。 */
 async function loadAutostartStatus(): Promise<DoctorAutostartResult | undefined> {
@@ -171,7 +177,7 @@ export async function runDoctor(
   options: DoctorOptions = {},
   dependencies: DoctorDependencies = {}
 ): Promise<DoctorReport> {
-  const env = dependencies.env ?? process.env;
+  let env = dependencies.env ?? process.env;
   const json = options.json === true;
   const ui = dependencies.ui ?? createCliUi({ env });
   const platform = dependencies.platform ?? process.platform;
@@ -206,10 +212,46 @@ export async function runDoctor(
     ?? (dependencies.daemonRecord ? undefined : daemonPaths(resolveDaemonDir()).logFile);
   checks.push(checkDaemon({ status, ...(record ? { record } : {}), ...(logFile ? { logFile } : {}) }));
 
-  // ---- 3. 配置解析（loadConfig 只允许调用一次） ----
+  // ---- 3. .env 定位 + 配置解析（loadConfig 只允许调用一次） ----
+  // 注入了 env 的调用方自己负责环境；真实运行时才按「当前目录 → daemon 根目录」找 .env。
+  const envLocation = dependencies.envLocation
+    ?? (dependencies.env ? undefined : locateEnvFile({ cwd: dependencies.cwd ?? process.cwd(), home: process.env.HOME }));
+  let envReadError: string | undefined;
+  if (envLocation?.source === 'daemon-root' && envLocation.file) {
+    // 与 loadEnvFile 同一语义：进程环境变量优先，.env 只补缺。
+    try { env = { ...parseEnv(readFileSync(envLocation.file, 'utf8')), ...env }; }
+    catch (error) { envReadError = error instanceof Error ? error.message : String(error); }
+  }
+  if (envLocation) checks.push(checkEnvFile(envLocation, envReadError));
+
   progress('解析配置（首次会探测各 Agent CLI 版本，可能需要几秒）');
-  const config: DoctorConfig = dependencies.config ?? loadConfig(env);
-  checks.push(checkConfig(config));
+  let config: DoctorConfig;
+  let configError: string | undefined;
+  try {
+    config = dependencies.config ?? (() => { const loaded = loadConfigWithDiagnostics(env, PTY_AGENT_CONTRIBUTIONS); return { ...loaded.config, droppedAgents: loaded.droppedAgents }; })();
+    checks.push(checkConfig(config));
+  } catch (error) {
+    // 配置坏了也要把体检跑完：这正是用户最需要诊断的时候。
+    configError = error instanceof Error ? error.message : String(error);
+    const defaultCwd = env.DUTYDECK_DEFAULT_CWD ?? process.cwd();
+    config = {
+      host: env.DUTYDECK_HOST ?? '127.0.0.1',
+      port: Number(env.DUTYDECK_PORT) || 4310,
+      authEnabled: env.DUTYDECK_AUTH !== 'false',
+      databaseUrl: resolve(defaultCwd, env.DUTYDECK_DATABASE_URL ?? './.dutydeck/dutydeck.db'),
+      agents: []
+    };
+    const envFile = envLocation?.file ?? resolve(dependencies.cwd ?? process.cwd(), '.env');
+    checks.push({
+      id: 'config.resolved',
+      label: '配置解析',
+      level: 'fail',
+      detail: configError,
+      remedy: `配置无法解析，Dutydeck 会因此起不来。按上面的提示修正 ${envFile}（或进程环境变量）中的对应项后重跑。`,
+      command: configError.includes('DUTYDECK_AGENTS_JSON') ? `grep -n DUTYDECK_AGENTS_JSON ${envFile}` : `ls -l ${envFile}`,
+      verify: 'dutydeck doctor'
+    });
+  }
 
   // ---- 4. 数据库 + 迁移 ----
   // 库路径以守护进程记录为准，与 cli.ts 的取法一致（它才是真正在用的那个库）。
@@ -225,8 +267,21 @@ export async function runDoctor(
   checks.push(checkDutydeckDir(await observeDirectory(dutydeckDir, platform, exists, access, stat)));
 
   // ---- 6. Agent ----
-  checks.push(checkAgents(config.agents));
-  checks.push(checkAgentAuth(config.agents));
+  if (configError) {
+    checks.push({ id: 'agents.detected', label: 'Agent CLI', level: 'skip', detail: '配置解析失败，未检测 Agent' });
+  } else {
+    checks.push(checkAgents(config.agents));
+    checks.push(...checkDroppedAgents(config.droppedAgents ?? []));
+    checks.push(checkAgentAuth(config.agents));
+    // 默认 Agent 存在机器人配置（lark.bots.defaultAgentId）里，只对它们做一次 --version。
+    const defaultBots = probe.exists && !probe.error ? readDefaultAgents(probe.values?.[larkBotsConfigKey]) : [];
+    const agentTimeout = dependencies.agentProbeTimeoutMs ?? DEFAULT_AGENT_PROBE_TIMEOUT_MS;
+    const agentProbe = dependencies.agentProbe ?? defaultAgentProbe;
+    const targets = agentsToProbe(defaultBots, config.agents).filter(target => target.execute);
+    if (targets.length > 0) progress(`检查默认 Agent 命令（--version，最多 ${Math.round(agentTimeout / 1000)} 秒）`);
+    const results = new Map(await Promise.all(targets.map(async target => [target.id, await agentProbe(target.command, agentTimeout)] as const)));
+    checks.push(checkDefaultAgents({ bots: defaultBots, agents: config.agents, dropped: config.droppedAgents ?? [], results, timeoutMs: agentTimeout }));
+  }
 
   // ---- 7. 飞书 ----
   const databaseUnreadable = !probe.exists || Boolean(probe.error);

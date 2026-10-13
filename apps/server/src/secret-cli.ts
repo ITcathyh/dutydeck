@@ -76,11 +76,11 @@ function readDescriptor(fd: number): Buffer {
   }
 }
 
-async function readHiddenTty(stdin: ReadStream, stderr: WriteStream): Promise<Buffer> {
+async function readHiddenTty(stdin: ReadStream, stderr: WriteStream, prompt: string): Promise<Buffer> {
   if (!stdin.isTTY || !stderr.isTTY || typeof stdin.setRawMode !== 'function') {
     throw new SecretCliError('SECRET_VALUE_INPUT_REQUIRED', 'Use an interactive TTY or pass --value-fd with an inherited descriptor');
   }
-  stderr.write('Lark credential bundle JSON (input hidden): ');
+  stderr.write(prompt);
   stdin.setRawMode(true);
   stdin.resume();
   const bytes: number[] = [];
@@ -124,10 +124,10 @@ async function readHiddenTty(stdin: ReadStream, stderr: WriteStream): Promise<Bu
 
 export async function readSecretValue(
   options: SecretValueInputOptions,
-  streams: { stdin?: ReadStream; stderr?: WriteStream } = {}
+  streams: { stdin?: ReadStream; stderr?: WriteStream; prompt?: string } = {}
 ): Promise<Buffer> {
   if (options.valueFd !== undefined) return readDescriptor(fileDescriptorSchema.parse(options.valueFd));
-  return readHiddenTty(streams.stdin ?? process.stdin, streams.stderr ?? process.stderr);
+  return readHiddenTty(streams.stdin ?? process.stdin, streams.stderr ?? process.stderr, streams.prompt ?? 'Lark credential bundle JSON (input hidden): ');
 }
 
 function canonicalizeLarkBundle(value: Buffer): Buffer {

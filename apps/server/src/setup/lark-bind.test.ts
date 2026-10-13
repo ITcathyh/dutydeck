@@ -197,6 +197,7 @@ function fakePrompter(answers: boolean[] = [], interactive = true): FakePrompter
     questions: [],
     async ask<T>(): Promise<T> { throw new Error('不应在飞书绑定中使用 ask'); },
     async choose<T>(): Promise<T> { throw new Error('不应在飞书绑定中使用 choose'); },
+    async secret(): Promise<string> { throw new Error('不应在飞书绑定中使用 secret'); },
     async confirm({ question, dangerous = false, defaultValue = false }) {
       prompter.questions.push(question);
       const next = queue.shift();

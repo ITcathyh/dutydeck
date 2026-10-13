@@ -150,6 +150,9 @@ export interface SetupCliProgramOptions {
   larkAppId?: string;
   skipLark?: boolean;
   forceLogin?: boolean;
+  agent?: string;
+  larkAppSecretFd?: string;
+  listen?: boolean;
 }
 
 export interface DoctorCliOptions {
@@ -329,6 +332,9 @@ const setupOptionsFrom = (options: SetupCliProgramOptions, command: Command): Se
   if (merged.json === true) picked.json = true;
   if (merged.skipLark === true) picked.skipLark = true;
   if (merged.forceLogin === true) picked.forceLogin = true;
+  if (typeof merged.agent === 'string') picked.agent = merged.agent;
+  if (typeof merged.larkAppSecretFd === 'string') picked.larkAppSecretFd = merged.larkAppSecretFd;
+  if (merged.listen === true) picked.listen = true;
   return picked;
 };
 
@@ -412,7 +418,7 @@ export function createCliProgram(version: string, handlers: CliHandlers = {}) {
   // commander 会把它们路由到定义处（即根命令），所以这里必须读合并后的 globals，
   // 否则 `dutydeck setup --cwd X` 里的 X 会落到根命令上、setup 拿到 undefined。
   program.command('setup')
-    .description('Guided first-run setup: detect Agent CLIs, choose a working directory, optionally bind a Lark bot')
+    .description('Guided first-run setup: detect Agent CLIs, choose a working directory, optionally bind a Lark bot with its default Agent and App Secret')
     .option('--yes', 'Accept defaults without prompting; the only way to skip the Lark publish confirmation')
     .option('--json', 'Emit a single JSON line and never prompt or render a QR code (secrets are masked)')
     .option('--cwd <directory>', 'Default Agent working directory; skips that question')
@@ -421,17 +427,26 @@ export function createCliProgram(version: string, handlers: CliHandlers = {}) {
     .option('--lark-app-id <id>', 'Lark app ID (cli_*) to configure and bind')
     .option('--skip-lark', 'Skip the Lark binding step entirely')
     .option('--force-login', 'Re-scan the Lark open-platform QR code to switch accounts')
+    .option('--agent <id>', 'Default Agent for the Lark bot (must be a detected CLI; stored in the bot configuration). Without it: keep the bot\'s current one, else ask, else the first detected')
+    .option('--lark-app-secret-fd <fd>', 'Read the Lark App Secret from an inherited file descriptor (e.g. 0 with a pipe); interactive runs prompt with hidden input instead. Never pass secrets as arguments')
+    .option('--listen', 'Also enable Lark message listening for the saved bot')
     .action((options, command) => handlers.setup?.(setupOptionsFrom(options, command)))
     .addHelpText('after', `
 Behaviour:
   幂等可重跑：检测到已有配置时逐项询问「保留或更新」，配置无变化则报告无需改动。
   中途失败或取消不会写入半份配置，并会打印一条算好的续跑命令。
   --json 隐含「绝不提问、绝不渲染二维码」；非交互环境请用字段 flag 或 --yes。
+  飞书机器人的 App Secret 与默认 Agent 保存在机器人配置里（与 Dashboard 同一份）：交互时隐藏输入 App Secret，
+  脚本里用 --lark-app-secret-fd 从管道读，绝不通过命令行参数传。
+  不给 --lark-app-id、只给 --agent 或 --lark-app-secret-fd：改 .env 里 LARK_APP_ID 那个机器人的默认 Agent / App Secret，不重新配置开放平台。
+  已在运行的服务需要 dutydeck restart 才会读取新的机器人配置。
 
 Examples:
   $ dutydeck setup
   $ dutydeck setup --cwd /path/to/project --port 4310
   $ dutydeck setup --lark-app-id cli_xxx
+  $ printf %s "$LARK_SECRET" | dutydeck setup --lark-app-id cli_xxx --lark-app-secret-fd 0 --agent claude --yes
+  $ dutydeck setup --agent codex
   $ dutydeck setup --lark-app-id cli_xxx --force-login
   $ dutydeck setup --cwd /path/to/project --skip-lark --yes
   $ dutydeck setup --json --cwd /path/to/project --skip-lark --yes`);

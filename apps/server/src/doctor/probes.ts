@@ -6,7 +6,8 @@
  */
 import Database from 'better-sqlite3';
 import { createServer } from 'node:net';
-import type { DatabaseProbe, DatabaseProbeResult, PortProbe, PortProbeOutcome } from './types.js';
+import { execFile } from 'node:child_process';
+import type { AgentProbe, DatabaseProbe, DatabaseProbeResult, PortProbe, PortProbeOutcome } from './types.js';
 import { existsSync } from 'node:fs';
 
 /** configs 表的形状：{ key TEXT PRIMARY KEY, value TEXT NOT NULL }。 */
@@ -115,4 +116,31 @@ export const defaultPortProbe: PortProbe = (host, port, timeoutMs) => new Promis
   } catch {
     finish('unknown');
   }
+});
+
+/**
+ * 执行一次 `<command> --version`，带超时。不传任何提示词、不连模型；
+ * 超时用 SIGKILL 结束子进程，不会留下残余进程。
+ */
+export const defaultAgentProbe: AgentProbe = (command, timeoutMs) => new Promise(resolve => {
+  execFile(command, ['--version'], {
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL',
+    maxBuffer: 64 * 1024,
+    windowsHide: true,
+    env: { ...process.env, NO_COLOR: '1' }
+  }, (error, stdout, stderr) => {
+    const firstLine = (text: string) => text.split(/\r?\n/).map(line => line.trim()).find(Boolean)?.slice(0, 100);
+    if (!error) {
+      resolve({ status: 'ok', version: firstLine(String(stdout)) ?? firstLine(String(stderr)) ?? '(无版本输出)' });
+      return;
+    }
+    const failure = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string | null };
+    if (failure.code === 'ENOENT') resolve({ status: 'not_found' });
+    else if (failure.killed || failure.code === 'ETIMEDOUT') resolve({ status: 'timeout' });
+    else {
+      const reason = firstLine(String(stderr)) ?? firstLine(String(stdout));
+      resolve({ status: 'failed', detail: `${typeof failure.code === 'number' ? `退出码 ${failure.code}` : failure.code ?? failure.message}${reason ? `：${reason}` : ''}` });
+    }
+  });
 });
