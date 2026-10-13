@@ -495,3 +495,44 @@ describe('close', () => {
     expect(() => prompter.close()).not.toThrow();
   });
 });
+
+describe('secret（隐藏输入）', () => {
+  const buildSecret = (config: { interactive: boolean; assumeYes?: boolean }, readSecret: (prompt: string) => Promise<string>) => {
+    const input = new PassThrough();
+    const output = fakeOutput();
+    const prompter = createPrompter({ ui: fakeUi() as unknown as CliUi, interactive: config.interactive, assumeYes: config.assumeYes, io: { input, output: output.stream }, readSecret });
+    return { input, output, prompter };
+  };
+
+  it('非交互下不读任何输入，抛 PromptUnavailableError 并指向 fd 路径', async () => {
+    const readSecret = vi.fn(async () => 'x');
+    const { prompter } = buildSecret({ interactive: false }, readSecret);
+    await expect(prompter.secret({ question: 'App Secret', remedyFlag: '--lark-app-secret-fd <fd>' })).rejects.toThrow(/--lark-app-secret-fd <fd>/);
+    expect(readSecret).not.toHaveBeenCalled();
+  });
+
+  it('--yes 同样不提问：没有人可问，也不能把机密喂给默认值路径', async () => {
+    const readSecret = vi.fn(async () => 'x');
+    const { prompter } = buildSecret({ interactive: true, assumeYes: true }, readSecret);
+    await expect(prompter.secret({ question: 'App Secret', remedyFlag: '--lark-app-secret-fd <fd>' })).rejects.toBeInstanceOf(PromptUnavailableError);
+    expect(readSecret).not.toHaveBeenCalled();
+  });
+
+  it('交互下返回隐藏输入的值；提示语里带问题，答案不写进输出流', async () => {
+    const prompts: string[] = [];
+    const { prompter, output } = buildSecret({ interactive: true }, async prompt => { prompts.push(prompt); return 's3cret-value'; });
+    await expect(prompter.secret({ question: '飞书应用 cli_x 的 App Secret', remedyFlag: '--lark-app-secret-fd <fd>' })).resolves.toBe('s3cret-value');
+    expect(prompts[0]).toContain('飞书应用 cli_x 的 App Secret');
+    expect(output.text()).not.toContain('s3cret-value');
+  });
+
+  it('读完机密后，后续提问仍然正常（readline 让出 stdin 后会重建）', async () => {
+    const { prompter, input } = buildSecret({ interactive: true }, async () => 'hidden');
+    input.write('第一个答案\n');
+    await expect(prompter.ask({ question: 'q1', remedyFlag: '--a', validate: trimValidator })).resolves.toBe('第一个答案');
+    await expect(prompter.secret({ question: 's', remedyFlag: '--s' })).resolves.toBe('hidden');
+    input.write('第二个答案\n');
+    await expect(prompter.ask({ question: 'q2', remedyFlag: '--b', validate: trimValidator })).resolves.toBe('第二个答案');
+    prompter.close();
+  });
+});

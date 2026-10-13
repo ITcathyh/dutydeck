@@ -100,6 +100,13 @@ describe('Dutydeck CLI', () => {
     expect(setup).toHaveBeenCalledWith(expect.objectContaining({ json: true, skipLark: true }));
   });
 
+  it('parses setup --agent, --lark-app-secret-fd and --listen; the secret is only ever a descriptor number', async () => {
+    const setup = vi.fn();
+    await createCliProgram('0.0.6', { setup }).parseAsync(['node', 'dutydeck', 'setup',
+      '--lark-app-id', 'cli_wizard', '--agent', 'codex', '--lark-app-secret-fd', '0', '--listen', '--yes']);
+    expect(setup).toHaveBeenCalledWith(expect.objectContaining({ larkAppId: 'cli_wizard', agent: 'codex', larkAppSecretFd: '0', listen: true, yes: true }));
+  });
+
   it('defaults setup flags to undefined so the wizard can tell "unset" from "explicitly chosen"', async () => {
     const setup = vi.fn();
     await createCliProgram('0.0.6', { setup }).parseAsync(['node', 'dutydeck', 'setup']);

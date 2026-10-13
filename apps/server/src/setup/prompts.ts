@@ -12,6 +12,7 @@
  */
 import { createInterface } from 'node:readline';
 import type { CliUi } from '../cli-ui.js';
+import { SecretCliError, readSecretValue } from '../secret-cli.js';
 
 /** 用户在非交互环境下要求交互输入时抛出；由命令层翻译成「该加哪个 flag」。 */
 export class PromptUnavailableError extends Error {
@@ -42,6 +43,22 @@ export interface PrompterOptions {
   /** --yes：无条件接受默认值，且是唯一能跳过危险确认的开关。 */
   assumeYes?: boolean;
   io?: ReadLineIO;
+  /** 隐藏输入的读取函数，默认读真实终端；测试注入。返回空串表示用户直接回车。 */
+  readSecret?: (prompt: string) => Promise<string>;
+}
+
+/** 终端里不回显地读一行机密。Ctrl-C 视为用户中断；直接回车返回空串。 */
+async function readHiddenSecret(prompt: string): Promise<string> {
+  try {
+    const bytes = await readSecretValue({}, { prompt });
+    try { return bytes.toString('utf8').trim(); } finally { bytes.fill(0); }
+  } catch (error) {
+    if (error instanceof SecretCliError) {
+      if (error.code === 'SECRET_VALUE_EMPTY') return '';
+      if (error.code === 'SECRET_VALUE_INPUT_CANCELLED') throw new PromptAbortedError();
+    }
+    throw error;
+  }
 }
 
 /** 校验器：把原始输入规整成目标类型，或抛出带中文原因的错误。 */
@@ -83,6 +100,11 @@ export interface Prompter {
    * 非交互且没有 --yes 时一律拒绝（fail closed），不默默继续。
    */
   confirm(options: { question: string; dangerous?: boolean; defaultValue?: boolean }): Promise<boolean>;
+  /**
+   * 隐藏输入机密（App Secret 等），回车跳过返回空串。机密不进 argv、不回显、不进 shell 历史。
+   * 非交互（含 --yes）下没有人可问，抛 PromptUnavailableError，由 remedyFlag 指向 fd 路径。
+   */
+  secret(options: { question: string; remedyFlag: string }): Promise<string>;
   close(): void;
 }
 
@@ -232,6 +254,19 @@ export function createPrompter(options: PrompterOptions): Prompter {
       const answer = raw.trim().toLowerCase();
       if (answer === '') return defaultValue;
       return answer === 'y' || answer === 'yes';
+    },
+
+    async secret({ question, remedyFlag }) {
+      if (!interactive || assumeYes) throw new PromptUnavailableError(question, remedyFlag);
+      // 隐藏输入要独占 stdin：readline 常驻时会把输入的机密当成普通一行缓冲起来，
+      // 下一个提问就会读到它。先让出 stdin，读完下一次提问再重建 readline。
+      if (readline) {
+        readline.close();
+        readline = undefined;
+      }
+      inputExhausted = false;
+      bufferedLines.length = 0;
+      return await (options.readSecret ?? readHiddenSecret)(`${question}（输入不回显，直接回车跳过）: `);
     },
 
     close() {

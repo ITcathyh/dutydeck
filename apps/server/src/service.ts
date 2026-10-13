@@ -14,7 +14,8 @@ import type { CollaborationExtensions } from './collaboration-extensions.js';
 import { LarkGroupManager } from './lark/group-management.js';
 import { larkMemoryEnabled, readLarkConfigs } from './lark/config.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
-import { loadConfig, type AppConfig } from '@dutydeck/config';
+import { loadConfigWithDiagnostics, type AppConfig } from '@dutydeck/config';
+import { logDroppedAgents } from './agent-config-log.js';
 import { assertBotProcessStartup, childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
 import { createPtyRetirementControl } from './pty-recovery.js';
 import { installationOwnerTaskActor, makeId, RuntimeError, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
@@ -192,7 +193,7 @@ export function createProductionPtyBackend(sessionId: string) {
 export async function startLocalServer(options: StartLocalServerOptions = {}): Promise<LocalServer> {
   // pty-cli agent 发现：PTY_AGENT_CONTRIBUTIONS 经 loadConfig 合并进 config.agents
   // （builtinAgents 内部按 commandExists 过滤，只暴露本机已安装的 CLI；id 冲突时 ACPX 优先）。
-  const config = loadConfig(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS);
+  const { config, droppedAgents } = loadConfigWithDiagnostics(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS);
   const refusal = unauthenticatedListenRefusal(config, options.env ?? process.env);
   if (refusal) throw new Error(refusal);
   assertBotProcessStartup(config.databaseUrl, (options.env ?? process.env).DUTYDECK_BOT_APP_ID);
@@ -675,6 +676,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         authorize: (request, sessionId, boundary, action) => authorizeSessionRequest(request, sessionId, boundary, action),
       },
     });
+    logDroppedAgents(app.log, droppedAgents);
     await app.listen(listenOptions(config));
     workItems.start();
     void delegations.start().catch(error => app?.log.warn({ error }, '分层协作规划恢复失败'));

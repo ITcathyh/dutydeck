@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, chmodSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, chmodSync, mkdirSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import Database from 'better-sqlite3';
 import { createCliUi, type CliUiTarget } from '../cli-ui.js';
 import { runDoctor, REQUIRED_NODE_VERSION } from './doctor.js';
+import { defaultAgentProbe } from './probes.js';
 import { defaultDatabaseProbe, defaultPortProbe } from './probes.js';
 import type {
   DoctorCheck,
@@ -63,6 +64,7 @@ function deps(overrides: Partial<DoctorDependencies> = {}): DoctorDependencies {
     daemonLogFile: '/tmp/dutydeck-fixture/.dutydeck/daemon/dutydeck.log',
     databaseProbe: () => ({ exists: true, appliedVersion: 14, values: { [AUTH_TOKEN_CONFIG_KEY]: FIXTURE_TOKEN } }),
     expectedSchemaVersion: 14,
+    agentProbe: async () => ({ status: 'ok' as const, version: 'stub 1.0.0' }),
     portProbe: async () => 'occupied' as PortProbeOutcome,
     exists: () => true,
     access: async () => undefined,
@@ -1098,5 +1100,222 @@ describe('只读性', () => {
     }));
     expect(accessed).toBe(0);
     expect(statted).toBe(0);
+  });
+});
+
+describe('Agent 配置诊断', () => {
+  it('被丢弃的 Agent 为 fail，写出 id、找不到的命令，并建议改用绝对路径', async () => {
+    const report = await runDoctor({ json: true }, deps({
+      config: { ...baseConfig, droppedAgents: [{ id: 'ghost', name: 'Ghost', command: 'ghost-cli', reason: 'command_not_found' }] }
+    }));
+    const check = find(report, 'agents.dropped.ghost')!;
+    expect(check.level).toBe('fail');
+    expect(check.detail).toContain('ghost');
+    expect(check.detail).toContain('ghost-cli');
+    expect(check.remedy).toContain('绝对路径');
+    expect(check.remedy).toContain('DUTYDECK_AGENTS_JSON');
+    expect(check.command).toBe('command -v ghost-cli');
+    expect(report.ok).toBe(false);
+  });
+
+  it('没有被丢弃的 Agent 时不出现 agents.dropped 项', async () => {
+    const report = await runDoctor({ json: true }, deps());
+    expect(report.checks.some(check => check.id.startsWith('agents.dropped'))).toBe(false);
+  });
+
+  it('DUTYDECK_AGENTS_JSON 解析失败时 doctor 不崩溃，报 fail 并点名变量与 .env 位置', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-badjson-'));
+    try {
+      const { config: _config, ...rest } = deps();
+      const report = await runDoctor({ json: true }, {
+        ...rest,
+        cwd: dir,
+        env: { DUTYDECK_AGENTS_JSON: '[{"id":"x",}]' }
+      });
+      const check = find(report, 'config.resolved')!;
+      expect(check.level).toBe('fail');
+      expect(check.detail).toContain('DUTYDECK_AGENTS_JSON');
+      expect(check.command).toContain('grep -n DUTYDECK_AGENTS_JSON');
+      expect(level(report, 'agents.detected')).toBe('skip');
+      expect(report.ok).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('默认 Agent 可用性', () => {
+  const botsWith = (agentId: string | undefined, extra: Partial<DoctorDependencies> = {}) => deps({
+    databaseProbe: () => ({ exists: true, appliedVersion: 14, values: { [larkBotsConfigKey]: JSON.stringify([{ appId: 'cli_a', appSecret: FIXTURE_APP_SECRET, defaultAgentId: agentId, listening: false }]) } }),
+    ...extra
+  });
+
+  it('没有机器人默认 Agent 时为 skip，并且不执行任何探针', async () => {
+    let probed = 0;
+    const report = await runDoctor({ json: true }, deps({ agentProbe: async () => { probed += 1; return { status: 'ok', version: '1' }; } }));
+    expect(level(report, 'agents.default')).toBe('skip');
+    expect(probed).toBe(0);
+  });
+
+  it('--version 成功为 ok，探测的是真实 CLI 而不是 npx 启动器', async () => {
+    const calls: Array<{ command: string; timeout: number }> = [];
+    const report = await runDoctor({ json: true }, botsWith('claude', {
+      config: { ...baseConfig, agents: [{ id: 'claude', name: 'Claude Code', command: 'npx', protocol: 'acp', builtin: true }] },
+      agentProbe: async (command, timeout) => { calls.push({ command, timeout }); return { status: 'ok', version: '2.0.1 (Claude Code)' }; },
+      agentProbeTimeoutMs: 1234
+    }));
+    expect(calls).toEqual([{ command: 'claude', timeout: 1234 }]);
+    const check = find(report, 'agents.default')!;
+    expect(check.level).toBe('ok');
+    expect(check.detail).toContain('2.0.1');
+  });
+
+  it('命令找不到为 fail，给出可复制的 command -v 与绝对路径建议', async () => {
+    const check = find(await runDoctor({ json: true }, botsWith('claude', { agentProbe: async () => ({ status: 'not_found' }) })), 'agents.default')!;
+    expect(check.level).toBe('fail');
+    expect(check.remedy).toContain('绝对路径');
+    expect(check.command).toBe('command -v claude');
+  });
+
+  it('--version 退出码非 0 为 fail，建议在终端直接运行同一条命令', async () => {
+    const check = find(await runDoctor({ json: true }, botsWith('claude', { agentProbe: async () => ({ status: 'failed', detail: '退出码 1：missing module' }) })), 'agents.default')!;
+    expect(check.level).toBe('fail');
+    expect(check.detail).toContain('missing module');
+    expect(check.command).toBe('claude --version');
+  });
+
+  it('--version 超时为 warn，不把慢当成坏', async () => {
+    const check = find(await runDoctor({ json: true }, botsWith('claude', { agentProbe: async () => ({ status: 'timeout' }), agentProbeTimeoutMs: 3000 })), 'agents.default')!;
+    expect(check.level).toBe('warn');
+    expect(check.detail).toContain('3 秒');
+    expect(check.command).toBe('claude --version');
+  });
+
+  it('默认 Agent 不在可用列表里为 fail，并给出换成可用 Agent 的命令', async () => {
+    const check = find(await runDoctor({ json: true }, botsWith('codex')), 'agents.default')!;
+    expect(check.level).toBe('fail');
+    expect(check.detail).toContain('codex');
+    expect(check.command).toContain('dutydeck settings bot set cli_a defaultAgentId=');
+  });
+
+  it('默认 Agent 恰好是被丢弃的 Agent 时，指回命令找不到的修法', async () => {
+    const check = find(await runDoctor({ json: true }, botsWith('ghost', {
+      config: { ...baseConfig, droppedAgents: [{ id: 'ghost', name: 'Ghost', command: 'ghost-cli', reason: 'command_not_found' }] }
+    })), 'agents.default')!;
+    expect(check.level).toBe('fail');
+    expect(check.detail).toContain('ghost-cli');
+    expect(check.command).toBe('command -v ghost-cli');
+  });
+
+  it('自定义 pty 包装命令不执行 --version（可能改动本地设置），只确认存在', async () => {
+    let probed = 0;
+    const check = find(await runDoctor({ json: true }, botsWith('wrap', {
+      config: { ...baseConfig, agents: [{ id: 'wrap', name: 'Wrap', command: '/opt/wrap', protocol: 'pty-cli', builtin: false, adapterId: 'claude-code' }] },
+      agentProbe: async () => { probed += 1; return { status: 'ok', version: '1' }; }
+    })), 'agents.default')!;
+    expect(probed).toBe(0);
+    expect(check.level).toBe('ok');
+    expect(check.detail).toContain('未执行 --version');
+  });
+});
+
+describe('defaultAgentProbe（真实子进程，假 agent 脚本）', () => {
+  function script(body: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'dutydeck-agent-probe-'));
+    const file = join(dir, 'fake-agent');
+    writeFileSync(file, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    return { dir, file };
+  }
+
+  it('成功时返回第一行输出', async () => {
+    const { dir, file } = script('echo "fake-agent 9.9.9"; echo second-line');
+    try { expect(await defaultAgentProbe(file, 3000)).toEqual({ status: 'ok', version: 'fake-agent 9.9.9' }); }
+    finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('只执行 --version，且不带任何其他参数', async () => {
+    const { dir, file } = script('echo "$# $1"');
+    try { expect(await defaultAgentProbe(file, 3000)).toEqual({ status: 'ok', version: '1 --version' }); }
+    finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('退出码非 0 时返回 failed 并带上 stderr', async () => {
+    const { dir, file } = script('echo "boom: missing dependency" >&2; exit 3');
+    try {
+      const result = await defaultAgentProbe(file, 3000);
+      expect(result.status).toBe('failed');
+      expect(result.status === 'failed' && result.detail).toContain('退出码 3');
+      expect(result.status === 'failed' && result.detail).toContain('boom: missing dependency');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('命令不存在时返回 not_found', async () => {
+    expect(await defaultAgentProbe('/nonexistent/dutydeck-fake-agent', 3000)).toEqual({ status: 'not_found' });
+  });
+
+  it('超时时杀掉子进程并返回 timeout', async () => {
+    const { dir, file } = script('sleep 30');
+    try {
+      const started = Date.now();
+      expect(await defaultAgentProbe(file, 300)).toEqual({ status: 'timeout' });
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('.env 定位说明', () => {
+  const location = (overrides: Partial<import('../env-location.js').EnvLocation> = {}) => ({ source: 'cwd' as const, file: '/work/a/.env', cwd: '/work/a', daemonRoot: '/work/a', ...overrides });
+
+  it('当前目录就是 daemon 根目录时为 ok', async () => {
+    const check = find(await runDoctor({ json: true }, deps({ envLocation: location() })), 'env.file')!;
+    expect(check.level).toBe('ok');
+    expect(check.detail).toBe('/work/a/.env');
+  });
+
+  it('当前目录有 .env 但不是 daemon 根目录：warn，写明读的是哪个目录并给出 cd 命令', async () => {
+    const check = find(await runDoctor({ json: true }, deps({ envLocation: location({ daemonRoot: '/srv/dutydeck' }) })), 'env.file')!;
+    expect(check.level).toBe('warn');
+    expect(check.detail).toContain('/work/a/.env');
+    expect(check.detail).toContain('/srv/dutydeck');
+    expect(check.command).toBe('cd /srv/dutydeck && dutydeck doctor');
+  });
+
+  it('当前目录没有 .env、回退到 daemon 根目录时明确说明正在读哪个目录', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-envroot-'));
+    try {
+      const file = join(dir, '.env');
+      writeFileSync(file, 'DUTYDECK_PORT=4310\n');
+      const check = find(await runDoctor({ json: true }, deps({ envLocation: location({ source: 'daemon-root', file, daemonRoot: dir }) })), 'env.file')!;
+      expect(check.level).toBe('info');
+      expect(check.detail).toContain('/work/a');
+      expect(check.detail).toContain(file);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('daemon 根目录的 .env 读取失败时为 warn，不假装读到了', async () => {
+    const check = find(await runDoctor({ json: true }, deps({ envLocation: location({ source: 'daemon-root', file: '/nonexistent/dutydeck/.env', daemonRoot: '/nonexistent/dutydeck' }) })), 'env.file')!;
+    expect(check.level).toBe('warn');
+    expect(check.detail).toContain('无法读取');
+  });
+
+  it('回退时真的用 daemon 根目录 .env 里的配置解析（进程环境变量优先）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-envroot-'));
+    try {
+      const file = join(dir, '.env');
+      writeFileSync(file, 'DUTYDECK_AGENTS_JSON=[{"id":"x",}]\nDUTYDECK_PORT=4999\n');
+      const { config: _config, ...rest } = deps();
+      const report = await runDoctor({ json: true }, {
+        ...rest,
+        env: { DUTYDECK_AGENTS_JSON: '[]' },
+        envLocation: { source: 'daemon-root', file, cwd: '/elsewhere', daemonRoot: dir }
+      });
+      // 进程环境变量里的 [] 覆盖了 .env 里写坏的值，所以配置能解析；端口来自 .env。
+      expect(find(report, 'config.resolved')!.level).toBe('ok');
+      expect(find(report, 'config.resolved')!.detail).toContain(':4999');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('两处都没有 .env 时为 info', async () => {
+    const check = find(await runDoctor({ json: true }, deps({ envLocation: { source: 'none', cwd: '/work/a', daemonRoot: '/srv/dutydeck' } })), 'env.file')!;
+    expect(check.level).toBe('info');
+    expect(check.detail).toContain('/srv/dutydeck');
   });
 });

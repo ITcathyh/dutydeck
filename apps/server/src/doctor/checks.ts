@@ -23,6 +23,7 @@ import type {
   DoctorDaemonStatus,
   PortProbeOutcome
 } from './types.js';
+import type { EnvLocation } from '../env-location.js';
 
 /** workspace 根 package.json 的 engines.node。 */
 export const REQUIRED_NODE_VERSION = '22.12.0';
@@ -147,6 +148,50 @@ export function checkConfig(config: DoctorConfig): DoctorCheck {
     label: '配置解析',
     level: 'ok',
     detail: `${config.host}:${config.port} · 认证${config.authEnabled ? '开启' : '关闭'} · 配置库 ${config.databaseUrl}`
+  };
+}
+
+/**
+ * 说明这次体检读的是哪个 `.env`。配置跟着目录走，在别的目录里跑体检会读到另一份（或没有）配置，
+ * 给出的建议就是错的，所以每次都写明，不一致时给出该去的目录。
+ */
+export function checkEnvFile(location: EnvLocation, readError?: string): DoctorCheck {
+  const { cwd, daemonRoot } = location;
+  const verify = 'dutydeck doctor';
+  if (readError) {
+    return {
+      id: 'env.file',
+      label: '配置文件 .env',
+      level: 'warn',
+      detail: `无法读取 ${location.file}：${readError}`,
+      remedy: `${location.file} 读取失败，本次体检没有用到其中的配置。检查文件权限与格式后重跑。`,
+      command: `ls -l ${location.file}`,
+      verify
+    };
+  }
+  if (location.source === 'daemon-root') {
+    return { id: 'env.file', label: '配置文件 .env', level: 'info', detail: `当前目录 ${cwd} 没有 .env，改读 daemon 根目录的 ${location.file}` };
+  }
+  if (location.source === 'cwd') {
+    if (daemonRoot !== cwd) {
+      return {
+        id: 'env.file',
+        label: '配置文件 .env',
+        level: 'warn',
+        detail: `读取的是当前目录的 ${location.file}，而 daemon 根目录是 ${daemonRoot}`,
+        remedy: `当前目录不是 daemon 根目录。本次体检按当前目录的 .env 解析配置，可能和正在使用的 daemon 不一致。要体检 daemon 实际用的配置，进入它的根目录再运行。`,
+        command: `cd ${daemonRoot} && dutydeck doctor`
+      };
+    }
+    return { id: 'env.file', label: '配置文件 .env', level: 'ok', detail: location.file };
+  }
+  return {
+    id: 'env.file',
+    label: '配置文件 .env',
+    level: 'info',
+    detail: daemonRoot === cwd
+      ? `当前目录 ${cwd} 没有 .env，使用默认值与进程环境变量`
+      : `当前目录 ${cwd} 与 daemon 根目录 ${daemonRoot} 都没有 .env，使用默认值与进程环境变量`
   };
 }
 
@@ -282,7 +327,7 @@ export function checkAgents(agents: DoctorConfig['agents']): DoctorCheck {
       label: 'Agent CLI',
       level: 'warn',
       detail: '未检测到任何已安装的 Agent CLI',
-      remedy: 'Dutydeck 只驱动本机已安装的 Agent CLI。先安装其中任意一个（如 Claude Code、Codex、Gemini），再重跑配置向导让它被登记。',
+      remedy: 'Dutydeck 只驱动本机已安装的 Agent CLI。先安装其中任意一个（如 Claude Code、Codex、Gemini）并确认它在 PATH 里，再重新运行配置向导：它会列出检测到的 Agent，并让你选默认 Agent。',
       command: 'dutydeck setup',
       verify: 'dutydeck doctor'
     };
@@ -362,7 +407,7 @@ export function checkLark(observation: LarkObservation, listenerDisabled: boolea
         label: '飞书配置',
         level: 'fail',
         detail: `${larkBotsConfigKey} 不是合法 JSON，飞书机器人不会被加载`,
-        remedy: `configs 表里的 ${larkBotsConfigKey} 已损坏。重新走一遍配置向导覆盖它；凭据请用 dutydeck secret set 录入，不会回显到终端。`,
+        remedy: `configs 表里的 ${larkBotsConfigKey} 已损坏。重新走一遍配置向导覆盖它；App Secret 由向导隐藏输入（脚本里用 --lark-app-secret-fd），不会回显到终端。dutydeck secret set 管理的是身份预检用的另一类凭据，补不上它。`,
         command: 'dutydeck setup --lark-app-id <应用ID>',
         verify: 'dutydeck doctor --json'
       }],
@@ -401,7 +446,7 @@ export function checkLark(observation: LarkObservation, listenerDisabled: boolea
       level: 'fail',
       // 只报「缺失」这一事实，永不打印 secret 本身。
       detail: `${missingSecret.length} 个机器人缺少 App Secret：${ids}`,
-      remedy: `缺少 App Secret 的飞书机器人会被静默忽略。重新绑定以补齐凭据；也可以用 dutydeck secret set 录入，它从文件描述符读取、不会把凭据回显到终端或 shell 历史。`,
+      remedy: `缺少 App Secret 的飞书机器人会被静默忽略。重新运行向导补齐凭据：交互时隐藏输入 App Secret，脚本里用 --lark-app-secret-fd 从管道读，都不会回显到终端或进 shell 历史。dutydeck secret set 管理的是身份预检用的另一类凭据，补不上监听所需的 App Secret。`,
       command: `dutydeck setup --lark-app-id ${missingSecret[0]?.appId ?? '<应用ID>'}`,
       verify: 'dutydeck doctor --json'
     });

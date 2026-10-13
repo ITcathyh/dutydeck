@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { builtinAgents, loadConfig } from './index.js';
+import { agentProbeTarget, builtinAgents, describeDroppedAgent, loadConfig, loadConfigWithDiagnostics } from './index.js';
 
 describe('working directory configuration', () => {
   it('uses the server process cwd when no default is specified', () => {
@@ -60,5 +60,52 @@ describe('working directory configuration', () => {
     expect(configured.agents.find(agent => agent.id === 'ccflash')).toMatchObject(custom);
     expect(configured.agents.find(agent => agent.id === 'ccflash')?.version).toBeUndefined();
     for (const builtin of builtinAgents()) expect(configured.agents).toContainEqual(builtin);
+  });
+});
+
+describe('DUTYDECK_AGENTS_JSON diagnostics', () => {
+  const missing = { id: 'ghost', name: 'Ghost', command: 'definitely-not-installed-agent-cli', protocol: 'acp' };
+
+  it('reports custom agents whose command cannot be found instead of dropping them silently', () => {
+    const { config, droppedAgents } = loadConfigWithDiagnostics({ DUTYDECK_AGENTS_JSON: JSON.stringify([missing]) });
+    expect(config.agents.some(agent => agent.id === 'ghost')).toBe(false);
+    expect(droppedAgents).toEqual([{ id: 'ghost', name: 'Ghost', command: 'definitely-not-installed-agent-cli', reason: 'command_not_found' }]);
+  });
+
+  it('does not report agents whose command exists', () => {
+    const present = { ...missing, id: 'present', command: process.execPath };
+    expect(loadConfigWithDiagnostics({ DUTYDECK_AGENTS_JSON: JSON.stringify([present]) }).droppedAgents).toEqual([]);
+  });
+
+  it('names the variable when the JSON cannot be parsed', () => {
+    expect(() => loadConfig({ DUTYDECK_AGENTS_JSON: '[{"id":"x",}]' })).toThrow(/DUTYDECK_AGENTS_JSON 不是合法 JSON/);
+  });
+
+  it('names the variable when the value is not an array', () => {
+    expect(() => loadConfig({ DUTYDECK_AGENTS_JSON: '{"id":"x"}' })).toThrow(/DUTYDECK_AGENTS_JSON 必须是 JSON 数组/);
+  });
+
+  it('names the variable, the entry position and the agent id when an entry is invalid', () => {
+    const message = (() => {
+      try { loadConfig({ DUTYDECK_AGENTS_JSON: JSON.stringify([{ id: 'broken', name: 'Broken' }]) }); } catch (error) { return (error as Error).message; }
+      return '';
+    })();
+    expect(message).toContain('DUTYDECK_AGENTS_JSON 第 1 项（id=broken）无效');
+    expect(message).toContain('command');
+  });
+
+  it('tells the user to switch to an absolute path and gives a copyable command', () => {
+    const described = describeDroppedAgent({ id: 'ghost', name: 'Ghost', command: 'ghost-cli', reason: 'command_not_found' });
+    expect(described.detail).toContain('ghost');
+    expect(described.detail).toContain('ghost-cli');
+    expect(described.remedy).toContain('绝对路径');
+    expect(described.command).toBe('command -v ghost-cli');
+    expect(describeDroppedAgent({ id: 'ghost', name: 'Ghost', command: '/opt/missing/agent', reason: 'command_not_found' }).command).toBe('ls -l /opt/missing/agent');
+  });
+
+  it('probes the real CLI for built-in ACP agents and skips executing custom pty wrappers', () => {
+    expect(agentProbeTarget({ id: 'claude', command: 'npx', protocol: 'acp', builtin: true })).toEqual({ command: 'claude', execute: true });
+    expect(agentProbeTarget({ id: 'ccflash', command: '/opt/ccflash', protocol: 'pty-cli', builtin: false, adapterId: 'claude-code' })).toEqual({ command: '/opt/ccflash', execute: false });
+    expect(agentProbeTarget({ id: 'custom', command: '/opt/custom', protocol: 'acp', builtin: false })).toEqual({ command: '/opt/custom', execute: true });
   });
 });

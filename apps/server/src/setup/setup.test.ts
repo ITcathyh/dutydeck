@@ -4,12 +4,14 @@
  * 全部依赖都从 SetupDependencies 注入：不碰网络、不碰真实 .env、不写临时目录之外
  * 的任何东西。真实目录只用 mkdtemp 建、afterEach 删。
  */
+import { closeSync, openSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCliUi, symbolFor } from '../cli-ui.js';
 import type { DetectedAgent } from './detect.js';
+import type { ExistingBot, SaveBotInput, SaveBotResult } from './bot-store.js';
 import type { WriteEnvResult } from './env-file.js';
 import type { LarkBindOptions, LarkBindResult } from './lark-bind.js';
 import { PromptUnavailableError, type AskOptions, type Prompter } from './prompts.js';
@@ -50,6 +52,7 @@ function strictPrompter(): Prompter {
     async ask<T>(): Promise<T> { throw new Error('prompter.ask must not be called'); },
     async choose<T>(): Promise<T> { throw new Error('prompter.choose must not be called'); },
     async confirm(): Promise<boolean> { throw new Error('prompter.confirm must not be called'); },
+    async secret(): Promise<string> { throw new Error('prompter.secret must not be called'); },
     close() {}
   };
 }
@@ -81,6 +84,9 @@ interface HarnessOptions {
   changed?: boolean;
   prompter?: Prompter;
   bind?: (options: LarkBindOptions) => Promise<LarkBindResult>;
+  /** 已保存的机器人（readBot 的返回）；缺省为库里没有这个机器人。 */
+  storedBot?: ExistingBot;
+  readSecretFd?: (fd: string) => Promise<string>;
 }
 
 function harness(options: HarnessOptions) {
@@ -103,10 +109,21 @@ function harness(options: HarnessOptions) {
   const detect = vi.fn((): DetectedAgent[] => options.agents ?? [AGENT]);
   const readExisting = vi.fn((): Map<string, string> => new Map(existing));
   const prompter = options.prompter ?? strictPrompter();
+  // 数据库层必须注入：默认实现会按 HOME 下的 last-daemon-dir 去打开真实 daemon 的库。
+  const readBot = vi.fn(async (): Promise<ExistingBot | undefined> => options.storedBot);
+  const saveBot = vi.fn(async (input: SaveBotInput): Promise<SaveBotResult> => ({
+    existed: options.storedBot !== undefined,
+    changed: true,
+    hasSecret: Boolean(input.appSecret ?? options.storedBot?.appSecret),
+    ...((input.defaultAgentId ?? options.storedBot?.defaultAgentId) ? { defaultAgentId: input.defaultAgentId ?? options.storedBot?.defaultAgentId } : {}),
+    listening: input.listen === true || options.storedBot?.listening === true
+  }));
   const deps: SetupDependencies = {
-    ui, prompter, cwd: options.cwd, env: {}, detect, bind, writeEnv, readExisting
+    ui, prompter, cwd: options.cwd, env: {}, detect, bind, writeEnv, readExisting,
+    readBot, saveBot, database: join(options.cwd, 'fixture.db'),
+    ...(options.readSecretFd ? { readSecretFd: options.readSecretFd } : {})
   };
-  return { out, err, deps, writeEnv, bind, detect, readExisting };
+  return { out, err, deps, writeEnv, bind, detect, readExisting, readBot, saveBot };
 }
 
 /** writeEnv 收到的 updates（第 n 次调用）。 */
@@ -200,6 +217,7 @@ describe('runSetup', () => {
       },
       async choose<T>(): Promise<T> { throw new Error('prompter.choose must not be called'); },
       async confirm(): Promise<boolean> { return false; },
+      async secret(): Promise<string> { throw new Error('prompter.secret must not be called'); },
       close() {}
     };
     const { deps, writeEnv, out } = harness({ cwd: dir, existing: {}, prompter });
@@ -386,5 +404,227 @@ describe('runSetup', () => {
     const result = await runSetup({ port: '4310', skipLark: true, yes: true }, deps);
 
     expect(result.warnings.some(warning => warning.includes('已不存在'))).toBe(false);
+  });
+});
+
+describe('runSetup —— 默认 Agent 与 App Secret', () => {
+  const CODEX: DetectedAgent = { id: 'codex', name: 'Codex', command: 'codex', version: '0.9.0', protocol: 'acp', builtin: true };
+  const SECRET = 'real-app-secret-must-never-leak';
+  const ready = () => larkResult({ outcome: 'ready', appId: 'cli_ok' });
+
+  it('拒绝未检测到的 --agent，且在任何写入或飞书绑定之前', async () => {
+    const dir = await makeTempDir();
+    const { deps, bind, writeEnv, saveBot } = harness({ cwd: dir, agents: [AGENT], bind: async () => ready() });
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', agent: 'ghost', yes: true }, deps);
+    expect(result.ok).toBe(false);
+    expect(result.error?.message).toContain('未检测到 Agent「ghost」');
+    expect(result.error?.message).toContain('claude');
+    expect(bind).not.toHaveBeenCalled();
+    expect(writeEnv).not.toHaveBeenCalled();
+    expect(saveBot).not.toHaveBeenCalled();
+  });
+
+  it('--lark-app-secret-fd 读到的 Secret 与 --agent 一起写入机器人配置，Secret 不出现在任何输出里', async () => {
+    const dir = await makeTempDir();
+    const { deps, bind, saveBot, out, err } = harness({ cwd: dir, agents: [AGENT, CODEX], bind: async () => ready(), readSecretFd: async () => SECRET });
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', agent: 'codex', larkAppSecretFd: '0', yes: true }, deps);
+    expect(result.ok).toBe(true);
+    expect(saveBot).toHaveBeenCalledTimes(1);
+    expect(saveBot.mock.calls[0]![0]).toMatchObject({ database: join(dir, 'fixture.db'), appId: 'cli_ok', appSecret: SECRET, defaultAgentId: 'codex', workspace: dir });
+    expect(bind.mock.calls[0]![0].appSecret).toBe(SECRET);
+    expect(result.defaultAgentId).toBe('codex');
+    expect(result.bot).toMatchObject({ appId: 'cli_ok', hasSecret: true, defaultAgentId: 'codex', listening: false });
+    expect(result.warnings.some(warning => warning.includes('尚未提供 App Secret'))).toBe(false);
+    expect(JSON.stringify(result) + out.read() + err.read()).not.toContain(SECRET);
+  });
+
+  it('--json 下同样写入，结果里只有布尔 hasSecret，没有 Secret 本身', async () => {
+    const dir = await makeTempDir();
+    const { deps, out } = harness({ cwd: dir, agents: [AGENT], bind: async () => ready(), readSecretFd: async () => SECRET });
+    await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', larkAppSecretFd: '0', json: true }, deps);
+    const printed = out.read();
+    expect(printed).not.toContain(SECRET);
+    expect(JSON.parse(printed.trim().split('\n').at(-1)!).bot.hasSecret).toBe(true);
+  });
+
+  it('真实文件描述符：从 fd 读 Secret 并去掉末尾换行', async () => {
+    const dir = await makeTempDir();
+    const file = join(dir, 'secret.txt');
+    writeFileSync(file, `${SECRET}\n`);
+    const fd = openSync(file, 'r');
+    try {
+      const { deps, saveBot } = harness({ cwd: dir, agents: [AGENT], bind: async () => ready() });
+      const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', larkAppSecretFd: String(fd), yes: true }, deps);
+      expect(result.ok).toBe(true);
+      expect(saveBot.mock.calls[0]![0].appSecret).toBe(SECRET);
+    } finally { closeSync(fd); }
+  });
+
+  it('fd 读不到内容时失败，不写任何配置', async () => {
+    const dir = await makeTempDir();
+    const { deps, writeEnv, bind } = harness({ cwd: dir, agents: [AGENT], bind: async () => ready(), readSecretFd: async () => '' });
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', larkAppSecretFd: '0', yes: true }, deps);
+    expect(result.ok).toBe(false);
+    expect(result.error?.message).toContain('没有读到 App Secret');
+    expect(bind).not.toHaveBeenCalled();
+    expect(writeEnv).not.toHaveBeenCalled();
+  });
+
+  it('非交互且没给 --agent：新机器人取第一个检测到的 Agent', async () => {
+    const dir = await makeTempDir();
+    const { deps, saveBot } = harness({ cwd: dir, agents: [CODEX, AGENT], bind: async () => ready(), readSecretFd: async () => SECRET });
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', larkAppSecretFd: '0', yes: true }, deps);
+    expect(saveBot.mock.calls[0]![0].defaultAgentId).toBe('codex');
+    expect(result.defaultAgentId).toBe('codex');
+  });
+
+  it('重跑向导不会悄悄换掉机器人已有的默认 Agent', async () => {
+    const dir = await makeTempDir();
+    const { deps, saveBot } = harness({ cwd: dir, agents: [CODEX, AGENT], bind: async () => ready(), storedBot: { appSecret: SECRET, defaultAgentId: 'claude', listening: false } });
+    await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', yes: true }, deps);
+    expect(saveBot.mock.calls[0]![0]).not.toHaveProperty('defaultAgentId');
+    expect(saveBot.mock.calls[0]![0]).not.toHaveProperty('appSecret');
+  });
+
+  it('沿用 .env 里同一应用的旧 LARK_APP_SECRET，并迁进机器人配置', async () => {
+    const dir = await makeTempDir();
+    const { deps, saveBot } = harness({ cwd: dir, agents: [AGENT], existing: { LARK_APP_ID: 'cli_ok', LARK_APP_SECRET: SECRET }, bind: async () => ready() });
+    await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', yes: true }, deps);
+    expect(saveBot.mock.calls[0]![0].appSecret).toBe(SECRET);
+  });
+
+  it('机器人已保存的 Secret 优先于 .env 里可能已过期的旧值', async () => {
+    const dir = await makeTempDir();
+    const { deps, saveBot, bind } = harness({ cwd: dir, agents: [AGENT], existing: { LARK_APP_ID: 'cli_ok', LARK_APP_SECRET: 'stale-env-secret' }, storedBot: { appSecret: SECRET, defaultAgentId: 'claude', listening: false }, bind: async () => ready() });
+    await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', yes: true }, deps);
+    expect(bind.mock.calls[0]![0].appSecret).toBe(SECRET);
+    expect(saveBot.mock.calls[0]![0]).not.toHaveProperty('appSecret');
+  });
+
+  it('非交互也没有 Secret 时不保存机器人，并给出补 Secret 的命令', async () => {
+    const dir = await makeTempDir();
+    const { deps, saveBot } = harness({ cwd: dir, agents: [AGENT], bind: async () => ready() });
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', yes: true }, deps);
+    expect(result.ok).toBe(true);
+    expect(saveBot).not.toHaveBeenCalled();
+    expect(result.bot).toBeUndefined();
+    expect(result.warnings.join('\n')).toContain('--lark-app-secret-fd 0');
+  });
+
+  it('交互：隐藏输入 App Secret、用编号选默认 Agent', async () => {
+    const dir = await makeTempDir();
+    const calls: string[] = [];
+    const prompter: Prompter = {
+      interactive: true,
+      async ask<T>(): Promise<T> { throw new Error('unexpected ask'); },
+      async choose<T>(options: { question: string; choices: Array<{ value: T }> }): Promise<T> { calls.push(`choose:${options.question}`); return options.choices[1]!.value; },
+      async confirm(): Promise<boolean> { return false; },
+      async secret(): Promise<string> { calls.push('secret'); return SECRET; },
+      close() {}
+    };
+    const { deps, saveBot, bind } = harness({ cwd: dir, agents: [AGENT, CODEX], bind: async () => ready(), prompter });
+    setIsTTY(true);
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok' }, deps);
+    expect(result.ok).toBe(true);
+    expect(calls[0]).toBe('secret');
+    expect(calls[1]).toContain('choose:默认 Agent');
+    expect(bind.mock.calls[0]![0].appSecret).toBe(SECRET);
+    expect(saveBot.mock.calls[0]![0]).toMatchObject({ appSecret: SECRET, defaultAgentId: 'codex' });
+  });
+
+  it('交互里直接回车跳过 Secret：不保存机器人', async () => {
+    const dir = await makeTempDir();
+    const prompter: Prompter = {
+      interactive: true,
+      async ask<T>(): Promise<T> { throw new Error('unexpected ask'); },
+      async choose<T>(options: { choices: Array<{ value: T }> }): Promise<T> { return options.choices[0]!.value; },
+      async confirm(): Promise<boolean> { return false; },
+      async secret(): Promise<string> { return ''; },
+      close() {}
+    };
+    const { deps, saveBot } = harness({ cwd: dir, agents: [AGENT], bind: async () => ready(), prompter });
+    setIsTTY(true);
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok' }, deps);
+    expect(result.ok).toBe(true);
+    expect(saveBot).not.toHaveBeenCalled();
+    expect(result.warnings.join('\n')).toContain('尚未提供 App Secret');
+  });
+
+  it('只给 --agent：改 .env 里那个机器人的默认 Agent，不碰开放平台', async () => {
+    const dir = await makeTempDir();
+    const { deps, bind, saveBot, writeEnv } = harness({ cwd: dir, agents: [AGENT, CODEX], existing: { LARK_APP_ID: 'cli_ok' }, storedBot: { appSecret: SECRET, defaultAgentId: 'claude', listening: true } });
+    const result = await runSetup({ cwd: dir, port: '4310', agent: 'codex', yes: true }, deps);
+    expect(result.ok).toBe(true);
+    expect(bind).not.toHaveBeenCalled();
+    expect(saveBot.mock.calls[0]![0]).toMatchObject({ appId: 'cli_ok', defaultAgentId: 'codex' });
+    expect(updatesOf(writeEnv)).not.toHaveProperty('LARK_APP_ID');
+  });
+
+  it('只给 --agent 但没有机器人可改：失败并说明需要 --lark-app-id', async () => {
+    const dir = await makeTempDir();
+    const { deps, writeEnv, saveBot } = harness({ cwd: dir, agents: [AGENT] });
+    const result = await runSetup({ cwd: dir, port: '4310', agent: 'claude', yes: true }, deps);
+    expect(result.ok).toBe(false);
+    expect(result.error?.message).toContain('--lark-app-id');
+    expect(writeEnv).not.toHaveBeenCalled();
+    expect(saveBot).not.toHaveBeenCalled();
+  });
+
+  it('--skip-lark 与 --agent 冲突、--lark-app-secret-fd 没有可指的机器人，都在写入前被拒绝', async () => {
+    const dir = await makeTempDir();
+    const first = harness({ cwd: dir, agents: [AGENT] });
+    expect((await runSetup({ cwd: dir, skipLark: true, agent: 'claude', yes: true }, first.deps)).ok).toBe(false);
+    const second = harness({ cwd: dir, agents: [AGENT] });
+    const result = await runSetup({ cwd: dir, larkAppSecretFd: '0', yes: true }, second.deps);
+    expect(result.ok).toBe(false);
+    expect(result.error?.message).toContain('--lark-app-id');
+    expect(first.writeEnv).not.toHaveBeenCalled();
+    expect(second.writeEnv).not.toHaveBeenCalled();
+  });
+
+  it('只给 --lark-app-secret-fd：用 .env 里那个机器人的 App Secret 轮换，不碰开放平台', async () => {
+    const dir = await makeTempDir();
+    const { deps, bind, saveBot } = harness({ cwd: dir, agents: [AGENT], existing: { LARK_APP_ID: 'cli_ok' }, storedBot: { appSecret: 'old', defaultAgentId: 'claude', listening: false }, readSecretFd: async () => SECRET });
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppSecretFd: '0', yes: true }, deps);
+    expect(result.ok).toBe(true);
+    expect(bind).not.toHaveBeenCalled();
+    expect(saveBot.mock.calls[0]![0]).toMatchObject({ appId: 'cli_ok', appSecret: SECRET });
+  });
+
+  it('交互新建机器人时询问是否立即开启监听，默认是；选否则不开', async () => {
+    const dir = await makeTempDir();
+    const asked: Array<{ question: string; defaultValue?: boolean }> = [];
+    const make = (answer: boolean): Prompter => ({
+      interactive: true,
+      async ask<T>(): Promise<T> { throw new Error('unexpected ask'); },
+      async choose<T>(options: { choices: Array<{ value: T }> }): Promise<T> { return options.choices[0]!.value; },
+      async confirm(options): Promise<boolean> { asked.push(options); return answer; },
+      async secret(): Promise<string> { return SECRET; },
+      close() {}
+    });
+    const yes = harness({ cwd: dir, agents: [AGENT], bind: async () => ready(), prompter: make(true) });
+    setIsTTY(true);
+    await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok' }, yes.deps);
+    expect(asked.find(item => item.question.includes('监听'))?.defaultValue).toBe(true);
+    expect(yes.saveBot.mock.calls[0]![0].listen).toBe(true);
+    const no = harness({ cwd: dir, agents: [AGENT], bind: async () => ready(), prompter: make(false) });
+    setIsTTY(true);
+    await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok' }, no.deps);
+    expect(no.saveBot.mock.calls[0]![0]).not.toHaveProperty('listen');
+  });
+
+  it('非交互新建机器人不询问监听，没有 --listen 就不开', async () => {
+    const dir = await makeTempDir();
+    const { deps, saveBot } = harness({ cwd: dir, agents: [AGENT], bind: async () => ready(), readSecretFd: async () => SECRET });
+    await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', larkAppSecretFd: '0', yes: true }, deps);
+    expect(saveBot.mock.calls[0]![0]).not.toHaveProperty('listen');
+  });
+
+  it('--listen 传给机器人配置', async () => {
+    const dir = await makeTempDir();
+    const { deps, saveBot } = harness({ cwd: dir, agents: [AGENT], bind: async () => ready(), readSecretFd: async () => SECRET });
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', larkAppSecretFd: '0', listen: true, yes: true }, deps);
+    expect(saveBot.mock.calls[0]![0].listen).toBe(true);
+    expect(result.bot?.listening).toBe(true);
   });
 });

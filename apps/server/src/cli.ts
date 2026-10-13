@@ -48,7 +48,10 @@ import { adoptLegacyEnv, migrateLegacyBrandDirs } from './legacy-brand.js';
 
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { name: string; version: string };
 
-try { loadEnvFile(); } catch {}
+// 文件不存在是正常的（没有 .env）；存在却读不了/解析失败不能静默，否则配置悄悄失效。
+try { loadEnvFile(); } catch (error) {
+  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`警告：无法读取 ${process.cwd()}/.env，其中的配置没有生效：${error instanceof Error ? error.message : String(error)}\n`);
+}
 
 // 先把旧状态目录就位，再接管环境变量——否则无从判断变量里改写后的路径是否真的存在。
 const legacyState = migrateLegacyBrandDirs();
