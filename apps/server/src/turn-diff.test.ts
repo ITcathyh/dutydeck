@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -24,6 +25,20 @@ async function repo() {
   await writeFile(join(dir, 'dirty.txt'), 'clean\n');
   await git('add', '.'); await git('commit', '-m', 'init');
   return { dir, git };
+}
+
+/** .git/objects 下所有文件的路径和总字节数。 */
+async function objectFiles(dir: string) {
+  const files: string[] = [];
+  let bytes = 0;
+  const walk = async (path: string) => {
+    for (const entry of await readdir(path, { withFileTypes: true })) {
+      if (entry.isDirectory()) await walk(join(path, entry.name));
+      else { files.push(join(path, entry.name)); bytes += (await stat(join(path, entry.name))).size; }
+    }
+  };
+  await walk(join(dir, '.git', 'objects'));
+  return { files, bytes };
 }
 
 function memoryStore() {
@@ -104,6 +119,49 @@ describe('turn diff snapshots', () => {
     await observe({ id: 'session_1', cwd: plain }, 'task_1', 'start');
     await observe({ id: 'session_1', cwd: plain }, 'task_1', 'end');
     expect(store.values.size).toBe(0);
+  });
+
+  it('skips the snapshot without writing objects when an untracked file is too large, and logs why', async () => {
+    const { dir } = await repo();
+    await writeFile(join(dir, 'dump.bin'), randomBytes(21 * 1024 * 1024));
+    const before = await objectFiles(dir);
+    const warn = vi.fn();
+    const store = memoryStore();
+    await createTurnDiffObserver(store, { log: { warn } })({ id: 'session_1', cwd: dir }, 'task_1', 'start');
+    expect(store.values.size).toBe(0);
+    expect(await objectFiles(dir)).toEqual(before);
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session_1', taskId: 'task_1', phase: 'start', reason: expect.stringContaining('dump.bin') }), '这一轮没有记录改动范围');
+    // 加进 .gitignore 后照常拍快照。
+    await writeFile(join(dir, '.gitignore'), 'ignored.log\ndump.bin\n');
+    expect(await snapshotWorkingTree(dir)).toBeDefined();
+  });
+
+  it('skips the snapshot when there are too many untracked files or too many bytes in total', async () => {
+    const { dir } = await repo();
+    for (let index = 0; index < 5; index++) await writeFile(join(dir, `new-${index}.txt`), 'x'.repeat(100));
+    const before = await objectFiles(dir);
+    const reasons: string[] = [];
+    expect(await snapshotWorkingTree(dir, undefined, { limits: { fileBytes: 1_000, totalBytes: 10_000, files: 4 }, onSkip: reason => reasons.push(reason) })).toBeUndefined();
+    expect(await snapshotWorkingTree(dir, undefined, { limits: { fileBytes: 1_000, totalBytes: 300, files: 10 }, onSkip: reason => reasons.push(reason) })).toBeUndefined();
+    expect(reasons).toEqual(['未跟踪文件 5 个，超过 4 个', '未跟踪文件合计超过 300 字节']);
+    expect(await objectFiles(dir)).toEqual(before);
+    expect(await snapshotWorkingTree(dir, undefined, { limits: { fileBytes: 1_000, totalBytes: 10_000, files: 10 } })).toBeDefined();
+  });
+
+  it('removes the temporary object files of a snapshot killed by the time limit, and only those', async () => {
+    const { dir } = await repo();
+    for (let index = 0; index < 5; index++) await writeFile(join(dir, `blob-${index}.bin`), randomBytes(8 * 1024 * 1024));
+    // 别的 git 进程留下的临时文件不归这次快照管。
+    const foreign = join(dir, '.git', 'objects', 'pack', 'tmp_pack_foreign');
+    await mkdir(join(dir, '.git', 'objects', 'pack'), { recursive: true });
+    await writeFile(foreign, 'other process');
+    const reasons: string[] = [];
+    for (const timeout of [150, 300, 600]) {
+      expect(await snapshotWorkingTree(dir, timeout, { onSkip: reason => reasons.push(reason) })).toBeUndefined();
+      expect((await objectFiles(dir)).files.filter(file => /\/tmp_/.test(file))).toEqual([foreign]);
+    }
+    expect(reasons.length).toBe(3);
+    expect(reasons.every(reason => reason.includes('时限'))).toBe(true);
   });
 
   it('shows binary and oversized files as placeholders and cuts the page at the total limit', async () => {
