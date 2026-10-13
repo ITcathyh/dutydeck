@@ -1,7 +1,14 @@
-/** Current session measurements; token totals belong to the separate usage ledger. */
-export interface ContextUsage { used: number; size?: number; observedAt: string }
+/** Current session measurements; native totals are independent of the usage ledger. */
+export interface ContextUsage { used: number; size?: number; observedAt: string; source?: NativeTokenUsage['source'] }
 export interface RateLimitWindow { usedPercent: number; resetsAt: number; observedAt: string }
-export interface SessionUsageSnapshot { context?: ContextUsage; rateLimits?: { fiveHour?: RateLimitWindow; sevenDay?: RateLimitWindow }; error?: string }
+export interface NativeTokenUsage {
+  source: 'codex_transcript' | 'claude_transcript';
+  scope: 'current_native_session';
+  observedAt: string;
+  partial?: boolean;
+  inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; totalTokens?: number;
+}
+export interface SessionUsageSnapshot { context?: ContextUsage; nativeTokens?: NativeTokenUsage; rateLimits?: { fiveHour?: RateLimitWindow; sevenDay?: RateLimitWindow }; error?: string }
 const nonnegative = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 export function contextUsage(used: unknown, size: unknown, observedAt: string): ContextUsage | undefined {
   return nonnegative(used) && Number.isSafeInteger(used) && Number.isFinite(Date.parse(observedAt)) ? { used, ...(nonnegative(size) && Number.isSafeInteger(size) && size > 0 ? { size } : {}), observedAt } : undefined;

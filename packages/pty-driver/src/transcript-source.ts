@@ -433,6 +433,33 @@ export function verifyLaunchedTranscript(
   }
 }
 
+/** An execution checkpoint supplies the file; content must still prove its native identity. */
+export function verifyTranscriptCheckpoint(client: 'codex' | 'claude', path: string, dataRoot: string, ctx: { sessionId: string; cwd: string }): VerifiedTranscriptIdentity | undefined {
+  if (!isSafeApprovedFile(path, dataRoot) || !isUsableMarker(ctx.sessionId)) return;
+  const entries = parseJsonlObjects(readHead(path, MARKER_HEAD_BYTES));
+  const marker = buildSessionMarker(ctx.sessionId);
+  const ids = new Set<string>();
+  let marked = false; let cwdMatches = false;
+  for (const entry of entries) {
+    if (client === 'claude') {
+      if (entry.isSidechain === true) continue;
+      if (typeof entry.sessionId === 'string') ids.add(entry.sessionId);
+      if (entry.cwd && !cwdMatches) { if (realCwd(entry.cwd) !== realCwd(ctx.cwd)) return; cwdMatches = true; }
+      if (entry.type === 'user' && entryMentionsMarker(entry, marker)) marked = true;
+    } else {
+      if (entry.type === 'session_meta') {
+        const id = entry.payload?.id ?? entry.payload?.session_id;
+        if (typeof id === 'string') ids.add(id);
+        if (entry.payload?.cwd) { if (realCwd(entry.payload.cwd) !== realCwd(ctx.cwd)) return; cwdMatches = true; }
+      }
+      if (codexInputText(entry)?.includes(marker)) marked = true;
+    }
+  }
+  if (!marked || !cwdMatches || ids.size !== 1) return;
+  const nativeSessionId = [...ids][0]!; const verifiedPath = realpathSync(path);
+  return { nativeSessionId, verifiedPath, identityProof: markerIdentityProof(marker, nativeSessionId, verifiedPath), streamIdentity: { kind: 'main', nativeAgentId: null } };
+}
+
 export interface PendingLaunch {
   observationId: string;
   client: InsightClient;

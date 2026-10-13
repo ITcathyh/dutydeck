@@ -48,3 +48,10 @@ it('does not use cumulative token breakdown for context and selects the newer se
   events.push({ type: 'status', timestamp: '2026-10-02T02:00:00Z', data: { state: 'usage', used: 0, size: 1000 } });
   expect(currentContextStats(events, snapshot)).toMatchObject({ used: 0, percentage: 0 });
 });
+
+it('keeps capacity and provenance with their own context sample rather than combining old and new usage', () => {
+  const events: any[] = [{ type: 'status', timestamp: '2026-10-13T00:00:00Z', data: { state: 'usage', used: 100, size: 1000 } }, { type: 'status', timestamp: '2026-10-13T00:01:00Z', data: { state: 'usage', used: 200 } }];
+  const snapshot = { used: 90, size: 900, observedAt: '2026-10-12T00:00:00Z', source: 'claude_transcript' as const };
+  const current = currentContextStats(events, snapshot);
+  expect(current.used).toBe(200); expect(current.size).toBeUndefined(); expect(current.source).toBeUndefined(); expect(current.percentage).toBeUndefined();
+});

@@ -611,7 +611,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         authorize: async request => Boolean(await resolveInstallationPrincipal(request)),
       },
       webRoot,
-      usage: { ledger: usageLedger, snapshot: sessionId => sessionUsageSnapshot(repos, sessionId), authorize: async request => Boolean(await resolveInstallationPrincipal(request)) },
+      usage: { ledger: usageLedger, snapshot: sessionId => sessionUsageSnapshot(repos, sessionId, options.env ?? process.env), authorize: async request => Boolean(await resolveInstallationPrincipal(request)) },
       collaboration: { service: collaboration.service, runtime, tools: agentTools, evaluation: collaboration.evaluation, extensions: collaboration.extensions,
         authorizeManagement: async request => await resolveInstallationPrincipal(request) ? installationOwnerTaskActor : undefined,
         bootstrap: scope => collaboration!.participation.bootstrap(scope), prepareSettings: (scope, patch) => collaboration!.prepareSettings(scope, patch), onChange: scope => collaboration!.onChange(scope),

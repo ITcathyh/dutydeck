@@ -21,14 +21,15 @@
  *   event_msg task_complete.last_agent_message    → text (modern schema,
  *                                                   sole final-answer source)
  */
-import { createReadStream, existsSync, opendirSync, statSync } from 'node:fs';
-import type { Dirent, Stats } from 'node:fs';
+import { existsSync, opendirSync, statSync } from 'node:fs';
+import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { codexRateLimits, contextUsage, type NormalizedDriverEvent, type SessionUsageSnapshot } from '@dutydeck/shared';
 import { codexHistoryPath, codexSessionsRoot, type CliPathEnv } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
 import { resolveCliSessionId } from '../session-id/index.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource } from './tail.js';
+import { readNativeTranscriptUsage } from './session-usage.js';
 import { codexInputText } from './input-receipt.js';
 import { CodexToolProjection, mapCodexCompletedTool } from './codex-tools.js';
 import { CodexInputReceipt } from './codex-input-receipt.js';
@@ -362,59 +363,16 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
   }
 }
 
-interface UsageReadCursor { path: string; inode: number; mtime: number; offset: number; pending: Buffer; skippingLine: boolean; bound: boolean; snapshot: SessionUsageSnapshot }
-const usageReadCursors = new Map<string, UsageReadCursor>();
+const usagePaths = new Map<string, string>();
 /** Read only the named native session. Repeated polling reads appended bytes only. */
 export async function readCodexSessionUsage(nativeSessionId: string, env: CliPathEnv, cwd: string): Promise<SessionUsageSnapshot | undefined> {
   const root = codexSessionsRoot(env);
   const key = `${root}\0${nativeSessionId}\0${cwd}`;
-  let saved = usageReadCursors.get(key);
-  let path = saved?.path;
-  let stat: Stats | undefined;
-  if (path) {
-    try { stat = statSync(path); }
-    catch { usageReadCursors.delete(key); saved = undefined; path = undefined; }
-  }
+  let path = usagePaths.get(key);
+  if (path && !existsSync(path)) { usagePaths.delete(key); path = undefined; }
   path ??= findRolloutBySessionId(root, nativeSessionId, Infinity);
   if (!path) return undefined;
-  stat ??= statSync(path);
-  let cursor = saved ? { ...saved, snapshot: { ...saved.snapshot, ...(saved.snapshot.rateLimits ? { rateLimits: { ...saved.snapshot.rateLimits } } : {}) } } : undefined;
-  if (!cursor || cursor.inode !== stat.ino || stat.size < cursor.offset || stat.size === cursor.offset && stat.mtimeMs !== cursor.mtime) {
-    cursor = { path, inode: stat.ino, mtime: stat.mtimeMs, offset: 0, pending: Buffer.alloc(0), skippingLine: false, bound: false, snapshot: {} };
-  }
-  const acceptLine = (line: Buffer) => {
-    let entry: any;
-    try { entry = JSON.parse(line.toString('utf8')); } catch { return; }
-    if (entry.type === 'session_meta') {
-      cursor!.bound = (entry.payload?.id ?? entry.payload?.session_id) === nativeSessionId && entry.payload?.cwd === cwd;
-      if (!cursor!.bound) cursor!.snapshot = {};
-    }
-    if (!cursor!.bound || entry.type !== 'event_msg' || entry.payload?.type !== 'token_count') return;
-    const context = contextUsage(entry.payload.info?.last_token_usage?.total_tokens, entry.payload.info?.model_context_window, entry.timestamp);
-    const rateLimits = codexRateLimits(entry.payload.rate_limits, entry.timestamp);
-    if (context) cursor!.snapshot.context = context;
-    if (rateLimits) cursor!.snapshot.rateLimits = { ...cursor!.snapshot.rateLimits, ...rateLimits };
-  };
-  if (stat.size > cursor.offset) {
-    const stream = createReadStream(path, { start: cursor.offset, end: stat.size - 1 });
-    try {
-      for await (const chunk of stream) {
-        const buffer = Buffer.concat([cursor.pending, chunk as Buffer]);
-        let start = 0; let end: number;
-        while ((end = buffer.indexOf(10, start)) >= 0) {
-          if (!cursor.skippingLine) acceptLine(buffer.subarray(start, end));
-          cursor.skippingLine = false; start = end + 1;
-        }
-        // Tool output can occupy huge JSONL lines; quota events are small.
-        cursor.pending = Buffer.from(buffer.subarray(start));
-        if (cursor.pending.length > 1024 * 1024) { cursor.pending = Buffer.alloc(0); cursor.skippingLine = true; }
-      }
-    } finally { stream.destroy(); }
-    cursor.offset = stat.size;
-    cursor.mtime = stat.mtimeMs;
-  }
-  usageReadCursors.delete(key);
-  if (cursor.bound) usageReadCursors.set(key, cursor);
-  if (usageReadCursors.size > 32) usageReadCursors.delete(usageReadCursors.keys().next().value!);
-  return cursor.bound ? { ...cursor.snapshot, ...(cursor.snapshot.rateLimits ? { rateLimits: { ...cursor.snapshot.rateLimits } } : {}) } : undefined;
+  usagePaths.delete(key); usagePaths.set(key, path);
+  if (usagePaths.size > 32) usagePaths.delete(usagePaths.keys().next().value!);
+  return readNativeTranscriptUsage({ client: 'codex', path, dataRoot: root, nativeSessionId, cwd });
 }
