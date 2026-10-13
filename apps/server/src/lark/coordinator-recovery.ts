@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { describeLarkTaskRecovery, larkContinuePrompt, larkIdleTimeoutMinutes, larkQuietSettledNote, larkRecoveryRetainedNote, larkReliability, larkStaleSettledNote,
-  larkUnknownTaskNoticeKey, larkUnknownTaskNoticeRecordKey, notifyLarkUnknownTask, type LarkUnknownTaskNotice } from './task-recovery.js';
+  larkUnknownTaskNoticeKey, larkUnknownTaskNoticeRecordKey, notifyLarkUnknownTask, urgeLarkUnknownTask, type LarkUnknownTaskNotice } from './task-recovery.js';
+import { isBotSenderType } from './card-mentions.js';
+import { larkNotice } from './notify-tier.js';
 import { describeUnknownTaskResolution, resolveUnknownTask, type UnknownTaskRuntime } from '../task-resolution.js';
 import type { LarkInboxRecord } from './task-inbox.js';
 import type { LarkLaunchOptions } from './new-session.js';
@@ -76,7 +78,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         return raw && (JSON.parse(raw) as { stale?: boolean }).stale ? larkStaleSettledNote : undefined;
       },
       ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}),
-      ...(this.runtime.inspectUnknownTask && this.runtime.resolveUnknownTask ? { unknownTaskNotice: (mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord) => this.notifyUnknownTask(config, mapping, saved, runtimeTask) } : {}),
+      ...(this.runtime.inspectUnknownTask && this.runtime.resolveUnknownTask ? { unknownTaskNotice: (mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord, effective: StoredLarkConfig) => this.notifyUnknownTask(config, mapping, saved, runtimeTask, effective) } : {}),
       // 呈现开关可以按群覆盖，对账必须按记录所属会话解析后再决定怎么补发，
       // 否则重启后群里的静默/只贴表情配置全部失效。解析失败退回 Bot 级配置。
       resolveConfig: async saved => {
@@ -911,17 +913,28 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
    * 结果未知、没有被自动处理的一轮：在原会话发一张带「重新执行」「标为已完成」「标为失败」的提醒卡，每次执行一张。
    * 旧的一轮（larkRecoveryNoticeExpired）不补发，免得重启时刷出几天前的提醒；那些在 Web 上处理。
    */
-  private async notifyUnknownTask(config: StoredLarkConfig, mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord) {
+  private async notifyUnknownTask(config: StoredLarkConfig, mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord, effective: StoredLarkConfig) {
     const store = this.workflowOptions.store;
     if (!store?.compareAndSet || !this.runtime.inspectUnknownTask) return;
     const facts = await this.runtime.inspectUnknownTask(mapping.sessionId, runtimeTask.id);
     if (!facts.actionable || await this.staleTurn(mapping.sessionId, runtimeTask)) return;
-    return notifyLarkUnknownTask({ service: this.service, store, log: this.log, appId: config.appId, sessionId: mapping.sessionId, runtimeTaskId: runtimeTask.id, facts,
+    const unknownMention = larkNotice('unknown_task_notice', effective,
+      { chatType: saved.chat_type, senderOpenId: saved.sender_open_id, senderType: saved.sender_type }).mention;
+    const messageId = await notifyLarkUnknownTask({ service: this.service, store, log: this.log, appId: config.appId, sessionId: mapping.sessionId, runtimeTaskId: runtimeTask.id, facts,
+      ...(unknownMention ? { mention: unknownMention } : {}),
       messageTaskId: mapping.externalId, turn: saved.turn ?? 0, taskName: saved.task_name, agentName: await this.resolveAgentName(config),
       target: { chatId: saved.chat_id,
         replyMessageId: saved.reply_message_id?.trim() || (saved.root_message_id?.trim().startsWith('om_') ? saved.root_message_id.trim() : undefined),
         replyInThread: saved.reply_in_thread },
       ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}) });
+    // 提醒卡挂太久没人处理，按加急设置提醒发起人；机器人发起的不加急。
+    const manager = this.workflows?.urgentManager;
+    if (messageId && manager && saved.sender_open_id && !isBotSenderType(saved.sender_type)) {
+      await urgeLarkUnknownTask({ store, manager, appId: config.appId, sessionId: mapping.sessionId, runtimeTaskId: runtimeTask.id, target: facts.target!,
+        chatId: saved.chat_id, targetUserId: saved.sender_open_id })
+        .catch(error => this.log.warn({ error, taskId: runtimeTask.id }, '结果未知提醒卡加急失败，不影响主任务'));
+    }
+    return messageId;
   }
 
   /** 提醒卡收尾：写明谁在什么时候做了什么，去掉按钮。 */

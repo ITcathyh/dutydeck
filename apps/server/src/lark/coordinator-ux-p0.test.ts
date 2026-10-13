@@ -565,6 +565,55 @@ describe('P0-4 群卡 @ 发起人：默认关字节不变，开启只在审批/�
       expect(mentions).toHaveLength(1);
     } finally { restored.stop(); }
   });
+
+  const resultCardOf = (h: Awaited<ReturnType<typeof harness>>) => [...h.cards.values()].find(card => card.state === 'completed' && Array.isArray(card.elements)
+    && card.elements.some((element: any) => element.element_id === 'final_output'))!;
+  const hasMention = (card: any) => card.elements.some((element: any) => element.element_id === 'group_mention');
+  const waitApproval = async (h: Awaited<ReturnType<typeof harness>>) => {
+    await h.coordinator.handle(event('om_perm', '等待批准'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).some(item => item.kind === 'permission' && item.state === 'pending')).toBe(true));
+    return [...h.cards.values()].find(card => card.awaitingHuman)!;
+  };
+  /** 包含此刻的免打扰时段（前后各一小时，可能跨零点），测试不依赖真实时钟落在哪个时间。 */
+  const quietAroundNow = () => {
+    const hhmm = (time: number) => `${String(new Date(time).getHours()).padStart(2, '0')}:${String(new Date(time).getMinutes()).padStart(2, '0')}`;
+    return `${hhmm(Date.now() - 3_600_000)}-${hhmm(Date.now() + 3_600_000)}`;
+  };
+
+  it('完成档开关关闭：结果卡不 @，审批卡仍 @', async () => {
+    const h = await harness('normal', { configPatch: { groupCardMention: true, notifyMentionDone: false } });
+    await h.coordinator.handle(event('om_task', '完成目标'), h.config);
+    await h.waitDelivered(1);
+    expect(hasMention(resultCardOf(h))).toBe(false);
+    expect(JSON.stringify([...h.cards.values()])).not.toContain('<at');
+
+    const p = await harness('permission', { configPatch: { groupCardMention: true, notifyMentionDone: false } });
+    expect(hasMention(await waitApproval(p))).toBe(true);
+  });
+
+  it('需要你操作档开关关闭：审批卡不 @，结果卡仍 @', async () => {
+    const p = await harness('permission', { configPatch: { groupCardMention: true, notifyMentionAction: false } });
+    const approval = await waitApproval(p);
+    expect(hasMention(approval)).toBe(false);
+    expect(JSON.stringify(approval)).not.toContain('<at');
+
+    const h = await harness('normal', { configPatch: { groupCardMention: true, notifyMentionAction: false } });
+    await h.coordinator.handle(event('om_task', '完成目标'), h.config);
+    await h.waitDelivered(1);
+    expect(hasMention(resultCardOf(h))).toBe(true);
+  });
+
+  it('免打扰时段内：结果卡不 @，审批卡仍 @', async () => {
+    const quietHours = quietAroundNow();
+    const h = await harness('normal', { configPatch: { groupCardMention: true, notifyQuietHours: quietHours } });
+    await h.coordinator.handle(event('om_task', '完成目标'), h.config);
+    await h.waitDelivered(1);
+    expect(hasMention(resultCardOf(h))).toBe(false);
+    expect(JSON.stringify([...h.cards.values()])).not.toContain('<at');
+
+    const p = await harness('permission', { configPatch: { groupCardMention: true, notifyQuietHours: quietHours } });
+    expect(hasMention(await waitApproval(p))).toBe(true);
+  });
 });
 
 describe('P0-6 /repair 二次确认回调：串应用/监听/白名单/人类四道门，发布走注入 client', () => {

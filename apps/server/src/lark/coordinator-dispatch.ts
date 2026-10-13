@@ -35,7 +35,7 @@ import { larkCommandEcho, parseSlashCommand } from './commands.js';
 import { escapeLarkPromptEcho, renderQueueSummaryElement, QUEUE_SUMMARY_ELEMENT_ID } from './queue-summary.js';
 import { replayedRecoveryNote } from './recovery-notes.js';
 import { protocolModeNote } from './protocol-hints.js';
-import { senderGroupMention } from './card-mentions.js';
+import { larkNotice } from './notify-tier.js';
 import { larkTaskAgentGuid } from './task-agent.js';
 import { markLarkFirstCardUndelivered, type LarkInboxRecord } from './task-inbox.js';
 import {
@@ -579,7 +579,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     this.log.info({ taskId: task.id, chatId: task.event.chatId }, '本轮已被 /new 作废，不再派发');
     void (async () => {
       // P0-4：作废回执是独立新消息，群聊开启时与失败回执同口径 @ 发起人；私聊不 @。
-      const mention = senderGroupMention(task.config.groupCardMention, task.event);
+      const mention = larkNotice('failure_receipt', task.config, task.event).mention;
       await sendTaskCard(this.service, task.event, {
         state: 'failed', readOnly: true, retryable: false,
         taskId: task.id, taskName: '请求未执行',
@@ -804,7 +804,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const completionReactionOnly = config.completionReactionOnly === true;
     // P0-4：仅独立失败/拒绝新消息在开启群 @ 时前置 @ 发起人；排队卡、心跳、私聊永不经过这里。
     const withGroupMention = (markdown: string): string => {
-      const mention = senderGroupMention(config.groupCardMention, event);
+      const mention = larkNotice('failure_receipt', config, event).mention;
       return mention ? `${mention}\n\n${markdown}` : markdown;
     };
     if (!this.workflows && task.resources.length) {
@@ -1088,9 +1088,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 提醒卡上没有按钮也没有详情链接，正文按不提这两者重新生成。
         const notice = recovery.relaunch || config.webBaseUrl
           ? await describeLarkTaskRecovery(this.runtime, task.sessionId, task.runtimeTaskId, state) : recovery;
+        const recoveryMention = larkNotice('task_recovery_notice', config, event).mention;
         return notifyLarkTaskRecovery({
           service: this.service, store: this.workflowOptions.store, log: this.log, appId: config.appId,
           sessionId: task.sessionId, taskId: task.runtimeTaskId, turn: task.turn, recovery: notice,
+          ...(recoveryMention ? { mention: recoveryMention } : {}),
           target: { chatId: event.chatId, ...(event.chatType === 'group'
             ? { replyMessageId: event.messageId, replyInThread: Boolean(event.threadId?.trim()) } : {}) }
         });
@@ -1250,7 +1252,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         const context = completed && !task.steered ? this.interactionContext(task) : undefined;
         // P0-4：完成/失败/被中断的独立新消息在群聊开启时 @ 发起人；超长结果转文件消息时
         // 长文的 @ 保留在摘要卡，附件不 @；reaction 不承担通知。
-        const terminalMention = senderGroupMention(config.groupCardMention, event);
+        const terminalMention = larkNotice('result', config, event).mention;
         // 「它说做完了，其实没做完」是这类产品最常见的失望。平台验证是可核对的反证，
         // 但此前只存在于 Web；结果卡上必须把「验证过没有」和 Agent 的自述分开写清楚。
         // 本轮有没有改这个仓库：「使用这个验证命令」按钮和 git 状态行都只在改了的时候才有意义。

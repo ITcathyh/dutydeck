@@ -185,6 +185,8 @@ export interface LarkWorkflowUrgentOptions {
   thresholdMs?: number;
   /** 每个群每小时最多加急次数，默认 3 次 */
   maxPerHourPerChat?: number;
+  /** 免打扰时段 HH:MM-HH:MM；时段内不发加急，结束后补发。 */
+  quietHours?: string;
 }
 
 export interface LarkWorkflowInteractionsOptions {
@@ -237,13 +239,14 @@ export class LarkWorkflowInteractions {
       : (typeof urgent === 'object' && urgent !== null && urgent.enabled !== false);
     if (!enabled) { this.urgentManager = undefined; this.urgentSignature = undefined; return; }
     const config = typeof urgent === 'object' && urgent !== null ? urgent : {};
-    const signature = JSON.stringify([config.thresholdMs ?? null, config.maxPerHourPerChat ?? null, Boolean(urgentManager)]);
+    const signature = JSON.stringify([config.thresholdMs ?? null, config.maxPerHourPerChat ?? null, config.quietHours ?? null, Boolean(urgentManager)]);
     if (this.urgentManager && this.urgentSignature === signature) return;
     this.urgentSignature = signature;
     this.urgentManager = urgentManager ?? new LarkUrgentManager({
       service: this.service,
       thresholdMs: config.thresholdMs,
       maxPerHourPerChat: config.maxPerHourPerChat,
+      quietHours: config.quietHours,
       onUrged: async (record, urgentAt) => {
         try {
           const current = await this.store.get(this.key(record));
@@ -312,7 +315,7 @@ export class LarkWorkflowInteractions {
     return unresolved;
   }
   async checkAndUrgePending(appId: string, options?: { now?: number }): Promise<LarkUrgentCheckResult> {
-    if (!this.urgentManager) return { checked: 0, urged: [], skippedRateLimited: [], skippedNotEligible: [], failed: [] };
+    if (!this.urgentManager) return { checked: 0, urged: [], skippedRateLimited: [], skippedNotEligible: [], skippedQuietHours: [], failed: [] };
     const records = await this.list(appId);
     return this.urgentManager.checkAndUrge(records, options?.now);
   }

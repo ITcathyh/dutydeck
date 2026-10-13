@@ -95,6 +95,11 @@ export type LarkBotConfig = {
   urgentThresholdMs?: number;
   /** 单个会话每小时的加急上限；服务端未配置时字段缺席，按模块默认处理。 */
   urgentMaxPerHourPerChat?: number;
+  /** 「需要你操作」「完成」两档是否 @ 发起人；服务端恒返回布尔，旧服务端缺省按开启处理。 */
+  notifyMentionAction?: boolean;
+  notifyMentionDone?: boolean;
+  /** 免打扰时段 HH:MM-HH:MM；未启用时字段缺席。 */
+  notifyQuietHours?: string;
   /** 长任务自动置顶；服务端恒返回布尔，旧服务端缺省按关闭处理。 */
   pinLongTasks?: boolean;
   /** 触发置顶的运行时长；服务端未配置时字段缺席，按模块默认处理。 */
@@ -426,6 +431,10 @@ export const api = {
     /** null = 清回模块默认（前端清空输入框就送 null）；undefined = 不改这一项。 */
     urgentThresholdMs?: number | null;
     urgentMaxPerHourPerChat?: number | null;
+    notifyMentionAction?: boolean;
+    notifyMentionDone?: boolean;
+    /** 空串 = 关闭免打扰时段；undefined = 不改这一项。 */
+    notifyQuietHours?: string;
     pinLongTasks?: boolean;
     pinAfterMs?: number | null;
     pushIntervalMs?: number;

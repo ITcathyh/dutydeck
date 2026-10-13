@@ -1036,6 +1036,72 @@ describe('LarkConfigModal 加急与置顶开关', () => {
     expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it('提醒分档：默认两档 @ 都开启、免打扰时段为空；回填服务端已存的值', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({ setupComplete: true }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+    expect(screen.getByRole('switch', { name: '需要你操作的消息 @ 发起人（默认开启）' }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('switch', { name: '完成通知 @ 发起人（默认开启）' }).getAttribute('aria-checked')).toBe('true');
+    expect((screen.getByLabelText('免打扰时段（可选）') as HTMLInputElement).value).toBe('');
+    cleanup();
+
+    renderModal(collection({ setupComplete: true, notifyMentionAction: false, notifyMentionDone: false, notifyQuietHours: '22:00-08:00' } as Partial<LarkBotConfig>));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+    expect(screen.getByRole('switch', { name: '需要你操作的消息 @ 发起人（默认开启）' }).getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByRole('switch', { name: '完成通知 @ 发起人（默认开启）' }).getAttribute('aria-checked')).toBe('false');
+    expect((screen.getByLabelText('免打扰时段（可选）') as HTMLInputElement).value).toBe('22:00-08:00');
+  });
+
+  it('提醒分档：改动随第一步保存写入', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true }));
+    renderModal(collection({ setupComplete: true }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    await user.click(screen.getByRole('switch', { name: '完成通知 @ 发起人（默认开启）' }));
+    await user.type(screen.getByLabelText('免打扰时段（可选）'), '22:00-08:00');
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]![0]).toMatchObject({ stage: 'lark', notifyMentionAction: true, notifyMentionDone: false, notifyQuietHours: '22:00-08:00' });
+  });
+
+  it('提醒分档：群卡片 @ 总开关关闭时两档开关不显示，重新打开后保留原选择', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({ setupComplete: true, notifyMentionDone: false } as Partial<LarkBotConfig>));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    await user.click(screen.getByRole('switch', { name: '群卡片 @ 发起人（默认开启）' }));
+    expect(screen.queryByRole('switch', { name: '完成通知 @ 发起人（默认开启）' })).toBeNull();
+    expect(screen.queryByRole('switch', { name: '需要你操作的消息 @ 发起人（默认开启）' })).toBeNull();
+    await user.click(screen.getByRole('switch', { name: '群卡片 @ 发起人（默认开启）' }));
+    expect(screen.getByRole('switch', { name: '完成通知 @ 发起人（默认开启）' }).getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('提醒分档：清空免打扰时段送空串；格式不对或起止相同就地挡住保存', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true }));
+    renderModal(collection({ setupComplete: true, notifyQuietHours: '22:00-08:00' } as Partial<LarkBotConfig>));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    const field = screen.getByLabelText('免打扰时段（可选）');
+    for (const bad of ['22-08', '25:00-08:00', '22:00-22:00', '22:00']) {
+      await user.clear(field);
+      await user.type(field, bad);
+      expect(screen.getByText(/免打扰时段格式应为/)).toBeTruthy();
+      expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(true);
+    }
+    await user.clear(field);
+    expect(screen.queryByText(/免打扰时段格式应为/)).toBeNull();
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]![0]).toMatchObject({ notifyQuietHours: '' });
+  });
+
   it('置顶等待时间同样有下限，且与加急的下限不同', async () => {
     const user = userEvent.setup();
     renderModal(collection({ setupComplete: true }));

@@ -2,6 +2,7 @@ import { collaborationParticipationModes, mentionPolicies, riskControlModes, sup
 import { isAbsolute } from 'node:path';
 import { hostname, userInfo } from 'node:os';
 import { LarkServiceError } from './service.js';
+import { parseLarkQuietHours } from './notify-tier.js';
 import { isLarkGroupMemoryScope, normalizeLarkGroupMemoryScope, type LarkGroupMemoryScope } from './memory.js';
 
 export const larkBotsConfigKey = 'lark.bots';
@@ -118,6 +119,14 @@ export interface StoredLarkConfig {
   urgentThresholdMs?: number;
   /** 每个群每小时最多加急几次，缺省由 workflow-urgent 按 3 次处理。 */
   urgentMaxPerHourPerChat?: number;
+  /**
+   * 提醒分档（见 notify-tier）：需要你操作 / 完成两档是否 @ 发起人，缺省开启；信息档永不 @。
+   * 需要先开 groupCardMention。normalizeStoredConfig 总是落成显式布尔。
+   */
+  notifyMentionAction?: boolean;
+  notifyMentionDone?: boolean;
+  /** 免打扰时段 HH:MM-HH:MM（daemon 本地时区，可跨零点）；缺省不启用。时段内只有「需要你操作」仍 @，加急推迟到时段结束。 */
+  notifyQuietHours?: string;
   /** 长任务进度卡是否自动置顶，默认关闭：置顶会改写群成员的会话列表。 */
   pinLongTasks: boolean;
   /** 任务跑多久算长任务（毫秒），缺省按 10 分钟处理。 */
@@ -235,6 +244,12 @@ export interface SaveLarkConfigInput {
   urgentThresholdMs?: number | null;
   /** 每群每小时加急上限，必须是 ≥ 1 的整数；缺省继承当前配置，null 表示清回模块默认。 */
   urgentMaxPerHourPerChat?: number | null;
+  /** 「需要你操作」档是否 @ 发起人；缺省继承当前配置，仍缺省按开启处理。 */
+  notifyMentionAction?: boolean;
+  /** 「完成」档是否 @ 发起人；缺省继承当前配置，仍缺省按开启处理。 */
+  notifyMentionDone?: boolean;
+  /** 免打扰时段 HH:MM-HH:MM；缺省继承当前配置，空白串关闭。 */
+  notifyQuietHours?: string;
   /** 长任务置顶总开关；缺省继承当前配置，仍缺省按关闭处理。 */
   pinLongTasks?: boolean;
   /** 长任务判定时长（毫秒），必须 ≥ 1000；缺省继承当前配置，null 表示清回模块默认。 */
@@ -317,6 +332,9 @@ export interface PublicLarkConfig {
   urgentEnabled: boolean;
   urgentThresholdMs?: number;
   urgentMaxPerHourPerChat?: number;
+  notifyMentionAction: boolean;
+  notifyMentionDone: boolean;
+  notifyQuietHours?: string;
   pinLongTasks: boolean;
   pinAfterMs?: number;
   pushIntervalMs: number;
@@ -613,6 +631,9 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     urgentEnabled: parsed.urgentEnabled === true,
     ...(normalizeDelayMs(parsed.urgentThresholdMs, minLarkUrgentThresholdMs) !== undefined ? { urgentThresholdMs: normalizeDelayMs(parsed.urgentThresholdMs, minLarkUrgentThresholdMs)! } : {}),
     ...(normalizeUrgentQuota(parsed.urgentMaxPerHourPerChat) !== undefined ? { urgentMaxPerHourPerChat: normalizeUrgentQuota(parsed.urgentMaxPerHourPerChat)! } : {}),
+    notifyMentionAction: parsed.notifyMentionAction !== false,
+    notifyMentionDone: parsed.notifyMentionDone !== false,
+    ...(parseLarkQuietHours(parsed.notifyQuietHours) ? { notifyQuietHours: parsed.notifyQuietHours!.trim() } : {}),
     pinLongTasks: parsed.pinLongTasks === true,
     ...(normalizeDelayMs(parsed.pinAfterMs, minLarkPinAfterMs) !== undefined ? { pinAfterMs: normalizeDelayMs(parsed.pinAfterMs, minLarkPinAfterMs)! } : {}),
     pushIntervalMs: Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20_000 ? pushIntervalMs : defaultLarkPushIntervalMs,
@@ -697,6 +718,9 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   urgentEnabled: config.urgentEnabled === true,
   ...(config.urgentThresholdMs !== undefined ? { urgentThresholdMs: config.urgentThresholdMs } : {}),
   ...(config.urgentMaxPerHourPerChat !== undefined ? { urgentMaxPerHourPerChat: config.urgentMaxPerHourPerChat } : {}),
+  notifyMentionAction: config.notifyMentionAction !== false,
+  notifyMentionDone: config.notifyMentionDone !== false,
+  ...(parseLarkQuietHours(config.notifyQuietHours) ? { notifyQuietHours: config.notifyQuietHours } : {}),
   pinLongTasks: config.pinLongTasks === true,
   ...(config.pinAfterMs !== undefined ? { pinAfterMs: config.pinAfterMs } : {}),
   preInjectPrompt: config.preInjectPrompt,
@@ -833,6 +857,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   // 三个阈值都用 null 表示「清回模块默认」，与 traceLimit 同一口径；不传才是继承现值。
   const urgentThresholdMs = input.urgentThresholdMs === undefined ? current?.urgentThresholdMs : input.urgentThresholdMs ?? undefined;
   const urgentMaxPerHourPerChat = input.urgentMaxPerHourPerChat === undefined ? current?.urgentMaxPerHourPerChat : input.urgentMaxPerHourPerChat ?? undefined;
+  const notifyMentionAction = input.notifyMentionAction ?? current?.notifyMentionAction ?? true;
+  const notifyMentionDone = input.notifyMentionDone ?? current?.notifyMentionDone ?? true;
+  const notifyQuietHours = input.notifyQuietHours === undefined ? current?.notifyQuietHours : input.notifyQuietHours.trim() || undefined;
   const pinLongTasks = input.pinLongTasks ?? current?.pinLongTasks ?? false;
   const pinAfterMs = input.pinAfterMs === undefined ? current?.pinAfterMs : input.pinAfterMs ?? undefined;
   const preInjectPrompt = input.preInjectPrompt === undefined ? current?.preInjectPrompt ?? '' : input.preInjectPrompt.trim();
@@ -852,6 +879,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (!Number.isInteger(traceLimit) || traceLimit < 1) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Trace limit must be a positive integer', 400);
   if (urgentThresholdMs !== undefined && (!Number.isInteger(urgentThresholdMs) || urgentThresholdMs < minLarkUrgentThresholdMs)) throw new LarkServiceError('INVALID_LARK_CONFIG', `Urgent threshold must be an integer of at least ${minLarkUrgentThresholdMs} milliseconds`, 400);
   if (urgentMaxPerHourPerChat !== undefined && (!Number.isInteger(urgentMaxPerHourPerChat) || urgentMaxPerHourPerChat < 1)) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Urgent hourly limit must be a positive integer', 400);
+  if (notifyQuietHours !== undefined && !parseLarkQuietHours(notifyQuietHours)) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Quiet hours must look like 22:00-08:00 (HH:MM-HH:MM, start and end differ)', 400);
   if (pinAfterMs !== undefined && (!Number.isInteger(pinAfterMs) || pinAfterMs < minLarkPinAfterMs)) throw new LarkServiceError('INVALID_LARK_CONFIG', `Pin delay must be an integer of at least ${minLarkPinAfterMs} milliseconds`, 400);
   const patternValidation = validateHighRiskPattern(highRiskPattern);
   if (!patternValidation.valid) throw new LarkServiceError('INVALID_HIGH_RISK_PATTERN', patternValidation.error, 400);
@@ -925,6 +953,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     urgentEnabled,
     ...(urgentThresholdMs !== undefined ? { urgentThresholdMs } : {}),
     ...(urgentMaxPerHourPerChat !== undefined ? { urgentMaxPerHourPerChat } : {}),
+    notifyMentionAction,
+    notifyMentionDone,
+    ...(notifyQuietHours ? { notifyQuietHours } : {}),
     pinLongTasks,
     ...(pinAfterMs !== undefined ? { pinAfterMs } : {}),
     pushIntervalMs,

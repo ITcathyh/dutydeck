@@ -23,7 +23,7 @@ import { deliverLarkStatusReaction, larkResultKey, larkSilentResultAnchor, sendL
 import { RECOVERY_TRACKING_NOTE } from './recovery-notes.js';
 import { isLarkDeterministicFailure } from './api-gate.js';
 import { redactTraceText } from './secret-redaction.js';
-import { senderGroupMention } from './card-mentions.js';
+import { larkNotice } from './notify-tier.js';
 import { larkTaskAgentGuid } from './task-agent.js';
 import type { ListenerLog, LarkRuntime } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
@@ -106,7 +106,7 @@ export async function performLarkCardReconcile(input: {
    * 结果未知、没有被自动处理的一轮：在原会话发一张带「重新执行」「标为已完成」「标为失败」的提醒卡（每次执行一张，幂等）。
    * 给了它，结果未知的一轮就不再发下面那张没有按钮的恢复提醒。
    */
-  unknownTaskNotice?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord) => Promise<unknown>;
+  unknownTaskNotice?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord, effective: StoredLarkConfig) => Promise<unknown>;
 }): Promise<number> {
   const { runtime, service, cardMappings, log, config, channel } = input;
   if (!runtime.getTasks || !runtime.getEvents) return 0;
@@ -200,7 +200,7 @@ export async function performLarkCardReconcile(input: {
         const hold = interrupted?.kind === 'hold' ? interrupted : undefined;
         const unknownNotice = runtimeTask.status === 'reconcile_required' && Boolean(input.unknownTaskNotice);
         if (unknownNotice) {
-          await input.unknownTaskNotice!(mapping, persisted, runtimeTask)
+          await input.unknownTaskNotice!(mapping, persisted, runtimeTask, effective)
             .catch(error => log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '结果未知提醒卡发送失败，下次对账重试'));
         }
         // 没有过程卡可画时按钮无处可放，说明里也不提。
@@ -229,9 +229,12 @@ export async function performLarkCardReconcile(input: {
           const notice = canRelaunch || canReplay || config.webBaseUrl
             ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status, undefined,
               hold ? { interrupted: hold } : {}) : recovery;
+          const recoveryMention = larkNotice('task_recovery_notice', effective,
+            { chatType: persisted.chat_type, senderOpenId: persisted.sender_open_id, senderType: persisted.sender_type }).mention;
           return notifyLarkTaskRecovery({
             service, store: input.deliveryStore, log, appId: persisted.app_id,
             sessionId: mapping.sessionId, taskId: runtimeTask.id, turn: persisted.turn, recovery: notice,
+            ...(recoveryMention ? { mention: recoveryMention } : {}),
             target: { chatId: persisted.chat_id,
               replyMessageId: persisted.reply_message_id?.trim()
                 || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
@@ -377,8 +380,8 @@ export async function performLarkCardReconcile(input: {
           // 保证消息不重发，@ 也不会重复。开关按群覆盖后的生效配置取值（与实时链路一致），
           // 群里关掉 @ 时本元素不存在。
           // 发起人是机器人时同样不 @ 回去：刷屏事故里最容易触发的恰好是重启对账这条路。
-          const mention = senderGroupMention(effective.groupCardMention, {
-            chatType: persisted.chat_type, senderOpenId: persisted.sender_open_id, senderType: persisted.sender_type });
+          const mention = larkNotice('result', effective, {
+            chatType: persisted.chat_type, senderOpenId: persisted.sender_open_id, senderType: persisted.sender_type }).mention;
           const decoration = await input.terminalDecoration?.(mapping, { ...persisted, runtime_task_id: runtimeTask.id, state }, effective);
           const elements = [
             ...(explicit ? [] : steered ? [{ tag: 'markdown', element_id: 'steer_note', content: steeringOutcomeText(steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : events)),

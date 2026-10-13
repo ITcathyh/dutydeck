@@ -36,7 +36,7 @@ import {
 } from './commands.js';
 import { expandLarkPluginCommand, larkPluginCommandHelp } from './plugin-commands.js';
 import { escapeLarkPromptEcho, renderQueueSummary, QUEUE_SUMMARY_MAX_ITEMS } from './queue-summary.js';
-import { senderGroupMention } from './card-mentions.js';
+import { larkNotice } from './notify-tier.js';
 import { claimLarkTaskDispatches, larkTaskAgentGuid, releaseLarkTaskClaim } from './task-agent.js';
 import { buildRepairConfirmCard, parseRepairCardActionValue, renderRepairResultCard, runOpenPlatformRepair } from './repair.js';
 import { connectLarkOpenPlatformSession } from './open-platform-session.js';
@@ -757,7 +757,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     } catch (error) {
       this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '解析飞书消息失败，已向用户回执');
       // P0-4：解析失败回执是独立新消息，群聊开启时与其他失败回执同口径 @ 发起人；私聊不 @。
-      const parseFailMention = senderGroupMention(config.groupCardMention, event);
+      const parseFailMention = larkNotice('failure_receipt', config, event).mention;
       await sendTaskCard(this.service, event, {
         state: 'failed', retryable: false, readOnly: true,
         taskId: event.messageId, taskName: '消息接收失败',

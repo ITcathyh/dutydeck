@@ -40,7 +40,8 @@ function cardService(prefix: string) {
     update: vi.fn(async (input: any) => ({ messageId: input.messageId })),
     getUserEmails: vi.fn(async () => ['alice@example.com']),
     listChatMembers: vi.fn(async () => ({ items: [], hasMore: false })),
-    listChatMessages: vi.fn(async () => ({ items: [], hasMore: false }))
+    listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })),
+    urgentApp: vi.fn(async () => ({ invalidUserIdList: [] as string[] }))
   };
 }
 
@@ -63,7 +64,7 @@ const buttonsOf = (card: any) => {
 const valueOf = (card: any, elementId: string) => buttonsOf(card).find(button => button.element_id === elementId)?.behaviors?.find((item: any) => item.type === 'callback')?.value;
 const isNotice = (input: any) => input?.elements?.some((element: any) => element.element_id === 'unknown_task_notice');
 
-async function unknownTopic() {
+async function unknownTopic(patch: Partial<StoredLarkConfig> = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-unknown-'));
   const path = join(cwd, 'state.db');
   const agent: AgentConfig = { id: 'unknown-fixture', name: 'Fixture', command: 'unused', args: [], protocol: 'acp', cwd, env: {},
@@ -72,7 +73,7 @@ async function unknownTopic() {
     fullTrustConfirmed: true, listening: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false,
     groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 60_000, hideTraceOnComplete: false,
     allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }, { openId: 'ou_bob', name: 'Bob' }], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
-    highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'danger', riskControlMode: 'off' };
+    highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'danger', riskControlMode: 'off', ...patch };
   const prompts: Array<{ sessionId: string; prompt: string }> = [];
   const agentState = { hang: true };
   const pending = new Set<() => void>();
@@ -166,6 +167,50 @@ describe('结果未知提醒卡（真实 Runtime + SQLite）', () => {
     expect(h.notices()).toHaveLength(0);
     expect(h.current().service.send.mock.calls.filter(([input]) => isNotice(input))).toHaveLength(0);
     expect(h.prompts).toHaveLength(1);
+  });
+
+  it('群里 @ 发起人放在提醒卡卡首；两档开关关闭或免打扰时段内的「需要你操作」档仍 @', async () => {
+    const mentioned = await unknownTopic({ groupCardMention: true });
+    expect(mentioned.notice.elements.map((element: any) => element.element_id)).toEqual(['group_mention', 'unknown_task_notice']);
+    expect(mentioned.notice.elements[0].content).toBe('<at id=ou_alice></at>');
+
+    const quiet = new Date(Date.now() - 3_600_000), quietEnd = new Date(Date.now() + 3_600_000);
+    const hhmm = (time: Date) => `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`;
+    const night = await unknownTopic({ groupCardMention: true, notifyQuietHours: `${hhmm(quiet)}-${hhmm(quietEnd)}` });
+    expect(night.notice.elements[0].element_id).toBe('group_mention');
+
+    const off = await unknownTopic({ groupCardMention: true, notifyMentionAction: false });
+    expect(off.notice.elements.map((element: any) => element.element_id)).toEqual(['unknown_task_notice']);
+  });
+
+  it('提醒卡挂过加急阈值仍没人处理，加急发起人一次；对账再跑、重启都不重发', async () => {
+    const h = await unknownTopic({ urgentEnabled: true, urgentThresholdMs: 60_000 });
+    await h.current().coordinator.reconcile(h.config);
+    expect(h.current().service.urgentApp).not.toHaveBeenCalled();
+
+    // 把提醒卡的发出时间拨到 2 分钟前，模拟挂了一阵。
+    const [row] = await h.current().repos.config.list('lark.unknown_task.');
+    await h.current().repos.config.set(row!.key, JSON.stringify({ ...JSON.parse(row!.value), sentAt: Date.now() - 120_000 }));
+    await h.current().coordinator.reconcile(h.config);
+    await h.current().coordinator.reconcile(h.config);
+    expect(h.current().service.urgentApp).toHaveBeenCalledExactlyOnceWith({ messageId: h.noticeId, userIdList: ['ou_alice'], userIdType: 'open_id' });
+    expect(JSON.parse((await h.current().repos.config.get(row!.key))!).urgentAt).toEqual(expect.any(String));
+
+    await h.restart();
+    await h.current().coordinator.reconcile(h.config);
+    expect(h.current().service.urgentApp).not.toHaveBeenCalled();
+  });
+
+  it('免打扰时段内提醒卡超时也不加急；加急没开则从不加急', async () => {
+    const hhmm = (time: number) => `${String(new Date(time).getHours()).padStart(2, '0')}:${String(new Date(time).getMinutes()).padStart(2, '0')}`;
+    const quiet = await unknownTopic({ urgentEnabled: true, urgentThresholdMs: 60_000, notifyQuietHours: `${hhmm(Date.now() - 3_600_000)}-${hhmm(Date.now() + 3_600_000)}` });
+    const off = await unknownTopic();
+    for (const h of [quiet, off]) {
+      const [row] = await h.current().repos.config.list('lark.unknown_task.');
+      await h.current().repos.config.set(row!.key, JSON.stringify({ ...JSON.parse(row!.value), sentAt: Date.now() - 120_000 }));
+      await h.current().coordinator.reconcile(h.config);
+      expect(h.current().service.urgentApp).not.toHaveBeenCalled();
+    }
   });
 
   it('非发起人、非管理员的点击被拒，任务不动', async () => {

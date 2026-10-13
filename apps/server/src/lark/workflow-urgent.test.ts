@@ -362,3 +362,78 @@ describe('LarkUrgentManager 时间戳不可解析时的方向', () => {
     expect(service.urgentApp).not.toHaveBeenCalled();
   });
 });
+
+describe('免打扰时段内的加急', () => {
+  /** 本地时区的时刻；免打扰时段按 daemon 本地时区判定。 */
+  const at = (hour: number, minute = 0, day = 13) => new Date(2026, 9, day, hour, minute, 0, 0).getTime();
+  const pending = (createdAt: number, overrides: Partial<LarkInteraction> = {}) =>
+    mockInteraction({ cardCreatedAt: new Date(createdAt).toISOString(), ...overrides });
+  const service = () => ({ urgentApp: vi.fn().mockResolvedValue({ invalidUserIdList: [] }) }) as Pick<LarkCardService, 'urgentApp'> & { urgentApp: ReturnType<typeof vi.fn> };
+
+  it('时段内超时的卡不加急、不消耗频控，时段结束后的第一次检查补发，只发一次', async () => {
+    const svc = service();
+    const manager = new LarkUrgentManager({ service: svc, quietHours: '22:00-08:00', maxPerHourPerChat: 1 });
+    const ask = pending(at(22, 30), { id: 'ask_night', kind: 'ask', cardId: 'om_ask' });
+
+    for (const when of [at(23, 0), at(3, 0, 14), at(7, 59, 14)]) {
+      const result = await manager.checkAndUrge([ask], when);
+      expect(result.skippedQuietHours).toEqual(['ask_night']);
+      expect(result.urged).toEqual([]);
+    }
+    expect(svc.urgentApp).not.toHaveBeenCalled();
+    expect(ask.urgentAt).toBeUndefined();
+
+    const resumed = await manager.checkAndUrge([ask], at(8, 0, 14));
+    expect(resumed.urged).toEqual(['ask_night']);
+    expect(resumed.skippedQuietHours).toEqual([]);
+    expect(svc.urgentApp).toHaveBeenCalledOnce();
+    expect(ask.urgentAt).toBe(new Date(at(8, 0, 14)).toISOString());
+
+    const again = await manager.checkAndUrge([ask], at(8, 5, 14));
+    expect(again.urged).toEqual([]);
+    expect(svc.urgentApp).toHaveBeenCalledOnce();
+  });
+
+  it('审批卡同样推迟；时段外超时照常立刻加急', async () => {
+    const svc = service();
+    const manager = new LarkUrgentManager({ service: svc, quietHours: '22:00-08:00' });
+    const permission = pending(at(21, 0), { id: 'perm_1', kind: 'permission', cardId: 'om_perm' });
+    expect((await manager.checkAndUrge([permission], at(22, 10))).skippedQuietHours).toEqual(['perm_1']);
+
+    const day = pending(at(10, 0), { id: 'perm_day', kind: 'permission', cardId: 'om_day' });
+    expect((await manager.checkAndUrge([day], at(10, 30))).urged).toEqual(['perm_day']);
+    expect(svc.urgentApp).toHaveBeenCalledOnce();
+  });
+
+  it('未配置免打扰时段时夜里照常加急', async () => {
+    const svc = service();
+    const manager = new LarkUrgentManager({ service: svc });
+    const result = await manager.checkAndUrge([pending(at(22, 30), { id: 'ask_1', cardId: 'om_ask' })], at(23, 0));
+    expect(result.urged).toEqual(['ask_1']);
+    expect(result.skippedQuietHours).toEqual([]);
+  });
+
+  it('urgeNotice：阈值、免打扰、每张卡一次、持久化的 urgentAt、每群频控', async () => {
+    const svc = service();
+    const manager = new LarkUrgentManager({ service: svc, quietHours: '22:00-08:00', thresholdMs: 10 * 60_000, maxPerHourPerChat: 1 });
+    const notice = { id: 'unknown_1', chatId: 'oc_group_1', messageId: 'om_notice', targetUserId: 'ou_target_person', since: at(21, 50) };
+
+    expect(await manager.urgeNotice(notice, 'unknown_task_notice', at(21, 55))).toBe('not_due');
+    expect(await manager.urgeNotice(notice, 'unknown_task_notice', at(22, 30))).toBe('quiet_hours');
+    expect(await manager.urgeNotice(notice, 'result', at(9, 0, 14))).toBe('not_eligible');
+    expect(svc.urgentApp).not.toHaveBeenCalled();
+
+    expect(await manager.urgeNotice(notice, 'unknown_task_notice', at(8, 0, 14))).toBe('urged');
+    expect(svc.urgentApp).toHaveBeenCalledWith({ messageId: 'om_notice', userIdList: ['ou_target_person'], userIdType: 'open_id' });
+    expect(await manager.urgeNotice(notice, 'unknown_task_notice', at(8, 1, 14))).toBe('already');
+
+    // 同一小时内同群再来一张：频控挡住；重启后带着持久化的 urgentAt 回来也不会重发。
+    expect(await manager.urgeNotice({ ...notice, id: 'unknown_2', messageId: 'om_notice_2' }, 'unknown_task_notice', at(8, 2, 14))).toBe('rate_limited');
+    const restarted = new LarkUrgentManager({ service: svc, quietHours: '22:00-08:00' });
+    expect(await restarted.urgeNotice({ ...notice, urgentAt: new Date(at(8, 0, 14)).toISOString() }, 'unknown_task_notice', at(9, 0, 14))).toBe('already');
+    expect(svc.urgentApp).toHaveBeenCalledOnce();
+
+    svc.urgentApp.mockRejectedValueOnce(new Error('boom'));
+    expect(await new LarkUrgentManager({ service: svc }).urgeNotice({ ...notice, id: 'unknown_3' }, 'unknown_task_notice', at(22, 30))).toBe('failed');
+  });
+});
