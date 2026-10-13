@@ -438,7 +438,11 @@ export interface LarkCommandContext {
   operator: LarkCommandOperator;
   /** /help 每页条数，默认 6，最终会被夹到 [1, 20]。 */
   helpPageSize?: number;
+  /** 当前机器人可用的插件命令，只用于 /help 的单独分组；插件命令的执行不经过本模块。 */
+  pluginCommands?: LarkPluginCommandHelp[];
 }
+
+export interface LarkPluginCommandHelp { name: string; summary: string; usage: string }
 
 const denyNotAllowlisted = (name: string) =>
   `当前账号不在机器人白名单中，无法执行 /${name}。请联系机器人管理员把你加入白名单后重试。`;
@@ -513,6 +517,8 @@ export function authorizeLarkCommandText(text: unknown, context: LarkCommandCont
 export interface LarkCommandHelpOptions {
   page?: number;
   pageSize?: number;
+  /** 插件命令单独成组，列在最后一页。 */
+  pluginCommands?: LarkPluginCommandHelp[];
 }
 
 export interface LarkCommandHelp {
@@ -642,16 +648,20 @@ export function renderLarkCommandHelp(
     '未列出的 `/xxx` 会作为普通文字交给 Agent 处理，不会被当作 Dutydeck 命令。'
   ];
   const navigation = helpNavigation(page, totalPages);
+  const plugins = page === totalPages && options.pluginCommands?.length
+    ? `**插件命令**\n${options.pluginCommands.map(command => `**\`/${command.name}\`**\n${command.summary}\n用法：\`${command.usage}\``).join('\n\n')}`
+    : undefined;
 
   return {
     title: larkHelpCardTitle,
     elements: [
       markdownElement('command_help_header', header),
       markdownElement('command_help_body', body),
+      ...(plugins ? [markdownElement('command_help_plugins', plugins)] : []),
       markdownElement('command_help_footer', footerLines.join('\n'), 'small'),
       ...(navigation ? [navigation] : [])
     ],
-    text: [header, body, footerLines.join('\n')].join('\n\n'),
+    text: [header, body, ...(plugins ? [plugins] : []), footerLines.join('\n')].join('\n\n'),
     page,
     totalPages
   };
@@ -729,7 +739,8 @@ export function routeLarkCommand(text: unknown, context: LarkCommandContext): La
         const page = Number.parseInt(parsed.args[0] ?? '', 10);
         const help = renderLarkCommandHelp(context.capabilities, {
           ...(Number.isFinite(page) ? { page } : {}),
-          ...(context.helpPageSize === undefined ? {} : { pageSize: context.helpPageSize })
+          ...(context.helpPageSize === undefined ? {} : { pageSize: context.helpPageSize }),
+          ...(context.pluginCommands?.length ? { pluginCommands: context.pluginCommands } : {})
         });
         return { kind: 'reply', command: 'help', parsed, elements: help.elements, text: help.text };
       }

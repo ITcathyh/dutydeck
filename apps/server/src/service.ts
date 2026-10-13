@@ -67,6 +67,9 @@ import { SessionInsightService } from './session-insight-service.js';
 import type { SessionInsightResolver } from './session-insight-service.js';
 import { SessionInsightResolver as SessionInsightResolverImpl } from './session-insight-resolver.js';
 import { createTranscriptSourceKeys } from '@dutydeck/runtime';
+import { loadDaemonPlugins, wirePlugins } from './plugins/service-wiring.js';
+import { sessionHookContext } from './plugins/integration.js';
+import type { StoredLarkConfig } from './lark/config.js';
 
 export interface StartLocalServerOptions {
   configureCollaborationExtensions?: (extensions: CollaborationExtensions) => void;
@@ -193,7 +196,9 @@ export function createProductionPtyBackend(sessionId: string) {
 export async function startLocalServer(options: StartLocalServerOptions = {}): Promise<LocalServer> {
   // pty-cli agent 发现：PTY_AGENT_CONTRIBUTIONS 经 loadConfig 合并进 config.agents
   // （builtinAgents 内部按 commandExists 过滤，只暴露本机已安装的 CLI；id 冲突时 ACPX 优先）。
-  const { config, droppedAgents } = loadConfigWithDiagnostics(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS);
+  // 插件在加载配置之前加载：插件 agents 要与 DUTYDECK_AGENTS_JSON 一起合并。没有启用的插件时为 undefined，下面不接线。
+  const pluginHost = await loadDaemonPlugins(options.env ?? process.env);
+  const { config, droppedAgents } = loadConfigWithDiagnostics(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS, pluginHost?.agents);
   const refusal = unauthenticatedListenRefusal(config, options.env ?? process.env);
   if (refusal) throw new Error(refusal);
   assertBotProcessStartup(config.databaseUrl, (options.env ?? process.env).DUTYDECK_BOT_APP_ID);
@@ -351,6 +356,15 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       awaitingAnswer: () => relayBroker.listPending(sessionId).length > 0,
     });
   };
+  const pluginWiring = pluginHost ? wirePlugins(pluginHost, {
+    runtime: () => runtime,
+    repositories: repos,
+    readBot: async appId => (await readLarkConfigs(repos.config)).find(bot => bot.appId === appId),
+    fallbackAgentId: () => config.agents[0]?.id,
+    sendText: (bot, input) => createLarkCardService(env, workbenchHttp.fetch, bot as StoredLarkConfig).sendText(input),
+    log: { warn: (details, message) => app?.log.warn(details, message) }
+  }) : undefined;
+  if (pluginWiring) setupCleanup.push(() => pluginWiring.dispose());
   // 用量账本：runtime 每轮交来读数、派发新任务前查月度上限。子步骤的根任务取自下方的工作项与 Leader 委托。
   const usageLedger = new UsageLedger({
     repositories: repos,
@@ -372,7 +386,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
     configureAgent: agent => agentModelSettings.resolve(agent),
     ptyRetirement: createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }, session => primaryHerdrBackend(session.id)),
-    admitTask: (session, request) => usageLedger.admit(session, request),
+    admitTask: pluginWiring
+      ? async (session, request) => { await usageLedger.admit(session, request); await pluginWiring.hooks.taskReceived(session, request); }
+      : (session, request) => usageLedger.admit(session, request),
     recordUsage: (session, attempt, reading) => usageLedger.record(session, attempt, reading),
     authorizeTask: async (session, task, phase) => { await collaboration?.background.authorizeTask(session, task); await automation.authorizeTask(task, phase); await codebaseCi?.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
     authorizeControl: async (sessionId, actor, _action) => {
@@ -408,7 +424,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       const policy = await readTokenEfficiencyPolicy(repos.config);
       return { version: promptTemplateVersion(policy.mode), ...(policy.diagnosticReason ? { diagnosticReason: policy.diagnosticReason } : {}) };
     },
-    prepareTaskPrompt: (session, prompt, skills, context) => prepareSkillPrompt(session.cwd, prompt, skills, context),
+    prepareTaskPrompt: pluginWiring
+      ? async (session, prompt, skills, context) => {
+        const botAppId = sessionHookContext(session).botAppId;
+        return pluginWiring.hooks.beforeRun(session, await prepareSkillPrompt(session.cwd, prompt, skills, { ...context, ...(botAppId ? { botAppId } : {}) }), context?.promptPolicyVersion);
+      }
+      : (session, prompt, skills, context) => prepareSkillPrompt(session.cwd, prompt, skills, context),
     sessionPrompt: async (session, prompt, context) => {
       const version = context?.promptPolicyVersion ?? 'legacy-v1';
       const toolsPrompt = await agentTools.promptForSession(session, prompt);
@@ -426,7 +447,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return result;
     },
     awaitingAnswer: sessionId => relayBroker.listPending(sessionId).length > 0,
-    log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) }
+    log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) },
+    ...pluginWiring?.runtimeOptions
   });
   setupCleanup.push(() => runtime.shutdown());
   const workspaceOrganizationService = new WorkspaceOrganizationService({
@@ -461,8 +483,16 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   }
   const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, client: config => createLarkCardService(env, workbenchHttp.fetch, config), log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
   const codebaseWebhookSecret = env.DUTYDECK_CODEBASE_WEBHOOK_SECRET?.trim();
+  // 插件 notify hook 拒绝时不发这条 CI 通知。
+  const notifyCi: typeof automationIntegration.notify = pluginWiring?.hooks.has('notify')
+    ? async (sessionId, sourceId, notice) => {
+      const session = await runtime.getSession(sessionId);
+      if (session && !await pluginWiring.hooks.notify(sessionHookContext(session), 'ci_notice', { title: notice.title, text: notice.markdown, failed: notice.failed === true })) return undefined;
+      return automationIntegration.notify(sessionId, sourceId, notice);
+    }
+    : automationIntegration.notify;
   const codebaseCi = codebaseWebhookSecret ? new CodebaseCiService({ repositories: repos, runtime, secret: codebaseWebhookSecret,
-    prepareDelivery: automationIntegration.prepareDelivery, notify: automationIntegration.notify, log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } }) : undefined;
+    prepareDelivery: automationIntegration.prepareDelivery, notify: notifyCi, log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } }) : undefined;
   const automation = new SessionAutomationService({ repositories: repos, runtime, ...automationIntegration, codebase: codebaseCi,
     githubToken: env.DUTYDECK_GITHUB_TOKEN ?? env.GH_TOKEN ?? env.GITHUB_TOKEN });
   setupCleanup.push(() => automation.close());
@@ -666,6 +696,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         return { ...decision, actorId: installationOwnerTaskActor };
       } },
       ...(codebaseCi ? { ciHooks: { codebase: codebaseCi } } : {}),
+      ...(pluginWiring ? { plugins: pluginWiring.routes } : {}),
       automation: { service: automation, authorize: async (request, sessionId, action) => {
         const principal = await resolveInstallationPrincipal(request);
         if (!principal) return false;

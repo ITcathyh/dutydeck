@@ -46,6 +46,7 @@ import { runDoctor } from './doctor/doctor.js';
 import { AutostartError, autostartDisable, autostartEnable, autostartStatus } from './autostart/autostart.js';
 import { createCliUi } from './cli-ui.js';
 import { adoptLegacyEnv, migrateLegacyBrandDirs } from './legacy-brand.js';
+import { runPluginCli } from './plugins/cli.js';
 
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { name: string; version: string };
 
@@ -468,6 +469,10 @@ async function main() {
     databaseExecutionStatus: async options => { output(await runDatabaseExecutionStatus(options)); },
     databaseUpgradeExecution: async options => { output(await runDatabaseUpgradeExecution(options)); },
     databaseRetireLegacy: async options => { output(await runDatabaseRetireLegacy(options)); },
+    plugin: async (action, args, options) => {
+      const result = await runPluginCli(action, args, options);
+      if (!result.ok) process.exitCode = 1;
+    },
     workspaceGroups: async (action, params, options) => {
       output(await runWorkspaceGroupsCli({
         action,

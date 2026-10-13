@@ -338,7 +338,7 @@ export interface TaskExecutionContext {
 export interface SkillDeliveryMetadata {
   name: string;
   path: string;
-  source: 'workspace' | 'user';
+  source: 'workspace' | 'user' | 'plugin';
   digest: string;
   mode: 'prompt';
 }
@@ -529,3 +529,4 @@ export * from './session-usage.js';
 export * from './memory-jobs.js';
 export * from './session-insight.js';
 export * from './session-insight-repository.js';
+export * from './plugins.js';

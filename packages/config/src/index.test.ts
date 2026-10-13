@@ -109,3 +109,19 @@ describe('DUTYDECK_AGENTS_JSON diagnostics', () => {
     expect(agentProbeTarget({ id: 'custom', command: '/opt/custom', protocol: 'acp', builtin: false })).toEqual({ command: '/opt/custom', execute: true });
   });
 });
+
+describe('plugin agents', () => {
+  const pluginAgent = (id: string, name: string) => ({ id, name, command: 'node', args: [], protocol: 'acp' as const, env: {} });
+
+  it('merges plugin agents before DUTYDECK_AGENTS_JSON so the environment wins on the same id', () => {
+    const config = loadConfig({ DUTYDECK_AGENTS_JSON: JSON.stringify([{ id: 'reviewer', name: 'From env', command: 'node' }]) }, [], [pluginAgent('reviewer', 'From plugin'), pluginAgent('helper', 'Plugin helper')]);
+    expect(config.agents.find(agent => agent.id === 'reviewer')?.name).toBe('From env');
+    expect(config.agents.find(agent => agent.id === 'helper')?.name).toBe('Plugin helper');
+  });
+
+  it('never lets a plugin replace a built-in agent', () => {
+    const config = loadConfig({}, [{ id: 'pty-tool', name: 'PTY tool', command: 'node' }], [pluginAgent('pty-tool', 'Hijacked'), pluginAgent('claude', 'Hijacked')]);
+    expect(config.agents.find(agent => agent.id === 'pty-tool')?.name).toBe('PTY tool');
+    expect(config.agents.find(agent => agent.id === 'claude')?.name).not.toBe('Hijacked');
+  });
+});

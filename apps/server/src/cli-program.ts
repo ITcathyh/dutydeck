@@ -5,6 +5,7 @@ import type { SessionNamesAction } from './session-names-cli.js';
 import { agentFields, botFields, fieldsHelp, groupFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { Command } from 'commander';
 import { DatabaseCliError } from './database-cli.js';
+import type { PluginCliAction, PluginCliOptions } from './plugins/cli.js';
 
 export interface CliOptions {
   host?: string;
@@ -191,6 +192,7 @@ export interface SessionNamesCommandOptions {
 export type SettingsCommandInput = Omit<SettingsCliInput, 'appSecret' | 'apiKey'> & { appSecretFd?: string; apiKeyFd?: string };
 
 export interface CliHandlers {
+  plugin?(action: PluginCliAction, args: string[], options: PluginCliOptions): void | Promise<void>;
   recovery?(operation: RecoveryOperation, sessionId: string, options: RecoveryCliOptions): void | Promise<void>;
   collaborate?(operation: string, id: string | undefined, options: { json?: string; file?: string; turn?: string }): void | Promise<void>;
   serve?(options: CliOptions): void | Promise<void>;
@@ -869,6 +871,50 @@ Examples:
     .requiredOption('--expected-revision <revision>', 'Current SecretRef revision for CAS')
     .action((id, options, command) => handlers.secretRemove?.(id, serverOptionsFrom(options, command) as SecretRemoveCliOptions));
 
+  const plugin = program.command('plugin').description('Install and manage Dutydeck plugins (commands, agents, skills, triggers, hooks, providers)');
+  const pluginOptions = (options: PluginCliOptions, command: Command): PluginCliOptions => {
+    const database = command.optsWithGlobals().database;
+    return { ...options, ...(typeof database === 'string' ? { database } : {}) };
+  };
+  plugin.command('install <source>')
+    .description('Install from a local directory, a git URL (git+https://…, git@…, file://…; #ref pins a branch, tag or commit) or an npm package (npm:name@version)')
+    .option('--scope <scope>', 'global, bot:<appId> or workspace:<path>', 'global')
+    .option('--yes', 'Trust the hooks and providers the plugin declares without prompting')
+    .option('--json', 'Print the result as a single line of JSON')
+    .action((source, options, command) => handlers.plugin?.('install', [source], pluginOptions(options, command)));
+  plugin.command('uninstall <name>').description('Remove an installed plugin, its trigger tokens and its configuration')
+    .option('--json', 'Print the result as a single line of JSON')
+    .action((name, options, command) => handlers.plugin?.('uninstall', [name], pluginOptions(options, command)));
+  plugin.command('enable <name>').description('Enable an installed plugin (takes effect after dutydeck restart)')
+    .option('--json', 'Print the result as a single line of JSON')
+    .action((name, options, command) => handlers.plugin?.('enable', [name], pluginOptions(options, command)));
+  plugin.command('disable <name>').description('Disable a plugin without removing it (takes effect after dutydeck restart)')
+    .option('--json', 'Print the result as a single line of JSON')
+    .action((name, options, command) => handlers.plugin?.('disable', [name], pluginOptions(options, command)));
+  plugin.command('list').description('List installed plugins with their source, pinned version and problems')
+    .option('--json', 'Print the result as a single line of JSON')
+    .action((options, command) => handlers.plugin?.('list', [], pluginOptions(options, command)));
+  plugin.command('update [name]').description('Fetch the recorded source again; new hooks or providers must be trusted again')
+    .option('--yes', 'Trust newly added hooks and providers without prompting')
+    .option('--json', 'Print the result as a single line of JSON')
+    .action((name, options, command) => handlers.plugin?.('update', name ? [name] : [], pluginOptions(options, command)));
+  plugin.command('validate <path>').description('Check a plugin directory and report every problem with its file and field')
+    .option('--json', 'Print the result as a single line of JSON')
+    .action((path, options, command) => handlers.plugin?.('validate', [path], pluginOptions(options, command)));
+  plugin.command('init <name>').description('Create a plugin template')
+    .option('--dir <path>', 'Target directory (default: ./<name>)')
+    .option('--json', 'Print the result as a single line of JSON')
+    .action((name, options, command) => handlers.plugin?.('init', [name], pluginOptions(options, command)));
+  plugin.command('trigger-token <trigger>').description('Show (or create) the token of <plugin>/<trigger>; used as the request token or HMAC key')
+    .option('--rotate', 'Replace the token; the old one stops working immediately')
+    .option('--json', 'Print the result as a single line of JSON')
+    .action((trigger, options, command) => handlers.plugin?.('trigger-token', [trigger], pluginOptions(options, command)));
+  plugin.command('config <name> <key>').description('Set a userConfig value; sensitive values go to the local secret store')
+    .option('--value <value>', 'Value for a non-sensitive key')
+    .option('--value-fd <fd>', 'Read the value from this file descriptor (0 = stdin)')
+    .option('--json', 'Print the result as a single line of JSON')
+    .action((name, key, options, command) => handlers.plugin?.('config', [name, key], pluginOptions(options, command)));
+
   program.command('update')
     .description('Update the global Dutydeck package and restart the background service')
     .option('--dist-tag <tag>', 'npm dist-tag to install (default: latest)', 'latest')
@@ -1051,6 +1097,8 @@ Examples:
   $ dutydeck workspace-groups move <group-id> --directory /path/to/repo
   $ dutydeck workspace-groups reset [session-id]
   $ dutydeck migrate archive --source-home /tmp/legacy-fixture --output /tmp/private-archive
+  $ dutydeck plugin install ./my-plugin
+  $ dutydeck plugin trigger-token my-plugin/deploy
   $ dutydeck secret list
   $ dutydeck secret set team-bot --value-fd 0
   $ dutydeck secret rotate team-bot --expected-revision 1 --value-fd 0

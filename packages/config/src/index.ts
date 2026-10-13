@@ -130,16 +130,31 @@ export function agentProbeTarget(agent: Pick<AgentConfig, 'id' | 'command' | 'pr
   return { command: agent.command, execute: true };
 }
 
-export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = []): LoadedConfig {
+/** 与 loadConfig 相同的数据库路径解析；插件目录等需要在 loadConfig 之前知道数据目录的地方用它。 */
+export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return resolve(env.DUTYDECK_DEFAULT_CWD ?? process.cwd(), env.DUTYDECK_DATABASE_URL ?? './.dutydeck/dutydeck.db');
+}
+
+/**
+ * pluginAgents：已启用插件 agents/*.json 的内容，先于 DUTYDECK_AGENTS_JSON 合并，同 id 以环境变量为准；
+ * 插件不能替换内置 Agent（同 id 的插件 Agent 被忽略）。命令找不到的插件 Agent 不进 droppedAgents（那份诊断针对环境变量）。
+ */
+export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): LoadedConfig {
   const extra = parseAgentsJson(env.DUTYDECK_AGENTS_JSON);
   const defaultCwd = env.DUTYDECK_DEFAULT_CWD ?? process.cwd();
   const agents = new Map(builtinAgents(defaultCwd, ptyContributions).map(agent => [agent.id, agent]));
-  const droppedAgents: DroppedAgent[] = [];
-  for (const configured of extra) {
+  const builtinIds = new Set([...listAcpxBuiltinAgents().map(agent => agent.id), ...ptyContributions.map(agent => agent.id)]);
+  const register = (configured: AgentConfig) => {
     // A custom CLI wrapper may change local settings even for --version.
     const customCli = configured.protocol === 'pty-cli' && configured.adapterId;
-    if (commandExists(configured.command)) agents.set(configured.id, { ...configured, cwd: configured.cwd ?? defaultCwd, version: configured.version ?? (customCli ? undefined : cliVersion(configured.command)) });
-    else droppedAgents.push({ id: configured.id, name: configured.name, command: configured.command, reason: 'command_not_found' });
+    if (!commandExists(configured.command)) return false;
+    agents.set(configured.id, { ...configured, cwd: configured.cwd ?? defaultCwd, version: configured.version ?? (customCli ? undefined : cliVersion(configured.command)) });
+    return true;
+  };
+  for (const agent of pluginAgents) if (!builtinIds.has(agent.id)) register(agentConfigSchema.parse(agent));
+  const droppedAgents: DroppedAgent[] = [];
+  for (const configured of extra) {
+    if (!register(configured)) droppedAgents.push({ id: configured.id, name: configured.name, command: configured.command, reason: 'command_not_found' });
   }
   const config = appConfigSchema.parse({
     host: env.DUTYDECK_LOCAL_ONLY === 'true' ? '127.0.0.1' : env.DUTYDECK_HOST,
@@ -147,7 +162,7 @@ export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, 
     authEnabled: env.DUTYDECK_AUTH === undefined
       ? undefined
       : z.enum(['true', 'false']).parse(env.DUTYDECK_AUTH) === 'true',
-    databaseUrl: resolve(defaultCwd, env.DUTYDECK_DATABASE_URL ?? './.dutydeck/dutydeck.db'),
+    databaseUrl: resolveDatabaseUrl(env),
     acpxCommand: env.DUTYDECK_ACPX_COMMAND,
     driverIdleTimeoutMs: env.DUTYDECK_DRIVER_IDLE_TIMEOUT_MS ? Number(env.DUTYDECK_DRIVER_IDLE_TIMEOUT_MS) : undefined,
     cleanupIntervalMs: env.DUTYDECK_CLEANUP_INTERVAL_MS ? Number(env.DUTYDECK_CLEANUP_INTERVAL_MS) : undefined,
@@ -156,8 +171,8 @@ export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, 
   return { config, droppedAgents };
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = []): AppConfig {
-  return loadConfigWithDiagnostics(env, ptyContributions).config;
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): AppConfig {
+  return loadConfigWithDiagnostics(env, ptyContributions, pluginAgents).config;
 }
 
 const shellQuote = (value: string) => /^[\w./@+:=-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;

@@ -91,7 +91,7 @@ function CommandPanel({ commands, skills, onChoose, onPickSkill }: { commands: V
       <span className="grid h-7 w-7 shrink-0 place-items-center rounded-sm bg-warning-soft text-warning"><Sparkles size={13}/></span>
       <span className="min-w-0">
         <span className="block text-body font-medium text-primary">{skill.name}</span>
-        <span className="block truncate text-caption text-subtle">{skill.source === 'workspace' ? '项目' : '个人'} · {skill.path}</span>
+        <span className="block truncate text-caption text-subtle">{skill.source === 'workspace' ? '项目' : skill.source === 'plugin' ? '插件' : '个人'} · {skill.path}</span>
       </span>
     </button>)}
     {/*

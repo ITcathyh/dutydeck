@@ -30,7 +30,7 @@ export type Agent = PublicAgent;
 export type AgentModel = { id: string; name: string };
 export type AgentModelsResult = { models: AgentModel[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent' };
 export type SessionCapabilities = { observedAt: string; protocol?: string; structuredApproval: string; terminal: string; turnRecovery: string; verification: string; localFileDelivery: string };
-export type SkillReference = { name: string; description: string; path: string; source: 'workspace' | 'user' };
+export type SkillReference = { name: string; description: string; path: string; source: 'workspace' | 'user' | 'plugin' };
 export type LarkAllowedUser = { openId: string; name: string };
 export type RiskControlMode = 'off' | 'guidance' | 'enforced';
 export type LarkBotConfig = {
@@ -470,6 +470,11 @@ export const api = {
   installLarkHook: (appId: string, highRiskPattern: string, expectedRevision?: number) => json<LarkHookStatus & { configRevision?: number }>('/api/lark/hooks/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, highRiskPattern, expectedRevision }) }),
   systemCapabilities: () => json<{ platform: string; directoryPicker: boolean; filePicker: boolean }>('/api/system/capabilities'),
   skills: (cwd?: string) => json<SkillReference[]>(`/api/system/skills${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`),
+  /** 已启用插件提供的斜杠命令；没有插件时服务端不注册这个接口，按空列表处理。 */
+  pluginCommands: async (cwd?: string) => {
+    try { return (await json<{ commands: Array<{ name: string; description: string }> }>(`/api/plugins/commands${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`)).commands; }
+    catch { return []; }
+  },
   selectDirectory: () => json<{ path: string }>('/api/system/select-directory', { method: 'POST' }),
   selectFile: () => json<{ path: string }>('/api/system/select-file', { method: 'POST' }),
   archive: (id: string) => json<Session>(`/api/sessions/${id}/archive`, { method: 'POST' }),

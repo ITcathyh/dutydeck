@@ -1,0 +1,5 @@
+{
+  "task.received": [
+    { "command": ["node", "hooks/log-event.mjs"], "timeout": 5000 }
+  ]
+}

@@ -90,7 +90,11 @@
     "src/session-name.ts",
     "dist/session-name.js",
     "dist/session-name.js.map",
-    "dist/session-name.d.ts"
+    "dist/session-name.d.ts",
+    "src/plugins.ts",
+    "dist/plugins.js",
+    "dist/plugins.js.map",
+    "dist/plugins.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

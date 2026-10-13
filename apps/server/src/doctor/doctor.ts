@@ -37,6 +37,7 @@ import { createCliUi, type CliUi } from '../cli-ui.js';
 import { locateEnvFile } from '../env-location.js';
 import { defaultAgentProbe, defaultDatabaseProbe, defaultPortProbe } from './probes.js';
 import { agentsToProbe, checkDefaultAgents, checkDroppedAgents, readDefaultAgents } from './agent-checks.js';
+import { pluginDoctorChecks } from '../plugins/doctor.js';
 import {
   AUTH_TOKEN_CONFIG_KEY,
   DOCTOR_CONFIG_KEYS,
@@ -346,6 +347,11 @@ export async function runDoctor(
     ? await dependencies.autostartStatus().catch(() => undefined)
     : await loadAutostartStatus();
   checks.push(...checkAutostart(autostart, username));
+
+  // ---- 12. 插件（没有安装插件时没有这一项） ----
+  checks.push(...await (dependencies.pluginChecks ?? pluginDoctorChecks)(dutydeckDir).catch(error => [{
+    id: 'plugins', label: '插件', level: 'warn' as const, detail: error instanceof Error ? error.message : String(error), remedy: '运行 dutydeck plugin list 查看插件状态。', command: 'dutydeck plugin list'
+  }]));
 
   const summary = summarize(checks);
   // ok 有且仅有「不存在 fail」时为 true —— 仅有警告仍然算通过。

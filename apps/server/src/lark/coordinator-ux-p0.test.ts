@@ -1478,3 +1478,21 @@ describe('卡片标题', () => {
     expect(larkTaskTitle(`@bdev-flash ${'长'.repeat(100)}`, 'bdev-flash')).toHaveLength(80);
   });
 });
+
+describe('插件命令接入飞书', () => {
+  it('插件命令展开成模板后照普通请求执行，/help 末页单独列出插件命令', async () => {
+    const { PluginCommandRegistry } = await import('../plugins/commands.js');
+    const { setLarkPluginCommands } = await import('./plugin-commands.js');
+    const dispose = setLarkPluginCommands(new PluginCommandRegistry([{ name: 'hello', scope: 'bot:cli_uxp0', commands: [{ name: 'greet', description: '打招呼', argumentHint: '<名字>', template: '向 $ARGUMENTS 打招呼' }] }]));
+    cleanups.push(dispose);
+    const h = await harness();
+    await h.coordinator.handle(event('om_plugin', '/greet 小明'), h.config);
+    await vi.waitFor(() => expect(h.send.mock.calls.some(([prompt]) => String(prompt).includes('向 小明 打招呼'))).toBe(true));
+    expect(h.send.mock.calls.some(([prompt]) => String(prompt).includes('/greet'))).toBe(false);
+
+    await h.coordinator.handle(event('om_help_plugins', '/help 99'), h.config);
+    const helpCard = [...h.cards.values()].find(card => card.taskId === 'om_help_plugins')!;
+    expect(JSON.stringify(helpCard)).toContain('插件命令');
+    expect(JSON.stringify(helpCard)).toContain('/greet <名字>');
+  });
+});

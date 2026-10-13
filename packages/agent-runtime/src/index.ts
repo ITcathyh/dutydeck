@@ -154,6 +154,15 @@ export interface RuntimeOptions {
   awaitingAnswer?: (sessionId: string) => boolean;
   /** 不调模型的登录状态检查，缺省见 agent-availability.ts。只在 checkAgentAvailability 里调用。 */
   agentStatusCheck?: AgentStatusCheck;
+  /**
+   * 待审批的工具调用在进入人工审批前先交给宿主（插件 hook）判定：allow/deny 直接代为决定、不再出审批，
+   * 其他返回值照常进入人工审批。抛错按未判定处理。
+   */
+  reviewPermission?: (session: Session, request: PermissionRequestData) => Promise<'allow' | 'deny' | undefined>;
+  /** 一轮执行结算后（completed/failed/interrupted/cancelled）通知宿主；不阻塞队列，异常忽略。 */
+  onTaskSettled?: (session: Session, task: PublicTaskRecord) => void | Promise<void>;
+  /** 一次验证跑完后通知宿主；不影响验证结果，异常忽略。 */
+  onVerificationCompleted?: (session: Session, result: VerificationResponse) => void | Promise<void>;
 }
 
 /** 已确认投递的任务完成；明确未投递才回队列，failed 保留未知状态等待恢复。 */
@@ -1499,10 +1508,12 @@ export class DutydeckRuntime {
       if (workspace) await this.mutations.wait(() => this.workspaces.validate(workspace));
       const token = this.mutations.current();
       this.mutations.check();
-      return await this.mutations.run(undefined, () => this.verifications.run(
+      const result = await this.mutations.run(undefined, () => this.verifications.run(
         id, session.cwd, input, actorId, eligibleTasks.at(-1)?.id,
         () => this.mutations.run(token, () => this.authorize(id, actorId))
       ));
+      if (this.options.onVerificationCompleted) void Promise.resolve().then(() => this.options.onVerificationCompleted!(session, result)).catch(() => {});
+      return result;
     } catch (error) {
       if (error instanceof RuntimeError && error.code === 'VERIFICATION_RECOVERY_BLOCKED') this.blockedVerificationSessions.set(id, error.message);
       throw error;
@@ -1635,6 +1646,17 @@ export class DutydeckRuntime {
       if (!previous || previous.sequence < stored.sequence) tools.calls.set(saved.id, { sequence: stored.sequence, data: saved, projected: false });
       return true;
     };
+    if (event.type === 'permission_request' && (data.status ?? 'pending') === 'pending' && scope && isAttemptRef(scope) && this.options.reviewPermission) {
+      const decision = await this.options.reviewPermission(session, data as PermissionRequestData).catch(() => undefined);
+      if (decision === 'allow' || decision === 'deny') {
+        // 不发待审批事件（没有人工审批卡片）；登记后走与人工审批相同的 resolvePermission，由它写入最终的审批记录。
+        const key = this.permissionKey(session.id, data.id);
+        this.permissions.set(key, { request: data, nativeId: String(event.data.id), fence: scope, generation: this.sessionGenerations.get(session.id) ?? 0, owner: this.mutations.current() });
+        setImmediate(() => void this.resolvePermission(session.id, data.id, decision === 'allow')
+          .catch(error => this.options.log?.warn({ sessionId: session.id, permissionId: data.id, error: error instanceof Error ? error.message : String(error) }, 'Host permission decision could not be applied')));
+        return;
+      }
+    }
     let stored: AgentEvent;
     try { stored = await this.emit(session.id, event.type, data, event.raw, eventId, event.sourceId); }
     catch (error) {
@@ -2403,9 +2425,10 @@ export class DutydeckRuntime {
     const ref = this.attemptRefs.get(token)!;
     this.activeTurns.add(id); this.completedTurns.delete(ref.attemptId);
     let agentId: string | undefined;
+    let settledSession: Session | undefined;
     try {
       const { session } = await this.active(id);
-      agentId = session.agentId;
+      agentId = session.agentId; settledSession = session;
       const input = this.acceptedInput(task);
       await this.authorize(id, task.executionContext?.actorId, true);
       await this.mutations.wait(() => this.options.authorizeTask?.(session, task, 'prepare') ?? Promise.resolve());
@@ -2497,7 +2520,12 @@ export class DutydeckRuntime {
       this.completedTurns.delete(ref.attemptId); this.driverStopReasons.delete(ref.attemptId); this.turnErrors.delete(ref.attemptId);
       this.attemptTools.delete(ref.attemptId);
     }
-    return this.publicTask(this.repos.execution.getTaskExecution(task.id)?.task ?? task);
+    const settled = this.publicTask(this.repos.execution.getTaskExecution(task.id)?.task ?? task);
+    if (this.options.onTaskSettled && settledSession && ['completed', 'failed', 'interrupted', 'cancelled'].includes(settled.status)) {
+      const notified = settledSession;
+      void Promise.resolve().then(() => this.options.onTaskSettled!(notified, settled)).catch(() => {});
+    }
+    return settled;
   }
 
   lookupAcceptedTask(request: TaskRequestV1): AcceptedTask | undefined {
