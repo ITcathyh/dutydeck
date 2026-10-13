@@ -34,7 +34,7 @@ const mentioning = (id: string, text: string, member: { openId?: string; name: s
     { key: '@_user_2', name: member.name, ...(member.openId ? { openId: member.openId } : {}), mentionedType: 'user' }
   ] });
 
-async function harness(options: { managedGroup?: boolean; configPatch?: Partial<StoredLarkConfig>; steer?: AgentDriver['steer']; hold?: (prompt: string) => Promise<void> | undefined } = {}) {
+async function harness(options: { managedGroup?: boolean; configPatch?: Partial<StoredLarkConfig>; steer?: AgentDriver['steer']; hold?: (prompt: string) => Promise<void> | undefined; reportIdle?: boolean } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-commands-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let release: (() => void) | undefined;
@@ -43,7 +43,7 @@ async function harness(options: { managedGroup?: boolean; configPatch?: Partial<
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
-      let cancelled = false;
+      let cancelled = false, sending = false;
       const cancel = () => { cancelled = true; emit({ type: 'completed', data: { stopReason: 'cancelled' } }); };
       const driver: AgentDriver = {
         start: async () => {}, resume: async () => {},
@@ -51,13 +51,18 @@ async function harness(options: { managedGroup?: boolean; configPatch?: Partial<
         send: async prompt => {
           prompts.push(prompt);
           cancelled = false;
-          // 第一轮一直挂着，后续消息才会真的排队；释放闸门后所有轮次立刻收口。
-          await gate;
-          await options.hold?.(prompt);
-          if (cancelled) return;
-          emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+          sending = true;
+          try {
+            // 第一轮一直挂着，后续消息才会真的排队；释放闸门后所有轮次立刻收口。
+            await gate;
+            await options.hold?.(prompt);
+            if (cancelled) return;
+            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+          } finally { sending = false; }
         },
-        ...(options.steer ? { steer: options.steer } : {})
+        ...(options.steer ? { steer: options.steer } : {}),
+        // 与真实 ACP 驱动一样报告自己是否空闲：结果未知的一轮要等驱动空闲才能人工处理。
+        ...(options.reportIdle ? { isIdle: () => !sending } : {})
       };
       return driver;
     }
@@ -123,6 +128,9 @@ async function harness(options: { managedGroup?: boolean; configPatch?: Partial<
   /** 指定标题的那张回执卡（任务终态卡也是只读卡，按标题取才不会拿错）。 */
   const receiptNamed = (taskName: string) => receipts().filter(card => card.taskName === taskName).at(-1);
   const markdownOf = (card: any) => String(card?.markdown ?? '') + JSON.stringify(card?.elements ?? []);
+  /** 发给某条指令的结果未知提醒卡（带「重新执行」「标为已完成」「标为失败」的那张）。 */
+  const unknownNotices = (taskId: string) => [...service.reply.mock.calls, ...service.send.mock.calls].map(([input]) => input as any)
+    .filter(input => input.taskId === taskId && JSON.stringify(input.elements ?? []).includes('unknown_task_notice'));
   /** 给本群下一条指令并等它进入队列（runtime 已经登记了这条任务）。 */
   const dispatch = async (id: string, text: string, senderOpenId = 'ou_alice') => {
     await coordinator.handle(event(id, text, { senderOpenId }), config);
@@ -136,7 +144,7 @@ async function harness(options: { managedGroup?: boolean; configPatch?: Partial<
   const waitRunning = async (text: string) => vi.waitFor(async () =>
     expect((await runtime.getTasks(await sessionId())).some(task => task.prompt.includes(text) && task.status === 'running')).toBe(true));
   return { repos, runtime, config, coordinator, createCoordinator, service, cards, log, groupManager, steerQueued, prompts,
-    receipts, lastReceipt, receiptNamed, markdownOf, dispatch, sessionId, waitRunning, cwd, release: () => release?.() };
+    receipts, lastReceipt, receiptNamed, markdownOf, unknownNotices, dispatch, sessionId, waitRunning, cwd, release: () => release?.() };
 }
 
 describe('/agents 列出本机可用 Agent', () => {
@@ -365,7 +373,7 @@ describe('Agent 支持插话时送进正在执行的这一轮', () => {
 
   it.each(['result', 'exception', 'moved'] as const)('/steer 投递结果未知时保留恢复状态，不降级为提升队首（%s）', async mode => {
     const steer = vi.fn(async () => { throw new Error('acknowledgement lost after delivery'); });
-    const h = await harness({ steer });
+    const h = await harness({ steer, reportIdle: true });
     await h.dispatch('om_1', '第一件事');
     await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
     if (mode !== 'result') {
@@ -380,13 +388,25 @@ describe('Agent 支持插话时送进正在执行的这一轮', () => {
     await vi.waitFor(async () => expect((await h.runtime.getTasks(id)).find(task => task.prompt.includes('改成另一个方向'))?.status).toBe('reconcile_required'));
     expect(h.steerQueued).not.toHaveBeenCalled();
     const note = await vi.waitFor(() => { const card = h.cards.filter(card => card.taskId === 'om_unknown').at(-1); expect(h.markdownOf(card)).toContain('投递结果未知'); return h.markdownOf(card); });
-    expect(note).toContain('管理员核对');
+    expect(note).toContain('请在随后发出的「结果未知」提醒卡上选择重新执行、标为已完成或标为失败');
     expect(note).not.toContain('已把这条内容提到队首');
     expect(note).not.toContain('这条内容按正常顺序排队');
+    // 回执里说的提醒卡由周期对账发到这条指令所在的话题，且只发一张。
+    await h.coordinator.startReconciliation(h.config, 50);
+    await vi.waitFor(() => expect(h.unknownNotices('om_unknown')).toHaveLength(1));
     h.release();
     // 夹具没有助手文本，原轮结束时标为 failed；未知插话仍不能随后自行执行。
     await vi.waitFor(async () => expect((await h.runtime.getTasks(id)).find(task => task.prompt.includes('第一件事'))?.status).toBe('failed'));
     expect(steer).toHaveBeenCalledTimes(1); expect(h.prompts).toHaveLength(1);
+    // 在提醒卡上标为已完成：插话按已送达结算，不重发；再对账也不补发第二张提醒卡。
+    const notice = h.unknownNotices('om_unknown')[0];
+    const noticeId = (await h.service.reply.mock.results[h.service.reply.mock.calls.findIndex(([input]) => input === notice)]!.value).messageId;
+    const value = { action: 'resolve_completed', task_id: 'om_unknown', turn: String(notice.turn), target: notice.capabilities.unknownTaskTarget };
+    expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: noticeId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
+    expect((await h.runtime.getTasks(id)).find(task => task.prompt.includes('改成另一个方向'))?.status).toBe('completed');
+    await h.coordinator.reconcile(h.config);
+    expect(h.unknownNotices('om_unknown')).toHaveLength(1);
+    expect(h.prompts).toHaveLength(1);
   });
 
   it('/steer 回执丢失但持久任务已完成时不重新提升队列', async () => {
@@ -405,19 +425,21 @@ describe('Agent 支持插话时送进正在执行的这一轮', () => {
 
   it('/queue steer 投递结果未知时要求核对，不提示继续排队或提升', async () => {
     const steer = vi.fn(async () => { throw new Error('acknowledgement lost after delivery'); });
-    const h = await harness({ steer });
+    const h = await harness({ steer, reportIdle: true });
     await h.dispatch('om_1', '第一件事');
     await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
     await h.dispatch('om_2', '第二件事');
     await h.coordinator.handle(event('om_q_unknown', '/queue steer 1'), h.config);
     const receipt = h.receiptNamed('/queue 插话结果未知');
     expect(h.markdownOf(receipt)).toContain('可能已送达');
-    expect(h.markdownOf(receipt)).toContain('管理员核对');
+    expect(h.markdownOf(receipt)).toContain('请在随后发出的「结果未知」提醒卡上选择重新执行、标为已完成或标为失败');
     expect(h.markdownOf(receipt)).not.toContain('仍在排队');
     expect(h.markdownOf(receipt)).not.toContain('/queue top');
     const second = (await h.runtime.getTasks(await h.sessionId())).find(task => task.prompt.includes('第二件事'))!;
     expect(second.status).toBe('reconcile_required');
     expect(h.steerQueued).not.toHaveBeenCalled(); expect(steer).toHaveBeenCalledTimes(1);
+    await h.coordinator.startReconciliation(h.config, 50);
+    await vi.waitFor(() => expect(h.unknownNotices('om_2')).toHaveLength(1));
   });
 
   it('/queue steer 在 Agent 不支持插话时如实说明，这条仍在排队', async () => {

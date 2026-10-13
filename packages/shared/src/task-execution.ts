@@ -202,19 +202,20 @@ export interface BoundExecutionRepository {
   promoteQueued(f: SessionFence, taskId: string, expectedTaskRevision: number, operation: QueueOperationInput): CommitResult;
   beginQueuedSteering(f: SessionFence, taskId: string, expectedTaskRevision: number, input: SteeringOperationInput): CommitResult;
   resolveQueuedSteering(f: SessionFence, operationId: string, controller: ExecutionController, outcome: 'injected' | 'startedNewTurn' | 'promptRequired' | 'unsupported' | 'unknown'): CommitResult;
-  confirmSteeringRecovery(f: SessionFence, input: import('./execution-recovery.js').SteeringRecoveryDecision, actor: ExecutionActor): CommitResult;
+  /** reuseOwned：资源核对按本运行时持有的驱动可复用处理（与 claimNext 开下一轮同一口径），由运行时先确认驱动空闲。 */
+  confirmSteeringRecovery(f: SessionFence, input: import('./execution-recovery.js').SteeringRecoveryDecision, actor: ExecutionActor, reuseOwned?: boolean): CommitResult;
   getPendingQueueActions(f: SessionFence): QueueAction[];
   settleQueueAction(f: SessionFence, operationId: string, expectedRevision: number, evidence: QueueActionEvidence): QueueAction;
   markSubmissionPending(f: AttemptFence, input: SubmissionIntent): CommitResult;
   markSubmitted(f: AttemptFence, receipt: SubmissionReceipt): CommitResult;
   settleAttempt(f: AttemptFence, settlementId: string, evidence: SettlementEvidence): CommitResult;
-  confirmAttemptRecovery(f: AttemptFence, settlementId: string, evidence: Extract<SettlementEvidence, { kind: 'manual' }>, verifiedOutputText?: string): CommitResult;
+  confirmAttemptRecovery(f: AttemptFence, settlementId: string, evidence: Extract<SettlementEvidence, { kind: 'manual' }>, verifiedOutputText?: string, reuseOwned?: boolean): CommitResult;
   suspendUnsubmitted(f: AttemptFence): CommitResult;
   cancelQueued(f: SessionFence, taskId: string, expectedTaskRevision: number, decision: RecoveryDecisionInput): CommitResult;
   markReconcileRequired(f: AttemptFence, reason: ReconcileReason): CommitResult;
   markOrphanedAttempt(f: AttemptFence, reason: ReconcileReason): CommitResult;
   recoverAttempt(f: AttemptFence, evidence: RecoveryEvidence): CommitResult;
-  retryAttempt(f: AttemptFence, decision: RecoveryDecisionInput, safeResources: ResourceCheckRef[]): CommitResult;
+  retryAttempt(f: AttemptFence, decision: RecoveryDecisionInput, safeResources: ResourceCheckRef[], reuseOwned?: boolean): CommitResult;
   appendEvent(f: SessionFence | AttemptFence, event: ExecutionEventInput): AgentEvent;
   patchSession(f: SessionFence, patch: SessionExecutionPatch): Session;
   finalizeSessionWorkspace(f: SessionFence, proof: SessionWorkspaceProof): Session;

@@ -6,7 +6,7 @@ import { redactTraceText } from './secret-redaction.js';
 import { OnlineProcessCard, type CardUpdateOutcome } from './online-process-card.js';
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import { mergeGroupTaskWatermark } from './group-task-context.js';
-import { describeLarkTaskRecovery, larkAgentUnavailableText, larkQuietSettledNote, larkReliability, larkStallNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
+import { describeLarkTaskRecovery, larkAgentUnavailableText, larkQuietSettledNote, larkReliability, larkStallNote, larkSteeringUnknownNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import { validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
 import { collectLarkTaskContext, larkMaterialMessageIds } from './task-context.js';
 import { findLarkAlertRecall, larkAlertKey, larkAlertRecallPrompt, type LarkAlertRecall } from './alert-recall.js';
@@ -151,7 +151,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     // 前面真的有东西才谈得上插队：只有自己一条时 steerQueued 无事可做，
     // 调了它再把异常写成「提升失败」，会把一个本来正常的情形说成出了问题。
     const tasks = this.runtime.getTasks ? await this.runtime.getTasks(sessionId).catch(() => []) : [];
-    const unknownNote = '插话投递结果未知，这条指令可能已送达。请联系 Dutydeck 管理员核对后处理，当前不会自动重发。';
+    const unknownNote = `插话投递结果未知。${larkSteeringUnknownNote}`;
     if (target.status === 'reconcile_required' || tasks.find(item => item.id === target.id)?.status === 'reconcile_required') return { note: unknownNote };
     const ahead = tasks.filter(item => item.id !== target.id && (item.status === 'queued' || item.status === 'running'));
     // 派发要花上几秒（附件、建会话），期间正在执行的可能已经换成别人的任务：
@@ -1079,6 +1079,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           { relaunch: await this.relaunchReady(config.appId, task.id, state, task.turn), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             continueInPlace: this.continuableScope(task) }) : undefined;
       const notifyRecovery = async () => {
+        // 结果未知的一轮由对账发带按钮的提醒卡（见 notifyUnknownTask），这里不再发没有按钮的那张。
+        if (state === 'reconcile_required' && this.runtime.inspectUnknownTask && this.runtime.resolveUnknownTask) return undefined;
         if (!recovery?.blocked || !task.sessionId || !task.runtimeTaskId) return undefined;
         // 提醒卡上没有按钮也没有详情链接，正文按不提这两者重新生成。
         const notice = recovery.relaunch || config.webBaseUrl

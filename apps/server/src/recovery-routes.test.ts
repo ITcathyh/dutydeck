@@ -4,6 +4,7 @@ import { ZodError } from 'zod';
 import { RuntimeError } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { registerRecoveryRoutes } from './recovery-routes.js';
+import { unknownTaskRuntime } from './task-resolution.test-helpers.js';
 
 const body = { action: 'confirm_result', outcome: 'unknown', runId: 'run', taskId: 'task', attemptId: 'attempt', expectedRevision: 3, decisionId: 'decision', evidenceRefs: ['operator:reviewed'], resourceChecks: [] };
 describe('execution recovery owner routes', () => {
@@ -65,5 +66,56 @@ describe('execution recovery owner routes', () => {
     const app = Fastify(); registerRecoveryRoutes(app, {} as DutydeckRuntime);
     try { expect((await app.inject({ method: 'GET', url: '/api/sessions/session/recovery' })).statusCode).toBe(403); }
     finally { await app.close(); }
+  });
+});
+
+describe('result-unknown task routes', () => {
+  const setup = async () => {
+    const h = await unknownTaskRuntime();
+    const app = Fastify();
+    app.setErrorHandler((error, _request, reply) => reply.code(error instanceof ZodError ? 400 : error instanceof RuntimeError ? error.statusCode : 500).send({ error: { code: (error as RuntimeError).code, message: error.message } }));
+    registerRecoveryRoutes(app, h.runtime, { authorize: request => request.headers.authorization === 'Bearer owner' });
+    return { h, app, headers: { authorization: 'Bearer owner' }, list: `/api/sessions/${h.session.id}/unknown-tasks`, url: `/api/sessions/${h.session.id}/unknown-tasks/${h.task.id}` };
+  };
+
+  it('lists the stuck task with its facts and retries the original prompt only after acknowledgement', async () => {
+    const { h, app, headers, list, url } = await setup();
+    try {
+      expect((await app.inject({ method: 'GET', url: list })).statusCode).toBe(403);
+      const [item] = (await app.inject({ method: 'GET', url: list, headers })).json();
+      expect(item).toMatchObject({ taskId: h.task.id, prompt: 'original', actionable: true, kind: 'attempt', reasonCode: 'AGENT_IDLE_TIMEOUT' });
+      expect(item.factLines).toHaveLength(3);
+      expect(item.factLines[0]).toContain('结果未知');
+      expect((await app.inject({ method: 'POST', url, payload: { target: item.target, action: 'failed' } })).statusCode).toBe(403);
+      const unacknowledged = await app.inject({ method: 'POST', url, headers, payload: { target: item.target, action: 'retry' } });
+      expect(unacknowledged.statusCode).toBe(400);
+      expect(await h.status()).toBe('reconcile_required');
+      const retried = await app.inject({ method: 'POST', url, headers, payload: { target: item.target, action: 'retry', allowDuplicateEffects: true } });
+      expect(retried.statusCode).toBe(200);
+      expect(retried.json()).toMatchObject({ replayed: false, status: 'queued' });
+      await vi.waitFor(async () => expect(await h.status()).toBe('completed'));
+      expect(h.prompts).toEqual(['original', 'original']);
+      // 同一个人再点一次只是回放；另一个动作被拒，写明谁在什么时候处理过。
+      expect((await app.inject({ method: 'POST', url, headers, payload: { target: item.target, action: 'retry', allowDuplicateEffects: true } })).json()).toMatchObject({ replayed: true });
+      const late = await app.inject({ method: 'POST', url, headers, payload: { target: item.target, action: 'failed' } });
+      expect(late.statusCode).toBe(409);
+      expect(late.json().error.message).toMatch(/^这一轮已经处理过：Web 管理员 于 .+ 已重新执行。$/);
+      expect((await app.inject({ method: 'GET', url: list, headers })).json()).toEqual([]);
+      expect(h.prompts).toEqual(['original', 'original']);
+    } finally { await app.close(); await h.close(); }
+  });
+
+  it('settles as failed or completed with the operator and time on record', async () => {
+    for (const action of ['failed', 'completed'] as const) {
+      const { h, app, headers, list, url } = await setup();
+      try {
+        const [item] = (await app.inject({ method: 'GET', url: list, headers })).json();
+        expect((await app.inject({ method: 'POST', url, headers, payload: { target: item.target, action } })).json()).toMatchObject({ status: action });
+        const settlement = h.repos.execution.getTaskExecution(h.task.id)!.currentAttempt!.settlement as any;
+        expect(settlement.decision).toMatchObject({ decisionId: `manual:${item.target}:${action}:web:installation_owner`,
+          evidenceRefs: ['manual_resolution', 'operator:web:installation_owner', expect.stringMatching(/^at:\d{4}-/)] });
+        expect(h.prompts).toEqual(['original']);
+      } finally { await app.close(); await h.close(); }
+    }
   });
 });

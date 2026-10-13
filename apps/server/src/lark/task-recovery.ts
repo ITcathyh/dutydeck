@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, type AgentEvent, type ConfigRepository } from '@dutydeck/shared';
+import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, unknownTaskActionLabels, unknownTaskRetryWarning, type AgentEvent, type ConfigRepository, type UnknownTaskFacts } from '@dutydeck/shared';
+import { unknownTaskFactLines } from '../task-resolution.js';
 import { withExplicitFinalLock } from './explicit-final.js';
 import { sendLarkResult, type DeliveryTarget } from './result-delivery.js';
 import { larkRelaunchLabels, larkReplayLabels } from './card-actions.js';
@@ -147,6 +148,69 @@ export async function notifyLarkTaskRecovery(input: {
       idempotencyKey: key
     }, input.log, store);
     return { messageId: sent.messageId, fingerprint: createHash('sha256').update(saved).digest('hex') };
+  });
+}
+
+/** 结果未知提醒卡的存档键：每次执行（或每次插话）一张，同一次执行不论对账跑多少遍、重启多少次都只发一张。 */
+export const larkUnknownTaskNoticeKey = (appId: string, sessionId: string, taskId: string, target: string) =>
+  `unknown_${createHash('sha256').update(JSON.stringify([appId, sessionId, taskId, target])).digest('hex').slice(0, 40)}`;
+export const larkUnknownTaskNoticeRecordKey = (key: string) => `lark.unknown_task.${key}`;
+export type LarkUnknownTaskNotice = { target: DeliveryTarget; markdown: string; messageId?: string };
+
+/** 提醒卡正文：已知事实、能做什么、谁能做。按钮与「查看详情」由卡片渲染。 */
+/** 插话投递结果未知时的回执：指向随后发到原话题的结果未知提醒卡（notifyLarkUnknownTask）和 Web 任务详情。 */
+export const larkSteeringUnknownNote = `这条指令可能已送达，也可能没有，不会自动重发。请在随后发出的「结果未知」提醒卡上选择${unknownTaskActionLabels.retry}、${unknownTaskActionLabels.completed}或${unknownTaskActionLabels.failed}，也可以在 Web 任务详情里处理。`;
+
+export const larkUnknownTaskMarkdown = (facts: UnknownTaskFacts, hasDetail: boolean) => [
+  '**这一轮的结果未知，需要你决定怎么处理**',
+  unknownTaskFactLines(facts).map(line => `- ${line}`).join('\n'),
+  `为避免重复执行，Dutydeck 不会自动重发。${hasDetail ? '可以先点「查看详情」看执行现场，再选择：' : '可以选择：'}`,
+  `- 「${unknownTaskActionLabels.retry}」：${unknownTaskRetryWarning}需要再点一次确认。`,
+  `- 「${unknownTaskActionLabels.completed}」「${unknownTaskActionLabels.failed}」：人工结算这一轮，不再重发。`,
+  '本轮发起人和管理员可以操作。'
+].join('\n\n');
+
+/**
+ * 结果未知时在原会话发一张带按钮的提醒卡，每次执行只发一次（larkUnknownTaskNoticeKey）。
+ * 第一次落库的目的地与正文冻结下来：重启后重放用同一个幂等键和同一份内容，送达回执（sendLarkResult 的 delivered 记录）挡住重复发送。
+ * 返回提醒卡的消息 ID，回调端据此确认点击来自这张卡。
+ */
+export async function notifyLarkUnknownTask(input: {
+  service: LarkCardService; store?: ConfigRepository; log: { warn: (...args: any[]) => void };
+  appId: string; sessionId: string; runtimeTaskId: string; facts: UnknownTaskFacts;
+  /** 原请求的飞书消息 ID 与轮次：按钮回调靠它们找回卡片映射。 */
+  messageTaskId: string; turn?: number; taskName: string; agentName?: string;
+  target: DeliveryTarget; webBaseUrl?: string; detailLogin?: boolean;
+}) {
+  const target = input.facts.target;
+  if (!input.facts.actionable || !target) return undefined;
+  if (!input.store?.compareAndSet) throw new Error('Unknown-task notification requires persistent CAS');
+  const store = input.store;
+  const key = larkUnknownTaskNoticeKey(input.appId, input.sessionId, input.runtimeTaskId, target);
+  const recordKey = larkUnknownTaskNoticeRecordKey(key);
+  return withExplicitFinalLock(store, key, async () => {
+    let saved = await store.get(recordKey);
+    if (!saved) {
+      const record: LarkUnknownTaskNotice = { target: input.target, markdown: larkUnknownTaskMarkdown(input.facts, Boolean(input.webBaseUrl)) };
+      await store.compareAndSet!(recordKey, saved, JSON.stringify(record));
+      saved = await store.get(recordKey);
+    }
+    if (!saved) throw new Error('Unknown-task notification record was not saved');
+    const record = JSON.parse(saved) as LarkUnknownTaskNotice;
+    if (record.messageId) return record.messageId;
+    const webBaseUrl = input.webBaseUrl?.trim().replace(/\/$/, '');
+    const sent = await sendLarkResult(input.service, { ...record.target, allowReplyFallback: false }, {
+      taskId: input.messageTaskId, taskName: input.taskName, sessionId: input.sessionId, turn: input.turn,
+      ...(input.agentName ? { agentName: input.agentName } : {}),
+      state: 'reconcile_required', statusLabel: '结果未知',
+      capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, unknownTaskTarget: target,
+        ...(webBaseUrl ? { webUrl: `${webBaseUrl}/sessions/${encodeURIComponent(input.sessionId)}` } : {}), ...(input.detailLogin && webBaseUrl ? { detailLogin: true } : {}) },
+      ...(webBaseUrl ? { webBaseUrl } : {}),
+      elements: [{ tag: 'markdown', element_id: 'unknown_task_notice', content: record.markdown }],
+      idempotencyKey: key
+    }, input.log, store);
+    await store.compareAndSet!(recordKey, saved, JSON.stringify({ ...record, messageId: sent.messageId }));
+    return sent.messageId;
   });
 }
 

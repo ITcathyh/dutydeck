@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { describeLarkTaskRecovery, larkContinuePrompt, larkIdleTimeoutMinutes, larkQuietSettledNote, larkRecoveryRetainedNote, larkReliability, larkStaleSettledNote } from './task-recovery.js';
+import { describeLarkTaskRecovery, larkContinuePrompt, larkIdleTimeoutMinutes, larkQuietSettledNote, larkRecoveryRetainedNote, larkReliability, larkStaleSettledNote,
+  larkUnknownTaskNoticeKey, larkUnknownTaskNoticeRecordKey, notifyLarkUnknownTask, type LarkUnknownTaskNotice } from './task-recovery.js';
+import { describeUnknownTaskResolution, resolveUnknownTask, type UnknownTaskRuntime } from '../task-resolution.js';
 import type { LarkInboxRecord } from './task-inbox.js';
 import type { LarkLaunchOptions } from './new-session.js';
-import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, type AgentEvent, type ChannelMapping, type Session, type TaskRecord } from '@dutydeck/shared';
+import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, RuntimeError, unknownTaskActionLabels, unknownTaskRetryWarning, type AgentEvent, type ChannelMapping, type Session, type TaskRecord, type UnknownTaskAction, type UnknownTaskFacts } from '@dutydeck/shared';
 import { larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
 import { larkPendingVerificationKey, parseLarkPendingVerifications } from './auto-verification.js';
 import { LarkServiceError } from './service.js';
@@ -74,6 +76,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         return raw && (JSON.parse(raw) as { stale?: boolean }).stale ? larkStaleSettledNote : undefined;
       },
       ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}),
+      ...(this.runtime.inspectUnknownTask && this.runtime.resolveUnknownTask ? { unknownTaskNotice: (mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord) => this.notifyUnknownTask(config, mapping, saved, runtimeTask) } : {}),
       // 呈现开关可以按群覆盖，对账必须按记录所属会话解析后再决定怎么补发，
       // 否则重启后群里的静默/只贴表情配置全部失效。解析失败退回 Bot 级配置。
       resolveConfig: async saved => {
@@ -900,6 +903,111 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       return { type: 'success', content: '已放弃这一轮，不再执行' };
     } catch (error) {
       this.log.warn({ error, taskId, action }, '处理重启切断那一轮的操作失败');
+      return { type: 'warning', content: error instanceof LarkServiceError ? error.message : '暂时无法处理，请稍后重试' };
+    }
+  }
+
+  /**
+   * 结果未知、没有被自动处理的一轮：在原会话发一张带「重新执行」「标为已完成」「标为失败」的提醒卡，每次执行一张。
+   * 旧的一轮（larkRecoveryNoticeExpired）不补发，免得重启时刷出几天前的提醒；那些在 Web 上处理。
+   */
+  private async notifyUnknownTask(config: StoredLarkConfig, mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord) {
+    const store = this.workflowOptions.store;
+    if (!store?.compareAndSet || !this.runtime.inspectUnknownTask) return;
+    const facts = await this.runtime.inspectUnknownTask(mapping.sessionId, runtimeTask.id);
+    if (!facts.actionable || await this.staleTurn(mapping.sessionId, runtimeTask)) return;
+    return notifyLarkUnknownTask({ service: this.service, store, log: this.log, appId: config.appId, sessionId: mapping.sessionId, runtimeTaskId: runtimeTask.id, facts,
+      messageTaskId: mapping.externalId, turn: saved.turn ?? 0, taskName: saved.task_name, agentName: await this.resolveAgentName(config),
+      target: { chatId: saved.chat_id,
+        replyMessageId: saved.reply_message_id?.trim() || (saved.root_message_id?.trim().startsWith('om_') ? saved.root_message_id.trim() : undefined),
+        replyInThread: saved.reply_in_thread },
+      ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}) });
+  }
+
+  /** 提醒卡收尾：写明谁在什么时候做了什么，去掉按钮。 */
+  private async closeUnknownTaskNotice(config: StoredLarkConfig, messageId: string, input: { taskId: string; taskName: string; turn: number; sessionId: string },
+    resolution: NonNullable<UnknownTaskFacts['resolution']>) {
+    const next = resolution.action === 'retry' ? '原请求已重新排队执行，进度见原来的任务卡。' : resolution.action === 'other' ? '' : '这一轮不会再重发。';
+    await this.service.update({
+      messageId, taskId: input.taskId, taskName: input.taskName, turn: input.turn, sessionId: input.sessionId,
+      state: resolution.action === 'completed' ? 'completed' : resolution.action === 'failed' ? 'failed' : resolution.action === 'retry' ? 'queued' : 'reconcile_required',
+      statusLabel: resolution.action === 'other' ? '结果未知' : `已${unknownTaskActionLabels[resolution.action]}`, readOnly: true,
+      capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false },
+      agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config),
+      ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
+      markdown: `**${describeUnknownTaskResolution(resolution, true)}**${next ? `\n\n${next}` : ''}`
+    });
+  }
+
+  /**
+   * 结果未知提醒卡的三个按钮。回调值只用来定位原消息、轮次和卡上那次执行；任务与会话从卡片映射读，点击必须来自那张提醒卡。
+   * 谁能点与「中断」同一口径：本轮发起人或管理员。「重新执行」可能重复上一轮的操作，60 秒内再点一次才执行；
+   * 管理员结算别人的任务与其他操作一样要再点一次。只结算一次由账本保证（见 resolveUnknownTask）。
+   */
+  protected async unknownTaskAction(action: 'resolve_retry' | 'resolve_completed' | 'resolve_failed', taskId: string, turn: number | undefined, target: string | undefined,
+    operatorOpenId?: string, context?: { messageId?: string; chatId?: string }) {
+    const store = this.workflowOptions.store;
+    const appId = this.reconcileConfig?.appId;
+    const runtime = this.runtime as typeof this.runtime & Partial<UnknownTaskRuntime>;
+    if (!operatorOpenId || !context?.messageId || !context.chatId || !appId || !store || !this.cardMappings || turn === undefined || !target
+      || !runtime.inspectUnknownTask || !runtime.resolveUnknownTask) {
+      return { type: 'warning', content: '此卡当前不可操作，请回原话题发送 /status 查看任务' };
+    }
+    const kind: UnknownTaskAction = action === 'resolve_retry' ? 'retry' : action === 'resolve_completed' ? 'completed' : 'failed';
+    try {
+      const config = await readLarkConfig(store, appId);
+      if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法执行此操作' };
+      const mapping = await this.cardMappings.get(larkCardChannel(appId), taskId);
+      const saved = parseOptionalCardTask(mapping?.extra);
+      const raw = mapping && saved?.runtime_task_id ? await store.get(larkUnknownTaskNoticeRecordKey(larkUnknownTaskNoticeKey(appId, mapping.sessionId, saved.runtime_task_id, target))) : undefined;
+      const notice = raw ? JSON.parse(raw) as LarkUnknownTaskNotice : undefined;
+      if (!mapping || !saved?.runtime_task_id || saved.app_id !== appId || saved.chat_id !== context.chatId || (saved.turn ?? 0) !== turn || notice?.messageId !== context.messageId) {
+        return { type: 'warning', content: '此卡已失效，请在最新的卡片上操作' };
+      }
+      const card = { taskId, taskName: saved.task_name, turn, sessionId: mapping.sessionId };
+      const effective = (saved.chat_type ?? 'group') === 'group' && this.groupManager ? await this.groupManager.resolved(config, saved.chat_id) : config;
+      if (!await this.isInterruptOperatorAllowed(effective, operatorOpenId, saved.chat_id, mapping.sessionId, saved.sender_open_id)) {
+        return { type: 'warning', content: this.requesterOnlyReason(effective, saved.sender_open_id, '处理这一轮') };
+      }
+      const facts = await runtime.inspectUnknownTask(mapping.sessionId, saved.runtime_task_id, target);
+      if (!facts.actionable) {
+        if (facts.resolution) void this.closeUnknownTaskNotice(config, context.messageId, card, facts.resolution).catch(error => this.log.warn({ error, taskId }, '结果未知提醒卡未能更新'));
+        return { type: 'warning', content: facts.resolution ? `这一轮已经处理过：${describeUnknownTaskResolution(facts.resolution)}` : '这一轮已经不在结果未知状态，请发送 /status 查看最新状态' };
+      }
+      if (kind === 'retry') {
+        // 与他人任务的二次确认同一个记法：60 秒内同一人再点同一按钮才执行。
+        const now = Date.now();
+        for (const [key, expiresAt] of this.foreignActionConfirmations) if (expiresAt <= now) this.foreignActionConfirmations.delete(key);
+        const confirmationKey = `${operatorOpenId}|${taskId}|${turn}|${action}|${target}`;
+        if ((this.foreignActionConfirmations.get(confirmationKey) ?? 0) <= now) {
+          this.foreignActionConfirmations.set(confirmationKey, now + 60_000);
+          return { type: 'warning', content: `${unknownTaskRetryWarning}确认要重新执行的话，60 秒内再点一次「${unknownTaskActionLabels.retry}」。` };
+        }
+        this.foreignActionConfirmations.delete(confirmationKey);
+      } else if (!this.foreignActionConfirmed(operatorOpenId, saved.sender_open_id, `${taskId}|${turn}|${action}|${target}`)) {
+        return { type: 'warning', content: '该任务由他人发起，再次点击同一按钮以确认操作' };
+      }
+      let result: Awaited<ReturnType<typeof resolveUnknownTask>>;
+      try {
+        result = await resolveUnknownTask(runtime as UnknownTaskRuntime, { sessionId: mapping.sessionId, taskId: saved.runtime_task_id, target, action: kind, operator: { channel: 'lark', id: operatorOpenId } });
+      } catch (error) {
+        if (!(error instanceof RuntimeError)) throw error;
+        if (error.code === 'UNKNOWN_TASK_ALREADY_RESOLVED') {
+          const latest = (await runtime.inspectUnknownTask(mapping.sessionId, saved.runtime_task_id, target).catch(() => undefined))?.resolution;
+          if (latest) void this.closeUnknownTaskNotice(config, context.messageId, card, latest).catch(updateError => this.log.warn({ error: updateError, taskId }, '结果未知提醒卡未能更新'));
+        }
+        return { type: 'warning', content: error.message };
+      }
+      // 进程卡上停下等人选的「重新执行」「放弃」「在原对话继续」随之失效（与 closeUnresolvedTurn 同一个记法）。
+      const redispatch = redispatchKey(appId, taskId, turn);
+      const held = await store.get(redispatch);
+      if (held && (JSON.parse(held) as LarkRelaunchClaim).phase === 'held') await store.compareAndSet?.(redispatch, held, JSON.stringify({ ...JSON.parse(held), phase: 'moved' })).catch(() => undefined);
+      const resolution = (await runtime.inspectUnknownTask(mapping.sessionId, saved.runtime_task_id, target)).resolution;
+      if (resolution) void this.closeUnknownTaskNotice(config, context.messageId, card, resolution).catch(error => this.log.warn({ error, taskId }, '结果未知提醒卡未能更新'));
+      this.scheduleReconcile();
+      return { type: 'success', content: kind === 'retry' ? '已按原请求重新排队执行，进度见原来的任务卡' : `已${unknownTaskActionLabels[kind]}，这一轮不会再重发` };
+    } catch (error) {
+      this.log.warn({ error, taskId, action }, '处理结果未知的一轮失败');
       return { type: 'warning', content: error instanceof LarkServiceError ? error.message : '暂时无法处理，请稍后重试' };
     }
   }
