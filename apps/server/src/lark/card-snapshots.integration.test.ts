@@ -179,7 +179,7 @@ function normalize(serialized: string, root: string) {
     .replace(/(已用时|用时|排队等待|已运行) \d+(?:m \d+s|m|s| 小时(?: \d+ 分)?| 分(?: \d+ 秒)?| 秒)/g, '$1 <耗时>')
     .replace(/(<\/font><font color='grey'> · )\d+(?: 小时(?: \d+ 分)?| 分(?: \d+ 秒)?| 秒)/g, '$1<耗时>')
     // 审批/提问卡关闭后的「结果 · 处理人 · HH:MM」。
-    .replace(/(已允许|已拒绝|已回答|超时自动拒绝)((?: · <at id=[^>]*><\/at>)?) · \d{2}:\d{2}/g, '$1$2 · <北京时刻>')
+    .replace(/(已允许|已拒绝|已回答|超时自动拒绝|已批准|已提修改意见|已取消)((?: · <at id=[^>]*><\/at>)?) · \d{2}:\d{2}/g, '$1$2 · <北京时刻>')
     // 进度卡「最近活动 HH:MM」。
     .replace(/最近活动 \d{2}:\d{2}/g, '最近活动 <北京时刻>')
     // 结果卡 git 状态行（分支名与数量替换成占位符）。
@@ -210,7 +210,7 @@ const earlierUsage = (costUsd: number): UsageLedgerEntry => ({
 
 const permissionOptions = [{ id: 'allow_once', label: '允许一次', kind: 'allow_once' }, { id: 'reject_once', label: '拒绝', kind: 'reject_once' }];
 
-async function harness(options: { config?: Partial<StoredLarkConfig>; turns?: Turn[]; git?: boolean; memory?: boolean; steer?: boolean } = {}) {
+async function harness(options: { config?: Partial<StoredLarkConfig>; turns?: Turn[]; git?: boolean; memory?: boolean; steer?: boolean; agent?: Partial<AgentConfig> } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-card-snapshots-'));
   // 状态库与记忆投影放在工作区外面：它们一直在写，放进工作区会让验证的代码指纹对不上。
   const workspace = join(root, 'workspace');
@@ -236,7 +236,7 @@ async function harness(options: { config?: Partial<StoredLarkConfig>; turns?: Tu
     ...options.config
   };
   const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd: workspace, env: {},
-    permissionMode: 'ask', timeout: 60, capabilities: { pause: false, resume: true }, builtin: false };
+    permissionMode: 'ask', timeout: 60, capabilities: { pause: false, resume: true }, builtin: false, ...options.agent };
 
   /** 在同一个状态库上起一套服务；重启时飞书那一侧（消息、卡片）原样保留。 */
   const boot = async (first: boolean) => {
@@ -265,6 +265,8 @@ async function harness(options: { config?: Partial<StoredLarkConfig>; turns?: Tu
         };
         const driver: AgentDriver = {
           start: async () => {}, resume: async () => {}, isStopped: async () => true,
+          // 先出计划的计划轮按任务切到 deny-all，下一轮切回。
+          setPermissionMode: () => {},
           stop: async () => cut(false),
           interrupt: async () => cut(true),
           send: async input => {
@@ -464,6 +466,27 @@ describe('飞书卡片快照（入站事件驱动真实链路）', () => {
     await h.delivered(task);
     h.checkpoint('运行完成');
     await h.snapshot('running-and-completed');
+  }, 60_000);
+
+  it('先出计划：计划卡、提修改意见后重出计划、批准后执行', async () => {
+    const h = await harness({ agent: { args: ['claude-agent-acp'] }, turns: [
+      async ({ emit }) => { emit(text('## 计划\n1. 修改 src/login/errors.ts，把英文报错换成中文\n2. 运行 pnpm test 验证')); },
+      async ({ emit }) => { emit(text('## 计划（按意见调整）\n1. 只修改 src/login/errors.ts 里的文案，不动样式\n2. 运行 pnpm test 验证')); },
+      async ({ emit }) => { emit(text('已按计划把登录页报错改成中文，pnpm test 通过。')); }
+    ] });
+    const task = h.say('/plan 把登录页的错误提示改成中文');
+    await h.delivered(task);
+    h.checkpoint('计划卡');
+    const firstPlan = (await h.persisted(task))!.final_message_id!;
+    await h.click(firstPlan, '提修改意见', { formValue: { answer: '只改文案，不动样式' } });
+    await h.delivered(firstPlan);
+    h.checkpoint('重出计划');
+    const secondPlan = (await h.persisted(firstPlan))!.final_message_id!;
+    await h.click(secondPlan, '批准执行');
+    await h.delivered(secondPlan);
+    h.checkpoint('批准后执行');
+    expect(h.prompts).toHaveLength(3);
+    await h.snapshot('plan-revise-approve');
   }, 60_000);
 
   it('执行失败的结果卡', async () => {

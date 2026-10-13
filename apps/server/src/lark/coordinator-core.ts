@@ -161,7 +161,8 @@ export abstract class LarkCoordinatorCore {
       this.inbox = new LarkTaskInbox(workflowOptions.store);
       this.workflows = new LarkWorkflowInteractions(workflowOptions.store, runtime, service, workflowOptions.broker,
         (record, actor, action) => this.authorizeInteraction(record, actor, action),
-        { approverCandidates: record => this.groupManager?.highRiskOpenIds(record.appId, record.event.chatId) ?? Promise.resolve([]) });
+        { approverCandidates: record => this.groupManager?.highRiskOpenIds(record.appId, record.event.chatId) ?? Promise.resolve([]),
+          onPlanDecision: record => this.submitPlanDecision(record) });
       // 置顶记录必须持久化：进程崩在长任务中间时，只有账本能让重启后的对账认出僵尸置顶。
       this.pins = new LarkPinManager(service, { store: workflowOptions.store, log: this.log });
     }
@@ -233,9 +234,12 @@ export abstract class LarkCoordinatorCore {
     if (saved.app_id !== record.appId || saved.chat_id !== record.event.chatId || saved.runtime_task_id !== record.taskId
       || saved.turn !== record.turn || saved.sender_open_id !== record.event.senderOpenId) return false;
     const task = (await this.runtime.getTasks?.(record.sessionId))?.find(item => item.id === record.taskId);
-    if (!task || (record.kind === 'result' ? task.status !== 'completed' : task.status !== 'running')) return false;
+    if (!task || (record.kind === 'result' || record.kind === 'plan' ? task.status !== 'completed' : task.status !== 'running')) return false;
     return this.currentAccess(config, saved.chat_id, record.event.chatType, actor, action, record.sessionId, saved.sender_open_id);
   }
+
+  /** 计划卡上批准或提修改意见后提交下一轮（见 coordinator-cards）。 */
+  protected abstract submitPlanDecision(record: LarkInteraction): Promise<void>;
 
   protected interactionContext(task: LarkTask): LarkInteractionContext | undefined {
     return task.sessionId && task.runtimeTaskId ? { appId: task.config.appId, sessionId: task.sessionId,

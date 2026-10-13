@@ -107,6 +107,12 @@ export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): 
   else (await backend.write('\r'));
 }
 
+/**
+ * 计划阶段守卫不拦的 Claude 工具：只读、搜索、联网读取、待办和子 agent（子 agent 自己的工具调用照样过 hook）。
+ * 其余工具（Bash、Edit、Write、MCP 工具等）都要过守卫；Bash 由守卫脚本按只读白名单判断。
+ */
+export const claudePlanGuardMatcher = '^(?!(?:Read|Glob|Grep|LS|NotebookRead|WebFetch|WebSearch|TodoWrite|TodoRead|Task|Agent|Skill|ToolSearch|AskUserQuestion|BashOutput|TaskOutput|ListAgents|ListMcpResourcesTool|ReadMcpResourceTool|ReadMcpResourceDirTool)$)';
+
 /** full-trust 姿态：同时跳过工具权限确认与危险模式提示。 */
 export function pushClaudeFamilyBypassArgs(args: string[], permissionMode: AdapterSessionContext['permissionMode']): void {
   if (permissionMode !== 'full-trust') return;
@@ -239,7 +245,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     id,
     capabilities: { resume: true, nativeInputReceipt: true },
 
-    buildArgs({ sessionId, resume, resumeSessionId, model, permissionMode, env }: AdapterSessionContext): string[] {
+    buildArgs({ sessionId, resume, resumeSessionId, model, permissionMode, env, planGuardCommand }: AdapterSessionContext): string[] {
       // --session-id/--resume 只接受裸 UUID：dutydeck 的 "ses_<uuid>" 剥前缀，
       // 目标步骤的 "ses_work_<hash>" 这类非 UUID id 确定性地映射成 UUID。
       const args: string[] = [];
@@ -259,16 +265,19 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
       if ((permissionMode === 'ask' || permissionMode === 'approve-reads') && env?.dutydeck_session_source === 'lark') {
         args.push('--permission-mode', 'default');
       }
-      if (relayEnabled(env)) {
+      const relay = relayEnabled(env);
+      if (relay || planGuardCommand) {
         const index = args.indexOf('--settings');
         const settings = index < 0 ? {} : JSON.parse(args[index + 1]!);
-        const value = JSON.stringify({ ...settings, hooks: { PreToolUse: [{
+        const value = JSON.stringify({ ...settings, hooks: { PreToolUse: [...(relay ? [{
           matcher: '^AskUserQuestion$',
           hooks: [{ type: 'command', command: `${relayCommandFrom(env)} session native-ask`, timeout: 1230 }],
-        }],
+        }] : []),
+        // 计划阶段守卫：只读工具不过 hook，其余工具每次先看守卫脚本在不在（平时不在，只花一次 test）。
+        ...(planGuardCommand ? [{ matcher: claudePlanGuardMatcher, hooks: [{ type: 'command', command: planGuardCommand, timeout: 30 }] }] : [])],
         // 非完全信任时，Claude 原本要在终端弹出的工具确认改由 hook 交给 Dutydeck，飞书会话里变成审批卡；
         // 非飞书会话由服务端答复保留原生确认。
-        ...(permissionMode === 'full-trust' ? {} : { PermissionRequest: [{
+        ...(!relay || permissionMode === 'full-trust' ? {} : { PermissionRequest: [{
           hooks: [{ type: 'command', command: `${relayCommandFrom(env)} session permission-hook`, timeout: relayPermissionHookTimeoutSeconds }],
         }] }) } });
         if (index < 0) args.push('--settings', value);

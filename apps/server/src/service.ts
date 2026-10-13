@@ -647,6 +647,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       sessionNames: {
         authorize: async request => Boolean(await resolveInstallationPrincipal(request)),
       },
+      plan: { store: repos.config },
       webRoot,
       usage: { ledger: usageLedger, snapshot: sessionId => sessionUsageSnapshot(repos, sessionId), authorize: async request => Boolean(await resolveInstallationPrincipal(request)) },
       collaboration: { service: collaboration.service, runtime, tools: agentTools, evaluation: collaboration.evaluation, extensions: collaboration.extensions,

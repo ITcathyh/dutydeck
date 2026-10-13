@@ -3,6 +3,7 @@ import type { TerminalSettings } from './terminal-settings.js';
 import { registerRecoveryRoutes, type RecoveryRouteOptions } from './recovery-routes.js';
 import { registerWorkspaceGroupRoutes, type WorkspaceGroupRouteOptions } from './workspace-group-routes.js';
 import { registerSessionNameRoutes, type SessionNameRouteOptions } from './session-name-routes.js';
+import { registerPlanRoutes, type PlanRouteOptions } from './plan-routes.js';
 import { z, ZodError } from 'zod';
 import { registerCollaborationRoutes, type CollaborationRouteOptions } from './collaboration-routes.js';
 import { AgentGroupToolError } from './lark/agent-tools.js';
@@ -71,6 +72,8 @@ export interface BuildAppOptions {
   recovery?: RecoveryRouteOptions;
   workspaceGroups?: WorkspaceGroupRouteOptions;
   sessionNames?: SessionNameRouteOptions;
+  /** 先出计划（/api/sessions/:id/plan*）；不传 = 不注册。 */
+  plan?: PlanRouteOptions;
   collaboration?: CollaborationRouteOptions;
   usage?: UsageRouteOptions;
   /**
@@ -165,6 +168,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   registerRecoveryRoutes(app, runtime, options.recovery);
   registerWorkspaceGroupRoutes(app, options.workspaceGroups);
   registerSessionNameRoutes(app, runtime, options.sessionNames);
+  if (options.plan) registerPlanRoutes(app, runtime, requireSessionExecution, options.plan);
   if (options.terminal) registerTerminalRoutes(app, options.terminal);
   await registerInstanceProxy(app, options.instances ?? [], options.terminal?.auth, options.lark?.config);
   registerRelayRoutes(app, { ...options.relay, runtime: options.relay?.runtime ?? runtime,

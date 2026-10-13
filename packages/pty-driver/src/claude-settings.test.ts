@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createCliAdapter } from '@dutydeck/cli-adapters';
+import { claudePlanGuardMatcher, createCliAdapter } from '@dutydeck/cli-adapters';
 import type { SessionBackend } from '@dutydeck/session-backends';
 import { ClaudeSettings } from './claude-settings.js';
 import { PtyCliDriver } from './driver.js';
@@ -116,7 +116,7 @@ describe('Claude settings composition', () => {
         hooks: [{
           type: 'command', command: "'/usr/bin/node' '/opt/dutydeck/cli.js' session native-ask", timeout: 1230,
         }],
-      }]);
+      }, { matcher: claudePlanGuardMatcher, hooks: [{ type: 'command', command: new ClaudeSettings('claude-code', sessionId).planGuardCommand(), timeout: 30 }] }]);
     } finally {
       await driver.stop();
     }

@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
+import { claudePlanGuardMatcher } from '@dutydeck/cli-adapters';
 import { getAuthToken } from './auth/auth.js';
 import { accessMode, createProductionPtyBackend, listenOptions, startLocalServer, unauthenticatedListenRefusal } from './service.js';
 
@@ -366,6 +367,11 @@ describe('production PTY backend injection', () => {
           {
             matcher: '^AskUserQuestion$',
             hooks: [{ type: 'command', command: 'dutydeck-fixture session native-ask', timeout: 1230 }],
+          },
+          // 先出计划的守卫 hook：平时守卫脚本不在，hook 直接放行。
+          {
+            matcher: claudePlanGuardMatcher,
+            hooks: [{ type: 'command', command: `test ! -e '${dirname(settingsPath)}/plan-guard.mjs' || '${process.execPath}' '${dirname(settingsPath)}/plan-guard.mjs' || exit 2`, timeout: 30 }],
           },
         ]);
       }

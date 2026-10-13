@@ -119,6 +119,8 @@ export interface LarkCommandCapabilities {
   memory?: boolean;
   /** coordinator 持有群策略（LarkGroupManager）时为 true；/grant、/revoke 依赖它。 */
   groupPolicy?: boolean;
+  /** 计划卡要用交互存储、入站记录和卡片映射；/plan 依赖它。 */
+  plan?: boolean;
   getSession: boolean;
   send: boolean;
   dispatch: boolean;
@@ -151,7 +153,7 @@ export function larkCommandCapabilities(runtime: unknown): LarkCommandCapabiliti
 // 命令注册表
 // ---------------------------------------------------------------------------
 
-export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'help' | 'repair' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject' | 'remember' | 'memory' | 'forget' | 'agents' | 'queue' | 'steer' | 'grant' | 'revoke';
+export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'help' | 'repair' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject' | 'remember' | 'memory' | 'forget' | 'agents' | 'queue' | 'steer' | 'plan' | 'grant' | 'revoke';
 
 export interface LarkCommandDefinition {
   name: LarkCommandName;
@@ -273,6 +275,14 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     mutating: true,
     requires: capabilities => capabilities.dispatch && capabilities.steerQueued === true,
     unavailableReason: '当前 Dutydeck 运行时无法把一条指令提到队首（缺少 dispatch 或 steerQueued），/steer 做不到任何插话效果，已停用。'
+  },
+  {
+    name: 'plan',
+    summary: '先让 Agent 只调研、出执行计划（不改文件），在计划卡上批准后再按计划执行；也可以提修改意见让它重出计划',
+    usage: '/plan <任务>',
+    mutating: true,
+    requires: capabilities => capabilities.plan === true && capabilities.dispatch,
+    unavailableReason: '当前服务没有计划卡所需的存储或无法派发任务，/plan 已停用。'
   },
   {
     name: 'grant',

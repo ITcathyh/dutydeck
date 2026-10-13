@@ -48,9 +48,12 @@ const larkRecoveryOwner = { kind: 'installation_owner', id: 'installation_owner'
 export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   private async reconciledResult(mapping: { externalId: string; sessionId: string }, saved: PersistedLarkCardTask, cardId: string) {
     if (!this.workflows || !saved.sender_open_id || !saved.runtime_task_id || !saved.turn) return [];
-    return this.workflows.result({ appId: saved.app_id, sessionId: mapping.sessionId, taskId: saved.runtime_task_id, turn: saved.turn,
+    const context = { appId: saved.app_id, sessionId: mapping.sessionId, taskId: saved.runtime_task_id, turn: saved.turn,
       event: { messageId: mapping.externalId, chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', senderOpenId: saved.sender_open_id,
-        threadId: saved.thread_id, messageType: 'text', content: JSON.stringify({ text: saved.prompt }), mentions: [] } }, cardId, saved.final_attachment_message_id ? [saved.final_attachment_message_id] : undefined);
+        threadId: saved.thread_id, messageType: 'text', content: JSON.stringify({ text: saved.prompt }), mentions: [] } };
+    const related = saved.final_attachment_message_id ? [saved.final_attachment_message_id] : undefined;
+    // 计划轮的结果卡补发时带回计划操作（计划记录在首次交付时已建）。
+    return [...await this.workflows.result(context, cardId, related), ...await this.workflows.plan(context, cardId, undefined, { relatedCardIds: related })];
   }
 
   private async performReconcile(config: StoredLarkConfig) {

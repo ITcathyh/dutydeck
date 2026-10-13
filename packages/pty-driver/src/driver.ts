@@ -5,7 +5,9 @@ import {
   DriverDetachedError,
   DriverRecoveryError,
   remoteApprovalCliAdapterIds,
+  RuntimeError,
   type AgentConfig,
+  type PermissionMode,
   type DriverPermissionDecision,
   type AgentIdleTimeoutData,
   type AgentDriver,
@@ -49,6 +51,13 @@ export interface PtyCliDriverOptions {
   awaitingAnswer?: () => boolean;
 }
 
+/** 计划阶段（deny-all）里 CLI 弹出的工具确认一律拒绝，不发审批卡。 */
+const planPhaseDenyReason = '先出计划阶段不执行需要确认的操作，已被 Dutydeck 拒绝。请把这一步写进计划，等用户批准后再执行。';
+
+/** 会话本身的权限模式（runtime 只给终端模式注入）：任务以 deny-all 运行时 CLI 仍按它启动。 */
+const sessionPermissionMode = (env: Record<string, string>): PermissionMode =>
+  env.dutydeck_session_permission_mode === 'full-trust' || env.dutydeck_session_permission_mode === 'approve-reads' ? env.dutydeck_session_permission_mode : 'ask';
+
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 30;
 /** raw_terminal 节流窗口：窗口内屏幕文本没变就不发。 */
@@ -77,6 +86,12 @@ export class PtyCliDriver implements AgentDriver {
   private backend: SessionBackend;
   private readonly cwd: string;
   private readonly claudeSettings: ClaudeSettings;
+  /** CLI 启动用的权限模式；任务以 deny-all（先出计划的第一阶段）运行时它仍是会话本身的模式。 */
+  private readonly spawnPermissionMode: PermissionMode;
+  /** 只有能接 hook 的 Claude 家族能装计划阶段守卫。 */
+  private readonly planGuardSupported: boolean;
+  /** 当前任务以 deny-all 运行：守卫脚本在，写操作被 PreToolUse hook 拦下，工具确认一律拒绝。 */
+  private planGuardActive: boolean;
 
   private started = false;
   private stopped = false;
@@ -119,6 +134,7 @@ export class PtyCliDriver implements AgentDriver {
   /** 只有能把工具确认交给 hook 的 CLI（Claude 家族）才有这两项；其它终端模式 CLI 仍在终端里确认。 */
   requestPermission?: AgentDriver['requestPermission'];
   resolvePermission?: AgentDriver['resolvePermission'];
+  setPermissionMode?: AgentDriver['setPermissionMode'];
   private backgroundEvidenceUntil = 0;
   private screenProgress = '';
   private refreshingScreen = false;
@@ -196,10 +212,16 @@ export class PtyCliDriver implements AgentDriver {
     this.backend = opts.backend ?? new PtyBackend();
     this.cwd = opts.agent.cwd ?? process.cwd();
     this.claudeSettings = new ClaudeSettings(this.adapter.id, this.sessionId);
+    this.planGuardSupported = remoteApprovalCliAdapterIds.includes(this.adapter.id);
+    this.planGuardActive = opts.agent.permissionMode === 'deny-all';
+    this.spawnPermissionMode = this.planGuardActive ? sessionPermissionMode(opts.agent.env) : opts.agent.permissionMode;
+    // 守卫脚本跟着任务走：上一个驱动留下的（daemon 在计划阶段之后重启）也按本次任务的模式改正。
+    if (this.planGuardSupported) this.claudeSettings.setPlanGuard(this.planGuardActive);
     this.cliSessionId = opts.cliSessionId;
     if (remoteApprovalCliAdapterIds.includes(this.adapter.id)) {
       this.requestPermission = request => this.requestHookPermission(request);
       this.resolvePermission = async (id, approved, reason) => this.resolveHookPermission(id, approved, reason);
+      this.setPermissionMode = mode => this.switchTaskPermission(mode);
     }
   }
 
@@ -207,6 +229,7 @@ export class PtyCliDriver implements AgentDriver {
   private requestHookPermission(request: Omit<PermissionRequestData, 'id' | 'status'>) {
     if (this.stopped || !this.turnActive) return undefined;
     const id = `hook_${randomUUID()}`;
+    if (this.planGuardActive) return { id, decision: Promise.resolve<DriverPermissionDecision>({ approved: false, reason: planPhaseDenyReason }) };
     const decision = new Promise<DriverPermissionDecision>(resolve => this.hookPermissions.set(id, resolve));
     const event: NormalizedDriverEvent = { type: 'permission_request', data: { ...request, id, status: 'pending' } };
     this.noteTurnProgress(event);
@@ -227,8 +250,30 @@ export class PtyCliDriver implements AgentDriver {
     for (const id of [...this.hookPermissions.keys()]) this.resolveHookPermission(id, false, reason);
   }
 
+  /**
+   * 任务级权限切换只支持一种：在会话本身的模式和 deny-all（先出计划的第一阶段）之间来回。
+   * deny-all 不重启 CLI，靠写入守卫脚本生效；守卫上线前启动的终端没装这个 hook，拒绝切换。
+   */
+  private switchTaskPermission(mode: PermissionMode): void {
+    if (mode === 'deny-all') {
+      this.assertPlanGuardWired();
+      this.claudeSettings.setPlanGuard(true);
+      this.planGuardActive = true;
+      return;
+    }
+    if (mode !== this.spawnPermissionMode) throw new RuntimeError('TASK_OPTIONS_UNSUPPORTED', `PTY Agent ${this.agent.id} cannot switch to ${mode} while running`, 422);
+    this.claudeSettings.setPlanGuard(false);
+    this.planGuardActive = false;
+  }
+
+  private assertPlanGuardWired() {
+    if (!this.started || this.claudeSettings.planGuardWired(this.lastArgs, this.cwd)) return;
+    throw new RuntimeError('PLAN_GUARD_UNAVAILABLE', '这个终端会话启动时还没有计划阶段拦截，没法保证计划阶段不改文件。请开新会话（飞书里发 /new）后再用先出计划。', 409);
+  }
+
   private assertPermissionModeSupported() {
-    const mode = this.agent.permissionMode;
+    if (this.planGuardActive && !this.planGuardSupported) throw new Error(`PTY Agent ${this.agent.id} does not support permission mode deny-all`);
+    const mode = this.spawnPermissionMode;
     // approve-reads 由权限 hook 在服务端放行读取与搜索，只有能接 hook 的 CLI 支持。
     if (mode !== 'ask' && mode !== 'full-trust' && !(mode === 'approve-reads' && this.requestPermission)) {
       throw new Error(`PTY Agent ${this.agent.id} does not support permission mode ${mode}; use ask or full-trust`);
@@ -291,8 +336,9 @@ export class PtyCliDriver implements AgentDriver {
       cwd: this.agent.cwd,
       model: this.agent.model,
       reasoningEffort: this.agent.reasoningEffort,
-      permissionMode: this.agent.permissionMode,
+      permissionMode: this.spawnPermissionMode,
       env: this.agent.env,
+      ...(this.planGuardSupported ? { planGuardCommand: this.claudeSettings.planGuardCommand() } : {}),
     }), this.cwd, this.agent.env);
     this.started = true;
     const spawnEnv = this.spawnEnv();
@@ -363,6 +409,7 @@ export class PtyCliDriver implements AgentDriver {
     if (this.stopped) throw new Error('PtyCliDriver: send() called after stop()');
     if (!this.started) await this.start();
     if (this.stopped) throw new Error('Driver stopped');
+    if (this.planGuardActive) this.assertPlanGuardWired();
 
     let finalPrompt = prompt;
     let routingPrefix: string | undefined;
@@ -1563,8 +1610,9 @@ export class PtyCliDriver implements AgentDriver {
       cwd: this.cwd,
       model: this.agent.model,
       reasoningEffort: this.agent.reasoningEffort,
-      permissionMode: this.agent.permissionMode,
+      permissionMode: this.spawnPermissionMode,
       env: this.agent.env,
+      ...(this.planGuardSupported ? { planGuardCommand: this.claudeSettings.planGuardCommand() } : {}),
     };
   }
 

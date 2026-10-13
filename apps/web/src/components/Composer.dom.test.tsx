@@ -484,3 +484,20 @@ describe('Composer 触控目标（契约 §9：主要交互 ≥40px）', () => {
     expect(screen.getByRole('button', { name: '打断当前任务并执行' }).className).toContain('h-10');
   });
 });
+
+describe('Composer 先出计划开关', () => {
+  it('只在接了回调时出现，点一下切换并改提示文字', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<Composer {...baseProps}/>);
+    expect(screen.queryByRole('button', { name: '先出计划' })).toBeNull();
+    const onPlanFirstChange = vi.fn();
+    rerender(<Composer {...baseProps} onPlanFirstChange={onPlanFirstChange}/>);
+    const toggle = screen.getByRole('button', { name: '先出计划' });
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    await user.click(toggle);
+    expect(onPlanFirstChange).toHaveBeenCalledWith(true);
+    rerender(<Composer {...baseProps} planFirst onPlanFirstChange={onPlanFirstChange}/>);
+    expect(screen.getByRole('button', { name: '先出计划' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByLabelText('消息').getAttribute('placeholder')).toContain('先出计划');
+  });
+});

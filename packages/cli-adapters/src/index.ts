@@ -16,6 +16,7 @@ export {
   writeRunnerInput,
 } from './runner-input.js';
 export { createClaudeCodeAdapter, CLAUDE_INPUT_CHUNK_BYTES, chunkTextByUtf8Bytes } from './adapters/claude-code.js';
+export { claudePlanGuardMatcher } from './adapters/claude-family.js';
 export { createCodexAdapter } from './adapters/codex.js';
 export { createGeminiAdapter } from './adapters/gemini.js';
 export { createOpenCodeAdapter } from './adapters/opencode.js';
