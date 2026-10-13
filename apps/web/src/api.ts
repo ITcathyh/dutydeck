@@ -11,7 +11,7 @@ import type {
   SessionInsightCompareResponse,
   SessionInsightExportRequest
 } from '@dutydeck/shared';
-import type { CreateWorkItemInput, WorkItem, WorkTemplate } from '@dutydeck/shared';
+import type { CreateWorkItemInput, UnknownTaskAction, UnknownTaskFacts, WorkItem, WorkTemplate } from '@dutydeck/shared';
 import type { WorkspaceMode, WorkspaceResponse, WorkspaceCleanupPreview, WorkspaceCleanupResult, VerificationResponse, VerificationCommandInput, SkillDeliveryMetadata, SessionAutomationList, CreateSessionScheduleInput, UpdateSessionScheduleInput, SubscribeCiInput, SessionSchedule, CiSubscription } from '@dutydeck/shared';
 import type { WorkspaceOrganization, WorkspaceOrganizationSnapshot } from '@dutydeck/shared';
 import type { UsageBackgroundBudget, UsageCap, UsageGroup, UsageReport, UsageReportFilter, UsageTaskPage, UsageTotals } from '@dutydeck/shared';
@@ -270,6 +270,8 @@ export type LarkAppCreationJob = {
 export type Session = { id: string; agentId: string; state: string; cwd: string; name?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; archivedAt?: string; runId: string; createdAt: string; updatedAt: string; error?: string; systemPrompt?: string; workspaceMode?: WorkspaceMode; workspaceSourceCwd?: string };
 export type DockEvent = { taskId?: string; id: string; sequence: number; type: string; timestamp: string; data: any; raw?: string };
 export type Task = { skillDeliveries?: SkillDeliveryMetadata[]; id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string };
+/** 结果未知、现在可以由人处理的一轮：已知事实与三行摘要（服务端生成，与飞书提醒卡同一份文字）。 */
+export type UnknownTask = UnknownTaskFacts & { target: string; prompt: string; factLines: string[] };
 /** 插话结果：injected / startedNewTurn 已送达；moved 表示状态已变化；failed 是否需要核对以 task.status 为准，reconcile_required 不自动重发。 */
 export type SteeringOutcome = 'injected' | 'startedNewTurn' | 'moved' | 'promptRequired' | 'unsupported' | 'incompatible' | 'failed';
 export type SteeringResult = { outcome: SteeringOutcome; error?: string };
@@ -461,6 +463,8 @@ export const api = {
     return json<LarkHookStatus>(`/api/lark/hooks/status?${query.toString()}`);
   },
   larkMemoryStatus: (appId: string) => json<LarkMemoryStatusResult>(`/api/lark/bots/${encodeURIComponent(appId)}/memory/status`, { cache: 'no-store' }),
+  unknownTasks: (sessionId: string) => json<UnknownTask[]>(`/api/sessions/${encodeURIComponent(sessionId)}/unknown-tasks`, { cache: 'no-store' }),
+  resolveUnknownTask: (sessionId: string, taskId: string, input: { target: string; action: UnknownTaskAction; allowDuplicateEffects?: true }) => json<{ replayed: boolean; status: string; decisionId: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/unknown-tasks/${encodeURIComponent(taskId)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   sessionMemory: (sessionId: string) => json<{ turns: LarkTurnMemory[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/memory`, { cache: 'no-store' }),
   forgetSessionMemory: (sessionId: string, taskId: string, memoryId: string) => json<{ removed: { id: string } }>(`/api/sessions/${encodeURIComponent(sessionId)}/memory/${encodeURIComponent(taskId)}/entries/${encodeURIComponent(memoryId)}`, { method: 'DELETE' }),
   installLarkHook: (appId: string, highRiskPattern: string, expectedRevision?: number) => json<LarkHookStatus & { configRevision?: number }>('/api/lark/hooks/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, highRiskPattern, expectedRevision }) }),

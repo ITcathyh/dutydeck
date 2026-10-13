@@ -1,12 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval } from '@dutydeck/shared';
+import { canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval } from '@dutydeck/shared';
 import { AcpxAdapter, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
-import type { SteeringRecoveryDecision, SteeringOperation, PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverSteeringOutcome, ExecutionActor, ResourceCheckRef, SessionFence, TaskAttempt, TaskExecutionProjection, TaskRequestV1 } from '@dutydeck/shared';
+import type { UnknownTaskFacts, UnknownTaskResolution, SteeringRecoveryDecision, SteeringOperation, PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverSteeringOutcome, ExecutionActor, ResourceCheckRef, SessionFence, TaskAttempt, TaskExecutionProjection, TaskRequestV1 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import { PersistentEventPublisher, type SubscribeOptions, type EventListener } from './persistent-event-publisher.js';
 import { digest, eventJson, DriverConfigurationLedger, LocalDriverLedger, type ExecutionOptions } from './ledger.js';
@@ -1398,6 +1398,82 @@ export class DutydeckRuntime {
         decision: { decisionId: input.decisionId, actor, action: 'confirm_result', evidenceRefs: input.evidenceRefs, resourceChecks: [] } })));
       await this.reopenQueue(id);
       return { replayed: false };
+    });
+  }
+
+  /**
+   * 结果未知任务的已知事实（飞书提醒卡、Web 共用）：最后状态、有没有提交给 Agent、最后输出时间，以及有没有人处理过。
+   * 不给 target 时看当前停在结果未知的那次执行或插话；给了就看那一次（卡上记着的那一次），已被换掉时 actionable 为 false。
+   */
+  async inspectUnknownTask(id: string, taskId: string, target?: string): Promise<UnknownTaskFacts> {
+    this.assertReady();
+    const projection = this.repos.execution.getTaskExecution(taskId);
+    if (!projection || projection.task.sessionId !== id) throw new RuntimeError('TASK_NOT_FOUND', 'Task not found in this session', 404);
+    const { task, currentAttempt, steering } = projection;
+    const open = task.status === 'reconcile_required' && currentAttempt?.state === 'reconcile_required' ? currentAttempt.attemptId
+      : task.status === 'reconcile_required' && !task.currentAttemptId && steering?.taskId === task.id && ['pending', 'unknown'].includes(steering.state) ? steering.operationId
+      : undefined;
+    const targetId = target ?? open ?? currentAttempt?.attemptId ?? steering?.operationId;
+    const attempt = projection.attempts.find(item => item.attemptId === targetId);
+    const operation = !attempt && steering?.operationId === targetId ? steering : undefined;
+    const settlement = attempt?.settlement?.kind === 'manual' ? attempt.settlement : undefined;
+    const resolution: UnknownTaskFacts['resolution'] = settlement
+      ? { action: settlement.decision.action === 'retry' ? 'retry' : settlement.outcome === 'completed' || settlement.outcome === 'failed' ? settlement.outcome : 'other',
+        decisionId: settlement.decision.decisionId, at: attempt!.updatedAt }
+      : operation?.decisionId && ['delivered', 'not_delivered', 'abandoned'].includes(operation.state)
+        ? { action: operation.state === 'delivered' ? 'completed' : operation.state === 'not_delivered' ? 'retry' : 'failed', decisionId: operation.decisionId, at: operation.updatedAt }
+        : undefined;
+    const lastOutput = attempt ? [...this.repos.execution.getAttemptEvents(attempt.attemptId)].reverse().find(event => event.type !== 'task' && event.type !== 'status') : undefined;
+    return { taskId, status: task.status, actionable: open !== undefined && open === targetId,
+      ...(attempt ? { kind: 'attempt' as const, target: attempt.attemptId, submission: attempt.submissionState, startedAt: attempt.createdAt,
+        ...(attempt.reconcileReason ? { reasonCode: attempt.reconcileReason.code } : {}), ...(lastOutput ? { lastOutputAt: lastOutput.timestamp } : {}) }
+        : operation ? { kind: 'steering' as const, target: operation.operationId, reasonCode: 'STEERING_DELIVERY_UNKNOWN', startedAt: operation.createdAt } : {}),
+      ...(resolution ? { resolution } : {}) };
+  }
+
+  /**
+   * 人工处理结果未知的任务：重新执行（同一任务按原请求排回队列）、标为已完成、标为失败。
+   * 用的是 `dutydeck recovery` 同一组账本原语（执行：retryAttempt / confirmAttemptRecovery；插话：confirmSteeringRecovery），
+   * 决定写进 recovery_decisions，版本号保证并发点击、重启后的重复回调只有一个生效；同一 decisionId 再来只回放。
+   * 驱动还连着时只在它确认空闲后进行，资源按本会话可复用的驱动核对（同 settleIdleAttempt）；没有驱动时先观测上一个进程留下的资源，再严格核对。
+   */
+  async resolveUnknownTask(id: string, raw: UnknownTaskResolution, actor: ExecutionActor) {
+    this.assertReady(); this.requireRecoveryOwner(actor);
+    const input = unknownTaskResolutionSchema.parse(raw);
+    return this.mutations.run(this.ownerOf(id), async () => {
+      const { session, driver } = await this.active(id);
+      const facts = await this.inspectUnknownTask(id, input.taskId, input.target);
+      const projection = this.repos.execution.getTaskExecution(input.taskId)!;
+      if (facts.resolution?.decisionId === input.decisionId) return { replayed: true, task: this.publicTask(projection.task) };
+      if (!facts.actionable) throw new RuntimeError('TASK_NOT_RESULT_UNKNOWN', 'This attempt is no longer waiting for a decision', 409);
+      if (input.action === 'completed' && facts.kind === 'attempt' && input.verifiedOutputText === undefined) throw new RuntimeError('RECOVERY_OUTPUT_REQUIRED', 'Completed recovery requires verified output', 400);
+      if (this.recoveryInFlight(id)) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'Original execution still has an in-flight owner', 409);
+      const reuseOwned = Boolean(driver);
+      if (driver) {
+        if (driver.isDetachedForShutdown?.() || !driver.isIdle?.()) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'The agent has not confirmed it is idle', 409);
+        this.assertResources(id, true);
+      } else {
+        await this.observeAbandonedResources(session);
+        await this.clearVerifiedStopBlock(session);
+      }
+      const resourceChecks = reuseOwned ? [] : (await this.inspectExecutionRecovery(id, actor)).resourceChecks;
+      const evidence = { decisionId: input.decisionId, actor, evidenceRefs: input.evidenceRefs, resourceChecks };
+      const result = await this.mutations.write(id, async () => {
+        if (facts.kind === 'steering') {
+          const operation = projection.steering!;
+          return this.wake(this.bound().confirmSteeringRecovery(this.fence(session), { runId: session.runId, taskId: input.taskId, operationId: operation.operationId,
+            expectedRevision: operation.revision, decisionId: input.decisionId, evidenceRefs: input.evidenceRefs, resourceChecks,
+            ...(input.action === 'retry' ? { action: 'not_delivered' as const, allowDuplicateEffects: true as const } : { action: input.action === 'completed' ? 'delivered' as const : 'abandon' as const }) }, actor, reuseOwned));
+        }
+        const attempt = projection.currentAttempt!;
+        const f = { sessionId: id, runId: session.runId, taskId: input.taskId, attemptId: attempt.attemptId, expectedRevision: attempt.revision };
+        return this.wake(input.action === 'retry'
+          ? this.bound().retryAttempt(f, { ...evidence, action: 'retry', allowDuplicateEffects: true }, resourceChecks, reuseOwned)
+          : this.bound().confirmAttemptRecovery(f, `recovery:${input.decisionId}`, { kind: 'manual', outcome: input.action, decision: { ...evidence, action: 'confirm_result' } },
+            input.action === 'completed' ? input.verifiedOutputText : undefined, reuseOwned));
+      });
+      if (!result.replayed) await this.reopenQueue(id);
+      return { replayed: result.replayed, task: this.publicTask(result.task!) };
     });
   }
 

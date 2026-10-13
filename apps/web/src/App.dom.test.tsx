@@ -1106,7 +1106,7 @@ describe('App 插话结果反馈', () => {
     const toast = toastStore.getSnapshot().find(item => item.key === 'steering')!;
     if (status === 'reconcile_required') {
       expect(toast.title).toBe('插话投递结果未知');
-      expect(toast.description).toContain('管理员核对');
+      expect(toast.description).toContain('在执行记录下方选择重新执行、标为已完成或标为失败');
       expect(toast.description).toContain('不会自动重发');
       expect(toast.description).not.toContain('当前任务完成后会执行它');
     } else if (status === 'completed') {

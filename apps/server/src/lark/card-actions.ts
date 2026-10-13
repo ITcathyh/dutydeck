@@ -15,6 +15,8 @@
 // 都不是 Agent / 工具输出，因此不需要 redactTraceText / redactTraceValue。反过来说这也是一条约束：
 // 任何时候都不要把 Agent 输出、工具参数或错误原文塞进按钮 label 或 callback value。
 
+import { unknownTaskActionLabels } from '@dutydeck/shared';
+
 /** 与 card-renderer.ts 的 LarkCardElement 结构一致，这里本地定义以避免 import 环。 */
 export type LarkCardElement = Record<string, any>;
 
@@ -23,6 +25,7 @@ export type LarkCardElement = Record<string, any>;
  * 只有 Web 要求登录时才是回调 detail（服务端给管理员私信一次性登录链接）。
  */
 export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify' | 'use_verification_command' | 'run_in_new_session' | 'rerun_in_new_session' | 'continue_in_place' | 'replay_turn' | 'abandon_turn' | 'ask_plain' | 'ask_reply' | 'ask_detail' | 'schedule_daily' | 'detail'
+  | 'resolve_retry' | 'resolve_completed' | 'resolve_failed'
   | 'steer_promote'
   | 'steer_inject';
 
@@ -70,6 +73,11 @@ export interface LarkCardCapabilities {
    */
   canContinueInPlace?: boolean;
   /**
+   * 结果未知提醒卡上的「重新执行」「标为已完成」「标为失败」：值是卡上展示的那次执行（attemptId）或插话（operationId），
+   * 随按钮回调带回，换过一次执行之后旧卡不会作用到新的执行上。缺省即不给按钮。
+   */
+  unknownTaskTarget?: string;
+  /**
    * 结果卡的一键续问（给我对外回复 / 再详细点）。coordinator 确认会话仍可续聊、
    * 去重键能落库时才置位；缺省即不给按钮。
    */
@@ -112,6 +120,8 @@ export interface LarkCardActionValue {
   action: LarkCardActionName;
   taskId: string;
   turn?: number;
+  /** 结果未知提醒卡的按钮带上的执行 / 插话标识（见 unknownTaskTarget）。 */
+  target?: string;
 }
 
 /**
@@ -131,6 +141,9 @@ const clockTime = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 export const larkRelaunchLabels = { run_in_new_session: '在新会话中执行', rerun_in_new_session: '在新会话中重新执行' } as const;
 /** 重启切断那一轮的两个按钮文案，task-recovery.ts 的说明引用同一份。 */
 export const larkReplayLabels = { continue_in_place: '在原对话继续', replay_turn: '重新执行', abandon_turn: '放弃' } as const;
+/** 结果未知提醒卡的三个按钮，与 Web 同一组文案（task-resolution.ts）。 */
+export const larkResolveLabels = { resolve_retry: unknownTaskActionLabels.retry, resolve_completed: unknownTaskActionLabels.completed, resolve_failed: unknownTaskActionLabels.failed } as const;
+const maxTargetLength = 256;
 
 type LarkCardActionDefinition = {
   action: LarkCardActionName;
@@ -176,6 +189,8 @@ type LarkCardActionDefinition = {
   lead?: (capabilities: LarkCardCapabilities) => boolean;
   /** 不进操作区，由卡片页脚渲染在原「查看详情」链接的位置（见 buildLarkCardDetailButton）。 */
   footer?: boolean;
+  /** 回调值带上 capabilities.unknownTaskTarget（结果未知提醒卡的三个按钮）。 */
+  targeted?: boolean;
 };
 
 /**
@@ -344,6 +359,39 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     primary: false
   },
   {
+    action: 'resolve_retry',
+    elementId: 'resolve_retry',
+    label: larkResolveLabels.resolve_retry,
+    buttonType: 'primary_text',
+    icon: 'repeat_outlined',
+    states: ['reconcile_required'],
+    capable: capabilities => Boolean(capabilities.unknownTaskTarget),
+    primary: false,
+    targeted: true
+  },
+  {
+    action: 'resolve_completed',
+    elementId: 'resolve_completed',
+    label: larkResolveLabels.resolve_completed,
+    buttonType: 'text',
+    icon: 'done_outlined',
+    states: ['reconcile_required'],
+    capable: capabilities => Boolean(capabilities.unknownTaskTarget),
+    primary: false,
+    targeted: true
+  },
+  {
+    action: 'resolve_failed',
+    elementId: 'resolve_failed',
+    label: larkResolveLabels.resolve_failed,
+    buttonType: 'text',
+    icon: 'close-small_outlined',
+    states: ['reconcile_required'],
+    capable: capabilities => Boolean(capabilities.unknownTaskTarget),
+    primary: false,
+    targeted: true
+  },
+  {
     action: 'ask_plain',
     elementId: 'ask_plain',
     label: '说人话',
@@ -505,10 +553,11 @@ export function larkCardActionLabel(action: LarkCardActionName, capabilities: La
  * 只有 value 里的 action / task_id / turn 能让重启后的进程独立解释这次点击，
  * 从而让操作在重启前后保持幂等。
  */
-const callbackValue = (action: LarkCardActionName, taskId: string, turn: number) => ({
+const callbackValue = (action: LarkCardActionName, taskId: string, turn: number, target?: string) => ({
   action,
   task_id: taskId,
-  turn: String(turn)
+  turn: String(turn),
+  ...(target ? { target } : {})
 });
 
 const callbackButton = (definition: LarkCardActionDefinition, taskId: string, turn: number, capabilities: LarkCardCapabilities): LarkCardElement => ({
@@ -516,7 +565,7 @@ const callbackButton = (definition: LarkCardActionDefinition, taskId: string, tu
   text: { tag: 'plain_text', content: definition.dynamicLabel?.(capabilities) ?? definition.label },
   type: definition.buttonType,
   icon: { tag: 'standard_icon', token: definition.icon, color: definition.buttonType === 'primary_text' ? 'blue' : 'grey' },
-  behaviors: [{ type: 'callback', value: callbackValue(definition.action, taskId, turn) }],
+  behaviors: [{ type: 'callback', value: callbackValue(definition.action, taskId, turn, definition.targeted ? capabilities.unknownTaskTarget : undefined) }],
   margin: '0px',
   element_id: definition.elementId
 });
@@ -624,7 +673,8 @@ export function parseLarkCardActionValue(value: unknown): LarkCardActionValue | 
   const turn = turnNumber !== undefined && Number.isFinite(turnNumber) && turnNumber >= 0
     ? Math.floor(turnNumber)
     : undefined;
-  return { action: definition.action, taskId, ...(turn === undefined ? {} : { turn }) };
+  const target = typeof record.target === 'string' && record.target.trim() && record.target.trim().length <= maxTargetLength ? record.target.trim() : undefined;
+  return { action: definition.action, taskId, ...(turn === undefined ? {} : { turn }), ...(target ? { target } : {}) };
 }
 
 /**

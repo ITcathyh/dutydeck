@@ -726,7 +726,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           events.push(append(f,{id:`steering:${operationId}:result:${value.revision}`,type:'task',data:{task:{id:t.id,status:t.status,revision:t.revision},steering:value}}));
           return result(f,t,undefined,events);
         }); },
-        confirmSteeringRecovery(rawFence, rawInput, rawActor) { return write(() => {
+        confirmSteeringRecovery(rawFence, rawInput, rawActor, reuseOwned) { return write(owner => {
           const f=readFence(rawFence), input=parse(steeringRecoveryDecisionSchema,rawInput), actor=parse(executionActorSchema,rawActor);
           if(actor.kind!=='installation_owner') fail('RECOVERY_OWNER_REQUIRED');
           if(input.runId!==f.runId) fail('SESSION_RUN_CONFLICT');
@@ -735,7 +735,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             if(!value || !t || value.taskId!==input.taskId || value.sessionId!==f.sessionId || value.runId!==f.runId) fail('STEERING_OPERATION_CONFLICT');
             if(value.revision!==input.expectedRevision) fail('STEERING_REVISION_CONFLICT');
             if(!['pending','unknown'].includes(value.state) || t.status!=='reconcile_required' || t.currentAttemptId) fail('STEERING_ALREADY_SETTLED');
-            assertResources(f,input.resourceChecks);
+            if(reuseOwned) assertResources(f,undefined,owner); else assertResources(f,input.resourceChecks);
             recordDecision(f,undefined,{...input,actor},input.decisionId);
             value.state=input.action==='abandon' ? 'abandoned' : input.action; value.decisionId=input.decisionId;
             value.revision++; value.updatedAt=timestamp(); saveSteering(value);
@@ -799,7 +799,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             a.receipt=receipt;a.submissionState='acknowledged';touch(t,a);return transitions(f,t,a);
           });
         }); },
-        confirmAttemptRecovery(f, settlementId, evidence, verifiedOutputText) { return write(owner => {
+        confirmAttemptRecovery(f, settlementId, evidence, verifiedOutputText, reuseOwned) { return write(owner => {
           id.parse(settlementId);
           if (evidence.verifiedOutput || (evidence.outcome === 'completed') !== (typeof verifiedOutputText === 'string')) fail('RECOVERY_OUTPUT_REQUIRED');
           if (verifiedOutputText !== undefined && Buffer.byteLength(verifiedOutputText, 'utf8') > 512 * 1024) fail('TASK_RESULT_OUTPUT_TOO_LARGE');
@@ -808,7 +808,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           validateManagementActor(f, f.taskId, evidence.decision.actor);
           return attemptCommand(f, `settlement:${settlementId}`, { evidence, ...(verifiedOutputText !== undefined ? { verifiedOutputText } : {}) }, () => {
             const { t, a } = currentAttempt(f, owner, true);
-            assertResources(f, evidence.decision.resourceChecks);
+            if (reuseOwned) assertResources(f, undefined, owner); else assertResources(f, evidence.decision.resourceChecks);
             if (verifiedOutputText === undefined) return settle(f, t, a, settlementId, evidence);
             const eventId = `recovery_output_${hash(stable([f.sessionId, f.runId, f.taskId, f.attemptId, settlementId]))}`;
             const event = append(f, { id: eventId, type: 'text', data: { role: 'assistant', text: verifiedOutputText, recovery: { decisionId: evidence.decision.decisionId, actor: evidence.decision.actor, evidenceRefs: evidence.decision.evidenceRefs } } }, a, settlementId);
@@ -888,14 +888,14 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             a.recoveryControllers.push({controller:owner,evidence});a.controller=owner;touch(t,a);return transitions(f,t,a);
           });
         }); },
-        retryAttempt(f,rawDecision,safeResources) { return write(owner => {
+        retryAttempt(f,rawDecision,safeResources,reuseOwned) { return write(owner => {
           const decision=parse(decisionSchema,rawDecision);parse(checksSchema,safeResources);
           if(decision.action!=='retry' || decision.actor.kind==='unspecified' || decision.allowDuplicateEffects!==true || !same(decision.resourceChecks,safeResources)) fail('RECOVERY_DECISION_REQUIRED');
           validateManagementActor(f,f.taskId,decision.actor);
           return attemptCommand(f,`decision:${decision.decisionId}`,{decision,safeResources},() => {
             const {t,a}=currentAttempt(f,owner,true);
             requireInputOptions(t.id);
-            assertResources(f,safeResources);
+            if(reuseOwned) assertResources(f,undefined,owner); else assertResources(f,safeResources);
             if(session(f.sessionId).archivedAt) fail('SESSION_NOT_ACCEPTING');
             if(a.state==='settled' ? !['failed','interrupted','cancelled','unknown'].includes(a.outcome!) : a.state!=='reconcile_required') fail('ATTEMPT_NOT_RETRYABLE');
             recordDecision(f,a,decision,decision.decisionId);

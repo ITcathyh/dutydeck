@@ -305,6 +305,222 @@
             "padding": "10px 12px 8px 12px"
           }
         }
+      },
+      {
+        "message": "om_msg_2",
+        "request": "reply",
+        "anchor": "om_in_1",
+        "reply_in_thread": true,
+        "msg_type": "interactive",
+        "uuid": "unknown_<id:3>",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "中断 · 把登录修复推上去"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "column_set",
+                "element_id": "task_action_row",
+                "flex_mode": "none",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": []
+                  },
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "重新执行"
+                        },
+                        "type": "primary_text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "repeat_outlined",
+                          "color": "blue"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "resolve_retry",
+                              "task_id": "om_in_1",
+                              "turn": "1",
+                              "target": "attempt_<id:2>"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "resolve_retry"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "标为已完成"
+                        },
+                        "type": "text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "done_outlined",
+                          "color": "grey"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "resolve_completed",
+                              "task_id": "om_in_1",
+                              "turn": "1",
+                              "target": "attempt_<id:2>"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "resolve_completed"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "标为失败"
+                        },
+                        "type": "text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "close-small_outlined",
+                          "color": "grey"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "resolve_failed",
+                              "task_id": "om_in_1",
+                              "turn": "1",
+                              "target": "attempt_<id:2>"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "resolve_failed"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "unknown_task_notice",
+                "content": "**这一轮的结果未知，需要你决定怎么处理**\n\n- 最后状态：结果未知，服务重启切断了这一轮\n- 是否已提交给 Agent：已提交，Agent 已开始执行并有输出\n- 最后输出：<北京时间>\n\n为避免重复执行，Dutydeck 不会自动重发。可以先点「查看详情」看执行现场，再选择：\n\n- 「重新执行」：重新执行会按原请求再做一遍。上一轮可能已经做过其中一部分（发消息、改文件、调接口等），这些操作可能被重复执行。需要再点一次确认。\n\n- 「标为已完成」「标为失败」：人工结算这一轮，不再重发。\n\n本轮发起人和管理员可以操作。"
+              },
+              {
+                "tag": "column_set",
+                "flex_mode": "none",
+                "horizontal_spacing": "8px",
+                "margin": "6px 0px 0px 0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "x-small",
+                        "text_align": "right",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "把登录修复推上去"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock · 结果未知"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "中断"
+                },
+                "color": "neutral"
+              }
+            ],
+            "template": "grey",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
       }
     ]
   },

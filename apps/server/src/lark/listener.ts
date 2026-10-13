@@ -1,6 +1,6 @@
 import { createWorkbenchFetch } from '../workbench-fetch.js';
 import type { LarkGroupParticipation } from './group-participation.js';
-import type { ExecutionActor, ExecutionRecoveryDecision } from '@dutydeck/shared';
+import type { ExecutionActor, ExecutionRecoveryDecision, UnknownTaskFacts, UnknownTaskResolution } from '@dutydeck/shared';
 import type { SessionAutomationService } from '../session-automation.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
 import * as lark from '@larksuiteoapi/node-sdk';
@@ -71,6 +71,9 @@ export interface LarkRuntime {
     tasks: Array<{ taskId: string; attempt?: { attemptId: string; revision: number; state: string; reconcileReason?: { code: string }; createdAt?: string } }>;
   }>;
   confirmExecutionRecovery?(id: string, decision: ExecutionRecoveryDecision, actor: ExecutionActor): Promise<unknown>;
+  /** 结果未知任务的已知事实与人工处理（提醒卡上的「重新执行」「标为已完成」「标为失败」）。 */
+  inspectUnknownTask?(id: string, taskId: string, target?: string): Promise<UnknownTaskFacts>;
+  resolveUnknownTask?(id: string, input: UnknownTaskResolution, actor: ExecutionActor): Promise<{ replayed: boolean; task: TaskRecord }>;
   /** 往会话时间线写一条说明（Web 上能看到），不属于任何一轮的执行输出。 */
   publishSessionEvent?(sessionId: string, type: 'text', data: unknown): Promise<unknown>;
   /** 服务升级排空中：新任务照常入队，但暂不开始执行。 */

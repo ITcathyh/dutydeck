@@ -102,6 +102,11 @@ export async function performLarkCardReconcile(input: {
    * 与 absorbQueuedTask 同一个记法：过程卡记作这一轮的收据，没有过程卡记作已交付。
    */
   quietTerminalNote?: (mapping: ChannelMapping, saved: PersistedLarkCardTask) => Promise<string | undefined>;
+  /**
+   * 结果未知、没有被自动处理的一轮：在原会话发一张带「重新执行」「标为已完成」「标为失败」的提醒卡（每次执行一张，幂等）。
+   * 给了它，结果未知的一轮就不再发下面那张没有按钮的恢复提醒。
+   */
+  unknownTaskNotice?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord) => Promise<unknown>;
 }): Promise<number> {
   const { runtime, service, cardMappings, log, config, channel } = input;
   if (!runtime.getTasks || !runtime.getEvents) return 0;
@@ -193,6 +198,11 @@ export async function performLarkCardReconcile(input: {
         const interrupted = runtimeTask.status === 'reconcile_required' ? await input.interruptedTurn?.(mapping, persisted, runtimeTask) : undefined;
         if (interrupted?.kind === 'handled') continue;
         const hold = interrupted?.kind === 'hold' ? interrupted : undefined;
+        const unknownNotice = runtimeTask.status === 'reconcile_required' && Boolean(input.unknownTaskNotice);
+        if (unknownNotice) {
+          await input.unknownTaskNotice!(mapping, persisted, runtimeTask)
+            .catch(error => log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '结果未知提醒卡发送失败，下次对账重试'));
+        }
         // 没有过程卡可画时按钮无处可放，说明里也不提。
         const cardless = Boolean(effective.silentProgress || persisted.progress_frozen || !persisted.card_message_id);
         const recovery = ['queued', 'reconcile_required', 'legacy_unresolved'].includes(runtimeTask.status)
@@ -214,7 +224,7 @@ export async function performLarkCardReconcile(input: {
         // already marked read-only. Never retain an old thinking/queued trace.
         const statusKey = JSON.stringify([state, recovery?.markdown, canCancel]);
         const notifyRecovery = async () => {
-          if (!recovery?.blocked || await input.staleTurn?.(mapping.sessionId, runtimeTask)) return undefined;
+          if (unknownNotice || !recovery?.blocked || await input.staleTurn?.(mapping.sessionId, runtimeTask)) return undefined;
           // 提醒卡上没有按钮也没有详情链接，正文按不提这两者重新生成。
           const notice = canRelaunch || canReplay || config.webBaseUrl
             ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status, undefined,

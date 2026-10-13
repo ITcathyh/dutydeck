@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { executionRecoveryDecisionSchema, steeringRecoveryDecisionSchema, ptyRetirementRecoverySchema, nativeReplacementRecoverySchema, RuntimeError } from '@dutydeck/shared';
+import { resolveUnknownTask, unknownTaskFactLines } from './task-resolution.js';
 
 export interface RecoveryRouteOptions {
   authorize(request: FastifyRequest): Promise<boolean> | boolean;
@@ -40,6 +41,24 @@ export function registerRecoveryRoutes(app: FastifyInstance, runtime: DutydeckRu
     await authorize(request);
     const input = nativeReplacementRecoverySchema.parse(request.body);
     return runtime.replaceNativeContext(request.params.id, owner, input.resourceId, input.expectedRevision, input.decisionId, input.runId);
+  });
+
+  // 结果未知的任务：Web 上与飞书提醒卡同样的三个操作。Web 用户都是安装管理员（同上面的 authorize）。
+  app.get<{ Params: { id: string } }>('/api/sessions/:id/unknown-tasks', async request => {
+    await authorize(request);
+    const tasks = (await runtime.getTasks(request.params.id)).filter(task => task.status === 'reconcile_required');
+    const facts = await Promise.all(tasks.map(async task => ({ task, facts: await runtime.inspectUnknownTask(request.params.id, task.id) })));
+    return facts.filter(item => item.facts.actionable)
+      .map(({ task, facts }) => ({ ...facts, prompt: task.prompt, factLines: unknownTaskFactLines(facts) }));
+  });
+  const resolveBody = z.object({ target: z.string().min(1), action: z.enum(['retry', 'completed', 'failed']), allowDuplicateEffects: z.literal(true).optional() }).strict();
+  app.post<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/unknown-tasks/:taskId', async request => {
+    await authorize(request);
+    const body = resolveBody.parse(request.body);
+    // 重新执行可能重复上一轮的操作：Web 的确认框确认过才带这一项，服务端照样再要一次。
+    if (body.action === 'retry' && body.allowDuplicateEffects !== true) throw new RuntimeError('DUPLICATE_EFFECTS_ACK_REQUIRED', 'Retry requires explicit duplicate-effects acknowledgement', 400);
+    return resolveUnknownTask(runtime, { sessionId: request.params.id, taskId: request.params.taskId, target: body.target, action: body.action,
+      operator: { channel: 'web', id: 'installation_owner' } });
   });
 
 }

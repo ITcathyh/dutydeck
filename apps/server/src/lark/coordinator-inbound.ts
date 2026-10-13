@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { describeLarkTaskRecovery, larkContinuePrompt, larkRecoveryRetainedNote, larkReliability } from './task-recovery.js';
+import { describeLarkTaskRecovery, larkContinuePrompt, larkRecoveryRetainedNote, larkReliability, larkSteeringUnknownNote } from './task-recovery.js';
 import { deadlineText, type LarkInteraction } from './workflow-interactions.js';
 import type { LarkInboxAdoption, LarkInboxRecord } from './task-inbox.js';
 import { isLarkFirstCardUndelivered } from './task-inbox.js';
@@ -1260,7 +1260,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           }
           const steering = await this.runtime.injectQueued(sessionId, target.id, event.senderOpenId);
           const echo = escapeLarkPromptEcho(larkCommandEcho(target.prompt, 120));
-          if (steering.task.status === 'reconcile_required') await replyCard('/queue 插话结果未知', `**这条指令可能已送达，请联系 Dutydeck 管理员核对后处理。当前不会自动重发。**\n\n${echo}`, { failed: true });
+          if (steering.task.status === 'reconcile_required') await replyCard('/queue 插话结果未知', `**${larkSteeringUnknownNote}**\n\n${echo}`, { failed: true });
           else if (steering.outcome === 'injected' || steering.outcome === 'startedNewTurn') await replyCard('已插话', `**${steeringOutcomeText(steering.outcome)}**\n\n${echo}`);
           else if (steering.task.status !== 'queued') await replyCard('/queue 状态已变化', `**这条指令已不在队列中，请通过 \`/status\` 核对最新执行记录。**\n\n${echo}`, { failed: true });
           else await replyCard('/queue 未插话', `**${steeringOutcomeText(steering.outcome)}第 ${index} 条指令仍在排队，顺序没有改动。**\n\n要尽快执行可用 \`/queue top ${index}\` 提到队首。\n\n${echo}`, { failed: true });
@@ -2224,6 +2224,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (action === 'run_in_new_session' || action === 'rerun_in_new_session') return this.relaunchCardAction(action, taskId, parsed.turn, operatorOpenId, context);
     if (action === 'replay_turn' || action === 'abandon_turn') return this.interruptedTurnAction(action, taskId, parsed.turn, operatorOpenId, context);
     if (action === 'continue_in_place') return this.continueInPlaceAction(taskId, parsed.turn, operatorOpenId, context);
+    if (action === 'resolve_retry' || action === 'resolve_completed' || action === 'resolve_failed') return this.unknownTaskAction(action, taskId, parsed.turn, parsed.target, operatorOpenId, context);
     const task = this.tasks.get(taskId) ?? (action === 'cancel'
       ? await this.restoreQueuedCardAction(taskId, parsed.turn, context)
       : action === 'verify' || action === 'use_verification_command' ? await this.restoreVerifyCardAction(taskId, parsed.turn, context) : undefined);
