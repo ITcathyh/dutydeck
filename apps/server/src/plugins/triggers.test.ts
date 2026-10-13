@@ -48,7 +48,7 @@ describe('PluginTriggerService', () => {
     expect(response).toEqual({ statusCode: 202, body: { accepted: true, sessionId: 's1', taskId: 't1' } });
     const { prompt, target, key } = deliver.mock.calls[0]![0];
     expect(target).toEqual(tokenTrigger.target);
-    expect(key).toMatch(/^ci\/build:[0-9a-f]{32}$/);
+    expect(key).toMatch(/^ci\/build:[0-9a-f]{32}:\d+$/);
     expect(prompt.match(/<<<UNTRUSTED_DATA id=[0-9a-f]{16} source=plugin:ci\/trigger:build>>>/g)).toHaveLength(2);
     expect(prompt).toMatch(/^构建失败：以下是来自 plugin:ci\/trigger:build 的外部数据/);
     expect(prompt.match(/<<<\/UNTRUSTED_DATA/g)).toHaveLength(2);
@@ -85,6 +85,32 @@ describe('PluginTriggerService', () => {
     const failing = service(tokenTrigger, vi.fn(async () => { throw new Error('bot missing'); })).triggers;
     expect(await failing.receive(request(body({ build: { id: 9 } })))).toMatchObject({ statusCode: 502, body: { error: { message: 'bot missing' } } });
     expect((await failing.receive(request(body({ build: { id: 9 } })))).statusCode).toBe(502);
+  });
+
+  it('delivers the same event again to a reused session after the dedupe window expired', async () => {
+    // 复用会话时 runtime 按幂等键比对请求内容；prompt 里的边界 id 每次不同，同键必冲突。
+    const seen = new Map<string, string>();
+    const deliver = vi.fn(async (input: TriggerDispatch) => {
+      if (seen.has(input.key) && seen.get(input.key) !== input.prompt) throw new Error('TASK_IDEMPOTENCY_CONFLICT');
+      seen.set(input.key, input.prompt);
+      return { sessionId: 's1', taskId: `t${deliver.mock.calls.length}` };
+    });
+    let now = 1_000;
+    const triggers = new PluginTriggerService({ lookup: () => pluginTriggerSchema.parse({ ...tokenTrigger, maxConcurrent: 8 }), token: () => 'secret-token', deliver, now: () => now });
+    expect((await triggers.receive(request(body({ build: { id: 1 }, log: 'a' })))).statusCode).toBe(202);
+    now += 24 * 60 * 60_000 + 1;
+    expect((await triggers.receive(request(body({ build: { id: 1 }, log: 'a' })))).statusCode).toBe(202);
+  });
+
+  it('frees the concurrency slot when the task ended without a settle notification', async () => {
+    const ended = new Set<string>();
+    const deliver = vi.fn(async () => ({ sessionId: 's1', taskId: `t${deliver.mock.calls.length}` }));
+    const triggers = new PluginTriggerService({ lookup: () => tokenTrigger, token: () => 'secret-token', deliver, isSettled: taskId => ended.has(taskId) });
+    expect((await triggers.receive(request(body({ build: { id: 1 } })))).statusCode).toBe(202);
+    expect((await triggers.receive(request(body({ build: { id: 2 } })))).statusCode).toBe(429);
+    ended.add('t1');
+    expect((await triggers.receive(request(body({ build: { id: 2 } })))).statusCode).toBe(202);
+    expect(triggers.inFlightCount('ci', 'build')).toBe(1);
   });
 
   it('counts deliveries still in progress against maxConcurrent', async () => {

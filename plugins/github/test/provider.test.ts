@@ -13,7 +13,7 @@ const directories: string[] = [];
 const repo = { owner: 'octo', name: 'repo', slug: 'octo/repo' };
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
 const workflowRun = (overrides: Record<string, unknown> = {}) => ({
-  id: 42, name: 'CI', workflow_id: 7, head_sha: 'a'.repeat(40), status: 'completed', conclusion: 'failure',
+  id: 42, name: 'CI', workflow_id: 7, head_sha: 'a'.repeat(40), head_repository: { full_name: 'octo/repo' }, status: 'completed', conclusion: 'failure',
   html_url: 'https://github.com/octo/repo/actions/runs/42', created_at: '2026-09-12T00:00:00Z', updated_at: '2026-09-12T00:01:00Z', ...overrides
 });
 
@@ -215,9 +215,36 @@ describe('GitHub provider: webhook', () => {
     await expect(provider.webhook!.parse(signed(pipelineBody, 'workflow_run'))).resolves.toMatchObject({ state: 'failed', runId: '42', eventId: 'delivery:d-1' });
   });
 
+  it('does not report success when the run list cannot be read, but still reports a failure', async () => {
+    const provider = createGithubProvider({ webhookSecret: secret, fetch: vi.fn(async () => new Response('', { status: 500 })) as typeof fetch });
+    const succeeded = { ...pipelineBody, workflow_run: { ...pipelineBody.workflow_run, conclusion: 'success' } };
+    await expect(provider.webhook!.parse(signed(succeeded, 'workflow_run'))).resolves.toBeUndefined();
+    const empty = createGithubProvider({ webhookSecret: secret, fetch: vi.fn(async () => json({ workflow_runs: [] })) as typeof fetch });
+    await expect(empty.webhook!.parse(signed(succeeded, 'workflow_run'))).resolves.toBeUndefined();
+  });
+
+  it('ignores events and runs whose head repository is a fork', async () => {
+    const forkRun = { ...pipelineBody.workflow_run, head_repository: { full_name: 'mallory/repo' } };
+    const provider = createGithubProvider({ webhookSecret: secret, fetch: vi.fn(async () => json({ workflow_runs: [workflowRun({ conclusion: 'success' }), workflowRun({ id: 43, head_repository: { full_name: 'mallory/repo' } })] })) as typeof fetch });
+    await expect(provider.webhook!.parse(signed({ ...pipelineBody, workflow_run: forkRun }, 'workflow_run'))).resolves.toBeUndefined();
+    const fork = { action: 'synchronize', repository: { full_name: 'octo/repo' }, pull_request: { number: 5, head: { ref: 'feature', sha: 'b'.repeat(40), repo: { full_name: 'mallory/repo' } } } };
+    await expect(provider.webhook!.parse(signed(fork, 'pull_request'))).resolves.toBeUndefined();
+    await expect(provider.webhook!.parse(signed({ ...fork, pull_request: { ...fork.pull_request, head: { ref: 'feature', repo: null } } }, 'pull_request'))).resolves.toBeUndefined();
+    // 汇总里也不算 fork 的失败：本仓库的构建全部成功
+    await expect(provider.getPipelineStatus({ repository: repo, sha: 'a'.repeat(40) })).resolves.toMatchObject({ state: 'success', runs: [expect.objectContaining({ id: 42 })] });
+    await expect(provider.webhook!.parse(signed(pipelineBody, 'workflow_run'))).resolves.toMatchObject({ state: 'success' });
+  });
+
+  it('marks event times as advisory so redelivered events are not replay-rejected', async () => {
+    const provider = createGithubProvider({ webhookSecret: secret, fetch: vi.fn(async () => json({ workflow_runs: [workflowRun()] })) as typeof fetch });
+    await expect(provider.webhook!.parse(signed(pipelineBody, 'workflow_run'))).resolves.toMatchObject({ timeIsAdvisory: true, eventId: expect.stringMatching(/^aggregate:/) });
+    const pull = { action: 'opened', repository: { full_name: 'octo/repo' }, pull_request: { number: 5, updated_at: '2026-09-12T00:01:00Z', head: { repo: { full_name: 'octo/repo' } } } };
+    await expect(provider.webhook!.parse(signed(pull, 'pull_request'))).resolves.toMatchObject({ timeIsAdvisory: true, eventId: 'delivery:d-1' });
+  });
+
   it('maps pull_request actions and ignores other events', async () => {
     const provider = createGithubProvider({ webhookSecret: secret });
-    const pull = (action: string, merged = false) => ({ action, repository: { full_name: 'octo/repo' }, pull_request: { number: 5, merged, head: { ref: 'feature', sha: 'b'.repeat(40) }, html_url: 'https://github.com/octo/repo/pull/5' } });
+    const pull = (action: string, merged = false) => ({ action, repository: { full_name: 'octo/repo' }, pull_request: { number: 5, merged, head: { ref: 'feature', sha: 'b'.repeat(40), repo: { full_name: 'octo/repo' } }, html_url: 'https://github.com/octo/repo/pull/5' } });
     await expect(provider.webhook!.parse(signed(pull('closed', true), 'pull_request'))).resolves.toMatchObject({ kind: 'pull_request', state: 'merge', pullRequest: 5, branch: 'feature', eventId: 'delivery:d-1' });
     await expect(provider.webhook!.parse(signed(pull('closed'), 'pull_request'))).resolves.toMatchObject({ state: 'close' });
     await expect(provider.webhook!.parse(signed(pull('synchronize'), 'pull_request'))).resolves.toMatchObject({ state: 'update' });
@@ -228,7 +255,7 @@ describe('GitHub provider: webhook', () => {
   it('rejects malformed bodies with a 400 error and accepts form-encoded payloads', async () => {
     const provider = createGithubProvider({ webhookSecret: secret });
     await expect(provider.webhook!.parse({ rawBody: Buffer.from('{'), headers: { 'x-github-event': 'pull_request' } })).rejects.toMatchObject({ statusCode: 400 });
-    const form = Buffer.from(`payload=${encodeURIComponent(JSON.stringify({ action: 'opened', repository: { full_name: 'octo/repo' }, pull_request: { number: 9 } }))}`);
+    const form = Buffer.from(`payload=${encodeURIComponent(JSON.stringify({ action: 'opened', repository: { full_name: 'octo/repo' }, pull_request: { number: 9, head: { repo: { full_name: 'octo/repo' } } } }))}`);
     await expect(provider.webhook!.parse({ rawBody: form, headers: { 'x-github-event': 'pull_request', 'content-type': 'application/x-www-form-urlencoded' } })).resolves.toMatchObject({ state: 'open', pullRequest: 9 });
   });
 });

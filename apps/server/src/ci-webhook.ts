@@ -426,8 +426,8 @@ export class CiWebhookService {
     const event = parsed ? normalizeEvent(parsed) : undefined;
     if (!event) return { statusCode: 202, body: { accepted: false, ignored: 'unsupported_event' } };
     if (!isActionable(event)) return { statusCode: 202, body: { accepted: false, ignored: 'state_not_handled' } };
-    // 签名带时间时用签名时间，否则用事件自带的时间；都没有只靠 event-id 去重。
-    const occurredAt = verified.signedAt ?? event.occurredAt;
+    // 签名带时间时用签名时间，否则用事件自带的时间（提供方声明它只是排序用的除外）；都没有只靠 event-id 去重。
+    const occurredAt = verified.signedAt ?? (parsed?.timeIsAdvisory === true ? undefined : event.occurredAt);
     if (occurredAt !== undefined && Math.abs(this.clock().getTime() - occurredAt) > webhookTimestampToleranceMs) return reject(401, 'WEBHOOK_TIMESTAMP_EXPIRED', '事件时间超出 5 分钟窗口，按重放拒绝');
     const eventId = event.eventId || `body:${createHash('sha256').update(request.rawBody).digest('hex')}`;
     const eventKey = createHash('sha256').update(`${provider.id}\0${eventId}`).digest('hex').slice(0, 32);

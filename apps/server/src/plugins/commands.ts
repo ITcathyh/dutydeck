@@ -4,10 +4,21 @@ import { scopeApplies, type PluginScopeContext } from './scope.js';
 export interface RegisteredPluginCommand extends PluginCommand {
   plugin: string;
   scope: string;
-  /** `/<plugin>:<name>` 恒可用；无重名时 `/<name>` 也可用。 */
+  /** `/<plugin>:<name>` 恒可用；无重名且不是 Agent 原生命令名时 `/<name>` 也可用。 */
   qualifiedName: string;
   shortNameAvailable: boolean;
 }
+
+/**
+ * Agent（Claude Code、Codex、Gemini CLI）自带的斜杠命令。Dutydeck 不认识的 `/xxx` 会原样发给 Agent，
+ * 插件用短名占了这些名字，用户输入的原生命令就会被改写成插件 prompt；所以它们只能用 `/<plugin>:<name>` 调用。
+ */
+export const AGENT_NATIVE_COMMANDS: ReadonlySet<string> = new Set([
+  'compact', 'clear', 'init', 'review', 'cost', 'context', 'memory', 'mcp', 'resume', 'config', 'doctor', 'permissions', 'hooks',
+  'login', 'logout', 'usage', 'add-dir', 'pr-comments', 'security-review', 'rewind', 'export', 'ide', 'output-style', 'statusline',
+  'todos', 'plugin', 'plugins', 'release-notes', 'upgrade', 'install-github-app', 'theme', 'vim', 'bug', 'feedback', 'terminal-setup',
+  'diff', 'mention', 'approvals', 'fork', 'undo', 'plan', 'quit', 'exit', 'compress', 'chat', 'restore', 'tools', 'stats', 'copy', 'auth', 'extensions', 'about'
+]);
 
 /** `/name 参数` 或 `/plugin:name 参数`；名字大小写不敏感。 */
 const invocationPattern = /^\/(?:([a-z][a-z0-9]*(?:-[a-z0-9]+)*):)?([a-z][a-z0-9_-]*)(?=\s|$)/i;
@@ -25,7 +36,7 @@ export class PluginCommandRegistry {
     this.commands = plugins.flatMap(plugin => plugin.commands.map(command => ({
       ...command, plugin: plugin.name, scope: plugin.scope,
       qualifiedName: `${plugin.name}:${command.name}`,
-      shortNameAvailable: counts.get(command.name) === 1
+      shortNameAvailable: counts.get(command.name) === 1 && !AGENT_NATIVE_COMMANDS.has(command.name)
     })));
   }
 

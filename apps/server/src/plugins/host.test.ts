@@ -51,6 +51,7 @@ describe('PluginHost', () => {
     const host = await PluginHost.load({ dataDir });
     expect(host.active.map(item => item.entry.name)).toEqual(['good']);
     expect(host.agents.map(agent => agent.id)).toEqual(['good-agent']);
+    expect(host.agents.map(agent => agent.origin)).toEqual(['plugin:good']);
     expect(host.diagnostics).toEqual([
       { plugin: 'broken', message: 'boom' },
       { plugin: 'hello', message: expect.stringContaining('hooks:notify') }

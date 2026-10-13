@@ -369,6 +369,16 @@ describe('resolveLarkSession ask posture', () => {
     expect(runtime.start).not.toHaveBeenCalled();
   });
 
+  it('tells the user the default Agent is gone instead of failing inside the runtime', async () => {
+    const config = { ...baseConfig, defaultAgentId: 'plugin-agent', permissionMode: 'ask' as const, fullTrustConfirmed: false };
+    const runtime = { listAgents: vi.fn(async () => [{ id: 'other', name: 'Other', protocol: 'acp' as const }]), listSessions: vi.fn(async () => []), start: vi.fn(), stop: vi.fn() };
+    const error = await resolveLarkSession(runtime as any, log, group() as any, config, 'oc_group', 'group', 'user:ou_user').catch(caught => caught);
+    expect(error).toMatchObject({ code: 'LARK_AGENT_NOT_FOUND', statusCode: 409 });
+    expect(error.message).toContain('plugin-agent');
+    expect(error.message).toContain('插件');
+    expect(runtime.start).not.toHaveBeenCalled();
+  });
+
   it('starts an ACP ask session without a full-trust confirmation', async () => {
     const ask = { ...baseConfig, permissionMode: 'ask' as const, fullTrustConfirmed: false };
     const session = { id: 'ses_ask', protocol: 'acp', permissionMode: 'ask', state: 'idle' };

@@ -18,7 +18,7 @@ export interface TriggerDispatch {
   triggerId: string;
   target: PluginTrigger['target'];
   prompt: string;
-  /** 稳定的派发键：同一事件重复投递时得到同一个键。 */
+  /** 派发键：同一次去重占位内稳定；去重过期后再来的同一事件得到新键，不会撞上旧任务的幂等记录。 */
   key: string;
 }
 
@@ -27,6 +27,8 @@ export interface TriggerServiceOptions {
   token(plugin: string, triggerId: string): string | undefined;
   deliver(request: TriggerDispatch): Promise<{ sessionId: string; taskId: string }>;
   dedupe?: TriggerDedupe;
+  /** 任务是否已结束。取消排队任务、停止会话不触发结算通知，名额靠它回收。 */
+  isSettled?(taskId: string): boolean;
   now?: () => number;
 }
 
@@ -122,6 +124,7 @@ export class PluginTriggerService {
     if (!this.dedupe.claim(dedupeKey, now, expiresAt)) return { statusCode: 200, body: { accepted: false, duplicate: true } };
 
     const running = this.inFlight.get(id) ?? new Set<string>();
+    for (const entry of running) if (!entry.startsWith('pending:') && this.options.isSettled?.(entry)) running.delete(entry);
     if (running.size >= trigger.maxConcurrent) {
       this.dedupe.release(dedupeKey, expiresAt);
       return { statusCode: 429, body: { error: { code: 'PLUGIN_TRIGGER_BUSY', message: `已有 ${running.size} 个任务在执行，达到 maxConcurrent 上限` } } };
@@ -133,7 +136,7 @@ export class PluginTriggerService {
     running.add(placeholder);
     this.inFlight.set(id, running);
     try {
-      const accepted = await this.options.deliver({ plugin: request.plugin, triggerId: request.triggerId, target: trigger.target, prompt, key: `${id}:${digest.slice(0, 32)}` });
+      const accepted = await this.options.deliver({ plugin: request.plugin, triggerId: request.triggerId, target: trigger.target, prompt, key: `${id}:${digest.slice(0, 32)}:${expiresAt}` });
       running.add(accepted.taskId);
       this.release(id, placeholder);
       return { statusCode: 202, body: { accepted: true, sessionId: accepted.sessionId, taskId: accepted.taskId } };

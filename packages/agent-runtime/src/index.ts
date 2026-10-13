@@ -571,9 +571,9 @@ export class DutydeckRuntime {
     this.blockedVerificationSessions.clear();
     for (const [sessionId, error] of blockedVerifications) this.blockedVerificationSessions.set(sessionId, error);
     // Configuration is the source of truth on every boot and removes built-ins
-    // that are no longer discovered from the ACPX registry.
+    // that are no longer discovered from the ACPX registry, and Agents of plugins that are gone.
     const configuredIds = new Set(agents.map(agent => agent.id));
-    for (const existing of await this.mutations.wait(() => this.repos.agents.list())) if (existing.builtin && !configuredIds.has(existing.id)) await this.mutations.write('runtime_initialize', () => this.repos.agents.delete(existing.id));
+    for (const existing of await this.mutations.wait(() => this.repos.agents.list())) if ((existing.builtin || existing.origin) && !configuredIds.has(existing.id)) await this.mutations.write('runtime_initialize', () => this.repos.agents.delete(existing.id));
     for (const agent of agents) await this.mutations.write('runtime_initialize', () => this.repos.agents.save(agent));
     for (const session of await this.mutations.wait(() => this.repos.sessions.list())) {
       await this.scoped(session.id, async () => {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { agentConfigSchema } from '@dutydeck/shared';
 import { agentProbeTarget, builtinAgents, describeDroppedAgent, loadConfig, loadConfigWithDiagnostics } from './index.js';
 
 describe('working directory configuration', () => {
@@ -47,6 +48,16 @@ describe('working directory configuration', () => {
     const custom = { id: 'custom', name: 'Custom', command: process.execPath, args: [], protocol: 'acp', cwd: '/tmp/custom-agent-project' };
     const configured = loadConfig({ DUTYDECK_DEFAULT_CWD: '/tmp/agent-buddy-project', DUTYDECK_AGENTS_JSON: JSON.stringify([custom]) });
     expect(configured.agents.find(agent => agent.id === 'custom')?.cwd).toBe('/tmp/custom-agent-project');
+  });
+
+  it('keeps the plugin origin of plugin agents, but never lets env agents claim one', () => {
+    const base = { name: 'X', command: process.execPath, protocol: 'acp' as const };
+    const forged = { id: 'env-agent', ...base, origin: 'plugin:victim' };
+    const shared = { id: 'shared', ...base };
+    const configured = loadConfig({ DUTYDECK_AGENTS_JSON: JSON.stringify([forged, shared]) }, [], [agentConfigSchema.parse({ id: 'plug', ...base, origin: 'plugin:p' }), agentConfigSchema.parse({ ...shared, origin: 'plugin:p' })]);
+    expect(configured.agents.find(agent => agent.id === 'plug')?.origin).toBe('plugin:p');
+    expect(configured.agents.find(agent => agent.id === 'env-agent')?.origin).toBeUndefined();
+    expect(configured.agents.find(agent => agent.id === 'shared')?.origin).toBeUndefined();
   });
 
   it('keeps a custom Claude CLI profile alongside the built-in agents', () => {
