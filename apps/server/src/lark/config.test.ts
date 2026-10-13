@@ -687,6 +687,50 @@ describe('加急与置顶开关归一化', () => {
 });
 
 
+describe('提醒分档与免打扰时段配置', () => {
+  it('旧配置缺省：两档 @ 都开启（与分档前的行为一致），免打扰时段整条缺席', async () => {
+    const [config] = await readLarkConfigs(seedBots([{ appId: 'cli_legacy', appSecret: 'secret' }]));
+    expect(config).toMatchObject({ notifyMentionAction: true, notifyMentionDone: true });
+    expect(config.notifyQuietHours).toBeUndefined();
+    const view = publicLarkConfig(config);
+    expect(view).toMatchObject({ notifyMentionAction: true, notifyMentionDone: true });
+    expect(view).not.toHaveProperty('notifyQuietHours');
+  });
+
+  it('读取时显式 false 与合法时段保留，脏值回落默认', async () => {
+    const [on, dirty] = await readLarkConfigs(seedBots([
+      { appId: 'cli_on', appSecret: 'secret', notifyMentionAction: false, notifyMentionDone: false, notifyQuietHours: ' 22:00-08:00 ' },
+      { appId: 'cli_dirty', appSecret: 'secret', notifyMentionAction: 0, notifyMentionDone: 'no', notifyQuietHours: '25:00-08:00' }
+    ]));
+    expect(on).toMatchObject({ notifyMentionAction: false, notifyMentionDone: false, notifyQuietHours: '22:00-08:00' });
+    expect(dirty).toMatchObject({ notifyMentionAction: true, notifyMentionDone: true });
+    expect(dirty!.notifyQuietHours).toBeUndefined();
+  });
+
+  it('保存往返落库，未带时继承现值，空白串清除时段，非法时段直接拒绝', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, { appId: 'cli_default', appSecret: 'secret' });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ notifyMentionAction: true, notifyMentionDone: true });
+
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_default', appId: 'cli_default', appSecret: 'secret',
+      notifyMentionDone: false, notifyQuietHours: '22:00-08:00' });
+    const [persisted] = JSON.parse((await repository.get(larkBotsConfigKey))!);
+    expect(persisted).toMatchObject({ notifyMentionAction: true, notifyMentionDone: false, notifyQuietHours: '22:00-08:00' });
+
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_default', appId: 'cli_default', appSecret: 'secret', preInjectPrompt: 'hi' });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ notifyMentionDone: false, notifyQuietHours: '22:00-08:00' });
+
+    for (const bad of ['22:00-22:00', '22:00', '24:00-08:00', '8:00-9:00', 'night']) {
+      await expect(saveLarkConfig(repository, undefined, { originalAppId: 'cli_default', appId: 'cli_default', appSecret: 'secret', notifyQuietHours: bad }))
+        .rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    }
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ notifyQuietHours: '22:00-08:00' });
+
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_default', appId: 'cli_default', appSecret: 'secret', notifyQuietHours: '  ' });
+    expect((await readLarkConfigs(repository))[0]!.notifyQuietHours).toBeUndefined();
+  });
+});
+
 describe('Bot default group participation', () => {
   it('新建的 Bot 默认话题内免 @；已有 Bot 没存过唤醒方式的，保存别的字段也不会被改', async () => {
     const repository = createRepository();

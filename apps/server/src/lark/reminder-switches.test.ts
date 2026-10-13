@@ -78,19 +78,19 @@ async function harness(patch: Partial<StoredLarkConfig> = {}) {
 }
 
 /** 一条挂着的待审批记录：只用来驱动加急判定，不牵动运行时。 */
-async function seedPendingPermission(h: Awaited<ReturnType<typeof harness>>, ageMs: number) {
+async function seedPendingPermission(h: Awaited<ReturnType<typeof harness>>, ageMs: number, now = Date.now()) {
   const record: LarkInteraction = {
     appId: h.config.appId, sessionId: 'ses_pending', taskId: 'task_pending', turn: 1,
     event: event('om_trigger'), id: 'req_pending', boot: 'boot_1', kind: 'permission',
     nativeId: 'native_1', question: '执行受控操作', state: 'pending', cardId: 'om_pending_card',
-    cardCreatedAt: new Date(Date.now() - ageMs).toISOString(), updatedAt: new Date(Date.now() - ageMs).toISOString()
+    cardCreatedAt: new Date(now - ageMs).toISOString(), updatedAt: new Date(now - ageMs).toISOString()
   };
   await h.repos.config.set(`lark.interaction.${h.config.appId}.${record.id}`, JSON.stringify(record));
   return record;
 }
 
-const urgePending = (h: Awaited<ReturnType<typeof harness>>) =>
-  (h.coordinator as any).workflows.checkAndUrgePending(h.config.appId);
+const urgePending = (h: Awaited<ReturnType<typeof harness>>, now?: number) =>
+  (h.coordinator as any).workflows.checkAndUrgePending(h.config.appId, now === undefined ? undefined : { now });
 
 describe('卡片加急的配置开关', () => {
   it('默认关闭：挂了很久的审批卡也不发强提醒', async () => {
@@ -122,6 +122,34 @@ describe('卡片加急的配置开关', () => {
     await h.coordinator.startReconciliation({ ...h.config, urgentEnabled: false });
     expect((await urgePending(h)).urged).toEqual([]);
     expect(h.service.urgentApp).not.toHaveBeenCalled();
+  });
+});
+
+describe('免打扰时段内的加急', () => {
+  /** 本地时区的时刻，免打扰时段按 daemon 本地时区判定。 */
+  const at = (hour: number, minute = 0, day = 13) => new Date(2026, 9, day, hour, minute, 0, 0).getTime();
+
+  it('时段内超时的审批卡不加急，时段结束后补发一次，之后对账不再重发', async () => {
+    const h = await harness({ urgentEnabled: true, urgentThresholdMs: 3 * 60 * 1000, notifyQuietHours: '22:00-08:00' });
+    await seedPendingPermission(h, 10 * 60 * 1000, at(22, 40));
+
+    expect((await urgePending(h, at(22, 40))).skippedQuietHours).toEqual(['req_pending']);
+    expect((await urgePending(h, at(3, 0, 14))).urged).toEqual([]);
+    expect(h.service.urgentApp).not.toHaveBeenCalled();
+
+    expect((await urgePending(h, at(8, 0, 14))).urged).toEqual(['req_pending']);
+    expect(h.service.urgentApp).toHaveBeenCalledExactlyOnceWith({ messageId: 'om_pending_card', userIdList: ['ou_alice'], userIdType: 'open_id' });
+    expect((await urgePending(h, at(8, 5, 14))).urged).toEqual([]);
+    expect(h.service.urgentApp).toHaveBeenCalledOnce();
+  });
+
+  it('改掉免打扰时段后立刻生效，不必等进程重启', async () => {
+    const h = await harness({ urgentEnabled: true, urgentThresholdMs: 3 * 60 * 1000, notifyQuietHours: '22:00-08:00' });
+    await seedPendingPermission(h, 10 * 60 * 1000, at(22, 40));
+    expect((await urgePending(h, at(23, 0))).urged).toEqual([]);
+    // 对账启动会把没有存活等待方的挂起记录过期掉，这里只重新落一次提醒设置。
+    (h.coordinator as any).applyReminderSettings({ ...h.config, notifyQuietHours: undefined });
+    expect((await urgePending(h, at(23, 0))).urged).toEqual(['req_pending']);
   });
 });
 

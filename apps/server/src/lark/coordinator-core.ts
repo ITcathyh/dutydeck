@@ -12,7 +12,7 @@ import { defaultHighRiskPattern, readLarkConfig, type StoredLarkConfig } from '.
 import { LarkServiceError, type LarkCardService } from './service.js';
 import { isLarkReplyTargetUnavailable } from './api-gate.js';
 import type { LarkHeldCause, LarkRedispatchInfo } from './turn-redispatch.js';
-import { isBotSenderType, isGroupChat } from './card-mentions.js';
+import { larkNotice } from './notify-tier.js';
 import { LarkPinManager } from './pin-manager.js';
 import type { LoginLinkStore } from '../auth/auth.js';
 import { larkReplyContext, type LarkChatModeResolver } from './session-resolver.js';
@@ -178,7 +178,8 @@ export abstract class LarkCoordinatorCore {
       ? {
         enabled: true,
         ...(config.urgentThresholdMs !== undefined ? { thresholdMs: config.urgentThresholdMs } : {}),
-        ...(config.urgentMaxPerHourPerChat !== undefined ? { maxPerHourPerChat: config.urgentMaxPerHourPerChat } : {})
+        ...(config.urgentMaxPerHourPerChat !== undefined ? { maxPerHourPerChat: config.urgentMaxPerHourPerChat } : {}),
+        ...(config.notifyQuietHours ? { quietHours: config.notifyQuietHours } : {})
       }
       : false);
   }
@@ -188,7 +189,7 @@ export abstract class LarkCoordinatorCore {
     return {
       structuredAskCards: task.config.structuredAskCards !== false,
       ...(task.config.webBaseUrl ? { webBaseUrl: task.config.webBaseUrl } : {}),
-      groupMention: task.config.groupCardMention === true && isGroupChat(task.event.chatType) && !isBotSenderType(task.event.senderType),
+      groupMention: larkNotice('permission_card', task.config, task.event).mentionAllowed,
       highRiskPattern: task.config.highRiskPattern || defaultHighRiskPattern,
       // 按「本会话允许」自动批准的请求不另发卡：在进度卡原来那条权限记录上标注，随下一帧原位刷新。
       onSessionAllowed: (permissionId: string) => {

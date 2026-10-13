@@ -487,6 +487,21 @@
                     "elements": [
                       {
                         "tag": "markdown",
+                        "element_id": "group_mention",
+                        "content": "<at id=ou_snapshot_alice></at>",
+                        "text_size": "x-small",
+                        "margin": "0px"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
                         "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
                         "text_size": "x-small",
                         "text_align": "right",

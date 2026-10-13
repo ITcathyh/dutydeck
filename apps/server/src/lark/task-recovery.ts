@@ -6,6 +6,7 @@ import { sendLarkResult, type DeliveryTarget } from './result-delivery.js';
 import { larkRelaunchLabels, larkReplayLabels } from './card-actions.js';
 import { isRestartInterruption, larkHeldReason, larkInterruptionSummary, type LarkHeldCause } from './turn-redispatch.js';
 import type { LarkCardService } from './service.js';
+import type { LarkUrgentManager } from './workflow-urgent.js';
 import type { LarkRuntime } from './listener.js';
 
 const explanations: Record<string, string> = {
@@ -123,6 +124,8 @@ export async function notifyLarkTaskRecovery(input: {
   service: LarkCardService; store?: ConfigRepository; log: { warn: (...args: any[]) => void };
   appId: string; sessionId: string; taskId: string; turn?: number; target: DeliveryTarget;
   recovery: Pick<Awaited<ReturnType<typeof describeLarkTaskRecovery>>, 'blocked' | 'label' | 'markdown'>;
+  /** @ 发起人的卡内标签（见 notify-tier）；和正文一起在第一次落库时冻结，重放不因配置变化而改变内容。 */
+  mention?: string;
 }) {
   if (!input.recovery.blocked) return;
   if (!input.store?.compareAndSet) throw new Error('Recovery notification requires persistent CAS');
@@ -134,17 +137,18 @@ export async function notifyLarkTaskRecovery(input: {
     const recordKey = `lark.recovery.${key}`;
     let saved = await store.get(recordKey);
     if (!saved) {
-      const record = JSON.stringify({ target: input.target, markdown: input.recovery.markdown, label: input.recovery.label });
+      const record = JSON.stringify({ target: input.target, markdown: input.recovery.markdown, label: input.recovery.label, ...(input.mention ? { mention: input.mention } : {}) });
       await store.compareAndSet!(recordKey, saved, record);
       saved = await store.get(recordKey);
     }
     if (!saved) throw new Error('Recovery notification record was not saved');
-    const record = JSON.parse(saved) as { target: DeliveryTarget; markdown: string; label: string };
+    const record = JSON.parse(saved) as { target: DeliveryTarget; markdown: string; label: string; mention?: string };
     const sent = await sendLarkResult(input.service, { ...record.target, allowReplyFallback: false }, {
       taskId: input.taskId, taskName: '任务恢复提醒', sessionId: input.sessionId, turn: input.turn,
       state: 'reconcile_required', statusLabel: record.label, readOnly: true,
       capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false },
-      elements: [{ tag: 'markdown', element_id: 'task_recovery_notice', content: record.markdown }],
+      elements: [...(record.mention ? [{ tag: 'markdown', element_id: 'group_mention', content: record.mention }] : []),
+        { tag: 'markdown', element_id: 'task_recovery_notice', content: record.markdown }],
       idempotencyKey: key
     }, input.log, store);
     return { messageId: sent.messageId, fingerprint: createHash('sha256').update(saved).digest('hex') };
@@ -155,7 +159,7 @@ export async function notifyLarkTaskRecovery(input: {
 export const larkUnknownTaskNoticeKey = (appId: string, sessionId: string, taskId: string, target: string) =>
   `unknown_${createHash('sha256').update(JSON.stringify([appId, sessionId, taskId, target])).digest('hex').slice(0, 40)}`;
 export const larkUnknownTaskNoticeRecordKey = (key: string) => `lark.unknown_task.${key}`;
-export type LarkUnknownTaskNotice = { target: DeliveryTarget; markdown: string; messageId?: string };
+export type LarkUnknownTaskNotice = { target: DeliveryTarget; markdown: string; messageId?: string; mention?: string; sentAt?: number; urgentAt?: string };
 
 /** 提醒卡正文：已知事实、能做什么、谁能做。按钮与「查看详情」由卡片渲染。 */
 /** 插话投递结果未知时的回执：指向随后发到原话题的结果未知提醒卡（notifyLarkUnknownTask）和 Web 任务详情。 */
@@ -181,6 +185,8 @@ export async function notifyLarkUnknownTask(input: {
   /** 原请求的飞书消息 ID 与轮次：按钮回调靠它们找回卡片映射。 */
   messageTaskId: string; turn?: number; taskName: string; agentName?: string;
   target: DeliveryTarget; webBaseUrl?: string; detailLogin?: boolean;
+  /** @ 发起人的卡内标签（见 notify-tier）；随正文一起冻结。 */
+  mention?: string;
 }) {
   const target = input.facts.target;
   if (!input.facts.actionable || !target) return undefined;
@@ -191,7 +197,7 @@ export async function notifyLarkUnknownTask(input: {
   return withExplicitFinalLock(store, key, async () => {
     let saved = await store.get(recordKey);
     if (!saved) {
-      const record: LarkUnknownTaskNotice = { target: input.target, markdown: larkUnknownTaskMarkdown(input.facts, Boolean(input.webBaseUrl)) };
+      const record: LarkUnknownTaskNotice = { target: input.target, markdown: larkUnknownTaskMarkdown(input.facts, Boolean(input.webBaseUrl)), ...(input.mention ? { mention: input.mention } : {}) };
       await store.compareAndSet!(recordKey, saved, JSON.stringify(record));
       saved = await store.get(recordKey);
     }
@@ -206,12 +212,36 @@ export async function notifyLarkUnknownTask(input: {
       capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, unknownTaskTarget: target,
         ...(webBaseUrl ? { webUrl: `${webBaseUrl}/sessions/${encodeURIComponent(input.sessionId)}` } : {}), ...(input.detailLogin && webBaseUrl ? { detailLogin: true } : {}) },
       ...(webBaseUrl ? { webBaseUrl } : {}),
-      elements: [{ tag: 'markdown', element_id: 'unknown_task_notice', content: record.markdown }],
+      elements: [...(record.mention ? [{ tag: 'markdown', element_id: 'group_mention', content: record.mention }] : []),
+        { tag: 'markdown', element_id: 'unknown_task_notice', content: record.markdown }],
       idempotencyKey: key
     }, input.log, store);
-    await store.compareAndSet!(recordKey, saved, JSON.stringify({ ...record, messageId: sent.messageId }));
+    await store.compareAndSet!(recordKey, saved, JSON.stringify({ ...record, messageId: sent.messageId, sentAt: Date.now() }));
     return sent.messageId;
   });
+}
+
+/**
+ * 结果未知提醒卡挂太久仍没人处理时，按已有加急规则加急发起人一次（阈值、免打扰、频控都在 manager 里）。
+ * 阈值从提醒卡发出的时刻（sentAt）起算；升级前发出、没有 sentAt 的卡从第一次看到起算。对账每轮都会走到这里，urgentAt 落库后不再重复。
+ */
+export async function urgeLarkUnknownTask(input: {
+  store: ConfigRepository; manager: Pick<LarkUrgentManager, 'urgeNotice'>;
+  appId: string; sessionId: string; runtimeTaskId: string; target: string; chatId: string; targetUserId: string; now?: number;
+}) {
+  const now = input.now ?? Date.now();
+  const recordKey = larkUnknownTaskNoticeRecordKey(larkUnknownTaskNoticeKey(input.appId, input.sessionId, input.runtimeTaskId, input.target));
+  const saved = await input.store.get(recordKey);
+  const record = saved ? JSON.parse(saved) as LarkUnknownTaskNotice : undefined;
+  if (!saved || !record?.messageId) return undefined;
+  if (record.sentAt === undefined) {
+    await input.store.compareAndSet!(recordKey, saved, JSON.stringify({ ...record, sentAt: now }));
+    return undefined;
+  }
+  const outcome = await input.manager.urgeNotice({ id: recordKey, chatId: input.chatId, messageId: record.messageId, targetUserId: input.targetUserId,
+    since: record.sentAt, ...(record.urgentAt ? { urgentAt: record.urgentAt } : {}) }, 'unknown_task_notice', now);
+  if (outcome === 'urged') await input.store.compareAndSet!(recordKey, saved, JSON.stringify({ ...record, urgentAt: new Date(now).toISOString() }));
+  return outcome;
 }
 
 /** Only a ledger-backed manual completion can supersede historical open tools. */

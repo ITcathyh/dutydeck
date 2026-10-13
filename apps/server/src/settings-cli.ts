@@ -59,6 +59,7 @@ export const botFields = {
   structuredAskCards: 'boolean', groupCardMention: 'boolean', pushIntervalMs: 'integer', traceLimit: 'integer|null',
   hideTraceOnComplete: 'boolean', compactTrace: 'boolean', completionReactionOnly: 'boolean', silentProgress: 'boolean', adhdMode: 'boolean',
   urgentEnabled: 'boolean', urgentThresholdMs: 'integer|null', urgentMaxPerHourPerChat: 'integer|null',
+  notifyMentionAction: 'boolean', notifyMentionDone: 'boolean', notifyQuietHours: 'string',
   pinLongTasks: 'boolean', pinAfterMs: 'integer|null',
   allowedUsers: 'users', allowedUserNames: 'list', allowedEmails: 'list',
   allowedBots: 'users', allowedBotNames: 'list', peerBotsAllowed: 'boolean',

@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
-import { describeLarkTaskRecovery, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
+import { describeLarkTaskRecovery, notifyLarkTaskRecovery, notifyLarkUnknownTask, urgeLarkUnknownTask, verifiedLarkRecoveryOutput } from './task-recovery.js';
+import { LarkUrgentManager } from './workflow-urgent.js';
 
 describe('durable task recovery notices', () => {
   it('retries a lost reply acknowledgement after reopening SQLite using the same destination, UUID and frozen payload', async () => {
@@ -101,5 +102,93 @@ describe('durable task recovery notices', () => {
     expect(await verifiedLarkRecoveryOutput(runtime, 'session', 'task', [event])).toBe(event);
     await expect(verifiedLarkRecoveryOutput(runtime, 'session', 'task', [{ ...event, data: { text: 'tampered' } }])).rejects.toThrow('does not match');
     await expect(verifiedLarkRecoveryOutput(runtime, 'session', 'task', [])).rejects.toThrow('unavailable');
+  });
+});
+
+describe('结果未知提醒卡的 @ 与加急', () => {
+  const facts = { actionable: true, target: 'attempt:task_1', kind: 'attempt', submission: 'acknowledged' } as any;
+  const base = { appId: 'app', sessionId: 'session', runtimeTaskId: 'rt_1', facts, messageTaskId: 'task_1', turn: 1, taskName: '整理告警',
+    target: { chatId: 'oc_group', replyMessageId: 'om_original', replyInThread: true } };
+
+  it('@ 发起人的标签和正文一起冻结：卡首一个 @，重放不因配置变化而改变', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      const reply = vi.fn()
+        .mockRejectedValueOnce(new Error('lost acknowledgement'))
+        .mockResolvedValue({ messageId: 'om_notice' });
+      const input = { ...base, service: { reply, send: vi.fn() } as any, store: repos.config, log: { warn: vi.fn() } };
+      await expect(notifyLarkUnknownTask({ ...input, mention: '<at id=ou_alice></at>' })).rejects.toThrow('lost acknowledgement');
+      // 重放时配置已关闭 @：仍用第一次冻结的内容。
+      expect(await notifyLarkUnknownTask(input)).toBe('om_notice');
+      expect(reply.mock.calls[1]![0]).toEqual(reply.mock.calls[0]![0]);
+      const elements = reply.mock.calls[1]![0].elements as Array<{ element_id: string; content: string }>;
+      expect(elements.map(element => element.element_id)).toEqual(['group_mention', 'unknown_task_notice']);
+      expect(elements[0]!.content).toBe('<at id=ou_alice></at>');
+    } finally { repos.close(); }
+  });
+
+  it('不 @ 时卡面只有正文，和升级前一致', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      const reply = vi.fn().mockResolvedValue({ messageId: 'om_notice' });
+      await notifyLarkUnknownTask({ ...base, service: { reply, send: vi.fn() } as any, store: repos.config, log: { warn: vi.fn() } });
+      expect((reply.mock.calls[0]![0].elements as Array<{ element_id: string }>).map(element => element.element_id)).toEqual(['unknown_task_notice']);
+    } finally { repos.close(); }
+  });
+
+  it('任务恢复提醒同样把 @ 放在卡首并冻结', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      const reply = vi.fn().mockResolvedValue({ messageId: 'om_recovery' });
+      await notifyLarkTaskRecovery({ service: { reply, send: vi.fn() } as any, store: repos.config, log: { warn: vi.fn() }, appId: 'app', sessionId: 'session',
+        taskId: 'task', turn: 1, target: { chatId: 'oc_group', replyMessageId: 'om_original' }, recovery: { blocked: true, label: '需要核对', markdown: '待检查' },
+        mention: '<at id=ou_alice></at>' });
+      expect((reply.mock.calls[0]![0].elements as Array<{ element_id: string }>).map(element => element.element_id)).toEqual(['group_mention', 'task_recovery_notice']);
+    } finally { repos.close(); }
+  });
+
+  it('提醒卡挂过阈值才加急发起人一次，免打扰时段内推迟到结束后，urgentAt 落库后重启也不重发', async () => {
+    const repos = createRepositories(':memory:');
+    const at = (hour: number, minute = 0, day = 13) => new Date(2026, 9, day, hour, minute, 0, 0).getTime();
+    const dateNow = vi.spyOn(Date, 'now').mockReturnValue(at(21, 50));
+    try {
+      const urgentApp = vi.fn().mockResolvedValue({ invalidUserIdList: [] });
+      const reply = vi.fn().mockResolvedValue({ messageId: 'om_notice' });
+      await notifyLarkUnknownTask({ ...base, service: { reply, send: vi.fn() } as any, store: repos.config, log: { warn: vi.fn() } });
+      const urge = (manager: LarkUrgentManager, now: number) => urgeLarkUnknownTask({ store: repos.config, manager, appId: 'app', sessionId: 'session',
+        runtimeTaskId: 'rt_1', target: 'attempt:task_1', chatId: 'oc_group', targetUserId: 'ou_alice', now });
+      const manager = new LarkUrgentManager({ service: { urgentApp }, quietHours: '22:00-08:00', thresholdMs: 10 * 60_000 });
+
+      expect(await urge(manager, at(21, 55))).toBe('not_due');
+      expect(await urge(manager, at(22, 30))).toBe('quiet_hours');
+      expect(urgentApp).not.toHaveBeenCalled();
+      expect(await urge(manager, at(8, 0, 14))).toBe('urged');
+      expect(urgentApp).toHaveBeenCalledOnce();
+      expect(urgentApp).toHaveBeenCalledWith({ messageId: 'om_notice', userIdList: ['ou_alice'], userIdType: 'open_id' });
+
+      // 对账每轮都会再走一遍，重启后换一个 manager 也一样。
+      expect(await urge(manager, at(8, 5, 14))).toBe('already');
+      expect(await urge(new LarkUrgentManager({ service: { urgentApp }, quietHours: '22:00-08:00' }), at(9, 0, 14))).toBe('already');
+      expect(urgentApp).toHaveBeenCalledOnce();
+    } finally { dateNow.mockRestore(); repos.close(); }
+  });
+
+  it('升级前发出、没有 sentAt 的提醒卡从第一次看到起算，不会一上来就加急', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      const urgentApp = vi.fn().mockResolvedValue({ invalidUserIdList: [] });
+      const reply = vi.fn().mockResolvedValue({ messageId: 'om_notice' });
+      await notifyLarkUnknownTask({ ...base, service: { reply, send: vi.fn() } as any, store: repos.config, log: { warn: vi.fn() } });
+      const key = (await repos.config.list('lark.unknown_task.'))[0]!.key;
+      const legacy = JSON.parse((await repos.config.get(key))!);
+      delete legacy.sentAt;
+      await repos.config.set(key, JSON.stringify(legacy));
+      const manager = new LarkUrgentManager({ service: { urgentApp }, thresholdMs: 10 * 60_000 });
+      const input = { store: repos.config, manager, appId: 'app', sessionId: 'session', runtimeTaskId: 'rt_1', target: 'attempt:task_1', chatId: 'oc_group', targetUserId: 'ou_alice' };
+      const first = Date.now();
+      expect(await urgeLarkUnknownTask({ ...input, now: first })).toBeUndefined();
+      expect(await urgeLarkUnknownTask({ ...input, now: first + 5 * 60_000 })).toBe('not_due');
+      expect(await urgeLarkUnknownTask({ ...input, now: first + 11 * 60_000 })).toBe('urged');
+    } finally { repos.close(); }
   });
 });

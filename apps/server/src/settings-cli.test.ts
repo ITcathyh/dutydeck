@@ -101,6 +101,30 @@ describe('settings CLI against the real bot routes', () => {
     expect(showCleared.bot).not.toHaveProperty('roleScope');
   });
 
+  it('sets notification tiers and quiet hours, keeps them across other edits, and rejects bad values', async () => {
+    const { repos, run } = await botRuntime();
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ notifyMentionAction: true, notifyMentionDone: true });
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).not.toHaveProperty('notifyQuietHours');
+    const set = await run('bot-set', { appId: 'cli_a', pairs: ['notifyMentionDone=false', 'notifyQuietHours=22:00-08:00'] });
+    expect(set.bot).toMatchObject({ notifyMentionAction: true, notifyMentionDone: false, notifyQuietHours: '22:00-08:00' });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ notifyMentionAction: true, notifyMentionDone: false, notifyQuietHours: '22:00-08:00' });
+
+    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=别的设置'] });
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ notifyMentionDone: false, notifyQuietHours: '22:00-08:00' });
+
+    for (const bad of ['25:00-08:00', '22:00', '22:00-22:00', '8:00-9:00', 'always']) {
+      await expect(run('bot-set', { appId: 'cli_a', pairs: [`notifyQuietHours=${bad}`] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    }
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['notifyMentionAction=maybe'] })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ notifyQuietHours: '22:00-08:00' });
+
+    await run('bot-set', { appId: 'cli_a', pairs: ['notifyQuietHours=', 'notifyMentionAction=false'] });
+    const cleared = (await run('bot-show', { appId: 'cli_a' })).bot;
+    expect(cleared).not.toHaveProperty('notifyQuietHours');
+    expect(cleared).toMatchObject({ notifyMentionAction: false });
+    expect(fieldsHelp(botFields)).toContain('notifyQuietHours=<text>');
+  });
+
   it('rejects unknown keys and bad values before sending anything', async () => {
     const { fetcher, run } = await botRuntime();
     await expect(run('bot-set', { appId: 'cli_a', pairs: ['adhdmode=true'] })).rejects.toMatchObject({ code: 'SETTINGS_KEY_UNKNOWN' });

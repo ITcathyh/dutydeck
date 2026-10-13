@@ -1,5 +1,6 @@
 import type { LarkCardService } from './service.js';
 import type { LarkInteraction } from './workflow-interactions.js';
+import { larkNotice, type LarkNoticeKind } from './notify-tier.js';
 
 export interface LarkUrgentManagerLog {
   warn?: (details: unknown, msg?: string) => void;
@@ -13,6 +14,8 @@ export interface LarkUrgentManagerOptions {
   thresholdMs?: number;
   /** 每个群每小时最多加急次数，默认 3 次 */
   maxPerHourPerChat?: number;
+  /** 免打扰时段 HH:MM-HH:MM（本地时区）；时段内不加急，也不消耗频控，时段结束后补发。 */
+  quietHours?: string;
   log?: LarkUrgentManagerLog;
   /** 持久化回调（用于记录 interaction.urgentAt） */
   onUrged?: (record: LarkInteraction, urgentAt: string) => Promise<void> | void;
@@ -23,13 +26,31 @@ export interface LarkUrgentCheckResult {
   urged: string[];
   skippedRateLimited: string[];
   skippedNotEligible: string[];
+  /** 已超时但处于免打扰时段，推迟到时段结束后再发。 */
+  skippedQuietHours: string[];
   failed: Array<{ id: string; error: unknown }>;
 }
+
+/** 不属于 LarkInteraction 的待处理提醒（如结果未知提醒卡）要加急时的描述。 */
+export interface LarkUrgentNotice {
+  id: string;
+  chatId: string;
+  /** 被加急的那张卡。 */
+  messageId: string;
+  targetUserId: string;
+  /** 卡片发出的时间（毫秒时间戳），阈值从这里起算。 */
+  since: number;
+  /** 持久化的上次加急时间；有值说明这张卡已经加急过。 */
+  urgentAt?: string;
+}
+
+export type LarkUrgentNoticeOutcome = 'urged' | 'already' | 'not_eligible' | 'not_due' | 'quiet_hours' | 'rate_limited' | 'failed';
 
 export class LarkUrgentManager {
   private readonly service: Pick<LarkCardService, 'urgentApp'>;
   private readonly thresholdMs: number;
   private readonly maxPerHourPerChat: number;
+  private readonly quietHours?: string;
   private readonly log?: LarkUrgentManagerLog;
   private readonly onUrged?: (record: LarkInteraction, urgentAt: string) => Promise<void> | void;
 
@@ -42,6 +63,7 @@ export class LarkUrgentManager {
     this.service = options.service;
     this.thresholdMs = Math.max(1_000, options.thresholdMs ?? 10 * 60 * 1000);
     this.maxPerHourPerChat = Math.max(1, options.maxPerHourPerChat ?? 3);
+    this.quietHours = options.quietHours;
     this.log = options.log;
     this.onUrged = options.onUrged;
   }
@@ -64,6 +86,7 @@ export class LarkUrgentManager {
       urged: [],
       skippedRateLimited: [],
       skippedNotEligible: [],
+      skippedQuietHours: [],
       failed: []
     };
 
@@ -106,6 +129,12 @@ export class LarkUrgentManager {
       const cardTime = new Date(record.cardCreatedAt ?? record.updatedAt).getTime();
       if (!Number.isFinite(cardTime) || now - cardTime < this.thresholdMs) {
         result.skippedNotEligible.push(record.id);
+        continue;
+      }
+
+      // 免打扰时段内先不发：不消耗频控也不写 urgentAt，时段结束后的下一次检查照常补发一次。
+      if (larkNotice(record.kind === 'ask' ? 'ask_card' : 'permission_card', { notifyQuietHours: this.quietHours }, undefined, now).urgentNotBefore !== undefined) {
+        result.skippedQuietHours.push(record.id);
         continue;
       }
 
@@ -164,5 +193,40 @@ export class LarkUrgentManager {
     }
 
     return result;
+  }
+
+  /**
+   * 加急一张不在 LarkInteraction 里的待处理提醒卡（如结果未知提醒卡），规则同 checkAndUrge：
+   * 档位允许加急、超过阈值、不在免打扰时段、每张卡一次、每群每小时频控。
+   * 返回 'urged' 时调用方负责把 urgentAt 持久化，下次带着它回来才不会重复加急。
+   */
+  async urgeNotice(notice: LarkUrgentNotice, kind: LarkNoticeKind, currentTime?: number): Promise<LarkUrgentNoticeOutcome> {
+    const now = currentTime ?? Date.now();
+    const oneHourAgo = now - 3600_000;
+    const history = (this.chatUrgentHistory.get(notice.chatId) ?? []).filter(t => t > oneHourAgo && t <= now);
+    this.chatUrgentHistory.set(notice.chatId, history);
+    if (notice.urgentAt && !this.urgedIds.has(notice.id)) {
+      this.urgedIds.add(notice.id);
+      const at = Date.parse(notice.urgentAt);
+      if (Number.isFinite(at) && at > oneHourAgo && at <= now) history.push(at);
+    }
+    if (notice.urgentAt || this.urgedIds.has(notice.id)) return 'already';
+    const decision = larkNotice(kind, { notifyQuietHours: this.quietHours }, undefined, now);
+    if (!decision.urgent) return 'not_eligible';
+    if (now - notice.since < this.thresholdMs) return 'not_due';
+    if (decision.urgentNotBefore !== undefined) return 'quiet_hours';
+    if (history.length >= this.maxPerHourPerChat) {
+      this.log?.warn?.({ chatId: notice.chatId, noticeId: notice.id, count: history.length, limit: this.maxPerHourPerChat }, '当前群每小时加急次数已达上限，跳过加急');
+      return 'rate_limited';
+    }
+    try {
+      await this.service.urgentApp({ messageId: notice.messageId, userIdList: [notice.targetUserId], userIdType: 'open_id' });
+    } catch (error) {
+      this.log?.warn?.({ error, noticeId: notice.id, messageId: notice.messageId }, '飞书卡片应用内加急失败，不影响主任务');
+      return 'failed';
+    }
+    history.push(now);
+    this.urgedIds.add(notice.id);
+    return 'urged';
   }
 }
