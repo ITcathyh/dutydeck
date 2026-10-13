@@ -88,7 +88,7 @@ export type CiWebhookSubscription = z.infer<typeof subscriptionSchema>;
 type Stored = { key: string; raw: string; value: CiWebhookSubscription };
 
 /** 宿主内部的事件形状：提供方的 CiWebhookEvent 经 normalizeEvent 清洗后得到。 */
-interface CiEvent {
+export interface CiEvent {
   kind: 'pipeline' | 'merge_request';
   repository: string;
   branch?: string;
@@ -111,6 +111,8 @@ export interface CiNotice {
   failed?: boolean;
   output?: string;
   action?: { label: string; value: Record<string, unknown> };
+  /** 多个按钮时用它（例如问题卡的「按评论修改 / 不处理」）。 */
+  actions?: Array<{ label: string; value: Record<string, unknown>; type?: 'primary' | 'default' }>;
 }
 
 export interface CiWebhookResponse { statusCode: number; body: Record<string, unknown> }
@@ -123,6 +125,8 @@ export interface CiWebhookServiceOptions {
   notify?: (sessionId: string, id: string, notice: CiNotice) => Promise<string | undefined>;
   clock?: () => Date;
   log?: { warn: (...args: any[]) => void };
+  /** 通过校验、去重后的每个事件也交给 `/pr` 跟进：PR 合并或关闭时停止，流水线有结果时马上看一次。 */
+  onEvent?: (providerId: string, event: CiEvent) => Promise<void>;
 }
 
 const text = (value: unknown, max = 500): string | undefined => typeof value === 'string' && value.trim() ? value.trim().slice(0, max)
@@ -436,6 +440,7 @@ export class CiWebhookService {
     const expiresAt = now + webhookEventTtlMs;
     const events = this.options.repositories.ciWebhook;
     if (!events.claimEvent(eventKey, now, expiresAt)) return { statusCode: 200, body: { accepted: false, duplicate: true } };
+    await this.options.onEvent?.(provider.id, event).catch(error => this.options.log?.warn({ error }, 'PR 跟进处理 webhook 事件失败'));
     try { return { statusCode: 202, body: { accepted: true, matched: await this.handleEvent(event, eventKey, provider.id) } }; }
     catch (error) { events.releaseEvent(eventKey, expiresAt); throw error; }
   }

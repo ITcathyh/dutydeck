@@ -206,6 +206,16 @@ export function createGithubProvider(options = {}) {
     return items.sort((left, right) => (left.createdAt ?? '').localeCompare(right.createdAt ?? ''));
   }
 
+  async function getPullRequest(repository, pullRequest) {
+    if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) throw new GithubError('GITHUB_PULL_REQUEST_INVALID', 'Pull request number is invalid', 400);
+    const value = await getPublic(apiUrl(`${repoPath(repository)}/pulls/${pullRequest}`));
+    if (!value || typeof value !== 'object' || typeof value.state !== 'string') throw new GithubError('GITHUB_RESPONSE_INVALID', 'GitHub did not return the pull request');
+    return {
+      state: value.merged === true || typeof value.merged_at === 'string' ? 'merged' : value.state === 'closed' ? 'closed' : 'open',
+      ...(typeof value.head?.sha === 'string' ? { headSha: value.head.sha.toLowerCase() } : {})
+    };
+  }
+
   async function postComment(repository, pullRequest, body) {
     if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) throw new GithubError('GITHUB_PULL_REQUEST_INVALID', 'Pull request number is invalid', 400);
     const value = await call('POST', apiUrl(`${repoPath(repository)}/issues/${pullRequest}/comments`), { body });
@@ -291,6 +301,7 @@ export function createGithubProvider(options = {}) {
     getFailureLogs,
     createPullRequest,
     listReviewComments,
+    getPullRequest,
     postComment,
     ...(options.webhookSecret ? { webhook: { verify, parse } } : {})
   };

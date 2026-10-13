@@ -291,7 +291,9 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       { tag: 'markdown', element_id: 'ci_notice', content: notice.markdown },
       ...(notice.output ? renderLarkResultTextElements(notice.output) : []),
       ...(notice.action ? [{ tag: 'button', element_id: 'ci_fix', text: { tag: 'plain_text', content: notice.action.label }, type: 'primary',
-        behaviors: [{ type: 'callback', value: notice.action.value }], margin: '0px' }] : [])
+        behaviors: [{ type: 'callback', value: notice.action.value }], margin: '0px' }] : []),
+      ...(notice.actions ?? []).map((action, index) => ({ tag: 'button', element_id: `notice_action_${index}`, text: { tag: 'plain_text', content: action.label }, type: action.type ?? 'primary',
+        behaviors: [{ type: 'callback', value: action.value }], margin: '0px' }))
     ];
     const sent = await sendLarkResult(client(config), target, {
       state: notice.failed ? 'failed' : 'completed',

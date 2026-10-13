@@ -177,6 +177,47 @@ describe('GitHub provider: failure logs and pull requests', () => {
   });
 });
 
+describe('GitHub provider: pull request follow-up', () => {
+  it('reads the pull request state: open, merged or closed without merge', async () => {
+    const pulls: Record<number, unknown> = {
+      1: { number: 1, state: 'open', merged: false, merged_at: null, head: { sha: 'A'.repeat(40) } },
+      2: { number: 2, state: 'closed', merged: true, merged_at: '2026-10-01T00:00:00Z', head: { sha: 'b'.repeat(40) } },
+      3: { number: 3, state: 'closed', merged: false, merged_at: null }
+    };
+    const request = vi.fn(async (input: string | URL | Request) => {
+      const match = /\/repos\/octo\/repo\/pulls\/(\d+)$/.exec(new URL(String(input)).pathname);
+      return match ? json(pulls[Number(match[1])]) : new Response('', { status: 404 });
+    });
+    const provider = createGithubProvider({ token: 't', fetch: request as typeof fetch });
+    await expect(provider.getPullRequest(repo, 1)).resolves.toEqual({ state: 'open', headSha: 'a'.repeat(40) });
+    await expect(provider.getPullRequest(repo, 2)).resolves.toEqual({ state: 'merged', headSha: 'b'.repeat(40) });
+    await expect(provider.getPullRequest(repo, 3)).resolves.toEqual({ state: 'closed' });
+    await expect(provider.getPullRequest(repo, 0)).rejects.toMatchObject({ code: 'GITHUB_PULL_REQUEST_INVALID' });
+  });
+
+  it('reads private review comments with the token after an anonymous 404', async () => {
+    const auth: Array<string | undefined> = [];
+    const request = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const value = (init?.headers as Record<string, string>).Authorization;
+      auth.push(value);
+      return value ? json([]) : new Response('', { status: 404 });
+    });
+    const provider = createGithubProvider({ token: 'private-token', fetch: request as typeof fetch });
+    await expect(provider.listReviewComments(repo, 5)).resolves.toEqual([]);
+    expect(auth.filter(value => value === undefined)).toHaveLength(2);
+    expect(auth.filter(value => value === 'Bearer private-token')).toHaveLength(2);
+  });
+
+  it('reports a rejected pull request creation without leaking the response body or the token', async () => {
+    const provider = createGithubProvider({ token: 'do-not-leak', fetch: vi.fn(async () => new Response('{"message":"A pull request already exists body-secret"}', { status: 422 })) as typeof fetch });
+    const error = await provider.createPullRequest(repo, { title: 'x', head: 'dutydeck/x-1', base: 'main' }).catch(cause => cause as Error & { code?: string });
+    expect(error).toMatchObject({ code: 'GITHUB_RESPONSE_ERROR', message: 'GitHub API returned HTTP 422' });
+    expect(JSON.stringify(error)).not.toContain('do-not-leak');
+    expect(error.message).not.toContain('body-secret');
+    await expect(provider.postComment(repo, -1, 'x')).rejects.toMatchObject({ code: 'GITHUB_PULL_REQUEST_INVALID' });
+  });
+});
+
 describe('GitHub provider: webhook', () => {
   const secret = 'hook-secret';
   const signed = (body: unknown, event: string, extra: Record<string, string> = {}) => {

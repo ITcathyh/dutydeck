@@ -175,6 +175,8 @@ export interface CiProvider {
   getFailureLogs?(repository: CiRepository, runId: string): Promise<CiFailureLog[]>;
   createPullRequest?(repository: CiRepository, input: CiPullRequestInput): Promise<{ id: string; number: number; url: string }>;
   listReviewComments?(repository: CiRepository, pullRequest: number): Promise<CiReviewComment[]>;
+  /** PR 当前状态；`/pr` 跟进据此在合并或关闭后停止。没有时只能靠 webhook 的 pull_request 事件得知。 */
+  getPullRequest?(repository: CiRepository, pullRequest: number): Promise<{ state: 'open' | 'closed' | 'merged'; headSha?: string }>;
   postComment?(repository: CiRepository, pullRequest: number, body: string): Promise<{ id: string; url?: string }>;
   /** 有 webhook 时 `/ci wait`、`/ci fix` 走事件驱动的续作与修复。 */
   webhook?: {

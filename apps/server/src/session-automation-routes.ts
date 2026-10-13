@@ -76,4 +76,42 @@ export async function registerSessionAutomationRoutes(app: FastifyInstance, opti
     const actorId = await authorize(request, request.params.sessionId, 'queue.cancel');
     return { subscription: await options.service.cancelCi(request.params.sessionId, request.params.id, parse(cancelCiInputSchema, request.body), actorId) };
   });
+
+  // 开 PR：发起只生成确认清单；确认与取消沿用中断、重试的权限判定。
+  const pullRequests = () => {
+    const service = options.service.pullRequests;
+    if (!service) throw new RuntimeError('PR_UNAVAILABLE', '当前服务未接入开 PR。', 404);
+    return service;
+  };
+  const owned = async (sessionId: string, id: string) => {
+    const record = await pullRequests().get(id);
+    if (!record || record.sessionId !== sessionId) throw new RuntimeError('PR_NOT_FOUND', '此会话中找不到这条 PR 记录。', 404);
+  };
+
+  app.get<{ Params: { sessionId: string } }>('/api/sessions/:sessionId/pull-requests', async request => {
+    await authorize(request, request.params.sessionId, 'task.view_result');
+    const service = options.service.pullRequests;
+    if (!service) return { available: false, hint: '当前服务未接入开 PR。', items: [] };
+    return { ...service.availability(), items: await service.listBySession(request.params.sessionId) };
+  });
+
+  app.post<{ Params: { sessionId: string } }>('/api/sessions/:sessionId/pull-requests', async request => {
+    const actorId = await authorize(request, request.params.sessionId, 'run.interrupt');
+    const input = parse(prepareInputSchema, request.body ?? {});
+    return { pullRequest: await pullRequests().prepare(request.params.sessionId, input, actorId) };
+  });
+
+  app.post<{ Params: { sessionId: string; id: string } }>('/api/sessions/:sessionId/pull-requests/:id/confirm', async request => {
+    const actorId = await authorize(request, request.params.sessionId, 'run.interrupt');
+    await owned(request.params.sessionId, request.params.id);
+    return pullRequests().confirm(request.params.id, actorId);
+  });
+
+  app.post<{ Params: { sessionId: string; id: string } }>('/api/sessions/:sessionId/pull-requests/:id/cancel', async request => {
+    await authorize(request, request.params.sessionId, 'run.interrupt');
+    await owned(request.params.sessionId, request.params.id);
+    return { pullRequest: await pullRequests().cancel(request.params.sessionId, request.params.id) };
+  });
 }
+
+const prepareInputSchema = z.object({ title: z.string().trim().max(120).optional() }).strict();

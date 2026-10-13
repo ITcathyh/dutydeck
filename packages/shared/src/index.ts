@@ -501,6 +501,7 @@ export * from './workspace-organization.js';
 export * from './verification.js';
 
 export * from './session-automation.js';
+export * from './pull-requests.js';
 export * from './work-items.js';
 
 export * from './permission-display.js';

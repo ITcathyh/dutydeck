@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, rm, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigRepository, Session } from '@dutydeck/shared';
@@ -61,8 +61,10 @@ export async function snapshotWorkingTree(cwd: string, timeoutMs = TURN_SNAPSHOT
     if (!top || !index || !gitDir) return undefined;
     scratch = await mkdtemp(join(tmpdir(), 'dutydeck-turn-diff-'));
     const tempIndex = join(scratch, 'index');
-    // 还没有 index（新仓库）时从空 index 开始。
-    await copyFile(index, tempIndex).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });
+    // 还没有 index（新仓库）时从空 index 开始。保留原 index 的修改时间：git 靠它认出和 index 同一秒写入的文件，
+    // 拷贝变新后，同一秒内改动且大小不变的文件会被当成没改。
+    const copied = await copyFile(index, tempIndex).then(() => true, error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return false; });
+    if (copied) { const original = await stat(index); await utimes(tempIndex, original.atime, original.mtime); }
     const env = { ...process.env, GIT_INDEX_FILE: tempIndex, GIT_OPTIONAL_LOCKS: '0' };
     // .dutydeck 下是平台数据，不算这一轮的改动。
     await git(['add', '-A', '--', '.', ':(exclude,glob)**/.dutydeck/**'], { cwd: top, env, timeout: remaining() });

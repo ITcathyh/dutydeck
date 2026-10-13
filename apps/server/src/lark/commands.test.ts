@@ -109,6 +109,16 @@ describe('注册表与能力门（诚实表达能力）', () => {
     expect(route.kind === 'unavailable' && route.reason).toEqual(expect.stringContaining('/api/hooks/<插件提供方>'));
     expect(renderLarkCommandHelp(capabilities()).text).not.toContain('/ci wait');
   });
+  it('/pr 只在装了支持开 PR 的插件时可用，否则回安装方法；越权的人不能发起', () => {
+    const route = routeLarkCommand('/pr Fix login', context());
+    expect(route).toMatchObject({ kind: 'unavailable', reason: expect.stringContaining('dutydeck plugin install') });
+    expect(route.kind === 'unavailable' && route.reason).toEqual(expect.stringContaining('plugins/github'));
+    expect(renderLarkCommandHelp(capabilities()).text).not.toContain('/pr');
+    const caps = capabilities({ pr: true });
+    expect(routeLarkCommand('/pr Fix login', context({ capabilities: caps }))).toMatchObject({ kind: 'intent', command: 'pr', argsText: 'Fix login' });
+    expect(renderLarkCommandHelp(caps).text).toContain('/pr [标题]');
+    expect(routeLarkCommand('/pr', context({ capabilities: caps, operator: { kind: 'user', allowlisted: false } })).kind).toBe('denied');
+  });
   it('注册表里的命令名与别名本身都满足命令形状规则', () => {
     for (const definition of larkCommandRegistry) {
       for (const key of [definition.name, ...(definition.aliases ?? [])]) {
