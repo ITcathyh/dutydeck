@@ -1,0 +1,1307 @@
+[
+  {
+    "say": "/plan 把登录页的错误提示改成中文",
+    "message": "om_in_1"
+  },
+  {
+    "checkpoint": "计划卡",
+    "requests": [
+      {
+        "message": "om_msg_1",
+        "request": "reply",
+        "anchor": "om_snapshot_root",
+        "reply_in_thread": true,
+        "msg_type": "interactive",
+        "uuid": "task_om_in_1_1",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "进行中 · 计划：把登录页的错误提示改成中文"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "任务已接收，正在准备执行…",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "column_set",
+                "element_id": "task_action_row",
+                "flex_mode": "none",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_meta",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "notation",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "计划：把登录页的错误提示改成中文"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock · 排队中"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "进行中"
+                },
+                "color": "blue"
+              }
+            ],
+            "template": "blue",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      },
+      {
+        "message": "om_msg_1",
+        "request": "patch",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "完成 · 计划：把登录页的错误提示改成中文"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "element_id": "task_overview",
+                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                "text_size": "normal",
+                "margin": "0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "done_outlined",
+                  "color": "green"
+                }
+              },
+              {
+                "tag": "markdown",
+                "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                "text_size": "notation",
+                "text_align": "right",
+                "margin": "0px"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "message": "om_msg_2",
+        "request": "reply",
+        "anchor": "om_in_1",
+        "reply_in_thread": true,
+        "msg_type": "interactive",
+        "uuid": "result_<id:3>",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "计划"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "element_id": "final_output",
+                "content": "## 计划\n1. 修改 src/login/errors.ts，把英文报错换成中文\n2. 运行 pnpm test 验证",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "workflow_plan_status",
+                "content": "**以上是执行计划，Agent 还没有改任何东西。**\n批准后在同一会话按计划执行；要调整就写下修改意见，Agent 会重新出计划。\n30 分钟无人处理会提醒一次，<北京时间>前未处理则计划卡失效。"
+              },
+              {
+                "tag": "button",
+                "element_id": "workflow_plan_approve",
+                "type": "primary",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "批准执行"
+                },
+                "behaviors": [
+                  {
+                    "type": "callback",
+                    "value": {
+                      "dutydeck_workflow": "plan_approve",
+                      "request_id": "<id:4>",
+                      "generation": "<id:2>"
+                    }
+                  }
+                ]
+              },
+              {
+                "tag": "button",
+                "element_id": "workflow_plan_cancel",
+                "type": "default",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "取消"
+                },
+                "behaviors": [
+                  {
+                    "type": "callback",
+                    "value": {
+                      "dutydeck_workflow": "plan_cancel",
+                      "request_id": "<id:4>",
+                      "generation": "<id:2>"
+                    }
+                  }
+                ]
+              },
+              {
+                "tag": "form",
+                "element_id": "workflow_plan_form",
+                "name": "workflow_plan_<id:4>",
+                "direction": "vertical",
+                "vertical_spacing": "8px",
+                "margin": "0px",
+                "elements": [
+                  {
+                    "tag": "input",
+                    "element_id": "workflow_plan_input",
+                    "name": "answer",
+                    "input_type": "multiline_text",
+                    "max_length": 1000,
+                    "placeholder": {
+                      "tag": "plain_text",
+                      "content": "写下要怎么改这份计划"
+                    }
+                  },
+                  {
+                    "tag": "button",
+                    "element_id": "workflow_plan_revise",
+                    "type": "default",
+                    "text": {
+                      "tag": "plain_text",
+                      "content": "提修改意见"
+                    },
+                    "form_action_type": "submit",
+                    "behaviors": [
+                      {
+                        "type": "callback",
+                        "value": {
+                          "dutydeck_workflow": "plan_revise",
+                          "request_id": "<id:4>",
+                          "generation": "<id:2>"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "workflow_plan_hint",
+                "content": "也可以引用这张卡回复：回复「批准」执行，回复「取消」作废，其他内容按修改意见处理。"
+              },
+              {
+                "tag": "column_set",
+                "flex_mode": "none",
+                "horizontal_spacing": "8px",
+                "margin": "6px 0px 0px 0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_elapsed",
+                        "content": "<font color='grey'>用时 <耗时> · </font><at id=ou_snapshot_alice></at>",
+                        "text_size": "x-small",
+                        "margin": "0px"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "x-small",
+                        "text_align": "right",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "计划：把登录页的错误提示改成中文"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "完成"
+                },
+                "color": "green"
+              }
+            ],
+            "template": "green",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "click": "提修改意见",
+    "message": "om_msg_2",
+    "form_value": {
+      "answer": "只改文案，不动样式"
+    },
+    "toast": {
+      "type": "success",
+      "content": "已提交修改意见，Agent 会重新出计划。"
+    }
+  },
+  {
+    "checkpoint": "重出计划",
+    "requests": [
+      {
+        "message": "om_msg_2",
+        "request": "patch",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "执行计划 · 已提修改意见"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "div",
+                "element_id": "task_status",
+                "width": "auto",
+                "margin": "0px",
+                "text": {
+                  "tag": "lark_md",
+                  "content": "<font color='grey'>已提修改意见</font>",
+                  "text_size": "small"
+                }
+              },
+              {
+                "tag": "markdown",
+                "content": "## 计划\n1. 修改 src/login/errors.ts，把英文报错换成中文\n2. 运行 pnpm test 验证"
+              },
+              {
+                "tag": "markdown",
+                "content": "已提修改意见 · <at id=ou_snapshot_alice></at> · <北京时刻>\n\n计划：已提修改意见，Agent 会重新出计划。"
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "执行计划"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Dutydeck"
+            },
+            "template": "green",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      },
+      {
+        "message": "om_msg_3",
+        "request": "reply",
+        "anchor": "om_msg_2",
+        "reply_in_thread": true,
+        "msg_type": "interactive",
+        "uuid": "task_om_msg_2_1",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "进行中 · 计划：按修改意见重出计划：只改文案，不动样式"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "任务已接收，正在准备执行…",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "column_set",
+                "element_id": "task_action_row",
+                "flex_mode": "none",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_meta",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "notation",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "计划：按修改意见重出计划：只改文案，不动样式"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock · 排队中"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "进行中"
+                },
+                "color": "blue"
+              }
+            ],
+            "template": "blue",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      },
+      {
+        "message": "om_msg_3",
+        "request": "patch",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "完成 · 计划：按修改意见重出计划：只改文案，不动样式"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "element_id": "task_overview",
+                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                "text_size": "normal",
+                "margin": "0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "done_outlined",
+                  "color": "green"
+                }
+              },
+              {
+                "tag": "markdown",
+                "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                "text_size": "notation",
+                "text_align": "right",
+                "margin": "0px"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "message": "om_msg_4",
+        "request": "reply",
+        "anchor": "om_msg_2",
+        "reply_in_thread": true,
+        "msg_type": "interactive",
+        "uuid": "result_<id:5>",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "计划（按意见调整）"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "element_id": "final_output",
+                "content": "## 计划（按意见调整）\n1. 只修改 src/login/errors.ts 里的文案，不动样式\n2. 运行 pnpm test 验证",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "workflow_plan_status",
+                "content": "**以上是执行计划，Agent 还没有改任何东西。**\n批准后在同一会话按计划执行；要调整就写下修改意见，Agent 会重新出计划。\n30 分钟无人处理会提醒一次，<北京时间>前未处理则计划卡失效。"
+              },
+              {
+                "tag": "button",
+                "element_id": "workflow_plan_approve",
+                "type": "primary",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "批准执行"
+                },
+                "behaviors": [
+                  {
+                    "type": "callback",
+                    "value": {
+                      "dutydeck_workflow": "plan_approve",
+                      "request_id": "<id:6>",
+                      "generation": "<id:2>"
+                    }
+                  }
+                ]
+              },
+              {
+                "tag": "button",
+                "element_id": "workflow_plan_cancel",
+                "type": "default",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "取消"
+                },
+                "behaviors": [
+                  {
+                    "type": "callback",
+                    "value": {
+                      "dutydeck_workflow": "plan_cancel",
+                      "request_id": "<id:6>",
+                      "generation": "<id:2>"
+                    }
+                  }
+                ]
+              },
+              {
+                "tag": "form",
+                "element_id": "workflow_plan_form",
+                "name": "workflow_plan_<id:6>",
+                "direction": "vertical",
+                "vertical_spacing": "8px",
+                "margin": "0px",
+                "elements": [
+                  {
+                    "tag": "input",
+                    "element_id": "workflow_plan_input",
+                    "name": "answer",
+                    "input_type": "multiline_text",
+                    "max_length": 1000,
+                    "placeholder": {
+                      "tag": "plain_text",
+                      "content": "写下要怎么改这份计划"
+                    }
+                  },
+                  {
+                    "tag": "button",
+                    "element_id": "workflow_plan_revise",
+                    "type": "default",
+                    "text": {
+                      "tag": "plain_text",
+                      "content": "提修改意见"
+                    },
+                    "form_action_type": "submit",
+                    "behaviors": [
+                      {
+                        "type": "callback",
+                        "value": {
+                          "dutydeck_workflow": "plan_revise",
+                          "request_id": "<id:6>",
+                          "generation": "<id:2>"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "workflow_plan_hint",
+                "content": "也可以引用这张卡回复：回复「批准」执行，回复「取消」作废，其他内容按修改意见处理。"
+              },
+              {
+                "tag": "column_set",
+                "flex_mode": "none",
+                "horizontal_spacing": "8px",
+                "margin": "6px 0px 0px 0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_elapsed",
+                        "content": "<font color='grey'>用时 <耗时> · </font><at id=ou_snapshot_alice></at>",
+                        "text_size": "x-small",
+                        "margin": "0px"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "x-small",
+                        "text_align": "right",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "计划：按修改意见重出计划：只改文案，不动样式"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "完成"
+                },
+                "color": "green"
+              }
+            ],
+            "template": "green",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "click": "批准执行",
+    "message": "om_msg_4",
+    "toast": {
+      "type": "success",
+      "content": "已批准，Agent 开始按计划执行，进度发在下方。"
+    }
+  },
+  {
+    "checkpoint": "批准后执行",
+    "requests": [
+      {
+        "message": "om_msg_4",
+        "request": "patch",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "执行计划 · 已批准"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "div",
+                "element_id": "task_status",
+                "width": "auto",
+                "margin": "0px",
+                "text": {
+                  "tag": "lark_md",
+                  "content": "<font color='grey'>已批准</font>",
+                  "text_size": "small"
+                }
+              },
+              {
+                "tag": "markdown",
+                "content": "## 计划（按意见调整）\n1. 只修改 src/login/errors.ts 里的文案，不动样式\n2. 运行 pnpm test 验证"
+              },
+              {
+                "tag": "markdown",
+                "content": "已批准 · <at id=ou_snapshot_alice></at> · <北京时刻>\n\n计划：已批准，正在按计划执行。"
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "执行计划"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Dutydeck"
+            },
+            "template": "green",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      },
+      {
+        "message": "om_msg_5",
+        "request": "reply",
+        "anchor": "om_msg_4",
+        "reply_in_thread": true,
+        "msg_type": "interactive",
+        "uuid": "task_om_msg_4_1",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "进行中 · 计划已批准，请按你上面给出的最新计划开始执行。执行中如果发现计划需要调整，先说明原因再继续。"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "任务已接收，正在准备执行…",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "column_set",
+                "element_id": "task_action_row",
+                "flex_mode": "none",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_meta",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "notation",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "计划已批准，请按你上面给出的最新计划开始执行…"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock · 排队中"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "进行中"
+                },
+                "color": "blue"
+              }
+            ],
+            "template": "blue",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      },
+      {
+        "message": "om_msg_5",
+        "request": "patch",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "完成 · 计划已批准，请按你上面给出的最新计划开始执行。执行中如果发现计划需要调整，先说明原因再继续。"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "element_id": "task_overview",
+                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                "text_size": "normal",
+                "margin": "0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "done_outlined",
+                  "color": "green"
+                }
+              },
+              {
+                "tag": "markdown",
+                "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                "text_size": "notation",
+                "text_align": "right",
+                "margin": "0px"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "message": "om_msg_6",
+        "request": "reply",
+        "anchor": "om_msg_4",
+        "reply_in_thread": true,
+        "msg_type": "interactive",
+        "uuid": "result_<id:7>",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "attention_bg": {
+                  "light_mode": "rgba(255,246,232,1)",
+                  "dark_mode": "rgba(66,48,24,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "已按计划把登录页报错改成中文，pnpm test 通过"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "element_id": "final_output",
+                "content": "已按计划把登录页报错改成中文，pnpm test 通过。",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "column_set",
+                "element_id": "result_follow_up_row",
+                "flex_mode": "flow",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "给我对外回复"
+                        },
+                        "type": "text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "reply_outlined",
+                          "color": "grey"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "ask_reply",
+                              "task_id": "om_msg_4",
+                              "turn": "1"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "ask_reply"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "再详细点"
+                        },
+                        "type": "text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "details_outlined",
+                          "color": "grey"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "ask_detail",
+                              "task_id": "om_msg_4",
+                              "turn": "1"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "ask_detail"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "flex_mode": "none",
+                "horizontal_spacing": "8px",
+                "margin": "6px 0px 0px 0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_elapsed",
+                        "content": "<font color='grey'>用时 <耗时> · </font><at id=ou_snapshot_alice></at>",
+                        "text_size": "x-small",
+                        "margin": "0px"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "x-small",
+                        "text_align": "right",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "已按计划把登录页报错改成中文，pnpm test 通过"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "完成"
+                },
+                "color": "green"
+              }
+            ],
+            "template": "green",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      }
+    ]
+  }
+]

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
-import { createClaudeFamilyAdapter, prepareClaudeFamilyInput } from './claude-family.js';
+import { claudePlanGuardMatcher, createClaudeFamilyAdapter, prepareClaudeFamilyInput } from './claude-family.js';
 import type { PtyLike } from '../types.js';
 
 // The observed pane's last four nonempty lines are verbatim; history above is anonymized.
@@ -215,5 +215,31 @@ describe('Claude family idle screen', () => {
     ['history only', '❯ old request\nPrevious answer'],
   ])('does not treat %s as idle', (_name, screen) => {
     expect(adapter.isIdleScreen!(screen)).toBe(false);
+  });
+});
+
+describe('Claude family plan guard hook', () => {
+  const adapter = createClaudeFamilyAdapter('claude-code');
+  const settings = (args: string[]) => JSON.parse(args[args.indexOf('--settings') + 1]!);
+  const guard = { matcher: claudePlanGuardMatcher, hooks: [{ type: 'command', command: 'guard', timeout: 30 }] };
+  const relay = { dutydeck_relay_url: 'http://localhost/api/relay', dutydeck_relay_token: 't', dutydeck_relay_command: 'relay' };
+
+  it('installs the guard without taking over permission prompts when there is no relay', () => {
+    const args = adapter.buildArgs({ sessionId: 'ses_1', permissionMode: 'ask', planGuardCommand: 'guard' });
+    expect(settings(args).hooks).toEqual({ PreToolUse: [guard] });
+    // 原生计划模式拦不住 Bash 写操作，继续禁用；计划阶段靠守卫 hook。
+    expect(args.slice(args.indexOf('--disallowed-tools'))).toEqual(['--disallowed-tools', 'EnterPlanMode,ExitPlanMode']);
+  });
+
+  it('keeps the question and permission hooks next to the guard when relayed', () => {
+    const hooks = settings(adapter.buildArgs({ sessionId: 'ses_1', permissionMode: 'ask', env: relay, planGuardCommand: 'guard' })).hooks;
+    expect(hooks.PreToolUse).toEqual([expect.objectContaining({ matcher: '^AskUserQuestion$' }), guard]);
+    expect(hooks.PermissionRequest).toHaveLength(1);
+  });
+
+  it('lets read-only tools skip the guard', () => {
+    const matcher = new RegExp(claudePlanGuardMatcher);
+    for (const tool of ['Read', 'Glob', 'Grep', 'WebFetch', 'Task', 'TodoWrite']) expect(matcher.test(tool)).toBe(false);
+    for (const tool of ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'mcp__fs__write_file', 'ReadX', 'CronCreate']) expect(matcher.test(tool)).toBe(true);
   });
 });

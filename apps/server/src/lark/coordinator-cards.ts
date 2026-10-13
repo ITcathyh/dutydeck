@@ -15,6 +15,9 @@ import type { LarkTaskState, LarkTask, PersistedLarkCardTask } from './coordinat
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
 import { larkCardChannel, withoutLeadingBotMention, larkTaskTitle, larkScopeContinuesFor, sendTaskCard } from './coordinator-core.js';
 import { LarkCoordinatorCore } from './coordinator-core.js';
+import type { LarkInteraction } from './workflow-interactions.js';
+import { planFollowUpEvent } from './plan-flow.js';
+import { LarkServiceError } from './service.js';
 
 // 飞书消息协调器 · 卡片生命周期：卡片映射的持久化与还原、结果卡的重绘与卡上操作、置顶、
 // 自动验证与结果卡上的操作。
@@ -506,6 +509,22 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       this.log.warn({ error, taskId: parsed.taskId, action: parsed.action }, '提交结果卡续问失败');
       return { type: 'error', content: '提交失败，请稍后重试。' };
     }
+  }
+
+  /**
+   * 计划卡上批准或提修改意见：按计划轮那张卡的映射找回话题和 scope，把计划卡当作操作人发来的消息提交下一轮。
+   * 入站记录按计划卡的消息 ID 去重，重启后补调不会重复执行。
+   */
+  protected async submitPlanDecision(record: LarkInteraction) {
+    const config = await readLarkConfig(this.workflowOptions.store, record.appId);
+    if (!config?.listening || !this.inbox || !record.cardId || !record.actorId) throw new LarkServiceError('LARK_PLAN_UNAVAILABLE', '机器人当前不在监听，计划没有提交。', 409);
+    const mapping = (await this.cardMappings?.list(larkCardChannel(record.appId)))?.find(item => item.externalId === record.event.messageId);
+    const saved = mapping?.extra ? parseCardTask(mapping.extra) : undefined;
+    if (!saved?.scope_id) throw new LarkServiceError('LARK_CONTEXT_MISSING', '原任务上下文不可恢复，请重新发送 /plan。', 409);
+    const { event, prompt } = planFollowUpEvent(record, { chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', threadId: saved.thread_id },
+      { name: config.name?.trim() || 'Dutydeck', openId: this.botOpenId });
+    if (!await this.inbox.seed(record.appId, event, { prompt, scopeId: saved.scope_id, resources: [] })) return;
+    void this.handle(event, config).catch(error => this.log.error({ error, messageId: event.messageId }, '提交计划的下一轮失败'));
   }
 
   /**

@@ -514,7 +514,8 @@ export class DutydeckRuntime {
       systemPrompt: session.systemPrompt ?? agent.systemPrompt,
       permissionMode: session.permissionMode ?? agent.permissionMode,
       // 终端模式的适配器据会话来源决定启动参数（飞书会话固定 CLI 的权限模式），只注入 pty-cli，不进 ACPX session。
-      env: { ...agent.env, ...this.options.sessionEnvironment?.(session), ...(session.protocol === 'pty-cli' ? { dutydeck_terminal_backend: session.terminalBackend ?? 'tmux', ...(session.source ? { dutydeck_session_source: session.source } : {}) } : {}) }
+      // dutydeck_session_permission_mode：任务以 deny-all（先出计划）运行时，终端仍按会话本身的模式启动 CLI。
+      env: { ...agent.env, ...this.options.sessionEnvironment?.(session), ...(session.protocol === 'pty-cli' ? { dutydeck_terminal_backend: session.terminalBackend ?? 'tmux', dutydeck_session_permission_mode: session.permissionMode ?? agent.permissionMode, ...(session.source ? { dutydeck_session_source: session.source } : {}) } : {}) }
     };
   }
 
@@ -2377,7 +2378,8 @@ export class DutydeckRuntime {
     await this.mutations.wait(() => this.configurations.assertClear(session.id));
     const existing = this.drivers.get(session.id);
     if (session.protocol === 'pty-cli' && !['ask', 'full-trust'].includes(options.permissionMode)) {
-      const agent = options.permissionMode === 'approve-reads' ? await this.repos.agents.get(session.agentId) : undefined;
+      // deny-all 只作任务级选项（先出计划）出现，由 Claude 家族终端的 PreToolUse 守卫拦写操作。
+      const agent = ['approve-reads', 'deny-all'].includes(options.permissionMode) ? await this.repos.agents.get(session.agentId) : undefined;
       if (!agent || !supportsRemoteApproval({ ...agent, protocol: 'pty-cli' })) throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY CLI cannot enforce the requested permission mode', 422);
     }
     if (!existing) return this.reconnect(session, true, options);
@@ -2540,12 +2542,12 @@ export class DutydeckRuntime {
     });
   }
 
-  async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[], supplied?: TaskRequestV1, idleCompactHours?: number, promptParts?: PromptPart[]) {
+  async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[], supplied?: TaskRequestV1, idleCompactHours?: number, promptParts?: PromptPart[], permissionMode?: PermissionMode) {
     this.assertReady();
     const stored = await this.repos.sessions.get(id);
     this.assertReady();
     if (!stored) throw new RuntimeError('SESSION_NOT_FOUND', 'Session is missing', 404);
-    const request: TaskRequestV1 = supplied ?? { version: 1, namespace: 'runtime', sessionId: id, key: idempotencyKey ?? makeId('request'), actor: this.actor(stored, actorId), prompt, mode, skills: skillRequests ?? [], options: {}, sources: [], sourcePayload: { agentPrompt, ...(riskPolicy ? { riskPolicy: JSON.parse(canonicalExecutionJson(riskPolicy)) } : {}), skills: skillRequests ?? [], ...(idleCompactHours !== undefined ? { idleCompactHours } : {}), ...(promptParts ? { promptParts: JSON.parse(canonicalExecutionJson(promptParts)) } : {}) } };
+    const request: TaskRequestV1 = supplied ?? { version: 1, namespace: 'runtime', sessionId: id, key: idempotencyKey ?? makeId('request'), actor: this.actor(stored, actorId), prompt, mode, skills: skillRequests ?? [], options: permissionMode ? { permissionMode } : {}, sources: [], sourcePayload: { agentPrompt, ...(riskPolicy ? { riskPolicy: JSON.parse(canonicalExecutionJson(riskPolicy)) } : {}), skills: skillRequests ?? [], ...(idleCompactHours !== undefined ? { idleCompactHours } : {}), ...(promptParts ? { promptParts: JSON.parse(canonicalExecutionJson(promptParts)) } : {}) } };
     canonicalExecutionJson(request); taskRequestV1Schema.parse(request);
     const explicitActor = actorId ?? undefined;
     const requestActor = request.actor.kind === 'unspecified' ? undefined : request.actor.id;
@@ -3031,7 +3033,8 @@ export class DutydeckRuntime {
     if (this.activeTurns.has(id)) throw new RuntimeError('TURN_IN_PROGRESS', 'Wait for the current response before switching permissions', 409);
     // 已启动驱动不支持热切换时，不得只改数据库却让子进程继续沿用
     // 旧 argv；未连接会话可以先持久化，下次 reconnect 会按新姿态启动。
-    if (driver && !driver.setPermissionMode) throw new RuntimeError('PERMISSION_MODE_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime permission switching`, 422);
+    // 终端驱动的 setPermissionMode 只服务任务级的先出计划，不能换掉已启动 CLI 的会话姿态。
+    if (driver && (!driver.setPermissionMode || session.protocol === 'pty-cli')) throw new RuntimeError('PERMISSION_MODE_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime permission switching`, 422);
     if (driver) await this.changeDriverConfiguration(session, driver, current => ({ ...current, permissionMode: mode }), { permissionMode: mode });
     else await this.mutations.write(id, async () => { await this.configurations.assertClear(id); Object.assign(session, await this.patchSession(id, { permissionMode: mode })); });
     return this.withSessionMetadata(session);

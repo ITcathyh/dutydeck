@@ -45,6 +45,8 @@ import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.j
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
 import { type LarkCommandPrompt, larkCardChannel, type LarkRelaunchClaim, larkTaskTitle, sendTaskCard } from './coordinator-core.js';
 import { LarkCoordinatorDispatch } from './coordinator-dispatch.js';
+import { planPrompt } from '../plan-mode.js';
+import { planReplyAction } from './plan-flow.js';
 
 // 飞书消息协调器 · 入站唤醒：入站消息与卡片回调的入口和路由、聊天命令与 /status、
 // 工作流与问答回复、群参与认领，以及飞书任务的认领。
@@ -325,6 +327,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       if (parsed?.name === 'tasks') {
         const card = await this.workflowReply(event, config, '', { taskName: '任务导航', elements: await this.taskDashboard(event, config, Number(parsed.args[0] ?? 1)) });
         await this.saveTaskDashboardOrigin(config, card, event);
+        return true;
+      }
+      // 引用计划卡回复：「批准」「取消」按按钮处理，其余文字是修改意见。斜杠命令照常走命令路由。
+      if (quoted?.kind === 'plan' && !parsed) {
+        const result = await this.workflows.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId: quoted.id, action: planReplyAction(prompt), answer: prompt });
+        await this.workflowReply(event, config, result);
         return true;
       }
       if (quoted?.kind === 'result' && prompt.trim() === '验收通过') {
@@ -945,7 +953,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       answer: Boolean(this.workflows && this.workflowOptions.broker),
       approval: Boolean(this.workflows && this.runtime.resolvePermission && this.runtime.getPendingPermissions),
       memory: Boolean(this.workflowOptions.memory),
-      groupPolicy: Boolean(this.groupManager)
+      groupPolicy: Boolean(this.groupManager),
+      plan: Boolean(this.workflows && this.inbox && this.cardMappings)
     };
   }
 
@@ -1276,6 +1285,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           await replyCard('已提到队首', `**第 ${index} 条待执行指令已排到队首，当前这一轮会被中断。**\n\n${escapeLarkPromptEcho(larkCommandEcho(target.prompt, 120))}`);
         }
         return 'handled';
+      }
+      if (route.command === 'plan') {
+        if (!route.argsText) {
+          await replyCard('/plan 未执行', '**用法：`/plan <任务>`**\n\n例如：`/plan 把登录页的报错改成中文`。Agent 先只调研、出计划，不改文件；你在计划卡上批准后才会执行。', { failed: true });
+          return 'handled';
+        }
+        // 任务内容走完整建任务链路；请求原文保留 /plan 前缀，runTurn 据此按计划轮执行（重试、恢复都带着它）。
+        return planPrompt(route.argsText);
       }
       if (route.command === 'steer') {
         if (!route.argsText) {
@@ -2166,7 +2183,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (workflow && workflowAction !== undefined) {
       if (!this.workflows || !context?.messageId || !context.chatId || !this.reconcileConfig) return { type: 'error', content: '卡片身份不完整或已失效。' };
       const action = workflowAction;
-      if (!['approve', 'reject', 'accept', 'changes', 'answer', 'allow_session'].includes(action)) return { type: 'error', content: '无法识别任务操作。' };
+      if (!['approve', 'reject', 'accept', 'changes', 'answer', 'allow_session', 'plan_approve', 'plan_revise', 'plan_cancel'].includes(action)) return { type: 'error', content: '无法识别任务操作。' };
       // P0-1：overflow 菜单只承载唯一的回调选项（审批行的「拒绝」），其余点选一律拒绝，
       // 防止共用 behaviors.value 被误当成任意动作执行。
       if (context.actionTag === 'overflow' && !(action === 'reject' && context.option === 'reject')) {
@@ -2190,6 +2207,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           return { type: 'warning', content: '审批已失效，请刷新 /tasks 后重试。' };
         }
         let answer: { answer?: string; selected?: string[] } = {};
+        if (action === 'plan_revise') {
+          const formAnswer = (workflow.form_value as { answer?: unknown } | undefined)?.answer;
+          answer = { answer: typeof formAnswer === 'string' ? formAnswer : '' };
+        }
         if (action === 'answer') {
           if (workflow.multiple === true) {
             // 多选值由平台放在 form_value.answer（string[]）；容忍单值形态，过滤去重在 respond 内。
@@ -2203,7 +2224,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           }
         }
         const content = await this.workflows.respond({ appId: this.reconcileConfig.appId, chatId: context.chatId,
-          actorId: operatorOpenId, requestId, action: action as 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session',
+          actorId: operatorOpenId, requestId, action: action as 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session' | 'plan_approve' | 'plan_revise' | 'plan_cancel',
           ...(fromDashboard ? {} : { cardId: context.messageId, generation: String(workflow.generation ?? ''), callback: true }),
           ...answer });
         if (action === 'accept' || action === 'changes') await this.refreshResultFeedback(this.reconcileConfig, requestId).catch(error => this.log.warn({ error }, '验收已记录，卡片刷新失败'));

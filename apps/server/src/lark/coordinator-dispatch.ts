@@ -50,6 +50,7 @@ import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTaskState, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask } from './persisted-card-task.js';
 import type { LarkInteraction } from './workflow-interactions.js';
+import { planInstructionBlock, planTaskOf, planUnsupportedReason } from '../plan-mode.js';
 import { larkCardFollowUpTitle, type LarkCardCapabilities } from './card-actions.js';
 import { type LarkCommandPrompt, larkCardChannel, relaunchRetainedPrefix, relaunchRetainedKey, larkTaskTitle, sendTaskCard, withoutLeadingBotMention } from './coordinator-core.js';
 import { LarkCoordinatorRecovery } from './coordinator-recovery.js';
@@ -837,7 +838,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
     if (!restoring && !resumeTask && currentTurn === 1) await this.mergeQueuedPredecessor(task);
     const prompt = task.prompt;
-    const taskTitle = larkTaskTitle(prompt, config.name);
+    /** 先出计划的计划轮（请求原文以 /plan 开头）：只调研出计划，以 deny-all 运行，结果卡带计划操作。 */
+    const planTask = planTaskOf(prompt);
+    const taskTitle = larkTaskTitle(planTask !== undefined ? `计划：${planTask}` : prompt, config.name);
     if (task.inbox?.request && task.inbox.request.prompt !== prompt) await this.inbox!.update(task.inbox, { request: { ...task.inbox.request, prompt } });
 
     let actorEmails: string[] = [];
@@ -958,6 +961,15 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       await clearAcknowledgement();
       return;
     }
+    if (planTask !== undefined) {
+      // 拦不住写操作的 Agent 明确拒绝，绝不退回直接执行。
+      const reason = !this.workflows || !this.inbox || !this.runtime.dispatch ? '当前服务没有计划卡所需的存储或无法派发任务，不能先出计划。'
+        : planUnsupportedReason(session, (await this.runtime.listAgents?.())?.find(item => item.id === session.agentId) as Parameters<typeof planUnsupportedReason>[1]);
+      if (reason) {
+        await failBeforeRun('无法先出计划', withGroupMention(reason), `plan_unsupported_${event.messageId}_${currentTurn}`, { inboxReason: '当前 Agent 不支持先出计划', readOnly: true });
+        return;
+      }
+    }
     task.sessionId = session.id;
     task.newSessionNote = takeLarkNewSessionNote(session);
     const legacyUpgradeNote = task.group.legacyUpgradeSessionId === session.id
@@ -994,7 +1006,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         else {
           let context: Awaited<ReturnType<typeof collectLarkTaskContext>>;
           try {
-            context = await withLarkContextReadTimeout(collectLarkTaskContext({ event, prompt, resources: task.resources, service: this.service, selfAppId: config.appId, ...previous }), '话题上下文读取');
+            context = await withLarkContextReadTimeout(collectLarkTaskContext({ event, prompt: planTask ?? prompt, resources: task.resources, service: this.service, selfAppId: config.appId, ...previous }), '话题上下文读取');
           } catch (error) { await failContextRead(error, session); return; }
           if (this.stopped || task.turn !== currentTurn || await this.supersededTurn(task, session)) return;
           materialPrompt = context.agentPrompt;
@@ -1235,7 +1247,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 完成时只贴表情：成功终态改为在原消息上贴一枚表情，不再发结果卡。
         // 只对成功终态生效——失败/中断/取消仍必须发结果卡，一个表情等于把失败藏起来。
         // 任务通道的合成事件没有可贴的原消息，只能照常发结果卡，否则用户什么也收不到。
-        if (!explicit && completionReactionOnly && state === 'completed' && !larkTaskAgentGuid(event.messageId)) {
+        // 计划轮必须发结果卡：计划和批准按钮都在卡上。
+        if (!explicit && completionReactionOnly && state === 'completed' && planTask === undefined && !larkTaskAgentGuid(event.messageId)) {
           const reacted = await deliverLarkStatusReaction(this.service, { appId: config.appId, messageId: event.messageId, completed: true }, this.log, this.workflowOptions.store);
           if (this.stopped || task.turn !== currentTurn) return;
           // 贴失败就不记「已交付」：这枚表情是用户唯一能看到的完成信号，交给对账重试。
@@ -1257,7 +1270,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         const changedCode = state === 'completed' && codeSignatureBefore !== undefined
           && await readGitCodeSignature(session.cwd) !== codeSignatureBefore;
         const verification = await this.verificationView(task, config, state, changedCode);
-        const resultActions = await this.resultActionCapabilities(task, config, state);
+        // 计划卡不给续问、定时这些结果操作：它们和批准共用这张卡做下一轮的锚点。
+        const resultActions = planTask === undefined ? await this.resultActionCapabilities(task, config, state) : {};
         const continueCause = await this.continueCause(config.appId, task.id, currentTurn, task.scopeId, state, task.events);
         const gitStatus = changedCode ? await this.readGitStatusLine(state, session.cwd ?? cardContext.workspace) : undefined;
         const elements = [
@@ -1267,10 +1281,16 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           ...(verification.element ? [verification.element] : []),
           ...(gitStatus ? [{ tag: 'markdown', element_id: 'git_status', content: gitStatus }] : []),
           ...(terminalMention ? [{ tag: 'markdown', element_id: 'group_mention', content: terminalMention }] : [])];
+        const planContext = planTask !== undefined && state === 'completed' && !explicit ? context : undefined;
+        if (planContext && this.workflows) {
+          const planText = (elements.find(element => element.element_id === 'final_output') as { content?: unknown } | undefined)?.content;
+          const planElements = await this.workflows.plan(planContext, '', typeof planText === 'string' ? planText : '', { groupMention: Boolean(terminalMention) });
+          elements.splice(terminalMention ? elements.length - 1 : elements.length, 0, ...planElements);
+        }
         if (this.stopped || task.turn !== currentTurn) return;
         // 结果卡标题用结论第一句，原话就在卡片上方不必重复；一键续问那一轮仍用「对外回复版」「详细版」，
         // 拿不到结论时用原话。
-        const conclusionTitle = state === 'completed' && !larkCardFollowUpTitle(withoutLeadingBotMention(prompt, config.name))
+        const conclusionTitle = state === 'completed' && planTask === undefined && !larkCardFollowUpTitle(withoutLeadingBotMention(prompt, config.name))
           ? larkConclusionHeadline((elements.find(element => element.element_id === 'final_output') as { content?: unknown } | undefined)?.content) : undefined;
         const resultCardInput = {
           ...cardContext, cardKind: 'result' as const, state, taskId: task.id, taskName: conclusionTitle ?? taskTitle,
@@ -1293,6 +1313,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         task.finalCardInput = resultCardInput;
         if (context && this.workflows) await this.workflows.result(context, result.messageId, result.attachmentMessageId ? [result.attachmentMessageId] : undefined).catch(error => {
           this.log.warn({ error, taskId: task.id }, '结果已送达，验收绑定等待对账补齐');
+          this.scheduleReconcile();
+        });
+        if (planContext && this.workflows) await this.workflows.plan(planContext, result.messageId, undefined, result.attachmentMessageId ? { relatedCardIds: [result.attachmentMessageId] } : {}).catch(error => {
+          this.log.warn({ error, taskId: task.id }, '计划卡已送达，按钮绑定等待对账补齐');
           this.scheduleReconcile();
         });
         // 结果送达后在原消息上留一枚状态表情，话题列表里不点进去就能看出成没成；用户自己取消、停下的不贴。
@@ -1474,12 +1498,13 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     if (config.adhdMode) injected.push(larkAdhdModePrompt);
     if (riskControlEnabled && !highRiskAuthorized) injected.push(`[Dutydeck 安全策略 · 自动注入]\n当前飞书发送人不在高危操作允许名单中。禁止执行匹配以下正则的操作，也不要通过脚本、子进程、MCP 或其他等价方式绕过：\n${highRiskPattern}\n如果用户要求此类操作，请明确说明已被 Dutydeck 安全策略阻止。`);
     if (task.redispatch) injected.push(larkRedispatchAgentNote(task.redispatch));
+    if (planTask !== undefined) injected.push(planInstructionBlock);
     if (event.chatType === 'group' && groupSend) {
       injected.push(`[Dutydeck 飞书当前消息 · 系统上下文] message_id：${event.messageId}；thread_id：${event.threadId?.trim() || '事件未提供'}。需要独立发送并接在这条消息下时用 --reply-to ${event.messageId}；--reply-to 只能用 om_* message_id，不能用 omt_* thread_id。`);
     }
     const agentPrompt = injected.length ? `${injected.join('\n\n')}\n\n[用户请求]\n${materialPrompt}` : materialPrompt;
     const promptParts: PromptPart[] = injected.flatMap((content, index) => {
-      const parts = knownParts.get(content) ?? [{ kind: content.startsWith('[Dutydeck 角色 · 管理者配置') || content.startsWith('[Dutydeck 群长期指令') || content.startsWith('[Dutydeck 预注入 Prompt') || content.startsWith('[Dutydeck 安全策略') || content === larkAdhdModePrompt ? 'host_rules' as const
+      const parts = knownParts.get(content) ?? [{ kind: content.startsWith('[Dutydeck 角色 · 管理者配置') || content.startsWith('[Dutydeck 群长期指令') || content.startsWith('[Dutydeck 预注入 Prompt') || content.startsWith('[Dutydeck 安全策略') || content === larkAdhdModePrompt || content === planInstructionBlock ? 'host_rules' as const
         : content.startsWith('[Dutydeck 会话记忆') ? 'memory' as const : 'dynamic_context' as const,
         sourceId: `lark:${config.appId}:${event.chatId}:injection:${index}`, digest: promptDigest(content), trustScope: 'host', content }];
       return parts.map((part, partIndex) => ({ ...part, prefix: `${partIndex === 0 && index ? '\n\n' : ''}${part.prefix ?? ''}` }));
@@ -1630,7 +1655,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           : await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt, riskPolicy,
             task.inbox || config.managedGroup ? event.senderOpenId : undefined,
             task.inbox ? `lark:${config.appId}:${event.messageId}:${currentTurn}` : undefined, undefined, undefined,
-            config.idleCompactEnabled !== false ? config.idleCompactHours ?? defaultLarkIdleCompactHours : undefined, promptParts);
+            config.idleCompactEnabled !== false ? config.idleCompactHours ?? defaultLarkIdleCompactHours : undefined, promptParts,
+            planTask !== undefined ? 'deny-all' : undefined);
         runtimeTaskId = runtimeTask.id;
         // 重连或按幂等键重放的是早先派发的那条 prompt，本轮新读的群上下文没有交给 Agent。
         if (runtimeTask.replayed) groupContextCommit = undefined;

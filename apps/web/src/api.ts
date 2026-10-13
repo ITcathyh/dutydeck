@@ -274,6 +274,9 @@ export type Task = { skillDeliveries?: SkillDeliveryMetadata[]; id: string; sess
 export type UnknownTask = UnknownTaskFacts & { target: string; prompt: string; factLines: string[] };
 /** 插话结果：injected / startedNewTurn 已送达；moved 表示状态已变化；failed 是否需要核对以 task.status 为准，reconcile_required 不自动重发。 */
 export type SteeringOutcome = 'injected' | 'startedNewTurn' | 'moved' | 'promptRequired' | 'unsupported' | 'incompatible' | 'failed';
+/** 会话里最近一份计划的状态：planning 正在出计划，pending 等人决定（operable=false 表示要回飞书计划卡处理）。 */
+export type PlanState = { state: 'none' | 'planning' | 'pending' | 'approved' | 'needs_changes' | 'cancelled' | 'expired'; taskId?: string; expiresAt?: string; operable?: boolean };
+export type PlanAction = 'approve' | 'revise' | 'cancel';
 export type SteeringResult = { outcome: SteeringOutcome; error?: string };
 export type RunSummary = { sessionId: string; taskId: string; prompt: string; status: string; queuedCount: number; updatedAt: string };
 export type EventWindowQuery = { before?: number; after?: number; limit?: number; direction?: 'backward' | 'forward' };
@@ -363,6 +366,10 @@ export const api = {
   // 跨任务标题的最小只读契约；服务端接入前 UI 仅使用当前已加载 tasks 的真实 prompt，不伪造摘要。
   runSummaries: () => json<RunSummary[]>(RUN_SUMMARY_ENDPOINT),
   create: (body: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: WorkspaceMode }) => json<Session>('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  /** 先出计划：Agent 只调研出计划（写操作被拦），批准后才执行。 */
+  plan: (id: string, prompt: string) => json<{ accepted: true; task: Task; steering?: undefined }>(`/api/sessions/${id}/plan`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt }) }),
+  planState: (id: string) => json<PlanState>(`/api/sessions/${id}/plan`, { cache: 'no-store' }),
+  decidePlan: (id: string, taskId: string, action: PlanAction, feedback?: string) => json<{ state: PlanState['state']; task?: Task }>(`/api/sessions/${id}/plan/${taskId}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...(feedback ? { feedback } : {}) }) }),
   send: (id: string, prompt: string, mode: 'queue' | 'interrupt' | 'steer' = 'queue', skillRequests?: string[]) => json<{ accepted: true; task: Task; steering?: SteeringResult }>(`/api/sessions/${id}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt, mode, ...(skillRequests?.length ? { skillRequests } : {}) }) }),
   setSessionModel: (id: string, model: string) => json<Session>(`/api/sessions/${id}/config`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model }) }),
   setSessionReasoningEffort: (id: string, reasoningEffort: string) => json<Session>(`/api/sessions/${id}/config`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reasoningEffort }) }),

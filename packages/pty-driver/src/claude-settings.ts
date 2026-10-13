@@ -2,8 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { planGuardScript } from './plan-guard.js';
 
 const claudeAdapters = new Set(['claude-code', 'seed', 'relay', 'genius']);
+const planGuardFile = 'plan-guard.mjs';
+const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 function settingsArgs(args: string[]): { rest: string[]; value?: string } {
   const rest: string[] = [];
@@ -97,6 +100,47 @@ export class ClaudeSettings {
     writeFileSync(path, JSON.stringify(merged), { mode: 0o600, flag: 'wx' });
     this.files.add(path);
     return [...user.rest, ...generated.rest, '--settings', path];
+  }
+
+  /**
+   * 计划阶段守卫脚本的位置。脚本只在任务以 deny-all 运行期间存在；hook 命令先看它在不在，不在就直接放行（只花一次 test）。
+   * 跑脚本失败（如 node 不可用）按拒绝处理，不会因为守卫坏了就放行。
+   */
+  planGuardCommand(nodePath = process.execPath): string {
+    const script = quote(join(this.directory, planGuardFile));
+    return `test ! -e ${script} || ${quote(nodePath)} ${script} || exit 2`;
+  }
+
+  /** 打开或关掉计划阶段守卫：写入或删除会话私有目录里的守卫脚本。 */
+  setPlanGuard(active: boolean): void {
+    const path = join(this.directory, planGuardFile);
+    if (!active) {
+      rmSync(path, { force: true });
+      this.files.delete(path);
+      return;
+    }
+    try { mkdirSync(this.directory, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    this.assertPrivateDirectory();
+    writeFileSync(path, planGuardScript(), { mode: 0o600 });
+    this.files.add(path);
+  }
+
+  /**
+   * 正在跑的 CLI 有没有装守卫 hook：本驱动启动的看启动参数里的设置，接管的旧终端看会话目录里的每份设置。
+   * 守卫上线前启动的终端没有这个 hook，计划阶段拦不住写操作，只能换新会话。
+   */
+  planGuardWired(launchArgs: string[], cwd: string): boolean {
+    const marker = join(this.directory, planGuardFile);
+    const index = launchArgs.indexOf('--settings');
+    if (index >= 0) {
+      const value = launchArgs[index + 1] ?? '';
+      try { return (value.trimStart().startsWith('{') ? value : readFileSync(resolve(cwd, value), 'utf8')).includes(marker); }
+      catch { return false; }
+    }
+    if (launchArgs.length) return false;
+    const settings = [...this.files].filter(path => path.endsWith('.json'));
+    return settings.length > 0 && settings.every(path => { try { return readFileSync(path, 'utf8').includes(marker); } catch { return false; } });
   }
 
   cleanup(): void {

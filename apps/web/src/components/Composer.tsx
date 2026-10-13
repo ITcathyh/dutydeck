@@ -1,5 +1,5 @@
 import { type KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { BrainCircuit, Check, ChevronDown, File, FolderOpen, Gauge, ListEnd, MessageSquarePlus, Plus, RefreshCw, Send, Sparkles, Square, X, Zap } from 'lucide-react';
+import { BrainCircuit, Check, ChevronDown, ClipboardList, File, FolderOpen, Gauge, ListEnd, MessageSquarePlus, Plus, RefreshCw, Send, Sparkles, Square, X, Zap } from 'lucide-react';
 import type { AgentModel, Session, SkillReference, Task } from '../api';
 import { formatTokens, replaceSlashQuery, slashQuery, type ComposerReference, type ContextStats, type ModelReadiness } from '../composer-utils';
 import { composerCapabilities, mergeComposerCommands, type ComposerCommandAction } from '../composer-commands';
@@ -191,8 +191,10 @@ function ContextMeter({ context }: { context: ContextStats }) {
   </div>;
 }
 
-export function Composer({ state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, injectingTaskId, steerable, blockingPermissionId, rejectingPermission, onRejectPermission, skills, models, reasoningEfforts, currentModel, currentReasoningEffort, context, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onSteerQueued, onInjectQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp }: {
+export function Composer({ planFirst = false, onPlanFirstChange, state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, injectingTaskId, steerable, blockingPermissionId, rejectingPermission, onRejectPermission, skills, models, reasoningEfforts, currentModel, currentReasoningEffort, context, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onSteerQueued, onInjectQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp }: {
   state: string; session?: Pick<Session, 'state' | 'archivedAt'>; value: string; references: ComposerReference[]; sending: boolean; mode: SendMode; queuedTasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string;
+  /** 先出计划：打开时这条消息让 Agent 只调研出计划，批准后才执行。未传 onPlanFirstChange 时不显示开关。 */
+  planFirst?: boolean; onPlanFirstChange?(value: boolean): void;
   /** 当前 Agent 可能支持插话（ACP）；为假时不提供「插话」。 */
   injectingTaskId?: string; steerable?: boolean; onInjectQueued?(taskId: string): void;
   /** 当前一轮停在这条审批上：排队指令标为被审批阻塞，并可直接拒绝它。 */
@@ -351,7 +353,7 @@ export function Composer({ state, session, value, references, sending, mode, que
         value={value}
         onChange={event => { onChange(event.target.value); if (panel !== 'file' && panel !== 'models' && panel !== 'reasoning') setPanel(undefined); }}
         onKeyDown={keyboard}
-        placeholder={busy ? '补充要求；可选择排队或立即介入当前执行' : '描述要完成的目标、范围和验收要求…'}
+        placeholder={planFirst ? '描述要完成的目标；Agent 先出计划，你批准后才执行' : busy ? '补充要求；可选择排队或立即介入当前执行' : '描述要完成的目标、范围和验收要求…'}
         rows={1}
         className="max-h-48 min-h-16 w-full resize-none overflow-y-auto border-0 bg-transparent px-2.5 py-2 text-body text-primary outline-none placeholder:text-subtle focus-visible:outline-none"
       />
@@ -383,6 +385,14 @@ export function Composer({ state, session, value, references, sending, mode, que
           onClick={() => setPanel(panel === 'reasoning' ? undefined : 'reasoning')}
           className={panelTriggerClass}
         ><BrainCircuit size={13}/><span className="truncate">{currentReasoningEffort || '默认深度'}</span><ChevronDown size={12}/></button>
+
+        {onPlanFirstChange && <button
+          type="button"
+          aria-pressed={planFirst}
+          title="先只调研、出计划，不改文件；你批准后再按计划执行"
+          onClick={() => onPlanFirstChange(!planFirst)}
+          className={`${panelTriggerClass} ${planFirst ? 'bg-action-soft text-action hover:bg-action-soft hover:text-action' : ''}`}
+        ><ClipboardList size={13}/><span className="truncate">先出计划</span></button>}
 
         <div className="ml-auto flex min-w-0 items-center gap-1.5">
           <ContextMeter context={context}/>

@@ -21,6 +21,11 @@ export interface AdapterSessionContext {
    * 算出的绝对路径，静态文案拿不到，只能经 env 下发。见 shared-hints.ts 注释。
    */
   env?: Record<string, string>;
+  /**
+   * 计划阶段守卫的 hook 命令（只有 Claude 家族终端由驱动给出）。适配器把它挂成 PreToolUse hook，
+   * 守卫脚本不存在时它什么都不做；先出计划的第一阶段驱动写入脚本，写操作就被拦下。
+   */
+  planGuardCommand?: string;
 }
 
 /** 后端写接口的最小表面（PtyBackend/TmuxBackend 都满足） */
