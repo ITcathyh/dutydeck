@@ -264,8 +264,7 @@ export class PullRequestService {
     const target = await defaultBranch(cwd);
     if (!target) throw new RuntimeError('PR_TARGET_UNKNOWN', '无法确定目标分支：origin 没有默认分支。可以先执行 git remote set-head origin --auto。', 409);
     const commonDir = (await git({ cwd }, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
-    const snapshot = await snapshotWorkingTree(cwd, SNAPSHOT_TIMEOUT_MS);
-    if (!snapshot) throw new RuntimeError('PR_SNAPSHOT_FAILED', '读取工作区改动失败或超时，请稍后重试。', 503);
+    const snapshot = await workspaceSnapshot(cwd);
 
     const uncommitted = await diffTrees({ cwd }, head.headSha, snapshot.tree);
     const owner = await this.sessionOwnership(sessionId, commonDir);
@@ -390,8 +389,7 @@ export class PullRequestService {
       const head = (await git({ cwd }, ['rev-parse', '--verify', 'HEAD'])).trim();
       if (head !== value.baseSha) throw new Error(`确认前工作区的 HEAD 从 ${short(value.baseSha)} 变成了 ${short(head)}，没有推送。请重新发起。`);
       if (value.contents.length) {
-        const snapshot = await snapshotWorkingTree(cwd, SNAPSHOT_TIMEOUT_MS);
-        if (!snapshot) throw new Error('读取工作区改动失败或超时，没有推送。');
+        const snapshot = await workspaceSnapshot(cwd);
         const current = await treeEntries({ cwd }, snapshot.tree, value.contents.map(item => item.path));
         const changed = value.contents.filter(item => !sameEntry(current.get(item.path), item.sha ? { mode: item.mode ?? '100644', sha: item.sha } : undefined));
         if (changed.length) throw new Error(`确认清单生成后这些文件又被改动：${changed.slice(0, 5).map(item => item.path).join('、')}${changed.length > 5 ? ' 等' : ''}，没有推送。请重新发起。`);
@@ -478,8 +476,8 @@ export class PullRequestService {
   /** 工作区里 PR 涉及的文件必须和 PR 分支一致，否则 Agent 改出来的东西对不上 PR。返回不一致的说明。 */
   private async workspaceDivergence(cwd: string, value: PullRequestRecord): Promise<string | undefined> {
     if (!value.headSha || !value.paths.length) return undefined;
-    const snapshot = await snapshotWorkingTree(cwd, SNAPSHOT_TIMEOUT_MS);
-    if (!snapshot) return '读取工作区改动失败或超时，已停止自动跟进。';
+    let snapshot: Awaited<ReturnType<typeof workspaceSnapshot>>;
+    try { snapshot = await workspaceSnapshot(cwd); } catch (error) { return `${errorMessage(error)}已停止自动跟进。`; }
     const [workspace, pr] = await Promise.all([treeEntries({ cwd }, snapshot.tree, value.paths), treeEntries({ cwd }, value.headSha, value.paths)]);
     const changed = value.paths.filter(path => !sameEntry(workspace.get(path), pr.get(path)));
     return changed.length ? `工作区里这些文件已和 PR 不一致：${changed.slice(0, 5).join('、')}${changed.length > 5 ? ' 等' : ''}。为避免把别的改动推进 PR，已停止自动跟进。` : undefined;
@@ -559,13 +557,28 @@ export class PullRequestService {
       const handled = new Set([...stored.value.handledComments, ...stored.value.ownComments, ...stored.value.questions.map(question => question.commentId)]);
       const fresh = (await provider.listReviewComments(value.repository, value.pullRequest.number))
         .filter(comment => comment && typeof comment.id === 'string' && !handled.has(comment.id) && typeof comment.body === 'string' && comment.body.trim() && !comment.body.includes(PR_COMMENT_MARKER));
-      if (fresh.length) {
+      // 只有仓库所有者、成员、协作者的人类账号的评论自动交给 Agent；其余的发卡片问人，不占处理轮次。
+      const untrusted = fresh.filter(comment => comment.trusted !== true).slice(0, pullRequestLimits.commentsPerRound)
+        .map(comment => ({ id: comment.id, excerpt: excerptOf(comment), question: untrustedAuthor(comment) }));
+      if (untrusted.length) {
+        const saved = await this.save(stored, {
+          ...stored.value, handledComments: [...stored.value.handledComments, ...untrusted.map(item => item.id)].slice(-2_000),
+          questions: [...stored.value.questions, ...untrusted.map(item => ({ commentId: item.id, question: item.question, excerpt: item.excerpt }))]
+        });
+        if (!saved) return;
+        await this.ask(saved.value, untrusted.map(item => ({ ...item, text: item.question })));
+        const latest = await this.read(value.id);
+        if (!latest) return;
+        stored = latest;
+      }
+      const trusted = fresh.filter(comment => comment.trusted === true);
+      if (trusted.length) {
         if (stored.value.reviewRounds >= pullRequestLimits.reviewRounds) {
           const saved = await this.save(stored, { ...stored.value, reviewsPaused: true, nextPollAt: iso(now + POLL_INTERVAL_MS) });
           if (saved) await this.notice(saved.value, { key: `${value.id}:reviews-paused`, title: `${this.label(value)} 评审意见需要人处理`, markdown: this.summary(saved.value, `评审意见已自动处理 ${pullRequestLimits.reviewRounds} 轮，达到上限。之后的评论请人处理。`), failed: true });
           return;
         }
-        await this.startReview(stored, stored.value, fresh.slice(0, pullRequestLimits.commentsPerRound).map((comment, index) => ({ ref: `c${index + 1}`, id: comment.id, excerpt: excerptOf(comment), body: comment.body, comment })), false);
+        await this.startReview(stored, stored.value, trusted.slice(0, pullRequestLimits.commentsPerRound).map((comment, index) => ({ ref: `c${index + 1}`, id: comment.id, excerpt: excerptOf(comment), body: comment.body, comment })), false);
         return;
       }
     }
@@ -679,8 +692,10 @@ export class PullRequestService {
     const record = await readTurnDiffRecord(this.options.repositories.config, sessionId, taskId);
     if (!record?.after) return undefined;
     const changes = await diffTrees({ gitDir: record.gitDir }, record.before, record.after);
-    const entries = await treeEntries({ gitDir: record.gitDir }, record.after, changes.map(change => change.path));
+    const paths = changes.map(change => change.path);
+    const [entries, before] = await Promise.all([treeEntries({ gitDir: record.gitDir }, record.after, paths), treeEntries({ gitDir: record.gitDir }, record.before, paths)]);
     return {
+      gitDir: record.gitDir, before,
       contents: changes.map((change): PathContent => { const entry = entries.get(change.path); return entry ? { path: change.path, ...entry } : { path: change.path }; }),
       files: changes.length,
       lines: changes.reduce((sum, change) => sum + change.additions + change.deletions, 0)
@@ -697,7 +712,12 @@ export class PullRequestService {
     if (!session) { await this.fail(value.id, '会话已不存在，已停止自动跟进。', ['open']); return; }
     const output = this.output(value.sessionId, task.id) ?? '';
     const changes = await this.taskChanges(value.sessionId, task.id).catch(() => undefined);
-    if (!changes) { await this.fail(value.id, `没有读到${name}的改动记录，已停止自动跟进。`, ['open']); return; }
+    if (!changes) {
+      // 这一轮的快照没拍成时，再拍一次拿到原因（例如未跟踪的大文件），告诉人怎么处理。
+      const why = await workspaceSnapshot(session.cwd).then(() => '', error => errorMessage(error));
+      await this.fail(value.id, `没有读到${name}的改动记录，已停止自动跟进。${why}`, ['open']);
+      return;
+    }
     if (changes.files > pullRequestLimits.files || changes.lines > pullRequestLimits.lines) {
       await this.fail(value.id, `${name}改了 ${changes.files} 个文件、${changes.lines} 行，超过每轮上限（${pullRequestLimits.files} 个文件、${pullRequestLimits.lines} 行），没有推送，已停止自动跟进，请人确认。`, ['open']);
       return;
@@ -705,6 +725,15 @@ export class PullRequestService {
     if (current.kind === 'ci' && !changes.files) { await this.fail(value.id, `${name}没有产生改动，已停止自动跟进。Agent 的说明见任务结果。`, ['open']); return; }
     let headSha = value.headSha!;
     if (changes.files) {
+      // 推上去的是这些文件改完后的完整内容。这一轮开始时它们必须和 PR 分支一致，否则里面还有不属于 PR 的内容
+      // （例如确认时被排除的、用户没提交的改动，或别的会话改的），会不经确认进 PR。
+      const paths = changes.contents.map(item => item.path);
+      const pr = await treeEntries({ gitDir: changes.gitDir }, headSha, paths);
+      const foreign = paths.filter(path => !sameEntry(changes.before.get(path), pr.get(path)));
+      if (foreign.length) {
+        await this.fail(value.id, `${name}改了 ${foreign.slice(0, 5).join('、')}${foreign.length > 5 ? ` 等 ${foreign.length} 个文件` : ''}，这些文件在这一轮开始前就和 PR 分支不一致（有不属于这个 PR 的改动，例如没提交的本地修改），推上去会把它们一起带进 PR。没有推送，已停止自动跟进，请人处理。`, ['open']);
+        return;
+      }
       try {
         const remote = await remoteBranchSha(session.cwd, value.branch);
         if (remote !== headSha) throw new Error(`远端 ${value.branch} 已不是 DutyDeck 推送的 ${short(headSha)}（有人推送过或分支已删除），没有推送`);
@@ -740,10 +769,15 @@ export class PullRequestService {
       markdown: this.summary(saved.value, changes.files ? `${name}已推送 ${short(headSha)}（${changes.files} 个文件、${changes.lines} 行）。` : `${name}没有改动代码。`),
       ...(output ? { output } : {})
     });
-    for (const item of asked) {
-      const messageId = await this.notice(saved.value, {
+    await this.ask(saved.value, asked.map(item => ({ ...item, text: `Agent 的问题：${item.question}` })));
+  }
+
+  /** 评论交给人决定：每条发一张带「按评论修改」「不处理」的卡片，记下卡片消息 ID。 */
+  private async ask(value: PullRequestRecord, items: Array<{ id: string; excerpt: string; text: string }>) {
+    for (const item of items) {
+      const messageId = await this.notice(value, {
         key: `${value.id}:ask:${item.id}`, title: `${this.label(value)} 有评审意见需要你决定`,
-        markdown: [`评论原文（节选）：`, codeBlock(item.excerpt), '', `Agent 的问题：${item.question}`].join('\n'),
+        markdown: [`评论原文（节选）：`, codeBlock(item.excerpt), '', item.text].join('\n'),
         actions: [
           { label: '按评论修改', value: { dutydeck_pr: value.id, op: 'answer', comment: item.id, choice: 'apply' } },
           { label: '不处理', value: { dutydeck_pr: value.id, op: 'answer', comment: item.id, choice: 'ignore' }, type: 'default' }
@@ -752,6 +786,30 @@ export class PullRequestService {
       if (messageId) await this.update(value.id, latest => ({ ...latest, questions: latest.questions.map(question => question.commentId === item.id && !question.cardMessageId ? { ...question, cardMessageId: messageId } : question) }));
     }
   }
+}
+
+/** 拍工作区快照；拍不了时抛出带原因和处理办法的错误。 */
+async function workspaceSnapshot(cwd: string) {
+  let reason: string | undefined;
+  const snapshot = await snapshotWorkingTree(cwd, SNAPSHOT_TIMEOUT_MS, { onSkip: value => { reason = value; } });
+  if (!snapshot) throw new RuntimeError('PR_SNAPSHOT_FAILED', snapshotFailure(reason), 503);
+  return snapshot;
+}
+
+/** 快照拍不了的原因，加上能怎么处理。 */
+export function snapshotFailure(reason: string | undefined) {
+  if (!reason) return '读取工作区改动失败，请稍后重试。';
+  const file = /^未跟踪文件 (.+) 有 \d+ 字节/.exec(reason)?.[1];
+  if (file) return `读取工作区改动失败：${reason}。把 ${file} 加进 .gitignore 后再试。`;
+  if (reason.startsWith('未跟踪文件')) return `读取工作区改动失败：${reason}。把不需要提交的未跟踪文件加进 .gitignore 后再试。`;
+  if (reason.includes('时限')) return `读取工作区改动超时：${reason}。通常是未跟踪的生成文件太多，把它们加进 .gitignore 后再试。`;
+  return `读取工作区改动失败：${reason}。`;
+}
+
+/** 评论作者为什么不在自动处理范围内。 */
+function untrustedAuthor(comment: CiReviewComment) {
+  const role = [comment.isBot ? '机器人' : undefined, comment.authorAssociation ? oneLine(comment.authorAssociation, 40) : comment.isBot ? undefined : '身份未知'].filter(Boolean).join('，');
+  return `评论作者 ${comment.author ? oneLine(comment.author, 40) : '未知'}（${role}）不是仓库所有者、成员或协作者的个人账号，没有自动处理。要按这条评论修改吗？`;
 }
 
 function excerptOf(comment: CiReviewComment) {

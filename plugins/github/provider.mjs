@@ -189,9 +189,14 @@ export function createGithubProvider(options = {}) {
     return { id: String(value.node_id ?? value.id), number: value.number, url: value.html_url };
   }
 
+  const trustedAssociations = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
   const comment = (kind, value) => ({
     id: `${kind}:${value.id}`,
     ...(typeof value.user?.login === 'string' ? { author: value.user.login } : {}),
+    // 只有仓库所有者、成员、协作者的人类账号算可信；路人和机器人的评论只发卡片问人，不自动改代码。
+    trusted: trustedAssociations.has(value.author_association) && value.user?.type !== 'Bot',
+    isBot: value.user?.type === 'Bot',
+    ...(typeof value.author_association === 'string' ? { authorAssociation: value.author_association } : {}),
     body: typeof value.body === 'string' ? value.body : '',
     ...(typeof value.path === 'string' ? { path: value.path } : {}),
     ...(Number.isSafeInteger(value.line) ? { line: value.line } : Number.isSafeInteger(value.original_line) ? { line: value.original_line } : {}),
@@ -223,7 +228,8 @@ export function createGithubProvider(options = {}) {
   async function postComment(repository, pullRequest, body) {
     if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) throw new GithubError('GITHUB_PULL_REQUEST_INVALID', 'Pull request number is invalid', 400);
     const value = await call('POST', apiUrl(`${repoPath(repository)}/issues/${pullRequest}/comments`), { body });
-    return { id: String(value?.id), ...(typeof value?.html_url === 'string' ? { url: value.html_url } : {}) };
+    // 与 listReviewComments 里普通评论的 id 同一写法，跟进时才能认出自己发的回复。
+    return { id: `issue:${value?.id}`, ...(typeof value?.html_url === 'string' ? { url: value.html_url } : {}) };
   }
 
   /** X-Hub-Signature-256: sha256=HMAC-SHA256(secret, 原始请求体)。 */
