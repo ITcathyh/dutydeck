@@ -214,6 +214,30 @@ export async function isValidSessionShareCredential(
   return Boolean(secret) && tokensEqual(presented, signSessionShareToken(secret!, sessionId));
 }
 
+/**
+ * 「查看改动」链接的 token = 到期时间（秒，36 进制）+ "." + HMAC(密钥, 会话 ID、任务 ID、到期时间)。
+ * 只授权读这一轮的 diff、把行评论转成飞书确认卡；签名前缀和会话分享 token 不同，两种 token 互相不能顶替。
+ */
+export function signTurnDiffToken(secret: string, sessionId: string, taskId: string, expiresAt: number): string {
+  const expires = Math.floor(expiresAt / 1000).toString(36);
+  return `${expires}.${createHmac('sha256', secret).update(`dutydeck-turn-diff-v1\0${sessionId}\0${taskId}\0${expires}`).digest('base64url')}`;
+}
+
+/** 验证「查看改动」凭据：签名对得上这个会话和任务，且没有过期。 */
+export async function isValidTurnDiffCredential(
+  presented: unknown,
+  sessionId: string,
+  taskId: string,
+  getShareSecret: AuthMiddlewareOptions['getShareSecret'],
+  now = Date.now(),
+): Promise<boolean> {
+  if (typeof presented !== 'string' || !getShareSecret) return false;
+  const match = /^([0-9a-z]{1,11})\.[A-Za-z0-9_-]+$/.exec(presented);
+  if (!match || parseInt(match[1]!, 36) * 1000 <= now) return false;
+  const secret = await getShareSecret();
+  return Boolean(secret) && tokensEqual(presented, signTurnDiffToken(secret!, sessionId, taskId, parseInt(match[1]!, 36) * 1000));
+}
+
 /** 从 Authorization 头提取 Bearer token；缺失或格式不对返回 undefined */
 export function extractBearerToken(authorization: string | undefined): string | undefined {
   if (!authorization) return undefined;
@@ -326,13 +350,20 @@ export class LoginThrottle {
 /** 分享页能读的接口：单个会话的详情、事件、任务和实时流，只读 */
 const SHARED_SESSION_READ_ROUTES = new Set(['/api/sessions/:id', '/api/sessions/:id/events', '/api/sessions/:id/tasks', '/api/sessions/:id/stream']);
 
-/** GET 上述路由且查询串带着为路由里这个会话 ID 签发的分享 token */
+/** 「查看改动」页能用的接口：这一轮 diff 的只读视图，和把行评论转成飞书确认卡（不直接给 Agent 下指令）。 */
+const SHARED_TURN_DIFF_ROUTES = new Map([['/api/sessions/:id/tasks/:taskId/diff', ['GET', 'HEAD']], ['/api/sessions/:id/tasks/:taskId/diff/comments', ['POST']]]);
+
+/** 上述路由且查询串带着为路由里这个会话（「查看改动」还要加上这个任务）签发的 token */
 async function isSharedSessionRead(request: FastifyRequest, options: AuthMiddlewareOptions): Promise<boolean> {
-  if (!options.getShareSecret || (request.method !== 'GET' && request.method !== 'HEAD')) return false;
-  if (!SHARED_SESSION_READ_ROUTES.has(request.routeOptions.url ?? '')) return false;
+  if (!options.getShareSecret) return false;
+  const route = request.routeOptions.url ?? '';
   const token = (request.query as Record<string, unknown> | undefined)?.[SHARE_TOKEN_QUERY_KEY];
-  const sessionId = (request.params as { id?: unknown } | undefined)?.id;
+  const { id: sessionId, taskId } = (request.params ?? {}) as { id?: unknown; taskId?: unknown };
   if (typeof token !== 'string' || !token || typeof sessionId !== 'string' || !sessionId) return false;
+  const diffMethods = SHARED_TURN_DIFF_ROUTES.get(route);
+  if (diffMethods) return diffMethods.includes(request.method) && typeof taskId === 'string' && Boolean(taskId) && isValidTurnDiffCredential(token, sessionId, taskId, options.getShareSecret);
+  if (request.method !== 'GET' && request.method !== 'HEAD') return false;
+  if (!SHARED_SESSION_READ_ROUTES.has(route)) return false;
   return isValidSessionShareCredential(token, sessionId, options.getShareSecret);
 }
 

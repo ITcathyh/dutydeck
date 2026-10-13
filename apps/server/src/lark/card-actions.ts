@@ -684,7 +684,7 @@ export function parseLarkCardActionValue(value: unknown): LarkCardActionValue | 
 export interface LarkConfirmValue { decision: 'confirm' | 'cancel'; confirmId: string; chatId: string }
 const maxConfirmIdLength = 128;
 
-export function buildLarkConfirmElements(input: { confirmId: string; chatId: string; body: string; pending: boolean }): LarkCardElement[] {
+export function buildLarkConfirmElements(input: { confirmId: string; chatId: string; body: string; pending: boolean; confirmLabel?: string }): LarkCardElement[] {
   const body: LarkCardElement = { tag: 'markdown', element_id: 'confirm_body', content: input.body, text_align: 'left', text_size: 'normal_v2', margin: '0px' };
   if (!input.pending || !input.confirmId || input.confirmId.length > maxConfirmIdLength) return [body];
   const button = (decision: LarkConfirmValue['decision'], label: string, type: string): LarkCardElement => ({
@@ -692,7 +692,7 @@ export function buildLarkConfirmElements(input: { confirmId: string; chatId: str
     behaviors: [{ type: 'callback', value: { dutydeck_confirm: decision, confirm_id: input.confirmId, chat_id: input.chatId } }]
   });
   return [body, { tag: 'column_set', element_id: 'confirm_actions', flex_mode: 'none', horizontal_spacing: '8px', columns: [
-    { tag: 'column', width: 'auto', elements: [button('confirm', '确认', 'primary')] },
+    { tag: 'column', width: 'auto', elements: [button('confirm', input.confirmLabel ?? '确认', 'primary')] },
     { tag: 'column', width: 'auto', elements: [button('cancel', '取消', 'default')] }
   ] }];
 }

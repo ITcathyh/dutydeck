@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import { buildApp } from './app.js';
-import { AUTH_COOKIE_NAME, registerAuthMiddleware, signSessionShareToken } from './auth/auth.js';
+import { AUTH_COOKIE_NAME, registerAuthMiddleware, signSessionShareToken, signTurnDiffToken } from './auth/auth.js';
 import { BOT_SESSION_ROUTES_KEY, isSharedInstanceRead, registerInstanceProxy, rewriteSharedSessionProxyUrl } from './instance-proxy.js';
 import { registerTerminalRoutes } from './terminal/terminal-ws.js';
 
@@ -28,11 +28,14 @@ async function shard(id: string, mode: 'local' | 'open' | 'token' = 'local') {
     });
   }
   app.post('/api/sessions/:id/send', async () => ({ writes: ++writes }));
+  app.get<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/tasks/:taskId/diff', async request => ({ shard: id, ...request.params }));
+  app.post<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/tasks/:taskId/diff/comments', async request => ({ shard: id, ...request.params, body: request.body }));
   registerTerminalRoutes(app, { provider: { lookupTerminalStream: () => ({ status: 'no-session' }) }, auth: { mode, check: token => token === 'admin' } });
   await app.listen({ host: '127.0.0.1', port: 0 });
   cleanup.push(() => app.close());
   return { app, id, name: id, url: `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`,
-    token: (sessionId = `ses_${id}`) => signSessionShareToken(secret, sessionId), rotate: () => { secret += '-rotated'; }, writes: () => writes };
+    token: (sessionId = `ses_${id}`) => signSessionShareToken(secret, sessionId),
+    diffToken: (taskId = 'task_1', sessionId = `ses_${id}`) => signTurnDiffToken(secret, sessionId, taskId, Date.now() + 60_000), rotate: () => { secret += '-rotated'; }, writes: () => writes };
 }
 
 async function world() {
@@ -90,6 +93,30 @@ describe('migrated bot sharing', () => {
       } else expect(await response.json()).toMatchObject({ id: peer.id });
     }
     expect((await fetch(`${w.url}/api/instances/a/sessions/ses_a?share=${w.a.token()}`, { method: 'HEAD' })).status).toBe(200);
+  });
+
+  it('forwards a diff link\'s read and comment submission to the owning shard, and nothing else', async () => {
+    const w = await world();
+    const page = await fetch(`${w.url}/diff/ses_a/task_1`, { redirect: 'manual' });
+    expect(page.status).toBe(302);
+    expect(page.headers.get('location')).toBe('/instances/a/diff/ses_a/task_1');
+    expect((await fetch(`${w.url}/diff/ses_a`, { redirect: 'manual' })).status).not.toBe(302);
+    const base = `${w.url}/api/instances/a/sessions/ses_a/tasks/task_1/diff`;
+    const read = await fetch(`${base}?share=${w.a.diffToken()}`);
+    expect(read.status).toBe(200);
+    expect(await read.json()).toEqual({ shard: 'a', id: 'ses_a', taskId: 'task_1' });
+    const posted = await fetch(`${base}/comments?share=${w.a.diffToken()}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ comments: [] }) });
+    expect(posted.status).toBe(200);
+    expect(await posted.json()).toEqual({ shard: 'a', id: 'ses_a', taskId: 'task_1', body: { comments: [] } });
+    for (const [url, init] of [
+      [`${base}?share=${w.a.token()}`, {}],
+      [`${base}?share=${w.a.diffToken('task_2')}`, {}],
+      [`${base}/comments?share=${w.a.token()}`, { method: 'POST' }],
+      [`${w.url}/api/instances/a/sessions/ses_a?share=${w.a.diffToken()}`, {}],
+      [`${w.url}/api/instances/a/sessions/ses_a/send?share=${w.a.diffToken()}`, { method: 'POST' }],
+      [`${base}?share=${w.a.diffToken()}`, { method: 'POST' }]
+    ] as const) expect((await fetch(url, init)).status, `${(init as RequestInit).method ?? 'GET'} ${url}`).toBe(401);
+    expect(w.a.writes()).toBe(0);
   });
 
   it('keeps main/A/B key rotation independent and never falls back to main credentials', async () => {

@@ -29,13 +29,28 @@ const PROXY_PATH = /^\/api\/instances\/([a-z0-9-]+)(\/[^#]*)$/;
 export const BOT_SESSION_ROUTES_KEY = 'dutydeck.bot_session_routes';
 const sessionRoutesSchema = z.object({ version: z.literal(1), routes: z.record(z.string().min(1), z.string().regex(/^[a-z0-9-]+$/)) }).strict();
 
+/**
+ * 分享链接能经主服务转发到对方实例的接口（会话路径之后的部分）：会话分享页的只读接口，
+ * 「查看改动」页读 diff 和提交评论（评论只会变成飞书确认卡，见 turn-diff-routes.ts）。
+ */
+const SHARED_PROXY_SUFFIX: Record<string, RegExp> = {
+  GET: /^(?:\/(?:events|tasks|stream|tasks\/[A-Za-z0-9_-]+\/diff))?$/,
+  HEAD: /^(?:\/(?:events|tasks|stream|tasks\/[A-Za-z0-9_-]+\/diff))?$/,
+  POST: /^\/tasks\/[A-Za-z0-9_-]+\/diff\/comments$/
+};
+const sharedProxyPath = (method: string | undefined, pathname: string, prefix: string) => {
+  const match = new RegExp(`^${prefix}/([A-Za-z0-9_-]+)(.*)$`).exec(pathname);
+  const suffix = method ? SHARED_PROXY_SUFFIX[method] : undefined;
+  return Boolean(match && suffix?.test(match[2]!));
+};
+
 /** A dedicated destination path makes anonymous sharing fail closed on older peers. */
 export function rewriteSharedSessionProxyUrl(request: { url?: string; method?: string }): string {
   const url = request.url ?? '/';
   const queryAt = url.indexOf('?');
   const tokens = new URLSearchParams(queryAt < 0 ? '' : url.slice(queryAt + 1)).getAll('share');
-  if (!['GET', 'HEAD'].includes(request.method ?? '') || tokens.length !== 1 || !tokens[0]) return url;
-  return url.replace(/^\/api\/shared-sessions\/([A-Za-z0-9_-]+(?:\/(?:events|tasks|stream))?)(?=\?|$)/, '/api/sessions/$1');
+  if (tokens.length !== 1 || !tokens[0] || !sharedProxyPath(request.method, queryAt < 0 ? url : url.slice(0, queryAt), '/api/shared-sessions')) return url;
+  return url.replace(/^\/api\/shared-sessions\//, '/api/sessions/');
 }
 
 function proxyTarget(raw: string | undefined, peers: PeerInstance[]) {
@@ -50,9 +65,8 @@ function proxyTarget(raw: string | undefined, peers: PeerInstance[]) {
 }
 
 export function isSharedInstanceRead(request: Pick<FastifyRequest, 'method' | 'url'>, peers: PeerInstance[]): boolean {
-  if (request.method !== 'GET' && request.method !== 'HEAD') return false;
   const target = proxyTarget(request.url, peers);
-  if (!target || !/^\/api\/sessions\/[A-Za-z0-9_-]+(?:\/(?:events|tasks|stream))?$/.test(target.url.pathname)) return false;
+  if (!target || !sharedProxyPath(request.method, target.url.pathname, '/api/sessions')) return false;
   const tokens = target.url.searchParams.getAll('share');
   return tokens.length === 1 && tokens[0]!.length > 0;
 }
@@ -75,12 +89,13 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
   }
   app.addHook('onRequest', async (request, reply) => {
     if (request.method !== 'GET' && request.method !== 'HEAD') return;
-    const match = /^\/(share|sessions)\/([^/?]+)(?:\?.*)?$/.exec(request.url);
-    if (!match) return;
+    const match = /^\/(share|sessions|diff)\/([^/?]+)(\/[^/?]+)?(?:\?.*)?$/.exec(request.url);
+    // 「查看改动」页是 /diff/<会话>/<任务>，另外两种只有会话一段。
+    if (!match || (match[1] === 'diff') !== Boolean(match[3])) return;
     let sessionId: string;
     try { sessionId = decodeURIComponent(match[2]!); } catch { return; }
     const instanceId = Object.prototype.hasOwnProperty.call(routes, sessionId) ? routes[sessionId] : undefined;
-    if (instanceId) return reply.header('Cache-Control', 'no-store').redirect(`/instances/${instanceId}/${match[1]}/${encodeURIComponent(sessionId)}`, 302);
+    if (instanceId) return reply.header('Cache-Control', 'no-store').redirect(`/instances/${instanceId}/${match[1]}/${encodeURIComponent(sessionId)}${match[3] ?? ''}`, 302);
   });
   app.get('/api/instances', async () => ({ instances: peers.map(({ id, name }) => ({ id, name })) }));
   if (!peers.length) return;
