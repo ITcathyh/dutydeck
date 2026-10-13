@@ -10,6 +10,7 @@ import {
   type RelayEventPublisher,
   type RelayPublishInput
 } from '@dutydeck/relay';
+import { HookPermissionRequests } from './permission-hook.js';
 
 export interface RelayRoutesOptions {
   runtime?: DutydeckRuntime;
@@ -17,13 +18,14 @@ export interface RelayRoutesOptions {
   capabilities?: RelayCapabilityRegistry;
   broker?: RelayAskBroker;
   service?: RelayService;
+  permissions?: HookPermissionRequests;
   authorize?(request: FastifyRequest, sessionId: string, action: 'task.view_result' | 'turn.append'): Promise<void>;
 }
 
 /** Only child-to-host relay calls use the session HMAC as their sole credential. */
 export const isRelayCapabilityRequest = (method: string, pathname: string) =>
   method.toUpperCase() === 'POST'
-  && /^\/api\/relay\/sessions\/[^/]+\/(?:send|ask|herdr)$/.test(pathname);
+  && /^\/api\/relay\/sessions\/[^/]+\/(?:send|ask|herdr|permission)$/.test(pathname);
 
 /** 会话进入这些状态时，把该会话所有阻塞中的 ask 唤醒 */
 const terminalStates = new Set(['stopped', 'failed']);
@@ -134,6 +136,15 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
       // 长轮询结果一律 200：answered / expired / cancelled 都是通道正常工作的结果，
       // CLI 侧据 status 决定退出码，不靠 HTTP 状态码区分。
       return outcome;
+    } catch (error) { return handleRelayError(error, reply); }
+  });
+
+  // Claude PermissionRequest hook 的短轮询入口：首次带工具事实登记，之后带 permissionId 续等，直到拿到裁决。
+  const permissions = options.permissions ?? (runtime ? new HookPermissionRequests(runtime) : undefined);
+  if (permissions) app.post<{ Params: { id: string } }>('/api/relay/sessions/:id/permission', async (request, reply) => {
+    try {
+      const capability = await service.resolveSession(request.headers.authorization, request.params.id);
+      return await permissions.submit(capability.sessionId, request.body ?? {});
     } catch (error) { return handleRelayError(error, reply); }
   });
 

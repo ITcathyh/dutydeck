@@ -8,7 +8,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { buildLarkCard, larkCardSafeLimits } from './service.js';
 import { defaultHighRiskPattern } from './config.js';
-import { LarkWorkflowInteractions, countCardComponents, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
+import { LarkWorkflowInteractions, countCardComponents, larkPermissionTimeoutReason, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
 import type { LarkCardService } from './service.js';
 import type { AgentEvent, PermissionRequestData, TaskRecord } from '@dutydeck/shared';
 import type { LarkMessageEvent, LarkRuntime } from './listener.js';
@@ -130,6 +130,33 @@ describe('persistent Lark workflow interactions', () => {
       expect(card).not.toContain('synthetic-secret');
       expect(card).toContain('本次选择只处理这一条请求');
       expect(card).toContain('允许本次');
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('审批卡顶部写一句要做什么，ACP 与终端模式 hook 来源都展示工具事实，关闭卡也保留', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const permissions: PermissionRequestData[] = [
+        { id: 'perm_edit', title: 'Edit files', status: 'pending', operation: { source: 'acp_tool_call', kind: 'edit', resource: 'src/a.ts', resourceCount: 3 } },
+        { id: 'perm_hook', title: 'Bash', status: 'pending', operation: { source: 'claude_permission_hook', kind: 'execute', cwd: '/work/project', command: 'pnpm test --token=synthetic-secret' } }
+      ];
+      const { runtime, resolvePermission } = makeRuntime([runningTask()], permissions);
+      const { service, reply } = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+      await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
+      await workflow.observe(context(), agentEvent('permission_request', permissions[1], { id: 'event_two', sequence: 2 }));
+      const [edit, hook] = reply.mock.calls.map(call => (call as unknown as [Record<string, any>])[0]);
+      expect(edit!.elements[0]).toEqual({ tag: 'div', text: { tag: 'plain_text', content: '修改文件：src/a.ts 等 3 个' } });
+      expect(hook!.elements[0]).toEqual({ tag: 'div', text: { tag: 'plain_text', content: '执行命令：pnpm test --token=[REDACTED]' } });
+      expect(JSON.stringify(hook)).toContain('来源：执行端工具请求');
+      expect(JSON.stringify(hook)).toContain('目录：/work/project');
+      expect(JSON.stringify(hook)).not.toContain('synthetic-secret');
+      const record = (await workflow.list('app_one')).find(item => item.nativeId === 'perm_hook')!;
+      expect(record.intent).toBe('执行命令：pnpm test --token=[REDACTED]');
+      await workflow.respond(responseInput(record, { action: 'reject' }));
+      expect(resolvePermission).toHaveBeenCalledWith('ses_one', 'perm_hook', false);
+      const closed = vi.mocked(service.update).mock.calls.at(-1)![0] as Record<string, any>;
+      expect(closed.elements[0]).toEqual({ tag: 'div', text: { tag: 'plain_text', content: '执行命令：pnpm test --token=[REDACTED]' } });
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
@@ -924,6 +951,8 @@ describe('过期审批跟随权威恢复状态', () => {
 
 describe('权限卡截止时间与自动拒绝', () => {
   const minute = 60_000;
+  const hour = 60 * minute;
+  const reason = '超过 24 小时未处理，已自动拒绝';
   const livePermissions = (id: string) => {
     const permissions: PermissionRequestData[] = [{ id, title: '写入配置', status: 'pending' }];
     const resolvePermission = vi.fn(async (_sessionId: string, permissionId: string) => {
@@ -935,41 +964,54 @@ describe('权限卡截止时间与自动拒绝', () => {
   };
   const replies = (reply: ReturnType<typeof makeService>['reply']) => reply.mock.calls.map(call => (call as unknown as [Record<string, any>])[0]);
 
-  it('写入 30 分钟截止时间，截止前 10 分钟只提醒一次，到点经 runtime 拒绝并把原卡改成已过期，不另发消息', async () => {
+  it('写入 24 小时上限，满 30 分钟提醒一次且继续等待，到 24 小时才带原因经 runtime 拒绝并把原卡改成已过期，不另发消息', async () => {
     const { directory, repositories } = await openDatabase();
     const at = Date.parse('2026-09-25T02:00:00.000Z');
     const clock = vi.spyOn(Date, 'now').mockReturnValue(at);
     try {
+      expect(larkPermissionTimeoutReason).toBe(reason);
       const { permissions, runtime, resolvePermission } = livePermissions('perm_deadline');
       const { service, reply } = makeService();
       const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
       // 提醒只发给能批准的人：夹具带上发起人，authorize 放行即发起人能批准。
       await workflow.observe(context({ event: larkMessage({ senderOpenId: 'ou_requester' }) }), agentEvent('permission_request', permissions[0]));
       let [record] = await workflow.list('app_one');
-      expect(record!.expiresAt).toBe(new Date(at + 30 * minute).toISOString());
-      expect(JSON.stringify(replies(reply)[0])).toContain('审批截止时间：2026/9/25 10:30:00（北京时间）。到时仍未处理将自动拒绝。');
+      expect(record!.expiresAt).toBe(new Date(at + 24 * hour).toISOString());
+      expect(JSON.stringify(replies(reply)[0])).toContain('任务会一直等待审批：30 分钟无人处理会提醒一次，超过 24 小时未处理才自动拒绝（2026/9/26 10:00:00（北京时间））。');
+      expect(JSON.stringify(replies(reply)[0])).not.toContain('到时仍未处理将自动拒绝');
 
-      clock.mockReturnValue(at + 19 * minute);
+      clock.mockReturnValue(at + 29 * minute);
       await workflow.reconcile('app_one', 'task_one');
       expect(reply).toHaveBeenCalledTimes(1);
-      clock.mockReturnValue(at + 20 * minute);
+      clock.mockReturnValue(at + 30 * minute);
       await workflow.reconcile('app_one', 'task_one');
       await workflow.reconcile('app_one', 'task_one');
       expect(reply).toHaveBeenCalledTimes(2);
       expect(replies(reply)[1]).toMatchObject({ messageId: record!.cardId, idempotencyKey: `workflow_remind_${record!.id}` });
-      expect(JSON.stringify(replies(reply)[1])).toContain('这条审批即将超时');
-      expect((await workflow.list('app_one'))[0]!.remindedAt).toBe(new Date(at + 20 * minute).toISOString());
+      const reminder = JSON.stringify(replies(reply)[1]);
+      expect(reminder).toContain('这条审批已等待 30 分钟');
+      expect(reminder).toContain('任务仍在等待，不会因为这次提醒被拒绝；超过 24 小时（2026/9/26 10:00:00（北京时间））仍未处理才自动拒绝。');
+      expect((await workflow.list('app_one'))[0]!.remindedAt).toBe(new Date(at + 30 * minute).toISOString());
       expect(resolvePermission).not.toHaveBeenCalled();
 
-      clock.mockReturnValue(at + 30 * minute);
+      // 原先 30 分钟就拒绝；现在过了几个小时仍在等，也不再重复提醒。
+      for (const elapsed of [31 * minute, 6 * hour, 24 * hour - 1_000]) {
+        clock.mockReturnValue(at + elapsed);
+        await workflow.reconcile('app_one', 'task_one');
+      }
+      expect(resolvePermission).not.toHaveBeenCalled();
+      expect(reply).toHaveBeenCalledTimes(2);
+      expect((await workflow.list('app_one'))[0]).toMatchObject({ state: 'pending' });
+
+      clock.mockReturnValue(at + 24 * hour);
       await workflow.reconcile('app_one', 'task_one');
-      expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_deadline', false);
+      expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_deadline', false, reason);
       [record] = await workflow.list('app_one');
       expect(record).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
       const closed = vi.mocked(service.update).mock.calls.at(-1)![0] as Record<string, any>;
       expect(closed).toMatchObject({ messageId: record!.cardId, statusLabel: '已过期' });
-      expect(JSON.stringify(closed)).toContain('超时自动拒绝 · 10:30');
-      expect(JSON.stringify(closed)).toContain('截止前无人处理，这次操作没有执行，不再接受批准；需要的话请重新发起。');
+      expect(JSON.stringify(closed)).toContain('超时自动拒绝 · 10:00');
+      expect(JSON.stringify(closed)).toContain('超过 24 小时未处理，这次操作没有执行，不再接受批准；需要的话请重新发起。');
       expect(JSON.stringify(closed)).not.toContain('允许本次');
       // 超时说明只原位改审批卡，不再另发一条消息。
       expect(reply).toHaveBeenCalledTimes(2);
@@ -991,9 +1033,9 @@ describe('权限卡截止时间与自动拒绝', () => {
       const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
       await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
       const [record] = await workflow.list('app_one');
-      clock.mockReturnValue(at + 30 * minute + 1_000);
+      clock.mockReturnValue(at + 24 * hour + 1_000);
       await expect(workflow.respond(responseInput(record!, { action: 'approve' }))).rejects.toThrow('超时自动拒绝');
-      expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_late', false);
+      expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_late', false, reason);
       expect((await workflow.list('app_one'))[0]).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
     } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
@@ -1007,7 +1049,7 @@ describe('权限卡截止时间与自动拒绝', () => {
       const { service } = makeService();
       const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
       await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
-      clock.mockReturnValue(at + 31 * minute);
+      clock.mockReturnValue(at + 24 * hour + minute);
       resolvePermission.mockRejectedValueOnce(Object.assign(new Error('intent write failed'), { code: 'EVENT_WRITE_FAILED' }));
       await workflow.reconcile('app_one', 'task_one');
       expect((await workflow.list('app_one'))[0]).toMatchObject({ state: 'pending' });
@@ -1027,12 +1069,13 @@ describe('权限卡截止时间与自动拒绝', () => {
       const first = makeService();
       const before = new LarkWorkflowInteractions(repositories.config, runtime, first.service, undefined, async () => true);
       await before.observe(context(), agentEvent('permission_request', permissions[0]));
-      clock.mockReturnValue(at + 21 * minute);
+      clock.mockReturnValue(at + 31 * minute);
       await before.reconcile('app_one', 'task_one');
       const [original] = await before.list('app_one');
       expect(original!.remindedAt).toBeDefined();
+      expect(original!.expiresAt).toBe(new Date(at + 24 * hour).toISOString());
 
-      clock.mockReturnValue(at + 25 * minute);
+      clock.mockReturnValue(at + 2 * hour);
       const second = makeService();
       const after = new LarkWorkflowInteractions(repositories.config, runtime, second.service, undefined, async () => true);
       await after.initialize('app_one');
@@ -1045,9 +1088,13 @@ describe('权限卡截止时间与自动拒绝', () => {
       await after.reconcile('app_one', 'task_one');
       expect(second.reply).toHaveBeenCalledOnce();
 
-      clock.mockReturnValue(at + 30 * minute);
+      clock.mockReturnValue(at + 24 * hour - minute);
       await after.reconcile('app_one', 'task_one');
-      expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_restart', false);
+      expect(second.reply).toHaveBeenCalledOnce();
+      expect(resolvePermission).not.toHaveBeenCalled();
+      clock.mockReturnValue(at + 24 * hour);
+      await after.reconcile('app_one', 'task_one');
+      expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_restart', false, reason);
       expect((await after.list('app_one')).find(item => item.boot === after.boot)).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
     } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
@@ -1066,7 +1113,7 @@ describe('权限卡截止时间与自动拒绝', () => {
       const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
       await workflow.initialize('app_one');
       expect(permissions).toHaveLength(0);
-      expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_live', false);
+      expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_live', false, reason);
       const records = new Map((await workflow.list('app_one')).map(record => [record.id, record]));
       expect(records.get('perm_overdue')).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
       expect(records.get('perm_gone')).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
@@ -1254,7 +1301,7 @@ describe('审批卡的 @、处理结果与「本会话允许此命令」', () =>
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
-  it('截止前提醒只发一次、@ 能批准的人；飞书里没人能批准时不发提醒', async () => {
+  it('满 30 分钟的提醒只发一次、@ 能批准的人；飞书里没人能批准时不发提醒', async () => {
     const { directory, repositories } = await openDatabase();
     const at = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(at);
@@ -1264,18 +1311,18 @@ describe('审批卡的 @、处理结果与「本会话允许此命令」', () =>
       const reminded = makeService();
       const workflow = new LarkWorkflowInteractions(repositories.config, runtime, reminded.service, undefined, onlyAlice);
       await workflow.observe(group(), agentEvent('permission_request', permissions[0]), { groupMention: true });
-      clock.mockReturnValue(at + 20 * minute);
+      clock.mockReturnValue(at + 30 * minute);
       await workflow.reconcile('app_one', 'task_one');
       await workflow.reconcile('app_one', 'task_one');
       const sent = cards(reminded.reply);
       expect(sent).toHaveLength(2);
-      expect(sent[1]!.elements[0].content).toMatch(/^<at id=ou_alice><\/at>\n\n\*\*这条审批即将超时\*\*/);
+      expect(sent[1]!.elements[0].content).toMatch(/^<at id=ou_alice><\/at>\n\n\*\*这条审批已等待 30 分钟\*\*\n\n执行命令：pnpm test\n\n任务仍在等待/);
 
       clock.mockReturnValue(at);
       const silent = makeService();
       const nobody = new LarkWorkflowInteractions(repositories.config, runtime, silent.service, undefined, async () => false);
       await nobody.observe(group({ messageId: 'om_silent' }), agentEvent('permission_request', permissions[1]), { groupMention: true });
-      clock.mockReturnValue(at + 20 * minute);
+      clock.mockReturnValue(at + 30 * minute);
       await nobody.reconcile('app_one', 'task_one');
       await nobody.reconcile('app_one', 'task_one');
       expect(silent.reply).toHaveBeenCalledOnce();

@@ -6,6 +6,7 @@
 // 文案上不得承诺手机能批 PTY。'auto' 的实际协议要等 runtime 解析后才知道，卡面不臆断。
 // full-trust 下 CLI 以跳过权限确认的方式启动，不会出现工具确认；AskUserQuestion 经 hook
 // 转成飞书提问卡；目录信任页由适配器自动确认。卡面再写这句就是误报。
+// Claude 家族终端模式的工具确认经 PermissionRequest hook 变成飞书审批卡，同样不标注。
 
 import type { PermissionMode } from '@dutydeck/shared';
 
@@ -22,10 +23,12 @@ export function isTerminalProtocol(protocol: string | undefined): boolean {
  * 接收，枚举值调用点直接传入即可。
  *
  * full-trust 不提示：该模式下根本没有工具确认（见文件头）。未传权限模式时按会确认处理。
+ * remoteApproval：该终端模式 Agent 的工具确认能交给飞书审批（Claude 家族），不提示。
  */
 export function protocolModeNote(
   protocol: string | undefined,
-  permissionMode?: PermissionMode
+  permissionMode?: PermissionMode,
+  remoteApproval = false
 ): string | undefined {
-  return isTerminalProtocol(protocol) && permissionMode !== 'full-trust' ? TERMINAL_PROTOCOL_NOTE : undefined;
+  return isTerminalProtocol(protocol) && permissionMode !== 'full-trust' && !remoteApproval ? TERMINAL_PROTOCOL_NOTE : undefined;
 }

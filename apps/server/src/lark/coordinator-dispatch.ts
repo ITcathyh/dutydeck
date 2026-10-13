@@ -15,7 +15,7 @@ import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type Lark
 import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
 import { larkAdhdModePrompt } from './adhd-mode.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
-import { RuntimeError } from '@dutydeck/shared';
+import { RuntimeError, supportsRemoteApproval } from '@dutydeck/shared';
 import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import { formatRolePrompt } from './role-format.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError } from './service.js';
@@ -964,8 +964,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       ? '这是升级后创建的新上下文；旧会话历史仍可查看，但原上下文未自动恢复。'
       : undefined;
     if (legacyUpgradeNote) task.group.legacyUpgradeSessionId = undefined;
-    // P0-7：ask 模式下 pty/pty-cli 任务的工具确认只能在电脑前响应，首卡、排队卡与每帧心跳都如实标注。
-    const protocolNote = protocolModeNote(session.protocol, larkPermissionMode(config));
+    // P0-7：ask 模式下 pty/pty-cli 任务的工具确认只能在电脑前响应，首卡、排队卡与每帧心跳都如实标注；
+    // Claude 家族终端模式经权限 hook 在飞书审批，不标注。
+    const sessionAgent = session.protocol === 'pty-cli' ? (await this.runtime.listAgents?.())?.find(item => item.id === session.agentId) : undefined;
+    const protocolNote = protocolModeNote(session.protocol, larkPermissionMode(config),
+      session.protocol === 'pty-cli' && supportsRemoteApproval({ id: session.agentId, adapterId: sessionAgent?.adapterId, protocol: 'pty-cli' }));
     // S3：未知命令近似提示只追加到卡面，绝不进入 prompt（materialPrompt 保持原文）。
     // S8：replayed 置位后排队 PATCH 也带恢复注记；心跳帧的同名元素在 update() 内另拼。
     // 任务卡住时不写重启注记：它承诺「将继续跟踪执行进度」，卡住的任务没有进度可跟踪。

@@ -242,6 +242,7 @@ export interface CliHandlers {
   sessionSend?(text: string): void | Promise<void>;
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
   sessionNativeAsk?(): void | Promise<void>;
+  sessionPermissionHook?(): void | Promise<void>;
   databaseExecutionStatus?(options: DatabaseExecutionStatusCliOptions): void | Promise<void>;
   databaseUpgradeExecution?(options: DatabaseUpgradeExecutionCliOptions): void | Promise<void>;
   databaseRetireLegacy?(options: DatabaseRetireLegacyCliOptions): void | Promise<void>;
@@ -782,6 +783,9 @@ principal ids from \`group members\`.`)
   session.command('native-ask')
     .description('Bridge a native Claude AskUserQuestion hook from stdin to the current session')
     .action(() => handlers.sessionNativeAsk?.());
+  session.command('permission-hook')
+    .description('Bridge a native Claude PermissionRequest hook from stdin to Dutydeck approval')
+    .action(() => handlers.sessionPermissionHook?.());
   session.command('send')
     .description('Publish an in-turn progress event; presentation depends on session settings')
     .argument('<text>', 'Message content')

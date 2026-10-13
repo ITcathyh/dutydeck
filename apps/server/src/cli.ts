@@ -20,6 +20,7 @@ import { AgentGroupToolCliError, runGroupBots, runGroupHandoff, runGroupMembers,
 import { runMemoryAdd, runMemoryList, runMemoryRemove, runMemorySearch, runMemoryShow } from './lark/memory-cli.js';
 import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
+import { runPermissionHook } from './permission-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
 import { dutydeckGroupToolsCommand } from './lark/agent-tools.js';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop, systemdRestartTarget, waitForRunningTasksDrain, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
@@ -445,6 +446,11 @@ async function main() {
     sessionSend: async text => { output(await runSessionSend(text)); },
     sessionNativeAsk: async () => {
       const result = await runNativeAskHook(await readNativeAskPayload(process.stdin));
+      if (result) process.stdout.write(`${result}\n`);
+    },
+    sessionPermissionHook: async () => {
+      // 读不懂 stdin 也要交回明确裁决：hook 只挂在 PermissionRequest 上，当成无法识别的请求拒绝。
+      const result = await runPermissionHook(await readNativeAskPayload(process.stdin).catch(() => ({ hook_event_name: 'PermissionRequest' })));
       if (result) process.stdout.write(`${result}\n`);
     },
     sessionAsk: async (question, options) => {

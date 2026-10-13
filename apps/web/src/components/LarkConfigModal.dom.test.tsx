@@ -484,6 +484,54 @@ describe('LarkConfigModal ask permission posture', () => {
 });
 
 
+describe('LarkConfigModal new-bot default permission', () => {
+  const approvalAgents: Agent[] = [
+    { id: 'claude-code', name: 'Claude 终端', protocol: 'pty-cli', permissionMode: 'ask', remoteApproval: true },
+    { id: 'codex', name: 'Codex 终端', protocol: 'pty-cli', permissionMode: 'ask', remoteApproval: false }
+  ];
+  const renderWith = (config: LarkConfig) => {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue(config);
+    vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], source: 'cli' });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={client}><LarkConfigModal agents={approvalAgents} onClose={() => {}}/></QueryClientProvider>);
+  };
+
+  it('defaults a new bot to ask for a Claude terminal Agent and requires explicit full trust after switching to Codex', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'claude-code', permissionMode: 'ask', setupComplete: true }));
+    renderWith(collection());
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    expect(await screen.findByRole('button', { name: /飞书逐项确认：等待批准后执行/ })).toBeTruthy();
+    expect(screen.queryByRole('checkbox', { name: /确认飞书任务以 full-trust 运行/ })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Claude 终端' }));
+    await user.click(screen.getByRole('option', { name: 'Codex 终端' }));
+    expect(await screen.findByRole('button', { name: /完全信任：自动执行操作/ })).toBeTruthy();
+    const submit = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    await user.click(screen.getByRole('button', { name: /完全信任：自动执行操作/ }));
+    await user.click(await screen.findByRole('option', { name: /飞书逐项确认/ }));
+    expect(await screen.findByText(/工具确认只能在终端里处理/)).toBeTruthy();
+    expect(submit.disabled).toBe(true);
+
+    // 手动改过确认方式后，换回 Claude 不再被覆盖。
+    await user.click(screen.getByRole('button', { name: 'Codex 终端' }));
+    await user.click(screen.getByRole('option', { name: 'Claude 终端' }));
+    expect(screen.getByRole('button', { name: /飞书逐项确认：等待批准后执行/ })).toBeTruthy();
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await user.click(submit);
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ defaultAgentId: 'claude-code', permissionMode: 'ask', fullTrustConfirmed: false })));
+  });
+
+  it('keeps the saved mode of a bot that already has an Agent', async () => {
+    const user = userEvent.setup();
+    renderWith(collection({ defaultAgentId: 'claude-code', permissionMode: 'full-trust', fullTrustConfirmed: true, setupComplete: true }));
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    expect(await screen.findByRole('button', { name: /完全信任：自动执行操作/ })).toBeTruthy();
+  });
+});
+
 describe('LarkConfigModal 会话记忆', () => {
   it('普通 Bot 默认关闭记忆，开启后显示下属设置', async () => {
     const user = userEvent.setup();

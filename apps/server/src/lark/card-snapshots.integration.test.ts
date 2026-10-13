@@ -556,9 +556,9 @@ describe('飞书卡片快照（入站事件驱动真实链路）', () => {
     await h.refresh(task);
     h.checkpoint('等待审批');
     const approvalCard = h.findMessage('确认本次操作')!;
-    // 审批时限 30 分钟：把时钟拨到 31 分钟后，再让监听按同一份配置重新对账（与配置刷新走同一条路）。
+    // 审批硬上限 24 小时：把时钟拨到 24 小时 1 分钟后，再让监听按同一份配置重新对账（与配置刷新走同一条路）。
     const now = Date.now.bind(Date);
-    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now() + 31 * 60_000);
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now() + 24 * 60 * 60_000 + 60_000);
     try {
       await h.listener.start(h.config);
       await h.until(() => h.textOf(approvalCard).includes('已过期'));

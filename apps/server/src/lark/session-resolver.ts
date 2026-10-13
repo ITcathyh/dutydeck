@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, extname, join } from 'node:path';
-import type { ChannelMappingRepository, Session } from '@dutydeck/shared';
+import { supportsRemoteApproval, type ChannelMappingRepository, type Session } from '@dutydeck/shared';
 import { LEGACY_RETIREMENT_NOTICE } from '@dutydeck/storage';
 import type { LarkLaunchOptions } from './new-session.js';
 import { larkExecutionConfirmed, larkPermissionMode, type StoredLarkConfig } from './config.js';
@@ -57,6 +57,23 @@ export const larkGroupScopeId = (event: LarkMessageEvent) => {
  * /new 也会停错人的会话。
  */
 export const larkGroupKey = (event: LarkMessageEvent, scopeId: string, appId: string) => `${appId}:${event.chatId}:${scopeId}`;
+
+/**
+ * 会话的工具确认能否在飞书逐项审批：ACP 会话，或能接权限 hook 的终端模式 CLI（Claude 家族）。
+ * 终端模式按会话所属 Agent 的适配器判断；运行时列不出 Agent 时按 Agent ID 当适配器。
+ */
+async function larkApprovalSupported(runtime: LarkRuntime, session: Session) {
+  if (session.protocol === 'acp') return true;
+  if (session.protocol !== 'pty-cli') return false;
+  const agent = (await runtime.listAgents?.())?.find(item => item.id === session.agentId);
+  return supportsRemoteApproval({ id: session.agentId, adapterId: agent?.adapterId, protocol: 'pty-cli' });
+}
+
+/** 终端模式 Agent 不支持飞书审批时给出的两条修法。 */
+const larkApprovalUnsupported = (config: StoredLarkConfig) => new LarkServiceError('LARK_APPROVAL_UNSUPPORTED',
+  `Agent ${config.defaultAgentId} 是终端模式，工具确认只能在终端里点，飞书无法逐项审批。二选一：`
+  + `① 改为完全信任：dutydeck settings bot set ${config.appId} permissionMode=full-trust fullTrustConfirmed=true；`
+  + '② 换一个支持飞书审批的 Agent（ACP Agent，或 Claude Code 终端模式），在 Dutydeck 飞书设置里修改默认 Agent。', 422);
 
 export const larkReplyContext = (event: LarkMessageEvent) => ({
   // 回复 API 的路径参数只能使用真实的 om_* 消息 ID。回复触发消息即可保留准确的上下文位置。
@@ -331,8 +348,8 @@ export async function resolveLarkSession(
     if (!runtime.stop) throw new LarkServiceError('LARK_CONFIGURATION_UNSUPPORTED', '当前运行时无法结束旧会话以应用配置。', 409);
     await runtime.stop(session.id);
   };
-  const compatible = (session: Session) => session.permissionMode === larkPermissionMode(config)
-    && (larkPermissionMode(config) === 'full-trust' || session.protocol === 'acp');
+  const compatible = async (session: Session) => session.permissionMode === larkPermissionMode(config)
+    && (larkPermissionMode(config) === 'full-trust' || await larkApprovalSupported(runtime, session));
   const configKey = larkSessionConfigKey(config);
   const sourceId = larkSourceId(config, chatId, chatType, scopeId);
   const binding = await mappings?.get(`lark-launch:${config.appId}`, sourceId);
@@ -362,7 +379,7 @@ export async function resolveLarkSession(
     const reusable = existing && !['failed', 'stopped'].includes(existing.state);
     if (existing && !reusable) replacedReason = endedSessionReason(existing);
     if (reusable && (config.managedGroup || group.sessionConfigKey === configKey)) {
-      if (compatible(existing) && launchCompatible(existing) && (!launchOptions || matchesRequest(existing))) {
+      if (await compatible(existing) && launchCompatible(existing) && (!launchOptions || matchesRequest(existing))) {
         await saveLaunchBinding(existing);
         return existing;
       }
@@ -391,7 +408,7 @@ export async function resolveLarkSession(
       // 此时并发到达的消息会把用户刚要求结束的上下文重新绑回来。
       && !group.retiredSessionIds?.has(item.id));
     if (existing) {
-      if (compatible(existing) && launchCompatible(existing)) {
+      if (await compatible(existing) && launchCompatible(existing)) {
         await saveLaunchBinding(existing);
         group.sessionId = existing.id;
         group.sessionConfigKey = configKey;
@@ -408,6 +425,10 @@ export async function resolveLarkSession(
       replacedReason = ['failed', 'stopped'].includes(previous.state) ? endedSessionReason(previous) : configChangedReason;
     }
   }
+  // 已知是不支持审批的终端模式 Agent 就别先起会话：approve-reads 会被运行时以更难懂的错误拒绝。
+  const configuredAgent = (await runtime.listAgents?.())?.find(item => item.id === config.defaultAgentId);
+  if (larkPermissionMode(config) !== 'full-trust' && configuredAgent?.protocol === 'pty-cli'
+    && !supportsRemoteApproval({ id: configuredAgent.id, adapterId: configuredAgent.adapterId, protocol: 'pty-cli' })) throw larkApprovalUnsupported(config);
   const session = await runtime.start({
     agentId: config.defaultAgentId,
     ...(config.workspace ? { cwd: config.workspace } : {}),
@@ -418,9 +439,9 @@ export async function resolveLarkSession(
     source: 'lark',
     sourceId
   });
-  if (larkPermissionMode(config) !== 'full-trust' && session.protocol !== 'acp') {
+  if (larkPermissionMode(config) !== 'full-trust' && !await larkApprovalSupported(runtime, session)) {
     await runtime.stop?.(session.id);
-    throw new LarkServiceError('LARK_APPROVAL_UNSUPPORTED', '飞书逐项确认仅支持 ACP Agent；此 Agent 的原生确认需在终端完成。', 422);
+    throw larkApprovalUnsupported(config);
   }
   await saveLaunchBinding(session);
   group.sessionId = session.id;
@@ -479,7 +500,7 @@ export async function findLarkThreadContinuation(
     .find(item => item.id === root.sessionId);
   const mode = larkPermissionMode(config);
   if (!session || ['failed', 'stopped'].includes(session.state)
-    || session.permissionMode !== mode || (mode !== 'full-trust' && session.protocol !== 'acp')) return undefined;
+    || session.permissionMode !== mode || (mode !== 'full-trust' && !await larkApprovalSupported(runtime, session))) return undefined;
   if (event.senderOpenId === owner) return session;
   const continued = (await mappings.list(channel)).some(row => {
     if (row.sessionId !== session.id || !row.extra) return false;

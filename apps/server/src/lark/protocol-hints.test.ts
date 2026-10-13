@@ -37,6 +37,12 @@ describe('protocolModeNote', () => {
     expect(protocolModeNote(undefined)).toBeUndefined();
   });
 
+  it('工具确认经权限 hook 交给飞书审批的终端模式 Agent（Claude 家族）不展示', () => {
+    expect(protocolModeNote('pty-cli', 'ask', true)).toBeUndefined();
+    expect(protocolModeNote('pty-cli', 'approve-reads', true)).toBeUndefined();
+    expect(protocolModeNote('pty-cli', 'ask', false)).toBe(TERMINAL_PROTOCOL_NOTE);
+  });
+
   it('permissionMode=full-trust 不展示：CLI 跳过权限确认启动，没有需要在电脑前响应的工具确认', () => {
     expect(protocolModeNote('pty', 'full-trust')).toBeUndefined();
     expect(protocolModeNote('pty-cli', 'full-trust')).toBeUndefined();

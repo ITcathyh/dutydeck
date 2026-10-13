@@ -1,5 +1,5 @@
 import type { DriverContext, DriverSubmission, DriverSubmissionInput, DriverResourceCapabilities, OperationPermit } from './driver-resources.js';
-import type { EventType, PermissionMode, ToolRiskPolicy } from './index.js';
+import type { EventType, PermissionMode, PermissionRequestData, ToolRiskPolicy } from './index.js';
 import type { TranscriptSourceObservation } from './session-insight.js';
 
 export type DriverTranscriptSourceObservation = Readonly<
@@ -104,6 +104,9 @@ export interface AgentIdleTimeoutData { message: string; code: typeof AGENT_IDLE
 export type DriverSteeringOutcome = 'injected' | 'startedNewTurn' | 'promptRequired' | 'unsupported';
 
 /** Agent 驱动：一个实现 = 一种 Agent 接入形态 */
+/** 驱动外部发起的权限请求最终裁决；reason 只在拒绝时出现。 */
+export interface DriverPermissionDecision { approved: boolean; reason?: string }
+
 export interface AgentDriver {
   /** Runtime chooses whether uncertain execution must remain attached to its persistent session. */
   prepareForDaemonShutdown?(preserveSession: boolean): void | Promise<void>;
@@ -148,8 +151,13 @@ export interface AgentDriver {
    * execution resource is gone; a resolved stop(), detach, or rejected adoption
    * alone is not proof. Unsupported drivers must omit this or return false. */
   isStopped?(): Promise<boolean>;
-  /** 裁决一个挂起的权限请求。返回是否成功兑现。 */
-  resolvePermission?(id: string, approved: boolean): Promise<boolean>;
+  /** 裁决一个挂起的权限请求。返回是否成功兑现。reason 是拒绝时交给 Agent 的原因（如超时），支持的驱动会转告。 */
+  resolvePermission?(id: string, approved: boolean, reason?: string): Promise<boolean>;
+  /**
+   * 可选：由驱动外部（如 CLI 的权限 hook）发起一条待审批请求。驱动把它作为 pending 的 permission_request 事件发出，
+   * 之后与 ACP 权限请求一样经 resolvePermission 裁决。没有进行中的轮次时返回 undefined，调用方保留 CLI 原生确认。
+   */
+  requestPermission?(request: Omit<PermissionRequestData, 'id' | 'status'>): { id: string; decision: Promise<DriverPermissionDecision> } | undefined;
   /** 切换模型（不支持的实现可不实现）。 */
   setModel?(model: string): Promise<void>;
   configureNative?(request: import('./driver-resources.js').NativeConfigurationRequest): Promise<import('./driver-resources.js').NativeConfigurationProof>;
