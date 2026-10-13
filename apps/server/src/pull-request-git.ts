@@ -115,11 +115,19 @@ export async function defaultBranch(cwd: string): Promise<string | undefined> {
   return /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(remote)?.[1];
 }
 
+/** 确认清单最多列出的本地提交数；超过就不开 PR，确认的内容必须和推送的一致。 */
+export const LOCAL_COMMIT_LIMIT = 50;
+
 /** 本地还没进目标分支的提交；没有 origin/<目标> 跟踪分支时无法确认。 */
 export async function localCommits(cwd: string, target: string): Promise<{ commits: Array<{ sha: string; subject: string }>; unverified: boolean }> {
   const tracking = await git({ cwd }, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${target}`]).catch(() => '');
   if (!tracking.trim()) return { commits: [], unverified: true };
-  const output = await git({ cwd }, ['log', '--format=%H%x1f%s', '-n', '50', `refs/remotes/origin/${target}..HEAD`]);
+  const range = `refs/remotes/origin/${target}..HEAD`;
+  const count = Number((await git({ cwd }, ['rev-list', '--count', range])).trim());
+  if (count > LOCAL_COMMIT_LIMIT) {
+    throw new RuntimeError('PR_TOO_MANY_COMMITS', `本地有 ${count} 个提交还不在 ${target} 上，超过 ${LOCAL_COMMIT_LIMIT} 个，确认清单列不全，不能开 PR。请把它们整理成少量提交后再试。`, 409);
+  }
+  const output = await git({ cwd }, ['log', '--format=%H%x1f%s', range]);
   return { commits: output.split('\n').filter(Boolean).map(line => { const [sha, subject] = line.split('\x1f'); return { sha: sha!, subject: (subject ?? '').slice(0, 200) }; }), unverified: false };
 }
 

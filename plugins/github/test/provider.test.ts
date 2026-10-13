@@ -152,8 +152,11 @@ describe('GitHub provider: failure logs and pull requests', () => {
       bodies.push({ method: init?.method, url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
       expect((init?.headers as Record<string, string>).Authorization ?? 'Bearer t').toBe('Bearer t');
       if (url.endsWith('/pulls') && init?.method === 'POST') return json({ id: 1, node_id: 'PR_1', number: 5, html_url: 'https://github.com/octo/repo/pull/5' }, 201);
-      if (url.includes('/pulls/5/comments')) return json([{ id: 11, user: { login: 'alice' }, body: 'rename this', path: 'src/a.ts', line: 3, created_at: '2026-10-01T00:00:02Z' }]);
-      if (url.includes('/issues/5/comments') && init?.method === 'GET') return json([{ id: 12, user: { login: 'bob' }, body: 'LGTM', created_at: '2026-10-01T00:00:01Z' }]);
+      if (url.includes('/pulls/5/comments')) return json([{ id: 11, user: { login: 'alice', type: 'User' }, author_association: 'MEMBER', body: 'rename this', path: 'src/a.ts', line: 3, created_at: '2026-10-01T00:00:02Z' }]);
+      if (url.includes('/issues/5/comments') && init?.method === 'GET') return json([
+        { id: 12, user: { login: 'bob', type: 'User' }, author_association: 'CONTRIBUTOR', body: 'LGTM', created_at: '2026-10-01T00:00:01Z' },
+        { id: 14, user: { login: 'codecov[bot]', type: 'Bot' }, author_association: 'COLLABORATOR', body: 'Coverage 80%', created_at: '2026-10-01T00:00:03Z' }
+      ]);
       if (url.includes('/issues/5/comments')) return json({ id: 13, html_url: 'https://github.com/octo/repo/pull/5#issuecomment-13' }, 201);
       throw new Error(`unexpected ${url}`);
     });
@@ -161,10 +164,12 @@ describe('GitHub provider: failure logs and pull requests', () => {
     await expect(provider.createPullRequest(repo, { title: 'Fix', head: 'fix', base: 'main' })).resolves.toEqual({ id: 'PR_1', number: 5, url: 'https://github.com/octo/repo/pull/5' });
     expect(bodies[0]).toMatchObject({ method: 'POST', body: { title: 'Fix', head: 'fix', base: 'main', body: '', draft: false } });
     await expect(provider.listReviewComments(repo, 5)).resolves.toEqual([
-      { id: 'issue:12', author: 'bob', body: 'LGTM', createdAt: '2026-10-01T00:00:01Z' },
-      { id: 'review:11', author: 'alice', body: 'rename this', path: 'src/a.ts', line: 3, createdAt: '2026-10-01T00:00:02Z' }
+      { id: 'issue:12', author: 'bob', trusted: false, isBot: false, authorAssociation: 'CONTRIBUTOR', body: 'LGTM', createdAt: '2026-10-01T00:00:01Z' },
+      { id: 'review:11', author: 'alice', trusted: true, isBot: false, authorAssociation: 'MEMBER', body: 'rename this', path: 'src/a.ts', line: 3, createdAt: '2026-10-01T00:00:02Z' },
+      { id: 'issue:14', author: 'codecov[bot]', trusted: false, isBot: true, authorAssociation: 'COLLABORATOR', body: 'Coverage 80%', createdAt: '2026-10-01T00:00:03Z' }
     ]);
-    await expect(provider.postComment(repo, 5, 'done')).resolves.toEqual({ id: '13', url: 'https://github.com/octo/repo/pull/5#issuecomment-13' });
+    // 发出的回复 id 和列表里普通评论的 id 同一写法，跟进时才能认出是自己发的。
+    await expect(provider.postComment(repo, 5, 'done')).resolves.toEqual({ id: 'issue:13', url: 'https://github.com/octo/repo/pull/5#issuecomment-13' });
     expect(bodies.at(-1)).toMatchObject({ method: 'POST', body: { body: 'done' } });
   });
 

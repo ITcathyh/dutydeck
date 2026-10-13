@@ -130,7 +130,15 @@ export interface CiPipelineStatus {
 }
 export interface CiFailureLog { job?: string; stage?: string; reason?: string; log?: string }
 export interface CiPullRequestInput { title: string; body?: string; head: string; base: string; draft?: boolean }
-export interface CiReviewComment { id: string; author?: string; body: string; path?: string; line?: number; url?: string; createdAt?: string }
+export interface CiReviewComment {
+  id: string; author?: string; body: string; path?: string; line?: number; url?: string; createdAt?: string;
+  /** 作者是仓库所有者、成员或协作者，且不是机器人；由 provider 判定。不是 true 的评论不会被自动交给 Agent 修改，只发卡片问人。 */
+  trusted?: boolean;
+  /** 作者是机器人账号（例如覆盖率、依赖更新机器人）。 */
+  isBot?: boolean;
+  /** 平台给出的作者与仓库的关系（例如 GitHub 的 OWNER、MEMBER、COLLABORATOR、CONTRIBUTOR、NONE），卡片上展示用。 */
+  authorAssociation?: string;
+}
 export interface CiWebhookRequest { rawBody: Buffer; headers: Record<string, string | string[] | undefined>; query?: Record<string, string | undefined> }
 /** `signedAt`：签名覆盖的时间（毫秒），宿主据此做 5 分钟重放窗口。失败默认 401。 */
 export type CiWebhookVerification = boolean | { ok: true; signedAt?: number } | { ok: false; statusCode?: 400 | 401; code?: string; message?: string };

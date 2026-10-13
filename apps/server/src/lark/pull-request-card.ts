@@ -19,7 +19,7 @@ export function buildPullRequestConfirmCard(proposal: PublicPullRequest): { titl
     proposal.files.length ? `**将提交的文件**（${proposal.files.length} 个，+${additions} −${deletions}）：` : '**没有未提交的改动**，只推送下面的本地提交。',
     ...proposal.files.slice(0, fileLimit).map(file => `- \`${file.path}\` +${file.additions} −${file.deletions}${file.change === 'added' ? '（新增）' : file.change === 'deleted' ? '（删除）' : ''}`),
     ...(proposal.files.length > fileLimit ? [`- 另有 ${proposal.files.length - fileLimit} 个文件`] : []),
-    ...(proposal.commits.length ? ['', `**一起推送的本地提交**（${proposal.commits.length} 个，还不在 ${proposal.target} 上）：`, ...proposal.commits.slice(0, 10).map(commit => `- ${commit.sha.slice(0, 8)} ${commit.subject}`)] : []),
+    ...(proposal.commits.length ? ['', `**一起推送的本地提交**（${proposal.commits.length} 个，还不在 ${proposal.target} 上）：`, ...proposal.commits.slice(0, 10).map(commit => `- ${commit.sha.slice(0, 8)} ${commit.subject}`), ...(proposal.commits.length > 10 ? [`- 另有 ${proposal.commits.length - 10} 个提交`] : [])] : []),
     ...(proposal.commitsUnverified ? ['', `注意：本地没有 origin/${proposal.target}，无法确认当前提交之前的本地提交是否已在目标分支上，它们可能一起出现在 PR 里。`] : []),
     ...(proposal.excluded.length ? ['', `**不包含**（${proposal.excluded.length} 个，工作区里的未提交改动）：`, ...proposal.excluded.slice(0, fileLimit).map(file => `- \`${file.path}\`：${excludedReasons[file.reason]}`)] : []),
     '',
