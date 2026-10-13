@@ -39,6 +39,7 @@ import { escapeLarkPromptEcho, renderQueueSummary, QUEUE_SUMMARY_MAX_ITEMS } fro
 import { larkNotice } from './notify-tier.js';
 import { claimLarkTaskDispatches, larkTaskAgentGuid, releaseLarkTaskClaim } from './task-agent.js';
 import { buildRepairConfirmCard, parseRepairCardActionValue, renderRepairResultCard, runOpenPlatformRepair } from './repair.js';
+import { buildPullRequestConfirmCard } from './pull-request-card.js';
 import { connectLarkOpenPlatformSession } from './open-platform-session.js';
 import { findLarkThreadContinuation, larkGroupKey, larkSessionConfigKey, parsePrompt, resolveLarkScopeId } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -949,6 +950,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       ...larkCommandCapabilities(this.runtime),
       // 只有 automation 不算可用：至少装了一个 CI 插件，否则 /ci 回「未配置」。
       ci: Boolean(this.workflowOptions.automation?.ciConfigured),
+      pr: Boolean(this.workflowOptions.automation?.pullRequests?.availability().available),
       schedule: Boolean(this.workflowOptions.automation),
       work: Boolean(this.workflowOptions.workbench),
       tasks: Boolean(this.workflows && this.cardMappings && this.runtime.getTasks),
@@ -1160,6 +1162,17 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         }
         const parentSessionId = sessionId ?? (await this.sessionFor(group, config, event.chatId, event.chatType, scopeId)).id;
         await replyCard('定时任务', await executeScheduleCommand(automation, this.workflowOptions.store, parentSessionId, route.argsText, event, config));
+        return 'handled';
+      }
+      if (route.command === 'pr') {
+        const pullRequests = this.workflowOptions.automation?.pullRequests;
+        if (!pullRequests) throw new Error('当前服务未接入开 PR。');
+        if (!sessionId) throw new Error('当前话题还没有可用的工作项，请先发送任务。');
+        if (!event.senderOpenId || !await this.isOperatorAllowed(config, event.senderOpenId, event.chatId, sessionId)) throw new Error('当前账号没有操作此任务的权限。');
+        const proposal = await pullRequests.prepare(sessionId, route.argsText.trim() ? { title: route.argsText.trim() } : {}, event.senderOpenId);
+        const card = buildPullRequestConfirmCard(proposal);
+        const sent = await replyCard(card.title, card.markdown, { elements: card.elements });
+        if (sent?.messageId) await pullRequests.attachCard(proposal.id, sent.messageId);
         return 'handled';
       }
       if (route.command === 'ci') {
@@ -2164,6 +2177,31 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         if (!subscription || appId !== config.appId || chatId !== context.chatId) return { type: 'warning', content: '这张 CI 失败卡不属于当前会话。' };
         if (!await this.isOperatorAllowed(config, operatorOpenId, context.chatId, subscription.sessionId)) return { type: 'warning', content: '当前账号没有操作此任务的权限。' };
         return { type: 'success', content: await ciWebhook.requestFix(subscription.id, { failureKey: workflow.failure, cardMessageId: context.messageId }, operatorOpenId) };
+      } catch (error) { return { type: 'error', content: error instanceof Error ? error.message : String(error) }; }
+    }
+    // 开 PR 的确认卡、「停止跟进」与评审意见问题卡。权限沿用重试：机器人白名单 / 群策略，以发起 /pr 的人为任务发起人。
+    if (workflow && typeof workflow.dutydeck_pr === 'string') {
+      const pullRequests = this.workflowOptions.automation?.pullRequests;
+      if (!pullRequests || !this.reconcileConfig || !context?.messageId || !context.chatId || !operatorOpenId) return { type: 'error', content: '这张卡片已失效，请重新发送 /pr。' };
+      try {
+        const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
+        if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法执行此操作。' };
+        const record = await pullRequests.get(workflow.dutydeck_pr);
+        const session = record ? await this.runtime.getSession(record.sessionId) : undefined;
+        const { appId, chatId, chatType } = parseLarkSourceId(session?.source === 'lark' ? session.sourceId : undefined);
+        if (!record || appId !== config.appId || chatId !== context.chatId) return { type: 'warning', content: '这张卡片不属于当前会话。' };
+        const effective = chatType === 'group' && this.groupManager ? await this.groupManager.resolved(config, context.chatId) : config;
+        if (!await this.isOperatorAllowed(effective, operatorOpenId, context.chatId, record.sessionId, record.actorId)) return { type: 'warning', content: '当前账号没有操作此任务的权限。' };
+        const op = workflow.op;
+        if (op === 'confirm') return { type: 'success', content: (await pullRequests.confirm(record.id, operatorOpenId, { messageId: context.messageId })).message };
+        if (op === 'cancel' || op === 'stop') {
+          const updated = await pullRequests.cancel(record.sessionId, record.id);
+          return { type: 'success', content: updated.status === 'cancelled' ? '已取消，没有推送任何内容。' : updated.status === 'stopped' ? '已停止自动跟进，PR 本身不受影响。' : `当前状态：${updated.reason ?? updated.status}` };
+        }
+        if (op === 'answer' && typeof workflow.comment === 'string' && (workflow.choice === 'apply' || workflow.choice === 'ignore')) {
+          return { type: 'success', content: await pullRequests.answer(record.id, { commentId: workflow.comment, choice: workflow.choice, cardMessageId: context.messageId }) };
+        }
+        return { type: 'error', content: '无法识别的操作。' };
       } catch (error) { return { type: 'error', content: error instanceof Error ? error.message : String(error) }; }
     }
     // 定时委托的确认卡 / 产出卡按钮（确认、取消、暂停、恢复、停止）；权限与状态判断都在 mandateCards 内。

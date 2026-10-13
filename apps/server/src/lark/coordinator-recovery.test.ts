@@ -211,6 +211,72 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     } finally { coordinator.stop(); repos.close(); }
   });
 
+  it('/pr 先发确认卡（列出文件与分支），只生成清单不推送；没装开 PR 插件时回安装方法', async () => {
+    const { runtime } = persistentRuntime();
+    const first = coordinatorFor(runtime, cardService());
+    await first.handle(dm('om_initial', '先创建工作项'), config);
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
+    const proposal = {
+      id: 'pr_1', sessionId: 'ses_1', provider: 'github', providerName: 'GitHub', repository: 'acme/app', status: 'proposed', title: 'Fix login',
+      bodySummary: '本 PR 由 DutyDeck 生成。', branch: 'dutydeck/fix-login-0a1b2c3d', target: 'main', baseSha: 'a'.repeat(40),
+      files: [{ path: 'src/login.ts', change: 'modified', additions: 3, deletions: 1 }], excluded: [{ path: 'notes.txt', reason: 'not_session' }], commits: [],
+      ciRounds: 0, reviewRounds: 0, expiresAt: '2026-10-13T00:30:00.000Z', createdAt: '2026-10-13T00:00:00.000Z', updatedAt: '2026-10-13T00:00:00.000Z'
+    };
+    const pullRequests = { availability: () => ({ available: true }), prepare: vi.fn(async () => proposal), attachCard: vi.fn(async () => {}), confirm: vi.fn() };
+    const service = cardService();
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: { pullRequests } as any });
+    try {
+      await coordinator.handle(dm('om_pr', '/pr Fix login'), config);
+      await vi.waitFor(() => expect(pullRequests.attachCard).toHaveBeenCalledWith('pr_1', 'om_card'));
+      expect(pullRequests.prepare).toHaveBeenCalledWith('ses_1', { title: 'Fix login' }, 'ou_user_a');
+      const card = service.send.mock.calls.find(([input]: any[]) => input.taskName === '/pr 需要确认')?.[0];
+      expect(card.markdown).toContain('源分支：`dutydeck/fix-login-0a1b2c3d`');
+      expect(card.markdown).toContain('- `src/login.ts` +3 −1');
+      expect(card.markdown).toContain('- `notes.txt`：不是本会话改的');
+      expect(card.elements.filter((element: any) => element.tag === 'button').map((element: any) => [element.text.content, element.behaviors[0].value]))
+        .toEqual([['确认推送并开 PR', { dutydeck_pr: 'pr_1', op: 'confirm' }], ['取消', { dutydeck_pr: 'pr_1', op: 'cancel' }]]);
+      expect(pullRequests.confirm).not.toHaveBeenCalled();
+    } finally { first.stop(); coordinator.stop(); }
+
+    const unconfigured = cardService();
+    const without = new LarkMessageCoordinator(runtime as any, unconfigured as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: { pullRequests: { availability: () => ({ available: false }), prepare: vi.fn() } } as any });
+    try {
+      await without.handle(dm('om_pr_unconfigured', '/pr'), config);
+      await vi.waitFor(() => expect(unconfigured.send).toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('dutydeck plugin install') })));
+      expect(String(unconfigured.send.mock.calls.at(-1)?.[0]?.markdown)).toContain('plugins/github');
+    } finally { without.stop(); }
+  });
+
+  it('/pr 确认卡的按钮走中断/重试同一道权限门，只认本会话所在群的卡', async () => {
+    const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+    const { runtime, sessions } = persistentRuntime();
+    sessions.push({ id: 'ses_pr', agentId: 'codex', state: 'idle', cwd: '/tmp', source: 'lark', sourceId: 'cli_test:oc_group:group', runId: 'run_pr', createdAt: '2026-10-13T00:00:00.000Z', updatedAt: '2026-10-13T00:00:00.000Z' });
+    await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
+    const pullRequests = {
+      get: vi.fn(async (id: string) => id === 'pr_1' ? { id: 'pr_1', sessionId: 'ses_pr', actorId: 'ou_alice' } : undefined),
+      confirm: vi.fn(async () => ({ message: '已确认，正在推送分支并开 PR，完成后会通知。' })),
+      cancel: vi.fn(async () => ({ status: 'cancelled' })),
+      answer: vi.fn(async () => '已记下：按评论修改。')
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { store: repos.config, automation: { pullRequests } as any });
+    try {
+      await coordinator.initializeWorkflows(config);
+      const context = { messageId: 'om_pr_card', chatId: 'oc_group' };
+      // 别的群转发过来的卡不能确认。
+      expect(await coordinator.handleAction({ dutydeck_pr: 'pr_1', op: 'confirm' }, 'ou_alice', { ...context, chatId: 'oc_other' })).toMatchObject({ type: 'warning' });
+      expect(await coordinator.handleAction({ dutydeck_pr: 'pr_1', op: 'confirm' }, 'ou_alice', context))
+        .toEqual({ type: 'success', content: '已确认，正在推送分支并开 PR，完成后会通知。' });
+      expect(pullRequests.confirm).toHaveBeenCalledWith('pr_1', 'ou_alice', { messageId: 'om_pr_card' });
+      expect(await coordinator.handleAction({ dutydeck_pr: 'pr_1', op: 'cancel' }, 'ou_alice', context)).toEqual({ type: 'success', content: '已取消，没有推送任何内容。' });
+      expect(await coordinator.handleAction({ dutydeck_pr: 'pr_1', op: 'answer', comment: 'issue:2', choice: 'apply' }, 'ou_alice', context)).toEqual({ type: 'success', content: '已记下：按评论修改。' });
+      expect(pullRequests.answer).toHaveBeenCalledWith('pr_1', { commentId: 'issue:2', choice: 'apply', cardMessageId: 'om_pr_card' });
+      // 白名单之外的成员点确认被拒绝。
+      await repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...config, allowedUsers: [{ openId: 'ou_carol', name: 'Carol' }] }]));
+      expect(await coordinator.handleAction({ dutydeck_pr: 'pr_1', op: 'confirm' }, 'ou_bob', context)).toEqual({ type: 'warning', content: '当前账号没有操作此任务的权限。' });
+      expect(pullRequests.confirm).toHaveBeenCalledOnce();
+    } finally { coordinator.stop(); repos.close(); }
+  });
+
   it('/status 报告持久化会话的 Agent、工作区与状态，而不是「尚未创建」', async () => {
     const { runtime } = persistentRuntime();
     const first = cardService();

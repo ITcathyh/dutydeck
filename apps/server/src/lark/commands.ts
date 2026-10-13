@@ -110,6 +110,8 @@ export function parseSlashCommand(text: unknown): ParsedSlashCommand | undefined
  */
 export interface LarkCommandCapabilities {
   ci?: boolean;
+  /** 装了支持开 PR 的 CI 插件；否则 /pr 回安装提示。 */
+  pr?: boolean;
   schedule?: boolean;
   work?: boolean;
   tasks?: boolean;
@@ -153,7 +155,7 @@ export function larkCommandCapabilities(runtime: unknown): LarkCommandCapabiliti
 // 命令注册表
 // ---------------------------------------------------------------------------
 
-export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'help' | 'repair' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject' | 'remember' | 'memory' | 'forget' | 'agents' | 'queue' | 'steer' | 'plan' | 'grant' | 'revoke';
+export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'pr' | 'help' | 'repair' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject' | 'remember' | 'memory' | 'forget' | 'agents' | 'queue' | 'steer' | 'plan' | 'grant' | 'revoke';
 
 export interface LarkCommandDefinition {
   name: LarkCommandName;
@@ -193,6 +195,8 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   { name: 'schedule', summary: '查看、创建、启用或停用此话题的定时任务', usage: '/schedule；/schedule every 分钟 指令；/schedule enable 编号；/schedule disable 编号', mutating: true, requires: c => c.schedule === true, unavailableReason: '当前服务未接入定时任务。' },
   { name: 'ci', summary: '等待当前提交的 CI（由已安装的 CI 插件提供）、按规则交给 Agent 修复失败、查看等待或取消续作', usage: '/ci；/ci wait [工作流]；/ci fix；/ci cancel <等待编号>', mutating: true, requires: c => c.ci === true,
     unavailableReason: 'CI 续作未配置：还没有安装 CI 插件。安装方法：dutydeck plugin install <CI 插件目录或包> --yes，按插件说明用 dutydeck plugin config 填好令牌或 webhook 密钥，再执行 dutydeck restart 生效。用 webhook 的插件，把平台的 webhook 指向本服务的 /api/hooks/<插件提供方>。' },
+  { name: 'pr', summary: '把本会话的改动推到 dutydeck/ 分支并开 PR（先发确认卡，确认后才推送），之后跟进 CI 和评审意见', usage: '/pr [标题]', mutating: true, requires: c => c.pr === true,
+    unavailableReason: '开 PR 未配置：没有安装支持开 PR 的 CI 插件。安装方法：dutydeck plugin install <插件目录> --yes（仓库自带的 plugins/github 支持），再用 dutydeck plugin config 填好访问令牌，执行 dutydeck restart 生效。' },
   { name: 'tasks', summary: '查看允许访问的待处理任务、运行进度和最近结果', usage: '/tasks [页码]', mutating: false, requires: c => c.tasks === true, unavailableReason: '当前机器人无法查询任务列表，/tasks 已停用。' },
   { name: 'answer', summary: '回答 Agent 的问题并继续原任务', usage: '/answer <问题编号> <回答>', mutating: true, requires: c => c.answer === true, unavailableReason: '当前机器人无法接收问题回答，/answer 已停用。' },
   { name: 'approve', summary: '批准卡片上的本次工具调用', usage: '/approve <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/approve 已停用。' },

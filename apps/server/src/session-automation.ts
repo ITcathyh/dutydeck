@@ -47,6 +47,7 @@ import {
 import { executionTaskId } from '@dutydeck/storage';
 import { CiProviderRegistry, ciProviderLabel, resolveCiHead, type CiHead } from './ci-providers.js';
 import type { CiWebhookService } from './ci-webhook.js';
+import type { PullRequestService } from './pull-requests.js';
 import { readAttemptResult } from './task-results.js';
 import { z } from 'zod';
 
@@ -93,6 +94,8 @@ export interface SessionAutomationServiceOptions {
   ciProviders?: CiProviderRegistry;
   /** webhook 驱动的 CI 续作与修复；没有配置 webhook 的提供方时不注入。 */
   ciWebhook?: CiWebhookService;
+  /** `/pr` 与 Web「开 PR」：会话改动开 PR 并跟进。 */
+  pullRequests?: PullRequestService;
   clock?: () => Date;
   pollIntervalMs?: number;
 }
@@ -339,6 +342,7 @@ export class SessionAutomationService {
   /** 至少装了一个 CI 插件；/ci 据此判断「未安装 CI 插件」。 */
   get ciConfigured() { return this.providers.size > 0; }
   get ciWebhook() { return this.options.ciWebhook; }
+  get pullRequests() { return this.options.pullRequests; }
   listCiProviders(): PublicCiProvider[] { return this.providers.describe(); }
 
   private pollingProvider(id: string): CiProvider & Required<Pick<CiProvider, 'getPipelineStatus'>> {

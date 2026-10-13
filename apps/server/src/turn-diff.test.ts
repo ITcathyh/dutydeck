@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -102,6 +102,19 @@ describe('turn diff snapshots', () => {
     const diff = await readTurnDiff(before!.gitDir, before!.tree, after!.tree);
     expect(diff.files.map(file => file.path)).toEqual(['dirty.txt', 'keep.txt']);
     expect(diff.files[0]!.hunks.flatMap(hunk => hunk.lines).filter(line => line.kind !== 'context')).toEqual([{ kind: 'add', newLine: 3, text: 'agent line' }]);
+  });
+
+  it('sees a same-size edit made in the same second as the last index write', async () => {
+    const { dir, git } = await repo();
+    await git('config', 'core.checkStat', 'minimal');
+    const second = new Date('2026-01-01T00:00:00Z');
+    await utimes(join(dir, 'keep.txt'), second, second);
+    await git('update-index', '--refresh');
+    await writeFile(join(dir, 'keep.txt'), 'KEEP\n');
+    await utimes(join(dir, 'keep.txt'), second, second);
+    await utimes(join(dir, '.git', 'index'), second, second);
+    const snapshot = await snapshotWorkingTree(dir);
+    expect(snapshot!.tree).not.toBe((await git('rev-parse', 'HEAD^{tree}')).stdout.trim());
   });
 
   it('gives no snapshot outside git and when the time limit is exceeded, without throwing', async () => {

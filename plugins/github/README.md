@@ -4,7 +4,7 @@
 
 - `/ci wait`、Web「等待 CI 完成」、定时任务的「CI 出现新的失败构建时执行」：按当前提交查询 GitHub Actions 构建。
 - 失败日志：读取失败 job 和失败步骤，日志只取末尾 3000 字符。
-- Pull Request：创建 PR、读取行内评审意见和普通评论、发评论（需要 token）。
+- Pull Request：创建 PR、读取 PR 状态、读取行内评审意见和普通评论、发评论（写操作需要 token），供飞书 `/pr` 和 Web「开 PR」使用。
 - Webhook（可选）：`POST /api/hooks/github`，用 `X-Hub-Signature-256` 校验。配了 webhook 后，`/ci wait`、`/ci fix` 改为等 GitHub 推送结果，`/ci fix` 会按规则把失败交给 Agent 修复。
 
 ## 安装

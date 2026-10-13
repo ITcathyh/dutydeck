@@ -5,6 +5,7 @@ import { api, type Session, type Task, type WorkspaceCleanupPreview } from '../a
 import { sessionDisplayName } from '../run-summary';
 import { turnDiffPath } from '../app-route';
 import { Banner, Button, Dialog, Field, IconButton, Input, Spinner } from './primitives';
+import { PullRequestPanel } from './PullRequestPanel';
 import { SessionAutomationPanel } from './SessionAutomationPanel';
 
 import { verificationLabel } from './verification-presentation';
@@ -186,6 +187,7 @@ export function SessionDeliveryPanel({ session, tasks, onClose }: { session: Ses
             {record.outputTruncated && <p className="text-caption text-warning">输出超过记录上限，已截断。</p>}
           </details>)}
         </section>
+        <PullRequestPanel session={session}/>
         <SessionAutomationPanel session={session} taskTitle={sessionDisplayName(session, tasks.find(task => task.prompt.trim())?.prompt)}/>
         <section className="space-y-2">
           <h3 className="text-body font-semibold">Skill 投递记录</h3>
