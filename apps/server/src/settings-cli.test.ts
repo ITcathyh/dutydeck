@@ -7,7 +7,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { buildApp } from './app.js';
 import { createCliProgram } from './cli-program.js';
 import { larkBotsConfigKey, readLarkConfig } from './lark/config.js';
-import { runSettingsCli, SettingsCliError, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
+import { botFields, fieldsHelp, runSettingsCli, SettingsCliError, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 
 const cleanups: Array<() => unknown> = [];
 afterEach(async () => { for (const clean of cleanups.splice(0).reverse()) await clean(); });
@@ -46,6 +46,19 @@ describe('settings CLI against the real bot routes', () => {
     expect(result.bot).not.toHaveProperty('appSecret');
     expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ appSecret: 'secret-a', adhdMode: true, mentionPolicy: 'never' });
     expect((await run('bot-list')).bots).toEqual([expect.objectContaining({ appId: 'cli_a', defaultAgentId: 'codex', listening: false })]);
+  });
+
+  it('reads and writes groupMemoryScope, defaulting to shared and rejecting unknown values', async () => {
+    const { repos, run } = await botRuntime();
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ groupMemoryScope: 'shared' });
+    const set = await run('bot-set', { appId: 'cli_a', pairs: ['groupMemoryScope=per-group'] });
+    expect(set.bot).toMatchObject({ appId: 'cli_a', groupMemoryScope: 'per-group' });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ groupMemoryScope: 'per-group' });
+    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=别的设置'] });
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ groupMemoryScope: 'per-group' });
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['groupMemoryScope=everyone'] })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    expect(await run('bot-set', { appId: 'cli_a', pairs: ['groupMemoryScope=shared'] })).toMatchObject({ bot: { groupMemoryScope: 'shared' } });
+    expect(fieldsHelp(botFields)).toContain('groupMemoryScope=<shared|per-group>');
   });
 
   it('reads, writes, partially preserves, and clears roleTitle and roleScope', async () => {

@@ -37,6 +37,17 @@ async function setup(options: { deny?: boolean } = {}) {
 }
 
 describe('Web task detail memory routes', () => {
+  it('marks turns of a per-group pool with perGroup and leaves shared turns unmarked', async () => {
+    const { app, store } = await setup();
+    const perGroup = larkMemoryScope('cli_bot', 'oc_group', 'group', 'per-group');
+    const own = await store.add(perGroup, { content: '本群自己的约定', source: 'user', chatId: 'oc_group' });
+    await store.recordTurn(perGroup, { taskId: 'task_pg', sessionId: 'ses_pg', injected: [own.id] });
+    const { turns } = (await app.inject({ method: 'GET', url: '/api/sessions/ses_pg/memory' })).json();
+    expect(turns[0]).toMatchObject({ taskId: 'task_pg', shared: false, perGroup: true, injected: [{ id: own.id }] });
+    const shared = (await app.inject({ method: 'GET', url: '/api/sessions/ses_1/memory' })).json().turns[0];
+    expect(shared).not.toHaveProperty('perGroup');
+  });
+
   it('lists the memories each turn used and wrote, newest first, skipping turns of other sessions', async () => {
     const { app, authorize, used, written } = await setup();
     const response = await app.inject({ method: 'GET', url: '/api/sessions/ses_1/memory' });

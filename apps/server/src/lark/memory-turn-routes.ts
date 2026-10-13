@@ -5,7 +5,7 @@
  */
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RuntimeError } from '@dutydeck/shared';
-import type { LarkMemoryEntry, LarkMemoryStore } from './memory.js';
+import { isLarkPerGroupMemoryPool, type LarkMemoryEntry, type LarkMemoryStore } from './memory.js';
 
 export interface LarkMemoryTurnRoutesOptions {
   store: Pick<LarkMemoryStore, 'turn' | 'turns' | 'remove'>;
@@ -27,7 +27,7 @@ export async function registerLarkMemoryTurnRoutes(app: FastifyInstance, options
     const turns = (await options.store.turns(sessionId))
       .filter(view => view.injected.length || view.written.length)
       .slice(0, maxTurns)
-      .map(view => ({ taskId: view.record.taskId, at: view.record.at, shared: view.shared, injected: view.injected.map(publicEntry), written: view.written.map(publicEntry) }));
+      .map(view => ({ taskId: view.record.taskId, at: view.record.at, shared: view.shared, ...(isLarkPerGroupMemoryPool(view.scope) ? { perGroup: true } : {}), injected: view.injected.map(publicEntry), written: view.written.map(publicEntry) }));
     return { turns };
   });
 

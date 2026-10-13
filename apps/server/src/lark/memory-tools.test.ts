@@ -18,12 +18,14 @@ const session = (id: string, sourceId: string): Session => ({
   id, agentId: 'codex', state: 'idle', cwd: '/tmp', source: 'lark', sourceId, runId: 'run_1', createdAt: '', updatedAt: ''
 });
 
-async function setup(options: { actorId?: string; memoryEnabled?: boolean | null } = {}) {
+async function setup(options: { actorId?: string; memoryEnabled?: boolean | null; groupMemoryScope?: 'shared' | 'per-group' } = {}) {
   const repos = createRepositories(':memory:'); repositories.push(repos);
   const groupSession = session('ses_group', 'cli_bot:oc_group:group');
   const p2pSession = session('ses_p2p', 'cli_bot:oc_p2p:p2p');
   await repos.sessions.save(groupSession);
   await repos.sessions.save(p2pSession);
+  const groupBSession = session('ses_group_b', 'cli_bot:oc_group_b:group');
+  await repos.sessions.save(groupBSession);
   // 群协作关闭的机器人：记忆工具仍必须可用。
   await repos.config.set(larkBotsConfigKey, JSON.stringify([{
     appId: 'cli_bot',
@@ -31,7 +33,8 @@ async function setup(options: { actorId?: string; memoryEnabled?: boolean | null
     name: 'Bot',
     defaultAgentId: 'codex',
     groupToolsEnabled: false,
-    ...(options.memoryEnabled === null ? {} : { memoryEnabled: options.memoryEnabled ?? true })
+    ...(options.memoryEnabled === null ? {} : { memoryEnabled: options.memoryEnabled ?? true }),
+    ...(options.groupMemoryScope ? { groupMemoryScope: options.groupMemoryScope } : {})
   }]));
   const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://127.0.0.1:4310');
   const tools = new LarkAgentToolsService(capabilities, repos.config, {});
@@ -46,8 +49,33 @@ async function setup(options: { actorId?: string; memoryEnabled?: boolean | null
   const getActiveTaskContext = vi.fn((sessionId: string) => sessionId === 'ses_group' && options.actorId ? { taskId: 'task_1', actorId: options.actorId } : undefined);
   await registerLarkMemoryTools(app, { tools, store, runtime: { getActiveTaskContext } });
   const headers = (target: Session) => ({ authorization: `Bearer ${capabilities.environmentFor(target).dutydeck_group_tools_token}` });
-  return { repos, app, store, groupSession, p2pSession, headers };
+  return { repos, app, store, groupSession, groupBSession, p2pSession, headers };
 }
+
+describe('Lark memory agent tools and the group memory scope', () => {
+  const addAs = (app: Awaited<ReturnType<typeof setup>>['app'], target: Session, headers: Awaited<ReturnType<typeof setup>>['headers'], content: string) =>
+    app.inject({ method: 'POST', url: larkMemoryToolsPath, headers: headers(target), payload: { content, topic: 'conventions' } });
+  const listAs = async (app: Awaited<ReturnType<typeof setup>>['app'], target: Session, headers: Awaited<ReturnType<typeof setup>>['headers'], path = '') =>
+    (await app.inject({ method: 'GET', url: `${larkMemoryToolsPath}${path}`, headers: headers(target) })).json().entries as Array<{ content: string }>;
+
+  it('per-group: list, search and show only return the bound group, and writes land in that group only', async () => {
+    const { app, store, groupSession, groupBSession, headers } = await setup({ groupMemoryScope: 'per-group' });
+    expect((await addAs(app, groupSession, headers, 'A 群约定：提交信息用英文')).statusCode).toBe(200);
+    expect((await listAs(app, groupSession, headers)).map(entry => entry.content)).toEqual(['A 群约定：提交信息用英文']);
+    expect(await listAs(app, groupBSession, headers)).toEqual([]);
+    expect(await listAs(app, groupBSession, headers, '/search?q=提交信息')).toEqual([]);
+    expect((await listAs(app, groupSession, headers, '/search?q=提交信息')).map(entry => entry.content)).toEqual(['A 群约定：提交信息用英文']);
+    expect(await listAs(app, groupBSession, headers, '/topics/conventions')).toEqual([]);
+    expect((await store.list(larkMemoryScope('cli_bot', 'oc_group', 'group', 'per-group'))).map(entry => entry.content)).toEqual(['A 群约定：提交信息用英文']);
+    expect(await store.list(larkMemoryScope('cli_bot', 'oc_group', 'group'))).toEqual([]);
+  });
+
+  it('shared (default): the other group reads what this group saved', async () => {
+    const { app, groupSession, groupBSession, headers } = await setup();
+    expect((await addAs(app, groupSession, headers, '各群共用的约定：提交信息用英文')).statusCode).toBe(200);
+    expect((await listAs(app, groupBSession, headers)).map(entry => entry.content)).toEqual(['各群共用的约定：提交信息用英文']);
+  });
+});
 
 describe('Lark memory agent tools', () => {
   it('lets the bound session read, add and remove memories of its own chat only', async () => {

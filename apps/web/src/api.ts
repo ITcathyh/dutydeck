@@ -59,6 +59,8 @@ export type LarkBotConfig = {
   memoryEnabled?: boolean;
   /** 后台自动提取与整理开关，服务端恒返回布尔；旧服务端缺省按开启处理。 */
   memoryAutoExtract?: boolean;
+  /** 群记忆范围：shared 各群共用一份（默认）；per-group 每个群各自一份。服务端恒返回；旧服务端缺省按 shared 处理。 */
+  groupMemoryScope?: 'shared' | 'per-group';
   /** 跑提取与整理的 Agent；空表示沿用机器人默认 Agent。 */
   memoryAgentId?: string;
   /** 跑提取与整理的模型；空表示沿用默认模型。 */
@@ -148,12 +150,14 @@ export type LarkMemoryGroupStatus = {
 export type LarkMemoryStatusResult = {
   appId: string;
   enabled: boolean;
+  /** 当前群记忆范围；旧服务端缺省按 shared 处理。groups 始终是各群共享池（per-group 时不再被读写，数据保留）。 */
+  groupMemoryScope?: 'shared' | 'per-group';
   groups: LarkMemoryGroupStatus;
 };
 
 export type LarkTurnMemoryEntry = { id: string; content: string; topic: string; source: 'user' | 'agent' | 'extraction' | 'consolidation'; createdAt: string; deletedAt?: string };
 /** 一轮任务注入了哪些记忆、新写入了哪些记忆；按任务记录，newest first。 */
-export type LarkTurnMemory = { taskId: string; at: string; shared: boolean; injected: LarkTurnMemoryEntry[]; written: LarkTurnMemoryEntry[] };
+export type LarkTurnMemory = { taskId: string; at: string; shared: boolean; perGroup?: boolean; injected: LarkTurnMemoryEntry[]; written: LarkTurnMemoryEntry[] };
 
 export type RoleChange =
   | {
@@ -395,6 +399,7 @@ export const api = {
     groupToolsAllowSend?: boolean;
     memoryEnabled?: boolean;
     memoryAutoExtract?: boolean;
+    groupMemoryScope?: 'shared' | 'per-group';
     memoryAgentId?: string;
     memoryModel?: string;
     decisionAgentId?: string;

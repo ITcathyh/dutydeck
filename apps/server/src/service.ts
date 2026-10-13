@@ -588,10 +588,10 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       }
     });
     for (const bot of await readLarkConfigs(repos.config)) void memoryPipeline.recoverJobs(bot.appId).catch(error => app?.log.error({ error, appId: bot.appId }, '恢复后台记忆作业失败'));
-    // 协作作用域都是群：读本机器人的群共享池，来源是别的群的条目标「其他群」。
+    // 协作作用域都是群：读本机器人的群记忆池（shared 时是各群共享池，来源是别的群的条目标「其他群」；per-group 时是本群的池）。
     readCollaborationMemory = async scope => {
       const bot = (await readLarkConfigs(repos.config)).find(entry => entry.appId === scope.appId);
-      const memoryScope = larkMemoryScope(scope.appId, scope.chatId, 'group');
+      const memoryScope = larkMemoryScope(scope.appId, scope.chatId, 'group', bot?.groupMemoryScope);
       return !bot || !larkMemoryEnabled(bot) ? '' : renderMemoryIndex(await memoryStore.list(memoryScope), await memoryStore.getState(memoryScope), { currentChatId: scope.chatId }).text;
     };
     app = await buildApp(runtime, {

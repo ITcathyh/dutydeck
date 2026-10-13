@@ -26,7 +26,9 @@ import { readAttemptResult, type AttemptResultRepositories } from '../task-resul
 import { installationOwnerTaskActor, RuntimeError, type AgentCapabilities, type AcceptedTask, type ConfigRepository, type MemoryJob, type MemoryJobRepository, type StartSessionInput, type TaskRequestV1, type AgentConfig, type AgentEvent, type ExecutionActor, type PermissionMode, type Session, type TaskRecord } from '@dutydeck/shared';
 import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
 import {
+  isLarkGroupChatMemoryPool,
   isLarkGroupMemoryPool,
+  larkMemoryScopeOfPool,
   isLarkMemoryId,
   larkMemoryDedupeKey,
   larkMemoryFingerprint,
@@ -163,7 +165,7 @@ export interface LarkMemoryRejectedFact {
 
 /**
  * 逐条核对提取结果。被拒的条目不影响其余条目，只计入 `rejected` 并由调用方记日志。
- * shared：群共享池，另挡疑似注入指令；ignoreRules：本池的「不许记」规则，命中任何一条即拒。
+ * shared：群聊记忆池（各群共享或按群独立，多人可写），另挡疑似注入指令；ignoreRules：本池的「不许记」规则，命中任何一条即拒。
  */
 export function gateExtractionFacts(
   input: { facts: unknown[]; evidenceTaskIds: string[]; shared?: boolean; ignoreRules?: LarkMemoryIgnoreRule[] },
@@ -389,7 +391,7 @@ export class LarkMemoryPipeline {
 
   async recoverJobs(appId: string): Promise<void> {
     for (const job of await this.options.jobs.listUnsettled(appId)) {
-      const scope = { ...job.scope, chatId: job.scope.pool };
+      const scope = larkMemoryScopeOfPool(job.scope);
       const config = await this.options.readConfig(appId);
       if (!config || !larkMemoryEnabled(config)) continue;
       const state = await this.options.store.getState(scope);
@@ -719,14 +721,14 @@ export class LarkMemoryPipeline {
           const parsed = parseLastJsonBlock(await this.runTurn(session, request.prompt, request)) as { facts?: unknown[]; actions?: unknown[] };
           if (kind === 'extraction') {
             if (!Array.isArray(parsed.facts)) throw new LarkMemoryError('MEMORY_AGENT_OUTPUT_INVALID', '输出缺少 facts。', 422);
-            const gate = gateExtractionFacts({ facts: parsed.facts, evidenceTaskIds: input.materials.map(turn => turn.taskId), shared: isLarkGroupMemoryPool(scope), ignoreRules: input.ignoreRules }, input.entries);
+            const gate = gateExtractionFacts({ facts: parsed.facts, evidenceTaskIds: input.materials.map(turn => turn.taskId), shared: isLarkGroupChatMemoryPool(scope), ignoreRules: input.ignoreRules }, input.entries);
             rejected = gate.rejected.length;
             plan = gate.accepted.map(fact => ({ op: 'add', input: { content: fact.content, topic: fact.topic, source: 'extraction', taskId: fact.evidence, sessionId: session.id, chatId: input.materials.find(turn => turn.taskId === fact.evidence)?.chatId, ...(input.actorId ? { createdBy: input.actorId } : {}) } }));
             break;
           }
           if (!Array.isArray(parsed.actions)) throw new LarkMemoryError('MEMORY_AGENT_OUTPUT_INVALID', '输出缺少 actions。', 422);
           candidate = parsed.actions;
-          const gate = gateConsolidationActions({ actions: candidate, sessionId: session.id, state: input.state, now: new Date(input.now), shared: isLarkGroupMemoryPool(scope) }, input.entries);
+          const gate = gateConsolidationActions({ actions: candidate, sessionId: session.id, state: input.state, now: new Date(input.now), shared: isLarkGroupChatMemoryPool(scope) }, input.entries);
           if (gate.ok) { plan = gate.plan; break; }
           violations = gate.violations;
           if (attempt === attempts - 1) throw new LarkMemoryError(violations.some(item => item.includes(indexOverBudgetViolation)) ? indexOverBudgetViolation : 'MEMORY_GATE_REJECTED', '两轮整理均未通过门禁。', 422);

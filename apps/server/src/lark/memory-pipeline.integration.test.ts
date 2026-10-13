@@ -840,6 +840,43 @@ describe('shared group pool through the pipeline', () => {
   });
 });
 
+describe('per-group pool through the pipeline', () => {
+  it('每个群各自计数、各自提取，事实与记忆会话只落在本群的池里', async () => {
+    const h = await harness();
+    const perGroup = await h.setConfig({ groupMemoryScope: 'per-group' });
+    const poolA = larkMemoryScope('cli_memory', 'oc_group', 'group', 'per-group');
+    const poolB = larkMemoryScope('cli_memory', 'oc_group_b', 'group', 'per-group');
+    h.setResponder(prompt => {
+      if (!prompt.includes('后台提取')) return { text: jsonBlock({ actions: [{ op: 'noop' }] }) };
+      const taskId = prompt.match(/### 轮次 (\S+)/)?.[1] ?? 'unknown';
+      return { text: jsonBlock({ facts: [{ content: 'A 群的发布窗口是周四下午', topic: 'conventions', kind: 'environment', evidence: taskId }] }) };
+    });
+
+    // B 群只有一轮，攒不够触发；A 群 3 轮触发提取。
+    const before = h.prompts.length;
+    await h.coordinator.handle(event('om_b_turn', 'B 群的任务', { chatId: 'oc_group_b', threadId: undefined, rootId: undefined }), perGroup);
+    await vi.waitFor(() => expect(h.prompts.length).toBe(before + 1), { timeout: 15_000 });
+    await h.runTurns(3, perGroup);
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(poolA)).lastRun).toMatchObject({ kind: 'extraction', ok: true, added: 1 });
+    }, { timeout: 10_000 });
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(poolA)).running).toBeUndefined();
+    }, { timeout: 10_000 });
+
+    expect((await h.store.list(poolA)).map(entry => entry.content)).toEqual(['A 群的发布窗口是周四下午']);
+    expect(await h.store.list(poolB)).toEqual([]);
+    expect(await h.store.list(scope)).toEqual([]);
+    expect((await h.store.getState(poolB)).pendingTurns).toHaveLength(1);
+    expect((await h.store.getState(poolB)).lastRun).toBeUndefined();
+    // 独立池里的轮次不带「来源群」标记，记忆会话也按池独立。
+    expect(h.memoryPrompts.find(prompt => prompt.includes('后台提取'))).not.toContain('来源群：');
+    expect((await h.runtime.listSessions()).filter(session => session.source === 'lark-memory').map(session => session.sourceId)).toEqual(['cli_memory:group_oc_group:memory']);
+    // 旧共享池没有被碰过。
+    expect(await h.repos.config.get(`lark.memory.cli_memory.groups`)).toBeUndefined();
+  });
+});
+
 describe('stuck memory session after a daemon restart', () => {
   it('重启后原执行未知时复用原持久作业并阻塞补跑，旧输出不被读取', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-memory-restart-'));

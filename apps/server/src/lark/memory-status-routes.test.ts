@@ -145,6 +145,16 @@ describe('GET /api/lark/bots/:appId/memory/status', () => {
     });
   });
 
+  it('返回当前群记忆范围：默认 shared，切到 per-group 后原共享池状态仍然返回', async () => {
+    await registerTestBot('cli_test_scope', true);
+    const status: LarkMemoryStatus = { appId: 'cli_test_scope', pool: 'groups', shared: true, liveEntries: 4, topics: 1, pendingTurns: 0 };
+    const app = await createServer({ memoryPipeline: { status: vi.fn(async () => status) } });
+    const read = async () => (await app.inject({ method: 'GET', url: '/api/lark/bots/cli_test_scope/memory/status' })).json();
+    expect(await read()).toMatchObject({ groupMemoryScope: 'shared', groups: { liveEntries: 4 } });
+    await saveLarkConfig(config, undefined, { originalAppId: 'cli_test_scope', groupMemoryScope: 'per-group' });
+    expect(await read()).toMatchObject({ groupMemoryScope: 'per-group', groups: { liveEntries: 4 } });
+  });
+
   it('失败时的 lastRunLabel 情况 1：已知错误码格式化为「错误码（中文说明）」', async () => {
     await registerTestBot('cli_test_fail1', true);
 

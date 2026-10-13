@@ -35,6 +35,12 @@ describe('turn memory in the task detail', () => {
     expect(screen.queryByRole('button', { name: '删除记忆 mem_00000002' })).toBeNull();
     expect(screen.getByRole('button', { name: '删除记忆 mem_00000001' })).toBeTruthy();
   });
+  it('labels a per-group turn as group-local memory instead of shared memory', async () => {
+    mount(async () => ({ turns: [{ ...turn, shared: false, perGroup: true }] }));
+    await screen.findByRole('complementary', { name: '本轮记忆' });
+    expect(screen.getByText(/本群记忆/)).toBeTruthy();
+    expect(screen.queryByText(/群共享记忆/)).toBeNull();
+  });
   it('deletes one memory with the turn it belongs to and refetches', async () => {
     const { sessionMemory } = mount(async () => ({ turns: [turn] }));
     const forget = vi.spyOn(api, 'forgetSessionMemory').mockResolvedValue({ removed: { id: 'mem_00000003' } });

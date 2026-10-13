@@ -12,7 +12,7 @@ import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import type { LarkTeamContextReader } from './team-context.js';
 import { parseLarkMessageContent } from './message-content.js';
 import { escapeCardInline } from './card-elements.js';
-import { larkMemoryToolsPrompt } from './memory.js';
+import { larkMemoryToolsPrompt, type LarkGroupMemoryScope } from './memory.js';
 import { stableMemoryCommand } from './memory-view.js';
 import { larkMemoryEnabled, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import {
@@ -576,7 +576,7 @@ export class LarkAgentToolsService {
    * 会话记忆工具的上下文：只要求 capability 仍指向一条存活的飞书会话、机器人仍存在。
    * 不经过群协作开关与 group_tools 策略——记忆读写的对象是本聊天自己的记忆，不是群消息。
    */
-  async memoryContext(token?: string): Promise<LarkAgentSessionBinding> {
+  async memoryContext(token?: string): Promise<LarkAgentSessionBinding & { groupMemoryScope?: LarkGroupMemoryScope }> {
     const binding = await this.capabilities.resolve(token);
     await this.options.authorizeTool?.(binding.sessionId, 'memory');
     const config = await readLarkConfig(this.configs, binding.appId);
@@ -586,7 +586,7 @@ export class LarkAgentToolsService {
     if (!larkMemoryEnabled(config)) {
       throw new AgentGroupToolError('MEMORY_DISABLED', '当前飞书机器人已关闭会话记忆。', 403);
     }
-    return binding;
+    return { ...binding, groupMemoryScope: config.groupMemoryScope };
   }
 
   async self(token?: string) {

@@ -2,6 +2,7 @@ import { collaborationParticipationModes, mentionPolicies, riskControlModes, val
 import { isAbsolute } from 'node:path';
 import { hostname, userInfo } from 'node:os';
 import { LarkServiceError } from './service.js';
+import { isLarkGroupMemoryScope, normalizeLarkGroupMemoryScope, type LarkGroupMemoryScope } from './memory.js';
 
 export const larkBotsConfigKey = 'lark.bots';
 export const larkCredentialsConfigKey = 'lark.credentials';
@@ -81,6 +82,8 @@ export interface StoredLarkConfig {
   memoryEnabled?: boolean;
   /** 后台自动提取与整理开关，默认开启；false 时只有 /memory consolidate 能手动触发。 */
   memoryAutoExtract?: boolean;
+  /** 群聊记忆范围：'shared' 本机器人所在各群共用一个池（默认，历史行为）；'per-group' 每个群各自一个池。切换不迁移数据。 */
+  groupMemoryScope?: LarkGroupMemoryScope;
   /** 跑提取与整理的 Agent；缺省沿用 defaultAgentId。 */
   memoryAgentId?: string;
   /** 跑提取与整理的模型；缺省沿用 defaultModel。 */
@@ -202,6 +205,7 @@ export interface SaveLarkConfigInput {
   groupToolsAllowSend?: boolean;
   memoryEnabled?: boolean;
   memoryAutoExtract?: boolean;
+  groupMemoryScope?: LarkGroupMemoryScope;
   memoryAgentId?: string;
   memoryModel?: string;
   decisionAgentId?: string;
@@ -289,6 +293,7 @@ export interface PublicLarkConfig {
   groupToolsAllowSend: boolean;
   memoryEnabled: boolean;
   memoryAutoExtract: boolean;
+  groupMemoryScope: LarkGroupMemoryScope;
   memoryAgentId?: string;
   memoryModel?: string;
   decisionAgentId?: string;
@@ -585,6 +590,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     groupToolsAllowSend: parsed.groupToolsEnabled === true && parsed.groupToolsAllowSend === true,
     memoryEnabled: larkMemoryEnabled(parsed),
     memoryAutoExtract: parsed.memoryAutoExtract !== false,
+    groupMemoryScope: normalizeLarkGroupMemoryScope(parsed.groupMemoryScope),
     ...(parsed.memoryAgentId?.trim() ? { memoryAgentId: parsed.memoryAgentId.trim() } : {}),
     ...(parsed.memoryModel?.trim() ? { memoryModel: parsed.memoryModel.trim() } : {}),
     ...(parsed.decisionAgentId?.trim() ? { decisionAgentId: parsed.decisionAgentId.trim() } : {}),
@@ -693,6 +699,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   groupToolsAllowSend: config.groupToolsAllowSend,
   memoryEnabled: larkMemoryEnabled(config),
   memoryAutoExtract: config.memoryAutoExtract !== false,
+  groupMemoryScope: normalizeLarkGroupMemoryScope(config.groupMemoryScope),
   ...(config.memoryAgentId ? { memoryAgentId: config.memoryAgentId } : {}),
   ...(config.memoryModel ? { memoryModel: config.memoryModel } : {}),
   ...(config.decisionAgentId ? { decisionAgentId: config.decisionAgentId } : {}),
@@ -781,6 +788,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const groupToolsAllowSend = groupToolsEnabled && (input.groupToolsAllowSend ?? current?.groupToolsAllowSend ?? false);
   const memoryEnabled = input.memoryEnabled ?? current?.memoryEnabled ?? (input.defaultGroupParticipation === 'selective' || input.defaultGroupParticipation === 'eager');
   const memoryAutoExtract = input.memoryAutoExtract ?? current?.memoryAutoExtract ?? true;
+  const groupMemoryScope = isLarkGroupMemoryScope(input.groupMemoryScope) ? input.groupMemoryScope : normalizeLarkGroupMemoryScope(current?.groupMemoryScope);
   const memoryAgentId = input.memoryAgentId === undefined ? current?.memoryAgentId : input.memoryAgentId.trim() || undefined;
   const memoryModel = input.memoryModel === undefined ? current?.memoryModel : input.memoryModel.trim() || undefined;
   const decisionAgentId = input.decisionAgentId === undefined ? current?.decisionAgentId : input.decisionAgentId.trim() || undefined;
@@ -893,6 +901,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     groupToolsAllowSend,
     memoryEnabled,
     memoryAutoExtract,
+    groupMemoryScope,
     ...(memoryAgentId ? { memoryAgentId } : {}),
     ...(memoryModel ? { memoryModel } : {}),
     ...(decisionAgentId ? { decisionAgentId } : {}),

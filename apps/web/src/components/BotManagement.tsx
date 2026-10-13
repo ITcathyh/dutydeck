@@ -63,6 +63,7 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     groupToolsAllowSend: bot.groupToolsAllowSend ?? false,
     memoryEnabled: bot.memoryEnabled ?? (bot.defaultGroupParticipation === 'selective'),
     memoryAutoExtract: bot.memoryAutoExtract ?? true,
+    groupMemoryScope: bot.groupMemoryScope ?? 'shared',
     memoryAgentId: bot.memoryAgentId ?? '',
     memoryModel: bot.memoryModel ?? '',
     decisionAgentId: bot.decisionAgentId ?? '',
@@ -257,6 +258,7 @@ export function BotManagement({
       groupToolsAllowSend: draft.groupToolsAllowSend,
       memoryEnabled: draft.memoryEnabled,
       memoryAutoExtract: draft.memoryAutoExtract,
+      groupMemoryScope: draft.groupMemoryScope,
       memoryAgentId: draft.memoryAgentId,
       memoryModel: draft.memoryModel,
       decisionAgentId: draft.decisionAgentId,
@@ -840,6 +842,14 @@ export function BotManagement({
                         />
                         <span>自动提取与整理</span>
                       </label>
+                      <Field label="群记忆范围" hint={currentDraft.groupMemoryScope === 'per-group'
+                        ? '各群记忆互不可见：A 群里记下的内容不会出现在 B 群。切换不会迁移或删除已有记忆：原来各群共用的那份保留不动、暂时不再读取，切回「各群共用」后继续使用。'
+                        : '各群共用同一份记忆：A 群里记下的内容，B 群也能看到。选「每个群各自一份」后各群记忆互不可见；切换不会迁移或删除已有记忆。'}>
+                        <Select aria-label="群记忆范围" value={currentDraft.groupMemoryScope} onChange={e => updateCurrentDraft({ groupMemoryScope: e.target.value === 'per-group' ? 'per-group' : 'shared' })}>
+                          <option value="shared">各群共用一份（默认）</option>
+                          <option value="per-group">每个群各自一份（各群记忆互不可见）</option>
+                        </Select>
+                      </Field>
                       <div className="grid gap-4 sm:grid-cols-2">
                         <div>
                           <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-memory-agent">
@@ -875,7 +885,10 @@ export function BotManagement({
                       ) : memoryStatusQuery.data?.groups ? (
                         <>
                           <p>
-                            群共享记忆：{memoryStatusQuery.data.groups.liveEntries} 条 · {memoryStatusQuery.data.groups.topics} 个主题 · 待提取 {memoryStatusQuery.data.groups.pendingTurns} 轮
+                            当前范围：{memoryStatusQuery.data.groupMemoryScope === 'per-group' ? '每个群各自一份，各群记忆互不可见' : '各群共用一份'}
+                          </p>
+                          <p>
+                            {memoryStatusQuery.data.groupMemoryScope === 'per-group' ? '原各群共用的记忆（已停用，数据保留）' : '群共享记忆'}：{memoryStatusQuery.data.groups.liveEntries} 条 · {memoryStatusQuery.data.groups.topics} 个主题 · 待提取 {memoryStatusQuery.data.groups.pendingTurns} 轮
                           </p>
                           <p>
                             上次提取 {memoryStatusQuery.data.groups.lastExtractionAt ? formatMemoryTime(memoryStatusQuery.data.groups.lastExtractionAt) : '尚未提取'} · 上次整理 {memoryStatusQuery.data.groups.lastConsolidationAt ? formatMemoryTime(memoryStatusQuery.data.groups.lastConsolidationAt) : '尚未整理'}
@@ -902,13 +915,13 @@ export function BotManagement({
                             )}
                           </p>
                           <p className="pt-1 text-meta text-subtle">
-                            私聊的记忆各自独立，在对应私聊里发 /memory 查看。
+                            {memoryStatusQuery.data.groupMemoryScope === 'per-group' ? '各群和私聊的记忆各自独立，在对应的群或私聊里发 /memory 查看。' : '私聊的记忆各自独立，在对应私聊里发 /memory 查看。'}
                           </p>
                         </>
                       ) : null}
                     </div>
                   )}
-                  <p className="text-caption text-subtle">各群共享同一份记忆，私聊各自独立；仅作为参考内容注入，不授予操作权限。</p>
+                  <p className="text-caption text-subtle">{currentDraft.groupMemoryScope === 'per-group' ? '各群记忆互不可见，私聊各自独立' : '各群共享同一份记忆，私聊各自独立'}；仅作为参考内容注入，不授予操作权限。</p>
                 </div>
               </Card>
 
