@@ -95,6 +95,42 @@ describe('claude pricing', () => {
     expect(measured).toMatchObject({ costEstimated: true, dataStatus: 'estimated', pricingSource: 'builtin_model', pricingMatch: 'claude-sonnet-5-5' });
     expect(measured.costUsd).toBeCloseTo((1000 * 2 + 9000 * 0.1 + 2000 * 2.5 + 500 * 10) / 1_000_000);
   });
+
+  describe('a turn with sub-agents on other models', () => {
+    const total = { inputTokens: 1500, cachedReadTokens: 9000, cachedWriteTokens: 2000, outputTokens: 600 };
+    const split = (haiku: string) => [
+      { model: 'claude-sonnet-5-5', breakdown: { inputTokens: 1000, cachedReadTokens: 9000, cachedWriteTokens: 2000, outputTokens: 500 } },
+      { model: haiku, breakdown: { inputTokens: 500, outputTokens: 100 } },
+    ];
+    const sonnet = (1000 * 2 + 9000 * 0.1 + 2000 * 2.5 + 500 * 10) / 1_000_000;
+
+    it('prices every model at its own rate and sums them', () => {
+      const measured = measureUsage({ reading: { usageRef: 'claude:msg_9', model: 'claude-haiku-4-5 + claude-sonnet-5-5', breakdown: total, byModel: split('claude-haiku-4-5') }, freshTokens: true, model: 'claude-haiku-4-5 + claude-sonnet-5-5', pricing: defaultUsagePricing });
+      expect(measured).toMatchObject({ costEstimated: true, dataStatus: 'estimated', inputTokens: 1500, outputTokens: 600, cacheReadTokens: 9000, cacheWriteTokens: 2000, pricingMatch: 'claude-sonnet-5-5 + claude-haiku-4-5' });
+      expect(measured.costUsd).toBeCloseTo(sonnet + (500 * 1 + 100 * 5) / 1_000_000);
+    });
+
+    it('is unpriced as a whole when one of the models has no rate', () => {
+      const measured = measureUsage({ reading: { usageRef: 'claude:msg_9', breakdown: total, byModel: split('claude-haiku-9') }, freshTokens: true, model: 'x', pricing: defaultUsagePricing });
+      expect(measured).toMatchObject({ dataStatus: 'unpriced', costEstimated: false, unpricedReason: 'unknown_model', inputTokens: 1500 });
+      expect(measured.costUsd).toBeUndefined();
+    });
+
+    it('uses the task model for a group that names none, and ignores the split once the tokens were already counted', () => {
+      const unnamed = split('claude-haiku-4-5').map((group, index) => index ? { breakdown: group.breakdown } : group);
+      const measured = measureUsage({ reading: { usageRef: 'claude:msg_9', breakdown: total, byModel: unnamed }, freshTokens: true, model: 'claude-haiku-4-5', pricing: defaultUsagePricing });
+      expect(measured.costUsd).toBeCloseTo(sonnet + (500 * 1 + 100 * 5) / 1_000_000);
+      expect(measureUsage({ reading: { usageRef: 'claude:msg_9', breakdown: total, byModel: unnamed }, freshTokens: false, model: 'claude-haiku-4-5', pricing: defaultUsagePricing }))
+        .toEqual({ costEstimated: false, dataStatus: 'unavailable', pricingSource: 'none' });
+    });
+  });
+
+  it('keeps the tokens but leaves the cost unknown when the reading is partial', () => {
+    const reading = { usageRef: 'claude:msg_1', breakdown: { inputTokens: 1000, outputTokens: 500 }, partial: true };
+    const measured = measureUsage({ reading, freshTokens: true, model: 'claude-sonnet-5-5', pricing: defaultUsagePricing });
+    expect(measured).toMatchObject({ dataStatus: 'unpriced', costEstimated: false, unpricedReason: 'usage_incomplete', inputTokens: 1000, outputTokens: 500, pricingMatch: 'claude-sonnet-5-5' });
+    expect(measured.costUsd).toBeUndefined();
+  });
 });
 
 describe('usage classification', () => {

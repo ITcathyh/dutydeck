@@ -31,7 +31,7 @@ export interface UsageLedgerEntry {
   pricingSource?: 'reported' | 'builtin_model' | 'custom_model' | 'custom_default' | 'unmatched' | 'none' | 'legacy_unknown';
   pricingVersion?: string;
   pricingMatch?: string;
-  unpricedReason?: 'unknown_model' | 'cache_write_rate_missing' | 'legacy_cache_write_rate_unknown';
+  unpricedReason?: 'unknown_model' | 'cache_write_rate_missing' | 'legacy_cache_write_rate_unknown' | 'usage_incomplete';
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
