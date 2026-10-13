@@ -83,7 +83,7 @@ export interface BuildAppOptions {
   workItemTools?: WorkItemToolsOptions;
   memoryTools?: LarkMemoryToolsOptions;
   automation?: SessionAutomationRouteOptions;
-  /** CI webhook 入口（/api/hooks/*）；未配置 webhook 密钥时不注册。 */
+  /** CI webhook 入口 `POST /api/hooks/<provider>`；没有配置 webhook 的 CI 插件时一律 404。 */
   ciHooks?: CiHookRouteOptions;
   /** 插件命令列表与触发器入口（/api/plugins/*）；没有启用的插件时不注册。 */
   plugins?: PluginRouteOptions;

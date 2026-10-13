@@ -1,6 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { pluginHookEvents, type AgentConfig, type CiProvider, type PluginApi, type PluginHookEvent, type PluginTrigger } from '@dutydeck/shared';
+import { CiProviderRegistry } from '../ci-providers.js';
 import { LocalFilePluginSecretResolver } from '@dutydeck/secret-provider';
 import { PluginCommandRegistry } from './commands.js';
 import { inProcessHookTimeout, PluginHookBus, withTimeout, type HookRegistration } from './hooks.js';
@@ -18,22 +19,6 @@ export function resolveTriggerTarget(target: PluginTrigger['target'], config: Re
   const fill = (value: string) => value.replace(configPlaceholder, (_match, key: string) => { const found = config[key]; if (found === undefined || found === '') missing = true; return found ?? ''; });
   const resolved = { ...target, botAppId: fill(target.botAppId), chatId: fill(target.chatId) };
   return missing ? undefined : resolved;
-}
-
-export class CiProviderRegistry {
-  private readonly providers = new Map<string, { plugin: string; provider: CiProvider }>();
-  register(plugin: string, provider: CiProvider) {
-    if (!provider?.id || typeof provider.matchRepository !== 'function') throw new Error('CI 提供方缺少 id 或 matchRepository');
-    const existing = this.providers.get(provider.id);
-    if (existing) throw new Error(`CI 提供方 ${provider.id} 已由插件 ${existing.plugin} 注册`);
-    this.providers.set(provider.id, { plugin, provider });
-  }
-  get(id: string): CiProvider | undefined { return this.providers.get(id)?.provider; }
-  list(): Array<{ plugin: string; provider: CiProvider }> { return [...this.providers.values()]; }
-  /** 第一个认领这个远端地址的提供方。 */
-  match(remoteUrl: string): CiProvider | undefined {
-    return this.list().find(({ provider }) => { try { return provider.matchRepository(remoteUrl); } catch { return false; } })?.provider;
-  }
 }
 
 export interface PluginHostOptions {

@@ -37,11 +37,16 @@ import {
   type SessionScheduleOccurrence,
   type SessionScheduleOccurrenceV2,
   type SubscribeCiInput,
-  type UpdateSessionScheduleInput
+  type UpdateSessionScheduleInput,
+  LEGACY_GITHUB_PROVIDER_ID,
+  type CiProvider,
+  type CiRepository,
+  type CiRun,
+  type PublicCiProvider
 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
-import { GithubActionsClient, resolveGithubHead, type GithubWorkflowRun } from './github-actions.js';
-import type { CodebaseCiService } from './codebase-ci.js';
+import { CiProviderRegistry, ciProviderLabel, resolveCiHead, type CiHead } from './ci-providers.js';
+import type { CiWebhookService } from './ci-webhook.js';
 import { readAttemptResult } from './task-results.js';
 import { z } from 'zod';
 
@@ -54,7 +59,7 @@ const CLAIM_TTL_MS = 30_000;
 const MAX_DELIVERIES = 4;
 const DEFAULT_POLL_MS = 60_000;
 const terminalTaskStatuses = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
-const failureConclusions = new Set(['failure', 'timed_out', 'action_required', 'startup_failure']);
+const runStatuses = new Set(['queued', 'running', 'completed']);
 /** 未决/阻塞来源持续挡下一次触发；其余 runStatus 为终态。 */
 const openRunStatuses = new Set(['pending', 'accepted', 'blocked']);
 /** CI 定义本身没有代际字段；binding 中的 generation 仅用于严格记录结构，取固定值。 */
@@ -84,13 +89,12 @@ export interface SessionAutomationServiceOptions {
   prepareDelivery?: (sessionId: string, automationId: string) => Promise<void>;
   deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void>;
   onScheduleDisabled?: (schedule: SessionSchedule, reason: string) => Promise<void>;
-  githubToken?: string;
-  githubFetch?: typeof fetch;
-  /** Codebase 流水线 webhook 续作；未配置 webhook 密钥时不注入。 */
-  codebase?: CodebaseCiService;
+  /** 已加载插件注册的 CI 提供方；没有 CI 插件时为空，CI 等待与「出现新的失败构建」不可用。 */
+  ciProviders?: CiProviderRegistry;
+  /** webhook 驱动的 CI 续作与修复；没有配置 webhook 的提供方时不注入。 */
+  ciWebhook?: CiWebhookService;
   clock?: () => Date;
   pollIntervalMs?: number;
-  requestTimeoutMs?: number;
 }
 
 function errorMessage(error: unknown): string {
@@ -208,7 +212,7 @@ function publicSubscription(value: CiSubscription): PublicCiSubscription {
     admission: _admission,
     ...record
   } = migrated;
-  return record;
+  return { ...record, provider: record.provider ?? LEGACY_GITHUB_PROVIDER_ID };
 }
 
 /** 严格 V1 reader：V1 记录只在原 CAS 写入时迁移为 V2，读取不破坏原始字段。 */
@@ -285,10 +289,29 @@ function nextDue(schedule: Pick<SessionSchedule, 'id' | 'name' | 'trigger' | 'ti
   return previewNextSchedule(asPreviewDefinition(schedule), after)?.scheduledForUtc;
 }
 
-function formatCiPrompt(basePrompt: string, repository: string, headSha: string, runs: GithubWorkflowRun[]): string {
-  const lines = runs.map(run => `- ${run.name.slice(0, 80)}: ${(run.conclusion ?? 'completed').slice(0, 40)} (run ${run.id}, ${run.htmlUrl.slice(0, 400)})`);
-  return `${basePrompt}\n\nGitHub Actions completed for ${repository} at ${headSha}:\n${lines.join('\n')}`;
+function formatCiPrompt(basePrompt: string, providerName: string, repository: string, headSha: string, runs: CiRun[]): string {
+  const lines = runs.map(run => `- ${run.name.slice(0, 80)}: ${(run.conclusion ?? run.result ?? 'completed').slice(0, 40)} (run ${run.id}, ${run.url.slice(0, 400)})`);
+  return `${basePrompt}\n\n${providerName} completed for ${repository} at ${headSha}:\n${lines.join('\n')}`;
 }
+
+/** 提供方返回的构建进提示词之前做一次形状检查：只留这个提交的、字段齐全的构建，同一 id 取最新一次重跑。 */
+function normalizeRuns(runs: unknown, headSha: string, completedOnly = false): CiRun[] {
+  if (!Array.isArray(runs)) throw new RuntimeError('CI_PROVIDER_RESPONSE_INVALID', 'CI 提供方返回的构建列表格式不正确', 502);
+  const latest = new Map<number, CiRun>();
+  for (const value of runs.slice(0, 100) as Array<Partial<CiRun>>) {
+    if (!value || !Number.isSafeInteger(value.id) || (value.id as number) < 0 || typeof value.name !== 'string' || typeof value.url !== 'string') continue;
+    if (typeof value.headSha !== 'string' || value.headSha.toLowerCase() !== headSha || !runStatuses.has(String(value.status))) continue;
+    if (completedOnly && value.status !== 'completed') continue;
+    const attempt = Number.isSafeInteger(value.attempt) && (value.attempt as number) > 0 ? value.attempt as number : 1;
+    const run: CiRun = { id: value.id as number, name: value.name, attempt, headSha, status: value.status as CiRun['status'], url: value.url,
+      ...(value.result ? { result: value.result } : {}), ...(typeof value.conclusion === 'string' ? { conclusion: value.conclusion } : {}) };
+    if (!latest.has(run.id) || latest.get(run.id)!.attempt < run.attempt) latest.set(run.id, run);
+  }
+  return [...latest.values()].sort((left, right) => left.id - right.id);
+}
+
+const sameHead = (resolved: CiHead, provider: string, repository: CiRepository, headSha: string) =>
+  resolved.provider.id === provider && resolved.repository.slug.toLowerCase() === repository.slug.toLowerCase() && resolved.headSha === headSha;
 
 interface ReconcileOutcome {
   status: 'pending' | 'cancelled' | 'settled' | 'blocked';
@@ -300,7 +323,7 @@ interface ReconcileOutcome {
 export class SessionAutomationService {
   private readonly ownerId = `automation_${randomUUID()}`;
   private readonly clock: () => Date;
-  private readonly github: GithubActionsClient;
+  private readonly providers: CiProviderRegistry;
   private readonly pollIntervalMs: number;
   private closed = false;
   private currentTick?: Promise<void>;
@@ -310,12 +333,30 @@ export class SessionAutomationService {
   constructor(private readonly options: SessionAutomationServiceOptions) {
     this.clock = options.clock ?? (() => new Date());
     this.pollIntervalMs = Math.max(60_000, Math.min(60 * 60_000, options.pollIntervalMs ?? DEFAULT_POLL_MS));
-    this.github = new GithubActionsClient({ token: options.githubToken, fetch: options.githubFetch, requestTimeoutMs: options.requestTimeoutMs });
+    this.providers = options.ciProviders ?? new CiProviderRegistry();
   }
 
-  /** GitHub 路径本身不强制令牌；这里只回答部署者有没有配置 GitHub 提供方，供 /ci 判断「未配置」。 */
-  get githubConfigured() { return Boolean(this.options.githubToken); }
-  get codebase() { return this.options.codebase; }
+  /** 至少装了一个 CI 插件；/ci 据此判断「未安装 CI 插件」。 */
+  get ciConfigured() { return this.providers.size > 0; }
+  get ciWebhook() { return this.options.ciWebhook; }
+  listCiProviders(): PublicCiProvider[] { return this.providers.describe(); }
+
+  private pollingProvider(id: string): CiProvider & Required<Pick<CiProvider, 'getPipelineStatus'>> {
+    const provider = this.providers.get(id);
+    if (!provider) throw new RuntimeError('CI_PROVIDER_UNAVAILABLE', `CI 插件提供方 ${id} 没有加载`, 409);
+    if (typeof provider.getPipelineStatus !== 'function') throw new RuntimeError('CI_PROVIDER_POLLING_UNSUPPORTED', `${provider.displayName} 不支持查询构建状态`, 400);
+    return provider as CiProvider & Required<Pick<CiProvider, 'getPipelineStatus'>>;
+  }
+
+  private async listRuns(providerId: string, repository: CiRepository, headSha: string, workflow?: string, completedOnly = false): Promise<CiRun[]> {
+    const status = await this.pollingProvider(providerId).getPipelineStatus({ repository, sha: headSha, ...(workflow ? { workflow } : {}), ...(completedOnly ? { completedOnly } : {}) });
+    return normalizeRuns(status?.runs, headSha, completedOnly);
+  }
+
+  /** 只在能查询构建状态的提供方里按 origin 匹配。 */
+  private ciHead(cwd: string, providerId?: string) {
+    return resolveCiHead(cwd, this.providers, providerId, provider => typeof provider.getPipelineStatus === 'function');
+  }
   /** 群委托的确认卡与产出卡按钮处理；群协作集成装配好后挂上，飞书卡片回调经此进入。 */
   mandateCards?: { callback(appId: string, value: Record<string, unknown>, operatorId: string | undefined, context: { messageId?: string; chatId?: string }): Promise<string> };
 
@@ -469,16 +510,17 @@ export class SessionAutomationService {
     };
   }
 
-  private async githubCondition(session: Session, input: { kind: 'github_new_failure'; workflow?: string }) {
-    const resolved = await resolveGithubHead(session.cwd);
-    const runs = await this.github.listCompletedRuns(resolved.repository, resolved.headSha, input.workflow);
+  private async ciCondition(session: Session, input: { kind: 'ci_new_failure'; provider?: string; workflow?: string }) {
+    const resolved = await this.ciHead(session.cwd, input.provider);
+    const runs = await this.listRuns(resolved.provider.id, resolved.repository, resolved.headSha, input.workflow, true);
     return {
-      kind: 'github_new_failure' as const,
+      kind: 'ci_new_failure' as const,
+      provider: resolved.provider.id,
       ...(input.workflow ? { workflow: input.workflow } : {}),
       repository: resolved.repository,
       headSha: resolved.headSha,
       observedRunIds: runs.map(run => run.id),
-      observedRunAttempts: runs.map(run => ({ id: run.id, attempt: run.runAttempt }))
+      observedRunAttempts: runs.map(run => ({ id: run.id, attempt: run.attempt }))
     };
   }
 
@@ -507,7 +549,7 @@ export class SessionAutomationService {
     const existing = receipt ? await this.getRecord(scheduleKey(id), value => sessionScheduleSchema.parse(value)) : undefined;
     if (existing) return publicSchedule(existing.value);
     const now = iso(this.clock());
-    const condition = input.condition.kind === 'always' ? input.condition : await this.githubCondition(session, input.condition);
+    const condition = input.condition.kind === 'always' ? input.condition : await this.ciCondition(session, input.condition);
     await receipt?.prepareDelivery?.(id);
     await this.options.prepareDelivery?.(sessionId, id);
     const schedule = sessionScheduleSchema.parse({
@@ -569,7 +611,7 @@ export class SessionAutomationService {
     if (stored.value.revision !== input.expectedRevision) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
     if (input.enabled === true && !isSessionRunnable(session)) throw new RuntimeError('SESSION_NOT_ACTIVE', 'Session is not active', 409);
     let condition = stored.value.condition;
-    if (input.condition) condition = input.condition.kind === 'always' ? input.condition : await this.githubCondition(session, input.condition);
+    if (input.condition) condition = input.condition.kind === 'always' ? input.condition : await this.ciCondition(session, input.condition);
     const now = this.clock();
     const candidate = {
       ...stored.value,
@@ -598,7 +640,7 @@ export class SessionAutomationService {
     const session = await this.requireSession(sessionId);
     if (!isSessionRunnable(session)) throw new RuntimeError('SESSION_NOT_ACTIVE', 'Session is not active', 409);
     const input = subscribeCiInputSchema.parse(rawInput);
-    const resolved = await resolveGithubHead(session.cwd);
+    const resolved = await this.ciHead(session.cwd, input.provider);
     const now = this.clock();
     const id = `ci_${randomUUID()}`;
     await this.options.prepareDelivery?.(sessionId, id);
@@ -608,10 +650,11 @@ export class SessionAutomationService {
       revision: 1,
       sessionId,
       ...(actorId ? { actorId } : {}),
+      provider: resolved.provider.id,
       repository: resolved.repository,
       headSha: resolved.headSha,
       ...(input.workflow ? { workflow: input.workflow } : {}),
-      prompt: input.prompt ?? 'Review the completed GitHub Actions result and continue the task.',
+      prompt: input.prompt ?? `Review the completed ${resolved.provider.displayName} result and continue the task.`,
       status: 'waiting',
       expiresAt: plus(now, input.ttlSeconds * 1_000),
       nextPollAt: iso(now),
@@ -722,16 +765,17 @@ export class SessionAutomationService {
         throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Scheduled task authorization was revoked', 403);
       }
       // 首次尚未提交时继续真正 HEAD 核验，删掉以 !accepted 为条件的 HEAD 绕过。
-      if (!started && schedule.value.condition.kind === 'github_new_failure') {
-        let resolved: Awaited<ReturnType<typeof resolveGithubHead>>;
-        try { resolved = await resolveGithubHead(session!.cwd); }
+      if (!started && schedule.value.condition.kind === 'ci_new_failure') {
+        const condition = schedule.value.condition;
+        let resolved: CiHead;
+        try { resolved = await this.ciHead(session!.cwd, condition.provider); }
         catch (error) {
           await this.finishOccurrence(occurrenceStored, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: errorMessage(error) });
-          throw new RuntimeError('SESSION_AUTOMATION_TASK_STALE_HEAD', 'Scheduled task GitHub HEAD is unavailable before execution', 409);
+          throw new RuntimeError('SESSION_AUTOMATION_TASK_STALE_HEAD', 'Scheduled task CI HEAD is unavailable before execution', 409);
         }
-        if (resolved.repository.slug.toLowerCase() !== schedule.value.condition.repository.slug.toLowerCase() || resolved.headSha !== schedule.value.condition.headSha) {
-          await this.finishOccurrence(occurrenceStored, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Scheduled task GitHub HEAD changed before execution' });
-          throw new RuntimeError('SESSION_AUTOMATION_TASK_STALE_HEAD', 'Scheduled task GitHub HEAD changed before execution', 409);
+        if (!sameHead(resolved, condition.provider, condition.repository, condition.headSha)) {
+          await this.finishOccurrence(occurrenceStored, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Scheduled task CI HEAD changed before execution' });
+          throw new RuntimeError('SESSION_AUTOMATION_TASK_STALE_HEAD', 'Scheduled task CI HEAD changed before execution', 409);
         }
       }
       if (phase === 'submit' && !started) {
@@ -805,15 +849,16 @@ export class SessionAutomationService {
     }
     // 首次尚未提交时继续真正 HEAD 核验，删掉以 !accepted 为条件的 HEAD 绕过。
     if (!started) {
-      let resolved: Awaited<ReturnType<typeof resolveGithubHead>>;
-      try { resolved = await resolveGithubHead(session!.cwd); }
+      const providerId = subscription.provider ?? LEGACY_GITHUB_PROVIDER_ID;
+      let resolved: CiHead;
+      try { resolved = await this.ciHead(session!.cwd, providerId); }
       catch (error) {
         await this.finishCi(subscriptionStored, 'stale_head', errorMessage(error));
-        throw new RuntimeError('SESSION_AUTOMATION_TASK_STALE_HEAD', 'CI continuation GitHub HEAD is unavailable before execution', 409);
+        throw new RuntimeError('SESSION_AUTOMATION_TASK_STALE_HEAD', 'CI continuation HEAD is unavailable before execution', 409);
       }
-      if (resolved.repository.slug.toLowerCase() !== subscription.repository.slug.toLowerCase() || resolved.headSha !== subscription.headSha) {
-        await this.finishCi(subscriptionStored, 'stale_head', 'CI continuation GitHub HEAD changed before execution');
-        throw new RuntimeError('SESSION_AUTOMATION_TASK_STALE_HEAD', 'CI continuation GitHub HEAD changed before execution', 409);
+      if (!sameHead(resolved, providerId, subscription.repository, subscription.headSha)) {
+        await this.finishCi(subscriptionStored, 'stale_head', 'CI continuation HEAD changed before execution');
+        throw new RuntimeError('SESSION_AUTOMATION_TASK_STALE_HEAD', 'CI continuation HEAD changed before execution', 409);
       }
     }
     if (phase === 'submit' && !started) {
@@ -947,23 +992,23 @@ export class SessionAutomationService {
     let working: { raw: string; value: SessionScheduleOccurrenceV2 } = { raw: stored.raw, value: occurrence };
     let conditionStatus: SessionScheduleOccurrenceV2['conditionStatus'] = occurrence.conditionStatus === 'pending' ? 'passed' : occurrence.conditionStatus;
     let conditionError = occurrence.error;
-    if (occurrence.conditionStatus === 'pending' && schedule.condition.kind === 'github_new_failure') {
+    if (occurrence.conditionStatus === 'pending' && schedule.condition.kind === 'ci_new_failure') {
       let observed: number[] | undefined;
       let observedAttempts: SessionScheduleOccurrenceV2['conditionObservedRunAttempts'];
       try {
         const condition = schedule.condition;
-        const resolved = await resolveGithubHead(session!.cwd);
-        if (resolved.repository.slug.toLowerCase() !== condition.repository.slug.toLowerCase() || resolved.headSha !== condition.headSha) {
-          throw new Error('GitHub repository or HEAD changed after the schedule generation was created');
+        const resolved = await this.ciHead(session!.cwd, condition.provider);
+        if (!sameHead(resolved, condition.provider, condition.repository, condition.headSha)) {
+          throw new Error('CI repository or HEAD changed after the schedule generation was created');
         }
-        const runs = await this.github.listCompletedRuns(condition.repository, condition.headSha, condition.workflow);
+        const runs = await this.listRuns(condition.provider, condition.repository, condition.headSha, condition.workflow, true);
         const seen = new Set(condition.observedRunIds);
         const attempts = new Map(condition.observedRunAttempts?.map(run => [run.id, run.attempt]));
         // 旧记录只有 ID：首轮为这些 ID 补齐当前 attempt，不重放历史失败。
-        const newRuns = runs.filter(run => !seen.has(run.id) || attempts.has(run.id) && run.runAttempt > attempts.get(run.id)!);
-        conditionStatus = newRuns.some(run => run.conclusion && failureConclusions.has(run.conclusion)) ? 'passed' : 'skipped';
+        const newRuns = runs.filter(run => !seen.has(run.id) || attempts.has(run.id) && run.attempt > attempts.get(run.id)!);
+        conditionStatus = newRuns.some(run => run.result === 'failed') ? 'passed' : 'skipped';
         observed = runs.map(run => run.id);
-        observedAttempts = runs.map(run => ({ id: run.id, attempt: run.runAttempt }));
+        observedAttempts = runs.map(run => ({ id: run.id, attempt: run.attempt }));
       } catch (error) {
         conditionStatus = 'error';
         conditionError = errorMessage(error);
@@ -988,7 +1033,7 @@ export class SessionAutomationService {
       working = { raw: JSON.stringify(evaluated), value: evaluated };
     }
     const persistedCondition = schedule.condition;
-    if (persistedCondition.kind === 'github_new_failure' && working.value.conditionObservedRunIds) {
+    if (persistedCondition.kind === 'ci_new_failure' && working.value.conditionObservedRunIds) {
       const observedRunIds = [...new Set([...persistedCondition.observedRunIds, ...working.value.conditionObservedRunIds])].sort((a, b) => a - b).slice(-100);
       const attempts = new Map(persistedCondition.observedRunAttempts?.map(run => [run.id, run.attempt]));
       for (const run of working.value.conditionObservedRunAttempts ?? []) attempts.set(run.id, Math.max(attempts.get(run.id) ?? 0, run.attempt));
@@ -1177,8 +1222,9 @@ export class SessionAutomationService {
 
   private async pollCi(stored: { raw: string; value: CiSubscription }) {
     const current0 = migrateCi(stored.value);
-    let runs: GithubWorkflowRun[];
-    try { runs = await this.github.listRuns(current0.repository, current0.headSha, current0.workflow); }
+    const providerId = current0.provider ?? LEGACY_GITHUB_PROVIDER_ID;
+    let runs: CiRun[];
+    try { runs = await this.listRuns(providerId, current0.repository, current0.headSha, current0.workflow); }
     catch (error) {
       await this.returnCiToWaiting(stored, errorMessage(error));
       return;
@@ -1196,17 +1242,17 @@ export class SessionAutomationService {
       await this.finishCi(current, 'session_inactive', 'Session is no longer active');
       return;
     }
-    let resolved: Awaited<ReturnType<typeof resolveGithubHead>>;
-    try { resolved = await resolveGithubHead(session!.cwd); }
+    let resolved: CiHead;
+    try { resolved = await this.ciHead(session!.cwd, providerId); }
     catch (error) { await this.finishCi(current, 'stale_head', errorMessage(error)); return; }
-    if (resolved.repository.slug.toLowerCase() !== currentValue.repository.slug.toLowerCase() || resolved.headSha !== currentValue.headSha) {
+    if (!sameHead(resolved, providerId, currentValue.repository, currentValue.headSha)) {
       await this.finishCi(current, 'stale_head', 'Session repository or HEAD changed while waiting for CI');
       return;
     }
     try { await this.requireAuthorized(currentValue.sessionId, currentValue.actorId); }
     catch (error) { await this.finishCi(current, 'revoked', errorMessage(error)); return; }
-    // 首次 dispatchPrompt 在收到完成 run 列表后冻结；恢复使用原文本，不再拼接新 GitHub 返回。
-    const dispatchPrompt = formatCiPrompt(currentValue.prompt, currentValue.repository.slug, currentValue.headSha, runs);
+    // 首次 dispatchPrompt 在收到完成 run 列表后冻结；恢复使用原文本，不再拼接提供方新的返回。
+    const dispatchPrompt = formatCiPrompt(currentValue.prompt, ciProviderLabel(this.providers, providerId), currentValue.repository.slug, currentValue.headSha, runs);
     const dispatching = ciSubscriptionV2Schema.parse({
       ...currentValue,
       schemaVersion: 2,

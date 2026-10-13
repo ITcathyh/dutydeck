@@ -16,6 +16,7 @@ import {
 } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ciProviders, ciStatus, TEST_CI_REMOTE, type StatusMock } from './ci-provider.test-helpers.js';
 import { SessionAutomationService, type SessionAutomationRuntime } from './session-automation.js';
 
 const run = promisify(execFile);
@@ -28,23 +29,8 @@ async function gitRepository() {
   await run('git', ['-C', cwd, 'config', 'user.email', 'test@example.com']);
   await run('git', ['-C', cwd, 'config', 'user.name', 'Test']);
   await run('git', ['-C', cwd, 'commit', '--allow-empty', '-qm', 'initial']);
-  await run('git', ['-C', cwd, 'remote', 'add', 'origin', 'git@github.com:octo/repo.git']);
+  await run('git', ['-C', cwd, 'remote', 'add', 'origin', TEST_CI_REMOTE]);
   return cwd;
-}
-
-function githubResponse(headSha: string, runs: Array<{ id: number; conclusion?: string; name?: string; status?: string }> = []) {
-  return new Response(JSON.stringify({ total_count: runs.length, workflow_runs: runs.map(item => ({
-    id: item.id,
-    name: item.name ?? 'CI',
-    workflow_id: 9,
-    head_sha: headSha,
-    status: item.status ?? 'completed',
-    conclusion: item.conclusion ?? null,
-    run_attempt: 1,
-    html_url: `https://github.com/octo/repo/actions/runs/${item.id}`,
-    created_at: '2026-09-12T00:00:00Z',
-    updated_at: '2026-09-12T00:01:00Z'
-  })) }), { status: 200, headers: { 'content-type': 'application/json' } });
 }
 
 type Repos = ReturnType<typeof createRepositories>;
@@ -142,7 +128,7 @@ function ledgerRuntime(repos: Repos, harnessSession: HarnessSession): RecoveryRu
   return runtime;
 }
 
-async function fixture(options: { fetch?: typeof fetch; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string) => Promise<void> } = {}) {
+async function fixture(options: { status?: StatusMock; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string) => Promise<void> } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-automation-recovery-db-'));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const database = join(directory, 'dutydeck.db');
@@ -160,7 +146,7 @@ async function fixture(options: { fetch?: typeof fetch; deliver?: (sessionId: st
     repositories,
     runtime: mocked,
     authorize: async () => true,
-    githubFetch: options.fetch ?? (vi.fn(async () => githubResponse((await run('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout.trim())) as typeof fetch),
+    ciProviders: ciProviders(options.status ?? (vi.fn(async () => ciStatus((await run('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout.trim())) as StatusMock)),
     clock: () => new Date(now.value),
     deliver: options.deliver
   });
@@ -271,7 +257,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
 
   it('B1 CI: recovery dispatches the frozen ask envelope even though session defaults are now full-trust', async () => {
     let head = '';
-    const h = await fixture({ fetch: vi.fn(async () => githubResponse(head, [{ id: 12, conclusion: 'success' }])) as typeof fetch });
+    const h = await fixture({ status: vi.fn(async () => ciStatus(head, [{ id: 12, conclusion: 'success' }])) as StatusMock });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const sub = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     const entered = deferred();
@@ -291,7 +277,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
         repositories: h.repositories,
         runtime: { getSession: async (id: string) => h.repositories.sessions.get(id), dispatchRequest: original },
         authorize: async () => true,
-        githubFetch: vi.fn(async () => githubResponse(head, [{ id: 12, conclusion: 'success' }])) as typeof fetch,
+        ciProviders: ciProviders(vi.fn(async () => ciStatus(head, [{ id: 12, conclusion: 'success' }])) as StatusMock),
         clock: () => h.now.value
       });
       cleanups.push(() => restored.close());
@@ -417,7 +403,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
 
   it('B4 CI: a stale/unreadable HEAD before first submit rejects authorization', async () => {
     let head = '';
-    const h = await fixture({ fetch: vi.fn(async () => githubResponse(head, [{ id: 11, conclusion: 'success' }])) as typeof fetch });
+    const h = await fixture({ status: vi.fn(async () => ciStatus(head, [{ id: 11, conclusion: 'success' }])) as StatusMock });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     await h.service.tick();
@@ -431,7 +417,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
 
   it('B4 CI: a cancellation winning the taskStarted CAS rejects the submit authorization', async () => {
     let head = '';
-    const h = await fixture({ fetch: vi.fn(async () => githubResponse(head, [{ id: 19, conclusion: 'success' }])) as typeof fetch });
+    const h = await fixture({ status: vi.fn(async () => ciStatus(head, [{ id: 19, conclusion: 'success' }])) as StatusMock });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const sub = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     await h.service.tick();
@@ -528,7 +514,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
 
   it('dual-KV schedule: admission/binding cutpoint survives actual SQLite close/new connection and recovers same binding', async () => {
     let head = '';
-    const h = await fixture({ fetch: vi.fn(async () => githubResponse(head, [{ id: 66, conclusion: 'success' }])) as typeof fetch });
+    const h = await fixture({ status: vi.fn(async () => ciStatus(head, [{ id: 66, conclusion: 'success' }])) as StatusMock });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const s = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
     await h.service.updateSchedule(h.session.id, s.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
@@ -571,7 +557,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
       runtime: rt,
       authorize: async () => true,
       clock: () => new Date('2026-09-12T00:02:01Z'),
-      githubFetch: vi.fn(async () => { throw new Error('recovery must not reread material'); }) as typeof fetch
+      ciProviders: ciProviders(vi.fn(async () => { throw new Error('recovery must not reread material'); }) as StatusMock)
     });
     cleanups.push(() => service.close());
     await service.tick();
@@ -596,7 +582,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
 
   it('dual-KV CI: admission/binding cutpoint survives actual SQLite close/new connection and recovers same binding', async () => {
     let head = '';
-    const h = await fixture({ fetch: vi.fn(async () => githubResponse(head, [{ id: 67, conclusion: 'success' }])) as typeof fetch });
+    const h = await fixture({ status: vi.fn(async () => ciStatus(head, [{ id: 67, conclusion: 'success' }])) as StatusMock });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const sub = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     type CasStore = {
@@ -637,7 +623,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
       runtime: rt,
       authorize: async () => true,
       clock: () => new Date('2026-09-12T00:01:01Z'),
-      githubFetch: vi.fn(async () => { throw new Error('recovery must not reread material'); }) as typeof fetch
+      ciProviders: ciProviders(vi.fn(async () => { throw new Error('recovery must not reread material'); }) as StatusMock)
     });
     cleanups.push(() => service.close());
     await service.tick();
@@ -660,7 +646,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
 
   it('F1 CI: conflicting acceptance persists as blocked and next refresh never consumes wrong request', async () => {
     let head = '';
-    const h = await fixture({ fetch: vi.fn(async () => githubResponse(head, [{ id: 88, conclusion: 'success' }])) as typeof fetch });
+    const h = await fixture({ status: vi.fn(async () => ciStatus(head, [{ id: 88, conclusion: 'success' }])) as StatusMock });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const sub = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     const serviceOptions = h.service as unknown as { options: { runtime: SessionAutomationRuntime } };
@@ -708,7 +694,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
 
   it('F3 CI: original Attempt manual confirmation unblocks source with persisted blockReason and transitions to completed', async () => {
     let head = '';
-    const h = await fixture({ fetch: vi.fn(async () => githubResponse(head, [{ id: 99, conclusion: 'success' }])) as typeof fetch });
+    const h = await fixture({ status: vi.fn(async () => ciStatus(head, [{ id: 99, conclusion: 'success' }])) as StatusMock });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const sub = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     await h.service.tick();
@@ -800,7 +786,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
 
   it('closeout: a stale CI authorization tail never overwrites a newer public cancellation (single CAS, no retry)', async () => {
     let head = '';
-    const h = await fixture({ fetch: vi.fn(async () => githubResponse(head, [{ id: 101, conclusion: 'success' }])) as typeof fetch });
+    const h = await fixture({ status: vi.fn(async () => ciStatus(head, [{ id: 101, conclusion: 'success' }])) as StatusMock });
     head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
     const sub = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     const entered = deferred();

@@ -1,0 +1,10 @@
+{
+  "name": "github",
+  "version": "0.1.0",
+  "description": "GitHub Actions 构建状态与失败日志、Pull Request 创建与评论、GitHub webhook（X-Hub-Signature-256）。",
+  "providers": "index.mjs",
+  "userConfig": {
+    "token": { "description": "GitHub 访问令牌（读 Actions、读写 Pull Request）。公开仓库只等构建时可不填", "sensitive": true },
+    "webhook_secret": { "description": "GitHub webhook 的 Secret；填了才启用 POST /api/hooks/github 与 /ci fix", "sensitive": true }
+  }
+}

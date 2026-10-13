@@ -33,7 +33,8 @@ import { createWorkbenchFetch } from './workbench-fetch.js';
 import { authorizeWorkItemAgent, authorizeWorkItemInteraction, workItemRiskPolicy } from './work-item-policy.js';
 import { SessionAutomationService } from './session-automation.js';
 import { createAutomationIntegration } from './automation-integration.js';
-import { CodebaseCiService } from './codebase-ci.js';
+import { CiWebhookService } from './ci-webhook.js';
+import { CiProviderRegistry } from './ci-providers.js';
 import { prepareSkillPrompt } from './skill-delivery.js';
 import { readTokenEfficiencyPolicy } from './token-efficiency.js';
 import { assemblePrompt, promptDigest, promptTemplateVersion } from './prompt-context.js';
@@ -394,7 +395,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       : (session, request) => usageLedger.admit(session, request),
     recordUsage: (session, attempt, reading) => usageLedger.record(session, attempt, reading),
     observeTurn: createTurnDiffObserver(repos.config),
-    authorizeTask: async (session, task, phase) => { await collaboration?.background.authorizeTask(session, task); await automation.authorizeTask(task, phase); await codebaseCi?.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
+    authorizeTask: async (session, task, phase) => { await collaboration?.background.authorizeTask(session, task); await automation.authorizeTask(task, phase); await ciWebhook?.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
     authorizeControl: async (sessionId, actor, _action) => {
       if (await workItems.authorizeControl(sessionId, actor)) return;
       if (await collaboration?.background.authorizeControl(sessionId, actor)) return;
@@ -486,7 +487,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     insightService = undefined;
   }
   const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, client: config => createLarkCardService(env, workbenchHttp.fetch, config), log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
-  const codebaseWebhookSecret = env.DUTYDECK_CODEBASE_WEBHOOK_SECRET?.trim();
+  // CI 平台全部来自插件；没有 CI 插件时注册表为空，/ci 与 Web 提示「未安装 CI 插件」。
+  const ciProviders = pluginHost?.ciProviders ?? new CiProviderRegistry();
   // 插件 notify hook 拒绝时不发这条 CI 通知。
   const notifyCi: typeof automationIntegration.notify = pluginWiring?.hooks.has('notify')
     ? async (sessionId, sourceId, notice) => {
@@ -495,12 +497,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return automationIntegration.notify(sessionId, sourceId, notice);
     }
     : automationIntegration.notify;
-  const codebaseCi = codebaseWebhookSecret ? new CodebaseCiService({ repositories: repos, runtime, secret: codebaseWebhookSecret,
+  const ciWebhook = ciProviders.list().some(({ provider }) => provider.webhook) ? new CiWebhookService({ repositories: repos, runtime, providers: ciProviders,
     prepareDelivery: automationIntegration.prepareDelivery, notify: notifyCi, log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } }) : undefined;
-  const automation = new SessionAutomationService({ repositories: repos, runtime, ...automationIntegration, codebase: codebaseCi,
-    githubToken: env.DUTYDECK_GITHUB_TOKEN ?? env.GH_TOKEN ?? env.GITHUB_TOKEN });
+  const automation = new SessionAutomationService({ repositories: repos, runtime, ...automationIntegration, ciProviders, ...(ciWebhook ? { ciWebhook } : {}) });
   setupCleanup.push(() => automation.close());
-  if (codebaseCi) setupCleanup.push(() => codebaseCi.close());
+  if (ciWebhook) setupCleanup.push(() => ciWebhook.close());
   const authorizeWorkAgent = (sessionId: string, actorId: string, agentId: string) => authorizeWorkItemAgent(repos, groupManager, automationIntegration.authorize, sessionId, actorId, agentId);
   const workbench = new LarkWorkbench(repos, runtime, () => workItems, () => workInteractions, automationIntegration.authorize, { env, authorizeAgent: authorizeWorkAgent, log: { warn: (...args: any[]) => app?.log.warn(...args as [unknown, string]) } });
   setupCleanup.push(() => workbench.close());
@@ -573,7 +574,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         const results = await Promise.allSettled(operations.map(operation => Promise.resolve().then(operation)));
         errors.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason));
       };
-      await settle([() => workbench.close(), () => workbenchHttp.close(), () => workItems.close(), () => delegations.close(), () => automation.close(), () => codebaseCi?.close()]);
+      await settle([() => workbench.close(), () => workbenchHttp.close(), () => workItems.close(), () => delegations.close(), () => automation.close(), () => ciWebhook?.close()]);
       // Wake blocked asks before waiting for HTTP shutdown.
       await settle([() => relayBroker.close()]);
       await settle([() => collaboration?.close(), () => relayBroker.flush(), () => app?.close(), () => runtime.shutdown()]);
@@ -700,7 +701,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         const decision = await groupManager.authorizeSession(sessionId, action, true) ?? await foundationExecution.authorizeSessionId(sessionId, { boundary: 'session', action, request });
         return { ...decision, actorId: installationOwnerTaskActor };
       } },
-      ...(codebaseCi ? { ciHooks: { codebase: codebaseCi } } : {}),
+      ciHooks: { ...(ciWebhook ? { service: ciWebhook } : {}) },
       ...(pluginWiring ? { plugins: pluginWiring.routes } : {}),
       automation: { service: automation, authorize: async (request, sessionId, action) => {
         const principal = await resolveInstallationPrincipal(request);
@@ -720,7 +721,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     void delegations.start().catch(error => app?.log.warn({ error }, '分层协作规划恢复失败'));
     const tick = () => {
       void automation.tick().catch(error => app?.log.warn({ error }, '自动任务轮询失败'));
-      void codebaseCi?.tick().catch(error => app?.log.warn({ error }, 'Codebase CI 续作轮询失败'));
+      void ciWebhook?.tick().catch(error => app?.log.warn({ error }, 'CI webhook 续作轮询失败'));
     };
     automationTimer = setInterval(tick, 60_000);
     automationTimer.unref();

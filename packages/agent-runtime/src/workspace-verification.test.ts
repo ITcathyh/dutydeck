@@ -111,17 +111,17 @@ describe('managed Session workspaces', () => {
     const markerFile = join(temporary('dutydeck-hook-'), 'observed.txt');
     const hook = join(source, '.git', 'hooks', 'post-checkout');
     mkdirSync(dirname(hook), { recursive: true });
-    writeFileSync(hook, `#!/bin/sh\nprintf '%s' "\${DUTYDECK_GITHUB_TOKEN-unset}" > ${JSON.stringify(markerFile)}\n`);
+    writeFileSync(hook, `#!/bin/sh\nprintf '%s' "\${DUTYDECK_SERVICE_TOKEN-unset}" > ${JSON.stringify(markerFile)}\n`);
     chmodSync(hook, 0o755);
-    const previous = process.env.DUTYDECK_GITHUB_TOKEN;
-    process.env.DUTYDECK_GITHUB_TOKEN = 'service-hook-secret-0123456789';
+    const previous = process.env.DUTYDECK_SERVICE_TOKEN;
+    process.env.DUTYDECK_SERVICE_TOKEN = 'service-hook-secret-0123456789';
     const h = open(':memory:', { workspaceRoot }); await h.runtime.initialize([agent]);
     try {
       await h.runtime.start({ agentId: agent.id, cwd: source, workspaceMode: 'worktree' });
       expect(readFileSync(markerFile, 'utf8')).toBe('unset');
     } finally {
-      if (previous === undefined) delete process.env.DUTYDECK_GITHUB_TOKEN;
-      else process.env.DUTYDECK_GITHUB_TOKEN = previous;
+      if (previous === undefined) delete process.env.DUTYDECK_SERVICE_TOKEN;
+      else process.env.DUTYDECK_SERVICE_TOKEN = previous;
     }
   });
 
@@ -307,14 +307,14 @@ describe('user-command verification evidence', () => {
     const source = repository(); const h = open(':memory:'); await h.runtime.initialize([agent]);
     const session = await h.runtime.start({ agentId: agent.id, cwd: source });
     const marker = 'service-token-cross-chunk-0123456789-SECRET';
-    const previous = process.env.DUTYDECK_GITHUB_TOKEN;
-    process.env.DUTYDECK_GITHUB_TOKEN = marker;
+    const previous = process.env.DUTYDECK_SERVICE_TOKEN;
+    process.env.DUTYDECK_SERVICE_TOKEN = marker;
     const script = join(source, 'credential-output.mjs');
     const firstPrefixBytes = Buffer.byteLength('inherited=\n') + Buffer.byteLength(marker) + 1;
     const fillerBytes = 128 * 1024 - firstPrefixBytes - 4;
     writeFileSync(script, `
 const marker = process.env.EXPLICIT_MARKER;
-process.stdout.write('inherited=' + (process.env.DUTYDECK_GITHUB_TOKEN ?? '') + '\\n');
+process.stdout.write('inherited=' + (process.env.DUTYDECK_SERVICE_TOKEN ?? '') + '\\n');
 process.stdout.write(marker.slice(0, 9));
 await new Promise(resolve => setTimeout(resolve, 10));
 process.stdout.write(marker.slice(9) + '\\n');
@@ -334,8 +334,8 @@ process.stdout.write(marker.slice(4));
       expect(result.output).not.toContain(marker.slice(0, 9));
       expect((await h.repos.config.list!(`runtime_verification:${session.id}:`))[0]!.value).not.toContain(marker);
     } finally {
-      if (previous === undefined) delete process.env.DUTYDECK_GITHUB_TOKEN;
-      else process.env.DUTYDECK_GITHUB_TOKEN = previous;
+      if (previous === undefined) delete process.env.DUTYDECK_SERVICE_TOKEN;
+      else process.env.DUTYDECK_SERVICE_TOKEN = previous;
     }
   });
 

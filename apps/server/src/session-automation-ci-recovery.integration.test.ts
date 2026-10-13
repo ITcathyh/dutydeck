@@ -8,6 +8,7 @@ import { agentConfigSchema, type AttemptResultV1, type Session } from '@dutydeck
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ciProviders, ciStatus, TEST_CI_REMOTE, type StatusMock } from './ci-provider.test-helpers.js';
 import { SessionAutomationService } from './session-automation.js';
 
 const run = promisify(execFile);
@@ -19,16 +20,7 @@ async function gitRepository(cwd: string) {
   await run('git', ['-C', cwd, 'config', 'user.email', 'test@example.com']);
   await run('git', ['-C', cwd, 'config', 'user.name', 'Test']);
   await run('git', ['-C', cwd, 'commit', '--allow-empty', '-qm', 'initial']);
-  await run('git', ['-C', cwd, 'remote', 'add', 'origin', 'git@github.com:octo/repo.git']);
-}
-
-function githubResponse(headSha: string, runs: Array<{ id: number; conclusion?: string }> = []) {
-  return new Response(JSON.stringify({ total_count: runs.length, workflow_runs: runs.map(item => ({
-    id: item.id, name: 'ci', workflow_id: 9, head_sha: headSha, status: 'completed',
-    conclusion: item.conclusion ?? 'success', run_attempt: 1,
-    html_url: `https://github.com/octo/repo/actions/runs/${item.id}`,
-    created_at: '2026-09-12T00:00:00Z', updated_at: '2026-09-12T00:01:00Z'
-  })) }), { status: 200, headers: { 'content-type': 'application/json' } });
+  await run('git', ['-C', cwd, 'remote', 'add', 'origin', TEST_CI_REMOTE]);
 }
 
 const waitForFile = async (path: string, timeoutMs = 10_000) => {
@@ -66,10 +58,10 @@ describe('SessionAutomation real CI recovery across a true SQLite close and a br
     let runtime!: DutydeckRuntime;
     let fetchCallsAfterReopen = 0;
     let reopened = false;
-    const githubFetch = vi.fn(async () => {
+    const pipelineStatus = vi.fn(async () => {
       if (reopened) fetchCallsAfterReopen++;
-      return githubResponse(headSha, [{ id: 77, conclusion: 'success' }]);
-    }) as typeof fetch;
+      return ciStatus(headSha, [{ id: 77, conclusion: 'success' }]);
+    }) as StatusMock;
 
     const agent = agentConfigSchema.parse({
       id: 'ci-native', name: 'CI fixture', protocol: 'jsonl', command: process.execPath,
@@ -91,7 +83,7 @@ describe('SessionAutomation real CI recovery across a true SQLite close and a br
       repositories: target,
       runtime: rt,
       authorize: async () => true,
-      githubFetch,
+      ciProviders: ciProviders(pipelineStatus),
       clock: () => new Date('2026-09-12T00:00:30Z'),
       deliver: async (sessionId, result, occurrenceId, sourceId) => { deliveries.push({ sessionId, result, occurrenceId, sourceId }); }
     });
@@ -161,7 +153,7 @@ describe('SessionAutomation real CI recovery across a true SQLite close and a br
     expect(deliveries[0]!.result.taskId).toBe(taskIdAfterAccept);
     expect(deliveries[0]!.result).toMatchObject({ version: 1, outcome: 'completed' });
     expect(deliveries[0]!.sourceId).toBe(sub.id);
-    // 恢复路径不重新读取 GitHub API HTTP 材料：重开后 fetch 零调用（源码取得原结果路径亦不查 HEAD）。
+    // 恢复路径不重新读取 CI 提供方的构建材料：重开后零调用（源码取得原结果路径亦不查 HEAD）。
     expect(fetchCallsAfterReopen).toBe(0);
     const stored = JSON.parse((await repos.config.get(`session_automation/ci/${sub.id}`))!)!;
     expect(stored.admission.taskId).toBe(taskIdAfterAccept);
