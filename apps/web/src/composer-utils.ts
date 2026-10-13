@@ -62,13 +62,6 @@ export function commandsFromEvents(events: DockEvent[] = []) {
   return [];
 }
 
-export function formatTokens(value?: number) {
-  if (value === undefined) return '等待数据';
-  if (value < 1_000) return String(value);
-  if (value < 1_000_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}k`;
-  return `${(value / 1_000_000).toFixed(1)}m`;
-}
-
 export function currentContextStats(events: DockEvent[], snapshot?: import('@dutydeck/shared').ContextUsage): ContextStats {
   const live = contextStatsFromEvents(events);
   if (!snapshot || live.used !== undefined && live.observedAt && Date.parse(live.observedAt) >= Date.parse(snapshot.observedAt)) return live;

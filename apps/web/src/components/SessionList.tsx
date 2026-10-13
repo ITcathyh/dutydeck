@@ -8,6 +8,7 @@ import { groupSessionsByWorkspace, type WorkbenchView, type WorkspaceGroup } fro
 import { formatLarkNavSummary } from '../lark-status';
 import { createTaskAffordance, DutydeckIcon } from './ui';
 import { IconButton, Skeleton } from './primitives';
+import { RemoteAccessLogout } from './AuthGate';
 import { SessionRow } from './SessionRow';
 import { SidebarNav, type SidebarNavGroup } from './SidebarNav';
 
@@ -281,7 +282,7 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
       ? <details className="group/tools px-2.5"><summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 rounded-md px-2 text-caption font-medium text-sidebar-text transition-colors duration-fast ease-out hover:bg-sidebar-hover hover:text-sidebar-text-strong [&::-webkit-details-marker]:hidden"><Settings2 aria-hidden="true" size={14} className="shrink-0 text-sidebar-text-muted"/>设置与工具<ChevronRight aria-hidden="true" size={13} className="ml-auto shrink-0 text-sidebar-text-muted transition-transform duration-fast group-open/tools:rotate-90"/></summary><SidebarNav groups={navGroups}/></details>
       : <SidebarNav groups={navGroups}/>}</div>
 
-    {/* 运行环境状态。它是事实陈述不是入口，所以在导航区之外、不做成按钮。 */}
-    <div className="shrink-0 border-t border-sidebar-border px-4 py-2 text-meta text-sidebar-text-faint">{authRequired === false ? <span className="flex items-center gap-1.5 text-sidebar-accent"><ShieldCheck size={12}/>受信开发机模式 · 无需 token</span> : '本机运行 · ACPX 0.13'}</div>
+    {/* 运行环境状态。它是事实陈述不是入口，所以在导航区之外、不做成按钮；远程访问时右侧附退出按钮。 */}
+    <div className="flex shrink-0 items-center border-t border-sidebar-border pl-4 pr-2 text-meta text-sidebar-text-faint"><span className="min-w-0 flex-1 py-2">{authRequired === false ? <span className="flex items-center gap-1.5 text-sidebar-accent"><ShieldCheck size={12}/>受信开发机模式 · 无需 token</span> : '本机运行 · ACPX 0.13'}</span><RemoteAccessLogout/></div>
   </aside>;
 }

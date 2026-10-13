@@ -9,7 +9,7 @@ describe('task usage HUD', () => {
     expect(screen.getByRole('progressbar', { name: '5h额度已用' }).getAttribute('aria-valuenow')).toBe('0');
     expect(screen.getByText('未提供')).toBeTruthy();
     expect(screen.getByText('310')).toBeTruthy();
-    expect(screen.getByText('账户5h额度')).toBeTruthy();
+    expect(screen.getByText('5h额度').getAttribute('title')).toBe('账户 5 小时额度');
     expect(screen.getByText(/上报于/)).toBeTruthy();
     expect(screen.getByText(/输入 200 · 输出 40 · 缓存读 60 · 缓存写 10/)).toBeTruthy();
     expect(screen.getByText(/含子步骤/)).toBeTruthy();
@@ -39,13 +39,13 @@ const native = { source: 'claude_transcript' as const, scope: 'current_native_se
 const empty = { ...totals, entries: 0, tokenEntries: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 it('shows native fallback with its scope, never adds it to ledger totals and keeps complete ledger totals authoritative', () => {
   const { rerender } = render(<UsageHud usage={{ own: empty, subSteps: empty, snapshot: { nativeTokens: native } }}/>);
-  expect(screen.getByText('原生会话累计 token')).toBeTruthy(); expect(screen.getByText('1,330')).toBeTruthy();
+  expect(screen.getByText('会话 token')).toBeTruthy(); expect(screen.getByText('1,330')).toBeTruthy();
   expect(screen.getByText('当前原生会话 · 不含子步骤')).toBeTruthy(); expect(screen.getByText(/Claude 日志/)).toBeTruthy();
   rerender(<UsageHud usage={{ own: { ...totals, entries: 2 }, subSteps: empty, snapshot: { nativeTokens: native } }}/>);
   expect(screen.getByText('1,330')).toBeTruthy(); expect(screen.getByText('账本已知累计 ≥ 155 token')).toBeTruthy();
   expect(screen.queryByText('1,485')).toBeNull();
   rerender(<UsageHud usage={{ own: totals, subSteps: empty, snapshot: { nativeTokens: native } }}/>);
-  expect(screen.getByText('155')).toBeTruthy(); expect(screen.queryByText('原生会话累计 token')).toBeNull();
+  expect(screen.getByText('155')).toBeTruthy(); expect(screen.queryByText('会话 token')).toBeNull();
 });
 it('labels partial native readings, retains old readings on refresh failure and restores them on return', () => {
   const usage = { own: empty, subSteps: empty, snapshot: { nativeTokens: { ...native, partial: true } } };
@@ -72,4 +72,11 @@ it('keeps complete ledger totals separate while the live native total changes', 
   rerender(<UsageHud usage={{ own: totals, subSteps: empty, snapshot: { nativeTokens: { ...native, totalTokens: 2000, partial: true } } }}/>);
   expect(screen.getByText('155')).toBeTruthy(); expect(screen.getByText('当前原生会话 ≥ 2,000 token · 不含子步骤')).toBeTruthy();
   expect(screen.queryByText('2,155')).toBeNull();
+});
+
+it('stays out of the way when the session has no usage readings at all', () => {
+  const { container, rerender } = render(<UsageHud usage={{ own: empty, subSteps: empty }}/>);
+  expect(container.innerHTML).toBe('');
+  rerender(<UsageHud usage={{ own: empty, subSteps: empty }} loading/>);
+  expect(screen.getByRole('region', { name: '任务用量' })).toBeTruthy();
 });

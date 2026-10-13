@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { KeyRound, LogOut, RefreshCw } from 'lucide-react';
 import { api, ApiError, UNAUTHORIZED_EVENT, type BrowserAuthState } from '../api';
-import { Banner, Button, Card, Field, Input, Spinner } from './primitives';
+import { Banner, Button, Card, Field, IconButton, Input, Spinner } from './primitives';
+
+const RemoteAccessContext = createContext<{ logout(): void; busy: boolean } | undefined>(undefined);
 
 export function AuthGate({ children }: { children: ReactNode }) {
   const [auth, setAuth] = useState<BrowserAuthState>();
@@ -82,17 +84,17 @@ export function AuthGate({ children }: { children: ReactNode }) {
   </main>;
 
   /*
-    退出钮与错误浮条都是登录后钉在视口角上的常驻控件，取 z-sticky（100，契约 §7）——
-    z-toast 是 Toast 专用档，占用它会让真正的 Toast 压不住这两个角标。
-
-    退出钮用 Button 原语而不是继续手写：原先是 32px 高（低于契约 §9 的 40px 下限）、
-    药丸形 rounded-full（契约 §3 禁止用在矩形上）、且没有任何 focus-visible 轮廓。
-    variant="secondary" 的视觉与原来逐条手写的 border + surface + shadow-card 一致，
-    高度、焦点环、禁用态一并由原语兜住。字号随之从 11px 变成原语的 text-body（14px）——
-    契约 §2 本就规定 text-body 是「所有交互控件的默认字号」，这里不再手工压小。
+    退出入口在侧栏底部（RemoteAccessLogout），这里只通过 context 交出登出动作；原先钉在
+    视口右下角的悬浮按钮会盖住输入框的发送键。错误浮条仍钉在右下角，取 z-sticky
+    （100，契约 §7）——z-toast 是 Toast 专用档，占用它会让真正的 Toast 压不住它。
   */
-  return <>{children}
-    {auth.required && <Button variant="secondary" disabled={submitting} onClick={() => void logout()} icon={<LogOut size={12}/>} title="清除这台浏览器的远程访问凭据" className="fixed bottom-3 right-3 z-sticky min-h-10 backdrop-blur">退出远程访问</Button>}
-    {error && <div className="fixed bottom-14 right-3 z-sticky max-w-xs rounded-md shadow-panel"><Banner tone="danger">{error}</Banner></div>}
-  </>;
+  return <RemoteAccessContext.Provider value={auth.required ? { logout: () => void logout(), busy: submitting } : undefined}>{children}
+    {error && <div className="fixed bottom-3 right-3 z-sticky max-w-xs rounded-md shadow-panel"><Banner tone="danger">{error}</Banner></div>}
+  </RemoteAccessContext.Provider>;
+}
+
+/** 远程访问时侧栏底部的退出入口；本机免登录时不渲染。 */
+export function RemoteAccessLogout() {
+  const remote = useContext(RemoteAccessContext);
+  return remote ? <IconButton label="退出远程访问" disabled={remote.busy} onClick={remote.logout}><LogOut size={16}/></IconButton> : null;
 }

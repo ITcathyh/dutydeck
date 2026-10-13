@@ -72,7 +72,7 @@ function SessionWorkItems({ session, agents, onSelectSession, control }: Props) 
   const act = (action: Action) => { if (!disabled) { setNotice(''); mutation.mutate(action); } };
 
   return <>
-    <ToolbarButton label="目标、步骤与成果" icon={<ListChecks size={14}/>} onClick={() => setOpen(true)}/>
+    <ToolbarButton label="目标、步骤与成果" text="目标" icon={<ListChecks size={14}/>} onClick={() => setOpen(true)}/>
     {open && <Dialog open onClose={() => setOpen(false)} label="目标、步骤与成果" size="lg">
       <Dialog.Header><h2 className="text-title font-semibold">目标、步骤与成果</h2><span className="ml-auto"><IconButton label="关闭目标详情" onClick={() => setOpen(false)}><X size={16}/></IconButton></span></Dialog.Header>
       <Dialog.Body><div className="space-y-5">
