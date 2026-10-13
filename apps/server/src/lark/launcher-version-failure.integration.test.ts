@@ -367,6 +367,48 @@ it.each(['topic', 'top'] as const)('%s 启动器失败后复用过程卡换新�
   expect(final.body.elements.some((el: any) => el.content === LARK_LAUNCHER_RECOVERY_NOTE)).toBe(true);
 });
 
+it('旧会话进程未确认停止时保留原记录，自动换新且原请求只提交一次', async () => {
+  let count = 0;
+  const stopBlock = (sessionId: string) => JSON.stringify({ sessionId, runId: 'old-run', reason: 'old process stop unconfirmed' });
+  const h = await setup(async sessionId => {
+    if (++count !== 2) return;
+    // 当前轮已进入准备阶段再补入旧进程的持久化阻塞，确保本轮仍触发启动器错误。
+    await h.repos.config.set(`runtime_driver_stop_block:${sessionId}`, stopBlock(sessionId));
+    throw new Error(LAUNCHER_ERROR);
+  });
+  cleanups.push(() => h.teardown());
+  const old = await h.runTurn('om_retained_history');
+  const oldRecord = await h.repos.tasks.get!(old.task.id);
+  const oldAttempts = h.repos.execution.getTaskExecution(old.task.id)!.attempts;
+  const stop = vi.spyOn(h.runtime, 'stop');
+  const { task, resultInput } = await h.runTurn('om_retained_launcher');
+  expect(task.status).toBe('completed');
+  expect(resultInput.sessionId).not.toBe(old.sessionId);
+  expect(stop).not.toHaveBeenCalled();
+  expect((await h.runtime.getSession(old.sessionId))?.state).not.toBe('stopped');
+  expect(await h.repos.tasks.get!(old.task.id)).toEqual(oldRecord);
+  expect(h.repos.execution.getTaskExecution(old.task.id)!.attempts).toEqual(oldAttempts);
+  expect(await h.repos.config.get(`runtime_driver_stop_block:${old.sessionId}`)).toBe(stopBlock(old.sessionId));
+  expect((await h.runtime.getTaskRecovery(old.sessionId, old.task.id)).blockers).toContainEqual({ code: 'DRIVER_STOP_BLOCKED' });
+  expect(JSON.parse((await h.repos.config.get(`lark.relaunch_retained.app.${old.sessionId}`))!)).toEqual({ message_id: 'om_retained_launcher' });
+  expect(h.log.info).toHaveBeenCalledWith(expect.objectContaining({ reason: 'session_retained', taskId: 'om_retained_launcher', sessionId: old.sessionId }), '旧启动器会话已保留未停止，继续自动换新');
+  expect(h.prepared).toEqual([old.sessionId, old.sessionId, resultInput.sessionId]);
+  expect(await h.runtime.getTasks(resultInput.sessionId)).toHaveLength(1);
+  expect(h.sent.filter(item => item.sessionId === resultInput.sessionId)).toEqual([{ sessionId: resultInput.sessionId, prompt: expect.stringContaining('跑一下任务') }]);
+  expect(h.issued.filter(input => input.cardKind === 'result' && input.taskId === 'om_retained_launcher').map(input => input.state)).toEqual(['completed']);
+  const process = h.issued.filter(input => input.cardKind === 'process' && input.taskId === 'om_retained_launcher');
+  expect(process).toHaveLength(1);
+  const updates = h.service.update.mock.calls.map(([input]) => input).filter(input => input.cardKind === 'process' && input.taskId === 'om_retained_launcher');
+  expect(updates.some(input => input.state === 'failed')).toBe(false);
+  const replacement = updates.filter(input => input.turn === 2);
+  expect(replacement.length).toBeGreaterThan(1);
+  for (const frame of replacement) {
+    expect(frame.messageId).toBe(updates[0].messageId);
+    expect(JSON.stringify(buildLarkCard(frame))).toContain(LARK_LAUNCHER_RECOVERY_NOTE);
+  }
+  expect(replacement.at(-1).state).toBe('completed');
+});
+
 it('结束旧会话失败时不重发，仍交付无重试的 /new 指引', async () => {
   const h = await setup(new Error(LAUNCHER_ERROR));
   cleanups.push(() => h.teardown());

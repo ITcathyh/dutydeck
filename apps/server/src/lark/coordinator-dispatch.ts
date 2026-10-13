@@ -745,7 +745,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       const epoch = group.epoch!;
       const result = await retirement;
       if (this.stopped) { notRecovered('coordinator_stopped'); return true; }
-      if (result.retained) return notRecovered('session_retained');
+      if (result.retained) {
+        this.log.info({ reason: 'session_retained', taskId: task.id, runtimeTaskId: task.runtimeTaskId, sessionId: task.sessionId }, '旧启动器会话已保留未停止，继续自动换新');
+      }
       if (group.epoch !== epoch) return notRecovered('scope_epoch_changed');
       task.epoch = epoch;
       task.launchOptions = undefined;
