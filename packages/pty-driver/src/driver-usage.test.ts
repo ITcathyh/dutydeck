@@ -63,3 +63,17 @@ it('emits no usage, not a zero reading, when the transcript has none, and does n
   await turn('问题二', () => answer('二', { input_tokens: 7, output_tokens: 1 }));
   expect(events.filter(event => event.type === 'status' && event.data.state === 'turn_usage').map(event => event.data.breakdown.inputTokens)).toEqual([7]);
 });
+
+it('adds the usage of sub-agents, which Claude Code keeps in files beside the session transcript, to the turn reading', async () => {
+  await turn('问题一', () => {
+    const directory = join(transcript.replace(/\.jsonl$/, ''), 'subagents');
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, 'agent-a1.jsonl'), JSON.stringify({ type: 'assistant', isSidechain: true, message: {
+      id: 'msg_sub', role: 'assistant', model: 'claude-haiku-4-5', content: [{ type: 'text', text: 'sub' }], stop_reason: 'end_turn', usage: { input_tokens: 40, output_tokens: 5 } } }) + '\n');
+    answer('一', { input_tokens: 100, output_tokens: 20 });
+  });
+  const usage = events.find(event => event.type === 'status' && event.data.state === 'turn_usage')!;
+  expect(usage.data).toMatchObject({ model: 'claude-haiku-4-5 + claude-sonnet-5-5', breakdown: { inputTokens: 140, outputTokens: 25 },
+    byModel: [{ model: 'claude-haiku-4-5', breakdown: { inputTokens: 40, outputTokens: 5 } }, { model: 'claude-sonnet-5-5', breakdown: { inputTokens: 100, outputTokens: 20 } }] });
+  expect(usage.data.partial).toBeUndefined();
+});

@@ -95,7 +95,13 @@ export function cumulativeDelta(previous: number | undefined, current: number): 
 
 const finite = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 /** ACP 驱动 turn_usage 事件的读数：usageRef/breakdown 是本轮 token（增量），cost 是会话累计成本。 */
-export interface UsageReading { provider?: unknown; model?: unknown; usageRef?: unknown; breakdown?: Record<string, unknown>; cost?: { amount?: unknown; currency?: unknown } }
+export interface UsageReading {
+  provider?: unknown; model?: unknown; usageRef?: unknown; breakdown?: Record<string, unknown>; cost?: { amount?: unknown; currency?: unknown };
+  /** 终端模式 Claude：一轮里有多个型号时，breakdown 总量按型号的拆分（每个型号按自己的单价估算）；model 缺省的组用任务型号。 */
+  byModel?: Array<{ model?: unknown; breakdown?: Record<string, unknown> }>;
+  /** 终端模式 Claude：本轮有部分用量读不到（子代理文件读失败或格式不认识），已读到的 token 只是下限，费用记为未知。 */
+  partial?: unknown;
+}
 type Measured = Pick<UsageLedgerEntry, keyof Tokens | 'costUsd' | 'costEstimated' | 'dataStatus' | 'cumulativeCostUsd' | 'usageRef' | 'pricingSource' | 'pricingVersion' | 'pricingMatch' | 'unpricedReason'>;
 
 /**
@@ -106,21 +112,32 @@ export function measureUsage(input: { reading?: UsageReading; freshTokens: boole
   const { reading } = input;
   const usageRef = typeof reading?.usageRef === 'string' ? reading.usageRef : undefined;
   const breakdown = input.freshTokens && usageRef && reading?.breakdown && typeof reading.breakdown === 'object' ? reading.breakdown : undefined;
-  const tokens: Tokens = breakdown ? {
-    inputTokens: finite(breakdown.inputTokens), outputTokens: finite(breakdown.outputTokens),
-    cacheReadTokens: finite(breakdown.cachedReadTokens), cacheWriteTokens: finite(breakdown.cachedWriteTokens)
-  } : {};
+  const tokensOf = (source: Record<string, unknown>): Tokens => ({
+    inputTokens: finite(source.inputTokens), outputTokens: finite(source.outputTokens),
+    cacheReadTokens: finite(source.cachedReadTokens), cacheWriteTokens: finite(source.cachedWriteTokens)
+  });
+  const tokens: Tokens = breakdown ? tokensOf(breakdown) : {};
+  const groups = breakdown && Array.isArray(reading?.byModel) && reading.byModel.length > 1
+    ? reading.byModel.filter(group => group?.breakdown && typeof group.breakdown === 'object').map(group => ({
+      model: typeof group.model === 'string' && group.model.trim() ? group.model.trim() : input.model, tokens: tokensOf(group.breakdown!) }))
+    : undefined;
   const hasTokens = Object.values(tokens).some(value => value !== undefined);
   const currency = typeof reading?.cost?.currency === 'string' ? reading.cost.currency.toUpperCase() : 'USD';
   const cumulative = currency === 'USD' ? finite(reading?.cost?.amount) : undefined;
   const counted = hasTokens ? { ...tokens, usageRef } : {};
   if (cumulative !== undefined) return { ...counted, costUsd: cumulativeDelta(input.baselineCostUsd, cumulative), costEstimated: false, dataStatus: 'reported', cumulativeCostUsd: cumulative, pricingSource: 'reported' };
   if (hasTokens) {
-    const { rate, ...provenance } = priceSelection(input.pricing, input.model, input.provider);
-    const costUsd = estimateCostUsd(input.pricing, input.model, tokens, input.provider);
-    return costUsd === undefined
+    // 多个型号的一轮：每个型号各按自己的单价估算再相加，任何一个估不出来，整轮就记为未定价。
+    const parts = (groups ?? [{ model: input.model, tokens }]).map(group => ({
+      ...priceSelection(input.pricing, group.model, input.provider), cost: estimateCostUsd(input.pricing, group.model, group.tokens, input.provider) }));
+    const unpriced = parts.find(part => part.cost === undefined);
+    const { rate, cost: _cost, ...selected } = unpriced ?? parts[0]!;
+    const matches = [...new Set(parts.flatMap(part => part.pricingMatch ?? []))];
+    const provenance = { ...selected, ...(matches.length ? { pricingMatch: matches.join(' + ') } : {}) };
+    if (reading?.partial === true) return { ...counted, ...provenance, costEstimated: false, dataStatus: 'unpriced', unpricedReason: 'usage_incomplete' };
+    return unpriced
       ? { ...counted, ...provenance, costEstimated: false, dataStatus: 'unpriced', unpricedReason: rate ? 'cache_write_rate_missing' : 'unknown_model' }
-      : { ...counted, ...provenance, costUsd, costEstimated: true, dataStatus: 'estimated' };
+      : { ...counted, ...provenance, costUsd: parts.reduce((total, part) => total + part.cost!, 0), costEstimated: true, dataStatus: 'estimated' };
   }
   return { costEstimated: false, dataStatus: 'unavailable', pricingSource: 'none' };
 }

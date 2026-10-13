@@ -20,8 +20,10 @@
  *
  * Token usage: every assistant line carries message.usage, and one API message is written once per
  * content block with the same message.id and usage, so usage is de-duplicated by message.id and
- * reported once per turn as status/turn_usage (see ClaudeUsageTally / takeTurnUsage). Sidechain
- * (sub-agent) messages are billed too, so they count there even though they produce no events.
+ * reported once per turn as status/turn_usage (see tallyUsage / takeTurnUsage). Sub-agent (Task,
+ * Explore, workflow) messages are billed too. Claude Code 2.1.x keeps them in separate files under
+ * <session>/subagents/ (see claude-subagents.ts), older versions as isSidechain lines of the main
+ * transcript; both are counted there even though they produce no events.
  *
  * Sidechain (Task tool internals) lines are skipped. API-error assistant lines
  * are not model output either: the tailer holds the latest one back as the
@@ -36,6 +38,7 @@ import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-
 import { isUsableMarker } from '../session-id/marker.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource } from './tail.js';
 import { claudeInputText } from './input-receipt.js';
+import { ClaudeSubagentReader } from './claude-subagents.js';
 
 /** Head window per candidate when scanning for the marker. It rides the FIRST
  *  user prompt, so a small window suffices and a long conversation is never
@@ -360,6 +363,12 @@ export function claudeMessageUsage(entry: any): ({ id: string } & ClaudeMessageU
   };
 }
 
+/** An assistant record that should carry usage but does not: the sub-agent file is in a shape we do not know. */
+function claudeUsageUnreadable(entry: any): boolean {
+  if (entry?.type !== 'assistant' || entry.isApiErrorMessage === true || entry.message?.model === '<synthetic>') return false;
+  return typeof entry.message?.id !== 'string' || !entry.message.id || !entry.message.usage || typeof entry.message.usage !== 'object';
+}
+
 export interface ClaudeTranscriptTailerOptions {
   cwd: string;
   /** Explicit transcript path. When given, directory scanning and file
@@ -398,6 +407,11 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   /** Usage of the API messages seen since the last takeTurnUsage(), by message.id (insertion order = transcript order). */
   private readonly pendingUsage = new Map<string, ClaudeMessageUsage>();
   private readonly reportedUsageIds = new Set<string>();
+  private readonly subagents: ClaudeSubagentReader;
+  private subagentsBaselined = false;
+  private restored = false;
+  /** Some usage of the turn could not be read (sub-agent files), so the reading is a lower bound. */
+  private usagePartial = false;
 
   constructor(opts: ClaudeTranscriptTailerOptions) {
     const explicit = opts.transcriptPath;
@@ -413,12 +427,14 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
      */
     let resolved: string | undefined;
     const resolveOnce = () => (resolved ??= resolveClaudeTranscriptPath(opts.cwd, opts.env, opts.sessionId));
+    const resolvePath = explicit
+      ? () => explicit
+      : opts.sessionId
+        ? resolveOnce
+        : () => resolveClaudeTranscriptPath(opts.cwd, opts.env);
+    this.subagents = new ClaudeSubagentReader(resolvePath);
     this.tailer = new JsonlTailer({
-      resolvePath: explicit
-        ? () => explicit
-        : opts.sessionId
-          ? resolveOnce
-          : () => resolveClaudeTranscriptPath(opts.cwd, opts.env),
+      resolvePath,
       mapEntry: entry => {
         this.tallyUsage(entry);
         const nativeInput = claudeInputText(entry) !== undefined && entry.isSidechain !== true;
@@ -510,11 +526,19 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     });
   }
 
-  start(): void { this.tailer.start(); }
+  start(): void {
+    if (!this.subagentsBaselined) {
+      this.subagentsBaselined = true;
+      // A restored tailer cannot tell which sub-agent records the recovered turn already wrote.
+      this.subagents.baseline(this.restored);
+    }
+    this.tailer.start();
+  }
   flush(): Promise<void> { return this.tailer.flush(); }
   checkpoint(): TranscriptCursor { return this.tailer.checkpoint(); }
   restore(cursor: TranscriptCursor): void {
     this.tailer.restore(cursor);
+    this.restored = true;
     this.terminalScope = false; this.turnTerminal = false; this.restoringTurn = true;
   }
   stop(): void { this.tailer.stop(); }
@@ -537,9 +561,13 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     if (this.inputUuid) this.inputEntries.add(this.inputUuid);
   }
   resetBackgroundWork(): void { this.backgroundWork = 0; }
-  private tallyUsage(entry: any): void {
+  /** False for a record that should have carried usage but did not. */
+  private tallyUsage(entry: any): boolean {
     const usage = claudeMessageUsage(entry);
-    if (!usage || this.reportedUsageIds.has(usage.id)) return;
+    if (!usage) return !claudeUsageUnreadable(entry);
+    // A message is first written with all-zero usage before its real reading arrives; it counts once it has one,
+    // so a turn that ends in between does not report it as zero and then ignore the real reading.
+    if (this.reportedUsageIds.has(usage.id) || !(usage.inputTokens || usage.outputTokens || usage.cacheReadTokens || usage.cacheWriteTokens)) return true;
     const previous = this.pendingUsage.get(usage.id);
     // Lines of one message repeat the same usage; a streamed partial line can carry a smaller output count.
     this.pendingUsage.set(usage.id, previous ? {
@@ -547,28 +575,41 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
       inputTokens: Math.max(previous.inputTokens, usage.inputTokens), outputTokens: Math.max(previous.outputTokens, usage.outputTokens),
       cacheReadTokens: Math.max(previous.cacheReadTokens, usage.cacheReadTokens), cacheWriteTokens: Math.max(previous.cacheWriteTokens, usage.cacheWriteTokens),
     } : usage);
+    return true;
   }
   /**
    * Token usage of every API message read since the previous call, as one status/turn_usage reading in the
    * same shape the ACP driver reports (the usageRef is the last message id, so re-reading the same records
-   * after a restore is not counted twice). Several models in one turn (a sub-agent on another model) are named
-   * together, which prices as an unknown model instead of billing one model's rate for the others' tokens.
+   * after a restore is not counted twice). Sub-agent files are read here, so the reading covers what they
+   * recorded since the previous call. `breakdown` is the total; when several models took part (a sub-agent on
+   * another model) `model` names them together and `byModel` splits the total so each can be priced at its own rate.
+   * `partial` is set when part of the usage could not be read (a sub-agent file failed or was not understood).
    * Undefined when the transcript showed no usage: the caller then records the turn as unavailable, never as zero.
    */
   takeTurnUsage(): NormalizedDriverEvent | undefined {
+    if (!this.subagents.read(entry => this.tallyUsage(entry))) this.usagePartial = true;
+    const partial = this.usagePartial;
+    this.usagePartial = false;
     if (!this.pendingUsage.size) return undefined;
     const messages = [...this.pendingUsage.entries()];
     this.pendingUsage.clear();
     for (const [id] of messages) this.reportedUsageIds.add(id);
     while (this.reportedUsageIds.size > REPORTED_USAGE_IDS_MAX) this.reportedUsageIds.delete(this.reportedUsageIds.values().next().value as string);
-    const sum = (key: keyof Omit<ClaudeMessageUsage, 'model'>) => messages.reduce((total, [, usage]) => total + usage[key], 0);
-    const models = [...new Set(messages.map(([, usage]) => usage.model).filter((model): model is string => model !== undefined))].sort();
+    const breakdown = (list: ClaudeMessageUsage[]) => {
+      const sum = (key: keyof Omit<ClaudeMessageUsage, 'model'>) => list.reduce((total, usage) => total + usage[key], 0);
+      return { inputTokens: sum('inputTokens'), outputTokens: sum('outputTokens'), cachedReadTokens: sum('cacheReadTokens'), cachedWriteTokens: sum('cacheWriteTokens') };
+    };
+    const byModel = new Map<string, ClaudeMessageUsage[]>();
+    for (const [, usage] of messages) byModel.set(usage.model ?? '', [...byModel.get(usage.model ?? '') ?? [], usage]);
+    const models = [...byModel.keys()].filter(Boolean).sort();
     return {
       type: 'status',
       data: {
         state: 'turn_usage', usageRef: `claude:${messages.at(-1)![0]}`,
         ...(models.length ? { model: models.join(' + ') } : {}),
-        breakdown: { inputTokens: sum('inputTokens'), outputTokens: sum('outputTokens'), cachedReadTokens: sum('cacheReadTokens'), cachedWriteTokens: sum('cacheWriteTokens') },
+        breakdown: breakdown(messages.map(([, usage]) => usage)),
+        ...(byModel.size > 1 ? { byModel: [...byModel].sort(([a], [b]) => a < b ? -1 : 1).map(([model, list]) => ({ ...(model ? { model } : {}), breakdown: breakdown(list) })) } : {}),
+        ...(partial ? { partial: true } : {}),
       },
     };
   }
