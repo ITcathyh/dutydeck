@@ -233,7 +233,7 @@ export class LarkAppCreationJobManager {
         try {
           created = await client.postJson('/developers/v1/manifest/upsert_by_template', {
             appManifestTemplateID: 'developer_console',
-            createAppUserCustomField: { i18n: { zh_cn: { name: this.jobs.get(id)!.name, description: 'AI coding assistant powered by Dutydeck' } }, avatar, primaryLang: 'zh_cn' },
+            createAppUserCustomField: { i18n: { zh_cn: { name: this.jobs.get(id)!.name, description: 'dutydeck bot 助手' } }, avatar, primaryLang: 'zh_cn' },
             cid: id,
             HTTPHead: {},
           });

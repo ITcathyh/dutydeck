@@ -568,7 +568,7 @@ export function restoreSession(sessionId: string) {
     expect(byId(card, 'retry')).toBeUndefined();
     expect(byId(card, 'cancel')).toBeUndefined();
 
-    const footer = card.body.elements.at(-1);
+    const footer = card.body.elements.at(-2);
     expect(JSON.stringify(footer)).toContain('[查看详情](https://dutydeck.example.com/sessions/ses_secure_123)');
   });
 
@@ -1120,7 +1120,7 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     expect(byId(card, 'current_title').icon).toEqual({ tag: 'standard_icon', token: 'loading_outlined', color: 'blue' });
     // 刚结束的阶段紧跟在当前阶段下面。
     expect(card.body.elements[1].element_id).toBe('trace_group_0');
-    const row = card.body.elements.at(-1);
+    const row = card.body.elements.at(-2);
     expect(row.element_id).toBe('task_action_row');
     expect(byId(row, 'task_meta').content).toBe("<font color='grey'>已运行 16 秒</font><font color='grey'> · </font><font color='grey'>共 2 步</font>");
     expect(JSON.stringify(card)).not.toContain('16.224');
@@ -1153,7 +1153,7 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
       capabilities: { canCancelQueued: false, canInterrupt: true, canRetry: false, canRefresh: true }
     });
     const row = byId(card, 'task_action_row');
-    expect(card.body.elements.at(-1)).toBe(row);
+    expect(card.body.elements.at(-2)).toBe(row);
     const shape = (actionRow: any) => actionRow.columns.map((column: any) => [column.width, column.elements.map((el: any) => el.element_id)]);
     expect(shape(row)).toEqual([['weighted', ['task_meta']], ['auto', ['interrupt']], ['auto', ['refresh']]]);
     expect(row.columns.slice(1).map((column: any) => column.elements[0].type)).toEqual(['text', 'text']);
@@ -1415,6 +1415,7 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
       text_tag_list: [{ text: { content: '失败' }, color: 'red' }]
     });
     expect(fallback.config.summary.content).toBe('失败 · 超大');
+    expect(fallback.body.elements.at(-1).content).toContain('[dutydeck](https://github.com/ITcathyh/dutydeck)');
     expect(byId(fallback, 'task_meta').content).toBe("<font color='grey'>用时 3 秒</font>");
     expect(fallback.body.elements.some((el: any) =>
       el.element_id === 'dutydeck_fallback_omission' || el.element_id === 'dutydeck_hard_fallback_omission')).toBe(true);
@@ -1560,6 +1561,7 @@ describe('公开执行记录的可执行入口', () => {
       elements: [{ tag: 'markdown', element_id: 'group_mention', content: '<at id=ou_x></at>'.repeat(3000) }]
     });
     expect(byId(hardFallback, 'dutydeck_hard_fallback_omission').content).toContain('[查看详情](https://dock.example/sessions/ses_1)');
+    expect(hardFallback.body.elements.at(-1).content).toContain('[dutydeck](https://github.com/ITcathyh/dutydeck)');
   });
 
   it('重试成功后：结果卡不挂失败计数，失败卡才讲最后失败的步骤；完整公开记录保留失败证据', () => {

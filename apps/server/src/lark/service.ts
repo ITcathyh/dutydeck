@@ -595,6 +595,11 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     tag: 'column_set', element_id: 'result_follow_up_row', flex_mode: 'flow', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
     columns: followUpButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }))
   }] : [];
+  const brandBadge = {
+    tag: 'markdown', element_id: 'dutydeck_brand',
+    content: "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+    text_size: 'x-small', text_align: 'left', margin: '0px'
+  };
 
   let footerMention: string | undefined;
   let mentionElementIndex = -1;
@@ -1015,7 +1020,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
           ...(footerColumns.length && !isProcessCard ? [{
             tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', margin: '6px 0px 0px 0px',
             columns: footerColumns
-          }] : [])
+          }] : []),
+          brandBadge
         ]
       }
     };
@@ -1124,7 +1130,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
           ...(receiptOnly ? [{ tag: 'markdown', element_id: 'task_overview', content: `<font color='${state === 'completed' ? 'green' : state === 'failed' ? 'red' : 'grey'}'>${statusLabel}</font>`, text_size: 'normal', margin: '0px', icon: { tag: 'standard_icon', token: state === 'completed' ? 'done_outlined' : 'close_outlined', color: state === 'completed' ? 'green' : state === 'failed' ? 'red' : 'grey' } }] : []),
           hardFallbackOmission,
           ...(detailButton ? [detailButton] : []),
-          ...meta
+          ...meta,
+          brandBadge
         ]
       }
     };
@@ -1138,7 +1145,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       elements: [
         { tag: 'markdown', content: `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>${elapsedSeconds > 0 ? `　<font color='grey'>已用时 ${larkElapsedLabel(elapsedSeconds)}</font>` : ''}`, text_size: 'small' },
         hardFallbackOmission,
-        ...(detailButton ? [detailButton] : [])
+        ...(detailButton ? [detailButton] : []),
+        brandBadge
       ]
     }
   };

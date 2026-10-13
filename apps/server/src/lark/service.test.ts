@@ -34,6 +34,18 @@ describe('Lark card service', () => {
     return [...(typeof value.tag === 'string' ? [value] : []), ...Object.values(value).flatMap(components)];
   };
   const byId = (card: any, elementId: string) => components(card).find(element => element.element_id === elementId);
+  it.each([undefined, 'process', 'result'] as const)('keeps a bottom-left project badge on %s cards in every state', cardKind => {
+    for (const state of larkCardStates) {
+      const card = buildLarkCard({ cardKind, state, markdown: '回复正文', readOnly: true });
+      expect(card.body.elements.at(-1)).toMatchObject({
+        tag: 'markdown', element_id: 'dutydeck_brand',
+        content: "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+        text_align: 'left', text_size: 'x-small'
+      });
+      expect(components(card).filter(element => element.element_id === 'dutydeck_brand')).toHaveLength(1);
+    }
+  });
+
   it('renders a completed Card 2.0 with a clear task header, status, and compact footer', () => {
     const card = buildLarkCard({ agentName: 'Business Agent', workspace: '/srv/repo', permissionMode: 'full-trust', state: 'completed', taskName: 'Release', taskId: '42', elapsedSeconds: 65, markdown: '**done**' });
     expect(card.schema).toBe('2.0');
@@ -67,7 +79,7 @@ describe('Lark card service', () => {
     // 任务尚未建立 session 时（解析中、排队中）飞书卡片仍要给出可用的去向。
     const withoutSession: any = buildLarkCard({ state: 'queued', taskId: 't1', webBaseUrl: 'https://web.example.com' });
     const withSession: any = buildLarkCard({ state: 'running', taskId: 't2', webBaseUrl: 'https://web.example.com', sessionId: 'ses_1' });
-    const footerLink = (card: any) => card.body.elements.at(-1)?.columns?.at(-1)?.elements?.[0]?.content ?? '';
+    const footerLink = (card: any) => card.body.elements.at(-2)?.columns?.at(-1)?.elements?.[0]?.content ?? '';
 
     expect(footerLink(withoutSession)).toContain('(https://web.example.com/)');
     expect(JSON.stringify(withoutSession)).not.toContain('web.example.com/sessions');
@@ -81,7 +93,7 @@ describe('Lark card service', () => {
     expect(rendered.match(/查看详情/g) ?? []).toHaveLength(1);
     expect(rendered).not.toContain('open_url');
     expect(byId(card, 'view_detail')).toBeUndefined();
-    expect(card.body.elements.at(-1).columns.at(-1).elements[0].content).toContain('[查看详情](https://web.example.com/sessions/ses_1)');
+    expect(card.body.elements.at(-2).columns.at(-1).elements[0].content).toContain('[查看详情](https://web.example.com/sessions/ses_1)');
   });
 
   it('只读与恢复卡同样保留页脚的查看详情', () => {
@@ -90,7 +102,7 @@ describe('Lark card service', () => {
       const card: any = buildLarkCard({ state, taskId: 't1', sessionId: 'ses_1', readOnly: true, webBaseUrl: 'https://web.example.com' });
       const rendered = JSON.stringify(card);
       expect(rendered.match(/查看详情/g) ?? [], `state=${state}`).toHaveLength(1);
-      expect(card.body.elements.at(-1).columns.at(-1).elements[0].content)
+      expect(card.body.elements.at(-2).columns.at(-1).elements[0].content)
         .toContain('[查看详情](https://web.example.com/sessions/ses_1)');
     }
   });
@@ -120,7 +132,7 @@ describe('Lark card service', () => {
       ]
     });
     expect(card.body.elements.some((el: any) => el.element_id === 'group_mention')).toBe(false);
-    const footer = card.body.elements.at(-1);
+    const footer = card.body.elements.at(-2);
     expect(footer.tag).toBe('column_set');
     const firstColMarkdown = footer.columns[0].elements[0];
     expect(firstColMarkdown.element_id).toBe('task_elapsed');
@@ -139,7 +151,7 @@ describe('Lark card service', () => {
       ]
     });
     expect(card.body.elements.some((el: any) => el.element_id === 'group_mention')).toBe(false);
-    const footer = card.body.elements.at(-1);
+    const footer = card.body.elements.at(-2);
     expect(footer.tag).toBe('column_set');
     const firstColMarkdown = footer.columns[0].elements[0];
     expect(firstColMarkdown.element_id).toBe('group_mention');
@@ -157,7 +169,7 @@ describe('Lark card service', () => {
         { tag: 'markdown', element_id: 'final_output', content: '任务已完成' }
       ]
     });
-    const footer = card.body.elements.at(-1);
+    const footer = card.body.elements.at(-2);
     expect(footer.tag).toBe('column_set');
     const firstColMarkdown = footer.columns[0].elements[0];
     expect(firstColMarkdown.element_id).toBe('task_elapsed');
@@ -395,6 +407,10 @@ describe('Lark card service', () => {
     const update = fetcher.mock.calls[3];
     expect(update?.[0]).toContain('/open-apis/im/v1/messages/om_sent');
     expect(update?.[1]?.method).toBe('PATCH');
+    const updatedCard = JSON.parse(JSON.parse(String(update?.[1]?.body)).content);
+    for (const card of [sentCard, updatedCard]) {
+      expect(card.body.elements.at(-1).content).toContain('[dutydeck](https://github.com/ITcathyh/dutydeck)');
+    }
   });
 
   it('fails clearly when credentials are absent', async () => {
@@ -431,6 +447,7 @@ describe('Lark card service', () => {
     const replied = JSON.parse(body.content);
     expect(replied.body.elements.some((element: any) => element.content === '话题内回复')).toBe(true);
     expect(byId(replied, 'task_status')).toBeUndefined();
+    expect(replied.body.elements.at(-1).content).toContain('[dutydeck](https://github.com/ITcathyh/dutydeck)');
   });
 
   it('anchors a thread reply to the root message when replyRootId is provided', async () => {

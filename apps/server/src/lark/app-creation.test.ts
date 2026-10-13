@@ -49,7 +49,10 @@ it('creates once, durably saves credentials privately and configures creator vis
   expect(h.connect).toHaveBeenCalledOnce();
   expect(h.connect.mock.calls[0]![0]).toMatchObject({ forceLogin: false });
   expect(h.postJson.mock.calls.filter(([path]) => path.includes('upsert_by_template'))).toHaveLength(1);
-  expect(h.postJson.mock.calls[0]![1]).toMatchObject({ cid: id, appManifestTemplateID: 'developer_console' });
+  expect(h.postJson.mock.calls[0]![1]).toMatchObject({
+    cid: id, appManifestTemplateID: 'developer_console',
+    createAppUserCustomField: { i18n: { zh_cn: { name: 'My Bot', description: 'dutydeck bot 助手' } } }
+  });
   expect(h.postForm.mock.calls[0]![1].get('uploadType')).toBe('4');
   expect(h.configure).toHaveBeenCalledWith(h.connected.client, 'cli_created', { creatorUserId: 'private-user', newApp: true });
   expect(await readLarkConfig(h.config, 'cli_created')).toMatchObject({ name: 'My Bot', appSecret: 'test-private-secret', listening: false });
