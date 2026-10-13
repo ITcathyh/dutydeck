@@ -498,6 +498,10 @@ export default function App() {
           applySessionSelection(id);
           navigate({ route: { kind: 'session', sessionId: id }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId, overlay: { kind: 'insight' } });
         }}
+        onOpenTask={id => {
+          applySessionSelection(id);
+          navigate({ route: { kind: 'session', sessionId: id }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId });
+        }}
         onCompare={(leftSessionId, rightSessionId) => {
           applySessionSelection(leftSessionId);
           navigate({ route: { kind: 'session', sessionId: leftSessionId }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId, overlay: { kind: 'insight', compare: rightSessionId } });

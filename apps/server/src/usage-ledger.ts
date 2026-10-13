@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { executionTaskId } from '@dutydeck/storage';
-import { makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type JsonValue } from '@dutydeck/shared';
+import { makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type UsageReport, type UsageReportFilter, type UsageTaskPage, type JsonValue } from '@dutydeck/shared';
 
 const rateSchema = z.object({ inputPerMTok: z.number().nonnegative(), cachedInputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative(), cacheWritePerMTok: z.number().nonnegative().optional(), provider: z.string().trim().min(1).optional() }).strict();
 const pricingSchema = z.object({ version: z.string().trim().min(1).optional(), default: rateSchema, models: z.array(rateSchema.extend({ match: z.string().trim().min(1) }).strict()) }).strict();
@@ -12,23 +12,43 @@ export function parseUsageBackgroundLimits(json?: string): UsageBackgroundLimits
 }
 
 /**
- * 估算单价（美元 / 百万 token），只在 Agent 不报成本时使用（codex-acp），结果一律标为估算。
- * 默认值按 OpenAI API 公开标价（https://openai.com/api/pricing ，2025 年末版本）录入，未与实际账单核对；
- * 按模型名最长前缀（型号边界）匹配，内置表不对未知型号使用 default。自定义 default 是明确的兜底估算。token 按 ACP 适配器的口径：inputTokens 不含缓存命中，缓存命中单列在 cachedReadTokens，
+ * 估算单价（美元 / 百万 token），只在 Agent 不报成本时使用（codex-acp、终端模式 Claude），结果一律标为估算。
+ * OpenAI 部分按公开标价（https://openai.com/api/pricing ，2025 年末版本）录入，未与实际账单核对。
+ * Claude 部分取自 Anthropic 官方定价页（https://platform.claude.com/docs/en/about-claude/pricing ，2026-10-13 查阅）：
+ * 输入、缓存读、缓存写、输出四项；缓存写按 5 分钟档（1 小时档单价更高，账本不区分，所以含 1 小时缓存写的会被低估）。
+ * 没有计入的官方加价：美国境内推理（inference_geo=us）1.1 倍、Opus 快速模式、Batch 折扣；账本读不到这些开关。
+ * Haiku 5.5 的单价按单次请求的提示长度分档（10 万 token 内 / 超过），账本只有整轮合计，分不了档，所以不录入，记为未定价。
+ * 匹配规则：按模型名最长前缀（型号边界）匹配，内置表不对未知型号使用 default；Claude 型号名在前缀之后只允许
+ * 日期后缀（-YYYYMMDD）或 -latest，所以 claude-opus-5-6 不会落到 claude-opus-5 的价格上。
+ * 自定义 default 是明确的兜底估算。token 按 ACP 适配器的口径：inputTokens 不含缓存命中，缓存命中单列在 cachedReadTokens，
  * 两者分别按 input、cachedInput 计。已安装的 codex-acp 1.12.1-preview.4 在 dist/index.js 的 toTokenCount 里把
  * inputTokens 换算成 inputTokens - cachedInputTokens，toPromptUsage 再把 cachedInputTokens 报成 cachedReadTokens；
  * claude-agent-acp 沿用 Anthropic 的 input_tokens，本来就不含缓存。
  * 部署时可用 DUTYDECK_USAGE_PRICING_JSON 整表覆盖。
  */
+const claudeRate = (inputPerMTok: number, cacheWritePerMTok: number, cachedInputPerMTok: number, outputPerMTok: number) => ({ inputPerMTok, cachedInputPerMTok, outputPerMTok, cacheWritePerMTok });
 export const defaultUsagePricing: UsagePricing = {
-  source: 'builtin', version: 'openai-public-2025-end-v1',
+  source: 'builtin', version: 'public-2026-10-v2',
   default: { inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10 },
   models: [
     { match: 'gpt-5.2', inputPerMTok: 1.75, cachedInputPerMTok: 0.175, outputPerMTok: 14 },
     { match: 'gpt-5.1-codex-mini', inputPerMTok: 0.25, cachedInputPerMTok: 0.025, outputPerMTok: 2 },
     { match: 'gpt-5-mini', inputPerMTok: 0.25, cachedInputPerMTok: 0.025, outputPerMTok: 2 },
     { match: 'gpt-5-nano', inputPerMTok: 0.05, cachedInputPerMTok: 0.005, outputPerMTok: 0.4 },
-    { match: 'gpt-5', inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10 }
+    { match: 'gpt-5', inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10 },
+    { match: 'claude-fable-5-1', ...claudeRate(10, 12.5, 0.25, 50) },
+    { match: 'claude-fable-5', ...claudeRate(10, 12.5, 1, 50) },
+    { match: 'claude-opus-5-5', ...claudeRate(4, 5, 0.2, 20) },
+    { match: 'claude-opus-5', ...claudeRate(5, 6.25, 0.5, 25) },
+    { match: 'claude-opus-4-8', ...claudeRate(5, 6.25, 0.5, 25) },
+    { match: 'claude-opus-4-7', ...claudeRate(5, 6.25, 0.5, 25) },
+    { match: 'claude-opus-4-6', ...claudeRate(5, 6.25, 0.5, 25) },
+    { match: 'claude-opus-4-5', ...claudeRate(5, 6.25, 0.5, 25) },
+    { match: 'claude-sonnet-5-5', ...claudeRate(2, 2.5, 0.1, 10) },
+    { match: 'claude-sonnet-5', ...claudeRate(2, 2.5, 0.2, 10) },
+    { match: 'claude-sonnet-4-6', ...claudeRate(3, 3.75, 0.3, 15) },
+    { match: 'claude-sonnet-4-5', ...claudeRate(3, 3.75, 0.3, 15) },
+    { match: 'claude-haiku-4-5', ...claudeRate(1, 1.25, 0.1, 5) }
   ]
 };
 export function parseUsagePricing(json?: string): UsagePricing {
@@ -36,13 +56,21 @@ export function parseUsagePricing(json?: string): UsagePricing {
 }
 
 interface Tokens { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
+/** Claude Code 会在型号后加 [1m]；Bedrock / Vertex 的型号带区域与厂商前缀、-v1:0 / @日期 后缀。统一成官方 API 型号名再匹配。 */
+function normalizeModelName(model: string | undefined) {
+  const name = (model ?? '').trim().toLowerCase().replace(/\[[^\]]*\]$/, '');
+  const claude = name.replace(/^(?:[a-z]{2,6}\.)?anthropic\./, '');
+  return claude.startsWith('claude-') ? claude.replace(/-v\d+(?::\d+)?$/, '').replace(/@(\d{8})$/, '-$1') : name;
+}
+function matchesModel(name: string, prefix: string) {
+  if (name === prefix) return true;
+  if (!name.startsWith(`${prefix}-`)) return false;
+  return !prefix.startsWith('claude-') || /^-(?:\d{8}|latest)$/.test(name.slice(prefix.length));
+}
 function priceSelection(pricing: UsagePricing, model: string | undefined, provider = 'unknown') {
-  const name = model?.toLowerCase() ?? '';
+  const name = normalizeModelName(model);
   const matchesProvider = (rate: z.infer<typeof rateSchema>) => !rate.provider || rate.provider.toLowerCase() === provider.toLowerCase();
-  const matched = pricing.models.filter(entry => {
-    const prefix = entry.match.toLowerCase();
-    return matchesProvider(entry) && (name === prefix || name.startsWith(`${prefix}-`));
-  }).sort((a, b) => b.match.length - a.match.length)[0];
+  const matched = pricing.models.filter(entry => matchesProvider(entry) && matchesModel(name, entry.match.toLowerCase())).sort((a, b) => b.match.length - a.match.length)[0];
   const builtin = pricing.source === 'builtin';
   const rate = matched ?? (!builtin && matchesProvider(pricing.default) ? pricing.default : undefined);
   const pricingSource: UsageLedgerEntry['pricingSource'] = matched ? (builtin ? 'builtin_model' : 'custom_model') : rate ? 'custom_default' : 'unmatched';
@@ -146,9 +174,16 @@ const usedUpThreshold = 100;
 const digestKey = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 32);
 const alertKey = (cap: UsageCap, month: string, threshold: number) => `usage_alert_${digestKey([cap.scope, cap.appId, cap.chatId ?? '', month, threshold])}`;
 
+/** 本月有费用算不出来的记录（终端模式 Claude 读不到 token、模型没有单价）时，上限只覆盖了已知部分。 */
+export function unknownUsageNote(totals: Pick<UsageTotals, 'unknownCostEntries' | 'unavailable' | 'unpriced'>) {
+  return totals.unknownCostEntries > 0
+    ? `注意：部分用量未知，上限可能不准（${totals.unknownCostEntries} 次任务的费用未知：${totals.unpriced} 次缺单价、${totals.unavailable} 次无用量数据，未计入已用金额）。`
+    : '';
+}
+
 /** 被上限拒绝时的说明：哪个上限、本月已用多少、谁能在哪里调高。 */
-export function capRefusal(cap: UsageCap, spent: number) {
-  return `${capLabel(cap.scope)}本月成本已达上限 ${usd(cap.monthlyCostUsd)}（已用 ${usd(spent)}），新任务不再执行，正在执行的任务不受影响。安装管理员可在 Dutydeck Web 的「用量与成本」里调高上限，否则下月 1 日起重新计算。`;
+export function capRefusal(cap: UsageCap, spent: number, unknownNote = '') {
+  return `${capLabel(cap.scope)}本月成本已达上限 ${usd(cap.monthlyCostUsd)}（已用 ${usd(spent)}），新任务不再执行，正在执行的任务不受影响。安装管理员可在 Dutydeck Web 的「用量与成本」里调高上限，否则下月 1 日起重新计算。${unknownNote}`;
 }
 
 interface Attribution { appId?: string; chatId?: string; actorId?: string; category: UsageCategory; origin: string; rootTaskId?: string; rootSessionId?: string }
@@ -164,6 +199,24 @@ export interface UsageLedgerOptions {
   notify?: (target: { appId: string; chatId: string }, text: string, idempotencyKey: string) => Promise<void>;
   log?: { warn(object: unknown, message: string): void };
   now?: () => Date;
+}
+/** 明细查询：from / to 是 daemon 本地时区的日历日（YYYY-MM-DD，含首尾两天），其余是精确匹配的筛选。 */
+export type UsageReportQuery = UsageReportFilter & { from?: string; to?: string };
+const dayText = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+function parseDay(value: string, label: string): Date {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  const date = match ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])) : undefined;
+  if (!date || dayText(date) !== value) throw new RuntimeError('USAGE_RANGE_INVALID', `${label} 需要是 YYYY-MM-DD 格式的日期`, 400);
+  return date;
+}
+/** 缺省为含今天在内的最近 30 天。结束日含当天：until 取次日本地零点（不含）。 */
+export function resolveUsageRange(query: Pick<UsageReportQuery, 'from' | 'to'>, now: Date) {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const to = query.to ? parseDay(query.to, 'to') : today;
+  const from = query.from ? parseDay(query.from, 'from') : new Date(to.getFullYear(), to.getMonth(), to.getDate() - 29);
+  if (from > to) throw new RuntimeError('USAGE_RANGE_INVALID', 'from 不能晚于 to', 400);
+  const until = new Date(to.getFullYear(), to.getMonth(), to.getDate() + 1);
+  return { from: dayText(from), to: dayText(to), since: from.toISOString(), until: until.toISOString() };
 }
 export interface UsageSummaryWindow { since: string; totals: UsageTotals; bots: UsageGroup[]; chats: UsageGroup[]; actors: UsageGroup[]; categories: UsageGroup[] }
 
@@ -228,7 +281,7 @@ export class UsageLedger {
     return (await this.repos.usage.listCaps()).filter(cap => cap.appId === appId && (cap.scope === 'bot' || cap.chatId === chatId));
   }
   private spent(cap: UsageCap, since: Date) {
-    return this.repos.usage.totals({ since: since.toISOString(), appId: cap.appId, ...(cap.scope === 'group' ? { chatId: cap.chatId } : {}) }).then(totals => totals.costUsd);
+    return this.repos.usage.totals({ since: since.toISOString(), appId: cap.appId, ...(cap.scope === 'group' ? { chatId: cap.chatId } : {}) });
   }
 
   /** runtime 的 admitTask 钩子：本月已用满 Bot 或群上限时拒绝新任务。子步骤属于已派发的根任务，不在这里拦。 */
@@ -271,9 +324,9 @@ export class UsageLedger {
   async refusal(appId: string, chatId?: string, request?: Pick<TaskRequestV1, 'namespace' | 'key'>): Promise<string | undefined> {
     const since = usageMonthStart(this.now());
     for (const cap of (await this.capsFor(appId, chatId)).sort((a, b) => a.scope === b.scope ? 0 : a.scope === 'group' ? -1 : 1)) {
-      const spent = await this.spent(cap, since);
-      if (spent < cap.monthlyCostUsd) continue;
-      const reason = capRefusal(cap, spent);
+      const totals = await this.spent(cap, since);
+      if (totals.costUsd < cap.monthlyCostUsd) continue;
+      const reason = capRefusal(cap, totals.costUsd, unknownUsageNote(totals));
       void this.explain(cap, chatId, reason, request).catch(error => this.options.log?.warn({ error, appId }, '用量上限说明发送失败'));
       return reason;
     }
@@ -309,13 +362,14 @@ export class UsageLedger {
     for (const cap of await this.capsFor(entry.appId, entry.chatId)) {
       const chatId = cap.scope === 'group' ? cap.chatId : entry.chatId;
       if (!chatId?.startsWith('oc_')) continue;
-      const spent = await this.spent(cap, usageMonthStart(now));
+      const totals = await this.spent(cap, usageMonthStart(now));
+      const spent = totals.costUsd;
       const claimed: number[] = [];
       for (const threshold of usageAlertThresholds) {
         if (spent >= cap.monthlyCostUsd * threshold / 100 && await this.repos.usage.claimAlert(cap.scope, cap.appId, cap.chatId, month, threshold)) claimed.push(threshold);
       }
       if (!claimed.length) continue;
-      const text = `用量提醒：${capLabel(cap.scope)}本月成本已用 ${usd(spent)}，达到月度上限 ${usd(cap.monthlyCostUsd)} 的 ${percent(spent, cap.monthlyCostUsd)}%。用满上限后新任务会被拒绝，正在执行的任务不受影响。`;
+      const text = `用量提醒：${capLabel(cap.scope)}本月成本已用 ${usd(spent)}，达到月度上限 ${usd(cap.monthlyCostUsd)} 的 ${percent(spent, cap.monthlyCostUsd)}%。用满上限后新任务会被拒绝，正在执行的任务不受影响。${unknownUsageNote(totals)}`;
       try { await this.options.notify({ appId: cap.appId, chatId }, text, alertKey(cap, month, claimed.at(-1)!)); }
       catch (error) {
         for (const threshold of claimed) await this.repos.usage.releaseAlert(cap.scope, cap.appId, cap.chatId, month, threshold);
@@ -333,6 +387,34 @@ export class UsageLedger {
       return { since: filter.since, totals, bots, chats, actors, categories };
     };
     return { month: await window(usageMonthStart(now)), week: await window(new Date(now.getTime() - 7 * 86_400_000)), caps: await this.repos.usage.listCaps(), backgroundBudget: { ...this.options.backgroundLimits, month: monthKey(now), usage: await this.repos.usage.backgroundTaskCounts(monthKey(now)) } };
+  }
+
+  /** 用量明细：日趋势与按型号 / agent / 机器人 / 来源的分布，同一时间范围与筛选下各部分合计一致。 */
+  async report(query: UsageReportQuery): Promise<UsageReport> {
+    const range = resolveUsageRange(query, this.now());
+    const rangeFilter: UsageFilter = { since: range.since, until: range.until };
+    const filter = this.usageFilter(query, range);
+    const usage = this.repos.usage;
+    const [totals, daily, models, agents, bots, origins, allModels, allAgents, allBots, allOrigins] = await Promise.all([
+      usage.totals(filter), usage.summarize('day', filter), usage.summarize('model', filter), usage.summarize('agentId', filter), usage.summarize('appId', filter), usage.summarize('origin', filter),
+      usage.summarize('model', rangeFilter), usage.summarize('agentId', rangeFilter), usage.summarize('appId', rangeFilter), usage.summarize('origin', rangeFilter)
+    ]);
+    const known = <T>(values: Array<T | undefined>) => values.filter((value): value is T => value !== undefined).sort();
+    return {
+      timezone: { name: Intl.DateTimeFormat().resolvedOptions().timeZone, offsetMinutes: -this.now().getTimezoneOffset() },
+      range, filter: { ...(query.model ? { model: query.model } : {}), ...(query.agentId ? { agentId: query.agentId } : {}), ...(query.appId ? { appId: query.appId } : {}), ...(query.origin ? { origin: query.origin } : {}) },
+      totals, daily, models, agents, bots, origins,
+      options: { models: [...known(allModels.map(group => group.model)), ...(allModels.some(group => group.model === undefined) ? [null] : [])], agentIds: known(allAgents.map(group => group.agentId)), appIds: known(allBots.map(group => group.appId)), origins: known(allOrigins.map(group => group.origin)) }
+    };
+  }
+
+  /** 同一时间范围与筛选下按根任务合并的分页列表（子步骤并入根任务，不重复计数）。 */
+  tasks(query: UsageReportQuery, page: { limit: number; offset: number }): Promise<UsageTaskPage> {
+    return this.repos.usage.listTasks(this.usageFilter(query, resolveUsageRange(query, this.now())), page);
+  }
+
+  private usageFilter(query: UsageReportQuery, range: { since: string; until: string }): UsageFilter {
+    return { since: range.since, until: range.until, ...(query.model ? { model: query.model } : {}), ...(query.agentId ? { agentId: query.agentId } : {}), ...(query.appId ? { appId: query.appId } : {}), ...(query.origin ? { origin: query.origin } : {}) };
   }
 
   /** 任务详情：本会话自身的用量，加上归到它名下的编排子步骤。 */

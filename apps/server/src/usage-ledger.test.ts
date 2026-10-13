@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { Session, TaskRequestV1 } from '@dutydeck/shared';
-import { classifyUsage, cumulativeDelta, defaultUsagePricing, estimateCostUsd, measureUsage, parseUsagePricing, UsageLedger, type UsageLedgerOptions } from './usage-ledger.js';
+import { classifyUsage, cumulativeDelta, defaultUsagePricing, estimateCostUsd, measureUsage, parseUsagePricing, resolveUsageRange, UsageLedger, type UsageLedgerOptions } from './usage-ledger.js';
 
 const at = '2026-09-25T00:00:00.000Z';
 const session = (id: string, source: string | undefined, sourceId?: string, agentId = 'claude'): Session => ({ id, agentId, state: 'idle', cwd: '/tmp', source, sourceId, runId: `run_${id}`, createdAt: at, updatedAt: at } as Session);
@@ -50,6 +50,50 @@ describe('usage measurement', () => {
     const custom = parseUsagePricing(JSON.stringify({ default: { inputPerMTok: 1, cachedInputPerMTok: 1, outputPerMTok: 1 }, models: [] }));
     expect(estimateCostUsd(custom, 'gpt-5', { inputTokens: 1_000_000 })).toBe(1);
     expect(() => parseUsagePricing('{"default":{}}')).toThrow();
+  });
+});
+
+describe('claude pricing', () => {
+  const perMTok = (model: string, tokens: Parameters<typeof estimateCostUsd>[2]) => estimateCostUsd(defaultUsagePricing, model, tokens);
+  // 官方定价页：输入 / 5 分钟缓存写 / 缓存读 / 输出，单位美元每百万 token。
+  const million = { inputTokens: 1_000_000, cacheWriteTokens: 1_000_000, cacheReadTokens: 1_000_000, outputTokens: 1_000_000 };
+  it.each([
+    ['claude-fable-5-1', 10 + 12.5 + 0.25 + 50], ['claude-fable-5', 10 + 12.5 + 1 + 50],
+    ['claude-opus-5-5', 4 + 5 + 0.2 + 20], ['claude-opus-5', 5 + 6.25 + 0.5 + 25], ['claude-opus-4-8', 5 + 6.25 + 0.5 + 25], ['claude-opus-4-5', 5 + 6.25 + 0.5 + 25],
+    ['claude-sonnet-5-5', 2 + 2.5 + 0.1 + 10], ['claude-sonnet-5', 2 + 2.5 + 0.2 + 10], ['claude-sonnet-4-6', 3 + 3.75 + 0.3 + 15], ['claude-haiku-4-5', 1 + 1.25 + 0.1 + 5]
+  ])('prices %s from the official table including cache read and write', (model, expected) => {
+    expect(perMTok(model, million)).toBeCloseTo(expected);
+  });
+
+  it('accepts dated, [1m], Bedrock and Vertex spellings of a known model', () => {
+    for (const name of ['claude-opus-5-5-20261001', 'CLAUDE-OPUS-5-5', 'claude-opus-5-5[1m]', 'anthropic.claude-opus-5-5', 'us.anthropic.claude-opus-5-5-v1:0', 'claude-opus-5-5@20261001', 'claude-opus-5-5-latest']) {
+      expect(perMTok(name, { inputTokens: 1_000_000 }), name).toBeCloseTo(4);
+    }
+  });
+
+  it('never falls back to another model, another family or another vendor for unknown names', () => {
+    // 未来的 5.6、没录入的 Haiku 5.5（按请求提示长度分档，账本分不了档）、别家模型、代理别名、Claude Code 的模型别名，一律未定价。
+    for (const name of ['claude-opus-5-6', 'claude-opus-5-5-fast', 'claude-haiku-5-5', 'claude-sonnet-4', 'claude-opus-4-1', 'opus', 'default', 'gemini-3.8-flash', 'auto_model/alwaysday1_max', 'claude', '']) {
+      expect(perMTok(name, { inputTokens: 1000 }), name).toBeUndefined();
+      expect(measureUsage({ reading: { usageRef: 'r', breakdown: { inputTokens: 1000 } }, freshTokens: true, model: name, pricing: defaultUsagePricing }), name)
+        .toMatchObject({ dataStatus: 'unpriced', unpricedReason: 'unknown_model', pricingSource: 'unmatched', inputTokens: 1000 });
+    }
+    expect(estimateCostUsd(defaultUsagePricing, undefined, { inputTokens: 1000 })).toBeUndefined();
+  });
+
+  it('keeps the OpenAI prefix behaviour and the DUTYDECK_USAGE_PRICING_JSON override', () => {
+    expect(perMTok('gpt-5-codex', { inputTokens: 1_000_000 })).toBeCloseTo(1.25);
+    const custom = parseUsagePricing(JSON.stringify({ default: { inputPerMTok: 1, cachedInputPerMTok: 1, outputPerMTok: 1 }, models: [{ match: 'claude-opus-5-5', inputPerMTok: 9, cachedInputPerMTok: 1, outputPerMTok: 1 }] }));
+    expect(estimateCostUsd(custom, 'claude-opus-5-5', { inputTokens: 1_000_000 })).toBe(9);
+    // 自定义表里 default 是明确的兜底，内置表没有。
+    expect(estimateCostUsd(custom, 'claude-unknown', { inputTokens: 1_000_000 })).toBe(1);
+  });
+
+  it('marks claude turns as estimates and records the table provenance', () => {
+    const reading = { usageRef: 'claude:msg_1', breakdown: { inputTokens: 1000, cachedReadTokens: 9000, cachedWriteTokens: 2000, outputTokens: 500 } };
+    const measured = measureUsage({ reading, freshTokens: true, model: 'claude-sonnet-5-5', pricing: defaultUsagePricing });
+    expect(measured).toMatchObject({ costEstimated: true, dataStatus: 'estimated', pricingSource: 'builtin_model', pricingMatch: 'claude-sonnet-5-5' });
+    expect(measured.costUsd).toBeCloseTo((1000 * 2 + 9000 * 0.1 + 2000 * 2.5 + 500 * 10) / 1_000_000);
   });
 });
 
@@ -298,5 +342,131 @@ describe('complete pricing and provenance', () => {
     await h.ledger.record(current, { taskId: 't', attemptId: 'reported-provider' }, { provider: 'actual-service', model: 'actual-model', usageRef: 'two', cost: { amount: 0.1, currency: 'USD' } });
     expect(append.mock.calls[1]![0]).toMatchObject({ provider: 'actual-service', model: 'actual-model', modelSource: 'reading', pricingSource: 'reported' });
     h.repos.close();
+  });
+});
+
+describe('terminal-mode (PTY) Claude usage in the ledger', () => {
+  const pty = session('ses_pty', 'lark', 'cli_a:oc_1:group:chat:oc_1', 'claude-pty');
+  const lark = (key: string) => request({ key, actor: { kind: 'channel', id: 'ou_1', appId: 'cli_a' } });
+  // 与 PTY 驱动在 completed 之前发的 turn_usage 读数同一形状（见 packages/pty-driver 的 claude-usage.test.ts）。
+  const reading = (usageRef: string, model: string | undefined, breakdown: Record<string, number>) => ({ state: 'turn_usage', usageRef, ...(model ? { model } : {}), breakdown });
+
+  it('books a transcript reading as an estimate from the Claude table, then ignores the completed event of the same attempt', async () => {
+    const h = harness({ requests: { t1: lark('lark:cli_a:om_1:1') } });
+    await h.repos.sessions.save(pty);
+    await h.ledger.record(pty, { taskId: 't1', attemptId: 'a1' }, reading('claude:msg_1', 'claude-opus-5-5', { inputTokens: 1000, outputTokens: 500, cachedReadTokens: 100_000, cachedWriteTokens: 10_000 }));
+    await h.ledger.record(pty, { taskId: 't1', attemptId: 'a1' });
+    const [entry] = await h.repos.usage.listEntries({ sessionId: pty.id });
+    expect(entry).toMatchObject({ model: 'claude-opus-5-5', modelSource: 'reading', dataStatus: 'estimated', costEstimated: true, pricingSource: 'builtin_model', pricingMatch: 'claude-opus-5-5', inputTokens: 1000, cacheReadTokens: 100_000, cacheWriteTokens: 10_000 });
+    expect(entry!.costUsd).toBeCloseTo((1000 * 4 + 500 * 20 + 100_000 * 0.2 + 10_000 * 5) / 1_000_000);
+    expect(await h.repos.usage.totals({ sessionId: pty.id })).toMatchObject({ entries: 1, unavailable: 0, unknownCostEntries: 0 });
+    h.repos.close();
+  });
+
+  it('keeps tokens but no cost for a model without a price, and records a turn with no transcript usage as unknown, never zero', async () => {
+    const h = harness({ requests: { t1: lark('lark:cli_a:om_1:1'), t2: lark('lark:cli_a:om_2:1'), t3: lark('lark:cli_a:om_3:1') } });
+    await h.repos.sessions.save(pty);
+    await h.ledger.record(pty, { taskId: 't1', attemptId: 'a1' }, reading('claude:msg_1', 'gemini-3.8-flash', { inputTokens: 1000, outputTokens: 10 }));
+    await h.ledger.record(pty, { taskId: 't2', attemptId: 'a2' }, reading('claude:msg_2', 'claude-haiku-4-5 + claude-opus-5-5', { inputTokens: 5 }));
+    await h.ledger.record(pty, { taskId: 't3', attemptId: 'a3' });
+    const entries = (await h.repos.usage.listEntries({ sessionId: pty.id })).sort((a, b) => a.attemptId.localeCompare(b.attemptId));
+    expect(entries.map(entry => [entry.dataStatus, entry.costUsd])).toEqual([['unpriced', undefined], ['unpriced', undefined], ['unavailable', undefined]]);
+    expect(entries[0]).toMatchObject({ inputTokens: 1000, unpricedReason: 'unknown_model' });
+    expect(await h.repos.usage.totals({ sessionId: pty.id })).toMatchObject({ entries: 3, costUsd: 0, pricedEntries: 0, unknownCostEntries: 3, unpriced: 2, unavailable: 1, costCoverage: 0 });
+    h.repos.close();
+  });
+
+  it('says that usage is partly unknown, in the refusal and in the 75% alert, only when some is', async () => {
+    const t = (n: number) => lark(`lark:cli_a:om_${n}:1`);
+    const h = harness({ requests: { t1: t(1), t2: t(2), t3: t(3) } });
+    await h.repos.sessions.save(group);
+    await h.ledger.setCap({ scope: 'bot', appId: 'cli_a', monthlyCostUsd: 4 });
+    await h.ledger.record(group, { taskId: 't1', attemptId: 'a1' }, { usageRef: 'r1', cost: { amount: 3 } });
+    await vi.waitFor(() => expect(h.notify).toHaveBeenCalledTimes(1));
+    expect(String(h.notify.mock.calls[0]![1])).not.toContain('用量未知');
+    // 一次没有任何用量数据的记录：之后的告警与拒绝都带上「部分用量未知」。
+    await h.ledger.record(group, { taskId: 't2', attemptId: 'a2' });
+    await h.ledger.record(group, { taskId: 't3', attemptId: 'a3' }, { usageRef: 'r3', cost: { amount: 4.5 } });
+    await vi.waitFor(() => expect(h.notify).toHaveBeenCalledTimes(2));
+    expect(String(h.notify.mock.calls[1]![1])).toContain('部分用量未知，上限可能不准');
+    await expect(h.ledger.admit(group, t(4))).rejects.toMatchObject({ code: 'USAGE_CAP_EXCEEDED', message: expect.stringContaining('部分用量未知，上限可能不准（1 次任务的费用未知：0 次缺单价、1 次无用量数据') });
+    h.repos.close();
+  });
+});
+
+describe('usage report (drill-down)', () => {
+  // 两个型号 × 两个日期（含一个归到根任务的子步骤），日期按本地时区切分，与 SQLite 的 localtime 一致。
+  const root = session('ses_root', 'lark', 'cli_a:oc_1:group:thread:om_root');
+  const step = session('ses_step', 'work_item', 'work_1:step_1:1', 'codex');
+  const lark = (key: string) => request({ key, actor: { kind: 'channel', id: 'ou_1', appId: 'cli_a' } });
+  async function seeded() {
+    let now = new Date('2026-09-24T10:00:00');
+    const h = harness({ requests: { t1: lark('lark:cli_a:om_1:1'), t2: lark('lark:cli_a:om_2:1'), step_task: request({ namespace: 'work_item', key: 'work_1:step_1:1', actor: { kind: 'channel', id: 'ou_1', appId: 'cli_a' } }) },
+      parentOf: async () => ({ parentSessionId: root.id, parentTaskId: 't1' }), now: () => now });
+    await h.repos.sessions.save(root); await h.repos.sessions.save(step);
+    const usage = (ref: string, model: string, inputTokens: number) => ({ state: 'turn_usage', usageRef: ref, model, breakdown: { inputTokens, outputTokens: 0 } });
+    await h.ledger.record(root, { taskId: 't1', attemptId: 'a1' }, usage('r1', 'claude-opus-5-5', 1_000_000));          // 09-24 opus $4
+    await h.ledger.record(step, { taskId: 'step_task', attemptId: 's1' }, usage('r2', 'gpt-5-codex', 1_000_000));       // 09-24 子步骤 gpt-5 $1.25
+    now = new Date('2026-09-25T09:00:00');
+    await h.ledger.record(root, { taskId: 't2', attemptId: 'a2' }, usage('r3', 'claude-sonnet-5-5', 1_000_000));        // 09-25 sonnet $2
+    await h.ledger.record(root, { taskId: 't2', attemptId: 'a3' }, usage('r4', 'gemini-3.8-flash', 1_000_000));         // 09-25 未定价
+    await h.ledger.record(root, { taskId: 't2', attemptId: 'a4' });                                                     // 09-25 无用量
+    return h;
+  }
+
+  it('agrees with the grand total in every breakdown, and never turns unknown into zero cost', async () => {
+    const h = await seeded();
+    const report = await h.ledger.report({ from: '2026-09-24', to: '2026-09-25' });
+    expect(report.range).toMatchObject({ from: '2026-09-24', to: '2026-09-25' });
+    expect(report.totals).toMatchObject({ entries: 5, unpriced: 1, unavailable: 1, unknownCostEntries: 2, pricedEntries: 3 });
+    expect(report.totals.costUsd).toBeCloseTo(4 + 1.25 + 2);
+    expect(report.daily.map(row => [row.day, row.entries, Number(row.costUsd.toFixed(2)), row.unknownCostEntries])).toEqual([['2026-09-24', 2, 5.25, 0], ['2026-09-25', 3, 2, 2]]);
+    for (const part of [report.daily, report.models, report.agents, report.bots, report.origins]) {
+      expect(part.reduce((sum, row) => sum + row.entries, 0)).toBe(5);
+      expect(part.reduce((sum, row) => sum + row.costUsd, 0)).toBeCloseTo(report.totals.costUsd);
+      expect(part.reduce((sum, row) => sum + row.unknownCostEntries, 0)).toBe(2);
+    }
+    expect(report.models.map(row => [row.model, row.entries, row.unknownCostEntries])).toEqual(expect.arrayContaining([['gemini-3.8-flash', 1, 1], [undefined, 1, 1]]));
+    expect(report.options).toMatchObject({ agentIds: ['claude', 'codex'], appIds: ['cli_a'], origins: ['lark_group', 'work_item'] });
+    expect(report.options.models).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5', 'gemini-3.8-flash', 'gpt-5-codex', null]);
+    expect(report.timezone.name).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    h.repos.close();
+  });
+
+  it('filters by model, agent and origin and keeps the day split; the options ignore the other filters', async () => {
+    const h = await seeded();
+    const opus = await h.ledger.report({ from: '2026-09-24', to: '2026-09-25', model: 'claude-opus-5-5' });
+    expect(opus.totals).toMatchObject({ entries: 1 });
+    expect(opus.daily.map(row => row.day)).toEqual(['2026-09-24']);
+    expect(opus.options.models).toHaveLength(5);
+    expect((await h.ledger.report({ from: '2026-09-24', to: '2026-09-25', agentId: 'codex' })).totals.costUsd).toBeCloseTo(1.25);
+    expect((await h.ledger.report({ from: '2026-09-24', to: '2026-09-25', origin: 'work_item' })).totals.entries).toBe(1);
+    expect((await h.ledger.report({ from: '2026-09-25', to: '2026-09-25' })).totals.entries).toBe(3);
+    expect((await h.ledger.report({ from: '2026-09-26', to: '2026-09-30' })).totals).toMatchObject({ entries: 0, costCoverage: null });
+    h.repos.close();
+  });
+
+  it('lists the tasks behind a range with the sub-step inside its root task, and the page rows add up to the report total', async () => {
+    const h = await seeded();
+    const query = { from: '2026-09-24', to: '2026-09-25' };
+    const report = await h.ledger.report(query);
+    const page = await h.ledger.tasks(query, { limit: 1, offset: 0 });
+    const rest = await h.ledger.tasks(query, { limit: 10, offset: 1 });
+    expect(page.total).toBe(2);
+    const rows = [...page.tasks, ...rest.tasks];
+    expect(rows.map(row => row.taskId).sort()).toEqual(['t1', 't2']);
+    expect(rows.reduce((sum, row) => sum + row.entries, 0)).toBe(report.totals.entries);
+    expect(rows.reduce((sum, row) => sum + row.costUsd, 0)).toBeCloseTo(report.totals.costUsd);
+    expect(rows.find(row => row.taskId === 't1')).toMatchObject({ sessionId: 'ses_root', entries: 2, subStepEntries: 1, models: ['claude-opus-5-5', 'gpt-5-codex'] });
+    expect(rows.find(row => row.taskId === 't2')).toMatchObject({ entries: 3, unknownCostEntries: 2 });
+    h.repos.close();
+  });
+
+  it('defaults to the last 30 days and rejects malformed or inverted ranges', async () => {
+    expect(resolveUsageRange({}, new Date('2026-09-25T08:00:00'))).toMatchObject({ from: '2026-08-27', to: '2026-09-25' });
+    expect(resolveUsageRange({ from: '2026-09-25', to: '2026-09-25' }, new Date('2026-09-25T08:00:00'))).toMatchObject({ since: new Date('2026-09-25T00:00:00').toISOString(), until: new Date('2026-09-26T00:00:00').toISOString() });
+    expect(() => resolveUsageRange({ from: '2026-02-30' }, new Date())).toThrow(/YYYY-MM-DD/);
+    expect(() => resolveUsageRange({ from: '09-25' }, new Date())).toThrow(/YYYY-MM-DD/);
+    expect(() => resolveUsageRange({ from: '2026-09-26', to: '2026-09-25' }, new Date())).toThrow(/不能晚于/);
   });
 });

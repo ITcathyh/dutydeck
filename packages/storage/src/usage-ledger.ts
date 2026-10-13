@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { usageCategories, type UsageCap, type UsageCapScope, type UsageDimension, type UsageFilter, type UsageGroup, type UsageLedgerEntry, type UsageLedgerRepository, type UsageTotals } from '@dutydeck/shared';
+import { usageCategories, usageUnknownModel, type UsageCap, type UsageCapScope, type UsageDimension, type UsageFilter, type UsageGroup, type UsageLedgerEntry, type UsageLedgerRepository, type UsageTaskPage, type UsageTaskRow, type UsageTotals } from '@dutydeck/shared';
 
 export function createUsageLedgerSchema(db: Database.Database): void {
   const categories = usageCategories.map(category => `'${category}'`).join(', ');
@@ -99,9 +99,10 @@ const aggregates = `COUNT(*) AS entries, SUM(cost_usd) AS cost_usd, SUM(CASE WHE
   SUM(CASE WHEN data_status = 'unavailable' THEN 1 ELSE 0 END) AS unavailable,
   SUM(CASE WHEN data_status = 'unpriced' THEN 1 ELSE 0 END) AS unpriced,
   SUM(CASE WHEN cost_usd IS NOT NULL AND data_status IN ('reported', 'estimated') THEN 1 ELSE 0 END) AS priced_entries`;
-/** 群按 (Bot, 群) 分组：同一个群里的两个 Bot 各算各的。 */
+/** 群按 (Bot, 群) 分组：同一个群里的两个 Bot 各算各的。day 按进程本地时区（daemon 时区）切日。 */
 const groupings: Record<UsageDimension, Array<[keyof UsageGroup, string]>> = {
-  appId: [['appId', 'app_id']], chatId: [['appId', 'app_id'], ['chatId', 'chat_id']], actorId: [['actorId', 'actor_id']], category: [['category', 'category']]
+  appId: [['appId', 'app_id']], chatId: [['appId', 'app_id'], ['chatId', 'chat_id']], actorId: [['actorId', 'actor_id']], category: [['category', 'category']],
+  model: [['model', 'model']], agentId: [['agentId', 'agent_id']], origin: [['origin', 'origin']], day: [['day', "date(recorded_at, 'localtime')"]]
 };
 
 function where(filter: UsageFilter): { sql: string; values: string[] } {
@@ -109,10 +110,15 @@ function where(filter: UsageFilter): { sql: string; values: string[] } {
   const values: string[] = [];
   const add = (clause: string, value: string | undefined) => { if (value !== undefined) { clauses.push(clause); values.push(value); } };
   add('recorded_at >= ?', filter.since);
+  add('recorded_at < ?', filter.until);
   add('app_id = ?', filter.appId);
   add('chat_id = ?', filter.chatId);
   add('session_id = ?', filter.sessionId);
   add('root_session_id = ?', filter.rootSessionId);
+  add('agent_id = ?', filter.agentId);
+  add('origin = ?', filter.origin);
+  if (filter.model === usageUnknownModel) clauses.push('model IS NULL');
+  else add('model = ?', filter.model);
   return { sql: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', values };
 }
 
@@ -202,16 +208,30 @@ export function createUsageLedgerRepository(sqlite: Database.Database): UsageLed
     async summarize(dimension: UsageDimension, filter: UsageFilter): Promise<UsageGroup[]> {
       const { sql, values } = where(filter);
       const keys = groupings[dimension];
-      const list = keys.map(([, column]) => column).join(', ');
-      const rows = sqlite.prepare(`SELECT ${list}, ${aggregates} FROM usage_ledger ${sql} GROUP BY ${list} ORDER BY SUM(cost_usd) DESC, COUNT(*) DESC`).all(...values) as LedgerRow[];
+      const select = keys.map(([, expression], index) => `${expression} AS g${index}`).join(', ');
+      const groupBy = keys.map((_, index) => `g${index}`).join(', ');
+      const order = dimension === 'day' ? groupBy : `SUM(cost_usd) DESC, COUNT(*) DESC, ${groupBy}`;
+      const rows = sqlite.prepare(`SELECT ${select}, ${aggregates} FROM usage_ledger ${sql} GROUP BY ${groupBy} ORDER BY ${order}`).all(...values) as Array<LedgerRow & Record<string, string | null>>;
       return rows.map(row => {
         const group: Record<string, unknown> = {};
-        for (const [key, column] of keys) {
-          const value = (row as unknown as Record<string, string | null>)[column];
-          if (value !== null && value !== undefined) group[key] = value;
-        }
+        keys.forEach(([key], index) => { const value = row[`g${index}`]; if (value !== null && value !== undefined) group[key] = value; });
         return { ...group, ...totalsOf(row) } as UsageGroup;
       });
+    },
+    async listTasks(filter: UsageFilter, page: { limit: number; offset: number }): Promise<UsageTaskPage> {
+      const { sql, values } = where(filter);
+      // 子步骤（root_task_id 不为空）并到根任务；根任务自身的行没有 root_task_id。
+      const key = 'COALESCE(root_task_id, task_id)';
+      const { total } = sqlite.prepare(`SELECT COUNT(DISTINCT ${key}) AS total FROM usage_ledger ${sql}`).get(...values) as { total: number };
+      const rows = sqlite.prepare(`SELECT ${key} AS task_id, MAX(COALESCE(root_session_id, session_id)) AS session_id, MAX(app_id) AS app_id, MAX(chat_id) AS chat_id,
+        COALESCE(MAX(CASE WHEN root_task_id IS NULL THEN agent_id END), MAX(agent_id)) AS agent_id, COALESCE(MAX(CASE WHEN root_task_id IS NULL THEN origin END), MAX(origin)) AS origin,
+        json_group_array(DISTINCT model) AS models, MIN(recorded_at) AS first_recorded_at, MAX(recorded_at) AS last_recorded_at, SUM(CASE WHEN root_task_id IS NOT NULL THEN 1 ELSE 0 END) AS sub_step_entries, ${aggregates}
+        FROM usage_ledger ${sql} GROUP BY ${key} ORDER BY MAX(recorded_at) DESC, ${key} LIMIT ? OFFSET ?`).all(...values, page.limit, page.offset) as Array<LedgerRow & Record<string, any>>;
+      return { total, tasks: rows.map(row => ({
+        taskId: row.task_id, sessionId: row.session_id, ...(row.app_id ? { appId: row.app_id } : {}), ...(row.chat_id ? { chatId: row.chat_id } : {}),
+        agentId: row.agent_id, origin: row.origin, models: (JSON.parse(row.models) as Array<string | null>).filter((model): model is string => model !== null).sort(),
+        firstRecordedAt: row.first_recorded_at, lastRecordedAt: row.last_recorded_at, subStepEntries: row.sub_step_entries ?? 0, ...totalsOf(row)
+      } satisfies UsageTaskRow)) };
     },
     async listCaps(): Promise<UsageCap[]> {
       return (sqlite.prepare('SELECT * FROM usage_caps ORDER BY scope, app_id, chat_id').all() as CapRow[]).map(capOf);

@@ -4,24 +4,13 @@ import type { UsageBackgroundBudget, UsageCap, UsageCategory } from '@dutydeck/s
 import { api, type LarkBotConfig, type UsageSummaryWindow, type UsageTotalsResponse as UsageTotals, type UsageGroupResponse as UsageGroup } from '../api';
 import { Banner, Button, Card, EmptyState, Field, Input, Select, Spinner, Tabs } from './primitives';
 import { SessionInsightOverview } from './SessionInsightOverview';
+import { count, usageText, usd } from './usageFormat';
+import { UsageDetail } from './UsageDetail';
 
 type UsageRange = 'month' | 'week';
-export type UsageView = 'cost' | 'insight';
+export type UsageView = 'cost' | 'detail' | 'insight';
 
 const categoryLabels: Record<UsageCategory, string> = { explicit: '显式请求', proactive: '主动介入', scheduled: '定时', background: '后台' };
-const usd = (value: number) => `$${value.toFixed(2)}`;
-const count = (value: number) => value.toLocaleString('zh-CN');
-
-/** 成本里估算的部分单独标出；PTY 等不上报用量的记录只计次数，不算进成本。 */
-function usageText(totals: UsageTotals) {
-  const parts = [`已知费用 ${usd(totals.costUsd)}${totals.estimatedCostUsd > 0 ? `（含估算 ${usd(totals.estimatedCostUsd)}）` : ''}`,
-    `输入 ${count(totals.inputTokens)} · 输出 ${count(totals.outputTokens)} token`, `${count(totals.entries)} 次`];
-  parts.push(`计价覆盖率 ${totals.costCoverage === null ? '暂无记录' : typeof totals.costCoverage === 'number' && Number.isFinite(totals.costCoverage) ? `${Math.round(totals.costCoverage * 100)}%` : '未知'}`);
-  if (totals.unpriced) parts.push(`${count(totals.unpriced)} 次有 token、费用未知`);
-  if (totals.unavailable) parts.push(`${count(totals.unavailable)} 次无用量数据`);
-  return parts.join(' · ');
-}
-
 function UsageList({ title, rows, label }: { title: string; rows: UsageGroup[]; label(row: UsageGroup): string }) {
   return <section aria-label={title} className="space-y-2">
     <h3 className="text-body font-semibold">{title}</h3>
@@ -35,12 +24,14 @@ function UsageList({ title, rows, label }: { title: string; rows: UsageGroup[]; 
 }
 
 // 用量汇总与月度上限都跨所有 Bot，服务端只对安装管理员开放；只在「用量与成本」打开时挂载。
-export function UsageOverview({ bots, initialView = 'cost', onViewChange, onOpenSession, onCompare }: {
+export function UsageOverview({ bots, initialView = 'cost', onViewChange, onOpenSession, onOpenTask, onCompare }: {
   bots: LarkBotConfig[];
   /** 深链 panel=usage&view=insight 恢复到会话分析 tab；缺省为费用 tab。 */
   initialView?: UsageView;
   onViewChange?(view: UsageView): void;
   onOpenSession?(sessionId: string): void;
+  /** 从用量明细跳到任务详情（会话页）。 */
+  onOpenTask?(sessionId: string): void;
   onCompare?(leftSessionId: string, rightSessionId: string): void;
 }) {
   const [view, setView] = useState<UsageView>(initialView);
@@ -55,8 +46,11 @@ export function UsageOverview({ bots, initialView = 'cost', onViewChange, onOpen
     value={view}
     onChange={changeView}
     label="用量与成本视图"
-    items={[{ id: 'cost', label: '费用' }, { id: 'insight', label: '会话分析' }]}
+    items={[{ id: 'cost', label: '费用' }, { id: 'detail', label: '明细' }, { id: 'insight', label: '会话分析' }]}
   />;
+
+  // 明细 tab 有自己的查询；费用汇总失败或 pending 都不应阻塞它。
+  if (view === 'detail') return <div className="space-y-4">{viewTabs}<UsageDetail botName={botName} onOpenTask={sessionId => onOpenTask?.(sessionId)}/></div>;
 
   // 会话分析 tab 不依赖费用查询：费用接口失败或 pending 都不应阻塞分析汇总。
   if (view === 'insight') {
@@ -131,6 +125,7 @@ function UsageCaps({ bots, caps, month, botName, chatName, groups }: { bots: Lar
   return <Card as="section" padding="md" className="space-y-3" aria-label="月度成本上限">
     <h3 className="text-body font-semibold">月度成本上限</h3>
     <p className="text-caption text-secondary">默认不设上限。美元上限仅累计已知费用，未知费用不代表免费。本月用到上限的 75% 和 95% 时各在群里提醒一次，用满后第一次拒绝新任务时再通知一次；之后新任务在派发前被拒绝并说明原因，正在执行的任务不受影响。下月 1 日起重新计算。</p>
+    {(month.totals.unknownCostEntries ?? 0) > 0 && <Banner tone="warning">部分用量未知，上限可能不准：本月有 {count(month.totals.unknownCostEntries!)} 次任务的费用算不出来（缺单价或无用量数据），没有计入上限的已用金额。可在「明细」里按型号、来源查看是哪些任务。</Banner>}
     {caps.length ? <ul className="divide-y divide-subtle rounded-md border border-subtle bg-surface">
       {caps.map(cap => <li key={`${cap.scope}:${cap.appId}:${cap.chatId ?? ''}`} className="flex flex-wrap items-center justify-between gap-2 p-3">
         <span className="min-w-0 break-all text-body text-primary">{cap.scope === 'bot' ? `机器人 ${botName(cap.appId)}` : `群 ${chatName(cap.chatId)} · ${botName(cap.appId)}`}</span>
