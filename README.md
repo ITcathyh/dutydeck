@@ -293,13 +293,14 @@ pnpm dev
 - **先确认，再推送**：先出确认卡（飞书）或确认框（Web），列出要提交的文件和增删行数、不包含的文件及原因、本地提交、源分支和目标分支、标题和正文摘要。有权限的人确认后才推送；清单 30 分钟过期。飞书沿用中断 / 重试同一道权限（发起人或管理员），Web 的生成、确认、取消也要求会话的中断权限。重复点或并发点只会推一次、只开一个 PR。
 - **推送目标**：只推新建的 `dutydeck/<主题>-<8 位 id>` 分支，不用 force，不切换分支，不改动你正在用的检出（HEAD、暂存区、工作区文件都不变）。推送用本机的 git 凭据，所以本机要能 `git push` 到 `origin`。首次推送前远端已有同名分支会拒绝。
 - **哪些文件会带上**：只带本会话某一轮改过、且之后没被别人再改的文件。其余的在清单里列为“不包含”：没有任何一轮改过的标“不是本会话改的”，改过之后又被改动的标“本会话改过，之后又被改动，无法确认”。生成清单到确认之间这些文件又变了，就不推送，需要重新发起。这依赖[每轮改动](#web-console)的记录，没有记录的轮次不会进清单。
-- **本地未推送的提交**：HEAD 上有不在 `origin/<目标分支>` 里的提交时，会作为 PR 分支的祖先一起推送（不改写），并在清单里逐条列出；没有 `origin/<目标分支>` 跟踪分支时会提示无法确认这些提交是否已在目标分支上。
+- **本地未推送的提交**：HEAD 上有不在 `origin/<目标分支>` 里的提交时，会作为 PR 分支的祖先一起推送（不改写），并在清单里逐条列出；没有 `origin/<目标分支>` 跟踪分支时会提示无法确认这些提交是否已在目标分支上。本地未推送的提交超过 50 个时不能开 PR（清单列不全），先把它们整理成少量提交再试。
+- **工作区里有超限的未跟踪文件时**（单个超过 20 MiB、合计超过 50 MiB，或超过 2000 个），`/pr` 和自动跟进都会报出具体文件或原因，不会静默跳过。把不需要提交的文件和构建目录加进 `.gitignore` 后再试。
 - **自动跟进**：开出 PR 后每 2 分钟查一次 PR 状态、当前提交的 CI 和新评论。
   - CI 失败：最多自动修 3 轮；同一个错误出现 2 次就停；每轮改动超过 10 个文件或 300 行就停。
-  - 评审意见：最多 5 轮，每轮最多带 10 条评论。Agent 对每条评论给出“已处理”或“需要问人”：已处理的在 PR 上回复；含义不清的发卡片问人，按钮是「按评论修改」「不处理」。自己发的评论和带 `<!-- dutydeck -->` 标记的评论不会当作新意见，同一条评论不会重复处理。
+  - 评审意见：最多 5 轮，每轮最多带 10 条评论。**只有仓库所有者、成员、协作者的个人账号**（GitHub 的 `author_association` 为 OWNER、MEMBER、COLLABORATOR，且不是 Bot）的评论会自动交给 Agent；其他人和机器人（如覆盖率机器人）的评论只发“需要你决定”卡片，卡片上写明作者和身份，点「按评论修改」才处理，这类评论不占处理轮次。Agent 对自动处理的每条评论给出“已处理”或“需要问人”：已处理的在 PR 上回复；含义不清的发卡片问人，按钮是「按评论修改」「不处理」。自己发的评论和带 `<!-- dutydeck -->` 标记的评论不会当作新意见，同一条评论不会重复处理。
   - 修复推到同一个分支，只做快进。远端分支被别人推过就停止跟进，不覆盖。
   - PR 合并或关闭、或在 Web 点「停止跟进」后不再跟进。
-  - 跟进时 Agent 直接改工作区，提示词禁止它自己 commit、push 或切分支，由 Dutydeck 把这一轮的改动提交到 PR 头上再推送。如果你在工作区里手改了 PR 涉及的文件，自动跟进会停下。
+  - 跟进时 Agent 直接改工作区，提示词禁止它自己 commit、push 或切分支，由 Dutydeck 把这一轮的改动提交到 PR 头上再推送。如果你在工作区里手改了 PR 涉及的文件，自动跟进会停下。修复这一轮改到的文件，如果在这一轮开始前就和 PR 分支不一致（里面有不属于这个 PR 的未提交改动，例如确认时被排除的本地修改），也不会推送：会停止跟进并列出这些文件，请人处理。
 - **没装 CI 插件时**：`/pr` 回“开 PR 未配置”和安装方法；Web 不显示按钮，只显示同样的提示。
 
 安装和令牌见[插件 → CI 提供方](#plugins)。
@@ -631,7 +632,7 @@ curl -X POST http://127.0.0.1:4310/api/plugins/hello/triggers/ping \
 - `id`、`displayName`（必填，出现在卡片、提示词和 Web 上）、可选 `changeRequestLabel(n)`；
 - `matchRepository(remoteUrl)`：远端地址归自己就返回仓库（`{owner, name, slug}`），否则返回 `undefined`；
 - `getPipelineStatus(query)`（轮询用）、`getFailureLogs(repository, runId)`（补失败日志）；
-- 可选 PR 方法，`/pr` 和 Web「开 PR」会实际用到：`createPullRequest`（开 PR）、`listReviewComments`（读评审意见）、`postComment`（回复），以及 `getPullRequest(repository, number)`，返回 `{ state: 'open' | 'closed' | 'merged', headSha? }`，用来发现 PR 已合并或关闭。没实现 `getPullRequest` 的插件只能靠 webhook 的 merge_request 事件发现合并或关闭；两者都没有时，跟进会一直轮询，直到达到轮次上限或有人手动停止；
+- 可选 PR 方法，`/pr` 和 Web「开 PR」会实际用到：`createPullRequest`（开 PR）、`listReviewComments`（读评审意见）、`postComment`（回复），以及 `getPullRequest(repository, number)`，返回 `{ state: 'open' | 'closed' | 'merged', headSha? }`，用来发现 PR 已合并或关闭。没实现 `getPullRequest` 的插件只能靠 webhook 的 merge_request 事件发现合并或关闭；两者都没有时，跟进会一直轮询，直到达到轮次上限或有人手动停止。`listReviewComments` 返回的每条 `CiReviewComment` 带 `trusted`、`isBot`、`authorAssociation`：**不给 `trusted: true` 的评论不会被自动处理**，只会发“需要你决定”卡片。github 插件的判定是 `author_association` 为 OWNER、MEMBER、COLLABORATOR 之一且不是 Bot 账号。`postComment` 返回的 `id` 要和 `listReviewComments` 里同一条评论的 `id` 写法一致，否则会把自己的回复当成新评论；
 - 可选 `webhook: { verify(req), parse(req) }`：`verify` 可返回 `signedAt`（宿主据此做 5 分钟重放窗口）；`parse` 返回统一的 `CiWebhookEvent`，请求体有问题时抛出 `statusCode: 400`。事件里 `timeIsAdvisory: true` 表示 `occurredAt` 只用于排序，不做重放窗口检查。缺哪个可选方法，对应能力就不可用。
 
 仓库自带两个 CI 插件（从源码检出目录安装；npm 发布包里不带它们）：
