@@ -1397,7 +1397,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     if (larkMemoryEnabled(config) && this.workflowOptions.memory) {
       try {
         const { store } = this.workflowOptions.memory;
-        const scope = larkMemoryScope(config.appId, event.chatId, event.chatType);
+        const scope = larkMemoryScope(config.appId, event.chatId, event.chatType, config.groupMemoryScope);
         const shared = isLarkGroupMemoryPool(scope);
         // 没有注入任何条目也要记：本轮 Agent 保存的、后台从本轮提取的记忆都按这份记录找到记忆池。
         memoryTurn = { scope, ids: [] };
@@ -1420,7 +1420,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
                   peerBots.map(async peerBot => {
                     try {
                       // 对端的群共享池里也有它在别的群记下的条目，下面只取本群的。只读：不替对端触发旧账本迁移。
-                      const peerList = await store.peek(larkMemoryScope(peerBot.appId, event.chatId, 'group'));
+                      const peerList = await store.peek(larkMemoryScope(peerBot.appId, event.chatId, 'group', peerBot.groupMemoryScope));
                       const botName = peerBot.name?.trim() || peerBot.displayName?.trim() || peerBot.appId;
                       return { botName, peerList };
                     } catch {
@@ -1566,7 +1566,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           // 记忆提取排在终态交付之后，且只记真实 dispatch 过的完成轮次；失败只留日志。
           const memoryPipeline = this.workflowOptions.memory?.pipeline;
           if (memoryPipeline && resolvedState === 'completed' && runtimeTaskId) {
-            void memoryPipeline.onTurnCompleted(larkMemoryScope(config.appId, event.chatId, event.chatType), { sessionId: session.id, taskId: runtimeTaskId, senderId: event.senderOpenId, senderKind: botSender ? 'bot' : 'human', sourceMessageId: event.messageId })
+            void memoryPipeline.onTurnCompleted(larkMemoryScope(config.appId, event.chatId, event.chatType, config.groupMemoryScope), { sessionId: session.id, taskId: runtimeTaskId, senderId: event.senderOpenId, senderKind: botSender ? 'bot' : 'human', sourceMessageId: event.messageId })
               .catch(error => this.log.warn({ error, appId: config.appId, chatId: event.chatId, taskId: runtimeTaskId }, '飞书会话记忆后台提取触发失败'));
           }
         })().catch(error => this.log.error({ error, taskId: task.id, runtimeTaskId }, '生成飞书任务终态失败'));

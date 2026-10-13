@@ -50,6 +50,7 @@ export type BotDraft = {
   groupToolsAllowSend: boolean;
   memoryEnabled: boolean;
   memoryAutoExtract: boolean;
+  groupMemoryScope: 'shared' | 'per-group';
   memoryAgentId: string;
   memoryModel: string;
   decisionAgentId: string;

@@ -44,6 +44,34 @@ describe('Lark memory defaults', () => {
   });
 });
 
+describe('Lark group memory scope config', () => {
+  it('defaults to shared for old configs, public config and new saves', async () => {
+    const repository = seedBots([{ appId: 'cli_old', appSecret: 'secret', riskControlMode: 'off' }]);
+    const [config] = await readLarkConfigs(repository);
+    expect(config.groupMemoryScope).toBe('shared');
+    expect(publicLarkConfig(config).groupMemoryScope).toBe('shared');
+    await saveLarkConfig(repository, undefined, { appId: 'cli_new', appSecret: 'secret' });
+    expect((await readLarkConfigs(repository)).map(item => [item.appId, item.groupMemoryScope])).toEqual([['cli_old', 'shared'], ['cli_new', 'shared']]);
+  });
+
+  it('saves per-group, keeps it across unrelated saves, and ignores invalid values', async () => {
+    const repository = seedBots([{ appId: 'cli_scope', appSecret: 'secret', riskControlMode: 'off' }]);
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_scope', groupMemoryScope: 'per-group' });
+    expect((await readLarkConfigs(repository))[0].groupMemoryScope).toBe('per-group');
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_scope', preInjectPrompt: 'updated' });
+    expect((await readLarkConfigs(repository))[0].groupMemoryScope).toBe('per-group');
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_scope', groupMemoryScope: 'bogus' as never });
+    expect((await readLarkConfigs(repository))[0].groupMemoryScope).toBe('per-group');
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_scope', groupMemoryScope: 'shared' });
+    expect((await readLarkConfigs(repository))[0].groupMemoryScope).toBe('shared');
+  });
+
+  it('reads an unknown stored value as shared', async () => {
+    const repository = seedBots([{ appId: 'cli_bad', appSecret: 'secret', groupMemoryScope: 'everyone', riskControlMode: 'off' }]);
+    expect((await readLarkConfigs(repository))[0].groupMemoryScope).toBe('shared');
+  });
+});
+
 describe('Lark config new-field normalization', () => {
   it('keeps valid enum values and sanitizes env / startupCommands / displayName', async () => {
     const repository = seedBots([{

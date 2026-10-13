@@ -738,3 +738,11 @@ describe('指挥命令的注册与能力门', () => {
     }
   });
 });
+
+describe('/remember summary and the group memory scope', () => {
+  it('describes the group memory scope as configurable instead of always shared', () => {
+    const summary = larkCommandRegistry.find(command => command.name === 'remember')!.summary;
+    expect(summary).toContain('群聊的记忆范围按 bot 配置：各群共享或按群隔离');
+    expect(summary).not.toContain('群聊里各群共享');
+  });
+});

@@ -209,6 +209,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       return {
         appId: request.params.appId,
         enabled,
+        groupMemoryScope: bot?.groupMemoryScope ?? 'shared',
         groups: {
           ...groups,
           ...(lastRun ? { lastRun } : {}),

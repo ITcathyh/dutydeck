@@ -270,6 +270,47 @@ describe('BotManagement 会话记忆', () => {
     })));
   });
 
+  it('群记忆范围：默认各群共用，仅开启记忆时显示；切到每个群各自一份会说明后果并随保存提交', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, memoryEnabled: false }], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const saveSpy = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, memoryEnabled: true, groupMemoryScope: 'per-group', revision: 4 }], listeningDisabled: false });
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+    await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
+    expect(screen.queryByLabelText('群记忆范围')).toBeNull();
+
+    await user.click(screen.getByRole('checkbox', { name: '启用会话记忆' }));
+    const scope = screen.getByLabelText('群记忆范围') as HTMLSelectElement;
+    expect(scope.value).toBe('shared');
+    expect(screen.getByText(/各群共用同一份记忆：A 群里记下的内容，B 群也能看到/)).toBeTruthy();
+    await user.selectOptions(scope, 'per-group');
+    expect(screen.getByText(/各群记忆互不可见：A 群里记下的内容不会出现在 B 群。切换不会迁移或删除已有记忆/)).toBeTruthy();
+    expect(screen.getByText('各群记忆互不可见，私聊各自独立；仅作为参考内容注入，不授予操作权限。')).toBeTruthy();
+    expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(saveSpy).toHaveBeenCalledWith(expect.objectContaining({ memoryEnabled: true, groupMemoryScope: 'per-group' })));
+  });
+
+  it('已保存为每个群各自一份时回显范围，并说明原共享记忆保留不动', async () => {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [{ ...memoryBot, groupMemoryScope: 'per-group' }], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    vi.spyOn(api, 'larkMemoryStatus').mockResolvedValue({
+      appId: 'cli_test_1', enabled: true, groupMemoryScope: 'per-group',
+      groups: { appId: 'cli_test_1', pool: 'groups', shared: true, liveEntries: 7, topics: 2, pendingTurns: 0 }
+    });
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+    expect((await screen.findByLabelText('群记忆范围') as HTMLSelectElement).value).toBe('per-group');
+    expect(await screen.findByText('当前范围：每个群各自一份，各群记忆互不可见')).toBeTruthy();
+    expect(screen.getByText('原各群共用的记忆（已停用，数据保留）：7 条 · 2 个主题 · 待提取 0 轮')).toBeTruthy();
+    expect(screen.getByText('各群和私聊的记忆各自独立，在对应的群或私聊里发 /memory 查看。')).toBeTruthy();
+  });
+
   it('会话记忆开启时展示群共享状态、上次提取/整理时间、成功运行及私聊小字', async () => {
     vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [memoryBot], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });

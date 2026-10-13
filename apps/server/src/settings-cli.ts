@@ -53,7 +53,7 @@ export const botFields = {
   p2pMode: ['chat', 'thread'], groupReplyMode: groupReplyModes,
   idleCompactEnabled: 'boolean', idleCompactHours: 'integer',
   groupToolsEnabled: 'boolean', groupToolsAllowSend: 'boolean',
-  memoryEnabled: 'boolean', memoryAutoExtract: 'boolean', memoryAgentId: 'string', memoryModel: 'string',
+  memoryEnabled: 'boolean', memoryAutoExtract: 'boolean', groupMemoryScope: ['shared', 'per-group'], memoryAgentId: 'string', memoryModel: 'string',
   decisionAgentId: 'string', decisionModel: 'string', responseAgentId: 'string', responseModel: 'string',
   executionMode: ['single', 'layered'], leaderAgentId: 'string', workerAgentIds: 'list',
   structuredAskCards: 'boolean', groupCardMention: 'boolean', pushIntervalMs: 'integer', traceLimit: 'integer|null',

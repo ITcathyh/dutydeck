@@ -33,7 +33,7 @@ export function TurnMemoryPanel({ session }: { session: Session }) {
   </div> : null;
   return <aside aria-label="本轮记忆" className="my-3 rounded-lg bg-muted px-4 py-2">
     {turns.map(turn => <section key={turn.taskId} className="py-1">
-      <p className="text-caption text-subtle">{formatTurnTime(turn.at)}{turn.shared ? ' · 群共享记忆' : ''}</p>
+      <p className="text-caption text-subtle">{formatTurnTime(turn.at)}{turn.shared ? ' · 群共享记忆' : turn.perGroup ? ' · 本群记忆' : ''}</p>
       {list(turn.taskId, '用到的记忆', turn.injected)}
       {list(turn.taskId, '新记下的记忆', turn.written)}
     </section>)}

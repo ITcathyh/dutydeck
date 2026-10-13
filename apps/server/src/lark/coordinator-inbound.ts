@@ -9,7 +9,7 @@ import { explicitFinalContext, readExplicitFinal } from './explicit-final.js';
 import { redactTraceText } from './secret-redaction.js';
 import { readGitSnapshot } from './git-status.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
-import { isLarkGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
+import { isLarkGroupChatMemoryPool, isLarkGroupMemoryPool, isLarkPerGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
 import { parseLarkSourceId, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
 import { executeScheduleCommand } from './schedule-command.js';
 import { larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
@@ -1191,7 +1191,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const approval = sessionId ? (await this.approvalBlock(config.appId, sessionId))?.record : undefined;
         const memoryApi = this.workflowOptions.memory;
         const memoryLine = memoryApi && larkMemoryEnabled(config)
-          ? await (memoryApi.pipeline ?? memoryApi.store).status(larkMemoryScope(config.appId, event.chatId, event.chatType)).then(renderLarkMemoryStatusLine).catch(() => undefined) : undefined;
+          ? await (memoryApi.pipeline ?? memoryApi.store).status(larkMemoryScope(config.appId, event.chatId, event.chatType, config.groupMemoryScope)).then(renderLarkMemoryStatusLine).catch(() => undefined) : undefined;
         const status = [await this.describeChatStatus(config, sessionId, latestTask), participation, usage, memoryLine].filter(Boolean).join('\n\n');
         // 卡片带了 elements 就不再渲染 markdown 正文，正文要作为第一个元素放在按钮前面。
         const card = await replyCard('任务状态', status,
@@ -1304,8 +1304,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           return 'handled';
         }
         const memory = this.memory!;
-        const scope = larkMemoryScope(config.appId, event.chatId, event.chatType);
+        const scope = larkMemoryScope(config.appId, event.chatId, event.chatType, config.groupMemoryScope);
         const shared = isLarkGroupMemoryPool(scope);
+        const perGroup = isLarkPerGroupMemoryPool(scope);
+        const chatLabel = perGroup ? '本群' : '本聊天';
         if (route.command === 'memory') {
           if (route.args[0] === 'consolidate') {
             // /memory 整体是只读命令，但 consolidate 会改写账本：这里单独挡住机器人发送者，
@@ -1328,7 +1330,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           if (route.args[0] === 'ignore') {
             // 「不许记」规则跟记忆池走：群聊里对本机器人所在各群都生效。增删改写的是约束，与 consolidate 一样挡住机器人发送者。
             const [, action, id, ...extra] = route.args;
-            const where = shared ? '本机器人所在各群共享' : '本聊天';
+            const where = shared ? '本机器人所在各群共享' : chatLabel;
             if (!action || (action === 'list' && !id)) {
               const rules = await memory.listIgnoreRules(scope);
               await replyCard('不许记规则', rules.length
@@ -1372,7 +1374,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
             memory.getState(scope),
             pipeline ? pipeline.status(scope) : memory.status(scope)
           ]);
-          const result = renderLarkMemoryList(byTopic, state, { page, shared, currentChatId: event.chatId, status });
+          const result = renderLarkMemoryList(byTopic, state, { page, shared, perGroup, currentChatId: event.chatId, status });
           if (page !== undefined && page > result.totalPages) {
             await replyCard('/memory 未执行', `**页码超出范围，共 ${result.totalPages} 页。**\n\n发送 \`/memory 1\` 查看第一页。`, { failed: true });
             return 'handled';
@@ -1389,7 +1391,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
             ...(event.senderOpenId ? { createdBy: event.senderOpenId } : {}), messageId: event.messageId });
           await replyCard('已记住', shared
             ? `**已保存为群共享记忆 \`${entry.id}\`。**\n\n${larkCommandEcho(entry.content, 200)}\n\n之后本机器人所在各群的每轮任务都会带给 Agent（在其他群里作为背景）。查看：\`/memory\`；删除：\`/forget ${entry.id}\`。`
-            : `**已保存为本聊天记忆 \`${entry.id}\`。**\n\n${larkCommandEcho(entry.content, 200)}\n\n之后本聊天的每轮任务都会带给 Agent。查看：\`/memory\`；删除：\`/forget ${entry.id}\`。`);
+            : `**已保存为${perGroup ? '本群独立记忆（其他群看不到）' : '本聊天记忆'} \`${entry.id}\`。**\n\n${larkCommandEcho(entry.content, 200)}\n\n之后${chatLabel}的每轮任务都会带给 Agent。查看：\`/memory\`；删除：\`/forget ${entry.id}\`。`);
           return 'handled';
         }
         const [id, ...extra] = route.args;
@@ -1399,7 +1401,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         }
         const removed = await memory.remove(scope, id, event.senderOpenId);
         if (!removed) {
-          await replyCard('/forget 未执行', `**${shared ? '群共享记忆' : '本聊天'}没有编号为 \`${id}\` 的记忆。**\n\n发送 \`/memory\` 查看当前记忆。`, { failed: true });
+          await replyCard('/forget 未执行', `**${shared ? '群共享记忆' : chatLabel}没有编号为 \`${id}\` 的记忆。**\n\n发送 \`/memory\` 查看当前记忆。`, { failed: true });
           return 'handled';
         }
         await replyCard('已忘记', `**已删除记忆 \`${removed.id}\`。**\n\n${larkCommandEcho(removed.content, 200)}\n\n之后的任务不再带上这条记忆。`);
@@ -2060,7 +2062,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           || ![...turn.injected, ...turn.written].some(entry => entry.id === memoryId)) {
           return { type: 'warning', content: '这条记忆不属于本卡片对应的任务，请发送 /memory 查看。' };
         }
-        if (!await this.commandAllowlisted(config, turn.shared ? 'group' : 'p2p', context.chatId, operatorOpenId, turn.record.sessionId)) {
+        if (!await this.commandAllowlisted(config, isLarkGroupChatMemoryPool(turn.scope) ? 'group' : 'p2p', context.chatId, operatorOpenId, turn.record.sessionId)) {
           return { type: 'warning', content: '当前账号不在机器人白名单中，无法删除记忆。' };
         }
         const removed = await this.memory.remove(turn.scope, memoryId, operatorOpenId);

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { executionTaskId } from '@dutydeck/storage';
 import { makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type JsonValue } from '@dutydeck/shared';
+import { isLarkPerGroupMemoryPool, larkMemoryScopeOfPool } from './lark/memory.js';
 
 const rateSchema = z.object({ inputPerMTok: z.number().nonnegative(), cachedInputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative(), cacheWritePerMTok: z.number().nonnegative().optional(), provider: z.string().trim().min(1).optional() }).strict();
 const pricingSchema = z.object({ version: z.string().trim().min(1).optional(), default: rateSchema, models: z.array(rateSchema.extend({ match: z.string().trim().min(1) }).strict()) }).strict();
@@ -103,8 +104,12 @@ export function usageScopeOf(session: Pick<Session, 'source' | 'sourceId'>): { a
   if (!appId || !chatId) return {};
   if (session.source === 'lark') return { appId, chatId, chatType: kind };
   if (session.source === 'lark-decision' || session.source === 'lark-response') return { appId, chatId, chatType: 'group' };
-  // 记忆会话按池划分：群聊共用 groups 池，私聊一人一池（池名即会话 id）。
-  if (session.source === 'lark-memory') return chatId === 'groups' ? { appId } : { appId, chatId, chatType: 'p2p' };
+  // 记忆会话按池划分：群聊共用 groups 池，按群独立的池归到那个群，私聊一人一池（池名即会话 id）。
+  if (session.source === 'lark-memory') {
+    if (chatId === 'groups') return { appId };
+    const pool = larkMemoryScopeOfPool({ appId, pool: chatId });
+    return isLarkPerGroupMemoryPool(pool) ? { appId, chatId: pool.chatId, chatType: 'group' } : { appId, chatId, chatType: 'p2p' };
+  }
   return {};
 }
 

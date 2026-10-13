@@ -1,9 +1,11 @@
 /**
  * 飞书会话记忆：按「机器人 + 记忆池」持久保存的短事实，每轮任务开头注入 Agent 提示。
  *
- * 记忆池：同一机器人的所有群聊共用一个池（`groups`），每个私聊各自一个池（池标识即 chatId）。
+ * 记忆池：默认（groupMemoryScope=shared）同一机器人的所有群聊共用一个池（`groups`），每个私聊各自一个池（池标识即 chatId）。
  * 群里的多个话题、`/new` 之后的新会话、daemon 重启、机器人所在的其他群，都读写同一份群池；
  * 私聊之间、私聊与群池互不可见，避免把私聊里学到的偏好带进群里。
+ * groupMemoryScope=per-group 时每个群各自一个池（池标识 `group_<chatId>`）；切换范围不迁移也不删除任何池，
+ * 切回 shared 继续用原来的 `groups` 池。
  *
  * 存储是 `configs` KV 里每个池一条 JSON（`lark.memory.<appId>.<pool>`），
  * 用 compareAndSet 做并发写入；删除只打墓碑不物理移除，保留「谁在何时删了什么」的账本，
@@ -27,11 +29,37 @@ export interface LarkMemoryScope { appId: string; chatId: string; pool: string }
 /** 群共享池的标识；飞书 chat_id 都是 oc_ / ou_ 开头，不会与它冲突。 */
 export const larkGroupMemoryPool = 'groups';
 
-export function larkMemoryScope(appId: string, chatId: string, chatType: string): LarkMemoryScope {
-  return { appId, chatId, pool: chatType === 'group' ? larkGroupMemoryPool : chatId };
+/** 群聊记忆范围：shared 本机器人各群共用一个池；per-group 每个群各自一个池。 */
+export type LarkGroupMemoryScope = 'shared' | 'per-group';
+export const isLarkGroupMemoryScope = (value: unknown): value is LarkGroupMemoryScope => value === 'shared' || value === 'per-group';
+export const normalizeLarkGroupMemoryScope = (value: unknown): LarkGroupMemoryScope => value === 'per-group' ? 'per-group' : 'shared';
+
+/** 按群独立池的标识前缀；飞书 chat_id 是 oc_ 开头，私聊池（chatId）与它不会冲突。 */
+const perGroupPoolPrefix = 'group_';
+const memoryChatIdPattern = /^[A-Za-z0-9_-]{1,100}$/;
+
+/**
+ * 入口一律用它按会话类型和机器人的群记忆范围构造 scope，不要手写 pool。
+ * 群 ID 会拼进池标识并用作视图目录名，不合法（含 `/`、`.` 等）直接拒绝，防路径穿越。
+ */
+export function larkMemoryScope(appId: string, chatId: string, chatType: string, groupScope: LarkGroupMemoryScope = 'shared'): LarkMemoryScope {
+  if (chatType !== 'group') return { appId, chatId, pool: chatId };
+  if (groupScope !== 'per-group') return { appId, chatId, pool: larkGroupMemoryPool };
+  if (!memoryChatIdPattern.test(chatId)) throw new LarkMemoryError('MEMORY_SCOPE_INVALID', '群 ID 包含非法字符，无法建立按群独立的记忆。', 400);
+  return { appId, chatId, pool: `${perGroupPoolPrefix}${chatId}` };
 }
 
+/** 由池标识还原 scope（后台作业恢复用）：按群池还原出群 ID，其余池的 chatId 就是池标识。 */
+export function larkMemoryScopeOfPool(scope: Pick<LarkMemoryScope, 'appId' | 'pool'>): LarkMemoryScope {
+  return { appId: scope.appId, pool: scope.pool, chatId: isLarkPerGroupMemoryPool(scope) ? scope.pool.slice(perGroupPoolPrefix.length) : scope.pool };
+}
+
+/** 本机器人各群共用的池（groupMemoryScope=shared）。 */
 export const isLarkGroupMemoryPool = (scope: Pick<LarkMemoryScope, 'pool'>) => scope.pool === larkGroupMemoryPool;
+/** 某个群独占的池（groupMemoryScope=per-group）。 */
+export const isLarkPerGroupMemoryPool = (scope: Pick<LarkMemoryScope, 'pool'>) => scope.pool.startsWith(perGroupPoolPrefix);
+/** 群聊产生的池（共用或按群）：多人可写，写入要挡注入指令；操作入口按群白名单。 */
+export const isLarkGroupChatMemoryPool = (scope: Pick<LarkMemoryScope, 'pool'>) => isLarkGroupMemoryPool(scope) || isLarkPerGroupMemoryPool(scope);
 
 export type LarkMemorySource = 'user' | 'agent' | 'extraction' | 'consolidation';
 
@@ -172,8 +200,9 @@ export interface LarkMemoryTurnView {
 /** 只读状态摘要，供 /memory 回执与后台页面使用。 */
 export interface LarkMemoryStatus {
   appId: string;
-  /** 池标识：群共享池为 larkGroupMemoryPool，私聊为 chatId。 */
+  /** 池标识：群共享池为 larkGroupMemoryPool，按群独立池为 group_<chatId>，私聊为 chatId。 */
   pool: string;
+  /** 群共享池（各群共用）；按群独立池和私聊为 false。 */
   shared: boolean;
   liveEntries: number;
   topics: number;
@@ -410,7 +439,7 @@ export class LarkMemoryStore {
   async add(scope: LarkMemoryScope, input: AddLarkMemoryInput): Promise<LarkMemoryEntry> {
     let created!: LarkMemoryEntry;
     await this.mutate(scope, entries => {
-      const outcome = this.addTo(entries, input, { shared: isLarkGroupMemoryPool(scope) });
+      const outcome = this.addTo(entries, input, { shared: isLarkGroupChatMemoryPool(scope) });
       created = outcome.created;
       return outcome.entries;
     });
@@ -473,7 +502,7 @@ export class LarkMemoryStore {
         if (step.op === 'add') {
           // 批内先 add 后 remove/retopic，中间态可能短暂多出一个主题或超过条数上限；两个上限都改到批次末尾统一判，
           // 否则「退掉某主题最后一条 + 新开一个主题」、迁移后超限的池「逐步合并收缩」这类终态合法的整理计划会被中间态误杀。
-          const outcome = this.addTo(current, step.input, { deferLimits: true, shared: isLarkGroupMemoryPool(scope) });
+          const outcome = this.addTo(current, step.input, { deferLimits: true, shared: isLarkGroupChatMemoryPool(scope) });
           current = outcome.entries;
           added.push(outcome.created);
         } else if (step.op === 'remove') {
@@ -1157,12 +1186,12 @@ export function renderLarkMemoryStatus(status: LarkMemoryStatus): string {
 /**
  * /memory 的 markdown 正文：按主题分页。
  * 将主题 × 条目拉平成有序序列，按每页 ≤ 30 条且 ≤ 6 个主题切页；跨页主题在续页标题标注（续）。
- * shared 时是群共享池：标题说明共享，来源不是 currentChatId 的条目标「其他群」；给了 status 时在页脚前附后台运行状态。
+ * perGroup 时是本群独立池：标题说明各群互不可见。shared 时是群共享池：标题说明共享，来源不是 currentChatId 的条目标「其他群」；给了 status 时在页脚前附后台运行状态。
  */
 export function renderLarkMemoryList(
   byTopic: Map<string, LarkMemoryEntry[]>,
   state: LarkMemoryState,
-  options?: { page?: number; pageSize?: number; shared?: boolean; currentChatId?: string; status?: LarkMemoryStatus }
+  options?: { page?: number; pageSize?: number; shared?: boolean; perGroup?: boolean; currentChatId?: string; status?: LarkMemoryStatus }
 ): { text: string; page: number; totalPages: number } {
   let totalEntries = 0;
   for (const group of byTopic.values()) totalEntries += group.length;
@@ -1170,7 +1199,7 @@ export function renderLarkMemoryList(
   if (totalEntries === 0) {
     return {
       text: [
-        options?.shared ? '**本机器人所在各群还没有共享的记忆。**' : '**本聊天还没有保存的记忆。**',
+        options?.shared ? '**本机器人所在各群还没有共享的记忆。**' : options?.perGroup ? '**本群还没有保存的记忆（各群记忆互不可见）。**' : '**本聊天还没有保存的记忆。**',
         '发送 `/remember <内容>` 保存一条；Agent 也会在你要求“记住”时自动保存。',
         ...statusBlock
       ].join('\n\n'),
@@ -1257,7 +1286,9 @@ export function renderLarkMemoryList(
   const text = [
     options?.shared
       ? `**本机器人所在各群共享，共 ${totalEntries} 条记忆 · 上次整理 ${lastConsolidation}**`
-      : `**本聊天共 ${totalEntries} 条记忆 · 上次整理 ${lastConsolidation}**`,
+      : options?.perGroup
+        ? `**本群独立记忆（各群记忆互不可见），共 ${totalEntries} 条 · 上次整理 ${lastConsolidation}**`
+        : `**本聊天共 ${totalEntries} 条记忆 · 上次整理 ${lastConsolidation}**`,
     '',
     topicBlocks.join('\n\n'),
     '',

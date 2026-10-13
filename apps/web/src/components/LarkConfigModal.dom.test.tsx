@@ -556,6 +556,29 @@ describe('LarkConfigModal 会话记忆', () => {
     expect((screen.getByRole('switch', { name: '启用会话记忆' }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
   });
 
+  it('群记忆范围：开启记忆后可选，默认各群共用，选每个群各自一份会随保存提交', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', setupComplete: true }));
+    renderModal(collection({ fullTrustConfirmed: true, defaultAgentId: 'codex' }));
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    await screen.findByText('操作确认方式');
+    expect(screen.queryByText('群记忆范围')).toBeNull();
+    await user.click(screen.getByRole('switch', { name: '启用会话记忆' }));
+    expect(screen.getByText('群记忆范围')).toBeTruthy();
+    expect(screen.getByText(/各群共用同一份记忆：A 群里记下的内容，B 群也能看到/)).toBeTruthy();
+    expect(screen.getByText('同一机器人的各群共享一份、每个私聊各自一份跨会话的长期记忆，并在每轮任务前注入索引')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /各群共用一份（默认）/ }));
+    await user.click(await screen.findByRole('option', { name: /每个群各自一份/ }));
+    expect(screen.getByText(/各群记忆互不可见：A 群里记下的内容不会出现在 B 群。切换不会迁移或删除已有记忆/)).toBeTruthy();
+    // 「启用会话记忆」下的描述随所选范围变化。
+    expect(screen.getByText('每个群、每个私聊各自一份跨会话的长期记忆（各群互不可见），并在每轮任务前注入索引')).toBeTruthy();
+    expect(screen.queryByText('同一机器人的各群共享一份、每个私聊各自一份跨会话的长期记忆，并在每轮任务前注入索引')).toBeNull();
+    const submit = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await user.click(submit);
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ memoryEnabled: true, groupMemoryScope: 'per-group' })));
+  });
+
   it('保存时带上四个记忆字段', async () => {
     const user = userEvent.setup();
     const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', setupComplete: true }));

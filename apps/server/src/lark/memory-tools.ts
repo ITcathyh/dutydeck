@@ -2,7 +2,7 @@
  * 会话记忆的 Agent 工具面：复用群协作工具的 capability token（Bearer）与路径前缀，
  * 因此走 app.ts 里同一条鉴权豁免规则；作用域由 token 绑定的会话决定，请求体不能指定别的聊天。
  * 会话类型取自 capability 解析时按会话 sourceId（`<appId>:<chatId>:group|p2p:…`）重算的绑定：
- * 群会话读写本机器人的群共享池，私聊会话只读写自己的池。
+ * 群会话读写本机器人的群共享池（groupMemoryScope=per-group 时是本群自己的池），私聊会话只读写自己的池。
  */
 import type { FastifyInstance } from 'fastify';
 import { RuntimeError } from '@dutydeck/shared';
@@ -23,7 +23,7 @@ export async function registerLarkMemoryTools(app: FastifyInstance, options: Lar
     const binding = await options.tools.memoryContext(agentGroupToolBearerToken(authorization));
     const active = options.runtime?.getActiveTaskContext(binding.sessionId);
     return {
-      scope: larkMemoryScope(binding.appId, binding.chatId, binding.chatType),
+      scope: larkMemoryScope(binding.appId, binding.chatId, binding.chatType, binding.groupMemoryScope),
       sessionId: binding.sessionId,
       taskId: active?.taskId,
       actorId: active?.actorId
