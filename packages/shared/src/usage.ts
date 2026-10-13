@@ -64,9 +64,50 @@ export interface UsageTotals {
   /** 已计价记录 / 总记录；没有记录时为 null，不代表免费。 */
   costCoverage: number | null;
 }
-export interface UsageFilter { since?: string; appId?: string; chatId?: string; sessionId?: string; rootSessionId?: string }
-export type UsageDimension = 'appId' | 'chatId' | 'actorId' | 'category';
-export interface UsageGroup extends UsageTotals { appId?: string; chatId?: string; actorId?: string; category?: UsageCategory }
+/** model 筛选里表示「没有记下型号」的记录。 */
+export const usageUnknownModel = '__unknown__';
+/** since 含、until 不含（ISO 时刻）；model 可取 usageUnknownModel。 */
+export interface UsageFilter { since?: string; until?: string; appId?: string; chatId?: string; sessionId?: string; rootSessionId?: string; model?: string; agentId?: string; origin?: string }
+/** day 按 daemon 本地时区的日历日分组（YYYY-MM-DD），升序；其余按成本降序。 */
+export type UsageDimension = 'appId' | 'chatId' | 'actorId' | 'category' | 'model' | 'agentId' | 'origin' | 'day';
+/** 缺 model（或 appId 等）的分组表示该维度未知，不并入任何已知值。 */
+export interface UsageGroup extends UsageTotals { appId?: string; chatId?: string; actorId?: string; category?: UsageCategory; model?: string; agentId?: string; origin?: string; day?: string }
+/**
+ * 一个根任务名下的用量：根任务自身与归到它的编排子步骤各记一次，合并成一行，不重复计数。
+ * sessionId 是任务详情所在的会话（子步骤指向发起它的根会话）。
+ */
+export interface UsageTaskRow extends UsageTotals {
+  taskId: string;
+  sessionId: string;
+  appId?: string;
+  chatId?: string;
+  agentId: string;
+  origin: string;
+  models: string[];
+  firstRecordedAt: string;
+  lastRecordedAt: string;
+  /** 其中来自子步骤的记录数。 */
+  subStepEntries: number;
+}
+/** 明细查询里的精确匹配筛选；model 可取 usageUnknownModel。 */
+export interface UsageReportFilter { model?: string; agentId?: string; appId?: string; origin?: string }
+export interface UsageReport {
+  /** 日历日按这个时区切分；offsetMinutes 是现在的 UTC 偏移（东八区为 480）。 */
+  timezone: { name: string; offsetMinutes: number };
+  /** from / to 是含首尾的本地日历日；since 含、until 不含（ISO 时刻）。 */
+  range: { from: string; to: string; since: string; until: string };
+  filter: UsageReportFilter;
+  totals: UsageTotals;
+  /** 范围内每个有记录的日历日，升序；没有记录的日子不出现，由界面补零。 */
+  daily: UsageGroup[];
+  models: UsageGroup[];
+  agents: UsageGroup[];
+  bots: UsageGroup[];
+  origins: UsageGroup[];
+  /** 筛选下拉的候选：只受时间范围限制，不受其它筛选影响；models 里的 null 表示有记录没有记下型号。 */
+  options: { models: Array<string | null>; agentIds: string[]; appIds: string[]; origins: string[] };
+}
+export interface UsageTaskPage { total: number; tasks: UsageTaskRow[] }
 
 export type UsageCapScope = 'bot' | 'group';
 export interface UsageCap { scope: UsageCapScope; appId: string; chatId?: string; monthlyCostUsd: number; updatedAt: string }
@@ -90,6 +131,8 @@ export interface UsageLedgerRepository {
   listEntries(filter: UsageFilter, taskIds?: string[]): Promise<UsageLedgerEntry[]>;
   totals(filter: UsageFilter): Promise<UsageTotals>;
   summarize(dimension: UsageDimension, filter: UsageFilter): Promise<UsageGroup[]>;
+  /** 按根任务合并后的分页列表，最近的在前；各行合计等于同一筛选下的 totals。 */
+  listTasks(filter: UsageFilter, page: { limit: number; offset: number }): Promise<UsageTaskPage>;
   listCaps(): Promise<UsageCap[]>;
   setCap(cap: Omit<UsageCap, 'updatedAt'>): Promise<UsageCap>;
   deleteCap(scope: UsageCapScope, appId: string, chatId?: string): Promise<boolean>;

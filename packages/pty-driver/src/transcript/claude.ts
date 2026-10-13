@@ -18,6 +18,11 @@
  *                          (see claudePendingBackgroundWork)
  *   system compact_boundary → { type:'status', data:{ state:'compaction', phase:'completed' } }
  *
+ * Token usage: every assistant line carries message.usage, and one API message is written once per
+ * content block with the same message.id and usage, so usage is de-duplicated by message.id and
+ * reported once per turn as status/turn_usage (see ClaudeUsageTally / takeTurnUsage). Sidechain
+ * (sub-agent) messages are billed too, so they count there even though they produce no events.
+ *
  * Sidechain (Task tool internals) lines are skipped. API-error assistant lines
  * are not model output either: the tailer holds the latest one back as the
  * turn's failure reason (see claudeApiError / takeTurnError).
@@ -333,6 +338,28 @@ export function claudePendingBackgroundWork(entry: any): number | undefined {
   return count(entry.pendingBackgroundAgentCount) + count(entry.pendingWorkflowCount);
 }
 
+interface ClaudeMessageUsage { model?: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }
+const usageNumber = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+/** Cap on remembered message ids; only guards against re-reading the same records after a restore. */
+const REPORTED_USAGE_IDS_MAX = 20_000;
+
+/**
+ * Per-message usage of an assistant record, or undefined when it reports none. Provider-synthesised
+ * placeholders (`<synthetic>`, API-error lines) made no model call and carry zeros, so they are not usage.
+ */
+export function claudeMessageUsage(entry: any): ({ id: string } & ClaudeMessageUsage) | undefined {
+  if (!entry || typeof entry !== 'object' || entry.type !== 'assistant' || entry.isApiErrorMessage === true) return undefined;
+  const message = entry.message;
+  const usage = message?.usage;
+  if (typeof message?.id !== 'string' || !message.id || !usage || typeof usage !== 'object' || message.model === '<synthetic>') return undefined;
+  return {
+    id: message.id,
+    ...(typeof message.model === 'string' && message.model.trim() ? { model: message.model.trim() } : {}),
+    inputTokens: usageNumber(usage.input_tokens), outputTokens: usageNumber(usage.output_tokens),
+    cacheReadTokens: usageNumber(usage.cache_read_input_tokens), cacheWriteTokens: usageNumber(usage.cache_creation_input_tokens),
+  };
+}
+
 export interface ClaudeTranscriptTailerOptions {
   cwd: string;
   /** Explicit transcript path. When given, directory scanning and file
@@ -368,6 +395,9 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private turnTerminal = false;
   private restoringTurn = false;
   private receiptEntry: unknown;
+  /** Usage of the API messages seen since the last takeTurnUsage(), by message.id (insertion order = transcript order). */
+  private readonly pendingUsage = new Map<string, ClaudeMessageUsage>();
+  private readonly reportedUsageIds = new Set<string>();
 
   constructor(opts: ClaudeTranscriptTailerOptions) {
     const explicit = opts.transcriptPath;
@@ -390,6 +420,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
           ? resolveOnce
           : () => resolveClaudeTranscriptPath(opts.cwd, opts.env),
       mapEntry: entry => {
+        this.tallyUsage(entry);
         const nativeInput = claudeInputText(entry) !== undefined && entry.isSidechain !== true;
         const notification = entry.turnOrigin === 'task_notification' || entry.origin?.kind === 'task-notification';
         // A recovery cursor is captured before submission. Its first fresh
@@ -506,6 +537,41 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     if (this.inputUuid) this.inputEntries.add(this.inputUuid);
   }
   resetBackgroundWork(): void { this.backgroundWork = 0; }
+  private tallyUsage(entry: any): void {
+    const usage = claudeMessageUsage(entry);
+    if (!usage || this.reportedUsageIds.has(usage.id)) return;
+    const previous = this.pendingUsage.get(usage.id);
+    // Lines of one message repeat the same usage; a streamed partial line can carry a smaller output count.
+    this.pendingUsage.set(usage.id, previous ? {
+      model: usage.model ?? previous.model,
+      inputTokens: Math.max(previous.inputTokens, usage.inputTokens), outputTokens: Math.max(previous.outputTokens, usage.outputTokens),
+      cacheReadTokens: Math.max(previous.cacheReadTokens, usage.cacheReadTokens), cacheWriteTokens: Math.max(previous.cacheWriteTokens, usage.cacheWriteTokens),
+    } : usage);
+  }
+  /**
+   * Token usage of every API message read since the previous call, as one status/turn_usage reading in the
+   * same shape the ACP driver reports (the usageRef is the last message id, so re-reading the same records
+   * after a restore is not counted twice). Several models in one turn (a sub-agent on another model) are named
+   * together, which prices as an unknown model instead of billing one model's rate for the others' tokens.
+   * Undefined when the transcript showed no usage: the caller then records the turn as unavailable, never as zero.
+   */
+  takeTurnUsage(): NormalizedDriverEvent | undefined {
+    if (!this.pendingUsage.size) return undefined;
+    const messages = [...this.pendingUsage.entries()];
+    this.pendingUsage.clear();
+    for (const [id] of messages) this.reportedUsageIds.add(id);
+    while (this.reportedUsageIds.size > REPORTED_USAGE_IDS_MAX) this.reportedUsageIds.delete(this.reportedUsageIds.values().next().value as string);
+    const sum = (key: keyof Omit<ClaudeMessageUsage, 'model'>) => messages.reduce((total, [, usage]) => total + usage[key], 0);
+    const models = [...new Set(messages.map(([, usage]) => usage.model).filter((model): model is string => model !== undefined))].sort();
+    return {
+      type: 'status',
+      data: {
+        state: 'turn_usage', usageRef: `claude:${messages.at(-1)![0]}`,
+        ...(models.length ? { model: models.join(' + ') } : {}),
+        breakdown: { inputTokens: sum('inputTokens'), outputTokens: sum('outputTokens'), cachedReadTokens: sum('cacheReadTokens'), cachedWriteTokens: sum('cacheWriteTokens') },
+      },
+    };
+  }
   takeTurnError(): NormalizedDriverEvent | undefined {
     const error = this.turnError;
     this.turnError = undefined; this.inputError = undefined;

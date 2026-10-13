@@ -1158,6 +1158,7 @@ export class PtyCliDriver implements AgentDriver {
         // The runtime fails a turn whose last step is not text but has no
         // reason to show; the CLI's own error record is that reason.
         if (turnError && !this.interruptPending) this.emitEvent(turnError);
+        this.emitTurnUsage();
         this.emitEvent({ type: 'completed', data: { stopReason: this.interruptPending ? 'cancelled' : 'end_turn' } });
         this.interruptPending = false;
         this.turnResolve?.();
@@ -1307,6 +1308,12 @@ export class PtyCliDriver implements AgentDriver {
     }
   }
 
+  /** Token usage the transcript recorded for this turn; ahead of `completed`, as the ACP driver does. */
+  private emitTurnUsage(): void {
+    const usage = this.transcript?.takeTurnUsage?.();
+    if (usage) this.emitEvent(usage);
+  }
+
   private completeInputError(): boolean {
     if (!this.turnActive || !this.turnInputConfirmed || this.interruptPending) return false;
     const error = this.transcript?.takeInputError?.();
@@ -1315,6 +1322,7 @@ export class PtyCliDriver implements AgentDriver {
     this.preparedTurnId = undefined;
     this.clearTurnDeadline(); this.clearRenderedCompletion(); this.clearBackgroundHold();
     this.emitEvent(error);
+    this.emitTurnUsage();
     this.emitEvent({ type: 'completed', data: { stopReason: 'end_turn' } });
     this.turnResolve?.();
     this.turnResolve = null; this.turnReject = null;

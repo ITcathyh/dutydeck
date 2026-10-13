@@ -14,7 +14,7 @@ import type {
 import type { CreateWorkItemInput, WorkItem, WorkTemplate } from '@dutydeck/shared';
 import type { WorkspaceMode, WorkspaceResponse, WorkspaceCleanupPreview, WorkspaceCleanupResult, VerificationResponse, VerificationCommandInput, SkillDeliveryMetadata, SessionAutomationList, CreateSessionScheduleInput, UpdateSessionScheduleInput, SubscribeCiInput, SessionSchedule, CiSubscription } from '@dutydeck/shared';
 import type { WorkspaceOrganization, WorkspaceOrganizationSnapshot } from '@dutydeck/shared';
-import type { UsageBackgroundBudget, UsageCap, UsageGroup, UsageTotals } from '@dutydeck/shared';
+import type { UsageBackgroundBudget, UsageCap, UsageGroup, UsageReport, UsageReportFilter, UsageTaskPage, UsageTotals } from '@dutydeck/shared';
 import type { ArchivedHammerIntegration, ChannelBotGroupPolicy, CreateGroupBindingInput, EffectiveGroupConfig, GroupBinding, PublicAgent, PublicChannelBotFoundation, RemoteChatFact, RoleAssignment, ScheduleBlocker, ScheduleGeneration, SchedulePreview, ScheduleTrigger, ScheduleWatermark, SecretRefMetadata, UpdateChannelBotInput, UpdateGroupBindingInput, UpdateScheduleDefinitionInput } from '@dutydeck/shared';
 
 import { instanceApiUrl } from './instance';
@@ -199,6 +199,10 @@ export type UsageSummaryWindow = { since: string; totals: UsageTotalsResponse; b
 export type UsageSummary = { month: UsageSummaryWindow; week: UsageSummaryWindow; caps: UsageCap[]; backgroundBudget?: UsageBackgroundBudget };
 /** own：本任务自己的执行；subSteps：归到本任务名下的编排子步骤与 Leader 规划。 */
 export type SessionUsage = { own: UsageTotalsResponse; subSteps: UsageTotalsResponse; snapshot?: SessionUsageSnapshot };
+/** 明细查询：from / to 是 daemon 本地时区的日历日（YYYY-MM-DD）。 */
+export type UsageReportQuery = UsageReportFilter & { from?: string; to?: string };
+export type { UsageReport, UsageTaskPage };
+const usageQuery = (query: UsageReportQuery & { limit?: number; offset?: number }) => new URLSearchParams(Object.entries(query).filter(([, value]) => value !== undefined && value !== '').map(([key, value]) => [key, String(value)])).toString();
 export type UsageCapInput = { scope: 'bot'; appId: string; monthlyCostUsd: number } | { scope: 'group'; appId: string; chatId: string; monthlyCostUsd: number };
 
 export type ManagedGroup = {
@@ -365,6 +369,8 @@ export const api = {
   steerQueued: (id: string, taskId: string) => json<Task>(`/api/sessions/${id}/queue/${taskId}/steer`, { method: 'POST' }),
   injectQueued: (id: string, taskId: string) => json<SteeringResult & { task: Task }>(`/api/sessions/${id}/queue/${taskId}/inject`, { method: 'POST' }),
   larkConfig: () => json<LarkConfig>('/api/lark/config'),
+  usageReport: (query: UsageReportQuery) => json<UsageReport>(`/api/usage/report?${usageQuery(query)}`, { cache: 'no-store' }),
+  usageTasks: (query: UsageReportQuery & { limit: number; offset: number }) => json<UsageTaskPage>(`/api/usage/tasks?${usageQuery(query)}`, { cache: 'no-store' }),
   usageSummary: () => json<UsageSummary>('/api/usage/summary', { cache: 'no-store' }),
   setUsageCap: (body: UsageCapInput) => json<UsageCap>('/api/usage/caps', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   deleteUsageCap: ({ scope, appId, chatId }: Pick<UsageCap, 'scope' | 'appId' | 'chatId'>) => json<{ deleted: boolean }>(`/api/usage/caps?${new URLSearchParams({ scope, appId, ...(chatId ? { chatId } : {}) })}`, { method: 'DELETE' }),

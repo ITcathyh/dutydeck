@@ -56,6 +56,9 @@ export interface TranscriptEventSource {
   /** Native terminal marker belonging to the current exact input receipt or
    * recovery cursor. Output text alone is not terminal evidence. */
   hasTurnTerminal?(): boolean;
+  /** Token usage of the model calls recorded since the last call, as a status/turn_usage event. Only
+   *  transcripts that record usage (Claude) implement it; undefined means the turn's usage is unknown. */
+  takeTurnUsage?(): NormalizedDriverEvent | undefined;
 }
 
 /** Loose shape of a parsed JSONL entry — mappers narrow per CLI schema. */
