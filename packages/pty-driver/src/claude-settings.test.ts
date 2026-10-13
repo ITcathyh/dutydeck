@@ -45,6 +45,42 @@ describe('Claude settings composition', () => {
     expect(composed.permissions.defaultMode).toBe(permissionMode === 'full-trust' ? 'bypassPermissions' : undefined);
   });
 
+  it.each(['ask', 'approve-reads', 'full-trust'] as const)('routes tool confirmations through the permission hook unless full-trust (%s)', permissionMode => {
+    const { cwd, helper, sessionId } = fixture();
+    const generated = createCliAdapter('claude-code').buildArgs({ sessionId, permissionMode, env: {
+      dutydeck_relay_url: 'http://localhost/api/relay', dutydeck_relay_token: 'fixture-secret',
+      dutydeck_relay_command: "'/usr/bin/node' '/opt/dutydeck/cli.js'",
+    } });
+    const original = { hooks: { PermissionRequest: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'user-approver' }] }] } };
+    const argv = helper.args(['--settings', JSON.stringify(original)], generated, cwd);
+    expect(argv.join(' ')).not.toContain('fixture-secret');
+    const composed = JSON.parse(readFileSync(argv.at(-1)!, 'utf8'));
+    expect(composed.hooks.PermissionRequest).toEqual(permissionMode === 'full-trust' ? original.hooks.PermissionRequest : [
+      original.hooks.PermissionRequest[0],
+      // 超时比飞书 24 小时自动拒绝更长：hook 先交回明确的拒绝，不会被 Claude 取消后退回终端确认。
+      { hooks: [{ type: 'command', command: "'/usr/bin/node' '/opt/dutydeck/cli.js' session permission-hook", timeout: 24 * 60 * 60 + 10 * 60 }] },
+    ]);
+  });
+
+  it.each([
+    ['lark', 'ask', true], ['lark', 'approve-reads', true], ['lark', 'full-trust', false],
+    ['web', 'ask', false], [undefined, 'ask', false],
+  ] as const)('pins Claude to default permission mode only for Lark approval sessions (source %s, %s)', (source, permissionMode, pinned) => {
+    const env = { dutydeck_relay_url: 'http://localhost/api/relay', dutydeck_relay_token: 'fixture-secret', ...(source ? { dutydeck_session_source: source } : {}) };
+    for (const resume of [false, true]) {
+      const args = createCliAdapter('claude-code').buildArgs({ sessionId: randomUUID(), resume, permissionMode, env });
+      const index = args.indexOf('--permission-mode');
+      expect(index >= 0 ? args.slice(index, index + 2) : undefined).toEqual(pinned ? ['--permission-mode', 'default'] : undefined);
+      if (permissionMode === 'full-trust') expect(args).toContain('--dangerously-skip-permissions');
+    }
+  });
+
+  it('keeps native confirmations when the session has no relay credentials', () => {
+    const settingsIndex = (args: string[]) => args.indexOf('--settings');
+    const args = createCliAdapter('claude-code').buildArgs({ sessionId: randomUUID(), permissionMode: 'ask', env: {} });
+    expect(settingsIndex(args)).toBe(-1);
+  });
+
   it('installs the native question hook during driver startup using agent.env', async () => {
     const { cwd, sessionId } = fixture();
     let spawnedArgs: string[] = [];

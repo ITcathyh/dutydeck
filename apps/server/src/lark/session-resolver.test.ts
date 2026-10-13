@@ -342,6 +342,33 @@ describe('resolveLarkSession ask posture', () => {
     expect(ptyRuntime.stop).toHaveBeenCalledWith(pty.id);
   });
 
+  it.each(['ask', 'approve-reads'] as const)('starts and reuses a Claude terminal-mode %s session because its confirmations go through the permission hook', async permissionMode => {
+    const config = { ...baseConfig, defaultAgentId: 'claude-wrapper', permissionMode, fullTrustConfirmed: false };
+    const listAgents = vi.fn(async () => [{ id: 'claude-wrapper', name: 'Claude', protocol: 'pty-cli' as const, adapterId: 'claude-code' }]);
+    const session = existing({ id: 'ses_claude', agentId: 'claude-wrapper', protocol: 'pty-cli', permissionMode });
+    const runtime = { listAgents, listSessions: vi.fn(async () => []), start: vi.fn(async () => session), stop: vi.fn() };
+    await expect(resolveLarkSession(runtime as any, log, group() as any, config, 'oc_group', 'group', 'user:ou_user')).resolves.toBe(session);
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'claude-wrapper', permissionMode }));
+    expect(runtime.stop).not.toHaveBeenCalled();
+    // 重启后没有内存绑定，持久化的同一会话照样复用，不会因为是终端模式就被换掉。
+    const restarted = { listAgents, listSessions: vi.fn(async () => [session]), getTasks: vi.fn(async () => []), start: vi.fn(), stop: vi.fn() };
+    await expect(resolveLarkSession(restarted as any, log, group() as any, config, 'oc_group', 'group', 'user:ou_user')).resolves.toBe(session);
+    expect(restarted.start).not.toHaveBeenCalled();
+    expect(restarted.stop).not.toHaveBeenCalled();
+  });
+
+  it.each(['ask', 'approve-reads'] as const)('rejects a non-Claude terminal-mode Agent in %s before starting it and names both fixes', async permissionMode => {
+    const config = { ...baseConfig, defaultAgentId: 'codex', permissionMode, fullTrustConfirmed: false };
+    const runtime = { listAgents: vi.fn(async () => [{ id: 'codex', name: 'Codex', protocol: 'pty-cli' as const }]),
+      listSessions: vi.fn(async () => []), start: vi.fn(), stop: vi.fn() };
+    const error = await resolveLarkSession(runtime as any, log, group() as any, config, 'oc_group', 'group', 'user:ou_user').catch(caught => caught);
+    expect(error).toMatchObject({ code: 'LARK_APPROVAL_UNSUPPORTED', statusCode: 422 });
+    expect(error.message).toContain('dutydeck settings bot set cli_test permissionMode=full-trust fullTrustConfirmed=true');
+    expect(error.message).toContain('ACP Agent');
+    expect(error.message).toContain('Claude Code 终端模式');
+    expect(runtime.start).not.toHaveBeenCalled();
+  });
+
   it('starts an ACP ask session without a full-trust confirmation', async () => {
     const ask = { ...baseConfig, permissionMode: 'ask' as const, fullTrustConfirmed: false };
     const session = { id: 'ses_ask', protocol: 'acp', permissionMode: 'ask', state: 'idle' };

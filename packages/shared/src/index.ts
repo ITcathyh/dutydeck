@@ -5,6 +5,7 @@ import {
   type ChannelBotBrand,
   type PermissionMode
 } from './configuration-primitives.js';
+import { supportsRemoteApproval } from './remote-approval.js';
 
 export * from './configuration-primitives.js';
 
@@ -46,7 +47,9 @@ export const publicAgentSchema = z.object({
   version: z.string().optional(),
   model: z.string().optional(),
   protocol: z.enum(protocols),
-  permissionMode: z.enum(permissionModes)
+  permissionMode: z.enum(permissionModes),
+  /** 工具确认能否在飞书逐项审批（见 supportsRemoteApproval）；不能时飞书机器人只能以完全信任运行。toPublicAgent 总会给出。 */
+  remoteApproval: z.boolean().optional()
 }).strict();
 export type PublicAgent = z.infer<typeof publicAgentSchema>;
 
@@ -57,7 +60,8 @@ export function toPublicAgent(agent: AgentConfig): PublicAgent {
     version: agent.version,
     model: agent.model,
     protocol: agent.protocol,
-    permissionMode: agent.permissionMode
+    permissionMode: agent.permissionMode,
+    remoteApproval: supportsRemoteApproval(agent)
   });
 }
 
@@ -218,8 +222,12 @@ export interface ToolCallData {
 export interface PermissionRequestData {
   id: string;
   toolCallId?: string;
-  /** Bounded, redacted facts supplied by the ACP tool call; never raw input. */
-  operation?: { source: 'acp_tool_call'; cwd?: string; resource?: string; command?: string };
+  /**
+   * Bounded, redacted facts supplied by the ACP tool call or the Claude PermissionRequest hook; never raw input.
+   * kind follows ACP tool kinds (execute / edit / delete / move / read / search / fetch / other);
+   * resourceCount is how many files the operation touches when more than one is known.
+   */
+  operation?: { source: 'acp_tool_call' | 'claude_permission_hook'; kind?: string; cwd?: string; resource?: string; resourceCount?: number; command?: string };
   title: string;
   options?: Array<{ id: string; label: string; kind?: string }>;
   status: 'pending' | 'approved' | 'rejected';
@@ -496,6 +504,7 @@ export * from './session-automation.js';
 export * from './work-items.js';
 
 export * from './permission-display.js';
+export * from './remote-approval.js';
 
 export * from './database-control.js';
 

@@ -92,7 +92,7 @@ describe('acpx ACP boundary', () => {
       const sending = adapter.send('permission details');
       await expect.poll(() => events.find(event => event.type === 'permission_request')).toBeTruthy();
       const request = events.find(event => event.type === 'permission_request').data;
-      expect(request).toMatchObject({ title: '运行项目测试', toolCallId: 'permission-tool', operation: { source: 'acp_tool_call', cwd: '/work/project', resource: '/work/project/config.ts', command: 'pnpm test --token=[REDACTED] && echo [REDACTED]' }, options: [{ id: 'allow', label: 'Allow', kind: 'allow_once' }, { id: 'deny', label: 'Deny', kind: 'reject_once' }] });
+      expect(request).toMatchObject({ title: '运行项目测试', toolCallId: 'permission-tool', operation: { source: 'acp_tool_call', kind: 'execute', cwd: '/work/project', resource: '/work/project/config.ts', command: 'pnpm test --token=[REDACTED] && echo [REDACTED]' }, options: [{ id: 'allow', label: 'Allow', kind: 'allow_once' }, { id: 'deny', label: 'Deny', kind: 'reject_once' }] });
       expect(JSON.stringify(request)).not.toMatch(/synthetic-(cli|env)-secret|PRIVATE FILE CONTENT|DO NOT DISPLAY/);
       expect(await adapter.resolvePermission(request.id, true)).toBe(true);
       expect(await adapter.resolvePermission(request.id, true)).toBe(false);
@@ -335,6 +335,12 @@ describe('acpx ACP boundary', () => {
 
   it('normalizes raw ACP session/update envelopes', () => {
     expect(normalizeAcpxEvent({ jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'TraeX says hi' } } } })).toMatchObject({ type: 'text', data: { text: 'TraeX says hi' } });
+    // 审批卡意图摘要的输入：执行端声明的工具类别，多个文件时带数量。
+    expect(normalizeAcpxEvent({ type: 'permission_request', requestId: 'perm-files', update: { toolCallId: 'tool-files', title: 'Edit files', kind: 'edit', locations: [{ path: 'src/a.ts' }, { path: 'src/b.ts' }, { path: 'src/c.ts' }] } }))
+      .toMatchObject({ type: 'permission_request', data: { id: 'perm-files', operation: { source: 'acp_tool_call', kind: 'edit', resource: 'src/a.ts', resourceCount: 3 } } });
+    expect(normalizeAcpxEvent({ type: 'permission_request', requestId: 'perm-one', update: { toolCallId: 'tool-one', title: 'Edit file', kind: 'edit', locations: [{ path: 'src/a.ts' }] } }))
+      .toMatchObject({ type: 'permission_request', data: { operation: { source: 'acp_tool_call', kind: 'edit', resource: 'src/a.ts' } } });
+    expect((normalizeAcpxEvent({ type: 'permission_request', requestId: 'perm-one', update: { toolCallId: 'tool-one', title: 'Edit file', kind: 'edit', locations: [{ path: 'src/a.ts' }] } }) as any).data.operation.resourceCount).toBeUndefined();
     expect(normalizeAcpxEvent({ jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call_update', toolCallId: 'tool-1', title: 'pwd' } } })).toMatchObject({ type: 'tool_call', data: { id: 'tool-1', status: 'running' } });
     expect(normalizeAcpxEvent({ jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call_update', toolCallId: 'tool-1', status: 'completed' } } })).toMatchObject({ type: 'tool_result', data: { id: 'tool-1', status: 'completed' } });
     expect(normalizeAcpxEvent({ type: 'status', tag: 'usage_update', used: 1200, size: 200000, breakdown: { totalTokens: 1300 } })).toEqual({ type: 'status', data: { state: 'usage', used: 1200, size: 200000, breakdown: { totalTokens: 1300 }, cost: undefined } });

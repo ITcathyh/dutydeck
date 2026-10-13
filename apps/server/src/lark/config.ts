@@ -1,4 +1,4 @@
-import { collaborationParticipationModes, mentionPolicies, riskControlModes, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type RiskControlMode } from '@dutydeck/shared';
+import { collaborationParticipationModes, mentionPolicies, riskControlModes, supportsRemoteApproval, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type RiskControlMode } from '@dutydeck/shared';
 import { isAbsolute } from 'node:path';
 import { hostname, userInfo } from 'node:os';
 import { LarkServiceError } from './service.js';
@@ -156,6 +156,13 @@ export const larkExecutionIdentity = (): string => {
 
 export const larkPermissionMode = (config: Pick<StoredLarkConfig, 'permissionMode'>) =>
   config.permissionMode === 'ask' || config.permissionMode === 'approve-reads' ? config.permissionMode : 'full-trust' as const;
+/**
+ * 新建机器人的默认确认方式：所选 Agent 能在飞书逐项审批就默认逐项确认；不能时落成完全信任，
+ * 须走完全信任确认后才能保存，不会静默变成一个启动就被拒的逐项确认。还没选 Agent 时按逐项确认。
+ * 只用于新建；已有机器人保存过的确认方式不重算。
+ */
+export const defaultLarkPermissionMode = (agent?: Parameters<typeof supportsRemoteApproval>[0]) =>
+  !agent || supportsRemoteApproval(agent) ? 'ask' as const : 'full-trust' as const;
 export const larkExecutionConfirmed = (config: Pick<StoredLarkConfig, 'permissionMode' | 'fullTrustConfirmed'>) => larkPermissionMode(config) !== 'full-trust' || config.fullTrustConfirmed === true;
 
 export interface SaveLarkConfigInput {
@@ -802,7 +809,8 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const defaultModel = input.defaultModel === undefined ? current?.defaultModel : input.defaultModel.trim() || undefined;
   const defaultReasoningEffort = input.defaultReasoningEffort === undefined ? current?.defaultReasoningEffort : input.defaultReasoningEffort.trim() || undefined;
   const fullTrustConfirmed = input.fullTrustConfirmed ?? current?.fullTrustConfirmed ?? false;
-  const permissionMode = input.permissionMode ?? larkPermissionMode(current ?? {});
+  const permissionMode = input.permissionMode ?? (current ? larkPermissionMode(current)
+    : defaultLarkPermissionMode(defaultAgentId ? await agents?.get(defaultAgentId) : undefined));
   if (permissionMode !== 'ask' && permissionMode !== 'approve-reads' && permissionMode !== 'full-trust') throw new LarkServiceError('INVALID_LARK_CONFIG', 'Unsupported Lark permission mode', 400);
   const p2pMode = input.p2pMode === undefined ? current?.p2pMode : normalizeP2pMode(input.p2pMode);
   const groupReplyMode = input.groupReplyMode === undefined ? current?.groupReplyMode : normalizeGroupReplyMode(input.groupReplyMode);

@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId } from '@dutydeck/shared';
+import { canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval } from '@dutydeck/shared';
 import { AcpxAdapter, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
@@ -513,7 +513,8 @@ export class DutydeckRuntime {
       reasoningEffort: session.reasoningEffort ?? agent.reasoningEffort,
       systemPrompt: session.systemPrompt ?? agent.systemPrompt,
       permissionMode: session.permissionMode ?? agent.permissionMode,
-      env: { ...agent.env, ...this.options.sessionEnvironment?.(session), ...(session.protocol === 'pty-cli' ? { dutydeck_terminal_backend: session.terminalBackend ?? 'tmux' } : {}) }
+      // 终端模式的适配器据会话来源决定启动参数（飞书会话固定 CLI 的权限模式），只注入 pty-cli，不进 ACPX session。
+      env: { ...agent.env, ...this.options.sessionEnvironment?.(session), ...(session.protocol === 'pty-cli' ? { dutydeck_terminal_backend: session.terminalBackend ?? 'tmux', ...(session.source ? { dutydeck_session_source: session.source } : {}) } : {}) }
     };
   }
 
@@ -1818,8 +1819,9 @@ export class DutydeckRuntime {
     if (capability.protocol === 'pty') {
       throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'Legacy PTY transport cannot enforce a permission posture or expose interactive approval; use an ACP or PTY CLI Agent', 422);
     }
-    if (capability.protocol === 'pty-cli' && initialConfigured.permissionMode !== 'ask' && initialConfigured.permissionMode !== 'full-trust') {
-      throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY Agent only supports ask (approve in the terminal) or explicit full-trust mode', 422);
+    if (capability.protocol === 'pty-cli' && initialConfigured.permissionMode !== 'ask' && initialConfigured.permissionMode !== 'full-trust'
+      && !(initialConfigured.permissionMode === 'approve-reads' && supportsRemoteApproval({ ...initialConfigured, protocol: 'pty-cli' }))) {
+      throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY Agent only supports ask (approve in the terminal) or explicit full-trust mode; approve-reads requires a Claude Code family CLI', 422);
     }
     const terminalBackend = capability.protocol === 'pty-cli' ? await this.options.terminalBackend?.() ?? 'tmux' : undefined;
     const session: Session = { terminalBackend, id: owned?.id ?? makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
@@ -2298,7 +2300,10 @@ export class DutydeckRuntime {
   private async configureTaskDriver(session: Session, options: ExecutionOptions) {
     await this.mutations.wait(() => this.configurations.assertClear(session.id));
     const existing = this.drivers.get(session.id);
-    if (session.protocol === 'pty-cli' && !['ask', 'full-trust'].includes(options.permissionMode)) throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY CLI cannot enforce the requested permission mode', 422);
+    if (session.protocol === 'pty-cli' && !['ask', 'full-trust'].includes(options.permissionMode)) {
+      const agent = options.permissionMode === 'approve-reads' ? await this.repos.agents.get(session.agentId) : undefined;
+      if (!agent || !supportsRemoteApproval({ ...agent, protocol: 'pty-cli' })) throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY CLI cannot enforce the requested permission mode', 422);
+    }
     if (!existing) return this.reconnect(session, true, options);
     const owned=this.localResources.get(existing);
     if(owned?.controlled&&owned.options.permissionMode!==options.permissionMode){await this.stopDriver(session.id,existing);this.mutations.check();return this.reconnect(session,true,options);}
@@ -2956,12 +2961,21 @@ export class DutydeckRuntime {
     return this.withSessionMetadata(session);
     });
   }
+  /**
+   * 终端模式 CLI 的权限 hook 交来的请求：本会话有进行中的轮次、驱动也能接时，登记成与 ACP 相同的待审批项，
+   * 返回驱动给出的裁决；否则返回 undefined，调用方保留 CLI 的原生确认。
+   */
+  requestDriverPermission(sessionId: string, request: Omit<PermissionRequestData, 'id' | 'status'>) {
+    if (this.shuttingDown || !this.attempts.has(sessionId) || !this.mutations.valid(this.lifecycle(sessionId))) return undefined;
+    return this.drivers.get(sessionId)?.requestPermission?.(request);
+  }
+
   getPendingPermissions(sessionId: string): PermissionRequestData[] {
     if (!this.mutations.valid(this.lifecycle(sessionId)) || !this.drivers.get(sessionId)?.resolvePermission) return [];
     return [...this.permissions.entries()].filter(([key, pending]) => key.startsWith(sessionId + ':') && this.mutations.valid(pending.owner) && !this.permissionResolutions.has(key)).map(([, value]) => ({ ...value.request }));
   }
 
-  async resolvePermission(sessionId: string, permissionId: string, approved: boolean) {
+  async resolvePermission(sessionId: string, permissionId: string, approved: boolean, reason?: string) {
     return this.scoped(sessionId, async () => {
     const { driver } = await this.active(sessionId);
     const key = this.permissionKey(sessionId, permissionId);
@@ -2980,7 +2994,7 @@ export class DutydeckRuntime {
       if (!this.mutations.valid(pending.owner) || this.permissionResolutions.get(key) !== claim || this.permissions.get(key) !== pending || this.drivers.get(sessionId) !== driver || pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0)) {
         throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);
       }
-      const resolved = await this.driverOperation(driver, () => driver.resolvePermission!(pending.nativeId, approved));
+      const resolved = await this.driverOperation(driver, () => !approved && reason ? driver.resolvePermission!(pending.nativeId, false, reason) : driver.resolvePermission!(pending.nativeId, approved));
       if (!resolved || !this.mutations.valid(pending.owner) || this.drivers.get(sessionId) !== driver || pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0)) {
         if (this.permissions.get(key) === pending) this.permissions.delete(key);
         throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);

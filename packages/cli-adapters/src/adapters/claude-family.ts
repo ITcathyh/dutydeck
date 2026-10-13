@@ -1,7 +1,7 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 import { pinnedSessionUuid } from '../resume-id.js';
-import { relayCommandFrom, relayEnabled } from '@dutydeck/relay';
+import { relayCommandFrom, relayEnabled, relayPermissionHookTimeoutSeconds } from '@dutydeck/relay';
 import { delay, waitForInputEcho, waitForQuietScreen } from './input-settle.js';
 
 /**
@@ -255,13 +255,22 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
         args.push('--model', model.trim());
       }
       pushClaudeFamilyBypassArgs(args, permissionMode);
+      // 飞书会话要逐项审批：固定 default 模式，不让用户本机的 auto 等默认模式先替人做决定。
+      if ((permissionMode === 'ask' || permissionMode === 'approve-reads') && env?.dutydeck_session_source === 'lark') {
+        args.push('--permission-mode', 'default');
+      }
       if (relayEnabled(env)) {
         const index = args.indexOf('--settings');
         const settings = index < 0 ? {} : JSON.parse(args[index + 1]!);
         const value = JSON.stringify({ ...settings, hooks: { PreToolUse: [{
           matcher: '^AskUserQuestion$',
           hooks: [{ type: 'command', command: `${relayCommandFrom(env)} session native-ask`, timeout: 1230 }],
-        }] } });
+        }],
+        // 非完全信任时，Claude 原本要在终端弹出的工具确认改由 hook 交给 Dutydeck，飞书会话里变成审批卡；
+        // 非飞书会话由服务端答复保留原生确认。
+        ...(permissionMode === 'full-trust' ? {} : { PermissionRequest: [{
+          hooks: [{ type: 'command', command: `${relayCommandFrom(env)} session permission-hook`, timeout: relayPermissionHookTimeoutSeconds }],
+        }] }) } });
         if (index < 0) args.push('--settings', value);
         else args[index + 1] = value;
       }

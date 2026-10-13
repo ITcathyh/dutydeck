@@ -4,11 +4,14 @@ import {
   AGENT_LOGIN_REQUIRED,
   DriverDetachedError,
   DriverRecoveryError,
+  remoteApprovalCliAdapterIds,
   type AgentConfig,
+  type DriverPermissionDecision,
   type AgentIdleTimeoutData,
   type AgentDriver,
   type DriverTurnRecovery,
   type NormalizedDriverEvent,
+  type PermissionRequestData,
   type PromptAssemblyData,
   type TerminalStream,
 } from '@dutydeck/shared';
@@ -111,6 +114,11 @@ export class PtyCliDriver implements AgentDriver {
   private readonly turnCpu = new TurnCpu();
   private readonly activityRecords = new Set<string>();
   private readonly humanWaits = new Set<string>();
+  /** CLI 权限 hook 交来、正在等人裁决的请求。 */
+  private readonly hookPermissions = new Map<string, (decision: DriverPermissionDecision) => void>();
+  /** 只有能把工具确认交给 hook 的 CLI（Claude 家族）才有这两项；其它终端模式 CLI 仍在终端里确认。 */
+  requestPermission?: AgentDriver['requestPermission'];
+  resolvePermission?: AgentDriver['resolvePermission'];
   private backgroundEvidenceUntil = 0;
   private screenProgress = '';
   private refreshingScreen = false;
@@ -178,18 +186,52 @@ export class PtyCliDriver implements AgentDriver {
     this.agent = opts.agent;
     this.adapter = opts.adapter;
     this.sessionId = opts.sessionId;
-    this.emitEvent = opts.onEvent;
+    this.emitEvent = event => {
+      // 轮次结束时还没裁决的 hook 请求一并拒绝：等它的 hook 进程已随这一轮结束，不能留着被迟到的批准放行。
+      if (event.type === 'completed' || (event.type === 'status' && event.data?.state === 'turn_timeout')) this.rejectHookPermissions('本轮任务已结束，这次操作没有执行。');
+      opts.onEvent(event);
+    };
     this.exitCallback = opts.onExit;
     this.stoppedCallback = opts.onStopped;
     this.backend = opts.backend ?? new PtyBackend();
     this.cwd = opts.agent.cwd ?? process.cwd();
     this.claudeSettings = new ClaudeSettings(this.adapter.id, this.sessionId);
     this.cliSessionId = opts.cliSessionId;
+    if (remoteApprovalCliAdapterIds.includes(this.adapter.id)) {
+      this.requestPermission = request => this.requestHookPermission(request);
+      this.resolvePermission = async (id, approved, reason) => this.resolveHookPermission(id, approved, reason);
+    }
+  }
+
+  /** 把 hook 交来的权限请求作为 pending 的 permission_request 发出；只在本轮进行中受理。 */
+  private requestHookPermission(request: Omit<PermissionRequestData, 'id' | 'status'>) {
+    if (this.stopped || !this.turnActive) return undefined;
+    const id = `hook_${randomUUID()}`;
+    const decision = new Promise<DriverPermissionDecision>(resolve => this.hookPermissions.set(id, resolve));
+    const event: NormalizedDriverEvent = { type: 'permission_request', data: { ...request, id, status: 'pending' } };
+    this.noteTurnProgress(event);
+    this.emitEvent(event);
+    return { id, decision };
+  }
+
+  private resolveHookPermission(id: string, approved: boolean, reason?: string) {
+    const resolve = this.hookPermissions.get(id);
+    if (!resolve) return false;
+    this.hookPermissions.delete(id);
+    if (this.humanWaits.delete(id)) this.lastProgressAt = Date.now();
+    resolve({ approved, ...(!approved && reason ? { reason } : {}) });
+    return true;
+  }
+
+  private rejectHookPermissions(reason: string) {
+    for (const id of [...this.hookPermissions.keys()]) this.resolveHookPermission(id, false, reason);
   }
 
   private assertPermissionModeSupported() {
-    if (this.agent.permissionMode !== 'ask' && this.agent.permissionMode !== 'full-trust') {
-      throw new Error(`PTY Agent ${this.agent.id} does not support permission mode ${this.agent.permissionMode}; use ask or full-trust`);
+    const mode = this.agent.permissionMode;
+    // approve-reads 由权限 hook 在服务端放行读取与搜索，只有能接 hook 的 CLI 支持。
+    if (mode !== 'ask' && mode !== 'full-trust' && !(mode === 'approve-reads' && this.requestPermission)) {
+      throw new Error(`PTY Agent ${this.agent.id} does not support permission mode ${mode}; use ask or full-trust`);
     }
   }
 
@@ -837,6 +879,7 @@ export class PtyCliDriver implements AgentDriver {
   async stop(options: { discardSession?: boolean } = {}): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    this.rejectHookPermissions('会话已停止，这次操作没有执行。');
     if (this.backend instanceof PtyBackend) this.stoppedPid = this.backend.getPid() ?? undefined;
     const tmuxBackend = this.persistentBackend();
     const preservePersistentSession = this.detachOnStop

@@ -80,7 +80,8 @@ describe('HTTP API boundary', () => {
       version: '1.2.3',
       model: 'model-a',
       protocol: 'acp',
-      permissionMode: 'ask'
+      permissionMode: 'ask',
+      remoteApproval: true
     }]);
     for (const canary of ['private-command-canary', 'private-arg-canary', 'private-reasoning-canary', '/private/', 'alice@example.com', 'PRIVATE_TOKEN', 'private-env-canary', 'private-system-canary']) {
       expect(response.body).not.toContain(canary);

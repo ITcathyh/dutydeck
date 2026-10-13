@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentRepository, ConfigRepository } from '@dutydeck/shared';
+import { supportsRemoteApproval, type AgentRepository, type ConfigRepository } from '@dutydeck/shared';
 import type { LarkCreateCliOptions } from '../cli-program.js';
 import { createCliUi, type CliUi } from '../cli-ui.js';
 import { InvalidWorkingDirectoryError, validateWorkingDirectory } from '../setup/detect.js';
 import { renderQrToTerminal } from '../setup/lark-bind.js';
 import { LarkAppCreationError, LarkAppCreationJobManager, type LarkAppCreationJob } from './app-creation.js';
 import { LarkServiceError } from './service.js';
-import { larkPermissionMode, publicLarkConfig, readLarkConfig, saveLarkConfig, type PublicLarkConfig } from './config.js';
+import { defaultLarkPermissionMode, larkPermissionMode, publicLarkConfig, readLarkConfig, saveLarkConfig, type PublicLarkConfig } from './config.js';
 import { connectLarkOpenPlatformSession } from './open-platform-session.js';
 import { syncLarkListener, type LarkListenerSyncResult } from './listener-cli.js';
 
@@ -76,12 +76,22 @@ export async function runLarkCreate(name: string | undefined, options: LarkCreat
     if ((options.listen || options.workspace || options.fullTrust) && !options.agent) throw new LarkCreateCliError('--listen、--workspace、--full-trust 需要同时指定 --agent <ID>。');
     if (options.forceLogin && (options.json || !ui.tty)) throw new LarkCreateCliError('--force-login 需要交互终端扫码，请去掉 --json 后执行。');
     const workspace = options.workspace === undefined ? undefined : validateWorkingDirectory(options.workspace);
-    if (options.agent && !await context.agents.get(options.agent)) {
+    const agent = options.agent ? await context.agents.get(options.agent) : undefined;
+    if (options.agent && !agent) {
       throw new LarkCreateCliError(`未知执行 Agent：${options.agent}。可用 ID：${(await context.agents.list()).map(agent => agent.id).join(', ') || '无'}。`);
     }
     const id = options.resume ?? randomUUID();
     const resume = `dutydeck lark create --resume ${id} --database ${quote(context.database)}`;
-    next = `${resume}${options.agent ? ` --agent ${quote(options.agent)}` : ''}${options.fullTrust ? ' --full-trust' : ''}${workspace ? ` --workspace ${quote(workspace)}` : ''}${options.listen ? ' --listen' : ''}`;
+    const flags = (fullTrust: boolean) => `${options.agent ? ` --agent ${quote(options.agent)}` : ''}${fullTrust ? ' --full-trust' : ''}${workspace ? ` --workspace ${quote(workspace)}` : ''}${options.listen ? ' --listen' : ''}`;
+    // 飞书里批不了这个 Agent 的工具确认：逐项确认的机器人一开会话就会被拒，扫码建应用之前就挡住。
+    if (agent && !options.fullTrust && !supportsRemoteApproval(agent)) {
+      const supported = (await context.agents.list()).filter(supportsRemoteApproval).map(item => item.id);
+      const fullTrustCommand = `${options.resume ? resume : `dutydeck lark create ${quote(name!.trim())} --database ${quote(context.database)}`}${flags(true)}`;
+      throw new LarkCreateCliError(`执行 Agent ${agent.id} 的工具确认只能在终端里处理，飞书无法逐项审批。二选一：`
+        + `1) 以完全信任运行（Agent 无人值守执行本机命令和修改文件）：${fullTrustCommand}；`
+        + `2) 换一个支持飞书审批的 Agent：${supported.length ? `把 --agent 换成 ${supported.join(' / ')}` : '当前没有可用的，请先安装 ACP Agent 或 Claude Code'}。`);
+    }
+    next = `${resume}${flags(options.fullTrust === true)}`;
     let renderedPayload: string | undefined;
     const manager = new LarkAppCreationJobManager({
       config: context.config,
@@ -125,7 +135,7 @@ export async function runLarkCreate(name: string | undefined, options: LarkCreat
     if (!options.status && configured && options.agent) {
       if (!bot) throw new LarkCreateCliError('应用已创建，但本地机器人配置不存在，请在 Dashboard 核对。');
       const listening = options.listen ?? bot.listening;
-      const permissionMode = options.fullTrust ? 'full-trust' : bot.fullTrustConfirmed ? larkPermissionMode(bot) : 'ask';
+      const permissionMode = options.fullTrust ? 'full-trust' : bot.fullTrustConfirmed ? larkPermissionMode(bot) : defaultLarkPermissionMode(agent);
       const fullTrustConfirmed = options.fullTrust === true || bot.fullTrustConfirmed;
       if (bot.defaultAgentId !== options.agent || bot.fullTrustConfirmed !== fullTrustConfirmed || larkPermissionMode(bot) !== permissionMode || (workspace !== undefined && bot.workspace !== workspace) || bot.listening !== listening) {
         const bots = await saveLarkConfig(context.config, context.agents, {

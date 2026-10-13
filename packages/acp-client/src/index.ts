@@ -163,13 +163,16 @@ export function normalizeAcpxEvent(input: unknown): NormalizedDriverEvent | unde
 function permissionFacts(tool: any, secrets: string[] = []) {
   const input = tool?.rawInput ?? tool?.input;
   const fields = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
-  const clean = (value: unknown) => permissionDisplayText(value, secrets);
+  const clean = (value: unknown, limit?: number) => permissionDisplayText(value, secrets, limit);
   const cwd = clean(fields.cwd ?? fields.workdir ?? fields.working_directory);
   const resource = clean(fields.path ?? fields.file_path ?? fields.url ?? tool?.locations?.[0]?.path);
   const command = clean(fields.command ?? fields.cmd);
+  // 审批卡的意图摘要按执行端声明的工具类别拼；涉及多个文件时带上数量。
+  const kind = clean(tool?.kind, 40);
+  const resourceCount = Array.isArray(tool?.locations) && tool.locations.length > 1 ? tool.locations.length : undefined;
   return {
     title: clean(fields.description) || clean(tool?.title) || 'Agent 请求执行受控操作',
-    ...(cwd || resource || command ? { operation: { source: 'acp_tool_call' as const, ...(cwd ? { cwd } : {}), ...(resource ? { resource } : {}), ...(command ? { command } : {}) } } : {})
+    ...(cwd || resource || command || kind ? { operation: { source: 'acp_tool_call' as const, ...(kind ? { kind } : {}), ...(cwd ? { cwd } : {}), ...(resource ? { resource, ...(resourceCount ? { resourceCount } : {}) } : {}), ...(command ? { command } : {}) } } : {})
   };
 }
 

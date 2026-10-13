@@ -36,6 +36,12 @@ export function relayCommandFrom(env: RelayPromptEnv = {}): string {
   return env[relayCommandEnvKey]?.trim() || 'dutydeck';
 }
 
+/**
+ * Claude PermissionRequest hook 的超时（秒）。飞书审批最长等 24 小时才自动拒绝，hook 自己在 24 小时 5 分钟时拒绝；
+ * Claude 侧超时再多留 5 分钟，确保 hook 总能先交回明确的拒绝，而不是被 Claude 取消后退回终端确认。
+ */
+export const relayPermissionHookTimeoutSeconds = 24 * 60 * 60 + 10 * 60;
+
 /** 该会话是否具备回传能力（env 齐全才有） */
 export function relayEnabled(env: RelayPromptEnv = {}): boolean {
   return Boolean(env[relayUrlEnvKey]?.trim() && env[relayTokenEnvKey]?.trim());

@@ -351,3 +351,44 @@ it('does not sync a listening completed bot during read-only status', async () =
   expect(h.syncListener).not.toHaveBeenCalled();
   expect(await h.context.config.get('lark.bots')).toBe(raw);
 });
+
+it('rejects a terminal-only Agent without --full-trust before scanning and names both fixes', async () => {
+  const h = await harness(true);
+  await h.repositories.agents.save(agentConfigSchema.parse({ id: 'codex-cli', name: 'Codex CLI', protocol: 'pty-cli', adapterId: 'codex', command: process.execPath }));
+  const before = await h.context.config.list!('lark.');
+  const result = await runLarkCreate('Codex bot', { agent: 'codex-cli', listen: true }, h.context);
+  expect(result.ok).toBe(false);
+  expect(result.error).toContain(`dutydeck lark create 'Codex bot' --database '/tmp/Bot'\\''s state.db' --agent 'codex-cli' --full-trust --listen`);
+  expect(result.error).toContain('ccflash');
+  expect(h.connect).not.toHaveBeenCalled();
+  expect(h.postJson).not.toHaveBeenCalled();
+  expect(await h.context.config.list!('lark.')).toEqual(before);
+  // 同一 Agent 显式选完全信任则照常创建。
+  expect(await runLarkCreate('Codex bot', { agent: 'codex-cli', fullTrust: true }, h.context)).toMatchObject({ ok: true, bot: { defaultAgentId: 'codex-cli', permissionMode: 'full-trust', fullTrustConfirmed: true } });
+});
+
+it('rejects a terminal-only Agent on resume with the resume command plus --full-trust', async () => {
+  const h = await harness(true);
+  await h.repositories.agents.save(agentConfigSchema.parse({ id: 'codex-cli', name: 'Codex CLI', protocol: 'pty-cli', adapterId: 'codex', command: process.execPath }));
+  const result = await runLarkCreate(undefined, { resume: uuid, agent: 'codex-cli' }, h.context);
+  expect(result.error).toContain(`dutydeck lark create --resume ${uuid} --database '/tmp/Bot'\\''s state.db' --agent 'codex-cli' --full-trust`);
+  expect(h.connect).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['ACP Agent', { id: 'acp-agent', name: 'ACP', protocol: 'acp' }, 'ask'],
+  ['Claude terminal Agent', { id: 'claude-cli', name: 'Claude CLI', protocol: 'pty-cli', adapterId: 'claude-code' }, 'ask'],
+  ['Codex terminal Agent', { id: 'codex-cli', name: 'Codex CLI', protocol: 'pty-cli', adapterId: 'codex' }, 'full-trust required']
+] as const)('uses the same new-bot default for %s in CLI creation and saveLarkConfig', async (_name, agentInput, expected) => {
+  const h = await harness(true);
+  await h.repositories.agents.save(agentConfigSchema.parse({ ...agentInput, command: process.execPath }));
+  const cli = await runLarkCreate('Default bot', { agent: agentInput.id }, h.context);
+  const saved = saveLarkConfig(h.context.config, h.context.agents, { stage: 'agent', appId: 'cli_saved', appSecret: 'secret', defaultAgentId: agentInput.id });
+  if (expected === 'ask') {
+    expect(cli).toMatchObject({ ok: true, bot: { permissionMode: 'ask', fullTrustConfirmed: false } });
+    expect((await saved).find(bot => bot.appId === 'cli_saved')).toMatchObject({ permissionMode: 'ask', fullTrustConfirmed: false });
+  } else {
+    expect(cli).toMatchObject({ ok: false, error: expect.stringContaining('--full-trust') });
+    await expect(saved).rejects.toMatchObject({ code: 'LARK_FULL_TRUST_CONFIRMATION_REQUIRED' });
+  }
+});

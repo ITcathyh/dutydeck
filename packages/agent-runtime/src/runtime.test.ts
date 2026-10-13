@@ -793,6 +793,26 @@ describe('runtime lifecycle acceptance', () => {
     await h.runtime.shutdown(); h.repos.close();
   });
 
+  it('registers driver-originated hook permissions only during a turn and forwards the rejection reason', async () => {
+    const h = harness(); const permissionTurn = deferred();
+    const request = { title: 'Run tests', operation: { source: 'claude_permission_hook' as const, kind: 'execute', command: 'pnpm test' } };
+    h.driver.requestPermission = vi.fn(input => { h.emit({ type: 'permission_request', data: { ...input, id: 'hook_1', status: 'pending' } }); return { id: 'hook_1', decision: new Promise(() => {}) }; });
+    h.driver.send = vi.fn(async () => { await permissionTurn.promise; h.emit({ type: 'text', data: { text: 'done' } }); h.emit({ type: 'completed', data: { stopReason: 'end_turn' } }); });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    // 没有进行中的轮次：交回 undefined，调用方保留 CLI 原生确认。
+    expect(h.runtime.requestDriverPermission(s.id, request)).toBeUndefined();
+    expect(h.driver.requestPermission).not.toHaveBeenCalled();
+    const turn = h.runtime.send(s.id, 'test');
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalled());
+    expect(h.runtime.requestDriverPermission(s.id, request)?.id).toBe('hook_1');
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toEqual([expect.objectContaining({ ...request, status: 'pending' })]));
+    const [pending] = h.runtime.getPendingPermissions(s.id);
+    expect((await h.runtime.resolvePermission(s.id, pending!.id, false, '超过 24 小时未处理，已自动拒绝')).status).toBe('rejected');
+    expect(h.driver.resolvePermission).toHaveBeenCalledWith('hook_1', false, '超过 24 小时未处理，已自动拒绝');
+    permissionTurn.resolve(); expect((await turn).status).toBe('completed');
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
   it('keeps a claim private while the driver decision is in flight', async () => {
     const gate = deferred(); const turnGate = deferred();
     const h = harness({ resolvePermission: async () => { await gate.promise; return true; } });
@@ -1279,6 +1299,36 @@ describe('multi-driver routing', () => {
     expect(factory).not.toHaveBeenCalled();
     expect(await h.runtime.listSessions()).toEqual([]);
     await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('accepts approve-reads for a Claude family PTY agent whose approvals go through the permission hook', async () => {
+    const h = ptyHarness();
+    const claude = { ...ptyAgent, id: 'claude-wrapper', adapterId: 'claude-code' };
+    await h.repos.agents.save(claude);
+    await h.runtime.initialize([claude]);
+    const session = await h.runtime.start({ agentId: claude.id, permissionMode: 'approve-reads' });
+    expect(session.permissionMode).toBe('approve-reads');
+    expect(h.routedAgent()?.permissionMode).toBe('approve-reads');
+    // 没有来源的会话不带来源变量，适配器不会改 CLI 的权限模式。
+    expect(h.routedAgent()?.env.dutydeck_session_source).toBeUndefined();
+    await h.runtime.send(session.id, 'work');
+    expect(h.driver.send).toHaveBeenCalledWith('work');
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('tells terminal-mode adapters the session source without adding it to ACP sessions', async () => {
+    const h = ptyHarness();
+    const claude = { ...ptyAgent, id: 'claude-wrapper', adapterId: 'claude-code' };
+    await h.repos.agents.save(claude);
+    await h.runtime.initialize([claude]);
+    await h.runtime.start({ agentId: claude.id, permissionMode: 'ask', source: 'lark', sourceId: 'cli_test:oc_group:group:user:ou_user' });
+    expect(h.routedAgent()?.env.dutydeck_session_source).toBe('lark');
+    await h.runtime.shutdown(); h.repos.close();
+    const acp = harness();
+    await acp.runtime.initialize([agent]);
+    await acp.runtime.start({ agentId: 'mock', source: 'lark', sourceId: 'cli_test:oc_group:group:user:ou_user' });
+    expect(acp.configuredAgents[0]?.env.dutydeck_session_source).toBeUndefined();
+    await acp.runtime.shutdown(); acp.repos.close();
   });
 
   it('rejects pty-cli sessions when no ptyDriverFactory is injected', async () => {

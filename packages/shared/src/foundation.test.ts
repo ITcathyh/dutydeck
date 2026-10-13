@@ -34,7 +34,7 @@ describe('WP0 public and disabled-state contracts', () => {
 
     const publicAgent = toPublicAgent(agent);
 
-    expect(publicAgent).toEqual({ id: 'codex', name: 'Codex', version: '1.0.0', model: 'model-a', protocol: 'acp', permissionMode: 'ask' });
+    expect(publicAgent).toEqual({ id: 'codex', name: 'Codex', version: '1.0.0', model: 'model-a', protocol: 'acp', permissionMode: 'ask', remoteApproval: true });
     const serialized = JSON.stringify(publicAgent);
     for (const canary of ['private-command-canary', 'private-arg-canary', 'private-reasoning-canary', '/private/', 'alice@example.com', 'PRIVATE_TOKEN', 'private-env-canary', 'private-system-canary']) {
       expect(serialized).not.toContain(canary);

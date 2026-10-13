@@ -285,6 +285,19 @@ describe('publicLarkConfig new-field exposure', () => {
 });
 
 describe('Lark permission posture persistence', () => {
+  it('defaults a new bot to ask and never recomputes the saved mode of an existing bot', async () => {
+    const agents = { get: vi.fn(async (id: string) => ({ claude: { id, protocol: 'pty-cli', adapterId: 'claude-code' }, codex: { id, protocol: 'pty-cli' } } as Record<string, object>)[id]) } as any;
+    const repository = createRepository();
+    await saveLarkConfig(repository, agents, { appId: 'cli_new', appSecret: 'secret', stage: 'lark' });
+    expect(larkPermissionMode((await readLarkConfigs(repository))[0]!)).toBe('ask');
+    const trusted = seedBots([{ appId: 'cli_old', appSecret: 'secret', defaultAgentId: 'claude', permissionMode: 'full-trust', fullTrustConfirmed: true }]);
+    await saveLarkConfig(trusted, agents, { originalAppId: 'cli_old', stage: 'agent', defaultAgentId: 'claude' });
+    expect(larkPermissionMode((await readLarkConfigs(trusted))[0]!)).toBe('full-trust');
+    const asking = seedBots([{ appId: 'cli_ask', appSecret: 'secret', defaultAgentId: 'claude', permissionMode: 'ask' }]);
+    await saveLarkConfig(asking, agents, { originalAppId: 'cli_ask', stage: 'agent', defaultAgentId: 'codex' });
+    expect(larkPermissionMode((await readLarkConfigs(asking))[0]!)).toBe('ask');
+  });
+
   it('keeps a legacy configuration without permissionMode as full-trust when full trust was confirmed', async () => {
     const [config] = await readLarkConfigs(seedBots([{ appId: 'cli_legacy', appSecret: 'secret', defaultAgentId: 'codex', fullTrustConfirmed: true }]));
     expect(publicLarkConfig(config)).toMatchObject({ permissionMode: 'full-trust', fullTrustConfirmed: true, setupComplete: true });
@@ -736,7 +749,8 @@ describe('分层协作执行方式', () => {
 
   it('accepts a terminal Leader when the Bot and the Agent are both full trust', async () => {
     const repository = createRepository();
-    await saveLarkConfig(repository, agents, { ...base, executionMode: 'layered', leaderAgentId: 'trusted-cli', workerAgentIds: ['worker'] });
+    // 新建机器人不再默认完全信任，这里显式选完全信任。
+    await saveLarkConfig(repository, agents, { ...base, permissionMode: 'full-trust', executionMode: 'layered', leaderAgentId: 'trusted-cli', workerAgentIds: ['worker'] });
     expect((await readLarkConfigs(repository))[0]).toMatchObject({ executionMode: 'layered', leaderAgentId: 'trusted-cli' });
   });
 
