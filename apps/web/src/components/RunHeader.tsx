@@ -1,4 +1,5 @@
-import { Archive, BookOpen, ChevronRight, Folder, LineChart, MessageSquare, PanelRightOpen, Pencil, Square, Terminal } from 'lucide-react';
+import { Archive, BookOpen, ChevronRight, Folder, LineChart, MessageSquare, PanelRightOpen, Pencil, RotateCcw, Square, Terminal } from 'lucide-react';
+import type { ReactNode } from 'react';
 import type { Agent, Session, SessionUsage, Task } from '../api';
 import type { StreamStatus } from '../sse';
 import { sessionDisplayName } from '../run-summary';
@@ -32,7 +33,7 @@ function usageLabel(usage?: SessionUsage) {
   const { own, subSteps } = usage;
   const entries = own.entries + subSteps.entries;
   if (!entries) return undefined;
-  if (own.unavailable + subSteps.unavailable === entries) return { text: '本任务累计：无用量数据', detail: '此 Agent 不上报 token 与成本' };
+  if (own.unavailable + subSteps.unavailable === entries) return { text: '本任务账本：无用量数据', detail: usage.snapshot?.nativeTokens ? '原生会话 token 见下方；此读数不计入账本费用' : '已完成的执行未记录 token 与成本' };
   const usd = (value: number) => `$${value.toFixed(2)}`;
   const estimated = own.estimatedCostUsd + subSteps.estimatedCostUsd;
   const unknown = (own.unknownCostEntries ?? (own.unpriced ?? 0) + own.unavailable)
@@ -42,13 +43,15 @@ function usageLabel(usage?: SessionUsage) {
   return { text: `本任务${unknown ? '已知费用' : '累计'} ${usd(own.costUsd + subSteps.costUsd)}${extra ? `（${extra}）` : ''}`, detail: `输入 ${tokens('inputTokens')} · 输出 ${tokens('outputTokens')} · 缓存读 ${tokens('cacheReadTokens')} · 缓存写 ${tokens('cacheWriteTokens')} token` };
 }
 
-export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, usage, rawVisible, rawAvailable, restarting, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw, onRename, onOpenInsight }: {
+export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, usage, tools, rawVisible, rawAvailable, restarting, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw, onRename, onOpenInsight }: {
   session: Session;
   agent?: Agent;
   taskPrompt?: string;
   streamStatus: StreamStatus;
   queuedTasks: Task[];
   usage?: SessionUsage;
+  /** 目标、工作目录等面板入口，排在「分析」前面。 */
+  tools?: ReactNode;
   rawVisible: boolean;
   rawAvailable: boolean;
   restarting: boolean;
@@ -76,7 +79,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   const errorSummary = sessionErrorSummary(session.error);
   const usageLine = usageLabel(usage);
   return <header className="shrink-0 bg-surface">
-    <div className="flex min-h-14 items-center gap-2 px-3 pt-1 sm:px-5">
+    <div className="flex flex-wrap items-center gap-x-2 px-3 pt-2 sm:px-5">
       {/*
         这里原先有一枚 md:hidden 的汉堡，无障碍名同样是「打开工作台导航」。
         全局顶栏落地后导航入口收归 TopBar，再留一枚就等于同一屏上有两个同名按钮：
@@ -84,10 +87,11 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
 
         缺陷 7：这一行原先塞了 workspace / 任务目标 / runId / cwd / Agent / 权限模式六类信息，
         移动端只剩一个截断标题。现在拆成两层：主行只回答「这是哪个仓库的什么任务」，
-        工作目录等次要信息下沉到副行，runId 与右侧操作居中对齐。cwd 与 runId 在窄屏用 CSS 隐藏（不是条件渲染），
+        工作目录、runId 等次要信息下沉到副行。cwd 与 runId 在窄屏用 CSS 隐藏（不是条件渲染），
         Agent 名与权限姿态任何视口都留在可访问树里。
       */}
-      <div className="min-w-0 flex-1">
+      {/* basis-48 给标题留底线：放不下全部操作按钮时，按钮整体换到下一行，而不是把标题挤成一个字。 */}
+      <div className="min-w-0 grow basis-48">
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="max-w-28 shrink-0 truncate text-body font-medium text-subtle sm:max-w-44" title={workspace}>{workspace}</span>
           <ChevronRight size={13} className="shrink-0 text-subtle"/>
@@ -97,17 +101,19 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
         <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-caption text-subtle">
           <span className="hidden min-w-0 items-center gap-1 sm:flex"><Folder size={11} className="shrink-0"/><span title={session.cwd} className="truncate">{session.cwd}</span><span className="shrink-0">·</span></span>
           <span className="shrink-0 truncate">{agent?.name ?? session.agentId}</span>
-          {session.permissionMode && <><span className="shrink-0">·</span><span title="本任务的权限姿态" className={`shrink-0 font-medium ${session.permissionMode === 'full-trust' ? 'text-danger' : 'text-subtle'}`}>{permissionLabels[session.permissionMode]}</span></>}
+          {/* 完全信任是飞书 Bot 的默认姿态，用提醒色标出即可，红字留给真正的失败。 */}
+          {session.permissionMode && <><span className="shrink-0">·</span><span title="本任务的权限姿态" className={`shrink-0 ${session.permissionMode === 'full-trust' ? 'text-warning' : 'text-subtle'}`}>{permissionLabels[session.permissionMode]}</span></>}
+          {/* runId 是低频元数据，text-meta 唯一合法的用途。 */}
+          <span className="hidden shrink-0 items-center gap-1.5 sm:flex"><span>·</span><span className="font-mono text-meta tracking-[.08em]">{shortRunId(session)}</span></span>
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-0.5">
-        {/* runId 是低频元数据，text-meta 唯一合法的用途。 */}
-        <span className="hidden shrink-0 pr-2 font-mono text-meta tracking-[.08em] text-subtle sm:inline">{shortRunId(session)}</span>
+      <div className="ml-auto flex shrink-0 items-center gap-0.5">
         {status.busy && !managed && <IconButton label="中断当前任务" onClick={onInterrupt}><Square size={14}/></IconButton>}
         {session.systemPrompt && <IconButton label="查看系统提示词" onClick={onOpenPrompt}><BookOpen size={14}/></IconButton>}
+        {tools}
+        <Button aria-label="会话分析" variant="ghost" onClick={onOpenInsight} icon={<LineChart size={14}/>}><span className="hidden lg:inline">分析</span></Button>
+        <Button aria-label="原始日志" variant="ghost" tone={rawVisible ? 'inverse' : 'default'} disabled={!rawAvailable} onClick={onToggleRaw} icon={rawVisible ? <PanelRightOpen size={14}/> : <Terminal size={14}/>}><span className="hidden lg:inline">日志</span></Button>
         {!status.archived && !managed && <IconButton label="归档任务" onClick={onArchive}><Archive size={15}/></IconButton>}
-        <Button aria-label="会话分析" variant="secondary" onClick={onOpenInsight} icon={<LineChart size={14}/>}><span className="hidden sm:inline">分析</span></Button>
-        <Button aria-label="原始日志" variant="secondary" tone={rawVisible ? 'inverse' : 'default'} disabled={!rawAvailable} onClick={onToggleRaw} icon={rawVisible ? <PanelRightOpen size={14}/> : <Terminal size={14}/>}><span className="hidden sm:inline">日志</span></Button>
       </div>
     </div>
     {/*
@@ -116,13 +122,13 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
       运行态圆点的配色来自 ui.tsx:stateTone，那是全站唯一的 state→色 映射，不在调用点
       另抄一份。归档与兜底这两支是 RunHeader 自己写的，与 stateTone 同用语义类。
     */}
-    <div className="flex min-h-10 items-center gap-2.5 px-3 pb-1.5 sm:px-5">
+    <div className="flex min-h-10 items-center gap-2.5 px-3 pb-2 pt-1 sm:px-5">
       <span className="inline-flex shrink-0 items-center gap-1.5 rounded-sm bg-muted px-2 py-0.5">
         <span aria-label={status.label} className={`h-2 w-2 shrink-0 rounded-full ${status.busy ? 'ui-status-pulse' : ''} ${status.archived ? 'bg-neutral-solid' : stateTone[session.state] ?? 'bg-neutral-solid'}`}/>
         <strong className="text-caption font-semibold text-primary">{status.label}</strong>
       </span>
       <span className="min-w-0 flex-1 truncate text-caption text-secondary">{nextAction}</span>
-      {status.recoverable && !managed && <Button variant="danger" size="sm" loading={restarting} onClick={onRestart}>重新启动</Button>}
+      {status.recoverable && !managed && <Button variant="secondary" size="sm" loading={restarting} onClick={onRestart} icon={<RotateCcw size={13}/>}>重新启动</Button>}
       {queuedTasks.length > 0 && <Badge tone="queued">待执行指令 {queuedTasks.length} 条</Badge>}
       {usageLine && <span title={usageLine.detail} className="hidden shrink-0 text-caption text-subtle sm:inline">{usageLine.text}</span>}
       <ConnectionState status={streamStatus}/>

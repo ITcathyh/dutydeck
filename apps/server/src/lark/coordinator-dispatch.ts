@@ -576,6 +576,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       void Promise.resolve(this.runtime.stop?.(session.id)).catch(error =>
         this.log.warn({ error, sessionId: session.id }, '停止被 /new 作废的会话失败'));
     }
+    // 自动换新的这一轮复用原过程卡：交回 recoverLauncherSession 按换新失败收口，原卡收到终态帧，不另发作废回执。
+    if (task.launcherRecoveryPending) throw new Error('换新会话的请求在派发前被作废');
     await this.failPendingInbox(task, '请求在执行前被 /new 作废');
     task.state = 'interrupted';
     task.retryable = false;
@@ -586,13 +588,18 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       await sendTaskCard(this.service, task.event, {
         state: 'failed', readOnly: true, retryable: false,
         taskId: task.id, taskName: '请求未执行',
-        markdown: `${mention ? `${mention}\n\n` : ''}**这条请求没有执行：期间收到了 /new。**\n\n上一个会话已结束，请重新发送这条请求。`,
+        markdown: `${mention ? `${mention}\n\n` : ''}**这条请求没有执行：${this.supersededReason(task)}。**\n\n上一个会话已结束，请重新发送这条请求。`,
         idempotencyKey: `superseded_${task.id}`.slice(0, 50),
         ...(task.config.webBaseUrl ? { webBaseUrl: task.config.webBaseUrl } : {})
       }, this.log).catch(error => this.log.error({ error, taskId: task.id }, '发送 /new 作废回执失败'));
       await this.clearAcknowledgementReaction(task);
     })();
     return true;
+  }
+
+  /** 作废本轮的那次 epoch 递增来自哪里：紧接本轮 epoch 的那次是自动换启动器会话时，如实写它。 */
+  private supersededReason(task: LarkTask) {
+    return task.group.launcherSwitchEpoch === task.epoch + 1 ? '会话因启动器更新已自动更换' : '期间收到了 /new';
   }
 
   protected async validateNewSession(config: StoredLarkConfig, event: LarkMessageEvent, options: LarkLaunchOptions) {
@@ -719,12 +726,13 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
   }
 
-  private async recoverLauncherSession(task: LarkTask): Promise<boolean> {
+  private async recoverLauncherSession(task: LarkTask, restored: boolean): Promise<boolean> {
     const { group, config, event } = task;
     const notRecovered = (reason: string) => {
       this.log.info({ reason, taskId: task.id, runtimeTaskId: task.runtimeTaskId, sessionId: task.sessionId }, '未自动更换旧启动器会话');
       return false;
     };
+    if (restored) return notRecovered('restored_turn');
     if (task.launcherRecoveryAttempted) return notRecovered('already_attempted');
     if (!task.runtimeTaskId) return notRecovered('runtime_task_missing');
     if (!this.cardMappings) return notRecovered('card_mappings_unavailable');
@@ -740,12 +748,24 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (await this.currentTurnInterruptDenial(config, event, task.sessionId!)) return notRecovered('current_turn_interrupt_denied');
       await this.saveCardTask(task, 'failed');
       if (task.inbox) await this.inbox!.update(task.inbox, { state: 'failed' });
+      // 结束旧会话会取消它的全部排队任务。托管群里普通成员不能取消别人的请求：有别人的排队任务就不换。
+      if (config.managedGroup) {
+        for (const queued of (await this.runtime.getTasks?.(task.sessionId!) ?? []).filter(item => item.status === 'queued')) {
+          const requester = (await this.larkTaskOrigin(config, event.chatId, { id: queued.id, sessionId: task.sessionId! }))?.requester;
+          if (requester !== event.senderOpenId) return notRecovered('other_sender_queued');
+        }
+        // runtime 还没收下的：已过派发前 epoch 检查、正在 dispatch 的请求。这一步到 retireScopeSession 递增 epoch 之间没有 await，
+        // 此后才到 epoch 检查的请求会被作废；更早已在派发途中的，只能在这里按内存状态拦下。
+        if ([...this.tasks.values()].some(other => other !== task && other.group === group && other.sessionId === task.sessionId
+          && other.submissionStarted && other.state === 'queued' && other.event.senderOpenId !== event.senderOpenId)) return notRecovered('other_sender_queued');
+      }
       if (this.stopped) { notRecovered('coordinator_stopped'); return true; }
       if (task.epoch !== (group.epoch ?? 0)) return notRecovered('scope_epoch_changed');
       if (group.sessionId !== task.sessionId) return notRecovered('scope_session_changed');
       this.cancelUndeliveredRetries(group);
       const retirement = this.retireScopeSession(group, config, event, task.scopeId);
       const epoch = group.epoch!;
+      group.launcherSwitchEpoch = epoch;
       const result = await retirement;
       if (this.stopped) { notRecovered('coordinator_stopped'); return true; }
       if (result.retained) {
@@ -1231,7 +1251,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 必须在 update(state) 之前，过程卡终态帧与结果卡才会一起隐藏「重试」。
         if (state === 'failed' && isLarkLauncherVersionChanged(task.events)) {
           task.retryable = false;
-          if (!restoring && !resumeTask && await this.recoverLauncherSession(task)) return;
+          if (await this.recoverLauncherSession(task, restoring || Boolean(resumeTask))) return;
         }
         await update(state);
         // 终态先撤置顶：轮次校验之后再撤，重试开的新一轮会让上一轮的进度卡永远挂在置顶里。
@@ -1347,7 +1367,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
 
     const closeSupersededPreparedTurn = async () => {
       if (task.epoch === (group.epoch ?? 0)) return false;
-      this.pushTaskError(task, '这条请求没有执行：期间收到了 /new。请在新会话中重新发送。');
+      this.pushTaskError(task, `这条请求没有执行：${this.supersededReason(task)}。请在新会话中重新发送。`);
       task.state = 'interrupted'; task.retryable = false;
       await this.failPendingInbox(task, '请求在执行前被 /new 作废');
       await deliverTerminal('interrupted', false);

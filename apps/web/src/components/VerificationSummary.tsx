@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import { ShieldCheck } from 'lucide-react';
 import { api, type Session } from '../api';
 import { Button } from './primitives';
 import { verificationLabel } from './verification-presentation';
@@ -16,12 +17,12 @@ export function VerificationSummary({ session, onOpenEvidence }: { session: Sess
     : capabilities.isError ? '验证能力读取失败'
     : capabilities.data?.verification !== 'available' ? '平台验证能力尚未确认'
     : '尚未验证';
-  return <aside aria-label="平台验证" className="my-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted px-4 py-2">
-    <div className="min-w-0 text-caption text-secondary"><p role="status">{label}</p>
-      {latest && unavailable && <p>平台验证当前不可用，以上为已有记录。</p>}
-      {latest && evidence.isError && <p>上次读取：{verificationLabel(latest)}</p>}
-      <p className="text-subtle">平台命令验证独立于 Agent 的完成状态。</p>
-    </div>
-    <Button variant="ghost" onClick={onOpenEvidence}>查看验证证据</Button>
+  // 多数任务没有验证记录，这里只占一行；「独立于 Agent 完成状态」的说明放在悬停提示里。
+  return <aside aria-label="平台验证" title="平台命令验证独立于 Agent 的完成状态。" className="my-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-caption text-subtle">
+    <ShieldCheck size={13} className="shrink-0"/>
+    <p role="status" className="text-secondary">{label}</p>
+    {latest && unavailable && <p>平台验证当前不可用，以上为已有记录。</p>}
+    {latest && evidence.isError && <p>上次读取：{verificationLabel(latest)}</p>}
+    <Button variant="ghost" size="sm" onClick={onOpenEvidence}>查看验证证据</Button>
   </aside>;
 }

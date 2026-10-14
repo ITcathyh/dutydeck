@@ -9,14 +9,14 @@ describe('task usage HUD', () => {
     expect(screen.getByRole('progressbar', { name: '5h额度已用' }).getAttribute('aria-valuenow')).toBe('0');
     expect(screen.getByText('未提供')).toBeTruthy();
     expect(screen.getByText('310')).toBeTruthy();
-    expect(screen.getByText('账户5h额度')).toBeTruthy();
+    expect(screen.getByText('5h额度').getAttribute('title')).toBe('账户 5 小时额度');
     expect(screen.getByText(/上报于/)).toBeTruthy();
     expect(screen.getByText(/输入 200 · 输出 40 · 缓存读 60 · 缓存写 10/)).toBeTruthy();
     expect(screen.getByText(/含子步骤/)).toBeTruthy();
   });
   it('labels expired data, loading and failures and clears readings on a session switch', () => {
     const { rerender } = render(<UsageHud usage={{ own: totals, subSteps: totals, snapshot: { rateLimits: { sevenDay: { usedPercent: 45, resetsAt: 1, observedAt: '2026-10-01T00:00:00Z' } } } }}/>);
-    expect(screen.getByText('45%（已过期）')).toBeTruthy();
+    expect(screen.getByText('已用 45%（已过期）')).toBeTruthy();
     expect(screen.queryByRole('progressbar')).toBeNull();
     rerender(<UsageHud loading/>);
     expect(screen.getAllByText('加载中…')).toHaveLength(4);
@@ -33,4 +33,50 @@ describe('task usage HUD', () => {
     expect(screen.getByText('1 次执行无 token 数据')).toBeTruthy();
     expect(screen.getByText('1 次执行仅有部分 token 数据')).toBeTruthy();
   });
+});
+
+const native = { source: 'claude_transcript' as const, scope: 'current_native_session' as const, observedAt: '2026-10-13T00:00:00Z', inputTokens: 1000, outputTokens: 100, cacheReadTokens: 200, cacheWriteTokens: 30, totalTokens: 1330 };
+const empty = { ...totals, entries: 0, tokenEntries: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+it('shows native fallback with its scope, never adds it to ledger totals and keeps complete ledger totals authoritative', () => {
+  const { rerender } = render(<UsageHud usage={{ own: empty, subSteps: empty, snapshot: { nativeTokens: native } }}/>);
+  expect(screen.getByText('会话 token')).toBeTruthy(); expect(screen.getByText('1,330')).toBeTruthy();
+  expect(screen.getByText('当前原生会话 · 不含子步骤')).toBeTruthy(); expect(screen.getByText(/Claude 日志/)).toBeTruthy();
+  rerender(<UsageHud usage={{ own: { ...totals, entries: 2 }, subSteps: empty, snapshot: { nativeTokens: native } }}/>);
+  expect(screen.getByText('1,330')).toBeTruthy(); expect(screen.getByText('账本已知累计 ≥ 155 token')).toBeTruthy();
+  expect(screen.queryByText('1,485')).toBeNull();
+  rerender(<UsageHud usage={{ own: totals, subSteps: empty, snapshot: { nativeTokens: native } }}/>);
+  expect(screen.getByText('155')).toBeTruthy(); expect(screen.queryByText('会话 token')).toBeNull();
+});
+it('labels partial native readings, retains old readings on refresh failure and restores them on return', () => {
+  const usage = { own: empty, subSteps: empty, snapshot: { nativeTokens: { ...native, partial: true } } };
+  const { rerender } = render(<UsageHud usage={usage} error/>);
+  expect(screen.getByText('≥ 1,330')).toBeTruthy(); expect(screen.getByText('日志用量仅部分可读')).toBeTruthy();
+  expect(screen.getByRole('status').textContent).toContain('可能未更新');
+  rerender(<UsageHud loading/>); expect(screen.queryByText('≥ 1,330')).toBeNull();
+  rerender(<UsageHud usage={usage}/>); expect(screen.getByText('≥ 1,330')).toBeTruthy();
+});
+it('shows remaining quota only for valid windows and uses one context sample without borrowing old size/source', () => {
+  const { rerender } = render(<UsageHud usage={{ own: empty, subSteps: empty, snapshot: { context: { used: 500, size: 1000, observedAt: '2026-10-13T00:00:00Z', source: 'claude_transcript' }, rateLimits: { fiveHour: { usedPercent: 25, resetsAt: Date.now() / 1000 + 3600, observedAt: native.observedAt }, sevenDay: { usedPercent: 50, resetsAt: 1, observedAt: native.observedAt } } } }} context={{ used: 700, observedAt: '2026-10-13T00:01:00Z' }}/>);
+  expect(screen.getByText('已用 25%')).toBeTruthy(); expect(screen.getByText('剩余 75%')).toBeTruthy();
+  expect(screen.queryByText('剩余 50%')).toBeNull(); expect(screen.getByText('已用 50%（已过期）')).toBeTruthy();
+  expect(screen.getByText('700 / 容量未提供')).toBeTruthy();
+  expect(screen.queryByText('最近请求输入 · 不含本次输出')).toBeNull();
+  expect(screen.queryByRole('progressbar', { name: '上下文已用' })).toBeNull();
+  rerender(<UsageHud usage={{ own: empty, subSteps: empty, snapshot: { context: { used: 500, observedAt: native.observedAt, source: 'claude_transcript' } } }}/>);
+  expect(screen.getByText('最近请求输入 · 不含本次输出')).toBeTruthy();
+});
+
+it('keeps complete ledger totals separate while the live native total changes', () => {
+  const { rerender } = render(<UsageHud usage={{ own: totals, subSteps: empty, snapshot: { nativeTokens: native } }}/>);
+  expect(screen.getByText('155')).toBeTruthy(); expect(screen.getByText('当前原生会话 1,330 token · 不含子步骤')).toBeTruthy();
+  rerender(<UsageHud usage={{ own: totals, subSteps: empty, snapshot: { nativeTokens: { ...native, totalTokens: 2000, partial: true } } }}/>);
+  expect(screen.getByText('155')).toBeTruthy(); expect(screen.getByText('当前原生会话 ≥ 2,000 token · 不含子步骤')).toBeTruthy();
+  expect(screen.queryByText('2,155')).toBeNull();
+});
+
+it('stays out of the way when the session has no usage readings at all', () => {
+  const { container, rerender } = render(<UsageHud usage={{ own: empty, subSteps: empty }}/>);
+  expect(container.innerHTML).toBe('');
+  rerender(<UsageHud usage={{ own: empty, subSteps: empty }} loading/>);
+  expect(screen.getByRole('region', { name: '任务用量' })).toBeTruthy();
 });

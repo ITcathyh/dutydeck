@@ -1,7 +1,7 @@
 import type { DockEvent } from './api';
 
 export type ComposerReference = { id: string; kind: 'file' | 'skill'; label: string; value: string };
-export type ContextStats = { used?: number; size?: number; compacted?: number; percentage?: number; observedAt?: string };
+export type ContextStats = { used?: number; size?: number; compacted?: number; percentage?: number; observedAt?: string; source?: import('@dutydeck/shared').ContextUsage['source'] };
 export type ModelReadiness =
   | { kind: 'ready' }
   | { kind: 'loading'; label: string; reason: string }
@@ -47,8 +47,7 @@ export function contextStatsFromEvents(events: DockEvent[] = []): ContextStats {
     const nextUsed = Number.isFinite(event.data.used) && event.data.used >= 0 ? Number(event.data.used) : undefined;
     const nextSize = Number.isFinite(event.data.size) && event.data.size > 0 ? Number(event.data.size) : undefined;
     if (used !== undefined && nextUsed !== undefined && nextUsed < used) compacted += used - nextUsed;
-    if (nextUsed !== undefined) { used = nextUsed; observedAt = event.timestamp; }
-    if (nextSize !== undefined) size = nextSize;
+    if (nextUsed !== undefined) { used = nextUsed; size = nextSize; observedAt = event.timestamp; }
   }
   return { used, size, ...(observedAt ? { observedAt } : {}), ...(hasUsage ? { compacted } : {}), ...(used !== undefined && size ? { percentage: Math.min(100, used / size * 100) } : {}) };
 }
@@ -61,13 +60,6 @@ export function commandsFromEvents(events: DockEvent[] = []) {
     }
   }
   return [];
-}
-
-export function formatTokens(value?: number) {
-  if (value === undefined) return '等待数据';
-  if (value < 1_000) return String(value);
-  if (value < 1_000_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}k`;
-  return `${(value / 1_000_000).toFixed(1)}m`;
 }
 
 export function currentContextStats(events: DockEvent[], snapshot?: import('@dutydeck/shared').ContextUsage): ContextStats {

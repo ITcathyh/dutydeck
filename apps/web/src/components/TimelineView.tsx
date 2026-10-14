@@ -220,7 +220,8 @@ export function TimelineView({ activeSessionId, eventsLoading, onResolvePermissi
         {!eventsLoading && timeline.length > 0 && footer}
       </div>
     </div>
-    {!eventsLoading && loadedEventCount !== undefined && <div className="absolute left-5 top-1 z-sticky rounded bg-canvas px-2 py-1 text-meta text-subtle">
+    {/* 历史全部加载完后这行提示只留给读屏，不再压在第一条消息上。 */}
+    {!eventsLoading && loadedEventCount !== undefined && <div className={olderError || hasOlder ? 'absolute left-5 top-1 z-sticky rounded bg-canvas px-2 py-1 text-meta text-subtle' : 'sr-only'}>
       <span role="status">{olderError ? `已加载 ${loadedEventCount} 条，历史加载中断` : hasOlder ? `已加载 ${loadedEventCount} 条，正在加载全部历史…` : `已加载全部 ${loadedEventCount} 条记录`}</span>
       {olderError && <button onClick={() => void loadOlder?.()} className="ml-2 text-caption text-danger" title={olderError}>重试加载历史</button>}
     </div>}

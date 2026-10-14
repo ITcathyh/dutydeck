@@ -15,7 +15,7 @@ import { acpDataRoot, buildLaunchObservation, buildNativeObservation, inferAcpIn
 // 归一化事件类型统一从 @dutydeck/shared re-export，保证 ACP driver 与 PTY driver 用同一类型。
 export type { NormalizedDriverEvent };
 // 服务端判定用户配置的高危正则时复用同一个带硬超时的隔离匹配，不在主线程上跑。
-export { testRegexWithTimeout };
+export { testRegexWithTimeout, inferAcpInsightClient };
 export { ProcessTreeCpu, type ProcessTreeActivity } from './process-cpu.js';
 export interface AcpxBuiltinAgent { id: string; argv: string[] }
 

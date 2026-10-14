@@ -569,3 +569,182 @@ it('终态回调读取事件时遇到对账，不会抢先交付旧轮失败卡'
   expect(h.issued.filter(input => input.cardKind === 'result').map(input => input.state)).toEqual(['completed']);
   expect(h.sent).toHaveLength(1);
 });
+
+it.each([
+  { name: '有别人的排队请求时不换会话，不替别人取消', otherQueued: true },
+  { name: '只有发起人自己的排队请求时照常换会话', otherQueued: false }
+])('托管群旧会话$name', async ({ otherQueued }) => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let count = 0;
+  const h = await setup(async () => { if (++count === 2) { await gate; throw new Error(LAUNCHER_ERROR); } }, true);
+  cleanups.push(() => h.teardown());
+  cleanups.push(async () => { release(); });
+  const top = { rootId: undefined, threadId: undefined };
+  const old = await h.runTurn('om_queue_owner', { ...top, senderOpenId: 'ou_owner' });
+  const stop = vi.spyOn(h.runtime, 'stop');
+  await h.coordinator.handle({ ...groupMessage('om_queue_failed'), ...top }, h.config);
+  await h.until(() => h.prepared.length === 2);
+  await h.coordinator.handle({ ...groupMessage('om_queue_alice'), ...top, content: JSON.stringify({ text: '@_user_1 Alice 的第二条' }) }, h.config);
+  if (otherQueued) await h.coordinator.handle({ ...groupMessage('om_queue_other'), ...top, senderOpenId: 'ou_owner', content: JSON.stringify({ text: '@_user_1 Owner 的第二条' }) }, h.config);
+  const queued = otherQueued ? 2 : 1;
+  await h.until(async () => (await h.runtime.getTasks(old.sessionId)).filter(task => task.status === 'queued').length === queued);
+  // 暂停领取队列：换会话判断时这几条仍在排队，不会先被领取。
+  h.runtime.setQueueHeld(true);
+  release();
+  // 换会话会先取消排队请求；新会话的任务要等恢复领取后才能执行。
+  await h.until(async () => h.issued.some(input => input.cardKind === 'result' && input.taskId === 'om_queue_failed')
+    || (await h.runtime.getTasks(old.sessionId)).some(task => task.status === 'cancelled'));
+  if (!otherQueued) {
+    // 发起人自己的排队请求随 stop 明确取消（现有设计），原请求在新会话完成。
+    h.runtime.setQueueHeld(false);
+    await h.until(() => ['om_queue_failed', 'om_queue_alice'].every(id => h.issued.some(input => input.cardKind === 'result' && input.taskId === id)));
+    expect(stop).toHaveBeenCalled();
+    expect((await h.runtime.getTasks(old.sessionId)).map(task => task.status)).toEqual(['completed', 'failed', 'cancelled']);
+    expect(h.issued.find(input => input.cardKind === 'result' && input.taskId === 'om_queue_failed').state).toBe('completed');
+    expect(h.issued.find(input => input.cardKind === 'result' && input.taskId === 'om_queue_alice').state).toBe('cancelled');
+    return;
+  }
+  expect(stop).not.toHaveBeenCalled();
+  expect(h.log.info).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_queue_failed', reason: 'other_sender_queued' }), '未自动更换旧启动器会话');
+  const failed = h.issued.find(input => input.cardKind === 'result' && input.taskId === 'om_queue_failed');
+  expect(failed.state).toBe('failed');
+  expect(hasRetryButton(failed)).toBe(false);
+  expect(JSON.stringify(buildLarkCard(failed))).toContain('发送 /new');
+  h.runtime.setQueueHeld(false);
+  await h.until(() => ['om_queue_alice', 'om_queue_other'].every(id => h.issued.some(input => input.cardKind === 'result' && input.taskId === id)));
+  expect(['om_queue_alice', 'om_queue_other'].map(id => h.issued.find(input => input.cardKind === 'result' && input.taskId === id).state)).toEqual(['completed', 'completed']);
+  expect((await h.runtime.getTasks(old.sessionId)).map(task => task.status)).toEqual(['completed', 'failed', 'completed', 'completed']);
+});
+
+it('托管群里别人的请求正在派发途中时不换会话，不把它打成失败', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let releaseDispatch!: () => void;
+  const dispatchGate = new Promise<void>(resolve => { releaseDispatch = resolve; });
+  let count = 0;
+  const h = await setup(async () => { if (++count === 2) { await gate; throw new Error(LAUNCHER_ERROR); } }, true);
+  cleanups.push(() => h.teardown());
+  cleanups.push(async () => { release(); releaseDispatch(); });
+  const top = { rootId: undefined, threadId: undefined };
+  const old = await h.runTurn('om_inflight_owner', { ...top, senderOpenId: 'ou_owner' });
+  const stop = vi.spyOn(h.runtime, 'stop');
+  // Owner 的第二条停在 runtime.dispatch 里：已过 epoch 检查，runtime 里还没有这条任务。
+  const dispatch = h.runtime.dispatch.bind(h.runtime);
+  let dispatching = false;
+  vi.spyOn(h.runtime, 'dispatch').mockImplementation(async (...args) => {
+    if (String(args[1]).includes('Owner 的第二条')) { dispatching = true; await dispatchGate; }
+    return dispatch(...args);
+  });
+  await h.coordinator.handle({ ...groupMessage('om_inflight_failed'), ...top }, h.config);
+  await h.until(() => h.prepared.length === 2);
+  await h.coordinator.handle({ ...groupMessage('om_inflight_other'), ...top, senderOpenId: 'ou_owner', content: JSON.stringify({ text: '@_user_1 Owner 的第二条' }) }, h.config);
+  await h.until(() => dispatching);
+  expect((await h.runtime.getTasks(old.sessionId)).some(task => task.status === 'queued')).toBe(false);
+  release();
+  await h.until(() => h.issued.some(input => input.cardKind === 'result' && input.taskId === 'om_inflight_failed'));
+  expect(stop).not.toHaveBeenCalled();
+  expect(h.log.info).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_inflight_failed', reason: 'other_sender_queued' }), '未自动更换旧启动器会话');
+  expect(h.issued.find(input => input.cardKind === 'result' && input.taskId === 'om_inflight_failed').state).toBe('failed');
+  releaseDispatch();
+  await h.until(() => h.issued.some(input => input.cardKind === 'result' && input.taskId === 'om_inflight_other'));
+  expect(h.issued.find(input => input.cardKind === 'result' && input.taskId === 'om_inflight_other').state).toBe('completed');
+});
+
+it.each(['before_session', 'after_card'] as const)('自动换会话作废别人尚未派发的请求（%s），回执如实写启动器更新', async stage => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let releaseOther!: () => void;
+  const otherGate = new Promise<void>(resolve => { releaseOther = resolve; });
+  let count = 0;
+  const h = await setup(async () => { if (++count === 1) { await gate; throw new Error(LAUNCHER_ERROR); } });
+  cleanups.push(() => h.teardown());
+  cleanups.push(async () => { release(); releaseOther(); });
+  h.config.allowedUsers = [];
+  h.config.allowedEmails = ['alice@example.com', 'bob@example.com'];
+  await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+  let otherBlocked = false;
+  // Bob 的请求停在派发前：建会话之前（身份解析）或首卡之后（过程卡发送）。
+  h.service.getUserEmails.mockImplementation(async (openId: string) => {
+    if (openId !== 'ou_bob') return ['alice@example.com'];
+    if (stage === 'before_session') { otherBlocked = true; await otherGate; }
+    return ['bob@example.com'];
+  });
+  const reply = h.service.reply.getMockImplementation()!;
+  h.service.reply.mockImplementation(async (input: any) => {
+    if (stage === 'after_card' && input.taskId === 'om_switch_bob' && input.cardKind === 'process') { otherBlocked = true; await otherGate; }
+    return reply(input);
+  });
+  await h.coordinator.handle(groupMessage('om_switch_alice'), h.config);
+  await h.until(() => h.prepared.length === 1);
+  await h.coordinator.handle({ ...groupMessage('om_switch_bob'), senderOpenId: 'ou_bob' }, h.config);
+  await h.until(() => otherBlocked);
+  release();
+  await h.until(() => h.issued.some(input => input.cardKind === 'result' && input.taskId === 'om_switch_alice'));
+  expect(h.issued.find(input => input.cardKind === 'result' && input.taskId === 'om_switch_alice').state).toBe('completed');
+  releaseOther();
+  const receipt = () => h.issued.find(input => input.taskId === 'om_switch_bob' && ['failed', 'interrupted'].includes(input.state));
+  await h.until(() => Boolean(receipt()));
+  const card = JSON.stringify(buildLarkCard(receipt()));
+  expect(card).toContain('会话因启动器更新已自动更换');
+  expect(card).not.toContain('期间收到了 /new');
+  expect(h.sent).toHaveLength(1);
+});
+
+it('换新会话的请求在派发前被 /new 作废时，原过程卡收到终态，只交付一张 /new 指引', async () => {
+  let count = 0;
+  const h = await setup(async () => { if (++count === 1) throw new Error(LAUNCHER_ERROR); });
+  cleanups.push(() => h.teardown());
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  cleanups.push(async () => { release(); });
+  const start = h.runtime.start.bind(h.runtime);
+  let starts = 0;
+  let entered = false;
+  vi.spyOn(h.runtime, 'start').mockImplementation(async (...args) => {
+    const session = await start(...args);
+    if (++starts === 2) { entered = true; await gate; }
+    return session;
+  });
+  await h.coordinator.handle(groupMessage('om_replaced'), h.config);
+  await h.until(() => entered);
+  const group = (h.coordinator as any).tasks.get('om_replaced').group;
+  const epoch = group.epoch;
+  // 换新会话还在建会话时，有人发了 /new。
+  void h.coordinator.handle({ ...groupMessage('om_replaced_new'), content: JSON.stringify({ text: '@_user_1 /new' }) }, h.config);
+  await h.until(() => group.epoch === epoch + 1);
+  release();
+  const delivered = () => h.issued.filter(input => input.taskId === 'om_replaced' && input.cardKind !== 'process');
+  await h.until(() => delivered().length > 0);
+  expect(delivered().map(input => [input.cardKind, input.state])).toEqual([['result', 'failed']]);
+  expect(hasRetryButton(delivered()[0])).toBe(false);
+  expect(JSON.stringify(buildLarkCard(delivered()[0]))).toContain('发送 /new');
+  const frames = h.service.update.mock.calls.map(([input]) => input).filter(input => input.cardKind === 'process' && input.taskId === 'om_replaced');
+  expect(frames.at(-1).state).toBe('failed');
+  expect(h.prepared).toHaveLength(1);
+  expect(h.sent).toHaveLength(0);
+});
+
+it('重启后接回的轮次遇到启动器失败时不自动换新，并记录跳过原因', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const h = await setup(async () => { await gate; throw new Error(LAUNCHER_ERROR); });
+  cleanups.push(() => h.teardown());
+  cleanups.push(async () => { release(); });
+  await h.coordinator.receive(groupMessage('om_resumed'), h.config);
+  await h.until(() => h.prepared.length === 1);
+  await h.until(async () => JSON.parse(await h.repos.config.get('lark.inbox.app.om_resumed') ?? '{}').state === 'accepted');
+  h.coordinator.stop();
+  const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const resumed = new LarkMessageCoordinator(h.runtime, h.service as any, log as any,
+    Math.random, 'ou_bot', undefined, h.repos.channelMappings, undefined, undefined, undefined, { store: h.repos.config });
+  cleanups.push(async () => { resumed.stop(); });
+  await resumed.initializeWorkflows(h.config);
+  await resumed.reconcile(h.config);
+  await h.until(() => (resumed as any).tasks.has('om_resumed'));
+  release();
+  await h.until(() => h.issued.some(input => input.cardKind === 'result' && input.taskId === 'om_resumed'));
+  expect(log.info).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_resumed', reason: 'restored_turn' }), '未自动更换旧启动器会话');
+  expect(h.prepared).toHaveLength(1);
+  expect(h.issued.find(input => input.cardKind === 'result' && input.taskId === 'om_resumed').state).toBe('failed');
+});

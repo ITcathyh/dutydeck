@@ -1,7 +1,7 @@
 import { type KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { BrainCircuit, Check, ChevronDown, ClipboardList, File, FolderOpen, Gauge, ListEnd, MessageSquarePlus, Plus, RefreshCw, Send, Sparkles, Square, X, Zap } from 'lucide-react';
 import type { AgentModel, Session, SkillReference, Task } from '../api';
-import { formatTokens, replaceSlashQuery, slashQuery, type ComposerReference, type ContextStats, type ModelReadiness } from '../composer-utils';
+import { replaceSlashQuery, slashQuery, type ComposerReference, type ModelReadiness } from '../composer-utils';
 import { composerCapabilities, mergeComposerCommands, type ComposerCommandAction } from '../composer-commands';
 import { Badge, Banner, Button, IconButton, Input, Popover, Spinner, usePopoverTrigger } from './primitives';
 import { busyStates } from './ui';
@@ -182,16 +182,7 @@ function ReferenceChips({ references, onChange }: { references: ComposerReferenc
   </span>)}</div>;
 }
 
-function ContextMeter({ context }: { context: ContextStats }) {
-  return <div className="hidden min-w-0 items-center gap-2 text-caption text-subtle sm:flex">
-    <span className="truncate">上下文 {formatTokens(context.used)}{context.size !== undefined ? ` / ${formatTokens(context.size)}` : ''}</span>
-    {/* 6px 高的进度条：rounded-sm（6px）在这个高度上就是全圆角，不需要违反「rounded-full 仅正圆」。 */}
-    {context.size !== undefined && <span className="h-1.5 w-12 overflow-hidden rounded-sm bg-muted"><span className="block h-full rounded-sm bg-subtle" style={{ width: `${context.percentage ?? 0}%` }}/></span>}
-    <span className="whitespace-nowrap">压缩 {formatTokens(context.compacted)}</span>
-  </div>;
-}
-
-export function Composer({ planFirst = false, onPlanFirstChange, state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, injectingTaskId, steerable, blockingPermissionId, rejectingPermission, onRejectPermission, skills, models, reasoningEfforts, currentModel, currentReasoningEffort, context, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onSteerQueued, onInjectQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp }: {
+export function Composer({ planFirst = false, onPlanFirstChange, state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, injectingTaskId, steerable, blockingPermissionId, rejectingPermission, onRejectPermission, skills, models, reasoningEfforts, currentModel, currentReasoningEffort, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onSteerQueued, onInjectQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp }: {
   state: string; session?: Pick<Session, 'state' | 'archivedAt'>; value: string; references: ComposerReference[]; sending: boolean; mode: SendMode; queuedTasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string;
   /** 先出计划：打开时这条消息让 Agent 只调研出计划，批准后才执行。未传 onPlanFirstChange 时不显示开关。 */
   planFirst?: boolean; onPlanFirstChange?(value: boolean): void;
@@ -199,7 +190,7 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
   injectingTaskId?: string; steerable?: boolean; onInjectQueued?(taskId: string): void;
   /** 当前一轮停在这条审批上：排队指令标为被审批阻塞，并可直接拒绝它。 */
   blockingPermissionId?: string; rejectingPermission?: boolean; onRejectPermission?(permissionId: string): void;
-  skills: SkillReference[]; models: AgentModel[]; reasoningEfforts: AgentModel[]; currentModel?: string; currentReasoningEffort?: string; context: ContextStats; advertisedCommands: Array<{ name: string; description: string }>; filePicker: boolean; modelReadiness: ModelReadiness; switchingModel: boolean; switchingReasoningEffort: boolean; refreshingModels: boolean;
+  skills: SkillReference[]; models: AgentModel[]; reasoningEfforts: AgentModel[]; currentModel?: string; currentReasoningEffort?: string; advertisedCommands: Array<{ name: string; description: string }>; filePicker: boolean; modelReadiness: ModelReadiness; switchingModel: boolean; switchingReasoningEffort: boolean; refreshingModels: boolean;
   onChange(value: string): void; onReferencesChange(value: ComposerReference[]): void; onModeChange(mode: SendMode): void; onSubmit(): void; onInterrupt(): void; onCancelQueued(taskId: string): void; onSteerQueued(taskId: string): void; onPickFile(): Promise<string | undefined>; onModelChange(model: string): void; onReasoningEffortChange(reasoningEffort: string): void; onRefreshModels(): void;
   // 命令注册表驱动的动作。未传时对应命令不出现在面板里（见 commands 的 filter）。
   onShowStatus?(): void; onRestart?(): void; onCreateTask?(): void; onOpenHelp?(): void;
@@ -342,18 +333,13 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
 
       <ReferenceChips references={references} onChange={onReferencesChange}/>
 
-      <div className="flex items-center px-2.5 pt-1 text-caption font-semibold uppercase tracking-wider text-action">
-        {busy ? '追加执行要求' : '下一步指令'}
-        <span className="ml-auto font-normal normal-case tracking-normal text-subtle">Enter 执行 · Shift + Enter 换行</span>
-      </div>
-
       <textarea
         ref={textarea}
         aria-label="消息"
         value={value}
         onChange={event => { onChange(event.target.value); if (panel !== 'file' && panel !== 'models' && panel !== 'reasoning') setPanel(undefined); }}
         onKeyDown={keyboard}
-        placeholder={planFirst ? '描述要完成的目标；Agent 先出计划，你批准后才执行' : busy ? '补充要求；可选择排队或立即介入当前执行' : '描述要完成的目标、范围和验收要求…'}
+        placeholder={planFirst ? '描述要完成的目标；Agent 先出计划，你批准后才执行' : busy ? '补充要求；可选择排队或立即介入当前执行' : '描述要完成的目标、范围和验收要求（Enter 发送，Shift + Enter 换行）'}
         rows={1}
         className="max-h-48 min-h-16 w-full resize-none overflow-y-auto border-0 bg-transparent px-2.5 py-2 text-body text-primary outline-none placeholder:text-subtle focus-visible:outline-none"
       />
@@ -395,8 +381,6 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
         ><ClipboardList size={13}/><span className="truncate">先出计划</span></button>}
 
         <div className="ml-auto flex min-w-0 items-center gap-1.5">
-          <ContextMeter context={context}/>
-
           {modeTriggerVisible && <button
             ref={modeAnchor}
             type="button"

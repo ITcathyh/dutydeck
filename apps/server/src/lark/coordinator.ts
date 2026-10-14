@@ -32,6 +32,8 @@ export type LarkGroup = {
    * /new 之后才走到派发那一步，没有这个标记它就会把旧 prompt 发进已经宣布结束的上下文。
    */
   epoch?: number;
+  /** 最近一次自动更换旧启动器会话递增到的 epoch：被它作废的请求，回执写换会话原因而不是 /new。 */
+  launcherSwitchEpoch?: number;
   /**
    * 正在进行的 sessionFor。/new 必须等它（建会话是短操作），才能连同这条刚建出来的
    * 会话一起停掉；但绝不能等 group.tail —— fallback 路径的 tail 要等整轮 send 结束，

@@ -179,7 +179,7 @@ describe('RunHeader 失败详情', () => {
     expect(screen.getByText('本任务累计 $0.75（含子步骤 $0.25，含估算 $0.25）').getAttribute('title')).toBe('输入 2,000 · 输出 40 · 缓存读 0 · 缓存写 0 token');
     const none = { ...totals, costUsd: 0, inputTokens: 0, outputTokens: 0 };
     rerender(<RunHeader session={session} {...props} usage={{ own: { ...none, unavailable: 1 }, subSteps: { ...none, entries: 0 } }}/>);
-    expect(screen.getByText('本任务累计：无用量数据')).toBeTruthy();
+    expect(screen.getByText('本任务账本：无用量数据')).toBeTruthy();
     rerender(<RunHeader session={session} {...props} usage={{ own: { ...none, unpriced: 1, unknownCostEntries: 1, costCoverage: 0 }, subSteps: { ...none, entries: 0, unknownCostEntries: 0 } }}/>);
     expect(screen.getByText('本任务已知费用 $0.00（另有 1 次费用未知）')).toBeTruthy();
     rerender(<RunHeader session={session} {...props} usage={{ own: { ...none, unknownCostEntries: 0, costCoverage: 1 }, subSteps: { ...none, entries: 0, unknownCostEntries: 0 } }}/>);
@@ -217,4 +217,10 @@ describe('RunDetailTabs', () => {
     expect(screen.getByRole('tab', { name: '执行记录' }).getAttribute('aria-controls')).toBe('tabpanel-timeline');
     expect(screen.getByRole('tab', { name: '终端' }).getAttribute('aria-controls')).toBe('tabpanel-terminal');
   });
+});
+
+it('does not claim the agent lacks usage reporting when the native snapshot has tokens', () => {
+  const totals = { entries: 1, tokenEntries: 0, costUsd: 0, estimatedCostUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, unavailable: 1 };
+  render(<RunHeader session={session} agent={agent} streamStatus="open" queuedTasks={[]} usage={{ own: totals, subSteps: { ...totals, entries: 0, unavailable: 0 }, snapshot: { nativeTokens: { source: 'codex_transcript', scope: 'current_native_session', observedAt: '2026-10-13T00:00:00Z', totalTokens: 100 } } }} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
+  expect(screen.getByText('本任务账本：无用量数据').getAttribute('title')).toBe('原生会话 token 见下方；此读数不计入账本费用');
 });

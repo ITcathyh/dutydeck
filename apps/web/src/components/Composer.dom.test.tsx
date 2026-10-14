@@ -18,7 +18,6 @@ const baseProps = {
   skills: [],
   models: [],
   reasoningEfforts: [],
-  context: {},
   advertisedCommands: [],
   filePicker: false,
   modelReadiness: { kind: 'ready' } as const,
