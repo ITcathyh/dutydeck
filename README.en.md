@@ -379,16 +379,42 @@ Automatic bot welcomes are enabled by default. Set `welcomeEnabled=false` to sup
 dutydeck settings bot set cli_xxx welcomeEnabled=false
 ```
 
-External Lark card buttons can be forwarded per bot directly to an HTTP receiver:
+Lark applications can register multiple HTTP event handlers. Matching handlers run sequentially in array order. Supported events are card clicks (`card.action.trigger`) and incoming messages (`im.message.receive_v1`):
 
 ```bash
-dutydeck settings bot set cli_xxx 'cardActionForwarding={"owner":"sample-service","url":"http://127.0.0.1:14432/cards","token":"<receiver-token>","legacyActions":["ack"]}'
-dutydeck settings bot set cli_xxx cardActionForwarding=null  # disable
+dutydeck settings bot set cli_xxx 'eventHandlers=[{"id":"observer","eventTypes":["card.action.trigger"],"url":"https://receiver.example/events","token":"<observer-token>"},{"id":"buttons","eventTypes":["card.action.trigger"],"owner":"sample-service","legacyActions":["ack"],"url":"http://127.0.0.1:14432/events","token":"<receiver-token>"}]'
+dutydeck settings bot set cli_xxx 'eventHandlers=[{"id":"messages","eventTypes":["im.message.receive_v1"],"url":"https://receiver.example/messages","token":"<receiver-token>"}]'
+dutydeck settings bot set cli_xxx eventHandlers=null  # disable; [] also clears the list
 ```
 
-`action.value.owner` must match the configured owner. Optional `legacyActions` matches old cards without an owner and cannot contain built-in Dutydeck actions. Built-in `task_id`, `taskId`, `dutydeck_*`, and legacy `dockmux_workflow` markers keep their existing handling. When forwarding is enabled, callbacks with an unknown owner or a combination of owner and built-in markers are rejected. Bots without forwarding keep their original callback handling. Corrupt persisted forwarding appears as `cardActionForwardingError` in public configuration and prevents that bot from starting its listener. The original value is retained, and unrelated changes to that bot are rejected until an explicit valid replacement or `null` is saved through the CLI above; the listener can then be restarted. The token is persisted in bot configuration and omitted from public API and CLI output. URLs must use HTTPS or local HTTP (`127.0.0.1`, `localhost`, `[::1]`); redirects are prohibited.
+Each entry requires a unique, stable `id` (1–64 letters, digits, dots, underscores or hyphens), nonempty `eventTypes`, `url`, and `token`. Optional card `owner` matches `action.value.owner`; `legacyActions` matches only ownerless old cards and cannot contain built-in Dutydeck actions. Without either filter, an entry matches all external cards. Message handlers receive every message event delivered by the application's subscriptions, before chat allowlists or group access checks; receivers authorize their own business actions. Any entry containing the message event type must omit card filters. An entry without filters may list both event types.
 
-Dutydeck sends a `POST` with `Authorization: Bearer <token>`, `Content-Type: application/json`, and `{"version":1,"app_id":"<trusted connection App ID>","event":<complete SDK card.action.trigger event>}`. Original fields including event_id, operator, context, action, and token are preserved. The receiver must persist the event before returning `202 {"status":"accepted","event_id":"<same event ID>"}`; a persisted duplicate returns `200 {"status":"duplicate","event_id":"<same event ID>"}`. These receipts show the Chinese “accepted” / “received” toast. The request has a 2-second deadline; a timeout reports an unconfirmed outcome. There are no background retries. The receiver owns persistent deduplication by event_id.
+Dutydeck sends a `POST` with `Authorization: Bearer <token>` and `Content-Type: application/json`:
+
+```json
+{"version":1,"app_id":"<trusted connection App ID>","handler_id":"buttons","event_type":"card.action.trigger","event":{"event_id":"<platform event ID>","operator":{},"context":{},"action":{}}}
+```
+
+`event` preserves the complete SDK event, including event_id, operator, context, action, token, and message content; the example shows only selected fields. Top-level `app_id` comes from the trusted connection configuration, and `handler_id` comes from the registration. Receivers return HTTP 200 or 202 with the same `event_id` and an explicit `decision`:
+
+```json
+{"event_id":"<same event ID>","decision":"continue"}
+{"event_id":"<same event ID>","decision":"stop","toast":{"type":"success","content":"Accepted."}}
+```
+
+Only `continue` invokes the next matching handler. When all handlers continue, Dutydeck runs its existing built-in handling and authorization. `stop` ends propagation immediately, also suppressing message welcome cards. HTTP 202 means the propagation decision is established, not that business processing is complete. Optional toast types are `success`, `info`, `warning`, and `error`, with nonempty string content; only a card's stop toast reaches the user. Receivers performing side effects must persist acceptance before acknowledging, deduplicate by `app_id + handler_id + event_id`, and return the original decision for duplicates.
+
+The entire external chain shares a 2-second budget, including requests and response bodies. Errors, timeouts, redirects, or invalid receipts stop later handlers and built-ins. Cards show an error or an unconfirmed-outcome warning; message failures are thrown to the SDK. Dutydeck adds no background retries or persistent queue. Receivers must remain idempotent on platform redelivery. Built-in `task_id`, `taskId`, `dutydeck_*`, and legacy `dockmux_workflow` cards bypass external handlers completely, retaining existing authorization and deduplication. With card handlers enabled, mixed owner/built-in markers and external owners without a matching receiver are rejected. Registering only message handlers leaves card behavior unchanged.
+
+Saving `eventHandlers` replaces the array; omitting it preserves existing registrations. Public API and CLI results omit tokens. For an existing stable id, omitting token preserves its credential during edits or reordering; new ids or changed URLs require an explicit token. URLs must use HTTPS or local HTTP (`127.0.0.1`, `localhost`, `[::1]`) without userinfo or fragments; redirects are prohibited. Corrupt stored registrations expose a safe `eventHandlersError` and prevent that bot's listener from starting. Original values are retained, and that bot requires an explicit valid replacement or null before other settings can be saved.
+
+Existing `cardActionForwarding` is adapted internally into the same pipeline. Its request remains `{"version":1,"app_id":"<trusted App ID>","event":<complete SDK event>}`; persisted acceptance returns `202 {"status":"accepted","event_id":"<same event ID>"}`, and a duplicate returns `200 {"status":"duplicate","event_id":"<same event ID>"}`. Both stop propagation. Legacy forwarding and nonempty `eventHandlers` cannot be enabled together. Once the receiver adds `decision:"stop"`, migrate atomically in one save:
+
+```bash
+dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id":"buttons","eventTypes":["card.action.trigger"],"owner":"sample-service","legacyActions":["ack"],"url":"http://127.0.0.1:14432/events","token":"<existing-receiver-token>"}]'
+```
+
+Old clients ignore the additional decision field. Corrupt legacy forwarding still exposes `cardActionForwardingError` and requires explicit repair or removal.
 
 - **Deploy**: drain → switch `releases/current` → restart → health check. If the health check fails the service is stopped and rolled back only when the database schema is unchanged; an old database snapshot is never restored.
 - **Cleanup**: after each successful deploy the newest 5 releases and deployment records (including database backups) are kept. `current`, its previous release and releases still referenced by running processes are always kept; cleanup failures only warn. Records from manual deployments (no `created_by: dutydeck deploy` in `manifest.json`) are left alone unless you pass `--include-unmarked`, and even then skipped when referenced by a process or modified within the last hour. `.partial` directories modified in the last hour are skipped too.

@@ -1,3 +1,4 @@
+import { parseLarkEventHandlers, validateLarkEventConfiguration, type LarkEventHandler } from './event-pipeline.js';
 import { parseCardActionForwarding, type CardActionForwarding } from './card-action-forwarding.js';
 import { collaborationParticipationModes, mentionPolicies, riskControlModes, supportsRemoteApproval, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type RiskControlMode } from '@dutydeck/shared';
 import { isAbsolute } from 'node:path';
@@ -17,6 +18,8 @@ export interface LarkAllowedUser {
 export { riskControlModes, type RiskControlMode };
 
 export interface StoredLarkConfig {
+  eventHandlers?: LarkEventHandler[];
+  eventHandlersError?: string;
   cardActionForwarding?: CardActionForwarding;
   cardActionForwardingError?: string;
   welcomeEnabled?: boolean;
@@ -182,6 +185,7 @@ export const defaultLarkPermissionMode = (agent?: Parameters<typeof supportsRemo
 export const larkExecutionConfirmed = (config: Pick<StoredLarkConfig, 'permissionMode' | 'fullTrustConfirmed'>) => larkPermissionMode(config) !== 'full-trust' || config.fullTrustConfirmed === true;
 
 export interface SaveLarkConfigInput {
+  eventHandlers?: Array<Omit<LarkEventHandler, 'token'> & { token?: string }> | null;
   cardActionForwarding?: CardActionForwarding | null;
   welcomeEnabled?: boolean;
   expectedRevision?: number;
@@ -288,6 +292,8 @@ export interface SaveLarkConfigInput {
 }
 
 export interface PublicLarkConfig {
+  eventHandlers?: Array<Omit<LarkEventHandler, 'token'>>;
+  eventHandlersError?: string;
   cardActionForwarding?: Omit<CardActionForwarding, 'token'>;
   cardActionForwardingError?: string;
   welcomeEnabled: boolean;
@@ -578,10 +584,14 @@ const normalizeAgentIds = (value: unknown): string[] => Array.isArray(value)
 
 // Keep invalid persisted values out of runtime/public views, but preserve them on unrelated writes.
 const invalidCardActionForwarding = new WeakMap<StoredLarkConfig, unknown>();
+const invalidEventHandlers = new WeakMap<StoredLarkConfig, unknown>();
+const invalidEventHandlersMessage = '存储的 eventHandlers 无效；请提交合法配置或 null 后重启监听。';
 const invalidForwardingMessage = '存储的 cardActionForwarding 无效；请提交合法配置或 null 后重启监听。';
 const serializeLarkConfigs = (configs: StoredLarkConfig[]) => JSON.stringify(configs.map(stored => {
-  const { cardActionForwardingError, ...config } = stored;
-  return invalidCardActionForwarding.has(stored) ? { ...config, cardActionForwarding: invalidCardActionForwarding.get(stored) } : config;
+  const { cardActionForwardingError, eventHandlersError, ...config } = stored;
+  return { ...config,
+    ...(invalidCardActionForwarding.has(stored) ? { cardActionForwarding: invalidCardActionForwarding.get(stored) } : {}),
+    ...(invalidEventHandlers.has(stored) ? { eventHandlers: invalidEventHandlers.get(stored) } : {}) };
 }));
 
 function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskControlShape): StoredLarkConfig | undefined {
@@ -590,6 +600,12 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
   let cardActionForwardingError: string | undefined;
   try { cardActionForwarding = parseCardActionForwarding(parsed.cardActionForwarding); }
   catch { cardActionForwardingError = invalidForwardingMessage; }
+  let eventHandlers: LarkEventHandler[] | undefined;
+  let eventHandlersError: string | undefined;
+  try {
+    eventHandlers = parseLarkEventHandlers(parsed.eventHandlers);
+    validateLarkEventConfiguration({ eventHandlers, cardActionForwarding });
+  } catch { eventHandlersError = invalidEventHandlersMessage; eventHandlers = undefined; }
   const pushIntervalMs = Number(parsed.pushIntervalMs ?? defaultLarkPushIntervalMs);
   const parsedTraceLimit = Number(parsed.traceLimit ?? defaultLarkTraceLimit);
   const traceLimit = Number.isInteger(parsedTraceLimit) && parsedTraceLimit > 0 ? parsedTraceLimit : defaultLarkTraceLimit;
@@ -603,6 +619,8 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
   const roleScope = normalizeRoleField(parsed.roleScope);
   const config: StoredLarkConfig = {
     welcomeEnabled: parsed.welcomeEnabled !== false,
+    ...(eventHandlersError ? { eventHandlersError } : {}),
+    ...(eventHandlers ? { eventHandlers } : {}),
     ...(cardActionForwardingError ? { cardActionForwardingError } : {}),
     ...(cardActionForwarding ? { cardActionForwarding } : {}),
     appId: parsed.appId.trim(),
@@ -677,6 +695,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     riskControlMode: normalizeRiskControlMode(parsed)
   };
   if (cardActionForwardingError) invalidCardActionForwarding.set(config, parsed.cardActionForwarding);
+  if (eventHandlersError) invalidEventHandlers.set(config, parsed.eventHandlers);
   return config;
 }
 
@@ -715,6 +734,8 @@ export async function readLarkConfig(repository?: ConfigRepository, appId?: stri
 }
 
 export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: ReadonlySet<string> = new Set(), duplicateNames: ReadonlySet<string> = new Set()): PublicLarkConfig => ({
+  ...(config.eventHandlers ? { eventHandlers: config.eventHandlers.map(({ token, ...handler }) => handler) } : {}),
+  ...(config.eventHandlersError ? { eventHandlersError: config.eventHandlersError } : {}),
   ...(config.cardActionForwarding ? { cardActionForwarding: { owner: config.cardActionForwarding.owner, url: config.cardActionForwarding.url, ...(config.cardActionForwarding.legacyActions ? { legacyActions: config.cardActionForwarding.legacyActions } : {}) } } : {}),
   welcomeEnabled: config.welcomeEnabled !== false,
   ...(config.cardActionForwardingError ? { cardActionForwardingError: config.cardActionForwardingError } : {}),
@@ -811,6 +832,10 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const index = originalAppId ? configs.findIndex(config => config.appId === originalAppId) : -1;
   if (originalAppId && index < 0) throw new LarkServiceError('LARK_BOT_NOT_FOUND', `Unknown Lark bot: ${originalAppId}`, 404);
   const current = index >= 0 ? configs[index] : undefined;
+  if (current?.eventHandlersError && input.eventHandlers === undefined) throw new LarkServiceError('INVALID_LARK_CONFIG', invalidEventHandlersMessage, 400);
+  const eventHandlers = input.eventHandlers === undefined ? current?.eventHandlers : parseLarkEventHandlers(input.eventHandlers, current?.eventHandlers);
+  const cardActionForwarding = input.cardActionForwarding === undefined ? current?.cardActionForwarding : submittedForwarding;
+  validateLarkEventConfiguration({ eventHandlers, cardActionForwarding });
   if (current?.cardActionForwardingError && input.cardActionForwarding === undefined) throw new LarkServiceError('INVALID_LARK_CONFIG', invalidForwardingMessage, 400);
   if (input.welcomeEnabled !== undefined && typeof input.welcomeEnabled !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'welcomeEnabled 必须为布尔值。', 400);
   if (input.expectedRevision !== undefined && input.expectedRevision !== (current ? current.revision ?? 1 : 0)) {
@@ -936,9 +961,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if ((input.stage === 'agent' || input.defaultAgentId !== undefined || input.listening === true) && permissionMode === 'full-trust' && !fullTrustConfirmed) {
     throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '请先确认飞书任务将以完全信任模式无人值守运行。', 409);
   }
-  const cardActionForwarding = input.cardActionForwarding === undefined ? current?.cardActionForwarding : submittedForwarding;
   const config: StoredLarkConfig = {
     welcomeEnabled: input.welcomeEnabled ?? current?.welcomeEnabled ?? true,
+    ...(eventHandlers ? { eventHandlers } : {}),
     ...(cardActionForwarding ? { cardActionForwarding } : {}),
     revision: (current?.revision ?? (current ? 1 : 0)) + 1,
     // 新建的 Bot 默认在自己接手的话题里免 @；已有 Bot 读出来时总带着自己的取值，这里不会改动它们。

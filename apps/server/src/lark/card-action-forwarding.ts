@@ -44,8 +44,7 @@ export function cardActionRoute(value: unknown, forwarding?: CardActionForwardin
 }
 
 /** A receipt means the receiver has persisted this exact event; never retry in the background. */
-export async function forwardCardAction(config: CardActionForwarding, appId: string, event: any, fetcher: typeof globalThis.fetch) {
-  const signal = AbortSignal.timeout(2_000);
+export async function forwardCardAction(config: CardActionForwarding, appId: string, event: any, fetcher: typeof globalThis.fetch, signal = AbortSignal.timeout(2_000)) {
   try {
     if (typeof event.event_id !== 'string' || !event.event_id) return { type: 'error', content: '卡片事件缺少 event_id，无法转发。' };
     const response = await fetcher(config.url, {

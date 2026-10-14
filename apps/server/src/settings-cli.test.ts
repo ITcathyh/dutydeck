@@ -68,6 +68,51 @@ describe('settings CLI against the real bot routes', () => {
     expect(fieldsHelp(botFields)).toContain('cardActionForwarding=<JSON>');
   });
 
+  it('saves ordered event handlers, hides tokens, preserves them by ID, and requires credentials when changing URL', async () => {
+    const { repos, run } = await botRuntime();
+    const first = { id: 'first', eventTypes: ['card.action.trigger'], url: 'http://127.0.0.1:14432/events', token: 'private-first-token', owner: 'sample-service' };
+    const second = { id: 'second', eventTypes: ['im.message.receive_v1'], url: 'https://receiver.example/events', token: 'private-second-token' };
+    const saved = await run('bot-set', { appId: 'cli_a', pairs: [`eventHandlers=${JSON.stringify([first, second])}`] });
+    expect((saved.bot as any).eventHandlers.map((handler: any) => handler.id)).toEqual(['first', 'second']);
+    for (const output of [saved, await run('bot-show', { appId: 'cli_a' }), await run('bot-list')]) {
+      expect(JSON.stringify(output)).not.toContain(first.token); expect(JSON.stringify(output)).not.toContain(second.token);
+    }
+    const { token: _firstToken, ...publicFirst } = first;
+    const { token: _secondToken, ...publicSecond } = second;
+    await run('bot-set', { appId: 'cli_a', pairs: [`eventHandlers=${JSON.stringify([publicSecond, publicFirst])}`] });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ eventHandlers: [second, first] });
+    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=keep handlers'] });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ eventHandlers: [second, first] });
+    await expect(run('bot-set', { appId: 'cli_a', pairs: [`eventHandlers=${JSON.stringify([{ ...publicFirst, url: 'https://new.example/events' }])}`] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ eventHandlers: [second, first] });
+    await expect(run('bot-set', { appId: 'cli_a', pairs: [`eventHandlers=${JSON.stringify([{ ...publicFirst, id: 'new' }])}`] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    await run('bot-set', { appId: 'cli_a', pairs: [`eventHandlers=${JSON.stringify([{ ...publicFirst, url: 'https://new.example/events', token: 'rotated-token' }])}`] });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ eventHandlers: [{ id: 'first', token: 'rotated-token', url: 'https://new.example/events' }] });
+    await run('bot-set', { appId: 'cli_a', pairs: ['eventHandlers=[]'] });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ eventHandlers: [] });
+    await run('bot-set', { appId: 'cli_a', pairs: ['eventHandlers=null'] });
+    expect(await readLarkConfig(repos.config, 'cli_a')).not.toHaveProperty('eventHandlers');
+    expect(fieldsHelp(botFields)).toContain('eventHandlers=<JSON>');
+  });
+
+  it('preserves corrupt handlers on migrations and writes to other bots, requires explicit repair, and exposes safe diagnostics', async () => {
+    const { repos, run } = await botRuntime();
+    const broken = [{ id: 'broken', eventTypes: ['card.action.trigger'], url: 'http://remote.example', token: 'invalid-handler-secret' }];
+    await repos.config.set(larkBotsConfigKey, JSON.stringify([
+      { appId: 'cli_a', appSecret: 'secret-a', listening: false, permissionMode: 'ask', defaultAgentId: 'codex', eventHandlers: broken },
+      { appId: 'cli_b', appSecret: 'secret-b', listening: false, permissionMode: 'ask', defaultAgentId: 'codex' }
+    ]));
+    const shown = await run('bot-show', { appId: 'cli_a' });
+    expect(shown.bot).toHaveProperty('eventHandlersError'); expect(shown.bot).not.toHaveProperty('eventHandlers');
+    expect(JSON.stringify(shown)).not.toContain('invalid-handler-secret');
+    expect(JSON.parse((await repos.config.get(larkBotsConfigKey))!)[0].eventHandlers).toEqual(broken);
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['welcomeEnabled=false'] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    await run('bot-set', { appId: 'cli_b', pairs: ['welcomeEnabled=false'] });
+    expect(JSON.parse((await repos.config.get(larkBotsConfigKey))!)[0].eventHandlers).toEqual(broken);
+    await run('bot-set', { appId: 'cli_a', pairs: ['eventHandlers=null'] });
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).not.toHaveProperty('eventHandlersError');
+  });
+
   it('defaults welcomes on, saves and preserves the boolean setting, and rejects invalid API values', async () => {
     const { repos, run, fetcher } = await botRuntime();
     expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ welcomeEnabled: true });

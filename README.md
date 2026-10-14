@@ -754,16 +754,42 @@ dutydeck settings usage set-cap 50 --app cli_xxx             # 设置月度用�
 dutydeck settings bot set cli_xxx welcomeEnabled=false
 ```
 
-飞书外部卡片按钮可按机器人配置 HTTP 转发，直接交给接收服务处理：
+飞书事件可按应用注册多个 HTTP 处理器，按数组顺序依次调用。当前支持卡片点击 `card.action.trigger` 和消息接收 `im.message.receive_v1`：
 
 ```bash
-dutydeck settings bot set cli_xxx 'cardActionForwarding={"owner":"sample-service","url":"http://127.0.0.1:14432/cards","token":"<接收服务令牌>","legacyActions":["ack"]}'
-dutydeck settings bot set cli_xxx cardActionForwarding=null  # 关闭
+dutydeck settings bot set cli_xxx 'eventHandlers=[{"id":"observer","eventTypes":["card.action.trigger"],"url":"https://receiver.example/events","token":"<观察服务令牌>"},{"id":"buttons","eventTypes":["card.action.trigger"],"owner":"sample-service","legacyActions":["ack"],"url":"http://127.0.0.1:14432/events","token":"<接收服务令牌>"}]'
+dutydeck settings bot set cli_xxx 'eventHandlers=[{"id":"messages","eventTypes":["im.message.receive_v1"],"url":"https://receiver.example/messages","token":"<接收服务令牌>"}]'
+dutydeck settings bot set cli_xxx eventHandlers=null  # 关闭；[] 也可清空
 ```
 
-`action.value.owner` 必须等于配置的 `owner`；`legacyActions` 只兼容没有 owner 的旧卡片，不能包含 Dutydeck 内置动作。带 `task_id`、`taskId`、`dutydeck_*` 或兼容的 `dockmux_workflow` 标记的内置卡片保留原处理；启用转发时，同时带 owner 和内置标记的请求以及未知 owner 都会被拒绝。未配置转发时保持原有按钮处理。存储的转发配置损坏时，公开配置显示 `cardActionForwardingError`，该机器人无法启动监听；原始字段保留，修改其它设置会被拒绝。通过上述 CLI 提交合法配置或 `null` 后可重新启动监听。令牌保存在机器人配置中，公开 API 和 CLI 输出不返回它。URL 只允许 HTTPS 或本机 HTTP（`127.0.0.1`、`localhost`、`[::1]`），禁止重定向。
+每项包含唯一且稳定的 `id`（1–64 位字母、数字、点、下划线或连字符）、非空 `eventTypes`、`url` 和 `token`。卡片处理器可加 `owner`，匹配 `action.value.owner`；`legacyActions` 只匹配没有 owner 的旧卡片，不能包含 Dutydeck 内置动作。没有这两个筛选字段时，匹配全部非内置卡片。消息处理器收到应用订阅接入的全部消息事件，包括尚未经过聊天白名单或群权限检查的消息；接收服务自行授权业务动作。包含消息事件的处理器不能配置卡片筛选字段；处理两类事件且不筛选时可在同一项列出两个事件类型。
 
-Dutydeck 发出 `POST`，带 `Authorization: Bearer <token>` 和 `Content-Type: application/json`，正文为 `{"version":1,"app_id":"<连接配置中的 App ID>","event":<SDK card.action.trigger 完整事件>}`；保留 event_id、operator、context、action、token 等原字段。接收端必须持久化事件，并且只在落库后返回 `202 {"status":"accepted","event_id":"<同一事件 ID>"}`；已落库的重复事件返回 `200 {"status":"duplicate","event_id":"<同一事件 ID>"}`。两种回执分别显示“已受理”和“已接收”。转发最多等待 2 秒，超时提示结果待确认；没有后台重试，接收端负责按 event_id 持久化去重。
+Dutydeck 发出 `POST`，带 `Authorization: Bearer <token>` 和 `Content-Type: application/json`：
+
+```json
+{"version":1,"app_id":"<连接配置中的 App ID>","handler_id":"buttons","event_type":"card.action.trigger","event":{"event_id":"<平台事件 ID>","operator":{},"context":{},"action":{}}}
+```
+
+`event` 是完整的 SDK 事件，保留 event_id、operator、context、action、token 以及消息内容等原字段；示例仅展示部分字段。顶层 `app_id` 来自可信连接配置，`handler_id` 来自注册项。接收服务返回 HTTP 200 或 202，JSON 必须包含同一 `event_id` 和 `decision`：
+
+```json
+{"event_id":"<同一事件 ID>","decision":"continue"}
+{"event_id":"<同一事件 ID>","decision":"stop","toast":{"type":"success","content":"已受理。"}}
+```
+
+`continue` 才会调用下一个匹配项，全部继续后进入原有内置处理和权限检查；`stop` 立即停止，消息也不会触发欢迎卡。202 只表示传播决定已经确定，不代表业务已完成。`toast` 可选，类型只允许 `success`、`info`、`warning`、`error`，content 必须是非空字符串；只有卡片 stop 的 toast 会回给用户。接收服务执行业务副作用时须在回执前持久受理，并以 `app_id + handler_id + event_id` 去重，重复事件返回原传播决定。
+
+整个外部处理链共用 2 秒预算，包含所有请求和回执正文读取。错误、超时、重定向或无效回执都会停止后续处理；卡片显示失败或结果待确认，消息回调抛出失败交给 SDK。没有后台重试或新增持久队列；平台再次投递时接收服务仍须幂等。内置 `task_id`、`taskId`、`dutydeck_*` 和兼容的 `dockmux_workflow` 卡片完全跳过外部处理器，保留原有去重与鉴权；启用卡片处理器时，owner 与内置标记混合或没有匹配接收项的外部 owner 会被拒绝。只注册消息处理器时卡片维持原处理。
+
+注册数组整体替换，省略 `eventHandlers` 的保存保留原数组；公开 API 和 CLI 不返回 token。编辑、排序时，相同 id 省略 token 会沿用原令牌；新增 id 或修改 URL 时必须显式提供 token。URL 只允许 HTTPS 或本机 HTTP（`127.0.0.1`、`localhost`、`[::1]`），禁止 URL 用户信息、fragment 和重定向。存储的注册项无效时，公开配置显示不含密钥的 `eventHandlersError`，该机器人不能启动监听；原始配置保留，必须明确替换合法数组或提交 null 才能修改该机器人。
+
+旧 `cardActionForwarding` 配置仍由同一事件链内部兼容：请求保持 `{"version":1,"app_id":"<可信 App ID>","event":<完整 SDK 事件>}`，接收端落库后返回 `202 {"status":"accepted","event_id":"<同一事件 ID>"}`，重复返回 `200 {"status":"duplicate","event_id":"<同一事件 ID>"}`，两种回执均停止传播。旧配置与非空 `eventHandlers` 不能同时启用。接收端增加 `decision:"stop"` 后，可用一次保存原子迁移：
+
+```bash
+dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id":"buttons","eventTypes":["card.action.trigger"],"owner":"sample-service","legacyActions":["ack"],"url":"http://127.0.0.1:14432/events","token":"<原接收服务令牌>"}]'
+```
+
+旧客户端忽略增加的 decision 字段；旧配置损坏时仍显示 `cardActionForwardingError`，需明确修复或清除旧字段。
 
 ### 5. 终端后端与 Herdr 侧边子任务空间
 

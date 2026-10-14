@@ -1,4 +1,4 @@
-import { cardActionRoute, forwardCardAction } from './card-action-forwarding.js';
+import { runLarkEventPipeline } from './event-pipeline.js';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
 import type { LarkGroupParticipation } from './group-participation.js';
 import type { ExecutionActor, ExecutionRecoveryDecision, UnknownTaskFacts, UnknownTaskResolution } from '@dutydeck/shared';
@@ -157,9 +157,9 @@ export class LarkLongConnectionListener implements LarkListener {
   constructor(private readonly log: ListenerLog, private readonly options: LarkLongConnectionListenerOptions = {}, private readonly connectionLost?: (error: unknown) => void, private readonly connectionChanged?: () => void) {}
 
   async start(config: StoredLarkConfig) {
-    if (config.cardActionForwardingError) {
+    if (config.cardActionForwardingError || config.eventHandlersError) {
       this.stop();
-      throw new LarkServiceError('INVALID_LARK_CONFIG', config.cardActionForwardingError, 400);
+      throw new LarkServiceError('INVALID_LARK_CONFIG', config.cardActionForwardingError ?? config.eventHandlersError!, 400);
     }
     // api-gate 是模块级单例（per-appId 限流状态必须跨会话共享），没有构造注入点。
     // 在监听装配处接上真实日志，让限流等待、退避重试和熔断跳闸可观测。
@@ -260,6 +260,8 @@ export class LarkLongConnectionListener implements LarkListener {
     }
     const dispatcher = new lark.EventDispatcher({ loggerLevel: lark.LoggerLevel.warn }).register({
       'im.message.receive_v1': async event => {
+        const result = await runLarkEventPipeline(this.config ?? config, 'im.message.receive_v1', event, http.fetch, this.log);
+        if (result.decision === 'stop') return;
         const message = event.message;
         this.log.info({ messageId: message.message_id, chatId: message.chat_id, chatType: message.chat_type }, '收到飞书消息事件');
         await coordinator?.receive({
@@ -284,11 +286,9 @@ export class LarkLongConnectionListener implements LarkListener {
         }
       },
       // 内置按钮重复推送只处理一次；外部事件的持久化去重由接收服务负责。
-      'card.action.trigger': (event: any) => {
-        const current = this.config ?? config;
-        const route = cardActionRoute(event.action?.value, current.cardActionForwarding);
-        if (route === 'forward') return forwardCardAction(current.cardActionForwarding!, current.appId, event, http.fetch).then(toast => ({ toast }));
-        if (route === 'unknown' || route === 'conflict') return { toast: { type: 'error', content: route === 'conflict' ? '卡片操作同时包含外部与内置标记，已拒绝。' : '未配置此卡片的接收服务。' } };
+      'card.action.trigger': async (event: any) => {
+        const result = await runLarkEventPipeline(this.config ?? config, 'card.action.trigger', event, http.fetch, this.log);
+        if (result.decision === 'stop') return result.toast ? { toast: result.toast } : undefined;
         return this.cardCallbacks.run(larkCardCallbackKeys(event), async () => {
           const operatorOpenId = event.operator?.open_id;
           // JSON 2.0 表单（结构化问答的多选/自由文本、workbench 步骤答题）提交值在 form_value，
