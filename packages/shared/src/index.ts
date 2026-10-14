@@ -51,7 +51,8 @@ export const publicAgentSchema = z.object({
   protocol: z.enum(protocols),
   permissionMode: z.enum(permissionModes),
   /** 工具确认能否在飞书逐项审批（见 supportsRemoteApproval）；不能时飞书机器人只能以完全信任运行。toPublicAgent 总会给出。 */
-  remoteApproval: z.boolean().optional()
+  remoteApproval: z.boolean().optional(),
+  modelServiceSettings: z.boolean().optional()
 }).strict();
 export type PublicAgent = z.infer<typeof publicAgentSchema>;
 
@@ -63,7 +64,8 @@ export function toPublicAgent(agent: AgentConfig): PublicAgent {
     model: agent.model,
     protocol: agent.protocol,
     permissionMode: agent.permissionMode,
-    remoteApproval: supportsRemoteApproval(agent)
+    remoteApproval: supportsRemoteApproval(agent),
+    ...(['claude', 'claude-code'].includes(agent.adapterId ?? agent.id) ? { modelServiceSettings: true } : {})
   });
 }
 

@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { api, ApiError, type Agent, type LarkBotConfig, type LarkConfig, type ManagedGroup } from '../api';
+import { agentModelSettingsApi, api, ApiError, type Agent, type LarkBotConfig, type LarkConfig, type ManagedGroup } from '../api';
 import { resetDrafts } from '../draft-store';
 import { BotManagement } from './BotManagement';
 
@@ -1114,4 +1114,26 @@ describe('BotManagement 角色设置', () => {
       preInjectPrompt: '给出确定的根因和影响'
     })));
   });
+});
+it('edits a custom Claude agent gateway for an existing bot and saves its model as the bot default', async () => {
+  const user = userEvent.setup();
+  const bot = { ...mockBot, defaultAgentId: 'ccflash', defaultModel: '', permissionMode: 'ask' as const };
+  vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [bot], listeningDisabled: false });
+  vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+  vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
+  const models = vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], source: 'agent' });
+  const state = { agentId: 'ccflash', appId: bot.appId, model: '', baseUrl: '', authMode: 'bearer' as const, hasApiKey: false, apiKeyAvailable: false, appliesTo: 'next_process' as const };
+  vi.spyOn(agentModelSettingsApi, 'get').mockResolvedValue(state);
+  const gateway = vi.spyOn(agentModelSettingsApi, 'set').mockResolvedValue({ ...state, hasApiKey: true, apiKeyAvailable: true });
+  const saveBot = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [{ ...bot, revision: 4, defaultModel: 'custom-model' }], listeningDisabled: false });
+  renderWithClient(<BotManagement selectedAppId={bot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={[{ id: 'ccflash', name: 'ccflash', protocol: 'pty-cli', permissionMode: 'ask', remoteApproval: true, modelServiceSettings: true }]}/>);
+  await user.click(await screen.findByText('模型服务配置'));
+  await user.type(await screen.findByLabelText('API Key'), 'EDIT_GATEWAY_KEY');
+  await user.click(screen.getByRole('button', { name: '保存模型配置' }));
+  await waitFor(() => expect(gateway).toHaveBeenCalledWith('ccflash', { apiKey: 'EDIT_GATEWAY_KEY', clearApiKey: false }, bot.appId));
+  await user.type(screen.getByLabelText('默认模型'), 'custom-model');
+  await user.click(screen.getByRole('button', { name: '保存配置' }));
+  await waitFor(() => expect(saveBot).toHaveBeenCalledWith(expect.objectContaining({ originalAppId: bot.appId, defaultAgentId: 'ccflash', defaultModel: 'custom-model' })));
+  expect(models).toHaveBeenCalledWith('ccflash', undefined, false, bot.appId);
+  expect(saveBot.mock.calls[0]![0]).not.toHaveProperty('apiKey');
 });

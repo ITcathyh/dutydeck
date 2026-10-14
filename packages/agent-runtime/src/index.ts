@@ -142,7 +142,7 @@ export interface RuntimeOptions {
   probe?: typeof probeAgent;
   driverIdleTimeoutMs?: number;
   cleanupIntervalMs?: number;
-  configureAgent?: (agent: AgentConfig) => Promise<AgentConfig>;
+  configureAgent?: (agent: AgentConfig, session: Session) => Promise<AgentConfig>;
   sessionEnvironment?: (session: Session) => Record<string, string>;
   selectPromptPolicy?: (session: Session, request: TaskRequestV1) => Promise<{ version: 'legacy-v1' | 'optimized-v1'; diagnosticReason?: string }>;
   sessionPrompt?: (session: Session, prompt: string, context?: TaskExecutionContext) => string | { prompt: string; diagnostics?: PromptSourceDiagnostics } | Promise<string | { prompt: string; diagnostics?: PromptSourceDiagnostics }>;
@@ -519,7 +519,7 @@ export class DutydeckRuntime {
     };
   }
   private async configureAgentForSession(agent: AgentConfig, session: Session): Promise<AgentConfig> {
-    if (this.options.configureAgent) agent = await this.mutations.wait(() => this.options.configureAgent!(agent));
+    if (this.options.configureAgent) agent = await this.mutations.wait(() => this.options.configureAgent!(agent, session));
     return {
       ...agent,
       cwd: session.cwd,

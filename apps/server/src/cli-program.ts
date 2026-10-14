@@ -721,12 +721,14 @@ Examples:
     .action((_options, command) => runSettings('agents', command));
 
   const agentSettings = settings.command('agent').description('Claude Code model service settings (dashboard: Agent)');
-  withTarget(agentSettings.command('show <agent-id>').description('Show model service settings; the API Key is never printed'))
-    .action((agentId, _options, command) => runSettings('agent-show', command, { agentId }));
+  withTarget(agentSettings.command('show <agent-id>').description('Show model service settings; the API Key is never printed')
+    .option('--app <app-id>', 'Show this bot’s independent model service settings'))
+    .action((agentId, options, command) => runSettings('agent-show', command, { agentId, appId: options.app }));
   withTarget(agentSettings.command('set <agent-id> [key=value...]').description('Apply when the next Agent process starts; recreate running sessions for immediate use. Empty model/baseUrl restores CLI defaults')
-    .option('--api-key-fd <fd>', 'Replace API Key from this file descriptor (0 = stdin); omitted keeps it'))
+    .option('--api-key-fd <fd>', 'Replace API Key from this file descriptor (0 = stdin); omitted keeps it')
+    .option('--app <app-id>', 'Configure only this bot; set its model with settings bot set <app-id> defaultModel=...'))
     .addHelpText('after', fieldsHelp(agentFields))
-    .action((agentId, pairs, options, command) => runSettings('agent-set', command, { agentId, pairs, apiKeyFd: options.apiKeyFd }));
+    .action((agentId, pairs, options, command) => runSettings('agent-set', command, { agentId, appId: options.app, pairs, apiKeyFd: options.apiKeyFd }));
 
   const botSettings = settings.command('bot').description('Bot settings (dashboard: 机器人)');
   withTarget(botSettings.command('list').description('List bots on the runtime'))

@@ -24,7 +24,7 @@ const validResult = (value: unknown): value is AgentModelsResult => {
     && (result.source === undefined || result.source === 'acp' || result.source === 'cli' || result.source === 'agent');
 };
 
-export const agentModelsQueryKey = (agentId?: string, model?: string) => ['agent-models', agentId ?? '', model ?? ''] as const;
+export const agentModelsQueryKey = (agentId?: string, model?: string, appId?: string) => appId ? ['bot-agent-models', appId, agentId ?? '', model ?? ''] as const : ['agent-models', agentId ?? '', model ?? ''] as const;
 
 export function readCachedAgentModels(agentId: string, model?: string, storage: ModelCacheStorage | undefined = browserStorage(), now = Date.now()): AgentModelsResult | undefined {
   if (!agentId || !storage) return undefined;
@@ -43,9 +43,9 @@ export function writeCachedAgentModels(agentId: string, model: string | undefine
   catch { /* localStorage may be unavailable or full; the network result remains usable. */ }
 }
 
-export async function loadAgentModels(agentId: string, model?: string, refresh = false): Promise<AgentModelsResult> {
-  const result = await api.agentModels(agentId, model, refresh);
-  writeCachedAgentModels(agentId, model, result);
+export async function loadAgentModels(agentId: string, model?: string, refresh = false, appId?: string): Promise<AgentModelsResult> {
+  const result = await (appId ? api.agentModels(agentId, model, refresh, appId) : api.agentModels(agentId, model, refresh));
+  if (!appId) writeCachedAgentModels(agentId, model, result);
   return result;
 }
 

@@ -161,6 +161,9 @@ const required = (value: string | undefined, name: string) => {
   return value.trim();
 };
 const path = encodeURIComponent;
+const agentSettingsPath = (input: SettingsCliInput) => input.appId
+  ? `/api/lark/bots/${path(required(input.appId, 'App ID'))}/agents/${path(required(input.agentId, 'Agent ID'))}/model-settings`
+  : `/api/agents/${path(required(input.agentId, 'Agent ID'))}/model-settings`;
 
 async function findBot(request: Request, appId: string) {
   const config = await request('GET', '/api/lark/config') as { bots?: PublicBot[] };
@@ -244,11 +247,11 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
   switch (action) {
     case 'instances': return request('GET', '/api/instances');
     case 'agents': return { agents: await request('GET', '/api/agents') };
-    case 'agent-show': return request('GET', `/api/agents/${path(required(input.agentId, 'Agent ID'))}/model-settings`);
+    case 'agent-show': return request('GET', agentSettingsPath(input));
     case 'agent-set': {
       const values = parsePairs(input.pairs ?? [], agentFields, 'dutydeck settings agent set --help');
       if (!Object.keys(values).length && input.apiKey === undefined) throw new SettingsCliError('SETTINGS_ARGUMENT_REQUIRED', 'Pass at least one key=value or --api-key-fd');
-      return request('PUT', `/api/agents/${path(required(input.agentId, 'Agent ID'))}/model-settings`, { ...values, ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}) });
+      return request('PUT', agentSettingsPath(input), { ...values, ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}) });
     }
     case 'bot-list': {
       const config = await request('GET', '/api/lark/config') as { bots: PublicBot[]; listeningDisabled?: boolean };

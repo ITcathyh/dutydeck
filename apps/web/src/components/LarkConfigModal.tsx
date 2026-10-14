@@ -1,3 +1,4 @@
+import { AgentModelSettings } from './AgentModelSettings';
 import { OptionalModelOverrides } from './OptionalModelOverrides';
 import type { LarkSetupTarget } from '../app-route';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -146,8 +147,9 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
   const [webMobileReachable, setWebMobileReachable] = useState(true);
   const webBaseUrlReachability = useMemo(() => describeWebBaseUrlReachability(webBaseUrl), [webBaseUrl]);
   const highRiskPatternValidation = useMemo(() => validateHighRiskPattern(highRiskPattern), [highRiskPattern]);
+  const [modelSettingsPending, setModelSettingsPending] = useState(false);
   const hookStatus = useQuery({ queryKey: ['lark-hook-status', current?.appId, defaultAgentId], queryFn: () => api.larkHookStatus(current!.appId, defaultAgentId), enabled: Boolean(current && defaultAgentId && riskControlMode === 'enforced' && step === 2) });
-  const agentOptions = useQuery({ queryKey: agentModelsQueryKey(defaultAgentId, defaultModel), queryFn: () => loadAgentModels(defaultAgentId, defaultModel || undefined), enabled: Boolean(defaultAgentId), initialData: () => readCachedAgentModels(defaultAgentId, defaultModel || undefined), initialDataUpdatedAt: 0, refetchOnMount: 'always', staleTime: 5 * 60_000 });
+  const agentOptions = useQuery({ queryKey: agentModelsQueryKey(defaultAgentId, defaultModel, current?.appId), queryFn: () => loadAgentModels(defaultAgentId, defaultModel || undefined, false, current?.appId), enabled: Boolean(defaultAgentId), initialData: () => current ? undefined : readCachedAgentModels(defaultAgentId, defaultModel || undefined), initialDataUpdatedAt: 0, refetchOnMount: 'always', staleTime: 5 * 60_000 });
   const openPlatformJob = useQuery({
     queryKey: ['lark-open-platform-job', openPlatformJobId],
     queryFn: () => api.larkOpenPlatformSetupJob(openPlatformJobId),
@@ -230,6 +232,7 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
   const agentCapabilitiesPending = step === 2 && Boolean(defaultAgentId) && !agentOptions.data && (agentOptions.isLoading || agentOptions.isFetching);
   const agentCapabilitiesReady = step !== 2 || Boolean(agentOptions.data);
   const selectedAgent = agents.find(agent => agent.id === defaultAgentId);
+  const claudeModelSettings = selectedAgent?.modelServiceSettings === true || ['claude', 'claude-code'].includes(defaultAgentId);
   // ACP 以实测协议为准（auto 可能解析成别的）；Claude 终端模式经权限 hook 在飞书审批。
   const remoteApprovalReady = agentOptions.data?.source === 'acp' || (selectedAgent?.protocol === 'pty-cli' && selectedAgent.remoteApproval === true);
   const missingTarget = Boolean(selectedAppId && config.data && !current);
@@ -246,7 +249,7 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
     notifyQuietHours.trim() && !validQuietHours(notifyQuietHours.trim()) ? '免打扰时段格式应为 22:00-08:00（24 小时制，起止不同），留空表示不启用。' : '',
     pinAfterSeconds.trim() && (pinAfterMs === undefined || pinAfterMs < minPinAfterSeconds * 1000) ? `置顶等待时间至少 ${minPinAfterSeconds} 秒，留空表示用默认的 10 分钟。` : ''
   ].filter(Boolean);
-  const canSave = !creationBusy && !configurationBusy && !missingTarget && (step === 1
+  const canSave = !creationBusy && !configurationBusy && !modelSettingsPending && !missingTarget && (step === 1
     ? Boolean(appId.trim() && (current || appSecret.trim()) && (!restrictUsers || allowedUserNames.length) && !invalidWorkspaceAliases.length && !reminderErrors.length && Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20000)
     : Boolean(current && defaultAgentId && (permissionMode === 'full-trust' ? fullTrustConfirmed : remoteApprovalReady) && agentCapabilitiesReady && (riskControlMode === 'off' || highRiskPatternValidation.valid) && !legacyHighRiskNeedsMigration && (riskControlMode !== 'enforced' || enforcedHookReady)));
   const formError = reload.error ?? save.error ?? remove.error ?? pickWorkspace.error ?? inspect.error ?? startOpenPlatformSetup.error ?? openPlatformJob.error ?? installHook.error ?? (agentOptions.data ? undefined : agentOptions.error) ?? hookStatus.error ?? config.error;
@@ -415,12 +418,14 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
           </fieldset>
           </> : <>
           <div><span className="text-caption font-medium text-secondary">默认 Agent</span><AgentSelect agents={agents} value={defaultAgentId} onChange={value => { setDefaultAgentId(value); setDefaultModel(''); setDefaultReasoningEffort(''); if (permissionFollowsAgent.current) setPermissionMode(newBotPermissionMode(agents.find(agent => agent.id === value))); }}/></div>
+          {current && claudeModelSettings && <AgentModelSettings key={`${current.appId}:${defaultAgentId}`} agentId={defaultAgentId} botAppId={current.appId} onDirtyChange={setModelSettingsPending}/>}
+          {claudeModelSettings && <Field label="默认模型" hint="可填写网关支持的模型 ID；留空沿用 Agent 默认模型。"><Input aria-label="默认模型" value={defaultModel} placeholder="例如 claude-sonnet-4-6" onChange={event => { setDefaultModel(event.target.value); setDefaultReasoningEffort(''); }}/></Field>}
           <Field label="操作确认方式" hint="飞书逐项确认与只读自动放行支持 ACP Agent 和 Claude 终端模式；修改后在会话空闲时应用，新操作仍受群权限与高危策略约束。"><CompactSelect options={[{ value: 'full-trust', label: '完全信任：自动执行操作' }, { value: 'approve-reads', label: '只读自动放行：读取与搜索直接执行，其余逐项确认' }, { value: 'ask', label: '飞书逐项确认：等待批准后执行' }]} value={permissionMode} placeholder="选择操作确认方式" disabledText="" onChange={value => { permissionFollowsAgent.current = false; setPermissionMode(value as 'ask' | 'approve-reads' | 'full-trust'); }}/></Field>
           {permissionMode !== 'full-trust' && !remoteApprovalReady && <p className="text-caption text-warning">{selectedAgent?.protocol === 'pty-cli' ? '这个终端模式 Agent 的工具确认只能在终端里处理，飞书无法逐项审批，会话启动时会被拒绝。请选择完全信任，或换 ACP Agent / Claude 终端模式。' : '当前 Agent 尚未确认支持 ACP，请选择支持 ACP 的 Agent 后保存。'}</p>}
           {permissionMode === 'full-trust' && <label className="flex items-start gap-2.5 rounded-md border border-warning-border bg-warning-soft px-3 py-2.5"><input type="checkbox" checked={fullTrustConfirmed} onChange={event => setFullTrustConfirmed(event.target.checked)} className="mt-0.5 h-4 w-4 rounded-sm border-warning-solid"/><span><span className="block text-caption font-semibold text-warning">确认飞书任务以 full-trust 运行</span><span className="mt-0.5 block text-caption text-warning">无人值守 Agent 可执行本机命令和修改文件；取消确认后不能保存完全信任配置；也可以切换为飞书逐项确认。</span></span></label>}
           <div className={`flex items-center rounded-md bg-surface px-3 py-2.5 shadow-card ${config.data?.listeningDisabled ? 'opacity-50' : ''}`}><div className="min-w-0"><label htmlFor="lark-switch-listening" className="cursor-pointer text-body font-medium text-primary">监听飞书消息</label><div className="mt-0.5 text-caption text-subtle">{config.data?.listeningDisabled ? '本次启动已通过 --no-lark-listen 禁用，保存值不受影响' : !listening ? '保持关闭，仅保存机器人配置' : current?.activeListening ? '监听已启动，可到飞书发送消息' : '完成配置后立即接收机器人消息'}</div></div><Switch id="lark-switch-listening" label="监听飞书消息" checked={listening} disabled={config.data?.listeningDisabled} onToggle={() => setListening(value => !value)}/></div>
           {!agentOptions.data && (agentOptions.isLoading || agentOptions.isFetching) ? <div className="flex min-h-10 items-center rounded-md bg-muted px-2.5"><Spinner label="正在读取 Agent 配置"/></div> : <>
-            {agentOptions.data?.source === 'acp' && agentOptions.data.models.length > 0 && <div><span className="text-caption font-medium text-secondary">默认模型</span><CompactSelect options={[{ value: '', label: agentOptions.data.defaultModel ? `Agent 默认 (${agentOptions.data.defaultModel})` : '使用 Agent 默认模型' }, ...agentOptions.data.models.map(item => ({ value: item.id, label: item.name, meta: item.name === item.id ? undefined : item.id }))]} value={defaultModel} placeholder="选择默认模型" disabledText="" onChange={value => { setDefaultModel(value); setDefaultReasoningEffort(''); }}/></div>}
+            {!claudeModelSettings && agentOptions.data?.source === 'acp' && agentOptions.data.models.length > 0 && <div><span className="text-caption font-medium text-secondary">默认模型</span><CompactSelect options={[{ value: '', label: agentOptions.data.defaultModel ? `Agent 默认 (${agentOptions.data.defaultModel})` : '使用 Agent 默认模型' }, ...agentOptions.data.models.map(item => ({ value: item.id, label: item.name, meta: item.name === item.id ? undefined : item.id }))]} value={defaultModel} placeholder="选择默认模型" disabledText="" onChange={value => { setDefaultModel(value); setDefaultReasoningEffort(''); }}/></div>}
             {agentOptions.data?.source === 'acp' && agentOptions.data.reasoningEfforts.length > 0 && <div><span className="text-caption font-medium text-secondary">推理强度</span><CompactSelect options={[{ value: '', label: agentOptions.data.defaultReasoningEffort ? `Agent 默认 (${agentOptions.data.defaultReasoningEffort})` : '使用 Agent 默认强度' }, ...agentOptions.data.reasoningEfforts.map(item => ({ value: item.id, label: item.name }))]} value={defaultReasoningEffort} placeholder="选择推理强度" disabledText="" onChange={setDefaultReasoningEffort}/></div>}
           </>}
           <Field label="预注入 Prompt（可选，默认空）" hint="每轮飞书对话都会在用户请求前隐式注入，不会在 Agent 聊天记录中重复显示为用户消息。">

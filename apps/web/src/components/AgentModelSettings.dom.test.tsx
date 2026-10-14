@@ -32,3 +32,30 @@ it('saves service settings, retains a blank key, clears keys and invalidates mod
   await waitFor(() => expect(set).toHaveBeenLastCalledWith('claude', { clearApiKey: true }));
   await waitFor(() => expect(screen.queryByRole('button', { name: '清除 API Key' })).toBeNull());
 });
+
+it('saves only the selected bot account inside an outer form, reports unsaved changes and preserves the shared cache', async () => {
+  const state = { agentId: 'claude', appId: 'cli_a', model: '', baseUrl: '', authMode: 'bearer' as const, hasApiKey: false, apiKeyAvailable: false, appliesTo: 'next_process' as const };
+  const get = vi.spyOn(agentModelSettingsApi, 'get').mockResolvedValue(state);
+  const set = vi.spyOn(agentModelSettingsApi, 'set').mockResolvedValue({ ...state, hasApiKey: true, apiKeyAvailable: true });
+  const submit = vi.fn(event => event.preventDefault()), dirty = vi.fn();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const shared = { models: [{ id: 'shared', name: 'Shared' }], reasoningEfforts: [] };
+  client.setQueryData(['agent-models', 'claude', 'shared'], shared);
+  writeCachedAgentModels('claude', 'shared', shared);
+  render(<QueryClientProvider client={client}><form onSubmit={submit}><AgentModelSettings agentId="claude" botAppId="cli_a" onDirtyChange={dirty}/></form></QueryClientProvider>);
+  await userEvent.click(screen.getByText('模型服务配置'));
+  const input = await screen.findByLabelText('API Key');
+  expect(get).toHaveBeenCalledWith('claude', 'cli_a');
+  expect(document.querySelectorAll('form')).toHaveLength(1);
+  expect(screen.queryByLabelText('默认模型')).toBeNull();
+  await userEvent.type(screen.getByLabelText('服务地址'), 'https://gateway.example');
+  await userEvent.type(input, 'BOT_UI_CANARY');
+  await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(true));
+  await userEvent.click(screen.getByRole('button', { name: '保存模型配置' }));
+  await waitFor(() => expect(set).toHaveBeenCalledWith('claude', { baseUrl: 'https://gateway.example', apiKey: 'BOT_UI_CANARY', clearApiKey: false }, 'cli_a'));
+  await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(false));
+  expect(submit).not.toHaveBeenCalled();
+  expect(readCachedAgentModels('claude', 'shared')).toEqual(shared);
+  expect(client.getQueryData(['agent-models', 'claude', 'shared'])).toEqual(shared);
+  expect(document.body.textContent).not.toContain('BOT_UI_CANARY');
+});

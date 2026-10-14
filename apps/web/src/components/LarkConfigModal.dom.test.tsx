@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, ApiError, type Agent, type LarkBotConfig, type LarkConfig } from '../api';
+import { agentModelSettingsApi, api, ApiError, type Agent, type LarkBotConfig, type LarkConfig } from '../api';
 import { LarkConfigModal } from './LarkConfigModal';
 
 const agents: Agent[] = [
@@ -1148,4 +1148,28 @@ it('expands stored model overrides and saves explicit clears without changing ot
   await user.click(screen.getByText('可选：分别设置群判定和回复模型'));
   await user.click(screen.getByRole('button', { name: '完成配置' }));
   await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ decisionModel: '', responseModel: '', defaultModel: 'original' })));
+});
+
+it('registers a Claude bot with a gateway and custom model, requiring the gateway draft to be saved before completion', async () => {
+  const user = userEvent.setup();
+  const state = { agentId: 'claude', appId: 'cli_test', model: '', baseUrl: '', authMode: 'bearer' as const, hasApiKey: false, apiKeyAvailable: false, appliesTo: 'next_process' as const };
+  vi.spyOn(agentModelSettingsApi, 'get').mockResolvedValue(state);
+  const saveGateway = vi.spyOn(agentModelSettingsApi, 'set').mockResolvedValue({ ...state, hasApiKey: true, apiKeyAvailable: true });
+  const saveBot = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'claude', permissionMode: 'ask', setupComplete: true }));
+  renderModal(collection({ defaultAgentId: 'claude', permissionMode: 'ask', setupComplete: false }));
+  await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+  await user.click(screen.getByText('模型服务配置'));
+  await user.type(await screen.findByLabelText('服务地址'), 'https://registration.example');
+  await user.type(screen.getByLabelText('API Key'), 'REGISTRATION_KEY');
+  const finish = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
+  await waitFor(() => expect(finish.disabled).toBe(true));
+  expect(document.querySelectorAll('form')).toHaveLength(1);
+  await user.click(screen.getByRole('button', { name: '保存模型配置' }));
+  await waitFor(() => expect(saveGateway).toHaveBeenCalledWith('claude', { baseUrl: 'https://registration.example', apiKey: 'REGISTRATION_KEY', clearApiKey: false }, 'cli_test'));
+  await user.type(screen.getByLabelText('默认模型'), 'gateway-custom-model');
+  await waitFor(() => expect(finish.disabled).toBe(false));
+  await user.click(finish);
+  await waitFor(() => expect(saveBot).toHaveBeenCalledWith(expect.objectContaining({ stage: 'agent', originalAppId: 'cli_test', defaultAgentId: 'claude', defaultModel: 'gateway-custom-model' })));
+  expect(saveBot.mock.calls[0]![0]).not.toHaveProperty('apiKey');
+  expect(document.body.textContent).not.toContain('REGISTRATION_KEY');
 });

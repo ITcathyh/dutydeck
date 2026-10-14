@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { RuntimeError, type AgentConfig, type RepositoryBundle } from '@dutydeck/shared';
+import { parseLarkSourceId, RuntimeError, type AgentConfig, type RepositoryBundle, type Session } from '@dutydeck/shared';
 import { LocalFileAgentApiKeyResolver, type LocalFileSecretProvider } from '@dutydeck/secret-provider';
 
 const text = z.string().trim().max(512);
@@ -15,24 +15,26 @@ export const agentModelSettingsPatchSchema = z.object({
 }).strict().refine(value => !(value.apiKey && value.clearApiKey), '不能同时设置和清除 API Key');
 export type AgentModelSettingsPatch = z.infer<typeof agentModelSettingsPatchSchema>;
 const storedSchema = z.object({ model: text.optional(), baseUrl: baseUrl.optional(), authMode: z.enum(['bearer', 'api-key']).optional(), referenceKey: z.string().optional() }).strict();
-const key = (id: string) => `dutydeck.agent_model.${id}`;
+const scopePart = (value: string) => encodeURIComponent(value).replaceAll('.', '%2E');
+const key = (id: string, appId?: string) => appId ? `dutydeck.bot_agent_model.${scopePart(appId)}.${scopePart(id)}` : `dutydeck.agent_model.${id}`;
 const isClaudeCode = (agent: AgentConfig) => ['claude', 'claude-code'].includes(agent.adapterId ?? agent.id);
 
 export class AgentModelSettings {
-  constructor(private readonly repos: Pick<RepositoryBundle, 'config' | 'agents'>, private readonly defaults: AgentConfig[], private readonly provider?: LocalFileSecretProvider) {}
+  constructor(private readonly repos: Pick<RepositoryBundle, 'config' | 'agents' | 'sessions'>, private readonly defaults: AgentConfig[], private readonly provider?: LocalFileSecretProvider) {}
   private baseline(id: string) {
     const agent = this.defaults.find(item => item.id === id);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Unknown agent', 404);
     if (!isClaudeCode(agent)) throw new RuntimeError('AGENT_MODEL_SETTINGS_UNSUPPORTED', '目前只支持 Claude Code 的模型服务配置', 400);
     return agent;
   }
-  private async read(id: string) { return storedSchema.parse(JSON.parse(await this.repos.config.get(key(id)) ?? '{}')); }
-  async get(id: string) {
-    const agent = this.baseline(id), saved = await this.read(id);
-    return { agentId: id, model: saved.model || agent.model || '', baseUrl: saved.baseUrl || '', authMode: saved.authMode ?? 'bearer', hasApiKey: Boolean(saved.referenceKey), apiKeyAvailable: Boolean(saved.referenceKey && this.provider?.inspect(saved.referenceKey).availability === 'available'), appliesTo: 'next_process' as const };
+  private async read(id: string, appId?: string) { return storedSchema.parse(JSON.parse(await this.repos.config.get(key(id, appId)) ?? '{}')); }
+  async get(id: string, appId?: string) {
+    const agent = this.baseline(id), saved = await this.read(id, appId);
+    return { agentId: id, ...(appId ? { appId } : {}), model: saved.model || agent.model || '', baseUrl: saved.baseUrl || '', authMode: saved.authMode ?? 'bearer', hasApiKey: Boolean(saved.referenceKey), apiKeyAvailable: Boolean(saved.referenceKey && this.provider?.inspect(saved.referenceKey).availability === 'available'), appliesTo: 'next_process' as const };
   }
-  async set(id: string, body: unknown) {
-    const baseline = this.baseline(id), patch = agentModelSettingsPatchSchema.parse(body), current = await this.read(id);
+  async set(id: string, body: unknown, appId?: string) {
+    const baseline = this.baseline(id), patch = agentModelSettingsPatchSchema.parse(body), current = await this.read(id, appId);
+    if (appId && patch.model !== undefined) throw new RuntimeError('BOT_MODEL_SETTING_REQUIRED', '机器人模型请使用默认模型设置（dutydeck settings bot set <app-id> defaultModel=...）', 400);
     const { apiKey, clearApiKey, ...fields } = patch;
     const saved = { ...current, ...fields };
     if (apiKey || clearApiKey) {
@@ -48,17 +50,37 @@ export class AgentModelSettings {
         saved.referenceKey = referenceKey;
       }
     }
-    await this.repos.config.set(key(id), JSON.stringify(saved));
+    await this.repos.config.set(key(id, appId), JSON.stringify(saved));
     const agent = await this.repos.agents.get(id);
-    if (agent) await this.repos.agents.save({ ...agent, model: saved.model || baseline.model });
-    return this.get(id);
+    if (agent && !appId) await this.repos.agents.save({ ...agent, model: saved.model || baseline.model });
+    return this.get(id, appId);
+  }
+  async clearBot(appId: string) {
+    const entries = await this.repos.config.list?.(`dutydeck.bot_agent_model.${scopePart(appId)}.`) ?? [];
+    for (const entry of entries) {
+      const saved = storedSchema.parse(JSON.parse(entry.value));
+      if (saved.referenceKey && this.provider?.inspect(saved.referenceKey).availability === 'available') this.provider.removeConditional(saved.referenceKey);
+      await this.repos.config.set(entry.key, '{}');
+    }
+  }
+  async resolveForSession(agent: AgentConfig, session: Session, parentForSession: (id: string) => Promise<{ parentSessionId: string } | undefined>): Promise<AgentConfig> {
+    let current: Session | undefined = session;
+    const visited = new Set<string>();
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id);
+      if (['lark', 'lark-memory', 'lark-decision', 'lark-response', 'plugin_trigger'].includes(current.source ?? '')) return this.resolve(agent, parseLarkSourceId(current.sourceId).appId);
+      const parent = await parentForSession(current.id);
+      current = parent ? await this.repos.sessions.get(parent.parentSessionId) : undefined;
+    }
+    return this.resolve(agent);
   }
   async defaultsForBoot(agents: AgentConfig[]) {
     return Promise.all(agents.map(async agent => ({ ...agent, model: (await this.read(agent.id)).model || agent.model })));
   }
-  async resolve(agent: AgentConfig): Promise<AgentConfig> {
+  async resolve(agent: AgentConfig, appId?: string): Promise<AgentConfig> {
     if (!isClaudeCode(agent)) return agent;
-    const saved = await this.read(agent.id);
+    const scoped = appId ? await this.read(agent.id, appId) : undefined;
+    const saved = scoped?.referenceKey ? scoped : await this.read(agent.id);
     if (!saved.referenceKey) return agent;
     const env = { ...agent.env, ...(saved.baseUrl ? { ANTHROPIC_BASE_URL: saved.baseUrl } : {}) };
     if (!this.provider) throw new RuntimeError('AGENT_SECRET_PROVIDER_UNAVAILABLE', '持久化密钥存储不可用', 503);

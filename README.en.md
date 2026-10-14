@@ -208,6 +208,18 @@ printf %s "$LARK_SECRET" | dutydeck setup --lark-app-id cli_xxx --lark-app-secre
 
 Agents that support Lark per-action approval: ACP agents, and Claude Code / Seed / Relay in terminal mode (via a PermissionRequest hook). Other terminal CLIs can only run `full-trust`.
 
+**Claude Code gateway and API key.** In step 2 of bot registration, choose Claude Code, expand “模型服务配置” (model service settings), enter the gateway URL, auth mode and key, then save the model service settings before completing registration. Existing bots have the same panel beside their default Agent settings. Enter the gateway model ID in the bot's default model field. Built-in Claude Code and custom Agents with `adapterId: "claude"` or `"claude-code"` (such as ccflash) are supported. The gateway must implement the Anthropic Messages API.
+
+```bash
+printf %s "$MODEL_API_KEY" | dutydeck settings agent set claude --app cli_xxx baseUrl=https://gateway.example authMode=bearer --api-key-fd 0
+dutydeck settings bot set cli_xxx defaultAgentId=claude defaultModel=your-model-id
+dutydeck settings agent show claude --app cli_xxx
+dutydeck settings agent set claude --app cli_xxx clearApiKey=true
+```
+
+`bearer` uses Authorization Bearer; `api-key` uses X-Api-Key. Settings are isolated per bot and Agent. Omitting `--app` changes shared Agent settings. A URL is activated only with a key in the same scope; clearing the bot key restores shared Agent / CLI connection settings. Keys live in private local secret files and are never returned by the API or CLI. The model uses the bot's `defaultModel`; an explicit session model takes priority, and other bots keep their own models. Gateway changes apply when the next Agent process starts; use `/new` to recreate a running session.
+
+
 ---
 
 ## Web Workbench <a id="web-console"></a>

@@ -348,6 +348,21 @@ printf %s "$LARK_SECRET" | dutydeck setup --lark-app-id cli_xxxxxxxx --lark-app-
 
 “支持飞书逐项审批”的 Agent：ACP Agent，以及 Claude Code / Seed / Relay 终端模式（经 PermissionRequest hook）。其它终端模式 CLI 只能用 `full-trust`。
 
+#### Claude Code 自定义网关与 API Key
+
+注册第二步选择 Claude Code，展开「模型服务配置」，填写网关 URL、认证方式和 API Key，先点「保存模型配置」，再点「完成配置」。已有机器人可在默认执行设置里修改；网关模型 ID 填在「默认模型」。支持内置 Claude Code 和 `adapterId` 为 `claude` / `claude-code` 的自定义 Agent（如 ccflash），网关须兼容 Anthropic Messages API。
+
+```bash
+# 已绑定的机器人：网关密钥从管道读，不进入命令行参数
+printf %s "$MODEL_API_KEY" | dutydeck settings agent set claude --app cli_xxx baseUrl=https://gateway.example authMode=bearer --api-key-fd 0
+dutydeck settings bot set cli_xxx defaultAgentId=claude defaultModel=your-model-id
+dutydeck settings agent show claude --app cli_xxx
+dutydeck settings agent set claude --app cli_xxx clearApiKey=true
+```
+
+`bearer` 使用 Authorization Bearer，`api-key` 使用 X-Api-Key。配置按机器人和 Agent 独立保存；不带 `--app` 修改的是共享 Agent 配置。URL 需配置该作用域的 API Key 才启用；清除机器人密钥后恢复共享 Agent / CLI 连接配置。密钥保存在本机私有密钥文件中，不在 API 和 CLI 输出里回显。模型用机器人 `defaultModel`，会话明确选择的模型优先；这些设置不改变其他机器人的模型。网关设置在下次启动 Agent 进程时生效，正在运行的会话用 `/new` 重新创建。
+
+
 ---
 
 ## Web 工作台与自动化闭环 <a id="web-console"></a>

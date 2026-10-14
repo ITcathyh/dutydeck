@@ -331,12 +331,13 @@ export class ApiError extends Error {
   constructor(message: string, public readonly code: string, public readonly status: number, public readonly current?: unknown) { super(message); this.name = 'ApiError'; }
 }
 const json = async <T,>(url: string, init?: RequestInit): Promise<T> => { const response = await fetch(withShareToken(instanceApiUrl(url)), { credentials: 'same-origin', ...init }); const data = await response.json(); if (!response.ok) { if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT)); throw new ApiError(data.error?.message ?? response.statusText, data.error?.code ?? 'REQUEST_FAILED', response.status, data.current); } return data; };
-const agentModelsUrl = (id: string, model?: string, refresh = false) => {
+const agentModelsUrl = (id: string, model?: string, refresh = false, appId?: string) => {
   const query = new URLSearchParams();
   if (model) query.set('model', model);
   if (refresh) query.set('refresh', '1');
   const suffix = query.toString();
-  return `/api/agents/${id}/models${suffix ? `?${suffix}` : ''}`;
+  const base = appId ? `/api/lark/bots/${encodeURIComponent(appId)}/agents/${encodeURIComponent(id)}` : `/api/agents/${id}`;
+  return `${base}/models${suffix ? `?${suffix}` : ''}`;
 };
 export const eventsUrl = (id: string, query: EventWindowQuery = {}) => {
   const params = new URLSearchParams();
@@ -384,7 +385,7 @@ export const api = {
   passwordLogin: (password: string) => json<BrowserAuthState>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password }) }),
   logout: () => json<BrowserAuthState>('/api/auth/logout', { method: 'POST' }),
   instances: () => json<{ instances: PeerInstance[] }>('/api/instances', { cache: 'no-store' }),
-  agents: () => json<Agent[]>('/api/agents'), agentModels: (id: string, model?: string, refresh = false) => json<AgentModelsResult>(agentModelsUrl(id, model, refresh)), sessions: () => json<Session[]>('/api/sessions'), session: (id: string) => json<Session>(`/api/sessions/${encodeURIComponent(id)}`), events: (id: string, query?: EventWindowQuery, signal?: AbortSignal) => json<DockEvent[]>(eventsUrl(id, query), { signal }), tasks: (id: string) => json<Task[]>(`/api/sessions/${id}/tasks`),
+  agents: () => json<Agent[]>('/api/agents'), agentModels: (id: string, model?: string, refresh = false, appId?: string) => json<AgentModelsResult>(agentModelsUrl(id, model, refresh, appId)), sessions: () => json<Session[]>('/api/sessions'), session: (id: string) => json<Session>(`/api/sessions/${encodeURIComponent(id)}`), events: (id: string, query?: EventWindowQuery, signal?: AbortSignal) => json<DockEvent[]>(eventsUrl(id, query), { signal }), tasks: (id: string) => json<Task[]>(`/api/sessions/${id}/tasks`),
   // 跨任务标题的最小只读契约；服务端接入前 UI 仅使用当前已加载 tasks 的真实 prompt，不伪造摘要。
   runSummaries: () => json<RunSummary[]>(RUN_SUMMARY_ENDPOINT),
   create: (body: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: WorkspaceMode }) => json<Session>('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
@@ -1000,9 +1001,12 @@ export const insightApi = {
   }
 };
 
-export type AgentModelSettings = { agentId: string; model: string; baseUrl: string; authMode: 'bearer' | 'api-key'; hasApiKey: boolean; apiKeyAvailable: boolean; appliesTo: 'next_process' };
+export type AgentModelSettings = { agentId: string; appId?: string; model: string; baseUrl: string; authMode: 'bearer' | 'api-key'; hasApiKey: boolean; apiKeyAvailable: boolean; appliesTo: 'next_process' };
 export type AgentModelSettingsPatch = { model?: string; baseUrl?: string; authMode?: 'bearer' | 'api-key'; apiKey?: string; clearApiKey?: boolean };
+const modelSettingsUrl = (id: string, appId?: string) => appId
+  ? `/api/lark/bots/${encodeURIComponent(appId)}/agents/${encodeURIComponent(id)}/model-settings`
+  : `/api/agents/${encodeURIComponent(id)}/model-settings`;
 export const agentModelSettingsApi = {
-  get: (id: string) => json<AgentModelSettings>(`/api/agents/${encodeURIComponent(id)}/model-settings`, { cache: 'no-store' }),
-  set: (id: string, body: AgentModelSettingsPatch) => json<AgentModelSettings>(`/api/agents/${encodeURIComponent(id)}/model-settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  get: (id: string, appId?: string) => json<AgentModelSettings>(modelSettingsUrl(id, appId), { cache: 'no-store' }),
+  set: (id: string, body: AgentModelSettingsPatch, appId?: string) => json<AgentModelSettings>(modelSettingsUrl(id, appId), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
 };

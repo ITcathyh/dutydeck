@@ -307,3 +307,12 @@ describe('settings commands', () => {
     expect(settings).toHaveBeenLastCalledWith('usage-set-cap', expect.objectContaining({ amount: '30', appId: 'cli_a', chatId: 'oc_1' }));
   });
 });
+
+it('passes a bot scope and a secret descriptor for Claude service settings without accepting an API key in argv', async () => {
+  const settings = vi.fn();
+  await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'agent', 'set', 'claude', 'baseUrl=https://gateway.example', '--app', 'cli_a', '--api-key-fd', '0']);
+  expect(settings).toHaveBeenLastCalledWith('agent-set', expect.objectContaining({ agentId: 'claude', appId: 'cli_a', apiKeyFd: '0', pairs: ['baseUrl=https://gateway.example'] }));
+  await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'agent', 'show', 'claude', '--app', 'cli_a']);
+  expect(settings).toHaveBeenLastCalledWith('agent-show', expect.objectContaining({ agentId: 'claude', appId: 'cli_a' }));
+  await expect(runSettingsCli('agent-set', { ...target, agentId: 'claude', appId: 'cli_a', pairs: ['apiKey=ARGV_SECRET'] }, { fetcher: vi.fn(), readToken })).rejects.toMatchObject({ code: 'SETTINGS_KEY_UNKNOWN' });
+});
