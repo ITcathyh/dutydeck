@@ -83,6 +83,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -169,6 +177,14 @@
                 "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
                 "text_size": "notation",
                 "text_align": "right",
+                "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
                 "margin": "0px"
               }
             ]
@@ -355,6 +371,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -458,6 +482,14 @@
               {
                 "tag": "markdown",
                 "content": "已提修改意见 · <at id=ou_snapshot_alice></at> · <北京时刻>\n\n计划：已提修改意见，Agent 会重新出计划。"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -552,6 +584,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -638,6 +678,14 @@
                 "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
                 "text_size": "notation",
                 "text_align": "right",
+                "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
                 "margin": "0px"
               }
             ]
@@ -824,6 +872,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -924,6 +980,14 @@
               {
                 "tag": "markdown",
                 "content": "已批准 · <at id=ou_snapshot_alice></at> · <北京时刻>\n\n计划：已批准，正在按计划执行。"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -1018,6 +1082,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -1104,6 +1176,14 @@
                 "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
                 "text_size": "notation",
                 "text_align": "right",
+                "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
                 "margin": "0px"
               }
             ]
@@ -1275,6 +1355,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },

@@ -83,6 +83,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -295,6 +303,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -436,6 +452,14 @@
                     }
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -573,6 +597,14 @@
                 "content": "<text_tag color='red'>已拦截</text_tag>　删除 build/cache 目录\n\n<font color='grey'>可调整指令后重试，或由有权限的成员重新发起。</font>",
                 "text_size": "normal",
                 "margin": "6px 0px 8px 0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           }
@@ -641,6 +673,14 @@
               {
                 "tag": "markdown",
                 "content": "超时自动拒绝 · <北京时刻>\n\n超过 24 小时未处理，这次操作没有执行，不再接受批准；需要的话请重新发起。"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -830,6 +870,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },

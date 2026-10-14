@@ -83,6 +83,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -288,6 +296,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -452,6 +468,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -545,6 +569,14 @@
                 "text_size": "notation",
                 "text_align": "right",
                 "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           }
@@ -610,6 +642,14 @@
               {
                 "tag": "markdown",
                 "content": "已回答 · <at id=ou_snapshot_alice></at> · <北京时刻>"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -792,6 +832,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },

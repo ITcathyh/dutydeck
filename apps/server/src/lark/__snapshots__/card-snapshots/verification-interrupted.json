@@ -83,6 +83,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -169,6 +177,14 @@
                 "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
                 "text_size": "notation",
                 "text_align": "right",
+                "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
                 "margin": "0px"
               }
             ]
@@ -357,6 +373,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
@@ -628,6 +652,14 @@
                     ]
                   }
                 ]
+              },
+              {
+                "tag": "markdown",
+                "element_id": "dutydeck_brand",
+                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+                "text_size": "x-small",
+                "text_align": "left",
+                "margin": "0px"
               }
             ]
           },
