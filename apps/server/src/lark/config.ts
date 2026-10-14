@@ -18,6 +18,8 @@ export { riskControlModes, type RiskControlMode };
 
 export interface StoredLarkConfig {
   cardActionForwarding?: CardActionForwarding;
+  cardActionForwardingError?: string;
+  welcomeEnabled?: boolean;
   revision?: number;
   mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
   defaultGroupParticipation?: 'off' | 'observe' | 'selective' | 'eager';
@@ -181,6 +183,7 @@ export const larkExecutionConfirmed = (config: Pick<StoredLarkConfig, 'permissio
 
 export interface SaveLarkConfigInput {
   cardActionForwarding?: CardActionForwarding | null;
+  welcomeEnabled?: boolean;
   expectedRevision?: number;
   mentionPolicy?: StoredLarkConfig['mentionPolicy'];
   defaultGroupParticipation?: StoredLarkConfig['defaultGroupParticipation'];
@@ -286,6 +289,8 @@ export interface SaveLarkConfigInput {
 
 export interface PublicLarkConfig {
   cardActionForwarding?: Omit<CardActionForwarding, 'token'>;
+  cardActionForwardingError?: string;
+  welcomeEnabled: boolean;
   revision: number;
   mentionPolicy?: StoredLarkConfig['mentionPolicy'];
   defaultGroupParticipation?: StoredLarkConfig['defaultGroupParticipation'];
@@ -571,10 +576,20 @@ const normalizeAgentIds = (value: unknown): string[] => Array.isArray(value)
   ? [...new Set(value.filter((id): id is string => typeof id === 'string').map(id => id.trim()).filter(Boolean))]
   : [];
 
+// Keep invalid persisted values out of runtime/public views, but preserve them on unrelated writes.
+const invalidCardActionForwarding = new WeakMap<StoredLarkConfig, unknown>();
+const invalidForwardingMessage = '存储的 cardActionForwarding 无效；请提交合法配置或 null 后重启监听。';
+const serializeLarkConfigs = (configs: StoredLarkConfig[]) => JSON.stringify(configs.map(stored => {
+  const { cardActionForwardingError, ...config } = stored;
+  return invalidCardActionForwarding.has(stored) ? { ...config, cardActionForwarding: invalidCardActionForwarding.get(stored) } : config;
+}));
+
 function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskControlShape): StoredLarkConfig | undefined {
   if (!parsed.appId || !parsed.appSecret) return undefined;
   let cardActionForwarding: CardActionForwarding | undefined;
-  try { cardActionForwarding = parseCardActionForwarding(parsed.cardActionForwarding); } catch {}
+  let cardActionForwardingError: string | undefined;
+  try { cardActionForwarding = parseCardActionForwarding(parsed.cardActionForwarding); }
+  catch { cardActionForwardingError = invalidForwardingMessage; }
   const pushIntervalMs = Number(parsed.pushIntervalMs ?? defaultLarkPushIntervalMs);
   const parsedTraceLimit = Number(parsed.traceLimit ?? defaultLarkTraceLimit);
   const traceLimit = Number.isInteger(parsedTraceLimit) && parsedTraceLimit > 0 ? parsedTraceLimit : defaultLarkTraceLimit;
@@ -586,7 +601,9 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
   const displayName = normalizeDisplayName(parsed.displayName);
   const roleTitle = normalizeRoleField(parsed.roleTitle);
   const roleScope = normalizeRoleField(parsed.roleScope);
-  return {
+  const config: StoredLarkConfig = {
+    welcomeEnabled: parsed.welcomeEnabled !== false,
+    ...(cardActionForwardingError ? { cardActionForwardingError } : {}),
     ...(cardActionForwarding ? { cardActionForwarding } : {}),
     appId: parsed.appId.trim(),
     revision: Number.isInteger(parsed.revision) && Number(parsed.revision) > 0 ? parsed.revision : 1,
@@ -659,6 +676,8 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     highRiskPattern: parsed.highRiskPattern?.trim() || defaultHighRiskPattern,
     riskControlMode: normalizeRiskControlMode(parsed)
   };
+  if (cardActionForwardingError) invalidCardActionForwarding.set(config, parsed.cardActionForwarding);
+  return config;
 }
 
 export async function readLarkConfigs(repository?: ConfigRepository, options: { readOnly?: boolean } = {}): Promise<StoredLarkConfig[]> {
@@ -670,8 +689,8 @@ export async function readLarkConfigs(repository?: ConfigRepository, options: { 
         const configs = parsed.map(item => normalizeStoredConfig(item)).filter((item): item is StoredLarkConfig => Boolean(item));
         if (!options.readOnly && parsed.some(needsRiskControlMigration)) {
           if (repository?.compareAndSet) {
-            if (!await repository.compareAndSet(larkBotsConfigKey, stored, JSON.stringify(configs))) return readLarkConfigs(repository, options);
-          } else await repository?.set(larkBotsConfigKey, JSON.stringify(configs));
+            if (!await repository.compareAndSet(larkBotsConfigKey, stored, serializeLarkConfigs(configs))) return readLarkConfigs(repository, options);
+          } else await repository?.set(larkBotsConfigKey, serializeLarkConfigs(configs));
         }
         return configs;
       }
@@ -683,8 +702,8 @@ export async function readLarkConfigs(repository?: ConfigRepository, options: { 
     const config = normalizeStoredConfig(JSON.parse(legacy));
     if (config && !options.readOnly) {
       if (repository?.compareAndSet) {
-        if (!await repository.compareAndSet(larkBotsConfigKey, stored, JSON.stringify([config]))) return readLarkConfigs(repository, options);
-      } else await repository?.set(larkBotsConfigKey, JSON.stringify([config]));
+        if (!await repository.compareAndSet(larkBotsConfigKey, stored, serializeLarkConfigs([config]))) return readLarkConfigs(repository, options);
+      } else await repository?.set(larkBotsConfigKey, serializeLarkConfigs([config]));
     }
     return config ? [config] : [];
   } catch { return []; }
@@ -697,6 +716,8 @@ export async function readLarkConfig(repository?: ConfigRepository, appId?: stri
 
 export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: ReadonlySet<string> = new Set(), duplicateNames: ReadonlySet<string> = new Set()): PublicLarkConfig => ({
   ...(config.cardActionForwarding ? { cardActionForwarding: { owner: config.cardActionForwarding.owner, url: config.cardActionForwarding.url, ...(config.cardActionForwarding.legacyActions ? { legacyActions: config.cardActionForwarding.legacyActions } : {}) } } : {}),
+  welcomeEnabled: config.welcomeEnabled !== false,
+  ...(config.cardActionForwardingError ? { cardActionForwardingError: config.cardActionForwardingError } : {}),
   configured: true,
   appId: config.appId,
   revision: config.revision ?? 1,
@@ -790,6 +811,8 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const index = originalAppId ? configs.findIndex(config => config.appId === originalAppId) : -1;
   if (originalAppId && index < 0) throw new LarkServiceError('LARK_BOT_NOT_FOUND', `Unknown Lark bot: ${originalAppId}`, 404);
   const current = index >= 0 ? configs[index] : undefined;
+  if (current?.cardActionForwardingError && input.cardActionForwarding === undefined) throw new LarkServiceError('INVALID_LARK_CONFIG', invalidForwardingMessage, 400);
+  if (input.welcomeEnabled !== undefined && typeof input.welcomeEnabled !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'welcomeEnabled 必须为布尔值。', 400);
   if (input.expectedRevision !== undefined && input.expectedRevision !== (current ? current.revision ?? 1 : 0)) {
     throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '此 Bot 已被修改，请比较最新配置后再保存。', 409);
   }
@@ -915,6 +938,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   }
   const cardActionForwarding = input.cardActionForwarding === undefined ? current?.cardActionForwarding : submittedForwarding;
   const config: StoredLarkConfig = {
+    welcomeEnabled: input.welcomeEnabled ?? current?.welcomeEnabled ?? true,
     ...(cardActionForwarding ? { cardActionForwarding } : {}),
     revision: (current?.revision ?? (current ? 1 : 0)) + 1,
     // 新建的 Bot 默认在自己接手的话题里免 @；已有 Bot 读出来时总带着自己的取值，这里不会改动它们。
@@ -987,7 +1011,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   };
   if (index >= 0) configs[index] = config;
   else configs.push(config);
-  await repository.set(larkBotsConfigKey, JSON.stringify(configs));
+  await repository.set(larkBotsConfigKey, serializeLarkConfigs(configs));
   return configs;
 }
 
@@ -996,7 +1020,7 @@ async function deleteLarkConfigUnlocked(repository: ConfigRepository | undefined
   const configs = await readLarkConfigs(repository);
   const next = configs.filter(config => config.appId !== appId);
   if (next.length === configs.length) throw new LarkServiceError('LARK_BOT_NOT_FOUND', `Unknown Lark bot: ${appId}`, 404);
-  await repository.set(larkBotsConfigKey, JSON.stringify(next));
+  await repository.set(larkBotsConfigKey, serializeLarkConfigs(next));
   return next;
 }
 

@@ -29,6 +29,7 @@ export function parseCardActionForwarding(value: unknown): CardActionForwarding 
 
 type CardActionRoute = 'builtin' | 'forward' | 'unknown' | 'conflict';
 export function cardActionRoute(value: unknown, forwarding?: CardActionForwarding): CardActionRoute {
+  if (!forwarding) return 'builtin';
   let parsed = value;
   if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return 'builtin'; } }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return 'builtin';

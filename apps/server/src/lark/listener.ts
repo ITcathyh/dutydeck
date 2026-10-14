@@ -157,6 +157,10 @@ export class LarkLongConnectionListener implements LarkListener {
   constructor(private readonly log: ListenerLog, private readonly options: LarkLongConnectionListenerOptions = {}, private readonly connectionLost?: (error: unknown) => void, private readonly connectionChanged?: () => void) {}
 
   async start(config: StoredLarkConfig) {
+    if (config.cardActionForwardingError) {
+      this.stop();
+      throw new LarkServiceError('INVALID_LARK_CONFIG', config.cardActionForwardingError, 400);
+    }
     // api-gate 是模块级单例（per-appId 限流状态必须跨会话共享），没有构造注入点。
     // 在监听装配处接上真实日志，让限流等待、退避重试和熔断跳闸可观测。
     setLarkGateLog(this.log);
@@ -221,6 +225,7 @@ export class LarkLongConnectionListener implements LarkListener {
       this.welcome = createLarkWelcomeService({
         appId: config.appId,
         kv: welcomeKv,
+        enabled: () => (this.config ?? config).welcomeEnabled !== false,
         routing: async (chatId, chatType) => {
           const current = this.config ?? config;
           try {
@@ -242,7 +247,7 @@ export class LarkLongConnectionListener implements LarkListener {
         },
         ...(capabilities ? { capabilities } : {}),
         log: this.log,
-        send: (chatId, content) => service.send({
+        send: (chatId, content) => (this.config ?? config).welcomeEnabled === false ? Promise.resolve() : service.send({
           chatId,
           state: 'completed',
           readOnly: true,

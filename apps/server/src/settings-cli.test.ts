@@ -68,6 +68,40 @@ describe('settings CLI against the real bot routes', () => {
     expect(fieldsHelp(botFields)).toContain('cardActionForwarding=<JSON>');
   });
 
+  it('defaults welcomes on, saves and preserves the boolean setting, and rejects invalid API values', async () => {
+    const { repos, run, fetcher } = await botRuntime();
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ welcomeEnabled: true });
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['welcomeEnabled=false'] })).bot).toMatchObject({ welcomeEnabled: false });
+    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=retain welcome preference'] });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ welcomeEnabled: false });
+    const invalid = await fetcher(`${target.url}/api/lark/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ originalAppId: 'cli_a', welcomeEnabled: 'false' }) });
+    expect(invalid.status).toBe(400);
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['welcomeEnabled=true'] })).bot).toMatchObject({ welcomeEnabled: true });
+    expect(fieldsHelp(botFields)).toContain('welcomeEnabled=<true|false>');
+  });
+
+  it('shows safe diagnostics for corrupt forwarding, preserves it on unrelated writes, and permits explicit repair', async () => {
+    const { repos, run } = await botRuntime();
+    const broken = { owner: 'sample-service', url: 'http://remote.example/cards', token: 'invalid-forward-secret' };
+    await repos.config.set(larkBotsConfigKey, JSON.stringify([
+      { appId: 'cli_a', appSecret: 'secret-a', listening: false, permissionMode: 'ask', defaultAgentId: 'codex', cardActionForwarding: broken },
+      { appId: 'cli_b', appSecret: 'secret-b', listening: false, permissionMode: 'ask', defaultAgentId: 'codex' }
+    ]));
+    const shown = await run('bot-show', { appId: 'cli_a' });
+    expect(shown.bot).toHaveProperty('cardActionForwardingError');
+    expect(shown.bot).not.toHaveProperty('cardActionForwarding');
+    expect(JSON.stringify(shown)).not.toContain(broken.token);
+    const afterMigration = JSON.parse((await repos.config.get(larkBotsConfigKey))!);
+    expect(afterMigration[0].cardActionForwarding).toEqual(broken);
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['welcomeEnabled=false'] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    await run('bot-set', { appId: 'cli_b', pairs: ['welcomeEnabled=false'] });
+    expect(JSON.parse((await repos.config.get(larkBotsConfigKey))!)[0].cardActionForwarding).toEqual(broken);
+    expect(JSON.parse((await repos.config.get(larkBotsConfigKey))!)[0]).not.toHaveProperty('cardActionForwardingError');
+    await run('bot-set', { appId: 'cli_a', pairs: ['cardActionForwarding=null'] });
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).not.toHaveProperty('cardActionForwardingError');
+    expect(await readLarkConfig(repos.config, 'cli_a')).not.toHaveProperty('cardActionForwarding');
+  });
+
   it('reads and writes groupMemoryScope, defaulting to shared and rejecting unknown values', async () => {
     const { repos, run } = await botRuntime();
     expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ groupMemoryScope: 'shared' });

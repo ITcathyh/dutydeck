@@ -83,13 +83,16 @@ describe('card forwarding via the SDK dispatcher and real HTTP', () => {
     expect(await h.invoke(builtin)).toMatchObject({ toast: { content: '内置动作已执行。' } });
     await h.invoke(builtin);
     await h.invoke(click({ dutydeck_confirm: 'confirm' }, 'ev_confirm'));
+    await h.invoke(click({ dutydeck_help_page: '1', page: '2' }, 'ev_help'));
     await h.invoke(click({ dockmux_workflow: 'approve' }, 'ev_compat'));
     for (const value of [{ owner: 'unknown', action: 'ack' }, { owner: forwarding.owner, taskId: 'task1', action: 'ack' }, { owner: forwarding.owner, dutydeck_confirm: 'confirm' }]) {
       expect(await h.invoke(click(value))).toMatchObject({ toast: { type: 'error' } });
     }
-    expect(requests).toHaveLength(1); expect(h.handleAction).toHaveBeenCalledTimes(3);
+    expect(requests).toHaveLength(1); expect(h.handleAction).toHaveBeenCalledTimes(4);
     await h.connection.start({ ...h.config, cardActionForwarding: undefined });
-    expect(await h.invoke(click())).toMatchObject({ toast: { type: 'error' } });
+    expect(await h.invoke(click(undefined, 'ev_disabled'))).toMatchObject({ toast: { content: '内置动作已执行。' } });
+    await h.invoke(click({ owner: 'any-owner', task_id: 't', action: 'cancel' }, 'ev_disabled_task'));
+    expect(h.handleAction).toHaveBeenCalledTimes(6);
     expect(requests).toHaveLength(1);
   });
 
@@ -151,6 +154,8 @@ it('validates local HTTP/HTTPS destinations and precisely reserves existing buil
   }
   expect(parseCardActionForwarding(null)).toBeUndefined();
   expect(cardActionRoute({ owner: 'unknown', task_id: 't' }, forwarding)).toBe('conflict');
+  expect(cardActionRoute({ owner: 'unknown', task_id: 't' })).toBe('builtin');
+  expect(cardActionRoute({ owner: 'unknown' })).toBe('builtin');
 });
 
 it('reloads forwarding credentials after closing and reopening the persistent configuration database', async () => {
@@ -169,4 +174,15 @@ it('reloads forwarding credentials after closing and reopening the persistent co
   const disabled = createRepositories(database);
   try { expect(await readLarkConfig(disabled.config, 'cli_persistent')).not.toHaveProperty('cardActionForwarding'); }
   finally { disabled.close(); }
+});
+
+it('refuses a corrupt persisted forwarding configuration before starting any network connection', async () => {
+  const repos = createRepositories(':memory:'); cleanups.push(() => repos.close());
+  await repos.config.set('lark.bots', JSON.stringify([{ appId: 'cli_invalid', appSecret: 'fake', listening: true, cardActionForwarding: { owner: 'sample-service', url: 'http://remote.example', token: 'private-corrupt-token' } }]));
+  const config = (await readLarkConfig(repos.config, 'cli_invalid'))!;
+  const fetcher = vi.fn(async () => { throw new Error('Unexpected network'); });
+  const connection = new LarkLongConnectionListener({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }, { fetcher });
+  await expect(connection.start(config)).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+  expect(fetcher).not.toHaveBeenCalled(); expect(connection.listening).toBe(false);
+  expect(config.cardActionForwardingError).not.toContain('private-corrupt-token');
 });

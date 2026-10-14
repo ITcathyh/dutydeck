@@ -154,6 +154,7 @@ export function buildWelcomeCardContent(input: {
 export interface CreateLarkWelcomeServiceOptions {
   appId: string;
   kv: WelcomeKv;
+  enabled?: () => boolean;
   /** 发送欢迎卡（由 listener 用 LarkCardService.send 适配），失败不得抛出。 */
   send: (chatId: string, content: WelcomeCardContent) => Promise<void>;
   capabilities?: LarkCommandCapabilities;
@@ -187,7 +188,7 @@ async function claimWelcomed(kv: WelcomeKv, key: string, marker: string): Promis
 
 export function createLarkWelcomeService(options: CreateLarkWelcomeServiceOptions): LarkWelcomeService {
   const deliver = async (chatId: string, chatType: 'group' | 'p2p') => {
-    if (!chatId) return;
+    if (!chatId || options.enabled?.() === false) return;
     const key = welcomedDedupeKey(options.appId, chatId);
     const marker = JSON.stringify({ at: (options.now ?? (() => new Date()))().toISOString() });
     let claimed = false;

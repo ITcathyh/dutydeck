@@ -2511,6 +2511,41 @@ describe('Lark long connection listener 欢迎语', () => {
     } finally { listener.stop(); handleAction.mockRestore(); }
   });
 
+  it('welcomeEnabled disables group and first-DM welcomes and applies changes without reconnecting', async () => {
+    const receive = vi.spyOn(LarkMessageCoordinator.prototype, 'receive').mockResolvedValue();
+    const runtime = { getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()), listSessions: vi.fn(async () => []) };
+    const { listener, handlers, posts, kv } = await startHarness({ runtime, configPatch: { welcomeEnabled: false } });
+    const dm = { sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      message: { message_id: 'om_dm', chat_id: 'oc_dm', chat_type: 'p2p', message_type: 'text', content: '{"text":"hello"}', mentions: [] } };
+    try {
+      await handlers['im.chat.member.bot.added_v1']!({ event_id: 'ev_disabled', chat_id: 'oc_group' });
+      await handlers['im.message.receive_v1']!(dm);
+      await new Promise(resolve => setImmediate(resolve));
+      expect(posts).toHaveLength(0); expect(kv.compareAndSet).not.toHaveBeenCalled();
+      await listener.start({ ...config, welcomeEnabled: true });
+      await handlers['im.chat.member.bot.added_v1']!({ event_id: 'ev_enabled', chat_id: 'oc_group' });
+      await handlers['im.message.receive_v1']!(dm);
+      await vi.waitFor(() => expect(posts).toHaveLength(2));
+      await listener.start({ ...config, welcomeEnabled: false });
+      await handlers['im.chat.member.bot.added_v1']!({ event_id: 'ev_disabled_again', chat_id: 'oc_other' });
+      await handlers['im.message.receive_v1']!({ ...dm, message: { ...dm.message, chat_id: 'oc_other_dm' } });
+      await new Promise(resolve => setImmediate(resolve));
+      expect(posts).toHaveLength(2); expect(larkSdkHarness.wsStart).toHaveBeenCalledOnce();
+    } finally { listener.stop(); receive.mockRestore(); }
+  });
+
+  it('does not send or start an Agent for ordinary unmentioned group messages with always/off configuration', async () => {
+    const runtime = { start: vi.fn(async () => session), send: vi.fn(async () => {}), dispatch: vi.fn(async () => ({ id: 'task', status: 'queued' })),
+      getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()), listSessions: vi.fn(async () => []) };
+    const { listener, handlers, posts } = await startHarness({ runtime, configPatch: { welcomeEnabled: false, mentionPolicy: 'always', defaultGroupParticipation: 'off' } });
+    try {
+      await handlers['im.message.receive_v1']!({ sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+        message: { message_id: 'om_ordinary', chat_id: 'oc_group', chat_type: 'group', message_type: 'text', content: '{"text":"ordinary group message"}', mentions: [] } });
+      await new Promise(resolve => setImmediate(resolve));
+      expect(posts).toHaveLength(0); expect(runtime.start).not.toHaveBeenCalled(); expect(runtime.send).not.toHaveBeenCalled(); expect(runtime.dispatch).not.toHaveBeenCalled();
+    } finally { listener.stop(); }
+  });
+
   it('bot 入群事件触发欢迎卡分发冒烟', async () => {
     const { listener, handlers, posts } = await startHarness();
     handlers['im.chat.member.bot.added_v1']!({ event_id: "e1", chat_id: "oc_group" });

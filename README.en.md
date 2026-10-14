@@ -373,6 +373,12 @@ dutydeck auth token [--rotate]            # token for CLI/scripts/API
 dutydeck auth share-key rotate
 ```
 
+Automatic bot welcomes are enabled by default. Set `welcomeEnabled=false` to suppress group-join and first-DM welcomes immediately after saving; user message handling continues. For group replies only when mentioned, also set `mentionPolicy=always` and `defaultGroupParticipation=off`.
+
+```bash
+dutydeck settings bot set cli_xxx welcomeEnabled=false
+```
+
 External Lark card buttons can be forwarded per bot directly to an HTTP receiver:
 
 ```bash
@@ -380,7 +386,7 @@ dutydeck settings bot set cli_xxx 'cardActionForwarding={"owner":"sample-service
 dutydeck settings bot set cli_xxx cardActionForwarding=null  # disable
 ```
 
-`action.value.owner` must match the configured owner. Optional `legacyActions` matches old cards without an owner and cannot contain built-in Dutydeck actions. Built-in `task_id`, `taskId`, `dutydeck_*`, and legacy `dockmux_workflow` markers keep their existing handling. An owner combined with built-in markers is rejected, as is an unknown owner. The token is persisted in bot configuration and omitted from public API and CLI output. URLs must use HTTPS or local HTTP (`127.0.0.1`, `localhost`, `[::1]`); redirects are prohibited.
+`action.value.owner` must match the configured owner. Optional `legacyActions` matches old cards without an owner and cannot contain built-in Dutydeck actions. Built-in `task_id`, `taskId`, `dutydeck_*`, and legacy `dockmux_workflow` markers keep their existing handling. When forwarding is enabled, callbacks with an unknown owner or a combination of owner and built-in markers are rejected. Bots without forwarding keep their original callback handling. Corrupt persisted forwarding appears as `cardActionForwardingError` in public configuration and prevents that bot from starting its listener. The original value is retained, and unrelated changes to that bot are rejected until an explicit valid replacement or `null` is saved through the CLI above; the listener can then be restarted. The token is persisted in bot configuration and omitted from public API and CLI output. URLs must use HTTPS or local HTTP (`127.0.0.1`, `localhost`, `[::1]`); redirects are prohibited.
 
 Dutydeck sends a `POST` with `Authorization: Bearer <token>`, `Content-Type: application/json`, and `{"version":1,"app_id":"<trusted connection App ID>","event":<complete SDK card.action.trigger event>}`. Original fields including event_id, operator, context, action, and token are preserved. The receiver must persist the event before returning `202 {"status":"accepted","event_id":"<same event ID>"}`; a persisted duplicate returns `200 {"status":"duplicate","event_id":"<same event ID>"}`. These receipts show the Chinese “accepted” / “received” toast. The request has a 2-second deadline; a timeout reports an unconfirmed outcome. There are no background retries. The receiver owns persistent deduplication by event_id.
 
