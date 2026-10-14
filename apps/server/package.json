@@ -1,6 +1,6 @@
 {
   "name": "@byted/dutydeck",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
