@@ -748,6 +748,17 @@ dutydeck settings group set oc_xxx participation=selective   # 设置群聊按�
 dutydeck settings usage set-cap 50 --app cli_xxx             # 设置月度用量上限（美元）
 ```
 
+飞书外部卡片按钮可按机器人配置 HTTP 转发，直接交给接收服务处理：
+
+```bash
+dutydeck settings bot set cli_xxx 'cardActionForwarding={"owner":"sample-service","url":"http://127.0.0.1:14432/cards","token":"<接收服务令牌>","legacyActions":["ack"]}'
+dutydeck settings bot set cli_xxx cardActionForwarding=null  # 关闭
+```
+
+`action.value.owner` 必须等于配置的 `owner`；`legacyActions` 只兼容没有 owner 的旧卡片，不能包含 Dutydeck 内置动作。带 `task_id`、`taskId`、`dutydeck_*` 或兼容的 `dockmux_workflow` 标记的内置卡片保留原处理；同时带 owner 和内置标记的请求拒绝执行，未知 owner 也会拒绝。令牌保存在机器人配置中，公开 API 和 CLI 输出不返回它。URL 只允许 HTTPS 或本机 HTTP（`127.0.0.1`、`localhost`、`[::1]`），禁止重定向。
+
+Dutydeck 发出 `POST`，带 `Authorization: Bearer <token>` 和 `Content-Type: application/json`，正文为 `{"version":1,"app_id":"<连接配置中的 App ID>","event":<SDK card.action.trigger 完整事件>}`；保留 event_id、operator、context、action、token 等原字段。接收端必须持久化事件，并且只在落库后返回 `202 {"status":"accepted","event_id":"<同一事件 ID>"}`；已落库的重复事件返回 `200 {"status":"duplicate","event_id":"<同一事件 ID>"}`。两种回执分别显示“已受理”和“已接收”。转发最多等待 2 秒，超时提示结果待确认；没有后台重试，接收端负责按 event_id 持久化去重。
+
 ### 5. 终端后端与 Herdr 侧边子任务空间
 
 - **主终端后端**：在 `tmux`（默认）与 `Herdr`（Linux，>= 0.9.0）之间选择，设置后新建的 `pty-cli` 会话生效。

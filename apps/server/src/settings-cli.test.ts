@@ -48,6 +48,26 @@ describe('settings CLI against the real bot routes', () => {
     expect((await run('bot-list')).bots).toEqual([expect.objectContaining({ appId: 'cli_a', defaultAgentId: 'codex', listening: false })]);
   });
 
+  it('persists card forwarding through CLI/API updates and redacts its token from all public results', async () => {
+    const { repos, run } = await botRuntime();
+    const forwarding = { owner: 'sample-service', url: 'http://127.0.0.1:14432/cards', token: 'private-forward-token', legacyActions: ['ack'] };
+    const result = await run('bot-set', { appId: 'cli_a', pairs: [`cardActionForwarding=${JSON.stringify(forwarding)}`] });
+    expect(result.bot).toMatchObject({ cardActionForwarding: { owner: forwarding.owner, url: forwarding.url, legacyActions: ['ack'] } });
+    expect(JSON.stringify(result)).not.toContain(forwarding.token);
+    expect((result.bot as any).cardActionForwarding).not.toHaveProperty('token');
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ cardActionForwarding: forwarding });
+    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=keep forwarding'] });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ cardActionForwarding: forwarding });
+    expect(JSON.stringify(await run('bot-show', { appId: 'cli_a' }))).not.toContain(forwarding.token);
+    expect(JSON.stringify(await run('bot-list'))).not.toContain(forwarding.token);
+    await expect(run('bot-set', { appId: 'cli_a', pairs: [`cardActionForwarding=${JSON.stringify({ ...forwarding, legacyActions: ['cancel'] })}`] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    await expect(run('bot-set', { appId: 'cli_a', pairs: [`cardActionForwarding=${JSON.stringify({ ...forwarding, url: 'http://remote.example/cards' })}`] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    await run('bot-set', { appId: 'cli_a', pairs: ['cardActionForwarding=null'] });
+    expect(await readLarkConfig(repos.config, 'cli_a')).not.toHaveProperty('cardActionForwarding');
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).not.toHaveProperty('cardActionForwarding');
+    expect(fieldsHelp(botFields)).toContain('cardActionForwarding=<JSON>');
+  });
+
   it('reads and writes groupMemoryScope, defaulting to shared and rejecting unknown values', async () => {
     const { repos, run } = await botRuntime();
     expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ groupMemoryScope: 'shared' });

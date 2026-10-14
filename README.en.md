@@ -373,6 +373,17 @@ dutydeck auth token [--rotate]            # token for CLI/scripts/API
 dutydeck auth share-key rotate
 ```
 
+External Lark card buttons can be forwarded per bot directly to an HTTP receiver:
+
+```bash
+dutydeck settings bot set cli_xxx 'cardActionForwarding={"owner":"sample-service","url":"http://127.0.0.1:14432/cards","token":"<receiver-token>","legacyActions":["ack"]}'
+dutydeck settings bot set cli_xxx cardActionForwarding=null  # disable
+```
+
+`action.value.owner` must match the configured owner. Optional `legacyActions` matches old cards without an owner and cannot contain built-in Dutydeck actions. Built-in `task_id`, `taskId`, `dutydeck_*`, and legacy `dockmux_workflow` markers keep their existing handling. An owner combined with built-in markers is rejected, as is an unknown owner. The token is persisted in bot configuration and omitted from public API and CLI output. URLs must use HTTPS or local HTTP (`127.0.0.1`, `localhost`, `[::1]`); redirects are prohibited.
+
+Dutydeck sends a `POST` with `Authorization: Bearer <token>`, `Content-Type: application/json`, and `{"version":1,"app_id":"<trusted connection App ID>","event":<complete SDK card.action.trigger event>}`. Original fields including event_id, operator, context, action, and token are preserved. The receiver must persist the event before returning `202 {"status":"accepted","event_id":"<same event ID>"}`; a persisted duplicate returns `200 {"status":"duplicate","event_id":"<same event ID>"}`. These receipts show the Chinese “accepted” / “received” toast. The request has a 2-second deadline; a timeout reports an unconfirmed outcome. There are no background retries. The receiver owns persistent deduplication by event_id.
+
 - **Deploy**: drain → switch `releases/current` → restart → health check. If the health check fails the service is stopped and rolled back only when the database schema is unchanged; an old database snapshot is never restored.
 - **Cleanup**: after each successful deploy the newest 5 releases and deployment records (including database backups) are kept. `current`, its previous release and releases still referenced by running processes are always kept; cleanup failures only warn. Records from manual deployments (no `created_by: dutydeck deploy` in `manifest.json`) are left alone unless you pass `--include-unmarked`, and even then skipped when referenced by a process or modified within the last hour. `.partial` directories modified in the last hour are skipped too.
 - **Remote access**: Dutydeck listens on `127.0.0.1` by default. With `--host 0.0.0.0`, browsers log in with the password from `dutydeck auth password set`; CLI and API use the access token. Never use `--no-auth` on a reachable address.

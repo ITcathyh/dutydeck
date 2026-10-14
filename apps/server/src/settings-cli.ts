@@ -44,6 +44,7 @@ export const agentFields = { model: 'string', baseUrl: 'string', authMode: ['bea
 
 /** dashboard 能保存的 Bot 字段。satisfies 保证保存接口新增字段时这里编译不过，CLI 不会漏项。 */
 export const botFields = {
+  cardActionForwarding: 'json',
   workspace: 'string', workspaceAliases: 'json', webBaseUrl: 'string', webMobileReachable: 'boolean', displayName: 'string', brand: ['feishu', 'lark'],
   defaultAgentId: 'string', defaultModel: 'string', defaultReasoningEffort: 'string',
   permissionMode: ['ask', 'approve-reads', 'full-trust'], fullTrustConfirmed: 'boolean',

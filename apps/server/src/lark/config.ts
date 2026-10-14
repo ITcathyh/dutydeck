@@ -1,3 +1,4 @@
+import { parseCardActionForwarding, type CardActionForwarding } from './card-action-forwarding.js';
 import { collaborationParticipationModes, mentionPolicies, riskControlModes, supportsRemoteApproval, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type RiskControlMode } from '@dutydeck/shared';
 import { isAbsolute } from 'node:path';
 import { hostname, userInfo } from 'node:os';
@@ -16,6 +17,7 @@ export interface LarkAllowedUser {
 export { riskControlModes, type RiskControlMode };
 
 export interface StoredLarkConfig {
+  cardActionForwarding?: CardActionForwarding;
   revision?: number;
   mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
   defaultGroupParticipation?: 'off' | 'observe' | 'selective' | 'eager';
@@ -178,6 +180,7 @@ export const defaultLarkPermissionMode = (agent?: Parameters<typeof supportsRemo
 export const larkExecutionConfirmed = (config: Pick<StoredLarkConfig, 'permissionMode' | 'fullTrustConfirmed'>) => larkPermissionMode(config) !== 'full-trust' || config.fullTrustConfirmed === true;
 
 export interface SaveLarkConfigInput {
+  cardActionForwarding?: CardActionForwarding | null;
   expectedRevision?: number;
   mentionPolicy?: StoredLarkConfig['mentionPolicy'];
   defaultGroupParticipation?: StoredLarkConfig['defaultGroupParticipation'];
@@ -282,6 +285,7 @@ export interface SaveLarkConfigInput {
 }
 
 export interface PublicLarkConfig {
+  cardActionForwarding?: Omit<CardActionForwarding, 'token'>;
   revision: number;
   mentionPolicy?: StoredLarkConfig['mentionPolicy'];
   defaultGroupParticipation?: StoredLarkConfig['defaultGroupParticipation'];
@@ -569,6 +573,8 @@ const normalizeAgentIds = (value: unknown): string[] => Array.isArray(value)
 
 function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskControlShape): StoredLarkConfig | undefined {
   if (!parsed.appId || !parsed.appSecret) return undefined;
+  let cardActionForwarding: CardActionForwarding | undefined;
+  try { cardActionForwarding = parseCardActionForwarding(parsed.cardActionForwarding); } catch {}
   const pushIntervalMs = Number(parsed.pushIntervalMs ?? defaultLarkPushIntervalMs);
   const parsedTraceLimit = Number(parsed.traceLimit ?? defaultLarkTraceLimit);
   const traceLimit = Number.isInteger(parsedTraceLimit) && parsedTraceLimit > 0 ? parsedTraceLimit : defaultLarkTraceLimit;
@@ -581,6 +587,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
   const roleTitle = normalizeRoleField(parsed.roleTitle);
   const roleScope = normalizeRoleField(parsed.roleScope);
   return {
+    ...(cardActionForwarding ? { cardActionForwarding } : {}),
     appId: parsed.appId.trim(),
     revision: Number.isInteger(parsed.revision) && Number(parsed.revision) > 0 ? parsed.revision : 1,
     mentionPolicy: parsed.mentionPolicy ?? 'always',
@@ -689,6 +696,7 @@ export async function readLarkConfig(repository?: ConfigRepository, appId?: stri
 }
 
 export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: ReadonlySet<string> = new Set(), duplicateNames: ReadonlySet<string> = new Set()): PublicLarkConfig => ({
+  ...(config.cardActionForwarding ? { cardActionForwarding: { owner: config.cardActionForwarding.owner, url: config.cardActionForwarding.url, ...(config.cardActionForwarding.legacyActions ? { legacyActions: config.cardActionForwarding.legacyActions } : {}) } } : {}),
   configured: true,
   appId: config.appId,
   revision: config.revision ?? 1,
@@ -777,6 +785,7 @@ export const publicLarkConfigs = (configs: StoredLarkConfig[], runtime: { active
 async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, agents: AgentRepository | undefined, input: SaveLarkConfigInput): Promise<StoredLarkConfig[]> {
   if (!repository) throw new LarkServiceError('LARK_CONFIG_STORAGE_UNAVAILABLE', 'Lark configuration storage is unavailable', 503);
   const configs = await readLarkConfigs(repository);
+  const submittedForwarding = parseCardActionForwarding(input.cardActionForwarding);
   const originalAppId = input.originalAppId?.trim();
   const index = originalAppId ? configs.findIndex(config => config.appId === originalAppId) : -1;
   if (originalAppId && index < 0) throw new LarkServiceError('LARK_BOT_NOT_FOUND', `Unknown Lark bot: ${originalAppId}`, 404);
@@ -904,7 +913,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if ((input.stage === 'agent' || input.defaultAgentId !== undefined || input.listening === true) && permissionMode === 'full-trust' && !fullTrustConfirmed) {
     throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '请先确认飞书任务将以完全信任模式无人值守运行。', 409);
   }
+  const cardActionForwarding = input.cardActionForwarding === undefined ? current?.cardActionForwarding : submittedForwarding;
   const config: StoredLarkConfig = {
+    ...(cardActionForwarding ? { cardActionForwarding } : {}),
     revision: (current?.revision ?? (current ? 1 : 0)) + 1,
     // 新建的 Bot 默认在自己接手的话题里免 @；已有 Bot 读出来时总带着自己的取值，这里不会改动它们。
     mentionPolicy: input.mentionPolicy ?? current?.mentionPolicy ?? 'topic',

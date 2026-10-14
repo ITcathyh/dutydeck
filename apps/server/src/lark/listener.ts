@@ -1,3 +1,4 @@
+import { cardActionRoute, forwardCardAction } from './card-action-forwarding.js';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
 import type { LarkGroupParticipation } from './group-participation.js';
 import type { ExecutionActor, ExecutionRecoveryDecision, UnknownTaskFacts, UnknownTaskResolution } from '@dutydeck/shared';
@@ -277,25 +278,31 @@ export class LarkLongConnectionListener implements LarkListener {
           });
         }
       },
-      // 平台重复推送的同一次点击只处理一次，重推直接返回第一次的结果。
-      'card.action.trigger': (event: any) => this.cardCallbacks.run(larkCardCallbackKeys(event), async () => {
-        const operatorOpenId = event.operator?.open_id;
-        // JSON 2.0 表单（结构化问答的多选/自由文本、workbench 步骤答题）提交值在 form_value，
-        // 按钮回调值在 action.value；合并后下游统一读 value，表单值挂在 value.form_value。
-        // 未合并时表单类回调必然拿不到答案，属 fail-closed 接线点。
-        const actionValue = event.action?.value;
-        const formValue = event.action?.form_value;
-        const value = formValue ? { ...actionValue, form_value: formValue } : actionValue;
-        const result = await coordinator?.handleAction(value, operatorOpenId, {
-          messageId: event.context?.open_message_id ?? event.open_message_id,
-          chatId: event.context?.open_chat_id ?? event.open_chat_id,
-          // overflow 菜单：behaviors.value 全组共用，被点选项只在 action.option。
-          // 传给主控做白名单门（目前只放行 'reject'），防 multi_url 等未证实项误触发回调。
-          ...(event.action?.tag === 'overflow' ? { actionTag: 'overflow', option: event.action.option } : {})
+      // 内置按钮重复推送只处理一次；外部事件的持久化去重由接收服务负责。
+      'card.action.trigger': (event: any) => {
+        const current = this.config ?? config;
+        const route = cardActionRoute(event.action?.value, current.cardActionForwarding);
+        if (route === 'forward') return forwardCardAction(current.cardActionForwarding!, current.appId, event, http.fetch).then(toast => ({ toast }));
+        if (route === 'unknown' || route === 'conflict') return { toast: { type: 'error', content: route === 'conflict' ? '卡片操作同时包含外部与内置标记，已拒绝。' : '未配置此卡片的接收服务。' } };
+        return this.cardCallbacks.run(larkCardCallbackKeys(event), async () => {
+          const operatorOpenId = event.operator?.open_id;
+          // JSON 2.0 表单（结构化问答的多选/自由文本、workbench 步骤答题）提交值在 form_value，
+          // 按钮回调值在 action.value；合并后下游统一读 value，表单值挂在 value.form_value。
+          // 未合并时表单类回调必然拿不到答案，属 fail-closed 接线点。
+          const actionValue = event.action?.value;
+          const formValue = event.action?.form_value;
+          const value = formValue ? { ...actionValue, form_value: formValue } : actionValue;
+          const result = await coordinator?.handleAction(value, operatorOpenId, {
+            messageId: event.context?.open_message_id ?? event.open_message_id,
+            chatId: event.context?.open_chat_id ?? event.open_chat_id,
+            // overflow 菜单：behaviors.value 全组共用，被点选项只在 action.option。
+            // 传给主控做白名单门（目前只放行 'reject'），防 multi_url 等未证实项误触发回调。
+            ...(event.action?.tag === 'overflow' ? { actionTag: 'overflow', option: event.action.option } : {})
+          });
+          if (!result) return;
+          return { toast: result };
         });
-        if (!result) return;
-        return { toast: result };
-      }),
+      },
       // bot 被拉入群：发一次入群欢迎卡（welcome 内部 kv 去重，重复事件/重启不重发）。
       // 存量应用需先经 /repair 增量订阅该事件并发布通过审核后才能收到。
       'im.chat.member.bot.added_v1': (event: any) => {
