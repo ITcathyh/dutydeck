@@ -176,3 +176,137 @@ it('preserves the surviving driver and events when simultaneous resumes finish a
   factories[1].emit({ type: 'text', data: { text: 'resumed driver remains current' } });
   await vi.waitFor(async () => expect((await runtime.getEvents(session.id)).some(event => (event.data as { text?: string }).text === 'resumed driver remains current')).toBe(true));
 });
+
+it('keeps bot gateway accounts separate from each other and shared settings, including rotation and clearing', async () => {
+  const { settings, agent, repos, provider } = await fixture();
+  await settings.set('claude', { baseUrl: 'https://shared.example', apiKey: 'SHARED_CANARY', model: 'shared-model' });
+  const shared = await repos.agents.get('claude');
+  await settings.set('claude', { baseUrl: 'https://a.example', apiKey: 'BOT_A_CANARY' }, 'cli_a');
+  await settings.set('claude', { baseUrl: 'https://b.example', apiKey: 'BOT_B_CANARY', authMode: 'api-key' }, 'cli_b');
+  expect(await repos.agents.get('claude')).toEqual(shared);
+  expect((await settings.resolve(agent, 'cli_a')).env).toMatchObject({ ANTHROPIC_BASE_URL: 'https://a.example', ANTHROPIC_AUTH_TOKEN: 'BOT_A_CANARY', ANTHROPIC_API_KEY: '' });
+  expect((await settings.resolve(agent, 'cli_b')).env).toMatchObject({ ANTHROPIC_BASE_URL: 'https://b.example', ANTHROPIC_API_KEY: 'BOT_B_CANARY', ANTHROPIC_AUTH_TOKEN: '' });
+  expect((await settings.resolve(agent)).env.ANTHROPIC_AUTH_TOKEN).toBe('SHARED_CANARY');
+  expect((await settings.resolve(agent, 'cli_unconfigured')).env.ANTHROPIC_AUTH_TOKEN).toBe('SHARED_CANARY');
+  await settings.set('claude', { apiKey: 'BOT_A_ROTATED' }, 'cli_a');
+  expect((await settings.resolve(agent, 'cli_a')).env.ANTHROPIC_AUTH_TOKEN).toBe('BOT_A_ROTATED');
+  await settings.set('claude', { clearApiKey: true }, 'cli_a');
+  expect((await settings.resolve(agent, 'cli_a')).env).toMatchObject({ ANTHROPIC_BASE_URL: 'https://shared.example', ANTHROPIC_AUTH_TOKEN: 'SHARED_CANARY' });
+  expect((await settings.resolve(agent, 'cli_b')).env.ANTHROPIC_API_KEY).toBe('BOT_B_CANARY');
+  await expect(settings.set('claude', { model: 'bot-model' }, 'cli_b')).rejects.toMatchObject({ code: 'BOT_MODEL_SETTING_REQUIRED' });
+  const serialized = JSON.stringify([await repos.config.list?.(''), await settings.get('claude', 'cli_a'), await settings.get('claude', 'cli_b'), await repos.agents.list()]);
+  for (const secret of ['SHARED_CANARY', 'BOT_A_CANARY', 'BOT_A_ROTATED', 'BOT_B_CANARY']) expect(serialized).not.toContain(secret);
+  const storedB = JSON.parse((await repos.config.get('dutydeck.bot_agent_model.cli_b.claude'))!);
+  await settings.clearBot('cli_b');
+  expect(provider.inspect(storedB.referenceKey).availability).toBe('missing');
+  expect((await settings.resolve(agent, 'cli_b')).env.ANTHROPIC_AUTH_TOKEN).toBe('SHARED_CANARY');
+});
+
+it('uses unambiguous bot and agent scope keys even when identifiers contain dots', async () => {
+  const { settings, agent, repos, provider } = await fixture();
+  const other = { ...agent, id: 'b.claude', adapterId: 'claude' };
+  await repos.agents.save(other);
+  const scoped = new AgentModelSettings(repos, [agent, other], provider);
+  await scoped.set('claude', { apiKey: 'DOT_A' }, 'a.b');
+  await scoped.set('b.claude', { apiKey: 'DOT_B' }, 'a');
+  expect((await scoped.resolve(agent, 'a.b')).env.ANTHROPIC_AUTH_TOKEN).toBe('DOT_A');
+  expect((await scoped.resolve(other, 'a')).env.ANTHROPIC_AUTH_TOKEN).toBe('DOT_B');
+  await scoped.clearBot('a');
+  expect((await scoped.resolve(agent, 'a.b')).env.ANTHROPIC_AUTH_TOKEN).toBe('DOT_A');
+  expect((await settings.get('claude')).hasApiKey).toBe(false);
+});
+
+it('CLI and bot routes require an owner and an existing bot, save independently, and remove its secret files', async () => {
+  const { settings, repos, agent, provider } = await fixture();
+  await repos.config.set('lark.bots', JSON.stringify([{ appId: 'cli_a', appSecret: 'synthetic', defaultAgentId: 'claude', permissionMode: 'ask', listening: false }]));
+  const options = { agentModelSettings: settings, lark: { config: repos.config, agents: repos.agents, listeningDisabled: true } };
+  const runtime = { listAgents: () => repos.agents.list() } as any;
+  const app = await buildApp(runtime, { ...options, sessionNames: { authorize: async () => true } });
+  cleanups.push(() => app.close());
+  const fetcher = vi.fn(async (url: URL | string | Request, init?: RequestInit) => {
+    const response = await app.inject({ method: init?.method as 'GET', url: new URL(String(url)).pathname, payload: init?.body as string, headers: init?.headers as Record<string, string> });
+    return new Response(response.body, { status: response.statusCode });
+  });
+  const target = { agentId: 'claude', appId: 'cli_a', url: 'http://127.0.0.1:4310', database: '/tmp/runtime.db' };
+  const dependencies = { fetcher, readToken: () => undefined };
+  expect(await runSettingsCli('agent-set', { ...target, pairs: ['baseUrl=https://bot.example', 'authMode=api-key'], apiKey: 'BOT_CLI_CANARY' }, dependencies)).toMatchObject({ appId: 'cli_a', hasApiKey: true });
+  expect((await settings.resolve(agent, 'cli_a')).env.ANTHROPIC_API_KEY).toBe('BOT_CLI_CANARY');
+  expect((await settings.get('claude')).hasApiKey).toBe(false);
+  expect(JSON.stringify(await runSettingsCli('agent-show', target, dependencies))).not.toContain('BOT_CLI_CANARY');
+  expect((await app.inject('/api/agents')).body).not.toContain('BOT_CLI_CANARY');
+  const endpoint = '/api/lark/bots/cli_a/agents/claude/model-settings';
+  const invalid = await app.inject({ method: 'PUT', url: endpoint, payload: { apiKey: 'BOT_SECRET_CANARY\u0000' } });
+  expect(invalid.statusCode).toBe(400); expect(invalid.body).not.toContain('BOT_SECRET_CANARY');
+  expect((await app.inject('/api/lark/bots/missing/agents/claude/model-settings')).statusCode).toBe(404);
+  expect((await app.inject({ method: 'PUT', url: '/api/lark/bots/missing/agents/claude/model-settings', payload: { apiKey: 'never-saved' } })).statusCode).toBe(404);
+  const forbidden = await buildApp(runtime, options); cleanups.push(() => forbidden.close());
+  expect((await forbidden.inject(endpoint)).statusCode).toBe(403);
+  expect((await forbidden.inject({ method: 'PUT', url: endpoint, payload: { apiKey: 'denied' } })).statusCode).toBe(403);
+  expect((await forbidden.inject('/api/lark/bots/cli_a/agents/claude/models')).statusCode).toBe(403);
+  const saved = JSON.parse((await repos.config.get('dutydeck.bot_agent_model.cli_a.claude'))!);
+  const removed = await app.inject({ method: 'DELETE', url: '/api/lark/config/cli_a' });
+  expect(removed.statusCode).toBe(200);
+  expect(provider.inspect(saved.referenceKey).availability).toBe('missing');
+  expect((await app.inject(endpoint)).statusCode).toBe(404);
+});
+
+it('runtime selects bot accounts for chats, background and child sessions, preserves explicit models, and resolves new keys on resume', async () => {
+  const { settings, agent, repos } = await fixture();
+  await settings.set('claude', { apiKey: 'ROOT_CANARY' }, 'cli_a');
+  await settings.set('claude', { apiKey: 'OTHER_CANARY' }, 'cli_b');
+  const launched: typeof agent[] = [];
+  const parentIds = new Map<string, string>();
+  const parentOf = async (id: string) => parentIds.has(id) ? { parentSessionId: parentIds.get(id)! } : undefined;
+  const runtime = new DutydeckRuntime(repos, { configureAgent: (config, session) => settings.resolveForSession(config, session, parentOf), driverIdleTimeoutMs: 1, cleanupIntervalMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: config => { launched.push(config); return { start: async () => {}, send: async () => {}, stop: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true }; } });
+  cleanups.push(() => runtime.shutdown());
+  await runtime.initialize([agent]);
+  const root = await runtime.start({ agentId: 'claude', source: 'lark', sourceId: 'cli_a:ou_owner:p2p', model: 'bot-model' });
+  expect(launched.at(-1)).toMatchObject({ model: 'bot-model', env: { ANTHROPIC_AUTH_TOKEN: 'ROOT_CANARY' } });
+  for (const [source, sourceId] of [['lark-memory', 'cli_a:groups:memory'], ['lark-decision', 'cli_a:oc_group'], ['lark-response', 'cli_a:oc_group'], ['plugin_trigger', 'cli_a:oc_group:plugin:hello:ping']]) {
+    await runtime.start({ agentId: 'claude', source, sourceId });
+    expect(launched.at(-1)!.env.ANTHROPIC_AUTH_TOKEN).toBe('ROOT_CANARY');
+  }
+  // Parent lookup is also the path used by persisted work-item/Leader bindings.
+  const leader = await runtime.start({ agentId: 'claude', source: 'lark-leader', sourceId: 'opaque-delegation' });
+  parentIds.set(leader.id, root.id); parentIds.set('child', leader.id);
+  expect((await settings.resolveForSession(agent, { ...root, id: 'child', source: 'work_item', sourceId: 'opaque-attempt' }, parentOf)).env.ANTHROPIC_AUTH_TOKEN).toBe('ROOT_CANARY');
+  await runtime.start({ agentId: 'claude', source: 'lark', sourceId: 'cli_b:ou_owner:p2p' });
+  expect(launched.at(-1)!.env.ANTHROPIC_AUTH_TOKEN).toBe('OTHER_CANARY');
+  await runtime.start({ agentId: 'claude' });
+  expect(launched.at(-1)!.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+  await runtime.cleanupIdleDrivers(Date.now() + 100);
+  await settings.set('claude', { apiKey: 'ROOT_ROTATED' }, 'cli_a');
+  await runtime.resume(root.id);
+  expect(launched.at(-1)).toMatchObject({ model: 'bot-model', env: { ANTHROPIC_AUTH_TOKEN: 'ROOT_ROTATED' } });
+  const stored = JSON.stringify([await repos.agents.list(), await repos.sessions.list(), await repos.config.list?.('')]);
+  for (const key of ['ROOT_CANARY', 'ROOT_ROTATED', 'OTHER_CANARY']) expect(stored).not.toContain(key);
+});
+
+it('real AcpxAdapter persists and reopens separate bot sessions without secrets or vendor keys in session options', async () => {
+  const { settings, agent, cwd } = await fixture();
+  const output = join(cwd, 'bot-env.jsonl'), script = join(cwd, 'bot-report.mjs');
+  await writeFile(script, `import {appendFileSync} from 'node:fs';appendFileSync(${JSON.stringify(output)}, JSON.stringify({ key: process.env.ANTHROPIC_API_KEY, token: process.env.ANTHROPIC_AUTH_TOKEN, base: process.env.ANTHROPIC_BASE_URL })+'\\n');await import(${JSON.stringify(resolve('tests/fixtures/mock-acp-agent.mjs'))});`);
+  const bots = [{ appId: 'cli_a', apiKey: 'ACPX_BOT_A', baseUrl: 'https://a.example', authMode: 'bearer' as const }, { appId: 'cli_b', apiKey: 'ACPX_BOT_B', baseUrl: 'https://b.example', authMode: 'api-key' as const }];
+  for (const { appId, ...patch } of bots) await settings.set('claude', patch, appId);
+  for (const bot of bots) {
+    const sessionKey = `bot-model-${bot.appId}`;
+    let nativeId: string | undefined;
+    for (let pass = 0; pass < 2; pass++) {
+      const config = await settings.resolve({ ...agent, model: undefined, args: [script] }, bot.appId);
+      const adapter = new AcpxAdapter(config, { sessionKey, onEvent() {} });
+      try { await adapter.start(); await adapter.send('hello'); } finally { await adapter.stop(); }
+      const record = (await createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') }).load(sessionKey))!;
+      const options = record.acpx!.session_options!;
+      expect(JSON.stringify(options)).not.toContain(bot.apiKey);
+      expect(Object.keys(options.env!).every(key => /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(key))).toBe(true);
+      if (pass === 0) nativeId = record.acpSessionId;
+      else expect(record.acpSessionId).toBe(nativeId);
+    }
+  }
+  const reports = (await readFile(output, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  for (const bot of bots) {
+    const matches = reports.filter(report => report.base === bot.baseUrl);
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+    for (const report of matches) expect(report).toEqual({ key: bot.authMode === 'api-key' ? bot.apiKey : '', token: bot.authMode === 'bearer' ? bot.apiKey : '', base: bot.baseUrl });
+  }
+});

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  agentConfigSchema,
   channelBotFoundationSchema,
   createChannelBotInputSchema,
   getChannelBotFoundationReadiness,
@@ -94,4 +95,12 @@ describe('WP0 public and disabled-state contracts', () => {
     expect(unreadable).toMatchObject({ selectedSecretRefId: configured.id, credentialStatus: 'unreadable', blockerCodes: ['channel_bot_credential_unreadable', 'channel_bot_activation_unavailable'] });
     expect(unreadable).not.toHaveProperty('credentialRef');
   });
+});
+
+it('advertises model service configuration for custom Claude Code adapters without exposing their launch environment', () => {
+  const agent = agentConfigSchema.parse({ id: 'ccflash', name: 'ccflash', adapterId: 'claude', command: 'private-command', protocol: 'pty-cli', env: { ANTHROPIC_AUTH_TOKEN: 'PRIVATE_TOKEN' } });
+  const publicAgent = toPublicAgent(agent);
+  expect(publicAgent.modelServiceSettings).toBe(true);
+  expect(publicAgent).not.toHaveProperty('adapterId');
+  expect(JSON.stringify(publicAgent)).not.toContain('PRIVATE_TOKEN');
 });

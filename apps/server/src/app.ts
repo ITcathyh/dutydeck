@@ -1,3 +1,4 @@
+import { readLarkConfig } from './lark/config.js';
 import type { AgentModelSettings } from './agent-model-settings.js';
 import type { TerminalSettings } from './terminal-settings.js';
 import { registerRecoveryRoutes, type RecoveryRouteOptions } from './recovery-routes.js';
@@ -192,7 +193,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.turnDiffs) registerTurnDiffRoutes(app, runtime, { ...options.turnDiffs, getShareSecret: options.auth?.getShareSecret,
     authorize: (request, sessionId, action) => requireSessionExecution(request, sessionId, 'session', action) });
   await registerSystemRoutes(app, options.system);
-  await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });
+  await registerLarkRoutes(app, { ...options.lark, clearBotModelSettings: appId => options.agentModelSettings?.clearBot(appId) ?? Promise.resolve(), runtime: options.lark?.runtime ?? runtime });
   app.get<{ Querystring: { excludeSessionId?: string } }>('/api/system/activity', async request => {
     const excludeSessionId = request.query.excludeSessionId?.trim() || undefined;
     return { runningTasks: runtime.getRunningTaskCount(excludeSessionId) };
@@ -230,6 +231,24 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     });
   }
   if (options.agentModelSettings) {
+    const authorizeBotSettings = async (request: FastifyRequest, appId: string) => {
+      if (!options.sessionNames || !await options.sessionNames.authorize(request)) throw new RuntimeError('AGENT_SETTINGS_OWNER_REQUIRED', 'Installation owner authorization is required', 403);
+      if (!await readLarkConfig(options.lark?.config, appId)) throw new RuntimeError('LARK_BOT_NOT_FOUND', '机器人尚未注册', 404);
+    };
+    app.get<{ Params: { appId: string; id: string } }>('/api/lark/bots/:appId/agents/:id/model-settings', async request => {
+      await authorizeBotSettings(request, request.params.appId);
+      return options.agentModelSettings!.get(request.params.id, request.params.appId);
+    });
+    app.put<{ Params: { appId: string; id: string }; Body: unknown }>('/api/lark/bots/:appId/agents/:id/model-settings', async request => {
+      await authorizeBotSettings(request, request.params.appId);
+      return options.agentModelSettings!.set(request.params.id, request.body, request.params.appId);
+    });
+    app.get<{ Params: { appId: string; id: string }; Querystring: { model?: string; refresh?: string } }>('/api/lark/bots/:appId/agents/:id/models', async request => {
+      await authorizeBotSettings(request, request.params.appId);
+      const agent = (await runtime.listAgents()).find(item => item.id === request.params.id);
+      if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Unknown agent', 404);
+      return discoverAgentModels(await options.agentModelSettings!.resolve(agent, request.params.appId), request.query.model?.trim() || undefined, request.query.refresh === '1' || request.query.refresh === 'true');
+    });
     app.get<{ Params: { id: string } }>('/api/agents/:id/model-settings', async request => {
       if (!options.sessionNames || !await options.sessionNames.authorize(request)) throw new RuntimeError('AGENT_SETTINGS_OWNER_REQUIRED', 'Installation owner authorization is required', 403);
       return options.agentModelSettings!.get(request.params.id);

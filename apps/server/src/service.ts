@@ -389,7 +389,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     log: { warn: (details, message) => app?.log.warn(details, message) }
   });
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
-    configureAgent: agent => agentModelSettings.resolve(agent),
+    configureAgent: (agent, session) => agentModelSettings.resolveForSession(agent, session, async id => await workItems.parentForSession(id) ?? await delegations.parentForSession(id)),
     ptyRetirement: createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }, session => primaryHerdrBackend(session.id)),
     admitTask: pluginWiring
       ? async (session, request) => { await usageLedger.admit(session, request); await pluginWiring.hooks.taskReceived(session, request); }

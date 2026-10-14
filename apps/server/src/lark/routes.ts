@@ -31,6 +31,7 @@ const larkError = (reply: FastifyReply, error: unknown) => {
 };
 
 export interface LarkRoutesOptions {
+  clearBotModelSettings?: (appId: string) => Promise<void>;
   participation?: LarkGroupParticipation;
   usage?: import('../usage-ledger.js').UsageLedger;
   workbench?: import('./workbench.js').LarkWorkbench;
@@ -356,6 +357,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   app.delete<{ Params: { appId: string } }>('/api/lark/config/:appId', async (request, reply) => {
     try {
       const saved = await deleteLarkConfig(options.config, request.params.appId);
+      await options.clearBotModelSettings?.(request.params.appId);
       if (!listeningDisabled) await syncListeners();
       if (options.runtime) await options.groupManager?.refreshPolicies(options.runtime);
       if (!options.service) service = undefined;

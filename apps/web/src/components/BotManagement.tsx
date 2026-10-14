@@ -1,3 +1,4 @@
+import { AgentModelSettings } from './AgentModelSettings';
 import { OptionalModelOverrides } from './OptionalModelOverrides';
 import type { LarkSetupTarget } from '../app-route';
 import { useState, useMemo } from 'react';
@@ -29,7 +30,7 @@ import { AgentSelect, CompactSelect } from './CompactSelect';
 import { DirectoryPicker } from './DirectoryPicker';
 import { ConfirmDialog } from './ConfirmDialog';
 import { toastStore } from '../useToasts';
-import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../model-cache';
+import { agentModelsQueryKey, loadAgentModels } from '../model-cache';
 
 export type BotManagementProps = {
   selectedAppId?: string;
@@ -173,6 +174,8 @@ export function BotManagement({
     return drafts[activeBot.appId] ?? initialDraft(activeBot);
   }, [activeBot, drafts]);
 
+  const claudeModelSettings = agents.find(agent => agent.id === currentDraft?.defaultAgentId)?.modelServiceSettings === true || ['claude', 'claude-code'].includes(currentDraft?.defaultAgentId ?? '');
+
   // 参与强度由两个底层字段合成；组合恰好是某一档的写法时才算「整档」。
   const botLevel: ParticipationLevel = participationLevelOf(currentDraft?.mentionPolicy, currentDraft?.defaultGroupParticipation ?? 'off');
   const botLevelFields = participationLevelFields(botLevel);
@@ -203,11 +206,10 @@ export function BotManagement({
 
   // 模型选项
   const agentOptions = useQuery({
-    queryKey: agentModelsQueryKey(currentDraft?.defaultAgentId, currentDraft?.defaultModel),
-    queryFn: () => loadAgentModels(currentDraft!.defaultAgentId, currentDraft?.defaultModel || undefined),
+    queryKey: agentModelsQueryKey(currentDraft?.defaultAgentId, currentDraft?.defaultModel, activeAppId),
+    queryFn: () => loadAgentModels(currentDraft!.defaultAgentId, currentDraft?.defaultModel || undefined, false, activeAppId),
     enabled: Boolean(currentDraft?.defaultAgentId),
-    initialData: () => currentDraft?.defaultAgentId ? readCachedAgentModels(currentDraft.defaultAgentId, currentDraft.defaultModel || undefined) : undefined,
-    staleTime: 5 * 60_000
+        staleTime: 5 * 60_000
   });
 
   // 机器人的群共享会话记忆状态
@@ -562,7 +564,7 @@ export function BotManagement({
                     <label className="mb-1.5 block text-caption font-medium text-secondary">
                       默认模型
                     </label>
-                    <CompactSelect
+                    {claudeModelSettings ? <Input aria-label="默认模型" value={currentDraft.defaultModel} placeholder="网关支持的模型 ID；留空沿用 Agent 默认" onChange={event => updateCurrentDraft({ defaultModel: event.target.value, defaultReasoningEffort: '' })}/> : <CompactSelect
                       options={[
                         { value: '', label: agentOptions.data?.defaultModel ? `使用 Agent 默认 (${agentOptions.data.defaultModel})` : '使用 Agent 默认' },
                         ...(agentOptions.data?.models ?? []).map(m => ({ value: m.id, label: m.name, meta: m.id !== m.name ? m.id : undefined }))
@@ -571,9 +573,11 @@ export function BotManagement({
                       placeholder="选择默认模型"
                       disabledText=""
                       onChange={val => updateCurrentDraft({ defaultModel: val, defaultReasoningEffort: '' })}
-                    />
+                    />}
                   </div>
                 </div>
+
+                {claudeModelSettings && <AgentModelSettings key={`${activeBot.appId}:${currentDraft.defaultAgentId}`} agentId={currentDraft.defaultAgentId} botAppId={activeBot.appId}/>}
 
                 <DirectoryPicker
                   value={currentDraft.workspace}
