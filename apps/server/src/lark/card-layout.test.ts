@@ -568,7 +568,7 @@ export function restoreSession(sessionId: string) {
     expect(byId(card, 'retry')).toBeUndefined();
     expect(byId(card, 'cancel')).toBeUndefined();
 
-    const footer = card.body.elements.at(-2);
+    const footer = card.body.elements.at(-1);
     expect(JSON.stringify(footer)).toContain('[查看详情](https://dutydeck.example.com/sessions/ses_secure_123)');
   });
 
@@ -1120,9 +1120,9 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     expect(byId(card, 'current_title').icon).toEqual({ tag: 'standard_icon', token: 'loading_outlined', color: 'blue' });
     // 刚结束的阶段紧跟在当前阶段下面。
     expect(card.body.elements[1].element_id).toBe('trace_group_0');
-    const row = card.body.elements.at(-2);
+    const row = card.body.elements.at(-1);
     expect(row.element_id).toBe('task_action_row');
-    expect(byId(row, 'task_meta').content).toBe("<font color='grey'>已运行 16 秒</font><font color='grey'> · </font><font color='grey'>共 2 步</font>");
+    expect(byId(row, 'task_meta').content).toBe("<font color='grey'>已运行 16 秒</font><font color='grey'> · </font><font color='grey'>共 2 步</font><font color='grey'> · </font><font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>");
     expect(JSON.stringify(card)).not.toContain('16.224');
     expect(card.config.summary.content).toBe('进行中 · 阶段 2：执行测试');
   });
@@ -1153,7 +1153,7 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
       capabilities: { canCancelQueued: false, canInterrupt: true, canRetry: false, canRefresh: true }
     });
     const row = byId(card, 'task_action_row');
-    expect(card.body.elements.at(-2)).toBe(row);
+    expect(card.body.elements.at(-1)).toBe(row);
     const shape = (actionRow: any) => actionRow.columns.map((column: any) => [column.width, column.elements.map((el: any) => el.element_id)]);
     expect(shape(row)).toEqual([['weighted', ['task_meta']], ['auto', ['interrupt']], ['auto', ['refresh']]]);
     expect(row.columns.slice(1).map((column: any) => column.elements[0].type)).toEqual(['text', 'text']);
@@ -1162,14 +1162,14 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
       cardKind: 'process', state: 'failed', taskId: 'om_p1b', elements,
       capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: true, canRefresh: false }
     });
-    expect(shape(byId(failed, 'task_action_row'))).toEqual([['weighted', []], ['auto', ['retry']]]);
+    expect(shape(byId(failed, 'task_action_row'))).toEqual([['weighted', ['dutydeck_brand']], ['auto', ['retry']]]);
     expect(byId(failed, 'retry').type).toBe('primary_text');
 
     const queued: any = buildLarkCard({
       cardKind: 'process', state: 'queued', taskId: 'om_p1b', turn: 1,
       capabilities: { canCancelQueued: true, canInterrupt: false, canRetry: false, canRefresh: false }
     });
-    expect(shape(byId(queued, 'task_action_row'))).toEqual([['weighted', []], ['auto', ['cancel']]]);
+    expect(shape(byId(queued, 'task_action_row'))).toEqual([['weighted', ['dutydeck_brand']], ['auto', ['cancel']]]);
 
     // 非过程卡：状态占左侧，按钮同样每个一列、宽度随内容。
     const plain: any = buildLarkCard({
@@ -1219,7 +1219,7 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     expect(byId(interrupted, 'task_overview')).toBeUndefined();
     expect(byId(interrupted, 'failure_step')).toBeUndefined();
     expect(String(interrupted.body.elements[0].element_id)).toMatch(/^trace_group_/);
-    expect(byId(interrupted, 'task_meta').content).toBe("<font color='grey'>用时 5 秒</font>");
+    expect(byId(interrupted, 'task_meta').content).toBe("<font color='grey'>用时 5 秒</font><font color='grey'> · </font><font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>");
 
     const failed: any = buildLarkCard({ cardKind: 'process', state: 'failed', taskName: '构建', elements });
     expect(failed.header.text_tag_list[0]).toMatchObject({ text: { content: '失败' }, color: 'red' });
@@ -1242,7 +1242,7 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     expect(queued.header.title).toMatchObject({ tag: 'plain_text', content: '拉取消息' });
     expect(queued.header.subtitle).toMatchObject({ tag: 'plain_text', content: 'Codex · 排队中' });
     expect(queued.body.elements[0]).toMatchObject({ tag: 'markdown', content: '任务已接收，正在准备执行…' });
-    expect(byId(queued, 'task_meta').content).toBe("<font color='grey'>排队等待 16 秒</font>");
+    expect(byId(queued, 'task_meta').content).toBe("<font color='grey'>排队等待 16 秒</font><font color='grey'> · </font><font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>");
     expect(JSON.stringify(queued)).not.toContain('16.224');
     expect(JSON.stringify(queued)).not.toContain('down-small-ccm');
 
@@ -1415,8 +1415,8 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
       text_tag_list: [{ text: { content: '失败' }, color: 'red' }]
     });
     expect(fallback.config.summary.content).toBe('失败 · 超大');
-    expect(fallback.body.elements.at(-1).content).toContain('[dutydeck](https://github.com/ITcathyh/dutydeck)');
-    expect(byId(fallback, 'task_meta').content).toBe("<font color='grey'>用时 3 秒</font>");
+    expect(JSON.stringify(fallback.body.elements.at(-1))).toContain('[dutydeck](https://github.com/ITcathyh/dutydeck)');
+    expect(byId(fallback, 'task_meta').content).toBe("<font color='grey'>用时 3 秒</font><font color='grey'> · </font><font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>");
     expect(fallback.body.elements.some((el: any) =>
       el.element_id === 'dutydeck_fallback_omission' || el.element_id === 'dutydeck_hard_fallback_omission')).toBe(true);
 

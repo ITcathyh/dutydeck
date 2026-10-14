@@ -175,10 +175,10 @@ describe('explicit final: real tools, runtime, coordinator and SQLite', () => {
     const mention = '<at id=ou_alice></at>';
     expect(JSON.stringify(card).split(mention)).toHaveLength(2);
     expect(card.body.elements.some((item: any) => item.element_id === 'group_mention')).toBe(false);
-    expect(card.body.elements.at(-1).element_id).toBe('dutydeck_brand');
-    const footer = card.body.elements.at(-2);
+    const footer = card.body.elements.at(-1);
     expect(footer.tag).toBe('column_set');
     expect(footer.columns[0].elements[0].content).toContain(mention);
+    expect(footer.columns[0].elements[0].content).toContain('[dutydeck](https://github.com/ITcathyh/dutydeck)');
     expect(resultSends(h)).toHaveLength(mode === 'unupdatable' ? 2 : 1);
     expect(saved.final_message_id === sent.messageId).toBe(mode !== 'unupdatable');
   });

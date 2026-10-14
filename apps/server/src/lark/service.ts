@@ -595,11 +595,14 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     tag: 'column_set', element_id: 'result_follow_up_row', flex_mode: 'flow', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
     columns: followUpButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }))
   }] : [];
+  // 品牌标并进卡片底部那一行的左侧文字末尾；底部没有这一行时才单独占一行。
+  const brandText = "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>";
   const brandBadge = {
     tag: 'markdown', element_id: 'dutydeck_brand',
-    content: "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
+    content: brandText,
     text_size: 'x-small', text_align: 'left', margin: '0px'
   };
+  const withBrand = (text: string) => `${text}<font color='grey'> · </font>${brandText}`;
 
   let footerMention: string | undefined;
   let mentionElementIndex = -1;
@@ -628,7 +631,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   if (footerMention) parts.push(footerMention);
   if (elapsedText) parts.push(elapsedText);
   if (parts.length) {
-    // 顺序固定为「用时 · @发起人 · 查看详情」：先说这轮跑了多久，再点名该来看的人，
+    // 顺序固定为「用时 · @发起人 · 品牌标 · 查看详情」：先说这轮跑了多久，再点名该来看的人，
     // 最后是去哪看全貌。
     const columnContent = footerMention && elapsedText
       ? `<font color='grey'>${elapsedText} · </font>${footerMention}`
@@ -639,7 +642,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center',
       elements: [{
         tag: 'markdown', element_id: elapsedText ? 'task_elapsed' : 'group_mention',
-        content: columnContent,
+        content: withBrand(columnContent),
         text_size: 'x-small', margin: '0px'
       }]
     });
@@ -661,6 +664,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         text_size: 'x-small', text_align: 'right', margin: '0px'
       }]
     });
+  }
+  if (footerColumns.length && !parts.length) {
+    footerColumns.unshift({ tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [brandBadge] });
   }
   const recordHint = footerDetailUrl ? '完整记录见「查看详情」。' : '';
   // 硬兜底卡没有页脚，指向「查看详情」时必须自带入口：回调按钮跟在提示后面，否则提示里带链接。
@@ -703,17 +709,17 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const headerSubtitle = (reason: string | undefined) => clipCardField(reason ? `${agentName} · ${reason}` : agentName, 96);
   const grey = (text: string) => `<font color='grey'>${text}</font>`;
   const detailLink = footerDetailUrl && !detailButton ? grey(`[查看详情](${footerDetailUrl})`) : '';
-  // 过程卡的底部一行：左边是耗时、步数和详情入口，右边是操作按钮（详情是按钮时排在最后）。
+  // 过程卡的底部一行：左边是耗时、步数、详情入口和品牌标，右边是操作按钮（详情是按钮时排在最后）。
   const actionRow = (parts: string[], detail?: Record<string, unknown>) => {
     const left = parts.filter(Boolean).join(grey(' · '));
     const buttonColumns = detail ? [...actionButtonColumns, { tag: 'column', width: 'auto', vertical_align: 'center', elements: [detail] }] : actionButtonColumns;
     return buttonColumns.length || left ? [{
       tag: 'column_set', element_id: 'task_action_row', flex_mode: 'none', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
       columns: [
-        { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: left ? [{ tag: 'markdown', element_id: 'task_meta', content: left, text_size: 'notation', margin: '0px' }] : [] },
+        { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [left ? { tag: 'markdown', element_id: 'task_meta', content: withBrand(left), text_size: 'notation', margin: '0px' } : brandBadge] },
         ...buttonColumns
       ]
-    }] : [];
+    }] : [brandBadge];
   };
   const arrange = (sourceElements: Array<Record<string, unknown>>) => {
     const waitingForApproval = state === 'running' && hasPendingApproval(sourceElements);
@@ -913,7 +919,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ...otherElements.filter(element => element.element_id === 'launcher_recovery_note'),
         receipt,
         ...(traceElements.length ? [] : listed),
-        ...(state === 'completed' ? [...attentionElements, ...actionRow([])] : [])
+        ...(state === 'completed' ? [...attentionElements, ...actionRow([])] : [brandBadge])
       ];
     }
 
@@ -1016,12 +1022,11 @@ export function buildLarkCard(input: LarkCardInput = {}) {
             if (!recordHint || !/(?:omission|rejected_delta)$/.test(String(element.element_id ?? '')) || typeof element.content !== 'string' || element.content.includes(recordHint)) return element;
             return { ...element, content: `${element.content}\n${recordHint}` };
           })),
-          // 过程卡的详情入口已经在底部那一行里。
-          ...(footerColumns.length && !isProcessCard ? [{
+          // 过程卡的详情入口和品牌标已经在底部那一行里。
+          ...(isProcessCard ? [] : footerColumns.length ? [{
             tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', margin: '6px 0px 0px 0px',
             columns: footerColumns
-          }] : []),
-          brandBadge
+          }] : [brandBadge])
         ]
       }
     };
@@ -1112,8 +1117,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     const metaText = userStatus.stopped ? stoppedText
       : elapsedSeconds > 0 ? `${state === 'queued' ? '排队等待' : '用时'} ${larkElapsedLabel(elapsedSeconds)}` : undefined;
     const meta = !receiptOnly && metaText
-      ? [{ tag: 'markdown', element_id: 'task_meta', content: grey(metaText), text_size: 'notation', margin: '0px' }]
-      : [];
+      ? { tag: 'markdown', element_id: 'task_meta', content: withBrand(grey(metaText)), text_size: 'notation', margin: '0px' }
+      : brandBadge;
     return {
       schema: '2.0',
       ...(receiptOnly ? {} : { header: {
@@ -1130,8 +1135,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
           ...(receiptOnly ? [{ tag: 'markdown', element_id: 'task_overview', content: `<font color='${state === 'completed' ? 'green' : state === 'failed' ? 'red' : 'grey'}'>${statusLabel}</font>`, text_size: 'normal', margin: '0px', icon: { tag: 'standard_icon', token: state === 'completed' ? 'done_outlined' : 'close_outlined', color: state === 'completed' ? 'green' : state === 'failed' ? 'red' : 'grey' } }] : []),
           hardFallbackOmission,
           ...(detailButton ? [detailButton] : []),
-          ...meta,
-          brandBadge
+          meta
         ]
       }
     };

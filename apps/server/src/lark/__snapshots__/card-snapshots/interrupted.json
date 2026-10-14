@@ -76,21 +76,13 @@
                       {
                         "tag": "markdown",
                         "element_id": "task_meta",
-                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font><font color='grey'> · </font><font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
                         "text_size": "notation",
                         "margin": "0px"
                       }
                     ]
                   }
                 ]
-              },
-              {
-                "tag": "markdown",
-                "element_id": "dutydeck_brand",
-                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
-                "text_size": "x-small",
-                "text_align": "left",
-                "margin": "0px"
               }
             ]
           },
@@ -239,7 +231,7 @@
                       {
                         "tag": "markdown",
                         "element_id": "task_meta",
-                        "content": "<font color='grey'>已运行 <耗时></font><font color='grey'> · </font><font color='grey'>共 1 步</font><font color='grey'> · </font><font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "content": "<font color='grey'>已运行 <耗时></font><font color='grey'> · </font><font color='grey'>共 1 步</font><font color='grey'> · </font><font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font><font color='grey'> · </font><font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
                         "text_size": "notation",
                         "margin": "0px"
                       }
@@ -310,14 +302,6 @@
                     ]
                   }
                 ]
-              },
-              {
-                "tag": "markdown",
-                "element_id": "dutydeck_brand",
-                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
-                "text_size": "x-small",
-                "text_align": "left",
-                "margin": "0px"
               }
             ]
           },
@@ -608,7 +592,7 @@
                       {
                         "tag": "markdown",
                         "element_id": "group_mention",
-                        "content": "<at id=ou_snapshot_alice></at>",
+                        "content": "<at id=ou_snapshot_alice></at><font color='grey'> · </font><font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
                         "text_size": "x-small",
                         "margin": "0px"
                       }
@@ -630,14 +614,6 @@
                     ]
                   }
                 ]
-              },
-              {
-                "tag": "markdown",
-                "element_id": "dutydeck_brand",
-                "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
-                "text_size": "x-small",
-                "text_align": "left",
-                "margin": "0px"
               }
             ]
           },
