@@ -137,8 +137,16 @@ Frontend `http://127.0.0.1:4311`, backend `http://127.0.0.1:4310`.
 1. **Dispatch**: DM the bot, or `@bot task` in a group.
 2. **Receipt**: the bot reacts with `👌` on your message and sends a progress card. A check mark is added when the turn finishes; a cross mark when it fails or is interrupted (not when you cancel).
 3. **Approval**: the card starts with a one-line summary (e.g. "Run command: pnpm test"). Buttons: "Allow once", "Allow this command for the session" (initiator only, non-high-risk commands only), "Reject". An unhandled card gets a reminder after 30 minutes (the task keeps waiting) and is auto-rejected after 24 hours.
-4. **Questions**: tap an option, or quote the card and reply with your answer.
+4. **Questions**: tap an option, or quote the card and reply with your answer. The full question and all options are shown when they fit; otherwise a full-text attachment is sent and the card is clearly marked as an excerpt. Dutydeck does not publish the answerable Lark card until attachment delivery succeeds; delivery resumes after recovery. Answered or expired cards retain the content originally displayed. Approval cards remain redacted; raw commands are not uploaded as full-text attachments.
 5. **Result**: the result card shows the change summary, verification result and long attachments, plus a "View changes" link when the turn changed files.
+
+**Attachments and delivery.** Markdown and structured images in cards share a deduplicated limit of 4 images. Only real Markdown image syntax with a valid Lark `img_key` is read; code examples and ordinary image URLs do not trigger downloads.
+
+Lark files fall back to Range downloads with the same bot identity only after an explicit platform size-limit response. Files stream to disk in chunks of at most 32 MB, with a **512 MiB local per-file limit** chosen by Dutydeck, not a Lark platform limit. Images do not use Range. Permission and restricted-message errors are not bypassed; failed, cancelled or timed-out downloads do not give the Agent partial files. The existing request deadline still applies (15 seconds by default); slow large files may need to be provided as smaller files.
+
+Progress and result writes recheck task and turn ownership after rate-limit waits and before retries, so stopped or replaced turns stop writing. Requests already sent cannot be revoked. A final result explicitly rejected by content audit stops unchanged retries and attempts a fixed notice without the rejected body. A delivered notice does not mark the result delivered, and the body is not resent as an attachment to bypass audit.
+
+The first result delivery time is saved before sending. Unknown deliveries are automatically retried only within one hour of that first attempt, including across restarts. After that, resending stops; check the original topic and the Web execution record. Confirmed receipts remain recoverable. This does not guarantee exactly-once remote effects.
 
 **Unknown outcomes.** After a restart or disconnect a turn may have an unknown result. The original Lark topic gets a card with "Run again / Mark done / Mark failed" and a details link. The initiator and admins can act; "Run again" needs a second click within 60 seconds. The Web session page has the same three actions. Who did what and when is shown on the card and recorded in the execution ledger. Tasks older than 24 hours get no Lark card and can only be handled on the Web. API: `GET /api/sessions/:id/unknown-tasks`, `POST /api/sessions/:id/unknown-tasks/:taskId` with `{target, action, allowDuplicateEffects?}`.
 
@@ -277,6 +285,16 @@ Scheduled tasks keep the selected permission posture; `ask` can wait for human a
 - Claude Code / Seed / Relay terminal modes support Lark approval (`ask` and `approve-reads`). Other terminal CLIs need `full-trust`; otherwise the session fails to start with two fixes: `dutydeck settings bot set <appId> permissionMode=full-trust fullTrustConfirmed=true`, or switch to an ACP / Claude terminal agent.
 - Claude terminal sessions started from Lark always use the `default` permission mode; defaults such as `auto` in your local `~/.claude` do not apply (but see [Known limits](#known-limits)).
 
+`timeout` is in seconds (default `600`) and must convert to an integer from 1 to 2147483647 milliseconds (`0.001`–`2147483.647` seconds). Fallback CLI model discovery uses the Agent's configured `command`, `args`, cleaned child `env` and `cwd`. Unknown wrapper commands are not run as a host CLI; the configured default model remains available when discovery is unavailable.
+
+#### Terminal task status and recovery
+
+Codex and TraeX terminal tasks settle from success, failure or cancellation events bound to the current native turn. A partial answer does not override a later failure; cancellation is recorded as an interruption. TraeX recovery drains the old log segment before reading the next segment for the same session. New canonical records retain progress, input receipts and final answers while deduplicating mirrored records.
+
+TraeX uses the full terminal viewport to distinguish busy and ready states; status text quoted in output or drafts is not treated as an active footer. Codex accepts `›` / `»` input prompts without treating trust or update menus as ready. Ordinary Cursor input sends one Enter, preserving multiline input and normal task queueing without a second empty-input control action.
+
+When a direct child explicitly started by the current Codex parent turn reports quota exhaustion or rate limiting, Web and Lark progress records show a fixed diagnostic without the upstream error body. The parent continues; Dutydeck does not automatically retry or switch accounts because of this diagnostic. Observation is bounded and best effort; children started before recovery are not reported retroactively. This diagnostic is not enabled for TraeX.
+
 ### 2. Permission modes
 
 Lark bots can use `ask`, `approve-reads` and `full-trust`. `deny-all` is not available for Lark bots.
@@ -300,6 +318,8 @@ Lark bots can use `ask`, `approve-reads` and `full-trust`. `deny-all` is not ava
 | `DUTYDECK_DEFAULT_CWD` | start dir | Default workspace |
 | `DUTYDECK_DATABASE_URL` | `<cwd>/.dutydeck/dutydeck.db` | SQLite file |
 | `DUTYDECK_AGENTS_JSON` | `[]` | Custom agents |
+| `DUTYDECK_CLEANUP_INTERVAL_MS` | `300000` | Cleanup interval: integer milliseconds from 1 to 2147483647 |
+| `DUTYDECK_DRIVER_IDLE_TIMEOUT_MS` | `21600000` | Nonnegative idle-terminal release threshold in milliseconds; `0` disables it; the periodic timer's 32-bit limit does not apply |
 | `DUTYDECK_USAGE_PRICING_JSON` | built-in table | Override usage prices |
 | `DUTYDECK_DEPLOY_WINDOW` | any time | Allowed `dutydeck deploy` windows, e.g. `10:00-11:00,16:00-17:00` (Asia/Shanghai) |
 | `LARK_APP_ID`, `LARK_APP_SECRET` | - | Fallback for `dutydeck lark send`-style commands only. Bots configured by `dutydeck setup` keep the secret in the bot configuration |
@@ -473,6 +493,7 @@ Old clients ignore the additional decision field. Corrupt legacy forwarding stil
 
 - **Allow rules in your local `~/.claude/settings.json` bypass Lark per-action approval.** Claude terminal sessions from Lark start in `default` mode, but `permissions.allow` rules still apply, and matching actions never produce an approval card. Clear those rules if you need strict per-action approval.
 - **With `/plan`, pre-approved writes on the ACP side cannot be blocked.** Planning blocks writes by rejecting every permission request the agent sends. If Claude ACP has its own allow rules (e.g. in settings) or runs in bypass mode, those actions never ask Dutydeck. Don't pre-approve writes on the ACP side when you use `/plan`.
+- Explicit Cursor `pty-cli` sessions with raw-screen output only may show an answer in playback but still be recorded as failed because normalized final text is unavailable. This does not apply to the default ACP Cursor.
 - The verification gate only applies to Lark tasks and needs a command configured.
 - Codex and Traex terminal modes report no usage, so caps don't apply to them; cost figures are estimates.
 - Trigger auth has no timestamp (see Plugins → Security).
