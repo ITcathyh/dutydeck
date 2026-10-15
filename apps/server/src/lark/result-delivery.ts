@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI, reactionDedupeKey, type ReactionRecord } from './reaction-records.js';
 import { isLarkReplyTargetUnavailable, larkFailureKind } from './api-gate.js';
+import { isLarkMessageUnupdatable } from './card-renderer.js';
 import { buildLarkCard, larkCardFinalOutputText, larkCardShownResult, LarkServiceError, type LarkCardInput, type LarkCardService, type LarkWriteGuard } from './service.js';
 
 // Live delivery and restart reconciliation share one provider UUID per process card.
@@ -330,7 +331,7 @@ async function sendPreparedLarkResult(
 /**
  * 以普通卡片 PATCH 整卡覆盖被点击的消息（非流式，延迟再久也不影响原消息可转发）。
  *
- * 返回 null 表示调用方应回退为发送新卡，两种情形：
+ * 返回 null 表示 PATCH 没有成功，是否改发新卡由调用方决定，两种情形：
  * 1. 卡内含最终结果且超出卡片预算——PATCH 不能附带文件，硬覆盖会把长结果截断成假凭证；
  * 2. 平台更新失败（消息被撤回、超过更新窗口等）。
  */
@@ -338,7 +339,8 @@ export async function patchLarkCard(
   service: LarkCardService,
   target: { messageId: string },
   input: LarkCardInput & { elements: Array<Record<string, any>> },
-  log: { warn: (...args: any[]) => void }
+  log: { warn: (...args: any[]) => void },
+  onUnupdatable?: () => void
 ): Promise<{ messageId: string } | null> {
   const output = input.elements.find(element => element.element_id === 'final_output')?.content;
   const card = buildLarkCard(input);
@@ -348,7 +350,8 @@ export async function patchLarkCard(
   try {
     return await service.update({ ...input, messageId: target.messageId });
   } catch (error) {
-    log.warn({ error, messageId: target.messageId }, 'PATCH 更新卡片失败，回退为发送新卡');
+    if (isLarkMessageUnupdatable(error)) onUnupdatable?.();
+    log.warn({ error, messageId: target.messageId }, 'PATCH 更新卡片失败');
     return null;
   }
 }

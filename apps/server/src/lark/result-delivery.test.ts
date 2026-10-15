@@ -330,6 +330,16 @@ describe('patchLarkCard 整卡 PATCH 与回退判定', () => {
     await expect(patchLarkCard({ update } as any, { messageId: 'om_old' }, cardInput([{ tag: 'markdown', content: '状态' }]), log)).resolves.toBeNull();
     expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_old' }), expect.any(String));
   });
+
+  it('飞书返回永久不可更新错误（230031）时通知调用方，临时错误不通知', async () => {
+    const onUnupdatable = vi.fn();
+    const expired = vi.fn(async () => { throw new LarkServiceError('LARK_OPENAPI_ERROR', 'expired', 502, { upstreamCode: 230031 }); });
+    await expect(patchLarkCard({ update: expired } as any, { messageId: 'om_old' }, cardInput([{ tag: 'markdown', content: '状态' }]), log, onUnupdatable)).resolves.toBeNull();
+    expect(onUnupdatable).toHaveBeenCalledOnce();
+    const limited = vi.fn(async () => { throw new LarkServiceError('LARK_OPENAPI_ERROR', 'limited', 502, { upstreamCode: 230020 }); });
+    await patchLarkCard({ update: limited } as any, { messageId: 'om_old' }, cardInput([{ tag: 'markdown', content: '状态' }]), log, onUnupdatable);
+    expect(onUnupdatable).toHaveBeenCalledOnce();
+  });
 });
 
 const cleanups: Array<() => Promise<void>> = [];

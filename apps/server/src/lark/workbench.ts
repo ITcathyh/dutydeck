@@ -323,6 +323,8 @@ export class LarkWorkbench {
   private closed = false;
   /** 每张工作台卡最近一次心跳 PATCH 的卡面摘要，键是消息 ID；PATCH 失败时带上下次重试的时间。 */
   private readonly patchedContent = new Map<string, { content: string; retryAt?: number }>();
+  /** 飞书明确告知不可再更新的卡（消息太旧等永久错误）：心跳不再 PATCH，进程重启后最多再试一次。 */
+  private readonly unupdatableCards = new Set<string>();
   close() { this.closed = true; this.http.close(); }
   private assertOpen() { if (this.closed) throw new RuntimeError('WORKBENCH_CLOSED', '工作台已关闭', 503); }
 
@@ -437,14 +439,15 @@ export class LarkWorkbench {
 
   /** PATCH 指定消息整卡覆盖；不可 PATCH（超长结果/平台失败）时返回 false 交调用方回退发新卡。 */
   private async patchWorkCard(item: WorkItem, chatId: string, config: StoredLarkConfig, messageId: string, requests: WorkItemRequest[]) {
-    const patched = await patchLarkCard(this.client(config), { messageId }, await this.cardInput(item, config, requests), this.options.log);
+    const patched = await patchLarkCard(this.client(config), { messageId }, await this.cardInput(item, config, requests), this.options.log,
+      () => this.unupdatableCards.add(messageId));
     if (!patched) return false;
     this.assertOpen();
     await this.saveWorkMapping(config.appId, patched.messageId, item, chatId);
     return true;
   }
 
-  /** 找到该目标最近一张工作台卡并原位 PATCH；没有可覆盖的卡时静默跳过。 */
+  /** 找到该目标最近一张工作台卡并原位 PATCH；没有可覆盖的卡时静默跳过，PATCH 失败也不补发新卡（新卡只在 notify 的亮屏剧集里发）。 */
   private async patchLatestCard(item: WorkItem, config: StoredLarkConfig, requests: WorkItemRequest[]) {
     const cards = (await this.repos.channelMappings.list(`lark-work-card:${config.appId}`))
       .filter(card => card.sessionId === item.parentSessionId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -452,7 +455,8 @@ export class LarkWorkbench {
       let saved: { workId?: string; chatId?: string } | null;
       try { saved = JSON.parse(card.extra ?? 'null'); } catch { continue; }
       if (saved?.workId !== item.id) continue;
-      // 1 秒心跳会反复走到这里：卡面没变就不再 PATCH；PATCH 失败（网络抖动、超过飞书的更新期限）隔 5 分钟再试。
+      if (this.unupdatableCards.has(card.externalId)) return;
+      // 1 秒心跳会反复走到这里：卡面没变就不再 PATCH；临时性 PATCH 失败（网络抖动、限流）隔 5 分钟再试；永久不可更新（230031 等）在上面已停。
       // 否则停在受阻、失败的目标会每秒调一次飞书接口，直到进程退出。
       const content = digest(JSON.stringify(await this.cardInput(item, config, requests)));
       const last = this.patchedContent.get(card.externalId);

@@ -631,21 +631,40 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect(answerCards()).toHaveLength(1);
   });
 
-  it('心跳反复 notify：卡面没变不再 PATCH，飞书拒绝更新后也不每秒重试', async () => {
+  it('心跳反复 notify：卡面没变不再 PATCH，临时失败后不每秒重试、隔 5 分钟再试', async () => {
     const f = await fixture();
     const { card } = await startWaitingWork(f);
     const { LarkServiceError } = await import('./service.js');
-    f.client.update.mockImplementation(async () => { throw new LarkServiceError('LARK_OPENAPI_ERROR', 'message update expired', 502, { upstreamCode: 230031 }); });
+    f.client.update.mockImplementation(async () => { throw new LarkServiceError('LARK_OPENAPI_ERROR', 'rate limited', 502, { upstreamCode: 230020 }); });
     const patches = () => f.client.update.mock.calls.filter(([input]: any[]) => input.messageId === card.messageId).length;
     const idle = () => vi.waitFor(() => expect((f.work as any).effects.size).toBe(0));
     await f.work.tick();
     await vi.waitFor(() => expect(patches()).toBe(1));
     for (let index = 0; index < 3; index++) { await f.work.tick(); await idle(); }
     expect(patches()).toBe(1);
-    // 隔 5 分钟再试一次：临时失败能自己恢复，永久失败也只是每 5 分钟一次。
+    // 隔 5 分钟再试一次：临时失败能自己恢复。
     vi.setSystemTime(Date.now() + 301_000);
     try { await f.work.tick(); await idle(); } finally { vi.useRealTimers(); }
     expect(patches()).toBe(2);
+  });
+
+  it('心跳 PATCH 遇到永久不可更新错误（230031）：只试一次，之后不再 PATCH 也不发新卡', async () => {
+    const f = await fixture();
+    const { card } = await startWaitingWork(f);
+    const { LarkServiceError } = await import('./service.js');
+    f.client.update.mockImplementation(async () => { throw new LarkServiceError('LARK_OPENAPI_ERROR', 'message update expired', 502, { upstreamCode: 230031 }); });
+    const patches = () => f.client.update.mock.calls.filter(([input]: any[]) => input.messageId === card.messageId).length;
+    const idle = () => vi.waitFor(() => expect((f.work as any).effects.size).toBe(0));
+    const sent = f.cards.length;
+    await f.work.tick();
+    await vi.waitFor(() => expect(patches()).toBe(1));
+    // 跨过 5 分钟重试间隔多次：永久错误不该再被重试。
+    for (let index = 0; index < 3; index++) {
+      vi.setSystemTime(Date.now() + (index + 1) * 301_000);
+      try { await f.work.tick(); await idle(); } finally { vi.useRealTimers(); }
+    }
+    expect(patches()).toBe(1);
+    expect(f.cards).toHaveLength(sent);
   });
 
   it('按钮回调 PATCH 过的卡，下一次心跳按当前内容再画一次', async () => {
