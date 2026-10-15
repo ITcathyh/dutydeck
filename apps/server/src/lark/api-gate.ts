@@ -68,6 +68,8 @@ export interface LarkGateOptions {
   /** Shared request budget can stop retries before another backoff. */
   canRetry?: () => boolean;
   onFailure?: () => void;
+  /** Local checks are outside the transport catch: they neither retry nor affect the circuit. */
+  beforeAttempt?: () => void | Promise<void>;
 }
 
 /**
@@ -583,6 +585,8 @@ export async function executeWithLarkGate<T>(
       if (signal?.aborted) throw gateAbortError(signal);
       // A concurrent request can trip the circuit while this call waits for a token.
       if (!current()) throw attempt > 0 ? previousError : new LarkCircuitOpenError(appId, circuit.openedAtMs);
+      await options?.beforeAttempt?.();
+      if (signal?.aborted) throw gateAbortError(signal);
       try {
         const result = await fn();
         if (signal?.aborted) throw gateAbortError(signal);

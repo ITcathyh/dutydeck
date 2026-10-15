@@ -4,8 +4,8 @@ import { isLarkMessageUnupdatable } from './card-renderer.js';
 import type { ConfigRepository, ChannelMapping } from '@dutydeck/shared';
 import type { PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask } from './persisted-card-task.js';
-import { prepareLarkResult, sendLarkResult, type DeliveryTarget } from './result-delivery.js';
-import type { LarkCardInput, LarkCardService } from './service.js';
+import { isLarkFinalContentAuditRejected, recordLarkResultAuditRejection, prepareLarkResult, sendLarkResult, type DeliveryTarget } from './result-delivery.js';
+import { LarkServiceError, type LarkCardInput, type LarkCardService, type LarkWriteGuard } from './service.js';
 import type { LarkAgentSessionBinding } from './agent-tools.js';
 
 export interface ExplicitFinalScope {
@@ -17,7 +17,7 @@ export interface ExplicitFinalContext { scope: ExplicitFinalScope; taskName: str
 type Elements = Array<Record<string, any>>;
 interface FinalRecord {
   version: 1; status: 'pending' | 'failed' | 'delivered'; scope: ExplicitFinalScope; content: string; provider_uuid: string;
-  task_name: string; delivery_unknown?: boolean; message_id?: string; attachment_message_id?: string; elements?: Elements;
+  task_name: string; first_attempt_at?: number; audit_rejected?: boolean; delivery_unknown?: boolean; message_id?: string; attachment_message_id?: string; elements?: Elements;
 }
 const locks = new WeakMap<ConfigRepository, Map<string, Promise<unknown>>>();
 export async function withExplicitFinalLock<T>(store: ConfigRepository | undefined, taskId: string, action: () => Promise<T>): Promise<T> {
@@ -91,11 +91,22 @@ export async function readExplicitFinal(store: ConfigRepository, context: Explic
 }
 export async function hasExplicitFinal(store: ConfigRepository | undefined, context: ExplicitFinalContext | undefined) {
   const record = store && context ? await readRecord(store, context.scope) : undefined;
-  return Boolean(record && record.status !== 'failed');
+  return Boolean(record && (record.status !== 'failed' || record.audit_rejected));
 }
 const log = { warn: (..._args: any[]) => {} };
-async function deliver(store: ConfigRepository, service: LarkCardService, record: FinalRecord) {
+async function deliver(store: ConfigRepository, service: LarkCardService, record: FinalRecord, beforeSend?: LarkWriteGuard) {
   if (record.message_id) return record;
+  if (record.first_attempt_at === undefined) {
+    record = { ...record, first_attempt_at: Date.now() };
+    await store.set(keyFor(record.scope), JSON.stringify(record));
+  }
+  const authority = beforeSend;
+  beforeSend = async () => {
+    await authority?.();
+    if (Date.now() - record.first_attempt_at! > 60 * 60_000) {
+      throw new LarkServiceError('LARK_RESULT_RETRY_EXPIRED', '自动重试超过 1 小时仍未确认送达，已停止自动重试；结果可能已送达，也可能没有', 409);
+    }
+  };
   let providerFailed = false;
   let deliveryUnknown = record.delivery_unknown === true;
   let attachmentMessageId: string | undefined;
@@ -116,17 +127,25 @@ async function deliver(store: ConfigRepository, service: LarkCardService, record
   } });
   let sent: Awaited<ReturnType<typeof sendLarkResult>>;
   try {
+    if (record.audit_rejected || await store.get(`lark.delivery.${record.provider_uuid}.audit_rejected`)) {
+      await sendLarkResult(strictService, targetFor(record.scope), { state: 'running', elements: [], idempotencyKey: record.provider_uuid }, log, store, beforeSend);
+    }
     const prepared = await prepareLarkResult(strictService, targetFor(record.scope), {
       state: 'running', cardKind: 'result', statusLabel: '答复已送达，执行尚未结束', readOnly: true,
       taskId: record.scope.origin_message_id, taskName: record.task_name, sessionId: record.scope.session_id, turn: record.scope.turn,
       capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, canVerify: false },
       elements: [{ tag: 'markdown', element_id: 'final_output', content: record.content }], idempotencyKey: record.provider_uuid
-    }, log, store);
+    }, log, store, beforeSend);
     // A delivered (including cached) attachment makes this a partial delivery:
     // keep its intent retryable if the summary fails, never start a second result.
     attachmentMessageId = prepared.attachmentMessageId;
-    sent = await sendLarkResult(strictService, targetFor(record.scope), prepared.input, log, store);
+    sent = await sendLarkResult(strictService, targetFor(record.scope), prepared.input, log, store, beforeSend);
   } catch (error) {
+    if (isLarkFinalContentAuditRejected(error)) {
+      await recordLarkResultAuditRejection(service, targetFor(record.scope), record.provider_uuid, error, log, store, beforeSend);
+      await store.set(keyFor(record.scope), JSON.stringify({ ...record, status: 'failed', audit_rejected: true, ...(deliveryUnknown ? { delivery_unknown: true } : {}) }));
+      throw error;
+    }
     // An unknown response may already have delivered the answer. Keep that
     // uncertainty across retries, even if a later attempt is clearly rejected.
     if (deliveryUnknown) await store.set(keyFor(record.scope), JSON.stringify({ ...record, delivery_unknown: true }));
@@ -142,33 +161,33 @@ async function deliver(store: ConfigRepository, service: LarkCardService, record
   return receipt;
 }
 // Caller holds the per-store/task lock, including authority/current-attempt checks.
-export async function sendExplicitFinal(store: ConfigRepository, service: LarkCardService, context: ExplicitFinalContext, content: string) {
+export async function sendExplicitFinal(store: ConfigRepository, service: LarkCardService, context: ExplicitFinalContext, content: string, beforeSend?: LarkWriteGuard) {
   let record = await readRecord(store, context.scope);
   if (record && record.content !== content) throw Object.assign(new Error('本轮已提交不同的最终答复，不能覆盖。'), { code: 'FINAL_CONTENT_CONFLICT', statusCode: 409 });
   if (!record) {
     record = { version: 1, status: 'pending', scope: context.scope, content, task_name: context.taskName, provider_uuid: uuidFor(context.scope) };
     await store.set(keyFor(context.scope), JSON.stringify(record));
   }
-  if (record.status === 'failed') {
+  if (record.status === 'failed' && !record.audit_rejected) {
     record = { ...record, status: 'pending' };
     await store.set(keyFor(record.scope), JSON.stringify(record));
   }
-  const receipt = await deliver(store, service, record);
+  const receipt = await deliver(store, service, record, beforeSend);
   return { messageId: receipt.message_id!, elements: receipt.elements!, attachmentMessageId: receipt.attachment_message_id };
 }
 export async function completeExplicitFinal(store: ConfigRepository | undefined, service: LarkCardService, context: ExplicitFinalContext | undefined,
-  input: LarkCardInput, decoration: Elements) {
+  input: LarkCardInput, decoration: Elements, beforeSend?: LarkWriteGuard) {
   if (!store || !context) return;
   const record = await readRecord(store, context.scope);
-  if (!record || record.status === 'failed') return;
-  const receipt = await deliver(store, service, record);
+  if (!record || record.status === 'failed' && !record.audit_rejected) return;
+  const receipt = await deliver(store, service, record, beforeSend);
   const elements = [...decoration.filter(item => item.element_id === 'group_mention'), ...receipt.elements!,
     ...decoration.filter(item => item.element_id !== 'group_mention')];
-  const prepared = await prepareLarkResult(service, targetFor(context.scope), { ...input,
-    elements, idempotencyKey: receipt.provider_uuid }, log, store);
+  const prepared = await prepareLarkResult(service, targetFor(context.scope), { ...input, beforeSend,
+    elements, idempotencyKey: receipt.provider_uuid }, log, store, beforeSend);
   // Transient failures retry the same card. A permanently unavailable card gets
   // only a platform-status receipt; the already delivered answer is never copied.
-  try { await service.update({ ...prepared.input, messageId: receipt.message_id! }); }
+  try { await service.update({ ...prepared.input, beforeSend, messageId: receipt.message_id! }); }
   catch (error) {
     if (!isLarkMessageUnupdatable(error)) throw error;
     const status = await sendLarkResult(service, targetFor(context.scope), { ...input,
@@ -176,7 +195,7 @@ export async function completeExplicitFinal(store: ConfigRepository | undefined,
         { tag: 'markdown', element_id: 'explicit_final_delivered', content: '正文已交付；原答复卡已无法更新。本卡提供平台执行状态、验证与验收入口。' },
         ...decoration.filter(item => item.element_id !== 'group_mention') ],
       idempotencyKey: `final_status_${digest(context.scope).slice(0, 32)}`
-    }, log, store);
+    }, log, store, beforeSend);
     return { ...status, attachmentMessageId: receipt.attachment_message_id ?? prepared.attachmentMessageId };
   }
   return { messageId: receipt.message_id!, elements: prepared.input.elements,

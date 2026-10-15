@@ -96,7 +96,10 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       turn: task.turn,
       ...(task.finalMessageId
         ? { final_message_id: task.finalMessageId, final_delivery_state: 'delivered' as const }
-        : task.finalDeliveryState === 'reaction' ? { final_delivery_state: 'reaction' as const } : {}),
+        : task.finalDeliveryState ? { final_delivery_state: task.finalDeliveryState } : {}),
+      ...(task.finalDeliveryError ? { final_delivery_error: task.finalDeliveryError } : {}),
+      ...(task.finalMessageId ? { final_delivery_first_failed_at: undefined }
+        : task.finalDeliveryFirstFailedAt !== undefined ? { final_delivery_first_failed_at: task.finalDeliveryFirstFailedAt } : {}),
       ...(task.finalAttachmentMessageId ? { final_attachment_message_id: task.finalAttachmentMessageId } : {}),
       ...(task.finalElements ? { final_elements: task.finalElements } : {}),
       ...(task.finalCardInput ? { final_card_input: task.finalCardInput } : {}),
@@ -144,7 +147,12 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
   private mergeCardTaskExtra(previous: string | null | undefined, extra: PersistedLarkCardTask, turn: number, sameSession: boolean): PersistedLarkCardTask {
     try {
       const parsed = parseOptionalCardTask(previous);
-      if (parsed && (parsed.turn ?? 0) === turn) return { ...parsed, ...extra };
+      if (parsed && (parsed.turn ?? 0) === turn) {
+        if (parsed.final_delivery_first_failed_at !== undefined && extra.final_delivery_first_failed_at !== undefined) {
+          extra.final_delivery_first_failed_at = Math.min(parsed.final_delivery_first_failed_at, extra.final_delivery_first_failed_at);
+        }
+        return { ...parsed, ...extra };
+      }
       const earlier = [...parsed?.earlier_message_ids ?? [], ...(sameSession ? [parsed?.card_message_id, parsed?.final_message_id] : [])]
         .filter((id): id is string => Boolean(id)).slice(-20);
       if (earlier.length) return { ...extra, earlier_message_ids: earlier };
@@ -166,6 +174,8 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       ...(saved.runtime_task_id ? { runtimeTaskId: saved.runtime_task_id } : {}),
       ...(saved.card_message_id ? { cardMessageId: saved.card_message_id } : {}),
       ...(saved.final_message_id ? { finalMessageId: saved.final_message_id } : {}),
+      ...(saved.final_delivery_error ? { finalDeliveryError: saved.final_delivery_error } : {}),
+      ...(saved.final_delivery_first_failed_at !== undefined ? { finalDeliveryFirstFailedAt: saved.final_delivery_first_failed_at } : {}),
       ...(saved.final_delivery_state ? { finalDeliveryState: saved.final_delivery_state } : {}),
       ...(saved.final_attachment_message_id ? { finalAttachmentMessageId: saved.final_attachment_message_id } : {}),
       ...(saved.final_card_input ? { finalCardInput: saved.final_card_input } : {}),

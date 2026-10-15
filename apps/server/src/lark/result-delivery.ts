@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI, reactionDedupeKey, type ReactionRecord } from './reaction-records.js';
-import { isLarkReplyTargetUnavailable } from './api-gate.js';
-import { buildLarkCard, larkCardFinalOutputText, larkCardShownResult, LarkServiceError, type LarkCardInput, type LarkCardService } from './service.js';
+import { isLarkReplyTargetUnavailable, larkFailureKind } from './api-gate.js';
+import { buildLarkCard, larkCardFinalOutputText, larkCardShownResult, LarkServiceError, type LarkCardInput, type LarkCardService, type LarkWriteGuard } from './service.js';
 
 // Live delivery and restart reconciliation share one provider UUID per process card.
 export const larkResultKey = (processMessageId: string) =>
@@ -90,10 +90,10 @@ async function delivered<T>(store: ConfigRepository | undefined, key: string, se
 export async function sendLarkFile(
   service: LarkCardService, target: DeliveryTarget,
   input: { data: Uint8Array; filename: string; idempotencyKey: string },
-  log: DeliveryLog, store?: ConfigRepository, beforeSend?: () => Promise<void>
+  log: DeliveryLog, store?: ConfigRepository, beforeSend?: LarkWriteGuard
 ) {
   const prefix = `lark.delivery.${input.idempotencyKey}`;
-  const fileKey = await delivered(store, `${prefix}.upload`, async () => { await beforeSend?.(); return service.uploadFile(input); });
+  const fileKey = await delivered(store, `${prefix}.upload`, async () => { await beforeSend?.(); return service.uploadFile({ ...input, ...(beforeSend ? { beforeSend } : {}) }); });
   return delivered(store, `${prefix}.message`, async () => {
     if (target.replyMessageId) {
       await beforeSend?.();
@@ -101,7 +101,7 @@ export async function sendLarkFile(
         return await service.replyFile({
           messageId: target.replyMessageId,
           ...(target.replyInThread ? { replyInThread: true } : {}),
-          fileKey,
+          ...(beforeSend ? { beforeSend } : {}), fileKey,
           idempotencyKey: input.idempotencyKey,
         });
       } catch (error) {
@@ -111,7 +111,7 @@ export async function sendLarkFile(
       }
     }
     await beforeSend?.();
-    return service.sendFile({ chatId: target.chatId, fileKey, idempotencyKey: input.idempotencyKey });
+    return service.sendFile({ ...(beforeSend ? { beforeSend } : {}), chatId: target.chatId, fileKey, idempotencyKey: input.idempotencyKey });
   }, target.allowReplyFallback === false ? result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim()) : undefined);
 }
 
@@ -158,9 +158,10 @@ export async function prepareLarkResult(
   input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string },
   log: DeliveryLog,
   store?: ConfigRepository,
-  beforeSend?: () => Promise<void>,
+  beforeSend?: LarkWriteGuard,
   forceAttachment = false
 ): Promise<{ input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string }; attachmentMessageId?: string }> {
+  beforeSend ??= input.beforeSend;
   const resultInput = { ...input, cardKind: 'result' as const };
   const output = resultInput.elements.find(element => element.element_id === 'final_output')?.content;
   const card = buildLarkCard(resultInput);
@@ -201,25 +202,75 @@ export async function prepareLarkResult(
   return { input: resultInput, ...(attachmentMessageId ? { attachmentMessageId } : {}) };
 }
 
+/** Only documented audit/sensitive-content codes count; general card/permission failures do not. */
+export const isLarkFinalContentAuditRejected = (error: unknown) => error instanceof LarkServiceError
+  && larkFailureKind(error) === 'rejected'
+  && ([230022, 230028, 11312, 11248].includes(Number(error.details?.upstreamCode))
+    || Number(error.details?.upstreamCode) === 18054 && /sensitive|audit|敏感|审[核计]/i.test(error.message));
+
+const contentAuditNotice = '本轮结果被飞书内容安全审核拒收，原文不会自动重发。请在有权访问的工作台查看结果；如需发送到聊天，请先脱敏。';
+
+async function notifyContentAudit(service: LarkCardService, target: DeliveryTarget, key: string,
+  log: DeliveryLog, store?: ConfigRepository, beforeSend?: LarkWriteGuard) {
+  const uuid = `audit_${createHash('sha256').update(key).digest('hex').slice(0, 40)}`;
+  try {
+    await delivered(store, `lark.delivery.${key}.audit_notice`, async () => {
+      await beforeSend?.();
+      const input = { text: contentAuditNotice, idempotencyKey: uuid, ...(beforeSend ? { beforeSend } : {}) };
+      if (target.replyMessageId) {
+        try { return await service.replyText({ ...input, messageId: target.replyMessageId, replyInThread: target.replyInThread }); }
+        catch (error) { if (target.allowReplyFallback === false || !isLarkReplyTargetUnavailable(error)) throw error; }
+      }
+      await beforeSend?.();
+      return service.sendText({ ...input, chatId: target.chatId });
+    }, result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim()));
+  } catch (error) {
+    // The original result stays failed even if the separate fixed notice cannot be delivered.
+    await store?.set(`lark.delivery.${key}.audit_notice_error`, error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300));
+    log.warn({ error, idempotencyKey: key }, '内容审核拒收提示投递失败，原结果仍未送达');
+  }
+}
+
+export async function recordLarkResultAuditRejection(service: LarkCardService, target: DeliveryTarget, key: string,
+  error: unknown, log: DeliveryLog, store?: ConfigRepository, beforeSend?: LarkWriteGuard) {
+  if (!isLarkFinalContentAuditRejected(error)) return;
+  await store?.set(`lark.delivery.${key}.audit_rejected`, String((error as LarkServiceError).details?.upstreamCode));
+  await notifyContentAudit(service, target, key, log, store, beforeSend);
+}
+
 export async function sendLarkResult(
   service: LarkCardService, target: DeliveryTarget,
   input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string },
-  log: DeliveryLog, store?: ConfigRepository, beforeSend?: () => Promise<void>
+  log: DeliveryLog, store?: ConfigRepository, beforeSend?: LarkWriteGuard
 ): Promise<{ messageId: string; elements: Array<Record<string, any>>; attachmentMessageId?: string }> {
-  const prepared = await prepareLarkResult(service, target, input, log, store, beforeSend);
-  try { return await sendPreparedLarkResult(service, target, prepared, log, store, beforeSend); }
-  catch (error) {
-    // 整卡被拒收时改走「节选 + 附件」，只降这一次；已经是附件形态、没有正文可转、或内容审核（230028）拒收时原样抛出。
-    const output = input.elements.find(element => element.element_id === 'final_output')?.content;
-    if (prepared.attachmentMessageId || typeof output !== 'string' || !output || !isLarkResultCardRejected(error)) throw error;
-    log.warn({ error, idempotencyKey: input.idempotencyKey }, '结果卡被飞书拒收，改为正文节选加附件发送');
-    return sendPreparedLarkResult(service, target, await prepareLarkResult(service, target, input, log, store, beforeSend, true), log, store, beforeSend);
+  beforeSend ??= input.beforeSend;
+  const auditKey = `lark.delivery.${input.idempotencyKey}.audit_rejected`;
+  const previous = await store?.get(auditKey);
+  if (previous) {
+    await notifyContentAudit(service, target, input.idempotencyKey, log, store, beforeSend);
+    throw new LarkServiceError('LARK_OPENAPI_ERROR', '最终结果已被飞书内容审核拒收。', 502, { upstreamCode: Number(previous), upstreamHttpStatus: 400 });
+  }
+  try {
+    const prepared = await prepareLarkResult(service, target, input, log, store, beforeSend);
+    try { return await sendPreparedLarkResult(service, target, prepared, log, store, beforeSend); }
+    catch (error) {
+      const output = input.elements.find(element => element.element_id === 'final_output')?.content;
+      if (prepared.attachmentMessageId || typeof output !== 'string' || !output || !isLarkResultCardRejected(error)) throw error;
+      log.warn({ error, idempotencyKey: input.idempotencyKey }, '结果卡被飞书拒收，改为正文节选加附件发送');
+      return await sendPreparedLarkResult(service, target, await prepareLarkResult(service, target, input, log, store, beforeSend, true), log, store, beforeSend);
+    }
+  } catch (error) {
+    if (isLarkFinalContentAuditRejected(error)) {
+      // Persist rejection before the notice: restart reconciliation never resends the rejected body.
+      await recordLarkResultAuditRejection(service, target, input.idempotencyKey, error, log, store, beforeSend);
+    }
+    throw error;
   }
 }
 
 async function sendPreparedLarkResult(
   service: LarkCardService, target: DeliveryTarget, prepared: Awaited<ReturnType<typeof prepareLarkResult>>,
-  log: DeliveryLog, store?: ConfigRepository, beforeSend?: () => Promise<void>
+  log: DeliveryLog, store?: ConfigRepository, beforeSend?: LarkWriteGuard
 ): Promise<{ messageId: string; elements: Array<Record<string, any>>; attachmentMessageId?: string }> {
   const { input: resultInput, attachmentMessageId } = prepared;
   const elements = resultInput.elements;
@@ -228,7 +279,7 @@ async function sendPreparedLarkResult(
       await beforeSend?.();
       try {
         const result = await service.reply({
-          ...resultInput,
+          ...resultInput, ...(beforeSend ? { beforeSend } : {}),
           messageId: target.replyMessageId,
           ...(target.replyInThread ? { replyInThread: true } : {}),
         });
@@ -240,7 +291,7 @@ async function sendPreparedLarkResult(
     }
     if (target.replyMessageId && target.allowReplyFallback === false) throw new Error('Explicit final requires reply support');
     await beforeSend?.();
-    return { ...await service.send({ ...resultInput, chatId: target.chatId }), elements };
+    return { ...await service.send({ ...resultInput, ...(beforeSend ? { beforeSend } : {}), chatId: target.chatId }), elements };
   }, target.allowReplyFallback === false ? result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim())
     && JSON.stringify(result.elements) === JSON.stringify(elements) : undefined);
   return { ...sent, ...(attachmentMessageId ? { attachmentMessageId } : {}) };

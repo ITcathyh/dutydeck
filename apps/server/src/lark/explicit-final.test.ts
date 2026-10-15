@@ -10,7 +10,7 @@ import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinato
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkInteraction } from './workflow-interactions.js';
-import { buildLarkCard, LarkServiceError } from './service.js';
+import { buildLarkCard, createLarkCardService, LarkServiceError } from './service.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './agent-tools.js';
 import { resolveExplicitFinalContext } from './explicit-final.js';
 
@@ -256,7 +256,7 @@ describe('explicit final: real tools, runtime, coordinator and SQLite', () => {
 
   it.each(['reply', 'replyFile'] as const)('never falls back from failed strict %s to the group main conversation', async method => {
     const h = await harness({ text: method === 'replyFile' ? '长正文'.repeat(20000) : 'answer' });
-    h.service[method].mockRejectedValueOnce(new LarkServiceError('LARK_OPENAPI_ERROR', 'provider failure', 502, { upstreamHttpStatus: 400, upstreamCode: 230028 }));
+    h.service[method].mockRejectedValueOnce(new LarkServiceError('LARK_OPENAPI_ERROR', 'provider failure', 502, { upstreamHttpStatus: 400, upstreamCode: 230002 }));
     await expect(h.sendFinal()).rejects.toThrow('provider failure');
     expect(h.service.send).not.toHaveBeenCalled();
     expect(h.service.sendFile).not.toHaveBeenCalled();
@@ -448,7 +448,7 @@ it('a definite rejection on a later retry does not erase an earlier unknown deli
   await expect(h.sendFinal()).rejects.toThrow('lost response');
   const uuid = resultSends(h)[0]!.idempotencyKey;
   h.service.reply.mockRejectedValueOnce(new LarkServiceError('LARK_OPENAPI_ERROR', 'rejected retry', 502,
-    { upstreamHttpStatus: 400, upstreamCode: 230028 }));
+    { upstreamHttpStatus: 400, upstreamCode: 230002 }));
   await expect(h.sendFinal()).rejects.toThrow('rejected retry');
   expect(JSON.parse((await h.repos.config.list!('lark.explicit_final.'))[0]!.value).status).toBe('pending');
   h.release();
@@ -461,7 +461,7 @@ it('a definite rejection on a later retry does not erase an earlier unknown deli
 it('keeps partial attachment delivery pending after the provider clearly rejects the summary', async () => {
   const h = await harness({ text: 'long answer '.repeat(6000) });
   h.service.reply.mockRejectedValueOnce(new LarkServiceError('LARK_OPENAPI_ERROR', 'summary rejected', 502,
-    { upstreamHttpStatus: 400, upstreamCode: 230028 }));
+    { upstreamHttpStatus: 400, upstreamCode: 230002 }));
   await expect(h.sendFinal()).rejects.toThrow('summary rejected');
   expect(h.service.replyFile).toHaveBeenCalledTimes(1);
   expect(JSON.parse((await h.repos.config.list!('lark.explicit_final.'))[0]!.value).status).toBe('pending');
@@ -617,3 +617,77 @@ it.each([['completion', 1], ['restart', 1], ['restart', 2]] as const)(
     });
   }
 );
+
+
+it('keeps an explicit final audit rejection failed through completion and restart without resending its body', async () => {
+  const h = await harness();
+  h.service.reply.mockRejectedValueOnce(new LarkServiceError('LARK_OPENAPI_ERROR', 'audit rejected', 502, { upstreamHttpStatus: 400, upstreamCode: 230028 }));
+  await expect(h.sendFinal()).rejects.toThrow('audit rejected');
+  expect(JSON.parse((await h.repos.config.list!('lark.explicit_final.'))[0]!.value)).toMatchObject({ status: 'failed', audit_rejected: true });
+  h.release();
+  await vi.waitFor(() => expect(h.log.error).toHaveBeenCalledWith(expect.anything(), '交付飞书执行结果失败，等待对账补偿'));
+  h.coordinator.stop();
+  const restarted = h.createCoordinator();
+  try { await restarted.reconcile(h.config); await restarted.reconcile(h.config); } finally { restarted.stop(); }
+  expect(resultSends(h)).toHaveLength(1);
+  expect(h.service.replyText).toHaveBeenCalledTimes(1);
+  expect((h.service.replyText.mock.calls[0]![0] as any).text).not.toContain('完整最终答复');
+  expect(await h.persisted()).toMatchObject({ state: 'completed', final_delivery_state: 'failed' });
+});
+
+it('anchors an unknown explicit final before sending and refuses its body after the dedupe window', async () => {
+  const h = await harness();
+  h.service.reply.mockRejectedValueOnce(new LarkServiceError('LARK_NETWORK_ERROR', 'lost response', 502));
+  await expect(h.sendFinal()).rejects.toThrow('lost response');
+  const [row] = await h.repos.config.list!('lark.explicit_final.');
+  const record = JSON.parse(row!.value);
+  expect(record.first_attempt_at).toEqual(expect.any(Number));
+  await h.repos.config.set(row!.key, JSON.stringify({ ...record, first_attempt_at: Date.now() - 2 * 60 * 60_000 }));
+  h.release();
+  await vi.waitFor(() => expect(h.log.error).toHaveBeenCalledWith(expect.anything(), '交付飞书执行结果失败，等待对账补偿'));
+  h.coordinator.stop(); const restarted = h.createCoordinator();
+  try { await restarted.reconcile(h.config); } finally { restarted.stop(); }
+  expect(resultSends(h)).toHaveLength(1);
+  expect(await h.persisted()).toMatchObject({ state: 'completed', final_delivery_state: 'failed' });
+});
+
+
+it('rechecks the real active attempt through tools and service after a provider 429', async () => {
+  const h = await harness();
+  let attempts = 0;
+  const real = createLarkCardService({ LARK_APP_ID: 'cli_explicit_fence', LARK_APP_SECRET: 'fake', LARK_API_QPS: '10000', LARK_API_BURST: '10000', LARK_API_RETRY_MAX_ATTEMPTS: '1', LARK_API_RETRY_BASE_MS: '1', LARK_API_RETRY_MAX_MS: '1' }, (async (url, init) => {
+    if (String(url).includes('tenant_access_token')) return Response.json({ code: 0, tenant_access_token: 'fake', expire: 7200 });
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+    if (body.uuid?.startsWith('final_')) {
+      attempts++; h.coordinator.stop(); h.release();
+      await vi.waitFor(() => expect(h.runtime.getActiveTaskContext(h.session.id)).toBeUndefined());
+      return Response.json({ code: 230020 }, { status: 429 });
+    }
+    return Response.json({ code: 0, data: { image_key: 'img_fixture', message_id: 'om_fixture' } });
+  }) as typeof fetch);
+  cleanups.push(() => real.close());
+  const tools = new LarkAgentToolsService(h.capabilities, h.repos.config, {
+    authorizeTool: async () => {}, clientFactory: () => real,
+    workbenchTask: id => h.runtime.getActiveTaskContext(id),
+    finalTaskContext: async (binding, task) => resolveExplicitFinalContext(await h.repos.channelMappings.list(h.channel), binding, task)
+  });
+  await expect(tools.send(h.token, { content: 'synthetic explicit final', final: true, turn: h.turn })).rejects.toMatchObject({ code: 'FINAL_TURN_EXPIRED' });
+  expect(attempts).toBe(1);
+});
+
+it('recovers a confirmed summary receipt after the retry window without resending the answer', async () => {
+  const h = await harness();
+  const set = h.repos.config.set.bind(h.repos.config);
+  let fail = true;
+  vi.spyOn(h.repos.config, 'set').mockImplementation(async (key, value) => {
+    if (fail && key.startsWith('lark.explicit_final.') && JSON.parse(value).message_id) { fail = false; throw new Error('receipt persistence failed'); }
+    return set(key, value);
+  });
+  await expect(h.sendFinal()).rejects.toThrow('receipt persistence failed');
+  const [row] = await h.repos.config.list!('lark.explicit_final.');
+  const record = JSON.parse(row!.value);
+  await set(row!.key, JSON.stringify({ ...record, first_attempt_at: Date.now() - 2 * 60 * 60_000 }));
+  h.release(); await h.resultCard();
+  expect(resultSends(h)).toHaveLength(1);
+  expect(await h.persisted()).toMatchObject({ final_delivery_state: 'delivered' });
+});

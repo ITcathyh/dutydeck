@@ -31,7 +31,7 @@ import {
   renderLarkResultElements,
   type LarkCardElement
 } from './card-renderer.js';
-import { deliverLarkStatusReaction, larkResultKey, larkSilentResultAnchor, sendLarkResult } from './result-delivery.js';
+import { deliverLarkStatusReaction, isLarkFinalContentAuditRejected, larkResultKey, larkSilentResultAnchor, sendLarkResult } from './result-delivery.js';
 import { larkRedispatchAgentNote, larkRedispatchCardNote } from './turn-redispatch.js';
 import { larkCommandEcho, parseSlashCommand } from './commands.js';
 import { escapeLarkPromptEcho, renderQueueSummaryElement, QUEUE_SUMMARY_ELEMENT_ID } from './queue-summary.js';
@@ -813,6 +813,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       // 留着会让新一轮在尚未交付时就写出 final_delivery_state: 'reaction'，
       // 而 reconciler 把它当作「已交付」且不要求 final_message_id，对账会永久跳过补发。
       task.finalDeliveryState = undefined;
+      task.finalDeliveryFirstFailedAt = undefined;
+      task.finalDeliveryError = undefined;
       task.finalElements = undefined;
       task.finalCardInput = undefined;
       task.lastSuccessfulElements = undefined;
@@ -834,7 +836,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       task.prompt = await materializeLarkResources(event.messageId, task.prompt, task.resources, this.service);
       task.resources = [];
     }
-    const cardContext: { agentName: string; permissionMode: ReturnType<typeof larkPermissionMode>; workspace?: string; alertRecall?: LarkAlertRecall } = { agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
+    const beforeTurnSend = () => {
+      if (this.stopped || task.turn !== currentTurn) throw new LarkServiceError('LARK_WRITE_OBSOLETE', '飞书写入已失去当前轮次归属。', 409);
+    };
+    const cardContext: { beforeSend: () => void; agentName: string; permissionMode: ReturnType<typeof larkPermissionMode>; workspace?: string; alertRecall?: LarkAlertRecall } = { beforeSend: beforeTurnSend, agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
     const clearAcknowledgement = () => this.clearAcknowledgementReaction(task);
     /** 执行前就失败：结束待办记录、发失败卡、撤掉收到表情。inboxReason 缺省同 taskName。 */
     const failBeforeRun = async (taskName: string, markdown: string, idempotencyKey: string, options: { inboxReason?: string; readOnly?: true } = {}) => {
@@ -978,7 +983,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (launcherRecovery) throw new Error(unavailable.reason);
       task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
       await this.failPendingInbox(task, unavailable.reason);
-      await this.service.replyText({ messageId: event.messageId, ...(event.threadId?.trim() ? { replyInThread: true } : {}),
+      await this.service.replyText({ beforeSend: beforeTurnSend, messageId: event.messageId, ...(event.threadId?.trim() ? { replyInThread: true } : {}),
         text: larkAgentUnavailableText(config.name?.trim() || 'Dutydeck', unavailable), idempotencyKey: `unavailable_${event.messageId}_${currentTurn}`.slice(0, 50) });
       await clearAcknowledgement();
       return;
@@ -1244,7 +1249,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     // Freeze the process card, then send one immutable result. Neither operation
     // counts as success for the other; reconciliation retries only the missing part.
     const deliverTerminal = (state: 'completed' | 'failed' | 'interrupted' | 'cancelled', completed = false) => {
-      if (task.finalDeliveredTurn === currentTurn && (task.finalMessageId || task.finalDeliveryState === 'reaction')) return Promise.resolve();
+      if (task.finalDeliveryState === 'failed' || task.finalDeliveredTurn === currentTurn && (task.finalMessageId || task.finalDeliveryState === 'reaction')) return Promise.resolve();
       if (terminalDelivery) return terminalDelivery;
       terminalDelivery = withExplicitFinalLock(this.workflowOptions.store, task.runtimeTaskId ?? task.id, async () => {
         // 启动器版本变化优先自动换一次会话；无法换新时不允许在旧会话重试。
@@ -1328,10 +1333,21 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           capabilities: { ...this.capabilitiesForTask(task), ...verification.capabilities, ...resultActions, ...(continueCause ? { canContinueInPlace: true } : {}) },
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
         };
-        const result = await completeExplicitFinal(this.workflowOptions.store, this.service, finalContext, resultCardInput, elements) ?? await sendLarkResult(this.service, {
+        const beforeSend = async () => {
+          if (this.stopped || task.turn !== currentTurn || task.sessionId !== session.id) {
+            throw new LarkServiceError('LARK_WRITE_OBSOLETE', '飞书结果已失去当前轮次归属。', 409);
+          }
+        };
+        await beforeSend();
+        if (task.finalDeliveryFirstFailedAt === undefined) {
+          task.finalDeliveryFirstFailedAt = Date.now();
+          try { await this.saveCardTask(task, state); }
+          catch (error) { task.finalDeliveryFirstFailedAt = undefined; throw error; }
+        }
+        const result = await completeExplicitFinal(this.workflowOptions.store, this.service, finalContext, resultCardInput, elements, beforeSend) ?? await sendLarkResult(this.service, {
           chatId: event.chatId,
           ...(event.chatType === 'group' ? { replyMessageId: event.messageId, replyInThread: Boolean(event.threadId?.trim()) } : {})
-        }, { ...resultCardInput, elements, idempotencyKey: larkResultKey(task.cardMessageId ?? larkSilentResultAnchor(task.id, currentTurn)) }, this.log, this.workflowOptions.store);
+        }, { ...resultCardInput, elements, idempotencyKey: larkResultKey(task.cardMessageId ?? larkSilentResultAnchor(task.id, currentTurn)) }, this.log, this.workflowOptions.store, beforeSend);
         if (this.stopped || task.turn !== currentTurn) return;
         task.finalAttachmentMessageId = result.attachmentMessageId;
         task.finalMessageId = result.messageId;
@@ -1358,7 +1374,12 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           const feedback = (await this.workflows.list(config.appId)).find(item => item.kind === 'result' && item.taskId === context.taskId && ['accepted', 'needs_changes'].includes(item.state));
           if (feedback) await this.refreshResultFeedback(config, feedback.id);
         }
-      }).catch(error => {
+      }).catch(async error => {
+        if (isLarkFinalContentAuditRejected(error) && !this.stopped && task.turn === currentTurn) {
+          task.finalDeliveryState = 'failed';
+          task.finalDeliveryError = redactTraceText(error instanceof Error ? error.message : String(error)).slice(0, 300);
+          await this.saveCardTask(task, state).catch(error => this.log.warn({ error, taskId: task.id }, '保存内容审核投递失败记录失败'));
+        }
         this.log.error({ error, taskId: task.id, state }, '交付飞书执行结果失败，等待对账补偿');
         this.scheduleReconcile();
       }).finally(() => { terminalDelivery = undefined; });

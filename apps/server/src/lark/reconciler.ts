@@ -2,7 +2,7 @@ import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExpl
 import { describeLarkTaskRecovery, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import type { ChannelMapping, ChannelMappingRepository, ConfigRepository, TaskRecord } from '@dutydeck/shared';
 import { defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
-import { boundLarkCardElements, type LarkCardInput, type LarkCardService } from './service.js';
+import { boundLarkCardElements, type LarkCardInput, type LarkCardService, LarkServiceError } from './service.js';
 import {
   LARK_LAUNCHER_RECOVERY_NOTE,
   eventsForRuntimeTask,
@@ -47,7 +47,7 @@ const persistedCardTask = (value?: string | null): PersistedLarkCardTask | undef
 /** 结果卡瞬时失败后按映射退避：5 秒起翻倍，最长 5 分钟。 */
 const larkResultRetryDelayMs = (attempts: number) => Math.min(5 * 60_000, 5_000 * 2 ** Math.max(0, attempts - 1));
 /**
- * 瞬时失败最多自动重试的时长，从第一次失败算起。飞书同一 UUID 只在 1 小时内去重：
+ * 瞬时失败最多自动重试的时长，从首次投递前持久化的时间算起（兼容旧记录的首次失败时间）。飞书同一 UUID 只在 1 小时内去重：
  * 超过这段时间再重发，前一次若其实已经送达，群里就会出现两份结果。
  */
 const larkResultRetryWindowMs = 60 * 60_000;
@@ -122,6 +122,23 @@ export async function performLarkCardReconcile(input: {
     try {
       const persisted = persistedCardTask(mapping.extra);
       if (!persisted) continue;
+      // Frozen delivery authority survives task completion, but never a replacement mapping/turn.
+      const scope = (saved: PersistedLarkCardTask) => JSON.stringify([saved.app_id, saved.chat_id, saved.turn ?? 0,
+        saved.runtime_task_id, saved.card_message_id, saved.reply_message_id, saved.root_message_id, saved.reply_in_thread, saved.started_at]);
+      const beforeProcessSend = async () => {
+        const latest = await cardMappings.get(mapping.channel, mapping.externalId);
+        const saved = persistedCardTask(latest?.extra);
+        if (!latest || latest.sessionId !== mapping.sessionId || !saved || scope(saved) !== scope(persisted)
+          || saved.relaunch_pending || input.skipTask?.(mapping.externalId, mapping.sessionId, persisted.turn ?? 0)) {
+          throw new LarkServiceError('LARK_WRITE_OBSOLETE', '飞书写入的持久轮次归属已失效。', 409);
+        }
+      };
+      const beforeSend = async () => {
+        await beforeProcessSend();
+        if (persisted.final_delivery_first_failed_at !== undefined && Date.now() - persisted.final_delivery_first_failed_at > larkResultRetryWindowMs) {
+          throw new LarkServiceError('LARK_RESULT_RETRY_EXPIRED', larkResultRetryExpiredReason, 409);
+        }
+      };
       // 这一轮正在转到新会话：旧卡由转交流程收尾，对账既不补发它的终态也不重绘。
       if (persisted.relaunch_pending || input.skipTask?.(mapping.externalId, mapping.sessionId, persisted.turn ?? 0)) continue;
       // 结果卡已判定投递失败，或还在这条映射自己的退避期内：这一轮不再打平台。过程卡也已收敛时整条跳过；
@@ -151,6 +168,7 @@ export async function performLarkCardReconcile(input: {
         const legacyElements = persisted.last_successful_elements?.length ? persisted.last_successful_elements : undefined;
         try {
           await service.update({
+            beforeSend: beforeProcessSend,
             ...processContext,
             ...(persisted.alert_recall ? { alertRecall: persisted.alert_recall } : {}),
             cardKind: 'process',
@@ -249,6 +267,7 @@ export async function performLarkCardReconcile(input: {
         }
         if (persisted.recovery_status_key !== statusKey) try {
           await service.update({
+            beforeSend: beforeProcessSend,
             ...processContext, ...(persisted.alert_recall ? { alertRecall: persisted.alert_recall } : {}), cardKind: 'process', messageId: persisted.card_message_id,
             permissionMode: larkPermissionMode(config), state,
             ...(recovery ? { statusLabel: recovery.label } : {}),
@@ -312,6 +331,7 @@ export async function performLarkCardReconcile(input: {
       const resultFollows = completed && effective.completionReactionOnly !== true;
       let deliveredElements = persisted.last_successful_elements;
       const updateProcessCard = (messageId: string, elements: Array<Record<string, any>>) => service.update({
+        beforeSend: beforeProcessSend,
         ...processContext,
         ...(persisted.alert_recall ? { alertRecall: persisted.alert_recall } : {}),
         cardKind: 'process',
@@ -394,12 +414,22 @@ export async function performLarkCardReconcile(input: {
             elapsedSeconds, sessionId: mapping.sessionId, turn: persisted.turn, readOnly: true,
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...decoration?.cardInput
           };
-          const result = await completeExplicitFinal(input.deliveryStore, service, finalContext, finalCardInput, elements) ?? await sendLarkResult(service, {
+          await beforeSend();
+          if (persisted.final_delivery_first_failed_at === undefined) {
+            const anchored = { ...persisted, final_delivery_first_failed_at: Date.now() };
+            const extra = JSON.stringify(anchored);
+            if (!await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, extra)) {
+              throw new LarkServiceError('LARK_WRITE_OBSOLETE', '首次投递时间写入时轮次已更新。', 409);
+            }
+            persisted.final_delivery_first_failed_at = anchored.final_delivery_first_failed_at;
+            mapping.extra = extra;
+          }
+          const result = await completeExplicitFinal(input.deliveryStore, service, finalContext, finalCardInput, elements, beforeSend) ?? await sendLarkResult(service, {
             chatId: persisted.chat_id,
             replyMessageId: persisted.reply_message_id?.trim()
               || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
             replyInThread: persisted.reply_in_thread
-          }, { ...finalCardInput, elements, idempotencyKey: larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn)) }, log, input.deliveryStore);
+          }, { ...finalCardInput, elements, idempotencyKey: larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn)) }, log, input.deliveryStore, beforeSend);
           finalAttachmentMessageId = result.attachmentMessageId;
           finalMessageId = result.messageId;
           finalElements = result.elements;
@@ -419,6 +449,7 @@ export async function performLarkCardReconcile(input: {
           }
           }
         } catch (error) {
+          if (error instanceof LarkServiceError && error.code === 'LARK_WRITE_OBSOLETE') { unresolved++; return; }
           deliveryError = error;
           log.warn({ error, messageId: persisted.card_message_id, sessionId: mapping.sessionId, externalId: mapping.externalId },
             isLarkDeterministicFailure(error) ? '执行结果被飞书明确拒收，停止自动重发' : '执行结果交付待下次对账重试');

@@ -91,6 +91,9 @@ export class OnlineProcessCard {
     const current = () => this.options.isCurrent();
     const obsolete = () => !current() || (!pending.receipt && this.receiptLatched) || (!pending.terminal && this.terminalLatched);
     if (obsolete() || this.unupdatable || (this.frozen && !pending.receipt)) return { delivered: false };
+    const beforeSend = () => {
+      if (obsolete()) throw new LarkServiceError('LARK_WRITE_OBSOLETE', '飞书写入已失去当前轮次归属。', 409);
+    };
     let delivered = false;
     let repaired = false;
     let lastError: unknown;
@@ -103,7 +106,7 @@ export class OnlineProcessCard {
           const cooldown = this.rateLimitedUntil - Date.now();
           if (cooldown > 0) await delay(cooldown, undefined, { signal });
           if (obsolete() || signal?.aborted) return;
-          await this.options.service.update(pending.input);
+          await this.options.service.update({ ...pending.input, beforeSend });
           delivered = true;
           lastError = undefined;
           successfulElements = pending.input.elements as LarkCardElement[] | undefined;
@@ -118,7 +121,7 @@ export class OnlineProcessCard {
             if (this.elements?.length) {
               const elements = patchRejectedCardDelta(this.elements, pending.input.elements as LarkCardElement[] | undefined);
               try {
-                await this.options.service.update({ ...pending.input, elements, markdown: undefined });
+                await this.options.service.update({ ...pending.input, beforeSend, elements, markdown: undefined });
                 delivered = true;
                 lastError = undefined;
                 successfulElements = elements;

@@ -1137,7 +1137,18 @@ export class LarkAgentToolsService {
         if (latest?.taskId !== task.taskId || latest.attemptId !== task.attemptId) throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '任务轮次已结束。', 403);
         if (!current.client.send || !current.client.update || !current.client.uploadFile
           || (scope.reply_message_id ? !current.client.reply || !current.client.replyFile : !current.client.sendFile)) throw new AgentGroupToolError('FINAL_CLIENT_UNSUPPORTED', '当前客户端不支持最终答复卡片。', 503);
-        return this.authorized(current, scope.reply_message_id ? 'reply' : 'send', () => sendExplicitFinal(this.configs, current.client as LarkCardService, target, content));
+        const beforeSend = async () => {
+          const fresh = await this.context(token, 'group_tools.send');
+          if (!fresh.config.groupToolsAllowSend) throw new AgentGroupToolError('GROUP_TOOL_SEND_DISABLED', '发送能力已关闭。', 403);
+          const active = this.options.workbenchTask?.(fresh.sessionId);
+          if (!active?.attemptId || active.taskId !== task.taskId || active.attemptId !== task.attemptId) throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '任务轮次已结束。', 403);
+          this.capabilities.assertFinalTurn(fresh.sessionId, active.taskId, active.attemptId, input.turn);
+          const latest = await this.options.finalTaskContext?.(fresh, { taskId: active.taskId, attemptId: active.attemptId });
+          if (!latest || JSON.stringify(latest.scope) !== JSON.stringify(scope)) throw new AgentGroupToolError('FINAL_TARGET_MISMATCH', '最终答复的原始消息位置已变更。', 409);
+          const stillActive = this.options.workbenchTask?.(fresh.sessionId);
+          if (stillActive?.taskId !== active.taskId || stillActive.attemptId !== active.attemptId) throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '任务轮次已结束。', 403);
+        };
+        return this.authorized(current, scope.reply_message_id ? 'reply' : 'send', () => sendExplicitFinal(this.configs, current.client as LarkCardService, target, content, beforeSend));
       });
     }
     if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);

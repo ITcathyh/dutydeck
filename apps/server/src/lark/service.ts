@@ -30,7 +30,11 @@ export type LarkCardState = (typeof larkCardStates)[number];
 export const larkReceiveIdTypes = ['open_id', 'union_id', 'user_id', 'email', 'chat_id'] as const;
 export type LarkReceiveIdType = (typeof larkReceiveIdTypes)[number];
 
+export type LarkWriteGuard = () => void | Promise<void>;
+
 export interface LarkCardInput {
+  /** Local authority check, repeated after token/quota waits before every provider attempt. */
+  beforeSend?: LarkWriteGuard;
   cardKind?: 'process' | 'result';
   agentName?: string;
   workspace?: string;
@@ -208,12 +212,12 @@ export interface LarkChatMessagesInput {
   endTime?: number;
 }
 export interface LarkChatMessagesResult { items: LarkChatMessage[]; hasMore: boolean; pageToken?: string }
-export interface LarkTextMessageInput { text: string; idempotencyKey?: string }
+export interface LarkTextMessageInput { beforeSend?: LarkWriteGuard; text: string; idempotencyKey?: string }
 export interface LarkSendTextInput extends LarkTextMessageInput { chatId: string }
 export interface LarkReplyTextInput extends LarkTextMessageInput { messageId: string; replyInThread?: boolean }
-export interface LarkUploadInput { data: Uint8Array; filename: string; idempotencyKey: string }
-export interface LarkMediaSendInput { chatId: string; fileKey?: string; imageKey?: string; idempotencyKey: string }
-export interface LarkMediaReplyInput { messageId: string; replyInThread?: boolean; fileKey?: string; imageKey?: string; idempotencyKey: string }
+export interface LarkUploadInput { beforeSend?: LarkWriteGuard; data: Uint8Array; filename: string; idempotencyKey: string }
+export interface LarkMediaSendInput { beforeSend?: LarkWriteGuard; chatId: string; fileKey?: string; imageKey?: string; idempotencyKey: string }
+export interface LarkMediaReplyInput { beforeSend?: LarkWriteGuard; messageId: string; replyInThread?: boolean; fileKey?: string; imageKey?: string; idempotencyKey: string }
 
 export interface LarkBotConfig {
   appId: string;
@@ -1215,11 +1219,11 @@ export class LarkCardService {
 
   private async cardInput<T extends LarkCardInput>(input: T): Promise<T> {
     if ((input.state ?? 'running') !== 'running') return input;
-    const loadingImageKey = await this.ensureLoadingImageKey();
+    const loadingImageKey = await this.ensureLoadingImageKey(input.beforeSend);
     return loadingImageKey ? { ...input, loadingImageKey } : input;
   }
 
-  private ensureLoadingImageKey() {
+  private ensureLoadingImageKey(beforeSend?: LarkWriteGuard) {
     if (this.loadingImageKey) return Promise.resolve(this.loadingImageKey);
     if (this.loadingImagePromise) return this.loadingImagePromise;
     this.loadingImagePromise = (async () => {
@@ -1227,7 +1231,7 @@ export class LarkCardService {
         const form = new FormData();
         form.append('image_type', 'message');
         form.append('image', new Blob([await readFile(new URL('./assets/dutydeck-bouncing-ball.webp', import.meta.url))], { type: 'image/webp' }), 'dutydeck-bouncing-ball.webp');
-        const payload = await this.request('/open-apis/im/v1/images', { form, retry: false });
+        const payload = await this.request('/open-apis/im/v1/images', { form, retry: false, beforeSend });
         if (!payload.data?.image_key) return undefined;
         this.loadingImageKey = String(payload.data.image_key);
         return this.loadingImageKey;
@@ -1245,7 +1249,7 @@ export class LarkCardService {
       const resolvedReceiveIdType = receiveIdType(chatId ? 'chat_id' : input.receiveIdType ?? this.config.defaultReceiveIdType);
       const cardInput = await this.cardInput(input);
       const payload = await this.request(`/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(resolvedReceiveIdType)}`, {
-        body: {
+        beforeSend: input.beforeSend, body: {
           receive_id: receiveId,
           msg_type: 'interactive',
           content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName })),
@@ -1268,7 +1272,7 @@ export class LarkCardService {
       // 消息 om_*）时，用 replyRootId 作为 path 锚点，让卡片落在话题根下；否则回落到触发消息 messageId。
       const threadAnchor = input.replyInThread && input.replyRootId?.trim() ? input.replyRootId.trim() : messageId;
       const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(threadAnchor)}/reply`, {
-        body: {
+        beforeSend: input.beforeSend, body: {
           msg_type: 'interactive',
           content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName })),
           ...(input.replyInThread ? { reply_in_thread: true } : {}),
@@ -1286,7 +1290,7 @@ export class LarkCardService {
       const messageId = required(input.messageId, 'messageId');
       const cardInput = await this.cardInput(input);
       const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`, {
-        method: 'PATCH', body: { content: JSON.stringify(buildLarkCard({ ...cardInput, taskId: input.taskId ?? messageId, agentName: input.agentName ?? this.config.defaultAgentName })) }
+        beforeSend: input.beforeSend, method: 'PATCH', body: { content: JSON.stringify(buildLarkCard({ ...cardInput, taskId: input.taskId ?? messageId, agentName: input.agentName ?? this.config.defaultAgentName })) }
       });
       return { messageId: payload.data?.message_id || messageId, chatId: payload.data?.chat_id };
     });
@@ -1484,7 +1488,7 @@ export class LarkCardService {
     const chatId = required(input.chatId, 'chatId');
     if (!chatId.startsWith('oc_')) throw new LarkServiceError('INVALID_CHAT_ID', 'chatId must start with oc_', 400);
     const payload = await this.request('/open-apis/im/v1/messages?receive_id_type=chat_id', {
-      body: { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }), ...(input.idempotencyKey ? { uuid: input.idempotencyKey } : {}) }
+      beforeSend: input.beforeSend, body: { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }), ...(input.idempotencyKey ? { uuid: input.idempotencyKey } : {}) }
     });
     const messageId = payload.data?.message_id;
     if (!messageId) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark send response did not include message_id', 502);
@@ -1494,7 +1498,7 @@ export class LarkCardService {
   async replyText(input: LarkReplyTextInput): Promise<LarkMessageResult> {
     const messageId = required(input.messageId, 'messageId');
     const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`, {
-      body: {
+      beforeSend: input.beforeSend, body: {
         msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }),
         ...(input.replyInThread ? { reply_in_thread: true } : {}),
         ...(input.idempotencyKey ? { uuid: input.idempotencyKey } : {})
@@ -1508,8 +1512,8 @@ export class LarkCardService {
   async uploadFile(input: LarkUploadInput): Promise<string> { return this.uploadMedia('/open-apis/im/v1/files', 'file', 'file_type', 'stream', input, 'file_key'); }
   async uploadImage(input: LarkUploadInput): Promise<string> { return this.uploadMedia('/open-apis/im/v1/images', 'image', 'image_type', 'message', input, 'image_key'); }
 
-  async sendFile(input: LarkMediaSendInput): Promise<LarkMessageResult> { return this.sendMedia(input.chatId, 'file', { file_key: required(input.fileKey, 'fileKey') }, input.idempotencyKey); }
-  async sendImage(input: LarkMediaSendInput): Promise<LarkMessageResult> { return this.sendMedia(input.chatId, 'image', { image_key: required(input.imageKey, 'imageKey') }, input.idempotencyKey); }
+  async sendFile(input: LarkMediaSendInput): Promise<LarkMessageResult> { return this.sendMedia(input.chatId, 'file', { file_key: required(input.fileKey, 'fileKey') }, input.idempotencyKey, input.beforeSend); }
+  async sendImage(input: LarkMediaSendInput): Promise<LarkMessageResult> { return this.sendMedia(input.chatId, 'image', { image_key: required(input.imageKey, 'imageKey') }, input.idempotencyKey, input.beforeSend); }
   async replyFile(input: LarkMediaReplyInput): Promise<LarkMessageResult> { return this.replyMedia(input, 'file', { file_key: required(input.fileKey, 'fileKey') }); }
   async replyImage(input: LarkMediaReplyInput): Promise<LarkMessageResult> { return this.replyMedia(input, 'image', { image_key: required(input.imageKey, 'imageKey') }); }
 
@@ -1518,18 +1522,18 @@ export class LarkCardService {
     // 飞书的文件上传接口要求 file_name 表单字段，只写在文件部件的文件名里时，群里看到的附件名是随机 UUID。
     if (field === 'file') form.append('file_name', required(input.filename, 'filename'));
     form.append(field, new Blob([input.data]), required(input.filename, 'filename'));
-    const payload = await this.requestForm(path, form);
+    const payload = await this.requestForm(path, form, input.beforeSend);
     const key = payload.data?.[responseKey];
     if (!key) throw new LarkServiceError('INVALID_LARK_RESPONSE', `Lark upload response did not include ${responseKey}`, 502);
     return String(key);
   }
-  private async sendMedia(chatId: string, msgType: 'file' | 'image', content: Record<string, string>, idempotencyKey: string) {
-    const payload = await this.request('/open-apis/im/v1/messages?receive_id_type=chat_id', { body: { receive_id: required(chatId, 'chatId'), msg_type: msgType, content: JSON.stringify(content), uuid: idempotencyKey } });
+  private async sendMedia(chatId: string, msgType: 'file' | 'image', content: Record<string, string>, idempotencyKey: string, beforeSend?: LarkWriteGuard) {
+    const payload = await this.request('/open-apis/im/v1/messages?receive_id_type=chat_id', { beforeSend, body: { receive_id: required(chatId, 'chatId'), msg_type: msgType, content: JSON.stringify(content), uuid: idempotencyKey } });
     if (!payload.data?.message_id) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark send response did not include message_id', 502);
     return { messageId: String(payload.data.message_id), chatId: payload.data?.chat_id };
   }
   private async replyMedia(input: LarkMediaReplyInput, msgType: 'file' | 'image', content: Record<string, string>) {
-    const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(required(input.messageId, 'messageId'))}/reply`, { body: { msg_type: msgType, content: JSON.stringify(content), ...(input.replyInThread ? { reply_in_thread: true } : {}), uuid: input.idempotencyKey } });
+    const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(required(input.messageId, 'messageId'))}/reply`, { beforeSend: input.beforeSend, body: { msg_type: msgType, content: JSON.stringify(content), ...(input.replyInThread ? { reply_in_thread: true } : {}), uuid: input.idempotencyKey } });
     if (!payload.data?.message_id) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark reply response did not include message_id', 502);
     return { messageId: String(payload.data.message_id), chatId: payload.data?.chat_id };
   }
@@ -1948,7 +1952,7 @@ export class LarkCardService {
     return this.token;
   }
 
-  private request(path: string, options: { method?: string; body?: unknown; token?: boolean; form?: FormData; retry?: boolean }) {
+  private request(path: string, options: { method?: string; body?: unknown; token?: boolean; form?: FormData; retry?: boolean; beforeSend?: LarkWriteGuard }) {
     return this.withRequestBudget(async signal => {
       const headers: Record<string, string> = options.form ? {} : { 'content-type': 'application/json; charset=utf-8' };
       if (options.token !== false) headers.authorization = `Bearer ${await this.tenantToken()}`;
@@ -1975,6 +1979,7 @@ export class LarkCardService {
           }
           return payload;
         }, { env: options.retry === false ? { ...this.config.env, LARK_API_RETRY_MAX_ATTEMPTS: '0' } : this.config.env, signal,
+          beforeAttempt: options.beforeSend,
           canRetry: () => this.budget()!.remaining > 0,
           onFailure: () => { if (options.retry !== false) this.budget()!.remaining--; } });
       } catch (error) {
@@ -1997,8 +2002,8 @@ export class LarkCardService {
     return await this.request(path, options);
   }
 
-  private requestForm(path: string, form: FormData) {
-    return this.request(path, { form });
+  private requestForm(path: string, form: FormData, beforeSend?: LarkWriteGuard) {
+    return this.request(path, { form, beforeSend });
   }
 }
 
