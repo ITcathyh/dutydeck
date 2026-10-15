@@ -57,7 +57,7 @@ export interface RuleContext {
   parent?: 'self' | 'sender' | 'other';
   /** 消息所在话题的根消息是本机器人发的（例如委托产出）。 */
   threadRootSelf?: boolean;
-  /** 消息所在话题是本机器人接手的（话题里有本机器人的会话，例如告警初筛）。 */
+  /** 消息所在话题是本机器人接手的（话题里有本机器人的会话，例如 direct 场景包起的任务）。 */
   ownedTopic?: boolean;
   /** 消息所在话题的根消息是别的机器人发的，或 @ 的是别人。只在多机器人群里查。 */
   threadRootOther?: boolean;

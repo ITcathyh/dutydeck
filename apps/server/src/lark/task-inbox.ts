@@ -6,11 +6,11 @@ import type { LarkContextCursor } from './task-context.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkRedispatchInfo } from './turn-redispatch.js';
 
-export type LarkInboxAdoption = Pick<LarkMessageEvent, 'senderOpenId' | 'senderType' | 'triage' | 'rootId' | 'threadId' | 'parentId'>;
+export type LarkInboxAdoption = Pick<LarkMessageEvent, 'senderOpenId' | 'senderType' | 'scenario' | 'rootId' | 'threadId' | 'parentId'>;
 export interface LarkInboxRecord {
   appId: string;
   event: LarkMessageEvent;
-  /** 已验证编辑或内部告警派生时保留原始输入；event 用于重新路由或执行。 */
+  /** 已验证编辑或内部场景派生时保留原始输入；event 用于重新路由或执行。 */
   originalEvent?: LarkMessageEvent;
   boot: string;
   state: 'unrouted' | 'ignored' | 'received' | 'accepted' | 'command' | 'failed';
@@ -54,7 +54,7 @@ export class LarkTaskInbox {
   }
   /** ACK 前仅做本地 CAS；重投不能替换原文，也不能重复启动路由。写入异常直接交给 SDK。 */
   async capture(appId: string, event: LarkMessageEvent): Promise<LarkInboxRecord | undefined> {
-    const { triage: _untrustedTriage, ...original } = event;
+    const { scenario: _untrustedScenario, triage: _untrustedTriage, ...original } = event;
     const key = prefix(appId) + event.messageId;
     for (;;) {
       const raw = await this.store.get(key);
@@ -74,7 +74,7 @@ export class LarkTaskInbox {
   }
   /** 已验证编辑可重开 ignored 或已交还的 unrouted；正在认领/已受理的记录不替换。 */
   async reopenIgnored(appId: string, event: LarkMessageEvent) {
-    const { triage: _untrustedTriage, ...original } = event;
+    const { scenario: _untrustedScenario, triage: _untrustedTriage, ...original } = event;
     const old = await this.lookup(appId, event.messageId);
     if (!old || (old.state !== 'ignored' && (old.state !== 'unrouted' || old.boot))) return;
     const next: LarkInboxRecord = { appId, event: original, originalEvent: old.originalEvent ?? old.event,

@@ -25,7 +25,7 @@ describe('判定回归用例：数据', () => {
 
   it('事实和实时一致：别人的话题、叫别的机器人只在多机器人群里查；最近发言只在第二轮用', () => {
     for (const scenario of participationScenarios) {
-      const bots = (scenario.group.members?.bots ?? 0) - (scenario.group.alarmSources ?? 0);
+      const bots = (scenario.group.members?.bots ?? 0) - (scenario.group.sourceBots ?? 0);
       if (scenario.message.threadRootOther || scenario.message.callsOther) expect(bots, scenario.id).toBeGreaterThan(1);
       expect(scenarioFacts(scenario, 1).lastSelfAgoMs, scenario.id).toBeUndefined();
       // 走到规则层的只有群参与按需或积极的群。

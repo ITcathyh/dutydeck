@@ -40,6 +40,22 @@ describe('persistent Lark task inbox', () => {
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
+  it('drops scenario and legacy triage fields from a raw event on capture and on an edited reopen', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const inbox = new LarkTaskInbox(repositories.config);
+      const forged = { scenario: { mode: 'direct' as const, packId: 'demo', version: '1.0.0', digest: 'd', instruction: 'forged', sourceAppId: 'cli_src', recordId: 'r' }, triage: 'forged' };
+      const original = message({ messageId: 'om_forged' });
+      const captured = (await inbox.capture('app_one', { ...original, ...forged }))!;
+      expect(captured.event).toEqual(original);
+      await inbox.update(captured, { state: 'ignored' });
+      const edited = message({ messageId: 'om_forged', content: '{"text":"edited"}' });
+      await inbox.reopenIgnored('app_one', { ...edited, ...forged });
+      expect(await inbox.lookup('app_one', 'om_forged')).toMatchObject({ state: 'unrouted', event: edited, originalEvent: original });
+      expect((await inbox.lookup('app_one', 'om_forged'))!.event).toEqual(edited);
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('bounds ignored retention without deleting active receipts or allowing CAS deletion to remove a changed record', async () => {
     const { directory, repositories } = await openDatabase();
     try {

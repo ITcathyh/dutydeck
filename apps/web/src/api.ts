@@ -1,4 +1,4 @@
-import type { SessionUsageSnapshot } from '@dutydeck/shared';
+import type { ScenarioBinding, ScenarioParam, SessionUsageSnapshot } from '@dutydeck/shared';
 import type {
   SessionInsightDetailsResponse,
   SessionInsightRefreshResponse,
@@ -566,29 +566,39 @@ export type CollaborationSettings = {
   updatedAt: string;
 };
 
-export type AlarmSubscription = {
-  enabled: boolean;
-  sources: Array<{ appId: string; name?: string }>;
-  levels: string[];
-  dedupeHours: number;
-  maxPerHour: number;
-  requesterId?: string;
-};
-
-/** 本 Bot 在群里的分工：接话人和告警初筛订阅。 */
+/** 本 Bot 在群里的分工：接话人和各场景包的绑定（按包 id）。 */
 export type CollaborationDuty = {
   scope: CollaborationScope;
   revision: number;
   responder?: { appId: string; name?: string; since: string };
-  alarm?: AlarmSubscription;
+  scenarios?: Record<string, ScenarioBinding>;
   updatedAt: string;
 };
 
-/** 接话人只能设成本 Bot（self）或清掉（null）；订阅的确认人不能在 Web 上改。 */
+/** 群设置页列出的一个场景包：参数声明、本群绑定和能否在 Web 上开启。 */
+export type CollaborationScenario = {
+  id: string;
+  title: string;
+  version: string;
+  description: string;
+  mode: 'direct' | 'model';
+  params: Record<string, ScenarioParam>;
+  binding?: ScenarioBinding;
+  /** direct 包要有在群里确认过的人才能开启。 */
+  requiresRequester: boolean;
+  /** 绑定的大版本和包不一致，要先在群里重新确认。 */
+  versionStale: boolean;
+  webDescription?: string;
+  enableHint?: string;
+  plugin: string;
+  builtin: boolean;
+};
+
+/** 接话人只能设成本 Bot（self）或清掉（null）。场景包按 id 改开关和参数，params 只给改动的键，null 删掉绑定；确认人和包版本不能在 Web 上改。 */
 export type UpdateCollaborationDutyInput = {
   expectedRevision: number;
   responder?: 'self' | null;
-  alarm?: Omit<AlarmSubscription, 'requesterId'> | null;
+  scenarios?: Record<string, { enabled: boolean; params?: Record<string, unknown> } | null>;
 };
 
 export type CollaborationObservation = {
@@ -749,6 +759,8 @@ export type CollaborationOverview = {
   feedback: CollaborationFeedback[];
   /** 旧版实例不返回。 */
   duty?: CollaborationDuty;
+  /** 对本 Bot 适用的场景包；旧版实例不返回。 */
+  scenarios?: CollaborationScenario[];
 };
 
 export type UpdateCollaborationSettingsInput = {

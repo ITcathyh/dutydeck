@@ -113,30 +113,62 @@ describe('Collaboration Storage Repository', () => {
     });
   });
 
-  describe('Group Duty (alarm subscription & responder)', () => {
+  describe('Group Duty (scenario bindings & responder)', () => {
     it('defaults to revision 0, updates with CAS, keeps omitted fields, clears null fields, and does not advance contextRevision', async () => {
       const repos = createRepositories(':memory:');
       try {
         const collab = repos.collaboration;
         expect(await collab.getDuty(scopeA)).toEqual({ scope: scopeA, revision: 0, updatedAt: expect.any(String) });
-        const alarm = { enabled: true, sources: [{ appId: 'cli_alarm', name: '监控' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3, requesterId: 'ou_admin' };
-        const first = await collab.updateDuty(scopeA, { expectedRevision: 0, alarm }, 'ou_admin');
-        expect(first).toMatchObject({ revision: 1, alarm });
+        const alarm = { enabled: true, params: { sources: [{ appId: 'cli_alarm', name: '监控' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3 }, requesterId: 'ou_admin', packVersion: '1.0.0' };
+        const first = await collab.updateDuty(scopeA, { expectedRevision: 0, scenarios: { alarm } }, 'ou_admin');
+        expect(first).toMatchObject({ revision: 1, scenarios: { alarm } });
         expect(first.responder).toBeUndefined();
         await expect(collab.updateDuty(scopeA, { expectedRevision: 0, responder: null }, 'ou_admin')).rejects.toMatchObject({ code: 'COLLABORATION_REVISION_CONFLICT', statusCode: 409 });
 
         const responder = { appId: 'cli_app_a', name: 'flash', since: isoTime1 };
         const second = await collab.updateDuty(scopeA, { expectedRevision: 1, responder }, 'ou_admin');
-        expect(second).toMatchObject({ revision: 2, responder, alarm });
-        const cleared = await collab.updateDuty(scopeA, { expectedRevision: 2, alarm: null }, 'ou_admin');
+        expect(second).toMatchObject({ revision: 2, responder, scenarios: { alarm } });
+        const cleared = await collab.updateDuty(scopeA, { expectedRevision: 2, scenarios: { alarm: null } }, 'ou_admin');
         expect(cleared).toMatchObject({ revision: 3, responder });
-        expect(cleared.alarm).toBeUndefined();
+        expect(cleared).not.toHaveProperty('scenarios');
         expect(await collab.getDuty(scopeA)).toEqual(cleared);
 
         expect(await collab.getDuty(scopeB)).toMatchObject({ revision: 0 });
         expect((await collab.snapshot(scopeA)).contextRevision).toBe(0);
         expect((await collab.listActivities(scopeA)).map(item => item.summary)).toEqual(['Updated group duty', 'Updated group duty', 'Updated group duty']);
-        await expect(collab.updateDuty(scopeA, { expectedRevision: 3, alarm: { ...alarm, dedupeHours: 0 } }, 'ou_admin')).rejects.toThrow();
+        await expect(collab.updateDuty(scopeA, { expectedRevision: 3, scenarios: { alarm: { ...alarm, packVersion: '1.0' } } }, 'ou_admin')).rejects.toThrow();
+        await expect(collab.updateDuty(scopeA, { expectedRevision: 3, scenarios: { alarm: { ...alarm, extra: true } as typeof alarm } }, 'ou_admin')).rejects.toThrow();
+        await expect(collab.updateDuty(scopeA, { expectedRevision: 3, scenarios: { Alarm: alarm } }, 'ou_admin')).rejects.toThrow();
+        expect((await collab.getDuty(scopeA)).revision).toBe(3);
+      } finally {
+        repos.close();
+      }
+    });
+
+    it('merges scenarios per pack: omitted packs stay, null removes one pack, all removed reads back without scenarios', async () => {
+      const repos = createRepositories(':memory:');
+      try {
+        const collab = repos.collaboration;
+        const alarm = { enabled: true, params: { sources: [{ appId: 'cli_alarm' }], levels: [], dedupeHours: 6, maxPerHour: 3 }, requesterId: 'ou_admin', packVersion: '1.0.0' };
+        const faq = { enabled: true, params: { docsTopK: 3 }, requesterId: 'ou_admin', packVersion: '0.1.0' };
+        await collab.updateDuty(scopeA, { expectedRevision: 0, scenarios: { alarm } }, 'ou_admin');
+        const both = await collab.updateDuty(scopeA, { expectedRevision: 1, scenarios: { 'team-faq': faq } }, 'ou_admin');
+        expect(both.scenarios).toEqual({ alarm, 'team-faq': faq });
+
+        const disabled = { ...alarm, enabled: false };
+        const replaced = await collab.updateDuty(scopeA, { expectedRevision: 2, scenarios: { alarm: disabled } }, 'ou_admin');
+        expect(replaced.scenarios).toEqual({ alarm: disabled, 'team-faq': faq });
+
+        const responder = { appId: 'cli_app_a', since: isoTime1 };
+        const withResponder = await collab.updateDuty(scopeA, { expectedRevision: 3, responder }, 'ou_admin');
+        expect(withResponder.scenarios).toEqual({ alarm: disabled, 'team-faq': faq });
+
+        const removed = await collab.updateDuty(scopeA, { expectedRevision: 4, scenarios: { 'team-faq': null, 'not-bound': null } }, 'ou_admin');
+        expect(removed.scenarios).toEqual({ alarm: disabled });
+        const empty = await collab.updateDuty(scopeA, { expectedRevision: 5, scenarios: { alarm: null } }, 'ou_admin');
+        expect(empty).not.toHaveProperty('scenarios');
+        expect(await collab.getDuty(scopeA)).toEqual({ scope: scopeA, revision: 6, responder, updatedAt: expect.any(String) });
+        expect(await collab.getDuty(scopeB)).toMatchObject({ revision: 0 });
       } finally {
         repos.close();
       }

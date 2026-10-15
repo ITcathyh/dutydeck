@@ -332,6 +332,11 @@ pnpm dev
   - **接话人**（多机器人群和单机器人群都能指定）：按需档的接话人没配负责范围时，群里没有明确对象、需要有机器人处理的求助（如「有人知道今天的发布单在哪看吗」）也由它接；闲聊、群友之间的问答、@ 别人和进度播报仍不接。
   - **负责范围**（Web「机器人管理」的「负责范围」，或 `dutydeck settings bot set <appId> roleScope=...`，对这个机器人所在的所有群生效）：按需档配了以后，没 @ 的消息里属于范围内的事由它判断后接，不受接话人限制；多个机器人的范围重叠时可能都接。按需档没配、它也不是接话人时，在有多个真人的群里，没明确叫它的泛问和普通告警不接。积极档和单真人群配了负责范围后也改为按范围判断，接的会变少。
   - 没接话时 @ 它问「刚才为什么没回」，它会说明原因和怎么改；`/status` 显示参与强度、接话人和负责范围。
+- **告警初筛**（内置场景包 `alarm`，见[内置插件](#builtin-plugins)）：
+  - @ 机器人说「告警来了先帮我看看」或「告警来了先帮我初筛，只看 P0」，它发一张确认卡，写明来源机器人（默认取最近在群里发言最多的机器人）、级别、去重窗口和每小时上限。点确认的人是确认人，初筛任务以他的名义发起。说「关闭告警初筛」并确认即可关闭，设置会保留。
+  - 开启后，来源机器人发的告警不经参与判定：机器人在告警下开话题起初筛任务。同一条告警在去重窗口内只分析一次，超过每小时上限的跳过；在跳过的告警下 @ 它问「刚才为什么没回」能查到原因。多机器人群里只由接话人做。`/status` 显示订阅和今天分析、跳过的条数。
+  - @ 机器人并引用一张告警卡时，如果它在这个群里处理过同一告警规则，会把上一次的结论作为参考材料带给 Agent，并在过程卡顶部挂一行「📎 日期 同一告警规则：…」。
+  - Web 群设置按场景包列出参数（来源、级别、去重窗口、每小时上限）。开启要先在群里确认过一次；之后可以在 Web 或 `dutydeck settings group set <chatId> scenarios=...` 改参数和开关。
 - **少 @ 一次**：见上文。
 - **自然语言定时与持续委托**：
   - `@机器人 提醒我明天下午 17:00 提交发布单。`
@@ -550,7 +555,7 @@ CI 相关的令牌和 webhook 密钥**不再是环境变量**，见[插件](#plu
 
 ## 插件 <a id="plugins"></a>
 
-插件给 Dutydeck 加命令、Agent、skills、外部触发器、hook 和 CI 提供方。核心里没有任何平台专用代码，GitHub、Codebase 的 CI 能力都是插件。
+插件给 Dutydeck 加命令、Agent、skills、外部触发器、hook、CI 提供方和场景包。核心里没有任何平台专用代码，GitHub、Codebase 的 CI 能力和告警初筛都是插件。
 
 ### 目录结构
 
@@ -562,7 +567,8 @@ my-plugin/
 ├── skills/                        skills 目录
 ├── triggers/<id>.json             外部触发器
 ├── hooks/hooks.json               hook 配置
-└── index.mjs                      providers 入口（CI 提供方、进程内 hook）
+├── scenarios/*.json               场景包
+└── index.mjs                      providers 入口（CI 提供方、场景包 provider、进程内 hook）
 ```
 
 `plugin.json` 用严格校验，出错会报文件名和字段。字段：
@@ -574,11 +580,12 @@ my-plugin/
 | `commands` / `agents` / `skills` / `triggers` | 目录，默认 `commands/`、`agents/`、`skills/`、`triggers/`；默认路径不存在就当没有 |
 | `hooks` | hook 配置文件，默认 `hooks/hooks.json` |
 | `providers` | ESM 入口文件，没有默认值 |
+| `scenarios` | 场景包目录，默认 `scenarios/`；默认路径不存在就当没有 |
 | `userConfig` | `{ <snake_case 键>: { description, sensitive? } }`，插件的配置项 |
 
 路径必须在插件目录内；显式声明了但不存在算错误。
 
-### 六类组件
+### 七类组件
 
 | 组件 | 作用 | 需要信任确认 |
 |---|---|---|
@@ -587,7 +594,8 @@ my-plugin/
 | skills | 作为一个 skills 根目录加载 | 否 |
 | triggers | 外部系统通过 HTTP 触发一次任务（见下） | 否 |
 | hooks | 在任务生命周期的几个点执行你的命令（见下） | **是**（按事件分别确认，如 `hooks:task.received`） |
-| providers | 入口模块导出 `register(api)`，注册 CI 提供方或进程内 hook；最多等 15 秒，超时只跳过这个插件 | **是** |
+| providers | 入口模块导出 `register(api)`，注册 CI 提供方、场景包 provider 或进程内 hook；最多等 15 秒，超时只跳过这个插件 | **是** |
+| scenarios | 场景包：群里出现某类消息时按包里写好的规则处理（见[怎么写场景包](#scenario-packs)）。包本身是 JSON，不执行代码；它引用的 provider 随 providers 一起确认 | 否 |
 
 ### 信任确认
 
@@ -605,6 +613,14 @@ agents、hooks、providers 会执行代码或命令，安装时要确认。daemo
 - `bot:<appId>`：只对这个机器人的会话生效；触发器的目标机器人也必须是它。Web 会话没有机器人，所以 bot 作用域的命令、skills、hooks 在 Web 里不生效。
 - `workspace:<绝对路径>`：会话工作目录在该路径下才生效。
 - agents 不受作用域限制，全局合并。
+
+### 内置插件 <a id="builtin-plugins"></a>
+
+随 Dutydeck 发布的插件在 `builtin-plugins/`（打包后在 `dist/builtin-plugins`）。daemon 先加载它们，再加载已安装的插件。现在只有一个：`alarm`，提供告警初筛和同一告警规则的关联，群里怎么用见[群聊协作机制](#lark-guide)。
+
+- 免信任确认，作用域固定为 `global`，一直启用，不能卸载。`plugin list` 里标「内置」。
+- 外部插件不能和内置插件同名，安装时会被拒绝；已装的同名插件不会加载，`plugin list` 和 `doctor` 会提示。
+- 外部插件里和内置场景包 id 相同的包会被跳过（插件其余部分照常加载），免得接过群里已经确认的绑定。
 
 ### CLI
 
@@ -624,6 +640,7 @@ dutydeck plugin uninstall <名字>
 
 - `<来源>`：本地目录、`git+https://…`、`git@…`、`file://…`（`#ref` 固定分支、标签或提交）、`npm:包名@版本`。git 来源按提交 SHA 固定。
 - 插件的增删改、启停都要 `dutydeck restart` 后才生效。
+- `plugin validate` 也校验场景包（格式、模板变量、正则、参数），出错报文件和字段；`install`、`update` 不因场景包的问题失败，但会列出不会加载的包和原因。
 - 数据放在数据库所在目录的 `plugins/` 下：`plugins.lock.json`（来源、固定版本、作用域、已确认能力）、`<名字>/`（安装副本）、`.data/<名字>/`（插件自己的可写目录）。`.trigger-tokens.json` 和 `.config.json` 权限 0600；敏感配置存在本机密钥存储里。
 
 ### 外部触发器
@@ -727,6 +744,49 @@ dutydeck restart
 - 飞书 `/ci` 只要装了任一 CI 插件就可用；装了 github 插件但没填 token 时，公开仓库也能等构建。
 - `/pr` 只要有实现了 `createPullRequest` 的 CI 插件就可用。webhook 型插件的 merge_request 合并或关闭事件会让 PR 跟进立即停止，pipeline 事件会立即触发一次检查。
 
+### 怎么写场景包 <a id="scenario-packs"></a>
+
+场景包让机器人在群里遇到某类消息时按写好的规则处理，例如来源机器人发告警就起初筛任务。一个包是插件 `scenarios/` 目录下的一个 JSON 文件，格式和每个字段的限制以 `packages/shared/src/scenarios.ts` 的 schema 为准。例子：`builtin-plugins/alarm`（`direct` 模式，带关联 provider）和 `plugins/team-faq`（`model` 模式，带上下文 provider）。
+
+包里写的是：参数（群里开启时确认、Web 上可改，类型有 `integer`、`string_list`、`bot_list`）、触发条件、执行指令、群里开关的说法和确认卡文案、`/status` 的一行、「为什么没回」的说明、Web 上的说明。包 id 是 kebab-case，最长 32。
+
+**两种模式**
+
+- `direct`：只由机器人消息触发。命中后不调判定模型，按去重和每小时上限决定起不起任务，起任务时以群里确认过的人的名义走和 @ 机器人相同的路径。下面这些是强制契约，包里省略了只会得到默认值，不会变成不限：
+  - 只处理参数里列出的来源机器人（`bot_list`，`role: "source"`），排除本机器人自己；
+  - 必须有确认人：开启只能在群里点确认卡完成，Web 只能改已确认过的绑定；
+  - 去重：`dedupe` 用核心的 `source_text_v1`（来源加正文，去掉链接、数字、长十六进制串和空白后比较，时间、数值、实例号变了仍算同一条）或包自己的 provider；去重窗口参数 1–168 小时，每小时上限参数 1–30；
+  - 多机器人群里只由接话人处理；每条消息的结论（起了、级别不符、重复、超上限、不是接话人、缺确认人、出错弃权）都记一条，「为什么没回」能查到。
+- `model`：由真人消息触发，命中后交给参与判定模型，包提供判定指引和上下文。需要支持它的 Dutydeck 版本；当前版本加载时会拒绝这类包并给出诊断。
+
+**provider 与信任**
+
+包可以引用插件在 `register(api)` 里用 `api.registerScenarioProvider(provider)` 注册的 provider：`match`（补充匹配或给去重键）、`correlationKey`（关联上一轮用的键）、`context`（`model` 模式的上下文）。provider 是插件代码，安装时随 `providers` 一起确认。每次调用都有截止时间（`match` 500 毫秒，一轮关联合计 1 秒，`context` 默认 5 秒、最多 15 秒），超时的结果丢弃。引用的 provider 没注册时整个包跳过。
+
+**正则**
+
+触发和群里开关说法里的正则只允许 `i`、`m`、`s`、`u` 标志（取全部匹配由宿主加 `g`），源码最长 1000 字符。正则在宿主的隔离线程里执行，单次 200 毫秒，输入最多取前 4000 字符。`validate` 对可能灾难性回溯的写法只给提示，安全靠隔离执行和超时。
+
+**模板变量**
+
+文案里可以写 `{变量}` 和一层条件 `{变量?有值时:为空时}`。每个位置能用的变量是固定的，写了别的变量校验不通过：
+
+| 位置 | 可用变量 |
+|---|---|
+| `execution.instruction`、`execution.intro` | `{source}`（来源机器人名字，`model` 模式的 instruction 不能用变量） |
+| `correlation.prompt` | `{date}` |
+| `correlation.cardLine` | `{date}`、`{headline}`、`{url}` |
+| `confirm.enableSummary`、`disableSummary`、`enabledResult` | `{summary}` 和各参数 |
+| `status.summary` | 各参数 |
+| `explain.*` | `{time}`、`{reason}`、`{snippet}` |
+| `web.description` | `{requesterId}` 和各参数 |
+
+标题、名词、判定指引、参数说明、`reasons` 等是字面文字，不能写变量。消息正文和模型输出不会插进任何指令位置：来源消息原文和上一轮结论都作为不可信材料跟在指令后面，来源机器人的名字插进模板前会去掉换行和括号类字符。
+
+**出错时**
+
+包的 JSON 校验不过时跳过这个包，插件其余部分照常加载，`plugin list` 和 `doctor` 会列出原因；引用的 provider 没注册、包 id 冲突时也跳过这个包，原因写在 daemon 日志里。运行时正则或 provider 出错、超时，这条消息这个包弃权：`direct` 记一条弃权记录，不起任务。同一条消息命中多个 `direct` 包时，按包 id 排序只处理第一个。
+
 ### 升级说明：CI 环境变量迁移到插件
 
 以前用环境变量配 CI 的部署，**升级后这些变量不再生效**：`DUTYDECK_GITHUB_TOKEN`、`GH_TOKEN`、`GITHUB_TOKEN`、`DUTYDECK_CODEBASE_WEBHOOK_SECRET`。升级后要：
@@ -815,7 +875,10 @@ dutydeck settings bot set cli_xxx adhdMode=true              # 开启 ADHD 友�
 dutydeck settings bot set cli_xxx notifyQuietHours=22:00-08:00
 dutydeck settings group set oc_xxx participation=selective   # 设置群聊按需参与
 dutydeck settings usage set-cap 50 --app cli_xxx             # 设置月度用量上限（美元）
+dutydeck settings group set oc_xxx 'scenarios={"alarm":{"enabled":true,"params":{"levels":["P0","P1"]}}}'  # 改告警初筛的级别
 ```
+
+群里的场景包用 `scenarios={"<包 id>":{"enabled":true|false,"params":{...}}}` 改，`params` 只写要改的键，`{"<包 id>":null}` 删掉这个包的绑定；`group show` 列出本群可用的包、参数和当前绑定。`direct` 模式的包（如告警初筛）要先在群里点确认卡开启过一次，之后才能用命令行或 Web 改。旧的 `alarm=<JSON>`（平铺的告警订阅）作为弃用别名保留一个版本，会转成 `scenarios.alarm`，输出里带弃用提示。
 
 机器人自动欢迎默认开启。设置 `welcomeEnabled=false` 可关闭入群和首次私聊欢迎；保存后立即生效，不改变用户消息处理。需要群里只在被 @ 时回复时，同时使用 `mentionPolicy=always` 和 `defaultGroupParticipation=off`。
 
@@ -886,6 +949,8 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 - **GitHub 读取边界**：PR 普通评论和行内评论支持分页，两类合计最多 100 页、8 MiB；超出时整次读取报错，不返回部分评论。单个 JSON 响应最多 2 MiB，单个日志实际下载最多 8 MiB，超限会取消读取；日志超限时仍返回失败任务和步骤摘要，但不附日志。
 - **CLI 启动**：减少 `secret` 等本地管理命令的启动开销。
 - **CI 环境变量迁移到插件**：见[插件 → 升级说明](#plugins)。`DUTYDECK_GITHUB_TOKEN`、`GH_TOKEN`、`GITHUB_TOKEN`、`DUTYDECK_CODEBASE_WEBHOOK_SECRET` 不再生效，要装插件、用 `dutydeck plugin config … --value-fd 0` 填值并重启。
+- **告警初筛改为内置场景包 `alarm`**：群里的说法、确认卡、来源、级别、去重和每小时上限不变；已有订阅在升级时自动转成 `alarm` 包的绑定，升级前发出的确认卡照常能点。变化有三处：初筛任务的 prompt 里告警原文改为不可信材料放在指令后面；关联带给 Agent 的上一轮结论也改为不可信材料；判断是否重复只查本包的初筛记录，群里其他判定记录再多也不会让同一条告警重复初筛。命令行改用 `scenarios=`，`alarm=` 保留一个版本。
+- **数据库升到 v38 后旧版本打不开**：v38 把群分工改成按场景包存绑定。升级后再换回旧版本会因为数据库版本比程序新而拒绝启动（`DATABASE_SCHEMA_TOO_NEW`）。出了问题只能向前修复，或者恢复部署前的数据库快照，快照之后的全部写入都会丢。
 - **每轮改动漏记已修复**：以前，一次索引写入后同一秒内又改了某个文件、且文件大小没变时，“每轮改动”会漏记这个文件（影响「查看改动」和 `/pr` 的文件清单）。现在已修复。
 
 ---

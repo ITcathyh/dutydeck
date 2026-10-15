@@ -203,6 +203,8 @@ Matches `/help` (6 per page by default; plugin commands are listed on the last p
 
 Participation level (when the bot answers without an @; it never changes permissions): mention only / no @ inside topics it owns / `selective` / `eager`. Underlying fields: `mentionPolicy` and group participation `off|observe|selective|eager` (`observe` only listens and builds background; set it with `dutydeck settings group set <chatId> participation=observe`). New bots default `mentionPolicy` to `topic`. In a group with several bots (the group's subscribed alert sources don't count) and no responder, un-@ messages are not answered, except ones that call the bot by name, reply to it, or sit in a topic it owns; @ the bot that should answer and say 「你负责接话」 ("you take the replies") and confirm, or pick the responder in the Web group settings. A responder can be set in single-bot groups too; a `selective` responder without a scope also answers requests for help that don't name anyone and need a bot (e.g. 「有人知道今天的发布单在哪看吗」, "does anyone know where today's release ticket is?"); small talk, questions between members, @ to others and progress updates are still left alone. A role scope (Web "Bot management" → "负责范围" / scope, or `dutydeck settings bot set <appId> roleScope=...`; applies to every group the bot is in) lets a `selective` bot judge and answer un-@ messages within that scope regardless of the responder; bots with overlapping scopes may all answer. A `selective` bot without a scope that is not the responder, in a group with several humans, does not answer general questions and plain alerts that don't address it. In `eager` mode and in single-human groups, setting a scope also switches the bot to judging by scope, so it answers fewer messages. When the bot stays silent, @ it and ask 「刚才为什么没回」 ("why didn't you reply") for the reason and how to change it; `/status` shows the participation level, responder and scope. Mention-once flow: inside a topic you don't need to @ again; if you forgot to @, send a lone `@bot` within 10 minutes to claim the previous message. Leader-Worker needs group tools; with a terminal-mode Leader both the bot and the agent must be `full-trust`.
 
+**Alert triage** (built-in scenario pack `alarm`, see [Built-in plugins](#builtin-plugins)). @ the bot and say 「告警来了先帮我看看」 ("look at alerts first when they come") or 「告警来了先帮我初筛，只看 P0」 ("triage alerts first, P0 only"); it posts a confirmation card naming the source bot (by default the bot that posted most in the group recently), levels, dedupe window and hourly cap. Whoever confirms becomes the requester, and triage tasks run in their name. Say 「关闭告警初筛」 ("turn off alert triage") and confirm to turn it off; the settings are kept. Once on, alerts from the source bot skip the participation decision: the bot opens a topic under the alert and starts a triage task. The same alert is analysed once per dedupe window, alerts over the hourly cap are skipped, and asking 「刚才为什么没回」 under a skipped alert gives the reason. In multi-bot groups only the responder triages. `/status` shows the subscription and today's analysed and skipped counts. When you @ the bot quoting an alert card and it has handled the same alert rule in this group before, the earlier conclusion goes to the agent as reference material and the process card shows a 「📎 date 同一告警规则：…」 line. The Web group settings list each pack's parameters (sources, levels, dedupe window, hourly cap); a pack must be confirmed in the group once before it can be changed from the Web or with `dutydeck settings group set <chatId> scenarios=...`.
+
 ### 4. Bot setup
 
 **Web (recommended)**: on the first screen click "Bind Lark Bot" (later "Manage Lark Bot"), choose "Add bot" in the dialog, then "One-click create Lark bot", enter a name and click "Create bot". It reuses the local Lark login (or asks for a QR scan), creates the app, configures scopes and events, publishes and stores the secret. Then pick the default Agent and workspace and enable listening.
@@ -330,7 +332,7 @@ CI tokens and webhook secrets are **no longer environment variables**; see Plugi
 
 ## Plugins <a id="plugins"></a>
 
-A plugin adds commands, agents, skills, external triggers, hooks and CI providers. The core has no platform-specific code; GitHub and Codebase CI support are plugins.
+A plugin adds commands, agents, skills, external triggers, hooks, CI providers and scenario packs. The core has no platform-specific code; GitHub and Codebase CI support and alert triage are plugins.
 
 ```text
 my-plugin/
@@ -340,14 +342,17 @@ my-plugin/
 ├── skills/                        skills directory
 ├── triggers/<id>.json             external triggers
 ├── hooks/hooks.json               hooks
-└── index.mjs                      providers entry (CI providers, in-process hooks)
+├── scenarios/*.json               scenario packs
+└── index.mjs                      providers entry (CI providers, scenario pack providers, in-process hooks)
 ```
 
-`plugin.json` fields: `name` (kebab-case, ≤ 64), `version`, `description`, `commands` / `agents` / `skills` / `triggers` (directories), `hooks` (file), `providers` (ESM entry, no default), `userConfig` (`{ <snake_case key>: { description, sensitive? } }`). Paths must stay inside the plugin.
+`plugin.json` fields: `name` (kebab-case, ≤ 64), `version`, `description`, `commands` / `agents` / `skills` / `triggers` (directories), `hooks` (file), `providers` (ESM entry, no default), `scenarios` (directory, default `scenarios/`), `userConfig` (`{ <snake_case key>: { description, sensitive? } }`). Paths must stay inside the plugin.
 
 **Trust.** `agents`, `hooks:<event>` and `providers` execute code or commands and must be confirmed at install (non-interactive installs need `--yes`). The daemon loads only enabled plugins whose required capabilities are all confirmed. `plugin update` re-confirms only newly added capabilities. npm sources are packed with `--ignore-scripts`.
 
 **Scopes** (`--scope`): `global` (default), `bot:<appId>` (only that bot's sessions; not effective in Web sessions, which have no bot), `workspace:<absolute path>` (sessions whose cwd is under it). Agents are always merged globally.
+
+**Built-in plugins** <a id="builtin-plugins"></a>. Plugins shipped with Dutydeck live in `builtin-plugins/` (`dist/builtin-plugins` once packaged) and load before installed plugins. There is one today: `alarm`, which provides alert triage and same-alert-rule correlation (group usage is under Group participation). Built-in plugins need no trust confirmation, are always enabled with `global` scope, cannot be uninstalled, and show as 「内置」 (built-in) in `plugin list`. An external plugin with the same name is refused at install, and one already installed is not loaded (`plugin list` and `doctor` say so). A scenario pack in an external plugin that reuses a built-in pack id is skipped; the rest of that plugin still loads.
 
 **Commands.** `/<plugin>:<name>` always works; `/<name>` works if not ambiguous. Names that clash with built-ins are rejected, and agent-native names such as `compact`, `clear`, `init`, `review` only work as `/<plugin>:<name>`.
 
@@ -361,6 +366,8 @@ printf %s "$SECRET" | dutydeck plugin config <plugin> <key> --value-fd 0   # sen
 dutydeck plugin trigger-token <plugin>/<trigger> [--rotate]
 dutydeck plugin update [name] [--yes] | enable <name> | disable <name> | uninstall <name>
 ```
+
+`plugin validate` also checks scenario packs (format, template variables, regexes, parameters) and reports file and field; `install` and `update` do not fail on scenario pack problems but list the packs that will not load and why.
 
 Sources: a local directory, `git+https://…`, `git@…`, `file://…` (`#ref` pins a branch, tag or commit; git sources are pinned by SHA), or `npm:name@version`. Changes take effect after `dutydeck restart`. Data lives under `plugins/` next to the database (`plugins.lock.json`, installed copies, `.data/<name>/`, 0600 `.trigger-tokens.json` and `.config.json`).
 
@@ -392,6 +399,19 @@ dutydeck restart
 
 The scheduled-task condition is `ci_new_failure` (the old `github_new_failure` still reads and works). `GET /api/sessions/:id/automation/ci-providers` lists loaded providers. Auto-fix limits: 3 rounds per incident, stop when the same error fingerprint appears twice, commit SHA checked before pushing, no merge or force-push.
 
+**Writing a scenario pack** <a id="scenario-packs"></a>. A scenario pack tells the bot how to handle one kind of group message, for example starting a triage task when a source bot posts an alert. Each pack is one JSON file in the plugin's `scenarios/` directory; `packages/shared/src/scenarios.ts` is the authoritative schema. Examples: `builtin-plugins/alarm` (`direct` mode with a correlation provider) and `plugins/team-faq` (`model` mode with a context provider). A pack declares parameters (`integer`, `string_list`, `bot_list`; confirmed when enabled in the group and editable on the Web), the trigger, the execution instruction, the phrases and confirmation-card text for turning it on and off in the group, a `/status` line, "why no reply" explanations and Web text. Pack ids are kebab-case, at most 32 characters.
+
+- `direct` mode is triggered only by bot messages. A match skips the decision model; dedupe and the hourly cap decide whether to start a task, which runs in the name of the person who confirmed in the group, through the same path as an @ to the bot. The contract is enforced, and leaving something out only gets you the default, never "unlimited": only the source bots listed in a `bot_list` parameter with `role: "source"`, never the bot itself; a requester is required (enabling only happens through the in-group confirmation card; the Web can only edit a confirmed binding); `dedupe` is either the core `source_text_v1` (source plus text with links, numbers, long hex strings and whitespace removed, so changing times, values and instance ids still count as the same alert) or the pack's own provider, with a 1–168 hour dedupe window parameter and a 1–30 hourly cap parameter; in multi-bot groups only the responder acts; every outcome (started, filtered, duplicate, over the cap, not the responder, no requester, abstained on error) is recorded so "why no reply" can find it.
+- `model` mode is triggered by human messages and hands the match to the participation decision model, with the pack's guidance and context. It needs a Dutydeck version that supports it; this version rejects such packs at load with a diagnostic.
+
+Providers are registered in `register(api)` with `api.registerScenarioProvider(provider)`: `match` (extra matching or a dedupe key), `correlationKey` (the key for finding an earlier turn) and `context` (context for `model` mode). They are plugin code and are confirmed together with `providers`. Every call has a deadline (`match` 500 ms, 1 s in total for one correlation round, `context` 5 s by default and at most 15 s); late results are discarded. A pack whose provider is not registered is skipped.
+
+Regexes in triggers and phrases allow only the `i`, `m`, `s`, `u` flags (the host adds `g` for capture-all) and at most 1000 characters of source. They run in an isolated host thread with a 200 ms limit per run, on at most the first 4000 characters of input. `validate` only warns about patterns that may backtrack catastrophically; safety comes from isolation and the timeout.
+
+Text fields accept `{variable}` and one level of conditionals `{variable?when set:when empty}`, and each position allows a fixed set of variables: `execution.instruction` and `execution.intro` take `{source}` (the source bot's name; a `model` instruction takes none); `correlation.prompt` takes `{date}`; `correlation.cardLine` takes `{date}`, `{headline}`, `{url}`; `confirm.enableSummary`, `disableSummary` and `enabledResult` take `{summary}` and the parameters; `status.summary` takes the parameters; `explain.*` takes `{time}`, `{reason}`, `{snippet}`; `web.description` takes `{requesterId}` and the parameters. Titles, nouns, decision guidance, parameter labels and `reasons` are literal text. Message text and model output never go into an instruction position: the source message and the earlier conclusion follow the instruction as untrusted material, and the source bot's name has line breaks and bracket characters removed before it is inserted.
+
+On errors a pack abstains rather than guessing. A pack that fails validation is skipped while the rest of the plugin loads, and `plugin list` and `doctor` show why; a pack whose provider is missing or whose id clashes is also skipped, with the reason in the daemon log. A regex or provider error or timeout at run time makes that pack abstain for that message; `direct` records an abstained outcome and starts nothing. When one message matches several `direct` packs, only the first by pack id is handled.
+
 **Upgrading from env-based CI.** `DUTYDECK_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` and `DUTYDECK_CODEBASE_WEBHOOK_SECRET` no longer work. Install the plugin, set `github.token` / `github.webhook_secret` / `codebase.webhook_secret` with `--value-fd 0`, and `dutydeck restart`. Otherwise old waits and `github_new_failure` schedules stop working, the Web shows "no CI plugin installed", and `/api/hooks/codebase` returns 404. There is no automatic migration.
 
 **Security.** Only install plugins you trust; agents, hooks and providers run on your machine. Hook processes inherit the daemon's environment. **Expose trigger URLs only over HTTPS or an internal network**: token/HMAC auth carries no timestamp, so a captured request can be replayed after the 24-hour dedupe window. Untrusted wrapping reduces prompt-injection risk but does not eliminate it; don't point an external trigger at a `full-trust` bot.
@@ -418,6 +438,9 @@ dutydeck settings bot show cli_xxx
 dutydeck settings bot set cli_xxx adhdMode=true
 dutydeck settings bot set cli_xxx notifyQuietHours=22:00-08:00
 dutydeck settings group set oc_xxx participation=selective
+dutydeck settings group set oc_xxx 'scenarios={"alarm":{"enabled":true,"params":{"levels":["P0","P1"]}}}'
+#   params lists only the keys to change; {"<pack id>":null} removes a binding; `group show` lists packs and params.
+#   A direct pack must be confirmed in the group once first. alarm=<JSON> is a deprecated alias kept for one release.
 dutydeck settings usage set-cap 50 --app cli_xxx       # monthly USD cap
 dutydeck settings terminal-backend [tmux|herdr]
 
@@ -485,6 +508,8 @@ Old clients ignore the additional decision field. Corrupt legacy forwarding stil
 - **GitHub read limits**: PR issue and inline comments support pagination, with a shared limit of 100 pages and 8 MiB. Exceeding it fails the whole read instead of returning partial comments. Each JSON response is limited to 2 MiB and each log download to 8 MiB of actual bytes; oversized reads are cancelled. Oversized logs are omitted while failed job and step summaries remain available.
 - **CLI startup**: reduced startup overhead for local management commands such as `secret`.
 - **CI env vars moved to plugins**: see the upgrade paragraph under Plugins.
+- **Alert triage is now the built-in scenario pack `alarm`.** The group phrases, confirmation card, sources, levels, dedupe and hourly cap are unchanged; existing subscriptions are converted to `alarm` bindings during the upgrade, and confirmation cards sent before the upgrade still work. Three things change: the alert text in the triage prompt now follows the instruction as untrusted material; the earlier conclusion that correlation passes to the agent is untrusted material too; duplicate checks read only this pack's triage records, so a busy group no longer makes the same alert get triaged twice. The CLI uses `scenarios=`; `alarm=` is kept for one release.
+- **After the database reaches v38, older versions cannot open it.** v38 stores group duties as per-pack bindings. Going back to an older version fails at start with `DATABASE_SCHEMA_TOO_NEW`. If something goes wrong, fix forward or restore the database snapshot taken before the deploy; every write after that snapshot is lost.
 - **Per-turn changes could be missed** when a file was edited within the same second as the last index write and kept the same size (affecting "View changes" and the `/pr` file list). Fixed.
 
 ---

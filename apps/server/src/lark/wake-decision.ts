@@ -15,7 +15,7 @@ export interface WakeFacts {
   hasMentions: boolean;
   /** 消息引用了一个还在等待的工作流交互。 */
   quotedWorkflow: boolean;
-  /** 群参与判为 act、告警初筛或恢复时按显式请求受理。 */
+  /** 群参与判为 act、direct 场景请求或恢复时按显式请求受理。 */
   adopted: boolean;
   recovering: boolean;
   /** 已识别的斜杠命令。 */
@@ -24,8 +24,8 @@ export interface WakeFacts {
   mentionPolicy: WakeMentionPolicy;
   /** 消息在本机器人接手的话题里（含续接了发起人顶层会话的话题）。 */
   ownedTopic: boolean;
-  /** 告警初筛派来的消息：不经群参与观察，也不过机器人回合门禁。 */
-  triage: boolean;
+  /** direct 场景包派来的消息：不经群参与观察，也不过机器人回合门禁（包自带去重和每小时上限）。 */
+  directScenario: boolean;
   /** 发起人在同一话题里直接回复仍在等待的提问。 */
   pendingAskContinuation: boolean;
   /** 发起人在自己请求的话题里免 @ 续说。 */
@@ -92,7 +92,7 @@ export function wakeSignals(facts: WakeFacts): WakeSignals {
   };
 }
 
-/** participation 为 undefined 表示没交给群参与（告警初筛或没接群参与）。 */
+/** participation 为 undefined 表示没交给群参与（direct 场景请求或没接群参与）。 */
 export function decideWake(facts: WakeFacts, participation?: { enabled: boolean; handled?: boolean }): WakeDecision {
   const signals = wakeSignals(facts);
   // 改档短语、「为什么没回」已由群参与直接回应；「没问你」这类纠正只记录，不当成新请求。
@@ -104,5 +104,5 @@ export function decideWake(facts: WakeFacts, participation?: { enabled: boolean;
   const reason = legacyWakeReason(facts)
     ?? (facts.adopted ? 'adopted' : facts.pendingAskContinuation ? 'pending_ask' : participation?.enabled && facts.requestContinuation ? 'request_continuation' : undefined);
   if (!reason) return { wake: false, reason: 'not_addressed' };
-  return { wake: true, reason, guardBotTurn: facts.chatType === 'group' && !facts.triage };
+  return { wake: true, reason, guardBotTurn: facts.chatType === 'group' && !facts.directScenario };
 }

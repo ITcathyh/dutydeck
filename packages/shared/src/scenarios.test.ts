@@ -109,6 +109,14 @@ describe('scenario pack format', () => {
     expect(fieldsOf({ ...clone(alarm), phrases: { ...alarm.phrases, examples: { enable: ['告警初筛'.repeat(11)], disable: alarm.phrases.examples.disable } } })).toContain('phrases.examples.enable.0');
   });
 
+  it('caps pack ids at 32 characters so confirm.scenario:<id> fits the 64-character action kind', () => {
+    const id = `a${'-b'.repeat(15)}c`;
+    expect(id).toHaveLength(32);
+    expect(validateScenarioPack({ ...clone(alarm), id }).issues).toEqual([]);
+    expect(issueFor({ ...clone(alarm), id: `${id}d` }, 'id')).toBeDefined();
+    expect(`confirm.scenario:${id}`.length).toBeLessThanOrEqual(64);
+  });
+
   it('allows only the variables of each template position; literal fields take no variables', () => {
     expect(issueFor({ ...clone(alarm), execution: { ...alarm.execution, instruction: '告警原文：{text}' } }, 'execution.instruction')).toContain('{text}');
     expect(fieldsOf({ ...clone(teamFaq), execution: { instruction: '来源 {source}' } })).toContain('execution.instruction');

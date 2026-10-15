@@ -1,48 +1,79 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { Check } from 'lucide-react';
-import { ApiError, collaborationApi, type CollaborationDuty, type UpdateCollaborationDutyInput } from '../api';
+import type { ScenarioParam } from '@dutydeck/shared';
+import { ApiError, collaborationApi, type CollaborationDuty, type CollaborationScenario, type UpdateCollaborationDutyInput } from '../api';
 import { Banner, Button, Field, Input, Select } from './primitives';
 
 type Responder = 'none' | 'self' | 'other';
-type Draft = { responder: Responder; enabled: boolean; sources: string; levels: string; dedupeHours: number; maxPerHour: number };
+/** 一个场景包的草稿：参数按输入框里的文字存，提交时再按类型转换。 */
+type PackDraft = { enabled: boolean; params: Record<string, string> };
+type Draft = { responder: Responder; packs: Record<string, PackDraft> };
 
 const words = (text: string) => [...new Set(text.split(/[,，\s]+/).map(item => item.trim()).filter(Boolean))];
-const clamp = (value: string, min: number, max: number) => Math.min(max, Math.max(min, Math.round(Number(value)) || min));
 
-function draftOf(duty: CollaborationDuty, appId: string): Draft {
+/** integer 显示成数字，string_list、bot_list 用逗号分隔（bot_list 只显示 appId）。没有绑定时用包的默认值。 */
+function paramText(param: ScenarioParam, value: unknown): string {
+  if (param.type === 'integer') return String(typeof value === 'number' ? value : param.default);
+  const list = Array.isArray(value) ? value : param.type === 'string_list' ? param.default : [];
+  return list.map(item => param.type === 'bot_list' ? (item as { appId: string }).appId : String(item)).join(', ');
+}
+
+function packDraftOf(scenario: CollaborationScenario): PackDraft {
   return {
-    responder: !duty.responder ? 'none' : duty.responder.appId === appId ? 'self' : 'other',
-    enabled: duty.alarm?.enabled ?? false,
-    sources: duty.alarm?.sources.map(source => source.appId).join(', ') ?? '',
-    levels: duty.alarm?.levels.join(', ') ?? '',
-    dedupeHours: duty.alarm?.dedupeHours ?? 6,
-    maxPerHour: duty.alarm?.maxPerHour ?? 3
+    enabled: scenario.binding?.enabled ?? false,
+    params: Object.fromEntries(Object.entries(scenario.params).map(([name, param]) => [name, paramText(param, scenario.binding?.params[name])]))
   };
 }
 
-/** 群设置里的分工：接话人和告警初筛订阅。只提交改动的那一项。 */
-export function GroupDutySettings({ appId, chatId, botName, duty, onSaved }: { appId: string; chatId: string; botName?: string; duty: CollaborationDuty; onSaved(): Promise<unknown> }) {
-  const saved = draftOf(duty, appId);
+function draftOf(duty: CollaborationDuty, scenarios: CollaborationScenario[], appId: string): Draft {
+  return {
+    responder: !duty.responder ? 'none' : duty.responder.appId === appId ? 'self' : 'other',
+    packs: Object.fromEntries(scenarios.map(scenario => [scenario.id, packDraftOf(scenario)]))
+  };
+}
+
+/** 输入框文字转成参数值；bot_list 的名字只用于展示，沿用已有绑定里的。取值范围由服务端按包的声明校验。 */
+function paramValue(param: ScenarioParam, text: string, current: unknown): unknown {
+  if (param.type === 'integer') return Number(text);
+  if (param.type === 'string_list') return words(text);
+  const names = new Map(Array.isArray(current) ? current.map((item: { appId: string; name?: string }) => [item.appId, item.name]) : []);
+  return words(text).map(id => { const name = names.get(id); return { appId: id, ...(name ? { name } : {}) }; });
+}
+
+/** 开启时来源机器人参数（role 为 source 的 bot_list）至少要填一个。 */
+const missingSourceParams = (scenario: CollaborationScenario, pack: PackDraft) => pack.enabled
+  ? Object.entries(scenario.params).filter(([name, param]) => param.type === 'bot_list' && param.role === 'source' && !words(pack.params[name] ?? '').length).map(([name]) => name)
+  : [];
+
+/** 群设置里的分工：接话人和各场景包的开关与参数。只提交改动的那几项。 */
+export function GroupDutySettings({ appId, chatId, botName, duty, scenarios, onSaved }: { appId: string; chatId: string; botName?: string; duty: CollaborationDuty; scenarios: CollaborationScenario[]; onSaved(): Promise<unknown> }) {
+  const saved = draftOf(duty, scenarios, appId);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: 'success' | 'warning'; text: string } | null>(null);
   const value = draft ?? saved;
   const update = (patch: Partial<Draft>) => { setDraft({ ...value, ...patch }); setNotice(null); };
-  const alarmChanged = (['enabled', 'sources', 'levels', 'dedupeHours', 'maxPerHour'] as const).some(key => value[key] !== saved[key]);
+  // 编辑中概览新增了包时，草稿里还没有它，用已保存的值。
+  const packOf = (id: string) => value.packs[id] ?? saved.packs[id]!;
+  const updatePack = (id: string, patch: Partial<PackDraft>) => update({ packs: { ...value.packs, [id]: { ...packOf(id), ...patch } } });
   const responderChanged = value.responder !== saved.responder;
-  const sources = words(value.sources);
-  const missingSource = value.enabled && !sources.length;
+  const changedParams = (id: string) => Object.keys(packOf(id).params).filter(name => packOf(id).params[name] !== saved.packs[id]!.params[name]);
+  const changedPacks = scenarios.filter(scenario => packOf(scenario.id).enabled !== saved.packs[scenario.id]!.enabled || changedParams(scenario.id).length);
+  const blocked = changedPacks.some(scenario => missingSourceParams(scenario, packOf(scenario.id)).length);
   const other = duty.responder && duty.responder.appId !== appId ? duty.responder : undefined;
 
   const save = useMutation({
     mutationFn: () => {
       const body: UpdateCollaborationDutyInput = { expectedRevision: duty.revision };
       if (responderChanged) body.responder = value.responder === 'self' ? 'self' : null;
-      // 来源名字只用于展示，沿用已有订阅里的。
-      const names = new Map(duty.alarm?.sources.map(source => [source.appId, source.name]));
-      if (alarmChanged) body.alarm = { enabled: value.enabled, levels: words(value.levels), dedupeHours: value.dedupeHours, maxPerHour: value.maxPerHour,
-        sources: sources.map(id => { const name = names.get(id); return { appId: id, ...(name ? { name } : {}) }; }) };
+      // 参数只给改动的键，服务端按包默认 → 已有绑定 → 这次的值合并。
+      if (changedPacks.length) body.scenarios = Object.fromEntries(changedPacks.map(scenario => {
+        const pack = packOf(scenario.id);
+        const names = changedParams(scenario.id);
+        return [scenario.id, { enabled: pack.enabled, ...(names.length ? { params: Object.fromEntries(names.map(name =>
+          [name, paramValue(scenario.params[name]!, pack.params[name]!, scenario.binding?.params[name])])) } : {}) }];
+      }));
       return collaborationApi.updateDuty(appId, chatId, body);
     },
     onSuccess: async result => {
@@ -70,40 +101,43 @@ export function GroupDutySettings({ appId, chatId, botName, duty, onSaved }: { a
           {other && <option value="other" disabled>{other.name ?? other.appId}（另一个机器人，在群里声明的）</option>}
         </Select>
       </Field>
-      <label className="flex cursor-pointer items-start gap-2">
-        <input
-          type="checkbox"
-          className="mt-0.5 h-4 w-4 rounded border-default text-action focus:ring-action"
-          checked={value.enabled}
-          disabled={!duty.alarm?.requesterId && !value.enabled}
-          onChange={e => update({ enabled: e.target.checked })}
-        />
-        <span>
-          <span className="block text-caption font-semibold text-primary">告警初筛</span>
-          <span className="mt-1 block text-meta text-subtle">
-            {duty.alarm?.requesterId
-              ? `来源机器人发的告警命中后，在告警话题里起初筛任务，以在群里确认订阅的人（${duty.alarm.requesterId}）的名义发起。`
-              : '开启前先在群里 @机器人 说「告警来了先帮我看看」并点确认：初筛任务要以确认人的名义发起。确认后可以在这里改来源和级别。'}
-          </span>
-        </span>
-      </label>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="来源机器人 app_id" hint="多个用逗号分隔，只有这些机器人发的消息会初筛。" {...(missingSource ? { error: '开启时至少填一个来源' } : {})}>
-          <Input value={value.sources} onChange={e => update({ sources: e.target.value })} placeholder="cli_xxx" />
-        </Field>
-        <Field label="级别关键字" hint="例如 P0, P1；留空表示不限级别。">
-          <Input value={value.levels} onChange={e => update({ levels: e.target.value })} />
-        </Field>
-        <Field label="去重窗口（小时，1–168）">
-          <Input type="number" min={1} max={168} className="w-32" value={value.dedupeHours} onChange={e => update({ dedupeHours: clamp(e.target.value, 1, 168) })} />
-        </Field>
-        <Field label="每小时最多初筛（1–30）">
-          <Input type="number" min={1} max={30} className="w-32" value={value.maxPerHour} onChange={e => update({ maxPerHour: clamp(e.target.value, 1, 30) })} />
-        </Field>
-      </div>
+      {scenarios.map(scenario => {
+        const pack = packOf(scenario.id);
+        // direct 包要以在群里确认过的人的名义发起；大版本过期的要先在群里重新确认。已开着的仍可以关掉。
+        const needsRequester = scenario.requiresRequester && !scenario.binding?.requesterId;
+        const missing = missingSourceParams(scenario, pack);
+        return (
+          <div key={scenario.id} className="space-y-4 border-t border-subtle pt-4">
+            <label className="flex cursor-pointer items-start gap-2">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 rounded border-default text-action focus:ring-action"
+                checked={pack.enabled}
+                disabled={(needsRequester || scenario.versionStale) && !pack.enabled}
+                onChange={e => updatePack(scenario.id, { enabled: e.target.checked })}
+              />
+              <span>
+                <span className="block text-caption font-semibold text-primary">{scenario.title}</span>
+                <span className="mt-1 block text-meta text-subtle">{needsRequester ? scenario.description : scenario.webDescription ?? scenario.description}</span>
+                {needsRequester && <span className="mt-1 block text-meta text-subtle">{scenario.enableHint ?? '请先在群里 @机器人 说开启并点确认，之后可以在这里改设置。'}</span>}
+                {scenario.versionStale && <span className="mt-1 block text-meta text-warning">场景包已升级到 v{scenario.version}，要先在群里重新确认才能开启。</span>}
+              </span>
+            </label>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {Object.entries(scenario.params).map(([name, param]) => (
+                <Field key={name} label={param.label} {...(param.hint ? { hint: param.hint } : {})} {...(missing.includes(name) ? { error: '开启时至少填一个来源' } : {})}>
+                  {param.type === 'integer'
+                    ? <Input type="number" min={param.min} max={param.max} className="w-32" value={pack.params[name]} onChange={e => updatePack(scenario.id, { params: { ...pack.params, [name]: e.target.value } })} />
+                    : <Input value={pack.params[name]} onChange={e => updatePack(scenario.id, { params: { ...pack.params, [name]: e.target.value } })} {...(param.type === 'bot_list' ? { placeholder: 'cli_xxx' } : {})} />}
+                </Field>
+              ))}
+            </div>
+          </div>
+        );
+      })}
       <div className="flex items-center justify-end gap-2">
         <Button variant="secondary" disabled={!draft || save.isPending} onClick={() => { setDraft(null); setError(null); }}>放弃修改</Button>
-        <Button variant="primary" disabled={!(responderChanged || alarmChanged) || missingSource} loading={save.isPending} onClick={() => save.mutate()}>
+        <Button variant="primary" disabled={!(responderChanged || changedPacks.length) || blocked} loading={save.isPending} onClick={() => save.mutate()}>
           <Check size={14} className="mr-1.5" />
           保存分工
         </Button>

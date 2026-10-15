@@ -52,8 +52,12 @@ import {
   type UpdateCollaborationSettingsInput,
   type UpdateDecisionInput,
   type UpdateFollowupInput,
-  type UpdateMandateInput
+  type UpdateMandateInput,
+  type ScenarioBinding,
+  SCENARIO_WINDOW_LIMIT,
+  SCENARIO_RECORD
 } from '@dutydeck/shared';
+import { fromLegacyDecision, legacyScenarioGate, retireLegacyDutyColumns, withLegacyDutyScenarios } from './scenario-legacy.js';
 
 const DEFAULT_SETTINGS_UPDATED_AT = '1970-01-01T00:00:00.000Z';
 const DEFAULT_OBSERVATION_WINDOW = 30;
@@ -242,18 +246,34 @@ interface DutyRow {
   chat_id: string;
   revision: number;
   responder_json: string | null;
-  alarm_json: string | null;
+  scenarios_json: string | null;
   updated_at: string;
 }
 
+/** 空的绑定集合按「没有」处理：存 NULL，读出来也不带 scenarios 键。 */
+const nonEmpty = (scenarios: Record<string, ScenarioBinding> | undefined) => scenarios && Object.keys(scenarios).length ? scenarios : undefined;
+
 function rowToDuty(row: DutyRow): CollaborationDuty {
+  // 升级前存下、迁移时没转成的旧字段由兼容读取补进 scenarios，见 scenario-legacy.ts。
+  const scenarios = nonEmpty(withLegacyDutyScenarios(row, row.scenarios_json ? JSON.parse(row.scenarios_json) : undefined));
   return collaborationDutySchema.parse({
     scope: { appId: row.app_id, chatId: row.chat_id },
     revision: row.revision,
     ...(row.responder_json ? { responder: JSON.parse(row.responder_json) } : {}),
-    ...(row.alarm_json ? { alarm: JSON.parse(row.alarm_json) } : {}),
+    ...(scenarios ? { scenarios } : {}),
     updatedAt: row.updated_at
   });
+}
+
+/** 按包合并：值为 null 删掉那个包的绑定，没传的包保持原样。 */
+function mergeScenarios(current: Record<string, ScenarioBinding> | undefined, patch: Record<string, ScenarioBinding | null> | undefined) {
+  if (!patch) return current;
+  const merged = { ...current };
+  for (const [packId, binding] of Object.entries(patch)) {
+    if (binding) merged[packId] = binding;
+    else delete merged[packId];
+  }
+  return nonEmpty(merged);
 }
 
 interface BootstrapRow {
@@ -382,8 +402,9 @@ interface DecisionRow {
   created_at: string;
 }
 
+/** 升级前的旧判定记录在这里映射成当前结构（库里不改写），见 scenario-legacy.ts。 */
 function rowToDecision(row: DecisionRow): CollaborationDecision {
-  return collaborationDecisionSchema.parse({
+  return fromLegacyDecision(collaborationDecisionSchema.parse({
     id: row.id,
     scope: { appId: row.app_id, chatId: row.chat_id },
     contextRevision: row.context_revision,
@@ -395,7 +416,7 @@ function rowToDecision(row: DecisionRow): CollaborationDecision {
     response: row.response ?? undefined,
     inputSnapshot: JSON.parse(row.input_snapshot_json),
     createdAt: row.created_at
-  });
+  }));
 }
 
 interface FeedbackRow {
@@ -627,13 +648,14 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           throw new RuntimeError('COLLABORATION_REVISION_CONFLICT', `Duty revision conflict: expected ${validated.expectedRevision}, current ${revision}`, 409);
         }
         const responder = validated.responder === undefined ? current?.responder : validated.responder ?? undefined;
-        const alarm = validated.alarm === undefined ? current?.alarm : validated.alarm ?? undefined;
-        const duty = collaborationDutySchema.parse({ scope, revision: revision + 1, ...(responder ? { responder } : {}), ...(alarm ? { alarm } : {}), updatedAt: now() });
+        const scenarios = mergeScenarios(current?.scenarios, validated.scenarios);
+        const duty = collaborationDutySchema.parse({ scope, revision: revision + 1, ...(responder ? { responder } : {}), ...(scenarios ? { scenarios } : {}), updatedAt: now() });
         sqlite.prepare(`
-          INSERT INTO collaboration_duties (app_id, chat_id, revision, responder_json, alarm_json, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO collaboration_duties (app_id, chat_id, revision, responder_json, scenarios_json, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(app_id, chat_id) DO UPDATE SET revision = excluded.revision, responder_json = excluded.responder_json,
-            alarm_json = excluded.alarm_json, updated_by = excluded.updated_by, updated_at = excluded.updated_at
-        `).run(scope.appId, scope.chatId, duty.revision, responder ? JSON.stringify(responder) : null, alarm ? JSON.stringify(alarm) : null, actorId.slice(0, 128), duty.updatedAt);
+            scenarios_json = excluded.scenarios_json, updated_by = excluded.updated_by, updated_at = excluded.updated_at
+        `).run(scope.appId, scope.chatId, duty.revision, responder ? JSON.stringify(responder) : null, scenarios ? JSON.stringify(scenarios) : null, actorId.slice(0, 128), duty.updatedAt);
+        retireLegacyDutyColumns(sqlite, scope, [...Object.keys(scenarios ?? {}), ...Object.keys(validated.scenarios ?? {})]);
         recordActivity(sqlite, { id: makeId('act'), scope, entityKind: 'settings', entityId: `${scope.appId}:${scope.chatId}:duty`.slice(0, 128), revision: duty.revision,
           actorId, sourceRefs: [], provenance: 'confirmed', summary: 'Updated group duty', createdAt: duty.updatedAt });
         return duty;
@@ -1378,6 +1400,20 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
         LIMIT ?
       `).all(scope.appId, scope.chatId, maxLimit + 1) as DecisionRow[];
       return markTruncated(rows.slice(0, maxLimit).map(rowToDecision), rows.length > maxLimit);
+    },
+
+    async listScenarioRecords(scope: CollaborationScope, query: { packId: string; since: string; limit: number }): Promise<ListedItems<CollaborationDecision>> {
+      const limit = Math.min(SCENARIO_WINDOW_LIMIT, Math.max(1, Math.trunc(query.limit)));
+      // 旧版本的记录 gate 不同（见 scenario-legacy.ts），读出时已映射成本包的场景记录。
+      const rows = sqlite.prepare(`
+        SELECT * FROM collaboration_decisions
+        WHERE app_id = ? AND chat_id = ? AND created_at >= ? AND action = 'act' AND status != 'failed'
+          AND ((json_extract(input_snapshot_json, '$.gate') = ? AND json_extract(input_snapshot_json, '$.scenario.packId') = ?)
+            OR json_extract(input_snapshot_json, '$.gate') = ?)
+        ORDER BY created_at DESC
+        LIMIT ?
+      `).all(scope.appId, scope.chatId, query.since, SCENARIO_RECORD, query.packId, legacyScenarioGate(query.packId) ?? null, limit + 1) as DecisionRow[];
+      return markTruncated(rows.slice(0, limit).map(rowToDecision), rows.length > limit);
     },
 
     async updateDecision(

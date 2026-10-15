@@ -34,7 +34,8 @@ describe('PluginHost', () => {
   it('changes nothing when no plugin is installed', async () => {
     const loaded = await loadDaemonPlugins({ DUTYDECK_DATABASE_URL: join(dataDir, 'dutydeck.db') });
     expect(loaded.host).toBeUndefined();
-    expect(loaded.scenarios.list()).toEqual([]);
+    // 只有内置场景包（告警）时也不接线。
+    expect(loaded.scenarios.list().map(entry => entry.pack.id)).toEqual(['alarm']);
     const host = await PluginHost.load({ dataDir });
     expect(host.diagnostics).toEqual([]);
     expect(host.agents).toEqual([]);
@@ -54,7 +55,7 @@ describe('PluginHost', () => {
     // 安装后插件目录里多出一个 hook：未经确认的能力让整个插件不加载
     await writePlugin(store.pluginDir('hello'), { 'hooks/hooks.json': JSON.stringify({ 'task.received': [{ command: 'true', timeout: 1000 }], notify: [{ command: 'true', timeout: 1000 }] }) });
 
-    const host = await PluginHost.load({ dataDir });
+    const host = await PluginHost.load({ dataDir, builtinRoot: join(temp, 'no-builtin') });
     expect(host.active.map(item => item.entry.name)).toEqual(['good']);
     expect(host.agents.map(agent => agent.id)).toEqual(['good-agent']);
     expect(host.agents.map(agent => agent.origin)).toEqual(['plugin:good']);
@@ -87,7 +88,7 @@ describe('PluginHost', () => {
     await writePlugin(join(temp, 'b'), { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'b-ci', providers: 'index.mjs' }), 'index.mjs': `export default api => { api.registerCiProvider(${provider('b-only')}); api.registerCiProvider(${provider('shared')}); }` });
     await store.install(join(temp, 'a'), { yes: true });
     await store.install(join(temp, 'b'), { yes: true });
-    const host = await PluginHost.load({ dataDir });
+    const host = await PluginHost.load({ dataDir, builtinRoot: join(temp, 'no-builtin') });
     expect(host.active.map(item => item.entry.name)).toEqual(['a-ci']);
     expect(host.ciProviders.list().map(item => item.provider.id)).toEqual(['shared']);
     expect(host.diagnostics).toEqual([{ plugin: 'b-ci', message: expect.stringContaining('a-ci') }]);
@@ -136,21 +137,23 @@ describe('pluginDoctorChecks', () => {
   it('reports nothing without plugins, then setup gaps, untrusted capabilities and broken plugins', async () => {
     const { pluginDoctorChecks } = await import('./doctor.js');
     const dataDir = join(temp, 'data');
-    expect(await pluginDoctorChecks(dataDir)).toEqual([]);
+    // 只看外部插件：内置插件目录指向空目录。
+    const builtinRoot = join(temp, 'no-builtin');
+    expect(await pluginDoctorChecks(dataDir, builtinRoot)).toEqual([]);
     const store = new PluginStore(dataDir);
     await store.install(examplePlugin, { yes: true });
-    expect(await pluginDoctorChecks(dataDir)).toEqual([expect.objectContaining({ id: 'plugins.hello', level: 'warn', detail: expect.stringContaining('缺少配置') })]);
+    expect(await pluginDoctorChecks(dataDir, builtinRoot)).toEqual([expect.objectContaining({ id: 'plugins.hello', level: 'warn', detail: expect.stringContaining('缺少配置') })]);
     await store.setConfig('hello', 'bot_app_id', Buffer.from('cli_a'));
     await store.setConfig('hello', 'chat_id', Buffer.from('oc_b'));
-    expect(await pluginDoctorChecks(dataDir)).toEqual([expect.objectContaining({ level: 'warn', command: 'dutydeck plugin trigger-token hello/ping' })]);
+    expect(await pluginDoctorChecks(dataDir, builtinRoot)).toEqual([expect.objectContaining({ level: 'warn', command: 'dutydeck plugin trigger-token hello/ping' })]);
     await store.ensureTriggerToken('hello', 'ping');
-    expect(await pluginDoctorChecks(dataDir)).toEqual([expect.objectContaining({ level: 'ok' })]);
+    expect(await pluginDoctorChecks(dataDir, builtinRoot)).toEqual([expect.objectContaining({ level: 'ok' })]);
     await writePlugin(store.pluginDir('hello'), { 'hooks/hooks.json': JSON.stringify({ notify: [{ command: 'true', timeout: 1000 }] }) });
-    expect(await pluginDoctorChecks(dataDir)).toEqual([expect.objectContaining({ level: 'warn', command: 'dutydeck plugin update hello' })]);
+    expect(await pluginDoctorChecks(dataDir, builtinRoot)).toEqual([expect.objectContaining({ level: 'warn', command: 'dutydeck plugin update hello' })]);
     await writePlugin(store.pluginDir('hello'), { '.dutydeck-plugin/plugin.json': '{' });
-    expect(await pluginDoctorChecks(dataDir)).toEqual([expect.objectContaining({ level: 'fail', command: 'dutydeck plugin disable hello' })]);
+    expect(await pluginDoctorChecks(dataDir, builtinRoot)).toEqual([expect.objectContaining({ level: 'fail', command: 'dutydeck plugin disable hello' })]);
     await store.setEnabled('hello', false);
-    expect(await pluginDoctorChecks(dataDir)).toEqual([expect.objectContaining({ level: 'skip' })]);
+    expect(await pluginDoctorChecks(dataDir, builtinRoot)).toEqual([expect.objectContaining({ level: 'skip' })]);
   });
 });
 

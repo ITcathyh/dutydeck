@@ -1,6 +1,7 @@
 import { runLarkEventPipeline } from './event-pipeline.js';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
 import type { LarkGroupParticipation } from './group-participation.js';
+import type { LarkScenarioAdoption } from './scenario-direct.js';
 import type { ExecutionActor, ExecutionRecoveryDecision, UnknownTaskFacts, UnknownTaskResolution } from '@dutydeck/shared';
 import type { SessionAutomationService } from '../session-automation.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
@@ -97,9 +98,11 @@ export interface LarkMessageEvent {
   senderType?: string;
   mentions: Array<{ key: string; name: string; openId?: string; mentionedType?: string }>;
   /**
-   * 告警订阅命中后由群参与合成的初筛请求：值是放在告警原文前的初筛约定。这类事件以订阅确认人的身份、
-   * 在告警话题里发起，随入站记录持久化，重启恢复时照样按初筛处理。
+   * direct 场景包命中后由群参与合成的请求：带已渲染的指令。这类事件以绑定确认人的身份、在来源消息的话题里发起，
+   * 随入站记录持久化，重启恢复时照样按场景请求处理。只有内部 dispatcher 能设置，原始接收和编辑重开时都剥掉。
    */
+  scenario?: LarkScenarioAdoption;
+  /** 升级前的入站记录里的同类字段（放在原文前的指令），只读不写，见 scenario-legacy.ts。 */
   triage?: string;
 }
 

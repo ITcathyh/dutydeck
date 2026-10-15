@@ -11,7 +11,9 @@ import { mergeGroupTaskWatermark } from './group-task-context.js';
 import { describeLarkTaskRecovery, larkAgentUnavailableText, larkQuietSettledNote, larkReliability, larkStallNote, larkSteeringUnknownNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import { validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
 import { collectLarkTaskContext, larkMaterialMessageIds } from './task-context.js';
-import { findLarkAlertRecall, larkAlertKey, larkAlertRecallPrompt, type LarkAlertRecall } from './alert-recall.js';
+import { scenarioRecallInjection, type LarkScenarioRecallLine } from './scenario-recall.js';
+import { splitDirectScenarioRequest } from './scenario-direct.js';
+import { larkScenarioAdoptionOf } from './scenario-legacy.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type LarkMemoryScope } from './memory.js';
 import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
@@ -839,7 +841,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const beforeTurnSend = () => {
       if (this.stopped || task.turn !== currentTurn) throw new LarkServiceError('LARK_WRITE_OBSOLETE', '飞书写入已失去当前轮次归属。', 409);
     };
-    const cardContext: { beforeSend: () => void; agentName: string; permissionMode: ReturnType<typeof larkPermissionMode>; workspace?: string; alertRecall?: LarkAlertRecall } = { beforeSend: beforeTurnSend, agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
+    const cardContext: { beforeSend: () => void; agentName: string; permissionMode: ReturnType<typeof larkPermissionMode>; workspace?: string; scenarioRecall?: LarkScenarioRecallLine } = { beforeSend: beforeTurnSend, agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
     const clearAcknowledgement = () => this.clearAcknowledgementReaction(task);
     /** 执行前就失败：结束待办记录、发失败卡、撤掉收到表情。inboxReason 缺省同 taskName。 */
     const failBeforeRun = async (taskName: string, markdown: string, idempotencyKey: string, options: { inboxReason?: string; readOnly?: true } = {}) => {
@@ -1063,16 +1065,17 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       : [];
     if (!resumeTask) task.startedAt = Date.now();
     task.interruptRequested = false;
-    // 材料里有告警卡、这个 Bot 之前在本群别的话题查过同一告警：上次的结论带给 Agent，过程卡顶部挂一行。读不到只少这一项。
-    task.alertRecall = undefined;
-    if (this.cardMappings && larkAlertKey(materialPrompt)) {
+    // 场景包的关联：这个 Bot 之前在本群别的话题处理过同一件事，上次的结论带给 Agent，过程卡顶部挂一行。读不到只少这一项。
+    task.scenarioRecall = undefined;
+    if (this.cardMappings && this.workflowOptions.participation) {
+      const cardMappings = this.cardMappings;
       try {
-        task.alertRecall = findLarkAlertRecall({ materialPrompt, chatId: event.chatId, scopeId: task.scopeId, before: task.startedAt!,
-          mappings: await this.cardMappings.list(larkCardChannel(config.appId)), brand: config.brand, webBaseUrl: config.webBaseUrl });
+        task.scenarioRecall = await this.workflowOptions.participation.scenarioRecall({ appId: config.appId, chatId: event.chatId }, config, { materialPrompt, scopeId: task.scopeId, before: task.startedAt!,
+          mappings: () => cardMappings.list(larkCardChannel(config.appId)), brand: config.brand, webBaseUrl: config.webBaseUrl });
       } catch (error) {
-        this.log.warn({ error, taskId: task.id }, '查找上次同一告警失败，本轮不带上次结论');
+        this.log.warn({ error, taskId: task.id }, '查找上一轮关联失败，本轮不带上次结论');
       }
-      if (task.alertRecall) cardContext.alertRecall = task.alertRecall;
+      if (task.scenarioRecall) cardContext.scenarioRecall = { packId: task.scenarioRecall.packId, line: task.scenarioRecall.line };
     }
     // An accepted task keeps its original card and mapping while reattaching.
     if (!resumeTask) {
@@ -1537,7 +1540,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         injected.push('[Dutydeck 会话记忆状态] 会话记忆读取超时或失败，本轮未注入记忆；不要把未读到的内容判断为不存在。');
       }
     }
-    if (task.alertRecall) injected.push(larkAlertRecallPrompt(task.alertRecall));
+    if (task.scenarioRecall) {
+      const recall = scenarioRecallInjection(task.scenarioRecall, `lark:${config.appId}:${event.chatId}:injection:${injected.length}`);
+      injected.push(recall.text);
+      knownParts.set(recall.text, recall.parts);
+    }
     const rolePrompt = formatRolePrompt(config);
     if (rolePrompt) injected.push(rolePrompt);
     if (groupInstructions) injected.push(`[Dutydeck 群长期指令 · 管理者配置]\n${groupInstructions}`);
@@ -1558,7 +1565,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         sourceId: `lark:${config.appId}:${event.chatId}:injection:${index}`, digest: promptDigest(content), trustScope: 'host', content }];
       return parts.map((part, partIndex) => ({ ...part, prefix: `${partIndex === 0 && index ? '\n\n' : ''}${part.prefix ?? ''}` }));
     });
-    const preparedMaterials = materialParts ?? [{ kind: 'user_request' as const, content: materialPrompt, trustScope: 'user_request' }];
+    // direct 场景请求：指令是用户请求，来源消息原文是不可信材料。
+    const preparedMaterials = splitDirectScenarioRequest(materialParts ?? [{ kind: 'user_request' as const, content: materialPrompt, trustScope: 'user_request' }], larkScenarioAdoptionOf(event));
     promptParts.push(...preparedMaterials.map((part, index) => ({ ...part, prefix: `${index === 0 && injected.length ? '\n\n[用户请求]\n' : ''}${part.prefix ?? ''}` })));
 
 

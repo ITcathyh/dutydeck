@@ -73,7 +73,8 @@ export type ScenarioParam = z.infer<typeof scenarioParamSchema>;
 const outcomeReasons = z.object(Object.fromEntries(scenarioOutcomes.map(outcome => [outcome, text(200).optional()])) as Record<ScenarioOutcome, z.ZodOptional<z.ZodString>>).strict();
 
 const scenarioPackObject = z.object({
-  id: z.string().max(64).regex(scenarioPackIdPattern, '必须是 kebab-case，例如 team-faq'),
+  // 最多 32 字符：确认单种类 confirm.scenario:<id> 不超过 64，开话题第一句的幂等键截到 50 后还留得下摘要。
+  id: z.string().max(32).regex(scenarioPackIdPattern, '必须是 kebab-case，例如 team-faq'),
   version: z.string().regex(versionPattern, '必须是 x.y.z 形式的版本号'),
   title: text(64),
   noun: text(16),
@@ -306,6 +307,45 @@ export const scenarioBindingSchema = z.object({
 }).strict();
 export type ScenarioBinding = z.infer<typeof scenarioBindingSchema>;
 
+/** bot_list 参数的一项：appId 用来匹配消息发送者，name 只用于展示。 */
+export const scenarioBotRefSchema = z.object({ appId: z.string().trim().min(1).max(128), name: z.string().trim().max(128).optional() }).strict();
+export type ScenarioBotRef = z.infer<typeof scenarioBotRefSchema>;
+
+/** 一个参数的取值校验：integer 在 min–max 之间；string_list 每项 1–maxLength 字；bot_list 是 { appId, name? } 列表。 */
+export function scenarioParamValueSchema(param: ScenarioParam): z.ZodTypeAny {
+  if (param.type === 'integer') return z.number().int().min(param.min).max(param.max);
+  if (param.type === 'string_list') return z.array(z.string().trim().min(1).max(param.maxLength)).max(param.maxItems);
+  return z.array(scenarioBotRefSchema).max(param.maxItems);
+}
+/** 参数缺省值；bot_list 没有缺省值，为空列表。 */
+export const scenarioParamDefault = (param: ScenarioParam): unknown => param.type === 'bot_list' ? [] : param.type === 'string_list' ? [...param.default] : param.default;
+
+/**
+ * 合并绑定参数：包默认值 → 已有绑定的参数 → 这次给的值，再按包的参数声明校验。
+ * 这次给的值里有包没声明的参数名时报错；已有绑定里多出来的旧参数直接丢掉。
+ */
+export function resolveScenarioParams(pack: ScenarioPack, existing?: Readonly<Record<string, unknown>>, patch?: Readonly<Record<string, unknown>>): { params: Record<string, unknown>; issues: string[] } {
+  const issues = Object.keys(patch ?? {}).filter(name => !pack.params[name]).map(name => `参数 ${name} 没有在场景包 ${pack.id} 里声明`);
+  const params: Record<string, unknown> = {};
+  for (const [name, param] of Object.entries(pack.params)) {
+    const value = patch && name in patch ? patch[name] : existing && name in existing ? existing[name] : scenarioParamDefault(param);
+    const parsed = scenarioParamValueSchema(param).safeParse(value);
+    if (parsed.success) params[name] = parsed.data;
+    else issues.push(`${param.label}（${name}）：${parsed.error.issues.map(issue => `${issue.path.length ? `${issue.path.join('.')} ` : ''}${issue.message}`).join('；')}`);
+  }
+  return { params, issues };
+}
+
+/** 包里 role 为 source 的 bot_list 参数名（来源机器人）。 */
+export const scenarioSourceParams = (pack: ScenarioPack): string[] => Object.entries(pack.params).filter(([, param]) => param.type === 'bot_list' && param.role === 'source').map(([name]) => name);
+/** 绑定里列出的来源机器人（关闭的绑定也算）。 */
+export function scenarioSourceBots(pack: ScenarioPack, binding: Pick<ScenarioBinding, 'params'>): ScenarioBotRef[] {
+  return scenarioSourceParams(pack).flatMap(name => {
+    const parsed = z.array(scenarioBotRefSchema).safeParse(binding.params[name]);
+    return parsed.success ? parsed.data : [];
+  });
+}
+
 export type ScenarioBindingStatus = 'enabled' | 'disabled' | 'stale';
 
 /** 绑定是否生效：关闭、大版本过期，或 direct 包的来源为空（契约 1：空列表视为没开启）。 */
@@ -329,6 +369,21 @@ export function scenarioDirectLimits(pack: ScenarioPack, params: Readonly<Record
   };
   return { dedupeWindowHours: read(pack.dedupeWindowHoursParam, SCENARIO_LIMITS.dedupeWindowHours), perHour: read(pack.quota?.perHourParam, SCENARIO_LIMITS.perHour) };
 }
+
+/**
+ * 场景记录（collaboration_decisions 里 gate 为 scenario 的记录）冻结的内容。window 是这次去重和额度查询读到的窗口：
+ * 有没有被截断、读到的最旧一条的时间，回放直接用它。
+ */
+export interface ScenarioRecordSnapshot {
+  packId: string;
+  version: string;
+  digest: string;
+  outcome: ScenarioOutcome;
+  dedupeKey?: string;
+  sourceAppId?: string;
+  window?: { truncated: boolean; oldestReadAt?: string };
+}
+export const scenarioPolicyVersion = (packId: string, version: string) => `scenario:${packId}@${version}`.slice(0, 64);
 
 export interface ScenarioMessage {
   messageId: string; chatId: string; threadId?: string; rootId?: string;

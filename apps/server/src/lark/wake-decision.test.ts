@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts, type WakeMentionPolicy } from './wake-decision.js';
 
 const base: WakeFacts = { chatType: 'group', botSender: false, mentionsBot: false, hasMentions: false, quotedWorkflow: false, adopted: false, recovering: false,
-  recognizedCommand: false, mentionPolicy: 'always', ownedTopic: false, triage: false, pendingAskContinuation: false, requestContinuation: false };
+  recognizedCommand: false, mentionPolicy: 'always', ownedTopic: false, directScenario: false, pendingAskContinuation: false, requestContinuation: false };
 type Participation = { enabled: boolean; handled?: boolean } | undefined;
 const on: Participation = { enabled: true };
 const off: Participation = { enabled: false };
@@ -26,7 +26,7 @@ describe('唤醒判定：各分支组合', () => {
     ['每次 @ 档，没 @，群参与关着', {}, off, { wake: false, reason: 'not_addressed' }],
     ['每次 @ 档，没 @，群参与开着', {}, on, { wake: false, reason: 'participation_observes' }],
     ['群参与判 act 后受理', { adopted: true }, on, { wake: true, reason: 'adopted', guardBotTurn: true }],
-    ['告警初筛受理：不过回合门禁', { adopted: true, triage: true }, undefined, { wake: true, reason: 'adopted', guardBotTurn: false }],
+    ['direct 场景请求受理：不过回合门禁', { adopted: true, directScenario: true }, undefined, { wake: true, reason: 'adopted', guardBotTurn: false }],
     ['回复仍在等待的提问', { pendingAskContinuation: true }, on, { wake: true, reason: 'pending_ask', guardBotTurn: true }],
     ['回复仍在等待的提问，没接群参与', { pendingAskContinuation: true }, undefined, { wake: true, reason: 'pending_ask', guardBotTurn: true }],
     ['续说自己的请求，群参与开着', { requestContinuation: true }, on, { wake: true, reason: 'request_continuation', guardBotTurn: true }],
@@ -68,12 +68,12 @@ function inlineBaseline(f: WakeFacts, participation: Participation) {
   if (participation?.handled) return { explicit, addressed, input, wake: false };
   if (participation?.enabled && !addressed && !f.pendingAskContinuation && !commandInteraction && !(f.botSender && legacyWake)) return { explicit, addressed, input, wake: false };
   const shouldWake = legacyWake || f.adopted || f.pendingAskContinuation || Boolean(participation?.enabled && f.requestContinuation);
-  return { explicit, addressed, input, wake: shouldWake, ...(shouldWake ? { guard: f.chatType === 'group' && !f.triage } : {}) };
+  return { explicit, addressed, input, wake: shouldWake, ...(shouldWake ? { guard: f.chatType === 'group' && !f.directScenario } : {}) };
 }
 
 describe('唤醒判定与抽取前的原式逐条一致', () => {
   it('所有布尔事实、唤醒方式、会话类型和群参与结果的组合', () => {
-    const flags = ['botSender', 'mentionsBot', 'hasMentions', 'quotedWorkflow', 'adopted', 'recovering', 'recognizedCommand', 'ownedTopic', 'triage', 'pendingAskContinuation', 'requestContinuation'] as const;
+    const flags = ['botSender', 'mentionsBot', 'hasMentions', 'quotedWorkflow', 'adopted', 'recovering', 'recognizedCommand', 'ownedTopic', 'directScenario', 'pendingAskContinuation', 'requestContinuation'] as const;
     const policies: WakeMentionPolicy[] = ['always', 'topic', 'never', 'ambient'];
     const participations: Participation[] = [undefined, { enabled: false }, { enabled: true }, { enabled: true, handled: true }, { enabled: false, handled: true }];
     let checked = 0;

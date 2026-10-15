@@ -23,10 +23,10 @@ export interface ScenarioGroup {
   roleScope?: string;
   /** 本群接话人：self 是本机器人，other 是别的机器人；不填表示没指定。 */
   responder?: 'self' | 'other';
-  /** 群成员数，bots 含本机器人和告警来源；不填表示查不到（没权限或被安全策略截断）。 */
+  /** 群成员数，bots 含本机器人和场景包来源机器人；不填表示查不到（没权限或被安全策略截断）。 */
   members?: { humans: number; bots: number };
-  /** members.bots 里有几个是本群订阅的告警来源；规则计数时排除（group-participation.ts 的 talkingBots）。 */
-  alarmSources?: number;
+  /** members.bots 里有几个是本群场景包绑定的来源机器人；规则计数时排除（group-participation.ts 的 talkingBots）。 */
+  sourceBots?: number;
 }
 
 export interface ScenarioHistoryItem {
@@ -210,7 +210,7 @@ export const participationScenarios: ParticipationScenario[] = [
     note: '有争议：「按需」档在单真人群里等于「积极」，随口一句也交给执行 Agent，而且不占主动发言额度。' },
   { id: 'solo_doc', category: '单真人群', title: '单真人群里没 @ 的「总结下这个文档」', group: solo, message: human('总结下这个文档要做的事情 https://example.com/docx/AbCdEf123'),
     expected: rule(1, 'addressed', 'single_human') },
-  { id: 'solo_with_alarm_source', category: '单真人群', title: '单真人群里还有一个订阅的告警机器人，随口一句', group: { ...solo, members: { humans: 1, bots: 2 }, alarmSources: 1 },
+  { id: 'solo_with_alarm_source', category: '单真人群', title: '单真人群里还有一个订阅的告警机器人，随口一句', group: { ...solo, members: { humans: 1, bots: 2 }, sourceBots: 1 },
     message: human('晚上记得把周报补了'), expected: rule(1, 'addressed', 'single_human'), note: '订阅的告警来源不计数，所以按单真人单机器人处理，争议同 solo_casual。' },
   { id: 'solo_scope', category: '单真人群', title: '单真人群配了告警负责范围，随口一句', group: { ...solo, ...alarmRole }, message: human('晚上记得把周报补了'),
     expected: model('silent', '像是给自己的备忘，不在负责范围'), note: '配了负责范围后 single_human 不再直接执行，交给模型。' },
@@ -222,7 +222,7 @@ export const participationScenarios: ParticipationScenario[] = [
     note: '有争议：工具机器人也算「会接话的机器人」，挂了工具机器人的群默认都不接没 @ 的消息（10-12 评估问题 1）。' },
   { id: 'no_responder_eager', category: '多机器人群无接话人', title: '两个机器人、积极档、没指定接话人', group: { ...crowded, participation: 'eager' }, message: human('今天下午三点发版'),
     expected: rule(1, 'silent', 'no_responder') },
-  { id: 'no_responder_with_alarm_source', category: '多机器人群无接话人', title: '三个机器人里一个是订阅的告警来源', group: { ...crowded, members: { humans: 3, bots: 3 }, alarmSources: 1 },
+  { id: 'no_responder_with_alarm_source', category: '多机器人群无接话人', title: '三个机器人里一个是订阅的告警来源', group: { ...crowded, members: { humans: 3, bots: 3 }, sourceBots: 1 },
     message: human('今天下午三点发版'), expected: rule(1, 'silent', 'no_responder') },
 
   // 指定接话人
@@ -305,7 +305,7 @@ export function scenarioFacts(scenario: ParticipationScenario, round: 1 | 2): Ru
     ...(message.parent ? { parent: message.parent } : {}), ...(message.threadRootSelf ? { threadRootSelf: true } : {}),
     ...(message.ownedTopic ? { ownedTopic: true } : {}), ...(message.threadRootOther ? { threadRootOther: true } : {}),
     ...(message.callsOther ? { callsOther: true } : {}), ...(group.responder ? { responder: group.responder } : {}),
-    ...(group.members ? { humans: group.members.humans, bots: group.members.bots - (group.alarmSources ?? 0) } : {}),
+    ...(group.members ? { humans: group.members.humans, bots: group.members.bots - (group.sourceBots ?? 0) } : {}),
     ...(round === 2 && message.recent ? { lastSelfAgoMs: message.recent.lastSelfAgoMs, humanBetween: message.recent.humanBetween, partner: message.recent.partner } : {})
   };
 }

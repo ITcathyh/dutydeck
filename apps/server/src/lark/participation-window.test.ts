@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { createCollaborationSchema } from '../../../../packages/storage/src/collaboration-migration.js';
 import { createCollaborationRepository } from '../../../../packages/storage/src/collaboration.js';
-import { allowEagerParticipation } from '../../../../packages/storage/src/migrations.js';
+import { addCollaborationScenarios, allowEagerParticipation } from '../../../../packages/storage/src/migrations.js';
 import { BOT_TURN_RECORD, DECIDER_META_KEY, markTruncated, type CollaborationRepository } from '@dutydeck/shared';
 import { LarkGroupParticipation } from './group-participation.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -27,7 +27,7 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const clean of cleanups.splice(0).reverse()) await clean(); });
 
 async function harness(cap?: number) {
-  const db = new Database(':memory:'); createCollaborationSchema(db); allowEagerParticipation(db);
+  const db = new Database(':memory:'); createCollaborationSchema(db); allowEagerParticipation(db); addCollaborationScenarios(db);
   const stored = createCollaborationRepository(db);
   await stored.updateSettings(scope, { expectedRevision: 0, participation: 'selective' }, 'owner');
   const repository = cap === undefined ? stored : capped(stored, cap);

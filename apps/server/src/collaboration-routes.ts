@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { RuntimeError, alarmSubscriptionSchema, collaborationScopeSchema, parseLarkSourceId, updateCollaborationSettingsInputSchema, updateFollowupInputSchema, type CollaborationScope } from '@dutydeck/shared';
+import { RuntimeError, collaborationScopeSchema, parseLarkSourceId, updateCollaborationSettingsInputSchema, updateFollowupInputSchema, type CollaborationScope } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { CollaborationService } from './collaboration-service.js';
 import type { CollaborationEvaluation } from './collaboration-evaluation.js';
@@ -20,14 +20,19 @@ export interface CollaborationRouteOptions {
   onChange?(scope: CollaborationScope): Promise<void>;
   /** Agent 发起的委托创建：不立即生效，改发确认卡，用户确认后才创建。未提供时直接创建。 */
   confirmMandate?(scope: CollaborationScope, actorId: string, body: unknown, origin: { threadRootMessageId?: string }): Promise<unknown>;
-  /** Web 改群分工（接话人、告警初筛订阅），见 LarkGroupParticipation.updateDuty。 */
+  /** Web 改群分工（接话人、场景包绑定），见 LarkGroupParticipation.updateDuty。 */
   updateDuty?(scope: CollaborationScope, patch: z.infer<typeof dutyPatchSchema>, actorId: string): Promise<unknown>;
+  /** 群设置页列出的场景包和本群绑定，合进 GET 的结果，见 LarkGroupParticipation.scenarioOverview。 */
+  scenarios?(scope: CollaborationScope): Promise<unknown[]>;
 }
-/** 接话人只能设成本 Bot（self）或清掉（null）；告警订阅的确认人不能在 Web 上改。 */
+/**
+ * 接话人只能设成本 Bot（self）或清掉（null）。场景包按包 id 改开关和参数，null 删掉绑定；
+ * 确认人和包版本只能由群里的确认卡写入，Web 带上就拒绝。参数按包的声明在服务端校验。
+ */
 const dutyPatchSchema = z.object({
   expectedRevision: z.number().int().min(0),
   responder: z.literal('self').nullable().optional(),
-  alarm: alarmSubscriptionSchema.omit({ requesterId: true }).nullable().optional()
+  scenarios: z.record(z.string().min(1).max(64), z.object({ enabled: z.boolean(), params: z.record(z.unknown()).optional() }).strict().nullable()).optional()
 }).strict();
 const feedbackSchema = z.object({ correction: z.string().trim().min(1).max(4000), expectedAction: z.enum(['silent', 'reply', 'act']).optional() }).strict();
 const replaySchema = z.object({ decisionIds: z.array(z.string().min(1)).min(1).max(50), policyVersion: z.string().min(1).max(64).optional() }).strict();
@@ -66,7 +71,11 @@ export async function registerCollaborationRoutes(app: FastifyInstance, options:
     ['/api/lark/groups/:appId/:chatId/collaboration', managementContext],
     ['/api/lark/agent-tools/collaboration', agentContext]
   ] as const) {
-    app.get(base, async request => { const ctx = await context(request); return options.service.get(ctx.scope, ctx.actorId); });
+    app.get(base, async request => {
+      const ctx = await context(request);
+      const result = await options.service.get(ctx.scope, ctx.actorId);
+      return options.scenarios ? { ...result, scenarios: await options.scenarios(ctx.scope) } : result;
+    });
     app.patch(`${base}/settings`, async request => {
       const ctx = await context(request);
       await options.service.require(ctx.scope, ctx.actorId, 'manage');

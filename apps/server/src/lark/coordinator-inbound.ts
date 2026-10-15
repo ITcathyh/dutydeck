@@ -12,6 +12,8 @@ import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dash
 import { isLarkGroupChatMemoryPool, isLarkGroupMemoryPool, isLarkPerGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
 import { parseLarkSourceId, resolveParticipation, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-decision.js';
+import { directScenarioPrompt } from './scenario-direct.js';
+import { larkScenarioAdoptionOf } from './scenario-legacy.js';
 import { executeScheduleCommand } from './schedule-command.js';
 import { larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageResource } from './message-content.js';
@@ -564,11 +566,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (inbox) await this.inbox!.update(inbox, { state: 'failed', error: reason });
   }
 
-  /** 群参与判定为 act、或告警订阅起初筛时，按发送者本人的显式请求走同一条授权、领取与执行路径。 */
+  /** 群参与判定为 act、或 direct 场景包起任务时，按发送者本人的显式请求走同一条授权、领取与执行路径。 */
   adopt(event: LarkMessageEvent, config: StoredLarkConfig) {
-    // 只有内部 dispatcher 的告警派生可改变执行身份/话题，正文始终沿用持久原文。
-    const adoption: LarkInboxAdoption | undefined = event.triage ? {
-      senderOpenId: event.senderOpenId, senderType: event.senderType, triage: event.triage,
+    // 只有内部 dispatcher 的场景派生可改变执行身份/话题，正文始终沿用持久原文。
+    const adoption: LarkInboxAdoption | undefined = event.scenario ? {
+      senderOpenId: event.senderOpenId, senderType: event.senderType, scenario: event.scenario,
       rootId: event.rootId, threadId: event.threadId, parentId: event.parentId
     } : undefined;
     return this.handle(event, config, false, true, undefined, undefined, adoption);
@@ -642,10 +644,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       event = persisted.event;
     }
     if (adoption) event = { ...event, ...adoption };
-    // 告警初筛的消息已由群参与观察和判过，这里不再观察、不过机器人回合门禁（订阅自带去重和每小时上限）；
+    // direct 场景请求的消息已由群参与看过，这里不再观察、不过机器人回合门禁（包自带去重和每小时上限）；
     // 发起人不是这条消息的发送者，要按群成员重新确认。重启恢复时同样按受理处理。
-    const triage = adoption || persisted?.state === 'received' ? event.triage : undefined;
-    if (triage) adopted = true;
+    const scenario = adoption || persisted?.state === 'received' ? larkScenarioAdoptionOf(event) : undefined;
+    if (scenario) adopted = true;
     if (this.workflowOptions.store) {
       const current = await readLarkConfig(this.workflowOptions.store, config.appId);
       if (!current?.listening) return;
@@ -686,9 +688,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const pendingAskContinuation = Boolean(!recovering && !explicit && await this.continuesPendingAsk(event, config, Boolean(captured)));
     const requestContinuation = Boolean(this.workflowOptions.participation && !recovering && !explicit && !pendingAskContinuation && await this.continuesOwnRequest(event, config, Boolean(captured)));
     const wakeFacts: WakeFacts = { chatType: event.chatType, botSender, mentionsBot, hasMentions: event.mentions.length > 0, quotedWorkflow: Boolean(quotedWorkflow), adopted, recovering,
-      recognizedCommand, mentionPolicy, ownedTopic: Boolean(ownedTopic), triage: Boolean(triage), pendingAskContinuation, requestContinuation };
+      recognizedCommand, mentionPolicy, ownedTopic: Boolean(ownedTopic), directScenario: Boolean(scenario), pendingAskContinuation, requestContinuation };
     const { addressed, participation: participationInput } = wakeSignals(wakeFacts);
-    const participation = triage ? undefined : await this.workflowOptions.participation?.handle(event, config, { ...participationInput, botOpenId: this.botOpenId });
+    const participation = scenario ? undefined : await this.workflowOptions.participation?.handle(event, config, { ...participationInput, botOpenId: this.botOpenId });
     if (this.handledMessages.has(event.messageId)) return;
     const wake = decideWake(wakeFacts, participation);
     if (!wake.wake) return;
@@ -711,7 +713,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       }
     }
     if (event.chatType === 'group' && this.groupManager) {
-      const decision = await this.groupManager.authorize(config.appId, event.chatId, event.senderOpenId, entryAction, undefined, { memberObserved: !recovering && !triage });
+      const decision = await this.groupManager.authorize(config.appId, event.chatId, event.senderOpenId, entryAction, undefined, { memberObserved: !recovering && !scenario });
       if (decision && !decision.allowed) {
         await this.rejectIncoming(event, config, decision.code === 'talk_required' ? '当前账号没有此群的任务访问权限。' : decision.reason, addressed);
         return;
@@ -768,7 +770,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       if (inbox) await this.inbox!.update(inbox, { state: 'failed', error: '消息解析失败' });
       return;
     }
-    if (triage) prompt = `${triage}\n${prompt}`;
+    if (scenario) prompt = directScenarioPrompt(scenario, prompt);
     if (inbox?.request) { prompt = inbox.request.prompt; resources = inbox.request.resources; scopeId = inbox.request.scopeId; }
     // 这条曾并入前一条排队消息：先按合并意图收口，决定执行合并后的原文还是自己的原文（见 resumeMergedInbox）。
     if (inbox?.request && inbox.mergeFrom) prompt = await this.resumeMergedInbox(inbox);

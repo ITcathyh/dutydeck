@@ -952,6 +952,7 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
               chatId={chatId}
               botName={botName}
               duty={overviewQuery.data.duty}
+              scenarios={overviewQuery.data.scenarios ?? []}
               onSaved={() => queryClient.invalidateQueries({ queryKey })}
             />
           )}

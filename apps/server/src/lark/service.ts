@@ -9,7 +9,7 @@ import { executeWithLarkGate, resolveLarkGateConfig, LarkCircuitOpenError } from
 import { buildLarkCardActions, buildLarkCardDetailButton, buildLarkCardFollowUpActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
 import { larkSessionDetailUrl } from './detail-link.js';
 import { collapsiblePanel } from './card-elements.js';
-import { larkAlertRecallLine, type LarkAlertRecall } from './alert-recall.js';
+import type { LarkScenarioRecallLine } from './scenario-recall.js';
 import { larkConclusionHeadline, larkElapsedLabel, larkStoppedAtLabel, larkUserStatus } from './card-status.js';
 
 /**
@@ -99,8 +99,8 @@ export interface LarkCardInput {
    * 只贴表情的模式下没有下一条。
    */
   resultFollows?: boolean;
-  /** 过程卡顶部「上一次同一告警」那一行；执行中和收成回执后都显示。 */
-  alertRecall?: LarkAlertRecall;
+  /** 过程卡顶部场景关联的那一行；执行中和收成回执后都显示。 */
+  scenarioRecall?: LarkScenarioRecallLine;
 }
 export interface LarkSendInput extends LarkCardInput { receiveId?: string; receiveIdType?: LarkReceiveIdType; chatId?: string }
 export interface LarkReplyInput extends LarkCardInput { messageId: string; replyInThread?: boolean; replyRootId?: string }
@@ -1021,8 +1021,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       body: {
         direction: 'vertical' as const, vertical_spacing: '8px' as const, padding: '10px 12px 10px 12px' as const,
         elements: [
-          ...(isProcessCard && input.alertRecall ? [{
-            tag: 'markdown', element_id: 'alert_recall', content: larkAlertRecallLine(input.alertRecall), text_size: 'notation', margin: '0px'
+          ...(isProcessCard && input.scenarioRecall ? [{
+            tag: 'markdown', element_id: 'scenario_recall', content: input.scenarioRecall.line, text_size: 'notation', margin: '0px'
           }] : []),
           ...arrange(mainElements.map(element => {
             if (!recordHint || !/(?:omission|rejected_delta)$/.test(String(element.element_id ?? '')) || typeof element.content !== 'string' || element.content.includes(recordHint)) return element;

@@ -109,7 +109,8 @@ export class PluginHost {
         const providers: CiProvider[] = [];
         const scenarioProviders = new Map<string, ScenarioProvider>();
         if (plugin.providersEntry) {
-          await mkdir(dataDir, { recursive: true });
+          // 内置插件随每次启动加载，不为它们建数据目录：没装插件时数据目录下什么都不多（用到时插件自己建）。
+          if (!builtin) await mkdir(dataDir, { recursive: true });
           const module = await import(pathToFileURL(plugin.providersEntry).href) as { default?: unknown; register?: unknown };
           const register = typeof module.default === 'function' ? module.default : module.register;
           if (typeof register !== 'function') throw new Error(`${plugin.manifest.providers} 没有默认导出 register(api) 函数`);

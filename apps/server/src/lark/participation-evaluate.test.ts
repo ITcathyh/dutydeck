@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { createCollaborationSchema } from '../../../../packages/storage/src/collaboration-migration.js';
 import { createCollaborationRepository } from '../../../../packages/storage/src/collaboration.js';
-import { allowEagerParticipation } from '../../../../packages/storage/src/migrations.js';
+import { addCollaborationScenarios, allowEagerParticipation } from '../../../../packages/storage/src/migrations.js';
 import { deciderMetaOf, type CollaborationObservation, type CollaborationSnapshot } from '@dutydeck/shared';
 import { CollaborationEvaluation } from '../collaboration-evaluation.js';
 import { LarkGroupParticipation } from './group-participation.js';
@@ -92,7 +92,7 @@ afterEach(async () => { for (const clean of cleanups.splice(0).reverse()) await 
 
 describe('实时判定的记录交给回放', () => {
   it('规则结论回放一致；回放报告总样本、有效样本和缺失样本，跳过的不算通过', async () => {
-    const db = new Database(':memory:'); createCollaborationSchema(db); allowEagerParticipation(db);
+    const db = new Database(':memory:'); createCollaborationSchema(db); allowEagerParticipation(db); addCollaborationScenarios(db);
     const repository = createCollaborationRepository(db);
     await repository.updateSettings(scope, { expectedRevision: 0, participation: 'selective' }, 'owner');
     const service = { listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })), listChatMembers: members(3, 1), replyText: vi.fn(async () => ({ messageId: 'om_sent' })),

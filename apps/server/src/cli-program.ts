@@ -781,7 +781,7 @@ Examples:
   withTarget(groupSettings.command('list').description('List synced groups and the binding of each bot')
     .option('--app <app-id>', 'Only groups of this bot'))
     .action((options, command) => runSettings('group-list', command, { appId: options.app }));
-  withTarget(groupSettings.command('show <chat-id>').description('Print a group binding, its effective settings, collaboration settings and duty')
+  withTarget(groupSettings.command('show <chat-id>').description('Print a group binding, its effective settings, collaboration settings, duty and scenario packs')
     .option('--app <app-id>', 'Bot to show when several bots share the group'))
     .action((chatId, options, command) => runSettings('group-show', command, { chatId, appId: options.app }));
   withTarget(groupSettings.command('set <chat-id> <key=value...>').description('Change group settings; keys not given keep their values')
@@ -789,7 +789,9 @@ Examples:
     .addHelpText('after', `${fieldsHelp(groupFields)}
 Object values take the JSON shape printed by \`group show\`. agentOverride, workspaceOverride, modelOverride
 and reasoningOverride also accept inherit, clear or a plain value. roleChanges and accessOverride use
-principal ids from \`group members\`.`)
+principal ids from \`group members\`. scenarios takes {"<pack id>":{"enabled":true,"params":{...}}} or
+{"<pack id>":null}; params may list only the keys to change. Packs and their params are listed by \`group show\`.
+alarm=<JSON> (the old flat alarm subscription) still works for one release and is converted to scenarios.alarm.`)
     .action((chatId, pairs, options, command) => runSettings('group-set', command, { chatId, pairs, appId: options.app }));
   withTarget(groupSettings.command('members <chat-id>').description('List group members with the principal ids used by accessOverride and roleChanges')
     .option('--app <app-id>', 'Bot to ask when several bots share the group')

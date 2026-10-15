@@ -28,6 +28,13 @@ import { larkTaskAgentGuid } from './task-agent.js';
 import type { ListenerLog, LarkRuntime } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 import type { LarkHeldCause } from './turn-redispatch.js';
+import { persistedRecallLine } from './scenario-legacy.js';
+
+/** 过程卡顶部场景关联那一行：新映射存 scenario_recall，升级前的存 alert_recall。 */
+const recallOf = (persisted: PersistedLarkCardTask) => {
+  const line = persistedRecallLine(persisted);
+  return line ? { scenarioRecall: line } : {};
+};
 
 export type LarkInterruptedTurn = { kind: 'handled' } | ({ kind: 'hold' } & LarkHeldCause);
 
@@ -171,7 +178,7 @@ export async function performLarkCardReconcile(input: {
           await service.update({
             beforeSend: beforeProcessSend,
             ...processContext,
-            ...(persisted.alert_recall ? { alertRecall: persisted.alert_recall } : {}),
+            ...recallOf(persisted),
             cardKind: 'process',
             messageId: persisted.card_message_id,
             permissionMode: larkPermissionMode(config),
@@ -269,7 +276,7 @@ export async function performLarkCardReconcile(input: {
         if (persisted.recovery_status_key !== statusKey) try {
           await service.update({
             beforeSend: beforeProcessSend,
-            ...processContext, ...(persisted.alert_recall ? { alertRecall: persisted.alert_recall } : {}), cardKind: 'process', messageId: persisted.card_message_id,
+            ...processContext, ...recallOf(persisted), cardKind: 'process', messageId: persisted.card_message_id,
             permissionMode: larkPermissionMode(config), state,
             ...(recovery ? { statusLabel: recovery.label } : {}),
             taskId: mapping.externalId, taskName: persisted.task_name,
@@ -334,7 +341,7 @@ export async function performLarkCardReconcile(input: {
       const updateProcessCard = (messageId: string, elements: Array<Record<string, any>>) => service.update({
         beforeSend: beforeProcessSend,
         ...processContext,
-        ...(persisted.alert_recall ? { alertRecall: persisted.alert_recall } : {}),
+        ...recallOf(persisted),
         cardKind: 'process',
         messageId,
         permissionMode: larkPermissionMode(config),

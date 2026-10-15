@@ -143,7 +143,8 @@ describe('dutydeck plugin CLI', () => {
   const cli = async (action: Parameters<typeof runPluginCli>[0], args: string[], options: Parameters<typeof runPluginCli>[2] = {}) => {
     let out = '';
     const ui = createCliUi({ stdout: { write: chunk => { out += chunk; } }, stderr: { write: () => {} }, color: false });
-    const result = await runPluginCli(action, args, { database: join(temp, 'data/dutydeck.db'), ...options }, { ui, cwd: temp, confirm: async () => false });
+    // 只看外部插件：内置插件目录指向空目录。
+    const result = await runPluginCli(action, args, { database: join(temp, 'data/dutydeck.db'), ...options }, { ui, cwd: temp, confirm: async () => false, builtinRoot: join(temp, 'no-builtin') });
     return { ...result, out };
   };
 

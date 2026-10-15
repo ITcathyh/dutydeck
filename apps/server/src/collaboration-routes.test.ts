@@ -12,11 +12,14 @@ import { CollaborationExtensions } from './collaboration-extensions.js';
 import { CollaborationEvaluation } from './collaboration-evaluation.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './lark/agent-tools.js';
 import { runCollaboration } from './collaboration-cli.js';
+import { LarkGroupParticipation } from './lark/group-participation.js';
+import { PluginHost } from './plugins/host.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0)) await close(); });
 const scope = { appId: 'cli_one', chatId: 'oc_one' };
-async function fixture(extra: Partial<CollaborationRouteOptions> = {}) {
+type Repositories = ReturnType<typeof createRepositories>;
+async function fixture(extra: Partial<CollaborationRouteOptions> | ((repos: Repositories, directory: string) => Promise<Partial<CollaborationRouteOptions>>) = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'collaboration-routes-'));
   const repos = createRepositories(join(directory, 'test.db'));
   const now = new Date().toISOString();
@@ -33,7 +36,7 @@ async function fixture(extra: Partial<CollaborationRouteOptions> = {}) {
   const app = Fastify();
   app.setErrorHandler((error, _request, reply) => reply.code(error instanceof ZodError ? 400 : (error as RuntimeError).statusCode ?? 500).send({ error: { code: (error as RuntimeError).code, message: error.message } }));
   await registerCollaborationRoutes(app, { service, runtime, tools, authorizeManagement: async request => request.headers.authorization === 'Bearer management' ? 'owner' : undefined,
-    bootstrap: async () => {}, extensions: new CollaborationExtensions({ repository: repos.collaboration, authorize }), evaluation: new CollaborationEvaluation({ repository: repos.collaboration, evaluate: async () => ({ action: 'silent', reason: '', evidenceIds: [] }) }), ...extra });
+    bootstrap: async () => {}, extensions: new CollaborationExtensions({ repository: repos.collaboration, authorize }), evaluation: new CollaborationEvaluation({ repository: repos.collaboration, evaluate: async () => ({ action: 'silent', reason: '', evidenceIds: [] }) }), ...(typeof extra === 'function' ? await extra(repos, directory) : extra) });
   cleanups.push(async () => { capabilities.close(); await app.close(); repos.close(); await rm(directory, { recursive: true, force: true }); });
   const headers = () => ({ authorization: `Bearer ${env.dutydeck_group_tools_token}`, 'x-dutydeck-work-turn': capabilities.workbenchTurnToken(session.id, taskId) });
   return { repos, app, env, headers, capabilities, changeTask() { taskId = 'task-two'; }, endTask() { actorId = undefined; } };
@@ -92,12 +95,70 @@ it('group duty: overview shows it, management PATCH validates the body and needs
   const patch = (payload: unknown, withAuth = true) => f.app.inject({ method: 'PATCH', url: `${url}/duty`, ...(withAuth ? { headers } : {}), payload: payload as object });
   expect((await patch({ expectedRevision: 0, responder: 'self' }, false)).statusCode).toBe(403);
   expect((await patch({ expectedRevision: 0, responder: 'cli_other' })).statusCode).toBe(400);
-  const alarm = { enabled: true, sources: [{ appId: 'cli_alarm' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3 };
-  expect((await patch({ expectedRevision: 0, alarm: { ...alarm, requesterId: 'ou_bob' } })).statusCode).toBe(400);
+  const alarm = { enabled: true, params: { sources: [{ appId: 'cli_source_a' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3 } };
+  // 确认人和包版本只能由群里的确认卡写入。
+  expect((await patch({ expectedRevision: 0, scenarios: { alarm: { ...alarm, requesterId: 'ou_bob' } } })).statusCode).toBe(400);
+  expect((await patch({ expectedRevision: 0, scenarios: { alarm: { ...alarm, packVersion: '1.0.0' } } })).statusCode).toBe(400);
   expect(calls).toEqual([]);
-  const saved = await patch({ expectedRevision: 0, responder: null, alarm });
+  const saved = await patch({ expectedRevision: 0, responder: null, scenarios: { alarm } });
   expect(saved.statusCode).toBe(200); expect(saved.json()).toEqual({ duty: { revision: 1 } });
-  expect(calls).toEqual([[scope, { expectedRevision: 0, responder: null, alarm }, 'owner']]);
+  expect(calls).toEqual([[scope, { expectedRevision: 0, responder: null, scenarios: { alarm } }, 'owner']]);
+});
+it('group duty: scenario bindings are checked against the loaded packs; confirmer and pack version stay as confirmed in the group', async () => {
+  const url = '/api/lark/groups/cli_one/oc_one/collaboration';
+  const headers = { authorization: 'Bearer management' };
+  let participation!: LarkGroupParticipation;
+  const f = await fixture(async (repos, directory) => {
+    const host = await PluginHost.load({ dataDir: directory });
+    participation = new LarkGroupParticipation({ repository: repos.collaboration, decider: {} as any, authorize: async () => true, serviceFor: () => ({}) as any,
+      readConfig: async appId => appId === scope.appId ? { appId, appSecret: 'synthetic' } as any : undefined, scenarios: host.scenarios });
+    cleanups.push(() => participation.close());
+    return { updateDuty: (target, patch, actorId) => participation.updateDuty(target, patch, actorId), scenarios: target => participation.scenarioOverview(target) };
+  });
+  const overview = async () => (await f.app.inject({ url, headers })).json();
+  const patch = async (payload: unknown) => {
+    const response = await f.app.inject({ method: 'PATCH', url: `${url}/duty`, headers, payload: payload as object });
+    return { status: response.statusCode, code: response.json().error?.code, body: response.json() };
+  };
+  const alarmPack = (await overview()).scenarios.find((item: { id: string }) => item.id === 'alarm');
+  expect(alarmPack).toMatchObject({ version: '1.0.0', mode: 'direct', builtin: true, requiresRequester: true, versionStale: false, enableHint: expect.any(String),
+    params: { sources: { type: 'bot_list', role: 'source' }, levels: { type: 'string_list', default: [] }, dedupeHours: { type: 'integer', min: 1, max: 168, default: 6 }, maxPerHour: { type: 'integer', min: 1, max: 30, default: 3 } } });
+  expect(alarmPack).not.toHaveProperty('binding');
+
+  const sources = [{ appId: 'cli_source_a', name: '来源 A' }];
+  expect(await patch({ expectedRevision: 0, scenarios: { alarm: { enabled: false, params: { sources }, requesterId: 'ou_tester' } } })).toMatchObject({ status: 400, code: 'COLLABORATION_INVALID_INPUT' });
+  expect(await patch({ expectedRevision: 0, scenarios: { alarm: { enabled: false, params: { sources }, packVersion: '1.0.0' } } })).toMatchObject({ status: 400, code: 'COLLABORATION_INVALID_INPUT' });
+  expect(await patch({ expectedRevision: 0, scenarios: { 'no-such-pack': { enabled: false } } })).toMatchObject({ status: 400, code: 'COLLABORATION_SCENARIO_UNKNOWN' });
+  expect(await patch({ expectedRevision: 0, scenarios: { alarm: { enabled: false, params: { dedupeHours: 200 } } } })).toMatchObject({ status: 400, code: 'COLLABORATION_SCENARIO_INVALID' });
+  expect(await patch({ expectedRevision: 0, scenarios: { alarm: { enabled: false, params: { severity: ['P0'] } } } })).toMatchObject({ status: 400, code: 'COLLABORATION_SCENARIO_INVALID' });
+  expect(await patch({ expectedRevision: 0, scenarios: { alarm: { enabled: false, params: { sources: [{ appId: scope.appId }] } } } })).toMatchObject({ status: 400, code: 'COLLABORATION_SCENARIO_SELF_SOURCE' });
+  // 从没在群里确认过的 direct 包不能在 Web 上开启，但可以先存成关闭的。
+  expect(await patch({ expectedRevision: 0, scenarios: { alarm: { enabled: true, params: { sources } } } })).toMatchObject({ status: 409, code: 'COLLABORATION_SCENARIO_REQUESTER_REQUIRED' });
+  expect((await overview()).duty.revision).toBe(0);
+  const off = await patch({ expectedRevision: 0, scenarios: { alarm: { enabled: false, params: { sources } } } });
+  expect(off.status).toBe(200);
+  expect(off.body.duty.scenarios).toEqual({ alarm: { enabled: false, params: { sources, levels: [], dedupeHours: 6, maxPerHour: 3 }, packVersion: '1.0.0' } });
+
+  // 群里确认过（确认卡写入确认人和包版本）后，Web 只给改动的参数，其余沿用。
+  await f.repos.collaboration.updateDuty(scope, { expectedRevision: 1, scenarios: { alarm: { ...off.body.duty.scenarios.alarm, enabled: true, requesterId: 'ou_tester' } } }, 'ou_tester');
+  const levels = await patch({ expectedRevision: 2, scenarios: { alarm: { enabled: true, params: { levels: ['P1'] } } } });
+  expect(levels.status).toBe(200);
+  expect(levels.body.duty.scenarios.alarm).toEqual({ enabled: true, params: { sources, levels: ['P1'], dedupeHours: 6, maxPerHour: 3 }, requesterId: 'ou_tester', packVersion: '1.0.0' });
+  expect(await patch({ expectedRevision: 2, scenarios: { alarm: { enabled: true } } })).toMatchObject({ status: 409, code: 'COLLABORATION_REVISION_CONFLICT' });
+  expect((await overview()).scenarios.find((item: { id: string }) => item.id === 'alarm')).toMatchObject({ binding: levels.body.duty.scenarios.alarm, webDescription: expect.stringContaining('ou_tester') });
+
+  // 绑定的大版本落后于包：显示过期，开启被拒，关闭可以。
+  await f.repos.collaboration.updateDuty(scope, { expectedRevision: 3, scenarios: { alarm: { ...levels.body.duty.scenarios.alarm, packVersion: '0.9.0' } } }, 'ou_tester');
+  expect((await overview()).scenarios.find((item: { id: string }) => item.id === 'alarm')).toMatchObject({ versionStale: true });
+  expect(await patch({ expectedRevision: 4, scenarios: { alarm: { enabled: true, params: { maxPerHour: 5 } } } })).toMatchObject({ status: 409, code: 'COLLABORATION_SCENARIO_VERSION_STALE' });
+  const disabled = await patch({ expectedRevision: 4, scenarios: { alarm: { enabled: false } } });
+  expect(disabled.body.duty.scenarios.alarm).toMatchObject({ enabled: false, requesterId: 'ou_tester', packVersion: '0.9.0' });
+
+  // null 删掉这个包的绑定。
+  expect((await patch({ expectedRevision: 5, scenarios: { alarm: null } })).status).toBe(200);
+  const after = await overview();
+  expect(after.duty.scenarios?.alarm).toBeUndefined();
+  expect(after.scenarios.find((item: { id: string }) => item.id === 'alarm')).not.toHaveProperty('binding');
 });
 it('sends CLI requests with the active turn and stable create id through the real route', async () => {
   const f = await fixture();

@@ -81,8 +81,25 @@ const collaborationFields = {
   maxProactivePerHour: 'integer', maxDecisionsPerHour: 'integer', retentionDays: 'integer', policyVersion: 'string'
 } satisfies Record<Exclude<keyof UpdateCollaborationSettingsInput, 'expectedRevision'>, FieldKind>;
 type DutyPatch = Parameters<NonNullable<CollaborationRouteOptions['updateDuty']>>[1];
-const dutyFields = { responder: ['self', 'null'], alarm: 'json' } satisfies Record<Exclude<keyof DutyPatch, 'expectedRevision'>, FieldKind>;
+// scenarios 的参数由服务端按场景包声明校验，这里只保证顶层键齐全。
+const dutyFields = { responder: ['self', 'null'], scenarios: 'json' } satisfies Record<Exclude<keyof DutyPatch, 'expectedRevision'>, FieldKind>;
 export const groupFields = { ...bindingFields, roleChanges: 'json', ...collaborationFields, ...dutyFields } satisfies Record<string, FieldKind>;
+/** 旧的 alarm=<JSON>（平铺的告警订阅）保留一个版本，转成 scenarios.alarm；不列在键表里。 */
+const legacyDutyFields = { alarm: 'json' } satisfies Record<string, FieldKind>;
+const legacyAlarmParams = ['sources', 'levels', 'dedupeHours', 'maxPerHour'];
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** 把旧格式的 alarm 并进 scenarios；requesterId、packVersion 等其余键原样带上，由服务端拒绝。 */
+function scenariosWithLegacyAlarm(scenarios: unknown, alarm: unknown): Record<string, unknown> {
+  const invalid = (message: string): never => { throw new SettingsCliError('SETTINGS_VALUE_INVALID', message); };
+  const base = scenarios === undefined ? {} : isObject(scenarios) ? scenarios : invalid('scenarios expects a JSON object keyed by pack id');
+  if (Object.hasOwn(base, 'alarm')) throw new SettingsCliError('SETTINGS_KEYS_CONFLICT', 'alarm= and scenarios.alarm change the same pack; keep only scenarios={"alarm":...}');
+  if (alarm === null) return { ...base, alarm: null };
+  const legacy = isObject(alarm) ? alarm : invalid('alarm expects a JSON object or null');
+  const params = Object.fromEntries(Object.entries(legacy).filter(([key]) => legacyAlarmParams.includes(key)));
+  const other = Object.fromEntries(Object.entries(legacy).filter(([key]) => !legacyAlarmParams.includes(key)));
+  return { ...base, alarm: { ...other, params } };
+}
 
 const describeKind = (kind: FieldKind) => typeof kind !== 'string' ? kind.join('|') : {
   boolean: 'true|false', integer: 'integer', 'integer|null': 'integer|null', string: 'text',
@@ -199,17 +216,23 @@ const collaborationPath = (appId: string, chatId: string) => `/api/lark/groups/$
 
 async function showGroup(request: Request, chatId: string, appId?: string) {
   const { group, bot } = await findGroup(request, chatId, appId);
-  const overview = await request('GET', collaborationPath(bot.appId, chatId)) as { snapshot: { settings: unknown }; duty?: unknown };
-  return { group: { chatId: group.chatId, name: group.name }, bot, collaboration: { settings: overview.snapshot.settings, duty: overview.duty } };
+  // scenarios 是对本机器人适用的场景包：参数说明、本群绑定、是否过期。旧版实例不返回。
+  const overview = await request('GET', collaborationPath(bot.appId, chatId)) as { snapshot: { settings: unknown }; duty?: unknown; scenarios?: unknown[] };
+  return { group: { chatId: group.chatId, name: group.name }, bot, collaboration: { settings: overview.snapshot.settings, duty: overview.duty, scenarios: overview.scenarios } };
 }
 
 async function setGroup(request: Request, input: SettingsCliInput) {
   const chatId = required(input.chatId, 'Chat ID');
   if (!input.pairs?.length) throw new SettingsCliError('SETTINGS_ARGUMENT_REQUIRED', 'Pass at least one key=value');
-  const values = parsePairs(input.pairs, groupFields, 'dutydeck settings group set --help');
+  const values = parsePairs(input.pairs, { ...groupFields, ...legacyDutyFields }, 'dutydeck settings group set --help');
   const { roleChanges, ...patch } = pick(values, { ...bindingFields, roleChanges: true });
   const settings = pick(values, collaborationFields);
   const duty = pick(values, dutyFields);
+  const warnings: string[] = [];
+  if (Object.hasOwn(values, 'alarm')) {
+    duty.scenarios = scenariosWithLegacyAlarm(duty.scenarios, values.alarm);
+    warnings.push('alarm= is deprecated and will be removed; use scenarios={"alarm":{"enabled":...,"params":{...}}}');
+  }
   const { bot } = await findGroup(request, chatId, input.appId);
   const applied: string[] = [];
   try {
@@ -234,7 +257,7 @@ async function setGroup(request: Request, input: SettingsCliInput) {
     if (applied.length && error instanceof SettingsCliError) throw new SettingsCliError(error.code, `${error.message} (already saved: ${applied.join(', ')})`);
     throw error;
   }
-  return { applied, ...await showGroup(request, chatId, bot.appId) };
+  return { applied, ...(warnings.length ? { warnings } : {}), ...await showGroup(request, chatId, bot.appId) };
 }
 
 function capTarget(input: SettingsCliInput): Record<string, string> {

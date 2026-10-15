@@ -1,0 +1,7 @@
+{
+  "name": "alarm",
+  "version": "1.0.0",
+  "description": "告警初筛：订阅的来源机器人发告警后，以确认人的名义在告警话题里起初筛任务；同一告警规则的上一轮结论带给 Agent。",
+  "scenarios": "scenarios",
+  "providers": "index.mjs"
+}

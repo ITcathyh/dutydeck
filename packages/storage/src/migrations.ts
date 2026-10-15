@@ -9,6 +9,7 @@ import { pruneScheduleEntityVersions } from './schedule-foundation.js'
 import { createCiWebhookSchema } from './ci-webhook.js'
 import { createUsageLedgerSchema, migrateUsagePricing } from './usage-ledger.js'
 import { createSessionInsightSchema } from './session-insight-migration.js'
+import { migrateLegacyDutyScenarios } from './scenario-legacy.js'
 
 export interface Migration {
   version: number
@@ -607,8 +608,23 @@ export const migrations: Migration[] = [
     createWorkItemIndexSchema(db);
     db.exec(`CREATE INDEX collaboration_actions_delivery_window ON collaboration_actions(app_id,chat_id,created_at,id)
       WHERE kind IN ('participation.reply','schedule_delivery') AND status IN ('intent','sending','unknown','succeeded')`);
-  } }
+  } },
+  {
+    // 告警初筛搬进内置场景包 alarm：群分工改成按场景包存绑定（scenarios_json）。
+    // v20/v36 共用的历史建表语句不变，新库旧库都只在这里加一次列。
+    // 同一事务里把 alarm_json 按旧订阅格式校验后转成 scenarios_json.alarm 并清空 alarm_json；
+    // 转不了的行原样保留、写一行日志，读取时由 scenario-legacy.ts 兜底。
+    version: 38,
+    name: 'collaboration_scenarios',
+    up: addCollaborationScenarios
+  }
 ]
+
+/** v38：collaboration_duties 加 scenarios_json 列，把旧的 alarm_json 转进去。 */
+export function addCollaborationScenarios(db: Database.Database): void {
+  db.exec('ALTER TABLE collaboration_duties ADD COLUMN scenarios_json TEXT CHECK (scenarios_json IS NULL OR json_valid(scenarios_json))')
+  migrateLegacyDutyScenarios(db)
+}
 
 /** 让 collaboration_settings 接受 'eager'；已经接受（或表不存在）时什么都不做。 */
 export function allowEagerParticipation(db: Database.Database): void {

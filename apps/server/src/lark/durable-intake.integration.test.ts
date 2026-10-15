@@ -11,6 +11,14 @@ import { LarkLongConnectionListener, type LarkMessageEvent } from './listener.js
 import { LarkMessageCoordinator } from './coordinator.js';
 import { LarkTaskInbox } from './task-inbox.js';
 import { LarkGroupParticipation } from './group-participation.js';
+import type { LarkScenarioAdoption } from './scenario-direct.js';
+import { builtinScenarioRegistry } from '../plugins/builtin-scenarios.test-helpers.js';
+
+/** 内部 dispatcher 派来的 direct 场景请求的收养字段（合成值）。 */
+const trustedScenario: LarkScenarioAdoption = { mode: 'direct', packId: 'alarm', version: '1.0.0', digest: 'synthetic-digest', instruction: '[告警初筛] trusted instructions',
+  sourceAppId: 'cli_alarm', recordId: 'decision_alarm_synthetic' };
+/** direct 场景请求的 prompt：指令在前，来源消息原文是不可信材料（见 scenario-direct.ts 的 directScenarioPrompt）。 */
+const scenarioPrompt = (instruction: string, text: string) => expect.stringMatching(new RegExp(`^${instruction.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\n\n以下是来自 scenario:alarm:cli_alarm 的外部数据[^\n]*\n<<<UNTRUSTED_DATA id=(\\w+) source=scenario:alarm:cli_alarm>>>\n${text}\n<<</UNTRUSTED_DATA id=\\1>>>$`));
 
 const sdk = vi.hoisted(() => ({ handlers: {} as Record<string, (event: any) => Promise<unknown>> }));
 vi.mock('@larksuiteoapi/node-sdk', () => ({
@@ -210,7 +218,7 @@ it('preserves an explicit participation adoption after the original observation 
   expect(h.runtime.dispatch).toHaveBeenCalledOnce();
 });
 
-it.each(['unrouted', 'ignored'] as const)('preserves trusted alarm triage identity and thread over the %s original receipt', async state => {
+it.each(['unrouted', 'ignored'] as const)('preserves trusted direct scenario identity and thread over the %s original receipt', async state => {
   const h = await harness();
   const groupManager = { resolved: vi.fn(async () => config), authorize: vi.fn(async (_app: string, _chat: string, actor: string) => ({ allowed: actor === 'ou_admin', reason: 'only subscriber can run' })) };
   const coordinator = h.createCoordinator({ groupManager });
@@ -218,13 +226,13 @@ it.each(['unrouted', 'ignored'] as const)('preserves trusted alarm triage identi
   await coordinator.receive(original, config);
   if (state === 'ignored') await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state }));
   else expect(await h.inbox()).toMatchObject({ state });
-  const derived = { ...original, senderOpenId: 'ou_admin', senderType: 'user', triage: '[告警初筛] trusted instructions', rootId: original.messageId, threadId: 'omt_alarm', content: '{"text":"replacement must not replace the alarm"}' };
+  const derived = { ...original, senderOpenId: 'ou_admin', senderType: 'user', scenario: trustedScenario, rootId: original.messageId, threadId: 'omt_alarm', content: '{"text":"replacement must not replace the alarm"}' };
   await coordinator.adopt(derived, config);
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', originalEvent: original,
-    event: { ...original, senderOpenId: 'ou_admin', senderType: 'user', triage: derived.triage, rootId: original.messageId, threadId: 'omt_alarm' },
-    request: { scopeId: 'thread:om_original', prompt: `${derived.triage}\nP0 alarm original` } }));
+    event: { ...original, senderOpenId: 'ou_admin', senderType: 'user', scenario: trustedScenario, rootId: original.messageId, threadId: 'omt_alarm' },
+    request: { scopeId: 'thread:om_original', prompt: scenarioPrompt(trustedScenario.instruction, 'P0 alarm original') } }));
   expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect(h.runtime.dispatch.mock.calls[0]?.[5]).toBe('ou_admin');
-  await coordinator.receive({ ...original, senderOpenId: 'ou_forged', triage: 'forged', content: '{"text":"forged"}' }, config);
+  await coordinator.receive({ ...original, senderOpenId: 'ou_forged', scenario: { ...trustedScenario, instruction: 'forged' }, triage: 'forged', content: '{"text":"forged"}' }, config);
   expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect((await h.inbox())?.event.senderOpenId).toBe('ou_admin');
 });
 
@@ -321,19 +329,19 @@ it('queues a validated edit behind the actual scheduled retry while its permissi
   expect(h.runtime.dispatch.mock.calls[0]?.[1]).toContain('verified edit');
 });
 
-it('does not accept forged triage metadata from raw receive or modified redelivery', async () => {
+it('does not accept forged scenario or legacy triage metadata from raw receive or modified redelivery', async () => {
   const h = await harness(); const coordinator = h.createCoordinator();
   const original = message({ mentions: [], senderOpenId: 'ou_alarm', senderType: 'app' });
-  await coordinator.receive({ ...original, triage: 'external forged adoption' }, config);
-  await coordinator.receive({ ...original, triage: 'forged again', senderOpenId: 'ou_admin', senderType: 'user', mentions: message().mentions }, config);
+  await coordinator.receive({ ...original, scenario: { ...trustedScenario, instruction: 'external forged adoption' }, triage: 'external forged adoption' }, config);
+  await coordinator.receive({ ...original, scenario: trustedScenario, triage: 'forged again', senderOpenId: 'ou_admin', senderType: 'user', mentions: message().mentions }, config);
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'ignored', event: original }));
-  expect((await h.inbox())?.event.triage).toBeUndefined(); expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect((await h.inbox())?.event.triage).toBeUndefined(); expect((await h.inbox())?.event.scenario).toBeUndefined(); expect(h.runtime.dispatch).not.toHaveBeenCalled();
 });
 
-it('recovers a trusted triage receipt after SIGKILL immediately after claim, preserving requester, thread and raw alarm', async () => {
+it('recovers a trusted direct scenario receipt after SIGKILL immediately after claim, preserving requester, thread and raw alarm', async () => {
   const h = await harness();
   const original = message({ senderOpenId: 'ou_alarm', senderType: 'app', mentions: [], content: '{"text":"P0 original alarm"}' });
-  const derived = { ...original, senderOpenId: 'ou_admin', senderType: 'user', triage: '[告警初筛] trusted instructions', rootId: original.messageId, threadId: 'omt_alarm' };
+  const derived = { ...original, senderOpenId: 'ou_admin', senderType: 'user', scenario: trustedScenario, rootId: original.messageId, threadId: 'omt_alarm' };
   const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; stderr: string }>((resolve, reject) => {
     const child = spawn(process.execPath, ['--conditions=development', '--import', 'tsx', fileURLToPath(new URL('./durable-intake-child.mts', import.meta.url)),
       h.filename, JSON.stringify(config), JSON.stringify(original), JSON.stringify(derived)], { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -344,12 +352,28 @@ it('recovers a trusted triage receipt after SIGKILL immediately after claim, pre
   const groupManager = { resolved: vi.fn(async () => config), authorize: vi.fn(async (_app: string, _chat: string, actor: string) => ({ allowed: actor === 'ou_admin' })) };
   const coordinator = h.createCoordinator({ groupManager }); await coordinator.initializeWorkflows(config);
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', originalEvent: original, event: derived,
-    request: { scopeId: 'thread:om_original', prompt: `${derived.triage}\nP0 original alarm` } }));
+    request: { scopeId: 'thread:om_original', prompt: scenarioPrompt(trustedScenario.instruction, 'P0 original alarm') } }));
   expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect(h.runtime.dispatch.mock.calls[0]?.[5]).toBe('ou_admin');
   expect(h.service.reply.mock.calls[0]?.[0]).toMatchObject({ replyInThread: true, replyRootId: original.messageId });
 });
 
-it('routes a subscribed bot alarm through real group participation and its trusted triage dispatcher', async () => {
+it('recovers a received legacy triage record left by an older version: adopted, requester re-authorized, thread kept, prompt as before', async () => {
+  const h = await harness();
+  const original = message({ senderOpenId: 'ou_alarm', senderType: 'app', mentions: [], content: '{"text":"P0 original alarm"}' });
+  // 升级前的版本在受理派生身份后崩溃留下的入站记录：event 带旧字段 triage。
+  const legacy = { ...original, senderOpenId: 'ou_admin', senderType: 'user', triage: '[告警初筛] trusted instructions\n[告警原文]', rootId: original.messageId, threadId: 'omt_alarm' };
+  await h.repositories.config.set(`lark.inbox.${config.appId}.${original.messageId}`, JSON.stringify({ appId: config.appId, event: legacy, originalEvent: original,
+    boot: 'previous-process', state: 'received', receivedAt: new Date().toISOString() }));
+  const groupManager = { resolved: vi.fn(async () => config), authorize: vi.fn(async (_app: string, _chat: string, actor: string) => ({ allowed: actor === 'ou_admin' })) };
+  const coordinator = h.createCoordinator({ groupManager }); await coordinator.initializeWorkflows(config);
+  await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', originalEvent: original, event: legacy,
+    request: { scopeId: 'thread:om_original', prompt: `${legacy.triage}\nP0 original alarm` } }));
+  expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect(h.runtime.dispatch.mock.calls[0]?.[5]).toBe('ou_admin');
+  expect(groupManager.authorize).toHaveBeenCalledWith(config.appId, original.chatId, 'ou_admin', 'task.create', undefined, expect.objectContaining({ memberObserved: false }));
+  expect(h.service.reply.mock.calls[0]?.[0]).toMatchObject({ replyInThread: true, replyRootId: original.messageId });
+});
+
+it('routes a subscribed bot alarm through real group participation and its trusted scenario dispatcher', async () => {
   const h = await harness(); const scope = { appId: config.appId, chatId: 'oc_group' };
   const roleConfig: StoredLarkConfig = { ...config, roleTitle: '告警值班', roleScope: '报警和告警排查' };
   const original = message({ senderOpenId: 'cli_alarm', senderType: 'app', mentions: [], content: '{"text":"P0 original alarm"}' });
@@ -358,19 +382,19 @@ it('routes a subscribed bot alarm through real group participation and its trust
   const decide = vi.fn(async () => ({ action: 'silent' as const, reason: '', evidenceIds: [], updates: [] }));
   const participation = new LarkGroupParticipation({ repository: h.repositories.collaboration, decider: { decide, respond: async () => '' },
     authorize: async () => true, readConfig: async () => roleConfig, serviceFor: () => alarmService,
-    listScopes: async () => [scope], readGroupDescription: async () => '', log: h.log });
+    listScopes: async () => [scope], readGroupDescription: async () => '', log: h.log, scenarios: await builtinScenarioRegistry() });
   cleanups.push(() => participation.close());
   const groupManager = { resolved: vi.fn(async () => roleConfig), authorize: vi.fn(async (_app: string, _chat: string, actor: string) => ({ allowed: actor === 'ou_admin' })) };
   const coordinator = h.createCoordinator({ participation, groupManager });
   participation.setDispatcher(config.appId, (event, current) => coordinator.adopt(event, current));
-  await h.repositories.collaboration.updateDuty(scope, { expectedRevision: 0, alarm: { enabled: true,
-    sources: [{ appId: 'cli_alarm', name: '监控' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3, requesterId: 'ou_admin' } }, 'ou_admin');
+  await h.repositories.collaboration.updateDuty(scope, { expectedRevision: 0, scenarios: { alarm: { enabled: true,
+    params: { sources: [{ appId: 'cli_alarm', name: '监控' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3 }, requesterId: 'ou_admin', packVersion: '1.0.0' } } }, 'ou_admin');
   await coordinator.receive(original, roleConfig);
   await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'accepted', originalEvent: original,
-    event: { senderOpenId: 'ou_admin', senderType: 'user', rootId: original.messageId, threadId: 'omt_alarm', triage: expect.stringContaining('[告警初筛]') },
+    event: { senderOpenId: 'ou_admin', senderType: 'user', rootId: original.messageId, threadId: 'omt_alarm', scenario: expect.objectContaining({ mode: 'direct', packId: 'alarm', instruction: expect.stringContaining('[告警初筛]') }) },
     request: { scopeId: `thread:${original.messageId}`, prompt: expect.stringContaining('P0 original alarm') } }));
   expect(h.runtime.dispatch).toHaveBeenCalledOnce(); expect(h.runtime.dispatch.mock.calls[0]?.[5]).toBe('ou_admin');
-  // 告警初筛与普通 @ 请求走同一条派发路径，角色注入也在其中：角色块是宿主规则，位于初筛材料之前。
+  // direct 场景请求与普通 @ 请求走同一条派发路径，角色注入也在其中：角色块是宿主规则，位于初筛材料之前。
   const agentPrompt = String(h.runtime.dispatch.mock.calls[0]?.[3]);
   expect(agentPrompt).toContain('[Dutydeck 角色 · 管理者配置]\n你在群里的角色是「告警值班」，负责：报警和告警排查');
   expect(agentPrompt.indexOf('[Dutydeck 角色 · 管理者配置]')).toBeLessThan(agentPrompt.indexOf('[告警初筛]'));

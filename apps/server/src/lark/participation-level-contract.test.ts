@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { participationLevelLabels, participationLevelPhraseHint, participationLevelPhrases, participationLevels, type ParticipationLevel } from '@dutydeck/shared';
 import { buildWelcomeCardContent } from './welcome.js';
 import { participationIntentOf } from './participation-rules.js';
-import { responderIntentOf } from './group-duty.js';
+import { responderIntentOf } from './group-responder.js';
 
 /** 卡片里「说「…」」教用户说的短语。 */
 const taughtPhrases = (text: string) => [...text.matchAll(/说((?:「[^」]+」(?:或)?)+)/g)].flatMap(match => [...match[1]!.matchAll(/「([^」]+)」/g)].map(item => item[1]!));

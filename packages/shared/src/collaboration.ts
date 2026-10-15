@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { scenarioBindingSchema, scenarioPackIdPattern, type ScenarioRecordSnapshot } from './scenarios.js';
 
 export const collaborationScopeSchema = z.object({
   appId: z.string().trim().min(1).max(128),
@@ -110,26 +111,6 @@ export const updateCollaborationSettingsInputSchema = z.object({
 });
 export type UpdateCollaborationSettingsInput = z.infer<typeof updateCollaborationSettingsInputSchema>;
 
-/**
- * 告警初筛订阅：来源 Bot 在本群发的消息命中后不走参与判定，直接在告警话题里起一个初筛任务。
- * 每个 Bot 实例各存一份，只管自己。
- */
-export const alarmSubscriptionSchema = z.object({
-  enabled: z.boolean(),
-  /** 来源 Bot：appId 用来匹配消息发送者，name 只用于展示。 */
-  sources: z.array(z.object({ appId: z.string().trim().min(1).max(128), name: z.string().trim().max(128).optional() }).strict()).max(20),
-  /** 级别关键字（如 P0、critical），告警文本包含任一个才分析，不分大小写；空表示不过滤。 */
-  levels: z.array(z.string().trim().min(1).max(32)).max(20),
-  /** 同一条告警（指纹相同）多少小时内只分析一次。 */
-  dedupeHours: z.number().int().min(1).max(168),
-  maxPerHour: z.number().int().min(1).max(30),
-  /** 初筛任务以谁的名义发起：在群里确认订阅的人（open_id）。没有时不起任务。 */
-  requesterId: z.string().trim().min(1).max(128).optional()
-}).strict();
-export type AlarmSubscription = z.infer<typeof alarmSubscriptionSchema>;
-export const ALARM_DEDUPE_HOURS = 6;
-export const ALARM_MAX_PER_HOUR = 3;
-
 /** 接话人：多 Bot 群里没 @ 任何 Bot 的消息只由它判定和回复。since 是生效时间，收到更早的声明时不回退。 */
 export const groupResponderSchema = z.object({
   appId: z.string().trim().min(1).max(128),
@@ -138,22 +119,24 @@ export const groupResponderSchema = z.object({
 }).strict();
 export type GroupResponder = z.infer<typeof groupResponderSchema>;
 
-/** 本 Bot 在群里的分工：告警初筛订阅和它所知的接话人。 */
+const scenarioPackIdSchema = z.string().regex(scenarioPackIdPattern);
+
+/** 本 Bot 在群里的分工：它所知的接话人，和本群对各场景包的绑定（按包 id）。每个 Bot 实例各存一份，只管自己。 */
 export const collaborationDutySchema = z.object({
   scope: collaborationScopeSchema,
   revision: z.number().int().min(0),
   responder: groupResponderSchema.optional(),
-  alarm: alarmSubscriptionSchema.optional(),
+  scenarios: z.record(scenarioPackIdSchema, scenarioBindingSchema).optional(),
   updatedAt: z.string().datetime()
 }).strict();
 export type CollaborationDuty = z.infer<typeof collaborationDutySchema>;
 
-/** null 表示清掉，不传表示不改。 */
+/** null 表示清掉，不传表示不改；scenarios 按包合并，某个包的值为 null 时删掉那个绑定。 */
 export const updateCollaborationDutyInputSchema = z.object({
   expectedRevision: z.number().int().min(0),
   responder: groupResponderSchema.nullable().optional(),
-  alarm: alarmSubscriptionSchema.nullable().optional()
-}).strict().refine(input => input.responder !== undefined || input.alarm !== undefined, {
+  scenarios: z.record(scenarioPackIdSchema, scenarioBindingSchema.nullable()).optional()
+}).strict().refine(input => input.responder !== undefined || input.scenarios !== undefined, {
   message: 'At least one field must be updated'
 });
 export type UpdateCollaborationDutyInput = z.infer<typeof updateCollaborationDutyInputSchema>;
@@ -490,15 +473,22 @@ export const BOT_TURN_LIMIT_PER_HOUR = 6;
 export const BOT_LOOP_DEPTH_LIMIT = 3;
 /** 标记「月度成本上限已用满，未判定」。没有调用模型，不计入判定预算。 */
 export const USAGE_CAP_GATE = 'usage_cap';
-/** 标记「告警订阅对一条来源 Bot 消息的处理」：起了初筛任务或因级别、重复、上限跳过。不调模型，不是参与判定。 */
-export const ALARM_TRIAGE_RECORD = 'alarm_triage';
+/** 标记「direct 场景包对一条来源 Bot 消息的处理」：起了任务或因过滤、重复、上限等跳过。不调模型，不是参与判定。 */
+export const SCENARIO_RECORD = 'scenario';
+/** listScenarioRecords 一次最多读多少条：每小时上限和去重窗口都取契约上限（30 × 168）时窗口内最多的记录数，再加 1。 */
+export const SCENARIO_WINDOW_LIMIT = 30 * 168 + 1;
 
 /** 不代表一次模型判定的记录标记，统计判定用量时必须全部排除。 */
-const nonDecisionGates = new Set<string>([DECISION_BUDGET_GATE, BOT_TURN_RECORD, BOT_LOOP_GATE, USAGE_CAP_GATE, ALARM_TRIAGE_RECORD]);
+const nonDecisionGates = new Set<string>([DECISION_BUDGET_GATE, BOT_TURN_RECORD, BOT_LOOP_GATE, USAGE_CAP_GATE, SCENARIO_RECORD]);
 const gateOf = (item: Pick<CollaborationDecision, 'inputSnapshot'>) => String((item.inputSnapshot as { gate?: unknown }).gate ?? '');
-/** 判定记录是否是闸门留痕（预算、成本上限、机器人回合、告警订阅），不是参与判定对某条人类消息的判断。 */
+/** 判定记录是否是闸门留痕（预算、成本上限、机器人回合、场景记录），不是参与判定对某条人类消息的判断。 */
 export const isDecisionGate = (item: Pick<CollaborationDecision, 'inputSnapshot'>): boolean => nonDecisionGates.has(gateOf(item));
-export const isAlarmRecord = (item: Pick<CollaborationDecision, 'inputSnapshot'>): boolean => gateOf(item) === ALARM_TRIAGE_RECORD;
+/** 场景记录冻结的内容；不是场景记录时返回 undefined。 */
+export function scenarioRecordOf(item: Pick<CollaborationDecision, 'inputSnapshot'>): ScenarioRecordSnapshot | undefined {
+  if (gateOf(item) !== SCENARIO_RECORD) return undefined;
+  const scenario = (item.inputSnapshot as { scenario?: unknown }).scenario;
+  return scenario && typeof scenario === 'object' && typeof (scenario as { packId?: unknown }).packId === 'string' ? scenario as ScenarioRecordSnapshot : undefined;
+}
 
 /**
  * 判定来源，存在 inputSnapshot.decider 里；inputSnapshot 其余部分仍是可回放的判定输入。
@@ -718,6 +708,11 @@ export interface CollaborationRepository {
   recordDecision(input: CollaborationDecision): Promise<CollaborationDecision>;
   getDecision(scope: CollaborationScope, id: string): Promise<CollaborationDecision | undefined>;
   listDecisions(scope: CollaborationScope, limit?: number): Promise<ListedItems<CollaborationDecision>>;
+  /**
+   * direct 场景包去重和每小时上限用的记录：本包、createdAt 不早于 since、action 为 act 且没失败的场景记录（含升级前的旧记录），新到旧。
+   * limit 最多 SCENARIO_WINDOW_LIMIT；库里还有更多时结果带 truncated。
+   */
+  listScenarioRecords(scope: CollaborationScope, query: { packId: string; since: string; limit: number }): Promise<ListedItems<CollaborationDecision>>;
   updateDecision(scope: CollaborationScope, id: string, patch: UpdateDecisionInput): Promise<CollaborationDecision>;
   addFeedback(input: CollaborationFeedback): Promise<CollaborationFeedback>;
   listFeedback(scope: CollaborationScope, decisionId?: string): Promise<CollaborationFeedback[]>;

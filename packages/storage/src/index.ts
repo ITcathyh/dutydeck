@@ -27,6 +27,7 @@ export * from './group-policy.js';
 export * from './schedule-foundation.js';
 export * from './collaboration.js';
 export * from './collaboration-migration.js';
+export * from './scenario-legacy.js';
 export * from './usage-ledger.js';
 export * from './execution-inspection.js';
 export { createSessionInsightRepository } from './session-insight.js';

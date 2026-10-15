@@ -17,6 +17,7 @@ import { larkExecutionConfirmed, readLarkConfig, type StoredLarkConfig } from '.
 import type { LarkGroupManager } from './lark/group-management.js';
 import { createLarkCardService, type LarkCardService } from './lark/service.js';
 import { MandateCards } from './collaboration-mandate-cards.js';
+import type { ScenarioRegistry } from './plugins/scenario-registry.js';
 
 export interface CollaborationIntegrationOptions {
   repositories: RepositoryBundle;
@@ -30,6 +31,8 @@ export interface CollaborationIntegrationOptions {
   readMemory?(scope: CollaborationScope): Promise<string>;
   /** 群参与判定前查月度成本上限，见 GroupParticipationOptions.usageRefusal。 */
   usageRefusal?(scope: CollaborationScope): Promise<string | undefined>;
+  /** 已加载的场景包。 */
+  scenarios?: ScenarioRegistry;
 }
 export function createCollaborationIntegration(options: CollaborationIntegrationOptions) {
   const { repositories: stored, runtime, groups } = options;
@@ -116,7 +119,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   const deliveries = new CollaborationDelivery(repos.collaboration);
   const participation = new LarkGroupParticipation({
     withDelivery: (scope, actionId, send) => deliveries.run(scope, actionId, send),
-    repository: roleParticipationRepo, decider, readConfig, serviceFor: client, readMemory: options.readMemory, usageRefusal: options.usageRefusal, log: options.log,
+    repository: roleParticipationRepo, decider, readConfig, serviceFor: client, readMemory: options.readMemory, usageRefusal: options.usageRefusal, log: options.log, scenarios: options.scenarios,
     readTeamContext: (scope, query) => teamContext.read(scope, query),
     authorizeTeamContext: (scope, context) => teamContext.authorize(scope, context),
     // 发起人本人能对机器人说话就能处理自己的请求；替别人确认要本群操作员或管理员（run.interrupt 的现有授权）。

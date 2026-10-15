@@ -2,12 +2,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance } from 'fastify';
+import type { RuntimeError } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { buildApp } from './app.js';
 import { createCliProgram } from './cli-program.js';
+import { registerCollaborationRoutes } from './collaboration-routes.js';
+import { CollaborationService } from './collaboration-service.js';
 import { larkBotsConfigKey, readLarkConfig } from './lark/config.js';
-import { botFields, fieldsHelp, runSettingsCli, SettingsCliError, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
+import { LarkGroupParticipation } from './lark/group-participation.js';
+import { PluginHost } from './plugins/host.js';
+import { botFields, fieldsHelp, groupFields, runSettingsCli, SettingsCliError, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 
 const cleanups: Array<() => unknown> = [];
 afterEach(async () => { for (const clean of cleanups.splice(0).reverse()) await clean(); });
@@ -258,6 +263,79 @@ describe('settings CLI against the real bot routes', () => {
   });
 });
 
+/** 群分工的请求交给真实的协作路由、群参与和场景包注册表（内置 alarm 包）；群列表用固定数据。 */
+async function dutyRuntime() {
+  const directory = await mkdtemp(join(tmpdir(), 'dutydeck-settings-duty-'));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  const repos = createRepositories(join(directory, 'test.sqlite'));
+  cleanups.push(() => repos.close());
+  const host = await PluginHost.load({ dataDir: directory });
+  const participation = new LarkGroupParticipation({ repository: repos.collaboration, decider: {} as any, authorize: async () => true, serviceFor: () => ({}) as any,
+    readConfig: async appId => appId === 'cli_a' ? { appId, appSecret: 'secret-a' } as any : undefined, scenarios: host.scenarios });
+  cleanups.push(() => participation.close());
+  const service = new CollaborationService({ repositories: repos, authorize: async () => true, resolveScheduleScope: async () => ({ channelBotId: 'bot', identityRef: 'identity', secretRef: 'secret' }) });
+  const app = Fastify();
+  app.setErrorHandler((error, _request, reply) => reply.code((error as RuntimeError).statusCode ?? 500).send({ error: { code: (error as RuntimeError).code, message: error.message } }));
+  app.get('/api/lark/management/groups', async () => ({ groups: [{ key: 'k', chatId: 'oc_duty', name: '测试群', bots: [{ appId: 'cli_a', membership: 'member', validity: 'valid', roles: [], applied: true, binding: { revision: 1, state: 'staged', oncall: false } }] }] }));
+  await registerCollaborationRoutes(app, { service, runtime: {} as any, tools: {} as any, evaluation: {} as any, extensions: {} as any, bootstrap: async () => {}, authorizeManagement: async () => 'ou_owner',
+    updateDuty: (scope, patch, actorId) => participation.updateDuty(scope, patch, actorId), scenarios: scope => participation.scenarioOverview(scope) });
+  cleanups.push(() => app.close());
+  const fetcher = bridge(app);
+  const dutyBodies = () => fetcher.mock.calls.filter(([url, init]) => new URL(String(url)).pathname.endsWith('/collaboration/duty') && init?.method === 'PATCH').map(([, init]) => JSON.parse(String(init!.body)));
+  const scope = { appId: 'cli_a', chatId: 'oc_duty' };
+  return { repos, scope, fetcher, dutyBodies, run: (action: SettingsAction, input: SettingsCliInput = {}) => runSettingsCli(action, { ...target, chatId: 'oc_duty', ...input }, { fetcher, readToken }) };
+}
+
+describe('settings CLI group duty against the real collaboration routes', () => {
+  const sources = [{ appId: 'cli_source_a', name: '来源 A' }];
+  const alarmOf = (result: Record<string, unknown>) => (result.collaboration as { scenarios: Array<{ id: string }> }).scenarios.find(item => item.id === 'alarm');
+
+  it('writes scenario bindings, merges partial params, and shows each pack with its params, binding and staleness', async () => {
+    const { repos, scope, run } = await dutyRuntime();
+    const before = alarmOf(await run('group-show'));
+    expect(before).toMatchObject({ title: '告警初筛', version: '1.0.0', mode: 'direct', requiresRequester: true, versionStale: false,
+      params: { sources: { type: 'bot_list', label: '来源机器人 app_id' }, dedupeHours: { type: 'integer', min: 1, max: 168, default: 6 } } });
+    expect(before).not.toHaveProperty('binding');
+    const saved = await run('group-set', { pairs: [`scenarios=${JSON.stringify({ alarm: { enabled: false, params: { sources, levels: ['P0'] } } })}`] });
+    expect(saved.applied).toEqual(['duty']);
+    expect(saved).not.toHaveProperty('warnings');
+    const off = { enabled: false, params: { sources, levels: ['P0'], dedupeHours: 6, maxPerHour: 3 }, packVersion: '1.0.0' };
+    expect(alarmOf(saved)).toMatchObject({ binding: off });
+    // 群里确认后（确认卡写入确认人），CLI 只改一个参数，其余沿用。
+    await repos.collaboration.updateDuty(scope, { expectedRevision: 1, scenarios: { alarm: { ...off, enabled: true, requesterId: 'ou_tester' } } }, 'ou_tester');
+    const changed = await run('group-set', { pairs: ['scenarios={"alarm":{"enabled":true,"params":{"maxPerHour":5}}}'] });
+    expect((changed.collaboration as any).duty.scenarios.alarm).toEqual({ enabled: true, params: { ...off.params, maxPerHour: 5 }, requesterId: 'ou_tester', packVersion: '1.0.0' });
+    // 绑定的大版本落后于包：show 标出过期，开启被服务端拒绝。
+    await repos.collaboration.updateDuty(scope, { expectedRevision: 3, scenarios: { alarm: { ...off, enabled: true, requesterId: 'ou_tester', packVersion: '0.9.0' } } }, 'ou_tester');
+    expect(alarmOf(await run('group-show'))).toMatchObject({ versionStale: true, binding: { packVersion: '0.9.0' } });
+    await expect(run('group-set', { pairs: ['scenarios={"alarm":{"enabled":true}}'] })).rejects.toMatchObject({ code: 'COLLABORATION_SCENARIO_VERSION_STALE' });
+    expect(fieldsHelp(groupFields)).toContain('scenarios=<JSON>');
+    expect(fieldsHelp(groupFields)).not.toContain('alarm=');
+  });
+
+  it('refuses confirmer and pack version from the CLI, and enabling a direct pack nobody confirmed in the group', async () => {
+    const { run } = await dutyRuntime();
+    await expect(run('group-set', { pairs: [`scenarios=${JSON.stringify({ alarm: { enabled: false, params: { sources }, requesterId: 'ou_tester' } })}`] })).rejects.toMatchObject({ code: 'COLLABORATION_INVALID_INPUT' });
+    await expect(run('group-set', { pairs: [`scenarios=${JSON.stringify({ alarm: { enabled: false, params: { sources }, packVersion: '1.0.0' } })}`] })).rejects.toMatchObject({ code: 'COLLABORATION_INVALID_INPUT' });
+    await expect(run('group-set', { pairs: [`alarm=${JSON.stringify({ enabled: false, sources, requesterId: 'ou_tester' })}`] })).rejects.toMatchObject({ code: 'COLLABORATION_INVALID_INPUT' });
+    await expect(run('group-set', { pairs: [`scenarios=${JSON.stringify({ alarm: { enabled: true, params: { sources } } })}`] })).rejects.toMatchObject({ code: 'COLLABORATION_SCENARIO_REQUESTER_REQUIRED' });
+    await expect(run('group-set', { pairs: ['scenarios={"alarm":{"enabled":false,"params":{"dedupeHours":0}}}'] })).rejects.toMatchObject({ code: 'COLLABORATION_SCENARIO_INVALID' });
+    expect((await run('group-show')).collaboration).toMatchObject({ duty: { revision: 0 } });
+  });
+
+  it('keeps alarm=<flat subscription> as an alias of scenarios.alarm for one release, with a warning; alarm=null removes the binding', async () => {
+    const { run, dutyBodies } = await dutyRuntime();
+    const saved = await run('group-set', { pairs: [`alarm=${JSON.stringify({ enabled: false, sources, levels: ['P1'], dedupeHours: 12 })}`] });
+    expect(dutyBodies()).toEqual([{ expectedRevision: 0, scenarios: { alarm: { enabled: false, params: { sources, levels: ['P1'], dedupeHours: 12 } } } }]);
+    expect(saved.warnings).toEqual([expect.stringContaining('scenarios={"alarm"')]);
+    expect(alarmOf(saved)).toMatchObject({ binding: { enabled: false, params: { sources, levels: ['P1'], dedupeHours: 12, maxPerHour: 3 } } });
+    const removed = await run('group-set', { pairs: ['alarm=null'] });
+    expect(dutyBodies().at(-1)).toEqual({ expectedRevision: 1, scenarios: { alarm: null } });
+    expect((removed.collaboration as any).duty.scenarios?.alarm).toBeUndefined();
+    expect(alarmOf(removed)).not.toHaveProperty('binding');
+  });
+});
+
 describe('settings CLI requests', () => {
   const run = (fetcher: ReturnType<typeof vi.fn>, action: SettingsAction, input: SettingsCliInput = {}) => runSettingsCli(action, { ...target, ...input }, { fetcher, readToken });
   const bodyOf = (fetcher: ReturnType<typeof vi.fn>, method: string, path: string) => {
@@ -313,6 +391,17 @@ describe('settings CLI requests', () => {
     await expect(run(fetcher, 'group-set', { chatId: 'oc_1', pairs: ['oncall=true'] })).rejects.toMatchObject({ code: 'SETTINGS_APP_REQUIRED', message: expect.stringContaining('cli_a|cli_b') });
     await run(fetcher, 'group-set', { chatId: 'oc_1', appId: 'cli_b', pairs: ['oncall=true'] });
     expect(bodyOf(fetcher, 'PUT', '/api/lark/bots/cli_b/groups/oc_1')).toMatchObject({ patch: { oncall: true } });
+  });
+
+  it('merges alarm= into the other packs of scenarios=, and refuses it together with scenarios.alarm before sending anything', async () => {
+    const fetcher = groupApi([groupBot('cli_a', 2)]);
+    await run(fetcher, 'group-set', { chatId: 'oc_1', pairs: ['scenarios={"team-faq":{"enabled":true}}', 'alarm=null'] });
+    expect(bodyOf(fetcher, 'PATCH', '/api/lark/groups/cli_a/oc_1/collaboration/duty')).toEqual({ expectedRevision: 3, scenarios: { 'team-faq': { enabled: true }, alarm: null } });
+    const untouched = groupApi([groupBot('cli_a', 2)]);
+    await expect(run(untouched, 'group-set', { chatId: 'oc_1', pairs: ['alarm={"enabled":false}', 'scenarios={"alarm":{"enabled":false}}'] })).rejects.toMatchObject({ code: 'SETTINGS_KEYS_CONFLICT' });
+    await expect(run(untouched, 'group-set', { chatId: 'oc_1', pairs: ['alarm=true'] })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    await expect(run(untouched, 'group-set', { chatId: 'oc_1', pairs: ['alarm=null', 'scenarios=[]'] })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    expect(untouched).not.toHaveBeenCalled();
   });
 
   it('says which part was already saved when a later part fails', async () => {

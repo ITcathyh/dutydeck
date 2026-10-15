@@ -7,8 +7,10 @@ import {
   ApiError,
   collaborationApi,
   type CollaborationOverview,
+  type CollaborationScenario,
   type CollaborationSettings
 } from '../api';
+import type { ScenarioBinding } from '@dutydeck/shared';
 import { CollaborationPanel } from './CollaborationPanel';
 
 const now = '2026-09-18T01:00:00.000Z';
@@ -217,14 +219,33 @@ describe('协作设置保存与版本冲突', () => {
   });
 });
 
-describe('群分工：接话人与告警初筛', () => {
+describe('群分工：接话人与场景包', () => {
   const duty = (patch: Partial<NonNullable<CollaborationOverview['duty']>> = {}): NonNullable<CollaborationOverview['duty']> => ({
     scope: { appId: 'cli_a', chatId: 'oc_a' }, revision: 2, updatedAt: now, ...patch
   });
+  const enableHint = '开启前先在群里 @机器人 说「告警来了先帮我看看」并点确认：初筛任务要以确认人的名义发起。确认后可以在这里改来源和级别。';
+  // 与内置 alarm 包的参数声明一致。
+  const alarmScenario = (patch: Partial<CollaborationScenario> = {}): CollaborationScenario => ({
+    id: 'alarm', title: '告警初筛', version: '1.0.0', description: '订阅的来源机器人发告警后，直接起一个初筛任务。', mode: 'direct',
+    params: {
+      sources: { type: 'bot_list', label: '来源机器人 app_id', hint: '多个用逗号分隔，只有这些机器人发的消息会初筛。', maxItems: 20, role: 'source', inferOnEnable: true, empty: '未填写' },
+      levels: { type: 'string_list', label: '级别关键字', hint: '例如 P0, P1；留空表示不限级别。', maxItems: 20, maxLength: 32, default: [] },
+      dedupeHours: { type: 'integer', label: '去重窗口（小时，1–168）', min: 1, max: 168, default: 6 },
+      maxPerHour: { type: 'integer', label: '每小时最多初筛（1–30）', min: 1, max: 30, default: 3 }
+    },
+    requiresRequester: true, versionStale: false, enableHint, plugin: 'alarm', builtin: true, ...patch
+  });
+  const faqScenario = (patch: Partial<CollaborationScenario> = {}): CollaborationScenario => ({
+    id: 'team-faq', title: '常见问题', version: '1.0.0', description: '群里有人问到常见问题时先回答。', mode: 'model',
+    params: { topics: { type: 'string_list', label: '问题关键字', maxItems: 10, maxLength: 32, default: ['部署'] } },
+    requiresRequester: false, versionStale: false, plugin: 'sample-faq', builtin: false, ...patch
+  });
+  const alarmBinding = { enabled: true, params: { sources: [{ appId: 'cli_alarm', name: '监控' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3 }, requesterId: 'ou_admin', packVersion: '1.0.0' };
+  const confirmed = (binding: ScenarioBinding = alarmBinding) => alarmScenario({ binding, webDescription: `来源机器人发的告警命中后，在告警话题里起初筛任务，以在群里确认订阅的人（${binding.requesterId}）的名义发起。` });
 
   it('把接话人设成本 Bot 只提交接话人；声明没发出去时提示', async () => {
     const user = userEvent.setup();
-    getOverview.mockResolvedValue(makeOverview(makeSettings(), { duty: duty({ responder: { appId: 'cli_flash', name: 'bdev-flash', since: now } }) }));
+    getOverview.mockResolvedValue(makeOverview(makeSettings(), { duty: duty({ responder: { appId: 'cli_flash', name: 'bdev-flash', since: now } }), scenarios: [alarmScenario()] }));
     const update = vi.spyOn(collaborationApi, 'updateDuty').mockResolvedValue({ duty: duty({ revision: 3, responder: { appId: 'cli_a', since: now } }), announced: false });
     renderPanel();
     const select = await screen.findByLabelText('接话人');
@@ -240,10 +261,9 @@ describe('群分工：接话人与告警初筛', () => {
     expect(await screen.findByText(/群里的接话人声明没发出去.*@本 Bot 说「你负责接话」重发声明/)).toBeTruthy();
   });
 
-  it('改告警级别只提交订阅，沿用来源名字；开启时来源不能为空；版本冲突照实说', async () => {
+  it('改告警级别只提交这个包，沿用来源名字；开启时来源不能为空；版本冲突照实说', async () => {
     const user = userEvent.setup();
-    const alarm = { enabled: true, sources: [{ appId: 'cli_alarm', name: '监控' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3, requesterId: 'ou_admin' };
-    getOverview.mockResolvedValue(makeOverview(makeSettings(), { duty: duty({ alarm }) }));
+    getOverview.mockResolvedValue(makeOverview(makeSettings(), { duty: duty({ scenarios: { alarm: alarmBinding } }), scenarios: [confirmed(), faqScenario()] }));
     const update = vi.spyOn(collaborationApi, 'updateDuty').mockRejectedValueOnce(new ApiError('stale', 'COLLABORATION_REVISION_CONFLICT', 409));
     renderPanel();
     const levels = await screen.findByLabelText('级别关键字');
@@ -258,7 +278,7 @@ describe('群分工：接话人与告警初筛', () => {
     await user.click(screen.getByRole('button', { name: '保存分工' }));
     await waitFor(() => expect(update).toHaveBeenCalledOnce());
     expect(update).toHaveBeenCalledWith('cli_a', 'oc_a', { expectedRevision: 2,
-      alarm: { enabled: true, sources: [{ appId: 'cli_alarm', name: '监控' }, { appId: 'cli_new' }], levels: ['P0', 'P1'], dedupeHours: 6, maxPerHour: 3 } });
+      scenarios: { alarm: { enabled: true, params: { sources: [{ appId: 'cli_alarm', name: '监控' }, { appId: 'cli_new' }], levels: ['P0', 'P1'] } } } });
     expect(await screen.findByText('群分工已被修改，请放弃修改后重新编辑。')).toBeTruthy();
     expect((screen.getByLabelText('级别关键字') as HTMLInputElement).value).toBe('P0，P1');
   });
@@ -280,6 +300,65 @@ describe('群分工：接话人与告警初筛', () => {
     renderPanel();
     await screen.findByLabelText('长期指令');
     expect(screen.queryByLabelText('接话人')).toBeNull();
+  });
+
+  it('没在群里确认过的 direct 包勾选框禁用并显示开启提示；不需要确认人的包可以直接开', async () => {
+    const user = userEvent.setup();
+    getOverview.mockResolvedValue(makeOverview(makeSettings(), { duty: duty(), scenarios: [alarmScenario(), faqScenario()] }));
+    const update = vi.spyOn(collaborationApi, 'updateDuty').mockResolvedValue({ duty: duty({ revision: 3 }) });
+    renderPanel();
+    const alarm = await screen.findByRole('checkbox', { name: /告警初筛/ }) as HTMLInputElement;
+    expect(alarm.disabled).toBe(true);
+    expect(screen.getByText(enableHint)).toBeTruthy();
+    // 没有绑定时显示包的默认值。
+    expect((screen.getByLabelText('去重窗口（小时，1–168）') as HTMLInputElement).value).toBe('6');
+    expect((screen.getByLabelText('问题关键字') as HTMLInputElement).value).toBe('部署');
+    await user.click(screen.getByRole('checkbox', { name: /常见问题/ }));
+    await user.click(screen.getByRole('button', { name: '保存分工' }));
+    await waitFor(() => expect(update).toHaveBeenCalledOnce());
+    expect(update).toHaveBeenCalledWith('cli_a', 'oc_a', { expectedRevision: 2, scenarios: { 'team-faq': { enabled: true } } });
+  });
+
+  it('数字参数按整数提交，只提交改动的包；保存后重新拉取并显示服务端存下的值', async () => {
+    const user = userEvent.setup();
+    const savedBinding = { ...alarmBinding, params: { ...alarmBinding.params, maxPerHour: 5 } };
+    getOverview
+      .mockResolvedValueOnce(makeOverview(makeSettings(), { duty: duty({ scenarios: { alarm: alarmBinding } }), scenarios: [confirmed(), faqScenario()] }))
+      .mockResolvedValue(makeOverview(makeSettings(), { duty: duty({ revision: 3, scenarios: { alarm: savedBinding } }), scenarios: [confirmed(savedBinding), faqScenario()] }));
+    const update = vi.spyOn(collaborationApi, 'updateDuty').mockResolvedValue({ duty: duty({ revision: 3, scenarios: { alarm: savedBinding } }) });
+    renderPanel();
+    const perHour = await screen.findByLabelText('每小时最多初筛（1–30）');
+    await user.clear(perHour);
+    await user.type(perHour, '5');
+    await user.click(screen.getByRole('button', { name: '保存分工' }));
+    await waitFor(() => expect(update).toHaveBeenCalledOnce());
+    expect(update).toHaveBeenCalledWith('cli_a', 'oc_a', { expectedRevision: 2, scenarios: { alarm: { enabled: true, params: { maxPerHour: 5 } } } });
+    expect(await screen.findByText('群分工已保存。')).toBeTruthy();
+    await waitFor(() => expect(getOverview).toHaveBeenCalledTimes(2));
+    expect((screen.getByLabelText('每小时最多初筛（1–30）') as HTMLInputElement).value).toBe('5');
+    // 草稿已清掉：显示的是重新拉取的值，没有待保存的改动。
+    expect((screen.getByRole('button', { name: '保存分工' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('包大版本过期时提示要在群里重新确认，仍可以关掉；服务端校验失败照原话显示，草稿保留', async () => {
+    const user = userEvent.setup();
+    const stale = { ...alarmBinding, packVersion: '0.9.0' };
+    getOverview.mockResolvedValue(makeOverview(makeSettings(), { duty: duty({ scenarios: { alarm: stale } }), scenarios: [alarmScenario({ binding: stale, versionStale: true })] }));
+    const invalid = '告警初筛的设置不对：级别关键字（levels）：0 String must contain at most 32 character(s)';
+    const update = vi.spyOn(collaborationApi, 'updateDuty')
+      .mockRejectedValueOnce(new ApiError(invalid, 'COLLABORATION_SCENARIO_INVALID', 400))
+      .mockResolvedValue({ duty: duty({ revision: 3, scenarios: { alarm: { ...stale, enabled: false } } }) });
+    renderPanel();
+    expect(await screen.findByText('场景包已升级到 v1.0.0，要先在群里重新确认才能开启。')).toBeTruthy();
+    const checkbox = screen.getByRole('checkbox', { name: /告警初筛/ }) as HTMLInputElement;
+    expect(checkbox.disabled).toBe(false);
+    await user.click(checkbox);
+    await user.type(screen.getByLabelText('级别关键字'), ', LEVEL_TOO_LONG_FOR_THE_PACK_LIMIT');
+    await user.click(screen.getByRole('button', { name: '保存分工' }));
+    expect(await screen.findByText(invalid)).toBeTruthy();
+    expect(update).toHaveBeenLastCalledWith('cli_a', 'oc_a', { expectedRevision: 2, scenarios: { alarm: { enabled: false, params: { levels: ['P0', 'LEVEL_TOO_LONG_FOR_THE_PACK_LIMIT'] } } } });
+    expect((screen.getByLabelText('级别关键字') as HTMLInputElement).value).toBe('P0, LEVEL_TOO_LONG_FOR_THE_PACK_LIMIT');
+    expect(checkbox.checked).toBe(false);
   });
 });
 

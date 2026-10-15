@@ -6,12 +6,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { createCollaborationSchema } from '../../../../packages/storage/src/collaboration-migration.js';
 import { createCollaborationRepository } from '../../../../packages/storage/src/collaboration.js';
-import { allowEagerParticipation } from '../../../../packages/storage/src/migrations.js';
+import { addCollaborationScenarios, allowEagerParticipation } from '../../../../packages/storage/src/migrations.js';
 import { deciderMetaOf, type CollaborationDecision, type CollaborationSnapshot } from '@dutydeck/shared';
 import { LarkGroupParticipation, type GroupParticipationOptions } from './group-participation.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { StoredLarkConfig } from './config.js';
 import type { ParticipationResult } from './readonly-decider.js';
+import { builtinScenarioRegistry } from '../plugins/builtin-scenarios.test-helpers.js';
 
 const scope = { appId: 'cli_test', chatId: 'oc_test' };
 const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'test', listening: true, defaultAgentId: 'mock', workspace: '/tmp', fullTrustConfirmed: true,
@@ -34,7 +35,7 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const clean of cleanups.splice(0).reverse()) await clean(); });
 
 async function harness(extra: Partial<GroupParticipationOptions> = {}) {
-  const db = new Database(':memory:'); createCollaborationSchema(db); allowEagerParticipation(db);
+  const db = new Database(':memory:'); createCollaborationSchema(db); allowEagerParticipation(db); addCollaborationScenarios(db);
   const repository = createCollaborationRepository(db);
   await repository.updateSettings(scope, { expectedRevision: 0, participation: 'selective' }, 'owner');
   const service = { listChatMessages: vi.fn(async () => ({ items: [] as any[], hasMore: false })), replyText: vi.fn(async () => ({ messageId: 'om_sent' })),
@@ -107,14 +108,14 @@ describe('叫群里另一个机器人的名字', () => {
 
 describe('机器人计数排除本群订阅的告警来源', () => {
   const subscribe = (h: Awaited<ReturnType<typeof harness>>, enabled: boolean) => h.repository.updateDuty(scope, { expectedRevision: 0,
-    alarm: { enabled, sources: [{ appId: alarmBot.appId, name: alarmBot.name }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3, requesterId: 'ou_admin' } }, 'ou_admin');
+    scenarios: { alarm: { enabled, params: { sources: [{ appId: alarmBot.appId, name: alarmBot.name }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3 }, requesterId: 'ou_admin', packVersion: '1.0.0' } } }, 'ou_admin');
   it.each([
     ['没订阅：告警机器人算第二个机器人，不接', [alarmBot, self], undefined, 2],
     ['订阅了：告警机器人不算，交给模型', [alarmBot, self], true, 1],
     ['订阅后关掉初筛：来源仍不算（当前行为），交给模型', [alarmBot, self], false, 1],
     ['订阅了，但还有一个别的机器人：不接', [alarmBot, flash, self], true, 2]
   ] as const)('%s', async (_name, bots, enabled, talking) => {
-    const h = await harness();
+    const h = await harness({ scenarios: await builtinScenarioRegistry() });
     Object.assign(h.service, { listChatMembers: members(3, [...bots]) });
     if (enabled !== undefined) await subscribe(h, enabled);
     await h.handle(message('om_1', '今天的发布单在哪看'));
