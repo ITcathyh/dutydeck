@@ -4,6 +4,8 @@ import { RuntimeError, type PolicyAction, type PolicyDecision } from '@dutydeck/
 import {
   cancelCiInputSchema,
   createSessionScheduleInputSchema,
+  runSessionScheduleInputSchema,
+  deleteSessionScheduleInputSchema,
   subscribeCiInputSchema,
   updateSessionScheduleInputSchema
 } from '@dutydeck/shared';
@@ -59,6 +61,26 @@ export async function registerSessionAutomationRoutes(app: FastifyInstance, opti
     const actorId = await authorize(request, request.params.sessionId, enables ? 'schedule.enable' : 'schedule.update');
     const body = parse(updateSessionScheduleInputSchema, request.body);
     return { schedule: await options.service.updateSchedule(request.params.sessionId, request.params.id, body, actorId) };
+  });
+
+  app.post<{ Params: { sessionId: string; id: string } }>('/api/sessions/:sessionId/automation/schedules/:id/run', async request => {
+    const actorId = await authorize(request, request.params.sessionId, 'task.create');
+    return { occurrence: await options.service.runSchedule(request.params.sessionId, request.params.id, parse(runSessionScheduleInputSchema, request.body), actorId) };
+  });
+
+  app.get<{ Params: { sessionId: string; id: string } }>('/api/sessions/:sessionId/automation/schedules/:id', async request => {
+    const actorId = await authorize(request, request.params.sessionId, 'task.view_result');
+    return { schedule: await options.service.getScheduleDefinition(request.params.sessionId, request.params.id, actorId) };
+  });
+
+  app.get<{ Params: { sessionId: string; id: string } }>('/api/sessions/:sessionId/automation/schedules/:id/history', async request => {
+    const actorId = await authorize(request, request.params.sessionId, 'task.view_result');
+    return { occurrences: await options.service.getScheduleHistory(request.params.sessionId, request.params.id, actorId) };
+  });
+
+  app.delete<{ Params: { sessionId: string; id: string } }>('/api/sessions/:sessionId/automation/schedules/:id', async request => {
+    const actorId = await authorize(request, request.params.sessionId, 'schedule.update');
+    return { schedule: await options.service.deleteSchedule(request.params.sessionId, request.params.id, parse(deleteSessionScheduleInputSchema, request.body), actorId) };
   });
 
   /** 已加载的 CI 提供方；没有 CI 插件时为空列表，Web 据此提示「未安装 CI 插件」。 */

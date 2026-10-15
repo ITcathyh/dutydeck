@@ -2,14 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { PublicCiProvider, PublicCiSubscription, PublicSessionSchedule } from '@dutydeck/shared';
+import type { PublicCiProvider, PublicCiSubscription, PublicSessionSchedule, PublicSessionScheduleOccurrence } from '@dutydeck/shared';
 import { api, ApiError, type Session } from '../api';
+import { setInstance } from '../instance';
 import { SessionAutomationPanel } from './SessionAutomationPanel';
 
 const session: Session = { id: 's1', agentId: 'a', cwd: '/project/worktree', state: 'completed', runId: 'r', createdAt: '2026-09-12T00:00:00Z', updatedAt: '2026-09-12T00:00:00Z' };
 const schedule: PublicSessionSchedule = { schemaVersion: 1, id: 'plan1', revision: 3, generation: 1, sessionId: session.id, name: '巡检', prompt: '检查构建', trigger: { kind: 'cron', expression: '*/17 3-9 * 2,7 1-5' }, timezone: 'America/New_York', dstPolicy: { gap: 'shift_forward', overlap: 'second' }, condition: { kind: 'always' }, enabled: false, createdAt: session.createdAt, updatedAt: session.updatedAt };
 const clients: QueryClient[] = [];
-afterEach(() => { cleanup(); clients.forEach(client => client.clear()); clients.length = 0; vi.restoreAllMocks(); });
+afterEach(() => { setInstance(undefined); cleanup(); clients.forEach(client => client.clear()); clients.length = 0; vi.restoreAllMocks(); });
 const testCi: PublicCiProvider = { id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false };
 function mount(schedules: PublicSessionSchedule[] = [], providers: PublicCiProvider[] = [testCi], subscriptions: PublicCiSubscription[] = []) {
   const read = vi.spyOn(api, 'automation').mockResolvedValue({ schedules, subscriptions, occurrences: [] });
@@ -31,6 +32,86 @@ async function fill(kind: string) {
 }
 
 describe('session automation schedules', () => {
+  it('retries immediate execution with the same operation key, then starts a fresh operation after success', async () => {
+    const read = mount([schedule]);
+    const occurrence: PublicSessionScheduleOccurrence = { schemaVersion: 2, id: 'o1', revision: 1, scheduleId: schedule.id, sessionId: session.id, generation: 1, scheduledForUtc: session.createdAt, conditionStatus: 'passed', runStatus: 'completed', taskId: 't1', delivery: { status: 'not_requested', attempts: 0, updatedAt: session.createdAt }, createdAt: session.createdAt, updatedAt: session.updatedAt };
+    const run = vi.spyOn(api, 'runSchedule').mockRejectedValueOnce(new Error('网络断开')).mockResolvedValue({ occurrence });
+    const update = vi.spyOn(api, 'updateSchedule');
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: '立即执行' }));
+    await screen.findByText('网络断开');
+    read.mockResolvedValue({ schedules: [schedule], subscriptions: [], occurrences: [occurrence] });
+    await user.click(screen.getByRole('button', { name: '立即执行' }));
+    await screen.findByText('已提交立即执行，可在最近触发记录中查看结果；原计划时间保持不变。');
+    expect(run.mock.calls[0]![2]).toEqual(run.mock.calls[1]![2]);
+    expect(run.mock.calls[0]![2]).toEqual({ expectedRevision: 3, idempotencyKey: expect.any(String) });
+    await user.click(screen.getByText('最近触发记录'));
+    expect(screen.getByText(/已完成 · 条件满足/)).toBeTruthy();
+    expect(screen.getByRole('link', { name: '查看执行任务 · t1' }).getAttribute('href')).toBe('/sessions/s1');
+    await user.click(screen.getByRole('button', { name: '立即执行' }));
+    await waitFor(() => expect(run).toHaveBeenCalledTimes(3));
+    expect(run.mock.calls[2]![2].idempotencyKey).not.toBe(run.mock.calls[1]![2].idempotencyKey);
+    expect(update).not.toHaveBeenCalled();
+    expect(screen.getByText('巡检 · 已停用')).toBeTruthy();
+  });
+
+  it('refreshes a definitive revision conflict before a fresh immediate-execution request', async () => {
+    const read = mount([schedule]);
+    const run = vi.spyOn(api, 'runSchedule').mockRejectedValueOnce(new ApiError('计划已更新，请重试', 'CONFLICT', 409)).mockResolvedValue({ occurrence: {} as PublicSessionScheduleOccurrence });
+    const user = userEvent.setup();
+    await screen.findByRole('button', { name: '立即执行' });
+    read.mockResolvedValue({ schedules: [{ ...schedule, revision: 4 }], subscriptions: [], occurrences: [] });
+    await user.click(screen.getByRole('button', { name: '立即执行' }));
+    await screen.findByText('计划已更新，请重试');
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole('button', { name: '立即执行' }));
+    await waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+    expect(run.mock.calls[1]![2].expectedRevision).toBe(4);
+    expect(run.mock.calls[1]![2].idempotencyKey).not.toBe(run.mock.calls[0]![2].idempotencyKey);
+  });
+
+  it('shows the newest twenty executions first and keeps result links in the owning instance', async () => {
+    setInstance('bot-1');
+    const read = mount([schedule]);
+    await screen.findByText('巡检 · 已停用');
+    const occurrences = Array.from({ length: 25 }, (_, index): PublicSessionScheduleOccurrence => ({ schemaVersion: 2, id: `o${index}`, revision: 1, scheduleId: schedule.id, sessionId: session.id, generation: 1, scheduledForUtc: session.createdAt, conditionStatus: 'passed', runStatus: 'completed', taskId: `t${index}`, delivery: { status: 'not_requested', attempts: 0, updatedAt: session.createdAt }, createdAt: session.createdAt, updatedAt: session.updatedAt }));
+    read.mockResolvedValue({ schedules: [schedule], subscriptions: [], occurrences });
+    await clients[0]!.invalidateQueries({ queryKey: ['automation', session.id] });
+    await userEvent.click(await screen.findByText('最近触发记录'));
+    const links = screen.getAllByRole('link', { name: /查看执行任务/ });
+    expect(links).toHaveLength(20);
+    expect(links[0]!.textContent).toBe('查看执行任务 · t24');
+    expect(links[19]!.textContent).toBe('查看执行任务 · t5');
+    expect(links[0]!.getAttribute('href')).toBe('/instances/bot-1/sessions/s1');
+    expect(screen.queryByRole('link', { name: '查看执行任务 · t0' })).toBeNull();
+  });
+
+  it('confirms deletion, retains execution history, and reports delete failures for retry', async () => {
+    const read = mount([schedule]);
+    const occurrence: PublicSessionScheduleOccurrence = { schemaVersion: 2, id: 'o1', revision: 1, scheduleId: schedule.id, sessionId: session.id, generation: 1, scheduledForUtc: session.createdAt, conditionStatus: 'passed', runStatus: 'failed', taskId: 't1', error: '执行退出', delivery: { status: 'not_requested', attempts: 0, updatedAt: session.createdAt }, createdAt: session.createdAt, updatedAt: session.updatedAt };
+    const remove = vi.spyOn(api, 'deleteSchedule').mockRejectedValueOnce(new ApiError('删除失败', 'CONFLICT', 409)).mockResolvedValue({ schedule });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: '删除' }));
+    expect(remove).not.toHaveBeenCalled();
+    expect(screen.getByRole('alertdialog', { name: '删除定时计划' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '取消' }));
+    expect(remove).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: '删除' }));
+    read.mockResolvedValue({ schedules: [{ ...schedule, revision: 4 }], subscriptions: [], occurrences: [] });
+    await user.click(screen.getByRole('button', { name: '删除计划' }));
+    await screen.findByText('删除失败');
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    read.mockResolvedValue({ schedules: [], subscriptions: [], occurrences: [occurrence] });
+    await user.click(screen.getByRole('button', { name: '删除计划' }));
+    await screen.findByText('计划已删除，触发记录已保留；正在运行的任务会继续。');
+    expect(remove).toHaveBeenLastCalledWith('s1', 'plan1', 4);
+    expect(screen.queryByRole('button', { name: '立即执行' })).toBeNull();
+    await user.click(screen.getByText('最近触发记录'));
+    expect(screen.getByText(/历史计划 plan1.*执行失败/)).toBeTruthy();
+    expect(screen.getByText('执行退出')).toBeTruthy();
+    expect(screen.getByRole('link', { name: '查看执行任务 · t1' })).toBeTruthy();
+  });
+
   it.each([['daily', '35 8 * * *'], ['weekly', '35 8 * * 5']])('creates %s using the selected timezone and existing Cron contract', async (kind, expression) => {
     const read = mount();
     const create = vi.spyOn(api, 'createSchedule').mockResolvedValue({ schedule });

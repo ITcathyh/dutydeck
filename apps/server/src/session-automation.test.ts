@@ -970,3 +970,191 @@ describe('没有安装 CI 插件', () => {
     expect(h.dispatches).toHaveLength(1);
   });
 });
+
+describe('manual schedule execution and deletion', () => {
+  it('runs a paused schedule idempotently without changing its cadence, and blocks competing runs', async () => {
+    const h = await fixture();
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    const input = { expectedRevision: created.revision, idempotencyKey: 'manual-1' };
+    const attempts = await Promise.all([
+      h.service.runSchedule(h.session.id, created.id, input, 'ou_owner'),
+      h.service.runSchedule(h.session.id, created.id, input, 'ou_owner')
+    ]);
+    expect(attempts[0].id).toBe(attempts[1].id);
+    expect(attempts[0].triggerSource).toBe('manual');
+    expect(h.dispatches).toHaveLength(1);
+    const schedule = (await h.service.listBySession(h.session.id)).schedules[0]!;
+    expect(schedule).toEqual(created);
+    expect(schedule).not.toHaveProperty('pendingOccurrence');
+    await expect(h.service.runSchedule(h.session.id, created.id, { ...input, idempotencyKey: 'manual-2' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_BUSY' });
+    await h.service.authorizeTask(h.dispatches[0]!, 'submit');
+    h.settleTask(h.dispatches[0]!.id);
+    await h.service.tick();
+    expect((await h.service.listBySession(h.session.id)).schedules[0]).toEqual(created);
+    const replay = await h.service.runSchedule(h.session.id, created.id, input, 'ou_owner');
+    expect(replay.runStatus).toBe('completed');
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it('reserves one slot across concurrent manual keys and a due timed trigger', async () => {
+    const h = await fixture();
+    const competing = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, clock: () => new Date(h.now.value) });
+    cleanups.push(() => competing.close());
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    const enabled = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await Promise.allSettled([
+      h.service.runSchedule(h.session.id, created.id, { expectedRevision: enabled.revision, idempotencyKey: 'first' }, 'ou_owner'),
+      competing.runSchedule(h.session.id, created.id, { expectedRevision: enabled.revision, idempotencyKey: 'second' }, 'ou_owner'),
+      h.service.tick()
+    ]);
+    expect(h.dispatches).toHaveLength(1);
+    const first = (await h.service.listBySession(h.session.id)).occurrences;
+    expect(first).toHaveLength(1);
+    h.settleTask(h.dispatches[0]!.id);
+    await h.service.tick();
+    expect(h.dispatches).toHaveLength(first[0]!.triggerSource === 'manual' ? 2 : 1);
+  });
+
+  it('keeps nextDueAt unchanged for an enabled manual run, including a skipped condition', async () => {
+    const h = await fixture();
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    const enabled = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    await h.service.runSchedule(h.session.id, created.id, { expectedRevision: enabled.revision, idempotencyKey: 'run' }, 'ou_owner');
+    expect((await h.service.listBySession(h.session.id)).schedules[0]).toEqual(enabled);
+    h.settleTask(h.dispatches[0]!.id);
+    await h.service.tick();
+    expect((await h.service.listBySession(h.session.id)).schedules[0]).toEqual(enabled);
+    const conditional = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' } }, 'ou_owner');
+    const skipped = await h.service.runSchedule(h.session.id, conditional.id, { expectedRevision: 1, idempotencyKey: 'conditional' }, 'ou_owner');
+    expect(skipped).toMatchObject({ conditionStatus: 'skipped', runStatus: 'skipped' });
+    expect((await h.service.listBySession(h.session.id)).schedules.find(item => item.id === conditional.id)).toEqual(conditional);
+  });
+
+  it('recovers a crash between reservation and occurrence insertion without duplicating accepted work', async () => {
+    const h = await fixture({ crashAfterAcceptance: true });
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    const compare = h.repositories.config.compareAndSet!.bind(h.repositories.config);
+    const spy = vi.spyOn(h.repositories.config, 'compareAndSet').mockImplementation(async (key, previous, value) => {
+      if (key.startsWith('session_automation/occurrence/')) throw new Error('crash before occurrence insertion');
+      return compare(key, previous, value);
+    });
+    const input = { expectedRevision: 1, idempotencyKey: 'recover' };
+    await expect(h.service.runSchedule(h.session.id, created.id, input, 'ou_owner')).rejects.toThrow('crash before occurrence insertion');
+    spy.mockRestore();
+    await h.service.close();
+    const recovered = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, clock: () => new Date(h.now.value) });
+    cleanups.push(() => recovered.close());
+    await recovered.tick();
+    expect(h.dispatches).toHaveLength(1);
+    const replay = await recovered.runSchedule(h.session.id, created.id, input, 'ou_owner');
+    expect(replay).toMatchObject({ runStatus: 'accepted', triggerSource: 'manual' });
+    await recovered.tick();
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it('blocks new runs after an unknown attempt instead of starting a replacement task', async () => {
+    const h = await fixture();
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    const first = await h.service.runSchedule(h.session.id, created.id, { expectedRevision: 1, idempotencyKey: 'first' }, 'ou_owner');
+    h.settleAttempt1UnknownThenAttempt2Completes(first.taskId!);
+    await h.service.tick();
+    await expect(h.service.runSchedule(h.session.id, created.id, { expectedRevision: 1, idempotencyKey: 'replacement' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_BUSY' });
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it('soft deletes definitions, invalidates unsubmitted tasks, and retains their history', async () => {
+    const h = await fixture();
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    const manual = await h.service.runSchedule(h.session.id, created.id, { expectedRevision: 1, idempotencyKey: 'first' }, 'ou_owner');
+    await expect(h.service.deleteSchedule(h.session.id, created.id, { expectedRevision: 2 }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_REVISION_CONFLICT' });
+    const deleted = await h.service.deleteSchedule(h.session.id, created.id, { expectedRevision: 1 }, 'ou_owner');
+    expect(deleted).toMatchObject({ enabled: false, generation: 2, deletedAt: h.now.value.toISOString() });
+    await expect(h.service.authorizeTask(h.dispatches[0]!, 'submit')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_TASK_REVOKED' });
+    expect((await h.service.listBySession(h.session.id)).schedules).toEqual([]);
+    expect((await h.service.listBySession(h.session.id)).occurrences).toEqual([expect.objectContaining({ id: manual.id, runStatus: 'invalidated' })]);
+    expect(await h.service.getScheduleDefinition(h.session.id, created.id, 'ou_owner')).toEqual(deleted);
+    await expect(h.service.runSchedule(h.session.id, created.id, { expectedRevision: 2, idempotencyKey: 'new' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_DELETED' });
+    await expect(h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 2, enabled: true }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_DELETED' });
+  });
+
+  it('lets an already submitted task settle after deletion, without issuing another turn', async () => {
+    const h = await fixture();
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    await h.service.runSchedule(h.session.id, created.id, { expectedRevision: 1, idempotencyKey: 'run' }, 'ou_owner');
+    await h.service.authorizeTask(h.dispatches[0]!, 'submit');
+    await h.service.deleteSchedule(h.session.id, created.id, { expectedRevision: 1 }, 'ou_owner');
+    await expect(h.service.authorizeTask(h.dispatches[0]!, 'submit')).resolves.toBeUndefined();
+    h.settleTask(h.dispatches[0]!.id);
+    await h.service.tick();
+    const records = await h.service.listBySession(h.session.id);
+    expect(records.schedules).toEqual([]);
+    expect(records.occurrences[0]).toMatchObject({ runStatus: 'completed', resultBoundary: 'verified' });
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it('requires authorization for new actions and refuses dispatch after shutdown', async () => {
+    const h = await fixture();
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    h.allowed.value = false;
+    await expect(h.service.runSchedule(h.session.id, created.id, { expectedRevision: 1, idempotencyKey: 'x' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_FORBIDDEN' });
+    await expect(h.service.deleteSchedule(h.session.id, created.id, { expectedRevision: 1 }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_FORBIDDEN' });
+    h.allowed.value = true;
+    await h.service.close();
+    await expect(h.service.runSchedule(h.session.id, created.id, { expectedRevision: 1, idempotencyKey: 'x' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_CLOSED' });
+  });
+
+  it('waits for an in-flight manual admission when closing', async () => {
+    const h = await fixture();
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    let release!: () => void, enter!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const compare = h.repositories.config.compareAndSet!.bind(h.repositories.config);
+    const spy = vi.spyOn(h.repositories.config, 'compareAndSet').mockImplementation(async (key, previous, value) => {
+      if (key.startsWith('session_automation/occurrence/') && previous === undefined) { enter(); await gate; }
+      return compare(key, previous, value);
+    });
+    const running = h.service.runSchedule(h.session.id, created.id, { expectedRevision: 1, idempotencyKey: 'closing' }, 'ou_owner');
+    await entered;
+    let closed = false;
+    const closing = h.service.close().then(() => { closed = true; });
+    try {
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      expect(h.dispatches).toHaveLength(0);
+    } finally { release(); await running; await closing; spy.mockRestore(); }
+    expect(closed).toBe(true);
+    expect(h.dispatches).toHaveLength(1);
+  });
+});
+
+it('keeps the latest 1000 occurrences of one deleted schedule independently of other plan traffic', async () => {
+  const h = await fixture();
+  const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+  const original = await h.service.runSchedule(h.session.id, created.id, { expectedRevision: 1, idempotencyKey: 'old' }, 'ou_owner');
+  h.settleTask(original.taskId!);
+  await h.service.tick();
+  await h.service.deleteSchedule(h.session.id, created.id, { expectedRevision: 1 }, 'ou_owner');
+  const timestamp = '2026-09-13T00:00:00.000Z';
+  const storeOccurrence = async (id: string, scheduleId: string, scheduledForUtc: string) => {
+    await h.repositories.config.set(`session_automation/occurrence/${id}`, JSON.stringify(sessionScheduleOccurrenceSchema.parse({
+      schemaVersion: 1, id, revision: 1, scheduleId, sessionId: h.session.id, generation: 1, scheduledForUtc,
+      conditionStatus: 'skipped', runStatus: 'skipped', delivery: { status: 'not_requested', attempts: 0, updatedAt: timestamp }, createdAt: timestamp, updatedAt: timestamp
+    })));
+  };
+  for (let i = 0; i < 1001; i++) await storeOccurrence(`other_occ_${i}`, 'other-schedule', timestamp);
+  expect((await h.service.listBySession(h.session.id)).occurrences.some(item => item.id === original.id)).toBe(false);
+  const retained = await h.service.getScheduleHistory(h.session.id, created.id, 'ou_owner');
+  expect(retained).toHaveLength(1);
+  expect(retained[0]).toMatchObject({ id: original.id, runStatus: 'completed', result: { output: { text: 'target result' } } });
+  for (let i = 0; i < 1001; i++) await storeOccurrence(`own_occ_${i}`, created.id, new Date(Date.parse(timestamp) + i * 60_000).toISOString());
+  const history = await h.service.getScheduleHistory(h.session.id, created.id, 'ou_owner');
+  expect(history).toHaveLength(1000);
+  expect(history[0]!.id).toBe('own_occ_1000');
+  expect(history.at(-1)!.id).toBe('own_occ_1');
+  bound(h.repositories).createSession({ ...h.session, id: 'ses_other' });
+  await expect(h.service.getScheduleHistory('ses_other', created.id, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_NOT_FOUND' });
+  h.allowed.value = false;
+  await expect(h.service.getScheduleHistory(h.session.id, created.id, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_FORBIDDEN' });
+});

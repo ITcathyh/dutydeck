@@ -34,6 +34,21 @@ describe('web api adapter', () => {
     expect(fetcher).toHaveBeenCalledWith('/api/sessions/s1/restart', { credentials: 'same-origin', method: 'POST' });
   });
 
+  it('runs schedules with a revision and operation key, and deletes with a revision', async () => {
+    const data = { occurrence: { id: 'o1' } };
+    const fetcher = vi.fn(async () => ({ ok: true, json: async () => data }));
+    vi.stubGlobal('fetch', fetcher);
+    const input = { expectedRevision: 3, idempotencyKey: 'operation-1' };
+    await expect(api.runSchedule('s1', 'plan1', input)).resolves.toEqual(data);
+    expect(fetcher).toHaveBeenLastCalledWith('/api/sessions/s1/automation/schedules/plan1/run', {
+      credentials: 'same-origin', method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input)
+    });
+    await api.deleteSchedule('s1', 'plan1', 3);
+    expect(fetcher).toHaveBeenLastCalledWith('/api/sessions/s1/automation/schedules/plan1', {
+      credentials: 'same-origin', method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: 3 })
+    });
+  });
+
   it('managementGroups 请求 /api/lark/management/groups', async () => {
     const data = { groups: [] };
     const fetcher = vi.fn(async () => ({ ok: true, json: async () => data }));

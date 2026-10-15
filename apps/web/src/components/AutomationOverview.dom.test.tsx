@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { PublicSessionSchedule } from '@dutydeck/shared';
-import { api, ApiError, scheduleApi, type RunSummary, type Session } from '../api';
+import { api, ApiError, scheduleApi, type Agent, type RunSummary, type Session } from '../api';
 import { AutomationOverview } from './AutomationOverview';
 import { EXPERIMENTAL_STORAGE_KEY, writeExperimental } from '../experimental';
 
@@ -12,11 +12,11 @@ const schedule: PublicSessionSchedule = { schemaVersion: 1, id: 'plan1', revisio
 const empty = { schedules: [], subscriptions: [], occurrences: [] };
 const clients: QueryClient[] = [];
 afterEach(() => { cleanup(); window.localStorage.removeItem(EXPERIMENTAL_STORAGE_KEY); clients.forEach(client => client.clear()); clients.length = 0; vi.restoreAllMocks(); vi.useRealTimers(); });
-function mount(sessions = [session], summaries: Record<string, RunSummary> = {}) {
+function mount(sessions = [session], summaries: Record<string, RunSummary> = {}, agents: Agent[] = []) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   clients.push(client);
   const onSelectSession = vi.fn();
-  const rendered = render(<QueryClientProvider client={client}><AutomationOverview sessions={sessions} summaries={summaries} onSelectSession={onSelectSession}/></QueryClientProvider>);
+  const rendered = render(<QueryClientProvider client={client}><AutomationOverview agents={agents} sessions={sessions} summaries={summaries} onSelectSession={onSelectSession}/></QueryClientProvider>);
   return Object.assign(onSelectSession, rendered, { client });
 }
 
@@ -29,6 +29,39 @@ async function advancePolling(ms = 10_000) {
 }
 
 describe('automation overview', () => {
+  it('creates an idle session from an empty overview and opens schedule setup without sending a prompt', async () => {
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    vi.spyOn(api, 'automation').mockResolvedValue(empty);
+    vi.spyOn(api, 'ciProviders').mockResolvedValue({ providers: [] });
+    const create = vi.spyOn(api, 'create').mockRejectedValueOnce(new Error('创建失败')).mockResolvedValueOnce({ ...session, state: 'idle' });
+    const send = vi.spyOn(api, 'send');
+    const save = vi.spyOn(api, 'createSchedule').mockRejectedValueOnce(new Error('计划保存失败')).mockResolvedValueOnce({ schedule });
+    const update = vi.spyOn(api, 'updateSchedule');
+    const view = mount([], {}, [{ id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'ask' }]);
+    const invalidate = vi.spyOn(view.client, 'invalidateQueries');
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: '创建定时任务' }));
+    expect(screen.queryByLabelText('任务目标')).toBeNull();
+    await user.click(screen.getByRole('button', { name: '下一步：设置计划' }));
+    expect(await screen.findByText('创建失败')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '下一步：设置计划' }));
+    await user.type(await screen.findByLabelText('计划名称'), '巡检');
+    await user.type(screen.getByLabelText('执行指令'), '检查构建');
+    fireEvent.change(screen.getByLabelText('指定时区的本地时间'), { target: { value: '2027-10-01T11:20' } });
+    await user.click(screen.getByRole('button', { name: '保存计划' }));
+    expect(await screen.findByText('计划保存失败')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '保存计划' }));
+    await screen.findByText('计划已保存，点击「启用」后才会运行。');
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenLastCalledWith({ agentId: 'codex', permissionMode: 'ask', workspaceMode: 'worktree' });
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[0]![0]).toBe('s1');
+    expect(save.mock.calls[0]![1]).not.toHaveProperty('enabled');
+    expect(send).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['sessions'] });
+  });
+
   it('opens the same plan editor and refreshes the shared list after saving', async () => {
     const read = vi.spyOn(api, 'automation').mockResolvedValue({ ...empty, schedules: [schedule] });
     const update = vi.spyOn(api, 'updateSchedule').mockResolvedValue({ schedule });

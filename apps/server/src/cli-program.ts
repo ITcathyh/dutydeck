@@ -2,6 +2,7 @@ import { workbenchHelp, layeredWorkbenchHelp, collaborationHelp, groupToolsHelp,
 import type { RecoveryCliOptions, RecoveryOperation } from './recovery-cli.js';
 import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
 import type { SessionNamesAction } from './session-names-cli.js';
+import type { ScheduleCliAction, ScheduleCliInput } from './schedule-cli.js';
 import { agentFields, botFields, fieldsHelp, groupFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { Command } from 'commander';
 import { DatabaseCliError } from './database-cli.js';
@@ -255,6 +256,7 @@ export interface CliHandlers {
   memoryRemove?(id: string): void | Promise<void>;
   terminalBackend?(value: string | undefined, options: { url?: string; database?: string }): void | Promise<void>;
   settings?(action: SettingsAction, input: SettingsCommandInput): void | Promise<void>;
+  schedule?(action: ScheduleCliAction, id: string | undefined, input: ScheduleCliInput): void | Promise<void>;
   sessionHerdr?(args: string[]): void | Promise<void>;
   sessionSend?(text: string): void | Promise<void>;
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
@@ -715,6 +717,32 @@ Examples:
     const { instance, url, database } = command.optsWithGlobals();
     return handlers.settings?.(action, { instance, url, database, ...input });
   };
+  const schedules = program.command('schedule').description('Create and manage persistent Agent schedules; every command prints JSON');
+  for (const action of ['create', 'list', 'show', 'update', 'enable', 'disable', 'run', 'delete', 'history'] as const) {
+    const command = withTarget(schedules.command(['create', 'list'].includes(action) ? action : `${action} <id>`))
+      .option('--session <id>', 'Existing session; otherwise list all sessions, or create one with --agent')
+      .option('--expected-revision <number>', 'Reject a concurrent edit; defaults to the revision just read');
+    if (action === 'create' || action === 'update') command
+      .option('--name <name>', 'Schedule name')
+      .option('--prompt <text>', 'Instructions to execute when the schedule fires')
+      .option('--cron <expression>', 'Five-field cron expression')
+      .option('--every <minutes>', 'Fixed interval in minutes (minimum 1)')
+      .option('--at <local-time>', 'Run once at YYYY-MM-DDTHH:mm[:ss] in --timezone')
+      .option('--timezone <iana-zone>', 'IANA timezone; creation defaults to this computer’s timezone')
+      .option('--input <json>', 'Complete create input or update patch as JSON')
+      .option('--file <path>', 'Read the JSON input from this file');
+    if (action === 'create') command
+      .option('--agent <id>', 'Create a new idle session for this Agent; the prompt runs only when triggered')
+      .option('--cwd <path>', 'Workspace directory for a new session')
+      .option('--workspace <mode>', 'shared (default) or worktree for a new session')
+      .option('--model <model>', 'Model for a new session')
+      .option('--permission-mode <mode>', 'Permission mode for a new session; defaults to the Agent setting');
+    if (action === 'run') command.option('--idempotency-key <key>', 'Reuse this key to return the same manual execution after a lost response');
+    command.action((...args: unknown[]) => {
+      const parsed = args.at(-1) as Command;
+      return handlers.schedule?.(action, ['create', 'list'].includes(action) ? undefined : args[0] as string, parsed.optsWithGlobals());
+    });
+  }
   withTarget(settings.command('instances').description('List peer instances that --instance can reach'))
     .action((_options, command) => runSettings('instances', command));
   withTarget(settings.command('agents').description('List the Agents that bot and group settings can select'))

@@ -100,3 +100,36 @@ describe('session automation routes', () => {
     expect((await app.inject({ method: 'GET', url: '/api/sessions/ses_1/pull-requests' })).json()).toEqual({ available: false, hint: '当前服务未接入开 PR。', items: [] });
   });
 });
+
+it('authorizes run/delete/read, validates bodies and passes the trusted actor', async () => {
+  const app = Fastify(); apps.push(app);
+  const target = Object.assign(service(), {
+    runSchedule: vi.fn(async () => ({ id: 'occ_1' })),
+    deleteSchedule: vi.fn(async () => ({ id: 'schedule_1', deletedAt: '2026-10-15T00:00:00.000Z' })),
+    getScheduleDefinition: vi.fn(async () => ({ id: 'schedule_1' })),
+    getScheduleHistory: vi.fn(async () => [{ id: 'occ_1' }])
+  });
+  let allowed = true;
+  const authorize = vi.fn(async () => ({ allowed, actorId: 'installation_owner' }));
+  await registerSessionAutomationRoutes(app, { service: target, authorize });
+  const base = '/api/sessions/ses_1/automation/schedules/schedule_1';
+  expect((await app.inject({ method: 'POST', url: `${base}/run`, payload: { expectedRevision: 1, idempotencyKey: 'manual-1' } })).json()).toEqual({ occurrence: { id: 'occ_1' } });
+  expect(target.runSchedule).toHaveBeenCalledWith('ses_1', 'schedule_1', { expectedRevision: 1, idempotencyKey: 'manual-1' }, 'installation_owner');
+  expect(authorize).toHaveBeenLastCalledWith(expect.any(Object), 'ses_1', 'task.create');
+  expect((await app.inject({ method: 'POST', url: `${base}/run`, payload: { expectedRevision: 1 } })).statusCode).toBe(400);
+  expect((await app.inject({ method: 'DELETE', url: base, payload: { expectedRevision: 1 } })).statusCode).toBe(200);
+  expect(target.deleteSchedule).toHaveBeenCalledWith('ses_1', 'schedule_1', { expectedRevision: 1 }, 'installation_owner');
+  expect(authorize).toHaveBeenLastCalledWith(expect.any(Object), 'ses_1', 'schedule.update');
+  expect((await app.inject({ method: 'GET', url: base })).json()).toEqual({ schedule: { id: 'schedule_1' } });
+  expect(authorize).toHaveBeenLastCalledWith(expect.any(Object), 'ses_1', 'task.view_result');
+  expect((await app.inject({ method: 'GET', url: `${base}/history` })).json()).toEqual({ occurrences: [{ id: 'occ_1' }] });
+  expect(target.getScheduleHistory).toHaveBeenCalledWith('ses_1', 'schedule_1', 'installation_owner');
+  expect(authorize).toHaveBeenLastCalledWith(expect.any(Object), 'ses_1', 'task.view_result');
+  allowed = false;
+  for (const [method, url, payload] of [['POST', `${base}/run`, {}], ['DELETE', base, {}], ['GET', base, undefined], ['GET', `${base}/history`, undefined]] as const) {
+    expect((await app.inject({ method, url, ...(payload ? { payload } : {}) })).statusCode).toBe(403);
+  }
+  expect(target.runSchedule).toHaveBeenCalledOnce();
+  expect(target.deleteSchedule).toHaveBeenCalledOnce();
+  expect(target.getScheduleHistory).toHaveBeenCalledOnce();
+});

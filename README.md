@@ -397,7 +397,31 @@ Web 侧栏「用量与成本」有「费用」「明细」「会话分析」三�
 - **没有计入的加价项**：美国境内推理 1.1 倍、快速模式、Batch、1 小时缓存写、Haiku 5.5 的分档价（Haiku 5.5 记为未定价）。所以估算偏低，不是账单。
 - **接口**：`GET /api/usage/report`、`GET /api/usage/tasks`，参数 `from`、`to`、`model`、`agentId`、`appId`、`origin`（`/api/usage/tasks` 另有 `limit`、`offset`）。日期按 daemon 本地时区。需要安装管理员权限。
 
-### 5. 实验功能（草稿页）
+### 5. 通用定时任务
+
+在 Web「任务计划」中点「创建定时任务」，选择 Agent、目录和权限后保存计划；保存只创建空闲会话，不发送执行指令。也可在已有任务的「工作目录与自动化」中创建计划，沿用该任务的目录、模型、权限和上下文。新计划默认停用，启用后才定时执行。支持指定时区的一次、每天、每周、固定间隔和五段 Cron；每分钟检查一次，服务恢复后最多补一次，同一计划有未结束或结果待核对的执行时不再启动下一次。
+
+CLI 使用同一套接口，结果为 JSON：
+
+```bash
+# 创建独立计划；不立即执行，默认 shared 目录，也可 --workspace worktree
+dutydeck schedule create --agent codex --cwd /path/to/project --name 日报 --prompt '检查变更并总结' --cron '0 9 * * 1-5' --timezone Asia/Shanghai
+# 或为已有任务创建计划：--session ses_xxx --every 30（分钟）或 --at 2026-12-01T09:00
+dutydeck schedule list
+dutydeck schedule show schedule_xxx --session ses_xxx
+dutydeck schedule enable schedule_xxx --session ses_xxx
+dutydeck schedule update schedule_xxx --session ses_xxx --prompt '检查构建并总结'
+dutydeck schedule disable schedule_xxx --session ses_xxx
+dutydeck schedule run schedule_xxx --session ses_xxx --idempotency-key daily-check-1
+dutydeck schedule history schedule_xxx --session ses_xxx
+dutydeck schedule delete schedule_xxx --session ses_xxx
+```
+
+「立即执行」可用于停用的计划，只跳过时间等待，仍检查执行条件与权限，不改变下一次定时；同一个幂等键始终返回原执行，脚本重试应复用 `--idempotency-key`。删除后停止后续触发并使尚未提交的任务失效，已提交的任务继续收尾，历史和结果保留。`history` 返回该计划最近 1000 条记录，按时间从新到旧排列；查询已删除计划的历史请指定 `--session`。`show --session` 可查看删除记录。用 `--input '<JSON>'` 或 `--file plan.json` 设置完整创建参数或更新补丁（含 `condition`、`dstPolicy`），`--expected-revision` 可拒绝并发修改。`--instance <id>`、`--url`、`--database` 的目标规则与 `dutydeck settings` 相同。创建新会话后若保存失败或响应丢失，CLI 会返回会话 ID；先用 `list --session <id>` 检查是否已经保存，确认不存在后再用该 `--session` 重试。
+
+后台任务沿用选定的权限姿态；`ask` 可能等待人工审批，需要无人值守时应显式选择适当权限。计划和执行记录保存在所属运行时的数据库中，每个数据库只允许一个运行时持有执行权；Web 与机器人实例通过实例切换访问各自的计划。
+
+### 6. 实验功能（草稿页）
 “群与权限”策略页、定时任务页的导入草稿、设置里的“迁移与高级草稿”目前只保存草稿，不会生效或执行，所以默认隐藏。在「设置与接入 → 实验功能」打开“显示实验功能”后才显示。开关只保存在当前浏览器。
 
 ---

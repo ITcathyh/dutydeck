@@ -37,6 +37,7 @@ import { LegacyImportCliError, runLegacyArchive, runLegacyDiscover, runLegacyPla
 import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { SecretCliError, readSecretValue, runSecretList, runSecretRemove, runSecretRotate, runSecretSet, type SecretCliContext } from './secret-cli.js';
 import { SettingsCliError, runSettingsCli } from './settings-cli.js';
+import { ScheduleCliError, runScheduleCli } from './schedule-cli.js';
 import { DatabaseCliError, runDatabaseExecutionStatus, runDatabaseRetireLegacy, runDatabaseUpgradeExecution } from './database-cli.js';
 import { IdentityPreflightCliError, runIdentityPreflightCli } from './identity-preflight-cli.js';
 import { runSetup } from './setup/setup.js';
@@ -472,6 +473,7 @@ async function main() {
       const apiKey = apiKeyFd === undefined ? undefined : (await readSecretValue({ valueFd: apiKeyFd })).toString('utf8').trim();
       output(await runSettingsCli(action, { ...input, ...(apiKey !== undefined ? { apiKey } : {}), ...(appSecret !== undefined ? { appSecret } : {}) }));
     },
+    schedule: async (action, id, input) => { output(await runScheduleCli(action, id, input)); },
     sessionHerdr: async args => { await runHerdrCli(args); },
     sessionSend: async text => { output(await runSessionSend(text)); },
     sessionNativeAsk: async () => {
@@ -537,7 +539,7 @@ try {
   else if (error instanceof LegacyImportError || error instanceof LegacyImportCliError) {
     process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   }
-  else if (error instanceof TerminalSettingsCliError || error instanceof RecoveryCliError || error instanceof SecretCliError || error instanceof SecretProviderError || error instanceof IdentityPreflightCliError || error instanceof DatabaseCliError || error instanceof WorkspaceGroupsCliError || error instanceof SessionNamesCliError || error instanceof SettingsCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
+  else if (error instanceof TerminalSettingsCliError || error instanceof RecoveryCliError || error instanceof SecretCliError || error instanceof SecretProviderError || error instanceof IdentityPreflightCliError || error instanceof DatabaseCliError || error instanceof WorkspaceGroupsCliError || error instanceof SessionNamesCliError || error instanceof SettingsCliError || error instanceof ScheduleCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   // setup 的三类错误自带中文说明和「该补哪个 flag」，直接原样呈现，不要压成 JSON 或堆栈。
   else if (error instanceof PromptUnavailableError || error instanceof PromptAbortedError || error instanceof InvalidWorkingDirectoryError) {
     process.stderr.write(`${error.message}\n`);

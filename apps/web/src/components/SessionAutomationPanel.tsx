@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { CreateSessionScheduleInput, PublicSessionSchedule as SessionSchedule } from '@dutydeck/shared';
-import { api, type Session } from '../api';
+import { api, ApiError, type Session } from '../api';
+import { sessionPath } from '../app-route';
+import { ConfirmDialog } from './ConfirmDialog';
 import { sessionDisplayName } from '../run-summary';
 import { Banner, Button, Field, Input, Select, Spinner, Textarea } from './primitives';
 
 const ciLabels: Record<string, string> = { waiting: '等待构建', dispatching: '提交续作中', accepted: '已提交续作', completed: '续作已结束', cancelled: '已取消', expired: '已过期', stale_head: '提交已变化，等待停止', session_inactive: '会话已结束', revoked: '权限已撤销', error: '查询失败' };
+const runLabels: Record<string, string> = { pending: '等待执行', accepted: '已接收', completed: '已完成', failed: '执行失败', interrupted: '已中断', skipped: '已跳过', error: '执行出错', invalidated: '已失效', blocked: '执行受阻' };
 const conditionLabels: Record<string, string> = { pending: '待检查', passed: '条件满足', skipped: '条件不满足，已跳过', error: '条件检查失败', invalidated: '已失效' };
 
 export function scheduleNextExecution(item: SessionSchedule): string {
@@ -36,6 +39,8 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
   const [condition, setCondition] = useState<'always' | 'ci_new_failure'>('always');
   const [conditionWorkflow, setConditionWorkflow] = useState('');
   const [notice, setNotice] = useState('');
+  const [deleting, setDeleting] = useState<SessionSchedule>();
+  const runRequests = useRef(new Map<string, { expectedRevision: number; idempotencyKey: string }>());
   const data = records.isError ? undefined : records.data;
   const readOnly = !data || Boolean(session.archivedAt) || ['stopped', 'failed'].includes(session.state);
   const refresh = () => qc.invalidateQueries({ queryKey });
@@ -45,6 +50,14 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
   const subscribe = useMutation({ mutationFn: () => api.subscribeCi(session.id, { ...(workflow.trim() ? { workflow: workflow.trim() } : {}), ...(ciPrompt.trim() ? { prompt: ciPrompt.trim() } : {}), ttlSeconds: ttlHours * 3600 }), onSuccess: result => { setNotice(`已开始等待当前提交的 ${providerName(result.subscription.provider)}；续作开始前可取消等待。`); refresh(); } });
   const cancel = useMutation({ mutationFn: (input: { id: string; revision: number }) => api.cancelCi(session.id, input.id, input.revision), onSettled: refresh });
   const toggle = useMutation({ mutationFn: (item: SessionSchedule) => api.updateSchedule(session.id, item.id, { expectedRevision: item.revision, enabled: !item.enabled }), onSuccess: async (_result, item) => { await refresh(); setNotice(item.enabled ? '计划已停用。' : '计划已启用。'); }, onError: refresh });
+  const run = useMutation({ mutationFn: (item: SessionSchedule) => {
+    let request = runRequests.current.get(item.id);
+    if (!request) { request = { expectedRevision: item.revision, idempotencyKey: crypto.randomUUID() }; runRequests.current.set(item.id, request); }
+    return api.runSchedule(session.id, item.id, request);
+  }, onSuccess: async (_result, item) => { runRequests.current.delete(item.id); await refresh(); setNotice('已提交立即执行，可在最近触发记录中查看结果；原计划时间保持不变。'); }, onError: (error, item) => {
+    if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408) { runRequests.current.delete(item.id); void refresh(); }
+  } });
+  const remove = useMutation({ mutationFn: (item: SessionSchedule) => api.deleteSchedule(session.id, item.id, item.revision), onSuccess: async (_result, item) => { if (editing?.id === item.id) setEditing(undefined); setDeleting(undefined); await refresh(); setNotice('计划已删除，触发记录已保留；正在运行的任务会继续。'); }, onError: refresh });
   const save = useMutation({ mutationFn: () => {
     const [hour, minute] = time.split(':').map(Number);
     const trigger: CreateSessionScheduleInput['trigger'] = kind === 'daily' || kind === 'weekly'
@@ -72,7 +85,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
     const item = data?.schedules.find(item => item.id === initialScheduleId);
     if (item) { edit(item); openedSchedule.current = initialScheduleId; }
   }, [initialScheduleId, data]);
-  const error = records.error ?? subscribe.error ?? cancel.error ?? toggle.error ?? save.error;
+  const error = records.error ?? subscribe.error ?? cancel.error ?? toggle.error ?? save.error ?? run.error;
 
   return <section className="space-y-3">
     <h3 className="text-body font-semibold">自动续作</h3>
@@ -116,11 +129,18 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
       </form>
     </details>}
     {data?.schedules.map(item => <div key={item.id} className="rounded-lg border border-default p-3 text-caption">
-      <div className="flex flex-wrap items-center justify-between gap-2"><strong>{item.name} · {item.enabled ? '已启用' : '已停用'}</strong>{!readOnly && <div className="flex gap-2"><Button onClick={() => edit(item)}>编辑</Button><Button disabled={toggle.isPending} onClick={() => toggle.mutate(item)}>{item.enabled ? '停用' : '启用'}</Button></div>}</div>
+      <div className="flex flex-wrap items-center justify-between gap-2"><strong>{item.name} · {item.enabled ? '已启用' : '已停用'}</strong>{!readOnly && <div className="flex flex-wrap gap-2"><Button disabled={run.isPending} onClick={() => run.mutate(item)}>立即执行</Button><Button onClick={() => edit(item)}>编辑</Button><Button disabled={toggle.isPending} onClick={() => toggle.mutate(item)}>{item.enabled ? '停用' : '启用'}</Button><Button variant="danger" onClick={() => { remove.reset(); setDeleting(item); }}>删除</Button></div>}</div>
       <p className="mt-1 text-secondary">{item.prompt}</p>
       <p className="text-secondary">{scheduleNextExecution(item)}</p>
       <p className="text-subtle">{item.timezone} · 沿用任务上下文 · {session.cwd}</p>
+      {item.trigger.kind === 'at' && <p className="text-subtle">一次计划仅自动触发一次；是否执行成功请查看触发记录。</p>}
     </div>)}
-    {!!data?.occurrences.length && <details><summary className="cursor-pointer text-caption">最近触发记录</summary><div className="mt-2 space-y-2">{data.occurrences.slice(0, 20).map(item => <p key={item.id} className="text-caption">{new Date(item.scheduledForUtc).toLocaleString()} · {conditionLabels[item.conditionStatus] ?? item.conditionStatus}{item.taskId ? ' · 任务已接收' : ''}{item.error ? ` · ${item.error}` : ''}{item.delivery.status === 'error' ? ' · 通知失败，等待重试' : ''}</p>)}</div></details>}
+    {!!data?.occurrences.length && <details><summary className="cursor-pointer text-caption">最近触发记录</summary><div className="mt-2 space-y-2">{data.occurrences.slice(-20).reverse().map(item => <div key={item.id} className="text-caption">
+      <p>{data.schedules.find(schedule => schedule.id === item.scheduleId)?.name ?? `历史计划 ${item.scheduleId}`} · {new Date(item.scheduledForUtc).toLocaleString()} · {runLabels[item.runStatus] ?? item.runStatus} · {conditionLabels[item.conditionStatus] ?? item.conditionStatus}</p>
+      {item.taskId && <a className="text-link underline" href={sessionPath(session.id)}>查看执行任务 · {item.taskId}</a>}
+      {item.error && <p className="text-danger">{item.error}</p>}
+      {item.delivery.status === 'error' && <p className="text-warning">通知失败，等待重试</p>}
+    </div>)}</div></details>}
+    <ConfirmDialog open={Boolean(deleting)} title="删除定时计划" description={`删除「${deleting?.name ?? ''}」后将停止未来和排队中的计划执行，保留触发记录。正在运行的任务会继续。`} confirmLabel="删除计划" tone="danger" busy={remove.isPending} error={remove.error?.message} onConfirm={() => { if (deleting) remove.mutate(data?.schedules.find(item => item.id === deleting.id) ?? deleting); }} onCancel={() => { if (!remove.isPending) setDeleting(undefined); }}/>
   </section>;
 }

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { scheduleTriggerSchema, scheduleDstGapPolicies, scheduleDstOverlapPolicies } from './schedule-foundation.js';
+import { previewNextSchedule, type ScheduleDefinition, scheduleTriggerSchema, scheduleDstGapPolicies, scheduleDstOverlapPolicies } from './schedule-foundation.js';
 import {
   attemptResultV1Schema,
   executionActorSchema,
@@ -72,8 +72,14 @@ export const sessionScheduleSchema = z.object({
   dstPolicy: z.object({ gap: z.enum(scheduleDstGapPolicies), overlap: z.enum(scheduleDstOverlapPolicies) }).strict(),
   condition: sessionScheduleConditionSchema,
   enabled: z.boolean(),
+  deletedAt: timestamp.optional(),
   nextDueAt: timestamp.optional(),
   taskStartOccurrenceId: z.string().optional(),
+  /** Durable single execution slot, written before the occurrence itself. */
+  pendingOccurrence: z.object({
+    id: z.string().min(1), generation: z.number().int().positive(), scheduledForUtc: timestamp,
+    triggerSource: z.literal('manual').optional(), actor: executionActorSchema.optional()
+  }).strict().optional(),
   createdAt: timestamp,
   updatedAt: timestamp
 }).strict();
@@ -100,6 +106,14 @@ export const updateSessionScheduleInputSchema = z.object({
   enabled: z.boolean().optional()
 }).strict().refine(value => Object.keys(value).some(key => key !== 'expectedRevision'), { message: 'At least one field must be updated' });
 export type UpdateSessionScheduleInput = z.infer<typeof updateSessionScheduleInputSchema>;
+
+export const runSessionScheduleInputSchema = z.object({
+  expectedRevision: z.number().int().positive(),
+  idempotencyKey: z.string().trim().min(1).max(200)
+}).strict();
+export type RunSessionScheduleInput = z.infer<typeof runSessionScheduleInputSchema>;
+export const deleteSessionScheduleInputSchema = z.object({ expectedRevision: z.number().int().positive() }).strict();
+export type DeleteSessionScheduleInput = z.infer<typeof deleteSessionScheduleInputSchema>;
 
 export const sessionScheduleOccurrenceV1Schema = z.object({
   schemaVersion: z.literal(1),
@@ -131,6 +145,7 @@ export const sessionScheduleOccurrenceV2Schema = z.object({
   sessionId: z.string().min(1),
   generation: z.number().int().positive(),
   scheduledForUtc: timestamp,
+  triggerSource: z.literal('manual').optional(),
   conditionStatus: z.enum(['pending', 'passed', 'skipped', 'error', 'invalidated']),
   conditionObservedRunIds: z.array(z.number().int().nonnegative()).max(100).optional(),
   conditionObservedRunAttempts: observedRunAttempts.optional(),
@@ -254,7 +269,7 @@ export type SubscribeCiInput = z.input<typeof subscribeCiInputSchema>;
 export const cancelCiInputSchema = z.object({ expectedRevision: z.number().int().positive() }).strict();
 export type CancelCiInput = z.infer<typeof cancelCiInputSchema>;
 
-export type PublicSessionSchedule = Omit<SessionSchedule, 'actorId' | 'dispatchPrompt' | 'taskStartOccurrenceId'>;
+export type PublicSessionSchedule = Omit<SessionSchedule, 'actorId' | 'dispatchPrompt' | 'taskStartOccurrenceId' | 'pendingOccurrence'>;
 export type PublicCiSubscription = Omit<
   CiSubscriptionV2,
   'actorId' | 'actor' | 'dispatchPrompt' | 'taskStartedAt' | 'leaseOwner' | 'leaseExpiresAt' | 'admission'
@@ -278,4 +293,31 @@ export interface SessionAutomationList {
   schedules: PublicSessionSchedule[];
   subscriptions: PublicCiSubscription[];
   occurrences: PublicSessionScheduleOccurrence[];
+}
+
+function asPreviewDefinition(schedule: Pick<SessionSchedule, 'id' | 'name' | 'trigger' | 'timezone' | 'dstPolicy'>): ScheduleDefinition {
+  return {
+    schemaVersion: 1,
+    id: schedule.id,
+    revision: 1,
+    channelBotId: 'session_automation',
+    name: schedule.name,
+    trigger: schedule.trigger,
+    timezone: schedule.timezone,
+    dstPolicy: schedule.dstPolicy,
+    delivery: { mode: 'chat', chatRef: 'session', continuation: 'chat_root' },
+    payloadRef: 'session_prompt',
+    sourceOwnership: 'dutydeck',
+    sourceNamespace: 'session_automation',
+    sourceEnabled: false,
+    state: 'disabled',
+    desiredExecutorState: 'disabled',
+    currentGeneration: 1,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString()
+  };
+}
+
+export function previewSessionSchedule(schedule: Pick<SessionSchedule, 'id' | 'name' | 'trigger' | 'timezone' | 'dstPolicy'>, after: Date) {
+  return previewNextSchedule(asPreviewDefinition(schedule), after);
 }

@@ -162,3 +162,35 @@ describe('SessionAutomation ledger integration with real SQLite and local JSONL 
     expect(f.deliveries).toHaveLength(1);
   });
 });
+
+it('creates an idle session through the CLI, runs once while paused, and retains its result after deletion and SQLite reopen', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerSessionAutomationRoutes } = await import('./session-automation-routes.js');
+  const { runScheduleCli } = await import('./schedule-cli.js');
+  const f = await fixture();
+  const app = Fastify();
+  cleanup.push(() => app.close());
+  app.get('/api/sessions', () => f.runtime.listSessions());
+  app.post('/api/sessions', request => f.runtime.start(request.body as { agentId: string; cwd?: string }));
+  await registerSessionAutomationRoutes(app, { service: f.service, authorize: async () => ({ allowed: true, actorId: 'installation_owner' }) });
+  const dependencies = { readToken: () => 'owner-token', fetcher: (async (url, init) => {
+    const response = await app.inject({ method: init!.method as 'GET' | 'POST' | 'PATCH' | 'DELETE', url: new URL(String(url)).pathname, headers: init!.headers as Record<string, string>, ...(init!.body ? { payload: String(init!.body) } : {}) });
+    return new Response(response.body, { status: response.statusCode, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch };
+  const input = { url: 'http://127.0.0.1:4310', database: '/unused.db' };
+  const created = await runScheduleCli('create', undefined, { ...input, agent: 'native', cwd: f.directory, name: 'CLI schedule', prompt: 'manual CLI prompt', every: '60', timezone: 'UTC' }, dependencies) as { schedule: { id: string; sessionId: string; enabled: boolean } };
+  const schedule = created.schedule;
+  expect(schedule.enabled).toBe(false);
+  expect(await f.repos.tasks.listBySession(schedule.sessionId)).toHaveLength(0);
+  await runScheduleCli('run', schedule.id, { ...input, session: schedule.sessionId, idempotencyKey: 'cli-manual' }, dependencies);
+  await f.tickUntil(async () => (await f.service.listBySession(schedule.sessionId)).occurrences[0]?.runStatus === 'completed');
+  const result = (await f.service.listBySession(schedule.sessionId)).occurrences[0]!;
+  expect(result.result!.output.text).toContain('manual CLI prompt');
+  await runScheduleCli('delete', schedule.id, { ...input, session: schedule.sessionId }, dependencies);
+  expect((await runScheduleCli('history', schedule.id, { ...input, session: schedule.sessionId }, dependencies) as { occurrences: unknown[] }).occurrences).toHaveLength(1);
+  await f.closeAndReopen();
+  const replay = await f.service.runSchedule(schedule.sessionId, schedule.id, { expectedRevision: 1, idempotencyKey: 'cli-manual' }, 'installation_owner');
+  expect(replay.id).toBe(result.id);
+  expect(replay.runStatus).toBe('completed');
+  expect((await readFile(f.sentLog, 'utf8')).trim().split('\n')).toHaveLength(1);
+});

@@ -487,7 +487,7 @@ export default function App() {
     {overlay?.kind === 'groups' && <Suspense fallback={overlayFallback('正在打开群配置…')}><GroupPolicyModal open onClose={closeOverlay}/></Suspense>}
     {overlay?.kind === 'automation' && <Dialog open onClose={closeOverlay} label="任务自动化" size="lg">
       <Dialog.Header><h2 className="text-title font-semibold">任务自动化</h2><span className="ml-auto"><IconButton label="关闭自动化" onClick={closeOverlay}><X size={16}/></IconButton></span></Dialog.Header>
-      <Dialog.Body><Suspense fallback={<Spinner label="正在读取任务自动化…"/>}><AutomationOverview sessions={visibleSessions} summaries={runSummaries} onSelectSession={id => { applySessionSelection(id); navigate({ route: { kind: 'session', sessionId: id }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId }, { replace: true }); }}/></Suspense></Dialog.Body>
+      <Dialog.Body><Suspense fallback={<Spinner label="正在读取任务自动化…"/>}><AutomationOverview agents={agents.data ?? []} capabilities={systemCapabilities.data} onOpenAgentSetup={() => openSettings('agents')} sessions={visibleSessions} summaries={runSummaries} onSelectSession={id => { applySessionSelection(id); navigate({ route: { kind: 'session', sessionId: id }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId }, { replace: true }); }}/></Suspense></Dialog.Body>
     </Dialog>}
     {overlay?.kind === 'usage' && <Dialog open onClose={closeOverlay} label="用量与成本" size="lg">
       <Dialog.Header><h2 className="text-title font-semibold">用量与成本</h2><span className="ml-auto"><IconButton label="关闭用量与成本" onClick={closeOverlay}><X size={16}/></IconButton></span></Dialog.Header>

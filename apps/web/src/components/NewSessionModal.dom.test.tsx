@@ -116,7 +116,7 @@ describe('NewSessionModal create → dispatch', () => {
 });
 
 describe('NewSessionModal 弹层外壳（契约 §7 / §8.1）', () => {
-  const renderModal = (props: Partial<Parameters<typeof NewSessionModal>[0]> = {}) => {
+  const renderModal = (props: Partial<Extract<Parameters<typeof NewSessionModal>[0], { mode?: 'task' }>> = {}) => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     return render(<QueryClientProvider client={client}><NewSessionModal open onClose={() => {}} onCreated={() => {}} agents={[agent]} {...props}/></QueryClientProvider>);
   };

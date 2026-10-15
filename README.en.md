@@ -231,6 +231,27 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 - **Usage and cost**: tabs "Cost", "Detail", "Session insight". Monthly USD caps per bot or group (`dutydeck settings usage set-cap <usd> --app <appId> [--chat <chatId>]`). The built-in price table covers OpenAI and Claude models (longest-prefix match; unmatched models are "unpriced"); override it entirely with `DUTYDECK_USAGE_PRICING_JSON`. Terminal-mode Claude usage is estimated from the transcript (subagent usage from `<session>/subagents/`); Codex and Traex terminal modes report none. "Partial usage unknown, caps may be inaccurate" appears on the cap card, in rejection notes and in alerts when a turn's usage cannot be read (unreadable subagent files, a turn recovered after a daemon restart, unpriced models). Not included: US-only inference 1.1x, fast mode, Batch, 1-hour cache writes, Haiku 5.5 tiers. These are estimates, not a bill. APIs: `GET /api/usage/report`, `GET /api/usage/tasks` (params `from`, `to`, `model`, `agentId`, `appId`, `origin`; tasks also `limit`, `offset`; dates in daemon local time; installation admin only).
 - **Experimental features**: the "Groups & permissions" draft page, the import drafts in scheduled tasks and the "migration & advanced drafts" in settings only store drafts and do nothing at runtime, so they are hidden. Turn on Settings → Experimental → "Show experimental features" (stored in this browser only).
 
+
+**Scheduled Agent tasks.** In Web → Task schedules, choose New scheduled task, an Agent, workspace and permissions. Saving creates an idle session without sending the prompt; enable the saved schedule to start automatic execution. Existing sessions can add schedules in Workspace & automation and keep their directory, model, permissions and context. Supports once, daily, weekly, intervals and five-field cron in an IANA timezone. The runtime checks once per minute, catches up at most once after downtime, and keeps one unfinished execution per schedule, including results awaiting reconciliation.
+
+```bash
+# New idle session; shared workspace by default, or --workspace worktree
+dutydeck schedule create --agent codex --cwd /path/to/project --name Daily --prompt 'Review changes and summarize' --cron '0 9 * * 1-5' --timezone UTC
+# Existing session: --session ses_xxx --every 30 (minutes), or --at 2026-12-01T09:00
+dutydeck schedule list
+dutydeck schedule show schedule_xxx --session ses_xxx
+dutydeck schedule enable schedule_xxx --session ses_xxx
+dutydeck schedule update schedule_xxx --session ses_xxx --prompt 'Review builds and summarize'
+dutydeck schedule disable schedule_xxx --session ses_xxx
+dutydeck schedule run schedule_xxx --session ses_xxx --idempotency-key daily-check-1
+dutydeck schedule history schedule_xxx --session ses_xxx
+dutydeck schedule delete schedule_xxx --session ses_xxx
+```
+
+Run now also works while paused. It bypasses the clock, keeps conditions and permissions, and leaves the next scheduled time unchanged. Reuse `--idempotency-key` when retrying a manual request: the same key returns the original execution. Deletion prevents future triggers and invalidates work not yet submitted; submitted tasks finish, and their history/results remain available. `history` returns the latest 1000 occurrences of that plan, newest first; specify `--session` for deleted plan history. `show --session` reads its retained definition. CLI output is JSON. Use `--input '<JSON>'` or `--file plan.json` for complete create input or an update patch (including `condition` and `dstPolicy`), and `--expected-revision` to reject concurrent edits. Runtime targeting with `--instance`, `--url` and `--database` follows `dutydeck settings`. If saving fails or its response is lost after a new session is created, the CLI reports its ID. Inspect `list --session <id>` first, then retry with that `--session` only if the schedule is absent.
+
+Scheduled tasks keep the selected permission posture; `ask` can wait for human approval, so choose permissions explicitly for unattended work. Each runtime database owns its schedules and execution history and permits one runtime executor. Switch instances to reach the Web or bot runtime that owns the task.
+
 ---
 
 ## Agent Configuration & Permissions <a id="agent-config"></a>

@@ -12,11 +12,11 @@ export type NewSessionModalProps = {
   open: boolean;
   onClose(): void;
   onOpenAgentSetup?(): void;
-  onCreated(session: Session, task: Task): void;
   agents: Agent[];
   initialAgentId?: string;
   capabilities?: { platform: string; directoryPicker: boolean; filePicker: boolean };
-};
+} & ({ mode?: 'task'; onCreated(session: Session, task: Task): void; onSessionCreated?: never }
+  | { mode: 'schedule'; onSessionCreated(session: Session): void; onCreated?: never });
 
 // label 一律来自 components/ui.tsx 的 permissionLabels，这里只补每个模式的说明文案。
 const permissionOptions: Record<PermissionMode, { label: string; meta: string }> = {
@@ -45,7 +45,7 @@ function SelectField({ label, children }: { label: string; children: React.React
   return <div><span className="text-caption font-medium text-secondary">{label}</span>{children}</div>;
 }
 
-export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, agents, initialAgentId, capabilities }: NewSessionModalProps) {
+export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, onSessionCreated, mode = 'task', agents, initialAgentId, capabilities }: NewSessionModalProps) {
   const qc = useQueryClient();
   const [agentId, setAgentId] = useState(initialAgentId ?? 'codex');
   const [cwd, setCwd] = useState('');
@@ -73,14 +73,16 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, ag
     mutationFn: async () => {
       const session = createdSession ?? await api.create({ agentId, permissionMode, workspaceMode, ...(cwd ? { cwd } : {}), ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) });
       if (!createdSession) setCreatedSession(session);
+      if (mode === 'schedule') return { session, task: undefined };
       const result = await api.send(session.id, goal.trim(), 'queue');
       return { session, task: result.task };
     },
     onSuccess: ({ session, task }) => {
       void qc.invalidateQueries({ queryKey: ['sessions'] });
-      qc.setQueryData<Task[]>(['tasks', session.id], [task]);
+      if (task) qc.setQueryData<Task[]>(['tasks', session.id], [task]);
       setCreatedSession(undefined); setGoal('');
-      onCreated(session, task);
+      if (task) onCreated?.(session, task);
+      else onSessionCreated?.(session);
     }
   });
   if (!open) return null;
@@ -108,22 +110,22 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, ag
     <Dialog.Footer><Button variant="primary" disabled>创建并执行</Button></Dialog.Footer>
   </Dialog>;
 
-  const submitDisabled = create.isPending || !goal.trim() || (permissionMode === 'full-trust' && !fullTrustConfirmed);
+  const submitDisabled = create.isPending || (mode === 'task' && !goal.trim()) || (permissionMode === 'full-trust' && !fullTrustConfirmed);
   // 提交进行中不允许 Escape / 点遮罩关闭：会把一个已经发出的写操作丢在半路（契约 §8.1）。
-  return <Dialog open onClose={onClose} label="创建新任务" size="sm" closeOnEscape={!create.isPending} closeOnScrim={!create.isPending}>
+  return <Dialog open onClose={onClose} label={mode === 'schedule' ? '创建定时任务' : '创建新任务'} size="sm" closeOnEscape={!create.isPending} closeOnScrim={!create.isPending}>
     <form onSubmit={(event: FormEvent) => { event.preventDefault(); create.mutate(); }} className="flex min-h-0 flex-1 flex-col">
       <Dialog.Header>
         <div>
-          <h2 className="text-title font-semibold text-primary">创建新任务</h2>
-          <p className="mt-1 text-caption text-subtle">写清目标即可开始；模型和推理强度可以使用 Agent 默认值。</p>
+          <h2 className="text-title font-semibold text-primary">{mode === 'schedule' ? '创建定时任务' : '创建新任务'}</h2>
+          <p className="mt-1 text-caption text-subtle">{mode === 'schedule' ? '先准备运行环境，再填写执行指令与时间。会启动空闲 Agent，保存计划后需另行启用。' : '写清目标即可开始；模型和推理强度可以使用 Agent 默认值。'}</p>
         </div>
         <span className="ml-auto"><IconButton label="关闭" onClick={onClose}><X size={16}/></IconButton></span>
       </Dialog.Header>
       <Dialog.Body>
         <div className="space-y-4">
-          <Field label="任务目标">
+          {mode === 'task' && <Field label="任务目标">
             <Textarea autoFocus required aria-label="任务目标" value={goal} onChange={event => setGoal(event.target.value)} rows={3} placeholder="例如：修复登录超时问题，补齐回归测试并通过构建" className="resize-y"/>
-          </Field>
+          </Field>}
           <DirectoryPicker
             value={cwd}
             onChange={setCwd}
@@ -169,7 +171,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, ag
       </Dialog.Body>
       <Dialog.Footer>
         <Button variant="secondary" onClick={onClose}>取消</Button>
-        <Button type="submit" variant="primary" loading={create.isPending} disabled={submitDisabled} className="min-w-24">{createdSession ? '重试发送' : '创建并执行'}</Button>
+        <Button type="submit" variant="primary" loading={create.isPending} disabled={submitDisabled} className="min-w-24">{mode === 'schedule' ? '下一步：设置计划' : createdSession ? '重试发送' : '创建并执行'}</Button>
       </Dialog.Footer>
     </form>
   </Dialog>;
