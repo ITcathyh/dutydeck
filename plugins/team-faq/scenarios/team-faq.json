@@ -1,0 +1,31 @@
+{
+  "id": "team-faq",
+  "version": "0.1.0",
+  "title": "团队答疑",
+  "noun": "答疑",
+  "mode": "model",
+  "description": "群里有人问到指定服务或流程时，按 runbook 判断要不要接，接了按 runbook 回答。",
+  "params": {
+    "topics": { "type": "string_list", "label": "关键字（服务名、流程名）", "maxItems": 50, "maxLength": 64, "default": [] },
+    "docs": { "type": "string_list", "label": "runbook 文件（相对插件配置的目录）", "maxItems": 20, "maxLength": 200, "default": [] }
+  },
+  "trigger": { "senderKinds": ["human"], "messageTypes": ["text", "post"], "match": { "textAnyParam": "topics" } },
+  "decision": { "guidance": "本群启用了团队答疑。当前消息提到了答疑关键字。是在向群里求助、且 scenarioContext 里的 runbook 能回答的，接：能直接按 runbook 回答的用 reply 并引用 runbook 材料；要查系统或执行步骤的用 act。只是同事间讨论、已有人回答、或 runbook 没覆盖的，silent。" },
+  "execution": { "instruction": "[团队答疑] 回答时以下面的 runbook 摘录为准，标明出处；摘录没覆盖的部分明确说没有依据，不要编。" },
+  "context": { "provider": "runbook", "timeoutMs": 3000, "maxChars": 6000, "decisionChars": 2000 },
+  "confirm": {
+    "enableTitle": "开启团队答疑",
+    "disableTitle": "关闭团队答疑",
+    "enableSummary": "关键字 {topics}；runbook {docs}。",
+    "disableSummary": "不再按 runbook 接答疑（关键字 {topics}）。",
+    "enabledResult": "已开启团队答疑：关键字 {topics}。",
+    "disabledResult": "已关闭本群团队答疑。"
+  },
+  "phrases": {
+    "maxLength": 30,
+    "enable": [{ "source": "(开启|打开)(团队)?答疑" }],
+    "disable": [{ "source": "(关闭|关掉|停止)(团队)?答疑" }],
+    "examples": { "enable": ["开启团队答疑"], "disable": ["关闭答疑"] }
+  },
+  "status": { "summary": "关键字 {topics?{topics}:未填写}；runbook {docs?{docs}:未填写}", "actedLabel": "回答" }
+}

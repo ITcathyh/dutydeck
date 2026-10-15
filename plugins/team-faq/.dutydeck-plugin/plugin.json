@@ -1,0 +1,10 @@
+{
+  "name": "team-faq",
+  "version": "0.1.0",
+  "description": "团队答疑：群里有人问到指定服务或流程时，按 runbook 判断要不要接、按 runbook 回答。",
+  "scenarios": "scenarios",
+  "providers": "index.mjs",
+  "userConfig": {
+    "docs_dir": { "description": "runbook 所在目录（Markdown）" }
+  }
+}
