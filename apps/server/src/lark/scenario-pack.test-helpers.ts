@@ -9,7 +9,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
-import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
+import { DutydeckRuntime, type AgentDriver, type RuntimeOptions } from '@dutydeck/runtime';
 import { RelayAskBroker } from '@dutydeck/relay';
 import { scenarioRecordOf, type AgentConfig, type CollaborationAction, type CollaborationSnapshot, type CollaborationDecision, type CollaborationDuty, type CollaborationParticipationMode, type CollaborationScope } from '@dutydeck/shared';
 import { createRelayAskStore } from '../relay-ask-store.js';
@@ -53,6 +53,12 @@ export interface AlarmHarnessOptions {
   scenarios?: ScenarioRegistry;
   /** 参与判定的模型桩；不给就恒为 silent。 */
   decide?: ParticipationDecider['decide'];
+  /** 回复生成的桩；不给就返回空串。 */
+  respond?: ParticipationDecider['respond'];
+  /** 接到 runtime 的宿主入口（插件 hook 的接线同 service.ts）。 */
+  runtimeOptions?: Pick<RuntimeOptions, 'prepareTaskPrompt' | 'reviewPermission'>;
+  /** 对这一轮 prompt 先发一个待审批的权限请求（不等审批结果就作答）。 */
+  permissionRequest?: (prompt: string) => { id: string; title: string } | undefined;
   /** 本机器人所在的其他群（同样登记、同样的参与模式），消息用 chatId 指定。 */
   extraChats?: string[];
 }
@@ -72,6 +78,8 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
   const decideSnapshots: CollaborationSnapshot[] = [];
   /** 每次派发时这条告警判定记录的状态（派发前应为 candidate）。 */
   const statusAtDispatch: string[] = [];
+  /** driver 收到的审批结果：宿主代为决定或有人审批时才有。 */
+  const permissionResolutions: Array<{ id: string; approved: boolean }> = [];
   let dispatchFailure: string | undefined;
   const answer = options.answer ?? defaultAnswer;
 
@@ -79,16 +87,20 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
       const driver: AgentDriver = {
-        start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
+        start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {}, isStopped: async () => true,
         send: async (prompt: unknown) => {
           const text = typeof prompt === 'string' ? prompt : String((prompt as { prompt?: string }).prompt ?? '');
           prompts.push(text);
+          const permission = options.permissionRequest?.(text);
+          if (permission) emit({ type: 'permission_request', data: { ...permission, status: 'pending' } });
           emit({ type: 'text', data: { text: answer(text) } });
           emit({ type: 'completed', data: { stopReason: 'end_turn' } });
-        }
+        },
+        resolvePermission: async (id: string, approved: boolean) => { permissionResolutions.push({ id, approved }); return true; }
       };
       return driver;
-    }
+    },
+    ...options.runtimeOptions
   });
   const broker = new RelayAskBroker({ publish: async () => {} }, createRelayAskStore(repos.config));
   await broker.initialize();
@@ -208,7 +220,7 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
         decideSnapshots.push(structuredClone(snapshot));
         return options.decide ? options.decide(config, snapshot, triggerId, facts) : { action: 'silent', reason: '桩：不接', evidenceIds: [], updates: [] };
       },
-      respond: async () => ''
+      respond: options.respond ?? (async () => '')
     },
     authorize: async () => true,
     canOperate: async () => true,
@@ -241,7 +253,7 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
   const inbox = new LarkTaskInbox(repos.config);
   const harness = {
     cwd, repos, runtime, coordinator, participation, groupManager, config, scope, service, messages,
-    calls, prompts, dispatched, authorizations, decideCalls, decideSnapshots, statusAtDispatch,
+    calls, prompts, dispatched, authorizations, decideCalls, decideSnapshots, statusAtDispatch, permissionResolutions,
     failNextDispatch(message = '派发失败（场景注入）') { dispatchFailure = message; },
     /** 之后读这个话题的消息都失败。 */
     failThreadReads(threadId: string) { failingThreads.add(threadId); },

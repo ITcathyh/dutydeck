@@ -1,18 +1,21 @@
-// 场景包的全链路集成测试（场景包设计 9.3 第 1–3 项）。
+// 场景包的全链路集成测试（场景包设计 9.3 第 1–4 项）。
 // 组装见 scenario-pack.test-helpers.ts：真实 DutydeckRuntime（mock driver）+ SQLite + LarkMessageCoordinator + LarkGroupParticipation，
 // 飞书 service 是内存实现，判定器是恒为 silent 的桩。
 // 这些断言要在 P3 把告警移到场景包之后照样成立：判定记录、派发事件、订阅、确认单、卡片关联行、prompt 片段都经 test-helpers 的投影函数比较（第①类结构映射），
 // P3 只改投影函数。记录 id、intro 幂等键、指纹按第②类公式或字面值精确比较。会按设计有意改变的部分（第③类：初筛指令最后一行、
 // 告警原文和上次结论移进不可信材料）只断言改了以后仍成立的内容。
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deciderMetaOf, type CollaborationScenarioSnapshot } from '@dutydeck/shared';
 import { PluginHost } from '../plugins/host.js';
+import { PluginRuntimeHooks } from '../plugins/integration.js';
+import { prepareSkillPrompt } from '../skill-delivery.js';
+import { ReadonlyParticipationDecider } from './readonly-decider.js';
 import { PluginStore } from '../plugins/store.js';
-import { alarmDecisionId, alarmDispatchView, alarmIntroKey, alarmPromptView, cardRecallLineView, confirmCardView, createAlarmHarness, inboxAdoptionView, recallLineView, SCENARIO_BOT, SCENARIO_MEMBER,
+import { alarmDecisionId, alarmDispatchView, alarmIntroKey, alarmPromptView, cardRecallLineView, confirmCardView, createAlarmHarness, inboxAdoptionView, recallLineView, SCENARIO_BOT, SCENARIO_CHAT, SCENARIO_MEMBER,
   SCENARIO_REQUESTER, waitFor, type AlarmHarness, type AlarmHarnessOptions } from './scenario-pack.test-helpers.js';
 
 vi.mock('./open-platform-session.js', () => ({ connectLarkOpenPlatformSession: vi.fn() }));
@@ -343,5 +346,82 @@ describe('告警来源开的话题（告警包 1.1.0 sourceTopics: neutral）', 
     await ask(h, 'om_q_unreadable', '这个要紧吗？要不要扩容', { parentId: 'om_alarm_unreadable', inThread: true });
     expect(await factsOf('om_q_unreadable')).toMatchObject({ rule: 'topic_of_other', facts: { threadClaimedByOther: true, threadClaimEvidence: 'unavailable' } });
     expect(h.decideCalls).toHaveLength(1);
+  });
+});
+
+// ---- 插件 hook 对后台会话（9.3 第 4 项）----
+
+describe('插件 hook 对群协作的后台会话', () => {
+  it('bot 作用域插件对判定、回复生成会话的改写和代为批准都被忽略并记警告；hook 照常收到本机器人的 botAppId', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dutydeck-hook-it-'));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    // 真实安装一个 bot 作用域插件：task.beforeRun 要改写 prompt，permission.request 要代为批准；每次调用把输入记一行。
+    const log = join(dir, 'hook-calls.jsonl');
+    const source = join(dir, 'rewrite-hook');
+    await mkdir(join(source, '.dutydeck-plugin'), { recursive: true });
+    await mkdir(join(source, 'hooks'));
+    await writeFile(join(source, '.dutydeck-plugin', 'plugin.json'), JSON.stringify({ name: 'rewrite-hook', version: '0.1.0' }));
+    await writeFile(join(source, 'hooks', 'record.mjs'), [
+      "import { appendFileSync, readFileSync } from 'node:fs';",
+      'const input = JSON.parse(readFileSync(0, "utf8"));',
+      `appendFileSync(${JSON.stringify(log)}, JSON.stringify(input) + '\\n');`,
+      "process.stdout.write(JSON.stringify(input.event === 'permission.request' ? { decision: 'allow' } : { updatedPrompt: '插件改写的 prompt', additionalContext: '插件追加的上下文' }));"
+    ].join('\n'));
+    const command = [process.execPath, 'hooks/record.mjs'];
+    await writeFile(join(source, 'hooks', 'hooks.json'), JSON.stringify({ 'task.beforeRun': [{ command, timeout: 10_000 }], 'permission.request': [{ command, timeout: 10_000 }] }));
+    const store = new PluginStore(join(dir, 'data'));
+    await store.install(source, { yes: true, scope: `bot:${SCENARIO_BOT.appId}` });
+    const host = await PluginHost.load({ dataDir: join(dir, 'data') });
+    expect(host.diagnostics).toEqual([]);
+
+    // 与 service.ts 相同的接线：prompt 冻结前过 task.beforeRun，待审批的工具调用先过 permission.request。
+    const warn = vi.fn();
+    const hooks = new PluginRuntimeHooks(host.hooks, { warn });
+    let decider!: ReadonlyParticipationDecider;
+    const h = await createAlarmHarness({
+      participation: 'selective',
+      runtimeOptions: {
+        prepareTaskPrompt: async (session, prompt, skills, context) => hooks.beforeRun(session, await prepareSkillPrompt(session.cwd, prompt, skills, { ...context, botAppId: SCENARIO_BOT.appId }), context?.promptPolicyVersion),
+        reviewPermission: (session, request) => hooks.reviewPermission(session, request)
+      },
+      decide: (...args) => decider.decide(...args),
+      respond: (...args) => decider.respond(...args),
+      // 判定会话判 reply（引用触发消息），回复生成会话给一段回复；两类会话都先发一个待审批的工具调用。
+      answer: prompt => prompt.startsWith('你是群参与的只读判定器')
+        ? JSON.stringify({ action: 'reply', reason: '有人在问订单服务 5xx 怎么排查', evidenceIds: [/当前触发观察 id："([^"]+)"/u.exec(prompt)![1]], updates: [] })
+        : JSON.stringify({ response: '先看网关日志。' }),
+      permissionRequest: prompt => ({ id: `perm_${h.prompts.length}`, title: prompt.startsWith('你是群参与的只读判定器') ? '读取判定材料' : '读取回复材料' })
+    });
+    cleanups.push(() => h.close());
+    decider = new ReadonlyParticipationDecider({ runtime: h.runtime, repos: h.repos, workspaceRoot: join(h.cwd, 'participation') });
+
+    await ask(h, 'om_hook', '有人知道订单服务 5xx 怎么排查吗');
+    const [decision] = await decisionsFor(h, 'om_hook');
+    expect(decision).toMatchObject({ action: 'reply', status: 'sent' });
+    expect(callsTo(h, 'replyText', 'om_hook').map(call => (call.input as { text: string }).text)).toEqual(['先看网关日志。']);
+
+    // prompt 没被改写：两类会话收到的都是宿主拼的原 prompt。
+    expect(h.prompts).toHaveLength(2);
+    expect(h.prompts[0]).toMatch(/^你是群参与的只读判定器/u);
+    expect(h.prompts[1]).toMatch(/^你是群回复生成器/u);
+    for (const prompt of h.prompts) { expect(prompt).not.toContain('插件改写的 prompt'); expect(prompt).not.toContain('插件追加的上下文'); }
+    // 批准没生效：driver 没收到任何审批结果，两个请求都留给人工审批。
+    expect(h.permissionResolutions).toEqual([]);
+    const sessions = (await h.runtime.listSessions()).filter(session => session.source === 'lark-decision' || session.source === 'lark-response');
+    expect(sessions.map(session => session.source).sort()).toEqual(['lark-decision', 'lark-response']);
+    const ignored = (source: string, message: string) => [{ sessionId: sessions.find(session => session.source === source)!.id, source, plugins: ['rewrite-hook'] }, message];
+    expect(warn.mock.calls).toEqual(expect.arrayContaining([
+      ignored('lark-decision', '插件对后台会话的改写已忽略'), ignored('lark-decision', '插件对后台会话的批准已忽略'),
+      ignored('lark-response', '插件对后台会话的改写已忽略'), ignored('lark-response', '插件对后台会话的批准已忽略')]));
+    expect(warn).toHaveBeenCalledTimes(4);
+
+    // hook 确实跑了：bot 作用域匹配上本机器人，带着群 id 和会话来源。
+    const calls = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { event: string; plugin: string; botAppId?: string; chatId?: string; sessionId?: string; payload: { source?: string; title?: string } });
+    const sourceOf = (sessionId?: string) => sessions.find(session => session.id === sessionId)?.source;
+    expect(calls.map(call => [call.event, call.plugin, call.botAppId, call.chatId, sourceOf(call.sessionId), call.payload.source ?? call.payload.title])).toEqual([
+      ['task.beforeRun', 'rewrite-hook', SCENARIO_BOT.appId, SCENARIO_CHAT, 'lark-decision', 'lark-decision'],
+      ['permission.request', 'rewrite-hook', SCENARIO_BOT.appId, SCENARIO_CHAT, 'lark-decision', '读取判定材料'],
+      ['task.beforeRun', 'rewrite-hook', SCENARIO_BOT.appId, SCENARIO_CHAT, 'lark-response', 'lark-response'],
+      ['permission.request', 'rewrite-hook', SCENARIO_BOT.appId, SCENARIO_CHAT, 'lark-response', '读取回复材料']]);
   });
 });
