@@ -8,14 +8,18 @@ import { setLarkPluginCommands } from '../lark/plugin-commands.js';
 import { PluginHost } from './host.js';
 import { createTriggerDispatcher, PLUGIN_TRIGGER_SOURCE, PluginRuntimeHooks, sessionHookContext, triggerResultText, type TriggerBot } from './integration.js';
 import type { PluginRouteOptions } from './routes.js';
+import type { ScenarioRegistry } from './scenario-registry.js';
 import { PluginTriggerService } from './triggers.js';
 
 const stderrLog = { warn: (data: Record<string, unknown>, message: string) => process.stderr.write(`[dutydeck] ${message} ${JSON.stringify(data)}\n`) };
 
-/** daemon 启动时加载插件；没有启用的插件时返回 undefined，调用方据此完全不接线。 */
-export async function loadDaemonPlugins(env: NodeJS.ProcessEnv): Promise<PluginHost | undefined> {
-  const host = await PluginHost.load({ dataDir: dirname(resolveDatabaseUrl(env)), log: stderrLog });
-  return host.active.length ? host : undefined;
+/**
+ * daemon 启动时加载插件。场景注册表总是返回（只有内置包时也一样）；host 只在需要接线时返回
+ * （有外部插件，或内置插件带了场景包以外的东西），否则为 undefined，调用方据此完全不接线，任务链路和没有插件时一样。
+ */
+export async function loadDaemonPlugins(env: NodeJS.ProcessEnv, options: { builtinRoot?: string } = {}): Promise<{ host?: PluginHost; scenarios: ScenarioRegistry }> {
+  const host = await PluginHost.load({ dataDir: dirname(resolveDatabaseUrl(env)), log: stderrLog, ...options });
+  return { scenarios: host.scenarios, ...(host.needsWiring ? { host } : {}) };
 }
 
 export interface PluginWiringDeps {

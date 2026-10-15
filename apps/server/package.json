@@ -12,6 +12,7 @@
     "dist/cli.js",
     "dist/agents",
     "dist/assets",
+    "dist/builtin-plugins",
     "public",
     "scripts/fix-node-pty.mjs"
   ],

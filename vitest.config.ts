@@ -35,7 +35,7 @@ export default defineConfig({
           environment: 'node',
           // 注意 apps/** 收窄到 apps/server/**：apps/web 的测试归 web project（jsdom），
           // 否则同一份文件会被两个 project 各跑一遍。
-          include: ['packages/**/*.test.ts', 'apps/server/**/*.test.ts', 'plugins/**/*.test.ts', 'tests/**/*.test.ts'],
+          include: ['packages/**/*.test.ts', 'apps/server/**/*.test.ts', 'plugins/**/*.test.ts', 'builtin-plugins/**/*.test.ts', 'tests/**/*.test.ts'],
           testTimeout: 15_000,
           hookTimeout: 15_000
         }

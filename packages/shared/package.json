@@ -94,7 +94,11 @@
     "src/plugins.ts",
     "dist/plugins.js",
     "dist/plugins.js.map",
-    "dist/plugins.d.ts"
+    "dist/plugins.d.ts",
+    "src/scenarios.ts",
+    "dist/scenarios.js",
+    "dist/scenarios.js.map",
+    "dist/scenarios.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

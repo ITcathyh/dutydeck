@@ -7,6 +7,7 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { LocalFileSecretProvider, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
+import { defaultBuiltinPluginRoot, listBuiltinPlugins } from './builtin.js';
 import { loadPluginDirectory, type LoadedPlugin } from './manifest.js';
 import { parsePluginScope } from './scope.js';
 
@@ -95,7 +96,10 @@ interface Staged { root: string; plugin: LoadedPlugin; resolved: PluginLockEntry
 
 export class PluginStore {
   readonly pluginsDir: string;
-  constructor(readonly dataDir: string) { this.pluginsDir = join(dataDir, 'plugins'); }
+  /** builtinRoot：内置插件目录，外部插件不能和其中的插件同名。 */
+  constructor(readonly dataDir: string, readonly builtinRoot: string = defaultBuiltinPluginRoot()) { this.pluginsDir = join(dataDir, 'plugins'); }
+
+  builtinNames(): Set<string> { return new Set(listBuiltinPlugins(this.builtinRoot).map(item => item.name)); }
 
   pluginDir(name: string) { return join(this.pluginsDir, name); }
   /** 插件自己的可写目录（hook 与 providers 可用来放状态）。 */
@@ -178,6 +182,7 @@ export class PluginStore {
     const staged = await this.stage(source);
     try {
       const name = staged.plugin.manifest.name;
+      if (this.builtinNames().has(name)) throw new PluginStoreError('PLUGIN_NAME_BUILTIN', `插件 ${name} 和内置插件同名，不能安装；请换个名字`);
       if (this.readLock().plugins[name] || existsSync(this.pluginDir(name))) {
         throw new PluginStoreError('PLUGIN_ALREADY_INSTALLED', `插件 ${name} 已安装；更新用 dutydeck plugin update ${name}，或先 uninstall`);
       }
@@ -225,6 +230,7 @@ export class PluginStore {
   }
 
   async uninstall(name: string): Promise<void> {
+    if (!this.readLock().plugins[name] && this.builtinNames().has(name)) throw new PluginStoreError('PLUGIN_BUILTIN', `${name} 是内置插件，随 Dutydeck 发布，不能卸载`);
     this.get(name);
     await rm(this.pluginDir(name), { recursive: true, force: true });
     await rm(this.pluginDataDir(name), { recursive: true, force: true });

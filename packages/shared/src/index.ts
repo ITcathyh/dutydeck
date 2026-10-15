@@ -549,3 +549,4 @@ export * from './memory-jobs.js';
 export * from './session-insight.js';
 export * from './session-insight-repository.js';
 export * from './plugins.js';
+export * from './scenarios.js';

@@ -1,5 +1,6 @@
 import safeRegex from 'safe-regex2';
 import { z } from 'zod';
+import type { ScenarioProvider } from './scenarios.js';
 
 /**
  * Dutydeck 插件契约（v1）：清单、hooks、触发器的 schema，hook 子进程协议，
@@ -29,6 +30,8 @@ export const pluginManifestSchema = z.object({
   triggers: relativePath.optional(),
   hooks: relativePath.optional(),
   providers: relativePath.optional(),
+  /** 场景包目录：每个 `<id>.json` 一个包（见 scenarios.ts）。只有声明式包的插件不需要信任确认。 */
+  scenarios: relativePath.optional(),
   userConfig: z.record(z.string().regex(/^[a-z][a-z0-9_]*$/, '配置键必须是 snake_case'), pluginUserConfigEntrySchema).optional()
 }).strict();
 export type PluginManifest = z.infer<typeof pluginManifestSchema>;
@@ -203,6 +206,8 @@ export interface PluginApi {
   config: Readonly<Record<string, string>>;
   registerCiProvider(provider: CiProvider): void;
   registerHookHandler(event: PluginHookEvent, handler: PluginHookHandler, options?: { timeout?: number; matcher?: string }): void;
+  /** 本插件场景包里引用的 provider；只在信任确认之后加载时调用。 */
+  registerScenarioProvider(provider: ScenarioProvider): void;
 }
 
 const untrustedValueLimit = 20_000;

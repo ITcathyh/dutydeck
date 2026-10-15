@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadPluginDirectory, parseCommandMarkdown, PluginValidationError } from './manifest.js';
+import { directPack, providerPack } from './scenario-fixtures.test-helpers.js';
 
 const examplePlugin = resolve(import.meta.dirname, '../../../../examples/plugins/hello');
 
@@ -99,5 +100,57 @@ describe('loadPluginDirectory', () => {
   it('parses command frontmatter', () => {
     expect(parseCommandMarkdown('---\ndescription: \'说明\'\nargument-hint: <x>\n---\n\nbody\n')).toEqual({ frontmatter: { description: '说明', 'argument-hint': '<x>' }, body: 'body' });
     expect(parseCommandMarkdown('no frontmatter')).toEqual({ frontmatter: {}, body: 'no frontmatter' });
+  });
+});
+
+describe('loadPluginDirectory scenario packs (static stage)', () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'dutydeck-plugin-scenarios-')); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+
+  it('loads declarative packs without any capability to trust', async () => {
+    await writePlugin(root, { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'packs' }), 'scenarios/demo.json': JSON.stringify(directPack('demo')) });
+    const plugin = await loadPluginDirectory(root);
+    expect(plugin.scenarios.map(({ file, pack }) => [file, pack.id])).toEqual([['scenarios/demo.json', 'demo']]);
+    expect(plugin.scenarioIssues).toEqual([]);
+    expect(plugin.capabilities).toEqual([]);
+  });
+
+  it('skips only the broken packs and keeps the rest of the plugin', async () => {
+    const { quota: _quota, ...noQuota } = directPack('no-quota');
+    await writePlugin(root, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'packs', scenarios: 'packs' }),
+      'commands/hi.md': '你好',
+      'packs/demo.json': JSON.stringify(directPack('demo')),
+      'packs/no-quota.json': JSON.stringify(noQuota),
+      'packs/renamed.json': JSON.stringify(directPack('other')),
+      'packs/model.json': JSON.stringify({ ...directPack('model'), mode: 'model', trigger: { senderKinds: ['human'] }, decision: { guidance: '只在被问到时接' }, execution: { instruction: '按规则回答。' }, dedupe: undefined, dedupeWindowHoursParam: undefined, quota: undefined }),
+      'packs/broken.json': '{'
+    });
+    const plugin = await loadPluginDirectory(root);
+    expect(plugin.commands.map(command => command.name)).toEqual(['hi']);
+    expect(plugin.scenarios.map(({ pack }) => pack.id)).toEqual(['demo']);
+    expect(plugin.scenarioIssues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ file: 'packs/no-quota.json', field: 'quota' }),
+      expect.objectContaining({ file: 'packs/renamed.json', field: 'id', message: expect.stringContaining('other.json') }),
+      expect.objectContaining({ file: 'packs/model.json', field: 'mode', message: expect.stringContaining('model') }),
+      expect.objectContaining({ file: 'packs/broken.json', message: expect.stringContaining('JSON') })
+    ]));
+  });
+
+  it('a pack that references a provider needs a providers entry in the manifest', async () => {
+    await writePlugin(root, { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'packs' }), 'scenarios/pick.json': JSON.stringify(providerPack('pick')) });
+    expect((await loadPluginDirectory(root)).scenarioIssues).toEqual([expect.objectContaining({ field: 'trigger.match.provider', message: expect.stringContaining('providers') })]);
+  });
+
+  it('runs phrase examples against the pack regexes in the host worker', async () => {
+    const phrases = { maxLength: 20, enable: [{ source: '(开启|打开)测试' }], disable: [{ source: '关闭测试' }], examples: { enable: ['开启测试', '帮我开一下'], disable: ['关闭测试'] } };
+    await writePlugin(root, { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'packs' }), 'scenarios/demo.json': JSON.stringify(directPack('demo', { phrases })) });
+    expect((await loadPluginDirectory(root)).scenarioIssues).toEqual([expect.objectContaining({ field: 'phrases.examples.enable.1', message: expect.stringContaining('帮我开一下') })]);
+  });
+
+  it('a declared scenarios path that does not exist fails the plugin like other components', async () => {
+    await writePlugin(root, { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'packs', scenarios: 'missing' }) });
+    expect(await issuesOf(root)).toEqual([expect.objectContaining({ field: 'scenarios', message: expect.stringContaining('不存在') })]);
   });
 });

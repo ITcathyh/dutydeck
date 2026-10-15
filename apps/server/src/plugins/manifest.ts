@@ -8,14 +8,18 @@ import {
   pluginManifestSchema,
   pluginTriggerIdPattern,
   pluginTriggerSchema,
+  scenarioProviderRefs,
+  validateScenarioPack,
   type AgentConfig,
   type PluginHooksFile,
   type PluginManifest,
-  type PluginTrigger
+  type PluginTrigger,
+  type ScenarioPack
 } from '@dutydeck/shared';
 import type { ZodError } from 'zod';
 import { larkCommandRegistry } from '../lark/commands.js';
 import { isPathInside } from '../skill-catalog.js';
+import { scenarioRegexRunner } from './scenario-regex.js';
 
 export const PLUGIN_MANIFEST_PATH = '.dutydeck-plugin/plugin.json';
 
@@ -44,9 +48,18 @@ export interface LoadedPlugin {
   triggers: Map<string, PluginTrigger>;
   hooks: PluginHooksFile;
   providersEntry?: string;
+  /** 通过静态校验的场景包；provider 引用要到信任确认之后加载时才解析。 */
+  scenarios: Array<{ file: string; pack: ScenarioPack }>;
+  /** 没通过静态校验的场景包的问题：只跳过那个包，插件其余部分照常加载。 */
+  scenarioIssues: PluginIssue[];
+  /** 不影响加载的提示（例如 safe-regex2 认为可能回溯的正则）。 */
+  scenarioWarnings: PluginIssue[];
   /** 需要安装时确认的能力：agents、hooks:<event>、providers。为空即声明式插件。 */
   capabilities: string[];
 }
+
+/** 当前版本实现了的场景模式；model 模式要到参与判定接上场景之后才开放。 */
+const SUPPORTED_SCENARIO_MODES: ReadonlySet<string> = new Set(['direct']);
 
 /**
  * 飞书与 Web 已占用的命令名。插件命令与它们重名时拒绝；`skills` 是 `/skills <名字>` 前导指令。
@@ -179,11 +192,56 @@ export async function loadPluginDirectory(rootInput: string, options: { reserved
   }
 
   const providersEntry = manifest.providers ? await componentPath(root, realRoot, manifest.providers, manifest.providers, 'providers', 'file', issues) : undefined;
+
+  const scenarios: LoadedPlugin['scenarios'] = [];
+  const scenarioIssues: PluginIssue[] = [];
+  const scenarioWarnings: PluginIssue[] = [];
+  const scenariosDir = await componentPath(root, realRoot, manifest.scenarios, 'scenarios', 'scenarios', 'dir', issues);
+  if (scenariosDir) for (const fileName of await listFiles(scenariosDir, '.json')) {
+    const file = `${manifest.scenarios ?? 'scenarios'}/${fileName}`;
+    const packIssues: PluginIssue[] = [];
+    const raw = await readJson(join(scenariosDir, fileName), file, packIssues);
+    const checked = raw === undefined ? undefined : validateScenarioPack(raw);
+    if (checked) {
+      packIssues.push(...checked.issues.map(issue => ({ file, ...issue })));
+      scenarioWarnings.push(...checked.warnings.map(issue => ({ file, ...issue })));
+    }
+    const pack = checked?.pack;
+    if (pack) {
+      if (basename(fileName, '.json') !== pack.id) packIssues.push({ file, field: 'id', message: `文件名应当是 ${pack.id}.json` });
+      if (scenarios.some(item => item.pack.id === pack.id)) packIssues.push({ file, field: 'id', message: `场景包 ${pack.id} 重复` });
+      if (!SUPPORTED_SCENARIO_MODES.has(pack.mode)) packIssues.push({ file, field: 'mode', message: `当前版本还不支持 ${pack.mode} 模式的场景包，这个包不会加载` });
+      if (!manifest.providers) for (const ref of scenarioProviderRefs(pack)) packIssues.push({ file, field: ref.field, message: `引用了 provider ${ref.id}，但清单没有声明 providers 入口` });
+      packIssues.push(...await phraseExampleIssues(pack, file));
+    }
+    if (packIssues.length || !pack) scenarioIssues.push(...packIssues);
+    else scenarios.push({ file, pack });
+  }
+
   if (issues.length) throw new PluginValidationError(root, issues);
   return {
-    root, manifest, commands, agents, triggers, hooks,
+    root, manifest, commands, agents, triggers, hooks, scenarios, scenarioIssues, scenarioWarnings,
     ...(skillsDir ? { skillsDir } : {}),
     ...(providersEntry ? { providersEntry } : {}),
     capabilities: pluginCapabilities(hooks, providersEntry, agents)
   };
+}
+
+/** 短语示例要能被包里的正则匹配：在宿主的隔离线程里跑，执行的是包里的正则，不是插件代码。 */
+async function phraseExampleIssues(pack: ScenarioPack, file: string): Promise<PluginIssue[]> {
+  const phrases = pack.phrases;
+  if (!phrases) return [];
+  const cases = (['enable', 'disable'] as const).flatMap(kind => phrases.examples[kind].map((example, index) => ({ kind, example, index })));
+  try {
+    const results = await scenarioRegexRunner().run(cases.flatMap(({ kind, example }) => phrases[kind].map(regex => ({ ...regex, input: example, maxInput: phrases.maxLength }))));
+    let offset = 0;
+    return cases.flatMap(({ kind, example, index }) => {
+      const count = phrases[kind].length;
+      const matched = results.slice(offset, offset + count).some(result => result.matched);
+      offset += count;
+      return matched ? [] : [{ file, field: `phrases.examples.${kind}.${index}`, message: `示例「${example}」没有被 phrases.${kind} 里的任何正则匹配` }];
+    });
+  } catch (error) {
+    return [{ file, field: 'phrases', message: `示例检查失败：${error instanceof Error ? error.message : String(error)}` }];
+  }
 }
