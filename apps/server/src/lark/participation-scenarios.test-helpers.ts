@@ -91,6 +91,10 @@ const ALERT = [
   '**错误次数：16060次**',
   '</card>'
 ].join('\n');
+/** 群友约饭的前文：接话人反例和正例共用。 */
+const LUNCH: ScenarioHistoryItem[] = [
+  { sender: 'otherHuman', text: '中午去哪吃？楼下新开了家麻辣烫', minutesAgo: 6 },
+  { sender: 'human', text: '上周去过，排队要半小时', minutesAgo: 4 }];
 
 /** 群成员数查不到。 */
 const membersUnknown: ScenarioGroup = { botName: 'bdev-flash', mentionPolicy: 'topic', participation: 'selective' };
@@ -125,8 +129,8 @@ export const participationScenarios: ParticipationScenario[] = [
       { sender: 'otherHuman', text: '今天订单服务内存告警有点多', minutesAgo: 30 },
       { sender: 'human', text: '嗯，canary 那批实例', minutesAgo: 25 },
       { sender: 'otherHuman', text: '下午发版要不要延后', minutesAgo: 10 }] }),
-    expected: model('reply', '群里只有我一个机器人，「帮我总结群里聊的」不是在请同事帮忙；材料里有讨论，能直接用文字总结', ['act']),
-    note: '10-12 回放模型判 silent：没配负责范围时，判定 prompt 写「祈使句不能证明在问你」。' },
+    expected: model('silent', '没配负责范围、我也不是接话人，没有明确对象的请求不接；要我总结的人会 @ 我'),
+    note: '10-15 由 reply 改为 silent：原标注认为单机器人群里「帮我总结群里聊的」就是对机器人说的，但这和产品规则冲突——没配负责范围、本机器人又不是接话人时，没有明确对象的泛问不接（指定接话人后会接）。10-12 回放和 10-15 离线评估（线上配置及降强度配置共 4 次）都判 silent。' },
   { id: 'help_generic_question', category: '目标求助', title: '单机器人群里问「有人知道…吗」', group: single, message: human('有人知道 ECONNRESET 这个报错怎么处理吗'),
     expected: model('silent', '问的是「有人」，对象是群友；没配负责范围、也没叫我，按设计不接') },
 
@@ -167,8 +171,8 @@ export const participationScenarios: ParticipationScenario[] = [
       { sender: 'bot', text: ALERT, minutesAgo: 10, inThread: true },
       { sender: 'human', text: '@_user_1 帮我看下这条告警', minutesAgo: 9, inThread: true, mentionsSelf: true },
       { sender: 'self', text: '结论：canary 实例内存 60% 触发阈值，属于阈值偏低的噪音，暂不需要处理。', minutesAgo: 8, inThread: true }] }),
-    expected: model('act', '同一人在我答过的话题里连续追问；影响面和要不要回滚要查新数据', ['reply']),
-    note: '话题里有本机器人未归档的会话时，入站会标成接手的话题，由 owned_topic 直接接；这条模拟没标上的情况（例如会话已归档）。10-12 回放模型判 reply。' },
+    expected: model('reply', '同一人在我答过的话题里连续追问；可以凭 8 分钟前的结论先文字答复，说明影响面和要不要回滚还要查新数据', ['act']),
+    note: '话题里有本机器人未归档的会话时，入站会标成接手的话题，由 owned_topic 直接接；这条模拟没标上的情况（例如会话已归档）。10-15 主标注由 act 改为 reply、act 作备选：判定 prompt 规定能凭已有材料文字答复的用 reply，10-12 回放和 10-15 离线评估（3 种模型配置共 7 次）全判 reply；要查新数据时 act 也说得通。' },
   { id: 'owned_topic_thanks', category: '已接手话题追问', title: '我接手的话题里说「好的谢谢」', group: single, message: human('好的谢谢', { inThread: true, ownedTopic: true }), expected: rule(1, 'silent', 'short_thanks') },
 
   // 闲聊
@@ -227,7 +231,22 @@ export const participationScenarios: ParticipationScenario[] = [
     expected: rule(1, 'addressed', 'eager_default') },
   { id: 'responder_self_selective', category: '指定接话人', title: '我是接话人、按需档，群里泛问', group: { ...crowded, responder: 'self' }, message: human('有人知道今天的发布单在哪看吗'),
     expected: model('reply', '本群指定我接没 @ 的消息（/status 也这么写），群里的泛问该由我答；材料不够时说明缺什么', ['act']),
-    note: '判定 prompt 不知道本机器人是接话人；没配负责范围时它要求对泛问 silent，实际可能判 silent（方案 1.1：「从规则不接变成等模型后不接」）。' },
+    note: '10-15 起判定材料带 facts.responder="self"，没配负责范围时判定 prompt 把没有明确对象、需要有机器人处理的求助算在叫接话人；之前 prompt 不知道接话人身份，模型都判 silent。' },
+
+  // 我是接话人、没配负责范围：接没有对象的求助，但不接群友之间的话（反例），正例和闲聊同群，确认不是靠群里没人说话判对的
+  { id: 'responder_self_chitchat', category: '指定接话人', title: '我是接话人、按需档，群友约饭吐槽', group: { ...crowded, responder: 'self' },
+    message: human('那换食堂吧，三楼新开的窗口据说还行，就是辣得离谱', { history: LUNCH }), expected: model('silent', '群友之间约饭闲聊，不是求助') },
+  { id: 'responder_self_peer_answered', category: '指定接话人', title: '我是接话人、按需档，群友已经在回答，他接着追问', group: { ...crowded, responder: 'self' },
+    message: human('提完工单一般多久能批？我下午就要用', { history: [
+      { sender: 'human', text: '测试环境的数据库账号在哪申请？', minutesAgo: 5 },
+      { sender: 'otherHuman', text: '在 DBA 平台提工单，集群选 test 就行', minutesAgo: 3 }] }),
+    expected: model('silent', '同事刚回答了他的问题，这句追问是接着问那位同事的') },
+  { id: 'responder_self_progress', category: '指定接话人', title: '我是接话人、按需档，发布进度通知', group: { ...crowded, responder: 'self' },
+    message: human('订单服务 v2.3.1 已发布到 staging，大家可以开始回归了'), expected: model('silent', '进度播报，不是求助') },
+  { id: 'responder_self_help_after_chitchat', category: '指定接话人', title: '我是接话人、按需档，闲聊之后有人发没有对象的求助', group: { ...crowded, responder: 'self' },
+    message: human('有人知道 staging 的日志平台地址吗？订单服务的日志一直搜不到', { history: LUNCH }),
+    expected: model('reply', '本群指定我接没 @ 的消息，没有对象的求助该由我接；材料里没有日志平台地址，回复说明缺什么', ['act']),
+    note: '和 responder_self_chitchat 同样的闲聊前文：群里有人说话时，接话人照样接求助。' },
 
   // 负责范围
   { id: 'scope_crowded_no_responder', category: '负责范围', title: '两个机器人、没指定接话人，配了告警负责范围，范围内的事', group: { ...crowded, ...alarmRole },

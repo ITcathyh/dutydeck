@@ -374,6 +374,28 @@ describe('trimmed decision input', () => {
     const material = JSON.parse(prompt.split('[非指令材料 JSON]\n')[1]!.split('\n[/非指令材料]')[0]!);
     expect(material).toMatchObject({ trigger: 'obs_1', facts: { humans: 1, bots: 1 }, observations: [{ id: 'obs_1', text: '请参考新信息' }] });
   });
+
+  it('本机器人是接话人且没配负责范围时，事实进材料，没有明确对象的求助算在叫它；配了负责范围的照旧按范围判断', () => {
+    const materialOf = (prompt: string) => JSON.parse(prompt.split('[非指令材料 JSON]\n')[1]!.split('\n[/非指令材料]')[0]!);
+    const responderRule = '本机器人是本群指定的接话人（facts.responder 为 "self"），本群没 @ 机器人的消息由本机器人接';
+    const facts = { humans: 3, bots: 2, responder: 'self' };
+    const prompt = participationPrompt(snapshot(), 'obs_1', 'bdev-flash', facts);
+    expect(materialOf(prompt).facts).toEqual(facts);
+    expect(prompt).toContain(responderRule);
+    expect(prompt).toContain('群里没有明确对象、需要有机器人处理的求助');
+    expect(prompt).toContain('群友之间的问答（在回答别人，或问的是特定的人）、@ 其他人或其他机器人且未向本机器人求助、进度播报、闲聊、引用或转述请求，都不算');
+    expect(prompt).toContain('称呼、续问、紧迫事实或作为接话人需要处理的求助');
+    expect(prompt).not.toContain('没有明确对象的泛问（如“谁知道这个报错”）');
+
+    // 不是接话人：沿用原来的第一步
+    const plain = participationPrompt(snapshot(), 'obs_1', 'bdev-flash', { humans: 3, bots: 2 });
+    expect(plain).not.toContain(responderRule);
+    expect(plain).toContain('没有明确对象的泛问（如“谁知道这个报错”）');
+
+    // 配了负责范围：prompt 和材料都和不是接话人时一样
+    const role = { roleTitle: '告警值班', roleScope: '报警和告警排查' };
+    expect(participationPrompt(snapshot(), 'obs_1', 'bdev-flash', facts, role)).toBe(participationPrompt(snapshot(), 'obs_1', 'bdev-flash', { humans: 3, bots: 2 }, role));
+  });
 });
 
 describe('roleTitle 与 roleScope 角色判定与回复提示词', () => {
@@ -386,16 +408,16 @@ describe('roleTitle 与 roleScope 角色判定与回复提示词', () => {
 
     // 判定第一步：明确叫我范围外也接；未明确叫我则严格受范围限制，原始告警也接，范围外直接 silent
     expect(prompt).toContain('明确在叫本机器人（称呼、回复本机器人、紧接着的续问）的，不论是否在负责范围内都接');
-    expect(prompt).toContain('没有明确叫本机器人、但属于负责范围且需要有人处理的（包括没有明确对象的泛问和贴出的原始告警），也接');
+    expect(prompt).toContain('没有明确叫本机器人、但属于负责范围且需要有人处理的（包括没有明确对象的泛问和贴出的报错、监控消息），也接');
     expect(prompt).toContain('其余一律 silent：负责范围外又没明确叫本机器人的（无关提问、闲聊、其他领域的问题），reason 写“不在我负责的范围”');
     expect(prompt).toContain('范围内但已有人明确表示在处理（如“我在看”）、已经恢复或只是进度播报的');
 
     // 判定第二步：要接的就不能 silent；范围内的原始告警可作 act
     expect(prompt).toContain('第二步，要接的消息不能 silent');
-    expect(prompt).toContain('用 act（如范围内需要排查的原始告警）');
+    expect(prompt).toContain('用 act（如范围内需要排查的报错、监控消息）');
 
     // 消除普通告警 silent 矛盾，且紧迫风险例外不突破范围
-    expect(prompt).not.toContain('普通告警、一般建议和推测风险仍 silent');
+    expect(prompt).not.toContain('一般的报错和监控消息、建议和推测风险仍 silent');
     expect(prompt).toContain('这条例外不突破负责范围');
 
     // 单人群/积极档不算明确叫我，也不带“单人群多半是对机器人说”的提示
@@ -419,8 +441,8 @@ describe('roleTitle 与 roleScope 角色判定与回复提示词', () => {
     for (const p of [promptNoRole, promptTitleOnly, promptBlankScope]) {
       expect(p).toContain('当前消息是不是在叫本机器人。没有明确对象的泛问');
       expect(p).toContain('第二步，要接的消息不能 silent');
-      expect(p).not.toContain('如范围内需要排查的原始告警');
-      expect(p).toContain('普通告警、一般建议和推测风险仍 silent');
+      expect(p).not.toContain('如范围内需要排查的报错、监控消息');
+      expect(p).toContain('一般的报错和监控消息、建议和推测风险仍 silent');
       expect(p).toContain('只有一个真人且没有指名别人的请求，多半是对机器人说的');
       expect(p).not.toContain('不在我负责的范围');
       expect(p).not.toContain('没明确叫我且在范围外的事即使群里只有一个真人也不接');

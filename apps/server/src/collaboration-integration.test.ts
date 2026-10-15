@@ -837,7 +837,7 @@ it('replays model and rule decisions with frozen snapshot role and never inherit
   expect(prompt2).not.toContain('[宿主管理者规则 · 角色定位]');
   expect(prompt2).not.toContain('当前新角色');
   expect(prompt2).not.toContain('当前新负责范围');
-  expect(prompt2).toContain('普通告警、一般建议和推测风险仍 silent');
+  expect(prompt2).toContain('一般的报错和监控消息、建议和推测风险仍 silent');
   f.calls[1]!.finish(JSON.stringify({ action: 'reply', reason: '明确叫我', evidenceIds: ['obs_trigger'] }));
   const res2 = await replayNoRolePromise;
   expect(res2.passed).toBe(1);
@@ -868,6 +868,37 @@ it('replays model and rule decisions with frozen snapshot role and never inherit
   expect(resRule.passed).toBe(1);
   // 没有触发新的模型调用（依然停在 calls.length === 2）
   expect(f.calls).toHaveLength(2);
+
+  // 4. 记录里本机器人是接话人、没配负责范围：回放按记录的事实带上接话人规则，不读当前的接话人设置（现在是别的机器人）
+  await f.repos.collaboration.updateDuty(scope, { expectedRevision: (await f.repos.collaboration.getDuty(scope)).revision,
+    responder: { appId: 'cli_other_bot', name: '别的机器人', since: '2026-09-18T11:00:00.000Z' } }, 'owner');
+  const decResponder = {
+    id: 'dec_responder_self',
+    scope,
+    contextRevision: 1,
+    policyVersion: 'v1',
+    action: 'reply' as const,
+    reason: '接话人接没有对象的求助',
+    evidenceIds: ['obs_trigger'],
+    status: 'sent' as const,
+    inputSnapshot: {
+      ...baseSnapshot,
+      decider: {
+        kind: 'model',
+        trigger: { id: 'obs_trigger', text: '【告警】线上服务异常排查' },
+        facts: { humans: 3, bots: 2, level: 'selective', responder: 'self' }
+      }
+    },
+    createdAt: '2026-09-18T10:00:00.000Z'
+  };
+  await f.repos.collaboration.recordDecision(decResponder);
+  const replayResponderPromise = f.collaboration.evaluation.replay(scope, { decisionIds: ['dec_responder_self'] });
+  await eventually(async () => f.calls.length === 3);
+  const prompt3 = f.calls[2]!.prompt;
+  expect(prompt3).toContain('本机器人是本群指定的接话人（facts.responder 为 "self"），本群没 @ 机器人的消息由本机器人接');
+  expect(prompt3).toContain('"facts":{"humans":3,"bots":2,"responder":"self"}');
+  f.calls[2]!.finish(JSON.stringify({ action: 'reply', reason: '接话人接没有对象的求助', evidenceIds: ['obs_trigger'] }));
+  expect((await replayResponderPromise).passed).toBe(1);
 });
 
 describe('CollaborationBackground - Bot role in scheduled execution', () => {

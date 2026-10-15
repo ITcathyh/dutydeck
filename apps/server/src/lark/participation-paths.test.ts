@@ -134,6 +134,18 @@ describe('机器人计数排除本群订阅的告警来源', () => {
   });
 });
 
+describe('本机器人是接话人', () => {
+  it('多机器人群里规则拿不准时交给模型，接话人事实随群成员数一起进判定；/status 说没 @ 的消息由我接', async () => {
+    const h = await harness();
+    Object.assign(h.service, { listChatMembers: members(3, [flash, self]) });
+    await h.repository.updateDuty(scope, { expectedRevision: 0, responder: { appId: scope.appId, name: 'Bot', since: '2026-10-15T00:00:00.000Z' } }, 'owner');
+    await h.handle(message('om_1', '有人知道今天的发布单在哪看吗'));
+    await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledExactlyOnceWith(config, expect.anything(), expect.any(String), { humans: 3, bots: 2, responder: 'self' });
+    expect(await h.participation.describe(scope)).toContain('**接话人**：我，本群没 @ 机器人的消息由我接');
+  });
+});
+
 describe('没接话时说明原因和怎么配', () => {
   const scopeHint = '也可以在 Dutydeck Web「机器人管理」的「负责范围」里写清我负责的事，范围内没 @ 的消息我会判断后接。';
   const why = async (h: Awaited<ReturnType<typeof harness>>) => {

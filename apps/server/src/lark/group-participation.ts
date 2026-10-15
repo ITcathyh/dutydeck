@@ -95,9 +95,11 @@ const triggerMeta = (trigger: CollaborationObservation): NonNullable<Collaborati
 /** 存进判定记录的事实去掉未填项（JSON 本来也不存 undefined）。 */
 const compactFacts = (facts: RuleFacts): Record<string, string | number | boolean> =>
   Object.fromEntries(Object.entries(facts).filter((entry): entry is [string, string | number | boolean] => entry[1] !== undefined));
-/** 交给模型的事实只给群成员数，其余规则事实只用于规则和回放。 */
-export const memberFacts = (facts: Partial<RuleFacts>): ParticipationFacts | undefined =>
-  facts.humans === undefined ? undefined : { humans: facts.humans, bots: facts.bots ?? 0 };
+/** 交给模型的事实只给群成员数和「本机器人是本群接话人」，其余规则事实只用于规则和回放。 */
+export const memberFacts = (facts: Partial<RuleFacts>): ParticipationFacts | undefined => {
+  const result: ParticipationFacts = { ...(facts.humans === undefined ? {} : { humans: facts.humans, bots: facts.bots ?? 0 }), ...(facts.responder === 'self' ? { responder: 'self' } : {}) };
+  return Object.keys(result).length ? result : undefined;
+};
 
 /** 判定针对的那条人类消息；旧记录没有来源说明时，按快照里最后一条实时人类消息找回。 */
 export function decisionTrigger(decision: Pick<CollaborationDecision, 'inputSnapshot'>): CollaborationDeciderMeta['trigger'] {
