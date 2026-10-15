@@ -35,13 +35,18 @@ export function traexDisplayCompletions(payload: any, threadId?: string): any[] 
     c?.turn_id === payload.turn_id && typeof c.thread_id === 'string' && c.thread_id && (!threadId || c.thread_id === threadId));
 }
 
+export function traexUserText(item: any): string | undefined {
+  if (item?.type !== 'UserMessage' || (item.role !== undefined && item.role !== 'user')) return undefined;
+  const text = contentText(item.content ?? item.text, ['text', 'Text', 'output_text', 'input_text']);
+  return text === '' ? undefined : text;
+}
+
 /** Canonical model items are not user receipts; only thread/turn-validated
  * display UserMessages can acknowledge input or carry the session marker. */
 export function traexInputText(entry: any, threadId?: string): string | undefined {
   if (entry?.type !== 'history_mutation') return codexInputText(entry);
   for (const completion of traexDisplayCompletions(entry.payload, threadId)) {
-    if (completion.item?.type !== 'UserMessage') continue;
-    const text = contentText(completion.item.content ?? completion.item.text, ['text', 'Text', 'output_text', 'input_text']);
+    const text = traexUserText(completion.item);
     if (text !== undefined) return text;
   }
   return undefined;

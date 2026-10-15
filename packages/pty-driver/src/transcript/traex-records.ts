@@ -1,6 +1,6 @@
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { mapCodexEntry } from './codex.js';
-import { traexDisplayCompletions } from './input-receipt.js';
+import { traexDisplayCompletions, traexUserText } from './input-receipt.js';
 
 function text(value: any): string {
   if (typeof value === 'string') return value;
@@ -29,7 +29,17 @@ export function traexEntries(entry: any, threadId?: string): any[] {
       ...(['function_call_output', 'custom_tool_call_output'].includes(item?.type) && Array.isArray(item.output) ? { output: text(item.output) } : {}) } });
   }
   for (const item of reasoning.values()) addReasoning(item);
-  for (const c of completions) if (c.item?.type !== 'Reasoning') entries.push({ ...entry, type: 'event_msg', payload: { type: 'item_completed', turn_id: p.turn_id, item: c.item } });
+  for (const c of completions) {
+    let item = c.item;
+    if (item?.type === 'Reasoning') continue;
+    if (item?.type === 'UserMessage') {
+      const input = traexUserText(item);
+      if (input === undefined) continue;
+      // Receipt matching and NativeTurn must see the same validated body.
+      item = { ...item, content: input };
+    }
+    entries.push({ ...entry, type: 'event_msg', payload: { type: 'item_completed', turn_id: p.turn_id, item } });
+  }
   return entries;
 }
 
