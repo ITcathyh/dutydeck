@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -332,5 +332,58 @@ setTimeout(() => {
     const res2 = await discoverAgentModels(noProbeAgent);
     expect(res2.models).toEqual([]);
     expect(res2.defaultModel).toBe('configured-fallback');
+  });
+});
+
+describe('CLI model discovery uses the configured launch boundary', () => {
+  let root: string;
+  let hostMarker: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'dutydeck-model-account-'));
+    hostMarker = join(root, 'host-called');
+    const hostBin = join(root, 'host-bin'); mkdirSync(hostBin);
+    writeFileSync(join(hostBin, 'opencode'), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(hostMarker)}, 'called'); console.log('host/model');\n`, { mode: 0o755 });
+    vi.stubEnv('PATH', `${hostBin}:${process.env.PATH ?? ''}`);
+    vi.stubEnv('ANTHROPIC_API_KEY', 'ambient-vendor-secret');
+    vi.stubEnv('DUTYDECK_RELAY_TOKEN', 'ambient-relay-secret');
+    vi.stubEnv('LARK_APP_SECRET', 'ambient-lark-secret');
+    clearAgentModelsCacheForTesting();
+  });
+  afterEach(() => { vi.unstubAllEnvs(); clearAgentModelsCacheForTesting(); rmSync(root, { recursive: true, force: true }); });
+
+  const configured = (label: string) => {
+    const bin = join(root, `account ${label} bin`); mkdirSync(bin);
+    const cwd = join(root, `project ${label}`); mkdirSync(cwd);
+    writeFileSync(join(cwd, 'profile.txt'), `project-${label}`);
+    const command = join(bin, 'opencode');
+    writeFileSync(command, `#!${process.execPath}
+const fs = require('node:fs');
+if (process.env.DUTYDECK_RELAY_TOKEN || process.env.LARK_APP_SECRET || process.env.HERDR_API_TOKEN || process.env.ANTHROPIC_API_KEY) { console.log('leaked/ambient'); process.exit(0); }
+if (process.argv.slice(2).join(',') !== '--profile,${label},models') process.exit(1);
+console.log(['binary-${label}', process.env.MODEL_ACCOUNT, fs.readFileSync('profile.txt', 'utf8'), process.env.ANTHROPIC_BASE_URL, process.env.HOME].join('/'));
+`, { mode: 0o755 });
+    return agentConfigSchema.parse({ id: 'opencode', name: 'OpenCode', command, args: ['--profile', label], protocol: 'pty-cli', cwd,
+      env: { MODEL_ACCOUNT: `account-${label}`, ANTHROPIC_BASE_URL: `endpoint-${label}`, HOME: `home-${label}`, HERDR_API_TOKEN: 'must-be-removed' } });
+  };
+
+  it('isolates same-id accounts by executable path, arguments, environment and cwd without changing the parent env', async () => {
+    for (const label of ['a', 'b']) {
+      const agent = configured(label);
+      const expected = `binary-${label}/account-${label}/project-${label}/endpoint-${label}/home-${label}`;
+      const result = await discoverAgentModels(agent);
+      expect(result).toMatchObject({ models: [{ id: expected, name: expected }], source: 'cli' });
+      expect(await discoverAgentModels(agent)).toEqual(result);
+    }
+    expect(existsSync(hostMarker)).toBe(false);
+    expect(process.env.ANTHROPIC_API_KEY).toBe('ambient-vendor-secret');
+    expect(process.env.DUTYDECK_RELAY_TOKEN).toBe('ambient-relay-secret');
+  });
+
+  it('does not execute a shell wrapper or substitute the daemon host CLI for its metadata', async () => {
+    const marker = join(root, 'wrapper-called');
+    const agent = agentConfigSchema.parse({ id: 'opencode', name: 'Wrapped OpenCode', command: '/bin/sh',
+      args: ['-c', `touch '${marker}'`], protocol: 'pty-cli', model: 'configured-model' });
+    expect(await discoverAgentModels(agent, undefined, true)).toEqual({ models: [], defaultModel: 'configured-model', reasoningEfforts: [], source: 'agent' });
+    expect(existsSync(marker)).toBe(false); expect(existsSync(hostMarker)).toBe(false);
   });
 });

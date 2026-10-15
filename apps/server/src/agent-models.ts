@@ -2,7 +2,8 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
+import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { promisify } from 'node:util';
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpRuntime, type AcpRuntimeEnsureInput, type AcpRuntimeHandle, type AcpRuntimeStatus } from 'acpx/runtime';
 import { acpxPermissionMode, prepareAcpxAgentLaunch } from '@dutydeck/acp-client';
@@ -95,7 +96,7 @@ async function discoverThroughAcp(agent: AgentConfig, model?: string): Promise<A
     agentRegistry: createAgentRegistry({ overrides: { [agent.id]: launch.command } }),
     permissionMode: acpxPermissionMode(agent.permissionMode),
     nonInteractivePermissions: 'fail',
-    timeoutMs: Math.min(agent.timeout * 1000, ACP_MODEL_PROBE_TIMEOUT_MS)
+    timeoutMs: Math.min(Math.round(agent.timeout * 1000), ACP_MODEL_PROBE_TIMEOUT_MS)
   });
   try {
     return await probeModelsThroughAcpRuntime(runtime, { sessionKey, agent: agent.id, mode: 'oneshot', cwd: agent.cwd ?? process.cwd(), sessionOptions: { ...launch.sessionOptions, ...(model ? { model } : {}) } });
@@ -105,10 +106,15 @@ async function discoverThroughAcp(agent: AgentConfig, model?: string): Promise<A
   }
 }
 
-async function discoverThroughCli(agentId: string): Promise<AgentModel[]> {
-  const definition = cliCommands[agentId];
-  if (!definition) return [];
-  const { stdout } = await run(definition.command, definition.args, { timeout: 15_000, maxBuffer: 2 * 1024 * 1024 });
+async function discoverThroughCli(agent: AgentConfig): Promise<AgentModel[]> {
+  const definition = cliCommands[agent.id];
+  // 只对已知 CLI 的直接可执行程序追加只读参数；不执行 shell/启动器，也不换成宿主默认命令。
+  if (!definition || basename(agent.command) !== definition.command) return [];
+  const { stdout } = await run(agent.command, [...agent.args, ...definition.args], {
+    cwd: agent.cwd ?? process.cwd(),
+    env: childEnvironment(process.env, agent.env, { stripClaude: agent.protocol === 'pty-cli' }),
+    timeout: 15_000, maxBuffer: 2 * 1024 * 1024
+  });
   return definition.parse(stdout);
 }
 
@@ -170,7 +176,7 @@ export async function discoverAgentModels(agent: AgentConfig, model?: string, fo
       }
       if (!value?.models.length) {
         try {
-          const models = await discoverThroughCli(agent.id);
+          const models = await discoverThroughCli(agent);
           if (models.length) {
             value = { models, ...(agent.model ? { defaultModel: agent.model } : {}), reasoningEfforts: [], source: 'cli' };
           }

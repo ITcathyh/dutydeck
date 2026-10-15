@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { agentConfigSchema } from '@dutydeck/shared';
-import { agentProbeTarget, builtinAgents, describeDroppedAgent, loadConfig, loadConfigWithDiagnostics } from './index.js';
+import { agentProbeTarget, appConfigSchema, builtinAgents, describeDroppedAgent, loadConfig, loadConfigWithDiagnostics } from './index.js';
 
 describe('working directory configuration', () => {
   it('uses the server process cwd when no default is specified', () => {
@@ -134,5 +134,25 @@ describe('plugin agents', () => {
     const config = loadConfig({}, [{ id: 'pty-tool', name: 'PTY tool', command: 'node' }], [pluginAgent('pty-tool', 'Hijacked'), pluginAgent('claude', 'Hijacked')]);
     expect(config.agents.find(agent => agent.id === 'pty-tool')?.name).toBe('PTY tool');
     expect(config.agents.find(agent => agent.id === 'claude')?.name).not.toBe('Hijacked');
+  });
+});
+
+describe('Node timer configuration bounds', () => {
+  it.each([0, -1, 0.5, 2_147_483_648, NaN, Infinity])('rejects cleanupIntervalMs=%s before timer registration', cleanupIntervalMs => {
+    expect(appConfigSchema.safeParse({ cleanupIntervalMs }).success).toBe(false);
+  });
+
+  it.each([1, 300_000, 2_147_483_647])('keeps the exact Node interval for cleanupIntervalMs=%s', cleanupIntervalMs => {
+    const value = appConfigSchema.parse({ cleanupIntervalMs }).cleanupIntervalMs;
+    const timer = setInterval(() => {}, value);
+    try { expect((timer as unknown as { _idleTimeout: number })._idleTimeout).toBe(value); }
+    finally { clearInterval(timer); }
+  });
+
+  it('preserves disabled driver idle cleanup and comparison thresholds above timer range', () => {
+    expect(appConfigSchema.parse({ driverIdleTimeoutMs: 0 }).driverIdleTimeoutMs).toBe(0);
+    expect(appConfigSchema.parse({ driverIdleTimeoutMs: 4_000_000_000 }).driverIdleTimeoutMs).toBe(4_000_000_000);
+    expect(() => loadConfig({ DUTYDECK_CLEANUP_INTERVAL_MS: '0.5' })).toThrow();
+    expect(() => loadConfig({ DUTYDECK_CLEANUP_INTERVAL_MS: '2147483648' })).toThrow();
   });
 });

@@ -339,7 +339,7 @@ export class JsonlTransport implements AgentDriver {
 
       // 设置超时计时器（AgentConfig.timeout，单位秒）
       if (this.agent.timeout && this.agent.timeout > 0) {
-        const timeoutMs = this.agent.timeout * 1000;
+        const timeoutMs = Math.round(this.agent.timeout * 1000);
         turn.timer = setTimeout(() => {
           if (turn.settled || this.activeTurn !== turn) return;
           // 先关闭旧轮向 Runtime 的事件投递，再拒绝 Promise

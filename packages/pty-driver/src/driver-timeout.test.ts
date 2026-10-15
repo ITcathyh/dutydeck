@@ -11,7 +11,7 @@ afterEach(async () => {
   for (const driver of drivers.splice(0)) await driver.stop();
   vi.restoreAllMocks(); vi.useRealTimers();
 });
-async function fixture(options: { awaitingAnswer?: () => boolean; writeInput?: CliAdapter['writeInput']; write?: SessionBackend['write'] } = {}) {
+async function fixture(options: { awaitingAnswer?: () => boolean; writeInput?: CliAdapter['writeInput']; write?: SessionBackend['write']; timeout?: number } = {}) {
   let output!: (data: string) => void;
   const killed = vi.fn(), events: NormalizedDriverEvent[] = [];
   const backend: SessionBackend = {
@@ -20,7 +20,7 @@ async function fixture(options: { awaitingAnswer?: () => boolean; writeInput?: C
   };
   const driver = new PtyCliDriver({
     agent: { id: 'fixture', name: 'Fixture', command: 'unused', args: [], env: {}, protocol: 'pty-cli',
-      permissionMode: 'full-trust', timeout: 1, builtin: false, capabilities: { pause: false, resume: false } },
+      permissionMode: 'full-trust', timeout: options.timeout ?? 1, builtin: false, capabilities: { pause: false, resume: false } },
     adapter: { id: 'fixture', capabilities: {}, buildArgs: () => [], writeInput: options.writeInput ?? (() => {}) },
     backend, awaitingAnswer: options.awaitingAnswer, sessionId: 'fixture', onEvent: event => events.push(event), onExit() {},
   });
@@ -36,6 +36,14 @@ async function send(driver: PtyCliDriver) {
 }
 
 describe('PTY verified inactivity deadline', () => {
+  it.each([0.001, 1.001, 2.003, 2_147_483.647])('passes exact integer milliseconds to the human-wait timer (%s seconds)', async timeout => {
+    const f = await fixture({ timeout, awaitingAnswer: () => true });
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    await send(f.driver);
+    const delays = timers.mock.calls.map(call => call[1]).filter((value): value is number => typeof value === 'number' && value > 0);
+    expect(delays).toContain(Math.round(timeout * 1000));
+    expect(delays.every(Number.isInteger)).toBe(true);
+  });
   it('rejects an inert turn with recovery evidence, without killing or completing it', async () => {
     const f = await fixture(), turn = await send(f.driver);
     await vi.advanceTimersByTimeAsync(1001);

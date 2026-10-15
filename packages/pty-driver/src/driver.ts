@@ -1408,7 +1408,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private scheduleTurnDeadline(): void {
-    const timeout = this.agent.timeout * 1000;
+    const timeout = Math.round(this.agent.timeout * 1000);
     if (!Number.isFinite(timeout) || timeout <= 0) return;
     this.clearTurnDeadline();
     const waiting = this.awaitingAnswer?.() || this.humanWaits.size > 0 || this.screenWaitsForHuman();

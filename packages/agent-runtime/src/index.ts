@@ -281,6 +281,10 @@ export class DutydeckRuntime {
   private readonly cleaningRuns = new Map<string, Promise<WorkspaceCleanupResult>>();
 
   constructor(private readonly repos: RepositoryBundle, private readonly options: RuntimeOptions = {}) {
+    const interval = options.cleanupIntervalMs ?? 5 * 60_000;
+    if (!Number.isInteger(interval) || interval < 0 || interval > 2_147_483_647) {
+      throw new RuntimeError('INVALID_CLEANUP_INTERVAL', 'cleanupIntervalMs must be 0 (disabled) or an integer between 1 and 2147483647', 400);
+    }
     this.configurations = new DriverConfigurationLedger(repos.config);
     this.localResources = new LocalDriverLedger(() => this.bound(), repos.execution);
     this.publisher = new PersistentEventPublisher({ highWaterMark: id => repos.events.highWaterMark(id), listWindow: (id, options) => repos.events.listWindow(id, options) });
@@ -302,7 +306,6 @@ export class DutydeckRuntime {
       return new JsonlTransport(agent, { onEvent, onExit, context });
     });
     if (!options.driverFactory) this.factory.controlledResources = protocol => protocol === 'acp' || protocol === 'jsonl' || protocol === 'pipe';
-    const interval = options.cleanupIntervalMs ?? 5 * 60_000;
     if ((options.driverIdleTimeoutMs ?? 6 * 60 * 60_000) > 0 && interval > 0) {
       this.cleanupTimer = setInterval(() => { if (this.initialized && !this.shuttingDown) void this.cleanupIdleDrivers().catch(() => {}); }, interval);
       this.cleanupTimer.unref();

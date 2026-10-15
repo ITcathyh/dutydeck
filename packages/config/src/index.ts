@@ -13,7 +13,7 @@ export const appConfigSchema = z.object({
   databaseUrl: z.string().default('./.dutydeck/dutydeck.db'),
   acpxCommand: z.string().default('acpx'),
   driverIdleTimeoutMs: z.number().nonnegative().default(6 * 60 * 60_000),
-  cleanupIntervalMs: z.number().positive().default(5 * 60_000),
+  cleanupIntervalMs: z.number().int().min(1).max(2_147_483_647).default(5 * 60_000),
   agents: z.array(agentConfigSchema).default([])
 });
 export type AppConfig = z.infer<typeof appConfigSchema>;

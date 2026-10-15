@@ -32,7 +32,13 @@ export const agentConfigSchema = z.object({
   env: z.record(z.string()).default({}),
   systemPrompt: z.string().optional(),
   permissionMode: z.enum(permissionModes).default('ask'),
-  timeout: z.number().positive().default(600),
+  timeout: z.number().positive().refine(seconds => {
+    const milliseconds = seconds * 1000;
+    const rounded = Math.round(milliseconds);
+    // 例如 1.001 * 1000 略小于 1001；只容忍浮点计算误差，不放行真正的亚毫秒精度。
+    return Number.isSafeInteger(rounded) && rounded >= 1 && rounded <= 2_147_483_647
+      && Math.abs(milliseconds - rounded) <= Number.EPSILON * Math.max(1, milliseconds) * 4;
+  }, 'timeout must convert to integer milliseconds between 1 and 2147483647').default(600),
   capabilities: z.object({ pause: z.boolean().default(false), resume: z.boolean().default(true) }).default({ pause: false, resume: true }),
   builtin: z.boolean().default(false),
   /** 由哪个插件提供（`plugin:<name>`）；启动时配置里不再有该插件的 Agent 会被清掉。只由宿主写入。 */

@@ -281,7 +281,7 @@ export class AcpxAdapter implements AgentDriver {
       // permission requests still flow through onPermissionRequest below;
       // capabilities the host cannot intercept fail closed.
       permissionMode: acpxPermissionMode(agent.permissionMode),
-      nonInteractivePermissions: 'fail', timeoutMs: agent.timeout * 1000,
+      nonInteractivePermissions: 'fail', timeoutMs: Math.round(agent.timeout * 1000),
       onPermissionRequest: async request => {
         if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
         const raw = request.raw as any; const id = raw.toolCall?.toolCallId ?? `permission-${Date.now()}`;
@@ -608,9 +608,9 @@ export class AcpxAdapter implements AgentDriver {
       // result can reject before its event stream closes. Observe it immediately.
       const result = turn.result;
       void result.catch(() => undefined);
-      const idleTimeoutMs = this.agent.timeout * 1_000;
+      const idleTimeoutMs = Math.round(this.agent.timeout * 1_000);
       // 时限不到两个最短采样窗口时不看 CPU，照旧到点取消。
-      const cpuWindowMs = Math.min(IDLE_CPU_WINDOW_MS, idleTimeoutMs / 2);
+      const cpuWindowMs = Math.min(IDLE_CPU_WINDOW_MS, Math.max(1, Math.floor(idleTimeoutMs / 2)));
       const deferLimitMs = idleTimeoutMs * IDLE_DEFER_FACTOR;
       let silentMs = idleTimeoutMs;
       let timer: NodeJS.Timeout | undefined;
