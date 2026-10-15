@@ -125,11 +125,11 @@ test.describe('Session Insight Harness & Controlled CLI Smoke', () => {
     // createSession 内部已轮询至 task completed（否则抛错），能返回即任务真实完成
   });
 
-  test('real Go engine refresh reaches succeeded and resolves BOTH main and subagent sources', async () => {
+  test('built-in Node analyzer refresh reaches succeeded and resolves BOTH main and subagent sources', async () => {
     test.setTimeout(120_000);
     const result = await env.createSession('claude', 'VERIFY_CLAUDE_REFRESH_SOURCES');
 
-    // 触发真实刷新（最终 Go binary + resolver，不使用 fake engine / mock API）
+    // 触发真实刷新（内置 Node analyzer + resolver，不使用 fake engine / mock API）
     const refreshRes = await env.instance.request(
       'POST',
       `/api/sessions/${result.sessionId}/insight/refresh`

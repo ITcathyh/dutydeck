@@ -182,7 +182,7 @@ export interface SessionInsightRepository {
   /**
    * cacheKey 命中既有完整快照时的状态 transition：CAS 当前 request 到 succeeded 并指向已存在
    * 快照，保留原 snapshotId/createdAt，只刷新最后检查时间。同样校验 expectedBindingRevision。
-   * - hit：命中并完成 transition；miss：无此活跃 cacheKey（调用方再调 Go）；
+   * - hit：命中并完成 transition；miss：无此活跃 cacheKey（调用方再调分析器）；
    * - binding_changed：修订已变，已原子置 failed(source_binding_changed) 并保留旧指针。
    */
   resolveCacheHit(

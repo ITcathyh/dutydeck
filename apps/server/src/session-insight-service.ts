@@ -6,7 +6,7 @@
  *   Task/Attempt/Usage 写。
  * - 作业流水线严格按固定顺序：resolver 历史 proof → 固定 expectedBindingRevision/来源清单 →
  *   文件快照 hash → 一次短同步读事务冻结 hostEvidence → T4e 脱敏投影 → locator 握手固定版本 →
- *   cacheKey → resolveCacheHit → miss 才跑 Go → 校验/脱敏 → T4d 单 session 摘要 →
+ *   cacheKey → resolveCacheHit → miss 才跑分析器 → 校验/脱敏 → T4d 单 session 摘要 →
  *   manifest/events → 原子 publish。所有 IO 与大计算都在写事务外；better-sqlite3 事务内绝不 await。
  * - 私有的 root/path/env/stdout/stderr 不进 DTO/log；诊断只记 requestId/code/count。
  */
@@ -176,7 +176,8 @@ type FrozenHostEvidence = { raw: HostEvidenceRaw; executions: TaskExecutionProje
 
 export interface InsightEngineRunner {
   runInsightProcess(options: {
-    binaryPath: string;
+    entrypoint: string;
+    execArgv?: string[];
     request: AnalyzeFilesRequest;
     expectedVersions: EngineVersionInfo;
     signal?: AbortSignal;
@@ -195,7 +196,7 @@ export interface SessionInsightServiceOptions {
   hostEvidence: InsightHostEvidenceGateway;
   /** engine locator；默认接 T6a 真实 locator，测试可注入。 */
   resolveEngine?: () => Promise<ResolvedEngine>;
-  /** Go 进程边界；默认接 T4a 已验收 runner，测试可注入假进程。 */
+  /** 分析器进程边界；默认接 T4a 已验收 runner，测试可注入假进程。 */
   engineRunner?: InsightEngineRunner;
   /** 当前 workspace 组织配置（事务外 await 取得，不把 async repo 放进读事务）。 */
   loadWorkspaceOrganization?: () => Promise<WorkspaceOrganization>;
@@ -456,7 +457,7 @@ export class SessionInsightService {
         ? matched.find(source => source.sourceKey === resolved.primarySourceKey)
         : undefined;
 
-      // 2. 没有任何 matched 来源或缺权威 primary：不跑 Go、不伪造 source/快照。
+      // 2. 没有任何 matched 来源或缺权威 primary：不跑分析器、不伪造 source/快照。
       if (matched.length === 0 || !primaryResolved) {
         finishFailed('no_verified_source');
         return;
@@ -555,9 +556,10 @@ export class SessionInsightService {
       if (hit.outcome === 'hit') return;
       checkpoint();
 
-      // 10. miss 才跑 Go（单 child SIGTERM+2s SIGKILL 由 T4a runner 负责）。
+      // 10. miss 才跑分析器（单 child SIGTERM+2s SIGKILL 由 T4a runner 负责）。
       const result = await this.engineRunner.runInsightProcess({
-        binaryPath: engine.binaryPath,
+        entrypoint: engine.entrypoint,
+        execArgv: engine.execArgv,
         request: analyzeRequest,
         expectedVersions: engine.versions,
         signal,
@@ -590,7 +592,7 @@ export class SessionInsightService {
         return;
       }
 
-      // A2 半行：Go 只收完整 prefix（file.status 仍 ok），宿主必须把 capture 的
+      // A2 半行：分析器只收完整 prefix（file.status 仍 ok），宿主必须把 capture 的
       // 截尾事实合并进该来源结果（ok→partial），保留正常 metrics，使
       // manifest/summary source/报告一致表达 partial，而不是谎称 complete。
       // A3 发现截断：resolver 的 discoveryLimited 经 coverage.subagentDiscovery=partial
@@ -1038,8 +1040,8 @@ export class SessionInsightService {
   }
 
   /**
-   * A2 + A3：把宿主侧已知但 Go 进程看不到/不需要看的覆盖事实合并进引擎结果。
-   * - 半行截尾（capture.isPartial / trailingBytes>0）：Go 只分析完整 prefix 故报 ok，
+   * A2 + A3：把宿主侧已知但分析器进程看不到/不需要看的覆盖事实合并进引擎结果。
+   * - 半行截尾（capture.isPartial / trailingBytes>0）：分析器只分析完整 prefix 故报 ok，
    *   宿主把该文件降为 partial（metrics/trace 原样保留，不丢已有数据、不让整 job 失败）。
    * - 发现截断（resolver discoveryLimited）：在相关文件 coverage.subagentDiscovery
    *   标 partial 并向 aggregation.reasonCodes 补固定 DISCOVERY_LIMITED；

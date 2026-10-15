@@ -34,6 +34,14 @@ export class SecurityRedactionError extends Error {
 const SENSITIVE_QUERY_KEY_REGEX =
   /(?<=[?&](?:token|api[_-]?key|access[_-]?key|access[_-]?token|auth(?:[_-]?token)?|refresh[_-]?token|secret|client[_-]?secret|password|passwd|pwd|key|sig|signature|auth|private[_-]?key)=)[^&\s"'#]+/gi;
 
+// Known API key prefixes also appear as bare values in diagnostic prose.
+const API_KEY_TOKEN_REGEX = /\bsk-(?:ant-api\d{2}-|proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b/g;
+
+// Tool inputs can contain JSON-escaped shell quotes. Match the entire quoted
+// credential before the shared redactor can stop at a space inside its value.
+const QUOTED_CREDENTIAL_ASSIGNMENT_REGEX =
+  /(\b(?:authorization|[A-Za-z0-9_]*(?:api[_-]?key|secret[_-]?key|access[_-]?token|token|secret|password|passwd|pwd))(?:\\?["'])?\s*[:=]\s*)(\\?")(?:(?!\2)[\s\S])*\2/gi;
+
 /**
  * 对普通字符串执行完整的凭据和路径脱敏：
  * 1. 替换已知私有路径 canary（按长度降序优先匹配，防止前缀碎片截留）
@@ -71,10 +79,16 @@ export function redactText(text: string, context?: RedactionContext): string {
   //    （lark/secret-redaction 的非贪婪规则遇到 p@ss@host 会漏掉第二段）。
   redacted = redacted.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/]*@/gi, '$1[REDACTED]@');
 
-  // 3. 复用现有 secret-redaction (PEM, authorization, bearer, flags, envs)
+  // 3. 裸 API Key 与 JSON 转义的带引号赋值也必须整体脱敏。
+  const secretPlaceholder = context?.secretPlaceholder ?? '[REDACTED]';
+  redacted = redacted.replace(API_KEY_TOKEN_REGEX, secretPlaceholder);
+  redacted = redacted.replace(QUOTED_CREDENTIAL_ASSIGNMENT_REGEX,
+    (_match, prefix: string, quote: string) => prefix + quote + secretPlaceholder + quote);
+
+  // 4. 复用现有 secret-redaction (PEM, authorization, bearer, flags, envs)
   redacted = redactTraceText(redacted);
 
-  // 4. 补足 URL query 敏感凭据脱敏
+  // 5. 补足 URL query 敏感凭据脱敏
   redacted = redacted.replace(SENSITIVE_QUERY_KEY_REGEX, context?.secretPlaceholder ?? '[REDACTED]');
 
   return redacted;
@@ -181,7 +195,7 @@ export function assertSafeNativeIdentity(
 }
 
 /**
- * 校验引擎派生身份（Go 派生的 eventId, evidenceRefs, sourceKey）。
+ * 校验引擎派生身份（分析器派生的 eventId, evidenceRefs, sourceKey）。
  * 仅对已知引擎派生的固定末尾 `:token:<nonnegative integer>` 做最窄豁免：
  * 完整检查 path canary（无豁免），剥离固定后缀后其余串仍必须满足 redactText 无改写。
  * 若其余串仍含凭据（如 `token:CANARY:token:0`），坚决拒绝。
@@ -260,7 +274,7 @@ function redactCodeCountRecord(
 }
 
 /**
- * 对 Go 分析进程返回的 AnalyzeFilesResult 进行脱敏与公开投影：
+ * 对 分析器进程返回的 AnalyzeFilesResult 进行脱敏与公开投影：
  * - 纯函数，不修改传入的原始对象
  * - 结构 identity 严格校验并保留用于关联
  * - free text（inputExcerpt, outputExcerpt, errorExcerpt, warning samples）先脱敏后安全截断

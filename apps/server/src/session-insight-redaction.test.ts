@@ -34,6 +34,30 @@ describe('redactText 凭据与路径脱敏', () => {
     expect(redactText('TOKEN: headerpayloadsignature')).not.toContain('headerpayloadsignature');
   });
 
+  it('抹掉普通诊断文本和 JSON 命令内可识别的 API Key，保留普通标签', () => {
+    const secrets = [
+      'sk-ant-api03-sec_1792034317686_2574a9-SUPERSECRETKEY1234567890',
+      'sk-proj-SYNTHETIC_OPENAI_KEY_1234567890',
+      'sk-SYNTHETIC_LEGACY_KEY_1234567890'
+    ];
+    for (const secret of secrets) {
+      const text = `Diagnostics with credential ${secret} at root /tmp/public; token ${secret}; payload`;
+      expect(redactText(text)).not.toContain(secret);
+      expect(redactText(JSON.stringify({ command: `export SECRET_KEY="${secret}"; echo done` })))
+        .not.toContain(secret);
+    }
+    expect(redactText('sk-short and task_12345 at /tmp/public')).toBe('sk-short and task_12345 at /tmp/public');
+  });
+
+  it('JSON 转义的凭据赋值完整脱敏，包括值内空格', () => {
+    const input = JSON.stringify({ command: 'export API_KEY="opaque credential with spaces"; echo done' });
+    const redacted = redactText(input);
+    for (const part of ['opaque', 'credential', 'with spaces']) expect(redacted).not.toContain(part);
+    expect(redacted).toContain('echo done');
+    expect(redactText('export SECRET_KEY="opaque credential with spaces"; echo done'))
+      .not.toContain('opaque credential');
+  });
+
   it('抹掉 PEM 私钥（含截断在 END 之前的情况）', () => {
     const pem =
       '-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqh\nSECRETBODY123\n-----END PRIVATE KEY-----';
@@ -210,6 +234,24 @@ describe('redactAnalyzeResult 公开投影', () => {
     // 源 DTO 不被修改。
     expect(injected.files[0]!.trace[0]!.inputExcerpt).toContain('leakyToken123');
     expect(injected.files[0]!.models[0]).toContain('modelsecret');
+  });
+
+  it('agent_message 与 tool_call/result/summary 中裸 API Key 和转义命令全部脱敏', () => {
+    const injected = structuredClone(loadGolden());
+    const secret = 'sk-ant-api03-sec_1792034317686_2574a9-SUPERSECRETKEY1234567890';
+    const original = injected.files[0]!.trace[0]!;
+    injected.files[0]!.trace = ['agent_message', 'tool_call', 'tool_result', 'tool_summary'].map((kind, index) => ({
+      ...original,
+      eventId: `test-event-${index}`,
+      kind: kind as typeof original.kind,
+      inputExcerpt: JSON.stringify({ command: `export SECRET_KEY="${secret}"; echo done` }),
+      outputExcerpt: `Diagnostics with credential ${secret} at root ${PRIVATE_ROOT}; token ${secret}; payload`
+    }));
+    const serialized = JSON.stringify(redactAnalyzeResult(injected, context));
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain(PRIVATE_ROOT);
+    expect(serialized).toContain('echo done');
+    expect(JSON.stringify(injected)).toContain(secret);
   });
 
   it('identity 含路径 canary 时拒绝发布而非静默改写', () => {

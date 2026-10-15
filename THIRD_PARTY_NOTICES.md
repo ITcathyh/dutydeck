@@ -85,14 +85,13 @@ THE SOFTWARE.
 
 ---
 
-## 3. Session Insight (待授权 / 本地联调)
+## 3. Session Insight 测试材料来源
 
 - **项目来源**: https://github.com/ITcathyh/session-insight
-- **固定参考版本**: commit `0bf5f1c95e89384f6379357aa515d385b2bf4e1e`
-- **使用范围**: 内置或分发的预编译二进制执行文件（`dist/assets/session-insight/*/session-insight`）
-- **许可与分发声明**:
-  上游原项目标注为 `Private project. Not licensed for redistribution.`，尚未提供开源许可证或公开发布授权。
-  目前仅用于本地联调与测试，未经授权不得随正式发行包对外分发。待权利人确认授权后补齐许可证全文。
+- **参考版本**: commit `0bf5f1c95e89384f6379357aa515d385b2bf4e1e`
+- **保留范围**: `tests/fixtures/session-insight/upstream-sanitized/` 的脱敏测试材料；来源与样本性质详见 `tests/fixtures/session-insight/README.md`。
+- **许可说明**: 上游标注为 `Private project. Not licensed for redistribution.`，未记录再分发授权。上述材料仅用于仓库内测试，不随 npm 包发布。
+- **运行时**: Dutydeck 使用仓库内独立实现的 TypeScript 分析器，构建为 `dist/assets/session-insight/cli.js`；发布包不包含上游 Go 源码或二进制。本条来源记录不授予上游代码或测试材料新的许可。
 
 ---
 

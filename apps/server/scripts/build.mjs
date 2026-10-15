@@ -1,4 +1,4 @@
-import { chmodSync, cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -25,6 +25,16 @@ const aliases = new Map([
   ['@dutydeck/transports', 'packages/transports/src/index.ts']
 ]);
 
+const workspacePlugins = [{
+  name: 'dutydeck-workspace',
+  setup(buildApi) {
+    buildApi.onResolve({ filter: /^(?:acpx\/runtime|@dutydeck\/)/ }, args => {
+      const target = aliases.get(args.path);
+      return target ? { path: isAbsolute(target) ? target : resolve(workspaceRoot, target) } : undefined;
+    });
+  }
+}];
+
 rmSync(resolve(serverRoot, 'dist'), { recursive: true, force: true });
 if (!existsSync(resolve(webDist, 'index.html'))) throw new Error('Web UI is not built. Run pnpm --dir apps/web build first.');
 rmSync(publicDir, { recursive: true, force: true });
@@ -38,15 +48,19 @@ await build({
   target: 'node22',
   packages: 'external',
   sourcemap: false,
-  plugins: [{
-    name: 'dutydeck-workspace',
-    setup(buildApi) {
-      buildApi.onResolve({ filter: /^(?:acpx\/runtime|@dutydeck\/)/ }, args => {
-        const target = aliases.get(args.path);
-        return target ? { path: isAbsolute(target) ? target : resolve(workspaceRoot, target) } : undefined;
-      });
-    }
-  }]
+  plugins: workspacePlugins
+});
+// Bundle the analyzer and its dependencies so it can run with an empty PATH
+// from any cwd, without workspace packages or TypeScript loaders in production.
+await build({
+  entryPoints: [resolve(serverRoot, 'src/session-insight-cli.ts')],
+  outfile: resolve(serverRoot, 'dist/assets/session-insight/cli.js'),
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  target: 'node22',
+  sourcemap: false,
+  plugins: workspacePlugins
 });
 const agentsDir = resolve(serverRoot, 'dist/agents');
 mkdirSync(agentsDir, { recursive: true });
@@ -59,23 +73,3 @@ mkdirSync(assetsDir, { recursive: true });
 cpSync(resolve(serverRoot, 'src/lark/assets/dutydeck-bouncing-ball.webp'), resolve(assetsDir, 'dutydeck-bouncing-ball.webp'));
 cpSync(resolve(serverRoot, 'src/lark/assets/SVG-SPINNERS-LICENSE.txt'), resolve(assetsDir, 'SVG-SPINNERS-LICENSE.txt'));
 cpSync(resolve(workspaceRoot, 'THIRD_PARTY_NOTICES.md'), resolve(assetsDir, 'THIRD_PARTY_NOTICES.md'));
-
-const engineBuildDir = resolve(serverRoot, '.engine-build');
-const engineDistDir = resolve(assetsDir, 'session-insight');
-if (existsSync(engineBuildDir)) {
-  mkdirSync(engineDistDir, { recursive: true });
-  cpSync(engineBuildDir, engineDistDir, { recursive: true });
-  const targets = ['linux-amd64', 'linux-arm64', 'darwin-amd64', 'darwin-arm64'];
-  for (const target of targets) {
-    const binPath = resolve(engineDistDir, target, 'session-insight');
-    if (existsSync(binPath)) {
-      chmodSync(binPath, 0o755);
-    }
-  }
-  const noticesFile = resolve(workspaceRoot, 'THIRD_PARTY_NOTICES.md');
-  if (existsSync(noticesFile)) {
-    cpSync(noticesFile, resolve(engineDistDir, 'THIRD_PARTY_NOTICES.md'));
-  }
-} else {
-  console.warn('[build] Note: apps/server/.engine-build not found. Session Insight engine will be unavailable in distribution.');
-}

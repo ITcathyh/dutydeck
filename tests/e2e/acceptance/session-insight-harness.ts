@@ -39,7 +39,6 @@ export interface SessionInsightTestEnvironment {
   claudeDataDir: string;
   codexHome: string;
   traeHome: string;
-  assetsDir: string;
   createSession(
     client: 'claude' | 'codex' | 'traex',
     prompt?: string,
@@ -204,7 +203,6 @@ export async function launchSessionInsightTestServer(
   let capturedClaudeDataDir = '';
   let capturedCodexHome = '';
   let capturedTraeHome = '';
-  let capturedAssetsDir = '';
 
   const instance = await launchIsolatedTestServer({
     prefix,
@@ -214,12 +212,10 @@ export async function launchSessionInsightTestServer(
       capturedClaudeDataDir = join(dataDir, 'claude-root');
       capturedCodexHome = join(dataDir, 'codex-root');
       capturedTraeHome = join(dataDir, 'trae-root');
-      capturedAssetsDir = join(dataDir, 'engine-assets');
 
       mkdirSync(capturedClaudeDataDir, { recursive: true });
       mkdirSync(capturedCodexHome, { recursive: true });
       mkdirSync(capturedTraeHome, { recursive: true });
-      mkdirSync(capturedAssetsDir, { recursive: true });
 
       const claudeCli = writeInsightMockCli(binDir, 'claude');
       const codexCli = writeInsightMockCli(binDir, 'codex');
@@ -292,7 +288,6 @@ export async function launchSessionInsightTestServer(
   const claudeDataDir = capturedClaudeDataDir;
   const codexHome = capturedCodexHome;
   const traeHome = capturedTraeHome;
-  const assetsDir = capturedAssetsDir;
 
   /**
    * 创建受控会话并在真实 PTY 执行时将真实脱敏 native 日志安全注入到对应目录。
@@ -478,7 +473,6 @@ export async function launchSessionInsightTestServer(
     claudeDataDir,
     codexHome,
     traeHome,
-    assetsDir,
     createSession
   };
 }

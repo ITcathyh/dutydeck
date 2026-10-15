@@ -67,6 +67,7 @@ try {
 const mode = config.mode || 'success';
 
 if (mode === 'success') {
+  if (process.env.PATH !== '' || process.env.NODE_OPTIONS || process.env.INSIGHT_SECRET_CANARY || process.env.HOME !== process.cwd() || process.env.TMPDIR !== process.cwd()) process.exit(1);
   process.stdout.write(config.resultJson || '');
   process.exit(0);
 } else if (mode === 'exit3') {
@@ -119,7 +120,7 @@ if (mode === 'success') {
   });
 
   const baseOpts = (overrides: Record<string, unknown> = {}) => ({
-    binaryPath: fakeEnginePath,
+    entrypoint: fakeEnginePath,
     request: validRequest,
     expectedVersions: EXPECTED_VERSIONS,
     deadline: Date.now() + 15000,
@@ -129,7 +130,7 @@ if (mode === 'success') {
 
   it('rejects invalid required options before spawning', async () => {
     await expect(
-      runInsightProcess(baseOpts({ binaryPath: 'relative/path/engine' }) as any)
+      runInsightProcess(baseOpts({ entrypoint: 'relative/path/engine' }) as any)
     ).rejects.toMatchObject({ code: 'INSIGHT_INPUT_LIMIT' });
 
     await expect(
@@ -166,6 +167,26 @@ if (mode === 'success') {
     expect(result.files).toHaveLength(1);
     expect(result.files[0].sourceKey).toBe('src_claude_main_01');
     expect(result.files[0].sha256).toBe(validRequest.files[0].sha256);
+  });
+
+  it('ignores parent PATH, Node options and credentials while keeping private HOME and TMPDIR', async () => {
+    const previous = {
+      PATH: process.env.PATH,
+      NODE_OPTIONS: process.env.NODE_OPTIONS,
+      INSIGHT_SECRET_CANARY: process.env.INSIGHT_SECRET_CANARY
+    };
+    process.env.PATH = '';
+    process.env.NODE_OPTIONS = '--require=/SECRET_CANARY_MISSING_MODULE';
+    process.env.INSIGHT_SECRET_CANARY = 'PRIVATE';
+    try {
+      await setFakeEngineConfig({ mode: 'success', resultJson: JSON.stringify(goldenResult) });
+      expect((await runInsightProcess(baseOpts() as any)).requestId).toBe(validRequest.requestId);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   it('accepts exit code 3 with partial error files', async () => {
@@ -296,7 +317,7 @@ if (mode === 'success') {
   it('settles on close with fixed code when process fails to spawn, without leaking binary path', async () => {
     const canaryBinary = path.join(testRoot, 'CANARY_BINARY_4242', 'missing-engine');
     try {
-      await runInsightProcess(baseOpts({ binaryPath: canaryBinary }) as any);
+      await runInsightProcess(baseOpts({ entrypoint: canaryBinary }) as any);
       expect.fail('Should have failed to spawn');
     } catch (err: unknown) {
       const procErr = err as SessionInsightProcessError;

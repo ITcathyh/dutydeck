@@ -172,10 +172,8 @@ function makeHarness(): Harness {
 
   let engine: ResolvedEngine = {
     status: 'available',
-    binaryPath: join(dataDir, 'engine'),
-    platformArch: 'linux-amd64',
-    sha256: 'a'.repeat(64),
-    manifestPath: join(dataDir, 'manifest.json'),
+    entrypoint: join(dataDir, 'engine'),
+    execArgv: [],
     versions: VERSIONS
   };
   let runnerImpl: InsightEngineRunner['runInsightProcess'] = async ({ request }) => ({
@@ -466,7 +464,7 @@ describe('SessionInsightService cache and binding', () => {
     const snap1 = h.repos.insight.getState('s1').currentSnapshotId!;
     expect(h.repos.insight.getState('s1').state).toBe('succeeded');
 
-    // 第二次：内容/host/版本不变 → 缓存命中，同一 snapshotId，不重跑 Go。
+    // 第二次：内容/host/版本不变 → 缓存命中，同一 snapshotId，不重跑分析器。
     let engineCalls = 0;
     h.setRunner(async ({ request }) => {
       engineCalls++;
@@ -511,10 +509,9 @@ describe('SessionInsightService cache and binding', () => {
     await h.refreshAndWait('s1');
     const firstSnap = h.repos.insight.getState('s1').currentSnapshotId;
 
-    // 引擎版本变化：locator 握手返回新版本，cacheKey 随之不同 → miss，必须真的再跑一次 Go。
+    // 引擎版本变化：locator 握手返回新版本，cacheKey 随之不同 → miss，必须真的再跑一次 分析器。
     h.setEngine({
-      status: 'available', binaryPath: join(h.dataDir, 'engine2'), platformArch: 'linux-amd64',
-      sha256: 'b'.repeat(64), manifestPath: join(h.dataDir, 'm2.json'),
+      status: 'available', entrypoint: join(h.dataDir, 'engine2'), execArgv: [],
       versions: { schemaVersion: 1, engineVersion: 'engine-2', parserVersion: 'parser-1', metricVersion: 'metric-1' }
     });
     let ran = false;
@@ -544,7 +541,7 @@ describe('SessionInsightService cache and binding', () => {
       primarySourceKey: null
     }));
     let ran = false;
-    h.setRunner(async () => { ran = true; throw new Error('should not run Go'); });
+    h.setRunner(async () => { ran = true; throw new Error('should not run 分析器'); });
     await h.refreshAndWait('s1');
     expect(ran).toBe(false);
     expect(h.repos.insight.getState('s1').state).toBe('failed');
@@ -632,7 +629,7 @@ describe('SessionInsightService cache and binding', () => {
     await h.refreshAndWait('s1');
     const goodSnap = h.repos.insight.getState('s1').currentSnapshotId;
 
-    // 改变日志内容使 cacheKey miss（否则相同输入直接缓存命中不跑 Go），引擎抛预算错误。
+    // 改变日志内容使 cacheKey miss（否则相同输入直接缓存命中不跑分析器），引擎抛预算错误。
     h.writeLog('ok.jsonl', '{"line":2}');
     h.setRunner(async () => {
       throw new SessionInsightProcessError('INSIGHT_BUDGET_EXCEEDED', 'budget');
@@ -1105,7 +1102,7 @@ describe('createInsightResolver production wrapper (real resolver + real marker 
 });
 
 // ---------------------------------------------------------------------------
-// Astra A2 半行截尾：真实 snapshot 只送完整 prefix（Go 报 ok），
+// Astra A2 半行截尾：真实 snapshot 只送完整 prefix（分析器报 ok），
 // 宿主必须把 capture.isPartial 合并为 file/source partial（保留正常 metrics）。
 // ---------------------------------------------------------------------------
 
@@ -1121,7 +1118,7 @@ describe('Astra A2 half-line snapshot coverage', () => {
       sources: [h._matchedSource('k1', logPath, 'primary')],
       primarySourceKey: 'k1'
     }));
-    // Go 只收完整 prefix，因此按 ok 返回；宿主必须降级为 partial。
+    // 分析器只收完整 prefix，因此按 ok 返回；宿主必须降级为 partial。
     h.setRunner(async ({ request }) => ({
       schemaVersion: 1, requestId: request.requestId,
       engineVersion: VERSIONS.engineVersion, parserVersion: VERSIONS.parserVersion, metricVersion: VERSIONS.metricVersion,

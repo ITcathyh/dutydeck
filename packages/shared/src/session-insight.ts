@@ -378,7 +378,7 @@ export const fileMetricsSchema = z
 export type FileMetrics = z.infer<typeof fileMetricsSchema>;
 
 // ============================================================================
-// 6. Go 进程协议与引擎 DTO (第 4.1 节)
+// 6. 分析器进程协议与引擎 DTO (第 4.1 节)
 // ============================================================================
 
 export const engineVersionInfoSchema = z

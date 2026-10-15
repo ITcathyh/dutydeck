@@ -457,7 +457,7 @@ describe('Session Insight V1 Specification and Contracts (T0)', () => {
     });
   });
 
-  describe('Go CLI Protocol and Golden Contracts (Section 4.1 & Gate 9)', () => {
+  describe('Analyzer CLI Protocol and Golden Contracts (Section 4.1 & Gate 9)', () => {
     it('validates engineVersionInfoSchema', () => {
       const versionInfo = {
         schemaVersion: 1,

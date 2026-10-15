@@ -22,7 +22,8 @@ export class SessionInsightProcessError extends Error {
 }
 
 export interface RunInsightProcessOptions {
-  binaryPath: string; // 必须是绝对路径
+  entrypoint: string; // 必须是绝对路径
+  execArgv?: string[]; // locator 提供的显式开发 loader；不继承进程参数
   request: AnalyzeFilesRequest; // entry 处深拷贝并校验
   expectedVersions: EngineVersionInfo; // 必须完整提供
   signal?: AbortSignal;
@@ -32,7 +33,7 @@ export interface RunInsightProcessOptions {
 
 function getSanitizedEnv(tempDir: string): NodeJS.ProcessEnv {
   return {
-    PATH: process.env.PATH ?? '/bin:/usr/bin',
+    PATH: '',
     TMPDIR: tempDir,
     LANG: process.env.LANG ?? 'C.UTF-8',
     HOME: tempDir,
@@ -152,9 +153,9 @@ function validateEngineResult(
 }
 
 /**
- * 运行 Go session-insight 分析引擎。
+ * 运行 Node session insight 分析器。
  * 强约束：
- * - 必须接收绝对 binaryPath、绝对 tempDir、有限未来 deadline 与完整 expectedVersions。
+ * - 必须接收绝对 entrypoint、绝对 tempDir、有限未来 deadline 与完整 expectedVersions。
  * - 请求在 entry 处使用 frozen Zod 深拷贝，去重后序列化送往 stdin。
  * - 直接 spawn argv 固定 ['analyze', '--format', 'json']，无 shell，最小环境白名单。
  * - stdin 失败或 child error 不提前 settle，统一向子进程发送终止信号并在 close 终态结算。
@@ -163,10 +164,10 @@ function validateEngineResult(
 export async function runInsightProcess(
   options: RunInsightProcessOptions
 ): Promise<AnalyzeFilesResult> {
-  const { binaryPath, request, expectedVersions, signal, deadline, tempDir } = options;
+  const { entrypoint, execArgv = [], request, expectedVersions, signal, deadline, tempDir } = options;
 
-  if (!path.isAbsolute(binaryPath)) {
-    throw new SessionInsightProcessError('INSIGHT_INPUT_LIMIT', 'binaryPath must be an absolute path');
+  if (!path.isAbsolute(entrypoint)) {
+    throw new SessionInsightProcessError('INSIGHT_INPUT_LIMIT', 'entrypoint must be an absolute path');
   }
 
   if (!tempDir || typeof tempDir !== 'string' || !path.isAbsolute(tempDir)) {
@@ -210,7 +211,7 @@ export async function runInsightProcess(
   return new Promise<AnalyzeFilesResult>((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(binaryPath, ['analyze', '--format', 'json'], {
+      child = spawn(process.execPath, [...execArgv, entrypoint, 'analyze', '--format', 'json'], {
         shell: false,
         cwd: tempDir,
         env: getSanitizedEnv(tempDir),
@@ -218,7 +219,7 @@ export async function runInsightProcess(
       });
     } catch {
       return reject(
-        new SessionInsightProcessError('INSIGHT_PROCESS_ERROR', 'Failed to spawn insight engine binary')
+        new SessionInsightProcessError('INSIGHT_PROCESS_ERROR', 'Failed to spawn insight analyzer')
       );
     }
 

@@ -388,6 +388,8 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 ### 4. 用量与成本
 Web 侧栏「用量与成本」有「费用」「明细」「会话分析」三个标签；飞书里 `/status` 显示本月用量。
 
+- **会话洞察分析器**：随 npm 包内置，构建服务时自动生成；使用 Dutydeck 当前的 Node.js 运行时，在隔离子进程中本地分析，无需 Go 编译器、外部分析器二进制或单独构建引擎。源码开发使用工作区的 `tsx` loader。指标版本升级为 `v2`：旧快照仍可读取，不同指标版本不混算差值或分组汇总；重新分析可统一版本。洞察刷新不会修改任务用量与计费记录。
+
 - **月度上限**：美元，按机器人或按群设置。Web，或 `dutydeck settings usage set-cap <月度美元> --app <appId> [--chat <chatId>]`。
 - **价格表**：内置表含 OpenAI 和 Claude 型号，按模型名最长前缀匹配；匹配不到的型号记为“未定价”，不会套默认价。用 `DUTYDECK_USAGE_PRICING_JSON` 可整表覆盖。Claude 型号只认日期后缀（`-YYYYMMDD`）和 `-latest`，所以 `claude-opus-5-6` 不会落到 `claude-opus-5` 的价格上。
 - **用量来源**：ACP Agent 报多少算多少，不报成本的按价格表估算。终端模式 Claude 的用量来自 transcript，是估算；子代理用量来自 `<session>/subagents/` 下的文件。同一轮多个型号时各自按自己的单价算，任一型号没有单价，整轮记为未定价。Codex、Traex 终端模式没有用量。

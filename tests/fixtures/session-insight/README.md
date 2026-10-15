@@ -11,7 +11,7 @@
 - **边界样本覆盖 (Synthetic)**：
   为了验证累计值增量、reset 行为、多 message 聚合、子 Agent 关联及复杂工具方言，提供了明确标 `synthetic` 的边界用例。
 - **Golden JSON 性质说明**：
-  `golden/` 目录下的 JSON 仅作为跨 Go/TS 的**协议接口契约定义与反序列化示例**（Protocol Fixture），并非当前无状态 Go 引擎实测产物。待 T1 引擎 CLI 交付后，将产出真实引擎执行结果进行比对。
+  `golden/` 目录下的 JSON 仅作为分析器与宿主之间的**协议接口契约定义与反序列化示例**（Protocol Fixture），并非当前 TypeScript 分析器的实测产物；实际分析行为由分析器回归测试与真实样本检查验证。
 
 ---
 
