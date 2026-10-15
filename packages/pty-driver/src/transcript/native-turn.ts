@@ -50,7 +50,10 @@ export class NativeTurn {
     if (input !== undefined && this.scoped && entry !== this.input) {
       // Legacy/model and display records can mirror the same native input.
       if (id && this.turn && id !== this.turn) return false;
-      if (normalizeInputText(input) !== normalizeInputText(codexInputText(this.input) ?? '')) {
+      // Inside the bound native turn, differing user records are context or
+      // injected input (AGENTS.md, skills, steer), not a newer submission.
+      if (!(this.turn && this.candidate === this.turn)
+        && normalizeInputText(input) !== normalizeInputText(codexInputText(this.input) ?? '')) {
         this.scoped = false; this.error = undefined; this.terminal = this.cancelled = false;
       }
     }
