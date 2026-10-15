@@ -898,6 +898,9 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 ### Q5: 能否在同一台机器上运行多个机器人？
 - 可以。每个机器人有自己的默认工作区、Agent 和飞书应用凭据，服务不同的群组。
 
+### Q6: Claude Code / CCFlash 已完成，飞书卡片却提示工具未返回结果？
+- 旧版本可能把 CLI 日志中的历史请求快照当成本轮工具调用。升级后，这些快照不会进入执行记录或确认本轮指令已接收；真实工具缺少结果时仍会提示失败。
+
 ---
 
 ## 开源许可证与协议 (License)

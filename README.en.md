@@ -492,6 +492,8 @@ Old clients ignore the additional decision field. Corrupt legacy forwarding stil
 
 **Several bots on one machine?** Yes; each has its own workspace, Agent and Lark credentials.
 
+**Claude Code / CCFlash finished, but the Lark card reports missing tool results?** Older versions could interpret historical API request snapshots in CLI logs as current tool calls. After upgrading, these snapshots neither enter the execution timeline nor acknowledge the current prompt. Actual tool calls without results still cause a failure status.
+
 ---
 
 ## License

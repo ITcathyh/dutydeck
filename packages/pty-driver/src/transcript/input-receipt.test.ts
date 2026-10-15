@@ -17,6 +17,7 @@ it('keeps legal Unicode, narrows line endings, and excludes assistant/tool/sidec
   const text = '中文👩‍💻\u200c\u200b\r\nsecond\rthird';
   expect(normalizeInputText(text)).toBe('中文👩‍💻\u200c\u200b\nsecond\nthird');
   expect(claudeInputText(user(text))).toBe(text);
+  expect(claudeInputText({ type: 'api-request-blob', sessionId: 'session', hash: 'snapshot-hash', message: user(text).message })).toBeUndefined();
   expect(claudeInputText({ ...user(text), isSidechain: true })).toBeUndefined();
   expect(claudeInputText({ type: 'assistant', message: { role: 'assistant', content: text } })).toBeUndefined();
   expect(claudeInputText({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: text }] } })).toBeUndefined();
