@@ -57,6 +57,52 @@ function sourceId(path: string, offset: number, rawLine: string, eventIndex: num
 }
 
 describe('ClaudeTranscriptTailer (explicit path)', () => {
+  it('ignores API request snapshots without replaying historical tools or changing turn boundaries', async () => {
+    const dir = makeTempDir('claude-request-snapshots');
+    const file = join(dir, 'session.jsonl');
+    writeFileSync(file, '');
+    const tailer = new ClaudeTranscriptTailer({ cwd: dir, transcriptPath: file, pollIntervalMs: 60_000 });
+    const events = collect(tailer);
+    const append = async (...entries: unknown[]) => {
+      appendFileSync(file, entries.map(entry => JSON.stringify(entry) + '\n').join(''));
+      await tailer.flush();
+    };
+    // Sanitized shape from Claude's persisted API request blobs: historical
+    // messages carry roles, but have no native transcript UUID or timestamp.
+    const snapshot = (role: string, content: unknown) => ({
+      type: 'api-request-blob', sessionId: 'session', hash: 'snapshot-hash', message: { role, content },
+    });
+    tailer.start();
+    try {
+      await tailer.flush();
+      let received = false;
+      const receipt = tailer.waitForInput('current prompt', new AbortController().signal).then(() => { received = true; });
+      await append(snapshot('user', [{ type: 'text', text: 'current prompt' }]));
+      expect(received).toBe(false);
+      await append({ type: 'user', uuid: 'input', message: { role: 'user', content: 'current prompt' } });
+      await receipt;
+      const snapshots = [
+        snapshot('assistant', [{ type: 'tool_use', id: 'old-tool', name: 'Bash', input: { command: 'git status' } }]),
+        snapshot('assistant', [{ type: 'thinking', thinking: 'old thought' }, { type: 'text', text: 'old answer' }]),
+        snapshot('user', [{ type: 'tool_result', tool_use_id: 'other-old-tool', content: 'old result' }]),
+      ];
+      for (const entry of snapshots) expect(mapClaudeEntry(entry)).toBeUndefined();
+      await append(...snapshots);
+      expect(events).toEqual([]);
+      expect(tailer.hasTurnTerminal()).toBe(false);
+      await append(
+        { type: 'assistant', uuid: 'call', parentUuid: 'input', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'current-tool', name: 'Bash', input: { command: 'git status' } }] } },
+        { type: 'user', uuid: 'result', parentUuid: 'call', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'current-tool', content: 'clean' }] } },
+        { type: 'assistant', uuid: 'final', parentUuid: 'result', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'current answer' }] } },
+      );
+      expect(events.map(event => [event.type, event.data.id ?? event.data.text])).toEqual([
+        ['tool_call', 'current-tool'], ['tool_result', 'current-tool'], ['text', 'current answer'],
+      ]);
+      await append(snapshot('user', [{ type: 'text', text: 'old prompt' }]));
+      expect(tailer.hasTurnTerminal()).toBe(true);
+    } finally { tailer.stop(); }
+  });
+
   it('maps a provider synthetic placeholder to a structured retryable error', () => {
     const entry = {
       type: 'assistant',

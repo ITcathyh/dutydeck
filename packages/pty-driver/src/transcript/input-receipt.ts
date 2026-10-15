@@ -13,6 +13,7 @@ function contentText(content: unknown, textTypes = ['text', 'input_text']): stri
 }
 
 export function claudeInputText(entry: any): string | undefined {
+  if (entry?.type === 'api-request-blob') return undefined;
   if (entry?.isSidechain === true || (entry?.message?.role ?? entry?.type) !== 'user') return undefined;
   const text = contentText(entry.message?.content);
   // Claude 2.1.287 persists bracketed paste in this exact envelope. Remove

@@ -178,6 +178,8 @@ function stringifyToolResultContent(content: unknown): string {
 export function mapClaudeEntry(entry: any): NormalizedDriverEvent[] | undefined {
   if (!entry || typeof entry !== 'object') return undefined;
   if (entry.isSidechain === true) return undefined;
+  // Request blobs copy historical messages, not new model/tool activity.
+  if (entry.type === 'api-request-blob') return undefined;
   const role = entry.message?.role ?? entry.type;
 
   if (role === 'assistant') {
