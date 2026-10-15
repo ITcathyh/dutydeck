@@ -42,16 +42,19 @@ const staticResolver = (mode: 'topic' | 'group' | 'p2p'): LarkChatModeResolver =
 
 it('marks a stalled attachment download missing instead of holding the turn forever', async () => {
   let release!: () => void;
-  const service = { downloadMessageResource: vi.fn(() => new Promise<{ data: Uint8Array; contentType: string }>(resolve => {
-    release = () => resolve({ data: new Uint8Array([65]), contentType: 'text/plain' });
+  const service = { downloadMessageResource: vi.fn(), downloadMessageResourceToFile: vi.fn((_id: string, _key: string, _path: string, signal?: AbortSignal) => new Promise<{ contentType: string }>((resolve, reject) => {
+    release = () => resolve({ contentType: 'text/plain' });
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
   })) };
   vi.useFakeTimers();
   const pending = materializeLarkResources('om_attachment', '请分析附件', [{ key: 'file_key', type: 'file', label: '附件' }], service);
   let settled = false;
   void pending.then(() => { settled = true; });
   try {
+    await vi.waitFor(() => expect(service.downloadMessageResourceToFile).toHaveBeenCalledOnce());
     await vi.advanceTimersByTimeAsync(15_001);
-    expect(settled).toBe(true);
+    expect(service.downloadMessageResourceToFile.mock.calls[0]![3]?.aborted).toBe(true);
+    await vi.waitFor(() => expect(settled).toBe(true));
     expect(await pending).toContain('附件下载失败');
     expect(await pending).toContain('你无法读取该附件');
   } finally { release?.(); vi.useRealTimers(); }
@@ -63,7 +66,7 @@ describe('materializeLarkResources 图片按文件头识别格式', () => {
   const directory = join(tmpdir(), 'dutydeck', 'lark-resources', 'om_gif_format');
 
   it('扩展名是 .jpg 的 GIF 按真实字节保存为 .gif，并在提示中给出多帧说明', async () => {
-    const service = { downloadMessageResource: vi.fn(async () => ({ data: gif, contentType: 'image/jpeg' })) };
+    const service = { downloadMessageResourceToFile: vi.fn(), downloadMessageResource: vi.fn(async () => ({ data: gif, contentType: 'image/jpeg' })) };
     const result = await materializeLarkResources('om_gif_format', '看图', [
       { key: 'img_key', type: 'image', label: '图片「img_key.jpg」', fileName: 'img_key.jpg' }
     ], service);
@@ -75,7 +78,7 @@ describe('materializeLarkResources 图片按文件头识别格式', () => {
   });
 
   it('无法识别文件头的图片保留原始命名，不给出 GIF 提示', async () => {
-    const service = { downloadMessageResource: vi.fn(async () => ({ data: Buffer.from('unknown'), contentType: 'image/png' })) };
+    const service = { downloadMessageResourceToFile: vi.fn(), downloadMessageResource: vi.fn(async () => ({ data: Buffer.from('unknown'), contentType: 'image/png' })) };
     const result = await materializeLarkResources('om_unknown_format', '看图', [
       { key: 'img_unknown', type: 'image', label: '图片「x.png」', fileName: 'x.png' }
     ], service);
@@ -470,7 +473,7 @@ describe('resolveLarkSession ask posture', () => {
 
 describe('materializeLarkResources 卡片图片', () => {
   it('卡片图片下载失败只汇总一句，不阻断其余图片', async () => {
-    const service = { downloadMessageResource: vi.fn(async (_messageId: string, key: string) => {
+    const service = { downloadMessageResourceToFile: vi.fn(), downloadMessageResource: vi.fn(async (_messageId: string, key: string) => {
       if (key !== 'img_ok') throw new Error('boom');
       return { data: new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]), contentType: 'image/gif' };
     }) };

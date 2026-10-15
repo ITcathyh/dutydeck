@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, extname, join } from 'node:path';
 import { supportsRemoteApproval, type ChannelMappingRepository, type Session } from '@dutydeck/shared';
@@ -8,6 +8,7 @@ import type { LarkLaunchOptions } from './new-session.js';
 import { larkExecutionConfirmed, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
+import { ResourceRangeError } from './resource-range-download.js';
 import { detectImageFormat, gifSequenceHint } from './image-format.js';
 import { LarkServiceError, type LarkCardService } from './service.js';
 import type { LarkChatMode } from './chat-mode.js';
@@ -172,6 +173,7 @@ const withExtension = (fileName: string, extension: string) => {
 };
 
 const resourceFailureGuidance = (error: unknown) => {
+  if (error instanceof ResourceRangeError) return '请重新提供可完整下载且不超过 512 MiB 的文件。';
   const upstreamCode = error instanceof LarkServiceError ? Number(error.details?.upstreamCode) : undefined;
   if (upstreamCode === 234002 || upstreamCode === 14005) {
     return '该错误通常表示机器人无权访问这条消息所在的会话，或附件已被删除，并非缺少 API scope；请用户重新上传附件，并确认机器人仍在对应会话中。';
@@ -180,13 +182,33 @@ const resourceFailureGuidance = (error: unknown) => {
   return `请管理员确认机器人已开通 \`im:message:readonly\` 权限${consoleUrl ? `，权限配置地址：${consoleUrl}` : ''}；如果权限已开通，请用户重新上传可能已过期或删除的附件。`;
 };
 
-export async function materializeLarkResources(messageId: string, prompt: string, resources: LarkMessageResource[], service: Pick<LarkCardService, 'downloadMessageResource'>) {
+export async function materializeLarkResources(messageId: string, prompt: string, resources: LarkMessageResource[], service: Pick<LarkCardService, 'downloadMessageResource' | 'downloadMessageResourceToFile'>) {
   if (!resources.length) return prompt;
   const directory = join(tmpdir(), 'dutydeck', 'lark-resources', messageId.replace(/[^a-zA-Z0-9_-]/g, '_'));
   const notes: string[] = [];
   let failedCardImages = 0;
   for (const resource of resources) {
     try {
+      if (resource.type === 'file') {
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        const staging = join(directory, `.download-${randomUUID()}`);
+        const abort = new AbortController();
+        const download = service.downloadMessageResourceToFile(messageId, resource.key, staging, abort.signal);
+        try {
+          let downloaded: { contentType?: string };
+          try { downloaded = await withLarkContextReadTimeout(download, '附件下载'); }
+          catch (error) {
+            abort.abort(error);
+            await download.catch(() => {});
+            throw error;
+          }
+          abort.signal.throwIfAborted();
+          const path = join(directory, safeResourceName(resource, downloaded.contentType));
+          await rename(staging, path);
+          notes.push(`- ${resource.label}已下载到本地：${path}。请使用本地文件读取工具查看。`);
+        } finally { await rm(staging, { force: true }); }
+        continue;
+      }
       const downloaded = await withLarkContextReadTimeout(service.downloadMessageResource(messageId, resource.key, resource.type), '附件下载');
       // 图片按文件头识别真实格式：下载接口的 contentType 与资源自带扩展名都可能与实际字节不符。
       let fileName = safeResourceName(resource, downloaded.contentType);

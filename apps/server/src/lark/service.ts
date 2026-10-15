@@ -1,4 +1,6 @@
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, open, readFile, rename, rm } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { larkResourceRangeBytes, readResourceError, ResourceRangeError, ResourceStreamError, validateResourceRange, writeResourceStream } from './resource-range-download.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { requestSignal, type LifecycleFetch } from '../workbench-fetch.js';
 import type { PermissionMode } from '@dutydeck/shared';
@@ -1208,11 +1210,12 @@ export class LarkCardService {
 
   private async fetch(input: string, init: RequestInit): Promise<Response> {
     const context = this.budget()!;
-    context.signal.throwIfAborted();
+    const signal = init.signal ? AbortSignal.any([context.signal, init.signal]) : context.signal;
+    signal.throwIfAborted();
     if (context.remaining <= 0) throw new LarkServiceError('LARK_REQUEST_BUDGET_EXHAUSTED', '飞书请求的总尝试预算已用尽，等待持久化对账重投。', 503);
-    try { return await this.fetcher(input, { ...init, signal: context.signal }); }
+    try { return await this.fetcher(input, { ...init, signal }); }
     catch (error) {
-      context.signal.throwIfAborted();
+      signal.throwIfAborted();
       throw new LarkServiceError('LARK_NETWORK_ERROR', `Lark OpenAPI request failed: ${error instanceof Error ? error.message : String(error)}`, 502);
     }
   }
@@ -1673,31 +1676,89 @@ export class LarkCardService {
     };
   }
 
+  private async resourceResponse(url: string, token: string, signal: AbortSignal, range?: string) {
+    const response = await this.fetch(url, { method: 'GET', signal, ...(range ? { redirect: 'error' } : {}),
+      headers: { authorization: `Bearer ${token}`, ...(range ? { range } : {}) } });
+    if (!response.ok) {
+      const payload = await readResourceError(response, signal);
+      signal.throwIfAborted();
+      const violation = Array.isArray(payload.error?.permission_violations) ? payload.error.permission_violations[0] : undefined;
+      const consoleUrl = payload.error?.console_url ?? payload.console_url ?? violation?.url;
+      throw new LarkServiceError('LARK_RESOURCE_DOWNLOAD_FAILED', `Lark message resource download failed: ${payload.msg || response.statusText} (code: ${payload.code ?? 'HTTP_ERROR'})`, 502, {
+        upstreamCode: payload.code, upstreamHttpStatus: response.status,
+        ...(consoleUrl ? { consoleUrl: String(consoleUrl) } : {}),
+        ...(payload.error?.permission_violations ? { permissionViolations: payload.error.permission_violations } : {})
+      });
+    }
+    return response;
+  }
+
   async downloadMessageResource(messageId: string, fileKey: string, type: 'image' | 'file'): Promise<LarkMessageResourceResult> {
     const resolvedMessageId = required(messageId, 'messageId');
     const resolvedFileKey = required(fileKey, 'fileKey');
     return this.withRequestBudget(async signal => {
-      const token = await this.tenantToken();
+      const token = await this.tenantToken(signal);
+      const url = `${this.config.baseUrl}/open-apis/im/v1/messages/${encodeURIComponent(resolvedMessageId)}/resources/${encodeURIComponent(resolvedFileKey)}?type=${type}`;
       return executeWithLarkGate(this.config.appId, 'GET message resource', async () => {
-        const response = await this.fetch(`${this.config.baseUrl}/open-apis/im/v1/messages/${encodeURIComponent(resolvedMessageId)}/resources/${encodeURIComponent(resolvedFileKey)}?type=${type}`, {
-          method: 'GET', headers: { authorization: `Bearer ${token}` }
-        });
-        if (!response.ok) {
-          const payload = await response.json().catch(() => ({})) as any;
-          signal.throwIfAborted();
-          const violation = Array.isArray(payload.error?.permission_violations) ? payload.error.permission_violations[0] : undefined;
-          const consoleUrl = payload.error?.console_url ?? payload.console_url ?? violation?.url;
-          throw new LarkServiceError('LARK_RESOURCE_DOWNLOAD_FAILED', `Lark message resource download failed: ${payload.msg || response.statusText} (code: ${payload.code ?? 'HTTP_ERROR'})`, 502, {
-            upstreamCode: payload.code, upstreamHttpStatus: response.status,
-            ...(consoleUrl ? { consoleUrl: String(consoleUrl) } : {}),
-            ...(payload.error?.permission_violations ? { permissionViolations: payload.error.permission_violations } : {})
-          });
-        }
+        const response = await this.resourceResponse(url, token, signal);
         const contentType = response.headers.get('content-type')?.split(';')[0]?.trim() || undefined;
         const data = new Uint8Array(await response.arrayBuffer());
         signal.throwIfAborted();
         return { data, ...(contentType ? { contentType } : {}) };
       }, { env: this.config.env, signal, canRetry: () => this.budget()!.remaining > 0, onFailure: () => { this.budget()!.remaining--; } });
+    });
+  }
+
+  /** File-only disk API. Publish atomically; never assemble a large resource in memory. */
+  async downloadMessageResourceToFile(messageId: string, fileKey: string, destination: string, callerSignal?: AbortSignal): Promise<{ contentType?: string }> {
+    const resolvedMessageId = required(messageId, 'messageId');
+    const resolvedFileKey = required(fileKey, 'fileKey');
+    return this.withRequestBudget(async budgetSignal => {
+      const signal = callerSignal ? AbortSignal.any([budgetSignal, callerSignal]) : budgetSignal;
+      signal.throwIfAborted();
+      const token = await this.tenantToken(signal);
+      const url = `${this.config.baseUrl}/open-apis/im/v1/messages/${encodeURIComponent(resolvedMessageId)}/resources/${encodeURIComponent(resolvedFileKey)}?type=file`;
+      const temporary = await mkdtemp(join(dirname(destination), '.dutydeck-resource-partial-'));
+      const path = join(temporary, 'resource');
+      try {
+        const file = await open(path, 'wx', 0o600);
+        let contentType: string | undefined;
+        try {
+          const download = (start?: number, end?: number, total?: number) => executeWithLarkGate(this.config.appId, 'GET message resource', async () => {
+            await file.truncate(start ?? 0);
+            let response: Response;
+            try { response = await this.resourceResponse(url, token, signal, start === undefined ? undefined : `bytes=${start}-${end}`); }
+            catch (error) {
+              // The documented full-GET size response negotiates Range; it is not a failed transport attempt.
+              if (start === undefined && error instanceof LarkServiceError && Number(error.details?.upstreamCode) === 234037
+                && Number(error.details?.upstreamHttpStatus) === 400) return { rangeRequired: true as const };
+              throw error;
+            }
+            try {
+              const size = start === undefined ? undefined : validateResourceRange(response, start, end!, total);
+              if (start === undefined && response.status !== 200) throw new ResourceRangeError('飞书附件完整下载未返回 HTTP 200。');
+              await writeResourceStream(response, file, start ?? 0, signal, start === undefined ? undefined : end! - start + 1);
+              contentType ??= response.headers.get('content-type')?.split(';')[0]?.trim() || undefined;
+              return { total: size };
+            } catch (error) {
+              if (error instanceof ResourceStreamError) throw new LarkServiceError('LARK_NETWORK_ERROR', `Lark resource stream failed: ${error.message}`, 502);
+              throw error;
+            } finally { await response.body?.cancel().catch(() => {}); }
+          }, { env: this.config.env, signal, canRetry: () => this.budget()!.remaining > 0, onFailure: () => { this.budget()!.remaining--; } });
+          if ((await download()).rangeRequired) {
+            const total = (await download(0, 0)).total!;
+            for (let start = 1; start < total;) {
+              const end = Math.min(total - 1, start + larkResourceRangeBytes - 1);
+              await download(start, end, total);
+              start = end + 1;
+            }
+            if ((await file.stat()).size !== total) throw new ResourceRangeError('飞书附件最终长度不符。');
+          }
+        } finally { await file.close(); }
+        signal.throwIfAborted();
+        await rename(path, destination);
+        return { ...(contentType ? { contentType } : {}) };
+      } finally { await rm(temporary, { recursive: true, force: true }); }
     });
   }
 
@@ -1941,10 +2002,10 @@ export class LarkCardService {
     return hit ? String(hit.user_id) : undefined;
   }
 
-  private async tenantToken() {
+  private async tenantToken(signal?: AbortSignal) {
     if (this.token && Date.now() < this.tokenExpiresAt) return this.token;
     const payload = await this.request('/open-apis/auth/v3/tenant_access_token/internal/', {
-      token: false, body: { app_id: this.config.appId, app_secret: this.config.appSecret }
+      token: false, signal, body: { app_id: this.config.appId, app_secret: this.config.appSecret }
     });
     this.token = payload.tenant_access_token;
     if (!this.token) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark token response did not include tenant_access_token', 502);
@@ -1952,14 +2013,15 @@ export class LarkCardService {
     return this.token;
   }
 
-  private request(path: string, options: { method?: string; body?: unknown; token?: boolean; form?: FormData; retry?: boolean; beforeSend?: LarkWriteGuard }) {
-    return this.withRequestBudget(async signal => {
+  private request(path: string, options: { method?: string; body?: unknown; token?: boolean; form?: FormData; retry?: boolean; beforeSend?: LarkWriteGuard; signal?: AbortSignal }) {
+    return this.withRequestBudget(async budgetSignal => {
+      const signal = options.signal ? AbortSignal.any([budgetSignal, options.signal]) : budgetSignal;
       const headers: Record<string, string> = options.form ? {} : { 'content-type': 'application/json; charset=utf-8' };
       if (options.token !== false) headers.authorization = `Bearer ${await this.tenantToken()}`;
       try {
         return await executeWithLarkGate(this.config.appId, `${options.method ?? 'POST'} ${path.split('?')[0]}`, async () => {
           const response = await this.fetch(`${this.config.baseUrl}${path}`, {
-            method: options.method ?? 'POST', headers,
+            method: options.method ?? 'POST', headers, ...(options.signal ? { signal } : {}),
             ...(options.form ? { body: options.form } : options.body === undefined ? {} : { body: JSON.stringify(options.body) })
           });
           if (!response) throw new LarkServiceError('LARK_NETWORK_ERROR', 'Lark OpenAPI request returned no response', 502);
