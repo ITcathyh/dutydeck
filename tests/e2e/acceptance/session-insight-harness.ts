@@ -143,10 +143,13 @@ function submitPrompt(rawPrompt) {
   // codex / traex 共用 codex 家族 transcript 方言
   const file = currentRolloutPath();
   if (file) {
+    // 真实 CLI 的 task_started / task_complete 都带同一 turn_id；driver 只认绑定本轮 turn 的终止记录
+    const turnId = require('node:crypto').randomUUID();
+    appendLine(file, { timestamp: nowIso(), type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } });
     // response_item user message —— codexInputText 识别并逐字匹配
     appendLine(file, { timestamp: nowIso(), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'text', text }] } });
     // task_complete —— 现代 codex/traex mapper 的唯一 final-answer 来源，触发本轮完成
-    appendLine(file, { timestamp: nowIso(), type: 'event_msg', payload: { type: 'task_complete', last_agent_message: 'CONTROLLED_TASK_DONE', completed_at: Math.floor(Date.now() / 1000) } });
+    appendLine(file, { timestamp: nowIso(), type: 'event_msg', payload: { type: 'task_complete', turn_id: turnId, last_agent_message: 'CONTROLLED_TASK_DONE', completed_at: Math.floor(Date.now() / 1000) } });
   }
   const label = client === 'codex' ? 'Codex' : 'Trae';
   setTimeout(() => {
