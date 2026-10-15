@@ -19,6 +19,7 @@ export const directPack = (id: string, extra: Record<string, unknown> = {}) => (
   trigger: { senderKinds: ['bot'], sourceBotsParam: 'sources' },
   execution: { instruction: '处理「{source}」发的消息。' },
   dedupe: { algorithm: 'source_text_v1' }, dedupeWindowHoursParam: 'hours', quota: { perHourParam: 'perHour' },
+  phrases: { maxLength: 20, enable: [{ source: '开启测试场景' }], disable: [{ source: '关闭测试场景' }], examples: { enable: ['开启测试场景'], disable: ['关闭测试场景'] } },
   confirm: { enableTitle: '开启测试场景', disableTitle: '关闭测试场景', enableSummary: '{summary}', disableSummary: '{summary}', enabledResult: '已开启：{summary}', disabledResult: '已关闭测试场景' },
   status: { summary: '来源 {sources}', actedLabel: '处理' },
   ...extra

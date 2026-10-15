@@ -230,11 +230,14 @@ export const scenarioPackSchema = scenarioPackObject.superRefine((pack, context)
     if (!pack.dedupe) issue(['dedupe'], 'direct 模式必须声明去重方式');
     if (!pack.dedupeWindowHoursParam) issue(['dedupeWindowHoursParam'], 'direct 模式必须声明去重窗口参数（integer）');
     if (!pack.quota) issue(['quota'], 'direct 模式必须声明每小时上限参数（integer）');
+    // 确认人只能由群里的开关短语弹出的确认卡写入，Web 和 CLI 都要求已有确认人；没有短语的 direct 包永远开不了。
+    if (!pack.phrases) issue(['phrases'], 'direct 模式必须声明开关短语（phrases.enable 和 phrases.disable）：确认人只能在群里说开关短语、点确认卡写入');
     forbid(pack.decision, ['decision'], 'decision 只用于 model 模式');
     forbid(pack.context, ['context'], 'context 只用于 model 模式');
   } else {
     if (!pack.decision) issue(['decision'], 'model 模式必须写 decision.guidance');
     forbid(pack.trigger.sourceBotsParam, ['trigger', 'sourceBotsParam'], 'sourceBotsParam 只用于 direct 模式');
+    forbid(pack.trigger.filter, ['trigger', 'filter'], 'trigger.filter 只用于 direct 模式；model 模式用 trigger.match 选消息');
     forbid(pack.execution.intro, ['execution', 'intro'], 'execution.intro 只用于 direct 模式');
     forbid(pack.dedupe, ['dedupe'], 'dedupe 只用于 direct 模式');
     forbid(pack.dedupeWindowHoursParam, ['dedupeWindowHoursParam'], 'dedupeWindowHoursParam 只用于 direct 模式');

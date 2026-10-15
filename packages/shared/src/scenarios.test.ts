@@ -84,10 +84,22 @@ describe('scenario pack format', () => {
     expect(fieldsOf({ ...clone(alarm), decision: { guidance: 'x' }, context: { provider: 'p' } })).toEqual(expect.arrayContaining(['decision', 'context']));
   });
 
+  it('direct packs need on/off phrases: the requester is only written by the confirmation card they open', () => {
+    const { phrases: _phrases, ...noPhrases } = clone(alarm);
+    expect(issueFor(noPhrases, 'phrases')).toContain('开关短语');
+    expect(fieldsOf({ ...clone(alarm), phrases: { ...alarm.phrases, enable: [] } })).toContain('phrases.enable');
+    expect(fieldsOf({ ...clone(alarm), phrases: { ...alarm.phrases, disable: [] } })).toContain('phrases.disable');
+    // model 包不需要确认人，可以不写短语。
+    const { phrases: _faqPhrases, ...faqNoPhrases } = clone(teamFaq);
+    expect(validateScenarioPack(faqNoPhrases).issues).toEqual([]);
+  });
+
   it('model packs need guidance and cannot use direct-only fields', () => {
     const { decision: _decision, ...noGuidance } = clone(teamFaq);
     expect(fieldsOf(noGuidance)).toContain('decision');
     expect(fieldsOf({ ...clone(teamFaq), quota: { perHourParam: 'topics' }, topicOwnership: { sourceTopics: 'neutral' } })).toEqual(expect.arrayContaining(['quota', 'topicOwnership']));
+    // model 匹配不读 trigger.filter，声明了会被静默忽略，所以直接拒绝。
+    expect(issueFor({ ...clone(teamFaq), trigger: { ...teamFaq.trigger, filter: { keywordsAnyParam: 'topics' } } }, 'trigger.filter')).toContain('只用于 direct 模式');
   });
 
   it('checks the type and range of every parameter pointer', () => {

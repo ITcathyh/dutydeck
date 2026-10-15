@@ -10,7 +10,8 @@ type Responder = 'none' | 'self' | 'other';
 type PackDraft = { enabled: boolean; params: Record<string, string> };
 type Draft = { responder: Responder; packs: Record<string, PackDraft> };
 
-const words = (text: string) => [...new Set(text.split(/[,，\s]+/).map(item => item.trim()).filter(Boolean))];
+/** 列表参数只按逗号（中英文）和换行分隔：路径和关键字里可以有空格。 */
+const listItems = (text: string) => [...new Set(text.split(/[,，\n]+/).map(item => item.trim()).filter(Boolean))];
 
 /** integer 显示成数字，string_list、bot_list 用逗号分隔（bot_list 只显示 appId）。没有绑定时用包的默认值。 */
 function paramText(param: ScenarioParam, value: unknown): string {
@@ -36,14 +37,14 @@ function draftOf(duty: CollaborationDuty, scenarios: CollaborationScenario[], ap
 /** 输入框文字转成参数值；bot_list 的名字只用于展示，沿用已有绑定里的。取值范围由服务端按包的声明校验。 */
 function paramValue(param: ScenarioParam, text: string, current: unknown): unknown {
   if (param.type === 'integer') return Number(text);
-  if (param.type === 'string_list') return words(text);
+  if (param.type === 'string_list') return listItems(text);
   const names = new Map(Array.isArray(current) ? current.map((item: { appId: string; name?: string }) => [item.appId, item.name]) : []);
-  return words(text).map(id => { const name = names.get(id); return { appId: id, ...(name ? { name } : {}) }; });
+  return listItems(text).map(id => { const name = names.get(id); return { appId: id, ...(name ? { name } : {}) }; });
 }
 
 /** 开启时来源机器人参数（role 为 source 的 bot_list）至少要填一个。 */
 const missingSourceParams = (scenario: CollaborationScenario, pack: PackDraft) => pack.enabled
-  ? Object.entries(scenario.params).filter(([name, param]) => param.type === 'bot_list' && param.role === 'source' && !words(pack.params[name] ?? '').length).map(([name]) => name)
+  ? Object.entries(scenario.params).filter(([name, param]) => param.type === 'bot_list' && param.role === 'source' && !listItems(pack.params[name] ?? '').length).map(([name]) => name)
   : [];
 
 /** 群设置里的分工：接话人和各场景包的开关与参数。只提交改动的那几项。 */

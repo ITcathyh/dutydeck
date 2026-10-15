@@ -319,6 +319,25 @@ describe('群分工：接话人与场景包', () => {
     expect(update).toHaveBeenCalledWith('cli_a', 'oc_a', { expectedRevision: 2, scenarios: { 'team-faq': { enabled: true } } });
   });
 
+  it('列表参数只按逗号和换行分隔：带空格的路径和多词关键字原样保存', async () => {
+    const user = userEvent.setup();
+    const faq = faqScenario({ params: {
+      topics: { type: 'string_list', label: '问题关键字', maxItems: 10, maxLength: 32, default: ['部署'] },
+      docs: { type: 'string_list', label: 'runbook 文件', maxItems: 10, maxLength: 200, default: [] }
+    } });
+    getOverview.mockResolvedValue(makeOverview(makeSettings(), { duty: duty(), scenarios: [faq] }));
+    const update = vi.spyOn(collaborationApi, 'updateDuty').mockResolvedValue({ duty: duty({ revision: 3 }) });
+    renderPanel();
+    const topics = await screen.findByLabelText('问题关键字');
+    await user.clear(topics);
+    await user.type(topics, ' on call 交接 ，release train, 部署');
+    await user.type(screen.getByLabelText('runbook 文件'), 'runbooks/On Call.md, runbooks/deploy.md');
+    await user.click(screen.getByRole('button', { name: '保存分工' }));
+    await waitFor(() => expect(update).toHaveBeenCalledOnce());
+    expect(update).toHaveBeenCalledWith('cli_a', 'oc_a', { expectedRevision: 2, scenarios: { 'team-faq': { enabled: false, params: {
+      topics: ['on call 交接', 'release train', '部署'], docs: ['runbooks/On Call.md', 'runbooks/deploy.md'] } } } });
+  });
+
   it('数字参数按整数提交，只提交改动的包；保存后重新拉取并显示服务端存下的值', async () => {
     const user = userEvent.setup();
     const savedBinding = { ...alarmBinding, params: { ...alarmBinding.params, maxPerHour: 5 } };
