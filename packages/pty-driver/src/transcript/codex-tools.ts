@@ -21,8 +21,8 @@ export class CodexToolProjection {
     }
     if (entry?.type === 'event_msg' && p?.type === 'task_complete') {
       const mirrored = typeof p.last_agent_message === 'string' && p.last_agent_message === this.finalText;
-      this.finalText = undefined;
-      if (mirrored) return undefined;
+      if (typeof p.last_agent_message === 'string' && p.last_agent_message) this.finalText = p.last_agent_message;
+      if (mirrored) return events?.filter(event => event.type !== 'text');
     }
     if (entry?.type === 'response_item' && (p?.type === 'function_call' || p?.type === 'custom_tool_call') && p.name === 'exec') {
       const id = events?.[0]?.data?.id;

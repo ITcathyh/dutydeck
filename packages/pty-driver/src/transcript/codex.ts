@@ -33,6 +33,7 @@ import { readNativeTranscriptUsage } from './session-usage.js';
 import { codexInputText } from './input-receipt.js';
 import { CodexToolProjection, mapCodexCompletedTool } from './codex-tools.js';
 import { CodexInputReceipt } from './codex-input-receipt.js';
+import { NativeTurn, nativeTaskError } from './native-turn.js';
 
 const SESSION_SCAN_MAX_DEPTH = 3;
 /** Head window per rollout candidate — session_meta rides the first record.
@@ -290,10 +291,11 @@ export function mapCodexEntry(entry: any): NormalizedDriverEvent[] | undefined {
   }
 
   if (entry.type === 'event_msg' && p.type === 'task_complete') {
-    // Modern schema: the sole final-answer source. Fires once per turn.
-    return typeof p.last_agent_message === 'string' && p.last_agent_message.length > 0
-      ? [{ type: 'text', data: { text: p.last_agent_message } }]
-      : undefined;
+    const error = nativeTaskError(p.error);
+    const events: NormalizedDriverEvent[] = [];
+    if (typeof p.last_agent_message === 'string' && p.last_agent_message.length > 0) events.push({ type: 'text', data: { text: p.last_agent_message } });
+    if (error) events.push(error);
+    return events.length ? events : undefined;
   }
 
   return undefined;
@@ -317,12 +319,14 @@ export interface CodexTranscriptTailerOptions {
 }
 
 export class CodexTranscriptTailer implements TranscriptEventSource {
+  readonly requiresTurnTerminal = true;
   private readonly tailer: JsonlTailer;
+  private readonly turn = new NativeTurn();
   private readonly inputReceipt?: CodexInputReceipt;
 
   constructor(opts: CodexTranscriptTailerOptions) {
     if (opts.sessionId) this.inputReceipt = new CodexInputReceipt(codexHistoryPath(opts.env),
-      () => resolveCliSessionId('codex', { sessionId: opts.sessionId!, cwd: opts.cwd, env: opts.env }));
+      () => resolveCliSessionId('codex', { sessionId: opts.sessionId!, cwd: opts.cwd, env: opts.env }), text => this.turn.bindHistory(text));
     const explicit = opts.transcriptPath;
     // Memoise the session-scoped resolution: JsonlTailer re-resolves every
     // ~300ms tick, and recovering the CLI's own session id means reading
@@ -338,8 +342,14 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
         : opts.sessionId
           ? resolveOnce
           : () => resolveCodexRolloutPath(opts.cwd, opts.env),
-      mapEntry: entry => projection.map(entry),
-      resetMapping: () => projection.reset(),
+      mapEntry: (entry, baseline) => {
+        const bound = this.turn.observe(entry, baseline);
+        if (!baseline && this.turn.requiresBinding() && !bound) return mapCodexEntry(entry)?.filter(event => event.type === 'status');
+        const events = projection.map(entry);
+        return events?.filter(event => event.type !== 'error');
+      },
+      onInputReceipt: entry => this.turn.bind(entry),
+      resetMapping: () => { projection.reset(); this.turn.reset(); },
       inputText: codexInputText,
       deduplicateTools: true,
       pollIntervalMs: opts.pollIntervalMs,
@@ -355,10 +365,16 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
   start(): void { this.inputReceipt?.start(); this.tailer.start(); }
   async flush(): Promise<void> { await Promise.all([this.tailer.flush(), this.inputReceipt?.flush()]); }
   checkpoint(): TranscriptCursor { return this.tailer.checkpoint(); }
-  restore(cursor: TranscriptCursor): void { this.tailer.restore(cursor); }
+  restore(cursor: TranscriptCursor): void { this.tailer.restore(cursor); this.turn.restore(); }
   stop(): void { this.inputReceipt?.stop(); this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
+  onProgress(cb: () => void): void { this.tailer.onProgress(cb); }
+  hasTurnTerminal(): boolean { return this.turn.hasTerminal(); }
+  takeTurnError(): NormalizedDriverEvent | undefined { return this.turn.takeError(); }
+  takeInputError(): NormalizedDriverEvent | undefined { return this.turn.takeError(); }
+  takeInputCancellation(): boolean { return this.turn.takeCancellation(); }
   waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
+    this.turn.arm(signal);
     return this.inputReceipt ? this.inputReceipt.waitForInput(this.tailer, prompt, signal) : this.tailer.waitForInput(prompt, signal);
   }
 }

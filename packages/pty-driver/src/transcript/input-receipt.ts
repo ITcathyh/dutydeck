@@ -5,10 +5,10 @@ export function normalizeInputText(text: string): string {
   return text.replace(/\r\n?/g, '\n');
 }
 
-function contentText(content: unknown): string | undefined {
+function contentText(content: unknown, textTypes = ['text', 'input_text']): string | undefined {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return undefined;
-  const blocks = content.filter(block => block && (block.type === 'text' || block.type === 'input_text') && typeof block.text === 'string');
+  const blocks = content.filter(block => block && textTypes.includes(block.type) && typeof block.text === 'string');
   return blocks.length ? blocks.map(block => block.text).join('') : undefined;
 }
 
@@ -25,5 +25,24 @@ export function codexInputText(entry: any): string | undefined {
   if (entry?.type === 'response_item' && payload?.type === 'message' && payload.role === 'user') return contentText(payload.content);
   if (entry?.type === 'event_msg' && payload?.type === 'user_message') return contentText(payload.message);
   if (entry?.type === 'event_msg' && payload?.type === 'item_completed' && payload.item?.type === 'UserMessage') return contentText(payload.item.content ?? payload.item.text);
+  return undefined;
+}
+
+
+export function traexDisplayCompletions(payload: any, threadId?: string): any[] {
+  if (payload?.operation !== 'append' || typeof payload.turn_id !== 'string' || !payload.turn_id) return [];
+  return (Array.isArray(payload.display_completions) ? payload.display_completions : []).filter((c: any) =>
+    c?.turn_id === payload.turn_id && typeof c.thread_id === 'string' && c.thread_id && (!threadId || c.thread_id === threadId));
+}
+
+/** Canonical model items are not user receipts; only thread/turn-validated
+ * display UserMessages can acknowledge input or carry the session marker. */
+export function traexInputText(entry: any, threadId?: string): string | undefined {
+  if (entry?.type !== 'history_mutation') return codexInputText(entry);
+  for (const completion of traexDisplayCompletions(entry.payload, threadId)) {
+    if (completion.item?.type !== 'UserMessage') continue;
+    const text = contentText(completion.item.content ?? completion.item.text, ['text', 'Text', 'output_text', 'input_text']);
+    if (text !== undefined) return text;
+  }
   return undefined;
 }

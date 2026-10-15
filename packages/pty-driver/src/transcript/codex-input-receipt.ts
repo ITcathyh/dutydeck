@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
  * session must also be the one bound by Dutydeck's unique session marker. */
 export class CodexInputReceipt {
   private readonly history: JsonlTailer;
-  constructor(private readonly path: string, nativeSessionId: () => string | undefined) {
+  constructor(private readonly path: string, nativeSessionId: () => string | undefined, onReceipt?: (text: string) => void) {
     this.history = new JsonlTailer({
       resolvePath: () => path, mapEntry: () => undefined, watchForSwitch: false,
       inputText: entry => typeof entry.text === 'string' && typeof entry.session_id === 'string'
@@ -14,6 +14,7 @@ export class CodexInputReceipt {
         && typeof entry.ts === 'number' && Number.isFinite(entry.ts) && entry.ts > 0
         && entry.session_id === nativeSessionId() ? entry.text : undefined,
       inputTimestamp: entry => entry.ts * 1000,
+      onInputReceipt: entry => onReceipt?.(entry.text),
     });
   }
   start(): void { this.history.start(); }

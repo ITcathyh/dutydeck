@@ -56,6 +56,10 @@ export interface TranscriptEventSource {
   /** Native terminal marker belonging to the current exact input receipt or
    * recovery cursor. Output text alone is not terminal evidence. */
   hasTurnTerminal?(): boolean;
+  /** This dialect always records native terminals; screen silence cannot replace one. */
+  readonly requiresTurnTerminal?: boolean;
+  /** A native cancellation bound to the same exact input as takeInputError. */
+  takeInputCancellation?(): boolean;
   /** Token usage of the model calls recorded since the last call, as a status/turn_usage event. Only
    *  transcripts that record usage (Claude) implement it; undefined means the turn's usage is unknown. */
   takeTurnUsage?(): NormalizedDriverEvent | undefined;
@@ -67,14 +71,17 @@ export type TranscriptEntry = any;
 export interface JsonlTailerOptions {
   /** Resolve the file to tail. Called on the first tick (until a file is
    *  found) and, when watchForSwitch is on, on every subsequent tick. */
-  resolvePath: () => string | undefined;
+  resolvePath: (currentPath?: string) => string | undefined;
   /** Map one parsed JSONL entry to zero or more normalized events. */
-  mapEntry: (entry: TranscriptEntry) => NormalizedDriverEvent[] | undefined;
+  mapEntry: (entry: TranscriptEntry, baseline?: boolean) => NormalizedDriverEvent[] | undefined;
   resetMapping?: () => void;
   /** Poll interval in ms. Default 300. */
   pollIntervalMs?: number;
   /** Re-resolve the path each tick and switch to a newer file. Default true. */
   watchForSwitch?: boolean;
+  /** Verified segments of the same native session: drain old, read new from 0. */
+  followSegments?: boolean;
+  validateRestorePath?: (path: string) => boolean;
   inputText?: (entry: TranscriptEntry) => string | undefined;
   inputTimestamp?: (entry: TranscriptEntry) => number;
   /** Called only for a fresh exact receipt, before mapping that same record. */
@@ -92,11 +99,13 @@ const MAX_RECORD_BYTES = 16 * 1024 * 1024;
 const yieldLoop = () => new Promise<void>(resolve => setImmediate(resolve));
 
 export class JsonlTailer implements TranscriptEventSource {
-  private readonly resolvePath: () => string | undefined;
-  private readonly mapEntry: (entry: TranscriptEntry) => NormalizedDriverEvent[] | undefined;
+  private readonly resolvePath: (currentPath?: string) => string | undefined;
+  private readonly mapEntry: (entry: TranscriptEntry, baseline?: boolean) => NormalizedDriverEvent[] | undefined;
   private readonly resetMapping?: () => void;
   private readonly pollIntervalMs: number;
   private readonly watchForSwitch: boolean;
+  private readonly followSegments: boolean;
+  private readonly validateRestorePath?: JsonlTailerOptions['validateRestorePath'];
   private readonly inputText?: JsonlTailerOptions['inputText'];
   private readonly inputTimestamp?: JsonlTailerOptions['inputTimestamp'];
   private readonly onInputReceipt?: JsonlTailerOptions['onInputReceipt'];
@@ -132,6 +141,8 @@ export class JsonlTailer implements TranscriptEventSource {
     this.resetMapping = opts.resetMapping;
     this.pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_MS;
     this.watchForSwitch = opts.watchForSwitch ?? true;
+    this.followSegments = opts.followSegments ?? false;
+    this.validateRestorePath = opts.validateRestorePath;
     this.inputText = opts.inputText;
     this.inputTimestamp = opts.inputTimestamp;
     this.onInputReceipt = opts.onInputReceipt;
@@ -168,14 +179,15 @@ export class JsonlTailer implements TranscriptEventSource {
   /** Snapshot the file waterline now; later appends belong to a later drain. */
   async flush(): Promise<void> {
     const generation = this.generation;
-    const path = this.currentPath && !this.watchForSwitch ? this.currentPath : this.resolvePath();
+    const path = this.currentPath && !this.watchForSwitch ? this.currentPath : this.resolvePath(this.currentPath);
     const size = path ? this.fileSize(path) : undefined;
+    const previousSize = this.currentPath ? this.fileSize(this.currentPath) : undefined;
     const work = this.work.then(async () => {
       if (generation !== this.generation) return;
       if (this.failure) throw this.failure;
-      const offset = this.completedOffset;
-      await this.tick(path, size, generation);
-      if (generation === this.generation && this.completedOffset !== offset) this.progressCallback?.();
+      const before = this.checkpoint();
+      await this.tick(path, size, generation, previousSize);
+      if (generation === this.generation && (this.completedOffset !== before.offset || this.currentPath !== before.path)) this.progressCallback?.();
     });
     this.work = work.catch(() => {});
     return work;
@@ -205,10 +217,10 @@ export class JsonlTailer implements TranscriptEventSource {
     }
     if (cursor.path) {
       const path = this.resolvePath();
-      if (path !== cursor.path) {
+      if (path !== cursor.path && !this.validateRestorePath?.(cursor.path)) {
         throw new TranscriptRestoreError(`Transcript restore rejected: cursor path ${cursor.path} differs from resolved path ${path ?? 'undefined'}`);
       }
-      const size = this.fileSize(path);
+      const size = this.fileSize(cursor.path);
       if (size === undefined) {
         throw new TranscriptRestoreError(`Transcript restore rejected: cursor file is unavailable at ${path}`);
       }
@@ -245,10 +257,11 @@ export class JsonlTailer implements TranscriptEventSource {
     this.restoreCursor = undefined;
   }
 
-  private async tick(resolvedPath: string | undefined, waterline: number | undefined, generation: number): Promise<void> {
+  private async tick(resolvedPath: string | undefined, waterline: number | undefined, generation: number, previousSize?: number): Promise<void> {
     try {
       if (!this.currentPath) {
-        const path = resolvedPath;
+        const path = this.followSegments && this.restoreCursor?.path && this.validateRestorePath?.(this.restoreCursor.path)
+          ? this.restoreCursor.path : resolvedPath;
         if (!path) {
           if (this.restoreCursor?.path) {
             throw new TranscriptRestoreError(`Transcript restore rejected: resolver did not return ${this.restoreCursor.path}`);
@@ -259,7 +272,7 @@ export class JsonlTailer implements TranscriptEventSource {
         if (this.restoreCursor?.path && path !== this.restoreCursor.path) {
           throw new TranscriptRestoreError(`Transcript restore rejected: cursor path ${this.restoreCursor.path} differs from resolved path ${path}`);
         }
-        const size = waterline;
+        const size = path === resolvedPath ? waterline : this.fileSize(path);
         if (size === undefined) {
           if (this.restoreCursor?.path) {
             throw new TranscriptRestoreError(`Transcript restore rejected: cursor file is unavailable at ${path}`);
@@ -322,6 +335,16 @@ export class JsonlTailer implements TranscriptEventSource {
       if (this.watchForSwitch) {
         const path = resolvedPath;
         if (path && path !== this.currentPath) {
+          if (this.followSegments) {
+            await this.drain(previousSize, generation);
+            if (generation !== this.generation || this.pendingBytes || waterline === undefined) return;
+            this.currentPath = path;
+            this.offset = this.completedOffset = this.pendingStartOffset = 0;
+            this.pending = []; this.pendingBytes = 0;
+            for (const receipt of this.receipts) { receipt.path = path; receipt.offset = 0; }
+            await this.drain(waterline, generation);
+            return;
+          }
           this.toolEvents.clear();
           this.resetMapping?.();
           this.currentPath = path;
@@ -441,7 +464,7 @@ export class JsonlTailer implements TranscriptEventSource {
     }
     let events: NormalizedDriverEvent[] | undefined;
     try {
-      events = this.mapEntry(entry as TranscriptEntry);
+      events = this.mapEntry(entry as TranscriptEntry, baseline);
     } catch {
       return; // A mapper hiccup must not kill the loop.
     }

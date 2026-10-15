@@ -1188,22 +1188,23 @@ export class PtyCliDriver implements AgentDriver {
           return;
         }
         const turnError = this.transcript?.takeTurnError?.();
+        const nativeCancelled = this.transcript?.takeInputCancellation?.() ?? false;
         // A native user receipt proves submission, while a PTY redraw only
         // proves screen activity. Keep the turn open if its assistant record
         // has not reached the transcript yet, even after a completion marker.
-        if (this.adapter.capabilities.nativeInputReceipt && !this.turnHasTranscriptResult && !turnError && !this.interruptPending
+        if (this.adapter.capabilities.nativeInputReceipt && !this.turnHasTranscriptResult && !turnError && !nativeCancelled && !this.interruptPending
           && !this.adapter.screenCancelledPattern?.test(statusLine ?? '')) {
           this.awaitingTranscriptResult = true;
           return;
         }
         if (this.adapter.capabilities.nativeInputReceipt && this.transcript?.hasTurnTerminal
-          && !this.transcript.hasTurnTerminal() && !turnError && !this.interruptPending && !this.backgroundHoldExpired
+          && !this.transcript.hasTurnTerminal() && !turnError && !nativeCancelled && !this.interruptPending && !this.backgroundHoldExpired
           && !this.adapter.screenCancelledPattern?.test(statusLine ?? '')) {
           this.transcriptTerminalWaitAt ??= Date.now();
           // Legacy Claude dialects omit terminal markers. After a bounded
           // drain window retain the existing output + completion-screen
           // contract; elapsed time is not an observed native terminal.
-          if (Date.now() - this.transcriptTerminalWaitAt < 2_000) {
+          if (this.transcript.requiresTurnTerminal || Date.now() - this.transcriptTerminalWaitAt < 2_000) {
             this.awaitingTranscriptResult = true;
             this.idleDetector?.reset(); this.idleDetector?.seedReadyEvidence();
             this.checkRenderedCompletion();
@@ -1217,7 +1218,7 @@ export class PtyCliDriver implements AgentDriver {
         // reason to show; the CLI's own error record is that reason.
         if (turnError && !this.interruptPending) this.emitEvent(turnError);
         this.emitTurnUsage();
-        this.emitEvent({ type: 'completed', data: { stopReason: this.interruptPending ? 'cancelled' : 'end_turn' } });
+        this.emitEvent({ type: 'completed', data: { stopReason: this.interruptPending || nativeCancelled ? 'cancelled' : 'end_turn' } });
         this.interruptPending = false;
         this.turnResolve?.();
         this.turnResolve = null;
@@ -1360,6 +1361,9 @@ export class PtyCliDriver implements AgentDriver {
         // as model output. A newly read error must retry the same idle guard.
         this.idleDetector?.reset();
         this.checkRenderedCompletion();
+        if (!this.adapter.completionPattern && this.adapter.readyPattern?.test(this.snapshot?.viewportText() ?? '')) {
+          this.idleDetector?.seedReadyEvidence();
+        }
       });
       if (restoreTranscript) this.transcript.restore(restoreTranscript);
       this.transcript.start();
@@ -1375,13 +1379,14 @@ export class PtyCliDriver implements AgentDriver {
   private completeInputError(): boolean {
     if (!this.turnActive || !this.turnInputConfirmed || this.interruptPending) return false;
     const error = this.transcript?.takeInputError?.();
-    if (!error) return false;
+    const cancelled = this.transcript?.takeInputCancellation?.() ?? false;
+    if (!error && !cancelled) return false;
     this.turnActive = false;
     this.preparedTurnId = undefined;
     this.clearTurnDeadline(); this.clearRenderedCompletion(); this.clearBackgroundHold();
-    this.emitEvent(error);
+    if (error && !cancelled) this.emitEvent(error);
     this.emitTurnUsage();
-    this.emitEvent({ type: 'completed', data: { stopReason: 'end_turn' } });
+    this.emitEvent({ type: 'completed', data: { stopReason: cancelled ? 'cancelled' : 'end_turn' } });
     this.turnResolve?.();
     this.turnResolve = null; this.turnReject = null;
     return true;

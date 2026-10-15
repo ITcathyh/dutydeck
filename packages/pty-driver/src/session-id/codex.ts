@@ -38,7 +38,7 @@ import {
 import { byMtimeDesc, parseJsonlObjects, readHead, readTail, walkFiles } from './fs-scan.js';
 import { isUsableMarker } from './marker.js';
 import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
-import { codexInputText } from '../transcript/input-receipt.js';
+import { codexInputText, traexInputText } from '../transcript/input-receipt.js';
 
 /** history.jsonl grows without bound; recent sessions are at the end, so a
  *  bounded tail keeps the lookup O(window) rather than O(file). */
@@ -89,6 +89,7 @@ export function findSessionIdInRollouts(
   marker: string,
   cwd: string,
   env?: CliPathEnv,
+  inputText: (entry: any, threadId?: string) => string | undefined = codexInputText,
 ): string | undefined {
   const wanted = realCwd(cwd, env);
   const candidates = walkFiles(sessionsRoot, {
@@ -109,7 +110,7 @@ export function findSessionIdInRollouts(
         if (typeof p?.cwd === 'string' && p.cwd.length > 0) cwdOk = realCwd(p.cwd, env) === wanted;
         continue;
       }
-      if (codexInputText(entry)?.includes(marker)) {
+      if (inputText(entry, metaSessionId)?.includes(marker)) {
         marked = true;
         break;
       }
@@ -129,12 +130,13 @@ function codexFamilyResolve(
   historyPath: string,
   sessionsRoot: string,
   { sessionId, cwd, env }: SessionIdLookupContext,
+  inputText: (entry: any, threadId?: string) => string | undefined = codexInputText,
 ): string | undefined {
   if (!isUsableMarker(sessionId)) return undefined;
   // history.jsonl first: it is written at submit time, so it is populated
   // before the rollout has any user content to match on.
   return findSessionIdInHistory(historyPath, sessionId)
-    ?? findSessionIdInRollouts(sessionsRoot, sessionId, cwd, env);
+    ?? findSessionIdInRollouts(sessionsRoot, sessionId, cwd, env, inputText);
 }
 
 export const codexSessionIdLookup: SessionIdLookup = {
@@ -146,5 +148,6 @@ export const codexSessionIdLookup: SessionIdLookup = {
 
 export const traexSessionIdLookup: SessionIdLookup = {
   adapterIds: ['traex'],
-  resolve: ctx => codexFamilyResolve(traeHistoryPath(ctx.env), traeSessionsRoot(ctx.env), ctx),
+  resolve: ctx => codexFamilyResolve(traeHistoryPath(ctx.env), traeSessionsRoot(ctx.env), ctx,
+    (entry, threadId) => entry?.type === 'history_mutation' && !threadId ? undefined : traexInputText(entry, threadId)),
 };
