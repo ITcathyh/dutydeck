@@ -1004,7 +1004,16 @@ export class SessionAutomationService {
       if (occurrence.created) await this.processOccurrence(occurrence);
       if (openRunStatuses.has(occurrence.value.runStatus)) return;
     }
-    if (!schedule.enabled || schedule.deletedAt || !schedule.nextDueAt || new Date(schedule.nextDueAt) > this.clock() || await this.hasPendingOccurrence(schedule)) return;
+    if (!schedule.enabled || schedule.deletedAt) return;
+    if (!schedule.nextDueAt && schedule.trigger.kind !== 'at') {
+      if (await this.hasPendingOccurrence(schedule)) return;
+      let nextDueAt: string | undefined;
+      try { nextDueAt = previewSessionSchedule(schedule, this.clock())?.scheduledForUtc; }
+      catch { return; } // Invalid legacy triggers must not be reactivated by recovery.
+      if (nextDueAt) await this.replace(scheduleKey(schedule.id), stored.raw, sessionScheduleSchema.parse({ ...schedule, nextDueAt }));
+      return;
+    }
+    if (!schedule.nextDueAt || new Date(schedule.nextDueAt) > this.clock() || await this.hasPendingOccurrence(schedule)) return;
     const id = occurrenceId(schedule, schedule.nextDueAt);
     const already = await this.getRecord(occurrenceKey(id), value => sessionScheduleOccurrenceSchema.parse(value));
     if (already) {

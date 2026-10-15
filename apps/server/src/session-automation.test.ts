@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
   canonicalExecutionJson,
+  previewSessionSchedule,
   sessionScheduleOccurrenceSchema,
   type AttemptResultV1,
   type CiPipelineStatus,
@@ -183,6 +184,103 @@ const scheduleInput = {
   dstPolicy: { gap: 'skip' as const, overlap: 'first' as const },
   condition: { kind: 'always' as const }
 };
+
+describe('recurring schedule watermark recovery', () => {
+  async function enabledWithoutWatermark(h: Awaited<ReturnType<typeof fixture>>, patch = {}) {
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, timezone: 'UTC', ...patch }, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    const key = `session_automation/schedule/${created.id}`;
+    const legacy = JSON.parse((await h.repositories.config.get(key))!);
+    delete legacy.nextDueAt;
+    const raw = JSON.stringify(legacy);
+    await h.repositories.config.set(key, raw);
+    return { key, raw, legacy, id: created.id };
+  }
+
+  it('restores a legacy enabled leap-day schedule and continues execution and delivery after reopening the service', async () => {
+    const deliver = vi.fn(async () => {});
+    const h = await fixture({ clock: new Date('2026-01-01T00:00:00.000Z') });
+    const stored = await enabledWithoutWatermark(h, { trigger: { kind: 'cron', expression: '0 9 29 2 *' } });
+    expect(previewSessionSchedule(stored.legacy, h.now.value)?.scheduledForUtc).toBe('2028-02-29T09:00:00.000Z');
+    await h.service.tick();
+    expect(JSON.parse((await h.repositories.config.get(stored.key))!)).toEqual({ ...stored.legacy, nextDueAt: '2028-02-29T09:00:00.000Z' });
+    expect(h.dispatches).toHaveLength(0);
+    await h.service.close();
+    const reopened = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, clock: () => h.now.value, deliver });
+    cleanups.push(() => reopened.close());
+    h.now.value = new Date('2028-02-29T09:00:00.000Z');
+    await reopened.tick(); await reopened.tick();
+    expect(h.dispatches).toHaveLength(1);
+    expect((await reopened.getScheduleDefinition(h.session.id, stored.id, 'ou_owner')).nextDueAt).toBe('2032-02-29T09:00:00.000Z');
+    h.settleTask(h.dispatches[0]!.id, 'completed', 'leap-day result');
+    await reopened.tick();
+    await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+    await reopened.tick(); expect(deliver).toHaveBeenCalledOnce();
+  });
+
+  it('restores an every-minute schedule using its original anchor without firing during repair', async () => {
+    const h = await fixture({ clock: new Date('2026-01-01T00:00:30.000Z') });
+    const stored = await enabledWithoutWatermark(h, { trigger: { kind: 'interval', everySeconds: 60, anchorAt: '2026-01-01T00:00:00.000Z' } });
+    await h.service.tick();
+    expect(JSON.parse((await h.repositories.config.get(stored.key))!)).toEqual({ ...stored.legacy, nextDueAt: '2026-01-01T00:01:00.000Z' });
+    expect(h.dispatches).toHaveLength(0);
+    h.now.value = new Date('2026-01-01T00:01:00.000Z');
+    await h.service.tick(); await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
+    expect((await h.service.getScheduleDefinition(h.session.id, stored.id, 'ou_owner')).nextDueAt).toBe('2026-01-01T00:02:00.000Z');
+  });
+
+  it.each(['at', 'disabled', 'deleted', 'invalid-cron', 'invalid-timezone', 'impossible-date'] as const)('does not revive a %s schedule without a watermark', async kind => {
+    const h = await fixture({ clock: new Date('2026-01-01T00:00:00.000Z') });
+    const stored = await enabledWithoutWatermark(h, { trigger: { kind: 'interval', everySeconds: 60, anchorAt: '2026-01-01T00:00:00.000Z' } });
+    const value = { ...stored.legacy };
+    if (kind === 'at') { value.trigger = { kind: 'at', localDateTime: '2025-12-31T23:00:00' }; value.taskStartOccurrenceId = 'completed-once'; }
+    if (kind === 'disabled') value.enabled = false;
+    if (kind === 'deleted') value.deletedAt = '2025-12-31T23:00:00.000Z';
+    if (kind === 'invalid-cron') value.trigger = { kind: 'cron', expression: '99 9 * * *' };
+    if (kind === 'invalid-timezone') value.timezone = 'Invalid/Timezone';
+    if (kind === 'impossible-date') value.trigger = { kind: 'cron', expression: '0 9 31 2 *' };
+    const raw = JSON.stringify(value); await h.repositories.config.set(stored.key, raw);
+    await h.service.tick();
+    expect(await h.repositories.config.get(stored.key)).toBe(raw);
+    expect(h.dispatches).toHaveLength(0);
+  });
+
+  it.each(['disable', 'edit'] as const)('keeps a concurrent %s when recovery loses the source CAS', async change => {
+    const h = await fixture({ clock: new Date('2026-01-01T00:00:00.000Z') });
+    const stored = await enabledWithoutWatermark(h, { trigger: { kind: 'cron', expression: '0 9 29 2 *' } });
+    const compare = h.repositories.config.compareAndSet!.bind(h.repositories.config);
+    let edited: string | undefined;
+    vi.spyOn(h.repositories.config, 'compareAndSet').mockImplementation(async (key, expected, value) => {
+      if (key === stored.key && expected === stored.raw) {
+        edited = JSON.stringify({ ...stored.legacy, revision: stored.legacy.revision + 1, generation: stored.legacy.generation + 1,
+          ...(change === 'disable' ? { enabled: false } : { prompt: 'concurrent edit', nextDueAt: '2028-03-01T09:00:00.000Z' }) });
+        await h.repositories.config.set(key, edited);
+      }
+      return compare(key, expected, value);
+    });
+    await h.service.tick();
+    expect(edited).toBeDefined();
+    expect(await h.repositories.config.get(stored.key)).toBe(edited);
+    expect(h.dispatches).toHaveLength(0);
+  });
+
+  it('keeps an unresolved occurrence slot when a legacy recurring schedule has no watermark', async () => {
+    const h = await fixture({ clock: new Date('2026-01-01T00:00:00.000Z') });
+    const stored = await enabledWithoutWatermark(h, { trigger: { kind: 'cron', expression: '0 9 29 2 *' } });
+    const occurrence = sessionScheduleOccurrenceSchema.parse({ schemaVersion: 2, id: 'unresolved', revision: 1, scheduleId: stored.id,
+      sessionId: h.session.id, generation: stored.legacy.generation, scheduledForUtc: '2024-02-29T09:00:00.000Z', conditionStatus: 'passed', runStatus: 'blocked',
+      delivery: { status: 'not_requested', attempts: 0, updatedAt: '2024-02-29T09:00:00.000Z' }, createdAt: '2024-02-29T09:00:00.000Z', updatedAt: '2024-02-29T09:00:00.000Z' });
+    await h.repositories.config.set('session_automation/occurrence/unresolved', JSON.stringify(occurrence));
+    await h.service.tick();
+    expect(await h.repositories.config.get(stored.key)).toBe(stored.raw);
+    expect(h.dispatches).toHaveLength(0);
+    const { pendingOccurrence: _pending, ...withoutReservation } = JSON.parse((await h.repositories.config.get(stored.key))!);
+    await h.repositories.config.set(stored.key, JSON.stringify({ ...withoutReservation, pendingOccurrence: { id: 'unresolved', generation: stored.legacy.generation, scheduledForUtc: occurrence.scheduledForUtc } }));
+    const reserved = await h.repositories.config.get(stored.key);
+    await h.service.tick(); expect(await h.repositories.config.get(stored.key)).toBe(reserved);
+  });
+});
 
 async function completedSchedules(h: Awaited<ReturnType<typeof fixture>>, count = 1) {
   for (let index = 0; index < count; index++) {
