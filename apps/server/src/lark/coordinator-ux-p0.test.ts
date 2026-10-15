@@ -5,7 +5,7 @@
 // 真实 DutydeckRuntime + SQLite 持久化 + 真实 LarkWorkflowInteractions，service 为内存 mock。
 // /repair 的外部发布绝不真实发生：open-platform-session 整体被 mock，client 为测试桩。
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -133,11 +133,11 @@ async function harness(
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
   let nextCard = 0;
   const cards = new Map<string, any>();
-  const createCard = async (input: any) => { const id = `om_card_${++nextCard}`; cards.set(id, input); return { messageId: id }; };
+  const createCard = async ({ beforeSend, ...input }: any) => { await beforeSend?.(); const id = `om_card_${++nextCard}`; cards.set(id, structuredClone(input)); return { messageId: id }; };
   const service = {
     send: vi.fn(createCard), reply: vi.fn(createCard),
-    uploadFile: vi.fn(async () => `file_${Math.random()}`), replyFile: vi.fn(createCard), sendFile: vi.fn(createCard),
-    update: vi.fn(async (input: any) => { cards.set(input.messageId, input); return { messageId: input.messageId }; }),
+    uploadFile: vi.fn(async (input: any) => { await input.beforeSend?.(); return `file_${Math.random()}`; }), replyFile: vi.fn(createCard), sendFile: vi.fn(createCard),
+    update: vi.fn(async ({ beforeSend, ...input }: any) => { await beforeSend?.(); cards.set(input.messageId, structuredClone(input)); return { messageId: input.messageId }; }),
     addReaction: vi.fn(async (messageId: string, emojiType = 'OK') => ({ messageId, reactionId: `reaction_${messageId}_${emojiType}` })),
     deleteReaction: vi.fn(async () => {}), getUserEmails: vi.fn(async (_openIds?: string[]) => [] as string[]),
     listChatMembers: vi.fn(async () => ({ items: [{ memberId: 'ou_alice' }, { memberId: 'ou_bob' }], hasMore: false })),
@@ -145,6 +145,9 @@ async function harness(
     getMessage: vi.fn(async (id: string) => ({ messageId: id, chatId: 'oc_group', threadId: 'omt_topic', messageType: 'text', rawContent: JSON.stringify({ text: '已核实的引用材料' }), sender: { type: 'user' }, mentions: [] })),
     getMessageItems: vi.fn(async () => [] as any[]),
     downloadMessageResource: vi.fn(async () => ({ data: new Uint8Array([65, 66, 67]), contentType: 'text/plain' })),
+    downloadMessageResourceToFile: vi.fn(async (_messageId: string, _key: string, destination: string, signal?: AbortSignal) => {
+      signal?.throwIfAborted(); await writeFile(destination, new Uint8Array([65, 66, 67])); signal?.throwIfAborted(); return { contentType: 'text/plain' };
+    }),
     readDocument: vi.fn(async (url: string) => ({ url, title: '需求', text: '文档中的明确验收条件' }))
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };

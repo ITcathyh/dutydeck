@@ -95,9 +95,12 @@ describe('artifact delivery', () => {
     const client = { uploadFile: vi.fn(async input => { await paused; return input.idempotencyKey; }), uploadImage: vi.fn(), sendImage: vi.fn(), sendFile: vi.fn(async input => ({ messageId: input.idempotencyKey, chatId: 'oc_group' })) };
     const base = { configs: config, cwd, client, path: 'report.txt', target: { chatId: 'oc_group' }, image: false, idempotencyKey: 'same-key' };
     const first = deliverArtifact({ ...base, sessionId: 'ses_one' });
-    await new Promise(resolve => setTimeout(resolve, 0));
-    await expect(deliverArtifact({ ...base, configs: secondConfig, sessionId: 'ses_one' })).rejects.toMatchObject({ code: 'ARTIFACT_DELIVERY_IN_PROGRESS' });
-    release(); await first;
+    try {
+      // Provider entry proves the first caller has acquired the persisted lease. A timer tick does not.
+      await vi.waitFor(() => expect(client.uploadFile).toHaveBeenCalledOnce());
+      await expect(deliverArtifact({ ...base, configs: secondConfig, sessionId: 'ses_one' })).rejects.toMatchObject({ code: 'ARTIFACT_DELIVERY_IN_PROGRESS' });
+    } finally { release(); }
+    await first;
     await deliverArtifact({ ...base, sessionId: 'ses_two' });
     expect(client.uploadFile.mock.calls[0]![0].idempotencyKey).not.toBe(client.uploadFile.mock.calls[1]![0].idempotencyKey);
     expect(client.uploadFile.mock.calls[0]![0].idempotencyKey).toMatch(/^dutydeck-.{40}$/);

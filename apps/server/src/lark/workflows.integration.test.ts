@@ -1,6 +1,6 @@
 import { LarkGroupParticipation } from './group-participation.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -109,12 +109,12 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
   let nextCard = 0;
   const cards = new Map<string, any>();
   const files = new Map<string, Uint8Array>();
-  const createCard = async (input: any) => { const id = `om_card_${++nextCard}`; cards.set(id, input); return { messageId: id }; };
+  const createCard = async ({ beforeSend, ...input }: any) => { await beforeSend?.(); const id = `om_card_${++nextCard}`; cards.set(id, structuredClone(input)); return { messageId: id }; };
   const service = {
     send: vi.fn(createCard), reply: vi.fn(createCard),
-    uploadFile: vi.fn(async (input: any) => { const key = `file_${files.size + 1}`; files.set(key, input.data); return key; }),
+    uploadFile: vi.fn(async (input: any) => { await input.beforeSend?.(); const key = `file_${files.size + 1}`; files.set(key, input.data); return key; }),
     replyFile: vi.fn(createCard), sendFile: vi.fn(createCard),
-    update: vi.fn(async (input: any) => { cards.set(input.messageId, input); return { messageId: input.messageId }; }),
+    update: vi.fn(async ({ beforeSend, ...input }: any) => { await beforeSend?.(); cards.set(input.messageId, structuredClone(input)); return { messageId: input.messageId }; }),
     addReaction: vi.fn(async (messageId: string) => {
       const record = await repos.config.get(`lark.inbox.${config.appId}.${messageId}`);
       expect(record, 'receipt must follow durable inbox acceptance').toBeTruthy();
@@ -126,6 +126,9 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
     getMessage: vi.fn(async (id: string) => ({ messageId: id, chatId: 'oc_group', threadId: 'omt_topic', messageType: 'text', rawContent: JSON.stringify({ text: '已核实的引用材料' }), sender: { type: 'user' }, mentions: [] })),
     getMessageItems: vi.fn(async () => []),
     downloadMessageResource: vi.fn(async () => ({ data: new Uint8Array([65, 66, 67]), contentType: 'text/plain' })),
+    downloadMessageResourceToFile: vi.fn(async (_messageId: string, _key: string, destination: string, signal?: AbortSignal) => {
+      signal?.throwIfAborted(); await writeFile(destination, new Uint8Array([65, 66, 67])); signal?.throwIfAborted(); return { contentType: 'text/plain' };
+    }),
     readDocument: vi.fn(async (url: string) => ({ url, title: '需求', text: '文档中的明确验收条件' }))
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -1105,7 +1108,11 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
       await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(2));
       expect(h.send.mock.calls[1]?.[0]).toContain('evidence.txt');
       expect(h.send.mock.calls[1]?.[0]).toContain('文档中的明确验收条件');
-      expect(h.service.downloadMessageResource).toHaveBeenCalledOnce();
+      expect(h.service.downloadMessageResourceToFile).toHaveBeenCalledOnce();
+      const filePath = /已下载到本地：([^。]+)。/.exec(h.send.mock.calls[0]?.[0] ?? '')?.[1];
+      expect(filePath).toBeTruthy();
+      expect(await readFile(filePath!, 'utf8')).toBe('ABC');
+      expect(h.send.mock.calls[1]?.[0]).toContain(filePath);
       const [session] = await h.runtime.listSessions();
       expect((await h.runtime.getTasks(session!.id)).map(task => task.prompt)).toEqual([goal, goal]);
     } finally { restored.stop(); }

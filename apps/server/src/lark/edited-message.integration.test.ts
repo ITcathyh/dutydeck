@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,7 +37,10 @@ async function harness() {
     getMessage: vi.fn(async (id: string) => ({ messageId: id, chatId: 'oc_group', messageType: 'text',
       rawContent: '{"text":"reference"}', sender: { type: 'user' }, mentions: [] })),
     getMessageItems: vi.fn(async () => []),
-    downloadMessageResource: vi.fn(async () => ({ data: new Uint8Array([65, 66, 67]), contentType: 'text/plain' }))
+    downloadMessageResource: vi.fn(async () => ({ data: new Uint8Array([65, 66, 67]), contentType: 'text/plain' })),
+    downloadMessageResourceToFile: vi.fn(async (_messageId: string, _key: string, destination: string, signal?: AbortSignal) => {
+      signal?.throwIfAborted(); await writeFile(destination, new Uint8Array([65, 66, 67])); signal?.throwIfAborted(); return { contentType: 'text/plain' };
+    })
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const createCoordinator = () => new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
@@ -124,7 +127,7 @@ describe('edited-message real coordinator and SQLite inbox', () => {
     expect(h.runtime.dispatch).toHaveBeenCalledOnce();
     const agentPrompt = String(h.runtime.dispatch.mock.calls[0]?.[3]);
     if (messageType !== 'file') expect(h.service.downloadMessageResource).toHaveBeenCalledWith(event.messageId, 'img_edit', 'image');
-    if (messageType !== 'image') expect(h.service.downloadMessageResource).toHaveBeenCalledWith(event.messageId, 'file_edit', 'file');
+    if (messageType !== 'image') expect(h.service.downloadMessageResourceToFile).toHaveBeenCalledWith(event.messageId, 'file_edit', expect.stringContaining(resourcesPath), expect.any(AbortSignal));
     expect(agentPrompt).toContain(resourcesPath);
     const files = await readdir(resourcesPath);
     expect(files).toHaveLength(messageType === 'post' ? 2 : 1);

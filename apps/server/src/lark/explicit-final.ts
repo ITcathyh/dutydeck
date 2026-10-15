@@ -4,7 +4,7 @@ import { isLarkMessageUnupdatable } from './card-renderer.js';
 import type { ConfigRepository, ChannelMapping } from '@dutydeck/shared';
 import type { PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask } from './persisted-card-task.js';
-import { isLarkFinalContentAuditRejected, recordLarkResultAuditRejection, prepareLarkResult, sendLarkResult, type DeliveryTarget } from './result-delivery.js';
+import { isLarkFinalContentAuditRejected, recordLarkResultAuditRejection, prepareLarkResult, readConfirmedLarkResult, sendLarkResult, type DeliveryTarget } from './result-delivery.js';
 import { LarkServiceError, type LarkCardInput, type LarkCardService, type LarkWriteGuard } from './service.js';
 import type { LarkAgentSessionBinding } from './agent-tools.js';
 
@@ -94,6 +94,23 @@ export async function hasExplicitFinal(store: ConfigRepository | undefined, cont
   return Boolean(record && (record.status !== 'failed' || record.audit_rejected));
 }
 const log = { warn: (..._args: any[]) => {} };
+const finalInput = (record: FinalRecord) => ({
+  state: 'running' as const, cardKind: 'result' as const, statusLabel: '答复已送达，执行尚未结束', readOnly: true,
+  taskId: record.scope.origin_message_id, taskName: record.task_name, sessionId: record.scope.session_id, turn: record.scope.turn,
+  capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, canVerify: false },
+  elements: [{ tag: 'markdown', element_id: 'final_output', content: record.content }], idempotencyKey: record.provider_uuid
+});
+/** Confirmed body only; never PATCH execution decorations during expired recovery. */
+export async function readConfirmedExplicitFinal(store: ConfigRepository | undefined, service: LarkCardService, context: ExplicitFinalContext | undefined) {
+  if (!store || !context) return;
+  const record = await readRecord(store, context.scope);
+  if (!record || record.status === 'failed' || record.audit_rejected) return;
+  if (record.message_id) return { messageId: record.message_id, elements: record.elements!, attachmentMessageId: record.attachment_message_id };
+  const receipt = await readConfirmedLarkResult(service, targetFor(record.scope), finalInput(record), log, store);
+  if (receipt) await store.set(keyFor(record.scope), JSON.stringify({ ...record, status: 'delivered',
+    message_id: receipt.messageId, elements: receipt.elements, attachment_message_id: receipt.attachmentMessageId }));
+  return receipt;
+}
 async function deliver(store: ConfigRepository, service: LarkCardService, record: FinalRecord, beforeSend?: LarkWriteGuard) {
   if (record.message_id) return record;
   if (record.first_attempt_at === undefined) {
@@ -130,12 +147,7 @@ async function deliver(store: ConfigRepository, service: LarkCardService, record
     if (record.audit_rejected || await store.get(`lark.delivery.${record.provider_uuid}.audit_rejected`)) {
       await sendLarkResult(strictService, targetFor(record.scope), { state: 'running', elements: [], idempotencyKey: record.provider_uuid }, log, store, beforeSend);
     }
-    const prepared = await prepareLarkResult(strictService, targetFor(record.scope), {
-      state: 'running', cardKind: 'result', statusLabel: '答复已送达，执行尚未结束', readOnly: true,
-      taskId: record.scope.origin_message_id, taskName: record.task_name, sessionId: record.scope.session_id, turn: record.scope.turn,
-      capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, canVerify: false },
-      elements: [{ tag: 'markdown', element_id: 'final_output', content: record.content }], idempotencyKey: record.provider_uuid
-    }, log, store, beforeSend);
+    const prepared = await prepareLarkResult(strictService, targetFor(record.scope), finalInput(record), log, store, beforeSend);
     // A delivered (including cached) attachment makes this a partial delivery:
     // keep its intent retryable if the summary fails, never start a second result.
     attachmentMessageId = prepared.attachmentMessageId;

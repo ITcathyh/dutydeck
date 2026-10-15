@@ -156,8 +156,7 @@ describe('Agent handoff A → B → A through Runtime, SQLite and both Lark coor
     await h.coordinators[1]!.handle(bEvent, b!);
     await h.coordinators[1]!.handle(bEvent, b!);
     await vi.waitFor(async () => expect((await h.repos.config.get(`lark.inbox.${b!.appId}.${sentAB.id}`))).toContain('accepted'));
-    const queuedB = (await h.runtime.getTasks(firstB.session.id)).filter(task => task.status === 'queued');
-    expect(queuedB).toHaveLength(1);
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(firstB.session.id)).filter(task => task.status === 'queued')).toHaveLength(1));
     expect(h.sends.filter(send => send.agentId === 'b')).toHaveLength(1);
     h.sends.find(send => send.agentId === 'b')!.release();
     const secondB = await h.ready(b!.appId, sentAB.id);

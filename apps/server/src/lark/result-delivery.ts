@@ -115,6 +115,8 @@ export async function sendLarkFile(
   }, target.allowReplyFallback === false ? result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim()) : undefined);
 }
 
+const downgradedResultKey = (key: string) => `result_d_${createHash('sha256').update(key).digest('hex').slice(0, 40)}`;
+
 // 飞书卡片的表格上限：单个 Markdown 组件最多 4 个表格，整张卡最多 5 个表格组件。官方没写 Markdown 表格是否计入整卡上限，
 // 外部项目报告超过时同样被拒收（230099 / ErrCode 11310），这里按计入处理。
 const larkCardTableLimits = { markdown: 4, card: 5 } as const;
@@ -171,7 +173,7 @@ export async function prepareLarkResult(
   const fits = !forceAttachment && (!output || typeof output === 'string'
     && larkCardFinalOutputText(card.body.elements as Array<Record<string, unknown>>) === larkCardShownResult(output) && withinTableLimits(card.body.elements));
   let attachmentMessageId: string | undefined;
-  if (forceAttachment) resultInput.idempotencyKey = `result_d_${createHash('sha256').update(input.idempotencyKey).digest('hex').slice(0, 40)}`;
+  if (forceAttachment) resultInput.idempotencyKey = downgradedResultKey(input.idempotencyKey);
   if (!fits) {
     // 附件名用结果卡标题（结论第一句）：去掉文件名里不能出现的字符，群里看到的是一个能读懂的名字。
     const filename = `${(input.taskName ?? '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60).replace(/[. ]+$/, '') || '执行结果'}.md`;
@@ -265,6 +267,34 @@ export async function sendLarkResult(
       await recordLarkResultAuditRejection(service, target, input.idempotencyKey, error, log, store, beforeSend);
     }
     throw error;
+  }
+}
+
+/** Recover confirmed receipts only. The guard forbids every missing upload/send leg. */
+export async function readConfirmedLarkResult(
+  service: LarkCardService, target: DeliveryTarget,
+  input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string },
+  log: DeliveryLog, store?: ConfigRepository
+): Promise<{ messageId: string; elements: Array<Record<string, any>>; attachmentMessageId?: string } | undefined> {
+  if (!store || await store.get(`lark.delivery.${input.idempotencyKey}.audit_rejected`)) return;
+  const missing = () => { throw new LarkServiceError('LARK_RESULT_RECEIPT_MISSING', '完整结果尚无已确认回执。', 409); };
+  for (const fallback of [false, true]) {
+    const key = fallback ? downgradedResultKey(input.idempotencyKey) : input.idempotencyKey;
+    if (!await store.get(`lark.delivery.${key}.summary`)) continue;
+    try {
+      const prepared = await prepareLarkResult(service, { ...target, allowReplyFallback: false }, input, log, store, missing, fallback);
+      const output = prepared.input.elements.find(item => item.element_id === 'final_output')?.content;
+      const sent = await delivered<{ messageId: string; elements: Array<Record<string, any>> }>(store, `lark.delivery.${key}.summary`, async () => missing(), result =>
+        typeof result?.messageId === 'string' && Boolean(result.messageId.trim()) && Array.isArray(result.elements)
+        && result.elements.every(item => item && typeof item === 'object')
+        && (output === undefined ? JSON.stringify(result.elements) === JSON.stringify(prepared.input.elements)
+          : result.elements.find(item => item.element_id === 'final_output')?.content === output)
+        && (!prepared.attachmentMessageId || result.elements.some(item => item.element_id === 'result_attachment')));
+      // Return what was actually confirmed, not new decorations or a regenerated attachment filename.
+      return { ...sent, ...(prepared.attachmentMessageId ? { attachmentMessageId: prepared.attachmentMessageId } : {}) };
+    } catch (error) {
+      if (!(error instanceof SyntaxError) && !(error instanceof LarkServiceError && error.code === 'LARK_RESULT_RECEIPT_MISSING')) throw error;
+    }
   }
 }
 

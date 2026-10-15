@@ -5,7 +5,7 @@ import { LarkMessageCoordinator } from './coordinator.js';
 import { createLarkCardService } from './service.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 
-export async function deliveryCoordinator(cwd: string, fetcher: typeof fetch) {
+export async function deliveryCoordinator(cwd: string, fetcher: typeof fetch, answer = 'synthetic final answer') {
   const repos = createRepositories(`${cwd}/state.db`, { newDatabaseAuthority: 'ledger_v1' });
   let finish = () => {};
   let ready = false;
@@ -13,7 +13,7 @@ export async function deliveryCoordinator(cwd: string, fetcher: typeof fetch) {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => ({
       start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
-      send: async () => new Promise<void>(resolve => { ready = true; finish = () => { emit({ type: 'text', data: { text: 'synthetic final answer' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); resolve(); }; })
+      send: async () => new Promise<void>(resolve => { ready = true; finish = () => { emit({ type: 'text', data: { text: answer } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); resolve(); }; })
     } as AgentDriver)
   });
   const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd,

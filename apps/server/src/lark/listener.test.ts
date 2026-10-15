@@ -188,7 +188,7 @@ describe('Lark message coordinator', () => {
     const service = {
       addReaction: vi.fn(async () => ({})), send: vi.fn(async () => ({ messageId: 'om_card' })),
       deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' })),
-      downloadMessageResource: vi.fn(async () => { throw new Error('Access denied'); })
+      downloadMessageResourceToFile: vi.fn(async () => { throw new Error('Access denied'); })
     };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
     coordinator.handle({ messageId: 'om_file', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'file', content: '{"file_key":"file_1","file_name":"需求.pdf"}', mentions: [] }, config);
@@ -1415,7 +1415,7 @@ describe('Lark message coordinator', () => {
     };
     const recoveryRuntime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '真实最终结果' })]) };
     const recoveryService = { update: vi.fn(async () => { throw messageMissingError(); }), send: vi.fn(async () => ({ messageId: 'om_live_replacement' })) };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const recovered = new LarkMessageCoordinator(recoveryRuntime as any, recoveryService as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
     await recovered.reconcile(config);
 
@@ -1438,12 +1438,12 @@ describe('Lark message coordinator', () => {
       send: vi.fn(async () => ({ messageId: 'om_card' })), update: vi.fn(async (input: any) => ({ messageId: input.messageId }))
     };
     const mapping = { id: 'lark-card:cli_test:om_save_fail', channel: 'lark-card:cli_test', externalId: 'om_save_fail', sessionId: session.id, createdAt: '', extra: '' };
-    // 只让终态那次落库失败：这正是「PATCH 已成功、持久化没写进去」的裂缝。
+    // 只让过程终态 PATCH 后第一次保存失败；首次结果时间锚必须在下一次保存成功后才允许发送。
     let terminalReached = false;
     const mappings = {
       list: vi.fn(async () => []), get: vi.fn(async () => mapping),
       save: vi.fn(async (saved: typeof mapping) => {
-        if (JSON.parse(saved.extra).state === 'completed') { terminalReached = true; throw new Error('database is locked'); }
+        if (!terminalReached && JSON.parse(saved.extra).state === 'completed') { terminalReached = true; throw new Error('database is locked'); }
         mapping.extra = saved.extra;
       })
     };
@@ -1469,6 +1469,68 @@ describe('Lark message coordinator', () => {
     expect(service.send).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(service.send.mock.calls[1]?.[0].elements)).toContain('真实最终结果');
     expect(log.warn).toHaveBeenCalled();
+  });
+
+  it('keeps result side effects blocked while the first delivery anchor cannot persist, then recovers once', async () => {
+    let subscriber: ((event: AgentEvent) => void) | undefined;
+    const output = agentEvent(1, 'text', { text: '时间锚恢复后的最终结果' });
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session),
+      subscribe: vi.fn((_id: string, listener: (event: AgentEvent) => void) => { subscriber = listener; return vi.fn(); }),
+      send: vi.fn(async () => { subscriber?.(output); }), interrupt: vi.fn(async () => {})
+    };
+    const mapping = { id: 'lark-card:cli_test:om_anchor_fail', channel: 'lark-card:cli_test', externalId: 'om_anchor_fail', sessionId: session.id, createdAt: '', extra: '' };
+    let blockAnchor = true;
+    const persist = (extra: string) => {
+      if (blockAnchor && JSON.parse(extra).final_delivery_first_failed_at !== undefined) throw new Error('anchor database is locked');
+      mapping.extra = extra;
+    };
+    const mappings = {
+      list: vi.fn(async () => [mapping]),
+      get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined),
+      save: vi.fn(async (saved: typeof mapping) => persist(saved.extra)),
+      compareAndSetExtra: vi.fn(async (_id: string, expected: string | null | undefined, extra: string) => {
+        if ((mapping.extra ?? null) !== (expected ?? null)) return false;
+        persist(extra); return true;
+      })
+    };
+    const delivered: string[] = [];
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-anchor' })), deleteReaction: vi.fn(async () => {}),
+      send: vi.fn(async (input: any) => {
+        await input.beforeSend?.();
+        if (input.cardKind === 'result') {
+          expect(JSON.parse(mapping.extra).final_delivery_first_failed_at).toEqual(expect.any(Number));
+          delivered.push(input.idempotencyKey);
+        }
+        return { messageId: input.cardKind === 'result' ? 'om_anchor_result' : 'om_anchor_process' };
+      }),
+      update: vi.fn(async (input: any) => { await input.beforeSend?.(); return { messageId: input.messageId }; })
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot', undefined, mappings as any);
+    await coordinator.handle({ messageId: mapping.externalId, chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', mentions: [] }, config);
+    await vi.waitFor(() => expect(log.error).toHaveBeenCalledWith(expect.objectContaining({ error: expect.objectContaining({ message: 'anchor database is locked' }) }), '交付飞书执行结果失败，等待对账补偿'));
+    expect(delivered).toEqual([]);
+    expect(service.send).toHaveBeenCalledOnce();
+    expect(JSON.parse(mapping.extra).final_delivery_first_failed_at).toBeUndefined();
+    coordinator.stop();
+
+    const saved = JSON.parse(mapping.extra);
+    const runtimeTask = { id: 'runtime-anchor', sessionId: session.id, prompt: '执行任务', status: 'completed', createdAt: new Date(saved.started_at).toISOString(), updatedAt: new Date().toISOString() };
+    const recoveredRuntime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [output]) };
+    const recovered = new LarkMessageCoordinator(recoveredRuntime as any, service as any, log, Math.random, undefined, undefined, mappings as any);
+    try {
+      await expect(recovered.reconcile(config)).resolves.toBeGreaterThan(0);
+      expect(delivered).toEqual([]);
+      expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ error: expect.objectContaining({ message: 'anchor database is locked' }) }), '执行结果交付待下次对账重试');
+      blockAnchor = false;
+      await expect(recovered.reconcile(config)).resolves.toBe(0);
+      expect(delivered).toHaveLength(1);
+      expect(JSON.parse(mapping.extra)).toMatchObject({ final_message_id: 'om_anchor_result', final_delivery_state: 'delivered' });
+      await expect(recovered.reconcile(config)).resolves.toBe(0);
+      expect(delivered).toHaveLength(1);
+    } finally { recovered.stop(); }
   });
 
   // 评审 4：终态入队后，任何还在飞的心跳/进度更新都不得把它挤掉。
@@ -1832,7 +1894,7 @@ describe('Lark message coordinator', () => {
       agentEvent(5, 'text', { text: '不应串入的结果' })
     ]) };
     const service = { update: vi.fn(async () => ({ messageId: 'om_running' })), send: vi.fn(async () => ({ messageId: 'om_final' })) };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await coordinator.reconcile(config);
@@ -1857,7 +1919,7 @@ describe('Lark message coordinator', () => {
     };
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '最终结果' })]) };
     const service = { update: vi.fn(async () => ({ messageId: 'om_progress' })), send: vi.fn(async () => ({ messageId: 'om_result' })) };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await expect(coordinator.reconcile(config)).resolves.toBe(0);
@@ -1891,7 +1953,7 @@ describe('Lark message coordinator', () => {
       agentEvent(3, 'task', { task: runtimeTask })
     ]) };
     const service = { update: vi.fn(async () => ({ messageId: 'om_legacy_receipt' })), send: vi.fn(async () => ({ messageId: 'om_legacy_result' })) };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await expect(coordinator.reconcile(config)).resolves.toBe(0);
@@ -1915,7 +1977,7 @@ describe('Lark message coordinator', () => {
         .mockRejectedValueOnce(new Error('temporary result delivery failure'))
         .mockResolvedValueOnce({ messageId: 'om_recovered_result' })
     };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await expect(coordinator.reconcile(config)).resolves.toBe(1);
@@ -1958,7 +2020,7 @@ describe('Lark message coordinator', () => {
     };
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '历史结论' })]) };
     const service = { update: vi.fn(async () => ({ messageId: 'om_old_progress' })), send: vi.fn(), reply: vi.fn() };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await expect(coordinator.reconcile(config)).resolves.toBe(0);
@@ -1987,7 +2049,7 @@ describe('Lark message coordinator', () => {
     };
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '历史结论' })]) };
     const service = { update: vi.fn(async () => { throw messageMissingError(); }), send: vi.fn(), reply: vi.fn() };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     // 不可更新即视为已收敛：不计 unresolved，也不发任何补偿卡片。
@@ -2010,7 +2072,7 @@ describe('Lark message coordinator', () => {
     };
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'error', { message: '命令失败' })]) };
     const service = { update: vi.fn(async () => ({ messageId: 'om_failed_card' })), send: vi.fn(async () => ({ messageId: 'om_failed_final' })) };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await coordinator.reconcile(config);
@@ -2038,7 +2100,7 @@ describe('Lark message coordinator', () => {
       ])
     };
     const service = { update: vi.fn(async () => ({ messageId: 'om_waiting' })), send: vi.fn(async () => ({ messageId: 'om_waiting_final' })) };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await expect(coordinator.startReconciliation(config, 50)).resolves.toBe(1);
@@ -2063,7 +2125,7 @@ describe('Lark message coordinator', () => {
     };
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '真实最终结果' })]) };
     const service = { update: vi.fn(async () => { throw messageMissingError(); }), send: vi.fn(async () => ({ messageId: 'om_completed_replacement' })) };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await coordinator.reconcile(config);
@@ -2089,7 +2151,7 @@ describe('Lark message coordinator', () => {
       update: vi.fn().mockRejectedValueOnce(contentError).mockResolvedValueOnce({ messageId: 'om_rejected' }),
       send: vi.fn(async () => ({ messageId: 'om_safe_final' }))
     };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, undefined, undefined, mappings as any);
 
@@ -2118,7 +2180,7 @@ describe('Lark message coordinator', () => {
     const contentError = new LarkServiceError('LARK_OPENAPI_ERROR', 'card content rejected', 502, { upstreamCode: 230099 });
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '未通过审核的结果' })]) };
     const service = { update: vi.fn(async () => { throw contentError; }), send: vi.fn(async () => ({ messageId: 'om_legacy_safe_final' })) };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await expect(coordinator.reconcile(config)).resolves.toBe(1);
@@ -2139,7 +2201,7 @@ describe('Lark message coordinator', () => {
     };
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '真实最终结果' })]) };
     const service = { update: vi.fn(async () => { throw new Error('temporary network failure'); }), send: vi.fn(async () => ({ messageId: 'om_result' })) };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await expect(coordinator.reconcile(config)).resolves.toBe(1);
@@ -2167,7 +2229,7 @@ describe('Lark message coordinator', () => {
     };
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '真实最终结果' })]) };
     const service = { update: vi.fn(async () => { throw messageMissingError(); }), send: vi.fn(), reply: vi.fn(async () => ({ messageId: 'om_thread_replacement' })) };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await coordinator.reconcile(config);
@@ -2189,7 +2251,7 @@ describe('Lark message coordinator', () => {
     };
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '真实最终结果' })]) };
     const service = { update: vi.fn(async () => { throw messageMissingError(); }), send: vi.fn(async () => ({ messageId: 'om_group_result_fallback' })), reply: vi.fn(async () => ({ messageId: 'om_group_result' })) };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await coordinator.reconcile(config);
@@ -2214,7 +2276,7 @@ describe('Lark message coordinator', () => {
       send: vi.fn(async () => ({ messageId: 'om_fallback_result' }))
     };
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, undefined, undefined, mappings as any);
 
     await coordinator.reconcile(config);
@@ -2234,7 +2296,7 @@ describe('Lark message coordinator', () => {
     };
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '真实最终结果' })]) };
     const service = { update: vi.fn(async () => { throw messageMissingError(); }), send: vi.fn(async () => ({ messageId: 'om_legacy_result' })), reply: vi.fn() };
-    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await coordinator.reconcile(config);

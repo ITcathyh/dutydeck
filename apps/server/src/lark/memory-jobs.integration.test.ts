@@ -43,10 +43,11 @@ async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars
   await repos.config.set('token_efficiency', JSON.stringify({ mode, memoryProfiles: [{ agentId: 'agent', protocol: 'acp', model: 'verified-model', reasoningEffort: 'medium', maxInputChars, verificationRef: 'test_fixture_only' }] }));
   const store = new LarkMemoryStore(repos.config);
   const projection = new LarkMemoryProjection(store, join(dir,'memory'));
-  const pipeline = new LarkMemoryPipeline({ runtime, timeoutMs, repos: { execution: repos.execution }, jobs: repos.memoryJobs, policyConfig: repos.config, controlActorId: 'installation_owner', store, projection, readConfig: async () => JSON.parse((await repos.config.get('lark.bots'))!)[0], log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
+  const createPipeline = (timeoutMs?: number) => new LarkMemoryPipeline({ runtime, timeoutMs, repos: { execution: repos.execution }, jobs: repos.memoryJobs, policyConfig: repos.config, controlActorId: 'installation_owner', store, projection, readConfig: async () => JSON.parse((await repos.config.get('lark.bots'))!)[0], log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
+  const pipeline = createPipeline(timeoutMs);
   cleanups.push(async () => { await runtime.shutdown(); repos.close(); await rm(dir,{ recursive: true, force: true }); });
   await store.add(scope, { content: '保留完整来源和日期。', source: 'extraction', topic: 'general', chatId: 'other', taskId: 'evidence' });
-  return { repos, runtime, store, projection, pipeline, prompts, setOutputText: (value?: string) => { outputText = value; }, setReply: (value: typeof reply) => { reply = value; }, setDuringSend: (value: typeof duringSend) => { duringSend = value; }, setDuringInterrupt: (value: typeof duringInterrupt) => { duringInterrupt = value; } };
+  return { repos, runtime, store, projection, pipeline, createPipeline, prompts, setOutputText: (value?: string) => { outputText = value; }, setReply: (value: typeof reply) => { reply = value; }, setDuringSend: (value: typeof duringSend) => { duringSend = value; }, setDuringInterrupt: (value: typeof duringInterrupt) => { duringInterrupt = value; } };
 }
 it('consumes verified blank completed turns so the next extraction reaches useful material', async () => {
   const h = await harness();
@@ -348,10 +349,11 @@ it('keeps a timed out preparation job and resumes its stable session without a s
     release();
     await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined());
     expect(h.prompts).toEqual([]);
-    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+    // Recreate the pipeline with its normal deadline, as after restart; 100ms only forces the held preparation timeout.
+    expect(await h.createPipeline().runConsolidation(scope)).toMatchObject({ ok: true });
     const jobs = await h.repos.memoryJobs.listScope(scope);
     expect(jobs).toHaveLength(1);
-    expect(jobs[0]).toMatchObject({ id: job!.id, sessionId: job!.sessionId, state: 'settled' });
+    expect(jobs[0]).toMatchObject({ id: job!.id, sessionId: job!.sessionId, state: 'settled', receipt: { result: { lastRun: { ok: true } } } });
     expect(h.prompts).toHaveLength(1);
   } finally { release(); }
 });
