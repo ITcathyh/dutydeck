@@ -1,7 +1,7 @@
 // 群里的场景包：哪些包对这个机器人生效、来源消息命中哪个包、群里开关的说法、/status 的行。
 // 包作者写的正则一律经宿主的正则执行器跑（一个包一次调用，超时或出错只让这个包弃权），provider 经截止时间封装调用。
 
-import { scenarioBindingStatus, scenarioRecordOf, scenarioSourceBots, type CollaborationDecision, type CollaborationDuty, type ScenarioBinding, type ScenarioMessage, type ScenarioPack } from '@dutydeck/shared';
+import { isDecisionGate, resolveScenarioParams, scenarioBindingStatus, scenarioRecordOf, scenarioSourceBots, type CollaborationDecision, type CollaborationDuty, type ScenarioBinding, type ScenarioMessage, type ScenarioPack } from '@dutydeck/shared';
 import { ScenarioRegistry, type RegisteredScenarioPack } from '../plugins/scenario-registry.js';
 import { scenarioRegexRunner, type ScenarioRegexJob, type ScenarioRegexRunner } from '../plugins/scenario-regex.js';
 import { stripMentionPlaceholders } from './participation-rules.js';
@@ -11,6 +11,8 @@ import { scenarioSummary } from './scenario-template.js';
 export type ScenarioMatch = { matched: false } | { matched: true; dedupeKey?: string } | { matched: true; abstained: string };
 export type ScenarioPhrase = { entry: RegisteredScenarioPack; kind: 'enable'; captures: Record<string, string[]> } | { entry: RegisteredScenarioPack; kind: 'disable' };
 
+/** 判定快照里冻结的场景（model 包）。 */
+const snapshotScenario = (item: CollaborationDecision) => (item.inputSnapshot as { scenario?: { packId?: unknown; status?: unknown } }).scenario;
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const stringList = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 
@@ -31,11 +33,41 @@ export class LarkScenarios {
     }));
   }
 
+  /**
+   * 来源开的话题不算来源机器人的话题的包（topicOwnership.sourceTopics 为 neutral）在本群绑定里的来源机器人，关闭的绑定也算。
+   * 这些机器人开的话题不记「别人的话题」，改看话题里有没有别的机器人接过。
+   */
+  neutralSourceAppIds(duty: Pick<CollaborationDuty, 'scenarios'>): Set<string> {
+    return new Set(Object.entries(duty.scenarios ?? {}).flatMap(([id, binding]) => {
+      const entry = this.registry.get(id);
+      return entry?.pack.topicOwnership?.sourceTopics === 'neutral' ? scenarioSourceBots(entry.pack, binding).map(source => source.appId) : [];
+    }));
+  }
+
   /** 本群开着的 direct 包（开启、大版本一致、来源不为空）。 */
   direct(config: { appId: string; workspace?: string }, duty: Pick<CollaborationDuty, 'scenarios'>): Array<{ entry: RegisteredScenarioPack; binding: ScenarioBinding }> {
-    return this.entries(config).filter(entry => entry.pack.mode === 'direct').flatMap(entry => {
+    return this.open(config, duty, 'direct');
+  }
+
+  /** 本群开着的 model 包（开启、大版本一致），按包 id 排序：一条消息命中多个时取第一个。 */
+  model(config: { appId: string; workspace?: string }, duty: Pick<CollaborationDuty, 'scenarios'>): Array<{ entry: RegisteredScenarioPack; binding: ScenarioBinding }> {
+    return this.open(config, duty, 'model').sort((a, b) => a.entry.pack.id < b.entry.pack.id ? -1 : a.entry.pack.id > b.entry.pack.id ? 1 : 0);
+  }
+
+  /**
+   * 返回的绑定参数已按当前包的参数 schema 解析（和保存时同一个 resolveScenarioParams）：同一大版本内包新增的参数取包默认值。
+   * 存储的值在当前包下不合法时这个包按没开处理，记诊断。
+   */
+  private open(config: { appId: string; workspace?: string }, duty: Pick<CollaborationDuty, 'scenarios'>, mode: ScenarioPack['mode']) {
+    return this.entries(config).filter(entry => entry.pack.mode === mode).flatMap(entry => {
       const binding = duty.scenarios?.[entry.pack.id];
-      return binding && scenarioBindingStatus(entry.pack, binding) === 'enabled' ? [{ entry, binding }] : [];
+      if (!binding || scenarioBindingStatus(entry.pack, binding) !== 'enabled') return [];
+      const { params, issues } = resolveScenarioParams(entry.pack, binding.params);
+      if (issues.length) {
+        this.log?.warn({ scenario: entry.pack.id, issues }, '场景包绑定里的参数在当前版本的包下不合法，按没开处理');
+        return [];
+      }
+      return [{ entry, binding: { ...binding, params } }];
     });
   }
 
@@ -102,16 +134,29 @@ export class LarkScenarios {
     return undefined;
   }
 
-  /** /status 里每个有绑定的包一行。today 是今天的判定记录（含场景记录）。 */
+  /**
+   * /status 里每个有绑定的包一行。today 是今天的判定记录（含场景记录）。
+   * direct 包数场景记录：起了任务的算「<actedLabel>」，其余算跳过。model 包数快照里用到这个包的判定：
+   * reply 或 act 且已发出的算「<actedLabel>」，silent 或被挡下、失败的算跳过；取材料失败的单独数，没有就不显示。
+   */
   statusLines(config: { appId: string; workspace?: string }, duty: Pick<CollaborationDuty, 'scenarios'>, today: readonly CollaborationDecision[]): string[] {
     return this.entries(config).flatMap(({ pack }) => {
       const binding = duty.scenarios?.[pack.id];
       if (!binding) return [];
       if (!binding.enabled) return [`**${pack.title}**：已关闭`];
       if (scenarioBindingStatus(pack, binding) === 'stale') return [`**${pack.title}**：场景包升级到 v${pack.version}，需要在群里重新确认`];
+      const head = `**${pack.title}**：${scenarioSummary(pack, resolveScenarioParams(pack, binding.params).params)}；今天${pack.status.actedLabel}`;
+      if (pack.mode === 'model') {
+        const decisions = today.filter(item => !isDecisionGate(item));
+        const used = decisions.filter(item => snapshotScenario(item)?.status === 'used' && snapshotScenario(item)?.packId === pack.id);
+        const acted = used.filter(item => item.action !== 'silent' && item.status === 'sent').length;
+        const skipped = used.filter(item => item.action === 'silent' || ['suppressed', 'failed'].includes(item.status)).length;
+        const abstained = decisions.filter(item => snapshotScenario(item)?.status === 'abstained' && snapshotScenario(item)?.packId === pack.id).length;
+        return [`${head} ${acted} 条，跳过 ${skipped} 条${abstained ? `，取材料失败 ${abstained} 条` : ''}`];
+      }
       const records = today.filter(item => scenarioRecordOf(item)?.packId === pack.id);
       const acted = records.filter(item => item.action === 'act').length;
-      return [`**${pack.title}**：${scenarioSummary(pack, binding.params)}；今天${pack.status.actedLabel} ${acted} 条，跳过 ${records.length - acted} 条`];
+      return [`${head} ${acted} 条，跳过 ${records.length - acted} 条`];
     });
   }
 

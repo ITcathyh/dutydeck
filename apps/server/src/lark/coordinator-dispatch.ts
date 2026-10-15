@@ -13,6 +13,7 @@ import { validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session
 import { collectLarkTaskContext, larkMaterialMessageIds } from './task-context.js';
 import { scenarioRecallInjection, type LarkScenarioRecallLine } from './scenario-recall.js';
 import { splitDirectScenarioRequest } from './scenario-direct.js';
+import { modelScenarioInjection } from './scenario-model.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type LarkMemoryScope } from './memory.js';
@@ -1545,6 +1546,17 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       injected.push(recall.text);
       knownParts.set(recall.text, recall.parts);
     }
+    // model 场景包判为 act 的消息：判定时冻结的执行指令和材料，用户请求仍是原文。读不到或对不上时这一轮不带。
+    const scenarioAdoption = larkScenarioAdoptionOf(event);
+    if (scenarioAdoption?.mode === 'model' && this.workflowOptions.participation) {
+      const execution = await this.workflowOptions.participation.scenarioExecution({ appId: config.appId, chatId: event.chatId }, scenarioAdoption, event.messageId)
+        .catch(error => { this.log.warn({ error, taskId: task.id }, '读取场景执行内容失败，本轮不带场景指令'); return undefined; });
+      if (execution) {
+        const injection = modelScenarioInjection(execution, `lark:${config.appId}:${event.chatId}:injection:${injected.length}`);
+        injected.push(injection.text);
+        knownParts.set(injection.text, injection.parts);
+      }
+    }
     const rolePrompt = formatRolePrompt(config);
     if (rolePrompt) injected.push(rolePrompt);
     if (groupInstructions) injected.push(`[Dutydeck 群长期指令 · 管理者配置]\n${groupInstructions}`);
@@ -1566,7 +1578,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       return parts.map((part, partIndex) => ({ ...part, prefix: `${partIndex === 0 && index ? '\n\n' : ''}${part.prefix ?? ''}` }));
     });
     // direct 场景请求：指令是用户请求，来源消息原文是不可信材料。
-    const preparedMaterials = splitDirectScenarioRequest(materialParts ?? [{ kind: 'user_request' as const, content: materialPrompt, trustScope: 'user_request' }], larkScenarioAdoptionOf(event));
+    const preparedMaterials = splitDirectScenarioRequest(materialParts ?? [{ kind: 'user_request' as const, content: materialPrompt, trustScope: 'user_request' }], scenarioAdoption);
     promptParts.push(...preparedMaterials.map((part, index) => ({ ...part, prefix: `${index === 0 && injected.length ? '\n\n[用户请求]\n' : ''}${part.prefix ?? ''}` })));
 
 

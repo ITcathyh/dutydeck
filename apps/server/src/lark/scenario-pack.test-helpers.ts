@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import { RelayAskBroker } from '@dutydeck/relay';
-import { scenarioRecordOf, type AgentConfig, type CollaborationAction, type CollaborationDecision, type CollaborationDuty, type CollaborationParticipationMode, type CollaborationScope } from '@dutydeck/shared';
+import { scenarioRecordOf, type AgentConfig, type CollaborationAction, type CollaborationSnapshot, type CollaborationDecision, type CollaborationDuty, type CollaborationParticipationMode, type CollaborationScope } from '@dutydeck/shared';
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
 import { larkCardChannel } from './coordinator-core.js';
@@ -20,6 +20,8 @@ import { LarkGroupParticipation } from './group-participation.js';
 import { larkBotsConfigKey, readLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import { buildLarkCard, type LarkChatMessage } from './service.js';
+import type { ParticipationDecider } from './readonly-decider.js';
+import type { ScenarioRegistry } from '../plugins/scenario-registry.js';
 import { persistedRecallLine } from './scenario-legacy.js';
 import { builtinScenarioRegistry } from '../plugins/builtin-scenarios.test-helpers.js';
 import { LarkTaskInbox, type LarkInboxRecord } from './task-inbox.js';
@@ -47,6 +49,12 @@ export interface AlarmHarnessOptions {
   configPatch?: Partial<StoredLarkConfig>;
   /** 用这个目录放数据库并在 close() 时保留（旧库构造和重开用）；不给就用临时目录，close() 删除。 */
   directory?: string;
+  /** 加载的场景包；不给就只有内置包。 */
+  scenarios?: ScenarioRegistry;
+  /** 参与判定的模型桩；不给就恒为 silent。 */
+  decide?: ParticipationDecider['decide'];
+  /** 本机器人所在的其他群（同样登记、同样的参与模式），消息用 chatId 指定。 */
+  extraChats?: string[];
 }
 
 const defaultAnswer = () => '**判断**：待确认，样例数据不足以判断。\n\n证据：没查到。';
@@ -60,6 +68,8 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
   const dispatched: LarkMessageEvent[] = [];
   const authorizations: Array<{ actor?: string; action: string; memberObserved?: boolean }> = [];
   const decideCalls: string[] = [];
+  /** 每次模型判定拿到的快照。 */
+  const decideSnapshots: CollaborationSnapshot[] = [];
   /** 每次派发时这条告警判定记录的状态（派发前应为 candidate）。 */
   const statusAtDispatch: string[] = [];
   let dispatchFailure: string | undefined;
@@ -108,13 +118,15 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
     const messageId = `om_reply_${++sequence}`;
     let threadId = parent?.threadId;
     if (replyInThread && parent && !threadId) { threadId = `omt_${target}`; parent.threadId = threadId; parent.rootId ??= target; }
-    store({ messageId, chatId: SCENARIO_CHAT, messageType, createTime: nextTime(), sender: botSender, rawContent, mentions: [], deleted: false, updated: false,
+    store({ messageId, chatId: parent?.chatId ?? SCENARIO_CHAT, messageType, createTime: nextTime(), sender: botSender, rawContent, mentions: [], deleted: false, updated: false,
       parentId: target, rootId: parent?.rootId ?? target, ...(threadId ? { threadId } : {}) });
     if (key) idempotent.set(key, messageId);
     return { messageId };
   };
   const cardContent = (input: unknown) => JSON.stringify({ card: input });
   const record = (method: string, input: unknown) => { calls.push({ method, input }); };
+  const failingThreads = new Set<string>();
+  const chats = [SCENARIO_CHAT, ...options.extraChats ?? []];
   const members = () => [
     { memberId: SCENARIO_REQUESTER, openId: SCENARIO_REQUESTER, name: '确认人', memberType: 'user' as const },
     { memberId: SCENARIO_MEMBER, openId: SCENARIO_MEMBER, name: '成员', memberType: 'user' as const },
@@ -156,6 +168,7 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
     },
     getMessageItems: async (messageId: string) => { const message = messages.get(messageId); return message ? [{ ...message }] : []; },
     listChatMessages: async (input: { chatId?: string; threadId?: string; order?: 'asc' | 'desc'; pageSize?: number }) => {
+      if (input.threadId && failingThreads.has(input.threadId)) throw Object.assign(new Error('读取话题消息失败（场景注入）'), { code: 'LARK_RATE_LIMITED', status: 429 });
       const items = [...messages.values()].filter(item => input.threadId ? item.threadId === input.threadId : item.chatId === (input.chatId ?? SCENARIO_CHAT))
         .sort((a, b) => Number(a.createTime) - Number(b.createTime));
       if (input.order === 'desc') items.reverse();
@@ -173,13 +186,13 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
   const groupManager = new LarkGroupManager(repos, { client: () => ({
     getBotInfo: async () => ({ appName: SCENARIO_BOT.name, openId: SCENARIO_BOT.openId }),
     checkApplicationIdentity: async () => ({ verified: true, reportedAppId: SCENARIO_BOT.appId, tenantKey: 'synthetic-tenant' }),
-    listChats: async () => ({ items: [{ chatId: SCENARIO_CHAT, name: '告警场景群', chatMode: 'group' }], hasMore: false }),
+    listChats: async () => ({ items: chats.map((chatId, index) => ({ chatId, name: index ? `场景群 ${index + 1}` : '告警场景群', chatMode: 'group' })), hasMore: false }),
     listChatMembers: async () => ({ items: members().filter(item => item.memberType === 'user'), hasMore: false, securityLimited: false }),
     getUserEmails: async () => []
   }) as any });
   await groupManager.sync(SCENARIO_BOT.appId);
   // 重开已有的库时群已经登记过，再登记会因版本号冲突失败，忽略即可。
-  await groupManager.save(SCENARIO_BOT.appId, SCENARIO_CHAT, { expectedRevision: 0, patch: {} }).catch(error => { if (!options.directory) throw error; });
+  for (const chatId of chats) await groupManager.save(SCENARIO_BOT.appId, chatId, { expectedRevision: 0, patch: {} }).catch(error => { if (!options.directory) throw error; });
   // 记录授权身份：告警初筛按确认人重新鉴权（memberObserved=false）。
   const authorize = groupManager.authorize.bind(groupManager);
   groupManager.authorize = (async (...args: Parameters<typeof authorize>) => {
@@ -190,21 +203,28 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
   const participation = new LarkGroupParticipation({
     repository: repos.collaboration,
     decider: {
-      decide: async (_config, snapshot, triggerId) => { decideCalls.push(String(triggerId ?? snapshot.observations.at(-1)?.id ?? '')); return { action: 'silent', reason: '桩：不接', evidenceIds: [], updates: [] }; },
+      decide: async (config, snapshot, triggerId, facts) => {
+        decideCalls.push(String(triggerId ?? snapshot.observations.at(-1)?.id ?? ''));
+        decideSnapshots.push(structuredClone(snapshot));
+        return options.decide ? options.decide(config, snapshot, triggerId, facts) : { action: 'silent', reason: '桩：不接', evidenceIds: [], updates: [] };
+      },
       respond: async () => ''
     },
     authorize: async () => true,
     canOperate: async () => true,
     readConfig: appId => readLarkConfig(repos.config, appId),
     serviceFor: () => service as any,
-    listScopes: async () => [scope],
+    listScopes: async () => chats.map(chatId => ({ appId: SCENARIO_BOT.appId, chatId })),
     readGroupDescription: async () => '告警场景群',
-    scenarios: await builtinScenarioRegistry(),
+    scenarios: options.scenarios ?? await builtinScenarioRegistry(),
     debounceMs: 10,
     ...(options.now ? { now: options.now } : {})
   });
-  const settings = await repos.collaboration.getSettings(scope);
-  if (options.participation && settings.participation !== options.participation) await repos.collaboration.updateSettings(scope, { expectedRevision: settings.revision, participation: options.participation }, 'owner');
+  for (const chatId of chats) {
+    const chatScope = { appId: SCENARIO_BOT.appId, chatId };
+    const settings = await repos.collaboration.getSettings(chatScope);
+    if (options.participation && settings.participation !== options.participation) await repos.collaboration.updateSettings(chatScope, { expectedRevision: settings.revision, participation: options.participation }, 'owner');
+  }
 
   const log = { info: () => {}, warn: () => {}, error: () => {} };
   const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, SCENARIO_BOT.openId, undefined, repos.channelMappings,
@@ -221,8 +241,10 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
   const inbox = new LarkTaskInbox(repos.config);
   const harness = {
     cwd, repos, runtime, coordinator, participation, groupManager, config, scope, service, messages,
-    calls, prompts, dispatched, authorizations, decideCalls, statusAtDispatch,
+    calls, prompts, dispatched, authorizations, decideCalls, decideSnapshots, statusAtDispatch,
     failNextDispatch(message = '派发失败（场景注入）') { dispatchFailure = message; },
+    /** 之后读这个话题的消息都失败。 */
+    failThreadReads(threadId: string) { failingThreads.add(threadId); },
     async subscribe(alarm: AlarmSubscriptionInput) {
       const duty = await repos.collaboration.getDuty(scope);
       const value = { enabled: true, levels: [], dedupeHours: 6, maxPerHour: 3, requesterId: SCENARIO_REQUESTER, ...alarm };
@@ -236,15 +258,17 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
       await repos.collaboration.updateDuty(scope, { expectedRevision: duty.revision, responder: value }, 'owner');
     },
     /** 来源机器人发的一条消息：存进内存飞书（消息详情按 app_id 报发送者），返回实时事件（只带 open_id）。 */
-    fromBot(source: Pick<ScenarioSource, 'appId' | 'openId'>, input: { messageId: string; content: string; messageType?: string; threadId?: string; rootId?: string; createTime?: string }): LarkMessageEvent {
+    fromBot(source: Pick<ScenarioSource, 'appId' | 'openId'>, input: { messageId: string; content: string; messageType?: string; threadId?: string; rootId?: string; createTime?: string; chatId?: string }): LarkMessageEvent {
       const createTime = input.createTime ?? nextTime();
-      store({ messageId: input.messageId, chatId: SCENARIO_CHAT, messageType: input.messageType ?? 'text', createTime, sender: { id: source.appId, idType: 'app_id', type: 'app' },
+      const chatId = input.chatId ?? SCENARIO_CHAT;
+      store({ messageId: input.messageId, chatId, messageType: input.messageType ?? 'text', createTime, sender: { id: source.appId, idType: 'app_id', type: 'app' },
         rawContent: input.content, mentions: [], deleted: false, updated: false, ...(input.threadId ? { threadId: input.threadId, rootId: input.rootId ?? input.messageId } : {}) });
-      return { messageId: input.messageId, chatId: SCENARIO_CHAT, chatType: 'group', messageType: input.messageType ?? 'text', content: input.content, createTime,
+      return { messageId: input.messageId, chatId, chatType: 'group', messageType: input.messageType ?? 'text', content: input.content, createTime,
         senderOpenId: source.openId, senderType: 'app', mentions: [], ...(input.threadId ? { threadId: input.threadId, rootId: input.rootId ?? input.messageId } : {}) };
     },
     /** 真人发的一条消息；mentionBot 时 @ 本机器人，parentId 是引用回复的消息，inThread 时在它的话题里回复（没有话题就开一个）。 */
-    fromUser(input: { messageId: string; text: string; sender?: string; mentionBot?: boolean; parentId?: string; inThread?: boolean; threadId?: string; rootId?: string }): LarkMessageEvent {
+    fromUser(input: { messageId: string; text: string; sender?: string; mentionBot?: boolean; parentId?: string; inThread?: boolean; threadId?: string; rootId?: string; chatId?: string }): LarkMessageEvent {
+      const chatId = input.chatId ?? SCENARIO_CHAT;
       const parent = input.parentId ? messages.get(input.parentId) : undefined;
       if (input.inThread && parent && !parent.threadId) { parent.threadId = `omt_${parent.messageId}`; parent.rootId ??= parent.messageId; }
       const threadId = input.threadId ?? parent?.threadId;
@@ -252,10 +276,10 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
       const text = input.mentionBot ? `@_user_1 ${input.text}` : input.text;
       const mentions = input.mentionBot ? [{ key: '@_user_1', name: SCENARIO_BOT.name, openId: SCENARIO_BOT.openId }] : [];
       const createTime = nextTime();
-      store({ messageId: input.messageId, chatId: SCENARIO_CHAT, messageType: 'text', createTime, sender: { id: input.sender ?? SCENARIO_MEMBER, idType: 'open_id', type: 'user' },
+      store({ messageId: input.messageId, chatId, messageType: 'text', createTime, sender: { id: input.sender ?? SCENARIO_MEMBER, idType: 'open_id', type: 'user' },
         rawContent: JSON.stringify({ text }), mentions: input.mentionBot ? [{ key: '@_user_1', id: SCENARIO_BOT.appId, idType: 'app_id', name: SCENARIO_BOT.name }] : [],
         deleted: false, updated: false, ...(input.parentId ? { parentId: input.parentId } : {}), ...(threadId ? { threadId } : {}), ...(rootId ? { rootId } : {}) });
-      return { messageId: input.messageId, chatId: SCENARIO_CHAT, chatType: 'group', messageType: 'text', content: JSON.stringify({ text }), createTime,
+      return { messageId: input.messageId, chatId, chatType: 'group', messageType: 'text', content: JSON.stringify({ text }), createTime,
         senderOpenId: input.sender ?? SCENARIO_MEMBER, senderType: 'user', mentions,
         ...(input.parentId ? { parentId: input.parentId } : {}), ...(threadId ? { threadId } : {}), ...(rootId ? { rootId } : {}) };
     },
@@ -289,7 +313,7 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
         const mapping = (await harness.mappings()).find(item => item.externalId === messageId);
         return mapping?.saved.final_delivery_state === 'delivered';
       }, timeoutMs, `message ${messageId} did not settle`);
-      await participation.flush(scope);
+      for (const chatId of chats) await participation.flush({ appId: SCENARIO_BOT.appId, chatId });
     },
     async close() {
       coordinator.stop();
@@ -335,7 +359,7 @@ export interface AlarmDecisionView {
   outcome: string;
   dedupeKey: string;
   sourceAppId: string;
-  /** 旧值 alarm-triage；P3 的 scenario:alarm@1.0.0 映射回这里。 */
+  /** 旧值 alarm-triage；P3 起的 scenario:alarm@<版本> 映射回这里（P5 升到 1.1.0）。 */
   policyVersion: string;
   /** 旧值 alarm_<outcome>；P3 的 scenario_<新 outcome> 映射回这里。 */
   rule?: string;
@@ -349,7 +373,7 @@ export function alarmDecisionView(decision: CollaborationDecision): AlarmDecisio
   const snapshot = decision.inputSnapshot as { decider?: { rule?: string; trigger?: { messageId?: string } } };
   const rule = snapshot.decider?.rule?.startsWith('scenario_') ? `alarm_${legacyOutcome(snapshot.decider.rule.slice('scenario_'.length))}` : snapshot.decider?.rule;
   return { id: decision.id, action: decision.action, status: decision.status, reason: decision.reason, outcome: legacyOutcome(scenario?.outcome),
-    dedupeKey: String(scenario?.dedupeKey), sourceAppId: String(scenario?.sourceAppId), policyVersion: decision.policyVersion === 'scenario:alarm@1.0.0' ? 'alarm-triage' : decision.policyVersion,
+    dedupeKey: String(scenario?.dedupeKey), sourceAppId: String(scenario?.sourceAppId), policyVersion: decision.policyVersion.startsWith('scenario:alarm@') ? 'alarm-triage' : decision.policyVersion,
     ...(rule ? { rule } : {}),
     ...(snapshot.decider?.trigger?.messageId ? { triggerMessageId: snapshot.decider.trigger.messageId } : {}), createdAt: decision.createdAt };
 }

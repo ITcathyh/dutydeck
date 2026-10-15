@@ -121,7 +121,7 @@ it('group duty: scenario bindings are checked against the loaded packs; confirme
     return { status: response.statusCode, code: response.json().error?.code, body: response.json() };
   };
   const alarmPack = (await overview()).scenarios.find((item: { id: string }) => item.id === 'alarm');
-  expect(alarmPack).toMatchObject({ version: '1.0.0', mode: 'direct', builtin: true, requiresRequester: true, versionStale: false, enableHint: expect.any(String),
+  expect(alarmPack).toMatchObject({ version: '1.1.0', mode: 'direct', builtin: true, requiresRequester: true, versionStale: false, enableHint: expect.any(String),
     params: { sources: { type: 'bot_list', role: 'source' }, levels: { type: 'string_list', default: [] }, dedupeHours: { type: 'integer', min: 1, max: 168, default: 6 }, maxPerHour: { type: 'integer', min: 1, max: 30, default: 3 } } });
   expect(alarmPack).not.toHaveProperty('binding');
 
@@ -137,13 +137,13 @@ it('group duty: scenario bindings are checked against the loaded packs; confirme
   expect((await overview()).duty.revision).toBe(0);
   const off = await patch({ expectedRevision: 0, scenarios: { alarm: { enabled: false, params: { sources } } } });
   expect(off.status).toBe(200);
-  expect(off.body.duty.scenarios).toEqual({ alarm: { enabled: false, params: { sources, levels: [], dedupeHours: 6, maxPerHour: 3 }, packVersion: '1.0.0' } });
+  expect(off.body.duty.scenarios).toEqual({ alarm: { enabled: false, params: { sources, levels: [], dedupeHours: 6, maxPerHour: 3 }, packVersion: '1.1.0' } });
 
   // 群里确认过（确认卡写入确认人和包版本）后，Web 只给改动的参数，其余沿用。
   await f.repos.collaboration.updateDuty(scope, { expectedRevision: 1, scenarios: { alarm: { ...off.body.duty.scenarios.alarm, enabled: true, requesterId: 'ou_tester' } } }, 'ou_tester');
   const levels = await patch({ expectedRevision: 2, scenarios: { alarm: { enabled: true, params: { levels: ['P1'] } } } });
   expect(levels.status).toBe(200);
-  expect(levels.body.duty.scenarios.alarm).toEqual({ enabled: true, params: { sources, levels: ['P1'], dedupeHours: 6, maxPerHour: 3 }, requesterId: 'ou_tester', packVersion: '1.0.0' });
+  expect(levels.body.duty.scenarios.alarm).toEqual({ enabled: true, params: { sources, levels: ['P1'], dedupeHours: 6, maxPerHour: 3 }, requesterId: 'ou_tester', packVersion: '1.1.0' });
   expect(await patch({ expectedRevision: 2, scenarios: { alarm: { enabled: true } } })).toMatchObject({ status: 409, code: 'COLLABORATION_REVISION_CONFLICT' });
   expect((await overview()).scenarios.find((item: { id: string }) => item.id === 'alarm')).toMatchObject({ binding: levels.body.duty.scenarios.alarm, webDescription: expect.stringContaining('ou_tester') });
 

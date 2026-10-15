@@ -674,6 +674,31 @@ export const collaborationTeamContextSchema = z.object({
 }).strict();
 export type CollaborationTeamContext = z.infer<typeof collaborationTeamContextSchema>;
 
+/**
+ * 判定命中 model 场景包时冻结在快照里的场景内容（场景包设计 3.1）。used 带判定指引、执行指令和上下文材料；
+ * abstained 是取材料失败、这个包的影响整体撤销，只记原因。回复、执行和回放都读这一份，不读当前加载的包。
+ */
+export const collaborationScenarioSchema = z.object({
+  packId: z.string().min(1).max(64),
+  title: z.string().min(1).max(64),
+  version: z.string().min(1).max(32),
+  digest: z.string().min(1).max(128),
+  status: z.enum(['used', 'abstained']),
+  reason: z.string().max(2000).optional(),
+  /** 判定 prompt 里那一段宿主管理者规则的完整文字。 */
+  guidance: z.string().max(4000).optional(),
+  /** act 交给执行 Agent 的指令。 */
+  execution: z.object({ instruction: z.string().min(1).max(4000), digest: z.string().min(1).max(128) }).strict().optional(),
+  /** 上下文来源取到的材料：observations 是转成观察的条目，判定材料按 decisionChars 截取，回复和执行用全部。 */
+  context: z.object({
+    durationMs: z.number().int().min(0),
+    decisionChars: z.number().int().min(1).max(4000),
+    sources: z.array(z.object({ id: z.string().min(1).max(64), status: z.enum(['complete', 'partial', 'unavailable']), missing: z.array(z.string().max(256)).max(100) }).strict()).max(10),
+    observations: z.array(collaborationObservationSchema).max(50)
+  }).strict().optional()
+}).strict();
+export type CollaborationScenarioSnapshot = z.infer<typeof collaborationScenarioSchema>;
+
 export const collaborationSnapshotSchema = z.object({
   scope: collaborationScopeSchema,
   contextRevision: z.number().int().min(0),
@@ -682,7 +707,8 @@ export const collaborationSnapshotSchema = z.object({
   followups: z.array(collaborationFollowupSchema),
   mandates: z.array(collaborationMandateSchema),
   bootstrap: collaborationBootstrapSchema.optional(),
-  teamContext: collaborationTeamContextSchema.optional()
+  teamContext: collaborationTeamContextSchema.optional(),
+  scenario: collaborationScenarioSchema.optional()
 }).strict();
 export type CollaborationSnapshot = z.infer<typeof collaborationSnapshotSchema>;
 

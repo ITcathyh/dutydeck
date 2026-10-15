@@ -224,7 +224,13 @@ export class CollaborationEvaluation {
         mark({ decisionId, status: 'missing', expected, reason: `Team source '${teamGap.scope.chatId}' contains missing elements: ${teamGap.missing.join(', ') || teamGap.status}` }, 'missing');
         continue;
       }
-      const observations = [...snapshot.observations, ...(snapshot.teamContext?.observations ?? [])];
+      // model 场景包冻结的上下文材料：来源没取全时和 teamContext 一样记 missing，不重新调用 provider。
+      const scenarioGap = snapshot.scenario?.status === 'used' ? snapshot.scenario.context?.sources.find(source => source.status !== 'complete' || source.missing.length) : undefined;
+      if (scenarioGap) {
+        mark({ decisionId, status: 'missing', expected, reason: `Scenario context '${snapshot.scenario!.packId}:${scenarioGap.id}' contains missing elements: ${scenarioGap.missing.join(', ') || scenarioGap.status}` }, 'missing');
+        continue;
+      }
+      const observations = [...snapshot.observations, ...(snapshot.teamContext?.observations ?? []), ...(snapshot.scenario?.status === 'used' ? snapshot.scenario.context?.observations ?? [] : [])];
       const observationMap = new Map(observations.map(obs => [obs.id, obs]));
 
       // 任一 observation.missing 非空即材料不足（即使本次模型选 silent 或未引用该条）

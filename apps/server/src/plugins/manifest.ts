@@ -58,9 +58,6 @@ export interface LoadedPlugin {
   capabilities: string[];
 }
 
-/** 当前版本实现了的场景模式；model 模式要到参与判定接上场景之后才开放。 */
-const SUPPORTED_SCENARIO_MODES: ReadonlySet<string> = new Set(['direct']);
-
 /**
  * 飞书与 Web 已占用的命令名。插件命令与它们重名时拒绝；`skills` 是 `/skills <名字>` 前导指令。
  */
@@ -210,7 +207,6 @@ export async function loadPluginDirectory(rootInput: string, options: { reserved
     if (pack) {
       if (basename(fileName, '.json') !== pack.id) packIssues.push({ file, field: 'id', message: `文件名应当是 ${pack.id}.json` });
       if (scenarios.some(item => item.pack.id === pack.id)) packIssues.push({ file, field: 'id', message: `场景包 ${pack.id} 重复` });
-      if (!SUPPORTED_SCENARIO_MODES.has(pack.mode)) packIssues.push({ file, field: 'mode', message: `当前版本还不支持 ${pack.mode} 模式的场景包，这个包不会加载` });
       if (!manifest.providers) for (const ref of scenarioProviderRefs(pack)) packIssues.push({ file, field: ref.field, message: `引用了 provider ${ref.id}，但清单没有声明 providers 入口` });
       packIssues.push(...await phraseExampleIssues(pack, file));
     }

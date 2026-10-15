@@ -56,6 +56,8 @@ export interface ScenarioMessage {
   ownedTopic?: boolean;
   /** 话题根是别的机器人发的、或 @ 的是别人；实时只在多机器人群里查。 */
   threadRootOther?: boolean;
+  /** 场景来源开的话题（告警包 sourceTopics: neutral，不记 threadRootOther）：读了话题里的消息，complete 是读全了，capped 是读到 4 页上限，unavailable 是读失败。 */
+  sourceTopic?: { claimed: boolean; evidence: 'complete' | 'capped' | 'unavailable' };
   /** 消息开头叫的是群里另一个机器人；实时只在多机器人群里查。 */
   callsOther?: boolean;
   /** 第二轮规则才查的最近发言。 */
@@ -265,6 +267,16 @@ export const participationScenarios: ParticipationScenario[] = [
     message: human('这个要紧吗', { inThread: true, threadRootOther: true }), expected: rule(1, 'silent', 'topic_of_other') },
   { id: 'topic_of_other_quote_self', category: '别人的话题', title: '别人的话题里引用回复我的消息', group: crowded,
     message: human('这个结论能再解释下吗', { inThread: true, threadRootOther: true, parent: 'self' }), expected: rule(1, 'addressed', 'reply_to_self') },
+  // 订阅了告警初筛的群：告警来源开的话题不算别人的话题（告警包 1.1.0 的 topicOwnership），改看话题里有没有别的机器人接过。
+  { id: 'source_topic_scope', category: '别人的话题', title: '订阅群里告警来源开的话题，没别的机器人接过，配了告警负责范围', group: { ...crowded, ...alarmRole, members: { humans: 3, bots: 3 }, sourceBots: 1 },
+    message: human('这个要紧吗？要不要回滚', { inThread: true, sourceTopic: { claimed: false, evidence: 'complete' } }),
+    expected: model('act', '告警话题里问要不要回滚，属于告警负责范围、要查监控才能判断，没有别的机器人接过', ['reply']),
+    note: 'P5 有意变化：之前记 threadRootOther，按别人的话题不接。' },
+  { id: 'source_topic_claimed', category: '别人的话题', title: '订阅群里告警来源开的话题，另一个机器人已经在话题里回过', group: { ...crowded, ...alarmRole, members: { humans: 3, bots: 3 }, sourceBots: 1 },
+    message: human('这个要紧吗？要不要回滚', { inThread: true, sourceTopic: { claimed: true, evidence: 'complete' } }), expected: rule(1, 'silent', 'topic_of_other') },
+  { id: 'source_topic_unreadable', category: '别人的话题', title: '订阅群里告警来源开的话题，读话题消息失败', group: { ...crowded, ...alarmRole, members: { humans: 3, bots: 3 }, sourceBots: 1 },
+    message: human('这个要紧吗？要不要回滚', { inThread: true, sourceTopic: { claimed: true, evidence: 'unavailable' } }), expected: rule(1, 'silent', 'topic_of_other'),
+    note: '读不到就按已被接过让路，不承诺两个机器人互斥。' },
 
   // 负责范围重叠：两个配了负责范围的机器人看到同一条消息
   { id: 'overlap_responder_self', category: '负责范围重叠', title: '范围重叠，我是接话人', group: { ...crowded, ...alarmRole, responder: 'self' },
@@ -304,6 +316,7 @@ export function scenarioFacts(scenario: ParticipationScenario, round: 1 | 2): Ru
     level: scenarioLevel(scenario), messageType: message.messageType ?? 'text',
     ...(message.parent ? { parent: message.parent } : {}), ...(message.threadRootSelf ? { threadRootSelf: true } : {}),
     ...(message.ownedTopic ? { ownedTopic: true } : {}), ...(message.threadRootOther ? { threadRootOther: true } : {}),
+    ...(message.sourceTopic ? { threadClaimedByOther: message.sourceTopic.claimed, threadClaimEvidence: message.sourceTopic.evidence } : {}),
     ...(message.callsOther ? { callsOther: true } : {}), ...(group.responder ? { responder: group.responder } : {}),
     ...(group.members ? { humans: group.members.humans, bots: group.members.bots - (group.sourceBots ?? 0) } : {}),
     ...(round === 2 && message.recent ? { lastSelfAgoMs: message.recent.lastSelfAgoMs, humanBetween: message.recent.humanBetween, partner: message.recent.partner } : {})

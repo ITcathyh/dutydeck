@@ -6,7 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { DECIDER_META_KEY, SCENARIO_RECORD, RuntimeError, scenarioBindingStatus, scenarioDirectLimits, scenarioPolicyVersion, scenarioRecordOf, scenarioSourceBots, wrapUntrusted,
+import { DECIDER_META_KEY, SCENARIO_RECORD, RuntimeError, scenarioBindingStatus, scenarioDirectLimits, scenarioPolicyVersion, scenarioRecordOf, scenarioTriggerSources, resolveScenarioParams, wrapUntrusted,
   type CollaborationDecision, type CollaborationDeciderMeta, type CollaborationRepository, type CollaborationScope, type ListedItems, type ParticipationLevel, type PromptPart,
   type ScenarioBinding, type ScenarioOutcome, type ScenarioPack, type ScenarioRecordSnapshot } from '@dutydeck/shared';
 import type { RegisteredScenarioPack } from '../plugins/scenario-registry.js';
@@ -24,17 +24,20 @@ export const directRecordId = (packId: string, scope: CollaborationScope, messag
 export const directIntroKey = (packId: string, scope: CollaborationScope, messageId: string) => `${packId}_${digest([scope, messageId])}`.slice(0, 50);
 
 /**
- * 收养字段：内部 dispatcher 派来的 direct 场景请求。instruction 是已渲染的指令，恢复和执行都不再读当前加载的包。
- * legacyInstruction 是旧版本入站记录里的初筛约定（见 scenario-legacy.ts），prompt 沿用旧的拼接方式。
+ * 收养字段：内部 dispatcher 派来的场景请求。
+ * - direct：instruction 是已渲染的指令，恢复和执行都不再读当前加载的包。legacyInstruction 是旧版本入站记录里的初筛约定（见 scenario-legacy.ts），prompt 沿用旧的拼接方式。
+ * - model：参与判定为 act 的消息，执行指令和材料冻结在 decisionId 那条判定记录的快照里，coordinator 校验后读取（LarkGroupParticipation.scenarioExecution）。
  */
-export type LarkScenarioAdoption =
+export type LarkScenarioAdoption = LarkDirectAdoption | { mode: 'model'; packId: string; decisionId: string };
+export type LarkDirectAdoption =
   | { mode: 'direct'; packId: string; version: string; digest: string; instruction: string; sourceAppId: string; recordId: string }
   | { mode: 'direct'; packId: string; legacyInstruction: string };
 
 /** 入站记录里读回的收养字段要符合这个形状，否则按没有场景处理。 */
 export const larkScenarioAdoptionSchema = z.union([
   z.object({ mode: z.literal('direct'), packId: z.string().min(1), version: z.string().min(1), digest: z.string().min(1), instruction: z.string().min(1), sourceAppId: z.string().min(1), recordId: z.string().min(1) }).strict(),
-  z.object({ mode: z.literal('direct'), packId: z.string().min(1), legacyInstruction: z.string().min(1) }).strict()
+  z.object({ mode: z.literal('direct'), packId: z.string().min(1), legacyInstruction: z.string().min(1) }).strict(),
+  z.object({ mode: z.literal('model'), packId: z.string().min(1), decisionId: z.string().min(1) }).strict()
 ]);
 
 /** decideDirect 的窗口：本包去重窗口内起了任务的场景记录、查询有没有被截断、读到的最旧一条的时间。 */
@@ -72,7 +75,7 @@ const stringList = (value: unknown): string[] => Array.isArray(value) ? value.fi
 export function decideDirect(input: DirectDecisionInput): DirectDecision {
   const { pack, binding, self, sender, window, now } = input;
   if (sender.appId === self.appId || Boolean(sender.openId) && sender.openId === self.openId) return { matched: false, reason: 'self' };
-  if (!sender.appId || !scenarioSourceBots(pack, binding).some(source => source.appId === sender.appId)) return { matched: false, reason: 'not_source' };
+  if (!sender.appId || !scenarioTriggerSources(pack, binding).some(source => source.appId === sender.appId)) return { matched: false, reason: 'not_source' };
   const dedupeKey = input.dedupeKey ?? sourceTextFingerprint(sender.appId, input.text);
   const limits = scenarioDirectLimits(pack, binding.params);
   const dedupeMs = limits.dedupeWindowHours * HOUR_MS;
@@ -102,7 +105,7 @@ const defaultReasons: Record<ScenarioOutcome, string> = {
 export const directReason = (pack: Pick<ScenarioPack, 'reasons'> | undefined, outcome: ScenarioOutcome) => pack?.reasons?.[outcome] ?? defaultReasons[outcome];
 
 /** 执行 prompt 的请求部分：指令是用户请求，原文作为不可信材料跟在后面；旧版本入站记录沿用旧拼接。 */
-export function directScenarioPrompt(adoption: LarkScenarioAdoption, text: string): string {
+export function directScenarioPrompt(adoption: LarkDirectAdoption, text: string): string {
   if ('legacyInstruction' in adoption) return `${adoption.legacyInstruction}\n${text}`;
   return `${adoption.instruction}\n\n${wrapUntrusted(`scenario:${adoption.packId}:${adoption.sourceAppId}`, text)}`;
 }
@@ -110,7 +113,7 @@ export function directScenarioPrompt(adoption: LarkScenarioAdoption, text: strin
 /** 把材料里的用户请求拆成「指令」（user_request）和「原文」（reference，不可信材料）两部分；拼回去与原文一致。 */
 export function splitDirectScenarioRequest(parts: PromptPart[], adoption: LarkScenarioAdoption | undefined): PromptPart[] {
   const [request, ...rest] = parts;
-  if (!adoption || 'legacyInstruction' in adoption || request?.kind !== 'user_request') return parts;
+  if (adoption?.mode !== 'direct' || 'legacyInstruction' in adoption || request?.kind !== 'user_request') return parts;
   const head = `${adoption.instruction}\n\n`;
   if (!request.content.startsWith(head)) return parts;
   const body = request.content.slice(head.length);
@@ -152,10 +155,14 @@ export async function runDirectScenario(deps: DirectRunDeps, input: DirectRunInp
   const { entry, scope, event } = input;
   const pack = entry.pack;
   const { scenarios, responder } = await repo.getDuty(scope);
-  const binding = scenarios?.[pack.id];
+  const stored = scenarios?.[pack.id];
   const id = directRecordId(pack.id, scope, event.messageId);
   // 平台重推同一条消息只处理一次。
-  if (!binding || scenarioBindingStatus(pack, binding) !== 'enabled' || await repo.getDecision(scope, id)) return;
+  if (!stored || scenarioBindingStatus(pack, stored) !== 'enabled' || await repo.getDecision(scope, id)) return;
+  // 参数按当前包解析，缺的取默认值，和匹配时（LarkScenarios.open）同一口径；不合法时按没开处理。
+  const resolved = resolveScenarioParams(pack, stored.params);
+  if (resolved.issues.length) return;
+  const binding = { ...stored, params: resolved.params };
   const now = deps.now();
   // 去重和每小时上限只看本包窗口内起了任务的记录，单独查，不和群里其他判定记录抢条数。正常配额下读得全，截断时按 window_incomplete 跳过。
   const limits = scenarioDirectLimits(pack, binding.params);
@@ -193,7 +200,7 @@ async function startDirect(deps: DirectRunDeps, input: DirectRunInput, binding: 
   if (!dispatch) throw new RuntimeError('COLLABORATION_DISPATCH_UNAVAILABLE', '机器人还没开始监听', 409);
   const { entry, event, scope } = input;
   const pack = entry.pack;
-  const name = scenarioSourceBots(pack, binding).find(source => source.appId === input.sender.appId)?.name ?? input.sender.appId;
+  const name = scenarioTriggerSources(pack, binding).find(source => source.appId === input.sender.appId)?.name ?? input.sender.appId;
   const values = { source: templateText(sanitizeDisplayName(name)) };
   let thread = event.threadId ? { rootId: event.rootId ?? event.messageId, threadId: event.threadId } : undefined;
   if (!thread && pack.execution.intro) {

@@ -6,12 +6,13 @@ import { createHash } from 'node:crypto';
 import { createCollaborationSchema } from '../../../../packages/storage/src/collaboration-migration.js';
 import { createCollaborationRepository } from '../../../../packages/storage/src/collaboration.js';
 import { addCollaborationScenarios, allowEagerParticipation } from '../../../../packages/storage/src/migrations.js';
-import { markTruncated, scenarioRecordOf, type CollaborationDecision, type CollaborationScope, type CollaborationSnapshot, type PromptPart, type ScenarioBinding } from '@dutydeck/shared';
+import { markTruncated, scenarioRecordOf, type CollaborationDecision, type CollaborationScope, type CollaborationSnapshot, type PromptPart, type ScenarioBinding, type ScenarioPack } from '@dutydeck/shared';
 import { builtinScenarioRegistry } from '../plugins/builtin-scenarios.test-helpers.js';
 import { ScenarioRegistry } from '../plugins/scenario-registry.js';
 import { assemblePrompt } from '../prompt-context.js';
 import { LarkGroupParticipation, type GroupParticipationOptions } from './group-participation.js';
 import { LarkMessageCoordinator } from './coordinator.js';
+import { LarkScenarios } from './group-scenarios.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { StoredLarkConfig } from './config.js';
 import type { ParticipationResult } from './readonly-decider.js';
@@ -268,7 +269,7 @@ describe('告警初筛（内置告警包）', () => {
     expect(await alarmDuty(h)).toBeUndefined();
     expect(await h.coordinator.handleAction(value, 'ou_a', { messageId: 'om_card', chatId: scope.chatId })).toMatchObject({ type: 'success', content: expect.stringContaining('已开启告警初筛') });
     expect(await alarmDuty(h)).toEqual({ enabled: true, sources: [{ appId: 'cli_alarm', name: '监控机器人' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3, requesterId: 'ou_a' });
-    expect((await h.repository.getDuty(scope)).scenarios?.alarm?.packVersion).toBe('1.0.0');
+    expect((await h.repository.getDuty(scope)).scenarios?.alarm?.packVersion).toBe('1.1.0');
 
     await h.coordinator.handle(atBot('om_unsub', '关闭告警初筛'), config);
     await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledTimes(2));
@@ -356,7 +357,7 @@ describe('升级前发出的告警确认卡', () => {
     await after.coordinator.initializeWorkflows(config);
     expect(await click('ou_a', after)).toMatchObject({ type: 'success', content: expect.stringContaining('已开启告警初筛') });
     expect((await after.repository.getDuty(scope)).scenarios?.alarm).toEqual({ enabled: true, params: { sources: [{ appId: 'cli_alarm', name: '监控' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3 },
-      requesterId: 'ou_a', packVersion: '1.0.0' });
+      requesterId: 'ou_a', packVersion: '1.1.0' });
     expect(after.service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_card_om_sub', statusLabel: '已确认' }));
     expect(await click('ou_a', after)).toMatchObject({ type: 'info', content: '这张卡已经处理过了。' });
 
@@ -371,5 +372,105 @@ describe('升级前发出的告警确认卡', () => {
     const click = await legacyCard(h, 'om_bad', { enabled: true, sources: 'not json', levels: '[]', dedupeHours: 6, maxPerHour: 3 });
     expect(await click('ou_a')).toMatchObject({ type: 'error', content: expect.stringContaining('确认卡上的设置已经不能用了') });
     expect((await h.repository.getDuty(scope)).scenarios?.alarm).toBeUndefined();
+  });
+});
+
+describe('绑定参数、触发来源和确认卡版本', () => {
+  const alarmSource = { appId: 'cli_alarm', name: '监控' };
+  const canOperate = async (_scope: CollaborationScope, operator: string, requester: string) => operator === requester;
+  const details = (senders: Record<string, string>) => vi.fn(async (id: string) => ({ messageId: id, chatId: scope.chatId, messageType: 'text', createTime: '1789707600000', rawContent: '{}',
+    sender: senders[id] ? { id: senders[id], idType: 'app_id', type: 'app' } : { id: 'ou_x', type: 'user' }, mentions: [], deleted: false, updated: false, ...(id === 'om_sent' ? { threadId: 'omt_alarm' } : {}) }));
+  const fromBot = (id: string, text: string, openId: string) => message(id, text, { senderType: 'app', senderOpenId: openId });
+  const dispatchTo = (h: Awaited<ReturnType<typeof harness>>) => {
+    const dispatched: LarkMessageEvent[] = [];
+    h.participation.setDispatcher(scope.appId, (event, current) => { dispatched.push(event); return h.coordinator.adopt(event, current); });
+    return dispatched;
+  };
+  /** 只有一个告警包变体的注册表（模拟包升级）。 */
+  const variant = async (patch: (pack: ScenarioPack) => ScenarioPack) => {
+    const builtin = (await builtinScenarioRegistry()).get('alarm')!;
+    const registry = new ScenarioRegistry();
+    registry.add([{ ...builtin, pack: patch(builtin.pack), digest: 'variant' }]);
+    return registry;
+  };
+  const outcomeOf = async (h: Awaited<ReturnType<typeof harness>>, messageId: string) => {
+    const record = await h.repository.getDecision(scope, directRecordId('alarm', scope, messageId));
+    return record ? scenarioRecordOf(record)?.outcome : undefined;
+  };
+
+  it('同一大版本内包新增了带默认值的参数：已有绑定缺这个参数时，匹配、派发和 /status 都按包默认值', async () => {
+    const registry = await variant(pack => ({ ...pack, version: '1.2.0', trigger: { ...pack.trigger, match: { textAnyParam: 'regions' } },
+      params: { ...pack.params, levels: { ...pack.params.levels!, default: ['P0'] } as ScenarioPack['params'][string],
+        regions: { type: 'string_list', label: '区域', maxItems: 10, maxLength: 32, default: ['boom'] } } }));
+    const h = await harness('selective', { scenarios: registry });
+    await h.repository.updateDuty(scope, { expectedRevision: 0, scenarios: { alarm: { enabled: true, params: { sources: [alarmSource], dedupeHours: 6, maxPerHour: 3 },
+      requesterId: 'ou_admin', packVersion: '1.0.0' } } }, 'ou_admin');
+    Object.assign(h.service, { getMessage: details({ om_other: 'cli_alarm', om_p1: 'cli_alarm', om_p0: 'cli_alarm' }) });
+    const dispatched = dispatchTo(h);
+    await h.coordinator.handle(fromBot('om_other', '【P0】库存服务超时', 'ou_alarm'), config); await h.participation.flush(scope);
+    await h.coordinator.handle(fromBot('om_p1', '【P1】boom 支付服务超时', 'ou_alarm'), config); await h.participation.flush(scope);
+    await h.coordinator.handle(fromBot('om_p0', '【P0】boom 订单服务错误率超过阈值', 'ou_alarm'), config); await h.participation.flush(scope);
+    await vi.waitFor(() => expect(dispatched.map(event => event.messageId)).toEqual(['om_p0']));
+    // 没命中 regions 默认值的不匹配、不留记录；级别按 levels 默认值 P0 过滤。
+    expect([await outcomeOf(h, 'om_other'), await outcomeOf(h, 'om_p1'), await outcomeOf(h, 'om_p0')]).toEqual([undefined, 'filtered', 'started']);
+    expect(await h.participation.describe(scope)).toContain('级别只看 P0');
+  });
+
+  it('触发只认 trigger.sourceBotsParam 指定的来源；包里别的 role 为 source 的参数只用于不把它们算作会接话的机器人', async () => {
+    const registry = await variant(pack => ({ ...pack, params: { ...pack.params, escalation: { type: 'bot_list', label: '升级通知机器人', maxItems: 5, role: 'source' } } }));
+    const binding: ScenarioBinding = { enabled: true, params: { sources: [alarmSource], escalation: [{ appId: 'cli_escalate', name: '升级' }], levels: [], dedupeHours: 6, maxPerHour: 3 },
+      requesterId: 'ou_admin', packVersion: '1.0.0' };
+    expect([...new LarkScenarios(registry).sourceAppIds({ scenarios: { alarm: binding } })]).toEqual(['cli_alarm', 'cli_escalate']);
+    expect(decideDirect({ pack: registry.get('alarm')!.pack, binding, self: { appId: scope.appId }, sender: { appId: 'cli_escalate' }, text: '【P1】x',
+      window: { records: [], truncated: false }, now: Date.now() })).toEqual({ matched: false, reason: 'not_source' });
+    const h = await harness('selective', { scenarios: registry });
+    await h.repository.updateDuty(scope, { expectedRevision: 0, scenarios: { alarm: binding } }, 'ou_admin');
+    Object.assign(h.service, { getMessage: details({ om_escalate: 'cli_escalate', om_alarm: 'cli_alarm' }) });
+    const dispatched = dispatchTo(h);
+    await h.coordinator.handle(fromBot('om_escalate', '【P1】订单服务错误率超过阈值', 'ou_escalate'), config); await h.participation.flush(scope);
+    await h.coordinator.handle(fromBot('om_alarm', '【P1】支付服务超时', 'ou_alarm'), config); await h.participation.flush(scope);
+    await vi.waitFor(() => expect(dispatched.map(event => event.messageId)).toEqual(['om_alarm']));
+    expect(await outcomeOf(h, 'om_escalate')).toBeUndefined();
+  });
+
+  it('开启确认卡记着发卡时的包版本：之后包升了大版本，点旧卡按失效处理、不改绑定；升级前的旧格式卡按 1.0.0', async () => {
+    const before = await harness('selective', { canOperate });
+    await before.coordinator.initializeWorkflows(config);
+    const recent = (id: string, sender: string) => ({ messageId: id, chatId: scope.chatId, messageType: 'text', rawContent: '{"text":"x"}', createTime: '1789707500000',
+      sender: { id: sender, type: sender.startsWith('cli_') ? 'app' : 'user' }, mentions: [], deleted: false, updated: false });
+    before.service.listChatMessages.mockImplementation(async () => ({ items: [recent('m1', 'cli_alarm')], hasMore: false }));
+    Object.assign(before.service, { listChatMembers: vi.fn(async () => ({ items: [{ memberId: 'ou_0', memberType: 'user' as const, name: '用户0' },
+      { memberId: 'cli_alarm', memberType: 'bot' as const, name: '监控', appId: 'cli_alarm' }], hasMore: false, securityLimited: false })) });
+    await before.coordinator.handle(message('om_sub', '@_user_1 告警来了先帮我看看', { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }] }), config);
+    await vi.waitFor(() => expect(before.service.reply).toHaveBeenCalledOnce());
+    const card = (await before.repository.listActions(scope)).find(item => item.kind === 'confirm.scenario:alarm')!;
+    expect((card.payload as { payload: Record<string, unknown> }).payload).toMatchObject({ enabled: true, packVersion: '1.1.0' });
+    const legacyId = 'confirm_legacy_om_old';
+    const legacyPayload = { enabled: true, sources: JSON.stringify([alarmSource]), levels: '[]', dedupeHours: 6, maxPerHour: 3 };
+    const begun = await before.repository.beginAction({ id: legacyId, scope, kind: 'confirm.alarm_subscription', requesterId: 'ou_a', inputDigest: digest(legacyPayload),
+      payload: { kind: 'alarm_subscription', title: '开启告警初筛', summary: '旧卡', payload: legacyPayload, replyTo: { messageId: 'om_old' }, expiresAt: new Date(Date.now() + 3_600_000).toISOString() } });
+    await before.repository.updateAction(scope, legacyId, { expectedRevision: begun.action.revision, status: 'intent', receipt: 'om_card_old' });
+
+    // 重启后包升到 2.0.0。
+    const after = await harness('selective', { canOperate, scenarios: await variant(pack => ({ ...pack, version: '2.0.0' })) }, before.db);
+    await after.coordinator.initializeWorkflows(config);
+    for (const [id, cardMessageId] of [[card.id, 'om_card'], [legacyId, 'om_card_old']]) {
+      expect(await after.coordinator.handleAction({ dutydeck_confirm: 'confirm', confirm_id: id, chat_id: scope.chatId }, 'ou_a', { messageId: cardMessageId!, chatId: scope.chatId }))
+        .toMatchObject({ type: 'error', content: expect.stringContaining('场景包已升级到 v2.0.0，这张确认卡已经失效，请在群里重新说一次') });
+    }
+    expect((await after.repository.getDuty(scope)).scenarios?.alarm).toBeUndefined();
+  });
+
+  it('同一大版本内升级（卡上记的 1.0.0，当前包 1.1.0）：点卡照常开启，绑定记当前版本', async () => {
+    const h = await harness('selective', { canOperate });
+    await h.coordinator.initializeWorkflows(config);
+    const payload = { enabled: true, params: JSON.stringify({ sources: [alarmSource], levels: ['P0'], dedupeHours: 6, maxPerHour: 3 }), packVersion: '1.0.0' };
+    const id = 'confirm_v1_card';
+    const begun = await h.repository.beginAction({ id, scope, kind: 'confirm.scenario:alarm', requesterId: 'ou_a', inputDigest: digest(payload),
+      payload: { kind: 'scenario:alarm', title: '开启告警初筛', summary: 'v1 卡', payload, replyTo: { messageId: 'om_v1' }, expiresAt: new Date(Date.now() + 3_600_000).toISOString() } });
+    await h.repository.updateAction(scope, id, { expectedRevision: begun.action.revision, status: 'intent', receipt: 'om_card_v1' });
+    expect(await h.coordinator.handleAction({ dutydeck_confirm: 'confirm', confirm_id: id, chat_id: scope.chatId }, 'ou_a', { messageId: 'om_card_v1', chatId: scope.chatId }))
+      .toMatchObject({ type: 'success', content: expect.stringContaining('已开启告警初筛') });
+    expect((await h.repository.getDuty(scope)).scenarios?.alarm).toMatchObject({ enabled: true, params: { levels: ['P0'] }, requesterId: 'ou_a', packVersion: '1.1.0' });
   });
 });

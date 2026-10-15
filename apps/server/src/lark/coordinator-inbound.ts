@@ -646,7 +646,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (adoption) event = { ...event, ...adoption };
     // direct 场景请求的消息已由群参与看过，这里不再观察、不过机器人回合门禁（包自带去重和每小时上限）；
     // 发起人不是这条消息的发送者，要按群成员重新确认。重启恢复时同样按受理处理。
-    const scenario = adoption || persisted?.state === 'received' ? larkScenarioAdoptionOf(event) : undefined;
+    // model 场景的 act 和普通 act 一样以发消息的人的身份执行，收养字段只影响执行 prompt（见 coordinator-dispatch.ts）。
+    const adoptedScenario = adoption || persisted?.state === 'received' ? larkScenarioAdoptionOf(event) : undefined;
+    const scenario = adoptedScenario?.mode === 'direct' ? adoptedScenario : undefined;
     if (scenario) adopted = true;
     if (this.workflowOptions.store) {
       const current = await readLarkConfig(this.workflowOptions.store, config.appId);

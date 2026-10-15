@@ -309,6 +309,23 @@ describe('scenario packs: trust boundary, builtin plugins and wiring', () => {
     expect((await loadDaemonPlugins(env, { builtinRoot })).host?.active.map(item => item.entry.name)).toEqual(['sample', 'docs']);
   });
 
+  it('示例插件 team-faq（model 模式）能校验、确认后安装并和内置告警包一起加载，provider 按 docs_dir 读 runbook', async () => {
+    const teamFaq = resolve(import.meta.dirname, '../../../../plugins/team-faq');
+    expect(await cli('validate', [teamFaq])).toMatchObject({ ok: true, out: expect.stringContaining('team-faq@0.1.0（model）') });
+    const store = new PluginStore(dataDir);
+    await expect(store.install(teamFaq)).rejects.toMatchObject({ code: 'PLUGIN_TRUST_REQUIRED' });
+    await store.install(teamFaq, { yes: true });
+    const docs = join(temp, 'runbooks');
+    await writePlugin(docs, { 'orders.md': '# 订单服务\n\n## 5xx 排查\n\n订单服务 5xx 先看网关日志。\n' });
+    await store.setConfig('team-faq', 'docs_dir', Buffer.from(docs));
+    const host = await PluginHost.load({ dataDir });
+    expect(host.diagnostics).toEqual([]);
+    expect(host.scenarios.list().map(item => [item.pack.id, item.pack.mode, item.builtin])).toEqual([['alarm', 'direct', true], ['team-faq', 'model', false]]);
+    const context = await host.scenarios.get('team-faq')!.providers.get('runbook')!.context({ scope: { appId: 'cli_a', chatId: 'oc_a' },
+      message: { ...scenarioMessage('订单服务 5xx 怎么排查'), senderKind: 'human' }, params: { topics: ['订单服务'], docs: ['orders.md'] }, maxChars: 6000 }, 3000);
+    expect(context).toMatchObject({ status: 'ok', value: { items: expect.arrayContaining([expect.objectContaining({ id: 'orders.md#1', title: 'orders.md · 5xx 排查' })]), missing: [] } });
+  });
+
   it('answers which packs apply by plugin scope, group binding and major version', async () => {
     await writePlugin(join(temp, 'scoped'), { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'scoped' }), 'scenarios/demo.json': JSON.stringify(directPack('demo')) });
     await new PluginStore(dataDir, builtinRoot).install(join(temp, 'scoped'), { scope: 'bot:cli_a' });

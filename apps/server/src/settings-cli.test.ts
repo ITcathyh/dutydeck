@@ -293,18 +293,18 @@ describe('settings CLI group duty against the real collaboration routes', () => 
   it('writes scenario bindings, merges partial params, and shows each pack with its params, binding and staleness', async () => {
     const { repos, scope, run } = await dutyRuntime();
     const before = alarmOf(await run('group-show'));
-    expect(before).toMatchObject({ title: '告警初筛', version: '1.0.0', mode: 'direct', requiresRequester: true, versionStale: false,
+    expect(before).toMatchObject({ title: '告警初筛', version: '1.1.0', mode: 'direct', requiresRequester: true, versionStale: false,
       params: { sources: { type: 'bot_list', label: '来源机器人 app_id' }, dedupeHours: { type: 'integer', min: 1, max: 168, default: 6 } } });
     expect(before).not.toHaveProperty('binding');
     const saved = await run('group-set', { pairs: [`scenarios=${JSON.stringify({ alarm: { enabled: false, params: { sources, levels: ['P0'] } } })}`] });
     expect(saved.applied).toEqual(['duty']);
     expect(saved).not.toHaveProperty('warnings');
-    const off = { enabled: false, params: { sources, levels: ['P0'], dedupeHours: 6, maxPerHour: 3 }, packVersion: '1.0.0' };
+    const off = { enabled: false, params: { sources, levels: ['P0'], dedupeHours: 6, maxPerHour: 3 }, packVersion: '1.1.0' };
     expect(alarmOf(saved)).toMatchObject({ binding: off });
     // 群里确认后（确认卡写入确认人），CLI 只改一个参数，其余沿用。
     await repos.collaboration.updateDuty(scope, { expectedRevision: 1, scenarios: { alarm: { ...off, enabled: true, requesterId: 'ou_tester' } } }, 'ou_tester');
     const changed = await run('group-set', { pairs: ['scenarios={"alarm":{"enabled":true,"params":{"maxPerHour":5}}}'] });
-    expect((changed.collaboration as any).duty.scenarios.alarm).toEqual({ enabled: true, params: { ...off.params, maxPerHour: 5 }, requesterId: 'ou_tester', packVersion: '1.0.0' });
+    expect((changed.collaboration as any).duty.scenarios.alarm).toEqual({ enabled: true, params: { ...off.params, maxPerHour: 5 }, requesterId: 'ou_tester', packVersion: '1.1.0' });
     // 绑定的大版本落后于包：show 标出过期，开启被服务端拒绝。
     await repos.collaboration.updateDuty(scope, { expectedRevision: 3, scenarios: { alarm: { ...off, enabled: true, requesterId: 'ou_tester', packVersion: '0.9.0' } } }, 'ou_tester');
     expect(alarmOf(await run('group-show'))).toMatchObject({ versionStale: true, binding: { packVersion: '0.9.0' } });

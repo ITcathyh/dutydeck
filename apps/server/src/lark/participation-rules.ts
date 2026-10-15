@@ -53,6 +53,8 @@ export interface RuleContext {
   botNames: string[];
   /** 角色负责范围（设置后只绕过4条默认接话规则，交给模型按范围判定）。 */
   roleScope?: string;
+  /** 消息命中的 model 场景包 id：和负责范围一样只绕过那4条规则，交给模型按包的指引判定。 */
+  scenarioMatched?: string;
   /** 消息引用回复的那条消息是谁发的；没引用或查不到时不填。 */
   parent?: 'self' | 'sender' | 'other';
   /** 消息所在话题的根消息是本机器人发的（例如委托产出）。 */
@@ -61,6 +63,8 @@ export interface RuleContext {
   ownedTopic?: boolean;
   /** 消息所在话题的根消息是别的机器人发的，或 @ 的是别人。只在多机器人群里查。 */
   threadRootOther?: boolean;
+  /** 场景来源开的话题（不记 threadRootOther）里有别的机器人发过言，或话题没读全、读失败。只在多机器人群里查。 */
+  threadClaimedByOther?: boolean;
   /** 消息开头叫的是群里另一个机器人的名字。只在多机器人群里查。 */
   callsOther?: boolean;
   /** 本群的接话人是谁；没指定时不填。 */
@@ -144,8 +148,8 @@ export function evaluateParticipationRules(ctx: RuleContext): RuleVerdict | unde
   if (ctx.parent === 'other') return verdict('silent', 'reply_to_other');
   // 多机器人群：每条没 @ 的消息最多一个机器人接。别人的话题不接；不是接话人的只接上面这些明确叫自己的。
   const crowded = (ctx.members?.bots ?? 0) > 1;
-  if (crowded && !ctx.parent && ctx.threadRootOther) return verdict('silent', 'topic_of_other');
-  const hasScope = Boolean(ctx.roleScope?.trim());
+  if (crowded && !ctx.parent && (ctx.threadRootOther || ctx.threadClaimedByOther)) return verdict('silent', 'topic_of_other');
+  const hasScope = Boolean(ctx.roleScope?.trim()) || Boolean(ctx.scenarioMatched);
   if (!hasScope && ctx.responder === 'other') return verdict('silent', 'not_responder');
   if (!hasScope && crowded && ctx.responder !== 'self') return verdict('silent', 'no_responder');
   if (mentionsOwnedName(text, ctx.ownedNames)) return verdict('addressed', 'owned_item');
@@ -176,8 +180,13 @@ export type RuleFacts = {
   bots?: number;
   ownedTopic?: boolean;
   threadRootOther?: boolean;
+  /** 场景来源开的话题有没有被别的机器人接过；evidence 说明是读全了（complete）、读到上限（capped）还是读失败（unavailable）。 */
+  threadClaimedByOther?: boolean;
+  threadClaimEvidence?: 'complete' | 'capped' | 'unavailable';
   callsOther?: boolean;
   responder?: 'self' | 'other';
+  /** 消息命中、且取材料没失败的 model 场景包 id。 */
+  scenarioMatched?: string;
 };
 
 /** 本机器人负责的委托与事项：名称供点名匹配，有生效委托时「这个任务」才算指它。 */
@@ -199,6 +208,7 @@ export function ruleContextOf(trigger: CollaborationObservation, owned: { names:
     ...(roleScope !== undefined ? { roleScope } : {}),
     ...(facts.parent ? { parent: facts.parent } : {}), ...(facts.threadRootSelf ? { threadRootSelf: true } : {}),
     ...(facts.ownedTopic ? { ownedTopic: true } : {}), ...(facts.threadRootOther ? { threadRootOther: true } : {}),
+    ...(facts.threadClaimedByOther ? { threadClaimedByOther: true } : {}), ...(facts.scenarioMatched ? { scenarioMatched: facts.scenarioMatched } : {}),
     ...(facts.callsOther ? { callsOther: true } : {}), ...(facts.responder ? { responder: facts.responder } : {}),
     ...(facts.lastSelfAgoMs !== undefined ? { recent: { lastSelfAt: at - facts.lastSelfAgoMs, humanBetween: Boolean(facts.humanBetween), partners: facts.partner ? [senderId] : [] } } : {}),
     ...(facts.humans !== undefined ? { members: { humans: facts.humans, bots: facts.bots ?? 0 } } : {})

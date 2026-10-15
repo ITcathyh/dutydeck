@@ -1,6 +1,6 @@
 {
   "id": "alarm",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "title": "告警初筛",
   "noun": "告警",
   "description": "订阅的来源机器人发告警后，不走参与判定，直接在告警话题里以确认人的名义起一个初筛任务。",
@@ -19,6 +19,7 @@
   "dedupe": { "algorithm": "source_text_v1" },
   "dedupeWindowHoursParam": "dedupeHours",
   "quota": { "perHourParam": "maxPerHour" },
+  "topicOwnership": { "sourceTopics": "neutral" },
   "correlation": {
     "provider": "alert-key",
     "requiredFields": ["title"],

@@ -1,19 +1,20 @@
 import { RuntimeError, COLLABORATION_LIST_LIMIT, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GATE, countDecisionUsage, listWindowIncomplete, type ListedItems } from '@dutydeck/shared';
 import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_LIMIT_PER_HOUR, BOT_TURN_RECORD, countBotTurnUsage } from '@dutydeck/shared';
 import { DECIDER_META_KEY, INTRUSIVE_FEEDBACK_PREFIX, MISSED_FEEDBACK_PREFIX, deciderMetaOf, isDecisionGate, participationLevelBehaviors, participationLevelLabels, participationLevelPhraseHint, participationLevelPhrases, participationLevels, resolveParticipation } from '@dutydeck/shared';
-import { resolveScenarioParams, scenarioBindingStatus, scenarioMajorVersion, scenarioRecordOf, scenarioSourceBots, type CollaborationDuty, type ScenarioBinding, type ScenarioBotRef, type ScenarioMessage, type ScenarioPack, type UpdateCollaborationDutyInput } from '@dutydeck/shared';
+import { resolveScenarioParams, scenarioBindingStatus, scenarioMajorVersion, scenarioRecordOf, scenarioSourceBots, scenarioTriggerSources, type CollaborationDuty, type ScenarioBinding, type ScenarioBotRef, type ScenarioMessage, type ScenarioPack, type UpdateCollaborationDutyInput } from '@dutydeck/shared';
 import { createHash } from 'node:crypto';
-import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision, CollaborationAction, CollaborationTeamContext, CollaborationDeciderMeta, CollaborationSettings, ParticipationLevel } from '@dutydeck/shared';
+import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision, CollaborationAction, CollaborationTeamContext, CollaborationDeciderMeta, CollaborationScenarioSnapshot, CollaborationSettings, ParticipationLevel } from '@dutydeck/shared';
 import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkCardService, LarkChatMessage } from './service.js';
 import { parseLarkMessageContent } from './message-content.js';
 import { LarkContextBootstrap, observationTime } from './context-bootstrap.js';
-import { decisionInput, participationInput, parseParticipationResult, parseParticipationResponse, type ParticipationDecider, type ParticipationFacts, type ParticipationResult } from './readonly-decider.js';
+import { decisionInput, participationInput, parseParticipationResult, parseParticipationResponse, scenarioObservations, type ParticipationDecider, type ParticipationFacts, type ParticipationResult } from './readonly-decider.js';
 import { botNameTokens, callsBotName, compactText, intrusionPattern, ownedItems, participationIntentOf, participationRuleReasons, stripMentionPlaceholders, type ParticipationRule, type RuleFacts, type RuleVerdict } from './participation-rules.js';
 import { responderAnnouncementOf, responderClaimText, responderIntentOf, responderReleaseText } from './group-responder.js';
 import { LarkScenarios, type ScenarioMatch, type ScenarioPhrase } from './group-scenarios.js';
-import { runDirectScenario } from './scenario-direct.js';
+import { runDirectScenario, type LarkScenarioAdoption } from './scenario-direct.js';
+import { SCENARIO_REF_PREFIX, freezeScenario, humanScenarioMessage, modelScenarioExecution, scenarioContextLimits, type ModelScenarioExecution } from './scenario-model.js';
 import { findScenarioRecall, materialEntries, type LarkScenarioRecall } from './scenario-recall.js';
 import { legacyConfirmAliases } from './scenario-legacy.js';
 import { renderScenarioTemplate, scenarioParamValues, scenarioSummary, templateText, type TemplateValues } from './scenario-template.js';
@@ -74,6 +75,8 @@ const MISSED_WINDOW_MS = 10 * 60_000;
 const HOUR_MS = 3_600_000;
 const WHY_WINDOW_MS = HOUR_MS;
 const MEMBER_CACHE_MS = 10 * 60_000;
+/** 场景来源开的话题最多读几页（每页 50 条）看有没有别的机器人接过。 */
+const THREAD_CLAIM_PAGES = 4;
 const LEVEL_CONFIRM_KIND = 'participation_level';
 /** 场景包开关的确认卡种类：scenario:<包 id>。 */
 const scenarioConfirmKind = (packId: string) => `scenario:${packId}`;
@@ -92,6 +95,11 @@ const snippet = (text: string | undefined) => { const plain = stripMentionPlaceh
 const botName = (config: StoredLarkConfig) => config.name ?? config.displayName ?? config.appId;
 const isSelfMessage = (message: Pick<LarkChatMessage, 'sender'>, appId: string, botOpenId?: string) =>
   ['app', 'bot'].includes(message.sender.type ?? '') && Boolean(message.sender.id) && (message.sender.id === appId || message.sender.id === botOpenId);
+const isBotMessage = (message: Pick<LarkChatMessage, 'sender'>) => ['app', 'bot'].includes(message.sender.type ?? '');
+/** 消息读取接口把机器人发送者报成 app_id。 */
+const botAppIdOf = (message: Pick<LarkChatMessage, 'sender'>) => message.sender.idType === 'app_id' || message.sender.id?.startsWith('cli_') ? message.sender.id : undefined;
+/** 判定快照里冻结的场景（model 包）。 */
+const snapshotScenario = (item: Pick<CollaborationDecision, 'inputSnapshot'>) => (item.inputSnapshot as { scenario?: CollaborationScenarioSnapshot }).scenario;
 
 /** 会接话的机器人：群里的机器人去掉本群场景包绑定的来源机器人，它们只发通知，不算多机器人群里的另一个。 */
 const talkingBots = (members: Members, sources: ReadonlySet<string>) => members.botList.filter(item => !item.appId || !sources.has(item.appId));
@@ -305,16 +313,16 @@ export class LarkGroupParticipation {
     const scopeLine = level === 'selective' && !config?.roleScope?.trim()
       ? '**负责范围**：未配置。配置后，没 @ 我的消息里属于范围内的事我会判断后接；在 Dutydeck Web「机器人管理」的「负责范围」里填写' : undefined;
     const line = `**参与**：${participationLevelLabels[level]}${settings.participation === 'observe' ? '（只观察）' : ''}；今天判定 ${today.length} 次（规则 ${rules} / 模型 ${models}），回复 ${replies} 次，判定耗时中位 ${median === undefined ? '—' : `${(median / 1000).toFixed(1)} 秒`}，花费 ${cost}`;
-    const scenarioRecords = decisions.filter(item => scenarioRecordOf(item) && Date.parse(item.createdAt) >= since.getTime());
+    const decisionsToday = decisions.filter(item => Date.parse(item.createdAt) >= since.getTime());
     return [
       ...(roleLine ? [roleLine] : []),
       [line, ...(active ? [`生效中的持续委托 ${active} 个`] : []), ...(settings.notificationsPaused ? ['主动通知已暂停'] : [])].join(' · '),
       ...(scopeLine ? [scopeLine] : []),
-      ...await this.dutyLines(scope, scenarioRecords, config)
+      ...await this.dutyLines(scope, decisionsToday, config)
     ].join('\n\n');
   }
   /** /status 的分工行：接话人（多机器人群或已指定时）和每个有绑定的场景包。 */
-  private async dutyLines(scope: CollaborationScope, scenarioRecordsToday: CollaborationDecision[], config?: StoredLarkConfig): Promise<string[]> {
+  private async dutyLines(scope: CollaborationScope, decisionsToday: CollaborationDecision[], config?: StoredLarkConfig): Promise<string[]> {
     const duty = await this.options.repository.getDuty(scope);
     config ??= await this.options.readConfig(scope.appId, scope.chatId).catch(() => undefined);
     const members = config && await this.memberCounts(config, scope.chatId);
@@ -338,7 +346,7 @@ export class LarkGroupParticipation {
         lines.push(`**接话人**：未指定。本群有 ${bots} 个机器人，没 @ 的消息我先不接；要我接，@我 说「你负责接话」，或在 Dutydeck Web 的群设置里指定`);
       }
     }
-    lines.push(...this.scenarios.statusLines({ appId: scope.appId, ...(config?.workspace ? { workspace: config.workspace } : {}) }, duty, scenarioRecordsToday));
+    lines.push(...this.scenarios.statusLines({ appId: scope.appId, ...(config?.workspace ? { workspace: config.workspace } : {}) }, duty, decisionsToday));
     return lines;
   }
   setDispatcher(appId: string, dispatch: ParticipationDispatcher) {
@@ -448,12 +456,14 @@ export class LarkGroupParticipation {
     } catch { missing.push('message_parse_failed'); }
     if (text.length > 16000) missing.push('text_truncated');
     if (!event.createTime) missing.push('event_time_unavailable');
+    // model 场景包（H1）：没 @ 的真人消息才交给判定，命中的包记在观察 refs 里。
+    const scenarioRef = human && !input.explicit && !intrusive ? await this.matchModelScenario(scope, event, config, text, settings, input.botOpenId) : undefined;
     const result = await this.options.repository.observe({ scope, source: 'lark.message', eventId: event.messageId,
       occurredAt: observationTime(event.createTime, '1970-01-01T00:00:00.000Z'), receivedAt: now, senderId: event.senderOpenId,
       senderKind: bot ? 'bot' : event.senderOpenId ? 'human' : 'system', threadId: event.threadId, messageId: event.messageId,
       text: text.slice(0, 16_000), refs: [event.messageId, ...(event.parentId ? [event.parentId] : []), ...(input.explicit ? ['dutydeck:explicit'] : []),
         ...(input.botOpenId ? [`dutydeck:self:${input.botOpenId}`] : []),
-        ...(event.parentId ? [`dutydeck:parent:${event.parentId}`] : []), ...(input.ownedTopic ? [OWNED_TOPIC_REF] : []),
+        ...(event.parentId ? [`dutydeck:parent:${event.parentId}`] : []), ...(input.ownedTopic ? [OWNED_TOPIC_REF] : []), ...(scenarioRef ? [`${SCENARIO_REF_PREFIX}${scenarioRef}`] : []),
         ...new Set(event.mentions.map(mention => `dutydeck:mention:${!input.botOpenId || !mention.openId ? 'unknown' : mention.openId === input.botOpenId ? 'self' : 'other'}`))], origin: 'live', missing });
     // Bootstrap can run alongside explicit requests, but is awaited before ambient decisions.
     if (input.explicit) void this.bootstrapper.ensure(scope).catch(error => this.options.log?.warn({ error, scope }, '群上下文补读失败'));
@@ -463,6 +473,25 @@ export class LarkGroupParticipation {
       this.enqueue(scope, { event, config, observation: result.observation, ...(input.botOpenId ? { botOpenId: input.botOpenId } : {}) });
     }
     return { enabled: true, instructions: settings.instructions };
+  }
+  /**
+   * 没 @ 的真人消息命中哪个 model 场景包：只在按需、积极档；作用域、绑定和匹配规则同 direct 包。
+   * 多个命中时按包 id 取第一个，其余只记诊断；匹配正则或 provider 出错的包，这条消息不算命中。
+   */
+  private async matchModelScenario(scope: CollaborationScope, event: LarkMessageEvent, config: StoredLarkConfig, text: string, settings: CollaborationSettings, botOpenId?: string): Promise<string | undefined> {
+    if (!activeModes.has(await this.level(scope, settings))) return undefined;
+    const open = this.scenarios.model(config, await this.options.repository.getDuty(scope));
+    if (!open.length) return undefined;
+    const message = humanScenarioMessage(event, text, botOpenId);
+    let chosen: string | undefined;
+    for (const { entry, binding } of open) {
+      const matched = await this.scenarios.match(entry, binding, message);
+      if (!matched.matched) continue;
+      if ('abstained' in matched) { this.options.log?.warn({ scope, messageId: event.messageId, scenario: entry.pack.id, reason: matched.abstained }, '场景包匹配出错，这条消息不算命中'); continue; }
+      if (chosen) { this.options.log?.warn({ scope, messageId: event.messageId, scenario: entry.pack.id, chosen }, '同一条消息命中了多个场景包，只用包 id 排在最前的'); continue; }
+      chosen = entry.pack.id;
+    }
+    return chosen;
   }
   private enqueue(scope: CollaborationScope, pending: Pending) {
     if (this.closed) return;
@@ -499,10 +528,16 @@ export class LarkGroupParticipation {
   private async current(scope: CollaborationScope, snapshot: CollaborationSnapshot, actorId: string, slot: Slot, deliver = false, accepted = false) {
     if (this.closed || slot.stopped || !(await this.options.readConfig(scope.appId, scope.chatId))?.listening || !await this.options.authorize(scope, undefined, 'observe')) return false;
     if (snapshot.teamContext && await this.teamContextAllowed(scope, snapshot.teamContext) !== true) return false;
+    // 判定用到的 model 场景包在投递前再看一次绑定：判定期间群里关掉了，这一条就不发。
+    if (deliver && snapshot.scenario?.status === 'used' && !await this.scenarioOpen(scope, snapshot.scenario.packId)) return false;
     const current = await this.options.repository.snapshot(scope, 30);
     return (accepted || current.contextRevision === snapshot.contextRevision) && current.settings.revision === snapshot.settings.revision
       && current.settings.participation !== 'off' && (!deliver || activeModes.has(current.settings.participation) && !current.settings.notificationsPaused
         && await this.options.authorize(scope, 'policy:group-participation', 'deliver')) && !this.closed && !slot.stopped;
+  }
+  private async scenarioOpen(scope: CollaborationScope, packId: string): Promise<boolean> {
+    const config = await this.options.readConfig(scope.appId, scope.chatId);
+    return Boolean(config) && this.scenarios.model(config!, await this.options.repository.getDuty(scope)).some(item => item.entry.pack.id === packId);
   }
   /**
    * 返回拦截理由，通过则返回 undefined。
@@ -620,11 +655,34 @@ export class LarkGroupParticipation {
         const trigger = full.observations.find(item => item.messageId === pending.event.messageId && item.origin === 'live' && item.senderKind === 'human');
         if (!trigger) return undefined;
         // 第二轮规则：补上最近发言（续问、「这个任务」）和事项名称。
-        return { trigger, owned: ownedItems(full.mandates, full.followups), facts: { ...facts, ...await this.recentFacts(config, pending, full) }, context: full };
+        const merged: RuleFacts = { ...facts, ...await this.recentFacts(config, pending, full) };
+        // 命中的 model 包取上下文材料并冻结进快照；没取到就撤销这个包的影响，晚期规则按没有它重新求值。
+        const scenario = merged.scenarioMatched ? await this.scenarioSnapshot(scope, config, pending, merged.scenarioMatched) : undefined;
+        if (scenario?.status !== 'used') delete merged.scenarioMatched;
+        return { trigger, owned: ownedItems(full.mandates, full.followups), facts: merged, context: scenario ? { ...full, scenario } : full };
       },
       model: (round, full) => this.decideByModel(scope, pending, slot, config, round!.trigger, round!.facts, full!)
     });
     if (outcome.kind === 'rule') await this.decideByRule(scope, pending, slot, outcome.verdict, outcome.facts, outcome.context, config);
+  }
+  /** 命中的 model 包的冻结内容：调上下文来源（截止时间和字数按包声明封顶），失败时返回 abstained。包已经关掉时返回 undefined。 */
+  private async scenarioSnapshot(scope: CollaborationScope, config: StoredLarkConfig, pending: Pending, packId: string): Promise<CollaborationScenarioSnapshot | undefined> {
+    const open = this.scenarios.model(config, await this.options.repository.getDuty(scope)).find(item => item.entry.pack.id === packId);
+    if (!open) return undefined;
+    const { entry, binding } = open;
+    const limits = scenarioContextLimits(entry.pack);
+    const result = entry.pack.context ? await entry.providers.get(entry.pack.context.provider)!.context({ scope,
+      message: humanScenarioMessage(pending.event, pending.observation.text, pending.botOpenId), params: binding.params, maxChars: limits.maxChars }, limits.timeoutMs) : undefined;
+    const scenario = freezeScenario({ entry, scope, at: this.now().toISOString(), ...(result ? { result } : {}) });
+    if (scenario.status === 'abstained') this.options.log?.warn({ scope, messageId: pending.event.messageId, scenario: packId, reason: scenario.reason }, '场景包没取到材料，这条消息按没有这个包判定');
+    return scenario;
+  }
+  /** model 场景 act 的执行内容：校验收养字段指向的判定记录后取冻结内容；对不上时按没有场景处理并记诊断。 */
+  async scenarioExecution(scope: CollaborationScope, adoption: Extract<LarkScenarioAdoption, { mode: 'model' }>, messageId: string): Promise<ModelScenarioExecution | undefined> {
+    const execution = modelScenarioExecution(await this.options.repository.getDecision(scope, adoption.decisionId), { scope, messageId, packId: adoption.packId });
+    if (typeof execution !== 'string') return execution;
+    this.options.log?.warn({ scope, messageId, decisionId: adoption.decisionId, scenario: adoption.packId, reason: execution }, '场景收养字段和判定记录对不上，按没有场景处理');
+    return undefined;
   }
   /** 成本上限或判定预算用满时留痕并返回 true：这一轮不再判定。 */
   private async decisionGate(scope: CollaborationScope, pending: Pending, settings: CollaborationSettings): Promise<boolean> {
@@ -703,7 +761,8 @@ export class LarkGroupParticipation {
     snapshot = updated;
     if (result.action !== 'reply') {
       // act 本身不授权任何工具，只把当前人类消息交回显式执行路径，由 coordinator 按发送者本人重新授权。
-      if (result.action === 'act') await this.dispatch(scope, pending, trigger, snapshot, result.evidenceIds, id, slot);
+      if (result.action === 'act') await this.dispatch(scope, pending, trigger, snapshot, result.evidenceIds, id, slot, false,
+        snapshot.scenario?.status === 'used' ? { mode: 'model', packId: snapshot.scenario.packId, decisionId: id } : undefined);
       return;
     }
     if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true)) { await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
@@ -712,7 +771,9 @@ export class LarkGroupParticipation {
     // Keep uncertain/in-flight delivery deduplicated. A completed answer must not
     // suppress a different human question that happens to cite the same source.
     // The trigger proves who asked; adding it must not defeat deduplication of uncertain sends for the same material.
-    const materialIds = result.evidenceIds.filter(id => id !== trigger.id);
+    // 场景材料（如 runbook 段落）的 id 不随消息变：和当前消息一样不算进去，免得一次结果未知的回复挡住别人问到同一段的问题。
+    const scenarioIds = new Set(scenarioObservations(snapshot).map(item => item.id));
+    const materialIds = result.evidenceIds.filter(id => id !== trigger.id && !scenarioIds.has(id));
     const notificationKey = digest([(materialIds.length ? materialIds : result.evidenceIds).slice().sort(), pending.event.threadId ?? scope.chatId]);
     const inputDigest = digest([notificationKey, id]);
     for (const item of actions) {
@@ -726,7 +787,8 @@ export class LarkGroupParticipation {
         const observations = previous?.inputSnapshot?.observations;
         const previousTrigger = Array.isArray(observations) ? observations.find(observation => observation.messageId === item.payload.messageId) : undefined;
         if (previous && previousTrigger) {
-          const previousMaterials = previous.evidenceIds.filter(id => id !== previousTrigger.id);
+          const previousScenarioIds = new Set(scenarioObservations(previous.inputSnapshot as unknown as CollaborationSnapshot).map(item => item.id));
+          const previousMaterials = previous.evidenceIds.filter(id => id !== previousTrigger.id && !previousScenarioIds.has(id));
           duplicate = digest([(previousMaterials.length ? previousMaterials : previous.evidenceIds).slice().sort(), previousTrigger.threadId ?? scope.chatId]) === notificationKey;
         }
       }
@@ -793,8 +855,9 @@ export class LarkGroupParticipation {
   /**
    * 把当前人类消息按显式 @ 交给执行路径。addressed 是规则判为「在叫我」：等同对方 @ 了机器人，
    * 不占主动发言额度，也不受「暂停主动通知」影响；模型给出的 act 仍按主动发言计。
+   * scenario 是用到了 model 场景包的 act：收养字段只带判定记录 id，执行时 coordinator 按它取冻结的指令和材料。
    */
-  private async dispatch(scope: CollaborationScope, pending: Pending, trigger: CollaborationObservation, snapshot: CollaborationSnapshot, evidenceIds: string[], id: string, slot: Slot, addressed = false) {
+  private async dispatch(scope: CollaborationScope, pending: Pending, trigger: CollaborationObservation, snapshot: CollaborationSnapshot, evidenceIds: string[], id: string, slot: Slot, addressed = false, scenario?: LarkScenarioAdoption) {
     const repo = this.options.repository;
     const dispatch = this.dispatchers.get(scope.appId);
     if (!dispatch || !evidenceIds.includes(trigger.id) || !await this.current(scope, snapshot, pending.event.senderOpenId!, slot, !addressed, addressed)
@@ -807,7 +870,7 @@ export class LarkGroupParticipation {
     if (!begun.created) return;
     let action = await repo.updateAction(scope, actionId, { expectedRevision: begun.action.revision, status: 'sending' });
     try {
-      await dispatch(pending.event, pending.config);
+      await dispatch(scenario ? { ...pending.event, scenario } : pending.event, pending.config);
       action = await repo.updateAction(scope, actionId, { expectedRevision: action.revision, status: 'succeeded' });
       await repo.updateDecision(scope, id, { status: 'sent' });
     } catch (error) {
@@ -833,7 +896,7 @@ export class LarkGroupParticipation {
     // 同一条消息命中多个包时按包 id 排序取第一个，其余只记诊断，不起任务也不写记录。
     let chosen: { entry: (typeof direct)[number]['entry']; matched: Extract<ScenarioMatch, { matched: true }> } | undefined;
     for (const { entry, binding } of [...direct].sort((a, b) => a.entry.pack.id < b.entry.pack.id ? -1 : a.entry.pack.id > b.entry.pack.id ? 1 : 0)) {
-      if (!scenarioSourceBots(entry.pack, binding).some(source => source.appId === appId)) continue;
+      if (!scenarioTriggerSources(entry.pack, binding).some(source => source.appId === appId)) continue;
       const matched = await this.scenarios.match(entry, binding, message);
       if (!matched.matched) continue;
       if (chosen) { this.options.log?.warn({ scope, messageId: event.messageId, scenario: entry.pack.id, chosen: chosen.entry.pack.id }, '同一条消息命中了多个场景包，只处理包 id 排在最前的'); continue; }
@@ -998,6 +1061,11 @@ export class LarkGroupParticipation {
       await repo.updateDuty(record.scope, { expectedRevision: duty.revision, scenarios: { [pack.id]: { ...binding, enabled: false } } }, operator);
       return pack.confirm.disabledResult;
     }
+    // 卡上记着发卡时的包版本；没记的（升级前的告警确认卡、早于这个字段的卡）按 1.0.0。期间包升了大版本就要在群里重新说一次。
+    const cardVersion = typeof record.payload.packVersion === 'string' ? record.payload.packVersion : '1.0.0';
+    if (scenarioMajorVersion(cardVersion) !== scenarioMajorVersion(pack.version)) {
+      throw new RuntimeError('COLLABORATION_SCENARIO_VERSION_STALE', `${pack.title}的场景包已升级到 v${pack.version}，这张确认卡已经失效，请在群里重新说一次。`, 409);
+    }
     if (pack.mode === 'direct' && duty.responder && duty.responder.appId !== record.scope.appId) {
       throw new RuntimeError('COLLABORATION_NOT_RESPONDER', `本群接话人是「${duty.responder.name ?? duty.responder.appId}」，${pack.title}只由接话人做。`, 409);
     }
@@ -1070,17 +1138,51 @@ export class LarkGroupParticipation {
     const bots = members && talkingBots(members, this.scenarios.sourceAppIds(duty));
     if (members) { facts.humans = members.humans; facts.bots = bots!.length; }
     const crowded = (bots?.length ?? 0) > 1;
+    let sourceTopic = false;
     if (event.threadId && event.rootId && event.rootId !== event.messageId) {
       const root = await read(event.rootId);
+      const rootApp = root && isBotMessage(root) ? botAppIdOf(root) : undefined;
       if (root && isSelfMessage(root, config.appId, pending.botOpenId)) facts.threadRootSelf = true;
+      // 场景来源开的话题（包声明 sourceTopics: neutral）不算别人的话题，改看话题里有没有别的机器人接过。
+      else if (root && crowded && rootApp && this.scenarios.neutralSourceAppIds(duty).has(rootApp)) sourceTopic = true;
       // 多机器人群里，话题根是别的机器人发的、或 @ 的是别人，这个话题就不归本机器人。
-      else if (root && crowded && (['app', 'bot'].includes(root.sender.type ?? '') || root.mentions.some(mention => mention.id !== pending.botOpenId && mention.id !== config.appId))) facts.threadRootOther = true;
+      else if (root && crowded && (isBotMessage(root) || root.mentions.some(mention => mention.id !== pending.botOpenId && mention.id !== config.appId))) facts.threadRootOther = true;
     }
     if (pending.observation.refs.includes(OWNED_TOPIC_REF)) facts.ownedTopic = true;
     // 叫自己名字的消息先由 calls_name 接走，这里列表里含不含自己都一样。
     if (crowded && callsBotName(stripMentionPlaceholders(pending.observation.text), botNameTokens(bots!.map(item => item.name)))) facts.callsOther = true;
     if (duty.responder) facts.responder = duty.responder.appId === config.appId ? 'self' : 'other';
+    const scenario = pending.observation.refs.find(ref => ref.startsWith(SCENARIO_REF_PREFIX))?.slice(SCENARIO_REF_PREFIX.length);
+    if (scenario && activeModes.has(level) && this.scenarios.model(config, duty).some(item => item.entry.pack.id === scenario)) facts.scenarioMatched = scenario;
+    // 来源话题读不读回复：只在规则结论可能取决于它时读。接手的话题、引用了消息的，前面的规则已经定了；
+    // 不是接话人、没负责范围也没命中场景包的，多机器人群里没 @ 的消息本来就不接（no_responder / not_responder）。
+    if (sourceTopic && !facts.parent && !facts.ownedTopic && (facts.responder === 'self' || config.roleScope?.trim() || facts.scenarioMatched)) {
+      Object.assign(facts, await this.threadClaim(config, event.threadId!, pending.botOpenId, this.scenarios.sourceAppIds(duty)));
+    }
     return facts;
+  }
+  /**
+   * 场景来源开的话题有没有被别的机器人接过：按时间顺序每页读 50 条、最多 4 页，来源机器人和本机器人以外的机器人发过言就算接过。
+   * 读满 4 页还有、或任何一页读失败，也按接过算（capped / unavailable）。不保证两个实例互斥：同时读到空话题时可能都接。
+   */
+  private async threadClaim(config: StoredLarkConfig, threadId: string, botOpenId: string | undefined, sources: ReadonlySet<string>): Promise<Pick<RuleFacts, 'threadClaimedByOther' | 'threadClaimEvidence'>> {
+    const service = this.options.serviceFor(config);
+    let pageToken: string | undefined;
+    try {
+      for (let page = 0; page < THREAD_CLAIM_PAGES; page++) {
+        const result = await service.listChatMessages({ threadId, order: 'asc', pageSize: 50, ...(pageToken ? { pageToken } : {}) });
+        if (result.items.some(item => !item.deleted && isBotMessage(item) && !isSelfMessage(item, config.appId, botOpenId) && !sources.has(item.sender.id ?? ''))) {
+          return { threadClaimedByOther: true, threadClaimEvidence: 'complete' };
+        }
+        if (!result.hasMore) return { threadClaimedByOther: false, threadClaimEvidence: 'complete' };
+        if (!result.pageToken) return { threadClaimedByOther: true, threadClaimEvidence: 'unavailable' };
+        pageToken = result.pageToken;
+      }
+    } catch (error) {
+      this.options.log?.warn({ error, threadId }, '读取来源话题的消息失败，按已被别的机器人接过处理');
+      return { threadClaimedByOther: true, threadClaimEvidence: 'unavailable' };
+    }
+    return { threadClaimedByOther: true, threadClaimEvidence: 'capped' };
   }
   /** 群里真人和机器人的数量和机器人名单，按群缓存 10 分钟；查不到（没权限、被安全策略截断）时不填，「只有一个真人」「多机器人群」规则不触发。 */
   private async memberCounts(config: StoredLarkConfig, chatId: string): Promise<Members | undefined> {
@@ -1277,7 +1379,7 @@ export class LarkGroupParticipation {
     let others: ScenarioBotRef[] = [];
     const sourceParam = pack.trigger.sourceBotsParam;
     if (sourceParam) {
-      const existing = binding ? scenarioSourceBots(pack, binding) : [];
+      const existing = binding ? scenarioTriggerSources(pack, binding) : [];
       const param = pack.params[sourceParam];
       const inferred = param?.type === 'bot_list' && param.inferOnEnable ? await this.scenarioSources(event, config, existing) : { chosen: existing, others: [] };
       if (!inferred.chosen.length) {
@@ -1292,7 +1394,7 @@ export class LarkGroupParticipation {
     const record = await this.confirmations.request({ kind: scenarioConfirmKind(pack.id), scope, requesterId: sender, replyTo, title: pack.confirm.enableTitle,
       summary: `${renderScenarioTemplate(pack.confirm.enableSummary, confirmValues(pack, params))}${others.length
         ? `最近在本群发过消息的机器人还有：${others.map(item => item.name ?? item.appId).join('、')}；来源不对可以在 Dutydeck Web 的群设置里改。` : ''}`,
-      payload: { enabled: true, params: JSON.stringify(params) } });
+      payload: { enabled: true, params: JSON.stringify(params), packVersion: pack.version } });
     if (!record) await this.replyText(config, event, '确认卡没发出去，请稍后再说一次，或在 Dutydeck Web 的群设置里开启。', key);
     return true;
   }
@@ -1342,7 +1444,9 @@ export class LarkGroupParticipation {
         : meta?.rule === 'not_responder' ? `要改由我接，@我 说「你负责接话」；${scopeSetupHint}`
         : meta?.rule === 'topic_of_other' ? '要我接这个话题，在话题里 @我；我接手后，话题里的追问不用再 @。'
         : ['mentions_other', 'reply_to_other', 'calls_other'].includes(meta?.rule ?? '') ? '' : hint;
-      return `${clock(silent.createdAt)} 那条「${snippet(trigger?.text)}」我没接：${why}。${ruleHint}`;
+      const scenario = snapshotScenario(silent);
+      const abstained = scenario?.status === 'abstained' ? `${scenario.title}没取到材料：${(scenario.reason ?? '原因未知').slice(0, 200)}。` : '';
+      return `${clock(silent.createdAt)} 那条「${snippet(trigger?.text)}」我没接：${why}。${abstained}${ruleHint}`;
     }
     // 场景包跳过的来源消息不是这个人的消息，附在说明后面。
     const skipped = recent.find(item => scenarioRecordOf(item) && item.action === 'silent');
@@ -1401,8 +1505,9 @@ export class LarkGroupParticipation {
       await this.options.repository.updateFollowup(scope, followup.id, { expectedRevision: followup.revision, ...(update.progress !== undefined ? { progress: update.progress } : {}), ...(update.steps ? { steps: update.steps } : {}), provenance: 'inferred', sourceRefs: [...new Set([...followup.sourceRefs, ...update.evidenceIds])].slice(-100) }, pending.event.senderOpenId!);
       // Account only for our own single state transition; any concurrent material change invalidates delivery.
       const after = participationInput(await this.options.repository.snapshot(scope, 30));
-      if (after.contextRevision !== snapshot.contextRevision + 1) return { ...after, contextRevision: snapshot.contextRevision };
-      snapshot = boundCollaborationSnapshot({ ...after, observations: snapshot.observations, ...(snapshot.teamContext ? { teamContext: snapshot.teamContext } : {}) });
+      const frozen = { ...(snapshot.teamContext ? { teamContext: snapshot.teamContext } : {}), ...(snapshot.scenario ? { scenario: snapshot.scenario } : {}) };
+      if (after.contextRevision !== snapshot.contextRevision + 1) return { ...after, contextRevision: snapshot.contextRevision, ...(snapshot.scenario ? { scenario: snapshot.scenario } : {}) };
+      snapshot = boundCollaborationSnapshot({ ...after, observations: snapshot.observations, ...frozen });
     }
     return snapshot;
   }

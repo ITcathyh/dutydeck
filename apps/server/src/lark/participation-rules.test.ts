@@ -175,3 +175,38 @@ describe('roleScope 负责范围绕过规则与兼容', () => {
     expect(ctxWithoutScope.roleScope).toBeUndefined();
   });
 });
+
+describe('model 场景包命中（scenarioMatched）和来源话题（threadClaimedByOther）', () => {
+  const crowded = { members: { humans: 3, bots: 2 } };
+
+  it('命中的场景包和负责范围一样，只绕过 not_responder、no_responder，让 eager_default、single_human 不直接生效', () => {
+    expect(rule({ ...crowded, scenarioMatched: 'team-faq' })).toBeUndefined();
+    expect(rule({ ...crowded, responder: 'other', scenarioMatched: 'team-faq' })).toBeUndefined();
+    expect(rule({ level: 'eager', scenarioMatched: 'team-faq' })).toBeUndefined();
+    expect(rule({ members: { humans: 1, bots: 1 }, scenarioMatched: 'team-faq' })).toBeUndefined();
+  });
+
+  it('排在前面的规则不受影响：叫名字、叫别的机器人、@ 别人、别人的话题、回复别人照旧', () => {
+    expect(rule({ text: 'flash 帮我看下', scenarioMatched: 'team-faq' })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
+    expect(rule({ ...crowded, callsOther: true, scenarioMatched: 'team-faq' })).toMatchObject({ action: 'silent', rule: 'calls_other' });
+    expect(rule({ mentionsOther: true, scenarioMatched: 'team-faq' })).toMatchObject({ action: 'silent', rule: 'mentions_other' });
+    expect(rule({ ...crowded, threadRootOther: true, scenarioMatched: 'team-faq' })).toMatchObject({ action: 'silent', rule: 'topic_of_other' });
+    expect(rule({ parent: 'other', scenarioMatched: 'team-faq' })).toMatchObject({ action: 'silent', rule: 'reply_to_other' });
+  });
+
+  it('来源话题被别的机器人接过（或没读全、读失败）时让路，和别人的话题一样；没被接过就不算别人的话题', () => {
+    expect(rule({ ...crowded, threadClaimedByOther: true, roleScope: '告警' })).toMatchObject({ action: 'silent', rule: 'topic_of_other' });
+    expect(rule({ ...crowded, threadClaimedByOther: true, level: 'eager', responder: 'self' })).toMatchObject({ action: 'silent', rule: 'topic_of_other' });
+    expect(rule({ ...crowded, threadClaimedByOther: false, roleScope: '告警' })).toBeUndefined();
+    expect(rule({ ...crowded, level: 'eager', responder: 'self' })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
+    // 引用回复本机器人的消息仍然接。
+    expect(rule({ ...crowded, threadClaimedByOther: true, parent: 'self' })).toMatchObject({ action: 'addressed', rule: 'reply_to_self' });
+  });
+
+  it('ruleContextOf 透传两个事实，回放读到的和实时一样', () => {
+    const trigger = { id: 'obs_1', scope: { appId: 'cli_a', chatId: 'oc_1' }, sequence: 1, source: 'lark.message', eventId: 'om_1', occurredAt: '2026-10-09T00:00:00Z', receivedAt: '2026-10-09T00:00:00Z', senderId: 'ou_1', senderKind: 'human' as const, text: '订单服务 5xx 怎么排查', refs: [], origin: 'live' as const, missing: [], revision: 1 };
+    const context = ruleContextOf(trigger, { names: [], hasActiveMandates: false }, ['flash'], { level: 'selective', scenarioMatched: 'team-faq', threadClaimedByOther: true, threadClaimEvidence: 'capped' });
+    expect(context).toMatchObject({ scenarioMatched: 'team-faq', threadClaimedByOther: true });
+    expect(ruleContextOf(trigger, { names: [], hasActiveMandates: false }, ['flash'], { level: 'selective' })).not.toHaveProperty('scenarioMatched');
+  });
+});

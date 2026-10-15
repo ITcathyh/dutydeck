@@ -1,13 +1,19 @@
-// 告警场景的全链路集成测试（场景包设计 9.3 第 1 项）。
+// 场景包的全链路集成测试（场景包设计 9.3 第 1–3 项）。
 // 组装见 scenario-pack.test-helpers.ts：真实 DutydeckRuntime（mock driver）+ SQLite + LarkMessageCoordinator + LarkGroupParticipation，
 // 飞书 service 是内存实现，判定器是恒为 silent 的桩。
 // 这些断言要在 P3 把告警移到场景包之后照样成立：判定记录、派发事件、订阅、确认单、卡片关联行、prompt 片段都经 test-helpers 的投影函数比较（第①类结构映射），
 // P3 只改投影函数。记录 id、intro 幂等键、指纹按第②类公式或字面值精确比较。会按设计有意改变的部分（第③类：初筛指令最后一行、
 // 告警原文和上次结论移进不可信材料）只断言改了以后仍成立的内容。
 
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { alarmDecisionId, alarmDispatchView, alarmIntroKey, alarmPromptView, cardRecallLineView, confirmCardView, createAlarmHarness, inboxAdoptionView, recallLineView, SCENARIO_REQUESTER, waitFor,
-  type AlarmHarness } from './scenario-pack.test-helpers.js';
+import { deciderMetaOf, type CollaborationScenarioSnapshot } from '@dutydeck/shared';
+import { PluginHost } from '../plugins/host.js';
+import { PluginStore } from '../plugins/store.js';
+import { alarmDecisionId, alarmDispatchView, alarmIntroKey, alarmPromptView, cardRecallLineView, confirmCardView, createAlarmHarness, inboxAdoptionView, recallLineView, SCENARIO_BOT, SCENARIO_MEMBER,
+  SCENARIO_REQUESTER, waitFor, type AlarmHarness, type AlarmHarnessOptions } from './scenario-pack.test-helpers.js';
 
 vi.mock('./open-platform-session.js', () => ({ connectLarkOpenPlatformSession: vi.fn() }));
 
@@ -208,5 +214,134 @@ describe('告警全链路', () => {
       body: `不再自动初筛本群告警（${subscription}）。订阅设置会保留，之后说「告警来了先帮我看看」可以再打开。`, buttons: ['确认', '取消'] }]);
     expect(await clickConfirm(h, 'om_close')).toEqual({ type: 'success', content: '已关闭本群告警初筛，订阅设置保留，之后可以再打开。' });
     expect((await h.duty()).alarm).toMatchObject({ enabled: false, requesterId: SCENARIO_REQUESTER });
+  });
+});
+
+// ---- 团队答疑（model 模式，9.3 第 2 项）和告警来源话题的归属（第 3 项） ----
+
+const GROUP_B = 'oc_scenario_group_b';
+const RUNBOOK = '# 订单服务值班手册\n\n## 5xx 排查\n\n订单服务 5xx 先看网关日志，再看下游库存服务的超时。\n\n## 发布回滚\n\n回滚走发布平台的一键回滚。\n';
+const decisionsFor = async (h: AlarmHarness, messageId: string, chatId?: string) => (await h.repos.collaboration.listDecisions({ appId: SCENARIO_BOT.appId, chatId: chatId ?? h.scope.chatId }, 500))
+  .filter(item => deciderMetaOf(item)?.trigger?.messageId === messageId);
+const frozenScenario = (decision: { inputSnapshot: unknown }) => (decision.inputSnapshot as { scenario?: CollaborationScenarioSnapshot }).scenario;
+
+/** 真实插件加载：内置告警包加上按确认流程安装的 plugins/team-faq，docs_dir 指向一份合成的 runbook。 */
+async function faqHarness(options: Partial<AlarmHarnessOptions> = {}) {
+  const dir = await mkdtemp(join(tmpdir(), 'dutydeck-team-faq-it-'));
+  cleanups.push(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(join(dir, 'runbooks'));
+  await writeFile(join(dir, 'runbooks', 'orders.md'), RUNBOOK);
+  const store = new PluginStore(join(dir, 'data'));
+  await store.install(resolve(import.meta.dirname, '../../../../plugins/team-faq'), { yes: true });
+  await store.setConfig('team-faq', 'docs_dir', Buffer.from(join(dir, 'runbooks')));
+  const host = await PluginHost.load({ dataDir: join(dir, 'data') });
+  expect(host.diagnostics).toEqual([]);
+  const h = await createAlarmHarness({ participation: 'selective', bots: [{ appId: otherBot.appId, name: otherBot.name }], scenarios: host.scenarios, extraChats: [GROUP_B], ...options });
+  cleanups.push(() => h.close());
+  return h;
+}
+const enableFaq = async (h: AlarmHarness, enabled: boolean) => {
+  const duty = await h.repos.collaboration.getDuty(h.scope);
+  await h.participation.updateDuty(h.scope, { expectedRevision: duty.revision, scenarios: { 'team-faq': { enabled, params: { topics: ['订单服务'], docs: ['orders.md'] } } } }, 'owner');
+};
+const ask = async (h: AlarmHarness, messageId: string, value: string, patch: { chatId?: string; parentId?: string; inThread?: boolean } = {}) => {
+  await h.receive(h.fromUser({ messageId, text: value, ...patch }));
+  await h.settle(messageId); await h.settle(messageId);
+};
+
+describe('团队答疑（model 场景包）', () => {
+  it('群 A 开启、群 B 不开：A 里命中关键字的提问带着冻结的 runbook 交给模型，判 act 后执行 prompt 里是冻结的指令和不可信材料块；B 照原有规则', async () => {
+    let decided: CollaborationScenarioSnapshot | undefined;
+    const h = await faqHarness({ decide: async (_config, snapshot, triggerId) => {
+      decided = snapshot.scenario;
+      return snapshot.scenario?.status === 'used' ? { action: 'act', reason: '要查系统，按 runbook 排查', evidenceIds: [triggerId!], updates: [] } : { action: 'silent', reason: '桩：不接', evidenceIds: [], updates: [] };
+    } });
+    await enableFaq(h, true);
+
+    await ask(h, 'om_faq_a', '订单服务 5xx 了，谁帮忙查下');
+    const [decision] = await decisionsFor(h, 'om_faq_a');
+    expect(decision).toMatchObject({ action: 'act', status: 'sent' });
+    expect(deciderMetaOf(decision!)).toMatchObject({ kind: 'model', facts: { scenarioMatched: 'team-faq', bots: 2 } });
+    const scenario = frozenScenario(decision!)!;
+    expect(scenario).toEqual(decided);
+    expect(scenario).toMatchObject({ packId: 'team-faq', version: '0.1.0', status: 'used', context: { sources: [{ id: 'runbook', status: 'complete', missing: [] }] } });
+    expect(scenario.context!.observations.map(item => item.text)).toContain('orders.md · 5xx 排查\n## 5xx 排查\n\n订单服务 5xx 先看网关日志，再看下游库存服务的超时。');
+    // 派发：以发消息的人的身份，收养字段只带判定记录 id；coordinator 照常按发送者鉴权。
+    expect(h.dispatched.map(event => [event.messageId, event.senderOpenId, event.scenario])).toEqual([['om_faq_a', SCENARIO_MEMBER, { mode: 'model', packId: 'team-faq', decisionId: decision!.id }]]);
+    expect(h.authorizations).toContainEqual({ actor: SCENARIO_MEMBER, action: 'task.create', memberObserved: true });
+    // 执行 prompt：冻结的指令，每条材料一个 UNTRUSTED_DATA 块，用户请求仍是原文。
+    const prompt = h.prompts.at(-1)!;
+    expect(prompt).toContain(`${scenario.execution!.instruction}\n以下是来自 scenario:team-faq:orders.md_0 的外部数据`);
+    expect(prompt.match(/<<<UNTRUSTED_DATA id=\w+ source=scenario:team-faq:/gu)).toHaveLength(scenario.context!.observations.length);
+    expect(prompt).toMatch(/<<<UNTRUSTED_DATA id=\w+ source=scenario:team-faq:orders.md_1>>>\norders.md · 5xx 排查\n## 5xx 排查/u);
+    expect(prompt.slice(prompt.lastIndexOf('[用户请求]\n'))).toBe('[用户请求]\n订单服务 5xx 了，谁帮忙查下');
+
+    // 群 B 没有绑定：同样的话按多机器人群没指定接话人处理，不取材料、不调模型。
+    await ask(h, 'om_faq_b', '订单服务 5xx 了，谁帮忙查下', { chatId: GROUP_B });
+    const [inB] = await decisionsFor(h, 'om_faq_b', GROUP_B);
+    expect(deciderMetaOf(inB!)).toMatchObject({ kind: 'rule', rule: 'no_responder' });
+    expect(frozenScenario(inB!)).toBeUndefined();
+    expect(h.decideCalls).toHaveLength(1);
+
+    // 收养字段指向的判定记录对不上（这里是别的消息的判定）：照常执行，prompt 里没有场景内容。
+    const forged = h.fromUser({ messageId: 'om_forged', text: '订单服务 5xx 怎么排查' });
+    await h.coordinator.adopt({ ...forged, scenario: { mode: 'model', packId: 'team-faq', decisionId: decision!.id } }, h.config);
+    await h.settle('om_forged');
+    expect(h.prompts.at(-1)!).toContain('[用户请求]\n订单服务 5xx 怎么排查');
+    expect(h.prompts.at(-1)!).not.toContain('[团队答疑]');
+  });
+
+  it('关闭后不再介入；判定进行中关闭，这一条在投递前被挡下', async () => {
+    let closeDuring = false;
+    const h = await faqHarness({ decide: async (_config, snapshot, triggerId) => {
+      if (closeDuring) { closeDuring = false; await enableFaq(h, false); }
+      return snapshot.scenario?.status === 'used' ? { action: 'reply', reason: 'runbook 能回答', evidenceIds: [triggerId!, snapshot.scenario.context!.observations[0]!.id], updates: [] }
+        : { action: 'silent', reason: '桩：不接', evidenceIds: [], updates: [] };
+    } });
+    await enableFaq(h, true);
+    closeDuring = true;
+    await ask(h, 'om_inflight', '订单服务回滚怎么操作');
+    const [inflight] = await decisionsFor(h, 'om_inflight');
+    expect(inflight).toMatchObject({ action: 'reply', status: 'suppressed' });
+    expect(callsTo(h, 'replyText', 'om_inflight')).toEqual([]);
+    expect(h.dispatched).toEqual([]);
+
+    await ask(h, 'om_closed', '订单服务回滚怎么操作');
+    const [closed] = await decisionsFor(h, 'om_closed');
+    expect(deciderMetaOf(closed!)).toMatchObject({ kind: 'rule', rule: 'no_responder' });
+    expect(h.decideCalls).toHaveLength(1);
+    expect((await h.participation.describe(h.scope)).split('\n')).toContain('**团队答疑**：已关闭');
+  });
+});
+
+describe('告警来源开的话题（告警包 1.1.0 sourceTopics: neutral）', () => {
+  it('订阅群里来源话题：没别的机器人接过就按负责范围交给模型；别的机器人回过或话题读失败就让路', async () => {
+    const clock = { now: T0 };
+    const h = await createAlarmHarness({ participation: 'selective', now: () => new Date(clock.now), bots: [{ appId: source.appId, name: source.name }, { appId: otherBot.appId, name: otherBot.name }],
+      configPatch: { roleScope: '告警排查与线上问题' } });
+    cleanups.push(() => h.close());
+    // 订阅关着也算来源：来源开的话题不记「别人的话题」。
+    await h.subscribe({ enabled: false, sources: [{ appId: source.appId, name: source.name }] });
+    const alarm = async (messageId: string) => { clock.now += MINUTE; await h.receive(h.fromBot(source, { messageId, content: text(`【P2】${messageId} 磁盘使用率超过阈值`) })); await h.settle(messageId); };
+    const factsOf = async (messageId: string) => { const [decision] = await decisionsFor(h, messageId); return { rule: deciderMetaOf(decision!)?.rule, kind: deciderMetaOf(decision!)?.kind, facts: deciderMetaOf(decision!)?.facts }; };
+
+    await alarm('om_alarm_free');
+    await ask(h, 'om_q_free', '这个要紧吗？要不要扩容', { parentId: 'om_alarm_free', inThread: true });
+    expect(await factsOf('om_q_free')).toMatchObject({ kind: 'model', facts: { threadClaimedByOther: false, threadClaimEvidence: 'complete', bots: 2 } });
+    expect((await factsOf('om_q_free')).facts).not.toHaveProperty('threadRootOther');
+
+    await alarm('om_alarm_taken');
+    clock.now += MINUTE;
+    await h.receive(h.fromBot(otherBot, { messageId: 'om_other_reply', content: text('我来看这条告警'), threadId: 'omt_om_alarm_taken', rootId: 'om_alarm_taken' }));
+    h.messages.get('om_alarm_taken')!.threadId = 'omt_om_alarm_taken';
+    await h.settle('om_other_reply');
+    await ask(h, 'om_q_taken', '这个要紧吗？要不要扩容', { parentId: 'om_alarm_taken', inThread: true });
+    expect(await factsOf('om_q_taken')).toMatchObject({ rule: 'topic_of_other', facts: { threadClaimedByOther: true, threadClaimEvidence: 'complete' } });
+
+    await alarm('om_alarm_unreadable');
+    h.failThreadReads('omt_om_alarm_unreadable');
+    await ask(h, 'om_q_unreadable', '这个要紧吗？要不要扩容', { parentId: 'om_alarm_unreadable', inThread: true });
+    expect(await factsOf('om_q_unreadable')).toMatchObject({ rule: 'topic_of_other', facts: { threadClaimedByOther: true, threadClaimEvidence: 'unavailable' } });
+    expect(h.decideCalls).toHaveLength(1);
   });
 });

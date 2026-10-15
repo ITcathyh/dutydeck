@@ -129,11 +129,10 @@ describe('loadPluginDirectory scenario packs (static stage)', () => {
     });
     const plugin = await loadPluginDirectory(root);
     expect(plugin.commands.map(command => command.name)).toEqual(['hi']);
-    expect(plugin.scenarios.map(({ pack }) => pack.id)).toEqual(['demo']);
+    expect(plugin.scenarios.map(({ pack }) => pack.id)).toEqual(['demo', 'model']);
     expect(plugin.scenarioIssues).toEqual(expect.arrayContaining([
       expect.objectContaining({ file: 'packs/no-quota.json', field: 'quota' }),
       expect.objectContaining({ file: 'packs/renamed.json', field: 'id', message: expect.stringContaining('other.json') }),
-      expect.objectContaining({ file: 'packs/model.json', field: 'mode', message: expect.stringContaining('model') }),
       expect.objectContaining({ file: 'packs/broken.json', message: expect.stringContaining('JSON') })
     ]));
   });

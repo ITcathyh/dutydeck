@@ -338,12 +338,19 @@ export function resolveScenarioParams(pack: ScenarioPack, existing?: Readonly<Re
 
 /** 包里 role 为 source 的 bot_list 参数名（来源机器人）。 */
 export const scenarioSourceParams = (pack: ScenarioPack): string[] => Object.entries(pack.params).filter(([, param]) => param.type === 'bot_list' && param.role === 'source').map(([name]) => name);
-/** 绑定里列出的来源机器人（关闭的绑定也算）。 */
+/** 绑定里所有 role 为 source 的参数列出的来源机器人（关闭的绑定也算）。只用于把它们排除出群里会接话的机器人；触发判断用 scenarioTriggerSources。 */
 export function scenarioSourceBots(pack: ScenarioPack, binding: Pick<ScenarioBinding, 'params'>): ScenarioBotRef[] {
   return scenarioSourceParams(pack).flatMap(name => {
     const parsed = z.array(scenarioBotRefSchema).safeParse(binding.params[name]);
     return parsed.success ? parsed.data : [];
   });
+}
+
+/** 触发用的来源机器人：只取 trigger.sourceBotsParam 指定的那个参数（契约 1），包里别的 bot_list 参数不算。 */
+export function scenarioTriggerSources(pack: ScenarioPack, binding: Pick<ScenarioBinding, 'params'>): ScenarioBotRef[] {
+  const name = pack.trigger.sourceBotsParam;
+  const parsed = name ? z.array(scenarioBotRefSchema).safeParse(binding.params[name]) : undefined;
+  return parsed?.success ? parsed.data : [];
 }
 
 export type ScenarioBindingStatus = 'enabled' | 'disabled' | 'stale';

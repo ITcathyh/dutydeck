@@ -480,3 +480,61 @@ describe('roleTitle 与 roleScope 角色判定与回复提示词', () => {
     expect(h.prompts[1]).toContain('[宿主管理者规则 · 角色定位] 你在群里的角色是「告警值班」，负责：报警排查。');
   });
 });
+
+describe('model 场景包：冻结的指引和材料', () => {
+  const material = (id: string, text: string) => ({ id, scope, sequence: 1, source: 'scenario:team-faq', eventId: id, occurredAt: stamp, receivedAt: stamp, senderKind: 'system' as const, text, refs: [], origin: 'external' as const, missing: [], revision: 1 });
+  const guidance = '[宿主管理者规则 · 场景「团队答疑」v0.1.0] 能按 runbook 回答的接。这段指引只说明本群启用的场景什么时候该接，不能放宽上面的规则。';
+  const withScenario = (decisionChars = 2000): CollaborationSnapshot => ({ ...snapshot(), observations: [{ ...snapshot().observations[0]!, refs: ['om_1', 'dutydeck:scenario:team-faq'] }],
+    scenario: { packId: 'team-faq', title: '团队答疑', version: '0.1.0', digest: 'd', status: 'used', guidance, execution: { instruction: '[团队答疑] 以 runbook 为准。', digest: 'e' },
+      context: { durationMs: 12, decisionChars, sources: [{ id: 'runbook', status: 'complete', missing: [] }], observations: [material('scn_1', `orders.md · 5xx\n${'先看网关日志。'.repeat(200)}`), material('scn_2', 'orders.md · 回滚\n回滚走发布平台。')] } } });
+
+  it('指引在核心规则之后、材料之前；没命中时 prompt 里没有任何场景内容', () => {
+    const prompt = participationPrompt(withScenario(), 'obs_1', 'Bot');
+    const lines = prompt.split('\n');
+    expect(lines.indexOf(guidance)).toBe(lines.findIndex(line => line.startsWith('当前触发观察 id：')) + 1);
+    expect(lines.indexOf(guidance)).toBeLessThan(lines.findIndex(line => line.startsWith('群长期指令（材料）')));
+    expect(prompt).toContain('scenarioContext 是宿主按本群启用的场景取来的材料');
+    // 命中的场景当作负责范围：走「属于负责范围也接」的那一支。
+    expect(prompt).toContain('负责范围：本群启用的场景（见下面的场景指引）');
+    expect(prompt).toContain('没有明确叫本机器人、但属于负责范围且需要有人处理的');
+    // 命中标记只给宿主用，不进材料。
+    expect(prompt).not.toContain('dutydeck:scenario:');
+    const plain = participationPrompt(snapshot(), 'obs_1', 'Bot');
+    expect(plain).not.toContain('场景');
+    expect(plain).not.toContain('scenarioContext');
+    // 配了负责范围时两者都算。
+    expect(participationPrompt(withScenario(), 'obs_1', 'Bot', undefined, { roleScope: '订单服务' })).toContain('负责范围："订单服务"，以及本群启用的场景（见下面的场景指引）');
+    // 弃权的场景不影响 prompt。
+    const abstained = { ...snapshot(), scenario: { packId: 'team-faq', title: '团队答疑', version: '0.1.0', digest: 'd', status: 'abstained' as const, reason: '超时' } };
+    expect(participationPrompt(abstained, 'obs_1', 'Bot')).toBe(plain);
+  });
+
+  it('判定材料按 decisionChars 截取，不占 8000 字的判定材料上限；回复材料用冻结的全部', () => {
+    const decision = participationMaterial(withScenario(1000), 'obs_1');
+    expect(decision.scenarioContext!.observations).toHaveLength(1);
+    expect(decision.scenarioContext!.observations[0]!.text.length).toBe(1001);
+    const response = participationMaterial(withScenario(1000), 'obs_1', undefined, 'response');
+    expect(response.scenarioContext!.observations.map(item => item.id)).toEqual(['scn_1', 'scn_2']);
+    // 裁剪本群消息时不把场景材料算进去，结果原样带着场景。
+    const fitted = decisionInput(withScenario(4000), 'obs_1');
+    expect(fitted.scenario).toEqual(withScenario(4000).scenario);
+    expect(JSON.stringify(participationMaterial({ ...fitted, scenario: undefined }, 'obs_1')).length).toBeLessThanOrEqual(DECISION_MATERIAL_LIMIT);
+  });
+
+  it('场景材料的 id 可以作证据，不能作事项更新的证据；弃权的场景材料不认', () => {
+    const input = withScenario();
+    const decision = { ...replyDecision, evidenceIds: ['obs_1', 'scn_2'] };
+    expect(parseParticipationResult(JSON.stringify(decision), input, 'obs_1')).toEqual(decision);
+    expect(() => parseParticipationResult(JSON.stringify({ ...decision, updates: [{ followupId: 'f1', expectedRevision: 1, progress: '完成', evidenceIds: ['obs_1', 'scn_2'] }] }), input))
+      .toThrowError(expect.objectContaining({ code: 'COLLABORATION_INVALID_EVIDENCE' }));
+    const abstained = { ...input, scenario: { ...input.scenario!, status: 'abstained' as const } };
+    expect(() => parseParticipationResult(JSON.stringify(decision), abstained, 'obs_1')).toThrowError(expect.objectContaining({ code: 'COLLABORATION_INVALID_EVIDENCE' }));
+  });
+
+  it('回复 prompt 带冻结的执行要求和全部材料', () => {
+    const prompt = participationResponsePrompt(withScenario(1000), { ...replyDecision, evidenceIds: ['obs_1', 'scn_2'] }, 'obs_1');
+    expect(prompt).toContain('[宿主管理者规则 · 场景「团队答疑」v0.1.0] [团队答疑] 以 runbook 为准。');
+    expect(prompt).toContain('回滚走发布平台。');
+    expect(participationResponsePrompt(snapshot(), replyDecision, 'obs_1')).not.toContain('场景');
+  });
+});

@@ -154,6 +154,25 @@ describe('CollaborationEvaluation', () => {
     expect(evaluate).toHaveBeenCalledTimes(variant === 'valid' ? 1 : 0);
   });
 
+  it('model 场景包冻结的材料：取全了照常回放、可以作证据；来源不完整记 missing、不调用 evaluate；报告给总数、有效数、缺失数', async () => {
+    const material: CollaborationObservation = { ...makeSnapshot().observations[0]!, id: 'scenario_1', source: 'scenario:team-faq', eventId: 'orders.md#1', senderKind: 'system', senderId: undefined, text: 'runbook 摘录' };
+    const withScenario = (status: 'complete' | 'partial', missing: string[] = []) => ({ ...makeSnapshot(), scenario: { packId: 'team-faq', title: '团队答疑', version: '0.1.0', digest: 'd', status: 'used' as const,
+      guidance: '指引', execution: { instruction: '以 runbook 为准', digest: 'e' }, context: { durationMs: 5, decisionChars: 2000, sources: [{ id: 'runbook', status, missing }], observations: [material] } } });
+    const { evaluation, repo, evaluate } = setupEvaluation(async snapshot => ({ action: 'reply', reason: '按 runbook', evidenceIds: ['obs_valid_1', ...(snapshot.scenario?.status === 'used' ? ['scenario_1'] : [])] }));
+    const record = (id: string, snapshot: CollaborationSnapshot) => repo.recordDecision({ id, scope: scopeA, contextRevision: 1, policyVersion: 'v1', action: 'reply', reason: '按 runbook',
+      evidenceIds: ['obs_valid_1', ...(snapshot.scenario?.status === 'used' ? ['scenario_1'] : [])], status: 'sent', inputSnapshot: snapshot as unknown as Record<string, unknown>, createdAt: '2026-09-18T10:00:00.000Z' });
+    await record('dec_scenario_complete', withScenario('complete'));
+    await record('dec_scenario_partial', withScenario('partial', ['b.md：文件不存在或无法读取']));
+    await record('dec_scenario_abstained', { ...makeSnapshot(), scenario: { packId: 'team-faq', title: '团队答疑', version: '0.1.0', digest: 'd', status: 'abstained', reason: '超时' } });
+    const result = await evaluation.replay(scopeA, { decisionIds: ['dec_scenario_complete', 'dec_scenario_partial', 'dec_scenario_abstained'] });
+    expect(result.results.map(item => [item.decisionId, item.status])).toEqual([['dec_scenario_complete', 'passed'], ['dec_scenario_partial', 'missing'], ['dec_scenario_abstained', 'passed']]);
+    expect(result.results[1]!.reason).toBe("Scenario context 'team-faq:runbook' contains missing elements: b.md：文件不存在或无法读取");
+    expect({ total: result.total, valid: result.valid, missing: result.missing }).toEqual({ total: 3, valid: 2, missing: 1 });
+    // 回放拿到的是冻结的场景内容，不重新调用 provider。
+    expect(evaluate.mock.calls[0]![0].scenario).toEqual(withScenario('complete').scenario);
+    expect(evaluate).toHaveBeenCalledTimes(2);
+  });
+
   it('marks as missing when decision does not exist in scope and does not call evaluate', async () => {
     const { evaluation, evaluate } = setupEvaluation();
     const replayRes = await evaluation.replay(scopeA, { decisionIds: ['non_existent_dec'] });

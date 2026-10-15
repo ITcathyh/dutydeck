@@ -21,7 +21,13 @@ dutydeck restart
 
 ## 群里开启
 
-在群里说「开启团队答疑」，按确认卡填参数：
+先填参数再开启：在 Web 群设置的「团队答疑」里填，或用命令行：
+
+```sh
+dutydeck settings group set <chatId> 'scenarios={"team-faq":{"enabled":true,"params":{"topics":["订单服务"],"docs":["orders/oncall.md"]}}}'
+```
+
+在群里说「开启团队答疑」也能开启，确认卡上没有填写项，参数沿用已有的值；没填过时 `topics` 为空，不会触发。参数：
 
 | 参数 | 含义 |
 |---|---|
@@ -39,6 +45,7 @@ dutydeck restart
 
 ## 当前限制
 
-- 场景包是 model 模式（由判定模型决定接不接）。需要 Dutydeck 支持 model 模式的版本；不支持的版本上 `dutydeck plugin validate` 会报 `mode：当前版本还不支持 model 模式的场景包`，校验不通过。
+- 只在群的参与强度为 `按需` 或 `积极` 时生效；@ 机器人、回复机器人的消息不走这个包。
+- runbook 读取超时（3 秒）或出错，或者一段都没读到而有文件读不到时，这条消息按没开这个包判定，`/status` 记为「取材料失败」。
 - 摘录只按关键字打分，不做语义检索；runbook 里的段落标题和关键字写法要对得上。
 - runbook 内容会交给模型并可能出现在群回复里，不要把含密钥的文件列进 `docs`。
