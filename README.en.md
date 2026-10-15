@@ -285,7 +285,7 @@ Scheduled tasks keep the selected permission posture; `ask` can wait for human a
 - Claude Code / Seed / Relay terminal modes support Lark approval (`ask` and `approve-reads`). Other terminal CLIs need `full-trust`; otherwise the session fails to start with two fixes: `dutydeck settings bot set <appId> permissionMode=full-trust fullTrustConfirmed=true`, or switch to an ACP / Claude terminal agent.
 - Claude terminal sessions started from Lark always use the `default` permission mode; defaults such as `auto` in your local `~/.claude` do not apply (but see [Known limits](#known-limits)).
 
-`timeout` is in seconds (default `600`) and must convert to an integer from 1 to 2147483647 milliseconds (`0.001`–`2147483.647` seconds). Fallback CLI model discovery uses the Agent's configured `command`, `args`, cleaned child `env` and `cwd`. Unknown wrapper commands are not run as a host CLI; the configured default model remains available when discovery is unavailable.
+`timeout` is in seconds (default `600`) and must convert to an integer from 1 to 2147483647 milliseconds (`0.001`–`2147483.647` seconds). Fallback CLI model discovery uses the Agent's configured direct CLI executable, cleaned child `env` and `cwd`, passing only supported global options (with separate option/value arguments). Other launch arguments, equals forms, or wrapper commands skip fallback discovery and retain the configured default model without substituting a host command.
 
 #### Terminal task status and recovery
 

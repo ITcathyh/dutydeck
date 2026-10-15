@@ -356,13 +356,14 @@ describe('CLI model discovery uses the configured launch boundary', () => {
     const cwd = join(root, `project ${label}`); mkdirSync(cwd);
     writeFileSync(join(cwd, 'profile.txt'), `project-${label}`);
     const command = join(bin, 'opencode');
+    const level = label === 'a' ? 'DEBUG' : 'WARN';
     writeFileSync(command, `#!${process.execPath}
 const fs = require('node:fs');
 if (process.env.DUTYDECK_RELAY_TOKEN || process.env.LARK_APP_SECRET || process.env.HERDR_API_TOKEN || process.env.ANTHROPIC_API_KEY) { console.log('leaked/ambient'); process.exit(0); }
-if (process.argv.slice(2).join(',') !== '--profile,${label},models') process.exit(1);
+if (process.argv.slice(2).join(',') !== '--log-level,${level},models') process.exit(1);
 console.log(['binary-${label}', process.env.MODEL_ACCOUNT, fs.readFileSync('profile.txt', 'utf8'), process.env.ANTHROPIC_BASE_URL, process.env.HOME].join('/'));
 `, { mode: 0o755 });
-    return agentConfigSchema.parse({ id: 'opencode', name: 'OpenCode', command, args: ['--profile', label], protocol: 'pty-cli', cwd,
+    return agentConfigSchema.parse({ id: 'opencode', name: 'OpenCode', command, args: ['--log-level', level], protocol: 'pty-cli', cwd,
       env: { MODEL_ACCOUNT: `account-${label}`, ANTHROPIC_BASE_URL: `endpoint-${label}`, HOME: `home-${label}`, HERDR_API_TOKEN: 'must-be-removed' } });
   };
 
@@ -377,6 +378,49 @@ console.log(['binary-${label}', process.env.MODEL_ACCOUNT, fs.readFileSync('prof
     expect(existsSync(hostMarker)).toBe(false);
     expect(process.env.ANTHROPIC_API_KEY).toBe('ambient-vendor-secret');
     expect(process.env.DUTYDECK_RELAY_TOKEN).toBe('ambient-relay-secret');
+  });
+
+  it.each([['run', 'existing prompt'], ['serve'], ['--'], ['--prompt', 'existing prompt'], ['--unknown-mode'], ['--log-level'], ['--log-level', '--'], ['--log-level', 'DEBUG', 'run'], ['--log-level', 'INVALID'], ['--log-level=DEBUG']])('does not start an unverified action while listing models: %j', async (...args) => {
+    const marker = join(root, 'action-called');
+    const command = join(root, 'opencode');
+    writeFileSync(command, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(2))); console.log('action/model');\n`, { mode: 0o755 });
+    const agent = agentConfigSchema.parse({ id: 'opencode', name: 'OpenCode', command, args, protocol: 'pty-cli', model: 'configured-model' });
+    expect(await discoverAgentModels(agent, undefined, true)).toEqual({ models: [], defaultModel: 'configured-model', reasoningEfforts: [], source: 'agent' });
+    expect(existsSync(marker)).toBe(false); expect(existsSync(hostMarker)).toBe(false);
+  });
+
+  it.each([
+    { id: 'cursor', command: 'cursor-agent', args: ['--api-key', 'synthetic-test-key', '--header', 'Account: synthetic', '-H', 'Other: value', '--workspace', 'workspace with spaces'], query: ['--list-models'], output: 'model-a - Model A' },
+    { id: 'pi', command: 'pi', args: ['--provider', 'synthetic-provider', '--api-key', 'synthetic-test-key', '--model', 'model-a'], query: ['--list-models'], output: 'provider model name\nsynthetic-provider model-a Model A' },
+    { id: 'opencode', command: 'opencode', args: ['--log-level', 'DEBUG', '--print-logs', '--pure'], query: ['models'], output: 'provider/model-a' },
+    { id: 'trae', command: 'traecli', args: [], query: ['models'], output: 'provider/model-a' }
+  ])('passes the verified global options unchanged to $id', async profile => {
+    const marker = join(root, 'argv.json'), command = join(root, profile.command);
+    writeFileSync(command, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(2))); console.log(${JSON.stringify(profile.output)});\n`, { mode: 0o755 });
+    const agent = agentConfigSchema.parse({ id: profile.id, name: profile.id, command, args: profile.args, protocol: 'pty-cli' });
+    const result = await discoverAgentModels(agent, undefined, true);
+    expect(result.source).toBe('cli'); expect(result.models).toHaveLength(1);
+    expect(JSON.parse(readFileSync(marker, 'utf8'))).toEqual([...profile.args, ...profile.query]);
+    expect(existsSync(hostMarker)).toBe(false);
+  });
+
+  it.each([
+    { id: 'pi', command: 'pi', args: ['--'] },
+    { id: 'pi', command: 'pi', args: ['update'] },
+    { id: 'pi', command: 'pi', args: ['--provider'] },
+    { id: 'pi', command: 'pi', args: ['--provider=synthetic'] },
+    { id: 'pi', command: 'pi', args: ['--api-key', '--list-models'] },
+    { id: 'cursor', command: 'cursor-agent', args: ['resume'] },
+    { id: 'cursor', command: 'cursor-agent', args: ['worker', 'start'] },
+    { id: 'cursor', command: 'cursor-agent', args: ['--api-key'] },
+    { id: 'cursor', command: 'cursor-agent', args: ['--workspace', '/tmp', 'existing prompt'] },
+    { id: 'trae', command: 'traecli', args: ['--profile', 'unverified'] }
+  ])('falls back without spawning $id for unverified args $args', async profile => {
+    const marker = join(root, 'unverified-called'), command = join(root, profile.command);
+    writeFileSync(command, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, 'called');\n`, { mode: 0o755 });
+    const agent = agentConfigSchema.parse({ id: profile.id, name: profile.id, command, args: profile.args, protocol: 'pty-cli', model: 'configured-model' });
+    expect(await discoverAgentModels(agent, undefined, true)).toEqual({ models: [], defaultModel: 'configured-model', reasoningEfforts: [], source: 'agent' });
+    expect(existsSync(marker)).toBe(false); expect(existsSync(hostMarker)).toBe(false);
   });
 
   it('does not execute a shell wrapper or substitute the daemon host CLI for its metadata', async () => {

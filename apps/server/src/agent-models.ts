@@ -106,10 +106,31 @@ async function discoverThroughAcp(agent: AgentConfig, model?: string): Promise<A
   }
 }
 
+// Only verified global options may precede a metadata query. Startup commands,
+// positional prompts and option terminators can turn appended metadata args into work.
+const cliModelValueOptions: Record<string, readonly string[]> = {
+  cursor: ['--api-key', '--header', '-H', '--workspace'],
+  opencode: ['--log-level'],
+  pi: ['--provider', '--api-key', '--model'],
+  trae: []
+};
+function hasSafeModelProbeArgs(agent: AgentConfig): boolean {
+  const options = cliModelValueOptions[agent.id] ?? [];
+  for (let index = 0; index < agent.args.length; index++) {
+    const option = agent.args[index]!;
+    if (agent.id === 'opencode' && (option === '--print-logs' || option === '--pure')) continue;
+    if (!options.includes(option)) return false;
+    const value = agent.args[++index];
+    if (!value || value.startsWith('-')) return false;
+    if (agent.id === 'opencode' && !['DEBUG', 'INFO', 'WARN', 'ERROR'].includes(value)) return false;
+  }
+  return true;
+}
+
 async function discoverThroughCli(agent: AgentConfig): Promise<AgentModel[]> {
   const definition = cliCommands[agent.id];
-  // 只对已知 CLI 的直接可执行程序追加只读参数；不执行 shell/启动器，也不换成宿主默认命令。
-  if (!definition || basename(agent.command) !== definition.command) return [];
+  // 仅已知直接 CLI 且启动参数属于上述全局选项时查询；不执行其他启动配置或替换成宿主命令。
+  if (!definition || basename(agent.command) !== definition.command || !hasSafeModelProbeArgs(agent)) return [];
   const { stdout } = await run(agent.command, [...agent.args, ...definition.args], {
     cwd: agent.cwd ?? process.cwd(),
     env: childEnvironment(process.env, agent.env, { stripClaude: agent.protocol === 'pty-cli' }),
