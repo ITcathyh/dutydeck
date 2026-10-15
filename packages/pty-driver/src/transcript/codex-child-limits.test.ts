@@ -2,8 +2,10 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { CodexTranscriptTailer } from './codex.js';
+import { CodexChildLimits, childDiagnosticLimits } from './codex-child-limits.js';
 
 const parent = '11111111-1111-4111-8111-111111111111';
 const child = '22222222-2222-4222-8222-222222222222';
@@ -33,8 +35,34 @@ async function fixture() {
       line({ type: 'session_meta', payload: { id: child, parent_thread_id: parent, ...metadata } }) + records.map(line).join('')) };
 }
 
+// A flush is bounded work, not a promise to finish every child. Advance only
+// the reader's wall-clock polling gate; keep the real monotonic I/O budget.
+async function waitForDiagnostics(h: Awaited<ReturnType<typeof fixture>>, count: number) {
+  const now = Date.now(), clock = vi.spyOn(Date, 'now');
+  try {
+    for (let tick = 1; tick <= 20; tick++) {
+      clock.mockReturnValue(now + tick * (childDiagnosticLimits.intervalMs + 1));
+      await h.tail.flush();
+      if (h.events.filter(e => e.data.diagnostic).length >= count) break;
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    expect(h.events.filter(e => e.data.diagnostic)).toHaveLength(count);
+  } finally { clock.mockRestore(); }
+}
+
 it('emits a visible child quota diagnostic while the parent remains active and may succeed', async () => {
-  const h = await fixture(); h.child(); appendFileSync(h.path, line(started())); await h.tail.flush();
+  const h = await fixture();
+  vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+  const poll = CodexChildLimits.prototype.poll;
+  vi.spyOn(CodexChildLimits.prototype, 'poll').mockImplementationOnce(function (this: CodexChildLimits, turn) {
+    const clock = vi.spyOn(performance, 'now').mockReturnValueOnce(0).mockReturnValue(11);
+    try { return poll.call(this, turn); } finally { clock.mockRestore(); }
+  });
+  h.child(); appendFileSync(h.path, line(started())); await h.tail.flush();
+  expect(h.events.filter(e => e.data.diagnostic)).toEqual([]);
+  await h.tail.flush(); // Still throttled until the next 2-second observation.
+  expect(h.events.filter(e => e.data.diagnostic)).toEqual([]);
+  await waitForDiagnostics(h, 1);
   const diagnostics = h.events.filter(e => e.data.diagnostic === 'child_quota');
   expect(diagnostics).toEqual([expect.objectContaining({ type: 'status', sourceId: expect.any(String), data: expect.objectContaining({
     activityId: 'activity-child', state: 'child_quota', name: '子任务额度诊断', status: 'failed', code: 'usage_limit_exceeded', output: expect.stringContaining('父任务继续')
@@ -62,7 +90,7 @@ it('excludes fork-inherited failures and requires an own native child turn', asy
   h.child([event('task_started', 'inherited'), terminal('inherited'), event('task_started', 'child-turn'), terminal()],
     { forked_from_id: parent, subagent_history_start_ordinal: 3 });
   appendFileSync(h.path, line(started())); await h.tail.flush();
-  expect(h.events.filter(e => e.data.diagnostic)).toHaveLength(1);
+  await waitForDiagnostics(h, 1);
   expect(h.events.find(e => e.data.diagnostic)?.data.childTurnId).toBe('child-turn');
 });
 
@@ -79,6 +107,7 @@ it('rejects old parent turns/foreign threads, transient rate snapshots and forei
 
 it('deduplicates across polls, ignores completed parents and does not replay children before a recovery cursor', async () => {
   const h = await fixture(); h.child(); appendFileSync(h.path, line(started())); await h.tail.flush();
+  await waitForDiagnostics(h, 1);
   const cursor = h.tail.checkpoint(); h.tail.stop();
   const restored = new CodexTranscriptTailer({ cwd: h.root, transcriptPath: h.path, env: { CODEX_HOME: h.root } }); tails.push(restored);
   const events: NormalizedDriverEvent[] = []; restored.onEvent(e => events.push(e)); restored.restore(cursor); await restored.flush();
@@ -90,13 +119,14 @@ it('deduplicates across polls, ignores completed parents and does not replay chi
 it('distinguishes request rate limits from quota and deduplicates repeated child terminals', async () => {
   const h = await fixture(); h.child([event('task_started', 'child-turn'), terminal('child-turn', { message: '429 rate limit secret' }), terminal('child-turn')]);
   appendFileSync(h.path, line(started())); await h.tail.flush();
-  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 3000); await h.tail.flush();
+  await waitForDiagnostics(h, 1);
   expect(h.events.filter(e => e.data.diagnostic)).toEqual([expect.objectContaining({ data: expect.objectContaining({ diagnostic: 'child_rate_limit', code: 'rate_limit' }) })]);
   expect(JSON.stringify(h.events.filter(e => e.data.diagnostic))).not.toContain('secret');
 });
 
 it('keeps a new diagnostic distinct on a different parent turn', async () => {
   const h = await fixture(); h.child(); appendFileSync(h.path, line(started())); await h.tail.flush();
+  await waitForDiagnostics(h, 1);
   const first = h.events.find(e => e.data.diagnostic)!;
   vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 3000);
   h.child([event('task_started', 'new-child-turn'), terminal('new-child-turn')]);
@@ -104,6 +134,7 @@ it('keeps a new diagnostic distinct on a different parent turn', async () => {
   appendFileSync(h.path, line(event('task_started', 'next-parent')) + line(event('user_message', 'next-parent', { message: 'next question' }))
     + line(started({ turn_id: 'next-parent' })));
   await h.tail.flush(); await receipt;
+  await waitForDiagnostics(h, 2);
   const diagnostics = h.events.filter(e => e.data.diagnostic);
   expect(diagnostics).toHaveLength(2); expect(diagnostics[1]!.sourceId).not.toBe(first.sourceId);
 });
