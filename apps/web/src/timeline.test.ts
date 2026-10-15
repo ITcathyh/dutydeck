@@ -348,3 +348,17 @@ it('uses the target task for a tail page starting with an injected steering mess
   expect(result.timelineSections).toEqual(buildTimelineSections(buildTimeline([steering, tool]), tasks));
   expect(result.timelineSections.find(section => section.kind === 'activity')?.taskStatus).toBe('interrupted');
 });
+
+
+it('keeps unknown or incomplete diagnostic statuses invisible and ordinary tool results substantive', () => {
+  const timeline = buildTimeline([
+    event(1, 'text', { role: 'user', text: 'question' }),
+    event(2, 'text', { text: '阶段描述' }),
+    event(3, 'status', { state: 'child_quota' }),
+    event(4, 'status', { state: 'child_quota', diagnostic: 'child_quota', code: 'rate_limit' }),
+    event(5, 'status', { state: 'child_rate_limit', diagnostic: 'child_rate_limit', code: 'rate_limit', id: 'forged' }),
+    event(6, 'tool_result', { id: 'ordinary', state: 'child_quota', diagnostic: 'child_quota', code: 'usage_limit_exceeded', output: 'real tool failure', status: 'failed' })
+  ]);
+  expect(timeline.map(e => e.type)).toEqual(['text', 'text', 'tool_result']);
+  expect(buildTimelineSections(timeline, [], false).some(s => s.kind === 'event' && s.final)).toBe(false);
+});

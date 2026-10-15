@@ -63,11 +63,22 @@ export function patchRejectedCardDelta(previous: LarkCardElement[] = [], current
   ]);
 }
 
+const isChildDiagnostic = (value: unknown) => {
+  if (!value || typeof value !== 'object') return false;
+  const data = value as Record<string, any>;
+  return data.diagnostic === data.state
+  && typeof data.id === 'string' && /^child_diagnostic_[a-f0-9]{64}$/.test(data.id)
+  && typeof data.activityId === 'string' && typeof data.parentTurnId === 'string' && typeof data.childTurnId === 'string'
+  && typeof data.parentThreadId === 'string' && typeof data.childThreadId === 'string'
+  && (data.state === 'child_quota' && data.code === 'usage_limit_exceeded' || data.state === 'child_rate_limit' && data.code === 'rate_limit');
+};
+
 function compactTraceEntries(events: AgentEvent[]): TraceEntry[] {
   const result: TraceEntry[] = [];
   const tools = new Map<string, TraceEntry>();
   const permissions = new Map<string, TraceEntry>();
-  for (const event of events) {
+  for (let event of events) {
+    if (event.type === 'status' && isChildDiagnostic(event.data)) event = { ...event, type: 'tool_result' };
     if (event.type === 'task' || event.type === 'completed' || event.type === 'status') continue;
     const data = event.data && typeof event.data === 'object' ? event.data as Record<string, any> : { value: event.data };
     if (event.type === 'text' && data.role === 'user') continue;
@@ -1102,7 +1113,7 @@ export function renderLarkCardElements(
   // raw_terminal 例外——它是屏幕回显，不是活动。PTY 形态的 Agent 给出最终答复之后，
   // 屏幕上必然还会再吐一个提示符；把它算作活动会让真实答复失去 final 资格，
   // 而 hideTraceOnComplete 默认隐去 trace，用户最终一个字都看不到。
-  const lastActivityIndex = lastIndex(entry => entry.type !== 'text' && entry.type !== 'raw_terminal');
+  const lastActivityIndex = lastIndex(entry => entry.type !== 'text' && entry.type !== 'raw_terminal' && !isChildDiagnostic(entry.data));
   const finalFollowsActivity = finalMessageIndex > lastActivityIndex;
   const finalMessage = finalMessageIndex >= 0 && finalFollowsActivity ? entries[finalMessageIndex] : undefined;
   const idleTimeout = view === 'result' ? larkIdleTimeout(events) : undefined;

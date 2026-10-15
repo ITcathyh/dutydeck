@@ -66,6 +66,7 @@ export class NativeTurn {
     }
     return true;
   }
+  activeTurnId(): string | undefined { return this.scoped && !this.terminal ? this.turn : undefined; }
   requiresBinding(): boolean { return this.required; }
   hasTerminal(): boolean { return this.terminal; }
   takeError(): NormalizedDriverEvent | undefined { const error = this.error; this.error = undefined; return error; }

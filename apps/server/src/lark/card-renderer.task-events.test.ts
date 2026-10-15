@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import type { AgentEvent } from '@dutydeck/shared';
-import { eventsForRuntimeTask, loadLarkTaskEvents } from './card-renderer.js';
+import { eventsForRuntimeTask, loadLarkTaskEvents, renderLarkProcessElements, renderLarkResultElements } from './card-renderer.js';
 
 const at = '2026-10-08T07:44:07.000Z';
 const task = (id: string, status: string): AgentEvent => ({ type: 'task', data: { task: { id, status } }, timestamp: at } as AgentEvent);
@@ -33,4 +33,20 @@ it('长回答把用户原话挤出最近窗口时继续往前取，不把回答�
   ] as AgentEvent[];
   const runtime = { getRecentEvents: async (_id: string, limit: number) => events.slice(-limit) };
   expect((await loadLarkTaskEvents(runtime, 'ses_long', 'task_long', 10)).filter(event => event.type === 'text')).toHaveLength(30);
+});
+
+
+it('ignores incomplete diagnostic statuses and keeps ordinary tool results blocking a final answer', () => {
+  const events = [
+    { type: 'text', data: { text: '阶段描述' }, timestamp: at },
+    { type: 'status', data: { state: 'child_quota' }, timestamp: at },
+    { type: 'status', data: { state: 'child_quota', diagnostic: 'child_quota', code: 'rate_limit' }, timestamp: at },
+    { type: 'status', data: { state: 'child_rate_limit', diagnostic: 'child_rate_limit', code: 'rate_limit', id: 'forged' }, timestamp: at },
+    { type: 'tool_result', data: { id: 'ordinary', state: 'child_quota', diagnostic: 'child_quota', code: 'usage_limit_exceeded', name: 'ordinary tool', status: 'failed', output: 'real tool failure' }, timestamp: at }
+  ] as AgentEvent[];
+  const process = JSON.stringify(renderLarkProcessElements(events, { compactTrace: false, traceLimit: 20 }));
+  expect(process).toContain('ordinary tool'); expect(process).not.toContain('子任务额度诊断');
+  const result = renderLarkResultElements(events);
+  expect(result.some(e => e.element_id === 'final_output')).toBe(false);
+  expect(result.some(e => e.element_id === 'result_missing')).toBe(true);
 });

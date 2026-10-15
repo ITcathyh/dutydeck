@@ -7,6 +7,11 @@ export type TimelineSection =
   | { kind: 'activity'; id: string; groups: TimelineActivityGroup[]; hasAnswer: boolean; taskStatus: string; isLatestTurn: boolean; startedAt: string; completedAt?: string };
 
 const isActivity = (event: TimelineEvent) => event.type === 'thinking' || event.type === 'tool_call' || event.type === 'tool_result';
+const isChildDiagnostic = (data: TimelineEvent['data']) => data.diagnostic === data.state
+  && typeof data.id === 'string' && /^child_diagnostic_[a-f0-9]{64}$/.test(data.id)
+  && typeof data.activityId === 'string' && typeof data.parentTurnId === 'string' && typeof data.childTurnId === 'string'
+  && typeof data.parentThreadId === 'string' && typeof data.childThreadId === 'string'
+  && (data.state === 'child_quota' && data.code === 'usage_limit_exceeded' || data.state === 'child_rate_limit' && data.code === 'rate_limit');
 const warningPrefix = /^warning:\s*/i;
 
 function compactCommand(value: unknown) {
@@ -61,7 +66,8 @@ export function buildTimeline(events: DockEvent[] = [], tasks: Task[] = []): Tim
     taskEvents.push({ id: `task-event-${task.id}`, sequence: -1, type: 'text', timestamp: task.createdAt, data: { text: task.prompt, role: 'user', taskId: task.id } });
   }
   const source = [...events, ...taskEvents].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence);
-  for (const event of source) {
+  for (let event of source) {
+    if (event.type === 'status' && isChildDiagnostic(event.data)) event = { ...event, type: 'tool_result' };
     if (event.type === 'status' || event.type === 'task' || event.type === 'completed' || event.type === 'raw_terminal') continue;
     const current = { ...event, data: { ...event.data } } as TimelineEvent;
     const warning = warningText(current);
@@ -165,7 +171,7 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
     // 插话并入了正在执行的那一轮，这一段的状态跟着那一轮走。
     const task = tasksById.get(userMessage?.data.steering?.target?.taskId ?? userMessage?.data.taskId ?? turn.find(event => event.taskId || event.data.taskId)?.taskId ?? turn.find(event => event.data.taskId)?.data.taskId);
     const terminal = task ? terminalTaskStatuses.has(task.status) : turnIndex < turns.length - 1 || !latestTurn;
-    const lastActivityIndex = turn.reduce((latest, event, index) => isActivity(event) ? index : latest, -1);
+    const lastActivityIndex = turn.reduce((latest, event, index) => isActivity(event) && !isChildDiagnostic(event.data) ? index : latest, -1);
     const lastAssistantTextIndex = turn.reduce((latest, event, index) => event.type === 'text' && event.data.role !== 'user' ? index : latest, -1);
     const finalIndex = terminal && lastAssistantTextIndex > lastActivityIndex ? lastAssistantTextIndex : -1;
     const hasAnswer = finalIndex >= 0;

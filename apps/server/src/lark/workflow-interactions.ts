@@ -704,7 +704,8 @@ export class LarkWorkflowInteractions {
         state: 'running', statusLabel: kind === 'ask' ? '等待回答' : '等待审批', awaitingHuman: true, readOnly: true,
         taskId: record.id, taskName: kind === 'ask' ? 'Agent 需要你的回答' : '确认本次操作', permissionMode: 'ask', elements,
         ...(safeWebBaseUrl ? { webBaseUrl: safeWebBaseUrl } : {}),
-        idempotencyKey: `workflow_${record.id}` });
+        idempotencyKey: `workflow_${record.id}`,
+        ...(kind === 'ask' ? { beforeSend: async () => { if (!await this.live(record)) throw stale(); } } : {}) });
       mentionDelivered = true;
       let bound: LarkInteraction;
       try { bound = await this.bindCard(record, card.messageId); }

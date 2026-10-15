@@ -530,6 +530,36 @@ describe('structured ask cards (P0-2)', () => {
     return { service, cards, files, uploads, requests, fail: (value?: typeof fail) => { fail = value; } };
   };
 
+  it.each(['token', '429'] as const)('ask 卡片在 %s 等待后再次检查 live waiter，拒绝失效写入', async phase => {
+    let h: StructuredHarness;
+    let writes = 0;
+    const fetcher = vi.fn(async (url: string | URL | Request) => {
+      const path = String(url);
+      if (path.includes('/auth/')) {
+        if (phase === 'token') { h.broker.cancelSession('ses_one'); await h.broker.flush(); }
+        return new Response(JSON.stringify({ code: 0, tenant_access_token: 'fake', expire: 7200 }));
+      }
+      if (path.endsWith('/reply')) {
+        writes++;
+        if (phase === '429' && writes === 1) {
+          h.broker.cancelSession('ses_one'); await h.broker.flush();
+          return new Response(JSON.stringify({ code: 99991400, msg: 'synthetic throttle' }), { status: 429, headers: { 'retry-after': '0' } });
+        }
+        return new Response(JSON.stringify({ code: 0, data: { message_id: 'om_stale_ask' } }));
+      }
+      throw new Error(`Unexpected fake request ${path}`);
+    });
+    const service = createLarkCardService({ LARK_APP_ID: `cli_ask_guard_${phase}`, LARK_APP_SECRET: 'fake',
+      LARK_API_RETRY_MAX_ATTEMPTS: '1', LARK_API_RETRY_BASE_MS: '1', LARK_API_RETRY_MAX_MS: '1' }, fetcher);
+    h = await setupHarness(service);
+    try {
+      const ask = await h.ask(0);
+      const result = await h.workflow.observe(ask.ctx, ask.event).then(() => undefined, error => error);
+      expect(writes).toBe(phase === 'token' ? 0 : 1);
+      expect(result).toMatchObject({ code: 'LARK_INTERACTION_EXPIRED' });
+    } finally { service.close(); await h.cleanup(); }
+  });
+
   it.each([false, true])('真实卡链按 UTF-8 预算保留 6000 边界、中文 emoji 与全部选项（structured=%s）', async structuredAskCards => {
     const wire = mockLark(); const h = await setupHarness(wire.service);
     try {

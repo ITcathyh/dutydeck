@@ -33,6 +33,7 @@ import { readNativeTranscriptUsage } from './session-usage.js';
 import { codexInputText } from './input-receipt.js';
 import { CodexToolProjection, mapCodexCompletedTool } from './codex-tools.js';
 import { CodexInputReceipt } from './codex-input-receipt.js';
+import { CodexChildLimits, childDiagnosticLimits } from './codex-child-limits.js';
 import { NativeTurn, nativeTaskError } from './native-turn.js';
 
 const SESSION_SCAN_MAX_DEPTH = 3;
@@ -323,8 +324,12 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
   private readonly tailer: JsonlTailer;
   private readonly turn = new NativeTurn();
   private readonly inputReceipt?: CodexInputReceipt;
+  private readonly children: CodexChildLimits;
+  private childTimer?: NodeJS.Timeout;
+  private readonly childCallbacks = new Set<(event: NormalizedDriverEvent) => void>();
 
   constructor(opts: CodexTranscriptTailerOptions) {
+    this.children = new CodexChildLimits(codexSessionsRoot(opts.env));
     if (opts.sessionId) this.inputReceipt = new CodexInputReceipt(codexHistoryPath(opts.env),
       () => resolveCliSessionId('codex', { sessionId: opts.sessionId!, cwd: opts.cwd, env: opts.env }), text => this.turn.bindHistory(text));
     const explicit = opts.transcriptPath;
@@ -344,12 +349,13 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
           : () => resolveCodexRolloutPath(opts.cwd, opts.env),
       mapEntry: (entry, baseline) => {
         const bound = this.turn.observe(entry, baseline);
+        this.children.observe(entry, baseline, this.turn.activeTurnId());
         if (!baseline && this.turn.requiresBinding() && !bound) return mapCodexEntry(entry)?.filter(event => event.type === 'status');
         const events = projection.map(entry);
         return events?.filter(event => event.type !== 'error');
       },
       onInputReceipt: entry => this.turn.bind(entry),
-      resetMapping: () => { projection.reset(); this.turn.reset(); },
+      resetMapping: () => { projection.reset(); this.turn.reset(); this.children.reset(); },
       inputText: codexInputText,
       deduplicateTools: true,
       pollIntervalMs: opts.pollIntervalMs,
@@ -362,18 +368,26 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
     });
   }
 
-  start(): void { this.inputReceipt?.start(); this.tailer.start(); }
-  async flush(): Promise<void> { await Promise.all([this.tailer.flush(), this.inputReceipt?.flush()]); }
+  start(): void {
+    this.inputReceipt?.start(); this.tailer.start();
+    this.childTimer ??= setInterval(() => { void this.flush().catch(() => {}); }, childDiagnosticLimits.intervalMs);
+    this.childTimer.unref();
+  }
+  private publishChildDiagnostics(): void {
+    for (const event of this.children.poll(this.turn.activeTurnId())) for (const cb of this.childCallbacks) cb(event);
+  }
+  async flush(): Promise<void> { await Promise.all([this.tailer.flush(), this.inputReceipt?.flush()]); this.publishChildDiagnostics(); }
   checkpoint(): TranscriptCursor { return this.tailer.checkpoint(); }
   restore(cursor: TranscriptCursor): void { this.tailer.restore(cursor); this.turn.restore(); }
-  stop(): void { this.inputReceipt?.stop(); this.tailer.stop(); }
-  onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
+  stop(): void { if (this.childTimer) clearInterval(this.childTimer); this.childTimer = undefined; this.inputReceipt?.stop(); this.tailer.stop(); }
+  onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); this.childCallbacks.add(cb); }
   onProgress(cb: () => void): void { this.tailer.onProgress(cb); }
   hasTurnTerminal(): boolean { return this.turn.hasTerminal(); }
   takeTurnError(): NormalizedDriverEvent | undefined { return this.turn.takeError(); }
   takeInputError(): NormalizedDriverEvent | undefined { return this.turn.takeError(); }
   takeInputCancellation(): boolean { return this.turn.takeCancellation(); }
   waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
+    this.children.newInput();
     this.turn.arm(signal);
     return this.inputReceipt ? this.inputReceipt.waitForInput(this.tailer, prompt, signal) : this.tailer.waitForInput(prompt, signal);
   }
