@@ -32,6 +32,7 @@ const larkError = (reply: FastifyReply, error: unknown) => {
 
 export interface LarkRoutesOptions {
   clearBotModelSettings?: (appId: string) => Promise<void>;
+  renameBotModelSettings?: (oldAppId: string, newAppId: string) => Promise<void>;
   participation?: LarkGroupParticipation;
   usage?: import('../usage-ledger.js').UsageLedger;
   workbench?: import('./workbench.js').LarkWorkbench;
@@ -345,6 +346,11 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
         if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', hook.reason ?? 'Install the selected Agent hook before enabling enforced risk control', 409);
       }
       const saved = await saveLarkConfig(options.config, options.agents, listeningDisabled ? { ...input, listening: undefined } : input);
+      // Bot 改 appId（跨应用复制配置）后，按 appId 作用域的模型服务设置不会自动跟随记录，
+      // 显式搬到新 appId，避免新应用静默回退全局网关凭据。
+      const renamedFrom = input.originalAppId?.trim();
+      const renamedTo = input.appId?.trim();
+      if (renamedFrom && renamedTo && renamedTo !== renamedFrom) await options.renameBotModelSettings?.(renamedFrom, renamedTo);
       if (!listeningDisabled) await syncListeners();
       if (options.runtime) await options.groupManager?.refreshPolicies(options.runtime);
       if (!options.service) service = undefined;

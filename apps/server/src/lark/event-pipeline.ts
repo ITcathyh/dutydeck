@@ -1,4 +1,4 @@
-import { cardActionRoute, forwardCardAction, parseCardActionForwarding, type CardActionForwarding } from './card-action-forwarding.js';
+import { cardActionMatchesHandler, cardActionRoute, forwardCardAction, isBuiltinCardAction, parseCardActionForwarding, parseCardActionValue, type CardActionForwarding } from './card-action-forwarding.js';
 import { LarkServiceError } from './service.js';
 
 export const larkEventTypes = ['card.action.trigger', 'im.message.receive_v1'] as const;
@@ -45,17 +45,6 @@ export function validateLarkEventConfiguration(config: { eventHandlers?: LarkEve
   if (config.eventHandlers?.length && config.cardActionForwarding) throw new LarkServiceError('INVALID_LARK_CONFIG', 'eventHandlers 与 cardActionForwarding 不能同时启用；迁移时请同时提交 cardActionForwarding:null。', 400);
 }
 
-const parseValue = (value: unknown): Record<string, unknown> | undefined => {
-  if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return undefined; } }
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-};
-const builtin = (value?: Record<string, unknown>) => value && Object.keys(value).some(key => key === 'task_id' || key === 'taskId' || key.startsWith('dutydeck_') || key === 'dockmux_workflow');
-const matchesCard = (handler: LarkEventHandler, value?: Record<string, unknown>) => {
-  if (handler.owner === undefined && handler.legacyActions === undefined) return true;
-  if (!value) return false;
-  if (Object.hasOwn(value, 'owner')) return handler.owner !== undefined && value.owner === handler.owner;
-  return typeof value.action === 'string' && handler.legacyActions?.includes(value.action) === true;
-};
 const validToast = (toast: unknown): toast is LarkEventToast => {
   if (!toast || typeof toast !== 'object' || Array.isArray(toast)) return false;
   const value = toast as Record<string, unknown>;
@@ -71,14 +60,22 @@ export async function runLarkEventPipeline(config: { appId: string; eventHandler
   const legacy = card ? config.cardActionForwarding : undefined;
   const registered = handlers.filter(handler => handler.eventTypes.includes(eventType));
   if (!registered.length && !legacy) return { decision: 'continue' };
-  const value = card ? parseValue(event.action?.value) : undefined;
+  const value = card ? parseCardActionValue(event.action?.value) : undefined;
   const reject = (content: string): LarkEventDecision => ({ decision: 'stop', toast: { type: 'error', content } });
-  if (card && builtin(value)) return value && Object.hasOwn(value, 'owner')
-    ? reject('卡片操作同时包含外部与内置标记，已拒绝。') : { decision: 'continue' };
-  const matching = registered.filter(handler => !card || matchesCard(handler, value));
-  const legacyRoute = legacy ? cardActionRoute(event.action?.value, legacy) : undefined;
-  if (legacyRoute === 'unknown' || card && value && Object.hasOwn(value, 'owner') && !matching.length && legacyRoute !== 'forward') return reject('未配置此卡片的接收服务。');
-  if (!matching.length && legacyRoute !== 'forward') return { decision: 'continue' };
+  if (card && isBuiltinCardAction(value)) {
+    return value && Object.hasOwn(value, 'owner') ? reject('卡片操作同时包含外部与内置标记，已拒绝。') : { decision: 'continue' };
+  }
+  const matching = registered.filter(handler => !card || cardActionMatchesHandler(handler, value));
+  // legacy 转发与 eventHandlers 互斥（parse 边界 validateLarkEventConfiguration 已保证），两套路由不会同时存在。
+  let routeLegacy = false;
+  if (legacy) {
+    const route = cardActionRoute(event.action?.value, legacy);
+    if (route === 'unknown') return reject('未配置此卡片的接收服务。');
+    if (route !== 'forward') return { decision: 'continue' };
+    routeLegacy = true;
+  } else if (!matching.length) {
+    return card && value && Object.hasOwn(value, 'owner') ? reject('未配置此卡片的接收服务。') : { decision: 'continue' };
+  }
   const deadline = new AbortController();
   const signal = deadline.signal;
   const timer = setTimeout(() => deadline.abort(), 2_000);
@@ -87,11 +84,12 @@ export async function runLarkEventPipeline(config: { appId: string; eventHandler
   signal.addEventListener('abort', rejectDeadline, { once: true });
   const eventId = typeof event.event_id === 'string' ? event.event_id : undefined;
   const audit = (handlerId: string, result: string) => log.info({ eventType, handlerId, eventId, result }, '飞书外部事件处理');
-  let handlerId = legacy ? 'legacy-card-action' : matching[0]!.id;
+  let handlerId = routeLegacy ? 'legacy-card-action' : matching[0]!.id;
   try {
     if (!eventId) throw new Error('Event is missing event_id');
-    if (legacy) {
-      const toast = await Promise.race([forwardCardAction(legacy, config.appId, event, fetcher, signal), aborted]);
+    if (routeLegacy) {
+      // forwardCardAction 自身兜底网络错误；仍要与 aborted 竞速，使响应头已返回但回执 body 卡住时受同一 2 秒死线约束。
+      const toast = await Promise.race([forwardCardAction(legacy!, config.appId, event, fetcher, signal), aborted]);
       audit(handlerId, toast.type === 'success' ? 'stop' : 'error');
       return { decision: 'stop', toast: toast as LarkEventToast };
     }

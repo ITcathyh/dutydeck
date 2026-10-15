@@ -7,6 +7,7 @@ import { AlertTriangle, Bot, Check, ExternalLink, Eye, EyeOff, FolderOpen, Plus,
 import { validateHighRiskPattern } from '@dutydeck/shared';
 import { api, ApiError, type Agent, type LarkAppCreationJob, type RiskControlMode } from '../api';
 import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../model-cache';
+import { supportsModelServiceSettings } from '../agent-model-support';
 import { Badge, Banner, Button, Dialog, Field, IconButton, Input, Select, Skeleton, Spinner, Textarea } from './primitives';
 import { ConfirmDialog } from './ConfirmDialog';
 import { AgentSelect, CompactSelect } from './CompactSelect';
@@ -232,7 +233,7 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
   const agentCapabilitiesPending = step === 2 && Boolean(defaultAgentId) && !agentOptions.data && (agentOptions.isLoading || agentOptions.isFetching);
   const agentCapabilitiesReady = step !== 2 || Boolean(agentOptions.data);
   const selectedAgent = agents.find(agent => agent.id === defaultAgentId);
-  const claudeModelSettings = selectedAgent?.modelServiceSettings === true || ['claude', 'claude-code'].includes(defaultAgentId);
+  const claudeModelSettings = supportsModelServiceSettings(selectedAgent, defaultAgentId);
   // ACP 以实测协议为准（auto 可能解析成别的）；Claude 终端模式经权限 hook 在飞书审批。
   const remoteApprovalReady = agentOptions.data?.source === 'acp' || (selectedAgent?.protocol === 'pty-cli' && selectedAgent.remoteApproval === true);
   const missingTarget = Boolean(selectedAppId && config.data && !current);

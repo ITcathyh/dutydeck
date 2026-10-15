@@ -216,6 +216,46 @@ it('uses unambiguous bot and agent scope keys even when identifiers contain dots
   expect((await settings.get('claude')).hasApiKey).toBe(false);
 });
 
+it('moves bot-scoped settings when a bot is renamed, carrying the shared secret file and removing only the orphaned override', async () => {
+  const { settings, repos, agent, provider } = await fixture();
+  await settings.set('claude', { baseUrl: 'https://moved.example', authMode: 'bearer', apiKey: 'MOVED_CANARY' }, 'cli_old');
+  await settings.set('claude', { baseUrl: 'https://kept.example', authMode: 'api-key', apiKey: 'KEPT_CANARY' }, 'cli_new');
+  const movedKey = JSON.parse((await repos.config.get('dutydeck.bot_agent_model.cli_old.claude'))!).referenceKey;
+  const keptKey = JSON.parse((await repos.config.get('dutydeck.bot_agent_model.cli_new.claude'))!).referenceKey;
+  await settings.renameBot('cli_old', 'cli_new');
+  expect(await repos.config.get('dutydeck.bot_agent_model.cli_old.claude')).toBe('{}');
+  expect((await settings.resolve(agent, 'cli_new')).env).toMatchObject({ ANTHROPIC_BASE_URL: 'https://kept.example', ANTHROPIC_API_KEY: 'KEPT_CANARY' });
+  expect(provider.inspect(keptKey).availability).toBe('available');
+  expect(provider.inspect(movedKey).availability).toBe('missing');
+  // 目标作用域空闲时设置连同密钥引用一起搬走，密钥文件本身不删。
+  await settings.set('claude', { baseUrl: 'https://moved.example', authMode: 'bearer', apiKey: 'MOVED_CANARY' }, 'cli_old');
+  await settings.renameBot('cli_old', 'cli_empty');
+  expect(await repos.config.get('dutydeck.bot_agent_model.cli_old.claude')).toBe('{}');
+  expect((await settings.resolve(agent, 'cli_empty')).env).toMatchObject({ ANTHROPIC_BASE_URL: 'https://moved.example', ANTHROPIC_AUTH_TOKEN: 'MOVED_CANARY' });
+  // 含点号的 appId/agent id 编解码往返一致。
+  const other = { ...agent, id: 'b.claude', adapterId: 'claude' };
+  await repos.agents.save(other);
+  const dotted = new AgentModelSettings(repos, [agent, other], provider);
+  await dotted.set('b.claude', { apiKey: 'DOT_MOVE' }, 'a.b');
+  await dotted.renameBot('a.b', 'c.d');
+  expect(await repos.config.get('dutydeck.bot_agent_model.a%2Eb.b%2Eclaude')).toBe('{}');
+  expect((await dotted.resolve(other, 'c.d')).env.ANTHROPIC_AUTH_TOKEN).toBe('DOT_MOVE');
+});
+
+it('carries bot-scoped model settings to the new appId when renaming a bot through HTTP', async () => {
+  const { settings, repos, agent } = await fixture();
+  await repos.config.set('lark.bots', JSON.stringify([{ appId: 'cli_old', appSecret: 'synthetic', defaultAgentId: 'claude', permissionMode: 'ask', listening: false }]));
+  const runtime = { listAgents: () => repos.agents.list() } as any;
+  const app = await buildApp(runtime, { agentModelSettings: settings, lark: { config: repos.config, agents: repos.agents, listeningDisabled: true }, sessionNames: { authorize: async () => true } });
+  cleanups.push(() => app.close());
+  await settings.set('claude', { baseUrl: 'https://route.example', apiKey: 'ROUTE_MOVE' }, 'cli_old');
+  const renamed = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { originalAppId: 'cli_old', appId: 'cli_new' } });
+  expect(renamed.statusCode).toBe(200);
+  expect(renamed.json().bots.map((bot: { appId: string }) => bot.appId)).toEqual(['cli_new']);
+  expect((await settings.resolve(agent, 'cli_new')).env).toMatchObject({ ANTHROPIC_BASE_URL: 'https://route.example', ANTHROPIC_AUTH_TOKEN: 'ROUTE_MOVE' });
+  expect(await repos.config.get('dutydeck.bot_agent_model.cli_old.claude')).toBe('{}');
+});
+
 it('CLI and bot routes require an owner and an existing bot, save independently, and remove its secret files', async () => {
   const { settings, repos, agent, provider } = await fixture();
   await repos.config.set('lark.bots', JSON.stringify([{ appId: 'cli_a', appSecret: 'synthetic', defaultAgentId: 'claude', permissionMode: 'ask', listening: false }]));

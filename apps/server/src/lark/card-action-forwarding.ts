@@ -27,26 +27,40 @@ export function parseCardActionForwarding(value: unknown): CardActionForwarding 
     ...(legacy !== undefined ? { legacyActions: [...new Set((legacy as string[]).map(action => action.trim()))] } : {}) };
 }
 
+/** 容错解析卡片回调 action.value：字符串按 JSON 解析；结果不是普通对象时返回 undefined。 */
+export const parseCardActionValue = (raw: unknown): Record<string, unknown> | undefined => {
+  if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { return undefined; } }
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : undefined;
+};
+
+/** dutydeck 内置按钮标记：命中的动作只能走内置处理，任何外部接收方都不得接管。 */
+export const isBuiltinCardAction = (value?: Record<string, unknown>): boolean =>
+  Boolean(value && Object.keys(value).some(key => key === 'task_id' || key === 'taskId' || key.startsWith('dutydeck_') || key === 'dockmux_workflow'));
+
+/** 外部处理器认领规则：声明了 owner 或 legacyActions 的处理器只认领对应卡片；都未声明时是兜底处理器。 */
+export const cardActionMatchesHandler = (handler: { owner?: string; legacyActions?: string[] }, value?: Record<string, unknown>): boolean => {
+  if (handler.owner === undefined && handler.legacyActions === undefined) return true;
+  if (!value) return false;
+  if (Object.hasOwn(value, 'owner')) return handler.owner !== undefined && value.owner === handler.owner;
+  return typeof value.action === 'string' && handler.legacyActions?.includes(value.action) === true;
+};
+
 type CardActionRoute = 'builtin' | 'forward' | 'unknown' | 'conflict';
-export function cardActionRoute(value: unknown, forwarding?: CardActionForwarding): CardActionRoute {
+export function cardActionRoute(raw: unknown, forwarding?: CardActionForwarding): CardActionRoute {
   if (!forwarding) return 'builtin';
-  let parsed = value;
-  if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return 'builtin'; } }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return 'builtin';
-  const action = parsed as Record<string, unknown>;
-  const builtin = Object.keys(action).some(key => key === 'task_id' || key === 'taskId' || key.startsWith('dutydeck_') || key === 'dockmux_workflow');
-  if (Object.hasOwn(action, 'owner')) {
-    if (builtin) return 'conflict';
-    return forwarding && action.owner === forwarding.owner ? 'forward' : 'unknown';
+  const value = parseCardActionValue(raw);
+  if (!value) return 'builtin';
+  if (Object.hasOwn(value, 'owner')) {
+    if (isBuiltinCardAction(value)) return 'conflict';
+    return value.owner === forwarding.owner ? 'forward' : 'unknown';
   }
-  if (builtin) return 'builtin';
-  return forwarding && typeof action.action === 'string' && forwarding.legacyActions?.includes(action.action) ? 'forward' : 'builtin';
+  if (isBuiltinCardAction(value)) return 'builtin';
+  return typeof value.action === 'string' && forwarding.legacyActions?.includes(value.action) ? 'forward' : 'builtin';
 }
 
-/** A receipt means the receiver has persisted this exact event; never retry in the background. */
-export async function forwardCardAction(config: CardActionForwarding, appId: string, event: any, fetcher: typeof globalThis.fetch, signal = AbortSignal.timeout(2_000)) {
+/** A receipt means the receiver has persisted this exact event; the caller owns the shared deadline and event_id check. */
+export async function forwardCardAction(config: CardActionForwarding, appId: string, event: any, fetcher: typeof globalThis.fetch, signal: AbortSignal) {
   try {
-    if (typeof event.event_id !== 'string' || !event.event_id) return { type: 'error', content: '卡片事件缺少 event_id，无法转发。' };
     const response = await fetcher(config.url, {
       method: 'POST', redirect: 'error', signal,
       headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },

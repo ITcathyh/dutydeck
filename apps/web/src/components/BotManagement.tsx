@@ -31,6 +31,7 @@ import { DirectoryPicker } from './DirectoryPicker';
 import { ConfirmDialog } from './ConfirmDialog';
 import { toastStore } from '../useToasts';
 import { agentModelsQueryKey, loadAgentModels } from '../model-cache';
+import { supportsModelServiceSettings } from '../agent-model-support';
 
 export type BotManagementProps = {
   selectedAppId?: string;
@@ -174,7 +175,7 @@ export function BotManagement({
     return drafts[activeBot.appId] ?? initialDraft(activeBot);
   }, [activeBot, drafts]);
 
-  const claudeModelSettings = agents.find(agent => agent.id === currentDraft?.defaultAgentId)?.modelServiceSettings === true || ['claude', 'claude-code'].includes(currentDraft?.defaultAgentId ?? '');
+  const claudeModelSettings = supportsModelServiceSettings(agents.find(agent => agent.id === currentDraft?.defaultAgentId), currentDraft?.defaultAgentId);
 
   // 参与强度由两个底层字段合成；组合恰好是某一档的写法时才算「整档」。
   const botLevel: ParticipationLevel = participationLevelOf(currentDraft?.mentionPolicy, currentDraft?.defaultGroupParticipation ?? 'off');
@@ -209,7 +210,7 @@ export function BotManagement({
     queryKey: agentModelsQueryKey(currentDraft?.defaultAgentId, currentDraft?.defaultModel, activeAppId),
     queryFn: () => loadAgentModels(currentDraft!.defaultAgentId, currentDraft?.defaultModel || undefined, false, activeAppId),
     enabled: Boolean(currentDraft?.defaultAgentId),
-        staleTime: 5 * 60_000
+    staleTime: 5 * 60_000
   });
 
   // 机器人的群共享会话记忆状态

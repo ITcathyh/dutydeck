@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { parseLarkSourceId, RuntimeError, type AgentConfig, type RepositoryBundle, type Session } from '@dutydeck/shared';
+import { botAppIdOfSession, RuntimeError, supportsAgentModelService, type AgentConfig, type RepositoryBundle, type Session } from '@dutydeck/shared';
 import { LocalFileAgentApiKeyResolver, type LocalFileSecretProvider } from '@dutydeck/secret-provider';
 
 const text = z.string().trim().max(512);
@@ -16,8 +16,9 @@ export const agentModelSettingsPatchSchema = z.object({
 export type AgentModelSettingsPatch = z.infer<typeof agentModelSettingsPatchSchema>;
 const storedSchema = z.object({ model: text.optional(), baseUrl: baseUrl.optional(), authMode: z.enum(['bearer', 'api-key']).optional(), referenceKey: z.string().optional() }).strict();
 const scopePart = (value: string) => encodeURIComponent(value).replaceAll('.', '%2E');
-const key = (id: string, appId?: string) => appId ? `dutydeck.bot_agent_model.${scopePart(appId)}.${scopePart(id)}` : `dutydeck.agent_model.${id}`;
-const isClaudeCode = (agent: AgentConfig) => ['claude', 'claude-code'].includes(agent.adapterId ?? agent.id);
+const botScopePrefix = (appId: string) => `dutydeck.bot_agent_model.${scopePart(appId)}.`;
+const key = (id: string, appId?: string) => appId ? `${botScopePrefix(appId)}${scopePart(id)}` : `dutydeck.agent_model.${id}`;
+const isClaudeCode = (agent: AgentConfig) => supportsAgentModelService(agent);
 
 export class AgentModelSettings {
   constructor(private readonly repos: Pick<RepositoryBundle, 'config' | 'agents' | 'sessions'>, private readonly defaults: AgentConfig[], private readonly provider?: LocalFileSecretProvider) {}
@@ -32,6 +33,10 @@ export class AgentModelSettings {
     const agent = this.baseline(id), saved = await this.read(id, appId);
     return { agentId: id, ...(appId ? { appId } : {}), model: saved.model || agent.model || '', baseUrl: saved.baseUrl || '', authMode: saved.authMode ?? 'bearer', hasApiKey: Boolean(saved.referenceKey), apiKeyAvailable: Boolean(saved.referenceKey && this.provider?.inspect(saved.referenceKey).availability === 'available'), appliesTo: 'next_process' as const };
   }
+  /** 引用的密钥文件确实由本实例管理时才条件删除，避免误删同名外部文件。 */
+  private removeReferenceKeyIfAvailable(referenceKey: string | undefined) {
+    if (referenceKey && this.provider?.inspect(referenceKey).availability === 'available') this.provider.removeConditional(referenceKey);
+  }
   async set(id: string, body: unknown, appId?: string) {
     const baseline = this.baseline(id), patch = agentModelSettingsPatchSchema.parse(body), current = await this.read(id, appId);
     if (appId && patch.model !== undefined) throw new RuntimeError('BOT_MODEL_SETTING_REQUIRED', '机器人模型请使用默认模型设置（dutydeck settings bot set <app-id> defaultModel=...）', 400);
@@ -40,7 +45,7 @@ export class AgentModelSettings {
     if (apiKey || clearApiKey) {
       if (!this.provider) throw new RuntimeError('AGENT_SECRET_PROVIDER_UNAVAILABLE', '持久化密钥存储不可用', 503);
       if (clearApiKey) {
-        if (saved.referenceKey && this.provider.inspect(saved.referenceKey).availability === 'available') this.provider.removeConditional(saved.referenceKey);
+        this.removeReferenceKeyIfAvailable(saved.referenceKey);
         delete saved.referenceKey;
       } else {
         const available = saved.referenceKey && this.provider.inspect(saved.referenceKey).availability === 'available';
@@ -56,10 +61,30 @@ export class AgentModelSettings {
     return this.get(id, appId);
   }
   async clearBot(appId: string) {
-    const entries = await this.repos.config.list?.(`dutydeck.bot_agent_model.${scopePart(appId)}.`) ?? [];
+    const entries = await this.repos.config.list?.(botScopePrefix(appId)) ?? [];
     for (const entry of entries) {
       const saved = storedSchema.parse(JSON.parse(entry.value));
-      if (saved.referenceKey && this.provider?.inspect(saved.referenceKey).availability === 'available') this.provider.removeConditional(saved.referenceKey);
+      this.removeReferenceKeyIfAvailable(saved.referenceKey);
+      await this.repos.config.set(entry.key, '{}');
+    }
+  }
+  /**
+   * Bot 改 appId（跨应用复制配置）后把模型服务设置搬到新作用域：存储条目原样搬过去，
+   * 密钥引用名与 appId 无关、由新作用域继续持有，不删密钥文件。新作用域已有同 Agent
+   * 设置时保留新方凭据，旧作用域那份成为孤儿才删密钥。最后旧条目清空（无通用删除键，
+   * 沿用 '{}' 墓碑约定）。
+   */
+  async renameBot(oldAppId: string, newAppId: string) {
+    const prefix = botScopePrefix(oldAppId);
+    for (const entry of await this.repos.config.list?.(prefix) ?? []) {
+      if (entry.value === '{}') continue;
+      const agentId = decodeURIComponent(entry.key.slice(prefix.length));
+      const targetKey = key(agentId, newAppId);
+      if (await this.repos.config.get(targetKey)) {
+        this.removeReferenceKeyIfAvailable(storedSchema.parse(JSON.parse(entry.value)).referenceKey);
+      } else {
+        await this.repos.config.set(targetKey, entry.value);
+      }
       await this.repos.config.set(entry.key, '{}');
     }
   }
@@ -68,7 +93,8 @@ export class AgentModelSettings {
     const visited = new Set<string>();
     while (current && !visited.has(current.id)) {
       visited.add(current.id);
-      if (['lark', 'lark-memory', 'lark-decision', 'lark-response', 'plugin_trigger'].includes(current.source ?? '')) return this.resolve(agent, parseLarkSourceId(current.sourceId).appId);
+      const appId = botAppIdOfSession(current);
+      if (appId) return this.resolve(agent, appId);
       const parent = await parentForSession(current.id);
       current = parent ? await this.repos.sessions.get(parent.parentSessionId) : undefined;
     }

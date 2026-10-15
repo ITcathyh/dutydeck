@@ -16,7 +16,7 @@ import { LarkMessageCoordinator } from './coordinator.js';
 import type { LarkMemoryStore } from './memory.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import { createLarkWelcomeService, type LarkWelcomeService } from './welcome.js';
-import { describeWebBaseUrlReachability, larkExecutionConfirmed, readLarkConfigs } from './config.js';
+import { describeWebBaseUrlReachability, larkConfigBlockingError, larkExecutionConfirmed, readLarkConfigs } from './config.js';
 import { buildEditedMessageEvent } from './edited-message.js';
 import { LarkCardCallbackDeduper, larkCardCallbackKeys } from './card-callback-dedup.js';
 import { isTaskAssigneesUpdateEvent } from './task-agent.js';
@@ -157,9 +157,10 @@ export class LarkLongConnectionListener implements LarkListener {
   constructor(private readonly log: ListenerLog, private readonly options: LarkLongConnectionListenerOptions = {}, private readonly connectionLost?: (error: unknown) => void, private readonly connectionChanged?: () => void) {}
 
   async start(config: StoredLarkConfig) {
-    if (config.cardActionForwardingError || config.eventHandlersError) {
+    const blockingError = larkConfigBlockingError(config);
+    if (blockingError) {
       this.stop();
-      throw new LarkServiceError('INVALID_LARK_CONFIG', config.cardActionForwardingError ?? config.eventHandlersError!, 400);
+      throw new LarkServiceError('INVALID_LARK_CONFIG', blockingError, 400);
     }
     // api-gate 是模块级单例（per-appId 限流状态必须跨会话共享），没有构造注入点。
     // 在监听装配处接上真实日志，让限流等待、退避重试和熔断跳闸可观测。
@@ -247,7 +248,7 @@ export class LarkLongConnectionListener implements LarkListener {
         },
         ...(capabilities ? { capabilities } : {}),
         log: this.log,
-        send: (chatId, content) => (this.config ?? config).welcomeEnabled === false ? Promise.resolve() : service.send({
+        send: (chatId, content) => service.send({
           chatId,
           state: 'completed',
           readOnly: true,

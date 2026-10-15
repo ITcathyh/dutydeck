@@ -582,30 +582,48 @@ const normalizeAgentIds = (value: unknown): string[] => Array.isArray(value)
   ? [...new Set(value.filter((id): id is string => typeof id === 'string').map(id => id.trim()).filter(Boolean))]
   : [];
 
-// Keep invalid persisted values out of runtime/public views, but preserve them on unrelated writes.
-const invalidCardActionForwarding = new WeakMap<StoredLarkConfig, unknown>();
-const invalidEventHandlers = new WeakMap<StoredLarkConfig, unknown>();
+// 解析失败的子对象不进运行时/公开视图，但原始值按字段登记并在写回时原样保留，
+// 使不相关的写入不会丢掉待修复的配置；新增同类子对象只需在 normalize 里登记一处。
+type InvalidLarkField = { raw: unknown; message: string };
+const invalidLarkFields = new WeakMap<StoredLarkConfig, Map<string, InvalidLarkField>>();
 const invalidEventHandlersMessage = '存储的 eventHandlers 无效；请提交合法配置或 null 后重启监听。';
 const invalidForwardingMessage = '存储的 cardActionForwarding 无效；请提交合法配置或 null 后重启监听。';
+
+/** 阻止该 Bot 监听启动的损坏配置错误（任意一个字段，按登记顺序）；无损坏时返回 undefined。 */
+export const larkConfigBlockingError = (config: StoredLarkConfig): string | undefined =>
+  invalidLarkFields.get(config)?.values().next().value?.message;
+
 const serializeLarkConfigs = (configs: StoredLarkConfig[]) => JSON.stringify(configs.map(stored => {
-  const { cardActionForwardingError, eventHandlersError, ...config } = stored;
-  return { ...config,
-    ...(invalidCardActionForwarding.has(stored) ? { cardActionForwarding: invalidCardActionForwarding.get(stored) } : {}),
-    ...(invalidEventHandlers.has(stored) ? { eventHandlers: invalidEventHandlers.get(stored) } : {}) };
+  const invalid = invalidLarkFields.get(stored);
+  if (!invalid) return stored;
+  const config: Record<string, unknown> = { ...stored };
+  // error 只是运行时视图，原始坏值还原回同名字段后一起写回。
+  for (const [field, { raw }] of invalid) {
+    delete config[`${field}Error`];
+    config[field] = raw;
+  }
+  return config;
 }));
 
 function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskControlShape): StoredLarkConfig | undefined {
   if (!parsed.appId || !parsed.appSecret) return undefined;
+  const invalidFields = new Map<string, InvalidLarkField>();
   let cardActionForwarding: CardActionForwarding | undefined;
   let cardActionForwardingError: string | undefined;
   try { cardActionForwarding = parseCardActionForwarding(parsed.cardActionForwarding); }
-  catch { cardActionForwardingError = invalidForwardingMessage; }
+  catch {
+    cardActionForwardingError = invalidForwardingMessage;
+    invalidFields.set('cardActionForwarding', { raw: parsed.cardActionForwarding, message: invalidForwardingMessage });
+  }
   let eventHandlers: LarkEventHandler[] | undefined;
   let eventHandlersError: string | undefined;
   try {
     eventHandlers = parseLarkEventHandlers(parsed.eventHandlers);
     validateLarkEventConfiguration({ eventHandlers, cardActionForwarding });
-  } catch { eventHandlersError = invalidEventHandlersMessage; eventHandlers = undefined; }
+  } catch {
+    eventHandlersError = invalidEventHandlersMessage; eventHandlers = undefined;
+    invalidFields.set('eventHandlers', { raw: parsed.eventHandlers, message: invalidEventHandlersMessage });
+  }
   const pushIntervalMs = Number(parsed.pushIntervalMs ?? defaultLarkPushIntervalMs);
   const parsedTraceLimit = Number(parsed.traceLimit ?? defaultLarkTraceLimit);
   const traceLimit = Number.isInteger(parsedTraceLimit) && parsedTraceLimit > 0 ? parsedTraceLimit : defaultLarkTraceLimit;
@@ -694,8 +712,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     highRiskPattern: parsed.highRiskPattern?.trim() || defaultHighRiskPattern,
     riskControlMode: normalizeRiskControlMode(parsed)
   };
-  if (cardActionForwardingError) invalidCardActionForwarding.set(config, parsed.cardActionForwarding);
-  if (eventHandlersError) invalidEventHandlers.set(config, parsed.eventHandlers);
+  if (invalidFields.size) invalidLarkFields.set(config, invalidFields);
   return config;
 }
 
@@ -832,11 +849,14 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const index = originalAppId ? configs.findIndex(config => config.appId === originalAppId) : -1;
   if (originalAppId && index < 0) throw new LarkServiceError('LARK_BOT_NOT_FOUND', `Unknown Lark bot: ${originalAppId}`, 404);
   const current = index >= 0 ? configs[index] : undefined;
-  if (current?.eventHandlersError && input.eventHandlers === undefined) throw new LarkServiceError('INVALID_LARK_CONFIG', invalidEventHandlersMessage, 400);
+  // 该 Bot 存有损坏字段时，任何不相关写入都拒绝，逼调用方显式提交合法值或 null 修复，避免坏值被静默重写。
+  const invalid = current ? invalidLarkFields.get(current) : undefined;
+  if (invalid) for (const [field, { message }] of invalid) {
+    if ((input as Record<string, unknown>)[field] === undefined) throw new LarkServiceError('INVALID_LARK_CONFIG', message, 400);
+  }
   const eventHandlers = input.eventHandlers === undefined ? current?.eventHandlers : parseLarkEventHandlers(input.eventHandlers, current?.eventHandlers);
   const cardActionForwarding = input.cardActionForwarding === undefined ? current?.cardActionForwarding : submittedForwarding;
   validateLarkEventConfiguration({ eventHandlers, cardActionForwarding });
-  if (current?.cardActionForwardingError && input.cardActionForwarding === undefined) throw new LarkServiceError('INVALID_LARK_CONFIG', invalidForwardingMessage, 400);
   if (input.welcomeEnabled !== undefined && typeof input.welcomeEnabled !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'welcomeEnabled 必须为布尔值。', 400);
   if (input.expectedRevision !== undefined && input.expectedRevision !== (current ? current.revision ?? 1 : 0)) {
     throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '此 Bot 已被修改，请比较最新配置后再保存。', 409);

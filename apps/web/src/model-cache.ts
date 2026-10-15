@@ -44,7 +44,7 @@ export function writeCachedAgentModels(agentId: string, model: string | undefine
 }
 
 export async function loadAgentModels(agentId: string, model?: string, refresh = false, appId?: string): Promise<AgentModelsResult> {
-  const result = await (appId ? api.agentModels(agentId, model, refresh, appId) : api.agentModels(agentId, model, refresh));
+  const result = await api.agentModels(agentId, model, refresh, appId);
   if (!appId) writeCachedAgentModels(agentId, model, result);
   return result;
 }

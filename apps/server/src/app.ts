@@ -193,7 +193,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.turnDiffs) registerTurnDiffRoutes(app, runtime, { ...options.turnDiffs, getShareSecret: options.auth?.getShareSecret,
     authorize: (request, sessionId, action) => requireSessionExecution(request, sessionId, 'session', action) });
   await registerSystemRoutes(app, options.system);
-  await registerLarkRoutes(app, { ...options.lark, clearBotModelSettings: appId => options.agentModelSettings?.clearBot(appId) ?? Promise.resolve(), runtime: options.lark?.runtime ?? runtime });
+  await registerLarkRoutes(app, { ...options.lark, clearBotModelSettings: appId => options.agentModelSettings?.clearBot(appId) ?? Promise.resolve(), renameBotModelSettings: (oldAppId, newAppId) => options.agentModelSettings?.renameBot(oldAppId, newAppId) ?? Promise.resolve(), runtime: options.lark?.runtime ?? runtime });
   app.get<{ Querystring: { excludeSessionId?: string } }>('/api/system/activity', async request => {
     const excludeSessionId = request.query.excludeSessionId?.trim() || undefined;
     return { runningTasks: runtime.getRunningTaskCount(excludeSessionId) };

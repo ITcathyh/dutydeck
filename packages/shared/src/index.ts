@@ -5,6 +5,7 @@ import {
   type ChannelBotBrand,
   type PermissionMode
 } from './configuration-primitives.js';
+import { supportsAgentModelService } from './agent-model-service.js';
 import { supportsRemoteApproval } from './remote-approval.js';
 
 export * from './configuration-primitives.js';
@@ -65,7 +66,7 @@ export function toPublicAgent(agent: AgentConfig): PublicAgent {
     protocol: agent.protocol,
     permissionMode: agent.permissionMode,
     remoteApproval: supportsRemoteApproval(agent),
-    ...(['claude', 'claude-code'].includes(agent.adapterId ?? agent.id) ? { modelServiceSettings: true } : {})
+    ...(supportsAgentModelService(agent) ? { modelServiceSettings: true } : {})
   });
 }
 
@@ -510,6 +511,7 @@ export * from './work-items.js';
 
 export * from './permission-display.js';
 export * from './remote-approval.js';
+export * from './agent-model-service.js';
 
 export * from './database-control.js';
 

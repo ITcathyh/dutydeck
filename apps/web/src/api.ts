@@ -331,13 +331,15 @@ export class ApiError extends Error {
   constructor(message: string, public readonly code: string, public readonly status: number, public readonly current?: unknown) { super(message); this.name = 'ApiError'; }
 }
 const json = async <T,>(url: string, init?: RequestInit): Promise<T> => { const response = await fetch(withShareToken(instanceApiUrl(url)), { credentials: 'same-origin', ...init }); const data = await response.json(); if (!response.ok) { if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT)); throw new ApiError(data.error?.message ?? response.statusText, data.error?.code ?? 'REQUEST_FAILED', response.status, data.current); } return data; };
+const botAgentPath = (id: string, appId?: string) => appId
+  ? `/api/lark/bots/${encodeURIComponent(appId)}/agents/${encodeURIComponent(id)}`
+  : `/api/agents/${encodeURIComponent(id)}`;
 const agentModelsUrl = (id: string, model?: string, refresh = false, appId?: string) => {
   const query = new URLSearchParams();
   if (model) query.set('model', model);
   if (refresh) query.set('refresh', '1');
   const suffix = query.toString();
-  const base = appId ? `/api/lark/bots/${encodeURIComponent(appId)}/agents/${encodeURIComponent(id)}` : `/api/agents/${id}`;
-  return `${base}/models${suffix ? `?${suffix}` : ''}`;
+  return `${botAgentPath(id, appId)}/models${suffix ? `?${suffix}` : ''}`;
 };
 export const eventsUrl = (id: string, query: EventWindowQuery = {}) => {
   const params = new URLSearchParams();
@@ -1003,9 +1005,7 @@ export const insightApi = {
 
 export type AgentModelSettings = { agentId: string; appId?: string; model: string; baseUrl: string; authMode: 'bearer' | 'api-key'; hasApiKey: boolean; apiKeyAvailable: boolean; appliesTo: 'next_process' };
 export type AgentModelSettingsPatch = { model?: string; baseUrl?: string; authMode?: 'bearer' | 'api-key'; apiKey?: string; clearApiKey?: boolean };
-const modelSettingsUrl = (id: string, appId?: string) => appId
-  ? `/api/lark/bots/${encodeURIComponent(appId)}/agents/${encodeURIComponent(id)}/model-settings`
-  : `/api/agents/${encodeURIComponent(id)}/model-settings`;
+const modelSettingsUrl = (id: string, appId?: string) => `${botAgentPath(id, appId)}/model-settings`;
 export const agentModelSettingsApi = {
   get: (id: string, appId?: string) => json<AgentModelSettings>(modelSettingsUrl(id, appId), { cache: 'no-store' }),
   set: (id: string, body: AgentModelSettingsPatch, appId?: string) => json<AgentModelSettings>(modelSettingsUrl(id, appId), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
