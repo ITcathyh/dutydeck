@@ -114,8 +114,8 @@ export class WorkItemService {
     if (!await this.repos.config.compareAndSet!(PREFIX + state.value.item.id, state.raw, raw)) throw new RuntimeError('WORK_ITEM_CONFLICT', 'Work item changed; refresh before continuing', 409);
     state.raw = raw;
   }
-  private async records(): Promise<StoredWork[]> {
-    return (await this.repos.config.list!(PREFIX)).map(row => JSON.parse(row.value) as StoredWork);
+  private async records(parentSessionId: string): Promise<StoredWork[]> {
+    return (await this.repos.workItems.listByParent(parentSessionId)).map(row => JSON.parse(row.value) as StoredWork);
   }
   /** 公开投影：item 本身不含 admission/actor 等私有执行材料（它们只存在 StoredWork 外层）。 */
   private view(record: StoredWork): WorkItem { return structuredClone(record.item); }
@@ -156,8 +156,9 @@ export class WorkItemService {
     }
   }
   async parentForSession(sessionId: string): Promise<{ parentSessionId: string; actorId: string; workId: string; stepId: string; parentTaskId?: string } | undefined> {
-    const record = (await this.records()).find(record => record.item.steps.some(step => step.attempts.some(attempt => attempt.sessionId === sessionId)));
-    if (!record) return undefined;
+    const id = await this.repos.workItems.findByChildSession(sessionId);
+    if (!id) return undefined;
+    const record = (await this.read(id)).value;
     const step = record.item.steps.find(step => step.attempts.some(attempt => attempt.sessionId === sessionId))!;
     return { parentSessionId: record.item.parentSessionId, actorId: record.actorId, workId: record.item.id, stepId: step.id, ...(record.parentTaskId ? { parentTaskId: record.parentTaskId } : {}) };
   }
@@ -253,7 +254,7 @@ export class WorkItemService {
   }
   async listBySession(parentSessionId: string, actorId?: string): Promise<WorkItem[]> {
     await this.access(parentSessionId, actorId);
-    return (await this.records()).filter(record => record.item.parentSessionId === parentSessionId && (record.actorId === actorId || actorId === installationOwnerTaskActor)).map(record => this.view(record));
+    return (await this.records(parentSessionId)).filter(record => record.actorId === actorId || actorId === installationOwnerTaskActor).map(record => this.view(record));
   }
   async get(parentSessionId: string, id: string, actorId?: string): Promise<WorkItem> { return this.view((await this.owned(parentSessionId, id, actorId)).value); }
   /** Existence only, without authorization: recovery bookkeeping for a caller that derived the id itself. */
@@ -378,19 +379,22 @@ export class WorkItemService {
     return run;
   }
   private async runTick() {
-    for (const record of await this.records()) {
+    for (const id of await this.repos.workItems.listScheduledIds()) {
       if (this.closed) break;
-      try { await this.serial(record.item.id, () => this.drive(record.item.id)); }
+      try { await this.serial(id, () => this.drive(id)); }
       catch (error) {
         if (this.closed) break;
         if (error instanceof RuntimeError && error.code === 'WORK_ITEM_CONFLICT') continue;
-        const state = await this.read(record.item.id);
-        if (['cancelling', 'cancelled', 'completed'].includes(state.value.item.status)) continue;
-        state.value.item.status = 'blocked'; state.value.item.error = errorText(error);
-        try { await this.haltBlocked(state); await this.write(state); } catch { /* A concurrent cancel wins. */ }
+        try {
+          const state = await this.read(id), record = state.value;
+          if (!record || typeof record !== 'object' || Array.isArray(record) || !record.item || typeof record.item !== 'object' || Array.isArray(record.item)) continue;
+          if (['cancelling', 'cancelled', 'completed'].includes(record.item.status)) continue;
+          record.item.status = 'blocked'; record.item.error = errorText(error);
+          await this.haltBlocked(state); await this.write(state);
+        } catch { continue; } // Preserve corrupt records and failed repairs without blocking other work.
       }
       if (this.closed) break;
-      const latest = (await this.read(record.item.id)).value;
+      const latest = (await this.read(id)).value;
       const current = latest.item;
       if (['awaiting_confirmation', 'running', 'waiting', 'failed', 'blocked'].includes(current.status)) {
         this.effect('notify:' + current.id, async () => { await this.options.notify?.(this.view(latest), latest.actorId); });
@@ -553,7 +557,7 @@ export class WorkItemService {
         step.status = 'skipped'; await this.write(state); continue;
       }
       if (definition.kind === 'wait') { step.status = 'waiting'; await this.write(state); continue; }
-      const globalActive = (await this.records()).reduce((sum, record) => sum + record.item.steps.filter(step => step.status === 'running' || step.status === 'blocked' && !!last(step)?.sessionId && !record.stoppedAttempts.includes(last(step)!.id)).length, 0);
+      const globalActive = await this.repos.workItems.countActiveSteps();
       if (record.item.steps.filter(step => step.status === 'running').length >= 3 || globalActive >= 6) break;
       const number = step.attempts.length + 1;
       const attemptId = `${id}:${step.id}:${number}`;

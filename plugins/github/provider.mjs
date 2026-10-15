@@ -4,6 +4,8 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 const API_ORIGIN = 'https://api.github.com';
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_LOG_BYTES = 8 * 1024 * 1024;
+const MAX_COMMENT_BYTES = 8 * 1024 * 1024;
+const MAX_COMMENT_PAGES = 100;
 const LOG_TAIL_CHARS = 3_000;
 const MAX_FAILED_JOBS = 10;
 const failureConclusions = new Set(['failure', 'timed_out', 'action_required', 'startup_failure']);
@@ -87,25 +89,60 @@ export function createGithubProvider(options = {}) {
     return url;
   };
 
-  const readJson = async response => {
-    if (response.status >= 300 && response.status < 400) throw new GithubError('GITHUB_REDIRECT_REJECTED', 'GitHub API redirect was rejected');
-    if (!response.ok) throw new GithubError('GITHUB_RESPONSE_ERROR', `GitHub API returned HTTP ${response.status}`, response.status === 401 || response.status === 403 ? 403 : 502);
+  const responseTooLarge = () => new GithubError('GITHUB_RESPONSE_TOO_LARGE', 'GitHub API response exceeded the size limit');
+  const commentsTooLarge = () => new GithubError('GITHUB_COMMENT_SET_TOO_LARGE', 'GitHub comments exceeded the pagination or response budget');
+  const readText = async (response, limit, tailChars, budget) => {
     const declared = Number(response.headers.get('content-length'));
-    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) throw new GithubError('GITHUB_RESPONSE_TOO_LARGE', 'GitHub API response exceeded the size limit');
-    const text = await response.text();
-    if (Buffer.byteLength(text) > MAX_RESPONSE_BYTES) throw new GithubError('GITHUB_RESPONSE_TOO_LARGE', 'GitHub API response exceeded the size limit');
+    if (Number.isFinite(declared) && (declared > limit || budget && declared > budget.bytes)) {
+      await response.body?.cancel();
+      throw declared > limit ? responseTooLarge() : commentsTooLarge();
+    }
+    if (!response.body) return '';
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let bytes = 0;
+    let text = '';
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > limit) throw responseTooLarge();
+        if (budget && (budget.bytes -= value.byteLength) < 0) throw commentsTooLarge();
+        text += decoder.decode(value, { stream: true });
+        if (tailChars) text = text.slice(-tailChars);
+      }
+      text += decoder.decode();
+      return tailChars ? text.slice(-tailChars) : text;
+    } catch (error) {
+      await reader.cancel().catch(() => {});
+      throw error;
+    } finally { reader.releaseLock(); }
+  };
+
+  const readJson = async (response, budget) => {
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel();
+      throw new GithubError('GITHUB_REDIRECT_REJECTED', 'GitHub API redirect was rejected');
+    }
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new GithubError('GITHUB_RESPONSE_ERROR', `GitHub API returned HTTP ${response.status}`, response.status === 401 || response.status === 403 ? 403 : 502);
+    }
+    const text = await readText(response, MAX_RESPONSE_BYTES, undefined, budget);
     try { return JSON.parse(text); } catch { throw new GithubError('GITHUB_RESPONSE_INVALID', 'GitHub API returned invalid JSON'); }
   };
 
   /** 读接口先不带令牌（公开仓库够用），401/403/404 时再带令牌重试一次。 */
-  const getPublic = async (url) => {
+  const getPublicResponse = async url => {
     let response = await send(url, { method: 'GET' }, false);
     if (token && [401, 403, 404].includes(response.status)) {
       await response.body?.cancel();
       response = await send(url, { method: 'GET' }, true);
     }
-    return readJson(response);
+    return response;
   };
+  const getPublic = async url => readJson(await getPublicResponse(url));
   const requireToken = () => { if (!token) throw new GithubError('GITHUB_TOKEN_REQUIRED', 'GitHub 插件没有配置 token：dutydeck plugin config github token --value-fd 0', 400); };
   const call = async (method, url, body) => {
     requireToken();
@@ -157,11 +194,8 @@ export function createGithubProvider(options = {}) {
     try { target = new URL(location); } catch { return undefined; }
     if (target.protocol !== 'https:') return undefined;
     const download = await request(target, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
-    if (!download.ok) return undefined;
-    const declared = Number(download.headers.get('content-length'));
-    if (Number.isFinite(declared) && declared > MAX_LOG_BYTES) { await download.body?.cancel(); return undefined; }
-    const text = await download.text();
-    return text.slice(-LOG_TAIL_CHARS);
+    if (!download.ok) { await download.body?.cancel(); return undefined; }
+    return readText(download, MAX_LOG_BYTES, LOG_TAIL_CHARS);
   }
 
   async function getFailureLogs(repository, runId) {
@@ -204,15 +238,45 @@ export function createGithubProvider(options = {}) {
     ...(typeof value.created_at === 'string' ? { createdAt: value.created_at } : {})
   });
 
-  /** 行内评审意见和普通评论合在一起，按时间排序。 */
+  /** 行内评审意见和普通评论合在一起，按时间排序；预算用尽时拒绝返回不完整集合。 */
   async function listReviewComments(repository, pullRequest) {
     if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) throw new GithubError('GITHUB_PULL_REQUEST_INVALID', 'Pull request number is invalid', 400);
+    const budget = { bytes: MAX_COMMENT_BYTES, pages: MAX_COMMENT_PAGES };
+    const list = async path => {
+      let url = apiUrl(path, { per_page: 100 });
+      const items = [];
+      for (let page = 1; ; page++) {
+        if (--budget.pages < 0) throw commentsTooLarge();
+        const response = await getPublicResponse(url);
+        const values = await readJson(response, budget);
+        if (!Array.isArray(values)) throw new GithubError('GITHUB_RESPONSE_INVALID', 'GitHub API response did not contain comments');
+        items.push(...values);
+        const link = response.headers.get('link');
+        let next;
+        for (const entry of link?.split(/,(?=\s*<)/) ?? []) {
+          const match = /^\s*<([^>]+)>\s*(.*)$/.exec(entry);
+          const rel = /;\s*rel=(?:"([^"]*)"|([^;\s]+))/.exec(match?.[2] ?? '');
+          if (!match || !rel) throw new GithubError('GITHUB_PAGINATION_INVALID', 'GitHub comment pagination is invalid');
+          if ((rel[1] ?? rel[2]).split(/\s+/).includes('next')) next = match[1];
+        }
+        if (!next) return items;
+        let target;
+        try { target = new URL(next, url); } catch {}
+        if (!target || target.origin !== API_ORIGIN || target.username || target.password || target.pathname !== path || target.hash
+          || target.searchParams.get('page') !== String(page + 1) || target.searchParams.get('per_page') !== '100'
+          || [...target.searchParams.keys()].some(key => !['page', 'per_page'].includes(key))
+          || target.searchParams.getAll('page').length !== 1 || target.searchParams.getAll('per_page').length !== 1) {
+          throw new GithubError('GITHUB_PAGINATION_INVALID', 'GitHub comment pagination is invalid');
+        }
+        url = target;
+      }
+    };
     const [review, issue] = await Promise.all([
-      getPublic(apiUrl(`${repoPath(repository)}/pulls/${pullRequest}/comments`, { per_page: 100 })),
-      getPublic(apiUrl(`${repoPath(repository)}/issues/${pullRequest}/comments`, { per_page: 100 }))
+      list(`${repoPath(repository)}/pulls/${pullRequest}/comments`),
+      list(`${repoPath(repository)}/issues/${pullRequest}/comments`)
     ]);
-    const items = [...(Array.isArray(review) ? review.map(value => comment('review', value)) : []), ...(Array.isArray(issue) ? issue.map(value => comment('issue', value)) : [])];
-    return items.sort((left, right) => (left.createdAt ?? '').localeCompare(right.createdAt ?? ''));
+    return [...review.map(value => comment('review', value)), ...issue.map(value => comment('issue', value))]
+      .sort((left, right) => (left.createdAt ?? '').localeCompare(right.createdAt ?? ''));
   }
 
   async function getPullRequest(repository, pullRequest) {

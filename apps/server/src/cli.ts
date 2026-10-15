@@ -10,7 +10,6 @@ import { spawn } from 'node:child_process';
 import { loadEnvFile } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { createCliProgram, environmentFromCli, type CliOptions } from './cli-program.js';
-import { startLocalServer } from './service.js';
 import { runLarkSend, runLarkUpdate } from './lark/cli.js';
 import { runLarkCreate } from './lark/create-cli.js';
 import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver';
@@ -22,7 +21,6 @@ import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { runPermissionHook } from './permission-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
-import { dutydeckGroupToolsCommand } from './lark/agent-tools.js';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop, systemdRestartTarget, waitForRunningTasksDrain, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
 import { readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
@@ -43,7 +41,6 @@ import { IdentityPreflightCliError, runIdentityPreflightCli } from './identity-p
 import { runSetup } from './setup/setup.js';
 import { PromptAbortedError, PromptUnavailableError } from './setup/prompts.js';
 import { InvalidWorkingDirectoryError } from './setup/detect.js';
-import { runDoctor } from './doctor/doctor.js';
 import { AutostartError, autostartDisable, autostartEnable, autostartStatus } from './autostart/autostart.js';
 import { createCliUi } from './cli-ui.js';
 import { adoptLegacyEnv, migrateLegacyBrandDirs } from './legacy-brand.js';
@@ -65,6 +62,8 @@ for (const dir of legacyState.skipped) {
 adoptLegacyEnv();
 
 async function serve(options: CliOptions, onReady?: () => void) {
+  const { startLocalServer } = await import('./service.js');
+  const { dutydeckGroupToolsCommand } = await import('./lark/agent-tools.js');
   const service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: dutydeckGroupToolsCommand(fileURLToPath(import.meta.url)) });
   const address = service.config.host === '0.0.0.0'
     ? `http://127.0.0.1:${service.config.port} (LAN access enabled; other devices can use this computer's LAN IP)`
@@ -303,6 +302,7 @@ async function main() {
       if (!result.ok) process.exitCode = 1;
     },
     doctor: async options => {
+      const { runDoctor } = await import('./doctor/doctor.js');
       const report = await runDoctor(options);
       // 有任何一项 fail 才算体检失败；仅有警告仍然是 0。
       if (!report.ok) process.exitCode = 1;

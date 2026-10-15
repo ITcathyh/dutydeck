@@ -1,4 +1,5 @@
 import { createMemoryJobSchema } from './memory-jobs.js';
+import { createWorkItemIndexSchema } from './work-item-index.js';
 import { createScheduleExecutionSchema } from './schedule-execution-migration.js'
 import type Database from 'better-sqlite3'
 import { createTaskExecutionSchema } from './task-execution-migration.js'
@@ -601,7 +602,12 @@ export const migrations: Migration[] = [
   // 参与强度新增「积极」档（participation = 'eager'）。v20 把三种取值写进了 CHECK，SQLite 改不了约束，只能重建表。
   { version: 35, name: 'collaboration_participation_eager', up: allowEagerParticipation },
   // 告警初筛订阅和接话人单独建表：不改 collaboration_settings，改分工也不会让进行中的参与判定因设置版本变化作废。
-  { version: 36, name: 'collaboration_duties', up: createCollaborationDutySchema }
+  { version: 36, name: 'collaboration_duties', up: createCollaborationDutySchema },
+  { version: 37, name: 'background_scheduling_indexes', up(db) {
+    createWorkItemIndexSchema(db);
+    db.exec(`CREATE INDEX collaboration_actions_delivery_window ON collaboration_actions(app_id,chat_id,created_at,id)
+      WHERE kind IN ('participation.reply','schedule_delivery') AND status IN ('intent','sending','unknown','succeeded')`);
+  } }
 ]
 
 /** 让 collaboration_settings 接受 'eager'；已经接受（或表不存在）时什么都不做。 */

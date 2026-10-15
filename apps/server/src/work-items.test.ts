@@ -11,6 +11,20 @@ import { DutydeckRuntime } from '@dutydeck/runtime';
 import { WorkItemService } from './work-items.js';
 
 const cleanup: Array<() => Promise<void>> = [];
+it('does not read historical completed result blobs during idle ticks, including after reopen', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'work-history-index-')), path = join(directory, 'history.db');
+  let repos = createRepositories(path);
+  let service = new WorkItemService({ repositories: repos, runtime: {} as DutydeckRuntime, authorize: async () => true });
+  try {
+    for (let i = 0; i < 100; i++) await repos.config.set(`work_item:old-${i}`, JSON.stringify({ item: { id: `old-${i}`, status: 'completed', delivery: { status: 'delivered' }, output: { text: 'x'.repeat(16 * 1024) } } }));
+    await service.close(); repos.close(); repos = createRepositories(path);
+    service = new WorkItemService({ repositories: repos, runtime: {} as DutydeckRuntime, authorize: async () => true });
+    const get = vi.spyOn(repos.config, 'get'), list = vi.spyOn(repos.config, 'list');
+    await service.tick(); await service.tick();
+    expect(get.mock.calls.filter(([key]) => key.startsWith('work_item:'))).toEqual([]);
+    expect(list.mock.calls.filter(([prefix]) => prefix === 'work_item:')).toEqual([]);
+  } finally { await service.close(); repos.close(); await rm(directory, { recursive: true, force: true }); }
+});
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); });
 async function eventually(check: () => Promise<boolean>) {
   for (let i = 0; i < 100; i++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
@@ -302,7 +316,39 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     const f = await fixture(); f.deliveries.mockRejectedValueOnce(new Error('delivery unavailable'));
     const item = await f.create({ ...plan, steps: [plan.steps[0]!], outputStepId: 'a' }); await f.tick(); await eventually(async () => f.calls.length === 1);
     await f.finish(f.calls[0]!, 'Ready'); await f.tick(); expect((await f.get(item.id)).delivery.status).toBe('error');
+    expect(await f.repos.workItems.listScheduledIds()).toContain(item.id);
+    await f.recreateService();
     await f.tick(); expect((await f.get(item.id)).delivery.status).toBe('delivered'); expect(f.calls).toHaveLength(1); expect(f.deliveries).toHaveBeenCalledTimes(2);
+    expect(await f.repos.workItems.listScheduledIds()).not.toContain(item.id);
+    await f.tick(); expect(f.deliveries).toHaveBeenCalledTimes(2);
+  });
+  it('preserves invalid historical JSON without preventing another work item from advancing', async () => {
+    const f = await fixture();
+    const corrupt = ['{invalid', ...[null, true, 1, 'bad', [], [1], {}, { item: null }, { item: 'bad' }, { item: 1 }, { item: true }, { item: [] }, { item: [1] }, { item: {} }].map(value => JSON.stringify(value))];
+    for (const [index, raw] of corrupt.entries()) await f.repos.config.set(`work_item:000-corrupt-${index}`, raw);
+    const item = await f.create({ ...plan, steps: [plan.steps[0]!], outputStepId: 'a' });
+    await f.tick(); await eventually(async () => f.calls.length === 1);
+    for (const [index, raw] of corrupt.entries()) expect(await f.repos.config.get(`work_item:000-corrupt-${index}`)).toBe(raw);
+    await f.finish(f.calls[0]!, 'Ready'); await f.tick();
+    expect((await f.get(item.id)).status).toBe('completed');
+  });
+  it('continues other work when recording a failed work item also fails', async () => {
+    const f = await fixture();
+    const item = await f.create({ ...plan, steps: [plan.steps[0]!], outputStepId: 'a' });
+    const broken = JSON.parse((await f.repos.config.get('work_item:' + item.id))!);
+    broken.item.id = '000-repair'; broken.item.parentSessionId = 'missing-parent';
+    const raw = JSON.stringify(broken), key = 'work_item:000-repair';
+    await f.repos.config.set(key, raw);
+    const original = f.repos.config.compareAndSet!.bind(f.repos.config);
+    const cas = vi.spyOn(f.repos.config, 'compareAndSet').mockImplementation(async (target, expected, value) => {
+      if (target === key) throw new Error('injected repair write failure');
+      return original(target, expected, value);
+    });
+    await f.tick(); await eventually(async () => f.calls.length === 1);
+    expect(cas).toHaveBeenCalledWith(key, raw, expect.any(String));
+    expect(await f.repos.config.get(key)).toBe(raw);
+    await f.finish(f.calls[0]!, 'Ready'); await f.tick();
+    expect((await f.get(item.id)).status).toBe('completed');
   });
   it('fences an accepted task before driver.send when cancellation wins preparation', async () => {
     const f = await fixture(); let release!: () => void;

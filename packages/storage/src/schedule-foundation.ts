@@ -367,7 +367,17 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
         });
       }
     },
-    scheduleWatermarks: { async get(id) { return getWatermark(id); } },
+    scheduleWatermarks: {
+      async get(id) { return getWatermark(id); },
+      async restoreNextDue(id, expectedGeneration, nextDueAt) {
+        const due = new Date(nextDueAt);
+        if (!Number.isFinite(due.getTime()) || due.toISOString() !== nextDueAt) throw new RuntimeError('SCHEDULE_WATERMARK_TIME_INVALID', 'Watermark next due time must use canonical UTC ISO time', 400);
+        sqlite.prepare(`UPDATE schedule_watermarks SET next_due_at=?,revision=revision+1,updated_at=?
+          WHERE schedule_definition_id=? AND next_due_at IS NULL AND EXISTS (
+            SELECT 1 FROM schedule_definitions WHERE id=? AND current_generation=? AND state='enabled' AND trigger_kind IN ('cron','interval'))`)
+          .run(nextDueAt, new Date().toISOString(), id, id, expectedGeneration);
+      }
+    },
     scheduleLeases: {
       async getByKey(key) { return getLease(key); },
       async acquire(input) { return transact(() => acquireLease(input)); },

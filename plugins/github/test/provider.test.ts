@@ -305,3 +305,114 @@ describe('GitHub provider: webhook', () => {
     await expect(provider.webhook!.parse({ rawBody: form, headers: { 'x-github-event': 'pull_request', 'content-type': 'application/x-www-form-urlencoded' } })).resolves.toMatchObject({ state: 'open', pullRequest: 9 });
   });
 });
+
+describe('GitHub provider: pagination and response budgets', () => {
+  it('reads every review and issue comment page, including private pages', async () => {
+    const request = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (!(init?.headers as Record<string, string>).Authorization) return new Response('', { status: 404 });
+      const page = Number(url.searchParams.get('page') ?? 1);
+      const kind = url.pathname.includes('/pulls/') ? 'review' : 'issue';
+      return new Response(JSON.stringify([{ id: page, body: `${kind} ${page}` }]), { headers: page < 3 ? { link: `<${url.origin}${url.pathname}?per_page=100&page=${page + 1}>; rel="next"` } : {} });
+    });
+    const provider = createGithubProvider({ token: 'private-token', fetch: request as typeof fetch });
+    const comments = await provider.listReviewComments(repo, 5);
+    expect(comments.map(comment => comment.id).sort()).toEqual(['issue:1', 'issue:2', 'issue:3', 'review:1', 'review:2', 'review:3']);
+    expect(request).toHaveBeenCalledTimes(12);
+  });
+
+  it.each(['https://evil.example/comments?page=2&per_page=100', 'https://token@api.github.com/repos/octo/repo/pulls/5/comments?page=2&per_page=100', 'https://api.github.com/repos/other/repo/pulls/5/comments?page=2&per_page=100', 'https://api.github.com/repos/octo/repo/pulls/5/comments?page=1&per_page=100'])(
+    'rejects unsafe or looping pagination before sending credentials: %s', async next => {
+      const request = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => !(init?.headers as Record<string, string>).Authorization
+        ? new Response('', { status: 404 }) : new Response('[]', { headers: { link: `<${next}>; rel="next"` } }));
+      const provider = createGithubProvider({ token: 'private-token', fetch: request as typeof fetch });
+      await expect(provider.listReviewComments(repo, 5)).rejects.toMatchObject({ code: 'GITHUB_PAGINATION_INVALID' });
+      expect(request.mock.calls.every(([input]) => { const url = new URL(String(input)); return url.origin === 'https://api.github.com' && !url.username && !url.password && url.pathname.startsWith('/repos/octo/repo/'); })).toBe(true);
+      expect(request).toHaveBeenCalledTimes(4);
+    });
+
+  it('fails explicitly when comment pagination exhausts the shared page budget', async () => {
+    const request = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      const page = Number(url.searchParams.get('page') ?? 1);
+      return new Response('[]', { headers: { link: `<${url.origin}${url.pathname}?per_page=100&page=${page + 1}>; rel="next"` } });
+    });
+    const provider = createGithubProvider({ fetch: request as typeof fetch });
+    await expect(provider.listReviewComments(repo, 5)).rejects.toMatchObject({ code: 'GITHUB_COMMENT_SET_TOO_LARGE' });
+    expect(request).toHaveBeenCalledTimes(100);
+  });
+
+  it('fails explicitly when comment pages exhaust their shared byte budget', async () => {
+    const request = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      const page = Number(url.searchParams.get('page') ?? 1);
+      return new Response(JSON.stringify([{ id: page, body: 'x'.repeat(1024 * 1024) }]), { headers: { link: `<${url.origin}${url.pathname}?per_page=100&page=${page + 1}>; rel="next"` } });
+    });
+    const provider = createGithubProvider({ fetch: request as typeof fetch });
+    await expect(provider.listReviewComments(repo, 5)).rejects.toMatchObject({ code: 'GITHUB_COMMENT_SET_TOO_LARGE' });
+    expect(request.mock.calls.length).toBeLessThanOrEqual(10);
+  });
+
+  const stream = (bytes: number, headers: Record<string, string> = {}) => {
+    let sent = 0;
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) { if (sent >= bytes) return controller.close(); const chunk = new Uint8Array(Math.min(64 * 1024, bytes - sent)).fill(120); sent += chunk.byteLength; controller.enqueue(chunk); },
+      cancel
+    }, { highWaterMark: 0 });
+    return { response: new Response(body, { headers }), cancel, sent: () => sent };
+  };
+
+  it.each([{}, { 'content-length': '1' }])('cancels oversized JSON while reading even with missing or false lengths: %j', async headers => {
+    const body = stream(4 * 1024 * 1024, headers);
+    const provider = createGithubProvider({ fetch: vi.fn(async () => body.response) as typeof fetch });
+    await expect(provider.getPipelineStatus({ repository: repo, sha: 'a'.repeat(40) })).rejects.toMatchObject({ code: 'GITHUB_RESPONSE_TOO_LARGE' });
+    expect(body.cancel).toHaveBeenCalledOnce();
+    expect(body.sent()).toBeLessThan(4 * 1024 * 1024);
+  });
+
+  it.each([{}, { 'content-length': '1' }])('cancels oversized logs while reading even with missing or false lengths: %j', async headers => {
+    const body = stream(10 * 1024 * 1024, headers);
+    const provider = createGithubProvider({ token: 't', fetch: vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/runs/')) return json({ jobs: [{ id: 7, name: 'test', conclusion: 'failure', steps: [{ name: 'pnpm test', conclusion: 'failure' }] }] });
+      if (url.includes('/jobs/')) return new Response('', { status: 302, headers: { location: 'https://logs.example/test' } });
+      return body.response;
+    }) as typeof fetch });
+    await expect(provider.getFailureLogs(repo, '42')).resolves.toEqual([{ job: 'test', stage: 'pnpm test', reason: 'failure' }]);
+    expect(body.cancel).toHaveBeenCalledOnce();
+    expect(body.sent()).toBeLessThan(10 * 1024 * 1024);
+  });
+
+  it('cancels declared oversized JSON and logs before consuming their bodies', async () => {
+    const jsonBody = stream(1024, { 'content-length': String(2 * 1024 * 1024 + 1) });
+    const jsonProvider = createGithubProvider({ fetch: vi.fn(async () => jsonBody.response) as typeof fetch });
+    await expect(jsonProvider.getPipelineStatus({ repository: repo, sha: 'a'.repeat(40) })).rejects.toMatchObject({ code: 'GITHUB_RESPONSE_TOO_LARGE' });
+    expect(jsonBody.sent()).toBe(0);
+    expect(jsonBody.cancel).toHaveBeenCalledOnce();
+    const logBody = stream(1024, { 'content-length': String(8 * 1024 * 1024 + 1) });
+    const logProvider = createGithubProvider({ token: 't', fetch: vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/runs/')) return json({ jobs: [{ id: 7, name: 'test', conclusion: 'failure', steps: [{ name: 'pnpm test', conclusion: 'failure' }] }] });
+      if (url.includes('/jobs/')) return new Response('', { status: 302, headers: { location: 'https://logs.example/test' } });
+      return logBody.response;
+    }) as typeof fetch });
+    await expect(logProvider.getFailureLogs(repo, '42')).resolves.toEqual([{ job: 'test', stage: 'pnpm test', reason: 'failure' }]);
+    expect(logBody.sent()).toBe(0);
+    expect(logBody.cancel).toHaveBeenCalledOnce();
+  });
+
+  it('decodes UTF-8 across chunk boundaries for JSON and log tails', async () => {
+    const chunked = (value: string) => {
+      const bytes = new TextEncoder().encode(value);
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) { for (const byte of bytes) controller.enqueue(Uint8Array.of(byte)); controller.close(); } }));
+    };
+    const provider = createGithubProvider({ token: 't', fetch: vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/runs/')) return chunked(JSON.stringify({ jobs: [{ id: 7, name: '测试😀', conclusion: 'failure' }] }));
+      if (url.includes('/jobs/')) return new Response('', { status: 302, headers: { location: 'https://logs.example/test' } });
+      return chunked('错误😀尾部');
+    }) as typeof fetch });
+    await expect(provider.getFailureLogs(repo, '42')).resolves.toEqual([{ job: '测试😀', reason: 'failure', log: '错误😀尾部' }]);
+  });
+});

@@ -129,7 +129,15 @@ export class ScheduleExecutor {
         }
         schedule = await this.options.service.reconcileMandate(mandate) ?? schedule;
         if (mandate.status !== 'active' || schedule.state !== 'enabled' || !scheduleMatchesMandate(schedule, mandate) || (await this.repos.scheduleOccurrences.listUnsettled(schedule.id)).length || processed >= 20) continue;
-        const watermark = await this.repos.scheduleWatermarks.get(schedule.id), due = watermark?.nextDueAt;
+        let watermark = await this.repos.scheduleWatermarks.get(schedule.id);
+        if (!watermark?.nextDueAt && schedule.trigger.kind !== 'at') {
+          const restored = previewNextSchedule(schedule, this.now())?.scheduledForUtc;
+          if (restored) {
+            await this.repos.scheduleWatermarks.restoreNextDue(schedule.id, schedule.currentGeneration, restored);
+            watermark = await this.repos.scheduleWatermarks.get(schedule.id);
+          }
+        }
+        const due = watermark?.nextDueAt;
         if (!due || due > this.now().toISOString()) continue;
         const nextDue = previewNextSchedule(schedule, this.now())?.scheduledForUtc;
         const { occurrence } = await this.repos.scheduleOccurrences.recordPlanned(schedule.id, due, nextDue, schedule.currentGeneration);
@@ -219,10 +227,9 @@ export class ScheduleExecutor {
     const input = this.input(mandate, schedule, occurrence, originalSnapshot, lease, delivery, 'deliver');
     try {
       await input.assertCurrent();
-      const recent = await this.repos.collaboration.listActions(mandate.scope, 500);
-      const since = this.now().getTime() - 3_600_000;
-      const count = recent.filter(action => action.id !== delivery!.id && action.kind === 'schedule_delivery' && ['sending','succeeded','unknown'].includes(action.status) && Date.parse(action.updatedAt) >= since).length;
-      if (count >= originalSnapshot.settings.maxProactivePerHour) throw new RuntimeError('COLLABORATION_BUDGET_EXHAUSTED', 'Group notification budget exhausted', 409);
+      const since = new Date(this.now().getTime() - 3_600_000).toISOString();
+      const position = await this.repos.collaboration.getDeliveryPosition(mandate.scope, delivery.id, since);
+      if (position < 0 || position >= originalSnapshot.settings.maxProactivePerHour) throw new RuntimeError('COLLABORATION_BUDGET_EXHAUSTED', 'Group notification budget exhausted', 409);
     } catch (error) {
       await this.actionState(delivery, 'suppressed', undefined, message(error));
       await this.advance(occurrence, 'suppressed', lease, message(error)); return;

@@ -102,9 +102,11 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
   const target = (url: string | undefined) => proxyTarget(url, peers);
   let closing = false;
   const upgrades = new Set<() => void>();
+  const forwards = new Set<() => void>();
   app.addHook('preClose', async () => {
     closing = true;
     for (const close of upgrades) close();
+    for (const close of forwards) close();
   });
 
   void app.register(async scope => {
@@ -115,20 +117,36 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
       const upstreamTarget = target(request.raw.url);
       if (!upstreamTarget) throw new RuntimeError('INSTANCE_NOT_FOUND', `Unknown instance: ${(request.params as { id: string }).id}`, 404);
       const { peer, url } = upstreamTarget;
+      if (closing) throw new RuntimeError('INSTANCE_PROXY_CLOSING', 'Instance proxy is closing', 503);
       const sharedRead = isSharedInstanceRead(request, peers);
       if (sharedRead) url.pathname = url.pathname.replace('/api/sessions/', '/api/shared-sessions/');
       reply.hijack();
       const upstream = httpRequest(url, { method: request.method, headers: withoutHeaders(request.headers, DROPPED_REQUEST_HEADERS) });
+      const body = request.body as Readable | undefined;
+      let upstreamResponse: IncomingMessage | undefined;
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        forwards.delete(close);
+        upstream.destroy();
+        upstreamResponse?.destroy();
+        if (!reply.raw.writableFinished) reply.raw.destroy();
+      };
+      forwards.add(close);
+      reply.raw.once('close', close).once('error', close);
+      reply.raw.once('finish', () => forwards.delete(close));
+      request.raw.once('aborted', close);
+      body?.once('error', close);
       upstream.on('response', response => {
+        upstreamResponse = response;
+        if (closed) { response.destroy(); return; }
         // 对方要登录说明它不是 --local-only 启动的；原样回 401 会让浏览器以为主服务掉了登录。
         reply.raw.writeHead(response.statusCode === 401 && !sharedRead ? 502 : response.statusCode ?? 502, withoutHeaders(response.headers, DROPPED_RESPONSE_HEADERS));
-        if (sharedRead) {
-          // A revoked peer stream is destroyed rather than ended. pipe() does
-          // not forward this premature close to the browser on its own.
-          const disconnect = () => reply.raw.destroy();
-          response.once('aborted', disconnect).once('error', disconnect);
-          response.once('close', () => { if (!response.complete) disconnect(); });
-        }
+        // pipe() does not propagate a premature upstream close, including a
+        // revoked share stream, to the browser. Normal end still drains fully.
+        response.once('aborted', close).once('error', close);
+        response.once('close', () => { if (!response.complete) close(); });
         response.pipe(reply.raw);
       });
       upstream.on('error', error => {
@@ -136,9 +154,6 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
         reply.raw.writeHead(502, { 'content-type': 'application/json; charset=utf-8' });
         reply.raw.end(JSON.stringify({ error: { code: 'INSTANCE_UNAVAILABLE', message: `${peer.name} 无法连接：${error.message}` } }));
       });
-      // 浏览器关掉实时流或请求中断时，一并断开到对方的连接。
-      reply.raw.on('close', () => upstream.destroy());
-      const body = request.body as Readable | undefined;
       if (body) body.pipe(upstream);
       else upstream.end();
     });

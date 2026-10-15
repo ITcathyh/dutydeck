@@ -95,6 +95,7 @@ export class PtyCliDriver implements AgentDriver {
 
   private started = false;
   private stopped = false;
+  private stopping?: Promise<void>;
   private wiringGeneration = 0;
   private stoppedPid: number | undefined;
   private readonly processProbe: ProcessProbe | undefined;
@@ -923,11 +924,21 @@ export class PtyCliDriver implements AgentDriver {
     return found && this.adapter.buildResumeCommand(found) !== null ? found : undefined;
   }
 
-  async stop(options: { discardSession?: boolean } = {}): Promise<void> {
-    if (this.stopped) return;
+  stop(options: { discardSession?: boolean } = {}): Promise<void> {
+    if (this.stopping) return this.stopping;
+    const alreadyStopped = this.stopped;
     this.stopped = true;
+    const run = this.stopOnce(options, alreadyStopped);
+    this.stopping = run;
+    const release = () => { if (this.stopping === run) this.stopping = undefined; };
+    void run.then(release, release);
+    return run;
+  }
+
+  private async stopOnce(options: { discardSession?: boolean }, alreadyStopped: boolean): Promise<void> {
+    if (this.detachedForShutdown || alreadyStopped && await this.isStopped()) return;
     this.rejectHookPermissions('会话已停止，这次操作没有执行。');
-    if (this.backend instanceof PtyBackend) this.stoppedPid = this.backend.getPid() ?? undefined;
+    if (this.backend instanceof PtyBackend) this.stoppedPid ??= this.backend.getPid() ?? undefined;
     const tmuxBackend = this.persistentBackend();
     const preservePersistentSession = this.detachOnStop
       && !options.discardSession

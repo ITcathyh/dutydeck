@@ -1567,6 +1567,21 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
       return row ? rowToAction(row) : undefined;
     },
 
+    async getDeliveryPosition(scope: CollaborationScope, actionId: string, since: string): Promise<number> {
+      const row = sqlite.prepare(`
+        SELECT (SELECT COUNT(*) FROM collaboration_actions prior
+          WHERE prior.app_id=current.app_id AND prior.chat_id=current.chat_id
+            AND prior.kind IN ('participation.reply','schedule_delivery')
+            AND prior.status IN ('intent','sending','unknown','succeeded') AND prior.created_at>=?
+            AND prior.id!=current.id
+            AND (prior.status!='intent' OR prior.created_at<current.created_at OR (prior.created_at=current.created_at AND prior.id<current.id))) AS position
+        FROM collaboration_actions current WHERE current.id=? AND current.app_id=? AND current.chat_id=?
+          AND current.kind IN ('participation.reply','schedule_delivery')
+          AND current.status IN ('intent','sending','unknown','succeeded') AND current.created_at>=?
+      `).get(since, actionId, scope.appId, scope.chatId, since) as { position: number } | undefined;
+      return row?.position ?? -1;
+    },
+
     async listActions(scope?: CollaborationScope, limit?: number): Promise<CollaborationAction[]> {
       const maxLimit = clampLimit(limit, 50);
       if (scope) {

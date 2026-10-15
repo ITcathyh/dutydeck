@@ -14,6 +14,8 @@ const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); for (const close of cleanup.splice(0)) await close(); });
 const scope = { appId: 'app', chatId: 'chat' };
 async function fixture(initialNow = new Date()) {
+  // Repository action timestamps and executor time must share one clock.
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(initialNow);
   const directory = mkdtempSync(join(tmpdir(), 'collaboration-scheduler-')), path = join(directory, 'state.db');
   const repos = createRepositories(path);
   const db = new Database(path); withMigrationTransaction(db, () => createScheduleExecutionSchema(db)); db.close();
@@ -30,7 +32,7 @@ async function fixture(initialNow = new Date()) {
   };
   cleanup.push(async () => { await Promise.allSettled(instances.map(instance => instance.close())); repos.close(); rmSync(directory, { recursive: true, force: true }); });
   const input = { id: 'delegation', goal: 'Follow the document', mode: 'notify' as const, prompt: 'Please share the remaining material', trigger: { kind: 'interval' as const, everySeconds: 60, anchorAt: clock.toISOString() }, timezone: 'UTC' };
-  return { repos, service, executor, deliver, authorize, input, now, path, deny() { allowed = false; }, advance(ms = 60_000) { clock = new Date(clock.getTime() + ms); }, create: (extra = {}) => service.createMandate(scope, 'requester', { ...input, ...extra }) };
+  return { repos, service, executor, deliver, authorize, input, now, path, deny() { allowed = false; }, advance(ms = 60_000) { clock = new Date(clock.getTime() + ms); vi.setSystemTime(clock); }, create: (extra = {}) => service.createMandate(scope, 'requester', { ...input, ...extra }) };
 }
 
 it('delivers a persisted delegation once per occurrence without creating a follow-up or requiring a live parent session', async () => {
@@ -41,6 +43,50 @@ it('delivers a persisted delegation once per occurrence without creating a follo
   expect(await f.repos.collaboration.listFollowups(scope)).toEqual([]);
   expect(await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId)).toEqual([expect.objectContaining({ state: 'settled' })]);
   expect(await f.repos.collaboration.getMandate(scope, mandate.id)).toMatchObject({ status: 'active' });
+});
+
+it('restores enabled sparse cron plans with missing watermarks without reviving completed one-offs', async () => {
+  const f = await fixture(new Date('2026-01-01T00:00:00.000Z'));
+  const { mandate } = await f.create({ trigger: { kind: 'cron', expression: '0 9 29 2 *' } });
+  const once = await f.create({ id: 'once', trigger: { kind: 'at', localDateTime: '2026-01-01T00:01:00' } });
+  const db = new Database(f.path);
+  try { db.prepare('UPDATE schedule_watermarks SET next_due_at=NULL').run(); } finally { db.close(); }
+  const run = f.executor(); await run.tick();
+  expect(await f.repos.scheduleWatermarks.get(mandate.scheduleDefinitionId)).toMatchObject({ nextDueAt: '2028-02-29T09:00:00.000Z' });
+  expect((await f.repos.scheduleWatermarks.get(once.mandate.scheduleDefinitionId))?.nextDueAt).toBeUndefined();
+  await run.close();
+  const restarted = f.executor(); await restarted.tick();
+  expect(f.deliver).not.toHaveBeenCalled();
+  f.advance(Date.parse('2028-02-29T09:00:00.000Z') - f.now().getTime());
+  await restarted.tick();
+  expect(f.deliver).toHaveBeenCalledOnce();
+  expect(await f.repos.scheduleWatermarks.get(mandate.scheduleDefinitionId)).toMatchObject({ nextDueAt: '2032-02-29T09:00:00.000Z' });
+});
+
+it('enforces the shared hourly budget despite more than 500 newer non-delivery actions', async () => {
+  const f = await fixture();
+  await f.repos.collaboration.updateSettings(scope, { expectedRevision: 0, maxProactivePerHour: 1 }, 'owner');
+  await f.create();
+  const run = f.executor(); f.advance(); await run.tick(); expect(f.deliver).toHaveBeenCalledOnce();
+  for (let i = 0; i < 501; i++) await f.repos.collaboration.beginAction({ scope, id: `command-${i}`, kind: 'command:update_mandate', requesterId: 'owner', inputDigest: `digest-${i}`, payload: {} });
+  f.advance(); await run.tick();
+  expect(f.deliver).toHaveBeenCalledOnce();
+  expect((await f.repos.scheduleOccurrences.listByDefinition((await f.repos.collaboration.listMandates(scope))[0]!.scheduleDefinitionId))[0]?.state).toBe('suppressed');
+});
+
+it.each(['sending', 'unknown', 'succeeded'] as const)('counts a same-millisecond %s notification before dispatching a scheduled notification', async status => {
+  const f = await fixture();
+  await f.repos.collaboration.updateSettings(scope, { expectedRevision: 0, maxProactivePerHour: 1 }, 'owner');
+  const { mandate } = await f.create(); f.advance();
+  let prior = (await f.repos.collaboration.beginAction({ scope, id: 'z', kind: 'participation.reply', requesterId: 'owner', inputDigest: 'prior', payload: {} })).action;
+  prior = await f.repos.collaboration.updateAction(scope, prior.id, { expectedRevision: prior.revision, status: 'sending' });
+  if (status !== 'sending') await f.repos.collaboration.updateAction(scope, prior.id, { expectedRevision: prior.revision, status });
+  await f.executor().tick();
+  expect(f.deliver).not.toHaveBeenCalled();
+  const delivery = (await f.repos.collaboration.listActions(scope)).find(action => action.kind === 'schedule_delivery')!;
+  expect(delivery.createdAt).toBe(prior.createdAt); expect(delivery.id < prior.id).toBe(true);
+  expect(delivery.status).toBe('suppressed');
+  expect((await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId))[0]?.state).toBe('suppressed');
 });
 
 it('enforces stable create inputs, chat scope, mandate ownership and stale revisions', async () => {

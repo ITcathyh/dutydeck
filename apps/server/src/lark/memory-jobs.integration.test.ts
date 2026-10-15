@@ -18,6 +18,7 @@ async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars
   let reply = (_prompt: string) => ({ actions: [{ op: 'noop' }] });
   let duringSend = async () => {};
   let duringInterrupt = () => {};
+  let outputText: string | undefined;
   const runtime = new DutydeckRuntime(repos, {
     cleanupIntervalMs: 0, workspaceRoot: join(dir, 'work'),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
@@ -30,7 +31,7 @@ async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars
           interrupted = false;
           prompts.push(prompt);
           await duringSend();
-          emit({ type: 'text', data: { text: '```json\n' + JSON.stringify(reply(prompt)) + '\n```' } });
+          emit({ type: 'text', data: { text: outputText ?? '```json\n' + JSON.stringify(reply(prompt)) + '\n```' } });
           emit({ type: 'completed', data: { stopReason: interrupted ? 'cancelled' : 'end_turn' } });
         }
       };
@@ -45,8 +46,31 @@ async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars
   const pipeline = new LarkMemoryPipeline({ runtime, timeoutMs, repos: { execution: repos.execution }, jobs: repos.memoryJobs, policyConfig: repos.config, controlActorId: 'installation_owner', store, projection, readConfig: async () => JSON.parse((await repos.config.get('lark.bots'))!)[0], log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
   cleanups.push(async () => { await runtime.shutdown(); repos.close(); await rm(dir,{ recursive: true, force: true }); });
   await store.add(scope, { content: '保留完整来源和日期。', source: 'extraction', topic: 'general', chatId: 'other', taskId: 'evidence' });
-  return { repos, runtime, store, projection, pipeline, prompts, setReply: (value: typeof reply) => { reply = value; }, setDuringSend: (value: typeof duringSend) => { duringSend = value; }, setDuringInterrupt: (value: typeof duringInterrupt) => { duringInterrupt = value; } };
+  return { repos, runtime, store, projection, pipeline, prompts, setOutputText: (value?: string) => { outputText = value; }, setReply: (value: typeof reply) => { reply = value; }, setDuringSend: (value: typeof duringSend) => { duringSend = value; }, setDuringInterrupt: (value: typeof duringInterrupt) => { duringInterrupt = value; } };
 }
+it('consumes verified blank completed turns so the next extraction reaches useful material', async () => {
+  const h = await harness();
+  const session = await h.runtime.start({ agentId: 'agent' });
+  const taskIds: string[] = [];
+  h.setOutputText(' \n ');
+  for (let i = 0; i < 12; i++) {
+    const task = await h.runtime.send(session.id, `blank-${i}`);
+    expect(task.status).toBe('completed'); taskIds.push(task.id);
+    await h.pipeline.onTurnCompleted(scope, { sessionId: session.id, taskId: task.id, senderKind: 'human' });
+  }
+  h.setOutputText();
+  const useful = await h.runtime.send(session.id, 'Useful material');
+  await h.pipeline.onTurnCompleted(scope, { sessionId: session.id, taskId: useful.id, senderKind: 'human' });
+  h.setReply(() => ({ facts: [] } as any));
+  h.prompts.length = 0;
+  expect(await h.pipeline.runExtraction(scope)).toMatchObject({ ok: true });
+  expect((await h.store.getState(scope)).pendingTurns?.map(turn => turn.taskId)).toEqual([useful.id]);
+  expect((await h.repos.memoryJobs.listScope(scope))[0].receipt?.consumedTaskIds).toEqual(taskIds);
+  expect(h.prompts).toHaveLength(0);
+  expect(await h.pipeline.runExtraction(scope)).toMatchObject({ ok: true });
+  expect((await h.store.getState(scope)).pendingTurns).toEqual([]);
+  expect(h.prompts).toHaveLength(1); expect(h.prompts[0]).toContain('Useful material');
+});
 it.each(['legacy','optimized'] as const)('%s jobs apply noop receipts and choose their frozen session lifecycle', async mode => {
   const h = await harness(mode);
   expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });

@@ -673,6 +673,8 @@ export interface CollaborationRepository {
   beginAction(input: BeginActionInput): Promise<{ action: CollaborationAction; created: boolean }>;
   getAction(scope: CollaborationScope, id: string): Promise<CollaborationAction | undefined>;
   listActions(scope?: CollaborationScope, limit?: number): Promise<CollaborationAction[]>;
+  /** Position among all in-window delivery reservations; -1 if this action is ineligible. */
+  getDeliveryPosition(scope: CollaborationScope, actionId: string, since: string): Promise<number>;
   listPendingActions(appId: string, kind: string): Promise<CollaborationAction[]>;
   updateAction(scope: CollaborationScope, id: string, patch: UpdateActionInput): Promise<CollaborationAction>;
   listActivities(scope: CollaborationScope, limit?: number): Promise<CollaborationActivity[]>;

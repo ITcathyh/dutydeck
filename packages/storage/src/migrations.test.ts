@@ -25,6 +25,8 @@ const BUSINESS_TABLES = [
   'errors',
   'channel_mappings',
   'configs',
+  'work_item_index',
+  'work_item_sessions',
   'secret_refs',
   'channel_bots',
   'foundation_entity_versions',
@@ -59,7 +61,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -82,6 +84,34 @@ function appliedVersions(db: Database.Database): number[] {
 }
 
 describe('storage migrations', () => {
+  it('v37 atomically backfills old work records and the migration marker without rewriting JSON', () => {
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL)');
+    withMigrationTransaction(db, () => { for (const migration of migrations.filter(item => item.version <= 36)) { migration.up(db); db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(migration.version, '2026-10-15'); } });
+    const records = [
+      ['work_item:completed', JSON.stringify({ item: { parentSessionId: 'parent', status: 'completed', delivery: { status: 'delivered' } } })],
+      ['work_item:pending', JSON.stringify({ item: { status: 'completed', delivery: { status: 'pending' }, steps: [{ status: 'completed', attempts: [{ sessionId: 'child' }] }] } })],
+      ['work_item:blocked', JSON.stringify({ stoppedAttempts: [], item: { status: 'blocked', steps: [{ status: 'blocked', attempts: [{ id: 'unresolved', sessionId: 'unresolved-child' }] }] } })],
+      ['work_item:invalid', 'not valid json'],
+      ['work_item:old-shape', JSON.stringify({ item: { steps: ['invalid-step', { attempts: ['invalid-attempt'] }] } })]
+    ];
+    for (const [key, value] of records) db.prepare('INSERT INTO configs VALUES (?,?)').run(key, value);
+    const migration = migrations.find(item => item.version === 37)!, up = migration.up;
+    try {
+      migration.up = database => { up(database); throw new Error('injected after backfill'); };
+      expect(() => runMigrations(db)).toThrow('injected after backfill');
+      expect(tableNames(db)).not.toContain('work_item_index');
+      expect(appliedVersions(db)).not.toContain(37);
+    } finally { migration.up = up; }
+    runMigrations(db);
+    expect(db.prepare('SELECT config_key FROM work_item_index WHERE needs_tick=1 ORDER BY config_key').pluck().all()).toEqual(['work_item:blocked', 'work_item:invalid', 'work_item:old-shape', 'work_item:pending']);
+    expect(db.prepare('SELECT active_steps FROM work_item_index WHERE config_key=?').pluck().get('work_item:blocked')).toBe(1);
+    expect(db.prepare('SELECT session_id FROM work_item_sessions ORDER BY session_id').pluck().all()).toEqual(['child', 'unresolved-child']);
+    expect(db.prepare('SELECT key,value FROM configs ORDER BY key').all()).toEqual([...records].sort(([a], [b]) => a!.localeCompare(b!)).map(([key, value]) => ({ key, value })));
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS);
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+    db.close();
+  });
   it('declares migrations in ascending version order', () => {
     expect(migrations.map(migration => migration.version)).toEqual(ALL_VERSIONS)
   })

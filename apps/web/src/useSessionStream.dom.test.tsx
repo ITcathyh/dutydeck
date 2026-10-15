@@ -261,3 +261,49 @@ it('preserves metadata from earlier status events in the same frame', async () =
   });
   await waitFor(() => expect(client.getQueryData<Session[]>(['sessions'])?.[0]).toMatchObject({ model: 'new-model', state: 'completed' }));
 });
+
+it('refreshes tasks when a gap recovers a missed task event, without refreshing unrelated queries', async () => {
+  const missed: DockEvent = { ...event(11), type: 'task', data: { task: { id: 't1', status: 'completed' } } };
+  vi.spyOn(api, 'events').mockResolvedValue([missed, event(12)]);
+  const task = { id: 't1', sessionId: 's1', prompt: 'fix', status: 'running', createdAt: '', updatedAt: '' };
+  const taskLoader = vi.fn().mockResolvedValueOnce([task]).mockResolvedValue([{ ...task, status: 'completed' }]);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['events', 's1'], createEventWindow([event(10)]));
+  const invalidations = vi.spyOn(client, 'invalidateQueries');
+  function Harness() { useQuery({ queryKey: ['tasks', 's1'], queryFn: taskLoader }); useSessionStream('s1', 'r1', true); return null; }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  try {
+    await waitFor(() => expect(taskLoader).toHaveBeenCalledTimes(1));
+    act(() => MockEventSource.instances[0]!.emit('text', event(12)));
+    await waitFor(() => expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.map(item => item.sequence)).toEqual([10, 11, 12]));
+    await waitFor(() => expect(client.getQueryData<Task[]>(['tasks', 's1'])?.[0]?.status).toBe('completed'));
+    expect(taskLoader).toHaveBeenCalledTimes(2);
+    expect(invalidations.mock.calls).toEqual([[{ queryKey: ['tasks', 's1'], exact: true }]]);
+    act(() => MockEventSource.instances[0]!.emit('task', missed));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(invalidations).toHaveBeenCalledTimes(1);
+  } finally { view.unmount(); client.clear(); }
+});
+
+it('applies recovered status metadata without regressing a newer live status', async () => {
+  const earlier: DockEvent = { ...event(11), type: 'status', data: { state: 'thinking', model: 'new-model' } };
+  let recover!: (events: DockEvent[]) => void;
+  vi.spyOn(api, 'events').mockImplementation(() => new Promise(resolve => { recover = resolve; }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['events', 's1'], createEventWindow([event(10)]));
+  client.setQueryData(['sessions'], [session]);
+  const invalidations = vi.spyOn(client, 'invalidateQueries');
+  function Harness() { useSessionStream('s1', 'r1', true); return null; }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  try {
+    act(() => MockEventSource.instances[0]!.emit('text', event(12)));
+    act(() => MockEventSource.instances[0]!.emit('status', { ...event(13), type: 'status', data: { state: 'completed' } }));
+    await waitFor(() => expect(client.getQueryData<Session[]>(['sessions'])?.[0]?.state).toBe('completed'));
+    await act(async () => recover([earlier, event(12)]));
+    await waitFor(() => expect(client.getQueryData<Session[]>(['sessions'])?.[0]).toMatchObject({ state: 'completed', model: 'new-model' }));
+    act(() => MockEventSource.instances[0]!.emit('status', earlier));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(client.getQueryData<Session[]>(['sessions'])?.[0]?.state).toBe('completed');
+    expect(invalidations).not.toHaveBeenCalled();
+  } finally { view.unmount(); client.clear(); }
+});

@@ -22,6 +22,34 @@ const base = (trigger: ScheduleDefinition['trigger'], overrides: Partial<Schedul
 });
 
 describe('Schedule foundation time semantics', () => {
+  it('finds sparse dates beyond two years, including the Gregorian non-leap century', () => {
+    const leap = base({ kind: 'cron', expression: '0 9 29 2 *' }, { timezone: 'UTC' });
+    expect(previewNextSchedule(leap, new Date('2026-01-01T00:00:00.000Z'))?.scheduledForUtc).toBe('2028-02-29T09:00:00.000Z');
+    expect(previewNextSchedule(leap, new Date('2096-02-29T09:00:00.000Z'))?.scheduledForUtc).toBe('2104-02-29T09:00:00.000Z');
+    expect(previewNextSchedule(base({ kind: 'cron', expression: '0 9 31 2 *' }, { timezone: 'UTC' }))).toBeUndefined();
+  });
+
+  it('keeps a future second overlap instant even after its first local-time occurrence passed', () => {
+    const cron = base({ kind: 'cron', expression: '30 1 * * *' }, { dstPolicy: { gap: 'skip', overlap: 'second' } });
+    expect(previewNextSchedule(cron, new Date('2026-11-01T05:45:00.000Z'))?.scheduledForUtc).toBe('2026-11-01T06:30:00.000Z');
+    expect(previewNextSchedule(cron, new Date('2026-11-01T06:30:00.000Z'))?.scheduledForUtc).toBe('2026-11-02T06:30:00.000Z');
+    const first = { ...cron, dstPolicy: { gap: 'skip' as const, overlap: 'first' as const } };
+    expect(previewNextSchedule(first, new Date('2026-11-01T05:45:00.000Z'))?.scheduledForUtc).toBe('2026-11-02T06:30:00.000Z');
+  });
+
+  it('applies cron DST gaps and day/weekday OR without enumerating missing minutes', () => {
+    const cron = base({ kind: 'cron', expression: '30 2 * * *' });
+    expect(previewNextSchedule(cron, new Date('2026-03-08T05:00:00.000Z'))?.scheduledForUtc).toBe('2026-03-09T06:30:00.000Z');
+    expect(previewNextSchedule({ ...cron, dstPolicy: { gap: 'shift_forward', overlap: 'first' } }, new Date('2026-03-08T05:00:00.000Z'))?.scheduledForUtc).toBe('2026-03-08T07:00:00.000Z');
+    expect(previewNextSchedule({ ...cron, dstPolicy: { gap: 'shift_forward', overlap: 'first' } }, new Date('2026-03-08T06:59:59.000Z'))?.scheduledForUtc).toBe('2026-03-08T07:00:00.000Z');
+    expect(previewNextSchedule(base({ kind: 'cron', expression: '0 9 31 2 1' }, { timezone: 'UTC' }), new Date('2026-02-01T00:00:00.000Z'))?.scheduledForUtc).toBe('2026-02-02T09:00:00.000Z');
+  });
+
+  it('preserves weekdays and midnight cadence with calendar jumps', () => {
+    const friday = base({ kind: 'cron', expression: '0 9 * * 5' }, { timezone: 'UTC' });
+    expect(previewNextSchedule(friday, new Date('2026-08-28T09:00:00.000Z'))?.scheduledForUtc).toBe('2026-09-04T09:00:00.000Z');
+    expect(previewNextSchedule(base({ kind: 'cron', expression: '* * * * *' }, { timezone: 'UTC' }), new Date('2026-08-28T23:59:00.000Z'))?.scheduledForUtc).toBe('2026-08-29T00:00:00.000Z');
+  });
   it('models DST gaps explicitly instead of silently changing timezone semantics', () => {
     const skipped = base({ kind: 'at', localDateTime: '2026-03-08T02:30:00' });
     expect(previewNextSchedule(skipped, new Date('2026-03-01T00:00:00.000Z'))).toBeUndefined();

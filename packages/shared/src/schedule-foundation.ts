@@ -249,7 +249,10 @@ export interface ScheduleOccurrenceRepository {
   advance(id: string, expectedRevision: number, state: ScheduleOccurrence['state'], fence: ScheduleExecutionFence, error?: string): Promise<ScheduleOccurrence>;
   recordPlanned(definitionId: string, scheduledForUtc: string, nextDueAt?: string, expectedGeneration?: number): Promise<{ occurrence: ScheduleOccurrence; created: boolean }>;
 }
-export interface ScheduleWatermarkRepository { get(definitionId: string): Promise<ScheduleWatermark | undefined> }
+export interface ScheduleWatermarkRepository {
+  get(definitionId: string): Promise<ScheduleWatermark | undefined>;
+  restoreNextDue(definitionId: string, expectedGeneration: number, nextDueAt: string): Promise<void>;
+}
 export interface ScheduleLeaseRepository {
   getByKey(leaseKey: string): Promise<ScheduleLease | undefined>;
   acquire(input: AcquireScheduleLeaseInput): Promise<ScheduleLease>;
@@ -268,12 +271,17 @@ function isValidTimezone(timezone: string): boolean {
 
 interface LocalParts { year: number; month: number; day: number; hour: number; minute: number; second: number; weekday: number }
 const weekdayByShort: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+const formatters = new Map<string, Intl.DateTimeFormat>();
 
 function zonedParts(date: Date, timezone: string): LocalParts {
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone, hour12: false, weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
-  });
+  let formatter = formatters.get(timezone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone, weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+    });
+    formatters.set(timezone, formatter);
+  }
   const parts = Object.fromEntries(formatter.formatToParts(date).map(part => [part.type, part.value]));
   return { year: Number(parts.year), month: Number(parts.month), day: Number(parts.day), hour: Number(parts.hour), minute: Number(parts.minute), second: Number(parts.second), weekday: weekdayByShort[parts.weekday ?? 'Sun'] ?? 0 };
 }
@@ -291,7 +299,7 @@ function sameLocal(left: Omit<LocalParts, 'weekday'>, right: LocalParts): boolea
   return left.year === right.year && left.month === right.month && left.day === right.day && left.hour === right.hour && left.minute === right.minute && left.second === right.second;
 }
 
-function resolveLocal(parts: Omit<LocalParts, 'weekday'>, timezone: string): Date[] {
+function localOffsets(parts: Omit<LocalParts, 'weekday'>, timezone: string): number[] {
   const naive = localEpoch(parts);
   const offsets = new Set<number>();
   for (let minutes = -2_160; minutes <= 2_160; minutes += 30) {
@@ -299,7 +307,11 @@ function resolveLocal(parts: Omit<LocalParts, 'weekday'>, timezone: string): Dat
     const local = zonedParts(instant, timezone);
     offsets.add(localEpoch(local) - instant.getTime());
   }
-  return [...offsets]
+  return [...offsets];
+}
+function resolveLocal(parts: Omit<LocalParts, 'weekday'>, timezone: string, offsets = localOffsets(parts, timezone)): Date[] {
+  const naive = localEpoch(parts);
+  return offsets
     .map(offset => new Date(naive - offset))
     .filter(candidate => sameLocal(parts, zonedParts(candidate, timezone)))
     .sort((left, right) => left.getTime() - right.getTime());
@@ -310,8 +322,8 @@ function label(parts: Omit<LocalParts, 'weekday'>): string {
   return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
 }
 
-function resolveWithDst(parts: Omit<LocalParts, 'weekday'>, definition: ScheduleDefinition): SchedulePreview | undefined {
-  let candidates = resolveLocal(parts, definition.timezone);
+function resolveWithDst(parts: Omit<LocalParts, 'weekday'>, definition: ScheduleDefinition, offsets = localOffsets(parts, definition.timezone)): SchedulePreview | undefined {
+  let candidates = resolveLocal(parts, definition.timezone, offsets);
   let resolution: SchedulePreview['dstResolution'] = 'exact';
   let resolvedParts = parts;
   if (candidates.length === 0) {
@@ -319,7 +331,7 @@ function resolveWithDst(parts: Omit<LocalParts, 'weekday'>, definition: Schedule
     for (let minute = 1; minute <= 180 && candidates.length === 0; minute += 1) {
       const shifted = new Date(localEpoch(parts) + minute * 60_000);
       resolvedParts = { year: shifted.getUTCFullYear(), month: shifted.getUTCMonth() + 1, day: shifted.getUTCDate(), hour: shifted.getUTCHours(), minute: shifted.getUTCMinutes(), second: shifted.getUTCSeconds() };
-      candidates = resolveLocal(resolvedParts, definition.timezone);
+      candidates = resolveLocal(resolvedParts, definition.timezone, offsets);
     }
     if (candidates.length === 0) return undefined;
     resolution = 'gap_shifted';
@@ -374,15 +386,29 @@ export function previewNextSchedule(definition: ScheduleDefinition, after = new 
   }
   const matcher = parseCron(definition.trigger.expression);
   const afterLocal = zonedParts(after, definition.timezone);
-  let cursor = new Date(Date.UTC(afterLocal.year, afterLocal.month - 1, afterLocal.day, afterLocal.hour, afterLocal.minute, 0) + 60_000);
-  const limit = cursor.getTime() + 2 * 366 * 24 * 60 * 60_000;
-  while (cursor.getTime() <= limit) {
-    const local: LocalParts = { year: cursor.getUTCFullYear(), month: cursor.getUTCMonth() + 1, day: cursor.getUTCDate(), hour: cursor.getUTCHours(), minute: cursor.getUTCMinutes(), second: 0, weekday: cursor.getUTCDay() };
-    if (cronMatches(matcher, local)) {
-      const preview = resolveWithDst(local, definition);
-      if (preview && new Date(preview.scheduledForUtc) > after) return preview;
+  const months = [...matcher.month].sort((a, b) => a - b);
+  const hours = [...matcher.hour].sort((a, b) => a - b), minutes = [...matcher.minute].sort((a, b) => a - b);
+  // Gregorian dates and weekdays repeat every 400 years. Visit matching calendar
+  // days, not every elapsed minute; even impossible February dates are bounded.
+  for (let year = afterLocal.year; year <= afterLocal.year + 400; year++) {
+    for (const month of months) {
+      if (year === afterLocal.year && month < afterLocal.month) continue;
+      const days = new Date(Date.UTC(year, month, 0)).getUTCDate();
+      for (let day = 1; day <= days; day++) {
+        if (year === afterLocal.year && month === afterLocal.month && day < afterLocal.day) continue;
+        const local: LocalParts = { year, month, day, hour: hours[0]!, minute: minutes[0]!, second: 0, weekday: new Date(Date.UTC(year, month - 1, day)).getUTCDay() };
+        if (!cronMatches(matcher, local)) continue;
+        const offsets = localOffsets({ ...local, hour: 12 }, definition.timezone);
+        for (const hour of hours) for (const minute of minutes) {
+          const candidate = { ...local, hour, minute }, naive = localEpoch(candidate);
+          // Start at the beginning of the local day so a still-future second
+          // overlap occurrence is considered even after its first wall time.
+          if (offsets.every(offset => naive - offset <= after.getTime())) continue;
+          const preview = resolveWithDst(candidate, definition, offsets);
+          if (preview && new Date(preview.scheduledForUtc) > after) return preview;
+        }
+      }
     }
-    cursor = new Date(cursor.getTime() + 60_000);
   }
   return undefined;
 }

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { readLarkConfigs, saveLarkConfig } from './config.js';
-import { LarkLongConnectionListenerPool } from './listener.js';
+import { LarkLongConnectionListener, LarkLongConnectionListenerPool, LarkMessageCoordinator } from './listener.js';
 import { __testOnly_resetLarkGate } from './api-gate.js';
 import { larkListenerStatusKey, type LarkListenerStatus } from './listener-status.js';
 
@@ -188,4 +188,53 @@ it('reports a bot as reconnecting, not connected, while the SDK reconnects an es
   sockets[0]!.reconnected();
   await settle();
   expect(status(values)).toMatchObject({ active: ['cli_retry'], reconnecting: [] });
+});
+
+it('closes a connecting socket immediately and settles startup without waiting for readiness', async () => {
+  const { store, pool } = await setup(['hold']);
+  let settled = false;
+  const starting = pool.sync(await readLarkConfigs(store)).catch(error => error).finally(() => { settled = true; });
+  await settle();
+  expect(sockets).toHaveLength(1);
+  pool.stop();
+  await settle();
+  expect.soft(sockets[0]!.closed).toBe(true);
+  expect.soft(settled).toBe(true);
+  sockets[0]!.ready();
+  await starting;
+  expect(pool.activeAppIds).toEqual([]);
+  await pool.sync(await readLarkConfigs(store));
+  expect(sockets).toHaveLength(1);
+});
+
+it('cleans up coordinator resources when initialization fails before creating the socket', async () => {
+  const { store } = await setup([]);
+  const initialize = vi.spyOn(LarkMessageCoordinator.prototype, 'initializeWorkflows').mockRejectedValue(new Error('initialization failed'));
+  const stop = vi.spyOn(LarkMessageCoordinator.prototype, 'stop');
+  const listener = new LarkLongConnectionListener(log(), { runtime: {} as any, fetcher, env: {} });
+  try {
+    await expect(listener.start((await readLarkConfigs(store))[0]!)).rejects.toThrow('initialization failed');
+    expect(stop).toHaveBeenCalledOnce();
+    expect(sockets).toHaveLength(0);
+    expect(listener.listening).toBe(false);
+  } finally { listener.stop(); initialize.mockRestore(); stop.mockRestore(); }
+});
+
+it('does not create a socket when stopped during coordinator initialization', async () => {
+  const { store } = await setup([]);
+  let release!: () => void;
+  const initialize = vi.spyOn(LarkMessageCoordinator.prototype, 'initializeWorkflows').mockImplementation(() => new Promise(resolve => { release = resolve; }));
+  const stop = vi.spyOn(LarkMessageCoordinator.prototype, 'stop');
+  const listener = new LarkLongConnectionListener(log(), { runtime: {} as any, fetcher, env: {} });
+  const starting = listener.start((await readLarkConfigs(store))[0]!).catch(error => error);
+  try {
+    await settle();
+    expect(initialize).toHaveBeenCalledOnce();
+    listener.stop();
+    release();
+    expect(await starting).toBeInstanceOf(Error);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(sockets).toHaveLength(0);
+    expect(listener.listening).toBe(false);
+  } finally { release(); await starting; listener.stop(); initialize.mockRestore(); stop.mockRestore(); }
 });

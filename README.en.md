@@ -458,6 +458,12 @@ Old clients ignore the additional decision field. Corrupt legacy forwarding stil
 
 ## Upgrade Notes
 
+- **Work item history**: upgrades automatically build a scheduling index. Completed items with settled delivery no longer enter the per-second scan; history remains available and pending deliveries keep retrying.
+- **Disconnect and stop recovery**: cross-instance live streams can reconnect after an upstream disconnect. Shutdown closes proxy connections and pending Lark listener connections. A failed terminal stop can be retried to release the process.
+- **Background tasks**: blank answers no longer block later memory extraction; group notification limits use the complete hourly window; cron handles leap days across years and repeated daylight-saving times. Enabled recurring schedules with a missing next execution time are repaired automatically; completed one-time schedules are not rerun.
+- **Web task state**: replaying missed events also refreshes task state, so the task list catches up with restored history.
+- **GitHub read limits**: PR issue and inline comments support pagination, with a shared limit of 100 pages and 8 MiB. Exceeding it fails the whole read instead of returning partial comments. Each JSON response is limited to 2 MiB and each log download to 8 MiB of actual bytes; oversized reads are cancelled. Oversized logs are omitted while failed job and step summaries remain available.
+- **CLI startup**: reduced startup overhead for local management commands such as `secret`.
 - **CI env vars moved to plugins**: see the upgrade paragraph under Plugins.
 - **Per-turn changes could be missed** when a file was edited within the same second as the last index write and kept the same size (affecting "View changes" and the `/pr` file list). Fixed.
 

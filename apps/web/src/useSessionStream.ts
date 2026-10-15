@@ -19,13 +19,25 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
     let frame: number | undefined;
     let pending: import('./api').DockEvent[] = [];
     let received = newestSequence(qc.getQueryData<EventWindow>(['events', sessionId]));
+    const applyEvents = (batch: import('./api').DockEvent[]) => {
+      if (!batch.length) return;
+      const cached = qc.getQueryData<EventWindow>(['events', sessionId]);
+      let statuses = batch.filter(event => event.type === 'status');
+      if (statuses.length) {
+        const firstStatus = Math.min(...statuses.map(event => event.sequence));
+        // A recovered older status may contain metadata absent from later live statuses.
+        statuses = [...statuses, ...(cached?.events.filter(event => event.type === 'status' && event.sequence > firstStatus) ?? [])]
+          .sort((a, b) => a.sequence - b.sequence);
+      }
+      const newTask = batch.some(event => event.type === 'task' && !cached?.events.some(item => item.sequence === event.sequence));
+      qc.setQueryData<EventWindow>(['events', sessionId], current => mergeReconciledEvents(current, batch));
+      if (statuses.length) qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === sessionId ? statuses.reduce(applyStatusEvent, session) : session));
+      if (newTask) void qc.invalidateQueries({ queryKey: ['tasks', sessionId], exact: true });
+    };
     const flush = () => {
       frame = undefined;
       const batch = pending; pending = [];
-      qc.setQueryData<EventWindow>(['events', sessionId], current => mergeReconciledEvents(current, batch));
-      const statuses = batch.filter(event => event.type === 'status');
-      if (statuses.length) qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === sessionId ? statuses.reduce(applyStatusEvent, session) : session));
-      if (batch.some(event => event.type === 'task')) void qc.invalidateQueries({ queryKey: ['tasks', sessionId], exact: true });
+      applyEvents(batch);
     };
     let reconciling = false;
     let desiredTarget: number | undefined;
@@ -39,7 +51,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
         while (true) {
           const missed = await api.events(sessionId, { after: cursor, limit: EVENT_PAGE_SIZE, direction: 'forward' }, controller.signal);
           if (controller.signal.aborted) return;
-          qc.setQueryData<EventWindow>(['events', sessionId], current => mergeReconciledEvents(current, missed));
+          applyEvents(missed);
           const nextCursor = missed.at(-1)?.sequence ?? cursor;
           if (!missed.length || nextCursor <= cursor || missed.length < EVENT_PAGE_SIZE || (desiredTarget !== undefined && nextCursor >= desiredTarget - 1)) {
             if (desiredTarget === undefined || nextCursor >= desiredTarget - 1) recoveryCursors.current.delete(sessionId);

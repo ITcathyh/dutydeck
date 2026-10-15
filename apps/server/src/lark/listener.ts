@@ -185,6 +185,15 @@ export class LarkLongConnectionListener implements LarkListener {
 
     const http = createWorkbenchFetch(this.options.fetcher);
     this.http = http;
+    this.config = config;
+    try { await this.connect(config, domain, credentials, http); }
+    catch (error) {
+      if (this.http === http) this.stop();
+      throw error;
+    }
+  }
+
+  private async connect(config: StoredLarkConfig, domain: string, credentials: string, http: ReturnType<typeof createWorkbenchFetch>) {
     const service = createLarkCardService(this.options.env ?? process.env, http.fetch, config);
     let botOpenId: string;
     try { botOpenId = await service.getBotOpenId(); }
@@ -208,11 +217,14 @@ export class LarkLongConnectionListener implements LarkListener {
       this.options.groupManager,
       { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation, usage: this.options.usage, loginLinks: this.options.loginLinks },
     ) : undefined;
+    this.coordinator = coordinator;
     await coordinator?.initializeWorkflows(config);
+    http.fetch.signal!.throwIfAborted();
     if (coordinator) this.options.participation?.setDispatcher(config.appId, (event, current) => coordinator.adopt(event, current));
     void this.options.participation?.recover(config.appId).catch(error => this.log.warn({ error, appId: config.appId }, '群观察恢复失败'));
     try { await coordinator?.startReconciliation(config); }
     catch (error) { this.log.warn({ error, appId: config.appId }, '飞书卡片终态对账启动失败，继续建立消息监听'); }
+    http.fetch.signal!.throwIfAborted();
     // 欢迎语：kv 必须是持久化存储，重启后才能靠标记不重发；无存储则不启用。
     const welcomeKv = this.options.welcomeStore ?? this.options.workflowStore;
     if (welcomeKv) {
@@ -408,21 +420,26 @@ export class LarkLongConnectionListener implements LarkListener {
         if (this.client === client) this.connectionLost?.(error);
       }
     });
+    this.client = client;
+    const abortStart = () => connectionFailed(http.fetch.signal!.reason);
+    http.fetch.signal!.addEventListener('abort', abortStart, { once: true });
     const connectionTimeout = setTimeout(() => connectionFailed(new Error('WebSocket connection readiness timed out')), 20_000);
     try {
       // SDK start() returns before the handshake; only onReady confirms it.
+      http.fetch.signal!.throwIfAborted();
       await Promise.all([client.start({ eventDispatcher: dispatcher }), ready]);
+      http.fetch.signal!.throwIfAborted();
       this.client = client;
       this.coordinator = coordinator;
       this.credentials = credentials;
       this.config = config;
       this.listening = true;
     } catch (error) {
-      http.close();
-      client.close();
-      coordinator?.stop();
       throw new LarkServiceError('LARK_LISTENER_START_FAILED', `Failed to start Lark listener: ${error instanceof Error ? error.message : String(error)}`, 502);
-    } finally { clearTimeout(connectionTimeout); }
+    } finally {
+      clearTimeout(connectionTimeout);
+      http.fetch.signal!.removeEventListener('abort', abortStart);
+    }
   }
 
   stop() {
@@ -455,6 +472,7 @@ interface LarkListenerRetry { attempt: number; error: string; failedAt: string; 
 
 export class LarkLongConnectionListenerPool implements LarkListenerPool {
   private readonly listeners = new Map<string, LarkLongConnectionListener>();
+  private readonly starting = new Set<LarkLongConnectionListener>();
   /** 连接失败、等待重连的机器人。一直重连，直到连上、配置被删除或关闭监听。 */
   private readonly retries = new Map<string, LarkListenerRetry>();
   private syncTail: Promise<void> = Promise.resolve();
@@ -477,6 +495,7 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
   }
 
   private async syncConfiguredListeners(configs: StoredLarkConfig[]) {
+    if (this.closed) return;
     // 手动同步或保存配置：已排定的重连作废，按这次的配置从头开始。
     for (const retry of this.retries.values()) clearTimeout(retry.timer);
     this.retries.clear();
@@ -500,15 +519,18 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
   }
 
   private async startListener(appId: string, config: StoredLarkConfig) {
+    if (this.closed) return;
     const listener = this.listeners.get(appId) ?? this.createListener(appId);
+    this.starting.add(listener);
     try {
       await listener.start(config);
-      this.listeners.set(appId, listener);
+      if (this.closed) listener.stop();
+      else this.listeners.set(appId, listener);
     } catch (error) {
       listener.stop();
       this.listeners.delete(appId);
       throw error;
-    }
+    } finally { this.starting.delete(listener); }
   }
 
   private createListener(appId: string): LarkLongConnectionListener {
@@ -573,8 +595,9 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
     this.closed = true;
     for (const retry of this.retries.values()) clearTimeout(retry.timer);
     this.retries.clear();
-    for (const listener of this.listeners.values()) listener.stop();
+    for (const listener of new Set([...this.listeners.values(), ...this.starting])) listener.stop();
     this.listeners.clear();
+    this.starting.clear();
   }
 }
 

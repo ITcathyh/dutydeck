@@ -737,7 +737,8 @@ export class LarkMemoryPipeline {
       await this.assertClaim();
       const currentConfig = await this.options.readConfig(scope.appId);
       if (!currentConfig || !larkMemoryEnabled(currentConfig)) throw new LarkMemoryError('MEMORY_DISABLED', '写入前记忆权限已关闭。', 403);
-      const consumed = kind === 'extraction' ? input.turns.filter(turn => turn.senderKind === 'bot' || input.materials.some(material => material.taskId === turn.taskId)).map(turn => turn.taskId) : [];
+      // collectTurns verifies every human input before freezing the job, including blank results.
+      const consumed = kind === 'extraction' ? input.turns.map(turn => turn.taskId) : [];
       job = await this.options.store.applyJob(scope, jobs, job, plan, (state, result) => {
         const at = this.now().toISOString();
         const pendingTurns = (state.pendingTurns ?? []).filter(turn => !consumed.includes(turn.taskId));

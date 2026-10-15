@@ -462,6 +462,12 @@ export interface FoundationRepository {
 }
 
 export interface RepositoryBundle {
+  workItems: {
+    listScheduledIds(): Promise<string[]>;
+    listByParent(parentSessionId: string): Promise<Array<{ key: string; value: string }>>;
+    findByChildSession(sessionId: string): Promise<string | undefined>;
+    countActiveSteps(): Promise<number>;
+  };
   memoryJobs: import('./memory-jobs.js').MemoryJobRepository;
   collaboration: import('./collaboration.js').CollaborationRepository;
   ciWebhook: import('./ci-webhook.js').CiWebhookRepository;

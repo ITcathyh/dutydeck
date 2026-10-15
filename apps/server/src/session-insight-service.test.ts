@@ -367,20 +367,27 @@ describe('SessionInsightService cancel', () => {
       sources: [h._matchedSource('k1', h.writeLog('b.jsonl', '{"x":1}'), 'primary')],
       primarySourceKey: 'k1'
     }));
+    let runnerStarted!: () => void;
+    const started = new Promise<void>(resolve => { runnerStarted = resolve; });
+    let runnerStopped!: () => void;
+    const stopped = new Promise<void>(resolve => { runnerStopped = resolve; });
     let runnerAborted = false;
     h.setRunner(async ({ signal }) => {
-      await new Promise(resolve => {
-        if (signal?.aborted) return resolve();
-        signal?.addEventListener('abort', resolve);
-        setTimeout(resolve, 5000);
+      expect(signal).toBeDefined();
+      await new Promise<void>(resolve => {
+        if (signal!.aborted) resolve();
+        else signal!.addEventListener('abort', () => resolve(), { once: true });
+        runnerStarted();
       });
       runnerAborted = true;
+      runnerStopped();
       throw new SessionInsightProcessError('INSIGHT_INTERRUPTED', 'aborted');
     });
     const refresh = await h.service.refresh('s1');
-    await new Promise(r => setTimeout(r, 20));
+    await started;
     const cancelRun = await h.service.cancel('s1', refresh.requestId);
     expect(cancelRun.success).toBe(true);
+    await stopped;
     await h.settled();
     expect(runnerAborted).toBe(true);
     expect(h.repos.insight.getState('s1').state).toBe('cancelled');
@@ -397,6 +404,36 @@ describe('SessionInsightService cancel', () => {
     expect(staleCancel.success).toBe(false);
     expect(staleCancel.state).toBe('succeeded');
     void successId;
+  });
+
+  it('cancels a promoted job before its resolver completes without starting the runner', async () => {
+    const h = makeHarness();
+    h.createSession('s1');
+    let releaseResolver!: () => void;
+    const gate = new Promise<void>(resolve => { releaseResolver = resolve; });
+    let resolverStarted!: () => void;
+    const started = new Promise<void>(resolve => { resolverStarted = resolve; });
+    h.setResolverResult(async () => {
+      resolverStarted();
+      await gate;
+      return {
+        sources: [h._matchedSource('k1', h.writeLog('cancel-before-runner.jsonl', '{"x":1}'), 'primary')],
+        primarySourceKey: 'k1'
+      };
+    });
+    let runnerCalled = false;
+    h.setRunner(async () => { runnerCalled = true; throw new Error('Cancelled job must not start its runner'); });
+    try {
+      const refresh = await h.service.refresh('s1');
+      await started;
+      expect(h.repos.insight.getState('s1').state).toBe('running');
+      expect(await h.service.cancel('s1', refresh.requestId)).toMatchObject({ success: true, state: 'cancelled' });
+      releaseResolver();
+      // Unlike the persistent cancelled state, close waits for the actual job pipeline to drain.
+      await h.service.close();
+      expect(runnerCalled).toBe(false);
+      expect(h.repos.insight.getState('s1').state).toBe('cancelled');
+    } finally { releaseResolver(); await h.service.close(); }
   });
 
   it('repeated queue-then-cancel never leaves queued rows or grows capacity', async () => {
