@@ -298,6 +298,32 @@ describe('execution Agent task context', () => {
     expect(lines).toContain('- 事项 follow_capacity [open] 目标：完成容量评估；负责人：ou_a；步骤 1/2 已完成');
   });
 
+  it('lists repeated messages from one sender once and drops link parameters from bot messages', async () => {
+    const h = await harness('selective');
+    const alert = (host: string) => `PSM：svc.file 环境：canary (https://${host}/error_list?page=1&search=${'%7B'.repeat(60)}) 错误数上升`;
+    await observe(h, 'om_alert_1', alert('apm.example.com'), { senderId: 'ou_alarm', senderKind: 'bot', occurredAt: at(0) });
+    await observe(h, 'om_other', alert('apm.example.com'), { senderId: 'ou_other', senderKind: 'bot', occurredAt: at(1) });
+    await observe(h, 'om_alert_2', alert('apm.example.com'), { senderId: 'ou_alarm', senderKind: 'bot', occurredAt: at(2) });
+    await observe(h, 'om_prod', alert('apm.example.com').replace('canary', 'prod'), { senderId: 'ou_alarm', senderKind: 'bot', occurredAt: at(3) });
+    await observe(h, 'om_alert_3', alert('apm.example.com'), { senderId: 'ou_alarm', senderKind: 'bot', occurredAt: at(4) });
+    await observe(h, 'om_link', '看下 https://wiki.example.com/page?id=1', { occurredAt: at(5) });
+    await observe(h, 'om_ask', '这个告警要处理吗', { occurredAt: at(6), origin: 'live' });
+    const context = (await h.participation.taskContext(scope, { triggerMessageId: 'om_ask', materialMessageIds: new Set(['om_alert_1', 'om_alert_2']) }))!;
+    const lines = context.text.split('\n');
+    const short = 'PSM：svc.file 环境：canary (https://apm.example.com/error_list?…) 错误数上升';
+    // 已在参考材料里的两条不合并；剩下的同内容只留最近一条。其他发送人和改了内容的不合并。
+    expect(lines).toContain('[09-25 10:00] ou_alarm(bot) om_alert_1: （正文见下方用户请求后的参考材料）');
+    expect(lines).toContain('[09-25 10:02] ou_alarm(bot) om_alert_2: （正文见下方用户请求后的参考材料）');
+    expect(lines).toContain(`[09-25 10:01] ou_other(bot) om_other: ${short}`);
+    expect(lines).toContain(`[09-25 10:03] ou_alarm(bot) om_prod: ${short.replace('canary', 'prod')}`);
+    expect(lines).toContain(`[09-25 10:04] ou_alarm(bot) om_alert_3: ${short}`);
+    expect(lines).toContain('[09-25 10:05] ou_a(human) om_link: 看下 https://wiki.example.com/page?id=1');
+
+    const repeated = (await h.participation.taskContext(scope, { triggerMessageId: 'om_ask' }))!.text.split('\n');
+    expect(repeated.filter(line => line.includes('ou_alarm(bot)') && line.includes('canary'))).toEqual([`[09-25 10:04] ou_alarm(bot) om_alert_3: ${short}（相同内容共 3 条，最早 09-25 10:00）`]);
+    expect(repeated).toContain('[09-25 10:06] ou_a(human) om_ask: （本轮请求，正文见下方用户请求）');
+  });
+
   it.each([
     [true, '可以用 group messages 查看'],
     [false, '本轮未注入']
