@@ -715,10 +715,9 @@ describe('Lark message coordinator', () => {
     expect(runtime.send).toHaveBeenCalledWith('ses_1', '协作处理', expect.any(String));
     expect(injectedPrompt).toContain('[Dutydeck 飞书当前消息 · 系统上下文]');
     expect(injectedPrompt).toContain('message_id：om_group_tools');
-    expect(injectedPrompt).toContain('thread_id：omt_topic');
-    expect(injectedPrompt).toContain('需要独立发送并接在这条消息下时用 --reply-to om_group_tools');
-    expect(injectedPrompt).toContain('不能用 omt_* thread_id');
-    expect(injectedPrompt).toContain('交付文件用 group send-file 发到群里');
+    // 发送用法只在按本轮授权生成的工具块里说；这里不给 thread_id，也不教发送。
+    expect(injectedPrompt).not.toContain('omt_topic');
+    expect(injectedPrompt).not.toContain('send-file');
     expect(injectedPrompt).not.toContain('回答当前提问，使用 group send');
     expect(injectedPrompt).toContain('[用户请求]\n协作处理');
   });

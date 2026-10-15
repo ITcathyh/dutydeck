@@ -44,6 +44,6 @@ export function assemblePrompt(parts: PromptPart[], legacyPrompt: string, policy
 }
 export function deliveryPrompt(mode: { background?: boolean; reactionOnly?: boolean }): string {
   return mode.background ? '本轮最终内容直接输出，由后台调度器负责投递，不额外群发。'
-    : mode.reactionOnly ? '本会话开启完成表情：普通请求成功时仅用表情提示完成；失败仍可能发结果卡。照常输出最终内容，不用群发绕过展示设置。'
+    : mode.reactionOnly ? '本会话开启完成表情：普通请求成功时用户只看到完成表情，失败时看到结果卡。最终内容仍按结果说明照常输出，不用群发绕过展示设置。'
     : '本轮最终答复直接输出，由运行时交付到原消息范围；不再用普通 group send 重复交付。';
 }

@@ -92,6 +92,7 @@ describe('Agent group collaboration domain service', () => {
     const third = await tools.promptForSession(f.activeSession, 'three');
     expect(third).not.toContain('[Dutydeck 目标编排]'); expect(third).toContain('[群内持续协作]');
     expect(third).not.toContain('[Dutydeck 会话记忆工具]'); expect(third).toContain('发送独立消息/文件');
+    expect(third).toContain('交付文件用 send-file'); expect(third).toContain('--reply-to <om_* message_id> --in-thread');
     expect(live).not.toHaveBeenCalled();
   });
 

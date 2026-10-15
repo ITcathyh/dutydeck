@@ -77,7 +77,7 @@ const queuedAheadOf = (tasks: TaskRecord[], taskId?: string) => {
  * 每轮的结果写法。第一句会被 larkConclusionHeadline 取作结果卡标题和通知预览，所以要求它就是结论。
  * 只有机器人能往群里发文件时才提 send-file。
  */
-const larkResultGuidance = (groupSend: boolean) => `[飞书结果说明] 最终输出会原样显示在飞书结果卡上，读者多在手机上看。第一句直接给结论：做事类写做成了什么、还差什么，排查类写根因或判断；这句会成为卡片标题和通知预览，标题只显示约 20 个汉字，所以控制在 20 字左右，数字、时间范围和明细放到后面，也不要用开场白或过程话开头。开始动手前先用一句话说这一轮打算怎么做，只说这一次（显示在过程卡上，不属于最终输出）；直接回答时不写。之后按需给证据、影响、下一步和交付入口，术语准确且让读者能理解。等待用户操作或外部批准时写明尚未完成，不把本轮结束写成目标完成。需要用户操作时单独写一行「需要你：…」，卡片会把它显示成醒目块。用户要求转述或结果需要协同时，再附一段可直接转发的短文。${groupSend ? '交付文件用 group send-file 发到群里，' : ''}不要在结果里给本机路径链接（手机上点不开）。用户明确指定的格式优先。`;
+const larkResultGuidance = (silentProgress: boolean) => `[飞书结果说明] 最终输出会原样显示在飞书结果卡上，读者多在手机上看。第一句直接给结论：做事类写做成了什么、还差什么，排查类写根因或判断；这句会成为卡片标题和通知预览，标题只显示约 20 个汉字，数字、时间范围和明细放到后面，不用开场白或过程话开头。${silentProgress ? '' : '开始动手前先用一句话说这一轮打算怎么做，只说这一次（显示在过程卡上，不属于最终输出）；直接回答时不写。'}之后按需给证据、影响、下一步和交付入口。等待用户操作或外部批准时写明尚未完成，不把本轮结束写成目标完成。需要用户操作时单独写一行「需要你：…」，卡片会把它显示成醒目块。用户要求转述或结果需要协同时，再附一段可直接转发的短文。不要在结果里给本机路径链接（手机上点不开）。用户明确指定的格式优先。`;
 
 /** 被并入下一条的排队卡原位改成的说明。 */
 const mergedCardNote = '**已并入下一条**\n\n这条内容会和你紧接着发的消息一起执行，进度见新的任务卡。';
@@ -1517,18 +1517,18 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       }
     }
     if (task.alertRecall) injected.push(larkAlertRecallPrompt(task.alertRecall));
-    const groupSend = Boolean(config.groupToolsEnabled && config.groupToolsAllowSend);
     const rolePrompt = formatRolePrompt(config);
     if (rolePrompt) injected.push(rolePrompt);
     if (groupInstructions) injected.push(`[Dutydeck 群长期指令 · 管理者配置]\n${groupInstructions}`);
     if (config.preInjectPrompt?.trim()) injected.push(`[Dutydeck 预注入 Prompt]\n${config.preInjectPrompt.trim()}`);
-    injected.push(larkResultGuidance(groupSend));
+    injected.push(larkResultGuidance(silentProgress));
     if (config.adhdMode) injected.push(larkAdhdModePrompt);
     if (riskControlEnabled && !highRiskAuthorized) injected.push(`[Dutydeck 安全策略 · 自动注入]\n当前飞书发送人不在高危操作允许名单中。禁止执行匹配以下正则的操作，也不要通过脚本、子进程、MCP 或其他等价方式绕过：\n${highRiskPattern}\n如果用户要求此类操作，请明确说明已被 Dutydeck 安全策略阻止。`);
     if (task.redispatch) injected.push(larkRedispatchAgentNote(task.redispatch));
     if (planTask !== undefined) injected.push(planInstructionBlock);
-    if (event.chatType === 'group' && groupSend) {
-      injected.push(`[Dutydeck 飞书当前消息 · 系统上下文] message_id：${event.messageId}；thread_id：${event.threadId?.trim() || '事件未提供'}。需要独立发送并接在这条消息下时用 --reply-to ${event.messageId}；--reply-to 只能用 om_* message_id，不能用 omt_* thread_id。`);
+    // 只给事实；能不能发、怎么接在这条消息下，由工具块按本轮实际授权说明。
+    if (event.chatType === 'group' && config.groupToolsEnabled && config.groupToolsAllowSend) {
+      injected.push(`[Dutydeck 飞书当前消息 · 系统上下文] message_id：${event.messageId}`);
     }
     const agentPrompt = injected.length ? `${injected.join('\n\n')}\n\n[用户请求]\n${materialPrompt}` : materialPrompt;
     const promptParts: PromptPart[] = injected.flatMap((content, index) => {

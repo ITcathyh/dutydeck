@@ -719,7 +719,7 @@ export class LarkAgentToolsService {
     const blocks: string[] = [larkCommandPrompt(stableMemoryCommand(this.options.groupToolsCommand ?? 'dutydeck'),
       deliveryPrompt({ background: collaborationSession, reactionOnly: config.completionReactionOnly }))];
     if (memory) blocks.push(larkMemoryToolsPrompt());
-    if (config.silentProgress) blocks.push('本会话隐藏普通进度；提问和最终结果仍按各自设置处理。');
+    if (config.silentProgress) blocks.push('本会话不显示中间进度，不要另发进度消息；提问和最终结果不受影响。');
     const groupTools = read || discover || send ? [larkGroupToolsPrompt(send, { read, discover })] : [];
     if (task?.attemptId && send && this.options.finalTaskContext) {
       const turn = this.capabilities.finalTurnToken(session.id, task.taskId, task.attemptId);
@@ -1434,7 +1434,7 @@ export const larkGroupToolsPrompt = (allowSend: boolean, access = { read: true, 
   '[Dutydeck 飞书会话工具]',
   ...(access.read ? ['读取消息/任务历史：dutydeck group messages/message、history list/show；回答以前讨论过的结论先查历史，查不到或结果标 truncated 时不等于不存在。跨群资料：group team-search。'] : []),
   ...(access.discover ? ['发现成员/机器人：group peers/members。'] : []),
-  ...(allowSend ? ['发送独立消息/文件：group send/send-file，只用于用户授权的独立消息、文件或指定的人。不要回应自己发的消息，不和其他机器人互相礼貌 @，一次请求最多主动交接两跳。'] : []),
+  ...(allowSend ? ['发送独立消息/文件：group send/send-file。交付文件用 send-file；独立消息只在用户要求或需要通知指定的人时发；要接在某条消息下用 --reply-to <om_* message_id> --in-thread。不要回应自己发的消息，不和其他机器人互相礼貌 @，一次请求最多主动交接两跳。'] : []),
   '工具返回 GROUP_TOOL_AUTHORIZATION_REQUIRED 时停止操作，把 instruction 和 authorizationUrl 告诉用户，由管理员开通权限；不运行 lark-cli auth login，不索要密钥。'
 ].join('\n');
 

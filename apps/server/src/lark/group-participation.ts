@@ -238,7 +238,7 @@ export class LarkGroupParticipation {
     const level = await this.level(scope, settings);
     const config = await this.options.readConfig(scope.appId, scope.chatId).catch(() => undefined);
     const behavior = formatParticipationBehavior(level, config);
-    const modeLine = `本群参与强度：${participationLevelLabels[level]}（${behavior}）${settings.participation === 'observe' ? '；群参与目前是仅观察：只记录群消息，不主动发言' : ''}${settings.notificationsPaused ? '；主动通知已暂停' : ''}。被 @、回复你的消息、或在你接手的话题里续聊时按正常任务处理。用户问起你的参与方式时直接按此回答；想调整时请他 @ 你说「积极点」「按需」「话题里不用@」或「只在@时回」，会收到一张确认卡。`;
+    const modeLine = `本群参与强度：${participationLevelLabels[level]}（${behavior}）${settings.participation === 'observe' ? '；群参与目前是仅观察：只记录群消息，不主动发言' : ''}${settings.notificationsPaused ? '；主动通知已暂停' : ''}。用户问起你的参与方式时直接按此回答；想调整时请他 @ 你说「积极点」「按需」「话题里不用@」或「只在@时回」，会收到一张确认卡。`;
     const description = this.bootstrapper.material(scope) ?? snapshot.observations.find(item => item.source === 'lark.description');
     return renderGroupTaskContext({ snapshot, description, modeLine, now: this.now(), ...input });
   }
