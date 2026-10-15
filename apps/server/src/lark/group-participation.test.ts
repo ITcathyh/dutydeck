@@ -662,18 +662,18 @@ describe('group observation and selective participation through the coordinator'
     expect(h.service.replyText).not.toHaveBeenCalled();
   });
   it('tells the explicit Agent which participation mode the group uses', async () => {
-    for (const [mode, label, status] of [['selective', '本群参与强度：按需', '按需'], ['observe', '仅观察', '只在 @ 时（只观察）']] as const) {
+    for (const [mode, label, status, scopeLine] of [['selective', '本群参与强度：按需', '按需', '\n\n**负责范围**：未配置。配置后，没 @ 我的消息里属于范围内的事我会判断后接；在 Dutydeck Web「机器人管理」的「负责范围」里填写'], ['observe', '仅观察', '只在 @ 时（只观察）', '']] as const) {
       const h = await harness(mode);
       await h.coordinator.handle(message('om_explicit', '@_user_1 你现在是什么模式', { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }] }), config);
       await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
       expect(h.runtime.send.mock.calls[0]).toEqual(expect.arrayContaining([expect.stringContaining(label)]));
-      expect(await h.participation.describe(scope)).toBe(`**参与**：${status}；今天判定 0 次（规则 0 / 模型 0），回复 0 次，判定耗时中位 —，花费 $0.00`);
+      expect(await h.participation.describe(scope)).toBe(`**参与**：${status}；今天判定 0 次（规则 0 / 模型 0），回复 0 次，判定耗时中位 —，花费 $0.00${scopeLine}`);
     }
   });
   it('summarizes paused notifications for /status', async () => {
     const h = await harness();
     await h.repository.updateSettings(scope, { expectedRevision: 1, notificationsPaused: true }, 'owner');
-    expect(await h.participation.describe(scope)).toBe('**参与**：按需；今天判定 0 次（规则 0 / 模型 0），回复 0 次，判定耗时中位 —，花费 $0.00 · 主动通知已暂停');
+    expect(await h.participation.describe(scope)).toBe('**参与**：按需；今天判定 0 次（规则 0 / 模型 0），回复 0 次，判定耗时中位 —，花费 $0.00 · 主动通知已暂停\n\n**负责范围**：未配置。配置后，没 @ 我的消息里属于范围内的事我会判断后接；在 Dutydeck Web「机器人管理」的「负责范围」里填写');
   });
   it('acknowledges only after deciding to reply, before generation, and clears the exact reaction after sending', async () => {
     const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
@@ -1187,7 +1187,7 @@ describe('rule layer, participation levels and corrections (pilot sentences)', (
     h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
     await h.coordinator.handle(message('om_q', '这个报错大家见过吗'), config); await h.participation.flush(scope);
     await h.coordinator.handle(message('om_thanks', '谢谢'), config); await h.participation.flush(scope);
-    expect(await h.participation.describe(scope)).toMatch(/^\*\*参与\*\*：按需；今天判定 2 次（规则 1 \/ 模型 1），回复 1 次，判定耗时中位 \d+\.\d 秒，花费 未知$/);
+    expect(await h.participation.describe(scope)).toMatch(/^\*\*参与\*\*：按需；今天判定 2 次（规则 1 \/ 模型 1），回复 1 次，判定耗时中位 \d+\.\d 秒，花费 未知\n\n\*\*负责范围\*\*：未配置。[^\n]+$/);
     expect(readParticipationUsage).toHaveBeenCalledWith(scope, expect.any(String));
     readParticipationUsage.mockResolvedValue({ entries: 2, costUsd: 0.0123, unknown: 0 });
     expect(await h.participation.describe(scope)).toContain('花费 $0.01');
@@ -1326,7 +1326,7 @@ describe('告警初筛和多机器人群的接话人', () => {
     expect(await h.participation.describe(scope)).toContain('**接话人**：未指定。本群有 2 个机器人，没 @ 的消息我先不接；要我接，@我 说「你负责接话」');
     await h.coordinator.handle(atBot('om_why', '刚才为什么没回'), config);
     await vi.waitFor(() => expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_why',
-      text: expect.stringContaining('那条「今天下午三点发版」我没接：本群有多个机器人、还没指定接话人，没 @ 的消息我先不接。要我接，@我 说「你负责接话」。') })));
+      text: expect.stringContaining('那条「今天下午三点发版」我没接：本群有多个机器人、还没指定接话人，没 @ 的消息我先不接。要我接，@我 说「你负责接话」，或在 Dutydeck Web 的群设置里指定接话人；也可以在 Dutydeck Web「机器人管理」的「负责范围」里写清我负责的事，范围内没 @ 的消息我会判断后接。') })));
   });
 
   it('单机器人群照旧：积极档没 @ 的消息照常接；订阅的告警来源机器人不算第二个机器人', async () => {

@@ -112,7 +112,10 @@ export function buildWelcomeCardContent(input: {
         ? '继续任务请回原任务话题回复；新任务请另发顶层消息。'
         : routing?.groupReplyMode === 'shared' ? '本群顶层消息共享任务上下文；独立工作请另开话题。'
         : '普通群顶层消息按发送人延续上下文；同一话题内共享上下文。',
-      '有多个机器人时，@你要使用的那个机器人。'
+      // 多机器人群没指定接话人时，没 @ 的消息规则层直接不接；配了负责范围的不受这条限制。
+      (participation === 'selective' || participation === 'eager') && !hasScope
+        ? '有多个机器人时，@你要使用的那个机器人；有多个机器人且本群没指定接话人时，没 @ 的消息我不接，要我接就 @我 说「你负责接话」。'
+        : '有多个机器人时，@你要使用的那个机器人。'
     ].join('\n');
     const commands = commandLines.length ? `常用命令：\n${commandLines.join('\n')}` : `发送 \`${trigger}/help\` 查看命令。`;
     // 身份边界：机器人以部署这台服务的系统账号执行，worktree 只隔离可写目录，

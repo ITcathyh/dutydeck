@@ -248,6 +248,15 @@ describe('欢迎卡使用生效群参与模式', () => {
     expect(buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy } }).markdown).toContain(`本群参与强度：**${label}**`);
   });
 
+  it('按需、积极档没配负责范围时说明多机器人群要指定接话人；配了负责范围或只在 @ 时不提', () => {
+    const multiBot = '有多个机器人且本群没指定接话人时，没 @ 的消息我不接，要我接就 @我 说「你负责接话」';
+    for (const participation of ['selective', 'eager'] as const) {
+      expect(buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'topic', participation } }).markdown).toContain(multiBot);
+      expect(buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'topic', participation, roleScope: '报警和告警排查' } }).markdown).not.toContain(multiBot);
+    }
+    expect(buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'always', participation: 'off' } }).markdown).not.toContain(multiBot);
+  });
+
   it('按需档在话题内免 @ 时说明话题内可直接回复', () => {
     expect(buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'topic', participation: 'selective' } }).markdown)
       .toContain('本群参与强度：**按需**（Tag 按需参与）。没 @我 的普通消息会先判断是否需要回复');

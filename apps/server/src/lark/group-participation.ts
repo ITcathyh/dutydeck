@@ -71,6 +71,8 @@ const OWNED_TOPIC_REF = 'dutydeck:owned-topic';
 type BotMember = { name: string; appId?: string; openId?: string };
 type Members = { humans: number; bots: number; botList: BotMember[] };
 const activeModes = new Set(['selective', 'eager']);
+/** 多机器人群里没接时，除了指定接话人，配负责范围也能让本机器人按范围接没 @ 的消息。 */
+const scopeSetupHint = '也可以在 Dutydeck Web「机器人管理」的「负责范围」里写清我负责的事，范围内没 @ 的消息我会判断后接。';
 /** 当不了接话人的档（只在 @ 时、话题内免 @）怎么跟人说。 */
 const deafLevelText = (level: ParticipationLevel) => level === 'mention' ? '我现在只在 @ 时回复' : `我现在是「${participationLevelLabels[level]}」，不接没 @ 的消息`;
 const clock = (at: string) => { const date = new Date(at); return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`; };
@@ -291,11 +293,15 @@ export class LarkGroupParticipation {
     const active = mandates.filter(item => item.status === 'active').length;
     const config = await this.options.readConfig(scope.appId, scope.chatId).catch(() => undefined);
     const roleLine = formatRoleStatusLine(config);
+    // 按需档没配负责范围时，说明配了之后的变化和入口。积极档和单真人群配了以后接的反而变少，不提示。
+    const scopeLine = level === 'selective' && !config?.roleScope?.trim()
+      ? '**负责范围**：未配置。配置后，没 @ 我的消息里属于范围内的事我会判断后接；在 Dutydeck Web「机器人管理」的「负责范围」里填写' : undefined;
     const line = `**参与**：${participationLevelLabels[level]}${settings.participation === 'observe' ? '（只观察）' : ''}；今天判定 ${today.length} 次（规则 ${rules} / 模型 ${models}），回复 ${replies} 次，判定耗时中位 ${median === undefined ? '—' : `${(median / 1000).toFixed(1)} 秒`}，花费 ${cost}`;
     const alarms = decisions.filter(item => isAlarmRecord(item) && Date.parse(item.createdAt) >= since.getTime());
     return [
       ...(roleLine ? [roleLine] : []),
       [line, ...(active ? [`生效中的持续委托 ${active} 个`] : []), ...(settings.notificationsPaused ? ['主动通知已暂停'] : [])].join(' · '),
+      ...(scopeLine ? [scopeLine] : []),
       ...await this.dutyLines(scope, alarms, config)
     ].join('\n\n');
   }
@@ -1269,9 +1275,11 @@ export class LarkGroupParticipation {
       const meta = deciderMetaOf(silent);
       const rule = meta?.kind === 'rule' ? participationRuleReasons[meta.rule as ParticipationRule] : undefined;
       const why = rule ?? (silent.status === 'failed' ? '那次判断没跑成，按规定不出声' : `我判断不是在叫我（${silent.reason.slice(0, 200)}）`);
-      // 对别人说的话不该接，就不再提示调档；多机器人群里是接话人的事，提示指定接话人。
-      const ruleHint = meta?.rule === 'no_responder' ? '要我接，@我 说「你负责接话」。'
-        : ['mentions_other', 'reply_to_other', 'calls_other', 'topic_of_other', 'not_responder'].includes(meta?.rule ?? '') ? '' : hint;
+      // 对别人说的话不该接，就不再提示调档；多机器人群里没接的，提示指定接话人或配负责范围；别人的话题提示在话题里 @。
+      const ruleHint = meta?.rule === 'no_responder' ? `要我接，@我 说「你负责接话」，或在 Dutydeck Web 的群设置里指定接话人；${scopeSetupHint}`
+        : meta?.rule === 'not_responder' ? `要改由我接，@我 说「你负责接话」；${scopeSetupHint}`
+        : meta?.rule === 'topic_of_other' ? '要我接这个话题，在话题里 @我；我接手后，话题里的追问不用再 @。'
+        : ['mentions_other', 'reply_to_other', 'calls_other'].includes(meta?.rule ?? '') ? '' : hint;
       return `${clock(silent.createdAt)} 那条「${snippet(trigger?.text)}」我没接：${why}。${ruleHint}`;
     }
     // 告警订阅跳过的告警不是这个人的消息，附在说明后面。
