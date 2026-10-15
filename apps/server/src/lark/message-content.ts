@@ -1,3 +1,5 @@
+import { fromMarkdown } from 'mdast-util-from-markdown';
+
 export type LarkResourceType = 'image' | 'file';
 
 export interface LarkMessageResource {
@@ -41,9 +43,23 @@ const collectCardImageKeys = (root: unknown, attachmentImages?: Record<string, a
     if (depth > 16 || !value || typeof value !== 'object') return;
     if (Array.isArray(value)) { for (const item of value) visit(item, depth + 1); return; }
     const node = value as Record<string, any>;
+    if (node.tag === 'code' || node.tag === 'code_block') return;
+    // 只解析卡片 Markdown 组件的真实 image token；AST 会排除代码、转义及普通链接。
+    if (node.tag === 'markdown' || node.tag === 'md' || node.tag === 'lark_md') {
+      const property = asRecord(node.property);
+      const markdown = [node.content, node.text, asRecord(node.text)?.content, property?.content, property?.text]
+        .find(value => typeof value === 'string');
+      if (typeof markdown === 'string' && markdown.includes('![')) {
+        const collect = (token: { type: string; url?: string; children?: unknown[] }) => {
+          if (token.type === 'image' && token.url && /^img_v\d+_[A-Za-z0-9_-]+$/i.test(token.url) && !keys.includes(token.url)) keys.push(token.url);
+          for (const child of token.children ?? []) collect(child as typeof token);
+        };
+        collect(fromMarkdown(markdown));
+      }
+    }
     if (node.tag === 'img' || node.tag === 'image') {
       const property = asRecord(node.property);
-      let key = [node.img_key, node.image_key, property?.img_key, property?.image_key].find(item => typeof item === 'string' && item.trim());
+      let key = [node.img_key, node.image_key, property?.img_key, property?.image_key, node.file_key].find(item => typeof item === 'string' && item.trim());
       // raw_card_content 下 img 节点的 imageID 映射到 json_attachment.images 的真实 key。
       if (!key && attachmentImages) {
         const imageId = [property?.imageID, property?.imageId, node.imageID, node.imageId]
@@ -191,6 +207,11 @@ export async function parseLarkMessageContent(
       : Boolean(bodyElements && typeof bodyElements === 'object' && Object.keys(bodyElements).length > 0);
     // 转发的告警卡片常带趋势图：和普通图片消息一样交给下载流程，最多 MAX_CARD_IMAGES 张。
     const imageKeys = collectCardImageKeys(card, attachmentImages);
+    // image_key 形态也可能已在正文渲染时入列；与 Markdown 图片共用同一条卡片的上限。
+    const allowedImages = new Set(imageKeys.slice(0, MAX_CARD_IMAGES));
+    for (let index = resources.length - 1; index >= 0; index--) {
+      if (resources[index]!.type === 'image' && !allowedImages.has(resources[index]!.key)) resources.splice(index, 1);
+    }
     const imageMarkers: string[] = [];
     for (const [index, imageKey] of imageKeys.slice(0, MAX_CARD_IMAGES).entries()) {
       const marker = addResource('image', imageKey, undefined, `卡片图片 ${index + 1}`);

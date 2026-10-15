@@ -2,6 +2,27 @@ import { describe, expect, it, vi } from 'vitest';
 import { parseLarkMessageContent } from './message-content.js';
 
 describe('parseLarkMessageContent', () => {
+  it('collects actual Markdown image keys, ignoring code, escaped images and URLs', async () => {
+    const content = ['![图](img_v3_valid)', '`![示例](img_v3_inline)`',
+      '```md\n![示例](img_v3_fenced)\n```', '\\![转义](img_v3_escaped)',
+      '[链接](img_v3_link)', '![远程](https://example.com/a.png)', '![重复](img_v3_valid)'].join('\n\n');
+    const parsed = await parseLarkMessageContent('interactive', JSON.stringify({ elements: [{ tag: 'markdown', content }] }));
+    expect(parsed.resources).toEqual([{ key: 'img_v3_valid', type: 'image', label: '卡片图片 1', fromCard: true }]);
+  });
+
+  it('shares the four-image budget and deduplication between Markdown and structural images', async () => {
+    const parsed = await parseLarkMessageContent('interactive', JSON.stringify({ json_card: JSON.stringify({ body: { elements: [
+      { tag: 'markdown', property: { content: '![one](img_v3_one) ![two](img_v3_two)' } },
+      { tag: 'img', property: { img_key: 'img_v3_one' } },
+      { tag: 'img', img_key: 'img_v3_three' },
+      { tag: 'div', text: { tag: 'lark_md', content: '![four](img_v3_four) ![five](img_v3_five)' } },
+      { tag: 'img', image_key: 'img_v3_five' }
+    ] } }) }));
+    expect(parsed.resources.map(resource => resource.key)).toEqual(['img_v3_one', 'img_v3_two', 'img_v3_three', 'img_v3_four']);
+    expect(parsed.resources.every(resource => resource.fromCard)).toBe(true);
+    expect(parsed.text).toContain('还有 1 张图片未读取');
+  });
+
   it('converts a Feishu post into readable text without leaking protocol JSON', async () => {
     const content = JSON.stringify({
       title: '',

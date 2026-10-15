@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { RelayAskBroker, type RelayAskChoice } from '@dutydeck/relay';
 import { createRepositories } from '@dutydeck/storage';
 import { createRelayAskStore } from '../relay-ask-store.js';
-import { buildLarkCard, larkCardSafeLimits } from './service.js';
+import { buildLarkCard, createLarkCardService, larkCardSafeLimits } from './service.js';
 import { defaultHighRiskPattern } from './config.js';
 import { LarkWorkflowInteractions, countCardComponents, larkPermissionTimeoutReason, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
 import type { LarkCardService } from './service.js';
@@ -88,7 +88,7 @@ const openDatabase = async () => {
 const makeService = () => {
   let cardNumber = 0;
   const reply = vi.fn(async () => ({ messageId: `om_card_${++cardNumber}` }));
-  return { reply, service: { reply, update: vi.fn(async () => ({})) } as unknown as LarkCardService };
+  return { reply, service: { reply, update: vi.fn(async () => ({})), uploadFile: vi.fn(async () => 'file_full'), replyFile: vi.fn(async () => ({ messageId: 'om_full' })) } as unknown as LarkCardService };
 };
 
 const makeRuntime = (tasks: TaskRecord[], permissions: PermissionRequestData[], resolvePermission = vi.fn(async () => undefined)) => {
@@ -130,6 +130,21 @@ describe('persistent Lark workflow interactions', () => {
       expect(card).not.toContain('synthetic-secret');
       expect(card).toContain('本次选择只处理这一条请求');
       expect(card).toContain('允许本次');
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('长权限审批仍只展示脱敏命令，绝不走问答全文附件', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const permissions: PermissionRequestData[] = [{ id: 'perm_long', title: '执行受控命令', status: 'pending',
+        operation: { source: 'acp_tool_call', command: `${'echo x;'.repeat(2000)} --token=synthetic-secret` } }];
+      const { runtime } = makeRuntime([runningTask()], permissions);
+      const { service, reply } = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+      await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
+      expect(JSON.stringify(reply.mock.calls)).not.toContain('synthetic-secret');
+      expect(service.uploadFile).not.toHaveBeenCalled();
+      expect(service.replyFile).not.toHaveBeenCalled();
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
@@ -445,10 +460,10 @@ describe('structured ask cards (P0-2)', () => {
     cardAt: (index: number) => Record<string, any>;
   }
 
-  const setupHarness = async (): Promise<StructuredHarness> => {
+  const setupHarness = async (serviceOverride?: LarkCardService): Promise<StructuredHarness> => {
     const { directory, repositories } = await openDatabase();
     const { runtime } = makeRuntime([runningTask()], []);
-    const { service, reply } = makeService();
+    const { service, reply } = serviceOverride ? { service: serviceOverride, reply: vi.spyOn(serviceOverride, 'reply') } : makeService();
     const broker = new RelayAskBroker({ publish: async () => undefined }, createRelayAskStore(repositories.config));
     const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, broker, async () => true);
     const ask: StructuredHarness['ask'] = async (index, choices, multiple = false, question = '怎么继续？') => {
@@ -478,6 +493,140 @@ describe('structured ask cards (P0-2)', () => {
 
   const findRecord = async (workflow: LarkWorkflowInteractions, askId: string) =>
     (await workflow.list('app_one')).find(record => record.nativeId === askId)!;
+
+  // 真实 service + broker + workflow；只在 HTTP 边界替换飞书，不启动任何连接。
+  const mockLark = () => {
+    const cards: Array<Record<string, any>> = [];
+    const files: Array<{ uuid: string; content: string; messageId: string }> = [];
+    const uploads: string[] = [];
+    const requests: string[] = [];
+    let fail: 'upload' | 'file' | 'card' | undefined;
+    let number = 0;
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = String(url);
+      const json = (data: unknown) => new Response(JSON.stringify({ code: 0, data }), { headers: { 'content-type': 'application/json' } });
+      if (path.includes('/auth/')) return new Response(JSON.stringify({ code: 0, tenant_access_token: 'fake-token', expire: 7200 }));
+      if (path.endsWith('/files')) {
+        if (fail === 'upload') return new Response(JSON.stringify({ code: 230001, msg: 'synthetic upload failure' }), { status: 400 });
+        uploads.push(await ((init!.body as FormData).get('file') as Blob).text());
+        return json({ file_key: 'file_full' });
+      }
+      if (init?.method === 'PATCH') { cards.push(JSON.parse(JSON.parse(String(init.body)).content)); return json({}); }
+      if (path.endsWith('/reply')) {
+        const body = JSON.parse(String(init!.body));
+        if (body.msg_type === 'file') {
+          files.push({ uuid: body.uuid, content: body.content, messageId: path });
+          if (fail === 'file') return new Response(JSON.stringify({ code: 230001, msg: 'synthetic file failure' }), { status: 400 });
+        } else {
+          if (fail === 'card') return new Response(JSON.stringify({ code: 230001, msg: 'synthetic card failure' }), { status: 400 });
+          requests.push(String(init!.body));
+          cards.push(JSON.parse(body.content));
+        }
+        return json({ message_id: `om_wire_${++number}` });
+      }
+      throw new Error(`Unexpected fake Lark request: ${path}`);
+    });
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'fake', LARK_API_MAX_RETRIES: '0' }, fetcher);
+    return { service, cards, files, uploads, requests, fail: (value?: typeof fail) => { fail = value; } };
+  };
+
+  it.each([false, true])('真实卡链按 UTF-8 预算保留 6000 边界、中文 emoji 与全部选项（structured=%s）', async structuredAskCards => {
+    const wire = mockLark(); const h = await setupHarness(wire.service);
+    try {
+      for (const [index, question] of ['a'.repeat(5999) + '尾', 'a'.repeat(6000) + '尾😀', '中文😀'.repeat(1200) + '完整尾部'].entries()) {
+        const ask = await h.ask(index, [{ label: '允许', value: 'yes' }, { label: '禁止', value: 'no' }], false, question);
+        await h.workflow.observe(ask.ctx, ask.event, { structuredAskCards });
+        expect(JSON.stringify(wire.cards.at(-1))).toContain(question);
+        expect(JSON.stringify(wire.cards.at(-1))).toContain('禁止');
+        expect(Buffer.byteLength(JSON.stringify(wire.cards.at(-1)), 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
+        const record = await findRecord(h.workflow, ask.askId);
+        await h.workflow.respond(responseInput(record, { answer: structuredAskCards ? 'yes' : '允许' }));
+        expect(JSON.stringify(wire.cards.at(-1))).toContain(question);
+        expect(JSON.stringify(wire.cards.at(-1))).toContain('禁止');
+      }
+      expect(wire.uploads).toEqual([]);
+    } finally { wire.service.close(); await h.cleanup(); }
+  });
+
+  it('按整个请求的二次 JSON 转义预算降级，引号较多也不越过卡片安全预算', async () => {
+    const wire = mockLark(); const h = await setupHarness(wire.service);
+    try {
+      const question = '"'.repeat(10_000) + '中文😀尾部';
+      const ask = await h.ask(0, undefined, false, question);
+      await h.workflow.observe(ask.ctx, ask.event);
+      expect(wire.uploads).toEqual([question]);
+      expect(JSON.stringify(wire.cards[0])).toContain('以下是节选');
+      expect(Buffer.byteLength(wire.requests[0]!, 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
+    } finally { wire.service.close(); await h.cleanup(); }
+  });
+
+  it('结构化选项过大而全文纯文本能放下时保留所有选项，不上传附件', async () => {
+    const h = await setupHarness();
+    try {
+      const choices = Array.from({ length: 50 }, (_, index) => ({ label: `选项${index}${'x'.repeat(150)}` }));
+      const ask = await h.ask(0, choices);
+      await h.workflow.observe(ask.ctx, ask.event);
+      const card = h.cardAt(0);
+      expect(card.elements.some((element: any) => element.tag === 'button' || element.tag === 'form')).toBe(false);
+      for (const choice of choices) expect(JSON.stringify(card.elements)).toContain(choice.label);
+      expect(h.service.uploadFile).not.toHaveBeenCalled();
+    } finally { await h.cleanup(); }
+  });
+
+  it.each([false, true])('完整问题和长选项共同超预算时附全文，关闭卡保留同一节选（structured=%s）', async structuredAskCards => {
+    const wire = mockLark(); const h = await setupHarness(wire.service);
+    try {
+      const question = '中文😀'.repeat(1600) + '问题末尾禁止部署';
+      const choices = Array.from({ length: 50 }, (_, i) => ({ label: `选项${i}${'长'.repeat(180)}结尾`, value: `choice_${i}` }));
+      const ask = await h.ask(0, choices, false, question);
+      await h.workflow.observe(ask.ctx, ask.event, { structuredAskCards });
+      expect(wire.uploads).toHaveLength(1);
+      expect(wire.uploads[0]).toContain(question);
+      for (const choice of choices) expect(wire.uploads[0]).toContain(choice.label);
+      expect(wire.files).toHaveLength(1);
+      const record = await findRecord(h.workflow, ask.askId);
+      expect(JSON.stringify(wire.cards[0])).toContain('以下是节选');
+      expect(JSON.stringify(wire.cards[0])).toContain('全文附件');
+      expect(Buffer.byteLength(JSON.stringify(wire.cards[0]), 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
+      expect(countCardComponents(wire.cards[0])).toBeLessThanOrEqual(larkCardSafeLimits.components);
+      await h.workflow.respond(responseInput(record, { answer: structuredAskCards ? 'choice_49' : '已阅读附件，选择第50项' }));
+      for (const element of record.askContentElements!) expect(JSON.stringify(wire.cards.at(-1))).toContain(JSON.stringify(element).slice(1, -1));
+      expect(wire.uploads).toHaveLength(1); expect(wire.files).toHaveLength(1);
+    } finally { wire.service.close(); await h.cleanup(); }
+  });
+
+  it.each(['upload', 'file', 'card'] as const)('附件或卡片失败后同 UUID 重试，已成功上传/发送的腿不重复（%s）', async failure => {
+    const wire = mockLark(); const h = await setupHarness(wire.service);
+    const date = vi.spyOn(Date, 'now'); const initial = Date.now();
+    try {
+      const ask = await h.ask(0, undefined, false, '中文😀'.repeat(4000) + '不能遗漏');
+      wire.fail(failure);
+      await expect(h.workflow.observe(ask.ctx, ask.event)).rejects.toThrow();
+      expect(wire.cards).toHaveLength(0); // 附件失败时绝不声称全文已提供。
+      const uploads = wire.uploads.length, files = wire.files.length;
+      wire.fail(); date.mockReturnValue(initial + 6_000);
+      await h.workflow.observe(ask.ctx, ask.event);
+      expect(wire.uploads).toHaveLength(uploads || 1);
+      expect(wire.files).toHaveLength(failure === 'file' ? files + 1 : 1);
+      expect(new Set(wire.files.map(file => file.uuid)).size).toBe(1);
+      expect(JSON.stringify(wire.cards[0])).toContain('以下是节选');
+      await h.workflow.observe(ask.ctx, ask.event);
+      expect(wire.cards).toHaveLength(1);
+    } finally { date.mockRestore(); wire.service.close(); await h.cleanup(); }
+  });
+
+  it('保留 6000 字符之后的问题条件并在回答后重绘', async () => {
+    const h = await setupHarness();
+    try {
+      const question = 'a'.repeat(6000) + '尾部条件😀';
+      const ask = await h.ask(0, undefined, false, question);
+      await h.workflow.observe(ask.ctx, ask.event);
+      expect(JSON.stringify(h.cardAt(0).elements)).toContain('尾部条件😀');
+      const record = await findRecord(h.workflow, ask.askId);
+      await h.workflow.respond(responseInput(record, { answer: '已阅读全文' }));
+      expect(JSON.stringify(vi.mocked(h.service.update).mock.calls)).toContain('尾部条件😀');
+    } finally { await h.cleanup(); }
+  });
 
   it('开关关闭时保留文本卡，选项仍以可读文本显示', async () => {
     const h = await setupHarness();

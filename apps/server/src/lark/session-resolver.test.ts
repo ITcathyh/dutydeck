@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { rm } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
+import { createLarkCardService } from './service.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Session } from '@dutydeck/shared';
@@ -82,6 +83,57 @@ describe('materializeLarkResources 图片按文件头识别格式', () => {
     expect(path.endsWith('x.png')).toBe(true);
     expect(result).not.toContain('多帧');
     await rm(join(tmpdir(), 'dutydeck', 'lark-resources', 'om_unknown_format'), { recursive: true, force: true });
+  });
+});
+
+describe('卡片 Markdown 图片从消息解析到资源读取', () => {
+  it('只下载真实图片 token 的前四张，同身份权限拒绝不换接口，并保留 fromCard 失败摘要', async () => {
+    // 格式参考 botmux 023735f03 的 test/card-json-export.test.ts。
+    // 这是脱敏合成的公开格式契约样本，不宣称是已捕获的真实平台回读。
+    const content = JSON.stringify({ json_card: JSON.stringify({
+      schema: '2.0', body: { elements: [
+        { tag: 'markdown', content: [
+          '测试图片：![E2E attachment](img_v3_real_key)',
+          '`![inline example](img_v3_inline_fake)`',
+          '```md\n![fenced example](img_v3_fenced_fake)\n```',
+          '\\![escaped](img_v3_escaped)',
+          '[ordinary](img_v3_link)', '![remote](https://example.com/remote.png)',
+          '![duplicate](img_v3_real_key)',
+          '![denied](img_v3_denied)', '![third](img_v3_third)', '![fourth](img_v3_fourth)', '![fifth](img_v3_fifth)'
+        ].join('\n\n') },
+        { tag: 'img', img_key: 'img_v3_real_key' }
+      ] }
+    }), card_schema: 2 });
+    const messageId = 'om_markdown_images';
+    const image = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+    const downloads: string[] = [];
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = String(url);
+      if (path.includes('/auth/')) return new Response(JSON.stringify({ code: 0, tenant_access_token: 'fake-card-app-token', expire: 7200 }));
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer fake-card-app-token');
+      expect(path).toContain(`/messages/${messageId}/resources/img_v3_`);
+      downloads.push(path);
+      if (path.includes('denied')) return new Response(JSON.stringify({ code: 99991672, msg: 'synthetic permission denied' }), { status: 403 });
+      return new Response(image, { headers: { 'content-type': 'image/gif' } });
+    });
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_card_reader', LARK_APP_SECRET: 'fake', LARK_API_MAX_RETRIES: '0' }, fetcher);
+    try {
+      const parsed = await parsePrompt(groupEvent({ messageId, messageType: 'interactive', content }));
+      expect(parsed.resources.map(resource => resource.key)).toEqual(['img_v3_real_key', 'img_v3_denied', 'img_v3_third', 'img_v3_fourth']);
+      expect(parsed.resources.every(resource => resource.fromCard)).toBe(true);
+      expect(parsed.prompt).toContain('还有 1 张图片未读取');
+      const materialized = await materializeLarkResources(messageId, parsed.prompt, parsed.resources, service);
+      expect(downloads).toHaveLength(4);
+      expect(materialized).toContain('卡片图片 1 张未能下载');
+      const paths = [...materialized.matchAll(/已下载到本地：(.+?)。/g)].map(match => match[1]!);
+      expect(paths).toHaveLength(3);
+      for (const path of paths) expect(await readFile(path)).toEqual(image);
+      expect(downloads.join(' ')).not.toContain('remote.png');
+      expect(fetcher.mock.calls.filter(call => String(call[0]).includes('/auth/'))).toHaveLength(1);
+    } finally {
+      service.close();
+      await rm(join(tmpdir(), 'dutydeck', 'lark-resources', messageId), { recursive: true, force: true });
+    }
   });
 });
 

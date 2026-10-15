@@ -66,6 +66,22 @@ const collect = (input: Partial<CollectLarkTaskContextInput> & Pick<CollectLarkT
 });
 
 describe('collectLarkTaskContext', () => {
+  it.each([false, true])('quoted Markdown images keep the source message and same-chat read boundary (crossChat=%s)', async crossChat => {
+    const parent = message('om_card_source', '1000', '', { messageType: 'interactive',
+      ...(crossChat ? { chatId: 'oc_unrelated' } : {}),
+      rawContent: JSON.stringify({ elements: [{ tag: 'markdown', content: '趋势图 ![curve](img_v3_curve)' }] }) });
+    const getMessage = vi.fn(async () => parent);
+    const getMessageItems = vi.fn(async () => [parent]);
+    const result = await collect({ event: event({ parentId: parent.messageId }), service: service({ getMessage, getMessageItems }) });
+    if (crossChat) {
+      expect(result.resources).toEqual([]);
+      expect(result.agentPrompt).not.toContain('img_v3_curve');
+    } else {
+      expect(result.resources).toContainEqual({ key: 'img_v3_curve', type: 'image', label: '卡片图片 1', fromCard: true, sourceMessageId: parent.messageId });
+      expect(result.agentPrompt).toContain('趋势图');
+    }
+  });
+
   it('validates an explicit same-chat parent before expanding its forwarded child resources', async () => {
     const parent = mergeMessage('om_parent', '1000');
     const child = message('om_child', '1001', '', {

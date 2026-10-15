@@ -9,6 +9,7 @@ import type { LarkCardService } from './service.js';
 import { safeLarkWebUrl } from './card-actions.js';
 import { isBotSenderType, isGroupChat, renderGroupMention } from './card-mentions.js';
 import type { LarkCardElement } from './card-renderer.js';
+import { sendLarkFile } from './result-delivery.js';
 import { renderQuestionMarkdown } from './ask-markdown.js';
 import { LarkUrgentManager, type LarkUrgentCheckResult } from './workflow-urgent.js';
 import { larkCommandEcho } from './commands.js';
@@ -23,7 +24,7 @@ import { planClosedText, planPendingElements, planStaleText, type LarkPlanDecisi
  * 授权（permission）问题来自受控命令拼装，不需要任何 Markdown，继续用 plain_text。
  */
 const questionElement = (kind: LarkInteraction['kind'], question: string): LarkCardElement => {
-  const content = question.slice(0, 6000);
+  const content = kind === 'ask' ? question : question.slice(0, 6000);
   return kind !== 'permission'
     ? { tag: 'markdown', content: renderQuestionMarkdown(content) }
     : { tag: 'div', text: { tag: 'plain_text', content } };
@@ -72,6 +73,8 @@ export interface LarkInteraction extends LarkInteractionContext {
   /** plan：用户在计划卡上的决定与修改意见，进入 resolving 时写入，重启后据此补完提交 */
   decision?: LarkPlanDecision;
   feedback?: string;
+  /** ask 实际展示的正文、选项与全文附件提示，关闭卡复用同一份内容。 */
+  askContentElements?: LarkCardElement[];
 }
 export const deadlineText = (expiresAt: string) => `${new Date(expiresAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（北京时间）`;
 /**
@@ -342,11 +345,15 @@ export class LarkWorkflowInteractions {
   }
   private async renderClosed(record: LarkInteraction, message: string) {
     if (!record.cardId || record.kind === 'result' || this.closedCards.has(`${record.cardId}:${record.state}:${message}`)) return true;
+    // 升级前的记录没有展示快照，沿用旧卡的正文范围；新 ask 始终复用完整展示/附件节选。
+    const contentElements = record.kind === 'ask'
+      ? record.askContentElements ?? [questionElement('ask', record.question.slice(0, 6000))]
+      : [questionElement(record.kind, record.question)];
     return this.service.update({ messageId: record.cardId, taskId: record.id, taskName: record.kind === 'ask' ? 'Agent 提问' : record.kind === 'plan' ? '执行计划' : '本次操作确认',
       permissionMode: 'ask', state: record.state === 'expired' ? 'interrupted' : 'completed', statusLabel: record.state === 'expired' ? record.timedOutAt ? '已过期' : '已失效'
         : record.kind === 'plan' ? ({ approved: '已批准', needs_changes: '已提修改意见', rejected: '已取消' } as Partial<Record<LarkInteraction['state'], string>>)[record.state] ?? '已处理'
         : ({ answered: '已回答', approved: '已允许', rejected: '已拒绝' } as Partial<Record<LarkInteraction['state'], string>>)[record.state] ?? '已处理',
-      readOnly: true, elements: [...intentElements(record), questionElement(record.kind, record.question), { tag: 'markdown', content: message }] }).then(() => { this.closedCards.add(`${record.cardId}:${record.state}:${message}`); return true; }).catch(() => false);
+      readOnly: true, elements: [...intentElements(record), ...contentElements, { tag: 'markdown', content: message }] }).then(() => { this.closedCards.add(`${record.cardId}:${record.state}:${message}`); return true; }).catch(() => false);
   }
   private async renderPendingPermission(record: LarkInteraction) {
     if (!record.cardId) return;
@@ -576,7 +583,7 @@ export class LarkWorkflowInteractions {
       { ...(expiresAt ? { expiresAt } : {}), ...(remindedAt ? { remindedAt } : {}), ...(structuredChoices ? { structured: true, ...(askMultiple ? { multiple: true } : {}) } : {}),
         ...(allowKey ? { sessionAllowKey: allowKey } : {}), ...(intent ? { intent } : {}), ...(kind === 'permission' && options.groupMention === true ? { groupMention: true } : {}) }
     );
-    const record = created.record;
+    let record = created.record;
     if (record.state !== 'pending' || record.cardId || this.delivering.has(record.id) || (this.retryAfter.get(record.id) ?? 0) > Date.now()) return;
     this.delivering.add(record.id);
     const approvers = kind === 'permission' ? await this.approvers(record).catch(() => []) : [];
@@ -605,10 +612,11 @@ export class LarkWorkflowInteractions {
         ? structuredChoices ? '点选下方选项提交；也可引用本卡片直接回复你的答案。' : '在下方填写答案并点击提交；也可引用本卡片直接回复你的答案。'
         : '请引用本卡片回复你的答案。')
       : '本次选择只处理这一条请求，不改变后续授权方式。' };
+    const displayedQuestion = questionElement(kind, question);
     const elements: LarkCardElement[] = [
       ...(groupMentionTag ? [{ tag: 'markdown', element_id: 'group_mention', content: groupMentionTag }] : []),
       ...intentElements(record),
-      questionElement(kind, question),
+      displayedQuestion,
       // 正文只写读者做决定时需要知道的东西：授权范围（permission）、怎么答（ask）。
       // 原先还各带一份完整 slash 指令，`/approve wf_01H…` 里那串请求编号在 permission 卡上
       // 出现两次，正下方就是「批准一次 / 拒绝」两个按钮——对能点按钮的人是三行纯噪声。
@@ -640,29 +648,57 @@ export class LarkWorkflowInteractions {
       }
     }
     const safeWebBaseUrl = structuredOn && kind === 'ask' ? safeLarkWebUrl(options.webBaseUrl) : undefined;
-    // 选项来自 agent，渲染前按 24KB/180 预测整卡：超预算的单选/多选回落成普通文本卡，
-    // 引用卡片回复仍可用；自由文本表单体积恒定，必然在预算内。
-    if (structuredParts && this.withinAskCardBudget([...elements, ...structuredParts], safeWebBaseUrl)) {
-      elements.push(...structuredParts);
-    } else if (kind === 'ask') {
-      hintElement.content = '请引用本卡片回复你的答案。';
-      if (askChoices?.length) {
-        // Text mode still has to show what the user is choosing. Keep labels
-        // as plain text and reserve space for an explicit truncation notice.
-        const labels = askChoices.map((choice, index) => `${index + 1}. ${choice.label}`);
-        let visible = labels.length;
-        let choicesElement: LarkCardElement;
-        do {
-          const omitted = visible < labels.length ? `\n还有 ${labels.length - visible} 个选项未展示，请引用本卡片说明你的选择。` : '';
-          choicesElement = { tag: 'div', text: { tag: 'plain_text', content: `可选项：\n${labels.slice(0, visible).join('\n')}${omitted}` } };
-          if (this.withinAskCardBudget([...elements, choicesElement], safeWebBaseUrl)) break;
-          visible--;
-        } while (visible >= 0);
-        if (visible >= 0) elements.push(choicesElement);
-        else hintElement.content = '选项过多，当前卡片无法完整展示。请引用本卡片说明你的选择。';
-      }
-    }
     try {
+      if (!await this.live(record)) { await this.move(record, 'expired'); return; }
+      if (kind === 'ask') {
+        const questionIndex = elements.indexOf(displayedQuestion);
+        const labels = (askChoices ?? []).map((choice, index) => `${index + 1}. ${choice.label}`);
+        const choicesElement = (visible: number): LarkCardElement => ({ tag: 'div', text: { tag: 'plain_text',
+          content: `可选项：\n${labels.slice(0, visible).join('\n')}${visible < labels.length ? `\n还有 ${labels.length - visible} 个选项未展示，请查看全文附件。` : ''}` } });
+        const fullTextParts = labels.length ? [choicesElement(labels.length)] : [];
+        let contentElements = [questionElement(kind, question), ...fullTextParts];
+        if (structuredParts && this.withinAskCardBudget([...elements, ...structuredParts], safeWebBaseUrl)) {
+          elements.push(...structuredParts);
+        } else {
+          hintElement.content = '请引用本卡片回复你的答案。';
+          if (this.withinAskCardBudget([...elements, ...fullTextParts], safeWebBaseUrl)) {
+            elements.push(...fullTextParts);
+          } else {
+            // 只有问答全文确实放不下时上传；审批卡不经过这里，避免扩大命令/秘密的披露范围。
+            const attachment = await sendLarkFile(this.service, {
+              chatId: context.event.chatId, replyMessageId: context.event.messageId,
+              replyInThread: Boolean(context.event.threadId), allowReplyFallback: false
+            }, {
+              data: Buffer.from([question, ...(labels.length ? ['可选项：', ...labels] : [])].join('\n\n'), 'utf8'),
+              filename: `question-${record.id}.txt`, idempotencyKey: `workflow_${record.id}_full`
+            }, { warn: () => undefined }, this.store, async () => { if (!await this.live(record)) throw stale(); });
+            if (!attachment.messageId) throw new Error('Question attachment delivery has no receipt');
+            const notice: LarkCardElement = { tag: 'markdown', content: '以下是节选；完整问题和全部选项已提供为本话题的全文附件，请阅读后回答。' };
+            let visible = labels.length;
+            const excerpt = () => [questionElement(kind, question), ...(labels.length ? [choicesElement(visible)] : []), notice];
+            // 先保留完整问题，逐个减少可见选项；问题自身超限时再按 Unicode 字符缩短。
+            while (visible > 0 && !this.withinAskCardBudget([...elements.filter((_, index) => index !== questionIndex), ...excerpt()], safeWebBaseUrl)) visible--;
+            const characters = Array.from(question);
+            let low = 0, high = characters.length;
+            while (low < high) {
+              const middle = Math.ceil((low + high) / 2);
+              const candidate = [questionElement(kind, characters.slice(0, middle).join('')), ...(labels.length ? [choicesElement(visible)] : []), notice];
+              if (this.withinAskCardBudget([...elements.filter((_, index) => index !== questionIndex), ...candidate], safeWebBaseUrl)) low = middle;
+              else high = middle - 1;
+            }
+            contentElements = [questionElement(kind, characters.slice(0, low).join('')), ...(labels.length ? [choicesElement(visible)] : []), notice];
+            elements.splice(questionIndex, 1, ...contentElements);
+          }
+        }
+        // 展示真相独立于 broker 的 live waiter；回答/过期后的重绘仍保留当时全部可读内容。
+        for (;;) {
+          const next = { ...record, askContentElements: contentElements };
+          if (await this.store.compareAndSet!(this.key(record), JSON.stringify(record), JSON.stringify(next))) { record = next; break; }
+          const current = await this.store.get(this.key(record));
+          if (!current) throw stale();
+          record = JSON.parse(current) as LarkInteraction;
+        }
+      }
       if (!await this.live(record)) { await this.move(record, 'expired'); return; }
       const card = await this.service.reply({ messageId: context.event.messageId, ...(context.event.threadId ? { replyInThread: true } : {}),
         state: 'running', statusLabel: kind === 'ask' ? '等待回答' : '等待审批', awaitingHuman: true, readOnly: true,
@@ -699,7 +735,7 @@ export class LarkWorkflowInteractions {
    * 预测「信封 + 结构化元素」拼装后的整卡体积，选项过多时由调用方回落成普通文本问答卡。
    * 不能直接 buildLarkCard(elements) 试算：buildLarkCard 超预算时会静默把整卡换成只剩
    * 提示文案的兜底卡，拿兜底卡反算永远「达标」。这里用同入参的空信封卡测得固定开销，
-   * arrange 会把未登记 element_id 的结构化元素原样追加进 body，故字节/组件均按增量相加。
+   * arrange 会把未登记 element_id 的结构化元素原样追加进 body，将元素追加到空信封后，连 content 外层 JSON 转义一起计入请求预算。
    */
   private withinAskCardBudget(elements: LarkCardElement[], webBaseUrl?: string) {
     const envelope = buildLarkCard({
@@ -707,10 +743,13 @@ export class LarkWorkflowInteractions {
       taskName: 'Agent 需要你的回答', permissionMode: 'ask',
       ...(webBaseUrl ? { webBaseUrl } : {})
     });
-    const projectedBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8')
-      + Buffer.byteLength(JSON.stringify(elements), 'utf8');
-    const projectedComponents = countCardComponents(envelope) + countCardComponents(elements);
-    return projectedBytes <= larkCardSafeLimits.bytes - structuredCardBudgetHeadroomBytes
+    envelope.body.elements.push(...elements);
+    const content = JSON.stringify(envelope);
+    // reply 的 content 是再次序列化的 JSON 字符串；引号和反斜杠会放大整个 HTTP 请求。
+    const projectedRequestBytes = Buffer.byteLength(JSON.stringify({ msg_type: 'interactive', content,
+      reply_in_thread: true, uuid: `workflow_${'x'.repeat(24)}` }), 'utf8');
+    const projectedComponents = countCardComponents(envelope);
+    return projectedRequestBytes <= larkCardSafeLimits.bytes - structuredCardBudgetHeadroomBytes
       && projectedComponents <= larkCardSafeLimits.components;
   }
   async result(context: LarkInteractionContext, cardId: string, relatedCardIds?: string[]) {
