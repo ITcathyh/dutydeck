@@ -6,7 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
   RuntimeError, canonicalExecutionJson, parseLarkSourceId, createGroupBindingInputSchema, createRoleAssignmentInputSchema, evaluatePolicyAction, installationOwnerTaskActor,
-  groupBindingSchema, remoteChatFactValidity, resolveGroupEffectiveConfig, updateRoleAssignmentInputSchema,
+  groupBindingSchema, remoteChatFactValidity, resolveGroupEffectiveConfig, resolveParticipation, updateRoleAssignmentInputSchema,
   type ChannelBotGroupPolicy, type EffectiveGroupConfig, type GroupBinding, type PolicyAction,
   type PolicyDecision, type PresentationSettings, type RepositoryBundle, type RoleAssignment, type Session, type ToolRiskPolicy
 } from '@dutydeck/shared';
@@ -145,7 +145,7 @@ export class LarkGroupManager {
     return {
       id: `live_policy_${channelBotId}`, schemaVersion: 1, revision: config.revision ?? 1, channelBotId,
       defaults: { agentDefinitionId: config.defaultAgentId, workspace: config.workspace, model: config.defaultModel, reasoningEffort: config.defaultReasoningEffort },
-      routingDefaults: { groupReplyMode: config.groupReplyMode ?? 'chat-topic', mentionPolicy: config.mentionPolicy ?? 'always' },
+      routingDefaults: { groupReplyMode: config.groupReplyMode ?? 'chat-topic', mentionPolicy: resolveParticipation({ mentionPolicy: config.mentionPolicy }).mentionPolicy },
       accessPolicy: config.allowedUsers.length ? { mode: 'allowlist', principalIds: config.allowedUsers.map(user => principalId(config.appId, user.openId)) }
         : { mode: config.allowedEmails.length ? 'owner_only' : 'open', principalIds: [] },
       groupToolsPolicy: { readCeiling: config.groupToolsEnabled, discoverCeiling: config.groupToolsEnabled, sendCeiling: config.groupToolsEnabled && config.groupToolsAllowSend, readDefault: config.groupToolsEnabled, discoverDefault: config.groupToolsEnabled, sendDefault: config.groupToolsEnabled && config.groupToolsAllowSend },

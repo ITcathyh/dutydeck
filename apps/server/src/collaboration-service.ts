@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { RuntimeError, canonicalExecutionJson, countDecisionUsage, isBotTurnRecord, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, DECISION_WINDOW_LIMIT, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type CreateScheduleDefinitionInput, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
+import { RuntimeError, canonicalExecutionJson, countDecisionUsage, isBotTurnRecord, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, DECISION_WINDOW_LIMIT, listWindowIncomplete, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type CreateScheduleDefinitionInput, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
 
 export type CollaborationRepositories = Pick<RepositoryBundle, 'scheduleDefinitions' | 'scheduleGenerations' | 'scheduleOccurrences' | 'scheduleWatermarks' | 'scheduleLeases'> & { collaboration: CollaborationRepository };
 export type CollaborationAuthorization = (scope: CollaborationScope, actorId: string, action: 'read' | 'write' | 'manage' | 'execute' | 'deliver') => Promise<boolean>;
@@ -86,7 +86,7 @@ export class CollaborationService {
     const repo = this.repositories.collaboration;
     // 两个列表的服务端硬上限都是 500，传更大的数只会被静默截断。
     const [recentDecisions, recentActions] = await Promise.all([repo.listDecisions(scope, DECISION_WINDOW_LIMIT), repo.listActions(scope, DECISION_WINDOW_LIMIT)]);
-    const decisionWindowComplete = recentDecisions.length < DECISION_WINDOW_LIMIT || Date.parse(recentDecisions.at(-1)!.createdAt) < since;
+    const decisionWindowComplete = !listWindowIncomplete(recentDecisions, since);
     return {
       decisionsLastHour: countDecisionUsage(recentDecisions, since),
       maxDecisionsPerHour: snapshot.settings.maxDecisionsPerHour,

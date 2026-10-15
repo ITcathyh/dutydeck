@@ -29,7 +29,7 @@ import type {
   PresentationOverride,
   RoleAssignment
 } from '@dutydeck/shared';
-import { participationLevelBehaviors, participationLevelFields, participationLevelLabels, participationLevelOf, participationLevels } from '@dutydeck/shared';
+import { participationLevelBehaviors, participationLevelFields, participationLevelLabels, participationLevels, resolveParticipation } from '@dutydeck/shared';
 import { Badge, Banner, Button, Card, EmptyState, Input, Select, Spinner } from './primitives';
 import { AgentSelect, CompactSelect } from './CompactSelect';
 import { DirectoryPicker } from './DirectoryPicker';
@@ -687,10 +687,10 @@ export function GroupManagement({
     retry: false
   });
   const groupSettings = levelOverviewQuery.data?.snapshot.settings;
-  const botDefaultLevel = participationLevelOf(botConfig?.mentionPolicy, botConfig?.defaultGroupParticipation ?? 'off');
+  const botDefaultLevel = resolveParticipation({ mentionPolicy: botConfig?.mentionPolicy, participation: botConfig?.defaultGroupParticipation }).level;
   const groupLevelValue: ParticipationLevel | 'inherit' | '' = !groupSettings || !activeBotEntry ? ''
     : activeBotEntry.binding?.routingOverride.mentionPolicy.mode !== 'set' && groupSettings.inheritParticipation ? 'inherit'
-    : participationLevelOf(activeBotEntry.effective?.routing.mentionPolicy.value as LarkBotConfig['mentionPolicy'], groupSettings.participation);
+    : resolveParticipation({ mentionPolicy: activeBotEntry.effective?.routing.mentionPolicy.value as LarkBotConfig['mentionPolicy'], participation: groupSettings.participation }).level;
   const levelMutation = useMutation({
     mutationFn: async ({ appId, chatId, level, binding, settings }: { appId: string; chatId: string; level: ParticipationLevel | 'inherit'; binding?: GroupBinding; settings: CollaborationSettings }) => {
       const fields = level === 'inherit' ? undefined : participationLevelFields(level);

@@ -1,6 +1,6 @@
-import { RuntimeError, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GATE, countDecisionUsage } from '@dutydeck/shared';
+import { RuntimeError, COLLABORATION_LIST_LIMIT, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GATE, countDecisionUsage, listWindowIncomplete, type ListedItems } from '@dutydeck/shared';
 import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_LIMIT_PER_HOUR, BOT_TURN_RECORD, countBotTurnUsage } from '@dutydeck/shared';
-import { DECIDER_META_KEY, INTRUSIVE_FEEDBACK_PREFIX, MISSED_FEEDBACK_PREFIX, deciderMetaOf, isDecisionGate, participationLevelBehaviors, participationLevelLabels, participationLevelOf, participationLevels } from '@dutydeck/shared';
+import { DECIDER_META_KEY, INTRUSIVE_FEEDBACK_PREFIX, MISSED_FEEDBACK_PREFIX, deciderMetaOf, isDecisionGate, participationLevelBehaviors, participationLevelLabels, participationLevelPhraseHint, participationLevelPhrases, participationLevels, resolveParticipation } from '@dutydeck/shared';
 import { ALARM_DEDUPE_HOURS, ALARM_MAX_PER_HOUR, ALARM_TRIAGE_RECORD, alarmSubscriptionSchema, isAlarmRecord, type AlarmSubscription, type CollaborationDuty, type UpdateCollaborationDutyInput } from '@dutydeck/shared';
 import { createHash } from 'node:crypto';
 import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision, CollaborationAction, CollaborationTeamContext, CollaborationDeciderMeta, CollaborationSettings, ParticipationLevel } from '@dutydeck/shared';
@@ -10,13 +10,14 @@ import type { LarkCardService, LarkChatMessage } from './service.js';
 import { parseLarkMessageContent } from './message-content.js';
 import { LarkContextBootstrap, observationTime } from './context-bootstrap.js';
 import { decisionInput, participationInput, parseParticipationResult, parseParticipationResponse, type ParticipationDecider, type ParticipationFacts, type ParticipationResult } from './readonly-decider.js';
-import { botNameTokens, callsBotName, compactText, evaluateParticipationRules, intrusionPattern, ownedItems, participationIntentOf, participationRuleReasons, ruleContextOf, stripMentionPlaceholders, type ParticipationRule, type RuleFacts, type RuleVerdict } from './participation-rules.js';
+import { botNameTokens, callsBotName, compactText, intrusionPattern, ownedItems, participationIntentOf, participationRuleReasons, stripMentionPlaceholders, type ParticipationRule, type RuleFacts, type RuleVerdict } from './participation-rules.js';
 import { alarmFingerprint, alarmIntentOf, alarmLevelMatches, alarmOutcomeReasons, alarmTriagePrompt, describeAlarm, responderAnnouncementOf, responderClaimText, responderIntentOf, responderReleaseText, type AlarmIntent, type AlarmOutcome } from './group-duty.js';
 import { formatParticipationBehavior, formatRoleStatusLine } from './role-format.js';
 import { LarkConfirmCards, type LarkConfirmRecord } from './confirm-cards.js';
 import { boundCollaborationSnapshot } from '../collaboration-context.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { renderGroupTaskContext, TASK_CONTEXT_WINDOW, type GroupTaskContext, type GroupTaskContextRequest } from './group-task-context.js';
+import { evaluateParticipation } from './participation-evaluate.js';
 
 export interface GroupParticipationOptions {
   repository: CollaborationRepository;
@@ -61,7 +62,9 @@ const teamContextTimeoutMs = 10_000;
 const proactiveKinds = ['participation.reply', 'participation.dispatch'];
 const ADDRESSED_KIND = 'participation.addressed';
 const MISSED_WINDOW_MS = 10 * 60_000;
-const WHY_WINDOW_MS = 3_600_000;
+/** 判定预算、机器人回合预算、主动发言额度和告警每小时上限都按滑动一小时统计；闸门留痕按整点小时分桶。 */
+const HOUR_MS = 3_600_000;
+const WHY_WINDOW_MS = HOUR_MS;
 const MEMBER_CACHE_MS = 10 * 60_000;
 const LEVEL_CONFIRM_KIND = 'participation_level';
 const ALARM_CONFIRM_KIND = 'alarm_subscription';
@@ -240,7 +243,7 @@ export class LarkGroupParticipation {
     const level = await this.level(scope, settings);
     const config = await this.options.readConfig(scope.appId, scope.chatId).catch(() => undefined);
     const behavior = formatParticipationBehavior(level, config);
-    const modeLine = `本群参与强度：${participationLevelLabels[level]}（${behavior}）${settings.participation === 'observe' ? '；群参与目前是仅观察：只记录群消息，不主动发言' : ''}${settings.notificationsPaused ? '；主动通知已暂停' : ''}。用户问起你的参与方式时直接按此回答；想调整时请他 @ 你说「积极点」「按需」「话题里不用@」或「只在@时回」，会收到一张确认卡。`;
+    const modeLine = `本群参与强度：${participationLevelLabels[level]}（${behavior}）${settings.participation === 'observe' ? '；群参与目前是仅观察：只记录群消息，不主动发言' : ''}${settings.notificationsPaused ? '；主动通知已暂停' : ''}。用户问起你的参与方式时直接按此回答；想调整时请他 @ 你说${participationLevelPhraseHint}，会收到一张确认卡。`;
     const description = this.bootstrapper.material(scope) ?? snapshot.observations.find(item => item.source === 'lark.description');
     return renderGroupTaskContext({ snapshot, description, modeLine, now: this.now(), ...input });
   }
@@ -269,7 +272,7 @@ export class LarkGroupParticipation {
   async level(scope: CollaborationScope, settings?: CollaborationSettings): Promise<ParticipationLevel> {
     const current = settings ?? await this.options.repository.getSettings(scope);
     const config = await this.options.readConfig(scope.appId, scope.chatId).catch(() => undefined);
-    return participationLevelOf(config?.mentionPolicy, current.participation);
+    return resolveParticipation({ mentionPolicy: config?.mentionPolicy, participation: current.participation }).level;
   }
   /** /status 的参与行：档位、今天的判定与回复次数、模型判定耗时中位数和花费。 */
   async describe(scope: CollaborationScope): Promise<string> {
@@ -504,12 +507,12 @@ export class LarkGroupParticipation {
    * 只统计真正跑过模型的判定：被闸门挡下的记录不计入，否则一旦超限就再也降不回来。
    */
   private async decisionBudget(scope: CollaborationScope, limit: number): Promise<string | undefined> {
-    const since = this.now().getTime() - 3_600_000;
+    const since = this.now().getTime() - HOUR_MS;
     const recent = await this.options.repository.listDecisions(scope, DECISION_WINDOW_LIMIT);
     const used = countDecisionUsage(recent, since);
-    // 取满上限且最旧一条仍在窗口内时，窗口没有读全，用量只会被低估，按超限处理。
+    // 列表被截断且最旧一条仍在窗口内时，窗口没有读全，用量只会被低估，按超限处理。
     // 上限 500 同时是 maxDecisionsPerHour 的最大值，所以走到这一步时用量本来就已经超配置。
-    if (recent.length >= DECISION_WINDOW_LIMIT && Date.parse(recent.at(-1)!.createdAt) >= since) {
+    if (listWindowIncomplete(recent, since)) {
       return `判定预算窗口不完整：最近 ${DECISION_WINDOW_LIMIT} 条判定都落在本小时内`;
     }
     return used >= limit ? `判定预算已用尽：本小时 ${used}/${limit}` : undefined;
@@ -555,11 +558,11 @@ export class LarkGroupParticipation {
     // 预算是滑动一小时，缓存只是「刷屏时别每条消息都读一次库」的短期结论，
     // 因此只缓存几秒：过期后重新按滑动窗口判，名额一到点就能放出来。
     if ((this.botBudgetExhausted.get(chatKey) ?? 0) > now) return `机器人触发的回合已用尽本小时预算（上限 ${BOT_TURN_LIMIT_PER_HOUR}）`;
-    const since = now - 3_600_000;
+    const since = now - HOUR_MS;
     const recent = await this.options.repository.listDecisions(scope, DECISION_WINDOW_LIMIT);
     const used = countBotTurnUsage(recent, since);
-    // 与 decisionBudget 同一形态：窗口取满且最旧一条仍在本小时内时用量只会被低估，按超限处理。
-    const windowIncomplete = recent.length >= DECISION_WINDOW_LIMIT && Date.parse(recent.at(-1)!.createdAt) >= since;
+    // 与 decisionBudget 同一形态：列表被截断且最旧一条仍在本小时内时用量只会被低估，按超限处理。
+    const windowIncomplete = listWindowIncomplete(recent, since);
     if (windowIncomplete || used >= BOT_TURN_LIMIT_PER_HOUR) {
       this.botBudgetExhausted.set(chatKey, now + 10_000);
       const reason = windowIncomplete
@@ -588,7 +591,7 @@ export class LarkGroupParticipation {
    * 按每条消息写会让几百条门禁记录把 500 条统计窗口占满，用量从此再也读不准。
    */
   private async recordBotGate(scope: CollaborationScope, reason: string, kind: 'depth' | 'budget') {
-    const hour = Math.floor(this.now().getTime() / 3_600_000);
+    const hour = Math.floor(this.now().getTime() / HOUR_MS);
     await this.options.repository.recordDecision({
       id: `decision_bot_gate_${digest([scope, hour, kind])}`, scope, contextRevision: 0, policyVersion: 'bot-loop-guard',
       action: 'silent', reason, evidenceIds: [], status: 'suppressed',
@@ -603,17 +606,33 @@ export class LarkGroupParticipation {
     if (!config?.listening) return;
     // 规则层先判：不调模型，不占判定预算和成本上限。这一轮只查父消息、话题根和群成员（有缓存），
     // 要翻最近消息的规则放到闸门之后，免得预算用满时每条消息还去读一次群历史。
-    const botNames = [config.name, config.displayName].filter((name): name is string => Boolean(name));
-    let facts = await this.ruleFacts(scope, pending, config, participationLevelOf(config.mentionPolicy, settings.participation));
-    const owned = ownedItems(await repo.listMandates(scope), []);
-    const early = evaluateParticipationRules(ruleContextOf(pending.observation, owned, botNames, facts, config.roleScope));
-    if (early) { await this.decideByRule(scope, pending, slot, early, facts, undefined, config); return; }
+    const facts = await this.ruleFacts(scope, pending, config, resolveParticipation({ mentionPolicy: config.mentionPolicy, participation: settings.participation }).level);
+    const outcome = await evaluateParticipation<CollaborationSnapshot, void>({
+      botNames: [config.name, config.displayName].filter((name): name is string => Boolean(name)), roleScope: config.roleScope,
+      early: { trigger: pending.observation, owned: ownedItems(await repo.listMandates(scope), []), facts },
+      gate: () => this.decisionGate(scope, pending, settings),
+      enrich: async () => {
+        await this.bootstrapper.ensure(scope);
+        const full = await this.snapshot(scope, pending.observation);
+        if (full.settings.participation === 'off' || !await this.current(scope, full, pending.event.senderOpenId!, slot)) return undefined;
+        const trigger = full.observations.find(item => item.messageId === pending.event.messageId && item.origin === 'live' && item.senderKind === 'human');
+        if (!trigger) return undefined;
+        // 第二轮规则：补上最近发言（续问、「这个任务」）和事项名称。
+        return { trigger, owned: ownedItems(full.mandates, full.followups), facts: { ...facts, ...await this.recentFacts(config, pending, full) }, context: full };
+      },
+      model: (round, full) => this.decideByModel(scope, pending, slot, config, round!.trigger, round!.facts, full!)
+    });
+    if (outcome.kind === 'rule') await this.decideByRule(scope, pending, slot, outcome.verdict, outcome.facts, outcome.context, config);
+  }
+  /** 成本上限或判定预算用满时留痕并返回 true：这一轮不再判定。 */
+  private async decisionGate(scope: CollaborationScope, pending: Pending, settings: CollaborationSettings): Promise<boolean> {
+    const repo = this.options.repository;
     // 成本上限用满后判定也不再跑；群里的说明由用量账本发一次。留痕与预算闸门一样按小时分桶。
     const refusal = await this.options.usageRefusal?.(scope);
     if (refusal) {
-      await repo.recordDecision({ id: `decision_usage_cap_${digest([scope, Math.floor(this.now().getTime() / 3_600_000)])}`, scope, contextRevision: 0, policyVersion: settings.policyVersion,
+      await repo.recordDecision({ id: `decision_usage_cap_${digest([scope, Math.floor(this.now().getTime() / HOUR_MS)])}`, scope, contextRevision: 0, policyVersion: settings.policyVersion,
         action: 'silent', reason: refusal, evidenceIds: [pending.observation.id], status: 'suppressed', inputSnapshot: { gate: USAGE_CAP_GATE }, createdAt: this.now().toISOString() });
-      return;
+      return true;
     }
     // 判定本身要花一次模型调用，observe 影子模式同样花。闸门必须在调用之前，
     // 否则每条新消息都会先付费再被发言预算挡下。
@@ -621,20 +640,16 @@ export class LarkGroupParticipation {
     if (gate) {
       // 留痕让用量可见，但按小时分桶而不是按 contextRevision：recordDecision 遇到已存在的 id 直接返回，
       // 所以每群每小时最多写一条。否则超限期间每条消息都写一条，闸门记录会把 500 条统计窗口占满。
-      const gateId = `decision_gate_${digest([scope, Math.floor(this.now().getTime() / 3_600_000)])}`;
+      const gateId = `decision_gate_${digest([scope, Math.floor(this.now().getTime() / HOUR_MS)])}`;
       await repo.recordDecision({ id: gateId, scope, contextRevision: 0, policyVersion: settings.policyVersion,
         action: 'silent', reason: gate, evidenceIds: [pending.observation.id], status: 'suppressed', inputSnapshot: { gate: DECISION_BUDGET_GATE }, createdAt: this.now().toISOString() });
-      return;
+      return true;
     }
-    await this.bootstrapper.ensure(scope);
-    const full = await this.snapshot(scope, pending.observation);
-    if (full.settings.participation === 'off' || !await this.current(scope, full, pending.event.senderOpenId!, slot)) return;
-    const trigger = full.observations.find(item => item.messageId === pending.event.messageId && item.origin === 'live' && item.senderKind === 'human');
-    if (!trigger) return;
-    // 第二轮规则：补上最近发言（续问、「这个任务」）和事项名称。
-    facts = { ...facts, ...await this.recentFacts(config, pending, full) };
-    const late = evaluateParticipationRules(ruleContextOf(trigger, ownedItems(full.mandates, full.followups), botNames, facts, config.roleScope));
-    if (late) { await this.decideByRule(scope, pending, slot, late, facts, full, config); return; }
+    return false;
+  }
+  /** 规则拿不准：调模型判定，再按结论回复或转执行。 */
+  private async decideByModel(scope: CollaborationScope, pending: Pending, slot: Slot, config: StoredLarkConfig, trigger: CollaborationObservation, facts: RuleFacts, full: CollaborationSnapshot) {
+    const repo = this.options.repository;
     // 交给模型的材料只留当前消息、最近 20 条、本机器人最近的发言和事项标题，控制在 8000 字以内。
     let snapshot = decisionInput(full, trigger.id);
     const id = `decision_${digest([scope, snapshot.contextRevision, snapshot.settings.policyVersion])}`;
@@ -690,7 +705,7 @@ export class LarkGroupParticipation {
       return;
     }
     if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true)) { await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
-    const actions = await repo.listActions(scope, 1000);
+    const actions = await repo.listActions(scope, COLLABORATION_LIST_LIMIT);
     if (this.proactiveBudgetExhausted(actions, snapshot.settings.maxProactivePerHour)) { await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
     // Keep uncertain/in-flight delivery deduplicated. A completed answer must not
     // suppress a different human question that happens to cite the same source.
@@ -768,10 +783,10 @@ export class LarkGroupParticipation {
       if (acknowledgement) await this.clearAcknowledgement(acknowledgement);
     }
   }
-  private proactiveBudgetExhausted(actions: CollaborationAction[], limit: number): boolean {
-    const since = this.now().getTime() - 3_600_000;
+  private proactiveBudgetExhausted(actions: ListedItems<CollaborationAction>, limit: number): boolean {
+    const since = this.now().getTime() - HOUR_MS;
     const used = actions.filter(item => proactiveKinds.includes(item.kind) && ['intent', 'sending', 'succeeded', 'unknown'].includes(item.status) && Date.parse(item.createdAt) >= since).length;
-    return actions.length >= 500 && Date.parse(actions.at(-1)!.createdAt) >= since || used >= limit;
+    return listWindowIncomplete(actions, since) || used >= limit;
   }
   /**
    * 把当前人类消息按显式 @ 交给执行路径。addressed 是规则判为「在叫我」：等同对方 @ 了机器人，
@@ -781,7 +796,7 @@ export class LarkGroupParticipation {
     const repo = this.options.repository;
     const dispatch = this.dispatchers.get(scope.appId);
     if (!dispatch || !evidenceIds.includes(trigger.id) || !await this.current(scope, snapshot, pending.event.senderOpenId!, slot, !addressed, addressed)
-      || !addressed && this.proactiveBudgetExhausted(await repo.listActions(scope, 1000), snapshot.settings.maxProactivePerHour)) {
+      || !addressed && this.proactiveBudgetExhausted(await repo.listActions(scope, COLLABORATION_LIST_LIMIT), snapshot.settings.maxProactivePerHour)) {
       await repo.updateDecision(scope, id, { status: 'suppressed' }); return;
     }
     const actionId = `${addressed ? 'addressed' : 'dispatch'}_${digest([id, pending.event.messageId])}`;
@@ -855,8 +870,8 @@ export class LarkGroupParticipation {
     const within = (item: CollaborationDecision, ms: number) => Date.parse(item.createdAt) >= now.getTime() - ms;
     const outcome: AlarmOutcome = !alarmLevelMatches(alarm.levels, text) ? 'level'
       : responder && responder.appId !== scope.appId ? 'not_responder'
-      : triaged.some(item => alarmOf(item)?.fingerprint === fingerprint && within(item, alarm.dedupeHours * 3_600_000)) ? 'duplicate'
-      : triaged.filter(item => within(item, 3_600_000)).length >= alarm.maxPerHour ? 'rate_limited'
+      : triaged.some(item => alarmOf(item)?.fingerprint === fingerprint && within(item, alarm.dedupeHours * HOUR_MS)) ? 'duplicate'
+      : triaged.filter(item => within(item, HOUR_MS)).length >= alarm.maxPerHour ? 'rate_limited'
       : !alarm.requesterId ? 'no_requester' : 'triaged';
     const meta: CollaborationDeciderMeta = { kind: 'rule', rule: `alarm_${outcome}`, trigger: { id: event.messageId, messageId: event.messageId, ...(event.senderOpenId ? { senderId: event.senderOpenId } : {}), text: text.slice(0, 200) } };
     // 先记下再派发：同一指纹的下一条告警在派发期间到达也能看到这条。
@@ -1268,7 +1283,7 @@ export class LarkGroupParticipation {
     if (alarm) return alarm.action === 'act' ? `${clock(alarm.createdAt)} 那条告警已经起了初筛任务，结果在告警话题里。` : `${clock(alarm.createdAt)} 那条告警我没分析：${alarm.reason}。`;
     const recent = decisions.filter(item => Date.parse(item.createdAt) >= since);
     const level = await this.level(scope, settings);
-    const hint = level === 'eager' ? '' : '想让我多接话，可以 @ 我说「积极点」。';
+    const hint = level === 'eager' ? '' : `想让我多接话，可以 @ 我说「${participationLevelPhrases.eager}」。`;
     const silent = recent.find(item => item.action === 'silent' && !isDecisionGate(item) && decisionTrigger(item)?.senderId === senderId);
     if (silent) {
       const trigger = decisionTrigger(silent);

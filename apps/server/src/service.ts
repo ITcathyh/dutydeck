@@ -18,7 +18,7 @@ import { loadConfigWithDiagnostics, type AppConfig } from '@dutydeck/config';
 import { logDroppedAgents } from './agent-config-log.js';
 import { assertBotProcessStartup, childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
 import { createPtyRetirementControl } from './pty-recovery.js';
-import { installationOwnerTaskActor, makeId, RuntimeError, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import { COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, RuntimeError, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -379,7 +379,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       const binding = session.source === 'work_item' ? await workItems.parentForSession(session.id) : await delegations.parentForSession(session.id);
       return binding ? { parentSessionId: binding.parentSessionId, ...(binding.parentTaskId ? { parentTaskId: binding.parentTaskId } : {}) } : undefined;
     },
-    isProactive: async (appId, chatId, messageId) => (await repos.collaboration.listActions({ appId, chatId }, 500))
+    isProactive: async (appId, chatId, messageId) => (await repos.collaboration.listActions({ appId, chatId }, COLLABORATION_LIST_LIMIT))
       .some(action => action.kind === 'participation.dispatch' && action.payload.messageId === messageId),
     notify: async (target, text, idempotencyKey) => {
       const bot = (await readLarkConfigs(repos.config)).find(entry => entry.appId === target.appId);

@@ -1,6 +1,6 @@
 import { CollaborationDelivery } from './collaboration-delivery.js';
 import { createHash } from 'node:crypto';
-import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, participationLevelFields, participationLevelOf, RuntimeError, type CollaborationRepository, type CollaborationScope, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
+import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, participationLevelFields, resolveParticipation, RuntimeError, type CollaborationRepository, type CollaborationScope, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { CollaborationService, type CollaborationAuthorization } from './collaboration-service.js';
 import { ScheduleExecutor } from './schedule-executor.js';
@@ -9,7 +9,8 @@ import { CollaborationExtensions } from './collaboration-extensions.js';
 import { CollaborationEvaluation } from './collaboration-evaluation.js';
 import { LarkGroupParticipation, memberFacts } from './lark/group-participation.js';
 import { ReadonlyParticipationDecider } from './lark/readonly-decider.js';
-import { evaluateParticipationRules, ownedItems, ruleContextOf, type RuleFacts } from './lark/participation-rules.js';
+import type { RuleFacts } from './lark/participation-rules.js';
+import { evaluateParticipation, replayRound } from './lark/participation-evaluate.js';
 import { participationUsage } from './usage-ledger.js';
 import { LarkTeamContextReader } from './lark/team-context.js';
 import { larkExecutionConfirmed, readLarkConfig, type StoredLarkConfig } from './lark/config.js';
@@ -35,7 +36,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   // Keep the saved group override distinct from the effective Bot default. All collaboration
   // consumers (including snapshots, bootstrap and management) use the same resolution.
   const effectiveSettings = async (settings: CollaborationSettings): Promise<CollaborationSettings> => settings.inheritParticipation
-    ? { ...settings, participation: (await readLarkConfig(stored.config, settings.scope.appId))?.defaultGroupParticipation ?? 'off' }
+    ? { ...settings, participation: resolveParticipation({ inheritParticipation: true, botDefaultParticipation: (await readLarkConfig(stored.config, settings.scope.appId))?.defaultGroupParticipation }).participation }
     : settings;
   const repos: RepositoryBundle = { ...stored, collaboration: {
     ...stored.collaboration,
@@ -95,10 +96,8 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     const config = await readLarkConfig(stored.config, settings.scope.appId, { readOnly: true });
     if (!config?.roleScope?.trim()) return settings;
     const resolved = await groups.resolved(config, settings.scope.chatId, true);
-    if (resolved.mentionPolicy === 'never' || resolved.mentionPolicy === 'ambient') {
-      return { ...settings, participation: 'eager' };
-    }
-    return settings;
+    const { participation } = resolveParticipation({ mentionPolicy: resolved.mentionPolicy, participation: settings.participation, roleScope: config.roleScope });
+    return participation === settings.participation ? settings : { ...settings, participation };
   };
   const roleParticipationRepo: CollaborationRepository = {
     ...repos.collaboration,
@@ -246,14 +245,16 @@ export function createCollaborationIntegration(options: CollaborationIntegration
         roleTitle: meta?.roleTitle,
         roleScope: meta?.roleScope
       };
-      // 与实时判定同一顺序：规则层先判（用当时查到的事实），拿不准才交给模型。旧记录没有事实时只跑不依赖外部事实的规则。
-      const trigger = meta?.trigger && snapshot.observations.find(item => item.id === meta.trigger!.id);
-      if (trigger) {
-        const facts = { level: participationLevelOf(replayConfig.mentionPolicy, snapshot.settings.participation), ...meta?.facts } as RuleFacts;
-        const verdict = evaluateParticipationRules(ruleContextOf(trigger, ownedItems(snapshot.mandates, snapshot.followups), [replayConfig.name, replayConfig.displayName].filter((name): name is string => Boolean(name)), facts, replayConfig.roleScope));
-        if (verdict) return { action: verdict.action === 'addressed' ? 'act' as const : 'silent' as const, reason: `规则：${verdict.reason}`, evidenceIds: [trigger.id] };
-      }
-      return decider.resolve(replayConfig, { ...snapshot, settings: { ...snapshot.settings, policyVersion: version, instructions } }, memberFacts((meta?.facts ?? {}) as Partial<RuleFacts>), trigger?.id);
+      // 与实时判定共用 evaluateParticipation：规则层先判（用当时查到的事实），拿不准才交给模型；不经闸门和补读，没有授权、预算和发送。
+      // 旧记录没有事实时只跑不依赖外部事实的规则。
+      const early = replayRound(snapshot, meta, resolveParticipation({ mentionPolicy: replayConfig.mentionPolicy, participation: snapshot.settings.participation }).level);
+      const outcome = await evaluateParticipation({
+        botNames: [replayConfig.name, replayConfig.displayName].filter((name): name is string => Boolean(name)), roleScope: replayConfig.roleScope, ...(early ? { early } : {}),
+        model: () => decider.resolve(replayConfig, { ...snapshot, settings: { ...snapshot.settings, policyVersion: version, instructions } }, memberFacts((meta?.facts ?? {}) as Partial<RuleFacts>), early?.trigger.id)
+      });
+      if (outcome.kind === 'rule') return { action: outcome.verdict.action === 'addressed' ? 'act' as const : 'silent' as const, reason: `规则：${outcome.verdict.reason}`, evidenceIds: [early!.trigger.id] };
+      if (outcome.kind === 'model') return outcome.value;
+      throw new RuntimeError('COLLABORATION_REPLAY_UNAVAILABLE', '回放不经闸门和补读，不应中止。', 500);
     }
   });
   return { service, scheduler, background, participation, extensions, evaluation, authorize, prepareSettings, riskPolicy, mandateCards,

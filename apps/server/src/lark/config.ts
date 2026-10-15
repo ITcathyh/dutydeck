@@ -1,6 +1,6 @@
 import { parseLarkEventHandlers, validateLarkEventConfiguration, type LarkEventHandler } from './event-pipeline.js';
 import { parseCardActionForwarding, type CardActionForwarding } from './card-action-forwarding.js';
-import { collaborationParticipationModes, mentionPolicies, riskControlModes, supportsRemoteApproval, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type RiskControlMode } from '@dutydeck/shared';
+import { NEW_BOT_MENTION_POLICY, collaborationParticipationModes, mentionPolicies, resolveParticipation, riskControlModes, supportsRemoteApproval, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type RiskControlMode } from '@dutydeck/shared';
 import { isAbsolute } from 'node:path';
 import { hostname, userInfo } from 'node:os';
 import { LarkServiceError } from './service.js';
@@ -643,7 +643,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(cardActionForwarding ? { cardActionForwarding } : {}),
     appId: parsed.appId.trim(),
     revision: Number.isInteger(parsed.revision) && Number(parsed.revision) > 0 ? parsed.revision : 1,
-    mentionPolicy: parsed.mentionPolicy ?? 'always',
+    mentionPolicy: resolveParticipation({ mentionPolicy: parsed.mentionPolicy }).mentionPolicy,
     defaultGroupParticipation: normalizeDefaultGroupParticipation(parsed.defaultGroupParticipation),
     appSecret: parsed.appSecret,
     ...(parsed.name?.trim() ? { name: parsed.name.trim() } : {}),
@@ -759,7 +759,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   configured: true,
   appId: config.appId,
   revision: config.revision ?? 1,
-  mentionPolicy: config.mentionPolicy ?? 'always',
+  mentionPolicy: resolveParticipation({ mentionPolicy: config.mentionPolicy }).mentionPolicy,
   defaultGroupParticipation: normalizeDefaultGroupParticipation(config.defaultGroupParticipation),
   name: config.name ?? config.appId,
   tabLabel: duplicateNames.has((config.name ?? config.appId).toLowerCase()) ? `${config.name ?? config.appId} · ${config.appId}` : config.name ?? config.appId,
@@ -987,7 +987,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     ...(cardActionForwarding ? { cardActionForwarding } : {}),
     revision: (current?.revision ?? (current ? 1 : 0)) + 1,
     // 新建的 Bot 默认在自己接手的话题里免 @；已有 Bot 读出来时总带着自己的取值，这里不会改动它们。
-    mentionPolicy: input.mentionPolicy ?? current?.mentionPolicy ?? 'topic',
+    mentionPolicy: input.mentionPolicy ?? current?.mentionPolicy ?? NEW_BOT_MENTION_POLICY,
     defaultGroupParticipation: input.defaultGroupParticipation ?? current?.defaultGroupParticipation ?? 'off',
     appId,
     appSecret,

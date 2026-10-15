@@ -22,12 +22,52 @@ export const participationLevelBehaviors: Record<ParticipationLevel, string> = {
   selective: '没 @ 我的消息先判断是不是在叫我，是才接',
   eager: '除了明显是对别人说的、表情和致谢，群里真人的消息我都接，适合单人群'
 };
+/** 在群里 @ 机器人说这些短语就改到对应档位；欢迎卡和执行 Agent 的说明从这里取，规则层必须能认出它们。 */
+export const participationLevelPhrases: Record<ParticipationLevel, string> = { mention: '只在@时回', topic: '话题里不用@', selective: '按需', eager: '积极点' };
+/** 改档短语的完整说明：「积极点」「按需」「话题里不用@」或「只在@时回」。 */
+export const participationLevelPhraseHint = `「${participationLevelPhrases.eager}」「${participationLevelPhrases.selective}」「${participationLevelPhrases.topic}」或「${participationLevelPhrases.mention}」`;
 type LevelMentionPolicy = 'always' | 'topic' | 'never' | 'ambient';
+/**
+ * 旧配置缺唤醒方式时按「每条都要 @」读，升级后不变档；新建机器人另存为 NEW_BOT_MENTION_POLICY。
+ * 两个默认值有意不同，不要合并。
+ */
+export const LEGACY_MENTION_POLICY: LevelMentionPolicy = 'always';
+export const NEW_BOT_MENTION_POLICY: LevelMentionPolicy = 'topic';
 /** 旧配置自动落到最接近的档位：never / ambient 本来就不需要 @，按「积极」说明。 */
 export function participationLevelOf(mentionPolicy: LevelMentionPolicy | undefined, participation: CollaborationParticipationMode): ParticipationLevel {
   if (participation === 'eager' || participation === 'selective') return participation;
   if (mentionPolicy === 'never' || mentionPolicy === 'ambient') return 'eager';
   return mentionPolicy === 'topic' ? 'topic' : 'mention';
+}
+export interface ParticipationSources {
+  /** 本群生效的唤醒方式（群级覆盖已合并）；旧配置可能缺。 */
+  mentionPolicy?: LevelMentionPolicy;
+  /** 群设置里保存的参与模式；没有时按 off。 */
+  participation?: CollaborationParticipationMode;
+  /** 群设置继承机器人默认参与模式。 */
+  inheritParticipation?: boolean;
+  /** 机器人默认参与模式，继承时使用；没有时按 off。 */
+  botDefaultParticipation?: CollaborationParticipationMode;
+  /** 负责范围：配了范围、参与模式为 off、唤醒方式不需要 @ 时，按积极参与判定。 */
+  roleScope?: string;
+}
+export interface ResolvedParticipation {
+  level: ParticipationLevel;
+  mentionPolicy: LevelMentionPolicy;
+  participation: CollaborationParticipationMode;
+  source: { mentionPolicy: 'configured' | 'legacy_default'; participation: 'group' | 'inherited' | 'role_scope' };
+}
+/** 参与强度的唯一解析入口：由唤醒方式、群参与模式、继承和负责范围合成生效档位，并说明各自的来源。 */
+export function resolveParticipation(input: ParticipationSources): ResolvedParticipation {
+  const mentionPolicy = input.mentionPolicy ?? LEGACY_MENTION_POLICY;
+  let participation = (input.inheritParticipation ? input.botDefaultParticipation : input.participation) ?? 'off';
+  let participationSource: ResolvedParticipation['source']['participation'] = input.inheritParticipation ? 'inherited' : 'group';
+  if (participation === 'off' && input.roleScope?.trim() && (mentionPolicy === 'never' || mentionPolicy === 'ambient')) {
+    participation = 'eager';
+    participationSource = 'role_scope';
+  }
+  return { level: participationLevelOf(mentionPolicy, participation), mentionPolicy, participation,
+    source: { mentionPolicy: input.mentionPolicy ? 'configured' : 'legacy_default', participation: participationSource } };
 }
 /** 档位写回的两个底层字段。 */
 export function participationLevelFields(level: ParticipationLevel): { mentionPolicy: 'always' | 'topic'; participation: CollaborationParticipationMode } {
@@ -427,8 +467,19 @@ export type DecisionStatus = (typeof decisionStatuses)[number];
 
 /** 标记「判定还没发生就被闸门挡下」的记录。这类记录不代表一次模型调用。 */
 export const DECISION_BUDGET_GATE = 'decision_budget';
-/** 判定用量统计窗口一次读多少条；与 listDecisions 的服务端硬上限一致，便于识别窗口读不全。 */
-export const DECISION_WINDOW_LIMIT = 500;
+/** 协作列表查询（判定、动作、活动）一次最多返回的条数，存储层按它截断。 */
+export const COLLABORATION_LIST_LIMIT = 500;
+/** 判定用量统计窗口一次读多少条；窗口是否读全看结果上的 truncated，不按条数推断。 */
+export const DECISION_WINDOW_LIMIT = COLLABORATION_LIST_LIMIT;
+/** 列表查询的结果：按条数上限截断、库里还有更早的记录时带 truncated=true（不可枚举，不进 JSON 和相等比较）。 */
+export type ListedItems<T> = T[] & { readonly truncated?: boolean };
+export function markTruncated<T>(items: T[], truncated: boolean): ListedItems<T> {
+  return Object.defineProperty(items, 'truncated', { value: truncated, enumerable: false });
+}
+/** 新到旧的列表被截断，且读到的最旧一条仍在统计窗口内：窗口没读全，用量只会被低估。 */
+export function listWindowIncomplete(items: ListedItems<{ createdAt: string }>, sinceMs: number): boolean {
+  return items.truncated === true && items.length > 0 && Date.parse(items.at(-1)!.createdAt) >= sinceMs;
+}
 /** 标记「一次由机器人触发的回合」。计入机器人预算，不是一次模型判定。 */
 export const BOT_TURN_RECORD = 'bot_turn';
 /** 标记「机器人回合被 loop guard 挡下」。既不是判定，也不消耗机器人预算。 */
@@ -666,16 +717,16 @@ export interface CollaborationRepository {
   updateMandate(scope: CollaborationScope, id: string, patch: UpdateMandateInput, actorId: string): Promise<CollaborationMandate>;
   recordDecision(input: CollaborationDecision): Promise<CollaborationDecision>;
   getDecision(scope: CollaborationScope, id: string): Promise<CollaborationDecision | undefined>;
-  listDecisions(scope: CollaborationScope, limit?: number): Promise<CollaborationDecision[]>;
+  listDecisions(scope: CollaborationScope, limit?: number): Promise<ListedItems<CollaborationDecision>>;
   updateDecision(scope: CollaborationScope, id: string, patch: UpdateDecisionInput): Promise<CollaborationDecision>;
   addFeedback(input: CollaborationFeedback): Promise<CollaborationFeedback>;
   listFeedback(scope: CollaborationScope, decisionId?: string): Promise<CollaborationFeedback[]>;
   beginAction(input: BeginActionInput): Promise<{ action: CollaborationAction; created: boolean }>;
   getAction(scope: CollaborationScope, id: string): Promise<CollaborationAction | undefined>;
-  listActions(scope?: CollaborationScope, limit?: number): Promise<CollaborationAction[]>;
+  listActions(scope?: CollaborationScope, limit?: number): Promise<ListedItems<CollaborationAction>>;
   /** Position among all in-window delivery reservations; -1 if this action is ineligible. */
   getDeliveryPosition(scope: CollaborationScope, actionId: string, since: string): Promise<number>;
   listPendingActions(appId: string, kind: string): Promise<CollaborationAction[]>;
   updateAction(scope: CollaborationScope, id: string, patch: UpdateActionInput): Promise<CollaborationAction>;
-  listActivities(scope: CollaborationScope, limit?: number): Promise<CollaborationActivity[]>;
+  listActivities(scope: CollaborationScope, limit?: number): Promise<ListedItems<CollaborationActivity>>;
 }

@@ -41,8 +41,13 @@ export interface ReplayItemResult {
 
 export interface ReplayResult {
   results: ReplayItemResult[];
+  /** 本次请求回放的样本数。 */
+  total: number;
+  /** 材料完整、实际参与比较的样本数（passed + failed）。 */
+  valid: number;
   passed: number;
   failed: number;
+  /** 因记录或材料缺失跳过的样本数；跳过的不算通过。 */
   missing: number;
 }
 
@@ -389,6 +394,6 @@ export class CollaborationEvaluation {
       );
     }
 
-    return { results, passed, failed, missing };
+    return { results, total: options.decisionIds.length, valid: passed + failed, passed, failed, missing };
   }
 }

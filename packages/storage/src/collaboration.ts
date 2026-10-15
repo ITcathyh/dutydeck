@@ -1,6 +1,8 @@
 import type Database from 'better-sqlite3';
 import {
+  COLLABORATION_LIST_LIMIT,
   RuntimeError,
+  markTruncated,
   collaborationActionSchema,
   collaborationActivitySchema,
   collaborationBootstrapSchema,
@@ -42,6 +44,7 @@ import {
   type CreateFollowupInput,
   type CreateMandateInput,
   type CreateFeedbackInput,
+  type ListedItems,
   type ListObservationsOptions,
   type ObserveCollaborationInput,
   type UpdateActionInput,
@@ -506,7 +509,7 @@ function defaultSettings(scope: CollaborationScope): CollaborationSettings {
 }
 
 function clampLimit(limit: number | undefined, fallback: number): number {
-  return limit !== undefined && Number.isFinite(limit) && limit > 0 ? Math.min(500, Math.trunc(limit)) : fallback;
+  return limit !== undefined && Number.isFinite(limit) && limit > 0 ? Math.min(COLLABORATION_LIST_LIMIT, Math.trunc(limit)) : fallback;
 }
 
 export function createCollaborationRepository(sqlite: Database.Database): CollaborationRepository {
@@ -1366,15 +1369,15 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
       return row ? rowToDecision(row) : undefined;
     },
 
-    async listDecisions(scope: CollaborationScope, limit?: number): Promise<CollaborationDecision[]> {
+    async listDecisions(scope: CollaborationScope, limit?: number): Promise<ListedItems<CollaborationDecision>> {
       const maxLimit = clampLimit(limit, 50);
       const rows = sqlite.prepare(`
         SELECT * FROM collaboration_decisions
         WHERE app_id = ? AND chat_id = ?
         ORDER BY created_at DESC
         LIMIT ?
-      `).all(scope.appId, scope.chatId, maxLimit) as DecisionRow[];
-      return rows.map(rowToDecision);
+      `).all(scope.appId, scope.chatId, maxLimit + 1) as DecisionRow[];
+      return markTruncated(rows.slice(0, maxLimit).map(rowToDecision), rows.length > maxLimit);
     },
 
     async updateDecision(
@@ -1582,23 +1585,19 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
       return row?.position ?? -1;
     },
 
-    async listActions(scope?: CollaborationScope, limit?: number): Promise<CollaborationAction[]> {
+    async listActions(scope?: CollaborationScope, limit?: number): Promise<ListedItems<CollaborationAction>> {
       const maxLimit = clampLimit(limit, 50);
-      if (scope) {
-        const rows = sqlite.prepare(`
+      const rows = (scope ? sqlite.prepare(`
           SELECT * FROM collaboration_actions
           WHERE app_id = ? AND chat_id = ?
           ORDER BY created_at DESC
           LIMIT ?
-        `).all(scope.appId, scope.chatId, maxLimit) as ActionRow[];
-        return rows.map(rowToAction);
-      }
-      const rows = sqlite.prepare(`
+        `).all(scope.appId, scope.chatId, maxLimit + 1) : sqlite.prepare(`
         SELECT * FROM collaboration_actions
         ORDER BY created_at DESC
         LIMIT ?
-      `).all(maxLimit) as ActionRow[];
-      return rows.map(rowToAction);
+      `).all(maxLimit + 1)) as ActionRow[];
+      return markTruncated(rows.slice(0, maxLimit).map(rowToAction), rows.length > maxLimit);
     },
 
     async listPendingActions(appId: string, kind: string): Promise<CollaborationAction[]> {
@@ -1703,15 +1702,15 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
       })();
     },
 
-    async listActivities(scope: CollaborationScope, limit?: number): Promise<CollaborationActivity[]> {
+    async listActivities(scope: CollaborationScope, limit?: number): Promise<ListedItems<CollaborationActivity>> {
       const maxLimit = clampLimit(limit, 50);
       const rows = sqlite.prepare(`
         SELECT * FROM collaboration_activities
         WHERE app_id = ? AND chat_id = ?
         ORDER BY created_at DESC
         LIMIT ?
-      `).all(scope.appId, scope.chatId, maxLimit) as ActivityRow[];
-      return rows.map(rowToActivity);
+      `).all(scope.appId, scope.chatId, maxLimit + 1) as ActivityRow[];
+      return markTruncated(rows.slice(0, maxLimit).map(rowToActivity), rows.length > maxLimit);
     }
   };
 }

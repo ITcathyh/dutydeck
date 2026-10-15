@@ -2,7 +2,7 @@ import { AgentModelSettings } from './AgentModelSettings';
 import { OptionalModelOverrides } from './OptionalModelOverrides';
 import type { LarkSetupTarget } from '../app-route';
 import { useState, useMemo } from 'react';
-import { participationLevelBehaviors, participationLevelFields, participationLevelLabels, participationLevelOf, participationLevels, type ParticipationLevel } from '@dutydeck/shared';
+import { participationLevelBehaviors, participationLevelFields, participationLevelLabels, participationLevels, resolveParticipation, type ParticipationLevel } from '@dutydeck/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Bot,
@@ -54,7 +54,7 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     idleCompactEnabled: bot.idleCompactEnabled ?? true,
     idleCompactHours: String(bot.idleCompactHours ?? 24),
     groupReplyMode: bot.groupReplyMode ?? '',
-    mentionPolicy: bot.mentionPolicy ?? 'always',
+    mentionPolicy: resolveParticipation({ mentionPolicy: bot.mentionPolicy }).mentionPolicy,
     defaultGroupParticipation: bot.defaultGroupParticipation ?? 'off',
     roleTitle: bot.roleTitle ?? '',
     roleScope: bot.roleScope ?? '',
@@ -178,7 +178,7 @@ export function BotManagement({
   const claudeModelSettings = supportsModelServiceSettings(agents.find(agent => agent.id === currentDraft?.defaultAgentId), currentDraft?.defaultAgentId);
 
   // 参与强度由两个底层字段合成；组合恰好是某一档的写法时才算「整档」。
-  const botLevel: ParticipationLevel = participationLevelOf(currentDraft?.mentionPolicy, currentDraft?.defaultGroupParticipation ?? 'off');
+  const botLevel: ParticipationLevel = resolveParticipation({ mentionPolicy: currentDraft?.mentionPolicy, participation: currentDraft?.defaultGroupParticipation }).level;
   const botLevelFields = participationLevelFields(botLevel);
   const botLevelExact = currentDraft?.mentionPolicy === botLevelFields.mentionPolicy && currentDraft?.defaultGroupParticipation === botLevelFields.participation;
 

@@ -1,9 +1,13 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import { untrustedNotice } from '@dutydeck/shared';
 import {
   AgentGroupToolError,
   agentGroupToolBearerToken,
   type LarkAgentToolsService
 } from './agent-tools.js';
+
+/** 群工具读回的消息、任务原文和跨群资料是外部材料：JSON 头部加统一声明，其余字段原样返回。 */
+const untrusted = async <T extends object>(source: string, result: Promise<T>) => ({ untrusted: untrustedNotice(source), ...await result });
 
 interface GroupToolQuery {
   after?: string;
@@ -67,59 +71,59 @@ export async function registerLarkAgentToolRoutes(app: FastifyInstance, service?
 
   app.get<{ Querystring: GroupToolQuery }>('/api/lark/agent-tools/messages', async (request, reply) => {
     try {
-      return await service.messages(tokenFrom(request.headers.authorization), {
+      return await untrusted('lark:group-messages', service.messages(tokenFrom(request.headers.authorization), {
         after: request.query.after,
         limit: numberFrom(request.query.limit),
         since: request.query.since,
         until: request.query.until,
         query: request.query.query
-      });
+      }));
     } catch (error) { return handleToolError(error, reply); }
   });
 
   app.get<{ Querystring: { messageId?: string } }>('/api/lark/agent-tools/message', async (request, reply) => {
     try {
-      return await service.message(tokenFrom(request.headers.authorization), {
+      return await untrusted('lark:group-messages', service.message(tokenFrom(request.headers.authorization), {
         messageId: request.query.messageId ?? ''
-      });
+      }));
     } catch (error) { return handleToolError(error, reply); }
   });
 
   app.get<{ Querystring: GroupToolQuery }>('/api/lark/agent-tools/history', async (request, reply) => {
     try {
-      return await service.history(tokenFrom(request.headers.authorization), {
+      return await untrusted('dutydeck:task-history', service.history(tokenFrom(request.headers.authorization), {
         limit: numberFrom(request.query.limit),
         since: request.query.since,
         until: request.query.until,
         query: request.query.query
-      });
+      }));
     } catch (error) { return handleToolError(error, reply); }
   });
 
   app.get<{ Params: { taskId: string }; Querystring: { field?: string; offset?: string; length?: string; cursor?: string } }>('/api/lark/agent-tools/history/:taskId', async (request, reply) => {
     try {
       const integer = (value: string) => typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value) ? Number(value) : NaN;
-      return await service.historyTask(tokenFrom(request.headers.authorization), { taskId: request.params.taskId,
+      return await untrusted('dutydeck:task-history', service.historyTask(tokenFrom(request.headers.authorization), { taskId: request.params.taskId,
         ...(request.query.field !== undefined ? { field: request.query.field } : {}),
         ...(request.query.offset !== undefined ? { offset: integer(request.query.offset) } : {}),
         ...(request.query.length !== undefined ? { length: integer(request.query.length) } : {}),
-        ...(request.query.cursor !== undefined ? { cursor: request.query.cursor } : {}) });
+        ...(request.query.cursor !== undefined ? { cursor: request.query.cursor } : {}) }));
     }
     catch (error) { return handleToolError(error, reply); }
   });
 
   app.get<{ Querystring: { query?: string } }>('/api/lark/agent-tools/team-search', async (request, reply) => {
-    try { return await service.teamSearch(tokenFrom(request.headers.authorization), { query: request.query.query }); }
+    try { return await untrusted('lark:team-search', service.teamSearch(tokenFrom(request.headers.authorization), { query: request.query.query })); }
     catch (error) { return handleToolError(error, reply); }
   });
 
   app.get<{ Querystring: GroupToolQuery }>('/api/lark/agent-tools/wait', async (request, reply) => {
     try {
-      return await service.wait(tokenFrom(request.headers.authorization), {
+      return await untrusted('lark:group-messages', service.wait(tokenFrom(request.headers.authorization), {
         after: request.query.after,
         limit: numberFrom(request.query.limit),
         timeoutMs: numberFrom(request.query.timeoutMs)
-      });
+      }));
     } catch (error) { return handleToolError(error, reply); }
   });
 

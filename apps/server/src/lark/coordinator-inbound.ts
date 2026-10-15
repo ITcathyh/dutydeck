@@ -10,7 +10,8 @@ import { redactTraceText } from './secret-redaction.js';
 import { readGitSnapshot } from './git-status.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { isLarkGroupChatMemoryPool, isLarkGroupMemoryPool, isLarkPerGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
-import { parseLarkSourceId, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
+import { parseLarkSourceId, resolveParticipation, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
+import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-decision.js';
 import { executeScheduleCommand } from './schedule-command.js';
 import { larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageResource } from './message-content.js';
@@ -654,7 +655,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const mentionsBot = this.botOpenId ? event.mentions.some(mention => mention.openId === this.botOpenId) : event.mentions.some(mention => mention.mentionedType === 'bot');
     if (this.stopped) return;
     const botSender = event.senderType === 'app' || event.senderType === 'bot';
-    const explicit = !botSender && (event.chatType === 'p2p' || mentionsBot || Boolean(quotedWorkflow) || adopted);
+    const explicit = isExplicitWake({ chatType: event.chatType, botSender, mentionsBot, quotedWorkflow: Boolean(quotedWorkflow), adopted });
     let helpOnly = false;
     let recognizedCommand = false;
     try {
@@ -670,7 +671,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       await this.rejectIncoming(event, config, error instanceof Error ? error.message : '群配置尚未生效。', explicit);
       return;
     }
-    const mentionPolicy = config.mentionPolicy ?? 'always';
+    const mentionPolicy = resolveParticipation({ mentionPolicy: config.mentionPolicy }).mentionPolicy;
     const participationMode = mentionPolicy !== 'topic' && event.chatType === 'group' && !botSender && this.groupManager
       ? await this.workflowOptions.participation?.mode({ appId: config.appId, chatId: event.chatId }) : undefined;
     const topicScope = (mentionPolicy === 'topic' || participationMode === 'selective' || participationMode === 'eager') && this.groupManager
@@ -680,34 +681,22 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     // 已识别命令里的 @ 是参数（/grant @成员），不算。
     const ownedTopic = topicScope && this.groupManager && (mentionsBot || !event.mentions.length || recognizedCommand)
       ? await this.groupManager.ownsTopic(config, event, topicScope) || Boolean(await this.threadContinuation(event, config, topicScope)) : false;
-    // 按需、积极档的接手话题只交给群参与规则，不直接唤醒。
-    const continuedTopic = mentionPolicy === 'topic' && ownedTopic;
-    // ambient 与 never 的区别在这里：ambient 在消息指名了别人时让路，只接没有指名任何人的消息。
-    // 本分支已排除 mentionsBot，所以此处出现的任何 mention 都是「点了别人」。
-    const ambientOpen = mentionPolicy === 'ambient' && !event.mentions.length;
-    const legacyWake = Boolean(quotedWorkflow) || event.chatType === 'p2p' || (event.chatType === 'group' && (mentionsBot || !botSender && (continuedTopic || mentionPolicy === 'never' || ambientOpen)));
-    // Known commands retain their existing wake and authorization rules; unknown /paths remain material.
-    const commandInteraction = !botSender && recognizedCommand && legacyWake;
     // Observation precedes wake filtering and every visible acknowledgement.
     // 发起人在同一话题里直接回复仍在等待的提问就是在作答，不依赖群参与开关。
     const pendingAskContinuation = Boolean(!recovering && !explicit && await this.continuesPendingAsk(event, config, Boolean(captured)));
     const requestContinuation = Boolean(this.workflowOptions.participation && !recovering && !explicit && !pendingAskContinuation && await this.continuesOwnRequest(event, config, Boolean(captured)));
-    const addressed = explicit || requestContinuation;
-    // 话题内免 @ 续聊也算在叫它，可以直接改档或问「为什么没回」；是否接手仍按下方原规则。
-    const topicContinuation = Boolean(ownedTopic) && !botSender;
-    const participation = triage ? undefined : await this.workflowOptions.participation?.handle(event, config, { explicit: addressed || pendingAskContinuation || commandInteraction, botOpenId: this.botOpenId,
-      addressed: (addressed || topicContinuation) && !recognizedCommand && !recovering, ownedTopic: topicContinuation });
+    const wakeFacts: WakeFacts = { chatType: event.chatType, botSender, mentionsBot, hasMentions: event.mentions.length > 0, quotedWorkflow: Boolean(quotedWorkflow), adopted, recovering,
+      recognizedCommand, mentionPolicy, ownedTopic: Boolean(ownedTopic), triage: Boolean(triage), pendingAskContinuation, requestContinuation };
+    const { addressed, participation: participationInput } = wakeSignals(wakeFacts);
+    const participation = triage ? undefined : await this.workflowOptions.participation?.handle(event, config, { ...participationInput, botOpenId: this.botOpenId });
     if (this.handledMessages.has(event.messageId)) return;
-    // 改档短语、「为什么没回」已由群参与直接回应；「没问你」这类纠正只记录，不当成新请求。
-    if (participation?.handled) return;
-    // 定向机器人交接仍走下方循环门禁和访问授权，不作为人类显式指令或主动判定。
-    if (participation?.enabled && !addressed && !pendingAskContinuation && !commandInteraction && !(botSender && legacyWake)) return;
-    const shouldWake = legacyWake || adopted || pendingAskContinuation || Boolean(participation?.enabled && requestContinuation);
+    const wake = decideWake(wakeFacts, participation);
+    if (!wake.wake) return;
     // 机器人互相 @ 的硬门禁。legacyWake 的 mentionsBot / quotedWorkflow 两支都不受 !botSender
     // 约束，访问控制在没配成员名单时又对机器人一律放行，所以刷屏回路只能在这里封口。
     // 判定失败按挡下处理：门禁读不到状态时放行等于把回路重新打开。
     // 被挡下的回合只留门禁记录，绝不向群里发消息——那本身就是噪音。
-    if (shouldWake && event.chatType === 'group' && this.workflowOptions.participation && !triage) {
+    if (wake.guardBotTurn && this.workflowOptions.participation) {
       let botTurnGate: string | undefined;
       try {
         botTurnGate = await this.workflowOptions.participation.guardBotTurn(event, config, { botOpenId: this.botOpenId });
@@ -721,14 +710,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         return;
       }
     }
-    if (shouldWake && event.chatType === 'group' && this.groupManager) {
+    if (event.chatType === 'group' && this.groupManager) {
       const decision = await this.groupManager.authorize(config.appId, event.chatId, event.senderOpenId, entryAction, undefined, { memberObserved: !recovering && !triage });
       if (decision && !decision.allowed) {
         await this.rejectIncoming(event, config, decision.code === 'talk_required' ? '当前账号没有此群的任务访问权限。' : decision.reason, addressed);
         return;
       }
     }
-    if (this.stopped || !shouldWake || this.handledMessages.has(event.messageId)) return;
+    if (this.stopped || this.handledMessages.has(event.messageId)) return;
     if (recovering && (!event.senderOpenId || !await this.currentAccess(config, event.chatId, event.chatType, event.senderOpenId, entryAction, undefined, event.senderOpenId))) return;
     try { if (!helpOnly) await this.requireExecution('listener', 'task.create'); }
     catch (error) {
