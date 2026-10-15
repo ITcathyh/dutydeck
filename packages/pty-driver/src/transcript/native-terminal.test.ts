@@ -127,3 +127,12 @@ it('codex binds the next native turn only to its own terminal', async () => {
   expect(tail.hasTurnTerminal?.()).toBe(true);
   expect(replies(events)).toEqual(['done', 'done2']);
 });
+
+it('codex drops a turn superseded by a different input in a newer native turn', async () => {
+  const { tail, path, events } = await historyFirst();
+  appendFileSync(path, line(record('task_started')) + user(prompt) + mirror(prompt)
+    + line(record('task_started', { turn_id: 'typed' })) + user('typed directly') + line(record('task_complete', { last_agent_message: 'late' })));
+  await tail.flush();
+  expect(tail.hasTurnTerminal?.()).toBe(false);
+  expect(replies(events)).toEqual([]);
+});
