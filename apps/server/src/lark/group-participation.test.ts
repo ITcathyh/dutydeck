@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { createCollaborationSchema } from '../../../../packages/storage/src/collaboration-migration.js';
 import { createCollaborationRepository } from '../../../../packages/storage/src/collaboration.js';
 import { allowEagerParticipation } from '../../../../packages/storage/src/migrations.js';
-import { deciderMetaOf, RuntimeError, type CollaborationSnapshot, type CollaborationFollowup, type CollaborationTeamContext, type ObserveCollaborationInput } from '@dutydeck/shared';
+import { deciderMetaOf, RuntimeError, type CollaborationSnapshot, type CollaborationFollowup, type CollaborationTeamContext, type ObserveCollaborationInput, type Session } from '@dutydeck/shared';
 import { LarkGroupParticipation, type GroupParticipationOptions } from './group-participation.js';
 import { TASK_CONTEXT_BOT_TEXT_LIMIT, TASK_CONTEXT_BUDGET, TASK_CONTEXT_FULL_REFRESH_MS, TASK_CONTEXT_HUMAN_TEXT_LIMIT, TASK_CONTEXT_WINDOW } from './group-task-context.js';
 import { LarkMessageCoordinator } from './coordinator.js';
@@ -14,6 +14,8 @@ import type { ParticipationResult } from './readonly-decider.js';
 import { LarkContextBootstrap } from './context-bootstrap.js';
 import { responderClaimText, responderReleaseText } from './group-duty.js';
 import { buildLarkCard } from './service.js';
+import { PluginHookBus } from '../plugins/hooks.js';
+import { PluginRuntimeHooks } from '../plugins/integration.js';
 
 const scope = { appId: 'cli_test', chatId: 'oc_test' };
 const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'test', listening: true, defaultAgentId: 'mock', workspace: '/tmp', fullTrustConfirmed: true,
@@ -1834,5 +1836,30 @@ describe('角色注入与 /status 展示', () => {
     // 无 scope 时本 Bot 是接话人的 /status 原文案
     await h2.repository.updateDuty(scope, { expectedRevision: (await h2.repository.getDuty(scope)).revision, responder: { appId: scope.appId, name: 'cli_test', since: new Date().toISOString() } }, 'owner');
     expect(await h2.participation.describe(scope)).toContain('**接话人**：我，本群没 @ 机器人的消息由我接');
+  });
+});
+
+describe('plugin task.beforeRun deny on background sessions', () => {
+  // bot 作用域插件拒绝判定、回复生成会话；会话与 readonly-decider 开的同形，拒绝沿 decide/respond 抛出。
+  const hooks = new PluginRuntimeHooks(new PluginHookBus([{ kind: 'handler', plugin: 'guard', scope: `bot:${scope.appId}`, event: 'task.beforeRun', timeout: 1_000, handler: () => ({ decision: 'deny', reason: '值班外不处理' }) }]));
+  const run = (phase: 'decision' | 'response') => hooks.beforeRun({ id: `s_${phase}`, cwd: '/tmp', source: `lark-${phase}`, sourceId: `${scope.appId}:${scope.chatId}` } as Session, { agentPrompt: 'p', skillDeliveries: [] });
+
+  it('records a denied decision as failed and stays silent in the group', async () => {
+    const h = await harness();
+    h.decide.mockImplementation(async () => { await run('decision'); return silent(); });
+    await h.coordinator.handle(message(), config); await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledOnce();
+    expect(h.respond).not.toHaveBeenCalled();
+    for (const send of [h.service.replyText, h.service.sendText, h.service.send, h.service.reply, h.service.addReaction]) expect(send).not.toHaveBeenCalled();
+    expect((await h.repository.listDecisions(scope))[0]).toMatchObject({ action: 'silent', status: 'failed', reason: expect.stringContaining('值班外不处理') });
+  });
+
+  it('replies with the generic failure notice when the response session is denied', async () => {
+    const h = await harness();
+    h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    h.respond.mockImplementation(async () => { await run('response'); return '不会用到'; });
+    await h.coordinator.handle(message(), config); await h.participation.flush(scope);
+    expect(h.service.replyText).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_1', text: '这次回复生成失败，请稍后重试。' }));
+    expect((await h.repository.listDecisions(scope))[0]!.status).toBe('failed');
   });
 });

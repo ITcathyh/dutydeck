@@ -685,8 +685,10 @@ curl -X POST http://127.0.0.1:4310/api/plugins/hello/triggers/ping \
 | `task.beforeRun` | 任务开始前，skills 处理之后、prompt 冻结之前 | source, prompt, skills | 会话 source | `deny` 拒收；`additionalContext` 追加；`updatedPrompt` 替换 |
 | `permission.request` | 审批发出之前 | 完整的权限请求 | 请求标题 | `allow` / `deny` 直接代为决定、不再出人工审批；其他结果照常走人工审批 |
 | `task.completed` | 任务结算后，异步 | status, prompt, source；顶层带 taskId | status | 无 |
-| `verification.completed` | 验证跑完后，异步 | 验证结果 | status | 无 |
+| `verification.completed` | 验证跑完后，异步 | 验证结果，加 source | status | 无 |
 | `notify` | CI 通知和触发器结果发出之前 | `ci_notice`（title, text, failed）或 `trigger_result`（taskId, status, text） | kind | `deny` 时不发 |
+
+群协作的判定、回复生成和记忆整理这三类后台会话也经过 `task.received` 和 `task.beforeRun`，输入带所属机器人的 `botAppId`，`bot:<appId>` 作用域的 hook 对它们生效；记忆整理会话不带 `chatId`。对这三类会话，`task.beforeRun` 只认 `deny`，`additionalContext` 和 `updatedPrompt` 会被忽略并记一条警告日志；`permission.request` 也只认 `deny`，`allow` 会被忽略并记警告日志，审批照常走原流程（不论插件作用域）。这三类会话结算时的 `task.completed`（以及适用时的 `verification.completed`）同样带 `botAppId`，bot 作用域的 hook 也会收到，可以用 payload 里的 `source`（`lark-decision`、`lark-response`、`lark-memory`）区分。
 
 目前 `notify` 只覆盖 CI 通知和触发器结果，飞书任务结果卡的推送不经过它。
 

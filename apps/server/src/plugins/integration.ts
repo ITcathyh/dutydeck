@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  botAppIdOfSession,
   installationOwnerTaskActor,
   parseLarkSourceId,
   RuntimeError,
@@ -19,8 +20,13 @@ import type { TriggerDispatch } from './triggers.js';
 /** 触发器开的会话：sourceId 为 `<appId>:<chatId>:plugin:<插件>:<触发器>`。 */
 export const PLUGIN_TRIGGER_SOURCE = 'plugin_trigger';
 
+/** 群协作判定、回复生成、记忆整理三类后台会话：hook 照常运行，但只能拒绝，不能改写 prompt，也不能代为批准工具调用。 */
+const backgroundSources = new Set(['lark-decision', 'lark-response', 'lark-memory']);
+
 export function sessionHookContext(session: Pick<Session, 'id' | 'cwd' | 'source' | 'sourceId'>) {
-  const { appId, chatId } = session.source === 'lark' || session.source === PLUGIN_TRIGGER_SOURCE ? parseLarkSourceId(session.sourceId) : { appId: undefined, chatId: undefined };
+  const appId = botAppIdOfSession(session);
+  // 记忆会话 sourceId 的第二段是记忆池，不一定是群 id。
+  const chatId = appId && session.source !== 'lark-memory' ? parseLarkSourceId(session.sourceId).chatId : undefined;
   return { sessionId: session.id, ...(session.cwd ? { cwd: session.cwd } : {}), ...(appId ? { botAppId: appId } : {}), ...(chatId ? { chatId } : {}) };
 }
 
@@ -29,13 +35,13 @@ const denied = (reason: string | undefined) => new RuntimeError('PLUGIN_HOOK_DEN
 /**
  * 把插件 hook 接到现有流程的几个入口。没有对应事件的 hook 时每个方法都直接返回，行为与未装插件一致。
  * - task.received：新任务接收前（runtime admitTask），deny 拒收；
- * - task.beforeRun：任务 prompt 冻结前（prepareTaskPrompt），deny 拒收，additionalContext 追加、updatedPrompt 替换；
- * - permission.request：待审批工具调用进入人工审批前，allow/deny 直接代为决定；
+ * - task.beforeRun：任务 prompt 冻结前（prepareTaskPrompt），deny 拒收，additionalContext 追加、updatedPrompt 替换；后台会话只认 deny；
+ * - permission.request：待审批工具调用进入人工审批前，allow/deny 直接代为决定；后台会话只认 deny；
  * - task.completed / verification.completed：结算后通知，结果不影响流程；
  * - notify：Dutydeck 主动推送（CI 通知、触发器结果）前，deny 不发。
  */
 export class PluginRuntimeHooks {
-  constructor(private readonly hooks: PluginHookBus) {}
+  constructor(private readonly hooks: PluginHookBus, private readonly log?: { warn(data: Record<string, unknown>, message: string): void }) {}
 
   has(event: Parameters<PluginHookBus['has']>[0]) { return this.hooks.has(event); }
 
@@ -54,6 +60,10 @@ export class PluginRuntimeHooks {
     } }, session.source ?? 'web');
     if (result.decision === 'deny') throw denied(result.reason);
     if (!result.updatedPrompt && !result.additionalContext.length) return prepared;
+    if (backgroundSources.has(session.source ?? '')) {
+      this.log?.warn({ sessionId: session.id, source: session.source, plugins: result.outcomes.map(outcome => outcome.plugin) }, '插件对后台会话的改写已忽略');
+      return prepared;
+    }
     const context = result.additionalContext.length ? `\n\n${result.additionalContext.join('\n\n')}` : '';
     const agentPrompt = `${result.updatedPrompt ?? prepared.agentPrompt}${context}`;
     if (!prepared.promptParts) return { ...prepared, agentPrompt };
@@ -66,6 +76,10 @@ export class PluginRuntimeHooks {
 
   async reviewPermission(session: Session, request: PermissionRequestData): Promise<'allow' | 'deny' | undefined> {
     const result = await this.hooks.run('permission.request', { ...sessionHookContext(session), payload: { ...request } }, request.title ?? '');
+    if (result.decision === 'allow' && backgroundSources.has(session.source ?? '')) {
+      this.log?.warn({ sessionId: session.id, source: session.source, plugins: result.outcomes.map(outcome => outcome.plugin) }, '插件对后台会话的批准已忽略');
+      return undefined;
+    }
     return result.decision === 'allow' || result.decision === 'deny' ? result.decision : undefined;
   }
 
@@ -76,7 +90,7 @@ export class PluginRuntimeHooks {
 
   async verificationCompleted(session: Session, result: VerificationResponse): Promise<void> {
     if (!this.hooks.has('verification.completed')) return;
-    await this.hooks.run('verification.completed', { ...sessionHookContext(session), payload: { ...result } as Record<string, unknown> }, String((result as { status?: unknown }).status ?? ''));
+    await this.hooks.run('verification.completed', { ...sessionHookContext(session), payload: { ...result, source: session.source ?? 'web' } as Record<string, unknown> }, String((result as { status?: unknown }).status ?? ''));
   }
 
   /** 返回 false 表示有插件拒绝这次推送。 */

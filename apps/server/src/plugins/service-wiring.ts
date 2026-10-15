@@ -32,7 +32,7 @@ export interface PluginWiringDeps {
  * runtimeOptions 只包含有对应 hook 的项，没有插件时整个函数不被调用。
  */
 export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
-  const hooks = new PluginRuntimeHooks(host.hooks);
+  const hooks = new PluginRuntimeHooks(host.hooks, deps.log);
   const disposers = [
     setPluginSkillRoots(context => host.skillRoots(context)),
     setLarkPluginCommands(host.commands)
