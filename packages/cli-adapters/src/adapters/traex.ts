@@ -3,6 +3,7 @@ import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { pollScreenReady } from './screen-ready-helper.js';
 import { buildCwdTrustArgs } from './cwd-trust.js';
 import { delay } from './input-settle.js';
+import { isTraexBusyScreen } from './traex-footer.js';
 
 /**
  * TRAE CLI（traex / traecli）适配器：Codex 家族，共享 bracketed-paste 输入
@@ -146,6 +147,7 @@ export function createTraexAdapter(): CliAdapter {
       return ['resume', sessionId];
     },
 
+    isBusyScreen: isTraexBusyScreen,
     busyPattern: TRAEX_ACTIVE_BUSY_PATTERN,
     idleToBusyPattern: TRAEX_ACTIVE_BUSY_PATTERN,
     staticBusyPattern: TRAEX_STATIC_BUSY_PATTERN,

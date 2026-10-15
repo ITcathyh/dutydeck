@@ -1,5 +1,6 @@
 import type { PtyLike } from '../types.js';
 import { delay } from './input-settle.js';
+import { isTraexBusyScreen } from './traex-footer.js';
 
 const STARTUP_POLL_MS = 100;
 const STARTUP_TIMEOUT_MS = 30_000;
@@ -7,9 +8,10 @@ const STARTUP_TIMEOUT_MS = 30_000;
 const LOADING = /^│\s*(?:model|directory):\s*loading\b/i;
 const LOADED_BANNER = /^│[ \t]+model:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│[ \t]*\n│[ \t]+directory:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│$/im;
 const PENDING = /^(?:Resuming(?: session)?(?:…|\.{3})?|(?:[•⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*)?Working[^\r\n]{0,160}esc to interrupt\)?|esc to interrupt|Queued for capacity|Too many requests right now(?:\. You're in the queue.*)?|Select permissions|Review hooks|Press enter to continue)$/i;
+const STARTUP_PENDING = /^(?:Resuming(?: session)?(?:…|\.{3})?|Select permissions|Review hooks|Press enter to continue)$/i;
 const CODEX_BANNER = /^(?:Codex|│\s*>_ OpenAI Codex \(v[^\s()]+\)\s*│)$/i;
 const TRAEX_BANNER = /^(?:TraeX|TraeCode CLI)$/i;
-const CODEX_COMPOSER = /^[›❯]\s*(?:Ask Codex(?: to do anything)?)?$/i;
+const CODEX_COMPOSER = /^[›»❯]\s*(?:Ask Codex(?: to do anything)?)?$/i;
 
 /**
  * TraeX 输入框随机占位词列表（共 11 条）。
@@ -77,7 +79,7 @@ const DECORATION = /^[╰╯│╭╮─\-\s+=]+$|^\?\s+for\s+shortcuts$/i;
 // 这样可以彻底避免未就绪画面（如 resume 期间）正文折行恰好出现 "Trust this folder?" 等标题文字时误判报错。
 const CODEX_TRUST_HEADING = /^Trust this folder\?/i;
 const TRAEX_TRUST_HEADING = /^Do you trust the contents of this directory\?/i;
-const CODEX_TRUST_MENU = /^[›❯]\s*1\.\s*(?:Trust and continue|Yes, continue)\s*$/i;
+const CODEX_TRUST_MENU = /^[›»❯]\s*1\.\s*(?:Trust and continue|Yes, continue)\s*$/i;
 const TRAEX_TRUST_MENU = /^[›❯]\s*1\.\s*Yes,\s*continue\s*$/i;
 // hooks 审核页不属于目录信任页：其选项是「Review hooks / Trust all and continue」。
 const HOOKS_REVIEW_LINE = /Review hooks/i;
@@ -99,17 +101,19 @@ function isInitializedFooter(line: string): boolean {
 
 /** readScreen is a rendered viewport, not a raw PTY transcript. */
 export function isInputReady(screen: string, cli: 'Codex' | 'TraeX', busyPattern?: RegExp): boolean {
-  const lines = screen.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
-    .split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  if (lines.some(line => LOADING.test(line) || PENDING.test(line)
-    || /^[›❯]\s*\d+\./.test(line) || busyPattern?.test(line))) return false;
+  if (cli === 'TraeX' && isTraexBusyScreen(screen)) return false;
+  const rows = screen.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').split(/\r?\n/);
+  const lines = rows.map(line => line.trim()).filter(Boolean);
+  if (lines.some(line => LOADING.test(line) || (cli === 'TraeX' ? STARTUP_PENDING : PENDING).test(line)
+    || /^[›»❯]\s*\d+\./.test(line) || (cli !== 'TraeX' && busyPattern?.test(line)))) return false;
 
-  let prompt = lines.length - 1;
-  while (prompt >= 0 && !/^[›❯](?:\s|$)/.test(lines[prompt]!)) prompt--;
-  if (prompt < 0 || !(cli === 'Codex' ? CODEX_COMPOSER : TRAEX_COMPOSER).test(lines[prompt]!)) return false;
-  const footer = lines.slice(prompt + 1);
+  const composerRows = cli === 'TraeX' ? rows : lines;
+  let prompt = composerRows.length - 1;
+  while (prompt >= 0 && !/^[›»❯](?:\s|$)/.test(composerRows[prompt]!)) prompt--;
+  if (prompt < 0 || !(cli === 'Codex' ? CODEX_COMPOSER : TRAEX_COMPOSER).test(composerRows[prompt]!.trimEnd())) return false;
+  const footer = composerRows.slice(prompt + 1).map(line => line.trim()).filter(Boolean);
   if (footer.some(line => !isInitializedFooter(line) && !DECORATION.test(line))) return false;
-  const banner = lines.slice(0, prompt);
+  const banner = composerRows.slice(0, prompt).map(line => line.trim());
   return footer.some(isInitializedFooter) || LOADED_BANNER.test(banner.join('\n'))
     || banner.some(line => (cli === 'Codex' ? CODEX_BANNER : TRAEX_BANNER).test(line));
 }

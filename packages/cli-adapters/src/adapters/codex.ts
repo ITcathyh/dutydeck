@@ -104,6 +104,6 @@ export function createCodexAdapter(): CliAdapter {
     idleToBusyPattern: CODEX_ACTIVE_BUSY_PATTERN,
     // 更新选择器也渲染 `› 1. Update now`，裸 › 会把菜单当成 composer，
     // 所以排除带序号的菜单行。
-    readyPattern: /›(?!\s*\d+\.)|\d+% left/,
+    readyPattern: /[›»](?!\s*\d+\.)|\d+% left/,
   };
 }

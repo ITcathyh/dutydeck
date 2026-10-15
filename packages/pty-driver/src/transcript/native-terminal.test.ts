@@ -49,7 +49,7 @@ it.each(['codex', 'traex'] as const)('%s retains partial text and failure indepe
 it.each(['codex', 'traex'] as const)('%s rejects old/foreign terminal and cancellation after aborting its input', async kind => {
   const { tail, path, controller } = await source(kind);
   appendFileSync(path, line(record('user_message', { turn_id: 'foreign', message: 'old input' }))
-    + line(record('task_complete', { turn_id: 'foreign', error: { message: 'wrong' } }))); 
+    + line(record('task_complete', { turn_id: 'foreign', error: { message: 'wrong' } })));
   await tail.flush(); expect(tail.takeInputError?.()).toBeUndefined(); expect(tail.hasTurnTerminal?.()).toBe(false);
   const unreceived = tail.waitForInput('unreceived', controller.signal); void unreceived.catch(() => {});
   controller.abort(); await expect(unreceived).rejects.toThrow();

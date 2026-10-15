@@ -70,10 +70,8 @@ export function createCursorAdapter(): CliAdapter {
       }
       await delay(200);
       (await emitEnter());
-      // turn 运行中时第一个 Enter 只把文本停在 follow-up 面板，第二个 Enter
-      // 才把它推进活动 turn；空闲时空 composer 的额外 Enter 是 no-op。
-      await delay(200);
-      (await emitEnter());
+      // A second Enter on the empty composer is a separate queued-message
+      // delivery/steer action. Runtime owns ordinary task sequencing.
     },
 
     /** Cursor 的 chat id 不透明、由 CLI 自己铸，dutydeck 的 sessionId 推导不出来。

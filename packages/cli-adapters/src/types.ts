@@ -86,6 +86,8 @@ export interface CliAdapter {
   busyPattern?: RegExp;
   /** Current rendered footer evidence that vetoes screen-derived completion. */
   screenBusyPattern?: RegExp;
+  /** Current full rendered viewport, with physical rows and indentation retained. */
+  isBusyScreen?(screen: string): boolean;
   /** Explicit local terminal cancellation can finish without an assistant record. */
   screenCancelledPattern?: RegExp;
   /** Animated status line in the rendered viewport; a later completion line supersedes it. */

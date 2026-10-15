@@ -1,0 +1,68 @@
+{
+  "source": "Botmux 81f978251 test/fixtures/traex-tape/two-turns.json",
+  "recordedWith": "traecli 0.209.1",
+  "cols": 160,
+  "rows": 50,
+  "frames": [
+    {
+      "t": 4100,
+      "kind": "busy",
+      "screen": "\n ▄▄▄▄▄▄▄\n █ ◆ ◆ █ TRAE CLI (v0.209.1)\n ▀▀▀▀▀▀\n Hello, tape-user-\n\n model: tape-model--- /model to change\n directory: {{CWD}}\n permissions: YOLO mode\n\n\n Tip: NEW: Network proxy can now be enabled from /experimental. Restart TRAE CLI after enabling it.\n\n⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.\n\n\n▍ 只回复一个词：好。不要调用任何工具。\n\n\n⋄ Working… (0s • esc to interrupt)\n\n❯ Summarize recent commits"
+    },
+    {
+      "t": 7040,
+      "kind": "other",
+      "screen": "\n ▄▄▄▄▄▄▄\n █ ◆ ◆ █ TRAE CLI (v0.209.1)\n ▀▀▀▀▀▀\n Hello, tape-user-\n\n model: tape-model--- /model to change\n directory: {{CWD}}\n permissions: YOLO mode\n\n\n Tip: NEW: Network proxy can now be enabled from /experimental. Restart TRAE CLI after enabling it.\n\n⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.\n\n\n▍ 只回复一个词：好。不要调用任何工具。"
+    },
+    {
+      "t": 7041,
+      "kind": "busy",
+      "screen": "\n ▄▄▄▄▄▄▄\n █ ◆ ◆ █ TRAE CLI (v0.209.1)\n ▀▀▀▀▀▀\n Hello, tape-user-\n\n model: tape-model--- /model to change\n directory: {{CWD}}\n permissions: YOLO mode\n\n\n Tip: NEW: Network proxy can now be enabled from /experimental. Restart TRAE CLI after enabling it.\n\n⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.\n\n\n▍ 只回复一个词：好。不要调用任何工具。\n\n\n◆ The user asks me to reply with only one word: 好 (good/okay), and not call any tools. Simple.\n\n◈ Working… (2s • esc to interrupt)\n 只回复一个词：好。不要调用任何工具。\n❯ Summarize recent commits\n\n tape-model--- · Context 100% left · {{CWD}} ☢ Full Access · ← for agents"
+    },
+    {
+      "t": 7053,
+      "kind": "other",
+      "screen": "\n ▄▄▄▄▄▄▄\n █ ◆ ◆ █ TRAE CLI (v0.209.1)\n ▀▀▀▀▀▀\n Hello, tape-user-\n\n model: tape-model--- /model to change\n directory: {{CWD}}\n permissions: YOLO mode\n\n\n Tip: NEW: Network proxy can now be enabled from /experimental. Restart TRAE CLI after enabling it.\n\n⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.\n\n\n▍ 只回复一个词：好。不要调用任何工具。\n\n\n◆ The user asks me to reply with only one word: 好 (good/okay), and not call any tools. Simple."
+    },
+    {
+      "t": 7053,
+      "kind": "busy",
+      "screen": "\n ▄▄▄▄▄▄▄\n █ ◆ ◆ █ TRAE CLI (v0.209.1)\n ▀▀▀▀▀▀\n Hello, tape-user-\n\n model: tape-model--- /model to change\n directory: {{CWD}}\n permissions: YOLO mode\n\n\n Tip: NEW: Network proxy can now be enabled from /experimental. Restart TRAE CLI after enabling it.\n\n⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.\n\n\n▍ 只回复一个词：好。不要调用任何工具。\n\n\n◆ The user asks me to reply with only one word: 好 (good/okay), and not call any tools. Simple.\n\n◆ 好\n\n◈ Working… (2s • esc to interrupt)\n 只回复一个词：好。不要调用任何工具。\n❯ Summarize recent commits\n\n tape-model--- · Context 100% left · {{CWD}} ☢ Full Access"
+    },
+    {
+      "t": 7225,
+      "kind": "other",
+      "screen": "\n ▄▄▄▄▄▄▄\n █ ◆ ◆ █ TRAE CLI (v0.209.1)\n ▀▀▀▀▀▀\n Hello, tape-user-\n\n model: tape-model--- /model to change\n directory: {{CWD}}\n permissions: YOLO mode\n\n\n Tip: NEW: Network proxy can now be enabled from /experimental. Restart TRAE CLI after enabling it.\n\n⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.\n\n\n▍ 只回复一个词：好。不要调用任何工具。\n\n\n◆ The user asks me to reply with only one word: 好 (good/okay), and not call any tools. Simple.\n\n◆ 好"
+    },
+    {
+      "t": 10490,
+      "kind": "busy",
+      "screen": "\n ▄▄▄▄▄▄▄\n █ ◆ ◆ █ TRAE CLI (v0.209.1)\n ▀▀▀▀▀▀\n Hello, tape-user-\n\n model: tape-model--- /model to change\n directory: {{CWD}}\n permissions: YOLO mode\n\n\n Tip: NEW: Network proxy can now be enabled from /experimental. Restart TRAE CLI after enabling it.\n\n⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.\n\n\n▍ 只回复一个词：好。不要调用任何工具。\n\n\n◆ The user asks me to reply with only one word: 好 (good/okay), and not call any tools. Simple.\n\n◆ 好\n\n Worked for 3s • 11:08 PM\n\n\n▍ 只回复一个词：行。不要调用任何工具。\n\n\n⋄ Working… (0s • esc to interrupt)\n 只回复一个词：好。不要调用任何工具。\n❯ Summarize recent commits\n\n tape-model--- · Context 99% left · {{CWD}} ☢ Full Access · ← for agents"
+    },
+    {
+      "t": 13555,
+      "kind": "other",
+      "screen": "\n ▄▄▄▄▄▄▄\n █ ◆ ◆ █ TRAE CLI (v0.209.1)\n ▀▀▀▀▀▀\n Hello, tape-user-\n\n model: tape-model--- /model to change\n directory: {{CWD}}\n permissions: YOLO mode\n\n\n Tip: NEW: Network proxy can now be enabled from /experimental. Restart TRAE CLI after enabling it.\n\n⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.\n\n\n▍ 只回复一个词：好。不要调用任何工具。\n\n\n◆ The user asks me to reply with only one word: 好 (good/okay), and not call any tools. Simple.\n\n◆ 好\n\n Worked for 3s • 11:08 PM\n\n\n▍ 只回复一个词：行。不要调用任何工具。"
+    },
+    {
+      "t": 13555,
+      "kind": "busy",
+      "screen": "\n ▄▄▄▄▄▄▄\n █ ◆ ◆ █ TRAE CLI (v0.209.1)\n ▀▀▀▀▀▀\n Hello, tape-user-\n\n model: tape-model--- /model to change\n directory: {{CWD}}\n permissions: YOLO mode\n\n\n Tip: NEW: Network proxy can now be enabled from /experimental. Restart TRAE CLI after enabling it.\n\n⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.\n\n\n▍ 只回复一个词：好。不要调用任何工具。\n\n\n◆ The user asks me to reply with only one word: 好 (good/okay), and not call any tools. Simple.\n\n◆ 好\n\n Worked for 3s • 11:08 PM\n\n\n▍ 只回复一个词：行。不要调用任何工具。\n\n\n◆ The user is asking me to reply with just one word: 行 (which means \"okay/alright\" in Chinese). They explicitly say not to call any tools. I should just\n respond with that one word.\n\n✧ Working… (3s • esc to interrupt)\n 响应简单指令\n❯ Summarize recent commits"
+    },
+    {
+      "t": 13563,
+      "kind": "other",
+      "screen": "\n ▄▄▄▄▄▄▄\n █ ◆ ◆ █ TRAE CLI (v0.209.1)\n ▀▀▀▀▀▀\n Hello, tape-user-\n\n model: tape-model--- /model to change\n directory: {{CWD}}\n permissions: YOLO mode\n\n\n Tip: NEW: Network proxy can now be enabled from /experimental. Restart TRAE CLI after enabling it.\n\n⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.\n\n\n▍ 只回复一个词：好。不要调用任何工具。\n\n\n◆ The user asks me to reply with only one word: 好 (good/okay), and not call any tools. Simple.\n\n◆ 好\n\n Worked for 3s • 11:08 PM\n\n\n▍ 只回复一个词：行。不要调用任何工具。\n\n\n◆ The user is asking me to reply with just one word: 行 (which means \"okay/alright\" in Chinese). They explicitly say not to call any tools. I should just\n respond with that one word."
+    },
+    {
+      "t": 13564,
+      "kind": "busy",
+      "screen": "\n ▄▄▄▄▄▄▄\n █ ◆ ◆ █ TRAE CLI (v0.209.1)\n ▀▀▀▀▀▀\n Hello, tape-user-\n\n model: tape-model--- /model to change\n directory: {{CWD}}\n permissions: YOLO mode\n\n\n Tip: NEW: Network proxy can now be enabled from /experimental. Restart TRAE CLI after enabling it.\n\n⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.\n\n\n▍ 只回复一个词：好。不要调用任何工具。\n\n\n◆ The user asks me to reply with only one word: 好 (good/okay), and not call any tools. Simple.\n\n◆ 好\n\n Worked for 3s • 11:08 PM\n\n\n▍ 只回复一个词：行。不要调用任何工具。\n\n\n◆ The user is asking me to reply with just one word: 行 (which means \"okay/alright\" in Chinese). They explicitly say not to call any tools. I should just\n respond with that one word.\n\n◆ 行\n\n✧ Working… (3s • esc to interrupt)\n 响应简单指令\n❯ Summarize recent commits\n\n tape-model--- · Context 99% left · {{CWD}} ☢ Full Access · ← for agents"
+    },
+    {
+      "t": 13679,
+      "kind": "other",
+      "screen": "\n ▄▄▄▄▄▄▄\n █ ◆ ◆ █ TRAE CLI (v0.209.1)\n ▀▀▀▀▀▀\n Hello, tape-user-\n\n model: tape-model--- /model to change\n directory: {{CWD}}\n permissions: YOLO mode\n\n\n Tip: NEW: Network proxy can now be enabled from /experimental. Restart TRAE CLI after enabling it.\n\n⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation.\n\n\n▍ 只回复一个词：好。不要调用任何工具。\n\n\n◆ The user asks me to reply with only one word: 好 (good/okay), and not call any tools. Simple.\n\n◆ 好\n\n Worked for 3s • 11:08 PM\n\n\n▍ 只回复一个词：行。不要调用任何工具。\n\n\n◆ The user is asking me to reply with just one word: 行 (which means \"okay/alright\" in Chinese). They explicitly say not to call any tools. I should just\n respond with that one word.\n\n◆ 行"
+    }
+  ]
+}

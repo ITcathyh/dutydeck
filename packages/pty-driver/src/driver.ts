@@ -1157,7 +1157,7 @@ export class PtyCliDriver implements AgentDriver {
         const statusLine = activity ? this.snapshot?.viewportText().split('\n').reverse()
           .find(line => activity.test(line) || this.adapter.backgroundWaitPattern?.test(line) || this.adapter.completionPattern?.test(line)
             || this.adapter.screenCancelledPattern?.test(line)) : undefined;
-        if (this.activeSubmission || this.adapter.screenBusyPattern?.test(footer) || (statusLine && activity?.test(statusLine))) {
+        if (this.activeSubmission || this.adapter.isBusyScreen?.(this.snapshot?.viewportText() ?? '') || this.adapter.screenBusyPattern?.test(footer) || (statusLine && activity?.test(statusLine))) {
           // Keep checking even if the next redraw only clears the footer.
           this.idleDetector?.reset();
           this.idleDetector?.seedReadyEvidence();
@@ -1356,7 +1356,8 @@ export class PtyCliDriver implements AgentDriver {
       });
       this.transcript.onProgress?.(() => {
         if (backend !== this.backend || this.stopped || !this.turnActive) return;
-        if (this.completeInputError() || !this.awaitingTranscriptResult) return;
+        const nativeTerminal = this.transcript?.requiresTurnTerminal && this.transcript.hasTurnTerminal?.();
+        if (this.completeInputError() || (!this.awaitingTranscriptResult && !nativeTerminal)) return;
         // Claude's API errors are held until completion rather than emitted
         // as model output. A newly read error must retry the same idle guard.
         this.idleDetector?.reset();
@@ -1565,7 +1566,7 @@ export class PtyCliDriver implements AgentDriver {
       : lines.find(line => completion.test(line));
     if (!statusLine || !completion.test(statusLine) || (activity && activity.test(statusLine))) return false;
     const footer = this.snapshot?.lastLine() ?? '';
-    if (this.adapter.screenBusyPattern?.test(footer)) return false;
+    if (this.adapter.isBusyScreen?.(this.snapshot?.viewportText() ?? '') || this.adapter.screenBusyPattern?.test(footer)) return false;
     return true;
   }
 
