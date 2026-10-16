@@ -97,7 +97,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -316,7 +316,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 等待审批"
+              "content": "等待审批"
             },
             "text_tag_list": [
               {
@@ -463,10 +463,6 @@
               "tag": "plain_text",
               "content": "确认本次操作"
             },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Dutydeck"
-            },
             "template": "orange",
             "padding": "10px 12px 8px 12px"
           }
@@ -559,7 +555,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -786,7 +782,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -930,10 +926,6 @@
             "title": {
               "tag": "plain_text",
               "content": "任务状态"
-            },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Dutydeck"
             },
             "template": "green",
             "padding": "10px 12px 8px 12px"
@@ -1159,10 +1151,6 @@
             "title": {
               "tag": "plain_text",
               "content": "本次操作确认"
-            },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Dutydeck"
             },
             "template": "green",
             "padding": "10px 12px 8px 12px"
@@ -1422,10 +1410,6 @@
               "tag": "plain_text",
               "content": "审批被拒绝，没有修改 config/app.yaml"
             },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
-            },
             "text_tag_list": [
               {
                 "tag": "text_tag",
@@ -1613,10 +1597,6 @@
             "title": {
               "tag": "plain_text",
               "content": "补了一条超时配置的单元测试"
-            },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
             },
             "text_tag_list": [
               {

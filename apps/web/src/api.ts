@@ -109,6 +109,7 @@ export type LarkBotConfig = {
   hideTraceOnComplete: boolean;
   /** 精简过程卡；旧服务端缺省按开启处理。 */
   compactTrace?: boolean;
+  showAgentName?: boolean;
   allowedUsers: LarkAllowedUser[];
   allowedEmails: string[];
   allowedBots: LarkAllowedUser[];
@@ -470,6 +471,7 @@ export const api = {
     traceLimit?: number | null;
     /** 精简过程卡；缺省继承当前配置，旧服务端按开启处理。 */
     compactTrace?: boolean;
+    showAgentName?: boolean;
     allowedUsers?: LarkAllowedUser[];
     allowedUserNames?: string[];
     allowedEmails?: string[];

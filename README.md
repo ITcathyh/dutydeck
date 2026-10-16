@@ -189,6 +189,8 @@ pnpm dev
 
 ## 飞书指挥台实战指南 <a id="lark-guide"></a>
 
+飞书任务卡默认不显示 Agent 名称。在机器人设置的「访问范围与高级设置」中开启「卡片显示 Agent 名称」后，状态右侧会显示简称角标（例如 `完成` `CCFlash`），不展示括号中的宿主细节。也可用 `dutydeck settings bot set <appId> showAgentName=true` 开启，设为 `false` 关闭。
+
 ### 1. 经典任务交互流程
 
 ```text

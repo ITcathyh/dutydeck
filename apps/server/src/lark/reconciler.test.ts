@@ -1343,3 +1343,17 @@ describe('结果投递失败的对账', () => {
     expect(h.persisted().final_delivery_retry_at! - Date.now()).toBeLessThanOrEqual(5 * 60_000);
   });
 });
+
+
+describe('Agent badge reconciliation', () => {
+  it.each([false, true])('restores badge preference %s on a recovered result', async showAgentName => {
+    const mapping = createMapping('map-badge', 'msg-badge', 'ses-badge', { runtime_task_id: 'task-badge', state: 'running' });
+    const cardMappings = createMemoryChannelMappingRepo([mapping]);
+    const service = { update: vi.fn(async () => ({ messageId: 'om_card_msg-badge' })), send: vi.fn(async (_input: any) => ({ messageId: 'om_result' })) };
+    await performLarkCardReconcile({ config: { ...config, showAgentName }, channel: mapping.channel, cardMappings,
+      runtime: { listAgents: async () => [{ id: 'codex', name: 'CCFlash (Claude Code / CPA)' }], getTasks: async () => [{ id: 'task-badge', sessionId: 'ses-badge', prompt: 'task', status: 'completed', createdAt: mapping.createdAt, updatedAt: mapping.createdAt }], getEvents: async () => [{ id: 'event', type: 'text', data: { text: '完成' } }] } as any,
+      service: service as any, log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
+    expect(service.send).toHaveBeenCalledOnce();
+    expect(service.send.mock.calls[0]![0]).toMatchObject({ showAgentName, agentName: 'CCFlash (Claude Code / CPA)' });
+  });
+});

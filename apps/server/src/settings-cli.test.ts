@@ -118,6 +118,20 @@ describe('settings CLI against the real bot routes', () => {
     expect((await run('bot-show', { appId: 'cli_a' })).bot).not.toHaveProperty('eventHandlersError');
   });
 
+  it('shows, changes, and preserves the Agent badge switch through the settings API', async () => {
+    const { repos, run, fetcher } = await botRuntime();
+    expect((await run('bot-show', { appId: 'cli_a' })).bot.showAgentName).toBe(false);
+    for (const showAgentName of [true, false]) {
+      await run('bot-set', { appId: 'cli_a', pairs: [`showAgentName=${showAgentName}`] });
+      await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=keep badge preference'] });
+      expect((await run('bot-show', { appId: 'cli_a' })).bot.showAgentName).toBe(showAgentName);
+      expect((await readLarkConfig(repos.config, 'cli_a'))?.showAgentName).toBe(showAgentName);
+    }
+    const invalid = await fetcher(`${target.url}/api/lark/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ originalAppId: 'cli_a', showAgentName: 'true' }) });
+    expect(invalid.status).toBe(400);
+    expect(fieldsHelp(botFields)).toContain('showAgentName=<true|false>');
+  });
+
   it('defaults welcomes on, saves and preserves the boolean setting, and rejects invalid API values', async () => {
     const { repos, run, fetcher } = await botRuntime();
     expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ welcomeEnabled: true });

@@ -1111,7 +1111,7 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
       taskId: 'om_p1', elapsedSeconds: 16.224, elements
     });
     expect(card.header.title).toMatchObject({ tag: 'plain_text', content: '自动化流水线' });
-    expect(card.header.subtitle).toMatchObject({ tag: 'plain_text', content: 'Claude Code' });
+    expect(card.header.subtitle).toBeUndefined();
     expect(card.header.template).toBe('blue');
     expect(card.header.text_tag_list).toEqual([{ tag: 'text_tag', text: { tag: 'plain_text', content: '进行中' }, color: 'blue' }]);
     // 不再有「执行记录 · 执行中 · 用时」那一行：当前阶段直接是正文第一块，且不套底色。
@@ -1241,7 +1241,7 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
       elements: [{ tag: 'markdown', content: '任务已接收，正在准备执行…', text_size: 'normal', margin: '0px' }]
     });
     expect(queued.header.title).toMatchObject({ tag: 'plain_text', content: '拉取消息' });
-    expect(queued.header.subtitle).toMatchObject({ tag: 'plain_text', content: 'Codex · 排队中' });
+    expect(queued.header.subtitle).toMatchObject({ tag: 'plain_text', content: '排队中' });
     expect(queued.body.elements[0]).toMatchObject({ tag: 'markdown', content: '任务已接收，正在准备执行…' });
     expect(byId(queued, 'task_meta').content).toBe("<font color='grey'>排队等待 16 秒</font><font color='grey'> · </font><font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>");
     expect(JSON.stringify(queued)).not.toContain('16.224');
@@ -1251,7 +1251,7 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     const errorElements = renderLarkProcessElements([makeEvent(1, 'error', { message: '连接失败' })], config, true);
     const failed: any = buildLarkCard({ cardKind: 'process', state: 'failed', taskName: '看不懂', agentName: 'Codex', elements: errorElements });
     expect(failed.header.title).toMatchObject({ tag: 'plain_text', content: '看不懂' });
-    expect(failed.header.subtitle).toMatchObject({ tag: 'plain_text', content: 'Codex' });
+    expect(failed.header.subtitle).toBeUndefined();
     expect(failed.body.elements[0].element_id).toBe('execution_alert_0');
     expect(byId(failed, 'failure_step')).toBeUndefined();
     expect(JSON.stringify(failed)).not.toContain('正在思考中');
@@ -1260,11 +1260,12 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
   it('P6. 任务名/Agent 名中的 markdown 与 at 标签在根 header plain_text 标题中原样保留，不被解释', () => {
     const card: any = buildLarkCard({
       cardKind: 'process', state: 'queued', taskName: '**bold** [x](https://a) <at id=all></at>',
-      agentName: 'Agent <font color=red>red</font>',
+      agentName: 'Agent <font color=red>red</font>', showAgentName: true,
       elements: [{ tag: 'markdown', content: '任务已接收，正在准备执行…', text_size: 'normal', margin: '0px' }]
     });
     expect(card.header.title).toMatchObject({ tag: 'plain_text', content: '**bold** [x](https://a) <at id=all></at>' });
-    expect(card.header.subtitle).toMatchObject({ tag: 'plain_text', content: 'Agent <font color=red>red</font> · 排队中' });
+    expect(card.header.subtitle).toMatchObject({ tag: 'plain_text', content: '排队中' });
+    expect(card.header.text_tag_list[1].text).toEqual({ tag: 'plain_text', content: 'Agent <font color=red>red</font>' });
     expect(card.header.text_tag_list[0].text).toEqual({ tag: 'plain_text', content: '进行中' });
     expect(JSON.stringify(card.body)).not.toContain('bold');
   });
@@ -1405,7 +1406,7 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     }
     const elements = boundLarkCardElements(renderLarkProcessElements(events, { traceLimit: 200, hideTraceOnComplete: true }, true));
     for (const state of ['completed', 'failed'] as const) {
-      const card: any = buildLarkCard({ cardKind: 'process', state, taskName: '大任务', agentName: 'Codex', elapsedSeconds: 99, elements });
+      const card: any = buildLarkCard({ cardKind: 'process', state, taskName: '大任务', agentName: 'Codex', showAgentName: true, elapsedSeconds: 99, elements });
       expect(Buffer.byteLength(JSON.stringify(card), 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
       expect(components(card).length).toBeLessThanOrEqual(larkCardSafeLimits.components);
       expect(card.config.summary.content).toBe(`${state === 'completed' ? '完成' : '失败'} · 大任务`);
@@ -1416,7 +1417,8 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
         expect(byId(card, 'task_overview').header.title.content).not.toContain('第 12 阶段');
         expect(byId(card, 'trace_counts').content).toContain('运行命令 12 次');
       } else {
-        expect(card.header).toMatchObject({ title: { content: '大任务' }, subtitle: { content: 'Codex' } });
+        expect(card.header).toMatchObject({ title: { content: '大任务' }, text_tag_list: [{ text: { content: '失败' } }, { text: { content: 'Codex' } }] });
+        expect(card.header.subtitle).toBeUndefined();
       }
     }
 
@@ -1424,12 +1426,11 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     // （硬安全网是为第三方 schema 额外开销预留的，常规有界输入不可达；此路径验证
     // 真实可达的兜底同样保留 Agent/状态/耗时并给稳定裁剪提示 ID。）
     const huge = [{ tag: 'markdown', content: 'A'.repeat(40_000), text_size: 'normal_v2', margin: '0px' }];
-    const fallback: any = buildLarkCard({ cardKind: 'process', state: 'failed', taskName: '超大', agentName: 'AgentX', elapsedSeconds: 3, elements: huge });
+    const fallback: any = buildLarkCard({ cardKind: 'process', state: 'failed', taskName: '超大', agentName: 'AgentX', showAgentName: true, elapsedSeconds: 3, elements: huge });
     expect(Buffer.byteLength(JSON.stringify(fallback), 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
     expect(fallback.header).toMatchObject({
       title: { tag: 'plain_text', content: '超大' },
-      subtitle: { tag: 'plain_text', content: 'AgentX' },
-      text_tag_list: [{ text: { content: '失败' }, color: 'red' }]
+      text_tag_list: [{ text: { content: '失败' }, color: 'red' }, { text: { content: 'AgentX' }, color: 'neutral' }]
     });
     expect(fallback.config.summary.content).toBe('失败 · 超大');
     expect(JSON.stringify(fallback.body.elements.at(-1))).toContain('[dutydeck](https://github.com/ITcathyh/dutydeck)');
@@ -1733,5 +1734,35 @@ describe('过程卡回执：一句话说做了什么', () => {
       expect(title).not.toContain('先查一下现状');
       expect(JSON.stringify(card)).not.toContain('trace_counts');
     }
+  });
+});
+
+
+describe('Agent name header badge', () => {
+  it.each(['process', 'result'] as const)('hides the Agent by default and shows only its short name after status on %s cards', cardKind => {
+    const input = { cardKind, state: 'running' as const, agentName: 'CCFlash (Claude Code / CPA)', markdown: 'working' };
+    for (const showAgentName of [undefined, false]) {
+      const card: any = buildLarkCard({ ...input, showAgentName });
+      expect(card.header.subtitle).toBeUndefined();
+      expect(card.header.text_tag_list.map((tag: any) => tag.text.content)).toEqual(['进行中']);
+      expect(JSON.stringify(card)).not.toContain('CCFlash');
+    }
+    const card: any = buildLarkCard({ ...input, state: 'completed', showAgentName: true });
+    if (cardKind === 'result') {
+      expect(card.header.text_tag_list.map((tag: any) => tag.text.content)).toEqual(['完成', 'CCFlash']);
+      expect(card.header.subtitle).toBeUndefined();
+    } else expect(card.header).toBeUndefined(); // collapsed completion receipt
+    const queued: any = buildLarkCard({ ...input, state: 'queued', showAgentName: true, queuePosition: 2 });
+    expect(queued.header.text_tag_list.map((tag: any) => tag.text.content)).toEqual(['进行中', 'CCFlash']);
+    expect(queued.header.subtitle.content).toContain('排队');
+    expect(queued.header.subtitle.content).not.toContain('CCFlash');
+  });
+
+  it.each([false, true])('keeps visibility %s and status reasons in oversized fallback cards', showAgentName => {
+    const card: any = buildLarkCard({ cardKind: 'result', state: 'queued', showAgentName, agentName: 'CCFlash（Claude Code / CPA）', elements: [{ tag: 'markdown', content: 'x'.repeat(40_000) }] });
+    expect(card.header.text_tag_list.map((tag: any) => tag.text.content)).toEqual(showAgentName ? ['进行中', 'CCFlash'] : ['进行中']);
+    expect(card.header.subtitle.content).toContain('排队');
+    expect(JSON.stringify(card)).not.toContain('CPA');
+    expect(Buffer.byteLength(JSON.stringify(card))).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
   });
 });

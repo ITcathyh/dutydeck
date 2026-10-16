@@ -93,7 +93,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -309,10 +309,6 @@
             "title": {
               "tag": "plain_text",
               "content": "把登录页的错误提示改成中文"
-            },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
             },
             "text_tag_list": [
               {
@@ -634,10 +630,6 @@
             "title": {
               "tag": "plain_text",
               "content": "已把登录页的错误提示改成中文：密码错误时显示…"
-            },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
             },
             "text_tag_list": [
               {

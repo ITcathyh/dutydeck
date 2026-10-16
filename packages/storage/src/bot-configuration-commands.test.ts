@@ -518,6 +518,31 @@ describe('bot-configuration-commands: mutateRelated', () => {
     expect(updated.policy.execution.riskControlMode).toBe('guidance');
   });
 
+  it('persists the Agent badge preference when creating a V2 bot', () => {
+    const { db } = fixture();
+    const policy = samplePolicyInput();
+    const created = createConfigurationCommands(db).create(sampleCreateInput({ policy: { ...policy, presentation: { ...policy.presentation, showAgentName: true } } }));
+    expect(created.policy.presentation.showAgentName).toBe(true);
+    expect(createConfigurationReader(db).read('bot_test')!.policy.presentation.showAgentName).toBe(true);
+  });
+
+  it('defaults old V2 presentation to hidden and round-trips the Agent badge switch', () => {
+    const { db } = fixture();
+    seedBot(db);
+    const commands = createConfigurationCommands(db);
+    const reader = createConfigurationReader(db);
+    expect(reader.read('bot_test')!.policy.presentation.showAgentName).toBe(false);
+    let revision = 1;
+    for (const showAgentName of [true, false]) {
+      const updated = commands.mutateRelated({ operationId: `op_badge_${revision}`, actor: owner, botId: 'bot_test', expectedRevision: revision }, mut({ policy: { expectedRevision: revision, patch: { presentation: { showAgentName } } } }));
+      revision = updated.bot.revision;
+      const preserved = commands.mutateRelated({ operationId: `op_other_${revision}`, actor: owner, botId: 'bot_test', expectedRevision: revision }, mut({ policy: { expectedRevision: updated.policy.revision, patch: { presentation: { pushIntervalMs: revision * 1000 } } } }));
+      revision = preserved.bot.revision;
+      expect(reader.read('bot_test')!.policy.presentation.showAgentName).toBe(showAgentName);
+      expect(JSON.parse(db.prepare('SELECT presentation_json FROM channel_bot_policies WHERE channel_bot_id = ?').pluck().get('bot_test') as string).showAgentName).toBe(showAgentName);
+    }
+  });
+
   it('pure presentation mutation increments only composition revision', () => {
     const { db } = fixture();
     seedBot(db);

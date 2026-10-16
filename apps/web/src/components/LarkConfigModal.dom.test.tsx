@@ -1173,3 +1173,20 @@ it('registers a Claude bot with a gateway and custom model, requiring the gatewa
   expect(saveBot.mock.calls[0]![0]).not.toHaveProperty('apiKey');
   expect(document.body.textContent).not.toContain('REGISTRATION_KEY');
 });
+
+
+describe('LarkConfigModal Agent badge preference', () => {
+  it.each([undefined, true, false])('loads %s and saves an explicit opposite value', async initial => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true }));
+    renderModal(collection({ setupComplete: true, showAgentName: initial }));
+    await screen.findByPlaceholderText('已保存');
+    await user.click(screen.getByText('访问范围与高级设置（可选）'));
+    const toggle = screen.getByRole('switch', { name: '卡片显示 Agent 名称（默认关闭）' });
+    expect(toggle.getAttribute('aria-checked')).toBe(String(initial === true));
+    await user.click(toggle);
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]![0]).toMatchObject({ stage: 'lark', showAgentName: initial !== true });
+  });
+});

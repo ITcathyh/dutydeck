@@ -289,3 +289,21 @@ describe('中间进展静默（silentProgress）', () => {
     expect(h.completionReactions()).toHaveLength(0);
   });
 });
+
+
+describe('Agent badge delivery context', () => {
+  it.each([undefined, false, true])('passes bot preference %s to progress and result cards', async showAgentName => {
+    const h = await harness('normal', { showAgentName });
+    await h.coordinator.handle(event('om_badge', '做一件事'), h.config);
+    await h.settled('om_badge');
+    for (const kind of ['process', 'result'] as const) {
+      const cards = h.cardsOfKind(kind);
+      expect(cards).toHaveLength(1);
+      expect(cards[0].showAgentName).toBe(showAgentName === true);
+      const card: any = buildLarkCard(cards[0]);
+      expect(card.header.text_tag_list.some((tag: any) => tag.text.content === 'Mock')).toBe(showAgentName === true);
+      if (kind === 'process') expect(card.header.subtitle).toMatchObject({ content: '排队中' });
+      else expect(card.header.subtitle).toBeUndefined();
+    }
+  });
+});

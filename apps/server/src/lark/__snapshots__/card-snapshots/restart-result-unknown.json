@@ -93,7 +93,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -289,7 +289,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 结果未知"
+              "content": "结果未知"
             },
             "text_tag_list": [
               {
@@ -520,7 +520,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 结果未知"
+              "content": "结果未知"
             },
             "text_tag_list": [
               {
@@ -633,7 +633,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 已放弃"
+              "content": "已放弃"
             },
             "text_tag_list": [
               {

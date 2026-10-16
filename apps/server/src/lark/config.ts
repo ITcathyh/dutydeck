@@ -147,6 +147,8 @@ export interface StoredLarkConfig {
    * 精简模式下 hideTraceOnComplete 对过程卡不再生效（各阶段退化为一行标题 markdown）。
    */
   compactTrace?: boolean;
+  /** 卡片标题栏显示 Agent 简称，默认关闭。 */
+  showAgentName?: boolean;
   /** 完成时只对触发消息贴表情，不再发结果卡，默认关闭。可被群级 presentationOverride 覆盖。 */
   completionReactionOnly: boolean;
   /** 中间进展完全静默，只保留最终结果，默认关闭。可被群级 presentationOverride 覆盖。 */
@@ -269,6 +271,8 @@ export interface SaveLarkConfigInput {
   hideTraceOnComplete?: boolean;
   /** 精简过程卡；缺省继承当前配置，仍缺省按开启处理。 */
   compactTrace?: boolean;
+  /** 卡片标题栏显示 Agent 简称，默认关闭。 */
+  showAgentName?: boolean;
   completionReactionOnly?: boolean;
   silentProgress?: boolean;
   adhdMode?: boolean;
@@ -357,6 +361,7 @@ export interface PublicLarkConfig {
   hideTraceOnComplete: boolean;
   /** 精简过程卡，默认开启；旧服务端/未归一化配置缺省时按开启处理。 */
   compactTrace: boolean;
+  showAgentName: boolean;
   completionReactionOnly: boolean;
   silentProgress: boolean;
   adhdMode: boolean;
@@ -700,6 +705,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     traceLimit,
     hideTraceOnComplete: parsed.hideTraceOnComplete !== false,
     compactTrace: parsed.compactTrace !== false,
+    showAgentName: parsed.showAgentName === true,
     completionReactionOnly: parsed.completionReactionOnly === true,
     silentProgress: parsed.silentProgress === true,
     adhdMode: parsed.adhdMode === true,
@@ -813,6 +819,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   traceLimit: config.traceLimit ?? defaultLarkTraceLimit,
   hideTraceOnComplete: config.hideTraceOnComplete,
   compactTrace: config.compactTrace !== false,
+  showAgentName: config.showAgentName === true,
   completionReactionOnly: config.completionReactionOnly === true,
   silentProgress: config.silentProgress === true,
   adhdMode: config.adhdMode === true,
@@ -857,6 +864,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const eventHandlers = input.eventHandlers === undefined ? current?.eventHandlers : parseLarkEventHandlers(input.eventHandlers, current?.eventHandlers);
   const cardActionForwarding = input.cardActionForwarding === undefined ? current?.cardActionForwarding : submittedForwarding;
   validateLarkEventConfiguration({ eventHandlers, cardActionForwarding });
+  if (input.showAgentName !== undefined && typeof input.showAgentName !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'showAgentName 必须为布尔值。', 400);
   if (input.welcomeEnabled !== undefined && typeof input.welcomeEnabled !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'welcomeEnabled 必须为布尔值。', 400);
   if (input.expectedRevision !== undefined && input.expectedRevision !== (current ? current.revision ?? 1 : 0)) {
     throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '此 Bot 已被修改，请比较最新配置后再保存。', 409);
@@ -912,6 +920,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const traceLimit = input.traceLimit === undefined ? current?.traceLimit ?? defaultLarkTraceLimit : input.traceLimit ?? defaultLarkTraceLimit;
   const hideTraceOnComplete = input.hideTraceOnComplete ?? current?.hideTraceOnComplete ?? true;
   const compactTrace = input.compactTrace ?? current?.compactTrace ?? true;
+  const showAgentName = input.showAgentName ?? current?.showAgentName ?? false;
   const completionReactionOnly = input.completionReactionOnly ?? current?.completionReactionOnly ?? false;
   const silentProgress = input.silentProgress ?? current?.silentProgress ?? false;
   const adhdMode = input.adhdMode ?? current?.adhdMode ?? false;
@@ -1042,6 +1051,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     traceLimit,
     hideTraceOnComplete,
     compactTrace,
+    showAgentName,
     completionReactionOnly,
     silentProgress,
     adhdMode,

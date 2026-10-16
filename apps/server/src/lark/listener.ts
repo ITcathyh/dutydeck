@@ -197,7 +197,7 @@ export class LarkLongConnectionListener implements LarkListener {
   }
 
   private async connect(config: StoredLarkConfig, domain: string, credentials: string, http: ReturnType<typeof createWorkbenchFetch>) {
-    const service = createLarkCardService(this.options.env ?? process.env, http.fetch, config);
+    const service = createLarkCardService(this.options.env ?? process.env, http.fetch, { ...config, resolveShowAgentName: () => (this.config ?? config).showAgentName === true });
     let botOpenId: string;
     try { botOpenId = await service.getBotOpenId(); }
     catch (error) { http.close(); throw new LarkServiceError('LARK_LISTENER_START_FAILED', `Failed to resolve Lark bot identity: ${error instanceof Error ? error.message : String(error)}`, 502); }

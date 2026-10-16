@@ -93,7 +93,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -371,10 +371,6 @@
               "tag": "plain_text",
               "content": "计划：把登录页的错误提示改成中文"
             },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
-            },
             "text_tag_list": [
               {
                 "tag": "text_tag",
@@ -482,10 +478,6 @@
               "tag": "plain_text",
               "content": "执行计划"
             },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Dutydeck"
-            },
             "template": "green",
             "padding": "10px 12px 8px 12px"
           }
@@ -578,7 +570,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -856,10 +848,6 @@
               "tag": "plain_text",
               "content": "计划：按修改意见重出计划：只改文案，不动样式"
             },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
-            },
             "text_tag_list": [
               {
                 "tag": "text_tag",
@@ -964,10 +952,6 @@
               "tag": "plain_text",
               "content": "执行计划"
             },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Dutydeck"
-            },
             "template": "green",
             "padding": "10px 12px 8px 12px"
           }
@@ -1060,7 +1044,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -1322,10 +1306,6 @@
             "title": {
               "tag": "plain_text",
               "content": "已按计划把登录页报错改成中文，pnpm test 通过"
-            },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
             },
             "text_tag_list": [
               {

@@ -93,7 +93,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -373,10 +373,6 @@
               "tag": "plain_text",
               "content": "第一轮改好了"
             },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
-            },
             "text_tag_list": [
               {
                 "tag": "text_tag",
@@ -578,10 +574,6 @@
               "tag": "plain_text",
               "content": "第一轮改好了"
             },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
-            },
             "text_tag_list": [
               {
                 "tag": "text_tag",
@@ -695,7 +687,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -975,10 +967,6 @@
               "tag": "plain_text",
               "content": "补上了 fixed.txt"
             },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
-            },
             "text_tag_list": [
               {
                 "tag": "text_tag",
@@ -1179,10 +1167,6 @@
             "title": {
               "tag": "plain_text",
               "content": "补上了 fixed.txt"
-            },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
             },
             "text_tag_list": [
               {

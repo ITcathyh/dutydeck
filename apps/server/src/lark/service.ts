@@ -39,6 +39,7 @@ export interface LarkCardInput {
   beforeSend?: LarkWriteGuard;
   cardKind?: 'process' | 'result';
   agentName?: string;
+  showAgentName?: boolean;
   workspace?: string;
   state?: LarkCardState;
   taskName?: string;
@@ -227,6 +228,9 @@ export interface LarkBotConfig {
   defaultReceiveId?: string;
   defaultReceiveIdType: LarkReceiveIdType;
   defaultAgentName: string;
+  showAgentName?: boolean;
+  /** Listener-owned live preference; avoids reconnecting when presentation changes. */
+  resolveShowAgentName?: () => boolean;
   baseUrl: string;
   /**
    * 构造本 service 时使用的 env，转交给 api-gate 读取限流/退避/熔断配置。
@@ -243,6 +247,9 @@ export interface LarkBotConfigInput {
   chatId?: string;
   receiveIdType?: LarkReceiveIdType;
   agentName?: string;
+  showAgentName?: boolean;
+  /** Listener-owned live preference; avoids reconnecting when presentation changes. */
+  resolveShowAgentName?: () => boolean;
   baseUrl?: string;
 }
 
@@ -529,6 +536,8 @@ export function loadLarkBotConfig(env: NodeJS.ProcessEnv = process.env, input: L
     defaultReceiveId: input.chatId?.trim() || env.LARK_CHAT_ID?.trim() || input.receiveId?.trim() || env.LARK_RECEIVE_ID?.trim() || undefined,
     defaultReceiveIdType: status.defaultReceiveIdType,
     defaultAgentName: status.defaultAgentName,
+    showAgentName: input.showAgentName === true,
+    ...(input.resolveShowAgentName ? { resolveShowAgentName: input.resolveShowAgentName } : {}),
     baseUrl: status.baseUrl,
     env
   };
@@ -540,7 +549,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   if (!presentation) throw new LarkServiceError('INVALID_CARD_STATE', `Unsupported Lark card state: ${String(state)}`, 400);
   const taskName = clipCardField((input.taskName?.trim() || 'Dutydeck').replace(/\s+/g, ' '), cardFieldLimits.taskName);
   const taskId = clipCardField(String(input.taskId ?? Date.now()).trim() || 'task', cardFieldLimits.taskId);
-  const agentName = clipCardField(input.agentName?.trim() || 'Dutydeck', cardFieldLimits.agentName);
+  const agentName = clipCardField((input.agentName?.trim() || 'Dutydeck').replace(/\s*[（(][^()（）]*[)）]\s*$/, '').trim() || 'Dutydeck', cardFieldLimits.agentName);
   const sessionId = input.sessionId?.trim() ? clipCardField(input.sessionId.trim(), cardFieldLimits.sessionId) : undefined;
   const webBaseUrl = input.webBaseUrl?.trim() ? clipCardField(input.webBaseUrl.trim(), cardFieldLimits.webBaseUrl) : undefined;
   const loadingImageKey = input.loadingImageKey?.trim() ? clipCardField(input.loadingImageKey.trim(), cardFieldLimits.imageKey) : undefined;
@@ -622,8 +631,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     }
   }
 
-  // 页脚承载两件不值得占正文的事：这轮跑了多久，以及去哪看全貌。执行者已经写在
-  // header 副标题里，页脚再写一次就是同一个名字在一张卡上出现两遍；工作区路径、
+  // 页脚承载这轮跑了多久，以及去哪看全貌。Agent 由标题栏的可选角标展示；工作区路径、
   // 任务号、权限标签对聊天里的读者没有可操作性，同样不占这一行。
   // 两者都没有时整行不渲染，不留空页脚。
   const footerColumns: any[] = [];
@@ -712,7 +720,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   });
   const stoppedText = larkStoppedAtLabel(input.stoppedAt);
   // 任务停在中间（卡住、受阻、待核对）时，从开始到现在的时长一直在涨，没有意义：改写停下的时刻。
-  const headerSubtitle = (reason: string | undefined) => clipCardField(reason ? `${agentName} · ${reason}` : agentName, 96);
+  const headerSubtitle = (reason: string | undefined) => reason ? { subtitle: { tag: 'plain_text', content: clipCardField(reason, 96) } } : {};
+  const agentTags = input.showAgentName === true ? [{ tag: 'text_tag', text: { tag: 'plain_text', content: agentName }, color: 'neutral' }] : [];
+  const headerTags = (label: string, color: string) => [{ tag: 'text_tag', text: { tag: 'plain_text', content: label }, color }, ...agentTags];
   const grey = (text: string) => `<font color='grey'>${text}</font>`;
   const detailLink = footerDetailUrl && !detailButton ? grey(`[查看详情](${footerDetailUrl})`) : '';
   // 过程卡的底部一行：左边是耗时、步数、详情入口和品牌标，右边是操作按钮（详情是按钮时排在最后）。
@@ -1042,13 +1052,10 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       ...baseCard,
       header: {
         title: { tag: 'plain_text', content: headerTitle },
-        // 副标题只承载「谁在跑这个任务」。执行宿主（Claude Code / Codex / …）会改变
-        // 读者怎么理解结果、去哪排查，是这一行唯一有信息量的东西；
-        // 「· Agent 任务」每张卡都一样，只会把它冲淡。页脚不再重复第二遍。
-        subtitle: { tag: 'plain_text', content: isProcessCard || isResultCard ? headerSubtitle(userStatus.reason) : agentName },
+        ...(isProcessCard || isResultCard ? headerSubtitle(userStatus.reason) : {}),
         // 任务卡的状态放在标题栏右侧：扫一眼就知道「在跑 / 等人 / 结束了没有」，正文里不再另起一行说。
         // 审批、提问这类通用卡片仍由正文状态行表达。
-        ...(isProcessCard || isResultCard ? { text_tag_list: [{ tag: 'text_tag', text: { tag: 'plain_text', content: statusLabel }, color: userStatus.tagColor }] } : {}),
+        ...(isProcessCard || isResultCard ? { text_tag_list: headerTags(statusLabel, userStatus.tagColor) } : agentTags.length ? { text_tag_list: agentTags } : {}),
         template: isProcessCard || isResultCard ? userStatus.template : waitingForApproval ? 'orange' : presentation.template,
         padding: '10px 12px 8px 12px'
       }
@@ -1129,8 +1136,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       schema: '2.0',
       ...(receiptOnly ? {} : { header: {
         title: { tag: 'plain_text', content: clipTitleWidth(compactTaskName || 'Dutydeck') },
-        subtitle: { tag: 'plain_text', content: headerSubtitle(userStatus.reason) },
-        text_tag_list: [{ tag: 'text_tag', text: { tag: 'plain_text', content: statusLabel }, color: userStatus.tagColor }],
+        ...headerSubtitle(userStatus.reason),
+        text_tag_list: headerTags(statusLabel, userStatus.tagColor),
         template: userStatus.template,
         padding: '10px 12px 8px 12px'
       } }),
@@ -1148,7 +1155,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   }
   return {
     schema: '2.0',
-    header: { title: { tag: 'plain_text', content: compactTaskName }, subtitle: { tag: 'plain_text', content: agentName }, template: presentation.template },
+    header: { title: { tag: 'plain_text', content: compactTaskName }, ...(agentTags.length ? { text_tag_list: agentTags } : {}), template: presentation.template },
     config: { update_multi: true, width_mode: 'default', streaming_mode: false, summary: { content: `${taskName} · ${liveTitle}` } },
     body: {
       direction: 'vertical', padding: '10px 12px',
@@ -1255,7 +1262,7 @@ export class LarkCardService {
         beforeSend: input.beforeSend, body: {
           receive_id: receiveId,
           msg_type: 'interactive',
-          content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName })),
+          content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName, showAgentName: input.showAgentName ?? this.config.resolveShowAgentName?.() ?? this.config.showAgentName })),
           ...(input.idempotencyKey?.trim() ? { uuid: input.idempotencyKey.trim() } : {})
         }
       });
@@ -1277,7 +1284,7 @@ export class LarkCardService {
       const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(threadAnchor)}/reply`, {
         beforeSend: input.beforeSend, body: {
           msg_type: 'interactive',
-          content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName })),
+          content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName, showAgentName: input.showAgentName ?? this.config.resolveShowAgentName?.() ?? this.config.showAgentName })),
           ...(input.replyInThread ? { reply_in_thread: true } : {}),
           ...(input.idempotencyKey?.trim() ? { uuid: input.idempotencyKey.trim() } : {})
         }
@@ -1293,7 +1300,7 @@ export class LarkCardService {
       const messageId = required(input.messageId, 'messageId');
       const cardInput = await this.cardInput(input);
       const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`, {
-        beforeSend: input.beforeSend, method: 'PATCH', body: { content: JSON.stringify(buildLarkCard({ ...cardInput, taskId: input.taskId ?? messageId, agentName: input.agentName ?? this.config.defaultAgentName })) }
+        beforeSend: input.beforeSend, method: 'PATCH', body: { content: JSON.stringify(buildLarkCard({ ...cardInput, taskId: input.taskId ?? messageId, agentName: input.agentName ?? this.config.defaultAgentName, showAgentName: input.showAgentName ?? this.config.resolveShowAgentName?.() ?? this.config.showAgentName })) }
       });
       return { messageId: payload.data?.message_id || messageId, chatId: payload.data?.chat_id };
     });

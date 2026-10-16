@@ -334,7 +334,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false,
           ...(webBaseUrl ? { webUrl: `${webBaseUrl}/sessions/${encodeURIComponent(task.sessionId)}` } : {}),
           ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}) },
-        agentName: await this.resolveAgentName(task.config), permissionMode: larkPermissionMode(task.config),
+        agentName: await this.resolveAgentName(task.config), showAgentName: task.config.showAgentName === true, permissionMode: larkPermissionMode(task.config),
         ...(task.config.webBaseUrl ? { webBaseUrl: task.config.webBaseUrl } : {})
       });
     }
@@ -842,7 +842,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const beforeTurnSend = () => {
       if (this.stopped || task.turn !== currentTurn) throw new LarkServiceError('LARK_WRITE_OBSOLETE', '飞书写入已失去当前轮次归属。', 409);
     };
-    const cardContext: { beforeSend: () => void; agentName: string; permissionMode: ReturnType<typeof larkPermissionMode>; workspace?: string; scenarioRecall?: LarkScenarioRecallLine } = { beforeSend: beforeTurnSend, agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
+    const cardContext: { beforeSend: () => void; agentName: string; showAgentName: boolean; permissionMode: ReturnType<typeof larkPermissionMode>; workspace?: string; scenarioRecall?: LarkScenarioRecallLine } = { beforeSend: beforeTurnSend, agentName: await this.resolveAgentName(config), showAgentName: config.showAgentName === true, permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
     const clearAcknowledgement = () => this.clearAcknowledgementReaction(task);
     /** 执行前就失败：结束待办记录、发失败卡、撤掉收到表情。inboxReason 缺省同 taskName。 */
     const failBeforeRun = async (taskName: string, markdown: string, idempotencyKey: string, options: { inboxReason?: string; readOnly?: true } = {}) => {

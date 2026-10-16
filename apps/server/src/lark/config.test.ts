@@ -979,3 +979,19 @@ describe('roleTitle 与 roleScope 角色配置字段', () => {
     expect(publicLarkConfig(legacy!)).not.toHaveProperty('roleScope');
   });
 });
+
+
+describe('Agent name badge preference', () => {
+  it('defaults old and new bots to hidden and preserves explicit values on unrelated saves', async () => {
+    const repository = seedBots([{ appId: 'cli_old', appSecret: 'secret' }]);
+    expect(publicLarkConfig((await readLarkConfigs(repository))[0]).showAgentName).toBe(false);
+    await saveLarkConfig(repository, undefined, { appId: 'cli_new', appSecret: 'secret' });
+    expect((await readLarkConfigs(repository)).every(bot => bot.showAgentName === false)).toBe(true);
+    for (const showAgentName of [true, false]) {
+      await saveLarkConfig(repository, undefined, { originalAppId: 'cli_old', showAgentName });
+      await saveLarkConfig(repository, undefined, { originalAppId: 'cli_old', preInjectPrompt: 'updated' });
+      expect(JSON.parse((await repository.get(larkBotsConfigKey))!)[0].showAgentName).toBe(showAgentName);
+      expect(publicLarkConfig((await readLarkConfigs(repository))[0]).showAgentName).toBe(showAgentName);
+    }
+  });
+});

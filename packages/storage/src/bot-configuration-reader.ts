@@ -310,7 +310,7 @@ function decodePolicyRow(row: ChannelBotPolicyRow): ChannelBotPolicyV2 {
     routingDefaults,
     accessPolicy,
     execution,
-    presentation,
+    presentation: { showAgentName: false, ...presentation },
     groupToolsPolicy,
     createdAt: row.created_at,
     updatedAt: row.updated_at

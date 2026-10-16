@@ -93,7 +93,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -355,10 +355,6 @@
             "title": {
               "tag": "plain_text",
               "content": "总结一下这周的发布情况"
-            },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
             },
             "text_tag_list": [
               {

@@ -145,6 +145,12 @@ const dashboardEntries = [
 ];
 
 const scenarios: Scenario[] = [
+  ...[false, true].map(showAgentName => ({
+    id: `agent-badge-${showAgentName ? 'enabled' : 'hidden'}`,
+    label: showAgentName ? 'Agent 角标 · 已开启' : 'Agent 角标 · 默认关闭',
+    note: '任务状态标签在前，开启后 Agent 简称紧随其后；标题下不再显示 Agent 详情。',
+    card: buildLarkCard({ cardKind: 'result', state: 'completed', taskName: '代码已同步并部署完成', agentName: 'CCFlash (Claude Code / CPA)', showAgentName, markdown: '代码已同步并部署完成。', elapsedSeconds: 1364 })
+  })),
   {
     id: 'running-multi-stage',
     label: '过程卡 · 执行中（多阶段）',
@@ -256,7 +262,7 @@ const tagColor: Record<string, [string, string]> = {
   grey: ['#1F232910', '#646A73']
 };
 const fontColor: Record<string, string> = {
-  grey: '#8F959E', green: '#2EA121', red: '#C93A38', orange: '#A34D00', yellow: '#8F6A00',
+  neutral: '#646A73', grey: '#8F959E', green: '#2EA121', red: '#C93A38', orange: '#A34D00', yellow: '#8F6A00',
   blue: '#245BDB', wathet: '#245BDB'
 };
 // 飞书内置字号档。heading-* 是 schema 2.0 的语义档，卡片可以在 config.style.text_size 里
@@ -389,7 +395,7 @@ export function renderCard(card: any): string {
   const plain = !template[band];
   const header = card.header ? `
   <div class="card-header${plain ? ' plain' : ''}"${plain ? '' : ` style="background:${template[band]}"`}>
-    <div class="card-title">${esc(card.header.title?.content ?? '')}</div>
+    <div class="card-title-row"><div class="card-title">${esc(card.header.title?.content ?? '')}</div>${(card.header.text_tag_list ?? []).map((tag: any) => `<span class="header-tag" style="color:${tint(tag.color, theme) ?? '#646A73'}">${esc(tag.text?.content ?? '')}</span>`).join('')}</div>
     ${card.header.subtitle?.content ? `<div class="card-subtitle">${esc(card.header.subtitle.content)}</div>` : ''}
   </div>` : '';
   return `<div class="card">${header}
@@ -423,6 +429,8 @@ const html = `<!doctype html>
   .meta { font-size:11px; color:#8F959E; margin-top:6px; }
   .card { width:420px; background:#fff; border-radius:8px; overflow:hidden; box-shadow:0 1px 4px rgba(31,35,41,.12); }
   .card-header { padding:10px 12px 8px; }
+  .card-title-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .header-tag { font-size:11px; line-height:18px; padding:0 5px; border-radius:4px; background:rgba(255,255,255,.65); white-space:nowrap; }
   .card-title { color:#fff; font-size:15px; font-weight:600; line-height:1.35; }
   .card-subtitle { color:rgba(255,255,255,.75); font-size:12px; margin-top:2px; }
   .stack:last-child { margin-bottom:0 !important; }

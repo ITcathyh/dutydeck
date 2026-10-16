@@ -120,7 +120,7 @@ export async function performLarkCardReconcile(input: {
   let agentName = config.defaultAgentId ?? 'Dutydeck';
   try { agentName = (await runtime.listAgents?.())?.find(agent => agent.id === config.defaultAgentId)?.name ?? agentName; }
   catch (error) { log.warn({ error, agentId: config.defaultAgentId }, '读取 Agent 展示名失败，使用 Agent ID 对账卡片'); }
-  const cardContext = { agentName, ...(config.workspace ? { workspace: config.workspace } : {}) };
+  const cardContext = { agentName, showAgentName: config.showAgentName === true, ...(config.workspace ? { workspace: config.workspace } : {}) };
   // 过程卡重绘不注入整张能力表，「查看详情」要不要走回调单独声明，否则页脚退回直链、点开落到登录页。
   const processContext = { ...cardContext, ...(input.detailLogin ? { detailLogin: true } : {}) };
   const mappings = await cardMappings.list(channel);

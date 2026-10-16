@@ -93,7 +93,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -347,10 +347,6 @@
               "tag": "plain_text",
               "content": "再跑一次登录回归"
             },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
-            },
             "text_tag_list": [
               {
                 "tag": "text_tag",
@@ -473,10 +469,6 @@
             "title": {
               "tag": "plain_text",
               "content": "任务状态"
-            },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Dutydeck"
             },
             "template": "green",
             "padding": "10px 12px 8px 12px"

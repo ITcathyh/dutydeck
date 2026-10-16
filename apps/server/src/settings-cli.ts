@@ -58,7 +58,7 @@ export const botFields = {
   decisionAgentId: 'string', decisionModel: 'string', responseAgentId: 'string', responseModel: 'string',
   executionMode: ['single', 'layered'], leaderAgentId: 'string', workerAgentIds: 'list',
   structuredAskCards: 'boolean', groupCardMention: 'boolean', pushIntervalMs: 'integer', traceLimit: 'integer|null',
-  hideTraceOnComplete: 'boolean', compactTrace: 'boolean', completionReactionOnly: 'boolean', silentProgress: 'boolean', adhdMode: 'boolean',
+  hideTraceOnComplete: 'boolean', compactTrace: 'boolean', showAgentName: 'boolean', completionReactionOnly: 'boolean', silentProgress: 'boolean', adhdMode: 'boolean',
   urgentEnabled: 'boolean', urgentThresholdMs: 'integer|null', urgentMaxPerHourPerChat: 'integer|null',
   notifyMentionAction: 'boolean', notifyMentionDone: 'boolean', notifyQuietHours: 'string',
   pinLongTasks: 'boolean', pinAfterMs: 'integer|null',

@@ -17,6 +17,41 @@ describe('Lark card service', () => {
       ? (typeof (value as any).tag === 'string' ? 1 : 0) + Object.values(value).reduce<number>((sum, item) => sum + componentCount(item), 0)
       : 0;
 
+  it.each(['send', 'reply', 'update'] as const)('inherits bot Agent visibility on %s and honors explicit false', async method => {
+    const cards: any[] = [];
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes('tenant_access_token')) return response({ code: 0, tenant_access_token: 'token', expire: 7200 });
+      cards.push(JSON.parse(JSON.parse(String(init?.body)).content));
+      return response({ code: 0, data: { message_id: 'om_test' } });
+    });
+    const service = createLarkCardService(configured, fetcher as typeof fetch, { showAgentName: true, agentName: 'CCFlash (Claude Code / CPA)' });
+    const input = { messageId: 'om_test', chatId: 'oc_test', cardKind: 'result' as const, state: 'completed' as const, markdown: 'done' };
+    await service[method](input);
+    await service[method]({ ...input, showAgentName: false });
+    expect(cards[0].header.text_tag_list.map((tag: any) => tag.text.content)).toEqual(['完成', 'CCFlash']);
+    expect(cards[1].header.text_tag_list.map((tag: any) => tag.text.content)).toEqual(['完成']);
+    expect(cards[1].header.subtitle).toBeUndefined();
+    service.close();
+  });
+
+  it('reads the live bot preference for generic workflow cards without rebuilding the service', async () => {
+    let showAgentName = false;
+    const cards: any[] = [];
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes('tenant_access_token')) return response({ code: 0, tenant_access_token: 'token', expire: 7200 });
+      cards.push(JSON.parse(JSON.parse(String(init?.body)).content));
+      return response({ code: 0, data: { message_id: 'om_live' } });
+    });
+    const service = createLarkCardService(configured, fetcher as typeof fetch, { agentName: 'CCFlash (Claude Code / CPA)', resolveShowAgentName: () => showAgentName });
+    for (const value of [false, true, false]) {
+      showAgentName = value;
+      await service.reply({ messageId: 'om_live', state: 'completed', markdown: '操作已确认' });
+      expect(cards.at(-1).header.text_tag_list?.[0]?.text.content).toBe(value ? 'CCFlash' : undefined);
+      expect(cards.at(-1).header.subtitle).toBeUndefined();
+    }
+    service.close();
+  });
+
   it('bounds successful-card snapshots before they are sent and persisted', () => {
     const elements = Array.from({ length: 200 }, (_, index) => ({
       tag: 'collapsible_panel', element_id: `trace_group_${index}`,
@@ -47,7 +82,7 @@ describe('Lark card service', () => {
   });
 
   it('renders a completed Card 2.0 with a clear task header, status, and compact footer', () => {
-    const card = buildLarkCard({ agentName: 'Business Agent', workspace: '/srv/repo', permissionMode: 'full-trust', state: 'completed', taskName: 'Release', taskId: '42', elapsedSeconds: 65, markdown: '**done**' });
+    const card = buildLarkCard({ agentName: 'Business Agent', showAgentName: true, workspace: '/srv/repo', permissionMode: 'full-trust', state: 'completed', taskName: 'Release', taskId: '42', elapsedSeconds: 65, markdown: '**done**' });
     expect(card.schema).toBe('2.0');
     // 这两个色值既当状态圆点又当状态文字，取的是白底上可读的飞书语义色；步骤级的失败改用灰色，不再有醒目的失败色。
     expect(card.config.style.color).toMatchObject({
@@ -57,16 +92,16 @@ describe('Lark card service', () => {
     expect(card.config.style.color).not.toHaveProperty('trace_failure');
     expect(card.header).toMatchObject({
       title: { tag: 'plain_text', content: 'Release' },
-      subtitle: { tag: 'plain_text', content: 'Business Agent' },
+      text_tag_list: [{ text: { tag: 'plain_text', content: 'Business Agent' }, color: 'neutral' }],
       template: 'green'
     });
     // 已完成的卡不渲染状态行：结论直接排在最上面，不再被一行「已完成」往下推。
     expect(byId(card, 'task_status')).toBeUndefined();
     expect(card.body.elements[0].content).toBe('**done**');
-    // 耗时改由页脚承担。Agent 名已经在 header 副标题里，页脚不写第二遍；
+    // 耗时改由页脚承担，Agent 名只在标题栏角标里展示；
     // 本例没有 webBaseUrl，所以页脚只剩耗时这一列。
     expect(byId(card, 'task_elapsed').content).toContain('用时 1 分 5 秒');
-    expect(JSON.stringify(card)).not.toContain('text_tag');
+    expect(card.header.subtitle).toBeUndefined();
     const rendered = JSON.stringify(card);
     expect(rendered).not.toContain("<font color='grey'>Business Agent</font>");
     expect(rendered).not.toContain('/srv/repo');
@@ -284,7 +319,7 @@ describe('Lark card service', () => {
     const card: any = buildLarkCard({
       state: 'running',
       taskName: huge,
-      agentName: huge,
+      agentName: huge, showAgentName: true,
       taskId: huge,
       sessionId: huge,
       webBaseUrl: `https://dutydeck.example/${huge}`,
@@ -295,7 +330,7 @@ describe('Lark card service', () => {
     expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
     expect(componentCount(card)).toBeLessThanOrEqual(larkCardSafeLimits.components);
     expect(Array.from(card.header.title.content).length).toBeLessThanOrEqual(160);
-    expect(Array.from(card.header.subtitle.content).length).toBeLessThanOrEqual(64);
+    expect(Array.from(card.header.text_tag_list[0].text.content).length).toBeLessThanOrEqual(64);
     expect(byId(card, 'interrupt').behaviors[0].value.task_id).toHaveLength(96);
     expect(serialized).not.toContain(huge);
   });
@@ -400,7 +435,8 @@ describe('Lark card service', () => {
     expect(sendBody.receive_id).toBe('user@example.com');
     expect(sendBody.uuid).toBe('task-42');
     const sentCard = JSON.parse(sendBody.content);
-    expect(sentCard.header).toMatchObject({ template: 'blue', subtitle: { content: 'Business Agent' } });
+    expect(sentCard.header).toMatchObject({ template: 'blue' });
+    expect(sentCard.header.subtitle).toBeUndefined();
     expect(byId(sentCard, 'task_status').text.content).toContain('已用时');
     expect(byId(sentCard, 'task_status').icon).toMatchObject({ tag: 'custom_icon', img_key: 'img_loading' });
     expect(byId(sentCard, 'interrupt')).toMatchObject({ behaviors: [{ value: { action: 'interrupt', task_id: '42' } }] });

@@ -110,7 +110,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   };
   const storedBot = async (appId?: string) => {
     const stored = await readLarkConfig(options.config, appId);
-    return stored ? { appId: stored.appId, appSecret: stored.appSecret, brand: stored.brand } : undefined;
+    return stored ? { appId: stored.appId, appSecret: stored.appSecret, brand: stored.brand, showAgentName: stored.showAgentName } : undefined;
   };
   const resolveService = async (bot?: LarkBotConfigInput, appId?: string) => {
     if (bot) return createLarkCardService(env, fetcher, bot);
@@ -121,7 +121,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     }
     if (options.service) return options.service;
     const stored = await storedBot();
-    const key = JSON.stringify([stored?.appId ?? env.LARK_APP_ID, stored?.appSecret ?? env.LARK_APP_SECRET, larkConfigurationStatus(env, stored).baseUrl]);
+    const key = JSON.stringify([stored?.appId ?? env.LARK_APP_ID, stored?.appSecret ?? env.LARK_APP_SECRET, larkConfigurationStatus(env, stored).baseUrl, stored?.showAgentName === true]);
     if (!service || serviceKey !== key) {
       service = createLarkCardService(env, fetcher, stored);
       serviceKey = key;

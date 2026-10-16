@@ -292,8 +292,11 @@ export const channelBotPolicyExecutionV2Schema = z.object({
 }).strict();
 export type ChannelBotPolicyExecutionV2 = z.infer<typeof channelBotPolicyExecutionV2Schema>;
 
-/** Bot 级呈现设置；群级 presentationOverride 逐字段覆盖它（见 group-policy.ts）。 */
-export const channelBotPolicyPresentationV2Schema = presentationSettingsSchema;
+/** Bot 级呈现设置；群级覆盖见 group-policy.ts，showAgentName 只在 Bot 级设置。 */
+export const channelBotPolicyPresentationV2Schema = presentationSettingsSchema.extend({
+  /** Bot 级卡片 Agent 简称角标，旧记录缺省关闭。 */
+  showAgentName: z.boolean().optional()
+});
 export type ChannelBotPolicyPresentationV2 = z.infer<typeof channelBotPolicyPresentationV2Schema>;
 
 export const channelBotPolicyGroupToolsBaseSchema = z.object({

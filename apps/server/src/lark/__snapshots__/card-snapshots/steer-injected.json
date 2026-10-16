@@ -97,7 +97,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -300,10 +300,6 @@
               "tag": "plain_text",
               "content": "整理本周报警"
             },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
-            },
             "text_tag_list": [
               {
                 "tag": "text_tag",
@@ -406,7 +402,7 @@
             },
             "subtitle": {
               "tag": "plain_text",
-              "content": "Mock · 排队中"
+              "content": "排队中"
             },
             "text_tag_list": [
               {
@@ -665,10 +661,6 @@
             "title": {
               "tag": "plain_text",
               "content": "只看 P0 级别的报警"
-            },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
             },
             "text_tag_list": [
               {
@@ -935,10 +927,6 @@
             "title": {
               "tag": "plain_text",
               "content": "本周报警整理完成，按插话只列了 P0 级别"
-            },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Mock"
             },
             "text_tag_list": [
               {

@@ -48,9 +48,9 @@ describe('renderLarkCardElements 视觉快照', () => {
     });
     expect(card.header).toMatchObject({
       title: { content: '验证 Dutydeck 测试' },
-      subtitle: { content: 'Dutydeck' },
       template: 'blue',
     });
+    expect(card.header.subtitle).toBeUndefined();
     expect(card.config?.summary?.content).toBe('验证 Dutydeck 测试 · 执行中');
     const bodyJson = JSON.stringify(card.body);
     expect(bodyJson).toContain('正在分析需求，先跑一遍测试。');
@@ -67,9 +67,9 @@ describe('renderLarkCardElements 视觉快照', () => {
     });
     expect(card.header).toMatchObject({
       title: { content: '验证 Dutydeck 测试' },
-      subtitle: { content: 'Dutydeck' },
       template: 'green',
     });
+    expect(card.header.subtitle).toBeUndefined();
     expect(card.config?.summary?.content).toBe('验证 Dutydeck 测试 · 已完成');
     const bodyJson = JSON.stringify(card.body);
     expect(bodyJson).toContain('全部通过。');
@@ -91,9 +91,9 @@ describe('renderLarkCardElements 视觉快照', () => {
     });
     expect(card.header).toMatchObject({
       title: { content: '清理构建缓存' },
-      subtitle: { content: 'Dutydeck' },
       template: 'orange',
     });
+    expect(card.header.subtitle).toBeUndefined();
     expect(card.config?.summary?.content).toBe('清理构建缓存 · 等待审批');
     const bodyJson = JSON.stringify(card.body);
     expect(bodyJson).toContain('等待审批');

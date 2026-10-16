@@ -132,6 +132,8 @@ Frontend `http://127.0.0.1:4311`, backend `http://127.0.0.1:4310`.
 
 ## Lark Bridge Guide <a id="lark-guide"></a>
 
+Lark task cards hide the Agent name by default. Enable the Agent name switch under the bot’s access and advanced settings to show a short name badge after the status (for example, `Completed` `CCFlash`), without parenthesized host details. You can also enable it with `dutydeck settings bot set <appId> showAgentName=true`, or set it to `false` to hide it.
+
 ### 1. Task lifecycle
 
 1. **Dispatch**: DM the bot, or `@bot task` in a group.
