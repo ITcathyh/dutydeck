@@ -2,6 +2,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
 
 /**
  * 凭据保护：非管理员发起的这一轮里，Agent 的工具调用要读取或改动凭据、Agent 会话记录时拒绝。
@@ -9,6 +10,7 @@ import { fileURLToPath } from 'node:url';
  * Dutydeck 把本文件作为 Claude Code / Codex 的 PreToolUse hook 运行（stdin 收工具调用，stdout 回拒绝）。
  * 是否生效看本轮的会话策略文件（runtime 每轮写入 <cwd>/.dutydeck/security/sessions/<会话>.json）：
  * 风险管控开启且发起人不在高危操作允许名单时才拦，管理员和未开风险管控的机器人不受影响。
+ * 同一个 hook 也按本轮策略里的高危正则拦截，所以带着它启动的 Agent 开强制拦截不用再装工作区 Hook。
  * 规则按文本匹配，换写法（脚本里拼路径、编码后读取）能绕过，所以它只是其中一层；发往飞书的文本另有脱敏。
  */
 
@@ -43,8 +45,11 @@ const commandRules = [
 const agentDirectory = /(?<![\w-])\.(?:claude|codex)(?:\/|(?![\w.-]))/;
 const agentDataName = /(?<![\w./-])(?:auth\.json|\.credentials\.json|sessions|archived_sessions|projects|paste-cache|history\.jsonl|session_index\.jsonl)(?![\w-])/;
 
-/** 由 hook 处理的工具：命令类看命令文本，文件类看路径参数。其余工具（待办、子 agent 提示等）是自然语言，不检查。 */
-export const secretGuardToolMatcher = '^(?:Bash|Monitor|Read|NotebookRead|Write|Edit|MultiEdit|NotebookEdit|Grep|apply_patch)$';
+/**
+ * hook 覆盖全部工具：高危正则要看每个工具的输入（和工作区拦截 Hook 一致）。
+ * 凭据规则只看命令类的命令文本和文件类的路径参数，其余工具（待办、子 agent 提示等）是自然语言，不检查。
+ */
+export const secretGuardToolMatcher = '.*';
 
 function homes(home) {
   const list = [home];
@@ -135,13 +140,34 @@ export function secretGuardHookCommand({ nodePath = process.execPath, policyRoot
     + `DUTYDECK_POLICY_ROOT=${root} ${quote(nodePath)} ${quote(secretGuardScriptPath())} || exit 2`;
 }
 
-/** 本轮是否要拦：风险管控开启（enabled）且发起人未获授权。读不到策略按不拦处理，和高危操作 hook 一致。 */
-export function secretGuardActive({ root, sessionId }) {
-  if (!sessionId) return false;
+/** 本轮要拦时返回策略：风险管控开启（enabled）且发起人未获授权。读不到策略按不拦处理，和高危操作 hook 一致。 */
+function activePolicy(root, sessionId) {
+  if (!sessionId) return undefined;
   try {
     const policy = JSON.parse(readFileSync(policyFile(root, sessionId), 'utf8'));
-    return policy?.enabled === true && policy.authorized === false;
-  } catch { return false; }
+    return policy?.enabled === true && policy.authorized === false ? policy : undefined;
+  } catch { return undefined; }
+}
+
+export function secretGuardActive({ root, sessionId }) {
+  return Boolean(activePolicy(root, sessionId));
+}
+
+const regexWorker = "const { parentPort, workerData } = require('node:worker_threads'); try { parentPort.postMessage({ matched: new RegExp(workerData.pattern, 'i').test(workerData.input) }); } catch (error) { parentPort.postMessage({ error: error instanceof Error ? error.message : String(error) }); }";
+
+/** 工具输入命中本轮高危正则时返回拒绝原因。正则在隔离线程里跑，超过 1 秒或出错按拒绝处理。 */
+async function highRiskReason(policy, event) {
+  if (!policy.pattern) return '';
+  const input = strings({ tool_name: event?.tool_name ?? event?.toolName, tool_input: event?.tool_input ?? event?.toolInput, command: event?.command }).join('\n');
+  return new Promise(resolve => {
+    const worker = new Worker(regexWorker, { eval: true, workerData: { pattern: policy.pattern, input } });
+    let settled = false;
+    const finish = reason => { if (settled) return; settled = true; clearTimeout(timer); worker.removeAllListeners(); void worker.terminate(); resolve(reason); };
+    const timer = setTimeout(() => finish('正则匹配超过 1000ms，已终止并拒绝操作'), 1000);
+    worker.once('message', result => finish(result.error ? `正则匹配失败：${result.error}` : result.matched ? policy.reason || '当前飞书发送人无权执行高危操作' : ''));
+    worker.once('error', error => finish(`正则匹配隔离任务失败：${error.message}`));
+    worker.once('exit', code => { if (code !== 0) finish(`正则匹配隔离任务异常退出：${code}`); });
+  });
 }
 
 async function runHook() {
@@ -154,10 +180,12 @@ async function runHook() {
     process.exit(2);
   }
   const root = process.env.DUTYDECK_POLICY_ROOT || event?.cwd || process.cwd();
-  if (!secretGuardActive({ root, sessionId: process.env.dutydeck_session_id })) return;
+  const policy = activePolicy(root, process.env.dutydeck_session_id);
+  if (!policy) return;
   const finding = secretGuardFinding(event);
-  if (!finding) return;
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: secretGuardReason(finding) } }));
+  const reason = finding ? secretGuardReason(finding) : await highRiskReason(policy, event);
+  if (!reason) return;
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } }));
 }
 
 const entry = process.argv[1];

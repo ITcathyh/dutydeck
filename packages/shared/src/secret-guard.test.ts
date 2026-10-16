@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { protectedPathFinding, secretGuardActive, secretGuardFinding, secretGuardHookCommand } from '@dutydeck/shared/secret-guard';
+import { protectedPathFinding, secretGuardActive, secretGuardFinding, secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 
 const home = '/home/alice';
 const bash = (command: string, cwd = '/work/repo') => secretGuardFinding({ tool_name: 'Bash', tool_input: { command }, cwd }, { home });
@@ -115,6 +115,28 @@ describe('secret guard', () => {
       expect(spawnSync('/bin/sh', ['-c', command], { input: 'not json', encoding: 'utf8', env: { ...process.env, dutydeck_session_id: 'ses_1' } }).status).toBe(2);
       expect(secretGuardActive({ root, sessionId: 'ses_1' })).toBe(true);
       expect(secretGuardActive({ root, sessionId: 'ses_2' })).toBe(false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('also enforces the high-risk pattern of the turn on every tool, failing closed on bad patterns', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-secret-guard-'));
+    const sessions = join(root, '.dutydeck', 'security', 'sessions');
+    mkdirSync(sessions, { recursive: true });
+    const policy = (value: object) => writeFileSync(join(sessions, 'ses_1.json'), JSON.stringify(value));
+    const command = secretGuardHookCommand({ nodePath: process.execPath, policyRoot: root });
+    const run = (tool_name: string, tool_input: object) => spawnSync('/bin/sh', ['-c', command], { input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name, tool_input, cwd: '/work/repo' }), encoding: 'utf8', env: { ...process.env, HOME: home, dutydeck_session_id: 'ses_1' } });
+    const reason = (result: ReturnType<typeof run>) => result.stdout ? JSON.parse(result.stdout).hookSpecificOutput.permissionDecisionReason : '';
+    try {
+      expect(new RegExp(secretGuardToolMatcher).test('mcp__lark__send_message')).toBe(true);
+      policy({ enabled: true, authorized: false, pattern: '(?:^|\\s)rm\\b', reason: '当前飞书发送人不在高危操作允许名单中' });
+      expect(reason(run('Bash', { command: 'rm -rf /tmp/example' }))).toBe('当前飞书发送人不在高危操作允许名单中');
+      expect(reason(run('mcp__fs__exec', { argv: ['rm', 'x'] }))).toBe('当前飞书发送人不在高危操作允许名单中');
+      expect(reason(run('Bash', { command: 'cat .env' }))).toContain('Dutydeck 凭据保护');
+      expect(reason(run('Bash', { command: 'pnpm test' }))).toBe('');
+      policy({ enabled: true, authorized: false, pattern: '(' });
+      expect(reason(run('Bash', { command: 'pnpm test' }))).toContain('正则匹配失败');
+      policy({ enabled: true, authorized: true, pattern: '(?:^|\\s)rm\\b' });
+      expect(run('Bash', { command: 'rm -rf /tmp/example' }).stdout).toBe('');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

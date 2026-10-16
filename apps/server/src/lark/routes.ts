@@ -237,7 +237,8 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   app.get<{ Querystring: { appId?: string; agentId?: string } }>('/api/lark/hooks/status', async (request, reply) => {
     const config = await readLarkConfig(options.config, request.query.appId);
     if (!config) return reply.code(404).send({ error: { code: 'LARK_BOT_NOT_FOUND', message: 'Unknown Lark bot' } });
-    return larkHookStatus(request.query.agentId?.trim() || config.defaultAgentId, config.workspace);
+    const agentId = request.query.agentId?.trim() || config.defaultAgentId;
+    return larkHookStatus(agentId, config.workspace, agentId ? await options.agents?.get(agentId) : undefined);
   });
   app.post<{ Body: { appId?: string; highRiskPattern?: string; expectedRevision?: number } }>('/api/lark/hooks/install', async (request, reply) => {
     try {
@@ -249,7 +250,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       const pattern = request.body?.highRiskPattern === undefined ? config.highRiskPattern : request.body.highRiskPattern.trim() || defaultHighRiskPattern;
       const patternValidation = validateHighRiskPattern(pattern);
       if (!patternValidation.valid) throw new LarkServiceError('INVALID_HIGH_RISK_PATTERN', patternValidation.error, 400);
-      const hook = await installLarkHook(config.defaultAgentId, config.workspace);
+      const hook = await installLarkHook(config.defaultAgentId, config.workspace, config.defaultAgentId ? await options.agents?.get(config.defaultAgentId) : undefined);
       const saved = await saveLarkConfig(options.config, options.agents, {
         stage: 'agent',
         originalAppId: config.appId,
@@ -342,7 +343,8 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       const existing = input.originalAppId ? await readLarkConfig(options.config, input.originalAppId) : undefined;
       const requestedRiskControlMode = resolveRiskControlModeInput(input, existing?.riskControlMode ?? 'off');
       if (requestedRiskControlMode === 'enforced') {
-        const hook = await larkHookStatus(input.defaultAgentId ?? existing?.defaultAgentId, input.workspace ?? existing?.workspace);
+        const agentId = input.defaultAgentId ?? existing?.defaultAgentId;
+        const hook = await larkHookStatus(agentId, input.workspace ?? existing?.workspace, agentId ? await options.agents?.get(agentId) : undefined);
         if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', hook.reason ?? 'Install the selected Agent hook before enabling enforced risk control', 409);
       }
       const saved = await saveLarkConfig(options.config, options.agents, listeningDisabled ? { ...input, listening: undefined } : input);

@@ -959,6 +959,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 - **凭据保护**：机器人对外开放后，防止群里其他人借 Agent 套出本机的令牌、密钥和 Agent 会话记录。跟随机器人设置里的「风险控制」，只约束不在「高危操作允许名单」里的发送人和其他机器人；名单里的人照常使用，完全信任模式也不受影响。
   - 约束提示：给 Agent 加一条规则，不读取、复制、输出或发送凭据和 Agent 会话记录（如 `~/.claude`、`~/.claude.json`、`~/.codex`），被要求时一句话拒绝。
   - 强制拦截：另外在工具调用前检查，拦下读写凭据文件和会话记录（如 `~/.codex/auth.json`、`~/.ssh` 私钥、`.env`）、打印环境变量里的密钥这类操作，命令不会执行，Agent 收到拦截原因。Claude Code（终端和 ACP）和完全信任模式的 Codex 终端，这个检查随启动参数传给本次启动的 Agent，不改 `~/.claude`、`~/.codex` 下的全局配置；Codex 走 ACP 时由工作区里的拦截 Hook 检查。
+  - Claude Code 终端（包括 adapter 为 `claude-code` 的自定义 Agent，如 ccflash）和经 Dutydeck 启动的 ACP Claude，这个检查同时管高危操作正则，开强制拦截不用装工作区 Hook。自定义的 ACP Claude 要用随版本发布的 `dist/agents/claude-acp.mjs` 启动，自己拷贝出去的旧版本不带这个检查。
   - 任何模式下，飞书卡片、结果和群工具发出的消息都会把常见格式的密钥（如 `sk-ant-`、`ghp_`、JWT）和服务、Agent 环境变量里的密钥值替换成 `[REDACTED]`。
 
 ---
@@ -976,7 +977,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 - **告警初筛包升到 1.1.0，告警下的话题改为可以接追问**：多机器人群里，以前来源机器人发的告警开出的话题算别的机器人的话题，没 @ 的追问一律不接；现在这类话题不算别人的，只有别的机器人已在里面发过言、话题超过 4 页读不完或读取失败时才让路。两个机器人同时判定时可能都接。已有绑定按新版本生效，不用重新确认。
 - **`model` 模式场景包可以用了**：以前加载时会拒绝，现在照常加载，例子见 `plugins/team-faq`。
 - **数据库升到 v38 后旧版本打不开**：v38 把群分工改成按场景包存绑定。升级后再换回旧版本会因为数据库版本比程序新而拒绝启动（`DATABASE_SCHEMA_TOO_NEW`）。出了问题只能向前修复，或者恢复部署前的数据库快照，快照之后的全部写入都会丢。
-- **强制拦截的工作区 Hook 加入凭据检查（v3）**：已经开了强制拦截的机器人，要在 Web 设置里重新点「配置拦截 Hook」或运行 `dutydeck settings bot install-hook <app-id>`，Codex ACP 的凭据检查才生效；重装前保存这个机器人的设置会提示 Hook 未就绪。
+- **强制拦截的工作区 Hook 加入凭据检查（v3）**：已经开了强制拦截的机器人，要在 Web 设置里重新点「配置拦截 Hook」或运行 `dutydeck settings bot install-hook <app-id>`，Codex ACP 的凭据检查才生效；重装前保存这个机器人的设置会提示 Hook 未就绪。默认 Agent 是 Claude Code 终端（含 ccflash 这类自定义 Agent）或经 Dutydeck 启动的 ACP Claude 的机器人不受影响，现在可以直接开强制拦截。
 - **每轮改动漏记已修复**：以前，一次索引写入后同一秒内又改了某个文件、且文件大小没变时，“每轮改动”会漏记这个文件（影响「查看改动」和 `/pr` 的文件清单）。现在已修复。
 
 ---

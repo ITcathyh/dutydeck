@@ -1,7 +1,8 @@
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { constants } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { constants, existsSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import type { AgentConfig } from '@dutydeck/shared';
 import { secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
 import { LarkServiceError } from './service.js';
 
@@ -36,6 +37,17 @@ const adapterFor = (agentId?: string) => {
   const normalized = agentId ? aliases[agentId.toLowerCase()] : undefined;
   return normalized ? adapters[normalized] : undefined;
 };
+/**
+ * 启动参数自带凭据保护 hook 的 Agent（它同时检查高危正则）：Claude 家族终端适配器（含 adapterId 为 claude-code 的自定义 Agent），
+ * 以及经 Dutydeck 的 claude-acp.mjs 启动的 ACP Claude（旁边要有 claude-guard.mjs，旧版本拷贝没有）。这些 Agent 开强制拦截不用装工作区 Hook。
+ */
+export function processGuardedAgent(agent?: AgentConfig) {
+  if (!agent) return false;
+  if (agent.protocol === 'pty-cli') return ['claude-code', 'seed', 'relay'].includes(agent.adapterId ?? agent.id);
+  return agent.protocol === 'acp' && process.platform !== 'win32' && [agent.command, ...(agent.args ?? [])]
+    .some(part => basename(part) === 'claude-acp.mjs' && existsSync(join(dirname(part), 'claude-guard.mjs')));
+}
+
 const markerFor = (adapter: HookAdapter) => `dutydeck-lark-high-risk-guard-${adapter.id}.mjs`;
 // 改名前装好的 hook 条目里是这个文件名，且命令是绝对路径。找不到它就会在同一个事件下
 // 追加第二条：老条目指向的老脚本读 process.env.dockmux_session_id（新 runtime 不再注入），
@@ -154,7 +166,8 @@ async function installedState(adapter: HookAdapter, workspace: string) {
   return scriptCurrent && JSON.stringify(config.hooks?.[adapter.eventKey!]).includes(markerFor(adapter));
 }
 
-export async function larkHookStatus(agentId?: string, workspace?: string): Promise<LarkHookStatus> {
+export async function larkHookStatus(agentId?: string, workspace?: string, agent?: AgentConfig): Promise<LarkHookStatus> {
+  if (processGuardedAgent(agent)) return { agentId, supported: true, installed: true, writable: true, trustRequired: false };
   if (!workspace) return { agentId, supported: false, installed: false, writable: false, trustRequired: false, reason: '请先选择工作区' };
   const adapter = adapterFor(agentId);
   if (!adapter) return { agentId, supported: false, installed: false, writable: false, trustRequired: false, reason: `${agentId || '所选 Agent'} 暂未提供可验证的原生工具调用拦截入口` };
@@ -201,8 +214,9 @@ async function installJsonHook(adapter: HookAdapter, workspace: string) {
   await writeFile(hooksPath, `${JSON.stringify({ ...config, ...(adapter.kind === 'cursor-json' ? { version: 1 } : {}), hooks: { ...hooks, [adapter.eventKey!]: entries } }, null, 2)}\n`, { mode: 0o600 });
 }
 
-export async function installLarkHook(agentId: string | undefined, workspace: string | undefined): Promise<LarkHookStatus> {
-  const status = await larkHookStatus(agentId, workspace);
+export async function installLarkHook(agentId: string | undefined, workspace: string | undefined, agent?: AgentConfig): Promise<LarkHookStatus> {
+  const status = await larkHookStatus(agentId, workspace, agent);
+  if (processGuardedAgent(agent)) return status;
   if (!status.supported || !workspace) throw new LarkServiceError('RISK_CONTROL_UNSUPPORTED', status.reason ?? 'Selected Agent does not support enforced risk control', 422);
   if (!status.writable) throw new LarkServiceError('HOOK_NOT_WRITABLE', status.reason ?? 'Workspace is not writable', 403);
   const adapter = adapterFor(agentId)!;

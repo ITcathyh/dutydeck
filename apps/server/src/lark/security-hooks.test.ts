@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { installLarkHook, larkHookStatus } from './security-hooks.js';
+import { dirname, join } from 'node:path';
+import type { AgentConfig } from '@dutydeck/shared';
+import { installLarkHook, larkHookStatus, processGuardedAgent } from './security-hooks.js';
 
 const workspaces: string[] = [];
 afterEach(async () => Promise.all(workspaces.splice(0).map(path => rm(path, { recursive: true, force: true }))));
@@ -62,6 +63,24 @@ describe('Lark Agent security hooks', () => {
     }
     await writeFile(join(policyDirectory, 'ses_secret.json'), JSON.stringify({ enabled: true, authorized: true, pattern: 'rm\\b' }));
     expect((await runGuard(workspace, 'codex', 'ses_secret', secret)).output).toBe('');
+  });
+
+  it('treats Agents launched with the process guard as ready without writing workspace hooks', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
+    const agent = (value: Partial<AgentConfig>) => ({ id: 'ccflash', name: 'ccflash', command: 'claude', protocol: 'pty-cli', ...value }) as AgentConfig;
+    const terminal = agent({ adapterId: 'claude-code' });
+    const launcher = join(process.cwd(), 'packages', 'acp-client', 'agents', 'claude-acp.mjs');
+    const acp = agent({ protocol: 'acp', command: process.execPath, args: [launcher] });
+    expect(processGuardedAgent(terminal)).toBe(true);
+    expect(processGuardedAgent(acp)).toBe(process.platform !== 'win32');
+    expect(processGuardedAgent(agent({ adapterId: 'genius' }))).toBe(false);
+    expect(await larkHookStatus('ccflash', workspace, terminal)).toEqual({ agentId: 'ccflash', supported: true, installed: true, writable: true, trustRequired: false });
+    expect(await installLarkHook('ccflash', workspace, terminal)).toMatchObject({ supported: true, installed: true });
+    await expect(readFile(join(workspace, '.claude', 'settings.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    // 旧版本拷贝旁边没有 claude-guard.mjs：启动参数不带 hook，仍按 Agent ID 判断（ccflash 不支持）。
+    const stale = join(workspace, 'runtime', 'claude-acp.mjs');
+    await mkdir(dirname(stale), { recursive: true }); await writeFile(stale, '');
+    expect(await larkHookStatus('ccflash', workspace, agent({ protocol: 'acp', command: process.execPath, args: [stale] }))).toMatchObject({ supported: false });
   });
 
   it('terminates catastrophic matching after one second and fails closed', async () => {
