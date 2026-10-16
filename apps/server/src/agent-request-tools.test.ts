@@ -166,6 +166,12 @@ describe('dutydeck agent views and actions', () => {
     expect(run).toHaveBeenLastCalledWith({ sessionId: 'ses_group', taskId: 'task_1', actorId: 'ou_alice', command: '/new --agent claude -- 修复登录页报错', action: 'session.new', dryRun: true });
     await f.agent('POST', 'actions/access.grant', { members: ['Bob'] });
     expect(run).toHaveBeenLastCalledWith({ sessionId: 'ses_group', taskId: 'task_1', actorId: 'ou_alice', command: '/grant @Bob', action: 'access.grant', dryRun: false, members: ['Bob'] });
+    // --member '@' 规范化后为空：dry-run 和真实执行都拒绝，不会变成对全群生效的命令。
+    for (const [path, payload] of [['actions/access.grant', { members: ['@'], dryRun: true }], ['actions/access.grant', { members: ['@'] }], ['actions/access.revoke', { members: ['@ '] }]] as const) {
+      const empty = await f.agent('POST', path, payload);
+      expect(empty.statusCode).toBe(400);
+      expect(empty.json().error).toMatchObject({ code: 'INVALID_ARGUMENT', params: [{ name: '--member' }] });
+    }
     const bad = await f.agent('POST', 'actions/queue.cancel', { index: 0 });
     expect(bad.statusCode).toBe(400);
     expect(bad.json().error).toMatchObject({ code: 'INVALID_ARGUMENT', params: [{ name: '<编号>', reason: '从 1 开始' }] });

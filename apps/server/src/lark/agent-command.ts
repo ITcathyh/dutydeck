@@ -153,7 +153,9 @@ export function agentActionCommand(action: string, input: unknown): { command: s
     case 'queue.top': return { command: `/queue top ${p.index}` };
     case 'access.grant':
     case 'access.revoke': {
-      const members = (p.members ?? []).map((name: string) => name.replace(/^@/, '').trim()).filter(Boolean);
+      const members = (p.members ?? []).map((name: string) => name.replace(/^@/, '').trim());
+      // 给了 --member 却是空名字时不能退化成对全群生效的 /grant、/revoke。
+      if (p.members && (!members.length || members.some((name: string) => !name))) throw paramError('--member', '要填用户这条消息里 @ 过的人的名字，不能为空');
       return { command: [action === 'access.grant' ? '/grant' : '/revoke', ...members.map((name: string) => `@${name}`)].join(' '), members };
     }
     case 'pr.open': return { command: p.title ? `/pr ${p.title}` : '/pr' };

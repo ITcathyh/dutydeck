@@ -291,6 +291,10 @@ describe('dutydeck agent 写入类', () => {
     expect(issue('queue.cancel', { index: 0 })).toMatchObject({ params: [{ name: '<编号>', reason: '从 1 开始' }] });
     expect(issue('plan', {})).toMatchObject({ params: [{ name: '--task', reason: '必填' }] });
     expect(issue('retry', { force: true })).toMatchObject({ params: [{ name: '--force', reason: '不支持这个参数' }] });
+    for (const members of [['@'], [' '], ['@ '], ['Bob', '@'], []]) {
+      expect(issue('access.grant', { members })).toMatchObject({ code: 'INVALID_ARGUMENT', params: [{ name: '--member' }] });
+      expect(issue('access.revoke', { members })).toMatchObject({ code: 'INVALID_ARGUMENT', params: [{ name: '--member' }] });
+    }
     expect(issue('nope', {})).toMatchObject({ code: 'AGENT_ACTION_UNKNOWN', params: [{ name: '<命令>', reason: expect.stringContaining('session.new') }] });
   });
 
