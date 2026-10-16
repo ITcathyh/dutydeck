@@ -379,6 +379,8 @@ type RunOutcome = NonNullable<LarkMemoryState['lastRun']>;
 
 export class LarkMemoryPipeline {
   private readonly now: () => Date;
+  /** 本进程的启动时刻，用真实时钟与会话的 createdAt 比较。兼容模式只续用此后建的记忆会话，见 executeJob。 */
+  private readonly startedAt = Date.now();
   private readonly timeoutMs: number;
   private readonly staleRunningMs: number;
   private readonly runContext = new AsyncLocalStorage<{ scope: LarkMemoryScope; token: string; signal: AbortSignal }>();
@@ -680,7 +682,9 @@ export class LarkMemoryPipeline {
         const input = { entries, state, ignoreRules, turns, materials, now, prompt, promptPolicyVersion: policy.mode === 'optimized' ? 'optimized-v1' : 'legacy-v1', actorId, agentDigest: createHash('sha256').update(JSON.stringify(agent)).digest('hex'), verifiedMaxInputChars: isolated ? profile!.maxInputChars : undefined, skip: Boolean(skip) };
         const inputDigest = createHash('sha256').update(JSON.stringify(input)).digest('hex');
         const id = `memory_${createHash('sha256').update(`${scope.appId}:${scope.pool}:${kind}:${token}`).digest('hex')}`;
-        const previous = mode === 'compatible' ? sessions.filter(session => session.agentId === agentId && (session.model ?? undefined) === (model ?? undefined) && session.permissionMode === permissionMode && session.cwd === sessionInput.cwd && (session.reasoningEffort ?? undefined) === sessionInput.reasoningEffort && (session.systemPrompt ?? undefined) === (agent.systemPrompt ?? undefined) && session.protocol === sessionInput.protocol && !session.archivedAt && !['stopped','failed'].includes(session.state)).sort((a,b) => b.createdAt.localeCompare(a.createdAt))[0] : undefined;
+        // 兼容模式只续用本进程建的会话：每次部署启动器路径都会变，上一个进程的 ACP 会话再也起不来
+        // （ACP_LAUNCHER_VERSION_CHANGED），续用它就每次都失败；部署后第一次作业换新会话。
+        const previous = mode === 'compatible' ? sessions.filter(session => Date.parse(session.createdAt) >= this.startedAt && session.agentId === agentId && (session.model ?? undefined) === (model ?? undefined) && session.permissionMode === permissionMode && session.cwd === sessionInput.cwd && (session.reasoningEffort ?? undefined) === sessionInput.reasoningEffort && (session.systemPrompt ?? undefined) === (agent.systemPrompt ?? undefined) && session.protocol === sessionInput.protocol && !session.archivedAt && !['stopped','failed'].includes(session.state)).sort((a,b) => b.createdAt.localeCompare(a.createdAt))[0] : undefined;
         job = { id, scope: { appId: scope.appId, pool: scope.pool }, kind, revision: 0, claimToken: token, mode, compatibilityReason, inputDigest, input: JSON.parse(JSON.stringify(input)), versions, sessionId: previous?.id ?? `ses_memory_${createHash('sha256').update(id).digest('hex')}`, sessionInput, requests: [], state: 'prepared', createdAt: now };
         await jobs.create(job);
         this.options.log.info({ jobId: id, mode, compatibilityReason, inputChars: prompt.length }, '记忆作业输入已冻结');

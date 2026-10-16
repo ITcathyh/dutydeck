@@ -19,13 +19,15 @@ async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars
   let duringSend = async () => {};
   let duringInterrupt = () => {};
   let outputText: string | undefined;
-  const runtime = new DutydeckRuntime(repos, {
+  // 这些会话的 driver 一启动就报启动器版本变化，模拟部署后旧 ACP 会话起不来。
+  const staleSessions = new Set<string>();
+  const createRuntime = () => new DutydeckRuntime(repos, {
     cleanupIntervalMs: 0, workspaceRoot: join(dir, 'work'),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
-    driverFactory: (_config, _protocol, emit) => {
+    driverFactory: (_config, _protocol, emit, _exit, sessionId) => {
       let interrupted = false;
       return {
-        start: async () => {}, stop: async () => {}, isStopped: async () => true,
+        start: async () => { if (staleSessions.has(sessionId!)) throw new Error('ACP_LAUNCHER_VERSION_CHANGED: 旧会话启动器版本变化'); }, stop: async () => {}, isStopped: async () => true,
         interrupt: async () => { interrupted = true; duringInterrupt(); },
         send: async prompt => {
           interrupted = false;
@@ -37,17 +39,26 @@ async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars
       };
     }
   });
-  await runtime.initialize([agentConfigSchema.parse({ id: 'agent', name: 'Agent', command: 'fake', protocol: 'acp', cwd: dir, model: 'verified-model', reasoningEffort: 'medium' })]);
+  const agents = [agentConfigSchema.parse({ id: 'agent', name: 'Agent', command: 'fake', protocol: 'acp', cwd: dir, model: 'verified-model', reasoningEffort: 'medium' })];
+  const runtime = createRuntime();
+  await runtime.initialize(agents);
   const config = { appId: 'app', memoryEnabled: true, memoryAutoExtract: false, defaultAgentId: 'agent' } as any;
   await repos.config.set('lark.bots', JSON.stringify([config]));
   await repos.config.set('token_efficiency', JSON.stringify({ mode, memoryProfiles: [{ agentId: 'agent', protocol: 'acp', model: 'verified-model', reasoningEffort: 'medium', maxInputChars, verificationRef: 'test_fixture_only' }] }));
   const store = new LarkMemoryStore(repos.config);
   const projection = new LarkMemoryProjection(store, join(dir,'memory'));
-  const createPipeline = (timeoutMs?: number) => new LarkMemoryPipeline({ runtime, timeoutMs, repos: { execution: repos.execution }, jobs: repos.memoryJobs, policyConfig: repos.config, controlActorId: 'installation_owner', store, projection, readConfig: async () => JSON.parse((await repos.config.get('lark.bots'))!)[0], log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
+  const createPipeline = (timeoutMs?: number, current = runtime) => new LarkMemoryPipeline({ runtime: current, timeoutMs, repos: { execution: repos.execution }, jobs: repos.memoryJobs, policyConfig: repos.config, controlActorId: 'installation_owner', store, projection, readConfig: async () => JSON.parse((await repos.config.get('lark.bots'))!)[0], log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
   const pipeline = createPipeline(timeoutMs);
   cleanups.push(async () => { await runtime.shutdown(); repos.close(); await rm(dir,{ recursive: true, force: true }); });
   await store.add(scope, { content: '保留完整来源和日期。', source: 'extraction', topic: 'general', chatId: 'other', taskId: 'evidence' });
-  return { repos, runtime, store, projection, pipeline, createPipeline, prompts, setOutputText: (value?: string) => { outputText = value; }, setReply: (value: typeof reply) => { reply = value; }, setDuringSend: (value: typeof duringSend) => { duringSend = value; }, setDuringInterrupt: (value: typeof duringInterrupt) => { duringInterrupt = value; } };
+  // 模拟部署重启：旧 runtime 关掉，同一个库上起新 runtime 和新管线。
+  const restart = async () => {
+    await runtime.shutdown();
+    const next = createRuntime(); await next.initialize(agents);
+    cleanups.unshift(() => next.shutdown());
+    return { runtime: next, pipeline: createPipeline(undefined, next) };
+  };
+  return { repos, runtime, store, projection, pipeline, createPipeline, restart, staleSessions, prompts, setOutputText: (value?: string) => { outputText = value; }, setReply: (value: typeof reply) => { reply = value; }, setDuringSend: (value: typeof duringSend) => { duringSend = value; }, setDuringInterrupt: (value: typeof duringInterrupt) => { duringInterrupt = value; } };
 }
 it('consumes verified blank completed turns so the next extraction reaches useful material', async () => {
   const h = await harness();
@@ -87,6 +98,21 @@ it('uses compatibility before dispatch when the verified input range is insuffic
   const h = await harness('optimized',1);
   expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
   expect((await h.repos.memoryJobs.listScope(scope))[0]).toMatchObject({ mode: 'compatible', compatibilityReason: 'input_outside_verified_range' });
+});
+it('starts a new compatible session after restart instead of resuming one the new launcher cannot start', async () => {
+  const h = await harness('legacy');
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+  const before = new Set((await h.repos.memoryJobs.listScope(scope)).map(job => job.sessionId));
+  expect(before.size).toBe(1);
+  const [old] = before;
+  h.staleSessions.add(old);
+  const { pipeline } = await h.restart();
+  expect(await pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+  expect(await pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+  const after = (await h.repos.memoryJobs.listScope(scope)).map(job => job.sessionId).filter(id => !before.has(id));
+  expect(after).toHaveLength(2);
+  expect(new Set(after).size).toBe(1);
 });
 it.each(['ignore','authorization'] as const)('refuses a completed result after %s changes', async kind => {
   const h = await harness();

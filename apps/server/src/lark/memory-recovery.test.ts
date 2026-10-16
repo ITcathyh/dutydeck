@@ -15,8 +15,10 @@ async function harness(status = 'running', timeoutMs = 30, options: { archive?: 
   await store.add(scope, { content: '回复使用中文', topic: 'preferences', source: 'user' });
   const memorySession = (id: string, createdAt: string) => ({ id, agentId: 'agent', state: 'idle', permissionMode: 'deny-all',
     cwd: '/memory', protocol: 'acp', source: 'lark-memory', sourceId: `${scope.appId}:${scope.pool}:memory`, createdAt }) as Session;
-  const session = memorySession('session_memory', '2026-09-20T00:00:00.000Z');
-  const fresh = memorySession('session_fresh', '2026-09-25T00:00:00.000Z');
+  // 兼容模式只续用本进程建的会话：两个会话的创建时间都要晚于下面管线的启动时刻。
+  const createdAfterStart = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString();
+  const session = memorySession('session_memory', createdAfterStart(1_000));
+  const fresh = memorySession('session_fresh', createdAfterStart(2_000));
   const sessions: Session[] = [session];
   const tasksBySession = new Map<string, TaskRecord[]>([[session.id, []]]);
   const tasksOf = (id: string) => tasksBySession.get(id) ?? [];
