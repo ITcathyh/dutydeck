@@ -14,6 +14,11 @@ const harness = () => {
 afterEach(() => { __testOnly_resetLarkGate(); vi.restoreAllMocks(); });
 
 describe('contact lookups use the shared HTTP retry budget', () => {
+  it('preserves the user display name for read-only origin metadata', async () => {
+    const { service, contact } = harness();
+    contact.mockResolvedValue(response({ code: 0, data: { user: { open_id: 'ou_1', name: '小李' } } }));
+    await expect(service.getContactUser('ou_1', 'open_id')).resolves.toEqual({ openId: 'ou_1', name: '小李' });
+  });
   it('retries a 5xx and returns both user identifiers', async () => {
     const { service, contact } = harness();
     contact.mockResolvedValueOnce(response({ code: 500 }, 500))

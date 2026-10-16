@@ -1,4 +1,4 @@
-import type { ScenarioBinding, ScenarioParam, SessionUsageSnapshot } from '@dutydeck/shared';
+import type { ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
 import type {
   SessionInsightDetailsResponse,
   SessionInsightRefreshResponse,
@@ -272,7 +272,7 @@ export type LarkAppCreationJob = {
   updatedAt: string;
   retryable: boolean;
 };
-export type Session = { id: string; agentId: string; state: string; cwd: string; name?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; archivedAt?: string; runId: string; createdAt: string; updatedAt: string; error?: string; systemPrompt?: string; workspaceMode?: WorkspaceMode; workspaceSourceCwd?: string };
+export type Session = { id: string; agentId: string; state: string; cwd: string; name?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; sourceContext?: SessionSourceContext; archivedAt?: string; runId: string; createdAt: string; updatedAt: string; error?: string; systemPrompt?: string; workspaceMode?: WorkspaceMode; workspaceSourceCwd?: string };
 export type DockEvent = { taskId?: string; id: string; sequence: number; type: string; timestamp: string; data: any; raw?: string };
 export type Task = { skillDeliveries?: SkillDeliveryMetadata[]; id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string };
 /** 结果未知、现在可以由人处理的一轮：已知事实与三行摘要（服务端生成，与飞书提醒卡同一份文字）。 */

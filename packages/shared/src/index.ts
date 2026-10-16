@@ -289,6 +289,15 @@ export interface Session {
   name?: string;
 }
 
+/** Read-only origin metadata, resolved for the session response rather than persisted on Session. */
+export interface SessionSourceContext {
+  channel: 'lark';
+  chat: { id: string; name: string; type: 'group' | 'p2p'; url: string };
+  topic?: { id: string; title: string; url: string };
+  initiator?: { id: string; name: string; type?: 'user' | 'bot' };
+  originAvailable: boolean;
+}
+
 export interface StartSessionInput { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; workspaceMode?: import('./workspace.js').WorkspaceMode }
 export interface SendInput { prompt: string }
 export interface AgentCapabilities { protocol: Exclude<Protocol, 'auto'>; available: boolean; detail?: string; pause: boolean; resume: boolean }

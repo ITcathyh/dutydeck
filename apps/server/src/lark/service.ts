@@ -1977,7 +1977,8 @@ export class LarkCardService {
     if (!user || typeof user !== 'object') return undefined;
     return {
       ...(user.open_id ? { openId: String(user.open_id) } : {}),
-      ...(user.union_id ? { unionId: String(user.union_id) } : {})
+      ...(user.union_id ? { unionId: String(user.union_id) } : {}),
+      ...(user.name ? { name: String(user.name) } : {})
     };
   }
 

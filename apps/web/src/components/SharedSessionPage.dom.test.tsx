@@ -42,6 +42,47 @@ describe('SharedSessionPage', () => {
     expect(screen.queryByRole('link')).toBeNull();
     expect(sessionRead).toHaveBeenCalledWith('ses_1');
     expect(sessions).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText('会话来源')).toBeNull();
+  });
+
+  it('显示来源话题、群聊和最初发起人，来源链接只跳回飞书', async () => {
+    vi.spyOn(api, 'session').mockResolvedValue({ ...session, sourceContext: {
+      channel: 'lark', originAvailable: true,
+      chat: { id: 'oc_source', name: '项目讨论', type: 'group', url: 'https://applink.feishu.cn/client/chat/open?openChatId=oc_source' },
+      topic: { id: 'omt_source', title: '打开来源话题', url: 'https://applink.feishu.cn/client/thread/open?open_thread_id=omt_source' },
+      initiator: { id: 'ou_first', name: '小李', type: 'user' }
+    } });
+    vi.spyOn(api, 'events').mockResolvedValue([]);
+    vi.spyOn(api, 'tasks').mockResolvedValue(tasks);
+    renderPage();
+    expect(await screen.findByLabelText('会话来源')).toBeTruthy();
+    expect(screen.getByText('来源话题')).toBeTruthy();
+    expect(screen.getByText('来源群聊')).toBeTruthy();
+    expect(screen.getByText('发起人')).toBeTruthy();
+    expect(screen.getByText('小李')).toBeTruthy();
+    expect(screen.getByRole('link', { name: '打开来源话题' }).getAttribute('href')).toContain('open_thread_id=omt_source');
+    expect(screen.getByRole('link', { name: '项目讨论' }).getAttribute('href')).toContain('openChatId=oc_source');
+    expect(screen.getAllByRole('link').every(link => link.getAttribute('target') === '_blank' && link.getAttribute('rel') === 'noreferrer')).toBe(true);
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.queryByRole('navigation')).toBeNull();
+  });
+
+  it.each([true, false])('没有话题或来源历史时给出明确说明，发起机器人保留身份（originAvailable=%s）', async originAvailable => {
+    vi.spyOn(api, 'session').mockResolvedValue({ ...session, sourceContext: {
+      channel: 'lark', originAvailable,
+      chat: { id: 'oc_source', name: 'oc_source', type: 'group', url: 'https://applink.feishu.cn/client/chat/open?openChatId=oc_source' },
+      ...(originAvailable ? { initiator: { id: 'ou_bot', name: '告警助手', type: 'bot' as const } } : {})
+    } });
+    vi.spyOn(api, 'events').mockResolvedValue([]);
+    vi.spyOn(api, 'tasks').mockResolvedValue([]);
+    renderPage();
+    await screen.findByLabelText('会话来源');
+    if (originAvailable) {
+      expect(screen.getByText('未记录话题')).toBeTruthy();
+      expect(screen.getByText('告警助手（机器人）')).toBeTruthy();
+    } else expect(screen.getAllByText('来源记录不可用')).toHaveLength(2);
+    expect(screen.queryByRole('link', { name: '打开来源话题' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'oc_source' })).toBeTruthy();
   });
 
   it('分享 token 不对或任务不存在时只提示链接失效，不给工作台入口', async () => {

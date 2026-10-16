@@ -51,6 +51,7 @@ export type ContactIdType = 'open_id' | 'union_id';
 export interface ContactUser {
   openId?: string;
   unionId?: string;
+  name?: string;
 }
 
 /**

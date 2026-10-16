@@ -1,4 +1,5 @@
 import { readLarkConfig } from './lark/config.js';
+import { createLarkSessionSourceResolver } from './lark/session-source.js';
 import type { AgentModelSettings } from './agent-model-settings.js';
 import type { TerminalSettings } from './terminal-settings.js';
 import { registerRecoveryRoutes, type RecoveryRouteOptions } from './recovery-routes.js';
@@ -115,6 +116,7 @@ export interface BuildAppOptions {
 }
 
 export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOptions = {}) {
+  const sessionSource = createLarkSessionSourceResolver(options.lark ?? {});
   // 分享页的实时流只能把分享 token 放进查询串（EventSource 带不了请求头），请求日志里抹掉它。
   const app = Fastify({ rewriteUrl: rewriteSharedSessionProxyUrl, logger: process.env.NODE_ENV !== 'test' && { serializers: { req: (request: FastifyRequest) => ({
     method: request.method, url: request.url.replace(/([?&]share=)[^&#]*/g, '$1[redacted]'), host: request.host, remoteAddress: request.ip, remotePort: request.socket?.remotePort
@@ -305,7 +307,10 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   });
   app.get<{ Params: { id: string } }>('/api/sessions/:id', async (request, reply) => {
     await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
-    return (await runtime.getSession(request.params.id)) ?? reply.code(404).send({ error: { code: 'SESSION_NOT_FOUND', message: 'Session not found' } });
+    const session = await runtime.getSession(request.params.id);
+    if (!session) return reply.code(404).send({ error: { code: 'SESSION_NOT_FOUND', message: 'Session not found' } });
+    const sourceContext = await sessionSource(session);
+    return sourceContext ? { ...session, sourceContext } : session;
   });
   app.get<{ Params: { id: string } }>('/api/sessions/:id/capabilities', async request => {
     await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');

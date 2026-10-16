@@ -71,6 +71,24 @@ export function SharedSessionPage({ sessionId }: { sessionId: string }) {
         {queued > 0 && <Badge tone="queued">待执行指令 {queued} 条</Badge>}
         <span className="ml-auto shrink-0 text-meta text-subtle">{connection}</span>
       </div>
+      {session.sourceContext && <dl aria-label="会话来源" className="grid gap-2 border-t border-default px-3 py-2.5 text-caption sm:grid-cols-3 sm:px-5">
+        <div className="min-w-0">
+          <dt className="text-subtle">来源话题</dt>
+          <dd className="mt-0.5 truncate">{session.sourceContext.topic
+            ? <a className="underline underline-offset-2" href={session.sourceContext.topic.url} target="_blank" rel="noreferrer" title={session.sourceContext.topic.id}>{session.sourceContext.topic.title}</a>
+            : session.sourceContext.originAvailable ? '未记录话题' : '来源记录不可用'}</dd>
+        </div>
+        <div className="min-w-0">
+          <dt className="text-subtle">{session.sourceContext.chat.type === 'p2p' ? '来源聊天' : '来源群聊'}</dt>
+          <dd className="mt-0.5 truncate"><a className="underline underline-offset-2" href={session.sourceContext.chat.url} target="_blank" rel="noreferrer" title={session.sourceContext.chat.id}>{session.sourceContext.chat.name}</a></dd>
+        </div>
+        <div className="min-w-0">
+          <dt className="text-subtle">发起人</dt>
+          <dd className="mt-0.5 truncate" title={session.sourceContext.initiator?.id}>{session.sourceContext.initiator
+            ? <>{session.sourceContext.initiator.name}{session.sourceContext.initiator.type === 'bot' && '（机器人）'}</>
+            : '来源记录不可用'}</dd>
+        </div>
+      </dl>}
       {errorSummary && <div className="px-3 pb-3 sm:px-5"><Banner tone="danger" title="失败详情">{errorSummary}</Banner></div>}
     </header>
     {events.isError && <div className="shrink-0 px-4 py-2"><Banner tone="danger">执行记录加载失败：{events.error.message}<button className="ml-2 underline" onClick={() => void events.refetch()}>重试加载记录</button></Banner></div>}
