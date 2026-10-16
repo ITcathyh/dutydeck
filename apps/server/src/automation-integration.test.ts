@@ -260,6 +260,20 @@ describe('Agent schedule request delivery', () => {
     expect(await f.repos.config.get('automation.delivery-target.schedule_other')).toBeUndefined();
   });
 
+  it('reports to the requesting message in private chats, whose card records carry no reply_message_id', async () => {
+    const f = await fixture();
+    f.runtime.getSession.mockResolvedValue({ ...f.session, sourceId: 'cli_a:oc_p2p:p2p' });
+    await f.repos.channelMappings.save({ id: 'lark-card:cli_a:om_p2p_request', channel: 'lark-card:cli_a', externalId: 'om_p2p_request', sessionId: 's1', createdAt: '2026-10-16T09:00:00.000Z',
+      extra: JSON.stringify({ app_id: 'cli_a', chat_id: 'oc_p2p', chat_type: 'p2p', runtime_task_id: 'task_now' }) });
+    await f.prepareTaskDelivery('s1', 'task_now', 'schedule_req');
+    expect(JSON.parse((await f.repos.config.get('automation.delivery-target.schedule_req'))!)).toEqual({ appId: 'cli_a', chatId: 'oc_p2p', replyMessageId: 'om_p2p_request', replyInThread: false });
+    // createSchedule 接着调的通用 prepareDelivery 认这个位置，不再报找不到回报位置。
+    await expect(f.prepareDelivery('s1', 'schedule_req')).resolves.toBeUndefined();
+    await f.sendScheduleRequest({ ...schedule, sessionId: 's1' });
+    expect(f.client.reply.mock.calls[0]![0]).toMatchObject({ messageId: 'om_p2p_request' });
+    expect(JSON.stringify((f.client.reply.mock.calls[0]![0] as any).elements)).toContain('**发到哪**：本会话');
+  });
+
   it('posts a confirmation card with an enable button to the frozen target', async () => {
     const f = await fixture();
     await expect(f.sendScheduleRequest(schedule)).rejects.toMatchObject({ code: 'AUTOMATION_DESTINATION_MISSING' });

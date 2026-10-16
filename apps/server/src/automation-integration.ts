@@ -94,8 +94,10 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       if (mapping.sessionId !== sessionId) continue;
       let saved: PersistedLarkCardTask;
       try { saved = JSON.parse(mapping.extra ?? 'null'); } catch { continue; }
-      if (saved?.runtime_task_id !== taskId || saved.chat_id !== chatId || !saved.reply_message_id?.startsWith('om_')) continue;
-      await repos.config.compareAndSet(`automation.delivery-target.${automationId}`, undefined, JSON.stringify({ appId, chatId, replyMessageId: saved.reply_message_id, replyInThread: saved.reply_in_thread === true }));
+      // 私聊的卡片记录不写 reply_message_id，记录的 externalId 就是这条请求消息。
+      const replyMessageId = saved?.reply_message_id ?? mapping.externalId;
+      if (saved?.runtime_task_id !== taskId || saved.chat_id !== chatId || !replyMessageId.startsWith('om_')) continue;
+      await repos.config.compareAndSet(`automation.delivery-target.${automationId}`, undefined, JSON.stringify({ appId, chatId, replyMessageId, replyInThread: saved.reply_in_thread === true }));
       return;
     }
   };
