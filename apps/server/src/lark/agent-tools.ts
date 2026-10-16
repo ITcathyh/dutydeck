@@ -1,4 +1,5 @@
 import { deliveryPrompt } from '../prompt-context.js';
+import { redactTraceText } from './secret-redaction.js';
 import { readExplicitFinal, resolveExplicitFinalContext, sendExplicitFinal, withExplicitFinalLock, type ExplicitFinalContext, type ExplicitFinalScope } from './explicit-final.js';
 import { collaborationAgentPrompt } from '../collaboration-cli.js';
 import { layeredWorkbenchPrompt, workbenchAgentPrompt } from '../work-item-tools.js';
@@ -1112,7 +1113,8 @@ export class LarkAgentToolsService {
   async send(token: string | undefined, input: { final?: boolean; turn?: string; content?: string; to?: string; replyTo?: string; inThread?: boolean; idempotencyKey?: string }) {
     const context = await this.context(token, 'group_tools.send');
     if (!context.config.groupToolsAllowSend) throw new AgentGroupToolError('GROUP_TOOL_SEND_DISABLED', '当前飞书机器人的群协作发送能力已被管理员关闭。', 403);
-    const content = input.content?.trim();
+    // 和结果卡同一套凭据脱敏：Agent 主动发到群里的文本不绕过它。
+    const content = input.content === undefined ? undefined : redactTraceText(input.content).trim();
     if (!content) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能为空。', 400);
     if (input.final !== undefined && typeof input.final !== 'boolean') throw new AgentGroupToolError('INVALID_FINAL_FLAG', 'final 必须是布尔值。');
     if (input.turn && !input.final) throw new AgentGroupToolError('FINAL_FLAG_REQUIRED', '--turn 只能与 --final 一起使用。');

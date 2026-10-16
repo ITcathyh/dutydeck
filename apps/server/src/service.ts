@@ -4,6 +4,7 @@ import { HerdrBackend } from '@dutydeck/session-backends';
 import { TerminalSettings, primaryHerdrBinary } from './terminal-settings.js';
 import { createRequire } from 'node:module';
 import { HerdrSessions } from './herdr.js';
+import { rememberSecretValues } from './lark/secret-redaction.js';
 import { dutydeckGroupToolsCommand } from './lark/agent-tools.js';
 import { resolveExplicitFinalContext } from './lark/explicit-final.js';
 import { larkResultDeliveryIssues } from './lark/reconciler.js';
@@ -231,6 +232,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   try {
   // Recheck under the runtime claim in case an offline split completed between inspection and open.
   assertBotProcessStartup(config.databaseUrl, (options.env ?? process.env).DUTYDECK_BOT_APP_ID);
+  // 发往飞书的文本按原值抹掉服务环境和各 Agent 配置里的凭据（见 lark/secret-redaction）。
+  rememberSecretValues(options.env ?? process.env);
+  for (const agent of [...config.agents, ...await repos.agents.list()]) rememberSecretValues(agent.env ?? {});
   let localSecretProvider: LocalFileSecretProvider | undefined;
   try {
     localSecretProvider = new LocalFileSecretProvider(secretDirectoryForDatabase(config.databaseUrl), { createDirectory: true });

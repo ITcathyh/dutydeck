@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { claudePlanGuardMatcher, createCliAdapter } from '@dutydeck/cli-adapters';
+import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import type { SessionBackend } from '@dutydeck/session-backends';
 import { ClaudeSettings } from './claude-settings.js';
 import { PtyCliDriver } from './driver.js';
@@ -112,6 +113,8 @@ describe('Claude settings composition', () => {
       const composed = JSON.parse(readFileSync(settingsPath, 'utf8'));
       expect(composed.theme).toBe('dark');
       expect(composed.hooks.PreToolUse).toEqual([{
+        matcher: secretGuardToolMatcher, hooks: [{ type: 'command', command: secretGuardHookCommand({ policyRoot: cwd }), timeout: 10 }],
+      }, {
         matcher: '^AskUserQuestion$',
         hooks: [{
           type: 'command', command: "'/usr/bin/node' '/opt/dutydeck/cli.js' session native-ask", timeout: 1230,

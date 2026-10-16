@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { claudePlanGuardMatcher } from '@dutydeck/cli-adapters';
+import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { getAuthToken } from './auth/auth.js';
 import { accessMode, createProductionPtyBackend, listenOptions, startLocalServer, unauthenticatedListenRefusal } from './service.js';
 
@@ -364,6 +365,8 @@ describe('production PTY backend injection', () => {
         expect(settingsJson.env?.dutydeck_relay_token).toMatch(/^(?:fixture-relay-token|v1\.)/);
         expect(rawArgv.join(' ')).not.toContain(settingsJson.env?.dutydeck_relay_token);
         expect(settingsJson.hooks.PreToolUse).toEqual([
+          // 凭据保护 hook 按会话目录找本轮策略文件。
+          { matcher: secretGuardToolMatcher, hooks: [{ type: 'command', command: secretGuardHookCommand({ policyRoot: root }), timeout: 10 }] },
           {
             matcher: '^AskUserQuestion$',
             hooks: [{ type: 'command', command: 'dutydeck-fixture session native-ask', timeout: 1230 }],

@@ -2,6 +2,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 import { pinnedSessionUuid } from '../resume-id.js';
 import { relayCommandFrom, relayEnabled, relayPermissionHookTimeoutSeconds } from '@dutydeck/relay';
+import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { delay, waitForInputEcho, waitForQuietScreen } from './input-settle.js';
 
 /**
@@ -245,7 +246,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     id,
     capabilities: { resume: true, nativeInputReceipt: true },
 
-    buildArgs({ sessionId, resume, resumeSessionId, model, permissionMode, env, planGuardCommand }: AdapterSessionContext): string[] {
+    buildArgs({ sessionId, resume, resumeSessionId, model, permissionMode, env, planGuardCommand, cwd }: AdapterSessionContext): string[] {
       // --session-id/--resume 只接受裸 UUID：dutydeck 的 "ses_<uuid>" 剥前缀，
       // 目标步骤的 "ses_work_<hash>" 这类非 UUID id 确定性地映射成 UUID。
       const args: string[] = [];
@@ -266,20 +267,23 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
         args.push('--permission-mode', 'default');
       }
       const relay = relayEnabled(env);
-      if (relay || planGuardCommand) {
+      if (cwd || relay || planGuardCommand) {
         const index = args.indexOf('--settings');
         const settings = index < 0 ? {} : JSON.parse(args[index + 1]!);
-        const value = JSON.stringify({ ...settings, hooks: { PreToolUse: [...(relay ? [{
-          matcher: '^AskUserQuestion$',
-          hooks: [{ type: 'command', command: `${relayCommandFrom(env)} session native-ask`, timeout: 1230 }],
-        }] : []),
-        // 计划阶段守卫：只读工具不过 hook，其余工具每次先看守卫脚本在不在（平时不在，只花一次 test）。
-        ...(planGuardCommand ? [{ matcher: claudePlanGuardMatcher, hooks: [{ type: 'command', command: planGuardCommand, timeout: 30 }] }] : [])],
-        // 非完全信任时，Claude 原本要在终端弹出的工具确认改由 hook 交给 Dutydeck，飞书会话里变成审批卡；
-        // 非飞书会话由服务端答复保留原生确认。
-        ...(!relay || permissionMode === 'full-trust' ? {} : { PermissionRequest: [{
-          hooks: [{ type: 'command', command: `${relayCommandFrom(env)} session permission-hook`, timeout: relayPermissionHookTimeoutSeconds }],
-        }] }) } });
+        const value = JSON.stringify({ ...settings, hooks: { PreToolUse: [
+          // 凭据保护：非管理员发起的轮次里拒绝读写凭据和 Agent 会话记录，是否生效看会话目录下本轮的策略文件（见 @dutydeck/shared/secret-guard）。
+          ...(cwd ? [{ matcher: secretGuardToolMatcher, hooks: [{ type: 'command', command: secretGuardHookCommand({ policyRoot: cwd }), timeout: 10 }] }] : []),
+          ...(relay ? [{
+            matcher: '^AskUserQuestion$',
+            hooks: [{ type: 'command', command: `${relayCommandFrom(env)} session native-ask`, timeout: 1230 }],
+          }] : []),
+          // 计划阶段守卫：只读工具不过 hook，其余工具每次先看守卫脚本在不在（平时不在，只花一次 test）。
+          ...(planGuardCommand ? [{ matcher: claudePlanGuardMatcher, hooks: [{ type: 'command', command: planGuardCommand, timeout: 30 }] }] : [])],
+          // 非完全信任时，Claude 原本要在终端弹出的工具确认改由 hook 交给 Dutydeck，飞书会话里变成审批卡；
+          // 非飞书会话由服务端答复保留原生确认。
+          ...(!relay || permissionMode === 'full-trust' ? {} : { PermissionRequest: [{
+            hooks: [{ type: 'command', command: `${relayCommandFrom(env)} session permission-hook`, timeout: relayPermissionHookTimeoutSeconds }],
+          }] }) } });
         if (index < 0) args.push('--settings', value);
         else args[index + 1] = value;
       }

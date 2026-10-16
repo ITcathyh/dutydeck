@@ -11,6 +11,7 @@ import { createTraexAdapter } from './adapters/traex.js';
 import { encodeRunnerInput, chunkAscii, writeRunnerInput, RUNNER_INPUT_CHUNK_BYTES } from './runner-input.js';
 import { pinnedSessionUuid } from './resume-id.js';
 import { buildCwdTrustArgs } from './adapters/cwd-trust.js';
+import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { mkdtempSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -173,6 +174,16 @@ describe('codex', () => {
     expect(safeArgs[nudgeIndex - 1]).toBe('-c');
     expect(args).toContain('notice.hide_rate_limit_model_nudge=true');
     expect(args).toContain('projects={"/tmp/ws"={trust_level="trusted"}}');
+  });
+
+  it('full-trust 且有会话目录时经 -c 注入凭据保护 hook，其余模式不注入', () => {
+    const hook = (args: string[]) => args.find(arg => arg.startsWith('hooks.PreToolUse='));
+    expect(hook(adapter.buildArgs({ sessionId: SID, ...FULL_TRUST, cwd: '/tmp/ws' }))).toBe(
+      `hooks.PreToolUse=[{matcher=${JSON.stringify(secretGuardToolMatcher)},hooks=[{type="command",command=${JSON.stringify(secretGuardHookCommand({ policyRoot: '/tmp/ws' }))},timeout=10}]}]`);
+    const resumed = adapter.buildArgs({ sessionId: SID, ...FULL_TRUST, cwd: '/tmp/ws', resume: true, resumeSessionId: 'codex-sid' });
+    expect(resumed.indexOf(hook(resumed)!)).toBeLessThan(resumed.indexOf('resume'));
+    expect(hook(adapter.buildArgs({ sessionId: SID, permissionMode: 'ask', cwd: '/tmp/ws' }))).toBeUndefined();
+    expect(hook(adapter.buildArgs({ sessionId: SID, ...FULL_TRUST }))).toBeUndefined();
   });
 
   it('resume=true：-c 配置参数前移到 resume 子命令前，子命令参数在 resume 后，id 收尾', () => {

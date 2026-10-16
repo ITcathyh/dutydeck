@@ -35,8 +35,9 @@ describe('Claude ACP launcher', () => {
     await writeFile(join(project, '.claude', 'settings.json'), JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://project.example' } }));
     await writeFile(join(project, '.claude', 'settings.local.json'), JSON.stringify({ env: { ANTHROPIC_MODEL: 'local-model' } }));
     const bin = join(root, 'bin'); await mkdir(bin); const claude = join(bin, process.platform === 'win32' ? 'claude.cmd' : 'claude');
-    await writeFile(claude, process.platform === 'win32' ? '@echo off\r\n' : '#!/bin/sh\n'); await chmod(claude, 0o755);
-    const inspect = `process.stdout.write(JSON.stringify({ token: process.env.ANTHROPIC_AUTH_TOKEN, base: process.env.ANTHROPIC_BASE_URL, model: process.env.ANTHROPIC_MODEL, bedrock: process.env.CLAUDE_CODE_USE_BEDROCK, awsProfile: process.env.AWS_PROFILE, executable: process.env.CLAUDE_CODE_EXECUTABLE }))`;
+    // 假的 claude 只回显收到的参数和自己看到的 CLAUDE_CODE_EXECUTABLE。
+    await writeFile(claude, process.platform === 'win32' ? '@echo off\r\n' : `#!${process.execPath}\nprocess.stdout.write(JSON.stringify({ args: process.argv.slice(2), executable: process.env.CLAUDE_CODE_EXECUTABLE, guard: process.env.dutydeck_secret_guard_settings }))\n`); await chmod(claude, 0o755);
+    const inspect = `process.stdout.write(JSON.stringify({ token: process.env.ANTHROPIC_AUTH_TOKEN, base: process.env.ANTHROPIC_BASE_URL, model: process.env.ANTHROPIC_MODEL, bedrock: process.env.CLAUDE_CODE_USE_BEDROCK, awsProfile: process.env.AWS_PROFILE, executable: process.env.CLAUDE_CODE_EXECUTABLE, real: process.env.dutydeck_claude_executable, guard: process.env.dutydeck_secret_guard_settings }))`;
     const inheritedEnv = { ...process.env };
     for (const key of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL', 'CLAUDE_CODE_USE_BEDROCK', 'AWS_PROFILE', 'CLAUDE_CODE_EXECUTABLE']) delete inheritedEnv[key];
     const result = spawnSync(process.execPath, [resolve(process.cwd(), 'packages/acp-client/agents/claude-acp.mjs')], {
@@ -45,7 +46,26 @@ describe('Claude ACP launcher', () => {
       encoding: 'utf8'
     });
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ token: 'explicit-token', base: 'https://project.example', model: 'local-model', bedrock: '1', awsProfile: 'dutydeck-test', executable: claude });
+    const { real, guard, ...launched } = JSON.parse(result.stdout);
+    expect(launched).toEqual({ token: 'explicit-token', base: 'https://project.example', model: 'local-model', bedrock: '1', awsProfile: 'dutydeck-test',
+      executable: process.platform === 'win32' ? claude : expect.stringMatching(/\/dutydeck-claude-guard-[^/]+\/claude-[0-9a-f]{16}\.sh$/) });
+    if (process.platform === 'win32') return;
+    // SDK 拿到的是转发脚本：凭据保护 hook 并进 SDK 自己传的 --settings（Claude Code 只认最后一个），再启动真正的 CLI。
+    expect(real).toBe(claude);
+    const sdkHook = { matcher: 'Bash', hooks: [{ type: 'command', command: 'sdk-hook' }] };
+    const forwarded = spawnSync(launched.executable, ['--settings', JSON.stringify({ model: 'm', hooks: { PreToolUse: [sdkHook] } }), '--print'], {
+      cwd: project, env: { ...process.env, dutydeck_claude_executable: real, dutydeck_secret_guard_settings: guard }, encoding: 'utf8' });
+    expect(forwarded.status).toBe(0);
+    const child = JSON.parse(forwarded.stdout);
+    expect(child.executable).toBe(claude);
+    expect(child.guard).toBeUndefined();
+    expect(child.args).toHaveLength(3);
+    expect(child.args[0]).toBe('--settings');
+    expect(child.args[2]).toBe('--print');
+    const settings = JSON.parse(child.args[1]);
+    expect(settings.model).toBe('m');
+    expect(settings.hooks.PreToolUse).toEqual([...JSON.parse(guard).hooks.PreToolUse, sdkHook]);
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain(`'${project}'/.dutydeck/security/sessions/`);
   });
   it.each(['bearer', 'api-key'] as const)('keeps explicit %s credentials exclusive over user and project cloud settings', async mode => {
     const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-auth-')); dirs.push(root);

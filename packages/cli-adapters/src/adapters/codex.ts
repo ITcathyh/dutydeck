@@ -2,6 +2,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { pollScreenReady } from './screen-ready-helper.js';
 import { buildCwdTrustArgs } from './cwd-trust.js';
+import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { delay, waitForInputEcho, waitForQuietScreen } from './input-settle.js';
 
 /** Codex 活动态 busy 标记：turn 进行中重绘的状态行。 */
@@ -32,6 +33,9 @@ export function createCodexAdapter(): CliAdapter {
         // 该目录仍是未受信任状态、照样弹文件夹信任页（真机 codex 0.156.1 已验证）。
         if (cwd) {
           args.push(...buildCwdTrustArgs(cwd));
+          // 凭据保护 hook：非管理员发起的轮次里拒绝读写凭据和 Agent 会话记录，是否生效看会话目录下本轮的策略文件（见 @dutydeck/shared/secret-guard）。
+          // 经 -c 注入的 hook 要靠上面的 --dangerously-bypass-hook-trust 才会执行，所以只在 full-trust 装；其余模式命令先经人确认。
+          args.push('-c', `hooks.PreToolUse=[{matcher=${JSON.stringify(secretGuardToolMatcher)},hooks=[{type="command",command=${JSON.stringify(secretGuardHookCommand({ policyRoot: cwd }))},timeout=10}]}]`);
         }
       }
       if (model && model.trim()) {

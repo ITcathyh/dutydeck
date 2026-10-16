@@ -1,9 +1,11 @@
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
 import { LarkServiceError } from './service.js';
 
-const guardVersion = 'dutydeck-high-risk-guard-v2';
+const guardVersion = 'dutydeck-high-risk-guard-v3';
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 type HookAgentId = 'codex' | 'claude' | 'trae' | 'cursor' | 'pi';
@@ -83,7 +85,12 @@ try { event = JSON.parse(input); } catch { process.exit(2); }
 const root = process.env.DUTYDECK_POLICY_ROOT || event.cwd || process.cwd();
 let policy;
 try { policy = JSON.parse(readFileSync(join(root, '.dutydeck', 'security', 'sessions', sessionId + '.json'), 'utf8')); } catch { process.exit(0); }
-if (!policy.enabled || policy.authorized || !policy.pattern) process.exit(0);
+if (!policy.enabled || policy.authorized) process.exit(0);
+// 凭据保护：和 Agent 进程级 hook 同一套规则，Codex 走 ACP 时只有这里能拦；规则模块加载失败按拒绝处理。
+const secretReason = await import(${JSON.stringify(pathToFileURL(secretGuardScriptPath()).href)})
+  .then(guard => { const finding = guard.secretGuardFinding(event); return finding ? guard.secretGuardReason(finding) : ''; })
+  .catch(() => 'Dutydeck 凭据保护规则加载失败，已拦截');
+if (!secretReason && !policy.pattern) process.exit(0);
 const values = [];
 const flatten = value => {
   if (typeof value === 'string') values.push(value);
@@ -93,7 +100,7 @@ const flatten = value => {
 flatten({ tool_name: event.tool_name || event.toolName, tool_input: event.tool_input || event.toolInput, command: event.command });
 const regexWorker = "const { parentPort, workerData } = require('node:worker_threads'); try { parentPort.postMessage({ matched: new RegExp(workerData.pattern, 'i').test(workerData.input) }); } catch (error) { parentPort.postMessage({ error: error instanceof Error ? error.message : String(error) }); }";
 let matchError = '';
-const risky = await new Promise(resolve => {
+const risky = secretReason ? true : await new Promise(resolve => {
   const worker = new Worker(regexWorker, { eval: true, workerData: { pattern: policy.pattern, input: values.join('\\n') } });
   let settled = false;
   const finish = value => { if (settled) return; settled = true; clearTimeout(timer); worker.removeAllListeners(); void worker.terminate(); resolve(value); };
@@ -103,7 +110,7 @@ const risky = await new Promise(resolve => {
   worker.once('exit', code => { if (code !== 0) { matchError = '正则匹配隔离任务异常退出：' + code; finish(true); } });
 });
 if (!risky) process.exit(0);
-const reason = matchError || policy.reason || '当前飞书发送人无权执行高危操作';
+const reason = secretReason || matchError || policy.reason || '当前飞书发送人无权执行高危操作';
 ${deny}
 `;
 }

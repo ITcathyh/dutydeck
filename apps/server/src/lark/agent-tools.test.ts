@@ -332,6 +332,13 @@ describe('Agent group collaboration domain service', () => {
     });
   });
 
+  it('redacts credentials in text the Agent sends to the group', async () => {
+    const current = fakeClient();
+    const { tools, token } = await setup({ cli_current: current });
+    await tools.send(token, { content: '配置里是 ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789' });
+    expect(current.sendText).toHaveBeenCalledWith(expect.objectContaining({ text: '配置里是 [REDACTED]' }));
+  });
+
   it('discovers and mentions a human member in the scoped group', async () => {
     const current = fakeClient({
       listChatMembers: vi.fn(async input => ({

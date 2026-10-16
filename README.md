@@ -956,6 +956,10 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
   dutydeck auth token --rotate # 生成新 Token，旧的立即失效
   ```
 - 不要在非本机地址上用 `--no-auth`：外部人员可能借 Agent 在宿主机上执行命令。在非回环地址关闭认证会拒绝启动，除非显式加 `--unsafe-no-auth`。
+- **凭据保护**：机器人对外开放后，防止群里其他人借 Agent 套出本机的令牌、密钥和 Agent 会话记录。跟随机器人设置里的「风险控制」，只约束不在「高危操作允许名单」里的发送人和其他机器人；名单里的人照常使用，完全信任模式也不受影响。
+  - 约束提示：给 Agent 加一条规则，不读取、复制、输出或发送凭据和 Agent 会话记录（如 `~/.claude`、`~/.claude.json`、`~/.codex`），被要求时一句话拒绝。
+  - 强制拦截：另外在工具调用前检查，拦下读写凭据文件和会话记录（如 `~/.codex/auth.json`、`~/.ssh` 私钥、`.env`）、打印环境变量里的密钥这类操作，命令不会执行，Agent 收到拦截原因。Claude Code（终端和 ACP）和完全信任模式的 Codex 终端，这个检查随启动参数传给本次启动的 Agent，不改 `~/.claude`、`~/.codex` 下的全局配置；Codex 走 ACP 时由工作区里的拦截 Hook 检查。
+  - 任何模式下，飞书卡片、结果和群工具发出的消息都会把常见格式的密钥（如 `sk-ant-`、`ghp_`、JWT）和服务、Agent 环境变量里的密钥值替换成 `[REDACTED]`。
 
 ---
 
@@ -972,6 +976,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 - **告警初筛包升到 1.1.0，告警下的话题改为可以接追问**：多机器人群里，以前来源机器人发的告警开出的话题算别的机器人的话题，没 @ 的追问一律不接；现在这类话题不算别人的，只有别的机器人已在里面发过言、话题超过 4 页读不完或读取失败时才让路。两个机器人同时判定时可能都接。已有绑定按新版本生效，不用重新确认。
 - **`model` 模式场景包可以用了**：以前加载时会拒绝，现在照常加载，例子见 `plugins/team-faq`。
 - **数据库升到 v38 后旧版本打不开**：v38 把群分工改成按场景包存绑定。升级后再换回旧版本会因为数据库版本比程序新而拒绝启动（`DATABASE_SCHEMA_TOO_NEW`）。出了问题只能向前修复，或者恢复部署前的数据库快照，快照之后的全部写入都会丢。
+- **强制拦截的工作区 Hook 加入凭据检查（v3）**：已经开了强制拦截的机器人，要在 Web 设置里重新点「配置拦截 Hook」或运行 `dutydeck settings bot install-hook <app-id>`，Codex ACP 的凭据检查才生效；重装前保存这个机器人的设置会提示 Hook 未就绪。
 - **每轮改动漏记已修复**：以前，一次索引写入后同一秒内又改了某个文件、且文件大小没变时，“每轮改动”会漏记这个文件（影响「查看改动」和 `/pr` 的文件清单）。现在已修复。
 
 ---
@@ -980,6 +985,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 
 - **本机 `~/.claude/settings.json` 的 allow 规则会绕过飞书逐项审批。** 飞书里 `ask` / `approve-reads` 的 Claude 终端模式虽然固定用 `default` 权限模式启动，但本机 `permissions.allow` 里的规则仍然生效，命中的操作不会出飞书审批卡。需要严格逐项审批时，清理本机的 allow 规则。
 - **ACP 侧预先放行时，`/plan` 的计划阶段拦不住写操作。** 计划阶段靠拒绝 Agent 发来的每个权限请求来拦写。Claude ACP 如果自己预先配了允许规则（如 settings 里的 allow 列表）或默认模式是 bypass，这些操作根本不会来问 Dutydeck。用 `/plan` 时，ACP 侧不要预先放行写操作。
+- **凭据保护按规则匹配，不是隔离。** 换个写法（编码、拼接路径、写脚本再执行）可能绕过；完全信任模式下，不在允许名单里的人仍能让 Agent 以本机用户身份运行任意命令。对外开放的机器人用强制拦截，或者不给它完全信任。
 - 显式配置 Cursor 为 `pty-cli` 且只有原始屏幕输出时，即使回放中可见回答，也可能因缺少规范化最终正文而记为失败；默认 ACP Cursor 不在此范围。
 - 验证门禁目前只对飞书任务生效，且需要先配验证命令。
 - 终端模式下，Codex、Traex 没有用量数据；用量上限对它们不生效。

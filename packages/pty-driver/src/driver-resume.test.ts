@@ -19,6 +19,7 @@ import { dirname, join } from 'node:path';
 import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
 import { claudePlanGuardMatcher, createClaudeCodeAdapter } from '@dutydeck/cli-adapters';
+import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { PtyBackend, TmuxBackend, isTmuxAvailable } from '@dutydeck/session-backends';
 import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { ClaudeSettings } from './claude-settings.js';
@@ -263,11 +264,11 @@ describe('PtyCliDriver resume session id resolution', () => {
     try {
       await driver.start();
       await waitForAssert(() => expect(launches()).toHaveLength(1));
-      expect(launches()[0]).toEqual(['--wrapper-profile', 'flash profile', ...adapter.buildArgs({ sessionId: SESSION_ID, model, permissionMode: 'full-trust', planGuardCommand })]);
+      expect(launches()[0]).toEqual(['--wrapper-profile', 'flash profile', ...adapter.buildArgs({ sessionId: SESSION_ID, cwd, model, permissionMode: 'full-trust', planGuardCommand })]);
       for (let count = 2; count <= 3; count++) {
         await driver.resume();
         await waitForAssert(() => expect(launches()).toHaveLength(count));
-        expect(launches()[count - 1]).toEqual(['--wrapper-profile', 'flash profile', ...adapter.buildArgs({ sessionId: SESSION_ID, resume: true, resumeSessionId: SESSION_ID, model, permissionMode: 'full-trust', planGuardCommand })]);
+        expect(launches()[count - 1]).toEqual(['--wrapper-profile', 'flash profile', ...adapter.buildArgs({ sessionId: SESSION_ID, cwd, resume: true, resumeSessionId: SESSION_ID, model, permissionMode: 'full-trust', planGuardCommand })]);
       }
       expect(args).toEqual([wrapper, '--wrapper-profile', 'flash profile']);
     } finally { await driver.stop(); }
@@ -329,7 +330,10 @@ describe('PtyCliDriver resume session id resolution', () => {
         const actual = launches()[launch - 1];
         expect(actual.settings).toEqual({ env: { TOKEN: `fixture-secret-${launch}` }, skipDangerousModePermissionPrompt: true,
           permissions: { allow: ['Read'], defaultMode: 'bypassPermissions' },
-          hooks: { PreToolUse: [{ matcher: claudePlanGuardMatcher, hooks: [{ type: 'command', command: new ClaudeSettings('claude-code', SESSION_ID).planGuardCommand(), timeout: 30 }] }] } });
+          hooks: { PreToolUse: [
+            { matcher: secretGuardToolMatcher, hooks: [{ type: 'command', command: secretGuardHookCommand({ policyRoot: cwd }), timeout: 10 }] },
+            { matcher: claudePlanGuardMatcher, hooks: [{ type: 'command', command: new ClaudeSettings('claude-code', SESSION_ID).planGuardCommand(), timeout: 30 }] },
+          ] } });
         expect(actual.args.join(' ')).not.toContain('fixture-secret');
         expect(actual.args.filter((arg: string) => arg === '--settings')).toHaveLength(1);
         const path = actual.args.at(-1);

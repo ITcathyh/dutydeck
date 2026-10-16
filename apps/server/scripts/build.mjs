@@ -20,6 +20,7 @@ const aliases = new Map([
   ['@dutydeck/session-backends', 'packages/session-backends/src/index.ts'],
   ['@dutydeck/shared', 'packages/shared/src/index.ts'],
   ['@dutydeck/shared/child-environment', 'packages/shared/runtime/child-environment.mjs'],
+  ['@dutydeck/shared/secret-guard', 'packages/shared/runtime/secret-guard.mjs'],
   ['@dutydeck/storage', 'packages/storage/src/index.ts'],
   ['@dutydeck/terminal-renderer', 'packages/terminal-renderer/src/index.ts'],
   ['@dutydeck/transports', 'packages/transports/src/index.ts']
@@ -65,8 +66,10 @@ await build({
 const agentsDir = resolve(serverRoot, 'dist/agents');
 mkdirSync(agentsDir, { recursive: true });
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/claude-acp.mjs'), resolve(agentsDir, 'claude-acp.mjs'));
+cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/claude-guard.mjs'), resolve(agentsDir, 'claude-guard.mjs'));
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/env-launcher.mjs'), resolve(agentsDir, 'env-launcher.mjs'));
 cpSync(resolve(workspaceRoot, 'packages/shared/runtime/child-environment.mjs'), resolve(agentsDir, 'child-environment.mjs'));
+cpSync(resolve(workspaceRoot, 'packages/shared/runtime/secret-guard.mjs'), resolve(agentsDir, 'secret-guard.mjs'));
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/launcher-process.mjs'), resolve(agentsDir, 'launcher-process.mjs'));
 // 内置插件随包发布；各插件的 test/ 和 *.test.ts 只在仓库里跑，不进发布产物。
 cpSync(resolve(workspaceRoot, 'builtin-plugins'), resolve(serverRoot, 'dist/builtin-plugins'), { recursive: true, filter: source => basename(source) !== 'test' && !source.endsWith('.test.ts') });

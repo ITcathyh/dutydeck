@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
+import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { claudePlanGuardMatcher, createClaudeFamilyAdapter, prepareClaudeFamilyInput } from './claude-family.js';
 import type { PtyLike } from '../types.js';
 
@@ -235,6 +236,17 @@ describe('Claude family plan guard hook', () => {
     const hooks = settings(adapter.buildArgs({ sessionId: 'ses_1', permissionMode: 'ask', env: relay, planGuardCommand: 'guard' })).hooks;
     expect(hooks.PreToolUse).toEqual([expect.objectContaining({ matcher: '^AskUserQuestion$' }), guard]);
     expect(hooks.PermissionRequest).toHaveLength(1);
+  });
+
+  it('puts the secret guard hook first in every permission mode once the session directory is known', () => {
+    const secretGuard = { matcher: secretGuardToolMatcher, hooks: [{ type: 'command', command: secretGuardHookCommand({ policyRoot: cwd }), timeout: 10 }] };
+    for (const permissionMode of ['ask', 'approve-reads', 'full-trust'] as const) {
+      expect(settings(adapter.buildArgs({ sessionId: 'ses_1', permissionMode, cwd })).hooks.PreToolUse).toEqual([secretGuard]);
+      expect(settings(adapter.buildArgs({ sessionId: 'ses_1', resume: true, resumeSessionId: 'ses_1', permissionMode, cwd, env: relay, planGuardCommand: 'guard' })).hooks.PreToolUse)
+        .toEqual([secretGuard, expect.objectContaining({ matcher: '^AskUserQuestion$' }), guard]);
+    }
+    // 策略文件按会话目录定位，拿不到目录就不装，避免按 Agent 运行中的当前目录去找。
+    expect(settings(adapter.buildArgs({ sessionId: 'ses_1', permissionMode: 'full-trust' })).hooks).toBeUndefined();
   });
 
   it('lets read-only tools skip the guard', () => {

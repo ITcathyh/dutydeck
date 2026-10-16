@@ -10,6 +10,10 @@
       "types": "./runtime/child-environment.d.mts",
       "import": "./runtime/child-environment.mjs"
     },
+    "./secret-guard": {
+      "types": "./runtime/secret-guard.d.mts",
+      "import": "./runtime/secret-guard.mjs"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "development": "./src/index.ts",
