@@ -313,6 +313,35 @@ describe('Agent group collaboration domain service', () => {
     expect(promptP2P).toContain('切换 agent、模型或工作目录用 /new');
   });
 
+  it('lets the Agent set up a schedule for the requester instead of telling them to send /schedule', async () => {
+    const f = await setup({ cli_current: fakeClient() });
+    const active = { taskId: 'task-one', attemptId: 'attempt-one', actorId: 'ou_actor' };
+    let collaboration = false;
+    const tools = new LarkAgentToolsService(f.capabilities, f.repos.config, {
+      scheduleRequests: true, workbenchTask: () => active, previewWork: async () => false, previewCollaboration: async () => collaboration,
+      automatedTask: taskId => taskId === 'task-scheduled'
+    });
+    const prompt = await tools.promptForSession(f.activeSession, '这个群聊有结论了私发我');
+    expect(prompt).toContain(`dutydeck schedule request --turn ${f.capabilities.workbenchTurnToken(f.activeSession.id, 'task-one')}`);
+    expect(prompt).toContain('用户点「启用」才开始');
+    expect(prompt).not.toContain('定时任务用 /schedule');
+    expect(prompt).toContain('切换 agent、模型或工作目录用 /new');
+    // 能做群内持续协作时走定时委托，不再给第二种做法。
+    collaboration = true;
+    const delegated = await tools.promptForSession(f.activeSession, 'x');
+    expect(delegated).toContain('[群内持续协作]');
+    expect(delegated).not.toContain('schedule request');
+    // 定时任务到点执行的那一轮不给入口，免得每次到点又建一个。
+    collaboration = false; active.taskId = 'task-scheduled';
+    expect(await tools.promptForSession(f.activeSession, 'x')).not.toContain('schedule request');
+    active.taskId = 'task-one';
+    // 没有这一轮的发起人时建不了计划，仍按原说法提示。
+    const idle = new LarkAgentToolsService(f.capabilities, f.repos.config, { scheduleRequests: true });
+    expect(await idle.promptForSession(f.activeSession, 'x')).toContain('定时任务用 /schedule');
+    await expect(tools.scheduleContext(f.token)).resolves.toMatchObject({ sessionId: f.activeSession.id, appId: 'cli_current', chatId: 'oc_group' });
+    await expect(tools.scheduleContext('v1.forged')).rejects.toMatchObject({ code: 'GROUP_TOOL_UNAUTHORIZED' });
+  });
+
   it('uses opaque cursors for incremental reads and mentions a discovered target when sending', async () => {
     const first = message('om_1', '1000', 'one'); const second = message('om_2', '2000', 'two'); const third = message('om_3', '3000', 'three');
     const current = fakeClient({

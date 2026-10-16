@@ -8,6 +8,7 @@ import {
   sessionScheduleOccurrenceV2Schema,
   type AttemptResultV1,
   type ExecutionActor,
+  type PublicSessionSchedule,
   type RepositoryBundle,
   type SessionSchedule
 } from '@dutydeck/shared';
@@ -18,6 +19,7 @@ import { createLarkCardService, type LarkCardService } from './lark/service.js';
 import type { PersistedLarkCardTask } from './lark/coordinator.js';
 import { renderLarkResultTextElements } from './lark/card-renderer.js';
 import { sendLarkResult } from './lark/result-delivery.js';
+import { scheduleRequestCard } from './lark/schedule-command.js';
 import { readAttemptResult } from './task-results.js';
 import type { CiNotice } from './ci-webhook.js';
 import { SessionAutomationService, type AutomationDeliveryContext } from './session-automation.js';
@@ -81,6 +83,38 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       if (!await repos.config.compareAndSet(key, undefined, JSON.stringify(target))) target = JSON.parse((await repos.config.get(key))!);
     }
     if (!target || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_CHANGED', '自动任务的回报位置已变化', 409);
+  };
+
+  /** Agent 代建计划的回报位置：这一轮请求的那条消息，和用户在那里发 /schedule 一样。找不到这一轮的卡片时交给 prepareDelivery 按会话最近的卡片推断。 */
+  const prepareTaskDelivery = async (sessionId: string, taskId: string, automationId: string) => {
+    const session = await runtime.getSession(sessionId);
+    if (session?.source !== 'lark' || !repos.config.compareAndSet) return;
+    const { appId, chatId } = parseLarkSourceId(session.sourceId);
+    for (const mapping of await repos.channelMappings.list(`lark-card:${appId}`)) {
+      if (mapping.sessionId !== sessionId) continue;
+      let saved: PersistedLarkCardTask;
+      try { saved = JSON.parse(mapping.extra ?? 'null'); } catch { continue; }
+      if (saved?.runtime_task_id !== taskId || saved.chat_id !== chatId || !saved.reply_message_id?.startsWith('om_')) continue;
+      await repos.config.compareAndSet(`automation.delivery-target.${automationId}`, undefined, JSON.stringify({ appId, chatId, replyMessageId: saved.reply_message_id, replyInThread: saved.reply_in_thread === true }));
+      return;
+    }
+  };
+
+  /** Agent 代建计划的确认卡：发到计划冻结的回报位置，同一计划只发一张；点「启用」「停用」后由卡片回调原位重绘。 */
+  const sendScheduleRequest = async (schedule: PublicSessionSchedule) => {
+    const session = await runtime.getSession(schedule.sessionId);
+    if (!session || session.source !== 'lark') throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '只能在飞书会话里代设定时任务', 409);
+    const { appId, chatId } = parseLarkSourceId(session.sourceId);
+    const target = JSON.parse(await repos.config.get(`automation.delivery-target.${schedule.id}`) ?? 'null') as { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean } | null;
+    const config = appId ? await readLarkConfig(repos.config, appId) : undefined;
+    if (!target || !config || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '自动任务缺少接收时保存的回报位置', 409);
+    await sendLarkResult(client(config), target, {
+      ...scheduleRequestCard(schedule, target.replyInThread),
+      sessionId: schedule.sessionId,
+      workspace: session.cwd,
+      webBaseUrl: config.webBaseUrl,
+      idempotencyKey: `schedule_request_${createHash('sha256').update(schedule.id).digest('hex').slice(0, 40)}`
+    }, options.log, repos.config);
   };
 
   const deliver = async (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => {
@@ -309,5 +343,5 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     }, options.log, repos.config);
     return sent.messageId;
   };
-  return { authorize, previewAuthorize: (sessionId: string, actorId?: string) => authorize(sessionId, actorId, undefined, true), prepareDelivery, deliver, notify, onScheduleDisabled };
+  return { authorize, previewAuthorize: (sessionId: string, actorId?: string) => authorize(sessionId, actorId, undefined, true), prepareDelivery, prepareTaskDelivery, sendScheduleRequest, deliver, notify, onScheduleDisabled };
 }

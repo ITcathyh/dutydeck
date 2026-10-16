@@ -35,7 +35,7 @@ import { LegacyImportCliError, runLegacyArchive, runLegacyDiscover, runLegacyPla
 import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { SecretCliError, readSecretValue, runSecretList, runSecretRemove, runSecretRotate, runSecretSet, type SecretCliContext } from './secret-cli.js';
 import { SettingsCliError, runSettingsCli } from './settings-cli.js';
-import { ScheduleCliError, runScheduleCli } from './schedule-cli.js';
+import { ScheduleCliError, runScheduleCli, runScheduleRequest } from './schedule-cli.js';
 import { DatabaseCliError, runDatabaseExecutionStatus, runDatabaseRetireLegacy, runDatabaseUpgradeExecution } from './database-cli.js';
 import { IdentityPreflightCliError, runIdentityPreflightCli } from './identity-preflight-cli.js';
 import { runSetup } from './setup/setup.js';
@@ -474,6 +474,7 @@ async function main() {
       output(await runSettingsCli(action, { ...input, ...(apiKey !== undefined ? { apiKey } : {}), ...(appSecret !== undefined ? { appSecret } : {}) }));
     },
     schedule: async (action, id, input) => { output(await runScheduleCli(action, id, input)); },
+    scheduleRequest: async input => { output(await runScheduleRequest(input)); },
     sessionHerdr: async args => { await runHerdrCli(args); },
     sessionSend: async text => { output(await runSessionSend(text)); },
     sessionNativeAsk: async () => {

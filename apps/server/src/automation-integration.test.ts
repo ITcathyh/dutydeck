@@ -237,3 +237,42 @@ describe('automation service integration', () => {
     expect(button.behaviors?.[0]?.value).toEqual({ dutydeck_schedule_disable: 'automation1' });
   });
 });
+
+describe('Agent schedule request delivery', () => {
+  const mapping = (externalId: string, taskId: string, createdAt: string, sessionId = 's1') => ({
+    id: `lark-card:cli_a:${externalId}`, channel: 'lark-card:cli_a', externalId, sessionId, createdAt,
+    extra: JSON.stringify({ app_id: 'cli_a', chat_id: 'oc_chat', reply_message_id: externalId, reply_in_thread: true, runtime_task_id: taskId })
+  });
+  const schedule = { schemaVersion: 1 as const, id: 'schedule_req', revision: 1, generation: 1, sessionId: 's1', name: '盯结论', prompt: '看看这个话题有没有排查结论',
+    trigger: { kind: 'interval' as const, everySeconds: 900, anchorAt: '2026-10-16T00:00:00.000Z' }, timezone: 'Asia/Shanghai',
+    dstPolicy: { gap: 'skip' as const, overlap: 'first' as const }, condition: { kind: 'always' as const }, enabled: false, createdAt: '', updatedAt: '' };
+
+  it('reports to the message of the requesting turn, even when a later message in the session is newer', async () => {
+    const f = await fixture();
+    await f.repos.channelMappings.save(mapping('om_request', 'task_now', '2026-10-16T09:00:00.000Z'));
+    await f.repos.channelMappings.save(mapping('om_queued', 'task_later', '2026-10-16T09:05:00.000Z'));
+    await f.prepareTaskDelivery('s1', 'task_now', 'schedule_req');
+    expect(JSON.parse((await f.repos.config.get('automation.delivery-target.schedule_req'))!)).toEqual({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_request', replyInThread: true });
+    // 已有回报位置不覆盖；找不到这一轮的卡片时不写，交给 prepareDelivery 推断。
+    await f.prepareTaskDelivery('s1', 'task_later', 'schedule_req');
+    expect(JSON.parse((await f.repos.config.get('automation.delivery-target.schedule_req'))!).replyMessageId).toBe('om_request');
+    await f.prepareTaskDelivery('s1', 'task_unknown', 'schedule_other');
+    expect(await f.repos.config.get('automation.delivery-target.schedule_other')).toBeUndefined();
+  });
+
+  it('posts a confirmation card with an enable button to the frozen target', async () => {
+    const f = await fixture();
+    await expect(f.sendScheduleRequest(schedule)).rejects.toMatchObject({ code: 'AUTOMATION_DESTINATION_MISSING' });
+    await f.repos.config.set('automation.delivery-target.schedule_req', JSON.stringify({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_request', replyInThread: true }));
+    await f.sendScheduleRequest(schedule);
+    expect(f.client.reply).toHaveBeenCalledTimes(1);
+    const sent = f.client.reply.mock.calls[0]![0] as any;
+    expect(sent).toMatchObject({ messageId: 'om_request', replyInThread: true, statusLabel: '待启用' });
+    expect(JSON.stringify(sent.elements)).toContain('**做什么**：看看这个话题有没有排查结论');
+    expect(JSON.stringify(sent.elements)).toContain('**什么时候**：每 15 分钟');
+    expect(JSON.stringify(sent.elements)).toContain('**发到哪**：本话题');
+    const button = sent.elements.find((element: any) => element.element_id === 'schedule_request_toggle');
+    expect(button.text.content).toBe('启用');
+    expect(button.behaviors[0].value).toEqual({ dutydeck_schedule_enable: 'schedule_req', card: 'request' });
+  });
+});

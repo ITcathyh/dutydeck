@@ -14,7 +14,7 @@ import { parseLarkSourceId, resolveParticipation, type PolicyAction, type Sessio
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-decision.js';
 import { directScenarioPrompt } from './scenario-direct.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
-import { executeScheduleCommand } from './schedule-command.js';
+import { executeScheduleCommand, scheduleRequestCard } from './schedule-command.js';
 import { larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageResource } from './message-content.js';
 import { LarkServiceError } from './service.js';
@@ -2023,27 +2023,32 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         return { type: 'error', content: '修复操作受理失败，请稍后重试；本次未完成发布。' };
       }
     }
-    // 定时结果卡「停用此计划」按钮回调：与 /schedule disable <编号> 完全一致的权限校验与执行逻辑。
-    if (workflow && typeof workflow === 'object' && typeof workflow.dutydeck_schedule_disable === 'string') {
-      const scheduleId = workflow.dutydeck_schedule_disable.trim();
+    // 定时计划的「启用」「停用」按钮：结果卡上的「停用此计划」和 Agent 代建计划的确认卡。权限校验与执行逻辑和 /schedule enable|disable <编号> 完全一致。
+    const scheduleToggle = workflow && typeof workflow === 'object'
+      ? typeof workflow.dutydeck_schedule_enable === 'string' ? { action: 'enable' as const, id: workflow.dutydeck_schedule_enable }
+        : typeof workflow.dutydeck_schedule_disable === 'string' ? { action: 'disable' as const, id: workflow.dutydeck_schedule_disable } : undefined
+      : undefined;
+    if (scheduleToggle) {
+      const verb = scheduleToggle.action === 'enable' ? '启用' : '停用';
+      const scheduleId = scheduleToggle.id.trim();
       if (!scheduleId || !context?.chatId || !operatorOpenId || !this.reconcileConfig || !this.workflowOptions.store) {
-        return { type: 'error', content: '卡片已失效，无法停用计划。' };
+        return { type: 'error', content: `卡片已失效，无法${verb}计划。` };
       }
       const automation = this.workflowOptions.automation;
       if (!automation) return { type: 'error', content: '当前服务尚未接入定时任务。' };
       const scheduleRecord = await automation.getSchedule(scheduleId);
       if (!scheduleRecord) return { type: 'warning', content: '当前话题没有此计划' };
 
-      // 核对回调所在的卡片、聊天是否和计划冻结的投递位置一致，防止跨会话停用他人的计划
+      // 核对回调所在的卡片、聊天是否和计划冻结的投递位置一致，防止跨会话改动他人的计划
       const rawTarget = await this.workflowOptions.store.get(`automation.delivery-target.${scheduleId}`);
       type DeliveryTarget = { appId: string; chatId: string; replyMessageId?: string; messageId?: string; replyInThread?: boolean };
       let target: DeliveryTarget | null = null;
       try { target = JSON.parse(rawTarget ?? 'null'); } catch {}
       if (!target || target.appId !== this.reconcileConfig.appId || target.chatId !== context.chatId) {
-        return { type: 'warning', content: '这张卡不属于这个计划，无法停用。' };
+        return { type: 'warning', content: `这张卡不属于这个计划，无法${verb}。` };
       }
       if (context.messageId && target.messageId && target.messageId !== context.messageId) {
-        return { type: 'warning', content: '这张卡不属于这个计划，无法停用。' };
+        return { type: 'warning', content: `这张卡不属于这个计划，无法${verb}。` };
       }
 
       const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
@@ -2065,10 +2070,17 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           automation,
           this.workflowOptions.store,
           scheduleRecord.sessionId,
-          `disable ${scheduleId}`,
+          `${scheduleToggle.action} ${scheduleId}`,
           dummyEvent,
           config
         );
+        // 确认卡原位改成新状态；结果卡上的「停用此计划」不重绘，结果正文保持原样。
+        if (workflow?.card === 'request' && context.messageId) {
+          const messageId = context.messageId, replyInThread = target.replyInThread === true;
+          void automation.listBySession(scheduleRecord.sessionId, operatorOpenId)
+            .then(({ schedules }) => { const schedule = schedules.find(item => item.id === scheduleId); return schedule && this.service.update({ messageId, ...scheduleRequestCard(schedule, replyInThread) }); })
+            .catch(error => this.log.warn({ error, scheduleId }, '定时任务确认卡未能更新'));
+        }
         return { type: 'success', content };
       } catch (error) {
         return { type: 'warning', content: error instanceof Error ? error.message : String(error) };

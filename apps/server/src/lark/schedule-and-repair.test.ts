@@ -434,6 +434,58 @@ describe('F2-5: 定时结果卡「停用此计划」按钮与标题', () => {
   });
 });
 
+describe('Agent 代建计划的确认卡：启用与停用', () => {
+  async function pendingSchedule(h: Awaited<ReturnType<typeof testHarness>>) {
+    const session = await h.runtime.startSession({ agentId: 'mock', cwd: h.cwd, source: 'lark', sourceId: `${h.config.appId}:oc_group:group` });
+    const sched = await h.automation.createSchedule(session.id, {
+      name: '盯结论', prompt: '看看这个话题有没有排查结论', trigger: { kind: 'interval', everySeconds: 900, anchorAt: new Date().toISOString() },
+      timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }
+    }, 'ou_alice');
+    await h.repos.config.set(`automation.delivery-target.${sched.id}`, JSON.stringify({ appId: h.config.appId, chatId: 'oc_group', replyMessageId: 'om_request', replyInThread: true }));
+    return { session, sched };
+  }
+  const toggleButton = (card: any) => card.elements.find((element: any) => element.element_id === 'schedule_request_toggle');
+
+  it('点「启用」后计划开始执行，确认卡原位改成已启用并给「停用」；再点停用改回待启用', async () => {
+    const h = await testHarness({ configPatch: { allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }] } });
+    const { session, sched } = await pendingSchedule(h);
+    const context = { messageId: 'om_request_card', chatId: 'oc_group' };
+
+    const enabled = await h.coordinator.handleAction({ dutydeck_schedule_enable: sched.id, card: 'request' }, 'ou_alice', context);
+    expect(enabled).toMatchObject({ type: 'success', content: expect.stringContaining('已启用') });
+    expect((await h.automation.listBySession(session.id)).schedules[0]!.enabled).toBe(true);
+    await vi.waitFor(() => expect(h.service.update).toHaveBeenCalledTimes(1));
+    const redrawn = h.service.update.mock.calls[0]![0] as any;
+    expect(redrawn).toMatchObject({ messageId: 'om_request_card', statusLabel: '已启用' });
+    expect(toggleButton(redrawn).text.content).toBe('停用');
+    expect(toggleButton(redrawn).behaviors[0].value).toEqual({ dutydeck_schedule_disable: sched.id, card: 'request' });
+
+    const disabled = await h.coordinator.handleAction({ dutydeck_schedule_disable: sched.id, card: 'request' }, 'ou_alice', context);
+    expect(disabled).toMatchObject({ type: 'success', content: expect.stringContaining('已停用') });
+    await vi.waitFor(() => expect(h.service.update).toHaveBeenCalledTimes(2));
+    expect(toggleButton(h.service.update.mock.calls[1]![0]).text.content).toBe('启用');
+
+    // 结果卡上的「停用此计划」不带 card 标记：只停用，不重绘结果正文。
+    await h.coordinator.handleAction({ dutydeck_schedule_enable: sched.id, card: 'request' }, 'ou_alice', context);
+    await vi.waitFor(() => expect(h.service.update).toHaveBeenCalledTimes(3));
+    await h.coordinator.handleAction({ dutydeck_schedule_disable: sched.id }, 'ou_alice', { messageId: 'om_result_card', chatId: 'oc_group' });
+    expect((await h.automation.listBySession(session.id)).schedules[0]!.enabled).toBe(false);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(h.service.update).toHaveBeenCalledTimes(3);
+  });
+
+  it('没有权限的人或别的聊天里点「启用」被拒，计划保持停用', async () => {
+    const h = await testHarness({ configPatch: { allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }] } });
+    const { session, sched } = await pendingSchedule(h);
+    expect(await h.coordinator.handleAction({ dutydeck_schedule_enable: sched.id, card: 'request' }, 'ou_bob', { messageId: 'om_request_card', chatId: 'oc_group' }))
+      .toMatchObject({ type: 'warning', content: '当前账号没有操作此任务的权限。' });
+    expect(await h.coordinator.handleAction({ dutydeck_schedule_enable: sched.id, card: 'request' }, 'ou_alice', { messageId: 'om_other', chatId: 'oc_other' }))
+      .toMatchObject({ type: 'warning', content: '这张卡不属于这个计划，无法启用。' });
+    expect((await h.automation.listBySession(session.id)).schedules[0]!.enabled).toBe(false);
+    expect(h.service.update).not.toHaveBeenCalled();
+  });
+});
+
 describe('定时委托卡片按钮回调', () => {
   it('把确认、暂停、停止等点击交给 mandateCards，并把拒绝原因原样回给点击者', async () => {
     const h = await testHarness();

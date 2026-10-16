@@ -2,7 +2,7 @@ import { workbenchHelp, layeredWorkbenchHelp, collaborationHelp, groupToolsHelp,
 import type { RecoveryCliOptions, RecoveryOperation } from './recovery-cli.js';
 import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
 import type { SessionNamesAction } from './session-names-cli.js';
-import type { ScheduleCliAction, ScheduleCliInput } from './schedule-cli.js';
+import type { ScheduleCliAction, ScheduleCliInput, ScheduleRequestCliInput } from './schedule-cli.js';
 import { agentFields, botFields, fieldsHelp, groupFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { Command } from 'commander';
 import { DatabaseCliError } from './database-cli.js';
@@ -257,6 +257,7 @@ export interface CliHandlers {
   terminalBackend?(value: string | undefined, options: { url?: string; database?: string }): void | Promise<void>;
   settings?(action: SettingsAction, input: SettingsCommandInput): void | Promise<void>;
   schedule?(action: ScheduleCliAction, id: string | undefined, input: ScheduleCliInput): void | Promise<void>;
+  scheduleRequest?(input: ScheduleRequestCliInput): void | Promise<void>;
   sessionHerdr?(args: string[]): void | Promise<void>;
   sessionSend?(text: string): void | Promise<void>;
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
@@ -743,6 +744,15 @@ Examples:
       return handlers.schedule?.(action, ['create', 'list'].includes(action) ? undefined : args[0] as string, parsed.optsWithGlobals());
     });
   }
+  schedules.command('request')
+    .description('Lark Agent only: set up a schedule for this turn\'s requester; it starts after they click 启用 on the posted card')
+    .requiredOption('--turn <token>', 'Current task authorization token')
+    .requiredOption('--prompt <text>', 'Complete instructions to execute each time')
+    .option('--name <name>', 'Short schedule name')
+    .option('--every <minutes>', 'Fixed interval in whole minutes')
+    .option('--cron <expression>', 'Five-field cron expression, Asia/Shanghai time')
+    .option('--at <local-time>', 'Run once at YYYY-MM-DDTHH:mm, Asia/Shanghai time')
+    .action(options => handlers.scheduleRequest?.(options));
   withTarget(settings.command('instances').description('List peer instances that --instance can reach'))
     .action((_options, command) => runSettings('instances', command));
   withTarget(settings.command('agents').description('List the Agents that bot and group settings can select'))

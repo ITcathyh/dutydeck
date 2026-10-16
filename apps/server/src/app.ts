@@ -26,6 +26,7 @@ import { isRelayCapabilityRequest, registerRelayRoutes, type RelayRoutesOptions 
 import { registerFoundationManagementRoutes, type FoundationManagementOptions } from './foundation-routes.js';
 import { registerScheduleManagementRoutes, type ScheduleManagementOptions } from './schedule-routes.js';
 import { registerWorkItemTools, type WorkItemToolsOptions } from './work-item-tools.js';
+import { registerScheduleRequestTools, type ScheduleRequestToolsOptions } from './schedule-request-tools.js';
 import { registerLarkMemoryTools, type LarkMemoryToolsOptions } from './lark/memory-tools.js';
 import { registerLarkMemoryTurnRoutes } from './lark/memory-turn-routes.js';
 import { registerWorkItemRoutes, type WorkItemRouteOptions } from './work-item-routes.js';
@@ -86,6 +87,7 @@ export interface BuildAppOptions {
   insight?: SessionInsightRouteOptions;
   workItems?: WorkItemRouteOptions;
   workItemTools?: WorkItemToolsOptions;
+  scheduleRequests?: ScheduleRequestToolsOptions;
   memoryTools?: LarkMemoryToolsOptions;
   automation?: SessionAutomationRouteOptions;
   /** CI webhook 入口 `POST /api/hooks/<provider>`；没有配置 webhook 的 CI 插件时一律 404。 */
@@ -184,6 +186,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.plugins) await registerPluginRoutes(app, options.plugins);
   if (options.workItems) await registerWorkItemRoutes(app, options.workItems);
   if (options.workItemTools) await registerWorkItemTools(app, options.workItemTools);
+  if (options.scheduleRequests) await registerScheduleRequestTools(app, options.scheduleRequests);
   if (options.memoryTools) await registerLarkMemoryTools(app, options.memoryTools);
   if (options.memoryTools) await registerLarkMemoryTurnRoutes(app, { store: options.memoryTools.store,
     authorize: (request, sessionId) => requireSessionExecution(request, sessionId, 'session', 'task.view_result') });

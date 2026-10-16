@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { runScheduleCli, type ScheduleCliInput } from './schedule-cli.js';
+import { runScheduleCli, runScheduleRequest, type ScheduleCliInput } from './schedule-cli.js';
 import { createCliProgram } from './cli-program.js';
 
 const target = { url: 'http://127.0.0.1:4310', database: '/tmp/schedule-cli.db' };
@@ -86,5 +86,23 @@ describe('schedule CLI', () => {
       await fresh.parseAsync(['node', 'dutydeck', 'schedule', action, ...(action === 'list' ? [] : ['schedule_1']), '--session', 'ses_1']);
       expect(handler).toHaveBeenLastCalledWith(action, action === 'list' ? undefined : 'schedule_1', expect.objectContaining({ session: 'ses_1' }));
     }
+  });
+
+  it('sends an Agent schedule request with this turn token over the session capability', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetcher = vi.fn<typeof fetch>(async (url, init) => { calls.push({ url: String(url), init: init! }); return new Response(JSON.stringify({ pendingConfirmation: true }), { headers: { 'content-type': 'application/json' } }); });
+    const env = { dutydeck_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dutydeck_group_tools_token: 'v1.token' };
+    await expect(runScheduleRequest({ turn: 'turn-1', every: '15', prompt: '看看有没有结论', env, fetcher })).resolves.toEqual({ pendingConfirmation: true });
+    expect(calls[0]!.url).toBe('http://127.0.0.1:4310/api/lark/agent-tools/schedules');
+    const headers = new Headers(calls[0]!.init.headers);
+    expect(headers.get('authorization')).toBe('Bearer v1.token');
+    expect(headers.get('x-dutydeck-work-turn')).toBe('turn-1');
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ prompt: '看看有没有结论', every: 15 });
+    await expect(runScheduleRequest({ turn: 'turn-1', every: '15m', prompt: 'x', env, fetcher })).rejects.toMatchObject({ code: 'SCHEDULE_ARGUMENT_INVALID' });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    const handler = vi.fn();
+    await createCliProgram('test', { scheduleRequest: handler }).parseAsync(['node', 'dutydeck', 'schedule', 'request', '--turn', 'turn-1', '--cron', '0 9 * * *', '--prompt', '汇总告警']);
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ turn: 'turn-1', cron: '0 9 * * *', prompt: '汇总告警' }));
   });
 });

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createSessionScheduleInputSchema, updateSessionScheduleInputSchema, previewSessionSchedule, type PublicSessionSchedule, type SessionAutomationList } from '@dutydeck/shared';
 import { executeLocalRuntimeRequest, type LocalRuntimeRequestDependencies } from './local-runtime-request.js';
+import { AgentGroupToolHttpClient } from './lark/agent-tools-cli.js';
 
 export type ScheduleCliAction = 'create' | 'list' | 'show' | 'update' | 'enable' | 'disable' | 'run' | 'delete' | 'history';
 export interface ScheduleCliInput {
@@ -84,4 +85,16 @@ export async function runScheduleCli(action: ScheduleCliAction, id: string | und
   if (action === 'run') return request('POST', `${endpoint}/run`, { expectedRevision, idempotencyKey: input.idempotencyKey ?? randomUUID() });
   if (action === 'enable' || action === 'disable') return request('PATCH', endpoint, { expectedRevision, enabled: action === 'enable' });
   return request('PATCH', endpoint, { ...config, expectedRevision });
+}
+
+export interface ScheduleRequestCliInput { turn?: string; prompt?: string; name?: string; every?: string; cron?: string; at?: string; env?: NodeJS.ProcessEnv; fetcher?: typeof fetch }
+/** 飞书会话里的 Agent 替这一轮发起人设置定时任务：宿主发确认卡，对方点「启用」才开始（见 schedule-request-tools.ts）。 */
+export async function runScheduleRequest(input: ScheduleRequestCliInput): Promise<Record<string, unknown>> {
+  const every = input.every === undefined ? undefined : Number(input.every);
+  if (every !== undefined && !Number.isInteger(every)) argument('--every takes whole minutes, e.g. --every 15');
+  return new AgentGroupToolHttpClient(input).request('/schedules', {
+    method: 'POST',
+    headers: { 'x-dutydeck-work-turn': input.turn ?? '' },
+    body: JSON.stringify({ prompt: input.prompt, name: input.name, every, cron: input.cron, at: input.at })
+  });
 }

@@ -1,8 +1,32 @@
 import type { ConfigRepository, PublicSessionSchedule } from '@dutydeck/shared';
-import { RuntimeError } from '@dutydeck/shared';
+import { RuntimeError, describeScheduleTrigger } from '@dutydeck/shared';
 import type { SessionAutomationService } from '../session-automation.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { StoredLarkConfig } from './config.js';
+import type { LarkCardInput } from './service.js';
+
+/**
+ * Agent 代建计划的确认卡，发出和点按钮后原位重绘共用：做什么、什么时候、发到哪。
+ * 没启用时给「启用」，启用后给「停用」；按钮带 card: 'request'，回调据此只重绘这张卡。
+ */
+export function scheduleRequestCard(schedule: Pick<PublicSessionSchedule, 'id' | 'prompt' | 'trigger' | 'timezone' | 'enabled' | 'nextDueAt'>, replyInThread: boolean): LarkCardInput & { elements: Array<Record<string, unknown>> } {
+  const prompt = schedule.prompt.replace(/\s+/g, ' ').trim();
+  const next = schedule.nextDueAt ? new Date(schedule.nextDueAt).toLocaleString('zh-CN', { timeZone: schedule.timezone, hour12: false }) : undefined;
+  return {
+    taskId: schedule.id, taskName: '定时任务', readOnly: true, retryable: false,
+    ...(schedule.enabled ? { state: 'completed' as const, statusLabel: '已启用' } : { state: 'running' as const, statusLabel: '待启用', awaitingHuman: true }),
+    elements: [
+      { tag: 'markdown', element_id: 'schedule_request', content: [
+        `**做什么**：${prompt.length > 200 ? `${prompt.slice(0, 200)}…` : prompt}`,
+        `**什么时候**：${describeScheduleTrigger(schedule.trigger, schedule.timezone)}`,
+        `**发到哪**：${replyInThread ? '本话题' : '本会话'}`,
+        schedule.enabled ? `已启用${next ? `，下一次 ${next}` : ''}。每次的结果卡上也能停用。` : '点「启用」后开始，不点不会执行。'
+      ].join('\n') },
+      { tag: 'button', element_id: 'schedule_request_toggle', text: { tag: 'plain_text', content: schedule.enabled ? '停用' : '启用' }, type: schedule.enabled ? 'default' : 'primary',
+        behaviors: [{ type: 'callback', value: { [schedule.enabled ? 'dutydeck_schedule_disable' : 'dutydeck_schedule_enable']: schedule.id, card: 'request' } }], margin: '0px' }
+    ]
+  };
+}
 
 export async function executeScheduleCommand(automation: SessionAutomationService, store: ConfigRepository | undefined, sessionId: string, text: string, event: LarkMessageEvent, config: StoredLarkConfig) {
   const [action, id, ...rest] = text.trim().split(/\s+/).filter(Boolean);

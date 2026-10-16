@@ -331,10 +331,14 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const groupManager: LarkGroupManager = new LarkGroupManager(repos, { env, fetcher: workbenchHttp.fetch, onPolicyChanged: (): Promise<void> => groupManager.refreshPolicies(runtime) });
   let readCollaborationMemory: (scope: import('@dutydeck/shared').CollaborationScope) => Promise<string> = async () => '';
   let collaboration: ReturnType<typeof createCollaborationIntegration> | undefined;
+  // 定时计划或 CI 自动续作提交的一轮（不是有人在飞书里发的消息）。
+  const isAutomatedTask = (taskId: string) => ['schedule', 'automation'].includes(repos.execution.getAcceptedTask(taskId)?.request?.namespace ?? '');
   const agentTools = new LarkAgentToolsService(capabilities, repos.config, {
     env,
     groupToolsCommand: options.groupToolsCommand,
     workbenchTask: sessionId => runtime.getActiveTaskContext(sessionId),
+    scheduleRequests: true,
+    automatedTask: taskId => isAutomatedTask(taskId),
     finalTaskContext: async (binding, task) => resolveExplicitFinalContext(await repos.channelMappings.list(`lark-card:${binding.appId}`), binding, task),
     authorizeTool: (sessionId, action) => collaboration?.background.authorizeTool(sessionId, action) ?? Promise.resolve(),
     previewTool: (sessionId, action) => collaboration?.background.authorizeTool(sessionId, action, true) ?? Promise.resolve(),
@@ -703,6 +707,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       identityPreflight: { repositories: repos, authorize: foundationManagementAuthorizer, probe: identityPreflightProbe, now: options.identityPreflight?.now },
       schedule: { repositories: repos, authorize: foundationManagementAuthorizer, uiEntryReady: true, collaborationExecutorWired: true },
       workItemTools: { runtime, work: workItems, tools: agentTools, delegations },
+      scheduleRequests: { runtime, tools: agentTools, automation, automatedTask: isAutomatedTask, prepareDelivery: automationIntegration.prepareTaskDelivery, sendConfirmation: automationIntegration.sendScheduleRequest },
       // 与 coordinator 的记忆存储同一个 configs 仓库（listener 的 workflowStore 就是 repos.config）。
       memoryTools: { tools: agentTools, store: memoryStore, runtime },
       workItems: { service: workItems, interactions: workInteractions, authorize: async (request, sessionId, action) => {
