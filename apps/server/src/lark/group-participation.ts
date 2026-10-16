@@ -1,5 +1,5 @@
 import { RuntimeError, COLLABORATION_LIST_LIMIT, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GATE, countDecisionUsage, listWindowIncomplete, type ListedItems } from '@dutydeck/shared';
-import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_LIMIT_PER_HOUR, BOT_TURN_RECORD, countBotTurnUsage } from '@dutydeck/shared';
+import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_RECORD } from '@dutydeck/shared';
 import { DECIDER_META_KEY, INTRUSIVE_FEEDBACK_PREFIX, MISSED_FEEDBACK_PREFIX, deciderMetaOf, isDecisionGate, participationLevelBehaviors, participationLevelLabels, participationLevelPhraseHint, participationLevelPhrases, participationLevels, resolveParticipation } from '@dutydeck/shared';
 import { resolveScenarioParams, scenarioBindingStatus, scenarioMajorVersion, scenarioRecordOf, scenarioSourceBots, scenarioTriggerSources, type CollaborationDuty, type ScenarioBinding, type ScenarioBotRef, type ScenarioMessage, type ScenarioPack, type UpdateCollaborationDutyInput } from '@dutydeck/shared';
 import { createHash } from 'node:crypto';
@@ -137,8 +137,6 @@ export class LarkGroupParticipation {
   private readonly slots = new Map<string, Slot>();
   /** 同一话题内连续由机器人触发的回合数；人类触发的回合把它清零。 */
   private readonly botTurnDepth = new Map<string, number>();
-  /** 已判定超出机器人预算的群 → 该结论的短期有效期（ms）。刷屏时避免每条消息都读一次统计窗口。 */
-  private readonly botBudgetExhausted = new Map<string, number>();
   /** 每群一条门禁串行链。门禁是跨 await 的读-改-写，并发进入会让同一份用量被重复放行。 */
   private readonly botTurnChain = new Map<string, Promise<unknown>>();
   /** 各 Bot 的 coordinator 在监听启动时登记；act 判定经它走显式 @ 的同一路径。 */
@@ -563,7 +561,7 @@ export class LarkGroupParticipation {
    * 发生在默认配置上。（真实接线见 service.ts，participation 实例始终存在。）
    *
    * 按群串行执行：coordinator.handle 由长连接 fire-and-forget 调起，同一 tick 到达的
-   * 多条机器人消息会并发进来。不串行的话它们会读到同一份深度与用量后一起放行——
+   * 多条机器人消息会并发进来。不串行的话它们会读到同一份深度后一起放行——
    * 而「同一 tick 涌进一批」正是刷屏事故的形态，门禁必须在这里就是准的。
    * decide() 靠 enqueue/drain 的按群 slot 拿到同样的保证。
    *
@@ -591,26 +589,9 @@ export class LarkGroupParticipation {
       await this.recordBotGate(scope, reason, 'depth');
       return reason;
     }
-    const now = this.now().getTime();
-    // 预算是滑动一小时，缓存只是「刷屏时别每条消息都读一次库」的短期结论，
-    // 因此只缓存几秒：过期后重新按滑动窗口判，名额一到点就能放出来。
-    if ((this.botBudgetExhausted.get(chatKey) ?? 0) > now) return `机器人触发的回合已用尽本小时预算（上限 ${BOT_TURN_LIMIT_PER_HOUR}）`;
-    const since = now - HOUR_MS;
-    const recent = await this.options.repository.listDecisions(scope, DECISION_WINDOW_LIMIT);
-    const used = countBotTurnUsage(recent, since);
-    // 与 decisionBudget 同一形态：列表被截断且最旧一条仍在本小时内时用量只会被低估，按超限处理。
-    const windowIncomplete = listWindowIncomplete(recent, since);
-    if (windowIncomplete || used >= BOT_TURN_LIMIT_PER_HOUR) {
-      this.botBudgetExhausted.set(chatKey, now + 10_000);
-      const reason = windowIncomplete
-        ? `机器人预算窗口不完整：最近 ${DECISION_WINDOW_LIMIT} 条记录都落在本小时内`
-        : `机器人触发的回合已用尽本小时预算：${used}/${BOT_TURN_LIMIT_PER_HOUR}`;
-      await this.recordBotGate(scope, reason, 'budget');
-      return reason;
-    }
     await this.options.repository.recordDecision({
       id: `decision_bot_turn_${digest([scope, event.messageId])}`, scope, contextRevision: 0, policyVersion: 'bot-loop-guard',
-      action: 'silent', reason: `机器人触发的回合 ${used + 1}/${BOT_TURN_LIMIT_PER_HOUR}，同话题连续第 ${depth} 轮`,
+      action: 'silent', reason: `机器人触发的回合，同话题连续第 ${depth} 轮`,
       evidenceIds: [], status: 'suppressed',
       inputSnapshot: { gate: BOT_TURN_RECORD, messageId: event.messageId, ...(event.threadId ? { threadId: event.threadId } : {}) },
       createdAt: this.now().toISOString()
@@ -627,7 +608,7 @@ export class LarkGroupParticipation {
    * 门禁留痕按小时分桶：recordDecision 遇到已存在的 id 直接返回，所以每群每小时每类最多一条。
    * 按每条消息写会让几百条门禁记录把 500 条统计窗口占满，用量从此再也读不准。
    */
-  private async recordBotGate(scope: CollaborationScope, reason: string, kind: 'depth' | 'budget') {
+  private async recordBotGate(scope: CollaborationScope, reason: string, kind: 'depth') {
     const hour = Math.floor(this.now().getTime() / HOUR_MS);
     await this.options.repository.recordDecision({
       id: `decision_bot_gate_${digest([scope, hour, kind])}`, scope, contextRevision: 0, policyVersion: 'bot-loop-guard',

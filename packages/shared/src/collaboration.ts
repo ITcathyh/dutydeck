@@ -463,12 +463,10 @@ export function markTruncated<T>(items: T[], truncated: boolean): ListedItems<T>
 export function listWindowIncomplete(items: ListedItems<{ createdAt: string }>, sinceMs: number): boolean {
   return items.truncated === true && items.length > 0 && Date.parse(items.at(-1)!.createdAt) >= sinceMs;
 }
-/** 标记「一次由机器人触发的回合」。计入机器人预算，不是一次模型判定。 */
+/** 标记「一次由机器人触发的回合」。只做留痕，不是一次模型判定。 */
 export const BOT_TURN_RECORD = 'bot_turn';
-/** 标记「机器人回合被 loop guard 挡下」。既不是判定，也不消耗机器人预算。 */
+/** 标记「机器人回合被 loop guard 挡下」。不是判定。 */
 export const BOT_LOOP_GATE = 'bot_loop_gate';
-/** 每群每小时允许的机器人触发回合数。默认比人类判定预算严得多：机器人之间不会自己停。 */
-export const BOT_TURN_LIMIT_PER_HOUR = 6;
 /** 同一话题内连续「机器人往返」的轮数上限；中间出现人类触发的回合即归零。 */
 export const BOT_LOOP_DEPTH_LIMIT = 3;
 /** 标记「月度成本上限已用满，未判定」。没有调用模型，不计入判定预算。 */
@@ -522,19 +520,11 @@ export function countDecisionUsage(decisions: Array<Pick<CollaborationDecision, 
 }
 
 /**
- * 纯记账行：机器人回合每放行一次写一条，只为让预算可数。
+ * 留痕行：机器人回合每放行一次写一条。
  * 它不是判定也不是闸门，没有给人读的内容，列判定历史时应当滤掉——
- * 否则活跃几小时后，判定列表里就只剩记账行，真正的判定被挤出窗口。
+ * 否则活跃几小时后，判定列表里就只剩留痕行，真正的判定被挤出窗口。
  */
 export const isBotTurnRecord = (item: Pick<CollaborationDecision, 'inputSnapshot'>): boolean => gateOf(item) === BOT_TURN_RECORD;
-
-/**
- * 统计窗口内由机器人触发的回合数，与人类判定用量分开计。
- * 同样排除闸门记录：被挡下的回合不是一次回合，否则超限之后预算永远降不回来。
- */
-export function countBotTurnUsage(decisions: Array<Pick<CollaborationDecision, 'createdAt' | 'inputSnapshot'>>, sinceMs: number): number {
-  return decisions.filter(item => Date.parse(item.createdAt) >= sinceMs && isBotTurnRecord(item)).length;
-}
 
 export const boundedJsonRecordSchema = z
   .record(z.string(), z.unknown())

@@ -5,15 +5,15 @@
 // 任何机器人一律放行，群参与判定默认 off——三道闸一道都不封口，所以门禁必须自成一层。
 //
 // 这里用真实 SQLite 协作仓 + 真实 coordinator 接线，service 与 runtime 为 mock：
-// 门禁的三条硬约束（挡下的回合不计用量、门禁记录按小时分桶、被挡下不发群消息）
+// 门禁的两条硬约束（门禁记录按小时分桶、被挡下不发群消息）
 // 只有在真的读写同一张 decisions 表时才能被锁住。
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { createCollaborationSchema } from '../../../../packages/storage/src/collaboration-migration.js';
 import { createCollaborationRepository } from '../../../../packages/storage/src/collaboration.js';
 import {
-  BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_LIMIT_PER_HOUR, BOT_TURN_RECORD,
-  countBotTurnUsage, countDecisionUsage, type CollaborationSnapshot, type ConfigRepository
+  BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_RECORD,
+  countDecisionUsage, type CollaborationSnapshot, type ConfigRepository
 } from '@dutydeck/shared';
 import { LarkGroupParticipation } from './group-participation.js';
 import { LarkMessageCoordinator } from './coordinator.js';
@@ -136,19 +136,18 @@ describe.each(['off', 'observe', 'selective'] as const)('机器人定向交接�
     expect(h.decider.decide).not.toHaveBeenCalled();
   });
 
-  it.each(['depth', 'budget'] as const)('定向交接仍受%s循环门禁限制，拦截时不发回执', async gate => {
+  it('定向交接仍受循环门禁限制，拦截时不发回执', async () => {
     const h = await configuredHarness();
-    const limit = gate === 'depth' ? BOT_LOOP_DEPTH_LIMIT : BOT_TURN_LIMIT_PER_HOUR;
-    for (let index = 0; index < limit; index++) {
-      await h.participation.guardBotTurn(botMessage(`om_fill_${index}`, { threadId: gate === 'depth' ? 'omt_same' : `omt_${index}` }), restrictedConfig, { botOpenId: 'ou_bot' });
+    for (let index = 0; index < BOT_LOOP_DEPTH_LIMIT; index++) {
+      await h.participation.guardBotTurn(botMessage(`om_fill_${index}`, { threadId: 'omt_same' }), restrictedConfig, { botOpenId: 'ou_bot' });
     }
-    await h.coordinator.handle(botMessage('om_blocked', { threadId: gate === 'depth' ? 'omt_same' : 'omt_new' }), restrictedConfig);
+    await h.coordinator.handle(botMessage('om_blocked', { threadId: 'omt_same' }), restrictedConfig);
     expect(h.runtime.start).not.toHaveBeenCalled();
     expect(h.service.addReaction).not.toHaveBeenCalled();
     expect(h.service.send).not.toHaveBeenCalled(); expect(h.service.reply).not.toHaveBeenCalled();
     expect(h.service.sendText).not.toHaveBeenCalled(); expect(h.service.replyText).not.toHaveBeenCalled();
     expect(await gateRecords(h)).toHaveLength(1);
-    expect(await turnRecords(h)).toHaveLength(limit);
+    expect(await turnRecords(h)).toHaveLength(BOT_LOOP_DEPTH_LIMIT);
   });
 });
 
@@ -234,16 +233,6 @@ describe('多 bot 互相 @ 的硬门禁', () => {
     expect(await turnRecords(h)).toHaveLength(BOT_LOOP_DEPTH_LIMIT);
   });
 
-  it('并发涌入时每小时预算同样不会被超发', async () => {
-    const h = harness();
-    const burst = await Promise.all(Array.from({ length: BOT_TURN_LIMIT_PER_HOUR + 5 }, (_, index) =>
-      // 每条各一个话题，绕开深度上限，只让预算判定并发。
-      h.participation.guardBotTurn(botMessage(`om_burst_${index}`, { threadId: `omt_${index}` }), config, { botOpenId: 'ou_bot' })));
-    expect(burst.filter(reason => reason === undefined)).toHaveLength(BOT_TURN_LIMIT_PER_HOUR);
-    const since = Date.parse('2026-09-18T10:00:00.000Z') - 3_600_000;
-    expect(countBotTurnUsage(await decisions(h), since)).toBe(BOT_TURN_LIMIT_PER_HOUR);
-  });
-
   it('人类触发的回合把连续深度清零，机器人可以重新接话', async () => {
     const h = harness();
     for (let index = 0; index < BOT_LOOP_DEPTH_LIMIT; index++) {
@@ -254,35 +243,14 @@ describe('多 bot 互相 @ 的硬门禁', () => {
     expect(await h.participation.guardBotTurn(botMessage('om_bot_after', { threadId: 'omt_a' }), config, { botOpenId: 'ou_bot' })).toBeUndefined();
   });
 
-  it('换话题绕开深度上限后仍被每小时机器人预算挡住，且预算独立于人类判定用量', async () => {
+  it('换话题的机器人回合不限次数，且不占人类判定用量', async () => {
     const h = harness();
-    for (let index = 0; index < BOT_TURN_LIMIT_PER_HOUR; index++) {
-      // 每条各用一个话题，连续深度永远是 1，只有预算能拦住。
+    for (let index = 0; index < 20; index++) {
       expect(await h.participation.guardBotTurn(botMessage(`om_bot_${index}`, { threadId: `omt_${index}` }), config, { botOpenId: 'ou_bot' })).toBeUndefined();
     }
-    const blocked = await h.participation.guardBotTurn(botMessage('om_bot_over', { threadId: 'omt_over' }), config, { botOpenId: 'ou_bot' });
-    expect(blocked).toContain(`${BOT_TURN_LIMIT_PER_HOUR}`);
-    const since = Date.parse('2026-09-18T10:00:00.000Z') - 3_600_000;
-    expect(countBotTurnUsage(await decisions(h), since)).toBe(BOT_TURN_LIMIT_PER_HOUR);
-    // 机器人回合与门禁记录都不是模型判定，人类的每小时判定预算不能被它们吃掉。
-    expect(countDecisionUsage(await decisions(h), since)).toBe(0);
-  });
-
-  it('被挡下的回合不计入机器人用量，门禁记录按小时分桶每群每类只留一条', async () => {
-    const h = harness();
-    for (let index = 0; index < BOT_TURN_LIMIT_PER_HOUR; index++) {
-      await h.participation.guardBotTurn(botMessage(`om_bot_${index}`, { threadId: `omt_${index}` }), config, { botOpenId: 'ou_bot' });
-    }
-    for (let index = 0; index < 20; index++) {
-      expect(await h.participation.guardBotTurn(botMessage(`om_blocked_${index}`, { threadId: `omt_b_${index}` }), config, { botOpenId: 'ou_bot' })).toBeTruthy();
-    }
-    expect(await gateRecords(h)).toHaveLength(1);
-    const since = Date.parse('2026-09-18T10:00:00.000Z') - 3_600_000;
-    // 关键：闸门记录不能自己涨用量，否则一旦超限就再也降不回来。
-    expect(countBotTurnUsage(await decisions(h), since)).toBe(BOT_TURN_LIMIT_PER_HOUR);
-    // 下一个小时窗口重新放行。
-    h.clock.now = new Date('2026-09-18T11:30:00.000Z');
-    expect(await h.participation.guardBotTurn(botMessage('om_next_hour', { threadId: 'omt_next' }), config, { botOpenId: 'ou_bot' })).toBeUndefined();
+    expect(await turnRecords(h)).toHaveLength(20);
+    // 机器人回合记录不是模型判定，人类的每小时判定预算不能被它们吃掉。
+    expect(countDecisionUsage(await decisions(h), Date.parse('2026-09-18T10:00:00.000Z') - 3_600_000)).toBe(0);
   });
 
   it('coordinator 在唤醒前咨询门禁：挡下的机器人消息不派活、不发任何群消息', async () => {
@@ -292,9 +260,9 @@ describe('多 bot 互相 @ 的硬门禁', () => {
     const sent = h.service.send.mock.calls.length + h.service.reply.mock.calls.length
       + h.service.sendText.mock.calls.length + h.service.replyText.mock.calls.length;
 
-    // 把本小时的机器人预算直接用满，下一条机器人消息必然被门禁挡下。
-    for (let index = 0; index < BOT_TURN_LIMIT_PER_HOUR; index++) {
-      await h.participation.guardBotTurn(botMessage(`om_fill_${index}`, { threadId: `omt_f_${index}` }), config, { botOpenId: 'ou_bot' });
+    // 把同一话题的连续深度用满，下一条机器人消息必然被门禁挡下。
+    for (let index = 1; index < BOT_LOOP_DEPTH_LIMIT; index++) {
+      await h.participation.guardBotTurn(botMessage(`om_fill_${index}`), config, { botOpenId: 'ou_bot' });
     }
     await h.coordinator.handle(botMessage('om_bot_blocked'), config);
     expect(h.runtime.send).toHaveBeenCalledOnce();
@@ -305,8 +273,8 @@ describe('多 bot 互相 @ 的硬门禁', () => {
 
   it('coordinator 不拦人类消息', async () => {
     const h = harness();
-    for (let index = 0; index < BOT_TURN_LIMIT_PER_HOUR; index++) {
-      await h.participation.guardBotTurn(botMessage(`om_fill_${index}`, { threadId: `omt_f_${index}` }), config, { botOpenId: 'ou_bot' });
+    for (let index = 0; index < BOT_LOOP_DEPTH_LIMIT + 1; index++) {
+      await h.participation.guardBotTurn(botMessage(`om_fill_${index}`), config, { botOpenId: 'ou_bot' });
     }
     await h.coordinator.handle(humanMessage('om_human'), config);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());

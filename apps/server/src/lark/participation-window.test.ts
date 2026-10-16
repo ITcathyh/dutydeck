@@ -5,7 +5,7 @@ import Database from 'better-sqlite3';
 import { createCollaborationSchema } from '../../../../packages/storage/src/collaboration-migration.js';
 import { createCollaborationRepository } from '../../../../packages/storage/src/collaboration.js';
 import { addCollaborationScenarios, allowEagerParticipation } from '../../../../packages/storage/src/migrations.js';
-import { BOT_TURN_RECORD, DECIDER_META_KEY, markTruncated, type CollaborationRepository } from '@dutydeck/shared';
+import { DECIDER_META_KEY, markTruncated, type CollaborationRepository } from '@dutydeck/shared';
 import { LarkGroupParticipation } from './group-participation.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { StoredLarkConfig } from './config.js';
@@ -54,18 +54,6 @@ describe('统计窗口按截断标记判断是否读全', () => {
       if (cap === undefined) { expect(h.decide).toHaveBeenCalledOnce(); continue; }
       expect(h.decide).not.toHaveBeenCalled();
       expect((await h.stored.listDecisions(scope)).find(item => item.reason.startsWith('判定预算窗口不完整'))).toBeDefined();
-    }
-  });
-
-  it('机器人回合预算：窗口被截断且都在本小时内，挡下机器人触发的回合', async () => {
-    for (const cap of [undefined, 2]) {
-      const h = await harness(cap);
-      for (let index = 0; index < 3; index++) {
-        await h.stored.recordDecision({ id: `decision_turn_${index}`, scope, contextRevision: 0, policyVersion: 'bot-loop-guard', action: 'silent', reason: 'r', evidenceIds: [], status: 'suppressed',
-          inputSnapshot: { gate: BOT_TURN_RECORD, messageId: `om_bot_${index}` }, createdAt: now() });
-      }
-      const gate = await h.participation.guardBotTurn(message('om_bot', '@Bot 看下', { senderType: 'app', senderOpenId: 'ou_other_bot' }), config, { botOpenId: 'ou_bot' });
-      expect(gate).toBe(cap === undefined ? undefined : '机器人预算窗口不完整：最近 500 条记录都落在本小时内');
     }
   });
 

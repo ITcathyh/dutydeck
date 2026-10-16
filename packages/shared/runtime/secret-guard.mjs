@@ -16,6 +16,10 @@ import { Worker } from 'node:worker_threads';
 
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
 const word = String.raw`[\w.@+-]`;
+// 命令里单独的一个路径参数：前面是开头、空白、引号、=、:、/ 或重定向符，后面是结尾、空白、引号或命令分隔符。
+// 用来认 app.env、server.key 这类相对路径，同时不把代码里的 obj.key、process.env 当成文件。
+const argStart = String.raw`(?<=^|[\s'"=<>:/])`;
+const argEnd = String.raw`(?=$|[\s'";|&)<>])`;
 
 /** 文件路径规则：命中即拒绝。匹配前把家目录写成 ~。 */
 const pathRules = [
@@ -24,10 +28,10 @@ const pathRules = [
   ['Claude Code 登录信息', new RegExp(String.raw`(?<![\w-])\.claude/\.credentials\.json|(?<![\w-])\.claude\.json|~/\.claude/settings(?:\.local)?\.json`)],
   ['Codex 登录信息或会话记录', new RegExp(String.raw`(?<![\w-])\.codex/(?:auth\.json|sessions|archived_sessions|history\.jsonl|session_index\.jsonl|[\w.-]*\.sqlite(?:-wal|-shm)?)(?![\w-])`)],
   ['SSH 私钥', new RegExp(String.raw`(?<![\w-])\.ssh/(?!known_hosts(?:\.old)?(?![\w.-])|config(?![\w.-])|${word}+\.pub(?![\w.-]))${word}+|(?<![\w.-])id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?(?![\w.-])`)],
-  ['私钥或证书文件', new RegExp(String.raw`(?<![\w.-])${word}+\.(?:pem|p12|pfx|ppk|jks|keystore)(?![\w-])|/${word}+\.key(?![\w-])`)],
+  ['私钥或证书文件', new RegExp(String.raw`(?<![\w.-])${word}+\.(?:pem|p12|pfx|ppk|jks|keystore)(?![\w-])|${argStart}${word}+\.key${argEnd}`)],
   ['云服务或工具凭据', new RegExp(String.raw`(?<![\w-])\.aws/(?:credentials|sso/cache|cli/cache)|(?<![\w-])\.config/gcloud/(?:credentials\.db|access_tokens\.db|legacy_credentials|application_default_credentials\.json)|(?<![\w-])\.azure/(?:accessTokens\.json|msal_token_cache)|(?<![\w-])\.kube/config(?![\w-])|(?<![\w.-])kubeconfig(?![\w-])|(?<![\w-])\.docker/config\.json|(?<![\w-])\.config/gh/hosts\.yml|(?<![\w-])\.(?:gnupg|password-store)(?:/|(?![\w-]))|(?<![\w.-])\.(?:netrc|git-credentials|npmrc|pypirc|vault-token)(?![\w-])`)],
   ['凭据文件', new RegExp(String.raw`(?<![\w.-])(?:credentials?|secrets?|tokens?|auth|oauth[\w-]*)\.(?:json|ya?ml|toml|ini|txt|db)(?![\w-])`)],
-  ['.env 文件', new RegExp(String.raw`(?<![\w.$-])\.env(?:\.(?!example(?![\w-])|sample(?![\w-])|template(?![\w-])|dist(?![\w-])|defaults?(?![\w-]))[\w-]+)*(?![\w.-])|/[\w-]+\.env(?![\w.-])`)],
+  ['.env 文件', new RegExp(String.raw`(?<![\w.$-])\.env(?:\.(?!example(?![\w-])|sample(?![\w-])|template(?![\w-])|dist(?![\w-])|defaults?(?![\w-]))[\w-]+)*(?![\w.-])|${argStart}(?!process\.env)[\w-]+\.env${argEnd}`)],
   // 含密钥目录和本轮策略文件：删掉策略文件就能让这个 hook 放行，所以除发布目录 releases/<版本>/ 里的程序外都不让碰
   // （Agent 调用的群工具、relay 命令在那里）；路径里带 ../ 的不算发布目录。
   ['Dutydeck 数据目录', new RegExp(String.raw`(?<![\w-])\.dutydeck(?![\w.-])(?!/(?:[^\s'"/]+/)*releases/[^\s'"/]+/(?![^\s'"]*\.\./))`)],
