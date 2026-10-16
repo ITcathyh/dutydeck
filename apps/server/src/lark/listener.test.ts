@@ -907,6 +907,7 @@ describe('Lark message coordinator', () => {
     expect(safety?.content).toContain(config.highRiskPattern);
     expect(safety?.content).toContain('禁止执行');
     expect(safety?.content).toContain('~/.codex');
+    expect(safety?.content).toContain('不要去查找、阅读或试探它们的实现和配置');
     expect((runtime.dispatch.mock.calls[0]?.[10] as PromptPart[]).some(part => part.content.startsWith('[Dutydeck 安全策略 · 自动注入]'))).toBe(false);
     expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('正在排队，前面还有 1 个任务…') }));
     expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('前面还有 0 个任务') }));

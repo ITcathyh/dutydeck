@@ -47,6 +47,8 @@ describe('secret guard', () => {
     'ls .dutydeck/secrets',
     'rm -rf .dutydeck',
     'rm .dutydeck/security/sessions/ses_1.json',
+    'ls .dutydeck/bot-process-deployment/releases/',
+    'cat .dutydeck/bot-process-deployment/releases/current/../../secrets/app.key',
   ])('blocks %s', command => {
     expect(bash(command)).toBeDefined();
   });
@@ -70,6 +72,9 @@ describe('secret guard', () => {
     'kubectl --kubeconfig=/etc/k8s/admin.conf get pods',
     'ls ~/ai/projects',
     'pnpm vitest run src/auth.test.ts',
+    // 群工具和 relay 命令：Dutydeck 发布目录里的程序。
+    "'/opt/node/bin/node' '/srv/app/.dutydeck/bot-runtimes/cli_x/.dutydeck/releases/current/dist/cli.js' group messages --limit 10",
+    'node ~/app/.dutydeck/bot-process-deployment/releases/20261016T075907Z-fe7f2e3/dist/cli.js session native-ask',
   ])('allows %s', command => {
     expect(bash(command)).toBeUndefined();
   });

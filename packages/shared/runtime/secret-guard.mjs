@@ -28,8 +28,9 @@ const pathRules = [
   ['云服务或工具凭据', new RegExp(String.raw`(?<![\w-])\.aws/(?:credentials|sso/cache|cli/cache)|(?<![\w-])\.config/gcloud/(?:credentials\.db|access_tokens\.db|legacy_credentials|application_default_credentials\.json)|(?<![\w-])\.azure/(?:accessTokens\.json|msal_token_cache)|(?<![\w-])\.kube/config(?![\w-])|(?<![\w.-])kubeconfig(?![\w-])|(?<![\w-])\.docker/config\.json|(?<![\w-])\.config/gh/hosts\.yml|(?<![\w-])\.(?:gnupg|password-store)(?:/|(?![\w-]))|(?<![\w.-])\.(?:netrc|git-credentials|npmrc|pypirc|vault-token)(?![\w-])`)],
   ['凭据文件', new RegExp(String.raw`(?<![\w.-])(?:credentials?|secrets?|tokens?|auth|oauth[\w-]*)\.(?:json|ya?ml|toml|ini|txt|db)(?![\w-])`)],
   ['.env 文件', new RegExp(String.raw`(?<![\w.$-])\.env(?:\.(?!example(?![\w-])|sample(?![\w-])|template(?![\w-])|dist(?![\w-])|defaults?(?![\w-]))[\w-]+)*(?![\w.-])|/[\w-]+\.env(?![\w.-])`)],
-  // 含密钥目录和本轮策略文件：删掉策略文件就能让这个 hook 放行，所以整个目录都不让碰。
-  ['Dutydeck 数据目录', new RegExp(String.raw`(?<![\w-])\.dutydeck(?:/|(?![\w.-]))`)],
+  // 含密钥目录和本轮策略文件：删掉策略文件就能让这个 hook 放行，所以除发布目录 releases/<版本>/ 里的程序外都不让碰
+  // （Agent 调用的群工具、relay 命令在那里）；路径里带 ../ 的不算发布目录。
+  ['Dutydeck 数据目录', new RegExp(String.raw`(?<![\w-])\.dutydeck(?![\w.-])(?!/(?:[^\s'"/]+/)*releases/[^\s'"/]+/(?![^\s'"]*\.\./))`)],
   ['进程环境变量', /\/proc\/[^/\s]+\/environ/],
 ];
 
