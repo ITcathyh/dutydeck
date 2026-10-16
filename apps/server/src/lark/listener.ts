@@ -105,6 +105,8 @@ export interface LarkMessageEvent {
   scenario?: LarkScenarioAdoption;
   /** 升级前的入站记录里的同类字段（放在原文前的指令），只读不写，见 scenario-legacy.ts。 */
   triage?: string;
+  /** Agent 代发命令（agent-command.ts）的回执去重键：同一条请求消息下代发的不同命令各回一张卡。只在内部合成。 */
+  replyKey?: string;
 }
 
 export interface LarkListener {

@@ -259,7 +259,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       taskId: event.messageId, taskName: options.taskName ?? '任务操作',
       state: options.failed ? 'failed' : 'completed', readOnly: true,
       permissionMode: larkPermissionMode(config), markdown, ...(options.elements ? { elements: options.elements } : {}),
-      idempotencyKey: `workflow_reply_${event.messageId}`.slice(0, 50) }, this.log);
+      idempotencyKey: `workflow_reply_${event.replyKey ?? event.messageId}`.slice(0, 50) }, this.log);
   }
 
   private saveTaskDashboardOrigin(config: StoredLarkConfig, card: { messageId: string }, event: LarkMessageEvent) {
@@ -997,7 +997,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         taskId: event.messageId, taskName,
         markdown,
         ...(options.elements?.length ? { elements: options.elements } : {}),
-        idempotencyKey: `cmd_${route.command}_${event.messageId}`.slice(0, 50),
+        idempotencyKey: `cmd_${route.command}_${event.replyKey ?? event.messageId}`.slice(0, 50),
         ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
       }, this.log).catch(error => { this.log.error({ error, messageId: event.messageId, command: route.command }, '发送飞书命令回执失败'); return undefined; });
       // reaction 是「请求已接入」的回执，命令回执落地后必须撤销，避免两个状态并存。
@@ -1954,7 +1954,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     // 话题根要带上：话题续接发起人顶层会话时，重启后靠它找回那个会话。
     const place = { chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', ...(requested.threadId ? { threadId: requested.threadId } : {}), ...(requested.rootId ? { rootId: requested.rootId } : {}) };
     if (!confirm) {
-      await this.runAgentCommand(this.agentCommandEvent(config, { ...place, messageId: requested.messageId }, request.actorId, parsed.raw, mentions), config, parsed.raw, saved.scope_id!);
+      // 回执挂在请求消息下；去重键按命令区分，同一轮代发 /help 1 和 /help 2 各回一张卡。
+      const replyKey = createHash('sha256').update(`${requested.messageId}\n${parsed.raw}`).digest('hex').slice(0, 24);
+      await this.runAgentCommand({ ...this.agentCommandEvent(config, { ...place, messageId: requested.messageId }, request.actorId, parsed.raw, mentions), replyKey }, config, parsed.raw, saved.scope_id!);
       return { executed: true, message: '已执行，结果卡已发到对话里。不用复述卡片内容，也不要让用户再发命令。' };
     }
     const confirmations = this.workflowOptions.participation?.confirmations;
@@ -1987,9 +1989,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const command = String(record.payload.command);
         const event = this.agentCommandEvent(config, { messageId: record.cardMessageId, chatId: record.scope.chatId, chatType: String(record.payload.chat_type),
           ...(record.payload.thread_id ? { threadId: String(record.payload.thread_id) } : {}), ...(record.payload.root_id ? { rootId: String(record.payload.root_id) } : {}) }, operator, command, JSON.parse(String(record.payload.mentions ?? '[]')));
+        // 先落库再回卡片：执行中进程退出的话，重启后在这张卡下回执无法确认是否完成。
+        const started = await this.inbox?.startCommand(config.appId, event);
+        if (!started) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '这条命令已经执行过或无法登记，没有再执行。', 409);
         // 卡片回调要在 3 秒内返回：命令放到后台执行，结果和失败由命令自己的回执写在这张卡下面。
-        void this.runAgentCommand(event, config, command, String(record.payload.scope_id))
-          .catch(error => this.log.error({ error, messageId: event.messageId }, '执行代办命令失败'));
+        void this.runAgentCommand(event, config, command, String(record.payload.scope_id), started).catch(async error => {
+          this.log.error({ error, messageId: event.messageId }, '执行代办命令失败');
+          await this.inbox?.update(started, { state: 'failed', error: error instanceof Error ? error.message : String(error) }).catch(() => undefined);
+        });
         return `已确认执行 ${larkCommandEcho(command, 120)}，结果会发在这张卡下面。`;
       }
     });
@@ -2003,24 +2010,35 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         ...mentions.map((mention, index) => ({ ...mention, key: `@_user_${index + 2}` }))] };
   }
 
-  /** 以 event 发送人的身份、在 scopeId 这个会话里执行一条命令，和他在那里自己发一样；命令带出的新一轮挂在 event 这条消息下。 */
-  private async runAgentCommand(event: LarkMessageEvent, config: StoredLarkConfig, command: string, scopeId: string) {
-    if (await this.routeWorkflow(event, config, command, { id: scopeId })) return;
-    const groupKey = larkGroupKey(event, scopeId, config.appId);
-    const group = this.groups.get(groupKey) ?? { tail: Promise.resolve() };
-    this.groups.set(groupKey, group);
-    if (!group.sessionId) {
-      const continued = await this.threadContinuation(event, config, scopeId);
-      if (continued && !group.retiredSessionIds?.has(continued.id)) { group.sessionId = continued.id; group.sessionConfigKey = larkSessionConfigKey(config); }
+  /**
+   * 以 event 发送人的身份、在 scopeId 这个会话里执行一条命令，和他在那里自己发一样；命令带出的新一轮挂在 event 这条消息下。
+   * started 是确认后落库的执行中记录：命令自己回执后记为完成，带出新一轮时改成待处理的请求交给 handle。
+   */
+  private async runAgentCommand(event: LarkMessageEvent, config: StoredLarkConfig, command: string, scopeId: string, started?: LarkInboxRecord) {
+    let route: 'handled' | string | LarkCommandPrompt | undefined = 'handled';
+    if (!await this.routeWorkflow(event, config, command, { id: scopeId })) {
+      const groupKey = larkGroupKey(event, scopeId, config.appId);
+      const group = this.groups.get(groupKey) ?? { tail: Promise.resolve() };
+      this.groups.set(groupKey, group);
+      if (!group.sessionId) {
+        const continued = await this.threadContinuation(event, config, scopeId);
+        if (continued && !group.retiredSessionIds?.has(continued.id)) { group.sessionId = continued.id; group.sessionConfigKey = larkSessionConfigKey(config); }
+      }
+      route = await this.routeChatCommand(event, config, command, group, scopeId);
     }
-    const route = await this.routeChatCommand(event, config, command, group, scopeId);
-    if (route === 'handled' || route === undefined || !this.inbox) return;
-    // /new 带任务、/retry、/plan：按这条消息登记成一条请求交给 handle，授权、排队和卡片照常。
+    if (route === 'handled' || route === undefined || !this.inbox) {
+      if (started) await this.inbox!.update(started, { state: 'accepted' });
+      return;
+    }
+    // /new 带任务、/retry、/plan：按这条消息登记成一条请求交给 handle，授权、排队和卡片照常；进程退出的话重启后接着执行。
     const next = typeof route === 'string' ? { prompt: route } : route;
-    if (await this.inbox.seed(config.appId, event, { prompt: next.prompt, scopeId, resources: [],
-      ...(next.materialPrompt ? { materialPrompt: next.materialPrompt } : {}), ...(next.launchOptions ? { launchOptions: next.launchOptions } : {}) })) {
-      await this.handle(event, config);
-    }
+    const request = { prompt: next.prompt, scopeId, resources: [],
+      ...(next.materialPrompt ? { materialPrompt: next.materialPrompt } : {}), ...(next.launchOptions ? { launchOptions: next.launchOptions } : {}) };
+    if (started) {
+      await this.inbox.update(started, { state: 'received', request });
+      if (!await this.inbox.release(started)) return;
+    } else if (!await this.inbox.seed(config.appId, event, request)) return;
+    await this.handle(event, config);
   }
 
   async handleAction(value: unknown, operatorOpenId?: string, context?: { messageId?: string; chatId?: string; actionTag?: string; option?: string }) {

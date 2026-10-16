@@ -85,7 +85,7 @@ async function harness() {
     return coordinator.agentCommand({ sessionId: saved.sessionId, taskId: saved.runtime_task_id!, actorId: 'ou_alice', command });
   };
   const repliesTo = (messageId: string) => service.reply.mock.calls.map(call => call[0]).filter(input => input.messageId === messageId);
-  return { repos, config, service, cards, prompts, coordinator, result, turn, repliesTo };
+  return { repos, runtime, participation, config, service, cards, prompts, coordinator, result, turn, repliesTo };
 }
 
 const findElement = (node: unknown, id: string): Record<string, any> | undefined => {
@@ -115,11 +115,22 @@ describe('Agent 代发飞书命令', () => {
     expect(agentCommandHelp()).not.toContain('/cancel');
   });
 
-  it('查看类以发起人身份直接执行，结果卡回在这一轮的请求消息下', async () => {
+  it('查看类以发起人身份直接执行，结果卡回在这一轮的请求消息下；同一轮的不同命令各回一张卡', async () => {
     const h = await harness();
     expect(await h.turn(undefined, '/status')).toMatchObject({ executed: true });
     expect(h.repliesTo('om_1').map(input => input.taskName)).toContain('任务状态');
     expect(h.prompts).toHaveLength(1);
+    await h.turn(undefined, '/help 1');
+    await h.turn(undefined, '/help 2');
+    await h.turn(undefined, '/tasks 1');
+    await h.turn(undefined, '/tasks 2');
+    const commandKeys = () => h.repliesTo('om_1').map(input => String(input.idempotencyKey)).filter(key => /^(cmd|workflow_reply)_/.test(key));
+    const keys = commandKeys();
+    expect(keys).toHaveLength(5);
+    expect(new Set(keys).size).toBe(5);
+    // 同一条命令重试时还是同一张卡。
+    await h.turn(undefined, '/help 2');
+    expect(commandKeys().at(-1)).toBe(keys[2]);
   });
 
   it('/new 先发确认卡；没权限的人点被拒，发起人点确认后在新会话里执行，新一轮挂在确认卡下', async () => {
@@ -149,6 +160,27 @@ describe('Agent 代发飞书命令', () => {
     expect(next.sessionId).not.toBe(first.sessionId);
     expect(h.service.update.mock.calls.map(call => call[0]).find(input => input.messageId === confirmCardId)).toMatchObject({ statusLabel: '已确认' });
     expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: confirmCardId, chatId: 'oc_group' })).toMatchObject({ content: '这张卡已经处理过了。' });
+  });
+
+  it('确认后执行中进程退出：重启后在确认卡下回执无法确认是否完成，不会重新执行', async () => {
+    const h = await harness();
+    expect(await h.turn(undefined, '/new')).toMatchObject({ pendingConfirmation: true });
+    const confirmCall = h.repliesTo('om_1').find(input => input.taskName === '待确认的操作')!;
+    const confirmCardId = [...h.cards].find(([, input]) => input === confirmCall)![0];
+    // 模拟命令执行到一半进程退出：执行永远不返回。
+    (h.coordinator as any).routeChatCommand = () => new Promise(() => {});
+    const value = findElement(buildLarkCard(confirmCall), 'confirm_confirm')!.behaviors[0].value;
+    expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: confirmCardId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
+    const inboxKey = `lark.inbox.${h.config.appId}.${confirmCardId}`;
+    expect(JSON.parse((await h.repos.config.get(inboxKey))!)).toMatchObject({ state: 'command', event: { senderOpenId: 'ou_alice' } });
+
+    const restarted = new LarkMessageCoordinator(h.runtime, h.service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot',
+      undefined, h.repos.channelMappings, async () => 'group', undefined, undefined, { store: h.repos.config, participation: h.participation });
+    cleanups.push(() => restarted.stop());
+    await restarted.initializeWorkflows(h.config);
+    expect(h.repliesTo(confirmCardId).map(input => input.markdown).join('\n')).toContain('重启后无法确认这条命令是否完成');
+    expect(JSON.parse((await h.repos.config.get(inboxKey))!)).toMatchObject({ state: 'failed' });
+    expect(h.prompts).toHaveLength(1);
   });
 
   it('点取消不执行；Agent 编号填错、找不到这一轮时直接报错给 Agent；/grant 带上用户消息里 @ 过的成员', async () => {

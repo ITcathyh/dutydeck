@@ -105,6 +105,14 @@ export class LarkTaskInbox {
     return await this.store.compareAndSet!(key, raw, JSON.stringify(next)) ? next : undefined;
   }
   /**
+   * Agent 代发、用户已确认的命令（agent-command.ts）：执行前按确认卡的消息落库为执行中的命令。
+   * 进程在执行中退出时，重启后和用户自己发的命令一样回执「无法确认是否完成」。已登记过返回 undefined。
+   */
+  async startCommand(appId: string, event: LarkMessageEvent): Promise<LarkInboxRecord | undefined> {
+    const record: LarkInboxRecord = { appId, event, boot: this.boot, state: 'command', receivedAt: new Date().toISOString() };
+    return await this.store.compareAndSet!(prefix(appId) + event.messageId, undefined, JSON.stringify(record)) ? record : undefined;
+  }
+  /**
    * 结果卡续问按钮代发的一条消息：请求内容和所属 scope 由服务端按原任务定好，交给 handle 之前先落库。
    * boot 留空，handle 里的 claim 会像认领上个进程留下的记录一样认领它；进程在认领前退出时，
    * 重启后 recoverable 也会把它捞回来重放。返回 false 说明这条消息已经登记过。
