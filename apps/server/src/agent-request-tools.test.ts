@@ -5,7 +5,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { RuntimeError, type PublicSessionSchedule, type Session } from '@dutydeck/shared';
 import { AgentGroupToolError, LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './lark/agent-tools.js';
 import { larkBotsConfigKey } from './lark/config.js';
-import { registerAgentRequestTools, type AgentRequestToolsOptions } from './agent-request-tools.js';
+import { isAutomatedRequest, registerAgentRequestTools, type AgentRequestToolsOptions } from './agent-request-tools.js';
 
 const apps: ReturnType<typeof Fastify>[] = [];
 const repositories: Array<ReturnType<typeof createRepositories>> = [];
@@ -137,4 +137,14 @@ describe('Agent commands', () => {
     expect((await f.command({ command: '/status' })).json().error.code).toBe('AGENT_REQUEST_ACTOR_REQUIRED');
     expect(handler).not.toHaveBeenCalled();
   });
+});
+
+it('treats schedule, CI and PR follow-up rounds as automated, and Lark or Web requests as not', () => {
+  expect(isAutomatedRequest({ namespace: 'schedule', key: 'occurrence_1' })).toBe(true);
+  expect(isAutomatedRequest({ namespace: 'automation', key: 'ci_1' })).toBe(true);
+  expect(isAutomatedRequest({ namespace: 'runtime', key: 'ci-webhook:sub_1:fix:1:abc1234' })).toBe(true);
+  expect(isAutomatedRequest({ namespace: 'runtime', key: 'pull-request:pr_1:ci:1' })).toBe(true);
+  expect(isAutomatedRequest({ namespace: 'lark', key: 'om_1' })).toBe(false);
+  expect(isAutomatedRequest({ namespace: 'runtime', key: 'request_1' })).toBe(false);
+  expect(isAutomatedRequest(undefined)).toBe(false);
 });

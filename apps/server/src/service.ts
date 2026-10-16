@@ -9,6 +9,7 @@ import { dutydeckGroupToolsCommand } from './lark/agent-tools.js';
 import { resolveExplicitFinalContext } from './lark/explicit-final.js';
 import { larkResultDeliveryIssues } from './lark/reconciler.js';
 import { createCollaborationIntegration } from './collaboration-integration.js';
+import { isAutomatedRequest } from './agent-request-tools.js';
 import { LeaderDelegationService } from './leader-delegation.js';
 import { renderMemoryIndex } from './lark/memory-view.js';
 import type { CollaborationExtensions } from './collaboration-extensions.js';
@@ -331,8 +332,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const groupManager: LarkGroupManager = new LarkGroupManager(repos, { env, fetcher: workbenchHttp.fetch, onPolicyChanged: (): Promise<void> => groupManager.refreshPolicies(runtime) });
   let readCollaborationMemory: (scope: import('@dutydeck/shared').CollaborationScope) => Promise<string> = async () => '';
   let collaboration: ReturnType<typeof createCollaborationIntegration> | undefined;
-  // 定时计划或 CI 自动续作提交的一轮（不是有人在飞书里发的消息）。
-  const isAutomatedTask = (taskId: string) => ['schedule', 'automation'].includes(repos.execution.getAcceptedTask(taskId)?.request?.namespace ?? '');
+  const isAutomatedTask = (taskId: string) => isAutomatedRequest(repos.execution.getAcceptedTask(taskId)?.request);
   const agentTools = new LarkAgentToolsService(capabilities, repos.config, {
     env,
     groupToolsCommand: options.groupToolsCommand,

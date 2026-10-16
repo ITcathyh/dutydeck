@@ -135,6 +135,9 @@ describe('Agent 代发飞书命令', () => {
     expect(h.repliesTo('om_1').filter(input => input.taskName === '待确认的操作')).toHaveLength(1);
     expect(h.prompts).toHaveLength(1);
 
+    // 话题根随确认单保存：重启后点确认，靠它找回话题续接的会话。
+    const pending = (await h.repos.collaboration.listActions({ appId: h.config.appId, chatId: 'oc_group' })).find(action => (action.payload as any).payload?.command?.startsWith('/new'))!;
+    expect((pending.payload as any).payload).toMatchObject({ root_id: 'om_root', thread_id: 'omt_topic', chat_type: 'group' });
     const value = findElement(buildLarkCard(confirmCall), 'confirm_confirm')!.behaviors[0].value;
     expect(await h.coordinator.handleAction(value, 'ou_mallory', { messageId: confirmCardId, chatId: 'oc_group' }))
       .toMatchObject({ type: 'warning', content: '只有发起人或有权限的人能确认。' });

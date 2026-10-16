@@ -1951,7 +1951,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     }
     // /grant @成员：成员要在用户这条消息里被 @ 过，按名字对上那条提及（命令层只认真实的提及）。
     const mentions = requested.mentions.filter(mention => mention.openId && mention.openId !== this.botOpenId && parsed.argsText.includes(`@${mention.name}`));
-    const place = { chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', ...(requested.threadId ? { threadId: requested.threadId } : {}) };
+    // 话题根要带上：话题续接发起人顶层会话时，重启后靠它找回那个会话。
+    const place = { chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', ...(requested.threadId ? { threadId: requested.threadId } : {}), ...(requested.rootId ? { rootId: requested.rootId } : {}) };
     if (!confirm) {
       await this.runAgentCommand(this.agentCommandEvent(config, { ...place, messageId: requested.messageId }, request.actorId, parsed.raw, mentions), config, parsed.raw, saved.scope_id!);
       return { executed: true, message: '已执行，结果卡已发到对话里。不用复述卡片内容，也不要让用户再发命令。' };
@@ -1961,7 +1962,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const record = await confirmations.request({ kind: larkAgentCommandKind(config.appId), scope: { appId: config.appId, chatId: saved.chat_id }, requesterId: request.actorId,
       replyTo: { messageId: requested.messageId, ...(requested.threadId ? { threadId: requested.threadId } : {}) }, dedupeKey: `${requested.messageId}:${parsed.raw}`,
       title: '待确认的操作', summary: `${summary}\n\n\`${parsed.raw.replace(/`/g, "'").slice(0, 300)}\``,
-      payload: { command: parsed.raw, session_id: request.sessionId, scope_id: saved.scope_id!, chat_type: place.chatType, ...(place.threadId ? { thread_id: place.threadId } : {}), mentions: JSON.stringify(mentions) } });
+      payload: { command: parsed.raw, session_id: request.sessionId, scope_id: saved.scope_id!, chat_type: place.chatType, ...(place.threadId ? { thread_id: place.threadId } : {}), ...(place.rootId ? { root_id: place.rootId } : {}), mentions: JSON.stringify(mentions) } });
     if (!record?.cardMessageId) throw new RuntimeError('AGENT_COMMAND_CARD_FAILED', '确认卡没发出去。', 502);
     return { pendingConfirmation: true, message: '已发确认卡，用户点「确认」后才执行。只回一句已发确认卡，不要说已完成，也不要让用户发命令。' };
   }
@@ -1985,7 +1986,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         if (!config || !record.cardMessageId) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '机器人已停用，没有执行。', 409);
         const command = String(record.payload.command);
         const event = this.agentCommandEvent(config, { messageId: record.cardMessageId, chatId: record.scope.chatId, chatType: String(record.payload.chat_type),
-          ...(record.payload.thread_id ? { threadId: String(record.payload.thread_id) } : {}) }, operator, command, JSON.parse(String(record.payload.mentions ?? '[]')));
+          ...(record.payload.thread_id ? { threadId: String(record.payload.thread_id) } : {}), ...(record.payload.root_id ? { rootId: String(record.payload.root_id) } : {}) }, operator, command, JSON.parse(String(record.payload.mentions ?? '[]')));
         // 卡片回调要在 3 秒内返回：命令放到后台执行，结果和失败由命令自己的回执写在这张卡下面。
         void this.runAgentCommand(event, config, command, String(record.payload.scope_id))
           .catch(error => this.log.error({ error, messageId: event.messageId }, '执行代办命令失败'));
@@ -1995,7 +1996,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   }
 
   /** 代发命令的合成消息：带 @机器人，和用户在这里 @我 发这条命令一样；不带引用，免得被当成在回复哪张卡。 */
-  private agentCommandEvent(config: StoredLarkConfig, place: { messageId: string; chatId: string; chatType: string; threadId?: string },
+  private agentCommandEvent(config: StoredLarkConfig, place: { messageId: string; chatId: string; chatType: string; threadId?: string; rootId?: string },
     sender: string, command: string, mentions: LarkMessageEvent['mentions']): LarkMessageEvent {
     return { ...place, createTime: String(Date.now()), messageType: 'text', content: JSON.stringify({ text: `@_user_1 ${command}` }), senderOpenId: sender, senderType: 'user',
       mentions: [{ key: '@_user_1', name: config.name?.trim() || 'Dutydeck', ...(this.botOpenId ? { openId: this.botOpenId } : {}), mentionedType: 'bot' },

@@ -22,6 +22,10 @@ const requestSchema = z.object({
 
 const commandSchema = z.object({ command: z.string().trim().min(1).max(4000) }).strict();
 
+/** 不是有人发的消息、而是自动提交的一轮：定时计划、CI 自动续作，以及 CI webhook 和 PR 跟进派发的修复轮（按派发键认）。 */
+export const isAutomatedRequest = (request?: { namespace: string; key: string }) =>
+  ['schedule', 'automation'].includes(request?.namespace ?? '') || /^(ci-webhook|pull-request):/.test(request?.key ?? '');
+
 export interface AgentRequestToolsOptions {
   runtime: { getActiveTaskContext(sessionId: string): { taskId: string; actorId?: string } | undefined };
   /** 定时或自动续作触发的一轮不能再代办，免得每次到点又建一个计划、又发一条命令。 */
