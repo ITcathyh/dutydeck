@@ -4,6 +4,7 @@ import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
 import type { SessionNamesAction } from './session-names-cli.js';
 import type { ScheduleCliAction, ScheduleCliInput, ScheduleRequestCliInput } from './schedule-cli.js';
 import { agentFields, botFields, fieldsHelp, groupFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
+import { agentCommandHelp } from './lark/agent-command.js';
 import { Command } from 'commander';
 import { DatabaseCliError } from './database-cli.js';
 import type { PluginCliAction, PluginCliOptions } from './plugins/cli.js';
@@ -243,6 +244,7 @@ export interface CliHandlers {
   groupMessage?(messageId: string): void | Promise<void>;
   groupSend?(content: string, options: AgentGroupCliOptions): void | Promise<void>;
   groupHandoff?(target: string, content: string, options: { turn: string }): void | Promise<void>;
+  agentCommand?(command: string, options: { turn: string }): void | Promise<void>;
   groupReplyAgent?(content: string, options: { turn: string }): void | Promise<void>;
   groupSendFile?(path: string, options: AgentGroupCliOptions): void | Promise<void>;
   groupWait?(options: AgentGroupCliOptions): void | Promise<void>;
@@ -664,6 +666,13 @@ Routing guidance:
     .option('--json <json>', 'Structured operation parameters').option('--file <path>', 'Read operation parameters from JSON file')
     .requiredOption('--turn <token>', 'Current task authorization token')
     .action((operation, id, options) => handlers.collaborate?.(operation, id, options));
+
+  program.command('command')
+    .description('Lark Agent only: run a Dutydeck chat command for this turn\'s requester; commands that change something post a confirm card first')
+    .argument('<command>', "Chat command, e.g. '/status' or '/new --agent <id> -- <task>'")
+    .requiredOption('--turn <token>', 'Current task authorization token')
+    .addHelpText('after', `\nCommands:\n${agentCommandHelp()}`)
+    .action((command, options) => handlers.agentCommand?.(command, options));
 
   const memory = program.command('memory').description('Read and maintain the long-term memory of the current Lark chat').addHelpText('after', memoryToolsHelp());
   memory.command('list')

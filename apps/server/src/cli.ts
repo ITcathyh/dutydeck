@@ -15,7 +15,7 @@ import { runLarkCreate } from './lark/create-cli.js';
 import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver';
 import { acpkPassThroughArgs, runAcpk } from './acpk.js';
 import { runWorkCommand } from './work-item-cli.js';
-import { AgentGroupToolCliError, runGroupBots, runGroupHandoff, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupReplyAgent, runGroupSelf, runGroupSend, runGroupSendFile, runGroupTeamSearch, runGroupWait, runHistoryList, runHistoryShow } from './lark/agent-tools-cli.js';
+import { AgentGroupToolCliError, runAgentCommand, runGroupBots, runGroupHandoff, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupReplyAgent, runGroupSelf, runGroupSend, runGroupSendFile, runGroupTeamSearch, runGroupWait, runHistoryList, runHistoryShow } from './lark/agent-tools-cli.js';
 import { runMemoryAdd, runMemoryList, runMemoryRemove, runMemorySearch, runMemoryShow } from './lark/memory-cli.js';
 import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
@@ -453,6 +453,7 @@ async function main() {
     groupMessage: async messageId => { output(await runGroupMessage(messageId)); },
     groupSend: async (content, options) => { output(await runGroupSend(content, options)); },
     groupHandoff: async (target, content, options) => { output(await runGroupHandoff(target, content, options)); },
+    agentCommand: async (command, options) => { output(await runAgentCommand(command, options)); },
     groupReplyAgent: async (content, options) => { output(await runGroupReplyAgent(content, options)); },
     groupSendFile: async (path, options) => { output(await runGroupSendFile(path, options)); },
     groupWait: async options => { output(await runGroupWait(options)); },

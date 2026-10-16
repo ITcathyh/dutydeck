@@ -150,6 +150,15 @@ export function runGroupHandoff(target: string, content: string, cliOptions: { t
   });
 }
 
+/** 替这一轮发起人发一条飞书 / 命令（见 agent-request-tools.ts）：查看类直接出结果卡，会改东西的先发确认卡。 */
+export function runAgentCommand(command: string, cliOptions: { turn: string }, options: GroupToolClientOptions = {}) {
+  return new AgentGroupToolHttpClient(options).request('/commands', {
+    method: 'POST',
+    headers: { 'x-dutydeck-work-turn': cliOptions.turn },
+    body: JSON.stringify({ command })
+  });
+}
+
 export function runGroupReplyAgent(content: string, cliOptions: { turn: string }, options: GroupToolClientOptions = {}) {
   return new AgentGroupToolHttpClient(options).request('/reply-agent', {
     method: 'POST',

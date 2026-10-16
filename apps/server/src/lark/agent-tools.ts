@@ -1,4 +1,5 @@
 import { deliveryPrompt } from '../prompt-context.js';
+import { LarkAgentCommands } from './agent-command.js';
 import { redactTraceText } from './secret-redaction.js';
 import { readExplicitFinal, resolveExplicitFinalContext, sendExplicitFinal, withExplicitFinalLock, type ExplicitFinalContext, type ExplicitFinalScope } from './explicit-final.js';
 import { collaborationAgentPrompt } from '../collaboration-cli.js';
@@ -186,7 +187,7 @@ export interface LarkAgentToolsOptions {
   previewWork?: (sessionId: string, actorId: string) => Promise<boolean>;
   previewCollaboration?: (binding: LarkAgentSessionBinding, actorId: string) => Promise<boolean>;
   workbenchTask?: (sessionId: string) => { taskId: string; attemptId?: string; actorId?: string } | undefined;
-  /** 宿主接了定时任务：Agent 可以替这一轮发起人建计划（发确认卡，对方点「启用」才开始），见 schedule-request-tools.ts。 */
+  /** 宿主接了定时任务：Agent 可以替这一轮发起人建计划（发确认卡，对方点「启用」才开始），见 agent-request-tools.ts。 */
   scheduleRequests?: boolean;
   /** 定时或自动续作触发的一轮：不给代设定时任务的入口，免得每次到点又建一个。 */
   automatedTask?: (taskId: string) => boolean;
@@ -508,6 +509,8 @@ export class LarkAgentToolsService {
   private readonly clients = new Map<string, { secret: string; domain: string; client: LarkGroupToolClient }>();
   private readonly identities = new Map<string, { secret: string; domain: string; info: Promise<LarkBotInfo> }>();
   private readonly pollIntervalMs: number;
+  /** 各机器人的消息处理器登记的代发命令入口（dutydeck command）。 */
+  readonly commands = new LarkAgentCommands();
 
   constructor(
     private readonly capabilities: LarkAgentToolCapabilityRegistry,
@@ -578,10 +581,10 @@ export class LarkAgentToolsService {
   }
 
   /**
-   * 代设定时任务的上下文：只要求 capability 仍指向存活的飞书会话、机器人仍存在。
-   * 不经过群协作工具开关——私聊和没开群工具的机器人也能用；谁能建、谁能启用由定时任务自己的授权判断。
+   * 代设定时任务、代发命令的上下文：只要求 capability 仍指向存活的飞书会话、机器人仍存在。
+   * 不经过群协作工具开关——私聊和没开群工具的机器人也能用；谁能做由定时任务和命令自己的授权判断。
    */
-  async scheduleContext(token?: string): Promise<LarkAgentSessionBinding> {
+  async requestContext(token?: string): Promise<LarkAgentSessionBinding> {
     const binding = await this.capabilities.resolve(token);
     if (!await readLarkConfig(this.configs, binding.appId)) {
       throw new AgentGroupToolError('GROUP_TOOL_BOT_NOT_FOUND', `当前会话关联的飞书机器人 ${binding.appId} 已被删除。`, 404);
@@ -755,10 +758,11 @@ export class LarkAgentToolsService {
       }
       if (collaboration) blocks.push(collaborationAgentPrompt(`dutydeck collaborate --turn ${turn}`));
     }
-    // 定时：能做群内持续协作时走定时委托；否则 Agent 用 schedule request 替用户建，用户点卡上的「启用」就行，不用记命令。
-    const scheduleCommand = !collaboration && !collaborationSession && this.options.scheduleRequests && task?.actorId && !this.options.automatedTask?.(task.taskId)
-      ? `dutydeck schedule request --turn ${this.capabilities.workbenchTurnToken(session.id, task.taskId)}` : undefined;
-    blocks.push(larkCapabilityPrompt(!collaboration, scheduleCommand));
+    // 有人发起的这一轮里，定时任务和 / 命令都由 Agent 代办，用户不用记命令；定时在能做群内持续协作时走定时委托。
+    const requested = !collaborationSession && task?.actorId && !this.options.automatedTask?.(task.taskId) ? this.capabilities.workbenchTurnToken(session.id, task.taskId) : undefined;
+    const scheduleCommand = requested && !collaboration && this.options.scheduleRequests ? `dutydeck schedule request --turn ${requested}` : undefined;
+    const agentCommand = requested && this.commands.has(binding.appId) ? `dutydeck command --turn ${requested}` : undefined;
+    blocks.push(larkCapabilityPrompt(!collaboration, scheduleCommand, agentCommand));
     return `${blocks.join('\n\n')}\n\n${prompt}`;
   }
 
@@ -1456,7 +1460,8 @@ export const dutydeckGroupToolsCommand = (entrypoint: string, execPath = process
 };
 
 const scheduleRequestPrompt = (command: string) => `用户要定时或周期性做的事（如“每天 9 点汇总”“每 15 分钟看看有没有结论”“明天 10 点提醒我”）由你直接设置：${command} 加 --every <分钟数>、--cron '<五段 cron>' 或 --at YYYY-MM-DDTHH:mm 其中一个，再加 --prompt '<到点后要执行的完整指令，只写每次要做的事，不写频率>'，可加 --name '<简短名称>'；时间按北京时间。宿主会在当前对话发确认卡，用户点「启用」才开始，结果发回当前对话。成功后只回一句“已发确认卡，点「启用」后生效”，不要说已设置，不要让用户发 /schedule，也不要用 crontab、后台 sleep 或循环脚本代替。`;
-export const larkCapabilityPrompt = (cannotSchedule: boolean, scheduleCommand?: string) => `[Dutydeck 能力限制与操作指引] ${scheduleCommand ? scheduleRequestPrompt(scheduleCommand) : ''}下面这些由用户自己操作，遇到时在回复里给出做法，不要说“已完成”或“已设置”：${cannotSchedule && !scheduleCommand ? '定时任务用 /schedule（如 /schedule every 分钟 指令），不要用 crontab、后台 sleep 或循环脚本代替；' : ''}切换 agent、模型或工作目录用 /new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容；查看任务用 /tasks；停止当前任务点进度卡上的“中断”；重新开始用 /new。`;
+const agentCommandPrompt = (command: string) => `用户要做 Dutydeck 自己的操作时由你代办：${command} '<命令>'，不要让用户自己发命令。例如换 Agent、模型或工作目录重新做用 /new --agent <Agent编号> -- <完整任务>（新对话不带当前上下文，任务要写全；要带上当前进展加 --handoff；编号填错时会返回可用编号），看状态用 /status，看任务列表用 /tasks，开 PR 用 /pr <标题>；全部命令见 dutydeck command --help。查看类会把结果卡直接发到对话里；会改东西的先发确认卡，用户点「确认」才执行，这时只回一句已发确认卡，不要说已完成。停止当前任务、批准工具调用、回答你的提问只能由用户做：停止点进度卡上的“中断”或说“停”，批准点审批卡上的按钮或说“可以”，回答直接在话题里回复。`;
+export const larkCapabilityPrompt = (cannotSchedule: boolean, scheduleCommand?: string, agentCommand?: string) => `[Dutydeck 能力限制与操作指引] ${scheduleCommand ? scheduleRequestPrompt(scheduleCommand) : ''}${agentCommand ? agentCommandPrompt(agentCommand) : `下面这些由用户自己操作，遇到时在回复里给出做法，不要说“已完成”或“已设置”：${cannotSchedule && !scheduleCommand ? '定时任务用 /schedule（如 /schedule every 分钟 指令），不要用 crontab、后台 sleep 或循环脚本代替；' : ''}切换 agent、模型或工作目录用 /new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容；查看任务用 /tasks；停止当前任务点进度卡上的“中断”；重新开始用 /new。`}`;
 
 /** 每轮工具块的开头：完整绑定命令只在这里出现一次，最终答复的交付方式也只在这里说。 */
 export const larkCommandPrompt = (command: string, delivery: string) => `[Dutydeck 命令] ${command === 'dutydeck' ? '' : `本会话的 dutydeck 命令是 ${command}，下文的 dutydeck 都指它：原样使用，不要换成 PATH 里的 dutydeck。`}各命令加 --help 看完整用法，帮助不需要服务或凭证。

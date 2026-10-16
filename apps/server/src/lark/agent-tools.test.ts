@@ -338,8 +338,27 @@ describe('Agent group collaboration domain service', () => {
     // 没有这一轮的发起人时建不了计划，仍按原说法提示。
     const idle = new LarkAgentToolsService(f.capabilities, f.repos.config, { scheduleRequests: true });
     expect(await idle.promptForSession(f.activeSession, 'x')).toContain('定时任务用 /schedule');
-    await expect(tools.scheduleContext(f.token)).resolves.toMatchObject({ sessionId: f.activeSession.id, appId: 'cli_current', chatId: 'oc_group' });
-    await expect(tools.scheduleContext('v1.forged')).rejects.toMatchObject({ code: 'GROUP_TOOL_UNAUTHORIZED' });
+    await expect(tools.requestContext(f.token)).resolves.toMatchObject({ sessionId: f.activeSession.id, appId: 'cli_current', chatId: 'oc_group' });
+    await expect(tools.requestContext('v1.forged')).rejects.toMatchObject({ code: 'GROUP_TOOL_UNAUTHORIZED' });
+  });
+
+  it('lets the Agent run chat commands for the requester once the bot\'s listener has registered them', async () => {
+    const f = await setup({ cli_current: fakeClient() });
+    const active = { taskId: 'task-one', attemptId: 'attempt-one', actorId: 'ou_actor' };
+    const tools = new LarkAgentToolsService(f.capabilities, f.repos.config, {
+      workbenchTask: () => active, previewWork: async () => false, previewCollaboration: async () => false, automatedTask: taskId => taskId === 'task-scheduled'
+    });
+    // 监听没在运行就没有入口，仍按原说法提示。
+    expect(await tools.promptForSession(f.activeSession, 'x')).toContain('切换 agent、模型或工作目录用 /new');
+    tools.commands.set('cli_current', async () => ({}));
+    const prompt = await tools.promptForSession(f.activeSession, '换 codex 重新做');
+    expect(prompt).toContain(`dutydeck command --turn ${f.capabilities.workbenchTurnToken(f.activeSession.id, 'task-one')} '<命令>'`);
+    expect(prompt).toContain('/new --agent <Agent编号> -- <完整任务>');
+    expect(prompt).toContain('不要让用户自己发命令');
+    expect(prompt).not.toContain('切换 agent、模型或工作目录用 /new');
+    // 定时任务到点执行的那一轮不给入口。
+    active.taskId = 'task-scheduled';
+    expect(await tools.promptForSession(f.activeSession, 'x')).not.toContain('dutydeck command');
   });
 
   it('uses opaque cursors for incremental reads and mentions a discovered target when sending', async () => {

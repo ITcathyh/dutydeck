@@ -5,7 +5,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { RuntimeError, type PublicSessionSchedule, type Session } from '@dutydeck/shared';
 import { AgentGroupToolError, LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './lark/agent-tools.js';
 import { larkBotsConfigKey } from './lark/config.js';
-import { registerScheduleRequestTools, type ScheduleRequestToolsOptions } from './schedule-request-tools.js';
+import { registerAgentRequestTools, type AgentRequestToolsOptions } from './agent-request-tools.js';
 
 const apps: ReturnType<typeof Fastify>[] = [];
 const repositories: Array<ReturnType<typeof createRepositories>> = [];
@@ -29,7 +29,7 @@ async function setup() {
   let active: { taskId: string; actorId?: string } | undefined = { taskId: 'task_1', actorId: 'ou_alice' };
   const automated = new Set<string>();
   const saved = new Map<string, PublicSessionSchedule>();
-  const createSchedule = vi.fn<ScheduleRequestToolsOptions['automation']['createSchedule']>(async (sessionId, input, actorId, receipt) => {
+  const createSchedule = vi.fn<AgentRequestToolsOptions['automation']['createSchedule']>(async (sessionId, input, actorId, receipt) => {
     const id = `schedule_${receipt!.key}`;
     if (!saved.has(id)) {
       await receipt!.prepareDelivery!(id);
@@ -49,12 +49,13 @@ async function setup() {
     if (error instanceof RuntimeError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   });
-  await registerScheduleRequestTools(app, { runtime: { getActiveTaskContext: () => active }, automatedTask: taskId => automated.has(taskId), tools, automation: { createSchedule }, prepareDelivery, sendConfirmation });
-  const request = (target: Session, payload: object, turn = capabilities.workbenchTurnToken(target.id, active?.taskId ?? '')) => app.inject({
-    method: 'POST', url: '/api/lark/agent-tools/schedules', payload,
+  await registerAgentRequestTools(app, { runtime: { getActiveTaskContext: () => active }, automatedTask: taskId => automated.has(taskId), tools, automation: { createSchedule }, prepareDelivery, sendConfirmation });
+  const request = (target: Session, payload: object, turn = capabilities.workbenchTurnToken(target.id, active?.taskId ?? ''), path = 'schedules') => app.inject({
+    method: 'POST', url: `/api/lark/agent-tools/${path}`, payload,
     headers: { authorization: `Bearer ${capabilities.environmentFor(target).dutydeck_group_tools_token}`, 'x-dutydeck-work-turn': turn }
   });
-  return { group, p2p, request, createSchedule, prepareDelivery, sendConfirmation, saved, automated, setActive: (value: typeof active) => { active = value; } };
+  const command = (payload: object, turn?: string) => request(group, payload, turn, 'commands');
+  return { group, p2p, request, command, tools, createSchedule, prepareDelivery, sendConfirmation, saved, automated, setActive: (value: typeof active) => { active = value; } };
 }
 
 describe('Agent schedule requests', () => {
@@ -99,13 +100,41 @@ describe('Agent schedule requests', () => {
     }
     // 定时任务到点执行的那一轮不能再建计划，否则每次到点都会多一个。
     f.automated.add('task_1');
-    expect((await f.request(f.group, { every: 15, prompt: 'x' })).json().error.code).toBe('SCHEDULE_REQUEST_AUTOMATED');
+    expect((await f.request(f.group, { every: 15, prompt: 'x' })).json().error.code).toBe('AGENT_REQUEST_AUTOMATED');
     f.automated.clear();
     f.setActive({ taskId: 'task_1' });
-    expect((await f.request(f.group, { every: 15, prompt: 'x' })).json().error.code).toBe('SCHEDULE_REQUEST_ACTOR_REQUIRED');
+    expect((await f.request(f.group, { every: 15, prompt: 'x' })).json().error.code).toBe('AGENT_REQUEST_ACTOR_REQUIRED');
     f.setActive(undefined);
     expect((await f.request(f.group, { every: 15, prompt: 'x' })).statusCode).toBe(403);
     expect(f.createSchedule).not.toHaveBeenCalled();
     expect(f.sendConfirmation).not.toHaveBeenCalled();
+  });
+});
+
+describe('Agent commands', () => {
+  it('forwards the command to the bot that owns the session, as the turn requester', async () => {
+    const f = await setup();
+    // 机器人的监听没在运行：不能代办。
+    expect((await f.command({ command: '/status' })).json().error.code).toBe('AGENT_COMMAND_UNAVAILABLE');
+    const handler = vi.fn(async () => ({ executed: true }));
+    f.tools.commands.set('cli_bot', handler);
+    const response = await f.command({ command: '  /new --agent claude -- 修复登录页报错 ' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ executed: true });
+    expect(handler).toHaveBeenCalledWith({ sessionId: 'ses_group', taskId: 'task_1', actorId: 'ou_alice', command: '/new --agent claude -- 修复登录页报错' });
+  });
+
+  it('only runs for the current turn of an active requester that no schedule started', async () => {
+    const f = await setup();
+    const handler = vi.fn(async () => ({ executed: true }));
+    f.tools.commands.set('cli_bot', handler);
+    expect((await f.command({ command: '/status' }, 'stale-turn')).json().error.code).toBe('WORK_ITEM_TURN_EXPIRED');
+    expect((await f.command({ command: '' })).statusCode).toBe(400);
+    f.automated.add('task_1');
+    expect((await f.command({ command: '/status' })).json().error.code).toBe('AGENT_REQUEST_AUTOMATED');
+    f.automated.clear();
+    f.setActive({ taskId: 'task_1' });
+    expect((await f.command({ command: '/status' })).json().error.code).toBe('AGENT_REQUEST_ACTOR_REQUIRED');
+    expect(handler).not.toHaveBeenCalled();
   });
 });

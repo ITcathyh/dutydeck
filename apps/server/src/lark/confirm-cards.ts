@@ -64,6 +64,9 @@ export class LarkConfirmCards {
     if (!this.handlers.has(input.kind)) throw new Error(`Unknown confirmation kind: ${input.kind}`);
     const repo = this.options.repository;
     const id = `confirm_${digest([input.kind, input.scope, input.dedupeKey ?? input.replyTo.messageId])}`;
+    // 已经发过：存档里的有效期是当时算的，重新 beginAction 会因 payload 不同被判冲突。
+    const existing = await repo.getAction(input.scope, id).catch(() => undefined);
+    if (existing) return recordOf(existing);
     const expiresAt = new Date(this.now().getTime() + (this.options.ttlMs ?? 24 * 3_600_000)).toISOString();
     const begun = await repo.beginAction({ id, scope: input.scope, kind: actionKind(input.kind), requesterId: input.requesterId, inputDigest: digest([input.kind, input.payload]),
       payload: { kind: input.kind, title: input.title, summary: input.summary, payload: input.payload, replyTo: input.replyTo, expiresAt } });

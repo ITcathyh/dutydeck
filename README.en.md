@@ -164,6 +164,8 @@ The first result delivery time is saved before sending. Unknown deliveries are a
 
 ### 2. Commands
 
+You don't have to remember these: tell the bot what you want ("redo this with codex", "show the status", "open this group to everyone") and the Agent runs the matching command for you. Read-only commands reply with their result card; commands that change something post a confirm card first and run after you click 确认. Stopping a task, approving a tool call and answering the Agent's question stay with you: use the card buttons or just say "停" / "可以".
+
 Matches `/help` (6 per page by default; plugin commands are listed on the last page).
 
 | Command | Example | Description |

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AgentGroupToolCliError, runGroupHandoff, runGroupMembers, runGroupMessages, runGroupReplyAgent, runGroupSend, runGroupSendFile, runGroupTeamSearch, runHistoryList, runHistoryShow } from './agent-tools-cli.js';
+import { createCliProgram } from '../cli-program.js';
+import { AgentGroupToolCliError, runAgentCommand, runGroupHandoff, runGroupMembers, runGroupMessages, runGroupReplyAgent, runGroupSend, runGroupSendFile, runGroupTeamSearch, runHistoryList, runHistoryShow } from './agent-tools-cli.js';
 
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
@@ -125,4 +126,20 @@ it('preserves zero offset and cursor query parameters for history ranges', async
   await runHistoryShow('task/1', options, { cursor: 'abc+=' });
   expect(Object.fromEntries(new URL(fetcher.mock.calls[0]![0] as string).searchParams)).toEqual({ field: 'request', offset: '0', length: '5' });
   expect(new URL(fetcher.mock.calls[1]![0] as string).searchParams.get('cursor')).toBe('abc+=');
+});
+
+it('sends an Agent chat command with this turn token', async () => {
+  const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => response({ pendingConfirmation: true }));
+  await expect(runAgentCommand('/new --agent codex -- 重做', { turn: 'signed-turn' }, {
+    env: { dutydeck_group_tools_url: 'http://localhost/api/lark/agent-tools', dutydeck_group_tools_token: 'capability' },
+    fetcher: fetcher as typeof fetch
+  })).resolves.toEqual({ pendingConfirmation: true });
+  expect(fetcher.mock.calls[0]![0]).toBe('http://localhost/api/lark/agent-tools/commands');
+  expect(new Headers(fetcher.mock.calls[0]![1]?.headers).get('x-dutydeck-work-turn')).toBe('signed-turn');
+  expect(JSON.parse(String(fetcher.mock.calls[0]![1]?.body))).toEqual({ command: '/new --agent codex -- 重做' });
+
+  const handler = vi.fn();
+  const program = createCliProgram('test', { agentCommand: handler });
+  await program.parseAsync(['node', 'dutydeck', 'command', '/status', '--turn', 'signed-turn']);
+  expect(handler).toHaveBeenCalledWith('/status', expect.objectContaining({ turn: 'signed-turn' }));
 });
