@@ -81,12 +81,14 @@ describe('Agent group collaboration domain service', () => {
     const first = await tools.promptForSession(f.activeSession, 'one');
     const final1 = f.capabilities.finalTurnToken(f.activeSession.id, active.taskId, active.attemptId);
     const work1 = f.capabilities.workbenchTurnToken(f.activeSession.id, active.taskId);
-    expect(first).toContain(final1); expect(first).toContain(work1);
+    // 提示词不再带任何轮次凭证：命令不带 --turn 时服务按执行中的这一轮认。
+    expect(first).not.toContain(final1); expect(first).not.toContain(work1);
+    expect(first).toContain("group send '<完整答复>' --final"); expect(first).toContain('dutydeck agent work');
     expect(first).toContain('[Dutydeck 目标编排]'); expect(first).toContain('[群内持续协作]');
     active.taskId = 'task-two'; active.attemptId = 'attempt-two'; collaboration = false;
     const second = await tools.promptForSession(f.activeSession, 'two');
     expect(second).not.toContain(final1); expect(second).not.toContain(work1);
-    expect(second).toContain(f.capabilities.finalTurnToken(f.activeSession.id, active.taskId, active.attemptId));
+    expect(second).not.toContain(f.capabilities.finalTurnToken(f.activeSession.id, active.taskId, active.attemptId));
     expect(second).toContain('[Dutydeck 目标编排]'); expect(second).not.toContain('[群内持续协作]');
     work = false; collaboration = true; memory = false;
     const third = await tools.promptForSession(f.activeSession, 'three');
@@ -252,7 +254,8 @@ describe('Agent group collaboration domain service', () => {
     // 完整绑定命令只出现一次，其余入口用 dutydeck 简写；交付方式也只说一次。
     expect(prompt).toContain("本会话的 dutydeck 命令是 '/usr/bin/node' '/app/cli.js'，下文的 dutydeck 都指它");
     expect(prompt.split("'/usr/bin/node' '/app/cli.js'")).toHaveLength(2);
-    expect(prompt).toContain('dutydeck group messages/message');
+    expect(prompt).toContain('group messages/message');
+    expect(prompt).toContain('先看 dutydeck agent --help');
     expect(prompt).toContain('group peers/members');
     expect(prompt.split('本轮最终答复直接输出')).toHaveLength(2);
     await expect(tools.promptForSession(session({ sourceId: 'cli_current:oc_p2p:p2p' }), '继续处理')).resolves.toContain('group send/send-file');
@@ -263,12 +266,12 @@ describe('Agent group collaboration domain service', () => {
     const enabled = await tools.promptForSession(session(), '继续处理');
     expect(enabled.indexOf('[Dutydeck 会话记忆工具]')).toBeGreaterThanOrEqual(0);
     expect(enabled.indexOf('[Dutydeck 会话记忆工具]')).toBeLessThan(enabled.indexOf('[Dutydeck 飞书会话工具]'));
-    expect(enabled).toContain('dutydeck memory search/show/list');
+    expect(enabled).toContain('dutydeck agent memory search/show/list');
     expect(enabled).toContain('memory add/remove');
     expect(enabled.endsWith('继续处理')).toBe(true);
     const disabled = await tools.promptForSession(session({ sourceId: 'cli_disabled:oc_p2p:p2p' }), '继续处理');
     expect(disabled).toContain("本会话的 dutydeck 命令是 '/usr/bin/node' '/app/cli.js'");
-    expect(disabled).toContain('dutydeck memory search/show/list');
+    expect(disabled).toContain('dutydeck agent memory search/show/list');
     expect(disabled).not.toContain('[Dutydeck 飞书会话工具]');
     expect(disabled).not.toContain('[Dutydeck 目标编排]');
     await expect(tools.promptForSession(session({ source: 'web', sourceId: undefined }), '继续处理')).resolves.toBe('继续处理');
@@ -322,7 +325,8 @@ describe('Agent group collaboration domain service', () => {
       automatedTask: taskId => taskId === 'task-scheduled'
     });
     const prompt = await tools.promptForSession(f.activeSession, '这个群聊有结论了私发我');
-    expect(prompt).toContain(`dutydeck schedule request --turn ${f.capabilities.workbenchTurnToken(f.activeSession.id, 'task-one')}`);
+    expect(prompt).toContain('schedule create 加 --every <分钟数>');
+    expect(prompt).not.toContain(f.capabilities.workbenchTurnToken(f.activeSession.id, 'task-one'));
     expect(prompt).toContain('用户点「启用」才开始');
     expect(prompt).not.toContain('定时任务用 /schedule');
     expect(prompt).toContain('切换 agent、模型或工作目录用 /new');
@@ -330,10 +334,10 @@ describe('Agent group collaboration domain service', () => {
     collaboration = true;
     const delegated = await tools.promptForSession(f.activeSession, 'x');
     expect(delegated).toContain('[群内持续协作]');
-    expect(delegated).not.toContain('schedule request');
+    expect(delegated).not.toContain('schedule create');
     // 定时任务到点执行的那一轮不给入口，免得每次到点又建一个。
     collaboration = false; active.taskId = 'task-scheduled';
-    expect(await tools.promptForSession(f.activeSession, 'x')).not.toContain('schedule request');
+    expect(await tools.promptForSession(f.activeSession, 'x')).not.toContain('schedule create');
     active.taskId = 'task-one';
     // 没有这一轮的发起人时建不了计划，仍按原说法提示。
     const idle = new LarkAgentToolsService(f.capabilities, f.repos.config, { scheduleRequests: true });
@@ -352,13 +356,51 @@ describe('Agent group collaboration domain service', () => {
     expect(await tools.promptForSession(f.activeSession, 'x')).toContain('切换 agent、模型或工作目录用 /new');
     tools.commands.set('cli_current', async () => ({}));
     const prompt = await tools.promptForSession(f.activeSession, '换 codex 重新做');
-    expect(prompt).toContain(`dutydeck command --turn ${f.capabilities.workbenchTurnToken(f.activeSession.id, 'task-one')} '<命令>'`);
-    expect(prompt).toContain('/new --agent <Agent编号> -- <完整任务>');
+    expect(prompt).toContain("session new --agent <Agent编号> --task '<完整任务>'");
+    expect(prompt).toContain('status、agents、tasks、queue、schedules、ci');
+    expect(prompt).not.toContain(f.capabilities.workbenchTurnToken(f.activeSession.id, 'task-one'));
     expect(prompt).toContain('不要让用户自己发命令');
+    // 必须留在提示词里的规则：确认卡只回一句、用户专属操作。
+    expect(prompt).toContain('返回 pendingConfirmation:true 表示已发确认卡：只回一句已发确认卡');
+    expect(prompt).toContain('停止当前任务、批准工具调用、回答你的提问只能由用户做');
     expect(prompt).not.toContain('切换 agent、模型或工作目录用 /new');
     // 定时任务到点执行的那一轮不给入口。
     active.taskId = 'task-scheduled';
-    expect(await tools.promptForSession(f.activeSession, 'x')).not.toContain('dutydeck command');
+    expect(await tools.promptForSession(f.activeSession, 'x')).not.toContain('Dutydeck 操作由你代办');
+  });
+
+  it('puts everything into one short block: entry, one line per capability this turn, the rules to keep, no credentials', async () => {
+    const f = await setup({ cli_current: fakeClient() });
+    const active = { taskId: 'task-one', attemptId: 'attempt-one', actorId: 'ou_actor' };
+    const tools = new LarkAgentToolsService(f.capabilities, f.repos.config, {
+      groupToolsCommand: "'/usr/bin/node' '/app/cli.js'", scheduleRequests: true,
+      workbenchTask: () => active, finalTaskContext: async () => undefined, previewWork: async () => true, previewCollaboration: async () => false
+    });
+    tools.commands.set('cli_current', async () => ({}));
+    const prompt = await tools.promptForSession(f.activeSession, '用户指令');
+    const [block, rest] = prompt.split('\n\n用户指令');
+    expect(rest).toBe('');
+    // 一个块：入口在最前，命令前缀是绝对路径且只出现一次。
+    expect(block.startsWith("[Dutydeck 命令] 本会话的 dutydeck 命令是 '/usr/bin/node' '/app/cli.js'")).toBe(true);
+    expect(block.split("'/usr/bin/node' '/app/cli.js'")).toHaveLength(2);
+    expect(block).toContain('先看 dutydeck agent --help');
+    // 本轮能力每项一行。
+    const capabilities = block.slice(block.indexOf('本轮可用（都在 dutydeck agent 下）：'), block.indexOf('规则：')).trim().split('\n').slice(1);
+    expect(capabilities.every(line => line.startsWith('- '))).toBe(true);
+    for (const text of ['memory search/show/list', 'group messages/message', 'group peers/members/bots', 'group send/send-file', "--final", 'group handoff', 'dutydeck agent work', 'schedule create', 'session new --agent']) {
+      expect(capabilities.filter(line => line.includes(text))).toHaveLength(1);
+    }
+    // 保留的规则。
+    const rules = block.slice(block.indexOf('规则：')).split('\n').slice(1);
+    expect(rules).toEqual([expect.stringContaining('群里发消息'), expect.stringContaining('GROUP_TOOL_AUTHORIZATION_REQUIRED'), expect.stringContaining('pendingConfirmation:true'), expect.stringContaining('只能由用户做')]);
+    expect(block).toContain('本轮最终答复直接输出');
+    // 没有任何凭证或轮次令牌，也不出现旧入口。
+    expect(block).not.toContain(f.token);
+    expect(block).not.toContain('dutydeck_group_tools_token');
+    expect(block).not.toContain(f.capabilities.workbenchTurnToken(f.activeSession.id, 'task-one'));
+    expect(block).not.toContain(f.capabilities.finalTurnToken(f.activeSession.id, 'task-one', 'attempt-one'));
+    expect(block).not.toContain('--turn ');
+    for (const legacy of ['dutydeck command', 'schedule request', 'dutydeck group ', 'dutydeck memory ', 'dutydeck work ']) expect(block).not.toContain(legacy);
   });
 
   it('uses opaque cursors for incremental reads and mentions a discovered target when sending', async () => {

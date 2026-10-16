@@ -500,7 +500,8 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     }
     const env = f.capabilities.environmentFor(parent);
     const turn = f.capabilities.workbenchTurnToken(parent.id, active.taskId);
-    expect(f.prompts[0]!.prompt).toContain(`work --turn ${turn}`);
+    expect(f.prompts[0]!.prompt).toContain('dutydeck agent work');
+    expect(f.prompts[0]!.prompt).not.toContain(turn);
     const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
       const response = await f.app.inject({ method: init?.method as any ?? 'GET', url: new URL(String(url)).pathname, headers: Object.fromEntries(new Headers(init?.headers)), ...(init?.body ? { payload: String(init.body) } : {}) });
       return new Response(response.body, { status: response.statusCode, headers: { 'content-type': 'application/json' } });
@@ -511,8 +512,12 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     const created = await runWorkCommand('create', [], { file: path, turn }, { env, fetcher: fetcher as typeof fetch });
     expect(created).toMatchObject({ status: 'awaiting_confirmation', parentSessionId: parent.id });
     expect(await runWorkCommand('create', [], { file: path, turn }, { env, fetcher: fetcher as typeof fetch })).toMatchObject({ id: created.id });
-    const unauthorized = await f.app.inject({ method: 'POST', url: '/api/lark/agent-tools/work-items', headers: { authorization: `Bearer ${env.dutydeck_group_tools_token}` }, payload: { goal: 'x', plan: researchWorkPlan(['alpha']), idempotencyKey: 'no-turn' } });
-    expect(unauthorized.statusCode).toBe(403);
+    // 不带本轮凭证时按正在执行的这一轮认；没有会话凭证仍被拒。
+    const current = await f.app.inject({ method: 'POST', url: '/api/lark/agent-tools/work-items', headers: { authorization: `Bearer ${env.dutydeck_group_tools_token}` }, payload: { goal: 'x', plan: researchWorkPlan(['alpha']), idempotencyKey: 'no-turn' } });
+    expect(current.statusCode).toBe(200);
+    expect(current.json()).toMatchObject({ parentSessionId: parent.id });
+    const unauthorized = await f.app.inject({ method: 'POST', url: '/api/lark/agent-tools/work-items', payload: { goal: 'x', plan: researchWorkPlan(['alpha']), idempotencyKey: 'no-token' } });
+    expect(unauthorized.statusCode).toBe(401);
     f.releases.get(parent.id)!();
     await vi.waitFor(() => expect(f.runtime.getActiveTaskContext(parent.id)).toBeUndefined());
     await expect(runWorkCommand('list', [], { turn }, { env, fetcher: fetcher as typeof fetch })).rejects.toMatchObject({ statusCode: 403 });

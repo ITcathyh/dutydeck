@@ -164,7 +164,7 @@ The first result delivery time is saved before sending. Unknown deliveries are a
 
 ### 2. Commands
 
-You don't have to remember these: tell the bot what you want ("redo this with codex", "show the status", "open this group to everyone") and the Agent runs the matching command for you. Read-only commands reply with their result card; commands that change something post a confirm card first and run after you click 确认. Stopping a task, approving a tool call and answering the Agent's question stay with you: use the card buttons or just say "停" / "可以".
+You don't have to remember these: tell the bot what you want ("redo this with codex", "show the status", "open this group to everyone") and the Agent runs the matching command for you. For read-only commands the Agent tells you the result in its answer instead of posting a card; commands that change something post a confirm card first and run after you click 确认. Stopping a task, approving a tool call and answering the Agent's question stay with you: use the card buttons or just say "停" / "可以".
 
 Matches `/help` (6 per page by default; plugin commands are listed on the last page).
 
@@ -511,6 +511,17 @@ Old clients ignore the additional decision field. Corrupt legacy forwarding stil
   - For Claude Code terminal agents (including custom agents whose adapter is `claude-code`, such as ccflash) and ACP Claude launched by Dutydeck, the same check also enforces the high-risk pattern, so enforced mode needs no workspace hook. A custom ACP Claude must launch with the released `dist/agents/claude-acp.mjs`; an old copy made elsewhere does not include the check.
   - In every mode, Lark cards, results and group tool messages replace common secret formats (such as `sk-ant-`, `ghp_`, JWTs) and secret values from the service and agent environments with `[REDACTED]`.
 
+### Agent CLI (`dutydeck agent`)
+
+Agents in Lark sessions do everything they can do through `dutydeck agent`. Each turn's prompt only gives the command prefix (absolute path), "read `dutydeck agent --help` first" and what is available this turn; it carries no credentials.
+
+- **Help**: `dutydeck agent --help` starts with a quick guide for the Agent; every subcommand's `--help` has a `Risk` line (`read`, `write-confirm` posts a confirm card, `write` takes effect at once) and examples. Help needs no service or credentials.
+- **Output**: stdout carries exactly one JSON. Success is `{"ok":true,"data":...}`; failure is `{"ok":false,"error":{"code","message","hint"?,"params"?:[{"name","reason"}]}}` with a non-zero exit code. `params` names the wrong parameter, with allowed values in `reason` when there are any.
+- **Read**: `status`, `agents`, `tasks [--page]`, `queue`, `schedules`, `ci`, plus the read commands under `group`, `history`, `memory`, `work` and `collaborate`. Results go back to the Agent without posting a card; permissions are the same as the turn's requester sending that command in the original topic.
+- **Write**: `session new`, `retry`, `plan --task`, `schedule create/enable/disable`, `queue cancel/top`, `access grant/revoke --member`, `pr open`, `ci wait/fix/cancel` and `repair` post a confirm card under the turn's request message; after 确认 they run the same way as the matching slash command. `group send`, `memory add` and the like still take effect directly. Every write command accepts `--dry-run`, which returns what would happen, whether it needs confirmation and what the card says, without running anything or posting a card.
+- **No `--turn` needed**: the service uses the turn currently running in the session and refuses when none is; a given `--turn` is still checked. The same holds for `group send --final`, `group handoff` and `group reply-agent`.
+- **Old commands**: `dutydeck group/history/memory/work/collaborate/command` and `dutydeck schedule request` are kept unchanged, so sessions started before the upgrade keep working; new prompts only mention `dutydeck agent`.
+
 ---
 
 ## Upgrade Notes
@@ -527,6 +538,7 @@ Old clients ignore the additional decision field. Corrupt legacy forwarding stil
 - **`model` scenario packs now load.** They used to be rejected at load; see `plugins/team-faq` for an example.
 - **After the database reaches v38, older versions cannot open it.** v38 stores group duties as per-pack bindings. Going back to an older version fails at start with `DATABASE_SCHEMA_TOO_NEW`. If something goes wrong, fix forward or restore the database snapshot taken before the deploy; every write after that snapshot is lost.
 - **The enforced-mode workspace hook now checks credential access (v3).** Bots that already use enforced mode need the hook reinstalled ("Configure hook" in the Web settings, or `dutydeck settings bot install-hook <app-id>`) before the check covers Codex over ACP; until then, saving that bot's settings reports that the hook is not ready. Bots whose default agent is a Claude Code terminal agent (including custom ones such as ccflash) or ACP Claude launched by Dutydeck are not affected and can now turn on enforced mode directly.
+- **Agent commands are unified under `dutydeck agent`.** The prompt is now one short block without turn credentials; when the Agent checks status, tasks, the queue and so on for you, it tells you in its answer instead of posting a result card. Old commands are kept, so sessions started before the upgrade keep working. See Agent CLI under [CLI Reference](#cli-reference).
 - **Per-turn changes could be missed** when a file was edited within the same second as the last index write and kept the same size (affecting "View changes" and the `/pr` file list). Fixed.
 
 ---

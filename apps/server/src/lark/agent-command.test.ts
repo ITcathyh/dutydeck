@@ -12,7 +12,8 @@ import { larkBotsConfigKey, readLarkConfig, type StoredLarkConfig } from './conf
 import type { LarkMessageEvent } from './listener.js';
 import { buildLarkCard } from './service.js';
 import { LarkConfirmCards } from './confirm-cards.js';
-import { agentCommandHelp, agentCommandPlan } from './agent-command.js';
+import { agentActionCommand, agentCommandHelp, agentCommandPlan } from './agent-command.js';
+import { parseLarkNewSession } from './new-session.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -23,7 +24,7 @@ const event = (id: string, text: string, mentions: LarkMessageEvent['mentions'] 
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }, ...mentions]
 });
 
-async function harness() {
+async function harness(workflow: Record<string, unknown> = {}) {
   const state = await mkdtemp(join(tmpdir(), 'dutydeck-lark-agent-command-'));
   const repos = createRepositories(join(state, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
@@ -68,7 +69,7 @@ async function harness() {
     taskContext: async () => undefined, instructions: async () => '', describe: async () => undefined } as any;
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
-    undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config, participation });
+    undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config, participation, ...workflow });
   await coordinator.initializeWorkflows(config);
   await coordinator.startReconciliation(config, 60_000);
   cleanups.push(async () => { coordinator.stop(); await runtime.shutdown(); repos.close(); await rm(state, { recursive: true, force: true }); });
@@ -85,7 +86,14 @@ async function harness() {
     return coordinator.agentCommand({ sessionId: saved.sessionId, taskId: saved.runtime_task_id!, actorId: 'ou_alice', command });
   };
   const repliesTo = (messageId: string) => service.reply.mock.calls.map(call => call[0]).filter(input => input.messageId === messageId);
-  return { repos, runtime, participation, config, service, cards, prompts, coordinator, result, turn, repliesTo };
+  const sent = () => service.reply.mock.calls.length + service.send.mock.calls.length + service.replyText.mock.calls.length;
+  // dutydeck agent 走的入口：这一轮跑完后按它的会话和任务代办。
+  const current = async (request = event('om_1', '帮我看看')) => {
+    if (!await repos.channelMappings.get(`lark-card:${config.appId}`, request.messageId)) await coordinator.handle(request, config);
+    const saved = await result(request.messageId);
+    return { sessionId: saved.sessionId, taskId: saved.runtime_task_id!, actorId: 'ou_alice' };
+  };
+  return { repos, runtime, participation, config, service, cards, prompts, coordinator, result, turn, repliesTo, sent, current };
 }
 
 const findElement = (node: unknown, id: string): Record<string, any> | undefined => {
@@ -201,5 +209,139 @@ describe('Agent 代发飞书命令', () => {
     const actions = await h.repos.collaboration.listActions({ appId: h.config.appId, chatId: 'oc_group' });
     const grant = actions.find(action => (action.payload as any).payload?.command === '/grant @Bob')!;
     expect(JSON.parse((grant.payload as any).payload.mentions)).toEqual([{ key: '@_user_2', name: 'Bob', openId: 'ou_bob' }]);
+  });
+});
+
+// dutydeck agent：查看类经真实协调器把数据交回给 Agent、不发卡；写入类把参数换成同一条 / 命令，dry-run 只预览。
+const automation = () => ({
+  ciConfigured: true, listCiProviders: () => [],
+  listBySession: vi.fn(async () => ({
+    schedules: [{ id: 'sch_1', name: '晨报', prompt: '汇总昨天的告警', enabled: false, trigger: { kind: 'cron', expression: '0 9 * * *' }, timezone: 'Asia/Shanghai', revision: 1 }],
+    subscriptions: [{ id: 'ci_1', status: 'waiting', repository: { slug: 'acme/app' }, headSha: 'abcdef1234567890', expiresAt: '2026-10-17T00:00:00.000Z', revision: 1 }],
+    occurrences: []
+  }))
+});
+
+describe('dutydeck agent 查看类', () => {
+  it('status、agents、tasks、queue、schedules、ci 都把结果交回给 Agent，对话里不多发卡', async () => {
+    const h = await harness({ automation: automation() });
+    const turn = await h.current();
+    const before = h.sent();
+    const view = (name: any, extra = {}) => h.coordinator.agentView({ ...turn, view: name, ...extra });
+    const status = await view('status');
+    expect(status).toMatchObject({ sessionId: turn.sessionId, agent: 'mock', workspace: h.config.workspace, state: expect.any(String), running: expect.any(Number), queued: 0, needsReview: 0 });
+    // 文本与 /status 卡片同一份。
+    expect(status.text).toContain('**Agent**：mock');
+    expect(status.text).toContain(`**会话**：\`${turn.sessionId}\``);
+    expect(await view('agents')).toMatchObject({ agents: [{ id: 'mock', name: 'Mock', default: true }], text: expect.stringContaining('Mock') });
+    expect(await view('tasks', { page: 1 })).toMatchObject({ page: 1, totalPages: 1, total: 1, tasks: [{ taskId: turn.taskId, status: 'completed', agent: 'Mock' }] });
+    expect(await view('queue')).toMatchObject({ queued: [], text: expect.stringContaining('当前没有待执行的指令') });
+    expect(await view('schedules')).toMatchObject({ schedules: [{ id: 'sch_1', name: '晨报', enabled: false, when: expect.any(String) }], text: expect.stringContaining('晨报') });
+    expect(await view('ci')).toMatchObject({ waits: [{ id: 'ci_1', repository: 'acme/app', status: 'waiting' }], webhookWaits: [], text: expect.stringContaining('acme/app') });
+    expect(h.sent()).toBe(before);
+    expect(h.prompts).toHaveLength(1);
+  });
+
+  it('权限和发起人在原话题自己发这条命令一致：没权限时报错给 Agent，也不发卡', async () => {
+    const h = await harness({ automation: automation() });
+    const turn = await h.current();
+    const before = h.sent();
+    await expect(h.coordinator.agentView({ ...turn, actorId: 'ou_mallory', view: 'queue' })).rejects.toMatchObject({ code: 'AGENT_COMMAND_REJECTED' });
+    await expect(h.coordinator.agentView({ ...turn, actorId: 'ou_mallory', view: 'schedules' })).rejects.toMatchObject({ code: 'AGENT_COMMAND_REJECTED', message: expect.stringContaining('不在机器人白名单中') });
+    // 没开通的能力同样如实报错。
+    const bare = await harness();
+    await expect(bare.coordinator.agentView({ ...await bare.current(), view: 'ci' })).rejects.toMatchObject({ code: 'AGENT_COMMAND_REJECTED', message: expect.stringContaining('CI 续作未配置') });
+    expect(h.sent()).toBe(before);
+  });
+});
+
+describe('dutydeck agent 写入类', () => {
+  it('参数换成与用户自己发的 / 命令相同的那一条', () => {
+    const command = (action: string, params: object = {}) => agentActionCommand(action, params).command;
+    expect(command('session.new', { agent: 'codex', cwd: '/srv/my repo', workspace: 'worktree', model: 'gpt', effort: 'high', task: '修复登录' }))
+      .toBe('/new --agent codex --cwd "/srv/my repo" --workspace worktree --model gpt --effort high -- 修复登录');
+    expect(parseLarkNewSession(command('session.new', { agent: 'codex', cwd: '/srv/my repo', task: '修复登录' }).slice(5)))
+      .toEqual({ prompt: '修复登录', launchOptions: { agentId: 'codex', cwd: '/srv/my repo' } });
+    expect(parseLarkNewSession(command('session.new', { agent: 'codex', handoff: true, note: '接着查内存', task: '修复' }).slice(5)))
+      .toEqual({ prompt: '修复', handoff: { note: '接着查内存' }, launchOptions: { agentId: 'codex' } });
+    expect(command('session.new', { handoff: true })).toBe('/new --handoff');
+    expect(command('session.new', { task: '--不是参数' })).toBe('/new -- --不是参数');
+    expect(command('session.new')).toBe('/new');
+    expect(command('retry')).toBe('/retry');
+    expect(command('plan', { task: '把报错改成中文' })).toBe('/plan 把报错改成中文');
+    expect(command('schedule.enable', { id: 'sch_1' })).toBe('/schedule enable sch_1');
+    expect(command('schedule.disable', { id: 'sch_1' })).toBe('/schedule disable sch_1');
+    expect(command('queue.cancel', { index: 2 })).toBe('/queue cancel 2');
+    expect(command('queue.top', { index: 2 })).toBe('/queue top 2');
+    expect(agentActionCommand('access.grant', { members: ['@Bob', 'Carol'] })).toEqual({ command: '/grant @Bob @Carol', members: ['Bob', 'Carol'] });
+    expect(command('access.revoke')).toBe('/revoke');
+    expect(command('pr.open', { title: '修复登录' })).toBe('/pr 修复登录');
+    expect(command('ci.wait', { workflow: 'build.yml' })).toBe('/ci wait build.yml');
+    expect(command('ci.fix')).toBe('/ci fix');
+    expect(command('ci.cancel', { id: 'ci_1' })).toBe('/ci cancel ci_1');
+    expect(command('repair')).toBe('/repair');
+  });
+
+  it('参数错误指出是哪个参数，能给可选值时给出', () => {
+    const issue = (action: string, params: object) => { try { agentActionCommand(action, params); } catch (error) { return error as any; } throw new Error('应当报错'); };
+    expect(issue('session.new', { workspace: 'x' })).toMatchObject({ code: 'INVALID_ARGUMENT', params: [{ name: '--workspace', reason: '只能是 shared 或 worktree' }] });
+    expect(issue('session.new', { agent: 'codex' })).toMatchObject({ params: [{ name: '--task' }] });
+    expect(issue('session.new', { note: 'x' })).toMatchObject({ params: [{ name: '--note', reason: '只能和 --handoff 一起用' }] });
+    expect(issue('session.new', { handoff: true, note: 'a -- b' })).toMatchObject({ params: [{ name: '--note' }] });
+    expect(issue('queue.cancel', { index: 0 })).toMatchObject({ params: [{ name: '<编号>', reason: '从 1 开始' }] });
+    expect(issue('plan', {})).toMatchObject({ params: [{ name: '--task', reason: '必填' }] });
+    expect(issue('retry', { force: true })).toMatchObject({ params: [{ name: '--force', reason: '不支持这个参数' }] });
+    expect(issue('nope', {})).toMatchObject({ code: 'AGENT_ACTION_UNKNOWN', params: [{ name: '<命令>', reason: expect.stringContaining('session.new') }] });
+  });
+
+  it('--dry-run 只返回将要做什么和确认卡内容，不执行、不发卡；去掉后发出同样的确认卡', async () => {
+    const h = await harness({ automation: automation() });
+    const turn = await h.current();
+    const cases: Array<[string, object]> = [['session.new', { agent: 'mock', task: '重新查一遍' }], ['retry', {}], ['plan', { task: '先出计划' }], ['schedule.enable', { id: 'sch_1' }],
+      ['schedule.disable', { id: 'sch_1' }], ['queue.cancel', { index: 1 }], ['queue.top', { index: 1 }], ['ci.wait', { workflow: 'build.yml' }], ['ci.fix', {}], ['ci.cancel', { id: 'ci_1' }]];
+    for (const [action, params] of cases) {
+      const { command } = agentActionCommand(action, params);
+      const before = h.sent();
+      const preview = await h.coordinator.agentCommand({ ...turn, command, action, dryRun: true });
+      expect(preview).toMatchObject({ dryRun: true, command, needsConfirmation: true, confirmCard: { title: '待确认的操作', body: expect.stringContaining(`\`${command}\``) }, effect: expect.stringContaining('确认') });
+      expect(h.sent()).toBe(before);
+      expect(await h.coordinator.agentCommand({ ...turn, command, action })).toMatchObject({ pendingConfirmation: true });
+      const card = h.repliesTo('om_1').filter(input => input.taskName === '待确认的操作').at(-1)!;
+      expect(findElement(buildLarkCard(card), 'confirm_body')!.content).toContain((preview.confirmCard as any).body.split('\n\n')[0]);
+      expect(findElement(buildLarkCard(card), 'confirm_body')!.content).toContain(`\`${command}\``);
+    }
+    expect(h.prompts).toHaveLength(1);
+    // 没开通的能力：dry-run 直接说不可用，不预告一张注定失败的卡。
+    await expect(h.coordinator.agentCommand({ ...turn, command: '/grant', action: 'access.grant', dryRun: true })).rejects.toMatchObject({ code: 'AGENT_COMMAND_UNAVAILABLE' });
+    // /repair 自己发确认卡：预览给出那张卡的内容。
+    expect(await h.coordinator.agentCommand({ ...turn, command: '/repair', action: 'repair', dryRun: true })).toMatchObject({ needsConfirmation: true, confirmCard: { body: expect.stringContaining(h.config.appId) } });
+  });
+
+  it('确认后与斜杠命令同一条路：点「确认」以点击人的身份执行，新一轮挂在确认卡下', async () => {
+    const h = await harness();
+    const turn = await h.current();
+    const { command } = agentActionCommand('session.new', { agent: 'mock', task: '把报错改成中文' });
+    expect(await h.coordinator.agentCommand({ ...turn, command, action: 'session.new' })).toMatchObject({ pendingConfirmation: true });
+    const confirmCall = h.repliesTo('om_1').find(input => input.taskName === '待确认的操作')!;
+    const confirmCardId = [...h.cards].find(([, input]) => input === confirmCall)![0];
+    const value = findElement(buildLarkCard(confirmCall), 'confirm_confirm')!.behaviors[0].value;
+    expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: confirmCardId, chatId: 'oc_group' })).toMatchObject({ type: 'success', content: expect.stringContaining('/new') });
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(2), { timeout: 10_000 });
+    expect(h.prompts[1]).toContain('把报错改成中文');
+    expect((await h.result(confirmCardId)).sessionId).not.toBe(turn.sessionId);
+  });
+
+  it('自己发确认卡的命令没开通时如实报错给 Agent；--member 只能是用户消息里 @ 过的人；--agent 填错时列出可用编号', async () => {
+    const h = await harness();
+    const turn = await h.current();
+    await expect(h.coordinator.agentCommand({ ...turn, command: '/pr', action: 'pr.open' })).rejects.toMatchObject({ code: 'AGENT_COMMAND_REJECTED', message: expect.stringContaining('开 PR 未配置') });
+    await expect(h.coordinator.agentCommand({ ...turn, command: '/new --agent nope -- 重做', action: 'session.new' }))
+      .rejects.toMatchObject({ code: 'AGENT_COMMAND_INVALID', params: [{ name: '--agent', reason: expect.stringContaining('mock（Mock）') }] });
+    const grant = await h.current(event('om_2', '给 @_user_2 开权限', [{ key: '@_user_2', name: 'Bob', openId: 'ou_bob' }]));
+    await expect(h.coordinator.agentCommand({ ...grant, ...agentActionCommand('access.grant', { members: ['Carol'] }), action: 'access.grant' }))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT', params: [{ name: '--member', reason: expect.stringContaining('这条消息 @ 过：Bob') }] });
+    expect(await h.coordinator.agentCommand({ ...grant, ...agentActionCommand('access.grant', { members: ['Bob'] }), action: 'access.grant' })).toMatchObject({ pendingConfirmation: true });
+    const actions = await h.repos.collaboration.listActions({ appId: h.config.appId, chatId: 'oc_group' });
+    expect(JSON.parse((actions.find(action => (action.payload as any).payload?.command === '/grant @Bob')!.payload as any).payload.mentions)).toEqual([{ key: '@_user_2', name: 'Bob', openId: 'ou_bob' }]);
   });
 });

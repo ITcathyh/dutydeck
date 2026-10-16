@@ -250,7 +250,7 @@ pnpm dev
 
 ### 2. 常用飞书命令速查表
 
-不记命令也行：直接对机器人说要做什么（如“换 codex 重新做”“看看状态”“把这个群放开给所有人”），Agent 会替你执行对应的命令。查看类直接出结果卡；会改东西的先发确认卡，点「确认」才执行。停止任务、批准工具调用、回答 Agent 的提问仍由你点卡片按钮或直接说“停”“可以”。
+不记命令也行：直接对机器人说要做什么（如“换 codex 重新做”“看看状态”“把这个群放开给所有人”），Agent 会替你执行对应的命令。查看类的结果由 Agent 在答复里告诉你，不另发卡；会改东西的先发确认卡，点「确认」才执行。停止任务、批准工具调用、回答 Agent 的提问仍由你点卡片按钮或直接说“停”“可以”。
 
 下表与 `/help` 一致。`/help` 默认每页 6 条；装了插件命令时，插件命令列在最后一页。
 
@@ -964,6 +964,17 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
   - Claude Code 终端（包括 adapter 为 `claude-code` 的自定义 Agent，如 ccflash）和经 Dutydeck 启动的 ACP Claude，这个检查同时管高危操作正则，开强制拦截不用装工作区 Hook。自定义的 ACP Claude 要用随版本发布的 `dist/agents/claude-acp.mjs` 启动，自己拷贝出去的旧版本不带这个检查。
   - 任何模式下，飞书卡片、结果和群工具发出的消息都会把常见格式的密钥（如 `sk-ant-`、`ghp_`、JWT）和服务、Agent 环境变量里的密钥值替换成 `[REDACTED]`。
 
+### 7. 给 Agent 用的命令行（`dutydeck agent`）
+
+飞书会话里的 Agent 用 `dutydeck agent` 做它能做的全部操作。每轮提示词只给命令前缀（绝对路径）、`先看 dutydeck agent --help` 和本轮能用的能力，不含凭证。
+
+- **帮助**：`dutydeck agent --help` 开头是写给 Agent 的快速说明；每个子命令的 `--help` 有一行 `Risk`（`read` 只读、`write-confirm` 发确认卡、`write` 直接生效）和例子。帮助不需要服务或凭证。
+- **输出**：stdout 只有一个 JSON。成功 `{"ok":true,"data":...}`；失败 `{"ok":false,"error":{"code","message","hint"?,"params"?:[{"name","reason"}]}}`，退出码非 0。`params` 指出哪个参数不对，能给可选值时写在 `reason` 里。
+- **查看**：`status`、`agents`、`tasks [--page]`、`queue`、`schedules`、`ci`，以及 `group`、`history`、`memory`、`work`、`collaborate` 的读取命令。结果直接交给 Agent，不在群里发卡；权限与这一轮的发起人在原话题自己发这条命令相同。
+- **写入**：`session new`、`retry`、`plan --task`、`schedule create/enable/disable`、`queue cancel/top`、`access grant/revoke --member`、`pr open`、`ci wait/fix/cancel`、`repair` 在这一轮的请求消息下发确认卡，点「确认」后与对应的斜杠命令走同一条路执行。`group send`、`memory add` 等照旧直接生效。写入命令都支持 `--dry-run`：只返回将要做什么、要不要确认、确认卡上写什么，不执行、不发卡。
+- **不用带 `--turn`**：按本会话正在执行的这一轮认，没有执行中的一轮时拒绝；带了照旧校验。`group send --final`、`group handoff`、`group reply-agent` 同样。
+- **旧命令**：`dutydeck group/history/memory/work/collaborate/command`、`dutydeck schedule request` 保留不变，升级前已经在跑的会话照常可用；新的提示词只给 `dutydeck agent`。
+
 ---
 
 ## 升级说明
@@ -980,6 +991,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 - **`model` 模式场景包可以用了**：以前加载时会拒绝，现在照常加载，例子见 `plugins/team-faq`。
 - **数据库升到 v38 后旧版本打不开**：v38 把群分工改成按场景包存绑定。升级后再换回旧版本会因为数据库版本比程序新而拒绝启动（`DATABASE_SCHEMA_TOO_NEW`）。出了问题只能向前修复，或者恢复部署前的数据库快照，快照之后的全部写入都会丢。
 - **强制拦截的工作区 Hook 加入凭据检查（v3）**：已经开了强制拦截的机器人，要在 Web 设置里重新点「配置拦截 Hook」或运行 `dutydeck settings bot install-hook <app-id>`，Codex ACP 的凭据检查才生效；重装前保存这个机器人的设置会提示 Hook 未就绪。默认 Agent 是 Claude Code 终端（含 ccflash 这类自定义 Agent）或经 Dutydeck 启动的 ACP Claude 的机器人不受影响，现在可以直接开强制拦截。
+- **Agent 的命令统一到 `dutydeck agent`**：提示词缩成一段，不再带轮次凭证；Agent 代你查看状态、任务、排队等时不再在群里发结果卡，改为在答复里说明。旧命令保留，升级前已经在跑的会话照常可用。见[给 Agent 用的命令行](#cli-reference)。
 - **每轮改动漏记已修复**：以前，一次索引写入后同一秒内又改了某个文件、且文件大小没变时，“每轮改动”会漏记这个文件（影响「查看改动」和 `/pr` 的文件清单）。现在已修复。
 
 ---

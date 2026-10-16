@@ -99,7 +99,9 @@ export class LarkAgentToolCapabilityRegistry {
     return createHmac('sha256', this.signingSecret).update(`dutydeck-final-turn-v1\0${sessionId}\0${taskId}\0${attemptId}`).digest('base64url');
   }
 
+  /** 不带凭证时按这个会话当前正在执行的那一次尝试认（调用方已确认有）；带了照旧校验，会话历史里的旧命令仍然可用。 */
   assertFinalTurn(sessionId: string, taskId: string, attemptId: string, presented?: string) {
+    if (!presented) return;
     const expected = Buffer.from(this.finalTurnToken(sessionId, taskId, attemptId));
     const actual = Buffer.from(typeof presented === 'string' ? presented : '');
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '最终答复凭证不属于当前任务轮次，请使用本轮提供的命令。', 403);
@@ -109,7 +111,9 @@ export class LarkAgentToolCapabilityRegistry {
     return createHmac('sha256', this.signingSecret).update(`dutydeck-work-turn-v1\0${sessionId}\0${taskId}`).digest('base64url');
   }
 
+  /** 不带凭证时按这个会话当前正在执行的那一轮认（调用方已确认有执行中的一轮）；带了照旧校验。 */
   assertWorkbenchTurn(sessionId: string, taskId: string, presented?: string) {
+    if (!presented) return;
     const expected = Buffer.from(this.workbenchTurnToken(sessionId, taskId));
     const actual = Buffer.from(typeof presented === 'string' ? presented : '');
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new AgentGroupToolError('WORK_ITEM_TURN_EXPIRED', '编排凭证不属于当前指令，请使用本轮提供的 work 命令。', 403);
@@ -734,35 +738,45 @@ export class LarkAgentToolsService {
       } catch { return false; }
     };
     const [memory, read, discover, send] = await Promise.all([allowed('memory'), allowed('group_tools.read'), allowed('group_tools.discover'), allowed('group_tools.send')]);
-    // 完整绑定命令只写一次，后面各处入口都用 dutydeck 简写：原来每轮要把这串两百字的路径重复近十遍。
+    // 完整绑定命令只写一次，细节都在 dutydeck agent --help 里；这里只列本轮开着的能力和必须遵守的规则，不放凭证。
     // 指向 releases/current 的写法在部署后仍然有效，留在会话历史里的命令不会失效。
-    const blocks: string[] = [larkCommandPrompt(stableMemoryCommand(this.options.groupToolsCommand ?? 'dutydeck'),
-      deliveryPrompt({ background: collaborationSession, reactionOnly: config.completionReactionOnly }))];
-    if (memory) blocks.push(larkMemoryToolsPrompt());
-    if (config.silentProgress) blocks.push('本会话不显示中间进度，不要另发进度消息；提问和最终结果不受影响。');
-    const groupTools = read || discover || send ? [larkGroupToolsPrompt(send, { read, discover })] : [];
+    const abilities: string[] = [];
+    if (memory) abilities.push(larkMemoryToolsPrompt('dutydeck agent'));
+    abilities.push(...larkGroupToolsPrompt(send, { read, discover }));
     if (task?.attemptId && send && this.options.finalTaskContext) {
-      const turn = this.capabilities.finalTurnToken(session.id, task.taskId, task.attemptId);
-      groupTools.push(`主动最终交付（一般用不到）：dutydeck group send '<完整答复>' --final --turn ${turn}，绑定本轮与原消息，不加 --to 或自定义幂等键；进展和交接不加 --final，映射未就绪时稍后重试。`);
-      if (binding.chatType === 'group') groupTools.push(`单次 Agent 交接：dutydeck group handoff <机器人名称/appId/openId> '<目标、代码版本、工作区、读写边界和验收>' --turn ${turn}；收到交接后用 dutydeck group reply-agent '<交付结果>' --turn ${turn} 回传一次；多轮审查返修用 work。`);
+      abilities.push('主动最终交付（一般用不到）：group send \'<完整答复>\' --final，绑定本轮与原消息，不加 --to 或自定义幂等键；进展和交接不加 --final，映射未就绪时稍后重试。');
+      if (binding.chatType === 'group') abilities.push('单次 Agent 交接：group handoff <机器人名称/appId/openId> \'<目标、代码版本、工作区、读写边界和验收>\'；收到交接后用 group reply-agent \'<交付结果>\' 回传一次；多轮审查返修用 work。');
     }
-    if (groupTools.length) blocks.push(groupTools.join('\n'));
     let work = false, collaboration = false;
     if (read && task?.actorId) {
       work = await this.options.previewWork?.(session.id, task.actorId).catch(() => false) ?? false;
       collaboration = binding.chatType === 'group' && !collaborationSession && (await this.options.previewCollaboration?.(binding, task.actorId).catch(() => false) ?? false);
-      const turn = this.capabilities.workbenchTurnToken(session.id, task.taskId);
       if (work) {
         const workbench = config.executionMode === 'layered' && binding.chatType === 'group' && !collaborationSession ? layeredWorkbenchPrompt : workbenchAgentPrompt;
-        blocks.push(workbench(`dutydeck work --turn ${turn}`, workPlanConfirmationRequired(session)));
+        abilities.push(workbench('dutydeck agent work', workPlanConfirmationRequired(session)));
       }
-      if (collaboration) blocks.push(collaborationAgentPrompt(`dutydeck collaborate --turn ${turn}`));
+      if (collaboration) abilities.push(collaborationAgentPrompt('dutydeck agent collaborate'));
     }
-    // 有人发起的这一轮里，定时任务和 / 命令都由 Agent 代办，用户不用记命令；定时在能做群内持续协作时走定时委托。
-    const requested = !collaborationSession && task?.actorId && !this.options.automatedTask?.(task.taskId) ? this.capabilities.workbenchTurnToken(session.id, task.taskId) : undefined;
-    const scheduleCommand = requested && !collaboration && this.options.scheduleRequests ? `dutydeck schedule request --turn ${requested}` : undefined;
-    const agentCommand = requested && this.commands.has(binding.appId) ? `dutydeck command --turn ${requested}` : undefined;
-    blocks.push(larkCapabilityPrompt(!collaboration, scheduleCommand, agentCommand));
+    // 有人发起的这一轮里，定时任务和 Dutydeck 操作都由 Agent 代办，用户不用记命令；定时在能做群内持续协作时走定时委托。
+    const requested = !collaborationSession && task?.actorId && !this.options.automatedTask?.(task.taskId);
+    const schedule = Boolean(requested && !collaboration && this.options.scheduleRequests);
+    const commands = Boolean(requested && this.commands.has(binding.appId));
+    if (schedule) abilities.push(scheduleRequestPrompt);
+    if (commands) abilities.push(agentCommandPrompt);
+    const groupTools = read || discover || send;
+    const rules = [
+      ...(send ? ['群里发消息：独立消息只在用户要求或需要通知指定的人时发；不要回应自己发的消息，不和其他机器人互相礼貌 @，一次请求最多主动交接两跳。'] : []),
+      ...(groupTools ? ['工具返回 GROUP_TOOL_AUTHORIZATION_REQUIRED 时停止操作，把 instruction 和 authorizationUrl 告诉用户，由管理员开通权限；不运行 lark-cli auth login，不索要密钥。'] : []),
+      ...(schedule || commands || collaboration || work ? ['返回 pendingConfirmation:true 表示已发确认卡：只回一句已发确认卡、点确认后生效，不要说已完成或已设置，也不要让用户自己发命令。'] : []),
+      ...(commands ? [userOnlyPrompt] : []),
+      ...(config.silentProgress ? ['本会话不显示中间进度，不要另发进度消息；提问和最终结果不受影响。'] : [])
+    ];
+    const blocks: string[] = [larkCommandPrompt(stableMemoryCommand(this.options.groupToolsCommand ?? 'dutydeck'),
+      deliveryPrompt({ background: collaborationSession, reactionOnly: config.completionReactionOnly }))];
+    if (abilities.length) blocks.push(`本轮可用（都在 dutydeck agent 下）：\n${abilities.map(line => `- ${line}`).join('\n')}`);
+    if (rules.length) blocks.push(`规则：\n${rules.map(line => `- ${line}`).join('\n')}`);
+    // 没有代办入口（没有发起人、定时任务触发的一轮、监听没在运行）时仍按原说法，由用户自己操作。
+    if (!commands) blocks.push(larkCapabilityPrompt(!collaboration && !schedule));
     return `${blocks.join('\n\n')}\n\n${prompt}`;
   }
 
@@ -1253,9 +1267,6 @@ export class LarkAgentToolsService {
     if (!context.config.groupToolsAllowSend) {
       throw new AgentGroupToolError('GROUP_TOOL_SEND_DISABLED', '当前飞书机器人的群协作发送能力已被管理员关闭。', 403);
     }
-    if (!turn?.trim()) {
-      throw new AgentGroupToolError('FINAL_FLAG_REQUIRED', '--turn 凭证不能为空。', 400);
-    }
     const active = this.options.workbenchTask?.(context.sessionId);
     if (!active?.attemptId) {
       throw new AgentGroupToolError('FINAL_NO_ACTIVE_TASK', '没有可交接的活跃任务。', 409);
@@ -1459,22 +1470,22 @@ export const dutydeckGroupToolsCommand = (entrypoint: string, execPath = process
   return `${shellQuote(execPath)}${loader ? ` --import ${shellQuote(loader)}` : ''} ${shellQuote(absoluteEntrypoint)}`;
 };
 
-const scheduleRequestPrompt = (command: string) => `用户要定时或周期性做的事（如“每天 9 点汇总”“每 15 分钟看看有没有结论”“明天 10 点提醒我”）由你直接设置：${command} 加 --every <分钟数>、--cron '<五段 cron>' 或 --at YYYY-MM-DDTHH:mm 其中一个，再加 --prompt '<到点后要执行的完整指令，只写每次要做的事，不写频率>'，可加 --name '<简短名称>'；时间按北京时间。宿主会在当前对话发确认卡，用户点「启用」才开始，结果发回当前对话。成功后只回一句“已发确认卡，点「启用」后生效”，不要说已设置，不要让用户发 /schedule，也不要用 crontab、后台 sleep 或循环脚本代替。`;
-const agentCommandPrompt = (command: string) => `用户要做 Dutydeck 自己的操作时由你代办：${command} '<命令>'，不要让用户自己发命令。例如换 Agent、模型或工作目录重新做用 /new --agent <Agent编号> -- <完整任务>（新对话不带当前上下文，任务要写全；要带上当前进展加 --handoff；编号填错时会返回可用编号），看状态用 /status，看任务列表用 /tasks，开 PR 用 /pr <标题>；全部命令见 dutydeck command --help。查看类会把结果卡直接发到对话里；会改东西的先发确认卡，用户点「确认」才执行，这时只回一句已发确认卡，不要说已完成。停止当前任务、批准工具调用、回答你的提问只能由用户做：停止点进度卡上的“中断”或说“停”，批准点审批卡上的按钮或说“可以”，回答直接在话题里回复。`;
-export const larkCapabilityPrompt = (cannotSchedule: boolean, scheduleCommand?: string, agentCommand?: string) => `[Dutydeck 能力限制与操作指引] ${scheduleCommand ? scheduleRequestPrompt(scheduleCommand) : ''}${agentCommand ? agentCommandPrompt(agentCommand) : `下面这些由用户自己操作，遇到时在回复里给出做法，不要说“已完成”或“已设置”：${cannotSchedule && !scheduleCommand ? '定时任务用 /schedule（如 /schedule every 分钟 指令），不要用 crontab、后台 sleep 或循环脚本代替；' : ''}切换 agent、模型或工作目录用 /new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容；查看任务用 /tasks；停止当前任务点进度卡上的“中断”；重新开始用 /new。`}`;
+const scheduleRequestPrompt = '定时任务：用户要定时或周期性做的事（如“每天 9 点汇总”“每 15 分钟看看有没有结论”“明天 10 点提醒我”）由你直接设置：schedule create 加 --every <分钟数>、--cron \'<五段 cron>\' 或 --at YYYY-MM-DDTHH:mm 其中一个，再加 --prompt \'<到点后要执行的完整指令，只写每次要做的事，不写频率>\'，时间按北京时间；用户点「启用」才开始，结果发回当前对话。不要用 crontab、后台 sleep 或循环脚本代替。';
+const agentCommandPrompt = 'Dutydeck 操作由你代办，不要让用户自己发命令：查看状态、Agent、任务、排队、定时任务、CI 等待用 status、agents、tasks、queue、schedules、ci（直接返回数据，不发卡）；换 Agent、模型或工作目录重新做用 session new --agent <Agent编号> --task \'<完整任务>\'（新对话不带当前上下文，任务要写全；要带上当前进展加 --handoff；编号填错时会返回可用编号），重试用 retry，先出计划用 plan --task，开 PR 用 pr open；其余见 dutydeck agent --help。改东西的命令先发确认卡，用户点「确认」才执行；不确定时加 --dry-run 预览。';
+const userOnlyPrompt = '停止当前任务、批准工具调用、回答你的提问只能由用户做：停止点进度卡上的“中断”或说“停”，批准点审批卡上的按钮或说“可以”，回答直接在话题里回复。';
+/** 没有代办入口时的说法：这些由用户自己操作。 */
+export const larkCapabilityPrompt = (cannotSchedule: boolean) => `[Dutydeck 能力限制与操作指引] 下面这些由用户自己操作，遇到时在回复里给出做法，不要说“已完成”或“已设置”：${cannotSchedule ? '定时任务用 /schedule（如 /schedule every 分钟 指令），不要用 crontab、后台 sleep 或循环脚本代替；' : ''}切换 agent、模型或工作目录用 /new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容；查看任务用 /tasks；停止当前任务点进度卡上的“中断”；重新开始用 /new。`;
 
 /** 每轮工具块的开头：完整绑定命令只在这里出现一次，最终答复的交付方式也只在这里说。 */
-export const larkCommandPrompt = (command: string, delivery: string) => `[Dutydeck 命令] ${command === 'dutydeck' ? '' : `本会话的 dutydeck 命令是 ${command}，下文的 dutydeck 都指它：原样使用，不要换成 PATH 里的 dutydeck。`}各命令加 --help 看完整用法，帮助不需要服务或凭证。
+export const larkCommandPrompt = (command: string, delivery: string) => `[Dutydeck 命令] ${command === 'dutydeck' ? '' : `本会话的 dutydeck 命令是 ${command}，下文的 dutydeck 都指它：原样使用，不要换成 PATH 里的 dutydeck。`}先看 dutydeck agent --help：本轮的操作都在 dutydeck agent 下，子命令加 --help 看参数、风险和例子；帮助不需要服务或凭证，命令不用带 --turn。
 ${delivery}`;
 
-/** 只列本轮确实可用的入口；消息范围、cursor、幂等键、交接格式等细节在 group --help 里。 */
+/** 群工具的能力行，只列本轮确实可用的入口；消息范围、cursor、幂等键、交接格式等细节在 dutydeck agent group --help 里。 */
 export const larkGroupToolsPrompt = (allowSend: boolean, access = { read: true, discover: true }) => [
-  '[Dutydeck 飞书会话工具]',
-  ...(access.read ? ['读取消息/任务历史：dutydeck group messages/message、history list/show；回答以前讨论过的结论先查历史，查不到或结果标 truncated 时不等于不存在。跨群资料：group team-search。'] : []),
-  ...(access.discover ? ['发现成员/机器人：group peers/members。'] : []),
-  ...(allowSend ? ['发送独立消息/文件：group send/send-file。交付文件用 send-file；独立消息只在用户要求或需要通知指定的人时发；要接在某条消息下用 --reply-to <om_* message_id> --in-thread。不要回应自己发的消息，不和其他机器人互相礼貌 @，一次请求最多主动交接两跳。'] : []),
-  '工具返回 GROUP_TOOL_AUTHORIZATION_REQUIRED 时停止操作，把 instruction 和 authorizationUrl 告诉用户，由管理员开通权限；不运行 lark-cli auth login，不索要密钥。'
-].join('\n');
+  ...(access.read ? ['读取消息/任务历史：group messages/message、history list/show；回答以前讨论过的结论先查历史，查不到或结果标 truncated 时不等于不存在。跨群资料：group team-search。'] : []),
+  ...(access.discover ? ['发现成员/机器人：group peers/members/bots。'] : []),
+  ...(allowSend ? ['发送独立消息/文件：group send/send-file。交付文件用 send-file；要接在某条消息下用 --reply-to <om_* message_id> --in-thread。'] : [])
+].map((line, index) => index ? line : `[Dutydeck 飞书会话工具] ${line}`);
 
 export const agentGroupToolBearerToken = (authorization?: string) => {
   const match = authorization?.match(/^Bearer\s+(.+)$/i);

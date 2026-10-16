@@ -9,6 +9,7 @@ import { registerPlanRoutes, type PlanRouteOptions } from './plan-routes.js';
 import { z, ZodError } from 'zod';
 import { registerCollaborationRoutes, type CollaborationRouteOptions } from './collaboration-routes.js';
 import { AgentGroupToolError } from './lark/agent-tools.js';
+import { AgentCommandParamError } from './lark/agent-command.js';
 import { LarkServiceError } from './lark/service.js';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { readFile } from 'node:fs/promises';
@@ -138,7 +139,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof ZodError) return reply.code(400).send({ error: { code: 'INVALID_INPUT', message: error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ') } });
-    if (error instanceof AgentGroupToolError) return reply.code(error.statusCode).send(error.response());
+    if (error instanceof AgentGroupToolError || error instanceof AgentCommandParamError) return reply.code(error.statusCode).send(error.response());
     if (error instanceof RuntimeError || error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   });

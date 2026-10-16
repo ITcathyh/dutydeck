@@ -8,9 +8,9 @@ import { formatLarkHandoff, larkHandoffAck, larkHandoffTitle } from './handoff.j
 import { explicitFinalContext, readExplicitFinal } from './explicit-final.js';
 import { redactTraceText } from './secret-redaction.js';
 import { readGitSnapshot } from './git-status.js';
-import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
+import { buildLarkTaskDashboard, pageLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { isLarkGroupChatMemoryPool, isLarkGroupMemoryPool, isLarkPerGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
-import { parseLarkSourceId, resolveParticipation, RuntimeError, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
+import { describeScheduleTrigger, parseLarkSourceId, resolveParticipation, RuntimeError, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-decision.js';
 import { directScenarioPrompt } from './scenario-direct.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
@@ -52,8 +52,12 @@ import { type LarkCommandPrompt, larkCardChannel, type LarkRelaunchClaim, larkTa
 import { LarkCoordinatorDispatch } from './coordinator-dispatch.js';
 import { planPrompt } from '../plan-mode.js';
 import { planReplyAction } from './plan-flow.js';
-import { agentCommandPlan, larkAgentCommandKind, type LarkAgentCommandRequest } from './agent-command.js';
+import { AgentCommandParamError, agentCommandConfirmSummary, agentCommandPlan, larkAgentCommandKind, type LarkAgentCommandRequest, type LarkAgentViewRequest } from './agent-command.js';
 import type { LarkConfirmRecord } from './confirm-cards.js';
+
+/** 命令回执的去向：不传时照常发卡；capture 时只记下、不发卡（dutydeck agent 的查看类），否则发卡的同时记下。 */
+interface LarkCommandReceipts { capture: boolean; cards: Array<{ title: string; markdown: string; failed: boolean }> }
+const larkPlainText = (markdown: string) => markdown.replace(/\*\*/g, '').trim();
 
 // 飞书消息协调器 · 入站唤醒：入站消息与卡片回调的入口和路由、聊天命令与 /status、
 // 工作流与问答回复、群参与认领，以及飞书任务的认领。
@@ -270,6 +274,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   }
 
   private async taskDashboard(event: LarkMessageEvent, config: StoredLarkConfig, page: number) {
+    return buildLarkTaskDashboard(await this.taskDashboardEntries(event, config), page, undefined, event.chatId).elements;
+  }
+
+  /** /tasks 列出的任务：只有发送人能看结果的那些。 */
+  private async taskDashboardEntries(event: LarkMessageEvent, config: StoredLarkConfig) {
     if (!event.senderOpenId) throw new LarkServiceError('LARK_IDENTITY_REQUIRED', '缺少当前成员身份。', 403);
     const entries: LarkTaskDashboardEntry[] = [];
     const interactions = await this.workflows?.list(config.appId) ?? [];
@@ -320,7 +329,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           : {}),
         ...(result && ['pending', 'accepted', 'needs_changes'].includes(result.state) ? { feedback: result.state as 'pending' | 'accepted' | 'needs_changes' } : {}) });
     }
-    return buildLarkTaskDashboard(entries, page, undefined, event.chatId).elements;
+    return entries;
   }
 
   private async routeWorkflow(event: LarkMessageEvent, config: StoredLarkConfig, prompt: string, scope: { id: string; prompt?: string }): Promise<boolean> {
@@ -964,7 +973,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     prompt: string,
     group: LarkGroup,
     scopeId: string,
-    acknowledgementReactionId?: string
+    acknowledgementReactionId?: string,
+    receipts?: LarkCommandReceipts
   ): Promise<'handled' | string | LarkCommandPrompt | undefined> {
     // 插件命令展开成 prompt 模板后照普通请求处理（授权与建任务都不变）；内置命令名在安装时已拒绝。
     const pluginScope = { botAppId: config.appId, ...(config.workspace ? { cwd: config.workspace } : {}) };
@@ -992,6 +1002,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       markdown: string,
       options: { elements?: LarkCardElement[]; failed?: boolean } = {}
     ) => {
+      receipts?.cards.push({ title: taskName, markdown, failed: options.failed === true });
+      if (receipts?.capture) return undefined;
       const card = await sendTaskCard(this.service, event, {
         state: options.failed ? 'failed' : 'completed', readOnly: true, retryable: false,
         taskId: event.messageId, taskName,
@@ -1922,12 +1934,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     }
   }
 
-  /**
-   * Agent 代发的命令（dutydeck command，见 agent-command.ts）。按这一轮的卡片记录找回请求消息和会话 scope：
-   * 查看类以发起人的身份、在请求消息下立即执行；会改东西的在请求消息下发确认卡，点「确认」后再执行。
-   */
-  async agentCommand(request: LarkAgentCommandRequest): Promise<Record<string, unknown>> {
-    const { parsed, summary, confirm } = agentCommandPlan(request.command);
+  /** 代办命令的出处：按这一轮的卡片记录找回请求消息、会话 scope 和机器人配置。 */
+  private async agentCommandOrigin(request: { sessionId: string; taskId: string }) {
     const store = this.workflowOptions.store;
     const current = this.reconcileConfig && store ? await readLarkConfig(store, this.reconcileConfig.appId) : undefined;
     if (!current?.listening || !store || !this.cardMappings) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '机器人当前不在监听，现在不能代办命令。', 503);
@@ -1941,32 +1949,121 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (!origin || !requested) throw new RuntimeError('AGENT_COMMAND_ORIGIN_MISSING', '找不到这一轮的飞书消息，不能代办命令。', 409);
     const { saved } = origin;
     const config = saved.chat_type === 'group' && this.groupManager ? await this.groupManager.resolved(current, saved.chat_id) : current;
+    // 话题根要带上：话题续接发起人顶层会话时，重启后靠它找回那个会话。
+    const place = { chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', ...(requested.threadId ? { threadId: requested.threadId } : {}), ...(requested.rootId ? { rootId: requested.rootId } : {}) };
+    return { config, requested, place, scopeId: saved.scope_id! };
+  }
+
+  /**
+   * Agent 代发的命令（dutydeck agent 的写入命令、旧入口 dutydeck command，见 agent-command.ts）。按这一轮的卡片记录找回请求消息和会话 scope：
+   * 查看类以发起人的身份、在请求消息下立即执行；会改东西的在请求消息下发确认卡，点「确认」后再执行。dryRun 只返回将要做什么，不执行、不发卡。
+   */
+  async agentCommand(request: LarkAgentCommandRequest): Promise<Record<string, unknown>> {
+    const { parsed, summary, confirm } = agentCommandPlan(request.command);
+    const { config, requested, place, scopeId } = await this.agentCommandOrigin(request);
     if (parsed.name === 'new') {
       // Agent 看不到 Agent 编号：填错时直接退回可用编号让它改，不发一张注定失败的确认卡。
       const agentId = parseLarkNewSession(parsed.argsText).launchOptions?.agentId;
       const agents = agentId ? await this.runtime.listAgents?.() ?? [] : [];
       if (agentId && !agents.some(agent => agent.id === agentId)) {
-        throw new RuntimeError('AGENT_COMMAND_INVALID', `没有编号为 ${agentId} 的 Agent。可用：${agents.map(agent => `${agent.id}（${agent.name}）`).join('、') || '无'}。`, 400);
+        const available = agents.map(agent => `${agent.id}（${agent.name}）`).join('、') || '无';
+        throw new AgentCommandParamError('AGENT_COMMAND_INVALID', `没有编号为 ${agentId} 的 Agent。可用：${available}。`, [{ name: '--agent', reason: `没有编号为 ${agentId} 的 Agent；可用：${available}` }]);
       }
     }
     // /grant @成员：成员要在用户这条消息里被 @ 过，按名字对上那条提及（命令层只认真实的提及）。
-    const mentions = requested.mentions.filter(mention => mention.openId && mention.openId !== this.botOpenId && parsed.argsText.includes(`@${mention.name}`));
-    // 话题根要带上：话题续接发起人顶层会话时，重启后靠它找回那个会话。
-    const place = { chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', ...(requested.threadId ? { threadId: requested.threadId } : {}), ...(requested.rootId ? { rootId: requested.rootId } : {}) };
+    const mentioned = requested.mentions.filter(mention => mention.openId && mention.openId !== this.botOpenId);
+    const missing = request.members?.filter(name => !mentioned.some(mention => mention.name === name)) ?? [];
+    if (missing.length) {
+      const seen = mentioned.length ? `这条消息 @ 过：${mentioned.map(mention => mention.name).join('、')}` : '这条消息没有 @ 任何成员';
+      throw new AgentCommandParamError('INVALID_ARGUMENT', `${missing.join('、')} 没有在用户这条消息里被 @ 过。`, missing.map(name => ({ name: '--member', reason: `${name} 没有在用户这条消息里被 @ 过；${seen}` })),
+        '只能操作用户在这条消息里 @ 过的成员；需要的话请用户在消息里 @ 要操作的人。');
+    }
+    const mentions = mentioned.filter(mention => parsed.argsText.includes(`@${mention.name}`));
+    const confirmSummary = agentCommandConfirmSummary(summary, parsed.raw);
+    if (request.dryRun) {
+      const route = routeLarkCommand(parsed.raw, { capabilities: this.larkRouteCapabilities(), operator: { kind: 'user', allowlisted: true } });
+      if (route.kind === 'unavailable') throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', route.reason, 409);
+      const repair = parsed.name === 'repair' ? buildRepairConfirmCard(config.appId) : undefined;
+      const card = confirm ? { title: '待确认的操作', body: confirmSummary } : repair ? { title: repair.title, body: repair.markdown }
+        : parsed.name === 'pr' ? { title: '/pr 需要确认', body: '执行时生成：要推送的 dutydeck/ 分支、提交和 PR 标题。' } : undefined;
+      return { dryRun: true, command: parsed.raw, summary, needsConfirmation: Boolean(card), ...(card ? { confirmCard: card } : {}),
+        effect: confirm ? '在本轮请求消息下发确认卡；发起人或有权限的人点「确认」后，以点击人的身份执行，和他在原话题自己发这条命令一样。'
+          : card ? '执行后在本轮请求消息下发这张确认卡；用户在卡上确认后才真正执行。' : '以本轮发起人的身份立即执行，结果卡发在本轮请求消息下。' };
+    }
     if (!confirm) {
       // 回执挂在请求消息下；去重键按命令区分，同一轮代发 /help 1 和 /help 2 各回一张卡。
       const replyKey = createHash('sha256').update(`${requested.messageId}\n${parsed.raw}`).digest('hex').slice(0, 24);
-      await this.runAgentCommand({ ...this.agentCommandEvent(config, { ...place, messageId: requested.messageId }, request.actorId, parsed.raw, mentions), replyKey }, config, parsed.raw, saved.scope_id!);
-      return { executed: true, message: '已执行，结果卡已发到对话里。不用复述卡片内容，也不要让用户再发命令。' };
+      const receipts: LarkCommandReceipts = { capture: false, cards: [] };
+      await this.runAgentCommand({ ...this.agentCommandEvent(config, { ...place, messageId: requested.messageId }, request.actorId, parsed.raw, mentions), replyKey }, config, parsed.raw, scopeId, undefined, receipts);
+      if (!request.action) return { executed: true, message: '已执行，结果卡已发到对话里。不用复述卡片内容，也不要让用户再发命令。' };
+      // dutydeck agent 这里只有自己发确认卡的命令（/pr、/repair）：卡没发成就如实报错。
+      const failed = receipts.cards.find(card => card.failed);
+      if (failed) throw new RuntimeError('AGENT_COMMAND_REJECTED', larkPlainText(failed.markdown), 409);
+      return { pendingConfirmation: true, message: '已发确认卡，用户在卡上确认后才执行。只回一句已发确认卡，不要说已完成，也不要让用户发命令。' };
     }
     const confirmations = this.workflowOptions.participation?.confirmations;
     if (!confirmations) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '当前服务不能发确认卡，现在不能代办这条命令。', 503);
-    const record = await confirmations.request({ kind: larkAgentCommandKind(config.appId), scope: { appId: config.appId, chatId: saved.chat_id }, requesterId: request.actorId,
+    const record = await confirmations.request({ kind: larkAgentCommandKind(config.appId), scope: { appId: config.appId, chatId: place.chatId }, requesterId: request.actorId,
       replyTo: { messageId: requested.messageId, ...(requested.threadId ? { threadId: requested.threadId } : {}) }, dedupeKey: `${requested.messageId}:${parsed.raw}`,
-      title: '待确认的操作', summary: `${summary}\n\n\`${parsed.raw.replace(/`/g, "'").slice(0, 300)}\``,
-      payload: { command: parsed.raw, session_id: request.sessionId, scope_id: saved.scope_id!, chat_type: place.chatType, ...(place.threadId ? { thread_id: place.threadId } : {}), ...(place.rootId ? { root_id: place.rootId } : {}), mentions: JSON.stringify(mentions) } });
+      title: '待确认的操作', summary: confirmSummary,
+      payload: { command: parsed.raw, session_id: request.sessionId, scope_id: scopeId, chat_type: place.chatType, ...(place.threadId ? { thread_id: place.threadId } : {}), ...(place.rootId ? { root_id: place.rootId } : {}), mentions: JSON.stringify(mentions) } });
     if (!record?.cardMessageId) throw new RuntimeError('AGENT_COMMAND_CARD_FAILED', '确认卡没发出去。', 502);
     return { pendingConfirmation: true, message: '已发确认卡，用户点「确认」后才执行。只回一句已发确认卡，不要说已完成，也不要让用户发命令。' };
+  }
+
+  /**
+   * dutydeck agent 的查看类：以这一轮发起人的身份，走和他在原话题发这条命令同一条路（权限一致），回执不发卡，
+   * 和卡片同样的文本连同结构化数据交回给 Agent。/tasks 直接取导航卡的数据。
+   */
+  async agentView(request: LarkAgentViewRequest): Promise<Record<string, unknown>> {
+    const { config, requested, place, scopeId } = await this.agentCommandOrigin(request);
+    const command = { status: '/status', agents: '/agents', tasks: '/tasks', queue: '/queue', schedules: '/schedule', ci: '/ci' }[request.view];
+    const event = this.agentCommandEvent(config, { ...place, messageId: requested.messageId }, request.actorId, command, []);
+    if (request.view === 'tasks') {
+      if (!this.workflows) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '当前机器人无法查询任务列表。', 409);
+      const entries = await this.taskDashboardEntries(event, config);
+      const { page, totalPages, entries: items } = pageLarkTaskDashboard(entries, request.page ?? 1);
+      return { page, totalPages, total: entries.length, tasks: items.map(entry => ({ taskId: entry.taskId, title: entry.title, status: entry.status, agent: entry.agent, workspace: entry.workspace,
+        updatedAt: entry.updatedAt, ...(entry.url ? { url: entry.url } : {}), ...(entry.detail ? { detail: entry.detail } : {}), ...(entry.feedback ? { feedback: entry.feedback } : {}),
+        ...(entry.pendingApproval ? { pendingApproval: entry.pendingApproval.commandSummary } : {}) })) };
+    }
+    const receipts: LarkCommandReceipts = { capture: true, cards: [] };
+    await this.runAgentCommand(event, config, command, scopeId, undefined, receipts);
+    const card = receipts.cards.at(-1);
+    if (!card) throw new RuntimeError('AGENT_COMMAND_FAILED', '命令没有给出结果。', 500);
+    if (card.failed) throw new RuntimeError('AGENT_COMMAND_REJECTED', larkPlainText(card.markdown), 403);
+    return { ...await this.agentViewData(request, config), text: card.markdown };
+  }
+
+  /** 查看类的结构化数据：命令已按发起人的权限执行成功后才读。 */
+  private async agentViewData(request: LarkAgentViewRequest, config: StoredLarkConfig): Promise<Record<string, unknown>> {
+    const { sessionId, actorId } = request;
+    const automation = this.workflowOptions.automation;
+    switch (request.view) {
+      case 'status': {
+        const session = await this.runtime.getSession(sessionId).catch(() => undefined);
+        const tasks = await this.runtime.getTasks?.(sessionId).catch(() => []) ?? [];
+        const count = (...statuses: string[]) => tasks.filter(task => statuses.includes(task.status)).length;
+        return { sessionId, agent: session?.agentId ?? config.defaultAgentId, ...(session && config.defaultAgentId && session.agentId !== config.defaultAgentId ? { configuredAgent: config.defaultAgentId } : {}),
+          ...(session?.model ? { model: session.model } : {}), ...(session?.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
+          workspace: session?.cwd ?? config.workspace, state: session?.state ?? 'missing',
+          running: count('running'), queued: count('queued'), needsReview: count('reconcile_required', 'legacy_unresolved') };
+      }
+      case 'agents':
+        return { agents: (await this.runtime.listAgents?.() ?? []).map(agent => ({ id: agent.id, name: agent.name, ...(agent.version?.trim() ? { version: agent.version.trim() } : {}), default: agent.id === config.defaultAgentId })) };
+      case 'queue':
+        return { queued: (await this.runtime.getTasks?.(sessionId) ?? []).filter(task => task.status === 'queued').map((task, index) => ({ index: index + 1, taskId: task.id, prompt: task.prompt })) };
+      case 'schedules':
+        return { schedules: automation ? (await automation.listBySession(sessionId, actorId)).schedules.map(item => ({ id: item.id, name: item.name, prompt: item.prompt, enabled: item.enabled,
+          when: describeScheduleTrigger(item.trigger, item.timezone), ...(item.nextDueAt ? { nextDueAt: item.nextDueAt } : {}) })) : [] };
+      default: {
+        const records = automation ? await automation.listBySession(sessionId, actorId) : undefined;
+        return {
+          waits: (records?.subscriptions ?? []).map(item => ({ id: item.id, status: item.status, repository: item.repository.slug, headSha: item.headSha, expiresAt: item.expiresAt, ...(item.error ? { error: item.error } : {}) })),
+          webhookWaits: (await automation?.ciWebhook?.listBySession(sessionId) ?? []).map(item => ({ id: item.id, status: item.status, repository: item.repository, branch: item.branch, headSha: item.headSha, rounds: item.rounds, ...(item.reason ? { reason: item.reason } : {}) }))
+        };
+      }
+    }
   }
 
   /** 代发命令的确认卡：发起人或有权限的人点「确认」，以点击人的身份执行，带出的新一轮挂在确认卡下。 */
@@ -2014,7 +2111,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
    * 以 event 发送人的身份、在 scopeId 这个会话里执行一条命令，和他在那里自己发一样；命令带出的新一轮挂在 event 这条消息下。
    * started 是确认后落库的执行中记录：命令自己回执后记为完成，带出新一轮时改成待处理的请求交给 handle。
    */
-  private async runAgentCommand(event: LarkMessageEvent, config: StoredLarkConfig, command: string, scopeId: string, started?: LarkInboxRecord) {
+  private async runAgentCommand(event: LarkMessageEvent, config: StoredLarkConfig, command: string, scopeId: string, started?: LarkInboxRecord, receipts?: LarkCommandReceipts) {
     let route: 'handled' | string | LarkCommandPrompt | undefined = 'handled';
     if (!await this.routeWorkflow(event, config, command, { id: scopeId })) {
       const groupKey = larkGroupKey(event, scopeId, config.appId);
@@ -2024,9 +2121,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const continued = await this.threadContinuation(event, config, scopeId);
         if (continued && !group.retiredSessionIds?.has(continued.id)) { group.sessionId = continued.id; group.sessionConfigKey = larkSessionConfigKey(config); }
       }
-      route = await this.routeChatCommand(event, config, command, group, scopeId);
+      route = await this.routeChatCommand(event, config, command, group, scopeId, undefined, receipts);
     }
-    if (route === 'handled' || route === undefined || !this.inbox) {
+    // 只取回执的查看命令不带出新一轮。
+    if (route === 'handled' || route === undefined || !this.inbox || receipts?.capture) {
       if (started) await this.inbox!.update(started, { state: 'accepted' });
       return;
     }

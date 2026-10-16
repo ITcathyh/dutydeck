@@ -146,7 +146,7 @@ export interface LarkLongConnectionListenerOptions {
   };
   /** Web 要求登录时提供；卡片「查看详情」改为给管理员私信一次性登录链接。 */
   loginLinks?: LoginLinkStore;
-  /** Agent 代发命令（dutydeck command）的登记表：监听启动后把本机器人的处理器登记进去。 */
+  /** Agent 代发命令（dutydeck agent、dutydeck command）的登记表：监听启动后把本机器人的处理器登记进去。 */
   agentCommands?: LarkAgentCommands;
 }
 
@@ -232,7 +232,7 @@ export class LarkLongConnectionListener implements LarkListener {
     if (coordinator) this.options.participation?.setDispatcher(config.appId, (event, current) => coordinator.adopt(event, current));
     if (coordinator && this.options.agentCommands) {
       this.agentCommand = request => coordinator.agentCommand(request);
-      this.options.agentCommands.set(config.appId, this.agentCommand);
+      this.options.agentCommands.set(config.appId, this.agentCommand, request => coordinator.agentView(request));
     }
     void this.options.participation?.recover(config.appId).catch(error => this.log.warn({ error, appId: config.appId }, '群观察恢复失败'));
     try { await coordinator?.startReconciliation(config); }

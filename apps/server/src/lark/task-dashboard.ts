@@ -344,16 +344,28 @@ const navigation = (page: number, totalPages: number) => ({
   }))
 });
 
+const orderEntries = (entries: LarkTaskDashboardEntry[]) => {
+  const indexed = entries.map((entry, index): IndexedEntry => ({ entry, index, group: entry.blocked || entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status) }));
+  return ([0, 1, 2] as DashboardGroup[]).flatMap(group => indexed
+    .filter(item => item.group === group)
+    .sort((left, right) => timestamp(right.entry.updatedAt) - timestamp(left.entry.updatedAt)));
+};
+
+/** 与卡片同一套排序和分页，给 dutydeck agent tasks 返回数据用。 */
+export function pageLarkTaskDashboard(entries: LarkTaskDashboardEntry[], page = 1) {
+  const ordered = orderEntries(entries);
+  const totalPages = Math.max(1, Math.ceil(ordered.length / PAGE_SIZE));
+  const currentPage = Math.min(totalPages, validPage(page));
+  return { page: currentPage, totalPages, entries: ordered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE).map(item => item.entry) };
+}
+
 export function buildLarkTaskDashboard(
   entries: LarkTaskDashboardEntry[],
   page = 1,
   now = Date.now(),
   currentChatId?: string
 ): LarkTaskDashboardResult {
-  const indexed = entries.map((entry, index): IndexedEntry => ({ entry, index, group: entry.blocked || entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status) }));
-  const ordered = ([0, 1, 2] as DashboardGroup[]).flatMap(group => indexed
-    .filter(item => item.group === group)
-    .sort((left, right) => timestamp(right.entry.updatedAt) - timestamp(left.entry.updatedAt)));
+  const ordered = orderEntries(entries);
   const totalPages = Math.max(1, Math.ceil(ordered.length / PAGE_SIZE));
   const currentPage = Math.min(totalPages, validPage(page));
 

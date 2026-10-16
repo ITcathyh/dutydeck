@@ -53,8 +53,8 @@ async function setup(options: Partial<LarkAgentToolsOptions> = {}, tokenSession 
 it('tells the Agent when to use history and team-search', () => {
   // ea5dc2b moved detailed flags into bound --help; retain the retrieval and
   // coverage guarantees instead of asserting the retired inline command list.
-  const prompt = larkGroupToolsPrompt(false);
-  expect(prompt).toContain('dutydeck group messages/message、history list/show');
+  const prompt = larkGroupToolsPrompt(false).join('\n');
+  expect(prompt).toContain('group messages/message、history list/show');
   expect(prompt).toContain('跨群资料：group team-search');
   expect(prompt).toContain('回答以前讨论过的结论先查历史');
   expect(prompt).toContain('查不到或结果标 truncated 时不等于不存在');

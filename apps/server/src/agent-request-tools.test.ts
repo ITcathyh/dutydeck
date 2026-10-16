@@ -5,6 +5,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { RuntimeError, type PublicSessionSchedule, type Session } from '@dutydeck/shared';
 import { AgentGroupToolError, LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './lark/agent-tools.js';
 import { larkBotsConfigKey } from './lark/config.js';
+import { AgentCommandParamError } from './lark/agent-command.js';
 import { isAutomatedRequest, registerAgentRequestTools, type AgentRequestToolsOptions } from './agent-request-tools.js';
 
 const apps: ReturnType<typeof Fastify>[] = [];
@@ -45,7 +46,7 @@ async function setup() {
   // 与 app.ts 相同的错误映射。
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof ZodError) return reply.code(400).send({ error: { code: 'INVALID_INPUT', message: error.message } });
-    if (error instanceof AgentGroupToolError) return reply.code(error.statusCode).send(error.response());
+    if (error instanceof AgentGroupToolError || error instanceof AgentCommandParamError) return reply.code(error.statusCode).send(error.response());
     if (error instanceof RuntimeError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   });
@@ -55,7 +56,13 @@ async function setup() {
     headers: { authorization: `Bearer ${capabilities.environmentFor(target).dutydeck_group_tools_token}`, 'x-dutydeck-work-turn': turn }
   });
   const command = (payload: object, turn?: string) => request(group, payload, turn, 'commands');
-  return { group, p2p, request, command, tools, createSchedule, prepareDelivery, sendConfirmation, saved, automated, setActive: (value: typeof active) => { active = value; } };
+  // dutydeck agent 默认不带 --turn：不发 x-dutydeck-work-turn。
+  const agent = (method: 'GET' | 'POST', path: string, payload?: object, turn?: string) => app.inject({
+    method, url: `/api/lark/agent-tools/${path}`, ...(payload ? { payload } : {}),
+    headers: { authorization: `Bearer ${capabilities.environmentFor(group).dutydeck_group_tools_token}`, ...(turn ? { 'x-dutydeck-work-turn': turn } : {}) }
+  });
+  const currentTurn = () => capabilities.workbenchTurnToken(group.id, active?.taskId ?? '');
+  return { group, p2p, request, command, agent, currentTurn, tools, createSchedule, prepareDelivery, sendConfirmation, saved, automated, setActive: (value: typeof active) => { active = value; } };
 }
 
 describe('Agent schedule requests', () => {
@@ -108,6 +115,65 @@ describe('Agent schedule requests', () => {
     expect((await f.request(f.group, { every: 15, prompt: 'x' })).statusCode).toBe(403);
     expect(f.createSchedule).not.toHaveBeenCalled();
     expect(f.sendConfirmation).not.toHaveBeenCalled();
+  });
+
+  it('dryRun previews the schedule and card without creating it; bad options name the parameter', async () => {
+    const f = await setup();
+    const preview = await f.request(f.group, { cron: '0 9 * * *', prompt: '汇总昨天的告警', dryRun: true });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json()).toMatchObject({ dryRun: true, needsConfirmation: true, schedule: { name: '汇总昨天的告警', prompt: '汇总昨天的告警', when: expect.any(String), nextRunAt: expect.any(String) },
+      confirmCard: { body: expect.stringContaining('汇总昨天的告警') }, effect: expect.stringContaining('启用') });
+    expect(f.createSchedule).not.toHaveBeenCalled();
+    expect(f.prepareDelivery).not.toHaveBeenCalled();
+    expect(f.sendConfirmation).not.toHaveBeenCalled();
+    const both = await f.request(f.group, { every: 15, cron: '0 9 * * *', prompt: 'x' });
+    expect(both.statusCode).toBe(400);
+    expect(both.json().error).toMatchObject({ code: 'INVALID_ARGUMENT', params: [{ name: '--every/--cron/--at' }], hint: expect.stringContaining('schedule create --help') });
+    expect((await f.request(f.group, { every: 0, prompt: 'x' })).json().error.params).toEqual([{ name: '--every', reason: expect.any(String) }]);
+    expect((await f.request(f.group, { cron: 'not a cron', prompt: 'x' })).json().error).toMatchObject({ code: 'SCHEDULE_REQUEST_INVALID', params: [{ name: '--cron' }] });
+  });
+});
+
+describe('dutydeck agent views and actions', () => {
+  it('without --turn use the running turn; a wrong --turn or no running turn is refused as before', async () => {
+    const f = await setup();
+    const run = vi.fn(async (request: object) => ({ request }));
+    const view = vi.fn(async (request: object) => ({ request }));
+    f.tools.commands.set('cli_bot', run, view);
+    const status = await f.agent('GET', 'views/status');
+    expect(status.statusCode).toBe(200);
+    expect(view).toHaveBeenLastCalledWith({ sessionId: 'ses_group', taskId: 'task_1', actorId: 'ou_alice', view: 'status' });
+    expect((await f.agent('GET', 'views/tasks?page=2', undefined, f.currentTurn())).statusCode).toBe(200);
+    expect(view).toHaveBeenLastCalledWith({ sessionId: 'ses_group', taskId: 'task_1', actorId: 'ou_alice', view: 'tasks', page: 2 });
+    expect((await f.agent('GET', 'views/status', undefined, 'stale-turn')).json().error.code).toBe('WORK_ITEM_TURN_EXPIRED');
+    expect((await f.agent('POST', 'actions/retry', {}, 'stale-turn')).json().error.code).toBe('WORK_ITEM_TURN_EXPIRED');
+    f.setActive(undefined);
+    expect((await f.agent('GET', 'views/status')).json().error.code).toBe('AGENT_REQUEST_ACTOR_REQUIRED');
+    expect((await f.agent('POST', 'actions/retry', {})).json().error.code).toBe('AGENT_REQUEST_ACTOR_REQUIRED');
+    f.setActive({ taskId: 'task_1', actorId: 'ou_alice' });
+    f.automated.add('task_1');
+    expect((await f.agent('GET', 'views/queue')).json().error.code).toBe('AGENT_REQUEST_AUTOMATED');
+    expect(view).toHaveBeenCalledTimes(2);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('actions turn parameters into the same slash command and pass dryRun through; bad parameters are named', async () => {
+    const f = await setup();
+    const run = vi.fn(async (request: object) => ({ request }));
+    f.tools.commands.set('cli_bot', run, vi.fn());
+    const created = await f.agent('POST', 'actions/session.new', { agent: 'claude', task: '修复登录页报错', dryRun: true });
+    expect(created.statusCode).toBe(200);
+    expect(run).toHaveBeenLastCalledWith({ sessionId: 'ses_group', taskId: 'task_1', actorId: 'ou_alice', command: '/new --agent claude -- 修复登录页报错', action: 'session.new', dryRun: true });
+    await f.agent('POST', 'actions/access.grant', { members: ['Bob'] });
+    expect(run).toHaveBeenLastCalledWith({ sessionId: 'ses_group', taskId: 'task_1', actorId: 'ou_alice', command: '/grant @Bob', action: 'access.grant', dryRun: false, members: ['Bob'] });
+    const bad = await f.agent('POST', 'actions/queue.cancel', { index: 0 });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().error).toMatchObject({ code: 'INVALID_ARGUMENT', params: [{ name: '<编号>', reason: '从 1 开始' }] });
+    expect((await f.agent('POST', 'actions/retry', { dryRun: 'yes' })).json().error.params).toEqual([{ name: '--dry-run', reason: '不带值' }]);
+    expect((await f.agent('POST', 'actions/nope', {})).json().error).toMatchObject({ code: 'AGENT_ACTION_UNKNOWN', params: [{ name: '<命令>' }] });
+    expect((await f.agent('GET', 'views/nope')).json().error).toMatchObject({ code: 'AGENT_ACTION_UNKNOWN', params: [{ name: '<命令>', reason: expect.stringContaining('status') }] });
+    expect((await f.agent('GET', 'views/tasks?page=0')).json().error).toMatchObject({ code: 'INVALID_ARGUMENT', params: [{ name: '--page' }] });
+    expect(run).toHaveBeenCalledTimes(2);
   });
 });
 

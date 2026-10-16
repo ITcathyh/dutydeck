@@ -3,13 +3,15 @@
  * - 定时任务（schedule request）：计划建好先停用，宿主在原话题发确认卡，用户点「启用」才开始。计划、执行身份、权限与回报位置
  *   都和用户在这里发 /schedule 相同。
  * - 其他 / 命令（command）：交给这个机器人的消息处理器，按用户在原话题自己发这条命令处理（见 lark/agent-command.ts）。
- * 两者都只能在正在执行的这一轮、以这一轮发起人的身份做；定时或自动续作触发的一轮不能做。
+ * - dutydeck agent 的查看类（views）和写入类（actions）：参数换成同一条 / 命令交给消息处理器，查看类的结果交回给 Agent，不发卡。
+ * 都只能在正在执行的这一轮、以这一轮发起人的身份做；定时或自动续作触发的一轮不能做。不带 --turn 时按执行中的这一轮认。
  */
 import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { RuntimeError, createSessionScheduleInputSchema, previewSessionSchedule, type PublicSessionSchedule } from '@dutydeck/shared';
+import { RuntimeError, createSessionScheduleInputSchema, describeScheduleTrigger, previewSessionSchedule, type PublicSessionSchedule } from '@dutydeck/shared';
 import { agentGroupToolBearerToken, type LarkAgentToolsService } from './lark/agent-tools.js';
+import { AgentCommandParamError, agentActionCommand, agentParamIssues, larkAgentViews, type LarkAgentViewName } from './lark/agent-command.js';
 import type { SessionAutomationService } from './session-automation.js';
 
 const requestSchema = z.object({
@@ -17,8 +19,10 @@ const requestSchema = z.object({
   name: z.string().trim().min(1).optional(),
   every: z.number().int().min(1).max(525_600).optional(),
   cron: z.string().trim().min(1).optional(),
-  at: z.string().trim().min(1).optional()
-}).strict().refine(input => [input.every, input.cron, input.at].filter(value => value !== undefined).length === 1, { message: '--every、--cron、--at 只选一个' });
+  at: z.string().trim().min(1).optional(),
+  dryRun: z.boolean().optional()
+}).strict().refine(input => [input.every, input.cron, input.at].filter(value => value !== undefined).length === 1, { message: '--every、--cron、--at 只选一个', path: ['trigger'] });
+const scheduleParam = (key: string) => key === 'trigger' ? '--every/--cron/--at' : `--${key}`;
 
 const commandSchema = z.object({ command: z.string().trim().min(1).max(4000) }).strict();
 
@@ -52,15 +56,42 @@ export async function registerAgentRequestTools(app: FastifyInstance, options: A
     const { appId, ...turn } = await turnContext(request);
     return await options.tools.commands.run(appId, { ...turn, command: commandSchema.parse(request.body).command });
   });
+  app.post<{ Params: { name: string }; Body: Record<string, unknown> | undefined }>('/api/lark/agent-tools/actions/:name', async request => {
+    const { appId, ...turn } = await turnContext(request);
+    const { dryRun, ...params } = request.body ?? {};
+    if (dryRun !== undefined && typeof dryRun !== 'boolean') throw new AgentCommandParamError('INVALID_ARGUMENT', '--dry-run 不带值。', [{ name: '--dry-run', reason: '不带值' }]);
+    const { command, members } = agentActionCommand(request.params.name, params);
+    return await options.tools.commands.run(appId, { ...turn, command, action: request.params.name, dryRun: dryRun === true, ...(members ? { members } : {}) });
+  });
+  app.get<{ Params: { name: string }; Querystring: { page?: string } }>('/api/lark/agent-tools/views/:name', async request => {
+    const { appId, ...turn } = await turnContext(request);
+    const view = request.params.name as LarkAgentViewName;
+    if (!larkAgentViews.includes(view)) throw new AgentCommandParamError('AGENT_ACTION_UNKNOWN', `没有 ${request.params.name} 这个查看命令。`, [{ name: '<命令>', reason: `可用：${larkAgentViews.join('、')}` }]);
+    const page = request.query.page === undefined ? undefined : Number(request.query.page);
+    if (page !== undefined && (!Number.isInteger(page) || page < 1)) throw new AgentCommandParamError('INVALID_ARGUMENT', '--page 要是从 1 开始的整数。', [{ name: '--page', reason: '要是从 1 开始的整数' }]);
+    return await options.tools.commands.view(appId, { ...turn, view, ...(page !== undefined ? { page } : {}) });
+  });
   app.post('/api/lark/agent-tools/schedules', async request => {
     const { sessionId, taskId, actorId } = await turnContext(request);
-    const body = requestSchema.parse(request.body);
+    const parsed = requestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      const params = agentParamIssues(parsed.error, scheduleParam);
+      throw new AgentCommandParamError('INVALID_ARGUMENT', params.map(param => `${param.name}：${param.reason}`).join('；'), params, '运行 dutydeck agent schedule create --help 看用法。');
+    }
+    const { dryRun, ...body } = parsed.data;
     const trigger = body.every !== undefined ? { kind: 'interval' as const, everySeconds: body.every * 60, anchorAt: new Date().toISOString() }
       : body.cron !== undefined ? { kind: 'cron' as const, expression: body.cron } : { kind: 'at' as const, localDateTime: body.at! };
     const input = createSessionScheduleInputSchema.parse({ name: body.name ?? body.prompt.slice(0, 100), prompt: body.prompt, trigger,
       timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' } });
-    try { previewSessionSchedule({ id: 'preview', ...input }, new Date()); }
-    catch (error) { throw new RuntimeError('SCHEDULE_REQUEST_INVALID', error instanceof Error ? error.message : String(error), 400); }
+    let next: ReturnType<typeof previewSessionSchedule>;
+    try { next = previewSessionSchedule({ id: 'preview', ...input }, new Date()); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new AgentCommandParamError('SCHEDULE_REQUEST_INVALID', message, [{ name: scheduleParam(body.every !== undefined ? 'every' : body.cron !== undefined ? 'cron' : 'at'), reason: message }]);
+    }
+    if (dryRun) return { dryRun: true, needsConfirmation: true, schedule: { name: input.name, prompt: input.prompt, when: describeScheduleTrigger(input.trigger, input.timezone), timezone: input.timezone, ...(next ? { nextRunAt: next.localLabel } : {}) },
+      confirmCard: { title: '定时任务', body: `**做什么**：${input.prompt}\n**什么时候**：${describeScheduleTrigger(input.trigger, input.timezone)}\n点「启用」后开始，不点不会执行。` },
+      effect: '在本轮请求消息下发启用卡；计划先建成停用状态，用户点「启用」后才开始，结果发回当前对话。' };
     // 同一轮里同样的请求重试时拿回同一个计划，不会再建一个、再发一张卡。
     const schedule = await options.automation.createSchedule(sessionId, input, actorId, {
       key: `agent-request:${createHash('sha256').update(JSON.stringify([taskId, body])).digest('hex')}`,

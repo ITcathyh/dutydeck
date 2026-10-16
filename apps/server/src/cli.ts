@@ -15,6 +15,7 @@ import { runLarkCreate } from './lark/create-cli.js';
 import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver';
 import { acpkPassThroughArgs, runAcpk } from './acpk.js';
 import { runWorkCommand } from './work-item-cli.js';
+import { AgentCliError, agentCliErrorBody, runAgentCli } from './agent-cli.js';
 import { AgentGroupToolCliError, runAgentCommand, runGroupBots, runGroupHandoff, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupReplyAgent, runGroupSelf, runGroupSend, runGroupSendFile, runGroupTeamSearch, runGroupWait, runHistoryList, runHistoryShow } from './lark/agent-tools-cli.js';
 import { runMemoryAdd, runMemoryList, runMemoryRemove, runMemorySearch, runMemoryShow } from './lark/memory-cli.js';
 import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
@@ -445,6 +446,7 @@ async function main() {
     },
     collaborate: async (operation, id, options) => { output(await runCollaboration(operation, id, options)); },
     work: async (operation, args, options) => { output(await runWorkCommand(operation, args, options)); },
+    agent: (operation, args, options) => runAgentCli(operation, args, options),
     groupSelf: async () => { output(await runGroupSelf()); },
     groupPeers: async () => { output(await runGroupPeers()); },
     groupMembers: async () => { output(await runGroupMembers()); },
@@ -537,7 +539,9 @@ async function main() {
 try {
   await main();
 } catch (error) {
-  if (error instanceof AgentGroupToolCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: error.error })}\n`);
+  // dutydeck agent 的用法错误也只往 stdout 写一个 JSON。
+  if (error instanceof AgentCliError) process.stdout.write(`${JSON.stringify({ ok: false, error: agentCliErrorBody(error) })}\n`);
+  else if (error instanceof AgentGroupToolCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: error.error })}\n`);
   else if (error instanceof LegacyImportError || error instanceof LegacyImportCliError) {
     process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   }

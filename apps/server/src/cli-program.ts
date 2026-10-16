@@ -5,6 +5,7 @@ import type { SessionNamesAction } from './session-names-cli.js';
 import type { ScheduleCliAction, ScheduleCliInput, ScheduleRequestCliInput } from './schedule-cli.js';
 import { agentFields, botFields, fieldsHelp, groupFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { agentCommandHelp } from './lark/agent-command.js';
+import { addAgentCommands } from './agent-cli.js';
 import { Command } from 'commander';
 import { DatabaseCliError } from './database-cli.js';
 import type { PluginCliAction, PluginCliOptions } from './plugins/cli.js';
@@ -208,6 +209,8 @@ export interface CliHandlers {
   plugin?(action: PluginCliAction, args: string[], options: PluginCliOptions): void | Promise<void>;
   recovery?(operation: RecoveryOperation, sessionId: string, options: RecoveryCliOptions): void | Promise<void>;
   collaborate?(operation: string, id: string | undefined, options: { json?: string; file?: string; turn?: string }): void | Promise<void>;
+  /** dutydeck agent：operation 如 status、session.new、group.send；输出统一 JSON（见 agent-cli.ts）。 */
+  agent?(operation: string, args: unknown[], options: Record<string, unknown>): void | Promise<void>;
   serve?(options: CliOptions): void | Promise<void>;
   setup?(options: SetupCliProgramOptions): void | Promise<void>;
   doctor?(options: DoctorCliOptions): void | Promise<void>;
@@ -559,6 +562,9 @@ Examples:
     .argument('<channel-bot-id>', 'Staged or disabled ChannelBot ID')
     .option('--group-binding <id>', 'Limit verification to a GroupBinding (repeatable)', (value: string, previous: string[]) => [...previous, value], [])
     .action((channelBotId, options) => handlers.identityPreflight?.(channelBotId, options));
+
+  // 给 Agent 用的统一入口；下面 work/group/history/collaborate/command/memory/schedule request 是兼容旧会话的入口。
+  addAgentCommands(program, (operation, args, options) => handlers.agent?.(operation, args, options));
 
   const work = program.command('work').description('Arrange durable goals, Agent steps and reusable workflows in the current Feishu conversation').requiredOption('--turn <token>', 'Current task capability supplied by Dutydeck');
   work.addHelpText('after', workbenchHelp() + '\n' + layeredWorkbenchHelp());

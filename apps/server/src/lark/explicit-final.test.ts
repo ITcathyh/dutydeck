@@ -227,6 +227,16 @@ describe('explicit final: real tools, runtime, coordinator and SQLite', () => {
     expect(resultSends(progress)).toHaveLength(1);
   });
 
+  it('without --turn delivers for the running attempt; with no running task it is refused as before', async () => {
+    const h = await harness();
+    const sent = await h.sendFinal(undefined, { turn: undefined });
+    expect(resultSends(h)).toHaveLength(1);
+    expect((await h.sendFinal()).messageId).toBe(sent.messageId);
+    h.release();
+    expect((await h.resultCard()).final_message_id).toBe(sent.messageId);
+    await expect(h.sendFinal('answer', { turn: undefined })).rejects.toMatchObject({ code: 'FINAL_NO_ACTIVE_TASK' });
+  });
+
   it('rejects old task/attempt, other sessions, forged tokens, target overrides, empty answer and turn without final', async () => {
     const h = await harness();
     for (const turn of ['forged', h.capabilities.finalTurnToken(h.session.id, h.active.taskId, 'old-attempt'),
@@ -520,11 +530,12 @@ it('restart delivers a cancellation diagnostic even if an explicit answer exists
 it('publishes a domain-separated attempt token in the prompt only', async () => {
   const h = await harness();
   const prompt = await h.tools.promptForSession(h.session, 'request');
-  expect(prompt).toContain(`group send '<完整答复>' --final --turn ${h.turn}`);
+  expect(prompt).toContain(`group send '<完整答复>' --final`);
+  expect(prompt).not.toContain(h.turn);
   expect(h.turn).not.toBe(h.capabilities.workbenchTurnToken(h.session.id, h.active.taskId));
   expect(JSON.stringify(h.capabilities.environmentFor(h.session))).not.toContain(h.turn);
   await h.repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...h.config, groupToolsAllowSend: false }]));
-  expect(await h.tools.promptForSession(h.session, 'request')).not.toContain('--final --turn');
+  expect(await h.tools.promptForSession(h.session, 'request')).not.toContain('--final');
 });
 
 it('provides only platform controls when the original card is permanently unupdatable', async () => {

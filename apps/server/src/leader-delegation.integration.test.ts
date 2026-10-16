@@ -170,7 +170,7 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     const turn = await f.pmoTurn('om_goal', '帮我修复登录并补测试');
     const pmoPrompt = f.prompts.find(value => value.agentId === 'pmo')!.prompt;
     expect(pmoPrompt).toContain('[Dutydeck 分层协作]');
-    expect(pmoPrompt).toContain('work --turn');
+    expect(pmoPrompt).toContain('dutydeck agent work delegate --file');
     expect(pmoPrompt).toContain('delegate --file');
     expect(pmoPrompt).not.toContain('[Dutydeck 目标编排]');
 
