@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { fromMarkdown } from 'mdast-util-from-markdown';
 import type { AgentEvent } from '@dutydeck/shared';
 import {
   renderLarkCardElements,
@@ -1298,6 +1299,22 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     expect(byId(card, 'final_output_more')).toBeUndefined();
     expect(byId(card, 'task_overview')).toBeUndefined();
     expect(byId(card, 'task_elapsed').content).toContain('用时 9 秒');
+  });
+
+  it.each(['需要你：', '**需要你：** ', '- **需要你:** '])('result 卡的「需要你」标签渲染为加粗而不是星号：%s', prefix => {
+    const request = '确认是否将「download_image 下游存储读取异常与 5xx 语义映射治理」录入待办？（回复「记待办」即可自动创建）';
+    const card = buildLarkCard({ cardKind: 'result', state: 'completed', elements: [
+      { tag: 'markdown', element_id: 'final_output', content: `排查完成。\n\n${prefix}${request}` }
+    ] });
+    expect(byId(card, 'final_output').content).toBe('排查完成。');
+    const notice = byId(card, 'need_you').elements[0];
+    expect(notice.tag).toBe('markdown');
+    expect(fromMarkdown(notice.content).children).toMatchObject([{
+      type: 'paragraph', children: [
+        { type: 'strong', children: [{ type: 'text', value: '需要你：' }] },
+        { type: 'text', value: ` ${request}` }
+      ]
+    }]);
   });
 
   it('P7b. result 卡长结论：开头一段露在外面，其余收进折叠；拼回去与原文逐字一致', () => {

@@ -839,7 +839,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         corner_radius: '8px', padding: '8px 10px 8px 10px', margin: '0px', direction: 'vertical', vertical_spacing: '2px',
         elements: needs.map(line => ({
           tag: 'markdown', text_size: 'normal', margin: '0px',
-          content: `**需要你：**${line.replace(/^(?:\*\*)?需要你[：:](?:\*\*)?\s*/, '')}`,
+          content: `**需要你：** ${line.replace(/^(?:\*\*)?需要你[：:](?:\*\*)?\s*/, '')}`,
           icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'orange' }
         }))
       }] : [];

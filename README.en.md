@@ -138,7 +138,7 @@ Frontend `http://127.0.0.1:4311`, backend `http://127.0.0.1:4310`.
 2. **Receipt**: the bot reacts with `👌` on your message and sends a progress card. A check mark is added when the turn finishes; a cross mark when it fails or is interrupted (not when you cancel).
 3. **Approval**: the card starts with a one-line summary (e.g. "Run command: pnpm test"). Buttons: "Allow once", "Allow this command for the session" (initiator only, non-high-risk commands only), "Reject". An unhandled card gets a reminder after 30 minutes (the task keeps waiting) and is auto-rejected after 24 hours.
 4. **Questions**: tap an option, or quote the card and reply with your answer. The full question and all options are shown when they fit; otherwise a full-text attachment is sent and the card is clearly marked as an excerpt. Dutydeck does not publish the answerable Lark card until attachment delivery succeeds; delivery resumes after recovery. Answered or expired cards retain the content originally displayed. Approval cards remain redacted; raw commands are not uploaded as full-text attachments.
-5. **Result**: the result card shows the change summary, verification result and long attachments, plus a "View changes" link when the turn changed files.
+5. **Result**: the result card shows the change summary, verification result and long attachments, plus a "View changes" link when the turn changed files. A `需要你：…` (action needed) line after the conclusion appears in a separate highlighted block with a bold label.
 
 **Attachments and delivery.** Markdown and structured images in cards share a deduplicated limit of 4 images. Only real Markdown image syntax with a valid Lark `img_key` is read; code examples and ordinary image URLs do not trigger downloads.
 
