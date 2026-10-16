@@ -8,7 +8,7 @@ const turn = new AgentCardTurn(LarkCardClient.fromEnv(), {
   receiveId,
   receiveIdType: process.env.LARK_RECEIVE_ID_TYPE?.trim() || 'email',
   taskName: 'Agent Debug',
-  taskId: '18779161860',
+  taskId: 'synthetic-task-1',
   refreshIntervalMs: 5000
 });
 turn.startedAt -= 35_000;

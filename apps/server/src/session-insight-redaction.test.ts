@@ -15,8 +15,9 @@ import {
 const GOLDEN_PATH = fileURLToPath(
   new URL('../../../tests/fixtures/session-insight/golden/analyze-result.golden.json', import.meta.url)
 );
-const PRIVATE_ROOT = '/home/huangyuhang.edu/.dutydeck/private-data';
+const PRIVATE_ROOT = '/home/fixture-user/.dutydeck/private-data';
 const context: RedactionContext = { canaryPaths: [PRIVATE_ROOT] };
+const escapedQuoteCommand = String.raw`export SECRET_KEY="first \"middle\" LAST_CANARY"; echo done`;
 
 function loadGolden(): AnalyzeFilesResult {
   return analyzeFilesResultSchema.parse(
@@ -58,6 +59,17 @@ describe('redactText 凭据与路径脱敏', () => {
       .not.toContain('opaque credential');
   });
 
+  it.each([escapedQuoteCommand, JSON.stringify({ command: escapedQuoteCommand })])('完整脱敏值内转义双引号及尾部凭据，保留后续命令：%s', text => {
+    const redacted = redactText(text);
+    for (const fragment of ['first', 'middle', 'LAST_CANARY']) expect(redacted).not.toContain(fragment);
+    expect(redacted).toContain('echo done');
+  });
+
+  it('保留裸 API Key 和 query 凭据的自定义占位符', () => {
+    const text = 'sk-proj-SYNTHETIC_CANARY_1234567890 https://api.example.com/path?key=query-canary&sig=signature-canary';
+    expect(redactText(text, { secretPlaceholder: '[PRIVATE]' })).toBe('[PRIVATE] https://api.example.com/path?key=[PRIVATE]&sig=[PRIVATE]');
+  });
+
   it('抹掉 PEM 私钥（含截断在 END 之前的情况）', () => {
     const pem =
       '-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqh\nSECRETBODY123\n-----END PRIVATE KEY-----';
@@ -87,7 +99,7 @@ describe('redactText 凭据与路径脱敏', () => {
     const text = `workspace ${PRIVATE_ROOT}/logs/a.jsonl and /tmp/public.txt`;
     const out = redactText(text, context);
     expect(out).not.toContain(PRIVATE_ROOT);
-    expect(out).not.toContain('huangyuhang');
+    expect(out).not.toContain('fixture-user');
     expect(out).toContain('/tmp/public.txt');
   });
 
@@ -252,6 +264,23 @@ describe('redactAnalyzeResult 公开投影', () => {
     expect(serialized).not.toContain(PRIVATE_ROOT);
     expect(serialized).toContain('echo done');
     expect(JSON.stringify(injected)).toContain(secret);
+  });
+
+  it('公开投影完整脱敏原始和 JSON 编码命令内的转义双引号凭据', () => {
+    const injected = structuredClone(loadGolden());
+    const original = injected.files[0]!.trace[0]!;
+    injected.files[0]!.trace = [escapedQuoteCommand, JSON.stringify({ command: escapedQuoteCommand })].map((text, index) => ({
+      ...original, eventId: `escaped-quote-${index}`, inputExcerpt: text, outputExcerpt: text
+    }));
+    const projected = redactAnalyzeResult(injected, context);
+    for (const entry of projected.files[0]!.trace) {
+      for (const text of [entry.inputExcerpt!, entry.outputExcerpt!]) {
+        for (const fragment of ['first', 'middle', 'LAST_CANARY']) expect(text).not.toContain(fragment);
+        expect(text).toContain('echo done');
+      }
+    }
+    expect(() => analyzeFilesResultSchema.parse(projected)).not.toThrow();
+    expect(JSON.stringify(injected)).toContain('LAST_CANARY');
   });
 
   it('identity 含路径 canary 时拒绝发布而非静默改写', () => {

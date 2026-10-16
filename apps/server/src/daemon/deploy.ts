@@ -114,7 +114,8 @@ function checkBuild(source: string): BuiltCheckout | { error: string } {
   } catch {
     return { error: `${source} 不是 Dutydeck 检出目录：读不到 apps/server/package.json。` };
   }
-  if (pkg.name !== '@byted/dutydeck' || !pkg.version) return { error: `${server}/package.json 不是 Dutydeck 服务包（name=${pkg.name ?? '未知'}）。` };
+  // 兼容旧发布包名，允许现有检出直接升级。
+  if ((pkg.name !== 'dutydeck' && pkg.name !== '@byted/dutydeck') || !pkg.version) return { error: `${server}/package.json 不是 Dutydeck 服务包（name=${pkg.name ?? '未知'}）。` };
   const missing = BUILD_OUTPUTS.filter(file => !existsSync(join(server, file)));
   if (missing.length > 0) return { error: `${server} 缺少构建产物 ${missing.join('、')}。先在 ${source} 里执行 pnpm install --frozen-lockfile && pnpm build。` };
   if (!existsSync(join(source, 'node_modules', '.pnpm'))) return { error: `${source} 没有安装依赖（缺 node_modules/.pnpm）。先执行 pnpm install --frozen-lockfile。` };

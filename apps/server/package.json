@@ -1,5 +1,5 @@
 {
-  "name": "@byted/dutydeck",
+  "name": "dutydeck",
   "version": "0.0.7",
   "type": "module",
   "engines": {

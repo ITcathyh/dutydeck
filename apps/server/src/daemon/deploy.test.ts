@@ -75,7 +75,7 @@ function fakeCheckout(root: string, behaviour: CliBehaviour = {}) {
   const server = join(root, 'apps', 'server');
   const store = join(root, 'node_modules', '.pnpm');
   write(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - apps/*\n');
-  write(join(server, 'package.json'), JSON.stringify({ name: '@byted/dutydeck', version: '0.0.3', type: 'module', dependencies: { 'dep-a': '1.0.0' }, devDependencies: { 'dev-only': '1.0.0' } }));
+  write(join(server, 'package.json'), JSON.stringify({ name: 'dutydeck', version: '0.0.3', type: 'module', dependencies: { 'dep-a': '1.0.0' }, devDependencies: { 'dev-only': '1.0.0' } }));
   for (const [id, name, code] of [['dep-a@1.0.0', 'dep-a', "import b from 'dep-b'; export default `a+${b}`;"], ['dep-b@1.0.0', 'dep-b', "export default 'b';"], ['dev-only@1.0.0', 'dev-only', "export default 'dev';"]] as const) {
     write(join(store, id, 'node_modules', name, 'package.json'), JSON.stringify({ name, version: '1.0.0', type: 'module', main: 'index.js' }));
     write(join(store, id, 'node_modules', name, 'index.js'), code);
@@ -661,6 +661,25 @@ describe('dutydeck deploy', () => {
     const malformed = await runDeploy({ source, runtime: bot, restart: false }, deps({ env: { DUTYDECK_DEPLOY_WINDOW: 'mornings' } }));
     expect(malformed).toMatchObject({ ok: false, status: 'refused' });
   }, 60_000);
+
+  it.each(['dutydeck', '@byted/dutydeck'])('接受服务包名 %s，保留旧检出的升级能力', async name => {
+    const path = join(source, 'apps/server/package.json');
+    const pkg = JSON.parse(readFileSync(path, 'utf8'));
+    writeFileSync(path, JSON.stringify({ ...pkg, name }));
+    const result = await runDeploy({ source, runtime: bot, restart: false }, deps());
+    expect(result, result.error).toMatchObject({ ok: true, status: 'staged' });
+    expect(JSON.parse(readFileSync(join(result.release!, 'package.json'), 'utf8')).name).toBe(name);
+  });
+
+  it('拒绝其他包名，避免把无关服务当作 Dutydeck 部署', async () => {
+    const path = join(source, 'apps/server/package.json');
+    const pkg = JSON.parse(readFileSync(path, 'utf8'));
+    writeFileSync(path, JSON.stringify({ ...pkg, name: 'unrelated-server' }));
+    const result = await runDeploy({ source, runtime: bot, restart: false }, deps());
+    expect(result).toMatchObject({ ok: false, status: 'refused' });
+    expect(result.error).toContain('不是 Dutydeck 服务包');
+    expect(existsSync(releases)).toBe(false);
+  });
 
   it('构建产物缺失或早于最新提交时拒绝部署', async () => {
     utimesSync(join(source, 'apps', 'server', 'dist', 'cli.js'), new Date(Date.now() - 3_600_000), new Date(Date.now() - 3_600_000));

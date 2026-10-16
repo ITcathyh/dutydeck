@@ -8,7 +8,7 @@
 
 | 文件名 | 客户端 | 流类型 | 行数 | 字节数 | SHA256 校验和 | 采样时间 (UTC) | 客户端版本 | 原生 Session ID |
 |---|---|---|---|---|---|---|---|---|
-| `codex.jsonl` | codex | main | 32 | 21,286 | `8855c11c4386249a626f158d74fdb0503064cec2d0cf5cb4d101964261ac6987` | 2026-10-03T02:45:40Z | `codex-cli 0.160.0` | `01a0ffa7-270b-72f1-be55-21dde8e42935` |
+| `codex.jsonl` | codex | main | 32 | 20,272 | `489c193acd2493d953647f5fc1150c59e6ff72a448995b60b101d396f612c683` | 2026-10-03T02:45:40Z | `codex-cli 0.160.0` | `01a0ffa7-270b-72f1-be55-21dde8e42935` |
 | `traex.jsonl` | traex | main | 18 | 14,247 | `754d2548800ceb4af06f45c2a91c5ccfa5328276a22e260a2d9228c168d4235b` | 2026-10-03T02:45:07Z | `traecli 0.208.1-alpha.5` | `01a0ffa6-a71d-79b3-9a87-d386f1808e41` |
 | `claude-main.jsonl` | claude | main | 6 | 6,157 | `df6d31d43478c20916984cab9da0a8de7761219861a54d5319305b8202d1068b` | 2026-10-03T02:55:10Z | `2.1.288 (Claude Code)` | `0192e000-7a3b-7000-8000-000000000001` |
 | `claude-subagent.jsonl` | claude | subagent | 8 | 7,693 | `edc45222add9bb1f9a43dd06478b8ce3547389c1c7b5406878cf532a99d4f0ad` | 2026-10-03T02:55:11Z | `2.1.288 (Claude Code)` | `0192e000-7a3b-7000-8000-000000000001` (agentId: `a01e15e2adc99f940`) |
@@ -20,7 +20,7 @@
 ## 2. 采样执行与结构投影说明
 
 ### 2.1 结构投影与自由文本 Placeholder 规则
-为避免将数万字符的系统开发指令、环境配置、长文档全文或个人配置带入测试仓库，本 fixture 对自由文本字段采用轻量 placeholder 投影，原生结构字段保持不变：
+为避免将数万字符的系统开发指令、环境配置、长文档全文或个人配置带入测试仓库，本 fixture 对自由文本字段采用轻量 placeholder 投影，除下面明确列出的账户脱敏字段外，原生结构字段保持不变：
 - **保留字段（未改动）**：
   - 核心元数据：`type`, `status`, `timestamp`, `model`, `exit_code`
   - 身份与调用关系：`sessionId`, `agentId`, `isSidechain`, `uuid`, `parentUuid`, `toolUseId`, `callId`, `turn_id`, `commit_id`
@@ -33,6 +33,7 @@
   - `turn_context` 中的 sandbox/permission 文本 → `"<permission_profile_placeholder>"` 等
   - `tool_result` / `AgentMessage` / `thinking` 文本 → 相应占位符，保留结构对象。
   - `thinking.signature` → `"<signature_placeholder>"`（不透明 blob 不参与分析计算）。
+- **账户信息脱敏**：删除 Codex `session_meta.payload.creator_*` 身份字段；`token_count.payload.rate_limits` 替换为固定合成值：`primary` 的 `used_percent: 0`、`window_minutes: 10080`、`resets_at: 1`，`secondary: null`。账户余额、credits、plan_type 不入库。此投影只保留驱动读取的限额结构，不代表真实账户额度；`info` 内真实 token usage 保持不变。
 
 ### 2.2 Claude 过滤行映射与范围 (Filtered Line Mapping)
 Claude 运行时会在日志中交替写入大批内部系统附件（如 `attachment`, `queue-operation`, `atis-latch`, `last-prompt`, `cost-state`），这些附件包含环境快照与内部 latch，不参与 session insight 的指标与 trace 计算。为保证测试集紧凑，按规则过滤了非分析附件行。
@@ -147,13 +148,14 @@ Claude 运行时会在日志中交替写入大批内部系统附件（如 `attac
 
 ## 5. 机器核验脚本说明
 
-目录内提供可重复核验脚本 `verify-fidelity.mjs`，执行命令：
+目录内提供可重复核验脚本 `verify-fidelity.mjs`，在仓库根目录执行：
 ```bash
-# 1. 基础完整性与 Canary 扫描自检：
-node verify-fidelity.mjs
+# 1. 基础完整性、Canary 与账户字段检查：
+node tests/fixtures/session-insight/real-native/verify-fidelity.mjs
+pnpm vitest run tests/fixtures/session-insight/real-native/verify-fidelity.test.ts
 
 # 2. 对照外部原始源日志比对数值一致性（不自动扫描 HOME，需显式传参）：
-node verify-fidelity.mjs \
+node tests/fixtures/session-insight/real-native/verify-fidelity.mjs \
   --codex-raw <path-to-raw-codex-rollout.jsonl> \
   --traex-raw <path-to-raw-traex-rollout.jsonl> \
   --claude-main-raw <path-to-raw-claude-main.jsonl> \

@@ -37,11 +37,6 @@ const SENSITIVE_QUERY_KEY_REGEX =
 // Known API key prefixes also appear as bare values in diagnostic prose.
 const API_KEY_TOKEN_REGEX = /\bsk-(?:ant-api\d{2}-|proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b/g;
 
-// Tool inputs can contain JSON-escaped shell quotes. Match the entire quoted
-// credential before the shared redactor can stop at a space inside its value.
-const QUOTED_CREDENTIAL_ASSIGNMENT_REGEX =
-  /(\b(?:authorization|[A-Za-z0-9_]*(?:api[_-]?key|secret[_-]?key|access[_-]?token|token|secret|password|passwd|pwd))(?:\\?["'])?\s*[:=]\s*)(\\?")(?:(?!\2)[\s\S])*\2/gi;
-
 /**
  * 对普通字符串执行完整的凭据和路径脱敏：
  * 1. 替换已知私有路径 canary（按长度降序优先匹配，防止前缀碎片截留）
@@ -75,20 +70,14 @@ export function redactText(text: string, context?: RedactionContext): string {
     }
   }
 
-  // 2. URL userinfo：贪婪吃到 host 前最后一个 @，覆盖密码本身含 @ 的情况
-  //    （lark/secret-redaction 的非贪婪规则遇到 p@ss@host 会漏掉第二段）。
-  redacted = redacted.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/]*@/gi, '$1[REDACTED]@');
-
-  // 3. 裸 API Key 与 JSON 转义的带引号赋值也必须整体脱敏。
+  // 2. 保留自定义 API Key 占位符。
   const secretPlaceholder = context?.secretPlaceholder ?? '[REDACTED]';
   redacted = redacted.replace(API_KEY_TOKEN_REGEX, secretPlaceholder);
-  redacted = redacted.replace(QUOTED_CREDENTIAL_ASSIGNMENT_REGEX,
-    (_match, prefix: string, quote: string) => prefix + quote + secretPlaceholder + quote);
 
-  // 4. 复用现有 secret-redaction (PEM, authorization, bearer, flags, envs)
+  // 3. 复用 secret-redaction（含转义引号赋值和密码带 @ 的 URL userinfo）。
   redacted = redactTraceText(redacted);
 
-  // 5. 补足 URL query 敏感凭据脱敏
+  // 4. 补足 URL query 敏感凭据脱敏
   redacted = redacted.replace(SENSITIVE_QUERY_KEY_REGEX, context?.secretPlaceholder ?? '[REDACTED]');
 
   return redacted;

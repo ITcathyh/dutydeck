@@ -19,7 +19,7 @@ describe('participation rules', () => {
   });
 
   it('试点原句：单人群里没 @ 的「总结下这个文档要做的事情 <链接>」算在叫它；多个机器人同群时不算', () => {
-    const text = '总结下这个文档要做的事情 https://bytedance.larkoffice.com/docx/AbCdEf123';
+    const text = '总结下这个文档要做的事情 https://tenant.larkoffice.com/docx/AbCdEf123';
     expect(rule({ text, members: { humans: 1, bots: 1 } })).toMatchObject({ action: 'addressed', rule: 'single_human' });
     expect(rule({ text, members: { humans: 1, bots: 0 } })).toMatchObject({ action: 'addressed', rule: 'single_human' });
     expect(rule({ text, members: { humans: 1, bots: 2 } })).toMatchObject({ action: 'silent', rule: 'no_responder' });

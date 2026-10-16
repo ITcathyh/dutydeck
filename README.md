@@ -119,15 +119,20 @@
 - **包管理器**：`pnpm >= 11`
 - **已安装并登录的 Agent CLI**：Claude Code（`claude`）、Codex 或其他支持 ACP / CLI 的智能体。
 
-### 2. 全局安装与配置
+### 2. 从源码安装与配置
 
 ```bash
-# 全局安装 Dutydeck
-pnpm add -g @byted/dutydeck --registry=http://bnpm.byted.org
+git clone https://github.com/ITcathyh/dutydeck.git
+cd dutydeck
+pnpm install --frozen-lockfile
+pnpm build
 
-# 运行交互式配置向导（可重复运行）
+# 把已构建的本地 CLI 链接到 npm 的全局 bin 目录
+(cd apps/server && npm link --offline)
 dutydeck setup
 ```
+
+请将 npm 的全局 bin 目录加入 `PATH`。此安装使用本地构建，不依赖已发布的 Dutydeck npm 包。
 
 向导会探测本机可用的 Agent、设置默认工作目录，并可选地绑定飞书机器人。绑定时：
 
@@ -168,18 +173,14 @@ dutydeck status
 
 ### 源码二次开发与调试模式
 
+在上面的源码检出目录运行：
+
 ```bash
-# 1. 克隆代码仓库并安装依赖
-git clone https://github.com/ITcathyh/dutydeck.git
-cd dutydeck
-pnpm install
-
-# 2. 配置环境变量
 cp .env.example .env
-
-# 3. 启动前后端热重载开发模式
 pnpm dev
 ```
+
+更新源码后，在检出目录重新执行 `pnpm install --frozen-lockfile && pnpm build`，再运行 `dutydeck restart`。`dutydeck update` 用于 npm registry 中已发布的版本，不更新源码检出。
 
 本地开发地址：
 - **Web 前端**：`http://127.0.0.1:4311`
@@ -211,6 +212,8 @@ pnpm dev
 5. **交付验收**：结果卡包含改动摘要、验证结果（通过 / 未通过 / 未验证 / 已过期）和超长 Markdown 附件；有改动的轮次带「查看改动」链接。
 
 ### 附件读取与结果投递
+
+飞书卡片与公开执行记录导出会隐藏可识别的凭据，包括 `SECRET_KEY`、JWT 赋值、常见 `sk-` API 密钥和 URL 中的账号密码；同样的凭据识别会拒绝写入长期记忆。规则不能识别所有私密内容，分享前仍需核对输出。
 
 卡片的 Markdown 图片和结构化图片共用最多 4 张的读取上限，并去重；Markdown 中仅识别实际图片语法里的合法飞书 `img_key`，代码示例和普通图片 URL 不会触发下载。
 
@@ -454,6 +457,8 @@ dutydeck schedule delete schedule_xxx --session ses_xxx
 ## Agent 配置与权限姿态 <a id="agent-config"></a>
 
 Dutydeck 支持 ACP（Agent Client Protocol），也支持用 PTY 驱动已有的 CLI Agent。
+
+启动时按 `PATH` 探测内置 Agent，并查询已找到的 CLI 版本。Seed / Relay 不参与默认探测；如需沿用其适配器，请通过 `DUTYDECK_AGENTS_JSON` 或插件显式注册，设置 `protocol: "pty-cli"` 和对应的 `adapterId`（`seed` / `relay`）。
 
 ### 1. 自定义 Agent (`DUTYDECK_AGENTS_JSON`)
 
@@ -841,7 +846,7 @@ dutydeck restart
 # 停止守护进程
 dutydeck stop
 
-# 更新全局 Dutydeck 包并自动重启
+# 更新 npm registry 中已发布的 Dutydeck 包并自动重启（源码安装见上文）
 dutydeck update
 
 # 一键诊断（端口、SQLite、Agent 可执行性与默认 Agent、飞书监听等）

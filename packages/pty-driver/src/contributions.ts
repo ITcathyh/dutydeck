@@ -52,8 +52,8 @@ export const PTY_AGENT_CONTRIBUTIONS: PtyAgentContribution[] = [
   { id: 'kiro-cli', name: 'Kiro', command: 'kiro-cli', adapterId: 'kiro-cli', capabilities: { pause: false, resume: true } },
   { id: 'reasonix', name: 'Reasonix', command: 'reasonix', adapterId: 'reasonix', capabilities: { pause: false, resume: true } },
   { id: 'dsh-tui', name: 'DeepSeek Harness TUI', command: 'dsh-tui', adapterId: 'dsh-tui', capabilities: { pause: false, resume: false } },
-  { id: 'seed', name: 'Seed', command: 'seed', adapterId: 'seed', capabilities: { pause: false, resume: true } },
-  { id: 'relay', name: 'Relay', command: 'relay', adapterId: 'relay', capabilities: { pause: false, resume: true } },
+  // Seed / Relay require explicit DUTYDECK_AGENTS_JSON or plugin registration.
+  // Keep their adapters available without probing company-specific CLI accounts.
   { id: 'aiden', name: 'Aiden', command: 'aiden', adapterId: 'aiden', capabilities: { pause: false, resume: true } },
   { id: 'genius', name: 'Genius', command: 'genius', adapterId: 'genius', capabilities: { pause: false, resume: true } },
   // ⚠️ 未登记：mir / dsh / codex-app / mojo / riff / mira —— 适配器都已移植可用

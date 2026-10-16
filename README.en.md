@@ -86,12 +86,18 @@ A local daemon connects the coding agents on your machine or dev server (Claude 
 - **Node.js** `>= 22.12.0`, **pnpm** `>= 11`
 - An authenticated Agent CLI (Claude Code `claude`, Codex, or another ACP agent)
 
-### 2. Install and set up
+### 2. Install from source and set up
 
 ```bash
-pnpm add -g @byted/dutydeck --registry=http://bnpm.byted.org
+git clone https://github.com/ITcathyh/dutydeck.git
+cd dutydeck
+pnpm install --frozen-lockfile
+pnpm build
+(cd apps/server && npm link --offline)
 dutydeck setup
 ```
+
+Add npm's global bin directory to `PATH`. This installs the local build and does not depend on a published Dutydeck npm package.
 
 The wizard detects Agent CLIs, sets the default working directory and can bind a Lark bot. The default Agent and the App Secret are stored in the bot configuration (the same one the Web panel shows), not in `.env`; the secret is prompted with hidden input. When creating a bot interactively it asks whether to start listening now (default yes).
 
@@ -118,13 +124,14 @@ Web console: `http://127.0.0.1:4310` (no login for local requests).
 
 ### Development from source
 
+In the source checkout created above:
+
 ```bash
-git clone https://github.com/ITcathyh/dutydeck.git
-cd dutydeck
-pnpm install
 cp .env.example .env
 pnpm dev
 ```
+
+After updating the source, run `pnpm install --frozen-lockfile && pnpm build` in the checkout, then `dutydeck restart`. `dutydeck update` targets published npm registry versions and does not update a source checkout.
 
 Frontend `http://127.0.0.1:4311`, backend `http://127.0.0.1:4310`.
 
@@ -141,6 +148,8 @@ Frontend `http://127.0.0.1:4311`, backend `http://127.0.0.1:4310`.
 5. **Result**: the result card shows the change summary, verification result and long attachments, plus a "View changes" link when the turn changed files.
 
 **Attachments and delivery.** Markdown and structured images in cards share a deduplicated limit of 4 images. Only real Markdown image syntax with a valid Lark `img_key` is read; code examples and ordinary image URLs do not trigger downloads.
+
+Lark cards and public execution record exports redact recognized credentials, including `SECRET_KEY` and JWT assignments, common `sk-` API keys, and URL usernames/passwords. The same detection rejects writes to long-term memory. These rules cannot recognize every private value; review output before sharing it.
 
 Lark files fall back to Range downloads with the same bot identity only after an explicit platform size-limit response. Files stream to disk in chunks of at most 32 MB, with a **512 MiB local per-file limit** chosen by Dutydeck, not a Lark platform limit. Images do not use Range. Permission and restricted-message errors are not bypassed; failed, cancelled or timed-out downloads do not give the Agent partial files. The existing request deadline still applies (15 seconds by default); slow large files may need to be provided as smaller files.
 
@@ -267,6 +276,8 @@ Scheduled tasks keep the selected permission posture; `ask` can wait for human a
 ---
 
 ## Agent Configuration & Permissions <a id="agent-config"></a>
+
+Startup discovers built-in agents on `PATH` and queries the versions of installed CLIs. Seed / Relay are excluded from default discovery. To use their existing adapters, register them explicitly through `DUTYDECK_AGENTS_JSON` or a plugin with `protocol: "pty-cli"` and the matching `adapterId` (`seed` / `relay`).
 
 ### 1. Custom agents (`DUTYDECK_AGENTS_JSON`)
 

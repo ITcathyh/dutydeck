@@ -4,7 +4,7 @@
  *
  * Verifies that:
  *  1. All fixture files are valid JSON per line.
- *  2. No credentials, tokens, or private home paths leak into fixtures.
+ *  2. No credentials, tokens, private home paths, or source account fields leak into fixtures.
  *  3. (When raw source paths are supplied via CLI flags):
  *     - Verifies numerical usage values, timestamps, and exit codes.
  *     - Verifies actual models (message.model, payload.model, meta model).
@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -37,17 +38,37 @@ const FORBIDDEN_PATTERNS = [
   /\/home\/[a-zA-Z0-9_\-\.]+\.edu/i,
 ];
 
-function auditFixtureFile(filePath) {
+// 保留驱动读取的限额形状，数值只允许此固定合成样本，不能带来源账户数据。
+const SYNTHETIC_RATE_LIMITS = {
+  primary: { used_percent: 0, window_minutes: 10080, resets_at: 1 }, secondary: null
+};
+
+function auditAccountFields(value, filePath, line) {
+  if (!value || typeof value !== 'object') return;
+  for (const [key, child] of Object.entries(value)) {
+    if (key.startsWith('creator_') || key === 'credits' || key === 'plan_type') {
+      throw new Error(`Forbidden account field ${key} in ${filePath}:${line}`);
+    }
+    if (key === 'rate_limits' && child !== null && !isDeepStrictEqual(child, SYNTHETIC_RATE_LIMITS)) {
+      throw new Error(`Non-synthetic rate_limits in ${filePath}:${line}`);
+    }
+    auditAccountFields(child, filePath, line);
+  }
+}
+
+export function auditFixtureFile(filePath) {
   const content = fs.readFileSync(filePath, 'utf8');
   const lines = content.trim().split('\n');
   const sha256 = crypto.createHash('sha256').update(content, 'utf8').digest('hex');
 
   lines.forEach((line, idx) => {
+    let record;
     try {
-      JSON.parse(line);
+      record = JSON.parse(line);
     } catch (err) {
       throw new Error(`Invalid JSON in ${filePath}:${idx + 1}: ${err.message}`);
     }
+    auditAccountFields(record, filePath, idx + 1);
   });
 
   for (const reg of FORBIDDEN_PATTERNS) {
@@ -272,4 +293,4 @@ function main() {
   }
 }
 
-main();
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) main();

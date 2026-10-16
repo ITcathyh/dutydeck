@@ -1023,7 +1023,7 @@ describe('rule layer, participation levels and corrections (pilot sentences)', (
     const h = await harness('selective');
     Object.assign(h.service, { listChatMembers: members(1) });
     h.participation.setDispatcher(scope.appId, (event, current) => h.coordinator.adopt(event, current));
-    await h.coordinator.handle(message('om_doc', '总结下这个文档要做的事情 https://bytedance.larkoffice.com/docx/AbCdEf123'), config);
+    await h.coordinator.handle(message('om_doc', '总结下这个文档要做的事情 https://tenant.larkoffice.com/docx/AbCdEf123'), config);
     await h.participation.flush(scope);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
     expect(h.decide).not.toHaveBeenCalled();

@@ -386,7 +386,7 @@ describe('collectLarkTaskContext', () => {
   });
 
   it('reads larkoffice document links while rejecting lookalike hosts and credentials', async () => {
-    const urls = ['https://bytedance.larkoffice.com/docx/original', 'https://larkoffice.com/wiki/child'];
+    const urls = ['https://tenant.larkoffice.com/docx/original', 'https://larkoffice.com/wiki/child'];
     const rejected = ['https://evil-larkoffice.com/docx/x', 'https://larkoffice.com.evil.example/docx/x', 'https://user@larkoffice.com/docx/x'];
     const readDocument = vi.fn(async (url: string) => ({ url, text: `正文 ${url}` }));
     const result = await collect({ prompt: [...urls, ...rejected].join('\n'), service: service({ readDocument }) });
