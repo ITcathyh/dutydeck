@@ -599,6 +599,33 @@ describe('恢复已关闭会话与并行分身', () => {
     rebuilt.stop();
   });
 
+  it('all_chat_members 只能列出和恢复自己有 run.resume 权限的会话', async () => {
+    const h = await harness({ managedGroup: true, answer: true }); h.release();
+    const access = (await h.groupManager!.groupAccess(h.config.appId, 'oc_group'))!;
+    await h.groupManager!.save(h.config.appId, 'oc_group', { expectedRevision: access.revision, patch: { accessOverride: { mode: 'all_chat_members', principalIds: [] } } });
+    await h.dispatch('om_old', 'Alice 的旧任务');
+    const old = await h.sessionId();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(old))[0]?.status).toBe('completed'));
+    await h.coordinator.handle(event('om_new', '/new'), h.config);
+    await h.coordinator.handle(event('om_bob_list', '/resume list', { senderOpenId: 'ou_bob' }), h.config);
+    expect(h.markdownOf(h.lastReceipt())).not.toContain(old);
+    await h.coordinator.handle(event('om_bob_resume', `/resume ${old}`, { senderOpenId: 'ou_bob' }), h.config);
+    expect((await h.runtime.getSession(old))?.state).toBe('stopped');
+    await h.coordinator.handle(event('om_alice_resume', `/resume ${old}`), h.config);
+    expect((await h.runtime.getSession(old))?.state).toBe('idle');
+  });
+
+  it('无法核实原请求人时不列出或恢复已关闭会话', async () => {
+    const h = await harness({ answer: true }); h.release();
+    const old = await h.runtime.start({ agentId: 'mock', source: 'lark', sourceId: `${h.config.appId}:oc_group:group:thread:om_root`, permissionMode: 'ask' });
+    await h.runtime.send(old.id, '没有飞书来源映射的旧任务', undefined, undefined, 'ou_alice');
+    await h.runtime.stop(old.id);
+    await h.coordinator.handle(event('om_list', '/resume list'), h.config);
+    expect(h.markdownOf(h.lastReceipt())).not.toContain(old.id);
+    await h.coordinator.handle(event('om_resume', `/resume ${old.id}`), h.config);
+    expect((await h.runtime.getSession(old.id))?.state).toBe('stopped');
+  });
+
   it('不支持恢复时保留当前会话并明确提示交接', async () => {
     const h = await harness({ answer: true }); h.release(); await h.dispatch('om_old', '旧任务');
     const id = await h.sessionId();

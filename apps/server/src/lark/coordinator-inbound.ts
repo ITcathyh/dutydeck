@@ -60,7 +60,7 @@ import { AgentCommandParamError, agentCommandConfirmSummary, agentCommandPlan, l
 import type { LarkConfirmRecord } from './confirm-cards.js';
 
 /** 命令回执的去向：不传时照常发卡；capture 时只记下、不发卡（dutydeck agent 的查看类），否则发卡的同时记下。 */
-interface LarkCommandReceipts { capture: boolean; notice?: string; cards: Array<{ title: string; markdown: string; failed: boolean; elements?: LarkCardElement[] }> }
+interface LarkCommandReceipts { capture: boolean; deliveryFailed?: boolean; notice?: string; cards: Array<{ title: string; markdown: string; failed: boolean; elements?: LarkCardElement[] }> }
 const larkPlainText = (markdown: string) => markdown.replace(/\*\*/g, '').trim();
 
 // 飞书消息协调器 · 入站唤醒：入站消息与卡片回调的入口和路由、聊天命令与 /status、
@@ -874,7 +874,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const participation = this.workflowOptions.participation;
     if (!sessionId || !participation || !event.senderOpenId || !this.runtime.getTasks) return;
     if (!config.managedGroup && !await this.isStaticOperatorAllowed(config, event.senderOpenId, event.chatId)) return;
-    if (event.parentId && await participation.confirmations.isPendingReply(config.appId, event.chatId, event.parentId)) return;
+    if (event.parentId && await participation.confirmations?.isPendingReply(config.appId, event.chatId, event.parentId)) return;
     const running = (await this.runtime.getTasks(sessionId)).find(task => task.status === 'running');
     if (!running) return;
     const epoch = group.epoch;
@@ -930,9 +930,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const card = receipts.cards.at(-1);
       if (!card || card.failed) return;
       const sent = await reply(`按控制操作处理。\n\n${card.markdown}`, card.elements);
-      if (decision.view === 'tasks') await this.saveTaskDashboardOrigin(config, sent, event);
+      if (decision.view === 'tasks' || decision.view === 'status' && card.elements?.length) await this.saveTaskDashboardOrigin(config, sent, event);
     } else {
-      await this.agentCommandAt(request, { config, requested: event, place: event, scopeId }, '按控制操作处理。');
+      await this.agentCommandAt(request, { config, requested: event, place: event, scopeId }, '按控制操作处理。', true);
     }
     return 'handled';
   }
@@ -1103,7 +1103,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         ...(options.elements?.length ? { elements: options.elements } : {}),
         idempotencyKey: `cmd_${route.command}_${event.replyKey ?? event.messageId}`.slice(0, 50),
         ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
-      }, this.log).catch(error => { this.log.error({ error, messageId: event.messageId, command: route.command }, '发送飞书命令回执失败'); return undefined; });
+      }, this.log).catch(error => { this.log.error({ error, messageId: event.messageId, command: route.command }, '发送飞书命令回执失败'); if (receipts) receipts.deliveryFailed = true; return undefined; });
       // reaction 是「请求已接入」的回执，命令回执落地后必须撤销，避免两个状态并存。
       if (acknowledgementReactionId) {
         await this.service.deleteReaction(event.messageId, acknowledgementReactionId).catch(() => undefined);
@@ -1269,7 +1269,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         if (!pullRequests) throw new Error('当前服务未接入开 PR。');
         if (!sessionId) throw new Error('当前话题还没有可用的工作项，请先发送任务。');
         if (!event.senderOpenId || !await this.isOperatorAllowed(config, event.senderOpenId, event.chatId, sessionId)) throw new Error('当前账号没有操作此任务的权限。');
-        const proposal = await pullRequests.prepare(sessionId, route.argsText.trim() ? { title: route.argsText.trim() } : {}, event.senderOpenId);
+        // A failed busy confirmation queues this same request; its Agent may retry /pr later.
+        const proposalKey = `lark.pr_proposal.${config.appId}.${createHash('sha256').update(JSON.stringify([event.messageId, sessionId, event.senderOpenId, route.argsText.trim()])).digest('hex')}`;
+        const preparedId = await this.workflowOptions.store?.get(proposalKey);
+        const prepared = preparedId ? (await pullRequests.listBySession(sessionId)).find(item => item.id === preparedId) : undefined;
+        if (preparedId && (!prepared || prepared.status !== 'proposed' || Date.parse(prepared.expiresAt) <= Date.now())) throw new Error('之前准备的 PR 提案已不可用，请重新发送开 PR 请求。');
+        const proposal = prepared ?? await pullRequests.prepare(sessionId, route.argsText.trim() ? { title: route.argsText.trim() } : {}, event.senderOpenId);
+        if (!preparedId) await this.workflowOptions.store?.set(proposalKey, proposal.id);
         const card = buildPullRequestConfirmCard(proposal);
         const sent = await replyCard(card.title, card.markdown, { elements: card.elements });
         if (sent?.messageId) await pullRequests.attachCard(proposal.id, sent.messageId);
@@ -1658,6 +1664,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         // Re-read after closing the current scope; a concurrent command must not resurrect a stale target.
         const current = await this.runtime.getSession(target.session.id);
         if (!current || current.archivedAt || !['stopped', 'failed'].includes(current.state) || resumeEpoch !== group.epoch) throw new Error('目标会话已发生变化，请重新选择。');
+        const targetTask = { id: target.firstTaskId, sessionId: current.id };
+        if (!(await this.larkTaskOrigin(config, event.chatId, targetTask))?.requester || !await this.isTaskOperatorAllowed(config, event, targetTask, 'run.resume')) throw new Error('当前账号没有恢复此会话的权限。');
         const restored = await this.runtime.resume(current.id);
         if (resumeEpoch !== group.epoch) { await this.runtime.stop?.(restored.id, { kind: 'channel', id: event.senderOpenId!, appId: config.appId }); throw new Error('恢复期间会话已切换，请重新选择。'); }
         const sourceId = larkSourceId(config, event.chatId, event.chatType, scopeId);
@@ -1778,17 +1786,18 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   }
 
   private async closedScopeSessions(config: StoredLarkConfig, event: LarkMessageEvent, scopeId: string) {
-    const candidates: Array<{ session: Session; closedAt: string; approximate: boolean; title: string }> = [];
+    const candidates: Array<{ session: Session; firstTaskId: string; closedAt: string; approximate: boolean; title: string }> = [];
     for (const session of await listPersistedLarkSessions(this.runtime, config, event.chatId, event.chatType, scopeId, this.cardMappings)) {
       if (!['stopped', 'failed'].includes(session.state)) continue;
       const tasks = await this.runtime.getTasks?.(session.id) ?? [];
       // Empty command-created sessions have no context to restore.
       const first = [...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
-      if (!first || !await this.isTaskOperatorAllowed(config, event, { id: first.id, sessionId: session.id }, 'task.view_result')) continue;
+      const origin = first ? await this.larkTaskOrigin(config, event.chatId, { id: first.id, sessionId: session.id }) : undefined;
+      if (!first || !origin?.requester || !await this.isTaskOperatorAllowed(config, event, { id: first.id, sessionId: session.id }, 'run.resume')) continue;
       const events = await this.runtime.getRecentEvents?.(session.id, 500) ?? [];
       const closed = events.filter(item => item.type === 'status' && ['stopped', 'failed'].includes((item.data as { state?: string })?.state ?? ''))
         .sort((a, b) => b.sequence - a.sequence)[0];
-      candidates.push({ session, closedAt: closed?.timestamp ?? session.updatedAt, approximate: !closed, title: (await this.larkTaskOrigin(config, event.chatId, { id: first.id, sessionId: session.id }))?.title ?? larkTaskTitle(first.prompt, config.name) });
+      candidates.push({ session, firstTaskId: first.id, closedAt: closed?.timestamp ?? session.updatedAt, approximate: !closed, title: origin.title ?? larkTaskTitle(first.prompt, config.name) });
     }
     candidates.sort((a, b) => b.closedAt.localeCompare(a.closedAt));
     return candidates;
@@ -2155,13 +2164,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     return this.agentCommandAt(request, await this.agentCommandOrigin(request));
   }
 
-  private async agentCommandAt(request: LarkAgentCommandRequest, origin: Awaited<ReturnType<LarkCoordinatorInbound['agentCommandOrigin']>>, notice?: string): Promise<Record<string, unknown>> {
+  private async agentCommandAt(request: LarkAgentCommandRequest, origin: Awaited<ReturnType<LarkCoordinatorInbound['agentCommandOrigin']>>, notice?: string, requireDelivery = false): Promise<Record<string, unknown>> {
     const { parsed, summary, confirm } = agentCommandPlan(request.command);
     const { config, requested, place, scopeId } = origin;
     if (parsed.name === 'resume' && !parsed.args.length && !request.dryRun) {
       const target = (await this.closedScopeSessions(config, requested, scopeId))[0];
       if (!target) throw new Error('本话题没有可恢复的已关闭会话。');
-      return this.agentCommandAt({ ...request, command: `/resume ${target.session.id}` }, origin, notice);
+      return this.agentCommandAt({ ...request, command: `/resume ${target.session.id}` }, origin, notice, requireDelivery);
     }
     if (parsed.name === 'new' || parsed.name === 'fork') {
       // Agent 看不到 Agent 编号：填错时直接退回可用编号让它改，不发一张注定失败的确认卡。
@@ -2197,6 +2206,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const replyKey = createHash('sha256').update(`${requested.messageId}\n${parsed.raw}`).digest('hex').slice(0, 24);
       const receipts: LarkCommandReceipts = { capture: false, cards: [], ...(notice ? { notice } : {}) };
       await this.runAgentCommand({ ...this.agentCommandEvent(config, { ...place, messageId: requested.messageId }, request.actorId, parsed.raw, mentions), replyKey }, config, parsed.raw, scopeId, undefined, receipts);
+      if (requireDelivery && receipts.deliveryFailed) throw new RuntimeError('AGENT_COMMAND_CARD_FAILED', '确认卡或回执没发出去。', 502);
       if (!request.action) return { executed: true, message: '已执行，结果卡已发到对话里。不用复述卡片内容，也不要让用户再发命令。' };
       // dutydeck agent 这里只有自己发确认卡的命令（/pr、/repair）：卡没发成就如实报错。
       const failed = receipts.cards.find(card => card.failed);
@@ -2283,7 +2293,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const patch = await this.validateAgentSettings(request.pairs ?? []);
     const summary = `${notice ? `${notice}\n\n` : ''}\`\`\`json\n${JSON.stringify(patch, null, 2)}\n\`\`\``;
     if (request.dryRun) return { dryRun: true, needsConfirmation: true, settings: patch, confirmCard: { title: '机器人设置', body: summary } };
-    const record = await this.workflowOptions.participation?.confirmations.request({
+    const record = await this.workflowOptions.participation?.confirmations?.request({
       kind: agentSettingsConfirmKind(config.appId), scope: { appId: config.appId, chatId: place.chatId }, requesterId: request.actorId,
       replyTo: { messageId: requested.messageId, ...(requested.threadId ? { threadId: requested.threadId } : {}) },
       dedupeKey: `${requested.messageId}:${config.revision ?? 1}:${JSON.stringify(patch)}`, title: '机器人设置', summary,
@@ -2304,10 +2314,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
 
   private registerAgentSettingsConfirm(appId: string) {
     const configFor = (record: LarkConfirmRecord) => readLarkConfig(this.workflowOptions.store, record.scope.appId);
-    this.workflowOptions.participation?.confirmations.register(agentSettingsConfirmKind(appId), {
+    this.workflowOptions.participation?.confirmations?.register(agentSettingsConfirmKind(appId), {
       authorize: async (record, operator) => {
         const config = await configFor(record);
-        return config?.listening && (await this.isRepairOperatorAllowed(config, operator, record.payload.chat_type === 'group' ? record.scope.chatId : undefined)).allowed
+        if (!config?.listening) return '只有机器人管理员能确认。';
+        const managed = record.payload.chat_type === 'group'
+          ? await this.groupManager?.authorize(config.appId, record.scope.chatId, operator, 'channel_bot.update') : undefined;
+        return (managed ? managed.allowed : (await this.isRepairOperatorAllowed(config, operator)).allowed)
           ? true : '只有机器人管理员能确认。';
       },
       apply: async record => {

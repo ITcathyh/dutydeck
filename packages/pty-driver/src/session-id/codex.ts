@@ -99,11 +99,17 @@ export function findSessionIdInRollouts(
   for (const candidate of candidates) {
     const entries = nativeTranscriptObjects(candidate.path);
     let metaSessionId: string | undefined;
+    let sawMeta = false;
     let cwdOk: boolean | undefined;
     let marked = false;
     for (const entry of entries) {
       if (entry?.type === 'session_meta') {
+        // Native forks copy parent metadata after their own identity record.
+        if (sawMeta) continue;
+        sawMeta = true;
         const p = entry.payload;
+        // Internal agents inherit user markers but never own a Dutydeck CLI session.
+        if (p?.source && typeof p.source === 'object' && 'subagent' in p.source) break;
         const id = p?.id ?? p?.session_id;
         if (typeof id === 'string' && id.length > 0) metaSessionId = id;
         if (typeof p?.cwd === 'string' && p.cwd.length > 0) cwdOk = realCwd(p.cwd, env) === wanted;

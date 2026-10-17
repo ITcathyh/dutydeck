@@ -17,6 +17,7 @@ import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinato
 import { larkBotsConfigKey, readLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import { buildLarkCard } from './service.js';
+import { LarkGroupManager } from './group-management.js';
 import { LarkConfirmCards } from './confirm-cards.js';
 import { agentActionCommand, agentCommandHelp, agentCommandPlan } from './agent-command.js';
 import { parseBusyTriageResult } from './busy-triage.js';
@@ -435,6 +436,63 @@ describe('busy message triage through real runtime and confirmation cards', () =
     permissions.mockRestore();
   });
 
+  it.each(['repair', 'pr.open', 'settings.set', 'schedule.create', 'status', 'progress'])('queues a busy %s message when its card cannot be delivered', async action => {
+    const h = await busyHarness();
+    const prepare = vi.fn(async () => ({ id: 'pr_test', sessionId: h.active.sessionId, title: '修复', branch: 'dutydeck/test', baseBranch: 'main', commits: [], files: [], excluded: [], bodySummary: '', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(), status: 'proposed' }));
+    const attachCard = vi.fn();
+    const integration = createAutomationIntegration(h.repos, h.runtime, { authorize: async () => undefined } as any,
+      { client: () => h.service as any, log: { warn: vi.fn() } });
+    const automation = new SessionAutomationService({ repositories: h.repos, runtime: h.runtime,
+      authorize: integration.authorize, prepareDelivery: integration.prepareDelivery });
+    Object.assign((h.coordinator as any).workflowOptions, { saveBotConfig: vi.fn(), automation,
+      scheduleRequests: { prepareDelivery: integration.prepareMessageDelivery, sendConfirmation: integration.sendScheduleRequest } });
+    Object.defineProperty(automation, 'pullRequests', { value: { prepare, attachCard, availability: () => ({ available: true }) } });
+    const params = action === 'settings.set' ? { pairs: ['busyTriage=true'] } : action === 'schedule.create' ? { prompt: '看 CI', every: 60 } : {};
+    h.triage.mockResolvedValue(action === 'progress' ? { kind: 'progress' } : parseBusyTriageResult(JSON.stringify({ kind: 'command', action, params })));
+    // 拒绝控制卡，普通排队任务的接入卡仍可正常发送。
+    const reply = h.service.reply.getMockImplementation()!;
+    h.service.reply.mockImplementation(async input => {
+      if (/^(busy_|cmd_|confirm_|schedule_request_)/.test(String(input.idempotencyKey))) throw new Error('card delivery failed');
+      return reply(input);
+    });
+    await h.receive('处理这个忙时消息');
+    await h.queued();
+    expect(JSON.parse((await h.repos.config.get(`lark.inbox.${h.config.appId}.om_busy_second`))!).state).toBe('accepted');
+    if (action === 'pr.open') { expect(prepare).toHaveBeenCalledTimes(1); expect(attachCard).not.toHaveBeenCalled(); }
+  });
+
+  it.each(['proposed', 'cancelled', 'open', 'expired', 'elapsed'])('retries the prepared PR after card delivery fails (state: %s)', async state => {
+    const h = await busyHarness();
+    const proposals: any[] = [];
+    const prepare = vi.fn(async () => {
+      const proposal = { id: `pr_${proposals.length + 1}`, sessionId: h.active.sessionId, title: '修复', branch: 'dutydeck/test', target: 'main', commits: [], files: [], excluded: [], bodySummary: '', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(), status: 'proposed' };
+      proposals.push(proposal); return proposal;
+    });
+    const attachCard = vi.fn();
+    (h.coordinator as any).workflowOptions.automation = { pullRequests: { prepare, attachCard, availability: () => ({ available: true }), listBySession: async () => proposals } };
+    h.triage.mockResolvedValue(parseBusyTriageResult('{"kind":"command","action":"pr.open","params":{}}'));
+    const reply = h.service.reply.getMockImplementation()!;
+    h.service.reply.mockImplementation(async input => { if (input.taskName === '/pr 需要确认') throw new Error('card delivery failed'); return reply(input); });
+    await h.receive('帮我开 PR');
+    const tasks = await h.queued();
+    const queued = tasks.find(task => task.status === 'queued')!;
+    h.service.reply.mockImplementation(reply);
+    // 排队后 Agent 对同一条用户消息重试；必须发送之前准备好的提案。
+    if (state !== 'proposed') {
+      if (state === 'elapsed') proposals[0].expiresAt = new Date(Date.now() - 1).toISOString();
+      else proposals[0].status = state;
+      await expect(h.coordinator.agentCommand({ sessionId: h.active.sessionId, taskId: queued.id, actorId: 'ou_alice', command: '/pr', action: 'pr.open' })).rejects.toThrow('之前准备的 PR 提案已不可用');
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(attachCard).not.toHaveBeenCalled();
+      expect(h.repliesTo('om_busy_second').filter(input => input.taskName === '/pr 需要确认')).toHaveLength(1);
+      return;
+    }
+    await h.coordinator.agentCommand({ sessionId: h.active.sessionId, taskId: queued.id, actorId: 'ou_alice', command: '/pr', action: 'pr.open' });
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(attachCard).toHaveBeenCalledWith('pr_1', expect.any(String));
+    expect(proposals).toHaveLength(1);
+  });
+
   it('injects a supplement through the existing ACP queue steering path', async () => {
     const h = await busyHarness();
     h.triage.mockResolvedValue({ kind: 'supplement' });
@@ -665,6 +723,23 @@ describe('恢复和分身确认卡不跨会话执行', () => {
     expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: cardId, chatId: 'oc_group' })).toMatchObject({ content: expect.stringContaining('会话已经切换') });
     expect(await h.runtime.listSessions()).toEqual(before);
   });
+  it('恢复确认卡按点击人重新检查目标的 run.resume 权限', async () => {
+    const h = await harness(); const old = await h.current();
+    await h.coordinator.handle(event('om_new', '/new'), h.config);
+    const current = await h.current(event('om_next', '当前任务'));
+    const authorize = vi.fn(async (_app: string, _chat: string, actor: string, action: string) => ({ allowed: action !== 'run.resume' || actor === 'ou_alice' }));
+    (h.coordinator as any).groupManager = { resolved: async (config: any) => ({ ...config, managedGroup: { bindingId: 'binding', revision: 1 } }), authorize };
+    await h.coordinator.agentCommand({ ...current, command: `/resume ${old.sessionId}` });
+    const card = h.repliesTo('om_next').find(input => input.taskName === '待确认的操作')!;
+    const cardId = [...h.cards].find(([, value]) => value === card)![0];
+    const value = findElement(buildLarkCard(card), 'confirm_confirm')!.behaviors[0].value;
+    await h.coordinator.handleAction(value, 'ou_bob', { messageId: cardId, chatId: 'oc_group' });
+    await vi.waitFor(() => expect(h.repliesTo(cardId).map(card => card.markdown).join()).toContain('没有这个可见的已关闭会话'));
+    expect((await h.runtime.getSession(old.sessionId))?.state).toBe('stopped');
+    expect((await h.runtime.getSession(current.sessionId))?.state).toBe('idle');
+    expect(authorize).toHaveBeenCalledWith(h.config.appId, 'oc_group', 'ou_bob', 'run.resume', old.sessionId, { taskRequesterOpenId: 'ou_alice' });
+  });
+
   it('无编号恢复在确认卡中固定目标；归档后点击不能恢复', async () => {
     const h = await harness(); const first = await h.current();
     await h.coordinator.handle(event('om_new', '/new'), h.config);
@@ -701,7 +776,7 @@ async function settingsHarness(managed = false) {
   const turn = await h.current();
   if (managed) (h.coordinator as any).groupManager = {
     resolved: async (config: any) => ({ ...config, defaultAgentId: 'group-agent', defaultModel: 'group-model', notifyMentionDone: false }),
-    authorize: async (_app: string, _chat: string, operator: string, action: string) => ({ allowed: action !== 'high_risk.execute' || operator === 'ou_alice' })
+    authorize: async (_app: string, _chat: string, operator: string, action: string) => ({ allowed: action !== 'channel_bot.update' || operator === 'ou_alice' })
   };
   const request = (pairs?: string[], extra: Record<string, unknown> = {}) => h.coordinator.agentSettings({ ...turn, action: pairs ? 'set' : 'show', ...(pairs ? { pairs } : {}), ...extra });
   const record = async () => (await h.repos.collaboration.listActions({ appId: h.config.appId, chatId: 'oc_group' })).find(action => action.kind === `confirm.agent_settings.${h.config.appId}`)!;
@@ -751,7 +826,33 @@ describe('Agent common bot settings', () => {
     expect(await h.confirm()).toMatchObject({ type: 'info' }); expect(h.persist).toHaveBeenCalledTimes(1);
   });
 
-  it('denies the requester in a managed group when they lack high-risk admin permission', async () => {
+  it('denies highRisk own_runs operators but lets bot administrators confirm settings', async () => {
+    const h = await settingsHarness(true);
+    const manager = new LarkGroupManager(h.repos, { client: () => ({
+      getBotInfo: async () => ({ appName: h.config.appId, openId: 'ou_bot' }),
+      checkApplicationIdentity: async () => ({ verified: true, reportedAppId: h.config.appId, tenantKey: 'synthetic-tenant' }),
+      listChats: async () => ({ items: [{ chatId: 'oc_group', name: '设置群', chatMode: 'topic' }], hasMore: false }),
+      listChatMembers: async () => ({ items: ['alice', 'bob'].map(name => ({ memberId: `ou_${name}`, openId: `ou_${name}`, name, memberType: 'user' })), hasMore: false, securityLimited: false }),
+      getUserEmails: async () => []
+    }) as any });
+    await manager.sync(h.config.appId);
+    const members = (await manager.members(h.config.appId, 'oc_group')).members;
+    await manager.save(h.config.appId, 'oc_group', { expectedRevision: 0, patch: {}, roleChanges: [
+      { kind: 'create', principalId: members.find(member => member.openId === 'ou_bob')!.principalId, role: 'can_operate', operateScope: 'own_runs', actionGates: { highRisk: true, terminalWrite: false, groupToolsSend: false } }
+    ] });
+    const binding = (await manager.groups()).groups[0]!.bots[0]!.binding!;
+    await h.repos.roleAssignments.create({ id: 'alice_admin', channelBotId: binding.channelBotId, groupBindingId: binding.id, principalId: members.find(member => member.openId === 'ou_alice')!.principalId, role: 'admin', operateScope: 'none', actionGates: { terminalWrite: false, highRisk: false, groupToolsSend: false } });
+    (h.coordinator as any).groupManager = manager;
+    expect(await manager.authorize(h.config.appId, 'oc_group', 'ou_bob', 'high_risk.execute')).toMatchObject({ allowed: true });
+    expect(await manager.authorize(h.config.appId, 'oc_group', 'ou_bob', 'channel_bot.update')).toMatchObject({ allowed: false });
+    await h.request(['busyTriage=true']);
+    expect(await h.confirm('ou_bob')).toMatchObject({ type: 'warning', content: '只有机器人管理员能确认。' });
+    expect(h.persist).not.toHaveBeenCalled();
+    expect(await h.confirm()).toMatchObject({ type: 'success' });
+    expect(h.persist).toHaveBeenCalledTimes(1);
+  });
+
+  it('denies the requester in a managed group when they lack bot management permission', async () => {
     const h = await settingsHarness(true);
     await h.request(['busyTriage=true'], { actorId: 'ou_bob' });
     expect((await h.record()).requesterId).toBe('ou_bob');

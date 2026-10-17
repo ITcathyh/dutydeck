@@ -879,6 +879,31 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await vi.waitFor(async () => expect((await h.runtime.getTasks(request.sessionId)).find(task => task.id === request.taskId)?.status).toBe('completed'));
   });
 
+  it('registers the busy status card as an approval callback source', async () => {
+    const participation = { mode: async () => 'off', handle: async () => ({ handled: false, enabled: false }), guardBotTurn: async () => undefined,
+      taskContext: async () => undefined, instructions: async () => '', describe: async () => undefined,
+      triageBusy: async () => ({ kind: 'command', command: '/status', action: 'status', view: 'status' }) } as unknown as LarkGroupParticipation;
+    const h = await harness('permission', { participation });
+    h.config.busyTriage = true;
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+    await h.coordinator.handle(event('om_task', '修改实现'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'permission')?.cardId).toBeTruthy());
+    h.config.busyTriage = false;
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+    await h.coordinator.handle(event('om_queued', '补充测试'), h.config);
+    h.config.busyTriage = true;
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+    await vi.waitFor(async () => expect((await h.runtime.getTasks((await h.interactions())[0]!.sessionId)).some(task => task.status === 'queued')).toBe(true));
+    await h.coordinator.handle(event('om_busy_status', '现在是什么状态'), h.config);
+    const [cardId, card] = [...h.cards.entries()].find(([, card]) => card.taskName === '忙时消息')!;
+    const button = card.elements.find((element: any) => element.element_id === 'status_reject_approval');
+    expect(button).toBeDefined();
+    expect(await h.coordinator.handleAction(button.behaviors[0].value, 'ou_alice', { messageId: 'om_forged', chatId: 'oc_group' })).toMatchObject({ type: 'error' });
+    expect(await h.coordinator.handleAction(button.behaviors[0].value, 'ou_alice', { messageId: cardId, chatId: 'oc_group' })).toMatchObject({ type: 'success', content: '执行端已接受拒绝。' });
+    expect(h.resolvePermission).toHaveBeenCalledExactlyOnceWith('native_permission', false);
+    await h.completed();
+  });
+
   it('sends the blocked /status card to Feishu with both its status text and the reject button', async () => {
     const h = await harness('permission');
     await h.coordinator.handle(event('om_task', '修改实现'), h.config);
