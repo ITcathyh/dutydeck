@@ -1,0 +1,6 @@
+TRAE CLI (v0.210.1-alpha.3)
+
+❯ Implement {feature}
+
+ GPT-6-Astra xhigh · ~/workspace/traex-workspace · Cont…
+ ☢ Full Access (shift+tab to cycle) · ? for shortcuts · ← for agents

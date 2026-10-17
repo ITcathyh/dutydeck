@@ -312,9 +312,9 @@ The built-in Codex ACP agent resolves Codex from the Dutydeck process `PATH` eac
 
 #### Terminal task status and recovery
 
-Codex and TraeX terminal tasks settle from success, failure or cancellation events bound to the current native turn. A partial answer does not override a later failure; cancellation is recorded as an interruption. TraeX recovery drains the old log segment before reading the next segment for the same session. New canonical records retain progress, input receipts and final answers while deduplicating mirrored records.
+Codex and TraeX terminal tasks settle from success, failure or cancellation events bound to the current native turn. A partial answer does not override a later failure; cancellation is recorded as an interruption. TraeX reads session metadata containing large model catalogs so final answers arrive and tasks complete. Recovery drains the old log segment before reading the next segment for the same session. New canonical records retain progress, input receipts and final answers while deduplicating mirrored records.
 
-TraeX uses the full terminal viewport to distinguish busy and ready states; status text quoted in output or drafts is not treated as an active footer. Codex accepts `›` / `»` input prompts without treating trust or update menus as ready. Ordinary Cursor input sends one Enter, preserving multiline input and normal task queueing without a second empty-input control action.
+TraeX uses the full terminal viewport to distinguish busy and ready states, including layouts with keyboard controls on a separate footer row; status text quoted in output or drafts is not treated as an active footer. Codex accepts `›` / `»` input prompts without treating trust or update menus as ready. Ordinary Cursor input sends one Enter, preserving multiline input and normal task queueing without a second empty-input control action.
 
 When a direct child explicitly started by the current Codex parent turn reports quota exhaustion or rate limiting, Web and Lark progress records show a fixed diagnostic without the upstream error body. The parent continues; Dutydeck does not automatically retry or switch accounts because of this diagnostic. Observation is bounded and best effort; children started before recovery are not reported retroactively. This diagnostic is not enabled for TraeX.
 

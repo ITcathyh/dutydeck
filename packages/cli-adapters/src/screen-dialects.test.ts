@@ -98,3 +98,14 @@ it.each(['raw', 'keyed'] as const)('Cursor %s submits once and preserves multi-l
     expect(mode === 'keyed' ? keys : writes).toEqual(mode === 'keyed' ? ['Enter'] : ['single', '\r']);
   } finally { vi.useRealTimers(); }
 });
+
+
+it('accepts the captured 0.210.1 TraeX controls row while preserving footer and busy guards', () => {
+  const screen = readFileSync(new URL('./fixtures/traex-startup/0.210.1-footer.txt', import.meta.url), 'utf8');
+  expect(isInputReady(screen, 'TraeX', traex.busyPattern)).toBe(true);
+  expect(isInputReady(screen, 'Codex')).toBe(false);
+  expect(isInputReady(screen + 'Review hooks\n', 'TraeX')).toBe(false);
+  expect(isInputReady(screen.replace('← for agents', 'unknown control'), 'TraeX')).toBe(false);
+  expect(isInputReady(screen.replace('❯ Implement {feature}', '❯ 1. Yes, continue'), 'TraeX')).toBe(false);
+  expect(isInputReady(screen.replace('\n❯', '\n❖ Working… (8s • esc to interrupt)\n\n❯'), 'TraeX')).toBe(false);
+});

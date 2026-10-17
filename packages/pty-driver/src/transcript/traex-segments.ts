@@ -1,5 +1,23 @@
+import { statSync } from 'node:fs';
 import { basename } from 'node:path';
 import { parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
+
+// Model catalogs made a real 0.207.1 first metadata record 353,510 bytes.
+// The bound keeps per-poll probes of malformed rollouts cheap.
+const METADATA_HEAD_BYTES = 1024 * 1024;
+// A rollout keeps its identity once its metadata is complete, so polls skip rereads.
+const verified = new Map<string, string>();
+
+function hasThreadMetadata(path: string, threadId: string): boolean {
+  let identity: string;
+  try { const st = statSync(path); identity = `${st.dev}:${st.ino}:${threadId}`; } catch { return false; }
+  if (verified.get(path) === identity) return true;
+  const meta = parseJsonlObjects(readHead(path, METADATA_HEAD_BYTES)).find(entry => entry?.type === 'session_meta');
+  if ((meta?.payload?.id ?? meta?.payload?.session_id) !== threadId) return false;
+  if (verified.size >= 1000) verified.clear();
+  verified.set(path, identity);
+  return true;
+}
 
 /** Thread id precedes the optional first-turn suffix; the final UUID alone
  * identifies a turn in resumed TraeX files. Metadata must agree with it. */
@@ -8,8 +26,7 @@ export function traexSegments(root: string, threadId: string): string[] {
     .filter(candidate => {
       const suffix = basename(candidate.path).slice('rollout-'.length);
       if (!suffix.endsWith(`-${threadId}.jsonl`) && !suffix.includes(`-${threadId}_`)) return false;
-      const meta = parseJsonlObjects(readHead(candidate.path, 256 * 1024)).find(entry => entry?.type === 'session_meta');
-      return (meta?.payload?.id ?? meta?.payload?.session_id) === threadId;
+      return hasThreadMetadata(candidate.path, threadId);
     })
     .map(candidate => candidate.path)
     .sort((a, b) => basename(a).localeCompare(basename(b)));

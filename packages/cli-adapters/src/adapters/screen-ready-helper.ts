@@ -48,6 +48,8 @@ const TRAEX_COMPOSER = new RegExp(
 // TraeX 允许 `☢ Full Access (shift+tab to cycle) · ← for agents` 后缀；
 // Codex 允许用空白隔开的 `⚠ N warning(s) · f2 to view`。
 const TRAEX_ACCESS_FOOTER = /(?:\s+☢ Full Access \(shift\+tab to cycle\) · ← for agents)?/;
+// TraeX 0.210.1 renders these controls on their own row below model/path.
+const TRAEX_CONTROLS_FOOTER = /^☢ Full Access \(shift\+tab to cycle\) · \? for shortcuts · ← for agents$/;
 const CODEX_WARNING_FOOTER = /(?:\s+⚠ \d+ warnings? · f2 to view)?/;
 
 const CONTEXT_FOOTER = new RegExp(
@@ -112,7 +114,7 @@ export function isInputReady(screen: string, cli: 'Codex' | 'TraeX', busyPattern
   while (prompt >= 0 && !/^[›»❯](?:\s|$)/.test(composerRows[prompt]!)) prompt--;
   if (prompt < 0 || !(cli === 'Codex' ? CODEX_COMPOSER : TRAEX_COMPOSER).test(composerRows[prompt]!.trimEnd())) return false;
   const footer = composerRows.slice(prompt + 1).map(line => line.trim()).filter(Boolean);
-  if (footer.some(line => !isInitializedFooter(line) && !DECORATION.test(line))) return false;
+  if (footer.some(line => !isInitializedFooter(line) && !(cli === 'TraeX' && TRAEX_CONTROLS_FOOTER.test(line)) && !DECORATION.test(line))) return false;
   const banner = composerRows.slice(0, prompt).map(line => line.trim());
   return footer.some(isInitializedFooter) || LOADED_BANNER.test(banner.join('\n'))
     || banner.some(line => (cli === 'Codex' ? CODEX_BANNER : TRAEX_BANNER).test(line));

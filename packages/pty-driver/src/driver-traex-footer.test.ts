@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTraexAdapter } from '@dutydeck/cli-adapters';
@@ -51,4 +51,25 @@ it('holds the real submission on busy geometry and requires the native terminal 
   // No more PTY redraw after this point: terminal progress must reuse ready.
   append('task_complete', { last_agent_message: '' }); await vi.advanceTimersByTimeAsync(4000); await pending;
   expect(events.filter(e => e.type === 'completed')).toHaveLength(1);
+});
+
+
+it('completes a captured TraeX turn whose catalog makes session metadata exceed 256 KiB', async () => {
+  const records = readFileSync(new URL('./transcript/fixtures/traex-0.207.1-terminal.jsonl', import.meta.url), 'utf8').trim().split('\n').map(row => JSON.parse(row));
+  for (const record of records.filter(record => record.type === 'session_meta')) {
+    record.payload.cwd = directory;
+    record.payload.model_catalog_snapshot.sanitized_padding = 'x'.repeat(335059);
+  }
+  writeFileSync(path, records.slice(0, 2).map(line).join(''));
+  const { pending } = await send();
+  for (const record of records.slice(2)) {
+    record.timestamp = new Date().toISOString();
+    record.payload.turn_id = `turn-${turn}`;
+    if (record.payload.item?.type === 'UserMessage') record.payload.item.content[0].text = prompt;
+    appendFileSync(path, line(record));
+  }
+  paint(ready); await vi.advanceTimersByTimeAsync(6000);
+  expect(events.filter(event => event.type === 'text').map(event => event.data.text)).toEqual(['NONCLAUDE_CONTROL_OK']);
+  expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+  await pending;
 });
