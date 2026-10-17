@@ -460,6 +460,8 @@ dutydeck schedule delete schedule_xxx --session ses_xxx
 
 Dutydeck 支持 ACP（Agent Client Protocol），也支持用 PTY 驱动已有的 CLI Agent。
 
+内置 Codex ACP 在每次启动执行进程时使用 Dutydeck 进程 `PATH` 中的 Codex，沿用用户的登录和配置；升级用户安装的 Codex 后，新启动的进程自动使用新版本。显式设置的 `CODEX_PATH` 优先。找不到用户安装的 Codex 时会报错，不使用 ACP 适配器缓存中的版本。
+
 ### 1. 自定义 Agent (`DUTYDECK_AGENTS_JSON`)
 
 用环境变量 `DUTYDECK_AGENTS_JSON` 注册自定义 Agent。

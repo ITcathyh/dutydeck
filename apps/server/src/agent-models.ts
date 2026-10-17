@@ -6,7 +6,7 @@ import { basename, join } from 'node:path';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { promisify } from 'node:util';
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpRuntime, type AcpRuntimeEnsureInput, type AcpRuntimeHandle, type AcpRuntimeStatus } from 'acpx/runtime';
-import { acpxPermissionMode, prepareAcpxAgentLaunch } from '@dutydeck/acp-client';
+import { acpxAgentEnvironment, acpxPermissionMode, prepareAcpxAgentLaunch } from '@dutydeck/acp-client';
 import type { AgentConfig } from '@dutydeck/shared';
 
 const run = promisify(execFile);
@@ -92,6 +92,7 @@ async function discoverThroughAcp(agent: AgentConfig, model?: string): Promise<A
   const launch = prepareAcpxAgentLaunch(agent, { runtimeDirectory: join(stateDir, 'runtime-env'), sessionKey });
   const runtime = createAcpRuntime({
     cwd: agent.cwd ?? process.cwd(),
+    agentEnvironment: () => acpxAgentEnvironment(agent),
     sessionStore: createRuntimeStore({ stateDir }),
     agentRegistry: createAgentRegistry({ overrides: { [agent.id]: launch.command } }),
     permissionMode: acpxPermissionMode(agent.permissionMode),
