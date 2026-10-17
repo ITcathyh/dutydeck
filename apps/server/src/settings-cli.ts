@@ -55,7 +55,7 @@ export const botFields = {
   idleCompactEnabled: 'boolean', idleCompactHours: 'integer',
   groupToolsEnabled: 'boolean', groupToolsAllowSend: 'boolean',
   memoryEnabled: 'boolean', memoryAutoExtract: 'boolean', groupMemoryScope: ['shared', 'per-group'], memoryAgentId: 'string', memoryModel: 'string',
-  decisionAgentId: 'string', decisionModel: 'string', responseAgentId: 'string', responseModel: 'string',
+  busyTriage: 'boolean', decisionAgentId: 'string', decisionModel: 'string', responseAgentId: 'string', responseModel: 'string',
   executionMode: ['single', 'layered'], leaderAgentId: 'string', workerAgentIds: 'list',
   structuredAskCards: 'boolean', groupCardMention: 'boolean', pushIntervalMs: 'integer', traceLimit: 'integer|null',
   hideTraceOnComplete: 'boolean', compactTrace: 'boolean', showAgentName: 'boolean', completionReactionOnly: 'boolean', silentProgress: 'boolean', adhdMode: 'boolean',
@@ -135,7 +135,7 @@ function parseValue(key: string, raw: string, kind: FieldKind): unknown {
   return json();
 }
 
-function parsePairs(pairs: string[], fields: Record<string, FieldKind>, help: string) {
+export function parsePairs(pairs: string[], fields: Record<string, FieldKind>, help: string) {
   const values: Record<string, unknown> = {};
   for (const pair of pairs) {
     const at = pair.indexOf('=');

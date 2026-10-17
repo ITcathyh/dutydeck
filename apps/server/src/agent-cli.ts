@@ -113,6 +113,8 @@ const collaborate = (method: AgentRequest['method'], path: (args: any[]) => stri
 const workFile = (path: string): Operation => ({ risk: 'write', request: async (_args, options) => ({ method: 'POST', path, body: await jsonInput({ file: options.file }, true) }) });
 
 const operations: Record<string, Operation> = {
+  'settings.show': read(() => '/settings'),
+  'settings.set': { risk: 'write-confirm', serverDryRun: true, request: ([pairs]) => ({ method: 'POST', path: '/settings', body: { pairs } }) },
   status: view('status'), agents: view('agents'), tasks: view('tasks'), queue: view('queue'), schedules: view('schedules'), ci: view('ci'),
   'session.resume': action('session.resume', (_args, o) => ({ id: o.id })),
   'session.fork': action('session.fork', (_args, o) => ({ agent: o.agent, model: o.model, effort: o.effort, cwd: o.cwd, workspace: o.workspace, task: o.task })),
@@ -308,6 +310,11 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
   sub(pr, 'open', 'Push the changes of this conversation to a dutydeck/ branch and open a PR after the user confirms on the card', 'pr.open', 'write-confirm', ['pr open', "pr open --title '修复登录页报错'"])
     .option('--title <title>', 'PR title');
   sub(agent, 'repair', 'Fix the bot\'s Feishu app permissions, events and card callbacks after an admin confirms on the card', 'repair', 'write-confirm', ['repair']);
+
+  const settings = group(agent, 'settings', 'Show or propose common bot defaults and notification settings; changes need a bot admin confirmation');
+  sub(settings, 'show', 'Show only common bot settings', 'settings.show', 'read', ['settings show']);
+  sub(settings, 'set <key=value...>', 'Propose bot settings; only a bot admin can confirm', 'settings.set', 'write-confirm', ['settings set defaultAgentId=codex', 'settings set notifyQuietHours=22:00-08:00 busyTriage=true'],
+    'Keys: defaultAgentId, defaultModel, defaultReasoningEffort, p2pMode, groupReplyMode, notifyQuietHours, notifyMentionAction, notifyMentionDone, busyTriage. Booleans: true/false; use an empty value to clear model, effort or quiet hours.');
 
   const chat = group(agent, 'group', 'Read and send messages in the current Lark chat', groupToolsHelp(true, 'dutydeck agent'));
   sub(chat, 'self', 'Show the current bot and scoped chat', 'group.self', 'read', ['group self']);

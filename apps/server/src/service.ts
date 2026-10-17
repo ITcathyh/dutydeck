@@ -674,6 +674,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         participation: collaboration.participation,
         usage: usageLedger,
         automation,
+        scheduleRequests: { prepareDelivery: automationIntegration.prepareMessageDelivery, sendConfirmation: automationIntegration.sendScheduleRequest },
         workbench,
         relayBroker,
         env,

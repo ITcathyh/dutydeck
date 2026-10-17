@@ -1190,3 +1190,16 @@ describe('LarkConfigModal Agent badge preference', () => {
     expect(save.mock.calls[0]![0]).toMatchObject({ stage: 'lark', showAgentName: initial !== true });
   });
 });
+
+
+it('saves busy triage from the bot setup panel', async () => {
+  const user = userEvent.setup();
+  const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', setupComplete: true }));
+  renderModal(collection({ fullTrustConfirmed: true, defaultAgentId: 'codex' }));
+  await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+  const toggle = screen.getByRole('switch', { name: '忙时先判断' }) as HTMLButtonElement;
+  expect(toggle.getAttribute('aria-checked')).toBe('false');
+  await user.click(toggle);
+  await user.click(screen.getByRole('button', { name: '完成配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ busyTriage: true })));
+});

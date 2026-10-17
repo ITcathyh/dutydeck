@@ -105,3 +105,15 @@ describe('unanswered ACP steering request', () => {
     expect(h.repos.execution.getTaskExecution(second.id)?.steering?.state).toBe('unknown');
   });
 });
+
+
+it.each(['task', 'attempt'])('keeps supplements queued when the expected running %s differs', async mismatch => {
+  const h = await fixture();
+  const first = await h.running();
+  const running = (await h.runtime.getTasks(h.session.id)).find(task => task.id === first.id)!;
+  const second = await h.runtime.dispatch(h.session.id, 'extra requirement');
+  const target = mismatch === 'task' ? { taskId: 'old-task', attemptId: running.currentAttemptId } : { taskId: first.id, attemptId: 'old-attempt' };
+  expect(await h.runtime.injectQueued(h.session.id, second.id, undefined, undefined, target)).toMatchObject({ outcome: 'promptRequired', task: { status: 'queued' } });
+  expect(await h.status(first.id)).toBe('running');
+  expect(await h.texts()).not.toContain('extra requirement');
+});

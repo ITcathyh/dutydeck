@@ -99,6 +99,7 @@ export interface StoredLarkConfig {
   /** 群判定独立选型；缺省沿用 memory，再回落 default。 */
   decisionAgentId?: string;
   decisionModel?: string;
+  busyTriage?: boolean;
   /** 群回复独立选型；缺省沿用 memory，再回落 default。 */
   responseAgentId?: string;
   responseModel?: string;
@@ -238,6 +239,7 @@ export interface SaveLarkConfigInput {
   memoryModel?: string;
   decisionAgentId?: string;
   decisionModel?: string;
+  busyTriage?: boolean;
   responseAgentId?: string;
   responseModel?: string;
   executionMode?: StoredLarkConfig['executionMode'];
@@ -339,6 +341,7 @@ export interface PublicLarkConfig {
   memoryModel?: string;
   decisionAgentId?: string;
   decisionModel?: string;
+  busyTriage?: boolean;
   responseAgentId?: string;
   responseModel?: string;
   executionMode: NonNullable<StoredLarkConfig['executionMode']>;
@@ -680,6 +683,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     groupToolsAllowSend: parsed.groupToolsEnabled === true && parsed.groupToolsAllowSend === true,
     memoryEnabled: larkMemoryEnabled(parsed),
     memoryAutoExtract: parsed.memoryAutoExtract !== false,
+    busyTriage: parsed.busyTriage === true,
     groupMemoryScope: normalizeLarkGroupMemoryScope(parsed.groupMemoryScope),
     ...(parsed.memoryAgentId?.trim() ? { memoryAgentId: parsed.memoryAgentId.trim() } : {}),
     ...(parsed.memoryModel?.trim() ? { memoryModel: parsed.memoryModel.trim() } : {}),
@@ -803,6 +807,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   groupToolsAllowSend: config.groupToolsAllowSend,
   memoryEnabled: larkMemoryEnabled(config),
   memoryAutoExtract: config.memoryAutoExtract !== false,
+  busyTriage: config.busyTriage === true,
   groupMemoryScope: normalizeLarkGroupMemoryScope(config.groupMemoryScope),
   ...(config.memoryAgentId ? { memoryAgentId: config.memoryAgentId } : {}),
   ...(config.memoryModel ? { memoryModel: config.memoryModel } : {}),
@@ -864,6 +869,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const eventHandlers = input.eventHandlers === undefined ? current?.eventHandlers : parseLarkEventHandlers(input.eventHandlers, current?.eventHandlers);
   const cardActionForwarding = input.cardActionForwarding === undefined ? current?.cardActionForwarding : submittedForwarding;
   validateLarkEventConfiguration({ eventHandlers, cardActionForwarding });
+  if (input.busyTriage !== undefined && typeof input.busyTriage !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'busyTriage 必须为布尔值。', 400);
   if (input.showAgentName !== undefined && typeof input.showAgentName !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'showAgentName 必须为布尔值。', 400);
   if (input.welcomeEnabled !== undefined && typeof input.welcomeEnabled !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'welcomeEnabled 必须为布尔值。', 400);
   if (input.expectedRevision !== undefined && input.expectedRevision !== (current ? current.revision ?? 1 : 0)) {
@@ -1026,6 +1032,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     groupToolsAllowSend,
     memoryEnabled,
     memoryAutoExtract,
+    busyTriage: input.busyTriage ?? current?.busyTriage ?? false,
     groupMemoryScope,
     ...(memoryAgentId ? { memoryAgentId } : {}),
     ...(memoryModel ? { memoryModel } : {}),

@@ -1137,3 +1137,18 @@ it('edits a custom Claude agent gateway for an existing bot and saves its model 
   expect(models).toHaveBeenCalledWith('ccflash', undefined, false, bot.appId);
   expect(saveBot.mock.calls[0]![0]).not.toHaveProperty('apiKey');
 });
+
+
+it('defaults busy triage off and saves the enabled bot setting', async () => {
+  const user = userEvent.setup();
+  vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+  vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+  vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+  const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, busyTriage: true }], listeningDisabled: false });
+  renderWithClient(<BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>);
+  const toggle = await screen.findByRole('checkbox', { name: '忙时先判断' }) as HTMLInputElement;
+  expect(toggle.checked).toBe(false);
+  await user.click(toggle);
+  await user.click(screen.getByRole('button', { name: '保存配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ busyTriage: true })));
+});

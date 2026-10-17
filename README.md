@@ -361,6 +361,10 @@ pnpm dev
 
 ---
 
+机器人设置里的「忙时先判断」（`busyTriage`）默认关闭；也可用 `dutydeck settings bot set <App ID> busyTriage=true` 打开。关闭时，执行中收到的普通消息仍照常排队。打开后，问进度由宿主直接回复阶段、最近一步、已用时间、排队数和待审批情况；补充当前任务会尝试插进支持插话的 ACP Agent，终端 Agent 仍排队；机器人管理操作复用 `dutydeck agent` 的校验和权限，只读立即回复，会改东西的先发确认卡，点确认才执行。回复会用一句短话标出理解结果。停止、拿不准、模型报错或超过 15 秒都照常排队，不自动中断。控制短语、斜杠命令、回复待处理卡片和机器人或自动化消息保持原路径。
+
+判断复用「群判定 Agent / 模型」：优先 `decisionAgentId` / `decisionModel`，留空沿用记忆 Agent / 模型，再回落默认 Agent / 模型；可把群判定模型设成便宜、快速的模型。分类器可选 `dutydeck agent` 的查看和控制命令，也可处理「每天九点看下 CI」「以后默认用 codex」这类定时任务和机器人设置请求：定时任务立即发启用卡，草稿保持停用；设置立即发管理员确认卡，确认前不保存。两类卡都回复在当前这条消息下，使用这条消息发送人的身份，不占排队轮次。进度耗时按秒、分秒或小时分显示，例如「12 分 30 秒」「1 小时 5 分」。
+
 ### 4. 接入飞书机器人
 
 #### 方式 A：Web 控制台一键创建（推荐）
@@ -814,7 +818,11 @@ dutydeck restart
 
 包的 JSON 校验不过时跳过这个包，插件其余部分照常加载，`plugin list` 和 `doctor` 会列出原因；引用的 provider 没注册、包 id 冲突时也跳过这个包，原因写在 daemon 日志里。运行时正则或 provider 出错、超时，这条消息这个包弃权：`direct` 记一条弃权记录，不起任务；`model` 的上下文 provider 超时、出错、返回格式不对，或者一条材料都没有而 `missing` 不为空时，这条消息按没有这个包重新判定，判定记录里记下原因，`/status` 计入「取材料失败」，「为什么没回」会说明。同一条消息命中多个 `direct` 包时，按包 id 排序只处理第一个。
 
-### 升级说明：CI 环境变量迁移到插件
+#`dutydeck agent settings show` 只读查看机器人常用设置；`dutydeck agent settings set defaultAgentId=codex notifyQuietHours=22:00-08:00` 先发确认卡，机器人管理员点确认才保存。用户可以直接说「以后默认用 codex」「晚上十点到早上八点别推送」，让 Agent 代办。可改的只有默认 Agent、模型、推理强度、私聊模式（`p2pMode`）、群回复模式（`groupReplyMode`）、免打扰（`notifyQuietHours`）、两档通知 @（`notifyMentionAction` / `notifyMentionDone`）和忙时判断（`busyTriage`）；权限、白名单和凭据不开放。免打扰留空可清除。群有单独覆盖时，`show` 仍返回机器人默认值；群回复模式为 `null` 表示尚未显式设置，沿用旧路由。
+
+确认权限沿用机器人修复操作的管理员判断：托管群需要高风险操作授权；未托管时，需要明确的部署成员或邮箱名单，名单为空不能确认。确认卡绑定发卡时的配置版本；期间 Web 改过设置，旧卡会拒绝覆盖，需要重新提出变更。
+
+## 升级说明：CI 环境变量迁移到插件
 
 以前用环境变量配 CI 的部署，**升级后这些变量不再生效**：`DUTYDECK_GITHUB_TOKEN`、`GH_TOKEN`、`GITHUB_TOKEN`、`DUTYDECK_CODEBASE_WEBHOOK_SECRET`。升级后要：
 

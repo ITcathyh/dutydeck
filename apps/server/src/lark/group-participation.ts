@@ -132,6 +132,11 @@ export function decisionTrigger(decision: Pick<CollaborationDecision, 'inputSnap
 
 /** Silent decisions stay invisible; accepted replies own their processing reaction. */
 export class LarkGroupParticipation {
+  async triageBusy(config: StoredLarkConfig, event: LarkMessageEvent, prompt: string, currentTask: string) {
+    if (this.closed || await this.options.usageRefusal?.({ appId: config.appId, chatId: event.chatId })) return { kind: 'queue' as const };
+    return await this.options.decider.triage?.(config, { appId: config.appId, chatId: event.chatId }, prompt, currentTask) ?? { kind: 'queue' as const };
+  }
+
   private closed = false;
   private readonly active = new Set<Promise<unknown>>();
   private readonly slots = new Map<string, Slot>();

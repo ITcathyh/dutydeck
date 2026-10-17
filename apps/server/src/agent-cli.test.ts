@@ -112,3 +112,23 @@ describe('dutydeck agent', () => {
     expect(await usage(['schedule', 'enable'])).toMatchObject({ params: [{ name: '<id>', reason: '必填' }] });
   });
 });
+
+
+it('routes common settings commands and lists their risk and whitelist in help', async () => {
+  expect(await agent(['settings', 'show'])).toMatchObject({ url: '/settings', method: 'GET', body: undefined });
+  expect(await agent(['settings', 'set', 'defaultAgentId=codex', 'notifyQuietHours=22:00-08:00', 'busyTriage=true'])).toMatchObject({
+    url: '/settings', method: 'POST', body: { pairs: ['defaultAgentId=codex', 'notifyQuietHours=22:00-08:00', 'busyTriage=true'] }
+  });
+  expect(await agent(['settings', 'set', 'busyTriage=true', '--dry-run'])).toMatchObject({ body: { pairs: ['busyTriage=true'], dryRun: true } });
+  const program = createCliProgram('test', { agent: vi.fn() });
+  const root = program.commands.find(command => command.name() === 'agent')!;
+  expect(root.helpInformation()).toContain('settings');
+  const settings = root.commands.find(command => command.name() === 'settings')!;
+  const set = settings.commands.find(command => command.name() === 'set')!;
+  const output: string[] = [];
+  set.configureOutput({ writeOut: text => { output.push(text); } });
+  set.outputHelp();
+  expect(output.join('')).toContain('write-confirm');
+  expect(output.join('')).toContain('notifyQuietHours');
+  expect(output.join('')).toContain('bot admin');
+});

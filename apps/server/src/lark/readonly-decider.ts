@@ -1,3 +1,4 @@
+import { busyTriagePrompt, parseBusyTriageResult, type BusyTriageResult } from './busy-triage.js';
 import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -27,6 +28,7 @@ export type ParticipationResult = z.infer<typeof participationResultSchema>;
 /** 宿主查到的外部事实（如群里真人和机器人的数量），随判定材料交给模型，并存进判定记录供回放。 */
 export type ParticipationFacts = Record<string, string | number | boolean>;
 export interface ParticipationDecider {
+  triage?(config: StoredLarkConfig, scope: CollaborationSnapshot['scope'], message: string, currentTask: string): Promise<BusyTriageResult>;
   decide(config: StoredLarkConfig, snapshot: CollaborationSnapshot, triggerId?: string, facts?: ParticipationFacts): Promise<ParticipationResult>;
   respond(config: StoredLarkConfig, snapshot: CollaborationSnapshot, decision: ParticipationResult, triggerId: string): Promise<string>;
 }
@@ -253,6 +255,9 @@ export function participationResponsePrompt(
 /** Uses the real runtime and fixed Attempt results. No interactive permission fallback. */
 export class ReadonlyParticipationDecider implements ParticipationDecider {
   constructor(private readonly options: { runtime: LarkMemoryPipelineRuntime; repos: AttemptResultRepositories; workspaceRoot: string; timeoutMs?: number }) {}
+  async triage(config: StoredLarkConfig, scope: CollaborationSnapshot['scope'], message: string, currentTask: string): Promise<BusyTriageResult> {
+    return parseBusyTriageResult(await this.runPrompt(config, { scope }, busyTriagePrompt(message, currentTask), 'decision', 15_000));
+  }
   resolve(config: StoredLarkConfig, snapshot: CollaborationSnapshot, facts?: ParticipationFacts, triggerId?: string) { return this.decide(config, snapshot, triggerId, facts); }
   async decide(config: StoredLarkConfig, snapshot: CollaborationSnapshot, triggerId?: string, facts?: ParticipationFacts): Promise<ParticipationResult> {
     if (triggerId !== undefined) requireTrigger(snapshot, triggerId);
@@ -266,7 +271,7 @@ export class ReadonlyParticipationDecider implements ParticipationDecider {
     const text = await this.runPrompt(config, snapshot, participationResponsePrompt(snapshot, accepted, triggerId, config), 'response');
     return parseParticipationResponse(text);
   }
-  private async runPrompt(config: StoredLarkConfig, snapshot: CollaborationSnapshot, prompt: string, phase: 'decision' | 'response'): Promise<string> {
+  private async runPrompt(config: StoredLarkConfig, snapshot: Pick<CollaborationSnapshot, 'scope'>, prompt: string, phase: 'decision' | 'response', timeoutMs?: number): Promise<string> {
     const agentId = config[phase === 'decision' ? 'decisionAgentId' : 'responseAgentId'] ?? config.memoryAgentId ?? config.defaultAgentId;
     if (!agentId) throw new RuntimeError('COLLABORATION_DECIDER_UNAVAILABLE', 'No decision Agent configured', 409);
     const key = createHash('sha256').update(JSON.stringify(snapshot.scope)).digest('hex');
@@ -274,7 +279,7 @@ export class ReadonlyParticipationDecider implements ParticipationDecider {
     await mkdir(cwd, { recursive: true });
     // Each phase gets a fresh session so prior model context cannot bypass the frozen snapshot.
     // sourceId 记下 appId:chatId，用量账本据此把判定和回复生成的成本记到这个群。
-    return runReadonlyPrompt(this.options.runtime, this.options.repos, { agentId, cwd, model: config[phase === 'decision' ? 'decisionModel' : 'responseModel'] ?? config.memoryModel ?? config.defaultModel, source: `lark-${phase}`, sourceId: `${snapshot.scope.appId}:${snapshot.scope.chatId}`, prompt, timeoutMs: this.options.timeoutMs ?? 60_000 });
+    return runReadonlyPrompt(this.options.runtime, this.options.repos, { agentId, cwd, model: config[phase === 'decision' ? 'decisionModel' : 'responseModel'] ?? config.memoryModel ?? config.defaultModel, source: `lark-${phase}`, sourceId: `${snapshot.scope.appId}:${snapshot.scope.chatId}`, prompt, timeoutMs: timeoutMs ?? this.options.timeoutMs ?? 60_000 });
   }
 }
 

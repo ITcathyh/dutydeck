@@ -100,6 +100,7 @@ export type LarkTask = {
   redispatch?: LarkRedispatchInfo;
   /** /steer：这一轮派发后要立刻提到队首（运行时没有「注入当前轮」的原语，只能降级到队首）。 */
   steer?: boolean;
+  busySupplement?: { taskId: string; attemptId?: string };
   /** /steer 的降级结果说明，派发后按真实发生的事写进卡面，绝不预告未发生的成功。 */
   steerNote?: string;
   /** 结果卡上自动验证的进展；验证状态行按它写说明。 */

@@ -2791,7 +2791,7 @@ export class DutydeckRuntime {
     });
   }
   /** 插话：先持久记录投递意图；没有明确回执时禁止普通队列重发。 */
-  async injectQueued(id: string, taskId: string, actorId?: string, operationId = makeId('steering')): Promise<SteeringResult> {
+  async injectQueued(id: string, taskId: string, actorId?: string, operationId = makeId('steering'), expectedTarget?: { taskId: string; attemptId?: string }): Promise<SteeringResult> {
     return this.scoped(id, async () => {
       const {session,driver} = await this.active(id);
       await this.authorize(id,actorId);
@@ -2811,7 +2811,8 @@ export class DutydeckRuntime {
         return ref && execution && attempt?.state === 'active' && attempt.submissionState !== 'not_submitted' ? {ref,task:execution.task} : undefined;
       };
       const target = running();
-      if (!target) return skipped('promptRequired');
+      if (!target || expectedTarget && (target.ref.taskId !== expectedTarget.taskId
+        || expectedTarget.attemptId !== undefined && target.ref.attemptId !== expectedTarget.attemptId)) return skipped('promptRequired');
       const input = this.acceptedInput(task);
       if (task.currentAttemptId || digest(input.executionOptions) !== digest(this.acceptedInput(target.task).executionOptions)
         || digest(task.executionContext?.riskPolicy ?? null) !== digest(target.task.executionContext?.riskPolicy ?? null)) return skipped('incompatible');

@@ -36,15 +36,23 @@ export type LarkAgentCommandHandler = (request: LarkAgentCommandRequest) => Prom
 export interface LarkAgentViewRequest { sessionId: string; taskId: string; actorId: string; view: LarkAgentViewName; page?: number }
 export type LarkAgentViewHandler = (request: LarkAgentViewRequest) => Promise<Record<string, unknown>>;
 
+export interface LarkAgentSettingsRequest { sessionId: string; taskId: string; actorId: string; action: 'show' | 'set'; pairs?: string[]; dryRun?: boolean }
+export type LarkAgentSettingsHandler = (request: LarkAgentSettingsRequest) => Promise<Record<string, unknown>>;
+
 /** 各机器人的消息处理器在监听启动时登记；Agent 工具按会话所属的机器人转过去。 */
 export class LarkAgentCommands {
-  private readonly handlers = new Map<string, { run: LarkAgentCommandHandler; view?: LarkAgentViewHandler }>();
-  set(appId: string, handler: LarkAgentCommandHandler, view?: LarkAgentViewHandler) { this.handlers.set(appId, { run: handler, ...(view ? { view } : {}) }); }
+  private readonly handlers = new Map<string, { run: LarkAgentCommandHandler; view?: LarkAgentViewHandler; settings?: LarkAgentSettingsHandler }>();
+  set(appId: string, handler: LarkAgentCommandHandler, view?: LarkAgentViewHandler, settings?: LarkAgentSettingsHandler) { this.handlers.set(appId, { run: handler, ...(view ? { view } : {}), ...(settings ? { settings } : {}) }); }
   delete(appId: string, handler: LarkAgentCommandHandler) { if (this.handlers.get(appId)?.run === handler) this.handlers.delete(appId); }
   has(appId: string) { return this.handlers.has(appId); }
   run(appId: string, request: LarkAgentCommandRequest) {
     const handler = this.handlers.get(appId)?.run;
     if (!handler) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '这个机器人的飞书监听没有在运行，现在不能代办命令。', 503);
+    return handler(request);
+  }
+  settings(appId: string, request: LarkAgentSettingsRequest) {
+    const handler = this.handlers.get(appId)?.settings;
+    if (!handler) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '这个机器人的飞书监听没有在运行，现在不能代办设置。', 503);
     return handler(request);
   }
   view(appId: string, request: LarkAgentViewRequest) {

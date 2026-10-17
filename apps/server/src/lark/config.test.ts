@@ -995,3 +995,16 @@ describe('Agent name badge preference', () => {
     }
   });
 });
+
+
+describe('busy triage bot setting', () => {
+  it('normalizes to off by default, persists changes, and rejects non-boolean API input', async () => {
+    const repository = seedBots([{ appId: 'cli_busy', appSecret: 'secret', listening: false }]);
+    expect(publicLarkConfig((await readLarkConfigs(repository))[0]!)).toMatchObject({ busyTriage: false });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_busy', busyTriage: true });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ busyTriage: true });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_busy', preInjectPrompt: 'keep' });
+    expect(publicLarkConfig((await readLarkConfigs(repository))[0]!)).toMatchObject({ busyTriage: true });
+    await expect(saveLarkConfig(repository, undefined, { originalAppId: 'cli_busy', busyTriage: 'true' as any })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+  });
+});

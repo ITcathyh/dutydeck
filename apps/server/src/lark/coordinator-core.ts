@@ -143,6 +143,8 @@ export abstract class LarkCoordinatorCore {
     protected readonly groupManager?: LarkGroupManager,
     protected readonly workflowOptions: {
       participation?: LarkGroupParticipation;
+      scheduleRequests?: import('../agent-schedule-request.js').LarkScheduleRequests;
+      saveBotConfig?(input: import('./config.js').SaveLarkConfigInput): Promise<unknown>;
       usage?: Pick<import('../usage-ledger.js').UsageLedger, 'describe'>;
       store?: ConfigRepository;
       broker?: RelayAskBroker;
