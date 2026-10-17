@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ChildProcess } from 'node:child_process';
-import { dirname, join } from 'node:path';
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { delimiter, dirname, join, resolve } from 'node:path';
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
@@ -34,6 +34,27 @@ function agentsFile(name: string) {
 function claudeLauncherPath() { return agentsFile('claude-acp.mjs'); }
 
 function envLauncherPath() { return agentsFile('env-launcher.mjs'); }
+
+/** Resolve before npx prepends its bundled Codex to PATH; never persist this override. */
+export function acpxAgentEnvironment(agent: AgentConfig): Record<string, string> {
+  if (!agent.builtin || agent.id !== 'codex') return {};
+  const env = childEnvironment(process.env, agent.env);
+  if (env.CODEX_PATH) return {};
+  const extensions = process.platform === 'win32'
+    ? ['', ...(env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';')]
+    : [''];
+  for (const directory of (env.PATH ?? '/usr/bin:/bin').split(delimiter)) {
+    for (const extension of extensions) {
+      const path = resolve(agent.cwd ?? process.cwd(), directory || '.', `codex${extension}`);
+      try {
+        if (!statSync(path).isFile()) continue;
+        accessSync(path, constants.X_OK);
+        return { CODEX_PATH: path };
+      } catch {}
+    }
+  }
+  throw new Error('CODEX_CLI_NOT_FOUND: Install Codex in the Dutydeck process PATH, or set CODEX_PATH to its executable.');
+}
 
 const persistedEnvKey = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 const bridgedAgentEnvFileKey = 'dutydeck_agent_env_file';
@@ -274,6 +295,7 @@ export class AcpxAdapter implements AgentDriver {
     const registry = createAgentRegistry({ overrides: { [agent.id]: this.launch.command } });
     this.runtime = createAcpRuntime({
       cwd,
+      agentEnvironment: () => acpxAgentEnvironment(agent),
       onProcess: event => this.observeProcess(event),
       sessionStore: this.sessionStore,
       agentRegistry: { ...registry, resolve: name => name === agent.id ? this.launch.command : registry.resolve(name) },

@@ -285,6 +285,8 @@ Scheduled tasks keep the selected permission posture; `ask` can wait for human a
 
 ## Agent Configuration & Permissions <a id="agent-config"></a>
 
+The built-in Codex ACP agent resolves Codex from the Dutydeck process `PATH` each time it starts an execution process, using the user's login and configuration. New processes use user-installed upgrades automatically. An explicit `CODEX_PATH` takes precedence. If the user's Codex is missing, startup fails instead of using the ACP adapter's cached version.
+
 ### 1. Custom agents (`DUTYDECK_AGENTS_JSON`)
 
 ```json

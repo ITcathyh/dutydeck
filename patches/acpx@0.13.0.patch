@@ -1,5 +1,5 @@
 diff --git a/dist/runtime.js b/dist/runtime.js
-index 3fb25ae4124cea292546e1dda95465b3ae15577e..23e148abc85904e7f751a1b4248b9874f8e7d353 100644
+index 3fb25ae4124cea292546e1dda95465b3ae15577e..9d34b4d2a67d27b2fae290b14d8b2da1155867d2 100644
 --- a/dist/runtime.js
 +++ b/dist/runtime.js
 @@ -346,11 +346,26 @@
@@ -41,7 +41,7 @@ index 3fb25ae4124cea292546e1dda95465b3ae15577e..23e148abc85904e7f751a1b4248b9874
  	};
  }
  function availableCommandsUpdateEvent(payload) {
-@@ -734,17 +734,33 @@ async function createOrLoadRuntimeSession(client, resumeSessionId, cwd) {
+@@ -734,17 +750,33 @@ async function createOrLoadRuntimeSession(client, resumeSessionId, cwd) {
  		sessionResult: created
  	};
  }
@@ -71,7 +71,7 @@ index 3fb25ae4124cea292546e1dda95465b3ae15577e..23e148abc85904e7f751a1b4248b9874
  		this.deps = deps;
  	}
  	createClient(options) {
-+		options = { ...options, onProcess: this.options.onProcess };
++		options = { ...options, onProcess: this.options.onProcess, agentEnvironment: this.options.agentEnvironment };
  		return this.deps.clientFactory?.(options) ?? new AcpClient(options);
  	}
  	async readPendingPersistentClient(record, options) {
@@ -348,7 +348,7 @@ index 3fb25ae4124cea292546e1dda95465b3ae15577e..23e148abc85904e7f751a1b4248b9874
  //# sourceMappingURL=runtime.js.map
 \ No newline at end of file
 diff --git a/dist/runtime.d.ts b/dist/runtime.d.ts
-index 0a8e55a11354137781078a1cf8ff043c0466b06f..f3d8b26d6175711379eed09d529775680e10ccc4 100644
+index 0a8e55a11354137781078a1cf8ff043c0466b06f..640cce8dff2d6d7954ce81db03ecb8b4132e483c 100644
 --- a/dist/runtime.d.ts
 +++ b/dist/runtime.d.ts
 @@ -1,4 +1,4 @@
@@ -407,10 +407,12 @@ index 0a8e55a11354137781078a1cf8ff043c0466b06f..f3d8b26d6175711379eed09d52977568
    startTurn(input: AcpRuntimeTurnInput): AcpRuntimeTurn;
    /**
     * Compatibility adapter for consumers that expect terminal status in the
-@@ -261,6 +289,8 @@ interface AcpAgentRegistry {
+@@ -261,6 +289,10 @@ interface AcpAgentRegistry {
    list(): string[];
  }
  type AcpRuntimeOptions = {
++  /** Transient child environment overrides; never persisted in session options. */
++  agentEnvironment?: () => Record<string, string>;
 +  /** In-process ownership events; never persisted in session options. */
 +  onProcess?: (event: AcpRuntimeProcessEvent) => void;
    cwd: string;
@@ -436,7 +438,7 @@ index 0a8e55a11354137781078a1cf8ff043c0466b06f..f3d8b26d6175711379eed09d52977568
  //# sourceMappingURL=runtime.d.ts.map
 \ No newline at end of file
 diff --git a/dist/live-checkpoint-CBecfnSH.js b/dist/live-checkpoint-CBecfnSH.js
-index 32fd9b038f9427d9be1f8c045596a9852c256065..18e8998a1287ff1ce6153408d21c6f8625ed8464 100644
+index 32fd9b038f9427d9be1f8c045596a9852c256065..5d237c4a24e7a0b6c3150bd14026ceff3779fee6 100644
 --- a/dist/live-checkpoint-CBecfnSH.js
 +++ b/dist/live-checkpoint-CBecfnSH.js
 @@ -1356,6 +1356,8 @@ function parseAcpxState(raw) {
@@ -547,6 +549,19 @@ index 32fd9b038f9427d9be1f8c045596a9852c256065..18e8998a1287ff1ce6153408d21c6f86
  }
  function buildClaudeCodeOptionsMeta(options, isolateUserSettings = false) {
  	const claudeCodeOptions = {};
+@@ -3147,10 +3158,10 @@ function resolveConfiguredAuthCredential(methodId, authCredentials) {
+ 	const configCredentials = authCredentials ?? {};
+ 	return configCredentials[methodId] ?? configCredentials[toEnvToken(methodId)];
+ }
+-function buildAgentSpawnOptions(cwd, authCredentials, sessionEnv) {
++function buildAgentSpawnOptions(cwd, authCredentials, sessionEnv, agentEnvironment) {
+ 	return {
+ 		cwd,
+-		env: buildAgentEnvironment(authCredentials, sessionEnv),
++		env: { ...buildAgentEnvironment(authCredentials, sessionEnv), ...agentEnvironment },
+ 		stdio: [
+ 			"pipe",
+ 			"pipe",
 @@ -3382,6 +3393,10 @@ var TerminalManager = class {
  		this.permissionMode = options.permissionMode;
  		this.nonInteractivePermissions = options.nonInteractivePermissions ?? "deny";
@@ -859,6 +874,15 @@ index 32fd9b038f9427d9be1f8c045596a9852c256065..18e8998a1287ff1ce6153408d21c6f86
  		if (isQoderAcpCommand(spawnCommand, args)) args = buildQoderAcpCommandArgs(args, this.options);
  		return {
  			spawnCommand,
+@@ -4190,7 +4243,7 @@ var AcpClient = class {
+ 			geminiAcp: isGeminiAcpCommand(spawnCommand, args),
+ 			copilotAcp: isCopilotAcpCommand(spawnCommand, args),
+ 			claudeAcp: isClaudeAcpCommand(spawnCommand, args),
+-			spawnOptions: buildAgentSpawnOptions(this.options.cwd, this.options.authCredentials, this.options.sessionOptions?.env)
++			spawnOptions: buildAgentSpawnOptions(this.options.cwd, this.options.authCredentials, this.options.sessionOptions?.env, this.options.agentEnvironment?.())
+ 		};
+ 	}
+ 	logAgentLaunch(plan) {
 @@ -4205,8 +4258,8 @@ var AcpClient = class {
  		}
  		this.log(`spawning agent: ${plan.spawnCommand} ${plan.args.join(" ")}`);
@@ -989,7 +1013,7 @@ index 32fd9b038f9427d9be1f8c045596a9852c256065..18e8998a1287ff1ce6153408d21c6f86
  		};
  	} catch (error) {
 diff --git a/dist/session-options-CTdZvr68.d.ts b/dist/session-options-CTdZvr68.d.ts
-index 3ec271cc95b43ad598f182652c391d17f28fc695..67062f8d94b12b5795504a8547098ebb0590a025 100644
+index 3ec271cc95b43ad598f182652c391d17f28fc695..bc7ddef048e8b4f6120b5e5add26c5bec68ea296 100644
 --- a/dist/session-options-CTdZvr68.d.ts
 +++ b/dist/session-options-CTdZvr68.d.ts
 @@ -1,3 +1,4 @@
@@ -997,12 +1021,13 @@ index 3ec271cc95b43ad598f182652c391d17f28fc695..67062f8d94b12b5795504a8547098ebb
  import { AgentCapabilities, AnyMessage, ContentBlock, McpServer, McpServer as McpServer$1, RequestPermissionRequest, SessionConfigOption, SessionNotification, SetSessionConfigOptionResponse, ToolKind } from "@agentclientprotocol/sdk";
  //#region src/prompt-content.d.ts
  type PromptInput = ContentBlock[];
-@@ -71,7 +72,9 @@ type SessionEventLog = {
+@@ -71,7 +72,10 @@ type SessionEventLog = {
    last_write_at?: string;
    last_write_error?: string | null;
  };
 +type AcpProcessEvent = { phase: 'creation-started'; kind: 'agent' | 'terminal'; creation: object } | { phase: 'creation-finished'; kind: 'agent' | 'terminal'; creation: object } | { phase: 'spawned'; kind: 'agent' | 'terminal'; child: ChildProcess };
  type AcpClientOptions = {
++  agentEnvironment?: () => Record<string, string>;
 +  onProcess?: (event: AcpProcessEvent) => void;
    agentCommand: string;
    agentArgv?: string[];
