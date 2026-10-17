@@ -968,6 +968,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 
 飞书会话里的 Agent 用 `dutydeck agent` 做它能做的全部操作。每轮提示词只给命令前缀（绝对路径）、`先看 dutydeck agent --help` 和本轮能用的能力，不含凭证。
 
+- **工具审批**：在 `ask` / `approve-reads` 下，已注入工具凭证的会话使用本会话的精确命令前缀执行单条 `dutydeck agent …` 时，Claude Code / Seed / Relay 终端模式和 ACP 会自动放行工具审批，并记录原因。拼接、重定向、展开等 shell 语法仍照常审批；高风险拦截和写操作确认卡照旧。其他终端 CLI 不支持这项精确放行。
 - **帮助**：`dutydeck agent --help` 开头是写给 Agent 的快速说明；每个子命令的 `--help` 有一行 `Risk`（`read` 只读、`write-confirm` 发确认卡、`write` 直接生效）和例子。帮助不需要服务或凭证。
 - **输出**：stdout 只有一个 JSON。成功 `{"ok":true,"data":...}`；失败 `{"ok":false,"error":{"code","message","hint"?,"params"?:[{"name","reason"}]}}`，退出码非 0。`params` 指出哪个参数不对，能给可选值时写在 `reason` 里。
 - **查看**：`status`、`agents`、`tasks [--page]`、`queue`、`schedules`、`ci`，以及 `group`、`history`、`memory`、`work`、`collaborate` 的读取命令。结果直接交给 Agent，不在群里发卡；权限与这一轮的发起人在原话题自己发这条命令相同。

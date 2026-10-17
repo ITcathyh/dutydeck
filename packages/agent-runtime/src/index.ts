@@ -1,8 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval } from '@dutydeck/shared';
-import { AcpxAdapter, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
+import { agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval } from '@dutydeck/shared';
+import { AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
@@ -154,7 +154,7 @@ export interface RuntimeOptions {
     promptDiagnostics?: PromptSourceDiagnostics;
   }>;
   /** Diagnostics only, e.g. a steering reply that arrives after its timeout. */
-  log?: { warn(data: Record<string, unknown>, message: string): void };
+  log?: { warn(data: Record<string, unknown>, message: string): void; info?(data: Record<string, unknown>, message: string): void };
   /** 会话里有 Agent 的提问在等人回答（relay ask）：与待审批一样是人工等待，这期间不判这一轮可能卡住。 */
   awaitingAnswer?: (sessionId: string) => boolean;
   /** 不调模型的登录状态检查，缺省见 agent-availability.ts。只在 checkAgentAvailability 里调用。 */
@@ -3089,6 +3089,28 @@ export class DutydeckRuntime {
     return this.withSessionMetadata(session);
     });
   }
+  async autoApproveAgentCommand(sessionId: string, kind: string, command: string): Promise<boolean> {
+    const owner = this.attempts.get(sessionId);
+    const task = this.activeTasks.get(sessionId);
+    if (this.shuttingDown || !owner || !task || !this.mutations.valid(owner)) return false;
+    const session = await this.repos.sessions.get(sessionId);
+    if (!session) return false;
+    const accepted = this.repos.execution.getAcceptedTask(task.id);
+    if (accepted?.input?.version !== 2) return false;
+    const permissionMode = accepted.input.executionOptions.permissionMode;
+    if (!isAgentCommandAutoApproval({ permissionMode, kind, command, env: this.options.sessionEnvironment?.(session) })) return false;
+    // PreToolUse already guards terminal commands. Recheck the live policy here as well,
+    // so auto-approval cannot turn a matching high-risk command into an allow.
+    try {
+      const policy = this.options.resolveRiskPolicy
+        ? await this.options.resolveRiskPolicy(sessionId, task.executionContext?.riskPolicy) : task.executionContext?.riskPolicy;
+      if (policy?.enabled && !policy.authorized && await testRegexWithTimeout(policy.pattern, command)) return false;
+    } catch { return false; }
+    if (this.attempts.get(sessionId) !== owner || !this.mutations.valid(owner)) return false;
+    this.options.log?.info?.({ sessionId, taskId: task.id }, agentCommandApprovalReason);
+    return true;
+  }
+
   /**
    * 终端模式 CLI 的权限 hook 交来的请求：本会话有进行中的轮次、驱动也能接时，登记成与 ACP 相同的待审批项，
    * 返回驱动给出的裁决；否则返回 undefined，调用方保留 CLI 的原生确认。

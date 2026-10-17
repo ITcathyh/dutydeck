@@ -85,7 +85,8 @@ export class LarkAgentToolCapabilityRegistry {
   constructor(
     private readonly sessions: SessionRepository,
     private readonly apiBaseUrl: string,
-    private readonly signingSecret = randomBytes(32).toString('base64url')
+    private readonly signingSecret = randomBytes(32).toString('base64url'),
+    private readonly command = 'dutydeck'
   ) {}
 
   private tokenFor(binding: LarkAgentSessionBinding) {
@@ -131,7 +132,8 @@ export class LarkAgentToolCapabilityRegistry {
     this.byToken.set(capability.token, capability);
     return {
       dutydeck_group_tools_url: `${this.apiBaseUrl.replace(/\/$/, '')}${groupToolPath}`,
-      dutydeck_group_tools_token: capability.token
+      dutydeck_group_tools_token: capability.token,
+      dutydeck_group_tools_command: stableMemoryCommand(this.command)
     };
   }
 

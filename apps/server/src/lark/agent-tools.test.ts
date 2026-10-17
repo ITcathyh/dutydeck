@@ -55,7 +55,7 @@ async function setup(
     { appId: 'cli_peer', appSecret: 'secret-peer', name: 'Peer Bot', defaultAgentId: 'claude', groupToolsEnabled: true, groupToolsAllowSend: true, memoryEnabled: true },
     { appId: 'cli_disabled', appSecret: 'secret-disabled', name: 'Disabled Bot', defaultAgentId: 'gemini', groupToolsEnabled: false, memoryEnabled: true }
   ]));
-  const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://127.0.0.1:4310');
+  const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://127.0.0.1:4310', undefined, groupToolsCommand);
   const environment = capabilities.environmentFor(activeSession);
   const tools = new LarkAgentToolsService(capabilities, repos.config, {
     pollIntervalMs: 50,
@@ -67,6 +67,17 @@ async function setup(
 }
 
 describe('Agent group collaboration domain service', () => {
+  it.each(['dutydeck', '/x/dutydeck', "'/usr/bin/node' '/app/cli.js'"])(
+    'injects the same command prefix as the session prompt: %s', async command => {
+      const f = await setup({ cli_current: fakeClient() }, command);
+      const env = f.capabilities.environmentFor(f.activeSession);
+      expect(env.dutydeck_group_tools_command).toBe(command);
+      expect(env.dutydeck_group_tools_token).toBe(f.token);
+      expect(Object.keys(env).every(key => /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(key))).toBe(true);
+      if (command !== 'dutydeck') expect(await f.tools.promptForSession(f.activeSession, 'test')).toContain(`本会话的 dutydeck 命令是 ${command}`);
+      expect(f.capabilities.environmentFor(session({ source: 'web', sourceId: undefined }))).toEqual({});
+    });
+
   it('refreshes final and work tokens and keeps independent capability gates on every prompt', async () => {
     const f = await setup({ cli_current: fakeClient() });
     const active = { taskId: 'task-one', attemptId: 'attempt-one', actorId: 'ou_actor' };
@@ -131,7 +142,8 @@ describe('Agent group collaboration domain service', () => {
     expect(larkAgentSessionBinding(session({ sourceId: 'cli_current:ou_legacy:p2p' }))).toMatchObject({ chatId: 'ou_legacy', chatType: 'p2p' });
     expect(capabilities.environmentFor(activeSession)).toEqual({
       dutydeck_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools',
-      dutydeck_group_tools_token: token
+      dutydeck_group_tools_token: token,
+      dutydeck_group_tools_command: 'dutydeck'
     });
     expect(JSON.stringify(capabilities.environmentFor(activeSession))).not.toContain('secret-current');
     await expect(tools.self('wrong-token')).rejects.toMatchObject({ code: 'GROUP_TOOL_UNAUTHORIZED', statusCode: 401 });

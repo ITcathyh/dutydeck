@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs
 import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
-import { AGENT_IDLE_TIMEOUT, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
+import { agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
 import { PROCESS_CPU_MIN_WINDOW_MS, ProcessTreeCpu } from './process-cpu.js';
@@ -310,6 +310,13 @@ export class AcpxAdapter implements AgentDriver {
         }
         if (this.permissionMode === 'full-trust') return { outcome: 'allow_once' };
         if (this.permissionMode === 'deny-all') return { outcome: 'reject_once' };
+        const input = raw.toolCall?.rawInput ?? raw.toolCall?.input;
+        if (isAgentCommandAutoApproval({ permissionMode: this.permissionMode, kind: raw.toolCall?.kind,
+          command: input?.command ?? input?.cmd, env: this.agent.env })) {
+          this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId,
+            ...facts, title: `${agentCommandApprovalReason}：${facts.title}`, options: [], status: 'approved' } });
+          return { outcome: 'allow_once' };
+        }
         // 只读判定从严，只认执行端自己声明的 read / search：acpx 在缺 kind 时按标题首词猜（「Read and delete」也会猜成 read），
         // fetch 会把内容带到外部地址，都不算只读，照常审批。
         if (this.permissionMode === 'approve-reads' && ['read', 'search'].includes(String(raw.toolCall?.kind ?? ''))) return { outcome: 'allow_once' };

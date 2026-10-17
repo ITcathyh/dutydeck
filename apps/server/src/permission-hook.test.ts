@@ -1,9 +1,14 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DutydeckRuntime } from '@dutydeck/runtime';
+import { createRepositories } from '@dutydeck/storage';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayCapabilityRegistry } from '@dutydeck/relay';
 import { createCliAdapter } from '@dutydeck/cli-adapters';
-import type { DriverPermissionDecision, PermissionRequestData, Session } from '@dutydeck/shared';
+import type { AgentConfig, AgentDriver, DriverPermissionDecision, PermissionRequestData, Session } from '@dutydeck/shared';
 import { buildApp } from './app.js';
 import { HookPermissionRequests, claudeToolKind, permissionHookDeadlineMs, runPermissionHook } from './permission-hook.js';
 
@@ -81,6 +86,65 @@ describe('Claude PermissionRequest hook over the session relay', () => {
     const unreadable = await run('not json');
     expect(decision(unreadable.stdout).behavior).toBe('deny');
   }, 30_000);
+
+  it.each(['ask', 'approve-reads'] as const)('checks real runtime session capability and risk before hook auto-approval in %s', async permissionMode => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-hook-agent-'));
+    const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+    const requests: ReturnType<typeof deferred>[] = [];
+    let finish!: () => void;
+    const sending = new Promise<void>(resolve => { finish = resolve; });
+    const driver: AgentDriver = {
+      start: async () => {}, send: vi.fn(async () => sending), stop: async () => { finish(); }, interrupt: async () => { finish(); }, resume: async () => {},
+      isStopped: async () => true, setPermissionMode: () => {},
+      requestPermission: vi.fn(() => { const pending = deferred(); requests.push(pending); return { id: `hook_${requests.length}`, decision: pending.decision }; }),
+    };
+    const toolsEnv = { dutydeck_group_tools_url: 'http://localhost/unused', dutydeck_group_tools_token: 'fixture-tools', dutydeck_group_tools_command: 'node /x/cli.js' };
+    let enabled = true;
+    let pattern = 'never_matches';
+    const info = vi.fn();
+    const runtime = new DutydeckRuntime(repos, { driverFactory: () => driver,
+      probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
+      sessionEnvironment: current => enabled && current.source === 'lark' ? toolsEnv : {},
+      resolveRiskPolicy: async () => ({ enabled: true, authorized: false, pattern }), log: { warn: vi.fn(), info } });
+    const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp',
+      cwd, env: {}, permissionMode, timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
+    const capabilities = new RelayCapabilityRegistry(repos.sessions, 'http://localhost', 'test-secret');
+    const app = await buildApp(runtime, { relay: { runtime, capabilities,
+      permissions: new HookPermissionRequests(runtime, { waitMs: 5 }) } });
+    cleanup.push(async () => { await app.close(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
+    await runtime.initialize([agent]);
+    const current = await runtime.start({ agentId: agent.id, source: 'lark', sourceId: 'cli_fixture:oc_fixture:p2p', permissionMode });
+    expect(await runtime.autoApproveAgentCommand(current.id, 'execute', 'node /x/cli.js agent status')).toBe(false);
+    await runtime.dispatch(current.id, 'test', 'queue', 'test', undefined, 'ou_fixture');
+    await vi.waitFor(() => expect(driver.send).toHaveBeenCalled());
+    const hookEnv = capabilities.environmentFor(current.id);
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const response = await app.inject({ method: 'POST', url: new URL(String(url)).pathname,
+        headers: init?.headers as Record<string, string>, payload: JSON.parse(String(init?.body)) });
+      return new Response(response.body, { status: response.statusCode });
+    });
+    const run = (command: string, toolName = 'Bash') => runPermissionHook({ ...payload, tool_name: toolName, tool_input: { command } }, { env: hookEnv, fetcher: fetcher as typeof fetch });
+    expect(decision(await run('  node /x/cli.js agent status  '))).toEqual({ behavior: 'allow' });
+    expect(driver.requestPermission).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ sessionId: current.id }), '因 dutydeck agent 命令自动放行');
+    const held = async (command: string, toolName = 'Bash') => {
+      const count = requests.length;
+      const running = run(command, toolName);
+      await vi.waitFor(() => expect(requests).toHaveLength(count + 1));
+      requests[count]!.resolve({ approved: false });
+      expect(decision(await running).behavior).toBe('deny');
+    };
+    await held('node /x/cli.js agent status && x');
+    await held('node /x/cli.js agent status\nsh');
+    await held('node /x/cli.js agent status --task ' + 'x'.repeat(1200) + '; sh');
+    await held('node /x/cli.js agent status', 'Edit');
+    enabled = false;
+    await held('node /x/cli.js agent status');
+    enabled = true;
+    pattern = 'agent\\s+status';
+    await held('node /x/cli.js agent status');
+    expect(info).toHaveBeenCalledTimes(1);
+  });
 
   it('accepts the permission route only with the session capability', async () => {
     const runtime = fakeRuntime();
