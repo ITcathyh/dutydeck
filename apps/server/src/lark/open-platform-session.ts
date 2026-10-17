@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { asRecord, pickString } from './open-platform-values.js';
 
 const FEISHU_ACCOUNTS_ORIGIN = 'https://accounts.feishu.cn';
 const FEISHU_CONSOLE_ORIGIN = 'https://open.feishu.cn';
@@ -659,19 +660,6 @@ function balancedJson(input: string, start: number): string | null {
     else if (char === '}' && --depth === 0) return input.slice(start, index + 1);
   }
   return null;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
-function pickString(record: Record<string, unknown>, keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === 'string' && value) return value;
-    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  }
-  return undefined;
 }
 
 function numericCode(payload: unknown): number | undefined {

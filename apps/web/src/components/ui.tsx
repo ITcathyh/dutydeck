@@ -3,9 +3,7 @@ import type { Agent, PermissionMode, Session } from '../api';
 
 // 展示层术语两级制：一条 Session 对用户叫「任务」，一条 TaskRecord 对用户叫「指令」。
 // 「任务运行」「运行」「会话」都不再作为 Session 的叫法出现在界面上。
-//
-// stateLabels 在 sse.ts 有一份刻意的逐字副本（那里禁止与 components/ 互相 import）。
-// 改动这里的任何一个状态词，必须同步 sse.ts:stateLabels。
+
 export const stateLabels: Record<string, string> = {
   created: '已创建', starting: '启动中', idle: '就绪', thinking: '思考中', running_tool: '正在调用工具', waiting_for_permission: '等待授权', interrupting: '正在取消', interrupted: '已取消', completed: '已完成', failed: '失败', stopped: '已停止'
 };

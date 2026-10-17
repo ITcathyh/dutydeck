@@ -4,7 +4,7 @@ import type { LarkSetupTarget } from '../app-route';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Bot, Check, ExternalLink, Eye, EyeOff, FolderOpen, Plus, Trash2, Wrench, X } from 'lucide-react';
-import { validateHighRiskPattern } from '@dutydeck/shared';
+import { describeWebBaseUrlReachability, validateHighRiskPattern } from '@dutydeck/shared';
 import { api, ApiError, type Agent, type LarkAppCreationJob, type RiskControlMode } from '../api';
 import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../model-cache';
 import { supportsModelServiceSettings } from '../agent-model-support';
@@ -58,52 +58,6 @@ const workspaceAliasTable = (rows: readonly WorkspaceAliasRow[]): Record<string,
   }
   return table;
 };
-
-/*
-  S7 Web 出口健康提示的 web 侧分类。apps/web 不能依赖 apps/server，
-  规则与文案必须与 apps/server/src/lark/config.ts 的 describeWebBaseUrlReachability
-  保持一致；改动分类规则时两边同步，测试各自钉一份边界矩阵。
-*/
-const webBaseUrlUnsetMessage = '未配置公网 Web 地址：审批/问答卡片没有网页出口，手机无法打开详情。';
-const webBaseUrlLocalMessage = 'Web 地址只在本机或内网可达：手机外网打不开，卡片上的“查看详情”没有出口。';
-const webBaseUrlInvalidMessage = 'Web 地址不是合法的 http(s) 链接：卡片上的“查看详情”不会渲染，请改为手机可达的公网地址。';
-
-function describeWebBaseUrlReachability(webBaseUrl: string): { kind: 'unset' | 'local' | 'public'; message?: string } {
-  const trimmed = webBaseUrl.trim();
-  if (!trimmed) return { kind: 'unset', message: webBaseUrlUnsetMessage };
-  // ftp:// 等非 http(s) 协议不能补成 https://（new URL 会把主机名误读成协议段），直接判不可用。
-  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(trimmed);
-  if (scheme && !/^https?$/i.test(scheme[1]!)) return { kind: 'local', message: webBaseUrlInvalidMessage };
-  // normalizeWebBaseUrl 会把非 http(s) 输入误补成 https://<原串>（ftp://x → https://ftp://x），
-  // 归一化后的存储态会在主机段内出现第二个 ://；hydrate 回填的是存储态，需同样判畸形，避免警示漏报。
-  // 只看首个路径分隔符之前的主机段，避免误伤路径或参数里自带 URL 的合法公网地址。
-  if (/^[a-z][a-z0-9+.-]*:\/\/[^/]*:\/\//i.test(trimmed)) return { kind: 'local', message: webBaseUrlInvalidMessage };
-  let parsed: URL;
-  try {
-    parsed = new URL(scheme ? trimmed : `https://${trimmed}`);
-  } catch {
-    return { kind: 'local', message: webBaseUrlInvalidMessage };
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { kind: 'local', message: webBaseUrlInvalidMessage };
-  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  if (!hostname) return { kind: 'local', message: webBaseUrlInvalidMessage };
-  const local = hostname === 'localhost' || hostname === '::1' || hostname.endsWith('.local') || (() => {
-    if (hostname.includes(':')) {
-      const firstHextet = parseInt(hostname.slice(0, 4), 16);
-      return Number.isInteger(firstHextet) && ((firstHextet >= 0xfe80 && firstHextet <= 0xfebf) || (firstHextet >= 0xfc00 && firstHextet <= 0xfdff));
-    }
-    const parts = hostname.split('.');
-    if (parts.length === 4 && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)) {
-      const [first = 0, second = 0] = parts.map(Number);
-      return first === 0 || first === 10 || first === 127
-        || (first === 169 && second === 254)
-        || (first === 172 && second >= 16 && second <= 31)
-        || (first === 192 && second === 168);
-    }
-    return false;
-  })();
-  return local ? { kind: 'local', message: webBaseUrlLocalMessage } : { kind: 'public' };
-}
 
 /*
   四个手写开关（primitives 里没有 Switch 原语）。轨道是真正的胶囊滑块，

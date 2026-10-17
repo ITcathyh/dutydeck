@@ -1,5 +1,6 @@
 import { larkCommandRegistry } from './commands.js';
 import { isOpenPlatformSessionExpired } from './open-platform-session.js';
+import { asRecord, isRecord, pickString } from './open-platform-values.js';
 import type { LarkSlashCommandDefinition } from './service.js';
 
 /**
@@ -698,23 +699,6 @@ function finiteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-function pickString(record: Record<string, unknown>, keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === 'string' && value) return value;
-    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  }
-  return undefined;
-}
-
 function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return isRecord(value) ? value : {};
 }

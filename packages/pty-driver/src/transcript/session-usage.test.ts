@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { appendFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as fs from 'node:fs';
@@ -21,6 +21,28 @@ it('reads real CLI schema: Codex cumulative differs from current context, cached
   const source = await sample('codex');
   expect(await readNativeTranscriptUsage(source)).toMatchObject({ context: { used: 40596, size: 475000 }, nativeTokens: { inputTokens: 41029, cacheReadTokens: 107392, outputTokens: 864, totalTokens: 149285, scope: 'current_native_session', source: 'codex_transcript' }, rateLimits: { sevenDay: { usedPercent: 3 } } });
   expect((await readNativeTranscriptUsage(source))?.rateLimits?.fiveHour).toBeUndefined();
+});
+it('reuses the Claude aggregate when the transcript has no new bytes', async () => {
+  const source = await sample('claude');
+  await appendFile(source.path, next('msg-extra') + '\n');
+  const first = await readNativeTranscriptUsage(source);
+  const parse = vi.spyOn(Date, 'parse');
+  try {
+    const second = await readNativeTranscriptUsage(source);
+    expect(second).toEqual(first);
+    expect(second).not.toBe(first);
+    expect(parse).not.toHaveBeenCalled();
+  } finally { parse.mockRestore(); }
+});
+it('recomputes a same-size Claude rewrite when its modification time changes', async () => {
+  const source = await sample('claude');
+  expect((await readNativeTranscriptUsage(source))?.nativeTokens?.totalTokens).toBe(117160);
+  const before = await fs.promises.stat(source.path);
+  const original = await readFile(source.path, 'utf8');
+  await writeFile(source.path, original.replace('"output_tokens":812', '"output_tokens":813'));
+  await utimes(source.path, before.atime, new Date(before.mtimeMs + 1000));
+  expect(await fs.promises.stat(source.path)).toMatchObject({ size: before.size, ino: before.ino });
+  expect((await readNativeTranscriptUsage(source))?.nativeTokens?.totalTokens).toBe(117161);
 });
 it('deduplicates Claude message snapshots, excludes errors/sidechains/synthetic/cost-state, reads appended bytes and retains partial UTF-8 lines', async () => {
   const source = await sample('claude');

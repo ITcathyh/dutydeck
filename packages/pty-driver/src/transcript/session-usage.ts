@@ -88,7 +88,8 @@ async function readUsage(source: NativeUsageSource, key: string): Promise<Sessio
         if (context && (!cursor!.snapshot.context || Date.parse(context.observedAt) >= Date.parse(cursor!.snapshot.context.observedAt))) cursor!.snapshot.context = { ...context, source: 'claude_transcript' };
       }
     };
-    if (stat.size > cursor.offset) {
+    const appended = stat.size > cursor.offset;
+    if (appended) {
       if (stat.size - cursor.offset > 128 * 1024 * 1024) throw new Error('Transcript usage read limit exceeded');
       const stream = createReadStream(source.path, { fd: fd.fd, autoClose: false, start: cursor.offset, end: stat.size - 1 });
       for await (const chunk of stream) {
@@ -104,7 +105,7 @@ async function readUsage(source: NativeUsageSource, key: string): Promise<Sessio
       cursor.offset = stat.size; cursor.mtime = stat.mtimeMs;
     }
     if (!cursor.bound || cursor.invalid) { cursors.delete(key); return; }
-    if (cursor.messages.size) {
+    if (appended && cursor.messages.size) {
       const messages = [...cursor.messages.values()];
       const latest = messages.reduce((a, b) => Date.parse(a.observedAt) > Date.parse(b.observedAt) ? a : b);
       const total: NativeTokenUsage = { source: 'claude_transcript', scope: 'current_native_session', observedAt: latest.observedAt, ...(cursor.partial ? { partial: true } : {}) };

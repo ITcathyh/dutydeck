@@ -92,30 +92,11 @@ const eventsQueryRouteSchema = sessionInsightEventsQuerySchema.extend({
   cursor: routeCursorSchema.optional(),
   tool: routeTextSchema(128).optional()
 });
-const summaryQueryRouteSchema = z
-  .object({
-    workspace: routeTextSchema(4096).optional(),
-    agentId: routeTextSchema(256).optional(),
-    usage: z.enum(['explicit', 'proactive', 'scheduled', 'background', 'mixed', 'unknown']).optional(),
-    from: z.string().datetime().optional(),
-    to: z.string().datetime().optional(),
-    includeArchived: z
-      .union([z.boolean(), z.enum(['true', 'false']).transform(v => v === 'true')])
-      .default(false),
-    groupBy: z.enum(['workspace', 'agent', 'model', 'usage']).default('workspace'),
-    limit: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(SESSION_INSIGHT_LIMITS.maxSummaryRowsPerPageMax)
-      .default(SESSION_INSIGHT_LIMITS.maxSummaryRowsPerPageDefault),
-    cursor: routeCursorSchema.optional()
-  })
-  .strict()
-  .refine(
-    data => !data.from || !data.to || new Date(data.from).getTime() < new Date(data.to).getTime(),
-    { message: 'from must be earlier than to' }
-  );
+const summaryQueryRouteSchema = sessionInsightSummaryQuerySchema.and(z.object({
+  workspace: routeTextSchema(4096).optional(),
+  agentId: routeTextSchema(256).optional(),
+  cursor: routeCursorSchema.optional()
+}));
 
 const routeCompareRefSchema = compareSessionRefSchema.extend({
   sessionId: routeIdSchema,

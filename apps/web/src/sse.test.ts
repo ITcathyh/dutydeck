@@ -113,6 +113,11 @@ describe('applyStatusEvent', () => {
     const original = makeSession();
     expect(applyStatusEvent(original, makeEvent(1, 'status', { state: 'bogus' }))).toBe(original);
   });
+
+  it.each(['constructor', 'toString', '__proto__'])('忽略原型属性 state %s', state => {
+    const original = makeSession();
+    expect(applyStatusEvent(original, makeEvent(1, 'status', { state }))).toBe(original);
+  });
 });
 
 // 模拟 EventSource（node 环境没有原生实现）；默认工厂走全局 EventSource，用 stubGlobal 注入

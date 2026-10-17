@@ -103,30 +103,22 @@ export async function discoverSkills(
   const homeRoot = resolve(options?.homeDirectory?.trim() || homedir());
   const roots = skillRoots(workspaceRoot, homeRoot, options?.botAppId);
 
-  const references = await Promise.all(
-    roots.map(async root => {
-      const files = await findSkillFiles(root.path);
-      return Promise.all(
-        files.map(async filePath => {
-          const markdown = await readFile(filePath, 'utf8').catch(() => '');
-          return {
-            name: frontmatterValue(markdown, 'name') || basename(dirname(filePath)),
-            description: frontmatterValue(markdown, 'description'),
-            path: filePath,
-            source: root.source
-          } satisfies SkillReference;
-        })
-      );
-    })
-  );
-
-  const seenPaths = new Set<string>();
-  const uniqueSkills: SkillReference[] = [];
+  const references = await Promise.all(roots.map(async root =>
+    (await findSkillFiles(root.path)).map(path => ({ path, source: root.source }))
+  ));
+  const files = new Map<string, SkillReference['source']>();
   for (const skill of references.flat()) {
-    if (seenPaths.has(skill.path)) continue;
-    seenPaths.add(skill.path);
-    uniqueSkills.push(skill);
+    if (!files.has(skill.path)) files.set(skill.path, skill.source);
   }
+  const uniqueSkills = await Promise.all([...files].map(async ([path, source]) => {
+    const markdown = await readFile(path, 'utf8').catch(() => '');
+    return {
+      name: frontmatterValue(markdown, 'name') || basename(dirname(path)),
+      description: frontmatterValue(markdown, 'description'),
+      path,
+      source
+    } satisfies SkillReference;
+  }));
 
   return uniqueSkills.sort((left, right) => {
     const nameCompare = left.name.localeCompare(right.name);

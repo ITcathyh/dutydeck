@@ -1,5 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { writeRunnerInput } from '../runner-input.js';
+import { pushOpt } from '../runner-args.js';
 
 /**
  * dsh（DeepSeek Harness）适配器 —— runner 类：由一个 Node runner 以 JSON-RPC
@@ -12,12 +13,6 @@ import { writeRunnerInput } from '../runner-input.js';
  * 恢复，故不实现 buildResumeCommand。runner 自己注入上下文，也就不实现
  * injectSessionContext。
  */
-
-/** value 为 undefined 或空串就跳过。 */
-function pushOpt(args: string[], key: string, value: string | undefined): void {
-  if (value === undefined || value.length === 0) return;
-  args.push(key, value);
-}
 
 export function createDshAdapter(): CliAdapter {
   return {

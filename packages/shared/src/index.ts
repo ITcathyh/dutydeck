@@ -9,6 +9,7 @@ import { supportsAgentModelService } from './agent-model-service.js';
 import { supportsRemoteApproval } from './remote-approval.js';
 
 export * from './configuration-primitives.js';
+export * from './web-base-url.js';
 
 export const protocols = ['auto', 'acp', 'jsonl', 'pipe', 'pty', 'pty-cli'] as const;
 export type Protocol = (typeof protocols)[number];

@@ -87,20 +87,29 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
 
   // 会话终态唤醒：ask 阻塞期间会话被 stop/archive/崩溃，必须把等待者放出来，
   // 否则 CLI 子进程会一直挂在那次 HTTP 长轮询上。只用公开的 runtime.subscribe。
-  const watched = new Map<string, () => void>();
-  const watchSession = (sessionId: string) => {
-    if (!runtime || watched.has(sessionId)) return;
-    const unsubscribe = runtime.subscribe(sessionId, event => {
-      const state = (event.data as { state?: string } | undefined)?.state;
-      if (event.type !== 'status' || !state || !terminalStates.has(state)) return;
-      broker.cancelSession(sessionId, `会话已${state === 'stopped' ? '停止' : '失败'}`);
-      unwatch(sessionId);
-    });
-    watched.set(sessionId, unsubscribe);
-  };
-  const unwatch = (sessionId: string) => {
-    watched.get(sessionId)?.();
+  const watched = new Map<string, { references: number; unsubscribe(): void }>();
+  const unwatch = (sessionId: string, entry = watched.get(sessionId)) => {
+    if (!entry || watched.get(sessionId) !== entry) return;
+    entry.unsubscribe();
     watched.delete(sessionId);
+  };
+  const watchSession = (sessionId: string) => {
+    if (!runtime) return;
+    let entry = watched.get(sessionId);
+    if (!entry) {
+      const current = { references: 0, unsubscribe: () => {} };
+      current.unsubscribe = runtime.subscribe(sessionId, event => {
+        const state = (event.data as { state?: string } | undefined)?.state;
+        if (event.type !== 'status' || !state || !terminalStates.has(state)) return;
+        broker.cancelSession(sessionId, `会话已${state === 'stopped' ? '停止' : '失败'}`);
+        unwatch(sessionId, current);
+      });
+      watched.set(sessionId, current);
+      entry = current;
+    }
+    entry.references++;
+    const current = entry;
+    return () => { if (--current.references === 0) unwatch(sessionId, current); };
   };
 
   app.addHook('onClose', async () => {
@@ -127,16 +136,18 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
   });
 
   app.post<{ Params: { id: string }; Body: { question?: string; timeoutMs?: number } }>('/api/relay/sessions/:id/ask', async (request, reply) => {
+    let release: (() => void) | undefined;
     try {
       // 先反解会话再注册终态唤醒：必须在阻塞之前挂上监听，
       // 否则「注册监听」这一步永远等不到执行，会话结束时无人唤醒。
       const capability = await service.resolveSession(request.headers.authorization, request.params.id);
-      watchSession(capability.sessionId);
+      release = watchSession(capability.sessionId);
       const outcome = await service.ask(request.headers.authorization, request.params.id, request.body ?? {});
       // 长轮询结果一律 200：answered / expired / cancelled 都是通道正常工作的结果，
       // CLI 侧据 status 决定退出码，不靠 HTTP 状态码区分。
       return outcome;
     } catch (error) { return handleRelayError(error, reply); }
+    finally { release?.(); }
   });
 
   // Claude PermissionRequest hook 的短轮询入口：首次带工具事实登记，之后带 permissionId 续等，直到拿到裁决。

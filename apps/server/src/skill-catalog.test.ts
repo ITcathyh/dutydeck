@@ -1,8 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { discoverSkills, isPathInside } from './skill-catalog.js';
+
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof import('node:fs/promises')>();
+  return { ...actual, readFile: vi.fn(actual.readFile) };
+});
 
 describe('skill-catalog', () => {
   let tempDir: string;
@@ -158,6 +164,20 @@ describe('skill-catalog', () => {
       const skills = await discoverSkills(workspaceDir, { homeDirectory: userHomeDir });
       expect(skills).toHaveLength(1);
       expect(skills[0]?.path).toBe(join(claudeDir, 'SKILL.md'));
+      expect(vi.mocked(fs.readFile).mock.calls.filter(([path]) => path === join(claudeDir, 'SKILL.md'))).toHaveLength(1);
+    });
+
+    it('reads shared canonical paths once and keeps workspace source ahead of user roots', async () => {
+      const skillRoot = join(workspaceDir, '.claude', 'skills');
+      const skillFile = join(skillRoot, 'shared', 'SKILL.md');
+      await mkdir(join(skillRoot, 'shared'), { recursive: true });
+      await writeFile(skillFile, '---\nname: shared\ndescription: Shared content\n---\nBody');
+      await mkdir(join(userHomeDir, '.agents'), { recursive: true });
+      await symlink(skillRoot, join(userHomeDir, '.agents', 'skills'));
+
+      const skills = await discoverSkills(workspaceDir, { homeDirectory: userHomeDir });
+      expect(skills).toEqual([{ name: 'shared', description: 'Shared content', path: skillFile, source: 'workspace' }]);
+      expect(vi.mocked(fs.readFile).mock.calls.filter(([path]) => path === skillFile)).toHaveLength(1);
     });
 
     it('does not crawl symlink directories pointing outside registered root', async () => {

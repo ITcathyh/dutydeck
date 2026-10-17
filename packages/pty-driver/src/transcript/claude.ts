@@ -38,6 +38,7 @@ import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-
 import { isUsableMarker } from '../session-id/marker.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource, type TranscriptPosition } from './tail.js';
 import { claudeInputText } from './input-receipt.js';
+import { entryMentionsMarker } from './claude-content.js';
 import { ClaudeSubagentReader } from './claude-subagents.js';
 
 /** Head window per candidate when scanning for the marker. It rides the FIRST
@@ -150,16 +151,6 @@ function findJsonlByMarker(dir: string, marker: string): string | undefined {
     }
   }
   return undefined;
-}
-
-/** Does an entry's text content mention the marker? Handles both the string
- *  and the content-block array form of `message.content`. */
-function entryMentionsMarker(entry: any, marker: string): boolean {
-  const content = entry?.message?.content;
-  if (typeof content === 'string') return content.includes(marker);
-  if (!Array.isArray(content)) return false;
-  return content.some((block: any) =>
-    block && typeof block === 'object' && typeof block.text === 'string' && block.text.includes(marker));
 }
 
 /** Flatten a tool_result block's content (string, or array of text blocks)

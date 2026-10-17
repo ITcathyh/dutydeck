@@ -252,7 +252,7 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 
 ## Web Workbench <a id="web-console"></a>
 
-- **Task board**: Awaiting action / In progress / Completed / Archived; queueing and interrupt. **Terminal playback exists only for terminal-mode (`pty-cli`) agents**, 5000 lines at most. The delivery panel lists per-turn changes.
+- **Task board**: Awaiting action / In progress / Completed / Archived; queueing and interrupt. **Terminal playback exists only for terminal-mode (`pty-cli`) agents**, 5000 lines at most. The delivery panel lists per-turn changes. The current task title and summary use loaded execution records and are not overwritten by a lagging task-list refresh.
 - **Read-only task details from Lark cards** show the source topic, group or private chat, and original initiator, with links back to known topics or chats. Unrecorded topics and missing historical origin records are marked explicitly; unavailable names fall back to known IDs.
 - **Verification**: Lark tasks only, after a command is configured. Result states: passed, failed, expired, not verified.
 - **View changes on the phone**: the result-card link is valid for 14 days and shows only that turn. Only turns in a git repo run through the runtime are recorded; with too many un-ignored untracked files (over 20 MiB each, 50 MiB total, or 2000 files) no diff is recorded and the log says why, so add large files and build dirs to `.gitignore`. Line comments: signed-in Web users send them straight to the agent; people with only the share link create a confirmation card in the Lark topic, and someone with permission must tap "Hand to agent". `dutydeck auth share-key rotate` invalidates all issued links.

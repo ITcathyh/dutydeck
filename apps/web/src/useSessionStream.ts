@@ -9,7 +9,6 @@ import { SessionStream, applyStatusEvent, type StreamStatus } from './sse';
 export function useSessionStream(sessionId: string | undefined, runId: string | undefined, enabled: boolean): StreamStatus {
   const qc = useQueryClient();
   const [status, setStatus] = useState<StreamStatus>('connecting');
-  const streamRef = useRef<SessionStream | null>(null);
   const recoveryCursors = useRef(new Map<string, number>());
 
   useEffect(() => {
@@ -81,9 +80,8 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
         void qc.refetchQueries({ queryKey: ['sessions'], exact: true });
       }
     });
-    streamRef.current = stream;
     stream.start();
-    return () => { if (frame !== undefined) cancelAnimationFrame(frame); pending = []; controller.abort(); stream.close(); streamRef.current = null; };
+    return () => { if (frame !== undefined) cancelAnimationFrame(frame); pending = []; controller.abort(); stream.close(); };
   }, [sessionId, runId, enabled, qc]);
 
   return sessionId && enabled ? status : 'connecting';

@@ -1,6 +1,7 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { writeRunnerInput } from '../runner-input.js';
+import { pushOpt } from '../runner-args.js';
 
 /**
  * Mira（Mira Web API）适配器 —— runner 类：云端编排 + 远端 sandbox，没有本地
@@ -12,12 +13,6 @@ import { writeRunnerInput } from '../runner-input.js';
  * 的用户可见 CLI 命令，故不实现 buildResumeCommand。runner 自己注入上下文，也就
  * 不实现 injectSessionContext。
  */
-
-/** value 为 undefined 或空串就跳过。 */
-function pushOpt(args: string[], key: string, value: string | undefined): void {
-  if (value === undefined || value.length === 0) return;
-  args.push(key, value);
-}
 
 export function createMiraAdapter(): CliAdapter {
   return {

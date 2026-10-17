@@ -1,4 +1,4 @@
-import type { ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
+import type { PermissionMode, ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
 import type {
   SessionInsightDetailsResponse,
   SessionInsightRefreshResponse,
@@ -24,7 +24,7 @@ export type { WorkspaceCleanupPreview, WorkspaceCleanupResult };
 export type PeerInstance = { id: string; name: string };
 export type { WorkspaceOrganization, WorkspaceOrganizationSnapshot };
 export type { ScheduleTrigger };
-export type PermissionMode = 'ask' | 'approve-reads' | 'deny-all' | 'full-trust';
+export type { PermissionMode };
 export type { WorkspaceMode };
 export type Agent = PublicAgent;
 export type AgentModel = { id: string; name: string };

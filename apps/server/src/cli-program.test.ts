@@ -253,6 +253,20 @@ describe('Dutydeck CLI', () => {
     expect(databaseUpgradeExecution).not.toHaveBeenCalled();
   });
 
+  it.each(['workspace-groups', 'session'])('preserves local runtime options over globals for %s', async commandName => {
+    const handler = vi.fn();
+    const program = createCliProgram('0.0.6', { workspaceGroups: handler, sessionNames: handler });
+    program.setOptionValue('json', true);
+    program.commands.find(command => command.name() === commandName)!.commands.find(command => command.name() === 'list')!.setOptionValue('json', false);
+
+    await program.parseAsync([
+      'node', 'dutydeck', '--database', '/root/global.sqlite', commandName, 'list',
+      '--database', '/root/local.sqlite', '--url', 'http://127.0.0.1:4310'
+    ]);
+
+    expect(handler).toHaveBeenCalledWith('list', {}, expect.objectContaining({ database: '/root/local.sqlite', url: 'http://127.0.0.1:4310', json: false }));
+  });
+
   describe('workspace-groups commands parsing', () => {
     it('parses workspace-groups list with options and root database', async () => {
       const workspaceGroups = vi.fn();

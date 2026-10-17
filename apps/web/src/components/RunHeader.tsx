@@ -6,6 +6,7 @@ import { sessionDisplayName } from '../run-summary';
 import { nextActionForState, sessionErrorSummary, sessionWorkspaceName, shortRunId } from '../workspace-model';
 import { Badge, Banner, Button, IconButton, Tabs } from './primitives';
 import { effectiveStatus, permissionLabels, stateTone } from './ui';
+import { usd } from './usageFormat';
 
 function ConnectionState({ status }: { status: StreamStatus }) {
   const label = status === 'open' ? '实时同步' : status === 'reconnecting' ? '正在重连' : '正在连接';
@@ -34,7 +35,6 @@ function usageLabel(usage?: SessionUsage) {
   const entries = own.entries + subSteps.entries;
   if (!entries) return undefined;
   if (own.unavailable + subSteps.unavailable === entries) return { text: '本任务账本：无用量数据', detail: usage.snapshot?.nativeTokens ? '原生会话 token 见下方；此读数不计入账本费用' : '已完成的执行未记录 token 与成本' };
-  const usd = (value: number) => `$${value.toFixed(2)}`;
   const estimated = own.estimatedCostUsd + subSteps.estimatedCostUsd;
   const unknown = (own.unknownCostEntries ?? (own.unpriced ?? 0) + own.unavailable)
     + (subSteps.unknownCostEntries ?? (subSteps.unpriced ?? 0) + subSteps.unavailable);

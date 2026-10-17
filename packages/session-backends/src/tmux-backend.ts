@@ -217,8 +217,6 @@ export class TmuxBackend implements SessionBackend {
   /** SessionBackend contract: the tmux session this backend owns. */
   readonly sessionName: string;
   readonly ownerId?: string;
-  private cols = 80;
-  private rows = 24;
   private started = false;
   private lifecycle = 0;
   private inputGeneration = 0;
@@ -260,8 +258,6 @@ export class TmuxBackend implements SessionBackend {
       throw new TmuxError(`工作目录不可用：${opts.cwd}。请在机器人或任务设置中选择已存在且可访问的目录。`);
     }
     this.started = true;
-    this.cols = opts.cols;
-    this.rows = opts.rows;
 
     // 1. Detached session running a bare shell. The CLI is launched by
     //    send-keys (step 4) so session-specific env never touches the tmux
@@ -355,8 +351,6 @@ export class TmuxBackend implements SessionBackend {
 
   async resize(cols: number, rows: number): Promise<void> {
     if (this.exited) return;
-    this.cols = cols;
-    this.rows = rows;
     try {
       (await runTmux(['resize-window', '-t', this.sessionName, '-x', String(cols), '-y', String(rows)]));
     } catch { /* best effort */ }
@@ -433,8 +427,6 @@ export class TmuxBackend implements SessionBackend {
     this.socketPath = (await runTmux(['display-message', '-p', '-t', `=${this.sessionName}`, '#{socket_path}'])).trim();
     check();
     this.started = true;
-    this.cols = opts.cols;
-    this.rows = opts.rows;
     try {
       // A daemon crash leaves tmux's `pipe-pane` writer alive even though the
       // local socket reader is gone. Replace that stale capture before arming

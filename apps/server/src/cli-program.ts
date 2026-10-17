@@ -382,22 +382,7 @@ const databaseRetirementOptionsFrom = (options: { database?: string; hostname?: 
 
 const collectDirectories = (val: string, prev: string[] = []): string[] => [...prev, val];
 
-const workspaceGroupsOptionsFrom = (options: WorkspaceGroupsCommandOptions, command: Command): WorkspaceGroupsCommandOptions => {
-  const merged = { ...command.optsWithGlobals(), ...options } as Record<string, unknown>;
-  const result: WorkspaceGroupsCommandOptions = { ...options };
-  if (typeof merged.database === 'string' && merged.database) {
-    result.database = merged.database;
-  }
-  if (typeof merged.url === 'string' && merged.url) {
-    result.url = merged.url;
-  }
-  if (merged.json === true) {
-    result.json = true;
-  }
-  return result;
-};
-
-const sessionOptionsFrom = (options: SessionNamesCommandOptions, command: Command): SessionNamesCommandOptions => {
+const localRuntimeOptionsFrom = (options: SessionNamesCommandOptions, command: Command): SessionNamesCommandOptions => {
   const merged = { ...command.optsWithGlobals(), ...options } as Record<string, unknown>;
   const result: SessionNamesCommandOptions = { ...options };
   if (typeof merged.database === 'string' && merged.database) {
@@ -843,21 +828,21 @@ alarm=<JSON> (the old flat alarm subscription) still works for one release and i
     .option('--url <url>', 'Exact local runtime URL; requires --database')
     .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
     .option('--json', 'Print the result as JSON')
-    .action((options, command) => handlers.sessionNames?.('list', {}, sessionOptionsFrom(options, command)));
+    .action((options, command) => handlers.sessionNames?.('list', {}, localRuntimeOptionsFrom(options, command)));
 
   session.command('rename <session-id> <name>')
     .description('Rename a session on the local runtime')
     .option('--url <url>', 'Exact local runtime URL; requires --database')
     .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
     .option('--json', 'Print the result as JSON')
-    .action((sessionId, name, options, command) => handlers.sessionNames?.('rename', { sessionId, name }, sessionOptionsFrom(options, command)));
+    .action((sessionId, name, options, command) => handlers.sessionNames?.('rename', { sessionId, name }, localRuntimeOptionsFrom(options, command)));
 
   session.command('reset-name <session-id>')
     .description('Reset custom name of a session on the local runtime')
     .option('--url <url>', 'Exact local runtime URL; requires --database')
     .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
     .option('--json', 'Print the result as JSON')
-    .action((sessionId, options, command) => handlers.sessionNames?.('reset-name', { sessionId }, sessionOptionsFrom(options, command)));
+    .action((sessionId, options, command) => handlers.sessionNames?.('reset-name', { sessionId }, localRuntimeOptionsFrom(options, command)));
 
   session.command('herdr [args...]')
     .description('Prepare or operate the current session’s dedicated Herdr side workspace')
@@ -1071,28 +1056,28 @@ Examples:
     .option('--url <url>', 'Exact local runtime URL; requires --database')
     .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
     .option('--json', 'Print the result as JSON')
-    .action((options, command) => handlers.workspaceGroups?.('list', {}, workspaceGroupsOptionsFrom(options, command)));
+    .action((options, command) => handlers.workspaceGroups?.('list', {}, localRuntimeOptionsFrom(options, command)));
 
   groups.command('create <name>')
     .description('Create a new workspace group')
     .option('--url <url>', 'Exact local runtime URL; requires --database')
     .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
     .option('--json', 'Print the result as JSON')
-    .action((name, options, command) => handlers.workspaceGroups?.('create', { name }, workspaceGroupsOptionsFrom(options, command)));
+    .action((name, options, command) => handlers.workspaceGroups?.('create', { name }, localRuntimeOptionsFrom(options, command)));
 
   groups.command('rename <group-id> <name>')
     .description('Rename an existing workspace group')
     .option('--url <url>', 'Exact local runtime URL; requires --database')
     .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
     .option('--json', 'Print the result as JSON')
-    .action((groupId, name, options, command) => handlers.workspaceGroups?.('rename', { groupId, name }, workspaceGroupsOptionsFrom(options, command)));
+    .action((groupId, name, options, command) => handlers.workspaceGroups?.('rename', { groupId, name }, localRuntimeOptionsFrom(options, command)));
 
   groups.command('delete <group-id>')
     .description('Delete a workspace group, preserving sessions and falling back to directory rules')
     .option('--url <url>', 'Exact local runtime URL; requires --database')
     .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
     .option('--json', 'Print the result as JSON')
-    .action((groupId, options, command) => handlers.workspaceGroups?.('delete', { groupId }, workspaceGroupsOptionsFrom(options, command)));
+    .action((groupId, options, command) => handlers.workspaceGroups?.('delete', { groupId }, localRuntimeOptionsFrom(options, command)));
 
   groups.command('move <group-id> [session-ids...]')
     .description('Assign sessions and/or directories to a workspace group')
@@ -1100,7 +1085,7 @@ Examples:
     .option('--url <url>', 'Exact local runtime URL; requires --database')
     .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
     .option('--json', 'Print the result as JSON')
-    .action((groupId, sessionIds, options, command) => handlers.workspaceGroups?.('move', { groupId, sessionIds: Array.isArray(sessionIds) ? sessionIds : (sessionIds ? [sessionIds] : []) }, workspaceGroupsOptionsFrom(options, command)));
+    .action((groupId, sessionIds, options, command) => handlers.workspaceGroups?.('move', { groupId, sessionIds: Array.isArray(sessionIds) ? sessionIds : (sessionIds ? [sessionIds] : []) }, localRuntimeOptionsFrom(options, command)));
 
   groups.command('reset [session-ids...]')
     .description('Reset session manual overrides and/or directory assignments')
@@ -1108,7 +1093,7 @@ Examples:
     .option('--url <url>', 'Exact local runtime URL; requires --database')
     .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
     .option('--json', 'Print the result as JSON')
-    .action((sessionIds, options, command) => handlers.workspaceGroups?.('reset', { sessionIds: Array.isArray(sessionIds) ? sessionIds : (sessionIds ? [sessionIds] : []) }, workspaceGroupsOptionsFrom(options, command)));
+    .action((sessionIds, options, command) => handlers.workspaceGroups?.('reset', { sessionIds: Array.isArray(sessionIds) ? sessionIds : (sessionIds ? [sessionIds] : []) }, localRuntimeOptionsFrom(options, command)));
 
   const addProcessCommands = (parent: Command) => {
     parent.command('start')

@@ -64,6 +64,63 @@ afterEach(() => {
   window.history.replaceState(null, '', '/');
 });
 
+describe('App summary updates', () => {
+  it('keeps the current task summary when a lagging list refresh arrives', async () => {
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '已取消的旧目标')] });
+    const task = { id: 'fresh-task', sessionId: 's1', prompt: '当前任务目标', status: 'running', createdAt: '2026-10-17T00:00:00Z', updatedAt: '2026-10-17T00:01:00Z' };
+    vi.mocked(api.tasks).mockResolvedValue([task]);
+    const { client } = renderApp();
+    await screen.findByRole('heading', { level: 1, name: task.prompt });
+    const cachedTasks = client.getQueryData(['tasks', 's1']);
+
+    await act(async () => {
+      client.setQueryData(['run-summaries'], [{ ...summary('s1', '已取消的旧目标'), queuedCount: 1 }]);
+    });
+
+    expect(client.getQueryData(['tasks', 's1'])).toBe(cachedTasks);
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(task.prompt);
+  });
+
+  it('retains another session summary when the selected session tasks change', async () => {
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1'), session('s2')], summaries: [summary('s1', '旧目标'), summary('s2', '第二个任务')] });
+    const task = { id: 'fresh-task', sessionId: 's1', prompt: '更新后的目标', status: 'running', createdAt: '2026-10-17T00:00:00Z', updatedAt: '2026-10-17T00:01:00Z' };
+    vi.mocked(api.tasks).mockImplementation(async id => id === 's1' ? [task] : []);
+    const { client } = renderApp();
+    await screen.findByRole('heading', { level: 1, name: task.prompt });
+    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
+    await userEvent.click(within(navigation).getByRole('button', { name: /第二个任务/ }));
+    await screen.findByRole('heading', { level: 1, name: '第二个任务' });
+    await act(async () => {
+      client.setQueryData(['tasks', 's2'], [{ ...task, id: 'second-task', sessionId: 's2', prompt: '第二个任务的新目标' }]);
+    });
+
+    expect(within(navigation).getByRole('button', { name: /更新后的目标/ })).toBeTruthy();
+  });
+
+  it('shows a newly created task title before the summary list includes it', async () => {
+    mockAppApi();
+    const created = session('s1');
+    const task = { id: 'created-task', sessionId: created.id, prompt: '新建后立即显示的目标', status: 'queued', createdAt: created.createdAt, updatedAt: created.updatedAt };
+    vi.spyOn(api, 'create').mockResolvedValue(created);
+    vi.spyOn(api, 'send').mockImplementation(async () => {
+      vi.mocked(api.sessions).mockResolvedValue([created]);
+      return { accepted: true, task };
+    });
+    const { container, client } = renderApp();
+    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    await userEvent.click(within(container.querySelector('main')!).getByRole('button', { name: '创建任务' }));
+    const dialog = await screen.findByRole('dialog', { name: '创建新任务' });
+    fireEvent.change(within(dialog).getByRole('textbox', { name: '任务目标' }), { target: { value: task.prompt } });
+    await userEvent.click(within(dialog).getByRole('checkbox', { name: /确认允许 Agent 直接操作此工作目录/ }));
+    await userEvent.click(within(dialog).getByRole('button', { name: '创建并执行' }));
+
+    expect(await screen.findByRole('heading', { level: 1, name: task.prompt })).toBeTruthy();
+    expect(client.getQueryData(['run-summaries'])).toEqual([]);
+  });
+});
+
 describe('App 批量清理', () => {
   function setup() {
     const sessions = [session('s1', 'completed'), session('s2', 'thinking')];

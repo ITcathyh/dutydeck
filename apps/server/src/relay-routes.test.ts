@@ -187,6 +187,7 @@ describe('relay ask — blocking round trip over HTTP', () => {
       const result = await response;
       expect(result.statusCode).toBe(400);
       expect(result.json().error.code).toBe(code);
+      expect(runtime.listeners.get('ses_a')?.size ?? 0).toBe(0);
     } finally {
       broker.close();
       await response;
@@ -226,13 +227,89 @@ describe('relay ask — blocking round trip over HTTP', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ status: 'answered', answer: '继续' });
     expect(runtime.events.map(e => (e.data as any).relay)).toEqual(['ask', 'answer']);
+    expect(runtime.listeners.get('ses_a')?.size ?? 0).toBe(0);
   });
 
   it('returns expired (not an error) when nobody answers in time', async () => {
-    const { app, capabilities } = await harness();
+    const { app, capabilities, runtime } = await harness();
     const response = await app.inject({ method: 'POST', url: '/api/relay/sessions/self/ask', headers: auth(capabilities.tokenFor('ses_a')), payload: { question: '在吗', timeoutMs: 1_000 } });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ status: 'expired' });
+    expect(runtime.listeners.get('ses_a')?.size ?? 0).toBe(0);
+  });
+
+  it('keeps a shared listener until both concurrent asks finish', async () => {
+    const { app, capabilities, broker, runtime } = await harness();
+    const ask = (question: string) => app.inject({ method: 'POST', url: '/api/relay/sessions/self/ask', headers: auth(capabilities.tokenFor('ses_a')), payload: { question, timeoutMs: 30_000 } }).then(response => response.json());
+    const first = ask('first');
+    const second = ask('second');
+    await vi.waitFor(() => expect(broker.listPending('ses_a')).toHaveLength(2));
+    expect(runtime.listeners.get('ses_a')?.size).toBe(1);
+    await broker.answer(broker.listPending('ses_a').find(item => item.question === 'first')!.id, 'ok');
+    expect(await first).toMatchObject({ status: 'answered' });
+    expect(runtime.listeners.get('ses_a')?.size).toBe(1);
+    await runtime.publishSessionEvent('ses_a', 'status', { state: 'stopped' });
+    expect(await second).toMatchObject({ status: 'cancelled' });
+    expect(runtime.listeners.get('ses_a')?.size).toBe(0);
+  });
+
+  it('keeps the listener while another ask is still resolving its capability', async () => {
+    const { app, capabilities, broker, runtime } = await harness();
+    const ask = (question: string) => app.inject({ method: 'POST', url: '/api/relay/sessions/self/ask', headers: auth(capabilities.tokenFor('ses_a')), payload: { question, timeoutMs: 30_000 } }).then(response => response.json());
+    const first = ask('first');
+    await vi.waitFor(() => expect(broker.listPending('ses_a')).toHaveLength(1));
+    let release!: () => void;
+    const resolving = new Promise<void>(resolve => { release = resolve; });
+    const resolve = capabilities.resolve.bind(capabilities);
+    let calls = 0;
+    vi.spyOn(capabilities, 'resolve').mockImplementation(async (...args) => {
+      if (++calls === 2) await resolving;
+      return resolve(...args);
+    });
+    const second = ask('second');
+    try {
+      await vi.waitFor(() => expect(calls).toBe(2));
+      await broker.answer(broker.listPending('ses_a')[0]!.id, 'ok');
+      expect(await first).toMatchObject({ status: 'answered' });
+      expect(broker.listPending('ses_a')).toHaveLength(0);
+      expect(runtime.listeners.get('ses_a')?.size).toBe(1);
+      release();
+      await vi.waitFor(() => expect(broker.listPending('ses_a')).toHaveLength(1));
+      await runtime.publishSessionEvent('ses_a', 'status', { state: 'stopped' });
+      expect(await second).toMatchObject({ status: 'cancelled' });
+      expect(runtime.listeners.get('ses_a')?.size).toBe(0);
+    } finally {
+      release(); broker.close(); await Promise.allSettled([first, second]);
+    }
+  });
+
+  it('does not let an old request release a new listener after a terminal event', async () => {
+    const { app, capabilities, broker, runtime } = await harness();
+    let release!: () => void;
+    const settling = new Promise<void>(resolve => { release = resolve; });
+    const register = broker.register.bind(broker);
+    vi.spyOn(broker, 'register').mockImplementationOnce(async input => {
+      const outcome = await register(input);
+      await settling;
+      return outcome;
+    });
+    const ask = (question: string) => app.inject({ method: 'POST', url: '/api/relay/sessions/self/ask', headers: auth(capabilities.tokenFor('ses_a')), payload: { question, timeoutMs: 30_000 } }).then(response => response.json());
+    const first = ask('first');
+    await vi.waitFor(() => expect(broker.listPending('ses_a')).toHaveLength(1));
+    await runtime.publishSessionEvent('ses_a', 'status', { state: 'stopped' });
+    await vi.waitFor(() => expect(broker.listPending('ses_a')).toHaveLength(0));
+    const second = ask('second');
+    try {
+      await vi.waitFor(() => expect(broker.listPending('ses_a')).toHaveLength(1));
+      release();
+      expect(await first).toMatchObject({ status: 'cancelled' });
+      expect(runtime.listeners.get('ses_a')?.size).toBe(1);
+      await runtime.publishSessionEvent('ses_a', 'status', { state: 'stopped' });
+      expect(await second).toMatchObject({ status: 'cancelled' });
+      expect(runtime.listeners.get('ses_a')?.size).toBe(0);
+    } finally {
+      release(); broker.close(); await Promise.allSettled([first, second]);
+    }
   });
 
   it('wakes a blocked ask when the session reaches a terminal state', async () => {

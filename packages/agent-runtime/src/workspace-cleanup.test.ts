@@ -496,19 +496,21 @@ describe('managed workspace cleanup', () => {
     const workspace = (await h.runtime.getWorkspace(session.id))!;
     const preview = await h.runtime.getWorkspaceCleanupPreview(session.id);
 
+    let cleaningIntentLogged = false;
     let cleaningGate!: () => void;
     const gate = new Promise<void>(r => { cleaningGate = r; });
     const originalCAS = h.repos.config.compareAndSet;
     h.repos.config.compareAndSet = async (k, e, v) => {
       const ok = await originalCAS!.call(h.repos.config, k, e, v);
       if (ok && k === `runtime_workspace:${session.id}` && JSON.parse(v).state === 'cleaning') {
+        cleaningIntentLogged = true;
         await gate;
       }
       return ok;
     };
 
     const cleanupRun = h.runtime.cleanWorkspace(session.id, preview.fingerprint);
-    await vi.waitFor(() => expect((h.runtime as any).cleaningDirs.size).toBe(1));
+    await vi.waitFor(() => expect(cleaningIntentLogged).toBe(true));
 
     // 尝试以正在被清理的 worktree 目录作为 sourceCwd 启动新 session
     let reachedPrepare = false;
@@ -528,7 +530,7 @@ describe('managed workspace cleanup', () => {
     expect(reachedPrepare).toBe(false);
 
     cleaningGate();
-    await cleanupRun;
+    await expect(cleanupRun).resolves.toMatchObject({ ok: true });
     h.repos.config.compareAndSet = originalCAS;
   });
 

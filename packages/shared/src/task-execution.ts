@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { permissionModes } from './configuration-primitives.js';
 import type { AgentEvent, EventWindowOptions, Session, TaskExecutionContext, TaskRecord } from './index.js';
 import type { RuntimeControlClaim } from './database-control.js';
 import type { DriverTurnRecovery } from './driver.js';
@@ -55,7 +56,7 @@ export type ExecutionActor = z.infer<typeof executionActorSchema>;
 export const taskRequestV1Schema = z.object({
   version: z.literal(1), namespace: z.enum(['runtime', 'lark', 'work_item', 'automation', 'schedule']), key: id, sessionId: id,
   actor: executionActorSchema, prompt: z.string(), mode: z.enum(['queue', 'interrupt']), skills: z.array(id),
-  options: z.object({ model: id.optional(), reasoningEffort: id.optional(), permissionMode: z.enum(['ask', 'approve-reads', 'deny-all', 'full-trust']).optional() }).strict(),
+  options: z.object({ model: id.optional(), reasoningEffort: id.optional(), permissionMode: z.enum(permissionModes).optional() }).strict(),
   sources: z.array(z.object({ kind: id, id, version: id.optional(), digest: id.optional() }).strict()), sourcePayload: executionJsonSchema
 }).strict();
 export type TaskRequestV1 = z.infer<typeof taskRequestV1Schema>;
@@ -89,7 +90,7 @@ export const acceptedTaskInputV1Schema = z.object({
 }).strict();
 export const taskExecutionOptionsSchema = z.object({
   model: id.optional(), reasoningEffort: id.optional(),
-  permissionMode: z.enum(['ask', 'approve-reads', 'deny-all', 'full-trust'])
+  permissionMode: z.enum(permissionModes)
 }).strict();
 export type TaskExecutionOptions = z.infer<typeof taskExecutionOptionsSchema>;
 export interface AcceptedTaskInputV2 extends Omit<AcceptedTaskInputV1, 'version'> {
@@ -353,7 +354,7 @@ export const taskExecutionSchemas = {
   identitySchema: z.object({ identityId: id, kind: z.enum(physicalKinds), locator: executionJsonSchema }).strict(),
   observationSchema: z.object({ observationId: id, state: z.enum(['live', 'gone', 'unknown']), identityId: id.optional(), evidenceRef: id, observedAt: z.string().datetime() }).strict(),
   intentSchema: z.object({ submissionId: id, inputDigest: executionDigestSchema, resourceRefs: z.array(z.object({ resourceId: id, identityId: id }).strict()), recovery: recoverySchema.optional(), authorizationRefs: z.array(id), nativeContextRef:nativeContextRefSchema.optional(),contextProofId:id.optional(),driverInstanceId:id.optional() }).strict(),
-  sessionSchema: z.object({ id, agentId: id, state: z.enum(['created','starting','idle','thinking','running_tool','waiting_for_permission','interrupting','interrupted','completed','failed','stopped']), cwd: id, runId: id, createdAt: z.string().datetime(), updatedAt: z.string().datetime(), model: z.string().optional(), reasoningEffort: z.string().optional(), systemPrompt: z.string().optional(), permissionMode: z.enum(['ask','approve-reads','deny-all','full-trust']).optional(), source: id.optional(), sourceId: id.optional(), archivedAt: z.string().optional(), protocol: z.enum(['acp','jsonl','pipe','pty','pty-cli']).optional(), terminalBackend: z.enum(['tmux','herdr']).optional(), error: z.string().optional(), workspaceMode: z.enum(['shared','worktree']).optional(), workspaceSourceCwd: id.optional() }).strict(),
+  sessionSchema: z.object({ id, agentId: id, state: z.enum(['created','starting','idle','thinking','running_tool','waiting_for_permission','interrupting','interrupted','completed','failed','stopped']), cwd: id, runId: id, createdAt: z.string().datetime(), updatedAt: z.string().datetime(), model: z.string().optional(), reasoningEffort: z.string().optional(), systemPrompt: z.string().optional(), permissionMode: z.enum(permissionModes).optional(), source: id.optional(), sourceId: id.optional(), archivedAt: z.string().optional(), protocol: z.enum(['acp','jsonl','pipe','pty','pty-cli']).optional(), terminalBackend: z.enum(['tmux','herdr']).optional(), error: z.string().optional(), workspaceMode: z.enum(['shared','worktree']).optional(), workspaceSourceCwd: id.optional() }).strict(),
   driverResult: z.object({ kind:z.literal('driver_result'), submissionId:id, outcome:z.enum(['completed','failed','interrupted']), outputDigest:executionDigestSchema, stopReason:id, complete:z.literal(true) }).strict(),
   notSubmitted: z.object({ kind:z.literal('not_submitted'), outcome:z.enum(['failed','cancelled']), reason:id }).strict(),
   manual: z.object({ kind:z.literal('manual'), outcome:z.enum(['completed','failed','interrupted','cancelled','unknown']), decision:decisionSchema, verifiedOutput:z.object({eventId:id,digest:executionDigestSchema}).strict().optional() }).strict(),

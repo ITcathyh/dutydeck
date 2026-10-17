@@ -49,6 +49,16 @@ export function readAttemptResult(repositories: AttemptResultRepositories, sessi
   return { status: 'settled', result };
 }
 
+/** Best-effort text for a settled first attempt; invalid or unavailable results have no output. */
+export function readFirstAttemptOutput(repositories: AttemptResultRepositories, sessionId: string, taskId: string): string | undefined {
+  try {
+    const first = repositories.execution.getTaskExecution(taskId)?.attempts.find(attempt => attempt.number === 1);
+    if (!first) return undefined;
+    const read = readAttemptResult(repositories, sessionId, taskId, first.attemptId);
+    return read.status === 'settled' ? read.result.output.text : undefined;
+  } catch { return undefined; }
+}
+
 function owned(event: AgentEvent, attempt: TaskAttempt, cursor: { sequence: number }) {
   if (event.sequence <= cursor.sequence || event.sessionId !== attempt.sessionId || event.taskId !== attempt.taskId || event.attemptId !== attempt.attemptId) {
     fail('TASK_RESULT_EVENT_ORDER', `Event ${event.sequence} breaks the strictly ordered attempt ownership boundary`);

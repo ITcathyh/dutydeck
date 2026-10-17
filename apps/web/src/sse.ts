@@ -1,19 +1,13 @@
+import { eventTypes, sessionStates } from '@dutydeck/shared';
 import { withShareToken, type DockEvent, type Session } from './api';
 import { instanceApiUrl } from './instance';
 
-// 服务端 SSE 流支持的事件类型（与 App.tsx 现有监听列表保持一致）
-export const STREAM_EVENT_TYPES = ['text', 'thinking', 'tool_call', 'tool_result', 'permission_request', 'status', 'task', 'error', 'completed', 'raw_terminal'] as const;
+export const STREAM_EVENT_TYPES = eventTypes;
 
 // SSE 连接状态：首次连接中 / 已连接 / 断线重连中
 export type StreamStatus = 'connecting' | 'open' | 'reconnecting';
 
-// 合法任务状态集合（复制自 App.tsx，sse 层自有副本，勿与 components/ 互相 import）。
-// 这里只保留状态「白名单」这一个用途：applyStatusEvent 用它挡掉未知 state。
-// 配色映射不在此处 —— 那是展示层的事，唯一副本在 components/ui.tsx。
-// 词面必须与 components/ui.tsx:stateLabels 逐字相同；改一处就要改另一处。
-export const stateLabels: Record<string, string> = {
-  created: '已创建', starting: '启动中', idle: '就绪', thinking: '思考中', running_tool: '正在调用工具', waiting_for_permission: '等待授权', interrupting: '正在取消', interrupted: '已取消', completed: '已完成', failed: '失败', stopped: '已停止'
-};
+const validSessionStates = new Set<string>(sessionStates);
 
 // 指数退避延迟：baseMs * 2^attempt，封顶 maxMs
 export function nextBackoffDelay(attempt: number, baseMs = 1000, maxMs = 30000): number {
@@ -37,7 +31,7 @@ export function mergeDockEvent(events: DockEvent[] | undefined, event: DockEvent
 
 // status 事件写入 session：仅合法 state 才更新；model / reasoningEffort 仅在为 string 时覆盖
 export function applyStatusEvent(session: Session, event: DockEvent): Session {
-  if (event.type !== 'status' || !Object.hasOwn(stateLabels, event.data.state)) return session;
+  if (event.type !== 'status' || !validSessionStates.has(event.data.state)) return session;
   return {
     ...session,
     state: event.data.state,

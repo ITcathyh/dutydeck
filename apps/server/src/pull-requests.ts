@@ -13,7 +13,7 @@ import {
   assertPushTarget, buildCommit, defaultBranch, diffTrees, git, localCommits, pushBranch, remoteBranchSha, sameEntry, treeEntries,
   type PathContent, type TreeEntry
 } from './pull-request-git.js';
-import { readAttemptResult } from './task-results.js';
+import { readFirstAttemptOutput } from './task-results.js';
 import { listTurnDiffRecords, readTurnDiffRecord, snapshotWorkingTree } from './turn-diff.js';
 
 const RECORD_PREFIX = 'pull_request/record/';
@@ -679,12 +679,7 @@ export class PullRequestService {
 
   private output(sessionId: string, taskId: string) {
     if (this.options.readTaskOutput) return this.options.readTaskOutput(sessionId, taskId);
-    try {
-      const first = this.options.repositories.execution.getTaskExecution(taskId)?.attempts.find(attempt => attempt.number === 1);
-      if (!first) return undefined;
-      const read = readAttemptResult({ execution: this.options.repositories.execution }, sessionId, taskId, first.attemptId);
-      return read.status === 'settled' ? read.result.output.text : undefined;
-    } catch { return undefined; }
+    return readFirstAttemptOutput({ execution: this.options.repositories.execution }, sessionId, taskId);
   }
 
   /** 这一轮任务改了哪些路径，以及结束时的内容；来自每轮改动快照。 */

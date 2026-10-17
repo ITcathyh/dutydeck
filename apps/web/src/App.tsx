@@ -300,7 +300,11 @@ export default function App() {
 
   useEffect(() => {
     if (!summaries.data) return;
-    setRunSummaries(Object.fromEntries(summaries.data.map(summary => [summary.sessionId, summary])));
+    const next = Object.fromEntries(summaries.data.map(summary => [summary.sessionId, summary]));
+    const summary = activeSessionId ? summaryFromTasks(activeSessionId, tasks.data) : undefined;
+    if (summary) next[summary.sessionId] = summary;
+    setRunSummaries(next);
+    // 这里只响应摘要列表刷新；任务更新由下方 effect 合并，保留其他会话的本地摘要。
   }, [summaries.data]);
 
   useEffect(() => {

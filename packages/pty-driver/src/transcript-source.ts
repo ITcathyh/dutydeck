@@ -47,6 +47,7 @@ import {
 import { parseJsonlObjects, readHead, readTail } from './session-id/fs-scan.js';
 import { buildSessionMarker, isUsableMarker } from './session-id/marker.js';
 import { codexInputText } from './transcript/input-receipt.js';
+import { entryMentionsMarker } from './transcript/claude-content.js';
 
 /** Adapter id → Session Insight log client. Adapter ids identify the on-disk
  *  CLIENT (transcript dialect + data root); a model provider is never a
@@ -180,15 +181,6 @@ function isSafeApprovedFile(filePath: string, approvedRoot: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** True when a Claude entry carries the marker in its user-visible text. */
-function entryMentionsMarker(entry: any, marker: string): boolean {
-  const content = entry?.message?.content;
-  if (typeof content === 'string') return content.includes(marker);
-  if (!Array.isArray(content)) return false;
-  return content.some((block: any) =>
-    block && typeof block === 'object' && typeof block.text === 'string' && block.text.includes(marker));
 }
 
 /** A Claude head record that carries our marker AND a native id. */

@@ -1,5 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { writeRunnerInput } from '../runner-input.js';
+import { pushOpt } from '../runner-args.js';
 
 /**
  * Mir CLI（mircli）适配器 —— runner 类：不驱动 TUI，而是由一个 Node runner
@@ -16,12 +17,6 @@ import { writeRunnerInput } from '../runner-input.js';
  * runner 也会自行注入本地运行时上下文，所以不实现 injectSessionContext（避免
  * dutydeck 再叠一层路由块）。
  */
-
-/** value 为 undefined 或空串就跳过。 */
-function pushOpt(args: string[], key: string, value: string | undefined): void {
-  if (value === undefined || value.length === 0) return;
-  args.push(key, value);
-}
 
 export function createMirAdapter(): CliAdapter {
   return {
