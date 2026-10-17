@@ -54,6 +54,8 @@ export const agentQuickstart = `QUICKSTART（给 Agent）
 
 常用
   dutydeck agent status                                        本会话的 Agent、模型、工作区、运行状态和排队
+  dutydeck agent session resume [--id <编号>]  恢复本话题最近关闭的会话（先发确认卡）
+  dutydeck agent session fork [--task '<任务>']  带上下文在新话题开分身（先发确认卡）
   dutydeck agent session new --agent <编号> --task '<完整任务>'  换 Agent 重新做（先发确认卡；编号用 agents 查）
   dutydeck agent group messages --limit 20                     读本群或本话题最近的消息
   dutydeck agent history list --query '<关键词>'                查本聊天以前的任务和结论
@@ -111,7 +113,11 @@ const collaborate = (method: AgentRequest['method'], path: (args: any[]) => stri
 const workFile = (path: string): Operation => ({ risk: 'write', request: async (_args, options) => ({ method: 'POST', path, body: await jsonInput({ file: options.file }, true) }) });
 
 const operations: Record<string, Operation> = {
+  'settings.show': read(() => '/settings'),
+  'settings.set': { risk: 'write-confirm', serverDryRun: true, request: ([pairs]) => ({ method: 'POST', path: '/settings', body: { pairs } }) },
   status: view('status'), agents: view('agents'), tasks: view('tasks'), queue: view('queue'), schedules: view('schedules'), ci: view('ci'),
+  'session.resume': action('session.resume', (_args, o) => ({ id: o.id })),
+  'session.fork': action('session.fork', (_args, o) => ({ agent: o.agent, model: o.model, effort: o.effort, cwd: o.cwd, workspace: o.workspace, task: o.task })),
   'session.new': action('session.new', (_args, o) => ({ agent: o.agent, model: o.model, effort: o.effort, cwd: o.cwd, workspace: o.workspace, handoff: o.handoff, note: o.note, task: o.task })),
   retry: action('retry'),
   plan: action('plan', (_args, o) => ({ task: o.task })),
@@ -271,7 +277,15 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
     .option('--workflow <name>', 'Workflow file name or id');
   sub(ci, 'fix', 'Wait for CI and hand failures to the Agent to fix, within limits', 'ci.fix', 'write-confirm', ['ci fix']);
   sub(ci, 'cancel', 'Cancel a CI wait', 'ci.cancel', 'write-confirm', ['ci cancel <编号>']).argument('<id>', 'Wait id shown by ci');
-  const session = group(agent, 'session', 'Start a new conversation in this chat');
+  const session = group(agent, 'session', 'Start, resume or fork conversations in this chat');
+  sub(session, 'resume', 'Restore a closed conversation in this topic; omit id for the latest', 'session.resume', 'write-confirm', ['session resume', 'session resume --id ses_编号']).option('--id <id>', 'Closed conversation id in the same topic');
+  sub(session, 'fork', 'Copy this conversation into a parallel topic; git repositories use a worktree by default', 'session.fork', 'write-confirm', ["session fork --task '检查另一种实现'", 'session fork'])
+    .option('--task <text>', 'Task for the fork')
+    .option('--agent <id>', 'Agent id from agents; changing Agent uses a handoff')
+    .option('--model <model>', 'Model for the fork')
+    .option('--effort <level>', 'Reasoning effort for the fork')
+    .option('--cwd <path>', 'Absolute workspace path, or a workspace alias of this bot')
+    .addOption(new Option('--workspace <mode>', 'Workspace mode').choices(['shared', 'worktree']));
   sub(session, 'new', 'End this conversation and start a new one, optionally with another Agent, model or workspace', 'session.new', 'write-confirm',
     ["session new --agent codex --task '修复登录页报错，改完跑测试'", "session new --handoff --note '接着查内存泄漏'", 'session new'],
     '新对话不带当前上下文：--task 要写全；要带上最近结果、git 状态和备注加 --handoff。--agent 填错时返回可用编号；指定 Agent、模型、工作目录或工作区时要同时给 --task 或 --handoff。不带参数只结束当前对话。')
@@ -296,6 +310,11 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
   sub(pr, 'open', 'Push the changes of this conversation to a dutydeck/ branch and open a PR after the user confirms on the card', 'pr.open', 'write-confirm', ['pr open', "pr open --title '修复登录页报错'"])
     .option('--title <title>', 'PR title');
   sub(agent, 'repair', 'Fix the bot\'s Feishu app permissions, events and card callbacks after an admin confirms on the card', 'repair', 'write-confirm', ['repair']);
+
+  const settings = group(agent, 'settings', 'Show or propose common bot defaults and notification settings; changes need a bot admin confirmation');
+  sub(settings, 'show', 'Show only common bot settings', 'settings.show', 'read', ['settings show']);
+  sub(settings, 'set <key=value...>', 'Propose bot settings; only a bot admin can confirm', 'settings.set', 'write-confirm', ['settings set defaultAgentId=codex', 'settings set notifyQuietHours=22:00-08:00 busyTriage=true'],
+    'Keys: defaultAgentId, defaultModel, defaultReasoningEffort, p2pMode, groupReplyMode, notifyQuietHours, notifyMentionAction, notifyMentionDone, busyTriage. Booleans: true/false; use an empty value to clear model, effort or quiet hours.');
 
   const chat = group(agent, 'group', 'Read and send messages in the current Lark chat', groupToolsHelp(true, 'dutydeck agent'));
   sub(chat, 'self', 'Show the current bot and scoped chat', 'group.self', 'read', ['group self']);

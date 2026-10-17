@@ -17,6 +17,16 @@ describe('Lark card service', () => {
       ? (typeof (value as any).tag === 'string' ? 1 : 0) + Object.values(value).reduce<number>((sum, item) => sum + componentCount(item), 0)
       : 0;
 
+  it('gets the real permalink for a fork seed instead of guessing a message token', async () => {
+    const fetcher = vi.fn(async (url: string | URL | Request) => String(url).includes('tenant_access_token')
+      ? response({ code: 0, tenant_access_token: 'token', expire: 7200 })
+      : response({ code: 0, data: { message_link: 'https://applink.feishu.cn/client/message/link?token=actual-link-token' } }));
+    const service = createLarkCardService(configured, fetcher as typeof fetch);
+    await expect(service.getMessageLink('om_seed')).resolves.toContain('actual-link-token');
+    expect(String(fetcher.mock.calls[1]?.[0])).toContain('/im/v1/messages/om_seed/message_link');
+    service.close();
+  });
+
   it.each(['send', 'reply', 'update'] as const)('inherits bot Agent visibility on %s and honors explicit false', async method => {
     const cards: any[] = [];
     const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {

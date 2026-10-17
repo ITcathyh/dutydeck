@@ -36,15 +36,23 @@ export type LarkAgentCommandHandler = (request: LarkAgentCommandRequest) => Prom
 export interface LarkAgentViewRequest { sessionId: string; taskId: string; actorId: string; view: LarkAgentViewName; page?: number }
 export type LarkAgentViewHandler = (request: LarkAgentViewRequest) => Promise<Record<string, unknown>>;
 
+export interface LarkAgentSettingsRequest { sessionId: string; taskId: string; actorId: string; action: 'show' | 'set'; pairs?: string[]; dryRun?: boolean }
+export type LarkAgentSettingsHandler = (request: LarkAgentSettingsRequest) => Promise<Record<string, unknown>>;
+
 /** 各机器人的消息处理器在监听启动时登记；Agent 工具按会话所属的机器人转过去。 */
 export class LarkAgentCommands {
-  private readonly handlers = new Map<string, { run: LarkAgentCommandHandler; view?: LarkAgentViewHandler }>();
-  set(appId: string, handler: LarkAgentCommandHandler, view?: LarkAgentViewHandler) { this.handlers.set(appId, { run: handler, ...(view ? { view } : {}) }); }
+  private readonly handlers = new Map<string, { run: LarkAgentCommandHandler; view?: LarkAgentViewHandler; settings?: LarkAgentSettingsHandler }>();
+  set(appId: string, handler: LarkAgentCommandHandler, view?: LarkAgentViewHandler, settings?: LarkAgentSettingsHandler) { this.handlers.set(appId, { run: handler, ...(view ? { view } : {}), ...(settings ? { settings } : {}) }); }
   delete(appId: string, handler: LarkAgentCommandHandler) { if (this.handlers.get(appId)?.run === handler) this.handlers.delete(appId); }
   has(appId: string) { return this.handlers.has(appId); }
   run(appId: string, request: LarkAgentCommandRequest) {
     const handler = this.handlers.get(appId)?.run;
     if (!handler) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '这个机器人的飞书监听没有在运行，现在不能代办命令。', 503);
+    return handler(request);
+  }
+  settings(appId: string, request: LarkAgentSettingsRequest) {
+    const handler = this.handlers.get(appId)?.settings;
+    if (!handler) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '这个机器人的飞书监听没有在运行，现在不能代办设置。', 503);
     return handler(request);
   }
   view(appId: string, request: LarkAgentViewRequest) {
@@ -90,6 +98,8 @@ const workspace = z.enum(['shared', 'worktree'], { errorMap: () => ({ message: '
  * 参数名是命令行上的写法，报错时原样指给 Agent。
  */
 const actions = {
+  'session.resume': z.object({ id: word.optional() }).strict(),
+  'session.fork': z.object({ agent: word.optional(), model: word.optional(), effort: word.optional(), cwd: text().optional(), workspace: workspace.optional(), task: text().optional() }).strict(),
   'session.new': z.object({ agent: word.optional(), model: word.optional(), effort: word.optional(), cwd: text().optional(), workspace: workspace.optional(),
     handoff: z.boolean().optional(), note: text().optional(), task: text().optional() }).strict(),
   retry: z.object({}).strict(),
@@ -136,6 +146,11 @@ export function agentActionCommand(action: string, input: unknown): { command: s
   }
   const p = parsed.data as Record<string, any>;
   switch (action as AgentActionName) {
+    case 'session.resume': return { command: p.id ? `/resume ${p.id}` : '/resume' };
+    case 'session.fork': {
+      const flags = (['agent', 'cwd', 'workspace', 'model', 'effort'] as const).filter(key => p[key] !== undefined).map(key => `--${key} ${quoted(`--${key}`, p[key])}`);
+      return { command: ['/fork', ...flags, '--', p.task ?? '继续原会话的任务'].join(' ') };
+    }
     case 'session.new': {
       const flags = (['agent', 'cwd', 'workspace', 'model', 'effort'] as const).filter(key => p[key] !== undefined)
         .map(key => `--${key} ${quoted(`--${key}`, p[key])}`);

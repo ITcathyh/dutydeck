@@ -67,6 +67,7 @@ export type LarkBotConfig = {
   memoryModel?: string;
   decisionAgentId?: string;
   decisionModel?: string;
+  busyTriage?: boolean;
   responseAgentId?: string;
   responseModel?: string;
   /** 执行方式；旧服务端缺省按 single 处理。 */
@@ -447,6 +448,7 @@ export const api = {
     memoryModel?: string;
     decisionAgentId?: string;
     decisionModel?: string;
+    busyTriage?: boolean;
     responseAgentId?: string;
     responseModel?: string;
     executionMode?: 'single' | 'layered';

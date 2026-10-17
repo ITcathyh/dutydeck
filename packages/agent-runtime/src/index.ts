@@ -1,8 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval } from '@dutydeck/shared';
-import { AcpxAdapter, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
+import { agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval } from '@dutydeck/shared';
+import { AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
@@ -154,7 +154,7 @@ export interface RuntimeOptions {
     promptDiagnostics?: PromptSourceDiagnostics;
   }>;
   /** Diagnostics only, e.g. a steering reply that arrives after its timeout. */
-  log?: { warn(data: Record<string, unknown>, message: string): void };
+  log?: { warn(data: Record<string, unknown>, message: string): void; info?(data: Record<string, unknown>, message: string): void };
   /** 会话里有 Agent 的提问在等人回答（relay ask）：与待审批一样是人工等待，这期间不判这一轮可能卡住。 */
   awaitingAnswer?: (sessionId: string) => boolean;
   /** 不调模型的登录状态检查，缺省见 agent-availability.ts。只在 checkAgentAvailability 里调用。 */
@@ -1930,6 +1930,9 @@ export class DutydeckRuntime {
       && !(initialConfigured.permissionMode === 'approve-reads' && supportsRemoteApproval({ ...initialConfigured, protocol: 'pty-cli' }))) {
       throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY Agent only supports ask (approve in the terminal) or explicit full-trust mode; approve-reads requires a Claude Code family CLI', 422);
     }
+    if (input.nativeForkSessionId && (capability.protocol !== 'pty-cli' || !['claude-code', 'codex'].includes(agent.adapterId ?? agent.id))) {
+      throw new RuntimeError('FORK_UNSUPPORTED', 'This Agent does not support native session copying', 422);
+    }
     const terminalBackend = capability.protocol === 'pty-cli' ? await this.options.terminalBackend?.() ?? 'tmux' : undefined;
     const session: Session = { terminalBackend, id: owned?.id ?? makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
     return this.scoped(session.id, async () => {
@@ -1953,7 +1956,7 @@ export class DutydeckRuntime {
     await this.mutations.wait(() => owned?.beforeStart() ?? Promise.resolve());
     await this.saveState(session, 'starting');
     try {
-      await this.reconnect(session);
+      await this.reconnect(session, true, undefined, false, input.nativeForkSessionId);
       await this.mutations.wait(() => owned?.beforeStart() ?? Promise.resolve());
       await this.saveState(session, 'idle'); return this.withSessionMetadata(session);
     } catch (error) {
@@ -2062,7 +2065,7 @@ export class DutydeckRuntime {
     });
   }
 
-  private async reconnect(session: Session, start = true, executionOptions?: ExecutionOptions, repairConfiguration = false) {
+  private async reconnect(session: Session, start = true, executionOptions?: ExecutionOptions, repairConfiguration = false, nativeForkSessionId?: string) {
     this.mutations.check(); this.assertVerificationRecoverySafe(session.id);
     if(!repairConfiguration)await this.mutations.wait(() => this.configurations.assertClear(session.id));
     await this.loadStopBlock(session.id); this.assertReplaceable(session.id);
@@ -2087,7 +2090,7 @@ export class DutydeckRuntime {
       this.notifyDriverExit(session.id, code);
       // An executing turn owns its result. A lifecycle exit never overwrites it.
       if (code && !this.attempts.has(session.id)) void this.mutations.run(lifecycle, () => this.saveState(session, 'failed', `Agent exited with code ${code}`)).catch(() => {});
-    }, session.id, resource.context);} catch(error) {
+    }, session.id, nativeForkSessionId ? { ...resource.context, nativeForkSessionId } : resource.context);} catch(error) {
       if(resource.controlled){
         const cleanup=resource.controlled.abortFactory();this.factoryCleanups.set(session.id,cleanup);
         const release=()=>{if(this.factoryCleanups.get(session.id)===cleanup)this.factoryCleanups.delete(session.id);};
@@ -2788,7 +2791,7 @@ export class DutydeckRuntime {
     });
   }
   /** 插话：先持久记录投递意图；没有明确回执时禁止普通队列重发。 */
-  async injectQueued(id: string, taskId: string, actorId?: string, operationId = makeId('steering')): Promise<SteeringResult> {
+  async injectQueued(id: string, taskId: string, actorId?: string, operationId = makeId('steering'), expectedTarget?: { taskId: string; attemptId?: string }): Promise<SteeringResult> {
     return this.scoped(id, async () => {
       const {session,driver} = await this.active(id);
       await this.authorize(id,actorId);
@@ -2808,7 +2811,8 @@ export class DutydeckRuntime {
         return ref && execution && attempt?.state === 'active' && attempt.submissionState !== 'not_submitted' ? {ref,task:execution.task} : undefined;
       };
       const target = running();
-      if (!target) return skipped('promptRequired');
+      if (!target || expectedTarget && (target.ref.taskId !== expectedTarget.taskId
+        || expectedTarget.attemptId !== undefined && target.ref.attemptId !== expectedTarget.attemptId)) return skipped('promptRequired');
       const input = this.acceptedInput(task);
       if (task.currentAttemptId || digest(input.executionOptions) !== digest(this.acceptedInput(target.task).executionOptions)
         || digest(task.executionContext?.riskPolicy ?? null) !== digest(target.task.executionContext?.riskPolicy ?? null)) return skipped('incompatible');
@@ -3089,6 +3093,28 @@ export class DutydeckRuntime {
     return this.withSessionMetadata(session);
     });
   }
+  async autoApproveAgentCommand(sessionId: string, kind: string, command: string): Promise<boolean> {
+    const owner = this.attempts.get(sessionId);
+    const task = this.activeTasks.get(sessionId);
+    if (this.shuttingDown || !owner || !task || !this.mutations.valid(owner)) return false;
+    const session = await this.repos.sessions.get(sessionId);
+    if (!session) return false;
+    const accepted = this.repos.execution.getAcceptedTask(task.id);
+    if (accepted?.input?.version !== 2) return false;
+    const permissionMode = accepted.input.executionOptions.permissionMode;
+    if (!isAgentCommandAutoApproval({ permissionMode, kind, command, env: this.options.sessionEnvironment?.(session) })) return false;
+    // PreToolUse already guards terminal commands. Recheck the live policy here as well,
+    // so auto-approval cannot turn a matching high-risk command into an allow.
+    try {
+      const policy = this.options.resolveRiskPolicy
+        ? await this.options.resolveRiskPolicy(sessionId, task.executionContext?.riskPolicy) : task.executionContext?.riskPolicy;
+      if (policy?.enabled && !policy.authorized && await testRegexWithTimeout(policy.pattern, command)) return false;
+    } catch { return false; }
+    if (this.attempts.get(sessionId) !== owner || !this.mutations.valid(owner)) return false;
+    this.options.log?.info?.({ sessionId, taskId: task.id }, agentCommandApprovalReason);
+    return true;
+  }
+
   /**
    * 终端模式 CLI 的权限 hook 交来的请求：本会话有进行中的轮次、驱动也能接时，登记成与 ACP 相同的待审批项，
    * 返回驱动给出的裁决；否则返回 undefined，调用方保留 CLI 的原生确认。

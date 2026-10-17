@@ -1,3 +1,4 @@
+import type { LarkScheduleMessageOrigin } from './agent-schedule-request.js';
 import { createHash } from 'node:crypto';
 import {
   RuntimeError,
@@ -102,16 +103,31 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     }
   };
 
+  /** 忙时消息没有自己的执行轮次，回报锚由已授权的宿主入站事件显式提供。 */
+  const prepareMessageDelivery = async (sessionId: string, origin: LarkScheduleMessageOrigin, automationId: string) => {
+    const session = await runtime.getSession(sessionId);
+    const { appId, chatId } = parseLarkSourceId(session?.sourceId);
+    if (session?.source !== 'lark' || appId !== origin.appId || chatId !== origin.chatId || !origin.messageId.startsWith('om_') || !repos.config.compareAndSet) {
+      throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '无法确认当前消息的回报位置', 409);
+    }
+    const key = `automation.delivery-target.${automationId}`;
+    const target = JSON.stringify({ appId, chatId, replyMessageId: origin.messageId, replyInThread: origin.replyInThread });
+    if (!await repos.config.compareAndSet(key, undefined, target) && await repos.config.get(key) !== target) {
+      throw new RuntimeError('AUTOMATION_DESTINATION_CHANGED', '自动任务的回报位置已变化', 409);
+    }
+  };
+
   /** Agent 代建计划的确认卡：发到计划冻结的回报位置，同一计划只发一张；点「启用」「停用」后由卡片回调原位重绘。 */
-  const sendScheduleRequest = async (schedule: PublicSessionSchedule) => {
+  const sendScheduleRequest = async (schedule: PublicSessionSchedule, notice?: string) => {
     const session = await runtime.getSession(schedule.sessionId);
     if (!session || session.source !== 'lark') throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '只能在飞书会话里代设定时任务', 409);
     const { appId, chatId } = parseLarkSourceId(session.sourceId);
     const target = JSON.parse(await repos.config.get(`automation.delivery-target.${schedule.id}`) ?? 'null') as { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean } | null;
     const config = appId ? await readLarkConfig(repos.config, appId) : undefined;
     if (!target || !config || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '自动任务缺少接收时保存的回报位置', 409);
+    const card = scheduleRequestCard(schedule, target.replyInThread);
     await sendLarkResult(client(config), target, {
-      ...scheduleRequestCard(schedule, target.replyInThread),
+      ...card, ...(notice ? { elements: [{ tag: 'markdown', content: notice }, ...card.elements] } : {}),
       sessionId: schedule.sessionId,
       workspace: session.cwd,
       webBaseUrl: config.webBaseUrl,
@@ -345,5 +361,5 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     }, options.log, repos.config);
     return sent.messageId;
   };
-  return { authorize, previewAuthorize: (sessionId: string, actorId?: string) => authorize(sessionId, actorId, undefined, true), prepareDelivery, prepareTaskDelivery, sendScheduleRequest, deliver, notify, onScheduleDisabled };
+  return { authorize, previewAuthorize: (sessionId: string, actorId?: string) => authorize(sessionId, actorId, undefined, true), prepareDelivery, prepareTaskDelivery, prepareMessageDelivery, sendScheduleRequest, deliver, notify, onScheduleDisabled };
 }

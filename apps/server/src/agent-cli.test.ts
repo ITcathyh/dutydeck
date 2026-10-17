@@ -51,6 +51,8 @@ describe('dutydeck agent', () => {
     expect(await agent(['session', 'new', '--agent', 'codex', '--workspace', 'worktree', '--task', '修复登录页报错'])).toMatchObject({
       url: '/actions/session.new', method: 'POST', body: { agent: 'codex', workspace: 'worktree', task: '修复登录页报错' } });
     expect(await agent(['session', 'new', '--handoff', '--note', '接着查', '--dry-run'])).toMatchObject({ url: '/actions/session.new', body: { handoff: true, note: '接着查', dryRun: true } });
+    expect(await agent(['session', 'resume', '--id', 'ses_123'])).toMatchObject({ url: '/actions/session.resume', body: { id: 'ses_123' } });
+    expect(await agent(['session', 'fork', '--task', '并行检查', '--agent', 'codex'])).toMatchObject({ url: '/actions/session.fork', body: { task: '并行检查', agent: 'codex' } });
     expect(await agent(['retry'])).toMatchObject({ url: '/actions/retry', body: {} });
     expect(await agent(['plan', '--task', '先出计划'])).toMatchObject({ url: '/actions/plan', body: { task: '先出计划' } });
     expect(await agent(['queue', 'cancel', '2'])).toMatchObject({ url: '/actions/queue.cancel', body: { index: 2 } });
@@ -109,4 +111,24 @@ describe('dutydeck agent', () => {
     expect(await usage(['retry', 'now'])).toMatchObject({ code: 'INVALID_ARGUMENT', params: [{ name: '<参数>', reason: '多余的参数' }] });
     expect(await usage(['schedule', 'enable'])).toMatchObject({ params: [{ name: '<id>', reason: '必填' }] });
   });
+});
+
+
+it('routes common settings commands and lists their risk and whitelist in help', async () => {
+  expect(await agent(['settings', 'show'])).toMatchObject({ url: '/settings', method: 'GET', body: undefined });
+  expect(await agent(['settings', 'set', 'defaultAgentId=codex', 'notifyQuietHours=22:00-08:00', 'busyTriage=true'])).toMatchObject({
+    url: '/settings', method: 'POST', body: { pairs: ['defaultAgentId=codex', 'notifyQuietHours=22:00-08:00', 'busyTriage=true'] }
+  });
+  expect(await agent(['settings', 'set', 'busyTriage=true', '--dry-run'])).toMatchObject({ body: { pairs: ['busyTriage=true'], dryRun: true } });
+  const program = createCliProgram('test', { agent: vi.fn() });
+  const root = program.commands.find(command => command.name() === 'agent')!;
+  expect(root.helpInformation()).toContain('settings');
+  const settings = root.commands.find(command => command.name() === 'settings')!;
+  const set = settings.commands.find(command => command.name() === 'set')!;
+  const output: string[] = [];
+  set.configureOutput({ writeOut: text => { output.push(text); } });
+  set.outputHelp();
+  expect(output.join('')).toContain('write-confirm');
+  expect(output.join('')).toContain('notifyQuietHours');
+  expect(output.join('')).toContain('bot admin');
 });

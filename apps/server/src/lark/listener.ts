@@ -38,10 +38,11 @@ export type ListenerLog = {
 };
 
 export interface LarkRuntime {
-  start(input: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: 'shared' | 'worktree'; source?: string; sourceId?: string }): Promise<Session>;
+  start(input: { nativeForkSessionId?: string; agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: 'shared' | 'worktree'; source?: string; sourceId?: string }): Promise<Session>;
   listAgents?(): Promise<Array<Pick<AgentConfig, 'id' | 'name'> & Partial<AgentConfig>>>;
   listSessions?(): Promise<Session[]>;
   getSession(id: string): Promise<Session | undefined>;
+  resume?(id: string): Promise<Session>;
   stop?(id: string, actor?: ExecutionActor): Promise<unknown>;
   send(id: string, prompt: string, agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string): Promise<unknown>;
   dispatch?(id: string, prompt: string, mode?: 'queue' | 'interrupt', agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[], supplied?: import('@dutydeck/shared').TaskRequestV1, idleCompactHours?: number, promptParts?: import('@dutydeck/shared').PromptPart[], permissionMode?: PermissionMode): Promise<{ id: string; status: string; queuedAhead?: number; replayed?: boolean }>;
@@ -56,7 +57,7 @@ export interface LarkRuntime {
   /** 把排队中的一轮提到队首（会中断当前正在执行的那一轮）。/queue top 与 /steer 的唯一原语。 */
   steerQueued?(id: string, taskId: string, actorId?: string): Promise<unknown>;
   /** ACP 插话结果包含持久任务状态；reconcile_required 表示投递未知，不能自动重发。 */
-  injectQueued?(id: string, taskId: string, actorId?: string): Promise<{ task: TaskRecord; outcome: string; error?: string }>;
+  injectQueued?(id: string, taskId: string, actorId?: string, operationId?: string, expectedTarget?: { taskId: string; attemptId?: string }): Promise<{ task: TaskRecord; outcome: string; error?: string }>;
   /** 平台验证记录，最新在前，含代码指纹与 stale 判定。 */
   getVerifications?(id: string): Promise<VerificationResponse[]>;
   runVerification?(id: string, input: VerificationCommandInput, actorId?: string): Promise<VerificationResponse>;
@@ -148,6 +149,8 @@ export interface LarkLongConnectionListenerOptions {
   loginLinks?: LoginLinkStore;
   /** Agent 代发命令（dutydeck agent、dutydeck command）的登记表：监听启动后把本机器人的处理器登记进去。 */
   agentCommands?: LarkAgentCommands;
+  scheduleRequests?: import('../agent-schedule-request.js').LarkScheduleRequests;
+  saveBotConfig?(input: import('./config.js').SaveLarkConfigInput): Promise<unknown>;
 }
 
 export class LarkLongConnectionListener implements LarkListener {
@@ -224,7 +227,7 @@ export class LarkLongConnectionListener implements LarkListener {
       chatModeResolver,
       this.options.executionPolicy,
       this.options.groupManager,
-      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation, usage: this.options.usage, loginLinks: this.options.loginLinks },
+      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation, usage: this.options.usage, loginLinks: this.options.loginLinks, saveBotConfig: this.options.saveBotConfig, scheduleRequests: this.options.scheduleRequests },
     ) : undefined;
     this.coordinator = coordinator;
     await coordinator?.initializeWorkflows(config);
@@ -232,7 +235,7 @@ export class LarkLongConnectionListener implements LarkListener {
     if (coordinator) this.options.participation?.setDispatcher(config.appId, (event, current) => coordinator.adopt(event, current));
     if (coordinator && this.options.agentCommands) {
       this.agentCommand = request => coordinator.agentCommand(request);
-      this.options.agentCommands.set(config.appId, this.agentCommand, request => coordinator.agentView(request));
+      this.options.agentCommands.set(config.appId, this.agentCommand, request => coordinator.agentView(request), request => coordinator.agentSettings(request));
     }
     void this.options.participation?.recover(config.appId).catch(error => this.log.warn({ error, appId: config.appId }, '群观察恢复失败'));
     try { await coordinator?.startReconciliation(config); }

@@ -143,6 +143,38 @@ describe('acpx ACP boundary', () => {
     await adapter.stop();
   });
 
+  it.each(['ask', 'approve-reads'] as const)('auto-approves only scoped agent commands through real ACPX in %s', async permissionMode => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-agent-command-')); dirs.push(cwd);
+    const events: any[] = [];
+    const adapter = new AcpxAdapter({ ...agentConfig(), cwd, command: process.execPath,
+      args: [resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs')], permissionMode,
+      env: { dutydeck_group_tools_url: 'http://localhost/unused', dutydeck_group_tools_token: 'fixture-token', dutydeck_group_tools_command: 'node /x/cli.js' } },
+      { onEvent: event => events.push(event) });
+    const send = (command: string) => adapter.send(`agent command permission: ${command}`);
+    try {
+      await adapter.start();
+      const record = await createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') }).load((adapter as any).sessionKey);
+      expect(record?.acpx?.session_options?.env?.dutydeck_group_tools_command).toBe('node /x/cli.js');
+      await send('node /x/cli.js agent status');
+      expect(events).toContainEqual(expect.objectContaining({ type: 'permission_request', data: expect.objectContaining({ status: 'approved', title: expect.stringContaining('因 dutydeck agent 命令自动放行') }) }));
+      expect(events.some(event => event.data.status === 'pending')).toBe(false);
+      expect(events.some(event => event.type === 'text' && event.data.text.includes('"optionId":"allow"'))).toBe(true);
+      for (const command of ['node /x/cli.js agent status && x', 'dutydeck agent status']) {
+        events.length = 0;
+        const sending = send(command);
+        await expect.poll(() => events.some(event => event.type === 'permission_request' && event.data.status === 'pending')).toBe(true);
+        await adapter.resolvePermission('agent-command', false);
+        await sending;
+        expect(events.some(event => event.type === 'text' && event.data.text.includes('"optionId":"deny"'))).toBe(true);
+      }
+      events.length = 0;
+      adapter.setRiskPolicy({ enabled: true, authorized: false, pattern: 'agent\\s+status' });
+      await send('node /x/cli.js agent status');
+      expect(events).toContainEqual(expect.objectContaining({ type: 'permission_request', data: expect.objectContaining({ status: 'rejected' }) }));
+      expect(events.some(event => event.data.status === 'approved' || event.data.status === 'pending')).toBe(false);
+    } finally { await adapter.stop(); }
+  });
+
   it('keeps title-guessed reads waiting for approval through real ACPX in approve-reads mode', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-approve-reads-')); dirs.push(cwd);
     const events: any[] = [];

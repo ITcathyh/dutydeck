@@ -132,6 +132,7 @@ export interface LarkCommandCapabilities {
   steerQueued?: boolean;
   /** runtime.injectQueued（把排队中的一轮送进正在执行的那一轮）。缺失时 /steer 只能提到队首，/queue steer 停用。 */
   injectQueued?: boolean;
+  resume?: boolean;
   stop: boolean;
   getTasks: boolean;
   listAgents: boolean;
@@ -140,7 +141,7 @@ export interface LarkCommandCapabilities {
 
 const capabilityKeys = [
   'getSession', 'send', 'dispatch', 'interrupt', 'cancelQueued', 'steerQueued', 'injectQueued',
-  'stop', 'getTasks', 'listAgents', 'listSessions'
+  'stop', 'resume', 'getTasks', 'listAgents', 'listSessions'
 ] as const satisfies readonly (keyof LarkCommandCapabilities)[];
 
 /** 从真实 runtime 对象探测能力。coordinator 直接传 this.runtime 即可。 */
@@ -155,7 +156,7 @@ export function larkCommandCapabilities(runtime: unknown): LarkCommandCapabiliti
 // 命令注册表
 // ---------------------------------------------------------------------------
 
-export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'pr' | 'help' | 'repair' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject' | 'remember' | 'memory' | 'forget' | 'agents' | 'queue' | 'steer' | 'plan' | 'grant' | 'revoke';
+export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'pr' | 'help' | 'repair' | 'status' | 'cancel' | 'retry' | 'resume' | 'fork' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject' | 'remember' | 'memory' | 'forget' | 'agents' | 'queue' | 'steer' | 'plan' | 'grant' | 'revoke';
 
 export interface LarkCommandDefinition {
   name: LarkCommandName;
@@ -252,6 +253,8 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     requires: capabilities => capabilities.stop,
     unavailableReason: '当前 Dutydeck 运行时无法结束旧会话（缺少 stop），/new 不能保证下一条消息真的开启新会话，已停用。'
   },
+  { name: 'resume', summary: '恢复本话题最近关闭的会话；用 list 查看最近几个，再按编号选择', usage: '/resume [会话编号]；/resume list', mutating: true, requires: c => c.resume === true && c.stop && c.listSessions && c.getTasks && c.getSession && c.listAgents, unavailableReason: '当前运行时不支持恢复会话。可以用 /new --handoff 交接上下文。' },
+  { name: 'fork', summary: '带上下文在新话题开分身，与原会话并行；git 仓库默认用独立 worktree', usage: '/fork [任务]；/fork [--agent Agent编号] [--cwd 目录] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务', mutating: true, requires: c => c.getSession && c.listAgents && c.getTasks && c.dispatch, unavailableReason: '当前运行时无法读取源会话或 Agent，不能开分身。' },
   {
     name: 'agents',
     summary: '列出本机可用的 Agent、版本与本机器人当前默认使用的那个',

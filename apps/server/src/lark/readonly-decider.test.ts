@@ -538,3 +538,26 @@ describe('model 场景包：冻结的指引和材料', () => {
     expect(participationResponsePrompt(snapshot(), replyDecision, 'obs_1')).not.toContain('场景');
   });
 });
+
+
+it('busy triage uses the configured readonly decision Agent and model in a fresh session', async () => {
+  const h = await harness('{"kind":"progress"}');
+  const base = (await h.runtime.listAgents())[0]!;
+  await h.repositories.agents.save({ ...base, id: 'decision', name: 'Decision' });
+  expect(await h.decider.triage({ ...config, decisionAgentId: 'decision', decisionModel: 'fast' }, snapshot().scope, '做到哪了', '修改接口')).toEqual({ kind: 'progress' });
+  expect(h.starts).toEqual([expect.objectContaining({ id: 'decision', model: 'fast', permissionMode: 'deny-all' })]);
+  expect(h.prompts[0]).toContain('做到哪了');
+  expect(h.prompts[0]).toContain('修改接口');
+});
+
+
+it('busy triage times out at its 15-second deadline and cleans up the readonly session', async () => {
+  const h = await harness(null);
+  const schedule = globalThis.setTimeout;
+  const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((callback: (...args: any[]) => void, delay?: number, ...args: any[]) =>
+    schedule(callback, delay === 15_000 ? 20 : delay, ...args)) as typeof setTimeout);
+  await expect(h.decider.triage(config, snapshot().scope, '做到哪了', '修改接口')).rejects.toMatchObject({ code: 'COLLABORATION_DECISION_TIMEOUT' });
+  expect(timer.mock.calls.some(call => call[1] === 15_000)).toBe(true);
+  timer.mockRestore();
+  await expect.poll(async () => (await h.runtime.listSessions()).every(session => session.state === 'stopped')).toBe(true);
+});

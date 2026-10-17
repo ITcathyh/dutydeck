@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '@dutydeck/shared';
-import { renderLarkCardElements, renderLarkProcessElements, renderLarkRecordExport, renderLarkResultElements } from './card-renderer.js';
+import { busyProgressSummary, renderLarkCardElements, renderLarkProcessElements, renderLarkRecordExport, renderLarkResultElements } from './card-renderer.js';
 import { buildLarkCard } from './service.js';
 
 // 精简过程卡（compactTrace）：历史阶段与当前阶段都退化为标题行，
@@ -192,4 +192,16 @@ describe('proactive compaction outcome hints', () => {
     expect(text).toContain(expected);
     expect(text).not.toContain('本轮发生过上下文压缩');
   });
+});
+
+
+it('summarizes busy progress from the same visible stage and latest tool as process cards', () => {
+  const events = [...multiStageEvents,
+    event(11, 'thinking', t8, { text: 'private reasoning' }),
+    event(12, 'raw_terminal', t8, { text: 'private terminal output' }),
+    event(13, 'text', t8, { role: 'user', text: 'new user message' })];
+  const summary = busyProgressSummary(events);
+  expect(summary.phase).toBe('根据失败信息修复。');
+  expect(summary.latest).toContain('pnpm vitest run');
+  expect(JSON.stringify(summary)).not.toMatch(/private reasoning|private terminal output|new user message/);
 });

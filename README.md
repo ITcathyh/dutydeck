@@ -260,6 +260,8 @@ pnpm dev
 | `/new` | `/new -- 优化登录接口的查询耗时` | 结束当前会话上下文；带任务内容则同时开新会话并派发 |
 | `/new` 指定首轮配置 | `/new --cwd "/data/app" --workspace worktree -- 重构模块` | 选项：`--agent`、`--cwd`、`--workspace shared\|worktree`、`--model`、`--effort` |
 | `/new --handoff` | `/new --handoff 接着补测试 -- 补齐重试逻辑单测` | 新会话带上上一会话的结果、git 状态和备注。`--handoff` 后到 `--` 之前是备注，任务写在 `--` 之后；不写 `--` 则只交接、不派任务 |
+| `/resume [会话编号]` | `/resume`；`/resume list` | 恢复本话题最近关闭的会话；list 只列出你有恢复权限且能核实原请求人的最近 5 个会话的关闭时间、Agent 和首句任务，再按编号选。先按 /new 的方式结束当前会话，再接回旧上下文；归档、其他机器人或话题的会话不可恢复 |
+| `/fork [任务]` | `/fork 检查另一种实现` | 带上下文在新话题开分身，原会话和队列继续运行。支持 /new 的首轮 Agent、模型、目录等选项；git 仓库默认独立 worktree |
 | `/plan` | `/plan 把鉴权中间件改成无状态` | 先只调研、出计划，卡片上批准后再执行（见下文） |
 | `/pr` | `/pr 修复登录超时` | 把本会话的改动推到新的 `dutydeck/` 分支并开 PR（先发确认卡，确认后才推送），之后跟进 CI 和评审意见。需先装支持开 PR 的 CI 插件 |
 | `/tasks` | `/tasks 2` | 分页查看待处理任务、运行进度和最近结果 |
@@ -280,6 +282,10 @@ pnpm dev
 | `/work` | `/work research 目标` | 查看目标、分配 Agent、回答步骤问题、复用工作流（`consult`、`research`、`templates`） |
 | `/grant` / `/revoke` | `/grant @成员` | 把本群对话权限开放给全部成员或加入名单 / 收回 |
 | `/repair` | `/repair` | 诊断并补齐飞书应用权限、事件订阅和卡片回调（执行前二次确认，不会自动发布） |
+
+恢复和分身也可以直接用大白话告诉 Agent，由它运行 `dutydeck agent session resume [--id 编号]` 或 `dutydeck agent session fork [--task 任务]`；它会先发确认卡，点确认后才执行。恢复失败会说明原因，并提示 `/new --handoff`。
+
+分身只允许源会话第一条任务的发起人操作，沿用原会话的 Agent、模型和推理强度，权限按机器人当前设置执行。Claude Code 终端模式用 `--resume 编号 --fork-session`，Codex 终端模式用 `fork 编号` 复制已落盘的上下文；ACP、其他 Agent、换 Agent 或找不到已落盘上下文时，改用 `/new --handoff` 的最近结果、git 状态和备注交接。原生分身也附上 git 状态。Codex 显式使用相同共享目录时走交接，避免后续把复制出来的记录误认成源会话。独立 worktree 从已提交的代码开始，不含原会话未提交的改动；首条消息会说明。分身回执能跳转到新话题。整段私聊共用一个会话时不能开分身，请先把机器人设置中的私聊模式改成“每条消息一个话题”。
 
 > **提示**：`/new` 带选项时，选项和正文之间用 `--` 分隔，例如 `/new --workspace worktree --model "claude-sonnet-5-5" -- 修复单测`。
 
@@ -354,6 +360,10 @@ pnpm dev
 - **分层协作（Leader-Worker）**：接待的 Agent 整理任务简报交给 Leader；Leader 拆只读方案并指派 Worker 改代码，最终由 Leader 验收回传原话题。前提：开启群工具；Leader 若是终端模式 Agent，机器人和该 Agent 都要是 `full-trust`，否则保存配置时会报错。
 
 ---
+
+机器人设置里的「忙时先判断」（`busyTriage`）默认关闭；也可用 `dutydeck settings bot set <App ID> busyTriage=true` 打开。关闭时，执行中收到的普通消息仍照常排队。打开后，问进度由宿主直接回复阶段、最近一步、已用时间、排队数和待审批情况；补充当前任务会尝试插进支持插话的 ACP Agent，终端 Agent 仍排队；机器人管理操作复用 `dutydeck agent` 的校验和权限，只读立即回复，会改东西的先发确认卡，点确认才执行。回复会用一句短话标出理解结果。确认卡或回执发送失败、停止、拿不准、模型报错或超过 15 秒都照常排队，不自动中断。控制短语、斜杠命令、回复待处理卡片和机器人或自动化消息保持原路径。
+
+判断复用「群判定 Agent / 模型」：优先 `decisionAgentId` / `decisionModel`，留空沿用记忆 Agent / 模型，再回落默认 Agent / 模型；可把群判定模型设成便宜、快速的模型。分类器可选 `dutydeck agent` 的查看和控制命令，也可处理「每天九点看下 CI」「以后默认用 codex」这类定时任务和机器人设置请求：定时任务立即发启用卡，草稿保持停用；设置立即发管理员确认卡，确认前不保存。两类卡都回复在当前这条消息下，使用这条消息发送人的身份，不占排队轮次。进度耗时按秒、分秒或小时分显示，例如「12 分 30 秒」「1 小时 5 分」。
 
 ### 4. 接入飞书机器人
 
@@ -810,7 +820,11 @@ dutydeck restart
 
 包的 JSON 校验不过时跳过这个包，插件其余部分照常加载，`plugin list` 和 `doctor` 会列出原因；引用的 provider 没注册、包 id 冲突时也跳过这个包，原因写在 daemon 日志里。运行时正则或 provider 出错、超时，这条消息这个包弃权：`direct` 记一条弃权记录，不起任务；`model` 的上下文 provider 超时、出错、返回格式不对，或者一条材料都没有而 `missing` 不为空时，这条消息按没有这个包重新判定，判定记录里记下原因，`/status` 计入「取材料失败」，「为什么没回」会说明。同一条消息命中多个 `direct` 包时，按包 id 排序只处理第一个。
 
-### 升级说明：CI 环境变量迁移到插件
+#`dutydeck agent settings show` 只读查看机器人常用设置；`dutydeck agent settings set defaultAgentId=codex notifyQuietHours=22:00-08:00` 先发确认卡，机器人管理员点确认才保存。用户可以直接说「以后默认用 codex」「晚上十点到早上八点别推送」，让 Agent 代办。可改的只有默认 Agent、模型、推理强度、私聊模式（`p2pMode`）、群回复模式（`groupReplyMode`）、免打扰（`notifyQuietHours`）、两档通知 @（`notifyMentionAction` / `notifyMentionDone`）和忙时判断（`busyTriage`）；权限、白名单和凭据不开放。免打扰留空可清除。群有单独覆盖时，`show` 仍返回机器人默认值；群回复模式为 `null` 表示尚未显式设置，沿用旧路由。
+
+确认权限与管理机器人设置的入口一致：托管群需要机器人管理权限（`channel_bot.update`），只有高风险操作授权不能确认；未托管时，需要明确的部署成员或邮箱名单，名单为空不能确认。确认卡绑定发卡时的配置版本；期间 Web 改过设置，旧卡会拒绝覆盖，需要重新提出变更。
+
+## 升级说明：CI 环境变量迁移到插件
 
 以前用环境变量配 CI 的部署，**升级后这些变量不再生效**：`DUTYDECK_GITHUB_TOKEN`、`GH_TOKEN`、`GITHUB_TOKEN`、`DUTYDECK_CODEBASE_WEBHOOK_SECRET`。升级后要：
 
@@ -970,10 +984,11 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 
 飞书会话里的 Agent 用 `dutydeck agent` 做它能做的全部操作。每轮提示词只给命令前缀（绝对路径）、`先看 dutydeck agent --help` 和本轮能用的能力，不含凭证。
 
+- **工具审批**：在 `ask` / `approve-reads` 下，已注入工具凭证的会话使用本会话的精确命令前缀执行单条 `dutydeck agent …` 时，Claude Code / Seed / Relay 终端模式和 ACP 会自动放行工具审批，并记录原因。拼接、重定向、展开等 shell 语法仍照常审批；高风险拦截和写操作确认卡照旧。其他终端 CLI 不支持这项精确放行。
 - **帮助**：`dutydeck agent --help` 开头是写给 Agent 的快速说明；每个子命令的 `--help` 有一行 `Risk`（`read` 只读、`write-confirm` 发确认卡、`write` 直接生效）和例子。帮助不需要服务或凭证。
 - **输出**：stdout 只有一个 JSON。成功 `{"ok":true,"data":...}`；失败 `{"ok":false,"error":{"code","message","hint"?,"params"?:[{"name","reason"}]}}`，退出码非 0。`params` 指出哪个参数不对，能给可选值时写在 `reason` 里。
 - **查看**：`status`、`agents`、`tasks [--page]`、`queue`、`schedules`、`ci`，以及 `group`、`history`、`memory`、`work`、`collaborate` 的读取命令。结果直接交给 Agent，不在群里发卡；权限与这一轮的发起人在原话题自己发这条命令相同。
-- **写入**：`session new`、`retry`、`plan --task`、`schedule create/enable/disable`、`queue cancel/top`、`access grant/revoke --member`、`pr open`、`ci wait/fix/cancel`、`repair` 在这一轮的请求消息下发确认卡，点「确认」后与对应的斜杠命令走同一条路执行。`group send`、`memory add` 等照旧直接生效。写入命令都支持 `--dry-run`：只返回将要做什么、要不要确认、确认卡上写什么，不执行、不发卡。
+- **写入**：`session new/resume/fork`、`retry`、`plan --task`、`schedule create/enable/disable`、`queue cancel/top`、`access grant/revoke --member`、`pr open`、`ci wait/fix/cancel`、`repair` 在这一轮的请求消息下发确认卡，点「确认」后与对应的斜杠命令走同一条路执行。`group send`、`memory add` 等照旧直接生效。写入命令都支持 `--dry-run`：只返回将要做什么、要不要确认、确认卡上写什么，不执行、不发卡。
 - **不用带 `--turn`**：按本会话正在执行的这一轮认，没有执行中的一轮时拒绝；带了照旧校验。`group send --final`、`group handoff`、`group reply-agent` 同样。
 - **旧命令**：`dutydeck group/history/memory/work/collaborate/command`、`dutydeck schedule request` 保留不变，升级前已经在跑的会话照常可用；新的提示词只给 `dutydeck agent`。
 

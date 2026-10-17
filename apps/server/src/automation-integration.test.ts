@@ -290,3 +290,13 @@ describe('Agent schedule request delivery', () => {
     expect(button.behaviors[0].value).toEqual({ dutydeck_schedule_enable: 'schedule_req', card: 'request' });
   });
 });
+
+
+it('freezes an explicit busy message origin and rejects cross-chat or conflicting targets', async () => {
+  const f = await fixture();
+  const origin = { appId: 'cli_a', chatId: 'oc_chat', messageId: 'om_busy_now', replyInThread: false };
+  await f.prepareMessageDelivery('s1', origin, 'busy_schedule');
+  expect(JSON.parse((await f.repos.config.get('automation.delivery-target.busy_schedule'))!)).toEqual({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_busy_now', replyInThread: false });
+  await expect(f.prepareMessageDelivery('s1', { ...origin, chatId: 'oc_other' }, 'wrong_chat')).rejects.toMatchObject({ code: 'AUTOMATION_DESTINATION_MISSING' });
+  await expect(f.prepareMessageDelivery('s1', { ...origin, messageId: 'om_changed' }, 'busy_schedule')).rejects.toMatchObject({ code: 'AUTOMATION_DESTINATION_CHANGED' });
+});

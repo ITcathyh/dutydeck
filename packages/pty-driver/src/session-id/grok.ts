@@ -22,7 +22,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { grokPromptHistoryPath, resolveGrokCwdBucketDir } from '../cli-paths.js';
 import { readTail } from './fs-scan.js';
-import { isUsableMarker } from './marker.js';
+import { buildSessionMarker, isUsableMarker } from './marker.js';
 import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
 
 /** prompt_history.jsonl is per-cwd and small; a generous tail still bounds a
@@ -64,6 +64,6 @@ export const grokSessionIdLookup: SessionIdLookup = {
     // (the session directory exists under this cwd's bucket).
     if (sessionId && existsSync(join(bucket, sessionId))) return sessionId;
     if (!isUsableMarker(sessionId)) return undefined;
-    return findGrokSessionIdInPromptHistory(grokPromptHistoryPath(cwd, env), sessionId);
+    return findGrokSessionIdInPromptHistory(grokPromptHistoryPath(cwd, env), buildSessionMarker(sessionId));
   },
 };

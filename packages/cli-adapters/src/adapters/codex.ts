@@ -13,9 +13,9 @@ export function createCodexAdapter(): CliAdapter {
     id: 'codex',
     capabilities: { resume: true, nativeInputReceipt: true },
 
-    buildArgs({ resume, resumeSessionId, cwd, model, reasoningEffort, permissionMode }: AdapterSessionContext): string[] {
-      const usable = usableResumeId(resumeSessionId);
-      const isRealResume = Boolean(resume && usable);
+    buildArgs({ resume, resumeSessionId, nativeForkSessionId, cwd, model, reasoningEffort, permissionMode }: AdapterSessionContext): string[] {
+      const usable = usableResumeId(nativeForkSessionId ?? resumeSessionId);
+      const isRealResume = Boolean((resume || nativeForkSessionId) && usable);
 
       const args: string[] = [
         '--no-alt-screen',
@@ -62,7 +62,7 @@ export function createCodexAdapter(): CliAdapter {
             subcommandArgs.push(arg);
           }
         }
-        return [...rootConfigArgs, 'resume', ...subcommandArgs, usable!];
+        return [...rootConfigArgs, nativeForkSessionId ? 'fork' : 'resume', ...subcommandArgs, ...(nativeForkSessionId ? ['--all'] : []), usable!];
       }
       return args;
     },

@@ -59,6 +59,13 @@ export class LarkConfirmCards {
     this.handlers.set(kind, handler);
   }
 
+  async isPendingReply(appId: string, chatId: string, parentId: string): Promise<boolean> {
+    const actions = await this.options.repository.listActions({ appId, chatId });
+    // 历史窗口不完整时保守跳过引用消息的判定，不能把旧的待确认卡当普通补充。
+    return actions.truncated === true || actions.some(action => action.kind.startsWith('confirm.')
+      && action.status === 'intent' && action.receipt === parentId);
+  }
+
   /** 发确认卡；同一条消息重复投递时返回已有的确认单，不再发第二张。发卡失败返回 undefined。 */
   async request(input: LarkConfirmRequest): Promise<LarkConfirmRecord | undefined> {
     if (!this.handlers.has(input.kind)) throw new Error(`Unknown confirmation kind: ${input.kind}`);

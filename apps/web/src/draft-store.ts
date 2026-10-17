@@ -55,6 +55,7 @@ export type BotDraft = {
   memoryModel: string;
   decisionAgentId: string;
   decisionModel: string;
+  busyTriage: boolean;
   responseAgentId: string;
   responseModel: string;
   executionMode: 'single' | 'layered';

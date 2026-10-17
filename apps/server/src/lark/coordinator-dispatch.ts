@@ -153,7 +153,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
    * mode：steer 先试插话、送不进去再提到队首；inject 只试插话；promote 只提到队首并中断正在执行的那一轮。
    * 返回按真实结果写的说明，不预告成功；插话送达时一并返回插话结果。
    */
-  protected async steerQueuedTurn(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string, target: { id: string; status: string }, mode: 'steer' | 'inject' | 'promote'): Promise<{ steered?: string; note: string }> {
+  protected async steerQueuedTurn(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string, target: { id: string; status: string }, mode: 'steer' | 'inject' | 'promote', expectedTarget?: { taskId: string; attemptId?: string }): Promise<{ steered?: string; note: string }> {
     // 前面真的有东西才谈得上插队：只有自己一条时 steerQueued 无事可做，
     // 调了它再把异常写成「提升失败」，会把一个本来正常的情形说成出了问题。
     const tasks = this.runtime.getTasks ? await this.runtime.getTasks(sessionId).catch(() => []) : [];
@@ -174,7 +174,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         : status === 'reconcile_required' ? unknownNote : status === 'cancelled' ? '这条内容在插话之前已被取消。' : status === 'running' ? '这条内容在插话之前已经开始执行，按普通的一轮处理，没有插话。' : '这条内容已不在队列中，请通过 `/status` 核对最新执行记录。';
     };
     const steering = mode !== 'promote' && allowed && running && this.runtime.injectQueued
-      ? await this.runtime.injectQueued(sessionId, target.id, event.senderOpenId).catch(async error => {
+      ? await (expectedTarget ? this.runtime.injectQueued(sessionId, target.id, event.senderOpenId, undefined, expectedTarget)
+        : this.runtime.injectQueued(sessionId, target.id, event.senderOpenId)).catch(async error => {
         if (error instanceof RuntimeError && error.code === 'QUEUED_TASK_NOT_FOUND') return { outcome: 'moved' };
         this.log.warn({ error, runtimeTaskId: target.id }, '插话请求未返回成功结果，核对任务状态');
         const task = (await this.runtime.getTasks?.(sessionId).catch(() => undefined))?.find(item => item.id === target.id);
@@ -354,7 +355,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (item.group === task.group) previous = item;
     }
     const sessionId = previous?.sessionId;
-    if (!previous || !sessionId || !previous.runtimeTaskId || previous.state !== 'queued' || previous.turn !== 1 || previous.steer || previous.promoted
+    if (!previous || !sessionId || !previous.runtimeTaskId || previous.state !== 'queued' || previous.turn !== 1 || previous.steer || previous.busySupplement || task.busySupplement || previous.promoted
       || previous.redispatch || previous.epoch !== task.epoch || !task.event.senderOpenId || previous.event.senderOpenId !== task.event.senderOpenId
       || task.group.sessionId !== sessionId || task.group.retiredSessionIds?.has(sessionId) || task.launchOptions || task.redispatch
       || !this.runtime.getTasks || !this.runtime.cancelQueued) return;
@@ -1702,7 +1703,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
               .finally(() => this.scheduleReconcile());
           } else if (record.status === 'completed' || record.status === 'failed' || record.status === 'interrupted' || record.status === 'cancelled') {
             const steering = (agentEvent.data as any)?.steering;
-            if (record.status === 'completed' && steering?.outcome) { task.steered = String(steering.outcome); task.steerNote = steeringOutcomeText(task.steered); }
+            if (record.status === 'completed' && steering?.outcome) { task.steered = String(steering.outcome); task.steerNote = `${task.busySupplement ? '按补充当前任务处理。' : ''}${steeringOutcomeText(task.steered)}`; }
             finish(record.status);
           }
           return;
@@ -1751,10 +1752,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         }
         // /steer：先尝试插话；明确未投递才可降级为提到队首，结果未知时等待核对。
         // 注记按真实结果写：插话送达、提升成功、提升失败、或本来就没有排队都各说各的，不预告成功。
-        if (task.steer) {
-          const steering = await this.steerQueuedTurn(config, event, session.id, runtimeTask, 'steer');
+        if (task.steer || task.busySupplement && (await this.runtime.getTasks?.(session.id))?.some(item => item.id === task.busySupplement?.taskId && item.status === 'running')) {
+          const steering = await this.steerQueuedTurn(config, event, session.id, runtimeTask, task.busySupplement ? 'inject' : 'steer', task.busySupplement);
           if (steering.steered) task.steered = steering.steered;
-          task.steerNote = steering.note;
+          task.steerNote = `${task.busySupplement ? '按补充当前任务处理。' : ''}${steering.note}`;
         }
         const mappingCommitted = await this.saveCardTask(task, task.state).then(() => true, error => {
           this.log.error({ error, runtimeTaskId }, '任务已接收，卡片映射待重启对账'); return false;

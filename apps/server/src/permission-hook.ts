@@ -49,7 +49,7 @@ export function claudePermissionFacts(payload: Record<string, unknown>, env: Nod
     title: clean(input.description) || toolName,
     ...(cwd ? { cwd } : {}),
     ...(resource ? { resource } : {}),
-    ...(command ? { command } : {}),
+    ...(command ? { command, commandIsExact: typeof input.command === 'string' && command === input.command.trim() && !/[\r\n\x00-\x08\x0b-\x1f\x7f]/.test(input.command) } : {}),
   };
 }
 
@@ -91,6 +91,7 @@ interface PendingHookPermission {
 
 export interface HookPermissionRuntime {
   getSession(id: string): Promise<Session | undefined>;
+  autoApproveAgentCommand?(sessionId: string, kind: string, command: string): Promise<boolean>;
   requestDriverPermission(sessionId: string, request: Omit<PermissionRequestData, 'id' | 'status'>): { id: string; decision: Promise<DriverPermissionDecision> } | undefined;
 }
 
@@ -118,9 +119,12 @@ export class HookPermissionRequests {
     const cwd = text(body.cwd, 'cwd', 1300);
     const resource = text(body.resource, 'resource', 1300);
     const command = text(body.command, 'command', 1300);
+    const exactCommand = typeof body.command === 'string' ? body.command : undefined;
     const session = await this.runtime.getSession(sessionId);
     if (!session || session.source !== 'lark' || session.permissionMode === 'full-trust') return { status: 'native' };
     const kind = claudeToolKind(toolName);
+    if (body.commandIsExact === true && exactCommand
+      && await this.runtime.autoApproveAgentCommand?.(sessionId, kind, exactCommand)) return { status: 'approved' };
     // 与 ACP 的只读自动放行同一口径：只认读取与搜索，访问网络不算只读。
     if (session.permissionMode === 'approve-reads' && (kind === 'read' || kind === 'search')) return { status: 'approved' };
     const handle = this.runtime.requestDriverPermission(sessionId, {

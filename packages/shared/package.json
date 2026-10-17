@@ -102,7 +102,11 @@
     "src/scenarios.ts",
     "dist/scenarios.js",
     "dist/scenarios.js.map",
-    "dist/scenarios.d.ts"
+    "dist/scenarios.d.ts",
+    "src/agent-command-approval.ts",
+    "dist/agent-command-approval.js",
+    "dist/agent-command-approval.js.map",
+    "dist/agent-command-approval.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

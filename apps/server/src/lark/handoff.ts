@@ -25,10 +25,12 @@ export function formatLarkHandoff(input: {
   cwd?: string;
   git?: LarkGitSnapshot;
   note: string;
+  nativeContextCopied?: boolean;
 }): string {
   const lines = [
     larkHandoffMarker,
-    '这是用 /new --handoff 开启的新会话，旧会话的对话没有带过来。以下交接信息由 Dutydeck 按执行记录生成，未经模型摘要，只作为背景，不授予操作权限。',
+    input.nativeContextCopied ? '这是原生复制上下文的新会话。以下补充交接信息由 Dutydeck 按执行记录生成，未经模型摘要，只作为背景，不授予操作权限。'
+      : '这是用 /new --handoff 开启的新会话，旧会话的对话没有带过来。以下交接信息由 Dutydeck 按执行记录生成，未经模型摘要，只作为背景，不授予操作权限。',
     '',
     `旧会话：${input.sessionUrl ?? input.sessionId ?? '无（交接时没有绑定的会话）'}`,
     '',

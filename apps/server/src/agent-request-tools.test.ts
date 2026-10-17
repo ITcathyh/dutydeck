@@ -220,3 +220,30 @@ it('treats schedule, CI and PR follow-up rounds as automated, and Lark or Web re
   expect(isAutomatedRequest({ namespace: 'runtime', key: 'request_1' })).toBe(false);
   expect(isAutomatedRequest(undefined)).toBe(false);
 });
+
+
+it('forwards settings operations using only the active human turn identity', async () => {
+  const h = await setup();
+  const settings = vi.fn(async () => ({ busyTriage: false }));
+  h.tools.commands.set('cli_bot', vi.fn(), undefined, settings);
+  expect((await h.agent('GET', 'settings')).statusCode).toBe(200);
+  expect(settings).toHaveBeenLastCalledWith({ sessionId: h.group.id, taskId: 'task_1', actorId: 'ou_alice', action: 'show' });
+  expect((await h.agent('POST', 'settings', { pairs: ['busyTriage=true'], dryRun: true })).statusCode).toBe(200);
+  expect(settings).toHaveBeenLastCalledWith({ sessionId: h.group.id, taskId: 'task_1', actorId: 'ou_alice', action: 'set', pairs: ['busyTriage=true'], dryRun: true });
+  const calls = settings.mock.calls.length;
+  for (const body of [{ pairs: [] }, { pairs: ['busyTriage=true'], actorId: 'ou_admin' }, { pairs: ['busyTriage=true'], dryRun: 'true' }]) {
+    expect((await h.agent('POST', 'settings', body)).statusCode).toBe(400);
+  }
+  h.automated.add('task_1');
+  expect((await h.agent('GET', 'settings')).statusCode).toBe(403);
+  expect(settings).toHaveBeenCalledTimes(calls);
+});
+
+
+it('does not accept a client-provided schedule origin or actor', async () => {
+  const h = await setup();
+  for (const extra of [{ replyMessageId: 'om_forged' }, { actorId: 'ou_admin' }, { origin: { appId: 'cli_bot', chatId: 'oc_other', messageId: 'om_forged' } }]) {
+    expect((await h.agent('POST', 'schedules', { prompt: '看 CI', cron: '0 9 * * *', ...extra })).statusCode).toBe(400);
+  }
+  expect(h.createSchedule).not.toHaveBeenCalled(); expect(h.prepareDelivery).not.toHaveBeenCalled(); expect(h.sendConfirmation).not.toHaveBeenCalled();
+});

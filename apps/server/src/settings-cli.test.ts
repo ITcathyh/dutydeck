@@ -53,6 +53,17 @@ describe('settings CLI against the real bot routes', () => {
     expect((await run('bot-list')).bots).toEqual([expect.objectContaining({ appId: 'cli_a', defaultAgentId: 'codex', listening: false })]);
   });
 
+  it('defaults busy triage off and saves typed on/off values through the bot route', async () => {
+    const { repos, run } = await botRuntime();
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ busyTriage: false });
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['busyTriage=true'] })).bot).toMatchObject({ busyTriage: true });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ busyTriage: true });
+    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=keep busy setting'] });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ busyTriage: true });
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['busyTriage=false'] })).bot).toMatchObject({ busyTriage: false });
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['busyTriage=maybe'] })).rejects.toThrow();
+  });
+
   it('persists card forwarding through CLI/API updates and redacts its token from all public results', async () => {
     const { repos, run } = await botRuntime();
     const forwarding = { owner: 'sample-service', url: 'http://127.0.0.1:14432/cards', token: 'private-forward-token', legacyActions: ['ack'] };

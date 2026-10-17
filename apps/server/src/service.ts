@@ -263,7 +263,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   let relaySigningSecret: string;
   try { relaySigningSecret = await loadOrCreateRelaySigningSecret(repos.config); }
   catch (error) { throw error; }
-  const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, localApiBaseUrl(config), groupToolsSigningSecret);
+  const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, localApiBaseUrl(config), groupToolsSigningSecret, options.groupToolsCommand ?? 'dutydeck');
   setupCleanup.push(() => capabilities.close());
   // 通用回传通道：与飞书无关，任何来源的会话（含 Web 工作台创建的 pty-cli）都注入凭证。
   // command 前缀复用 groupToolsCommand 算出的运行期绝对路径——静态文案拿不到它，
@@ -356,7 +356,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const terminalSettings = new TerminalSettings(repos.config, env);
   // pty-cli 协议驱动工厂：protocol='pty-cli' 的会话路由到 Dutydeck 的 PtyCliDriver。
   // 自定义命令可通过 adapterId 复用已有 CLI 家族，同时保留独立 agent id。
-  const ptyDriverFactory: DriverFactory = (agent, _protocol, onEvent, onExit, sessionId) => {
+  const ptyDriverFactory: DriverFactory = (agent, _protocol, onEvent, onExit, sessionId, context) => {
     const adapter = createCliAdapter(agent.adapterId ?? agent.id);
     return createPtyCliDriver({
       agent,
@@ -367,6 +367,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       onExit,
       sessionId,
       awaitingAnswer: () => relayBroker.listPending(sessionId).length > 0,
+      nativeForkSessionId: context.nativeForkSessionId,
     });
   };
   const pluginWiring = pluginHost ? wirePlugins(pluginHost, {
@@ -461,7 +462,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return result;
     },
     awaitingAnswer: sessionId => relayBroker.listPending(sessionId).length > 0,
-    log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) },
+    log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]), info: (data, message) => app?.log.info(data, message) },
     ...pluginWiring?.runtimeOptions
   });
   setupCleanup.push(() => runtime.shutdown());
@@ -673,6 +674,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         participation: collaboration.participation,
         usage: usageLedger,
         automation,
+        scheduleRequests: { prepareDelivery: automationIntegration.prepareMessageDelivery, sendConfirmation: automationIntegration.sendScheduleRequest },
         workbench,
         relayBroker,
         env,

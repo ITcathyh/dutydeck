@@ -8,6 +8,7 @@
  */
 import { closeSync, existsSync, openSync, opendirSync, readSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -163,4 +164,27 @@ export function parseJsonlObjects(text: string): any[] {
     }
   }
   return out;
+}
+
+/** Scan a selected native transcript without a head/tail window: a fork's
+ * ownership marker can be between inherited history and later output. */
+export function* nativeTranscriptObjects(path: string): Generator<any> {
+  let fd: number | undefined;
+  try {
+    if (!statSync(path).isFile()) return;
+    fd = openSync(path, 'r');
+    const buffer = Buffer.alloc(64 * 1024), decoder = new StringDecoder('utf8');
+    let pending = '';
+    for (;;) {
+      const count = readSync(fd, buffer, 0, buffer.length, null);
+      pending += count ? decoder.write(buffer.subarray(0, count)) : decoder.end();
+      let newline: number;
+      while ((newline = pending.indexOf('\n')) >= 0) {
+        const line = pending.slice(0, newline); pending = pending.slice(newline + 1);
+        try { yield JSON.parse(line); } catch { /* Partial or malformed native record. */ }
+      }
+      if (!count) { if (pending.trim()) { try { yield JSON.parse(pending); } catch { /* Incomplete last record. */ } } break; }
+    }
+  } catch { /* Missing or unreadable native history is not a match. */ }
+  finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* Already closed. */ } } }
 }

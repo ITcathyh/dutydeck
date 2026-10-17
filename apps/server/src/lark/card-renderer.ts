@@ -481,6 +481,15 @@ const toolKindLabel: Record<TraceToolKind, string> = {
 // 标题整行加粗；文本自带 * 时不包，免得和它自己的 Markdown 拼出一串字面星号。
 const strong = (markdown: string) => markdown.includes('*') ? markdown : `**${markdown}**`;
 
+/** 与过程卡共用脱敏后的旁白和工具摘要，不暴露 thinking 或终端原文。 */
+export function busyProgressSummary(events: AgentEvent[]): { phase: string; latest: string } {
+  const entries = compactTraceEntries(events);
+  const narrative = entries.filter(entry => entry.type === 'text' && entry.data.role !== 'user').at(-1);
+  const tool = entries.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result').at(-1);
+  return { phase: narrative?.data.text ? redactTraceText(String(narrative.data.text)).slice(0, 200) : '正在执行',
+    latest: tool ? toolHeadline(toolPresentation(tool)).slice(0, 200) : '暂无可见步骤' };
+}
+
 export const hasUnresolvedToolCalls = (events: AgentEvent[]) => compactTraceEntries(events).some(entry =>
   (entry.type === 'tool_call' || entry.type === 'tool_result') && toolPresentation(entry).statusLabel === '执行中'
 );

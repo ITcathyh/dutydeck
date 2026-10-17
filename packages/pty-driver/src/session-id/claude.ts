@@ -21,7 +21,7 @@ import { existsSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { claudeProjectDir } from '../cli-paths.js';
-import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from './fs-scan.js';
+import { byMtimeDesc, parseJsonlObjects, readHead, nativeTranscriptObjects, walkFiles } from './fs-scan.js';
 import { buildSessionMarker, isUsableMarker } from './marker.js';
 import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
 
@@ -56,11 +56,12 @@ function entrySessionId(entry: any): string | undefined {
   return typeof id === 'string' && id.length > 0 ? id : undefined;
 }
 
-function markedSession(path: string, sessionId: string, requireMarker: boolean): string | undefined {
-  for (const entry of parseJsonlObjects(readHead(path, HEAD_BYTES))) {
+function markedSession(path: string, sessionId: string, requireMarker: boolean, exactPinned = false): string | undefined {
+  const records = exactPinned ? nativeTranscriptObjects(path) : parseJsonlObjects(readHead(path, HEAD_BYTES));
+  for (const entry of records) {
     if (entry?.isSidechain === true) continue;
     if (requireMarker && (entry?.type !== 'user' || entry?.message?.role !== 'user')) continue;
-    if (!entryMentions(entry, requireMarker ? buildSessionMarker(sessionId) : sessionId)) continue;
+    if (!entryMentions(entry, buildSessionMarker(sessionId))) continue;
     return entrySessionId(entry) ?? (path.replace(/^.*\//, '').replace(/\.jsonl$/, '') || undefined);
   }
   return undefined;
@@ -90,7 +91,7 @@ export const claudeSessionIdLookup: SessionIdLookup = {
       if (!requireMarker) return pinned;
       // Do not let unrelated newer files push the exact pinned transcript out
       // of the bounded scan. A conflicting pinned file must not be adopted.
-      return isUsableMarker(sessionId) ? markedSession(pinnedPath, sessionId, true) : undefined;
+      return isUsableMarker(sessionId) ? markedSession(pinnedPath, sessionId, true, true) : undefined;
     }
 
     if (!isUsableMarker(sessionId)) return undefined;
