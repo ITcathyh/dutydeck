@@ -1,3 +1,5 @@
+import { ProgramStatusFramingStream } from './program-status-parser.js';
+import { writeProbeReplySync } from './program-status-probe-relay.js';
 import * as pty from 'node-pty';
 import { chmodSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -29,9 +31,11 @@ export class PtyBackend implements SessionBackend {
   /** SessionBackend contract: a pty child has no addressable session of its
    *  own — it dies with its backend, so there is nothing to reattach to. */
   readonly sessionName = undefined;
+  private programStatus = false;
   private process: pty.IPty | null = null;
 
   spawn(bin: string, args: string[], opts: SpawnOptions): void {
+    this.programStatus = opts.programStatus === true;
     this.process = pty.spawn(bin, args, {
       name: 'xterm-256color',
       cols: opts.cols,
@@ -58,7 +62,11 @@ export class PtyBackend implements SessionBackend {
 
   /** Must be called AFTER spawn(). Callbacks registered before spawn are silently lost. */
   onData(cb: (data: string) => void): void {
-    this.process?.onData(cb);
+    const parser = this.programStatus ? new ProgramStatusFramingStream() : undefined;
+    this.process?.onData(data => {
+      if (parser?.feed(data).some(part => part.type === 'probe') && this.process) writeProbeReplySync(this.process);
+      cb(data);
+    });
   }
 
   /** Must be called AFTER spawn(). Callbacks registered before spawn are silently lost. */

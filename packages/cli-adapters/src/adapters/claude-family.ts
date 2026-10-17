@@ -244,7 +244,7 @@ export async function prepareClaudeFamilyInput(backend: PtyLike, ctx: AdapterSes
 export function createClaudeFamilyAdapter(id: string): CliAdapter {
   return {
     id,
-    capabilities: { resume: true, nativeInputReceipt: true },
+    capabilities: { resume: true, nativeInputReceipt: true, ...(id === 'claude-code' ? { programStatus: true } : {}) },
 
     buildArgs({ sessionId, resume, resumeSessionId, nativeForkSessionId, model, permissionMode, env, planGuardCommand, cwd }: AdapterSessionContext): string[] {
       // --session-id/--resume 只接受裸 UUID：dutydeck 的 "ses_<uuid>" 剥前缀，

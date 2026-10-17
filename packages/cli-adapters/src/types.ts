@@ -44,6 +44,8 @@ export interface PtyLike {
 }
 
 export interface CliAdapterCapabilities {
+  /** CLI emits OSC 7501 program status after terminal negotiation. */
+  programStatus?: boolean;
   /** Native user records can prove that terminal input was accepted. */
   nativeInputReceipt?: boolean;
   /** 支持 --resume 类会话恢复 */

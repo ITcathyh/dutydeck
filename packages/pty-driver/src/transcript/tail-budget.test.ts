@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
+vi.mock('node:fs', async original => {
+  const actual = await original<typeof import('node:fs')>();
+  return { ...actual, openSync: vi.fn(actual.openSync), fstatSync: vi.fn(actual.fstatSync), closeSync: vi.fn(actual.closeSync) };
+});
 import { JsonlTailer } from './tail.js';
 import { mapClaudeEntry } from './claude.js';
 import { mapCodexEntry } from './codex.js';
@@ -23,6 +28,18 @@ function fixture(mapEntry = (entry: any): NormalizedDriverEvent[] => [{ type: 't
 }
 
 describe('bounded transcript drains', () => {
+  it('closes the transcript descriptor when fstat fails', async () => {
+    const { tailer, path } = fixture();
+    await tailer.flush();
+    appendFileSync(path, JSON.stringify({ text: 'x' }) + '\n');
+    const error = Object.assign(new Error('fstat EIO'), { code: 'EIO' });
+    vi.mocked(fs.fstatSync).mockImplementationOnce(() => { throw error; });
+    const closed = vi.mocked(fs.closeSync).mock.calls.length;
+    await expect(tailer.flush()).rejects.toBe(error);
+    const fd = vi.mocked(fs.openSync).mock.results.at(-1)!.value;
+    expect(vi.mocked(fs.closeSync).mock.calls.slice(closed)).toContainEqual([fd]);
+  });
+
   it('rejects resolver errors without throwing from start or the polling timer, then retries', async () => {
     vi.useFakeTimers();
     let fail = true;

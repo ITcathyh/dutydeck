@@ -1,3 +1,6 @@
+// Adapted from botmux (https://github.com/deepcoldy/botmux), MIT License, Copyright (c) 2026 botmux contributors
+import type { ProgramStatusEvent } from '@dutydeck/session-backends';
+
 /**
  * Idle detection state machine.
  * Third-party attribution: see THIRD_PARTY_NOTICES.md.
@@ -15,7 +18,7 @@
  *   - ANSI stripping, 500-char rolling tail, lastMatchIndex helper
  */
 
-export type IdleEvidenceSource = 'screen' | 'external';
+export type IdleEvidenceSource = 'screen' | 'external' | 'program-status';
 
 /** Pattern bag driving the detector; every field is optional. */
 export interface IdlePatterns {
@@ -37,6 +40,125 @@ const QUIESCENCE_MS = 2_000;
 const SPINNER_GUARD_MS = 3_000;
 
 export class IdleDetector {
+  private programStatusEnabled = false;
+  private programStatusAuthority = false;
+  private programStatusPending = false;
+  private readonly programStatusRecords = new Map<string, ProgramStatusEvent>();
+  private readonly programStatusEvictedBusy = new Set<string>();
+  private programStatusTimer: ReturnType<typeof setTimeout> | undefined;
+  private programStatusLog?: (mode: 'osc7501' | 'screen', reason: string) => void;
+
+  enableProgramStatus(log: (mode: 'osc7501' | 'screen', reason: string) => void): void {
+    this.programStatusEnabled = true;
+    this.programStatusLog = log;
+    log('screen', 'waiting for OSC 7501 negotiation');
+    this.waitForProgramStatus('no startup status within 15000ms (handshake unavailable)');
+  }
+
+  /** No heartbeat is promised. Only a host submission expects a new edge. */
+  beginProgramStatusTurn(): void {
+    if (!this.programStatusEnabled) return;
+    this.programStatusRecords.clear();
+    this.programStatusEvictedBusy.clear();
+    this.programStatusPending = this.programStatusAuthority;
+    this.waitForProgramStatus('no status after submission within 15000ms');
+  }
+
+  private waitForProgramStatus(reason: string): void {
+    if (this.programStatusTimer) clearTimeout(this.programStatusTimer);
+    this.programStatusTimer = setTimeout(() => this.fallbackProgramStatus(reason), 15_000);
+    this.programStatusTimer.unref();
+  }
+
+  fallbackProgramStatus(reason: string): void {
+    if (!this.programStatusEnabled) return;
+    // A fallback retires only current evidence; a later valid frame may recover.
+    this.programStatusAuthority = false;
+    this.programStatusPending = false;
+    this.programStatusRecords.clear();
+    this.programStatusEvictedBusy.clear();
+    if (this.programStatusTimer) clearTimeout(this.programStatusTimer);
+    this.programStatusTimer = undefined;
+    this.programStatusLog?.('screen', reason);
+    // Reuse the accumulated prompt/spinner evidence; no new PTY byte is needed.
+    if (!this.isIdle && (!this.readyPattern || this.readySeen)) {
+      this.clearTimer();
+      this.quiescenceTimer = setTimeout(() => this.quiescenceCheck(), QUIESCENCE_MS);
+    }
+  }
+
+  observeProgramStatus(event: ProgramStatusEvent): void {
+    if (!this.programStatusEnabled || event.app !== 'claude-code') return;
+    if (event.id !== undefined && (!event.id || event.id.length > 256 || /[\x00-\x20\x7f]/.test(event.id))) return;
+    if (this.programStatusTimer) clearTimeout(this.programStatusTimer);
+    this.programStatusTimer = undefined;
+    if (event.state === 'clear' && event.id === undefined) {
+      this.fallbackProgramStatus('CLI cleared program status');
+      return;
+    }
+    if (!this.programStatusAuthority) this.programStatusLog?.('osc7501', 'received valid program status');
+    this.programStatusAuthority = true;
+    this.programStatusPending = false;
+    const id = event.id ?? '';
+    if (event.state === 'clear') {
+      for (const key of this.programStatusRecords.keys()) {
+        if (key === id || key.startsWith(id + '/')) this.programStatusRecords.delete(key);
+      }
+      for (const key of this.programStatusEvictedBusy) {
+        if (key === id || key.startsWith(id + '/')) this.programStatusEvictedBusy.delete(key);
+      }
+    } else {
+      this.programStatusEvictedBusy.delete(id);
+      if (!this.programStatusRecords.has(id) && this.programStatusRecords.size >= 256) {
+        const children = [...this.programStatusRecords.keys()].filter(key => key !== '');
+        const oldest = children.find(key => !['working', 'blocked'].includes(this.programStatusRecords.get(key)!.state)) ?? children[0];
+        if (oldest !== undefined) {
+          const prior = this.programStatusRecords.get(oldest)!;
+          if (prior.state === 'working' || prior.state === 'blocked') this.programStatusEvictedBusy.add(oldest);
+          this.programStatusRecords.delete(oldest);
+        }
+      }
+      this.programStatusRecords.set(id, event);
+    }
+    if (this.programStatusRecords.size === 0 && this.programStatusEvictedBusy.size === 0) {
+      this.fallbackProgramStatus('CLI cleared all program status records');
+      return;
+    }
+    this.clearTimer();
+    this.isIdle = false;
+    this.busyTransitionArmed = false;
+    if (this.programStatusTerminal()) this.fireIdle();
+  }
+
+  programStatusActive(): boolean { return this.programStatusAuthority; }
+
+  programStatusTerminal(): boolean {
+    if (!this.programStatusAuthority || this.programStatusPending || this.programStatusEvictedBusy.size > 0) return false;
+    for (const rec of this.programStatusRecords.values()) {
+      if (rec.state === 'working' || rec.state === 'blocked') return false;
+    }
+    const root = this.programStatusRecords.get('');
+    return !!root && ['done', 'idle', 'error'].includes(root.state);
+  }
+
+  programStatusBlock(): ProgramStatusEvent | undefined {
+    let blocked: ProgramStatusEvent | undefined;
+    for (const record of this.programStatusRecords.values()) {
+      if (record.state === 'blocked') blocked = record;
+    }
+    return this.programStatusAuthority ? blocked : undefined;
+  }
+
+  programStatusError(): string | undefined {
+    const root = this.programStatusRecords.get('');
+    return this.programStatusAuthority && root?.state === 'error' ? root.msg ?? 'CLI reported an error' : undefined;
+  }
+
+  /** Also used after asynchronous transcript flushes to recheck fresh busy edges. */
+  programStatusAllowsIdle(): boolean {
+    return !this.programStatusAuthority || this.programStatusTerminal();
+  }
+
   private outputTail = '';
   private lastSpinnerAt = 0;
   private quiescenceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -188,6 +310,8 @@ export class IdleDetector {
       this.lastSpinnerAt = Date.now();
     }
 
+    if (this.programStatusAuthority) { this.clearTimer(); return; }
+
     // Strategy 1: CLI-specific completion marker
     // Check the current chunk too: a single full-screen redraw can contain
     // the completion line and enough trailing status text to push it out of
@@ -245,11 +369,13 @@ export class IdleDetector {
    *  agree. Idempotent within a turn (gated by isIdle); reset() re-arms it
    *  for the next turn — same lifecycle as the internal markIdle path. */
   fireIdle(): void {
-    if (this.isIdle) return;
-    this.markIdle('external');
+    if (this.isIdle || !this.programStatusAllowsIdle()) return;
+    this.markIdle(this.programStatusAuthority ? 'program-status' : 'external');
   }
 
   dispose(): void {
+    if (this.programStatusTimer) clearTimeout(this.programStatusTimer);
+    this.programStatusTimer = undefined;
     this.clearTimer();
     this.idleCallback = null;
     this.busyCallback = null;
@@ -278,6 +404,7 @@ export class IdleDetector {
   }
 
   private markIdle(source: IdleEvidenceSource): void {
+    if (this.programStatusAuthority && (source !== 'program-status' || !this.programStatusTerminal())) return;
     this.isIdle = true;
     // Arm before the callback: markPromptReady may synchronously flush queued
     // input and call reset(), which must win and disarm this edge.
@@ -297,7 +424,7 @@ export class IdleDetector {
   private stripAnsi(str: string): string {
     return str
       .replace(/\x1b\[(\d*)C/g, (_m, n) => ' '.repeat(Number(n) || 1))
-      .replace(/\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]|\x1b\[[\?]?[0-9;]*[hlmsuJ]/g, '');
+      .replace(/\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-B]|\x1b\[[\?]?[0-9;]*[hlmsuJ]/g, '');
   }
 }
 

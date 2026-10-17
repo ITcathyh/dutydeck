@@ -19,11 +19,11 @@ import {
 } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
 import { buildDutydeckRoutingBlock } from '@dutydeck/cli-adapters';
-import { captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit, PtyBackend, TmuxBackend, HerdrBackend, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type PhysicalProcessIdentity } from '@dutydeck/session-backends';
+import { ProgramStatusFramingStream, captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit, PtyBackend, TmuxBackend, HerdrBackend, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type PhysicalProcessIdentity } from '@dutydeck/session-backends';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector } from './idle-detector.js';
 import { TurnCpu } from './turn-cpu.js';
-import { createTranscriptTailer, type TranscriptEventSource } from './transcript/index.js';
+import { createTranscriptTailer, type TranscriptEventSource, type TranscriptPosition } from './transcript/index.js';
 import { buildSessionMarker, resolveCliSessionId, hasPinnedClaudeSession, claudeSessionIdLookup } from './session-id/index.js';
 import { hostname } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
@@ -178,6 +178,10 @@ export class PtyCliDriver implements AgentDriver {
   private snapshot: TerminalSnapshot | undefined;
   private transcript: TranscriptEventSource | undefined;
   private rawTerminalTimer: ReturnType<typeof setTimeout> | undefined;
+  private programStatusDrainTimer: ReturnType<typeof setTimeout> | undefined;
+  private programStatusNativeTerminalSeen: number | undefined;
+  private programStatusBusyWatermark: TranscriptPosition | undefined;
+  private programStatusRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   private renderedCompletionTimer: ReturnType<typeof setTimeout> | undefined;
   private lastRawTerminalText = '';
   /** 最近一次 PTY 输出的时间，经 submissionBackend 交给适配器判断屏幕是否静止。 */
@@ -247,6 +251,11 @@ export class PtyCliDriver implements AgentDriver {
     this.hookPermissions.delete(id);
     if (this.humanWaits.delete(id)) this.lastProgressAt = Date.now();
     resolve({ approved, ...(!approved && reason ? { reason } : {}) });
+    // A settled real hook disproves its OSC permission wait even when the
+    // CLI's next working edge was lost. This releases evidence, not the turn.
+    if (this.hookPermissions.size === 0 && this.idleDetector?.programStatusBlock()?.kind === 'permission') {
+      this.idleDetector.fallbackProgramStatus('permission hook adjudicated; retiring stale OSC permission wait');
+    }
     return true;
   }
 
@@ -326,7 +335,7 @@ export class PtyCliDriver implements AgentDriver {
       this.lastArgs = this.claudeSettings.args(this.agent.args, this.buildResumeArgs(nativeSessionId, resumeFragment), this.cwd, this.agent.env);
       const spawnEnv = this.spawnEnv();
       await this.backend.spawn(this.agent.command, this.lastArgs, {
-        cwd: this.cwd, cols: DEFAULT_COLS, rows: DEFAULT_ROWS, env: spawnEnv,
+        cwd: this.cwd, cols: DEFAULT_COLS, rows: DEFAULT_ROWS, env: spawnEnv, programStatus: this.usesProgramStatus,
       });
       check();
       this.recordTranscriptLaunch(spawnEnv);
@@ -352,6 +361,7 @@ export class PtyCliDriver implements AgentDriver {
       cols: DEFAULT_COLS,
       rows: DEFAULT_ROWS,
       env: spawnEnv,
+      programStatus: this.usesProgramStatus,
     });
     check();
     this.recordTranscriptLaunch(spawnEnv);
@@ -476,11 +486,13 @@ export class PtyCliDriver implements AgentDriver {
       this.startTurnDeadline();
       this.awaitingRecoveryTranscript = false;
       this.clearRenderedCompletion();
+      this.clearProgramStatusDrain();
       this.clearBackgroundHold();
       this.transcript?.resetBackgroundWork?.();
       // An earlier turn's unreported error must not fail this one.
       this.transcript?.takeTurnError?.();
       this.idleDetector?.reset();
+      this.idleDetector?.beginProgramStatusTurn();
       completion = new Promise<void>((resolve, reject) => {
         this.turnResolve = resolve;
         this.turnReject = rejectTurn = reject;
@@ -566,7 +578,9 @@ export class PtyCliDriver implements AgentDriver {
     // A CLI can paint its final screen before persisting the user receipt.
     // Re-drive completion after releasing the submission hold, even if there
     // are no more PTY bytes. All current-screen/busy guards still apply.
+    this.recoverProgramStatusFromTranscript();
     this.checkRenderedCompletion();
+    if (this.idleDetector?.programStatusTerminal()) this.idleDetector.fireIdle();
 
     // 与 AcpxAdapter 语义对齐：send() 等本轮结束（completed）才 resolve，
     // runtime 在 send resolve 后立即判定终态。driver 退出则 reject。
@@ -1115,6 +1129,11 @@ export class PtyCliDriver implements AgentDriver {
     }
   }
 
+  private get usesProgramStatus(): boolean {
+    // Herdr's control API streams rendered screen updates, stripping OSC frames.
+    return this.adapter.capabilities.programStatus === true && this.backend.kind !== 'herdr';
+  }
+
   /** 把一个后端接线进事件流（start / reattach / respawn 共用）。 */
   private async wire(backend: SessionBackend, restoreTranscript?: DriverTurnRecovery['transcript']): Promise<void> {
     const generation = this.wiringGeneration;
@@ -1145,12 +1164,23 @@ export class PtyCliDriver implements AgentDriver {
       staticBusyClearPattern: this.adapter.staticBusyClearPattern,
       readyPattern: this.adapter.readyPattern,
     });
-    let completing = false;
-    this.idleDetector.onIdle(() => {
-      if (completing) return;
+    let completing = false, idleAgain = false;
+    this.programStatusNativeTerminalSeen = undefined;
+    this.programStatusBusyWatermark = undefined;
+    if (this.usesProgramStatus) {
+      this.idleDetector.enableProgramStatus((mode, reason) => {
+        if (mode === 'screen') {
+          this.humanWaits.delete('osc7501');
+          if (this.turnActive) this.emitEvent({ type: 'status', data: { state: 'program_status_fallback', source: 'osc7501', reason } });
+        }
+        console.info(`[dutydeck] session=${this.sessionId} detector=${mode} reason=${reason}`);
+      });
+    } else console.info(`[dutydeck] session=${this.sessionId} detector=screen reason=${backend.kind === 'herdr' ? 'Herdr control stream renders screens and drops OSC status frames' : 'adapter does not advertise OSC 7501'}`);
+    this.idleDetector.onIdle(source => {
+      if (completing) { idleAgain = true; return; }
       completing = true;
       void (async () => {
-        if (!this.turnActive || this.stopped) return;
+        if (!this.turnActive || this.stopped || !this.idleDetector?.programStatusAllowsIdle()) return;
         if (this.awaitingRecoveryTranscript) return;
         // Streaming can pause with an old prompt still on screen. Only the
         // current footer counts; earlier busy text may remain in the answer.
@@ -1161,7 +1191,7 @@ export class PtyCliDriver implements AgentDriver {
         const statusLine = activity ? this.snapshot?.viewportText().split('\n').reverse()
           .find(line => activity.test(line) || this.adapter.backgroundWaitPattern?.test(line) || this.adapter.completionPattern?.test(line)
             || this.adapter.screenCancelledPattern?.test(line)) : undefined;
-        if (this.activeSubmission || this.adapter.isBusyScreen?.(this.snapshot?.viewportText() ?? '') || this.adapter.screenBusyPattern?.test(footer) || (statusLine && activity?.test(statusLine))) {
+        if (this.activeSubmission || (source !== 'program-status' && (this.adapter.isBusyScreen?.(this.snapshot?.viewportText() ?? '') || this.adapter.screenBusyPattern?.test(footer) || (statusLine && activity?.test(statusLine))))) {
           // Keep checking even if the next redraw only clears the footer.
           this.idleDetector?.reset();
           this.idleDetector?.seedReadyEvidence();
@@ -1169,7 +1199,7 @@ export class PtyCliDriver implements AgentDriver {
         }
         // 已有实质输出（CLI 在干活）→ 不受宽限期限制，idle 即完成。
         // 尚无实质输出 → 可能还在启动期（splash 屏静止），宽限期内禁止 completed。
-        if (!this.turnHasOutput) {
+        if (source !== 'program-status' && !this.turnHasOutput) {
           if (Date.now() - this.turnStartedAt < PtyCliDriver.TURN_GRACE_MS) return;
         }
         // Publish the final JSONL record before Runtime closes the turn, even
@@ -1178,7 +1208,11 @@ export class PtyCliDriver implements AgentDriver {
         const outputAt = this.lastOutputAt;
         await this.transcript?.flush();
         if (backend !== this.backend || this.stopped || !this.turnActive || this.turnResolve !== resolve) return;
-        if (outputAt !== this.lastOutputAt) {
+        if (!this.idleDetector?.programStatusAllowsIdle()) return;
+        // A fallback during flush retires the old OSC completion and its
+        // screen exemptions. The fallback's screen timer owns the next check.
+        if (source === 'program-status' && !this.idleDetector.programStatusTerminal()) return;
+        if (source !== 'program-status' && outputAt !== this.lastOutputAt) {
           this.idleDetector?.reset();
           this.idleDetector?.seedReadyEvidence();
           return;
@@ -1186,12 +1220,13 @@ export class PtyCliDriver implements AgentDriver {
         // Prompt #1 (with the session marker) is now persisted: content-verify
         // the current launch's native identity. No-op once verified.
         this.verifyPendingTranscriptLaunches();
-        if (this.holdForBackgroundWork(statusLine)) {
+        if (this.holdForBackgroundWork(source === 'program-status' ? undefined : statusLine)) {
           this.idleDetector?.reset();
           this.idleDetector?.seedReadyEvidence();
           return;
         }
-        const turnError = this.transcript?.takeTurnError?.();
+        const programError = this.idleDetector?.programStatusError();
+        const turnError = this.transcript?.takeTurnError?.() ?? (programError ? { type: 'error' as const, data: { message: programError, code: 'CLI_PROGRAM_STATUS_ERROR' } } : undefined);
         const nativeCancelled = this.transcript?.takeInputCancellation?.() ?? false;
         // A native user receipt proves submission, while a PTY redraw only
         // proves screen activity. Keep the turn open if its assistant record
@@ -1211,11 +1246,21 @@ export class PtyCliDriver implements AgentDriver {
           if (this.transcript.requiresTurnTerminal || Date.now() - this.transcriptTerminalWaitAt < 2_000) {
             this.awaitingTranscriptResult = true;
             this.idleDetector?.reset(); this.idleDetector?.seedReadyEvidence();
+            if (source === 'program-status' && !this.transcript.requiresTurnTerminal && !this.programStatusDrainTimer) {
+              this.programStatusDrainTimer = setTimeout(() => {
+                this.programStatusDrainTimer = undefined;
+                if (backend !== this.backend || this.stopped || !this.turnActive || this.turnResolve !== resolve || !this.idleDetector?.programStatusTerminal()) return;
+                this.idleDetector.reset();
+                this.idleDetector.fireIdle();
+              }, Math.max(1, 2_000 - (Date.now() - this.transcriptTerminalWaitAt)));
+              this.programStatusDrainTimer.unref();
+            }
             this.checkRenderedCompletion();
             return;
           }
         }
         this.clearBackgroundHold();
+        this.clearProgramStatusDrain();
         this.turnActive = false;
         this.clearTurnDeadline();
         // The runtime fails a turn whose last step is not text but has no
@@ -1233,7 +1278,14 @@ export class PtyCliDriver implements AgentDriver {
         this.turnReject?.(error instanceof Error ? error : new Error(String(error)));
         this.turnResolve = null;
         this.turnReject = null;
-      }).finally(() => { completing = false; });
+      }).finally(() => {
+        completing = false;
+        if (idleAgain && this.turnActive && this.idleDetector?.programStatusTerminal()) {
+          idleAgain = false;
+          this.idleDetector.reset();
+          this.idleDetector.fireIdle();
+        } else idleAgain = false;
+      });
     });
 
     // Backends retain bounded post-snapshot increments until this subscription.
@@ -1244,6 +1296,7 @@ export class PtyCliDriver implements AgentDriver {
     const notice = '\r\n[DutyDeck: terminal output exceeded its buffer; restoring the current screen.]\r\n';
     const refreshAfterGap = (droppedBytes: number) => {
       if (backend !== this.backend || this.stopped) return;
+      this.idleDetector?.fallbackProgramStatus('terminal output gap may have lost status frames');
       this.emitEvent({ type: 'status', data: { state: 'terminal_output_gap', droppedBytes, message: 'At least this many terminal bytes were dropped; restoring the current screen.' } });
       if (this.refreshingScreen) { retryRefresh = true; return; }
       for (const cb of this.terminalSubscribers) cb(notice);
@@ -1273,8 +1326,58 @@ export class PtyCliDriver implements AgentDriver {
       });
     };
     backend.onOutputGap?.(refreshAfterGap);
+    // The tailer must resolve the CLI's data dir from the environment the CLI
+    // CHILD got, never the daemon's: mergedEnv strips CLAUDE_* from the child,
+    // and agent.env may relocate CODEX_HOME / CLAUDE_CONFIG_DIR / HOME. Reading
+    // the daemon's env instead watches a tree the CLI never writes to, and the
+    // turn is then reported as "no final output" while the screen shows a
+    // perfectly good answer.
+    this.transcript = createTranscriptTailer(this.adapter.id, {
+      cwd: this.cwd,
+      env: this.spawnEnv(),
+      // Claude keys its transcript directory by cwd ALONE, so two dutydeck
+      // sessions in one repo share it. Without the session id the tailer
+      // resolves by recency and picks up a sibling's transcript — the timeline
+      // then shows another session's answer, or the turn is failed as "no
+      // final output" while our own transcript sits on disk, correct and
+      // unread. Sources that cannot be session-scoped ignore this.
+      sessionId: this.sessionId,
+    });
+    if (restoreTranscript) this.transcript?.restore(restoreTranscript);
+
+    const programStatusParser = this.usesProgramStatus ? new ProgramStatusFramingStream() : undefined;
     backend.onData(data => {
       if (backend !== this.backend || this.stopped) return;
+      if (programStatusParser) {
+        const parts = programStatusParser.feed(data);
+        // Update authority before any screen timer or asynchronous renderer sees this batch.
+        for (const part of parts) {
+          if (part.type !== 'status') continue;
+          const event = part.event;
+          if (event.app !== 'claude-code') continue;
+          if (this.turnActive) this.turnHasOutput = true;
+          console.info(`[dutydeck] session=${this.sessionId} OSC7501 state=${event.state} kind=${event.kind ?? '-'} at=${Date.now()}`);
+          this.clearProgramStatusRecovery();
+          // Snapshot disk bytes synchronously: a final already written before
+          // this busy edge must not overturn it when a later poll reads it.
+          if (event.state === 'working' || event.state === 'blocked') {
+            this.programStatusBusyWatermark = this.transcript?.captureWatermark?.();
+            this.programStatusNativeTerminalSeen = this.transcript?.turnTerminalRevision?.()
+              ?? (this.transcript?.hasTurnTerminal?.() ? 0 : undefined);
+          }
+          this.idleDetector?.observeProgramStatus(event);
+          if (this.turnActive && this.idleDetector?.programStatusActive()) {
+            const block = this.idleDetector.programStatusBlock();
+            const waiting = block !== undefined;
+            if (waiting) this.humanWaits.add('osc7501');
+            else { if (this.humanWaits.delete('osc7501')) this.lastProgressAt = Date.now(); }
+            // Hooks remain the only producer of actionable approval items.
+            this.emitEvent({ type: 'status', data: { state: 'program_status', source: 'osc7501', programState: block ? 'blocked' : event.state, kind: block?.kind ?? event.kind, message: block?.msg ?? event.msg } });
+          }
+        }
+        data = parts.filter(part => part.type === 'data').map(part => part.text).join('');
+        if (!data) return;
+      }
       const bytes = Buffer.byteLength(data);
       if (this.refreshingScreen) {
         if (retryRefresh) return;
@@ -1316,23 +1419,6 @@ export class PtyCliDriver implements AgentDriver {
     });
     check();
 
-    // The tailer must resolve the CLI's data dir from the environment the CLI
-    // CHILD got, never the daemon's: mergedEnv strips CLAUDE_* from the child,
-    // and agent.env may relocate CODEX_HOME / CLAUDE_CONFIG_DIR / HOME. Reading
-    // the daemon's env instead watches a tree the CLI never writes to, and the
-    // turn is then reported as "no final output" while the screen shows a
-    // perfectly good answer.
-    this.transcript = createTranscriptTailer(this.adapter.id, {
-      cwd: this.cwd,
-      env: this.spawnEnv(),
-      // Claude keys its transcript directory by cwd ALONE, so two dutydeck
-      // sessions in one repo share it. Without the session id the tailer
-      // resolves by recency and picks up a sibling's transcript — the timeline
-      // then shows another session's answer, or the turn is failed as "no
-      // final output" while our own transcript sits on disk, correct and
-      // unread. Sources that cannot be session-scoped ignore this.
-      sessionId: this.sessionId,
-    });
     if (this.transcript) {
       this.transcript.onEvent(e => {
         this.noteTurnProgress(e);
@@ -1353,6 +1439,7 @@ export class PtyCliDriver implements AgentDriver {
           this.awaitingTranscriptResult = false;
           this.idleDetector?.reset();
           this.checkRenderedCompletion();
+          if (this.idleDetector?.programStatusTerminal()) this.idleDetector.fireIdle();
           if (!this.adapter.completionPattern && this.adapter.readyPattern?.test(this.snapshot?.viewportText() ?? '')) {
             this.idleDetector?.seedReadyEvidence();
           }
@@ -1361,18 +1448,51 @@ export class PtyCliDriver implements AgentDriver {
       this.transcript.onProgress?.(() => {
         if (backend !== this.backend || this.stopped || !this.turnActive) return;
         const nativeTerminal = this.transcript?.requiresTurnTerminal && this.transcript.hasTurnTerminal?.();
-        if (this.completeInputError() || (!this.awaitingTranscriptResult && !nativeTerminal)) return;
+        if (!this.transcript?.turnTerminalRevision && !this.transcript?.hasTurnTerminal?.()) this.programStatusNativeTerminalSeen = undefined;
+        this.recoverProgramStatusFromTranscript();
+        if (this.completeInputError() || (!this.awaitingTranscriptResult && !nativeTerminal && !this.idleDetector?.programStatusTerminal())) return;
         // Claude's API errors are held until completion rather than emitted
         // as model output. A newly read error must retry the same idle guard.
         this.idleDetector?.reset();
         this.checkRenderedCompletion();
+        if (this.idleDetector?.programStatusTerminal()) this.idleDetector.fireIdle();
         if (!this.adapter.completionPattern && this.adapter.readyPattern?.test(this.snapshot?.viewportText() ?? '')) {
           this.idleDetector?.seedReadyEvidence();
         }
       });
-      if (restoreTranscript) this.transcript.restore(restoreTranscript);
       this.transcript.start();
     }
+  }
+
+  private recoverProgramStatusFromTranscript(): void {
+    // Only a terminal bound to this exact native input can replace a lost OSC
+    // edge. Drain time and silence are not terminal evidence. Allow the normal
+    // OSC terminal to arrive first; any new frame cancels this recovery.
+    const eligible = () => this.turnActive && (this.turnInputConfirmed || this.transcript?.hasRecoveredInput?.() === true) && !this.activeSubmission
+      && this.programStatusBusyWatermark !== undefined
+      && this.transcript?.hasTurnTerminalAfter?.(this.programStatusBusyWatermark) === true
+      && this.programStatusNativeTerminalSeen !== (this.transcript.turnTerminalRevision?.() ?? 0)
+      && this.hookPermissions.size === 0 && !this.awaitingAnswer?.()
+      && ![...this.humanWaits].some(id => id !== 'osc7501')
+      && !this.transcript.pendingBackgroundWork?.()
+      && this.idleDetector?.programStatusActive() && !this.idleDetector.programStatusAllowsIdle();
+    if (this.programStatusRecoveryTimer || !eligible()) return;
+    const backend = this.backend, resolve = this.turnResolve;
+    this.programStatusRecoveryTimer = setTimeout(() => {
+      this.programStatusRecoveryTimer = undefined;
+      if (this.stopped || this.backend !== backend || this.turnResolve !== resolve || !eligible()) return;
+      // Consume this proof once. A newer busy edge must not be overturned by
+      // the same terminal on a later metadata poll or across an async flush.
+      this.programStatusNativeTerminalSeen = this.transcript?.turnTerminalRevision?.() ?? 0;
+      this.idleDetector!.fallbackProgramStatus('current native transcript terminal recovered a missing OSC terminal edge');
+      this.idleDetector!.fireIdle();
+    }, 1_000);
+    this.programStatusRecoveryTimer.unref();
+  }
+
+  private clearProgramStatusRecovery(): void {
+    if (this.programStatusRecoveryTimer) clearTimeout(this.programStatusRecoveryTimer);
+    this.programStatusRecoveryTimer = undefined;
   }
 
   /** Token usage the transcript recorded for this turn; ahead of `completed`, as the ACP driver does. */
@@ -1382,6 +1502,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private completeInputError(): boolean {
+    if (!this.idleDetector?.programStatusAllowsIdle()) return false;
     if (!this.turnActive || !this.turnInputConfirmed || this.interruptPending) return false;
     const error = this.transcript?.takeInputError?.();
     const cancelled = this.transcript?.takeInputCancellation?.() ?? false;
@@ -1408,6 +1529,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private clearTurnDeadline(): void {
+    this.clearProgramStatusRecovery();
     if (this.turnDeadlineTimer) clearTimeout(this.turnDeadlineTimer);
     this.turnDeadlineTimer = undefined;
   }
@@ -1415,7 +1537,10 @@ export class PtyCliDriver implements AgentDriver {
   private scheduleTurnDeadline(): void {
     const timeout = Math.round(this.agent.timeout * 1000);
     if (!Number.isFinite(timeout) || timeout <= 0) return;
-    this.clearTurnDeadline();
+    // Rescheduling inactivity is not a turn boundary: preserve an independent
+    // native-terminal recovery which may be waiting for its OSC grace period.
+    if (this.turnDeadlineTimer) clearTimeout(this.turnDeadlineTimer);
+    this.turnDeadlineTimer = undefined;
     const waiting = this.awaitingAnswer?.() || this.humanWaits.size > 0 || this.screenWaitsForHuman();
     const remaining = waiting ? timeout : Math.max(1, this.lastProgressAt + timeout - Date.now());
     this.turnDeadlineTimer = setTimeout(() => {
@@ -1482,6 +1607,8 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private teardownWiring(): void {
+    this.clearProgramStatusRecovery();
+    this.clearProgramStatusDrain();
     this.clearTurnDeadline();
     this.wiringGeneration++;
     if (this.idleDetector) {
@@ -1549,6 +1676,11 @@ export class PtyCliDriver implements AgentDriver {
     }, RAW_TERMINAL_THROTTLE_MS);
     timer.unref();
     this.rawTerminalTimer = timer;
+  }
+
+  private clearProgramStatusDrain(): void {
+    if (this.programStatusDrainTimer) clearTimeout(this.programStatusDrainTimer);
+    this.programStatusDrainTimer = undefined;
   }
 
   private clearRenderedCompletion(): void {
@@ -1786,6 +1918,7 @@ export class PtyCliDriver implements AgentDriver {
         cols: DEFAULT_COLS,
         rows: DEFAULT_ROWS,
         env: respawnEnv,
+        programStatus: this.usesProgramStatus,
       });
       if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) throw new Error('PTY respawn cancelled by lifecycle change');
     } catch (error) {

@@ -32,6 +32,8 @@ Dutydeck 源码中包含或派生自以下第三方开源项目的代码与资�
 
   - `packages/cli-adapters/src/fixtures/traex-startup/0.209.1-footers.json`：从同一 `81f97825126938f5ad50d5354062eb937bcb6768` 的 `test/fixtures/traex-tape/two-turns.json` 渲染并脱敏提取 12 个 TraeX 0.209.1 状态切换视口（10150 字节），未保留完整 549-chunk 录像；按下列 MIT 许可使用。
 
+  2026-10-17：`packages/session-backends/src/program-status-{parser,probe-relay,relay}.ts` 与 `packages/pty-driver/src/idle-detector.ts` 的 OSC 7501 分帧、pane 内握手和权威状态逻辑参考并适配自 botmux（握手中继 commit `4dfd7c0de`），按下列 MIT 许可使用。
+
   原生终态、TraeX 分段与 canonical 适配另参考 `bf6507dd4`、`0f332b75a`、`20e5f32cf`、`9308dbc90`；上述既有 transcript 派生范围继续适用。终端就绪与提交语义修复参考 `3c5371bef90a1f52633c2d632760ed01c171c28b`、`69ed3c2dde5ce8714ff529f4de50da68d943fead`、`0623210c2bdc9b5bb351bd9f1334925c0ec8099c`、`0064e4e6a`，没有复制官方 Codex/Cursor 发行源码。问答、图片提取、投递保护、timer、模型探测和子任务诊断修复按 Dutydeck 现有接口独立实现，相关上游设计参考不表示复制其全部实现。
 
 - **版权与许可证全文**:

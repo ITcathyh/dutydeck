@@ -1,5 +1,7 @@
 # Dutydeck
 
+Claude Code terminal sessions use OSC 7501 signals for busy, approval and completion detection, with automatic screen detection fallback and recovery when valid signals resume. A native terminal bound to the current input and written after the latest busy signal, including in a turn recovered after daemon restart, or a resolved approval hook can release stale busy status after a lost signal.
+
 <p align="center">
   <strong>Local-First AI Agent Engineering Workbench & Lark Bridge</strong><br>
   <em>Connect coding agents running on your machine (Claude Code, Codex, CLI) to Lark and a Web workbench</em>

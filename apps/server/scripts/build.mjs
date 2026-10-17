@@ -51,6 +51,16 @@ await build({
   sourcemap: false,
   plugins: workspacePlugins
 });
+// Pane-resident OSC handshake relay must survive bundling and npm packaging.
+await build({
+  entryPoints: [resolve(workspaceRoot, 'packages/session-backends/src/program-status-relay.ts')],
+  outfile: resolve(serverRoot, 'dist/program-status-relay.js'),
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  target: 'node22',
+  packages: 'external',
+});
 // Bundle the analyzer and its dependencies so it can run with an empty PATH
 // from any cwd, without workspace packages or TypeScript loaders in production.
 await build({

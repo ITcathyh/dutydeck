@@ -18,3 +18,5 @@ export {
 } from './owned-tmux.js';
 
 export { HerdrBackend, herdrControlEnvironment, type HerdrBackendOptions } from './herdr-backend.js';
+
+export { ProgramStatusFramingStream, type ProgramStatusEvent } from './program-status-parser.js';

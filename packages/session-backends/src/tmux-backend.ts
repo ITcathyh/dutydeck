@@ -1,3 +1,4 @@
+import { programStatusCommand } from './program-status-launch.js';
 /**
  * TmuxBackend — session backend backed by a detached tmux session.
  *
@@ -300,7 +301,7 @@ export class TmuxBackend implements SessionBackend {
       // tmux preserves the bootstrap pane's PATH across respawn (even with
       // set-environment/-e). Override it after shell startup to prevent old
       // session identity wrappers from returning to the CLI's search path.
-      const launchLine = `${childEnvironment.PATH === undefined ? '' : `PATH=${shellescape(childEnvironment.PATH)} `}${['exec', bin, ...args].map(shellescape).join(' ')}`;
+      const launchLine = `${childEnvironment.PATH === undefined ? '' : `PATH=${shellescape(childEnvironment.PATH)} `}${['exec', ...programStatusCommand(bin, args, opts.programStatus)].map(shellescape).join(' ')}`;
       (await runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', opts.cwd, launchLine]));
       await this.clearSessionEnvironment(Object.keys(childEnvironment));
       check();

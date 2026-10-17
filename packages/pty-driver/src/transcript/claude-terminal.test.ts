@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from 'vitest';
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ClaudeTranscriptTailer } from './claude.js';
@@ -45,4 +45,37 @@ it('uses the recovery cursor input boundary instead of old terminal history', as
   expect(source.hasTurnTerminal()).toBe(false);
   await append({ ...final, uuid: 'late-old', parentUuid: 'old-input' }); expect(source.hasTurnTerminal()).toBe(false);
   await append(input, final); expect(source.hasTurnTerminal()).toBe(true);
+});
+
+it('versions bound terminal identities without treating metadata or replay as new terminals', async () => {
+  const { append } = await harness(); source.start(); await source.flush();
+  const receipt = source.waitForInput('exact prompt', new AbortController().signal); await append(input); await receipt;
+  expect(source.turnTerminalRevision()).toBe(0);
+  await append(final); expect(source.turnTerminalRevision()).toBe(1);
+  await append({ type: 'system', subtype: 'metadata', parentUuid: 'final' });
+  expect(source.turnTerminalRevision()).toBe(1);
+  await append({ ...final, uuid: 'second', parentUuid: 'final' }); expect(source.turnTerminalRevision()).toBe(2);
+  await append(final); expect(source.turnTerminalRevision()).toBe(2);
+  await append({ type: 'assistant', uuid: 'empty', parentUuid: 'second', message: { stop_reason: null, content: [] } },
+    { ...final, uuid: 'third', parentUuid: 'empty' });
+  expect(source.hasTurnTerminal()).toBe(true); expect(source.turnTerminalRevision()).toBe(3);
+  await append({ ...final, uuid: 'side', isSidechain: true }); expect(source.turnTerminalRevision()).toBe(3);
+});
+
+it('rejects a terminal in a replacement file even at a later byte offset', async () => {
+  const { path, append } = await harness(); source.start(); await source.flush();
+  const receipt = source.waitForInput('exact prompt', new AbortController().signal); await append(input); await receipt;
+  const watermark = source.captureWatermark()!;
+  renameSync(path, path + '.old'); writeFileSync(path, line(input));
+  await append(final);
+  expect(source.hasTurnTerminal()).toBe(true);
+  expect(source.hasTurnTerminalAfter(watermark)).toBe(false);
+});
+it('invalidates a busy watermark after detected transcript truncation', async () => {
+  const { path, append } = await harness(); source.start(); await source.flush();
+  const receipt = source.waitForInput('exact prompt', new AbortController().signal); await append(input); await receipt;
+  const watermark = source.captureWatermark()!;
+  writeFileSync(path, ''); await source.flush();
+  await append(input, final);
+  expect(source.hasTurnTerminalAfter(watermark)).toBe(false);
 });

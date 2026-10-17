@@ -4,6 +4,8 @@
  */
 
 export interface SpawnOptions {
+  /** Enable OSC 7501 negotiation for a known supporting CLI. */
+  programStatus?: boolean;
   cwd: string;
   cols: number;
   rows: number;

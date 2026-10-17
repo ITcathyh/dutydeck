@@ -10,6 +10,7 @@
   },
   "files": [
     "dist/cli.js",
+    "dist/program-status-relay.js",
     "dist/agents",
     "dist/assets",
     "dist/builtin-plugins",

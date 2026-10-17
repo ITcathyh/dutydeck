@@ -234,6 +234,7 @@ export class DutydeckRuntime {
   private readonly localResources: LocalDriverLedger;
   private readonly configurations: DriverConfigurationLedger;
   private readonly publisher: PersistentEventPublisher;
+  private readonly oscPermissionWaits = new Set<string>();
   private readonly completedTurns = new Set<string>();
   private readonly attemptTools = new Map<string, AttemptTools>();
   private readonly sendWaiters = new Set<() => void>();
@@ -799,7 +800,7 @@ export class DutydeckRuntime {
           this.attempts.delete(session.id); this.activeTasks.delete(session.id); this.activeTurns.delete(session.id);
         }
         token.revoke(); this.completedTurns.delete(attempt.attemptId); this.driverStopReasons.delete(attempt.attemptId);
-        this.turnErrors.delete(attempt.attemptId); this.attemptTools.delete(attempt.attemptId);
+        this.turnErrors.delete(attempt.attemptId); this.attemptTools.delete(attempt.attemptId); this.oscPermissionWaits.delete(attempt.attemptId);
         if (attached && !this.shuttingDown) await this.scoped(session.id, async () => {
           await this.projectQueue(session.id); this.queueBlocked.delete(session.id); this.scheduleQueue(session.id);
         });
@@ -1624,6 +1625,7 @@ export class DutydeckRuntime {
     this.touch(session.id);
     if (event.type === 'completed') {
       if (scope && isAttemptRef(scope)) {
+        this.oscPermissionWaits.delete(scope.attemptId);
         this.completedTurns.add(scope.attemptId);
         if (typeof event.data?.stopReason === 'string') this.driverStopReasons.set(scope.attemptId, event.data.stopReason);
       }
@@ -1690,10 +1692,10 @@ export class DutydeckRuntime {
     }
     if (event.type === 'tool_call' || event.type === 'tool_result') {
       if (!rememberTool(stored)) return;
-      if (scope && isAttemptRef(scope)) await this.saveState(session, event.type === 'tool_result' ? 'thinking' : 'running_tool');
+      if (scope && isAttemptRef(scope)) await this.saveState(session, (this.oscPermissionWaits.has(scope.attemptId) || this.permissionsForSession(session.id).length) ? 'waiting_for_permission' : event.type === 'tool_result' ? 'thinking' : 'running_tool');
       await this.artifact('saveToolCall', session.id, data).catch(() => {});
       if (tools) tools.calls.get(data.id)!.projected = true;
-    } else if (event.type === 'thinking' && scope && isAttemptRef(scope)) await this.saveState(session, 'thinking');
+    } else if (event.type === 'thinking' && scope && isAttemptRef(scope)) await this.saveState(session, (this.oscPermissionWaits.has(scope.attemptId) || this.permissionsForSession(session.id).length) ? 'waiting_for_permission' : 'thinking');
     else if (event.type === 'permission_request' && scope && isAttemptRef(scope)) {
       const key = this.permissionKey(session.id, data.id);
       if ((data.status ?? 'pending') === 'pending') {
@@ -1701,6 +1703,15 @@ export class DutydeckRuntime {
         await this.saveState(session, 'waiting_for_permission');
       } else { this.permissions.delete(key); this.permissionResolutions.delete(key); }
       await this.artifact('savePermission', session.id, data).catch(() => {});
+    } else if (event.type === 'status' && scope && isAttemptRef(scope)
+      && ((data.state === 'program_status' || data.state === 'program_status_fallback') && data.source === 'osc7501' || data.state === 'turn_timeout')) {
+      if (data.state === 'program_status' && data.programState === 'blocked' && data.kind === 'permission') {
+        this.oscPermissionWaits.add(scope.attemptId);
+        await this.saveState(session, 'waiting_for_permission');
+      } else {
+        const wasWaiting = this.oscPermissionWaits.delete(scope.attemptId);
+        if ((wasWaiting || data.programState === 'working') && !this.permissionsForSession(session.id).length) await this.saveState(session, 'thinking');
+      }
     } else if (event.type === 'error') {
       if (scope && isAttemptRef(scope)) this.turnErrors.set(scope.attemptId, data.message);
       await this.noteAgentFailure(session.agentId, data);
@@ -2436,7 +2447,7 @@ export class DutydeckRuntime {
   private async executeTask(id: string, task: TaskRecord) {
     const token = this.mutations.current()!;
     const ref = this.attemptRefs.get(token)!;
-    this.activeTurns.add(id); this.completedTurns.delete(ref.attemptId);
+    this.activeTurns.add(id); this.completedTurns.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId);
     let agentId: string | undefined;
     let settledSession: Session | undefined;
     let observed: Session | undefined;
@@ -2544,7 +2555,7 @@ export class DutydeckRuntime {
         token.revoke(); this.touch(id);
       }
       this.completedTurns.delete(ref.attemptId); this.driverStopReasons.delete(ref.attemptId); this.turnErrors.delete(ref.attemptId);
-      this.attemptTools.delete(ref.attemptId);
+      this.attemptTools.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId);
     }
     const settled = this.publicTask(this.repos.execution.getTaskExecution(task.id)?.task ?? task);
     if (this.options.onTaskSettled && settledSession && ['completed', 'failed', 'interrupted', 'cancelled'].includes(settled.status)) {

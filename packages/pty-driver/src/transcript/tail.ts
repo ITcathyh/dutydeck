@@ -16,7 +16,7 @@
  *    from byte 0 (defensive; Claude/Codex transcripts are append-only).
  *  - Transient fs errors never kill the poll loop.
  */
-import { closeSync, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { normalizeInputText } from './input-receipt.js';
@@ -26,6 +26,15 @@ import { normalizeInputText } from './input-receipt.js';
 export interface TranscriptCursor {
   path?: string;
   offset: number;
+}
+
+/** A physical file position; offsets are comparable only within the same file epoch. */
+export interface TranscriptPosition {
+  path: string;
+  offset: number;
+  dev: number;
+  ino: number;
+  epoch: number;
 }
 
 /** A live source of normalized driver events, backed by a CLI transcript. */
@@ -56,6 +65,15 @@ export interface TranscriptEventSource {
   /** Native terminal marker belonging to the current exact input receipt or
    * recovery cursor. Output text alone is not terminal evidence. */
   hasTurnTerminal?(): boolean;
+  /** Advances only for fresh terminals bound to this input, not metadata or
+   * replayed terminal identities. Detects continuations read in a single poll. */
+  turnTerminalRevision?(): number;
+  /** Synchronous disk waterline, including bytes not yet polled. */
+  captureWatermark?(): TranscriptPosition | undefined;
+  /** True only for a bound terminal starting after that physical waterline. */
+  hasTurnTerminalAfter?(watermark: TranscriptPosition): boolean;
+  /** A native business input was bound after restoring the durable cursor. */
+  hasRecoveredInput?(): boolean;
   /** This dialect always records native terminals; screen silence cannot replace one. */
   readonly requiresTurnTerminal?: boolean;
   /** A native cancellation bound to the same exact input as takeInputError. */
@@ -73,7 +91,7 @@ export interface JsonlTailerOptions {
    *  found) and, when watchForSwitch is on, on every subsequent tick. */
   resolvePath: (currentPath?: string) => string | undefined;
   /** Map one parsed JSONL entry to zero or more normalized events. */
-  mapEntry: (entry: TranscriptEntry, baseline?: boolean) => NormalizedDriverEvent[] | undefined;
+  mapEntry: (entry: TranscriptEntry, baseline?: boolean, position?: TranscriptPosition) => NormalizedDriverEvent[] | undefined;
   resetMapping?: () => void;
   /** Poll interval in ms. Default 300. */
   pollIntervalMs?: number;
@@ -100,7 +118,7 @@ const yieldLoop = () => new Promise<void>(resolve => setImmediate(resolve));
 
 export class JsonlTailer implements TranscriptEventSource {
   private readonly resolvePath: (currentPath?: string) => string | undefined;
-  private readonly mapEntry: (entry: TranscriptEntry, baseline?: boolean) => NormalizedDriverEvent[] | undefined;
+  private readonly mapEntry: (entry: TranscriptEntry, baseline?: boolean, position?: TranscriptPosition) => NormalizedDriverEvent[] | undefined;
   private readonly resetMapping?: () => void;
   private readonly pollIntervalMs: number;
   private readonly watchForSwitch: boolean;
@@ -119,6 +137,8 @@ export class JsonlTailer implements TranscriptEventSource {
   /** Bytes read after `pendingStartOffset` that do not yet end in a newline. */
   private pending: Buffer[] = [];
   private pendingBytes = 0;
+  private pendingPosition: TranscriptPosition | undefined;
+  private fileEpoch = 0;
   private generation = 0;
   private work: Promise<void> = Promise.resolve();
   private polling = false;
@@ -208,6 +228,15 @@ export class JsonlTailer implements TranscriptEventSource {
       : { offset: 0 };
   }
 
+  captureWatermark(): TranscriptPosition | undefined {
+    const path = this.currentPath && !this.watchForSwitch ? this.currentPath : this.resolvePath(this.currentPath);
+    if (!path) return undefined;
+    try {
+      const { size, dev, ino } = statSync(path);
+      return { path, offset: size, dev, ino, epoch: this.fileEpoch };
+    } catch { return undefined; }
+  }
+
   restore(cursor: TranscriptCursor): void {
     if (this.timer) throw new Error('Transcript cursor can only be restored before start()');
     if (!cursor || !Number.isSafeInteger(cursor.offset) || cursor.offset < 0
@@ -230,7 +259,7 @@ export class JsonlTailer implements TranscriptEventSource {
     }
     this.currentPath = undefined;
     this.offset = 0;
-    this.pending = []; this.pendingBytes = 0;
+    this.pending = []; this.pendingBytes = 0; this.pendingPosition = undefined;
     this.pendingStartOffset = 0;
     this.completedOffset = 0;
     this.pendingBirth = false;
@@ -250,7 +279,7 @@ export class JsonlTailer implements TranscriptEventSource {
     }
     this.currentPath = undefined;
     this.offset = 0;
-    this.pending = []; this.pendingBytes = 0;
+    this.pending = []; this.pendingBytes = 0; this.pendingPosition = undefined;
     this.pendingStartOffset = 0;
     this.completedOffset = 0;
     this.pendingBirth = false;
@@ -295,7 +324,7 @@ export class JsonlTailer implements TranscriptEventSource {
           this.offset = restoreOffset;
           this.completedOffset = restoreOffset;
           this.pendingStartOffset = restoreOffset;
-          this.pending = []; this.pendingBytes = 0;
+          this.pending = []; this.pendingBytes = 0; this.pendingPosition = undefined;
           this.pendingBirth = false;
           this.restoreCursor = undefined;
           // A recovered tailer must replay bytes appended while it was down
@@ -313,7 +342,7 @@ export class JsonlTailer implements TranscriptEventSource {
         if (this.pendingBirth) {
           this.completedOffset = 0;
           this.pendingStartOffset = 0;
-          this.pending = []; this.pendingBytes = 0;
+          this.pending = []; this.pendingBytes = 0; this.pendingPosition = undefined;
         } else {
           // EOF is not necessarily a JSONL boundary: a CLI can be in the
           // middle of writing a multibyte character or its trailing newline.
@@ -324,7 +353,7 @@ export class JsonlTailer implements TranscriptEventSource {
           if (generation !== this.generation) return;
           this.completedOffset = partial.offset;
           this.pendingStartOffset = partial.offset;
-          this.pending = partial.bytes;
+          this.pending = partial.bytes; this.pendingPosition = undefined;
           this.pendingBytes = size - partial.offset;
         }
         const newlyCreated = this.pendingBirth;
@@ -340,7 +369,7 @@ export class JsonlTailer implements TranscriptEventSource {
             if (generation !== this.generation || this.pendingBytes || waterline === undefined) return;
             this.currentPath = path;
             this.offset = this.completedOffset = this.pendingStartOffset = 0;
-            this.pending = []; this.pendingBytes = 0;
+            this.pending = []; this.pendingBytes = 0; this.pendingPosition = undefined;
             for (const receipt of this.receipts) { receipt.path = path; receipt.offset = 0; }
             await this.drain(waterline, generation);
             return;
@@ -350,7 +379,7 @@ export class JsonlTailer implements TranscriptEventSource {
           this.currentPath = path;
           if (this.deduplicateTools) {
             this.offset = this.completedOffset = this.pendingStartOffset = 0;
-            this.pending = []; this.pendingBytes = 0;
+            this.pending = []; this.pendingBytes = 0; this.pendingPosition = undefined;
             await this.drain(waterline ?? 0, generation, true);
             return;
           }
@@ -358,7 +387,7 @@ export class JsonlTailer implements TranscriptEventSource {
           const partial = waterline === undefined ? { offset: 0, bytes: [] } : await this.trailingPartial(path, waterline, generation);
           if (generation !== this.generation) return;
           this.completedOffset = this.pendingStartOffset = partial.offset;
-          this.pending = partial.bytes;
+          this.pending = partial.bytes; this.pendingPosition = undefined;
           this.pendingBytes = this.offset - partial.offset;
           return;
         }
@@ -379,16 +408,18 @@ export class JsonlTailer implements TranscriptEventSource {
       throw new Error('Transcript file became unavailable before its drain completed');
     }
     if (size < this.offset) {
+      this.fileEpoch++;
       this.toolEvents.clear();
       this.resetMapping?.();
       this.offset = this.completedOffset = this.pendingStartOffset = 0;
-      this.pending = []; this.pendingBytes = 0;
+      this.pending = []; this.pendingBytes = 0; this.pendingPosition = undefined;
     }
     if (size === this.offset) return;
     const fd = openSync(path, 'r');
     let budget = 0;
     let started = performance.now();
     try {
+      const { dev, ino } = fstatSync(fd);
       while (this.offset < size && generation === this.generation) {
         const buf = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, size - this.offset));
         const bytesRead = readSync(fd, buf, 0, buf.length, this.offset);
@@ -397,15 +428,18 @@ export class JsonlTailer implements TranscriptEventSource {
         while (start < bytesRead) {
           const newline = buf.indexOf(0x0a, start);
           const end = newline >= 0 && newline < bytesRead ? newline : bytesRead;
+          if (this.pendingBytes === 0) this.pendingPosition = { path, offset: this.pendingStartOffset, dev, ino, epoch: this.fileEpoch };
+          else if (this.pendingPosition?.dev !== dev || this.pendingPosition?.ino !== ino) this.pendingPosition = undefined;
           this.appendSegment(buf.subarray(start, end));
           this.offset += end - start;
           if (end < bytesRead) {
             const lineOffset = this.pendingStartOffset;
+            const position = this.pendingPosition;
             const raw = Buffer.concat(this.pending, this.pendingBytes).toString('utf8');
             this.offset++;
-            this.pending = []; this.pendingBytes = 0;
+            this.pending = []; this.pendingBytes = 0; this.pendingPosition = undefined;
             this.completedOffset = this.pendingStartOffset = this.offset;
-            this.handleLine(raw, lineOffset, baseline);
+            this.handleLine(raw, lineOffset, baseline, position);
           }
           start = end + 1;
         }
@@ -434,7 +468,7 @@ export class JsonlTailer implements TranscriptEventSource {
     throw this.failure;
   }
 
-  private handleLine(rawLine: string, lineOffset: number, baseline = false): void {
+  private handleLine(rawLine: string, lineOffset: number, baseline = false, position?: TranscriptPosition): void {
     const line = rawLine.trim();
     if (!line) return;
     let entry: unknown;
@@ -464,7 +498,7 @@ export class JsonlTailer implements TranscriptEventSource {
     }
     let events: NormalizedDriverEvent[] | undefined;
     try {
-      events = this.mapEntry(entry as TranscriptEntry, baseline);
+      events = this.mapEntry(entry as TranscriptEntry, baseline, position);
     } catch {
       return; // A mapper hiccup must not kill the loop.
     }
