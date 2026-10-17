@@ -646,7 +646,8 @@ describe('恢复已关闭会话与并行分身', () => {
     const id = await h.sessionId(); const before = await h.runtime.getTasks(id); const source = await h.runtime.getSession(id);
     await h.coordinator.handle(event('om_fork', '/fork 检查另一种实现'), h.config);
     expect(h.markdownOf(h.lastReceipt())).toContain('已在新话题开分身');
-    expect(await h.runtime.getSession(id)).toEqual(source);
+    // 原会话还在执行，updatedAt 会随事件变化；其余字段（状态、绑定、配置）必须不变。
+    expect({ ...(await h.runtime.getSession(id)), updatedAt: undefined }).toEqual({ ...source, updatedAt: undefined });
     expect(await h.runtime.getTasks(id)).toEqual(before);
     await vi.waitFor(async () => expect(await h.runtime.listSessions()).toHaveLength(2));
     const child = (await h.runtime.listSessions()).find(s => s.id !== id)!;
@@ -735,7 +736,7 @@ describe('恢复已关闭会话与并行分身', () => {
     await h.coordinator.handle(event('om_fork', '/fork 并行检查'), h.config);
     expect(h.markdownOf(h.lastReceipt())).toContain('新话题已创建，但分身未启动');
     expect(h.markdownOf(h.lastReceipt())).toContain('https://example.test/message/');
-    expect(await h.runtime.getSession(id)).toEqual(source);
+    expect({ ...(await h.runtime.getSession(id)), updatedAt: undefined }).toEqual({ ...source, updatedAt: undefined });
     expect(await h.runtime.getTasks(id)).toEqual(tasks);
     const child = (await h.runtime.listSessions()).find(s => s.id !== id)!;
     expect(child.state).toBe('failed'); expect(await h.runtime.getTasks(child.id)).toHaveLength(0);
