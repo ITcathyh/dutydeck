@@ -21,7 +21,7 @@ import {
 
 const fullCapabilities: LarkCommandCapabilities = {
   getSession: true, send: true, dispatch: true, interrupt: true, cancelQueued: true,
-  stop: true, getTasks: true, listAgents: true, listSessions: true
+  resume: true, stop: true, getTasks: true, listAgents: true, listSessions: true
 };
 
 /** 含全部可选能力（work/schedule/ci/tasks/answer/approval），12 条命令全部可用。 */
@@ -129,7 +129,7 @@ describe('注册表与能力门（诚实表达能力）', () => {
 
   it('全能力时列出全部命令', () => {
     expect(listLarkCommands(fullCapabilities).map(item => item.name))
-      .toEqual(['help', 'repair', 'status', 'cancel', 'retry', 'new', 'agents', 'queue']);
+      .toEqual(['help', 'repair', 'status', 'cancel', 'retry', 'new', 'resume', 'fork', 'agents', 'queue']);
   });
 
   it('缺少 interrupt 与 cancelQueued 时 /cancel 从 /help 消失并路由为 unavailable，不产生 intent', () => {
@@ -376,13 +376,13 @@ describe('/help 渲染', () => {
 
   it('分页有界：每页只渲染 pageSize 条，页码可越界夹取', () => {
     const first = renderLarkCommandHelp(fullCapabilities, { page: 1, pageSize: 2 });
-    expect(first.totalPages).toBe(4);
+    expect(first.totalPages).toBe(5);
     expect(first.page).toBe(1);
     expect(first.text).toContain('/help');
     expect(first.text).not.toContain('/retry');
 
     const last = renderLarkCommandHelp(fullCapabilities, { page: 99, pageSize: 2 });
-    expect(last.page).toBe(4);
+    expect(last.page).toBe(5);
     const zero = renderLarkCommandHelp(fullCapabilities, { page: 0, pageSize: 2 });
     expect(zero.page).toBe(1);
     const negative = renderLarkCommandHelp(fullCapabilities, { page: -5, pageSize: 0 });
@@ -416,7 +416,7 @@ describe('/help 渲染', () => {
     const route = routeLarkCommand('/help 2', context({ helpPageSize: 2 }));
     expect(route.kind).toBe('reply');
     if (route.kind !== 'reply') throw new Error('unreachable');
-    expect(route.text).toContain('第 2/4 页');
+    expect(route.text).toContain('第 2/5 页');
     for (const element of route.elements.filter(item => item.tag === 'markdown')) {
       expect(element.tag).toBe('markdown');
     }
@@ -425,7 +425,7 @@ describe('/help 渲染', () => {
   it('非数字页码退回第 1 页，不抛异常', () => {
     const route = routeLarkCommand('/help abc', context({ helpPageSize: 2 }));
     expect(route.kind).toBe('reply');
-    expect(route.kind === 'reply' && route.text).toContain('第 1/4 页');
+    expect(route.kind === 'reply' && route.text).toContain('第 1/5 页');
   });
 
   it('没有任何可用命令时给出诚实的空态说明', () => {
@@ -523,7 +523,7 @@ describe('/help 上一页/下一页（S2）', () => {
 
   it('首页只显示下一页，回调 value 形态为 {dutydeck_help_page, page:String(n)}', () => {
     const help = renderLarkCommandHelp(fullCapabilities, { page: 1, pageSize: 2 });
-    expect(help.totalPages).toBe(4);
+    expect(help.totalPages).toBe(5);
     const { nav, buttons } = navigation(help);
     expect(nav).toBeDefined();
     expect(buttons).toEqual([
@@ -532,10 +532,10 @@ describe('/help 上一页/下一页（S2）', () => {
   });
 
   it('末页只显示上一页，指回 totalPages-1', () => {
-    const help = renderLarkCommandHelp(fullCapabilities, { page: 4, pageSize: 2 });
+    const help = renderLarkCommandHelp(fullCapabilities, { page: 5, pageSize: 2 });
     const { buttons } = navigation(help);
     expect(buttons).toEqual([
-      { id: 'command_help_prev', label: '上一页', value: { dutydeck_help_page: '1', page: '3' } }
+      { id: 'command_help_prev', label: '上一页', value: { dutydeck_help_page: '1', page: '4' } }
     ]);
   });
 
@@ -548,7 +548,7 @@ describe('/help 上一页/下一页（S2）', () => {
 
   it('渲染侧越界夹取：超出末页时停在末页且没有下一页', () => {
     const help = renderLarkCommandHelp(fullCapabilities, { page: 99, pageSize: 2 });
-    expect(help.page).toBe(4);
+    expect(help.page).toBe(5);
     const { buttons } = navigation(help);
     expect(buttons.map(button => button.id)).toEqual(['command_help_prev']);
   });
@@ -593,7 +593,7 @@ describe('parseLarkHelpPageValue 宽进严出（S2）', () => {
     const parsed = parseLarkHelpPageValue({ dutydeck_help_page: '1', page: '99' })!;
     expect(parsed).toEqual({ page: 99 });
     const help = renderLarkCommandHelp(fullCapabilities, { page: parsed.page, pageSize: 2 });
-    expect(help.page).toBe(4);
+    expect(help.page).toBe(5);
   });
 });
 
@@ -643,8 +643,8 @@ describe('未知命令「你是不是想用」建议（S3）', () => {
     expect(suggestLarkCommand('approev', allCapabilities)).toContain('approve');
     expect(suggestLarkCommand('approev', capabilities({ approval: false }))).toBeUndefined();
     // 可选能力全缺时 work/schedule/ci/tasks 都不提示。
-    expect(suggestLarkCommand('wrk', fullCapabilities)).toBeUndefined();
-    expect(suggestLarkCommand('wrk', allCapabilities)).toEqual(['work']);
+    expect(suggestLarkCommand('wrk', fullCapabilities)).toEqual(['fork']);
+    expect(suggestLarkCommand('wrk', allCapabilities)).toEqual(['work', 'fork']);
   });
 
   it('路由层：未知命令带 suggestion 文案，但 promptText 原样透传不被污染', () => {
@@ -694,7 +694,7 @@ describe('控制命令明确拼错只纠正，不执行或自动改写', () => {
   it('控制能力缺失也不能把取消笔误变成新任务', () => {
     expect(routeLarkCommand('/cancle', context({ capabilities: capabilities({ interrupt: false, cancelQueued: false, stop: false }) }))).toMatchObject({ kind: 'correction' });
   });
-  it.each(['/resume', '/usr/bin/bash', '/tmp', '/model', '/review'])('%s 继续交给 CLI', text => {
+  it.each(['/usr/bin/bash', '/tmp', '/model', '/review'])('%s 继续交给 CLI', text => {
     expect(['unknown_command', 'not_a_command']).toContain(routeLarkCommand(text, context()).kind);
   });
 });
@@ -755,4 +755,10 @@ describe('/remember summary and the group memory scope', () => {
     expect(summary).toContain('群聊的记忆范围按 bot 配置：各群共享或按群隔离');
     expect(summary).not.toContain('群聊里各群共享');
   });
+});
+
+it('resume/fork 走内建命令，并按真实运行时能力停用', () => {
+  for (const command of ['/resume', '/fork 任务']) expect(routeLarkCommand(command, context()).kind).toBe('intent');
+  expect(routeLarkCommand('/resume', context({ capabilities: capabilities({ resume: false }) })).kind).toBe('unavailable');
+  expect(routeLarkCommand('/fork', context({ capabilities: capabilities({ getTasks: false }) })).kind).toBe('unavailable');
 });

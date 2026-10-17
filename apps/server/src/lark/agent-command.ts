@@ -90,6 +90,8 @@ const workspace = z.enum(['shared', 'worktree'], { errorMap: () => ({ message: '
  * 参数名是命令行上的写法，报错时原样指给 Agent。
  */
 const actions = {
+  'session.resume': z.object({ id: word.optional() }).strict(),
+  'session.fork': z.object({ agent: word.optional(), model: word.optional(), effort: word.optional(), cwd: text().optional(), workspace: workspace.optional(), task: text().optional() }).strict(),
   'session.new': z.object({ agent: word.optional(), model: word.optional(), effort: word.optional(), cwd: text().optional(), workspace: workspace.optional(),
     handoff: z.boolean().optional(), note: text().optional(), task: text().optional() }).strict(),
   retry: z.object({}).strict(),
@@ -136,6 +138,11 @@ export function agentActionCommand(action: string, input: unknown): { command: s
   }
   const p = parsed.data as Record<string, any>;
   switch (action as AgentActionName) {
+    case 'session.resume': return { command: p.id ? `/resume ${p.id}` : '/resume' };
+    case 'session.fork': {
+      const flags = (['agent', 'cwd', 'workspace', 'model', 'effort'] as const).filter(key => p[key] !== undefined).map(key => `--${key} ${quoted(`--${key}`, p[key])}`);
+      return { command: ['/fork', ...flags, '--', p.task ?? '继续原会话的任务'].join(' ') };
+    }
     case 'session.new': {
       const flags = (['agent', 'cwd', 'workspace', 'model', 'effort'] as const).filter(key => p[key] !== undefined)
         .map(key => `--${key} ${quoted(`--${key}`, p[key])}`);

@@ -17,7 +17,7 @@
  * Run: npx vitest run packages/pty-driver/src/session-id/session-id.test.ts
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
@@ -130,6 +130,19 @@ describe('claude-code session id lookup', () => {
     expect(resolveCliSessionId('claude-code', { sessionId: OUR_SESSION, cwd })).toBe(OUR_UUID);
   });
 
+  it('a native fork can find its own marker after a large inherited transcript', () => {
+    const configDir = makeTempDir('claude-fork-cfg'); const cwd = makeTempDir('claude-fork-cwd');
+    setEnv('CLAUDE_CONFIG_DIR', configDir);
+    const projectDir = claudeProject(configDir, cwd);
+    writeJsonl(join(projectDir, `${OUR_UUID}.jsonl`), [
+      ...claudeTranscript(OUR_UUID, firstPrompt(OTHER_SESSION, 'inherited source')),
+      { type: 'assistant', message: { role: 'assistant', content: 'x'.repeat(300_000) } },
+      ...claudeTranscript(OUR_UUID, firstPrompt(OUR_SESSION, 'fork first turn')),
+      { type: 'assistant', message: { role: 'assistant', content: 'y'.repeat(300_000) } },
+    ]);
+    expect(resolveCliSessionId('claude-code', { sessionId: OUR_SESSION, cwd, requireMarker: true })).toBe(OUR_UUID);
+  });
+
   it('uses the pinned file for a work-item step whose session id is not a UUID', () => {
     const configDir = makeTempDir('claude-cfg');
     const cwd = makeTempDir('claude-cwd');
@@ -154,9 +167,12 @@ describe('claude-code session id lookup', () => {
     // Decoy: same cwd, DIFFERENT dutydeck session, written last so a
     // newest-wins resolver would pick it.
     writeJsonl(join(projectDir, `${decoyCliId}.jsonl`),
-      claudeTranscript(decoyCliId, firstPrompt(OTHER_SESSION, 'do their work')));
+      claudeTranscript(decoyCliId, firstPrompt(OTHER_SESSION, `Handoff from ${OUR_SESSION}`)));
+    utimesSync(join(projectDir, `${ourCliId}.jsonl`), 1, 1);
+    utimesSync(join(projectDir, `${decoyCliId}.jsonl`), 2, 2);
 
     expect(resolveCliSessionId('claude-code', { sessionId: OUR_SESSION, cwd })).toBe(ourCliId);
+    expect(resolveCliSessionId('claude-code', { sessionId: OUR_SESSION, cwd, requireMarker: true })).toBe(ourCliId);
     expect(resolveCliSessionId('claude-code', { sessionId: OTHER_SESSION, cwd })).toBe(decoyCliId);
   });
 
@@ -280,6 +296,17 @@ describe.each([
     expect(resolveCliSessionId(adapter, { sessionId: OTHER_SESSION, cwd })).toBe(decoyCliId);
   });
 
+  it('a fork handoff mentioning the parent id cannot hijack its native history lookup', () => {
+    const { root, cwd } = makeHome();
+    writeJsonl(join(root, 'history.jsonl'), [
+      { session_id: ourCliId, ts: 1, text: firstPrompt(OUR_SESSION, 'original') },
+      { session_id: decoyCliId, ts: 2, text: firstPrompt(OTHER_SESSION, `Handoff from ${OUR_SESSION}`) },
+    ]);
+    expect(resolveCliSessionId(adapter, { sessionId: OUR_SESSION, cwd })).toBe(ourCliId);
+    expect(resolveCliSessionId(adapter, { sessionId: OUR_SESSION, cwd, requireMarker: true })).toBe(ourCliId);
+    expect(resolveCliSessionId(adapter, { sessionId: OTHER_SESSION, cwd })).toBe(decoyCliId);
+  });
+
   it('prefers the newest history line when one session carries the marker twice', () => {
     const { root, cwd } = makeHome();
     const resumedId = '01a02e6e-aaaa-bbbb-cccc-dddddddddddd';
@@ -298,6 +325,18 @@ describe.each([
     writeRollout(dayDir, { sessionId: ourCliId, cwd, prompt: firstPrompt(OUR_SESSION, 'ours') });
 
     expect(resolveCliSessionId(adapter, { sessionId: OUR_SESSION, cwd })).toBe(ourCliId);
+  });
+
+  it('a copied rollout in a worktree cannot hijack the source and finds its own tail marker', () => {
+    const { root, cwd } = makeHome(); const childCwd = makeTempDir(`${adapter}-fork-cwd`); const dayDir = codexDayDir(root);
+    writeRollout(dayDir, { sessionId: ourCliId, cwd, prompt: firstPrompt(OUR_SESSION, 'source') });
+    const path = writeRollout(dayDir, { sessionId: decoyCliId, cwd: childCwd, prompt: firstPrompt(OUR_SESSION, 'inherited source') });
+    const original = readFileSync(path, 'utf8');
+    writeFileSync(path, original + JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'x'.repeat(300_000) }] } }) + '\n'
+      + JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: firstPrompt(OTHER_SESSION, 'child first new turn') }] } }) + '\n'
+      + JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'y'.repeat(300_000) }] } }) + '\n');
+    expect(resolveCliSessionId(adapter, { sessionId: OUR_SESSION, cwd, requireMarker: true })).toBe(ourCliId);
+    expect(resolveCliSessionId(adapter, { sessionId: OTHER_SESSION, cwd: childCwd, requireMarker: true })).toBe(decoyCliId);
   });
 
   it('rejects a rollout whose recorded cwd is a different project', () => {
@@ -357,7 +396,7 @@ describe('grok session id lookup', () => {
     writeJsonl(join(bucket, 'prompt_history.jsonl'), [
       { timestamp: 1, session_id: decoyCliId, prompt: firstPrompt(OTHER_SESSION, 'theirs'), is_bash: false },
       { timestamp: 2, session_id: ourCliId, prompt: firstPrompt(OUR_SESSION, 'ours'), is_bash: false },
-      { timestamp: 3, session_id: decoyCliId, prompt: 'their follow-up', is_bash: false },
+      { timestamp: 3, session_id: decoyCliId, prompt: firstPrompt(OTHER_SESSION, `Handoff from ${OUR_SESSION}`), is_bash: false },
     ]);
 
     expect(resolveCliSessionId('grok', { sessionId: OUR_SESSION, cwd })).toBe(ourCliId);
@@ -473,6 +512,7 @@ describe('opencode session id lookup', () => {
     setEnv('XDG_DATA_HOME', xdg);
     buildOpenCodeDb(join(dataDir, 'opencode.db'), [
       { sessionId: ourCliId, messageId: 'msg_1', text: firstPrompt(OUR_SESSION, 'ours'), timeCreated: 1 },
+      { sessionId: decoyCliId, messageId: 'msg_2', text: firstPrompt(OTHER_SESSION, `Handoff from ${OUR_SESSION}`), timeCreated: 2 },
     ]);
 
     expect(resolveCliSessionId('opencode', { sessionId: OUR_SESSION, cwd: '/repo' })).toBe(ourCliId);

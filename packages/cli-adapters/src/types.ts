@@ -6,6 +6,7 @@ export interface AdapterSessionContext {
   cwd?: string;
   resume?: boolean;
   resumeSessionId?: string;
+  nativeForkSessionId?: string;
   initialPrompt?: string;
   model?: string;
   reasoningEffort?: string;

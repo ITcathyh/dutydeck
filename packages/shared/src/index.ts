@@ -298,7 +298,7 @@ export interface SessionSourceContext {
   originAvailable: boolean;
 }
 
-export interface StartSessionInput { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; workspaceMode?: import('./workspace.js').WorkspaceMode }
+export interface StartSessionInput { nativeForkSessionId?: string; agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; workspaceMode?: import('./workspace.js').WorkspaceMode }
 export interface SendInput { prompt: string }
 export interface AgentCapabilities { protocol: Exclude<Protocol, 'auto'>; available: boolean; detail?: string; pause: boolean; resume: boolean }
 

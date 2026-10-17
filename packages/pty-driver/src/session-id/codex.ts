@@ -35,16 +35,14 @@ import {
   traeSessionsRoot,
   type CliPathEnv,
 } from '../cli-paths.js';
-import { byMtimeDesc, parseJsonlObjects, readHead, readTail, walkFiles } from './fs-scan.js';
-import { isUsableMarker } from './marker.js';
+import { byMtimeDesc, readTail, nativeTranscriptObjects, walkFiles } from './fs-scan.js';
+import { buildSessionMarker, isUsableMarker } from './marker.js';
 import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
 import { codexInputText, traexInputText } from '../transcript/input-receipt.js';
 
 /** history.jsonl grows without bound; recent sessions are at the end, so a
  *  bounded tail keeps the lookup O(window) rather than O(file). */
 const HISTORY_TAIL_BYTES = 4 * 1024 * 1024;
-/** Head window per rollout candidate: session_meta plus the first prompt. */
-const ROLLOUT_HEAD_BYTES = 256 * 1024;
 /** Directory depth of the YYYY/MM/DD rollout tree below `sessions/`. */
 const SESSION_SCAN_MAX_DEPTH = 3;
 /** Newest-first cap on rollout candidates examined. */
@@ -56,7 +54,7 @@ const ROLLOUT_ID_RE = /rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 
 /** Scan the tail of a Codex-dialect history.jsonl for the newest submit whose
  *  text carries the marker, and return that line's `session_id`. */
-export function findSessionIdInHistory(historyPath: string, marker: string): string | undefined {
+export function findSessionIdInHistory(historyPath: string, marker: string, exactText = false): string | undefined {
   const text = readTail(historyPath, HISTORY_TAIL_BYTES);
   if (!text) return undefined;
   const lines = text.split('\n');
@@ -71,7 +69,7 @@ export function findSessionIdInHistory(historyPath: string, marker: string): str
     } catch {
       continue;
     }
-    if (typeof parsed?.text !== 'string' || !parsed.text.includes(marker)) continue;
+    if (typeof parsed?.text !== 'string' || !(exactText ? parsed.text.trim() === marker : parsed.text.includes(marker))) continue;
     if (typeof parsed.session_id === 'string' && parsed.session_id.length > 0) {
       return parsed.session_id;
     }
@@ -90,6 +88,7 @@ export function findSessionIdInRollouts(
   cwd: string,
   env?: CliPathEnv,
   inputText: (entry: any, threadId?: string) => string | undefined = codexInputText,
+  exactText = false,
 ): string | undefined {
   const wanted = realCwd(cwd, env);
   const candidates = walkFiles(sessionsRoot, {
@@ -98,7 +97,7 @@ export function findSessionIdInRollouts(
   }).sort(byMtimeDesc).slice(0, MAX_ROLLOUT_CANDIDATES);
 
   for (const candidate of candidates) {
-    const entries = parseJsonlObjects(readHead(candidate.path, ROLLOUT_HEAD_BYTES));
+    const entries = nativeTranscriptObjects(candidate.path);
     let metaSessionId: string | undefined;
     let cwdOk: boolean | undefined;
     let marked = false;
@@ -108,9 +107,11 @@ export function findSessionIdInRollouts(
         const id = p?.id ?? p?.session_id;
         if (typeof id === 'string' && id.length > 0) metaSessionId = id;
         if (typeof p?.cwd === 'string' && p.cwd.length > 0) cwdOk = realCwd(p.cwd, env) === wanted;
+        if (cwdOk === false) break;
         continue;
       }
-      if (inputText(entry, metaSessionId)?.includes(marker)) {
+      const text = inputText(entry, metaSessionId);
+      if (text !== undefined && (exactText ? text.trim() === marker : text.includes(marker))) {
         marked = true;
         break;
       }
@@ -129,14 +130,22 @@ export function findSessionIdInRollouts(
 function codexFamilyResolve(
   historyPath: string,
   sessionsRoot: string,
-  { sessionId, cwd, env }: SessionIdLookupContext,
+  { sessionId, cwd, env, requireMarker }: SessionIdLookupContext,
   inputText: (entry: any, threadId?: string) => string | undefined = codexInputText,
 ): string | undefined {
   if (!isUsableMarker(sessionId)) return undefined;
   // history.jsonl first: it is written at submit time, so it is populated
   // before the rollout has any user content to match on.
-  return findSessionIdInHistory(historyPath, sessionId)
-    ?? findSessionIdInRollouts(sessionsRoot, sessionId, cwd, env, inputText);
+  // Prefer modern identity across both sources before trying either legacy
+  // envelope. A source id merely mentioned in a fork handoff is never a match.
+  const markers = [buildSessionMarker(sessionId), ...(requireMarker ? [] : [`[dutydeck-session:${sessionId}]`, sessionId])];
+  for (const marker of markers) {
+    const exactText = marker === sessionId;
+    const found = findSessionIdInHistory(historyPath, marker, exactText)
+      ?? findSessionIdInRollouts(sessionsRoot, marker, cwd, env, inputText, exactText);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 export const codexSessionIdLookup: SessionIdLookup = {

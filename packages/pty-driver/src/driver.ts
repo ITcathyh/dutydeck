@@ -47,6 +47,7 @@ export interface PtyCliDriverOptions {
    * 不做磁盘反查——这是最可靠的来源。
    */
   cliSessionId?: string;
+  nativeForkSessionId?: string;
   /** Composition root knows whether a relay answer is pending. */
   awaitingAnswer?: () => boolean;
 }
@@ -79,6 +80,7 @@ export class PtyCliDriver implements AgentDriver {
   private readonly agent: AgentConfig;
   private readonly adapter: CliAdapter;
   private readonly sessionId: string;
+  private readonly optsNativeForkSessionId?: string;
   private readonly emitEvent: (e: NormalizedDriverEvent) => void;
   private readonly exitCallback: (code: number | null) => void;
   private readonly stoppedCallback: (() => void) | undefined;
@@ -219,6 +221,7 @@ export class PtyCliDriver implements AgentDriver {
     // 守卫脚本跟着任务走：上一个驱动留下的（daemon 在计划阶段之后重启）也按本次任务的模式改正。
     if (this.planGuardSupported) this.claudeSettings.setPlanGuard(this.planGuardActive);
     this.cliSessionId = opts.cliSessionId;
+    this.optsNativeForkSessionId = opts.nativeForkSessionId;
     if (remoteApprovalCliAdapterIds.includes(this.adapter.id)) {
       this.requestPermission = request => this.requestHookPermission(request);
       this.resolvePermission = async (id, approved, reason) => this.resolveHookPermission(id, approved, reason);
@@ -334,6 +337,7 @@ export class PtyCliDriver implements AgentDriver {
 
     this.lastArgs = this.claudeSettings.args(this.agent.args, this.adapter.buildArgs({
       sessionId: this.sessionId,
+      ...(this.optsNativeForkSessionId ? { nativeForkSessionId: this.optsNativeForkSessionId } : {}),
       cwd: this.agent.cwd,
       model: this.agent.model,
       reasoningEffort: this.agent.reasoningEffort,

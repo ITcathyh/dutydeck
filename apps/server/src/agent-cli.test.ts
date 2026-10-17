@@ -51,6 +51,8 @@ describe('dutydeck agent', () => {
     expect(await agent(['session', 'new', '--agent', 'codex', '--workspace', 'worktree', '--task', '修复登录页报错'])).toMatchObject({
       url: '/actions/session.new', method: 'POST', body: { agent: 'codex', workspace: 'worktree', task: '修复登录页报错' } });
     expect(await agent(['session', 'new', '--handoff', '--note', '接着查', '--dry-run'])).toMatchObject({ url: '/actions/session.new', body: { handoff: true, note: '接着查', dryRun: true } });
+    expect(await agent(['session', 'resume', '--id', 'ses_123'])).toMatchObject({ url: '/actions/session.resume', body: { id: 'ses_123' } });
+    expect(await agent(['session', 'fork', '--task', '并行检查', '--agent', 'codex'])).toMatchObject({ url: '/actions/session.fork', body: { task: '并行检查', agent: 'codex' } });
     expect(await agent(['retry'])).toMatchObject({ url: '/actions/retry', body: {} });
     expect(await agent(['plan', '--task', '先出计划'])).toMatchObject({ url: '/actions/plan', body: { task: '先出计划' } });
     expect(await agent(['queue', 'cancel', '2'])).toMatchObject({ url: '/actions/queue.cancel', body: { index: 2 } });

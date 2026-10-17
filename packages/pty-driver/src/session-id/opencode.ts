@@ -36,7 +36,7 @@
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { opencodeDbPath } from '../cli-paths.js';
-import { isUsableMarker } from './marker.js';
+import { buildSessionMarker, isUsableMarker } from './marker.js';
 import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
 
 /** OpenCode's own session-id shape, identical across V1 and V2. Guards against
@@ -131,7 +131,7 @@ function opencodeResolve(kind: OpenCodeDbKind) {
     // dutydeck session id is never also the CLI's.
     if (!isUsableMarker(sessionId)) return undefined;
     // The db path follows the CHILD's $XDG_DATA_HOME / $HOME, not the daemon's.
-    return readOpenCodeSessionId(opencodeDbPath(env), sessionId, kind);
+    return readOpenCodeSessionId(opencodeDbPath(env), buildSessionMarker(sessionId), kind);
   };
 }
 

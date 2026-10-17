@@ -7,10 +7,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
+import { buildSessionMarker, claudeProjectDir } from '@dutydeck/pty-driver';
+import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import { RuntimeError, type AgentConfig } from '@dutydeck/shared';
 import { LarkMessageCoordinator } from './coordinator.js';
@@ -34,19 +36,22 @@ const mentioning = (id: string, text: string, member: { openId?: string; name: s
     { key: '@_user_2', name: member.name, ...(member.openId ? { openId: member.openId } : {}), mentionedType: 'user' }
   ] });
 
-async function harness(options: { managedGroup?: boolean; configPatch?: Partial<StoredLarkConfig>; steer?: AgentDriver['steer']; hold?: (prompt: string) => Promise<void> | undefined; reportIdle?: boolean } = {}) {
+async function harness(options: { native?: boolean; answer?: boolean; managedGroup?: boolean; configPatch?: Partial<StoredLarkConfig>; steer?: AgentDriver['steer']; hold?: (prompt: string) => Promise<void> | undefined; reportIdle?: boolean } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-commands-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let release: (() => void) | undefined;
   const gate = new Promise<void>(done => { release = done; });
   const prompts: string[] = [];
+  const forks: Array<string | undefined> = [];
   const runtime = new DutydeckRuntime(repos, {
-    probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
-    driverFactory: (_config, _protocol, emit) => {
+    probe: () => ({ protocol: options.native ? 'pty-cli' : 'acp', available: true, pause: false, resume: true }),
+    driverFactory: (_config, _protocol, emit, _exit, _id, context) => {
+      forks.push(context.nativeForkSessionId);
       let cancelled = false, sending = false;
       const cancel = () => { cancelled = true; emit({ type: 'completed', data: { stopReason: 'cancelled' } }); };
       const driver: AgentDriver = {
         start: async () => {}, resume: async () => {},
+        isStopped: async () => true,
         stop: async () => cancel(), interrupt: async () => cancel(),
         send: async prompt => {
           prompts.push(prompt);
@@ -57,6 +62,7 @@ async function harness(options: { managedGroup?: boolean; configPatch?: Partial<
             await gate;
             await options.hold?.(prompt);
             if (cancelled) return;
+            if (options.answer) emit({ type: 'text', data: { text: '已完成原任务' } });
             emit({ type: 'completed', data: { stopReason: 'end_turn' } });
           } finally { sending = false; }
         },
@@ -71,6 +77,7 @@ async function harness(options: { managedGroup?: boolean; configPatch?: Partial<
     { id: 'mock', name: 'Mock Agent', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, version: '1.2.3', capabilities: { pause: false, resume: true }, builtin: false },
     { id: 'spare', name: 'Spare Agent', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false }
   ];
+  if (options.native) Object.assign(agents[0]!, { protocol: 'pty-cli', adapterId: 'claude-code', env: { CLAUDE_CONFIG_DIR: join(cwd, 'claude-fixture') }, permissionMode: 'full-trust' });
   await runtime.initialize(agents);
   const steerQueued = vi.fn();
   const realSteer = runtime.steerQueued.bind(runtime);
@@ -90,6 +97,7 @@ async function harness(options: { managedGroup?: boolean; configPatch?: Partial<
   const createCard = async (input: any) => { cards.push(input); return { messageId: `om_card_${++nextCard}` }; };
   const service = {
     send: vi.fn(createCard), reply: vi.fn(createCard),
+    sendText: vi.fn(createCard), getMessageLink: vi.fn(async (id: string) => `https://example.test/message/${id}`),
     uploadFile: vi.fn(async () => 'file_x'), replyFile: vi.fn(createCard), sendFile: vi.fn(createCard),
     update: vi.fn(async (input: any) => { cards.push(input); return { messageId: input.messageId }; }),
     addReaction: vi.fn(async (messageId: string) => ({ messageId, reactionId: `reaction_${messageId}` })),
@@ -143,7 +151,7 @@ async function harness(options: { managedGroup?: boolean; configPatch?: Partial<
   /** 等某条指令真的开跑：只等它出现在队列里的用例，会在「谁在执行」上偶发竞态。 */
   const waitRunning = async (text: string) => vi.waitFor(async () =>
     expect((await runtime.getTasks(await sessionId())).some(task => task.prompt.includes(text) && task.status === 'running')).toBe(true));
-  return { repos, runtime, config, coordinator, createCoordinator, service, cards, log, groupManager, steerQueued, prompts,
+  return { forks, agents, repos, runtime, config, coordinator, createCoordinator, service, cards, log, groupManager, steerQueued, prompts,
     receipts, lastReceipt, receiptNamed, markdownOf, unknownNotices, dispatch, sessionId, waitRunning, cwd, release: () => release?.() };
 }
 
@@ -550,5 +558,169 @@ describe('/grant 与 /revoke 在聊天里开通对话权限', () => {
     // 没有 groupManager 时命令本身停用；回执必须说明原因而不是假装成功。
     expect(h.lastReceipt()).toMatchObject({ state: 'failed' });
     expect(h.markdownOf(h.lastReceipt())).toContain('群');
+  });
+});
+
+
+describe('恢复已关闭会话与并行分身', () => {
+  it('只列出同 scope 的已关闭非归档非空会话，默认恢复最近关闭的一条', async () => {
+    const h = await harness({ answer: true }); h.release();
+    await h.dispatch('om_old', '原始任务');
+    const old = await h.sessionId();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(old))[0]?.status).toBe('completed'));
+    await h.coordinator.handle(event('om_new', '/new'), h.config);
+    await h.coordinator.handle(event('om_second', '第二个任务'), h.config);
+    let second = '';
+    await vi.waitFor(async () => { second = (await h.runtime.listSessions()).find(s => s.id !== old)!.id; expect((await h.runtime.getTasks(second))[0]?.status).toBe('completed'); });
+    await h.coordinator.handle(event('om_new2', '/new'), h.config);
+    // A later metadata update is not a later closure.
+    await h.repos.sessions.save({ ...(await h.runtime.getSession(old))!, updatedAt: '2099-01-01T00:00:00.000Z' });
+    const other = await h.runtime.start({ agentId: 'mock', source: 'lark', sourceId: `${h.config.appId}:oc_other:group:thread:om_root`, permissionMode: 'ask' });
+    await h.runtime.send(other.id, '跨聊天的任务不该出现', undefined, undefined, 'ou_alice');
+    await h.runtime.stop(other.id);
+    const otherThread = await h.runtime.start({ agentId: 'mock', source: 'lark', sourceId: `${h.config.appId}:oc_group:group:thread:om_other_root`, permissionMode: 'ask' });
+    await h.runtime.send(otherThread.id, '同聊天其他话题的任务不该出现', undefined, undefined, 'ou_alice');
+    await h.runtime.stop(otherThread.id);
+    const empty = await h.runtime.start({ agentId: 'mock', source: 'lark', sourceId: `${h.config.appId}:oc_group:group:thread:om_root`, permissionMode: 'ask' });
+    await h.runtime.stop(empty.id);
+    await h.coordinator.handle(event('om_wrong', `/resume ${other.id}`), h.config);
+    expect(h.markdownOf(h.lastReceipt())).toContain('没有这个可见的已关闭会话');
+    await h.coordinator.handle(event('om_wrong_thread', `/resume ${otherThread.id}`), h.config);
+    expect(h.markdownOf(h.lastReceipt())).toContain('没有这个可见的已关闭会话');
+    await h.coordinator.handle(event('om_list', '/resume list'), h.config);
+    const list = h.markdownOf(h.lastReceipt());
+    expect(list).toContain('原始任务'); expect(list).toContain('第二个任务'); expect(list).not.toContain(other.id); expect(list).not.toContain(otherThread.id); expect(list).not.toContain(empty.id); expect(list).not.toContain('2099-01-01'); expect(list.indexOf(second)).toBeLessThan(list.indexOf(old));
+    await h.coordinator.handle(event('om_resume', '/resume'), h.config);
+    expect(h.markdownOf(h.lastReceipt())).toContain(`已恢复会话 \`${second}\``);
+    expect((await h.runtime.getSession(second))?.state).toBe('idle');
+    const rebuilt = h.createCoordinator(); await rebuilt.initializeWorkflows(h.config);
+    await rebuilt.handle(event('om_after', '恢复后的任务'), h.config);
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(second)).some(t => t.prompt.includes('恢复后的任务'))).toBe(true));
+    rebuilt.stop();
+  });
+
+  it('不支持恢复时保留当前会话并明确提示交接', async () => {
+    const h = await harness({ answer: true }); h.release(); await h.dispatch('om_old', '旧任务');
+    const id = await h.sessionId();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(id))[0]?.status).toBe('completed'));
+    await h.coordinator.handle(event('om_new', '/new'), h.config);
+    const listAgents = h.runtime.listAgents.bind(h.runtime);
+    h.runtime.listAgents = async () => (await listAgents()).map(a => ({ ...a, capabilities: { pause: false, resume: false } }));
+    await h.coordinator.handle(event('om_resume', '/resume'), h.config);
+    expect(h.markdownOf(h.lastReceipt())).toContain('不支持恢复');
+    expect(h.markdownOf(h.lastReceipt())).toContain('/new --handoff');
+    expect((await h.runtime.getSession(id))?.state).toBe('stopped');
+  });
+
+  it('ACP 分身用交接，保留原会话正在执行的任务和排队内容', async () => {
+    const h = await harness();
+    await h.dispatch('om_task', '第一条任务'); await h.waitRunning('第一条任务');
+    await h.dispatch('om_queue', '排队任务');
+    const id = await h.sessionId(); const before = await h.runtime.getTasks(id); const source = await h.runtime.getSession(id);
+    await h.coordinator.handle(event('om_fork', '/fork 检查另一种实现'), h.config);
+    expect(h.markdownOf(h.lastReceipt())).toContain('已在新话题开分身');
+    expect(await h.runtime.getSession(id)).toEqual(source);
+    expect(await h.runtime.getTasks(id)).toEqual(before);
+    await vi.waitFor(async () => expect(await h.runtime.listSessions()).toHaveLength(2));
+    const child = (await h.runtime.listSessions()).find(s => s.id !== id)!;
+    expect(child.sourceId).toContain(':thread:om_card_');
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(child.id))[0]?.status).toBe('running'));
+    await vi.waitFor(() => expect(h.prompts).toEqual(expect.arrayContaining([expect.stringContaining('会话交接')])));
+    expect(h.service.sendText.mock.calls[0]![0].text).toContain('最近结果');
+  });
+
+  it('Claude 有落盘上下文时传递原生分身 ID，并默认独立 worktree', async () => {
+    const h = await harness({ native: true, configPatch: { permissionMode: 'full-trust' } });
+    execFileSync('git', ['init', '-q', h.cwd]);
+    execFileSync('git', ['-C', h.cwd, '-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '--allow-empty', '-qm', 'initial']);
+    await h.dispatch('om_task', '源任务'); await h.waitRunning('源任务');
+    const id = await h.sessionId();
+    const nativeId = pinnedSessionUuid(id);
+    const dir = claudeProjectDir(h.cwd, h.agents[0]!.env); await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, `${nativeId}.jsonl`), JSON.stringify({ type: 'user', sessionId: nativeId, message: { role: 'user', content: buildSessionMarker(id) } }) + '\n');
+    await h.coordinator.handle(event('om_fork', '/fork 并行任务'), h.config);
+    await vi.waitFor(() => expect(h.forks).toContain(nativeId));
+    const child = (await h.runtime.listSessions()).find(s => s.id !== id)!;
+    expect(child.workspaceMode).toBe('worktree'); expect(child.cwd).not.toBe(h.cwd);
+    expect(h.service.sendText.mock.calls[0]![0].text).toContain('不含原会话未提交的改动');
+    expect((await h.runtime.getTasks(id))[0]?.status).toBe('running');
+  });
+
+  it.each([false, true])('机器人收紧为 ask 后分身使用当前权限，native=%s', async native => {
+    const h = await harness({ native, configPatch: { permissionMode: 'full-trust' } });
+    await h.dispatch('om_permission_source', '源任务'); await h.waitRunning('源任务');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    const id = await h.sessionId();
+    if (native) {
+      const nativeId = pinnedSessionUuid(id);
+      const dir = claudeProjectDir(h.cwd, h.agents[0]!.env); await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, `${nativeId}.jsonl`), JSON.stringify({ type: 'user', sessionId: nativeId, message: { role: 'user', content: buildSessionMarker(id) } }) + '\n');
+    }
+    h.config.permissionMode = 'ask';
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+    const before = await h.runtime.getTasks(id);
+    await h.coordinator.handle(event('om_permission_fork', '/fork 按当前权限检查'), h.config);
+    const child = (await h.runtime.listSessions()).find(s => s.id !== id)!;
+    expect(child.permissionMode).toBe('ask');
+    expect((await h.runtime.getSession(id))?.permissionMode).toBe('full-trust');
+    expect(await h.runtime.getTasks(id)).toEqual(before);
+    expect(h.forks.filter(Boolean)).toEqual(native ? [pinnedSessionUuid(id)] : []);
+    const binding = await h.repos.channelMappings.get(`lark-launch:${h.config.appId}`, child.sourceId!);
+    expect(JSON.parse(binding!.extra!)).not.toHaveProperty('permissionMode');
+  });
+
+  it('权限收紧后拒绝恢复旧权限，当前会话和队列不受影响', async () => {
+    const h = await harness({ answer: true, configPatch: { permissionMode: 'full-trust' } }); h.release();
+    await h.dispatch('om_old', '旧任务'); const old = await h.sessionId();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(old))[0]?.status).toBe('completed'));
+    await h.coordinator.handle(event('om_new', '/new'), h.config);
+    h.config.permissionMode = 'approve-reads';
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+    await h.coordinator.handle(event('om_current', '当前任务'), h.config);
+    let current = '';
+    await vi.waitFor(async () => { current = (await h.runtime.listSessions()).find(s => s.id !== old)!.id; expect((await h.runtime.getTasks(current))[0]?.status).toBe('completed'); });
+    const before = await h.runtime.getSession(current);
+    await h.coordinator.handle(event('om_resume', `/resume ${old}`), h.config);
+    expect(h.markdownOf(h.lastReceipt())).toContain('不能恢复旧权限');
+    expect(await h.runtime.getSession(current)).toEqual(before);
+  });
+
+  it('换 Agent 时用交接，不继承原 Agent 的模型；私聊 thread 模式建立独立 scope', async () => {
+    const h = await harness({ native: true, configPatch: { permissionMode: 'full-trust', defaultModel: 'claude-source-model', p2pMode: 'thread' } });
+    await h.coordinator.handle(event('om_dm', '源任务', { chatType: 'p2p', threadId: undefined, rootId: undefined }), h.config);
+    let source = '';
+    await vi.waitFor(async () => { source = (await h.runtime.listSessions())[0]!.id; expect((await h.runtime.getTasks(source))[0]?.status).toBe('running'); });
+    await h.coordinator.handle(event('om_fork', '/fork --agent spare -- 并行检查', { chatType: 'p2p', threadId: 'omt_dm', rootId: 'om_dm' }), h.config);
+    await vi.waitFor(async () => expect((await h.runtime.listSessions()).filter(s => s.agentId === 'spare')).toHaveLength(1));
+    const child = (await h.runtime.listSessions()).find(s => s.agentId === 'spare')!;
+    expect(child.model).toBeFalsy(); expect(child.reasoningEffort).toBeFalsy();
+    expect(child.sourceId).toContain(':p2p:thread:om_card_');
+    expect(h.forks.every(id => id === undefined)).toBe(true);
+    expect(h.service.sendText.mock.calls[0]![0].text).toContain('交接');
+  });
+
+  it('未提交过的 git 仓库无法创建分身 worktree 时，不回成功且不影响源会话', async () => {
+    const h = await harness();
+    execFileSync('git', ['init', '-q', h.cwd]);
+    await h.dispatch('om_task', '原任务继续'); await h.waitRunning('原任务继续');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    const id = await h.sessionId(), source = await h.runtime.getSession(id), tasks = await h.runtime.getTasks(id);
+    await h.coordinator.handle(event('om_fork', '/fork 并行检查'), h.config);
+    expect(h.markdownOf(h.lastReceipt())).toContain('新话题已创建，但分身未启动');
+    expect(h.markdownOf(h.lastReceipt())).toContain('https://example.test/message/');
+    expect(await h.runtime.getSession(id)).toEqual(source);
+    expect(await h.runtime.getTasks(id)).toEqual(tasks);
+    const child = (await h.runtime.listSessions()).find(s => s.id !== id)!;
+    expect(child.state).toBe('failed'); expect(await h.runtime.getTasks(child.id)).toHaveLength(0);
+  });
+
+  it('整段私聊和非原请求人的分身请求明确拒绝', async () => {
+    const h = await harness();
+    await h.coordinator.handle(event('om_p2p', '/fork 任务', { chatType: 'p2p', threadId: undefined, rootId: undefined }), h.config);
+    expect(h.markdownOf(h.lastReceipt())).toContain('每条消息一个话题');
+    await h.dispatch('om_task', '源任务'); await h.waitRunning('源任务');
+    await h.coordinator.handle(event('om_fork', '/fork 任务', { senderOpenId: 'ou_bob' }), h.config);
+    expect(h.markdownOf(h.lastReceipt())).toContain('第一条任务发起人');
+    expect(h.service.sendText).not.toHaveBeenCalled();
   });
 });

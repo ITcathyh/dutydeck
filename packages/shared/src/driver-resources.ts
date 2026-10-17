@@ -46,6 +46,8 @@ export interface DriverResourceHooks {
   creationFinished(permit: OperationPermit | ChildPermit, result: 'created' | 'not_created' | 'unknown'): void;
 }
 export interface DriverContext extends SessionFence {
+  /** One-shot native context copy for a newly allocated session. Never an attach target. */
+  readonly nativeForkSessionId?: string;
   readonly protocol: 'controlled-v1' | 'local-only';
   readonly driverInstanceId: string;
   readonly executionDomain: string;

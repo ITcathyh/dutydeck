@@ -349,3 +349,57 @@ describe('dutydeck agent 写入类', () => {
     expect(JSON.parse((actions.find(action => (action.payload as any).payload?.command === '/grant @Bob')!.payload as any).payload.mentions)).toEqual([{ key: '@_user_2', name: 'Bob', openId: 'ou_bob' }]);
   });
 });
+
+
+describe('session resume/fork 参数与确认卡', () => {
+  it('验证参数并归到 write-confirm', () => {
+    expect(agentActionCommand('session.resume', {})).toEqual({ command: '/resume' });
+    expect(agentActionCommand('session.resume', { id: 'ses_123' })).toEqual({ command: '/resume ses_123' });
+    expect(agentActionCommand('session.fork', { task: '并行检查' })).toEqual({ command: '/fork -- 并行检查' });
+    for (const command of ['/resume', '/resume ses_123', '/fork 并行检查']) expect(agentCommandPlan(command).confirm).toBe(true);
+    expect(() => agentActionCommand('session.resume', { id: 'two ids' })).toThrow('不能含空白');
+    expect(() => agentActionCommand('session.fork', { task: '', workspace: 'bad' })).toThrow();
+    expect(() => agentActionCommand('session.fork', { id: 'other' })).toThrow('不支持这个参数');
+  });
+  it.each(['/resume ses_old', '/fork 并行检查'])('%s 先发确认卡，未点击不执行', async command => {
+    const h = await harness();
+    const current = await h.current();
+    const before = await h.runtime.listSessions();
+    const result = await h.coordinator.agentCommand({ ...current, command, action: command.startsWith('/resume') ? 'session.resume' : 'session.fork' });
+    expect(result).toMatchObject({ pendingConfirmation: true });
+    expect(await h.runtime.listSessions()).toEqual(before);
+    expect(h.repliesTo('om_1').some(input => input.taskName === '待确认的操作')).toBe(true);
+  });
+});
+
+
+describe('恢复和分身确认卡不跨会话执行', () => {
+  it.each(['/fork 并行检查', '/resume ses_old'])('确认 %s 前已切到新会话时拒绝', async command => {
+    const h = await harness(); const first = await h.current();
+    await h.coordinator.agentCommand({ ...first, command });
+    const card = h.repliesTo('om_1').find(input => input.taskName === '待确认的操作')!;
+    const cardId = [...h.cards].find(([, value]) => value === card)![0];
+    await h.coordinator.handle(event('om_new', '/new'), h.config);
+    await h.coordinator.handle(event('om_next', '新会话任务'), h.config);
+    const next = await h.result('om_next'); expect(next.sessionId).not.toBe(first.sessionId);
+    const before = await h.runtime.listSessions();
+    const value = findElement(buildLarkCard(card), 'confirm_confirm')!.behaviors[0].value;
+    expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: cardId, chatId: 'oc_group' })).toMatchObject({ content: expect.stringContaining('会话已经切换') });
+    expect(await h.runtime.listSessions()).toEqual(before);
+  });
+  it('无编号恢复在确认卡中固定目标；归档后点击不能恢复', async () => {
+    const h = await harness(); const first = await h.current();
+    await h.coordinator.handle(event('om_new', '/new'), h.config);
+    await h.coordinator.handle(event('om_next', '新会话任务'), h.config);
+    const next = await h.current(event('om_next', '新会话任务'));
+    await h.coordinator.agentCommand({ ...next, command: '/resume' });
+    const card = h.repliesTo('om_next').find(input => input.taskName === '待确认的操作')!;
+    expect(findElement(buildLarkCard(card), 'confirm_body')!.content).toContain(`/resume ${first.sessionId}`);
+    await h.runtime.archive(first.sessionId, { kind: 'channel', id: 'ou_alice', appId: h.config.appId });
+    const cardId = [...h.cards].find(([, value]) => value === card)![0];
+    const value = findElement(buildLarkCard(card), 'confirm_confirm')!.behaviors[0].value;
+    await h.coordinator.handleAction(value, 'ou_alice', { messageId: cardId, chatId: 'oc_group' });
+    await vi.waitFor(() => expect(h.repliesTo(cardId).map(c => c.markdown).join()).toContain('没有这个可见的已关闭会话'));
+    expect((await h.runtime.getSession(next.sessionId))?.state).toBe('idle');
+  });
+});

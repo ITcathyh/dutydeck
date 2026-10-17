@@ -356,7 +356,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const terminalSettings = new TerminalSettings(repos.config, env);
   // pty-cli 协议驱动工厂：protocol='pty-cli' 的会话路由到 Dutydeck 的 PtyCliDriver。
   // 自定义命令可通过 adapterId 复用已有 CLI 家族，同时保留独立 agent id。
-  const ptyDriverFactory: DriverFactory = (agent, _protocol, onEvent, onExit, sessionId) => {
+  const ptyDriverFactory: DriverFactory = (agent, _protocol, onEvent, onExit, sessionId, context) => {
     const adapter = createCliAdapter(agent.adapterId ?? agent.id);
     return createPtyCliDriver({
       agent,
@@ -367,6 +367,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       onExit,
       sessionId,
       awaitingAnswer: () => relayBroker.listPending(sessionId).length > 0,
+      nativeForkSessionId: context.nativeForkSessionId,
     });
   };
   const pluginWiring = pluginHost ? wirePlugins(pluginHost, {

@@ -4,7 +4,7 @@ import { getCliAdapter } from '@dutydeck/cli-adapters';
 import type { AgentConfig } from '@dutydeck/shared';
 import { discoverAgentModels } from '../agent-models.js';
 
-export interface LarkLaunchOptions { agentId?: string; cwd?: string; model?: string; reasoningEffort?: string; workspaceMode?: 'shared' | 'worktree' }
+export interface LarkLaunchOptions { agentId?: string; cwd?: string; model?: string; reasoningEffort?: string; workspaceMode?: 'shared' | 'worktree'; nativeForkSessionId?: string; useAgentDefaults?: boolean }
 export const larkNewSessionUsage = '/new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容；带交接：/new [以上选项] --handoff [备注] [-- 任务内容]';
 
 /** Only the option header is tokenized; the task body is never shell-parsed.

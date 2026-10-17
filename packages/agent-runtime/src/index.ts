@@ -1930,6 +1930,9 @@ export class DutydeckRuntime {
       && !(initialConfigured.permissionMode === 'approve-reads' && supportsRemoteApproval({ ...initialConfigured, protocol: 'pty-cli' }))) {
       throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY Agent only supports ask (approve in the terminal) or explicit full-trust mode; approve-reads requires a Claude Code family CLI', 422);
     }
+    if (input.nativeForkSessionId && (capability.protocol !== 'pty-cli' || !['claude-code', 'codex'].includes(agent.adapterId ?? agent.id))) {
+      throw new RuntimeError('FORK_UNSUPPORTED', 'This Agent does not support native session copying', 422);
+    }
     const terminalBackend = capability.protocol === 'pty-cli' ? await this.options.terminalBackend?.() ?? 'tmux' : undefined;
     const session: Session = { terminalBackend, id: owned?.id ?? makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
     return this.scoped(session.id, async () => {
@@ -1953,7 +1956,7 @@ export class DutydeckRuntime {
     await this.mutations.wait(() => owned?.beforeStart() ?? Promise.resolve());
     await this.saveState(session, 'starting');
     try {
-      await this.reconnect(session);
+      await this.reconnect(session, true, undefined, false, input.nativeForkSessionId);
       await this.mutations.wait(() => owned?.beforeStart() ?? Promise.resolve());
       await this.saveState(session, 'idle'); return this.withSessionMetadata(session);
     } catch (error) {
@@ -2062,7 +2065,7 @@ export class DutydeckRuntime {
     });
   }
 
-  private async reconnect(session: Session, start = true, executionOptions?: ExecutionOptions, repairConfiguration = false) {
+  private async reconnect(session: Session, start = true, executionOptions?: ExecutionOptions, repairConfiguration = false, nativeForkSessionId?: string) {
     this.mutations.check(); this.assertVerificationRecoverySafe(session.id);
     if(!repairConfiguration)await this.mutations.wait(() => this.configurations.assertClear(session.id));
     await this.loadStopBlock(session.id); this.assertReplaceable(session.id);
@@ -2087,7 +2090,7 @@ export class DutydeckRuntime {
       this.notifyDriverExit(session.id, code);
       // An executing turn owns its result. A lifecycle exit never overwrites it.
       if (code && !this.attempts.has(session.id)) void this.mutations.run(lifecycle, () => this.saveState(session, 'failed', `Agent exited with code ${code}`)).catch(() => {});
-    }, session.id, resource.context);} catch(error) {
+    }, session.id, nativeForkSessionId ? { ...resource.context, nativeForkSessionId } : resource.context);} catch(error) {
       if(resource.controlled){
         const cleanup=resource.controlled.abortFactory();this.factoryCleanups.set(session.id,cleanup);
         const release=()=>{if(this.factoryCleanups.get(session.id)===cleanup)this.factoryCleanups.delete(session.id);};

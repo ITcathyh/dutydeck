@@ -16,10 +16,10 @@
  *   Recency is used only to break ties among several records that all carry
  *   the SAME marker (a session legitimately resumed more than once).
  *
- * The lookups search for the raw session id substring rather than the whole
- * tag, so they keep working if the surrounding wording ever changes; the tag
- * only exists to keep the marker readable to the model (and to make it
- * obvious in a transcript that the line is bookkeeping, not a user request).
+ * Lookups match complete fingerprints, not an id mentioned in task prose.
+ * Codex-family compatibility also recognizes the old bracketed envelope or
+ * an entire user record containing only the id; strict lookup requires the
+ * current XML marker.
  */
 
 /** Shortest session id we will search for. A very short id could appear

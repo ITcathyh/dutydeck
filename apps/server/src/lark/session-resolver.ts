@@ -392,7 +392,7 @@ export async function resolveLarkSession(
   };
   const requestedConfig = launchOptions ? { ...config, workspace: launchOptions.cwd ?? config.workspace,
     defaultAgentId: launchOptions.agentId ?? config.defaultAgentId,
-    defaultModel: launchOptions.model ?? config.defaultModel, defaultReasoningEffort: launchOptions.reasoningEffort ?? config.defaultReasoningEffort } : config;
+    defaultModel: launchOptions.useAgentDefaults ? launchOptions.model : launchOptions.model ?? config.defaultModel, defaultReasoningEffort: launchOptions.useAgentDefaults ? launchOptions.reasoningEffort : launchOptions.reasoningEffort ?? config.defaultReasoningEffort } : config;
   const matchesRequest = (session: Session) => larkSessionMatchesScope(session, launchOptions ? { ...requestedConfig, managedGroup: undefined } : config, sourceId, launchOptions ? undefined : launch?.sessionId);
   // 旧会话没能沿用的原因，新建会话时写进首卡。/new 结束的会话登记在 retiredSessionIds 里，不算意外。
   let replacedReason: string | undefined;
@@ -459,6 +459,8 @@ export async function resolveLarkSession(
     ...(config.defaultModel ? { model: config.defaultModel } : {}),
     ...(config.defaultReasoningEffort ? { reasoningEffort: config.defaultReasoningEffort } : {}),
     ...launchOptions,
+    ...(launchOptions?.useAgentDefaults && !launchOptions.model ? { model: undefined } : {}),
+    ...(launchOptions?.useAgentDefaults && !launchOptions.reasoningEffort ? { reasoningEffort: undefined } : {}),
     permissionMode: larkPermissionMode(config),
     source: 'lark',
     sourceId

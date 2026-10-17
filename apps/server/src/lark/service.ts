@@ -1494,6 +1494,13 @@ export class LarkCardService {
     return rawItems.map((item: any) => this.normalizeMessageItem(item)).filter((item: LarkChatMessage | undefined): item is LarkChatMessage => Boolean(item));
   }
 
+  async getMessageLink(messageId: string): Promise<string> {
+    const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(required(messageId, 'messageId'))}/message_link`, { method: 'GET' });
+    const link = payload.data?.message_link;
+    if (typeof link !== 'string' || !link.startsWith('https://')) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark did not return a message link', 502);
+    return link;
+  }
+
   async sendText(input: LarkSendTextInput): Promise<LarkMessageResult> {
     const chatId = required(input.chatId, 'chatId');
     if (!chatId.startsWith('oc_')) throw new LarkServiceError('INVALID_CHAT_ID', 'chatId must start with oc_', 400);

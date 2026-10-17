@@ -3,6 +3,7 @@ import { describeLarkTaskRecovery, larkContinuePrompt, larkRecoveryRetainedNote,
 import { deadlineText, type LarkInteraction } from './workflow-interactions.js';
 import type { LarkInboxAdoption, LarkInboxRecord } from './task-inbox.js';
 import { isLarkFirstCardUndelivered } from './task-inbox.js';
+import { larkForkWorkspaceMode, larkNativeForkId, larkResumeUnavailable } from './session-branches.js';
 import { parseLarkNewSession } from './new-session.js';
 import { formatLarkHandoff, larkHandoffAck, larkHandoffTitle } from './handoff.js';
 import { explicitFinalContext, readExplicitFinal } from './explicit-final.js';
@@ -44,7 +45,7 @@ import { claimLarkTaskDispatches, larkTaskAgentGuid, releaseLarkTaskClaim } from
 import { buildRepairConfirmCard, parseRepairCardActionValue, renderRepairResultCard, runOpenPlatformRepair } from './repair.js';
 import { buildPullRequestConfirmCard } from './pull-request-card.js';
 import { connectLarkOpenPlatformSession } from './open-platform-session.js';
-import { findLarkThreadContinuation, larkGroupKey, larkSessionConfigKey, parsePrompt, resolveLarkScopeId } from './session-resolver.js';
+import { findLarkThreadContinuation, listPersistedLarkSessions, larkSourceId, larkGroupKey, larkSessionConfigKey, parsePrompt, resolveLarkScopeId } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
@@ -1542,6 +1543,90 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         }
         return restored;
       }
+      if (route.command === 'resume') {
+        if (!this.runtime.resume || !this.cardMappings) throw new Error('当前运行时不支持恢复会话。可以用 /new --handoff。');
+        if (route.args.length > 1 || (route.args[0]?.startsWith('--'))) throw new Error('用法：/resume [会话编号]；用 /resume list 查看最近关闭的会话。');
+        const epoch = group.epoch ?? 0;
+        const candidates = await this.closedScopeSessions(config, event, scopeId);
+        if (route.args[0] === 'list') {
+          await replyCard('最近关闭的会话', candidates.length ? candidates.slice(0, 5).map(({ session, title, closedAt, approximate }) => `\`${session.id}\` · ${closedAt}${approximate ? '（近似，按更新时间）' : ''} · ${session.agentId}\n${escapeLarkPromptEcho(larkCommandEcho(title, 100))}`).join('\n\n') + '\n\n发送 `/resume` 恢复最近一个，或 `/resume 会话编号` 选择。' : '本话题没有可恢复的已关闭会话。');
+          return 'handled';
+        }
+        const target = route.args[0] ? candidates.find(item => item.session.id === route.args[0]) : candidates[0];
+        if (!target) throw new Error('本话题没有这个可见的已关闭会话；发送 /resume list 查看可选会话。');
+        const agent = (await this.runtime.listAgents?.())?.find(item => item.id === target.session.agentId);
+        if (target.session.permissionMode !== larkPermissionMode(config)) throw new Error('旧会话的权限模式与机器人当前设置不同，不能恢复旧权限。请按当前权限用 /new --handoff 交接。');
+        const unavailable = larkResumeUnavailable(target.session, agent);
+        if (unavailable) throw new Error(unavailable);
+        const denial = sessionId ? await this.currentTurnInterruptDenial(config, event, sessionId) : undefined;
+        if (denial) throw new Error(denial);
+        if (epoch !== (group.epoch ?? 0)) throw new Error('会话已发生变化，请重新发送恢复请求。');
+        this.cancelUndeliveredRetries(group);
+        await this.retireScopeSession(group, config, event, scopeId);
+        const resumeEpoch = group.epoch;
+        // Re-read after closing the current scope; a concurrent command must not resurrect a stale target.
+        const current = await this.runtime.getSession(target.session.id);
+        if (!current || current.archivedAt || !['stopped', 'failed'].includes(current.state) || resumeEpoch !== group.epoch) throw new Error('目标会话已发生变化，请重新选择。');
+        const restored = await this.runtime.resume(current.id);
+        if (resumeEpoch !== group.epoch) { await this.runtime.stop?.(restored.id, { kind: 'channel', id: event.senderOpenId!, appId: config.appId }); throw new Error('恢复期间会话已切换，请重新选择。'); }
+        const sourceId = larkSourceId(config, event.chatId, event.chatType, scopeId);
+        try {
+          await this.cardMappings.save({ id: `lark-launch:${sourceId}`, channel: `lark-launch:${config.appId}`, externalId: sourceId,
+            sessionId: restored.id, extra: JSON.stringify({ baseConfigKey: larkSessionConfigKey(config) }), createdAt: new Date().toISOString() });
+        } catch (error) { await this.runtime.stop?.(restored.id, { kind: 'channel', id: event.senderOpenId!, appId: config.appId }); throw error; }
+        group.retiredSessionIds?.delete(restored.id);
+        group.sessionId = restored.id; group.sessionConfigKey = larkSessionConfigKey(config);
+        await replyCard('会话已恢复', `已恢复会话 \`${restored.id}\`（${restored.agentId}）：${escapeLarkPromptEcho(larkCommandEcho(target.title, 100))}。下一条消息会接着原来的上下文。`);
+        return 'handled';
+      }
+      if (route.command === 'fork') {
+        if (event.chatType !== 'group' && config.p2pMode !== 'thread') throw new Error('当前私聊整段共用一个会话，没有独立话题，不能并行开分身。请在机器人设置把私聊模式改成“每条消息一个话题”后再试。');
+        if (!sessionId || !this.cardMappings || !this.inbox) throw new Error('当前没有可分身的会话，或未接入新话题存储。请先在此话题开始一个任务。');
+        const source = await this.runtime.getSession(sessionId);
+        if (!source || source.archivedAt || ['stopped', 'failed'].includes(source.state)) throw new Error('源会话已关闭，请先恢复它再开分身。');
+        const tasks = await this.runtime.getTasks?.(source.id) ?? [];
+        const first = [...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+        if (!first || !await this.isTaskOperatorAllowed(config, event, { id: first.id, sessionId: source.id }, 'task.view_result')) throw new Error('当前账号没有访问源会话的权限。');
+        const requester = (await this.larkTaskOrigin(config, event.chatId, { id: first.id, sessionId: source.id }))?.requester;
+        if (!requester || requester !== event.senderOpenId) throw new Error('分身沿用源会话的请求人，请由源会话的第一条任务发起人开分身；无法核实原请求人时不能开分身。');
+        const request = parseLarkNewSession(route.argsText);
+        if (request.handoff) throw new Error('/fork 自动继承上下文，无需 --handoff。');
+        const sourceConfig = { ...config, defaultAgentId: source.agentId, defaultModel: source.model, defaultReasoningEffort: source.reasoningEffort, workspace: source.cwd };
+        const explicit = request.launchOptions ? await this.validateNewSession(sourceConfig, event, request.launchOptions) : {};
+        const switchingAgent = explicit.agentId !== undefined && explicit.agentId !== source.agentId;
+        const agent = (await this.runtime.listAgents?.())?.find(item => item.id === source.agentId);
+        if (!agent) throw new Error('找不到源会话的 Agent。');
+        const cwd = explicit.cwd ?? source.cwd;
+        const workspaceMode = await larkForkWorkspaceMode(cwd, explicit.workspaceMode);
+        // A copied Codex rollout in the same cwd also carries its parent's marker.
+        // Keep that case on handoff so later native discovery cannot choose the child as its parent.
+        const nativeForkSessionId = (agent.adapterId ?? agent.id) === 'codex' && workspaceMode === 'shared' && cwd === source.cwd
+          ? undefined : larkNativeForkId(source, agent, explicit.agentId ?? source.agentId);
+        const launchOptions = { useAgentDefaults: true, agentId: source.agentId, cwd, ...(!switchingAgent && source.model ? { model: source.model } : {}), ...(!switchingAgent && source.reasoningEffort ? { reasoningEffort: source.reasoningEffort } : {}),
+          workspaceMode, ...explicit,
+          ...(nativeForkSessionId ? { nativeForkSessionId } : {}) };
+        const handoff = await this.newSessionHandoff(config, event, source.id, tasks, '', Boolean(nativeForkSessionId));
+        const context = nativeForkSessionId ? 'Agent 原生复制的会话上下文，以及最近结果和 git 状态交接' : '最近结果、git 状态和备注交接（此 Agent/接入方式不支持原生复制，或源上下文尚未落盘）';
+        const workspaceNote = launchOptions.workspaceMode === 'worktree' ? '分身使用独立 worktree，不含原会话未提交的改动；这些改动只列在 git 状态交接中。' : '分身与原会话共享目录，同时修改同一文件可能冲突。';
+        const seed = await this.service.sendText({ chatId: event.chatId, text: `从会话 ${source.id} 分出的新话题。\n携带：${context}。\n${workspaceNote}\n任务：${escapeLarkPromptEcho(larkCommandEcho(request.prompt || '继续原会话的任务', 160))}`, idempotencyKey: `fork_${event.messageId}`.slice(0, 50) });
+        const goal = request.prompt || '请先阅读继承的上下文，简短确认已接手并等待我的下一条任务。';
+        const forkEvent: LarkMessageEvent = { ...event, messageId: seed.messageId, rootId: seed.messageId, threadId: seed.messageId, content: JSON.stringify({ text: goal }), messageType: 'text', mentions: [] };
+        const forkScope = `thread:${seed.messageId}`;
+        const seeded = await this.inbox.seed(config.appId, forkEvent, { prompt: goal, scopeId: forkScope, resources: [], launchOptions,
+          materialPrompt: `${handoff}\n\n${workspaceNote}\n\n${goal}` });
+        if (!seeded) throw new Error('分身话题已存在，请在新话题继续。');
+        await this.handle(forkEvent, config, false, true);
+        // handle only schedules runTurn. Wait for startup/dispatch, not for the Agent's response.
+        await this.groups.get(larkGroupKey(forkEvent, forkScope, config.appId))?.tail;
+        const forkTask = this.tasks.get(seed.messageId);
+        const started = Boolean(forkTask?.runtimeTaskId && !['failed', 'interrupted'].includes(forkTask.state));
+        const messageLink = await this.service.getMessageLink(seed.messageId).catch(() => undefined);
+        const jump = messageLink ? `[打开新话题](${messageLink})` : `飞书暂未返回跳转链接，请打开本聊天刚发出的分身话题（${seed.messageId}）`;
+        await replyCard(started ? '已开分身' : '分身未启动', started
+          ? `已在新话题开分身：${jump}。源会话 \`${source.id}\` 继续运行。`
+          : `新话题已创建，但分身未启动：${jump}。请查看新话题中的失败原因。源会话 \`${source.id}\` 不受影响。`, { failed: !started });
+        return 'handled';
+      }
       if (route.command === 'new') {
         // /new 会停掉正在执行的那一轮：那一轮是别人的时，与进度卡「中断」同一口径拒绝。
         const denial = sessionId ? await this.currentTurnInterruptDenial(config, event, sessionId) : undefined;
@@ -1601,11 +1686,28 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     return 'handled';
   }
 
+  private async closedScopeSessions(config: StoredLarkConfig, event: LarkMessageEvent, scopeId: string) {
+    const candidates: Array<{ session: Session; closedAt: string; approximate: boolean; title: string }> = [];
+    for (const session of await listPersistedLarkSessions(this.runtime, config, event.chatId, event.chatType, scopeId, this.cardMappings)) {
+      if (!['stopped', 'failed'].includes(session.state)) continue;
+      const tasks = await this.runtime.getTasks?.(session.id) ?? [];
+      // Empty command-created sessions have no context to restore.
+      const first = [...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+      if (!first || !await this.isTaskOperatorAllowed(config, event, { id: first.id, sessionId: session.id }, 'task.view_result')) continue;
+      const events = await this.runtime.getRecentEvents?.(session.id, 500) ?? [];
+      const closed = events.filter(item => item.type === 'status' && ['stopped', 'failed'].includes((item.data as { state?: string })?.state ?? ''))
+        .sort((a, b) => b.sequence - a.sequence)[0];
+      candidates.push({ session, closedAt: closed?.timestamp ?? session.updatedAt, approximate: !closed, title: (await this.larkTaskOrigin(config, event.chatId, { id: first.id, sessionId: session.id }))?.title ?? larkTaskTitle(first.prompt, config.name) });
+    }
+    candidates.sort((a, b) => b.closedAt.localeCompare(a.closedAt));
+    return candidates;
+  }
+
   /**
    * `/new --handoff` 的交接前缀：最近 3 轮已结束任务的标题与结果摘录（已交付的显式最终答复优先，否则与结果卡同一口径；已脱敏）、
    * 旧会话链接、工作目录 git 快照和备注。只读执行记录，不调用模型；读不到的部分缺省，不让 /new 失败。
    */
-  private async newSessionHandoff(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, tasks: TaskRecord[], note: string) {
+  private async newSessionHandoff(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, tasks: TaskRecord[], note: string, nativeContextCopied = false) {
     const recent = tasks.filter(task => terminalTaskStates.has(task.status))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt)).slice(-3);
     const window = sessionId && recent.length && (this.runtime.getRecentEvents || this.runtime.getEvents)
@@ -1639,7 +1741,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const cwd = (sessionId ? (await this.runtime.getSession(sessionId).catch(() => undefined))?.cwd : undefined) ?? config.workspace;
     return formatLarkHandoff({
       ...(sessionId ? { sessionId, ...(config.webBaseUrl ? { sessionUrl: `${config.webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` } : {}) } : {}),
-      turns, note, ...(cwd ? { cwd, git: await readGitSnapshot(cwd) } : {})
+      turns, note, nativeContextCopied, ...(cwd ? { cwd, git: await readGitSnapshot(cwd) } : {})
     });
   }
 
@@ -1961,7 +2063,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   async agentCommand(request: LarkAgentCommandRequest): Promise<Record<string, unknown>> {
     const { parsed, summary, confirm } = agentCommandPlan(request.command);
     const { config, requested, place, scopeId } = await this.agentCommandOrigin(request);
-    if (parsed.name === 'new') {
+    if (parsed.name === 'resume' && !parsed.args.length && !request.dryRun) {
+      const target = (await this.closedScopeSessions(config, requested, scopeId))[0];
+      if (!target) throw new Error('本话题没有可恢复的已关闭会话。');
+      return this.agentCommand({ ...request, command: `/resume ${target.session.id}` });
+    }
+    if (parsed.name === 'new' || parsed.name === 'fork') {
       // Agent 看不到 Agent 编号：填错时直接退回可用编号让它改，不发一张注定失败的确认卡。
       const agentId = parseLarkNewSession(parsed.argsText).launchOptions?.agentId;
       const agents = agentId ? await this.runtime.listAgents?.() ?? [] : [];
@@ -2086,6 +2193,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const command = String(record.payload.command);
         const event = this.agentCommandEvent(config, { messageId: record.cardMessageId, chatId: record.scope.chatId, chatType: String(record.payload.chat_type),
           ...(record.payload.thread_id ? { threadId: String(record.payload.thread_id) } : {}), ...(record.payload.root_id ? { rootId: String(record.payload.root_id) } : {}) }, operator, command, JSON.parse(String(record.payload.mentions ?? '[]')));
+        const parsed = parseSlashCommand(command);
+        if (parsed?.name === 'resume' || parsed?.name === 'fork') {
+          const scopeId = String(record.payload.scope_id);
+          const group = this.groups.get(larkGroupKey(event, scopeId, config.appId)) ?? { tail: Promise.resolve() };
+          const bound = group.sessionId && !group.retiredSessionIds?.has(group.sessionId) ? group.sessionId : (await this.findScopeSession(config, event, scopeId, group))?.id;
+          if (bound !== String(record.payload.session_id)) throw new RuntimeError('AGENT_COMMAND_STALE', '这个话题的会话已经切换，请重新发起恢复或分身请求。', 409);
+          if (parsed.name === 'fork' && operator !== record.requesterId) throw new RuntimeError('AGENT_COMMAND_FORBIDDEN', '分身需要原请求人自己确认。', 403);
+        }
         // 先落库再回卡片：执行中进程退出的话，重启后在这张卡下回执无法确认是否完成。
         const started = await this.inbox?.startCommand(config.appId, event);
         if (!started) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '这条命令已经执行过或无法登记，没有再执行。', 409);
