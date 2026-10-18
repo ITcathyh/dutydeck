@@ -127,6 +127,15 @@ describe('PluginStore', () => {
     expect(again).not.toHaveBeenCalled();
   });
 
+  it('reports same-version local content replacement as changed', async () => {
+    const source = join(temp, 'local');
+    await writePlugin(source, declarative('local'));
+    await store.install(source);
+    await writePlugin(source, { 'commands/summary.md': 'new contents' });
+    expect(await store.update('local')).toMatchObject({ changed: true });
+    expect(await readFile(join(store.pluginDir('local'), 'commands/summary.md'), 'utf8')).toBe('new contents');
+  });
+
   it('installs an npm package from a local tarball source and records its version', async () => {
     const pkg = join(temp, 'pkg');
     await writePlugin(pkg, { ...declarative('npmdemo', '2.0.0'), 'package.json': JSON.stringify({ name: 'npmdemo-plugin', version: '2.0.1', files: ['.dutydeck-plugin', 'commands', 'triggers'] }) });
@@ -163,6 +172,15 @@ describe('dutydeck plugin CLI', () => {
     expect((await cli('list', [])).out).toContain('已停用');
     expect((await cli('uninstall', ['hello'])).ok).toBe(true);
     expect((await cli('list', [])).out).toContain('还没有安装插件');
+  });
+
+  it('prints restart guidance after updating local content without a version bump', async () => {
+    await writePlugin(join(temp, 'local'), declarative('local'));
+    await cli('install', ['./local']);
+    await writePlugin(join(temp, 'local'), { 'commands/summary.md': 'new contents' });
+    const result = await cli('update', ['local']);
+    expect(result.out).toContain('dutydeck restart');
+    expect(result.out).not.toContain('已是最新');
   });
 
   it('validate exits non-zero and lists issues', async () => {

@@ -145,3 +145,27 @@ describe('v13 Schedule foundation repositories', () => {
     rmSync(directory, { recursive: true, force: true });
   });
 });
+
+
+it('reads invalid historical calendar dates as disabled and permits a validated repair', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'schedule-invalid-date-'));
+  const path = join(directory, 'test.db');
+  const repositories = createRepositories(path);
+  const db = new Database(path);
+  try {
+    await repositories.channelBots.create({ id: 'bot-schedule', channel: 'lark', externalAppId: 'cli_dates', displayName: 'Dates', brand: 'feishu', state: 'staged' });
+    const good = definition('valid-date', { trigger: { kind: 'at', localDateTime: '2026-02-28T09:00' }, dstPolicy: { gap: 'shift_forward', overlap: 'first' } });
+    await repositories.scheduleDefinitions.create(good);
+    await repositories.scheduleDefinitions.create({ ...good, id: 'legacy-date' });
+    db.prepare("UPDATE schedule_definitions SET at_local_datetime = ?, state = 'enabled', desired_executor_state = 'enabled' WHERE id = ?").run('2026-02-30T09:00', 'legacy-date');
+    const listed = await repositories.scheduleDefinitions.list();
+    expect(listed).toHaveLength(2);
+    expect(listed.find(item => item.id === 'legacy-date')).toMatchObject({ state: 'disabled', desiredExecutorState: 'disabled', trigger: { kind: 'at', localDateTime: '2026-02-30T09:00' } });
+    expect((await repositories.scheduleDefinitions.readiness('legacy-date')).executionEligible).toBe(false);
+    await expect(repositories.scheduleDefinitions.update('legacy-date', { expectedRevision: 1, state: 'enabled' })).rejects.toThrow();
+    const repaired = await repositories.scheduleDefinitions.update('legacy-date', { expectedRevision: 1, trigger: { kind: 'at', localDateTime: '2026-02-28T09:00' } });
+    expect(repaired.state).toBe('disabled');
+    await expect(repositories.scheduleDefinitions.create({ ...good, id: 'bad-new', trigger: { kind: 'at', localDateTime: '2026-02-30T09:00' } })).rejects.toThrow();
+    await expect(repositories.scheduleDefinitions.update('valid-date', { expectedRevision: 1, trigger: { kind: 'at', localDateTime: '2026-02-28T25:00' } })).rejects.toThrow();
+  } finally { db.close(); repositories.close(); rmSync(directory, { recursive: true, force: true }); }
+});

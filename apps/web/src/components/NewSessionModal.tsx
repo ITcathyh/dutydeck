@@ -111,7 +111,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
   </Dialog>;
 
   const submitDisabled = create.isPending || (mode === 'task' && !goal.trim()) || (permissionMode === 'full-trust' && !fullTrustConfirmed);
-  // 提交进行中不允许 Escape / 点遮罩关闭：会把一个已经发出的写操作丢在半路（契约 §8.1）。
+  // 提交进行中禁用所有关闭入口：会把一个已经发出的写操作丢在半路（契约 §8.1）。
   return <Dialog open onClose={onClose} label={mode === 'schedule' ? '创建定时任务' : '创建新任务'} size="sm" closeOnEscape={!create.isPending} closeOnScrim={!create.isPending}>
     <form onSubmit={(event: FormEvent) => { event.preventDefault(); create.mutate(); }} className="flex min-h-0 flex-1 flex-col">
       <Dialog.Header>
@@ -119,7 +119,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
           <h2 className="text-title font-semibold text-primary">{mode === 'schedule' ? '创建定时任务' : '创建新任务'}</h2>
           <p className="mt-1 text-caption text-subtle">{mode === 'schedule' ? '先准备运行环境，再填写执行指令与时间。会启动空闲 Agent，保存计划后需另行启用。' : '写清目标即可开始；模型和推理强度可以使用 Agent 默认值。'}</p>
         </div>
-        <span className="ml-auto"><IconButton label="关闭" onClick={onClose}><X size={16}/></IconButton></span>
+        <span className="ml-auto"><IconButton label="关闭" onClick={onClose} disabled={create.isPending}><X size={16}/></IconButton></span>
       </Dialog.Header>
       <Dialog.Body>
         <div className="space-y-4">
@@ -170,7 +170,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
         </div>
       </Dialog.Body>
       <Dialog.Footer>
-        <Button variant="secondary" onClick={onClose}>取消</Button>
+        <Button variant="secondary" onClick={onClose} disabled={create.isPending}>取消</Button>
         <Button type="submit" variant="primary" loading={create.isPending} disabled={submitDisabled} className="min-w-24">{mode === 'schedule' ? '下一步：设置计划' : createdSession ? '重试发送' : '创建并执行'}</Button>
       </Dialog.Footer>
     </form>

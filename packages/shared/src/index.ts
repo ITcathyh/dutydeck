@@ -532,6 +532,7 @@ export * from './pull-requests.js';
 export * from './work-items.js';
 
 export * from './permission-display.js';
+export * from './credential-redaction.js';
 export * from './agent-command-approval.js';
 export * from './remote-approval.js';
 export * from './agent-model-service.js';

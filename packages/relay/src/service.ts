@@ -1,5 +1,5 @@
 import { RelayError, type RelayAskChoice, type RelayEventPublisher } from './types.js';
-import { RelayAskBroker, type RelayAskOutcome } from './ask-broker.js';
+import { RelayAskBroker, type RelayAskContext, type RelayAskOutcome } from './ask-broker.js';
 import { RelayCapabilityRegistry, relayBearerToken } from './capability.js';
 
 /** 单条回传消息的长度上限，防止一次 send 把事件流灌爆 */
@@ -58,7 +58,7 @@ export class RelayService {
   }
 
   /** 阻塞提问：Promise 直到被回答/超时/取消才 resolve（HTTP 响应因此被扣住） */
-  async ask(authorization: string | undefined, sessionId: string | undefined, input: unknown): Promise<RelayAskOutcome> {
+  async ask(authorization: string | undefined, sessionId: string | undefined, input: unknown, context: RelayAskContext = {}): Promise<RelayAskOutcome> {
     const capability = await this.capabilities.resolve(relayBearerToken(authorization), sessionId);
     requireAskInput(input);
     const question = requireText(input.question, 'RELAY_QUESTION_REQUIRED', '提问内容');
@@ -67,7 +67,7 @@ export class RelayService {
       // 不能用 truthy：choices:null 必须进 broker 的校验抛 400，而不是被静默当成普通提问登记。
       ...(input.choices !== undefined ? { choices: input.choices } : {}),
       ...(input.multiple === true ? { multiple: true } : {})
-    });
+    }, context);
   }
 
   /** 从 token 反解会话 id，供路由在注册终态唤醒时使用 */

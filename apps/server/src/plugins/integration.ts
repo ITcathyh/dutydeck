@@ -16,6 +16,7 @@ import { assemblePrompt } from '../prompt-context.js';
 import type { PrepareSkillPromptResult } from '../skill-delivery.js';
 import type { PluginHookBus } from './hooks.js';
 import type { TriggerDispatch } from './triggers.js';
+import { scopeApplies } from './scope.js';
 
 /** 触发器开的会话：sourceId 为 `<appId>:<chatId>:plugin:<插件>:<触发器>`。 */
 export const PLUGIN_TRIGGER_SOURCE = 'plugin_trigger';
@@ -117,12 +118,17 @@ export function createTriggerDispatcher(deps: {
     const bot = await deps.readBot(request.target.botAppId);
     if (!bot) throw new Error(`机器人 ${request.target.botAppId} 未配置`);
     const sourceId = `${bot.appId}:${request.target.chatId}:plugin:${request.plugin}:${request.triggerId}`;
-    let sessionId: string | undefined;
+    let session: Session | undefined;
     if (request.target.session === 'reuse') {
-      sessionId = (await deps.runtime.listSessions())
+      session = (await deps.runtime.listSessions())
         .filter(session => session.source === PLUGIN_TRIGGER_SOURCE && session.sourceId === sourceId && !session.archivedAt && !['stopped', 'failed'].includes(session.state))
-        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]?.id;
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
     }
+    const cwd = session ? session.cwd : bot.workspace;
+    if (!scopeApplies(request.scope, { botAppId: bot.appId, ...(cwd ? { cwd } : {}) })) {
+      throw new Error(`插件 ${request.plugin} 的作用域不允许在目标会话工作区执行`);
+    }
+    let sessionId = session?.id;
     if (!sessionId) {
       const agentId = bot.defaultAgentId ?? deps.fallbackAgentId();
       if (!agentId) throw new Error('没有可用的 Agent');

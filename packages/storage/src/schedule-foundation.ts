@@ -10,6 +10,8 @@ import {
   previewNextSchedule,
   renewScheduleLeaseInputSchema,
   scheduleDefinitionSchema,
+  scheduleTriggerSchema,
+  storedScheduleTriggerSchema,
   scheduleGenerationSchema,
   scheduleLeaseSchema,
   scheduleOccurrenceSchema,
@@ -81,8 +83,9 @@ function triggerFromRow(row: DefinitionRow): ScheduleDefinition['trigger'] {
   if (row.trigger_kind === 'interval') return { kind: 'interval', everySeconds: row.interval_seconds!, anchorAt: row.interval_anchor_at! };
   return { kind: 'cron', expression: row.cron_expression! };
 }
+const storedDefinitionSchema = scheduleDefinitionSchema.extend({ trigger: storedScheduleTriggerSchema });
 function decodeDefinition(row: DefinitionRow): ScheduleDefinition {
-  return scheduleDefinitionSchema.parse({
+  const definition = storedDefinitionSchema.parse({
     schemaVersion: row.schema_version, id: row.id, revision: row.revision, channelBotId: row.channel_bot_id,
     groupBindingId: row.group_binding_id ?? undefined, name: row.name, description: row.description ?? undefined,
     trigger: triggerFromRow(row), timezone: row.timezone, dstPolicy: { gap: row.dst_gap_policy, overlap: row.dst_overlap_policy },
@@ -93,6 +96,8 @@ function decodeDefinition(row: DefinitionRow): ScheduleDefinition {
     desiredExecutorState: row.desired_executor_state, currentGeneration: row.current_generation,
     createdAt: row.created_at, updatedAt: row.updated_at
   });
+  return scheduleTriggerSchema.safeParse(definition.trigger).success ? definition
+    : { ...definition, state: 'disabled', desiredExecutorState: 'disabled' };
 }
 function decodeGeneration(row: GenerationRow): ScheduleGeneration {
   return scheduleGenerationSchema.parse({ schemaVersion: row.schema_version, id: row.id, scheduleDefinitionId: row.schedule_definition_id, generation: row.generation, definitionRevision: row.definition_revision, definitionHash: row.definition_hash, timezone: row.timezone, identityRef: row.identity_ref ?? undefined, secretRef: row.secret_ref ?? undefined, state: row.state, createdAt: row.created_at });

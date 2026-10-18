@@ -2,7 +2,7 @@ import { checkSqliteDriver, describeSqliteDriverFailure } from '@dutydeck/storag
 import Database from 'better-sqlite3';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOSTART_LINUX_UNIT } from '../autostart/autostart.js';
 import type { DeployCliOptions, DeployPruneCliOptions } from '../cli-program.js';
@@ -264,7 +264,7 @@ function databaseSchema(file: string): { version: number; fingerprint: string } 
 export const RELEASES_TO_KEEP = 5;
 /** 写进 manifest.json 的来源标记：只有带它的部署记录才会被自动清理，手工部署留下的记录不动。 */
 export const DEPLOY_RECORD_CREATOR = 'dutydeck deploy';
-const RELEASE_NAME = /^\d{8}T\d{6}Z-[0-9a-f]{7}(-dirty)?$/;
+const RELEASE_NAME = /^\d{8}T\d{6}Z-[0-9a-f]{7}(-dirty)?(-[A-Za-z0-9]{6})?$/;
 const PARTIAL_NAME = /^\..+\.partial$/;
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -570,12 +570,13 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
   if (build.dirty) warn(`${source} 有未提交的改动；发布目录按提交 ${build.commit.slice(0, 7)} 命名，内容包含这些改动。`);
 
   const startedAt = now();
-  const id = `${startedAt.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}-${build.commit.slice(0, 7)}${build.dirty ? '-dirty' : ''}`;
+  const prefix = `${startedAt.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}-${build.commit.slice(0, 7)}${build.dirty ? '-dirty' : ''}`;
+  mkdirSync(target.deployments, { recursive: true, mode: 0o700 });
+  const record = mkdtempSync(join(target.deployments, `${prefix}-`));
+  const id = basename(record);
   const release = join(target.releases, id);
-  const record = join(target.deployments, id);
   const manifestPath = join(record, 'manifest.json');
   const previousRelease = currentRelease(target.releases);
-  mkdirSync(record, { recursive: true, mode: 0o700 });
   const manifest: Record<string, unknown> = {
     created_by: DEPLOY_RECORD_CREATOR, commit: build.commit, dirty: build.dirty, source, unit: target.unit, release, previous_release: previousRelease ?? null,
     backup: record, status: 'preparing', started_at: startedAt.toISOString()

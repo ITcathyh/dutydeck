@@ -254,6 +254,9 @@ it('carries bot-scoped model settings to the new appId when renaming a bot throu
   expect(renamed.json().bots.map((bot: { appId: string }) => bot.appId)).toEqual(['cli_new']);
   expect((await settings.resolve(agent, 'cli_new')).env).toMatchObject({ ANTHROPIC_BASE_URL: 'https://route.example', ANTHROPIC_AUTH_TOKEN: 'ROUTE_MOVE' });
   expect(await repos.config.get('dutydeck.bot_agent_model.cli_old.claude')).toBe('{}');
+  const returned = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { originalAppId: 'cli_new', appId: 'cli_old' } });
+  expect(returned.statusCode).toBe(200);
+  expect((await settings.resolve(agent, 'cli_old')).env).toMatchObject({ ANTHROPIC_BASE_URL: 'https://route.example', ANTHROPIC_AUTH_TOKEN: 'ROUTE_MOVE' });
 });
 
 it('CLI and bot routes require an owner and an existing bot, save independently, and remove its secret files', async () => {
@@ -349,4 +352,54 @@ it('real AcpxAdapter persists and reopens separate bot sessions without secrets 
     expect(matches.length).toBeGreaterThanOrEqual(2);
     for (const report of matches) expect(report).toEqual({ key: bot.authMode === 'api-key' ? bot.apiKey : '', token: bot.authMode === 'bearer' ? bot.apiKey : '', base: bot.baseUrl });
   }
+});
+
+
+it('renames back into a tombstone without losing settings or the real secret file', async () => {
+  const { settings, repos, provider, agent } = await fixture();
+  await settings.set('claude', { baseUrl: 'https://roundtrip.example', authMode: 'api-key', apiKey: 'ROUNDTRIP' }, 'a');
+  const original = await repos.config.get('dutydeck.bot_agent_model.a.claude');
+  const reference = JSON.parse(original!).referenceKey;
+  await settings.renameBot('a', 'b');
+  await settings.renameBot('b', 'a');
+  expect(await repos.config.get('dutydeck.bot_agent_model.a.claude')).toBe(original);
+  expect(provider.inspect(reference).availability).toBe('available');
+  expect((await settings.resolve(agent, 'a')).env.ANTHROPIC_API_KEY).toBe('ROUNDTRIP');
+  await settings.set('claude', { apiKey: 'DISCARD' }, 'b');
+  await settings.clearBot('b');
+  await settings.renameBot('a', 'b');
+  expect(await repos.config.get('dutydeck.bot_agent_model.b.claude')).toBe(original);
+  expect((await settings.resolve(agent, 'b')).env.ANTHROPIC_API_KEY).toBe('ROUNDTRIP');
+  await settings.renameBot('b', 'b');
+  expect(await repos.config.get('dutydeck.bot_agent_model.b.claude')).toBe(original);
+});
+
+it.each([undefined, 'bot-a'])('serializes concurrent patches and key deletion in scope %s', async appId => {
+  const { settings, repos, provider, agent } = await fixture();
+  const second = new AgentModelSettings(repos, [agent], provider);
+  await settings.set('claude', { apiKey: 'OLD_KEY' }, appId);
+  await Promise.all([
+    settings.set('claude', { clearApiKey: true }, appId),
+    second.set('claude', { baseUrl: 'https://concurrent.example' }, appId),
+    settings.set('claude', { authMode: 'api-key' }, appId)
+  ]);
+  expect(await settings.get('claude', appId)).toMatchObject({ baseUrl: 'https://concurrent.example', authMode: 'api-key', hasApiKey: false, apiKeyAvailable: false });
+  expect((await settings.resolve(agent, appId)).env).toEqual(agent.env);
+  await Promise.all([settings.set('claude', { apiKey: 'NEW_KEY' }, appId), second.set('claude', { clearApiKey: true }, appId)]);
+  expect((await settings.get('claude', appId)).hasApiKey).toBe(false);
+  await Promise.all([settings.set('claude', { clearApiKey: true }, appId), second.set('claude', { apiKey: 'LAST_KEY' }, appId)]);
+  expect((await settings.resolve(agent, appId)).env.ANTHROPIC_API_KEY).toBe('LAST_KEY');
+});
+
+it('coordinates clear and rename with patches while preserving separate scope credentials', async () => {
+  const { settings, agent } = await fixture();
+  await settings.set('claude', { apiKey: 'GLOBAL' });
+  await settings.set('claude', { apiKey: 'BOT_A' }, 'a');
+  await settings.set('claude', { apiKey: 'BOT_B' }, 'b');
+  await Promise.all([settings.set('claude', { baseUrl: 'https://clear.example' }, 'a'), settings.clearBot('a')]);
+  expect((await settings.get('claude', 'a')).hasApiKey).toBe(false);
+  await Promise.all([settings.set('claude', { baseUrl: 'https://rename.example' }, 'b'), settings.renameBot('b', 'a')]);
+  expect((await settings.resolve(agent, 'a')).env).toMatchObject({ ANTHROPIC_AUTH_TOKEN: 'BOT_B', ANTHROPIC_BASE_URL: 'https://rename.example' });
+  expect((await settings.get('claude', 'b')).hasApiKey).toBe(false);
+  expect((await settings.resolve(agent)).env.ANTHROPIC_AUTH_TOKEN).toBe('GLOBAL');
 });

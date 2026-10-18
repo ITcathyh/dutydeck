@@ -7,3 +7,9 @@ export function entryMentionsMarker(entry: any, marker: string): boolean {
   return content.some((block: any) =>
     block && typeof block === 'object' && typeof block.text === 'string' && block.text.includes(marker));
 }
+
+/** Only main-stream user records can establish session ownership. */
+export function userEntryMentionsMarker(entry: any, marker: string): boolean {
+  return entry?.type === 'user' && entry?.message?.role === 'user'
+    && entry?.isSidechain !== true && entryMentionsMarker(entry, marker);
+}

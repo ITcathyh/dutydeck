@@ -29,6 +29,7 @@ export const isRelayCapabilityRequest = (method: string, pathname: string) =>
 
 /** 会话进入这些状态时，把该会话所有阻塞中的 ask 唤醒 */
 const terminalStates = new Set(['stopped', 'failed']);
+const endedTaskStates = new Set(['completed', 'failed', 'interrupted', 'cancelled', 'reconcile_required']);
 
 /**
  * 事件流投递适配器：把 relay 的抽象消息映射成 runtime 的 `text` 事件。
@@ -87,29 +88,37 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
 
   // 会话终态唤醒：ask 阻塞期间会话被 stop/archive/崩溃，必须把等待者放出来，
   // 否则 CLI 子进程会一直挂在那次 HTTP 长轮询上。只用公开的 runtime.subscribe。
-  const watched = new Map<string, { references: number; unsubscribe(): void }>();
+  type Waiter = { taskId?: string; attemptId?: string; controller: AbortController };
+  const watched = new Map<string, { waiters: Set<Waiter>; unsubscribe(): void }>();
   const unwatch = (sessionId: string, entry = watched.get(sessionId)) => {
     if (!entry || watched.get(sessionId) !== entry) return;
     entry.unsubscribe();
     watched.delete(sessionId);
   };
-  const watchSession = (sessionId: string) => {
+  const watchSession = (sessionId: string, waiter: Waiter) => {
     if (!runtime) return;
     let entry = watched.get(sessionId);
     if (!entry) {
-      const current = { references: 0, unsubscribe: () => {} };
+      const current = { waiters: new Set<Waiter>(), unsubscribe: () => {} };
       current.unsubscribe = runtime.subscribe(sessionId, event => {
-        const state = (event.data as { state?: string } | undefined)?.state;
-        if (event.type !== 'status' || !state || !terminalStates.has(state)) return;
-        broker.cancelSession(sessionId, `会话已${state === 'stopped' ? '停止' : '失败'}`);
+        const data = event.data as { state?: string; task?: { id: string; status: string } } | undefined;
+        if (event.type === 'task' && data?.task && endedTaskStates.has(data.task.status)) {
+          for (const waiting of current.waiters) {
+            if (waiting.taskId === data.task.id && (!waiting.attemptId || waiting.attemptId === event.attemptId)) waiting.controller.abort('任务已结束');
+          }
+        }
+        if (event.type !== 'status' || !data?.state || !terminalStates.has(data.state)) return;
+        const reason = `会话已${data.state === 'stopped' ? '停止' : '失败'}`;
+        for (const waiting of current.waiters) waiting.controller.abort(reason);
+        broker.cancelSession(sessionId, reason);
         unwatch(sessionId, current);
       });
       watched.set(sessionId, current);
       entry = current;
     }
-    entry.references++;
+    entry.waiters.add(waiter);
     const current = entry;
-    return () => { if (--current.references === 0) unwatch(sessionId, current); };
+    return () => { current.waiters.delete(waiter); if (current.waiters.size === 0) unwatch(sessionId, current); };
   };
 
   app.addHook('onClose', async () => {
@@ -141,8 +150,13 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
       // 先反解会话再注册终态唤醒：必须在阻塞之前挂上监听，
       // 否则「注册监听」这一步永远等不到执行，会话结束时无人唤醒。
       const capability = await service.resolveSession(request.headers.authorization, request.params.id);
-      release = watchSession(capability.sessionId);
-      const outcome = await service.ask(request.headers.authorization, request.params.id, request.body ?? {});
+      const owner = runtime?.getActiveTaskContext(capability.sessionId);
+      const controller = new AbortController();
+      release = watchSession(capability.sessionId, { ...owner, controller });
+      // The durable settlement may already precede subscription while the
+      // in-memory active task is still being cleaned up.
+      if (owner && endedTaskStates.has((await runtime!.getTaskRecovery(capability.sessionId, owner.taskId)).status)) controller.abort('任务已结束');
+      const outcome = await service.ask(request.headers.authorization, request.params.id, request.body ?? {}, { ...owner, signal: controller.signal });
       // 长轮询结果一律 200：answered / expired / cancelled 都是通道正常工作的结果，
       // CLI 侧据 status 决定退出码，不靠 HTTP 状态码区分。
       return outcome;

@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCliUi } from '../cli-ui.js';
 import { discoverSkills, setPluginSkillRoots } from '../skill-catalog.js';
 import { runPluginCli } from './cli.js';
@@ -29,7 +29,7 @@ describe('PluginHost', () => {
     dataDir = join(temp, 'data');
     store = new PluginStore(dataDir);
   });
-  afterEach(async () => { await rm(temp, { recursive: true, force: true }); });
+  afterEach(async () => { vi.restoreAllMocks(); await rm(temp, { recursive: true, force: true }); });
 
   it('changes nothing when no plugin is installed', async () => {
     const loaded = await loadDaemonPlugins({ DUTYDECK_DATABASE_URL: join(dataDir, 'dutydeck.db') });
@@ -94,6 +94,36 @@ describe('PluginHost', () => {
     expect(host.diagnostics).toEqual([{ plugin: 'b-ci', message: expect.stringContaining('a-ci') }]);
   });
 
+  it('bounds provider module evaluation, skips the stalled plugin and loads the next plugin', async () => {
+    await writePlugin(join(temp, 'stalled'), { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'a-stalled', providers: 'index.mjs' }), 'index.mjs': 'await new Promise(() => {}); export default () => {};' });
+    await writePlugin(join(temp, 'valid'), { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'b-valid', providers: 'index.mjs' }), 'index.mjs': 'await Promise.resolve(); export default async api => { await Promise.resolve(); api.registerHookHandler("notify", () => ({})); };' });
+    await store.install(join(temp, 'stalled'), { yes: true }); await store.install(join(temp, 'valid'), { yes: true });
+    const setTimer = globalThis.setTimeout;
+    let firstDeadline = true;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((callback, delay, ...args) => {
+      if (delay === 15_000 && firstDeadline) { firstDeadline = false; return setTimer(callback, 40, ...args); }
+      return setTimer(callback, delay, ...args);
+    }) as typeof setTimeout);
+    const host = await Promise.race([PluginHost.load({ dataDir, builtinRoot: join(temp, 'empty') }), new Promise<never>((_, reject) => setTimer(() => reject(new Error('provider startup remained blocked')), 500))]);
+    expect(host.active.map(item => item.entry.name)).toEqual(['b-valid']);
+    expect(host.hooks.has('notify')).toBe(true);
+    expect(host.diagnostics).toEqual([{ plugin: 'a-stalled', message: expect.stringContaining('15000ms') }]);
+  });
+
+  it('does not invoke register when module evaluation resolves after the startup deadline', async () => {
+    const marker = join(temp, 'registered');
+    await writePlugin(join(temp, 'late'), { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'late', providers: 'index.mjs' }),
+      'index.mjs': `import { writeFileSync } from 'node:fs'; await new Promise(resolve => setTimeout(resolve, 100)); writeFileSync(${JSON.stringify(marker + '.evaluated')}, 'evaluated'); export default api => { writeFileSync(${JSON.stringify(marker)}, 'registered'); api.registerHookHandler('notify', () => ({})); };` });
+    await store.install(join(temp, 'late'), { yes: true });
+    const setTimer = globalThis.setTimeout;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((callback, delay, ...args) => setTimer(callback, delay === 15_000 ? 40 : delay, ...args)) as typeof setTimeout);
+    const host = await PluginHost.load({ dataDir, builtinRoot: join(temp, 'empty') });
+    await vi.waitFor(() => expect(existsSync(marker + '.evaluated')).toBe(true));
+    expect(host.active).toEqual([]); expect(host.hooks.has('notify')).toBe(false);
+    expect(existsSync(marker)).toBe(false);
+    expect(host.diagnostics).toEqual([{ plugin: 'late', message: expect.stringContaining('15000ms') }]);
+  });
+
   it('resolves trigger targets from userConfig and hides triggers until configured', async () => {
     await store.install(examplePlugin, { yes: true });
     expect((await PluginHost.load({ dataDir })).trigger('hello', 'ping')).toBeUndefined();
@@ -132,7 +162,7 @@ describe('PluginHost', () => {
 describe('pluginDoctorChecks', () => {
   let temp: string;
   beforeEach(async () => { temp = await mkdtemp(join(tmpdir(), 'dutydeck-plugin-doctor-')); });
-  afterEach(async () => { await rm(temp, { recursive: true, force: true }); });
+  afterEach(async () => { vi.restoreAllMocks(); await rm(temp, { recursive: true, force: true }); });
 
   it('reports nothing without plugins, then setup gaps, untrusted capabilities and broken plugins', async () => {
     const { pluginDoctorChecks } = await import('./doctor.js');
@@ -169,7 +199,7 @@ describe('scenario packs: trust boundary, builtin plugins and wiring', () => {
     marker = join(temp, 'imported.marker');
     await mkdir(builtinRoot);
   });
-  afterEach(async () => { await rm(temp, { recursive: true, force: true }); });
+  afterEach(async () => { vi.restoreAllMocks(); await rm(temp, { recursive: true, force: true }); });
 
   const cli = async (action: Parameters<typeof runPluginCli>[0], args: string[], options: Parameters<typeof runPluginCli>[2] = {}) => {
     let out = '';

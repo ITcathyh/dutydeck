@@ -411,7 +411,7 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 ### 1. 任务看板与终端回放
 - 任务按 **「待处理」**（等审批 / 待回答）、**「进行中」**、**「已完成」**、**「已归档」** 分层。
 - 卡片显示耗时、工具调用明细和最终产物。
-- 当前任务的标题和摘要以已加载的执行记录为准，不会被滞后的任务列表刷新覆盖。
+- 当前任务的标题和摘要以已加载的执行记录为准，不会被滞后的任务列表刷新覆盖；再次选择当前任务会保留未发送的输入。创建任务或准备定时任务提交期间，关闭和取消入口暂时禁用。
 - **终端回放只有终端模式（`pty-cli`）Agent 才有**，最多保留 5000 行；ACP Agent 没有终端。
 - 支持新指令排队，也可以「立即中断」抢占。
 - 会话的交付面板里有「每轮改动」列表。
@@ -443,6 +443,8 @@ Web 侧栏「用量与成本」有「费用」「明细」「会话分析」三�
 ### 5. 通用定时任务
 
 在 Web「任务计划」中点「创建定时任务」，选择 Agent、目录和权限后保存计划；保存只创建空闲会话，不发送执行指令。也可在已有任务的「工作目录与自动化」中创建计划，沿用该任务的目录、模型、权限和上下文。新计划默认停用，启用后才定时执行。支持指定时区的一次、每天、每周、固定间隔和五段 Cron；每分钟检查一次，服务恢复后最多补一次，同一计划有未结束或结果待核对的执行时不再启动下一次。
+
+Cron 的日期和星期字段中，只要有一项以 `*` 开头（包括 `*/n`），两项都须匹配；两项都有限定值时，任一匹配即可。例如 `0 9 */2 * 1` 只在每月奇数日且为周一的 09:00 触发。一次性计划拒绝无效日历日期或时间（如 2 月 30 日）；历史无效计划仍可查看和修改，但保持停用，修正后才能启用。
 
 CLI 使用同一套接口，结果为 JSON：
 
@@ -528,6 +530,8 @@ Dutydeck 支持 ACP（Agent Client Protocol），也支持用 PTY 驱动已有�
 `timeout` 以秒为单位，默认 `600`，必须能精确换算为 1–2147483647 的整数毫秒（即 `0.001`–`2147483.647` 秒）。模型目录的备用 CLI 探测使用该 Agent 实际配置的直接 CLI 可执行路径、清洗后的 `env` 和 `cwd`，只透传已支持的全局选项（带值选项须分开参数和值）。其他启动参数、等号形式或包装命令不执行备用探测，保留配置中的默认模型，不替换成宿主命令。
 
 #### 终端任务状态与恢复
+
+Codex 和 TraeX 恢复原生会话时，只使用能确认属于当前会话的记录；继承的上下文不足以证明归属时会拒绝恢复，避免续接其他会话。
 
 Codex 和 TraeX 终端任务按当前原生轮次的成功、失败或取消事件结算，部分回答不抵消随后出现的失败；取消记为中断。TraeX 可读取含大型模型目录的会话元数据，正常接收最终回答并结束任务；恢复会先读完同一会话的旧日志段，再读取新段；新版 canonical 记录保留过程、输入回执和最终回答，并去除镜像重复。
 
@@ -620,7 +624,7 @@ my-plugin/
 | skills | 作为一个 skills 根目录加载 | 否 |
 | triggers | 外部系统通过 HTTP 触发一次任务（见下） | 否 |
 | hooks | 在任务生命周期的几个点执行你的命令（见下） | **是**（按事件分别确认，如 `hooks:task.received`） |
-| providers | 入口模块导出 `register(api)`，注册 CI 提供方、场景包 provider 或进程内 hook；最多等 15 秒，超时只跳过这个插件 | **是** |
+| providers | 入口模块导出 `register(api)`，注册 CI 提供方、场景包 provider 或进程内 hook；模块加载和注册合计最多等 15 秒，超时跳过这个插件，忽略后续注册 | **是** |
 | scenarios | 场景包：群里出现某类消息时按包里写好的规则处理（见[怎么写场景包](#scenario-packs)）。包本身是 JSON，不执行代码；它引用的 provider 随 providers 一起确认 | 否 |
 
 ### 信任确认
@@ -637,7 +641,7 @@ agents、hooks、providers 会执行代码或命令，安装时要确认。daemo
 
 - `global`（默认）：处处生效。
 - `bot:<appId>`：只对这个机器人的会话生效；触发器的目标机器人也必须是它。Web 会话没有机器人，所以 bot 作用域的命令、skills、hooks 在 Web 里不生效。
-- `workspace:<绝对路径>`：会话工作目录在该路径下才生效。
+- `workspace:<绝对路径>`：会话工作目录在该路径下才生效。触发器也检查此范围：新会话检查机器人的工作目录，复用会话检查该会话的实际目录；缺少目录或越界时不派发任务。
 - agents 不受作用域限制，全局合并。
 
 ### 内置插件 <a id="builtin-plugins"></a>
@@ -665,7 +669,7 @@ dutydeck plugin uninstall <名字>
 ```
 
 - `<来源>`：本地目录、`git+https://…`、`git@…`、`file://…`（`#ref` 固定分支、标签或提交）、`npm:包名@版本`。git 来源按提交 SHA 固定。
-- 插件的增删改、启停都要 `dutydeck restart` 后才生效。
+- 插件的增删改、启停都要 `dutydeck restart` 后才生效。本地目录来源每次 `plugin update` 都重新复制并报告“已更新”，即使版本号未变，也会提示重启。
 - `plugin validate` 也校验场景包（格式、模板变量、正则、参数），出错报文件和字段；`install`、`update` 不因场景包的问题失败，但会列出不会加载的包和原因。
 - 数据放在数据库所在目录的 `plugins/` 下：`plugins.lock.json`（来源、固定版本、作用域、已确认能力）、`<名字>/`（安装副本）、`.data/<名字>/`（插件自己的可写目录）。`.trigger-tokens.json` 和 `.config.json` 权限 0600；敏感配置存在本机密钥存储里。
 
@@ -905,6 +909,7 @@ Web 控制台里的机器人设置、群聊策略和用量上限，都可以用�
 |---|---|
 | 机器人设置 | `dutydeck settings bot list / show / set / add / remove / install-hook` |
 | 群聊协作策略 | `dutydeck settings group list / show / set / members / sync` |
+| 实验草稿 Bot 与 SecretRef 引用 | `dutydeck settings channel-bot list / show / set` |
 | 月度用量上限 | `dutydeck settings usage show / set-cap / remove-cap` |
 | 主终端后端 | `dutydeck settings terminal-backend [tmux\|herdr]` |
 | 工作区分组 | `dutydeck workspace-groups` |
@@ -919,6 +924,17 @@ dutydeck settings group set oc_xxx 'scenarios={"alarm":{"enabled":true,"params":
 ```
 
 群里的场景包用 `scenarios={"<包 id>":{"enabled":true|false,"params":{...}}}` 改，`params` 只写要改的键，`{"<包 id>":null}` 删掉这个包的绑定；`group show` 列出本群可用的包、参数和当前绑定。`direct` 模式的包（如告警初筛）要先在群里点确认卡开启过一次，之后才能用命令行或 Web 改。旧的 `alarm=<JSON>`（平铺的告警订阅）作为弃用别名保留一个版本，会转成 `scenarios.alarm`，输出里带弃用提示。
+
+实验页「群配置与权限」里的 Bot 用 `channel-bot` 管理，参数是 `list` 返回的内部 `id`，不是飞书 App ID：
+
+```bash
+dutydeck settings channel-bot list
+dutydeck settings channel-bot show <id>
+dutydeck settings channel-bot set <id> credentialRef=<secret-ref-id> --expected-revision 3
+dutydeck settings channel-bot set <id> credentialRef=null
+```
+
+可改 `externalAppId`、`displayName`、`brand=feishu|lark`、`credentialRef` 和 `state=staged|disabled`。省略的键保持原值，`credentialRef=null` 清除引用；不传 `--expected-revision` 时使用刚读取的版本，版本冲突会拒绝保存。命令只改草稿元数据，监听仍停用；已接入运行时的机器人继续用 `settings bot` 管理。支持同样的 `--instance`、`--url` 和 `--database` 目标选项，不返回凭据值。
 
 机器人自动欢迎默认开启。设置 `welcomeEnabled=false` 可关闭入群和首次私聊欢迎；保存后立即生效，不改变用户消息处理。需要群里只在被 @ 时回复时，同时使用 `mentionPolicy=always` 和 `defaultGroupParticipation=off`。
 

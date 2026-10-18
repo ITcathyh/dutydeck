@@ -54,3 +54,33 @@ describe('Herdr controller snapshot handoff', () => {
     await backend.detach(); expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+it('rejects a stdin failure before the first frame and disposes only the controller', async () => {
+  const backend = fixture(), target = child();
+  spawn.mockReturnValueOnce(target);
+  const ready = backend.attach({ cols: 80, rows: 24 });
+  const rejected = expect(ready).rejects.toThrow('broken controller stdin');
+  await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+  target.stdin.emit('error', new Error('broken controller stdin'));
+  await rejected;
+  expect(target.kill).toHaveBeenCalledTimes(1);
+  expect(await backend.isStopped()).toBe(false);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('ignores late stdin failures from a replaced controller and reports one current disconnect', async () => {
+  const backend = fixture(), first = child(), second = child();
+  await start(backend, first, 'FIRST', '');
+  await start(backend, second, 'SECOND', '');
+  const disconnect = vi.fn(), exit = vi.fn();
+  backend.onDisconnect(disconnect); backend.onExit(exit);
+  first.stdin.emit('error', new Error('old failure'));
+  expect(second.kill).not.toHaveBeenCalled();
+  expect(disconnect).not.toHaveBeenCalled();
+  second.stdin.emit('error', new Error('current failure'));
+  second.emit('exit', 1);
+  await vi.waitFor(() => expect(disconnect).toHaveBeenCalledTimes(1));
+  expect(exit).not.toHaveBeenCalled();
+  expect(second.kill).toHaveBeenCalledTimes(1);
+  expect(vi.getTimerCount()).toBe(0);
+});

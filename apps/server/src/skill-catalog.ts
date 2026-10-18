@@ -1,6 +1,6 @@
 import { readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 export interface SkillReference {
   name: string;
@@ -40,7 +40,7 @@ export function skillRoots(workspaceRoot: string, homeRoot: string, botAppId?: s
 
 export function isPathInside(child: string, parent: string): boolean {
   const rel = relative(parent, child);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 async function findSkillFiles(rootPath: string, maxDepth = 5): Promise<string[]> {

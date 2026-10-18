@@ -133,3 +133,19 @@ it('authorizes run/delete/read, validates bodies and passes the trusted actor', 
   expect(target.deleteSchedule).toHaveBeenCalledOnce();
   expect(target.getScheduleHistory).toHaveBeenCalledOnce();
 });
+
+
+it.each(['2026-02-30T09:00', '2026-02-28T25:00'])('rejects invalid local calendar time %s in create and patch', async localDateTime => {
+  const app = Fastify(); apps.push(app);
+  const target = service();
+  await registerSessionAutomationRoutes(app, { service: target, authorize: async () => true });
+  const trigger = { kind: 'at', localDateTime };
+  const created = await app.inject({ method: 'POST', url: '/api/sessions/ses_1/automation/schedules', payload: { name: 'Invalid', prompt: 'run', trigger, timezone: 'UTC', dstPolicy: { gap: 'shift_forward', overlap: 'first' }, condition: { kind: 'always' } } });
+  const updated = await app.inject({ method: 'PATCH', url: '/api/sessions/ses_1/automation/schedules/schedule_1', payload: { expectedRevision: 1, trigger } });
+  for (const response of [created, updated]) {
+    expect(response.statusCode).toBe(400);
+    expect(response.json().code).toBe('SESSION_AUTOMATION_VALIDATION_FAILED');
+  }
+  expect(target.createSchedule).not.toHaveBeenCalled();
+  expect(target.updateSchedule).not.toHaveBeenCalled();
+});

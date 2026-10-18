@@ -44,10 +44,11 @@ import {
   traeSessionsRoot,
   type CliPathEnv,
 } from './cli-paths.js';
-import { parseJsonlObjects, readHead, readTail } from './session-id/fs-scan.js';
+import { nativeTranscriptObjects, parseJsonlObjects, readHead, readTail } from './session-id/fs-scan.js';
 import { buildSessionMarker, isUsableMarker } from './session-id/marker.js';
+import { lastCodexSessionMarker } from './session-id/codex.js';
 import { codexInputText } from './transcript/input-receipt.js';
-import { entryMentionsMarker } from './transcript/claude-content.js';
+import { userEntryMentionsMarker } from './transcript/claude-content.js';
 
 /** Adapter id → Session Insight log client. Adapter ids identify the on-disk
  *  CLIENT (transcript dialect + data root); a model provider is never a
@@ -236,9 +237,7 @@ function verifyClaude(
     const idsInFile = new Set<string>();
     let markerWithoutId = false;
     for (const entry of parseJsonlObjects(readHead(path, MARKER_HEAD_BYTES))) {
-      if (entry?.isSidechain === true) continue;
-      if (entry?.type !== 'user' || entry?.message?.role !== 'user') continue;
-      if (!entryMentionsMarker(entry, marker)) continue;
+      if (!userEntryMentionsMarker(entry, marker)) continue;
       const id = typeof entry?.sessionId === 'string' && entry.sessionId.length > 0 ? entry.sessionId : undefined;
       if (id) idsInFile.add(id);
       else markerWithoutId = true;
@@ -290,7 +289,7 @@ function codexHistoryMarkerIds(historyPath: string, marker: string): Set<string>
  *
  * Identity requires CONTENT evidence that all converges on ONE native id:
  * marker-bearing lines in history.jsonl plus `session_meta` of rollouts whose
- * head user content carries the marker.
+ * user content carries the marker.
  *
  * Strict conservative rules:
  *  - If history.jsonl exceeds HISTORY_TAIL_BYTES, earlier records were truncated
@@ -332,26 +331,46 @@ function verifyCodexFamily(
   if (enumeration.truncated) return undefined;
   const candidates = enumeration.paths.map(path => ({ path }));
 
-  // Rollouts whose OWN head user content carries the marker are self-attributing:
-  // marker + session_meta(id,cwd) in one file independently proves this CLI id,
-  // regardless of whether history.jsonl was fully readable.
+  // The final ownership marker supersedes older prompts. With inherited
+  // metadata, any number of markers could also be inherited: only independent
+  // history can attribute a submission to the first native identity.
   const contentIds = new Set<string>();
+  const rolloutIdentities: Array<{ path: string; id: string | undefined; cwdOk: boolean; envelope?: string; inheritedMeta: boolean }> = [];
   for (const candidate of candidates) {
     if (!isSafeApprovedFile(candidate.path, dataRoot)) continue;
     let metaId: string | undefined;
     let cwdOk: boolean | undefined;
-    let markerInContent = false;
-    for (const entry of parseJsonlObjects(readHead(candidate.path, MARKER_HEAD_BYTES))) {
+    let ownershipEnvelope: string | undefined;
+    let ownershipSessionId: string | undefined;
+    let inheritedMeta = false;
+    let sawMeta = false;
+    let internalAgent = false;
+    for (const entry of nativeTranscriptObjects(candidate.path)) {
       if (entry?.type === 'session_meta') {
+        if (sawMeta) {
+          if ((entry.payload?.id ?? entry.payload?.session_id) !== metaId) { inheritedMeta = true; break; }
+          continue;
+        }
+        sawMeta = true;
+        const source = entry.payload?.source;
+        if (source && typeof source === 'object' && 'subagent' in source) { internalAgent = true; break; }
         const id = entry.payload?.id ?? entry.payload?.session_id;
         if (typeof id === 'string' && id.length > 0) metaId = id;
         if (typeof entry.payload?.cwd === 'string' && entry.payload.cwd.length > 0) {
           cwdOk = realCwd(entry.payload.cwd, env) === wanted;
         }
-      } else if (!markerInContent && codexInputText(entry)?.includes(marker)) {
-        markerInContent = true;
+      } else {
+        const text = codexInputText(entry);
+        const envelope = text === undefined ? undefined : lastCodexSessionMarker(text);
+        if (envelope) {
+          if (ownershipSessionId !== envelope.sessionId || envelope.text.startsWith('<')) ownershipEnvelope = envelope.text;
+          ownershipSessionId = envelope.sessionId;
+        }
       }
     }
+    if (internalAgent) continue;
+    rolloutIdentities.push({ path: realpathSync(candidate.path), id: metaId, cwdOk: cwdOk !== false, envelope: ownershipEnvelope, inheritedMeta });
+    const markerInContent = ownershipEnvelope === marker && !inheritedMeta;
     // Marker in content requires a self-consistent meta; a marker with no/mismatched id is a conflict.
     if (markerInContent && (!metaId || cwdOk === false)) return undefined;
     if (markerInContent && metaId) contentIds.add(metaId);
@@ -375,28 +394,15 @@ function verifyCodexFamily(
   }
   const nativeSessionId = strongId ?? [...historyIds][0]!;
 
-  // 4) Enumerate EVERY rollout whose session_meta names this native id,
+  // 4) Select EVERY rollout whose first session_meta names this native id,
   // including cwd-mismatching ones: silently skipping a conflicting file would
   // let the survivor look unique. Multiple physical files for one id, or a
   // single one whose recorded cwd contradicts ours, is not verifiable here.
-  const idMatches: Array<{ path: string; cwdOk: boolean }> = [];
-  for (const candidate of candidates) {
-    if (!isSafeApprovedFile(candidate.path, dataRoot)) continue;
-    for (const entry of parseJsonlObjects(readHead(candidate.path, MARKER_HEAD_BYTES))) {
-      if (entry?.type !== 'session_meta') continue;
-      const id = entry.payload?.id ?? entry.payload?.session_id;
-      if (id === nativeSessionId) {
-        const cwdOk = !(typeof entry.payload?.cwd === 'string' && entry.payload.cwd.length > 0)
-          || realCwd(entry.payload.cwd, env) === wanted;
-        idMatches.push({ path: realpathSync(candidate.path), cwdOk });
-      }
-      break;
-    }
-  }
+  const idMatches = rolloutIdentities.filter(candidate => candidate.id === nativeSessionId);
 
   if (idMatches.length !== 1) return undefined; // 0 = no file, >1 = path-ambiguous
   const match = idMatches[0]!;
-  if (!match.cwdOk) return undefined;
+  if (!match.cwdOk || !match.inheritedMeta && match.envelope !== undefined && match.envelope !== marker) return undefined;
 
   return {
     nativeSessionId,
@@ -428,23 +434,44 @@ export function verifyLaunchedTranscript(
 /** An execution checkpoint supplies the file; content must still prove its native identity. */
 export function verifyTranscriptCheckpoint(client: 'codex' | 'claude', path: string, dataRoot: string, ctx: { sessionId: string; cwd: string }): VerifiedTranscriptIdentity | undefined {
   if (!isSafeApprovedFile(path, dataRoot) || !isUsableMarker(ctx.sessionId)) return;
-  const entries = parseJsonlObjects(readHead(path, MARKER_HEAD_BYTES));
+  const entries = client === 'codex' ? nativeTranscriptObjects(path) : parseJsonlObjects(readHead(path, MARKER_HEAD_BYTES));
   const marker = buildSessionMarker(ctx.sessionId);
   const ids = new Set<string>();
-  let marked = false; let cwdMatches = false;
+  let marked = false; let cwdMatches = false; let sawMeta = false;
+  let ownershipSessionId: string | undefined;
   for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
     if (client === 'claude') {
       if (entry.isSidechain === true) continue;
       if (typeof entry.sessionId === 'string') ids.add(entry.sessionId);
       if (entry.cwd && !cwdMatches) { if (realCwd(entry.cwd) !== realCwd(ctx.cwd)) return; cwdMatches = true; }
-      if (entry.type === 'user' && entryMentionsMarker(entry, marker)) marked = true;
+      if (userEntryMentionsMarker(entry, marker)) marked = true;
     } else {
       if (entry.type === 'session_meta') {
+        if (sawMeta) {
+          if (!ids.has(entry.payload?.id ?? entry.payload?.session_id)) {
+            if (!cwdMatches || ids.size !== 1) return;
+            // Inherited prompts cannot establish ownership. Reuse independent
+            // history validation and require this exact physical transcript.
+            const verified = verifyLaunchedTranscript(client, dataRoot, ctx);
+            return verified?.verifiedPath === realpathSync(path) ? verified : undefined;
+          }
+          continue;
+        }
+        sawMeta = true;
+        const source = entry.payload?.source;
+        if (source && typeof source === 'object' && 'subagent' in source) return;
         const id = entry.payload?.id ?? entry.payload?.session_id;
         if (typeof id === 'string') ids.add(id);
         if (entry.payload?.cwd) { if (realCwd(entry.payload.cwd) !== realCwd(ctx.cwd)) return; cwdMatches = true; }
       }
-      if (codexInputText(entry)?.includes(marker)) marked = true;
+      const text = codexInputText(entry);
+      const envelope = text === undefined ? undefined : lastCodexSessionMarker(text);
+      if (envelope) {
+        if (ownershipSessionId !== envelope.sessionId) marked = false;
+        ownershipSessionId = envelope.sessionId;
+        if (envelope.text === marker) marked = true;
+      }
     }
   }
   if (!marked || !cwdMatches || ids.size !== 1) return;

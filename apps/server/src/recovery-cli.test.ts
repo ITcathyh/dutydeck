@@ -8,6 +8,21 @@ import { createCliProgram } from './cli-program.js';
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 describe('owner recovery CLI', () => {
+  it('bounds the request and reports a non-JSON HTTP failure as a recovery error', async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response('Service unavailable', { status: 503 }));
+    await expect(runRecoveryCli('inspect', 'session', { url: 'http://127.0.0.1:4311', database: '/db' }, {
+      fetcher, readToken: () => undefined
+    })).rejects.toMatchObject({ code: 'RECOVERY_REQUEST_FAILED', message: 'Recovery request failed with HTTP 503' });
+    expect(fetcher.mock.calls[0]![1].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('rejects a successful HTTP response without a recovery JSON object', async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response('<html>proxy</html>'));
+    await expect(runRecoveryCli('inspect', 'session', { url: 'http://127.0.0.1:4311', database: '/db' }, {
+      fetcher, readToken: () => undefined
+    })).rejects.toMatchObject({ code: 'RECOVERY_INVALID_RESPONSE' });
+  });
+
   it('reads the exact runtime token without migrations and submits a validated decision through HTTP', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'recovery-cli-')); dirs.push(dir);
     const database = join(dir, 'runtime.sqlite'), file = join(dir, 'decision.json');

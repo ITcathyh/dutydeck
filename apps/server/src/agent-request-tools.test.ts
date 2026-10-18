@@ -102,7 +102,7 @@ describe('Agent schedule requests', () => {
   it('only accepts the current turn of an active requester and exactly one valid time', async () => {
     const f = await setup();
     expect((await f.request(f.group, { every: 15, prompt: 'x' }, 'stale-turn')).json().error.code).toBe('WORK_ITEM_TURN_EXPIRED');
-    for (const payload of [{ prompt: 'x' }, { every: 15, cron: '0 9 * * *', prompt: 'x' }, { every: 0, prompt: 'x' }, { every: 15 }, { cron: 'not a cron', prompt: 'x' }]) {
+    for (const payload of [{ prompt: 'x' }, { every: 15, cron: '0 9 * * *', prompt: 'x' }, { every: 0, prompt: 'x' }, { every: 15 }, { cron: 'not a cron', prompt: 'x' }, { at: '2026-02-30T09:00', prompt: 'x' }, { at: '2026-02-28T25:00', prompt: 'x' }]) {
       expect((await f.request(f.group, payload)).statusCode).toBe(400);
     }
     // 定时任务到点执行的那一轮不能再建计划，否则每次到点都会多一个。

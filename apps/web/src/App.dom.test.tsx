@@ -1359,3 +1359,44 @@ describe('App pending composer mutations', () => {
     expect(Boolean(screen.queryByRole('button', { name: '移除引用 second.ts' }))).toBe(change === 'session' || change === 'new references');
   });
 });
+
+
+describe('App same-session overlay draft preservation', () => {
+  it.each(['Escape', 'close', 'back'] as const)('keeps text and references across settings %s and forward, clears them on session changes', async close => {
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1'), session('s2')], summaries: [summary('s1', 'first session'), summary('s2', 'second session')] });
+    renderApp();
+    const input = () => screen.getByRole('textbox', { name: '消息' }) as HTMLTextAreaElement;
+    await screen.findByRole('textbox', { name: '消息' });
+    fireEvent.change(input(), { target: { value: '/file' } });
+    await userEvent.click(screen.getByRole('button', { name: /\/file/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: '本地文件路径' }), { target: { value: '/tmp/draft.ts' } });
+    await userEvent.click(screen.getByRole('button', { name: '引用' }));
+    fireEvent.change(input(), { target: { value: 'unfinished draft 123' } });
+    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
+    await userEvent.click(within(navigation).getByRole('button', { name: /Agent 与设置/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
+    if (close === 'Escape') await userEvent.keyboard('{Escape}');
+    else if (close === 'close') await userEvent.click(within(dialog).getByRole('button', { name: '关闭设置与接入' }));
+    else act(() => window.history.back());
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeNull());
+    expect(input().value).toBe('unfinished draft 123');
+    expect(screen.getByRole('button', { name: '移除引用 draft.ts' })).toBeTruthy();
+    act(() => window.history.forward());
+    await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeNull());
+    expect(input().value).toBe('unfinished draft 123');
+    expect(screen.getByRole('button', { name: '移除引用 draft.ts' })).toBeTruthy();
+    await userEvent.click(within(navigation).getByRole('button', { name: /second session/ }));
+    expect(input().value).toBe('');
+    expect(screen.queryByRole('button', { name: '移除引用 draft.ts' })).toBeNull();
+    fireEvent.change(input(), { target: { value: 'second session draft' } });
+    act(() => window.history.back());
+    await waitFor(() => expect(window.location.pathname).toBe('/sessions/s1'));
+    await waitFor(() => expect(input().value).toBe(''));
+    act(() => window.history.forward());
+    await waitFor(() => expect(window.location.pathname).toBe('/sessions/s2'));
+    expect(input().value).toBe('');
+  });
+});

@@ -21,6 +21,8 @@ import {
   sessionScheduleOccurrenceSchema,
   sessionScheduleOccurrenceV2Schema,
   sessionScheduleSchema,
+  readStoredSessionSchedule,
+  scheduleTriggerSchema,
   subscribeCiInputSchema,
   updateSessionScheduleInputSchema,
   runSessionScheduleInputSchema,
@@ -85,6 +87,10 @@ export interface AutomationDeliveryContext {
 }
 
 type DeliveryRecord = SessionScheduleOccurrenceV2 | CiSubscriptionV2;
+type TickParseCache = {
+  occurrences: Map<string, SessionScheduleOccurrence>;
+  subscriptions: Map<string, CiSubscription>;
+};
 
 export interface SessionAutomationServiceOptions {
   repositories: AutomationRepositories;
@@ -361,11 +367,15 @@ export class SessionAutomationService {
     return session;
   }
 
-  private async listRecords<T>(prefix: string, parse: (input: unknown) => T): Promise<Array<{ raw: string; value: T }>> {
+  private async listRecords<T>(prefix: string, parse: (input: unknown) => T, cache?: Map<string, T>): Promise<Array<{ raw: string; value: T }>> {
     const rows = await this.requireStore().list(prefix);
     const parsed: Array<{ raw: string; value: T }> = [];
     for (const row of rows) {
-      try { parsed.push({ raw: row.value, value: parse(JSON.parse(row.value)) }); }
+      try {
+        const value = cache?.get(row.value) ?? parse(JSON.parse(row.value));
+        cache?.set(row.value, value);
+        parsed.push({ raw: row.value, value });
+      }
       catch { throw new RuntimeError('SESSION_AUTOMATION_RECORD_INVALID', 'Stored session automation record is invalid', 500); }
     }
     return parsed;
@@ -480,7 +490,7 @@ export class SessionAutomationService {
     await this.requireAuthorized(sessionId, actorId);
     await this.requireSession(sessionId);
     const [schedules, subscriptions, occurrences] = await Promise.all([
-      this.listRecords(SCHEDULE_PREFIX, value => sessionScheduleSchema.parse(value)),
+      this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule),
       this.listRecords(CI_PREFIX, value => ciSubscriptionSchema.parse(value)),
       this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value))
     ]);
@@ -527,7 +537,7 @@ export class SessionAutomationService {
     if (!isSessionRunnable(session)) throw new RuntimeError('SESSION_NOT_ACTIVE', 'Session is not active', 409);
     const input = createSessionScheduleInputSchema.parse(rawInput);
     const id = receipt ? `schedule_${createHash('sha256').update(JSON.stringify([sessionId, actorId, receipt.key])).digest('hex')}` : `schedule_${randomUUID()}`;
-    const existing = receipt ? await this.getRecord(scheduleKey(id), value => sessionScheduleSchema.parse(value)) : undefined;
+    const existing = receipt ? await this.getRecord(scheduleKey(id), readStoredSessionSchedule) : undefined;
     if (existing) return publicSchedule(existing.value);
     const now = iso(this.clock());
     const condition = input.condition.kind === 'always' ? input.condition : await this.ciCondition(session, input.condition);
@@ -553,7 +563,7 @@ export class SessionAutomationService {
     previewSessionSchedule(schedule, this.clock());
     if (!await this.createRecord(scheduleKey(schedule.id), schedule)) {
       if (receipt) {
-        const saved = await this.getRecord(scheduleKey(id), value => sessionScheduleSchema.parse(value));
+        const saved = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
         if (saved) return publicSchedule(saved.value);
       }
       throw new RuntimeError('SESSION_AUTOMATION_CONFLICT', 'Schedule identifier already exists', 409);
@@ -586,7 +596,7 @@ export class SessionAutomationService {
   async getScheduleDefinition(sessionId: string, id: string, actorId?: string): Promise<PublicSessionSchedule> {
     await this.requireAuthorized(sessionId, actorId);
     await this.requireSession(sessionId);
-    const stored = await this.getRecord(scheduleKey(id), value => sessionScheduleSchema.parse(value));
+    const stored = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
     if (!stored || stored.value.sessionId !== sessionId) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_NOT_FOUND', 'Session schedule not found', 404);
     return publicSchedule(stored.value);
   }
@@ -602,7 +612,7 @@ export class SessionAutomationService {
     await this.requireAuthorized(sessionId, actorId);
     const session = await this.requireSession(sessionId);
     const input = updateSessionScheduleInputSchema.parse(rawInput);
-    const stored = await this.getRecord(scheduleKey(id), value => sessionScheduleSchema.parse(value));
+    const stored = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
     if (!stored || stored.value.sessionId !== sessionId) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_NOT_FOUND', 'Session schedule not found', 404);
     if (stored.value.deletedAt) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_DELETED', 'Session schedule was deleted', 409);
     if (stored.value.revision !== input.expectedRevision) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
@@ -636,12 +646,12 @@ export class SessionAutomationService {
     await this.requireAuthorized(sessionId, actorId);
     await this.requireSession(sessionId);
     const input = deleteSessionScheduleInputSchema.parse(rawInput);
-    const stored = await this.getRecord(scheduleKey(id), value => sessionScheduleSchema.parse(value));
+    const stored = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
     if (!stored || stored.value.sessionId !== sessionId) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_NOT_FOUND', 'Session schedule not found', 404);
     if (stored.value.revision !== input.expectedRevision) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
     if (stored.value.deletedAt) return publicSchedule(stored.value);
     const now = iso(this.clock());
-    const deleted = sessionScheduleSchema.parse({ ...stored.value, revision: stored.value.revision + 1, generation: stored.value.generation + 1, enabled: false, nextDueAt: undefined, deletedAt: now, updatedAt: now });
+    const deleted = readStoredSessionSchedule({ ...stored.value, revision: stored.value.revision + 1, generation: stored.value.generation + 1, enabled: false, nextDueAt: undefined, deletedAt: now, updatedAt: now });
     if (!await this.replace(scheduleKey(id), stored.raw, deleted)) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
     return publicSchedule(deleted);
   }
@@ -658,7 +668,7 @@ export class SessionAutomationService {
     await this.requireAuthorized(sessionId, actorId);
     const session = await this.requireSession(sessionId);
     const input = runSessionScheduleInputSchema.parse(rawInput);
-    const stored = await this.getRecord(scheduleKey(id), value => sessionScheduleSchema.parse(value));
+    const stored = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
     if (!stored || stored.value.sessionId !== sessionId) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_NOT_FOUND', 'Session schedule not found', 404);
     const manualId = `occ_${createHash('sha256').update(JSON.stringify([id, 'manual', input.idempotencyKey])).digest('hex')}`;
     const existing = await this.getRecord(occurrenceKey(manualId), value => sessionScheduleOccurrenceSchema.parse(value));
@@ -675,7 +685,7 @@ export class SessionAutomationService {
     if (!actor) throw new RuntimeError('SESSION_AUTOMATION_FORBIDDEN', 'Schedule actor domain cannot be verified', 403);
     const reserved = sessionScheduleSchema.parse({ ...stored.value, pendingOccurrence: { id: manualId, generation: stored.value.generation, scheduledForUtc: iso(this.clock()), triggerSource: 'manual', actor } });
     if (!await this.replace(scheduleKey(id), stored.raw, reserved)) {
-      const latest = await this.getRecord(scheduleKey(id), value => sessionScheduleSchema.parse(value));
+      const latest = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
       if (latest?.value.pendingOccurrence?.id === manualId) return this.runReservedOccurrence(latest.value);
       throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule changed while reserving execution', 409);
     }
@@ -794,10 +804,10 @@ export class SessionAutomationService {
         if (!fixedTaskId || fixedTaskId !== task.id) throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Scheduled task binding is invalid', 403);
       }
       assertAdmissionMatchesAccepted('Scheduled task', occurrence.admission, accepted);
-      const schedule = await this.getRecord(scheduleKey(occurrence.scheduleId), value => sessionScheduleSchema.parse(value));
+      const schedule = await this.getRecord(scheduleKey(occurrence.scheduleId), readStoredSessionSchedule);
       if (!schedule) throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Scheduled task definition is missing', 403);
       const started = Boolean(occurrence.taskStartedAt || schedule.value.taskStartOccurrenceId === occurrence.id);
-      if (!started && (schedule.value.generation !== occurrence.generation || schedule.value.deletedAt || !schedule.value.enabled && occurrence.triggerSource !== 'manual' || occurrence.conditionStatus !== 'passed' || !['pending', 'accepted'].includes(occurrence.runStatus))) {
+      if (!started && (!scheduleTriggerSchema.safeParse(schedule.value.trigger).success || schedule.value.generation !== occurrence.generation || schedule.value.deletedAt || !schedule.value.enabled && occurrence.triggerSource !== 'manual' || occurrence.conditionStatus !== 'passed' || !['pending', 'accepted'].includes(occurrence.runStatus))) {
         await this.finishOccurrence(occurrenceStored, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule changed before task execution' });
         throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Scheduled task is no longer authorized to run', 403);
       }
@@ -839,7 +849,7 @@ export class SessionAutomationService {
           ...(!schedule.value.nextDueAt && occurrence.triggerSource !== 'manual' ? { enabled: false } : {})
         });
         if (!await this.replace(scheduleKey(schedule.value.id), schedule.raw, startedSchedule)) {
-          const latestSchedule = await this.getRecord(scheduleKey(schedule.value.id), value => sessionScheduleSchema.parse(value));
+          const latestSchedule = await this.getRecord(scheduleKey(schedule.value.id), readStoredSessionSchedule);
           if (latestSchedule?.value.taskStartOccurrenceId !== occurrence.id) {
             const latest = await this.getRecord(occurrenceKey(occurrence.id), value => sessionScheduleOccurrenceSchema.parse(value));
             if (latest) await this.finishOccurrence(latest, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule changed before submission' });
@@ -934,12 +944,14 @@ export class SessionAutomationService {
 
   private async runTick() {
     this.requireStore();
-    await this.refreshAcceptedWork();
+    // Re-read storage at each phase; only reuse decoding for byte-identical rows within this tick.
+    const parsed: TickParseCache = { occurrences: new Map(), subscriptions: new Map() };
+    await this.refreshAcceptedWork(parsed);
     if (this.closed) return;
     const [schedules, occurrences, subscriptions] = await Promise.all([
-      this.listRecords(SCHEDULE_PREFIX, value => sessionScheduleSchema.parse(value)),
-      this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value)),
-      this.listRecords(CI_PREFIX, value => ciSubscriptionSchema.parse(value))
+      this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule),
+      this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), parsed.occurrences),
+      this.listRecords(CI_PREFIX, value => ciSubscriptionSchema.parse(value), parsed.subscriptions)
     ]);
     for (const item of occurrences) {
       if (this.closed) return;
@@ -959,7 +971,7 @@ export class SessionAutomationService {
         if (task?.status === 'queued' && !value.taskStartedAt) await this.finishCi(item, 'expired', 'CI continuation expired before execution');
       }
     }
-    await this.startPendingDeliveries();
+    await this.startPendingDeliveries(parsed);
   }
 
   private async hasPendingOccurrence(schedule: SessionSchedule) {
@@ -996,7 +1008,7 @@ export class SessionAutomationService {
   }
 
   private async planSchedule(snapshot: SessionSchedule) {
-    const stored = await this.getRecord(scheduleKey(snapshot.id), value => sessionScheduleSchema.parse(value));
+    const stored = await this.getRecord(scheduleKey(snapshot.id), readStoredSessionSchedule);
     if (!stored) return;
     let schedule = stored.value;
     if (schedule.pendingOccurrence) {
@@ -1042,8 +1054,8 @@ export class SessionAutomationService {
 
   private async processOccurrence(stored: { raw: string; value: SessionScheduleOccurrence }) {
     const occurrence = migrateOccurrence(stored.value);
-    const scheduleStored = await this.getRecord(scheduleKey(occurrence.scheduleId), value => sessionScheduleSchema.parse(value));
-    if (!scheduleStored || scheduleStored.value.generation !== occurrence.generation || scheduleStored.value.deletedAt || !scheduleStored.value.enabled && occurrence.triggerSource !== 'manual') {
+    const scheduleStored = await this.getRecord(scheduleKey(occurrence.scheduleId), readStoredSessionSchedule);
+    if (!scheduleStored || !scheduleTriggerSchema.safeParse(scheduleStored.value.trigger).success || scheduleStored.value.generation !== occurrence.generation || scheduleStored.value.deletedAt || !scheduleStored.value.enabled && occurrence.triggerSource !== 'manual') {
       await this.finishOccurrence({ raw: stored.raw, value: occurrence }, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule generation changed before dispatch' });
       return;
     }
@@ -1094,7 +1106,7 @@ export class SessionAutomationService {
       const renewed = await this.renewOccurrenceLease(working);
       if (!renewed) return;
       working = renewed;
-      const currentSchedule = await this.getRecord(scheduleKey(schedule.id), value => sessionScheduleSchema.parse(value));
+      const currentSchedule = await this.getRecord(scheduleKey(schedule.id), readStoredSessionSchedule);
       if (!currentSchedule || currentSchedule.raw !== scheduleStored.raw || currentSchedule.value.generation !== occurrence.generation || currentSchedule.value.deletedAt || !currentSchedule.value.enabled && occurrence.triggerSource !== 'manual') {
         await this.finishOccurrence(working, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule changed while its condition was evaluated' });
         return;
@@ -1125,7 +1137,7 @@ export class SessionAutomationService {
     }
     try { await this.requireAuthorized(schedule.sessionId, actorId); }
     catch (error) {
-      const currentSchedule = await this.getRecord(scheduleKey(schedule.id), value => sessionScheduleSchema.parse(value));
+      const currentSchedule = await this.getRecord(scheduleKey(schedule.id), readStoredSessionSchedule);
       if (currentSchedule?.value.generation === schedule.generation) await this.disableSchedule(currentSchedule);
       await this.finishOccurrence(working, { conditionStatus: 'error', runStatus: 'error', error: errorMessage(error) });
       return;
@@ -1264,7 +1276,7 @@ export class SessionAutomationService {
   }
 
   private async advanceSchedule(schedule: SessionSchedule, due: string) {
-    const current = await this.getRecord(scheduleKey(schedule.id), value => sessionScheduleSchema.parse(value));
+    const current = await this.getRecord(scheduleKey(schedule.id), readStoredSessionSchedule);
     if (!current || current.value.generation !== schedule.generation || current.value.nextDueAt !== due) return;
     const upcoming = previewSessionSchedule(current.value, this.clock())?.scheduledForUtc;
     const updated = sessionScheduleSchema.parse({ ...current.value, enabled: current.value.enabled, nextDueAt: upcoming, updatedAt: current.value.updatedAt });
@@ -1525,14 +1537,16 @@ export class SessionAutomationService {
     await this.replace(ciKey(id), current.raw, accepted);
   }
 
-  private async refreshAcceptedWork() {
-    const [occurrences, subscriptions] = await Promise.all([
-      this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value)),
-      this.listRecords(CI_PREFIX, value => ciSubscriptionSchema.parse(value))
+  private async refreshAcceptedWork(parsed: TickParseCache) {
+    const [occurrences, subscriptions, records] = await Promise.all([
+      this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), parsed.occurrences),
+      this.listRecords(CI_PREFIX, value => ciSubscriptionSchema.parse(value), parsed.subscriptions),
+      this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule)
     ]);
+    const schedules = new Map(records.map(item => [item.value.id, item]));
     for (const item of occurrences) {
       if (this.closed) return;
-      await this.refreshOccurrence(item);
+      await this.refreshOccurrence(item, schedules);
     }
     for (const item of subscriptions) {
       if (this.closed) return;
@@ -1544,7 +1558,7 @@ export class SessionAutomationService {
    * V1 来源记录迁移：若记录上已有实际接受 Task，则固定为 legacy_partial 并保留其旧 ID，
    * 不改成 canonical；映射冲突持久 blocked。尚未接受的 V1 记录不在这里造新 request（交给新触发流程）。
    */
-  private async fixOccurrenceAdmission(item: { raw: string; value: SessionScheduleOccurrence }): Promise<{ raw: string; value: SessionScheduleOccurrenceV2 } | undefined> {
+  private async fixOccurrenceAdmission(item: { raw: string; value: SessionScheduleOccurrence }, schedules: Map<string, { raw: string; value: SessionSchedule }>): Promise<{ raw: string; value: SessionScheduleOccurrenceV2 } | undefined> {
     const value = migrateOccurrence(item.value);
     if (value.admission) return { raw: item.raw, value };
     if (value.taskId) {
@@ -1561,7 +1575,7 @@ export class SessionAutomationService {
       return { raw: JSON.stringify(fixed), value: fixed };
     }
     // 若 V1 来源没有 taskId（接受响应丢失或旧版未记），通过 lookupAccepted 查找已存在的接受事实
-    const scheduleStored = await this.getRecord(scheduleKey(value.scheduleId), v => sessionScheduleSchema.parse(v));
+    const scheduleStored = schedules.get(value.scheduleId);
     if (scheduleStored) {
       const session = await this.options.runtime.getSession(value.sessionId);
       const actor = resolveAutomationActor(session, scheduleStored.value.actorId);
@@ -1570,6 +1584,8 @@ export class SessionAutomationService {
         let accepted;
         try { accepted = this.execution.lookupAccepted(candidateRequest); } catch { /* conflict */ }
         if (accepted && accepted.task.sessionId === value.sessionId) {
+          // A concurrently edited definition must be reconsidered with its new request on the next tick.
+          if (await this.options.repositories.config.get(scheduleKey(value.scheduleId)) !== scheduleStored.raw) return undefined;
           const admission = legacyAdmission(accepted);
           const fixed = sessionScheduleOccurrenceV2Schema.parse({
             ...value,
@@ -1630,8 +1646,8 @@ export class SessionAutomationService {
     return undefined;
   }
 
-  private async refreshOccurrence(item: { raw: string; value: SessionScheduleOccurrence }) {
-    const fixed = await this.fixOccurrenceAdmission(item);
+  private async refreshOccurrence(item: { raw: string; value: SessionScheduleOccurrence }, schedules: Map<string, { raw: string; value: SessionSchedule }>) {
+    const fixed = await this.fixOccurrenceAdmission(item, schedules);
     if (!fixed || !fixed.value.admission) return;
     // 仍在派发阶段（pending，acceptance 在途或响应丢失、尚无接受事实）时不做结果对账，
     // 由 processOccurrence 重投/恢复，避免把在途来源误判为 blocked。
@@ -1826,15 +1842,15 @@ export class SessionAutomationService {
       && (!('scheduleId' in expected) || 'scheduleId' in current && current.scheduleId === expected.scheduleId && current.generation === expected.generation);
   }
 
-  private async startPendingDeliveries() {
+  private async startPendingDeliveries(parsed: TickParseCache) {
     if (this.closed || !this.options.deliver || this.deliveries.size >= MAX_DELIVERIES) return;
     const [occurrences, subscriptions] = await Promise.all([
-      this.listRecords(OCCURRENCE_PREFIX, input => migrateOccurrence(sessionScheduleOccurrenceSchema.parse(input))),
-      this.listRecords(CI_PREFIX, input => migrateCi(ciSubscriptionSchema.parse(input)))
+      this.listRecords(OCCURRENCE_PREFIX, input => sessionScheduleOccurrenceSchema.parse(input), parsed.occurrences),
+      this.listRecords(CI_PREFIX, input => ciSubscriptionSchema.parse(input), parsed.subscriptions)
     ]);
     const candidates = [
-      ...occurrences.map(item => ({ key: occurrenceKey(item.value.id), ...item })),
-      ...subscriptions.map(item => ({ key: ciKey(item.value.id), ...item }))
+      ...occurrences.map(item => ({ key: occurrenceKey(item.value.id), raw: item.raw, value: migrateOccurrence(item.value) })),
+      ...subscriptions.map(item => ({ key: ciKey(item.value.id), raw: item.raw, value: migrateCi(item.value) }))
     ].filter(item => this.deliverable(item.value)).sort((a, b) => a.key.localeCompare(b.key));
     const start = candidates.findIndex(item => item.key > (this.lastDeliveryKey ?? ''));
     for (const candidate of [...candidates.slice(start < 0 ? 0 : start), ...candidates.slice(0, start < 0 ? 0 : start)]) {

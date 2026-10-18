@@ -2,6 +2,18 @@ import { describe, expect, it } from 'vitest';
 import { redactTraceText, rememberSecretValues } from './secret-redaction.js';
 
 describe('secret redaction', () => {
+  it('redacts complete URL credentials and signed queries without hiding the destination', () => {
+    expect(redactTraceText('https://user:canary@tail@example.test/a?signature=SIGNEDVALUE&q=ok'))
+      .toBe('https://[REDACTED]@example.test/a?signature=[REDACTED]&q=ok');
+  });
+
+  it('redacts JSON-escaped credential values, cookies and Basic authorization', () => {
+    expect(redactTraceText(JSON.stringify({ command: 'export API_KEY="opaque credential with spaces"; echo done' })))
+      .not.toContain('credential with spaces');
+    expect(redactTraceText("curl -H 'Cookie: a=one; b=two'")).not.toMatch(/one|two/);
+    expect(redactTraceText('Basic Y2FuYXJ5OnNlY3JldA==')).not.toContain('Y2FuYXJ5');
+  });
+
   it.each([
     ['Anthropic key', 'key is sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'],
     ['Claude OAuth token', 'sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'],

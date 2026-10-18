@@ -9,6 +9,7 @@ import {
   scheduleOccurrenceSchema,
   scheduleReadiness,
   scheduleTriggerPeriod,
+  scheduleTriggerSchema,
   type ScheduleDefinition
 } from './schedule-foundation.js';
 
@@ -128,4 +129,35 @@ describe('describeScheduleTrigger', () => {
     expect(scheduleTriggerPeriod({ kind: 'cron', expression: '0 9 1 * *' })).toBe('本月');
     expect(scheduleTriggerPeriod({ kind: 'interval', everySeconds: 600, anchorAt: timestamp })).toBe('这段时间');
   });
+});
+
+
+describe('validated calendar and Cronie wildcard semantics', () => {
+  it.each([
+    ['*', '1-5', '2026-10-19'], ['*/1', '1-5', '2026-10-19'],
+    ['*/2', '1-5', '2026-10-19'], ['18', '*/2', '2026-10-18'],
+    ['*/2', '*/2', '2026-10-17'], ['1-31', '1-5', '2026-10-17'],
+    ['*', '7', '2026-10-18'], ['*', '0', '2026-10-18'],
+    ['*/2,2', '1-5', '2026-10-19']
+  ])('matches DOM=%s DOW=%s with wildcard steps and Sunday aliases', (day, weekday, next) => {
+    const definition = base({ kind: 'cron', expression: `0 9 ${day} * ${weekday}` }, { timezone: 'UTC' });
+    expect(previewNextSchedule(definition, new Date('2026-10-16T09:00:00Z'))?.scheduledForUtc).toBe(`${next}T09:00:00.000Z`);
+  });
+
+  it.each(['2026-02-30T09:00', '2026-02-29T09:00', '2100-02-29T09:00', '2026-00-10T09:00', '2026-13-10T09:00', '2026-01-00T09:00', '2026-04-31T09:00', '2026-02-28T24:00', '2026-02-28T25:00', '2026-02-28T09:60', '2026-02-28T09:00:60'])('rejects invalid local date-time %s before DST resolution', localDateTime => {
+    const trigger = { kind: 'at' as const, localDateTime };
+    expect(scheduleTriggerSchema.safeParse(trigger).success).toBe(false);
+    const definition = { ...base({ kind: 'at', localDateTime: '2026-02-28T09:00' }, { timezone: 'UTC', dstPolicy: { gap: 'shift_forward', overlap: 'first' } }), trigger };
+    expect(() => previewNextSchedule(definition, new Date('2026-01-01T00:00:00Z'))).toThrow();
+  });
+
+  it.each(['2028-02-29T09:00', '2000-02-29T09:00:59', '2026-01-01T00:00:00'])('accepts actual dates with optional seconds: %s', localDateTime => {
+    expect(scheduleTriggerSchema.safeParse({ kind: 'at', localDateTime }).success).toBe(true);
+  });
+});
+
+
+it('retains both DOM and DOW step filters after their first intersection', () => {
+  expect(previewNextSchedule(base({ kind: 'cron', expression: '0 9 */2 * */2' }, { timezone: 'UTC' }), new Date('2026-10-17T09:00:00Z'))?.scheduledForUtc).toBe('2026-10-25T09:00:00.000Z');
+  expect(previewNextSchedule(base({ kind: 'cron', expression: '0 9 */2 * 1-5' }, { timezone: 'UTC' }), new Date('2026-10-19T09:00:00Z'))?.scheduledForUtc).toBe('2026-10-21T09:00:00.000Z');
 });

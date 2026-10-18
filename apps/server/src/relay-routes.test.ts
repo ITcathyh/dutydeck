@@ -24,6 +24,7 @@ function fakeRuntime(sessions: Record<string, Session | undefined>) {
   return {
     events,
     listeners,
+    getActiveTaskContext() { return undefined; },
     async getSession(id: string) { return sessions[id]; },
     async publishSessionEvent(sessionId: string, type: EventType, data: unknown) {
       const session = sessions[sessionId];

@@ -32,6 +32,7 @@ describe('skill-catalog', () => {
       expect(isPathInside('/a/b', '/a/b')).toBe(true);
       expect(isPathInside('/a/b/c', '/a/b')).toBe(true);
       expect(isPathInside('/a/b/c/d.txt', '/a/b')).toBe(true);
+      expect(isPathInside('/a/b/..internal', '/a/b')).toBe(true);
     });
 
     it('returns false for ancestor and outside paths', () => {
@@ -42,6 +43,15 @@ describe('skill-catalog', () => {
   });
 
   describe('discoverSkills', () => {
+    it('discovers a skill whose directory starts with two dots', async () => {
+      const dir = join(workspaceDir, '.agents', 'skills', '..internal');
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, 'SKILL.md'), '---\nname: internal\n---\nInstructions');
+      expect(await discoverSkills(workspaceDir, { homeDirectory: userHomeDir })).toEqual([
+        { name: 'internal', description: '', path: join(dir, 'SKILL.md'), source: 'workspace' }
+      ]);
+    });
+
     it('discovers skills across workspace and user roots with frontmatter', async () => {
       // workspace .agents/skills
       const wsAgentSkillDir = join(workspaceDir, '.agents', 'skills', 'deploy');

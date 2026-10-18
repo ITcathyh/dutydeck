@@ -14,7 +14,7 @@ const hmacTrigger = pluginTriggerSchema.parse({ auth: { type: 'hmac-sha256', hea
 
 function service(trigger: PluginTrigger = tokenTrigger, deliver = vi.fn(async (_request: TriggerDispatch) => ({ sessionId: 's1', taskId: `t${deliver.mock.calls.length}` }))) {
   const triggers = new PluginTriggerService({
-    lookup: (plugin, id) => plugin === 'ci' && id === 'build' ? trigger : undefined,
+    lookup: (plugin, id) => plugin === 'ci' && id === 'build' ? { ...trigger, scope: 'global' } : undefined,
     token: () => 'secret-token',
     deliver
   });
@@ -96,7 +96,7 @@ describe('PluginTriggerService', () => {
       return { sessionId: 's1', taskId: `t${deliver.mock.calls.length}` };
     });
     let now = 1_000;
-    const triggers = new PluginTriggerService({ lookup: () => pluginTriggerSchema.parse({ ...tokenTrigger, maxConcurrent: 8 }), token: () => 'secret-token', deliver, now: () => now });
+    const triggers = new PluginTriggerService({ lookup: () => ({ ...pluginTriggerSchema.parse({ ...tokenTrigger, maxConcurrent: 8 }), scope: 'global' }), token: () => 'secret-token', deliver, now: () => now });
     expect((await triggers.receive(request(body({ build: { id: 1 }, log: 'a' })))).statusCode).toBe(202);
     now += 24 * 60 * 60_000 + 1;
     expect((await triggers.receive(request(body({ build: { id: 1 }, log: 'a' })))).statusCode).toBe(202);
@@ -105,7 +105,7 @@ describe('PluginTriggerService', () => {
   it('frees the concurrency slot when the task ended without a settle notification', async () => {
     const ended = new Set<string>();
     const deliver = vi.fn(async () => ({ sessionId: 's1', taskId: `t${deliver.mock.calls.length}` }));
-    const triggers = new PluginTriggerService({ lookup: () => tokenTrigger, token: () => 'secret-token', deliver, isSettled: taskId => ended.has(taskId) });
+    const triggers = new PluginTriggerService({ lookup: () => ({ ...tokenTrigger, scope: 'global' }), token: () => 'secret-token', deliver, isSettled: taskId => ended.has(taskId) });
     expect((await triggers.receive(request(body({ build: { id: 1 } })))).statusCode).toBe(202);
     expect((await triggers.receive(request(body({ build: { id: 2 } })))).statusCode).toBe(429);
     ended.add('t1');

@@ -21,6 +21,47 @@ const target = { url: 'http://127.0.0.1:4310', database: '/tmp/runtime.db' };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 const readToken = () => undefined;
 
+describe('settings CLI foundation channel bots', () => {
+  async function foundationRuntime() {
+    const repos = createRepositories(':memory:');
+    cleanups.push(() => repos.close());
+    await repos.channelBots.create({ id: 'draft/bot', channel: 'lark', externalAppId: 'cli_draft', displayName: 'Draft', brand: 'feishu', state: 'staged' });
+    await repos.secretRefs.create({ id: 'ref_cli', kind: 'lark_app_secret', provider: 'local-file-v1', referenceKey: 'opaque.reference', status: 'configured' });
+    let allowed = true;
+    const app = await buildApp({ listAgents: async () => [] } as any, { foundation: {
+      repositories: repos, authorize: async () => allowed, inspectSecretRef: async () => 'available'
+    } });
+    cleanups.push(() => app.close());
+    const fetcher = bridge(app);
+    return { repos, fetcher, deny: () => { allowed = false; }, run: (action: SettingsAction, input: SettingsCliInput = {}) => runSettingsCli(action, { ...target, channelBotId: 'draft/bot', ...input }, { fetcher, readToken }) };
+  }
+
+  it('selects and clears a SecretRef through the same revision-checked metadata API as the dashboard', async () => {
+    const { repos, run } = await foundationRuntime();
+    expect(await run('channel-bot-list')).toMatchObject({ bots: [{ id: 'draft/bot', revision: 1 }] });
+    expect(await run('channel-bot-set', { pairs: ['credentialRef=ref_cli'] })).toMatchObject({ bot: { selectedSecretRefId: 'ref_cli', revision: 2 } });
+    expect(await run('channel-bot-set', { pairs: ['displayName=Renamed'] })).toMatchObject({ bot: { selectedSecretRefId: 'ref_cli', displayName: 'Renamed', revision: 3 } });
+    await expect(run('channel-bot-set', { pairs: ['credentialRef=null'], expectedRevision: '2' })).rejects.toMatchObject({ code: 'FOUNDATION_REVISION_CONFLICT' });
+    expect(await run('channel-bot-set', { pairs: ['credentialRef=null'], expectedRevision: '3' })).toMatchObject({ bot: { credentialStatus: 'missing', revision: 4 } });
+    expect((await repos.channelBots.get('draft/bot'))?.credentialRef).toBeUndefined();
+    const shown = await run('channel-bot-show');
+    expect(JSON.stringify(shown)).not.toMatch(/"appSecret"|"value"|opaque.reference/);
+  });
+
+  it('preserves permission, disabled-state restrictions and SecretRef readiness checks', async () => {
+    const { repos, deny, fetcher, run } = await foundationRuntime();
+    await repos.secretRefs.create({ id: 'invalid_ref', kind: 'lark_app_secret', provider: 'local-file-v1', referenceKey: 'opaque.other', status: 'invalid' });
+    expect(await run('channel-bot-set', { pairs: ['credentialRef=invalid_ref'] })).toMatchObject({ bot: { credentialStatus: 'invalid', blockerCodes: expect.arrayContaining(['channel_bot_credential_invalid']) } });
+    await expect(run('channel-bot-set', { pairs: ['state=active'] })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    await expect(run('channel-bot-set', { pairs: ['credentialRef=ref_cli'], expectedRevision: '0' })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    await expect(run('channel-bot-set', { pairs: ['appSecret=raw_secret'] })).rejects.toMatchObject({ code: 'SETTINGS_KEY_UNKNOWN' });
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'PATCH')).toHaveLength(1);
+    deny();
+    await expect(run('channel-bot-set', { pairs: ['credentialRef=ref_cli'] })).rejects.toMatchObject({ code: 'FOUNDATION_PERMISSION_DENIED' });
+    expect((await repos.channelBots.get('draft/bot'))?.revision).toBe(2);
+  });
+});
+
 /** CLI 发出的请求直接交给内存里的服务端路由处理，校验和保存都走真实代码。 */
 function bridge(app: FastifyInstance) {
   return vi.fn(async (url: URL | string | Request, init?: RequestInit) => {
@@ -452,6 +493,12 @@ describe('settings CLI requests', () => {
 });
 
 describe('settings commands', () => {
+  it('passes a foundation ID, reference selection and revision to the handler', async () => {
+    const settings = vi.fn();
+    await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'channel-bot', 'set', 'draft/bot', 'credentialRef=ref_cli', '--expected-revision', '4', '--instance', 'tag']);
+    expect(settings).toHaveBeenCalledWith('channel-bot-set', expect.objectContaining({ channelBotId: 'draft/bot', pairs: ['credentialRef=ref_cli'], expectedRevision: '4', instance: 'tag' }));
+  });
+
   it('passes target, ids and key=value pairs to the handler', async () => {
     const settings = vi.fn();
     await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'agent', 'set', 'claude', 'authMode=bearer', '--api-key-fd', '0', '--instance', 'tag']);

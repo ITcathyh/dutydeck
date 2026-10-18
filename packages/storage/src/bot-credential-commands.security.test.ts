@@ -20,7 +20,7 @@ import { createWp1aRepositories } from './group-policy.js';
 const dump = (db: Database.Database) =>
   Object.fromEntries(
     (db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as { name: string }[])
-      .map(({ name }) => [name, db.prepare('SELECT * FROM "' + name.replaceAll('"', '""') + '" ORDER BY rowid').all()])
+      .map(({ name }) => [name, db.prepare('SELECT * FROM "' + name.replaceAll('"', '""') + '" ORDER BY ' + (name === 'memory_consumed_tasks' ? 'app_id, pool, task_id' : 'rowid')).all()])
   );
 
 const owner: ManagementActor = { kind: 'installation_owner', principalId: 'principal_installation_owner' };

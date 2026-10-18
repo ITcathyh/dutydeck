@@ -1,5 +1,5 @@
 import type { AgentModelSettingsPatch } from './agent-model-settings.js';
-import { collaborationParticipationModes, groupReplyModes, mentionPolicies, riskControlModes, type UpdateCollaborationSettingsInput } from '@dutydeck/shared';
+import { collaborationParticipationModes, groupReplyModes, mentionPolicies, riskControlModes, type PublicChannelBotFoundation, type UpdateChannelBotInput, type UpdateCollaborationSettingsInput } from '@dutydeck/shared';
 import type { CollaborationRouteOptions } from './collaboration-routes.js';
 import type { GroupConfigPatch, ManagedGroup, ManagedGroupBot } from './lark/group-management.js';
 import type { SaveLarkConfigRequest } from './lark/routes.js';
@@ -15,6 +15,7 @@ export class SettingsCliError extends Error {
 export type SettingsAction =
   | 'instances' | 'agents' | 'agent-show' | 'agent-set'
   | 'bot-list' | 'bot-show' | 'bot-add' | 'bot-set' | 'bot-remove' | 'bot-install-hook'
+  | 'channel-bot-list' | 'channel-bot-show' | 'channel-bot-set'
   | 'group-list' | 'group-show' | 'group-set' | 'group-members' | 'group-sync'
   | 'usage-show' | 'usage-set-cap' | 'usage-remove-cap';
 
@@ -24,6 +25,8 @@ export interface SettingsCliInput {
   url?: string;
   database?: string;
   appId?: string;
+  channelBotId?: string;
+  expectedRevision?: string;
   chatId?: string;
   pairs?: string[];
   appSecret?: string;
@@ -35,12 +38,17 @@ export interface SettingsCliInput {
   yes?: boolean;
 }
 
-type FieldKind = 'boolean' | 'integer' | 'integer|null' | 'string' | 'list' | 'users' | 'json' | 'override' | readonly string[];
+type FieldKind = 'boolean' | 'integer' | 'integer|null' | 'string' | 'string|null' | 'list' | 'users' | 'json' | 'override' | readonly string[];
 
 type BotField = Exclude<keyof SaveLarkConfigRequest,
   'stage' | 'originalAppId' | 'expectedRevision' | 'appId' | 'appSecret' | 'name' | 'env' | 'startupCommands' | 'gateEnabled' | 'softGateEnabled' | 'hardGateEnabled' | 'hookTrustConfirmed'>;
 
 export const agentFields = { model: 'string', baseUrl: 'string', authMode: ['bearer', 'api-key'], clearApiKey: 'boolean' } satisfies Record<Exclude<keyof AgentModelSettingsPatch, 'apiKey'>, FieldKind>;
+
+export const channelBotFields = {
+  externalAppId: 'string', displayName: 'string', brand: ['feishu', 'lark'],
+  credentialRef: 'string|null', state: ['staged', 'disabled']
+} satisfies Record<Exclude<keyof UpdateChannelBotInput, 'expectedRevision'>, FieldKind>;
 
 /** dashboard 能保存的 Bot 字段。satisfies 保证保存接口新增字段时这里编译不过，CLI 不会漏项。 */
 export const botFields = {
@@ -102,7 +110,7 @@ function scenariosWithLegacyAlarm(scenarios: unknown, alarm: unknown): Record<st
 }
 
 const describeKind = (kind: FieldKind) => typeof kind !== 'string' ? kind.join('|') : {
-  boolean: 'true|false', integer: 'integer', 'integer|null': 'integer|null', string: 'text',
+  boolean: 'true|false', integer: 'integer', 'integer|null': 'integer|null', string: 'text', 'string|null': 'text|null',
   list: 'a,b,c|JSON array', users: 'JSON array of {"openId":"ou_...","name":"..."}', json: 'JSON', override: 'inherit|clear|<value>|JSON'
 }[kind];
 
@@ -120,6 +128,7 @@ function parseValue(key: string, raw: string, kind: FieldKind): unknown {
     throw invalid();
   }
   if (kind === 'string') return raw;
+  if (kind === 'string|null') return raw === 'null' ? null : raw;
   // 服务端会静默丢掉格式不对的名单条目，名单变空就等于不限制，所以这里先拦住。
   if (kind === 'list') {
     const list = raw.trim().startsWith('[') ? json() : raw.split(',').map(item => item.trim()).filter(Boolean);
@@ -186,6 +195,17 @@ async function findBot(request: Request, appId: string) {
   const config = await request('GET', '/api/lark/config') as { bots?: PublicBot[] };
   const bot = config.bots?.find(item => item.appId === appId);
   if (!bot) throw new SettingsCliError('SETTINGS_BOT_NOT_FOUND', `Bot ${appId} is not configured on this runtime; see \`dutydeck settings bot list\``);
+  return bot;
+}
+
+async function channelBots(request: Request): Promise<PublicChannelBotFoundation[]> {
+  const matrix = await request('GET', '/api/foundation/group-matrix') as { bots: Array<{ bot: PublicChannelBotFoundation }> };
+  return matrix.bots.map(entry => entry.bot);
+}
+
+async function findChannelBot(request: Request, id: string) {
+  const bot = (await channelBots(request)).find(bot => bot.id === id);
+  if (!bot) throw new SettingsCliError('SETTINGS_CHANNEL_BOT_NOT_FOUND', `Channel bot ${id} is not configured; see \`dutydeck settings channel-bot list\``);
   return bot;
 }
 
@@ -275,6 +295,19 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
       const values = parsePairs(input.pairs ?? [], agentFields, 'dutydeck settings agent set --help');
       if (!Object.keys(values).length && input.apiKey === undefined) throw new SettingsCliError('SETTINGS_ARGUMENT_REQUIRED', 'Pass at least one key=value or --api-key-fd');
       return request('PUT', agentSettingsPath(input), { ...values, ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}) });
+    }
+    case 'channel-bot-list': return { bots: await channelBots(request) };
+    case 'channel-bot-show': return { bot: await findChannelBot(request, required(input.channelBotId, 'Channel bot ID')) };
+    case 'channel-bot-set': {
+      const id = required(input.channelBotId, 'Channel bot ID');
+      const fields = parsePairs(input.pairs ?? [], channelBotFields, 'dutydeck settings channel-bot set --help');
+      if (!Object.keys(fields).length) throw new SettingsCliError('SETTINGS_ARGUMENT_REQUIRED', 'Pass at least one key=value');
+      const revision = input.expectedRevision === undefined ? undefined : Number(input.expectedRevision);
+      if (revision !== undefined && (!/^\d+$/.test(input.expectedRevision!) || !Number.isSafeInteger(revision) || revision < 1)) {
+        throw new SettingsCliError('SETTINGS_VALUE_INVALID', 'Expected revision must be a positive integer');
+      }
+      const bot = await findChannelBot(request, id);
+      return { bot: await request('PATCH', `/api/foundation/channel-bots/${path(id)}`, { expectedRevision: revision ?? bot.revision, ...fields }) };
     }
     case 'bot-list': {
       const config = await request('GET', '/api/lark/config') as { bots: PublicBot[]; listeningDisabled?: boolean };

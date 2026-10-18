@@ -647,6 +647,22 @@ describe('dutydeck deploy', () => {
     expect(service.ran).toEqual([]);
   }, 60_000);
 
+  it('同一时刻重复部署同一提交使用独立发布目录并保留原部署记录', async () => {
+    const options = { source, runtime: bot, restart: false };
+    const fixed = deps({ now: () => Date.parse('2026-10-18T08:00:00Z') });
+    const first = await runDeploy(options, fixed);
+    expect(first).toMatchObject({ ok: true, status: 'staged' });
+    const original = readFileSync(first.manifest!, 'utf8');
+
+    const second = await runDeploy(options, fixed);
+
+    expect(second, second.error).toMatchObject({ ok: true, status: 'staged', previousRelease: first.release });
+    expect(second.release).not.toBe(first.release);
+    expect(second.manifest).not.toBe(first.manifest);
+    expect(readFileSync(first.manifest!, 'utf8')).toBe(original);
+    expect(realpathSync(join(releases, 'current'))).toBe(second.release);
+  }, 60_000);
+
   it('配置了部署窗口时，窗口外拒绝执行，加 --now 才部署', async () => {
     const at = Date.parse('2026-09-25T03:30:00Z'); // 11:30 Asia/Shanghai
     const outside = await runDeploy({ source, runtime: bot, restart: false }, deps({ env: { DUTYDECK_DEPLOY_WINDOW: '10:00-11:00,16:00-17:00' }, now: () => at }));
@@ -675,16 +691,16 @@ describe('dutydeck deploy', () => {
   });
 
   /** 在 releases 下造几个更早的发布目录，版本名按时间递增。 */
-  function oldReleases(count: number) {
+  function oldReleases(count: number, suffix = '') {
     return Array.from({ length: count }, (_, index) => {
-      const dir = join(releases, `2026010${index + 1}T000000Z-${String(index).repeat(7)}`);
+      const dir = join(releases, `2026010${index + 1}T000000Z-${String(index).repeat(7)}${suffix}`);
       write(join(dir, 'dist', 'cli.js'), 'x'.repeat(8192));
       return dir;
     });
   }
 
-  it('部署成功后只留最新 5 个发布目录，current 的上一版和仍被进程引用的不删，.partial 一并清掉', async () => {
-    const old = oldReleases(7);
+  it.each(['', '-ABC123', '-dirty-ABC123'])('部署成功后保留新旧格式最新 5 个目录及在用版本，清理 .partial（后缀 %s）', async (suffix) => {
+    const old = oldReleases(7, suffix);
     symlinkSync(basename(old[0]!), join(releases, 'current'));
     mkdirSync(join(releases, '.20260108T000000Z-7777777.partial'));
     mkdirSync(join(releases, 'notes'));

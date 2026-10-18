@@ -69,6 +69,23 @@ it('reports hourly decision and reply usage so shadow-mode cost is visible', asy
   // 真实判定计入用量，被闸门挡下的记录不计入，否则超限后用量永远降不回来。
   expect((await f.app.inject({ url, headers })).json().usage.decisionsLastHour).toBe(1);
 });
+it('shares the unfiltered decision window with usage, including its truncation marker', async () => {
+  const f = await fixture();
+  const record = (id: string, inputSnapshot: Record<string, unknown> = {}) => f.repos.collaboration.recordDecision({
+    id, scope, contextRevision: 0, policyVersion: 'v1', action: 'silent', reason: '', evidenceIds: [],
+    status: 'suppressed', inputSnapshot, createdAt: new Date().toISOString()
+  });
+  for (let i = 0; i < 501; i++) await record(`decision_${i}`);
+  await record('zzz_bot_turn', { gate: 'bot_turn' });
+  const list = vi.spyOn(f.repos.collaboration, 'listDecisions');
+  const response = await f.app.inject({ url: '/api/lark/groups/cli_one/oc_one/collaboration', headers: { authorization: 'Bearer management' } });
+  expect(response.statusCode).toBe(200);
+  const result = response.json();
+  expect(result.decisions).toHaveLength(50);
+  expect(result.decisions.every((item: { id: string }) => item.id !== 'zzz_bot_turn')).toBe(true);
+  expect(result.usage).toMatchObject({ decisionsLastHour: 499, decisionWindowComplete: false });
+  expect(list).toHaveBeenCalledTimes(1);
+});
 it('validates management auth, scoped paths and optimistic revisions through HTTP', async () => {
   const f = await fixture(); const url = '/api/lark/groups/cli_one/oc_one/collaboration';
   expect((await f.app.inject({ url })).statusCode).toBe(403);

@@ -75,17 +75,17 @@ export class CollaborationService {
     const [snapshot, followups, records, allDecisions, actions, activities, feedback, duty] = await Promise.all([repo.snapshot(scope), repo.listFollowups(scope), repo.listMandates(scope), repo.listDecisions(scope, DECISION_WINDOW_LIMIT), repo.listActions(scope), repo.listActivities(scope), repo.listFeedback(scope), repo.getDuty(scope)]);
     const decisions = allDecisions.filter(item => !isBotTurnRecord(item)).slice(0, 50);
     const mandates = await Promise.all(records.map(async mandate => ({ ...mandate, schedule: await this.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId), nextDueAt: (await this.repositories.scheduleWatermarks.get(mandate.scheduleDefinitionId))?.nextDueAt })));
-    return { snapshot, followups, mandates, decisions, actions, activities, feedback, duty, usage: await this.usage(scope, snapshot) };
+    return { snapshot, followups, mandates, decisions, actions, activities, feedback, duty, usage: await this.usage(scope, snapshot, allDecisions) };
   }
   /**
    * 本小时用量。判定要花模型调用，observe 影子模式同样花却从不发言，
    * 所以用量必须能单独看到，而不是让调用方从 decisions 列表里自己数。
    */
-  private async usage(scope: CollaborationScope, snapshot: CollaborationSnapshot) {
+  private async usage(scope: CollaborationScope, snapshot: CollaborationSnapshot, recentDecisions: Awaited<ReturnType<CollaborationRepository['listDecisions']>>) {
     const since = (this.options.now?.() ?? new Date()).getTime() - 3_600_000;
     const repo = this.repositories.collaboration;
-    // 两个列表的服务端硬上限都是 500，传更大的数只会被静默截断。
-    const [recentDecisions, recentActions] = await Promise.all([repo.listDecisions(scope, DECISION_WINDOW_LIMIT), repo.listActions(scope, DECISION_WINDOW_LIMIT)]);
+    // 动作列表的服务端硬上限也是 500，传更大的数只会被静默截断。
+    const recentActions = await repo.listActions(scope, DECISION_WINDOW_LIMIT);
     const decisionWindowComplete = !listWindowIncomplete(recentDecisions, since);
     return {
       decisionsLastHour: countDecisionUsage(recentDecisions, since),
