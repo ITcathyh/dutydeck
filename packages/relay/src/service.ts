@@ -70,7 +70,12 @@ export class RelayService {
     }, context);
   }
 
-  /** 从 token 反解会话 id，供路由在注册终态唤醒时使用 */
+  /** 同步验签，供路由在首次 await 前绑定任务和终态监听；存活校验仍走 resolveSession。 */
+  verifySession(authorization: string | undefined, sessionId?: string) {
+    return this.capabilities.verify(relayBearerToken(authorization), sessionId);
+  }
+
+  /** 从 token 反解会话 id，并校验会话仍可接收消息 */
   resolveSession(authorization: string | undefined, sessionId?: string) {
     return this.capabilities.resolve(relayBearerToken(authorization), sessionId);
   }

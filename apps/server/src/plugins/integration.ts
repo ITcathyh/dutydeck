@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
 import {
   botAppIdOfSession,
   installationOwnerTaskActor,
@@ -124,8 +125,19 @@ export function createTriggerDispatcher(deps: {
         .filter(session => session.source === PLUGIN_TRIGGER_SOURCE && session.sourceId === sourceId && !session.archivedAt && !['stopped', 'failed'].includes(session.state))
         .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
     }
-    const cwd = session ? session.cwd : bot.workspace;
-    if (!scopeApplies(request.scope, { botAppId: bot.appId, ...(cwd ? { cwd } : {}) })) {
+    let cwd = session ? session.cwd : bot.workspace;
+    let scope = request.scope;
+    if (scope.startsWith('workspace:')) {
+      try {
+        // 两端都按真实路径比较；把已核准的目录交给 runtime，避免再次解析原来的符号链接。
+        const root = await realpath(scope.slice('workspace:'.length));
+        cwd = cwd ? await realpath(cwd) : undefined;
+        scope = `workspace:${root}`;
+      } catch {
+        throw new Error(`插件 ${request.plugin} 的作用域或目标会话工作区无法解析`);
+      }
+    }
+    if (!scopeApplies(scope, { botAppId: bot.appId, ...(cwd ? { cwd } : {}) })) {
       throw new Error(`插件 ${request.plugin} 的作用域不允许在目标会话工作区执行`);
     }
     let sessionId = session?.id;
@@ -133,7 +145,7 @@ export function createTriggerDispatcher(deps: {
       const agentId = bot.defaultAgentId ?? deps.fallbackAgentId();
       if (!agentId) throw new Error('没有可用的 Agent');
       const permissionMode = bot.permissionMode === 'full-trust' && !bot.fullTrustConfirmed ? undefined : bot.permissionMode;
-      sessionId = (await deps.runtime.start({ agentId, ...(bot.workspace ? { cwd: bot.workspace } : {}), source: PLUGIN_TRIGGER_SOURCE, sourceId, ...(permissionMode ? { permissionMode } : {}) })).id;
+      sessionId = (await deps.runtime.start({ agentId, ...(cwd ? { cwd } : {}), source: PLUGIN_TRIGGER_SOURCE, sourceId, ...(permissionMode ? { permissionMode } : {}) })).id;
     }
     const task = await deps.runtime.dispatch(sessionId, request.prompt, 'queue', request.prompt, undefined, installationOwnerTaskActor, `plugin-trigger:${request.key}`);
     return { sessionId, taskId: task.id };

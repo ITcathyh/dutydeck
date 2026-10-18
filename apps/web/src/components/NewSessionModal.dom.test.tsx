@@ -178,6 +178,82 @@ describe('NewSessionModal 弹层外壳（契约 §7 / §8.1）', () => {
 
 
 describe('NewSessionModal pending exits', () => {
+  it('blocks switching to a legacy Agent during pending creation and dispatches only once', async () => {
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const create = vi.spyOn(api, 'create').mockImplementation(async () => { await gate; return session; });
+    const send = vi.spyOn(api, 'send').mockResolvedValue({ accepted: true, task });
+    const onClose = vi.fn(), onCreated = vi.fn();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={client}><NewSessionModal open onClose={onClose} onCreated={onCreated} agents={[agent, { ...agent, id: 'legacy', name: 'Legacy PTY', protocol: 'pty' }]}/></QueryClientProvider>);
+    await userEvent.type(screen.getByLabelText('任务目标'), task.prompt);
+    await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    await userEvent.click(screen.getByRole('button', { name: 'Codex' }));
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Codex' }).matches(':disabled')).toBe(true);
+    expect((screen.getByLabelText('工作目录') as HTMLInputElement).disabled).toBe(true);
+    await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
+    await userEvent.click(screen.getByRole('button', { name: '关闭' }));
+    await userEvent.keyboard('{Escape}');
+    fireEvent.mouseDown(screen.getByRole('dialog', { name: '创建新任务' }).parentElement!);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    await act(async () => release());
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(session, task));
+    expect(onCreated).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledWith({ agentId: 'codex', permissionMode: 'ask', workspaceMode: 'worktree' });
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(session.id, task.prompt, 'queue');
+  });
+
+  it.each([
+    ['legacy', 'complete'], ['empty', 'complete'], ['legacy', 'fail'], ['empty', 'fail']
+  ] as const)('keeps exits blocked when Agents refresh to %s until creation settles: %s', async (refresh, outcome) => {
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const create = vi.spyOn(api, 'create').mockImplementation(async () => {
+      await gate;
+      if (outcome === 'fail') throw new Error('request failed');
+      return session;
+    });
+    const send = vi.spyOn(api, 'send').mockResolvedValue({ accepted: true, task });
+    const onClose = vi.fn(), onCreated = vi.fn(), onOpenAgentSetup = vi.fn();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const modal = (agents: Agent[]) => <QueryClientProvider client={client}><NewSessionModal open onClose={onClose} onCreated={onCreated} onOpenAgentSetup={onOpenAgentSetup} agents={agents}/></QueryClientProvider>;
+    const { rerender } = render(modal([agent]));
+    await userEvent.type(screen.getByLabelText('任务目标'), task.prompt);
+    await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    rerender(modal(refresh === 'legacy' ? [{ ...agent, protocol: 'pty' }] : []));
+    const dialog = screen.getByRole('dialog', { name: refresh === 'legacy' ? '无法创建旧 PTY 任务' : '需要先准备 Agent' });
+    const tryExits = async () => {
+      await userEvent.click(screen.getByRole('button', { name: '关闭' }));
+      await userEvent.keyboard('{Escape}');
+      fireEvent.mouseDown(dialog.parentElement!);
+      if (refresh === 'empty') {
+        await userEvent.click(screen.getByRole('button', { name: '稍后再说' }));
+        await userEvent.click(screen.getByRole('button', { name: '查看添加方法' }));
+      }
+    };
+    await tryExits();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onOpenAgentSetup).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    await act(async () => release());
+    await waitFor(() => expect((screen.getByRole('button', { name: '关闭' }) as HTMLButtonElement).disabled).toBe(false));
+    await tryExits();
+    expect(onClose).toHaveBeenCalledTimes(refresh === 'empty' ? 4 : 3);
+    expect(onOpenAgentSetup).toHaveBeenCalledTimes(refresh === 'empty' ? 1 : 0);
+    expect(create).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledTimes(outcome === 'complete' ? 1 : 0);
+    expect(onCreated).toHaveBeenCalledTimes(outcome === 'complete' ? 1 : 0);
+    if (outcome === 'complete') expect(onCreated).toHaveBeenCalledWith(session, task);
+  });
+
   it.each(['create', 'send', 'schedule'] as const)('blocks every exit while %s is pending, then completes once', async stage => {
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     let release!: () => void;
@@ -216,6 +292,8 @@ describe('NewSessionModal pending exits', () => {
     await userEvent.type(screen.getByLabelText('任务目标'), task.prompt);
     await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
     await screen.findByRole('alert');
+    expect(screen.getByRole('button', { name: 'Codex' }).matches(':disabled')).toBe(stage === 'send');
+    expect((screen.getByLabelText('工作目录') as HTMLInputElement).disabled).toBe(stage === 'send');
     await userEvent.click(screen.getByRole('button', { name: '取消' }));
     await userEvent.click(screen.getByRole('button', { name: '关闭' }));
     await userEvent.keyboard('{Escape}');

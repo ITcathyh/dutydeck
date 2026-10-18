@@ -415,6 +415,7 @@ async function runTest() {
   await waitFor('Alice active before Bob queues', async () => (await harness!.observations()).length === 8);
   await harness.ingress('cli_one', { rootId: held.messageId, threadId: 'omt_risk', senderOpenId: 'ou_bob', mentions: [], content: '{"text":"check-risk from Bob"}' });
   const heldSession = (await harness.runtime.listSessions()).find(session => session.sourceId?.includes(held.messageId))!;
+  assert.equal(heldSession.permissionMode, 'full-trust');
   await waitFor('Bob actor persisted with queued task', async () => (await harness!.repositories.tasks.listBySession(heldSession.id)).some(task => task.status === 'queued' && task.executionContext?.actorId === 'ou_bob'));
   const queuedBobTask = (await harness!.repositories.tasks.listBySession(heldSession.id)).find(task => task.status === 'queued' && task.executionContext?.actorId === 'ou_bob');
   assert(queuedBobTask, 'Missing queued Bob task');

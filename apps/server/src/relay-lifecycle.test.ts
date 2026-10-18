@@ -63,6 +63,75 @@ it('cancels an interrupted task question while the reusable session becomes idle
   expect(late.statusCode).toBe(409);
 });
 
+it('retains task ownership when interruption completes during the first session lookup', async () => {
+  const f = await fixture();
+  const owner = await f.dispatch();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const getSession = f.runtime.getSession.bind(f.runtime);
+  let lookupStarted = false;
+  vi.spyOn(f.runtime, 'getSession').mockImplementation(async (...args) => {
+    if (lookupStarted) return getSession(...args);
+    lookupStarted = true;
+    const session = await getSession(...args);
+    await gate;
+    return session;
+  });
+  const result = f.ask('old task question delayed at initial lookup');
+  try {
+    await vi.waitFor(() => expect(lookupStarted).toBe(true));
+    await f.runtime.interrupt(f.session.id);
+    await vi.waitFor(() => expect(f.runtime.getActiveTaskContext(f.session.id)).toBeUndefined());
+    expect((await f.runtime.getTasks(f.session.id)).find(task => task.id === owner.taskId)?.status).toBe('interrupted');
+    expect((await f.runtime.getSession(f.session.id))?.state).toBe('idle');
+    release();
+    const store = createRelayAskStore(f.repos.config);
+    await vi.waitFor(async () => expect(await store.list()).toEqual([
+      expect.objectContaining({ status: 'cancelled', taskId: owner.taskId, attemptId: owner.attemptId })
+    ]));
+    const outcome = await result;
+    expect(outcome).toMatchObject({ status: 'cancelled' });
+    expect(f.broker.listPending()).toEqual([]);
+    expect((await f.runtime.getEvents(f.session.id)).some(event => (event.data as { relay?: string }).relay === 'ask')).toBe(false);
+    const late = await f.app.inject({ method: 'POST', url: `/api/relay/sessions/${f.session.id}/asks/${outcome.askId}/answer`, payload: { answer: 'late' } });
+    expect(late.statusCode).toBe(409);
+    expect(late.json()).toMatchObject({ error: { code: 'RELAY_ASK_SETTLED' } });
+    expect(await store.get(outcome.askId)).toMatchObject({ status: 'cancelled', taskId: owner.taskId, attemptId: owner.attemptId });
+  } finally { release(); }
+});
+
+it('accepts and answers an idle session question after an earlier task was interrupted', async () => {
+  const f = await fixture();
+  await f.dispatch();
+  await f.runtime.interrupt(f.session.id);
+  await vi.waitFor(() => expect(f.runtime.getActiveTaskContext(f.session.id)).toBeUndefined());
+  const result = f.ask('idle question');
+  await vi.waitFor(() => expect(f.broker.listPending()).toHaveLength(1));
+  const pending = f.broker.listPending()[0]!;
+  expect(pending.taskId).toBeUndefined();
+  expect(pending.attemptId).toBeUndefined();
+  const answer = await f.app.inject({ method: 'POST', url: `/api/relay/sessions/${f.session.id}/asks/${pending.id}/answer`, payload: { answer: 'idle answer' } });
+  expect(answer.statusCode).toBe(200);
+  expect(await result).toMatchObject({ status: 'answered', answer: 'idle answer' });
+});
+
+it.each(['missing', 'forged', 'foreign'] as const)('rejects a %s token before binding a task or subscribing', async kind => {
+  const f = await fixture();
+  await f.dispatch();
+  const owner = vi.spyOn(f.runtime, 'getActiveTaskContext');
+  const lookup = vi.spyOn(f.runtime, 'getSession');
+  const subscribe = vi.mocked(f.runtime.subscribe);
+  subscribe.mockClear();
+  const token = kind === 'foreign' ? f.capabilities.tokenFor('another-session') : `${f.capabilities.tokenFor(f.session.id)}-forged`;
+  const response = await f.app.inject({ method: 'POST', url: `/api/relay/sessions/${f.session.id}/ask`, headers: kind === 'missing' ? {} : { authorization: `Bearer ${token}` }, payload: { question: 'unauthorized' } });
+  expect(response.statusCode).toBe(401);
+  expect(response.json()).toMatchObject({ error: { code: kind === 'missing' ? 'RELAY_CONTEXT_REQUIRED' : 'RELAY_UNAUTHORIZED' } });
+  expect(owner).not.toHaveBeenCalled();
+  expect(lookup).not.toHaveBeenCalled();
+  expect(subscribe).not.toHaveBeenCalled();
+  expect(f.broker.listPending()).toEqual([]);
+});
+
 it('does not cancel a new task question when an old task event arrives late', async () => {
   const f = await fixture();
   const old = await f.dispatch();

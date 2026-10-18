@@ -147,12 +147,12 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
   app.post<{ Params: { id: string }; Body: { question?: string; timeoutMs?: number } }>('/api/relay/sessions/:id/ask', async (request, reply) => {
     let release: (() => void) | undefined;
     try {
-      // 先反解会话再注册终态唤醒：必须在阻塞之前挂上监听，
-      // 否则「注册监听」这一步永远等不到执行，会话结束时无人唤醒。
-      const capability = await service.resolveSession(request.headers.authorization, request.params.id);
+      // 首次 await 前用已验签的身份绑定任务和监听；异步存活查询期间任务可能已结束并清除 activeTask。
+      const capability = service.verifySession(request.headers.authorization, request.params.id);
       const owner = runtime?.getActiveTaskContext(capability.sessionId);
       const controller = new AbortController();
       release = watchSession(capability.sessionId, { ...owner, controller });
+      await service.resolveSession(request.headers.authorization, request.params.id);
       // The durable settlement may already precede subscription while the
       // in-memory active task is still being cleaned up.
       if (owner && endedTaskStates.has((await runtime!.getTaskRecovery(capability.sessionId, owner.taskId)).status)) controller.abort('任务已结束');

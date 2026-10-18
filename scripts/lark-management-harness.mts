@@ -85,6 +85,7 @@ export async function createLarkManagementHarness(
           defaultAgentId: agents[index]!.id,
           workspace: workspaces[index],
           fullTrustConfirmed: true,
+          permissionMode: 'full-trust',
           defaultModel: 'model-default',
           groupReplyMode: 'new-topic',
           mentionPolicy: 'topic',

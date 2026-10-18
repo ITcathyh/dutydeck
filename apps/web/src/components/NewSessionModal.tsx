@@ -87,22 +87,22 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
   });
   if (!open) return null;
 
-  if (agents.length === 0) return <Dialog open onClose={onClose} label="需要先准备 Agent" size="sm">
+  if (agents.length === 0) return <Dialog open onClose={onClose} label="需要先准备 Agent" size="sm" closeOnEscape={!create.isPending} closeOnScrim={!create.isPending}>
     <Dialog.Header>
       <h2 className="text-title font-semibold text-primary">先准备一个 Agent</h2>
-      <span className="ml-auto"><IconButton label="关闭" onClick={onClose}><X size={16}/></IconButton></span>
+      <span className="ml-auto"><IconButton label="关闭" onClick={onClose} disabled={create.isPending}><X size={16}/></IconButton></span>
     </Dialog.Header>
     <Dialog.Body>Dutydeck 没有检测到可用的 Agent CLI。安装并登录 Codex、Claude Code 等 CLI 后重启 Dutydeck，再回来创建任务。</Dialog.Body>
     <Dialog.Footer>
-      <Button variant="secondary" onClick={onClose}>稍后再说</Button>
-      <Button variant="primary" onClick={onOpenAgentSetup ?? onClose}>查看添加方法</Button>
+      <Button variant="secondary" onClick={onClose} disabled={create.isPending}>稍后再说</Button>
+      <Button variant="primary" onClick={onOpenAgentSetup ?? onClose} disabled={create.isPending}>查看添加方法</Button>
     </Dialog.Footer>
   </Dialog>;
 
-  if (legacyPtyUnsupported) return <Dialog open onClose={onClose} label="无法创建旧 PTY 任务" size="sm">
+  if (legacyPtyUnsupported) return <Dialog open onClose={onClose} label="无法创建旧 PTY 任务" size="sm" closeOnEscape={!create.isPending} closeOnScrim={!create.isPending}>
     <Dialog.Header>
       <h2 className="text-title font-semibold text-primary">无法创建任务</h2>
-      <span className="ml-auto"><IconButton label="关闭" onClick={onClose}><X size={16}/></IconButton></span>
+      <span className="ml-auto"><IconButton label="关闭" onClick={onClose} disabled={create.isPending}><X size={16}/></IconButton></span>
     </Dialog.Header>
     <Dialog.Body>
       <Banner tone="danger">旧 PTY 兼容协议无法提供可靠的权限控制或交互审批，请改用 ACP 或 PTY CLI Agent。</Banner>
@@ -133,9 +133,9 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
             description="填写运行 Dutydeck 的这台机器上的目录；留空会使用 Agent 的默认工作区。"
             placeholder="留空则使用 Agent 默认目录"
             allowNative={Boolean(capabilities?.directoryPicker)}
-            disabled={Boolean(createdSession)}
+            disabled={create.isPending || Boolean(createdSession)}
           />
-          <fieldset disabled={Boolean(createdSession)} className="contents disabled:opacity-60">
+          <fieldset disabled={create.isPending || Boolean(createdSession)} className="contents disabled:opacity-60">
             <SelectField label="工作目录方式">
               <CompactSelect value={workspaceMode} options={[{ value: 'worktree', label: '独立 Git 工作目录', meta: '从当前提交创建分支；后续追问复用，不带入未提交改动' }, { value: 'shared', label: '直接使用所选目录', meta: '适用于非 Git 目录，或需要使用现有未提交改动' }]} onChange={value => setWorkspaceMode(value as 'shared' | 'worktree')} placeholder="选择工作目录方式" disabledText=""/>
             </SelectField>
