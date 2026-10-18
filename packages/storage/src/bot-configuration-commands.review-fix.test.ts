@@ -83,7 +83,7 @@ function mut(value: Record<string, unknown>): BotRelatedMutation {
 function tableDump(db: Database.Database) {
   return (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
     .all() as Array<{ name: string }>)
-    .map(r => [r.name, db.prepare(`SELECT * FROM "${r.name}" ORDER BY rowid`).all()]);
+    .map(r => [r.name, db.prepare(`SELECT * FROM "${r.name}" ORDER BY ${r.name === 'memory_consumed_tasks' ? 'app_id, pool, task_id' : 'rowid'}`).all()]);
 }
 
 describe('F1: strict getter / hidden-field boundary on the four assembling wrappers', () => {

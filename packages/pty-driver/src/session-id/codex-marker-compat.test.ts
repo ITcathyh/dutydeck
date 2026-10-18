@@ -69,6 +69,9 @@ describe.each([
       { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: buildSessionMarker(child) }] } },
       { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'x'.repeat(5 * 1024 * 1024) }] } },
     ]);
+    // Copied generic user input cannot establish a fork's own identity.
+    expect(resolveCliSessionId(adapter, { ...h.context, sessionId: child, cwd: childCwd })).toBeUndefined();
+    h.history([{ session_id: childNative, text: buildSessionMarker(child) }]);
     expect(resolveCliSessionId(adapter, { ...h.context, sessionId: child, cwd: childCwd })).toBe(childNative);
     expect(h.resolve()).toBeUndefined();
   });
@@ -107,6 +110,8 @@ describe.each([
       { type: 'session_meta', payload: { id: sourceNative, cwd: h.context.cwd, source: { subagent: 'review' } } },
       { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: buildSessionMarker(child) }] } },
     ]);
+    expect(resolveCliSessionId(adapter, { ...h.context, sessionId: child })).toBeUndefined();
+    h.history([{ session_id: childNative, text: buildSessionMarker(child) }]);
     expect(resolveCliSessionId(adapter, { ...h.context, sessionId: child })).toBe(childNative);
   });
 
@@ -117,4 +122,22 @@ describe.each([
     expect(h.resolve()).toBeUndefined();
     expect(h.resolve(true)).toBeUndefined();
   });
+});
+
+// Unlike generic copied user messages, these native receipts carry explicit thread/turn ownership.
+it.each(['own', 'parent', 'foreign-turn', 'assistant'])('TraeX fork accepts only attributable display input: %s', kind => {
+  const home = mkdtempSync(join(tmpdir(), 'traex-fork-owner-')); roots.push(home);
+  const sessions = join(home, 'cli', 'sessions'); mkdirSync(sessions, { recursive: true });
+  jsonl(join(sessions, `rollout-now-${childNative}.jsonl`), [
+    { type: 'session_meta', payload: { id: childNative, cwd: home } },
+    { type: 'session_meta', payload: { id: sourceNative, cwd: home } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: buildSessionMarker(source) } },
+    { type: 'history_mutation', payload: { operation: 'append', turn_id: 'turn-child', display_completions: [
+      { thread_id: kind === 'parent' ? sourceNative : childNative, turn_id: kind === 'foreign-turn' ? 'turn-other' : 'turn-child',
+        item: { type: kind === 'assistant' ? 'AgentMessage' : 'UserMessage', content: [{ type: 'Text', text: buildSessionMarker(child) }] } },
+    ] } },
+  ]);
+  const context = { cwd: home, env: { TRAE_HOME: home }, requireMarker: true };
+  expect(resolveCliSessionId('traex', { ...context, sessionId: child })).toBe(kind === 'own' ? childNative : undefined);
+  expect(resolveCliSessionId('traex', { ...context, sessionId: source })).toBeUndefined();
 });

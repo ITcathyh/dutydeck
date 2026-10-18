@@ -717,3 +717,17 @@ it('blocks Agent dispatch when closing races the persisted sending claim', async
   expect(executeAgent).not.toHaveBeenCalled(); expect(f.deliver).not.toHaveBeenCalled();
   expect((await f.repos.collaboration.listActions(scope)).find(action => action.kind === 'schedule_agent')!.status).toBe('suppressed');
 });
+
+
+it('rejects invalid calendar dates during collaboration prepare, create and update', async () => {
+  const f = await fixture(new Date('2026-01-01T00:00:00Z'));
+  const { mandate } = await f.create();
+  for (const localDateTime of ['2026-02-30T09:00', '2026-02-28T25:00']) {
+    const trigger = { kind: 'at', localDateTime };
+    await expect(f.service.prepareMandate(scope, 'requester', { ...f.input, id: 'invalid', trigger })).rejects.toThrow();
+    await expect(f.create({ id: 'invalid', trigger })).rejects.toThrow();
+    await expect(f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 1, trigger })).rejects.toThrow();
+  }
+  expect(await f.repos.scheduleDefinitions.list()).toHaveLength(1);
+  expect((await f.repos.collaboration.getMandate(scope, mandate.id))?.revision).toBe(1);
+});

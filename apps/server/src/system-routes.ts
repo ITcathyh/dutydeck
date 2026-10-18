@@ -4,9 +4,9 @@ import { promisify } from 'node:util';
 import { access, readdir, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir, hostname } from 'node:os';
-import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { RuntimeError } from '@dutydeck/shared';
-import { discoverSkills } from './skill-catalog.js';
+import { discoverSkills, isPathInside } from './skill-catalog.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -18,11 +18,6 @@ export interface SystemRoutesOptions {
   directoryRoots?: () => Promise<string[]>;
 }
 
-const withinDirectory = (path: string, root: string) => {
-  const child = relative(root, path);
-  return child === '' || (child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child));
-};
-
 async function listDirectories(input: unknown, additionalRoots: string[]) {
   if (input !== undefined && (typeof input !== 'string' || !isAbsolute(input) || input.includes('\0'))) {
     throw new RuntimeError('INVALID_DIRECTORY', '请输入服务器上的绝对目录路径。', 400);
@@ -32,7 +27,7 @@ async function listDirectories(input: unknown, additionalRoots: string[]) {
     try { return await realpath(root); } catch { return undefined; }
   }))).filter((root): root is string => Boolean(root)))];
   const path = await realpath(input as string | undefined ?? homedir());
-  const allowed = (candidate: string) => roots.some(root => withinDirectory(candidate, root));
+  const allowed = (candidate: string) => roots.some(root => isPathInside(candidate, root));
   if (!allowed(path)) throw new RuntimeError('DIRECTORY_OUTSIDE_ROOTS', '请选择主目录或已配置工作区内的目录。', 403);
   if (!(await stat(path)).isDirectory()) throw new RuntimeError('NOT_A_DIRECTORY', '所选路径不是目录。', 400);
   await access(path, constants.R_OK | constants.X_OK);

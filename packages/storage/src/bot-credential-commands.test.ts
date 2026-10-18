@@ -127,7 +127,7 @@ function seedAdminRole(db: Database.Database, botId: string, principalId: string
 const dump = (db: Database.Database) =>
   Object.fromEntries(
     (db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as { name: string }[])
-      .map(({ name }) => [name, db.prepare('SELECT * FROM "' + name.replaceAll('"', '""') + '" ORDER BY rowid').all()])
+      .map(({ name }) => [name, db.prepare('SELECT * FROM "' + name.replaceAll('"', '""') + '" ORDER BY ' + (name === 'memory_consumed_tasks' ? 'app_id, pool, task_id' : 'rowid')).all()])
   );
 
 describe('bot-credential-commands', () => {

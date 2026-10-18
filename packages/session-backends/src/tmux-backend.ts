@@ -368,7 +368,6 @@ export class TmuxBackend implements SessionBackend {
 
   /** Frozen while attached; later TMUX_TMPDIR changes cannot redirect a verified stop. */
   getSocketPath(): string | undefined { return this.socketPath; }
-  getCapturePid(): number | undefined { return undefined; }
   captureDisposed(): boolean { return !this.capture; }
   onOutputGap(cb: (dropped: number) => void): void { this.output.onGap(cb); }
 

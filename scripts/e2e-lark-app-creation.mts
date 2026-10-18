@@ -7,11 +7,12 @@ import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { agentConfigSchema } from '@dutydeck/shared';
 import { buildApp } from '../apps/server/src/app.js';
+import { AgentModelSettings } from '../apps/server/src/agent-model-settings.js';
 import { LarkAppCreationJobManager } from '../apps/server/src/lark/app-creation.js';
 import { LARK_COMMON_TENANT_SCOPES } from '../apps/server/src/lark/open-platform-configurator.js';
 import newAppPrivileges from '../apps/server/src/lark/fixtures/new-app-privileges.json';
 import automaticApproval from '../apps/server/src/lark/fixtures/approval-collaborator-exemption.json';
-import { readLarkConfig, saveLarkConfig } from '../apps/server/src/lark/config.js';
+import { larkPermissionMode, readLarkConfig, saveLarkConfig } from '../apps/server/src/lark/config.js';
 import {
   resolveArtifactDir,
   getGitMetadata,
@@ -222,6 +223,8 @@ async function runTest() {
   app = await buildApp(runtime, {
     webRoot: resolve('apps/web/dist'),
     auth: { mode: 'local', localOnly: true, getToken: async () => null },
+    agentModelSettings: new AgentModelSettings(repositories, [agent]),
+    sessionNames: { authorize: async () => true },
     lark: {
       config: repositories.config, agents: repositories.agents, listener, appCreationJobs: jobs,
       fetcher: async () => { throw new Error('Real Feishu requests are forbidden in this test'); },
@@ -283,12 +286,19 @@ async function runTest() {
   } else {
     await expect(dialog.getByText('默认 Agent', { exact: true })).toBeVisible();
     await expect(dialog.getByRole('button', { name: 'CCFlash (Claude Code / CPA)', exact: true })).toBeVisible();
+    await dialog.getByRole('button', { name: '飞书逐项确认：等待批准后执行', exact: true }).click();
+    await page.getByRole('option', { name: '完全信任：自动执行操作', exact: true }).click();
+    await expect(dialog.getByRole('checkbox', { name: /确认飞书任务以 full-trust 运行/ })).not.toBeChecked();
+    await expect(dialog.getByRole('button', { name: '完成配置' })).toBeDisabled();
     await dialog.getByRole('checkbox', { name: /确认飞书任务以 full-trust 运行/ }).check();
     await dialog.getByRole('button', { name: '完成配置' }).click();
     await expect(dialog).toHaveCount(0);
   }
   const saved = await readLarkConfig(repositories.config, 'cli_created');
-  if (!pendingReview) assert.equal(saved?.defaultAgentId, 'ccflash');
+  if (!pendingReview) {
+    assert.equal(saved?.defaultAgentId, 'ccflash');
+    assert.equal(larkPermissionMode(saved!), 'full-trust');
+  }
   assert.equal(saved?.listening, !pendingReview);
   assert.equal(saved?.fullTrustConfirmed, !pendingReview);
   assert.deepEqual(await readLarkConfig(repositories.config, 'cli_previous'), previous);

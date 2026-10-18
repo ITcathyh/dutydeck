@@ -23,6 +23,7 @@ import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { claudeProjectDir } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, nativeTranscriptObjects, walkFiles } from './fs-scan.js';
 import { buildSessionMarker, isUsableMarker } from './marker.js';
+import { userEntryMentionsMarker } from '../transcript/claude-content.js';
 import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
 
 /** Head window per candidate transcript. The marker rides the FIRST user
@@ -37,31 +38,16 @@ function bareId(sessionId: string): string {
   return pinnedSessionUuid(sessionId);
 }
 
-/** Does an entry's text content mention the marker? Handles both the string
- *  and the content-block array form of `message.content`. */
-function entryMentions(entry: any, needle: string): boolean {
-  const content = entry?.message?.content;
-  if (typeof content === 'string') return content.includes(needle);
-  if (!Array.isArray(content)) return false;
-  for (const block of content) {
-    if (block && typeof block === 'object' && typeof block.text === 'string'
-      && block.text.includes(needle)) return true;
-  }
-  return false;
-}
-
 /** The CLI session id recorded inside a transcript entry, if any. */
 function entrySessionId(entry: any): string | undefined {
   const id = entry?.sessionId;
   return typeof id === 'string' && id.length > 0 ? id : undefined;
 }
 
-function markedSession(path: string, sessionId: string, requireMarker: boolean, exactPinned = false): string | undefined {
+function markedSession(path: string, sessionId: string, exactPinned = false): string | undefined {
   const records = exactPinned ? nativeTranscriptObjects(path) : parseJsonlObjects(readHead(path, HEAD_BYTES));
   for (const entry of records) {
-    if (entry?.isSidechain === true) continue;
-    if (requireMarker && (entry?.type !== 'user' || entry?.message?.role !== 'user')) continue;
-    if (!entryMentions(entry, buildSessionMarker(sessionId))) continue;
+    if (!userEntryMentionsMarker(entry, buildSessionMarker(sessionId))) continue;
     return entrySessionId(entry) ?? (path.replace(/^.*\//, '').replace(/\.jsonl$/, '') || undefined);
   }
   return undefined;
@@ -91,7 +77,7 @@ export const claudeSessionIdLookup: SessionIdLookup = {
       if (!requireMarker) return pinned;
       // Do not let unrelated newer files push the exact pinned transcript out
       // of the bounded scan. A conflicting pinned file must not be adopted.
-      return isUsableMarker(sessionId) ? markedSession(pinnedPath, sessionId, true, true) : undefined;
+      return isUsableMarker(sessionId) ? markedSession(pinnedPath, sessionId, true) : undefined;
     }
 
     if (!isUsableMarker(sessionId)) return undefined;
@@ -104,7 +90,7 @@ export const claudeSessionIdLookup: SessionIdLookup = {
     }).sort(byMtimeDesc).slice(0, MAX_CANDIDATES);
 
     for (const candidate of candidates) {
-      const found = markedSession(candidate.path, sessionId, !!requireMarker);
+      const found = markedSession(candidate.path, sessionId);
       if (found) return found;
     }
     return undefined;

@@ -1,7 +1,14 @@
 import { z } from 'zod';
 
 const utcTimestamp = z.string().datetime({ offset: true });
-const localDateTime = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/, 'Expected a local ISO date-time without an offset');
+const localDateTimeFormat = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/, 'Expected a local ISO date-time without an offset');
+const localDateTime = localDateTimeFormat.refine(value => {
+  const parts = parseLocal(value);
+  const date = new Date(localEpoch(parts));
+  return parts.year >= 1 && date.getUTCFullYear() === parts.year && date.getUTCMonth() + 1 === parts.month
+    && date.getUTCDate() === parts.day && date.getUTCHours() === parts.hour
+    && date.getUTCMinutes() === parts.minute && date.getUTCSeconds() === parts.second;
+}, 'Expected a valid calendar date and time');
 
 export const scheduleDefinitionStates = ['staged', 'disabled', 'enabled'] as const;
 export const scheduleOwnerships = ['dutydeck', 'botmux'] as const;
@@ -14,6 +21,12 @@ export const scheduleTriggerSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('cron'), expression: z.string().trim().min(9).max(256) }).strict()
 ]);
 export type ScheduleTrigger = z.infer<typeof scheduleTriggerSchema>;
+
+/** Read-only compatibility for pre-validation records; callers must disable invalid triggers. */
+export const storedScheduleTriggerSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('at'), localDateTime: localDateTimeFormat }).strict(),
+  scheduleTriggerSchema.options[1], scheduleTriggerSchema.options[2]
+]);
 
 export const scheduleDeliverySchema = z.object({
   mode: z.enum(['chat', 'thread']),
@@ -192,7 +205,7 @@ export const scheduleBlockerCodes = [
   'schedule_staged_disabled', 'schedule_generation_missing', 'schedule_generation_stale', 'schedule_lease_required',
   'schedule_lease_not_held', 'schedule_lease_expired', 'schedule_identity_required', 'schedule_identity_mismatch',
   'schedule_secret_ref_required', 'schedule_secret_ref_invalid', 'schedule_secret_ref_mismatch',
-  'botmux_source_schedule_enabled', 'schedule_executor_unavailable'
+  'botmux_source_schedule_enabled', 'schedule_executor_unavailable', 'schedule_trigger_invalid'
 ] as const;
 export type ScheduleBlockerCode = typeof scheduleBlockerCodes[number];
 export interface ScheduleBlocker { code: ScheduleBlockerCode; message: string; action: string }
@@ -287,7 +300,10 @@ function zonedParts(date: Date, timezone: string): LocalParts {
 }
 
 function localEpoch(parts: Omit<LocalParts, 'weekday'>): number {
-  return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  const date = new Date(0);
+  date.setUTCFullYear(parts.year, parts.month - 1, parts.day);
+  date.setUTCHours(parts.hour, parts.minute, parts.second, 0);
+  return date.getTime();
 }
 function parseLocal(value: string): Omit<LocalParts, 'weekday'> {
   const [date = '', time = ''] = value.split('T');
@@ -358,14 +374,14 @@ function cronField(raw: string, minimum: number, maximum: number, sunday = false
 function parseCron(expression: string): CronMatcher {
   const fields = expression.trim().split(/\s+/);
   if (fields.length !== 5) throw new Error('Cron expressions must contain five fields');
-  return { minute: cronField(fields[0]!, 0, 59), hour: cronField(fields[1]!, 0, 23), day: cronField(fields[2]!, 1, 31), month: cronField(fields[3]!, 1, 12), weekday: cronField(fields[4]!, 0, 7, true), dayWildcard: fields[2] === '*', weekdayWildcard: fields[4] === '*' };
+  return { minute: cronField(fields[0]!, 0, 59), hour: cronField(fields[1]!, 0, 23), day: cronField(fields[2]!, 1, 31), month: cronField(fields[3]!, 1, 12), weekday: cronField(fields[4]!, 0, 7, true), dayWildcard: fields[2]!.startsWith('*'), weekdayWildcard: fields[4]!.startsWith('*') };
 }
 function cronMatches(matcher: CronMatcher, parts: LocalParts): boolean {
   const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
   const weekday = date.getUTCDay();
   const dayMatch = matcher.day.has(parts.day);
   const weekdayMatch = matcher.weekday.has(weekday);
-  const calendarDay = matcher.dayWildcard ? weekdayMatch : matcher.weekdayWildcard ? dayMatch : dayMatch || weekdayMatch;
+  const calendarDay = (matcher.dayWildcard || matcher.weekdayWildcard) ? dayMatch && weekdayMatch : dayMatch || weekdayMatch;
   return matcher.minute.has(parts.minute) && matcher.hour.has(parts.hour) && matcher.month.has(parts.month) && calendarDay;
 }
 
@@ -422,6 +438,7 @@ export function scheduleReadiness(
 ): ScheduleReadiness {
   const blockers: ScheduleBlocker[] = [];
   const add = (code: ScheduleBlockerCode, message: string, action: string) => blockers.push({ code, message, action });
+  if (!scheduleTriggerSchema.safeParse(definition.trigger).success) add('schedule_trigger_invalid', 'Schedule calendar date or time is invalid', 'Correct the trigger before enabling the schedule');
   if (definition.state !== 'enabled' || definition.desiredExecutorState !== 'enabled') add('schedule_staged_disabled', 'Schedule is disabled', 'Enable through its collaboration mandate');
   if (!generation) add('schedule_generation_missing', 'No immutable generation is pinned', 'Create a disabled generation from the current revision');
   else if (generation.generation !== definition.currentGeneration || generation.definitionRevision !== definition.revision) add('schedule_generation_stale', 'Pinned generation does not match the current definition revision', 'Create a new disabled generation');

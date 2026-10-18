@@ -19,9 +19,18 @@ const scopePart = (value: string) => encodeURIComponent(value).replaceAll('.', '
 const botScopePrefix = (appId: string) => `dutydeck.bot_agent_model.${scopePart(appId)}.`;
 const key = (id: string, appId?: string) => appId ? `${botScopePrefix(appId)}${scopePart(id)}` : `dutydeck.agent_model.${id}`;
 const isClaudeCode = (agent: AgentConfig) => supportsAgentModelService(agent);
+// One queue per repository also covers bot-wide clear/rename and multiple service instances.
+const writes = new WeakMap<RepositoryBundle['config'], Promise<unknown>>();
 
 export class AgentModelSettings {
   constructor(private readonly repos: Pick<RepositoryBundle, 'config' | 'agents' | 'sessions'>, private readonly defaults: AgentConfig[], private readonly provider?: LocalFileSecretProvider) {}
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = (writes.get(this.repos.config) ?? Promise.resolve()).then(operation);
+    const settled = pending.catch(() => {});
+    writes.set(this.repos.config, settled);
+    void settled.then(() => { if (writes.get(this.repos.config) === settled) writes.delete(this.repos.config); });
+    return pending;
+  }
   private baseline(id: string) {
     const agent = this.defaults.find(item => item.id === id);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Unknown agent', 404);
@@ -37,7 +46,10 @@ export class AgentModelSettings {
   private removeReferenceKeyIfAvailable(referenceKey: string | undefined) {
     if (referenceKey && this.provider?.inspect(referenceKey).availability === 'available') this.provider.removeConditional(referenceKey);
   }
-  async set(id: string, body: unknown, appId?: string) {
+  set(id: string, body: unknown, appId?: string) {
+    return this.serialize(() => this.setStored(id, body, appId));
+  }
+  private async setStored(id: string, body: unknown, appId?: string) {
     const baseline = this.baseline(id), patch = agentModelSettingsPatchSchema.parse(body), current = await this.read(id, appId);
     if (appId && patch.model !== undefined) throw new RuntimeError('BOT_MODEL_SETTING_REQUIRED', '机器人模型请使用默认模型设置（dutydeck settings bot set <app-id> defaultModel=...）', 400);
     const { apiKey, clearApiKey, ...fields } = patch;
@@ -60,7 +72,10 @@ export class AgentModelSettings {
     if (agent && !appId) await this.repos.agents.save({ ...agent, model: saved.model || baseline.model });
     return this.get(id, appId);
   }
-  async clearBot(appId: string) {
+  clearBot(appId: string) {
+    return this.serialize(() => this.clearBotStored(appId));
+  }
+  private async clearBotStored(appId: string) {
     const entries = await this.repos.config.list?.(botScopePrefix(appId)) ?? [];
     for (const entry of entries) {
       const saved = storedSchema.parse(JSON.parse(entry.value));
@@ -74,13 +89,18 @@ export class AgentModelSettings {
    * 设置时保留新方凭据，旧作用域那份成为孤儿才删密钥。最后旧条目清空（无通用删除键，
    * 沿用 '{}' 墓碑约定）。
    */
-  async renameBot(oldAppId: string, newAppId: string) {
+  renameBot(oldAppId: string, newAppId: string) {
+    return this.serialize(() => this.renameBotStored(oldAppId, newAppId));
+  }
+  private async renameBotStored(oldAppId: string, newAppId: string) {
+    if (oldAppId === newAppId) return;
     const prefix = botScopePrefix(oldAppId);
     for (const entry of await this.repos.config.list?.(prefix) ?? []) {
       if (entry.value === '{}') continue;
       const agentId = decodeURIComponent(entry.key.slice(prefix.length));
       const targetKey = key(agentId, newAppId);
-      if (await this.repos.config.get(targetKey)) {
+      const target = storedSchema.parse(JSON.parse(await this.repos.config.get(targetKey) ?? '{}'));
+      if (Object.keys(target).length > 0) {
         this.removeReferenceKeyIfAvailable(storedSchema.parse(JSON.parse(entry.value)).referenceKey);
       } else {
         await this.repos.config.set(targetKey, entry.value);

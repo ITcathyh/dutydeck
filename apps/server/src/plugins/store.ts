@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
+import Database from 'better-sqlite3';
 import { LocalFileSecretProvider, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { defaultBuiltinPluginRoot, listBuiltinPlugins } from './builtin.js';
 import { loadPluginDirectory, type LoadedPlugin } from './manifest.js';
@@ -220,7 +221,7 @@ export class PluginStore {
         trustedCapabilities: staged.plugin.capabilities,
         updatedAt: new Date().toISOString()
       };
-      const changed = JSON.stringify(entry.resolved) !== JSON.stringify(current.resolved) || entry.version !== current.version
+      const changed = current.source.kind === 'local' || JSON.stringify(entry.resolved) !== JSON.stringify(current.resolved) || entry.version !== current.version
         || entry.trustedCapabilities.join() !== current.trustedCapabilities.join();
       const lock = this.readLock();
       lock.plugins[name] = entry;
@@ -230,23 +231,25 @@ export class PluginStore {
   }
 
   async uninstall(name: string): Promise<void> {
-    if (!this.readLock().plugins[name] && this.builtinNames().has(name)) throw new PluginStoreError('PLUGIN_BUILTIN', `${name} 是内置插件，随 Dutydeck 发布，不能卸载`);
-    this.get(name);
-    await rm(this.pluginDir(name), { recursive: true, force: true });
-    await rm(this.pluginDataDir(name), { recursive: true, force: true });
-    const lock = this.readLock();
-    delete lock.plugins[name];
-    await this.writeLock(lock);
-    const tokens = await this.readTokens();
-    for (const key of Object.keys(tokens)) if (key.startsWith(`${name}/`)) delete tokens[key];
-    await this.writeTokens(tokens);
-    const config = await this.readConfigFile();
-    if (config[name]) { delete config[name]; await this.writeConfigFile(config); }
-    const provider = this.secretProvider(false);
-    if (provider && existsSync(provider.directory)) for (const file of await readdir(provider.directory)) {
-      const prefix = `${pluginSecretPrefix(name)}`;
-      if (file.startsWith(prefix) && file.endsWith('.secret')) provider.removeConditional(file.slice(0, -'.secret'.length));
-    }
+    return this.withConfigLock(async () => {
+      if (!this.readLock().plugins[name] && this.builtinNames().has(name)) throw new PluginStoreError('PLUGIN_BUILTIN', `${name} 是内置插件，随 Dutydeck 发布，不能卸载`);
+      this.get(name);
+      await rm(this.pluginDir(name), { recursive: true, force: true });
+      await rm(this.pluginDataDir(name), { recursive: true, force: true });
+      const lock = this.readLock();
+      delete lock.plugins[name];
+      await this.writeLock(lock);
+      const tokens = await this.readTokens();
+      for (const key of Object.keys(tokens)) if (key.startsWith(`${name}/`)) delete tokens[key];
+      await this.writeTokens(tokens);
+      const config = await this.readConfigFile();
+      if (config[name]) { delete config[name]; await this.writeConfigFile(config); }
+      const provider = this.secretProvider(false);
+      if (provider && existsSync(provider.directory)) for (const file of await readdir(provider.directory)) {
+        const prefix = `${pluginSecretPrefix(name)}`;
+        if (file.startsWith(prefix) && file.endsWith('.secret')) provider.removeConditional(file.slice(0, -'.secret'.length));
+      }
+    });
   }
 
   async setEnabled(name: string, enabled: boolean): Promise<PluginLockEntry> {
@@ -295,6 +298,25 @@ export class PluginStore {
 
   // ---- userConfig：普通值存 .config.json，sensitive 值存 secret-provider ----
 
+  /** 单独的 SQLite 事务只作互斥锁；连接关闭或进程退出时由系统释放，不删除锁文件。 */
+  private async withConfigLock<T>(action: () => Promise<T>): Promise<T> {
+    await mkdir(this.pluginsDir, { recursive: true });
+    const lock = new Database(join(this.pluginsDir, '.config-lock.sqlite'), { timeout: 0 });
+    try {
+      const deadline = Date.now() + 10_000;
+      while (true) {
+        try { lock.exec('BEGIN IMMEDIATE'); break; }
+        catch (error) {
+          if ((error as { code?: string }).code !== 'SQLITE_BUSY') throw error;
+          if (Date.now() >= deadline) throw new PluginStoreError('PLUGIN_CONFIG_BUSY', '插件配置正在被另一个进程修改，请稍后重试');
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      }
+      // 不能用同步 transaction(callback)：配置文件的异步读改写完成前必须保留事务。
+      return await action();
+    } finally { lock.close(); }
+  }
+
   private async readConfigFile(): Promise<Record<string, Record<string, string>>> {
     const path = join(this.pluginsDir, CONFIG_FILE);
     return existsSync(path) ? JSON.parse(await readFile(path, 'utf8')) as Record<string, Record<string, string>> : {};
@@ -302,8 +324,11 @@ export class PluginStore {
   private async writeConfigFile(config: Record<string, Record<string, string>>) {
     await mkdir(this.pluginsDir, { recursive: true });
     const path = join(this.pluginsDir, CONFIG_FILE);
-    await writeFile(`${path}.tmp`, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-    await rename(`${path}.tmp`, path);
+    const temporary = `${path}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
+    try {
+      await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+      await rename(temporary, path);
+    } finally { await rm(temporary, { force: true }); }
   }
 
   secretProvider(create: boolean): LocalFileSecretProvider | undefined {
@@ -314,22 +339,24 @@ export class PluginStore {
 
   /** fromArgv：值来自命令行参数。敏感值不接受这种方式（会留在进程列表和 shell 历史里）。 */
   async setConfig(name: string, key: string, value: Buffer, fromArgv = false): Promise<{ sensitive: boolean }> {
-    this.get(name);
-    const declared = (await loadPluginDirectory(this.pluginDir(name))).manifest.userConfig?.[key];
-    if (!declared) { value.fill(0); throw new PluginStoreError('PLUGIN_CONFIG_UNKNOWN', `插件 ${name} 没有声明配置项 ${key}`); }
-    if (declared.sensitive && fromArgv) { value.fill(0); throw new PluginStoreError('PLUGIN_CONFIG_SENSITIVE', `${key} 是敏感配置，请用 --value-fd 或在终端隐藏输入`); }
-    if (declared.sensitive) {
-      const provider = this.secretProvider(true)!;
-      const referenceKey = pluginSecretKey(name, key);
-      if (provider.inspect(referenceKey).availability === 'missing') provider.writeExclusive(referenceKey, value);
-      else provider.replaceConditional(referenceKey, value, provider.fingerprint(referenceKey));
-      return { sensitive: true };
-    }
-    const config = await this.readConfigFile();
-    config[name] = { ...config[name], [key]: value.toString('utf8') };
-    value.fill(0);
-    await this.writeConfigFile(config);
-    return { sensitive: false };
+    try { return await this.withConfigLock(async () => {
+      this.get(name);
+      const declared = (await loadPluginDirectory(this.pluginDir(name))).manifest.userConfig?.[key];
+      if (!declared) { value.fill(0); throw new PluginStoreError('PLUGIN_CONFIG_UNKNOWN', `插件 ${name} 没有声明配置项 ${key}`); }
+      if (declared.sensitive && fromArgv) { value.fill(0); throw new PluginStoreError('PLUGIN_CONFIG_SENSITIVE', `${key} 是敏感配置，请用 --value-fd 或在终端隐藏输入`); }
+      if (declared.sensitive) {
+        const provider = this.secretProvider(true)!;
+        const referenceKey = pluginSecretKey(name, key);
+        if (provider.inspect(referenceKey).availability === 'missing') provider.writeExclusive(referenceKey, value);
+        else provider.replaceConditional(referenceKey, value, provider.fingerprint(referenceKey));
+        return { sensitive: true };
+      }
+      const config = await this.readConfigFile();
+      config[name] = { ...config[name], [key]: value.toString('utf8') };
+      value.fill(0);
+      await this.writeConfigFile(config);
+      return { sensitive: false };
+    }); } finally { value.fill(0); }
   }
 
   /** 非敏感取值；敏感取值由 daemon 经 secret-provider 读取。 */

@@ -19,7 +19,7 @@ import {
 } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
 import { buildDutydeckRoutingBlock } from '@dutydeck/cli-adapters';
-import { ProgramStatusFramingStream, captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit, PtyBackend, TmuxBackend, HerdrBackend, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type PhysicalProcessIdentity } from '@dutydeck/session-backends';
+import { ProgramStatusFramingStream, captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit, PtyBackend, TmuxBackend, HerdrBackend, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof } from '@dutydeck/session-backends';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector } from './idle-detector.js';
 import { TurnCpu } from './turn-cpu.js';
@@ -103,7 +103,6 @@ export class PtyCliDriver implements AgentDriver {
   private readonly processProbe: ProcessProbe | undefined;
   private tmuxIdentity: OwnedTmuxIdentity | undefined;
   private tmuxExitProof: OwnedTmuxExitProof | undefined;
-  private captureIdentity: PhysicalProcessIdentity | undefined;
   /** Runtime shutdown preserves active/unknown sessions; proven idle sessions
    * may be stopped when their native context can be restored. */
   private detachOnStop = false;
@@ -997,10 +996,6 @@ export class PtyCliDriver implements AgentDriver {
         // mutable process.env or mark a failed/unknown stop as gone.
         tmuxBackend.disposeCapture();
         if (this.tmuxIdentity) this.tmuxExitProof = await stopOwnedTmux(this.tmuxIdentity, this.processProbe);
-        const deadline = Date.now() + 5_000;
-        while (this.captureIdentity && this.processProbe.observe(this.captureIdentity) === 'alive' && Date.now() < deadline) {
-          await new Promise(resolve => setTimeout(resolve, 25));
-        }
       } else (await this.backend.kill());
     } catch {
       // best effort：后端可能已退出
@@ -1027,7 +1022,7 @@ export class PtyCliDriver implements AgentDriver {
     if (this.backend instanceof TmuxBackend) {
       return !!this.processProbe && !!this.tmuxExitProof
         && (await verifyOwnedTmuxExit(this.tmuxExitProof, this.processProbe))
-        && this.backend.captureDisposed() && (!this.captureIdentity || this.processProbe.observe(this.captureIdentity) === 'dead');
+        && this.backend.captureDisposed();
     }
     if (!(this.backend instanceof PtyBackend) || this.stoppedPid === undefined) return false;
     try { process.kill(this.stoppedPid, 0); return false; }
@@ -1143,15 +1138,12 @@ export class PtyCliDriver implements AgentDriver {
     this.backendPid = pid ? { backend, pid } : undefined;
     this.tmuxIdentity = undefined;
     this.tmuxExitProof = undefined;
-    this.captureIdentity = undefined;
     if (backend instanceof TmuxBackend && this.processProbe && backend.ownerId && backend.getSocketPath()) {
       try {
         this.tmuxIdentity = (await captureOwnedTmuxIdentity({
           socketPath: backend.getSocketPath()!, sessionName: backend.sessionName,
           ownerId: backend.ownerId, hostname: hostname(), uid: process.getuid!(),
         }, this.processProbe));
-        const capturePid = backend.getCapturePid();
-        if (capturePid) this.captureIdentity = this.processProbe.identify(capturePid);
       } catch { /* Unknown physical identity must keep isStopped false. */ }
     }
     check();

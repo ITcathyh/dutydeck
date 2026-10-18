@@ -272,7 +272,14 @@ export class HerdrBackend implements SessionBackend {
       const timer = setTimeout(async () => { fail(new Error('Herdr terminal stream did not become ready')); if (this.stream === child) (await this.detach()); }, 5000);
       this.attachReject = fail;
       const lines = createInterface({ input: child.stdout });
-      child.once('error', fail);
+      const transportError = (error: Error) => {
+        fail(error);
+        if (this.stream === child && this.initialScreen) void this.observeClosedStream(child, error);
+      };
+      child.once('error', transportError);
+      // ChildProcess errors do not handle errors emitted by its stdin pipe.
+      // Keep this listener after detach too: a queued write can fail later.
+      child.stdin.on('error', transportError);
       child.once('exit', async code => {
         if (this.stream !== child) { fail(new Error('Herdr terminal attachment cancelled')); return; }
         if ((await this.finishNaturalExit())) { fail(new Error('Primary process exited')); return; }
@@ -364,7 +371,10 @@ export class HerdrBackend implements SessionBackend {
   async resize(cols: number, rows: number): Promise<void> {
     (await this.checked());
     if (!this.stream?.stdin.writable) throw new Error('Herdr terminal controller is detached');
-    this.stream.stdin.write(JSON.stringify({ type: 'terminal.resize', cols, rows }) + '\n');
+    const child = this.stream;
+    await new Promise<void>((resolve, reject) => {
+      child.stdin.write(JSON.stringify({ type: 'terminal.resize', cols, rows }) + '\n', error => error ? reject(error) : resolve());
+    });
   }
   async resyncOutput(onBoundary?: () => void): Promise<string | null> {
     // A new controller's first frame is the snapshot boundary; later frames

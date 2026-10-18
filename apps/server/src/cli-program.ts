@@ -3,7 +3,7 @@ import type { RecoveryCliOptions, RecoveryOperation } from './recovery-cli.js';
 import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
 import type { SessionNamesAction } from './session-names-cli.js';
 import type { ScheduleCliAction, ScheduleCliInput, ScheduleRequestCliInput } from './schedule-cli.js';
-import { agentFields, botFields, fieldsHelp, groupFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
+import { agentFields, botFields, channelBotFields, fieldsHelp, groupFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { agentCommandHelp } from './lark/agent-command.js';
 import { addAgentCommands } from './agent-cli.js';
 import { Command } from 'commander';
@@ -786,6 +786,16 @@ Examples:
   withTarget(botSettings.command('install-hook <app-id>').description('Install the high-risk command hook for the bot Agent; needed before riskControlMode=enforced')
     .option('--pattern <regex>', 'High-risk command pattern; defaults to the saved one'))
     .action((appId, options, command) => runSettings('bot-install-hook', command, { appId, pattern: options.pattern }));
+
+  const channelBotSettings = settings.command('channel-bot').description('Foundation draft bot settings and SecretRef selection (dashboard: 群配置与权限)');
+  withTarget(channelBotSettings.command('list').description('List foundation bot IDs and credential metadata'))
+    .action((_options, command) => runSettings('channel-bot-list', command));
+  withTarget(channelBotSettings.command('show <id>').description('Show a foundation bot by its internal ID, not its App ID'))
+    .action((channelBotId, _options, command) => runSettings('channel-bot-show', command, { channelBotId }));
+  withTarget(channelBotSettings.command('set <id> <key=value...>').description('Update a staged/disabled bot; credentialRef=null clears the selection')
+    .option('--expected-revision <number>', 'Reject a concurrent edit; defaults to the revision just read'))
+    .addHelpText('after', fieldsHelp(channelBotFields))
+    .action((channelBotId, pairs, options, command) => runSettings('channel-bot-set', command, { channelBotId, pairs, expectedRevision: options.expectedRevision }));
 
   const groupSettings = settings.command('group').description('Per-group settings of each bot (dashboard: 群聊)');
   withTarget(groupSettings.command('list').description('List synced groups and the binding of each bot')

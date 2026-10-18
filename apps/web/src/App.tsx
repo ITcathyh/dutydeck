@@ -130,6 +130,7 @@ export default function App() {
   };
 
   const applySessionSelection = useCallback((id?: string) => {
+    if (useDockStore.getState().activeSessionId === id) return;
     draftRevision.current++;
     setActive(id);
     setPrompt('');

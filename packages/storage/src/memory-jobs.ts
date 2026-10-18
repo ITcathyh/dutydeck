@@ -6,13 +6,24 @@ export function createMemoryJobSchema(db: Database.Database): void {
   db.exec(`CREATE TABLE memory_jobs (id TEXT PRIMARY KEY, app_id TEXT NOT NULL, pool TEXT NOT NULL, state TEXT NOT NULL, revision INTEGER NOT NULL, json TEXT NOT NULL);
     CREATE UNIQUE INDEX memory_jobs_unsettled ON memory_jobs(app_id,pool) WHERE state NOT IN ('settled','failed');`);
 }
+/** Receipt consumption outlives settlement and is shared by all database accessors. */
+export function createMemoryConsumedTaskSchema(db: Database.Database): void {
+  db.exec(`CREATE TABLE memory_consumed_tasks (
+    app_id TEXT NOT NULL, pool TEXT NOT NULL, task_id TEXT NOT NULL,
+    PRIMARY KEY(app_id,pool,task_id)
+  ) WITHOUT ROWID;
+  INSERT INTO memory_consumed_tasks(app_id,pool,task_id)
+    SELECT app_id,pool,consumed.value FROM memory_jobs, json_each(memory_jobs.json, '$.receipt.consumedTaskIds') AS consumed
+    WHERE consumed.type='text'
+    ON CONFLICT(app_id,pool,task_id) DO NOTHING;`);
+}
 export function createMemoryJobRepository(db: Database.Database): MemoryJobRepository {
   const read = (key: string) => (db.prepare('SELECT value FROM configs WHERE key=?').get(key) as { value: string } | undefined)?.value;
   const scopeCheck = (scope: MemoryJobScope) => {
     if (!/^[A-Za-z0-9_-]+$/.test(scope.appId) || !/^[A-Za-z0-9_-]+$/.test(scope.pool)) throw new RuntimeError('MEMORY_SCOPE_INVALID', 'Invalid memory job scope', 400);
     assertBotProcessApp(db, scope.appId);
   };
-  const consumed = (scope: MemoryJobScope, taskId: string) => Boolean(db.prepare("SELECT 1 FROM memory_jobs, json_each(memory_jobs.json, '$.receipt.consumedTaskIds') AS consumed WHERE app_id=? AND pool=? AND consumed.value=? LIMIT 1").get(scope.appId, scope.pool, taskId));
+  const consumed = (scope: MemoryJobScope, taskId: string) => Boolean(db.prepare('SELECT 1 FROM memory_consumed_tasks WHERE app_id=? AND pool=? AND task_id=?').get(scope.appId, scope.pool, taskId));
   const decode = (row: unknown): MemoryJob | undefined => row ? JSON.parse((row as { json: string }).json) : undefined;
   const get = (scope: MemoryJobScope, id: string) => {
     scopeCheck(scope);
@@ -96,6 +107,8 @@ export function createMemoryJobRepository(db: Database.Database): MemoryJobRepos
         const state = JSON.parse(read(stateKey) ?? '{}');
         if (state.running?.token !== input.claimToken) throw new RuntimeError('MEMORY_CLAIM_LOST', 'Memory pool claim changed', 409);
         for (const write of input.writes) db.prepare('INSERT INTO configs(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(write.key, write.value);
+        const recordConsumed = db.prepare('INSERT INTO memory_consumed_tasks(app_id,pool,task_id) VALUES (?,?,?) ON CONFLICT(app_id,pool,task_id) DO NOTHING');
+        for (const taskId of input.consumedTaskIds) recordConsumed.run(scope.appId, scope.pool, taskId);
         const next: MemoryJob = { ...job, revision: job.revision + 1, state: 'applied', receipt: { appliedJobId: job.id, consumedTaskIds: input.consumedTaskIds, result: input.result, appliedAt: input.appliedAt } };
         db.prepare('UPDATE memory_jobs SET state=?,revision=?,json=? WHERE id=?').run(next.state, next.revision, JSON.stringify(next), next.id);
         return next;

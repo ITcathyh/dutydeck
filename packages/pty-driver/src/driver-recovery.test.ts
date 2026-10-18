@@ -289,6 +289,10 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
       await driver.start();
       await driver.stop();
       expect(await driver.isStopped()).toBe(true);
+      const captureDisposed = vi.spyOn(backend, 'captureDisposed').mockReturnValue(false);
+      expect(await driver.isStopped()).toBe(false);
+      captureDisposed.mockRestore();
+      expect(await driver.isStopped()).toBe(true);
       expect((await TmuxBackend.probeSession(other.name))).toBe('exists');
     } finally { (await unrelated.kill()); }
   }, 45_000);

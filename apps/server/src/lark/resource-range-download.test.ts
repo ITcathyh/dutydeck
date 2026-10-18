@@ -195,3 +195,50 @@ it('bounds and cancels oversized error responses instead of buffering them or tr
   await expect(h.service.downloadMessageResourceToFile('om_input', 'file_fake', join(directory, 'file.bin'))).rejects.toMatchObject({ details: { upstreamHttpStatus: 403 } });
   expect(cancelled).toBe(true); expect(h.requests.map(request => request.range)).toEqual([null]); expect(await readdir(directory)).toEqual([]);
 });
+
+
+it.each([429, 503])('retries a plain-text HTTP %s resource rejection', async status => {
+  let attempts = 0;
+  const h = setup(`text_retry_${status}`, () => ++attempts === 1
+    ? new Response('temporarily unavailable', { status }) : new Response('image', { headers: { 'content-type': 'image/png' } }));
+  await expect(h.service.downloadMessageResource('om_input', 'img_fake', 'image')).resolves.toEqual({ data: new TextEncoder().encode('image'), contentType: 'image/png' });
+  expect(h.requests).toHaveLength(2);
+});
+
+it.each([400, 403])('does not retry a plain-text HTTP %s resource rejection', async status => {
+  const h = setup(`text_reject_${status}`, () => new Response('rejected', { status }));
+  await expect(h.service.downloadMessageResource('om_input', 'img_fake', 'image')).rejects.toMatchObject({ code: 'LARK_RESOURCE_DOWNLOAD_FAILED', details: { upstreamHttpStatus: status } });
+  expect(h.requests).toHaveLength(1);
+});
+
+it('retries an interrupted in-memory resource body', async () => {
+  let attempts = 0;
+  const h = setup('image_body_reset', () => ++attempts === 1
+    ? new Response(new ReadableStream({ start(controller) { controller.error(new TypeError('terminated')); } })) : new Response('complete'));
+  await expect(h.service.downloadMessageResource('om_input', 'img_fake', 'image')).resolves.toMatchObject({ data: new TextEncoder().encode('complete') });
+  expect(h.requests).toHaveLength(2);
+});
+
+it.each(['AbortError', 'TimeoutError'])('does not retry an in-memory resource body %s', async name => {
+  const h = setup(`image_body_${name}`, () => new Response(new ReadableStream({ start(controller) { controller.error(new DOMException('cancelled', name)); } })));
+  await expect(h.service.downloadMessageResource('om_input', 'img_fake', 'image')).rejects.toMatchObject({ name });
+  expect(h.requests).toHaveLength(1);
+});
+
+it('shares the failed-attempt budget between token acquisition and resource body retries', async () => {
+  let tokens = 0, resources = 0;
+  const service = createLarkCardService({ ...env('image_shared_budget'), LARK_API_RETRY_MAX_ATTEMPTS: '2' }, (async url => {
+    if (String(url).includes('tenant_access_token')) return ++tokens === 1 ? Response.json({ code: 503 }, { status: 503 }) : Response.json({ code: 0, tenant_access_token: 'fake', expire: 7200 });
+    resources++;
+    return new Response(new ReadableStream({ start(controller) { controller.error(new TypeError('terminated')); } }));
+  }) as typeof fetch); cleanups.push(() => service.close());
+  await expect(service.downloadMessageResource('om_input', 'img_fake', 'image')).rejects.toMatchObject({ code: 'LARK_NETWORK_ERROR' });
+  expect(tokens).toBe(2); expect(resources).toBe(2);
+});
+
+it('retries plain-text resource failures on disk and removes partial files after exhaustion', async () => {
+  const directory = await temporary();
+  const h = setup('disk_text_retry', () => new Response('temporary failure', { status: 503 }));
+  await expect(h.service.downloadMessageResourceToFile('om_input', 'file_fake', join(directory, 'file.bin'))).rejects.toMatchObject({ details: { upstreamHttpStatus: 503 } });
+  expect(h.requests).toHaveLength(4); expect(await readdir(directory)).toEqual([]);
+});

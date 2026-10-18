@@ -992,6 +992,25 @@ describe('Collaboration Storage Repository', () => {
       }
     });
 
+    it('replays JSON-equivalent payloads while retaining nested value and array order conflicts', async () => {
+      const repos = createRepositories(':memory:');
+      try {
+        const input = { id: 'canonical', scope: scopeA, kind: 'send', requesterId: 'owner', inputDigest: 'same',
+          payload: { fields: { a: 1, b: 2 }, items: ['a', 'b'] } };
+        const first = await repos.collaboration.beginAction(input);
+        expect(await repos.collaboration.beginAction({ ...input,
+          payload: { items: ['a', 'b'], fields: { b: 2, a: 1, optional: undefined } }
+        })).toEqual({ action: first.action, created: false });
+        for (const payload of [
+          { fields: { a: 1, b: 3 }, items: ['a', 'b'] },
+          { fields: { a: 1, b: 2 }, items: ['b', 'a'] }
+        ]) {
+          await expect(repos.collaboration.beginAction({ ...input, payload }))
+            .rejects.toMatchObject({ code: 'COLLABORATION_ACTION_CONFLICT' });
+        }
+      } finally { repos.close(); }
+    });
+
     it('enforces fail-closed state machine: unknown cannot transition to sending, terminal states cannot transition', async () => {
       const repos = createRepositories(':memory:');
       try {

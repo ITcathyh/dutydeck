@@ -1,4 +1,4 @@
-import { createMemoryJobSchema } from './memory-jobs.js';
+import { createMemoryConsumedTaskSchema, createMemoryJobSchema } from './memory-jobs.js';
 import { createWorkItemIndexSchema } from './work-item-index.js';
 import { createScheduleExecutionSchema } from './schedule-execution-migration.js'
 import type Database from 'better-sqlite3'
@@ -617,7 +617,8 @@ export const migrations: Migration[] = [
     version: 38,
     name: 'collaboration_scenarios',
     up: addCollaborationScenarios
-  }
+  },
+  { version: 39, name: 'memory_consumed_tasks', up: createMemoryConsumedTaskSchema }
 ]
 
 /** v38：collaboration_duties 加 scenarios_json 列，把旧的 alarm_json 转进去。 */

@@ -1716,7 +1716,13 @@ export class LarkCardService {
       return executeWithLarkGate(this.config.appId, 'GET message resource', async () => {
         const response = await this.resourceResponse(url, token, signal);
         const contentType = response.headers.get('content-type')?.split(';')[0]?.trim() || undefined;
-        const data = new Uint8Array(await response.arrayBuffer());
+        let data: Uint8Array;
+        try { data = new Uint8Array(await response.arrayBuffer()); }
+        catch (error) {
+          signal.throwIfAborted();
+          if (!(error instanceof TypeError)) throw error;
+          throw new LarkServiceError('LARK_NETWORK_ERROR', `Lark resource stream failed: ${error.message}`, 502);
+        }
         signal.throwIfAborted();
         return { data, ...(contentType ? { contentType } : {}) };
       }, { env: this.config.env, signal, canRetry: () => this.budget()!.remaining > 0, onFailure: () => { this.budget()!.remaining--; } });

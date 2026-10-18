@@ -76,12 +76,12 @@ export class RelayCapabilityRegistry {
   }
 
   /**
-   * 从 token 反解会话，并校验会话仍可接收消息。失败一律抛 RelayError。
+   * 同步验签并反解会话身份；不检查会话存活，使用凭证前仍须调用 resolve。
    *
    * `expectedSessionId` 只用于**额外收紧**：路径里带了会话 id 时必须与 token 内的一致，
    * 但会话身份始终以 token 为准——调用方自报的 id 永远不能扩大它的权限。
    */
-  async resolve(token: string | undefined, expectedSessionId?: string): Promise<RelayCapability> {
+  verify(token: string | undefined, expectedSessionId?: string): RelayCapability {
     const presented = token?.trim();
     if (!presented) {
       throw new RelayError('RELAY_CONTEXT_REQUIRED', '回传通道只能由 Dutydeck 会话内的 Agent 调用；当前进程没有会话凭证。', 401);
@@ -101,11 +101,17 @@ export class RelayCapabilityRegistry {
     if (expectedSessionId && expectedSessionId !== 'self' && expectedSessionId !== sessionId) {
       throw new RelayError('RELAY_UNAUTHORIZED', '回传凭证不属于该会话。', 401);
     }
-    const session = await this.sessions.get(sessionId);
+    return { sessionId, token: presented };
+  }
+
+  /** 验签并校验会话仍可接收消息。失败一律抛 RelayError。 */
+  async resolve(token: string | undefined, expectedSessionId?: string): Promise<RelayCapability> {
+    const capability = this.verify(token, expectedSessionId);
+    const session = await this.sessions.get(capability.sessionId);
     if (!session || session.archivedAt || terminalStates.has(session.state)) {
       throw new RelayError('RELAY_SESSION_ENDED', '会话已结束，回传凭证不再有效。', 401);
     }
-    return { sessionId, token: presented };
+    return capability;
   }
 }
 

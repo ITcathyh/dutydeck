@@ -368,7 +368,22 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       async get(key) { return db.select().from(configs).where(eq(configs.key, key)).get()?.value; },
       async set(key, value) { assertBotProcessConfigWrite(sqlite, key, value); if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409); db.insert(configs).values({ key, value }).onConflictDoUpdate({ target: configs.key, set: { value } }).run(); },
       async list(prefix) {
-        return sqlite.prepare('SELECT key, value FROM configs WHERE substr(key, 1, length(?)) = ? ORDER BY key').all(prefix, prefix) as Array<{ key: string; value: string }>;
+        const characters = Array.from(prefix);
+        // SQLite length/substr stop at NUL; keep their existing edge-case semantics.
+        if (!prefix || prefix.includes('\0') || characters.some(character => /^[\ud800-\udfff]$/.test(character))) {
+          return sqlite.prepare('SELECT key, value FROM configs WHERE substr(key, 1, length(?)) = ? ORDER BY key').all(prefix, prefix) as Array<{ key: string; value: string }>;
+        }
+        let upper: string | undefined;
+        for (let index = characters.length - 1; index >= 0; index--) {
+          const code = characters[index]!.codePointAt(0)!;
+          if (code === 0x10ffff) continue;
+          // UTF-8 BINARY order follows scalar values; skip the surrogate range.
+          upper = characters.slice(0, index).join('') + String.fromCodePoint(code === 0xd7ff ? 0xe000 : code + 1);
+          break;
+        }
+        return (upper === undefined
+          ? sqlite.prepare('SELECT key, value FROM configs WHERE key >= ? COLLATE BINARY AND substr(key, 1, length(?)) = ? ORDER BY key').all(prefix, prefix, prefix)
+          : sqlite.prepare('SELECT key, value FROM configs WHERE key >= ? COLLATE BINARY AND key < ? COLLATE BINARY AND substr(key, 1, length(?)) = ? ORDER BY key').all(prefix, upper, prefix, prefix)) as Array<{ key: string; value: string }>;
       },
       async compareAndSet(key, expected, value) {
         assertBotProcessConfigWrite(sqlite, key, value);

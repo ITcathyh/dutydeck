@@ -124,7 +124,7 @@ describe('trigger delivery', () => {
     start: vi.fn(async () => ({ id: 'new-session' }) as Session),
     dispatch: vi.fn(async () => ({ id: 'task-1' }) as PublicTaskRecord)
   });
-  const request = { plugin: 'hello', triggerId: 'ping', target: { botAppId: 'cli_a', chatId: 'oc_b', session: 'new' as const }, prompt: 'wrapped', key: 'hello/ping:abc' };
+  const request = { scope: 'global', plugin: 'hello', triggerId: 'ping', target: { botAppId: 'cli_a', chatId: 'oc_b', session: 'new' as const }, prompt: 'wrapped', key: 'hello/ping:abc' };
 
   it('opens a trigger session in the bot workspace and dispatches as the installation owner', async () => {
     const fake = runtime();

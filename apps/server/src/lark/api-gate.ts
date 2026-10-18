@@ -234,7 +234,7 @@ function upstreamHttpStatus(err: unknown): number | undefined {
 function looksLikeLarkTransportError(err: unknown): boolean {
   const value = err as ErrorLike;
   if (!value || typeof value !== 'object') return false;
-  if (value.code === LARK_NETWORK_ERROR_CODE || value.code === LARK_OPENAPI_ERROR_CODE) return true;
+  if (value.code === LARK_NETWORK_ERROR_CODE || value.code === LARK_OPENAPI_ERROR_CODE || value.code === 'LARK_RESOURCE_DOWNLOAD_FAILED') return true;
   // 兼容旧 SDK / axios 调用方。
   if (value.isAxiosError === true || value.name === 'AxiosError') return true;
   if (value.config != null && (value.response != null || value.status != null)) return true;

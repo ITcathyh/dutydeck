@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import {
   COLLABORATION_LIST_LIMIT,
   RuntimeError,
+  canonicalExecutionJson,
   markTruncated,
   collaborationActionSchema,
   collaborationActivitySchema,
@@ -1520,7 +1521,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           const sameScheduleGeneration = (existing.scheduleGeneration ?? null) === (validated.scheduleGeneration ?? null);
           const sameContextRevision = (existing.contextRevision ?? null) === (validated.contextRevision ?? null);
           const sameFollowupRevision = (existing.followupRevision ?? null) === (validated.followupRevision ?? null);
-          const samePayload = JSON.stringify(existing.payload) === JSON.stringify(validated.payload);
+          const samePayload = canonicalExecutionJson(existing.payload) === canonicalExecutionJson(JSON.parse(JSON.stringify(validated.payload)));
 
           const matches =
             sameScope &&

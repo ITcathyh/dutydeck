@@ -252,8 +252,9 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 
 ## Web Workbench <a id="web-console"></a>
 
-- **Task board**: Awaiting action / In progress / Completed / Archived; queueing and interrupt. **Terminal playback exists only for terminal-mode (`pty-cli`) agents**, 5000 lines at most. The delivery panel lists per-turn changes. The current task title and summary use loaded execution records and are not overwritten by a lagging task-list refresh.
+- **Task board**: Awaiting action / In progress / Completed / Archived; queueing and interrupt. **Terminal playback exists only for terminal-mode (`pty-cli`) agents**, 5000 lines at most. The delivery panel lists per-turn changes. The current task title and summary use loaded execution records and are not overwritten by a lagging task-list refresh. Selecting the current task again preserves unsent input. Directory, Agent and other configuration controls, along with close and cancel controls, are disabled while task creation or scheduled-task preparation is submitting. Refreshing the Agent list keeps closing disabled. After creation fails, configuration can be changed before retrying; if the first instruction fails to send, retrying reuses the created session.
 - **Read-only task details from Lark cards** show the source topic, group or private chat, and original initiator, with links back to known topics or chats. Unrecorded topics and missing historical origin records are marked explicitly; unavailable names fall back to known IDs.
+- Interrupting a task cancels its pending questions, including requests still being validated, and rejects late answers. Idle sessions can still ask questions normally.
 - **Verification**: Lark tasks only, after a command is configured. Result states: passed, failed, expired, not verified.
 - **View changes on the phone**: the result-card link is valid for 14 days and shows only that turn. Only turns in a git repo run through the runtime are recorded; with too many un-ignored untracked files (over 20 MiB each, 50 MiB total, or 2000 files) no diff is recorded and the log says why, so add large files and build dirs to `.gitignore`. Line comments: signed-in Web users send them straight to the agent; people with only the share link create a confirmation card in the Lark topic, and someone with permission must tap "Hand to agent". `dutydeck auth share-key rotate` invalidates all issued links.
 - **Session insight analyzer**: built into the npm package and built automatically with the server. It runs locally in an isolated child process using Dutydeck's current Node.js runtime; no Go compiler, external analyzer binary, or separate engine build is required. Source development uses the workspace's `tsx` loader. Metrics now use version `v2`: old snapshots remain readable, and different metric versions are excluded from shared deltas and group totals; reanalyze to align versions. Insight refresh does not change task usage or billing records.
@@ -262,6 +263,8 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 
 
 **Scheduled Agent tasks.** In Web → Task schedules, choose New scheduled task, an Agent, workspace and permissions. Saving creates an idle session without sending the prompt; enable the saved schedule to start automatic execution. Existing sessions can add schedules in Workspace & automation and keep their directory, model, permissions and context. Supports once, daily, weekly, intervals and five-field cron in an IANA timezone. The runtime checks once per minute, catches up at most once after downtime, and keeps one unfinished execution per schedule, including results awaiting reconciliation.
+
+For the cron day-of-month and day-of-week fields, if either starts with `*` (including `*/n`), both must match; otherwise either may match. For example, `0 9 */2 * 1` runs at 09:00 only on Mondays that fall on an odd day of the month. One-time schedules reject invalid calendar dates or times, such as February 30. Historical invalid schedules remain readable and editable but are disabled until corrected and enabled again.
 
 ```bash
 # New idle session; shared workspace by default, or --workspace worktree
@@ -311,6 +314,8 @@ The built-in Codex ACP agent resolves Codex from the Dutydeck process `PATH` eac
 `timeout` is in seconds (default `600`) and must convert to an integer from 1 to 2147483647 milliseconds (`0.001`–`2147483.647` seconds). Fallback CLI model discovery uses the Agent's configured direct CLI executable, cleaned child `env` and `cwd`, passing only supported global options (with separate option/value arguments). Other launch arguments, equals forms, or wrapper commands skip fallback discovery and retain the configured default model without substituting a host command.
 
 #### Terminal task status and recovery
+
+Codex and TraeX native recovery uses only records confirmed to belong to the current session. If inherited context cannot establish ownership, recovery is refused to avoid resuming another session.
 
 Codex and TraeX terminal tasks settle from success, failure or cancellation events bound to the current native turn. A partial answer does not override a later failure; cancellation is recorded as an interruption. TraeX reads session metadata containing large model catalogs so final answers arrive and tasks complete. Recovery drains the old log segment before reading the next segment for the same session. New canonical records retain progress, input receipts and final answers while deduplicating mirrored records.
 
@@ -367,11 +372,11 @@ my-plugin/
 └── index.mjs                      providers entry (CI providers, scenario pack providers, in-process hooks)
 ```
 
-`plugin.json` fields: `name` (kebab-case, ≤ 64), `version`, `description`, `commands` / `agents` / `skills` / `triggers` (directories), `hooks` (file), `providers` (ESM entry, no default), `scenarios` (directory, default `scenarios/`), `userConfig` (`{ <snake_case key>: { description, sensitive? } }`). Paths must stay inside the plugin.
+`plugin.json` fields: `name` (kebab-case, ≤ 64), `version`, `description`, `commands` / `agents` / `skills` / `triggers` (directories), `hooks` (file), `providers` (ESM entry, no default), `scenarios` (directory, default `scenarios/`), `userConfig` (`{ <snake_case key>: { description, sensitive? } }`). Paths must stay inside the plugin. Provider module loading and registration share a 15-second deadline; a timeout skips that plugin and ignores later registrations.
 
 **Trust.** `agents`, `hooks:<event>` and `providers` execute code or commands and must be confirmed at install (non-interactive installs need `--yes`). The daemon loads only enabled plugins whose required capabilities are all confirmed. `plugin update` re-confirms only newly added capabilities. npm sources are packed with `--ignore-scripts`.
 
-**Scopes** (`--scope`): `global` (default), `bot:<appId>` (only that bot's sessions; not effective in Web sessions, which have no bot), `workspace:<absolute path>` (sessions whose cwd is under it). Agents are always merged globally.
+**Scopes** (`--scope`): `global` (default), `bot:<appId>` (only that bot's sessions; not effective in Web sessions, which have no bot), `workspace:<absolute path>` (sessions whose cwd is under it). Triggers check this scope too: the bot workspace before starting a new session, or the actual cwd of a reused session. Both the scope root and target directory are resolved through symlinks and compared by real path; aliases pointing inside the scope are allowed. A missing, unresolvable or out-of-scope directory prevents session creation and dispatch. Agents are always merged globally.
 
 **Built-in plugins** <a id="builtin-plugins"></a>. Plugins shipped with Dutydeck live in `builtin-plugins/` (`dist/builtin-plugins` once packaged) and load before installed plugins. There is one today: `alarm`, which provides alert triage and same-alert-rule correlation (group usage is under Group participation). Built-in plugins need no trust confirmation, are always enabled with `global` scope, cannot be uninstalled, and show as 「内置」 (built-in) in `plugin list`. An external plugin with the same name is refused at install, and one already installed is not loaded (`plugin list` and `doctor` say so). A scenario pack in an external plugin that reuses a built-in pack id is skipped; the rest of that plugin still loads.
 
@@ -390,7 +395,7 @@ dutydeck plugin update [name] [--yes] | enable <name> | disable <name> | uninsta
 
 `plugin validate` also checks scenario packs (format, template variables, regexes, parameters) and reports file and field; `install` and `update` do not fail on scenario pack problems but list the packs that will not load and why.
 
-Sources: a local directory, `git+https://…`, `git@…`, `file://…` (`#ref` pins a branch, tag or commit; git sources are pinned by SHA), or `npm:name@version`. Changes take effect after `dutydeck restart`. Data lives under `plugins/` next to the database (`plugins.lock.json`, installed copies, `.data/<name>/`, 0600 `.trigger-tokens.json` and `.config.json`).
+Sources: a local directory, `git+https://…`, `git@…`, `file://…` (`#ref` pins a branch, tag or commit; git sources are pinned by SHA), or `npm:name@version`. Changes take effect after `dutydeck restart`. Each `plugin update` from a local directory copies it again and reports an update with a restart reminder, even if its version is unchanged. Data lives under `plugins/` next to the database (`plugins.lock.json`, installed copies, `.data/<name>/`, 0600 `.trigger-tokens.json` and `.config.json`).
 
 **Triggers.** `POST /api/plugins/<plugin>/triggers/<id>`, no Web login, authenticated by the trigger's own `token` header or `hmac-sha256` of the raw body. Responses: `202 {sessionId, taskId}`, `200 {duplicate:true}`, `400` not JSON, `401` bad token/signature, `404` unknown trigger or disabled plugin, `413` body over 1 MiB, `429` over `maxConcurrent` (default 4, 1 to 32), `502` delivery failed (the dedupe record is revoked, so retry). Dedupe lasts 24 hours and survives restarts. Template values in the prompt are wrapped as untrusted data; templates cannot read auth headers, `authorization` or `cookie`. See `examples/plugins/hello`:
 
@@ -472,6 +477,17 @@ dutydeck auth password set [--generate]   # browser login password
 dutydeck auth token [--rotate]            # token for CLI/scripts/API
 dutydeck auth share-key rotate
 ```
+
+Use `channel-bot` for the draft bots shown in the experimental “Groups & permissions” page. Its argument is the internal `id` returned by `list`, not the Lark App ID:
+
+```bash
+dutydeck settings channel-bot list
+dutydeck settings channel-bot show <id>
+dutydeck settings channel-bot set <id> credentialRef=<secret-ref-id> --expected-revision 3
+dutydeck settings channel-bot set <id> credentialRef=null
+```
+
+Editable keys: `externalAppId`, `displayName`, `brand=feishu|lark`, `credentialRef`, and `state=staged|disabled`. Omitted keys keep their values; `credentialRef=null` clears the reference. Without `--expected-revision`, the command uses the revision just read; conflicting edits are rejected. Only draft metadata changes and listening remains disabled; use `settings bot` for bots already managed by the runtime. The same `--instance`, `--url`, and `--database` targeting options apply. Credential values are never returned.
 
 Automatic bot welcomes are enabled by default. Set `welcomeEnabled=false` to suppress group-join and first-DM welcomes immediately after saving; user message handling continues. For group replies only when mentioned, also set `mentionPolicy=always` and `defaultGroupParticipation=off`.
 

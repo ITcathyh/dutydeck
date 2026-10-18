@@ -13,7 +13,10 @@ export interface TriggerRequest {
 }
 export interface TriggerResponse { statusCode: number; body: Record<string, unknown> }
 
+export type ScopedPluginTrigger = PluginTrigger & { scope: string };
+
 export interface TriggerDispatch {
+  scope: string;
   plugin: string;
   triggerId: string;
   target: PluginTrigger['target'];
@@ -23,7 +26,7 @@ export interface TriggerDispatch {
 }
 
 export interface TriggerServiceOptions {
-  lookup(plugin: string, triggerId: string): PluginTrigger | undefined;
+  lookup(plugin: string, triggerId: string): ScopedPluginTrigger | undefined;
   token(plugin: string, triggerId: string): string | undefined;
   deliver(request: TriggerDispatch): Promise<{ sessionId: string; taskId: string }>;
   dedupe?: TriggerDedupe;
@@ -136,7 +139,7 @@ export class PluginTriggerService {
     running.add(placeholder);
     this.inFlight.set(id, running);
     try {
-      const accepted = await this.options.deliver({ plugin: request.plugin, triggerId: request.triggerId, target: trigger.target, prompt, key: `${id}:${digest.slice(0, 32)}:${expiresAt}` });
+      const accepted = await this.options.deliver({ scope: trigger.scope, plugin: request.plugin, triggerId: request.triggerId, target: trigger.target, prompt, key: `${id}:${digest.slice(0, 32)}:${expiresAt}` });
       running.add(accepted.taskId);
       this.release(id, placeholder);
       return { statusCode: 202, body: { accepted: true, sessionId: accepted.sessionId, taskId: accepted.taskId } };

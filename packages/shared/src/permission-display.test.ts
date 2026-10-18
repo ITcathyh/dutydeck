@@ -2,6 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { permissionDisplayText } from './permission-display.js';
 
 describe('permission display redaction', () => {
+  it.each([
+    ['curl --access-key CANARYVALUE', 'CANARYVALUE'],
+    ['echo xoxb-1234567890-canaryvalue', 'canaryvalue'],
+    ['curl https://user:canary@tail@example.test/a?signature=SIGNEDVALUE', 'tail'],
+    ['curl https://example.test/a?signature=SIGNEDVALUE', 'SIGNEDVALUE'],
+    [JSON.stringify({ command: 'export API_KEY="opaque credential with spaces"; echo done' }), 'credential with spaces']
+  ])('uses credential rules for permission text: %s', (text, secret) => {
+    expect(permissionDisplayText(text)).not.toContain(secret);
+    expect(permissionDisplayText(text)).toContain('[REDACTED]');
+  });
+
   it.each(['--turn scoped_turn_secret', '--turn=scoped_turn_secret', '--turn "scoped_turn_secret"', "--turn='scoped_turn_secret'"])('hides collaboration capability %s', flag => {
     const shown = permissionDisplayText(`dutydeck collaborate ${flag} status`);
     expect(shown).not.toContain('scoped_turn_secret');

@@ -59,8 +59,10 @@ async function readUsage(source: NativeUsageSource, key: string): Promise<Sessio
       if (line.length > 1024 * 1024) { cursor!.partial = true; return; }
       let entry: any;
       try { entry = JSON.parse(line.toString('utf8')); } catch { if (source.client === 'claude' && line.length) cursor!.partial = true; return; }
-      if (source.client === 'codex' && entry.type === 'session_meta') {
-        if ((entry.payload?.id ?? entry.payload?.session_id) !== source.nativeSessionId || (typeof entry.payload?.cwd !== 'string' || realCwd(entry.payload.cwd) !== cwd)) cursor!.invalid = true;
+      // A native fork can append inherited metadata even after an incremental read.
+      if (source.client === 'codex' && entry.type === 'session_meta' && !cursor!.bound && !cursor!.invalid) {
+        if (entry.payload?.source && typeof entry.payload.source === 'object' && 'subagent' in entry.payload.source
+          || (entry.payload?.id ?? entry.payload?.session_id) !== source.nativeSessionId || (typeof entry.payload?.cwd !== 'string' || realCwd(entry.payload.cwd) !== cwd)) cursor!.invalid = true;
         else cursor!.bound = true;
       }
       if (source.client === 'claude' && entry.isSidechain !== true) {

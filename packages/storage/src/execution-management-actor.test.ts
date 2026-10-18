@@ -16,7 +16,7 @@ const owner: ExecutionActor = { kind: 'installation_owner', id: 'installation_ow
 const hash = (value: unknown) => createHash('sha256').update(canonicalExecutionJson(value)).digest('hex');
 function rows(db: Database.Database): string {
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as Array<{ name: string }>;
-  return JSON.stringify(tables.map(({ name }) => [name, db.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}" ORDER BY rowid`).all()]));
+  return JSON.stringify(tables.map(({ name }) => [name, db.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}" ORDER BY ${name === 'memory_consumed_tasks' ? 'app_id, pool, task_id' : 'rowid'}`).all()]));
 }
 function fixture(action: Action, source: 'lark' | 'work_item', originalActor: ExecutionActor = actor) {
   const directory = mkdtempSync(join(tmpdir(), 'execution-management-actor-'));

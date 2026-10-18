@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { previewNextSchedule, type ScheduleDefinition, scheduleTriggerSchema, scheduleDstGapPolicies, scheduleDstOverlapPolicies } from './schedule-foundation.js';
+import { previewNextSchedule, type ScheduleDefinition, scheduleTriggerSchema, storedScheduleTriggerSchema, scheduleDstGapPolicies, scheduleDstOverlapPolicies } from './schedule-foundation.js';
 import {
   attemptResultV1Schema,
   executionActorSchema,
@@ -84,6 +84,14 @@ export const sessionScheduleSchema = z.object({
   updatedAt: timestamp
 }).strict();
 export type SessionSchedule = z.infer<typeof sessionScheduleSchema>;
+
+const storedSessionScheduleSchema = sessionScheduleSchema.extend({ trigger: storedScheduleTriggerSchema });
+/** Keep old calendar mistakes editable, but revoke automatic and reserved execution on read. */
+export function readStoredSessionSchedule(input: unknown): SessionSchedule {
+  const schedule = storedSessionScheduleSchema.parse(input);
+  if (scheduleTriggerSchema.safeParse(schedule.trigger).success) return schedule;
+  return { ...schedule, enabled: false, nextDueAt: undefined, pendingOccurrence: undefined };
+}
 
 export const createSessionScheduleInputSchema = z.object({
   name: z.string().trim().min(1).max(200),

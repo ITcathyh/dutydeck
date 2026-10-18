@@ -261,3 +261,65 @@ describe('relay answer races', () => {
     expect(getCalls).toBe(3);
   });
 });
+
+describe('relay registration cancellation', () => {
+  it('retains cancellation while initialization is awaiting', async () => {
+    const gate = deferred();
+    let record: RelayAskRecord | undefined;
+    const publish = vi.fn(async () => {});
+    const broker = new RelayAskBroker({ publish }, {
+      list: async () => { await gate.promise; return []; },
+      get: async () => record,
+      compareAndSet: async (_expected, next) => { record = next; return true; }
+    });
+    const waiting = broker.register({ sessionId: 'ses_one', question: 'old' });
+    broker.cancelSession('ses_one', 'task ended');
+    gate.resolve();
+    expect(await waiting).toMatchObject({ status: 'cancelled', reason: 'task ended' });
+    expect(record?.status).toBe('cancelled');
+    expect(publish).not.toHaveBeenCalled();
+    await broker.flush();
+  });
+
+  it('flushes the durable cancellation when close overtakes the initial CAS', async () => {
+    const gate = deferred();
+    let record: RelayAskRecord | undefined;
+    let started = false;
+    const publish = vi.fn(async () => {});
+    const broker = new RelayAskBroker({ publish }, {
+      list: async () => [], get: async () => record,
+      compareAndSet: async (expected, next) => {
+        if (!expected) { started = true; await gate.promise; }
+        record = next; return true;
+      }
+    });
+    const waiting = broker.register({ sessionId: 'ses_one', question: 'old' });
+    await vi.waitFor(() => expect(started).toBe(true));
+    broker.close('shutdown');
+    let flushed = false;
+    const flush = broker.flush().then(() => { flushed = true; });
+    await drainMicrotasks();
+    expect(flushed).toBe(false);
+    gate.resolve();
+    await flush;
+    expect(record?.status).toBe('cancelled');
+    expect(await waiting).toMatchObject({ status: 'cancelled', reason: 'shutdown' });
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('rejects an initial CAS failure after cancellation and leaves no waiter', async () => {
+    const gate = deferred();
+    const publish = vi.fn(async () => {});
+    const broker = new RelayAskBroker({ publish }, {
+      list: async () => [], get: async () => undefined,
+      compareAndSet: async () => { await gate.promise; return false; }
+    });
+    const waiting = broker.register({ sessionId: 'ses_one', question: 'old' });
+    broker.cancelSession('ses_one');
+    gate.resolve();
+    await expect(waiting).rejects.toMatchObject({ code: 'RELAY_ASK_CONFLICT' });
+    expect(broker.listPending()).toEqual([]);
+    expect(publish).not.toHaveBeenCalled();
+    await broker.flush();
+  });
+});

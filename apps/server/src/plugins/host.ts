@@ -10,6 +10,7 @@ import { loadPluginDirectory, type LoadedPlugin } from './manifest.js';
 import { ScenarioProviderCaller } from './scenario-providers.js';
 import { scenarioPackDigest, ScenarioRegistry, type RegisteredScenarioPack } from './scenario-registry.js';
 import { scopeApplies } from './scope.js';
+import type { ScopedPluginTrigger } from './triggers.js';
 import { pluginSecretKey, PluginStore, type PluginLockEntry } from './store.js';
 
 export interface PluginDiagnostic { plugin: string; scenario?: string; message: string }
@@ -35,7 +36,7 @@ export interface PluginHostOptions {
 }
 
 const configEnvName = (key: string) => `DUTYDECK_PLUGIN_CONFIG_${key.toUpperCase()}`;
-/** register(api) 迟迟不返回时放弃这个插件，daemon 照常启动。 */
+/** 模块加载和 register(api) 共用启动时限；超时放弃插件，daemon 照常启动。 */
 const PROVIDER_REGISTER_TIMEOUT_MS = 15_000;
 
 /**
@@ -111,24 +112,32 @@ export class PluginHost {
         if (plugin.providersEntry) {
           // 内置插件随每次启动加载，不为它们建数据目录：没装插件时数据目录下什么都不多（用到时插件自己建）。
           if (!builtin) await mkdir(dataDir, { recursive: true });
-          const module = await import(pathToFileURL(plugin.providersEntry).href) as { default?: unknown; register?: unknown };
-          const register = typeof module.default === 'function' ? module.default : module.register;
-          if (typeof register !== 'function') throw new Error(`${plugin.manifest.providers} 没有默认导出 register(api) 函数`);
+          let registering = true;
           const api: PluginApi = {
             plugin: { name: entry.name, ...(plugin.manifest.version ? { version: plugin.manifest.version } : {}), root: plugin.root, dataDir },
             config: Object.freeze({ ...config }),
-            registerCiProvider: provider => { providers.push(provider); },
+            registerCiProvider: provider => { if (registering) providers.push(provider); },
             registerHookHandler: (event: PluginHookEvent, handler, options) => {
+              if (!registering) return;
               if (!pluginHookEvents.includes(event)) throw new Error(`未知的 hook 事件：${event}`);
               pluginRegistrations.push({ kind: 'handler', plugin: entry.name, scope: entry.scope, event, handler, timeout: inProcessHookTimeout(options?.timeout), ...(options?.matcher ? { matcher: new RegExp(options.matcher) } : {}) });
             },
             registerScenarioProvider: provider => {
+              if (!registering) return;
               if (typeof provider?.id !== 'string' || !scenarioProviderIdPattern.test(provider.id)) throw new Error(`场景 provider id 无效：${String(provider?.id)}`);
               if (scenarioProviders.has(provider.id)) throw new Error(`场景 provider ${provider.id} 重复注册`);
               scenarioProviders.set(provider.id, provider);
             }
           };
-          await withTimeout(Promise.resolve().then(() => register(api)), PROVIDER_REGISTER_TIMEOUT_MS);
+          try {
+            await withTimeout((async () => {
+              const module = await import(pathToFileURL(plugin.providersEntry!).href) as { default?: unknown; register?: unknown };
+              if (!registering) return;
+              const register = typeof module.default === 'function' ? module.default : module.register;
+              if (typeof register !== 'function') throw new Error(`${plugin.manifest.providers} 没有默认导出 register(api) 函数`);
+              await register(api);
+            })(), PROVIDER_REGISTER_TIMEOUT_MS);
+          } finally { registering = false; }
         }
         // 先登记到临时表做完检查，失败的插件不留下一部分提供方。
         const checked = new CiProviderRegistry();
@@ -186,13 +195,13 @@ export class PluginHost {
   }
 
   /** 触发器的目标机器人由触发器声明（可引用 userConfig）；bot 作用域的插件只能把任务投给它限定的那个机器人。 */
-  trigger(pluginName: string, triggerId: string): PluginTrigger | undefined {
+  trigger(pluginName: string, triggerId: string): ScopedPluginTrigger | undefined {
     const active = this.active.find(({ entry }) => entry.name === pluginName);
     const trigger = active?.plugin.triggers.get(triggerId);
     if (!active || !trigger) return undefined;
     const target = resolveTriggerTarget(trigger.target, active.config);
     if (!target) return undefined;
-    return scopeApplies(active.entry.scope, { botAppId: target.botAppId }) || active.entry.scope.startsWith('workspace:') ? { ...trigger, target } : undefined;
+    return scopeApplies(active.entry.scope, { botAppId: target.botAppId }) || active.entry.scope.startsWith('workspace:') ? { ...trigger, target, scope: active.entry.scope } : undefined;
   }
 
   triggerToken(pluginName: string, triggerId: string): string | undefined {

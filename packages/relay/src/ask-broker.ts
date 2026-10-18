@@ -48,6 +48,19 @@ function normalizeChoices(input: unknown): RelayAskChoice[] | undefined {
   return choices;
 }
 
+export interface RelayAskContext {
+  taskId?: string;
+  attemptId?: string;
+  signal?: AbortSignal;
+}
+
+interface AskRegistration {
+  sessionId: string;
+  prepared(): void;
+  reason?: string;
+  ask?: PendingAsk;
+}
+
 interface PendingAsk {
   record: RelayAskRecord;
   timer?: NodeJS.Timeout;
@@ -60,6 +73,7 @@ interface PendingAsk {
 
 /** Persistent history never restores a lost HTTP waiter or grants permission to answer it. */
 export class RelayAskBroker {
+  private readonly registrations = new Set<AskRegistration>();
   private readonly pending = new Map<string, PendingAsk>();
   private readonly history = new Map<string, RelayAskRecord>();
   private readonly writes = new Set<Promise<unknown>>();
@@ -88,7 +102,23 @@ export class RelayAskBroker {
     }
   }
 
-  async register(input: { sessionId: string; question: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }): Promise<RelayAskOutcome> {
+  register(input: { sessionId: string; question: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }, context: RelayAskContext = {}): Promise<RelayAskOutcome> {
+    // Register the cancellation fence before readiness or the first storage await.
+    let prepared!: () => void;
+    this.track(new Promise<void>(resolve => { prepared = resolve; }));
+    const registration: AskRegistration = { sessionId: input.sessionId, prepared };
+    this.registrations.add(registration);
+    const cancel = () => this.cancelRegistration(registration, typeof context.signal?.reason === 'string' ? context.signal.reason : '任务已结束');
+    context.signal?.addEventListener('abort', cancel, { once: true });
+    if (context.signal?.aborted) cancel();
+    return this.registerAsk(input, context, registration).finally(() => {
+      registration.prepared();
+      this.registrations.delete(registration);
+      context.signal?.removeEventListener('abort', cancel);
+    });
+  }
+
+  private async registerAsk(input: { sessionId: string; question: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }, context: RelayAskContext, registration: AskRegistration): Promise<RelayAskOutcome> {
     await this.ready;
     if (this.closed) throw new RelayError('RELAY_CLOSED', 'Dutydeck 提问通道已关闭。', 409);
     const question = input.question.trim();
@@ -102,6 +132,8 @@ export class RelayAskBroker {
     const multiple = choices !== undefined && input.multiple === true;
     const record: RelayAskRecord = {
       id: 'ask_' + randomUUID(), sessionId: input.sessionId, question, status: 'pending',
+      ...(context.taskId ? { taskId: context.taskId } : {}),
+      ...(context.attemptId ? { attemptId: context.attemptId } : {}),
       createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + timeoutMs).toISOString(),
       ...(choices ? { choices } : {}),
       ...(multiple ? { multiple: true } : {})
@@ -112,6 +144,7 @@ export class RelayAskBroker {
     const outcome = new Promise<RelayAskOutcome>((done, failed) => { resolve = done; reject = failed; });
     void outcome.catch(() => undefined);
     const ask: PendingAsk = { record, resolve, reject, outcome };
+    registration.ask = ask;
     this.pending.set(record.id, ask);
     ask.timer = setTimeout(() => {
       if (ask.record.status === 'pending') this.track(this.finish(ask, { status: 'expired', askId: record.id }));
@@ -119,19 +152,23 @@ export class RelayAskBroker {
     ask.timer.unref?.();
     // Register before publishing so a reply arriving during publish can find the live request.
     try {
-      if (this.closed) await this.finish(ask, { status: 'cancelled', askId: record.id, reason: 'Dutydeck 服务已关闭' });
-      else await Promise.race([
-        this.publisher.publish(input.sessionId, {
-          kind: 'ask', text: question, askId: record.id,
-          ...(record.choices ? { choices: record.choices } : {}),
-          ...(record.multiple ? { multiple: true } : {})
-        }),
-        ask.outcome.then(() => undefined)
-      ]);
+      if (registration.reason || this.closed) await this.finish(ask, { status: 'cancelled', askId: record.id, reason: registration.reason ?? 'Dutydeck 服务已关闭' });
+      else {
+        registration.prepared();
+        await Promise.race([
+          this.publisher.publish(input.sessionId, {
+            kind: 'ask', text: question, askId: record.id,
+            ...(record.choices ? { choices: record.choices } : {}),
+            ...(record.multiple ? { multiple: true } : {})
+          }),
+          ask.outcome.then(() => undefined)
+        ]);
+      }
     } catch (error) {
       if (ask.record.status === 'pending') await this.finish(ask, { status: 'cancelled', askId: record.id, reason: '提问未能发送。' });
       throw error;
     }
+    registration.prepared();
     return outcome;
   }
 
@@ -189,16 +226,23 @@ export class RelayAskBroker {
     return record ? { ...record } : undefined;
   }
 
+  private cancelRegistration(registration: AskRegistration, reason: string) {
+    registration.reason ??= reason;
+    const ask = registration.ask;
+    if (ask && (ask.record.status === 'pending' || ask.record.status === 'answering' && !ask.answerPublishStarted)) {
+      this.track(this.finish(ask, { status: 'cancelled', askId: ask.record.id, reason }));
+    }
+  }
+
   cancelSession(sessionId: string, reason = '会话已结束') {
-    for (const ask of [...this.pending.values()]) {
-      if (ask.record.sessionId === sessionId && (ask.record.status === 'pending' || ask.record.status === 'answering' && !ask.answerPublishStarted)) {
-        this.track(this.finish(ask, { status: 'cancelled', askId: ask.record.id, reason }));
-      }
+    for (const registration of this.registrations) {
+      if (registration.sessionId === sessionId) this.cancelRegistration(registration, reason);
     }
   }
 
   close(reason = 'Dutydeck 服务已关闭') {
     this.closed = true;
+    for (const registration of this.registrations) if (!registration.ask) registration.reason ??= reason;
     for (const ask of [...this.pending.values()]) {
       if (ask.record.status === 'pending') this.track(this.finish(ask, { status: 'cancelled', askId: ask.record.id, reason }));
       else if (ask.record.status === 'answering' && !ask.timer) {

@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { RelayAskBroker, type RelayAskRecord } from '@dutydeck/relay';
 import { createRelayAskStore } from './relay-ask-store.js';
@@ -34,4 +34,27 @@ describe('persistent relay questions', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+});
+
+
+it('cancels registration during the real SQLite CAS microtask without publishing and allows the next question', async () => {
+  const repos = createRepositories(':memory:');
+  const store = createRelayAskStore(repos.config);
+  const publish = vi.fn(async () => {});
+  const broker = new RelayAskBroker({ publish }, store);
+  try {
+    await broker.initialize();
+    const outcome = broker.register({ sessionId: 'session', question: 'old', timeoutMs: 60_000 });
+    queueMicrotask(() => broker.cancelSession('session', 'stopped during registration'));
+    await new Promise(resolve => setImmediate(resolve));
+    expect(broker.listPending()).toEqual([]);
+    const cancelled = await outcome;
+    expect(cancelled).toMatchObject({ status: 'cancelled' });
+    expect(await store.get(cancelled.askId)).toMatchObject({ status: 'cancelled', reason: 'stopped during registration' });
+    expect(publish).not.toHaveBeenCalled();
+    const next = broker.register({ sessionId: 'session', question: 'new', timeoutMs: 60_000 });
+    await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+    await broker.answer(broker.listPending()[0]!.id, 'yes');
+    expect(await next).toMatchObject({ status: 'answered' });
+  } finally { broker.close(); await broker.flush(); repos.close(); }
 });

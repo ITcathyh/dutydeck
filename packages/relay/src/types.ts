@@ -66,6 +66,8 @@ export type RelayAskStatus = 'pending' | 'answering' | 'answered' | 'cancelled' 
 
 /** 提问记录（对外只读投影） */
 export interface RelayAskRecord {
+  taskId?: string;
+  attemptId?: string;
   id: string;
   sessionId: string;
   question: string;

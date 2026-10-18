@@ -185,6 +185,39 @@ const scheduleInput = {
   condition: { kind: 'always' as const }
 };
 
+it('parses unchanged occurrence history once per tick and batches schedule lookup for recovery', async () => {
+  const deliver = vi.fn(async () => {});
+  const h = await fixture({ deliver });
+  const timestamp = h.now.value.toISOString();
+  const raws = new Set<string>();
+  for (let i = 0; i < 100; i++) {
+    const id = `history_${i}`;
+    const raw = JSON.stringify(sessionScheduleOccurrenceSchema.parse({
+      schemaVersion: 2, id, revision: 1, scheduleId: `removed_${i}`, sessionId: h.session.id, generation: 1,
+      scheduledForUtc: timestamp, conditionStatus: 'skipped', runStatus: 'skipped',
+      delivery: { status: 'not_requested', attempts: 0, updatedAt: timestamp }, createdAt: timestamp, updatedAt: timestamp
+    }));
+    raws.add(raw);
+    await h.repositories.config.set(`session_automation/occurrence/${id}`, raw);
+  }
+  const parse = vi.spyOn(JSON, 'parse');
+  const schemaParse = vi.spyOn(sessionScheduleOccurrenceSchema, 'parse');
+  const get = vi.spyOn(h.repositories.config, 'get');
+  try {
+    await h.service.tick();
+    expect(parse.mock.calls.filter(([raw]) => raws.has(raw))).toHaveLength(100);
+    expect(schemaParse).toHaveBeenCalledTimes(100);
+    expect(get.mock.calls.filter(([key]) => key.startsWith('session_automation/schedule/'))).toHaveLength(0);
+    expect(h.dispatches).toHaveLength(0);
+    expect(deliver).not.toHaveBeenCalled();
+    parse.mockClear();
+    await h.service.tick();
+    expect(parse.mock.calls.filter(([raw]) => raws.has(raw))).toHaveLength(100);
+  } finally {
+    parse.mockRestore(); schemaParse.mockRestore(); get.mockRestore();
+  }
+});
+
 describe('recurring schedule watermark recovery', () => {
   async function enabledWithoutWatermark(h: Awaited<ReturnType<typeof fixture>>, patch = {}) {
     const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, timezone: 'UTC', ...patch }, 'ou_owner');
@@ -1255,4 +1288,33 @@ it('keeps the latest 1000 occurrences of one deleted schedule independently of o
   await expect(h.service.getScheduleHistory('ses_other', created.id, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_NOT_FOUND' });
   h.allowed.value = false;
   await expect(h.service.getScheduleHistory(h.session.id, created.id, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_FORBIDDEN' });
+});
+
+
+describe('schedule calendar validation and legacy reads', () => {
+  it('keeps invalid historical dates visible but disabled, isolates ticks, and allows repair', async () => {
+    const h = await fixture({ clock: new Date('2026-10-16T09:00:00Z') });
+    const good = await h.service.createSchedule(h.session.id, { ...scheduleInput, timezone: 'UTC', trigger: { kind: 'cron', expression: '0 9 */1 * 1-5' } }, 'ou_owner');
+    const enabled = await h.service.updateSchedule(h.session.id, good.id, { expectedRevision: good.revision, enabled: true }, 'ou_owner');
+    expect(enabled.nextDueAt).toBe('2026-10-19T09:00:00.000Z');
+    const bad = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    const key = `session_automation/schedule/${bad.id}`;
+    const raw = JSON.parse((await h.repositories.config.get(key))!);
+    raw.trigger = { kind: 'at', localDateTime: '2026-02-30T09:00' };
+    raw.enabled = true;
+    raw.nextDueAt = '2026-03-02T09:01:00.000Z';
+    raw.dstPolicy.gap = 'shift_forward';
+    await h.repositories.config.set(key, JSON.stringify(raw));
+    const listed = await h.service.listBySession(h.session.id, 'ou_owner');
+    expect(listed.schedules).toHaveLength(2);
+    expect(listed.schedules.find(item => item.id === bad.id)).toMatchObject({ enabled: false, trigger: raw.trigger });
+    expect((await h.service.getScheduleDefinition(h.session.id, bad.id, 'ou_owner')).nextDueAt).toBeUndefined();
+    await h.service.tick();
+    expect(h.dispatches).toHaveLength(0);
+    await expect(h.service.runSchedule(h.session.id, bad.id, { expectedRevision: bad.revision, idempotencyKey: 'invalid-manual' }, 'ou_owner')).rejects.toThrow();
+    await expect(h.service.updateSchedule(h.session.id, bad.id, { expectedRevision: bad.revision, enabled: true }, 'ou_owner')).rejects.toThrow();
+    const repaired = await h.service.updateSchedule(h.session.id, bad.id, { expectedRevision: bad.revision, trigger: { kind: 'at', localDateTime: '2026-10-20T09:00' } }, 'ou_owner');
+    expect(repaired).toMatchObject({ enabled: false, revision: 2 });
+    expect((await h.service.updateSchedule(h.session.id, bad.id, { expectedRevision: 2, enabled: true }, 'ou_owner')).nextDueAt).toBe('2026-10-20T01:00:00.000Z');
+  });
 });

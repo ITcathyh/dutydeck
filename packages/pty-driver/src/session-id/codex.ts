@@ -52,44 +52,64 @@ const MAX_ROLLOUT_CANDIDATES = 60;
  *  its own dashes, so the id is anchored on the UUID shape, not on position. */
 const ROLLOUT_ID_RE = /rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
 
-/** Scan the tail of a Codex-dialect history.jsonl for the newest submit whose
- *  text carries the marker, and return that line's `session_id`. */
-export function findSessionIdInHistory(historyPath: string, marker: string, exactText = false): string | undefined {
-  const text = readTail(historyPath, HISTORY_TAIL_BYTES);
-  if (!text) return undefined;
-  const lines = text.split('\n');
-  // Last match wins: the newest submit naming this dutydeck session belongs to
-  // the CLI session that is still alive.
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i]!;
-    if (!line.includes(marker)) continue;
-    let parsed: any;
-    try {
-      parsed = JSON.parse(line.trim());
-    } catch {
-      continue;
-    }
-    if (typeof parsed?.text !== 'string' || !(exactText ? parsed.text.trim() === marker : parsed.text.includes(marker))) continue;
-    if (typeof parsed.session_id === 'string' && parsed.session_id.length > 0) {
-      return parsed.session_id;
-    }
+interface Marker { text: string; exactText: boolean }
+const matchesMarker = (text: string, marker: Marker): boolean => marker.exactText ? text.trim() === marker.text : text.includes(marker.text);
+
+/** A fork appends its own prompt after inherited user records. The final
+ * complete envelope supersedes inherited markers; ordinary follow-ups do not. */
+export function lastCodexSessionMarker(text: string): { text: string; sessionId: string } | undefined {
+  let last: { text: string; sessionId: string } | undefined;
+  for (const match of text.matchAll(/<dutydeck_session_id>([^<>\r\n]+)<\/dutydeck_session_id>|\[dutydeck-session:([^\]\r\n]+)\]/g)) {
+    const sessionId = (match[1] ?? match[2])!;
+    if (isUsableMarker(sessionId) && (last?.sessionId !== sessionId || match[1])) last = { text: match[0], sessionId };
   }
-  return undefined;
+  return last;
 }
 
-/**
- * Scan the rollout tree for the session whose head carries the marker.
- * `cwd` gates the match: session_meta records the working directory, and a
- * rollout from a different project can never be this dutydeck session.
- */
-export function findSessionIdInRollouts(
+interface RolloutMarkerMatches { sessionId?: string; marked: boolean[] }
+function recordRolloutMarkers(text: string, markers: Marker[], state: RolloutMarkerMatches): void {
+  const envelope = lastCodexSessionMarker(text);
+  if (envelope) {
+    if (state.sessionId !== envelope.sessionId) state.marked.fill(false);
+    state.sessionId = envelope.sessionId;
+    markers.forEach((marker, index) => { if (marker.text === envelope.text) state.marked[index] = true; });
+  } else if (!state.sessionId) {
+    markers.forEach((marker, index) => { if (matchesMarker(text, marker)) state.marked[index] = true; });
+  }
+}
+
+/** Read history once, retaining the newest hit for each marker format. */
+function findSessionIdsInHistory(historyPath: string, markers: Marker[]): Array<string | undefined> {
+  const matches: Array<string | undefined> = markers.map(() => undefined);
+  const lines = readTail(historyPath, HISTORY_TAIL_BYTES).split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (!markers.some(marker => line.includes(marker.text))) continue;
+    let parsed: any;
+    try { parsed = JSON.parse(line.trim()); } catch { continue; }
+    if (typeof parsed?.text !== 'string' || typeof parsed.session_id !== 'string' || !parsed.session_id) continue;
+    markers.forEach((marker, index) => {
+      if (!matches[index] && matchesMarker(parsed.text, marker)) matches[index] = parsed.session_id;
+    });
+    if (matches[0]) break;
+  }
+  return matches;
+}
+
+/** Newest submit carrying this marker. Raw legacy IDs must occupy the whole input. */
+export function findSessionIdInHistory(historyPath: string, marker: string, exactText = false): string | undefined {
+  return findSessionIdsInHistory(historyPath, [{ text: marker, exactText }])[0];
+}
+
+/** Scan each rollout once for every format, retaining global marker priority. */
+function findSessionIdsInRollouts(
   sessionsRoot: string,
-  marker: string,
+  markers: Marker[],
   cwd: string,
-  env?: CliPathEnv,
-  inputText: (entry: any, threadId?: string) => string | undefined = codexInputText,
-  exactText = false,
-): string | undefined {
+  env: CliPathEnv | undefined,
+  inputText: (entry: any, threadId?: string) => string | undefined,
+): Array<string | undefined> {
+  const matches: Array<string | undefined> = markers.map(() => undefined);
   const wanted = realCwd(cwd, env);
   const candidates = walkFiles(sessionsRoot, {
     maxDepth: SESSION_SCAN_MAX_DEPTH,
@@ -97,15 +117,19 @@ export function findSessionIdInRollouts(
   }).sort(byMtimeDesc).slice(0, MAX_ROLLOUT_CANDIDATES);
 
   for (const candidate of candidates) {
-    const entries = nativeTranscriptObjects(candidate.path);
     let metaSessionId: string | undefined;
     let sawMeta = false;
     let cwdOk: boolean | undefined;
-    let marked = false;
-    for (const entry of entries) {
+    let inheritedMeta = false;
+    const all: RolloutMarkerMatches = { marked: markers.map(() => false) };
+    const threadBound: RolloutMarkerMatches = { marked: markers.map(() => false) };
+    for (const entry of nativeTranscriptObjects(candidate.path)) {
       if (entry?.type === 'session_meta') {
         // Native forks copy parent metadata after their own identity record.
-        if (sawMeta) continue;
+        if (sawMeta) {
+          if ((entry.payload?.id ?? entry.payload?.session_id) !== metaSessionId) inheritedMeta = true;
+          continue;
+        }
         sawMeta = true;
         const p = entry.payload;
         // Internal agents inherit user markers but never own a Dutydeck CLI session.
@@ -117,20 +141,40 @@ export function findSessionIdInRollouts(
         continue;
       }
       const text = inputText(entry, metaSessionId);
-      if (text !== undefined && (exactText ? text.trim() === marker : text.includes(marker))) {
-        marked = true;
-        break;
+      if (text === undefined) continue;
+      recordRolloutMarkers(text, markers, all);
+      // TraeX display completions explicitly name their native thread and turn.
+      // Copied parent completions cannot prove ownership of this first metadata ID.
+      if (entry.type === 'history_mutation' && metaSessionId) {
+        const ownInput = traexInputText(entry, metaSessionId);
+        if (ownInput !== undefined) recordRolloutMarkers(ownInput, markers, threadBound);
       }
+      // Scan through EOF: later metadata can reveal that earlier input was inherited.
     }
-    // A rollout that records a DIFFERENT cwd is provably not ours. A rollout
-    // with no recorded cwd is accepted on the marker alone (the marker is
-    // already per-session unique).
-    if (!marked || cwdOk === false) continue;
-    if (metaSessionId) return metaSessionId;
-    const fromName = ROLLOUT_ID_RE.exec(candidate.path);
-    if (fromName?.[1]) return fromName[1];
+    if (cwdOk === false) continue;
+    // Without recorded metadata, retain the filename fallback on a marker match.
+    const id = metaSessionId ?? ROLLOUT_ID_RE.exec(candidate.path)?.[1];
+    if (!id) continue;
+    // Generic user records in forks have no trustworthy own-input boundary.
+    // history.jsonl is handled independently; only thread-bound receipts may
+    // establish a fork's identity from the rollout itself.
+    const marked = inheritedMeta ? threadBound.marked : all.marked;
+    marked.forEach((hit, index) => { if (hit && !matches[index]) matches[index] = id; });
+    if (matches[0]) break;
   }
-  return undefined;
+  return matches;
+}
+
+/** Scan newest-first rollouts for one marker, gated by the first metadata cwd. */
+export function findSessionIdInRollouts(
+  sessionsRoot: string,
+  marker: string,
+  cwd: string,
+  env?: CliPathEnv,
+  inputText: (entry: any, threadId?: string) => string | undefined = codexInputText,
+  exactText = false,
+): string | undefined {
+  return findSessionIdsInRollouts(sessionsRoot, [{ text: marker, exactText }], cwd, env, inputText)[0];
 }
 
 function codexFamilyResolve(
@@ -144,11 +188,13 @@ function codexFamilyResolve(
   // before the rollout has any user content to match on.
   // Prefer modern identity across both sources before trying either legacy
   // envelope. A source id merely mentioned in a fork handoff is never a match.
-  const markers = [buildSessionMarker(sessionId), ...(requireMarker ? [] : [`[dutydeck-session:${sessionId}]`, sessionId])];
-  for (const marker of markers) {
-    const exactText = marker === sessionId;
-    const found = findSessionIdInHistory(historyPath, marker, exactText)
-      ?? findSessionIdInRollouts(sessionsRoot, marker, cwd, env, inputText, exactText);
+  const markers = [buildSessionMarker(sessionId), ...(requireMarker ? [] : [`[dutydeck-session:${sessionId}]`, sessionId])]
+    .map(text => ({ text, exactText: text === sessionId }));
+  const history = findSessionIdsInHistory(historyPath, markers);
+  if (history[0]) return history[0];
+  const rollouts = findSessionIdsInRollouts(sessionsRoot, markers, cwd, env, inputText);
+  for (let index = 0; index < markers.length; index++) {
+    const found = history[index] ?? rollouts[index];
     if (found) return found;
   }
   return undefined;

@@ -35,10 +35,10 @@ import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { claudeProjectDir, type CliPathEnv } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
-import { isUsableMarker } from '../session-id/marker.js';
+import { buildSessionMarker, isUsableMarker } from '../session-id/marker.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource, type TranscriptPosition } from './tail.js';
 import { claudeInputText } from './input-receipt.js';
-import { entryMentionsMarker } from './claude-content.js';
+import { userEntryMentionsMarker } from './claude-content.js';
 import { ClaudeSubagentReader } from './claude-subagents.js';
 
 /** Head window per candidate when scanning for the marker. It rides the FIRST
@@ -138,16 +138,15 @@ function resolveClaudeSessionTranscript(projectDir: string, sessionId: string): 
 }
 
 /** The jsonl in `dir` whose head carries `marker`, or undefined. */
-function findJsonlByMarker(dir: string, marker: string): string | undefined {
-  if (!isUsableMarker(marker)) return undefined;
+function findJsonlByMarker(dir: string, sessionId: string): string | undefined {
+  if (!isUsableMarker(sessionId)) return undefined;
+  const marker = buildSessionMarker(sessionId);
   const candidates = walkFiles(dir, { maxDepth: 0, accept: name => name.endsWith('.jsonl') })
     .sort(byMtimeDesc)
     .slice(0, MAX_MARKER_CANDIDATES);
   for (const candidate of candidates) {
     for (const entry of parseJsonlObjects(readHead(candidate.path, MARKER_HEAD_BYTES))) {
-      // Sidechain entries are Task-tool internals, not the session's own prompt.
-      if (entry?.isSidechain === true) continue;
-      if (entryMentionsMarker(entry, marker)) return candidate.path;
+      if (userEntryMentionsMarker(entry, marker)) return candidate.path;
     }
   }
   return undefined;
