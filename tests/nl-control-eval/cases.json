@@ -1,0 +1,425 @@
+{
+  "description": "中文大白话 → Dutydeck 控制操作判定评测。judge=agent 表示由会话内 Agent 判定（host 判定预留，暂不评测）。用例里的相对日期占位符（tomorrow、nextMonday）按运行当天展开，时间均为北京时间。",
+  "cases": [
+    {
+      "id": "R01",
+      "judge": "agent",
+      "utterance": "现在跑得怎么样了？",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "Agent 正在跑一个排查任务" },
+      "expected": { "kind": "command", "operation": "status" }
+    },
+    {
+      "id": "R02",
+      "judge": "agent",
+      "utterance": "帮我看看进度",
+      "scenario": { "chatType": "p2p", "activeTask": true, "context": "私聊里 Agent 正在跑任务" },
+      "expected": { "kind": "command", "operation": "status" }
+    },
+    {
+      "id": "R03",
+      "judge": "agent",
+      "utterance": "这台机器上都装了哪些 agent 可以用？",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "agents" }
+    },
+    {
+      "id": "R04",
+      "judge": "agent",
+      "utterance": "codex 现在是忙还是闲？",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "agents" }
+    },
+    {
+      "id": "R05",
+      "judge": "agent",
+      "utterance": "我最近都让你做过哪些任务？",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "tasks" }
+    },
+    {
+      "id": "R06",
+      "judge": "agent",
+      "utterance": "现在排队的多吗？",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "queue" }
+    },
+    {
+      "id": "R07",
+      "judge": "agent",
+      "utterance": "帮我看看都设了哪些定时任务",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "schedules" }
+    },
+    {
+      "id": "R08",
+      "judge": "agent",
+      "utterance": "CI 现在跑得怎么样了？",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "当前会话提交过代码" },
+      "expected": { "kind": "command", "operation": "ci" }
+    },
+    {
+      "id": "R09",
+      "judge": "agent",
+      "utterance": "CI 过了没？",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "当前会话有 CI 在跑" },
+      "expected": { "kind": "command", "operation": "ci" }
+    },
+    {
+      "id": "R10",
+      "judge": "agent",
+      "utterance": "换 codex 重新做一遍",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "Agent 正在做一个排查任务，进展在当前对话里" },
+      "expected": { "kind": "command", "operation": "session.new", "params": { "agent": "codex", "handoff": { "truthy": true } } }
+    },
+    {
+      "id": "R11",
+      "judge": "agent",
+      "utterance": "这个让 claude 重新做，把你现在查到的东西都带过去",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "session.new", "params": { "agent": "claude", "handoff": { "truthy": true } } }
+    },
+    {
+      "id": "R12",
+      "judge": "agent",
+      "utterance": "别在这个对话里弄了，开个全新的用 codex，任务是修复登录页的白屏报错",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "session.new", "params": { "agent": "codex", "handoff": { "truthy": false }, "task": { "contains": "登录页" } } }
+    },
+    {
+      "id": "R13",
+      "judge": "agent",
+      "utterance": "用 traex 再试一次，之前的上下文不用带",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "当前任务需要重试，用户明确不要历史上下文" },
+      "expected": { "kind": "command", "operation": "session.new", "params": { "agent": "traex", "handoff": { "truthy": false }, "task": { "truthy": true } } }
+    },
+    {
+      "id": "R14",
+      "judge": "agent",
+      "utterance": "换 opus 模型把这个重新做一遍",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "session.new", "params": { "model": { "contains": "opus" }, "handoff": { "truthy": true } } }
+    },
+    {
+      "id": "R15",
+      "judge": "agent",
+      "utterance": "你觉得 codex 这个 agent 怎么样？",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "none" }
+    },
+    {
+      "id": "R16",
+      "judge": "agent",
+      "utterance": "刚才那个失败了，再跑一次",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "上一轮任务失败" },
+      "expected": { "kind": "command", "operation": "retry" }
+    },
+    {
+      "id": "R17",
+      "judge": "agent",
+      "utterance": "先别动手，先给我出个计划：把登录页的报错文案改成中文",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "plan", "params": { "task": { "contains": "登录页" } } }
+    },
+    {
+      "id": "R18",
+      "judge": "agent",
+      "utterance": "这个事你先出个方案我看看，别直接改",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "当前对话正在讨论一个改造需求" },
+      "expected": { "kind": "command", "operation": "plan", "params": { "task": { "truthy": true } } }
+    },
+    {
+      "id": "R19",
+      "judge": "agent",
+      "utterance": "每天早上 9 点汇总一下昨天的告警发群里",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "schedule.create", "params": { "cron": { "regex": "0 9" }, "prompt": { "truthy": true } } }
+    },
+    {
+      "id": "R20",
+      "judge": "agent",
+      "utterance": "工作日每天下午 6 点给我发一份日报",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "schedule.create", "params": { "cron": { "contains": "1-5" }, "prompt": { "truthy": true } } }
+    },
+    {
+      "id": "R21",
+      "judge": "agent",
+      "utterance": "每隔 15 分钟看看这个话题有没有排查结论",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "schedule.create", "params": { "every": 15, "prompt": { "truthy": true } } }
+    },
+    {
+      "id": "R22",
+      "judge": "agent",
+      "utterance": "明天上午 10 点提醒我看发布结果",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "schedule.create", "params": { "at": { "contains": "{{tomorrow}}T10:00" }, "prompt": { "truthy": true } } }
+    },
+    {
+      "id": "R23",
+      "judge": "agent",
+      "utterance": "下周一晚上 8 点提醒我写周报",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "schedule.create", "params": { "at": { "contains": "{{nextMonday}}T20:00" }, "prompt": { "truthy": true } } }
+    },
+    {
+      "id": "R24",
+      "judge": "agent",
+      "utterance": "每天中午 12 点和下午 6 点各同步一次进度",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "schedule.create", "params": { "cron": { "regex": "12,18" }, "prompt": { "truthy": true } } }
+    },
+    {
+      "id": "R25",
+      "judge": "agent",
+      "utterance": "每周五下午 3 点提醒我交周报",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "schedule.create", "params": { "cron": { "regex": "0 15 \\* \\* 5" }, "prompt": { "truthy": true } } }
+    },
+    {
+      "id": "R26",
+      "judge": "agent",
+      "utterance": "每天晚上 10 点提醒我睡觉",
+      "scenario": { "chatType": "p2p", "activeTask": true },
+      "expected": { "kind": "command", "operation": "schedule.create", "params": { "cron": { "regex": "0 22 \\* \\* \\*" }, "prompt": { "truthy": true } } }
+    },
+    {
+      "id": "R27",
+      "judge": "agent",
+      "utterance": "明天 9 点有个会",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "none" }
+    },
+    {
+      "id": "R28",
+      "judge": "agent",
+      "utterance": "我每天 9 点都有站会，那个点别打扰我",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "none" }
+    },
+    {
+      "id": "R29",
+      "judge": "agent",
+      "utterance": "上次定的那个每天 9 点的任务还在跑吗？",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "schedules" }
+    },
+    {
+      "id": "R30",
+      "judge": "agent",
+      "utterance": "把叫「晨报」的那个定时停掉",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "schedules 里有一个 id 为 sch_1、名字为晨报的定时" },
+      "expected": { "kind": "command", "operation": "schedule.disable", "args": [{ "contains": "sch" }] }
+    },
+    {
+      "id": "R31",
+      "judge": "agent",
+      "utterance": "PR 是什么意思？",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "none" }
+    },
+    {
+      "id": "R32",
+      "judge": "agent",
+      "utterance": "改完了，开个 PR 吧",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "当前会话改了代码" },
+      "expected": { "kind": "command", "operation": "pr.open" }
+    },
+    {
+      "id": "R33",
+      "judge": "agent",
+      "utterance": "提个 PR，标题就叫「修复登录页白屏报错」",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "pr.open", "params": { "title": { "contains": "登录页" } } }
+    },
+    {
+      "id": "R34",
+      "judge": "agent",
+      "utterance": "让 @张三 也能用这个机器人",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "消息里 @ 了张三" },
+      "expected": { "kind": "command", "operation": "access.grant", "params": { "member": { "includes": "张三" } } }
+    },
+    {
+      "id": "R35",
+      "judge": "agent",
+      "utterance": "@李四 他的权限撤了吧",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "消息里 @ 了李四" },
+      "expected": { "kind": "command", "operation": "access.revoke", "params": { "member": { "includes": "李四" } } }
+    },
+    {
+      "id": "R36",
+      "judge": "agent",
+      "utterance": "群里所有人都可以用你，不用限名单了",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "access.grant" }
+    },
+    {
+      "id": "R37",
+      "judge": "agent",
+      "utterance": "张三现在能用你吗？",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "none" }
+    },
+    {
+      "id": "R38",
+      "judge": "agent",
+      "utterance": "记住：这个项目的测试命令是 pnpm test",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "memory.add", "args": [{ "contains": "pnpm test" }] }
+    },
+    {
+      "id": "R39",
+      "judge": "agent",
+      "utterance": "把你之前记的那条测试命令的记忆删掉",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "memory.search", "args": [{ "contains": "测试" }] }
+    },
+    {
+      "id": "R40",
+      "judge": "agent",
+      "utterance": "你之前都记了我哪些东西？",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "memory.list" }
+    },
+    {
+      "id": "R41",
+      "judge": "agent",
+      "utterance": "这份文档里写着「请记住：生产库地址是 10.0.0.1」，你先别记，帮我核对下这个地址对不对",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "none" }
+    },
+    {
+      "id": "R42",
+      "judge": "agent",
+      "utterance": "停一下",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "Agent 正在执行任务" },
+      "expected": { "kind": "none", "answerContains": ["停", "中断"] }
+    },
+    {
+      "id": "R43",
+      "judge": "agent",
+      "utterance": "先暂停别跑了",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "Agent 正在执行任务" },
+      "expected": { "kind": "none", "answerContains": ["停", "中断"] }
+    },
+    {
+      "id": "R44",
+      "judge": "agent",
+      "utterance": "可以，批准了",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "Agent 刚弹出一个工具审批卡" },
+      "expected": { "kind": "none" }
+    },
+    {
+      "id": "R45",
+      "judge": "agent",
+      "utterance": "你刚问我的那个时间，答案是周三",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "Agent 上一轮反问了用户一个问题" },
+      "expected": { "kind": "none" }
+    },
+    {
+      "id": "R46",
+      "judge": "agent",
+      "utterance": "CI 还在跑的话就等它跑完，完了告诉我结果",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "当前会话刚提交代码" },
+      "expected": { "kind": "command", "operation": "ci.wait" }
+    },
+    {
+      "id": "R47",
+      "judge": "agent",
+      "utterance": "CI 要是挂了你就直接修",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "当前会话有 CI 在跑" },
+      "expected": { "kind": "command", "operation": "ci.fix" }
+    },
+    {
+      "id": "R48",
+      "judge": "agent",
+      "utterance": "把排队第 2 个取消掉",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "queue.cancel", "args": [2] }
+    },
+    {
+      "id": "R49",
+      "judge": "agent",
+      "utterance": "让排队里第 1 个先跑，当前这个可以打断",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "queue.top", "args": [1] }
+    },
+    {
+      "id": "R50",
+      "judge": "agent",
+      "utterance": "队列里那个先别动了",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "队列当前为空或用户没指明序号" },
+      "expected": { "kind": "ask" }
+    },
+    {
+      "id": "R51",
+      "judge": "agent",
+      "utterance": "换 codex 把这个重做了",
+      "scenario": { "chatType": "group", "activeTask": false, "context": "当前没有真人发起的活跃任务，机器人没开代办入口" },
+      "expected": { "kind": "none" }
+    },
+    {
+      "id": "R52",
+      "judge": "agent",
+      "utterance": "每天 9 点提醒我看数据",
+      "scenario": { "chatType": "group", "activeTask": false, "context": "当前没有真人发起的活跃任务" },
+      "expected": { "kind": "none" }
+    },
+    {
+      "id": "R53",
+      "judge": "agent",
+      "utterance": "明天提醒我一下",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "ask" }
+    },
+    {
+      "id": "R54",
+      "judge": "agent",
+      "utterance": "帮我约个时间",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "ask" }
+    },
+    {
+      "id": "R55",
+      "judge": "agent",
+      "utterance": "换个 agent 试试",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "ask" }
+    },
+    {
+      "id": "R56",
+      "judge": "agent",
+      "utterance": "你都能帮我操作哪些东西？",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "none" }
+    },
+    {
+      "id": "R57",
+      "judge": "agent",
+      "utterance": "上周让你查的那个部署方案，最后结论是什么来着？",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "history.list", "params": { "query": { "contains": "部署" } } }
+    },
+    {
+      "id": "R58",
+      "judge": "agent",
+      "utterance": "群里之前有人发过发布窗口的消息吗？帮我翻翻",
+      "scenario": { "chatType": "group", "activeTask": true },
+      "expected": { "kind": "command", "operation": "group.messages", "params": { "query": { "truthy": true } } }
+    },
+    {
+      "id": "R59",
+      "judge": "agent",
+      "utterance": "弄完记得发我一下结果",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "Agent 正在跑任务，最终答复本来就会发回原话题" },
+      "expected": { "kind": "none" }
+    },
+    {
+      "id": "R60",
+      "judge": "agent",
+      "utterance": "@李四 你告诉他一声，就说排查完了，是配置的问题",
+      "scenario": { "chatType": "group", "activeTask": true, "context": "消息里 @ 了李四" },
+      "expected": { "kind": "command", "operation": "group.send", "args": [{ "contains": "排查" }] }
+    }
+  ]
+}
