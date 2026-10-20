@@ -64,7 +64,6 @@ const MAX_RECORDS = 1_000;
 const CLAIM_TTL_MS = 30_000;
 const MAX_DELIVERIES = 4;
 const DEFAULT_POLL_MS = 60_000;
-const terminalTaskStatuses = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
 const runStatuses = new Set(['queued', 'running', 'completed']);
 /** 未决/阻塞来源持续挡下一次触发；其余 runStatus 为终态。 */
 const openRunStatuses = new Set(['pending', 'accepted', 'blocked']);

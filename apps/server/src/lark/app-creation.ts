@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentRepository, ConfigRepository } from '@dutydeck/shared';
+import type { AgentRepository, ConfigRepository, LarkAppCreationJob } from '@dutydeck/shared';
 import QRCode from 'qrcode';
 import { LARK_APP_ICON_BASE64 } from './app-icon.js';
 import { readLarkConfig, saveLarkConfig } from './config.js';
@@ -10,22 +10,7 @@ import { createLarkCardService } from './service.js';
 /** 与 repair.ts 同一个判据：这条权限被跳过时命令菜单不可用，同步注定 403，不必发请求。 */
 const SLASH_COMMAND_SCOPES = ['application:app_slash_command:read', 'application:app_slash_command:write'] as const;
 
-export interface LarkAppCreationJob {
-  id: string;
-  name: string;
-  status: 'preparing' | 'waiting_for_scan' | 'creating' | 'configuring' | 'completed' | 'pending_review' | 'failed' | 'cancelled';
-  appId?: string;
-  botSaved?: boolean;
-  qrDataUrl?: string;
-  scanConfirmed?: boolean;
-  accountName?: string;
-  tenantName?: string;
-  error?: string;
-  slashCommands?: 'configured' | 'skipped_scope' | 'skipped_credentials' | 'failed';
-  createdAt: string;
-  updatedAt: string;
-  retryable: boolean;
-}
+export type { LarkAppCreationJob } from '@dutydeck/shared';
 
 export class LarkAppCreationError extends Error {
   constructor(readonly statusCode: number, message: string) { super(message); }

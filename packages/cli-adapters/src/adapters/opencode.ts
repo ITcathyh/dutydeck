@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { delay } from './input-settle.js';
+import { submitPrompt } from './input-settle.js';
 
 /** OpenCode 原生会话 id 形态：`ses_` + 纯字母数字（CLI 自己铸，dutydeck 钉不了）。
  *  dutydeck 的 `ses_<uuid>` 带连字符，正好被这条规则挡住。 */
@@ -33,19 +33,10 @@ export function createOpenCodeAdapter(): CliAdapter {
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
-      if (backend.sendText && backend.sendSpecialKeys) {
-        if (backend.pasteText && (prompt.length > OPENCODE_PASTE_THRESHOLD || prompt.includes('\n'))) {
-          (await backend.pasteText(prompt));
-        } else {
-          (await backend.sendText(prompt));
-        }
-        await delay(200);
-        (await backend.sendSpecialKeys('Enter'));
-      } else {
-        (await backend.write(prompt));
-        await delay(1000);
-        (await backend.write('\r'));
-      }
+      await submitPrompt(backend, prompt, {
+        paste: Boolean(backend.sendText && backend.pasteText
+          && (prompt.length > OPENCODE_PASTE_THRESHOLD || prompt.includes('\n'))),
+      });
     },
 
     /**

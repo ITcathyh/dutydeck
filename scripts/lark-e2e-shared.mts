@@ -147,15 +147,12 @@ export function installTermination(
   handleTermination: (err: Error) => Promise<{ cleanupFailed?: boolean }>
 ): TerminationController {
   const state = { terminated: false, error: undefined as Error | undefined };
-  let handling = false;
   let hardExitTimer: NodeJS.Timeout | undefined;
 
   const trigger = (err: Error) => {
     if (state.terminated) return;
     state.terminated = true;
     state.error = err;
-    if (handling) return;
-    handling = true;
     console.error(`Terminating ${label}: ${err.message}`);
     hardExitTimer = setTimeout(() => {
       console.error(`Force exit: ${label} graceful termination exceeded its bound`);
@@ -164,7 +161,7 @@ export function installTermination(
     hardExitTimer.unref();
     void handleTermination(err)
       .then(
-        result => process.exit(result?.cleanupFailed ? 1 : 1),
+        () => process.exit(1),
         () => process.exit(1)
       );
   };

@@ -203,18 +203,16 @@ export function createGithubProvider(options = {}) {
     const payload = await getPublic(apiUrl(`${repoPath(repository)}/actions/runs/${runId}/jobs`, { filter: 'latest', per_page: 100 }));
     const jobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
     const failed = jobs.filter(job => job && failureConclusions.has(job.conclusion)).slice(0, MAX_FAILED_JOBS);
-    const results = [];
-    for (const job of failed) {
+    return Promise.all(failed.map(async job => {
       const step = Array.isArray(job.steps) ? job.steps.find(item => failureConclusions.has(item?.conclusion)) : undefined;
       const log = token && Number.isSafeInteger(job.id) ? await jobLogTail(repository, job.id).catch(() => undefined) : undefined;
-      results.push({
+      return {
         ...(typeof job.name === 'string' ? { job: job.name } : {}),
         ...(typeof step?.name === 'string' ? { stage: step.name } : {}),
         reason: job.conclusion,
         ...(log ? { log } : {})
-      });
-    }
-    return results;
+      };
+    }));
   }
 
   async function createPullRequest(repository, input) {

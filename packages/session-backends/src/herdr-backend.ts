@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { runCommand } from './command.js';
+import { descendantPids } from './descendant-pids.js';
 import { OutputHandoff } from './output-handoff.js';
 import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -492,17 +493,7 @@ export class HerdrBackend implements SessionBackend {
   }
   private async descendants(): Promise<PhysicalProcessIdentity[]> {
     const state = (await this.checked(false));
-    const children = new Map<number, number[]>();
-    for (const entry of readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
-      try {
-        const raw = readFileSync(`/proc/${entry}/stat`, 'utf8');
-        const parent = Number(raw.slice(raw.lastIndexOf(')') + 2).split(' ')[1]);
-        children.set(parent, [...(children.get(parent) ?? []), Number(entry)]);
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    }
-    const pids = new Set<number>(), pending = [state.root.pid];
-    while (pending.length) { const pid = pending.pop()!; if (pids.has(pid)) continue; pids.add(pid); pending.push(...children.get(pid) ?? []); }
-    return [...pids].map(pid => this.options.processProbe.identify(pid));
+    return descendantPids([state.root.pid]).map(pid => this.options.processProbe.identify(pid));
   }
   private boundServer(state: State): void {
     const observation = this.options.processProbe.observe(state.server);

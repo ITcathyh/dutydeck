@@ -85,6 +85,7 @@ it('consumes verified blank completed turns so the next extraction reaches usefu
 });
 it.each(['legacy','optimized'] as const)('%s jobs apply noop receipts and choose their frozen session lifecycle', async mode => {
   const h = await harness(mode);
+  const list = vi.spyOn(h.runtime, 'listSessions'), get = vi.spyOn(h.runtime, 'getSession');
   expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
   expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
   const jobs = await h.repos.memoryJobs.listScope(scope);
@@ -92,6 +93,9 @@ it.each(['legacy','optimized'] as const)('%s jobs apply noop receipts and choose
   expect(jobs.every(job => job.state === 'settled' && job.receipt?.appliedJobId === job.id)).toBe(true);
   expect(new Set(jobs.map(job => job.sessionId)).size).toBe(mode === 'legacy' ? 1 : 2);
   expect(h.prompts).toHaveLength(2);
+  expect(list).toHaveBeenCalledTimes(2); // One migration safety scan per new job.
+  expect(get.mock.calls.map(([id]) => id)).toEqual(jobs.flatMap(job => mode === 'optimized' ? [job.sessionId, job.sessionId] : [job.sessionId]));
+  if (mode === 'optimized') for (const job of jobs) expect((await h.repos.sessions.get(job.sessionId))?.archivedAt).toBeTruthy();
   if (mode === 'optimized') { expect(h.prompts[0]).toContain('"chatId":"other"'); expect(h.prompts[0].split('保留完整来源和日期。')).toHaveLength(2); }
 });
 it('uses compatibility before dispatch when the verified input range is insufficient', async () => {
@@ -125,12 +129,16 @@ it.each(['ignore','authorization'] as const)('refuses a completed result after %
 });
 it('rebuilds projection after commit without invoking the model or applying twice', async () => {
   const h = await harness();
+  const list = vi.spyOn(h.runtime, 'listSessions'), get = vi.spyOn(h.runtime, 'getSession');
   const write = vi.spyOn(h.projection,'writeVerified').mockResolvedValueOnce(false);
   expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error:'MEMORY_PROJECTION_FAILED' });
   const applied = (await h.repos.memoryJobs.listScope(scope))[0]; expect(applied.state).toBe('applied');
   expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:true });
   expect(h.prompts).toHaveLength(1); expect(write).toHaveBeenCalledTimes(2);
   expect((await h.repos.memoryJobs.listScope(scope))[0].state).toBe('settled');
+  expect(list).toHaveBeenCalledOnce();
+  expect(get.mock.calls).toEqual([[applied.sessionId], [applied.sessionId]]);
+  expect((await h.repos.sessions.get(applied.sessionId))?.archivedAt).toBeTruthy();
 });
 it('recovers uncertain dispatch by looking up the same accepted request', async () => {
   const h = await harness();
@@ -143,12 +151,45 @@ it('recovers uncertain dispatch by looking up the same accepted request', async 
 });
 it('recovers a lost startup reply using the same session', async () => {
   const h = await harness();
+  const list = vi.spyOn(h.runtime, 'listSessions'), get = vi.spyOn(h.runtime, 'getSession');
   const original = h.runtime.startMemorySession.bind(h.runtime);
   vi.spyOn(h.runtime,'startMemorySession').mockImplementationOnce(async (...args) => { await original(...args); throw new Error('start reply lost'); });
   expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:false });
   expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:true });
-  expect((await h.runtime.listSessions()).filter(session => session.source === 'lark-memory')).toHaveLength(1);
+  const [job] = await h.repos.memoryJobs.listScope(scope);
+  expect(list).toHaveBeenCalledOnce();
+  expect(get.mock.calls).toEqual([[job.sessionId], [job.sessionId], [job.sessionId]]);
+  expect((await h.repos.sessions.list()).filter(session => session.source === 'lark-memory')).toHaveLength(1);
   expect(h.prompts).toHaveLength(1);
+});
+it('archives an isolated failed job using only the known session lookup', async () => {
+  const h = await harness();
+  const list = vi.spyOn(h.runtime, 'listSessions'), get = vi.spyOn(h.runtime, 'getSession');
+  h.setOutputText('not a JSON result');
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: false, error: 'MEMORY_AGENT_OUTPUT_INVALID' });
+  const [job] = await h.repos.memoryJobs.listScope(scope);
+  expect(job).toMatchObject({ state: 'failed', error: 'MEMORY_AGENT_OUTPUT_INVALID' });
+  expect(list).toHaveBeenCalledOnce();
+  expect(get.mock.calls).toEqual([[job.sessionId], [job.sessionId]]);
+  expect((await h.repos.sessions.get(job.sessionId))?.archivedAt).toBeTruthy();
+});
+it('refuses a missing frozen compatible session without scanning or starting another session', async () => {
+  const h = await harness('legacy');
+  // Older frozen compatible jobs may refer to a non-stable session id.
+  const create = h.repos.memoryJobs.create.bind(h.repos.memoryJobs);
+  vi.spyOn(h.repos.memoryJobs, 'create').mockImplementationOnce(job => {
+    job.sessionId = 'missing_compatible_session';
+    return create(job);
+  });
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });
+  const list = vi.spyOn(h.runtime, 'listSessions'), get = vi.spyOn(h.runtime, 'getSession');
+  const start = vi.spyOn(h.runtime, 'startMemorySession'); start.mockClear();
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });
+  expect(list).not.toHaveBeenCalled();
+  expect(get).toHaveBeenCalledExactlyOnceWith('missing_compatible_session');
+  expect(start).not.toHaveBeenCalled();
+  expect(h.prompts).toHaveLength(0);
+  expect(await h.repos.memoryJobs.listScope(scope)).toHaveLength(1);
 });
 it('reattaches the full snapshot and candidate actions for the second correction', async () => {
   const h = await harness(); let round = 0;
@@ -195,10 +236,13 @@ it('requires the explicitly supplied installation owner and does not derive it f
 it('blocks migration when an old session has unknown execution', async () => {
   const h = await harness();
   const old = await h.runtime.start({ agentId:'agent',source:'lark-memory',sourceId:'app:groups:memory',permissionMode:'deny-all' });
+  const list = vi.spyOn(h.runtime, 'listSessions'), get = vi.spyOn(h.runtime, 'getSession');
   vi.spyOn(h.runtime,'getSessionTaskRecovery').mockImplementation(async id => id === old.id ? [{ taskId:'unknown',status:'reconcile_required',blockers:[] }] as any : []);
   expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:false,error:'MEMORY_RECOVERY_REQUIRED' });
   expect(await h.repos.memoryJobs.listScope(scope)).toEqual([]);
   expect(h.prompts).toHaveLength(0);
+  expect(list).toHaveBeenCalledOnce();
+  expect(get).not.toHaveBeenCalled();
 });
 it('startup recovery finishes a committed receipt without any due counter', async () => {
   const h = await harness();

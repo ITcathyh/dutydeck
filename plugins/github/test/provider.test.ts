@@ -124,6 +124,35 @@ describe('GitHub provider: repositories and Actions runs', () => {
 });
 
 describe('GitHub provider: failure logs and pull requests', () => {
+  it('starts at most ten log downloads concurrently and preserves job order with an individual failure', async () => {
+    const releases = new Map<number, (response: Response) => void>();
+    const downloads = new Map<number, (response: Response | Error) => void>();
+    const completed: number[] = [];
+    const request = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/runs/42/jobs')) return json({ jobs: Array.from({ length: 12 }, (_, id) => ({ id: id + 1, name: `job-${id + 1}`, conclusion: 'failure' })) });
+      if (url.origin === 'https://api.github.com') {
+        expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer synthetic-token');
+        const id = Number(/\/jobs\/(\d+)\/logs$/.exec(url.pathname)![1]);
+        return new Promise<Response>(resolve => releases.set(id, resolve));
+      }
+      expect(url.origin).toBe('https://logs.example');
+      expect(init?.headers).toBeUndefined();
+      const id = Number(url.pathname.slice(1));
+      return new Promise<Response>((resolve, reject) => downloads.set(id, response => { completed.push(id); if (response instanceof Error) reject(response); else resolve(response); }));
+    });
+    const provider = createGithubProvider({ token: 'synthetic-token', fetch: request as typeof fetch });
+    const pending = provider.getFailureLogs(repo, '42');
+    await vi.waitFor(() => expect([...releases.keys()]).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
+    for (const [id, release] of releases) release(new Response('', { status: 302, headers: { location: `https://logs.example/${id}` } }));
+    await vi.waitFor(() => expect(downloads.size).toBe(10));
+    for (let id = 10; id >= 1; id--) downloads.get(id)!(id === 4 ? new Error('synthetic download failure') : new Response(`log-${id}`));
+    const failures = await pending;
+    expect(completed).toEqual([10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    expect(failures).toEqual(Array.from({ length: 10 }, (_, index) => ({ job: `job-${index + 1}`, reason: 'failure', ...(index === 3 ? {} : { log: `log-${index + 1}` }) })));
+    expect(request).toHaveBeenCalledTimes(21);
+  });
+
   it('reads failed jobs and follows the log redirect without sending the token to the download host', async () => {
     const seen: Array<{ url: string; auth?: string }> = [];
     const request = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

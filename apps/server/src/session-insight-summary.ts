@@ -229,21 +229,17 @@ function combineFailureRate(sources: FileMetrics[]): ContinuousMetric {
   };
 }
 
-function unavailableMetric(reason: string, continuous: boolean): Metric {
-  const base = {
-    value: null, quality: 'unavailable' as const, status: 'unavailable' as const,
+function unavailableMetric(reason: string): Metric {
+  return {
+    value: null, quality: 'unavailable', status: 'unavailable',
     evidenceCount: 0, missingCount: 1, reasonCodes: [reason]
   };
-  return continuous ? base as ContinuousMetric : base as CountMetric;
 }
 
 function unavailableFileMetrics(reason: string): FileMetrics {
   const result = {} as FileMetrics;
   for (const key of METRIC_KEYS) {
-    (result as Record<string, Metric>)[key as string] = unavailableMetric(
-      reason,
-      !SUM_COUNT_KEYS.has(key) && !MAX_METRIC_KEYS.has(key) && key !== CONTEXT_WINDOW_KEY
-    );
+    (result as Record<string, Metric>)[key as string] = unavailableMetric(reason);
   }
   return result;
 }
@@ -842,10 +838,7 @@ export function buildSessionInsightSummaryResponse(options: BuildSummaryOptions)
           reasonCounts.set(R.overflow, (reasonCounts.get(R.overflow) ?? 0) + 1);
         }
         included.length = 0;
-        combined = unavailableMetric(
-          'AGGREGATE_OVERFLOW',
-          SUM_DURATION_KEYS.has(metricKey) || NON_ADDABLE_DURATION_KEYS.has(metricKey) || metricKey === RATE_KEY
-        );
+        combined = unavailableMetric('AGGREGATE_OVERFLOW');
       }
 
       // 有成员被排除（未分析/该指标未知/冲突等）时，合计只是已知子集：available 降 partial。
@@ -857,10 +850,8 @@ export function buildSessionInsightSummaryResponse(options: BuildSummaryOptions)
         };
       }
 
-      const continuous = NON_ADDABLE_DURATION_KEYS.has(metricKey)
-        || SUM_DURATION_KEYS.has(metricKey) || metricKey === RATE_KEY;
       if (aggregate) (aggregate as Record<string, Metric>)[metricKey as string] = combined
-        ?? unavailableMetric([...reasonCounts.keys()].sort()[0] ?? R.metricUnavailable, continuous);
+        ?? unavailableMetric([...reasonCounts.keys()].sort()[0] ?? R.metricUnavailable);
       metricCoverage[metricKey as string] = {
         includedCount: included.length,
         excludedCount: candidateSessions - included.length,

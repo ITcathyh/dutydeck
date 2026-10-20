@@ -230,7 +230,7 @@ export abstract class LarkCoordinatorCore {
   protected async authorizeInteraction(record: LarkInteraction, actor: string, action: PolicyAction) {
     const config = await readLarkConfig(this.workflowOptions.store, record.appId);
     if (!config?.listening || !record.event.senderOpenId) return false;
-    const mapping = (await this.cardMappings?.list(larkCardChannel(record.appId)))?.find(item => item.externalId === record.event.messageId);
+    const mapping = await this.cardMappings?.get(larkCardChannel(record.appId), record.event.messageId);
     if (!mapping || mapping.sessionId !== record.sessionId) return false;
     const saved = parseCardTask(mapping.extra ?? '{}');
     if (saved.app_id !== record.appId || saved.chat_id !== record.event.chatId || saved.runtime_task_id !== record.taskId

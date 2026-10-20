@@ -388,6 +388,11 @@ export function toPublicRemoteChatFact(fact: RemoteChatFact, identity: RemoteIde
 
 const actionGatesSchema = z.object({ terminalWrite: z.boolean(), highRisk: z.boolean(), groupToolsSend: z.boolean() }).strict();
 
+function validateRoleOperateScope(value: { role: (typeof roleKinds)[number]; operateScope: (typeof operateScopes)[number] }, context: z.RefinementCtx): void {
+  if (value.role !== 'can_operate' && value.operateScope !== 'none') context.addIssue({ code: z.ZodIssueCode.custom, path: ['operateScope'], message: 'Only can_operate assignments may have an operate scope' });
+  if (value.role === 'can_operate' && value.operateScope === 'none') context.addIssue({ code: z.ZodIssueCode.custom, path: ['operateScope'], message: 'can_operate requires an explicit scope' });
+}
+
 export const roleAssignmentSchema = z.object({
   schemaVersion: z.literal(1),
   id: z.string().min(1),
@@ -402,10 +407,7 @@ export const roleAssignmentSchema = z.object({
   expiresAt: timestampSchema.optional(),
   createdAt: timestampSchema,
   updatedAt: timestampSchema
-}).strict().superRefine((value, context) => {
-  if (value.role !== 'can_operate' && value.operateScope !== 'none') context.addIssue({ code: z.ZodIssueCode.custom, path: ['operateScope'], message: 'Only can_operate assignments may have an operate scope' });
-  if (value.role === 'can_operate' && value.operateScope === 'none') context.addIssue({ code: z.ZodIssueCode.custom, path: ['operateScope'], message: 'can_operate requires an explicit scope' });
-});
+}).strict().superRefine(validateRoleOperateScope);
 export type RoleAssignment = z.infer<typeof roleAssignmentSchema>;
 
 export const createRoleAssignmentInputSchema = z.object({
@@ -417,10 +419,7 @@ export const createRoleAssignmentInputSchema = z.object({
   operateScope: z.enum(operateScopes),
   actionGates: actionGatesSchema.default({ terminalWrite: false, highRisk: false, groupToolsSend: false }),
   expiresAt: timestampSchema.optional()
-}).strict().superRefine((value, context) => {
-  if (value.role !== 'can_operate' && value.operateScope !== 'none') context.addIssue({ code: z.ZodIssueCode.custom, path: ['operateScope'], message: 'Only can_operate assignments may have an operate scope' });
-  if (value.role === 'can_operate' && value.operateScope === 'none') context.addIssue({ code: z.ZodIssueCode.custom, path: ['operateScope'], message: 'can_operate requires an explicit scope' });
-});
+}).strict().superRefine(validateRoleOperateScope);
 export type CreateRoleAssignmentInput = z.input<typeof createRoleAssignmentInputSchema>;
 
 export const updateRoleAssignmentInputSchema = z.object({

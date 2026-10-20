@@ -368,7 +368,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       }
       if (quoted?.kind === 'result' && (!parsed || !names.includes(parsed.name))) {
         if (!event.senderOpenId || !await this.authorizeInteraction(quoted, event.senderOpenId, 'run.interrupt')) throw new LarkServiceError('LARK_INTERACTION_DENIED', '当前账号无权修改此任务。', 403);
-        const mapping = (await this.cardMappings!.list(larkCardChannel(config.appId))).find(item => item.externalId === quoted.event.messageId)!;
+        const mapping = (await this.cardMappings!.get(larkCardChannel(config.appId), quoted.event.messageId))!;
         const saved = parseCardTask(mapping.extra!);
         if (!saved.scope_id) throw new LarkServiceError('LARK_CONTEXT_MISSING', '原任务上下文不可恢复，请发送新的任务目标。', 409);
         if (quoted.state === 'pending') {
@@ -2429,7 +2429,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       try {
         const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
         if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法导出记录。' };
-        const mapping = (await this.cardMappings.list(larkCardChannel(config.appId))).find(item => item.externalId === workflow.task_id);
+        const mapping = typeof workflow.task_id === 'string' ? await this.cardMappings.get(larkCardChannel(config.appId), workflow.task_id) : undefined;
         const saved = parseOptionalCardTask(mapping?.extra);
         if (!mapping || !saved?.runtime_task_id || saved.app_id !== config.appId || saved.chat_id !== context.chatId
           || ![saved.card_message_id, saved.final_message_id].includes(context.messageId)

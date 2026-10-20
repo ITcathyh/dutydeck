@@ -34,6 +34,7 @@ async function harness(status = 'running', timeoutMs = 30, options: { archive?: 
     }),
     lookupAcceptedTask: vi.fn(() => undefined),
     listAgents: vi.fn(async () => [{ id: 'agent' }]), listSessions: vi.fn(async () => sessions.map(item => ({ ...item }))),
+    getSession: vi.fn(async (id: string) => { const session = sessions.find(item => item.id === id); return session ? { ...session } : undefined; }),
     getTasks: vi.fn(async (id: string) => tasksOf(id)),
     getTaskRecovery: vi.fn(async (id: string, taskId: string) => ({ status: tasksOf(id).find(item => item.id === taskId)!.status, blockers: [] as Array<{ code: string }>, resolvedUnknown: false })),
     dispatch: vi.fn(),

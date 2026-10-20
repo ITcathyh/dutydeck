@@ -1,5 +1,6 @@
 import { runCommand } from './command.js';
-import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { descendantPids } from './descendant-pids.js';
+import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { isAbsolute } from 'node:path';
 
@@ -74,22 +75,7 @@ async function ownerCheck(scope: OwnedTmuxScope, id: string): Promise<void> {
 async function processes(scope: OwnedTmuxScope, id: string, probe: ProcessProbe): Promise<PhysicalProcessIdentity[]> {
   const roots = (await tmux(scope.socketPath, ['list-panes', '-s', '-t', id, '-F', '#{pane_pid}'])).split('\n').map(Number);
   if (!roots.length || roots.some(pid => !Number.isSafeInteger(pid) || pid <= 0)) fail('LEGACY_TMUX_PROCESS_IDENTITY_UNAVAILABLE');
-  const children = new Map<number, number[]>();
-  for (const entry of readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
-    try {
-      const raw = readFileSync(`/proc/${entry}/stat`, 'utf8');
-      const parent = Number(raw.slice(raw.lastIndexOf(')') + 2).split(' ')[1]);
-      children.set(parent, [...(children.get(parent) ?? []), Number(entry)]);
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  }
-  const pids = new Set<number>();
-  const pending = [...roots];
-  while (pending.length) {
-    const pid = pending.pop()!;
-    if (pids.has(pid)) continue;
-    pids.add(pid); pending.push(...(children.get(pid) ?? []));
-  }
-  return [...pids].sort((a, b) => a - b).map(pid => probe.identify(pid));
+  return descendantPids(roots).sort((a, b) => a - b).map(pid => probe.identify(pid));
 }
 const key = (identity: PhysicalProcessIdentity) => JSON.stringify([identity.host, identity.boot, identity.namespace, identity.pid, identity.start]);
 function alive(identity: PhysicalProcessIdentity, probe: ProcessProbe): void {

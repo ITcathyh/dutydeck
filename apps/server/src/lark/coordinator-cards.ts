@@ -193,7 +193,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
   protected async refreshResultFeedback(config: StoredLarkConfig, requestId: string) {
     const record = (await this.workflows?.list(config.appId))?.find(item => item.id === requestId && item.kind === 'result');
     if (!record?.cardId) return;
-    const mapping = (await this.cardMappings?.list(larkCardChannel(config.appId)))?.find(item => item.externalId === record.event.messageId);
+    const mapping = await this.cardMappings?.get(larkCardChannel(config.appId), record.event.messageId);
     if (!mapping) return;
     const saved = parseCardTask(mapping.extra ?? '{}');
     if (saved.state !== 'completed' || saved.final_delivery_state !== 'delivered'
@@ -578,7 +578,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
   protected async submitPlanDecision(record: LarkInteraction) {
     const config = await readLarkConfig(this.workflowOptions.store, record.appId);
     if (!config?.listening || !this.inbox || !record.cardId || !record.actorId) throw new LarkServiceError('LARK_PLAN_UNAVAILABLE', '机器人当前不在监听，计划没有提交。', 409);
-    const mapping = (await this.cardMappings?.list(larkCardChannel(record.appId)))?.find(item => item.externalId === record.event.messageId);
+    const mapping = await this.cardMappings?.get(larkCardChannel(record.appId), record.event.messageId);
     const saved = mapping?.extra ? parseCardTask(mapping.extra) : undefined;
     if (!saved?.scope_id) throw new LarkServiceError('LARK_CONTEXT_MISSING', '原任务上下文不可恢复，请重新发送 /plan。', 409);
     const { event, prompt } = planFollowUpEvent(record, { chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', threadId: saved.thread_id },

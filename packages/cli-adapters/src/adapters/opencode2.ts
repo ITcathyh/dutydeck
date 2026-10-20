@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { delay } from './input-settle.js';
+import { submitPrompt } from './input-settle.js';
 
 /** OpenCode 原生会话 id 形态（V2 与 V1 同规则）：`ses_` + 纯字母数字。 */
 const OPENCODE_SESSION_ID_RE = /^ses_[0-9A-Za-z]+$/;
@@ -34,21 +34,10 @@ export function createOpenCode2Adapter(): CliAdapter {
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
       // 斜杠命令是 TUI 命令面板输入，必须逐字键入（paste 会被面板吃掉）。
-      const isSlashCommand = prompt.startsWith('/');
-      if (backend.sendText && backend.sendSpecialKeys) {
-        if (!isSlashCommand && backend.pasteText
-          && (prompt.length > OPENCODE_PASTE_THRESHOLD || prompt.includes('\n'))) {
-          (await backend.pasteText(prompt));
-        } else {
-          (await backend.sendText(prompt));
-        }
-        await delay(200);
-        (await backend.sendSpecialKeys('Enter'));
-      } else {
-        (await backend.write(prompt));
-        await delay(1000);
-        (await backend.write('\r'));
-      }
+      await submitPrompt(backend, prompt, {
+        paste: Boolean(!prompt.startsWith('/') && backend.sendText && backend.pasteText
+          && (prompt.length > OPENCODE_PASTE_THRESHOLD || prompt.includes('\n'))),
+      });
     },
 
     /**

@@ -23,6 +23,7 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
   it('stops only exact owned target, verifies proof again, and admits a later task', async () => {
     create(); create('other');
     const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
+    expect(identity.identities.map(item => item.pid)).toEqual(identity.identities.map(item => item.pid).sort((a, b) => a - b));
     const proof = await stopOwnedTmux(identity, probe);
     expect(proof.identities.length).toBeGreaterThan(0);
     expect(proof.identities.every(item => observeProcess(item) === 'dead')).toBe(true);

@@ -23,7 +23,6 @@ import {
  */
 
 const DIGEST_A = 'a'.repeat(64);
-const DIGEST_B = 'b'.repeat(64);
 
 let seq = 0;
 function nextId(prefix: string): string {

@@ -2,13 +2,16 @@ import { describe, expect, it } from 'vitest';
 import {
   createFailClosedPolicyEvaluator,
   createGroupBindingInputSchema,
+  createRoleAssignmentInputSchema,
   evaluatePolicyAction,
   groupBindingSchema,
   inheritPresentationOverride,
+  operateScopes,
   policyActions,
   presentationOverrideSchema,
   resolveGroupEffectiveConfig,
   roleAssignmentSchema,
+  roleKinds,
   type ChannelBotGroupPolicy,
   type GroupBinding,
   type PolicyEvaluationInput,
@@ -55,6 +58,34 @@ function input(action: PolicyEvaluationInput['action'], overrides: Partial<Polic
 }
 
 describe('WP1a group policy and action evaluator', () => {
+  it('keeps role and operate-scope validation identical for creation and stored assignments', () => {
+    for (const role of roleKinds) {
+      for (const operateScope of operateScopes) {
+        const input = { id: 'role-1', channelBotId: 'bot-1', principalId: 'principal_alice', role, operateScope };
+        const results = [
+          createRoleAssignmentInputSchema.safeParse(input),
+          roleAssignmentSchema.safeParse({ ...assignment(), ...input })
+        ];
+        const message = role === 'can_operate'
+          ? operateScope === 'none' ? 'can_operate requires an explicit scope' : undefined
+          : operateScope !== 'none' ? 'Only can_operate assignments may have an operate scope' : undefined;
+        for (const result of results) {
+          if (message) {
+            expect(result.success).toBe(false);
+            if (!result.success) expect(result.error.issues).toEqual([{ code: 'custom', path: ['operateScope'], message }]);
+          } else {
+            expect(result.success).toBe(true);
+            if (result.success) expect(result.data.actionGates).toEqual({ terminalWrite: false, highRisk: false, groupToolsSend: false });
+          }
+        }
+      }
+    }
+    expect(createRoleAssignmentInputSchema.safeParse({
+      id: 'role-1', channelBotId: 'bot-1', principalId: 'principal_alice', role: 'can_talk', operateScope: 'none', extra: true
+    }).success).toBe(false);
+    expect(roleAssignmentSchema.safeParse({ ...assignment(), extra: true }).success).toBe(false);
+  });
+
   it('explains group overrides over Bot defaults and clamps group-tools at the Bot ceiling', () => {
     const policy: ChannelBotGroupPolicy = {
       schemaVersion: 1, id: 'policy-1', revision: 1, channelBotId: 'bot-1',

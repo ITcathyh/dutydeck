@@ -16,7 +16,6 @@ const header = (headers, name) => { const value = headers?.[name]; return Array.
 const tokensEqual = (left, right) => timingSafeEqual(createHash('sha256').update(left).digest(), createHash('sha256').update(right).digest()) && left.length === right.length;
 const pipelineStates = { success: 'success', succeeded: 'success', passed: 'success', failed: 'failed', failure: 'failed' };
 const mergeRequestActions = { open: 'open', opened: 'open', reopen: 'reopen', reopened: 'reopen', update: 'update', updated: 'update', merge: 'merge', merged: 'merge', close: 'close', closed: 'close' };
-const pullRequestStates = { open: 'open', reopen: 'reopen', update: 'update', merge: 'merge', close: 'close' };
 
 /** 秒、毫秒或 ISO / GitLab 风格（`2026-09-25 08:00:00 UTC`）时间统一成毫秒。 */
 export function parseWebhookTime(value) {

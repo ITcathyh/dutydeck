@@ -1,4 +1,4 @@
-import type { PermissionMode, ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
+import type { LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
 import type {
   SessionInsightDetailsResponse,
   SessionInsightRefreshResponse,
@@ -258,22 +258,7 @@ export type LarkOpenPlatformSetupJob = {
   slashCommands?: 'configured' | 'skipped_scope' | 'skipped_credentials' | 'failed';
   error?: string;
 };
-export type LarkAppCreationJob = {
-  id: string;
-  name: string;
-  status: 'preparing' | 'waiting_for_scan' | 'creating' | 'configuring' | 'completed' | 'pending_review' | 'failed' | 'cancelled';
-  appId?: string;
-  botSaved?: boolean;
-  qrDataUrl?: string;
-  scanConfirmed?: boolean;
-  accountName?: string;
-  tenantName?: string;
-  error?: string;
-  slashCommands?: 'configured' | 'skipped_scope' | 'skipped_credentials' | 'failed';
-  createdAt: string;
-  updatedAt: string;
-  retryable: boolean;
-};
+export type { LarkAppCreationJob };
 export type Session = { id: string; agentId: string; state: string; cwd: string; name?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; sourceContext?: SessionSourceContext; archivedAt?: string; runId: string; createdAt: string; updatedAt: string; error?: string; systemPrompt?: string; workspaceMode?: WorkspaceMode; workspaceSourceCwd?: string };
 export type DockEvent = { taskId?: string; id: string; sequence: number; type: string; timestamp: string; data: any; raw?: string };
 export type Task = { skillDeliveries?: SkillDeliveryMetadata[]; id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string };

@@ -73,6 +73,14 @@ const ccflashEnv = (home) => ({
 });
 const cleanEnv = () => ({ HOME: realHome, PATH: pathEnv, USER: process.env.USER, SHELL: '/bin/zsh', TERM: 'xterm-256color', LANG: 'zh_CN.UTF-8' });
 
+async function parseClaudeResult(stdout) {
+  const lines = stdout.split('\n').filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    try { const parsed = JSON.parse(lines[i]); if (typeof parsed.result === 'string') return parsed.result; } catch { /* 非 JSON 输出行 */ }
+  }
+  return '';
+}
+
 /**
  * @typedef {Object} AgentSpec
  * @property {string} label
@@ -89,13 +97,7 @@ const agents = {
       args: ['-p', '--output-format', 'json', '--dangerously-skip-permissions'],
       env: { ...ccflashEnv(home), PATH: `${stubBin}:${pathEnv}` }
     }),
-    parse: async stdout => {
-      const lines = stdout.split('\n').filter(Boolean);
-      for (let i = lines.length - 1; i >= 0; i -= 1) {
-        try { const parsed = JSON.parse(lines[i]); if (typeof parsed.result === 'string') return parsed.result; } catch { /* 非 JSON 输出行 */ }
-      }
-      return '';
-    }
+    parse: parseClaudeResult
   },
   claude: {
     label: 'claude (auto_model/alwaysday1_max)',
@@ -105,13 +107,7 @@ const agents = {
       args: ['-p', '--output-format', 'json', '--dangerously-skip-permissions'],
       env: { ...cleanEnv(), PATH: `${stubBin}:${pathEnv}` }
     }),
-    parse: async stdout => {
-      const lines = stdout.split('\n').filter(Boolean);
-      for (let i = lines.length - 1; i >= 0; i -= 1) {
-        try { const parsed = JSON.parse(lines[i]); if (typeof parsed.result === 'string') return parsed.result; } catch { /* 非 JSON 输出行 */ }
-      }
-      return '';
-    }
+    parse: parseClaudeResult
   },
   traex: {
     label: 'traex (默认模型)',
@@ -246,7 +242,6 @@ async function probeAgent(agentId, spec) {
 }
 
 const verdictLabel = { correct: '做对', wrong: '做错', miss: '漏做', ask: '反问' };
-const verdictOrder = ['correct', 'wrong', 'miss', 'ask'];
 
 function summarize(results) {
   const byAgent = new Map();

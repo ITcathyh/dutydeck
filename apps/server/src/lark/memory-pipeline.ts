@@ -91,6 +91,7 @@ export interface LarkMemoryPipelineRuntime {
   start(input: { agentId: string; cwd?: string; model?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string }): Promise<Session>;
   listAgents(): Promise<AgentConfig[]>;
   listSessions(): Promise<Session[]>;
+  getSession(id: string): Promise<Session | undefined>;
   dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt', agentPrompt: string, riskPolicy?: undefined, actorId?: string, idempotencyKey?: string, skillRequests?: string[], request?: TaskRequestV1): Promise<{ id: string; status: string }>;
   dispatchRequest(request: TaskRequestV1, material?: { agentPrompt?: string }): Promise<{ id: string; status: string }>;
   getTasks(id: string): Promise<TaskRecord[]>;
@@ -697,7 +698,7 @@ export class LarkMemoryPipeline {
       if (requiresModel) {
         await this.options.projection.write(scope);
         await this.assertClaim();
-        let session = (await this.options.runtime.listSessions()).find(item => item.id === job!.sessionId);
+        let session = await this.options.runtime.getSession(job.sessionId);
         if (!session && !/^ses_memory_/.test(job.sessionId)) throw this.recoveryRequired(job.sessionId, undefined, '冻结的兼容会话不存在，禁止换会话补跑。');
         if (!session || /^ses_memory_/.test(session.id)) {
           if (!this.options.runtime.startMemorySession) throw this.recoveryRequired(job.sessionId, undefined, '运行时缺少稳定记忆会话入口。');
@@ -759,7 +760,7 @@ export class LarkMemoryPipeline {
         if (terminal && !this.runContext.getStore()?.signal.aborted) {
           try {
             if (job.mode === 'isolated') {
-              const session = (await this.options.runtime.listSessions()).find(item => item.id === job!.sessionId);
+              const session = await this.options.runtime.getSession(job.sessionId);
               if (session && !session.archivedAt) {
                 await this.assertMemorySessionReady(session);
                 if (!this.options.runtime.archive) throw this.recoveryRequired(session.id);
@@ -784,7 +785,7 @@ export class LarkMemoryPipeline {
     const projected = await this.options.projection.writeVerified(scope);
     if (!projected) throw new LarkMemoryError('MEMORY_PROJECTION_FAILED', '记忆已提交，派生视图待恢复。', 503);
     if (job.mode === 'isolated' && job.requests.length) {
-      const session = (await this.options.runtime.listSessions()).find(item => item.id === job.sessionId);
+      const session = await this.options.runtime.getSession(job.sessionId);
       if (session && !session.archivedAt) {
         await this.assertMemorySessionReady(session);
         if (!this.options.runtime.archive) throw this.recoveryRequired(job.sessionId);

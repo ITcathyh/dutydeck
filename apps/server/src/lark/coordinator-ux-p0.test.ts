@@ -440,6 +440,39 @@ describe('S4 文件型结果验收 reaction：先查 kv 后写、重启不重复
     } finally { restored.stop(); }
   });
 
+  it('reads only the addressed historical card for interaction authorization and retains the feedback refresh check', async () => {
+    const { h, record } = await fileHarness();
+    h.coordinator.stop();
+    const mapping = (await h.repos.channelMappings.get(h.channel, record.event.messageId))!;
+    for (let index = 0; index < 8; index++) await h.repos.channelMappings.save({ ...mapping, id: `history-${index}`, externalId: `om_history_${index}` });
+    const list = vi.spyOn(h.repos.channelMappings, 'list'), get = vi.spyOn(h.repos.channelMappings, 'get');
+    const authorize = (target: LarkInteraction, actor = 'ou_alice') => (h.coordinator as any).authorizeInteraction(target, actor, 'run.interrupt');
+    expect(await authorize(record)).toBe(true);
+    expect(await authorize({ ...record, sessionId: 'another-session' })).toBe(false);
+    expect(await authorize({ ...record, event: { ...record.event, chatId: 'another-chat' } })).toBe(false);
+    expect(await authorize({ ...record, turn: record.turn + 1 })).toBe(false);
+    expect(await authorize({ ...record, taskId: 'another-task' })).toBe(false);
+    expect(await authorize(record, 'ou_bob')).toBe(false);
+    expect(list).not.toHaveBeenCalled();
+    expect(get.mock.calls).toEqual(Array.from({ length: 6 }, () => [h.channel, record.event.messageId]));
+
+    await h.repos.config.set(`lark.interaction.${h.config.appId}.${record.id}`, JSON.stringify({ ...record, state: 'accepted' }));
+    get.mockClear();
+    await (h.coordinator as any).refreshResultFeedback(h.config, record.id);
+    expect(get.mock.calls.filter(([channel]) => channel === h.channel)).toEqual([[h.channel, record.event.messageId]]);
+    expect(list).toHaveBeenCalledExactlyOnceWith(h.channel); // Re-read by mapping.id after the external update.
+    expect(JSON.parse((await h.repos.channelMappings.get(h.channel, record.event.messageId))!.extra!).result_feedback_state).toBe('accepted');
+
+    await h.repos.config.set(`lark.interaction.${h.config.appId}.${record.id}`, JSON.stringify({ ...record, state: 'needs_changes' }));
+    h.service.update.mockImplementationOnce(async (input: any) => {
+      const current = (await h.repos.channelMappings.get(h.channel, record.event.messageId))!;
+      await h.repos.channelMappings.save({ ...current, extra: JSON.stringify({ ...JSON.parse(current.extra!), result_feedback_state: 'concurrent-update' }) });
+      return { messageId: input.messageId };
+    });
+    await (h.coordinator as any).refreshResultFeedback(h.config, record.id);
+    expect(JSON.parse((await h.repos.channelMappings.get(h.channel, record.event.messageId))!.extra!).result_feedback_state).toBe('concurrent-update');
+  });
+
   it('「需要修改」补 Typing；内联结果与 final_message_id 同卡两种形态均不加 reaction', async () => {
     const changes = await fileHarness();
     expect(await changes.h.coordinator.handleAction(
