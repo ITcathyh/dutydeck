@@ -35,8 +35,8 @@ export function TurnDiffPage({ sessionId, taskId, shared }: { sessionId: string;
   const [editing, setEditing] = useState<Target & { code: string } | null>(null);
   const [text, setText] = useState('');
   const submit = useMutation({
-    mutationFn: () => api.submitTurnDiffComments(sessionId, taskId, drafts.map(({ code: _code, ...comment }) => comment)),
-    onSuccess: () => setDrafts([])
+    mutationFn: (submitted: readonly Draft[]) => api.submitTurnDiffComments(sessionId, taskId, submitted.map(({ code: _code, ...comment }) => comment)),
+    onSuccess: (_result, submitted) => setDrafts(current => current.filter(draft => !submitted.includes(draft)))
   });
 
   if (diff.isPending) return <main className="grid min-h-[100dvh] place-items-center bg-canvas"><Spinner size="sm" label="正在打开改动…"/></main>;
@@ -120,7 +120,7 @@ export function TurnDiffPage({ sessionId, taskId, shared }: { sessionId: string;
     {drafts.length > 0 && <footer className="sticky bottom-0 border-t border-default bg-surface">
       <div className="mx-auto flex w-full max-w-4xl items-center gap-3 px-3 py-2 sm:px-5">
         <p className="min-w-0 flex-1 text-caption text-secondary">{drafts.length} 条评论待提交 · {shared ? '提交后在飞书话题里发确认卡，有权限的人确认后才交给 Agent' : '提交后作为新一轮请求发给 Agent'}</p>
-        <Button variant="primary" loading={submit.isPending} disabled={drafts.length > 20} onClick={() => submit.mutate()}>提交评论</Button>
+        <Button variant="primary" loading={submit.isPending} disabled={drafts.length > 20} onClick={() => submit.mutate([...drafts])}>提交评论</Button>
       </div>
     </footer>}
   </div>;

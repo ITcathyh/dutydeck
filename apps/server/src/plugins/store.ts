@@ -117,10 +117,12 @@ export class PluginStore {
   private async writeLock(lock: LockFile) {
     await mkdir(this.pluginsDir, { recursive: true });
     const path = join(this.pluginsDir, LOCK_FILE);
-    const temporary = `${path}.${process.pid}.tmp`;
+    const temporary = `${path}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
     const sorted = Object.fromEntries(Object.entries(lock.plugins).sort(([left], [right]) => left.localeCompare(right)));
-    await writeFile(temporary, `${JSON.stringify({ version: 1, plugins: sorted }, null, 2)}\n`);
-    await rename(temporary, path);
+    try {
+      await writeFile(temporary, `${JSON.stringify({ version: 1, plugins: sorted }, null, 2)}\n`, { flag: 'wx' });
+      await rename(temporary, path);
+    } finally { await rm(temporary, { force: true }); }
   }
 
   list(): PluginLockEntry[] { return Object.values(this.readLock().plugins); }
@@ -188,17 +190,22 @@ export class PluginStore {
         throw new PluginStoreError('PLUGIN_ALREADY_INSTALLED', `插件 ${name} 已安装；更新用 dutydeck plugin update ${name}，或先 uninstall`);
       }
       await this.confirmTrust(staged.plugin, [], options);
-      await rename(staged.root, this.pluginDir(name));
-      const at = new Date().toISOString();
-      const entry: PluginLockEntry = {
-        name, ...(staged.plugin.manifest.version ? { version: staged.plugin.manifest.version } : {}),
-        source, resolved: staged.resolved, scope, enabled: true,
-        trustedCapabilities: staged.plugin.capabilities, installedAt: at, updatedAt: at
-      };
-      const lock = this.readLock();
-      lock.plugins[name] = entry;
-      await this.writeLock(lock);
-      return entry;
+      return await this.withStoreLock(async () => {
+        const lock = this.readLock();
+        if (lock.plugins[name] || existsSync(this.pluginDir(name))) {
+          throw new PluginStoreError('PLUGIN_ALREADY_INSTALLED', `插件 ${name} 已安装；更新用 dutydeck plugin update ${name}，或先 uninstall`);
+        }
+        await rename(staged.root, this.pluginDir(name));
+        const at = new Date().toISOString();
+        const entry: PluginLockEntry = {
+          name, ...(staged.plugin.manifest.version ? { version: staged.plugin.manifest.version } : {}),
+          source, resolved: staged.resolved, scope, enabled: true,
+          trustedCapabilities: staged.plugin.capabilities, installedAt: at, updatedAt: at
+        };
+        lock.plugins[name] = entry;
+        await this.writeLock(lock);
+        return entry;
+      });
     } finally { await staged.cleanup(); }
   }
 
@@ -209,29 +216,36 @@ export class PluginStore {
     try {
       if (staged.plugin.manifest.name !== name) throw new PluginStoreError('PLUGIN_NAME_CHANGED', `来源里的插件名变成了 ${staged.plugin.manifest.name}，不会覆盖 ${name}`);
       await this.confirmTrust(staged.plugin, current.trustedCapabilities, options);
-      const backup = join(this.pluginsDir, STAGING_DIR, `${name}.previous-${Date.now()}`);
-      await rename(this.pluginDir(name), backup);
-      try { await rename(staged.root, this.pluginDir(name)); }
-      catch (error) { await rename(backup, this.pluginDir(name)); throw error; }
-      await rm(backup, { recursive: true, force: true });
-      const entry: PluginLockEntry = {
-        ...current,
-        ...(staged.plugin.manifest.version ? { version: staged.plugin.manifest.version } : {}),
-        resolved: staged.resolved,
-        trustedCapabilities: staged.plugin.capabilities,
-        updatedAt: new Date().toISOString()
-      };
-      const changed = current.source.kind === 'local' || JSON.stringify(entry.resolved) !== JSON.stringify(current.resolved) || entry.version !== current.version
-        || entry.trustedCapabilities.join() !== current.trustedCapabilities.join();
-      const lock = this.readLock();
-      lock.plugins[name] = entry;
-      await this.writeLock(lock);
-      return { entry, changed };
+      return await this.withStoreLock(async () => {
+        const lock = this.readLock();
+        const latest = lock.plugins[name];
+        if (!latest) throw new PluginStoreError('PLUGIN_NOT_INSTALLED', `插件 ${name} 未安装`);
+        if (latest.installedAt !== current.installedAt || JSON.stringify(latest.source) !== JSON.stringify(current.source)) {
+          throw new PluginStoreError('PLUGIN_CHANGED', `插件 ${name} 已重新安装，请重试更新`);
+        }
+        const backup = join(this.pluginsDir, STAGING_DIR, `${name}.previous-${Date.now()}`);
+        await rename(this.pluginDir(name), backup);
+        try { await rename(staged.root, this.pluginDir(name)); }
+        catch (error) { await rename(backup, this.pluginDir(name)); throw error; }
+        await rm(backup, { recursive: true, force: true });
+        const entry: PluginLockEntry = {
+          ...latest,
+          ...(staged.plugin.manifest.version ? { version: staged.plugin.manifest.version } : {}),
+          resolved: staged.resolved,
+          trustedCapabilities: staged.plugin.capabilities,
+          updatedAt: new Date().toISOString()
+        };
+        const changed = latest.source.kind === 'local' || JSON.stringify(entry.resolved) !== JSON.stringify(latest.resolved) || entry.version !== latest.version
+          || entry.trustedCapabilities.join() !== latest.trustedCapabilities.join();
+        lock.plugins[name] = entry;
+        await this.writeLock(lock);
+        return { entry, changed };
+      });
     } finally { await staged.cleanup(); }
   }
 
   async uninstall(name: string): Promise<void> {
-    return this.withConfigLock(async () => {
+    return this.withStoreLock(async () => {
       if (!this.readLock().plugins[name] && this.builtinNames().has(name)) throw new PluginStoreError('PLUGIN_BUILTIN', `${name} 是内置插件，随 Dutydeck 发布，不能卸载`);
       this.get(name);
       await rm(this.pluginDir(name), { recursive: true, force: true });
@@ -253,13 +267,15 @@ export class PluginStore {
   }
 
   async setEnabled(name: string, enabled: boolean): Promise<PluginLockEntry> {
-    const lock = this.readLock();
-    const entry = lock.plugins[name];
-    if (!entry) throw new PluginStoreError('PLUGIN_NOT_INSTALLED', `插件 ${name} 未安装`);
-    entry.enabled = enabled;
-    entry.updatedAt = new Date().toISOString();
-    await this.writeLock(lock);
-    return entry;
+    return this.withStoreLock(async () => {
+      const lock = this.readLock();
+      const entry = lock.plugins[name];
+      if (!entry) throw new PluginStoreError('PLUGIN_NOT_INSTALLED', `插件 ${name} 未安装`);
+      entry.enabled = enabled;
+      entry.updatedAt = new Date().toISOString();
+      await this.writeLock(lock);
+      return entry;
+    });
   }
 
   // ---- 触发器令牌：每个触发器一份，0600 文件，daemon 每次请求直读 ----
@@ -298,8 +314,8 @@ export class PluginStore {
 
   // ---- userConfig：普通值存 .config.json，sensitive 值存 secret-provider ----
 
-  /** 单独的 SQLite 事务只作互斥锁；连接关闭或进程退出时由系统释放，不删除锁文件。 */
-  private async withConfigLock<T>(action: () => Promise<T>): Promise<T> {
+  /** 插件清单和配置共用 SQLite 互斥；连接关闭或进程退出时由系统释放，不删除锁文件。 */
+  private async withStoreLock<T>(action: () => Promise<T>): Promise<T> {
     await mkdir(this.pluginsDir, { recursive: true });
     const lock = new Database(join(this.pluginsDir, '.config-lock.sqlite'), { timeout: 0 });
     try {
@@ -308,11 +324,11 @@ export class PluginStore {
         try { lock.exec('BEGIN IMMEDIATE'); break; }
         catch (error) {
           if ((error as { code?: string }).code !== 'SQLITE_BUSY') throw error;
-          if (Date.now() >= deadline) throw new PluginStoreError('PLUGIN_CONFIG_BUSY', '插件配置正在被另一个进程修改，请稍后重试');
+          if (Date.now() >= deadline) throw new PluginStoreError('PLUGIN_CONFIG_BUSY', '插件状态正在被另一个进程修改，请稍后重试');
           await new Promise(resolve => setTimeout(resolve, 10));
         }
       }
-      // 不能用同步 transaction(callback)：配置文件的异步读改写完成前必须保留事务。
+      // 不能用同步 transaction(callback)：文件的异步读改写完成前必须保留事务。
       return await action();
     } finally { lock.close(); }
   }
@@ -339,7 +355,7 @@ export class PluginStore {
 
   /** fromArgv：值来自命令行参数。敏感值不接受这种方式（会留在进程列表和 shell 历史里）。 */
   async setConfig(name: string, key: string, value: Buffer, fromArgv = false): Promise<{ sensitive: boolean }> {
-    try { return await this.withConfigLock(async () => {
+    try { return await this.withStoreLock(async () => {
       this.get(name);
       const declared = (await loadPluginDirectory(this.pluginDir(name))).manifest.userConfig?.[key];
       if (!declared) { value.fill(0); throw new PluginStoreError('PLUGIN_CONFIG_UNKNOWN', `插件 ${name} 没有声明配置项 ${key}`); }

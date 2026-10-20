@@ -925,7 +925,11 @@ export class SessionInsightService {
         executions: frozen.executions,
         accepted: frozen.accepted,
         verifications: this.projectVerifications(frozen.raw.verificationRecords, currentFingerprint),
-        usageEntries: frozen.raw.usageEntries as unknown as UsageLedgerEntry[]
+        usageEntries: frozen.raw.usageEntries.map(row => ({
+          recordedAt: row.recorded_at as string,
+          dataStatus: row.data_status as UsageLedgerEntry['dataStatus'],
+          costUsd: typeof row.cost_usd === 'number' ? row.cost_usd : undefined
+        }))
       },
       redactionContext ?? this.buildHostRedactionContext(sessionId, frozen.raw.session.cwd)
     );

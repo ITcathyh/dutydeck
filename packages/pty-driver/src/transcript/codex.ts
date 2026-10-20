@@ -383,6 +383,7 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); this.childCallbacks.add(cb); }
   onProgress(cb: () => void): void { this.tailer.onProgress(cb); }
   hasTurnTerminal(): boolean { return this.turn.hasTerminal(); }
+  hasRecoveredInput(): boolean { return this.turn.hasRecoveredInput(); }
   takeTurnError(): NormalizedDriverEvent | undefined { return this.turn.takeError(); }
   takeInputError(): NormalizedDriverEvent | undefined { return this.turn.takeError(); }
   takeInputCancellation(): boolean { return this.turn.takeCancellation(); }

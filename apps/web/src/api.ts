@@ -28,7 +28,7 @@ export type { PermissionMode };
 export type { WorkspaceMode };
 export type Agent = PublicAgent;
 export type AgentModel = { id: string; name: string };
-export type AgentModelsResult = { models: AgentModel[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent' };
+export type AgentModelsResult = { models: AgentModel[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent'; protocol?: 'acp' };
 export type SessionCapabilities = { observedAt: string; protocol?: string; structuredApproval: string; terminal: string; turnRecovery: string; verification: string; localFileDelivery: string };
 export type SkillReference = { name: string; description: string; path: string; source: 'workspace' | 'user' | 'plugin' };
 export type LarkAllowedUser = { openId: string; name: string };
@@ -474,7 +474,7 @@ export const api = {
     p2pMode?: 'chat' | 'thread';
     idleCompactEnabled?: boolean;
     idleCompactHours?: number;
-    groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
+    groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic' | null;
     mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
     defaultGroupParticipation?: 'off' | 'observe' | 'selective' | 'eager';
   }) => json<LarkConfig>('/api/lark/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),

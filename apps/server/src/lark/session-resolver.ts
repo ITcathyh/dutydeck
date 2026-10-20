@@ -358,7 +358,8 @@ export async function resolveLarkSession(
   chatType: LarkMessageEvent['chatType'],
   scopeId: string,
   mappings?: ChannelMappingRepository,
-  launchOptions?: LarkLaunchOptions
+  launchOptions?: LarkLaunchOptions,
+  beforeStart?: () => Promise<LarkLaunchOptions>
 ): Promise<Session> {
   if (!config.defaultAgentId) throw new LarkServiceError('LARK_AGENT_CONFIG_REQUIRED', '机器人尚未配置默认 Agent，请在 Dutydeck 飞书设置的“Agent 与风险控制”中完成配置。', 409);
   if (!larkExecutionConfirmed(config)) throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '飞书无人值守任务尚未获得完全信任确认，请在 Dutydeck 飞书设置中确认后重试。', 409);
@@ -453,6 +454,8 @@ export async function resolveLarkSession(
   if (agents && !configuredAgent) throw new LarkServiceError('LARK_AGENT_NOT_FOUND', `默认 Agent「${config.defaultAgentId}」不存在，可能随提供它的插件停用或卸载了。请在 Dutydeck 飞书设置的“Agent 与风险控制”中改选其他 Agent。`, 409);
   if (larkPermissionMode(config) !== 'full-trust' && configuredAgent?.protocol === 'pty-cli'
     && !supportsRemoteApproval({ id: configuredAgent.id, adapterId: configuredAgent.adapterId, protocol: 'pty-cli' })) throw larkApprovalUnsupported(config);
+  // 恢复中尚未建会话的首轮参数要按当前权限重验；复用已有会话不改变它的启动配置。
+  if (beforeStart) launchOptions = await beforeStart();
   const session = await runtime.start({
     agentId: config.defaultAgentId,
     ...(config.workspace ? { cwd: config.workspace } : {}),

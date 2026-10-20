@@ -11,6 +11,9 @@ describe('agent settings whitelist and shared value parser', () => {
   it.each([[], ['busyTriage=true', 'busyTriage=false'], ['busyTriage'], ['notifyQuietHours=invalid'], ['permissionMode=ask']])('rejects invalid pairs %s', pairs => {
     expect(() => parseAgentSettings(pairs)).toThrow();
   });
+  it('maps automatic group replies to the explicit API clear value', () => {
+    expect(parseAgentSettings(['groupReplyMode=auto'])).toEqual({ groupReplyMode: null });
+  });
   it('allows clearing optional strings without adding model or effort restrictions', () => {
     expect(parseAgentSettings(['defaultModel=', 'defaultReasoningEffort=', 'notifyQuietHours='])).toEqual({ defaultModel: '', defaultReasoningEffort: '', notifyQuietHours: '' });
   });

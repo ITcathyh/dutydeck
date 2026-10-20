@@ -17,9 +17,10 @@ import {
 } from '@dutydeck/shared';
 import { metric, object, safeToken, TokenAnalysis, PulseAnalysis, type JsonObject } from './session-insight-analyzer-tokens.js';
 
-export const SESSION_INSIGHT_ENGINE_VERSIONS: EngineVersionInfo = { schemaVersion: 1, engineVersion: 'dutydeck-ts-v1', parserVersion: 'ts-v1', metricVersion: 'v2' };
+export const SESSION_INSIGHT_ENGINE_VERSIONS: EngineVersionInfo = { schemaVersion: 1, engineVersion: 'dutydeck-ts-v1', parserVersion: 'ts-v2', metricVersion: 'v2' };
 const metricNames = ['inputUncached', 'cacheRead', 'cacheWrite', 'output', 'reasoningOutput', 'totalTracked', 'rawInput', 'rawOutput', 'rawTotal', 'peakContext', 'contextWindow', 'elapsedDurationMs', 'activeDurationMs', 'idleDurationMs', 'pairedToolDurationMs', 'userTurns', 'assistantTurns', 'toolCalls', 'toolFailures', 'toolSuccesses', 'toolUnknowns', 'toolFailureRate', 'compactionCount', 'subagentCount'] as const;
 const string = (value: unknown): string => typeof value === 'string' ? value : '';
+const turnId = (payload: JsonObject): string => string(payload.turn_id) || string(object(payload.internal_chat_message_metadata_passthrough).turn_id);
 const nativeTimestamp = (value: unknown, fallback: string | null): string | null => safeToken(value) && value > 0 && value <= 8.64e15 ? new Date(value).toISOString() : fallback;
 const timestamp = (value: unknown): string | null => typeof value === 'string' && /^\d{4}-\d\d-\d\dT/.test(value) && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
 const text = (value: unknown): string => typeof value === 'string' ? value : Array.isArray(value) ? value.map(item => string(object(item).text)).filter(Boolean).join('\n') : value === undefined ? '' : JSON.stringify(value);
@@ -118,8 +119,9 @@ class FileAnalysis {
   previousTime: number | null = null;
   idle = 0;
   canonical = false;
+  currentTurnId = '';
   position: Position = { line: 1, offset: 0, at: null, nativeId: '', sub: 0 };
-  constructor(readonly input: AnalyzeFileInput, readonly retention: TraceRetention, readonly warnings: Warnings) {
+  constructor(readonly input: AnalyzeFileInput, readonly retention: TraceRetention, readonly warnings: Warnings, readonly canonicalUserTurns: Set<string>) {
     this.result = emptyResult(input, 'missing_native_session_id');
     this.result.status = 'ok'; this.result.errorCode = null; this.result.aggregation = { eligibility: 'eligible', reasonCodes: [] };
     this.result.coverage.errorLines = 0;
@@ -216,7 +218,17 @@ class FileAnalysis {
     this.model(payload.model);
     if (kind === 'session_meta') {
       this.identity(payload.id);
-      const spawn = object(object(object(payload.source).subagent).thread_spawn);
+      const source = object(payload.source), subagent = object(source.subagent);
+      const fork = object(subagent.thread_fork ?? (source.kind === 'fork' ? source : undefined));
+      const forkParent = string(fork.parent_thread_id ?? fork.parent_session_id);
+      if (forkParent) {
+        this.result.parentNativeSessionId = forkParent;
+        this.result.relationship = { kind: 'fork', parentNativeSessionId: forkParent, parentNativeAgentId: null, evidenceRefs: [subagent.thread_fork != null ? 'session_meta:source.subagent.thread_fork' : 'session_meta:source'] };
+        this.result.coverage.inheritedHistory = 'detected';
+        this.result.aggregation = { eligibility: 'excluded', reasonCodes: ['INHERITED_HISTORY'] };
+        return;
+      }
+      const spawn = object(subagent.thread_spawn);
       if (typeof spawn.parent_thread_id === 'string') {
         this.result.parentNativeSessionId = spawn.parent_thread_id;
         this.result.relationship = { kind: 'child', parentNativeSessionId: spawn.parent_thread_id, parentNativeAgentId: null, evidenceRefs: ['session_meta:source.subagent.thread_spawn'] };
@@ -242,10 +254,16 @@ class FileAnalysis {
       this.emit(operation === 'replace' ? 'mutation_replace' : operation === 'rollback' ? 'mutation_rollback' : 'mutation_append'); return;
     }
     if (this.input.client === 'traex' && kind === 'inter_agent_communication') { this.subagent(string(payload.kind)); return; }
+    if (type === 'task_started') this.currentTurnId = turnId(payload);
     if (type === 'item_completed') { this.canonical = true; this.completed(payload); return; }
+    if (type === 'user_message' || (kind === 'response_item' && type === 'message' && payload.role === 'user')) {
+      const kinds = object(payload.internal_chat_message_metadata_passthrough).content_item_kinds;
+      const contextOnly = Array.isArray(kinds) && kinds.length > 0 && kinds.every(kind => typeof kind === 'string' && (kind.startsWith('agents_md.') || kind.startsWith('environments.')));
+      if (!contextOnly && !this.canonicalUserTurns.has(turnId(payload) || this.currentTurnId)) this.turn('user', string(payload.id), payload.message ?? payload.content);
+      return;
+    }
     if (this.canonical && (kind === 'response_item' || ['user_message', 'message', 'reasoning', 'function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output', 'task_started'].includes(type))) return;
-    if (type === 'user_message') this.turn('user', '', payload.message);
-    else if (type === 'agent_message') this.turn('assistant', '', payload.message ?? payload.text);
+    if (type === 'agent_message') this.turn('assistant', '', payload.message ?? payload.text);
     else if (type === 'reasoning' || type === 'agent_reasoning_raw_content') this.emit('reasoning');
     else if (type === 'sub_agent_activity') { this.position.at = nativeTimestamp(payload.occurred_at_ms, this.position.at); this.position.nativeId = string(payload.event_id); this.subagent(string(payload.kind)); }
     else if (['exec_command_end', 'patch_apply_end', 'web_search_end'].includes(type)) this.resolve(string(payload.call_id), payload, payload.stderr || payload.aggregated_output || payload.formatted_output || payload.stdout || payload.output, nativeTimestamp(payload.completed_at_ms, this.position.at), true);
@@ -383,9 +401,25 @@ export async function analyzeSessionInsightFiles(request: AnalyzeFilesRequest): 
   const warnings = new Warnings(), retention = new TraceRetention(parsed.limits.maxTraceEvents);
   const files: FileAnalysisResult[] = [];
   for (const input of [...inputs.values()].sort((a, b) => a.sourceKey.localeCompare(b.sourceKey))) {
-    const verified = await readSnapshot(input, parsed.limits.maxLineBytes);
+    // Select authority before emitting/counting mirrors so record order cannot change user turns.
+    const canonicalUserTurns = new Set<string>();
+    let currentTurnId = '';
+    const verified = await readSnapshot(input, parsed.limits.maxLineBytes, input.client === 'claude' ? undefined : (line, _number, _offset, partial) => {
+      if (partial || !line) return;
+      let raw: JsonObject;
+      try { raw = parseLine(line); } catch { return; }
+      const payload = object(raw.payload);
+      if (payload.type === 'task_started') currentTurnId = turnId(payload);
+      if (payload.type === 'item_completed' && object(payload.item).type === 'UserMessage') canonicalUserTurns.add(turnId(payload) || currentTurnId);
+      if (input.client === 'traex' && raw.type === 'history_mutation' && Array.isArray(payload.display_completions)) {
+        for (const completion of payload.display_completions) {
+          const value = object(completion);
+          if (object(value.item).type === 'UserMessage') canonicalUserTurns.add(turnId(value) || currentTurnId);
+        }
+      }
+    });
     if (verified) { files.push(emptyResult(input, verified)); continue; }
-    const analysis = new FileAnalysis(input, retention, warnings);
+    const analysis = new FileAnalysis(input, retention, warnings, canonicalUserTurns);
     const failure = await readSnapshot(input, parsed.limits.maxLineBytes, (line, number, offset, partial) => {
       const coverage = analysis.result.coverage;
       if (partial || !line) { coverage.ignoredLines++; analysis.result.status = 'partial'; warnings.add(partial ? 'truncated_final_line' : 'line_too_long'); return; }

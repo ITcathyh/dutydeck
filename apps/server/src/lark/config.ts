@@ -215,8 +215,8 @@ export interface SaveLarkConfigInput {
   p2pMode?: 'chat' | 'thread';
   idleCompactEnabled?: boolean;
   idleCompactHours?: number;
-  /** 普通群回复模式：'chat'/'shared' 全群一个会话；'new-topic' 每条顶层 @ 一个话题；'chat-topic' 顶层平铺、群内原生话题各自独立。非法值归一化时丢弃。 */
-  groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
+  /** 普通群回复模式：'chat'/'shared' 全群一个会话；'new-topic' 每条顶层 @ 一个话题；'chat-topic' 顶层平铺、群内原生话题各自独立。null 清除显式模式并恢复自动选择；未提供时保留。 */
+  groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic' | null;
   /** Legacy stored environment accepted for import compatibility; never returned publicly. */
   env?: Record<string, string>;
   /** Legacy stored commands accepted for import compatibility; never returned publicly. */

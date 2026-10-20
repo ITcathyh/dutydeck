@@ -109,6 +109,21 @@ describe('BotManagement component', () => {
     expect(onSelectGroup).toHaveBeenCalledWith('oc_chat_1', 'cli_test_1');
   });
 
+  it.each(['chat', 'shared', 'new-topic', 'chat-topic'] as const)('explicitly clears %s when selecting automatic replies', async groupReplyMode => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, groupReplyMode }], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const cleared = { configured: true, bots: [{ ...mockBot, groupReplyMode: undefined, revision: 4 }], listeningDisabled: false };
+    const save = vi.spyOn(api, 'saveLarkConfig').mockImplementation(async () => { vi.mocked(api.larkConfig).mockResolvedValue(cleared); return cleared; });
+    renderWithClient(<BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>);
+    await user.selectOptions(await screen.findByLabelText('群里回复到哪'), '');
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(JSON.parse(JSON.stringify(save.mock.calls[0]![0]))).toMatchObject({ groupReplyMode: null, expectedRevision: 3 });
+    await waitFor(() => expect((screen.getByLabelText('群里回复到哪') as HTMLSelectElement).value).toBe(''));
+  });
+
   it('修改配置后保存，带上 expectedRevision', async () => {
     const user = userEvent.setup();
     vi.spyOn(api, 'larkConfig').mockResolvedValue({

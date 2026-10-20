@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { createTurnDiffObserver, listTurnDiffRecords, readTurnDiff, readTurnDiffRecord, snapshotWorkingTree } from './turn-diff.js';
+import { buildTurnDiffReviewPrompt, createTurnDiffObserver, listTurnDiffRecords, readTurnDiff, readTurnDiffRecord, resolveTurnDiffComment, snapshotWorkingTree } from './turn-diff.js';
 
 const run = promisify(execFile);
 const dirs: string[] = [];
@@ -102,6 +102,122 @@ describe('turn diff snapshots', () => {
     const diff = await readTurnDiff(before!.gitDir, before!.tree, after!.tree);
     expect(diff.files.map(file => file.path)).toEqual(['dirty.txt', 'keep.txt']);
     expect(diff.files[0]!.hunks.flatMap(hunk => hunk.lines).filter(line => line.kind !== 'context')).toEqual([{ kind: 'add', newLine: 3, text: 'agent line' }]);
+  });
+
+  it.each(['file to symlink', 'symlink to file'])('combines both patches for %s without shifting later files or comment excerpts', async direction => {
+    const { dir, git } = await repo();
+    const path = 'a.txt';
+    if (direction === 'file to symlink') await writeFile(join(dir, path), 'old A\n');
+    else await symlink('keep.txt', join(dir, path));
+    await writeFile(join(dir, 'b.txt'), 'old B\n');
+    await git('add', '.'); await git('commit', '-m', 'before type change');
+    const indexBefore = await readFile(join(dir, '.git', 'index'));
+    const store = memoryStore();
+    const observe = createTurnDiffObserver(store);
+    await observe({ id: 'session_1', cwd: dir }, 'task_1', 'start');
+    await unlink(join(dir, path));
+    if (direction === 'file to symlink') await symlink('b.txt', join(dir, path));
+    else await writeFile(join(dir, path), 'new A\n');
+    await writeFile(join(dir, 'b.txt'), 'new B\n');
+    await observe({ id: 'session_1', cwd: dir }, 'task_1', 'end');
+    const record = (await readTurnDiffRecord(store, 'session_1', 'task_1'))!;
+    const patch = (await git('diff', '--no-ext-diff', '--no-textconv', record.before, record.after!)).stdout;
+    expect(patch.match(/^diff --git /gm)).toHaveLength(3);
+    const diff = await readTurnDiff(record.gitDir, record.before, record.after!);
+    expect(diff.summary).toEqual({ files: 2, additions: 2, deletions: 2 });
+    expect(diff.truncated).toBe(false);
+    expect(diff.files.map(file => [file.path, file.status, file.placeholder])).toEqual([
+      [path, 'modified', undefined], ['b.txt', 'modified', undefined]
+    ]);
+    expect(diff.files[0]!.hunks.flatMap(hunk => hunk.lines)).toEqual([
+      { kind: 'del', oldLine: 1, text: direction === 'file to symlink' ? 'old A' : 'keep.txt' },
+      { kind: 'add', newLine: 1, text: direction === 'file to symlink' ? 'b.txt' : 'new A' }
+    ]);
+    expect(diff.files[1]!.hunks.flatMap(hunk => hunk.lines)).toEqual([
+      { kind: 'del', oldLine: 1, text: 'old B' }, { kind: 'add', newLine: 1, text: 'new B' }
+    ]);
+    const code = resolveTurnDiffComment(diff.files, { path: 'b.txt', side: 'new', line: 1 });
+    expect(code).toBe('-old B\n+new B');
+    expect(resolveTurnDiffComment(diff.files, { path, side: 'old', line: 1 })).toBe(direction === 'file to symlink' ? '-old A' : '-keep.txt');
+    expect(resolveTurnDiffComment(diff.files, { path, side: 'new', line: 1 })).toBe(direction === 'file to symlink' ? '+b.txt' : '+new A');
+    const prompt = buildTurnDiffReviewPrompt([{ path: 'b.txt', side: 'new', line: 1, code: code!, comment: 'check B' }], { untrusted: false });
+    expect(prompt).toContain(JSON.stringify(code));
+    expect(await readFile(join(dir, '.git', 'index'))).toEqual(indexBefore);
+
+    // 单文件限额按两个补丁段的合计检查；总量截在第二段时不能展示半个类型变化。
+    const secondSection = patch.indexOf('diff --git ', 1);
+    const thirdSection = patch.indexOf('diff --git ', secondSection + 1);
+    const limited = await readTurnDiff(record.gitDir, record.before, record.after!, { file: thirdSection - 1, total: 10_000 });
+    expect(limited.files[0]!.placeholder).toBe('too_large');
+    expect(limited.files[1]!.hunks).toEqual(diff.files[1]!.hunks);
+    for (const total of [secondSection + 15, thirdSection - 1]) {
+      const truncated = await readTurnDiff(record.gitDir, record.before, record.after!, { file: 10_000, total });
+      expect(truncated.files.map(file => file.placeholder)).toEqual(['omitted', 'omitted']);
+      expect(truncated.files.every(file => file.hunks.length === 0)).toBe(true);
+      expect(truncated.truncated).toBe(true);
+    }
+  });
+
+  it('matches Git-quoted paths for edits, renames, binaries and type changes', async () => {
+    const { dir, git } = await repo();
+    const suffix = ' "quoted"\\\t\n\x01\x07\b\v\f\r\x1b\x7f中文.txt';
+    const edited = `a${suffix}`;
+    const renamed = `c${suffix}`;
+    const typed = `d${suffix}`;
+    const oldPath = `old${suffix}`;
+    await writeFile(join(dir, edited), 'old edit\n');
+    await writeFile(join(dir, typed), 'old type\n');
+    await rename(join(dir, 'old-name.txt'), join(dir, oldPath));
+    await git('add', '.'); await git('commit', '-m', 'quoted paths');
+    const before = (await snapshotWorkingTree(dir))!;
+    await writeFile(join(dir, edited), 'new edit\n');
+    await writeFile(join(dir, `b${suffix}`), Buffer.from([0, 1, 2]));
+    await rename(join(dir, oldPath), join(dir, renamed));
+    await writeFile(join(dir, renamed), 'a stable body that should be detected as a rename\nline 2\nline 3\nrename addition\n');
+    await unlink(join(dir, typed)); await symlink('keep.txt', join(dir, typed));
+    const after = (await snapshotWorkingTree(dir))!;
+    const diff = await readTurnDiff(before.gitDir, before.tree, after.tree);
+    expect(diff.files.map(file => [file.path, file.status, file.placeholder])).toEqual([
+      [edited, 'modified', undefined], [`b${suffix}`, 'added', 'binary'], [renamed, 'renamed', undefined], [typed, 'modified', undefined]
+    ]);
+    expect(diff.files[2]!.oldPath).toBe(oldPath);
+    expect(resolveTurnDiffComment(diff.files, { path: edited, side: 'new', line: 1 })).toBe('-old edit\n+new edit');
+    expect(resolveTurnDiffComment(diff.files, { path: renamed, side: 'new', line: 4 })).toBe(' line 2\n line 3\n+rename addition');
+    expect(resolveTurnDiffComment(diff.files, { path: typed, side: 'new', line: 1 })).toBe('+keep.txt');
+    expect(diff.truncated).toBe(false);
+    const patch = Buffer.from((await git('-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv', before.tree, after.tree)).stdout);
+    const lastHeader = patch.lastIndexOf('diff --git ');
+    const total = patch.indexOf(Buffer.from('中文'), lastHeader) + 1;
+    const truncated = await readTurnDiff(before.gitDir, before.tree, after.tree, { file: 10_000, total });
+    expect(truncated.files.slice(0, 3)).toEqual(diff.files.slice(0, 3));
+    expect(truncated.files[3]).toMatchObject({ path: typed, placeholder: 'omitted', hunks: [] });
+    expect(truncated.truncated).toBe(true);
+  });
+
+  it('keeps distinct renames with identical unquoted diff headers separate', async () => {
+    const { dir, git } = await repo();
+    await mkdir(join(dir, 'x b'));
+    const first = 'first body that remains stable for Git rename detection\nfirst line 2\n';
+    const second = 'second body that remains stable for Git rename detection\nsecond line 2\n';
+    await writeFile(join(dir, 'x'), first);
+    await writeFile(join(dir, 'x b/y'), second);
+    await git('add', '.'); await git('commit', '-m', 'before ambiguous rename headers');
+    const before = (await snapshotWorkingTree(dir))!;
+    await mkdir(join(dir, 'y b'));
+    await rename(join(dir, 'x'), join(dir, 'y b/z'));
+    await rename(join(dir, 'x b/y'), join(dir, 'z'));
+    await writeFile(join(dir, 'y b/z'), `${first}first addition\n`);
+    await writeFile(join(dir, 'z'), `${second}second addition\n`);
+    const after = (await snapshotWorkingTree(dir))!;
+    const patch = (await git('diff', '-M', before.tree, after.tree)).stdout;
+    expect(patch.match(/^diff --git a\/x b\/y b\/z$/gm)).toHaveLength(2);
+    const diff = await readTurnDiff(before.gitDir, before.tree, after.tree);
+    expect(diff.files.map(file => [file.oldPath, file.path, file.status])).toEqual([
+      ['x', 'y b/z', 'renamed'], ['x b/y', 'z', 'renamed']
+    ]);
+    expect(resolveTurnDiffComment(diff.files, { path: 'y b/z', side: 'new', line: 3 })).toBe(` ${first.trimEnd().replace('\n', '\n ')}\n+first addition`);
+    expect(resolveTurnDiffComment(diff.files, { path: 'z', side: 'new', line: 3 })).toBe(` ${second.trimEnd().replace('\n', '\n ')}\n+second addition`);
+    expect(diff.truncated).toBe(false);
   });
 
   it('sees a same-size edit made in the same second as the last index write', async () => {

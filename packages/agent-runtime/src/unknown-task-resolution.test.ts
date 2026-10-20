@@ -4,6 +4,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, BoundExecutionRepository, DriverFactory, UnknownTaskResolution } from '@dutydeck/shared';
+import { readFileSync } from 'node:fs';
+import { createCliAdapter } from '@dutydeck/cli-adapters';
+import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
+import { PtyCliDriver } from '../../pty-driver/src/driver.js';
 import { DutydeckRuntime } from './index.js';
 
 const owner = { kind: 'installation_owner', id: 'installation_owner' } as const;
@@ -11,14 +15,14 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); });
 
 /** 第一轮驱动报错后停在结果未知，第二条排在后面；idle 控制驱动是否声明自己空闲。 */
-async function fixture(options: { idle?: boolean; deferFailure?: boolean } = {}) {
+async function fixture(options: { idle?: boolean | (() => boolean); deferFailure?: boolean } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-unknown-task-'));
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
   let fail = true, releaseFailure!: () => void;
   const failureGate = new Promise<void>(done => { releaseFailure = done; });
   const factory: DriverFactory = (_agent, _protocol, emit) => ({ start: async () => {}, resume: async () => {}, stop: async () => {}, isStopped: async () => true,
-    interrupt: async () => {}, ...(options.idle === undefined ? {} : { isIdle: () => options.idle! }), send: async input => {
+    interrupt: async () => {}, ...(options.idle === undefined ? {} : { isIdle: () => typeof options.idle === 'function' ? options.idle() : options.idle! }), send: async input => {
       const prompt = typeof input === 'string' ? input : input.prompt; prompts.push(prompt);
       if (fail && prompt === 'original') {
         if (options.deferFailure) await failureGate;
@@ -142,4 +146,22 @@ describe('resolving result-unknown tasks', () => {
     expect((await h.runtime.inspectUnknownTask(h.session.id, h.second.id, 'steer-unknown')).resolution).toMatchObject({ action: 'completed', decisionId: input.decisionId });
     expect((await h.runtime.resolveUnknownTask(h.session.id, input, owner)).replayed).toBe(true);
   });
+});
+
+it.each(['failed', 'completed', 'retry', 'settle'] as const)('resolves %s beside a real parsed idle Claude composer and releases queued work', async action => {
+  const snapshot = new TerminalSnapshot(120, 30);
+  cleanups.push(async () => snapshot.dispose());
+  const idleDriver = Object.assign(Object.create(PtyCliDriver.prototype), { snapshot, adapter: createCliAdapter('claude-code'), stopped: false, turnActive: false });
+  const screen = readFileSync(new URL('../../cli-adapters/src/fixtures/claude-placeholder-ready/screen.txt', import.meta.url), 'utf8');
+  await snapshot.writeAndFlush(screen.replaceAll('\n', '\r\n'));
+  const h = await fixture({ idle: () => idleDriver.isIdle() });
+  await vi.waitFor(() => expect(h.runtime.inspectAgentQuiescence(h.session.id)).not.toBe('busy'));
+  expect(h.runtime.inspectAgentQuiescence(h.session.id)).toBe('idle');
+  h.succeed();
+  if (action === 'settle') await h.runtime.settleIdleAttempt(h.session.id, { taskId: h.first.id, decisionId: 'idle-settlement', outcome: 'failed', evidenceRefs: ['idle-screen'] }, owner);
+  else await h.runtime.resolveUnknownTask(h.session.id, await h.resolution(action), owner);
+  await vi.waitFor(async () => expect(await h.status(h.second.id)).toBe('completed'));
+  if (action === 'retry') await vi.waitFor(async () => expect(await h.status(h.first.id)).toBe('completed'));
+  else expect(await h.status(h.first.id)).toBe(action === 'settle' ? 'failed' : action);
+  expect(h.prompts).toEqual(action === 'retry' ? ['original', 'queued', 'original'] : ['original', 'queued']);
 });

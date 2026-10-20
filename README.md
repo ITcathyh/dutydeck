@@ -286,7 +286,7 @@ pnpm dev
 | `/grant` / `/revoke` | `/grant @成员` | 把本群对话权限开放给全部成员或加入名单 / 收回 |
 | `/repair` | `/repair` | 诊断并补齐飞书应用权限、事件订阅和卡片回调（执行前二次确认，不会自动发布） |
 
-恢复和分身也可以直接用大白话告诉 Agent，由它运行 `dutydeck agent session resume [--id 编号]` 或 `dutydeck agent session fork [--task 任务]`；它会先发确认卡，点确认后才执行。恢复失败会说明原因，并提示 `/new --handoff`。
+恢复和分身也可以直接用大白话告诉 Agent，由它运行 `dutydeck agent session resume [--id 编号]` 或 `dutydeck agent session fork [--task 任务]`；它会先发确认卡，点确认后才执行。恢复失败会说明原因，并提示 `/new --handoff`。恢复尚未启动的任务时，创建会话前会按发起人的当前权限重新校验启动参数。
 
 分身只允许源会话第一条任务的发起人操作，沿用原会话的 Agent、模型和推理强度，权限按机器人当前设置执行。Claude Code 终端模式用 `--resume 编号 --fork-session`，Codex 终端模式用 `fork 编号` 复制已落盘的上下文；ACP、其他 Agent、换 Agent 或找不到已落盘上下文时，改用 `/new --handoff` 的最近结果、git 状态和备注交接。原生分身也附上 git 状态。Codex 显式使用相同共享目录时走交接，避免后续把复制出来的记录误认成源会话。独立 worktree 从已提交的代码开始，不含原会话未提交的改动；首条消息会说明。分身回执能跳转到新话题。整段私聊共用一个会话时不能开分身，请先把机器人设置中的私聊模式改成“每条消息一个话题”。
 
@@ -341,7 +341,7 @@ pnpm dev
   - `积极`（`eager`）：除了明显对别人说的、表情和致谢，群里真人的消息都接，适合单人群。
   - 底层字段是 `mentionPolicy` 和群参与模式 `participation`（`off` / `observe` / `selective` / `eager`）。`observe` 只监听、沉淀背景、不发言，目前只能用 `dutydeck settings group set <chatId> participation=observe` 设置。
   - 新建机器人的 `mentionPolicy` 默认 `topic`。
-  - **多机器人群**（本群订阅的告警来源不算）没指定接话人时，除了叫它名字、回复它和它接手的话题，没 @ 的消息都不接。@ 要接话的机器人说「你负责接话」并点确认，或在 Web 群设置里指定接话人。
+  - **多机器人群**（本群订阅的告警来源不算）没指定接话人时，除了叫它名字、回复它和它接手的话题，没 @ 的消息都不接。@ 要接话的机器人说「你负责接话」并点确认，或在 Web 群设置里指定接话人；迟到的旧卸任声明不会清除更新的接话人记录。
   - **接话人**（多机器人群和单机器人群都能指定）：按需档的接话人没配负责范围时，群里没有明确对象、需要有机器人处理的求助（如「有人知道今天的发布单在哪看吗」）也由它接；闲聊、群友之间的问答、@ 别人和进度播报仍不接。
   - **负责范围**（Web「机器人管理」的「负责范围」，或 `dutydeck settings bot set <appId> roleScope=...`，对这个机器人所在的所有群生效）：按需档配了以后，没 @ 的消息里属于范围内的事由它判断后接，不受接话人限制；多个机器人的范围重叠时可能都接。按需档没配、它也不是接话人时，在有多个真人的群里，没明确叫它的泛问和普通告警不接。积极档和单真人群配了负责范围后也改为按范围判断，接的会变少。
   - 没接话时 @ 它问「刚才为什么没回」，它会说明原因和怎么改；`/status` 显示参与强度、接话人和负责范围。
@@ -388,7 +388,7 @@ dutydeck lark create "研发助手" --agent <终端模式 Agent 的 id> --full-t
 printf %s "$LARK_SECRET" | dutydeck setup --lark-app-id cli_xxxxxxxx --lark-app-secret-fd 0 --agent claude --yes
 ```
 
-“支持飞书逐项审批”的 Agent：ACP Agent，以及 Claude Code / Seed / Relay 终端模式（经 PermissionRequest hook）。其它终端模式 CLI 只能用 `full-trust`。
+“支持飞书逐项审批”的 Agent：ACP Agent（基于成功的 ACP 协议握手，不依赖可选的模型枚举元数据），以及 Claude Code / Seed / Relay 终端模式（经 PermissionRequest hook）。其它终端模式 CLI 只能用 `full-trust`。
 
 #### Claude Code 自定义网关与 API Key
 
@@ -412,7 +412,7 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 ### 1. 任务看板与终端回放
 - 任务按 **「待处理」**（等审批 / 待回答）、**「进行中」**、**「已完成」**、**「已归档」** 分层。
 - 卡片显示耗时、工具调用明细和最终产物。
-- 当前任务的标题和摘要以已加载的执行记录为准，不会被滞后的任务列表刷新覆盖；再次选择当前任务会保留未发送的输入。创建任务或准备定时任务提交期间，目录与 Agent 等配置、关闭和取消入口暂时禁用，Agent 列表刷新也不会解除关闭限制。创建失败后可修改配置并重试；首条指令发送失败时，重试会复用已创建的会话。
+- 当前任务的标题和摘要以已加载的执行记录为准，不会被滞后的任务列表刷新覆盖；迟到的发送确认不会覆盖已加载的完成结果；再次选择当前任务会保留未发送的输入。创建任务或准备定时任务提交期间，目录与 Agent 等配置、关闭和取消入口暂时禁用，Agent 列表刷新也不会解除关闭限制。创建失败后可修改配置并重试；首条指令发送失败时，重试会复用已创建的会话。
 - **终端回放只有终端模式（`pty-cli`）Agent 才有**，最多保留 5000 行；ACP Agent 没有终端。
 - 支持新指令排队，也可以「立即中断」抢占。
 - 中断任务会取消这一轮的待回答提问，正在校验的提问也不会随后弹出；迟到回答会被拒绝。会话空闲时仍可正常提问。
@@ -426,14 +426,14 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 
 ### 3. 手机看改动
 - 飞书结果卡的「改动 N 个文件 +A −D · 查看改动」链接 14 天有效，只能看这一轮的改动。
-- 只有在 git 仓库里、由 runtime 正常执行的轮次才记录改动。仓库里没被忽略的未跟踪文件太多（单个超过 20 MiB、合计超过 50 MiB 或超过 2000 个）时不记录，结果卡上没有改动行，服务日志写原因——建议把大文件和构建目录加进 `.gitignore`。
-- 「查看改动」页可以逐行评论：登录 Web 的用户提交后直接发给 Agent；只有分享链接的人提交后，会在飞书原话题出一张确认卡，有权限的人点「交给 Agent 修改」才会执行。
+- 只有在 git 仓库里、由 runtime 正常执行的轮次才记录改动。文件与符号链接互换时，差异仍归属正确文件。仓库里没被忽略的未跟踪文件太多（单个超过 20 MiB、合计超过 50 MiB 或超过 2000 个）时不记录，结果卡上没有改动行，服务日志写原因——建议把大文件和构建目录加进 `.gitignore`。
+- 「查看改动」页可以逐行评论：登录 Web 的用户提交后直接发给 Agent；只有分享链接的人提交后，会在飞书原话题出一张确认卡，有权限的人点「交给 Agent 修改」才会执行。提交期间新增或修改的评论草稿会保留。
 - 轮换分享密钥 `dutydeck auth share-key rotate` 后，已发出的链接全部失效。
 
 ### 4. 用量与成本
 Web 侧栏「用量与成本」有「费用」「明细」「会话分析」三个标签；飞书里 `/status` 显示本月用量。
 
-- **会话洞察分析器**：随 npm 包内置，构建服务时自动生成；使用 Dutydeck 当前的 Node.js 运行时，在隔离子进程中本地分析，无需 Go 编译器、外部分析器二进制或单独构建引擎。源码开发使用工作区的 `tsx` loader。指标版本升级为 `v2`：旧快照仍可读取，不同指标版本不混算差值或分组汇总；重新分析可统一版本。洞察刷新不会修改任务用量与计费记录。
+- **会话洞察分析器**：随 npm 包内置，构建服务时自动生成；使用 Dutydeck 当前的 Node.js 运行时，在隔离子进程中本地分析，无需 Go 编译器、外部分析器二进制或单独构建引擎。源码开发使用工作区的 `tsx` loader。指标版本升级为 `v2`：旧快照仍可读取，不同指标版本不混算差值或分组汇总；重新分析可统一版本。Codex 同一原生输入只计一轮；fork 继承历史不计入独立会话汇总；已计价记录的金额和时间保留在洞察与导出中。刷新生成修正后的快照，已有快照保持不变。洞察刷新不会修改任务用量与计费记录。
 
 - **月度上限**：美元，按机器人或按群设置。Web，或 `dutydeck settings usage set-cap <月度美元> --app <appId> [--chat <chatId>]`。
 - **价格表**：内置表含 OpenAI 和 Claude 型号，按模型名最长前缀匹配；匹配不到的型号记为“未定价”，不会套默认价。用 `DUTYDECK_USAGE_PRICING_JSON` 可整表覆盖。Claude 型号只认日期后缀（`-YYYYMMDD`）和 `-latest`，所以 `claude-opus-5-6` 不会落到 `claude-opus-5` 的价格上。
@@ -477,7 +477,7 @@ dutydeck schedule delete schedule_xxx --session ses_xxx
 
 Dutydeck 支持 ACP（Agent Client Protocol），也支持用 PTY 驱动已有的 CLI Agent。
 
-内置 Codex ACP 在每次启动执行进程时使用 Dutydeck 进程 `PATH` 中的 Codex，沿用用户的登录和配置；升级用户安装的 Codex 后，新启动的进程自动使用新版本。显式设置的 `CODEX_PATH` 优先。找不到用户安装的 Codex 时会报错，不使用 ACP 适配器缓存中的版本。
+内置 Codex ACP 在发现探测和启动执行进程时，优先遵循显式设置的 `CODEX_PATH`，支持指向 `PATH` 之外的可执行程序；未显式设置时使用 Dutydeck 进程 `PATH` 中的 Codex，沿用用户的登录和配置；升级用户安装的 Codex 后，新启动的进程自动使用新版本。找不到用户安装或显式指定路径的 Codex 时会报错，不使用 ACP 适配器缓存中的版本。
 
 ### 1. 自定义 Agent (`DUTYDECK_AGENTS_JSON`)
 
@@ -533,11 +533,11 @@ Dutydeck 支持 ACP（Agent Client Protocol），也支持用 PTY 驱动已有�
 
 #### 终端任务状态与恢复
 
-Codex 和 TraeX 恢复原生会话时，只使用能确认属于当前会话的记录；继承的上下文不足以证明归属时会拒绝恢复，避免续接其他会话。
+Codex 和 TraeX 恢复原生会话时，只使用能确认属于当前会话的记录；继承的上下文不足以证明归属时会拒绝恢复，避免续接其他会话。Codex 会话空闲释放后，下一轮会恢复已验证的原生上下文。
 
-Codex 和 TraeX 终端任务按当前原生轮次的成功、失败或取消事件结算，部分回答不抵消随后出现的失败；取消记为中断。TraeX 可读取含大型模型目录的会话元数据，正常接收最终回答并结束任务；恢复会先读完同一会话的旧日志段，再读取新段；新版 canonical 记录保留过程、输入回执和最终回答，并去除镜像重复。
+Codex 和 TraeX 终端任务按当前原生轮次的成功、失败或取消事件结算，部分回答不抵消随后出现的失败；取消记为中断。Codex 恢复中的轮次即使尚无正文输出，只要确认了对应输入和失败或取消终态，也会按该终态结束。TraeX 可读取含大型模型目录的会话元数据，正常接收最终回答并结束任务；恢复会先读完同一会话的旧日志段，再读取新段；新版 canonical 记录保留过程、输入回执和最终回答，并去除镜像重复。
 
-TraeX 用完整终端画面区分忙碌与就绪，兼容独立一行的快捷键页脚；正文或草稿里的状态引用不作为活动页脚。Codex 支持 `›` / `»` 输入提示，信任和更新菜单不视为输入就绪。Cursor 普通输入只发一次 Enter，保留多行输入和普通任务排队；不附带空输入的第二次控制动作。
+TraeX 用完整终端画面区分忙碌与就绪，兼容独立一行的快捷键页脚；正文或草稿里的状态引用不作为活动页脚。Codex 支持 `›` / `»` 输入提示，信任和更新菜单不视为输入就绪。Cursor 普通输入只发一次 Enter，保留多行输入和普通任务排队；不附带空输入的第二次控制动作。Claude Code、Seed、Relay 的空输入框可被识别为空闲，以便继续处理待确认任务的恢复操作。
 
 Codex 当前父轮明确启动的直接子任务若报告额度耗尽或请求限流，Web 和飞书进度记录会显示固定诊断，不展示上游错误原文。父任务继续；Dutydeck 不因该诊断自动重试或切换账号。这是有界的尽力观察，恢复前已启动的子任务不会补报；TraeX 尚未启用此诊断。
 
@@ -671,7 +671,7 @@ dutydeck plugin uninstall <名字>
 ```
 
 - `<来源>`：本地目录、`git+https://…`、`git@…`、`file://…`（`#ref` 固定分支、标签或提交）、`npm:包名@版本`。git 来源按提交 SHA 固定。
-- 插件的增删改、启停都要 `dutydeck restart` 后才生效。本地目录来源每次 `plugin update` 都重新复制并报告“已更新”，即使版本号未变，也会提示重启。
+- 插件的增删改、启停都要 `dutydeck restart` 后才生效。多进程同时修改不同插件时，各次成功操作都会保留。本地目录来源每次 `plugin update` 都重新复制并报告“已更新”，即使版本号未变，也会提示重启。
 - `plugin validate` 也校验场景包（格式、模板变量、正则、参数），出错报文件和字段；`install`、`update` 不因场景包的问题失败，但会列出不会加载的包和原因。
 - 数据放在数据库所在目录的 `plugins/` 下：`plugins.lock.json`（来源、固定版本、作用域、已确认能力）、`<名字>/`（安装副本）、`.data/<名字>/`（插件自己的可写目录）。`.trigger-tokens.json` 和 `.config.json` 权限 0600；敏感配置存在本机密钥存储里。
 
@@ -829,7 +829,7 @@ dutydeck restart
 
 包的 JSON 校验不过时跳过这个包，插件其余部分照常加载，`plugin list` 和 `doctor` 会列出原因；引用的 provider 没注册、包 id 冲突时也跳过这个包，原因写在 daemon 日志里。运行时正则或 provider 出错、超时，这条消息这个包弃权：`direct` 记一条弃权记录，不起任务；`model` 的上下文 provider 超时、出错、返回格式不对，或者一条材料都没有而 `missing` 不为空时，这条消息按没有这个包重新判定，判定记录里记下原因，`/status` 计入「取材料失败」，「为什么没回」会说明。同一条消息命中多个 `direct` 包时，按包 id 排序只处理第一个。
 
-#`dutydeck agent settings show` 只读查看机器人常用设置；`dutydeck agent settings set defaultAgentId=codex notifyQuietHours=22:00-08:00` 先发确认卡，机器人管理员点确认才保存。用户可以直接说「以后默认用 codex」「晚上十点到早上八点别推送」，让 Agent 代办。可改的只有默认 Agent、模型、推理强度、私聊模式（`p2pMode`）、群回复模式（`groupReplyMode`）、免打扰（`notifyQuietHours`）、两档通知 @（`notifyMentionAction` / `notifyMentionDone`）和忙时判断（`busyTriage`）；权限、白名单和凭据不开放。免打扰留空可清除。群有单独覆盖时，`show` 仍返回机器人默认值；群回复模式为 `null` 表示尚未显式设置，沿用旧路由。
+#`dutydeck agent settings show` 只读查看机器人常用设置；`dutydeck agent settings set defaultAgentId=codex notifyQuietHours=22:00-08:00` 先发确认卡，机器人管理员点确认才保存。用户可以直接说「以后默认用 codex」「晚上十点到早上八点别推送」，让 Agent 代办。可改的只有默认 Agent、模型、推理强度、私聊模式（`p2pMode`）、群回复模式（`groupReplyMode`）、免打扰（`notifyQuietHours`）、两档通知 @（`notifyMentionAction` / `notifyMentionDone`）和忙时判断（`busyTriage`）；权限、白名单和凭据不开放。免打扰留空可清除。群回复选择「自动」（或设置 `groupReplyMode=auto`）会清除已保存的显式覆盖，恢复默认自动路由；更新时省略的字段保持原值。群有单独覆盖时，`show` 仍返回机器人默认值；群回复模式为 `null` 表示尚未显式设置，沿用旧路由。
 
 确认权限与管理机器人设置的入口一致：托管群需要机器人管理权限（`channel_bot.update`），只有高风险操作授权不能确认；未托管时，需要明确的部署成员或邮箱名单，名单为空不能确认。确认卡绑定发卡时的配置版本；期间 Web 改过设置，旧卡会拒绝覆盖，需要重新提出变更。
 
@@ -894,6 +894,7 @@ dutydeck deploy prune --releases /path/to/releases
 - **自动清理**：每次部署成功后保留最新 5 个发布目录和部署记录（含数据库备份）。`current`、它的上一版和仍被运行中进程引用的版本永远保留；清理失败只告警，不影响部署结果。
 - **手动清理** `deploy prune`：选项 `--releases/--runtime/--unit`、`--keep N`（默认 5）、`--dry-run`、`--include-unmarked`、`--json`。手工部署留下的记录（没有 `created_by: dutydeck deploy` 标记）默认不动，只有加 `--include-unmarked` 才会清，并且仍被进程引用或 1 小时内改过的会跳过。最近 1 小时内改过的 `.partial` 目录同样跳过（可能是正在进行的部署）。
 - **单 Bot 独立进程**：`dutydeck start --foreground --database /path/to/bot.db --bot-app-id cli_xxx`。
+- **systemd 服务与数据库解析**：直接启动服务的 systemd user unit 根入口为 `node cli.js`。管理命令（`restart`、`status`、`deploy` 等）推导运行时时，按优先级依次从 ExecStart 的显式 `--database`、unit 环境变量 `DUTYDECK_DATABASE_URL`，再回落到默认的 `<cwd>/.dutydeck/dutydeck.db`（结合 `--cwd` 或 `DUTYDECK_DEFAULT_CWD` 解析）；现有的 `start --foreground` 模板与部署运行时元数据继续保持优先。
 
 ### 3. 开机自启 (`autostart`)
 
@@ -912,6 +913,7 @@ Web 控制台里的机器人设置、群聊策略和用量上限，都可以用�
 | 机器人设置 | `dutydeck settings bot list / show / set / add / remove / install-hook` |
 | 群聊协作策略 | `dutydeck settings group list / show / set / members / sync` |
 | 实验草稿 Bot 与 SecretRef 引用 | `dutydeck settings channel-bot list / show / set` |
+| 实验草稿群绑定策略 | `dutydeck settings group-binding list / show / add / set` |
 | 月度用量上限 | `dutydeck settings usage show / set-cap / remove-cap` |
 | 主终端后端 | `dutydeck settings terminal-backend [tmux\|herdr]` |
 | 工作区分组 | `dutydeck workspace-groups` |
@@ -920,6 +922,7 @@ Web 控制台里的机器人设置、群聊策略和用量上限，都可以用�
 dutydeck settings bot show cli_xxx                           # 查看机器人全部配置
 dutydeck settings bot set cli_xxx adhdMode=true              # 开启 ADHD 友好模式
 dutydeck settings bot set cli_xxx notifyQuietHours=22:00-08:00
+dutydeck settings bot set cli_xxx groupReplyMode=auto        # 清除群回复模式覆盖，恢复默认自动路由
 dutydeck settings group set oc_xxx participation=selective   # 设置群聊按需参与
 dutydeck settings usage set-cap 50 --app cli_xxx             # 设置月度用量上限（美元）
 dutydeck settings group set oc_xxx 'scenarios={"alarm":{"enabled":true,"params":{"levels":["P0","P1"]}}}'  # 改告警初筛的级别
@@ -937,6 +940,26 @@ dutydeck settings channel-bot set <id> credentialRef=null
 ```
 
 可改 `externalAppId`、`displayName`、`brand=feishu|lark`、`credentialRef` 和 `state=staged|disabled`。省略的键保持原值，`credentialRef=null` 清除引用；不传 `--expected-revision` 时使用刚读取的版本，版本冲突会拒绝保存。命令只改草稿元数据，监听仍停用；已接入运行时的机器人继续用 `settings bot` 管理。支持同样的 `--instance`、`--url` 和 `--database` 目标选项，不返回凭据值。
+
+实验页「群配置与权限」中的群绑定策略草稿使用 `group-binding` 管理，沿用与 `channel-bot` 相同的草稿寻址、运行保护与版本并发控制（CAS）：
+
+```bash
+dutydeck settings group-binding list [--bot <内部 channel-bot id>]
+dutydeck settings group-binding show <binding-id>
+dutydeck settings group-binding add <binding-id> --bot <内部 channel-bot id> --chat <外部群 chat-id> [key=value...]
+dutydeck settings group-binding set <binding-id> <key=value...> [--expected-revision N]
+```
+
+`add` 创建处于暂存状态的离线草稿绑定（初始 `state=staged`，`add` 时不接受 `state` 键），必须指定内部 Channel Bot ID（`--bot`）与外部群 ID（`--chat`），不会覆盖已有绑定。策略覆盖字段对齐 GroupBinding API 与界面，包括 `routingOverride`、`groupToolsOverride`、`rolePolicyOverride`、`reviewReasons`、`oncall` 等覆盖项；`set` 可修改这些字段，并支持设置 `state=staged|disabled|needs_review|archived`（不支持 `active`）。更新时省略的键保持原值；不传 `--expected-revision` 时默认使用刚读取的版本，版本冲突时拒绝保存。这些命令仅操作离线的实验草稿绑定，不代表已激活运行时群策略，也不包含自动迁移应用；运行中的机器人群配置继续使用 `dutydeck settings group` 管理。
+
+示例：
+```bash
+# 新建离线策略草稿（开启值班）
+dutydeck settings group-binding add draft-group --bot draft-bot --chat oc_example oncall=true
+
+# 使用 CAS 乐观锁更新路由覆盖与群工具权限
+dutydeck settings group-binding set draft-group 'routingOverride={"groupReplyMode":{"mode":"set","value":"chat-topic"},"mentionPolicy":{"mode":"set","value":"topic"}}' 'groupToolsOverride={"read":"deny","discover":"deny","send":"deny"}' --expected-revision 1
+```
 
 机器人自动欢迎默认开启。设置 `welcomeEnabled=false` 可关闭入群和首次私聊欢迎；保存后立即生效，不改变用户消息处理。需要群里只在被 @ 时回复时，同时使用 `mentionPolicy=always` 和 `defaultGroupParticipation=off`。
 

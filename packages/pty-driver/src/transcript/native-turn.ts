@@ -10,6 +10,7 @@ export class NativeTurn {
   private input?: any;
   private scoped = false;
   private recovering = false;
+  private recoveredInput = false;
   private terminal = false;
   private error?: NormalizedDriverEvent;
   private cancelled = false;
@@ -18,7 +19,7 @@ export class NativeTurn {
   reset(): void {
     this.detach?.(); this.detach = undefined;
     this.candidate = this.turn = this.input = undefined; this.required = false;
-    this.scoped = this.recovering = this.terminal = this.cancelled = false;
+    this.scoped = this.recovering = this.recoveredInput = this.terminal = this.cancelled = false;
     this.error = undefined;
   }
   arm(signal: AbortSignal): void {
@@ -46,7 +47,7 @@ export class NativeTurn {
       if (this.scoped && !this.turn && !this.terminal) this.turn = id;
     }
     const input = codexInputText(entry);
-    if (!baseline && this.recovering && input !== undefined) this.bind(entry);
+    if (!baseline && this.recovering && input !== undefined) { this.bind(entry); this.recoveredInput = true; }
     if (input !== undefined && this.scoped && entry !== this.input) {
       // Legacy/model and display records can mirror the same native input.
       if (id && this.turn && id !== this.turn) return false;
@@ -71,6 +72,7 @@ export class NativeTurn {
   }
   activeTurnId(): string | undefined { return this.scoped && !this.terminal ? this.turn : undefined; }
   requiresBinding(): boolean { return this.required; }
+  hasRecoveredInput(): boolean { return this.recoveredInput && this.scoped; }
   hasTerminal(): boolean { return this.terminal; }
   takeError(): NormalizedDriverEvent | undefined { const error = this.error; this.error = undefined; return error; }
   takeCancellation(): boolean { const cancelled = this.cancelled; this.cancelled = false; return cancelled; }

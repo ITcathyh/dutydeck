@@ -66,7 +66,7 @@ export interface HostEvidenceInput {
   /** 验证记录的只读响应投影，已携带 stale/fingerprint 判定。 */
   verifications?: readonly VerificationResponse[];
   /** 费用账本只读行投影；由 T4c 按 session 过滤，模块不查库。 */
-  usageEntries?: readonly UsageLedgerEntry[];
+  usageEntries?: readonly Pick<UsageLedgerEntry, 'recordedAt' | 'dataStatus' | 'costUsd'>[];
 }
 
 type GoalItem = HostEvidenceSnapshot['taskGoals'][number];
@@ -293,7 +293,7 @@ function projectModelConfigs(
   return { items, priority };
 }
 
-function projectUsage(entries: readonly UsageLedgerEntry[]): UsageProjection {
+function projectUsage(entries: NonNullable<HostEvidenceInput['usageEntries']>): UsageProjection {
   let start: string | null = null;
   let end: string | null = null;
   let startMs = Number.POSITIVE_INFINITY;

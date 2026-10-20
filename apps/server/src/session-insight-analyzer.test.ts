@@ -33,6 +33,50 @@ async function analyze(file: AnalyzeFileInput) {
 }
 
 describe('TypeScript session insight analyzer', () => {
+  it('counts the real Codex raw/canonical input once', async () => {
+    const result = await analyze(await input(join(fixtures, 'real-native/codex.jsonl'), 'codex', '01a0ffa7-270b-72f1-be55-21dde8e42935'));
+    expect(result.metrics.userTurns).toMatchObject({ value: 1, evidenceCount: 1, missingCount: 0, quality: 'exact' });
+    expect(result.trace.filter(event => event.kind === 'user_message').map(event => event.lineNumber)).toEqual([10]);
+  });
+  it.each([false, true])('selects canonical inputs by turn regardless of mirror order: %s', async canonicalFirst => {
+    const raw = (turn: string) => ({ type: 'response_item', timestamp: at(1), payload: { type: 'message', id: `raw-${turn}`, role: 'user', content: 'same input', internal_chat_message_metadata_passthrough: { turn_id: turn, content_item_kinds: ['user.text'] } } });
+    const canonical = (turn: string) => ({ type: 'event_msg', timestamp: at(1), payload: { type: 'item_completed', turn_id: turn, item: { type: 'UserMessage', id: `canonical-${turn}`, content: 'same input' } } });
+    const pair = (turn: string) => canonicalFirst ? [canonical(turn), raw(turn)] : [raw(turn), canonical(turn)];
+    const result = await analyze(await synthetic([meta, ...pair('one'), ...pair('two'), raw('legacy-only')]));
+    expect(result.metrics.userTurns.value).toBe(3);
+    expect(result.trace.filter(event => event.kind === 'user_message')).toHaveLength(3);
+    expect(result.trace.filter(event => event.kind === 'user_message').map(event => event.lineNumber)).toEqual(canonicalFirst ? [2, 4, 6] : [3, 5, 6]);
+  });
+  it('preserves raw-only inputs and excludes explicit context envelopes', async () => {
+    const result = await analyze(await synthetic([meta,
+      { type: 'response_item', timestamp: at(1), payload: { type: 'message', id: 'context', role: 'user', content: 'same input', internal_chat_message_metadata_passthrough: { content_item_kinds: ['agents_md.instructions', 'environments.environment_context'] } } },
+      ...['one', 'two'].map(id => ({ type: 'response_item', timestamp: at(2), payload: { type: 'message', id, role: 'user', content: 'same input' } }))
+    ]));
+    expect(result.metrics.userTurns.value).toBe(2);
+    expect(result.trace.filter(event => event.kind === 'user_message')).toHaveLength(2);
+  });
+  it('uses task_started identity when mirror records omit their turn id', async () => {
+    const result = await analyze(await synthetic([meta,
+      { type: 'event_msg', timestamp: at(1), payload: { type: 'task_started', turn_id: 'one' } },
+      { type: 'response_item', timestamp: at(2), payload: { type: 'message', id: 'mirror', role: 'user', content: 'same input' } },
+      { type: 'event_msg', timestamp: at(3), payload: { type: 'item_completed', turn_id: 'one', item: { type: 'UserMessage', id: 'canonical', content: 'same input' } } },
+      { type: 'event_msg', timestamp: at(4), payload: { type: 'task_started', turn_id: 'two' } },
+      { type: 'event_msg', timestamp: at(5), payload: { type: 'user_message', message: 'same input' } }
+    ]));
+    expect(result.metrics.userTurns.value).toBe(2);
+    expect(result.trace.filter(event => event.kind === 'user_message').map(event => event.lineNumber)).toEqual([4, 6]);
+  });
+  it.each([
+    [{ subagent: { thread_spawn: { parent_thread_id: 'parent' } } }, 'child', 'excluded', 'none'],
+    [{ subagent: { thread_spawn: { parent_thread_id: 'other' }, thread_fork: { parent_session_id: 'parent' } } }, 'fork', 'excluded', 'detected'],
+    [{ kind: 'fork' }, 'none', 'eligible', 'none']
+  ] as const)('preserves conservative relationship controls for %j', async (source, kind, eligibility, inheritedHistory) => {
+    const result = await analyze(await synthetic([{ ...meta, payload: { id: 'session', source } }]));
+    expect(result.relationship.kind).toBe(kind);
+    expect(result.aggregation.eligibility).toBe(eligibility);
+    expect(result.coverage.inheritedHistory).toBe(inheritedHistory);
+    if (kind !== 'none') expect(result.parentNativeSessionId).toBe('parent');
+  });
   it.each([
     ['codex', 'codex', '01a0ffa7-270b-72f1-be55-21dde8e42935', 92353, 3, 1],
     ['traex', 'traex', '01a0ffa6-a71d-79b3-9a87-d386f1808e41', 36849, 4, 1],

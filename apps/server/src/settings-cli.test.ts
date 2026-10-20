@@ -10,6 +10,7 @@ import { createCliProgram } from './cli-program.js';
 import { registerCollaborationRoutes } from './collaboration-routes.js';
 import { CollaborationService } from './collaboration-service.js';
 import { larkBotsConfigKey, readLarkConfig } from './lark/config.js';
+import { LarkGroupManager } from './lark/group-management.js';
 import { LarkGroupParticipation } from './lark/group-participation.js';
 import { PluginHost } from './plugins/host.js';
 import { botFields, fieldsHelp, groupFields, runSettingsCli, SettingsCliError, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
@@ -28,13 +29,46 @@ describe('settings CLI foundation channel bots', () => {
     await repos.channelBots.create({ id: 'draft/bot', channel: 'lark', externalAppId: 'cli_draft', displayName: 'Draft', brand: 'feishu', state: 'staged' });
     await repos.secretRefs.create({ id: 'ref_cli', kind: 'lark_app_secret', provider: 'local-file-v1', referenceKey: 'opaque.reference', status: 'configured' });
     let allowed = true;
+    const manager = new LarkGroupManager(repos);
     const app = await buildApp({ listAgents: async () => [] } as any, { foundation: {
-      repositories: repos, authorize: async () => allowed, inspectSecretRef: async () => 'available'
+      repositories: repos, authorize: async () => allowed, isLiveManagedBot: id => manager.isLiveManagedBot(id), inspectSecretRef: async () => 'available'
     } });
     cleanups.push(() => app.close());
     const fetcher = bridge(app);
     return { repos, fetcher, deny: () => { allowed = false; }, run: (action: SettingsAction, input: SettingsCliInput = {}) => runSettingsCli(action, { ...target, channelBotId: 'draft/bot', ...input }, { fetcher, readToken }) };
   }
+
+  it('creates, addresses and updates the Dashboard offline group bindings with CAS', async () => {
+    const { repos, run, fetcher } = await foundationRuntime();
+    const add = { groupBindingId: 'draft/binding', chatId: 'oc_draft', pairs: ['oncall=true'] };
+    expect(await run('group-binding-add', add)).toMatchObject({ binding: { id: 'draft/binding', revision: 1, state: 'staged', oncall: true } });
+    expect(await run('group-binding-list')).toMatchObject({ bindings: [{ id: 'draft/binding' }] });
+    expect(await run('group-binding-list', { channelBotId: 'absent' })).toEqual({ bindings: [] });
+    expect(await run('group-binding-show', { groupBindingId: 'draft/binding' })).toMatchObject({ binding: { channelBotId: 'draft/bot', externalChatId: 'oc_draft' } });
+    const patch = { groupBindingId: 'draft/binding', pairs: ['oncall=false', 'routingOverride={"groupReplyMode":{"mode":"set","value":"chat-topic"},"mentionPolicy":{"mode":"set","value":"topic"}}', 'groupToolsOverride={"read":"deny","discover":"deny","send":"deny"}', 'modelOverride=clear'] };
+    expect(await run('group-binding-set', patch)).toMatchObject({ binding: { revision: 2, oncall: false, modelOverride: { mode: 'clear' }, routingOverride: { mentionPolicy: { value: 'topic' } }, groupToolsOverride: { read: 'deny' } } });
+    await expect(run('group-binding-set', { ...patch, expectedRevision: '1' })).rejects.toMatchObject({ code: 'FOUNDATION_REVISION_CONFLICT' });
+    expect((await repos.groupBindings.get('draft/binding'))?.revision).toBe(2);
+    await expect(run('group-binding-add', add)).rejects.toMatchObject({ code: 'FOUNDATION_NATURAL_KEY_CONFLICT' });
+    expect((await repos.groupBindings.get('draft/binding'))?.revision).toBe(2);
+    expect(fetcher.mock.calls.every(([url]) => new URL(String(url)).pathname.startsWith('/api/foundation/'))).toBe(true);
+  });
+
+  it('retains foundation authorization, live management guard and disabled-state validation', async () => {
+    const { repos, run, deny } = await foundationRuntime();
+    const add = { groupBindingId: 'guarded', chatId: 'oc_draft' };
+    await run('group-binding-add', add);
+    await expect(run('group-binding-set', { groupBindingId: 'guarded', pairs: ['state=active'] })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    await expect(run('group-binding-set', { groupBindingId: 'guarded', pairs: ['oncall=true'], expectedRevision: '0' })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    await expect(run('group-binding-add', { ...add, groupBindingId: 'active', pairs: ['state=disabled'] })).rejects.toMatchObject({ code: 'SETTINGS_KEY_UNKNOWN' });
+    await repos.config.set(larkBotsConfigKey, JSON.stringify([{ appId: 'cli_draft', appSecret: 'fixture', foundationChannelBotId: 'draft/bot' }]));
+    await repos.config.set('lark.live-owner.cli_draft', JSON.stringify({ channelBotId: 'draft/bot' }));
+    await expect(run('group-binding-set', { groupBindingId: 'guarded', pairs: ['oncall=true'] })).rejects.toMatchObject({ code: 'LARK_LIVE_MANAGEMENT_REQUIRED' });
+    await expect(run('group-binding-add', { ...add, groupBindingId: 'live-new' })).rejects.toMatchObject({ code: 'LARK_LIVE_MANAGEMENT_REQUIRED' });
+    deny();
+    await expect(run('group-binding-set', { groupBindingId: 'guarded', pairs: ['oncall=true'] })).rejects.toMatchObject({ code: 'FOUNDATION_PERMISSION_DENIED' });
+    expect((await repos.groupBindings.get('guarded'))?.revision).toBe(1);
+  });
 
   it('selects and clears a SecretRef through the same revision-checked metadata API as the dashboard', async () => {
     const { repos, run } = await foundationRuntime();
@@ -84,6 +118,18 @@ async function botRuntime() {
 }
 
 describe('settings CLI against the real bot routes', () => {
+  it.each(['chat', 'shared', 'new-topic', 'chat-topic'])('clears the explicit %s reply mode with auto without changing omitted-field semantics', async mode => {
+    const { repos, run, fetcher } = await botRuntime();
+    await run('bot-set', { appId: 'cli_a', pairs: [`groupReplyMode=${mode}`] });
+    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=retain reply mode'] });
+    expect((await readLarkConfig(repos.config, 'cli_a'))?.groupReplyMode).toBe(mode);
+    const result = await run('bot-set', { appId: 'cli_a', pairs: ['groupReplyMode=auto'] });
+    expect(result.bot).not.toHaveProperty('groupReplyMode');
+    expect(await readLarkConfig(repos.config, 'cli_a')).not.toHaveProperty('groupReplyMode');
+    const last = fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT').at(-1)!;
+    expect(JSON.parse(String(last[1]!.body))).toMatchObject({ groupReplyMode: null });
+  });
+
   it('changes bot settings with typed values and the current revision, like the dashboard', async () => {
     const { repos, run } = await botRuntime();
     const before = (await run('bot-show', { appId: 'cli_a' })).bot as { revision: number };
@@ -493,6 +539,19 @@ describe('settings CLI requests', () => {
 });
 
 describe('settings commands', () => {
+  it('registers offline group binding commands with explicit IDs and revision', async () => {
+    const settings = vi.fn();
+    const invoke = (args: string[]) => createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'group-binding', ...args]);
+    await invoke(['add', 'binding/id', '--bot', 'draft/bot', '--chat', 'oc_draft', 'oncall=true', '--instance', 'tag']);
+    expect(settings).toHaveBeenLastCalledWith('group-binding-add', expect.objectContaining({ groupBindingId: 'binding/id', channelBotId: 'draft/bot', chatId: 'oc_draft', pairs: ['oncall=true'], instance: 'tag' }));
+    await invoke(['set', 'binding/id', 'oncall=false', '--expected-revision', '3']);
+    expect(settings).toHaveBeenLastCalledWith('group-binding-set', expect.objectContaining({ groupBindingId: 'binding/id', pairs: ['oncall=false'], expectedRevision: '3' }));
+    await invoke(['list', '--bot', 'draft/bot']);
+    expect(settings).toHaveBeenLastCalledWith('group-binding-list', expect.objectContaining({ channelBotId: 'draft/bot' }));
+    await invoke(['show', 'binding/id']);
+    expect(settings).toHaveBeenLastCalledWith('group-binding-show', expect.objectContaining({ groupBindingId: 'binding/id' }));
+  });
+
   it('passes a foundation ID, reference selection and revision to the handler', async () => {
     const settings = vi.fn();
     await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'channel-bot', 'set', 'draft/bot', 'credentialRef=ref_cli', '--expected-revision', '4', '--instance', 'tag']);

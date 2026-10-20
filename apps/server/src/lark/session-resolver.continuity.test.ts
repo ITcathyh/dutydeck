@@ -114,3 +114,16 @@ describe('findLarkThreadContinuation', () => {
     await expect(find([session()], rows, reply({ senderOpenId: 'ou_bob' }))).resolves.toMatchObject({ id: 'ses_old' });
   });
 });
+
+
+describe('resolveLarkSession restored launch validation', () => {
+  it('starts with the validated options returned by the recovery guard', async () => {
+    const { runtime, fresh } = runtimeWith([]);
+    const mappings = { get: vi.fn(async () => undefined), list: vi.fn(async () => []), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn() };
+    const beforeStart = vi.fn(async () => ({ cwd: '/canonical/workspace', model: 'validated-model' }));
+    await expect(resolveLarkSession(runtime as any, log, { tail: Promise.resolve() }, config, 'oc_group', 'group', 'user:ou_alice', mappings,
+      { cwd: '/saved/workspace', model: 'saved-model' }, beforeStart)).resolves.toBe(fresh);
+    expect(beforeStart).toHaveBeenCalledOnce();
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/canonical/workspace', model: 'validated-model' }));
+  });
+});

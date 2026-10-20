@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCodexAdapter } from '@dutydeck/cli-adapters';
-import { PtyBackend } from '@dutydeck/session-backends';
+import { PtyBackend, TmuxBackend } from '@dutydeck/session-backends';
 import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
 import { PtyCliDriver } from './driver.js';
 import { buildSessionMarker } from './session-id/marker.js';
@@ -49,4 +49,34 @@ it.each([
     expect(argv).not.toContain('resume'); expect(argv).not.toContain(child);
     expect(events).toContainEqual(expect.objectContaining({ type: 'status', data: expect.objectContaining({ state: 'resume_degraded' }) }));
   }
+});
+
+it.each(['matching', 'foreign', 'filename-only', 'inherited-only'] as const)('automatic persistent startup uses marker evidence rather than %s rollout recency or filenames', async kind => {
+  const home = mkdtempSync(join(tmpdir(), 'driver-native-start-')); roots.push(home);
+  const sessions = join(home, 'sessions'); mkdirSync(sessions);
+  const meta = (id: string) => ({ type: 'session_meta', payload: { id, cwd: home, source: 'cli' } });
+  writeFileSync(join(sessions, `rollout-newest-${child}.jsonl`), jsonl([meta(child),
+    ...(kind === 'inherited-only' ? [meta(parent)] : []),
+    ...(kind === 'filename-only' ? [] : [user(kind === 'matching' || kind === 'inherited-only' ? childSession : parentSession)]),
+  ]));
+  const backend = new TmuxBackend('native-start', { ownerId: `dutydeck:${childSession}` });
+  vi.spyOn(TmuxBackend, 'probeSession').mockResolvedValue('missing');
+  const spawn = vi.spyOn(backend, 'spawn').mockResolvedValue();
+  vi.spyOn(backend, 'getPid').mockResolvedValue(undefined);
+  vi.spyOn(backend, 'onData').mockImplementation(() => {});
+  vi.spyOn(backend, 'onExit').mockImplementation(() => {});
+  vi.spyOn(backend, 'setDutydeckMetadata').mockResolvedValue();
+  vi.spyOn(backend, 'kill').mockResolvedValue();
+  const agent: AgentConfig = { id: 'fixture', name: 'Fixture', command: 'unused-fixture', args: [], protocol: 'pty-cli', cwd: home,
+    env: { CODEX_HOME: home }, permissionMode: 'full-trust', timeout: 30, capabilities: { pause: false, resume: true }, builtin: false };
+  const driver = new PtyCliDriver({ agent, adapter: createCodexAdapter(), backend, sessionId: childSession, onEvent() {}, onExit() {} });
+  vi.spyOn(driver, 'isStopped').mockResolvedValue(true);
+  try {
+    await driver.start();
+    const argv = spawn.mock.calls[0]![1];
+    expect(argv.includes('resume')).toBe(kind === 'matching');
+    expect(driver.getCliSessionId()).toBe(kind === 'matching' ? child : undefined);
+    if (kind === 'matching') expect(argv.at(-1)).toBe(child);
+    else { expect(argv).not.toContain(child); expect(argv).not.toContain(parent); }
+  } finally { await driver.stop(); }
 });

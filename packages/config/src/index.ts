@@ -35,11 +35,15 @@ export function cliVersion(command: string): string | undefined {
   return undefined;
 }
 
+const builtinCli = (id: string, env: Record<string, string | undefined> = process.env) => id === 'codex' ? env.CODEX_PATH || agentDetails[id]!.cli : agentDetails[id]!.cli;
+
 let scannedBuiltinAgents: Array<Omit<AgentConfig, 'cwd'>> | undefined;
 const scanBuiltinAgents = () => scannedBuiltinAgents ??= listAcpxBuiltinAgents().flatMap(({ id, argv }) => {
   const detail = agentDetails[id];
-  if (!detail || !commandExists(detail.cli)) return [];
-  return [{ id, name: detail.name, command: argv[0]!, args: argv.slice(1), protocol: 'acp' as const, env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: { pause: false, resume: true }, builtin: true, version: cliVersion(detail.cli) }];
+  if (!detail) return [];
+  const command = builtinCli(id);
+  if (!commandExists(command)) return [];
+  return [{ id, name: detail.name, command: argv[0]!, args: argv.slice(1), protocol: 'acp' as const, env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: { pause: false, resume: true }, builtin: true, version: cliVersion(command) }];
 });
 
 // PTY 适配器（@dutydeck/cli-adapters，由 server 组装时注入，本包不直接依赖）贡献的内置 agent 描述
@@ -124,8 +128,8 @@ function parseAgentsJson(raw: string | undefined): AgentConfig[] {
  * 真正的 CLI 在 agentDetails 里；自定义的 pty-cli 包装命令（有 adapterId）可能在 `--version` 时改动本地设置，
  * 与 loadConfig 一样不执行，只确认可执行文件存在。
  */
-export function agentProbeTarget(agent: Pick<AgentConfig, 'id' | 'command' | 'protocol' | 'builtin' | 'adapterId'>): { command: string; execute: boolean } {
-  if (agent.builtin && agent.protocol === 'acp' && agentDetails[agent.id]) return { command: agentDetails[agent.id]!.cli, execute: true };
+export function agentProbeTarget(agent: Pick<AgentConfig, 'id' | 'command' | 'protocol' | 'builtin' | 'adapterId'> & { env?: Record<string, string> }): { command: string; execute: boolean } {
+  if (agent.builtin && agent.protocol === 'acp' && agentDetails[agent.id]) return { command: builtinCli(agent.id, { ...process.env, ...agent.env }), execute: true };
   if (!agent.builtin && agent.protocol === 'pty-cli' && agent.adapterId) return { command: agent.command, execute: false };
   return { command: agent.command, execute: true };
 }

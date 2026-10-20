@@ -781,21 +781,50 @@ describe('dutydeck deploy 与 systemd unit', () => {
   beforeEach(() => { tmp = realpathSync(mkdtempSync(join(tmpdir(), 'dutydeck-deploy-unit-'))); });
   afterEach(() => { rmSync(tmp, { recursive: true, force: true }); });
 
-  function systemctl(script: string, fragmentPath: string) {
+  function systemctl(script: string, fragmentPath: string, environment = 'PATH=/usr/bin', execArgs = `--database ${tmp}/bot.db --local-only --port 4311`) {
+    let pid = 4242;
     const calls: string[] = [];
     const runCommand = async (command: string, args: readonly string[]): Promise<AutostartCommandOutput> => {
       calls.push([command, ...args].join(' '));
+      if (args[1] === 'restart') pid = 4243;
       if (args[1] !== 'show') return { status: 0, stdout: '', stderr: '' };
       return {
         status: 0, stderr: '',
         stdout: [
-          'LoadState=loaded', 'SubState=running', 'MainPID=4242', 'Environment=PATH=/usr/bin', `WorkingDirectory=${tmp}`, `FragmentPath=${fragmentPath}`,
-          `ExecStart={ path=/opt/node/bin/node ; argv[]=/opt/node/bin/node ${script} --database ${tmp}/bot.db --local-only --port 4311 ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }`
+          'LoadState=loaded', 'SubState=running', `MainPID=${pid}`, `Environment=${environment}`, `WorkingDirectory=${tmp}`, `FragmentPath=${fragmentPath}`,
+          `ExecStart={ path=/opt/node/bin/node ; argv[]=/opt/node/bin/node ${script} ${execArgs} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }`
         ].join('\n')
       };
     };
     return { calls, runCommand };
   }
+
+  it.each([false, true])('backs up the environment database, with deployment metadata priority=%s', async useMetadata => {
+    const source = fakeCheckout(join(tmp, 'checkout'));
+    const releases = join(tmp, 'releases');
+    const custom = join(tmp, 'custom.db');
+    const metadata = join(tmp, 'metadata.db');
+    for (const [path, marker] of [[custom, 'environment'], [metadata, 'metadata'], [join(tmp, '.dutydeck/dutydeck.db'), 'wrong-default']] as const) {
+      mkdirSync(dirname(path), { recursive: true });
+      const db = new Database(path);
+      db.exec('CREATE TABLE configs (key TEXT PRIMARY KEY, value TEXT)');
+      db.prepare('INSERT INTO configs VALUES (?, ?)').run('marker', marker);
+      db.close();
+    }
+    writeFileSync(join(tmp, 'deployment.json'), JSON.stringify({ databasePath: metadata, address: 'http://127.0.0.1:4311' }));
+    const sys = systemctl(join(releases, 'current/dist/cli.js'), join(tmp, 'unit.service'), `DUTYDECK_DATABASE_URL=${custom}`, '--local-only --port 4311');
+    const result = await runDeploy({ unit: 'dutydeck-fixture.service', source, node: process.execPath, ...(useMetadata ? { runtime: tmp } : {}) }, {
+      ...sys, platform: 'linux', checkSqlite: passingSqlite, env: {}, processPaths: () => [], info: vi.fn(), warn: vi.fn(),
+      fetch: async () => new Response(JSON.stringify({ ok: true, runningTasks: 0, draining: true }))
+    });
+    expect(result, result.error).toMatchObject({ ok: true, status: 'deployed' });
+    const manifest = JSON.parse(readFileSync(result.manifest!, 'utf8'));
+    expect(basename(manifest.database_backup)).toBe(useMetadata ? 'metadata.db' : 'custom.db');
+    const backup = new Database(manifest.database_backup, { readonly: true });
+    try { expect(backup.prepare('SELECT value FROM configs WHERE key=?').get('marker')).toEqual({ value: useMetadata ? 'metadata' : 'environment' }); }
+    finally { backup.close(); }
+    expect(sys.calls.filter(call => call.includes(' restart '))).toEqual(['systemctl --user restart dutydeck-fixture.service']);
+  });
 
   it('unit 还没改跑 releases/current 时拒绝部署，--print-unit 给出改写后的 unit', async () => {
     const unitFile = join(tmp, 'dutydeck-tag.service');

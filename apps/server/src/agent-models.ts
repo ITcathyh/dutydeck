@@ -12,7 +12,7 @@ import type { AgentConfig } from '@dutydeck/shared';
 const run = promisify(execFile);
 const ACP_MODEL_PROBE_TIMEOUT_MS = 30_000;
 export interface AgentModel { id: string; name: string }
-export interface AgentModelsResult { models: AgentModel[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent' }
+export interface AgentModelsResult { models: AgentModel[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent'; protocol?: 'acp' }
 
 export class AgentModelProbeTimeoutError extends Error {
   constructor(readonly phase: 'ensureSession' | 'getStatus' | 'close', readonly timeoutMs: number) {
@@ -78,7 +78,7 @@ export async function probeModelsThroughAcpRuntime(runtime: AcpRuntime, input: A
     const status = runtime.getStatus
       ? await withAgentModelProbeTimeout('getStatus', timeoutMs, Promise.resolve(runtime.getStatus({ handle })))
       : undefined;
-    return modelsFromAcpStatus(status);
+    return { ...(modelsFromAcpStatus(status) ?? { models: [], reasoningEfforts: [] }), protocol: 'acp' };
   } finally {
     if (handle) {
       await withAgentModelProbeTimeout('close', timeoutMs, runtime.close({ handle, reason: 'Dutydeck model discovery', discardPersistentState: true })).catch(() => undefined);
@@ -200,12 +200,13 @@ export async function discoverAgentModels(agent: AgentConfig, model?: string, fo
         try {
           const models = await discoverThroughCli(agent);
           if (models.length) {
-            value = { models, ...(agent.model ? { defaultModel: agent.model } : {}), reasoningEfforts: [], source: 'cli' };
+            value = { ...value, models, ...(agent.model ? { defaultModel: agent.model } : {}), reasoningEfforts: [], source: 'cli' };
           }
         } catch {
           /* Fall through to the Agent's configured default. */
         }
       }
+      if (value && !value.defaultModel && !value.models.length && agent.model) value = { ...value, defaultModel: agent.model };
       value ??= { models: [], ...(agent.model ? { defaultModel: agent.model, source: 'agent' as const } : {}), reasoningEfforts: [] };
 
       // 仅成功探测到可用模型时才按 TTL 缓存；探测失败或没有可用模型的 fallback 不缓存，以便后续正常请求能及时重试。

@@ -143,7 +143,8 @@ function parseNumstat(output: string): NumstatEntry[] {
   for (let index = 0; index < parts.length; index++) {
     const head = parts[index];
     if (!head) continue;
-    const [added, deleted, path] = head.split('\t');
+    const [added, deleted, ...pathParts] = head.split('\t');
+    const path = pathParts.join('\t');
     const binary = added === '-' && deleted === '-';
     const counts = { additions: binary ? 0 : Number(added) || 0, deletions: binary ? 0 : Number(deleted) || 0, binary };
     if (path) entries.push({ path, ...counts });
@@ -181,6 +182,13 @@ function readPatch(args: string[], limit: number, timeoutMs: number): Promise<{ 
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
+/** 与 core.quotePath=false 的 Git 补丁路径格式一致：空格、Unicode 原样，控制字符用 C 转义。 */
+function patchPath(path: string): string {
+  const escapes: Record<string, string> = { '\x07': '\\a', '\b': '\\b', '\t': '\\t', '\n': '\\n', '\v': '\\v', '\f': '\\f', '\r': '\\r', '"': '\\"', '\\': '\\\\' };
+  const escaped = path.replace(/[\x00-\x1f\x7f"\\]/g, char => escapes[char] ?? `\\${char.charCodeAt(0).toString(8).padStart(3, '0')}`);
+  return escaped === path ? path : `"${escaped}"`;
+}
+
 function parseHunks(section: string[]): TurnDiffHunk[] {
   const hunks: TurnDiffHunk[] = [];
   let current: TurnDiffHunk | undefined;
@@ -205,7 +213,8 @@ function parseHunks(section: string[]): TurnDiffHunk[] {
 
 /**
  * 两棵树之间的改动，按文件拆好给 diff 页。文件清单与增删行数来自 numstat，正文来自同一次比较的补丁：
- * 两者按同一顺序输出，第 i 段补丁就是第 i 个文件。二进制、单文件超限只给占位；补丁总量超限时后面的文件只列名字。
+ * 按路径关联补丁段，普通文件与符号链接互换时合并同一路径的删除、新增两段。
+ * 二进制、单文件超限只给占位；补丁总量超限时后面的文件只列名字。
  */
 export async function readTurnDiff(gitDir: string, before: string, after: string, limits = { file: TURN_DIFF_FILE_LIMIT_BYTES, total: TURN_DIFF_TOTAL_LIMIT_BYTES }, timeoutMs = 15_000): Promise<{ summary: TurnDiffSummary; files: TurnDiffFile[]; truncated: boolean }> {
   const entries = parseNumstat(await git([...diffArgs(gitDir), '--numstat', '-z', before, after], { timeout: timeoutMs }));
@@ -215,20 +224,33 @@ export async function readTurnDiff(gitDir: string, before: string, after: string
     if (line.startsWith('diff --git ')) sections.push([line]);
     else sections.at(-1)?.push(line);
   }
-  // 被截断的最后一段不完整，不展开。
-  if (patch.cut) sections.pop();
-  const files = entries.map((entry, index): TurnDiffFile => {
-    const section = sections[index];
-    const headerEnd = section ? section.findIndex(line => line.startsWith('@@ ') || line.startsWith('Binary files ')) : -1;
-    const header = section ? section.slice(0, headerEnd < 0 ? section.length : headerEnd) : [];
-    const status = header.some(line => line.startsWith('new file mode')) ? 'added'
-      : header.some(line => line.startsWith('deleted file mode')) ? 'deleted'
-        : entry.oldPath !== undefined ? 'renamed' : 'modified';
+  // 被截断的最后一段不完整，同一路径已读到的另一段也不能单独展开。
+  const incomplete = patch.cut ? sections.pop() : undefined;
+  const byHeader = new Map<string, string[][]>();
+  for (const section of sections) {
+    const matching = byHeader.get(section[0]!) ?? [];
+    matching.push(section); byHeader.set(section[0]!, matching);
+  }
+  const files = entries.map((entry): TurnDiffFile => {
+    const patchHeader = `diff --git ${patchPath(`a/${entry.oldPath ?? entry.path}`)} ${patchPath(`b/${entry.path}`)}`;
+    // 含空格的路径未加引号，改名的 diff header 可能相同；用 rename 元数据区分，避免误合并。
+    const matching = (byHeader.get(patchHeader) ?? []).filter(section => entry.oldPath !== undefined
+      ? section.includes(`rename from ${patchPath(entry.oldPath)}`) && section.includes(`rename to ${patchPath(entry.path)}`)
+      : !section.some(line => line.startsWith('rename from ')));
+    const headers = matching.flatMap(section => {
+      const end = section.findIndex(line => line.startsWith('@@ ') || line.startsWith('Binary files '));
+      return section.slice(0, end < 0 ? section.length : end);
+    });
+    const added = headers.some(line => line.startsWith('new file mode'));
+    const deleted = headers.some(line => line.startsWith('deleted file mode'));
+    const status = entry.oldPath !== undefined ? 'renamed' : added && !deleted ? 'added' : deleted && !added ? 'deleted' : 'modified';
     const base = { path: entry.path, ...(entry.oldPath !== undefined ? { oldPath: entry.oldPath } : {}), status, additions: entry.additions, deletions: entry.deletions } as const;
     if (entry.binary) return { ...base, placeholder: 'binary', hunks: [] };
-    if (!section) return { ...base, placeholder: 'omitted', hunks: [] };
+    // UTF-8 路径可能在多字节字符中间被截断，末尾的替代字符不属于 header 前缀。
+    if (!matching.length || (incomplete && patchHeader.startsWith(incomplete[0]!.replace(/\ufffd$/, '')))) return { ...base, placeholder: 'omitted', hunks: [] };
+    const section = matching.flat();
     if (section.reduce((size, line) => size + Buffer.byteLength(line) + 1, 0) > limits.file) return { ...base, placeholder: 'too_large', hunks: [] };
-    return { ...base, hunks: parseHunks(section) };
+    return { ...base, hunks: matching.flatMap(section => parseHunks(section)) };
   });
   const summary = { files: entries.length, additions: entries.reduce((sum, entry) => sum + entry.additions, 0), deletions: entries.reduce((sum, entry) => sum + entry.deletions, 0) };
   return { summary, files, truncated: files.some(file => file.placeholder === 'omitted') };

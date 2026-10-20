@@ -1,5 +1,5 @@
 import type { AgentModelSettingsPatch } from './agent-model-settings.js';
-import { collaborationParticipationModes, groupReplyModes, mentionPolicies, riskControlModes, type PublicChannelBotFoundation, type UpdateChannelBotInput, type UpdateCollaborationSettingsInput } from '@dutydeck/shared';
+import { collaborationParticipationModes, groupReplyModes, mentionPolicies, riskControlModes, type GroupBinding, type UpdateGroupBindingInput, type PublicChannelBotFoundation, type UpdateChannelBotInput, type UpdateCollaborationSettingsInput } from '@dutydeck/shared';
 import type { CollaborationRouteOptions } from './collaboration-routes.js';
 import type { GroupConfigPatch, ManagedGroup, ManagedGroupBot } from './lark/group-management.js';
 import type { SaveLarkConfigRequest } from './lark/routes.js';
@@ -16,6 +16,7 @@ export type SettingsAction =
   | 'instances' | 'agents' | 'agent-show' | 'agent-set'
   | 'bot-list' | 'bot-show' | 'bot-add' | 'bot-set' | 'bot-remove' | 'bot-install-hook'
   | 'channel-bot-list' | 'channel-bot-show' | 'channel-bot-set'
+  | 'group-binding-list' | 'group-binding-show' | 'group-binding-add' | 'group-binding-set'
   | 'group-list' | 'group-show' | 'group-set' | 'group-members' | 'group-sync'
   | 'usage-show' | 'usage-set-cap' | 'usage-remove-cap';
 
@@ -26,6 +27,7 @@ export interface SettingsCliInput {
   database?: string;
   appId?: string;
   channelBotId?: string;
+  groupBindingId?: string;
   expectedRevision?: string;
   chatId?: string;
   pairs?: string[];
@@ -59,7 +61,7 @@ export const botFields = {
   roleTitle: 'string', roleScope: 'string',
   preInjectPrompt: 'string', verificationCommand: 'string', listening: 'boolean',
   mentionPolicy: mentionPolicies, defaultGroupParticipation: collaborationParticipationModes,
-  p2pMode: ['chat', 'thread'], groupReplyMode: groupReplyModes,
+  p2pMode: ['chat', 'thread'], groupReplyMode: [...groupReplyModes, 'auto'],
   idleCompactEnabled: 'boolean', idleCompactHours: 'integer',
   groupToolsEnabled: 'boolean', groupToolsAllowSend: 'boolean',
   memoryEnabled: 'boolean', memoryAutoExtract: 'boolean', groupMemoryScope: ['shared', 'per-group'], memoryAgentId: 'string', memoryModel: 'string',
@@ -84,6 +86,11 @@ const bindingFields = {
   agentOverride: 'override', workspaceOverride: 'override', modelOverride: 'override', reasoningOverride: 'override',
   routingOverride: 'json', accessOverride: 'json', groupToolsOverride: 'json', presentationOverride: 'json'
 } satisfies Record<keyof GroupConfigPatch, FieldKind>;
+export const groupBindingFields = {
+  ...bindingFields, rolePolicyOverride: 'override', reviewReasons: 'list'
+} satisfies Record<Exclude<keyof UpdateGroupBindingInput, 'expectedRevision'>, FieldKind>;
+const { state: _state, ...groupBindingCreateFields } = groupBindingFields;
+export { groupBindingCreateFields };
 const collaborationFields = {
   participation: collaborationParticipationModes, inheritParticipation: 'boolean', instructions: 'string', notificationsPaused: 'boolean',
   maxProactivePerHour: 'integer', maxDecisionsPerHour: 'integer', retentionDays: 'integer', policyVersion: 'string'
@@ -120,7 +127,7 @@ export const fieldsHelp = (fields: Record<string, FieldKind>) =>
 function parseValue(key: string, raw: string, kind: FieldKind): unknown {
   const invalid = () => new SettingsCliError('SETTINGS_VALUE_INVALID', `${key} expects ${describeKind(kind)}`);
   const json = () => { try { return JSON.parse(raw) as unknown; } catch { throw invalid(); } };
-  if (typeof kind !== 'string') { if (kind.includes(raw)) return raw === 'null' ? null : raw; throw invalid(); }
+  if (typeof kind !== 'string') { if (kind.includes(raw)) return raw === 'null' || (key === 'groupReplyMode' && raw === 'auto') ? null : raw; throw invalid(); }
   if (kind === 'boolean') { if (raw === 'true' || raw === 'false') return raw === 'true'; throw invalid(); }
   if (kind === 'integer' || kind === 'integer|null') {
     if (kind === 'integer|null' && raw === 'null') return null;
@@ -207,6 +214,24 @@ async function findChannelBot(request: Request, id: string) {
   const bot = (await channelBots(request)).find(bot => bot.id === id);
   if (!bot) throw new SettingsCliError('SETTINGS_CHANNEL_BOT_NOT_FOUND', `Channel bot ${id} is not configured; see \`dutydeck settings channel-bot list\``);
   return bot;
+}
+
+async function groupBindings(request: Request, channelBotId?: string): Promise<GroupBinding[]> {
+  const matrix = await request('GET', '/api/foundation/group-matrix') as { bots: Array<{ bot: PublicChannelBotFoundation; cells: Array<{ desiredPolicy?: GroupBinding }> }> };
+  return matrix.bots.filter(entry => !channelBotId || entry.bot.id === channelBotId).flatMap(entry => entry.cells.flatMap(cell => cell.desiredPolicy ? [cell.desiredPolicy] : []));
+}
+
+async function findGroupBinding(request: Request, id: string) {
+  const binding = (await groupBindings(request)).find(binding => binding.id === id);
+  if (!binding) throw new SettingsCliError('SETTINGS_GROUP_BINDING_NOT_FOUND', `Group binding ${id} is unknown; see \`dutydeck settings group-binding list\``);
+  return binding;
+}
+
+function expectedRevision(input: SettingsCliInput): number | undefined {
+  if (input.expectedRevision === undefined) return undefined;
+  const revision = Number(input.expectedRevision);
+  if (!/^\d+$/.test(input.expectedRevision) || !Number.isSafeInteger(revision) || revision < 1) throw new SettingsCliError('SETTINGS_VALUE_INVALID', 'Expected revision must be a positive integer');
+  return revision;
 }
 
 function larkStageOnly(fields: Record<string, unknown>, what: string) {
@@ -302,12 +327,26 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
       const id = required(input.channelBotId, 'Channel bot ID');
       const fields = parsePairs(input.pairs ?? [], channelBotFields, 'dutydeck settings channel-bot set --help');
       if (!Object.keys(fields).length) throw new SettingsCliError('SETTINGS_ARGUMENT_REQUIRED', 'Pass at least one key=value');
-      const revision = input.expectedRevision === undefined ? undefined : Number(input.expectedRevision);
-      if (revision !== undefined && (!/^\d+$/.test(input.expectedRevision!) || !Number.isSafeInteger(revision) || revision < 1)) {
-        throw new SettingsCliError('SETTINGS_VALUE_INVALID', 'Expected revision must be a positive integer');
-      }
+      const revision = expectedRevision(input);
       const bot = await findChannelBot(request, id);
       return { bot: await request('PATCH', `/api/foundation/channel-bots/${path(id)}`, { expectedRevision: revision ?? bot.revision, ...fields }) };
+    }
+    case 'group-binding-list': return { bindings: await groupBindings(request, input.channelBotId) };
+    case 'group-binding-show': return { binding: await findGroupBinding(request, required(input.groupBindingId, 'Group binding ID')) };
+    case 'group-binding-add': {
+      const id = required(input.groupBindingId, 'Group binding ID');
+      const channelBotId = required(input.channelBotId, '--bot');
+      const externalChatId = required(input.chatId, '--chat');
+      const fields = parsePairs(input.pairs ?? [], groupBindingCreateFields, 'dutydeck settings group-binding add --help');
+      return { binding: await request('POST', '/api/foundation/group-bindings', { id, channelBotId, externalChatId, ...fields }) };
+    }
+    case 'group-binding-set': {
+      const id = required(input.groupBindingId, 'Group binding ID');
+      const fields = parsePairs(input.pairs ?? [], groupBindingFields, 'dutydeck settings group-binding set --help');
+      if (!Object.keys(fields).length) throw new SettingsCliError('SETTINGS_ARGUMENT_REQUIRED', 'Pass at least one key=value');
+      const revision = expectedRevision(input);
+      const binding = await findGroupBinding(request, id);
+      return { binding: await request('PATCH', `/api/foundation/group-bindings/${path(id)}`, { expectedRevision: revision ?? binding.revision, ...fields }) };
     }
     case 'bot-list': {
       const config = await request('GET', '/api/lark/config') as { bots: PublicBot[]; listeningDisabled?: boolean };

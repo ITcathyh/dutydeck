@@ -939,7 +939,7 @@ function flagValue(args: string[], name: string): string | undefined {
 
 /**
  * 按 unit 找到它托管的运行时。`start --foreground` 的 unit 从守护状态读地址和数据库；直接 serve 的
- * unit（如 Tag 运行时）没有守护状态，按 ExecStart 的 --host / --port / --local-only / --database 推出来。
+ * unit（如 Tag 运行时）没有守护状态，按 ExecStart 参数和环境变量推出来。
  */
 export async function unitRuntime(unit: string, deps: DaemonCommandDeps): Promise<UnitRuntime | { error: string }> {
   if ((deps.platform ?? process.platform) !== 'linux') return { error: `--unit 只支持 Linux 上的 systemd user unit。` };
@@ -961,7 +961,9 @@ export async function unitRuntime(unit: string, deps: DaemonCommandDeps): Promis
     ...(info.args.includes('--local-only') ? { localOnly: true } : {}),
     ...(info.args.includes('--no-auth') ? { auth: false } : {})
   }, env);
-  return { ...base, endpoint: { address, authEnabled, database: resolve(root, flagValue(info.args, '--database') ?? '.dutydeck/dutydeck.db') } };
+  const cwd = flagValue(info.args, '--cwd') ?? env.DUTYDECK_DEFAULT_CWD ?? '.';
+  const database = resolve(root, cwd, flagValue(info.args, '--database') ?? env.DUTYDECK_DATABASE_URL ?? '.dutydeck/dutydeck.db');
+  return { ...base, endpoint: { address, authEnabled, database } };
 }
 
 /**

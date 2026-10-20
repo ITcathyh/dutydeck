@@ -3,7 +3,7 @@ import type { RecoveryCliOptions, RecoveryOperation } from './recovery-cli.js';
 import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
 import type { SessionNamesAction } from './session-names-cli.js';
 import type { ScheduleCliAction, ScheduleCliInput, ScheduleRequestCliInput } from './schedule-cli.js';
-import { agentFields, botFields, channelBotFields, fieldsHelp, groupFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
+import { agentFields, botFields, channelBotFields, fieldsHelp, groupFields, groupBindingFields, groupBindingCreateFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { agentCommandHelp } from './lark/agent-command.js';
 import { addAgentCommands } from './agent-cli.js';
 import { Command } from 'commander';
@@ -796,6 +796,22 @@ Examples:
     .option('--expected-revision <number>', 'Reject a concurrent edit; defaults to the revision just read'))
     .addHelpText('after', fieldsHelp(channelBotFields))
     .action((channelBotId, pairs, options, command) => runSettings('channel-bot-set', command, { channelBotId, pairs, expectedRevision: options.expectedRevision }));
+
+  const groupBindingSettings = settings.command('group-binding').description('Offline foundation group policy drafts (dashboard: 群配置与权限); does not activate runtime policies');
+  withTarget(groupBindingSettings.command('list').description('List offline bindings by internal ID')
+    .option('--bot <id>', 'Only bindings of this internal channel bot ID'))
+    .action((options, command) => runSettings('group-binding-list', command, { channelBotId: options.bot }));
+  withTarget(groupBindingSettings.command('show <id>').description('Show a foundation group binding by internal ID'))
+    .action((groupBindingId, _options, command) => runSettings('group-binding-show', command, { groupBindingId }));
+  withTarget(groupBindingSettings.command('add <id> [key=value...]').description('Create a staged offline binding; existing bindings are never overwritten')
+    .requiredOption('--bot <id>', 'Internal channel bot ID')
+    .requiredOption('--chat <chat-id>', 'External chat ID'))
+    .addHelpText('after', fieldsHelp(groupBindingCreateFields))
+    .action((groupBindingId, pairs, options, command) => runSettings('group-binding-add', command, { groupBindingId, channelBotId: options.bot, chatId: options.chat, pairs }));
+  withTarget(groupBindingSettings.command('set <id> <key=value...>').description('Update an offline binding; omitted keys keep their values')
+    .option('--expected-revision <number>', 'Reject a concurrent edit; defaults to the revision just read'))
+    .addHelpText('after', fieldsHelp(groupBindingFields))
+    .action((groupBindingId, pairs, options, command) => runSettings('group-binding-set', command, { groupBindingId, pairs, expectedRevision: options.expectedRevision }));
 
   const groupSettings = settings.command('group').description('Per-group settings of each bot (dashboard: 群聊)');
   withTarget(groupSettings.command('list').description('List synced groups and the binding of each bot')

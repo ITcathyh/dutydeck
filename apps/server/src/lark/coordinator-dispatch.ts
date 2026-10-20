@@ -642,11 +642,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     for (const row of await this.workflowOptions.store?.list?.(prefix) ?? []) (group.retiredSessionIds ??= new Set()).add(row.key.slice(prefix.length));
   }
 
-  protected async sessionFor(group: LarkGroup, config: StoredLarkConfig, chatId: string, chatType: LarkMessageEvent['chatType'], scopeId: string, launchOptions?: LarkLaunchOptions) {
+  protected async sessionFor(group: LarkGroup, config: StoredLarkConfig, chatId: string, chatType: LarkMessageEvent['chatType'], scopeId: string, launchOptions?: LarkLaunchOptions, beforeStart?: () => Promise<LarkLaunchOptions>) {
     // 建会话期间把 promise 挂到 group 上：并发的 /new 需要等它落地，才能把这条
     // 刚建出来的会话一起停掉，而不是让它在 /new 之后变成一个没人管的新上下文。
     const pending = this.skipRetainedSessions(group, config.appId)
-      .then(() => resolveLarkSession(this.runtime, this.log, group, config, chatId, chatType, scopeId, this.cardMappings, launchOptions));
+      .then(() => resolveLarkSession(this.runtime, this.log, group, config, chatId, chatType, scopeId, this.cardMappings, launchOptions, beforeStart));
     const tracked = pending.catch(() => undefined);
     group.pendingSession = tracked;
     try { return await pending; }
@@ -940,9 +940,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       // 附件下载与身份解析都可能很慢，期间用户可能已经 /new。此刻建会话等于把旧请求
       // 送进一个用户已经宣布结束的上下文，还会顺带创建一条新会话污染新上下文。
       if (await this.supersededTurn(task)) return;
-      if (task.launchOptions && task.restoring && !resumeTask && !task.inbox?.sessionId) task.launchOptions = await this.validateNewSession(config, event, task.launchOptions);
-      if (await this.supersededTurn(task)) return;
-      session = resumeTask ? (await this.runtime.getSession(resumeTask.sessionId))! : task.inbox?.sessionId ? (await this.runtime.getSession(task.inbox.sessionId))! : await this.sessionFor(group, config, event.chatId, event.chatType, task.scopeId, task.launchOptions);
+      session = resumeTask ? (await this.runtime.getSession(resumeTask.sessionId))! : task.inbox?.sessionId ? (await this.runtime.getSession(task.inbox.sessionId))! : await this.sessionFor(group, config, event.chatId, event.chatType, task.scopeId, task.launchOptions,
+        task.launchOptions && restoring ? async () => (task.launchOptions = await this.validateNewSession(config, event, task.launchOptions!)) : undefined);
       if (!session) throw new LarkServiceError('LARK_SESSION_MISSING', '原任务会话已不存在，请重新发送目标。', 409);
       // 建会话本身也可能卡住（runtime.start 未返回）。回来后再确认一次，
       // 并把这条会话交给 /new 收走，不留下一个游离的新上下文。

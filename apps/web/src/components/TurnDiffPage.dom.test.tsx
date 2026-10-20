@@ -27,7 +27,7 @@ function renderPage(shared = true) {
   return render(<QueryClientProvider client={client}><TurnDiffPage sessionId="ses_1" taskId="task_1" shared={shared}/></QueryClientProvider>);
 }
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('TurnDiffPage', () => {
   it('按文件折叠显示这一轮的改动，二进制、超大和超出上限的文件只显示占位，并提示截断', async () => {
@@ -102,5 +102,60 @@ describe('TurnDiffPage', () => {
     expect(turnDiffFromLocation('/diff/ses_1/task_1', '#bad token')).toEqual({ sessionId: 'ses_1', taskId: 'task_1', token: '' });
     expect(turnDiffFromLocation('/diff/ses_1', '')).toBeUndefined();
     expect(turnDiffFromLocation('/share/ses_1', '#x')).toBeUndefined();
+  });
+});
+
+
+describe('TurnDiffPage pending comment submissions', () => {
+  it.each(['added', 'edited', 'recreated', 'deleted', 'unchanged', 'failure', 'shared'] as const)('only clears successfully submitted draft versions: %s', async change => {
+    let settle!: (response: Response) => void;
+    const payloads: unknown[] = [];
+    const response = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
+    vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        payloads.push(JSON.parse(String(init.body)));
+        return new Promise<Response>(resolve => { settle = resolve; });
+      }
+      return response(diff);
+    }));
+    renderPage(change === 'shared');
+    const saveComment = async (line: number, body: string) => {
+      fireEvent.click(await screen.findByRole('button', { name: `评论 src/app.ts 第 ${line} 行` }));
+      fireEvent.change(screen.getByLabelText(`src/app.ts 第 ${line} 行的评论`), { target: { value: body } });
+      fireEvent.click(screen.getByRole('button', { name: '添加评论' }));
+    };
+    await saveComment(1, 'Submitted original');
+    // This second submitted object must clear even if the first is replaced.
+    await saveComment(2, 'Submitted unchanged');
+    fireEvent.click(screen.getByRole('button', { name: '提交评论' }));
+    await waitFor(() => expect(payloads).toHaveLength(1));
+    expect(screen.getByRole('button', { name: '提交评论' }).hasAttribute('disabled')).toBe(true);
+    if (['added', 'failure', 'shared'].includes(change)) await saveComment(3, 'New unsent comment');
+    if (change === 'edited') await saveComment(1, 'Edited unsent comment');
+    if (change === 'recreated' || change === 'deleted') {
+      fireEvent.click(screen.getByText('Submitted original').parentElement!.querySelector('button')!);
+      if (change === 'recreated') await saveComment(1, 'Submitted original');
+    }
+    expect(payloads).toEqual([{ comments: [
+      { path: 'src/app.ts', side: 'new', line: 1, body: 'Submitted original' },
+      { path: 'src/app.ts', side: 'new', line: 2, body: 'Submitted unchanged' }
+    ] }]);
+    settle(change === 'failure' ? response({ error: 'Comments unavailable' }, 503) : response({ delivery: change === 'shared' ? 'lark_confirmation' : 'dispatched' }, 202));
+    if (change === 'failure') {
+      expect(await screen.findByText(/提交失败/)).toBeTruthy();
+      expect(screen.getByText('Submitted original')).toBeTruthy();
+      expect(screen.getByText('Submitted unchanged')).toBeTruthy();
+      expect(screen.getByText('New unsent comment')).toBeTruthy();
+      expect(screen.getByText(/3 条评论待提交/)).toBeTruthy();
+    } else {
+      await screen.findByText(change === 'shared' ? '评论已发到飞书话题，等有权限的人确认后交给 Agent 修改。' : '评论已作为新一轮请求发给 Agent。');
+      expect(screen.queryByText('Submitted unchanged')).toBeNull();
+      if (['added', 'shared'].includes(change)) expect(screen.getByText('New unsent comment')).toBeTruthy();
+      if (change === 'edited') expect(screen.getByText('Edited unsent comment')).toBeTruthy();
+      expect(Boolean(screen.queryByText('Submitted original'))).toBe(change === 'recreated');
+      if (change === 'unchanged' || change === 'deleted') expect(screen.queryByText(/条评论待提交/)).toBeNull();
+      else expect(screen.getByText(/1 条评论待提交/)).toBeTruthy();
+    }
+    expect(payloads).toHaveLength(1);
   });
 });

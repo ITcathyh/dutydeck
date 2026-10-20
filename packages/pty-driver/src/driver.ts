@@ -695,7 +695,7 @@ export class PtyCliDriver implements AgentDriver {
    * 适配器认不出空输入框时返回 false。
    */
   isIdle(): boolean {
-    const screen = this.snapshot?.viewportText();
+    const screen = this.snapshot?.viewportText({ preserveStructure: true });
     if (this.stopped || this.turnActive || this.activeSubmission || !screen || !this.adapter.isIdleScreen) return false;
     const { screenActivityPattern: activity, backgroundWaitPattern: background, completionPattern: completion, screenCancelledPattern: cancelled } = this.adapter;
     const statusLine = screen.split('\n').reverse().find(line => activity?.test(line) || background?.test(line) || completion?.test(line) || cancelled?.test(line));
@@ -934,7 +934,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private resumableNativeSession(): string | undefined {
-    if (!this.adapter.buildResumeCommand || !claudeSessionIdLookup.adapterIds.includes(this.adapter.id)) return undefined;
+    if (!this.adapter.buildResumeCommand || (!claudeSessionIdLookup.adapterIds.includes(this.adapter.id) && this.adapter.id !== 'codex')) return undefined;
     const found = resolveCliSessionId(this.adapter.id, {
       sessionId: this.sessionId, cwd: this.cwd, env: this.spawnEnv(), requireMarker: true,
     });
@@ -1495,7 +1495,7 @@ export class PtyCliDriver implements AgentDriver {
 
   private completeInputError(): boolean {
     if (!this.idleDetector?.programStatusAllowsIdle()) return false;
-    if (!this.turnActive || !this.turnInputConfirmed || this.interruptPending) return false;
+    if (!this.turnActive || !(this.turnInputConfirmed || this.transcript?.hasRecoveredInput?.()) || this.interruptPending) return false;
     const error = this.transcript?.takeInputError?.();
     const cancelled = this.transcript?.takeInputCancellation?.() ?? false;
     if (!error && !cancelled) return false;

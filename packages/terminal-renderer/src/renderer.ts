@@ -47,7 +47,7 @@ const DEFAULT_ROWS = 30;
  */
 function readViewportText(
   terminal: InstanceType<typeof Terminal>,
-  opts: { filter: boolean; readCols?: number },
+  opts: { filter: boolean; readCols?: number; preserveStructure?: boolean },
 ): string {
   const buffer = terminal.buffer.active;
   const readCols = Math.min(opts.readCols ?? SNAPSHOT_COLS, terminal.cols);
@@ -59,7 +59,8 @@ function readViewportText(
   for (let y = baseY; y < endY; y++) {
     const line = buffer.getLine(y);
     if (!line) continue;
-    const s = cleanBoxDrawing(line.translateToString(true, 0, readCols));
+    const raw = line.translateToString(true, 0, readCols);
+    const s = opts.preserveStructure ? raw : cleanBoxDrawing(raw);
     if (opts.filter && (BARE_PROMPT_RE.test(s) || INPUT_ECHO_RE.test(s))) continue;
     lines.push(s);
   }
@@ -152,10 +153,11 @@ export class TerminalSnapshot {
   /**
    * Unfiltered viewport text for terminal interactions. Unlike text(), this
    * retains a bare composer prompt and menu selections so callers can make a
-   * decision from the screen currently visible to the user.
+   * decision from the screen currently visible to the user. preserveStructure
+   * also keeps box borders and spacing for structural composer recognition.
    */
-  viewportText(): string {
-    return readViewportText(this.terminal, { filter: false });
+  viewportText(options: { preserveStructure?: boolean } = {}): string {
+    return readViewportText(this.terminal, { filter: false, ...options });
   }
 
   /** Last non-empty logical line, joining physical rows wrapped by xterm. */

@@ -250,7 +250,7 @@ export function BotManagement({
       p2pMode: draft.p2pMode,
       idleCompactEnabled: draft.idleCompactEnabled,
       idleCompactHours: Number(draft.idleCompactHours),
-      groupReplyMode: draft.groupReplyMode || undefined,
+      groupReplyMode: draft.groupReplyMode || null,
       mentionPolicy: draft.mentionPolicy,
       defaultGroupParticipation: draft.defaultGroupParticipation,
       roleTitle: draft.roleTitle,

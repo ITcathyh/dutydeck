@@ -123,3 +123,16 @@ it('serializes history, cursor, alternate screen and mouse encoding at the queue
     expect(restored.viewportText()).toContain('normal prompt');
   } finally { source.dispose(); restored.dispose(); }
 });
+
+
+it('preserves structural characters and spacing only on request, within the current viewport', async () => {
+  const snap = new TerminalSnapshot(80, 3);
+  try {
+    await snap.writeAndFlush('STALE BORDER ────────\r\nold output\r\n\x1b[36m────────────────\x1b[0m\r\n❯  draft\r\n────────────────');
+    expect(snap.viewportText()).not.toContain('─');
+    const structural = snap.viewportText({ preserveStructure: true });
+    expect(structural).toBe('────────────────\n❯  draft\n────────────────');
+    expect(structural).not.toContain('STALE BORDER');
+    expect(structural).not.toContain('\x1b');
+  } finally { snap.dispose(); }
+});

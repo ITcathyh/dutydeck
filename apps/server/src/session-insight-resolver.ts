@@ -418,7 +418,7 @@ function extractCodexFamilyRelationship(source: any): FileRelationship | undefin
       kind: 'fork',
       parentNativeSessionId: forkParent,
       parentNativeAgentId: null,
-      evidenceRefs: ['session_meta:source.subagent.thread_fork'],
+      evidenceRefs: [source.subagent?.thread_fork != null ? 'session_meta:source.subagent.thread_fork' : 'session_meta:source'],
     };
   }
   const spawnParent = parentFrom(source.subagent?.thread_spawn);

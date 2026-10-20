@@ -43,10 +43,10 @@ const collection = (overrides: Partial<LarkBotConfig> = {}): LarkConfig => ({
   listeningDisabled: false
 });
 
-function renderModal(config: LarkConfig = collection(), source: 'acp' | 'cli' | 'agent' = 'acp', target?: import('../app-route').LarkSetupTarget) {
+function renderModal(config: LarkConfig = collection(), source: 'acp' | 'cli' | 'agent' | import('../api').AgentModelsResult = 'acp', target?: import('../app-route').LarkSetupTarget) {
   vi.spyOn(api, 'larkConfig').mockResolvedValue(config);
   vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
-  vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], source });
+  vi.spyOn(api, 'agentModels').mockResolvedValue(typeof source === 'object' ? source : { models: [], reasoningEfforts: [], source });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} target={target} onClose={() => {}}/></QueryClientProvider>);
   return client;
@@ -439,6 +439,38 @@ describe('LarkConfigModal 模态外壳契约', () => {
   });
 });
 
+
+describe('LarkConfigModal metadata-free ACP proof', () => {
+  it('creates a new bot with default ask after ACP proof without model enumeration', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: false, bots: [], listeningDisabled: false });
+    vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], protocol: 'acp' });
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', permissionMode: 'ask' }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={client}><LarkConfigModal agents={[{ ...agents[0]!, protocol: 'auto', remoteApproval: true }]} onClose={() => {}}/></QueryClientProvider>);
+    await user.type(await screen.findByPlaceholderText('cli_xxx'), 'cli_test');
+    await user.type(screen.getByPlaceholderText('输入 App Secret'), 'fixture-secret');
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+    const submit = await screen.findByRole('button', { name: '完成配置' }) as HTMLButtonElement;
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    expect(screen.queryByRole('checkbox', { name: /确认飞书任务以 full-trust 运行/ })).toBeNull();
+    await user.click(submit);
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(save.mock.calls[1]![0]).toMatchObject({ stage: 'agent', permissionMode: 'ask', fullTrustConfirmed: false });
+  });
+
+  it.each(['ask', 'approve-reads'] as const)('saves %s with verified protocol and no model metadata', async permissionMode => {
+    const user = userEvent.setup();
+    renderModal(collection({ defaultAgentId: 'codex', permissionMode, setupComplete: true }), { models: [], reasoningEfforts: [], protocol: 'acp' });
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ permissionMode, setupComplete: true }));
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    const submit = await screen.findByRole('button', { name: '完成配置' }) as HTMLButtonElement;
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await user.click(submit);
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ permissionMode, fullTrustConfirmed: false })));
+  });
+});
 
 describe('LarkConfigModal ask permission posture', () => {
   it('saves ask without a full-trust confirmation for an ACP Agent', async () => {

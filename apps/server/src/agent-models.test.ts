@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AcpRuntime } from 'acpx/runtime';
+import { AcpxAdapter } from '@dutydeck/acp-client';
+import { createRuntimeStore } from 'acpx/runtime';
 import { agentConfigSchema } from '@dutydeck/shared';
 import {
   AgentModelProbeTimeoutError,
@@ -58,6 +60,40 @@ describe('ACP-first Agent model discovery', () => {
       await expect(discoverAgentModels(agent, undefined, true)).resolves.toEqual({ models: [], reasoningEfforts: [], source: 'agent' });
       expect(existsSync(marker)).toBe(false);
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('keeps ACP proof without optional models and supports real persisted permission requests', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'dutydeck-no-model-acp-'));
+    const agent = agentConfigSchema.parse({ id: 'metadata-free-acp', name: 'Metadata-free ACP', command: process.execPath,
+      args: [resolve('tests/fixtures/mock-acp-agent.mjs')], protocol: 'acp', cwd, env: { MOCK_VENDOR_TOKEN: '' }, timeout: 10 });
+    const events: any[] = [];
+    const approvals: Promise<boolean>[] = [];
+    const adapter = new AcpxAdapter(agent, { sessionKey: 'metadata-free-approval', onEvent: event => {
+      events.push(event);
+      if (event.type === 'permission_request' && event.data.status === 'pending') approvals.push(adapter.resolvePermission(event.data.id, true));
+    } });
+    try {
+      const result = await discoverAgentModels(agent, undefined, true);
+      expect(result).toMatchObject({ protocol: 'acp', models: [], reasoningEfforts: [] });
+      expect(await discoverAgentModels(agent, undefined, true)).toEqual(result);
+      await adapter.start(); await adapter.send('permission');
+      expect(await Promise.all(approvals)).toEqual([true]);
+      expect(events.filter(event => event.type === 'text').map(event => event.data.text).join('')).toContain('"optionId":"allow"');
+      expect(events.filter(event => event.type === 'permission_request' && event.data.status === 'pending')).toHaveLength(1);
+      const record = await createRuntimeStore({ stateDir: join(cwd, '.dutydeck/acpx') }).load('metadata-free-approval');
+      expect(record?.acpSessionId).toBeTruthy();
+      expect(Object.keys(record?.acpx?.session_options?.env ?? {}).every(key => /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(key))).toBe(true);
+    } finally { await adapter.stop({ discardSession: true }); rmSync(cwd, { recursive: true, force: true }); }
+  });
+
+  it('preserves ACP protocol proof when optional model enumeration falls back to the CLI', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'dutydeck-acp-cli-models-'));
+    const command = join(cwd, 'opencode');
+    writeFileSync(command, `#!${process.execPath}\nif (process.argv.includes('models')) process.stdout.write('cli-model\\n'); else import(${JSON.stringify(resolve('tests/fixtures/mock-acp-agent.mjs'))});\n`, { mode: 0o755 });
+    try {
+      const result = await discoverAgentModels(agentConfigSchema.parse({ id: 'opencode', name: 'ACP with CLI models', command, protocol: 'auto', cwd, env: { MOCK_VENDOR_TOKEN: '' }, timeout: 10 }), undefined, true);
+      expect(result).toMatchObject({ protocol: 'acp', source: 'cli', models: [{ id: 'cli-model', name: 'cli-model' }] });
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
 
   it('uses Agent-advertised model identifiers and display names', () => {

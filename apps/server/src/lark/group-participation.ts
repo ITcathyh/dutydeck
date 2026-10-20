@@ -919,11 +919,11 @@ export class LarkGroupParticipation {
   /** 别的 Bot 声明自己成为或不再是接话人。声明比本地记录还早（乱序或重放）时不回退。 */
   private async syncResponder(scope: CollaborationScope, duty: CollaborationDuty, announcement: { kind: 'claim' | 'release'; name?: string }, appId: string, event: LarkMessageEvent) {
     const repo = this.options.repository;
+    const at = observationTime(event.createTime, this.now().toISOString());
     if (announcement.kind === 'release') {
-      if (duty.responder?.appId === appId) await repo.updateDuty(scope, { expectedRevision: duty.revision, responder: null }, `bot:${appId}`);
+      if (duty.responder?.appId === appId && Date.parse(duty.responder.since) <= Date.parse(at)) await repo.updateDuty(scope, { expectedRevision: duty.revision, responder: null }, `bot:${appId}`);
       return;
     }
-    const at = observationTime(event.createTime, this.now().toISOString());
     if (duty.responder && (duty.responder.appId === appId || Date.parse(duty.responder.since) > Date.parse(at))) return;
     await repo.updateDuty(scope, { expectedRevision: duty.revision, responder: { appId, ...(announcement.name ? { name: announcement.name } : {}), since: at } }, `bot:${appId}`);
   }

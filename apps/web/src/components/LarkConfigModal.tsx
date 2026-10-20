@@ -189,7 +189,7 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
   const selectedAgent = agents.find(agent => agent.id === defaultAgentId);
   const claudeModelSettings = supportsModelServiceSettings(selectedAgent, defaultAgentId);
   // ACP 以实测协议为准（auto 可能解析成别的）；Claude 终端模式经权限 hook 在飞书审批。
-  const remoteApprovalReady = agentOptions.data?.source === 'acp' || (selectedAgent?.protocol === 'pty-cli' && selectedAgent.remoteApproval === true);
+  const remoteApprovalReady = agentOptions.data?.protocol === 'acp' || agentOptions.data?.source === 'acp' || (selectedAgent?.protocol === 'pty-cli' && selectedAgent.remoteApproval === true);
   const missingTarget = Boolean(selectedAppId && config.data && !current);
   // 服务端会静默丢掉指向相对路径的别名，所以这里必须先挡住：别名存不进去却不报错，
   // 用户下次 `/new --cwd <别名>` 才会发现，那时已经无从追查。

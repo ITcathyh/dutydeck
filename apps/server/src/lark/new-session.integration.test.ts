@@ -9,6 +9,7 @@ import type { AgentConfig, AgentEvent, ChannelMappingRepository, PolicyAction, S
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
 import { LarkTaskInbox } from './task-inbox.js';
+import { LarkGroupManager } from './group-management.js';
 import { explicitFinalContext, sendExplicitFinal } from './explicit-final.js';
 import { larkCardChannel } from './coordinator-core.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -508,6 +509,119 @@ describe('Lark /new first-turn launch options', () => {
   });
 });
 
+
+describe('managed first-turn recovery authorization', () => {
+  const scenarios = [
+    { name: 'cwd', action: 'run.change_cwd', flags: (directory: string) => `--cwd ${directory}`, options: (directory: string) => ({ cwd: directory }) },
+    { name: 'agent', action: 'run.change_agent', flags: () => '--agent riff', options: () => ({ agentId: 'riff' }) },
+    { name: 'model', action: 'run.change_model', flags: () => '--model gpt-5.5', options: () => ({ model: 'gpt-5.5' }) },
+    { name: 'effort', action: 'run.change_model', flags: () => '--effort high', options: () => ({ reasoningEffort: 'high' }) }
+  ] as const;
+  const settled = async (coordinator: LarkMessageCoordinator) => {
+    await Promise.all([...(coordinator as any).groups.values()].map((group: any) => group.tail));
+  };
+  const managedHarness = async () => {
+    const h = await harness();
+    const agents = [agent(), agent('riff')];
+    for (const item of agents) await h.repos.agents.save(item);
+    h.runtime.listAgents.mockResolvedValue(agents);
+    const manager = new LarkGroupManager(h.repos, { client: config => ({
+      getBotInfo: async () => ({ appName: config.appId, openId: 'ou_bot' }),
+      checkApplicationIdentity: async () => ({ verified: true, reportedAppId: config.appId, tenantKey: 'test-tenant' }),
+      listChats: async () => ({ items: [{ chatId: 'oc_managed', name: 'Managed', external: false }], hasMore: false }),
+      listChatMembers: async () => ({ items: [{ memberId: 'ou_alice', openId: 'ou_alice', name: 'Alice', memberType: 'user' }], hasMore: false, securityLimited: false }),
+      getUserEmails: async () => []
+    }) as any });
+    await manager.sync(h.config.appId);
+    const group = await manager.save(h.config.appId, 'oc_managed', { expectedRevision: 0, patch: {} });
+    const actor = (await manager.members(h.config.appId, 'oc_managed')).members[0]!;
+    const admin = await h.repos.roleAssignments.create({ id: 'test_admin', channelBotId: group.channelBotId!, groupBindingId: group.binding!.id,
+      principalId: actor.principalId, role: 'admin', operateScope: 'none' });
+    const authorization = vi.spyOn(manager, 'authorize');
+    const dispatch = vi.fn(async (sessionId: string, prompt: string, _mode: string, _agentPrompt: string, _risk: unknown, actorId?: string) => {
+      const commit = await manager.prepareTurn(sessionId, actorId); await commit?.();
+      return { id: 'task_managed', sessionId, prompt, status: 'queued', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    });
+    Object.assign(h.runtime, { dispatch });
+    const coordinate = () => {
+      const coordinator = new LarkMessageCoordinator(h.runtime as any, h.service as any, silentLog(), Math.random, 'ou_bot', undefined,
+        h.repos.channelMappings, async () => 'group', undefined, manager, { store: h.repos.config });
+      cleanups.push(async () => coordinator.stop());
+      return coordinator;
+    };
+    const revoke = async () => {
+      await h.repos.roleAssignments.update(admin.id, { expectedRevision: admin.revision, state: 'revoked' });
+      expect(await manager.authorize(h.config.appId, 'oc_managed', 'ou_alice', 'task.create')).toMatchObject({ allowed: true });
+    };
+    return { ...h, manager, authorization, dispatch, coordinate, revoke };
+  };
+
+  it.each(scenarios)('rechecks a persisted $name override after its managed admin grant is revoked', async scenario => {
+    const h = await managedHarness();
+    expect(await h.manager.authorize(h.config.appId, 'oc_managed', 'ou_alice', scenario.action)).toMatchObject({ allowed: true, source: 'admin' });
+    h.runtime.start.mockRejectedValueOnce(new RuntimeError('RUNTIME_SHUTTING_DOWN', 'shutdown before session creation', 503));
+    const event = groupMessage(`om_restore_${scenario.name}`, `/new ${scenario.flags(h.config.workspace!)} -- saved goal`);
+    const first = h.coordinate();
+    await first.handle(event, h.config); await settled(first);
+    expect(h.runtime.start).toHaveBeenCalledOnce();
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    expect(h.dispatch).not.toHaveBeenCalled();
+    const inbox = new LarkTaskInbox(h.repos.config);
+    expect(await inbox.lookup(h.config.appId, event.messageId)).toMatchObject({ state: 'received',
+      request: { prompt: 'saved goal', launchOptions: scenario.options(h.config.workspace!) } });
+    expect((await inbox.lookup(h.config.appId, event.messageId))?.sessionId).toBeUndefined();
+    first.stop();
+    await h.revoke();
+    expect(await h.manager.authorize(h.config.appId, 'oc_managed', 'ou_alice', scenario.action)).toMatchObject({ allowed: false, code: 'admin_required' });
+    h.authorization.mockClear(); h.runtime.start.mockClear();
+    const recovered = h.coordinate();
+    await recovered.initializeWorkflows(h.config); await settled(recovered);
+    expect(h.authorization.mock.calls.map(call => call[3])).toContain(scenario.action);
+    expect(h.runtime.start).not.toHaveBeenCalled();
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    expect(h.dispatch).not.toHaveBeenCalled();
+    expect(await inbox.lookup(h.config.appId, event.messageId)).toMatchObject({ state: 'failed' });
+    expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ state: 'failed', markdown: expect.stringContaining('This action requires owner/admin authority') }));
+  });
+
+  it.each(['started', 'bound'] as const)('reuses a %s session without rechecking its launch options', async stage => {
+    const h = await managedHarness();
+    const event = groupMessage('om_existing_restore', '/new --model gpt-5.5 -- saved goal');
+    if (stage === 'started') {
+      const start = h.runtime.start.getMockImplementation()!;
+      h.runtime.start.mockImplementationOnce(async input => {
+        await start(input);
+        throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'shutdown after session creation', 503);
+      });
+    } else h.service.reply.mockRejectedValueOnce(new Error('temporary card failure'));
+    const first = h.coordinate();
+    await first.handle(event, h.config); await settled(first);
+    expect(h.runtime.start).toHaveBeenCalledOnce();
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    expect(h.dispatch).not.toHaveBeenCalled();
+    const inbox = new LarkTaskInbox(h.repos.config);
+    expect(await inbox.lookup(h.config.appId, event.messageId)).toMatchObject({ state: 'received', request: { launchOptions: { model: 'gpt-5.5' } } });
+    expect((await inbox.lookup(h.config.appId, event.messageId))?.sessionId).toBe(stage === 'started' ? undefined : 'ses_1');
+    first.stop(); await h.revoke(); h.authorization.mockClear();
+    const recovered = h.coordinate();
+    await recovered.initializeWorkflows(h.config); await settled(recovered);
+    expect(h.runtime.start).toHaveBeenCalledOnce();
+    expect(h.dispatch).toHaveBeenCalledOnce();
+    expect(h.dispatch.mock.calls[0]?.[0]).toBe('ses_1');
+    expect(h.authorization.mock.calls.map(call => call[3])).not.toContain('run.change_model');
+    expect(await inbox.lookup(h.config.appId, event.messageId)).toMatchObject({ state: 'accepted', sessionId: 'ses_1' });
+    // An accepted queued task is reattached, without resubmitting or changing its launch options.
+    Object.assign(h.runtime, { getRecentEvents: vi.fn(async () => []) });
+    h.runtime.getTasks.mockResolvedValue([{ id: 'task_managed', sessionId: 'ses_1', prompt: 'saved goal', status: 'queued',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }]);
+    recovered.stop(); h.dispatch.mockClear(); h.authorization.mockClear(); h.runtime.subscribe.mockClear();
+    const accepted = h.coordinate();
+    await accepted.initializeWorkflows(h.config); await settled(accepted);
+    expect(h.runtime.subscribe).toHaveBeenCalledOnce();
+    expect(h.dispatch).not.toHaveBeenCalled();
+    expect(h.authorization.mock.calls.map(call => call[3])).not.toContain('run.change_model');
+  });
+});
 
 describe('durable pre-dispatch rejection', () => {
   it('keeps lifecycle shutdown pending for recovery', async () => {
