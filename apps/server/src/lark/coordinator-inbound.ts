@@ -915,9 +915,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const requests = this.workflowOptions.scheduleRequests;
       if (!automation || !requests) return;
       const messageOrigin = { appId: config.appId, chatId: event.chatId, messageId: event.messageId, replyInThread: Boolean(event.threadId?.trim()) };
-      await runAgentScheduleRequest({ automation, prepareDelivery: id => requests.prepareDelivery(sessionId, messageOrigin, id),
+      const result = await runAgentScheduleRequest({ automation, prepareDelivery: id => requests.prepareDelivery(sessionId, messageOrigin, id),
         sendConfirmation: schedule => requests.sendConfirmation(schedule, '按控制操作处理。')
       }, { sessionId, requestId: event.messageId, actorId: event.senderOpenId }, decision.params);
+      if (result.confirmationDelivery === 'failed') return;
       return 'handled';
     }
     // 再用 agent 的参数与命令校验器核对，绝不接受模型给的原始斜杠命令。

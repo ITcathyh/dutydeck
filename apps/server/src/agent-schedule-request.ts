@@ -56,6 +56,11 @@ export async function runAgentScheduleRequest(options: {
     prepareDelivery: id => options.prepareDelivery(id)
   });
   if (schedule.enabled) return { pendingConfirmation: false, scheduleId: schedule.id, message: '用户已经启用了这个定时任务。' };
-  await options.sendConfirmation(schedule);
+  try { await options.sendConfirmation(schedule); }
+  catch (error) {
+    return { saved: true, pendingConfirmation: true, scheduleId: schedule.id, confirmationDelivery: 'failed' as const,
+      warning: { code: 'SCHEDULE_CONFIRMATION_DELIVERY_FAILED', message: error instanceof Error ? error.message : String(error) },
+      message: `计划已保存但确认卡未送达，当前停用，不会执行。可在本轮用相同参数重试补发确认卡，不要修改参数重复创建；也可告诉用户在当前对话发送 /schedule enable ${schedule.id} 手动启用。` };
+  }
   return { pendingConfirmation: true, scheduleId: schedule.id, message: '已发确认卡，用户点「启用」后才开始。只回一句已发卡，不要说已设置，也不要让用户发命令。' };
 }

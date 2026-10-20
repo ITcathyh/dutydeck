@@ -37,7 +37,7 @@ export const agentQuickstart = `QUICKSTART（给 Agent）
 
 风险分级（每个命令的 --help 都有一行 Risk）
   read           只读：直接返回数据，不发卡、不改东西。
-  write-confirm  写入·需确认：在本轮请求消息下发确认卡，用户点了才生效。返回 pendingConfirmation:true 时只回一句“已发确认卡，点确认后生效”，不要说已完成。
+  write-confirm  写入·需确认：在本轮请求消息下发确认卡，用户点了才生效。返回 pendingConfirmation:true 时只回一句“已发确认卡，点确认后生效”，不要说已完成；若 confirmationDelivery:failed，按返回的 message 说明已保存但发卡失败，并给用户恢复办法。
   write          写入·直接生效：调用成功就已经生效。
 
 输出

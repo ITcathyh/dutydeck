@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { canonicalExecutionJson, installationOwnerTaskActor, type AttemptResultV1, type RepositoryBundle, type TaskRequestV1 } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { createAutomationIntegration } from './automation-integration.js';
-import type { LarkCardService } from './lark/service.js';
+import { createLarkCardService, type LarkCardService } from './lark/service.js';
+import { runAgentScheduleRequest } from './agent-schedule-request.js';
+import { SessionAutomationService } from './session-automation.js';
 
 const opened: RepositoryBundle[] = [];
 const claims: Array<ReturnType<RepositoryBundle['control']['attachRuntime']>> = [];
@@ -246,6 +248,39 @@ describe('Agent schedule request delivery', () => {
   const schedule = { schemaVersion: 1 as const, id: 'schedule_req', revision: 1, generation: 1, sessionId: 's1', name: '盯结论', prompt: '看看这个话题有没有排查结论',
     trigger: { kind: 'interval' as const, everySeconds: 900, anchorAt: '2026-10-16T00:00:00.000Z' }, timezone: 'Asia/Shanghai',
     dstPolicy: { gap: 'skip' as const, overlap: 'first' as const }, condition: { kind: 'always' as const }, enabled: false, createdAt: '', updatedAt: '' };
+
+  it('persists once and recovers confirmation delivery through the real Lark service with bounded UUIDs', async () => {
+    const f = await fixture();
+    const bodies: any[] = [];
+    const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes('tenant_access_token')) return response({ code: 0, tenant_access_token: 'token', expire: 7200 });
+      if (String(url).endsWith('/images')) return response({ code: 0, data: { image_key: 'img_test' } });
+      const body = JSON.parse(String(init?.body)); bodies.push(body);
+      if (body.uuid.length > 50) return response({ code: 99992402, msg: 'uuid exceeds 50 characters' }, 400);
+      if (bodies.length === 1) return response({ code: 230001, msg: 'temporary card delivery failure' }, 400);
+      return response({ code: 0, data: { message_id: 'om_confirmation' } });
+    });
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_a', LARK_APP_SECRET: 'test-secret' }, fetcher as typeof fetch);
+    try {
+      const integration = createAutomationIntegration(f.repos, f.runtime as any, f.groups as any, { client: () => service, log: { warn: vi.fn() } });
+      const automation = new SessionAutomationService({ repositories: f.repos, runtime: f.runtime as any, authorize: integration.authorize, prepareDelivery: integration.prepareDelivery });
+      const request = () => runAgentScheduleRequest({ automation,
+        prepareDelivery: id => integration.prepareMessageDelivery('s1', { appId: 'cli_a', chatId: 'oc_chat', messageId: 'om_request', replyInThread: true }, id),
+        sendConfirmation: integration.sendScheduleRequest
+      }, { sessionId: 's1', requestId: 'task_1', actorId: 'ou_alice' }, { every: 15, prompt: '看看结论' });
+      const failed = await request();
+      expect(failed).toMatchObject({ saved: true, pendingConfirmation: true, confirmationDelivery: 'failed' });
+      expect(JSON.parse((await f.repos.config.get(`session_automation/schedule/${failed.scheduleId}`))!).enabled).toBe(false);
+      expect(await request()).toMatchObject({ scheduleId: failed.scheduleId, message: expect.stringContaining('已发确认卡') });
+      await request();
+      expect(bodies).toHaveLength(2);
+      expect(bodies[0].uuid).toBe(bodies[1].uuid);
+      expect(bodies[0].uuid.length).toBeLessThanOrEqual(50);
+      expect((await f.repos.config.list('session_automation/schedule/'))).toHaveLength(1);
+      expect(JSON.stringify(JSON.parse(bodies[1].content))).toContain('dutydeck_schedule_enable');
+    } finally { service.close(); }
+  });
 
   it('reports to the message of the requesting turn, even when a later message in the session is newer', async () => {
     const f = await fixture();

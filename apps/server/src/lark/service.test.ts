@@ -11,6 +11,26 @@ const configured = {
 };
 
 describe('Lark card service', () => {
+  it.each(['send', 'reply', 'sendText', 'replyText', 'sendFile', 'replyFile', 'sendImage', 'replyImage'] as const)('bounds long %s UUIDs without losing retry identity or merging different actions', async method => {
+    const uuids: string[] = [];
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes('tenant_access_token')) return response({ code: 0, tenant_access_token: 'token', expire: 7200 });
+      const { uuid } = JSON.parse(String(init?.body));
+      uuids.push(uuid);
+      return uuid.length > 50 ? response({ code: 99992402, msg: 'uuid exceeds 50 characters' }, 400)
+        : response({ code: 0, data: { message_id: 'om_test' } });
+    });
+    const service = createLarkCardService(configured, fetcher as typeof fetch);
+    const input = { chatId: 'oc_test', messageId: 'om_test', state: 'completed' as const, markdown: 'done', text: 'done', fileKey: 'file_test', imageKey: 'img_test' };
+    const key = `schedule_request_${'a'.repeat(40)}`;
+    for (const idempotencyKey of [key, key, `${key}:disable`, 'x'.repeat(50)]) await service[method]({ ...input, idempotencyKey });
+    expect(uuids.every(uuid => uuid.length <= 50)).toBe(true);
+    expect(uuids[0]).toBe(uuids[1]);
+    expect(uuids[2]).not.toBe(uuids[0]);
+    expect(uuids[3]).toBe('x'.repeat(50));
+    service.close();
+  });
+
   const componentCount = (value: unknown): number => Array.isArray(value)
     ? value.reduce((sum, item) => sum + componentCount(item), 0)
     : value && typeof value === 'object'

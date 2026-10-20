@@ -2,6 +2,7 @@ import { mkdtemp, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { larkResourceRangeBytes, readResourceError, ResourceRangeError, ResourceStreamError, validateResourceRange, writeResourceStream } from './resource-range-download.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 import { requestSignal, type LifecycleFetch } from '../workbench-fetch.js';
 import type { PermissionMode } from '@dutydeck/shared';
 import type { ContactIdType, ContactUser } from './owner-identity.js';
@@ -33,6 +34,11 @@ export const larkReceiveIdTypes = ['open_id', 'union_id', 'user_id', 'email', 'c
 export type LarkReceiveIdType = (typeof larkReceiveIdTypes)[number];
 
 export type LarkWriteGuard = () => void | Promise<void>;
+
+/** 飞书消息 uuid 最多 50 字符；对完整长键取摘要，保留重试身份和键末尾的动作差异。 */
+function larkMessageUuid(key: string): string {
+  return key.length <= 50 ? key : `dd_${createHash('sha256').update(key).digest('hex').slice(0, 40)}`;
+}
 
 export interface LarkCardInput {
   /** Local authority check, repeated after token/quota waits before every provider attempt. */
@@ -1263,7 +1269,7 @@ export class LarkCardService {
           receive_id: receiveId,
           msg_type: 'interactive',
           content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName, showAgentName: input.showAgentName ?? this.config.resolveShowAgentName?.() ?? this.config.showAgentName })),
-          ...(input.idempotencyKey?.trim() ? { uuid: input.idempotencyKey.trim() } : {})
+          ...(input.idempotencyKey?.trim() ? { uuid: larkMessageUuid(input.idempotencyKey.trim()) } : {})
         }
       });
       const messageId = payload.data?.message_id;
@@ -1286,7 +1292,7 @@ export class LarkCardService {
           msg_type: 'interactive',
           content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName, showAgentName: input.showAgentName ?? this.config.resolveShowAgentName?.() ?? this.config.showAgentName })),
           ...(input.replyInThread ? { reply_in_thread: true } : {}),
-          ...(input.idempotencyKey?.trim() ? { uuid: input.idempotencyKey.trim() } : {})
+          ...(input.idempotencyKey?.trim() ? { uuid: larkMessageUuid(input.idempotencyKey.trim()) } : {})
         }
       });
       const replyId = payload.data?.message_id;
@@ -1505,7 +1511,7 @@ export class LarkCardService {
     const chatId = required(input.chatId, 'chatId');
     if (!chatId.startsWith('oc_')) throw new LarkServiceError('INVALID_CHAT_ID', 'chatId must start with oc_', 400);
     const payload = await this.request('/open-apis/im/v1/messages?receive_id_type=chat_id', {
-      beforeSend: input.beforeSend, body: { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }), ...(input.idempotencyKey ? { uuid: input.idempotencyKey } : {}) }
+      beforeSend: input.beforeSend, body: { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }), ...(input.idempotencyKey ? { uuid: larkMessageUuid(input.idempotencyKey) } : {}) }
     });
     const messageId = payload.data?.message_id;
     if (!messageId) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark send response did not include message_id', 502);
@@ -1518,7 +1524,7 @@ export class LarkCardService {
       beforeSend: input.beforeSend, body: {
         msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }),
         ...(input.replyInThread ? { reply_in_thread: true } : {}),
-        ...(input.idempotencyKey ? { uuid: input.idempotencyKey } : {})
+        ...(input.idempotencyKey ? { uuid: larkMessageUuid(input.idempotencyKey) } : {})
       }
     });
     const replyId = payload.data?.message_id;
@@ -1545,12 +1551,12 @@ export class LarkCardService {
     return String(key);
   }
   private async sendMedia(chatId: string, msgType: 'file' | 'image', content: Record<string, string>, idempotencyKey: string, beforeSend?: LarkWriteGuard) {
-    const payload = await this.request('/open-apis/im/v1/messages?receive_id_type=chat_id', { beforeSend, body: { receive_id: required(chatId, 'chatId'), msg_type: msgType, content: JSON.stringify(content), uuid: idempotencyKey } });
+    const payload = await this.request('/open-apis/im/v1/messages?receive_id_type=chat_id', { beforeSend, body: { receive_id: required(chatId, 'chatId'), msg_type: msgType, content: JSON.stringify(content), uuid: larkMessageUuid(idempotencyKey) } });
     if (!payload.data?.message_id) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark send response did not include message_id', 502);
     return { messageId: String(payload.data.message_id), chatId: payload.data?.chat_id };
   }
   private async replyMedia(input: LarkMediaReplyInput, msgType: 'file' | 'image', content: Record<string, string>) {
-    const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(required(input.messageId, 'messageId'))}/reply`, { beforeSend: input.beforeSend, body: { msg_type: msgType, content: JSON.stringify(content), ...(input.replyInThread ? { reply_in_thread: true } : {}), uuid: input.idempotencyKey } });
+    const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(required(input.messageId, 'messageId'))}/reply`, { beforeSend: input.beforeSend, body: { msg_type: msgType, content: JSON.stringify(content), ...(input.replyInThread ? { reply_in_thread: true } : {}), uuid: larkMessageUuid(input.idempotencyKey) } });
     if (!payload.data?.message_id) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark reply response did not include message_id', 502);
     return { messageId: String(payload.data.message_id), chatId: payload.data?.chat_id };
   }

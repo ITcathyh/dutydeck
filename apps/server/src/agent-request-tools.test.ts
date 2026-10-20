@@ -99,6 +99,36 @@ describe('Agent schedule requests', () => {
     expect(f.createSchedule.mock.calls[0]![1].trigger).toEqual({ kind: 'at', localDateTime: '2026-10-17T10:00' });
   });
 
+  it('reports a saved, disabled schedule when confirmation delivery fails and retries the same schedule', async () => {
+    const f = await setup();
+    f.sendConfirmation.mockRejectedValueOnce(new Error('Lark confirmation unavailable'));
+    const payload = { every: 15, prompt: '看看有没有结论' };
+    const failed = await f.request(f.group, payload);
+    expect(failed.statusCode).toBe(200);
+    const result = failed.json();
+    expect(result).toMatchObject({ saved: true, pendingConfirmation: true, confirmationDelivery: 'failed', scheduleId: expect.any(String),
+      warning: { code: 'SCHEDULE_CONFIRMATION_DELIVERY_FAILED', message: 'Lark confirmation unavailable' },
+      message: expect.stringContaining('已保存') });
+    expect(result.message).toContain(`/schedule enable ${result.scheduleId}`);
+    expect(result.message).toContain('相同参数');
+    expect(result.message).not.toContain('已发确认卡');
+    expect(f.saved.get(result.scheduleId)?.enabled).toBe(false);
+    const retry = await f.request(f.group, payload);
+    expect(retry.statusCode).toBe(200);
+    expect(retry.json()).toMatchObject({ pendingConfirmation: true, scheduleId: result.scheduleId, message: expect.stringContaining('已发确认卡') });
+    expect(f.saved.size).toBe(1);
+    expect(f.sendConfirmation).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps save and delivery-target failures as errors before a schedule exists', async () => {
+    const f = await setup();
+    f.prepareDelivery.mockRejectedValueOnce(new Error('destination unavailable'));
+    const response = await f.request(f.group, { every: 15, prompt: 'x' });
+    expect(response.statusCode).toBe(500);
+    expect(f.saved.size).toBe(0);
+    expect(f.sendConfirmation).not.toHaveBeenCalled();
+  });
+
   it('only accepts the current turn of an active requester and exactly one valid time', async () => {
     const f = await setup();
     expect((await f.request(f.group, { every: 15, prompt: 'x' }, 'stale-turn')).json().error.code).toBe('WORK_ITEM_TURN_EXPIRED');

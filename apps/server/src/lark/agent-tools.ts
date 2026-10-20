@@ -769,7 +769,7 @@ export class LarkAgentToolsService {
     const rules = [
       ...(send ? ['群里发消息：独立消息只在用户要求或需要通知指定的人时发；不要回应自己发的消息，不和其他机器人互相礼貌 @，一次请求最多主动交接两跳。'] : []),
       ...(groupTools ? ['工具返回 GROUP_TOOL_AUTHORIZATION_REQUIRED 时停止操作，把 instruction 和 authorizationUrl 告诉用户，由管理员开通权限；不运行 lark-cli auth login，不索要密钥。'] : []),
-      ...(schedule || commands || collaboration || work ? ['返回 pendingConfirmation:true 表示已发确认卡：只回一句已发确认卡、点确认后生效，不要说已完成或已设置，也不要让用户自己发命令。'] : []),
+      ...(schedule || commands || collaboration || work ? ['返回 confirmationDelivery:failed 时，按 message 说明计划已保存但发卡失败，并给用户恢复办法。其他 pendingConfirmation:true 表示已发确认卡：只回一句已发确认卡、点确认后生效，不要说已完成或已设置，也不要让用户自己发命令。'] : []),
       ...(commands ? [userOnlyPrompt] : []),
       ...(config.silentProgress ? ['本会话不显示中间进度，不要另发进度消息；提问和最终结果不受影响。'] : [])
     ];

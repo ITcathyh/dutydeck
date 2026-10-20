@@ -373,7 +373,8 @@ describe('Agent group collaboration domain service', () => {
     expect(prompt).not.toContain(f.capabilities.workbenchTurnToken(f.activeSession.id, 'task-one'));
     expect(prompt).toContain('不要让用户自己发命令');
     // 必须留在提示词里的规则：确认卡只回一句、用户专属操作。
-    expect(prompt).toContain('返回 pendingConfirmation:true 表示已发确认卡：只回一句已发确认卡');
+    expect(prompt).toContain('返回 confirmationDelivery:failed 时，按 message 说明计划已保存但发卡失败，并给用户恢复办法');
+    expect(prompt).toContain('其他 pendingConfirmation:true 表示已发确认卡：只回一句已发确认卡');
     expect(prompt).toContain('停止当前任务、批准工具调用、回答你的提问只能由用户做');
     expect(prompt).not.toContain('切换 agent、模型或工作目录用 /new');
     // 定时任务到点执行的那一轮不给入口。
