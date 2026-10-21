@@ -433,7 +433,7 @@ export abstract class LarkCoordinatorCore {
   /**
    * 撤销「请求已接入」的 OK reaction。
    * 设计契约（见 docs/interaction-design-2026-08-30.md §4.1）：reaction 只是回执，
-   * 进度卡或失败回执一旦送达就必须移除，不允许 reaction 与卡片两个状态并存。
+   * 进度卡或失败回执送达后移除；静默进展时保留到终态交付结束。
    * 撤销失败只记日志、不阻断任务执行；reactionId 先清空再调用，保证幂等——
    * 重复调用（正常路径 + 异常兜底）不会重复打 OpenAPI。
    */

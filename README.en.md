@@ -140,7 +140,7 @@ Lark task cards hide the Agent name by default. Enable the Agent name switch und
 ### 1. Task lifecycle
 
 1. **Dispatch**: DM the bot, or `@bot task` in a group.
-2. **Receipt**: the bot reacts with `👌` on your message and sends a progress card. A check mark is added when the turn finishes; a cross mark when it fails or is interrupted (not when you cancel).
+2. **Receipt**: the bot reacts with `👌` on your message and removes it after the progress card arrives. When progress cards are hidden, `👌` stays until the task returns its result or completion reaction. A check mark is added when the turn finishes; a cross mark when it fails or is interrupted (not when you cancel).
 3. **Approval**: the card starts with a one-line summary (e.g. "Run command: pnpm test"). Buttons: "Allow once", "Allow this command for the session" (initiator only, non-high-risk commands only), "Reject". An unhandled card gets a reminder after 30 minutes (the task keeps waiting) and is auto-rejected after 24 hours.
 4. **Questions**: tap an option, or quote the card and reply with your answer. The full question and all options are shown when they fit; otherwise a full-text attachment is sent and the card is clearly marked as an excerpt. Dutydeck does not publish the answerable Lark card until attachment delivery succeeds; delivery resumes after recovery. Answered or expired cards retain the content originally displayed. Approval cards remain redacted; raw commands are not uploaded as full-text attachments.
 5. **Result**: the result card shows the change summary, verification result and long attachments, plus a "View changes" link when the turn changed files. A `需要你：…` (action needed) line after the conclusion appears in a separate highlighted block with a bold label.

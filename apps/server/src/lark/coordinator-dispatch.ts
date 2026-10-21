@@ -1105,7 +1105,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       task.lastSuccessfulElements = initialElements;
       await this.saveCardTask(task);
       if (task.inbox) await this.inbox!.update(task.inbox, { sessionId: session.id, cardId: task.cardMessageId, turn: currentTurn });
-      await clearAcknowledgement();
+      if (!silentProgress) await clearAcknowledgement();
     }
 
     let timer: NodeJS.Timeout | undefined;
@@ -1390,7 +1390,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         }
         this.log.error({ error, taskId: task.id, state }, '交付飞书执行结果失败，等待对账补偿');
         this.scheduleReconcile();
-      }).finally(() => { terminalDelivery = undefined; });
+      }).finally(async () => {
+        // 静默进展时，OK 是执行中的回执；终态交付结束后撤销，失败也不留下悬挂的确认。
+        if (!this.stopped && task.turn === currentTurn) await clearAcknowledgement();
+        terminalDelivery = undefined;
+      });
       return terminalDelivery;
     };
 

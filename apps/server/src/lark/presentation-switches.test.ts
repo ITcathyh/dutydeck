@@ -29,9 +29,9 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
 
 /**
  * normal = 正常完成；unresolved = 工具没回结果，终态按失败处理；permission = 发一张待决审批卡后挂住；
- * failThenPass = 第一轮按 unresolved 失败，之后的轮次正常完成；hang = 一直执行到被中断。
+ * failThenPass = 第一轮按 unresolved 失败，之后的轮次正常完成；hang = 一直执行到被中断；delayed = 放行后正常完成。
  */
-type HarnessMode = 'normal' | 'unresolved' | 'permission' | 'failThenPass' | 'hang';
+type HarnessMode = 'normal' | 'unresolved' | 'permission' | 'failThenPass' | 'hang' | 'delayed';
 
 async function harness(mode: HarnessMode = 'normal', configPatch: Partial<StoredLarkConfig> = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-presentation-'));
@@ -49,6 +49,7 @@ async function harness(mode: HarnessMode = 'normal', configPatch: Partial<Stored
         interrupt: async () => { if (mode === 'hang') release?.(); },
         send: async () => {
           sends++;
+          if (mode === 'delayed') await gate;
           if (mode === 'hang') {
             await gate;
             emit({ type: 'completed', data: { stopReason: 'cancelled' } });
@@ -206,12 +207,16 @@ describe('原消息上的状态表情', () => {
     expect(h.service.deleteReaction).toHaveBeenCalledWith('om_retry', `reaction_om_retry_${FAILURE_REACTION_EMOJI}`);
   });
 
-  it('用户自己停下的一轮不贴表情', async () => {
-    const h = await harness('hang');
+  it.each([false, true])('用户自己停下的一轮不贴表情，并撤掉确认表情（silentProgress=%s）', async silentProgress => {
+    const h = await harness('hang', { silentProgress });
     await h.coordinator.handle(event('om_stop', '做一件事'), h.config);
     // 还在排队时点中断走的是取消排队（不发结果卡），要等这一轮真正开跑再点。
-    await vi.waitFor(() => expect([...h.service.reply.mock.calls, ...h.service.update.mock.calls]
-      .some(([input]) => (input as any)?.taskId === 'om_stop' && (input as any)?.state === 'running')).toBe(true), { timeout: 5_000 });
+    await vi.waitFor(async () => {
+      const [session] = await h.runtime.listSessions();
+      expect(session).toBeTruthy();
+      expect((await h.runtime.getTasks(session!.id)).some(task => task.status === 'running')).toBe(true);
+    }, { timeout: 5_000 });
+    expect(h.service.deleteReaction).toHaveBeenCalledTimes(silentProgress ? 0 : 1);
     await vi.waitFor(async () => expect(await h.coordinator.handleAction({ action: 'interrupt', task_id: 'om_stop', turn: '1' }, 'ou_alice'))
       .toMatchObject({ type: 'success' }), { timeout: 5_000 });
     const saved = await h.settled('om_stop');
@@ -219,6 +224,7 @@ describe('原消息上的状态表情', () => {
     expect(['interrupted', 'cancelled']).toContain(saved.state);
     expect(h.cardsOfKind('result')).toHaveLength(1);
     expect(h.statusReactions()).toHaveLength(0);
+    await vi.waitFor(() => expect(h.service.deleteReaction).toHaveBeenCalledExactlyOnceWith('om_stop', 'reaction_om_stop_OK'));
   });
 
   it('贴表情失败不挡结果卡：结果照常记为已送达', async () => {
@@ -238,6 +244,42 @@ describe('原消息上的状态表情', () => {
 });
 
 describe('中间进展静默（silentProgress）', () => {
+  it.each([
+    { silentProgress: false, completionReactionOnly: false },
+    { silentProgress: true, completionReactionOnly: false },
+    { silentProgress: true, completionReactionOnly: true }
+  ])('确认表情保留到可见反馈送达：%j', async configPatch => {
+    const h = await harness('delayed', configPatch);
+    let deliver!: () => void;
+    const delivery = new Promise<void>(resolve => { deliver = resolve; });
+    cleanups.push(() => deliver());
+    h.service.reply.mockImplementation(async input => {
+      if (input.cardKind === 'result') await delivery;
+      return { messageId: `om_${input.cardKind}` };
+    });
+    h.service.addReaction.mockImplementation(async (messageId, emojiType = 'OK') => {
+      if (emojiType === COMPLETION_REACTION_EMOJI) await delivery;
+      return { messageId, reactionId: `reaction_${messageId}_${emojiType}` };
+    });
+
+    await h.coordinator.handle(event('om_ack', '做一件事'), h.config);
+    await vi.waitFor(async () => {
+      const [session] = await h.runtime.listSessions();
+      expect(session).toBeTruthy();
+      expect((await h.runtime.getTasks(session!.id)).some(task => task.status === 'running')).toBe(true);
+    });
+    expect(h.service.addReaction).toHaveBeenCalledWith('om_ack', 'OK');
+    expect(h.service.deleteReaction).toHaveBeenCalledTimes(configPatch.silentProgress ? 0 : 1);
+
+    h.releaseGate();
+    await vi.waitFor(() => expect(configPatch.completionReactionOnly ? h.completionReactions() : h.cardsOfKind('result')).toHaveLength(1));
+    // 任务已结束，但结果还没送达：静默模式下仍保留收到确认。
+    expect(h.service.deleteReaction).toHaveBeenCalledTimes(configPatch.silentProgress ? 0 : 1);
+    deliver();
+    await h.settled('om_ack');
+    await vi.waitFor(() => expect(h.service.deleteReaction).toHaveBeenCalledExactlyOnceWith('om_ack', 'reaction_om_ack_OK'));
+  });
+
   it('开启后不发过程卡，最终结果卡照发', async () => {
     const h = await harness('normal', { silentProgress: true });
     await h.coordinator.handle(event('om_silent', '做一件事'), h.config);
@@ -263,6 +305,7 @@ describe('中间进展静默（silentProgress）', () => {
     // 审批卡是独立新消息，不是过程卡。
     expect(h.sentCards().some(input => input?.cardKind === 'process')).toBe(false);
     expect(h.sentCards().length).toBeGreaterThan(0);
+    expect(h.service.deleteReaction).not.toHaveBeenCalled();
   });
 
   it('两个开关同时开启时只剩一个表情：既无过程卡也无结果卡', async () => {
@@ -287,6 +330,7 @@ describe('中间进展静默（silentProgress）', () => {
     expect(h.cardsOfKind('process')).toHaveLength(0);
     expect(h.cardsOfKind('result')).toHaveLength(1);
     expect(h.completionReactions()).toHaveLength(0);
+    await vi.waitFor(() => expect(h.service.deleteReaction).toHaveBeenCalledExactlyOnceWith('om_both_fail', 'reaction_om_both_fail_OK'));
   });
 });
 
