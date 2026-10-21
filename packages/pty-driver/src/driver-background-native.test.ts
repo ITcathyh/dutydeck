@@ -30,10 +30,12 @@ it('completes an explicitly answered main turn promptly, retains background stat
   expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
   expect(events.filter(event => event.type === 'status' && event.data.state === 'background_work').at(-1)?.data).toMatchObject({ count: 2, mainTurnEnded: true });
   const boundary = events.length, second = driver.send('A separate request'); await vi.waitFor(() => expect(submitted).toBe(2));
+  void second.catch(() => {});
   append(records.slice(10, 15));
-  append([{ type: 'user', uuid: 'next-input-repeat', message: { role: 'user', content: 'A separate request' } },
-    { type: 'assistant', uuid: 'next-answer', parentUuid: 'next-input', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Fresh independent answer' }] } },
-    { type: 'system', subtype: 'turn_duration' }]);
-  output(repaint(screen)); await vi.advanceTimersByTimeAsync(5_000); await second;
+  append([{ type: 'assistant', uuid: 'next-answer', parentUuid: 'next-input', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Fresh independent answer' }] } },
+    { type: 'system', subtype: 'turn_duration', uuid: 'next-terminal', parentUuid: 'next-answer' }]);
+  output(repaint(screen)); await vi.advanceTimersByTimeAsync(5_000);
   expect(events.slice(boundary).filter(event => event.type === 'text').map(event => event.data.text)).toEqual(['Fresh independent answer']);
+  expect(events.filter(event => event.type === 'completed')).toHaveLength(2);
+  await second;
 });

@@ -52,11 +52,33 @@ it.each(['unknown', 'tools', 'unbound'])('refuses %s evidence without mutating t
   expect(() => h.bound.settleCapacityRetry(af(a), 'unsafe', resultFor(a))).toThrow(/CAPACITY_RETRY_NOT_SAFE/);
   expect(h.repos.execution.getAttempt(af(a))?.state).toBe('active');
 });
-it('new user acceptance cancels the delayed attempt in the same transaction', () => {
+it.each(['suspended', 'preparing'] as const)('new user acceptance cancels the %s unsubmitted attempt in the same transaction', phase => {
+  vi.useFakeTimers();
   const h = fixture(); const old = h.accept('old').task!; const a = h.prepare(h.bound.claimNext(fence)!.attempt!); h.emit(a);
-  h.bound.settleCapacityRetry(af(a), 'capacity-old', resultFor(a)); h.accept('new');
+  h.bound.settleCapacityRetry(af(a), 'capacity-old', resultFor(a));
+  if (phase === 'preparing') { vi.advanceTimersByTime(30_000); expect(h.bound.claimNext(fence)?.attempt?.state).toBe('preparing'); }
+  h.accept('new');
   expect(h.repos.execution.getTaskExecution(old.id)?.currentAttempt).toMatchObject({ state: 'settled', outcome: 'cancelled', submissionState: 'not_submitted' });
   expect(h.bound.claimNext(fence)?.task?.id).not.toBe(old.id);
+});
+it('refuses both stale and refreshed submission fences after a preparing retry was cancelled', () => {
+  vi.useFakeTimers(); const h = fixture(); const old = h.accept('old').task!; const original = h.prepare(h.bound.claimNext(fence)!.attempt!); h.emit(original);
+  h.bound.settleCapacityRetry(af(original), 'capacity-old', resultFor(original)); vi.advanceTimersByTime(30_000);
+  const retry = h.bound.claimNext(fence)!.attempt!; h.accept('new');
+  expect(() => h.prepare(retry)).toThrow(/ATTEMPT_REVISION_CONFLICT/);
+  const cancelled = h.repos.execution.getTaskExecution(old.id)!.currentAttempt!;
+  expect(() => h.prepare(cancelled)).toThrow(/ATTEMPT_NOT_PREPARING/);
+  expect(h.bound.cancelCapacityRetries(fence, 'repeat_stop')).toEqual([]);
+  expect(h.repos.execution.getTaskExecution(old.id)!.attempts[0]?.outcome).toBe('failed');
+});
+it.each(['intent_recorded', 'acknowledged', 'reconcile_required'] as const)('does not cancel a retry after submission becomes %s', state => {
+  vi.useFakeTimers(); const h = fixture(); const old = h.accept('old').task!; const original = h.prepare(h.bound.claimNext(fence)!.attempt!); h.emit(original);
+  h.bound.settleCapacityRetry(af(original), 'capacity-old', resultFor(original)); vi.advanceTimersByTime(30_000);
+  let retry = h.prepare(h.bound.claimNext(fence)!.attempt!);
+  if (state === 'acknowledged') retry = h.bound.markSubmitted(af(retry), { submissionId: retry.submission!.submissionId, kind: 'provider_accepted', provider: 'fixture', receiptRef: 'accepted', digest: hash('accepted') }).attempt!;
+  else if (state === 'reconcile_required') retry = h.bound.markReconcileRequired(af(retry), { reasonId: 'unknown', code: 'DRIVER_RESULT_UNKNOWN', evidenceRefs: [] }).attempt!;
+  h.accept('new'); expect(h.bound.cancelCapacityRetries(fence, 'stop_unsubmitted_only')).toEqual([]);
+  expect(h.repos.execution.getTaskExecution(old.id)?.currentAttempt).toEqual(retry);
 });
 it('persists its deadline across a real database close and can cancel after reopening', () => {
   vi.useFakeTimers(); const root = mkdtempSync(join(tmpdir(), 'dd-capacity-disk-')); closing.push(() => rmSync(root, { recursive: true, force: true }));

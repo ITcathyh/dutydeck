@@ -2499,6 +2499,10 @@ export class DutydeckRuntime {
       }
       await this.authorize(id, task.executionContext?.actorId, true);
       await this.mutations.wait(() => this.options.authorizeTask?.(session, task, 'submit') ?? Promise.resolve());
+      const beforeSubmit = this.repos.execution.getAttempt(ref);
+      if (!beforeSubmit || beforeSubmit.state !== 'preparing' || beforeSubmit.submissionState !== 'not_submitted') {
+        throw new RuntimeError('ATTEMPT_NOT_PREPARING', 'The attempt was cancelled or changed while awaiting submission authorization', 409);
+      }
       if (this.options.observeTurn) {
         await this.mutations.wait(() => this.options.observeTurn!(session, task.id, 'start').catch(() => {}));
         observed = session;

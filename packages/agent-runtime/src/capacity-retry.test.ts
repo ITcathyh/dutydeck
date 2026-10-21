@@ -48,6 +48,60 @@ it('a new input cancels the old retry and the old request never replays', async 
   await vi.advanceTimersByTimeAsync(120_000); expect(h.prompts).toEqual(['old', 'new']);
   expect(h.repos.execution.getTaskExecution(old.id)?.currentAttempt?.outcome).toBe('cancelled');
 });
+it.each(['prepare', 'submit'] as const)('new input cancels a claimed automatic retry paused at %s authorization', async phase => {
+  let entered = false, release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }); cleanup.push(async () => { release(); });
+  const h = await fixture({ authorizeTask: async (_session, task, currentPhase) => {
+    if (currentPhase === phase && h.repos.execution.getTaskExecution(task.id)?.currentAttempt?.automaticRetry) { entered = true; await gate; }
+  } });
+  const old = await h.runtime.dispatch(h.session.id, 'old', 'queue', 'old', undefined, 'installation_owner'); await waitRetry(h, old.id);
+  await vi.advanceTimersByTimeAsync(30_100); await vi.waitFor(() => expect(entered).toBe(true));
+  expect(h.repos.execution.getTaskExecution(old.id)?.currentAttempt).toMatchObject({ state: 'preparing', submissionState: 'not_submitted' });
+  const fresh = await h.runtime.dispatch(h.session.id, 'new', 'queue', 'new', undefined, 'installation_owner'); release();
+  await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(fresh.id)?.task.status).toBe('completed'));
+  expect(h.prompts).toEqual(['old', 'new']);
+  expect(h.repos.execution.getTaskExecution(old.id)?.currentAttempt).toMatchObject({ state: 'settled', outcome: 'cancelled', submissionState: 'not_submitted' });
+});
+it.each(['prepare', 'submit'] as const)('stop cancels a claimed automatic retry paused at %s authorization', async phase => {
+  let entered = false, release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }); cleanup.push(async () => { release(); });
+  const h = await fixture({ authorizeTask: async (_session, task, currentPhase) => {
+    if (currentPhase === phase && h.repos.execution.getTaskExecution(task.id)?.currentAttempt?.automaticRetry) { entered = true; await gate; }
+  } });
+  const old = await h.runtime.dispatch(h.session.id, 'old', 'queue', 'old', undefined, 'installation_owner'); await waitRetry(h, old.id);
+  await vi.advanceTimersByTimeAsync(30_100); await vi.waitFor(() => expect(entered).toBe(true));
+  const stopping = h.runtime.stop(h.session.id, { kind: 'installation_owner', id: 'installation_owner' }); release(); await stopping;
+  await vi.advanceTimersByTimeAsync(120_000); expect(h.prompts).toEqual(['old']);
+  expect(h.repos.execution.getTaskExecution(old.id)?.currentAttempt).toMatchObject({ state: 'settled', outcome: 'cancelled', submissionState: 'not_submitted' });
+});
+it('rechecks the ledger CAS after a newer input arrives during the start observer', async () => {
+  let entered = false, release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }); cleanup.push(async () => { release(); });
+  const h = await fixture({ observeTurn: async (_session, taskId, phase) => {
+    if (phase === 'start' && h.repos.execution.getTaskExecution(taskId)?.currentAttempt?.automaticRetry) { entered = true; await gate; }
+  } });
+  const old = await h.runtime.dispatch(h.session.id, 'old', 'queue', 'old', undefined, 'installation_owner'); await waitRetry(h, old.id);
+  await vi.advanceTimersByTimeAsync(30_100); await vi.waitFor(() => expect(entered).toBe(true));
+  const fresh = await h.runtime.dispatch(h.session.id, 'new', 'queue', 'new', undefined, 'installation_owner'); release();
+  await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(fresh.id)?.task.status).toBe('completed'));
+  expect(h.prompts).toEqual(['old', 'new']);
+  expect(h.repos.execution.getTaskExecution(old.id)?.currentAttempt?.outcome).toBe('cancelled');
+});
+it('preserves a submitted automatic retry when new input arrives before its settlement', async () => {
+  let entered = false, release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }); cleanup.push(async () => { release(); });
+  const h = await fixture({ observeTurn: async (_session, taskId, phase) => {
+    if (phase === 'end' && h.repos.execution.getTaskExecution(taskId)?.currentAttempt?.automaticRetry) { entered = true; await gate; }
+  } });
+  const old = await h.runtime.dispatch(h.session.id, 'old', 'queue', 'old', undefined, 'installation_owner'); await waitRetry(h, old.id);
+  await vi.advanceTimersByTimeAsync(30_100); await vi.waitFor(() => expect(entered).toBe(true));
+  const submitted = h.repos.execution.getTaskExecution(old.id)!.currentAttempt!;
+  expect(submitted).toMatchObject({ state: 'active', submissionState: 'intent_recorded' });
+  const fresh = await h.runtime.dispatch(h.session.id, 'new', 'queue', 'new', undefined, 'installation_owner');
+  expect(h.repos.execution.getTaskExecution(old.id)?.currentAttempt).toEqual(submitted); release();
+  await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(fresh.id)?.task.status).toBe('completed'));
+  expect(h.prompts).toEqual(['old', 'old', 'new']); expect(h.repos.execution.getTaskExecution(old.id)?.task.status).toBe('completed');
+});
 it('stop cancels the delayed successor, including after restart', async () => {
   const h = await fixture(); const old = await h.runtime.dispatch(h.session.id, 'old', 'queue', 'old', undefined, 'installation_owner'); await waitRetry(h, old.id);
   await h.reopen(); await h.runtime.stop(h.session.id, { kind: 'installation_owner', id: 'installation_owner' });

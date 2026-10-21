@@ -3,6 +3,8 @@ export class ClaudeBackgroundTasks {
   private readonly calls = new Map<string, { name: string; originInputId?: string }>();
   private readonly tasks = new Map<string, { id: string; toolUseId: string; kind: 'agent' | 'shell' | 'monitor'; originInputId?: string; state: string; expiresAt?: number }>();
   private inputId?: string;
+  private readonly inputEntries = new Set<string>();
+  private readonly notificationEntries = new Set<string>();
   private notification = false;
   private ended = false;
 
@@ -10,6 +12,10 @@ export class ClaudeBackgroundTasks {
     if (entry?.isSidechain === true) return false;
     const before = JSON.stringify(this.snapshot());
     const content = entry.message?.content;
+    // A late notification can interleave with an already accepted input.
+    // Parent ancestry takes precedence over the last no-parent legacy record.
+    if (this.inputEntries.has(entry.parentUuid)) this.notification = false;
+    else if (this.notificationEntries.has(entry.parentUuid)) this.notification = true;
     const notificationText = entry.type === 'queue-operation' && entry.operation === 'enqueue' ? entry.content
       : entry.attachment?.type === 'queued_command' && entry.attachment.commandMode === 'task-notification' ? entry.attachment.prompt
       : entry.turnOrigin === 'task_notification' || entry.origin?.kind === 'task-notification'
@@ -25,6 +31,11 @@ export class ClaudeBackgroundTasks {
       if (state) for (const id of ids) { const task = this.tasks.get(id); if (task && (!toolUseId || task.toolUseId === toolUseId)) task.state = state; }
     } else if (claudeInputText(entry) !== undefined && !entry.isMeta) {
       this.inputId = entry.uuid; this.notification = false; this.ended = false;
+      this.inputEntries.clear();
+    }
+    if (typeof entry.uuid === 'string') {
+      if (this.notification) this.notificationEntries.add(entry.uuid);
+      else this.inputEntries.add(entry.uuid);
     }
     if (entry.type === 'assistant' && Array.isArray(content) && !this.notification) {
       for (const block of content) if (block.type === 'tool_use' && typeof block.id === 'string') this.calls.set(block.id, { name: block.name, originInputId: this.inputId });
@@ -51,6 +62,7 @@ export class ClaudeBackgroundTasks {
     // Metadata is bounded independently of session length; retain live tasks.
     if (this.tasks.size > 1000) for (const [id, task] of this.tasks) { if (task.state !== 'running') this.tasks.delete(id); if (this.tasks.size <= 1000) break; }
     while (this.calls.size > 1000) this.calls.delete(this.calls.keys().next().value!);
+    while (this.notificationEntries.size > 20_000) this.notificationEntries.delete(this.notificationEntries.values().next().value!);
     return this.tasks.size > 0 && before !== JSON.stringify(this.snapshot());
   }
   snapshot() {

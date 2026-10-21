@@ -31,6 +31,23 @@ it('rebuilds live task identities after restart without replaying old replies', 
   appendFileSync(path, records.slice(10, 20).map(entry => JSON.stringify(entry) + '\n').join('')); await tailer.flush();
   expect(tailer.pendingBackgroundWork()).toBe(0); expect(events.some(event => event.type === 'text')).toBe(false);
 });
+it('keeps a single accepted next input and its ancestry alive across late background notice chains', async () => {
+  root = mkdtempSync(join(tmpdir(), 'dd-bg-interleaved-')); const path = join(root, 'session.jsonl'); writeFileSync(path, '');
+  tailer = new ClaudeTranscriptTailer({ cwd: root, transcriptPath: path }); const events: NormalizedDriverEvent[] = []; tailer.onEvent(event => events.push(event));
+  const append = async (...rows: any[]) => { appendFileSync(path, rows.map(row => JSON.stringify(row) + '\n').join('')); await tailer.flush(); };
+  tailer.start(); await tailer.flush(); await append(...records.slice(0, 7));
+  const receipt = tailer.waitForInput('A separate request', new AbortController().signal);
+  await append({ type: 'user', uuid: 'next-input', timestamp: new Date().toISOString(), message: { role: 'user', content: 'A separate request' } }); await receipt;
+  await append(...records.slice(10, 15));
+  await append({ type: 'assistant', uuid: 'next-step', parentUuid: 'next-input', message: { content: [{ type: 'text', text: 'Fresh progress' }] } });
+  // Another old notice between current-input chunks must not reclaim its answer.
+  const notice = { ...records[17], uuid: 'late-notice-again' };
+  await append(notice, { type: 'assistant', uuid: 'old-note', parentUuid: notice.uuid, message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Old background postscript' }] } });
+  await append({ type: 'assistant', uuid: 'next-answer', parentUuid: 'next-step', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Fresh independent answer' }] } },
+    { type: 'system', subtype: 'turn_duration', uuid: 'next-terminal', parentUuid: 'next-answer' });
+  expect(events.filter(event => event.type === 'text').map(event => event.data.text)).toEqual(['launched', 'Fresh progress', 'Fresh independent answer']);
+  expect(tailer.hasTurnTerminal()).toBe(true);
+});
 it('restores legacy pending counters as required waiting, alongside native identities', async () => {
   root = mkdtempSync(join(tmpdir(), 'dd-bg-legacy-restore-')); const path = join(root, 'session.jsonl');
   const legacy = readFileSync(new URL('../fixtures/claude-background-agent/transcript.jsonl', import.meta.url), 'utf8').trim().split('\n');

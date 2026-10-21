@@ -626,8 +626,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         t.status = evidence.outcome === 'unknown' ? 'reconcile_required' : evidence.outcome;
         touch(t, a); return transitions(f, t, a, true);
       };
-      const cancelCapacityRetries = (f: SessionFence, reason: string) => db.prepare("SELECT json FROM task_attempts WHERE session_id=? AND state='suspended' AND submission_state='not_submitted'").all(f.sessionId).map(row => rowJson<TaskAttempt>(row)!).filter(a => a.automaticRetry).map(a => {
-        const t = task(a.taskId)!;
+      const cancelCapacityRetries = (f: SessionFence, reason: string) => db.prepare("SELECT json FROM task_attempts WHERE session_id=? AND run_id=? AND state IN ('suspended','preparing') AND submission_state='not_submitted'").all(f.sessionId, f.runId).map(row => rowJson<TaskAttempt>(row)!).filter(a => a.automaticRetry).map(a => {
+        const { t } = currentAttempt({ ...f, taskId: a.taskId, attemptId: a.attemptId, expectedRevision: a.revision }, a.controller, true);
         return settle({ ...f, taskId: t.id, attemptId: a.attemptId, expectedRevision: a.revision }, t, a, `capacity_cancel:${a.attemptId}`, { kind: 'not_submitted', outcome: 'cancelled', reason });
       });
       const bound: BoundExecutionRepository = {
