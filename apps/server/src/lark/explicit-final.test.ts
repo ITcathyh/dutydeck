@@ -12,7 +12,7 @@ import type { LarkMessageEvent } from './listener.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 import { buildLarkCard, createLarkCardService, LarkServiceError } from './service.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './agent-tools.js';
-import { resolveExplicitFinalContext } from './explicit-final.js';
+import { explicitFinalTextReceiptReader, resolveExplicitFinalContext } from './explicit-final.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -542,6 +542,55 @@ async function seedResultInteraction(h: Awaited<ReturnType<typeof harness>>) {
   return record;
 }
 
+
+it.each([false, true].flatMap(bound => ['accepted', 'needs_changes'].map(state => ({ bound, state }))))('keeps historical $state interactions from binding or patching relay text on restart (previously bound=$bound)', async ({ bound, state }) => {
+  const h = await harness({ botOrigin: true });
+  const record = await seedResultInteraction(h);
+  const key = `lark.interaction.${h.config.appId}.${record.id}`;
+  await h.repos.config.set(key, JSON.stringify({ ...record, state }));
+  const sent = await h.sendFinal('RELAY_ONLY_SUMMARY', { delivery: 'reply-agent' });
+  h.release(); const saved = await h.resultCard();
+  expect(saved.final_card_input).toBeUndefined();
+  expect(h.service.update.mock.calls.filter(([input]) => input.messageId === sent.messageId)).toHaveLength(0);
+  if (bound) {
+    await h.repos.config.set(key, JSON.stringify({ ...record, state, cardId: sent.messageId }));
+    // Old metadata is not evidence that a text receipt can be updated as a card.
+    await h.patchPersisted({ final_card_input: { cardKind: 'result', state: 'completed' } });
+  }
+  h.coordinator.stop();
+  const restored = h.createCoordinator();
+  try {
+    await restored.initializeWorkflows(h.config);
+    await restored.reconcile(h.config); await restored.reconcile(h.config);
+    expect(h.service.update.mock.calls.filter(([input]) => input.messageId === sent.messageId)).toHaveLength(0);
+    expect(resultSends(h)).toHaveLength(0);
+    expect(h.service.replyText).toHaveBeenCalledOnce();
+    if (!bound) expect(JSON.parse((await h.repos.config.get(key))!).cardId).not.toBe(sent.messageId);
+  } finally { restored.stop(); }
+});
+
+it('keeps confirmed legacy card feedback compatible without list while refusing an unknown receipt type', async () => {
+  const h = await harness(); const sent = await h.sendFinal(); h.release();
+  const saved = await h.resultCard();
+  const isText = await explicitFinalTextReceiptReader({ get: h.repos.config.get.bind(h.repos.config) } as any);
+  await expect(isText(h.mapping, saved, sent.messageId)).resolves.toBe(false);
+  await expect(isText(h.mapping, { ...saved, final_card_input: undefined }, sent.messageId)).rejects.toMatchObject({ code: 'FINAL_STORAGE_UNAVAILABLE' });
+});
+
+it.each(['accepted', 'needs_changes'] as const)('restores historical %s feedback on an ordinary final card', async state => {
+  const h = await harness();
+  const record = await seedResultInteraction(h);
+  const sent = await h.sendFinal(); h.release(); await h.resultCard();
+  h.coordinator.stop();
+  await h.repos.config.set(`lark.interaction.${h.config.appId}.${record.id}`, JSON.stringify({ ...record, state, cardId: sent.messageId }));
+  const restored = h.createCoordinator();
+  try {
+    await restored.initializeWorkflows(h.config); await restored.reconcile(h.config);
+    expect(h.service.update.mock.calls.some(([input]) => input.messageId === sent.messageId && JSON.stringify(input.elements).includes('workflow_result_status'))).toBe(true);
+    expect((await h.persisted()).result_feedback_state).toBe(state);
+    expect(resultSends(h)).toHaveLength(1);
+  } finally { restored.stop(); }
+});
 
 it('preserves an existing acceptance workflow and its callback on the same explicit result', async () => {
   const h = await harness({ verificationCommand: 'pnpm test' });

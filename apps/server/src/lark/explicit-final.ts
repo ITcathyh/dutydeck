@@ -136,6 +136,32 @@ export async function hasExplicitFinal(store: ConfigRepository | undefined, cont
   const record = store && context ? await readRecord(store, context.scope) : undefined;
   return Boolean(record && authoritative(record, state));
 }
+export type ExplicitFinalTextReceiptReader = (mapping: Pick<ChannelMapping, 'externalId' | 'sessionId'>, saved: PersistedLarkCardTask, messageId: string) => Promise<boolean>;
+/** Snapshot candidates once per reconciliation; verify the exact durable scope before treating a message as text. */
+export async function explicitFinalTextReceiptReader(store: ConfigRepository | undefined): Promise<ExplicitFinalTextReceiptReader> {
+  if (!store) return async () => false;
+  if (!store.list) return async (_mapping, saved, messageId) => {
+    if (saved.final_delivery_state === 'delivered' && saved.final_message_id === messageId && saved.final_card_input) return false;
+    throw new LarkServiceError('FINAL_STORAGE_UNAVAILABLE', '无法核验最终回执类型，已停止验收绑定与更新。', 503);
+  };
+  const candidates = (await store.list('lark.explicit_final.')).flatMap(row => {
+    try {
+      const record = JSON.parse(row.value) as FinalRecord;
+      return record && ['reply-agent', 'both'].includes(record.delivery_mode ?? '') && typeof record.relay?.message_id === 'string' && typeof record.scope?.attempt_id === 'string' ? [record] : [];
+    } catch { return []; }
+  });
+  return async (mapping, saved, messageId) => {
+    for (const candidate of candidates) {
+      if (candidate.relay?.message_id !== messageId) continue;
+      const context = explicitFinalContext(mapping, saved, candidate.scope.attempt_id);
+      if (!context || JSON.stringify(context.scope) !== JSON.stringify(candidate.scope)) continue;
+      const record = await readRecord(store, context.scope, true);
+      if (record?.relay?.message_id === messageId) return true;
+    }
+    return false;
+  };
+}
+
 const log = { warn: (..._args: any[]) => {} };
 const finalInput = (record: FinalRecord) => ({
   state: 'running' as const, cardKind: 'result' as const, statusLabel: '答复已送达，执行尚未结束', readOnly: true,

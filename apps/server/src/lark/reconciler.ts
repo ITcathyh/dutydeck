@@ -1,4 +1,4 @@
-import { completeExplicitFinal, readConfirmedExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
+import { explicitFinalTextReceiptReader, completeExplicitFinal, readConfirmedExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import { describeLarkTaskRecovery, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import type { ChannelMapping, ChannelMappingRepository, ConfigRepository, TaskRecord } from '@dutydeck/shared';
 import { defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
@@ -128,6 +128,7 @@ export async function performLarkCardReconcile(input: {
   // 过程卡重绘不注入整张能力表，「查看详情」要不要走回调单独声明，否则页脚退回直链、点开落到登录页。
   const processContext = { ...cardContext, ...(input.detailLogin ? { detailLogin: true } : {}) };
   const mappings = await cardMappings.list(channel);
+  const isTextReceipt = await explicitFinalTextReceiptReader(input.deliveryStore);
   let unresolved = 0;
   for (const mapping of mappings) {
     try {
@@ -174,7 +175,8 @@ export async function performLarkCardReconcile(input: {
       // 旧版单卡结果已经交付，保留历史消息，不追发。
       if (alreadyDelivered && persisted.final_message_id && persisted.final_message_id === persisted.card_message_id) continue;
       if (alreadyDelivered) {
-        if (persisted.state === 'completed' && persisted.final_message_id && input.resultElements) await input.resultElements(mapping, persisted, persisted.final_message_id);
+        if (persisted.state === 'completed' && persisted.final_message_id && input.resultElements
+          && !await isTextReceipt(mapping, persisted, persisted.final_message_id)) await input.resultElements(mapping, persisted, persisted.final_message_id);
         // 没有过程卡就没有可冻结的对象，直接收敛。
         if (persisted.progress_frozen || !persisted.card_message_id) continue;
         const legacyElements = persisted.last_successful_elements?.length ? persisted.last_successful_elements : undefined;
