@@ -76,7 +76,7 @@ export type SessionStreamOptions = {
   getAfter(): number;
   onEvent(event: DockEvent): void;
   onStatus(status: StreamStatus): void;
-  // 恢复连接时先校准查询，不等待可能被代理缓冲的 open。
+  // 重连或恢复前台时先校准查询，不等待可能被代理缓冲的 open。
   onReconnect?(): void;
   eventSourceFactory?: (url: string) => MockableEventSource;
   setTimeoutFn?: typeof setTimeout;
@@ -102,6 +102,7 @@ export class SessionStream {
   private watchdog: ReturnType<typeof setTimeout> | undefined;
   private suspendTimer: ReturnType<typeof setTimeout> | undefined;
   private started = false;
+  private wasHidden = false;
   private source: MockableEventSource | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private closed = false;
@@ -121,6 +122,7 @@ export class SessionStream {
   start(): void {
     if (this.closed || this.started) return;
     this.started = true;
+    this.wasHidden = this.hidden();
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this.onVisibilityChange);
     this.connect();
     this.onVisibilityChange();
@@ -167,7 +169,10 @@ export class SessionStream {
 
   private onVisibilityChange = (): void => {
     if (this.closed) return;
-    if (this.hidden()) {
+    const hidden = this.hidden();
+    const returnedToForeground = this.wasHidden && !hidden;
+    this.wasHidden = hidden;
+    if (hidden) {
       this.clearReconnect();
       if (this.source && this.suspendTimer === undefined) this.suspendTimer = this.setTimeoutFn(() => {
         this.suspendTimer = undefined;
@@ -175,13 +180,14 @@ export class SessionStream {
       }, SSE_HIDDEN_SUSPEND_MS);
       return;
     }
+    if (!returnedToForeground) return;
     if (this.suspendTimer !== undefined) this.clearTimeoutFn(this.suspendTimer);
     this.suspendTimer = undefined;
     if (!this.source) {
       this.clearReconnect();
       this.connect();
-      this.onReconnect();
     }
+    this.onReconnect();
   };
 
   private connect(): void {

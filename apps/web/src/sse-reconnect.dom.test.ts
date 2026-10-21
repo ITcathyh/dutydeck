@@ -304,6 +304,30 @@ describe('SessionStream 心跳与可见性', () => {
     expect(MockEventSource.instances).toHaveLength(2);
   });
 
+  it.each([
+    { name: '短暂隐藏保留连接', duration: 30_000, fail: false, sources: 1 },
+    { name: '长时间隐藏释放连接', duration: SSE_HIDDEN_SUSPEND_MS, fail: false, sources: 2 },
+    { name: '隐藏期间连接出错', duration: 30_000, fail: true, sources: 2 }
+  ])('$name：真实回前台只校准一次，重复 visible/start 不额外校准', ({ duration, fail, sources }) => {
+    const first = latest();
+    stream.start(); visibility(false); visibility(false);
+    expect(onReconnect).not.toHaveBeenCalled();
+    visibility(true);
+    if (fail) first.fail();
+    vi.advanceTimersByTime(duration);
+    expect(onReconnect).not.toHaveBeenCalled();
+    visibility(false);
+    expect(MockEventSource.instances).toHaveLength(sources);
+    expect(first.closed).toBe(sources === 2);
+    expect(onReconnect).toHaveBeenCalledOnce();
+    visibility(false); visibility(false); stream.start();
+    expect(MockEventSource.instances).toHaveLength(sources);
+    expect(onReconnect).toHaveBeenCalledOnce();
+    visibility(true); vi.advanceTimersByTime(1_000); visibility(false);
+    expect(MockEventSource.instances).toHaveLength(sources);
+    expect(onReconnect).toHaveBeenCalledTimes(2);
+  });
+
   it('隐藏延时释放连接，后台零重连，前台立即恢复并校准', () => {
     visibility(true);
     vi.advanceTimersByTime(SSE_HIDDEN_SUSPEND_MS - 1);

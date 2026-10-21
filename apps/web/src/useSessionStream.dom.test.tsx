@@ -310,11 +310,15 @@ it('applies recovered status metadata without regressing a newer live status', a
 });
 
 
-it('foreground recovery calibrates events, tasks and sessions before the replacement stream opens', async () => {
+it.each([
+  { name: 'short hidden interval retains the stream', duration: 30_000, fail: false, sources: 1 },
+  { name: 'long hidden interval suspends the stream', duration: 60_000, fail: false, sources: 2 },
+  { name: 'error while hidden closes the stream', duration: 30_000, fail: true, sources: 2 }
+])('foreground recovery calibrates once before any new open: $name', async ({ duration, fail, sources }) => {
   vi.useFakeTimers();
   let hidden = false;
   vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
-  const eventLoader = vi.spyOn(api, 'events').mockResolvedValueOnce([]).mockResolvedValue([event(2)]);
+  const eventLoader = vi.spyOn(api, 'events').mockResolvedValueOnce([]).mockResolvedValueOnce([event(2)]).mockResolvedValue([]);
   const taskLoader = vi.fn(async () => []);
   const sessionLoader = vi.fn(async () => [session]);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -331,14 +335,36 @@ it('foreground recovery calibrates events, tasks and sessions before the replace
     await act(async () => { MockEventSource.instances[0]!.onopen?.(new Event('open')); await vi.advanceTimersByTimeAsync(0); });
     const tasksBefore = taskLoader.mock.calls.length;
     const sessionsBefore = sessionLoader.mock.calls.length;
+    const eventsBefore = eventLoader.mock.calls.length;
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); document.dispatchEvent(new Event('visibilitychange')); });
+    expect(taskLoader).toHaveBeenCalledTimes(tasksBefore);
+    expect(sessionLoader).toHaveBeenCalledTimes(sessionsBefore);
+    expect(eventLoader).toHaveBeenCalledTimes(eventsBefore);
     act(() => { hidden = true; document.dispatchEvent(new Event('visibilitychange')); });
-    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-    expect(MockEventSource.instances[0]!.closed).toBe(true);
+    if (fail) act(() => MockEventSource.instances[0]!.onerror?.(new Event('error')));
+    await act(async () => { await vi.advanceTimersByTimeAsync(duration); });
+    expect(MockEventSource.instances[0]!.closed).toBe(sources === 2);
+    expect(taskLoader).toHaveBeenCalledTimes(tasksBefore);
+    expect(sessionLoader).toHaveBeenCalledTimes(sessionsBefore);
+    expect(eventLoader).toHaveBeenCalledTimes(eventsBefore);
     await act(async () => { hidden = false; document.dispatchEvent(new Event('visibilitychange')); await vi.advanceTimersByTimeAsync(0); });
-    expect(MockEventSource.instances).toHaveLength(2);
+    expect(MockEventSource.instances).toHaveLength(sources);
+    expect(eventLoader).toHaveBeenCalledTimes(eventsBefore + 1);
     expect(taskLoader.mock.calls.length).toBe(tasksBefore + 1);
     expect(sessionLoader.mock.calls.length).toBe(sessionsBefore + 1);
     expect(eventLoader).toHaveBeenLastCalledWith('s1', { after: 1, limit: 200, direction: 'forward' }, expect.any(AbortSignal));
     expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.map(item => item.sequence)).toEqual([1, 2]);
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); document.dispatchEvent(new Event('visibilitychange')); await vi.advanceTimersByTimeAsync(0); });
+    expect(taskLoader).toHaveBeenCalledTimes(tasksBefore + 1);
+    expect(sessionLoader).toHaveBeenCalledTimes(sessionsBefore + 1);
+    expect(eventLoader).toHaveBeenCalledTimes(eventsBefore + 1);
+    if (sources === 2) {
+      // 新 HTTP 订阅建立后仍保留原有 open 校准，关闭订阅建立之前的竞态窗口。
+      await act(async () => { MockEventSource.instances[1]!.onopen?.(new Event('open')); await vi.advanceTimersByTimeAsync(0); });
+      expect(taskLoader).toHaveBeenCalledTimes(tasksBefore + 2);
+      expect(sessionLoader).toHaveBeenCalledTimes(sessionsBefore + 2);
+      expect(eventLoader).toHaveBeenCalledTimes(eventsBefore + 2);
+      expect(eventLoader).toHaveBeenLastCalledWith('s1', { after: 2, limit: 200, direction: 'forward' }, expect.any(AbortSignal));
+    }
   } finally { view.unmount(); client.clear(); vi.useRealTimers(); }
 });
