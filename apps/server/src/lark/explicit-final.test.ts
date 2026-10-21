@@ -152,6 +152,87 @@ const callbackValues = (node: unknown, out: Record<string, unknown>[] = []): Rec
 const resultSends = (h: Awaited<ReturnType<typeof harness>>) => [...h.service.send.mock.calls, ...h.service.reply.mock.calls].map(([input]) => input).filter(input => input.cardKind === 'result');
 
 describe('explicit final: real tools, runtime, coordinator and SQLite', () => {
+  it.each([230099, 230025].flatMap(code => ['custom', 'both'].flatMap(intent => ['completion', 'restart'].map(phase => ({ code, intent, phase })))))('keeps rejected $intent intent authoritative through $phase ($code)', async ({ code, intent, phase }) => {
+    const h = await harness({ botOrigin: intent === 'both' });
+    const body = { elements: [{ tag: 'markdown', content: 'FROZEN_CUSTOM_CANARY' }] };
+    h.service.reply.mockRejectedValueOnce(new LarkServiceError('LARK_API_ERROR', 'frozen publication rejected', 400, { upstreamCode: code }));
+    // Plain finals can retain their existing attachment fallback; reject that provider leg too so publication has actually failed.
+    if (intent === 'both') h.service.replyFile.mockRejectedValueOnce(new LarkServiceError('LARK_API_ERROR', 'frozen publication rejected', 400, { upstreamCode: code }));
+    await expect(h.sendFinal('FROZEN_SUMMARY_CANARY', intent === 'custom' ? { cardBody: body } : { delivery: 'both' })).rejects.toThrow('frozen publication rejected');
+    if (phase === 'restart') h.coordinator.stop();
+    h.release();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(h.session.id))[0]?.status).toBe('completed'));
+    const restarted = phase === 'restart' ? h.createCoordinator() : undefined;
+    try {
+      if (restarted) await restarted.reconcile(h.config);
+      const saved = await h.resultCard();
+      expect(saved).toMatchObject({ final_delivery_state: 'failed', final_delivery_error: expect.stringContaining('最终答复未送达') });
+      expect(saved.final_card_input).toBeUndefined();
+      expect(h.service.addReaction.mock.calls.some(([, emoji]) => emoji === 'CheckMark')).toBe(false);
+      expect(resultSends(h)).toHaveLength(1);
+      expect(h.service.replyText).toHaveBeenCalledOnce();
+      const status = (h.service.replyText.mock.calls[0]![0] as any).text;
+      expect(status).not.toContain('FROZEN_CUSTOM_CANARY'); expect(status).not.toContain('FROZEN_SUMMARY_CANARY');
+      const record = JSON.parse((await h.repos.config.list!('lark.explicit_final.'))[0]!.value);
+      expect(record.status).toBe('failed'); expect(record.message_id).toBeUndefined();
+      if (intent === 'both') expect(record.relay.status).toBe('pending');
+      if (restarted) { await restarted.reconcile(h.config); expect(h.service.replyText).toHaveBeenCalledOnce(); }
+    } finally { restarted?.stop(); }
+  });
+
+  it('retains a failed relay-only attempt through revoked recovery permission without publishing its body', async () => {
+    const h = await harness({ botOrigin: true, fail: true });
+    h.service.replyText.mockRejectedValueOnce(new LarkServiceError('LARK_NETWORK_ERROR', 'relay unknown', 502));
+    await expect(h.sendFinal('RELAY_PRIVATE_CANARY', { delivery: 'reply-agent' })).rejects.toThrow('relay unknown');
+    h.coordinator.stop();
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...h.config, groupToolsAllowSend: false }]));
+    h.release(); await vi.waitFor(async () => expect((await h.runtime.getTasks(h.session.id))[0]?.status).toBe('failed'));
+    const restarted = h.createCoordinator();
+    try {
+      await restarted.reconcile(h.config);
+      expect(resultSends(h)).toHaveLength(0); expect(h.service.replyText).toHaveBeenCalledOnce();
+      const blocked = await h.persisted();
+      expect(blocked.final_delivery_state).not.toBe('delivered'); expect(blocked.final_delivery_error).toContain('权限');
+      await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+      await h.patchPersisted({ final_delivery_retry_at: 0 });
+      await restarted.reconcile(h.config);
+      const saved = await h.resultCard();
+      expect(saved).toMatchObject({ state: 'failed', final_delivery_state: 'delivered' });
+      expect(saved.final_card_input).toBeUndefined(); expect(resultSends(h)).toHaveLength(0);
+      expect(h.service.replyText).toHaveBeenCalledTimes(2);
+      expect((h.service.replyText.mock.calls[0]![0] as any).idempotencyKey).toBe((h.service.replyText.mock.calls[1]![0] as any).idempotencyKey);
+      expect(h.service.update.mock.calls.some(([input]) => input.messageId === saved.final_message_id)).toBe(false);
+    } finally { restarted.stop(); }
+  });
+
+  it.each(['failed', 'interrupted', 'cancelled'].flatMap(state => ['delivered', 'unknown'].flatMap(delivery => ['completion', 'restart'].filter(phase => state !== 'cancelled' || phase === 'restart').map(phase => ({ state, delivery, phase })))))('honors relay-only $delivery at $state through $phase', async ({ state, delivery, phase }) => {
+    const h = await harness({ botOrigin: true, fail: state === 'failed', interrupted: state === 'interrupted' });
+    if (delivery === 'unknown') h.service.replyText.mockRejectedValueOnce(new LarkServiceError('LARK_NETWORK_ERROR', 'relay acceptance unknown', 502));
+    const sent = h.sendFinal('RELAY_ONLY_BUSINESS_CANARY', { delivery: 'reply-agent' });
+    if (delivery === 'unknown') await expect(sent).rejects.toThrow('relay acceptance unknown'); else await sent;
+    if (phase === 'restart') h.coordinator.stop();
+    h.release();
+    const terminal = state === 'cancelled' ? 'completed' : state;
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(h.session.id))[0]?.status).toBe(terminal));
+    if (state === 'cancelled') {
+      const tasks = await h.runtime.getTasks(h.session.id);
+      vi.spyOn(h.runtime, 'getTasks').mockResolvedValue(tasks.map(task => ({ ...task, status: 'cancelled' })));
+    }
+    const restarted = phase === 'restart' ? h.createCoordinator() : undefined;
+    try {
+      if (restarted) await restarted.reconcile(h.config);
+      const saved = await h.resultCard();
+      expect(saved.state).toBe(state); expect(saved.final_delivery_state).toBe('delivered');
+      expect(saved.final_card_input).toBeUndefined();
+      expect(resultSends(h)).toHaveLength(0);
+      expect(h.service.replyText).toHaveBeenCalledTimes(delivery === 'unknown' ? 2 : 1);
+      const relayCalls = h.service.replyText.mock.calls.map(([input]) => input as any);
+      expect(new Set(relayCalls.map(input => input.idempotencyKey)).size).toBe(1);
+      expect(h.service.update.mock.calls.some(([input]) => input.messageId === saved.final_message_id)).toBe(false);
+      if (restarted) { await restarted.reconcile(h.config); expect(resultSends(h)).toHaveLength(0); }
+    } finally { restarted?.stop(); }
+  });
+
   it('serializes both targets and recovers a relay acknowledgment write failure with the same provider UUID', async () => {
     const h = await harness({ botOrigin: true });
     const cas = h.repos.config.compareAndSet!.bind(h.repos.config);

@@ -1267,16 +1267,16 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         await this.unpinTaskCard(task);
         if (this.stopped || task.turn !== currentTurn) return;
         // 中断时也要读：账本上记了操作人的是有人主动停下的，不贴失败表情。
-        const runtimeTask = (state === 'completed' || state === 'interrupted') && task.sessionId && task.runtimeTaskId
+        const runtimeTask = task.sessionId && task.runtimeTaskId
           ? (await this.runtime.getTasks?.(task.sessionId))?.find(item => item.id === task.runtimeTaskId) : undefined;
-        const finalContext = state === 'completed' && task.sessionId ? explicitFinalContext(
+        const finalContext = task.sessionId ? explicitFinalContext(
           { externalId: task.id, sessionId: task.sessionId }, {
             app_id: config.appId, chat_id: event.chatId, chat_type: event.chatType,
             runtime_task_id: task.runtimeTaskId, task_name: taskTitle, prompt,
             state, started_at: task.startedAt!, turn: currentTurn,
             ...(event.chatType === 'group' ? { reply_message_id: event.messageId, reply_in_thread: Boolean(event.threadId?.trim()) } : {})
           }, runtimeTask?.currentAttemptId) : undefined;
-        const explicit = await hasExplicitFinal(this.workflowOptions.store, finalContext);
+        const explicit = await hasExplicitFinal(this.workflowOptions.store, finalContext, state);
         // 完成时只贴表情：成功终态改为在原消息上贴一枚表情，不再发结果卡。
         // 只对成功终态生效——失败/中断/取消仍必须发结果卡，一个表情等于把失败藏起来。
         // 任务通道的合成事件没有可贴的原消息，只能照常发结果卡，否则用户什么也收不到。
@@ -1355,15 +1355,19 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         if (this.stopped || task.turn !== currentTurn) return;
         task.finalAttachmentMessageId = result.attachmentMessageId;
         task.finalMessageId = result.messageId;
-        task.finalDeliveryState = 'delivered';
+        const deliveryFailure = 'deliveryFailure' in result && typeof result.deliveryFailure === 'string' ? result.deliveryFailure : undefined;
+        const textReceipt = 'textReceipt' in result && result.textReceipt === true;
+        task.finalDeliveryState = deliveryFailure ? 'failed' : 'delivered';
+        task.finalDeliveryError = deliveryFailure;
         task.finalDeliveredTurn = currentTurn;
         task.finalElements = result.elements;
-        task.finalCardInput = resultCardInput;
-        if (context && this.workflows) await this.workflows.result(context, result.messageId, result.attachmentMessageId ? [result.attachmentMessageId] : undefined).catch(error => {
+        task.finalCardInput = textReceipt ? undefined : resultCardInput;
+        if (deliveryFailure) { await this.saveCardTask(task, state); return; }
+        if (!textReceipt && context && this.workflows) await this.workflows.result(context, result.messageId, result.attachmentMessageId ? [result.attachmentMessageId] : undefined).catch(error => {
           this.log.warn({ error, taskId: task.id }, '结果已送达，验收绑定等待对账补齐');
           this.scheduleReconcile();
         });
-        if (planContext && this.workflows) await this.workflows.plan(planContext, result.messageId, undefined, result.attachmentMessageId ? { relatedCardIds: [result.attachmentMessageId] } : {}).catch(error => {
+        if (!textReceipt && planContext && this.workflows) await this.workflows.plan(planContext, result.messageId, undefined, result.attachmentMessageId ? { relatedCardIds: [result.attachmentMessageId] } : {}).catch(error => {
           this.log.warn({ error, taskId: task.id }, '计划卡已送达，按钮绑定等待对账补齐');
           this.scheduleReconcile();
         });
@@ -1374,7 +1378,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         }
         if (this.stopped || task.turn !== currentTurn) return;
         await this.saveCardTask(task, state);
-        if (context && this.workflows) {
+        if (!textReceipt && context && this.workflows) {
           const feedback = (await this.workflows.list(config.appId)).find(item => item.kind === 'result' && item.taskId === context.taskId && ['accepted', 'needs_changes'].includes(item.state));
           if (feedback) await this.refreshResultFeedback(config, feedback.id);
         }

@@ -95,7 +95,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       chat_type: task.event.chatType,
       turn: task.turn,
       ...(task.finalMessageId
-        ? { final_message_id: task.finalMessageId, final_delivery_state: 'delivered' as const }
+        ? { final_message_id: task.finalMessageId, final_delivery_state: task.finalDeliveryState ?? 'delivered' as const }
         : task.finalDeliveryState ? { final_delivery_state: task.finalDeliveryState } : {}),
       ...(task.finalDeliveryError ? { final_delivery_error: task.finalDeliveryError } : {}),
       ...(task.finalMessageId ? { final_delivery_first_failed_at: undefined }

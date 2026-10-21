@@ -7,7 +7,7 @@ import { isLarkMessageUnupdatable } from './card-renderer.js';
 import type { ConfigRepository, ChannelMapping } from '@dutydeck/shared';
 import type { PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask } from './persisted-card-task.js';
-import { isLarkFinalContentAuditRejected, recordLarkResultAuditRejection, prepareLarkResult, readConfirmedLarkResult, sendLarkResult, type DeliveryTarget } from './result-delivery.js';
+import { isLarkFinalContentAuditRejected, recordLarkResultAuditRejection, prepareLarkResult, readConfirmedLarkResult, sendLarkResult, sendLarkDeliveryText, type DeliveryTarget } from './result-delivery.js';
 import { LarkServiceError, type LarkCardInput, type LarkCardService, type LarkWriteGuard } from './service.js';
 import type { LarkAgentSessionBinding } from './agent-tools.js';
 
@@ -17,6 +17,12 @@ export interface ExplicitFinalScope {
   reply_message_id: string; reply_in_thread: boolean;
 }
 export interface ExplicitFinalContext { scope: ExplicitFinalScope; taskName: string }
+export interface ExplicitFinalReceipt {
+  messageId: string; elements: Elements; attachmentMessageId?: string;
+  /** Text receipts must never be used as a card-update or acceptance-workflow target. */
+  textReceipt?: true;
+  deliveryFailure?: string;
+}
 type Elements = Array<Record<string, any>>;
 const relayIntentSchema = z.object({ target_id: z.string().min(1), sender_id: z.string().min(1), actor_id: z.string().min(1), text: z.string().min(1).max(22_000), provider_uuid: z.string().min(1).max(50) }).strict();
 const relayRecordSchema = relayIntentSchema.extend({ status: z.enum(['pending', 'delivered']), message_id: z.string().min(1).optional(), delivery_unknown: z.boolean().optional() }).strict();
@@ -115,17 +121,20 @@ async function saveRecord(store: ConfigRepository, record: FinalRecord) {
 const relayIntent = (relay: FinalRecord['relay']) => relay && relayIntentSchema.parse({ target_id: relay.target_id, sender_id: relay.sender_id, actor_id: relay.actor_id, text: relay.text, provider_uuid: relay.provider_uuid });
 const complete = (record: FinalRecord) => (record.delivery_mode === 'reply-agent' || Boolean(record.message_id))
   && (!record.relay || record.relay.status === 'delivered' && Boolean(record.relay.message_id));
-const receiptFor = (record: FinalRecord) => ({ messageId: (record.message_id ?? record.relay?.message_id)!,
-  elements: record.elements ?? [{ tag: 'markdown', element_id: 'final_output', content: record.content }], attachmentMessageId: record.attachment_message_id });
+const frozenIntent = (record: FinalRecord) => Boolean(record.card_body || record.delivery_mode && record.delivery_mode !== 'publish');
+const authoritative = (record: FinalRecord, state: LarkCardInput['state']) => frozenIntent(record) || (state === 'completed' && (record.status !== 'failed' || record.audit_rejected));
+const receiptFor = (record: FinalRecord): ExplicitFinalReceipt => ({ messageId: (record.message_id ?? record.relay?.message_id)!,
+  elements: record.elements ?? [{ tag: 'markdown', element_id: 'final_output', content: record.content }], attachmentMessageId: record.attachment_message_id,
+  ...(record.delivery_mode === 'reply-agent' ? { textReceipt: true as const } : {}) });
 
 /** 仅返回至少一个指定目标已确认收到的摘要，供会话历史回看。 */
 export async function readExplicitFinal(store: ConfigRepository, context: ExplicitFinalContext, strict = false): Promise<string | undefined> {
   const record = await readRecord(store, context.scope, strict);
   return record && (record.message_id || record.relay?.message_id) ? record.content : undefined;
 }
-export async function hasExplicitFinal(store: ConfigRepository | undefined, context: ExplicitFinalContext | undefined) {
+export async function hasExplicitFinal(store: ConfigRepository | undefined, context: ExplicitFinalContext | undefined, state: LarkCardInput['state'] = 'completed') {
   const record = store && context ? await readRecord(store, context.scope) : undefined;
-  return Boolean(record && (record.status !== 'failed' || record.audit_rejected));
+  return Boolean(record && authoritative(record, state));
 }
 const log = { warn: (..._args: any[]) => {} };
 const finalInput = (record: FinalRecord) => ({
@@ -263,10 +272,16 @@ export async function sendExplicitFinal(store: ConfigRepository, service: LarkCa
   return receiptFor(receipt);
 }
 export async function completeExplicitFinal(store: ConfigRepository | undefined, service: LarkCardService, context: ExplicitFinalContext | undefined,
-  input: LarkCardInput, decoration: Elements, beforeSend?: LarkWriteGuard, beforeRelay?: (scope: ExplicitFinalScope, actorId: string) => Promise<void>) {
+  input: LarkCardInput, decoration: Elements, beforeSend?: LarkWriteGuard, beforeRelay?: (scope: ExplicitFinalScope, actorId: string) => Promise<void>): Promise<ExplicitFinalReceipt | undefined> {
   if (!store || !context) return;
   const record = await readRecord(store, context.scope);
-  if (!record || record.status === 'failed' && !record.audit_rejected) return;
+  if (!record || !authoritative(record, input.state ?? 'completed')) return;
+  if (record.status === 'failed' && frozenIntent(record) && !record.audit_rejected) {
+    const deliveryFailure = '最终答复未送达：已提交的卡片或交付请求被拒绝，已停止自动重发。请在工作台核对；本回执仅说明交付状态。';
+    const notice = await sendLarkDeliveryText(service, targetFor(record.scope), { text: deliveryFailure,
+      idempotencyKey: `final_failure_${digest(record.scope).slice(0, 32)}` }, store, beforeSend);
+    return { messageId: notice.messageId, elements: [{ tag: 'markdown', element_id: 'explicit_final_failure', content: deliveryFailure }], textReceipt: true, deliveryFailure };
+  }
   const receipt = await deliver(store, service, record, beforeSend, beforeRelay);
   if (receipt.delivery_mode === 'reply-agent') return receiptFor(receipt);
   const elements = [...decoration.filter(item => item.element_id === 'group_mention'), ...receipt.elements!,

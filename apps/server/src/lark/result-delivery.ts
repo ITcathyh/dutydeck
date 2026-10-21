@@ -88,6 +88,17 @@ async function delivered<T>(store: ConfigRepository | undefined, key: string, se
   return result;
 }
 
+/** A fixed host delivery-status receipt; it never contains the result body or changes its target. */
+export async function sendLarkDeliveryText(service: Pick<LarkCardService, 'sendText' | 'replyText'>, target: DeliveryTarget,
+  input: { text: string; idempotencyKey: string }, store: ConfigRepository, beforeSend?: LarkWriteGuard) {
+  return delivered(store, `lark.delivery.${input.idempotencyKey}.message`, async () => {
+    await beforeSend?.();
+    return target.replyMessageId
+      ? service.replyText({ ...input, messageId: target.replyMessageId, replyInThread: target.replyInThread, ...(beforeSend ? { beforeSend } : {}) })
+      : service.sendText({ ...input, chatId: target.chatId, ...(beforeSend ? { beforeSend } : {}) });
+  }, result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim()));
+}
+
 export async function sendLarkFile(
   service: LarkCardService, target: DeliveryTarget,
   input: { data: Uint8Array; filename: string; idempotencyKey: string },

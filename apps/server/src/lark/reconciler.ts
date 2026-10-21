@@ -392,8 +392,8 @@ export async function performLarkCardReconcile(input: {
       if (!updated && isLarkMessageUnupdatable(lastError)) updated = true;
       await withExplicitFinalLock(input.deliveryStore, runtimeTask.id, async () => {
         if (input.skipTask?.(mapping.externalId, mapping.sessionId, persisted.turn ?? 0)) return;
-        const finalContext = completed ? explicitFinalContext(mapping, persisted, runtimeTask.currentAttemptId) : undefined;
-        const explicit = await hasExplicitFinal(input.deliveryStore, finalContext);
+        const finalContext = explicitFinalContext(mapping, persisted, runtimeTask.currentAttemptId);
+        const explicit = await hasExplicitFinal(input.deliveryStore, finalContext, state);
         let finalCardInput: LarkCardInput | undefined;
         let finalMessageId: string | undefined;
         let finalAttachmentMessageId: string | undefined;
@@ -401,6 +401,8 @@ export async function performLarkCardReconcile(input: {
         let reactionDelivered = false;
         let resultCallbackFailed = false;
         let deliveryError: unknown;
+        let receiptDeliveryFailure: string | undefined;
+        let textReceipt = false;
         try {
           // 完成时只贴表情：重启补发同样不发结果卡，只补那一枚表情。
           // 失败/中断/取消照旧补发结果卡——重启不是把失败藏起来的理由。
@@ -457,11 +459,14 @@ export async function performLarkCardReconcile(input: {
                 || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
               replyInThread: persisted.reply_in_thread
             }, { ...finalCardInput, elements, idempotencyKey: larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn)) }, log, input.deliveryStore, beforeSend);
+            receiptDeliveryFailure = 'deliveryFailure' in result && typeof result.deliveryFailure === 'string' ? result.deliveryFailure : undefined;
+            textReceipt = 'textReceipt' in result && result.textReceipt === true;
+            if (textReceipt) finalCardInput = undefined;
             finalAttachmentMessageId = result.attachmentMessageId;
             finalMessageId = result.messageId;
             finalElements = result.elements;
           }
-          if (!receiptOnly && finalMessageId && completed && input.resultElements) {
+          if (!receiptOnly && !textReceipt && finalMessageId && completed && input.resultElements) {
             try {
               await input.resultElements(mapping, { ...persisted, final_attachment_message_id: finalAttachmentMessageId }, finalMessageId);
             } catch (callbackError) {
@@ -471,7 +476,7 @@ export async function performLarkCardReconcile(input: {
           }
           // 补发结果后同实时链路一样在原消息上贴状态表情。用户自己取消、停下的不贴；旧的一轮也不贴，
           // 重启时不给几天前的消息补表情。贴失败只 warn，幂等键保证对账重入不重复贴。
-          if (!receiptOnly && state !== 'cancelled' && !runtimeTask.interruptedByActor && !larkTaskAgentGuid(mapping.externalId)
+          if (!receiptOnly && !receiptDeliveryFailure && state !== 'cancelled' && !runtimeTask.interruptedByActor && !larkTaskAgentGuid(mapping.externalId)
             && !await input.staleTurn?.(mapping.sessionId, runtimeTask)) {
             await deliverLarkStatusReaction(service, { appId: persisted.app_id, messageId: mapping.externalId, completed }, log, input.deliveryStore);
           }
@@ -502,7 +507,7 @@ export async function performLarkCardReconcile(input: {
           ...persisted, runtime_task_id: runtimeTask.id, state,
           progress_frozen: updated,
           ...(finalMessageId
-            ? { ...clearedRetry, final_message_id: finalMessageId, final_attachment_message_id: finalAttachmentMessageId, final_delivery_state: 'delivered', final_elements: finalElements, final_card_input: finalCardInput }
+            ? { ...clearedRetry, final_message_id: finalMessageId, final_attachment_message_id: finalAttachmentMessageId, final_delivery_state: receiptDeliveryFailure ? 'failed' : 'delivered', ...(receiptDeliveryFailure ? { final_delivery_error: receiptDeliveryFailure } : {}), final_elements: finalElements, final_card_input: finalCardInput }
             : reactionDelivered ? { final_delivery_state: 'reaction' }
             : inPlace ? cardMessageId ? { final_message_id: cardMessageId, final_delivery_state: 'delivered' } : { final_delivery_state: 'reaction' }
             : deliveryPatch),
