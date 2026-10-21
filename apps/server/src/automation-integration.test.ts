@@ -251,6 +251,7 @@ describe('Agent schedule request delivery', () => {
 
   it('persists once and recovers confirmation delivery through the real Lark service with bounded UUIDs', async () => {
     const f = await fixture();
+    const prompt = ['检查最近七天的运行记录。'.repeat(50), '', '只提方案，不修改代码。', '每条建议列出问题、方案、预期收益和 P0–P3 优先级。'].join('\n');
     const bodies: any[] = [];
     const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
     const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -268,7 +269,7 @@ describe('Agent schedule request delivery', () => {
       const request = () => runAgentScheduleRequest({ automation,
         prepareDelivery: id => integration.prepareMessageDelivery('s1', { appId: 'cli_a', chatId: 'oc_chat', messageId: 'om_request', replyInThread: true }, id),
         sendConfirmation: integration.sendScheduleRequest
-      }, { sessionId: 's1', requestId: 'task_1', actorId: 'ou_alice' }, { every: 15, prompt: '看看结论' });
+      }, { sessionId: 's1', requestId: 'task_1', actorId: 'ou_alice' }, { every: 15, prompt });
       const failed = await request();
       expect(failed).toMatchObject({ saved: true, pendingConfirmation: true, confirmationDelivery: 'failed' });
       expect(JSON.parse((await f.repos.config.get(`session_automation/schedule/${failed.scheduleId}`))!).enabled).toBe(false);
@@ -279,6 +280,7 @@ describe('Agent schedule request delivery', () => {
       expect(bodies[0].uuid.length).toBeLessThanOrEqual(50);
       expect((await f.repos.config.list('session_automation/schedule/'))).toHaveLength(1);
       expect(JSON.stringify(JSON.parse(bodies[1].content))).toContain('dutydeck_schedule_enable');
+      expect(JSON.parse(bodies[1].content).body.elements.find((element: any) => element.element_id === 'schedule_request').content).toContain(prompt);
     } finally { service.close(); }
   });
 

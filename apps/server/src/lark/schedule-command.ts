@@ -10,14 +10,14 @@ import type { LarkCardInput } from './service.js';
  * 没启用时给「启用」，启用后给「停用」；按钮带 card: 'request'，回调据此只重绘这张卡。
  */
 export function scheduleRequestCard(schedule: Pick<PublicSessionSchedule, 'id' | 'prompt' | 'trigger' | 'timezone' | 'enabled' | 'nextDueAt'>, replyInThread: boolean): LarkCardInput & { elements: Array<Record<string, unknown>> } {
-  const prompt = schedule.prompt.replace(/\s+/g, ' ').trim();
+  const prompt = schedule.prompt.trim();
   const next = schedule.nextDueAt ? new Date(schedule.nextDueAt).toLocaleString('zh-CN', { timeZone: schedule.timezone, hour12: false }) : undefined;
   return {
     taskId: schedule.id, taskName: '定时任务', readOnly: true, retryable: false,
     ...(schedule.enabled ? { state: 'completed' as const, statusLabel: '已启用' } : { state: 'running' as const, statusLabel: '待启用', awaitingHuman: true }),
     elements: [
       { tag: 'markdown', element_id: 'schedule_request', content: [
-        `**做什么**：${prompt.length > 200 ? `${prompt.slice(0, 200)}…` : prompt}`,
+        `**做什么**：${prompt}`,
         `**什么时候**：${describeScheduleTrigger(schedule.trigger, schedule.timezone)}`,
         `**发到哪**：${replyInThread ? '本话题' : '本会话'}`,
         schedule.enabled ? `已启用${next ? `，下一次 ${next}` : ''}。每次的结果卡上也能停用。` : '点「启用」后开始，不点不会执行。'
