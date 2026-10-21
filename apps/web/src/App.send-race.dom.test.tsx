@@ -7,6 +7,7 @@ import App from './App';
 import { api, type DockEvent, type Session, type Task } from './api';
 import { useDockStore } from './store';
 import { resetDrafts } from './draft-store';
+import { resetComposerDrafts } from './composer-draft';
 import type { EventWindow } from './event-history';
 import { toastStore } from './useToasts';
 
@@ -30,6 +31,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   useDockStore.setState({ activeSessionId: undefined, rawVisible: false });
   resetDrafts();
+  resetComposerDrafts();
   toastStore.clear();
   window.history.replaceState(null, '', '/');
 });
@@ -93,7 +95,7 @@ it.each(['running', 'completed'] as const)('keeps the %s task from SSE/refetch w
   act(() => stream.onopen?.(new Event('open')));
   await waitFor(() => expect(client!.isFetching()).toBe(0));
   fireEvent.change(screen.getByRole('textbox', { name: '消息' }), { target: { value: queued.prompt } });
-  await userEvent.click(await screen.findByRole('button', { name: '发送消息' }));
+  await userEvent.click(await screen.findByRole('button', { name: /^(发送消息|加入队列|立即插话|停止当前执行并发送)$/ }));
   await waitFor(() => expect(sentBody).toEqual({ prompt: queued.prompt, mode: 'queue' }));
   expect(client.isMutating()).toBe(1);
 
@@ -175,7 +177,7 @@ it.each(['queue', 'steer'] as const)('shows a new %s acknowledgement immediately
     await userEvent.click(screen.getByRole('button', { name: '排队' }));
     await userEvent.click(screen.getByRole('button', { name: '插话到当前这一轮' }));
   }
-  await userEvent.click(screen.getByRole('button', { name: '发送消息' }));
+  await userEvent.click(screen.getByRole('button', { name: /^(发送消息|加入队列|立即插话|停止当前执行并发送)$/ }));
   await waitFor(() => expect(client!.isMutating()).toBe(0));
   expect(sentBody).toEqual({ prompt: queued.prompt, mode });
   expect(await screen.findByRole('button', { name: `取消排队：${queued.prompt}` })).toBeTruthy();

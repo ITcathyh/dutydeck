@@ -44,10 +44,10 @@ describe('buildLarkTaskDashboard', () => {
       '待处理新', '待处理旧', '运行新', '运行旧', '结果新', '结果旧'
     ]);
     expect(JSON.stringify(result.elements)).toContain('待处理');
-    expect(JSON.stringify(result.elements)).toContain('运行中');
+    expect(JSON.stringify(result.elements)).toContain('进行中');
     expect(JSON.stringify(result.elements)).toContain('最近结果');
-    expect(rowText(renderedRows[0]!)).toContain('等待回答');
-    expect(rowText(renderedRows[2]!)).toContain('执行工具');
+    expect(rowText(renderedRows[0]!)).toContain('待回答');
+    expect(rowText(renderedRows[2]!)).toContain('进行中');
     expect(rowText(renderedRows[4]!)).toContain('已完成');
     expect(rowText(renderedRows[5]!)).toContain('状态待核对');
   });
@@ -168,9 +168,9 @@ describe('buildLarkTaskDashboard', () => {
   it('每行只给一个主操作，回调 value 与 card-actions 解析器完全同构', () => {
     const cases: Array<{ status: string; label?: string; action?: string; type?: string }> = [
       { status: 'queued', label: '取消', action: 'cancel', type: 'default' },
-      { status: 'running', label: '中断', action: 'interrupt', type: 'danger' },
-      { status: 'thinking', label: '中断', action: 'interrupt', type: 'danger' },
-      { status: 'running_tool', label: '中断', action: 'interrupt', type: 'danger' },
+      { status: 'running', label: '中断', action: 'interrupt', type: 'default' },
+      { status: 'thinking', label: '中断', action: 'interrupt', type: 'default' },
+      { status: 'running_tool', label: '中断', action: 'interrupt', type: 'default' },
       { status: 'failed', label: '重试', action: 'retry', type: 'primary' },
       { status: 'interrupted', label: '重试', action: 'retry', type: 'primary' },
       { status: 'completed' },
@@ -204,7 +204,7 @@ describe('buildLarkTaskDashboard', () => {
     }
   });
 
-  it('待决审批行主操作固定为批准本次，拒绝收进 overflow，均走 workflow CAS value', () => {
+  it('待决审批行主操作固定为允许本次，拒绝收进 overflow，均走 workflow CAS value', () => {
     const result = buildLarkTaskDashboard([
       // 即便任务还在 running，审批也优先于中断。
       entry({ taskId: 'runtime-approve', title: '审批中', status: 'running', turn: 3, actionTaskId: 'om_task',
@@ -212,7 +212,9 @@ describe('buildLarkTaskDashboard', () => {
     ]);
     const row = rows(result.elements)[0]!;
     const button = rowPrimaryButton(row)!;
-    expect(button.text.content).toBe('批准本次');
+    expect(button.text.content).toBe('允许本次');
+    expect(statusLine(row)).toContain('待审批');
+    expect(result.elements.find(item => item.element_id === 'task_dashboard_group_0')?.content).toContain('待处理');
     expect(button.behaviors[0].value).toEqual({ dutydeck_workflow: 'approve', request_id: 'wf_24x', generation: 'boot-1' });
     // 不能退化成任务状态操作。
     expect(parseLarkCardActionValue(button.behaviors[0].value)).toBeUndefined();
@@ -222,7 +224,7 @@ describe('buildLarkTaskDashboard', () => {
     expect(overflow.behaviors).toEqual([{ type: 'callback', value: { dutydeck_workflow: 'reject', request_id: 'wf_24x', generation: 'boot-1' } }]);
   });
 
-  it('同一群内查看审批：行里有命令摘要，按钮是「批准本次」', () => {
+  it('同一群内查看审批：行里有命令摘要，按钮是「允许本次」', () => {
     const result = buildLarkTaskDashboard([
       entry({
         taskId: 'runtime-approve-cmd',
@@ -241,7 +243,7 @@ describe('buildLarkTaskDashboard', () => {
 
     const row = rows(result.elements)[0]!;
     const button = rowPrimaryButton(row)!;
-    expect(button.text.content).toBe('批准本次');
+    expect(button.text.content).toBe('允许本次');
     const serialized = JSON.stringify(row);
     expect(serialized).toContain('pnpm test --run');
     expect(serialized).toContain('命令：pnpm test --run');
@@ -269,7 +271,7 @@ describe('buildLarkTaskDashboard', () => {
     // 私聊中不能批准属于原群的审批，无批准按钮
     expect(rowPrimaryButton(row)).toBeUndefined();
     const serialized = JSON.stringify(row);
-    expect(serialized).not.toContain('批准本次');
+    expect(serialized).not.toContain('允许本次');
     expect(serialized).toContain('请到原群处理');
   });
 
@@ -382,7 +384,7 @@ describe('buildLarkTaskDashboard', () => {
     for (const r of rowList) {
       const btn = rowPrimaryButton(r);
       expect(btn).toBeDefined();
-      expect(btn?.text.content).toBe('批准本次');
+      expect(btn?.text.content).toBe('允许本次');
     }
   });
 

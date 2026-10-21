@@ -493,14 +493,28 @@ export class SessionAutomationService {
 
   async listBySession(sessionId: string, actorId?: string): Promise<SessionAutomationList> {
     await this.requireAuthorized(sessionId, actorId);
-    await this.requireSession(sessionId);
+    const session = await this.requireSession(sessionId);
     const [schedules, subscriptions, occurrences] = await Promise.all([
       this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule),
       this.listRecords(CI_PREFIX, value => ciSubscriptionSchema.parse(value)),
       this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value))
     ]);
+    const publicSchedules = schedules.map(item => item.value).filter(item => item.sessionId === sessionId && !item.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-MAX_RECORDS).map(publicSchedule);
+    const deliveryTargets: NonNullable<SessionAutomationList['deliveryTargets']> = {};
+    const source = parseLarkSourceId(session.sourceId);
+    await Promise.all(publicSchedules.map(async schedule => {
+      if (session.source !== 'lark') { deliveryTargets[schedule.id] = { kind: 'task', sessionId }; return; }
+      const raw = await this.options.repositories.config.get(`automation.delivery-target.${schedule.id}`);
+      let target: unknown;
+      try { target = raw ? JSON.parse(raw) : undefined; } catch { target = undefined; }
+      const parsed = z.object({ appId: z.string().min(1), chatId: z.string().min(1), replyMessageId: z.string().startsWith('om_'), replyInThread: z.boolean() }).safeParse(target);
+      deliveryTargets[schedule.id] = parsed.success && source.appId === parsed.data.appId && source.chatId === parsed.data.chatId
+        ? { kind: 'lark', ...parsed.data }
+        : { kind: 'unavailable' };
+    }));
     return {
-      schedules: schedules.map(item => item.value).filter(item => item.sessionId === sessionId && !item.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-MAX_RECORDS).map(publicSchedule),
+      deliveryTargets,
+      schedules: publicSchedules,
       subscriptions: subscriptions.map(item => item.value).filter(item => item.sessionId === sessionId).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-MAX_RECORDS).map(publicSubscription),
       occurrences: occurrences.map(item => item.value).filter(item => item.sessionId === sessionId).sort((a, b) => a.scheduledForUtc.localeCompare(b.scheduledForUtc)).slice(-MAX_RECORDS).map(publicOccurrence)
     };

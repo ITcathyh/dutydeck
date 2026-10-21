@@ -9,8 +9,10 @@ import { PullRequestPanel } from './PullRequestPanel';
 import { SessionAutomationPanel } from './SessionAutomationPanel';
 
 import { verificationLabel } from './verification-presentation';
+import { usageLabel } from './RunHeader';
+import { effectiveStatus, permissionLabels } from './ui';
 
-export function SessionDeliveryPanel({ session, tasks, onClose }: { session: Session; tasks: Task[]; onClose(): void }) {
+export function SessionDeliveryPanel({ session, tasks, onClose, presentation = 'dialog' }: { session: Session; tasks: Task[]; onClose(): void; presentation?: 'dialog' | 'inspector' }) {
   const qc = useQueryClient();
   const [command, setCommand] = useState('');
   const [cleanupPreview, setCleanupPreview] = useState<WorkspaceCleanupPreview | null>(null);
@@ -19,7 +21,8 @@ export function SessionDeliveryPanel({ session, tasks, onClose }: { session: Ses
   const capabilities = useQuery({ queryKey: ['sessionCapabilities', session.id], queryFn: () => api.sessionCapabilities(session.id) });
   const workspace = useQuery({ queryKey: ['workspace', session.id], queryFn: () => api.workspace(session.id) });
   const evidence = useQuery({ queryKey: ['verifications', session.id], queryFn: () => api.verifications(session.id), refetchInterval: 5_000 });
-  const turnDiffs = useQuery({ queryKey: ['turnDiffs', session.id], queryFn: () => api.turnDiffs(session.id) });
+  const usage = useQuery({ queryKey: ['sessionUsage', session.id], queryFn: () => api.sessionUsage(session.id) });
+  const turnDiffs = useQuery({ queryKey: ['turnDiffs', session.id], queryFn: () => api.turnDiffs(session.id), refetchInterval: 10_000 });
   const verify = useMutation({ mutationFn: () => api.verify(session.id, { command: command.trim() }), onSettled: () => { void qc.invalidateQueries({ queryKey: ['verifications', session.id] }); } });
 
   const checkCleanup = useMutation({
@@ -50,18 +53,72 @@ export function SessionDeliveryPanel({ session, tasks, onClose }: { session: Ses
 
   const readOnly = Boolean(session.archivedAt) || ['stopped', 'failed'].includes(session.state);
   const verificationUnavailable = capabilities.data?.verification === 'unavailable';
-  const busy = verificationUnavailable || ['thinking', 'running_tool', 'waiting_for_permission', 'interrupting'].includes(session.state) || verify.isPending || evidence.data?.some(record => record.status === 'running');
+  const busy = capabilities.data?.verification !== 'available' || ['thinking', 'running_tool', 'waiting_for_permission', 'interrupting'].includes(session.state) || verify.isPending || evidence.data?.some(record => record.status === 'running');
   const skillTasks = tasks.filter(task => task.skillDeliveries?.length);
 
   const isArchivedWorktree = Boolean(session.archivedAt) && workspace.data?.mode === 'worktree';
+  const usageLine = usage.data?.own && usage.data?.subSteps ? usageLabel(usage.data) : undefined;
   const isCleaned = workspace.data?.state === 'cleaned' || Boolean(workspace.data?.cleanedAt);
 
-  return <Dialog open onClose={onClose} label="工作目录与自动化" size="lg">
-    <Dialog.Header><h2 className="text-title font-semibold">工作目录与自动化</h2><span className="ml-auto"><IconButton label="关闭" onClick={onClose}><X size={16}/></IconButton></span></Dialog.Header>
-    <Dialog.Body>
-      <div className="space-y-6">
+  const content = <div className="space-y-6">
+        <section className="space-y-2" aria-label="任务结果">
+          <h3 className="text-body font-semibold">结果</h3>
+          <p className="text-body text-primary">{sessionDisplayName(session, tasks.find(task => task.prompt.trim())?.prompt)}</p>
+          <p className="text-caption text-secondary">执行状态：{effectiveStatus(session).label}。执行完成与验证通过分别记录。</p>
+          <p className="text-caption text-subtle">结果正文保留在对话中；下方检查已记录的改动与交付证据。</p>
+        </section>
+        <section className="space-y-2">
+          <h3 className="text-body font-semibold">每轮改动</h3>
+          {turnDiffs.error && <Banner tone="danger">{turnDiffs.error.message}</Banner>}
+          {turnDiffs.data && !turnDiffs.data.length && <p className="text-caption text-subtle">还没有改动过文件的轮次。只有在 Git 仓库里执行的轮次才会记录改动。</p>}
+          {[...turnDiffs.data ?? []].reverse().map(item => <a key={item.taskId} href={turnDiffPath(session.id, item.taskId)} className="block rounded-lg border border-default p-3 text-caption hover:bg-hover">
+            <span className="block truncate text-primary">{tasks.find(task => task.id === item.taskId)?.prompt.trim().slice(0, 100) || '这一轮'}</span>
+            <span className="text-secondary">改动 {item.summary.files} 个文件 <span className="text-success">+{item.summary.additions}</span> <span className="text-danger">−{item.summary.deletions}</span> · <span className="text-link">查看改动</span></span>
+          </a>)}
+        </section>
+        <section className="space-y-3">
+          <h3 className="text-body font-semibold">验证证据</h3>
+          <p className="text-caption text-secondary">在任务工作目录执行你填写的命令，记录退出码与输出。验证结果独立于 Agent 的执行状态；代码变化后需要重新验证。</p>
+          {!readOnly && <form className="flex flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); if (command.trim() && !busy) verify.mutate(); }}>
+            <div className="min-w-0 flex-1"><Field label="验证命令"><Input value={command} onChange={event => setCommand(event.target.value)} placeholder="例如 pnpm test" maxLength={4096} disabled={busy}/></Field></div>
+            <Button type="submit" variant="primary" disabled={!command.trim() || busy} loading={verify.isPending}>执行验证</Button>
+          </form>}
+          {capabilities.isPending && <Spinner label="读取验证能力"/>}
+          {!capabilities.isPending && !capabilities.isError && capabilities.data?.verification === 'unverified' && <p className="text-caption text-subtle">平台验证能力尚未确认，暂不能启动验证。</p>}
+          {capabilities.isError && <Banner tone="danger">验证能力读取失败，暂不能执行新验证。<Button variant="ghost" onClick={() => void capabilities.refetch()}>重试</Button></Banner>}
+          {verificationUnavailable && <Banner tone="warning">平台验证当前需要 Linux，才能在服务异常退出后确认并清理原验证进程。</Banner>}
+          {busy && capabilities.data?.verification === 'available' && <p className="text-caption text-subtle">本会话正在执行，结束后可启动验证。</p>}
+          {(verify.error || evidence.error) && <Banner tone="danger">{(verify.error ?? evidence.error)?.message}</Banner>}
+          {evidence.isLoading ? <Spinner label="读取验证记录"/> : !evidence.error && !evidence.data?.length && <p className="text-caption text-subtle">尚无平台执行的验证记录。</p>}
+          {evidence.data?.map(record => <details key={record.id} className="rounded-lg border border-default p-3">
+            <summary className="cursor-pointer text-caption"><strong>{verificationLabel(record)}</strong> · {record.command}</summary>
+            <p className="mt-2 text-caption text-subtle">{new Date(record.startedAt).toLocaleString()} · {record.exitCode === undefined ? '无退出码' : `退出码 ${record.exitCode}`}</p>
+            <p className="mt-1 break-all font-mono text-caption text-subtle">版本：{record.beforeFingerprint ?? '未记录代码指纹'}{record.afterFingerprint && record.afterFingerprint !== record.beforeFingerprint ? ` → ${record.afterFingerprint}` : ''}</p>
+            <p className="mt-1 text-caption text-subtle">{record.taskId ? `关联轮次：${record.taskId}` : '未关联具体轮次'}{record.completedAt ? ` · 用时 ${Math.max(0, (Date.parse(record.completedAt) - Date.parse(record.startedAt)) / 1000).toFixed(1)} 秒` : ''}{record.stale ? ' · 这份证据不能证明当前版本有效，请重新验证。' : ''}</p>
+            {record.error && <p className="mt-1 text-caption text-danger">{record.error}</p>}
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-muted p-2 text-caption">{record.output || '无命令输出'}</pre>
+            {record.outputTruncated && <p className="text-caption text-warning">输出超过记录上限，已截断。</p>}
+          </details>)}
+        </section>
+        <PullRequestPanel session={session}/>
+        <section className="space-y-2">
+          <h3 className="text-body font-semibold">Skill 投递记录</h3>
+          {!skillTasks.length && <p className="text-caption text-subtle">尚无明确选中的 Skill。发送时可在输入框选择。</p>}
+          {skillTasks.map(task => <details key={task.id} className="rounded-lg border border-default p-3"><summary className="cursor-pointer text-caption">{task.prompt.slice(0, 100)} · {task.skillDeliveries!.length} 项</summary>
+            {task.skillDeliveries!.map(skill => <div key={skill.path} className="mt-2 break-all text-caption"><strong>{skill.name}</strong> · 正文已加入本轮指令<p className="text-subtle">{skill.source === 'workspace' ? '项目' : skill.source === 'plugin' ? '插件' : '个人'} · {skill.path}<br/>SHA256 {skill.digest}</p></div>)}
+          </details>)}
+        </section>
+        <details className="rounded-lg border border-default p-3">
+          <summary className="min-h-11 cursor-pointer text-body font-semibold">执行环境与用量</summary>
+          <div className="mt-3 space-y-4">
         <section className="space-y-2">
           <h3 className="text-body font-semibold">工作目录</h3>
+          <p className="break-all text-caption text-secondary">Agent：{session.agentId}{session.permissionMode ? ` · ${permissionLabels[session.permissionMode]}` : ''}</p>
+          <p className="break-all font-mono text-caption text-subtle">任务 {session.id} · 执行 {session.runId}</p>
+          {usage.error && <Banner tone="danger">用量读取失败：{usage.error.message}</Banner>}
+          {usageLine && <p className="text-caption text-secondary">{usageLine.text}<br/><span className="text-subtle">{usageLine.detail}</span></p>}
+          {usage.data?.snapshot?.nativeTokens?.totalTokens !== undefined && <p className="text-caption text-subtle">原生会话 token：{usage.data.snapshot.nativeTokens.totalTokens.toLocaleString('zh-CN')}（独立读数，不计入账本费用）</p>}
+          {!usage.isPending && !usage.error && !usageLine && <p className="text-caption text-subtle">尚未提供用量数据。</p>}
           {workspace.isLoading && <Spinner label="读取工作目录"/>}
           {workspace.error && <Banner tone="danger">{workspace.error.message}</Banner>}
           {isCleaned ? (
@@ -154,49 +211,23 @@ export function SessionDeliveryPanel({ session, tasks, onClose }: { session: Ses
           )}
         </section>
         <section className="space-y-2">
-          <h3 className="text-body font-semibold">每轮改动</h3>
-          {turnDiffs.error && <Banner tone="danger">{turnDiffs.error.message}</Banner>}
-          {turnDiffs.data && !turnDiffs.data.length && <p className="text-caption text-subtle">还没有改动过文件的轮次。只有在 Git 仓库里执行的轮次才会记录改动。</p>}
-          {[...turnDiffs.data ?? []].reverse().map(item => <a key={item.taskId} href={turnDiffPath(session.id, item.taskId)} className="block rounded-lg border border-default p-3 text-caption hover:bg-hover">
-            <span className="block truncate text-primary">{tasks.find(task => task.id === item.taskId)?.prompt.trim().slice(0, 100) || '这一轮'}</span>
-            <span className="text-secondary">改动 {item.summary.files} 个文件 <span className="text-success">+{item.summary.additions}</span> <span className="text-danger">−{item.summary.deletions}</span> · <span className="text-link">查看改动</span></span>
-          </a>)}
-        </section>
-        <section className="space-y-2">
           <h3 className="text-body font-semibold">当前连接能力</h3>
           {capabilities.error && <Banner tone="danger">{capabilities.error.message}</Banner>}
           {capabilities.data && <p className="text-caption text-secondary">{Object.entries({ structuredApproval: '结构化审批', terminal: '终端输入', localFileDelivery: '本地文件回传平台支持' }).map(([key, label]) => `${label}：${({ available: '可用', unavailable: '不可用', unverified: '尚未验证' } as Record<string, string>)[capabilities.data![key as 'terminal']] ?? '尚未验证'}`).join(' · ')}</p>}
           <p className="text-caption text-subtle">运行中恢复还需原生输出游标和原终端身份匹配；重启时验证，当前不保证可恢复。</p>
         </section>
-        <section className="space-y-3">
-          <h3 className="text-body font-semibold">验证证据</h3>
-          <p className="text-caption text-secondary">在上面的目录执行你填写的命令，记录退出码与输出。验证结果独立于 Agent 的执行状态；代码变化后需要重新验证。</p>
-          {!readOnly && <form className="flex items-end gap-2" onSubmit={event => { event.preventDefault(); if (command.trim() && !busy) verify.mutate(); }}>
-            <div className="min-w-0 flex-1"><Field label="验证命令"><Input value={command} onChange={event => setCommand(event.target.value)} placeholder="例如 pnpm test" maxLength={4096} disabled={busy}/></Field></div>
-            <Button type="submit" variant="primary" disabled={!command.trim() || busy} loading={verify.isPending}>执行验证</Button>
-          </form>}
-          {verificationUnavailable && <Banner tone="warning">平台验证当前需要 Linux，才能在服务异常退出后确认并清理原验证进程。</Banner>}
-          {busy && !verificationUnavailable && <p className="text-caption text-subtle">本会话正在执行，结束后可启动验证。</p>}
-          {(verify.error || evidence.error) && <Banner tone="danger">{(verify.error ?? evidence.error)?.message}</Banner>}
-          {evidence.isLoading ? <Spinner label="读取验证记录"/> : !evidence.error && !evidence.data?.length && <p className="text-caption text-subtle">尚无平台执行的验证记录。</p>}
-          {evidence.data?.map(record => <details key={record.id} className="rounded-lg border border-default p-3">
-            <summary className="cursor-pointer text-caption"><strong>{verificationLabel(record)}</strong> · {record.command}</summary>
-            <p className="mt-2 text-caption text-subtle">{new Date(record.startedAt).toLocaleString()} · {record.exitCode === undefined ? '无退出码' : `退出码 ${record.exitCode}`}</p>
-            {record.error && <p className="mt-1 text-caption text-danger">{record.error}</p>}
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-muted p-2 text-caption">{record.output || '无命令输出'}</pre>
-            {record.outputTruncated && <p className="text-caption text-warning">输出超过记录上限，已截断。</p>}
-          </details>)}
-        </section>
-        <PullRequestPanel session={session}/>
+          </div>
+        </details>
+        <details className="rounded-lg border border-default p-3">
+          <summary className="min-h-11 cursor-pointer text-body font-semibold">任务自动化</summary>
+          <div className="mt-3">
         <SessionAutomationPanel session={session} taskTitle={sessionDisplayName(session, tasks.find(task => task.prompt.trim())?.prompt)}/>
-        <section className="space-y-2">
-          <h3 className="text-body font-semibold">Skill 投递记录</h3>
-          {!skillTasks.length && <p className="text-caption text-subtle">尚无明确选中的 Skill。发送时可在输入框选择。</p>}
-          {skillTasks.map(task => <details key={task.id} className="rounded-lg border border-default p-3"><summary className="cursor-pointer text-caption">{task.prompt.slice(0, 100)} · {task.skillDeliveries!.length} 项</summary>
-            {task.skillDeliveries!.map(skill => <div key={skill.path} className="mt-2 break-all text-caption"><strong>{skill.name}</strong> · 正文已加入本轮指令<p className="text-subtle">{skill.source === 'workspace' ? '项目' : skill.source === 'plugin' ? '插件' : '个人'} · {skill.path}<br/>SHA256 {skill.digest}</p></div>)}
-          </details>)}
-        </section>
-      </div>
-    </Dialog.Body>
+          </div>
+        </details>
+      </div>;
+  if (presentation === 'inspector') return content;
+  return <Dialog open onClose={onClose} label="结果检视" size="lg">
+    <Dialog.Header><h2 className="text-title font-semibold">结果检视</h2><span className="ml-auto"><IconButton label="关闭" onClick={onClose}><X size={16}/></IconButton></span></Dialog.Header>
+    <Dialog.Body>{content}</Dialog.Body>
   </Dialog>;
 }

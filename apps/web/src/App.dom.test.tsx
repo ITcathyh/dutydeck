@@ -9,6 +9,7 @@ import App from './App';
 import { AuthGate } from './components/AuthGate';
 import { useDockStore } from './store';
 import { resetDrafts } from './draft-store';
+import { resetComposerDrafts } from './composer-draft';
 import type { EventWindow } from './event-history';
 import { shortcutDefinitions } from './useKeyboardShortcuts';
 import { toastStore } from './useToasts';
@@ -42,6 +43,7 @@ function mockAppApi({ agents = [agent()], sessions = [], summaries = [], events 
     localFileDelivery: 'available',
   });
   vi.spyOn(api, 'verifications').mockResolvedValue([]);
+  vi.spyOn(api, 'turnDiffs').mockResolvedValue([]);
   vi.spyOn(api, 'workItems').mockResolvedValue({ items: [], templates: [] });
   vi.spyOn(api, 'workItemRequests').mockResolvedValue([]);
   vi.spyOn(api, 'automation').mockResolvedValue({ schedules: [], subscriptions: [], occurrences: [] });
@@ -60,6 +62,8 @@ afterEach(() => {
   useDockStore.setState({ activeSessionId: undefined, rawVisible: false });
   // 编辑草稿是模块级 store（跨视图存活），不清会让用例互相串草稿。
   resetDrafts();
+  resetComposerDrafts();
+  Object.keys(window.localStorage).filter(key => key.startsWith('dutydeck:view:')).forEach(key => window.localStorage.removeItem(key));
   toastStore.clear();
   window.localStorage.removeItem(EXPERIMENTAL_STORAGE_KEY);
   window.history.replaceState(null, '', '/');
@@ -110,7 +114,7 @@ describe('App summary updates', () => {
       return { accepted: true, task };
     });
     const { container, client } = renderApp();
-    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    await screen.findByRole('heading', { level: 1, name: '工作台' });
     await userEvent.click(within(container.querySelector('main')!).getByRole('button', { name: '创建任务' }));
     const dialog = await screen.findByRole('dialog', { name: '创建新任务' });
     fireEvent.change(within(dialog).getByRole('textbox', { name: '任务目标' }), { target: { value: task.prompt } });
@@ -124,6 +128,7 @@ describe('App summary updates', () => {
 
 describe('App 批量清理', () => {
   function setup() {
+    window.history.replaceState(null, '', '/?nav=tasks');
     const sessions = [session('s1', 'completed'), session('s2', 'thinking')];
     mockAppApi({ sessions, summaries: [summary('s1', '已完成目标'), summary('s2', '运行中目标')] });
     return sessions;
@@ -259,7 +264,7 @@ describe('App mobile navigation accessibility', () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
     mockAppApi({ sessions: [session('s1', 'failed')], summaries: [summary('s1', '任务异常：Agent exited with code 129')] });
     const { container } = renderApp();
-    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    await screen.findByRole('heading', { level: 1, name: '工作台' });
     // 同名按钮只能有一枚，否则读屏会重复朗读，getByRole 也会抛 multiple elements。
     const triggers = screen.getAllByRole('button', { name: '打开工作台导航' });
     expect(triggers).toHaveLength(1);
@@ -293,7 +298,7 @@ describe('App browser navigation and shell states', () => {
     mockAppApi();
     const user = userEvent.setup();
     const { container } = renderApp();
-    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    await screen.findByRole('heading', { level: 1, name: '工作台' });
     const opener = within(container.querySelector('main')!).getByRole('button', { name: '创建任务' });
     await user.click(opener);
     const dialog = await screen.findByRole('dialog', { name: '创建新任务' });
@@ -313,7 +318,7 @@ describe('App browser navigation and shell states', () => {
     vi.spyOn(scheduleApi, 'capabilities').mockResolvedValue(schedules);
     vi.spyOn(scheduleApi, 'list').mockResolvedValue({ capabilities: schedules, schedules: [] });
     const { container } = renderApp();
-    expect(await screen.findByRole('heading', { name: '今天需要推进什么？' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { level: 1, name: '工作台' })).toBeTruthy();
     const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
     const opener = within(navigation).getByRole('button', { name: /Agent 与设置/ });
     await userEvent.click(opener);
@@ -345,7 +350,7 @@ describe('App browser navigation and shell states', () => {
 
     const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
     await userEvent.click(await within(navigation).findByRole('button', { name: /任务一/ }));
-    expect(pushState).toHaveBeenCalledWith({ sessionId: 's1' }, '', '/sessions/s1');
+    expect(pushState).toHaveBeenCalledWith({ sessionId: 's1', dutydeckTaskFilters: { view: 'all', query: '', project: '' } }, '', '/sessions/s1');
     expect(window.location.pathname).toBe('/sessions/s1');
     await screen.findByRole('button', { name: '归档任务' });
 
@@ -353,7 +358,7 @@ describe('App browser navigation and shell states', () => {
       window.history.replaceState(null, '', '/');
       window.dispatchEvent(new PopStateEvent('popstate'));
     });
-    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    await screen.findByRole('heading', { level: 1, name: '工作台' });
 
     act(() => {
       window.history.replaceState({ sessionId: 's1' }, '', '/sessions/s1');
@@ -373,7 +378,7 @@ describe('App browser navigation and shell states', () => {
     expect(api.tasks).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: '回到任务中心' }));
     expect(window.location.pathname).toBe('/');
-    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    await screen.findByRole('heading', { level: 1, name: '工作台' });
   });
 
   it('shows retryable failures for every main query instead of empty data', async () => {
@@ -391,7 +396,7 @@ describe('App browser navigation and shell states', () => {
     expect(error.textContent).toContain('任务摘要');
     expect(screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' }).querySelector('.animate-pulse')).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: '重新加载' }));
-    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    await screen.findByRole('heading', { level: 1, name: '工作台' });
     expect(agents).toHaveBeenCalledTimes(2);
     expect(sessions).toHaveBeenCalledTimes(2);
     expect(summaries).toHaveBeenCalledTimes(2);
@@ -415,11 +420,11 @@ describe('App browser navigation and shell states', () => {
       window.history.replaceState(null, '', '/');
       window.dispatchEvent(new PopStateEvent('popstate'));
     });
-    await screen.findByRole('heading', { name: '今天需要推进什么？' });
-    expect(screen.getByRole('status').textContent).toContain('任务列表');
+    await screen.findByRole('heading', { level: 1, name: '工作台' });
+    expect(screen.getByText(/部分数据可能不是最新：任务列表/).closest('[role="status"]')).toBeTruthy();
 
     await userEvent.click(screen.getByRole('button', { name: '重试' }));
-    await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/部分数据可能不是最新：任务列表/)).toBeNull());
   });
 
   it.each(['/foo', '/sessions/a/extra'])('shows not-found for unknown pathname %s', async pathname => {
@@ -428,7 +433,7 @@ describe('App browser navigation and shell states', () => {
     renderApp();
 
     expect(await screen.findByRole('heading', { name: '找不到这个页面' })).toBeTruthy();
-    expect(screen.queryByRole('heading', { name: '今天需要推进什么？' })).toBeNull();
+    expect(screen.queryByRole('heading', { level: 1, name: '工作台' })).toBeNull();
     expect(api.events).not.toHaveBeenCalled();
     expect(api.tasks).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: '回到任务中心' }));
@@ -456,18 +461,24 @@ describe('App browser navigation and shell states', () => {
     renderApp();
 
     expect(await screen.findByRole('tablist', { name: '任务内容' })).toBeTruthy();
-    const timelineTab = screen.getByRole('tab', { name: '执行记录' });
+    const timelineTab = screen.getByRole('tab', { name: '对话' });
+    const changesTab = screen.getByRole('tab', { name: '改动' });
     const terminalTab = screen.getByRole('tab', { name: '终端' });
     expect(timelineTab.getAttribute('aria-selected')).toBe('true');
     expect(terminalTab.getAttribute('aria-selected')).toBe('false');
-    expect(screen.getByRole('tabpanel', { name: '执行记录' })).toBeTruthy();
+    expect(screen.getByRole('tabpanel', { name: '对话' })).toBeTruthy();
 
     timelineTab.focus();
+    await userEvent.keyboard('{ArrowRight}');
+    expect(changesTab.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(changesTab);
     await userEvent.keyboard('{ArrowRight}');
     expect(terminalTab.getAttribute('aria-selected')).toBe('true');
     expect(document.activeElement).toBe(terminalTab);
     expect(await screen.findByRole('tabpanel', { name: '终端' })).toBeTruthy();
 
+    await userEvent.keyboard('{ArrowLeft}');
+    expect(changesTab.getAttribute('aria-selected')).toBe('true');
     await userEvent.keyboard('{ArrowLeft}');
     expect(timelineTab.getAttribute('aria-selected')).toBe('true');
     expect(document.activeElement).toBe(timelineTab);
@@ -544,7 +555,7 @@ describe('App 搜索、快捷键与通知接线', () => {
 
     // 先确认自己确实在会话详情页，而不是被路由退回了总览。
     await screen.findByRole('heading', { name: '修复登录超时' });
-    expect(screen.queryByRole('heading', { name: '今天需要推进什么？' })).toBeNull();
+    expect(screen.queryByRole('heading', { level: 1, name: '工作台' })).toBeNull();
 
     const topBar = container.querySelector('header')!;
     await user.click(within(topBar).getByRole('button', { name: '搜索任务目标、工作区或 Agent' }));
@@ -571,7 +582,7 @@ describe('App 搜索、快捷键与通知接线', () => {
     */
     mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '修复登录超时')] });
     const { container } = renderApp();
-    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    await screen.findByRole('heading', { level: 1, name: '工作台' });
     const main = container.querySelector('main')!;
     expect(main.className).toContain('md:ml-main-inset');
     // 任意值会被 design-consistency 拦下，但「换成另一个硬编码档位」只有这条能拦。
@@ -643,7 +654,7 @@ describe('App 搜索、快捷键与通知接线', () => {
     // 诚实表达能力：撤销只能排到队尾，不能还原原来的位置，文案必须说明。
     expect(screen.getByText('恢复会把这条指令重新排到队列末尾，不会回到原来的位置。')).toBeTruthy();
 
-    await user.click(screen.getByRole('button', { name: '恢复这条指令' }));
+    await user.click(screen.getByRole('button', { name: '重新加入队尾' }));
     await waitFor(() => expect(send).toHaveBeenCalledWith('s1', '顺手补一个回归测试', 'queue'));
   });
 
@@ -775,7 +786,7 @@ describe('可深链浮层的 URL 契约', () => {
     mockAppApi();
     mockFoundation();
     renderApp();
-    expect(await screen.findByRole('heading', { name: '今天需要推进什么？' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { level: 1, name: '工作台' })).toBeTruthy();
     expect(screen.queryByRole('dialog', { name: '群配置与权限' })).toBeNull();
     expect(screen.queryByRole('button', { name: /群与权限/ })).toBeNull();
     act(() => writeExperimental(true));
@@ -787,7 +798,7 @@ describe('可深链浮层的 URL 契约', () => {
     window.history.replaceState(null, '', '/?panel=totally-made-up');
     mockAppApi();
     renderApp();
-    expect(await screen.findByRole('heading', { name: '今天需要推进什么？' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { level: 1, name: '工作台' })).toBeTruthy();
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 });
@@ -809,8 +820,9 @@ describe('App 飞书 Bot 状态读取失败', () => {
   it('首页与侧栏都说状态未确认，不谎报「尚未配置机器人」', async () => {
     failLarkConfig();
     renderApp();
-    const aside = await screen.findByRole('complementary', { name: '协作入口' });
-    await waitFor(() => expect(within(aside).getByRole('heading', { name: /无法读取飞书接入状态/ })).toBeTruthy());
+    await screen.findByRole('heading', { name: /无法读取飞书接入状态/ });
+    const aside = screen.getByRole('complementary', { name: '协作入口' });
+    expect(within(aside).getByRole('heading', { name: /无法读取飞书接入状态/ })).toBeTruthy();
     expect(within(aside).getByText(/无法判断是否已配置机器人/)).toBeTruthy();
     // 「尚未配置」的两处文案都不许出现：概览引导与侧栏 hint。
     expect(document.body.textContent).not.toContain('尚未配置机器人');
@@ -822,8 +834,9 @@ describe('App 飞书 Bot 状态读取失败', () => {
   it('重试按钮真的重新请求 larkConfig，成功后改口为真实状态', async () => {
     const spy = failLarkConfig();
     renderApp();
-    const aside = await screen.findByRole('complementary', { name: '协作入口' });
-    await waitFor(() => expect(within(aside).getByRole('heading', { name: /无法读取飞书接入状态/ })).toBeTruthy());
+    await screen.findByRole('heading', { name: /无法读取飞书接入状态/ });
+    const aside = screen.getByRole('complementary', { name: '协作入口' });
+    expect(within(aside).getByRole('heading', { name: /无法读取飞书接入状态/ })).toBeTruthy();
     const callsBefore = spy.mock.calls.length;
 
     // 这一次让它成功，且返回一个「配置完成但本实例未开启监听」的 Bot。
@@ -943,15 +956,16 @@ describe('主区一级导航', () => {
     renderApp();
     const navigation = await screen.findByRole('complementary', { name: 'Dutydeck 工作台导航' });
 
-    // 默认在任务视图，且当前项标了 aria-current。
-    expect(within(navigation).getByRole('button', { name: /^任务/ }).getAttribute('aria-current')).toBe('page');
+    // 默认在工作台；全部任务与管理入口有独立位置。
+    expect(within(navigation).getByRole('button', { name: /^工作台/ }).getAttribute('aria-current')).toBe('page');
+    expect(within(navigation).getByRole('button', { name: /^全部任务/ }).getAttribute('aria-current')).toBeNull();
     expect(window.location.search).toBe('');
 
     await user.click(within(navigation).getByRole('button', { name: /^机器人/ }));
     await screen.findByRole('heading', { name: '机器人管理' });
     expect(window.location.search).toBe('?nav=bots');
     expect(within(navigation).getByRole('button', { name: /^机器人/ }).getAttribute('aria-current')).toBe('page');
-    expect(within(navigation).getByRole('button', { name: /^任务/ }).getAttribute('aria-current')).toBeNull();
+    expect(within(navigation).getByRole('button', { name: /^全部任务/ }).getAttribute('aria-current')).toBeNull();
 
     await user.click(within(navigation).getByRole('button', { name: /^群聊/ }));
     await screen.findByRole('heading', { name: '群聊管理' });
@@ -982,7 +996,7 @@ describe('主区一级导航', () => {
     // 任务仍在路径里，只是主区换了视图。
     expect(window.location.pathname).toBe('/sessions/s1');
 
-    await user.click(within(navigation).getByRole('button', { name: /^任务/ }));
+    await user.click(within(navigation).getByRole('button', { name: /^全部任务/ }));
     expect(await screen.findByRole('heading', { name: '修复登录超时' })).toBeTruthy();
   });
 
@@ -1031,8 +1045,8 @@ describe('编辑草稿跨视图存活', () => {
     expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
 
     // 切去任务：机器人页整体卸载。
-    await user.click(within(navigation).getByRole('button', { name: /^任务/ }));
-    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    await user.click(within(navigation).getByRole('button', { name: /^全部任务/ }));
+    await screen.findByRole('heading', { level: 1, name: '全部任务' });
     expect(screen.queryByRole('heading', { name: '机器人管理' })).toBeNull();
 
     // 切回来，用户填的字还在。
@@ -1154,7 +1168,7 @@ describe('App 插话结果反馈', () => {
     await user.type(await screen.findByRole('textbox', { name: '消息' }), task.prompt);
     await user.click(screen.getByRole('button', { name: '排队' }));
     await user.click(screen.getByRole('button', { name: '插话到当前这一轮' }));
-    await user.click(screen.getByRole('button', { name: '发送消息' }));
+    await user.click(screen.getByRole('button', { name: /^(发送消息|加入队列|立即插话|停止当前执行并发送)$/ }));
     await waitFor(() => expect(send).toHaveBeenCalledWith(active.id, task.prompt, 'steer', []));
     await waitFor(() => expect(toastStore.getSnapshot().find(toast => toast.key === 'steering')?.title).toBe('插话投递结果未知'));
     expect(toastStore.getSnapshot().find(toast => toast.key === 'steering')?.description).toContain('不会自动重发');
@@ -1244,7 +1258,7 @@ describe('App 会话分析深链与导航', () => {
     window.history.replaceState(null, '', '/?panel=insight');
     mockAppApi();
     renderApp();
-    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    await screen.findByRole('heading', { level: 1, name: '工作台' });
     // 等待一个 tick 确认 lazy 面板没有挂载。
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(screen.queryByRole('dialog', { name: '会话分析' })).toBeNull();
@@ -1338,7 +1352,7 @@ describe('App pending composer mutations', () => {
     await addFile('/tmp/first.ts');
     const input = () => screen.getByRole('textbox', { name: '消息' }) as HTMLTextAreaElement;
     fireEvent.change(input(), { target: { value: '  first instruction  ' } });
-    await userEvent.click(await screen.findByRole('button', { name: '发送消息' }));
+    await userEvent.click(await screen.findByRole('button', { name: /^(发送消息|加入队列|立即插话|停止当前执行并发送)$/ }));
     await waitFor(() => expect(send).toHaveBeenCalledWith('s1', '/file /tmp/first.ts\n\nfirst instruction', 'queue', []));
     if (change === 'text') fireEvent.change(input(), { target: { value: 'second unsent draft' } });
     if (change === 'references') await userEvent.click(screen.getByRole('button', { name: '移除引用 first.ts' }));
@@ -1363,7 +1377,7 @@ describe('App pending composer mutations', () => {
 
 
 describe('App same-session overlay draft preservation', () => {
-  it.each(['Escape', 'close', 'back'] as const)('keeps text and references across settings %s and forward, clears them on session changes', async close => {
+  it.each(['Escape', 'close', 'back'] as const)('keeps independent text and references across settings %s, task changes and browser history', async close => {
     window.history.replaceState(null, '', '/sessions/s1');
     mockAppApi({ sessions: [session('s1'), session('s2')], summaries: [summary('s1', 'first session'), summary('s2', 'second session')] });
     renderApp();
@@ -1395,10 +1409,11 @@ describe('App same-session overlay draft preservation', () => {
     fireEvent.change(input(), { target: { value: 'second session draft' } });
     act(() => window.history.back());
     await waitFor(() => expect(window.location.pathname).toBe('/sessions/s1'));
-    await waitFor(() => expect(input().value).toBe(''));
+    await waitFor(() => expect(input().value).toBe('unfinished draft 123'));
+    expect(screen.getByRole('button', { name: '移除引用 draft.ts' })).toBeTruthy();
     act(() => window.history.forward());
     await waitFor(() => expect(window.location.pathname).toBe('/sessions/s2'));
-    expect(input().value).toBe('');
+    expect(input().value).toBe('second session draft');
   });
 });
 
@@ -1425,7 +1440,7 @@ describe('App archived workspace deep link', () => {
     expect(window.location.search).toBe('?panel=workspace');
     await userEvent.type(screen.getByLabelText('访问令牌'), 'access-token');
     await userEvent.click(screen.getByRole('button', { name: '连接工作台' }));
-    const dialog = await screen.findByRole('dialog', { name: '工作目录与自动化' });
+    const dialog = await screen.findByRole('dialog', { name: '结果检视' });
     expect(login).toHaveBeenCalledWith('access-token');
     await within(dialog).findByText('/repo/old-worktree');
     expect(workspace).toHaveBeenCalledWith(old.id);
@@ -1434,8 +1449,8 @@ describe('App archived workspace deep link', () => {
     expect(within(dialog).getByRole('button', { name: '检查可否清理' })).toBeTruthy();
     expect(preview).not.toHaveBeenCalled();
     expect(clean).not.toHaveBeenCalled();
-    await userEvent.click(within(dialog).getByRole('button', { name: '关闭' }));
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: '工作目录与自动化' })).toBeNull());
+    await userEvent.click(within(dialog).getByRole('button', { name: '关闭结果检视' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '结果检视' })).toBeNull());
     expect(window.location.pathname).toBe('/sessions/old%20session');
     expect(window.location.search).toBe('');
   });
@@ -1447,7 +1462,7 @@ describe('App archived workspace deep link', () => {
     const preview = vi.spyOn(api, 'workspaceCleanupPreview');
     const clean = vi.spyOn(api, 'cleanWorkspace');
     renderApp();
-    expect(await screen.findByRole('dialog', { name: '工作目录与自动化' })).toBeTruthy();
+    expect(await screen.findByRole('dialog', { name: '结果检视' })).toBeTruthy();
     expect(useDockStore.getState().activeSessionId).toBe('s1');
     expect(preview).not.toHaveBeenCalled(); expect(clean).not.toHaveBeenCalled();
   });
@@ -1465,7 +1480,11 @@ it('shows session background lifecycle separately while preserving the current r
   mockAppApi({ sessions: [session('s1', 'thinking')], events });
   vi.mocked(api.tasks).mockResolvedValue([task]);
   const { client, container } = renderApp();
-  await screen.findByText('主回合已结束 · 后台子任务运行中（1）');
+  await userEvent.click(await screen.findByRole('button', { name: '结果检视' }));
+  const inspector = await screen.findByRole('dialog', { name: '结果检视' });
+  await userEvent.click(within(inspector).getByText('详细用量与后台状态'));
+  await within(inspector).findByText('主回合已结束 · 后台子任务运行中（1）');
+  await userEvent.click(within(inspector).getByRole('button', { name: '关闭结果检视' }));
   const activity = await screen.findByLabelText('Codex 执行过程');
   await userEvent.click(activity.querySelector('summary')!);
   expect(await within(activity).findByText('main round answer')).toBeTruthy();
@@ -1473,4 +1492,225 @@ it('shows session background lifecycle separately while preserving the current r
   expect(client.getQueryData<Session[]>(['sessions'])?.[0]?.state).toBe('thinking');
   expect(container.querySelector('[data-timeline-event="background"]')).toBeNull();
   expect(container.querySelector('[data-timeline-scroll]')?.textContent).not.toContain('old-native-task');
+});
+
+
+describe('Calm workbench continuity', () => {
+  it.each([false, true])('acknowledges the submitted task after switching away and back (new draft=%s)', async edited => {
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1'), session('s2')], summaries: [summary('s1', 'first task'), summary('s2', 'second task')] });
+    let resolve!: (value: Awaited<ReturnType<typeof api.send>>) => void;
+    const send = vi.spyOn(api, 'send').mockImplementation(() => new Promise(done => { resolve = done; }));
+    const { client } = renderApp();
+    const input = () => screen.getByRole('textbox', { name: '消息' }) as HTMLTextAreaElement;
+    await screen.findByRole('textbox', { name: '消息' });
+    fireEvent.change(input(), { target: { value: 'submitted first draft' } });
+    await userEvent.click(screen.getByRole('button', { name: /^(发送消息|加入队列|立即插话|停止当前执行并发送)$/ }));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    const nav = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
+    await userEvent.click(within(nav).getByRole('button', { name: /second task/ }));
+    fireEvent.change(input(), { target: { value: 'second task retained' } });
+    await userEvent.click(within(nav).getByRole('button', { name: /first task/ }));
+    expect(input().value).toBe('submitted first draft');
+    if (edited) fireEvent.change(input(), { target: { value: 'new first draft' } });
+    await act(async () => resolve({ accepted: true, task: { id: 'sent', sessionId: 's1', prompt: 'submitted first draft', status: 'queued', createdAt: session('s1').createdAt, updatedAt: session('s1').updatedAt } }));
+    await waitFor(() => expect(client.isMutating()).toBe(0));
+    expect(input().value).toBe(edited ? 'new first draft' : '');
+    await userEvent.click(within(nav).getByRole('button', { name: /second task/ }));
+    expect(input().value).toBe('second task retained');
+  });
+
+  it('preserves text and references after unmounting and remounting the workbench', async () => {
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1')] });
+    const first = renderApp();
+    await screen.findByRole('textbox', { name: '消息' });
+    fireEvent.change(screen.getByRole('textbox', { name: '消息' }), { target: { value: '/file' } });
+    await userEvent.click(screen.getByRole('button', { name: /\/file/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: '本地文件路径' }), { target: { value: '/tmp/preserved.ts' } });
+    await userEvent.click(screen.getByRole('button', { name: '引用' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '消息' }), { target: { value: 'restore on reload' } });
+    first.unmount(); first.client.clear();
+    renderApp();
+    expect((await screen.findByRole('textbox', { name: '消息' }) as HTMLTextAreaElement).value).toBe('restore on reload');
+    expect(screen.getByRole('button', { name: '移除引用 preserved.ts' })).toBeTruthy();
+  });
+
+  it('offers keyboard sidebar resizing within its limits and remembers collapse', async () => {
+    mockAppApi();
+    const first = renderApp();
+    const separator = screen.getByRole('separator', { name: '调整侧栏宽度' });
+    fireEvent.keyDown(separator, { key: 'End' });
+    expect(separator.getAttribute('aria-valuenow')).toBe('320');
+    fireEvent.keyDown(separator, { key: 'ArrowRight' });
+    expect(separator.getAttribute('aria-valuenow')).toBe('320');
+    fireEvent.keyDown(separator, { key: 'Home' });
+    expect(separator.getAttribute('aria-valuenow')).toBe('208');
+    fireEvent.keyDown(separator, { key: 'ArrowLeft' });
+    expect(separator.getAttribute('aria-valuenow')).toBe('208');
+    await userEvent.click(screen.getByRole('button', { name: '收起侧栏' }));
+    expect(screen.queryByRole('separator', { name: '调整侧栏宽度' })).toBeNull();
+    first.unmount(); first.client.clear();
+    renderApp();
+    expect(screen.getByRole('button', { name: '展开侧栏' })).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: '展开侧栏' }));
+    expect(screen.getByRole('separator', { name: '调整侧栏宽度' }).getAttribute('aria-valuenow')).toBe('208');
+  });
+});
+
+
+it('keeps global-search selections in navigation and restores the original task filter on Back', async () => {
+  window.history.replaceState(null, '', '/?nav=tasks');
+  mockAppApi({ sessions: [session('s1', 'waiting_for_permission'), session('s2', 'completed')], summaries: [summary('s1', 'awaiting target'), summary('s2', 'completed target')] });
+  renderApp();
+  const filters = await screen.findByRole('region', { name: '任务筛选' });
+  await userEvent.click(within(filters).getByRole('button', { name: '待你处理 1' }));
+  fireEvent.keyDown(document.body, { key: 'k', ctrlKey: true });
+  const search = await screen.findByRole('combobox', { name: '搜索任务与命令' });
+  fireEvent.change(search, { target: { value: 'completed target' } });
+  await userEvent.click(screen.getByRole('option', { name: /completed target/ }));
+  await screen.findByRole('heading', { level: 1, name: 'completed target' });
+  const nav = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
+  expect(within(nav).getByRole('button', { name: /completed target/ }).getAttribute('aria-current')).toBe('true');
+  act(() => window.history.back());
+  const restored = await screen.findByRole('region', { name: '任务筛选' });
+  expect(within(restored).getByRole('button', { name: '待你处理 1' }).getAttribute('aria-pressed')).toBe('true');
+  expect(window.location.search).toBe('?nav=tasks');
+});
+
+
+it('keeps task content modes independent and only offers a terminal for PTY connections', async () => {
+  window.history.replaceState(null, '', '/sessions/s1');
+  mockAppApi({ sessions: [session('s1'), session('s2')], summaries: [summary('s1', 'first mode task'), summary('s2', 'second mode task')] });
+  renderApp();
+  const changes = await screen.findByRole('tab', { name: '改动' });
+  expect(screen.queryByRole('tab', { name: '终端' })).toBeNull();
+  await userEvent.click(changes);
+  expect(changes.getAttribute('aria-selected')).toBe('true');
+  const nav = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
+  await userEvent.click(within(nav).getByRole('button', { name: /second mode task/ }));
+  expect(screen.getByRole('tab', { name: '对话' }).getAttribute('aria-selected')).toBe('true');
+  await userEvent.click(within(nav).getByRole('button', { name: /first mode task/ }));
+  expect(screen.getByRole('tab', { name: '改动' }).getAttribute('aria-selected')).toBe('true');
+});
+
+it('remembers closing the result inspector and does not reopen it for session updates', async () => {
+  window.history.replaceState(null, '', '/sessions/s1');
+  mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', 'inspector task')] });
+  vi.spyOn(api, 'workspace').mockResolvedValue({ schemaVersion: 1, revision: 1, sessionId: 's1', mode: 'shared', sourceCwd: '/repo/s1', cwd: '/repo/s1', state: 'ready', createdAt: session('s1').createdAt, updatedAt: session('s1').updatedAt });
+  const { client } = renderApp();
+  await userEvent.click(await screen.findByRole('button', { name: '结果检视' }));
+  const inspector = await screen.findByRole('dialog', { name: '结果检视' });
+  expect(within(inspector).getByRole('heading', { name: '验证证据' })).toBeTruthy();
+  await userEvent.click(within(inspector).getByRole('button', { name: '关闭结果检视' }));
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: '结果检视' })).toBeNull());
+  act(() => client.setQueryData(['sessions'], [session('s1', 'thinking')]));
+  expect(screen.queryByRole('dialog', { name: '结果检视' })).toBeNull();
+});
+
+
+it('restores each list entry view, search and project independently across multiple task visits', async () => {
+  window.history.replaceState(null, '', '/?nav=tasks');
+  mockAppApi({ sessions: [session('s1', 'completed'), session('s2', 'completed'), session('s3', 'thinking')], summaries: [summary('s1', 'first scoped task'), summary('s2', 'second scoped task'), summary('s3', 'running outside scope')] });
+  renderApp();
+  const search = () => screen.getByRole('textbox', { name: '筛选当前任务列表' }) as HTMLInputElement;
+  const project = () => screen.getByRole('combobox', { name: '筛选项目' }) as HTMLSelectElement;
+  const filters = () => screen.getByRole('region', { name: '任务筛选' });
+  const nav = await screen.findByRole('complementary', { name: 'Dutydeck 工作台导航' });
+  await screen.findByRole('heading', { level: 1, name: '全部任务' });
+  await userEvent.click(within(filters()).getByRole('button', { name: '已完成 2' }));
+  fireEvent.change(search(), { target: { value: 'first scoped' } });
+  fireEvent.change(project(), { target: { value: 's1' } });
+  await userEvent.click(within(screen.getByRole('region', { name: '任务列表' })).getByRole('button', { name: /first scoped task/ }));
+  await screen.findByRole('heading', { level: 1, name: 'first scoped task' });
+  await userEvent.click(within(nav).getByRole('button', { name: /^全部任务/ }));
+  expect(search().value).toBe('first scoped');
+  expect(project().value).toBe('s1');
+  const historyLength = window.history.length;
+  fireEvent.change(search(), { target: { value: 'second scoped' } });
+  fireEvent.change(project(), { target: { value: '' } });
+  await userEvent.click(within(filters()).getByRole('button', { name: '全部 3' }));
+  expect(window.history.length).toBe(historyLength);
+  await userEvent.click(within(screen.getByRole('region', { name: '任务列表' })).getByRole('button', { name: /second scoped task/ }));
+  await screen.findByRole('heading', { level: 1, name: 'second scoped task' });
+  act(() => window.history.back());
+  await screen.findByRole('heading', { level: 1, name: '全部任务' });
+  expect(search().value).toBe('second scoped');
+  expect(project().value).toBe('');
+  expect(within(filters()).getByRole('button', { name: '全部 3' }).getAttribute('aria-pressed')).toBe('true');
+  act(() => window.history.back());
+  await screen.findByRole('heading', { level: 1, name: 'first scoped task' });
+  act(() => window.history.back());
+  await screen.findByRole('heading', { level: 1, name: '全部任务' });
+  expect(search().value).toBe('first scoped');
+  expect(project().value).toBe('s1');
+  expect(within(filters()).getByRole('button', { name: '已完成 2' }).getAttribute('aria-pressed')).toBe('true');
+  await userEvent.click(within(nav).getByRole('button', { name: /^工作台/ }));
+  await screen.findByRole('heading', { level: 1, name: '工作台' });
+  expect(screen.queryByRole('textbox', { name: '筛选当前任务列表' })).toBeNull();
+  expect(within(screen.getByRole('region', { name: '任务列表' })).getByRole('button', { name: /running outside scope/ })).toBeTruthy();
+});
+
+
+it.each([false, true])('preserves detailed usage and restores the evidence opener when inspection closes (wide=%s)', async wide => {
+  vi.stubGlobal('matchMedia', vi.fn((query: string) => ({ matches: query === '(min-width: 768px)' || query === '(min-width: 1280px)' && wide, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+  window.history.replaceState(null, '', '/sessions/s1');
+  const events: DockEvent[] = [
+    { id: 'usage-user', sequence: 0, timestamp: '2026-10-21T00:00:00Z', type: 'text', data: { role: 'user', text: 'show current usage' } },
+    { id: 'usage-before', sequence: 1, timestamp: '2026-10-21T00:00:01Z', type: 'status', data: { state: 'usage', used: 600, size: 1000 } },
+    { id: 'usage-after', sequence: 2, timestamp: '2026-10-21T00:00:02Z', type: 'status', data: { state: 'usage', used: 300, size: 1000 } }
+  ];
+  mockAppApi({ sessions: [session('s1')], events });
+  vi.spyOn(api, 'workspace').mockResolvedValue({ schemaVersion: 1, revision: 1, sessionId: 's1', mode: 'shared', sourceCwd: '/repo/s1', cwd: '/repo/s1', state: 'ready', createdAt: session('s1').createdAt, updatedAt: session('s1').updatedAt });
+  const quota = (usedPercent: number) => ({ usedPercent, resetsAt: Math.floor(Date.now() / 1000) + 3600, observedAt: '2026-10-21T00:00:03Z' });
+  vi.spyOn(api, 'sessionUsage').mockResolvedValue({ own: { entries: 0 }, subSteps: { entries: 0 }, snapshot: { rateLimits: { fiveHour: quota(10), sevenDay: quota(20) }, error: 'quota sample partially unavailable' } } as never);
+  renderApp();
+  const opener = await screen.findByRole('button', { name: '查看验证证据' });
+  await userEvent.click(opener);
+  const inspector = await screen.findByRole(wide ? 'complementary' : 'dialog', { name: '结果检视' });
+  await userEvent.click(within(inspector).getByText('详细用量与后台状态'));
+  const usage = await within(inspector).findByRole('region', { name: '任务用量' });
+  expect(within(usage).getByRole('progressbar', { name: '上下文已用' }).getAttribute('aria-valuenow')).toBe('30');
+  expect(within(usage).getByRole('progressbar', { name: '5h额度已用' }).getAttribute('aria-valuenow')).toBe('10');
+  expect(within(usage).getByRole('progressbar', { name: '7天额度已用' }).getAttribute('aria-valuenow')).toBe('20');
+  await userEvent.click(within(usage).getByText('明细'));
+  expect(within(usage).getByText('300 / 1,000 token')).toBeTruthy();
+  expect(within(usage).getByText('已压缩 300 token')).toBeTruthy();
+  expect(within(usage).getAllByText(/重置/)).toHaveLength(2);
+  expect(within(usage).getByText('quota sample partially unavailable')).toBeTruthy();
+  await userEvent.click(within(inspector).getByRole('button', { name: '关闭结果检视' }));
+  await waitFor(() => expect(document.activeElement).toBe(opener));
+});
+
+
+it.each(['acp', 'pty-cli'] as const)('opens the actionable context from the home attention entry after reviewing changes (%s)', async protocol => {
+  window.history.replaceState(null, '', '/sessions/s1');
+  const permission: DockEvent = { id: 'permission', sequence: 2, timestamp: '2026-10-21T00:00:01Z', type: 'permission_request', data: { id: 'pending-approval', status: 'pending', title: 'approve pnpm test' } };
+  mockAppApi({ agents: [agent(protocol)], sessions: [session('s1', 'waiting_for_permission')], summaries: [summary('s1', 'approval target')], events: [
+    { id: 'input', sequence: 1, timestamp: '2026-10-21T00:00:00Z', type: 'text', data: { role: 'user', text: 'approval target' } }, permission
+  ] });
+  renderApp();
+  await userEvent.click(await screen.findByRole('tab', { name: '改动' }));
+  const nav = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
+  await userEvent.click(within(nav).getByRole('button', { name: /^工作台/ }));
+  await screen.findByRole('heading', { level: 1, name: '工作台' });
+  await userEvent.click(within(screen.getByRole('region', { name: '任务列表' })).getByRole('button', { name: /approval target/ }));
+  expect(screen.getByRole('tab', { name: protocol === 'acp' ? '对话' : '终端' }).getAttribute('aria-selected')).toBe('true');
+  if (protocol === 'acp') expect(await screen.findByRole('complementary', { name: '权限审批' })).toBeTruthy();
+  else expect(await screen.findByText('Terminal s1')).toBeTruthy();
+});
+
+it('shows managed-step approval as read-only and never offers an ineffective permission action', async () => {
+  window.history.replaceState(null, '', '/sessions/s1');
+  mockAppApi({ sessions: [{ ...session('s1', 'waiting_for_permission'), source: 'work_item' }], events: [
+    { id: 'managed-permission', sequence: 1, timestamp: '2026-10-21T00:00:00Z', type: 'permission_request', data: { id: 'managed-approval', status: 'pending', title: 'managed operation' } }
+  ] });
+  const permission = vi.spyOn(api, 'permission');
+  renderApp();
+  const card = await screen.findByRole('complementary', { name: '权限审批' });
+  expect(within(card).getByText('等待当前操作者处理')).toBeTruthy();
+  expect(within(card).queryByRole('button', { name: '允许本次' })).toBeNull();
+  expect(within(card).queryByRole('button', { name: '拒绝' })).toBeNull();
+  expect(screen.getByText('此后台步骤由目标管理，请从原目标处理问题、授权、重试或停止。')).toBeTruthy();
+  expect(permission).not.toHaveBeenCalled();
 });

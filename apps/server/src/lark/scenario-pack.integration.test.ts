@@ -106,7 +106,8 @@ describe('告警全链路', () => {
     // 过程卡和结果卡都回在告警话题里，结果卡带结论。
     expect(callsTo(h, 'reply', 'om_alarm_1').map(call => (call.input as { cardKind?: string }).cardKind)).toEqual(['process', 'result']);
     expect(await mapping(h, 'om_alarm_1')).toMatchObject({ state: 'completed', final_delivery_state: 'delivered', scope_id: 'thread:om_alarm_1', thread_id: 'omt_om_alarm_1',
-      final_elements: [expect.objectContaining({ element_id: 'final_output', content: expect.stringContaining(conclusion) })] });
+      final_elements: [expect.objectContaining({ element_id: 'final_output', content: expect.stringContaining(conclusion) }),
+        expect.objectContaining({ element_id: 'verification_status', content: "**平台验证**　<text_tag color='grey'>未验证</text_tag>　未配置验证命令，尚无平台执行记录。" })] });
     // 初筛这一轮的材料里没有告警卡（告警是本轮请求本身），既不带关联行，也不会被后来的轮次关联。
     expect(recallLineView((await mapping(h, 'om_alarm_1'))!)).toBeUndefined();
 

@@ -1,15 +1,17 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api, type Agent, type Session, type Task } from '../api';
+import { newSessionDrafts } from '../new-session-drafts';
+import { setInstance } from '../instance';
 import { NewSessionModal } from './NewSessionModal';
 
 const agent: Agent = { id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'ask' };
 const session: Session = { id: 's1', agentId: 'codex', state: 'idle', cwd: '/repo', runId: 'r1', createdAt: '', updatedAt: '' };
 const task: Task = { id: 't1', sessionId: 's1', prompt: '修复登录超时', status: 'queued', createdAt: '', updatedAt: '' };
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { cleanup(); newSessionDrafts.clear(); setInstance(undefined); vi.restoreAllMocks(); });
 
 describe('NewSessionModal create → dispatch', () => {
   it('支持用 Escape 取消创建', async () => {
@@ -229,7 +231,7 @@ describe('NewSessionModal pending exits', () => {
     await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
     rerender(modal(refresh === 'legacy' ? [{ ...agent, protocol: 'pty' }] : []));
-    const dialog = screen.getByRole('dialog', { name: refresh === 'legacy' ? '无法创建旧 PTY 任务' : '需要先准备 Agent' });
+    const dialog = screen.getByRole('dialog', { name: refresh === 'legacy' ? '创建新任务' : '需要先准备 Agent' });
     const tryExits = async () => {
       await userEvent.click(screen.getByRole('button', { name: '关闭' }));
       await userEvent.keyboard('{Escape}');
@@ -299,5 +301,106 @@ describe('NewSessionModal pending exits', () => {
     await userEvent.keyboard('{Escape}');
     fireEvent.mouseDown(screen.getByRole('dialog').parentElement!);
     expect(onClose).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe('new task draft continuity', () => {
+  it('retains goal, directory, and created session across close and reopen after dispatch failure', async () => {
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const create = vi.spyOn(api, 'create').mockResolvedValue(session);
+    const send = vi.spyOn(api, 'send').mockRejectedValueOnce(new Error('离线')).mockResolvedValueOnce({ accepted: true, task });
+    const onCreated = vi.fn();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const modal = () => <QueryClientProvider client={client}><NewSessionModal open agents={[agent]} onClose={() => {}} onCreated={onCreated}/></QueryClientProvider>;
+    const view = render(modal());
+    await userEvent.type(screen.getByLabelText('任务目标'), task.prompt);
+    await userEvent.type(screen.getByLabelText('工作目录'), '/repo');
+    await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
+    await screen.findByRole('alert');
+    view.unmount();
+    const reopened = render(modal());
+    expect((screen.getByLabelText('任务目标') as HTMLTextAreaElement).value).toBe(task.prompt);
+    expect((screen.getByLabelText('工作目录') as HTMLInputElement).value).toBe('/repo');
+    await userEvent.click(screen.getByRole('button', { name: '重试发送' }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledOnce());
+    reopened.unmount();
+    expect(create).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(newSessionDrafts.size).toBe(0);
+  });
+
+  it('retries an already confirmed full-trust session after reopening without requiring a disabled checkbox', async () => {
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const create = vi.spyOn(api, 'create').mockResolvedValue({ ...session, permissionMode: 'full-trust' });
+    const send = vi.spyOn(api, 'send').mockRejectedValueOnce(new Error('离线')).mockResolvedValueOnce({ accepted: true, task });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const modal = () => <QueryClientProvider client={client}><NewSessionModal open agents={[{ ...agent, permissionMode: 'full-trust' }]} onClose={() => {}} onCreated={() => {}}/></QueryClientProvider>;
+    const first = render(modal());
+    await userEvent.type(screen.getByLabelText('任务目标'), task.prompt);
+    await userEvent.click(screen.getByRole('checkbox', { name: /确认允许 Agent 直接操作/ }));
+    await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
+    await screen.findByRole('alert');
+    first.unmount();
+    render(modal());
+    const retry = screen.getByRole('button', { name: '重试发送' }) as HTMLButtonElement;
+    expect(retry.disabled).toBe(false);
+    await userEvent.click(retry);
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it('isolates root-instance drafts from a peer literally named local', () => {
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const modal = () => <QueryClientProvider client={client}><NewSessionModal open agents={[agent]} onClose={() => {}} onCreated={() => {}}/></QueryClientProvider>;
+    setInstance(undefined);
+    const root = render(modal());
+    fireEvent.change(screen.getByLabelText('任务目标'), { target: { value: '根实例草稿' } });
+    root.unmount();
+    setInstance('local');
+    const peer = render(modal());
+    expect((screen.getByLabelText('任务目标') as HTMLTextAreaElement).value).toBe('');
+    fireEvent.change(screen.getByLabelText('任务目标'), { target: { value: 'local 同名实例草稿' } });
+    peer.unmount();
+    setInstance(undefined);
+    const restoredRoot = render(modal());
+    expect((screen.getByLabelText('任务目标') as HTMLTextAreaElement).value).toBe('根实例草稿');
+    restoredRoot.unmount();
+    setInstance('local');
+    render(modal());
+    expect((screen.getByLabelText('任务目标') as HTMLTextAreaElement).value).toBe('local 同名实例草稿');
+  });
+
+  it('separates draft content by instance and task versus schedule creation', () => {
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const modal = () => <QueryClientProvider client={client}><NewSessionModal open agents={[agent]} onClose={() => {}} onCreated={() => {}}/></QueryClientProvider>;
+    setInstance('first');
+    const first = render(modal());
+    fireEvent.change(screen.getByLabelText('任务目标'), { target: { value: '第一实例草稿' } });
+    first.unmount();
+    setInstance('second');
+    const second = render(modal());
+    expect((screen.getByLabelText('任务目标') as HTMLTextAreaElement).value).toBe('');
+    second.unmount();
+    setInstance('first');
+    const restored = render(modal());
+    expect((screen.getByLabelText('任务目标') as HTMLTextAreaElement).value).toBe('第一实例草稿');
+    restored.unmount();
+    render(<QueryClientProvider client={client}><NewSessionModal open mode="schedule" agents={[agent]} onClose={() => {}} onSessionCreated={() => {}}/></QueryClientProvider>);
+    expect(screen.queryByLabelText('任务目标')).toBeNull();
+    expect(newSessionDrafts.has('first:schedule')).toBe(false);
+  });
+
+  it('lets the user replace an unsupported legacy Agent without losing their goal', async () => {
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><NewSessionModal open initialAgentId="legacy" agents={[{ ...agent, id: 'legacy', name: 'Legacy', protocol: 'pty' }, agent]} onClose={() => {}} onCreated={() => {}}/></QueryClientProvider>);
+    await userEvent.type(screen.getByLabelText('任务目标'), '保留目标');
+    expect((screen.getByRole('button', { name: '创建并执行' }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.click(screen.getByRole('button', { name: 'Legacy' }));
+    await userEvent.click(screen.getByRole('option', { name: /Codex/ }));
+    expect((screen.getByLabelText('任务目标') as HTMLTextAreaElement).value).toBe('保留目标');
+    expect((screen.getByRole('button', { name: '创建并执行' }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

@@ -176,3 +176,12 @@ it('round trips the workspace panel only on session routes', () => {
   expect(appLocationPath(location)).toBe('/sessions/old%20session?panel=workspace');
   expect(parseAppLocation('/', '?panel=workspace').overlay).toBeUndefined();
 });
+
+
+it('retains distinct workbench, task list and automation navigation in deep links', () => {
+  for (const nav of ['home', 'tasks', 'automation'] as const) {
+    const path = appLocationPath({ route: { kind: 'overview' }, nav });
+    const url = new URL(path, 'http://localhost');
+    expect(parseAppLocation(url.pathname, url.search).nav ?? 'home').toBe(nav);
+  }
+});

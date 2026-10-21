@@ -58,8 +58,8 @@ describe('Lark card service', () => {
     const input = { messageId: 'om_test', chatId: 'oc_test', cardKind: 'result' as const, state: 'completed' as const, markdown: 'done' };
     await service[method](input);
     await service[method]({ ...input, showAgentName: false });
-    expect(cards[0].header.text_tag_list.map((tag: any) => tag.text.content)).toEqual(['完成', 'CCFlash']);
-    expect(cards[1].header.text_tag_list.map((tag: any) => tag.text.content)).toEqual(['完成']);
+    expect(cards[0].header.text_tag_list.map((tag: any) => tag.text.content)).toEqual(['已完成', 'CCFlash']);
+    expect(cards[1].header.text_tag_list.map((tag: any) => tag.text.content)).toEqual(['已完成']);
     expect(cards[1].header.subtitle).toBeUndefined();
     service.close();
   });

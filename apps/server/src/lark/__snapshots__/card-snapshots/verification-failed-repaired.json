@@ -144,7 +144,7 @@
               }
             },
             "summary": {
-              "content": "完成 · 把登录逻辑修一下"
+              "content": "已完成 · 把登录逻辑修一下"
             }
           },
           "body": {
@@ -155,7 +155,7 @@
               {
                 "tag": "markdown",
                 "element_id": "task_overview",
-                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                "content": "<font color='green'>已完成</font><font color='grey'> · <耗时></font>",
                 "text_size": "normal",
                 "margin": "0px",
                 "icon": {
@@ -240,7 +240,7 @@
               {
                 "tag": "markdown",
                 "element_id": "verification_status",
-                "content": "<text_tag color='blue'>验证执行中</text_tag>　本轮改了代码，正在执行 `test -f fixed.txt || { echo \"缺少 fixed.txt\"; exit 1; }`，结论以完成后的记录为准。",
+                "content": "**平台验证**　<text_tag color='blue'>验证执行中</text_tag>　本轮改了代码，正在执行 `test -f fixed.txt || { echo \"缺少 fixed.txt\"; exit 1; }`，结论以完成后的记录为准。",
                 "text_size": "notation",
                 "margin": "4px 0px 0px 0px",
                 "icon": {
@@ -371,14 +371,14 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "第一轮改好了"
+              "content": "把登录逻辑修一下"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "完成"
+                  "content": "已完成"
                 },
                 "color": "green"
               }
@@ -446,7 +446,7 @@
               {
                 "tag": "markdown",
                 "element_id": "verification_status",
-                "content": "<text_tag color='red'>验证未通过</text_tag>　`test -f fixed.txt || { echo \"缺少 fixed.txt\"; exit 1; }` 失败　退出码 1　<UTC 时间>　已把失败输出发回 Agent 返修（第 1/2 轮），修好后会重新验证。",
+                "content": "**平台验证**　<text_tag color='red'>验证未通过</text_tag>　`test -f fixed.txt || { echo \"缺少 fixed.txt\"; exit 1; }` 失败　退出码 1　<UTC 时间>　已把失败输出发回 Agent 返修（第 1/2 轮），修好后会重新验证。",
                 "text_size": "notation",
                 "margin": "4px 0px 0px 0px",
                 "icon": {
@@ -572,14 +572,14 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "第一轮改好了"
+              "content": "把登录逻辑修一下"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "完成"
+                  "content": "已完成"
                 },
                 "color": "green"
               }
@@ -738,7 +738,7 @@
               }
             },
             "summary": {
-              "content": "完成 · 验证未通过，自动返修第 1/2 轮：按下面的失败输出修复代码。 上一轮改动之后，平台在工作目录执行验证命令 `test -f fixed.txt || { ec"
+              "content": "已完成 · 验证未通过，自动返修第 1/2 轮：按下面的失败输出修复代码。 上一轮改动之后，平台在工作目录执行验证命令 `test -f fixed.txt || { ec"
             }
           },
           "body": {
@@ -749,7 +749,7 @@
               {
                 "tag": "markdown",
                 "element_id": "task_overview",
-                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                "content": "<font color='green'>已完成</font><font color='grey'> · <耗时></font>",
                 "text_size": "normal",
                 "margin": "0px",
                 "icon": {
@@ -834,7 +834,7 @@
               {
                 "tag": "markdown",
                 "element_id": "verification_status",
-                "content": "<text_tag color='blue'>验证执行中</text_tag>　本轮改了代码，正在执行 `test -f fixed.txt || { echo \"缺少 fixed.txt\"; exit 1; }`，结论以完成后的记录为准。",
+                "content": "**平台验证**　<text_tag color='blue'>验证执行中</text_tag>　本轮改了代码，正在执行 `test -f fixed.txt || { echo \"缺少 fixed.txt\"; exit 1; }`，结论以完成后的记录为准。",
                 "text_size": "notation",
                 "margin": "4px 0px 0px 0px",
                 "icon": {
@@ -965,14 +965,14 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "补上了 fixed.txt"
+              "content": "验证未通过，自动返修第 1/2 轮：按下面的失败…"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "完成"
+                  "content": "已完成"
                 },
                 "color": "green"
               }
@@ -1040,7 +1040,7 @@
               {
                 "tag": "markdown",
                 "element_id": "verification_status",
-                "content": "<text_tag color='green'>验证通过</text_tag>　`test -f fixed.txt || { echo \"缺少 fixed.txt\"; exit 1; }` 退出码 0　代码指纹 <指纹>　<UTC 时间>",
+                "content": "**平台验证**　<text_tag color='green'>验证通过</text_tag>　`test -f fixed.txt || { echo \"缺少 fixed.txt\"; exit 1; }` 退出码 0　代码指纹 <指纹>　<UTC 时间>",
                 "text_size": "notation",
                 "margin": "4px 0px 0px 0px",
                 "icon": {
@@ -1166,14 +1166,14 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "补上了 fixed.txt"
+              "content": "验证未通过，自动返修第 1/2 轮：按下面的失败…"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "完成"
+                  "content": "已完成"
                 },
                 "color": "green"
               }

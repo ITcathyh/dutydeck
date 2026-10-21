@@ -32,8 +32,8 @@ function QuotaDetail({ window }: { window?: RateLimitWindow }) {
 }
 
 /*
-  任务用量条默认只占一行：四格读数一眼看完，采样时间、重置时间、来源和分项明细
-  点开再看。展开后的四列与摘要四格上下对齐，pr-14 让出右侧「明细」开关的宽度。
+  摘要和明细按容器宽度排布：窄检视栏单列，宽面板可自动分列。
+  采样、重置时间、来源和分项仍在折叠明细里，pr-14 对齐右侧「明细」开关。
 */
 export function UsageHud({ usage, context, loading, error }: { usage?: SessionUsage; context?: ContextStats; loading?: boolean; error?: boolean }) {
   const pending = error ? '加载失败' : loading ? '加载中…' : '未提供';
@@ -62,7 +62,7 @@ export function UsageHud({ usage, context, loading, error }: { usage?: SessionUs
   return <section aria-label="任务用量" className="shrink-0 border-y border-default bg-surface px-3 text-caption sm:px-5">
     <details className="group">
       <summary className="flex min-h-9 cursor-pointer list-none items-center py-1.5 [&::-webkit-details-marker]:hidden">
-        <div className="grid min-w-0 flex-1 grid-cols-2 gap-x-5 gap-y-1 xl:grid-cols-4">
+        <div className="grid min-w-0 flex-1 grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-x-5 gap-y-1">
           <Reading label="上下文" value={percent !== undefined ? percentage(percent) : used !== undefined ? `${tokens(used)} token` : pending}><Meter label="上下文已用" value={percent}/></Reading>
           <QuotaReading label="5h" window={snapshot?.rateLimits?.fiveHour} pending={pending}/>
           <QuotaReading label="7天" window={snapshot?.rateLimits?.sevenDay} pending={pending}/>
@@ -70,7 +70,7 @@ export function UsageHud({ usage, context, loading, error }: { usage?: SessionUs
         </div>
         <span className="flex w-14 shrink-0 items-center justify-end gap-0.5 text-subtle group-hover:text-primary">明细<ChevronDown size={13} className="transition-transform duration-fast group-open:rotate-180"/></span>
       </summary>
-      <div className="grid grid-cols-2 gap-x-5 gap-y-2 pb-2 pr-14 text-subtle xl:grid-cols-4">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-x-5 gap-y-2 pb-2 pr-14 text-subtle">
         <div className="min-w-0">
           {used !== undefined && <div>{tokens(used)} / {size === undefined ? '容量未提供' : tokens(size)}{size === undefined ? '' : ' token'}</div>}
           {context?.compacted ? <div>已压缩 {tokens(context.compacted)} token</div> : null}

@@ -303,6 +303,18 @@
                 }
               },
               {
+                "tag": "markdown",
+                "element_id": "verification_status",
+                "content": "**平台验证**　<text_tag color='grey'>未验证</text_tag>　未配置验证命令，尚无平台执行记录。",
+                "text_size": "notation",
+                "margin": "4px 0px 0px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info_outlined",
+                  "color": "grey"
+                }
+              },
+              {
                 "tag": "column_set",
                 "flex_mode": "none",
                 "horizontal_spacing": "8px",

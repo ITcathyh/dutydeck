@@ -45,9 +45,8 @@ test('creates a paused plan globally without sending a prompt, runs it explicitl
     });
     await page.goto(instance.baseUrl);
     const sidebar = page.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
-    await sidebar.locator('summary').filter({ hasText: '设置与工具' }).click();
-    await sidebar.getByRole('button', { name: /^定时任务/ }).click();
-    const automation = page.getByRole('dialog', { name: '任务自动化', exact: true });
+    await sidebar.getByRole('button', { name: /^自动化/ }).click();
+    const automation = page.getByRole('main');
     await automation.getByRole('button', { name: '创建定时任务', exact: true }).click();
     const createDialog = page.getByRole('dialog', { name: '创建定时任务', exact: true });
     await expect(createDialog.getByRole('textbox', { name: '任务目标' })).toHaveCount(0);

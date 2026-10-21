@@ -27,9 +27,9 @@ const record = (patch: Partial<VerificationResponse> = {}): VerificationResponse
 });
 
 describe('验证状态行渲染', () => {
-  it('没有配置验证命令时整行不渲染', () => {
-    expect(renderLarkVerificationElement({ latest: record() })).toBeUndefined();
-    expect(renderLarkVerificationElement({ command: '   ', latest: record() })).toBeUndefined();
+  it('没有配置验证命令时明确未验证，不把旧记录当作本轮结论', () => {
+    expect(renderLarkVerificationElement({ latest: record() })!.content).toContain('未配置验证命令');
+    expect(renderLarkVerificationElement({ command: '   ', latest: record() })!.content).toContain('未验证');
   });
 
   it('没有验证记录时明说未验证，并说明 Agent 自述不产生记录', () => {
@@ -107,8 +107,8 @@ describe('验证状态行渲染', () => {
     expect(skipped.content).not.toContain('验证通过');
   });
 
-  it('没配验证命令时只在带了候选命令时渲染：写明未验证并指向「使用这个验证命令」', () => {
-    expect(renderLarkVerificationElement({})).toBeUndefined();
+  it('没配验证命令时明说未验证；有候选命令时提议保存', () => {
+    expect(renderLarkVerificationElement({})!.content).toContain('未配置验证命令');
     const element = renderLarkVerificationElement({ suggestion: 'pnpm run typecheck && pnpm test' })!;
     expect(element.element_id).toBe(LARK_VERIFICATION_ELEMENT_ID);
     expect(element.content).toContain('未验证');
@@ -272,11 +272,12 @@ const verificationLine = (card: any) =>
   (card.elements as any[]).find(element => element.element_id === LARK_VERIFICATION_ELEMENT_ID);
 
 describe('coordinator 把验证状态带上结果卡', () => {
-  it('没配验证命令时结果卡既没有这一行也没有按钮', async () => {
+  it('没配验证命令时结果卡明说未验证且没有运行按钮', async () => {
     const h = await harness();
     await h.coordinator.handle(event('om_1'), h.config);
     const card = await h.resultCard();
-    expect(verificationLine(card)).toBeUndefined();
+    expect(verificationLine(card).content).toContain('未配置验证命令');
+    expect(JSON.stringify(buildLarkCard(card))).toContain('平台验证');
     expect(callbackValues(buildLarkCard(card)).map(value => value.action)).not.toContain('verify');
     expect(h.getVerifications).not.toHaveBeenCalled();
   });

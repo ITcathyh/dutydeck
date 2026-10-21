@@ -463,7 +463,7 @@ describe('Agent 代建计划的确认卡：启用与停用', () => {
     const disabled = await h.coordinator.handleAction({ dutydeck_schedule_disable: sched.id, card: 'request' }, 'ou_alice', context);
     expect(disabled).toMatchObject({ type: 'success', content: expect.stringContaining('已停用') });
     await vi.waitFor(() => expect(h.service.update).toHaveBeenCalledTimes(2));
-    expect(toggleButton(h.service.update.mock.calls[1]![0]).text.content).toBe('启用');
+    expect(toggleButton(h.service.update.mock.calls[1]![0]).text.content).toBe('确认启用');
 
     // 结果卡上的「停用此计划」不带 card 标记：只停用，不重绘结果正文。
     await h.coordinator.handleAction({ dutydeck_schedule_enable: sched.id, card: 'request' }, 'ou_alice', context);

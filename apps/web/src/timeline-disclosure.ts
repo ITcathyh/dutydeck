@@ -1,3 +1,4 @@
+import { saveTimelineReadingState } from './timeline-reading-state';
 import { createContext, useContext, useLayoutEffect, useState, type SetStateAction } from 'react';
 
 // Virtual rows unmount outside the viewport; keep disclosure choices per session.
@@ -9,6 +10,7 @@ export function useTimelineDisclosure(key: string, initial: boolean) {
   return [open, (value: SetStateAction<boolean>) => setOpen(current => {
     const next = typeof value === 'function' ? value(current) : value;
     choices?.set(key, next);
+    saveTimelineReadingState();
     return next;
   })] as const;
 }

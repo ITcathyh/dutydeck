@@ -5,7 +5,7 @@ import type { Agent, PermissionMode, Session } from '../api';
 // 「任务运行」「运行」「会话」都不再作为 Session 的叫法出现在界面上。
 
 export const stateLabels: Record<string, string> = {
-  created: '已创建', starting: '启动中', idle: '就绪', thinking: '思考中', running_tool: '正在调用工具', waiting_for_permission: '等待授权', interrupting: '正在取消', interrupted: '已取消', completed: '已完成', failed: '失败', stopped: '已停止'
+  created: '可继续', starting: '启动中', idle: '可继续', thinking: '进行中', running_tool: '进行中', waiting_for_permission: '待审批', waiting_for_answer: '待回答', interrupting: '正在取消', interrupted: '已中断', completed: '已完成', failed: '失败', stopped: '已停止'
 };
 
 /**
@@ -21,7 +21,7 @@ export const permissionLabels: Record<PermissionMode, string> = {
   'deny-all': '全部拒绝',
   'full-trust': '完全信任'
 };
-export const stateTone: Record<string, string> = { starting: 'bg-warning-solid', thinking: 'bg-warning-solid', running_tool: 'bg-info-solid', waiting_for_permission: 'bg-attention-solid', failed: 'bg-danger-solid', stopped: 'bg-neutral-solid', interrupted: 'bg-neutral-solid', completed: 'bg-success-solid', idle: 'bg-success-solid' };
+export const stateTone: Record<string, string> = { starting: 'bg-warning-solid', thinking: 'bg-info-solid', running_tool: 'bg-info-solid', waiting_for_answer: 'bg-attention-solid', waiting_for_permission: 'bg-attention-solid', failed: 'bg-danger-solid', stopped: 'bg-neutral-solid', interrupted: 'bg-neutral-solid', completed: 'bg-success-solid', idle: 'bg-success-solid' };
 export const busyStates = new Set(['starting', 'thinking', 'running_tool', 'waiting_for_permission', 'interrupting']);
 export const parseMemberNames = (value: string) => [...new Set(value.split(/[\n,，]/).map(item => item.trim()).filter(Boolean))];
 
@@ -52,7 +52,7 @@ export const parseMemberNames = (value: string) => [...new Set(value.split(/[\n,
 export function effectiveStatus(session: Session): { label: string; archived: boolean; busy: boolean; recoverable: boolean } {
   if (session.archivedAt) return { label: '已归档', archived: true, busy: false, recoverable: false };
   return {
-    label: stateLabels[session.state] ?? session.state,
+    label: stateLabels[session.state] ?? '状态待确认',
     archived: false,
     busy: busyStates.has(session.state),
     recoverable: session.state === 'failed' || session.state === 'stopped'
@@ -60,9 +60,9 @@ export function effectiveStatus(session: Session): { label: string; archived: bo
 }
 
 /**
- * 侧栏一行的状态视觉：文案、文字色、圆点色、圆点是否呼吸。
+ * 侧栏一行的状态视觉：文案、文字色与静态圆点。
  *
- * 只负责把 effectiveStatus 的语义映射到侧栏的深色 --sidebar-* 色板，自己不再判
+ * 只负责把 effectiveStatus 的语义映射到侧栏色板，自己不再判
  * archivedAt，也不再判什么算忙。改配色改这里，改语义改 effectiveStatus。
  */
 export function sidebarStatusVisual(session: Session): { label: string; textClass: string; dotClass: string; pulse: boolean } {
@@ -72,7 +72,7 @@ export function sidebarStatusVisual(session: Session): { label: string; textClas
     label: status.label,
     textClass: session.state === 'failed' ? 'text-danger' : session.state === 'waiting_for_permission' ? 'text-warning' : 'text-sidebar-text-muted',
     dotClass: stateTone[session.state] ?? 'bg-neutral-solid',
-    pulse: status.busy
+    pulse: false
   };
 }
 

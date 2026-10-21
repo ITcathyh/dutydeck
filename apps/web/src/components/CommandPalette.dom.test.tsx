@@ -225,7 +225,7 @@ describe('CommandPalette 任务行信息与全量性', () => {
   it('任务行给出文本状态、工作区、Agent 与相对更新时间（精确时间放在 title 上）', () => {
     render(<CommandPalette {...baseProps} sessions={[session('1', { state: 'waiting_for_permission', cwd: '/repo/api', agentId: 'claude-code', updatedAt: '2026-08-20T03:00:00Z' })]} summaries={{ '1': summary('1', '修复登录超时', 2) }}/>);
     const option = screen.getByRole('option', { name: /修复登录超时/ });
-    expect(option.textContent).toContain('等待授权');
+    expect(option.textContent).toContain('待审批');
     expect(option.textContent).toContain('api');
     expect(option.textContent).toContain('Claude Code');
     expect(option.textContent).toContain('更新于');

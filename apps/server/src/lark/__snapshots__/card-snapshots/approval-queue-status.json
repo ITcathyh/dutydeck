@@ -148,7 +148,7 @@
               }
             },
             "summary": {
-              "content": "需要你处理 · 把请求超时改成 30 秒"
+              "content": "待审批 · 把请求超时改成 30 秒"
             }
           },
           "body": {
@@ -314,16 +314,12 @@
               "tag": "plain_text",
               "content": "把请求超时改成 30 秒"
             },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "等待审批"
-            },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "需要你处理"
+                  "content": "待审批"
                 },
                 "color": "orange"
               }
@@ -371,7 +367,7 @@
               }
             },
             "summary": {
-              "content": "确认本次操作 · 等待审批"
+              "content": "把请求超时改成 30 秒 · 待审批"
             }
           },
           "body": {
@@ -386,7 +382,7 @@
                 "margin": "0px",
                 "text": {
                   "tag": "lark_md",
-                  "content": "<text_tag color='orange'>等待审批</text_tag>",
+                  "content": "<text_tag color='orange'>待审批</text_tag>",
                   "text_size": "small"
                 }
               },
@@ -401,10 +397,6 @@
                   "tag": "plain_text",
                   "content": "修改 config/app.yaml\n执行端未提供详细操作。"
                 }
-              },
-              {
-                "tag": "markdown",
-                "content": "任务会一直等待审批：30 分钟无人处理会提醒一次，超过 24 小时未处理才自动拒绝（<北京时间>）。"
               },
               {
                 "tag": "markdown",
@@ -450,6 +442,12 @@
               },
               {
                 "tag": "markdown",
+                "element_id": "workflow_deadline",
+                "text_size": "notation",
+                "content": "任务会一直等待审批：30 分钟无人处理会提醒一次，超过 24 小时未处理才自动拒绝（<北京时间>）。"
+              },
+              {
+                "tag": "markdown",
                 "element_id": "dutydeck_brand",
                 "content": "<font color='grey'>[dutydeck](https://github.com/ITcathyh/dutydeck)</font>",
                 "text_size": "x-small",
@@ -461,7 +459,7 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "确认本次操作"
+              "content": "把请求超时改成 30 秒"
             },
             "template": "orange",
             "padding": "10px 12px 8px 12px"
@@ -979,7 +977,7 @@
               }
             },
             "summary": {
-              "content": "完成 · 把请求超时改成 30 秒"
+              "content": "已完成 · 把请求超时改成 30 秒"
             }
           },
           "body": {
@@ -998,7 +996,7 @@
                 "header": {
                   "title": {
                     "tag": "markdown",
-                    "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                    "content": "<font color='green'>已完成</font><font color='grey'> · <耗时></font>",
                     "text_size": "normal",
                     "icon": {
                       "tag": "standard_icon",
@@ -1107,7 +1105,7 @@
               }
             },
             "summary": {
-              "content": "本次操作确认 · 已拒绝"
+              "content": "把请求超时改成 30 秒 · 已拒绝"
             }
           },
           "body": {
@@ -1150,7 +1148,7 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "本次操作确认"
+              "content": "把请求超时改成 30 秒"
             },
             "template": "green",
             "padding": "10px 12px 8px 12px"
@@ -1191,7 +1189,7 @@
               }
             },
             "summary": {
-              "content": "完成 · 顺便补一条单元测试"
+              "content": "已完成 · 顺便补一条单元测试"
             }
           },
           "body": {
@@ -1202,7 +1200,7 @@
               {
                 "tag": "markdown",
                 "element_id": "task_overview",
-                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                "content": "<font color='green'>已完成</font><font color='grey'> · <耗时></font>",
                 "text_size": "normal",
                 "margin": "0px",
                 "icon": {
@@ -1292,6 +1290,18 @@
                 "margin": "0px"
               },
               {
+                "tag": "markdown",
+                "element_id": "verification_status",
+                "content": "**平台验证**　<text_tag color='grey'>未验证</text_tag>　未配置验证命令，尚无平台执行记录。",
+                "text_size": "notation",
+                "margin": "4px 0px 0px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info_outlined",
+                  "color": "grey"
+                }
+              },
+              {
                 "tag": "column_set",
                 "element_id": "result_follow_up_row",
                 "flex_mode": "flow",
@@ -1408,14 +1418,14 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "审批被拒绝，没有修改 config/app.yaml"
+              "content": "把请求超时改成 30 秒"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "完成"
+                  "content": "已完成"
                 },
                 "color": "green"
               }
@@ -1480,6 +1490,18 @@
                 "margin": "0px"
               },
               {
+                "tag": "markdown",
+                "element_id": "verification_status",
+                "content": "**平台验证**　<text_tag color='grey'>未验证</text_tag>　未配置验证命令，尚无平台执行记录。",
+                "text_size": "notation",
+                "margin": "4px 0px 0px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info_outlined",
+                  "color": "grey"
+                }
+              },
+              {
                 "tag": "column_set",
                 "element_id": "result_follow_up_row",
                 "flex_mode": "flow",
@@ -1596,14 +1618,14 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "补了一条超时配置的单元测试"
+              "content": "顺便补一条单元测试"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "完成"
+                  "content": "已完成"
                 },
                 "color": "green"
               }

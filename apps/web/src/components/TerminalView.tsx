@@ -73,9 +73,16 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
     const scrollDisposable = term.onRender(() => {
       setScrolledUp(term.buffer.active.viewportY < term.buffer.active.baseY);
     });
-    // 容器尺寸为 0（如隐藏的 tab）时 fit 会抛错，忽略即可
+    // 隐藏的 tab 仍保持连接；不能用 CSS 的 100% 拟合出小网格并改写真实 PTY 尺寸。
+    const hasVisibleSize = () => host.clientWidth > 0 && host.clientHeight > 0;
     // 只读视图保留快照的 ANSI 网格；fit 会改行列数，且不能向托管 PTY 请求 resize。
-    const tryFit = () => { if (readOnly) return; try { fit.fit(); } catch { /* 容器尚未可见，等下次 ResizeObserver 回调 */ } };
+    const tryFit = () => {
+      if (!hasVisibleSize()) return;
+      const next = terminalFontSize(host.clientWidth);
+      if (term.options.fontSize !== next) term.options.fontSize = next;
+      if (readOnly) return;
+      try { fit.fit(); } catch { /* 容器尚未准备好，等下次 ResizeObserver 回调 */ }
+    };
     tryFit();
 
     let ws: WebSocket | undefined;
@@ -86,7 +93,7 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
     let restoring = false;
 
     const sendResize = () => {
-      if (!readOnly && !waitingForSnapshot && !restoring && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      if (!readOnly && hasVisibleSize() && !waitingForSnapshot && !restoring && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
     };
     const sendInput = (data: string) => {
       if (!readOnly && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data }));
@@ -143,8 +150,6 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
     // 可写视图再 fit 并把新的行列数通知服务端；只读视图只更新字号。
     const observer = new ResizeObserver(() => {
       if (restoring) return;
-      const next = terminalFontSize(host.clientWidth);
-      if (term.options.fontSize !== next) term.options.fontSize = next;
       tryFit();
       sendResize();
     });

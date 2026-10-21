@@ -144,7 +144,7 @@ describe('完成时只贴表情（completionReactionOnly）', () => {
     // 会另发结果卡：回执收成一行「完成 · 用时 · 步骤计数」，不再单独写「结果见下条」。
     const completedUpdate = h.service.update.mock.calls.map(([input]) => input as any).find(input => input.state === 'completed');
     expect(completedUpdate).toMatchObject({ cardKind: 'process', resultFollows: true });
-    expect(JSON.stringify(buildLarkCard(completedUpdate))).toContain("<font color='green'>完成</font>");
+    expect(JSON.stringify(buildLarkCard(completedUpdate))).toContain("<font color='green'>已完成</font>");
   });
 
   it('开启后成功终态只贴一个表情、不发结果卡，过程卡仍冻结成完成态', async () => {

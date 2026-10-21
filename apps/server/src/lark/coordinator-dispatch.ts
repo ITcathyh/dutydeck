@@ -3,7 +3,6 @@ import { promptDigest } from '../prompt-context.js';
 import { readGitCodeSignature, readGitStatusLine } from './git-status.js';
 import { larkTurnDiffElement } from './turn-diff.js';
 import { readTurnDiffRecord } from '../turn-diff.js';
-import { larkConclusionHeadline } from './card-status.js';
 import { redactTraceText } from './secret-redaction.js';
 import { OnlineProcessCard, type CardUpdateOutcome } from './online-process-card.js';
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
@@ -56,7 +55,7 @@ import type { LarkGroup, LarkTaskState, LarkTask, PersistedLarkCardTask } from '
 import { parseCardTask } from './persisted-card-task.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 import { planInstructionBlock, planTaskOf, planUnsupportedReason } from '../plan-mode.js';
-import { larkCardFollowUpTitle, type LarkCardCapabilities } from './card-actions.js';
+import type { LarkCardCapabilities } from './card-actions.js';
 import { type LarkCommandPrompt, larkCardChannel, relaunchRetainedPrefix, relaunchRetainedKey, larkTaskTitle, sendTaskCard, withoutLeadingBotMention } from './coordinator-core.js';
 import { LarkCoordinatorRecovery } from './coordinator-recovery.js';
 
@@ -77,7 +76,7 @@ const queuedAheadOf = (tasks: TaskRecord[], taskId?: string) => {
   return index < 0 ? undefined : tasks.slice(0, index).filter(item => item.status === 'queued').length;
 };
 /**
- * 每轮的结果写法。第一句会被 larkConclusionHeadline 取作结果卡标题和通知预览，所以要求它就是结论。
+ * 每轮的结果写法。第一句会被取作通知预览，所以要求它就是结论。
  * 只有机器人能往群里发文件时才提 send-file。
  */
 const larkResultGuidance = (silentProgress: boolean) => `[飞书结果说明] 读者多在手机上看。第一句给结论或需要读者执行的动作：做事类写做成了什么、还差什么，排查类写根因或判断；数字、时间范围和明细放到后面，不用开场白或过程话开头。${silentProgress ? '' : '开始动手前发一句进展说明这一轮打算怎么做，只说这一次，不写进最终答复；直接回答时不写。'}之后按需给证据、影响、下一步和交付入口。等待用户操作或外部批准时写明尚未完成，不把本轮结束写成目标完成。需要用户操作时单独写一行「需要你：…」。用户要求转述或结果需要协同时，再附一段可直接转发的短文。不要在结果里给本机路径链接（手机上点不开）。用户明确指定的格式优先。`;
@@ -1325,12 +1324,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           elements.splice(terminalMention ? elements.length - 1 : elements.length, 0, ...planElements);
         }
         if (this.stopped || task.turn !== currentTurn) return;
-        // 结果卡标题用结论第一句，原话就在卡片上方不必重复；一键续问那一轮仍用「对外回复版」「详细版」，
-        // 拿不到结论时用原话。
-        const conclusionTitle = state === 'completed' && planTask === undefined && !larkCardFollowUpTitle(withoutLeadingBotMention(prompt, config.name))
-          ? larkConclusionHeadline((elements.find(element => element.element_id === 'final_output') as { content?: unknown } | undefined)?.content) : undefined;
+        // 同一轮的过程、审批与结果卡保留任务名；结论由正文和通知预览承载。
         const resultCardInput = {
-          ...cardContext, cardKind: 'result' as const, state, taskId: task.id, taskName: conclusionTitle ?? taskTitle,
+          ...cardContext, cardKind: 'result' as const, state, taskId: task.id, taskName: taskTitle,
           // 只有完成的结果卡是只读收据；失败、中断、取消时过程卡已收成一行，「重试」只能放在这张卡上。
           sessionId: task.sessionId, turn: currentTurn, readOnly: state === 'completed',
           elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,

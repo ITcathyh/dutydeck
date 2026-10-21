@@ -42,7 +42,7 @@ describe('SessionList mobile accessibility', () => {
     // 「绑定 Bot」也从侧栏移除：飞书入口只在总览页与设置里各留一处。
     expect(screen.queryByRole('button', { name: /绑定 Bot/ })).toBeNull();
     // 工作区分组仍然列任务，这是侧栏保留的那条检索路径。
-    expect(screen.getByText('工作区')).toBeTruthy();
+    expect(screen.getByText('项目')).toBeTruthy();
     for (const name of ['alpha', 'beta']) expect(screen.getByText(name)).toBeTruthy();
   });
 
@@ -310,7 +310,7 @@ describe('SessionList 功能导航区', () => {
     render(<SessionList {...baseProps} open/>);
     for (const name of [/飞书接入/, /群与权限/, /定时任务/]) {
       const item = screen.getByRole('button', { name });
-      expect(item.className).toMatch(/\bmin-h-12\b/);
+      expect(item.className).toMatch(/\bmin-h-10\b/);
       // 原生 <button> 天然可 Tab 到；这里守的是没人给它加 tabIndex={-1}。
       expect(item.getAttribute('tabindex')).toBeNull();
     }
@@ -409,4 +409,50 @@ describe('SessionList 工作区自定义分组与整理入口', () => {
     expect(screen.queryByRole('button', { name: /^待开始规划组/ })).toBeNull();
     expect(screen.getByRole('button', { name: /^已完成归档组/ })).toBeTruthy();
   });
+});
+
+
+describe('Calm Workbench 当前任务定位', () => {
+  const make = (id: string, state: string, archivedAt?: string): Session => ({ id, agentId: 'codex', name: `目标 ${id}`, cwd: '/repo/project', state, createdAt: '', updatedAt: '', runId: id, archivedAt });
+  it('当前任务不匹配状态筛选时仍显示真实项目归属与解释，归档也可定位', () => {
+    render(<SessionList {...baseProps} open view="attention" sessions={[make('current', 'completed', '2026-10-21'), make('waiting', 'waiting_for_permission')]} activeSessionId="current"/>);
+    expect(screen.getByRole('button', { name: /^project/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /目标 current/ }).getAttribute('aria-current')).toBe('true');
+    expect(screen.getByText('当前任务不在此筛选中')).toBeTruthy();
+  });
+  it('手动折叠所在项目后保持当前任务可见，其他任务仍被收起', async () => {
+    const user = userEvent.setup();
+    render(<SessionList {...baseProps} open sessions={[make('a', 'idle'), make('b', 'idle')]} activeSessionId="a"/>);
+    await user.click(screen.getByRole('button', { name: /^project/ }));
+    expect(screen.getByRole('button', { name: /^project/ }).getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getByRole('button', { name: /目标 a/ }).getAttribute('aria-current')).toBe('true');
+    expect(screen.queryByRole('button', { name: /目标 b/ })).toBeNull();
+  });
+  it('一级导航和管理入口常驻，折叠轨道保留完整可及名与展开入口', async () => {
+    const onPrimaryNavChange = vi.fn(); const onToggleCollapsed = vi.fn();
+    render(<SessionList {...baseProps} open collapsed primaryNav="home" onPrimaryNavChange={onPrimaryNavChange} onToggleCollapsed={onToggleCollapsed}/>);
+    expect(screen.getByRole('button', { name: /^工作台/ }).getAttribute('aria-current')).toBe('page');
+    await userEvent.click(screen.getByRole('button', { name: /^全部任务/ }));
+    expect(onPrimaryNavChange).toHaveBeenCalledWith('tasks');
+    await userEvent.click(screen.getByRole('button', { name: /^自动化/ }));
+    expect(onPrimaryNavChange).toHaveBeenCalledWith('automation');
+    expect(screen.getAllByRole('button', { name: /^自动化/ })).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: /^定时任务/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /^Agent 与设置/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^飞书接入/ })).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: '展开侧栏' }));
+    expect(onToggleCollapsed).toHaveBeenCalledOnce();
+  });
+});
+
+
+it('有一级自动化导航时实验策略独立标明，不恢复重复定时入口', () => {
+  writeExperimental(true);
+  const { container } = render(<SessionList {...baseProps} open primaryNav="automation" onPrimaryNavChange={() => {}}/>);
+  const experimental = screen.getByRole('navigation', { name: '实验功能' });
+  expect(experimental.textContent).toContain('策略草稿 · 尚未接入运行时');
+  expect(experimental.textContent).toContain('群与权限');
+  expect(screen.queryByRole('button', { name: /^定时任务/ })).toBeNull();
+  expect(screen.getByRole('button', { name: /^自动化/ }).getAttribute('aria-current')).toBe('page');
+  for (const nav of container.querySelectorAll('nav')) expect(nav.querySelectorAll('button').length).toBeGreaterThan(0);
 });

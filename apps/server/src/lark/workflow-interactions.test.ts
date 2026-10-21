@@ -121,7 +121,7 @@ describe('persistent Lark workflow interactions', () => {
       const { runtime } = makeRuntime([runningTask()], permissions);
       const { service, reply } = makeService();
       const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
-      await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
+      await workflow.observe(context({ taskName: '运行回归检查' }), agentEvent('permission_request', permissions[0]));
       const card = JSON.stringify(reply.mock.calls);
       expect(card).toContain('来源：执行端工具请求');
       expect(card).toContain('目录：/work/project');
@@ -130,6 +130,15 @@ describe('persistent Lark workflow interactions', () => {
       expect(card).not.toContain('synthetic-secret');
       expect(card).toContain('本次选择只处理这一条请求');
       expect(card).toContain('允许本次');
+      const sent = reply.mock.calls[0]![0] as any;
+      expect(sent.taskName).toBe('运行回归检查');
+      const ids = sent.elements.map((element: any) => element.element_id);
+      expect(ids.indexOf('workflow_approve')).toBeLessThan(ids.indexOf('workflow_deadline'));
+      const record = (await workflow.list('app_one'))[0]!;
+      await workflow.respond(responseInput(record, { action: 'approve' }));
+      expect(service.update).toHaveBeenLastCalledWith(expect.objectContaining({
+        messageId: record.cardId, taskName: '运行回归检查', readOnly: true, statusLabel: '已允许'
+      }));
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
@@ -410,7 +419,7 @@ describe('permission interaction retry after Runtime pre-consumption faults', ()
       await expect(workflow.respond(responseInput(record, { action: 'approve' }))).rejects.toThrow(message);
       const pending = (await workflow.list('app_one'))[0]!;
       expect(pending).toMatchObject({ id: record.id, state: 'pending' });
-      expect((service.update as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(expect.objectContaining({ messageId: record.cardId, statusLabel: '等待审批' }));
+      expect((service.update as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(expect.objectContaining({ messageId: record.cardId, statusLabel: '待审批' }));
       await expect(workflow.respond(responseInput(pending, { action: 'approve' }))).resolves.toBe('执行端已接受本次批准。');
       expect(resolvePermission).toHaveBeenCalledTimes(2);
       expect((await workflow.list('app_one'))[0]).toMatchObject({ id: record.id, state: 'approved' });
@@ -855,7 +864,7 @@ describe('structured ask cards (P0-2)', () => {
       expect(JSON.stringify(card.elements)).toMatch(/还有 \d+ 个选项未展示/);
       // 回落卡真整卡试算必须达标，不能把超预算内容原样发给飞书
       const assembled = buildLarkCard({
-        state: 'running', statusLabel: '等待回答', awaitingHuman: true, readOnly: true,
+        state: 'running', statusLabel: '待回答', awaitingHuman: true, readOnly: true,
         taskName: 'Agent 需要你的回答', permissionMode: 'ask', elements: card.elements
       });
       expect(Buffer.byteLength(JSON.stringify(assembled), 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
@@ -1531,6 +1540,8 @@ describe('审批卡的 @、处理结果与「本会话允许此命令」', () =>
         const sent = cards(reply);
         expect(sent).toHaveLength(5);
         expect(allowButton(sent[0]!)).toMatchObject({ text: { content: '本会话允许此命令' } });
+        expect(JSON.stringify(sent[0])).toContain('目录、资源与命令完全相同');
+        expect(JSON.stringify(sent[0])).toContain('服务重启后失效');
         expect(allowButton(sent[0]!).behaviors[0].value).toEqual({ dutydeck_workflow: 'allow_session', request_id: expect.any(String), generation: workflow.boot });
         for (const card of sent.slice(1)) expect(allowButton(card)).toBeUndefined();
 

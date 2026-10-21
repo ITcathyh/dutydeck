@@ -254,7 +254,7 @@ export abstract class LarkCoordinatorCore {
 
   protected interactionContext(task: LarkTask): LarkInteractionContext | undefined {
     return task.sessionId && task.runtimeTaskId ? { appId: task.config.appId, sessionId: task.sessionId,
-      taskId: task.runtimeTaskId, turn: task.turn, event: task.event } : undefined;
+      taskId: task.runtimeTaskId, taskName: larkTaskTitle(task.prompt, task.config.name), turn: task.turn, event: task.event } : undefined;
   }
 
   protected async requireExecution(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction) {

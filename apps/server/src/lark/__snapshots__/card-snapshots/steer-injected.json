@@ -453,7 +453,7 @@
               }
             },
             "summary": {
-              "content": "完成 · 只看 P0 级别的报警"
+              "content": "已完成 · 只看 P0 级别的报警"
             }
           },
           "body": {
@@ -464,7 +464,7 @@
               {
                 "tag": "markdown",
                 "element_id": "task_overview",
-                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                "content": "<font color='green'>已完成</font><font color='grey'> · <耗时></font>",
                 "text_size": "normal",
                 "margin": "0px",
                 "icon": {
@@ -530,7 +530,7 @@
               }
             },
             "summary": {
-              "content": "完成 · 只看 P0 级别的报警"
+              "content": "已完成 · 只看 P0 级别的报警"
             }
           },
           "body": {
@@ -542,6 +542,18 @@
                 "tag": "markdown",
                 "element_id": "steer_note",
                 "content": "已把这条内容送进正在执行的这一轮，Agent 会在这一轮里接着处理，回复出现在那一轮的结果里。"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "verification_status",
+                "content": "**平台验证**　<text_tag color='grey'>未验证</text_tag>　未配置验证命令，尚无平台执行记录。",
+                "text_size": "notation",
+                "margin": "4px 0px 0px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info_outlined",
+                  "color": "grey"
+                }
               },
               {
                 "tag": "column_set",
@@ -667,7 +679,7 @@
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "完成"
+                  "content": "已完成"
                 },
                 "color": "green"
               }
@@ -716,7 +728,7 @@
               }
             },
             "summary": {
-              "content": "完成 · 整理本周报警"
+              "content": "已完成 · 整理本周报警"
             }
           },
           "body": {
@@ -727,7 +739,7 @@
               {
                 "tag": "markdown",
                 "element_id": "task_overview",
-                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                "content": "<font color='green'>已完成</font><font color='grey'> · <耗时></font>",
                 "text_size": "normal",
                 "margin": "0px",
                 "icon": {
@@ -808,6 +820,18 @@
                 "text_align": "left",
                 "text_size": "normal_v2",
                 "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "verification_status",
+                "content": "**平台验证**　<text_tag color='grey'>未验证</text_tag>　未配置验证命令，尚无平台执行记录。",
+                "text_size": "notation",
+                "margin": "4px 0px 0px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info_outlined",
+                  "color": "grey"
+                }
               },
               {
                 "tag": "column_set",
@@ -926,14 +950,14 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "本周报警整理完成，按插话只列了 P0 级别"
+              "content": "整理本周报警"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "完成"
+                  "content": "已完成"
                 },
                 "color": "green"
               }

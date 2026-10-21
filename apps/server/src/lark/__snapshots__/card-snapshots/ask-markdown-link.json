@@ -144,7 +144,7 @@
               }
             },
             "summary": {
-              "content": "需要你处理 · 今晚把登录修复发布上线"
+              "content": "待回答 · 今晚把登录修复发布上线"
             }
           },
           "body": {
@@ -296,16 +296,12 @@
               "tag": "plain_text",
               "content": "今晚把登录修复发布上线"
             },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "等待回答"
-            },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "需要你处理"
+                  "content": "待回答"
                 },
                 "color": "orange"
               }
@@ -353,7 +349,7 @@
               }
             },
             "summary": {
-              "content": "Agent 需要你的回答 · 等待回答"
+              "content": "今晚把登录修复发布上线 · 待回答"
             }
           },
           "body": {
@@ -368,7 +364,7 @@
                 "margin": "0px",
                 "text": {
                   "tag": "lark_md",
-                  "content": "<text_tag color='orange'>等待回答</text_tag>",
+                  "content": "<text_tag color='orange'>待回答</text_tag>",
                   "text_size": "small"
                 }
               },
@@ -383,11 +379,13 @@
               },
               {
                 "tag": "markdown",
-                "content": "回答截止时间：<北京时间>。超时后请发送 /status 查看任务状态。"
+                "content": "在下方填写答案并点击提交；也可引用本卡片直接回复你的答案。"
               },
               {
                 "tag": "markdown",
-                "content": "在下方填写答案并点击提交；也可引用本卡片直接回复你的答案。"
+                "element_id": "workflow_deadline",
+                "text_size": "notation",
+                "content": "回答截止时间：<北京时间>。超时后请发送 /status 查看任务状态。"
               },
               {
                 "tag": "form",
@@ -474,7 +472,7 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "Agent 需要你的回答"
+              "content": "今晚把登录修复发布上线"
             },
             "template": "orange",
             "padding": "10px 12px 8px 12px"
@@ -531,7 +529,7 @@
               }
             },
             "summary": {
-              "content": "完成 · 今晚把登录修复发布上线"
+              "content": "已完成 · 今晚把登录修复发布上线"
             }
           },
           "body": {
@@ -542,7 +540,7 @@
               {
                 "tag": "markdown",
                 "element_id": "task_overview",
-                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                "content": "<font color='green'>已完成</font><font color='grey'> · <耗时></font>",
                 "text_size": "normal",
                 "margin": "0px",
                 "icon": {
@@ -604,7 +602,7 @@
               }
             },
             "summary": {
-              "content": "Agent 提问 · 已回答"
+              "content": "今晚把登录修复发布上线 · 已回答"
             }
           },
           "body": {
@@ -644,7 +642,7 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "Agent 提问"
+              "content": "今晚把登录修复发布上线"
             },
             "template": "green",
             "padding": "10px 12px 8px 12px"
@@ -704,6 +702,18 @@
                 "text_align": "left",
                 "text_size": "normal_v2",
                 "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "verification_status",
+                "content": "**平台验证**　<text_tag color='grey'>未验证</text_tag>　未配置验证命令，尚无平台执行记录。",
+                "text_size": "notation",
+                "margin": "4px 0px 0px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info_outlined",
+                  "color": "grey"
+                }
               },
               {
                 "tag": "column_set",
@@ -822,14 +832,14 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "发布前需要跟你确认一件事"
+              "content": "今晚把登录修复发布上线"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "完成"
+                  "content": "已完成"
                 },
                 "color": "green"
               }

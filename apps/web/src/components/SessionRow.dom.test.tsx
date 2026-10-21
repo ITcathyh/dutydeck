@@ -67,11 +67,11 @@ describe('SessionRow 归档态状态视觉', () => {
     expect(dot.className).toContain('bg-danger-solid');
   });
 
-  it('未归档 + thinking：圆点仍然呼吸', () => {
+  it('未归档 + thinking：以静态蓝点表达进行中', () => {
     const { dot, label } = renderRow(makeSession('thinking'));
-    expect(label.textContent).toBe('思考中');
-    expect(dot.className).toContain('ui-status-pulse');
-    expect(dot.className).toContain('bg-warning-solid');
+    expect(label.textContent).toBe('进行中');
+    expect(dot.className).not.toContain('ui-status-pulse');
+    expect(dot.className).toContain('bg-info-solid');
   });
 });
 

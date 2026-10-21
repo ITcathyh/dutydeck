@@ -1,9 +1,10 @@
+import { useState } from 'react';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { Agent, LarkBotConfig, Session } from '../api';
 import { attentionReasonForSession, nextActionForState, workbenchViewLabels, workbenchViewOrder } from '../workspace-model';
-import { WorkspaceOverview } from './WorkspaceOverview';
+import { WorkspaceOverview, type WorkspaceListFilters } from './WorkspaceOverview';
 
 const agents: Agent[] = [{ id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'full-trust' }];
 const session = (id: string, cwd: string, state: string): Session => ({ id, cwd, state, agentId: 'codex', runId: `run-${id}`, createdAt: `2026-08-2${id}T00:00:00Z`, updatedAt: `2026-08-2${id}T00:00:00Z` });
@@ -40,7 +41,7 @@ describe('WorkspaceOverview 批量清理选择', () => {
   it('全选只包含当前筛选下的可清理任务，勾选不会打开详情', async () => {
     const user = userEvent.setup();
     const onBulkArchive = vi.fn(); const onSelect = vi.fn();
-    render(<WorkspaceOverview {...baseProps} sessions={sessions} view="completed" onBulkArchive={onBulkArchive} onSelect={onSelect}/>);
+    render(<WorkspaceOverview mode="tasks" {...baseProps} sessions={sessions} view="completed" onBulkArchive={onBulkArchive} onSelect={onSelect}/>);
     await user.click(screen.getByRole('button', { name: '批量清理' }));
     expect(screen.getByRole('button', { name: '清理所选任务' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('checkbox', { name: '选择任务：managed' }).hasAttribute('disabled')).toBe(true);
@@ -55,12 +56,12 @@ describe('WorkspaceOverview 批量清理选择', () => {
 
   it('支持单选与半选；刷新不自动勾选新任务，已归档项从选择中移除', async () => {
     const user = userEvent.setup(); const onBulkArchive = vi.fn();
-    const { rerender } = render(<WorkspaceOverview {...baseProps} sessions={sessions} onBulkArchive={onBulkArchive}/>);
+    const { rerender } = render(<WorkspaceOverview mode="tasks" {...baseProps} sessions={sessions} onBulkArchive={onBulkArchive}/>);
     await user.click(screen.getByRole('button', { name: '批量清理' }));
     await user.click(screen.getByRole('checkbox', { name: '选择任务：done' }));
     expect((screen.getByRole('checkbox', { name: '全选当前视图' }) as HTMLInputElement).indeterminate).toBe(true);
     const refreshed = [...sessions.map(item => item.id === '1' ? { ...item, archivedAt: '2026-09-12T01:00:00Z' } : item), session('5', '/repo/new', 'completed')];
-    rerender(<WorkspaceOverview {...baseProps} sessions={refreshed} onBulkArchive={onBulkArchive}/>);
+    rerender(<WorkspaceOverview mode="tasks" {...baseProps} sessions={refreshed} onBulkArchive={onBulkArchive}/>);
     expect(screen.getByText('已选 0 个任务')).toBeTruthy();
     expect((screen.getByRole('checkbox', { name: '选择任务：new' }) as HTMLInputElement).checked).toBe(false);
     expect(screen.getByRole('button', { name: '清理所选任务' }).hasAttribute('disabled')).toBe(true);
@@ -68,10 +69,10 @@ describe('WorkspaceOverview 批量清理选择', () => {
 
   it('切换筛选或退出多选会清空选择，已归档视图不提供清理入口', async () => {
     const user = userEvent.setup(); const onBulkArchive = vi.fn();
-    const { rerender } = render(<WorkspaceOverview {...baseProps} sessions={sessions} onBulkArchive={onBulkArchive}/>);
+    const { rerender } = render(<WorkspaceOverview mode="tasks" {...baseProps} sessions={sessions} onBulkArchive={onBulkArchive}/>);
     await user.click(screen.getByRole('button', { name: '批量清理' }));
     await user.click(screen.getByRole('checkbox', { name: '全选当前视图' }));
-    rerender(<WorkspaceOverview {...baseProps} sessions={sessions} view="completed" onBulkArchive={onBulkArchive}/>);
+    rerender(<WorkspaceOverview mode="tasks" {...baseProps} sessions={sessions} view="completed" onBulkArchive={onBulkArchive}/>);
     expect(screen.queryByRole('checkbox')).toBeNull();
     await user.click(screen.getByRole('button', { name: '批量清理' }));
     expect(screen.getByText('已选 0 个任务')).toBeTruthy();
@@ -79,7 +80,7 @@ describe('WorkspaceOverview 批量清理选择', () => {
     await user.click(screen.getByRole('button', { name: '退出多选' }));
     await user.click(screen.getByRole('button', { name: '批量清理' }));
     expect(screen.getByText('已选 0 个任务')).toBeTruthy();
-    rerender(<WorkspaceOverview {...baseProps} sessions={sessions} view="archived" onBulkArchive={onBulkArchive}/>);
+    rerender(<WorkspaceOverview mode="tasks" {...baseProps} sessions={sessions} view="archived" onBulkArchive={onBulkArchive}/>);
     expect(screen.queryByRole('checkbox')).toBeNull();
     expect(screen.queryByRole('button', { name: '批量清理' })).toBeNull();
   });
@@ -87,20 +88,20 @@ describe('WorkspaceOverview 批量清理选择', () => {
 
 describe('WorkspaceOverview', () => {
   it('does not claim work is in progress when both tasks and Agents are empty', () => {
-    render(<WorkspaceOverview {...baseProps} sessions={[]} agents={[]}/>);
+    render(<WorkspaceOverview mode="tasks" {...baseProps} sessions={[]} agents={[]}/>);
     expect(screen.getByText('还没有任务。先准备 Agent，再创建第一个任务。')).toBeTruthy();
     expect(document.body.textContent).not.toContain('继续跟进进行中的任务');
   });
 
   it('展示现有 Session 数据的工作区与状态投影', () => {
     const archived = { ...session('6', '/repo/archive', 'completed'), archivedAt: '2026-08-30T00:00:00Z' };
-    render(<WorkspaceOverview sessions={[session('1', '/repo/dutydeck', 'thinking'), session('2', '/repo/dutydeck', 'created'), session('3', '/repo/api', 'idle'), session('4', '/repo/api', 'failed'), session('5', '/repo/web', 'completed'), archived]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '优化工作台', status: 'running', queuedCount: 0, updatedAt: '' }, '2': { sessionId: '2', taskId: 't2', prompt: '等待调度', status: 'queued', queuedCount: 1, updatedAt: '' } }} agents={agents} loading={false} larkBots={[makeSimpleBot()]} view="all" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
+    render(<WorkspaceOverview mode="tasks" sessions={[session('1', '/repo/dutydeck', 'thinking'), session('2', '/repo/dutydeck', 'created'), session('3', '/repo/api', 'idle'), session('4', '/repo/api', 'failed'), session('5', '/repo/web', 'completed'), archived]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '优化工作台', status: 'running', queuedCount: 0, updatedAt: '' }, '2': { sessionId: '2', taskId: 't2', prompt: '等待调度', status: 'queued', queuedCount: 1, updatedAt: '' } }} agents={agents} loading={false} larkBots={[makeSimpleBot()]} view="all" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
     const filters = screen.getByRole('region', { name: '任务筛选' });
     // 筛选芯片就是 workbenchViewOrder 这一份常量，标签改文案不需要动这里。
     expect(workbenchViewOrder.map(view => within(filters).getByRole('button', { name: new RegExp(workbenchViewLabels[view]) }))).toHaveLength(5);
-    expect(filters.textContent).toContain('总览5');
+    expect(filters.textContent).toContain('全部5');
     // 失败并入「待你处理」：idle 的 3 与 failed 的 4，共 2 条。
-    expect(filters.textContent).toContain('待你处理2');
+    expect(filters.textContent).toContain('待你处理1');
     // 进行中同时含 thinking 的 1 与「created 但排了 1 条指令」的 2：
     // 排队中也算系统已承诺推进，芯片与分区用的是同一个判据（interaction-design §1）。
     expect(filters.textContent).toContain('进行中2');
@@ -116,7 +117,7 @@ describe('WorkspaceOverview', () => {
   it('创建、选择任务与打开飞书均保持可达', async () => {
     const user = userEvent.setup();
     const onCreate = vi.fn(); const onSelect = vi.fn(); const onOpenLarkSetup = vi.fn(); const onViewChange = vi.fn();
-    render(<WorkspaceOverview sessions={[session('1', '/repo/dutydeck', 'idle')]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '优化工作台', status: 'queued', queuedCount: 1, updatedAt: '' } }} agents={agents} loading={false} larkBots={[]} view="all" onViewChange={onViewChange} onSelect={onSelect} onCreate={onCreate} onOpenAgentSetup={() => {}} onOpenLarkSetup={onOpenLarkSetup}/>);
+    render(<WorkspaceOverview mode="tasks" sessions={[session('1', '/repo/dutydeck', 'idle')]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '优化工作台', status: 'queued', queuedCount: 1, updatedAt: '' } }} agents={agents} loading={false} larkBots={[]} view="all" onViewChange={onViewChange} onSelect={onSelect} onCreate={onCreate} onOpenAgentSetup={() => {}} onOpenLarkSetup={onOpenLarkSetup}/>);
     await user.click(screen.getByRole('button', { name: /创建任务/ }));
     await user.click(screen.getByRole('button', { name: /优化工作台/ }));
     await user.click(screen.getByRole('button', { name: /已归档/ }));
@@ -129,36 +130,36 @@ describe('WorkspaceOverview', () => {
 
   it('按已选状态过滤跨工作区任务，并让长任务目标保留完整 title', () => {
     const longGoal = '修复登录超时并补齐覆盖所有回归路径的端到端测试与性能验证';
-    render(<WorkspaceOverview sessions={[session('1', '/repo/run', 'thinking'), session('2', '/repo/queue', 'failed')]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '运行中的任务', status: 'running', queuedCount: 0, updatedAt: '' }, '2': { sessionId: '2', taskId: 't2', prompt: longGoal, status: 'failed', queuedCount: 0, updatedAt: '' } }} agents={agents} loading={false} larkBots={[]} view="attention" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
+    render(<WorkspaceOverview mode="tasks" sessions={[session('1', '/repo/run', 'thinking'), session('2', '/repo/queue', 'failed')]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '运行中的任务', status: 'running', queuedCount: 0, updatedAt: '' }, '2': { sessionId: '2', taskId: 't2', prompt: longGoal, status: 'failed', queuedCount: 0, updatedAt: '' } }} agents={agents} loading={false} larkBots={[]} view="attention" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
     expect(screen.getByTitle(longGoal)).toBeTruthy();
     expect(screen.queryByText('运行中的任务')).toBeNull();
   });
 
   it('进行中的任务有后续排队指令时，任务行按指令数标注待执行', () => {
-    render(<WorkspaceOverview sessions={[session('1', '/repo/run', 'thinking')]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '运行中且排了两条', status: 'running', queuedCount: 2, updatedAt: '' } }} agents={agents} loading={false} larkBots={[]} view="active" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
+    render(<WorkspaceOverview mode="tasks" sessions={[session('1', '/repo/run', 'thinking')]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '运行中且排了两条', status: 'running', queuedCount: 2, updatedAt: '' } }} agents={agents} loading={false} larkBots={[]} view="active" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
     expect(screen.getByRole('button', { name: /运行中且排了两条.*待执行指令 2 条/ })).toBeTruthy();
     expect(screen.getByRole('region', { name: '任务筛选' }).textContent).toContain('另有待执行指令 2 条');
   });
 
   it('默认将待处理与失败任务置顶，并给出可行动原因与更新时间', () => {
-    const { container } = render(<WorkspaceOverview sessions={[session('5', '/repo/recent', 'completed'), session('4', '/repo/run', 'thinking'), session('3', '/repo/fail', 'failed'), session('2', '/repo/auth', 'waiting_for_permission')]} summaries={{}} agents={agents} loading={false} larkBots={[]} view="all" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
+    const { container } = render(<WorkspaceOverview mode="tasks" sessions={[session('5', '/repo/recent', 'completed'), session('4', '/repo/run', 'thinking'), session('3', '/repo/fail', 'failed'), session('2', '/repo/auth', 'waiting_for_permission')]} summaries={{}} agents={agents} loading={false} larkBots={[]} view="all" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
     const taskList = screen.getByRole('region', { name: '任务列表' });
-    expect(within(taskList).getAllByRole('heading', { level: 2 }).map(node => node.textContent)).toEqual(['待你处理', '进行中', '已完成']);
+    expect(within(taskList).getAllByRole('heading', { level: 2 }).map(node => node.textContent)).toEqual(['需要你处理', '正在推进', '已完成']);
     expect(screen.getByText(nextActionForState('waiting_for_permission'))).toBeTruthy();
     expect(screen.getByText(nextActionForState('failed'))).toBeTruthy();
     expect(container.querySelectorAll('[data-task-priority="attention"]')).toHaveLength(2);
     expect(container.querySelector('[data-task-priority="attention"]')?.textContent).toContain('更新于');
-    expect(screen.getByRole('button', { name: /等待授权.*需要你授权/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /待审批.*需要你授权/ })).toBeTruthy();
   });
 
   it('总览每个分区只预览前 5 条，「查看全部」切到对应视图；多选时展开全部，避免清理看不见的任务', async () => {
     const user = userEvent.setup(); const onViewChange = vi.fn();
     // updatedAt 取自 id 拼日期，个位数 id 才是合法时间。
     const sessions = Array.from({ length: 7 }, (_, index) => session(String(index + 1), `/repo/${index + 1}`, 'failed'));
-    render(<WorkspaceOverview {...baseProps} sessions={sessions} view="all" onViewChange={onViewChange} onBulkArchive={() => {}}/>);
+    render(<WorkspaceOverview mode="home" {...baseProps} sessions={sessions} view="all" onViewChange={onViewChange} onBulkArchive={() => {}}/>);
     const list = screen.getByRole('region', { name: '任务列表' });
     expect(list.querySelectorAll('[data-task-priority]')).toHaveLength(5);
-    await user.click(screen.getByRole('button', { name: /查看全部 7 个待你处理的任务/ }));
+    await user.click(screen.getByRole('button', { name: /查看全部 7 个需要你处理的任务/ }));
     expect(onViewChange).toHaveBeenCalledWith('attention');
     await user.click(screen.getByRole('button', { name: '批量清理' }));
     expect(list.querySelectorAll('[data-task-priority]')).toHaveLength(7);
@@ -167,7 +168,7 @@ describe('WorkspaceOverview', () => {
 
   it('过滤视图展示全部匹配任务，不截断最近六条', () => {
     const sessions = Array.from({ length: 8 }, (_, index) => session(String(index + 1), `/repo/${index + 1}`, 'thinking'));
-    render(<WorkspaceOverview sessions={sessions} summaries={Object.fromEntries(sessions.map(item => [item.id, { sessionId: item.id, taskId: `t${item.id}`, prompt: `任务 ${item.id}`, status: 'running', queuedCount: 0, updatedAt: item.updatedAt }]))} agents={agents} loading={false} larkBots={[]} view="active" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
+    render(<WorkspaceOverview mode="tasks" sessions={sessions} summaries={Object.fromEntries(sessions.map(item => [item.id, { sessionId: item.id, taskId: `t${item.id}`, prompt: `任务 ${item.id}`, status: 'running', queuedCount: 0, updatedAt: item.updatedAt }]))} agents={agents} loading={false} larkBots={[]} view="active" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
     for (const item of sessions) expect(screen.getByText(`任务 ${item.id}`)).toBeTruthy();
     expect(screen.getByRole('region', { name: '任务列表' }).querySelectorAll('[data-task-priority]')).toHaveLength(8);
   });
@@ -179,14 +180,14 @@ describe('WorkspaceOverview', () => {
   const meetsTouchTarget = (node: HTMLElement) => /(?:^|\s)(?:min-)?h-10(?:\s|$)/.test(node.className);
 
   it('主操作与状态筛选提供至少 40px 触控目标', () => {
-    render(<WorkspaceOverview sessions={[]} summaries={{}} agents={agents} loading={false} larkBots={[]} view="all" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
+    render(<WorkspaceOverview mode="tasks" sessions={[]} summaries={{}} agents={agents} loading={false} larkBots={[]} view="all" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
     expect(meetsTouchTarget(screen.getByRole('button', { name: '创建任务' }))).toBe(true);
-    expect(meetsTouchTarget(screen.getByRole('button', { name: /总览 0/ }))).toBe(true);
+    expect(meetsTouchTarget(screen.getByRole('button', { name: /全部 0/ }))).toBe(true);
   });
 
   it('待处理任务优先展示经脱敏的 Runtime 错误摘要', () => {
     const failed = { ...session('1', '/repo/error', 'idle'), error: '连接本地进程失败\nAuthorization: Bearer should-not-render' };
-    render(<WorkspaceOverview sessions={[failed]} summaries={{}} agents={agents} loading={false} larkBots={[]} view="all" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
+    render(<WorkspaceOverview mode="tasks" sessions={[failed]} summaries={{}} agents={agents} loading={false} larkBots={[]} view="all" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
     expect(screen.getByText('任务异常：连接本地进程失败 Authorization: [已隐藏]；打开详情查看')).toBeTruthy();
     expect(screen.getByText(attentionReasonForSession(failed))).toBeTruthy();
     expect(screen.queryByText(/should-not-render/)).toBeNull();
@@ -194,13 +195,13 @@ describe('WorkspaceOverview', () => {
   });
 
   it('在 App 的主内容内使用有名区域，不再嵌套 main landmark', () => {
-    const { container } = render(<WorkspaceOverview sessions={[]} summaries={{}} agents={agents} loading={false} larkBots={[]} view="all" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
+    const { container } = render(<WorkspaceOverview mode="tasks" sessions={[]} summaries={{}} agents={agents} loading={false} larkBots={[]} view="all" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
     expect(container.querySelector('main')).toBeNull();
-    expect(screen.getByRole('region', { name: '今天需要推进什么？' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: '全部任务' })).toBeTruthy();
   });
 
   it('Agent 尚未加载完时不谎报「先准备 Agent」，改为说明正在检测', () => {
-    render(<WorkspaceOverview {...baseProps} sessions={[]} agents={[]} agentsLoading/>);
+    render(<WorkspaceOverview mode="tasks" {...baseProps} sessions={[]} agents={[]} agentsLoading/>);
     expect(screen.getByText('正在同步任务状态…')).toBeTruthy();
     expect(screen.queryByText('还没有任务。先准备 Agent，再创建第一个任务。')).toBeNull();
     const cta = screen.getByRole('button', { name: '正在检测 Agent…' });
@@ -208,13 +209,13 @@ describe('WorkspaceOverview', () => {
   });
 
   it('Agent 加载中时任务列表展示骨架，而不是先闪一次空状态', () => {
-    const { container } = render(<WorkspaceOverview {...baseProps} sessions={[]} agents={[]} agentsLoading/>);
+    const { container } = render(<WorkspaceOverview mode="tasks" {...baseProps} sessions={[]} agents={[]} agentsLoading/>);
     expect(container.querySelectorAll('.animate-pulse').length).toBeGreaterThan(0);
     expect(screen.queryByText('先准备一个可用 Agent')).toBeNull();
   });
 
   it('飞书接入状态未就绪时不谎报「尚未接入机器人」', () => {
-    render(<WorkspaceOverview {...baseProps} sessions={[]} larkBots={[]} larkBotsLoading/>);
+    render(<WorkspaceOverview mode="tasks" {...baseProps} sessions={[]} larkBots={[]} larkBotsLoading/>);
     expect(screen.getByText('正在读取接入状态…')).toBeTruthy();
     expect(screen.queryByText('尚未接入机器人')).toBeNull();
   });
@@ -226,16 +227,16 @@ describe('WorkspaceOverview', () => {
   // 这条用例把文案和实际归类绑在一起。
   it('第三个分区标题与「已完成」芯片同名，副标题说明它只装已交付且无排队指令的任务', () => {
     const sessions = [session('1', '/repo/done', 'completed'), session('2', '/repo/more', 'completed')];
-    render(<WorkspaceOverview {...baseProps} sessions={sessions} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '已交付', status: 'completed', queuedCount: 0, updatedAt: '' }, '2': { sessionId: '2', taskId: 't2', prompt: '交付后又排了一条', status: 'completed', queuedCount: 1, updatedAt: '' } }}/>);
+    render(<WorkspaceOverview mode="tasks" {...baseProps} sessions={sessions} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '已交付', status: 'completed', queuedCount: 0, updatedAt: '' }, '2': { sessionId: '2', taskId: 't2', prompt: '交付后又排了一条', status: 'completed', queuedCount: 1, updatedAt: '' } }}/>);
     expect(screen.queryByRole('region', { name: '最近' })).toBeNull();
     const done = screen.getByRole('region', { name: '已完成' });
-    expect(within(done).getByText('已交付且没有后续排队指令的任务')).toBeTruthy();
+    expect(within(done).getByText('本轮已完成，改动与验证分别检查')).toBeTruthy();
     // 分区 key 保持 recent：它是内部标识，taskSectionRank 与 data-task-priority 都用它。
     expect(done.querySelectorAll('[data-task-priority="recent"]')).toHaveLength(1);
     // 副标题的「没有后续排队指令」必须与归类一致：排了指令的那条不在这个分区里。
     expect(within(done).getByText('已交付')).toBeTruthy();
     expect(within(done).queryByText('交付后又排了一条')).toBeNull();
-    expect(within(screen.getByRole('region', { name: '进行中' })).getByText('交付后又排了一条')).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: '正在推进' })).getByText('交付后又排了一条')).toBeTruthy();
   });
 
   // 任务行的状态徽标走 effectiveStatus(session).label，不再自己判 archivedAt。
@@ -243,7 +244,7 @@ describe('WorkspaceOverview', () => {
   // 否则会告诉用户它还在跑。删掉 effectiveStatus 的归档分支时这条要挂。
   it('归档 + thinking：任务行徽标写「已归档」，不谎报仍在思考', () => {
     const archived = { ...session('1', '/repo/archive', 'thinking'), archivedAt: '2026-08-30T00:00:00Z' };
-    render(<WorkspaceOverview {...baseProps} sessions={[archived]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '归档时还在思考', status: 'running', queuedCount: 0, updatedAt: '' } }} view="archived"/>);
+    render(<WorkspaceOverview mode="tasks" {...baseProps} sessions={[archived]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '归档时还在思考', status: 'running', queuedCount: 0, updatedAt: '' } }} view="archived"/>);
     const row = screen.getByRole('button', { name: /归档时还在思考/ });
     expect(row.textContent).toContain('已归档');
     expect(row.textContent).not.toContain('思考中');
@@ -258,7 +259,7 @@ describe('WorkspaceOverview', () => {
     且调用方没传 icon 时的默认），neutral 档不会。改成 neutral 立刻挂。
   */
   it('筛不出结果时用 positive 空态，不把「没有待办」画成灰色失望感', () => {
-    const { container } = render(<WorkspaceOverview {...baseProps} sessions={[session('1', '/repo/done', 'completed')]} view="attention"/>);
+    const { container } = render(<WorkspaceOverview mode="tasks" {...baseProps} sessions={[session('1', '/repo/done', 'completed')]} view="attention"/>);
     expect(screen.getByText('当前视图没有任务')).toBeTruthy();
     const glyph = container.querySelector('.ui-empty-state span');
     expect(glyph?.className).toContain('text-success');
@@ -277,14 +278,14 @@ describe('WorkspaceOverview', () => {
     固然能过，但在退化成两颗时给出的是一条看不出所以然的报错。
   */
   it('首次使用时「绑定飞书 Bot」只有一个入口，不与协作卡片重名', () => {
-    render(<WorkspaceOverview {...baseProps} sessions={[]} larkBots={[]}/>);
+    render(<WorkspaceOverview mode="tasks" {...baseProps} sessions={[]} larkBots={[]}/>);
     expect(screen.getAllByRole('button', { name: '绑定飞书 Bot' })).toHaveLength(1);
     // 主 CTA 仍在：规范 §5.1 要求页首有唯一强主 CTA。
     expect(screen.getByRole('button', { name: '创建第一个任务' })).toBeTruthy();
   });
 
   it('数据就绪后仍然如实展示空状态', () => {
-    render(<WorkspaceOverview {...baseProps} sessions={[]} agents={[]}/>);
+    render(<WorkspaceOverview mode="tasks" {...baseProps} sessions={[]} agents={[]}/>);
     expect(screen.getByText('还没有任务。先准备 Agent，再创建第一个任务。')).toBeTruthy();
     expect(screen.getByText('尚未配置机器人')).toBeTruthy();
   });
@@ -295,7 +296,7 @@ describe('WorkspaceOverview', () => {
     it('无 Bot 时：展示未配置引导，说明在飞书私聊/群聊@bot使用，主操作为绑定飞书 Bot', async () => {
       const user = userEvent.setup();
       const onOpenLarkSetup = vi.fn();
-      render(<WorkspaceOverview {...baseProps} larkBots={[]} onOpenLarkSetup={onOpenLarkSetup} />);
+      render(<WorkspaceOverview mode="tasks" {...baseProps} larkBots={[]} onOpenLarkSetup={onOpenLarkSetup} />);
       const aside = screen.getByRole('complementary', { name: '协作入口' });
       expect(within(aside).getByText('尚未配置机器人')).toBeTruthy();
       expect(within(aside).getByText(/私聊发目标/)).toBeTruthy();
@@ -307,33 +308,33 @@ describe('WorkspaceOverview', () => {
     });
 
     it('配置未完成（setupComplete=false）：提示配置未完成与准确原因', () => {
-      render(<WorkspaceOverview {...baseProps} larkBots={[makeBot({ setupComplete: false })]} />);
+      render(<WorkspaceOverview mode="tasks" {...baseProps} larkBots={[makeBot({ setupComplete: false })]} />);
       expect(screen.getByText('配置未完成')).toBeTruthy();
       expect(screen.getByText('尚未选择默认 Agent 或确认执行权限')).toBeTruthy();
       expect(screen.queryByText(/监听已启动/)).toBeNull();
     });
 
     it('本实例 listening=false：只提示当前服务的监听状态', () => {
-      render(<WorkspaceOverview {...baseProps} larkBots={[makeBot({ listening: false })]} />);
+      render(<WorkspaceOverview mode="tasks" {...baseProps} larkBots={[makeBot({ listening: false })]} />);
       expect(screen.getByText('本实例未开启监听')).toBeTruthy();
       expect(screen.getByText('当前服务未开启此机器人的监听；若已在其他实例运行，请到对应实例查看')).toBeTruthy();
     });
 
     it('本次启动禁用监听（larkListeningDisabled=true）：优先展示本次启动禁用监听', () => {
-      render(<WorkspaceOverview {...baseProps} larkBots={[makeBot()]} larkListeningDisabled />);
+      render(<WorkspaceOverview mode="tasks" {...baseProps} larkBots={[makeBot()]} larkListeningDisabled />);
       expect(screen.getByText('本次启动禁用监听')).toBeTruthy();
       expect(screen.getByText('服务端启动参数已禁用监听')).toBeTruthy();
     });
 
     it('期望监听但长连接未就绪（listening=true, activeListening=false）：提示监听尚未启动', () => {
-      render(<WorkspaceOverview {...baseProps} larkBots={[makeBot({ activeListening: false })]} />);
+      render(<WorkspaceOverview mode="tasks" {...baseProps} larkBots={[makeBot({ activeListening: false })]} />);
       expect(screen.getByText('监听尚未启动')).toBeTruthy();
       expect(screen.getByText('已配置监听，但服务监听尚未启动')).toBeTruthy();
     });
 
     it('正常机器人只展示监听摘要，管理入口进入已有机器人页面', async () => {
       const onManageBots = vi.fn(); const onOpenLarkSetup = vi.fn();
-      render(<WorkspaceOverview {...baseProps} larkBots={Array.from({ length: 4 }, (_, i) => makeBot({ appId: `cli_${i}`, name: `机器人${i}` }))} onManageBots={onManageBots} onOpenLarkSetup={onOpenLarkSetup}/>);
+      render(<WorkspaceOverview mode="tasks" {...baseProps} larkBots={Array.from({ length: 4 }, (_, i) => makeBot({ appId: `cli_${i}`, name: `机器人${i}` }))} onManageBots={onManageBots} onOpenLarkSetup={onOpenLarkSetup}/>);
       expect(screen.getByText('4 个机器人 · 监听已启动')).toBeTruthy();
       expect(screen.queryByText('机器人0')).toBeNull();
       expect(screen.queryByText(/消息已送达/)).toBeNull();
@@ -344,7 +345,7 @@ describe('WorkspaceOverview', () => {
     });
 
     it('多 Bot 混合状态：综合概括如实展示，异常可展开且不重复列正常机器人', async () => {
-      render(<WorkspaceOverview {...baseProps} larkBots={[
+      render(<WorkspaceOverview mode="tasks" {...baseProps} larkBots={[
         makeBot({ appId: 'bot_active', name: '在线Bot' }),
         makeBot({ appId: 'bot_paused', name: '暂停Bot', listening: false })
       ]} />);
@@ -359,7 +360,7 @@ describe('WorkspaceOverview', () => {
 
     it('状态读取失败不沿用缓存宣布正常，也不误读为尚未配置', async () => {
       const onRetryLarkBots = vi.fn();
-      render(<WorkspaceOverview {...baseProps} larkBots={[makeBot()]} larkBotsFailed onRetryLarkBots={onRetryLarkBots}/>);
+      render(<WorkspaceOverview mode="tasks" {...baseProps} larkBots={[makeBot()]} larkBotsFailed onRetryLarkBots={onRetryLarkBots}/>);
       expect(screen.getByText('1 个机器人 · 状态未确认')).toBeTruthy();
       expect(screen.queryByText(/监听已启动/)).toBeNull();
       expect(screen.queryByText('尚未配置机器人')).toBeNull();
@@ -368,7 +369,7 @@ describe('WorkspaceOverview', () => {
     });
 
     it('加载中状态：展示骨架屏与读取中提示，不谎报尚未配置', () => {
-      render(<WorkspaceOverview {...baseProps} larkBots={[]} larkBotsLoading />);
+      render(<WorkspaceOverview mode="tasks" {...baseProps} larkBots={[]} larkBotsLoading />);
       expect(screen.getByText('正在读取接入状态…')).toBeTruthy();
       expect(screen.queryByText('尚未配置机器人')).toBeNull();
     });
@@ -377,7 +378,7 @@ describe('WorkspaceOverview', () => {
       const user = userEvent.setup();
       const onOpenAgentSetup = vi.fn();
       const onOpenLarkSetup = vi.fn();
-      render(<WorkspaceOverview {...baseProps} agents={[]} larkBots={[]} onOpenAgentSetup={onOpenAgentSetup} onOpenLarkSetup={onOpenLarkSetup} />);
+      render(<WorkspaceOverview mode="tasks" {...baseProps} agents={[]} larkBots={[]} onOpenAgentSetup={onOpenAgentSetup} onOpenLarkSetup={onOpenLarkSetup} />);
       const aside = screen.getByRole('complementary', { name: '协作入口' });
       expect(within(aside).getByText(/尚未检测到本机可用 Agent/)).toBeTruthy();
       await user.click(within(aside).getByRole('button', { name: '准备 Agent' }));
@@ -389,7 +390,7 @@ describe('WorkspaceOverview', () => {
     it('Web 创建任务次操作依然可用', async () => {
       const user = userEvent.setup();
       const onCreate = vi.fn();
-      render(<WorkspaceOverview {...baseProps} onCreate={onCreate} />);
+      render(<WorkspaceOverview mode="tasks" {...baseProps} onCreate={onCreate} />);
       await user.click(screen.getByRole('button', { name: '创建任务' }));
       expect(onCreate).toHaveBeenCalledOnce();
     });
@@ -397,7 +398,7 @@ describe('WorkspaceOverview', () => {
     it('任务行优先展示自定义会话名称，且 checkbox 的 aria-label 包含该名称', async () => {
       const user = userEvent.setup();
       const testSession: Session = { ...session('s1', '/repo/project', 'idle'), name: '周报生成任务' };
-      render(<WorkspaceOverview {...baseProps} sessions={[testSession]} summaries={{ s1: { sessionId: 's1', taskId: 't1', prompt: '原始任务', status: 'completed', queuedCount: 0, updatedAt: '' } }} onBulkArchive={() => {}} />);
+      render(<WorkspaceOverview mode="tasks" {...baseProps} sessions={[testSession]} summaries={{ s1: { sessionId: 's1', taskId: 't1', prompt: '原始任务', status: 'completed', queuedCount: 0, updatedAt: '' } }} onBulkArchive={() => {}} />);
 
       expect(screen.getByText('周报生成任务')).toBeTruthy();
       expect(screen.getByTitle('周报生成任务')).toBeTruthy();
@@ -406,4 +407,110 @@ describe('WorkspaceOverview', () => {
       expect(screen.getByRole('checkbox', { name: '选择任务：周报生成任务' })).toBeTruthy();
     });
   });
+});
+
+
+describe('Calm Workbench 首页与全部任务', () => {
+  it('首页将决策和恢复前置，空闲可继续，交付和健康接入放在侧栏', () => {
+    const sessions = [session('1', '/repo/a', 'waiting_for_permission'), session('2', '/repo/b', 'failed'), session('3', '/repo/c', 'idle'), session('4', '/repo/d', 'thinking'), { ...session('5', '/repo/e', 'completed'), name: '已交付的真实任务' }];
+    render(<WorkspaceOverview {...baseProps} sessions={sessions} larkBots={[makeSimpleBot()]}/>);
+    const list = screen.getByRole('region', { name: '任务列表' });
+    expect(within(list).getAllByRole('heading', { level: 2 }).map(node => node.textContent)).toEqual(['需要你处理', '正在推进', '继续上次的工作']);
+    expect(screen.getByText('需要决定')).toBeTruthy();
+    expect(screen.getByText('需要恢复')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: '任务筛选' })).toBeNull();
+    const rail = screen.getByRole('complementary', { name: '最近交付' });
+    expect(within(rail).getByText('已交付的真实任务')).toBeTruthy();
+    expect(within(list).queryByText('已交付的真实任务')).toBeNull();
+    expect(within(rail).getByRole('complementary', { name: '协作入口' })).toBeTruthy();
+  });
+
+  it('检查交付使用真实任务id，完成不被描述成验证通过', async () => {
+    const onOpenChanges = vi.fn();
+    render(<WorkspaceOverview {...baseProps} sessions={[{ ...session('5', '/repo/e', 'completed'), name: '交付任务' }]} onOpenChanges={onOpenChanges}/>);
+    await userEvent.click(screen.getByRole('button', { name: '检查交付' }));
+    expect(onOpenChanges).toHaveBeenCalledWith('5');
+    expect(screen.queryByText(/验证通过/)).toBeNull();
+    expect(screen.getByText('本轮已完成，改动与验证请在任务中检查。')).toBeTruthy();
+  });
+
+  it('全部任务的搜索和项目筛选共同作用，清除筛选保留关键词，清除搜索恢复任务', async () => {
+    const user = userEvent.setup(); const onViewChange = vi.fn();
+    const sessions = [{ ...session('1', '/repo/alpha', 'idle'), name: '修复导航' }, { ...session('2', '/repo/beta', 'completed'), name: '整理文档' }];
+    render(<WorkspaceOverview {...baseProps} mode="tasks" sessions={sessions} onViewChange={onViewChange}/>);
+    await user.type(screen.getByRole('textbox', { name: '筛选当前任务列表' }), '修复');
+    expect(screen.getByRole('button', { name: /修复导航/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /整理文档/ })).toBeNull();
+    await user.selectOptions(screen.getByRole('combobox', { name: '筛选项目' }), 'beta');
+    expect(screen.getByText('没有找到符合条件的任务')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '清除筛选' }));
+    expect((screen.getByRole('textbox', { name: '筛选当前任务列表' }) as HTMLInputElement).value).toBe('修复');
+    expect(onViewChange).toHaveBeenCalledWith('all');
+    await user.clear(screen.getByRole('textbox', { name: '筛选当前任务列表' }));
+    expect(screen.getByRole('button', { name: /整理文档/ })).toBeTruthy();
+  });
+});
+
+
+describe('WorkspaceOverview 受控列表范围', () => {
+  const sessions = [
+    { ...session('1', '/repo/alpha', 'idle'), name: '修复导航' },
+    { ...session('2', '/repo/alpha', 'idle'), name: '整理文档' },
+    { ...session('3', '/repo/beta', 'idle'), name: '修复菜单' }
+  ];
+  it('打开任务卸载列表再返回，受控搜索和项目范围完整恢复', async () => {
+    const user = userEvent.setup();
+    function ListAndTask() {
+      const [filters, setFilters] = useState<WorkspaceListFilters>({ query: '', project: '' });
+      const [opened, setOpened] = useState(false);
+      return opened ? <button onClick={() => setOpened(false)}>返回任务列表</button> : <WorkspaceOverview {...baseProps} mode="tasks" sessions={sessions} filters={filters} onFiltersChange={setFilters} onSelect={() => setOpened(true)}/>;
+    }
+    render(<ListAndTask/>);
+    await user.type(screen.getByRole('textbox', { name: '筛选当前任务列表' }), '修复');
+    await user.selectOptions(screen.getByRole('combobox', { name: '筛选项目' }), 'alpha');
+    await user.click(screen.getByRole('button', { name: /修复导航/ }));
+    expect(screen.queryByRole('textbox', { name: '筛选当前任务列表' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: '返回任务列表' }));
+    expect((screen.getByRole('textbox', { name: '筛选当前任务列表' }) as HTMLInputElement).value).toBe('修复');
+    expect((screen.getByRole('combobox', { name: '筛选项目' }) as HTMLSelectElement).value).toBe('alpha');
+    expect(screen.getByRole('button', { name: /修复导航/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /整理文档|修复菜单/ })).toBeNull();
+  });
+  it('清除条件提交完整范围，清除筛选保留搜索；首页忽略全部任务的已保存范围', async () => {
+    const onFiltersChange = vi.fn(); const onViewChange = vi.fn();
+    const { rerender } = render(<WorkspaceOverview {...baseProps} mode="tasks" sessions={sessions} filters={{ query: '不存在', project: 'alpha' }} onFiltersChange={onFiltersChange} onViewChange={onViewChange}/>);
+    await userEvent.click(screen.getByRole('button', { name: '清除筛选' }));
+    expect(onFiltersChange).toHaveBeenLastCalledWith({ query: '不存在', project: '' });
+    expect(onViewChange).toHaveBeenCalledWith('all');
+    await userEvent.click(screen.getByRole('button', { name: '清除搜索' }));
+    expect(onFiltersChange).toHaveBeenLastCalledWith({ query: '', project: 'alpha' });
+    rerender(<WorkspaceOverview {...baseProps} sessions={sessions} mode="home" filters={{ query: '不存在', project: 'alpha' }} onFiltersChange={onFiltersChange}/>);
+    expect(screen.getByRole('heading', { name: '工作台', level: 1 })).toBeTruthy();
+    for (const name of ['修复导航', '整理文档', '修复菜单']) expect(screen.getByRole('button', { name: new RegExp(name) })).toBeTruthy();
+    expect(screen.queryByText('没有找到符合条件的任务')).toBeNull();
+    expect(onFiltersChange).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+it('首页待处理入口使用处理上下文，普通列表和运行中入口保留普通任务导航', async () => {
+  const onSelect = vi.fn(); const onSelectAttention = vi.fn();
+  const sessions = [
+    { ...session('1', '/repo/alpha', 'waiting_for_permission'), name: '等待批准的真实任务' },
+    { ...session('2', '/repo/alpha', 'thinking'), name: '运行中的真实任务' }
+  ];
+  const { rerender } = render(<WorkspaceOverview {...baseProps} sessions={sessions} onSelect={onSelect} onSelectAttention={onSelectAttention}/>);
+  await userEvent.click(screen.getByRole('button', { name: /等待批准的真实任务/ }));
+  expect(onSelectAttention).toHaveBeenCalledExactlyOnceWith('1');
+  expect(onSelect).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: /运行中的真实任务/ }));
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith('2');
+  rerender(<WorkspaceOverview {...baseProps} mode="tasks" view="attention" sessions={sessions} onSelect={onSelect} onSelectAttention={onSelectAttention}/>);
+  await userEvent.click(screen.getByRole('button', { name: /等待批准的真实任务/ }));
+  expect(onSelect).toHaveBeenLastCalledWith('1');
+  expect(onSelectAttention).toHaveBeenCalledTimes(1);
+  rerender(<WorkspaceOverview {...baseProps} sessions={sessions} onSelect={onSelect}/>);
+  await userEvent.click(screen.getByRole('button', { name: /等待批准的真实任务/ }));
+  expect(onSelect).toHaveBeenCalledTimes(3);
+  expect(onSelect).toHaveBeenLastCalledWith('1');
 });

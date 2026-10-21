@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { X } from 'lucide-react';
 import { api, type Agent, type PermissionMode, type Session, type Task } from '../api';
@@ -7,6 +7,8 @@ import { permissionLabels } from './ui';
 import { Banner, Button, Dialog, IconButton, Spinner, Textarea, Field } from './primitives';
 import { AgentSelect, CompactSelect } from './CompactSelect';
 import { DirectoryPicker } from './DirectoryPicker';
+import { currentInstance } from '../instance';
+import { newSessionDrafts } from '../new-session-drafts';
 
 export type NewSessionModalProps = {
   open: boolean;
@@ -47,26 +49,39 @@ function SelectField({ label, children }: { label: string; children: React.React
 
 export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, onSessionCreated, mode = 'task', agents, initialAgentId, capabilities }: NewSessionModalProps) {
   const qc = useQueryClient();
-  const [agentId, setAgentId] = useState(initialAgentId ?? 'codex');
-  const [cwd, setCwd] = useState('');
-  const [workspaceMode, setWorkspaceMode] = useState<'shared' | 'worktree'>('worktree');
-  const [model, setModel] = useState('');
-  const [reasoningEffort, setReasoningEffort] = useState('');
+  const draftKey = `${currentInstance() ?? '@local'}:${mode}`;
+  const [draft] = useState(() => {
+    const saved = newSessionDrafts.get(draftKey);
+    return initialAgentId && saved?.agentId !== initialAgentId ? undefined : saved;
+  });
+  const completed = useRef(false);
+  const [agentId, setAgentId] = useState(initialAgentId ?? draft?.agentId ?? 'codex');
+  const [cwd, setCwd] = useState(draft?.cwd ?? '');
+  const [workspaceMode, setWorkspaceMode] = useState<'shared' | 'worktree'>(draft?.workspaceMode ?? 'worktree');
+  const [model, setModel] = useState(draft?.model ?? '');
+  const [reasoningEffort, setReasoningEffort] = useState(draft?.reasoningEffort ?? '');
   const selectedAgent = agents.find(agent => agent.id === agentId);
   const legacyPtyUnsupported = isLegacyPtyAgent(selectedAgent);
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>(() => initialPermissionMode(agents.find(agent => agent.id === (initialAgentId ?? 'codex')) ?? agents[0]));
-  const [fullTrustConfirmed, setFullTrustConfirmed] = useState(false);
-  const [goal, setGoal] = useState('');
-  const [createdSession, setCreatedSession] = useState<Session>();
-  const agentModels = useQuery({ queryKey: agentModelsQueryKey(agentId, model), queryFn: () => loadAgentModels(agentId, model || undefined), enabled: open && Boolean(agentId), initialData: () => readCachedAgentModels(agentId, model || undefined), initialDataUpdatedAt: 0, refetchOnMount: 'always', staleTime: 5 * 60_000 });
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(() => draft?.permissionMode ?? initialPermissionMode(agents.find(agent => agent.id === (initialAgentId ?? 'codex')) ?? agents[0]));
+  const [fullTrustConfirmed, setFullTrustConfirmed] = useState(Boolean(draft?.createdSession));
+  const [goal, setGoal] = useState(draft?.goal ?? '');
+  const [createdSession, setCreatedSession] = useState<Session | undefined>(draft?.createdSession);
+  const latestDraft = useRef({ agentId, cwd, workspaceMode, model, reasoningEffort, permissionMode, goal, createdSession });
+  latestDraft.current = { agentId, cwd, workspaceMode, model, reasoningEffort, permissionMode, goal, createdSession };
+  useEffect(() => () => {
+    if (!completed.current) newSessionDrafts.set(draftKey, latestDraft.current);
+  }, [draftKey]);
+  const agentModels = useQuery({ queryKey: agentModelsQueryKey(agentId, model), queryFn: () => loadAgentModels(agentId, model || undefined), enabled: open && Boolean(selectedAgent) && !legacyPtyUnsupported, initialData: () => readCachedAgentModels(agentId, model || undefined), initialDataUpdatedAt: 0, refetchOnMount: 'always', staleTime: 5 * 60_000 });
   useEffect(() => {
     if (!agentModels.data || agentModels.isFetching || !reasoningEffort) return;
     if (!agentModels.data.reasoningEfforts.some(option => option.id === reasoningEffort)) setReasoningEffort('');
   }, [agentModels.data, agentModels.isFetching, reasoningEffort]);
   useEffect(() => {
     if (!agents.length || agents.some(agent => agent.id === agentId)) return;
-    setAgentId(agents[0].id);
-    setPermissionMode(initialPermissionMode(agents[0]));
+    const fallback = agents.find(agent => !isLegacyPtyAgent(agent)) ?? agents[0];
+    setAgentId(fallback.id);
+    setPermissionMode(initialPermissionMode(fallback));
+    setModel(''); setReasoningEffort('');
     setFullTrustConfirmed(false);
   }, [agents, agentId]);
   const create = useMutation({
@@ -80,6 +95,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
     onSuccess: ({ session, task }) => {
       void qc.invalidateQueries({ queryKey: ['sessions'] });
       if (task) qc.setQueryData<Task[]>(['tasks', session.id], [task]);
+      completed.current = true; newSessionDrafts.delete(draftKey);
       setCreatedSession(undefined); setGoal('');
       if (task) onCreated?.(session, task);
       else onSessionCreated?.(session);
@@ -99,21 +115,10 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
     </Dialog.Footer>
   </Dialog>;
 
-  if (legacyPtyUnsupported) return <Dialog open onClose={onClose} label="无法创建旧 PTY 任务" size="sm" closeOnEscape={!create.isPending} closeOnScrim={!create.isPending}>
-    <Dialog.Header>
-      <h2 className="text-title font-semibold text-primary">无法创建任务</h2>
-      <span className="ml-auto"><IconButton label="关闭" onClick={onClose} disabled={create.isPending}><X size={16}/></IconButton></span>
-    </Dialog.Header>
-    <Dialog.Body>
-      <Banner tone="danger">旧 PTY 兼容协议无法提供可靠的权限控制或交互审批，请改用 ACP 或 PTY CLI Agent。</Banner>
-    </Dialog.Body>
-    <Dialog.Footer><Button variant="primary" disabled>创建并执行</Button></Dialog.Footer>
-  </Dialog>;
-
-  const submitDisabled = create.isPending || (mode === 'task' && !goal.trim()) || (permissionMode === 'full-trust' && !fullTrustConfirmed);
+  const submitDisabled = create.isPending || legacyPtyUnsupported || !selectedAgent || (mode === 'task' && !goal.trim()) || (permissionMode === 'full-trust' && !fullTrustConfirmed);
   // 提交进行中禁用所有关闭入口：会把一个已经发出的写操作丢在半路（契约 §8.1）。
   return <Dialog open onClose={onClose} label={mode === 'schedule' ? '创建定时任务' : '创建新任务'} size="sm" closeOnEscape={!create.isPending} closeOnScrim={!create.isPending}>
-    <form onSubmit={(event: FormEvent) => { event.preventDefault(); create.mutate(); }} className="flex min-h-0 flex-1 flex-col">
+    <form onSubmit={(event: FormEvent) => { event.preventDefault(); if (!submitDisabled) create.mutate(); }} className="flex min-h-0 flex-1 flex-col">
       <Dialog.Header>
         <div>
           <h2 className="text-title font-semibold text-primary">{mode === 'schedule' ? '创建定时任务' : '创建新任务'}</h2>
@@ -124,7 +129,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
       <Dialog.Body>
         <div className="space-y-4">
           {mode === 'task' && <Field label="任务目标">
-            <Textarea autoFocus required aria-label="任务目标" value={goal} onChange={event => setGoal(event.target.value)} rows={3} placeholder="例如：修复登录超时问题，补齐回归测试并通过构建" className="resize-y"/>
+            <Textarea autoFocus required aria-label="任务目标" value={goal} disabled={create.isPending} onChange={event => setGoal(event.target.value)} rows={3} placeholder="例如：修复登录超时问题，补齐回归测试并通过构建" className="resize-y"/>
           </Field>}
           <DirectoryPicker
             value={cwd}
@@ -143,9 +148,9 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
               <AgentSelect agents={agents} value={agentId} onChange={value => { const nextAgent = agents.find(agent => agent.id === value); setAgentId(value); setPermissionMode(initialPermissionMode(nextAgent)); setFullTrustConfirmed(false); setModel(''); setReasoningEffort(''); }}/>
             </SelectField>
             <div>
-              <SelectField label="操作权限">
+              {!legacyPtyUnsupported && <SelectField label="操作权限">
                 <CompactSelect options={supportedPermissionModes(selectedAgent).map(value => ({ value, ...permissionOptions[value] }))} value={permissionMode} placeholder="选择操作权限" disabledText="" onChange={value => { setPermissionMode(value as PermissionMode); setFullTrustConfirmed(false); }}/>
-              </SelectField>
+              </SelectField>}
               {isPtyAgent(selectedAgent) && permissionMode === 'ask' && <p className="mt-1.5 text-caption text-warning">此 CLI 的操作确认在终端中完成；任务停住时可直接打开「终端」处理。</p>}
               {permissionMode === 'full-trust' && <label className="mt-2 flex items-start gap-2 rounded-lg border border-danger-border bg-danger-soft p-2.5 text-caption text-danger">
                 <input type="checkbox" checked={fullTrustConfirmed} onChange={event => setFullTrustConfirmed(event.target.checked)} className="mt-0.5"/>
@@ -166,7 +171,9 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
               </div>
             </details>
           </fieldset>
-          {create.error && <Banner tone="danger">{createdSession ? `任务已创建，但目标发送失败：${create.error.message}。再次提交只会重试发送，不会重复创建任务。` : create.error.message}</Banner>}
+          {legacyPtyUnsupported && <Banner tone="danger">旧 PTY 兼容协议无法提供可靠的权限控制或交互审批。请在上方改选 ACP 或 PTY CLI Agent。{onOpenAgentSetup && <Button disabled={create.isPending} onClick={onOpenAgentSetup}>查看添加方法</Button>}</Banner>}
+          <p className="text-caption text-subtle">关闭后保留本次填写内容，直到创建成功；草稿仅保留在当前页面，刷新后清除。</p>
+          {create.error && <Banner tone="danger">{createdSession ? `任务已创建，但目标发送失败：${create.error.message}。再次提交只会重试发送，不会重复创建任务。` : <>{create.error.message}<p className="mt-2">请检查所选 Agent 和工作目录；可用「浏览」重新选目录。独立工作目录需要 Git 仓库，若要直接使用现有目录，请明确选择「直接使用所选目录」后重试。</p></>}</Banner>}
         </div>
       </Dialog.Body>
       <Dialog.Footer>

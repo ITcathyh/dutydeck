@@ -15,7 +15,7 @@ export type IconButtonProps = {
 
   契约 §9：视觉尺寸可以是 32px，但命中区必须 ≥40px。这里不用 ::before 撑命中区——
   相邻图标钮之间只有 gap-0.5（2px），伪元素外扩会让后一枚的命中区盖住前一枚的右边缘，
-  把「太小点不中」换成「点错一个」。改成按钮本体恒 40×40（真实命中区，也占真实布局
+  把「太小点不中」换成「点错一个」。桌面按钮本体为 40×40，手机由 index.css 提升为 44×44（真实命中区，也占真实布局
   宽度，兄弟之间不重叠），内层 chip 承担 32px 的视觉底色与圆角。
 */
 export function IconButton({ label, size = 'sm', tone = 'default', disabled, onClick, children }: IconButtonProps) {

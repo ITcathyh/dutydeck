@@ -144,7 +144,7 @@
               }
             },
             "summary": {
-              "content": "中断 · 把登录修复推上去"
+              "content": "已中断 · 把登录修复推上去"
             }
           },
           "body": {
@@ -296,7 +296,7 @@
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "中断"
+                  "content": "已中断"
                 },
                 "color": "neutral"
               }
@@ -344,7 +344,7 @@
               }
             },
             "summary": {
-              "content": "中断 · 把登录修复推上去"
+              "content": "已中断 · 把登录修复推上去"
             }
           },
           "body": {
@@ -527,7 +527,7 @@
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "中断"
+                  "content": "已中断"
                 },
                 "color": "neutral"
               }
@@ -584,7 +584,7 @@
               }
             },
             "summary": {
-              "content": "中断 · 把登录修复推上去"
+              "content": "已中断 · 把登录修复推上去"
             }
           },
           "body": {
@@ -640,7 +640,7 @@
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "中断"
+                  "content": "已中断"
                 },
                 "color": "neutral"
               }

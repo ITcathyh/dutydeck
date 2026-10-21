@@ -23,6 +23,15 @@ async function mockWorkspace(page: Page) {
       else { missed.push(`WRITE ${path}`); return route.fulfill({ status: 403, json: { error: { message: 'Unexpected mocked write' } } }); }
     } else if (path === '/api/auth/status') data = { authenticated: true, required: false };
     else if (path === '/api/agents') data = agents;
+    else if (path === '/api/instances') data = { instances: [] };
+    else if (path === '/api/workspace-groups') data = { organization: { groups: [], directoryGroups: {}, sessionGroups: {} }, workspaces: [{ id: '/repo/audit', name: 'audit', directories: ['/repo/audit'], sessionIds: ['audit'], custom: false }] };
+    else if (path === '/api/settings/terminal') data = { terminalBackend: 'tmux', scope: 'pty-cli' };
+    else if (path.endsWith('/model-settings')) data = { agentId: 'claude-code', model: '', baseUrl: '', authMode: 'bearer', hasApiKey: false, apiKeyAvailable: false, appliesTo: 'next_process' };
+    else if (path === '/api/plugins/commands') data = { commands: [] };
+    else if (path.endsWith('/usage')) {
+      const totals = { entries: 0, tokenEntries: 0, partialTokenEntries: 0, costUsd: 0, estimatedCostUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, unavailable: 0, unpriced: 0, pricedEntries: 0, unknownCostEntries: 0, costCoverage: null };
+      data = { own: totals, subSteps: totals, snapshot: {} };
+    }
     else if (path === '/api/sessions') data = [session];
     else if (path === '/api/sessions/summaries') data = [summary];
     else if (path === '/api/lark/management/groups') data = { groups: [] };
@@ -36,7 +45,10 @@ async function mockWorkspace(page: Page) {
     else if (path.endsWith('/work-items')) data = { items: [], templates: [] };
     else if (/\/sessions\/[^/]+\/capabilities$/.test(path)) data = { observedAt: now, protocol: 'acp', structuredApproval: 'available', terminal: 'unavailable', turnRecovery: 'unverified', verification: 'available', localFileDelivery: 'available' };
     else if (path.endsWith('/verifications')) data = [{ id: 'verification-audit', sessionId: 'audit', taskId: 'audit-task', command: 'pnpm test', cwd: '/repo/audit', startedAt: now, completedAt: now, status: 'failed', stale: false, output: 'test failure', exitCode: 1 }];
-    else if (path.endsWith('/automation')) data = { subscriptions: [], schedules: [], occurrences: [] };
+    else if (path.endsWith('/automation')) data = { subscriptions: [], schedules: [], occurrences: [], deliveryTargets: [] };
+    else if (path.endsWith('/automation/ci-providers')) data = { providers: [] };
+    else if (path.endsWith('/pull-requests')) data = { available: false, reason: 'fixture has no GitHub plugin', items: [] };
+    else if (path.endsWith('/diffs')) data = [];
     else if (path.endsWith('/workspace')) data = { cwd: '/repo/audit', mode: 'shared', state: 'ready' };
     else if (path === '/api/foundation/capabilities' || path === '/api/foundation/schedules/capabilities') data = { repositoriesWired: false, runtimeWired: false, executorWired: false, writesEnabled: false, blockers: [] };
     else { missed.push(path); data = []; }
@@ -161,9 +173,9 @@ test('permission facts and platform verification open evidence with focus restor
   await expect(verification.getByText('验证失败', { exact: true })).toBeVisible();
   const opener = verification.getByRole('button', { name: '查看验证证据', exact: true });
   await opener.click();
-  const evidence = page.getByRole('dialog', { name: '工作目录与自动化', exact: true });
+  const evidence = page.getByRole('complementary', { name: '结果检视', exact: true });
   await expect(evidence.locator('summary').filter({ hasText: '验证失败 · pnpm test' })).toBeVisible();
-  await page.keyboard.press('Escape');
+  await evidence.getByRole('button', { name: '关闭结果检视', exact: true }).click();
   await expect(evidence).toHaveCount(0);
   await expect(opener).toBeFocused();
   expect(fixture.missed).toEqual([]);
@@ -172,13 +184,13 @@ test('permission facts and platform verification open evidence with focus restor
 
 test('automation opens a task without a delayed Back and keeps drafts in a nested dialog', async ({ page }) => {
   const fixture = await mockWorkspace(page);
+  await page.addInitScript(() => localStorage.setItem('dutydeck.experimental', '1'));
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/');
   const navigation = page.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
-  await navigation.getByText('设置与工具', { exact: true }).click();
-  const trigger = navigation.getByRole('button', { name: /^定时任务/ });
+  const trigger = navigation.getByRole('button', { name: /^自动化/ });
   await trigger.click();
-  const automation = page.getByRole('dialog', { name: '任务自动化', exact: true });
+  const automation = page.getByRole('main');
   await expect(automation.getByRole('heading', { name: '修复登录超时并完成验证', exact: true })).toBeVisible();
   await automation.getByRole('button', { name: '打开任务', exact: true }).click();
   await expect(page).toHaveURL(/\/sessions\/audit$/);
@@ -187,8 +199,7 @@ test('automation opens a task without a delayed Back and keeps drafts in a neste
   await page.waitForTimeout(200);
   await expect(page).toHaveURL(/\/sessions\/audit$/);
   await page.goBack();
-  await expect(page).toHaveURL(/\/$/);
-  await expect(automation).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: '自动化', exact: true })).toBeVisible();
   await trigger.click();
   const draftsOpener = automation.getByRole('button', { name: '管理草稿', exact: true });
   await draftsOpener.click();

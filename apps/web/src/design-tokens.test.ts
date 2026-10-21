@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
   **Token 没有强制力就只是愿望。** 这里守四件事：
   1. 标度的数值与契约表格逐字一致——改档位必须同时改契约；
   2. 三层主题声明的顺序与结构不被打乱（顺序错了，显式浅色/深色选择会失效）；
-  3. 灰阶的**色相**不再走偏（2026-09-03 重做的起因，见下面那条断言的注释）；
+  3. 品牌与三套主题保持 Calm Workbench 语义；
   4. 三档文字在四个表面上实算 ≥4.5:1——AA 不能靠肉眼判断。
 */
 
@@ -103,23 +103,14 @@ describe('设计 token 与契约一致', () => {
     expect(declared('--duration-normal')).toBe('180ms');
   });
 
-  it('布局骨架 2 档标准尺寸（契约 §6）', () => {
-    // 侧栏宽度曾在 SessionList.tsx 里硬编码 292px，需统一规范为标准 248px。
-    expect(declared('--topbar-h')).toBe('56px');
-    expect(declared('--sidebar-w')).toBe('248px');
+  it('布局骨架默认尺寸与可调侧栏一致（契约 §6）', () => {
+    // 宽度的默认值来自原型；用户调整时覆盖同一个布局 token。
+    expect(declared('--topbar-h')).toBe('61px');
+    expect(declared('--sidebar-w')).toBe('234px');
   });
 
-  it('浮动侧栏的几何等式只有一个来源（契约 §15）', () => {
-    /*
-      侧栏是 position: fixed 的浮动卡片，「它占多宽」这件事被拆给了两个文件：
-      SessionList.tsx 写 left/top/bottom 插入距离，App.tsx 写主区 margin-left。
-      本轮是两个并发团队各改一半——最容易漂移的形状就是这种。
-
-      所以 --main-inset 必须是算出来的而不是抄出来的：写死 280px 的话，
-      有人改了 --sidebar-w 就会留下一条 44px 的空隙或者压住正文，而且**没有任何
-      测试会红**。这条断言就是防这个。
-    */
-    expect(declared('--shell-gap')).toBe('16px');
+  it('贴边侧栏与主区共用宽度来源（契约 §15）', () => {
+    expect(declared('--shell-gap')).toBe('0px');
     expect(declared('--main-inset')).toBe('calc(var(--sidebar-w) + var(--shell-gap) * 2)');
     expect(declared('--main-inset')).not.toMatch(/\d+px/);
   });
@@ -152,45 +143,19 @@ describe('设计 token 与契约一致', () => {
   });
 
   it('颜色 token 只在 tokens.css 定义，index.css 不再自带调色板', () => {
-    expect(tokens).toContain('--surface-canvas: #f4f5f8;');
+    expect(tokens).toContain('--surface-canvas: #faf9f6;');
     expect(indexCss).toContain("@import './tokens.css';");
     expect(indexCss).not.toContain('--surface-canvas:');
     expect(indexCss).not.toContain('--status-danger:');
   });
 
-  it('中性色一律 B ≥ G：灰阶不许再带绿（2026-09-03 重做的判据）', () => {
-    /*
-      重做前 dutydeck 的全部中性色都是 G > B——页面底 #f5f7f6、正文 #17201f、
-      边框 #dce3e1，肉眼读作「脏」和「旧」。这是用户说「太难看」最直接的来源，
-      不是细节不精致。统一设计规范为冷灰蓝：**绿通道不得高于蓝通道**。
-
-      只约束中性色。语义色不在此列——绿色的「成功」就该是绿的，
-      warning / attention 是暖黄，它们的 G > B 是正确的。
-    */
-    const neutral = /^--(surface|text|border|scrollbar|focus-ring|sidebar|terminal|code)/;
-    const offenders: string[] = [];
-    for (const [name, map] of [['浅色', lightLayer], ['深色', darkLayer], ['深色(系统)', mediaLayer]] as const) {
-      for (const token of Object.keys(map)) {
-        if (!neutral.test(token)) continue;
-        let hex: string;
-        try { hex = value(map, token); } catch { continue; }   // rgba() 与阴影不在此检查内
-        const [, g, b] = channels(hex);
-        if (b < g) offenders.push(`${name} ${token}: ${hex}（G=${g} > B=${b}）`);
-      }
-    }
-    expect(offenders).toEqual([]);
-  });
-
-  it('品牌色是靛蓝，不是墨绿（符合设计规范）', () => {
-    expect(lightLayer['--action-primary']).toBe('#4f56e8');
-    expect(darkLayer['--action-primary']).toBe('#7b82f5');
-    expect(mediaLayer['--action-primary']).toBe('#7b82f5');
-    // 墨绿那一支必须彻底从**取值**里消失，否则就是只改了一半。
-    // 注意只查取值不查全文：文件头的注释记录了「重做前是 #0f766e」这段病历，那是文档不是配色。
-    const teal = ['#0f766e', '#0b5f59', '#2dd4bf', '#5eead4', '#e6f3f1', '#04211d'];
-    for (const map of [lightLayer, darkLayer, mediaLayer]) {
-      expect(Object.entries(map).filter(([, v]) => teal.includes(v.toLowerCase()))).toEqual([]);
-    }
+  it('暖白、石墨与橙棕按同一语义覆盖三个主题', () => {
+    expect(lightLayer['--surface-canvas']).toBe('#faf9f6');
+    expect(lightLayer['--surface-default']).toBe('#fffefa');
+    expect(lightLayer['--text-primary']).toBe('#292b27');
+    expect(lightLayer['--action-primary']).toBe('#a65535');
+    expect(darkLayer['--action-primary']).toBe('#e0a080');
+    for (const token of Object.keys(darkLayer)) expect(mediaLayer[token], token).toBe(darkLayer[token]);
   });
 
   it('侧栏跟随主题，不再是独立深色盘（契约 §6 已同步修订）', () => {
@@ -227,17 +192,18 @@ describe('设计 token 与契约一致', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('四层表面的相邻亮度比落在 1.08–1.5（契约 §6）', () => {
-    // 低于 1.08 看不见分层，高于 1.6 读成「块」而不是「层」。
-    const ladder = ['--surface-canvas', '--surface-default', '--surface-muted', '--surface-hover'];
-    const offenders: string[] = [];
-    for (const [label, map] of [['浅色', lightLayer], ['深色', darkLayer], ['深色(系统)', mediaLayer]] as const) {
-      for (let i = 0; i < ladder.length - 1; i++) {
-        const ratio = contrast(value(map, ladder[i]), value(map, ladder[i + 1]));
-        if (ratio < 1.08 || ratio > 1.5) offenders.push(`${label} ${ladder[i]} ↔ ${ladder[i + 1]} = ${ratio.toFixed(3)}`);
-      }
+  it('悬停与普通表面可辨，轻表面通过边框分隔而不强制冷灰分层', () => {
+    for (const map of [lightLayer, darkLayer, mediaLayer]) {
+      expect(contrast(value(map, '--surface-default'), value(map, '--surface-hover'))).toBeGreaterThanOrEqual(1.08);
+      expect(value(map, '--border-default')).not.toBe(value(map, '--surface-default'));
     }
-    expect(offenders).toEqual([]);
+  });
+
+  it('品牌按钮文字达到 AA，键盘焦点环对画布达到 3:1', () => {
+    for (const map of [lightLayer, darkLayer, mediaLayer]) {
+      for (const action of ['--action-primary', '--action-primary-hover']) expect(contrast(value(map, '--text-on-action'), value(map, action))).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(value(map, '--focus-ring'), value(map, '--surface-canvas'))).toBeGreaterThanOrEqual(3);
+    }
   });
 
   it('语义色文字压在自家 soft 底上仍 ≥4.5:1（契约 §5.5）', () => {
@@ -292,7 +258,7 @@ describe('tailwind 语义类映射', () => {
     // 侧栏宽度此前硬编码 292px，顶栏高度散在各处；有语义类，消费方才有得可用。
     expect(config).toContain("width: { sidebar: 'var(--sidebar-w)' }");
     expect(config).toContain("height: { topbar: 'var(--topbar-h)' }");
-    // 一致性测试禁任意值，浮动侧栏的几何又必须写在 className 上：
+    // 一致性测试禁任意值，贴边侧栏的几何又必须写在 className 上：
     // 不给档位，调用点就只能去发明 ml-[280px]，然后和 --sidebar-w 脱钩。
     expect(config).toContain("'shell-gap': 'var(--shell-gap)'");
     expect(config).toContain("'main-inset': 'var(--main-inset)'");

@@ -6,7 +6,7 @@ import { useExperimental } from '../experimental';
 import { Banner, Button, Card, EmptyState, Spinner } from './primitives';
 import { NewSessionModal, type NewSessionModalProps } from './NewSessionModal';
 import { ScheduleFoundationPanel } from './ScheduleFoundationPanel';
-import { scheduleNextExecution, SessionAutomationPanel } from './SessionAutomationPanel';
+import { automationSource, runLabels, scheduleNextExecution, scheduleRule, scheduleDelivery, SessionAutomationPanel } from './SessionAutomationPanel';
 
 const pageSize = 8;
 
@@ -39,6 +39,7 @@ export function AutomationOverview({ sessions, summaries = {}, onSelectSession, 
     </section> : <section className="space-y-3" aria-label="任务计划">
       <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-title font-semibold">任务计划</h2><Button variant="primary" onClick={() => setCreating(true)}>创建定时任务</Button></div>
       <p className="text-body text-secondary">启用后按时执行，沿用所属任务的目录和上下文。在这里与任务详情中编辑的是同一份计划。</p>
+      {!!sessions.length && <p className="text-caption text-subtle">当前范围：任务 {currentPage * pageSize + 1}–{Math.min((currentPage + 1) * pageSize, sessions.length)} / {sessions.length} · 仅读取本页最多 {pageSize} 个任务的计划，不代表全实例计划总览。</p>}
       {!sessions.length && <EmptyState title="暂无任务" description="点击「创建定时任务」，选择运行环境并设置执行时间。"/>}
       {pageSessions.map((session, index) => {
         const query = queries[index]!;
@@ -50,7 +51,12 @@ export function AutomationOverview({ sessions, summaries = {}, onSelectSession, 
           {query.isError ? <Banner tone="danger" action={{ label: '重试', onClick: () => void query.refetch() }}>计划读取失败，无法确认当前状态。</Banner> : query.data && <>
             {query.data.schedules.map(item => <div key={item.id} className="space-y-1 rounded-md bg-muted p-3">
               <div className="flex flex-wrap items-center justify-between gap-2"><strong className="text-body">{item.name} · {item.enabled ? '已启用' : '已停用'}</strong><Button onClick={() => setSelected({ sessionId: session.id, scheduleId: item.id })}>查看 / 编辑计划</Button></div>
+              <p className="whitespace-pre-wrap break-words text-body text-secondary">{item.prompt}</p>
+              <p className="text-caption text-secondary">{scheduleRule(item)}</p>
+              <p className="text-caption text-secondary">{automationSource(session)}</p>
+              <p className="break-all text-caption text-secondary">投递位置：{scheduleDelivery(query.data.deliveryTargets?.[item.id], session)}</p>
               <p className="text-caption text-secondary">{scheduleNextExecution(item)}</p>
+              <p className="text-caption text-secondary">最近结果：{(() => { const latest = query.data.occurrences.filter(occurrence => occurrence.scheduleId === item.id).sort((a, b) => b.scheduledForUtc.localeCompare(a.scheduledForUtc))[0]; return latest ? `${runLabels[latest.runStatus] ?? latest.runStatus} · ${new Date(latest.scheduledForUtc).toLocaleString('zh-CN', { timeZone: item.timezone, hour12: false })} · ${item.timezone}` : '尚无触发记录'; })()}</p>
               <p className="text-caption text-secondary">{item.timezone} · 沿用任务上下文</p>
             </div>)}
             {!query.data.schedules.length && <p className="text-caption text-secondary">此任务暂无定时计划。</p>}

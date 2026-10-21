@@ -207,8 +207,10 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     const process = structuredClone(h.cards.get('om_card_1'));
     const file = structuredClone(h.cards.get('om_card_2'));
     const summary = structuredClone(h.cards.get('om_card_3'));
-    // 结果卡标题是结论第一句，不是用户原话。
-    expect(summary.taskName).toBe('开头');
+    // 过程与结果卡保留同一任务标题，结论仍在正文节选与通知预览中。
+    expect(summary.taskName).toBe('生成长结果');
+    expect(summary.taskName).toBe(process.taskName);
+    expect(JSON.stringify(summary)).toContain('开头');
     expect(JSON.stringify(summary)).toContain('正文开头节选');
     expect(JSON.stringify(summary)).not.toContain('workflow_accept');
     expect(JSON.stringify(file)).not.toContain('workflow_accept');
@@ -815,7 +817,9 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     // 自动批准不发审批卡，只在这一轮的进度卡上原位留一行。
     const again = [...h.cards.values()].filter(card => card.taskId === 'om_task_again');
     expect(again.find(card => card.cardKind === 'process')?.elements[0].content).toBe("<text_tag color='green'>本会话已允许</text_tag>　修改文件");
-    expect(h.service.reply.mock.calls.filter(([input]: any[]) => input.taskName === '确认本次操作')).toHaveLength(1);
+    const approvals = h.service.reply.mock.calls.filter(([input]: any[]) => input.elements?.some((element: any) => element.element_id === 'workflow_approve'));
+    expect(approvals).toHaveLength(1);
+    expect((approvals[0]![0] as any).taskName).toBe('运行测试');
     // 这一轮只多了进度卡和结果卡。
     expect(again).toHaveLength(2);
     expect(h.cards.size - cardCount).toBe(2);

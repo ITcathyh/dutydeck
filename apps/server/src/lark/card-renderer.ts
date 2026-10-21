@@ -1355,8 +1355,8 @@ const autoVerificationNotes: Record<LarkAutoVerificationNote['phase'], (note: La
  * 跑完了，验证状态单独写在这一行：验证通过 / 验证未通过 / 未验证 / 验证已过期。
  *
  * 三条硬规则：
- * 1. 没配验证命令 → 整行不渲染（返回 undefined），也不给按钮，不暗示不存在的能力；
- *    唯一例外是带了候选命令：只提议，同卡渲染「使用这个验证命令」按钮；
+ * 1. 没配验证命令 → 明说未验证，不给运行按钮，不暗示不存在的能力；
+ *    带了候选命令时只提议保存，同卡渲染「使用这个验证命令」按钮；
  * 2. 记录 stale（代码已变／验证期间变／指纹缺失）→ 必须显示为已过期，绝不能显示成通过；
  * 3. 通过要给出足以自行核对的信息：退出码、代码指纹前若干位、验证时间。
  */
@@ -1374,8 +1374,8 @@ export function renderLarkVerificationElement(input: {
   const suggestion = input.suggestion?.trim();
   let content: string;
   if (!command) {
-    if (!suggestion) return undefined;
-    content = `<text_tag color='grey'>未验证</text_tag>　这个机器人还没有配置验证命令。按基准分支上的项目文件推断可以用 \`${truncateTrace(suggestion, 120)}\`，点「使用这个验证命令」保存后，改了代码会自动验证。`;
+    if (!suggestion) content = "<text_tag color='grey'>未验证</text_tag>　未配置验证命令，尚无平台执行记录。";
+    else content = `<text_tag color='grey'>未验证</text_tag>　这个机器人还没有配置验证命令。按基准分支上的项目文件推断可以用 \`${truncateTrace(suggestion, 120)}\`，点「使用这个验证命令」保存后，改了代码会自动验证。`;
   } else {
     // 命令与 error 都会被原样印在群里，一律走 truncateTrace（内含 redactTraceValue 脱敏）。
     const label = `\`${truncateTrace(command, 120)}\``;
@@ -1407,7 +1407,7 @@ export function renderLarkVerificationElement(input: {
     }
   }
   return {
-    tag: 'markdown', element_id: LARK_VERIFICATION_ELEMENT_ID, content,
+    tag: 'markdown', element_id: LARK_VERIFICATION_ELEMENT_ID, content: `**平台验证**　${content}`,
     text_size: 'notation', margin: '4px 0px 0px 0px',
     icon: { tag: 'standard_icon', token: 'info_outlined', color: 'grey' }
   };

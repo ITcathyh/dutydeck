@@ -34,6 +34,8 @@ export interface LarkInteractionContext {
   appId: string;
   sessionId: string;
   taskId: string;
+  /** 与任务进度卡使用同一份标题；旧记录缺省时沿用原卡名称。 */
+  taskName?: string;
   turn: number;
   event: LarkMessageEvent;
 }
@@ -349,7 +351,7 @@ export class LarkWorkflowInteractions {
     const contentElements = record.kind === 'ask'
       ? record.askContentElements ?? [questionElement('ask', record.question.slice(0, 6000))]
       : [questionElement(record.kind, record.question)];
-    return this.service.update({ messageId: record.cardId, taskId: record.id, taskName: record.kind === 'ask' ? 'Agent 提问' : record.kind === 'plan' ? '执行计划' : '本次操作确认',
+    return this.service.update({ messageId: record.cardId, taskId: record.id, taskName: record.taskName || (record.kind === 'ask' ? 'Agent 提问' : record.kind === 'plan' ? '执行计划' : '本次操作确认'),
       permissionMode: 'ask', state: record.state === 'expired' ? 'interrupted' : 'completed', statusLabel: record.state === 'expired' ? record.timedOutAt ? '已过期' : '已失效'
         : record.kind === 'plan' ? ({ approved: '已批准', needs_changes: '已提修改意见', rejected: '已取消' } as Partial<Record<LarkInteraction['state'], string>>)[record.state] ?? '已处理'
         : ({ answered: '已回答', approved: '已允许', rejected: '已拒绝' } as Partial<Record<LarkInteraction['state'], string>>)[record.state] ?? '已处理',
@@ -357,7 +359,7 @@ export class LarkWorkflowInteractions {
   }
   private async renderPendingPermission(record: LarkInteraction) {
     if (!record.cardId) return;
-    await this.service.update({ messageId: record.cardId, taskId: record.id, taskName: '确认本次操作', permissionMode: 'ask', state: 'running', statusLabel: '等待审批', awaitingHuman: true, readOnly: true,
+    await this.service.update({ messageId: record.cardId, taskId: record.id, taskName: record.taskName || '确认本次操作', permissionMode: 'ask', state: 'running', statusLabel: '待审批', awaitingHuman: true, readOnly: true,
       elements: [...intentElements(record), { tag: 'div', text: { tag: 'plain_text', content: record.question.slice(0, 6000) } }, { tag: 'markdown', content: '上次提交未送达执行端，请重新批准或拒绝。' }, button(record, 'approve', '允许本次'), button(record, 'reject', '拒绝')] }).catch(() => undefined);
   }
   async expireTask(appId: string, taskId: string) {
@@ -384,7 +386,7 @@ export class LarkWorkflowInteractions {
       const mention = record.groupMention && isGroupChat(record.event.chatType) ? mentions(approvers) : '';
       try {
         await this.service.reply({ messageId: record.cardId, ...(record.event.threadId ? { replyInThread: true } : {}),
-          taskId: record.id, taskName: '审批提醒', permissionMode: 'ask', state: 'running', statusLabel: '等待审批', awaitingHuman: true, readOnly: true,
+          taskId: record.id, taskName: '审批提醒', permissionMode: 'ask', state: 'running', statusLabel: '待审批', awaitingHuman: true, readOnly: true,
           elements: [{ tag: 'markdown', content: record.kind === 'plan'
             ? `${mention ? `${mention}\n\n` : ''}**这份计划已等待 ${larkPermissionReminderAfterMs / 60_000} 分钟**\n\nAgent 在等你决定，还没有执行；超过 ${timeoutHours} 小时（${deadlineText(record.expiresAt)}）未处理，计划卡失效。请在计划卡上点「批准执行」、提修改意见或「取消」。`
             : `${mention ? `${mention}\n\n` : ''}**这条审批已等待 ${larkPermissionReminderAfterMs / 60_000} 分钟**\n\n${record.intent ? `${record.intent}\n\n` : ''}任务仍在等待，不会因为这次提醒被拒绝；超过 ${timeoutHours} 小时（${deadlineText(record.expiresAt)}）仍未处理才自动拒绝。请在审批卡上点「允许本次」或「拒绝」。` }],
@@ -611,7 +613,9 @@ export class LarkWorkflowInteractions {
       ? (structuredOn
         ? structuredChoices ? '点选下方选项提交；也可引用本卡片直接回复你的答案。' : '在下方填写答案并点击提交；也可引用本卡片直接回复你的答案。'
         : '请引用本卡片回复你的答案。')
-      : '本次选择只处理这一条请求，不改变后续授权方式。' };
+      : record.sessionAllowKey && requesterApproves
+        ? '「允许本次」只处理这一条请求；「本会话允许此命令」仅允许目录、资源与命令完全相同的后续请求，服务重启后失效。'
+        : '本次选择只处理这一条请求，不改变后续授权方式。' };
     const displayedQuestion = questionElement(kind, question);
     const elements: LarkCardElement[] = [
       ...(groupMentionTag ? [{ tag: 'markdown', element_id: 'group_mention', content: groupMentionTag }] : []),
@@ -626,14 +630,14 @@ export class LarkWorkflowInteractions {
       // 而不做那个回落，等于把这条备用路径一起删掉——命令会以「请填写请求编号」失败，
       // 而那个编号已经没有任何卡会显示。
       // 命令本身的可发现性由 `/help` 承担（commands.ts:173-175 已列出三条命令及其用法）。
-      ...(record.expiresAt ? [{ tag: 'markdown', content: kind === 'permission'
-        ? permissionDeadlineNotice(record.expiresAt)
-        : `回答截止时间：${deadlineText(record.expiresAt)}。超时后请发送 /status 查看任务状态。` }] : []),
       hintElement,
       ...(kind === 'permission' && !approvers.length ? [{ tag: 'markdown', content: '飞书里没有人能批准这条请求，需要在 Web 上处理。' }] : []),
       ...(kind === 'permission' ? [button(record, 'approve', '允许本次'), button(record, 'reject', '拒绝')] : []),
       // 只有发起人能点、且只在发起人本人能批准时给；高危、被脱敏或被截断的命令没有匹配键，不给。
-      ...(kind === 'permission' && record.sessionAllowKey && requesterApproves ? [button(record, 'allow_session', '本会话允许此命令')] : [])
+      ...(kind === 'permission' && record.sessionAllowKey && requesterApproves ? [button(record, 'allow_session', '本会话允许此命令')] : []),
+      ...(record.expiresAt ? [{ tag: 'markdown', element_id: 'workflow_deadline', text_size: 'notation', content: kind === 'permission'
+        ? permissionDeadlineNotice(record.expiresAt)
+        : `回答截止时间：${deadlineText(record.expiresAt)}。超时后请发送 /status 查看任务状态。` }] : [])
     ];
     // 结构化问答仅在开关开启且记录本身带选项时渲染；持久记录缺 structured（升级前的卡）
     // 一律走自由文本形态，绝不让新渲染逻辑作用于旧记录。
@@ -701,8 +705,8 @@ export class LarkWorkflowInteractions {
       }
       if (!await this.live(record)) { await this.move(record, 'expired'); return; }
       const card = await this.service.reply({ messageId: context.event.messageId, ...(context.event.threadId ? { replyInThread: true } : {}),
-        state: 'running', statusLabel: kind === 'ask' ? '等待回答' : '等待审批', awaitingHuman: true, readOnly: true,
-        taskId: record.id, taskName: kind === 'ask' ? 'Agent 需要你的回答' : '确认本次操作', permissionMode: 'ask', elements,
+        state: 'running', statusLabel: kind === 'ask' ? '待回答' : '待审批', awaitingHuman: true, readOnly: true,
+        taskId: record.id, taskName: record.taskName || (kind === 'ask' ? 'Agent 需要你的回答' : '确认本次操作'), permissionMode: 'ask', elements,
         ...(safeWebBaseUrl ? { webBaseUrl: safeWebBaseUrl } : {}),
         idempotencyKey: `workflow_${record.id}`,
         ...(kind === 'ask' ? { beforeSend: async () => { if (!await this.live(record)) throw stale(); } } : {}) });
@@ -740,7 +744,7 @@ export class LarkWorkflowInteractions {
    */
   private withinAskCardBudget(elements: LarkCardElement[], webBaseUrl?: string) {
     const envelope = buildLarkCard({
-      state: 'running', statusLabel: '等待回答', awaitingHuman: true, readOnly: true,
+      state: 'running', statusLabel: '待回答', awaitingHuman: true, readOnly: true,
       taskName: 'Agent 需要你的回答', permissionMode: 'ask',
       ...(webBaseUrl ? { webBaseUrl } : {})
     });

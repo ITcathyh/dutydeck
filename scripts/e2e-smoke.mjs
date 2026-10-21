@@ -575,7 +575,7 @@ async function main() {
   page.on('response', response => productResponses.push(response));
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });
-  await page.getByRole('heading', { name: '今天需要推进什么？' }).waitFor({ state: 'visible', timeout: 20_000 });
+  await page.getByRole('heading', { name: '工作台', level: 1, exact: true }).waitFor({ state: 'visible', timeout: 20_000 });
 
   // 首屏上段是飞书 Bot 概览：飞书 Bot 是 agent 交互核心，dashboard 先回答「Bot 能不能收到我的话」。
   const botOverview = page.getByRole('complementary', { name: '协作入口' });
@@ -686,8 +686,8 @@ async function main() {
     ok('Skill 正文经快照与 PTY 投递，最终回复包含独有标记');
   }
 
-  await page.getByRole('button', { name: '工作目录、验证与自动化', exact: true }).click();
-  const deliveryPanel = page.getByRole('dialog', { name: '工作目录与自动化' });
+  await page.getByRole('button', { name: '结果检视', exact: true }).click();
+  const deliveryPanel = page.getByRole('complementary', { name: '结果检视' });
   await deliveryPanel.waitFor({ state: 'visible' });
   if (process.platform === 'linux') {
     await deliveryPanel.getByLabel('验证命令').fill('git status --porcelain');
@@ -695,6 +695,7 @@ async function main() {
     await deliveryPanel.getByText('验证通过', { exact: true }).waitFor({ state: 'visible', timeout: 20_000 });
     ok('浏览器执行真实验证命令并展示通过证据');
   }
+  await deliveryPanel.locator('summary').filter({ hasText: '任务自动化' }).click();
   await deliveryPanel.getByText('为此任务创建计划', { exact: true }).click();
   await deliveryPanel.getByLabel('计划名称').fill('smoke disabled schedule');
   await deliveryPanel.getByLabel('执行指令', { exact: true }).fill('This schedule must remain disabled');
@@ -703,7 +704,7 @@ async function main() {
   await deliveryPanel.getByText('smoke disabled schedule · 已停用', { exact: true }).waitFor({ state: 'visible' });
   const automation = await request('GET', `/api/sessions/${browserSessionId}/automation`);
   assert(automation.json?.schedules.length === 1 && automation.json.schedules[0].enabled === false && automation.json.occurrences.length === 0, '浏览器保存计划后保持停用，未生成自动轮次');
-  await deliveryPanel.getByRole('button', { name: '关闭', exact: true }).click();
+  await deliveryPanel.getByRole('button', { name: '关闭结果检视', exact: true }).click();
 
   if (!REAL) {
     step('浏览器创建并完成多步骤目标');

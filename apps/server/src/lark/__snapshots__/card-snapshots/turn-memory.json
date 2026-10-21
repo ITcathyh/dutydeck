@@ -144,7 +144,7 @@
               }
             },
             "summary": {
-              "content": "完成 · 总结一下这周的发布情况"
+              "content": "已完成 · 总结一下这周的发布情况"
             }
           },
           "body": {
@@ -155,7 +155,7 @@
               {
                 "tag": "markdown",
                 "element_id": "task_overview",
-                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                "content": "<font color='green'>已完成</font><font color='grey'> · <耗时></font>",
                 "text_size": "normal",
                 "margin": "0px",
                 "icon": {
@@ -221,7 +221,7 @@
               }
             },
             "summary": {
-              "content": "完成 · 总结一下这周的发布情况"
+              "content": "已完成 · 总结一下这周的发布情况"
             }
           },
           "body": {
@@ -236,6 +236,18 @@
                 "text_align": "left",
                 "text_size": "normal_v2",
                 "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "verification_status",
+                "content": "**平台验证**　<text_tag color='grey'>未验证</text_tag>　未配置验证命令，尚无平台执行记录。",
+                "text_size": "notation",
+                "margin": "4px 0px 0px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info_outlined",
+                  "color": "grey"
+                }
               },
               {
                 "tag": "column_set",
@@ -361,7 +373,7 @@
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "完成"
+                  "content": "已完成"
                 },
                 "color": "green"
               }

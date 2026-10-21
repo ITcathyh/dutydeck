@@ -299,7 +299,14 @@ export interface PublicCiProvider {
   webhook: boolean;
 }
 
+export type AutomationDeliveryTarget =
+  | { kind: 'task'; sessionId: string }
+  | { kind: 'lark'; appId: string; chatId: string; replyMessageId: string; replyInThread: boolean }
+  | { kind: 'unavailable' };
+
 export interface SessionAutomationList {
+  /** Read-only projection of each plan's frozen destination; absent on older instances. */
+  deliveryTargets?: Record<string, AutomationDeliveryTarget>;
   schedules: PublicSessionSchedule[];
   subscriptions: PublicCiSubscription[];
   occurrences: PublicSessionScheduleOccurrence[];

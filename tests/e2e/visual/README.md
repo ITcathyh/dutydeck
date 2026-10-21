@@ -1,73 +1,26 @@
-# 视觉 e2e
+# Calm Workbench 视觉验收
 
-断言**真实渲染的计算样式**，不是源码里的类名字符串——类名对了但 CSS 没生效
-（token 没定义、被更高优先级覆盖、Tailwind 没生成那条规则）在类名断言里是绿的，
-在这里是红的。这是 `tests/e2e/integration-contracts/`（全是后端契约）没覆盖的那块洞。
-
-## 跑
+断言 Chromium 真实计算样式与可访问语义。标准来自 `dutydeck-prototype.html` 和设计方案 §14/15：暖白、石墨、橙棕强调色，贴左全高侧栏，桌面 61px / 移动 54px 顶栏。宽度默认 234px、可在 208–320px 调整，移动触控目标至少 44px。
 
 ```bash
-# 指定用于视觉验收的测试实例
-export DUTYDECK_E2E_BASE_URL=http://127.0.0.1:4310
-
-# 只跑视觉 e2e
-npx playwright test --config tests/e2e/visual/playwright.config.ts
-
-# 单条
-npx playwright test --config tests/e2e/visual/playwright.config.ts -g "侧栏宽 248px"
-
-# 连同三道回归闸一起（推荐，见下）
-node scripts/verify-redesign.mjs
+# 先构建；只指向隔离测试实例的随机端口，不使用线上 4310。
+DUTYDECK_E2E_BASE_URL=http://127.0.0.1:<test-port> pnpm exec playwright test -c tests/e2e/visual/playwright.config.ts
+# 自行启动/清理隔离服务，覆盖真实 HTTP、SQLite、Git、mock ACP/PTY CLI 与浏览器操作。
+pnpm exec playwright test -c tests/e2e/acceptance/playwright.config.ts --project=core calm-workbench.spec.ts
 ```
 
-必须设置 `DUTYDECK_E2E_BASE_URL`，未设置时会直接报错。上述地址仅为示例，
-请按测试实例的实际监听地址填写；截图脚本使用同一变量。
+`DUTYDECK_E2E_BASE_URL` 必填。视觉用例读取 `apps/web/dist`，源码变更后须重新 build。视觉主题同时覆盖显式选择与跟随系统；详情页有 SSE，因此等待 `domcontentloaded` 加真实界面锚点，不等待 `networkidle`。
 
-**这些用例读的是 `apps/web/dist` 的构建产物，不是源码。** 改完源码要
-`pnpm build` 才能看到变化（服务从磁盘读，不必重启）。曾经因为这个把已经改好的
-色板测成全红。
+| 文件 | 验收内容 |
+| --- | --- |
+| `redesign-contract.ts` | 颜色与几何标准的数值来源 |
+| `color.ts` | 色相、低彩度、亮度与文字对比度 |
+| `palette.spec.ts` | 真实主操作橙棕色、暖白画布、正文对比度 |
+| `shell.spec.ts` | 顶栏、贴边侧栏、独立主导航、主题、移动触控目标 |
+| `pages.spec.ts` | 详情能力门控、设置与命令面板语义、关闭与溢出 |
+| `ux-navigation.spec.ts` | 审批首屏、指定 Agent 创建、凭据对象、浮层焦点、证据与历史 |
+| `../acceptance/calm-workbench.spec.ts` | 草稿/引用/发送竞争、搜索定位、键盘布局、390px 主流程与截图 |
 
-## 红 / 绿的含义
+标题 `[红→绿]` 代表原型改造目标，`[绿]` 代表保留的功能护栏，供 `scripts/verify-redesign.mjs` 汇总。旧版靛蓝、冷灰通道和悬浮侧栏目标已由本次原型取代；审批事实、能力边界、焦点管理与真实功能断言仍保留。
 
-标题前缀就是状态，不用去翻代码：
-
-| 前缀 | 含义 |
-|---|---|
-| `[红→绿]` | **改版目标**。写下时是红的，改完该变绿。红转绿的条数 = 进度条。 |
-| `[绿]` / `[绿·护栏]` | **不许弄坏**。现在就是绿的，变红说明改版碰坏了东西。 |
-
-`scripts/verify-redesign.mjs` 按这个前缀分别统计，护栏变红会单独告警。
-
-## 文件
-
-| 文件 | 作用 |
-|---|---|
-| `redesign-contract.ts` | 验收目标的**唯一数值来源**（顶栏 56px、侧栏 248px、品牌色相区间…）。改目标改这里，不要散在断言里。 |
-| `color.ts` | 颜色度量：rgb 解析、转 HSL、相对亮度、「灰阶不带绿」判据。 |
-| `fixtures.ts` | 页面装配：主题落地、等待策略、沿祖先链取有效背景色。 |
-| `palette.spec.ts` | 品牌色是靛蓝、灰阶不带绿。 |
-| `shell.spec.ts` | 顶栏、侧栏宽度与形态、侧栏跟随主题、侧栏分组导航。 |
-| `pages.spec.ts` | 详情页 / 设置浮层 / 命令面板。 |
-
-## 两个反直觉的地方
-
-**`waitUntil: 'networkidle'` 在详情页永远不触发。** 那页开着 SSE 长连接，实测
-30s 超时。统一走 `domcontentloaded` + 等 DOM 锚点（`settle()`），别改回去。
-
-**「灰阶不带绿」的容差必须是 0。** `--surface-canvas` 改版前是 `#f5f7f6`，
-G-B 恰好等于 1；留 1 的容差会把要抓的缺陷整个放过去（实测 tolerance=1 时这条
-断言全绿）。这些是从 token 直接解析的不透明色，没有抗锯齿舍入要吸收。
-
-## 截图存档
-
-```bash
-node scripts/shoot-redesign.mjs before --reference   # 改造前基线 + 参照系统对照（兼容 --botmux）
-node scripts/shoot-redesign.mjs after                # 改造后
-```
-
-写到 `docs/assets/redesign-{tag}/`，命名 `{page}-{viewport}-{theme}.png`，
-同一格子的 before/after 文件名完全一致，便于并排比。附 `manifest.json` 记录
-来源 URL 与时间。
-
-`--reference`（兼容 `--botmux`）只在参照系统 dashboard 确实活着时才截，没跑就跳过，不去硬启别人的
-守护进程。
+Calm 验收最后一个测试保存 1440px / 390px、明暗两种主题的工作台、对话、真实改动、结果检视截图，写到本轮 `artifacts/e2e/<run-id>/test-results/`。CLI、任务和代码差异均为隔离夹具，截图不代表线上执行。

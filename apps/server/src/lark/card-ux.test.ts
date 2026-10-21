@@ -5,11 +5,11 @@ import { larkCardNeedsYou, larkCardResultMarkdown } from './service.js';
 describe('larkUserStatus', () => {
   it('maps internal states to the five user-visible statuses', () => {
     expect(larkUserStatus({ state: 'running' })).toMatchObject({ status: 'running', label: '进行中', template: 'blue', stopped: false });
-    expect(larkUserStatus({ state: 'completed', label: '运行完成' })).toMatchObject({ status: 'completed', label: '完成', template: 'green' });
+    expect(larkUserStatus({ state: 'completed', label: '运行完成' })).toMatchObject({ status: 'completed', label: '已完成', template: 'green' });
     expect(larkUserStatus({ state: 'failed' })).toMatchObject({ status: 'failed', label: '失败', template: 'red' });
-    expect(larkUserStatus({ state: 'interrupted' })).toMatchObject({ status: 'interrupted', label: '中断', template: 'grey' });
-    expect(larkUserStatus({ state: 'running', waiting: true })).toMatchObject({ status: 'attention', label: '需要你处理', template: 'orange', reason: '等待审批' });
-    expect(larkUserStatus({ state: 'running', waiting: true, awaitingAnswer: true })).toMatchObject({ reason: '等待回答' });
+    expect(larkUserStatus({ state: 'interrupted' })).toMatchObject({ status: 'interrupted', label: '已中断', template: 'grey' });
+    expect(larkUserStatus({ state: 'running', waiting: true })).toMatchObject({ status: 'attention', label: '待审批', template: 'orange' });
+    expect(larkUserStatus({ state: 'running', waiting: true, awaitingAnswer: true })).toMatchObject({ label: '待回答' });
   });
 
   it('puts the reason in the subtitle and marks recovery and stalled states as stopped', () => {

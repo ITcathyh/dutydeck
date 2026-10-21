@@ -16,6 +16,7 @@ function mount(state = session.state, options: {
   cleanupPreview?: any;
   cleanupHandler?: (init?: RequestInit) => any;
   sessionOverrides?: Partial<Session>;
+  presentation?: 'dialog' | 'inspector';
   tasks?: Task[];
   turnDiffs?: unknown[];
 } = {}) {
@@ -30,12 +31,12 @@ function mount(state = session.state, options: {
       : strUrl.endsWith('/diffs') ? (options.turnDiffs ?? [])
       : strUrl.endsWith('/pull-requests') ? { available: false, hint: '没有安装支持开 PR 的 CI 插件。', items: [] }
       : strUrl.endsWith('/automation/ci-providers') ? { providers: [{ id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false }] }
-      : strUrl.endsWith('/verifications') ? init?.method === 'POST' ? { id: 'v2', status: 'passed' } : [{ id: 'v1', command: 'pnpm test', status: 'passed', stale: true, staleReason: options.missingFingerprint ? 'current_fingerprint_unavailable' : 'code_changed', exitCode: 0, output: 'old evidence', startedAt: session.createdAt }]
+      : strUrl.endsWith('/verifications') ? init?.method === 'POST' ? { id: 'v2', status: 'passed' } : [{ id: 'v1', command: 'pnpm test', status: 'passed', stale: true, staleReason: options.missingFingerprint ? 'current_fingerprint_unavailable' : 'code_changed', exitCode: 0, beforeFingerprint: 'code-version-1', afterFingerprint: 'code-version-1', taskId: 't1', output: 'old evidence', startedAt: session.createdAt, completedAt: '2026-09-12T00:00:03Z' }]
       : { subscription: { id: 'ci1', status: 'waiting', provider: 'test-ci' } };
     return new Response(JSON.stringify(body), { status: options.evidenceFailure && strUrl.endsWith('/verifications') ? 503 : 200, headers: { 'content-type': 'application/json' } });
   });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  render(<QueryClientProvider client={qc}><SessionDeliveryPanel session={{ ...session, state, ...(options.archivedAt ? { archivedAt: options.archivedAt } : {}), ...options.sessionOverrides }} tasks={options.tasks ?? []} onClose={() => {}}/></QueryClientProvider>);
+  render(<QueryClientProvider client={qc}><SessionDeliveryPanel session={{ ...session, state, ...(options.archivedAt ? { archivedAt: options.archivedAt } : {}), ...options.sessionOverrides }} tasks={options.tasks ?? []} onClose={() => {}} presentation={options.presentation}/></QueryClientProvider>);
   return requests;
 }
 
@@ -55,9 +56,14 @@ describe('work item delivery panel', () => {
     const requests = mount();
     const user = userEvent.setup();
     await screen.findByText('验证通过 · 代码已变化');
+    await user.click(screen.getByText('验证通过 · 代码已变化'));
+    expect(screen.getByText('版本：code-version-1')).toBeTruthy();
+    expect(screen.getByText(/关联轮次：t1 · 用时 3.0 秒/)).toBeTruthy();
+    expect(screen.getByText(/退出码 0/)).toBeTruthy();
     await user.type(screen.getByLabelText('验证命令'), 'pnpm test');
     await user.click(screen.getByRole('button', { name: '执行验证' }));
     await waitFor(() => expect(requests.some(item => item.url === '/api/sessions/s1/verifications' && item.init?.body === JSON.stringify({ command: 'pnpm test' }))).toBe(true));
+    await user.click(screen.getByText('任务自动化', { selector: 'summary' }));
     await user.click(screen.getByText('等待 CI 完成'));
     await user.type(screen.getByLabelText('工作流（可选）'), 'ci.yml');
     await user.click(screen.getByRole('button', { name: '开始等待' }));
@@ -112,6 +118,7 @@ describe('work item delivery panel', () => {
     });
 
     const user = userEvent.setup();
+    await user.click(screen.getByText('执行环境与用量'));
     const checkBtn = await screen.findByRole('button', { name: '检查可否清理' });
     await user.click(checkBtn);
 
@@ -145,6 +152,7 @@ describe('work item delivery panel', () => {
     });
     const user = userEvent.setup();
 
+    await user.click(screen.getByText('执行环境与用量'));
     await user.click(await screen.findByRole('button', { name: '检查可否清理' }));
     await screen.findByText('当前无法清理工作目录：');
     expect(screen.getByText('存在未提交的代码改动')).toBeTruthy();
@@ -187,4 +195,12 @@ describe('work item delivery panel', () => {
     mount('completed', { tasks: [] });
     expect(await screen.findByText(/所属任务：a · \/project\/worktree/)).toBeTruthy();
   });
+});
+
+it('嵌入结果检视不渲染第二个 Dialog，环境默认折叠', async () => {
+  mount('completed', { presentation: 'inspector' });
+  await screen.findByText('验证通过 · 代码已变化');
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(screen.getByText('执行环境与用量').closest('details')?.open).toBe(false);
+  expect(screen.getByRole('region', { name: '任务结果' }).textContent).toContain('执行完成与验证通过分别记录');
 });

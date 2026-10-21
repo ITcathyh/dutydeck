@@ -144,7 +144,7 @@
               }
             },
             "summary": {
-              "content": "完成 · 计划：把登录页的错误提示改成中文"
+              "content": "已完成 · 计划：把登录页的错误提示改成中文"
             }
           },
           "body": {
@@ -155,7 +155,7 @@
               {
                 "tag": "markdown",
                 "element_id": "task_overview",
-                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                "content": "<font color='green'>已完成</font><font color='grey'> · <耗时></font>",
                 "text_size": "normal",
                 "margin": "0px",
                 "icon": {
@@ -236,6 +236,18 @@
                 "text_align": "left",
                 "text_size": "normal_v2",
                 "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "verification_status",
+                "content": "**平台验证**　<text_tag color='grey'>未验证</text_tag>　未配置验证命令，尚无平台执行记录。",
+                "text_size": "notation",
+                "margin": "4px 0px 0px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info_outlined",
+                  "color": "grey"
+                }
               },
               {
                 "tag": "markdown",
@@ -376,7 +388,7 @@
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "完成"
+                  "content": "已完成"
                 },
                 "color": "green"
               }
@@ -436,7 +448,7 @@
               }
             },
             "summary": {
-              "content": "执行计划 · 已提修改意见"
+              "content": "/plan 把登录页的错误提示改成中文 · 已提修改意见"
             }
           },
           "body": {
@@ -476,7 +488,7 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "执行计划"
+              "content": "/plan 把登录页的错误提示改成中文"
             },
             "template": "green",
             "padding": "10px 12px 8px 12px"
@@ -621,7 +633,7 @@
               }
             },
             "summary": {
-              "content": "完成 · 计划：按修改意见重出计划：只改文案，不动样式"
+              "content": "已完成 · 计划：按修改意见重出计划：只改文案，不动样式"
             }
           },
           "body": {
@@ -632,7 +644,7 @@
               {
                 "tag": "markdown",
                 "element_id": "task_overview",
-                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                "content": "<font color='green'>已完成</font><font color='grey'> · <耗时></font>",
                 "text_size": "normal",
                 "margin": "0px",
                 "icon": {
@@ -713,6 +725,18 @@
                 "text_align": "left",
                 "text_size": "normal_v2",
                 "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "verification_status",
+                "content": "**平台验证**　<text_tag color='grey'>未验证</text_tag>　未配置验证命令，尚无平台执行记录。",
+                "text_size": "notation",
+                "margin": "4px 0px 0px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info_outlined",
+                  "color": "grey"
+                }
               },
               {
                 "tag": "markdown",
@@ -853,7 +877,7 @@
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "完成"
+                  "content": "已完成"
                 },
                 "color": "green"
               }
@@ -910,7 +934,7 @@
               }
             },
             "summary": {
-              "content": "执行计划 · 已批准"
+              "content": "/plan 按修改意见重出计划：只改文案，不动样式 · 已批准"
             }
           },
           "body": {
@@ -950,7 +974,7 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "执行计划"
+              "content": "/plan 按修改意见重出计划：只改文案，不动样式"
             },
             "template": "green",
             "padding": "10px 12px 8px 12px"
@@ -1095,7 +1119,7 @@
               }
             },
             "summary": {
-              "content": "完成 · 计划已批准，请按你上面给出的最新计划开始执行。执行中如果发现计划需要调整，先说明原因再继续。"
+              "content": "已完成 · 计划已批准，请按你上面给出的最新计划开始执行。执行中如果发现计划需要调整，先说明原因再继续。"
             }
           },
           "body": {
@@ -1106,7 +1130,7 @@
               {
                 "tag": "markdown",
                 "element_id": "task_overview",
-                "content": "<font color='green'>完成</font><font color='grey'> · <耗时></font>",
+                "content": "<font color='green'>已完成</font><font color='grey'> · <耗时></font>",
                 "text_size": "normal",
                 "margin": "0px",
                 "icon": {
@@ -1187,6 +1211,18 @@
                 "text_align": "left",
                 "text_size": "normal_v2",
                 "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "verification_status",
+                "content": "**平台验证**　<text_tag color='grey'>未验证</text_tag>　未配置验证命令，尚无平台执行记录。",
+                "text_size": "notation",
+                "margin": "4px 0px 0px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info_outlined",
+                  "color": "grey"
+                }
               },
               {
                 "tag": "column_set",
@@ -1305,14 +1341,14 @@
           "header": {
             "title": {
               "tag": "plain_text",
-              "content": "已按计划把登录页报错改成中文，pnpm test 通过"
+              "content": "计划已批准，请按你上面给出的最新计划开始执行…"
             },
             "text_tag_list": [
               {
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "完成"
+                  "content": "已完成"
                 },
                 "color": "green"
               }

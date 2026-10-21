@@ -177,14 +177,14 @@ export function ControlCenterModal({
       <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-action-soft text-action"><Settings2 size={18}/></span>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2"><h2 className="text-title font-semibold text-primary">设置与接入</h2>{authRequired === false ? statePill('受信开发机模式', 'ready') : authRequired === true ? statePill('访问令牌保护') : statePill('正在检查访问模式')}</div>
-        <p className="mt-1 text-caption text-subtle">准备 Agent、连接飞书 Bot；迁移草稿和高级策略不会挡住日常任务。</p>
+        <p className="mt-1 text-caption text-subtle">按作用范围查找设置。机器人配置影响对应机器人；实例接入影响当前实例。</p>
       </div>
       <IconButton label="关闭设置与接入" onClick={onClose}><X size={16}/></IconButton>
     </Dialog.Header>
     {authRequired === false && <div className="shrink-0 px-5 pt-3"><Banner tone="info"><strong>受信开发机模式：</strong>当前实例无需粘贴访问 token。请只在受信网络或已有上游鉴权的环境中使用。</Banner></div>}
 
     <div className="grid min-h-0 flex-1 md:grid-cols-[230px_minmax(0,1fr)]">
-      <aside className="border-b border-subtle bg-muted p-3 md:border-b-0 md:border-r">
+      <aside className="max-h-72 overflow-y-auto border-b border-subtle bg-muted p-3 md:max-h-none md:border-b-0 md:border-r">
         <Card padding="sm" className="mb-3">
           <div className="text-caption font-semibold uppercase tracking-[.12em] text-subtle">建议下一步</div>
           <div className="mt-1 text-body font-semibold text-primary">{nextStep.title}</div>
@@ -196,7 +196,14 @@ export function ControlCenterModal({
           /^Agent 准备本机执行者$/），所以 description 那段即使在窄屏隐藏也必须留在
           按钮里；data-dialog-initial-focus 是 useDialogFocus 的入口焦点锚点。
         */}
-        <nav aria-label="设置与接入导航" className="grid grid-cols-2 gap-1 md:grid-cols-1">{visibleSections.map(item => <button key={item.id} type="button" data-dialog-initial-focus={activeSection === item.id ? '' : undefined} aria-current={activeSection === item.id ? 'page' : undefined} onClick={() => setSection(item.id)} className={`flex min-h-12 items-center gap-2 rounded-md px-3 text-left ${activeSection === item.id ? 'bg-surface text-primary shadow-card' : 'text-secondary hover:bg-hover'}`}><item.Icon size={15}/><span className="min-w-0"><strong className="block text-caption font-semibold">{item.label}</strong><span className="hidden truncate text-caption text-subtle md:block">{item.description}</span></span><ChevronRight size={13} className="ml-auto hidden md:block"/></button>)}</nav>
+        <nav aria-label="设置与接入导航" className="space-y-4">
+          <div><h3 className="px-3 text-caption font-semibold text-subtle">个人界面</h3><p className="mt-1 px-3 text-caption text-secondary">主题与侧栏布局在工作台调整，仅保存在当前浏览器。快捷查找：⌘ / Ctrl K。</p></div>
+          {[
+            { label: '本任务', ids: ['automation'] },
+            { label: '机器人 / 群聊', ids: ['lark', 'groups'] },
+            { label: '实例与接入', ids: ['agents', 'experimental'] }
+          ].map(group => <div key={group.label}><h3 className="mb-1 px-3 text-caption font-semibold text-subtle">{group.label}</h3>{group.label === '本任务' && <p className="mb-2 px-3 text-caption text-secondary">目录、权限与模型在任务中查看；创建时可选择，影响该任务。</p>}<div className="grid grid-cols-2 gap-1 md:grid-cols-1">{visibleSections.filter(item => group.ids.includes(item.id)).map(item =>         <button key={item.id} type="button" data-dialog-initial-focus={activeSection === item.id ? '' : undefined} aria-current={activeSection === item.id ? 'page' : undefined} onClick={() => setSection(item.id)} className={`flex min-h-12 items-center gap-2 rounded-md px-3 text-left ${activeSection === item.id ? 'bg-surface text-primary shadow-card' : 'text-secondary hover:bg-hover'}`}><item.Icon size={15}/><span className="min-w-0"><strong className="block text-caption font-semibold">{item.label}</strong><span className="hidden truncate text-caption text-subtle md:block">{item.description}</span></span><ChevronRight size={13} className="ml-auto hidden md:block"/></button>)}</div></div>)}
+        </nav>
       </aside>
 
       <div className="min-h-0 overflow-y-auto p-5">

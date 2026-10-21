@@ -59,16 +59,16 @@ const waitingStatuses = new Set(['waiting_for_permission', 'waiting_for_answer',
 const runningStatuses = new Set(['queued', 'running', 'thinking', 'running_tool']);
 
 const statusLabels: Record<string, string> = {
-  waiting_for_permission: '等待审批',
-  waiting_for_answer: '等待回答',
+  waiting_for_permission: '待审批',
+  waiting_for_answer: '待回答',
   failed: '失败',
   reconcile_required: '需要核对',
   legacy_unresolved: '需要核对',
   interrupted: '已中断',
   queued: '排队中',
-  running: '执行中',
-  thinking: '思考中',
-  running_tool: '执行工具',
+  running: '进行中',
+  thinking: '进行中',
+  running_tool: '进行中',
   completed: '已完成',
   succeeded: '已完成',
   success: '已完成',
@@ -77,7 +77,7 @@ const statusLabels: Record<string, string> = {
   canceled: '已取消'
 };
 
-const groupLabels = ['待处理', '运行中', '最近结果'] as const;
+const groupLabels = ['待处理', '进行中', '最近结果'] as const;
 
 type DashboardGroup = 0 | 1 | 2;
 
@@ -211,7 +211,7 @@ const primaryRowAction = (
   entry: LarkTaskDashboardEntry,
   approval: LarkTaskDashboardPendingApproval | undefined
 ): RowPrimaryAction | undefined => {
-  if (approval) return { label: '批准本次', buttonType: 'primary', value: workflowActionValue('approve', approval) };
+  if (approval) return { label: '允许本次', buttonType: 'primary', value: workflowActionValue('approve', approval) };
   const taskId = validActionTaskId(entry.actionTaskId);
   if (!taskId) return undefined;
   const turn = validTurn(entry.turn);
@@ -220,7 +220,7 @@ const primaryRowAction = (
     return { label: '取消', buttonType: 'default', value: taskActionValue('cancel', taskId, turn) };
   }
   if (status === 'running' || status === 'thinking' || status === 'running_tool') {
-    return { label: '中断', buttonType: 'danger', value: taskActionValue('interrupt', taskId, turn) };
+    return { label: '中断', buttonType: 'default', value: taskActionValue('interrupt', taskId, turn) };
   }
   if ((status === 'failed' || status === 'interrupted' || status === 'cancelled') && entry.retryable !== false) {
     return { label: '重试', buttonType: 'primary', value: taskActionValue('retry', taskId, turn) };
@@ -278,7 +278,7 @@ const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorksp
   const cmdSummary = approval?.commandSummary ? extractCommandSummary(approval.commandSummary) : undefined;
   const cmdLine = cmdSummary ? `\n命令：${cmdSummary}` : '';
 
-  const summary = `${title}\n${entry.blocked && entry.status === 'queued' ? '排队受阻' : statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}${executor}${entry.detail ? `\n${entry.detail}` : ''}${cmdLine}`;
+  const summary = `${title}\n${approval ? '待审批' : entry.blocked && entry.status === 'queued' ? '排队受阻' : statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}${executor}${entry.detail ? `\n${entry.detail}` : ''}${cmdLine}`;
 
   const primary = isDifferentChat ? undefined : primaryRowAction(entry, approval);
   const overflow = isDifferentChat ? rowOverflow(rowIndex, url, undefined) : rowOverflow(rowIndex, url, approval);
@@ -345,7 +345,7 @@ const navigation = (page: number, totalPages: number) => ({
 });
 
 const orderEntries = (entries: LarkTaskDashboardEntry[]) => {
-  const indexed = entries.map((entry, index): IndexedEntry => ({ entry, index, group: entry.blocked || entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status) }));
+  const indexed = entries.map((entry, index): IndexedEntry => ({ entry, index, group: validApproval(entry.pendingApproval) || entry.blocked || entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status) }));
   return ([0, 1, 2] as DashboardGroup[]).flatMap(group => indexed
     .filter(item => item.group === group)
     .sort((left, right) => timestamp(right.entry.updatedAt) - timestamp(left.entry.updatedAt)));

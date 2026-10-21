@@ -681,8 +681,8 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
   }
 
   /**
-   * 结果卡的验证状态：没配验证命令时整行不渲染、按钮也不给——不能暗示一个不存在的能力；
-   * 唯一例外是工作区第一次跑完任务时带上推断出的候选命令，只提议保存，不给「运行验证」。
+   * 结果卡的验证状态：没配验证命令时明说未验证、按钮不给——不能暗示一个不存在的能力；
+   * 工作区第一次跑完任务时可带上推断出的候选命令，只提议保存，不给「运行验证」。
    * canRun 与 canVerify 是同一个判断，渲染端与回调端因此不可能给出不同答案。
    */
   protected async verificationView(task: LarkTask, config: StoredLarkConfig, state: LarkCardActionState, changedCode = false): Promise<{ element?: LarkCardElement; canRun: boolean; capabilities: Pick<LarkCardCapabilities, 'canVerify' | 'verificationSuggestion'> }> {

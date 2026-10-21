@@ -550,7 +550,7 @@ describe('飞书卡片快照（入站事件驱动真实链路）', () => {
     ] });
     await h.repos.usage.append(earlierUsage(0.35));
     const first = h.say('把请求超时改成 30 秒');
-    await h.until(() => h.findMessage('确认本次操作'));
+    await h.until(() => h.findMessage('允许本次'));
     await h.settle();
     const second = h.say('顺便补一条单元测试');
     await h.until(async () => (await h.persisted(second))?.runtime_task_id);
@@ -575,10 +575,10 @@ describe('飞书卡片快照（入站事件驱动真实链路）', () => {
       emit(text(approved ? '已删除构建缓存。' : '审批没有通过，保留了构建缓存目录。'));
     }] });
     const task = h.say('清理一下构建缓存');
-    await h.until(() => h.findMessage('确认本次操作'));
+    await h.until(() => h.findMessage('允许本次'));
     await h.refresh(task);
     h.checkpoint('等待审批');
-    const approvalCard = h.findMessage('确认本次操作')!;
+    const approvalCard = h.findMessage('允许本次')!;
     // 审批硬上限 24 小时：把时钟拨到 24 小时 1 分钟后，再让监听按同一份配置重新对账（与配置刷新走同一条路）。
     const now = Date.now.bind(Date);
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => now() + 24 * 60 * 60_000 + 60_000);

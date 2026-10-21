@@ -1,14 +1,17 @@
 import { ArrowDown, MessageSquare } from 'lucide-react';
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { TimelineEvent, TimelineSection } from '../timeline';
-import { useTimelineAutoScroll } from '../useTimelineAutoScroll';
+import { isNearScrollBottom, useTimelineAutoScroll } from '../useTimelineAutoScroll';
 import { Button, EmptyState, Skeleton } from './primitives';
 import { ActivityPanel } from './ActivityPanel';
 import { TimelineDisclosureContext } from '../timeline-disclosure';
+import { getTimelineReadingState, saveTimelineReadingState, type TimelineReadingAnchor } from '../timeline-reading-state';
 import { TimelineItem } from './TimelineItem';
 
 export type TimelineViewProps = {
   activeSessionId?: string;
+  readingScopeKey?: string;
+  visible?: boolean;
   hasOlder?: boolean;
   loadedEventCount?: number;
   olderError?: string;
@@ -85,19 +88,29 @@ const TimelineBody = memo(function TimelineBody({ timelineSections, activeOutput
 type TimelineTurn = { id: string; sections: TimelineSection[] };
 type TimelineRow = TimelineTurn & { top: number; height: number };
 
-export function TimelineView({ activeSessionId, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress, hasOlder, loadedEventCount, olderError, loadOlder }: TimelineViewProps) {
-  const disclosures = useMemo(() => new Map<string, boolean>(), [activeSessionId]);
+export function TimelineView({ activeSessionId, readingScopeKey = activeSessionId ?? 'empty', visible: isVisible = true, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress, hasOlder, loadedEventCount, olderError, loadOlder }: TimelineViewProps) {
+  const reading = useMemo(() => getTimelineReadingState(readingScopeKey), [readingScopeKey]);
+  const disclosures = reading.disclosures;
   const progressRef = useRef<HTMLDivElement>(null);
-  const timelineScroll = useTimelineAutoScroll(activeSessionId, timeline, awaitingAnswer);
-  const heights = useMemo(() => new Map<string, number>(), [activeSessionId]);
+  const timelineScroll = useTimelineAutoScroll(readingScopeKey, timeline, awaitingAnswer, { initialFollowing: reading.following, enabled: isVisible });
+  const heights = reading.heights;
   const [measureVersion, setMeasureVersion] = useState(0);
-  const [viewport, setViewport] = useState({ top: Infinity, height: 960 });
-  const anchor = useRef<{ id: string; offset: number; eventId?: string; screenTop?: number } | undefined>(undefined);
+  const [viewport, setViewport] = useState({ top: reading.following ? Infinity : reading.scrollTop, height: 960 });
+  const anchor = useRef<TimelineReadingAnchor | undefined>(reading.anchor);
+  useLayoutEffect(() => {
+    anchor.current = reading.anchor;
+    setViewport({ top: reading.following ? Infinity : reading.scrollTop, height: 960 });
+  }, [reading]);
   const programmedScrollTop = useRef<number | undefined>(undefined);
   const turnAliases = useRef(new Map<string, string>());
   const previousFirst = useRef<{ id: string; events: Set<string> } | undefined>(undefined);
-  const turnCache = useMemo(() => new WeakMap<TimelineSection, TimelineTurn>(), [activeSessionId]);
-  const rowCache = useMemo(() => new WeakMap<TimelineTurn, TimelineRow>(), [activeSessionId]);
+  const previousScope = useRef(readingScopeKey);
+  if (previousScope.current !== readingScopeKey) {
+    turnAliases.current.clear(); previousFirst.current = undefined;
+    previousScope.current = readingScopeKey;
+  }
+  const turnCache = useMemo(() => new WeakMap<TimelineSection, TimelineTurn>(), [readingScopeKey]);
+  const rowCache = useMemo(() => new WeakMap<TimelineTurn, TimelineRow>(), [readingScopeKey]);
   const turns = useMemo(() => {
     const result: TimelineTurn[] = [];
     let start = 0;
@@ -145,7 +158,8 @@ export function TimelineView({ activeSessionId, eventsLoading, onResolvePermissi
     });
     return { rows, height: top };
   }, [turns, heights, measureVersion, rowCache]);
-  const top = !timelineScroll.isFollowing && Number.isFinite(viewport.top) ? viewport.top : Math.max(0, layout.height - viewport.height);
+  const restoredRow = anchor.current && (layout.rows.find(row => row.id === anchor.current!.id) ?? layout.rows.find(row => row.sections.some(section => section.kind === 'event' ? section.event.id === anchor.current!.eventId : section.groups.some(group => group.events.some(event => event.id === anchor.current!.eventId)))));
+  const top = !timelineScroll.isFollowing && Number.isFinite(viewport.top) ? (restoredRow ? restoredRow.top + anchor.current!.offset : viewport.top) : Math.max(0, layout.height - viewport.height);
   const firstMatch = layout.rows.findIndex(row => row.top + row.height >= top - 800);
   const first = firstMatch < 0 ? Math.max(0, layout.rows.length - 1) : firstMatch;
   let last = first;
@@ -153,7 +167,7 @@ export function TimelineView({ activeSessionId, eventsLoading, onResolvePermissi
   const visible = layout.rows.slice(first, last);
   const syncViewport = (captureAnchor = true) => {
     const container = timelineScroll.containerRef.current;
-    if (!container) return;
+    if (!container || !isVisible) return;
     setViewport({ top: container.scrollTop, height: container.clientHeight || 960 });
     if (!captureAnchor) return;
     const containerTop = container.getBoundingClientRect().top;
@@ -163,15 +177,20 @@ export function TimelineView({ activeSessionId, eventsLoading, onResolvePermissi
     const rowId = element?.closest<HTMLElement>('[data-timeline-turn]')?.dataset.timelineTurn;
     const row = layout.rows.find(row => row.id === rowId) ?? layout.rows.find(row => row.top + row.height > container.scrollTop);
     anchor.current = row ? { id: row.id, offset: container.scrollTop - row.top,
-      ...(element ? { eventId: element.dataset.timelineEvent, screenTop: element.getBoundingClientRect().top } : {}) } : undefined;
+      ...(element ? { eventId: element.dataset.timelineEvent, screenOffset: element.getBoundingClientRect().top - containerTop } : {}) } : undefined;
+    reading.following = timelineScroll.isFollowing;
+    reading.scrollTop = container.scrollTop;
+    reading.anchor = anchor.current;
   };
   useLayoutEffect(() => {
     const container = timelineScroll.containerRef.current;
-    if (!container) return;
+    if (!container || !isVisible || eventsLoading) return;
+    // A restored event may be in an older page that is still arriving.
+    if (!timelineScroll.isFollowing && anchor.current && !restoredRow && hasOlder) return;
     if (timelineScroll.isFollowing) container.scrollTop = container.scrollHeight;
     else if (anchor.current) {
       const element = [...container.querySelectorAll<HTMLElement>('[data-timeline-event]')].find(element => element.dataset.timelineEvent === anchor.current!.eventId);
-      if (element && anchor.current.screenTop !== undefined) container.scrollTop += element.getBoundingClientRect().top - anchor.current.screenTop;
+      if (element && anchor.current.screenOffset !== undefined) container.scrollTop += element.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.current.screenOffset;
       else {
         const row = layout.rows.find(row => row.id === anchor.current!.id);
         if (row) container.scrollTop = row.top + anchor.current.offset;
@@ -181,20 +200,27 @@ export function TimelineView({ activeSessionId, eventsLoading, onResolvePermissi
     // Height corrections and the resulting native scroll events must retain
     // the same event/pixel target until the user scrolls again.
     syncViewport(!anchor.current?.eventId);
-  }, [layout, activeSessionId, first, last]);
+    reading.following = timelineScroll.isFollowing;
+    reading.scrollTop = container.scrollTop;
+    reading.anchor = anchor.current;
+  }, [layout, readingScopeKey, first, last, isVisible, eventsLoading, timelineScroll.isFollowing]);
+  useLayoutEffect(() => () => { saveTimelineReadingState(); }, [reading, isVisible]);
   const onScroll = () => {
+    if (!isVisible) return;
     const scrollTop = timelineScroll.containerRef.current?.scrollTop;
     if (scrollTop === programmedScrollTop.current) { syncViewport(false); return; }
     programmedScrollTop.current = undefined;
     timelineScroll.onScroll(); syncViewport();
+    const container = timelineScroll.containerRef.current;
+    if (container) reading.following = isNearScrollBottom(container);
   };
   useEffect(() => {
     const progress = progressRef.current;
-    if (!progress || !timelineScroll.isFollowing || typeof ResizeObserver === 'undefined') return;
+    if (!isVisible || !progress || !timelineScroll.isFollowing || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(() => timelineScroll.followContentResize());
     observer.observe(progress);
     return () => observer.disconnect();
-  }, [activeSessionId, timelineScroll.isFollowing]);
+  }, [readingScopeKey, timelineScroll.isFollowing, isVisible]);
   return <TimelineDisclosureContext.Provider value={disclosures}><div className="relative min-h-0 flex-1 bg-canvas">
     <div ref={timelineScroll.containerRef} onScroll={onScroll}
       style={{ overflowAnchor: 'none' }} data-timeline-scroll="true" data-history-start={timeline[0]?.sequence} data-history-loaded={loadedEventCount} data-history-complete={hasOlder === false} className="absolute inset-0 overscroll-contain overflow-y-auto">
@@ -225,7 +251,7 @@ export function TimelineView({ activeSessionId, eventsLoading, onResolvePermissi
       <span role="status">{olderError ? `已加载 ${loadedEventCount} 条，历史加载中断` : hasOlder ? `已加载 ${loadedEventCount} 条，正在加载全部历史…` : `已加载全部 ${loadedEventCount} 条记录`}</span>
       {olderError && <button onClick={() => void loadOlder?.()} className="ml-2 text-caption text-danger" title={olderError}>重试加载历史</button>}
     </div>}
-    {!timelineScroll.isFollowing && <ScrollToBottomButton onClick={timelineScroll.scrollToBottom}/>}
+    {!timelineScroll.isFollowing && <ScrollToBottomButton onClick={() => { reading.following = true; reading.anchor = undefined; anchor.current = undefined; timelineScroll.scrollToBottom(); saveTimelineReadingState(); }}/>}
   </div></TimelineDisclosureContext.Provider>;
 }
 
@@ -241,5 +267,6 @@ function MeasuredTurn({ id, onMeasure, children }: { id: string; onMeasure(heigh
     const observer = new ResizeObserver(update); observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  return <div ref={ref} data-timeline-turn={id} style={{ display: 'flow-root' }}>{children}</div>;
+  // Virtual rows remount during navigation; replaying translation moves the reading anchor.
+  return <div ref={ref} data-timeline-turn={id} className="[&_.ui-timeline-item]:animate-none" style={{ display: 'flow-root' }}>{children}</div>;
 }

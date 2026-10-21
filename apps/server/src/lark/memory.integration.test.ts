@@ -349,8 +349,9 @@ describe('Lark chat memory through the coordinator', () => {
     const prompt1 = h.prompts[0]!;
 
     // 任务 A：结果说明新文案注入验证
-    expect(prompt1).toContain('[飞书结果说明] 最终输出会原样显示在飞书结果卡上');
-    expect(prompt1).toContain('这句会成为卡片标题和通知预览');
+    expect(prompt1).toContain('[飞书结果说明] 读者多在手机上看。第一句给结论或需要读者执行的动作');
+    expect(prompt1).toContain('等待用户操作或外部批准时写明尚未完成，不把本轮结束写成目标完成。');
+    expect(prompt1).toContain('需要用户操作时单独写一行「需要你：…」。');
     expect(prompt1).toContain('用户要求转述或结果需要协同时，再附一段可直接转发的短文。');
     expect(prompt1.indexOf('[Dutydeck 会话记忆')).toBeLessThan(prompt1.indexOf('[飞书结果说明]'));
     expect(prompt1).not.toContain('send-file');

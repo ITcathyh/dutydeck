@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { TimelineEvent } from '../timeline';
@@ -7,13 +7,13 @@ import { PermissionCard } from './PermissionCard';
 const permission = (status: string): TimelineEvent => ({ id: 'event-1', sequence: 1, type: 'permission_request', timestamp: '', data: { id: 'permission-1', title: '写入配置文件', status } });
 
 describe('PermissionCard', () => {
-  it('pending 审批可允许或拒绝', async () => {
+  it('pending 审批首个决定提交后阻止重复允许与拒绝', async () => {
     const user = userEvent.setup(); const onResolve = vi.fn();
     render(<PermissionCard event={permission('pending')} onResolve={onResolve}/>);
     await user.click(screen.getByRole('button', { name: '允许本次' }));
     await user.click(screen.getByRole('button', { name: '拒绝' }));
     expect(onResolve).toHaveBeenNthCalledWith(1, 'permission-1', true);
-    expect(onResolve).toHaveBeenNthCalledWith(2, 'permission-1', false);
+    expect(onResolve).toHaveBeenCalledTimes(1);
   });
 
   it('shows source facts, redacts commands, and makes unknown details explicit', async () => {
@@ -59,4 +59,25 @@ describe('PermissionCard', () => {
     expect(approve.getAttribute('aria-busy')).toBe('true');
     expect((screen.getByRole('button', { name: '拒绝' }) as HTMLButtonElement).disabled).toBe(true);
   });
+});
+
+it('失败回执结束提交后允许重试，不把请求显示为已允许', async () => {
+  const onResolve = vi.fn();
+  const view = render(<PermissionCard event={permission('pending')} onResolve={onResolve}/>);
+  await userEvent.setup().click(screen.getByRole('button', { name: '允许本次' }));
+  view.rerender(<PermissionCard event={permission('pending')} resolving onResolve={onResolve}/>);
+  view.rerender(<PermissionCard event={permission('pending')} resolving={false} onResolve={onResolve}/>);
+  await userEvent.setup().click(screen.getByRole('button', { name: '拒绝' }));
+  expect(onResolve).toHaveBeenLastCalledWith('permission-1', false);
+  expect(screen.queryByText('已允许')).toBeNull();
+});
+
+it('立即失败的异步请求释放本地锁，且不生成成功回执', async () => {
+  const onResolve = vi.fn().mockRejectedValue(new Error('网络失败'));
+  render(<PermissionCard event={permission('pending')} onResolve={onResolve}/>);
+  await userEvent.setup().click(screen.getByRole('button', { name: '允许本次' }));
+  await waitFor(() => expect((screen.getByRole('button', { name: '允许本次' }) as HTMLButtonElement).disabled).toBe(false));
+  await userEvent.setup().click(screen.getByRole('button', { name: '拒绝' }));
+  expect(onResolve).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText('已允许')).toBeNull();
 });

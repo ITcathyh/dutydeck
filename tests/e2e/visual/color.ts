@@ -22,8 +22,8 @@ export function parseRgb(value: string): Rgb {
 }
 
 /**
- * HSL 里的 H 是「这个颜色偏哪个方向」的唯一标量，也是「墨绿 vs 靛蓝」唯一能一句话
- * 说清的判据：teal #0f766e → H≈176，indigo #6366f1 → H≈239。用 RGB 三元组断言得
+ * HSL 里的 H 是「这个颜色偏哪个方向」的唯一标量，也是「青绿 vs 橙棕」唯一能一句话
+ * 说清的判据：teal #0f766e → H≈176，accent #a95735 → H≈18。用 RGB 三元组断言得
  * 写一堆区间，用 H 只需要一段。
  */
 export function rgbToHsl({ r, g, b }: Rgb): Hsl {
@@ -48,23 +48,15 @@ export function hueWithin(hue: number, from: number, to: number): boolean {
   return from <= to ? h >= from && h <= to : h >= from || h <= to;
 }
 
-/**
- * 灰阶「不带绿」的判据。
- *
- * dutydeck 现在的中性色是 `#f5f7f6` / `#17201f` 这一族——G 通道恒比 B 高 1–2，
- * 于是整屏灰阶朝黄绿偏，肉眼读作「脏」。冷灰（如深色基准 `#0d1117`：G=17 < B=23）
- * 反过来 B ≥ G。所以判据就是 **B ≥ G**。
- *
- * 容差默认 0，不是疏忽：`--surface-canvas: #f5f7f6` 的 G-B 恰好等于 1，留 1 的
- * 容差会把要抓的那个缺陷整个放过去（实测：tolerance=1 时这条断言全绿）。这些值
- * 是从 token 直接解析出来的不透明色，没有抗锯齿或半透明合成的舍入需要吸收，
- * 所以严格判 B ≥ G。真中性灰（G == B）仍然通过。
- *
- * 只对低饱和度的中性色成立；品牌色、状态色本来就该有自己的色相，不适用。
- */
-export function isNeutralNotGreenish(value: string, tolerance = 0): boolean {
-  const { g, b } = parseRgb(value);
-  return b >= g - tolerance;
+/** 暖白/石墨允许轻微黄绿底调，仍须保持中性色低彩度；状态色另行验收。 */
+export function isCalmNeutral(value: string): boolean {
+  const { r, g, b } = parseRgb(value);
+  return Math.max(r, g, b) - Math.min(r, g, b) <= 20;
+}
+
+export function contrastRatio(foreground: string, background: string): number {
+  const a = luminanceOf(foreground), b = luminanceOf(background);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 }
 
 /** 断言失败时把 rgb 与 hsl 一起打出来，省得再回浏览器手查。 */

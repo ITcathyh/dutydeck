@@ -18,7 +18,7 @@ export function PullRequestPanel({ session }: { session: Session }) {
   const refresh = () => qc.invalidateQueries({ queryKey });
   const prepare = useMutation({ mutationFn: () => api.preparePullRequest(session.id, title.trim() ? { title: title.trim() } : {}), onSuccess: result => { setNotice(''); setProposal(result.pullRequest); void refresh(); } });
   const confirm = useMutation({ mutationFn: (id: string) => api.confirmPullRequest(session.id, id), onSuccess: result => { setProposal(undefined); setTitle(''); setNotice(result.message); void refresh(); } });
-  const cancel = useMutation({ mutationFn: (id: string) => api.cancelPullRequest(session.id, id), onSettled: () => { setProposal(undefined); void refresh(); } });
+  const cancel = useMutation({ mutationFn: (id: string) => api.cancelPullRequest(session.id, id), onSuccess: () => { setProposal(undefined); void refresh(); } });
   const readOnly = Boolean(session.archivedAt) || ['stopped', 'failed'].includes(session.state);
   const data = records.data;
   const error = records.error ?? prepare.error ?? cancel.error;
@@ -31,7 +31,7 @@ export function PullRequestPanel({ session }: { session: Session }) {
     {error && <Banner tone="danger">{error.message}</Banner>}
     {notice && <p role="status" className="text-caption text-secondary">{notice}</p>}
     {data && !data.available && <p className="text-caption text-secondary">{data.hint}</p>}
-    {data?.available && !readOnly && <form className="flex items-end gap-2" onSubmit={event => { event.preventDefault(); prepare.mutate(); }}>
+    {data?.available && !readOnly && <form className="flex flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); prepare.mutate(); }}>
       <div className="min-w-0 flex-1"><Field label="PR 标题（可选）"><Input value={title} maxLength={120} onChange={event => setTitle(event.target.value)} placeholder="留空用任务名"/></Field></div>
       <Button type="submit" variant="primary" loading={prepare.isPending}>开 PR</Button>
     </form>}
@@ -45,12 +45,14 @@ export function PullRequestPanel({ session }: { session: Session }) {
       {(item.ciRounds > 0 || item.reviewRounds > 0) && <p className="text-subtle">已自动修 CI {item.ciRounds} 轮、处理评审意见 {item.reviewRounds} 轮</p>}
       {item.reason && <p className={item.status === 'failed' || item.status === 'stopped' ? 'text-warning' : 'text-subtle'}>{item.reason}</p>}
     </div>)}
-    {proposal && <Dialog open onClose={() => cancel.mutate(proposal.id)} label="确认推送并开 PR" size="md" role="alertdialog" closeOnEscape={!confirm.isPending && !cancel.isPending} closeOnScrim={!confirm.isPending && !cancel.isPending}>
+    {proposal && <Dialog open onClose={() => { if (!confirm.isPending && !cancel.isPending) cancel.mutate(proposal.id); }} label="确认推送并开 PR" size="md" role="alertdialog" closeOnEscape={!confirm.isPending && !cancel.isPending} closeOnScrim={!confirm.isPending && !cancel.isPending}>
       <Dialog.Header><h2 className="text-title font-semibold">确认推送并开 PR</h2></Dialog.Header>
       <Dialog.Body>
         <div className="space-y-3 text-caption">
           <p className="text-secondary">确认后才会推送并开 PR（{proposal.providerName}，{proposal.repository}）。</p>
           <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+            <dt className="text-subtle">基线版本</dt><dd className="break-all font-mono">{proposal.baseSha}</dd>
+            <dt className="text-subtle">确认有效期</dt><dd>{new Date(proposal.expiresAt).toLocaleString()}</dd>
             <dt className="text-subtle">源分支</dt><dd className="break-all font-mono">{proposal.branch}（新建）</dd>
             <dt className="text-subtle">目标分支</dt><dd className="break-all font-mono">{proposal.target}</dd>
             <dt className="text-subtle">标题</dt><dd>{proposal.title}</dd>
@@ -74,7 +76,7 @@ export function PullRequestPanel({ session }: { session: Session }) {
             <h3 className="font-semibold">PR 正文摘要</h3>
             <pre className="mt-1 whitespace-pre-wrap break-all rounded bg-muted p-2">{proposal.bodySummary}</pre>
           </div>
-          {confirm.error && <Banner tone="danger">{confirm.error.message}</Banner>}
+          {(confirm.error || cancel.error) && <Banner tone="danger">{(confirm.error ?? cancel.error)?.message}</Banner>}
         </div>
       </Dialog.Body>
       <Dialog.Footer>

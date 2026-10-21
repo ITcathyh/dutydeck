@@ -194,7 +194,7 @@ describe('改了代码就自动验证', () => {
     expect(h.runVerification).toHaveBeenCalledTimes(1);
     expect(h.runVerification).toHaveBeenCalledWith(expect.any(String), { command: 'test -f work.txt' }, 'ou_alice');
     const built = buildLarkCard((await h.resultCard('om_1')).card);
-    expect(built.header.text_tag_list[0].text.content).toBe('完成');
+    expect(built.header.text_tag_list[0].text.content).toBe('已完成');
     // 已有记录能证明当前代码：不再给「运行验证」，也不发返修。
     expect(callbackValues(built).map(value => value.action)).not.toContain('verify');
     expect(h.service.replyText).not.toHaveBeenCalled();
@@ -359,7 +359,7 @@ describe('没配验证命令时推断候选命令', () => {
 
     await h.coordinator.handle(event('om_2', '再看看'), h.config);
     await h.resultCard('om_2');
-    expect(await h.verificationLine('om_2')).toBe('');
+    expect(await h.verificationLine('om_2')).toContain('未配置验证命令');
     expect(callbackValues(buildLarkCard((await h.resultCard('om_2')).card)).map(value => value.action)).not.toContain('use_verification_command');
 
     const saved = (await h.resultCard('om_1')).saved;

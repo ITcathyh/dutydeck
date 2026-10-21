@@ -1370,3 +1370,40 @@ describe('schedule calendar validation and legacy reads', () => {
     expect((await h.service.updateSchedule(h.session.id, bad.id, { expectedRevision: 2, enabled: true }, 'ou_owner')).nextDueAt).toBe('2026-10-20T01:00:00.000Z');
   });
 });
+
+describe('schedule frozen delivery projection', () => {
+  it('reads only this session schedules and allowlists saved destinations without mutating them', async () => {
+    const h = await fixture();
+    const schedule = await h.service.createSchedule(h.session.id, scheduleInput);
+    const key = `automation.delivery-target.${schedule.id}`;
+    const raw = JSON.stringify({ appId: 'cli_app', chatId: 'oc_chat', replyMessageId: 'om_saved', replyInThread: true, token: 'never-public', secret: 'never-public' });
+    await h.repositories.config.set(key, raw);
+    await h.repositories.config.set('automation.delivery-target.unrelated', JSON.stringify({ appId: 'cli_other', chatId: 'oc_other', replyMessageId: 'om_private', replyInThread: false }));
+    const response = await h.service.listBySession(h.session.id);
+    expect(response.deliveryTargets).toEqual({ [schedule.id]: { kind: 'lark', appId: 'cli_app', chatId: 'oc_chat', replyMessageId: 'om_saved', replyInThread: true } });
+    expect(JSON.stringify(response)).not.toContain('never-public');
+    expect(JSON.stringify(response)).not.toContain('om_private');
+    expect(await h.repositories.config.get(key)).toBe(raw);
+    h.allowed.value = false;
+    await expect(h.service.listBySession(h.session.id)).rejects.toMatchObject({ statusCode: 403 });
+  });
+
+  it('marks missing, malformed, or mismatched destinations unavailable', async () => {
+    const h = await fixture();
+    const schedule = await h.service.createSchedule(h.session.id, scheduleInput);
+    const key = `automation.delivery-target.${schedule.id}`;
+    for (const raw of [undefined, '{bad json', JSON.stringify({ appId: 'cli_wrong', chatId: 'oc_chat', replyMessageId: 'om_saved', replyInThread: true })]) {
+      if (raw) await h.repositories.config.set(key, raw);
+      expect((await h.service.listBySession(h.session.id)).deliveryTargets).toEqual({ [schedule.id]: { kind: 'unavailable' } });
+    }
+  });
+
+  it('projects web schedules to their actual owning task', async () => {
+    const h = await fixture();
+    const { sourceId: _sourceId, ...base } = h.session;
+    const webSession = { ...base, id: 'web-session', source: 'web' };
+    bound(h.repositories).createSession(webSession);
+    const schedule = await h.service.createSchedule(webSession.id, scheduleInput);
+    expect((await h.service.listBySession(webSession.id)).deliveryTargets).toEqual({ [schedule.id]: { kind: 'task', sessionId: webSession.id } });
+  });
+});

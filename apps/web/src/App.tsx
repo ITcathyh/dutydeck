@@ -1,5 +1,6 @@
-import { BackgroundWorkStatus } from './components/BackgroundWorkStatus';
 import { UsageHud } from './components/UsageHud';
+import { useEscapeKey } from './useEscapeKey';
+import { BackgroundWorkStatus } from './components/BackgroundWorkStatus';
 import { WorkItemProgress } from './components/WorkItemProgress';
 import { WorkItemsPanel } from './components/WorkItemsPanel';
 import { SessionDeliveryPanel } from './components/SessionDeliveryPanel';
@@ -8,8 +9,8 @@ import { TurnMemoryPanel } from './components/TurnMemoryPanel';
 import { UnknownTasksPanel } from './components/UnknownTasksPanel';
 import { PlanPanel } from './components/PlanPanel';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FolderCog, Menu, PanelRightClose, Terminal, X } from 'lucide-react';
+import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { FolderCog, Menu, PanelRightClose, PanelRightOpen, Terminal, X } from 'lucide-react';
 import { api, type RunSummary, type Session, type SteeringResult, type Task } from './api';
 import { useDockStore } from './store';
 import { createTimelineProjector, pendingPermissionId } from './timeline';
@@ -24,7 +25,7 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { WorkspaceOverview } from './components/WorkspaceOverview';
 import { RunDetailTabs, RunHeader } from './components/RunHeader';
 import { useSessionStream } from './useSessionStream';
-import { buildPrompt, commandsFromEvents, currentContextStats, getModelReadiness, type ComposerReference } from './composer-utils';
+import { buildPrompt, commandsFromEvents, currentContextStats, getModelReadiness } from './composer-utils';
 import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from './model-cache';
 import { useEventHistory } from './useEventHistory';
 import { createEventWindow, type EventWindow } from './event-history';
@@ -40,6 +41,8 @@ import { ToastViewport } from './components/ToastViewport';
 import { toastStore } from './useToasts';
 import { TopBar } from './components/TopBar';
 import { useTheme } from './useTheme';
+import { acknowledgeComposerDraft, useComposerDraft } from './composer-draft';
+import { taskReadingScopeKey, useViewPreference } from './view-preferences';
 import { useExperimental } from './experimental';
 import { shortcutAvailability, useKeyboardShortcuts, workbenchViewShortcutIds } from './useKeyboardShortcuts';
 import { ShortcutHelpSheet } from './components/ShortcutHelpSheet';
@@ -57,9 +60,15 @@ const TimelineView = lazy(() => import('./components/TimelineView').then(module 
 // 与目录浏览器，进首屏 chunk 只会拖慢每个人的第一次加载。
 const BotManagement = lazy(() => import('./components/BotManagement').then(module => ({ default: module.BotManagement })));
 const GroupManagement = lazy(() => import('./components/GroupManagement').then(module => ({ default: module.GroupManagement })));
+const SessionChangesPanel = lazy(() => import('./components/SessionChangesPanel').then(module => ({ default: module.SessionChangesPanel })));
 const WorkspaceGroupsModal = lazy(() => import('./components/WorkspaceGroupsModal').then(module => ({ default: module.WorkspaceGroupsModal })));
 
-type DetailTab = 'timeline' | 'terminal';
+type DetailTab = 'timeline' | 'changes' | 'terminal';
+type TaskListFilters = { view: WorkbenchView; query: string; project: string };
+const LIST_HISTORY_KEY = 'dutydeckTaskFilters';
+const isTaskListFilters = (value: unknown): value is TaskListFilters => value !== null && typeof value === 'object' && 'view' in value && ['all', 'attention', 'active', 'completed', 'archived'].includes(String(value.view)) && 'query' in value && typeof value.query === 'string' && 'project' in value && typeof value.project === 'string';
+
+type TaskView = { tab: DetailTab; inspector: boolean; terminalVisited?: boolean; changesVisited?: boolean };
 type MainQueryFailure = { label: string; message: string; hasData: boolean; retrying: boolean; retry(): Promise<void> };
 
 // 只有明确未投递的指令继续排队；结果未知时由人在执行记录下方选择重新执行、标为已完成或标为失败。
@@ -95,14 +104,21 @@ export default function App() {
   const [archiveConfirm, setArchiveConfirm] = useState(false);
   const [bulkArchiveIds, setBulkArchiveIds] = useState<string[]>([]);
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
-  const [prompt, setPrompt] = useState('');
-  const draftRevision = useRef(0);
-  const [composerReferences, setComposerReferences] = useState<ComposerReference[]>([]);
-  const [sendMode, setSendMode] = useState<SendMode>('queue');
-  const [planFirst, setPlanFirst] = useState(false);
+  const composerDraft = useComposerDraft(activeSessionId);
+  const pendingSends = useIsMutating({ mutationKey: ['composer-send'], predicate: mutation => (mutation.state.variables as { sessionId?: string } | undefined)?.sessionId === activeSessionId });
+  const { text: prompt, references: composerReferences, mode: sendMode, planFirst } = composerDraft.draft;
+  const [sidebarWidth, setSidebarWidth] = useViewPreference('sidebar-width', 234, (value): value is number => typeof value === 'number' && value >= 208 && value <= 320);
+  const [sidebarCollapsed, setSidebarCollapsed] = useViewPreference('sidebar-collapsed', false, (value): value is boolean => typeof value === 'boolean');
+  const [taskViews, setTaskViews] = useViewPreference<Record<string, TaskView>>('task-views', {}, (value): value is Record<string, TaskView> => value !== null && typeof value === 'object' && Object.values(value).every((item: unknown) => item !== null && typeof item === 'object' && 'tab' in item && ['timeline', 'changes', 'terminal'].includes(String(item.tab)) && 'inspector' in item && typeof item.inspector === 'boolean'));
+  const detailTab = taskViews[activeSessionId ?? '']?.tab ?? 'timeline';
+  const updateTaskView = (patch: Partial<TaskView>) => { if (activeSessionId) setTaskViews(current => ({ ...current, [activeSessionId]: { ...(current[activeSessionId] ?? { tab: 'timeline', inspector: false }), ...patch } })); };
+  const setDetailTab = (tab: DetailTab | ((current: DetailTab) => DetailTab)) => {
+    const next = typeof tab === 'function' ? tab(detailTab) : tab;
+    updateTaskView({ tab: next, ...(next === 'terminal' ? { terminalVisited: true } : next === 'changes' ? { changesVisited: true } : {}) });
+  };
+  const inspectorSideBySide = useMediaQuery('(min-width: 1280px)');
   const [actionError, setActionError] = useState<string>();
   const [workItemPanel, setWorkItemPanel] = useState<{ sessionId: string; itemId: string } | null>(null);
-  const [detailTab, setDetailTab] = useState<DetailTab>('timeline');
   // 路由与「可深链的浮层」是同一个东西的两半，合成一个 state：分开存会让 URL 与界面
   // 各走各的，回退键、刷新、分享链接三者立刻打架（见 app-route.ts 的说明）。
   const [location, setLocation] = useState<AppLocation>(currentLocation);
@@ -112,10 +128,20 @@ export default function App() {
   const overlay = location.overlay?.kind === 'groups' && !experimental ? undefined : location.overlay;
   // 主区一级视图与选中对象。三者都在 URL 里，刷新和分享都能回到同一个对象
   // （app-route.ts 的 nav/appId/chatId）。
-  const primaryNav: PrimaryNav = location.nav ?? 'tasks';
+  const primaryNav: PrimaryNav = location.nav ?? (route.kind === 'session' ? 'tasks' : 'home');
   const selectedAppId = location.appId;
   const selectedChatId = location.chatId;
-  const [workbenchView, setWorkbenchView] = useState<WorkbenchView>('all');
+  const [taskFilters, setTaskFiltersPreference] = useViewPreference<TaskListFilters>('task-filters', { view: 'all', query: '', project: '' }, isTaskListFilters);
+  const taskFiltersRef = useRef(taskFilters);
+  taskFiltersRef.current = taskFilters;
+  const workbenchView = taskFilters.view;
+  const updateTaskFilters = (patch: Partial<TaskListFilters>) => {
+    const next = { ...taskFiltersRef.current, ...patch };
+    taskFiltersRef.current = next;
+    setTaskFiltersPreference(next);
+    if (route.kind === 'overview' && primaryNav === 'tasks') window.history.replaceState({ ...window.history.state, [LIST_HISTORY_KEY]: next }, '', window.location.href);
+  };
+  const setWorkbenchView = (view: WorkbenchView) => updateTaskFilters({ view });
   const [runSummaries, setRunSummaries] = useState<Record<string, RunSummary>>({});
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -123,6 +149,7 @@ export default function App() {
   const [renameSession, setRenameSession] = useState<Session | null>(null);
   const theme = useTheme();
   const navigationTrigger = useRef<HTMLElement | null>(null);
+  const inspectorOpener = useRef<HTMLElement | null>(null);
   const mobileNavigationOpen = mobile && sidebarOpen;
   const openMobileNavigation = () => {
     navigationTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -131,11 +158,7 @@ export default function App() {
 
   const applySessionSelection = useCallback((id?: string) => {
     if (useDockStore.getState().activeSessionId === id) return;
-    draftRevision.current++;
     setActive(id);
-    setPrompt('');
-    setComposerReferences([]);
-    setDetailTab('timeline');
     setWorkItemPanel(null);
     setActionError(undefined);
   }, [setActive]);
@@ -151,7 +174,7 @@ export default function App() {
     setLocation(next);
     const nextPath = appLocationPath(next);
     if (`${window.location.pathname}${window.location.search}` === nextPath) return;
-    const state = { sessionId: next.route.kind === 'session' ? next.route.sessionId : undefined, ...(next.overlay ? { [OVERLAY_HISTORY_MARK]: true } : {}) };
+    const state = { [LIST_HISTORY_KEY]: taskFiltersRef.current, sessionId: next.route.kind === 'session' ? next.route.sessionId : undefined, ...(next.overlay ? { [OVERLAY_HISTORY_MARK]: true } : {}) };
     if (options?.replace) window.history.replaceState(state, '', nextPath);
     else window.history.pushState(state, '', nextPath);
   }, []);
@@ -183,7 +206,7 @@ export default function App() {
    */
   const selectSession = useCallback((id?: string) => {
     applySessionSelection(id);
-    navigate({ route: id ? { kind: 'session', sessionId: id } : { kind: 'overview' }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId });
+    navigate({ route: id ? { kind: 'session', sessionId: id } : { kind: 'overview' }, nav: id ? 'tasks' : 'home', appId: selectedAppId, chatId: selectedChatId });
   }, [applySessionSelection, navigate, selectedAppId, selectedChatId]);
 
   /**
@@ -194,8 +217,12 @@ export default function App() {
    * 契约要求的「跳转配置再返回不丢任务」。
    */
   const setPrimaryNav = useCallback((next: PrimaryNav) => {
-    navigate({ route, nav: next, appId: selectedAppId, chatId: selectedChatId });
-  }, [navigate, route, selectedAppId, selectedChatId]);
+    const returningToTask = next === 'tasks' && (primaryNav === 'bots' || primaryNav === 'groups') && route.kind === 'session';
+    const destination = ['home', 'tasks', 'automation'].includes(next) && !returningToTask ? { kind: 'overview' as const } : route;
+    if (destination.kind === 'overview') applySessionSelection(undefined);
+    setSidebarOpen(false);
+    navigate({ route: destination, nav: next, appId: selectedAppId, chatId: selectedChatId });
+  }, [navigate, route, applySessionSelection, primaryNav, selectedAppId, selectedChatId]);
 
   /** 选中某个 Bot，进入机器人视图。chatId 保留，便于从 Bot 再跳回原来的群。 */
   const selectBot = useCallback((appId: string) => {
@@ -260,6 +287,11 @@ export default function App() {
   useEffect(() => {
     const syncSelectionFromLocation = () => {
       const next = currentLocation();
+      const savedFilters: unknown = window.history.state?.[LIST_HISTORY_KEY];
+      if (isTaskListFilters(savedFilters)) {
+        taskFiltersRef.current = savedFilters;
+        setTaskFiltersPreference(savedFilters);
+      } else window.history.replaceState({ ...window.history.state, [LIST_HISTORY_KEY]: taskFiltersRef.current }, '', window.location.href);
       setLocation(next);
       applySessionSelection(next.route.kind === 'session' ? next.route.sessionId : undefined);
     };
@@ -274,6 +306,34 @@ export default function App() {
   // 直接打开链接仍能查看，active 取自 sortedSessions。
   const visibleSessions = useMemo(() => sortedSessions.filter(session => session.source !== 'work_item' && session.source !== 'lark-memory'), [sortedSessions]);
   const active = useMemo(() => sortedSessions.find(session => session.id === activeSessionId), [sortedSessions, activeSessionId]);
+  const inspectorOpen = Boolean(primaryNav === 'tasks' && active && (overlay?.kind === 'workspace' || taskViews[active.id]?.inspector));
+  const openInspector = () => {
+    inspectorOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    captureDialogOpener();
+    updateTaskView({ inspector: true });
+  };
+  const closeInspector = () => {
+    updateTaskView({ inspector: false });
+    if (overlay?.kind === 'workspace') closeOverlay();
+    if (inspectorSideBySide) requestAnimationFrame(() => {
+      const opener = inspectorOpener.current;
+      if (opener?.isConnected && opener !== document.body) opener.focus();
+      else document.querySelector<HTMLElement>('[data-result-inspector-trigger]')?.focus();
+      inspectorOpener.current = null;
+    });
+  };
+  const resizeSidebar = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const origin = event.clientX;
+    const startWidth = sidebarWidth;
+    const handle = event.currentTarget;
+    const move = (next: PointerEvent) => setSidebarWidth(Math.min(320, Math.max(208, startWidth + next.clientX - origin)));
+    const stop = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', stop); handle.removeEventListener('pointercancel', stop); };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', stop);
+    handle.addEventListener('pointercancel', stop);
+  };
   const events = useEventHistory(activeSessionId, Boolean(active));
   const tasks = useQuery({ queryKey: ['tasks', activeSessionId], queryFn: () => api.tasks(activeSessionId!), enabled: Boolean(active) });
   const sessionUsage = useQuery({ queryKey: ['session-usage', activeSessionId], queryFn: () => api.sessionUsage(activeSessionId!), enabled: Boolean(active), retry: false, refetchInterval: 15_000, refetchIntervalInBackground: false });
@@ -314,12 +374,12 @@ export default function App() {
     if (summary) setRunSummaries(current => current[activeSessionId]?.taskId === summary.taskId && current[activeSessionId]?.status === summary.status && current[activeSessionId]?.queuedCount === summary.queuedCount && current[activeSessionId]?.updatedAt === summary.updatedAt ? current : { ...current, [activeSessionId]: summary });
   }, [activeSessionId, tasks.data]);
 
-  const send = useMutation({ mutationFn: ({ sessionId, message, mode, skillRequests, plan }: { sessionId: string; message: string; mode: SendMode; skillRequests?: string[]; draftRevision: number; plan?: boolean }) => plan ? api.plan(sessionId, message) : api.send(sessionId, message, mode, skillRequests), onSuccess: (result, variables) => { if (variables.sessionId === activeSessionId && variables.draftRevision === draftRevision.current) { setPrompt(''); setComposerReferences([]); setSendMode('queue'); setPlanFirst(false); } qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.some(task => task.id === result.task.id) ? current : [...(current ?? []), result.task]); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId], exact: true }); if (result.steering && (result.task.status === 'queued' || result.steering.outcome !== 'promptRequired')) toastStore.push(steeringToast(result.steering, result.task)); }, onError: error => setActionError(error.message) });
+  const send = useMutation({ mutationKey: ['composer-send'], mutationFn: ({ sessionId, message, mode, skillRequests, plan }: { sessionId: string; message: string; mode: SendMode; skillRequests?: string[]; draftKey: string; draftRevision: number; plan?: boolean }) => plan ? api.plan(sessionId, message) : api.send(sessionId, message, mode, skillRequests), onSuccess: (result, variables) => { acknowledgeComposerDraft(variables.draftKey, variables.draftRevision); qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.some(task => task.id === result.task.id) ? current : [...(current ?? []), result.task]); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId], exact: true }); if (result.steering && (result.task.status === 'queued' || result.steering.outcome !== 'promptRequired')) toastStore.push(steeringToast(result.steering, result.task)); }, onError: (error, variables) => { if (variables.sessionId === useDockStore.getState().activeSessionId) setActionError(error.message); } });
   const cancelQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.cancelQueued(sessionId, taskId), onMutate: ({ sessionId, taskId }) => ({ prompt: qc.getQueryData<Task[]>(['tasks', sessionId])?.find(task => task.id === taskId)?.prompt }), onSuccess: (result, variables, context) => {
     qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.map(task => task.id === result.id ? result : task));
     // 撤销只能把指令重新排到队尾，拿不回原来的任务 ID 和位置，所以 description 必须说清楚，不假装能还原现场。
     const restorable = context?.prompt?.trim();
-    toastStore.push({ kind: 'success', key: `cancel-queued-${variables.taskId}`, title: '已取消 1 条待执行指令', description: restorable ? '恢复会把这条指令重新排到队列末尾，不会回到原来的位置。' : undefined, action: restorable ? { label: '恢复这条指令', run: () => api.send(variables.sessionId, restorable, 'queue').then(() => { void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }) } : undefined });
+    toastStore.push({ kind: 'success', key: `cancel-queued-${variables.taskId}`, title: '已取消 1 条待执行指令', description: restorable ? '恢复会把这条指令重新排到队列末尾，不会回到原来的位置。' : undefined, action: restorable ? { label: '重新加入队尾', run: () => api.send(variables.sessionId, restorable, 'queue').then(() => { void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }) } : undefined });
   }, onError: error => { setActionError(error.message); toastStore.push({ kind: 'error', key: 'cancel-queued', title: '取消待执行指令失败', description: error.message }); } });
   const steerQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.steerQueued(sessionId, taskId), onSuccess: (_result, variables) => { setActionError(undefined); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });
   const injectQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.injectQueued(sessionId, taskId), onSuccess: (result, variables) => { setActionError(undefined); toastStore.push(steeringToast(result, result.task)); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });
@@ -347,7 +407,7 @@ export default function App() {
     }
   });
   const restart = useMutation({ mutationFn: api.restart, onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === result.id ? result : session)); void qc.invalidateQueries({ queryKey: ['sessions'] }); void qc.invalidateQueries({ queryKey: ['events', activeSessionId] }); void qc.invalidateQueries({ queryKey: ['tasks', activeSessionId] }); toastStore.push({ kind: 'success', key: 'restart', title: '任务已重新启动', description: '这是一个全新的 Agent 进程，会从空白上下文开始；之前的对话不会带过来。' }); }, onError: error => { setActionError(error.message); toastStore.push({ kind: 'error', key: 'restart', title: '重新启动失败', description: error.message }); } });
-  const resolvePermission = useMutation({ mutationFn: ({ sessionId, permissionId, approved }: { sessionId: string; permissionId: string; approved: boolean }) => api.permission(sessionId, permissionId, approved), onSuccess: (_result, variables) => { qc.setQueryData<EventWindow>(['events', variables.sessionId], current => { if (!current) return current; const next = current.events.map(event => event.type === 'permission_request' && (event.data.id === variables.permissionId || event.id === variables.permissionId) ? { ...event, data: { ...event.data, status: variables.approved ? 'approved' : 'rejected' } } : event); return createEventWindow(next, current.hasOlder); }); }, onError: error => setActionError(error.message) });
+  const resolvePermission = useMutation({ mutationFn: ({ sessionId, permissionId, approved }: { sessionId: string; permissionId: string; approved: boolean }) => api.permission(sessionId, permissionId, approved), onSuccess: (_result, variables) => { qc.setQueryData<EventWindow>(['events', variables.sessionId], current => { if (!current) return current; const next = current.events.map(event => event.type === 'permission_request' && (event.data.id === variables.permissionId || event.id === variables.permissionId) ? { ...event, data: { ...event.data, status: variables.approved ? 'approved' : 'rejected' } } : event); return createEventWindow(next, current.hasOlder); }); }, onError: (error, variables) => { setActionError(error.message); void qc.invalidateQueries({ queryKey: ['events', variables.sessionId] }); void qc.invalidateQueries({ queryKey: ['sessions'] }); } });
   const pickComposerFile = useMutation({ mutationFn: api.selectFile, onError: error => setActionError(error.message) });
   const refreshModels = useMutation({ mutationFn: ({ agentId: targetAgentId, currentModel }: { agentId: string; currentModel?: string }) => loadAgentModels(targetAgentId, currentModel, true), onSuccess: (result, variables) => { setActionError(undefined); qc.setQueryData(agentModelsQueryKey(variables.agentId, variables.currentModel), result); }, onError: error => setActionError(error.message) });
   const switchModel = useMutation({ mutationFn: ({ sessionId, nextModel }: { sessionId: string; nextModel: string }) => api.setSessionModel(sessionId, nextModel), onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === result.id ? result : session)); void activeModels.refetch(); }, onError: error => setActionError(error.message) });
@@ -361,11 +421,12 @@ export default function App() {
   const blockingMainQueryFailures = mainQueryFailures.filter(failure => !failure.hasData);
   const staleMainQueryFailures = mainQueryFailures.filter(failure => failure.hasData);
   const retryingMainQueries = mainQueryFailures.some(failure => failure.retrying);
-  const submit = () => { if (modelReadiness.kind !== 'ready') return; const message = buildPrompt(prompt, composerReferences); if (message && activeSessionId) send.mutate({ sessionId: activeSessionId, message, draftRevision: draftRevision.current, mode: busyStates.has(active?.state ?? '') ? sendMode : 'queue', skillRequests: composerReferences.filter(reference => reference.kind === 'skill').map(reference => reference.value), plan: planFirst }); };
+  const submit = () => { if (modelReadiness.kind !== 'ready') return; const message = buildPrompt(prompt, composerReferences); if (message && activeSessionId) send.mutate({ sessionId: activeSessionId, message, draftKey: composerDraft.key!, draftRevision: composerDraft.draft.revision, mode: busyStates.has(active?.state ?? '') ? sendMode : 'queue', skillRequests: composerReferences.filter(reference => reference.kind === 'skill').map(reference => reference.value), plan: planFirst }); };
   const act = async (action: string) => { try { setActionError(undefined); await api.action(activeSessionId!, action); } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); } };
 
   // 有浮层占用键盘时整套快捷键停用，避免和弹窗内的按键语义打架。
-  const overlayOpen = Boolean(overlay) || newOpen || archiveConfirm || bulkArchiveIds.length > 0 || systemPromptOpen || paletteOpen || helpOpen || Boolean(renameSession) || (rawVisible && !rawSideBySide);
+  const overlayOpen = Boolean(overlay && !(overlay.kind === 'workspace' && inspectorSideBySide)) || newOpen || archiveConfirm || bulkArchiveIds.length > 0 || systemPromptOpen || paletteOpen || helpOpen || Boolean(renameSession) || (rawVisible && !rawSideBySide) || (inspectorOpen && !inspectorSideBySide);
+  useEscapeKey(inspectorOpen && inspectorSideBySide && !overlayOpen, closeInspector);
   const shortcutHandlers = useMemo(() => ({
     'command-palette': openPalette,
     'toggle-help': () => setHelpOpen(open => !open),
@@ -374,14 +435,14 @@ export default function App() {
     'go-task-center': () => selectSession(undefined),
     'go-settings': () => openSettings('agents'),
     'go-lark-setup': openLarkSetup,
-    'toggle-navigation': () => setSidebarOpen(open => !open),
-    ...Object.fromEntries(Object.entries(workbenchViewShortcutIds).map(([view, id]) => [id, () => { setWorkbenchView(view as WorkbenchView); selectSession(undefined); }])),
+    'toggle-navigation': () => mobile ? setSidebarOpen(open => !open) : setSidebarCollapsed(!sidebarCollapsed),
+    ...Object.fromEntries(Object.entries(workbenchViewShortcutIds).map(([view, id]) => [id, () => { setWorkbenchView(view as WorkbenchView); setPrimaryNav('tasks'); }])),
     // session 作用域：没有打开任务时 shortcutAvailability 会自动判为不可用，这里无需再判。
     ...(active ? {
       'interrupt-run': () => { if (busyStates.has(active.state)) void act('interrupt'); },
       'restart-run': () => { if (active.state === 'failed' || active.state === 'stopped') restart.mutate(active.id); },
       'archive-run': () => { if (!active.archivedAt) { archive.reset(); setArchiveConfirm(true); } },
-      'toggle-detail-tab': () => { if (isPtyCli) setDetailTab(tab => tab === 'timeline' ? 'terminal' : 'timeline'); },
+      'toggle-detail-tab': () => { setDetailTab(tab => tab === 'timeline' ? 'changes' : tab === 'changes' && isPtyCli ? 'terminal' : 'timeline'); },
       'toggle-raw-log': () => { if (raw) toggleRawPanel(); }
     } : {})
   // openCreateTask / openSettings / openLarkSetup / act 每次渲染重建但只读最新 state，hook 内部用 ref 同步，
@@ -392,7 +453,7 @@ export default function App() {
   // 打开或刷新任务中心后按 n 永久跳到设置与接入。hook 内部同步的是这个 memo 对象本身，
   // 救不了对象里的陈旧闭包。
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [active, agents.data, isPtyCli, raw, selectSession, toggleRawPanel]);
+  }), [active, agents.data, isPtyCli, raw, selectSession, toggleRawPanel, detailTab, taskViews, sidebarCollapsed, mobile, setPrimaryNav]);
   useKeyboardShortcuts(shortcutHandlers, { enabled: !overlayOpen, sessionOpen: Boolean(active) });
   /**
    * 帮助面板的可用性标注刻意不传 enabled。
@@ -411,7 +472,7 @@ export default function App() {
     { id: 'open-lark', label: '绑定或管理飞书 Bot', hint: '在飞书中下达任务并接收结果', group: '导航', keywords: 'lark feishu 飞书 bot', run: openLarkSetup },
     { id: 'toggle-help', label: '查看键盘快捷键', group: '帮助', keywords: 'help shortcut 快捷键 帮助', shortcut: '?', run: openHelp },
     ...(active && !active.archivedAt ? [
-      { id: 'interrupt-run', label: '中断当前任务', hint: '停在已完成的步骤，可稍后继续', group: '任务', keywords: 'interrupt stop 中断', disabled: !busyStates.has(active.state), disabledReason: '当前任务没有在执行中的步骤', run: () => void act('interrupt') },
+      { id: 'interrupt-run', label: '中断当前任务', hint: '请求停止正在执行的操作，保留已有历史记录', group: '任务', keywords: 'interrupt stop 中断', disabled: !busyStates.has(active.state), disabledReason: '当前任务没有在执行中的步骤', run: () => void act('interrupt') },
       { id: 'archive-run', label: '归档当前任务', hint: '归档后只读，需二次确认', group: '任务', keywords: 'archive 归档', run: () => { archive.reset(); setArchiveConfirm(true); } }
     ] satisfies CommandAction[] : [])
   ];
@@ -448,19 +509,15 @@ export default function App() {
   // 四个懒加载浮层的加载态是同一件事，只有文案不同。
   const overlayFallback = (label: string) => <div className="fixed inset-0 z-dialog grid place-items-center bg-scrim backdrop-blur-sm"><Spinner label={label}/></div>;
 
-  return <div className="relative flex h-[100dvh] min-h-[100dvh] flex-col overflow-hidden bg-canvas font-sans text-primary">
-    <TopBar hidden={mobileNavigationOpen} onOpenNavigation={openMobileNavigation} onGoHome={() => selectSession(undefined)} onOpenSearch={openPalette} onOpenShortcuts={openHelp} themePreference={theme.preference} themeResolved={theme.resolved} onThemeChange={theme.setPreference} instances={peerInstances.data?.instances} instance={currentInstance()} onInstanceChange={id => { if (id !== currentInstance()) window.location.assign(instanceHomePath(id)); }}/>
-    {/*
-      顶栏之下的躯干。侧栏是 position:fixed 的浮动卡片而不是栅格列，所以这里是
-      普通的 block/flex 容器，主区靠 md:ml-main-inset 让位——--main-inset 就是
-      「侧栏左插入 + 侧栏宽 + 右间距」的唯一定义（tokens.css），主区不自己算像素。
-
-      让位只在 md: 及以上生效：窄屏侧栏是 translate-x 抽屉，浮在内容之上，主区
-      让位反而会留下一条永远空着的左边距。
-    */}
+  return <div style={{ '--sidebar-w': `${!mobile && sidebarCollapsed ? 68 : sidebarWidth}px`, '--main-inset': 'calc(var(--sidebar-w) + var(--shell-gap) * 2)' } as React.CSSProperties} className="relative flex h-[100dvh] min-h-[100dvh] flex-col overflow-hidden bg-canvas font-sans text-primary">
+    <div className="shrink-0 md:ml-main-inset"><TopBar hidden={mobileNavigationOpen} onOpenNavigation={openMobileNavigation} onGoHome={() => selectSession(undefined)} onOpenSearch={openPalette} onOpenShortcuts={openHelp} themePreference={theme.preference} themeResolved={theme.resolved} onThemeChange={theme.setPreference} instances={peerInstances.data?.instances} instance={currentInstance()} onInstanceChange={id => { if (id !== currentInstance()) window.location.assign(instanceHomePath(id)); }}/></div>
     <div className="relative flex min-h-0 flex-1 overflow-hidden">
       {mobileNavigationOpen && <button type="button" aria-label="关闭工作台导航" onClick={() => setSidebarOpen(false)} className="ui-overlay fixed inset-0 z-sticky bg-scrim backdrop-blur-[1px] md:hidden"/>}
-      <SessionList open={sidebarOpen} onClose={() => setSidebarOpen(false)} sessions={visibleSessions} summaries={runSummaries} sessionsLoading={sessions.isLoading} agents={agents.data ?? []} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} activeSessionId={activeSessionId} view={workbenchView} onSelect={selectSession} onNewSession={openCreateTask} onOpenControlCenter={() => openSettings('agents')} onOpenLarkSetup={() => openLarkSetup()} onOpenGroups={() => openOverlay({ kind: 'groups' })} onOpenSchedules={() => openOverlay({ kind: 'automation' })} onOpenUsage={() => openOverlay({ kind: 'usage' })} primaryNav={primaryNav} onPrimaryNavChange={setPrimaryNav} authRequired={authStatus.data?.required} organization={workspaceGroups.data?.organization} onManageWorkspaces={() => { captureDialogOpener(); setSidebarOpen(false); setWorkspaceGroupsOpen(true); }}/>
+      <SessionList open={sidebarOpen} onClose={() => setSidebarOpen(false)} sessions={active && !visibleSessions.some(session => session.id === active.id) ? [...visibleSessions, active] : visibleSessions} summaries={runSummaries} sessionsLoading={sessions.isLoading} agents={agents.data ?? []} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} activeSessionId={activeSessionId} view="all" collapsed={sidebarCollapsed} onToggleCollapsed={() => setSidebarCollapsed(!sidebarCollapsed)} onSelect={selectSession} onNewSession={openCreateTask} onOpenControlCenter={() => openSettings('agents')} onOpenLarkSetup={() => openLarkSetup()} onOpenGroups={() => openOverlay({ kind: 'groups' })} onOpenSchedules={() => openOverlay({ kind: 'automation' })} onOpenUsage={() => openOverlay({ kind: 'usage' })} primaryNav={primaryNav} onPrimaryNavChange={setPrimaryNav} authRequired={authStatus.data?.required} organization={workspaceGroups.data?.organization} onManageWorkspaces={() => { captureDialogOpener(); setSidebarOpen(false); setWorkspaceGroupsOpen(true); }}/>
+      {!sidebarCollapsed && <div role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-valuemin={208} aria-valuemax={320} aria-valuenow={sidebarWidth} tabIndex={0} onPointerDown={resizeSidebar} onKeyDown={event => {
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); setSidebarWidth(Math.min(320, Math.max(208, sidebarWidth + (event.key === 'ArrowRight' ? 8 : -8)))); }
+        if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); setSidebarWidth(event.key === 'Home' ? 208 : 320); }
+      }} style={{ left: `${sidebarWidth}px` }} className="fixed inset-y-0 z-sticky hidden w-2 -translate-x-1/2 cursor-col-resize touch-none rounded-sm hover:bg-action-soft focus-visible:bg-action-soft md:block"/>}
       <main aria-hidden={mobileNavigationOpen || undefined} inert={mobileNavigationOpen || undefined} className="flex min-w-0 flex-1 flex-col md:ml-main-inset">
       {route.kind !== 'not-found' && !blockingMainQueryFailures.length && staleMainQueryFailures.length > 0 && <div className="shrink-0 px-4 py-2"><Banner tone="warning" action={{ label: retryingMainQueries ? '重试中…' : '重试', busy: retryingMainQueries, onClick: () => void Promise.all(staleMainQueryFailures.map(failure => failure.retry())) }}><span className="block min-w-0 truncate" title={staleMainQueryFailures.map(failure => `${failure.label}：${failure.message}`).join('\n')}>部分数据可能不是最新：{staleMainQueryFailures.map(failure => failure.label).join('、')}</span></Banner></div>}
       {/*
@@ -470,21 +527,27 @@ export default function App() {
       */}
       {primaryNav === 'bots' ? <Suspense fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开机器人管理…"/></div>}><BotManagement selectedAppId={selectedAppId} onSelectBot={selectBot} onOpenLarkSetup={openLarkSetup} onSelectGroup={selectGroup} agents={agents.data ?? []} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false}/></Suspense>
       : primaryNav === 'groups' ? <Suspense fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开群聊管理…"/></div>}><GroupManagement selectedChatId={selectedChatId} selectedAppId={selectedAppId} onSelectGroup={selectGroup} onNavigateToBot={selectBot} agents={agents.data ?? []}/></Suspense>
+      : primaryNav === 'automation' ? <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6"><h1 className="mb-5 text-display font-semibold">自动化</h1><Suspense fallback={<Spinner label="正在读取任务自动化…"/>}><AutomationOverview agents={agents.data ?? []} capabilities={systemCapabilities.data} onOpenAgentSetup={() => openSettings('agents')} sessions={visibleSessions} summaries={runSummaries} onSelectSession={selectSession}/></Suspense></div>
       : route.kind === 'not-found' ? renderNotFound('page') : blockingMainQueryFailures.length ? renderBlockingFailure() : route.kind === 'session' && sessions.isPending ? <div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在加载任务…"/></div> : missingActiveSession ? renderNotFound('session') : active ? <>
-        <RunHeader session={active} agent={activeAgent} taskPrompt={runSummaries[active.id]?.prompt} streamStatus={streamStatus} queuedTasks={queuedTasks} usage={sessionUsage.data} rawVisible={rawVisible} rawAvailable={Boolean(raw)} restarting={restart.isPending} onInterrupt={() => void act('interrupt')} onRestart={() => restart.mutate(active.id)} onOpenPrompt={() => setSystemPromptOpen(true)} onArchive={() => { archive.reset(); setArchiveConfirm(true); }} onToggleRaw={toggleRawPanel} onRename={() => openRenameSession(active)} onOpenInsight={() => openOverlay({ kind: 'insight' })} tools={<>{active.source !== 'work_item' && <WorkItemsPanel session={active} agents={agents.data ?? []} onSelectSession={selectSession} control={{ open: workItemPanel?.sessionId === active.id, selectedId: workItemPanel?.sessionId === active.id ? workItemPanel.itemId : '', onOpenChange: open => setWorkItemPanel(open ? { sessionId: active.id, itemId: '' } : null), onSelectItem: itemId => setWorkItemPanel(current => current?.sessionId === active.id ? { sessionId: active.id, itemId } : current) }}/>}<ToolbarButton label="工作目录、验证与自动化" text="工作目录" icon={<FolderCog size={14}/>} onClick={() => openOverlay({ kind: 'workspace' })}/></>}/>
-        <BackgroundWorkStatus events={eventList}/>
-        <UsageHud usage={sessionUsage.data} context={taskContext} loading={sessionUsage.isLoading} error={sessionUsage.isError}/>
-        {isPtyCli && <div className="shrink-0 bg-surface px-3 sm:px-5"><RunDetailTabs value={detailTab} onChange={setDetailTab}/></div>}
+        <RunHeader session={active} agent={activeAgent} taskPrompt={runSummaries[active.id]?.prompt} streamStatus={streamStatus} queuedTasks={queuedTasks} usage={sessionUsage.data} rawVisible={rawVisible} rawAvailable={Boolean(raw)} restarting={restart.isPending} onInterrupt={() => void act('interrupt')} onRestart={() => restart.mutate(active.id)} onOpenPrompt={() => setSystemPromptOpen(true)} onArchive={() => { archive.reset(); setArchiveConfirm(true); }} onToggleRaw={toggleRawPanel} onRename={() => openRenameSession(active)} onOpenInsight={() => openOverlay({ kind: 'insight' })} tools={<>{active.source !== 'work_item' && <WorkItemsPanel session={active} agents={agents.data ?? []} onSelectSession={selectSession} control={{ open: workItemPanel?.sessionId === active.id, selectedId: workItemPanel?.sessionId === active.id ? workItemPanel.itemId : '', onOpenChange: open => setWorkItemPanel(open ? { sessionId: active.id, itemId: '' } : null), onSelectItem: itemId => setWorkItemPanel(current => current?.sessionId === active.id ? { sessionId: active.id, itemId } : current) }}/>}<ToolbarButton label="工作目录、验证与自动化" text="工作目录" icon={<FolderCog size={14}/>} onClick={openInspector}/></>}/>
+
+        <div className="flex shrink-0 items-center border-b border-default bg-surface px-3 sm:px-5"><div className="min-w-0 flex-1"><RunDetailTabs value={!isPtyCli && detailTab === 'terminal' ? 'timeline' : detailTab} onChange={setDetailTab} terminalAvailable={Boolean(isPtyCli)}/></div><Button variant="ghost" aria-label="结果检视" data-result-inspector-trigger icon={<PanelRightOpen size={15}/>} onClick={inspectorOpen ? closeInspector : openInspector}>结果检视</Button></div>
         {events.isError && <div className="shrink-0 px-4 py-2"><Banner tone="danger">历史记录加载失败：{events.error.message}<Button size="sm" variant="secondary" onClick={() => void events.refetch()}>重试加载记录</Button></Banner></div>}
         {actionError && <div className="shrink-0 px-4 py-2"><Banner tone="danger" onDismiss={() => setActionError(undefined)}>{actionError}</Banner></div>}
-        {overlay?.kind === 'workspace' && <SessionDeliveryPanel key={active.id} session={active} tasks={tasks.data ?? []} onClose={closeOverlay}/>}
-        {isPtyCli && active.permissionMode === 'ask' && <div className="shrink-0 px-4 py-2 sm:px-5"><Banner tone="warning" action={{ label: '打开终端', onClick: () => setDetailTab('terminal') }}>{active.source === 'work_item' ? '此步骤终端只读。需要确认时，请在原飞书话题使用 /work terminal 查看并按提示输入。' : '此 CLI 的操作确认在终端中完成；若任务等待响应，请前往终端处理。'}</Banner></div>}
-        <div className="flex min-h-0 flex-1"><section className="flex min-w-0 flex-1 flex-col">{detailTab === 'terminal' && isPtyCli ? <div id="tabpanel-terminal" role="tabpanel" aria-labelledby="tab-terminal" tabIndex={0} className="min-h-0 flex-1 bg-terminal-bg p-2"><Suspense fallback={<div className="grid h-full place-items-center"><Spinner label="终端加载中…"/></div>}><TerminalView sessionId={active.id} readOnly={active.source === 'work_item'} className="h-full"/></Suspense></div> : <div id={isPtyCli ? 'tabpanel-timeline' : undefined} role={isPtyCli ? 'tabpanel' : undefined} aria-labelledby={isPtyCli ? 'tab-timeline' : undefined} tabIndex={isPtyCli ? 0 : undefined} className="flex min-h-0 flex-1 flex-col"><Suspense fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在加载执行记录…"/></div>}><TimelineView key={activeSessionId} hasOlder={events.data?.hasOlder} loadedEventCount={events.data?.events.length} loadOlder={events.loadOlder} olderError={events.olderError} activeSessionId={activeSessionId} eventsLoading={events.isLoading} onResolvePermission={(permissionId, approved) => active.source === 'work_item' ? setActionError('请从原目标处理此步骤的工具授权') : resolvePermission.mutate({ sessionId: active.id, permissionId, approved })} resolvingPermissionId={resolvePermission.isPending ? resolvePermission.variables?.permissionId : undefined} timeline={timeline} timelineSections={timelineSections} awaitingAnswer={awaitingAnswer} hasOngoingActivity={hasOngoingActivity} latestUserIndex={latestUserIndex} activeOutputLabel={activeOutputLabel} renderProgress={active.source !== 'work_item' ? emptyState => <WorkItemProgress emptyState={emptyState} session={active} agents={agents.data ?? []} onOpenItem={itemId => setWorkItemPanel({ sessionId: active.id, itemId })} onSelectSession={selectSession}/> : undefined} footer={<><UnknownTasksPanel session={active} tasks={tasks.data ?? []}/><PlanPanel session={active} tasks={tasks.data ?? []}/><VerificationSummary session={active} onOpenEvidence={() => openOverlay({ kind: 'workspace' })}/>{active.source === 'lark' && <TurnMemoryPanel session={active}/>}</>} /></Suspense></div>} {active.source === 'work_item' ? <div className="border-t border-default bg-surface px-4 py-3 text-caption text-subtle">此后台步骤由目标管理，请从原目标处理问题、授权、重试或停止。</div> : active.archivedAt ? <div className="border-t border-default bg-surface px-4 py-3 text-center text-caption text-subtle">该任务已归档，只能查看历史记录。</div> : <Composer planFirst={planFirst} onPlanFirstChange={setPlanFirst} state={active.state} value={prompt} references={composerReferences} sending={send.isPending} mode={sendMode} queuedTasks={queuedTasks} cancellingTaskId={cancelQueued.isPending ? cancelQueued.variables?.taskId : undefined} steeringTaskId={steerQueued.isPending ? steerQueued.variables?.taskId : undefined} injectingTaskId={injectQueued.isPending ? injectQueued.variables?.taskId : undefined} steerable={activeAgent?.protocol === 'acp'} blockingPermissionId={blockingPermissionId} rejectingPermission={resolvePermission.isPending} onRejectPermission={permissionId => resolvePermission.mutate({ sessionId: active.id, permissionId, approved: false })} skills={skills.data ?? []} models={activeModels.data?.models ?? []} reasoningEfforts={activeModels.data?.reasoningEfforts ?? []} currentModel={active.model ?? activeModels.data?.defaultModel} currentReasoningEffort={active.reasoningEffort ?? activeModels.data?.defaultReasoningEffort} advertisedCommands={[...commandsFromEvents(eventList), ...(pluginCommands.data ?? [])]} filePicker={Boolean(systemCapabilities.data?.filePicker)} modelReadiness={modelReadiness} switchingModel={switchModel.isPending || busyStates.has(active.state)} switchingReasoningEffort={switchReasoningEffort.isPending || busyStates.has(active.state)} refreshingModels={activeModels.isFetching || refreshModels.isPending} onChange={value => { draftRevision.current++; setPrompt(value); }} onReferencesChange={references => { draftRevision.current++; setComposerReferences(references); }} onModeChange={setSendMode} onSubmit={submit} onInterrupt={() => void act('interrupt')} onCancelQueued={taskId => cancelQueued.mutate({ sessionId: active.id, taskId })} onSteerQueued={taskId => steerQueued.mutate({ sessionId: active.id, taskId })} onInjectQueued={taskId => injectQueued.mutate({ sessionId: active.id, taskId })} onPickFile={async () => (await pickComposerFile.mutateAsync()).path} onModelChange={nextModel => switchModel.mutate({ sessionId: active.id, nextModel })} onReasoningEffortChange={nextReasoningEffort => switchReasoningEffort.mutate({ sessionId: active.id, nextReasoningEffort })} onRefreshModels={() => refreshModels.mutate({ agentId: active.agentId, currentModel: active.model })} session={active} onShowStatus={() => { const status = effectiveStatus(active); toastStore.push({ kind: 'info', key: 'composer-status', title: `${status.label} · ${activeAgent?.name ?? active.agentId}`, description: `${sessionWorkspaceName(active)}｜${queuedTasks.length ? `待执行指令 ${queuedTasks.length} 条｜` : ''}${status.archived ? '已归档任务只读' : nextActionForState(active.state)}` }); }} onRestart={() => restart.mutate(active.id)} onCreateTask={openCreateTask} onOpenHelp={openHelp}/>}</section>
+        {isPtyCli && active.permissionMode === 'ask' && active.state === 'waiting_for_permission' && <div className="shrink-0 px-4 py-2 sm:px-5"><Banner tone="warning" action={{ label: '打开终端', onClick: () => setDetailTab('terminal') }}>{active.source === 'work_item' ? '此步骤终端只读。需要确认时，请在原飞书话题使用 /work terminal 查看并按提示输入。' : '此 CLI 的操作确认在终端中完成；若任务等待响应，请前往终端处理。'}</Banner></div>}
+        <div className="flex min-h-0 flex-1"><section className="flex min-w-0 flex-1 flex-col">{isPtyCli && (detailTab === 'terminal' || taskViews[active.id]?.terminalVisited) && <div hidden={detailTab !== 'terminal'} id="tabpanel-terminal" role="tabpanel" aria-labelledby="tab-terminal" tabIndex={0} className={detailTab === 'terminal' ? 'min-h-0 flex-1 bg-terminal-bg p-2' : 'hidden'}><Suspense fallback={<div className="grid h-full place-items-center"><Spinner label="终端加载中…"/></div>}><TerminalView sessionId={active.id} readOnly={active.source === 'work_item'} className="h-full"/></Suspense></div>}<div hidden={detailTab !== 'timeline' && (isPtyCli || detailTab !== 'terminal')} id="tabpanel-timeline" role="tabpanel" aria-labelledby="tab-timeline" tabIndex={0} className={detailTab === 'timeline' || (!isPtyCli && detailTab === 'terminal') ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}><Suspense fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在加载执行记录…"/></div>}><TimelineView key={activeSessionId} readingScopeKey={taskReadingScopeKey(active.id)} visible={detailTab === 'timeline' || (!isPtyCli && detailTab === 'terminal')} hasOlder={events.data?.hasOlder} loadedEventCount={events.data?.events.length} loadOlder={events.loadOlder} olderError={events.olderError} activeSessionId={activeSessionId} eventsLoading={events.isLoading} onResolvePermission={active.source === 'work_item' ? undefined : (permissionId, approved) => resolvePermission.mutateAsync({ sessionId: active.id, permissionId, approved })} resolvingPermissionId={resolvePermission.isPending ? resolvePermission.variables?.permissionId : undefined} timeline={timeline} timelineSections={timelineSections} awaitingAnswer={awaitingAnswer} hasOngoingActivity={hasOngoingActivity} latestUserIndex={latestUserIndex} activeOutputLabel={activeOutputLabel} renderProgress={active.source !== 'work_item' ? emptyState => <WorkItemProgress emptyState={emptyState} session={active} agents={agents.data ?? []} onOpenItem={itemId => setWorkItemPanel({ sessionId: active.id, itemId })} onSelectSession={selectSession}/> : undefined} footer={<><UnknownTasksPanel session={active} tasks={tasks.data ?? []}/><PlanPanel session={active} tasks={tasks.data ?? []}/><VerificationSummary session={active} onOpenEvidence={openInspector}/>{active.source === 'lark' && <TurnMemoryPanel session={active}/>}</>} /></Suspense></div>{(detailTab === 'changes' || taskViews[active.id]?.changesVisited) && <div hidden={detailTab !== 'changes'} id="tabpanel-changes" role="tabpanel" aria-labelledby="tab-changes" tabIndex={0} className={detailTab === 'changes' ? 'min-h-0 flex-1 overflow-auto' : 'hidden'}><Suspense fallback={<Spinner label="正在读取本轮改动…"/>}><SessionChangesPanel key={active.id} session={active} onBack={() => setDetailTab('timeline')}/></Suspense></div>} {active.source === 'work_item' ? <div className="border-t border-default bg-surface px-4 py-3 text-caption text-subtle">此后台步骤由目标管理，请从原目标处理问题、授权、重试或停止。</div> : active.archivedAt ? <div className="border-t border-default bg-surface px-4 py-3 text-center text-caption text-subtle">该任务已归档，只能查看历史记录。</div> : <Composer key={active.id} planFirst={planFirst} onPlanFirstChange={value => composerDraft.update({ planFirst: value })} state={active.state} value={prompt} references={composerReferences} sending={pendingSends > 0} mode={sendMode} queuedTasks={queuedTasks} cancellingTaskId={cancelQueued.isPending ? cancelQueued.variables?.taskId : undefined} steeringTaskId={steerQueued.isPending ? steerQueued.variables?.taskId : undefined} injectingTaskId={injectQueued.isPending ? injectQueued.variables?.taskId : undefined} steerable={activeAgent?.protocol === 'acp'} blockingPermissionId={blockingPermissionId} rejectingPermission={resolvePermission.isPending} onRejectPermission={permissionId => resolvePermission.mutate({ sessionId: active.id, permissionId, approved: false })} skills={skills.data ?? []} models={activeModels.data?.models ?? []} reasoningEfforts={activeModels.data?.reasoningEfforts ?? []} currentModel={active.model ?? activeModels.data?.defaultModel} currentReasoningEffort={active.reasoningEffort ?? activeModels.data?.defaultReasoningEffort} advertisedCommands={[...commandsFromEvents(eventList), ...(pluginCommands.data ?? [])]} filePicker={Boolean(systemCapabilities.data?.filePicker)} modelReadiness={modelReadiness} switchingModel={switchModel.isPending || busyStates.has(active.state)} switchingReasoningEffort={switchReasoningEffort.isPending || busyStates.has(active.state)} refreshingModels={activeModels.isFetching || refreshModels.isPending} onChange={value => composerDraft.update({ text: value })} onReferencesChange={references => composerDraft.update({ references })} onModeChange={mode => composerDraft.update({ mode })} onSubmit={submit} onInterrupt={() => void act('interrupt')} onCancelQueued={taskId => cancelQueued.mutate({ sessionId: active.id, taskId })} onSteerQueued={taskId => steerQueued.mutate({ sessionId: active.id, taskId })} onInjectQueued={taskId => injectQueued.mutate({ sessionId: active.id, taskId })} onPickFile={async () => (await pickComposerFile.mutateAsync()).path} onModelChange={nextModel => switchModel.mutate({ sessionId: active.id, nextModel })} onReasoningEffortChange={nextReasoningEffort => switchReasoningEffort.mutate({ sessionId: active.id, nextReasoningEffort })} onRefreshModels={() => refreshModels.mutate({ agentId: active.agentId, currentModel: active.model })} session={active} onShowStatus={() => { const status = effectiveStatus(active); toastStore.push({ kind: 'info', key: 'composer-status', title: `${status.label} · ${activeAgent?.name ?? active.agentId}`, description: `${sessionWorkspaceName(active)}｜${queuedTasks.length ? `待执行指令 ${queuedTasks.length} 条｜` : ''}${status.archived ? '已归档任务只读' : nextActionForState(active.state)}` }); }} onRestart={() => restart.mutate(active.id)} onCreateTask={openCreateTask} onOpenHelp={openHelp}/>}</section>
+          {inspectorOpen && inspectorSideBySide && <aside aria-label="结果检视" className="ui-side-panel flex w-96 shrink-0 flex-col border-l border-default bg-surface"><div className="flex h-12 shrink-0 items-center border-b border-default px-4"><h2 className="text-body font-semibold">结果检视</h2><span className="ml-auto"><IconButton label="关闭结果检视" onClick={closeInspector}><X size={16}/></IconButton></span></div><div className="min-h-0 flex-1 overflow-y-auto p-4"><SessionDeliveryPanel key={active.id} session={active} tasks={tasks.data ?? []} onClose={closeInspector} presentation="inspector"/><details className="mt-4"><summary className="min-h-10 cursor-pointer text-caption text-secondary">详细用量与后台状态</summary><UsageHud usage={sessionUsage.data} context={taskContext} loading={sessionUsage.isLoading} error={sessionUsage.isError}/><BackgroundWorkStatus events={eventList}/></details></div></aside>}
+          {inspectorOpen && !inspectorSideBySide && <Dialog open onClose={closeInspector} label="结果检视" size="lg"><Dialog.Header><h2 className="text-title font-semibold">结果检视</h2><span className="ml-auto"><IconButton label="关闭结果检视" onClick={closeInspector}><X size={16}/></IconButton></span></Dialog.Header><Dialog.Body><SessionDeliveryPanel key={active.id} session={active} tasks={tasks.data ?? []} onClose={closeInspector} presentation="inspector"/><details className="mt-4"><summary className="min-h-10 cursor-pointer text-caption text-secondary">详细用量与后台状态</summary><UsageHud usage={sessionUsage.data} context={taskContext} loading={sessionUsage.isLoading} error={sessionUsage.isError}/><BackgroundWorkStatus events={eventList}/></details></Dialog.Body></Dialog>}
           {rawVisible && (rawSideBySide
             ? <aside aria-label="原始日志" className="ui-side-panel flex w-[420px] shrink-0 flex-col border-l border-code-border bg-code-surface text-code-header-text"><div className="flex h-11 items-center border-b border-code-border px-3 text-caption font-medium"><Terminal size={13} className="mr-2"/>原始日志<span className="ml-auto"><IconButton label="关闭原始日志" onClick={toggleRawPanel}><PanelRightClose size={14}/></IconButton></span></div><pre className="m-0 flex-1 overflow-auto whitespace-pre-wrap border-0 bg-code-surface p-4 font-mono text-meta leading-5 text-code-header-text">{raw || '当前任务暂无原始输出。'}</pre></aside>
             : <Dialog open onClose={toggleRawPanel} label="原始日志" size="lg"><Dialog.Header><Terminal size={16}/><h2 className="text-title font-semibold">原始日志</h2><span className="ml-auto"><IconButton label="关闭原始日志" onClick={toggleRawPanel}><PanelRightClose size={16}/></IconButton></span></Dialog.Header><Dialog.Body className="bg-code-surface"><pre tabIndex={0} aria-label="原始日志内容" className="m-0 whitespace-pre-wrap border-0 bg-code-surface font-mono text-meta leading-5 text-code-header-text">{raw || '当前任务暂无原始输出。'}</pre></Dialog.Body></Dialog>)}
         </div>
-      </> : <WorkspaceOverview sessions={visibleSessions} summaries={runSummaries} agents={agents.data ?? []} loading={sessions.isLoading} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} view={workbenchView} onViewChange={setWorkbenchView} onSelect={selectSession} onBulkArchive={ids => { captureDialogOpener(); bulkArchive.reset(); setBulkArchiveIds(ids); }} onCreate={openCreateTask} onOpenAgentSetup={() => openSettings('agents')} onOpenLarkSetup={() => openLarkSetup('new')} onManageBots={() => setPrimaryNav('bots')}/>}
+      </> : <WorkspaceOverview mode={primaryNav === 'tasks' ? 'tasks' : 'home'} filters={primaryNav === 'home' ? { query: '', project: '' } : { query: taskFilters.query, project: taskFilters.project }} onFiltersChange={filters => updateTaskFilters(filters)} onSelectAttention={(id: string) => {
+        const target = sortedSessions.find(session => session.id === id);
+        const terminal = target?.state === 'waiting_for_permission' && agents.data?.find(agent => agent.id === target.agentId)?.protocol === 'pty-cli';
+        selectSession(id);
+        setTaskViews(current => ({ ...current, [id]: { ...current[id], inspector: false, tab: terminal ? 'terminal' : 'timeline', ...(terminal ? { terminalVisited: true } : {}) } }));
+      }} onOpenChanges={(id: string) => { selectSession(id); setTaskViews(current => ({ ...current, [id]: { ...current[id], tab: 'changes', changesVisited: true, inspector: false } })); }} sessions={visibleSessions} summaries={runSummaries} agents={agents.data ?? []} loading={sessions.isLoading} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} view={primaryNav === 'home' ? 'all' : workbenchView} onViewChange={view => { setWorkbenchView(view); setPrimaryNav('tasks'); }} onSelect={selectSession} onBulkArchive={ids => { captureDialogOpener(); bulkArchive.reset(); setBulkArchiveIds(ids); }} onCreate={openCreateTask} onOpenAgentSetup={() => openSettings('agents')} onOpenLarkSetup={() => openLarkSetup('new')} onManageBots={() => setPrimaryNav('bots')}/>}
     </main>
     </div>
     {newOpen && <NewSessionModal open initialAgentId={newAgentId} onClose={() => setNewOpen(false)} onOpenAgentSetup={() => { setNewOpen(false); openSettings('agents'); }} onCreated={(session, task) => { setRunSummaries(current => ({ ...current, [session.id]: { sessionId: session.id, taskId: task.id, prompt: task.prompt, status: task.status, queuedCount: task.status === 'queued' ? 1 : 0, updatedAt: task.updatedAt || task.createdAt } })); void qc.invalidateQueries({ queryKey: ['sessions'] }); selectSession(session.id); setNewOpen(false); setActionError(undefined); }} agents={agents.data ?? []} capabilities={systemCapabilities.data}/>}

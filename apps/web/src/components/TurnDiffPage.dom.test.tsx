@@ -27,14 +27,14 @@ function renderPage(shared = true) {
   return render(<QueryClientProvider client={client}><TurnDiffPage sessionId="ses_1" taskId="task_1" shared={shared}/></QueryClientProvider>);
 }
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { sessionStorage.clear(); cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('TurnDiffPage', () => {
   it('按文件折叠显示这一轮的改动，二进制、超大和超出上限的文件只显示占位，并提示截断', async () => {
     vi.spyOn(api, 'turnDiff').mockResolvedValue(diff);
     renderPage();
     expect(await screen.findByRole('heading', { name: '把 b 改成 20' })).toBeTruthy();
-    expect(screen.getByText(/改动 4 个文件/).textContent).toBe('改动 4 个文件 +3 −1 · 只读查看');
+    expect(screen.getByText(/改动 4 个文件/).textContent).toBe('改动 4 个文件 +3 −1 · 分享审阅');
     expect(screen.getByText('改动太多，只展开了前面的文件，其余文件只列出名字。')).toBeTruthy();
     expect(screen.getByText('二进制文件，不显示内容。')).toBeTruthy();
     expect(screen.getByText('这个文件的改动太大，页面上不显示。')).toBeTruthy();
@@ -80,9 +80,9 @@ describe('TurnDiffPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '评论 src/app.ts 第 3 行' }));
     fireEvent.change(screen.getByLabelText('src/app.ts 第 3 行的评论'), { target: { value: '加个测试' } });
     fireEvent.click(screen.getByRole('button', { name: '添加评论' }));
-    expect(within(screen.getByRole('contentinfo')).getByText(/提交后作为新一轮请求发给 Agent/)).toBeTruthy();
+    expect(within(screen.getByRole('contentinfo')).getByText(/提交后作为新一轮请求发回当前任务/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '提交评论' }));
-    expect(await screen.findByText('评论已作为新一轮请求发给 Agent。')).toBeTruthy();
+    expect(await screen.findByText('评论已作为新一轮请求发回当前任务。')).toBeTruthy();
   });
 
   it('链接无效或过期时只给提示', async () => {
@@ -148,7 +148,7 @@ describe('TurnDiffPage pending comment submissions', () => {
       expect(screen.getByText('New unsent comment')).toBeTruthy();
       expect(screen.getByText(/3 条评论待提交/)).toBeTruthy();
     } else {
-      await screen.findByText(change === 'shared' ? '评论已发到飞书话题，等有权限的人确认后交给 Agent 修改。' : '评论已作为新一轮请求发给 Agent。');
+      await screen.findByText(change === 'shared' ? '评论已发到飞书话题，等有权限的人确认后交给 Agent 修改。' : '评论已作为新一轮请求发回当前任务。');
       expect(screen.queryByText('Submitted unchanged')).toBeNull();
       if (['added', 'shared'].includes(change)) expect(screen.getByText('New unsent comment')).toBeTruthy();
       if (change === 'edited') expect(screen.getByText('Edited unsent comment')).toBeTruthy();

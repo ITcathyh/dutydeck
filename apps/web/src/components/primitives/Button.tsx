@@ -33,8 +33,8 @@ export type ButtonProps = ButtonBase & (
 );
 
 /*
-  高度即触控目标（契约 §9）：md 40px 是默认，sm 32px 只允许用在有 ≥40px 等价入口的
-  密集工具条上，lg 44px 给移动端高频操作。圆角按「高度 / 3.5」取档：32/40/44 全部
+  桌面高度即触控目标（契约 §9）：md 40px 是默认，sm 32px 只允许用在有 ≥40px 等价入口的
+  密集工具条上；手机由 index.css 将全部按钮的命中区提升到至少 44×44。圆角按「高度 / 3.5」取档：32/40/44 全部
   落在 31–47px 区间，所以三档共用 rounded-md。
 */
 const sizeClass: Record<ButtonSize, string> = {

@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { Agent, Session, Task } from '../api';
 import { nextActionForState, sessionErrorSummary } from '../workspace-model';
-import { RunDetailTabs, RunHeader } from './RunHeader';
+import { RunDetailTabs, RunHeader, usageLabel, type RunDetailTab } from './RunHeader';
 import { permissionLabels } from './ui';
 
 const agent: Agent = { id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'full-trust' };
@@ -16,7 +16,7 @@ describe('RunHeader', () => {
     render(<RunHeader session={session} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[queued]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     expect(screen.getByText('dutydeck')).toBeTruthy();
     expect(screen.getByRole('heading', { name: '优化飞书任务卡片' })).toBeTruthy();
-    expect(screen.getByText('思考中')).toBeTruthy();
+    expect(screen.getByText('进行中')).toBeTruthy();
     expect(screen.getByText(nextActionForState('thinking'))).toBeTruthy();
     // 排队徽标统一为「待执行指令 N 条」，与总览页任务行同一措辞。
     expect(screen.getByText('待执行指令 1 条')).toBeTruthy();
@@ -83,7 +83,7 @@ describe('RunHeader 归档态状态视觉与只读约束', () => {
     // 归档与兜底两支是 RunHeader 自己写的字面量，已迁到语义类；运行态那支仍来自
     // ui.tsx:stateTone（已冻结，返回内联 var(--status-*)），见下面「未归档 + thinking」。
     expect(dot.className).toContain('bg-neutral-solid');
-    expect(screen.queryByText('思考中')).toBeNull();
+    expect(screen.queryByText('进行中')).toBeNull();
   });
 
   it('归档 + failed：不再给出「重新启动」按钮，归档是只读终态', () => {
@@ -110,12 +110,12 @@ describe('RunHeader 归档态状态视觉与只读约束', () => {
     expect(screen.getByText(nextActionForState('failed'))).toBeTruthy();
   });
 
-  it('未归档 + thinking：圆点仍呼吸，状态仍写「思考中」', () => {
+  it('未归档 + thinking：正常执行不持续闪动，状态写「进行中」', () => {
     const { dot, statusText } = renderHeader({ state: 'thinking' });
-    expect(statusText.textContent).toBe('思考中');
-    expect(dot.getAttribute('aria-label')).toBe('思考中');
-    expect(dot.className).toContain('ui-status-pulse');
-    expect(dot.className).toContain('bg-warning-solid');
+    expect(statusText.textContent).toBe('进行中');
+    expect(dot.getAttribute('aria-label')).toBe('进行中');
+    expect(dot.className).not.toContain('ui-status-pulse');
+    expect(dot.className).toContain('bg-info-solid');
     expect(screen.getByText(nextActionForState('thinking'))).toBeTruthy();
   });
 });
@@ -172,36 +172,37 @@ describe('RunHeader 失败详情', () => {
     expect(screen.getByRole('heading', { name: '未命名任务' })).toBeTruthy();
   });
 
-  it('状态条显示本任务累计用量（含子步骤与估算），没有用量数据时如实说明', () => {
-    const totals = { entries: 1, costUsd: 0.5, estimatedCostUsd: 0, inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, unavailable: 0 };
-    const props = { agent, streamStatus: 'open' as const, queuedTasks: [], rawVisible: false, rawAvailable: false, restarting: false, onInterrupt() {}, onRestart() {}, onOpenPrompt() {}, onArchive() {}, onToggleRaw() {}, onOpenInsight() {} };
-    const { rerender } = render(<RunHeader session={session} {...props} usage={{ own: totals, subSteps: { ...totals, costUsd: 0.25, estimatedCostUsd: 0.25 } }}/>);
-    expect(screen.getByText('本任务累计 $0.75（含子步骤 $0.25，含估算 $0.25）').getAttribute('title')).toBe('输入 2,000 · 输出 40 · 缓存读 0 · 缓存写 0 token');
-    const none = { ...totals, costUsd: 0, inputTokens: 0, outputTokens: 0 };
-    rerender(<RunHeader session={session} {...props} usage={{ own: { ...none, unavailable: 1 }, subSteps: { ...none, entries: 0 } }}/>);
-    expect(screen.getByText('本任务账本：无用量数据')).toBeTruthy();
-    rerender(<RunHeader session={session} {...props} usage={{ own: { ...none, unpriced: 1, unknownCostEntries: 1, costCoverage: 0 }, subSteps: { ...none, entries: 0, unknownCostEntries: 0 } }}/>);
-    expect(screen.getByText('本任务已知费用 $0.00（另有 1 次费用未知）')).toBeTruthy();
-    rerender(<RunHeader session={session} {...props} usage={{ own: { ...none, unknownCostEntries: 0, costCoverage: 1 }, subSteps: { ...none, entries: 0, unknownCostEntries: 0 } }}/>);
-    expect(screen.getByText('本任务累计 $0.00')).toBeTruthy();
-    rerender(<RunHeader session={session} {...props}/>);
+  it('把路径、执行标识与用量从任务头部移入检视', () => {
+    render(<RunHeader session={session} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
+    expect(screen.queryByText(session.cwd)).toBeNull();
+    expect(screen.queryByText(session.runId)).toBeNull();
     expect(screen.queryByText(/本任务累计/)).toBeNull();
+  });
+
+  it('费用呈现仍区分账本缺失、部分未知和真实零费用', () => {
+    const totals = { entries: 1, costUsd: 0.5, estimatedCostUsd: 0, inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, unavailable: 0 };
+    expect(usageLabel({ own: totals, subSteps: { ...totals, costUsd: 0.25, estimatedCostUsd: 0.25 } })).toEqual({ text: '本任务累计 $0.75（含子步骤 $0.25，含估算 $0.25）', detail: '输入 2,000 · 输出 40 · 缓存读 0 · 缓存写 0 token' });
+    const none = { ...totals, costUsd: 0, inputTokens: 0, outputTokens: 0 };
+    expect(usageLabel({ own: { ...none, unavailable: 1 }, subSteps: { ...none, entries: 0 } })?.text).toBe('本任务账本：无用量数据');
+    expect(usageLabel({ own: { ...none, unpriced: 1, unknownCostEntries: 1, costCoverage: 0 }, subSteps: { ...none, entries: 0, unknownCostEntries: 0 } })?.text).toBe('本任务已知费用 $0.00（另有 1 次费用未知）');
+    expect(usageLabel({ own: { ...none, unknownCostEntries: 0, costCoverage: 1 }, subSteps: { ...none, entries: 0, unknownCostEntries: 0 } })?.text).toBe('本任务累计 $0.00');
+    expect(usageLabel()).toBeUndefined();
   });
 });
 
 // RunDetailTabs 已被 App.tsx 消费（commit 1a1100f），手写 tablist 与方向键处理均已删除。
 // aria-controls / aria-labelledby 由 Tabs 原语生成为 `tabpanel-<id>` / `tab-<id>`。
 describe('RunDetailTabs', () => {
-  function Host({ onChange }: { onChange?: (value: 'timeline' | 'terminal') => void }) {
-    const [value, setValue] = useState<'timeline' | 'terminal'>('timeline');
+  function Host({ onChange }: { onChange?: (value: RunDetailTab) => void }) {
+    const [value, setValue] = useState<RunDetailTab>('timeline');
     return <RunDetailTabs value={value} onChange={next => { setValue(next); onChange?.(next); }}/>;
   }
 
   it('沿用「任务内容」tablist 与「执行记录」「终端」两个标签', () => {
     render(<Host/>);
     expect(screen.getByRole('tablist', { name: '任务内容' })).toBeTruthy();
-    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['执行记录', '终端']);
-    expect(screen.getByRole('tab', { selected: true }).textContent).toBe('执行记录');
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['对话', '改动', '终端']);
+    expect(screen.getByRole('tab', { selected: true }).textContent).toBe('对话');
   });
 
   it('点击标签回传新 tab id', async () => {
@@ -214,13 +215,18 @@ describe('RunDetailTabs', () => {
 
   it('aria-controls 指向 tabpanel-<id>，App.tsx 替换时面板 id 要跟着改', () => {
     render(<Host/>);
-    expect(screen.getByRole('tab', { name: '执行记录' }).getAttribute('aria-controls')).toBe('tabpanel-timeline');
+    expect(screen.getByRole('tab', { name: '对话' }).getAttribute('aria-controls')).toBe('tabpanel-timeline');
     expect(screen.getByRole('tab', { name: '终端' }).getAttribute('aria-controls')).toBe('tabpanel-terminal');
   });
 });
 
-it('does not claim the agent lacks usage reporting when the native snapshot has tokens', () => {
+it('原生 token 与账本缺失分别呈现', () => {
   const totals = { entries: 1, tokenEntries: 0, costUsd: 0, estimatedCostUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, unavailable: 1 };
-  render(<RunHeader session={session} agent={agent} streamStatus="open" queuedTasks={[]} usage={{ own: totals, subSteps: { ...totals, entries: 0, unavailable: 0 }, snapshot: { nativeTokens: { source: 'codex_transcript', scope: 'current_native_session', observedAt: '2026-10-13T00:00:00Z', totalTokens: 100 } } }} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
-  expect(screen.getByText('本任务账本：无用量数据').getAttribute('title')).toBe('原生会话 token 见下方；此读数不计入账本费用');
+  expect(usageLabel({ own: totals, subSteps: { ...totals, entries: 0, unavailable: 0 }, snapshot: { nativeTokens: { source: 'codex_transcript', scope: 'current_native_session', observedAt: '2026-10-13T00:00:00Z', totalTokens: 100 } } })?.detail).toBe('原生会话 token 见下方；此读数不计入账本费用');
+});
+
+it('只为具备终端能力的任务提供终端标签', () => {
+  render(<RunDetailTabs value="timeline" onChange={() => {}} terminalAvailable={false}/>);
+  expect(screen.getByRole('tab', { name: '改动' })).toBeTruthy();
+  expect(screen.queryByRole('tab', { name: '终端' })).toBeNull();
 });

@@ -1,9 +1,9 @@
-import { Archive, BookOpen, ChevronRight, Folder, LineChart, MessageSquare, PanelRightOpen, Pencil, RotateCcw, Square, Terminal } from 'lucide-react';
+import { Archive, BookOpen, ChevronRight, FileDiff, LineChart, MessageSquare, PanelRightOpen, Pencil, RotateCcw, Square, Terminal } from 'lucide-react';
 import type { ReactNode } from 'react';
 import type { Agent, Session, SessionUsage, Task } from '../api';
 import type { StreamStatus } from '../sse';
 import { sessionDisplayName } from '../run-summary';
-import { nextActionForState, sessionErrorSummary, sessionWorkspaceName, shortRunId } from '../workspace-model';
+import { nextActionForState, sessionErrorSummary, sessionWorkspaceName } from '../workspace-model';
 import { Badge, Banner, Button, IconButton, Tabs } from './primitives';
 import { effectiveStatus, permissionLabels, stateTone } from './ui';
 import { usd } from './usageFormat';
@@ -14,22 +14,18 @@ function ConnectionState({ status }: { status: StreamStatus }) {
   return <span title={label} className="inline-flex shrink-0 items-center gap-1.5 text-meta text-subtle"><span className={`h-1.5 w-1.5 rounded-full ${status === 'open' ? 'bg-action' : status === 'reconnecting' ? 'ui-status-pulse bg-warning-solid' : 'bg-neutral-solid'}`}/><span className="hidden sm:inline">{label}</span></span>;
 }
 
-export type RunDetailTab = 'timeline' | 'terminal';
+export type RunDetailTab = 'timeline' | 'changes' | 'terminal';
 
-/*
-  详情页 timeline|terminal 标签栏。App.tsx 已消费此组件（commit 1a1100f），
-  手写的 role=tablist 与方向键处理一并删除，方向键/Home/End 归 Tabs 原语。
-  面板 id 也已按原语约定改为 `tabpanel-<id>` / `tab-<id>`。
-*/
-export function RunDetailTabs({ value, onChange }: { value: RunDetailTab; onChange(value: RunDetailTab): void }) {
+export function RunDetailTabs({ value, onChange, terminalAvailable = true }: { value: RunDetailTab; onChange(value: RunDetailTab): void; terminalAvailable?: boolean }) {
   return <Tabs value={value} onChange={onChange} label="任务内容" items={[
-    { id: 'timeline', label: '执行记录', icon: <MessageSquare size={13}/> },
-    { id: 'terminal', label: '终端', icon: <Terminal size={13}/> }
+    { id: 'timeline', label: '对话', icon: <MessageSquare size={13}/> },
+    { id: 'changes', label: '改动', icon: <FileDiff size={13}/> },
+    ...(terminalAvailable ? [{ id: 'terminal' as const, label: '终端', icon: <Terminal size={13}/> }] : [])
   ]}/>;
 }
 
 /** 本任务累计用量：自身执行加归到它名下的编排子步骤；还没有任何记录时不显示。 */
-function usageLabel(usage?: SessionUsage) {
+export function usageLabel(usage?: SessionUsage) {
   if (!usage) return undefined;
   const { own, subSteps } = usage;
   const entries = own.entries + subSteps.entries;
@@ -43,7 +39,7 @@ function usageLabel(usage?: SessionUsage) {
   return { text: `本任务${unknown ? '已知费用' : '累计'} ${usd(own.costUsd + subSteps.costUsd)}${extra ? `（${extra}）` : ''}`, detail: `输入 ${tokens('inputTokens')} · 输出 ${tokens('outputTokens')} · 缓存读 ${tokens('cacheReadTokens')} · 缓存写 ${tokens('cacheWriteTokens')} token` };
 }
 
-export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, usage, tools, rawVisible, rawAvailable, restarting, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw, onRename, onOpenInsight }: {
+export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, tools, rawVisible, rawAvailable, restarting, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw, onRename, onOpenInsight }: {
   session: Session;
   agent?: Agent;
   taskPrompt?: string;
@@ -77,20 +73,8 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   // 脱敏管线在 workspace-model:sessionErrorSummary，这里只读不改。
   // 归档任务同样要能看到：历史失败原因是只读信息，不是可操作项。
   const errorSummary = sessionErrorSummary(session.error);
-  const usageLine = usageLabel(usage);
   return <header className="shrink-0 bg-surface">
     <div className="flex flex-wrap items-center gap-x-2 px-3 pt-2 sm:px-5">
-      {/*
-        这里原先有一枚 md:hidden 的汉堡，无障碍名同样是「打开工作台导航」。
-        全局顶栏落地后导航入口收归 TopBar，再留一枚就等于同一屏上有两个同名按钮：
-        读屏用户听到两遍，getByRole 也会抛 "found multiple elements"。
-
-        缺陷 7：这一行原先塞了 workspace / 任务目标 / runId / cwd / Agent / 权限模式六类信息，
-        移动端只剩一个截断标题。现在拆成两层：主行只回答「这是哪个仓库的什么任务」，
-        工作目录、runId 等次要信息下沉到副行。cwd 与 runId 在窄屏用 CSS 隐藏（不是条件渲染），
-        Agent 名与权限姿态任何视口都留在可访问树里。
-      */}
-      {/* basis-48 给标题留底线：放不下全部操作按钮时，按钮整体换到下一行，而不是把标题挤成一个字。 */}
       <div className="min-w-0 grow basis-48">
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="max-w-28 shrink-0 truncate text-body font-medium text-subtle sm:max-w-44" title={workspace}>{workspace}</span>
@@ -99,12 +83,9 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
           {!managed && <IconButton label="重命名会话" onClick={() => onRename?.()}><Pencil size={13}/></IconButton>}
         </div>
         <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-caption text-subtle">
-          <span className="hidden min-w-0 items-center gap-1 sm:flex"><Folder size={11} className="shrink-0"/><span title={session.cwd} className="truncate">{session.cwd}</span><span className="shrink-0">·</span></span>
           <span className="shrink-0 truncate">{agent?.name ?? session.agentId}</span>
           {/* 完全信任是飞书 Bot 的默认姿态，用提醒色标出即可，红字留给真正的失败。 */}
           {session.permissionMode && <><span className="shrink-0">·</span><span title="本任务的权限姿态" className={`shrink-0 ${session.permissionMode === 'full-trust' ? 'text-warning' : 'text-subtle'}`}>{permissionLabels[session.permissionMode]}</span></>}
-          {/* runId 是低频元数据，text-meta 唯一合法的用途。 */}
-          <span className="hidden shrink-0 items-center gap-1.5 sm:flex"><span>·</span><span className="font-mono text-meta tracking-[.08em]">{shortRunId(session)}</span></span>
         </div>
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-0.5">
@@ -124,13 +105,12 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
     */}
     <div className="flex min-h-10 items-center gap-2.5 px-3 pb-2 pt-1 sm:px-5">
       <span className="inline-flex shrink-0 items-center gap-1.5 rounded-sm bg-muted px-2 py-0.5">
-        <span aria-label={status.label} className={`h-2 w-2 shrink-0 rounded-full ${status.busy ? 'ui-status-pulse' : ''} ${status.archived ? 'bg-neutral-solid' : stateTone[session.state] ?? 'bg-neutral-solid'}`}/>
+        <span aria-label={status.label} className={`h-2 w-2 shrink-0 rounded-full ${status.archived ? 'bg-neutral-solid' : stateTone[session.state] ?? 'bg-neutral-solid'}`}/>
         <strong className="text-caption font-semibold text-primary">{status.label}</strong>
       </span>
       <span className="min-w-0 flex-1 truncate text-caption text-secondary">{nextAction}</span>
       {status.recoverable && !managed && <Button variant="secondary" size="sm" loading={restarting} onClick={onRestart} icon={<RotateCcw size={13}/>}>重新启动</Button>}
       {queuedTasks.length > 0 && <Badge tone="queued">待执行指令 {queuedTasks.length} 条</Badge>}
-      {usageLine && <span title={usageLine.detail} className="hidden shrink-0 text-caption text-subtle sm:inline">{usageLine.text}</span>}
       <ConnectionState status={streamStatus}/>
     </div>
     {errorSummary && <div className="px-3 pb-3 sm:px-5"><Banner tone="danger" title="失败详情">{errorSummary}</Banner></div>}

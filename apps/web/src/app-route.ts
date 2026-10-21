@@ -28,7 +28,7 @@ import { instancePagePath, stripInstancePath } from './instance';
  * 则用 replaceState 抹掉 query，因为此时 back() 会离开站点。
  */
 
-export type PrimaryNav = 'tasks' | 'bots' | 'groups';
+export type PrimaryNav = 'home' | 'tasks' | 'automation' | 'bots' | 'groups';
 
 export type AppRoute = { kind: 'overview' } | { kind: 'session'; sessionId: string } | { kind: 'not-found' };
 
@@ -97,7 +97,7 @@ export const parseAppLocation = (pathname: string, search: string): AppLocation 
   if (route.kind === 'not-found') return { route };
   const params = new URLSearchParams(search);
   const navParam = params.get('nav');
-  const nav: PrimaryNav | undefined = (navParam === 'bots' || navParam === 'groups' || navParam === 'tasks') ? navParam : undefined;
+  const nav: PrimaryNav | undefined = (['home', 'tasks', 'automation', 'bots', 'groups'].includes(navParam ?? '')) ? navParam as PrimaryNav : undefined;
   const appId = params.get('appId') || undefined;
   const chatId = params.get('chatId') || undefined;
   return {
@@ -147,14 +147,11 @@ export const turnDiffPath = (sessionId: string, taskId: string) => instancePageP
 export const appLocationPath = ({ route, nav, appId, chatId, overlay }: AppLocation): string => {
   const base = routePath(route);
   const params = new URLSearchParams();
-  if (nav && nav !== 'tasks') {
+  if (nav && (nav !== (route.kind === 'session' ? 'tasks' : 'home') || appId || chatId)) {
     params.set('nav', nav);
     if (appId) params.set('appId', appId);
     if (chatId) params.set('chatId', chatId);
-  } else if (nav === 'tasks' && (appId || chatId)) {
-    params.set('nav', 'tasks');
-    if (appId) params.set('appId', appId);
-    if (chatId) params.set('chatId', chatId);
+
   }
   if (overlay) {
     params.set('panel', overlay.kind);

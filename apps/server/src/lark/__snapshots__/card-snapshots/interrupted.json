@@ -372,7 +372,7 @@
               }
             },
             "summary": {
-              "content": "中断 · 排查一下今天的告警"
+              "content": "已中断 · 排查一下今天的告警"
             }
           },
           "body": {
@@ -391,7 +391,7 @@
                 "header": {
                   "title": {
                     "tag": "markdown",
-                    "content": "<font color='grey'>中断</font><font color='grey'> · <耗时></font><font color='grey'> · 读文件 1 个</font><font color='grey'> · 原因见下条</font>",
+                    "content": "<font color='grey'>已中断</font><font color='grey'> · <耗时></font><font color='grey'> · 读文件 1 个</font><font color='grey'> · 原因见下条</font>",
                     "text_size": "normal",
                     "icon": {
                       "tag": "standard_icon",
@@ -497,7 +497,7 @@
               }
             },
             "summary": {
-              "content": "中断 · 排查一下今天的告警"
+              "content": "已中断 · 排查一下今天的告警"
             }
           },
           "body": {
@@ -574,6 +574,18 @@
                 "margin": "4px 0px"
               },
               {
+                "tag": "markdown",
+                "element_id": "verification_status",
+                "content": "**平台验证**　<text_tag color='grey'>未验证</text_tag>　未配置验证命令，尚无平台执行记录。",
+                "text_size": "notation",
+                "margin": "4px 0px 0px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info_outlined",
+                  "color": "grey"
+                }
+              },
+              {
                 "tag": "column_set",
                 "flex_mode": "none",
                 "horizontal_spacing": "8px",
@@ -623,7 +635,7 @@
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "中断"
+                  "content": "已中断"
                 },
                 "color": "neutral"
               }

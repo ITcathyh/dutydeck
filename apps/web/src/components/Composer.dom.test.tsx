@@ -37,7 +37,7 @@ const baseProps = {
   onRefreshModels: noop
 };
 
-const sendButton = () => screen.getByRole('button', { name: /发送消息|模型/ });
+const sendButton = () => screen.getByRole('button', { name: /发送消息|加入队列|停止当前执行并发送|模型/ });
 
 describe('Composer Skill 选择', () => {
   it.each(['click', 'enter'])('%s 保存完整路径并显示名称', async method => {
@@ -90,12 +90,12 @@ describe('Composer 发送门禁', () => {
 
   it.each(['starting', 'interrupting', 'stopped', 'failed'])('state=%s → 不可发送', state => {
     render(<Composer {...baseProps} value="你好" state={state}/>);
-    expect((screen.getByRole('button', { name: '发送消息' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: /发送消息|加入队列/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('state=thinking 且有文本 → 仍可发送（排队/打断语义）', () => {
+  it('state=thinking 且有文本 → 默认加入队列，明确本轮结束后执行', () => {
     render(<Composer {...baseProps} value="你好" state="thinking"/>);
-    expect((screen.getByRole('button', { name: '发送消息' }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: '加入队列' }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
 
@@ -388,9 +388,9 @@ describe('Composer 浮层缺陷回归', () => {
     // 菜单却留在屏幕上——既点不到触发器收起它，也没有外部点击/Escape 监听。
     const { rerender } = render(<Composer {...baseProps} state="thinking" value="补充要求"/>);
     await user.click(screen.getByRole('button', { name: /排队/ }));
-    expect(screen.getByText('打断并立即发送')).toBeTruthy();
+    expect(screen.getByText('停止当前执行并发送')).toBeTruthy();
     rerender(<Composer {...baseProps} state="thinking" value=""/>);
-    expect(screen.queryByText('打断并立即发送')).toBeNull();
+    expect(screen.queryByText('停止当前执行并发送')).toBeNull();
   });
 
   it('Agent 可插话时发送模式菜单多一项「插话到当前这一轮」', async () => {
@@ -401,7 +401,7 @@ describe('Composer 浮层缺陷回归', () => {
     await user.click(screen.getByText('插话到当前这一轮'));
     expect(onModeChange).toHaveBeenCalledWith('steer');
     rerender(<Composer {...baseProps} state="thinking" value="补充要求" mode="steer" steerable/>);
-    expect(screen.getByRole('button', { name: /插话/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '插话' })).toBeTruthy();
     rerender(<Composer {...baseProps} state="thinking" value="补充要求"/>);
     await user.click(screen.getByRole('button', { name: /排队/ }));
     expect(screen.queryByText('插话到当前这一轮')).toBeNull();
@@ -464,7 +464,7 @@ describe('Composer 浮层缺陷回归', () => {
 describe('Composer 触控目标（契约 §9：主要交互 ≥40px）', () => {
   it('发送按钮与中断按钮都是 40px', () => {
     const { unmount } = render(<Composer {...baseProps} value="你好"/>);
-    expect(screen.getByRole('button', { name: '发送消息' }).className).toContain('h-10');
+    expect(screen.getByRole('button', { name: '发送消息' }).className).toContain('h-11');
     unmount();
     render(<Composer {...baseProps} state="running_tool" value=""/>);
     expect(screen.getByRole('button', { name: '中断当前任务' }).className).toContain('h-10');

@@ -45,8 +45,9 @@ function QueuedTasks({ tasks, cancellingTaskId, steeringTaskId, injectingTaskId,
       <span className="ml-auto text-caption font-normal text-queued">{blocked ? '被审批阻塞，当前审批处理后依次执行' : '当前任务完成后依次执行'}</span>
       {blocked && onRejectPermission && <Button size="md" variant="ghost" loading={rejectingPermission} onClick={() => onRejectPermission(blockingPermissionId!)}>拒绝这条审批</Button>}
     </div>
-    <div className="max-h-32 overflow-y-auto">{tasks.map(task => <div key={task.id} className="group flex items-center gap-2 px-3.5 py-1.5 text-caption text-secondary hover:bg-hover">
-      <span className="min-w-0 flex-1 truncate">{task.prompt}</span>
+    <p className="px-3.5 pt-2 text-caption text-queued">打断会停止正在进行的操作，再执行所选指令；已有改动保留。</p>
+    <div className="max-h-32 overflow-y-auto">{tasks.map(task => <div key={task.id} className="group flex flex-wrap items-center gap-2 px-3.5 py-1.5 text-caption text-secondary hover:bg-hover">
+      <span className="min-w-0 basis-full truncate sm:flex-1 sm:basis-auto">{task.prompt}</span>
       <span className="shrink-0 text-caption text-subtle">{blocked ? '被审批阻塞' : '排队中'}</span>
       {/* 「立即插话」把这条送进正在执行的那一轮，不打断它；Agent 不支持时这条仍在排队。 */}
       {onInject && <Button size="md" variant="ghost" disabled={frozen} onClick={() => onInject(task.id)}>{injectingTaskId === task.id ? '正在插话' : '立即插话'}</Button>}
@@ -211,7 +212,7 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
   const busy = busyStates.has(state);
   const canSend = modelReadiness.kind === 'ready' && (value.trim().length > 0 || references.length > 0) && !sending && !['starting', 'interrupting', 'stopped', 'failed'].includes(state);
   const modelLabel = modelReadiness.kind === 'ready' ? currentModel || '默认模型' : modelReadiness.label;
-  const sendLabel = modelReadiness.kind === 'ready' ? '发送消息' : modelReadiness.reason;
+  const sendLabel = modelReadiness.kind === 'ready' ? busy ? mode === 'interrupt' ? '停止当前执行并发送' : mode === 'steer' && steerable ? '立即插话' : '加入队列' : '发送消息' : modelReadiness.reason;
   const query = slashQuery(value, textarea.current?.selectionStart ?? value.length);
   // 命令表来自 composer-commands.ts 的单一注册表，与飞书那份共享同一套设计模式：
   // 真实能力支撑 + 诚实门控。没有对应回调的动作型命令直接不列出，避免点了没反应。
@@ -237,6 +238,8 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
   */
   const modeTriggerVisible = busy && Boolean(value.trim());
   useEffect(() => { if (!modeTriggerVisible) setModeOpen(false); }, [modeTriggerVisible]);
+
+  useEffect(() => { if (mode === 'steer' && !steerable) onModeChange('queue'); }, [mode, onModeChange, steerable]);
 
   const slashTrigger = usePopoverTrigger(commandPanel, 'menu');
   const modelsTrigger = usePopoverTrigger(panel === 'models', 'listbox');
@@ -333,18 +336,19 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
 
       <ReferenceChips references={references} onChange={onReferencesChange}/>
 
+      {busy && <p className={`px-2.5 py-1 text-caption ${mode === 'interrupt' ? 'text-warning' : 'text-subtle'}`}>{mode === 'interrupt' ? '将停止当前执行并发送这条指令；正在进行的操作会被打断，已有改动保留。' : mode === 'steer' && steerable ? '补充给当前这一轮；不会停止当前执行。' : '本轮完成后，按队列顺序执行。'}</p>}
       <textarea
         ref={textarea}
         aria-label="消息"
         value={value}
         onChange={event => { onChange(event.target.value); if (panel !== 'file' && panel !== 'models' && panel !== 'reasoning') setPanel(undefined); }}
         onKeyDown={keyboard}
-        placeholder={planFirst ? '描述要完成的目标；Agent 先出计划，你批准后才执行' : busy ? '补充要求；可选择排队或立即介入当前执行' : '描述要完成的目标、范围和验收要求（Enter 发送，Shift + Enter 换行）'}
+        placeholder={planFirst ? '描述要完成的目标；Agent 先出计划，你批准后才执行' : busy ? '补充要求；默认在本轮完成后执行' : '描述要完成的目标、范围和验收要求（Enter 发送，Shift + Enter 换行）'}
         rows={1}
         className="max-h-48 min-h-16 w-full resize-none overflow-y-auto border-0 bg-transparent px-2.5 py-2 text-body text-primary outline-none placeholder:text-subtle focus-visible:outline-none"
       />
 
-      <div className="flex min-w-0 items-center gap-1 px-1 pb-1">
+      <div className="flex min-w-0 flex-wrap items-center gap-1 px-1 pb-1">
         <button
           type="button"
           aria-label="打开斜杠菜单"
@@ -393,7 +397,7 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
           <Popover open={modeOpen && modeTriggerVisible} onClose={() => setModeOpen(false)} anchor={modeAnchor} placement="top-end" width={224}>
             {steerable && <button type="button" onClick={() => { onModeChange('steer'); setModeOpen(false); }} className="flex min-h-10 w-full items-center gap-2 rounded-md px-2.5 py-2 text-body text-secondary hover:bg-hover"><MessageSquarePlus size={14}/>插话到当前这一轮</button>}
             <button type="button" onClick={() => { onModeChange('queue'); setModeOpen(false); }} className="flex min-h-10 w-full items-center gap-2 rounded-md px-2.5 py-2 text-body text-secondary hover:bg-hover"><ListEnd size={14}/>排队发送</button>
-            <button type="button" onClick={() => { onModeChange('interrupt'); setModeOpen(false); }} className="flex min-h-10 w-full items-center gap-2 rounded-md px-2.5 py-2 text-body text-secondary hover:bg-warning-soft hover:text-warning"><Zap size={14}/>打断并立即发送</button>
+            <button type="button" onClick={() => { onModeChange('interrupt'); setModeOpen(false); }} className="flex min-h-10 w-full items-center gap-2 rounded-md px-2.5 py-2 text-body text-secondary hover:bg-warning-soft hover:text-warning"><Zap size={14}/>停止当前执行并发送</button>
           </Popover>
 
           {busy && !value.trim() && !references.length
@@ -404,8 +408,8 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
                 disabled={!canSend}
                 onClick={onSubmit}
                 aria-label={sendLabel}
-                className={`grid h-10 w-10 place-items-center rounded-full transition-colors duration-fast ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring disabled:cursor-not-allowed disabled:bg-muted disabled:text-subtle ${busy && mode === 'interrupt' ? 'bg-attention-solid text-on-action hover:bg-warning-solid' : 'bg-inverse text-on-inverse hover:bg-inverse-hover'}`}
-              ><Send size={14}/></button>
+                className={`flex h-11 items-center justify-center gap-2 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring disabled:cursor-not-allowed disabled:bg-muted disabled:text-subtle ${busy && mode === 'interrupt' ? 'bg-attention-solid text-on-action hover:bg-warning-solid' : 'bg-inverse text-on-inverse hover:bg-inverse-hover'}`}
+              ><Send size={14}/>{busy && <span>{sendLabel}</span>}</button>
             </span>}
         </div>
       </div>

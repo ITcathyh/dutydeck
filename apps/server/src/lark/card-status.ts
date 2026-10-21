@@ -1,27 +1,27 @@
 // 飞书过程卡 / 结果卡的用户可见状态、时长与时间格式、结论首句。
 //
 // 内部状态机有十几种说法（排队受阻、需要核对、结果未知、已核对结果未确认……），
-// 读者分不清它们的区别，也没有对应的不同操作。这里把它们收敛成 5 个用户可见状态，
-// 具体原因作副标题；内部状态到 5 个状态的映射只在这一处。
+// 读者分不清它们的区别，也没有对应的不同操作。这里把它们收敛成 5 类状态，
+// 待处理直接写明审批或回答，其余具体原因作副标题；内部状态的映射只在这一处。
 // 本模块必须保持纯函数、不 import service.ts / card-renderer.ts（它们会反过来 import 本模块）。
 
 export type LarkUserStatus = 'running' | 'attention' | 'completed' | 'failed' | 'interrupted';
 
-// 标题栏颜色按 5 状态：进行中 blue、需要你处理 orange、完成 green、失败 red、中断 grey。
+// 标题栏颜色按 5 类状态：进行中 blue、待处理 orange、已完成 green、失败 red、已中断 grey。
 export const larkUserStatusPresentation: Record<LarkUserStatus, { label: string; template: string; tagColor: string }> = {
   running: { label: '进行中', template: 'blue', tagColor: 'blue' },
   attention: { label: '需要你处理', template: 'orange', tagColor: 'orange' },
-  completed: { label: '完成', template: 'green', tagColor: 'green' },
+  completed: { label: '已完成', template: 'green', tagColor: 'green' },
   failed: { label: '失败', template: 'red', tagColor: 'red' },
-  interrupted: { label: '中断', template: 'grey', tagColor: 'neutral' }
+  interrupted: { label: '已中断', template: 'grey', tagColor: 'neutral' }
 };
 
 /** 这些调用方传入的说法就是状态本身，不再作为副标题重复一遍。 */
 const plainLabels = new Set(['执行中', '运行完成', '已完成', '已失败', '已中断', '已取消', '排队中', '已接收']);
-/** 恢复类说法：任务停在不确定的位置，用户可见状态统一为「中断」，原因文本由恢复流程负责。 */
+/** 恢复类说法：任务停在不确定的位置，用户可见状态统一为「已中断」，原因文本由恢复流程负责。 */
 const recoveryLabels = new Set(['排队受阻', '需要核对', '结果未知', '已核对，结果未确认', '已放弃']);
 const stalledLabel = '可能卡住';
-const approvalLabels = new Set(['等待审批', '等待回答']);
+const approvalLabels = new Set(['等待审批', '等待回答', '待审批', '待回答']);
 
 export interface LarkUserStatusInput {
   /** 卡片的内部状态（buildLarkCard 的 state）。 */
@@ -52,7 +52,8 @@ export function larkUserStatus(input: LarkUserStatusInput): LarkUserStatusView {
     ({ status, ...larkUserStatusPresentation[status], ...(reason ? { reason } : {}), stopped });
   const detail = label && !plainLabels.has(label) ? label : undefined;
   if (input.waiting || (label && approvalLabels.has(label))) {
-    return view('attention', label && approvalLabels.has(label) ? label : input.awaitingAnswer ? '等待回答' : '等待审批');
+    const reason = label && approvalLabels.has(label) ? label : input.awaitingAnswer ? '等待回答' : '等待审批';
+    return { ...view('attention'), label: reason === '等待回答' || reason === '待回答' ? '待回答' : '待审批' };
   }
   switch (input.state) {
     case 'completed': return view('completed', detail);

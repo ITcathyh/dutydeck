@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { WorkspaceOrganization } from '@dutydeck/shared';
 import type { RunSummary, Session } from './api';
 import type { WorkbenchView } from './workspace-model';
-import { attentionReasonForSession, formatRelativeTime, groupSessionsByWorkspace, needsAttention, normalizeWorkspacePath, orderSessionsForWorkbench, sessionErrorSummary, sessionMatchesView, sessionWorkspaceDirectory, sessionWorkspaceName, workbenchCounts, workbenchTaskSection, workbenchViewLabels, workbenchViewOrder, workspaceName } from './workspace-model';
+import { attentionReasonForSession, formatRelativeTime, groupSessionsByWorkspace, needsAttention, normalizeWorkspacePath, orderSessionsForWorkbench, sessionErrorSummary, sessionMatchesView, sessionWorkspaceDirectory, sessionWorkspaceName, workbenchCounts, sessionAttention, workbenchTaskSection, workbenchViewLabels, workbenchViewOrder, workspaceName } from './workspace-model';
 
 const session = (id: string, cwd: string, state: string, updatedAt: string): Session => ({ id, cwd, state, updatedAt, createdAt: updatedAt, agentId: 'codex', runId: `run-${id}` });
 
@@ -91,18 +91,18 @@ describe('workspace model', () => {
     // 筛选收敛为 5 项，返回对象的键就是这 5 项加一个 queuedCommands；
     // 「有排队的任务数」不再是视图，待执行指令总数只以 queuedCommands 这一个口径出现。
     // active 是 2：thinking 的 '1'，以及 created 但已排队一条的 '2'——排队中也属于「进行中」。
-    expect(workbenchCounts(sessions, summaries)).toEqual({ all: 5, active: 2, queuedCommands: 3, attention: 2, completed: 1, archived: 1 });
+    expect(workbenchCounts(sessions, summaries)).toEqual({ all: 5, active: 2, queuedCommands: 3, attention: 1, continuable: 1, completed: 1, archived: 1 });
     // created 有排队指令 → Agent 还有活可干，不算卡在用户这一侧，而是归入「进行中」。
     expect(sessionMatchesView(sessions[1], 'attention', summaries['2'])).toBe(false);
     expect(sessionMatchesView(sessions[1], 'active', summaries['2'])).toBe(true);
     const noTask = session('no-task', '/repo', 'created', '');
-    expect(sessionMatchesView(noTask, 'attention')).toBe(true);
-    expect(sessionMatchesView(sessions[2], 'attention')).toBe(true);
+    expect(sessionMatchesView(noTask, 'attention')).toBe(false);
+    expect(sessionMatchesView(sessions[2], 'attention')).toBe(false);
     // 失败与已停止归入「待你处理」，不再是单独的筛选项。
     expect(sessionMatchesView(sessions[3], 'attention')).toBe(true);
     expect(sessionMatchesView(session('stopped', '/repo', 'stopped', ''), 'attention')).toBe(true);
     expect(sessionMatchesView(archived, 'completed')).toBe(false);
-    expect(groupSessionsByWorkspace(sessions, 'attention', summaries)[0].sessions.map(item => item.id)).toEqual(['3', '4']);
+    expect(groupSessionsByWorkspace(sessions, 'attention', summaries)[0].sessions.map(item => item.id)).toEqual(['4']);
     expect(groupSessionsByWorkspace(sessions, 'archived')[0].sessions[0].id).toBe('6');
     expect(groupSessionsByWorkspace(sessions, 'all', summaries)[0].queuedCount).toBe(3);
     expect(groupSessionsByWorkspace(sessions, 'all').flatMap(group => group.sessions)).not.toContain(archived);
@@ -123,7 +123,7 @@ describe('workspace model', () => {
     expect(counts.active).toBe(1);
     expect(counts.completed).toBe(0);
     // 一条 session 只能被一个芯片数到：三档相加等于未归档总数。
-    expect(counts.attention + counts.active + counts.completed).toBe(counts.all);
+    expect(counts.attention + counts.active + counts.continuable + counts.completed).toBe(counts.all);
     expect(workbenchTaskSection(doneQueued, summaries['done-queued'])).toBe('active');
     expect(sessionMatchesView(doneQueued, 'completed', summaries['done-queued'])).toBe(false);
     // 队列清空后它才回到「已完成」：视图判据只跟着分区函数动。
@@ -133,7 +133,7 @@ describe('workspace model', () => {
 
   it('筛选项常量即界面顺序，标签只有这一份', () => {
     expect([...workbenchViewOrder]).toEqual(['all', 'attention', 'active', 'completed', 'archived']);
-    expect(workbenchViewOrder.map(view => workbenchViewLabels[view])).toEqual(['总览', '待你处理', '进行中', '已完成', '已归档']);
+    expect(workbenchViewOrder.map(view => workbenchViewLabels[view])).toEqual(['全部', '待你处理', '进行中', '已完成', '已归档']);
     expect(Object.keys(workbenchViewLabels).sort()).toEqual([...workbenchViewOrder].sort());
   });
 
@@ -228,7 +228,7 @@ describe('workspace model', () => {
     // 待你处理：筛选计数 === 分区条数 === needsAttention 直接数出来的条数。
     expect(counts.attention).toBe(inSection('attention').length);
     expect(counts.attention).toBe(current.filter(item => needsAttention(item, summaries[item.id])).length);
-    expect(inSection('attention').map(item => item.id).sort()).toEqual(['empty', 'failed', 'idle', 'interrupted', 'permission', 'permission-queued', 'stopped']);
+    expect(inSection('attention').map(item => item.id).sort()).toEqual(['failed', 'interrupted', 'permission', 'permission-queued', 'stopped']);
 
     // 进行中：与 attention 完全同构的等式。
     //
@@ -238,7 +238,7 @@ describe('workspace model', () => {
     expect(inSection('active').map(item => item.id).sort()).toEqual(['done-queued', 'idle-queued', 'queued', 'working']);
     expect(counts.active).toBe(inSection('active').length);
     // 授权优先：permission-queued 有 3 条排队，但只进 attention，不被 active 重复计数。
-    expect(counts.attention + counts.active).toBe(current.filter(item => workbenchTaskSection(item, summaries[item.id]) !== 'recent').length);
+    expect(counts.attention + counts.active).toBe(current.filter(item => ['attention', 'active'].includes(workbenchTaskSection(item, summaries[item.id]))).length);
 
     // 已完成：视图名叫 completed、分区 key 叫 recent，但两者是同一个集合。
     // 委托前这里裸判 state === 'completed'，done-queued 会同时被 completed 与 active
@@ -260,10 +260,10 @@ describe('workspace model', () => {
     // 「已完成」视图必落在 recent 分区，绝不会同时出现在前两档。
     expect(inView('completed').every(item => workbenchTaskSection(item, summaries[item.id]) === 'recent')).toBe(true);
     // 三个芯片互不重叠地覆盖全部未归档任务：没有任何一条被数两次。
-    expect(counts.attention + counts.active + counts.completed).toBe(counts.all);
+    expect(counts.attention + counts.active + counts.continuable + counts.completed).toBe(counts.all);
 
     // 每个未归档任务恰好落在一个分区里，三个分区加起来等于 all，不重不漏。
-    expect(inSection('attention').length + inSection('active').length + inSection('recent').length).toBe(counts.all);
+    expect(inSection('attention').length + inSection('active').length + inSection('continue').length + inSection('recent').length).toBe(counts.all);
     expect(counts.all).toBe(current.length);
 
     // 归档既不进任何分区，也不计入 all。
@@ -376,5 +376,24 @@ describe('workspace model', () => {
     expect(archivedGroups).toHaveLength(1);
     expect(archivedGroups[0].id).toBe('wg_mixed');
     expect(archivedGroups[0].sessions.map(s => s.id)).toEqual(['s_archived']);
+  });
+});
+
+
+describe('Calm Workbench 注意力分层', () => {
+  it('新建和空闲可继续；审批、失败、中断、停止与未知状态需要处理，归档优先', () => {
+    for (const state of ['created', 'idle']) {
+      const current = session(state, '/repo', state, '');
+      expect(sessionAttention(current)).toBe('continue');
+      expect(needsAttention(current)).toBe(false);
+      expect(workbenchTaskSection(current)).toBe('continue');
+    }
+    for (const state of ['waiting_for_permission', 'waiting_for_answer', 'failed', 'interrupted', 'stopped', 'future_state']) {
+      const current = session(state, '/repo', state, '');
+      expect(needsAttention(current)).toBe(true);
+      expect(sessionAttention({ ...current, archivedAt: '2026-10-21' })).toBe('archived');
+      expect(needsAttention({ ...current, archivedAt: '2026-10-21' })).toBe(false);
+    }
+    expect(sessionAttention({ ...session('idle', '/repo', 'idle', ''), error: 'connection lost' })).toBe('recovery');
   });
 });

@@ -54,8 +54,8 @@ export type TopBarProps = {
 
   ## 高度只有一个值
 
-  避免因历史中 `--topbar-h(56px)` 与 `--topbar-height(60px)` 双变量不一致导致 4px 错位（契约 §15）。
-  这里只用 h-topbar 一个来源，确保侧栏的让位与顶栏的高度严格对齐。
+  避免因历史中 `--topbar-h(61px)` 与 `--topbar-height(60px)` 双变量不一致导致 4px 错位（契约 §15）。
+  这里只用 h-topbar 一个来源，桌面 61px、窄屏 54px；侧栏贴左全高。
 
   分隔线用 border-b border-default，采用标准语义边框而非硬编码 linear-gradient 渐变线，
   符合契约对颜色字面量的约束。
@@ -67,7 +67,7 @@ export function TopBar({ onOpenNavigation, onGoHome, onOpenSearch, onOpenShortcu
   return <header
     aria-hidden={hidden || undefined}
     inert={hidden || undefined}
-    className="flex h-topbar shrink-0 items-center gap-2 border-b border-default bg-surface px-3 sm:px-5"
+    className="flex h-topbar shrink-0 items-center gap-2 border-b border-default bg-canvas px-3 sm:px-5"
   >
     <span className="md:hidden"><IconButton label="打开工作台导航" onClick={onOpenNavigation}><Menu size={17}/></IconButton></span>
 

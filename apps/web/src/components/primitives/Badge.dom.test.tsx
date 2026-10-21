@@ -107,15 +107,15 @@ describe('StatusBadge 归档优先', () => {
 
   it('thinking（未归档）：「思考中」照常显示', () => {
     render(<StatusBadge session={makeSession('thinking')}/>);
-    const badge = screen.getByText('思考中');
+    const badge = screen.getByText('进行中');
     expect(badge.className).toContain('text-info');
   });
 
   it('waiting_for_permission 走警告色，未知状态兜底 info', () => {
     const { unmount } = render(<StatusBadge session={makeSession('waiting_for_permission')}/>);
-    expect(screen.getByText('等待授权').className).toContain('text-warning');
+    expect(screen.getByText('待审批').className).toContain('text-warning');
     unmount();
     render(<StatusBadge session={makeSession('running_tool')}/>);
-    expect(screen.getByText('正在调用工具').className).toContain('text-info');
+    expect(screen.getByText('进行中').className).toContain('text-info');
   });
 });

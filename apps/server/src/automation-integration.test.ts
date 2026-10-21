@@ -280,7 +280,16 @@ describe('Agent schedule request delivery', () => {
       expect(bodies[0].uuid.length).toBeLessThanOrEqual(50);
       expect((await f.repos.config.list('session_automation/schedule/'))).toHaveLength(1);
       expect(JSON.stringify(JSON.parse(bodies[1].content))).toContain('dutydeck_schedule_enable');
-      expect(JSON.parse(bodies[1].content).body.elements.find((element: any) => element.element_id === 'schedule_request').content).toContain(prompt);
+      const card = JSON.parse(bodies[1].content);
+      const summary = card.body.elements.find((element: any) => element.element_id === 'schedule_request');
+      expect(summary.content).toContain('**时区**：Asia/Shanghai');
+      expect(summary.content).toContain('**发到哪**：本话题');
+      expect(summary.content).toContain('当前未启用');
+      expect(summary.content).not.toContain(prompt);
+      const fullPrompt = card.body.elements.find((element: any) => element.element_id === 'schedule_request_prompt');
+      expect(fullPrompt).toMatchObject({ expanded: false, elements: [{ tag: 'div', text: { tag: 'plain_text', content: prompt } }] });
+      expect(fullPrompt.elements[0].text.content).toContain('只提方案，不修改代码');
+      expect(fullPrompt.elements[0].text.content).toContain('P0–P3');
     } finally { service.close(); }
   });
 
@@ -318,12 +327,12 @@ describe('Agent schedule request delivery', () => {
     await f.sendScheduleRequest(schedule);
     expect(f.client.reply).toHaveBeenCalledTimes(1);
     const sent = f.client.reply.mock.calls[0]![0] as any;
-    expect(sent).toMatchObject({ messageId: 'om_request', replyInThread: true, statusLabel: '待启用' });
+    expect(sent).toMatchObject({ messageId: 'om_request', replyInThread: true, statusLabel: '未启用' });
     expect(JSON.stringify(sent.elements)).toContain('**做什么**：看看这个话题有没有排查结论');
     expect(JSON.stringify(sent.elements)).toContain('**什么时候**：每 15 分钟');
     expect(JSON.stringify(sent.elements)).toContain('**发到哪**：本话题');
     const button = sent.elements.find((element: any) => element.element_id === 'schedule_request_toggle');
-    expect(button.text.content).toBe('启用');
+    expect(button.text.content).toBe('确认启用');
     expect(button.behaviors[0].value).toEqual({ dutydeck_schedule_enable: 'schedule_req', card: 'request' });
   });
 });

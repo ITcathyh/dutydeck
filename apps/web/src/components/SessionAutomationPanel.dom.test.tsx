@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { PublicCiProvider, PublicCiSubscription, PublicSessionSchedule, PublicSessionScheduleOccurrence } from '@dutydeck/shared';
 import { api, ApiError, type Session } from '../api';
 import { setInstance } from '../instance';
-import { SessionAutomationPanel } from './SessionAutomationPanel';
+import { SessionAutomationPanel, scheduleRule } from './SessionAutomationPanel';
 
 const session: Session = { id: 's1', agentId: 'a', cwd: '/project/worktree', state: 'completed', runId: 'r', createdAt: '2026-09-12T00:00:00Z', updatedAt: '2026-09-12T00:00:00Z' };
 const schedule: PublicSessionSchedule = { schemaVersion: 1, id: 'plan1', revision: 3, generation: 1, sessionId: session.id, name: '巡检', prompt: '检查构建', trigger: { kind: 'cron', expression: '*/17 3-9 * 2,7 1-5' }, timezone: 'America/New_York', dstPolicy: { gap: 'shift_forward', overlap: 'second' }, condition: { kind: 'always' }, enabled: false, createdAt: session.createdAt, updatedAt: session.updatedAt };
@@ -13,7 +13,7 @@ const clients: QueryClient[] = [];
 afterEach(() => { setInstance(undefined); cleanup(); clients.forEach(client => client.clear()); clients.length = 0; vi.restoreAllMocks(); });
 const testCi: PublicCiProvider = { id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false };
 function mount(schedules: PublicSessionSchedule[] = [], providers: PublicCiProvider[] = [testCi], subscriptions: PublicCiSubscription[] = []) {
-  const read = vi.spyOn(api, 'automation').mockResolvedValue({ schedules, subscriptions, occurrences: [] });
+  const read = vi.spyOn(api, 'automation').mockResolvedValue({ schedules, subscriptions, occurrences: [], deliveryTargets: Object.fromEntries(schedules.map(item => [item.id, { kind: 'task' as const, sessionId: session.id }])) });
   vi.spyOn(api, 'ciProviders').mockResolvedValue({ providers });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   clients.push(client);
@@ -153,6 +153,9 @@ describe('session automation schedules', () => {
     await screen.findByText('巡检 · 已停用');
     read.mockResolvedValue({ schedules: [enabled], subscriptions: [], occurrences: [] });
     await user.click(screen.getByRole('button', { name: '启用' }));
+    expect(update).not.toHaveBeenCalled();
+    expect(screen.getByRole('alertdialog', { name: '确认启用计划' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '确认启用' }));
     await screen.findByText('巡检 · 已启用');
     expect(await screen.findByText('下一次执行：2026/9/13 09:00:00 · America/New_York')).toBeTruthy();
     await waitFor(() => expect((screen.getByRole('button', { name: '停用' }) as HTMLButtonElement).disabled).toBe(false));
@@ -235,5 +238,46 @@ describe('session automation CI providers', () => {
     await user.type(screen.getByLabelText('检查的工作流（可选）'), 'ci.yml');
     await user.click(screen.getByRole('button', { name: '保存计划' }));
     await waitFor(() => expect(create).toHaveBeenCalledWith('s1', expect.objectContaining({ condition: { kind: 'ci_new_failure', workflow: 'ci.yml' } })));
+  });
+});
+
+describe('automation enable confirmation', () => {
+  it('shows exact frozen Lark destination and the full instruction before enabling', async () => {
+    const read = mount([schedule]);
+    const update = vi.spyOn(api, 'updateSchedule').mockResolvedValue({ schedule });
+    await screen.findByText('巡检 · 已停用');
+    read.mockResolvedValue({ schedules: [schedule], subscriptions: [], occurrences: [], deliveryTargets: { plan1: { kind: 'lark', appId: 'cli_saved', chatId: 'oc_saved', replyMessageId: 'om_saved_topic', replyInThread: true } } });
+    await clients[0]!.invalidateQueries({ queryKey: ['automation', session.id] });
+    await userEvent.click(screen.getByRole('button', { name: '启用' }));
+    const dialog = screen.getByRole('alertdialog', { name: '确认启用计划' });
+    expect(dialog.textContent).toContain('检查构建');
+    expect(dialog.textContent).toContain('*/17 3-9 * 2,7 1-5');
+    expect(dialog.textContent).toContain('America/New_York');
+    expect(dialog.textContent).toContain('oc_saved');
+    expect(dialog.textContent).toContain('话题内回复 om_saved_topic');
+    expect(dialog.textContent).toContain('cli_saved');
+    expect(update).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: '暂不启用' }));
+    expect(update).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: '启用' }));
+    await userEvent.click(screen.getByRole('button', { name: '确认启用' }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith('s1', 'plan1', { expectedRevision: 3, enabled: true }));
+  });
+
+  it('keeps old-instance plans readable but blocks enabling without a verified destination', async () => {
+    const read = mount([schedule]);
+    const update = vi.spyOn(api, 'updateSchedule');
+    await screen.findByText('巡检 · 已停用');
+    read.mockResolvedValue({ schedules: [schedule], subscriptions: [], occurrences: [] });
+    await clients[0]!.invalidateQueries({ queryKey: ['automation', session.id] });
+    await userEvent.click(screen.getByRole('button', { name: '启用' }));
+    expect((screen.getByRole('button', { name: '确认启用' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('alertdialog').textContent).toContain('未能核实保存的投递位置');
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('translates ordinary calendar rules while preserving advanced Cron expressions', () => {
+    expect(scheduleRule({ ...schedule, trigger: { kind: 'cron', expression: '30 18 * * 1-5' } })).toBe('每个工作日 18:30 · America/New_York');
+    expect(scheduleRule(schedule)).toContain('Cron */17 3-9 * 2,7 1-5');
   });
 });

@@ -52,10 +52,11 @@ export type StatusBadgeProps = { session: Session };
 const stateBadgeTone: Record<string, BadgeTone> = {
   failed: 'danger',
   stopped: 'danger',
+  waiting_for_answer: 'warning',
   waiting_for_permission: 'warning',
   interrupted: 'warning',
-  created: 'warning',
-  idle: 'warning',
+  created: 'neutral',
+  idle: 'neutral',
   completed: 'success'
 };
 

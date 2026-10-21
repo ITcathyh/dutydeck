@@ -98,7 +98,7 @@ test.describe('Managed workspace browser acceptance', () => {
 
   test('Journey A: same source worktrees group into single project, navigate correctly, and display actual worktree cwd', async ({ page }) => {
     await page.goto(instance.baseUrl, { waitUntil: 'domcontentloaded' });
-    await page.getByRole('heading', { name: '今天需要推进什么？' }).waitFor({ state: 'visible', timeout: 20_000 });
+    await page.getByRole('heading', { name: '工作台', level: 1, exact: true }).waitFor({ state: 'visible', timeout: 20_000 });
 
     // 定位唯一的工作台导航侧栏，避免匹配到页面主区里的其他 aside
     const sidebar = page.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
@@ -127,7 +127,7 @@ test.describe('Managed workspace browser acceptance', () => {
     await expect(sidebar.locator('[aria-current="true"]')).toHaveCount(1);
 
     // 核对主区执行记录：用户消息与最终输出 article
-    const timelineA = main.getByLabel('执行记录', { exact: true });
+    const timelineA = main.getByRole('tabpanel', { name: '对话', exact: true });
     await expect(timelineA.locator('.ui-timeline-item.justify-end').getByText(PROMPT_ALPHA, { exact: true })).toBeVisible();
 
     const outputArticleA = timelineA.getByRole('article', { name: /最终输出/ });
@@ -138,12 +138,13 @@ test.describe('Managed workspace browser acceptance', () => {
     await expect(main.getByText(PROMPT_BETA)).toHaveCount(0);
 
     // 打开“工作目录、验证与自动化”弹窗核对真实 cwd 与 branch
-    await page.getByRole('button', { name: '工作目录、验证与自动化', exact: true }).click();
-    const dialogA = page.getByRole('dialog', { name: '工作目录与自动化' });
+    await page.getByRole('button', { name: '结果检视', exact: true }).click();
+    const dialogA = page.getByRole('complementary', { name: '结果检视' });
     await expect(dialogA).toBeVisible();
+    await dialogA.locator('summary').filter({ hasText: '执行环境与用量' }).click();
     await expect(dialogA.getByText(sessionA.cwd, { exact: true })).toBeVisible();
     await expect(dialogA.getByText(sessionA.branch, { exact: false }).first()).toBeVisible();
-    await dialogA.getByRole('button', { name: '关闭', exact: true }).click();
+    await dialogA.getByRole('button', { name: '关闭结果检视', exact: true }).click();
     await expect(dialogA).toBeHidden();
 
     // 2. 点击 Session B 任务行
@@ -158,7 +159,7 @@ test.describe('Managed workspace browser acceptance', () => {
     await expect(sidebar.locator('[aria-current="true"]')).toHaveCount(1);
 
     // 核对主区执行记录：用户消息与最终输出 article
-    const timelineB = main.getByLabel('执行记录', { exact: true });
+    const timelineB = main.getByRole('tabpanel', { name: '对话', exact: true });
     await expect(timelineB.locator('.ui-timeline-item.justify-end').getByText(PROMPT_BETA, { exact: true })).toBeVisible();
 
     const outputArticleB = timelineB.getByRole('article', { name: /最终输出/ });
@@ -169,12 +170,13 @@ test.describe('Managed workspace browser acceptance', () => {
     await expect(main.getByText(PROMPT_ALPHA)).toHaveCount(0);
 
     // 打开弹窗核对 Session B 的真实 cwd 与 branch（与 Session A 不同）
-    await page.getByRole('button', { name: '工作目录、验证与自动化', exact: true }).click();
-    const dialogB = page.getByRole('dialog', { name: '工作目录与自动化' });
+    await page.getByRole('button', { name: '结果检视', exact: true }).click();
+    const dialogB = page.getByRole('complementary', { name: '结果检视' });
     await expect(dialogB).toBeVisible();
+    await dialogB.locator('summary').filter({ hasText: '执行环境与用量' }).click();
     await expect(dialogB.getByText(sessionB.cwd, { exact: true })).toBeVisible();
     await expect(dialogB.getByText(sessionB.branch, { exact: false }).first()).toBeVisible();
-    await dialogB.getByRole('button', { name: '关闭', exact: true }).click();
+    await dialogB.getByRole('button', { name: '关闭结果检视', exact: true }).click();
     await expect(dialogB).toBeHidden();
   });
 
@@ -182,7 +184,7 @@ test.describe('Managed workspace browser acceptance', () => {
     // 导航至 Session A 详情页
     await page.goto(`${instance.baseUrl}/sessions/${sessionA.id}`, { waitUntil: 'domcontentloaded' });
     const main = page.getByRole('main');
-    const timeline = main.getByLabel('执行记录', { exact: true });
+    const timeline = main.getByRole('tabpanel', { name: '对话', exact: true });
     await expect(timeline.getByRole('article', { name: /最终输出/ })).toBeVisible({ timeout: 20_000 });
 
     // 1. UI 点击“归档任务”并在 alertdialog 确认
@@ -192,8 +194,10 @@ test.describe('Managed workspace browser acceptance', () => {
     await confirmArchiveDialog.getByRole('button', { name: '确认归档', exact: true }).click();
     await expect(confirmArchiveDialog).toBeHidden();
 
-    // 归档后回到总览页，等待标题“今天需要推进什么？”
-    await page.getByRole('heading', { name: '今天需要推进什么？' }).waitFor({ state: 'visible', timeout: 20_000 });
+    // 归档后回到工作台，再进入完整任务列表查看归档记录。
+    await page.getByRole('heading', { name: '工作台', level: 1, exact: true }).waitFor({ state: 'visible', timeout: 20_000 });
+
+    await page.getByRole('complementary', { name: 'Dutydeck 工作台导航' }).getByRole('button', { name: /^全部任务/ }).click();
 
     // 点击任务筛选区域中的“已归档”筛选按钮，断言 aria-pressed="true"
     const filterSection = page.getByRole('region', { name: '任务筛选' });
@@ -214,8 +218,9 @@ test.describe('Managed workspace browser acceptance', () => {
     expect(existsSync(join(sessionA.cwd, 'tracked.txt'))).toBe(true);
 
     // 2. 打开弹窗，点击“检查可否清理”
-    await page.getByRole('button', { name: '工作目录、验证与自动化', exact: true }).click();
-    const dialog = page.getByRole('dialog', { name: '工作目录与自动化' });
+    await page.getByRole('button', { name: '结果检视', exact: true }).click();
+    const dialog = page.getByRole('complementary', { name: '结果检视' });
+    await dialog.locator('summary').filter({ hasText: '执行环境与用量' }).click();
     await expect(dialog).toBeVisible();
 
     const cleanupCheckPromise = page.waitForResponse(
@@ -326,7 +331,7 @@ test.describe('Managed workspace browser acceptance', () => {
     // 6. 页面刷新后核对历史仍然可读，且只读与已清理状态持久有效，输入框彻底卸载不可用
     await page.reload();
     const reloadedMain = page.getByRole('main');
-    const reloadedTimeline = reloadedMain.getByLabel('执行记录', { exact: true });
+    const reloadedTimeline = reloadedMain.getByRole('tabpanel', { name: '对话', exact: true });
 
     await expect(reloadedTimeline.locator('.ui-timeline-item.justify-end').getByText(PROMPT_ALPHA, { exact: true })).toBeVisible({ timeout: 15_000 });
     const reloadedOutputArticle = reloadedTimeline.getByRole('article', { name: /最终输出/ });
@@ -338,9 +343,10 @@ test.describe('Managed workspace browser acceptance', () => {
     await expect(page.getByText('该任务已归档，只能查看历史记录。')).toBeVisible();
     await expect(reloadedMain.getByRole('textbox', { name: '消息', exact: true })).toHaveCount(0);
 
-    await page.getByRole('button', { name: '工作目录、验证与自动化', exact: true }).click();
-    const reloadedDialog = page.getByRole('dialog', { name: '工作目录与自动化' });
+    const reloadedDialog = page.getByRole('complementary', { name: '结果检视' });
+    await expect(reloadedDialog).toBeVisible();
+    await reloadedDialog.locator('summary').filter({ hasText: '执行环境与用量' }).click();
     await expect(reloadedDialog.getByText(/工作目录已清理，任务历史仍可读/)).toBeVisible();
-    await reloadedDialog.getByRole('button', { name: '关闭', exact: true }).click();
+    await reloadedDialog.getByRole('button', { name: '关闭结果检视', exact: true }).click();
   });
 });

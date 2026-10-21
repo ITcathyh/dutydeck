@@ -164,7 +164,7 @@ describe('compactTrace 精简过程卡', () => {
     expect(activityEl.content).toBe("<font color='grey'>最近活动 15:30</font>");
   });
 
-  it('awaitingAnswer 为 true 时，状态显示「需要你处理」，原因写在副标题', () => {
+  it('awaitingAnswer 为 true 时，状态直接显示「待回答」', () => {
     const elements = renderLarkProcessElements(multiStageEvents, compactConfig, false);
     const card: any = buildLarkCard({
       cardKind: 'process',
@@ -174,9 +174,9 @@ describe('compactTrace 精简过程卡', () => {
       elements
     });
     expect(card.header.template).toBe('orange');
-    expect(card.header.text_tag_list[0].text.content).toBe('需要你处理');
-    expect(card.header.subtitle.content).toContain('等待回答');
-    expect(card.config.summary.content).toContain('需要你处理');
+    expect(card.header.text_tag_list[0].text.content).toBe('待回答');
+    expect(card.header.subtitle).toBeUndefined();
+    expect(card.config.summary.content).toContain('待回答');
   });
 });
 

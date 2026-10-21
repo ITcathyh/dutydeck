@@ -60,6 +60,8 @@ beforeEach(() => {
   Socket.instances = [];
   observers.length = 0;
   vi.stubGlobal('WebSocket', Socket);
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(960);
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600);
   vi.stubGlobal('ResizeObserver', class {
     constructor(callback: () => void) { observers.push(callback); }
     observe() {}
@@ -70,6 +72,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('TerminalView', () => {
@@ -149,4 +152,67 @@ describe('TerminalView', () => {
     expect([term.cols, term.rows]).toEqual([60, 20]);
     expect(term.options.disableStdin).toBe(false);
   });
+});
+
+
+it('does not fit or send a resize while hidden, including snapshot callbacks; refits when visible again', () => {
+  const view = render(<TerminalView sessionId="hidden_terminal" showKeyBar={false}/>);
+  const host = view.container.firstElementChild!.firstElementChild!;
+  let width = 960;
+  let height = 600;
+  Object.defineProperties(host, { clientWidth: { get: () => width }, clientHeight: { get: () => height } });
+  const term = terminals[0];
+  const socket = Socket.instances[0];
+  act(() => {
+    socket.open();
+    socket.frame({ type: 'snapshot', cols: 120, rows: 30, data: 'initial output' });
+    term.writeCallbacks.shift()!();
+  });
+  expect(socket.sent).toEqual([{ type: 'resize', cols: 60, rows: 20 }]);
+  const fitsBeforeHide = fits[0].fit.mock.calls.length;
+
+  act(() => {
+    width = 0; height = 0;
+    observers[0]();
+    socket.frame({ type: 'snapshot', cols: 120, rows: 30, data: 'output while hidden' });
+    term.writeCallbacks.shift()!();
+    socket.frame({ type: 'data', data: 'more hidden output' });
+    observers[0]();
+  });
+  expect(fits[0].fit).toHaveBeenCalledTimes(fitsBeforeHide);
+  expect(socket.sent).toEqual([{ type: 'resize', cols: 60, rows: 20 }]);
+  expect(term.writes).toContain('output while hidden');
+  expect(term.writes).toContain('more hidden output');
+  expect([term.cols, term.rows]).toEqual([120, 30]);
+  expect(socket.close).not.toHaveBeenCalled();
+
+  act(() => { width = 960; height = 600; observers[0](); });
+  expect(fits[0].fit).toHaveBeenCalledTimes(fitsBeforeHide + 1);
+  expect(socket.sent).toEqual([{ type: 'resize', cols: 60, rows: 20 }, { type: 'resize', cols: 60, rows: 20 }]);
+  expect([term.cols, term.rows]).toEqual([60, 20]);
+});
+
+it('waits for both visible dimensions before fitting an initially hidden terminal', () => {
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(0);
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(0);
+  render(<TerminalView sessionId="initially_hidden"/>);
+  const term = terminals[0];
+  const socket = Socket.instances[0];
+  act(() => {
+    socket.open();
+    socket.frame({ type: 'data', data: 'legacy stream output' });
+    observers[0]();
+  });
+  expect(fits[0].fit).not.toHaveBeenCalled();
+  expect(socket.sent).toEqual([]);
+
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(960);
+  act(() => observers[0]());
+  expect(fits[0].fit).not.toHaveBeenCalled();
+  expect(socket.sent).toEqual([]);
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600);
+  act(() => observers[0]());
+  expect(fits[0].fit).toHaveBeenCalledTimes(1);
+  expect(socket.sent).toEqual([{ type: 'resize', cols: 60, rows: 20 }]);
+  expect(term.options.fontSize).toBe(12);
 });
