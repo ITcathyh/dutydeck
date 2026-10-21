@@ -1,12 +1,47 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createConnection, createServer, type Socket } from 'node:net';
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { once } from 'node:events';
 import { join } from 'node:path';
 import { TmuxCapture, cleanAbandonedTmuxCapture, tmuxCaptureWriter } from './tmux-capture.js';
+vi.mock('node:fs', async original => { const real = await original<typeof import('node:fs')>(); return { ...real, chmodSync: vi.fn(real.chmodSync) }; });
 
 describe('bounded tmux capture', () => {
+  it.each(['a'.repeat(130), '目录'.repeat(35)])('listens with a long temporary root %s', async suffix => {
+    const root = mkdtempSync(join(tmpdir(), 'capture-long-'));
+    const previous = process.env.TMPDIR;
+    process.env.TMPDIR = join(root, suffix);
+    mkdirSync(process.env.TMPDIR);
+    let capture: TmuxCapture | undefined;
+    try {
+      capture = new TmuxCapture('long-root', () => {}, () => {});
+      expect(Buffer.byteLength(capture.path)).toBeLessThanOrEqual(100);
+      await capture.listen();
+      expect(statSync(capture.directory).mode & 0o777).toBe(0o700);
+      expect(statSync(capture.path).mode & 0o777).toBe(0o600);
+    } finally {
+      capture?.close();
+      if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects and removes resources when listen initialization fails', async () => {
+    const capture = new TmuxCapture('initialization-failure', () => {}, () => {});
+    rmSync(capture.directory, { recursive: true });
+    await expect(capture.listen()).rejects.toBeDefined();
+    expect(existsSync(capture.directory)).toBe(false);
+    capture.close();
+  });
+
+  it('rejects asynchronous chmod failure without an uncaught callback exception', async () => {
+    const capture = new TmuxCapture('chmod-failure', () => {}, () => {});
+    vi.mocked(chmodSync).mockImplementationOnce(() => { throw new Error('injected chmod failure'); });
+    await expect(capture.listen()).rejects.toThrow('injected chmod failure');
+    expect(existsSync(capture.directory)).toBe(false); capture.close();
+  });
   it('decodes split UTF8 frames and leaves only small socket metadata, then cleans its own directory', async () => {
     let output = '';
     const capture = new TmuxCapture('fixture', data => { output += data; }, () => {});

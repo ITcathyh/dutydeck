@@ -29,8 +29,8 @@
  * are not model output either: the tailer holds the latest one back as the
  * turn's failure reason (see claudeApiError / takeTurnError).
  */
-import { existsSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { claudeProjectDir, type CliPathEnv } from '../cli-paths.js';
@@ -40,6 +40,7 @@ import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource, type Tr
 import { claudeInputText } from './input-receipt.js';
 import { userEntryMentionsMarker } from './claude-content.js';
 import { ClaudeSubagentReader } from './claude-subagents.js';
+import { ClaudeBackgroundTasks } from './claude-background.js';
 
 /** Head window per candidate when scanning for the marker. It rides the FIRST
  *  user prompt, so a small window suffices and a long conversation is never
@@ -385,6 +386,14 @@ export interface ClaudeTranscriptTailerOptions {
 export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private readonly tailer: JsonlTailer;
   private backgroundWork = 0;
+  private backgroundReported = false;
+  private readonly backgroundTasks = new ClaudeBackgroundTasks();
+  private observedInputId?: string;
+  private readonly memoryCalls = new Map<string, string>();
+  private readonly backgroundCallbacks = new Set<(event: NormalizedDriverEvent) => void>();
+  private readonly backgroundOffsets = new Map<string, number>();
+  private backgroundSnapshot = '';
+  private backgroundTimer?: NodeJS.Timeout;
   /** Latest API error of this turn not yet superseded by model output. */
   private turnError: NormalizedDriverEvent | undefined;
   /** Type of this turn's latest model activity, ranked as the runtime ranks it. */
@@ -429,12 +438,44 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         ? resolveOnce
         : () => resolveClaudeTranscriptPath(opts.cwd, opts.env);
     this.subagents = new ClaudeSubagentReader(resolvePath);
+    const memoryRoot = resolve(claudeProjectDir(opts.cwd, opts.env), 'memory') + sep;
+    const decorateMemory = (events: NormalizedDriverEvent[] | undefined) => {
+      for (const event of events ?? []) {
+        if (!['text', 'tool_call', 'tool_result'].includes(event.type) || !this.observedInputId) continue;
+        Object.assign(event.data, { nativeSource: 'claude', nativeTurnId: this.observedInputId });
+        if (event.type === 'tool_call') {
+          const path = event.data.input?.file_path;
+          if (['Write', 'Edit'].includes(event.data.name) && typeof path === 'string' && isAbsolute(path) && resolve(path).startsWith(memoryRoot)) {
+            this.memoryCalls.set(event.data.id, this.observedInputId);
+            event.data.memoryPostprocess = true;
+          }
+        } else if (event.type === 'tool_result') {
+          event.data.memoryPostprocess = event.data.status === 'completed' && this.memoryCalls.get(event.data.id) === this.observedInputId;
+          this.memoryCalls.delete(event.data.id);
+        }
+      }
+      return events;
+    };
     this.tailer = new JsonlTailer({
       resolvePath,
-      mapEntry: (entry, _baseline, position) => {
-        this.tallyUsage(entry);
+      baselineMapping: true,
+      mapEntry: (entry, baseline, position) => {
+        const backgroundChanged = this.backgroundTasks.observe(entry);
         const nativeInput = claudeInputText(entry) !== undefined && entry.isSidechain !== true;
         const notification = entry.turnOrigin === 'task_notification' || entry.origin?.kind === 'task-notification';
+        if (nativeInput && !notification) { this.observedInputId = entry.uuid; this.memoryCalls.clear(); this.backgroundReported = false; }
+        const reportedBackground = claudePendingBackgroundWork(entry);
+        if (reportedBackground !== undefined) {
+          this.backgroundReported = true;
+          if (baseline) this.backgroundWork = reportedBackground;
+        }
+        if (baseline) { decorateMemory(mapClaudeEntry(entry)); return undefined; }
+        this.tallyUsage(entry);
+        const backgroundEvent: NormalizedDriverEvent = { type: 'status', data: this.backgroundTasks.snapshot() };
+        if (backgroundChanged) this.backgroundSnapshot = JSON.stringify(backgroundEvent.data);
+        // Native background follow-ups belong to their launch, never to the
+        // business input that happens to be active when the notice arrives.
+        if (this.backgroundTasks.isNotificationContinuation() && this.backgroundWork === 0 && (!this.terminalScope || !!this.inputUuid)) return backgroundChanged ? [backgroundEvent] : undefined;
         // A recovery cursor is captured before submission. Its first fresh
         // business input supplies the same boundary as an exact live receipt.
         if (this.restoringTurn && nativeInput && !notification) {
@@ -489,14 +530,14 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
           }
           return undefined;
         }
-        const events = mapClaudeEntry(entry);
+        const events = decorateMemory(mapClaudeEntry(entry));
         const activity = events?.filter(event => ['text', 'thinking', 'tool_call', 'tool_result'].includes(event.type)).at(-1);
         if (activity) {
           // The model carried on, so that error no longer explains the turn's end.
           this.turnError = undefined; this.inputError = undefined;
           this.lastActivity = activity.type;
         }
-        return events;
+        return backgroundChanged ? [...events ?? [], backgroundEvent] : events;
       },
       inputText: claudeInputText,
       onInputReceipt: entry => {
@@ -535,16 +576,53 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
       this.subagents.baseline(this.restored);
     }
     this.tailer.start();
+    this.backgroundSnapshot = JSON.stringify(this.backgroundTasks.snapshot());
+    this.backgroundTimer ??= setInterval(() => { this.refreshBackgroundTasks(); }, 1_000);
+    this.backgroundTimer.unref();
   }
-  flush(): Promise<void> { return this.tailer.flush(); }
+  async flush(): Promise<void> {
+    await this.tailer.flush();
+    this.refreshBackgroundTasks();
+  }
+  private refreshBackgroundTasks(): void {
+    // /clear changes the main transcript. Read only native stop notices for
+    // task identities already owned here; never follow another session's text.
+    const path = this.tailer.checkpoint().path;
+    if (path && this.backgroundTasks.snapshot().count) {
+      try {
+        for (const name of readdirSync(dirname(path)).filter(name => name.endsWith('.jsonl')).slice(-40)) {
+          const sibling = join(dirname(path), name); if (sibling === path) continue;
+          const size = statSync(sibling).size; if (size > 4 * 1024 * 1024) continue;
+          const old = this.backgroundOffsets.get(sibling) ?? 0, offset = size < old ? 0 : old;
+          if (size === offset) continue;
+          const bytes = readFileSync(sibling).subarray(offset), end = bytes.lastIndexOf(10); if (end < 0) continue;
+          for (const line of bytes.subarray(0, end).toString('utf8').split('\n')) {
+            try {
+              const entry = JSON.parse(line);
+              const content = entry.type === 'queue-operation' && entry.operation === 'enqueue' ? entry.content
+                : entry.turnOrigin === 'task_notification' ? entry.message?.content
+                : entry.attachment?.commandMode === 'task-notification' ? entry.attachment.prompt : undefined;
+              if (typeof content === 'string') this.backgroundTasks.observe({ type: 'queue-operation', operation: 'enqueue', content });
+            } catch { /* Unknown records cannot change lifecycle state. */ }
+          }
+          this.backgroundOffsets.set(sibling, offset + end + 1);
+        }
+      } catch { /* Clear does not authorize guessing another transcript's output. */ }
+    }
+    const data = this.backgroundTasks.snapshot(), snapshot = JSON.stringify(data);
+    if (data.tasks.length > 0 && snapshot !== this.backgroundSnapshot) {
+      this.backgroundSnapshot = snapshot;
+      for (const callback of this.backgroundCallbacks) callback({ type: 'status', data });
+    }
+  }
   checkpoint(): TranscriptCursor { return this.tailer.checkpoint(); }
   restore(cursor: TranscriptCursor): void {
     this.tailer.restore(cursor);
     this.restored = true;
     this.terminalScope = false; this.turnTerminal = false; this.terminalUuids.clear(); this.restoringTurn = true;
   }
-  stop(): void { this.tailer.stop(); }
-  onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
+  stop(): void { if (this.backgroundTimer) clearInterval(this.backgroundTimer); this.backgroundTimer = undefined; this.tailer.stop(); }
+  onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); this.backgroundCallbacks.add(cb); }
   onProgress(cb: () => void): void { this.tailer.onProgress(cb); }
   waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
     this.terminalScope = false; this.turnTerminal = false; this.terminalUuids.clear(); this.restoringTurn = false;
@@ -552,7 +630,8 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     this.inputUuid = undefined; this.inputEntries.clear(); this.inputError = undefined;
     return this.tailer.waitForInput(prompt, signal);
   }
-  pendingBackgroundWork(): number { return this.backgroundWork; }
+  pendingBackgroundWork(): number { return Math.max(this.backgroundWork, this.backgroundReported ? this.backgroundTasks.snapshot().count : 0); }
+  hasIndependentBackgroundWork(): boolean { return this.backgroundWork === 0 && this.backgroundTasks.independent(); }
   hasTurnTerminal(): boolean { return this.turnTerminal; }
   turnTerminalRevision(): number { return this.terminalRevision; }
   captureWatermark(): TranscriptPosition | undefined { return this.tailer.captureWatermark(); }
@@ -573,7 +652,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     this.lastActivity = undefined; this.turnError = undefined; this.inputError = undefined;
     if (this.inputUuid) this.inputEntries.add(this.inputUuid);
   }
-  resetBackgroundWork(): void { this.backgroundWork = 0; }
+  resetBackgroundWork(): void { this.backgroundWork = 0; this.backgroundReported = false; }
   /** False for a record that should have carried usage but did not. */
   private tallyUsage(entry: any): boolean {
     const usage = claudeMessageUsage(entry);

@@ -4,6 +4,7 @@ import { codexInputText, normalizeInputText } from './input-receipt.js';
 /** Native terminals are independent of reply text and only settle an exact
  * submitted input (or the first fresh input after a recovery cursor). */
 export class NativeTurn {
+  constructor(private readonly codexCapacity = false) {}
   private candidate?: string;
   private required = false;
   private turn?: string;
@@ -66,7 +67,10 @@ export class NativeTurn {
       if (this.terminal) return true;
       this.terminal = true;
       if (p.type === 'turn_aborted') this.cancelled = true;
-      else this.error ??= nativeTaskError(p.error);
+      else {
+        this.error ??= nativeTaskError(p.error, this.codexCapacity);
+        if (this.error) Object.assign(this.error.data, { nativeTerminal: true, nativeTurnId: id });
+      }
     }
     return true;
   }
@@ -78,12 +82,17 @@ export class NativeTurn {
   takeCancellation(): boolean { const cancelled = this.cancelled; this.cancelled = false; return cancelled; }
 }
 
-export function nativeTaskError(error: unknown): NormalizedDriverEvent | undefined {
+export function nativeTaskError(error: unknown, codexCapacity = false): NormalizedDriverEvent | undefined {
   if (error === null || error === undefined) return undefined;
   const raw = typeof error === 'string' ? error : JSON.stringify(error);
   const usage = /usage[_ -]?limit/i.test(raw);
   const rate = !usage && /rate[_ -]?limit|\b429\b/i.test(raw);
   const message = typeof error === 'string' ? error
     : typeof (error as any)?.message === 'string' ? (error as any).message : 'Native agent task failed';
-  return { type: 'error', data: { code: usage ? 'usage_limit_exceeded' : rate ? 'rate_limit' : 'native_task_failed', message, retryable: rate } };
+  const info = typeof error === 'object' ? (error as any)?.codex_error_info ?? (error as any)?.codexErrorInfo ?? (error as any)?.code ?? (error as any)?.type : undefined;
+  const capacity = codexCapacity && !usage && !rate && !/\b(?:400|401|403)\b|auth(?:entication|orization)?|quota|invalid[_ -]?request/i.test(raw)
+    && (typeof info === 'string' && /^server_?overloaded$/i.test(info)
+      || message === 'Selected model is at capacity. Please try a different model.');
+  return { type: 'error', data: { code: capacity ? 'codex_capacity' : usage ? 'usage_limit_exceeded' : rate ? 'rate_limit' : 'native_task_failed', message: capacity ? `Codex 当前模型容量已满，请稍后重试或切换模型。\n原文：${message}` : message,
+    retryable: capacity || rate, ...(capacity ? { nativeSource: 'codex', capacityReason: 'selected_model_capacity' } : {}) } };
 }

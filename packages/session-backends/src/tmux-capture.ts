@@ -6,6 +6,9 @@ import { StringDecoder } from 'node:string_decoder';
 
 export const TMUX_CAPTURE_BUFFER_BYTES = 256 * 1024;
 const MAX_FRAME_BYTES = 128 * 1024;
+// Darwin's sockaddr_un is smaller than Linux's; budget bytes, not characters.
+const SOCKET_PATH_BYTES = 100;
+const captureRoot = () => Buffer.byteLength(join(tmpdir(), 'dutydeck-tmux-capture-XXXXXX', 'out.sock')) <= SOCKET_PATH_BYTES ? tmpdir() : '/tmp';
 const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
 const start = (pid: number) => readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').at(-1)!.split(' ')[19];
 
@@ -42,13 +45,17 @@ export class TmuxCapture {
   private server?: Server;
   private closed = false;
   constructor(owner: string, private readonly data: (text: string) => void, private readonly gap: (bytes: number) => void) {
-    this.directory = mkdtempSync(join(tmpdir(), 'dutydeck-tmux-capture-'));
-    chmodSync(this.directory, 0o700);
+    this.directory = mkdtempSync(join(captureRoot(), 'dutydeck-tmux-capture-'));
     this.path = join(this.directory, 'out.sock');
-    writeFileSync(join(this.directory, 'owner.json'), JSON.stringify({ owner, pid: process.pid, start: process.platform === 'linux' ? start(process.pid) : undefined, host: hostname() }), { mode: 0o600 });
+    try {
+      chmodSync(this.directory, 0o700);
+      writeFileSync(join(this.directory, 'owner.json'), JSON.stringify({ owner, pid: process.pid, start: process.platform === 'linux' ? start(process.pid) : undefined, host: hostname() }), { mode: 0o600 });
+    } catch (error) { rmSync(this.directory, { recursive: true, force: true }); throw error; }
   }
   listen(): Promise<void> {
     return new Promise((resolve, reject) => {
+      if (this.closed) { reject(new Error('Tmux capture is closed')); return; }
+      const fail = (error: unknown) => { this.close(); reject(error); };
       this.server = createServer(socket => {
         if (this.closed || this.sockets.size) { socket.destroy(); return; }
         this.sockets.add(socket);
@@ -73,8 +80,13 @@ export class TmuxCapture {
           if (pending.length > MAX_FRAME_BYTES) { socket.destroy(); this.gap(1); }
         });
       });
-      this.server.once('error', reject);
-      this.server.listen(this.path, () => { chmodSync(this.path, 0o600); resolve(); });
+      this.server.once('error', fail);
+      try {
+        this.server.listen(this.path, () => {
+          try { chmodSync(this.path, 0o600); resolve(); }
+          catch (error) { fail(error); }
+        });
+      } catch (error) { fail(error); }
     });
   }
   command(): string { return `${quote(process.execPath)} -e ${quote(tmuxCaptureWriter)} ${quote(this.path)} ${TMUX_CAPTURE_BUFFER_BYTES}`; }
@@ -92,7 +104,7 @@ export class TmuxCapture {
  * A PID/start identity still alive, an unknown host, or unsafe path is retained. */
 export function cleanAbandonedTmuxCapture(directory: string, owner: string): void {
   try {
-    if (dirname(directory) !== tmpdir() || !/^dutydeck-tmux-capture-[A-Za-z0-9]+$/.test(basename(directory))) return;
+    if (![tmpdir(), '/tmp'].includes(dirname(directory)) || !/^dutydeck-tmux-capture-[A-Za-z0-9]+$/.test(basename(directory))) return;
     const info = lstatSync(directory);
     if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.() || (info.mode & 0o777) !== 0o700) return;
     const record = JSON.parse(readFileSync(join(directory, 'owner.json'), 'utf8'));

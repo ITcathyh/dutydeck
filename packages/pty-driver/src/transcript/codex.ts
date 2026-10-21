@@ -292,7 +292,7 @@ export function mapCodexEntry(entry: any): NormalizedDriverEvent[] | undefined {
   }
 
   if (entry.type === 'event_msg' && p.type === 'task_complete') {
-    const error = nativeTaskError(p.error);
+    const error = nativeTaskError(p.error, true);
     const events: NormalizedDriverEvent[] = [];
     if (typeof p.last_agent_message === 'string' && p.last_agent_message.length > 0) events.push({ type: 'text', data: { text: p.last_agent_message } });
     if (error) events.push(error);
@@ -322,7 +322,7 @@ export interface CodexTranscriptTailerOptions {
 export class CodexTranscriptTailer implements TranscriptEventSource {
   readonly requiresTurnTerminal = true;
   private readonly tailer: JsonlTailer;
-  private readonly turn = new NativeTurn();
+  private readonly turn = new NativeTurn(true);
   private readonly inputReceipt?: CodexInputReceipt;
   private readonly children: CodexChildLimits;
   private childTimer?: NodeJS.Timeout;

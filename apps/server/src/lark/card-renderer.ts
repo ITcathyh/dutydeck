@@ -77,7 +77,9 @@ function compactTraceEntries(events: AgentEvent[]): TraceEntry[] {
   const result: TraceEntry[] = [];
   const tools = new Map<string, TraceEntry>();
   const permissions = new Map<string, TraceEntry>();
+  const capacityRetried = new Set(events.filter(event => event.type === 'status' && (event.data as any)?.state === 'capacity_retry').map(event => (event.data as any).causeAttemptId).filter((value): value is string => typeof value === 'string'));
   for (let event of events) {
+    if (event.type === 'error' && event.attemptId && capacityRetried.has(event.attemptId) && (event.data as any)?.code === 'codex_capacity') continue;
     if (event.type === 'status' && isChildDiagnostic(event.data)) event = { ...event, type: 'tool_result' };
     if (event.type === 'task' || event.type === 'completed' || event.type === 'status') continue;
     const data = event.data && typeof event.data === 'object' ? event.data as Record<string, any> : { value: event.data };
@@ -90,7 +92,8 @@ function compactTraceEntries(events: AgentEvent[]): TraceEntry[] {
     }
     const previous = result.at(-1);
     const role = data.role ?? 'assistant';
-    if ((event.type === 'text' || event.type === 'thinking') && previous?.type === event.type && (previous.data.role ?? 'assistant') === role) {
+    if ((event.type === 'text' || event.type === 'thinking') && previous?.type === event.type && (previous.data.role ?? 'assistant') === role
+      && previous.data.nativeTurnId === data.nativeTurnId && previous.data.nativeSource === data.nativeSource) {
       previous.data.text = `${previous.data.text ?? ''}${data.text ?? ''}`;
       continue;
     }
@@ -1087,6 +1090,33 @@ const receiptNarration = (groups: TraceGroup[]) => {
 
 /** 一轮因「连续 N 分钟没有任何输出」被停止的原因码，由任务失败原因携带（分钟数跟在码后面）。 */
 export const LARK_AGENT_IDLE_TIMEOUT_CODE = 'AGENT_IDLE_TIMEOUT';
+
+function memoryFinalText(events: AgentEvent[], entries: TraceEntry[]): string | undefined {
+  const calls = new Map<string, string>();
+  const paired = new Map<string, string>();
+  for (const event of events) {
+    const data = event.data as Record<string, any>;
+    if (data?.nativeSource !== 'claude' || typeof data.nativeTurnId !== 'string' || data.memoryPostprocess !== true) continue;
+    if (event.type === 'tool_call' && ['Write', 'Edit'].includes(data.name)) calls.set(data.id, data.nativeTurnId);
+    if (event.type === 'tool_result' && data.status === 'completed' && calls.get(data.id) === data.nativeTurnId) paired.set(data.id, data.nativeTurnId);
+  }
+  const suffix: TraceEntry[] = [];
+  let turn: string | undefined, hasMemory = false;
+  for (const entry of [...entries].reverse()) {
+    if (entry.type === 'raw_terminal' || isChildDiagnostic(entry.data)) continue;
+    const data = entry.data;
+    if (data.nativeSource !== 'claude' || typeof data.nativeTurnId !== 'string' || turn && data.nativeTurnId !== turn) break;
+    turn ??= data.nativeTurnId;
+    if (entry.type === 'text') suffix.unshift(entry);
+    else if ((entry.type === 'tool_call' || entry.type === 'tool_result') && paired.get(data.id) === turn) hasMemory = true;
+    else break;
+  }
+  // A memory write can follow a complete answer with no extra closing text.
+  // This only affects a result whose runtime already reached completion.
+  const lastMemory = entries.length - 1 - [...entries].reverse().findIndex(entry => paired.get(entry.data.id) === turn);
+  return hasMemory && suffix.length && entries.indexOf(suffix[0]!) < lastMemory
+    ? suffix.map(entry => String(entry.data.text ?? '')).join('\n\n') : undefined;
+}
 function larkIdleTimeout(events: AgentEvent[]): { minutes?: number } | undefined {
   for (const event of [...events].reverse()) {
     if (event.type !== 'error' && event.type !== 'task') continue;
@@ -1126,7 +1156,8 @@ export function renderLarkCardElements(
   const finalFollowsActivity = finalMessageIndex > lastActivityIndex;
   const finalMessage = finalMessageIndex >= 0 && finalFollowsActivity ? entries[finalMessageIndex] : undefined;
   const idleTimeout = view === 'result' ? larkIdleTimeout(events) : undefined;
-  const finalText = view === 'result' ? redactTraceText(String(finalMessage?.data.text ?? '')).trim() : truncateTrace(finalMessage?.data.text, 6_000);
+  const preservedMemoryText = completed ? memoryFinalText(events, entries) : undefined;
+  const finalText = view === 'result' ? redactTraceText(preservedMemoryText ?? String(finalMessage?.data.text ?? '')).trim() : truncateTrace(preservedMemoryText ?? finalMessage?.data.text, 6_000);
   const activityEntries = entries.filter(entry => entry !== finalMessage || !finalFollowsActivity);
   const permissionEntries = activityEntries.filter(entry => entry.type === 'permission_request');
   const errorEntries = activityEntries.filter(entry => entry.type === 'error');
@@ -1139,6 +1170,10 @@ export function renderLarkCardElements(
   const groups = allGroups.slice(-visibleTraceGroupLimit);
   const omittedGroupCount = allGroups.length - groups.length;
   const elements: LarkCardElement[] = [];
+  const capacityRetry = [...events].reverse().find(event => event.type === 'status' && (event.data as any)?.state === 'capacity_retry')?.data as Record<string, any> | undefined;
+  if (!completed && capacityRetry) elements.push({ tag: 'markdown', element_id: 'capacity_retry', content: `Codex 当前模型容量已满，等待第 ${capacityRetry.ordinal} 次自动续跑（最多 2 次）。新的输入或停止会取消续跑。`, text_size: 'notation', margin: '4px 0px' });
+  const background = [...events].reverse().find(event => event.type === 'status' && (event.data as any)?.state === 'background_work')?.data as Record<string, any> | undefined;
+  if (background && background.count > 0) elements.push({ tag: 'markdown', element_id: 'background_work', content: `${background.mainTurnEnded ? '主回合已结束 · ' : ''}后台子任务运行中（${background.count}）`, text_size: 'notation', margin: '4px 0px' });
 
   if (compensation) {
     elements.push({ tag: 'markdown', content: "<font color='orange'>原运行卡片未能更新，Dutydeck 已补发终态结果。</font>", text_size: 'notation', margin: '0px 0px 8px 0px' });

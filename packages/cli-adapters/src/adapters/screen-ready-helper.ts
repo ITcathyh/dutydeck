@@ -126,6 +126,19 @@ export interface ScreenReadyOptions {
   permissionMode?: string;
 }
 
+/** Only the active native migration picker may receive synthesized keys. */
+export function codexExistingModelKeys(screen: string): string[] | undefined {
+  const lines = screen.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  if (!/^enter\/esc\s+confirm\b/i.test(lines.at(-1) ?? '')) return undefined;
+  const options = lines.slice(-3, -1).map(line => /^([›>»])?\s*(\d+)\.\s*(Try new model|Use existing model)$/i.exec(line));
+  if (options.length !== 2 || options.some(option => !option)) return undefined;
+  if (new Set(options.map(option => option![3]!.toLowerCase())).size !== 2) return undefined;
+  const selected = options.flatMap((option, index) => option![1] ? [index] : []);
+  if (selected.length !== 1) return undefined;
+  const existing = options.findIndex(option => /^Use existing model$/i.test(option![3]!));
+  return existing === selected[0] ? ['Enter'] : [existing > selected[0]! ? 'Down' : 'Up', 'Enter'];
+}
+
 export async function pollScreenReady(
   backend: PtyLike,
   cli: 'Codex' | 'TraeX',
@@ -137,11 +150,21 @@ export async function pollScreenReady(
     : (optionsOrBusyPattern ?? {});
   const { busyPattern, cwd, permissionMode } = options;
   const startedAt = Date.now();
+  let migrationAttempts = 0, migrationAt = -Infinity;
   while (Date.now() - startedAt < STARTUP_TIMEOUT_MS) {
     const screen = (await backend.readScreen());
     // 先判就绪：已就绪（例如对话正文里恰好提到信任弹窗文字、或 daemon 重连回旧会话）
     // 直接返回，避免把正文里的 "Trust this folder?" 之类文字误当成当前信任页。
     if (isInputReady(screen, cli, busyPattern)) return;
+    const keys = cli === 'Codex' ? codexExistingModelKeys(screen) : undefined;
+    if (keys && migrationAttempts < 3 && Date.now() - migrationAt >= 1_000) {
+      migrationAttempts++; migrationAt = Date.now();
+      if (backend.sendSpecialKeys) await backend.sendSpecialKeys(...keys);
+      else await backend.write(keys.map(key => key === 'Down' ? '\x1b[B' : key === 'Up' ? '\x1b[A' : '\r').join(''));
+      // Never paste a task until a subsequent authoritative read sees the composer.
+      await delay(STARTUP_POLL_MS);
+      continue;
+    }
     // 只有确实未就绪时，才识别当前是否停在目录信任页。
     if (permissionMode !== 'full-trust' && isTrustPrompt(screen, cli)) {
       const targetCwd = cwd || process.cwd();

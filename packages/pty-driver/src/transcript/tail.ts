@@ -53,6 +53,7 @@ export interface TranscriptEventSource {
   /** Background sub-agents the CLI reported still running when its latest
    *  turn ended. Only sources whose transcript records it (Claude) implement this. */
   pendingBackgroundWork?(): number;
+  hasIndependentBackgroundWork?(): boolean;
   /** Forget that report at a new prompt; the new turn's own end record decides. */
   resetBackgroundWork?(): void;
   /** Why the turn ends without an answer, when the CLI recorded it (Claude's
@@ -106,6 +107,8 @@ export interface JsonlTailerOptions {
   onInputReceipt?: (entry: TranscriptEntry) => void;
   /** Native tools can appear in both legacy and completed-item dialects. */
   deduplicateTools?: boolean;
+  /** Rebuild native lifecycle metadata without publishing historical events. */
+  baselineMapping?: boolean;
 }
 
 const DEFAULT_POLL_MS = 300;
@@ -128,6 +131,7 @@ export class JsonlTailer implements TranscriptEventSource {
   private readonly inputTimestamp?: JsonlTailerOptions['inputTimestamp'];
   private readonly onInputReceipt?: JsonlTailerOptions['onInputReceipt'];
   private readonly deduplicateTools: boolean;
+  private readonly baselineMapping: boolean;
   private readonly toolEvents = new Set<string>();
   private readonly receipts = new Set<{ prompt: string; path?: string; offset: number; since: number; finish(error?: Error): void }>();
   private readonly callbacks = new Set<(e: NormalizedDriverEvent) => void>();
@@ -167,6 +171,7 @@ export class JsonlTailer implements TranscriptEventSource {
     this.inputTimestamp = opts.inputTimestamp;
     this.onInputReceipt = opts.onInputReceipt;
     this.deduplicateTools = opts.deduplicateTools ?? false;
+    this.baselineMapping = opts.baselineMapping ?? false;
   }
 
   waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
@@ -319,7 +324,7 @@ export class JsonlTailer implements TranscriptEventSource {
           // Rebuild only the native tool identity set, without publishing old
           // events. A legacy call before the durable cursor can have its modern
           // mirror after it. Chunked reads keep restore memory and I/O bounded.
-          if (this.deduplicateTools) await this.drain(restoreOffset, generation, true);
+          if (this.deduplicateTools || this.baselineMapping) await this.drain(restoreOffset, generation, true);
           if (generation !== this.generation) return;
           this.offset = restoreOffset;
           this.completedOffset = restoreOffset;
@@ -332,7 +337,7 @@ export class JsonlTailer implements TranscriptEventSource {
           await this.drain(size, generation);
           return;
         }
-        if (this.deduplicateTools && !this.pendingBirth) {
+        if ((this.deduplicateTools || this.baselineMapping) && !this.pendingBirth) {
           await this.drain(size, generation, true);
           return;
         }

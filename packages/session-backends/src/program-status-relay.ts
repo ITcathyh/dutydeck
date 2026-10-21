@@ -35,6 +35,9 @@ if (!bin) throw new Error('Missing program-status relay command');
 const plan = { bin, args };
 const stdin = process.stdin;
 const stdout = process.stdout;
+// Initialize while the pane TTY is alive; lazy initialization after SIGHUP
+// can throw on Darwin and prevent the child termination escalation.
+void process.stderr;
 const childEnv = process.env;
 const childCwd = process.cwd();
 

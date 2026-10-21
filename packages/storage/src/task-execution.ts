@@ -626,6 +626,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         t.status = evidence.outcome === 'unknown' ? 'reconcile_required' : evidence.outcome;
         touch(t, a); return transitions(f, t, a, true);
       };
+      const cancelCapacityRetries = (f: SessionFence, reason: string) => db.prepare("SELECT json FROM task_attempts WHERE session_id=? AND state='suspended' AND submission_state='not_submitted'").all(f.sessionId).map(row => rowJson<TaskAttempt>(row)!).filter(a => a.automaticRetry).map(a => {
+        const t = task(a.taskId)!;
+        return settle({ ...f, taskId: t.id, attemptId: a.attemptId, expectedRevision: a.revision }, t, a, `capacity_cancel:${a.attemptId}`, { kind: 'not_submitted', outcome: 'cancelled', reason });
+      });
       const bound: BoundExecutionRepository = {
         lookupAccepted(request) { return write(() => lookup(request)); },
         acceptTask(rawFence, rawRequest, rawInput, position) { return write(() => {
@@ -642,6 +646,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           const { digest, ...content } = input;
           if (digest !== hash(stable(content))) fail('TASK_INPUT_DIGEST_CONFLICT');
           validateActor(request, s, input);
+          const cancelled = cancelCapacityRetries(f, 'new_input_superseded_capacity_retry');
           const time = timestamp();
           const taskId = executionTaskId(request.namespace, request.sessionId, request.key);
           const t: ExecutionTask = { id: taskId, sessionId: f.sessionId, prompt: input.prompt, executionContext: input.executionContext, status: 'queued', revision: 1, digestVersion: 'v1', queuePosition: nextPosition(f.sessionId, position), createdAt: time, updatedAt: time };
@@ -651,7 +656,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           // Accepted task events have no Attempt but retain the Task identity.
           db.prepare('UPDATE events SET task_id=? WHERE id=?').run(t.id,events[0]!.id); events[0]!.taskId = t.id;
           if (request.mode === 'interrupt') queueAction(f,t,'accept',{ operationId: `accept_interrupt:${t.id}`, actor: request.actor, interrupt: true });
-          return { ...result(f,t,undefined,events), accepted: lookup(request)! };
+          return { ...result(f,t,undefined,[...cancelled.flatMap(item => item.events), ...events]), accepted: lookup(request)! };
         }); },
         claimNext(rawFence) { return write(owner => {
           const f = readFence(rawFence); const s = session(f.sessionId);
@@ -664,6 +669,13 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           const t = task(row.id)!;
           requireInputOptions(t.id);
           let a = t.currentAttemptId ? attempt(t.currentAttemptId) : undefined;
+          if (a?.automaticRetry) {
+            const retry = a.automaticRetry;
+            const accepted = getAcceptedTask(t.id);
+            if (retry.reason !== 'codex_capacity' || retry.ordinal < 1 || retry.ordinal > 2 || retry.inputDigest !== accepted?.input?.digest
+              || a.runId !== f.runId || taskAttempts(t.id).at(-2)?.attemptId !== retry.causeAttemptId) fail('CAPACITY_RETRY_SCOPE_CONFLICT');
+            if (Date.parse(retry.dueAt) > Date.now()) return;
+          }
           if (a) {
             if (a.state !== 'suspended' || a.submissionState !== 'not_submitted' || a.runId !== f.runId) fail('ATTEMPT_NOT_SUSPENDED');
             if (!sameController(a.controller, owner)) {
@@ -824,6 +836,34 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             return settle(f,t,a,settlementId,evidence);
           });
         }); },
+        settleCapacityRetry(f, settlementId, rawEvidence) { return write(owner => {
+          id.parse(settlementId);
+          const evidence = parse(taskExecutionSchemas.driverResult, rawEvidence);
+          return attemptCommand(f, `capacity:${settlementId}`, evidence, () => {
+            const { t, a } = currentAttempt(f, owner);
+            requireInputOptions(t.id);
+            const accepted = getAcceptedTask(t.id);
+            const ordinal = taskAttempts(t.id).filter(previous => previous.automaticRetry?.reason === 'codex_capacity').length + 1;
+            const all = db.prepare('SELECT type,data FROM events WHERE attempt_id=? ORDER BY sequence').all(a.attemptId) as Array<{type:string;data:string}>;
+            const errors = all.filter(event => event.type === 'error').map(event => JSON.parse(event.data));
+            if (evidence.outcome !== 'failed' || !['active', 'preparing'].includes(a.state) || a.submissionState === 'not_submitted'
+              || !a.submission || a.submission.submissionId !== evidence.submissionId || ordinal > 2
+              || accepted?.request?.actor.kind === 'unspecified' || !accepted?.request
+              || all.some(event => event.type === 'tool_call' || event.type === 'permission_request')
+              || !errors.length || errors.some(error => error.code !== 'codex_capacity' || error.nativeSource !== 'codex'
+                || error.capacityReason !== 'selected_model_capacity' || error.nativeTerminal !== true || typeof error.nativeTurnId !== 'string')) fail('CAPACITY_RETRY_NOT_SAFE');
+            if (db.prepare('SELECT 1 FROM tasks WHERE session_id=? AND rowid>(SELECT rowid FROM tasks WHERE id=?) LIMIT 1').get(f.sessionId, t.id)) fail('CAPACITY_RETRY_SUPERSEDED');
+            a.state = 'settled'; a.outcome = 'failed'; a.settlementId = settlementId; a.settlement = evidence; touch(t, a); saveAttempt(a);
+            const next: TaskAttempt = { sessionId: f.sessionId, runId: f.runId, taskId: t.id, attemptId: `attempt_${randomUUID()}`, number: a.number + 1, revision: 1,
+              state: 'suspended', submissionState: 'not_submitted', controller: owner, recoveryControllers: [], createdAt: timestamp(), updatedAt: timestamp(),
+              automaticRetry: { reason: 'codex_capacity', causeAttemptId: a.attemptId, ordinal, dueAt: new Date(Date.now() + (ordinal === 1 ? 30_000 : 90_000)).toISOString(), inputDigest: accepted.input!.digest } };
+            t.currentAttemptId = next.attemptId; t.status = 'queued'; t.queuePosition = nextPosition(f.sessionId, 'back');
+            const committed = transitions(f, t, next);
+            committed.events.push(append(f, { id: `capacity_wait:${next.attemptId}`, type: 'status', data: { state: 'capacity_retry', taskId: t.id, attemptId: next.attemptId, causeAttemptId: a.attemptId, ordinal, dueAt: next.automaticRetry!.dueAt } }, next));
+            return committed;
+          });
+        }); },
+        cancelCapacityRetries(rawFence, reason) { return write(() => cancelCapacityRetries(readFence(rawFence), id.parse(reason))); },
         suspendUnsubmitted(f) { return write(owner => {
           const {t,a}=currentAttempt(f,owner);
           if(a.state!=='preparing' || a.submissionState!=='not_submitted') fail('ATTEMPT_NOT_PREPARING');

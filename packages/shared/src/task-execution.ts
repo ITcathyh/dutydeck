@@ -141,6 +141,7 @@ export interface TaskAttempt extends AttemptRef, SessionFence {
   submissionController?: ExecutionController; submission?: SubmissionIntent; receipt?: SubmissionReceipt;
   settlementId?: string; outcome?: AttemptOutcome; settlement?: SettlementEvidence; reconcileReason?: ReconcileReason;
   legacy?: JsonValue; createdAt: string; updatedAt: string;
+  automaticRetry?: { reason: 'codex_capacity'; causeAttemptId: string; ordinal: number; dueAt: string; inputDigest: string };
 }
 export interface ExecutionTask extends Omit<TaskRecord, 'status' | 'revision' | 'digestVersion'> {
   status: TaskStatus; revision: number; digestVersion: 'v1' | 'legacy_unverifiable'; currentAttemptId?: string;
@@ -210,6 +211,9 @@ export interface BoundExecutionRepository {
   markSubmissionPending(f: AttemptFence, input: SubmissionIntent): CommitResult;
   markSubmitted(f: AttemptFence, receipt: SubmissionReceipt): CommitResult;
   settleAttempt(f: AttemptFence, settlementId: string, evidence: SettlementEvidence): CommitResult;
+  /** Atomically settle a proven capacity failure and reserve a bounded successor. */
+  settleCapacityRetry(f: AttemptFence, settlementId: string, evidence: Extract<SettlementEvidence, { kind: 'driver_result' }>): CommitResult;
+  cancelCapacityRetries(f: SessionFence, reason: string): CommitResult[];
   confirmAttemptRecovery(f: AttemptFence, settlementId: string, evidence: Extract<SettlementEvidence, { kind: 'manual' }>, verifiedOutputText?: string, reuseOwned?: boolean): CommitResult;
   suspendUnsubmitted(f: AttemptFence): CommitResult;
   cancelQueued(f: SessionFence, taskId: string, expectedTaskRevision: number, decision: RecoveryDecisionInput): CommitResult;

@@ -185,6 +185,7 @@ export class PtyCliDriver implements AgentDriver {
   private lastRawTerminalText = '';
   /** 最近一次 PTY 输出的时间，经 submissionBackend 交给适配器判断屏幕是否静止。 */
   private lastOutputAt = 0;
+  private screenRevision = 0;
   /** createTerminalStream 订阅者集合，driver 级持有，rewire 后继续生效。 */
   private readonly terminalSubscribers = new Set<(data: string) => void>();
   /** Session Insight 来源观察（design §3.1）。Driver 级持有：reattach/rewire
@@ -1383,6 +1384,7 @@ export class PtyCliDriver implements AgentDriver {
       // xterm parses asynchronously: bound its in-flight write queue as well.
       if (parsingBytes + bytes > 256 * 1024) { refreshAfterGap(bytes); return; }
       this.lastOutputAt = Date.now();
+      this.screenRevision++;
       this.idleDetector?.feed(data);
       const snapshot = this.snapshot;
       if (snapshot) {
@@ -1729,6 +1731,7 @@ export class PtyCliDriver implements AgentDriver {
   private holdForBackgroundWork(statusLine: string | undefined): boolean {
     if (this.interruptPending || this.backgroundHoldExpired) return false;
     const screenWaiting = statusLine !== undefined && this.adapter.backgroundWaitPattern?.test(statusLine) === true;
+    if (!screenWaiting && this.transcript?.hasIndependentBackgroundWork?.()) return false;
     if (!screenWaiting && !this.transcript?.pendingBackgroundWork?.()) return false;
     if (!this.backgroundHoldTimer) {
       const timer = setTimeout(() => {
@@ -1853,9 +1856,18 @@ export class PtyCliDriver implements AgentDriver {
       // tmux can capture the pane through its management client. Prefer that authoritative
       // current render over its asynchronous pipe-pane/socket mirror while a
       // startup dialog is deciding whether it may accept any input.
-      readScreen: () => guarded(async () => target.captureCurrentScreen
-        ? await target.captureCurrentScreen() ?? ''
-        : this.snapshot?.viewportText() ?? ''),
+      readScreen: () => guarded(async () => {
+        if (target.captureCurrentScreen) return await target.captureCurrentScreen() ?? '';
+        if (this.adapter.id !== 'codex') return this.snapshot?.viewportText() ?? '';
+        const snapshot = this.snapshot;
+        for (let attempt = 0; snapshot && attempt < 3; attempt++) {
+          const revision = this.screenRevision;
+          await snapshot.writeAndFlush(''); check();
+          if (this.snapshot !== snapshot) return '';
+          if (revision === this.screenRevision) return snapshot.viewportText();
+        }
+        return '';
+      }),
     };
     if (target.sendText) proxy.sendText = text => guarded(() => target.sendText!(text));
     if (target.sendSpecialKeys) proxy.sendSpecialKeys = (...keys) => guarded(() => target.sendSpecialKeys!(...keys));

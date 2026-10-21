@@ -254,6 +254,7 @@ export class DutydeckRuntime {
   private readonly driverEventErrors = new Map<string, unknown>();
   private readonly driverStopReasons = new Map<string, string>();
   private readonly turnErrors = new Map<string, string>();
+  private readonly capacityTimers = new Map<string, { taskId: string; timer: ReturnType<typeof setTimeout> }>();
   private readonly exitListeners = new Map<string, Set<(code: number | null) => void>>();
   private readonly factory: DriverFactory;
   private readonly lastActivity = new Map<string, number>();
@@ -2529,7 +2530,14 @@ export class DutydeckRuntime {
       await this.mutations.wait(observeEnd);
       if (!this.completedTurns.has(ref.attemptId)) throw new RuntimeError('DRIVER_RESULT_INCOMPLETE', 'Driver returned without a completed result', 409);
       const result = this.turnOutput(ref);
-      await this.mutations.write(id, async () => this.wake(this.bound().settleAttempt(this.attemptFence(ref), `settlement:${submissionId}`, { kind: 'driver_result', submissionId, outcome: result.status, outputDigest: result.outputDigest, stopReason: result.stopReason, complete: true })));
+      await this.mutations.write(id, async () => {
+        const evidence = { kind: 'driver_result' as const, submissionId, outcome: result.status, outputDigest: result.outputDigest, stopReason: result.stopReason, complete: true as const };
+        if (result.status === 'failed') {
+          try { this.wake(this.bound().settleCapacityRetry(this.attemptFence(ref), `settlement:${submissionId}`, evidence)); return; }
+          catch (error) { if (!(error instanceof RuntimeError) || !['CAPACITY_RETRY_NOT_SAFE', 'CAPACITY_RETRY_SUPERSEDED'].includes(error.code)) throw error; }
+        }
+        this.wake(this.bound().settleAttempt(this.attemptFence(ref), `settlement:${submissionId}`, evidence));
+      });
       if (result.status === 'completed') this.agentUnavailable.delete(session.agentId);
     } catch (error) {
       if (agentId) await this.noteAgentFailure(agentId, { message: error instanceof Error ? error.message : String(error), code: (error as { code?: unknown } | undefined)?.code });
@@ -2587,7 +2595,14 @@ export class DutydeckRuntime {
         try {
           const value = this.repos.execution.getTaskExecution(task.id);
           // The first execution remains this send's result even after an explicit retry.
-          const selected = selectedAttemptId ? value?.attempts.find(attempt => attempt.attemptId === selectedAttemptId) : value?.attempts.find(attempt => attempt.number === 1);
+          let selected = selectedAttemptId ? value?.attempts.find(attempt => attempt.attemptId === selectedAttemptId) : value?.attempts.find(attempt => attempt.number === 1);
+          // Automatic capacity successors are part of this logical send;
+          // explicit operator retries retain their existing result semantics.
+          for (;;) {
+            const successor = selected && value?.attempts.find(attempt => attempt.automaticRetry?.causeAttemptId === selected!.attemptId);
+            if (!successor) break;
+            selected = successor; selectedAttemptId = successor.attemptId;
+          }
           selectedAttemptId ??= selected?.attemptId;
           if (value && selected && ['settled', 'reconcile_required', 'legacy_unresolved'].includes(selected.state)) {
             const status = selected.state === 'settled' && selected.outcome !== 'unknown' ? selected.outcome : 'reconcile_required';
@@ -2688,6 +2703,12 @@ export class DutydeckRuntime {
     if (queue.length) this.queues.set(id, queue); else this.queues.delete(id);
   }
   private scheduleQueue(id: string) {
+    const delayed = this.capacityTimers.get(id);
+    if (delayed) {
+      const current = this.repos.execution.getTaskExecution(delayed.taskId);
+      if (current?.task.status === 'queued' && current.currentAttempt?.automaticRetry && Date.parse(current.currentAttempt.automaticRetry.dueAt) > Date.now()) return;
+      clearTimeout(delayed.timer); this.capacityTimers.delete(id);
+    }
     if (this.ptyRetirements.has(id) || this.shuttingDown || this.queueHeld || this.initializationFailed || this.queueBlocked.has(id) || this.stopRuns.has(id) || this.stopBlocks.has(id) || this.blockedDrivers.has(id) || !this.mutations.valid(this.lifecycle(id)) || this.drains.has(id) || this.attempts.has(id) || this.verifyingSessions.has(id) || this.steeringSessions.has(id)
       || this.blockedVerificationSessions.has(id) || !(this.queues.get(id)?.length)) return;
     const token = owner(id, this.lifecycle(id)); this.drains.set(id, token);
@@ -2708,6 +2729,14 @@ export class DutydeckRuntime {
       try { next = (await this.queuedTasks(id))[0]; }
       catch { this.queueBlocked.add(id); return; }
       if (next && this.repos.execution.getAcceptedTask(next.id)?.input?.version !== 2) { this.queueBlocked.add(id); return; }
+      const retry = next && this.repos.execution.getTaskExecution(next.id)?.currentAttempt?.automaticRetry;
+      if (next && retry && Date.parse(retry.dueAt) > Date.now()) {
+        const timer = setTimeout(() => {
+          this.capacityTimers.delete(id);
+          this.mutations.run(undefined, () => this.scheduleQueue(id));
+        }, Math.min(2_147_483_647, Date.parse(retry.dueAt) - Date.now()));
+        timer.unref(); this.capacityTimers.set(id, { taskId: next.id, timer }); return;
+      }
       let claimed: CommitResult | undefined;
       let token: Owner | undefined;
       try {
@@ -2986,6 +3015,8 @@ export class DutydeckRuntime {
     });
   }
   private revokeSession(id: string, cancelQueue: boolean, state: 'stopped' | 'interrupted', shutdown = false, discardSession = false, beforeResourceCleanup?: Promise<void>, actor?: ExecutionActor): Promise<void> {
+    const delayed = this.capacityTimers.get(id);
+    if (delayed) { clearTimeout(delayed.timer); this.capacityTimers.delete(id); }
     const pending = this.stopRuns.get(id);
     if (pending) { if (cancelQueue) this.stopIntents.get(id)!.cancelQueue = true; if (actor) this.stopIntents.get(id)!.actor = actor; return pending; }
     const intent = { cancelQueue, actor };  this.stopIntents.set(id, intent);
@@ -3002,6 +3033,10 @@ export class DutydeckRuntime {
       try {
       await this.verifications.stopSession(id);
       await this.mutations.write(id, async () => {
+        if (!shutdown) {
+          const session = await this.repos.sessions.get(id);
+          if (session) for (const committed of this.bound().cancelCapacityRetries(this.fence(session), 'session_stopped_capacity_retry')) this.wake(committed);
+        }
         if (ref) {
           const attempt = this.repos.execution.getAttempt(ref);
           if (attempt && !['settled', 'suspended'].includes(attempt.state)) {
