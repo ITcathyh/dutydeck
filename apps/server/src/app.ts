@@ -616,7 +616,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       reply.raw.end();
       throw error;
     }
-    if (!closed) heartbeat = setInterval(() => { if (!closed && !reply.raw.writableNeedDrain) void writeChunk(': heartbeat\n\n').catch(disconnect); }, 15_000);
+    if (!closed) heartbeat = setInterval(() => { if (!closed && !reply.raw.writableNeedDrain) void writeChunk(`event: heartbeat\ndata: ${JSON.stringify({ ts: Date.now() })}\n\n`).catch(disconnect); }, 15_000);
   });
 
   if (options.webRoot) {

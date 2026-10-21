@@ -168,3 +168,11 @@ describe('其他实例下的路径', () => {
     } finally { setInstance(undefined); }
   });
 });
+
+
+it('round trips the workspace panel only on session routes', () => {
+  const location = parseAppLocation('/sessions/old%20session', '?panel=workspace');
+  expect(location).toEqual({ route: { kind: 'session', sessionId: 'old session' }, overlay: { kind: 'workspace' } });
+  expect(appLocationPath(location)).toBe('/sessions/old%20session?panel=workspace');
+  expect(parseAppLocation('/', '?panel=workspace').overlay).toBeUndefined();
+});

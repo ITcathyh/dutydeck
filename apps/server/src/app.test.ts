@@ -318,6 +318,52 @@ describe('HTTP API boundary', () => {
     expect(chunk).toContain('id: 2'); expect(chunk).toContain('replayed'); expect(runtime.getEventWindow).toHaveBeenCalledWith('s1', { afterSequence: 1, direction: 'forward', limit: 1_000 });
   });
 
+  it('sends timestamp heartbeats outside the persisted SSE sequence', async () => {
+    const intervals: Array<() => void> = [];
+    const originalInterval = globalThis.setInterval;
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void, delay: number, ...args: unknown[]) => {
+      if (delay === 15_000) intervals.push(callback);
+      return originalInterval(callback, delay, ...args);
+    }) as typeof setInterval);
+    const stored = [{ id: 'e7', sessionId: 's1', sequence: 7, type: 'text', timestamp: '', data: { text: 'persisted' } }];
+    let deliver!: (event: any) => void;
+    const runtime: any = {
+      getEventWindow: vi.fn(async () => [...stored]),
+      subscribe: vi.fn((_id: string, listener: typeof deliver) => { deliver = listener; return () => {}; }),
+      appendEvent: vi.fn()
+    };
+    const app = await buildApp(runtime); apps.push(app); await app.listen({ host: '127.0.0.1', port: 0 });
+    const address = app.server.address(); if (!address || typeof address === 'string') throw new Error('No port');
+    const controller = new AbortController();
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/sessions/s1/stream?after=6`, { signal: controller.signal });
+      const reader = response.body!.getReader(); const decoder = new TextDecoder(); let content = '';
+      while (!content.includes('id: 7')) { const next = await reader.read(); content += decoder.decode(next.value); }
+      await vi.waitFor(() => expect(intervals).toHaveLength(1));
+      const before = Date.now();
+      intervals[0]!(); intervals[0]!();
+      deliver({ ...stored[0], id: 'e8', sequence: 8, data: { text: 'live' } });
+      while (!content.includes('id: 8')) { const next = await reader.read(); content += decoder.decode(next.value); }
+      const heartbeats = content.split('\n\n').filter(frame => frame.includes('event: heartbeat'));
+      expect(heartbeats).toHaveLength(2);
+      for (const frame of heartbeats) {
+        expect(frame).not.toMatch(/(?:^|\n)id:/);
+        const data = JSON.parse(frame.split('data: ')[1]!);
+        expect(Object.keys(data)).toEqual(['ts']);
+        expect(data.ts).toBeGreaterThanOrEqual(before);
+        expect(data.ts).toBeLessThanOrEqual(Date.now());
+      }
+      expect(content.match(/(?:^|\n)id: \d+/g)).toEqual(['\nid: 7', '\nid: 8']);
+      expect(stored).toHaveLength(1);
+      expect(runtime.appendEvent).not.toHaveBeenCalled();
+      expect(runtime.getEventWindow).toHaveBeenCalledOnce();
+      expect(runtime.getEventWindow).toHaveBeenCalledWith('s1', { afterSequence: 6, direction: 'forward', limit: 1_000 });
+    } finally {
+      controller.abort();
+      intervalSpy.mockRestore();
+    }
+  });
+
   it('pages long SSE reconnect gaps in bounded batches', async () => {
     const event = (sequence: number) => ({ id: `e${sequence}`, sessionId: 's1', sequence, type: 'text', timestamp: '2026-01-01T00:00:00.000Z', data: { text: String(sequence) } });
     const runtime: any = {

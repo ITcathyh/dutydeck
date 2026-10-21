@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { api, foundationApi, insightApi, scheduleApi, type Agent, type DockEvent, type RunSummary, type Session } from './api';
 import type { SessionInsightDetailsResponse } from '@dutydeck/shared';
 import App from './App';
+import { AuthGate } from './components/AuthGate';
 import { useDockStore } from './store';
 import { resetDrafts } from './draft-store';
 import type { EventWindow } from './event-history';
@@ -1399,4 +1400,77 @@ describe('App same-session overlay draft preservation', () => {
     await waitFor(() => expect(window.location.pathname).toBe('/sessions/s2'));
     expect(input().value).toBe('');
   });
+});
+
+
+describe('App archived workspace deep link', () => {
+  it('selects the archived old session and opens its existing workspace panel after login', async () => {
+    window.history.replaceState(null, '', '/sessions/old%20session?panel=workspace');
+    const old = { ...session('old session', 'stopped'), archivedAt: '2026-10-21T00:00:00Z', workspaceMode: 'worktree' as const };
+    mockAppApi({ sessions: [session('new-session'), old] });
+    vi.mocked(api.authStatus).mockResolvedValue({ authenticated: false, required: true });
+    const login = vi.spyOn(api, 'login').mockImplementation(async () => {
+      vi.mocked(api.authStatus).mockResolvedValue({ authenticated: true, required: true });
+      return { authenticated: true, required: true };
+    });
+    const workspace = vi.spyOn(api, 'workspace').mockResolvedValue({ schemaVersion: 1, revision: 1, sessionId: old.id, mode: 'worktree', sourceCwd: '/repo', cwd: '/repo/old-worktree', state: 'ready', branch: 'old-branch', createdAt: old.createdAt, updatedAt: old.updatedAt });
+    vi.spyOn(api, 'turnDiffs').mockResolvedValue([]);
+    const preview = vi.spyOn(api, 'workspaceCleanupPreview');
+    const clean = vi.spyOn(api, 'cleanWorkspace');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><AuthGate><App/></AuthGate></QueryClientProvider>);
+    await screen.findByRole('heading', { name: '连接到这台 Dutydeck' });
+    expect(api.sessions).not.toHaveBeenCalled();
+    expect(workspace).not.toHaveBeenCalled();
+    expect(window.location.search).toBe('?panel=workspace');
+    await userEvent.type(screen.getByLabelText('访问令牌'), 'access-token');
+    await userEvent.click(screen.getByRole('button', { name: '连接工作台' }));
+    const dialog = await screen.findByRole('dialog', { name: '工作目录与自动化' });
+    expect(login).toHaveBeenCalledWith('access-token');
+    await within(dialog).findByText('/repo/old-worktree');
+    expect(workspace).toHaveBeenCalledWith(old.id);
+    expect(useDockStore.getState().activeSessionId).toBe(old.id);
+    expect(screen.getByText('该任务已归档，只能查看历史记录。')).toBeTruthy();
+    expect(within(dialog).getByRole('button', { name: '检查可否清理' })).toBeTruthy();
+    expect(preview).not.toHaveBeenCalled();
+    expect(clean).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole('button', { name: '关闭' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '工作目录与自动化' })).toBeNull());
+    expect(window.location.pathname).toBe('/sessions/old%20session');
+    expect(window.location.search).toBe('');
+  });
+
+  it('opens the archived workspace directly for an authenticated visitor', async () => {
+    window.history.replaceState(null, '', '/sessions/s1?panel=workspace');
+    mockAppApi({ sessions: [{ ...session('s1', 'stopped'), archivedAt: '2026-10-21T00:00:00Z' }] });
+    vi.spyOn(api, 'workspace').mockResolvedValue({ schemaVersion: 1, revision: 1, sessionId: 's1', mode: 'worktree', sourceCwd: '/repo', cwd: '/repo/s1', state: 'ready', createdAt: '', updatedAt: '' });
+    const preview = vi.spyOn(api, 'workspaceCleanupPreview');
+    const clean = vi.spyOn(api, 'cleanWorkspace');
+    renderApp();
+    expect(await screen.findByRole('dialog', { name: '工作目录与自动化' })).toBeTruthy();
+    expect(useDockStore.getState().activeSessionId).toBe('s1');
+    expect(preview).not.toHaveBeenCalled(); expect(clean).not.toHaveBeenCalled();
+  });
+});
+
+
+it('shows session background lifecycle separately while preserving the current running task', async () => {
+  window.history.replaceState(null, '', '/sessions/s1');
+  const events: DockEvent[] = [
+    { id: 'input', sequence: 1, timestamp: '', type: 'text', data: { role: 'user', text: 'current business request' } },
+    { id: 'answer', sequence: 2, timestamp: '', type: 'text', data: { role: 'assistant', text: 'main round answer' } },
+    { id: 'background', sequence: 3, timestamp: '', type: 'status', data: { state: 'background_work', count: 1, mainTurnEnded: true, tasks: [{ id: 'old-native-task', toolUseId: 'old-tool', originInputId: 'older-input', kind: 'agent', state: 'running' }] } }
+  ];
+  const task = { id: 'current-task', sessionId: 's1', prompt: 'current business request', status: 'running', createdAt: '', updatedAt: '' };
+  mockAppApi({ sessions: [session('s1', 'thinking')], events });
+  vi.mocked(api.tasks).mockResolvedValue([task]);
+  const { client, container } = renderApp();
+  await screen.findByText('主回合已结束 · 后台子任务运行中（1）');
+  const activity = await screen.findByLabelText('Codex 执行过程');
+  await userEvent.click(activity.querySelector('summary')!);
+  expect(await within(activity).findByText('main round answer')).toBeTruthy();
+  expect(client.getQueryData(['tasks', 's1'])).toEqual([task]);
+  expect(client.getQueryData<Session[]>(['sessions'])?.[0]?.state).toBe('thinking');
+  expect(container.querySelector('[data-timeline-event="background"]')).toBeNull();
+  expect(container.querySelector('[data-timeline-scroll]')?.textContent).not.toContain('old-native-task');
 });

@@ -60,7 +60,13 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
         }
       })().catch(() => { /* 下一次 open / gap 会再次校准 */ }).finally(() => { reconciling = false; desiredTarget = undefined; });
     };
+    const calibrate = () => {
+      reconcileEvents(newestSequence(qc.getQueryData<EventWindow>(['events', sessionId])));
+      void qc.refetchQueries({ queryKey: ['tasks', sessionId], exact: true });
+      void qc.refetchQueries({ queryKey: ['sessions'], exact: true });
+    };
     const stream = new SessionStream({
+      onReconnect: calibrate,
       sessionId,
       getAfter: () => recoveryCursors.current.get(sessionId) ?? newestSequence(qc.getQueryData<EventWindow>(['events', sessionId])),
       onEvent: event => {
@@ -75,9 +81,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
       onStatus: next => {
         setStatus(next);
         if (next !== 'open') return;
-        reconcileEvents(newestSequence(qc.getQueryData<EventWindow>(['events', sessionId])));
-        void qc.refetchQueries({ queryKey: ['tasks', sessionId], exact: true });
-        void qc.refetchQueries({ queryKey: ['sessions'], exact: true });
+        calibrate();
       }
     });
     stream.start();

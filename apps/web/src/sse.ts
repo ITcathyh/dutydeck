@@ -76,10 +76,17 @@ export type SessionStreamOptions = {
   getAfter(): number;
   onEvent(event: DockEvent): void;
   onStatus(status: StreamStatus): void;
+  // 恢复连接时先校准查询，不等待可能被代理缓冲的 open。
+  onReconnect?(): void;
   eventSourceFactory?: (url: string) => MockableEventSource;
   setTimeoutFn?: typeof setTimeout;
   clearTimeoutFn?: typeof clearTimeout;
 };
+
+export const SSE_STALE_MS = 45_000;
+export const SSE_BOOTSTRAP_STALE_MS = 120_000;
+export const SSE_HIDDEN_SUSPEND_MS = 60_000;
+const SSE_WATCHDOG_TICK_MS = 5_000;
 
 // SSE 连接 + 指数退避重连的核心循环（与 React 解耦，便于单测）
 export class SessionStream {
@@ -91,6 +98,10 @@ export class SessionStream {
   private readonly setTimeoutFn: typeof setTimeout;
   private readonly clearTimeoutFn: typeof clearTimeout;
   private readonly backoff = new Backoff();
+  private readonly onReconnect: () => void;
+  private watchdog: ReturnType<typeof setTimeout> | undefined;
+  private suspendTimer: ReturnType<typeof setTimeout> | undefined;
+  private started = false;
   private source: MockableEventSource | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private closed = false;
@@ -100,6 +111,7 @@ export class SessionStream {
     this.getAfter = opts.getAfter;
     this.onEvent = opts.onEvent;
     this.onStatus = opts.onStatus;
+    this.onReconnect = opts.onReconnect ?? (() => {});
     this.eventSourceFactory = opts.eventSourceFactory ?? (url => new EventSource(url));
     this.setTimeoutFn = opts.setTimeoutFn ?? setTimeout;
     this.clearTimeoutFn = opts.clearTimeoutFn ?? clearTimeout;
@@ -107,46 +119,123 @@ export class SessionStream {
 
   // 首次连接（重复调用无效果）
   start(): void {
-    if (this.closed || this.source) return;
+    if (this.closed || this.started) return;
+    this.started = true;
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this.onVisibilityChange);
     this.connect();
+    this.onVisibilityChange();
   }
 
-  // 关 source + 清 timer，之后不再重连
   close(): void {
     this.closed = true;
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    this.clearReconnect();
+    if (this.suspendTimer !== undefined) this.clearTimeoutFn(this.suspendTimer);
+    this.suspendTimer = undefined;
+    this.disconnect();
+  }
+
+  private hidden(): boolean {
+    return typeof document !== 'undefined' && document.hidden;
+  }
+
+  private clearReconnect(): void {
     if (this.timer !== undefined) this.clearTimeoutFn(this.timer);
-    this.source?.close();
-    this.source = undefined;
     this.timer = undefined;
   }
 
-  private connect(): void {
+  private disconnect(): void {
+    // 先撤销所有权，再关闭：close 期间或之后的迟到回调也不能生效。
+    const source = this.source;
+    this.source = undefined;
+    source?.close();
+    if (this.watchdog !== undefined) this.clearTimeoutFn(this.watchdog);
+    this.watchdog = undefined;
+  }
+
+  private reconnect(): void {
+    this.disconnect();
+    this.onStatus('reconnecting');
+    if (this.closed || this.hidden() || this.timer !== undefined) return;
+    this.timer = this.setTimeoutFn(() => {
+      this.timer = undefined;
+      if (this.closed || this.hidden()) return;
+      this.connect();
+      this.onReconnect();
+    }, this.backoff.next());
+  }
+
+  private onVisibilityChange = (): void => {
     if (this.closed) return;
-    // 重连时重新取缓存最新 maxSequence（双保险；原生 EventSource 同时会自动带 Last-Event-ID header）
+    if (this.hidden()) {
+      this.clearReconnect();
+      if (this.source && this.suspendTimer === undefined) this.suspendTimer = this.setTimeoutFn(() => {
+        this.suspendTimer = undefined;
+        if (this.hidden()) this.disconnect();
+      }, SSE_HIDDEN_SUSPEND_MS);
+      return;
+    }
+    if (this.suspendTimer !== undefined) this.clearTimeoutFn(this.suspendTimer);
+    this.suspendTimer = undefined;
+    if (!this.source) {
+      this.clearReconnect();
+      this.connect();
+      this.onReconnect();
+    }
+  };
+
+  private connect(): void {
+    if (this.closed || this.source) return;
     const after = this.getAfter();
     const source = this.eventSourceFactory(withShareToken(instanceApiUrl(`/api/sessions/${this.sessionId}/stream?after=${after}`)));
     this.source = source;
+    const current = () => !this.closed && this.source === source;
+    let lastFrameAt = Date.now();
+    let lastHeartbeat: { ts: number; at: number } | undefined;
+    let cadence: 'unknown' | 'realtime' | 'buffered' = 'unknown';
+    const watch = () => {
+      if (!current()) return;
+      const staleMs = cadence === 'realtime' ? SSE_STALE_MS : SSE_BOOTSTRAP_STALE_MS;
+      // 两帧已证明批量缓冲的流不能用静默判死。零/一帧仍需有界恢复。
+      if (!this.hidden() && cadence !== 'buffered' && Date.now() - lastFrameAt >= staleMs) {
+        this.reconnect();
+        return;
+      }
+      this.watchdog = this.setTimeoutFn(watch, SSE_WATCHDOG_TICK_MS);
+    };
     source.onopen = () => {
-      if (this.closed) return;
+      if (!current()) return;
       this.backoff.reset();
+      lastFrameAt = Date.now();
+      lastHeartbeat = undefined;
+      cadence = 'unknown';
+      if (this.watchdog !== undefined) this.clearTimeoutFn(this.watchdog);
+      this.watchdog = this.setTimeoutFn(watch, SSE_WATCHDOG_TICK_MS);
       this.onStatus('open');
     };
-    source.onerror = () => {
-      if (this.closed) return;
-      source.close();
-      this.onStatus('reconnecting');
-      this.timer = this.setTimeoutFn(() => this.connect(), this.backoff.next());
-    };
-    for (const type of STREAM_EVENT_TYPES) source.addEventListener(type, this.receive);
+    source.onerror = () => { if (current()) this.reconnect(); };
+    source.addEventListener('heartbeat', message => {
+      if (!current()) return;
+      try {
+        const { ts } = JSON.parse(message.data);
+        if (typeof ts !== 'number' || !Number.isFinite(ts)) return;
+        const at = Date.now();
+        if (lastHeartbeat && ts > lastHeartbeat.ts) {
+          const serverDelta = ts - lastHeartbeat.ts;
+          const arrivalDelta = at - lastHeartbeat.at;
+          cadence = serverDelta >= 5_000 && arrivalDelta >= serverDelta / 2 && arrivalDelta <= serverDelta * 2 ? 'realtime' : 'buffered';
+        }
+        lastHeartbeat = { ts, at };
+        lastFrameAt = at;
+      } catch { /* 忽略无法解析的帧 */ }
+    });
+    for (const type of STREAM_EVENT_TYPES) source.addEventListener(type, message => {
+      if (!current() || typeof message.data !== 'string' || !message.data) return;
+      try {
+        const event = JSON.parse(message.data) as DockEvent;
+        lastFrameAt = Date.now();
+        this.onEvent(event);
+      } catch { /* 忽略无法解析的帧 */ }
+    });
   }
-
-  // 与 App.tsx receive() 的解析逻辑一致：非字符串 / 空串 / JSON 解析失败的帧直接忽略
-  private receive = (message: MessageEvent<string>): void => {
-    if (typeof message.data !== 'string' || !message.data) return;
-    try {
-      this.onEvent(JSON.parse(message.data) as DockEvent);
-    } catch {
-      // 忽略无法解析的帧
-    }
-  };
 }

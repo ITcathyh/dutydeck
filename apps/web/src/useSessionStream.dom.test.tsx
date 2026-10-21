@@ -17,7 +17,8 @@ class MockEventSource implements MockableEventSource {
   constructor(readonly url: string) { MockEventSource.instances.push(this); }
   addEventListener(type: string, listener: (message: MessageEvent<string>) => void) { this.listeners.set(type, listener); }
   emit(type: string, value: DockEvent) { this.listeners.get(type)?.({ data: JSON.stringify(value) } as MessageEvent<string>); }
-  close() {}
+  closed = false;
+  close() { this.closed = true; }
 }
 
 beforeEach(() => { MockEventSource.instances = []; vi.stubGlobal('EventSource', MockEventSource); });
@@ -306,4 +307,38 @@ it('applies recovered status metadata without regressing a newer live status', a
     expect(client.getQueryData<Session[]>(['sessions'])?.[0]?.state).toBe('completed');
     expect(invalidations).not.toHaveBeenCalled();
   } finally { view.unmount(); client.clear(); }
+});
+
+
+it('foreground recovery calibrates events, tasks and sessions before the replacement stream opens', async () => {
+  vi.useFakeTimers();
+  let hidden = false;
+  vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+  const eventLoader = vi.spyOn(api, 'events').mockResolvedValueOnce([]).mockResolvedValue([event(2)]);
+  const taskLoader = vi.fn(async () => []);
+  const sessionLoader = vi.fn(async () => [session]);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['events', 's1'], createEventWindow([event(1)]));
+  function Harness() {
+    useQuery({ queryKey: ['tasks', 's1'], queryFn: taskLoader });
+    useQuery({ queryKey: ['sessions'], queryFn: sessionLoader });
+    useSessionStream('s1', 'r1', true);
+    return null;
+  }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await act(async () => { MockEventSource.instances[0]!.onopen?.(new Event('open')); await vi.advanceTimersByTimeAsync(0); });
+    const tasksBefore = taskLoader.mock.calls.length;
+    const sessionsBefore = sessionLoader.mock.calls.length;
+    act(() => { hidden = true; document.dispatchEvent(new Event('visibilitychange')); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(MockEventSource.instances[0]!.closed).toBe(true);
+    await act(async () => { hidden = false; document.dispatchEvent(new Event('visibilitychange')); await vi.advanceTimersByTimeAsync(0); });
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(taskLoader.mock.calls.length).toBe(tasksBefore + 1);
+    expect(sessionLoader.mock.calls.length).toBe(sessionsBefore + 1);
+    expect(eventLoader).toHaveBeenLastCalledWith('s1', { after: 1, limit: 200, direction: 'forward' }, expect.any(AbortSignal));
+    expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.map(item => item.sequence)).toEqual([1, 2]);
+  } finally { view.unmount(); client.clear(); vi.useRealTimers(); }
 });

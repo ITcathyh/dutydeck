@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SessionStream, type MockableEventSource, type StreamStatus } from './sse';
+import { SSE_BOOTSTRAP_STALE_MS, SSE_HIDDEN_SUSPEND_MS, SSE_STALE_MS, SessionStream, type MockableEventSource, type StreamStatus } from './sse';
 import type { DockEvent } from './api';
 
 // 已有的 sse.test.ts 覆盖了退避的基本递增；这里补的是重连**时序**上的边界：
@@ -61,9 +61,11 @@ describe('SessionStream 重连时序', () => {
     after = 0;
     vi.stubGlobal('EventSource', MockEventSource);
     vi.useFakeTimers();
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -209,5 +211,138 @@ describe('SessionStream 重连时序', () => {
     }
     expect(events.map(event => event.type)).toEqual(['text', 'thinking', 'tool_call', 'tool_result', 'permission_request', 'status', 'task', 'error', 'completed', 'raw_terminal']);
     stream.close();
+  });
+});
+
+
+describe('SessionStream 心跳与可见性', () => {
+  let stream: SessionStream;
+  let onEvent: ReturnType<typeof vi.fn>;
+  let onStatus: ReturnType<typeof vi.fn>;
+  let onReconnect: ReturnType<typeof vi.fn>;
+  let hidden = false;
+  const heartbeat = (ts = Date.now()) => latest().emit('heartbeat', JSON.stringify({ ts }));
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', MockEventSource);
+    hidden = false;
+    vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+    onEvent = vi.fn(); onStatus = vi.fn(); onReconnect = vi.fn();
+    stream = new SessionStream({ sessionId: 's1', getAfter: () => 7, onEvent, onStatus, onReconnect });
+    stream.start();
+    latest().open();
+  });
+  afterEach(() => { stream.close(); vi.restoreAllMocks(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+  const visibility = (value: boolean) => { hidden = value; document.dispatchEvent(new Event('visibilitychange')); };
+
+  it.each([0, 1])('在只收到 %i 帧心跳后静默的启动流上有界恢复', count => {
+    if (count) heartbeat();
+    vi.advanceTimersByTime(SSE_BOOTSTRAP_STALE_MS - 1);
+    expect(latest().closed).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(latest().closed).toBe(true);
+    vi.advanceTimersByTime(1_000);
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(afterParam(latest().url)).toBe(7);
+    expect(onReconnect).toHaveBeenCalledOnce();
+  });
+
+  it('证明实时节奏后在静默 45 秒时关闭并恢复', () => {
+    heartbeat(); vi.advanceTimersByTime(15_000); heartbeat();
+    vi.advanceTimersByTime(SSE_STALE_MS - 1);
+    expect(latest().closed).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(latest().closed).toBe(true);
+    vi.advanceTimersByTime(1_000);
+    expect(MockEventSource.instances).toHaveLength(2);
+  });
+
+  it('新连接重新证明实时性，不继承旧连接的心跳证据', () => {
+    heartbeat(); vi.advanceTimersByTime(15_000); heartbeat();
+    latest().fail(); vi.advanceTimersByTime(1_000); latest().open();
+    vi.advanceTimersByTime(SSE_STALE_MS);
+    expect(latest().closed).toBe(false);
+    vi.advanceTimersByTime(SSE_BOOTSTRAP_STALE_MS - SSE_STALE_MS);
+    expect(latest().closed).toBe(true);
+  });
+
+  it('持续心跳保持单条连接，且心跳不进入事件缓存', () => {
+    for (let i = 0; i < 40; i++) { heartbeat(); vi.advanceTimersByTime(15_000); }
+    expect(MockEventSource.instances).toHaveLength(1);
+    expect(latest().closed).toBe(false);
+    expect(onEvent).not.toHaveBeenCalled();
+  });
+
+  it('服务端时间戳静止不能证明实时节奏', () => {
+    heartbeat(1);
+    vi.advanceTimersByTime(15_000); heartbeat(1);
+    vi.advanceTimersByTime(SSE_STALE_MS);
+    expect(latest().closed).toBe(false);
+    vi.advanceTimersByTime(SSE_BOOTSTRAP_STALE_MS - SSE_STALE_MS);
+    expect(latest().closed).toBe(true);
+  });
+
+  it('批量心跳撤销实时证明，批次间静默不触发重连', () => {
+    heartbeat(); vi.advanceTimersByTime(15_000); heartbeat();
+    const now = Date.now();
+    heartbeat(now + 15_000); heartbeat(now + 30_000);
+    vi.advanceTimersByTime(SSE_BOOTSTRAP_STALE_MS * 3);
+    expect(MockEventSource.instances).toHaveLength(1);
+    expect(latest().closed).toBe(false);
+  });
+
+  it('旧 source 的事件、open、error、心跳都无副作用；重复 error 仅有一条重连', () => {
+    const first = latest(); first.fail(); first.fail();
+    first.open(); first.emit('text', JSON.stringify({ sequence: 99 })); first.emit('heartbeat', JSON.stringify({ ts: Date.now() }));
+    expect(onStatus.mock.calls.map(([value]) => value)).toEqual(['open', 'reconnecting']);
+    expect(onEvent).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1_000);
+    expect(MockEventSource.instances).toHaveLength(2);
+    first.fail(); first.open();
+    vi.advanceTimersByTime(5_000);
+    expect(MockEventSource.instances).toHaveLength(2);
+  });
+
+  it('隐藏延时释放连接，后台零重连，前台立即恢复并校准', () => {
+    visibility(true);
+    vi.advanceTimersByTime(SSE_HIDDEN_SUSPEND_MS - 1);
+    expect(latest().closed).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(latest().closed).toBe(true);
+    latest().fail(); vi.advanceTimersByTime(600_000);
+    expect(MockEventSource.instances).toHaveLength(1);
+    visibility(false);
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(onReconnect).toHaveBeenCalledOnce();
+  });
+
+  it('后台连接错误不重试，前台恢复时只连一条', () => {
+    visibility(true); latest().fail(); latest().fail();
+    vi.advanceTimersByTime(600_000);
+    expect(MockEventSource.instances).toHaveLength(1);
+    visibility(false); visibility(false);
+    expect(MockEventSource.instances).toHaveLength(2);
+  });
+
+  it('切到后台取消已排重连，短暂隐藏后保留健康连接', () => {
+    visibility(true); vi.advanceTimersByTime(1_000); visibility(false);
+    vi.advanceTimersByTime(SSE_HIDDEN_SUSPEND_MS);
+    expect(latest().closed).toBe(false);
+    latest().fail(); visibility(true);
+    vi.advanceTimersByTime(600_000);
+    expect(MockEventSource.instances).toHaveLength(1);
+  });
+
+  it('close 清除所有计时器、可见性监听与迟到投递', () => {
+    const remove = vi.spyOn(document, 'removeEventListener');
+    const first = latest(); visibility(true); stream.close();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(remove).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    first.emit('text', JSON.stringify({ sequence: 9 })); first.open(); first.fail(); visibility(false);
+    vi.advanceTimersByTime(600_000);
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(onStatus).toHaveBeenCalledTimes(1);
+    expect(MockEventSource.instances).toHaveLength(1);
   });
 });
