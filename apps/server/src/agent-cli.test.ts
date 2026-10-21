@@ -33,6 +33,14 @@ async function agent(args: string[], reply: unknown = { done: true }, status = 2
 }
 
 describe('dutydeck agent', () => {
+  it('reads static final cards from JSON files without shell JSON and supports delivery mode', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-final-cli-')); roots.push(root);
+    const file = join(root, 'card.json');
+    const cardBody = { elements: [{ tag: 'markdown', content: 'Quotes \" and $() stay text' }] };
+    await writeFile(file, JSON.stringify(cardBody));
+    expect(await agent(['group', 'send', 'Summary', '--final', '--card-file', file, '--delivery', 'both'])).toMatchObject({ url: '/send', body: { content: 'Summary', final: true, cardBody, delivery: 'both' } });
+  });
+
   it('查看类发 GET 到 views，stdout 只有一个 {ok,data}，不带 --turn', async () => {
     const status = await agent(['status'], { agent: 'codex', text: '…' });
     expect(status).toMatchObject({ url: '/views/status', method: 'GET', body: undefined, authorization: 'Bearer capability-token', turn: null, lines: 1, output: { ok: true, data: { agent: 'codex' } } });

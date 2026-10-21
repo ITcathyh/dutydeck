@@ -27,7 +27,7 @@ async function setup() {
   await repos.config.set(larkBotsConfigKey, JSON.stringify([{ appId: 'cli_bot', appSecret: 'secret', name: 'Bot', defaultAgentId: 'codex', groupToolsEnabled: false }]));
   const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://127.0.0.1:4310');
   const tools = new LarkAgentToolsService(capabilities, repos.config, {});
-  let active: { taskId: string; actorId?: string } | undefined = { taskId: 'task_1', actorId: 'ou_alice' };
+  let active: { taskId: string; actorId?: string; attemptId?: string } | undefined = { taskId: 'task_1', actorId: 'ou_alice', attemptId: 'attempt_1' };
   const automated = new Set<string>();
   const saved = new Map<string, PublicSessionSchedule>();
   const createSchedule = vi.fn<AgentRequestToolsOptions['automation']['createSchedule']>(async (sessionId, input, actorId, receipt) => {
@@ -50,7 +50,8 @@ async function setup() {
     if (error instanceof RuntimeError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   });
-  await registerAgentRequestTools(app, { runtime: { getActiveTaskContext: () => active }, automatedTask: taskId => automated.has(taskId), tools, automation: { createSchedule }, prepareDelivery, sendConfirmation });
+  const requestScheduleStop = vi.fn(async () => ({ pendingDelivery: true, scheduleId: 'host_bound' }));
+  await registerAgentRequestTools(app, { runtime: { getActiveTaskContext: () => active }, automatedTask: taskId => automated.has(taskId), tools, automation: { createSchedule, requestScheduleStop }, prepareDelivery, sendConfirmation });
   const request = (target: Session, payload: object, turn = capabilities.workbenchTurnToken(target.id, active?.taskId ?? ''), path = 'schedules') => app.inject({
     method: 'POST', url: `/api/lark/agent-tools/${path}`, payload,
     headers: { authorization: `Bearer ${capabilities.environmentFor(target).dutydeck_group_tools_token}`, 'x-dutydeck-work-turn': turn }
@@ -62,10 +63,19 @@ async function setup() {
     headers: { authorization: `Bearer ${capabilities.environmentFor(group).dutydeck_group_tools_token}`, ...(turn ? { 'x-dutydeck-work-turn': turn } : {}) }
   });
   const currentTurn = () => capabilities.workbenchTurnToken(group.id, active?.taskId ?? '');
-  return { group, p2p, request, command, agent, currentTurn, tools, createSchedule, prepareDelivery, sendConfirmation, saved, automated, setActive: (value: typeof active) => { active = value; } };
+  return { group, p2p, request, command, agent, requestScheduleStop, currentTurn, tools, createSchedule, prepareDelivery, sendConfirmation, saved, automated, setActive: (value: typeof active) => { active = value; } };
 }
 
 describe('Agent schedule requests', () => {
+  it('accepts only a self stop request without an arbitrary schedule id during an automated active turn', async () => {
+    const f = await setup(); f.automated.add('task_1');
+    const result = await f.agent('POST', 'schedules/stop-self', {});
+    expect(result.statusCode).toBe(200);
+    expect(f.requestScheduleStop).toHaveBeenCalledWith('ses_group', 'task_1', 'attempt_1', 'ou_alice');
+    expect((await f.agent('POST', 'schedules/stop-self', { scheduleId: 'other' })).statusCode).toBe(400);
+    expect(f.requestScheduleStop).toHaveBeenCalledOnce();
+  });
+
   it('creates a disabled schedule for the turn requester, posts one confirmation card, and returns the same schedule on retry', async () => {
     const f = await setup();
     const first = await f.request(f.group, { every: 15, prompt: '看看这个话题有没有排查结论', name: '盯结论' });

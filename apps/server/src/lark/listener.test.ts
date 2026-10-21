@@ -2556,6 +2556,29 @@ describe('Lark long connection listener 欢迎语', () => {
     } finally { releaseGroup(); listener.stop(); }
   });
 
+  it.each([false, true])('normalizes registered card callbacks before routing, form merge and dedup (string=%s)', async asString => {
+    const handleAction = vi.spyOn(LarkMessageCoordinator.prototype, 'handleAction').mockResolvedValue({ type: 'success', content: 'ok' });
+    const runtime = { getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()), listSessions: vi.fn(async () => []) };
+    const { listener, handlers } = await startHarness({ runtime, configPatch: { eventHandlers: [{ id: 'external', eventTypes: ['card.action.trigger'], url: 'https://example.invalid/callback', token: 'secret' }] } });
+    try {
+      for (const form of [undefined, { choice: 'one' }, { choices: ['a', 'b'] }, { answer: 'free text' }]) {
+        const value = { action: 'cancel', task_id: 'om_task', operator: { open_id: 'ou_fake' }, open_chat_id: 'oc_fake' };
+        const event = { header: { event_id: `ev_${asString}_${JSON.stringify(form)}` }, event: {
+          operator: { open_id: 'ou_real' }, context: { open_message_id: 'om_card', open_chat_id: 'oc_real' },
+          action: { value: asString ? JSON.stringify(value) : value, ...(form ? { form_value: form } : {}) }
+        } };
+        await handlers['card.action.trigger']!(event);
+        await handlers['card.action.trigger']!(event);
+        expect(handleAction).toHaveBeenLastCalledWith({ ...value, ...(form ? { form_value: form } : {}) }, 'ou_real', { messageId: 'om_card', chatId: 'oc_real' });
+      }
+      expect(handleAction).toHaveBeenCalledTimes(4);
+      await handlers['card.action.trigger']!({ event_id: 'behavior', operator: { open_id: 'ou_real' }, action: { behaviors: [{ value: JSON.stringify({ action: 'cancel', task_id: 'om_behavior' }) }] } });
+      expect(handleAction).toHaveBeenLastCalledWith({ action: 'cancel', task_id: 'om_behavior' }, 'ou_real', expect.anything());
+      await handlers['card.action.trigger']!({ event_id: 'malformed', action: { value: '{bad', behaviors: [{ value: { action: 'cancel', task_id: 'om_behavior' } }] } });
+      expect(handleAction).not.toHaveBeenLastCalledWith({ action: 'cancel', task_id: 'om_behavior' }, undefined, expect.anything());
+    } finally { listener.stop(); handleAction.mockRestore(); }
+  });
+
   it('同一次卡片点击被平台重复推送时只交给主控处理一次，重推拿到同一个结果', async () => {
     const handleAction = vi.spyOn(LarkMessageCoordinator.prototype, 'handleAction').mockResolvedValue({ type: 'success', content: '执行端已接受本次批准。' });
     const runtime = { getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()), listSessions: vi.fn(async () => []) };

@@ -1,3 +1,4 @@
+import { open } from 'node:fs/promises';
 import type { AgentGroupCliOptions, HistoryShowCliOptions } from '../cli-program.js';
 
 interface GroupToolErrorBody {
@@ -120,11 +121,22 @@ export function runGroupWait(cliOptions: AgentGroupCliOptions, options: GroupToo
   return new AgentGroupToolHttpClient(options).request(queryPath('/wait', cliOptions));
 }
 
-export function runGroupSend(content: string, cliOptions: AgentGroupCliOptions, options: GroupToolClientOptions = {}) {
+export async function runGroupSend(content: string, cliOptions: AgentGroupCliOptions, options: GroupToolClientOptions = {}) {
+  let cardBody: unknown;
+  if (cliOptions.cardFile) {
+    const file = await open(cliOptions.cardFile, 'r');
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.size > 28_000) throw new Error('--card-file requires a regular JSON file under 28 KB');
+      cardBody = JSON.parse(await file.readFile('utf8'));
+    } finally { await file.close(); }
+  }
   return new AgentGroupToolHttpClient(options).request('/send', {
     method: 'POST',
     body: JSON.stringify({
       content,
+      ...(cardBody === undefined ? {} : { cardBody }),
+      ...(cliOptions.delivery ? { delivery: cliOptions.delivery } : {}),
       ...(cliOptions.final ? { final: true } : {}),
       ...(cliOptions.turn ? { turn: cliOptions.turn } : {}),
       ...(cliOptions.to ? { to: cliOptions.to } : {}),

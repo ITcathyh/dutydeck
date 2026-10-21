@@ -1,3 +1,4 @@
+import { type FinalCardBody } from './final-card.js';
 import { mkdtemp, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { larkResourceRangeBytes, readResourceError, ResourceRangeError, ResourceStreamError, validateResourceRange, writeResourceStream } from './resource-range-download.js';
@@ -41,6 +42,8 @@ function larkMessageUuid(key: string): string {
 }
 
 export interface LarkCardInput {
+  /** Validated static custom final body; execution header and completion decorations remain host-owned. */
+  cardBody?: FinalCardBody;
   /** Local authority check, repeated after token/quota waits before every provider attempt. */
   beforeSend?: LarkWriteGuard;
   cardKind?: 'process' | 'result';
@@ -550,6 +553,14 @@ export function loadLarkBotConfig(env: NodeJS.ProcessEnv = process.env, input: L
 }
 
 export function buildLarkCard(input: LarkCardInput = {}) {
+  if (!input.cardBody) return buildDefaultLarkCard(input);
+  const { cardBody, ...hostInput } = input;
+  // New bodies are validated at admission. Completion may append trusted host controls.
+  const card = buildDefaultLarkCard({ ...hostInput, elements: [] });
+  return { ...card, body: { direction: 'vertical', padding: '10px 12px', ...cardBody } };
+}
+
+function buildDefaultLarkCard(input: LarkCardInput) {
   const state = input.state ?? 'running';
   const presentation = statePresentation[state];
   if (!presentation) throw new LarkServiceError('INVALID_CARD_STATE', `Unsupported Lark card state: ${String(state)}`, 400);

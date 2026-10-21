@@ -75,6 +75,8 @@ export const sessionScheduleSchema = z.object({
   deletedAt: timestamp.optional(),
   nextDueAt: timestamp.optional(),
   taskStartOccurrenceId: z.string().optional(),
+  /** Acknowledges the exact self-stop CAS, including recovery after an interrupted request acknowledgment. */
+  stopRequestId: z.string().optional(),
   /** Durable single execution slot, written before the occurrence itself. */
   pendingOccurrence: z.object({
     id: z.string().min(1), generation: z.number().int().positive(), scheduledForUtc: timestamp,

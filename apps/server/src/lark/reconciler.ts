@@ -59,6 +59,9 @@ const larkResultRetryDelayMs = (attempts: number) => Math.min(5 * 60_000, 5_000 
  */
 const larkResultRetryWindowMs = 60 * 60_000;
 const larkResultRetryExpiredReason = '自动重试超过 1 小时仍未确认送达，已停止自动重试；结果可能已送达，也可能没有';
+// Local relay permission can return before the bounded delivery window ends.
+const deterministicDeliveryFailure = (error: unknown) => isLarkDeterministicFailure(error)
+  && !(error instanceof LarkServiceError && error.code === 'FINAL_RELAY_REVOKED');
 const deliveryFailureReason = (error: unknown) => redactTraceText(error instanceof Error ? error.message : String(error)).slice(0, 300);
 
 export type LarkResultDeliveryIssue = {
@@ -87,6 +90,7 @@ export async function performLarkCardReconcile(input: {
   config: StoredLarkConfig;
   channel: string;
   deliveryStore?: ConfigRepository;
+  authorizeFinalRelay?: (scope: import('./explicit-final.js').ExplicitFinalScope, actorId: string) => Promise<void>;
   resultElements?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, cardId: string) => Promise<Array<Record<string, any>>>;
   terminalDecoration?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, config: StoredLarkConfig) => Promise<{ elements: Array<Record<string, any>>; cardInput: LarkCardInput }>;
   /** 按记录所属会话解析生效配置（群级呈现覆盖）。缺省时全部按 Bot 级配置补发。 */
@@ -447,7 +451,7 @@ export async function performLarkCardReconcile(input: {
               persisted.final_delivery_first_failed_at = anchored.final_delivery_first_failed_at;
               mapping.extra = extra;
             }
-            const result = await completeExplicitFinal(input.deliveryStore, service, finalContext, finalCardInput, elements, beforeSend) ?? await sendLarkResult(service, {
+            const result = await completeExplicitFinal(input.deliveryStore, service, finalContext, finalCardInput, elements, beforeSend, input.authorizeFinalRelay ?? (async () => { throw new LarkServiceError('FINAL_RELAY_REVOKED', '回传恢复缺少授权检查。', 403); })) ?? await sendLarkResult(service, {
               chatId: persisted.chat_id,
               replyMessageId: persisted.reply_message_id?.trim()
                 || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
@@ -476,11 +480,11 @@ export async function performLarkCardReconcile(input: {
           if (error instanceof LarkServiceError && error.code === 'LARK_WRITE_OBSOLETE') { unresolved++; return; }
           deliveryError = error;
           log.warn({ error, messageId: persisted.card_message_id, sessionId: mapping.sessionId, externalId: mapping.externalId },
-            isLarkDeterministicFailure(error) ? '执行结果被飞书明确拒收，停止自动重发' : '执行结果交付待下次对账重试');
+            deterministicDeliveryFailure(error) ? '执行结果被飞书明确拒收，停止自动重发' : '执行结果交付待下次对账重试');
         }
         // 投递失败只记在投递字段上，不改任务结果。确定性失败写失败终态、不再重试；瞬时失败按这条映射退避。
         const deliveryFailed = !finalMessageId && !reactionDelivered && (retryExpired
-          || (deliveryError === undefined ? persisted.final_delivery_state === 'failed' : isLarkDeterministicFailure(deliveryError)));
+          || (deliveryError === undefined ? persisted.final_delivery_state === 'failed' : deterministicDeliveryFailure(deliveryError)));
         const attempts = (persisted.final_delivery_attempts ?? 0) + 1;
         const clearedRetry = { final_delivery_error: undefined, final_delivery_attempts: undefined, final_delivery_retry_at: undefined, final_delivery_first_failed_at: undefined };
         const deliveryPatch = finalMessageId || reactionDelivered ? {}

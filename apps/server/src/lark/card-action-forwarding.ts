@@ -33,6 +33,18 @@ export const parseCardActionValue = (raw: unknown): Record<string, unknown> | un
   return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : undefined;
 };
 
+/** One normalized SDK callback for classification, forwarding, deduplication and execution. */
+export function normalizeCardCallback(raw: any) {
+  const event = raw?.event && typeof raw.event === 'object' ? raw.event : raw ?? {};
+  const action = event.action && typeof event.action === 'object' ? event.action : {};
+  // An explicitly malformed value must not select a different behavior instead.
+  const source = Object.hasOwn(action, 'value') ? action.value : action.behaviors?.find((item: any) => item && Object.hasOwn(item, 'value'))?.value;
+  const parsed = parseCardActionValue(source);
+  const form = parseCardActionValue(action.form_value);
+  return { ...event, event_id: event.event_id ?? raw?.header?.event_id,
+    action: { ...action, value: parsed ? { ...parsed, ...(form ? { form_value: form } : {}) } : undefined } };
+}
+
 /** dutydeck 内置按钮标记：命中的动作只能走内置处理，任何外部接收方都不得接管。 */
 export const isBuiltinCardAction = (value?: Record<string, unknown>): boolean =>
   Boolean(value && Object.keys(value).some(key => key === 'task_id' || key === 'taskId' || key.startsWith('dutydeck_') || key === 'dockmux_workflow'));

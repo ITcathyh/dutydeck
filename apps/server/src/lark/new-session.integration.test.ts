@@ -179,6 +179,19 @@ describe('Lark /new first-turn launch options', () => {
     expect(h.runtime.send).toHaveBeenCalledTimes(4);
   });
 
+  it('links a retired worktree to the existing protected preview and cleanup UI', async () => {
+    const h = await harness(); h.config.webBaseUrl = 'https://dutydeck.example';
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+    (h.runtime as any).getWorkspace = vi.fn(async () => ({ mode: 'worktree', path: '/tmp/owned-worktree' }));
+    const coordinator = h.createCoordinator();
+    await coordinator.handle(dm('om_start_cleanup', 'task'), h.config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    await coordinator.handle(dm('om_end_cleanup', '/new'), h.config);
+    await vi.waitFor(() => expect(h.service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/new 已受理', markdown: expect.stringContaining('[检查并清理 worktree](https://dutydeck.example/sessions/ses_1?panel=workspace)') })));
+    expect(h.runtime.stop).toHaveBeenCalledOnce();
+    expect(JSON.stringify(h.service.send.mock.calls)).toContain('工作目录');
+  });
+
   it('keeps legacy /new goal semantics and makes bare /new return the next turn to bot defaults', async () => {
     const h = await harness();
     const coordinator = h.createCoordinator();

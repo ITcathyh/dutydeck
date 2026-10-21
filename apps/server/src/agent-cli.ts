@@ -122,6 +122,7 @@ const operations: Record<string, Operation> = {
   retry: action('retry'),
   plan: action('plan', (_args, o) => ({ task: o.task })),
   'schedule.create': { risk: 'write-confirm', serverDryRun: true, request: (_args, o) => ({ method: 'POST', path: '/schedules', body: { prompt: o.prompt, name: o.name, every: o.every, cron: o.cron, at: o.at } }) },
+  'schedule.stop-self': write('POST', () => '/schedules/stop-self', () => ({})),
   'schedule.enable': action('schedule.enable', ([scheduleId]) => ({ id: scheduleId })),
   'schedule.disable': action('schedule.disable', ([scheduleId]) => ({ id: scheduleId })),
   'queue.cancel': action('queue.cancel', ([index]) => ({ index })),
@@ -142,7 +143,7 @@ const operations: Record<string, Operation> = {
   'group.message': read(([messageId]) => query('/message', { messageId })),
   'group.team-search': read(([text]) => query('/team-search', { query: text })),
   'group.wait': read((_args, o) => query('/wait', { after: o.after, limit: o.limit, timeoutMs: o.timeoutMs })),
-  'group.send': write('POST', () => '/send', ([content], o) => ({ content, final: o.final, to: o.to, replyTo: o.replyTo, inThread: o.inThread, idempotencyKey: o.idempotencyKey })),
+  'group.send': { risk: 'write', request: async ([content], o) => ({ method: 'POST', path: '/send', body: { content, final: o.final, delivery: o.delivery, ...(o.cardFile ? { cardBody: await jsonInput({ file: o.cardFile }, true) } : {}), to: o.to, replyTo: o.replyTo, inThread: o.inThread, idempotencyKey: o.idempotencyKey } }) },
   'group.send-file': write('POST', () => '/send-file', ([path], o) => ({ path, replyTo: o.replyTo, inThread: o.inThread, idempotencyKey: o.idempotencyKey, image: o.image })),
   'group.handoff': write('POST', () => '/handoff', ([to, content]) => ({ to, content })),
   'group.reply-agent': write('POST', () => '/reply-agent', ([content]) => ({ content })),
@@ -270,6 +271,7 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
     .option('--every <minutes>', 'Fixed interval in whole minutes', integer(1, 525_600))
     .option('--cron <expression>', 'Five-field cron expression, Asia/Shanghai time')
     .option('--at <local-time>', 'Run once at YYYY-MM-DDTHH:mm, Asia/Shanghai time');
+  sub(schedule, 'stop-self', 'Request disabling this scheduled task after its successful result is delivered', 'schedule.stop-self', 'write', ['schedule stop-self']);
   sub(schedule, 'enable', 'Enable a schedule', 'schedule.enable', 'write-confirm', ['schedule enable <编号>']).argument('<id>', 'Schedule id shown by schedules');
   sub(schedule, 'disable', 'Disable a schedule', 'schedule.disable', 'write-confirm', ['schedule disable <编号>']).argument('<id>', 'Schedule id shown by schedules');
   const ci = sub(agent, 'ci', 'List CI waits of this session; wait, fix or cancel with the subcommands', 'ci', 'read', ['ci', 'ci wait', 'ci cancel <编号>']);
@@ -336,6 +338,8 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
   sub(chat, 'send', 'Send a new message, or reply to a message or topic', 'group.send', 'write', ["group send '发布窗口已开启'", "group send '我已定位问题' --reply-to om_xxx --in-thread", "group send '<完整答复>' --final"])
     .argument('<content>', 'Message content')
     .option('--final', 'Deliver the final answer of the current task (rarely needed)')
+    .option('--card-file <path>', 'Static Card 2.0 body JSON file; requires --final and a searchable summary')
+    .addOption(new Option('--delivery <mode>', 'Final result targets').choices(['publish', 'reply-agent', 'both']))
     .option('--to <target>', 'Mention a discovered Agent or member by id or name')
     .option('--reply-to <message-id>', 'Reply to an om_* message in this chat')
     .option('--in-thread', 'Put the reply in the topic; needs --reply-to')

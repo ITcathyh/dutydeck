@@ -202,6 +202,15 @@ export abstract class LarkCoordinatorCore {
     };
   }
 
+  protected async authorizeFinalRelay(scope: import('./explicit-final.js').ExplicitFinalScope, actorId: string) {
+    const stored = this.workflowOptions.store && await readLarkConfig(this.workflowOptions.store, scope.app_id);
+    const config = stored && (await this.groupManager?.resolved(stored, scope.chat_id) ?? stored);
+    if (!config || !config.listening || !config.groupToolsEnabled || !config.groupToolsAllowSend
+      || !await this.isOperatorAllowed(config, actorId, scope.chat_id, scope.session_id, actorId, 'group_tools.send')) {
+      throw new LarkServiceError('FINAL_RELAY_REVOKED', '原执行身份的回传权限已撤销。', 403);
+    }
+  }
+
   protected async currentAccess(config: StoredLarkConfig, chatId: string, chatType: string, actor: string, action: PolicyAction, sessionId?: string, requester?: string) {
     const managed = chatType === 'group' ? await this.groupManager?.authorize(config.appId, chatId, actor, action, sessionId,
       { ...(requester ? { taskRequesterOpenId: requester } : {}) }) : undefined;

@@ -60,6 +60,12 @@ const SCHEDULE_PREFIX = 'session_automation/schedule/';
 const OCCURRENCE_PREFIX = 'session_automation/occurrence/';
 const CI_PREFIX = 'session_automation/ci/';
 const TASK_BINDING_PREFIX = 'session_automation/task/';
+const STOP_REQUEST_PREFIX = 'session_automation/stop_request/';
+const stopRequestSchema = z.object({
+  version: z.literal(1), taskId: z.string().min(1), attemptId: z.string().min(1), sessionId: z.string().min(1),
+  occurrenceId: z.string().min(1), scheduleId: z.string().min(1), generation: z.number().int().positive(), actorId: z.string().min(1),
+  status: z.enum(['pending', 'applied', 'rejected']), reason: z.string().optional()
+}).strict();
 const MAX_RECORDS = 1_000;
 const CLAIM_TTL_MS = 30_000;
 const MAX_DELIVERIES = 4;
@@ -195,7 +201,7 @@ function acceptedActorId(label: AutomationTaskLabel, accepted: AcceptedTask | un
 }
 
 function publicSchedule(value: SessionSchedule): PublicSessionSchedule {
-  const { actorId: _actorId, taskStartOccurrenceId: _taskStartOccurrenceId, pendingOccurrence: _pendingOccurrence, ...record } = value;
+  const { actorId: _actorId, taskStartOccurrenceId: _taskStartOccurrenceId, stopRequestId: _stopRequestId, pendingOccurrence: _pendingOccurrence, ...record } = value;
   return record;
 }
 function publicOccurrence(value: SessionScheduleOccurrence): PublicSessionScheduleOccurrence {
@@ -753,6 +759,64 @@ export class SessionAutomationService {
     return publicSubscription(cancelled);
   }
 
+  /** No schedule ID is accepted: only the current occurrence's durable host binding can request this. */
+  async requestScheduleStop(sessionId: string, taskId: string, attemptId: string, actorId: string) {
+    const revoked = () => new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'Only the active scheduled occurrence may stop its own schedule', 403);
+    const task = this.execution.getTaskExecution(taskId)?.task;
+    const binding = (await this.getRecord(taskBindingKey(taskId), value => taskBindingSchema.parse(value)))?.value;
+    if (!task || task.status !== 'running' || task.currentAttemptId !== attemptId || task.sessionId !== sessionId || binding?.kind !== 'schedule' || binding.sessionId !== sessionId) throw revoked();
+    const occurrence = (await this.getRecord(occurrenceKey(binding.occurrenceId), value => migrateOccurrence(sessionScheduleOccurrenceSchema.parse(value))))?.value;
+    const accepted = this.execution.getAcceptedTask(taskId);
+    if (!occurrence || occurrence.sessionId !== sessionId || occurrence.admission?.taskId !== taskId || occurrence.triggerSource === 'manual' || occurrence.runtimeAttemptId && occurrence.runtimeAttemptId !== attemptId
+      || binding.schemaVersion === 2 && (binding.taskId !== taskId || binding.scheduleId !== occurrence.scheduleId || binding.generation !== occurrence.generation)) throw revoked();
+    assertAdmissionMatchesAccepted('Scheduled task', occurrence.admission, accepted);
+    const session = await this.requireSession(sessionId);
+    if (acceptedActorId('Scheduled task', accepted, occurrence.admission, occurrence.actor, session) !== actorId) throw revoked();
+    await this.requireAuthorized(sessionId, actorId);
+    const schedule = (await this.getRecord(scheduleKey(occurrence.scheduleId), readStoredSessionSchedule))?.value;
+    if (!schedule || schedule.sessionId !== sessionId || !schedule.enabled || schedule.deletedAt || schedule.generation !== occurrence.generation || schedule.trigger.kind === 'at') throw revoked();
+    const current = this.execution.getTaskExecution(taskId)?.task;
+    if (!current || current.status !== 'running' || current.currentAttemptId !== attemptId || current.sessionId !== sessionId) throw revoked();
+    const value = stopRequestSchema.parse({ version: 1, sessionId, taskId, attemptId, occurrenceId: occurrence.id, scheduleId: schedule.id, generation: occurrence.generation, actorId, status: 'pending' });
+    const key = `${STOP_REQUEST_PREFIX}${taskId}`;
+    if (!await this.createRecord(key, value)) {
+      const existing = (await this.getRecord(key, input => stopRequestSchema.parse(input)))?.value;
+      if (!existing) throw revoked();
+      const { reason: _reason, status: _status, ...scope } = existing;
+      const { status: _pending, ...expected } = value;
+      if (canonicalExecutionJson(scope) !== canonicalExecutionJson(expected)) throw revoked();
+    }
+    return { pendingDelivery: true, scheduleId: schedule.id };
+  }
+
+  private async applyScheduleStops() {
+    for (const stored of await this.listRecords(STOP_REQUEST_PREFIX, value => stopRequestSchema.parse(value))) {
+      const request = stored.value;
+      if (request.status !== 'pending') continue;
+      const key = `${STOP_REQUEST_PREFIX}${request.taskId}`;
+      const finish = (status: 'applied' | 'rejected', reason?: string) => this.replace(key, stored.raw, { ...request, status, ...(reason ? { reason } : {}) });
+      const schedule = await this.getRecord(scheduleKey(request.scheduleId), readStoredSessionSchedule);
+      if (schedule?.value.stopRequestId === request.taskId && !schedule.value.enabled) { await finish('applied'); continue; }
+      if (!schedule || schedule.value.sessionId !== request.sessionId || schedule.value.generation !== request.generation || schedule.value.deletedAt || !schedule.value.enabled) { await finish('rejected', 'schedule_changed'); continue; }
+      const occurrence = (await this.getRecord(occurrenceKey(request.occurrenceId), value => migrateOccurrence(sessionScheduleOccurrenceSchema.parse(value))))?.value;
+      const task = this.execution.getTaskExecution(request.taskId)?.task;
+      if (!occurrence || occurrence.sessionId !== request.sessionId || occurrence.scheduleId !== request.scheduleId || occurrence.generation !== request.generation || occurrence.admission?.taskId !== request.taskId) { await finish('rejected', 'binding_changed'); continue; }
+      if (['failed', 'interrupted', 'cancelled'].includes(task?.status ?? '') || occurrence.result && occurrence.result.outcome !== 'completed') { await finish('rejected', 'task_not_successful'); continue; }
+      if (!task || task.status !== 'completed' || task.currentAttemptId !== request.attemptId || occurrence.runtimeAttemptId !== request.attemptId || occurrence.result?.outcome !== 'completed' || occurrence.delivery.status !== 'delivered') continue;
+      const accepted = this.execution.getAcceptedTask(request.taskId);
+      const session = await this.options.runtime.getSession(request.sessionId);
+      try {
+        assertAdmissionMatchesAccepted('Scheduled task', occurrence.admission, accepted);
+        if (acceptedActorId('Scheduled task', accepted, occurrence.admission, occurrence.actor, session) !== request.actorId) throw new Error('actor changed');
+        await this.requireAuthorized(request.sessionId, request.actorId);
+      }
+      catch { await finish('rejected', 'authorization_revoked'); continue; }
+      const stopped = sessionScheduleSchema.parse({ ...schedule.value, revision: schedule.value.revision + 1, generation: schedule.value.generation + 1,
+        enabled: false, nextDueAt: undefined, stopRequestId: request.taskId, updatedAt: iso(this.clock()) });
+      if (await this.replace(scheduleKey(request.scheduleId), schedule.raw, stopped)) await finish('applied');
+    }
+  }
+
   tick(): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.currentTick) return this.currentTick;
@@ -946,6 +1010,7 @@ export class SessionAutomationService {
     // Re-read storage at each phase; only reuse decoding for byte-identical rows within this tick.
     const parsed: TickParseCache = { occurrences: new Map(), subscriptions: new Map() };
     await this.refreshAcceptedWork(parsed);
+    await this.applyScheduleStops();
     if (this.closed) return;
     const [schedules, occurrences, subscriptions] = await Promise.all([
       this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule),
@@ -1906,7 +1971,7 @@ export class SessionAutomationService {
       delivery: { status: deliveryError ? 'error' as const : 'delivered' as const, attempts: current.value.delivery.attempts + 1,
         ...(deliveryError ? { error: deliveryError } : {}), updatedAt: iso(this.clock()) },
       leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: iso(this.clock()) };
-    await this.replace(key, current.raw, updated);
+    if (await this.replace(key, current.raw, updated)) await this.applyScheduleStops();
   }
 
 }

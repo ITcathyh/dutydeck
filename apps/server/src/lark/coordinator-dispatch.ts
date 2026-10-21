@@ -1348,7 +1348,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           try { await this.saveCardTask(task, state); }
           catch (error) { task.finalDeliveryFirstFailedAt = undefined; throw error; }
         }
-        const result = await completeExplicitFinal(this.workflowOptions.store, this.service, finalContext, resultCardInput, elements, beforeSend) ?? await sendLarkResult(this.service, {
+        const result = await completeExplicitFinal(this.workflowOptions.store, this.service, finalContext, resultCardInput, elements, beforeSend, (scope, actorId) => this.authorizeFinalRelay(scope, actorId)) ?? await sendLarkResult(this.service, {
           chatId: event.chatId,
           ...(event.chatType === 'group' ? { replyMessageId: event.messageId, replyInThread: Boolean(event.threadId?.trim()) } : {})
         }, { ...resultCardInput, elements, idempotencyKey: larkResultKey(task.cardMessageId ?? larkSilentResultAnchor(task.id, currentTurn)) }, this.log, this.workflowOptions.store, beforeSend);

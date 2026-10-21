@@ -165,6 +165,7 @@ export async function prepareLarkResult(
   forceAttachment = false
 ): Promise<{ input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string }; attachmentMessageId?: string }> {
   beforeSend ??= input.beforeSend;
+  if (input.cardBody && forceAttachment) throw new LarkServiceError('INVALID_FINAL_CARD', '自定义卡片被平台拒收，请修正静态卡片内容后重新提交。', 400);
   const resultInput = { ...input, cardKind: 'result' as const };
   const output = resultInput.elements.find(element => element.element_id === 'final_output')?.content;
   const card = buildLarkCard(resultInput);

@@ -90,8 +90,8 @@ function ledgerRuntime(repos: Repos, harnessSession: HarnessSession, options: { 
       const x = bound(repos);
       const accepted = repos.execution.getAcceptedTask(taskId)!;
       const runId = harnessSession.runId;
-      const claimed = x.claimNext({ sessionId: task.sessionId, runId });
-      const attempt = claimed!.attempt!;
+      const claimed = task.currentAttemptId ? undefined : x.claimNext({ sessionId: task.sessionId, runId });
+      const attempt = claimed?.attempt ?? repos.execution.getTaskExecution(taskId)!.attempts.find(item => item.attemptId === task.currentAttemptId)!;
       let fence: any = { sessionId: task.sessionId, runId, taskId, attemptId: attempt.attemptId, expectedRevision: attempt.revision };
       x.appendEvent(fence, { id: `out:${taskId}`, type: 'text', data: { role: 'assistant', text } });
       x.markSubmissionPending(fence, { submissionId: `sub:${taskId}`, inputDigest: (accepted.input as { digest: string }).digest, resourceRefs: [], authorizationRefs: [] });
@@ -324,6 +324,58 @@ async function completedSchedules(h: Awaited<ReturnType<typeof fixture>>, count 
   await h.service.tick();
   for (const task of h.dispatches) h.settleTask(task.id);
 }
+
+describe('scheduled self stop', () => {
+  async function activeSchedule(h: Awaited<ReturnType<typeof fixture>>) {
+    const schedule = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, schedule.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    const task = h.dispatches[0]!;
+    const claim = bound(h.repositories).claimNext({ sessionId: h.session.id, runId: h.session.runId })!;
+    return { schedule, task, attempt: claim.attempt! };
+  }
+  it.each(['completed', 'failed', 'unknown', 'revoked'] as const)('only disables its own bound schedule after confirmed successful delivery (%s)', async outcome => {
+    const deliver = vi.fn(async () => { if (outcome === 'unknown') throw new Error('unknown delivery'); });
+    const h = await fixture({ deliver }); const { schedule, task, attempt } = await activeSchedule(h);
+    await expect(h.service.requestScheduleStop(h.session.id, task.id, attempt.attemptId, 'ou_other')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_TASK_REVOKED' });
+    const requests = await Promise.all([h.service.requestScheduleStop(h.session.id, task.id, attempt.attemptId, 'ou_owner'), h.service.requestScheduleStop(h.session.id, task.id, attempt.attemptId, 'ou_owner')]);
+    expect(requests[0]).toEqual(requests[1]);
+    expect((await h.service.listBySession(h.session.id)).schedules[0]?.enabled).toBe(true);
+    h.settleTask(task.id, outcome === 'failed' ? 'failed' : 'completed');
+    if (outcome === 'revoked') h.allowed.value = false;
+    await h.service.tick();
+    await vi.waitFor(async () => expect((await h.repositories.config.list!('session_automation/occurrence/')).some(row => ['delivered', 'error'].includes(JSON.parse(row.value).delivery.status))).toBe(true));
+    await h.service.tick();
+    const stored = JSON.parse((await h.repositories.config.get(`session_automation/schedule/${schedule.id}`))!);
+    expect(stored.enabled).toBe(outcome !== 'completed');
+    if (outcome === 'completed') expect(stored.stopRequestId).toBeTruthy();
+  });
+  it('recovers a schedule CAS committed before stop acknowledgment and never disables an edited generation', async () => {
+    const h = await fixture({ deliver: async () => {} }); const { schedule, task, attempt } = await activeSchedule(h);
+    await h.service.requestScheduleStop(h.session.id, task.id, attempt.attemptId, 'ou_owner');
+    const key = `session_automation/stop_request/${task.id}`;
+    const request = JSON.parse((await h.repositories.config.get(key))!);
+    const cas = h.repositories.config.compareAndSet!.bind(h.repositories.config);
+    let failAck = true;
+    const write = vi.spyOn(h.repositories.config, 'compareAndSet').mockImplementation(async (target, expected, value) => {
+      if (target === key && value && JSON.parse(value).status === 'applied' && failAck) { failAck = false; throw new Error('stop ack disk failed'); }
+      return cas(target, expected, value);
+    });
+    h.settleTask(task.id); await h.service.tick();
+    await vi.waitFor(async () => expect(JSON.parse((await h.repositories.config.get(`session_automation/schedule/${schedule.id}`))!).enabled).toBe(false));
+    await vi.waitFor(() => expect(failAck).toBe(false));
+    write.mockRestore();
+    expect(JSON.parse((await h.repositories.config.get(key))!).status).toBe('pending');
+    const restored = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, clock: () => h.now.value });
+    try { await restored.tick(); } finally { await restored.close(); }
+    expect(JSON.parse((await h.repositories.config.get(key))!).status).toBe('applied');
+    const saved = JSON.parse((await h.repositories.config.get(`session_automation/schedule/${schedule.id}`))!);
+    await h.service.updateSchedule(h.session.id, schedule.id, { expectedRevision: saved.revision, enabled: true }, 'ou_owner');
+    await h.repositories.config.set(key, JSON.stringify({ ...request, status: 'pending' }));
+    await h.service.tick();
+    expect(JSON.parse((await h.repositories.config.get(`session_automation/schedule/${schedule.id}`))!).enabled).toBe(true);
+  });
+});
 
 describe('SessionAutomationService schedules', () => {
   it('plans another due occurrence while an earlier result delivery remains pending', async () => {

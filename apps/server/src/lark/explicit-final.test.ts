@@ -30,7 +30,7 @@ const verificationRecord = (patch: Partial<VerificationResponse> = {}): Verifica
   beforeFingerprint: 'abcdef1234567890', afterFingerprint: 'abcdef1234567890', stale: false, ...patch
 });
 
-async function harness(options: { verificationCommand?: string; verifications?: VerificationResponse[]; fail?: boolean; interrupted?: boolean; reaction?: boolean; text?: string; p2p?: boolean; groupMention?: boolean } = {}) {
+async function harness(options: { verificationCommand?: string; verifications?: VerificationResponse[]; fail?: boolean; interrupted?: boolean; reaction?: boolean; text?: string; p2p?: boolean; groupMention?: boolean; botOrigin?: boolean } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-resultcard-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let release!: () => void;
@@ -67,7 +67,7 @@ async function harness(options: { verificationCommand?: string; verifications?: 
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
     highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off',
     ...(options.verificationCommand ? { verificationCommand: options.verificationCommand } : {}) };
-  await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
+  await repos.config.set(larkBotsConfigKey, JSON.stringify([config, ...(options.botOrigin ? [{ ...config, appId: 'cli_parent', name: 'Parent' }] : [])]));
 
   let nextCard = 0;
   const cards = new Map<string, any>();
@@ -82,12 +82,12 @@ async function harness(options: { verificationCommand?: string; verifications?: 
   const service = {
     send: vi.fn(createCard), reply: vi.fn(createCard), sendText: vi.fn(createCard), replyText: vi.fn(createCard),
     getBotInfo: vi.fn(async () => ({ appName: 'test', openId: 'ou_bot' })),
-    getMessage: vi.fn(async (id: string) => ({ messageId: id, chatId: 'oc_group', threadId: 'omt_topic' })),
+    getMessage: vi.fn(async (id: string) => ({ messageId: id, chatId: 'oc_group', threadId: 'omt_topic', sender: { id: options.botOrigin ? 'ou_parent' : 'ou_user', type: options.botOrigin ? 'app' : 'user' } })),
     uploadFile: vi.fn(async () => 'file_1'), replyFile: vi.fn(createCard), sendFile: vi.fn(createCard),
     update: vi.fn(async (input: any) => { cards.set(input.messageId, input); return { messageId: input.messageId }; }),
     addReaction: vi.fn(async (messageId: string, emojiType = 'OK') => ({ messageId, reactionId: `r_${messageId}_${emojiType}` })),
     deleteReaction: vi.fn(async () => {}), getUserEmails: vi.fn(async () => [] as string[]),
-    listChatMembers: vi.fn(async () => ({ items: [{ memberId: 'ou_alice' }], hasMore: false })),
+    listChatMembers: vi.fn(async () => ({ items: [{ memberId: 'ou_alice' }, { memberId: 'ou_parent', openId: 'ou_parent', appId: 'cli_parent', name: 'Parent', memberType: 'bot' }], hasMore: false })),
     listChatMessages: vi.fn(async () => ({ items: [] as any[], hasMore: false })),
     getMessageItems: vi.fn(async () => [] as any[]),
     pin: vi.fn(async (messageId: string) => ({ messageId })), unpin: vi.fn(async () => {}),
@@ -126,7 +126,7 @@ async function harness(options: { verificationCommand?: string; verifications?: 
   const token = capabilities.environmentFor(session).dutydeck_group_tools_token!;
   const authorize = vi.fn(async () => {});
   const tools = new LarkAgentToolsService(capabilities, repos.config, {
-    authorizeTool: authorize, previewTool: authorize, clientFactory: () => service as any,
+    authorizeTool: authorize, previewTool: authorize, clientFactory: entry => entry.appId === 'cli_parent' ? { ...service, getBotInfo: async () => ({ appName: 'Parent', openId: 'ou_parent' }) } as any : service as any,
     workbenchTask: id => runtime.getActiveTaskContext(id),
     finalTaskContext: async (binding, task) => resolveExplicitFinalContext(await repos.channelMappings.list(channel), binding, task)
   });
@@ -152,6 +152,103 @@ const callbackValues = (node: unknown, out: Record<string, unknown>[] = []): Rec
 const resultSends = (h: Awaited<ReturnType<typeof harness>>) => [...h.service.send.mock.calls, ...h.service.reply.mock.calls].map(([input]) => input).filter(input => input.cardKind === 'result');
 
 describe('explicit final: real tools, runtime, coordinator and SQLite', () => {
+  it('serializes both targets and recovers a relay acknowledgment write failure with the same provider UUID', async () => {
+    const h = await harness({ botOrigin: true });
+    const cas = h.repos.config.compareAndSet!.bind(h.repos.config);
+    let failAck = true;
+    const write = vi.spyOn(h.repos.config, 'compareAndSet').mockImplementation(async (key, expected, value) => {
+      if (failAck && key.startsWith('lark.explicit_final.') && value && JSON.parse(value).relay?.status === 'delivered') { failAck = false; throw new Error('relay receipt disk failure'); }
+      return cas(key, expected, value);
+    });
+    try {
+      await expect(h.sendFinal('Summary', { delivery: 'both' })).rejects.toThrow('relay receipt disk failure');
+      const key = (h.service.replyText.mock.calls[0]![0] as any).idempotencyKey;
+      const [first, second] = await Promise.all([h.sendFinal('Summary', { delivery: 'both' }), h.sendFinal('Summary', { delivery: 'both' })]);
+      expect(first.messageId).toBe(second.messageId);
+      expect(resultSends(h)).toHaveLength(1);
+      expect(h.service.replyText).toHaveBeenCalledTimes(2);
+      expect((h.service.replyText.mock.calls[1]![0] as any).idempotencyKey).toBe(key);
+    } finally { write.mockRestore(); }
+  });
+
+  it('keeps a pending relay after permission revocation and retries only that target when permission returns', async () => {
+    const h = await harness({ botOrigin: true });
+    h.service.replyText.mockRejectedValueOnce(new Error('unknown relay'));
+    await expect(h.sendFinal('Summary', { delivery: 'both' })).rejects.toThrow('unknown relay');
+    h.coordinator.stop();
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...h.config, groupToolsAllowSend: false }]));
+    h.release(); await vi.waitFor(async () => expect((await h.runtime.getTasks(h.session.id))[0]?.status).toBe('completed'));
+    const restarted = h.createCoordinator();
+    try {
+      await restarted.reconcile(h.config);
+      expect(h.service.replyText).toHaveBeenCalledOnce();
+      expect(resultSends(h)).toHaveLength(1);
+      expect((await h.persisted()).final_delivery_state).not.toBe('delivered');
+      await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+      await h.patchPersisted({ final_delivery_retry_at: 0 });
+      await restarted.reconcile(h.config); await h.resultCard();
+      expect(h.service.replyText).toHaveBeenCalledTimes(2);
+      expect(resultSends(h)).toHaveLength(1);
+    } finally { restarted.stop(); }
+  });
+
+  it.each(['publish', 'reply-agent', 'both'] as const)('freezes final delivery targets and completes %s without duplicate publication', async delivery => {
+    const h = await harness({ botOrigin: true });
+    const sent = await h.sendFinal('Summary', { delivery });
+    await expect(h.sendFinal('Changed summary', { delivery })).rejects.toMatchObject({ code: 'FINAL_CONTENT_CONFLICT' });
+    await expect(h.sendFinal('Summary', { delivery: delivery === 'both' ? 'publish' : 'both' })).rejects.toMatchObject({ code: 'FINAL_CONTENT_CONFLICT' });
+    h.release(); const saved = await h.resultCard();
+    expect(saved.final_message_id).toBe(sent.messageId);
+    expect(resultSends(h)).toHaveLength(delivery === 'reply-agent' ? 0 : 1);
+    expect(h.service.replyText).toHaveBeenCalledTimes(delivery === 'publish' ? 0 : 1);
+    if (delivery === 'reply-agent') expect(h.service.update.mock.calls.some(([input]) => input.messageId === sent.messageId)).toBe(false);
+  });
+
+  it('preflights a relay target before publication and resumes only an unconfirmed relay after restart', async () => {
+    const human = await harness();
+    await expect(human.sendFinal('Summary', { delivery: 'both' })).rejects.toMatchObject({ code: 'REPLY_AGENT_ORIGIN_NOT_BOT' });
+    expect(resultSends(human)).toHaveLength(0);
+    const h = await harness({ botOrigin: true });
+    h.service.replyText.mockRejectedValueOnce(new Error('relay response unknown'));
+    await expect(h.sendFinal('Summary', { delivery: 'both' })).rejects.toThrow('relay response unknown');
+    expect(resultSends(h)).toHaveLength(1);
+    const firstKey = (h.service.replyText.mock.calls[0]![0] as any).idempotencyKey;
+    h.coordinator.stop(); h.release();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(h.session.id))[0]?.status).toBe('completed'));
+    const restarted = h.createCoordinator();
+    try { await restarted.reconcile(h.config); } finally { restarted.stop(); }
+    await h.resultCard();
+    expect(resultSends(h)).toHaveLength(1);
+    expect(h.service.replyText).toHaveBeenCalledTimes(2);
+    expect((h.service.replyText.mock.calls[1]![0] as any).idempotencyKey).toBe(firstKey);
+  });
+
+  it.each(['completion', 'restart'] as const)('delivers a static custom body once and preserves it after %s', async mode => {
+    const h = await harness();
+    const cardBody = { direction: 'vertical', elements: [{ tag: 'markdown', content: '**custom result**' }, { tag: 'hr' }] };
+    const sent = await h.sendFinal('Searchable summary', { cardBody });
+    const original = h.cards.get(sent.messageId);
+    expect(buildLarkCard(original).body.elements).toEqual(cardBody.elements);
+    await expect(h.sendFinal('Searchable summary', { cardBody: { elements: [{ tag: 'markdown', content: 'changed' }] } })).rejects.toMatchObject({ code: 'FINAL_CONTENT_CONFLICT' });
+    if (mode === 'restart') h.coordinator.stop();
+    h.release();
+    if (mode === 'restart') {
+      await vi.waitFor(async () => expect((await h.runtime.getTasks(h.session.id))[0]?.status).toBe('completed'));
+      const restarted = h.createCoordinator();
+      try { await restarted.reconcile(h.config); } finally { restarted.stop(); }
+    }
+    const saved = await h.resultCard();
+    expect(saved.final_message_id).toBe(sent.messageId);
+    expect(JSON.stringify(buildLarkCard(h.cards.get(sent.messageId)))).toContain('**custom result**');
+    expect(resultSends(h)).toHaveLength(1);
+  });
+
+  it.each([{}, { elements: [] }, { elements: [{ tag: 'button', behaviors: [{ type: 'callback', value: { task_id: 'other' } }] }] }, { elements: [{ tag: 'markdown', content: '[click](javascript:alert(1))' }] }, { elements: [{ tag: 'markdown', element_id: 'final_output', content: 'spoofed' }] }])('rejects invalid or privileged custom bodies before delivery: %j', async cardBody => {
+    const h = await harness();
+    await expect(h.sendFinal('Summary', { cardBody })).rejects.toMatchObject({ code: 'INVALID_FINAL_CARD' });
+    expect(resultSends(h)).toHaveLength(0);
+  });
+
   it.each(['completion', 'restart', 'unupdatable'] as const)('keeps the group mention once in the rendered result footer after %s', async mode => {
     const h = await harness({ groupMention: true });
     const sent = await h.sendFinal();

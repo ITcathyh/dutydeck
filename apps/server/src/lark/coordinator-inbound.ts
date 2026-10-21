@@ -28,7 +28,7 @@ import { busyProgressSummary, eventsForRuntimeTask, loadLarkTaskWindow, renderLa
 import { sendLarkFile } from './result-delivery.js';
 import { larkResultDeliveryIssues } from './reconciler.js';
 import { larkSessionDetailUrl } from './detail-link.js';
-import { isLarkCardActionAvailable, parseLarkCardActionValue } from './card-actions.js';
+import { isLarkCardActionAvailable, parseLarkCardActionValue, safeLarkWebUrl } from './card-actions.js';
 import {
   larkAgentAvailabilityLine,
   larkCommandCapabilities,
@@ -1748,6 +1748,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           ? (await this.workflowOptions.automation.listBySession(sessionId, event.senderOpenId).catch(() => undefined))?.schedules.filter(item => item.enabled) ?? [] : [];
         // 交接要在结束旧会话之前读：结束之后它的任务和工作目录就不再归这个聊天。
         const handoff = request.handoff ? await this.newSessionHandoff(config, event, sessionId, before, request.handoff.note) : undefined;
+        const cleanupWorkspace = sessionId && this.runtime.getWorkspace ? await this.runtime.getWorkspace(sessionId).catch(() => undefined) : undefined;
         this.cancelUndeliveredRetries(group);
         const retirement = this.retireScopeSession(group, config, event, scopeId);
         const epoch = group.epoch;
@@ -1769,12 +1770,15 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
             : queuedCount ? `已取消 ${queuedCount} 条排队。` : '',
           schedules.length ? `以下定时计划随旧会话停用：${schedules.map(item => escapeLarkPromptEcho(larkCommandEcho(item.name, 40))).join('、')}` : ''
         ].filter(Boolean).map(line => `${line}\n\n`).join('');
+        const cleanupUrl = sessionId && cleanupWorkspace?.mode === 'worktree' && config.webBaseUrl
+          ? safeLarkWebUrl(`${config.webBaseUrl.replace(/\/$/, '')}/sessions/${encodeURIComponent(sessionId)}?panel=workspace`) : undefined;
+        const cleanupNote = cleanupUrl ? `\n\n[检查并清理 worktree](${cleanupUrl})：在「工作目录」查看清理预览，确认后清理；正在使用或有未提交改动时不能清理。` : '';
         await replyCard(
           '/new 已受理',
           retained
             ? `**下一条消息将开启全新上下文。**\n\n原会话的执行进程尚未确认停止，没有结束它，之后的消息也不再进入它。${larkRecoveryRetainedNote(config.webBaseUrl)}`
             : retired
-            ? `**已结束当前会话，下一条消息将开启全新上下文。**\n\n${stopped}历史记录仍可在 Dutydeck Web 查看。`
+            ? `**已结束当前会话，下一条消息将开启全新上下文。**\n\n${stopped}历史记录仍可在 Dutydeck Web 查看。${cleanupNote}`
             : '**当前没有已绑定的会话，下一条消息会直接开启新会话。**'
         );
         return 'handled';

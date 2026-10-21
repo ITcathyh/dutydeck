@@ -6,7 +6,7 @@ import type { ScheduleCliAction, ScheduleCliInput, ScheduleRequestCliInput } fro
 import { agentFields, botFields, channelBotFields, fieldsHelp, groupFields, groupBindingFields, groupBindingCreateFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { agentCommandHelp } from './lark/agent-command.js';
 import { addAgentCommands } from './agent-cli.js';
-import { Command } from 'commander';
+import { Option, Command } from 'commander';
 import { DatabaseCliError } from './database-cli.js';
 import type { PluginCliAction, PluginCliOptions } from './plugins/cli.js';
 
@@ -103,6 +103,8 @@ export interface LarkCreateCliOptions {
 export interface HistoryShowCliOptions { field?: string; offset?: string; length?: string; cursor?: string }
 
 export interface AgentGroupCliOptions {
+  cardFile?: string;
+  delivery?: 'publish' | 'reply-agent' | 'both';
   final?: boolean;
   turn?: string;
   after?: string;
@@ -589,6 +591,8 @@ Examples:
   group.command('send')
     .description('Send a new group message or reply to an existing message/thread')
     .option('--final', 'Deliver the final answer for the current task')
+    .option('--card-file <path>', 'Static Card 2.0 body JSON file; requires --final')
+    .addOption(new Option('--delivery <mode>', 'Final result targets').choices(['publish', 'reply-agent', 'both']))
     .option('--turn <token>', 'Current final-delivery task capability')
     .argument('<content>', 'Message content')
     .option('--to <target>', 'Mention a discovered Agent or human member by ID or name')

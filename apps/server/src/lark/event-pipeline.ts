@@ -1,4 +1,4 @@
-import { cardActionMatchesHandler, cardActionRoute, forwardCardAction, isBuiltinCardAction, parseCardActionForwarding, parseCardActionValue, type CardActionForwarding } from './card-action-forwarding.js';
+import { normalizeCardCallback, cardActionMatchesHandler, cardActionRoute, forwardCardAction, isBuiltinCardAction, parseCardActionForwarding, parseCardActionValue, type CardActionForwarding } from './card-action-forwarding.js';
 import { LarkServiceError } from './service.js';
 
 export const larkEventTypes = ['card.action.trigger', 'im.message.receive_v1'] as const;
@@ -56,6 +56,7 @@ export async function runLarkEventPipeline(config: { appId: string; eventHandler
   eventType: LarkEventType, event: any, fetcher: typeof globalThis.fetch,
   log: { info(details: unknown, message?: string): void }): Promise<LarkEventDecision> {
   const card = eventType === 'card.action.trigger';
+  if (card) event = normalizeCardCallback(event);
   const handlers = config.eventHandlers ?? [];
   const legacy = card ? config.cardActionForwarding : undefined;
   const registered = handlers.filter(handler => handler.eventTypes.includes(eventType));

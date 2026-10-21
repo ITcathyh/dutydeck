@@ -1,7 +1,9 @@
+import { commitLarkAgentReply } from './agent-reply-delivery.js';
+import { parseFinalCardBody } from './final-card.js';
 import { deliveryPrompt } from '../prompt-context.js';
 import { LarkAgentCommands } from './agent-command.js';
 import { redactTraceText } from './secret-redaction.js';
-import { readExplicitFinal, resolveExplicitFinalContext, sendExplicitFinal, withExplicitFinalLock, type ExplicitFinalContext, type ExplicitFinalScope } from './explicit-final.js';
+import { readExplicitFinal, resolveExplicitFinalContext, sendExplicitFinal, withExplicitFinalLock, type ExplicitFinalContext, type ExplicitFinalScope, type ExplicitFinalDelivery } from './explicit-final.js';
 import { collaborationAgentPrompt } from '../collaboration-cli.js';
 import { layeredWorkbenchPrompt, workbenchAgentPrompt } from '../work-item-tools.js';
 import type { LarkGroupManager } from './group-management.js';
@@ -746,7 +748,7 @@ export class LarkAgentToolsService {
     if (memory) abilities.push(larkMemoryToolsPrompt('dutydeck agent'));
     abilities.push(...larkGroupToolsPrompt(send, { read, discover }));
     if (task?.attemptId && send && this.options.finalTaskContext) {
-      abilities.push('主动最终交付（一般用不到）：group send \'<完整答复>\' --final，绑定本轮与原消息，不加 --to 或自定义幂等键；进展和交接不加 --final，映射未就绪时稍后重试。');
+      abilities.push('主动最终交付（一般用不到）：group send \'<完整答复>\' --final，默认发布；--card-file <JSON文件> 可用静态 Card 2.0 body（content 写可检索摘要），--delivery publish|reply-agent|both 选择发布、仅向原交接机器人回传、或两者都做。绑定本轮与原消息，不加 --to 或自定义幂等键；重试保留全部内容与模式。进展和交接不加 --final。');
       if (binding.chatType === 'group') abilities.push('单次 Agent 交接：group handoff <机器人名称/appId/openId> \'<目标、代码版本、工作区、读写边界和验收>\'；收到交接后用 group reply-agent \'<交付结果>\' 回传一次；多轮审查返修用 work。');
     }
     let work = false, collaboration = false;
@@ -764,6 +766,7 @@ export class LarkAgentToolsService {
     const schedule = Boolean(requested && !collaboration && this.options.scheduleRequests);
     const commands = Boolean(requested && this.commands.has(binding.appId));
     if (schedule) abilities.push(scheduleRequestPrompt);
+    if (task?.actorId && this.options.automatedTask?.(task.taskId) && this.options.scheduleRequests) abilities.push('周期任务达到用户要求的停止条件时，可用 schedule stop-self 请求停用自身计划；宿主只在本轮成功且结果确认送达后停用。此命令不能指定其他计划，也不会删除历史；失败或投递未知不会停用。');
     if (commands) abilities.push(agentCommandPrompt);
     const groupTools = read || discover || send;
     const rules = [
@@ -1149,12 +1152,16 @@ export class LarkAgentToolsService {
     }
   }
 
-  async send(token: string | undefined, input: { final?: boolean; turn?: string; content?: string; to?: string; replyTo?: string; inThread?: boolean; idempotencyKey?: string }) {
+  async send(token: string | undefined, input: { delivery?: 'publish' | 'reply-agent' | 'both'; cardBody?: unknown; final?: boolean; turn?: string; content?: string; to?: string; replyTo?: string; inThread?: boolean; idempotencyKey?: string }) {
     const context = await this.context(token, 'group_tools.send');
     if (!context.config.groupToolsAllowSend) throw new AgentGroupToolError('GROUP_TOOL_SEND_DISABLED', '当前飞书机器人的群协作发送能力已被管理员关闭。', 403);
     // 和结果卡同一套凭据脱敏：Agent 主动发到群里的文本不绕过它。
     const content = input.content === undefined ? undefined : redactTraceText(input.content).trim();
     if (!content) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能为空。', 400);
+    if (input.cardBody !== undefined && !input.final) throw new AgentGroupToolError('FINAL_FLAG_REQUIRED', 'cardBody 只能与 --final 一起使用。');
+    const cardBody = input.cardBody === undefined ? undefined : parseFinalCardBody(input.cardBody);
+    if (input.delivery !== undefined && (!input.final || !['publish', 'reply-agent', 'both'].includes(input.delivery))) throw new AgentGroupToolError('INVALID_FINAL_DELIVERY', 'delivery 仅在 --final 时允许 publish、reply-agent 或 both。');
+    if (input.delivery === 'reply-agent' && cardBody) throw new AgentGroupToolError('INVALID_FINAL_DELIVERY', '仅回传时请用 content 摘要，不携带发布卡片。');
     if (input.final !== undefined && typeof input.final !== 'boolean') throw new AgentGroupToolError('INVALID_FINAL_FLAG', 'final 必须是布尔值。');
     if (input.turn && !input.final) throw new AgentGroupToolError('FINAL_FLAG_REQUIRED', '--turn 只能与 --final 一起使用。');
     if (input.final) {
@@ -1174,6 +1181,10 @@ export class LarkAgentToolsService {
           || input.to !== undefined || input.idempotencyKey !== undefined
           || (input.replyTo !== undefined && input.replyTo.trim() !== scope.reply_message_id)
           || (input.inThread !== undefined && input.inThread !== scope.reply_in_thread)) throw new AgentGroupToolError('FINAL_TARGET_MISMATCH', '最终答复只能交付到当前任务绑定的原始消息位置。', 400);
+        const relay = input.delivery && input.delivery !== 'publish' ? await this.prepareReplyAgent(token, { content, turn: input.turn }) : undefined;
+        if (relay && JSON.stringify(relay.scope) !== JSON.stringify(scope)) throw new AgentGroupToolError('FINAL_TARGET_MISMATCH', '回传目标作用域已变更。', 409);
+        const delivery: ExplicitFinalDelivery = { mode: input.delivery ?? 'publish', ...(relay ? { relay: { target_id: relay.targetPeer.openId ?? relay.targetPeer.appId ?? relay.targetPeer.memberId, sender_id: relay.senderId, actor_id: task.actorId!, text: relay.text, provider_uuid: relay.idempotencyKey } } : {}) };
+        if (relay && !task.actorId) throw new AgentGroupToolError('FINAL_NO_ACTIVE_TASK', '回传缺少本轮执行身份。', 403);
         const latest = this.options.workbenchTask?.(current.sessionId);
         if (latest?.taskId !== task.taskId || latest.attemptId !== task.attemptId) throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '任务轮次已结束。', 403);
         if (!current.client.send || !current.client.update || !current.client.uploadFile
@@ -1189,7 +1200,7 @@ export class LarkAgentToolsService {
           const stillActive = this.options.workbenchTask?.(fresh.sessionId);
           if (stillActive?.taskId !== active.taskId || stillActive.attemptId !== active.attemptId) throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '任务轮次已结束。', 403);
         };
-        return this.authorized(current, scope.reply_message_id ? 'reply' : 'send', () => sendExplicitFinal(this.configs, current.client as LarkCardService, target, content, beforeSend));
+        return this.authorized(current, scope.reply_message_id ? 'reply' : 'send', () => sendExplicitFinal(this.configs, current.client as LarkCardService, target, content, beforeSend, cardBody, delivery));
       });
     }
     if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);
@@ -1322,12 +1333,7 @@ export class LarkAgentToolsService {
     }
 
     // 4. 同步校验通过，立即发送（中间无任何 await）
-    const result = await this.authorized(freshContext, 'reply', () => freshContext.client.replyText({
-      messageId: expectedScope.origin_message_id,
-      text,
-      replyInThread: true,
-      idempotencyKey
-    }));
+    const result = await this.authorized(freshContext, 'reply', () => commitLarkAgentReply(freshContext.client as LarkCardService, { originMessageId: expectedScope.origin_message_id, text, idempotencyKey }));
 
     return {
       messageId: result.messageId,
@@ -1401,7 +1407,7 @@ export class LarkAgentToolsService {
     return this.commitAgentAction(token, context, task, scope, targetPeer, text, idempotencyKey);
   }
 
-  async replyAgent(token: string | undefined, input: { content?: string; turn?: string }) {
+  private async prepareReplyAgent(token: string | undefined, input: { content?: string; turn?: string }) {
     const content = agentMessageContent(input.content);
 
     const { context, task, scope } = await this.resolveHandoffScope(token, input.turn);
@@ -1460,7 +1466,11 @@ export class LarkAgentToolsService {
       content
     });
 
-    return this.commitAgentAction(token, context, task, scope, targetPeer, text, idempotencyKey);
+    return { context, task, scope, targetPeer, text, idempotencyKey, senderId };
+  }
+  async replyAgent(token: string | undefined, input: { content?: string; turn?: string }) {
+    const prepared = await this.prepareReplyAgent(token, input);
+    return this.commitAgentAction(token, prepared.context, prepared.task, prepared.scope, prepared.targetPeer, prepared.text, prepared.idempotencyKey);
   }
 }
 

@@ -19,6 +19,8 @@ interface GroupToolQuery {
 }
 
 interface GroupSendBody {
+  delivery?: 'publish' | 'reply-agent' | 'both';
+  cardBody?: unknown;
   final?: boolean;
   turn?: string;
   content?: string;

@@ -1,3 +1,4 @@
+import { normalizeCardCallback } from './card-action-forwarding.js';
 import { runLarkEventPipeline } from './event-pipeline.js';
 import type { LarkAgentCommandHandler, LarkAgentCommands } from './agent-command.js';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
@@ -315,17 +316,13 @@ export class LarkLongConnectionListener implements LarkListener {
         }
       },
       // 内置按钮重复推送只处理一次；外部事件的持久化去重由接收服务负责。
-      'card.action.trigger': async (event: any) => {
+      'card.action.trigger': async (raw: any) => {
+        const event = normalizeCardCallback(raw);
         const result = await runLarkEventPipeline(this.config ?? config, 'card.action.trigger', event, http.fetch, this.log);
         if (result.decision === 'stop') return result.toast ? { toast: result.toast } : undefined;
         return this.cardCallbacks.run(larkCardCallbackKeys(event), async () => {
           const operatorOpenId = event.operator?.open_id;
-          // JSON 2.0 表单（结构化问答的多选/自由文本、workbench 步骤答题）提交值在 form_value，
-          // 按钮回调值在 action.value；合并后下游统一读 value，表单值挂在 value.form_value。
-          // 未合并时表单类回调必然拿不到答案，属 fail-closed 接线点。
-          const actionValue = event.action?.value;
-          const formValue = event.action?.form_value;
-          const value = formValue ? { ...actionValue, form_value: formValue } : actionValue;
+          const value = event.action.value;
           const result = await coordinator?.handleAction(value, operatorOpenId, {
             messageId: event.context?.open_message_id ?? event.open_message_id,
             chatId: event.context?.open_chat_id ?? event.open_chat_id,
