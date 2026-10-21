@@ -408,6 +408,13 @@ printf %s "$LARK_SECRET" | dutydeck setup --lark-app-id cli_xxxxxxxx --lark-app-
 
 “支持飞书逐项审批”的 Agent：ACP Agent（基于成功的 ACP 协议握手，不依赖可选的模型枚举元数据），以及 Claude Code / Seed / Relay 终端模式（经 PermissionRequest hook）。其它终端模式 CLI 只能用 `full-trust`。
 
+**按权重分流 Agent。** 在机器人设置的「Agent 分流权重」中为参与的 Agent 填正数，留空表示不参与；全部留空关闭分流。例如 Codex 填 30、ccflash 填 70，新飞书主会话约按 30% / 70% 概率选择，短期数量不保证精确比例。已有会话保持原 Agent，修改或关闭分流不打断续聊；群固定 Agent、`/new --agent` 及显式模型/推理参数优先。默认模型和推理强度仅用于默认 Agent，其他 Agent 使用各自默认值；记忆与群判定不参与分流。所有候选都需支持当前审批模式，强制拦截会检查并安装全部候选的 Hook。CLI 使用同一设置：
+
+```bash
+dutydeck settings bot set cli_xxx 'defaultAgentWeights=[{"agentId":"codex","weight":30},{"agentId":"ccflash","weight":70}]'
+dutydeck settings bot set cli_xxx 'defaultAgentWeights=[]' # 关闭分流
+```
+
 #### Claude Code 自定义网关与 API Key
 
 注册第二步选择 Claude Code，展开「模型服务配置」，填写网关 URL、认证方式和 API Key，先点「保存模型配置」，再点「完成配置」。已有机器人可在默认执行设置里修改；网关模型 ID 填在「默认模型」。支持内置 Claude Code 和 `adapterId` 为 `claude` / `claude-code` 的自定义 Agent（如 ccflash），网关须兼容 Anthropic Messages API。

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { basename, extname, join } from 'node:path';
 import { supportsRemoteApproval, type ChannelMappingRepository, type Session } from '@dutydeck/shared';
 import { LEGACY_RETIREMENT_NOTICE } from '@dutydeck/storage';
+import { larkHookStatus } from './security-hooks.js';
 import type { LarkLaunchOptions } from './new-session.js';
 import { larkExecutionConfirmed, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
@@ -308,6 +309,12 @@ export const larkSessionMatchesScope = (session: Session, config: StoredLarkConf
   && (session.id === launchSessionId || config.managedGroup || !config.defaultModel || session.model === config.defaultModel)
   && Boolean(session.id === launchSessionId || config.managedGroup || !config.defaultReasoningEffort || session.reasoningEffort === config.defaultReasoningEffort);
 
+/** A started routing candidate may not yet have its durable launch binding. */
+const routingRecoveryConfig = (config: StoredLarkConfig, session: Session): StoredLarkConfig =>
+  config.defaultAgentWeights?.some(row => row.agentId === session.agentId)
+    ? { ...config, defaultAgentId: session.agentId, ...(session.agentId !== config.defaultAgentId ? { defaultModel: undefined, defaultReasoningEffort: undefined } : {}) }
+    : config;
+
 /**
  * 只读定位当前上下文的持久化会话，供聊天命令在 coordinator 重建后使用。
  *
@@ -346,7 +353,19 @@ export async function listPersistedLarkSessions(
   const binding = await mappings?.get(`lark-launch:${config.appId}`, sourceId);
   const launch = binding?.channel === `lark-launch:${config.appId}` && binding.externalId === sourceId ? binding : undefined;
   const sessions = await runtime.listSessions();
-  return sessions.filter(session => larkSessionMatchesScope(session, config, sourceId, launch?.sessionId));
+  return sessions.filter(session => larkSessionMatchesScope(session, launch ? config : routingRecoveryConfig(config, session), sourceId, launch?.sessionId));
+}
+
+/** Draw only when a new primary session is needed; persisted bindings keep later turns sticky. */
+export function selectLarkAgent(config: StoredLarkConfig, random = Math.random): string | undefined {
+  const rows = config.defaultAgentWeights;
+  if (!rows?.length) return config.defaultAgentId;
+  let remaining = random() * rows.reduce((total, row) => total + row.weight, 0);
+  for (const row of rows) {
+    remaining -= row.weight;
+    if (remaining < 0) return row.agentId;
+  }
+  return rows[rows.length - 1]!.agentId;
 }
 
 export async function resolveLarkSession(
@@ -380,7 +399,7 @@ export async function resolveLarkSession(
   const launchConfigKey = launch?.extra ? (JSON.parse(launch.extra) as { baseConfigKey?: string }).baseConfigKey : undefined;
   const launchCompatible = (session: Session) => session.id !== launch?.sessionId || launchConfigKey === configKey;
   const saveLaunchBinding = async (session: Session) => {
-    if (!launchOptions && !launch) return;
+    if (!launchOptions && !launch && !config.defaultAgentWeights?.length) return;
     if (launch?.sessionId === session.id && launchConfigKey === configKey) return;
     try {
       if (!mappings) throw new Error('当前运行时不支持保存首轮会话配置。');
@@ -391,10 +410,20 @@ export async function resolveLarkSession(
       throw error;
     }
   };
+  // A model/effort without --agent was validated against the configured default Agent.
+  const explicitAgentId = launchOptions?.agentId ?? (launchOptions?.model || launchOptions?.reasoningEffort || launchOptions?.nativeForkSessionId ? config.defaultAgentId : undefined);
+  const useAgentDefaults = launchOptions?.useAgentDefaults || (explicitAgentId && explicitAgentId !== config.defaultAgentId);
   const requestedConfig = launchOptions ? { ...config, workspace: launchOptions.cwd ?? config.workspace,
-    defaultAgentId: launchOptions.agentId ?? config.defaultAgentId,
-    defaultModel: launchOptions.useAgentDefaults ? launchOptions.model : launchOptions.model ?? config.defaultModel, defaultReasoningEffort: launchOptions.useAgentDefaults ? launchOptions.reasoningEffort : launchOptions.reasoningEffort ?? config.defaultReasoningEffort } : config;
-  const matchesRequest = (session: Session) => larkSessionMatchesScope(session, launchOptions ? { ...requestedConfig, managedGroup: undefined } : config, sourceId, launchOptions ? undefined : launch?.sessionId);
+    defaultAgentId: explicitAgentId ?? config.defaultAgentId,
+    defaultModel: useAgentDefaults ? launchOptions.model : launchOptions.model ?? config.defaultModel, defaultReasoningEffort: useAgentDefaults ? launchOptions.reasoningEffort : launchOptions.reasoningEffort ?? config.defaultReasoningEffort } : config;
+  const matchesRequest = (session: Session) => {
+    // A process may have started before its launch binding was committed. Recover only
+    // current routing candidates within this exact scope, without another random draw.
+    const expected = !launch && !explicitAgentId ? routingRecoveryConfig(requestedConfig, session) : requestedConfig;
+    return larkSessionMatchesScope(session, launchOptions ? { ...expected, managedGroup: undefined } : expected, sourceId, launchOptions && explicitAgentId ? undefined : launch?.sessionId)
+      && (!launchOptions?.cwd || (session.workspaceSourceCwd ?? session.cwd) === launchOptions.cwd);
+  };
+
   // 旧会话没能沿用的原因，新建会话时写进首卡。/new 结束的会话登记在 retiredSessionIds 里，不算意外。
   let replacedReason: string | undefined;
   if (group.sessionId && !group.retiredSessionIds?.has(group.sessionId)) {
@@ -448,22 +477,27 @@ export async function resolveLarkSession(
       replacedReason = ['failed', 'stopped'].includes(previous.state) ? endedSessionReason(previous) : configChangedReason;
     }
   }
-  // 已知是不支持审批的终端模式 Agent 就别先起会话：approve-reads 会被运行时以更难懂的错误拒绝。
-  const agents = await runtime.listAgents?.();
-  const configuredAgent = agents?.find(item => item.id === config.defaultAgentId);
-  if (agents && !configuredAgent) throw new LarkServiceError('LARK_AGENT_NOT_FOUND', `默认 Agent「${config.defaultAgentId}」不存在，可能随提供它的插件停用或卸载了。请在 Dutydeck 飞书设置的“Agent 与风险控制”中改选其他 Agent。`, 409);
-  if (larkPermissionMode(config) !== 'full-trust' && configuredAgent?.protocol === 'pty-cli'
-    && !supportsRemoteApproval({ id: configuredAgent.id, adapterId: configuredAgent.adapterId, protocol: 'pty-cli' })) throw larkApprovalUnsupported(config);
-  // 恢复中尚未建会话的首轮参数要按当前权限重验；复用已有会话不改变它的启动配置。
+  // Revalidate restored first-turn options before choosing an Agent or starting a process.
   if (beforeStart) launchOptions = await beforeStart();
+  const agentId = launchOptions?.agentId ?? (launchOptions?.model || launchOptions?.reasoningEffort || launchOptions?.nativeForkSessionId
+    ? config.defaultAgentId : selectLarkAgent(config));
+  const agents = await runtime.listAgents?.();
+  const configuredAgent = agents?.find(item => item.id === agentId);
+  const executionConfig = { ...config, defaultAgentId: agentId };
+  if (agents && !configuredAgent) throw new LarkServiceError('LARK_AGENT_NOT_FOUND', `Agent「${agentId}」不存在，可能随提供它的插件停用或卸载了。请在 Dutydeck 飞书设置的“Agent 与风险控制”中改选其他 Agent。`, 409);
+  if (larkPermissionMode(config) !== 'full-trust' && configuredAgent?.protocol === 'pty-cli'
+    && !supportsRemoteApproval({ id: configuredAgent.id, adapterId: configuredAgent.adapterId, protocol: 'pty-cli' })) throw larkApprovalUnsupported(executionConfig);
+  if (config.riskControlMode === 'enforced') {
+    const hook = await larkHookStatus(agentId, launchOptions?.cwd ?? config.workspace, configuredAgent);
+    if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', hook.reason ?? `Agent ${agentId} 尚未配置可写 Hook。`, 409);
+  }
+  const inheritModel = agentId === config.defaultAgentId && !launchOptions?.useAgentDefaults;
   const session = await runtime.start({
-    agentId: config.defaultAgentId,
     ...(config.workspace ? { cwd: config.workspace } : {}),
-    ...(config.defaultModel ? { model: config.defaultModel } : {}),
-    ...(config.defaultReasoningEffort ? { reasoningEffort: config.defaultReasoningEffort } : {}),
+    ...(inheritModel && config.defaultModel ? { model: config.defaultModel } : {}),
+    ...(inheritModel && config.defaultReasoningEffort ? { reasoningEffort: config.defaultReasoningEffort } : {}),
     ...launchOptions,
-    ...(launchOptions?.useAgentDefaults && !launchOptions.model ? { model: undefined } : {}),
-    ...(launchOptions?.useAgentDefaults && !launchOptions.reasoningEffort ? { reasoningEffort: undefined } : {}),
+    agentId: agentId!,
     permissionMode: larkPermissionMode(config),
     source: 'lark',
     sourceId

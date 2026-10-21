@@ -118,6 +118,20 @@ async function botRuntime() {
 }
 
 describe('settings CLI against the real bot routes', () => {
+  it.each(['{}', '[null]', 'null'])('rejects malformed routing weights before enforced hook checks: %s', async weights => {
+    const { run } = await botRuntime();
+    await expect(run('bot-set', { appId: 'cli_a', pairs: [`defaultAgentWeights=${weights}`, 'riskControlMode=enforced'] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+  });
+
+  it('saves, reads and clears Agent routing weights', async () => {
+    const { run } = await botRuntime();
+    const weights = [{ agentId: 'codex', weight: 30 }, { agentId: 'ccflash', weight: 70 }];
+    expect((await run('bot-set', { appId: 'cli_a', pairs: [`defaultAgentWeights=${JSON.stringify(weights)}`] })).bot).toMatchObject({ defaultAgentWeights: weights });
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ defaultAgentWeights: weights });
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['defaultAgentWeights=[{"agentId":"codex","weight":0}]'] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['defaultAgentWeights=[]'] })).bot).not.toHaveProperty('defaultAgentWeights');
+  });
+
   it.each(['chat', 'shared', 'new-topic', 'chat-topic'])('clears the explicit %s reply mode with auto without changing omitted-field semantics', async mode => {
     const { repos, run, fetcher } = await botRuntime();
     await run('bot-set', { appId: 'cli_a', pairs: [`groupReplyMode=${mode}`] });

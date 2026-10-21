@@ -1,6 +1,6 @@
 import { parseLarkEventHandlers, validateLarkEventConfiguration, type LarkEventHandler } from './event-pipeline.js';
 import { parseCardActionForwarding, type CardActionForwarding } from './card-action-forwarding.js';
-import { NEW_BOT_MENTION_POLICY, collaborationParticipationModes, mentionPolicies, resolveParticipation, riskControlModes, supportsRemoteApproval, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type RiskControlMode } from '@dutydeck/shared';
+import { NEW_BOT_MENTION_POLICY, agentWeightsSchema, type AgentWeight, collaborationParticipationModes, mentionPolicies, resolveParticipation, riskControlModes, supportsRemoteApproval, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type RiskControlMode } from '@dutydeck/shared';
 import { isAbsolute } from 'node:path';
 import { hostname, userInfo } from 'node:os';
 import { LarkServiceError } from './service.js';
@@ -45,6 +45,7 @@ export interface StoredLarkConfig {
    */
   webMobileReachable?: false;
   defaultAgentId?: string;
+  defaultAgentWeights?: AgentWeight[];
   defaultModel?: string;
   defaultReasoningEffort?: string;
   /** Explicit consent for unattended Lark sessions to run in full-trust mode. */
@@ -207,6 +208,7 @@ export interface SaveLarkConfigInput {
   /** 手机能否打开 webBaseUrl；false 时不保存地址，卡片不显示「查看详情」。未提供时沿用既有答案 */
   webMobileReachable?: boolean;
   defaultAgentId?: string;
+  defaultAgentWeights?: AgentWeight[];
   defaultModel?: string;
   defaultReasoningEffort?: string;
   fullTrustConfirmed?: boolean;
@@ -318,6 +320,7 @@ export interface PublicLarkConfig {
   webBaseUrl?: string;
   webMobileReachable?: false;
   defaultAgentId?: string;
+  defaultAgentWeights?: AgentWeight[];
   defaultModel?: string;
   defaultReasoningEffort?: string;
   fullTrustConfirmed: boolean;
@@ -597,6 +600,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(parsed.webMobileReachable !== false && normalizeWebBaseUrl(parsed.webBaseUrl) ? { webBaseUrl: normalizeWebBaseUrl(parsed.webBaseUrl) } : {}),
     ...(parsed.webMobileReachable === false ? { webMobileReachable: false as const } : {}),
     ...(parsed.defaultAgentId ? { defaultAgentId: parsed.defaultAgentId } : {}),
+    ...(parsed.defaultAgentWeights ? { defaultAgentWeights: agentWeightsSchema.parse(parsed.defaultAgentWeights) } : {}),
     ...(parsed.defaultModel ? { defaultModel: parsed.defaultModel } : {}),
     ...(parsed.defaultReasoningEffort ? { defaultReasoningEffort: parsed.defaultReasoningEffort } : {}),
     fullTrustConfirmed: parsed.fullTrustConfirmed === true,
@@ -716,6 +720,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
   ...(config.webMobileReachable === false ? { webMobileReachable: false as const } : {}),
   ...(config.defaultAgentId ? { defaultAgentId: config.defaultAgentId } : {}),
+  ...(config.defaultAgentWeights ? { defaultAgentWeights: config.defaultAgentWeights } : {}),
   ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
   ...(config.defaultReasoningEffort ? { defaultReasoningEffort: config.defaultReasoningEffort } : {}),
   fullTrustConfirmed: config.fullTrustConfirmed === true,
@@ -842,6 +847,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const webBaseUrl = !webMobileReachable ? undefined : input.webBaseUrl !== undefined ? normalizeWebBaseUrl(input.webBaseUrl)
     : current ? current.webBaseUrl : configs.find(config => config.webBaseUrl)?.webBaseUrl;
   const defaultAgentId = input.defaultAgentId?.trim() || current?.defaultAgentId;
+  const weightsResult = agentWeightsSchema.safeParse(input.defaultAgentWeights === undefined ? current?.defaultAgentWeights ?? [] : input.defaultAgentWeights);
+  if (!weightsResult.success) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Agent weights must contain distinct Agent IDs and finite positive weights.', 400);
+  const defaultAgentWeights = weightsResult.data;
   const listening = input.listening ?? current?.listening ?? false;
   const groupToolsEnabled = input.groupToolsEnabled ?? current?.groupToolsEnabled ?? false;
   const groupToolsAllowSend = groupToolsEnabled && (input.groupToolsAllowSend ?? current?.groupToolsAllowSend ?? false);
@@ -913,6 +921,11 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const patternValidation = validateHighRiskPattern(highRiskPattern);
   if (!patternValidation.valid) throw new LarkServiceError('INVALID_HIGH_RISK_PATTERN', patternValidation.error, 400);
   if (agents && defaultAgentId && !(await agents.get(defaultAgentId))) throw new LarkServiceError('INVALID_LARK_CONFIG', `Unknown default Agent: ${defaultAgentId}`, 400);
+  for (const row of defaultAgentWeights) {
+    const agent = await agents?.get(row.agentId);
+    if (agents && !agent) throw new LarkServiceError('INVALID_LARK_CONFIG', `Unknown Agent: ${row.agentId}`, 400);
+    if (agent && permissionMode !== 'full-trust' && !supportsRemoteApproval(agent)) throw new LarkServiceError('LARK_APPROVAL_UNSUPPORTED', `Agent ${row.agentId} does not support Lark approval.`, 422);
+  }
   if (executionMode === 'layered') {
     // PMO 通过群工具里的 work delegate 把任务交给 Leader，没有群工具就没有交接入口。
     if (!groupToolsEnabled) throw new LarkServiceError('INVALID_LARK_CONFIG', '分层协作需要开启群工具。', 400);
@@ -930,7 +943,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   }
   const duplicate = configs.find((config, configIndex) => config.appId === appId && configIndex !== index);
   if (duplicate) throw new LarkServiceError('LARK_BOT_ALREADY_CONFIGURED', `Lark bot ${appId} already has a configuration panel`, 409);
-  if ((input.stage === 'agent' || input.defaultAgentId !== undefined || input.listening === true) && permissionMode === 'full-trust' && !fullTrustConfirmed) {
+  if ((input.stage === 'agent' || input.defaultAgentId !== undefined || input.defaultAgentWeights !== undefined || input.listening === true) && permissionMode === 'full-trust' && !fullTrustConfirmed) {
     throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '请先确认飞书任务将以完全信任模式无人值守运行。', 409);
   }
   const config: StoredLarkConfig = {
@@ -949,6 +962,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     ...(webBaseUrl ? { webBaseUrl } : {}),
     ...(webMobileReachable ? {} : { webMobileReachable: false as const }),
     ...(defaultAgentId ? { defaultAgentId } : {}),
+    ...(defaultAgentWeights.length ? { defaultAgentWeights } : {}),
     ...(defaultModel ? { defaultModel } : {}),
     ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
     fullTrustConfirmed,

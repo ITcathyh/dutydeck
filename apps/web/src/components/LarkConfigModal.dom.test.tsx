@@ -1235,3 +1235,42 @@ it('saves busy triage from the bot setup panel', async () => {
   await user.click(screen.getByRole('button', { name: '完成配置' }));
   await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ busyTriage: true })));
 });
+
+describe('Lark Agent routing weights', () => {
+  it('can clear weights for an Agent that is no longer installed', async () => {
+    const user = userEvent.setup();
+    const initial = collection({ setupComplete: true, fullTrustConfirmed: true, permissionMode: 'full-trust', defaultAgentId: 'codex', defaultAgentWeights: [{ agentId: 'missing-agent', weight: 100 }] });
+    renderModal(initial);
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(initial);
+    await screen.findByDisplayValue('/repo');
+    await user.click(screen.getByRole('button', { name: /选择 Agent 并启用/ }));
+    expect(await screen.findByText(/部分参与分流的 Agent 已不可用：missing-agent/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '清空全部权重' }));
+    await user.click(screen.getByRole('button', { name: '完成配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]![0]).toMatchObject({ defaultAgentWeights: [] });
+  });
+
+  it('edits weights, saves them and allows disabling routing', async () => {
+    const user = userEvent.setup();
+    const initial = collection({ revision: 1, setupComplete: true, fullTrustConfirmed: true, permissionMode: 'full-trust', defaultAgentId: 'codex', defaultAgentWeights: [{ agentId: 'codex', weight: 30 }, { agentId: 'claude', weight: 70 }] });
+    renderModal(initial);
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(initial);
+    await screen.findByDisplayValue('/repo');
+    await user.click(screen.getByRole('button', { name: /选择 Agent 并启用/ }));
+    const codex = await screen.findByRole('spinbutton', { name: 'Codex 分流权重' });
+    const claude = screen.getByRole('spinbutton', { name: 'Claude 分流权重' });
+    expect((codex as HTMLInputElement).value).toBe('30');
+    await user.clear(codex); await user.type(codex, '20');
+    await user.clear(claude); await user.type(claude, '80');
+    await user.click(screen.getByRole('button', { name: '完成配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]![0]).toMatchObject({ defaultAgentWeights: [{ agentId: 'codex', weight: 20 }, { agentId: 'claude', weight: 80 }] });
+    await user.clear(codex); await user.type(codex, '0');
+    expect((screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement).disabled).toBe(true);
+    await user.clear(codex); await user.clear(claude);
+    await user.click(screen.getByRole('button', { name: '完成配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(save.mock.calls[1]![0]).toMatchObject({ defaultAgentWeights: [] });
+  });
+});

@@ -496,7 +496,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false,
         ...(webBaseUrl ? { webUrl: `${webBaseUrl}/sessions/${encodeURIComponent(claim.sessionId)}` } : {}),
         ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}) },
-      agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config),
+      agentName: await this.resolveSessionAgentName(config, claim.sessionId), permissionMode: larkPermissionMode(config),
       ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
       markdown: claim.phase === 'abandoned' ? `**${label}**\n\n这一轮不再执行，执行结果仍未知。\n\n${larkRecoveryRetainedNote(config.webBaseUrl)}`
         : claim.redispatch ? larkRedispatchedCardMarkdown(claim.redispatch, larkRecoveryRetainedNote(config.webBaseUrl))
@@ -568,7 +568,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       this.log.warn({ error, taskId: mapping.externalId }, '读取被切断那一轮的执行记录失败，按可能有外部副作用处理');
       unsafeReason = '的执行记录读取失败';
     }
-    const agent = await this.resolveAgentName(config);
+    const agent = await this.resolveSessionAgentName(config, mapping.sessionId);
     const lastActivity = larkLastActivityAt(own, attempt.createdAt);
     if (!restart) {
       const quiet = this.agentQuiet(mapping.sessionId);
@@ -737,7 +737,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         cardKind: 'process', messageId: saved.card_message_id, taskId: mapping.externalId, taskName: saved.task_name, turn, sessionId,
         state: 'reconcile_required', statusLabel: '结果未知', readOnly: true,
         capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false },
-        agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config),
+        agentName: await this.resolveSessionAgentName(config, sessionId), permissionMode: larkPermissionMode(config),
         ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
         markdown: `**已在原对话继续**\n\n${larkInterruptionSummary(code, record.redispatch?.agent)}已按没做完处理，在原来的会话里让 Agent 接着做，进度见新的任务卡。`
       }).catch(error => this.log.warn({ error, taskId: mapping.externalId }, '结果未知的旧卡未能更新为已在原对话继续'));
@@ -927,7 +927,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       { chatType: saved.chat_type, senderOpenId: saved.sender_open_id, senderType: saved.sender_type }).mention;
     const messageId = await notifyLarkUnknownTask({ service: this.service, store, log: this.log, appId: config.appId, sessionId: mapping.sessionId, runtimeTaskId: runtimeTask.id, facts,
       ...(unknownMention ? { mention: unknownMention } : {}),
-      messageTaskId: mapping.externalId, turn: saved.turn ?? 0, taskName: saved.task_name, agentName: await this.resolveAgentName(config),
+      messageTaskId: mapping.externalId, turn: saved.turn ?? 0, taskName: saved.task_name, agentName: await this.resolveSessionAgentName(config, mapping.sessionId),
       target: { chatId: saved.chat_id,
         replyMessageId: saved.reply_message_id?.trim() || (saved.root_message_id?.trim().startsWith('om_') ? saved.root_message_id.trim() : undefined),
         replyInThread: saved.reply_in_thread },
@@ -951,7 +951,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       state: resolution.action === 'completed' ? 'completed' : resolution.action === 'failed' ? 'failed' : resolution.action === 'retry' ? 'queued' : 'reconcile_required',
       statusLabel: resolution.action === 'other' ? '结果未知' : `已${unknownTaskActionLabels[resolution.action]}`, readOnly: true,
       capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false },
-      agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config),
+      agentName: await this.resolveSessionAgentName(config, input.sessionId), permissionMode: larkPermissionMode(config),
       ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
       markdown: `**${describeUnknownTaskResolution(resolution, true)}**${next ? `\n\n${next}` : ''}`
     });

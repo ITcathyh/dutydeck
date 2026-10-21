@@ -5,7 +5,7 @@ import { registerLarkAppCreationRoutes } from './app-creation-routes.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
 import { registerLarkGroupManagementRoutes, type LarkGroupManager } from './group-management.js';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import { agentWeightsSchema, validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { createLarkCardService, LarkServiceError, larkConfigurationStatus, type LarkBotConfigInput, type LarkCardService, type LarkSendInput, type LarkUpdateInput } from './service.js';
 import { detectUnusableOwnerEntries, normalizeOwnerEntries, type ContactLookup } from './owner-identity.js';
@@ -254,7 +254,10 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       const pattern = request.body?.highRiskPattern === undefined ? config.highRiskPattern : request.body.highRiskPattern.trim() || defaultHighRiskPattern;
       const patternValidation = validateHighRiskPattern(pattern);
       if (!patternValidation.valid) throw new LarkServiceError('INVALID_HIGH_RISK_PATTERN', patternValidation.error, 400);
-      const hook = await installLarkHook(config.defaultAgentId, config.workspace, config.defaultAgentId ? await options.agents?.get(config.defaultAgentId) : undefined);
+      let hook;
+      for (const agentId of new Set([config.defaultAgentId, ...(config.defaultAgentWeights ?? []).map(row => row.agentId)])) {
+        hook = await installLarkHook(agentId, config.workspace, agentId ? await options.agents?.get(agentId) : undefined);
+      }
       const saved = await saveLarkConfig(options.config, options.agents, {
         stage: 'agent',
         originalAppId: config.appId,
@@ -343,11 +346,15 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       if (resolvedHighRiskAllowedUsers !== undefined) input = { ...input, highRiskAllowedUsers: resolvedHighRiskAllowedUsers, highRiskAllowedEmails: [] };
     }
     const existing = input.originalAppId ? await readLarkConfig(options.config, input.originalAppId) : undefined;
+    const weightsResult = agentWeightsSchema.safeParse(input.defaultAgentWeights === undefined ? existing?.defaultAgentWeights ?? [] : input.defaultAgentWeights);
+    if (!weightsResult.success) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Agent weights must contain distinct Agent IDs and finite positive weights.', 400);
     const requestedRiskControlMode = resolveRiskControlModeInput(input, existing?.riskControlMode ?? 'off');
     if (requestedRiskControlMode === 'enforced') {
-      const agentId = input.defaultAgentId ?? existing?.defaultAgentId;
-      const hook = await larkHookStatus(agentId, input.workspace ?? existing?.workspace, agentId ? await options.agents?.get(agentId) : undefined);
-      if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', hook.reason ?? 'Install the selected Agent hook before enabling enforced risk control', 409);
+      const agentIds = new Set([input.defaultAgentId ?? existing?.defaultAgentId, ...weightsResult.data.map(row => row.agentId)]);
+      for (const agentId of agentIds) {
+        const hook = await larkHookStatus(agentId, input.workspace ?? existing?.workspace, agentId ? await options.agents?.get(agentId) : undefined);
+        if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', `${agentId}: ${hook.reason ?? 'Install the selected Agent hook before enabling enforced risk control'}`, 409);
+      }
     }
     const saved = await saveLarkConfig(options.config, options.agents, listeningDisabled ? { ...input, listening: undefined } : input);
     // Bot 改 appId（跨应用复制配置）后，按 appId 作用域的模型服务设置不会自动跟随记录，

@@ -42,6 +42,18 @@ describe('live group configuration', () => {
   });
   afterEach(async () => { repos?.close(); await rm(dir, { recursive: true, force: true }); });
 
+  it('inherits routing weights and disables them for a fixed group Agent', async () => {
+    const weights = [{ agentId: 'agent_one', weight: 30 }, { agentId: 'agent_two', weight: 70 }];
+    await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', defaultAgentWeights: weights });
+    const detail = await save();
+    const config = (await readLarkConfig(repos.config, 'cli_one'))!;
+    expect((await manager.resolved(config, 'oc_one')).defaultAgentWeights).toEqual(weights);
+    await manager.save('cli_one', 'oc_one', { expectedRevision: detail.binding!.revision, patch: { agentOverride: { mode: 'set', value: 'agent_two' } } });
+    const fixed = await manager.resolved(config, 'oc_one');
+    expect(fixed.defaultAgentId).toBe('agent_two');
+    expect(fixed.defaultAgentWeights).toBeUndefined();
+  });
+
   it('names the invalid field when a group patch has the wrong shape', async () => {
     await expect(manager.save('cli_one', 'oc_one', { expectedRevision: 0, patch: { modelOverride: 'gpt-5.5' } }))
       .rejects.toMatchObject({ code: 'INVALID_GROUP_CONFIG', message: expect.stringContaining('patch.modelOverride') });

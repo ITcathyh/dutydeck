@@ -1346,6 +1346,16 @@ describe('结果投递失败的对账', () => {
 
 
 describe('Agent badge reconciliation', () => {
+  it('uses the actual session Agent when reconciling a weighted session', async () => {
+    const mapping = createMapping('map-weighted', 'msg-weighted', 'ses-weighted', { runtime_task_id: 'task-weighted', state: 'running' });
+    const service = { update: vi.fn(async () => ({ messageId: 'om_card' })), send: vi.fn(async (_input: any) => ({ messageId: 'om_result' })) };
+    await performLarkCardReconcile({ config: { ...config, showAgentName: true, defaultAgentWeights: [{ agentId: 'ccflash', weight: 100 }] }, channel: mapping.channel, cardMappings: createMemoryChannelMappingRepo([mapping]),
+      runtime: { getSession: async () => ({ agentId: 'ccflash' }), listAgents: async () => [{ id: 'codex', name: 'Codex' }, { id: 'ccflash', name: 'CCFlash' }], getTasks: async () => [{ id: 'task-weighted', sessionId: mapping.sessionId, prompt: 'task', status: 'completed', createdAt: mapping.createdAt, updatedAt: mapping.createdAt }], getEvents: async () => [{ id: 'event', type: 'text', data: { text: '完成' } }] } as any,
+      service: service as any, log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
+    expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ showAgentName: true, agentName: 'CCFlash' }));
+    expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ agentName: 'CCFlash' }));
+  });
+
   it.each([false, true])('restores badge preference %s on a recovered result', async showAgentName => {
     const mapping = createMapping('map-badge', 'msg-badge', 'ses-badge', { runtime_task_id: 'task-badge', state: 'running' });
     const cardMappings = createMemoryChannelMappingRepo([mapping]);

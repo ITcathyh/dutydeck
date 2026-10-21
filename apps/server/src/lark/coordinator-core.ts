@@ -269,13 +269,17 @@ export abstract class LarkCoordinatorCore {
     }
   }
 
+  protected async resolveSessionAgentName(config: StoredLarkConfig, sessionId: string) {
+    return this.resolveAgentName(config, (await this.runtime.getSession(sessionId))?.agentId);
+  }
+
   /** 执行宿主名不进持久化，每次渲染时重新解析：Agent 可能被改名或删除，卡上应显示当前的名字。 */
-  protected async resolveAgentName(config: StoredLarkConfig) {
+  protected async resolveAgentName(config: StoredLarkConfig, agentId = config.defaultAgentId) {
     try {
-      return (await this.runtime.listAgents?.())?.find(agent => agent.id === config.defaultAgentId)?.name ?? config.defaultAgentId ?? 'Dutydeck';
+      return (await this.runtime.listAgents?.())?.find(agent => agent.id === agentId)?.name ?? agentId ?? 'Dutydeck';
     } catch (error) {
-      this.log.warn({ error, agentId: config.defaultAgentId }, '读取 Agent 展示名失败，使用 Agent ID 渲染卡片');
-      return config.defaultAgentId ?? 'Dutydeck';
+      this.log.warn({ error, agentId: agentId }, '读取 Agent 展示名失败，使用 Agent ID 渲染卡片');
+      return agentId ?? 'Dutydeck';
     }
   }
 

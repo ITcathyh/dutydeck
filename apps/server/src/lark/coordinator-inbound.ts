@@ -1691,7 +1691,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         if (!requester || requester !== event.senderOpenId) throw new Error('分身沿用源会话的请求人，请由源会话的第一条任务发起人开分身；无法核实原请求人时不能开分身。');
         const request = parseLarkNewSession(route.argsText);
         if (request.handoff) throw new Error('/fork 自动继承上下文，无需 --handoff。');
-        const sourceConfig = { ...config, defaultAgentId: source.agentId, defaultModel: source.model, defaultReasoningEffort: source.reasoningEffort, workspace: source.cwd };
+        const sourceConfig = { ...config, defaultAgentWeights: undefined, defaultAgentId: source.agentId, defaultModel: source.model, defaultReasoningEffort: source.reasoningEffort, workspace: source.cwd };
         const explicit = request.launchOptions ? await this.validateNewSession(sourceConfig, event, request.launchOptions) : {};
         const switchingAgent = explicit.agentId !== undefined && explicit.agentId !== source.agentId;
         const agent = (await this.runtime.listAgents?.())?.find(item => item.id === source.agentId);

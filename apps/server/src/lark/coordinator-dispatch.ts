@@ -334,7 +334,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false,
           ...(webBaseUrl ? { webUrl: `${webBaseUrl}/sessions/${encodeURIComponent(task.sessionId)}` } : {}),
           ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}) },
-        agentName: await this.resolveAgentName(task.config), showAgentName: task.config.showAgentName === true, permissionMode: larkPermissionMode(task.config),
+        agentName: await this.resolveSessionAgentName(task.config, task.sessionId), showAgentName: task.config.showAgentName === true, permissionMode: larkPermissionMode(task.config),
         ...(task.config.webBaseUrl ? { webBaseUrl: task.config.webBaseUrl } : {})
       });
     }
@@ -942,6 +942,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       session = resumeTask ? (await this.runtime.getSession(resumeTask.sessionId))! : task.inbox?.sessionId ? (await this.runtime.getSession(task.inbox.sessionId))! : await this.sessionFor(group, config, event.chatId, event.chatType, task.scopeId, task.launchOptions,
         task.launchOptions && restoring ? async () => (task.launchOptions = await this.validateNewSession(config, event, task.launchOptions!)) : undefined);
       if (!session) throw new LarkServiceError('LARK_SESSION_MISSING', '原任务会话已不存在，请重新发送目标。', 409);
+      cardContext.agentName = await this.resolveAgentName(config, session.agentId);
       // 建会话本身也可能卡住（runtime.start 未返回）。回来后再确认一次，
       // 并把这条会话交给 /new 收走，不留下一个游离的新上下文。
       if (await this.supersededTurn(task, session)) return;

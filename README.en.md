@@ -253,6 +253,13 @@ printf %s "$LARK_SECRET" | dutydeck setup --lark-app-id cli_xxx --lark-app-secre
 
 Agents that support Lark per-action approval: ACP agents (based on a successful ACP protocol handshake, independent of optional model enumeration metadata), and Claude Code / Seed / Relay in terminal mode (via a PermissionRequest hook). Other terminal CLIs can only run `full-trust`.
 
+**Route Agents by weight.** In bot settings, enter positive “Agent 分流权重” values for participating Agents; leave a field blank to exclude it, or clear all fields to disable routing. For example, Codex 30 and ccflash 70 select Agents for new primary Lark sessions with roughly 30% / 70% probability; short runs need not match the ratio exactly. Existing sessions keep their Agent when weights change or routing is disabled. A fixed group Agent, `/new --agent`, or explicit model/effort takes priority. The bot's default model and effort apply only to its default Agent; other Agents use their own defaults. Memory and group decisions are unaffected. Every candidate must support the chosen approval mode, and enforced risk control checks and installs hooks for all candidates. The CLI edits the same setting:
+
+```bash
+dutydeck settings bot set cli_xxx 'defaultAgentWeights=[{"agentId":"codex","weight":30},{"agentId":"ccflash","weight":70}]'
+dutydeck settings bot set cli_xxx 'defaultAgentWeights=[]' # Disable routing
+```
+
 **Claude Code gateway and API key.** In step 2 of bot registration, choose Claude Code, expand “模型服务配置” (model service settings), enter the gateway URL, auth mode and key, then save the model service settings before completing registration. Existing bots have the same panel beside their default Agent settings. Enter the gateway model ID in the bot's default model field. Built-in Claude Code and custom Agents with `adapterId: "claude"` or `"claude-code"` (such as ccflash) are supported. The gateway must implement the Anthropic Messages API.
 
 ```bash

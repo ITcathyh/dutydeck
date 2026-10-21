@@ -336,6 +336,15 @@ describe('中间进展静默（silentProgress）', () => {
 
 
 describe('Agent badge delivery context', () => {
+  it('shows the actual selected Agent on weighted progress and result cards', async () => {
+    const h = await harness('normal', { showAgentName: true, defaultAgentWeights: [{ agentId: 'ccflash', weight: 100 }] });
+    const agent = (await h.runtime.listAgents()).find(agent => agent.id === 'mock')!;
+    await h.repos.agents.save({ ...agent, id: 'ccflash', name: 'CCFlash' } as AgentConfig);
+    await h.coordinator.handle(event('om_weighted_badge', '做一件事'), h.config);
+    await h.settled('om_weighted_badge');
+    for (const kind of ['process', 'result'] as const) expect(h.cardsOfKind(kind)[0]).toMatchObject({ agentName: 'CCFlash', showAgentName: true });
+  });
+
   it.each([undefined, false, true])('passes bot preference %s to progress and result cards', async showAgentName => {
     const h = await harness('normal', { showAgentName });
     await h.coordinator.handle(event('om_badge', '做一件事'), h.config);

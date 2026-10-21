@@ -41,10 +41,10 @@ const adapterFor = (agentId?: string) => {
  * 启动参数自带凭据保护 hook 的 Agent（它同时检查高危正则）：Claude 家族终端适配器（含 adapterId 为 claude-code 的自定义 Agent），
  * 以及经 Dutydeck 的 claude-acp.mjs 启动的 ACP Claude（旁边要有 claude-guard.mjs，旧版本拷贝没有）。这些 Agent 开强制拦截不用装工作区 Hook。
  */
-export function processGuardedAgent(agent?: AgentConfig) {
+export function processGuardedAgent(agent?: Pick<AgentConfig, 'id'> & Partial<AgentConfig>) {
   if (!agent) return false;
   if (agent.protocol === 'pty-cli') return ['claude-code', 'seed', 'relay'].includes(agent.adapterId ?? agent.id);
-  return agent.protocol === 'acp' && process.platform !== 'win32' && [agent.command, ...(agent.args ?? [])]
+  return agent.protocol === 'acp' && process.platform !== 'win32' && [...(agent.command ? [agent.command] : []), ...(agent.args ?? [])]
     .some(part => basename(part) === 'claude-acp.mjs' && existsSync(join(dirname(part), 'claude-guard.mjs')));
 }
 
@@ -166,7 +166,7 @@ async function installedState(adapter: HookAdapter, workspace: string) {
   return scriptCurrent && JSON.stringify(config.hooks?.[adapter.eventKey!]).includes(markerFor(adapter));
 }
 
-export async function larkHookStatus(agentId?: string, workspace?: string, agent?: AgentConfig): Promise<LarkHookStatus> {
+export async function larkHookStatus(agentId?: string, workspace?: string, agent?: Pick<AgentConfig, 'id'> & Partial<AgentConfig>): Promise<LarkHookStatus> {
   if (processGuardedAgent(agent)) return { agentId, supported: true, installed: true, writable: true, trustRequired: false };
   if (!workspace) return { agentId, supported: false, installed: false, writable: false, trustRequired: false, reason: '请先选择工作区' };
   const adapter = adapterFor(agentId);

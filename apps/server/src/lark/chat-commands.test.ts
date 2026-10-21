@@ -644,6 +644,7 @@ describe('恢复已关闭会话与并行分身', () => {
     await h.dispatch('om_task', '第一条任务'); await h.waitRunning('第一条任务');
     await h.dispatch('om_queue', '排队任务');
     const id = await h.sessionId(); const before = await h.runtime.getTasks(id); const source = await h.runtime.getSession(id);
+    h.config.defaultAgentWeights = [{ agentId: 'spare', weight: 100 }];
     await h.coordinator.handle(event('om_fork', '/fork 检查另一种实现'), h.config);
     expect(h.markdownOf(h.lastReceipt())).toContain('已在新话题开分身');
     // 原会话还在执行，updatedAt 会随事件变化；其余字段（状态、绑定、配置）必须不变。
@@ -652,6 +653,7 @@ describe('恢复已关闭会话与并行分身', () => {
     await vi.waitFor(async () => expect(await h.runtime.listSessions()).toHaveLength(2));
     const child = (await h.runtime.listSessions()).find(s => s.id !== id)!;
     expect(child.sourceId).toContain(':thread:om_card_');
+    expect(child.agentId).toBe(source!.agentId);
     await vi.waitFor(async () => expect((await h.runtime.getTasks(child.id))[0]?.status).toBe('running'));
     await vi.waitFor(() => expect(h.prompts).toEqual(expect.arrayContaining([expect.stringContaining('会话交接')])));
     expect(h.service.sendText.mock.calls[0]![0].text).toContain('最近结果');

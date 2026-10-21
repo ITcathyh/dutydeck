@@ -121,12 +121,9 @@ export async function performLarkCardReconcile(input: {
 }): Promise<number> {
   const { runtime, service, cardMappings, log, config, channel } = input;
   if (!runtime.getTasks || !runtime.getEvents) return 0;
-  let agentName = config.defaultAgentId ?? 'Dutydeck';
-  try { agentName = (await runtime.listAgents?.())?.find(agent => agent.id === config.defaultAgentId)?.name ?? agentName; }
-  catch (error) { log.warn({ error, agentId: config.defaultAgentId }, '读取 Agent 展示名失败，使用 Agent ID 对账卡片'); }
-  const cardContext = { agentName, showAgentName: config.showAgentName === true, ...(config.workspace ? { workspace: config.workspace } : {}) };
-  // 过程卡重绘不注入整张能力表，「查看详情」要不要走回调单独声明，否则页脚退回直链、点开落到登录页。
-  const processContext = { ...cardContext, ...(input.detailLogin ? { detailLogin: true } : {}) };
+  let agents: Awaited<ReturnType<NonNullable<LarkRuntime['listAgents']>>> | undefined;
+  try { agents = await runtime.listAgents?.(); }
+  catch (error) { log.warn({ error }, '读取 Agent 展示名失败，使用 Agent ID 对账卡片'); }
   const mappings = await cardMappings.list(channel);
   const isTextReceipt = await explicitFinalTextReceiptReader(input.deliveryStore);
   let unresolved = 0;
@@ -167,6 +164,11 @@ export async function performLarkCardReconcile(input: {
       }
       // 呈现开关可以按群覆盖：补发方式必须按这条记录所属会话的生效配置决定。
       const effective = (await input.resolveConfig?.(persisted)) ?? config;
+      const agentId = (await runtime.getSession?.(mapping.sessionId))?.agentId ?? effective.defaultAgentId;
+      const agentName = agents?.find(agent => agent.id === agentId)?.name ?? agentId ?? 'Dutydeck';
+      const cardContext = { agentName, showAgentName: effective.showAgentName === true, ...(effective.workspace ? { workspace: effective.workspace } : {}) };
+      const processContext = { ...cardContext, ...(input.detailLogin ? { detailLogin: true } : {}) };
+
       const terminalPersisted = terminalTaskStates.has(persisted.state);
       const alreadyDelivered = terminalPersisted
         && ((persisted.final_delivery_state === 'delivered' && Boolean(persisted.final_message_id))

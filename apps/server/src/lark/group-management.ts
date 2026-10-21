@@ -423,7 +423,7 @@ export class LarkGroupManager {
     if (!detail.applied) throw new RuntimeError('LARK_GROUP_NOT_APPLIED', detail.error ?? '群配置尚未生效。', 403);
     const effective = detail.effective!;
     const presentation = effective.presentation;
-    return { ...config, defaultAgentId: effective.agent.value, workspace: effective.workspace.value, defaultModel: effective.model.value, defaultReasoningEffort: effective.reasoningEffort.value,
+    return { ...config, defaultAgentWeights: detail.binding.agentOverride.mode === 'set' ? undefined : config.defaultAgentWeights, defaultAgentId: effective.agent.value, workspace: effective.workspace.value, defaultModel: effective.model.value, defaultReasoningEffort: effective.reasoningEffort.value,
       groupReplyMode: effective.routing.groupReplyMode.value, mentionPolicy: effective.routing.mentionPolicy.value, groupToolsEnabled: effective.groupTools.read.allowed || effective.groupTools.discover.allowed || effective.groupTools.send.allowed,
       groupToolsAllowSend: effective.groupTools.send.allowed,
       // 呈现逐字段落到本群的运行配置上；未解析出来的项保留 Bot 级取值。
