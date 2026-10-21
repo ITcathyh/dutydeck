@@ -907,7 +907,7 @@ describe('Lark message coordinator', () => {
     expect(safety?.content).toContain(config.highRiskPattern);
     expect(safety?.content).toContain('禁止执行');
     expect(safety?.content).toContain('~/.codex');
-    expect(safety?.content).toContain('不要去查找、阅读或试探它们的实现和配置');
+    expect(safety?.content).toContain('不要去查找、阅读或试探这些限制的实现和配置');
     expect((runtime.dispatch.mock.calls[0]?.[10] as PromptPart[]).some(part => part.content.startsWith('[Dutydeck 安全策略 · 自动注入]'))).toBe(false);
     expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('正在排队，前面还有 1 个任务…') }));
     expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('前面还有 0 个任务') }));
@@ -1651,7 +1651,7 @@ describe('Lark message coordinator', () => {
     coordinator.stop();
   });
 
-  it('keeps the original message in history while injecting a hidden soft-gate prompt', async () => {
+  it.each(['guidance', 'enforced'] as const)('keeps the original request while injecting accurate %s safety rules', async riskControlMode => {
     let subscriber: ((event: AgentEvent) => void) | undefined;
     const runtime = {
       start: vi.fn(async () => session), getSession: vi.fn(async () => session),
@@ -1664,17 +1664,20 @@ describe('Lark message coordinator', () => {
       deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' })), getUserEmails: vi.fn(async () => ['user@example.com'])
     };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
-    coordinator.handle({ messageId: 'om_guard', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"请 rm -rf 临时目录"}', senderOpenId: 'ou_user', mentions: [] }, { ...config, preInjectPrompt: '始终使用中文回答。', riskControlMode: 'enforced', highRiskAllowedEmails: ['admin@example.com'] });
+    coordinator.handle({ messageId: 'om_guard', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"请 rm -rf 临时目录"}', senderOpenId: 'ou_user', mentions: [] }, { ...config, preInjectPrompt: '始终使用中文回答。', riskControlMode, highRiskAllowedEmails: ['admin@example.com'] });
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     expect(runtime.send.mock.calls[0]?.[1]).toBe('请 rm -rf 临时目录');
     expect(runtime.send.mock.calls[0]?.[2]).toContain('[Dutydeck 安全策略 · 自动注入]');
+    expect(runtime.send.mock.calls[0]?.[2]).not.toContain('这些限制由 Dutydeck 在工具层执行');
+    expect(runtime.send.mock.calls[0]?.[2]).toContain('不要换方法重试');
     expect(runtime.send.mock.calls[0]?.[2]).toContain('[Dutydeck 预注入 Prompt]\n始终使用中文回答。');
     expect(runtime.send.mock.calls[0]?.[2]).toContain('请 rm -rf 临时目录');
-    expect(runtime.send.mock.calls[0]?.[3]).toEqual(expect.objectContaining({ enabled: true, authorized: false, actorEmail: 'user@example.com' }));
+    if (riskControlMode === 'enforced') expect(runtime.send.mock.calls[0]?.[3]).toEqual(expect.objectContaining({ enabled: true, authorized: false, actorEmail: 'user@example.com' }));
+    else expect(runtime.send.mock.calls[0]?.[3]).toBeUndefined();
   });
 
   it('injects the ADHD output rules only for bots that enable them', async () => {
-    const promptFor = async (adhdMode?: boolean) => {
+    const promptFor = async (adhdMode?: boolean, patch: Partial<typeof config> = {}) => {
       const runtime = {
         start: vi.fn(async () => session), getSession: vi.fn(async () => session),
         subscribe: vi.fn(() => vi.fn()), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
@@ -1684,7 +1687,7 @@ describe('Lark message coordinator', () => {
         deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
       };
       const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
-      coordinator.handle({ messageId: 'om_adhd', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"修一下登录"}', senderOpenId: 'ou_user', mentions: [] }, adhdMode === undefined ? config : { ...config, adhdMode });
+      coordinator.handle({ messageId: 'om_adhd', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"修一下登录"}', senderOpenId: 'ou_user', mentions: [] }, { ...config, ...patch, ...(adhdMode === undefined ? {} : { adhdMode }) });
       await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
       return String(runtime.send.mock.calls[0]?.[2]);
     };
@@ -1692,6 +1695,16 @@ describe('Lark message coordinator', () => {
     expect(enabled.indexOf('[飞书结果说明]')).toBeGreaterThanOrEqual(0);
     expect(enabled.indexOf('[飞书结果说明]')).toBeLessThan(enabled.indexOf(larkAdhdModePrompt));
     expect(enabled.indexOf(larkAdhdModePrompt)).toBeLessThan(enabled.indexOf('[用户请求]'));
+    for (const text of ['读者有 ADHD', '连续三轮', '破坏性操作先确认', '要处理吗？', '与上面的结果说明冲突']) expect(enabled).not.toContain(text);
+    expect(enabled).toContain('估计值标明是估计');
+    for (const completionReactionOnly of [false, true]) for (const silentProgress of [false, true]) {
+      const prompt = await promptFor(true, { completionReactionOnly, silentProgress });
+      expect(prompt).not.toContain('最终输出会原样显示在飞书结果卡');
+      expect(prompt).toContain('第一句给结论或需要读者执行的动作');
+      expect(prompt).toContain(larkAdhdModePrompt);
+      if (silentProgress) expect(prompt).not.toContain('开始动手前发一句进展');
+      else expect(prompt).toContain('不写进最终答复');
+    }
     expect(await promptFor()).not.toContain('[Dutydeck 输出模式 · ADHD 友好]');
     expect(await promptFor(false)).not.toContain('[Dutydeck 输出模式 · ADHD 友好]');
   });

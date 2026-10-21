@@ -5,6 +5,10 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
+import type { RuntimeOptions } from '@dutydeck/runtime';
+import type { Session } from '@dutydeck/shared';
+import { LarkAgentToolsService } from './lark/agent-tools.js';
+import { HerdrSessions } from './herdr.js';
 import { claudePlanGuardMatcher } from '@dutydeck/cli-adapters';
 import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { getAuthToken } from './auth/auth.js';
@@ -29,6 +33,55 @@ const freePort = () => new Promise<number>((resolve, reject) => {
     if (!address || typeof address === 'string') return reject(new Error('expected TCP address'));
     server.close(error => error ? reject(error) : resolve(address.port));
   });
+});
+
+it('composes frozen collaboration prompts without tool, plugin-result or Herdr discovery, preserving other sessions', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dutydeck-frozen-prompt-'));
+  temporaryDirectories.push(root);
+  const database = join(root, 'dutydeck.db');
+  const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' }); seed.close();
+  const service = await startLocalServer({ webRoot: root, env: {
+    ...process.env, NODE_ENV: 'test', DUTYDECK_HOST: '127.0.0.1', DUTYDECK_PORT: String(await freePort()),
+    DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_AUTH: 'false',
+    DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]'
+  } });
+  const options = (service.runtime as unknown as { options: RuntimeOptions }).options;
+  const tools = vi.spyOn(LarkAgentToolsService.prototype, 'promptForSession').mockImplementation(async (_session, prompt) => `TOOLS\n\n${prompt}`);
+  const herdr = vi.spyOn(HerdrSessions.prototype, 'prompt').mockReturnValue('HERDR');
+  const active = vi.spyOn(service.runtime, 'getActiveTaskContext');
+  const base: Session = { id: 'prompt-fixture', agentId: 'fixture', cwd: root, state: 'idle', runId: 'fixture', createdAt: '', updatedAt: '',
+    source: 'lark', sourceId: 'cli_test:oc_group:group:collaboration:mandate', permissionMode: 'deny-all' };
+  const prompt = '仅使用冻结材料完成分析，不调用工具';
+  try {
+    for (const protocol of ['acp', 'pty-cli'] as const) for (const terminalBackend of ['tmux', 'herdr'] as const) {
+      const session = { ...base, protocol, terminalBackend };
+      for (const promptPolicyVersion of ['legacy-v1', 'optimized-v1'] as const) {
+        const result = await options.sessionPrompt!(session, prompt, { promptPolicyVersion, promptParts: [{ kind: 'user_request', trustScope: 'user_request', content: prompt }] });
+        expect(result).toMatchObject({ prompt, diagnostics: { templateVersion: promptPolicyVersion, beforeChars: prompt.length, afterChars: prompt.length } });
+        for (const fallbackReason of ['invalid_configuration', 'configuration_unavailable']) {
+          const context = { promptPolicyVersion, promptDiagnostics: { templateVersion: promptPolicyVersion, beforeChars: prompt.length, afterChars: prompt.length, deduplicatedParts: 0, parts: [], fallbackReason } };
+          expect(await options.sessionPrompt!(session, prompt, context)).toMatchObject({ prompt, diagnostics: { fallbackReason } });
+          expect(await options.sessionPrompt!(session, prompt, { ...context, promptParts: [{ kind: 'user_request', trustScope: 'user_request', content: 'mismatched source' }] }))
+            .toMatchObject({ prompt, diagnostics: { fallbackReason: 'source_render_mismatch' } });
+        }
+      }
+      const env = options.sessionEnvironment!(session);
+      expect(env.dutydeck_frozen_materials).toBe(protocol === 'pty-cli' ? 'true' : undefined);
+      expect(env.dutydeck_relay_token).toBeTruthy();
+    }
+    expect(tools).not.toHaveBeenCalled(); expect(herdr).not.toHaveBeenCalled(); expect(active).not.toHaveBeenCalled();
+    for (const patch of [
+      { permissionMode: 'approve-reads' as const }, { permissionMode: 'full-trust' as const },
+      { sourceId: 'cli_test:oc_group:group' }, { source: 'web', sourceId: undefined }, { source: 'terminal', sourceId: undefined }
+    ]) {
+      const session = { ...base, protocol: 'pty-cli' as const, ...patch };
+      const result = await options.sessionPrompt!(session, prompt, { promptDiagnostics: { templateVersion: 'legacy-v1', beforeChars: prompt.length, afterChars: prompt.length,
+        deduplicatedParts: 0, parts: [], fallbackReason: 'configuration_unavailable' } });
+      expect(typeof result === 'string' ? result : result.prompt).toBe(`TOOLS\n\nHERDR\n\n${prompt}`);
+      expect(result).toMatchObject({ diagnostics: { fallbackReason: 'configuration_unavailable' } });
+      expect(options.sessionEnvironment!(session).dutydeck_frozen_materials).toBeUndefined();
+    }
+  } finally { await service.close(); }
 });
 
 describe('server listen options', () => {

@@ -46,6 +46,17 @@ describe('routing block — relay command hints', () => {
     }
   });
 
+  it('omits routing for frozen background analysis and leaves other Lark/Web sessions interactive', () => {
+    expect(buildDutydeckRoutingBlock(undefined, { ...relayEnv, dutydeck_frozen_materials: 'true' })).toBe('');
+    for (const source of ['web', 'terminal', undefined, 'lark']) {
+      const block = buildDutydeckRoutingBlock(undefined, { ...relayEnv, dutydeck_session_source: source });
+      expect(block).toContain('session send');
+      expect(block).toContain('session ask');
+      if (source === 'lark') expect(block).not.toContain('最终答复直接输出');
+      else expect(block).toContain('最终答复直接输出，由运行时按设置交付');
+    }
+  });
+
   it('keeps the wrapper tags and prepends ahead of the prompt', () => {
     const block = buildDutydeckRoutingBlock(undefined, relayEnv);
     expect(block.startsWith('<dutydeck_routing>')).toBe(true);

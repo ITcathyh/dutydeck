@@ -1,6 +1,6 @@
 import { commitLarkAgentReply } from './agent-reply-delivery.js';
 import { parseFinalCardBody } from './final-card.js';
-import { deliveryPrompt } from '../prompt-context.js';
+import { deliveryPrompt, isFrozenCollaborationSession } from '../prompt-context.js';
 import { LarkAgentCommands } from './agent-command.js';
 import { redactTraceText } from './secret-redaction.js';
 import { readExplicitFinal, resolveExplicitFinalContext, sendExplicitFinal, withExplicitFinalLock, type ExplicitFinalContext, type ExplicitFinalScope, type ExplicitFinalDelivery } from './explicit-final.js';
@@ -714,6 +714,7 @@ export class LarkAgentToolsService {
   }
 
   async promptForSession(session: Session, prompt: string) {
+    if (isFrozenCollaborationSession(session)) return prompt;
     const binding = larkAgentSessionBinding(session);
     if (!binding) return prompt;
     const base = await readLarkConfig(this.configs, binding.appId, { readOnly: true });
@@ -1489,7 +1490,7 @@ const userOnlyPrompt = '停止当前任务、批准工具调用、回答你的�
 export const larkCapabilityPrompt = (cannotSchedule: boolean) => `[Dutydeck 能力限制与操作指引] 下面这些由用户自己操作，遇到时在回复里给出做法，不要说“已完成”或“已设置”：${cannotSchedule ? '定时任务用 /schedule（如 /schedule every 分钟 指令），不要用 crontab、后台 sleep 或循环脚本代替；' : ''}切换 agent、模型或工作目录用 /new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容；查看任务用 /tasks；停止当前任务点进度卡上的“中断”；重新开始用 /new。`;
 
 /** 每轮工具块的开头：完整绑定命令只在这里出现一次，最终答复的交付方式也只在这里说。 */
-export const larkCommandPrompt = (command: string, delivery: string) => `[Dutydeck 命令] ${command === 'dutydeck' ? '' : `本会话的 dutydeck 命令是 ${command}，下文的 dutydeck 都指它：原样使用，不要换成 PATH 里的 dutydeck。`}先看 dutydeck agent --help：本轮的操作都在 dutydeck agent 下，子命令加 --help 看参数、风险和例子；帮助不需要服务或凭证，命令不用带 --turn。
+export const larkCommandPrompt = (command: string, delivery: string) => `[Dutydeck 命令] ${command === 'dutydeck' ? '' : `本会话的 dutydeck 命令是 ${command}，下文的 dutydeck 都指它：原样使用，不要换成 PATH 里的 dutydeck。`}下列能力使用 dutydeck agent，先看 dutydeck agent --help；子命令加 --help 看参数、风险和例子。这些 agent 子命令不用带 --turn。帮助不需要服务或凭证。
 ${delivery}`;
 
 /** 群工具的能力行，只列本轮确实可用的入口；消息范围、cursor、幂等键、交接格式等细节在 dutydeck agent group --help 里。 */

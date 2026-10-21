@@ -10,7 +10,7 @@
     "docs": { "type": "string_list", "label": "runbook 文件（相对插件配置的目录）", "maxItems": 20, "maxLength": 200, "default": [] }
   },
   "trigger": { "senderKinds": ["human"], "messageTypes": ["text", "post"], "match": { "textAnyParam": "topics" } },
-  "decision": { "guidance": "本群启用了团队答疑。当前消息提到了答疑关键字。是在向群里求助、且 scenarioContext 里的 runbook 能回答的，接：能直接按 runbook 回答的用 reply 并引用 runbook 材料；要查系统或执行步骤的用 act。只是同事间讨论、已有人回答、或 runbook 没覆盖的，silent。" },
+  "decision": { "guidance": "本群启用了团队答疑。当前消息提到了答疑关键字。是在向群里求助、且 scenarioContext 里的 runbook 能回答的，接：能直接按 runbook 回答的用 reply 并引用 runbook 材料；要查系统或执行步骤的用 act。只是同事间讨论、已有人回答、或 runbook 没覆盖的，本答疑场景弃权；若无其他接话依据则 silent。" },
   "execution": { "instruction": "[团队答疑] 回答时以下面的 runbook 摘录为准，标明出处；摘录没覆盖的部分明确说没有依据，不要编。" },
   "context": { "provider": "runbook", "timeoutMs": 3000, "maxChars": 6000, "decisionChars": 2000 },
   "confirm": {

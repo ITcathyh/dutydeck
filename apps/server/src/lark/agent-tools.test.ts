@@ -268,9 +268,25 @@ describe('Agent group collaboration domain service', () => {
     expect(prompt.split("'/usr/bin/node' '/app/cli.js'")).toHaveLength(2);
     expect(prompt).toContain('group messages/message');
     expect(prompt).toContain('先看 dutydeck agent --help');
+    expect(prompt).toContain('这些 agent 子命令不用带 --turn。');
+    expect(prompt).not.toContain('本轮的操作都在');
     expect(prompt).toContain('group peers/members');
     expect(prompt.split('本轮最终答复直接输出')).toHaveLength(2);
     await expect(tools.promptForSession(session({ sourceId: 'cli_current:oc_p2p:p2p' }), '继续处理')).resolves.toContain('group send/send-file');
+  });
+
+  it.each(['deny-all', 'approve-reads', 'full-trust'] as const)('advertises background tools only with an explicit tool policy: %s', async permissionMode => {
+    const { tools } = await setup({ cli_current: fakeClient() });
+    const prompt = await tools.promptForSession(session({ sourceId: 'cli_current:oc_group:group:collaboration:mandate', permissionMode }), '冻结材料');
+    if (permissionMode === 'deny-all') expect(prompt).toBe('冻结材料');
+    else {
+      expect(prompt).toContain('先看 dutydeck agent --help');
+      expect(prompt).toContain('group messages/message');
+      expect(prompt).toContain('后台调度器负责投递');
+      expect(prompt).not.toContain('group send/send-file');
+    }
+    const interactive = await tools.promptForSession(session({ permissionMode }), '普通任务');
+    expect(interactive).toContain('group messages/message');
   });
 
   it('teaches memory tools to every Lark session, even when group collaboration is off', async () => {

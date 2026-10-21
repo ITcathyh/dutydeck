@@ -131,6 +131,12 @@ it('routes common settings commands and lists their risk and whitelist in help',
   const program = createCliProgram('test', { agent: vi.fn() });
   const root = program.commands.find(command => command.name() === 'agent')!;
   expect(root.helpInformation()).toContain('settings');
+  const quickstart: string[] = [];
+  root.configureOutput({ writeOut: text => { quickstart.push(text); } });
+  root.outputHelp();
+  expect(quickstart.join('')).toContain('dutydeck agent 提供下列飞书会话操作');
+  expect(quickstart.join('')).toContain('这些 agent 子命令不用带 --turn');
+  expect(quickstart.join('')).not.toContain('能用的全部操作');
   const settings = root.commands.find(command => command.name() === 'settings')!;
   const set = settings.commands.find(command => command.name() === 'set')!;
   const output: string[] = [];

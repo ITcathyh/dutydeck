@@ -44,7 +44,7 @@ import { PullRequestService } from './pull-requests.js';
 import { CiProviderRegistry } from './ci-providers.js';
 import { prepareSkillPrompt } from './skill-delivery.js';
 import { readTokenEfficiencyPolicy } from './token-efficiency.js';
-import { assemblePrompt, promptDigest, promptTemplateVersion } from './prompt-context.js';
+import { assemblePrompt, isFrozenCollaborationSession, promptDigest, promptTemplateVersion } from './prompt-context.js';
 import { createRelayAskStore } from './relay-ask-store.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGroupToolsSigningSecret } from './lark/agent-tools.js';
 import { larkMemoryScope, LarkMemoryStore } from './lark/memory.js';
@@ -434,7 +434,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     terminalBackend: () => terminalSettings.current(),
     driverIdleTimeoutMs: config.driverIdleTimeoutMs,
     cleanupIntervalMs: config.cleanupIntervalMs,
-    sessionEnvironment: session => ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id), ...herdr.environmentFor(session.id) }),
+    sessionEnvironment: session => ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id), ...herdr.environmentFor(session.id),
+      ...(session.protocol === 'pty-cli' && isFrozenCollaborationSession(session) ? { dutydeck_frozen_materials: 'true' } : {}) }),
     selectPromptPolicy: async session => {
       const parent = await workItems.parentForSession(session.id) ?? await delegations.parentForSession(session.id);
       if (parent?.parentTaskId) {
@@ -452,6 +453,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       : (session, prompt, skills, context) => prepareSkillPrompt(session.cwd, prompt, skills, context),
     sessionPrompt: async (session, prompt, context) => {
       const version = context?.promptPolicyVersion ?? 'legacy-v1';
+      if (isFrozenCollaborationSession(session)) {
+        const result = assemblePrompt(context?.promptParts ?? [{ kind: 'user_request', trustScope: 'user_request', content: prompt }], prompt, version);
+        if (context?.promptDiagnostics?.fallbackReason && !result.diagnostics.fallbackReason) result.diagnostics.fallbackReason = context.promptDiagnostics.fallbackReason;
+        return result;
+      }
       const toolsPrompt = await agentTools.promptForSession(session, prompt);
       const active = runtime.getActiveTaskContext(session.id);
       const resultTools = pluginHost?.resultTools.list({ botAppId: session.sourceId?.split(':')[0], cwd: session.cwd }) ?? [];

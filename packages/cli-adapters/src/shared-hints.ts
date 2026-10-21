@@ -39,6 +39,7 @@ export const DUTYDECK_SHELL_HINTS: readonly string[] = [
  */
 export function buildDutydeckRoutingBlock(locale?: string, env?: RelayPromptEnv): string {
   void locale;
+  if (env?.dutydeck_frozen_materials === 'true') return '';
   return [
     '<dutydeck_routing>',
     ...DUTYDECK_SHELL_HINTS.map(hint => `  ${hint}`),

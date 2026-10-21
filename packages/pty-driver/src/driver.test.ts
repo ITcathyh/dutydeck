@@ -58,6 +58,31 @@ describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  it.each([false, true])('keeps the first-turn session marker without routing tools for frozen material analysis; adapter context=%s', async adapterContext => {
+    const prompts: string[] = [];
+    const events: NormalizedDriverEvent[] = [];
+    const claude = createCliAdapter('claude-code');
+    const adapter: CliAdapter = { id: 'claude-code', capabilities: {}, buildArgs: context => [fixturePath, ...claude.buildArgs(context)],
+      ...(adapterContext ? { injectSessionContext: (context: Parameters<NonNullable<CliAdapter['injectSessionContext']>>[0]) => claude.injectSessionContext!(context) } : {}),
+      writeInput: (backend, prompt) => { prompts.push(prompt); backend.write(prompt + '\n'); }, completionPattern: /MOCK DONE/ };
+    const driver = new PtyCliDriver({ agent: { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'pty-cli',
+      cwd: dir, env: { dutydeck_frozen_materials: 'true', dutydeck_session_permission_mode: 'ask', dutydeck_relay_url: 'http://127.0.0.1:1', dutydeck_relay_token: 'fixture' },
+      permissionMode: 'deny-all', timeout: 600, capabilities: { pause: false, resume: false }, builtin: false },
+      adapter, backend: new PtyBackend(), onEvent: event => events.push(event), onExit: () => {}, sessionId: 'frozen-session' });
+    try {
+      await driver.start();
+      await waitFor('ready', () => events.some(event => event.type === 'raw_terminal' && String(event.data?.text).includes('MOCK READY')));
+      await driver.send('冻结材料任务');
+      await waitFor('completed', () => events.some(event => event.type === 'completed'));
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain('frozen-session');
+      expect(prompts[0]).toContain('冻结材料任务');
+      expect(prompts[0]).not.toContain('<dutydeck_routing>');
+      expect(prompts[0]).not.toContain('session send');
+      expect(prompts[0]).not.toContain('session ask');
+    } finally { await driver.stop(); }
+  }, 30_000);
+
   it('start 收 raw_terminal，每轮 send 恰好一次 completed，stop 触发生命周期回调', async () => {
     const events: NormalizedDriverEvent[] = [];
     let exitCode: number | null | undefined;

@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import type { PromptPart, PromptSourceDiagnostics } from '@dutydeck/shared';
+import { parseLarkSourceId, type PromptPart, type PromptSourceDiagnostics, type Session } from '@dutydeck/shared';
+
+export function isFrozenCollaborationSession(session: Pick<Session, 'source' | 'sourceId' | 'permissionMode'>): boolean {
+  const { appId, chatId, chatType, scope } = parseLarkSourceId(session.sourceId);
+  return session.source === 'lark' && session.permissionMode === 'deny-all' && chatType === 'group' && Boolean(appId && chatId) && scope[0] === 'collaboration';
+}
 
 export const promptDigest = (content: string) => createHash('sha256').update(content, 'utf8').digest('hex');
 export const promptTemplateVersion = (mode: 'legacy' | 'optimized'): 'legacy-v1' | 'optimized-v1' => mode === 'optimized' ? 'optimized-v1' : 'legacy-v1';

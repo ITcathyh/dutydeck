@@ -10,7 +10,7 @@ import { deciderMetaOf, validateScenarioPack, type CollaborationScenarioSnapshot
 import { LarkGroupParticipation, type GroupParticipationOptions } from './group-participation.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { StoredLarkConfig } from './config.js';
-import type { ParticipationResult } from './readonly-decider.js';
+import { participationPrompt, participationResponsePrompt, parseParticipationResponse, type ParticipationResult } from './readonly-decider.js';
 import { freezeScenario, modelScenarioExecution, modelScenarioInjection } from './scenario-model.js';
 import { builtinScenarioRegistry } from '../plugins/builtin-scenarios.test-helpers.js';
 import { ScenarioRegistry, scenarioPackDigest, type RegisteredScenarioPack } from '../plugins/scenario-registry.js';
@@ -74,6 +74,32 @@ async function harness(options: { participation?: 'selective' | 'eager' | 'obser
 }
 const scenarioOf = (decision: { inputSnapshot: unknown } | undefined) => (decision?.inputSnapshot as { scenario?: CollaborationScenarioSnapshot } | undefined)?.scenario;
 const triggerOf = (snapshot: CollaborationSnapshot, messageId: string) => snapshot.observations.find(item => item.messageId === messageId)!;
+
+describe('场景与角色的提示词边界', () => {
+  it.each([undefined, '订单服务故障排查'])('成功读取但没有 runbook 依据时，FAQ 仅自行弃权；roleScope=%s', async roleScope => {
+    const h = await harness({ config: { roleScope }, context: async () => ({ items: [], missing: [] }) });
+    await h.enableFaq();
+    await h.ask('om_scope', '订单服务错误率升高，谁能查一下');
+    expect(h.decide).toHaveBeenCalledOnce();
+    const snapshot = h.decide.mock.calls[0]![1];
+    expect(snapshot.scenario).toMatchObject({ status: 'used', context: { observations: [] } });
+    const trigger = triggerOf(snapshot, 'om_scope');
+    const prompt = participationPrompt(snapshot, trigger.id, 'Bot', undefined, h.config);
+    expect(prompt).toContain('角色负责范围与场景分别判断接话资格，任一成立就接');
+    expect(prompt).toContain('场景指引中的 silent 只表示该场景弃权');
+    expect(prompt).toContain('没有配置角色负责范围时，须符合场景指引才算范围内');
+    expect(prompt).toContain('本答疑场景弃权；若无其他接话依据则 silent');
+    expect(prompt).not.toContain('或 runbook 没覆盖的，silent');
+    if (roleScope) expect(prompt).toContain(`负责范围："${roleScope}"，以及本群启用的场景`);
+    else expect(prompt).toContain('负责范围：本群启用的场景');
+    const response = participationResponsePrompt(snapshot, { action: 'reply', reason: '已接受', evidenceIds: [trigger.id], updates: [] }, trigger.id, h.config);
+    expect(prompt).toContain('evidenceIds 可以引用其中的 id');
+    expect(response).not.toContain('evidenceIds 可以引用其中的 id');
+    expect(response).toContain('可以作为答复依据');
+    expect(parseParticipationResponse('{"response":"当前没有 runbook 依据"}')).toBe('当前没有 runbook 依据');
+    expect(() => parseParticipationResponse('{"response":"答复","evidenceIds":[]}')).toThrow();
+  });
+});
 
 describe('H1/H2：真人消息命中 model 包，按负责范围交给模型', () => {
   it('多机器人群没指定接话人：命中关键字的消息不再按 no_responder 沉默，而是带着冻结的指引和材料交给模型', async () => {

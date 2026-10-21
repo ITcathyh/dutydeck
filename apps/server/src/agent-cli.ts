@@ -32,8 +32,8 @@ const riskLabels: Record<Risk, string> = {
 };
 
 export const agentQuickstart = `QUICKSTART（给 Agent）
-  dutydeck agent 是你在 Dutydeck 飞书会话里能用的全部操作。先读这里，再用 dutydeck agent <命令> --help 看参数、风险和例子；帮助不需要服务或凭证。
-  例子里的 dutydeck 指本轮提示给出的完整命令前缀，原样使用，不要换成 PATH 里的 dutydeck。不用带 --turn：服务按本会话正在执行的这一轮认。
+  dutydeck agent 提供下列飞书会话操作。先读这里，再用 dutydeck agent <命令> --help 看参数、风险和例子；帮助不需要服务或凭证。
+  例子里的 dutydeck 指本轮提示给出的完整命令前缀，原样使用，不要换成 PATH 里的 dutydeck。这些 agent 子命令不用带 --turn：服务按本会话正在执行的这一轮认。
 
 风险分级（每个命令的 --help 都有一行 Risk）
   read           只读：直接返回数据，不发卡、不改东西。

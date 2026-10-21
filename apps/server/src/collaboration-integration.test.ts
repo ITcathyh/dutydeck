@@ -331,6 +331,8 @@ it.each(['ask', undefined] as const)('runs unattended %s delegations through rea
   expect(request.options.permissionMode).toBe('deny-all');
   expect(request.prompt).toContain('不调用工具');
   expect(request.prompt).toContain('不能声称');
+  expect(request.prompt).toContain('材料缺口影响结论或任务完成时，说明缺少什么、哪些目标未完成');
+  expect(request.prompt).not.toContain('缺失情况不写进产出');
 });
 
 it.each(['approve-reads', 'full-trust'] as const)('retains explicit %s background tool policy', async permissionMode => {
@@ -365,6 +367,7 @@ it('passes partial history coverage and omitted-context markers through the real
 
 it('uses real saved group bindings, runs one frozen background task and delivers its result once', async () => {
   const f = await fixture();
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, permissionMode: 'approve-reads' });
   expect((await f.groups.owner(scope.appId))?.activeGroups).toContain(f.group.binding!.id);
   expect(f.group.binding!.id).not.toBe(scope.chatId);
   expect(await f.collaboration.authorize(scope, 'ou_alice', 'execute')).toBe(true);
@@ -520,7 +523,10 @@ it('delivers each run as a card with pause, resume and stop that redraw the same
   const f = await fixture(); const { mandate } = await f.create(); f.advance(); await f.collaboration.scheduler.tick();
   await eventually(async () => f.calls.length === 1);
   expect(f.calls[0]!.prompt).toContain('最多 10 条');
-  expect(f.calls[0]!.prompt).toContain('不要写材料范围');
+  expect(f.calls[0]!.prompt).toContain('不例行罗列材料范围');
+  expect(f.calls[0]!.prompt).toContain('材料缺口影响结论或任务完成时，说明缺少什么、哪些目标未完成');
+  expect(f.calls[0]!.prompt).toContain('只有材料足以判断且');
+  expect(f.calls[0]!.prompt).toContain('确实没有新内容时，才回复一句');
   f.calls[0]!.finish('新增两条进展。');
   await eventually(async () => (await f.repos.tasks.listBySession(f.calls[0]!.sessionId)).every(task => !['queued', 'running'].includes(task.status)));
   await f.collaboration.scheduler.tick(); await f.collaboration.scheduler.tick();
