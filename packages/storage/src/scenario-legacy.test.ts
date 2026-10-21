@@ -67,7 +67,7 @@ describe('v38 collaboration_scenarios', () => {
     expect(columns.filter(name => name === 'scenarios_json')).toHaveLength(1);
     expect(columns).toContain('alarm_json');
     const applied = db.prepare('SELECT version, applied_at FROM schema_migrations ORDER BY version').all();
-    expect(applied.at(-1)).toMatchObject({ version: 39 });
+    expect(applied.at(-1)).toMatchObject({ version: 40 });
     db.close();
 
     createRepositories(path).close();
@@ -112,7 +112,7 @@ describe('v38 collaboration_scenarios', () => {
     expect(dutyRow(migrated, 'oc_no_requester').alarm_json).toBeNull();
     expect(dutyRow(migrated, 'oc_invalid')).toEqual({ alarm_json: invalid, scenarios_json: null });
     expect(dutyRow(migrated, 'oc_responder_only')).toEqual({ alarm_json: null, scenarios_json: null });
-    expect((migrated.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as { v: number }).v).toBe(39);
+    expect((migrated.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as { v: number }).v).toBe(40);
     migrated.close();
   });
 
@@ -131,7 +131,7 @@ describe('v38 collaboration_scenarios', () => {
 
     const migrated = new Database(path);
     expect(dutyRow(migrated, 'oc_valid')).toEqual({ alarm_json: null, scenarios_json: JSON.stringify({ alarm: binding }) });
-    expect(migrated.prepare('SELECT version FROM schema_migrations WHERE version >= 37 ORDER BY version').all()).toEqual([{ version: 37 }, { version: 38 }, { version: 39 }]);
+    expect(migrated.prepare('SELECT version FROM schema_migrations WHERE version >= 37 ORDER BY version').all()).toEqual([{ version: 37 }, { version: 38 }, { version: 39 }, { version: 40 }]);
     expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'collaboration_actions_delivery_window'").get()).toBeDefined();
     migrated.close();
   });

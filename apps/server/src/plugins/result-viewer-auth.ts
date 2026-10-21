@@ -35,12 +35,22 @@ export function registerPluginResultViewer(app:FastifyInstance,options:PluginRes
     // Public login shell; HEAD must neither issue cookies nor start a login.
     if (request.method==='HEAD') return reply.type('text/html').send('');
     const nonce=resultToken();
-    let secure=true;
-    try { const r=repo.get(request.params.deliveryId); if (r) secure=new URL(await options.identity.redirectUri(r.requester.tenant)).protocol==='https:'; } catch {}
+    let secure=true, oauthOrigin='';
+    try {
+      const row=repo.get(request.params.deliveryId);
+      if (row) {
+        const redirect=await options.identity.redirectUri(row.requester.tenant);
+        secure=new URL(redirect).protocol==='https:';
+        const authorization=new URL(await options.identity.authorize(row.requester.tenant,redirect,''));
+        if (['https:','http:'].includes(authorization.protocol)) oauthOrigin=` ${authorization.origin}`;
+      }
+    } catch {}
     reply.header('set-cookie',`dutydeck_result_nonce=${nonce}; Path=/api/plugin-results; Max-Age=300; HttpOnly; SameSite=Lax${secure?'; Secure':''}`);
     const id=encodeURIComponent(request.params.deliveryId).replace(/'/g,'%27');
     const scriptNonce=resultToken();
-    reply.header('content-security-policy',`default-src 'none'; script-src 'nonce-${scriptNonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`);
+    // Preserve Origin on the same-origin form POST, then suppress referrers at the OAuth redirect/callback.
+    reply.header('referrer-policy','same-origin');
+    reply.header('content-security-policy',`default-src 'none'; script-src 'nonce-${scriptNonce}'; connect-src 'self'; form-action 'self'${oauthOrigin}; base-uri 'none'; frame-ancestors 'none'`);
     return reply.type('text/html; charset=utf-8').send(`<!doctype html><html lang="zh"><meta charset="utf-8"><title>受控插件结果</title><body><h1>受控插件结果</h1><p>仅原请求者可通过飞书登录查看；结果 24 小时后过期。</p><form method="post" action="/api/plugin-results/${id}/auth/start"><input type="hidden" name="nonce" value="${nonce}"><button>使用飞书登录</button></form><ul id="files"></ul><script nonce="${scriptNonce}">fetch('/api/plugin-results/${id}').then(r=>r.ok?r.json():null).then(v=>{if(!v)return;for(const f of v.files){const li=document.createElement('li'),a=document.createElement('a');a.textContent=f.name+' ('+f.byteLength+' bytes)';a.href=f.url;li.append(a);document.getElementById('files').append(li);}}).catch(()=>{});</script></body></html>`);
   }));
   // Native browser forms use URL encoding; JSON clients must still prove Origin and nonce.
