@@ -1,0 +1,7 @@
+{
+  "name": "private-export",
+  "version": "1.0.0",
+  "description": "Export reports directly to the original requester's authenticated download",
+  "providers": "providers.mjs",
+  "userConfig": { "source_url": { "description": "Private report source HTTPS base URL", "sensitive": true } }
+}

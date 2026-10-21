@@ -1,3 +1,4 @@
+import { PluginResultToolRegistry } from './result-tools.js';
 import { mkdir } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { pluginHookEvents, scenarioProviderIdPattern, scenarioProviderRefs, type AgentConfig, type CiProvider, type PluginApi, type PluginHookEvent, type PluginTrigger, type ScenarioProvider } from '@dutydeck/shared';
@@ -47,6 +48,7 @@ export class PluginHost {
   readonly diagnostics: PluginDiagnostic[] = [];
   readonly active: ActivePlugin[] = [];
   readonly ciProviders = new CiProviderRegistry();
+  readonly resultTools = new PluginResultToolRegistry();
   /** 场景注册表总是存在，只有内置包时也一样。 */
   readonly scenarios = new ScenarioRegistry();
   commands = new PluginCommandRegistry([]);
@@ -100,6 +102,7 @@ export class PluginHost {
         }
         const dataDir = this.store.pluginDataDir(entry.name);
         const pluginRegistrations: HookRegistration[] = [];
+        const resultTools: import('@dutydeck/shared').PluginResultTool[] = [];
         const env = {
           DUTYDECK_PLUGIN_NAME: entry.name, DUTYDECK_PLUGIN_ROOT: plugin.root, DUTYDECK_PLUGIN_DATA: dataDir,
           ...Object.fromEntries(Object.entries(config).map(([key, value]) => [configEnvName(key), value]))
@@ -116,6 +119,7 @@ export class PluginHost {
           const api: PluginApi = {
             plugin: { name: entry.name, ...(plugin.manifest.version ? { version: plugin.manifest.version } : {}), root: plugin.root, dataDir },
             config: Object.freeze({ ...config }),
+            registerResultTool: tool => { if (registering) resultTools.push(tool); },
             registerCiProvider: provider => { if (registering) providers.push(provider); },
             registerHookHandler: (event: PluginHookEvent, handler, options) => {
               if (!registering) return;
@@ -146,12 +150,15 @@ export class PluginHost {
           const existing = this.ciProviders.list().find(item => item.provider.id === provider.id);
           if (existing) throw new Error(`CI 提供方 ${provider.id} 已由插件 ${existing.plugin} 注册`);
         }
+        const checkedResults = new PluginResultToolRegistry();
+        for (const tool of resultTools) checkedResults.register(entry.name, entry.scope, tool);
         const scenarios = this.resolveScenarios(entry.name, entry.scope, builtin, plugin, scenarioProviders, reservedScenarioIds);
         for (const provider of providers) this.ciProviders.register(entry.name, provider);
+        for (const tool of resultTools) this.resultTools.register(entry.name, entry.scope, tool);
         this.scenarios.add(scenarios);
         registrations.push(...pluginRegistrations);
         this.active.push({ entry, plugin, config: Object.freeze({ ...config }), builtin });
-        if (!builtin || plugin.commands.length || plugin.agents.length || plugin.skillsDir || plugin.triggers.size || pluginRegistrations.length || providers.length) this.needsWiring = true;
+        if (!builtin || plugin.commands.length || plugin.agents.length || plugin.skillsDir || plugin.triggers.size || pluginRegistrations.length || providers.length || resultTools.length) this.needsWiring = true;
       } catch (error) { this.fail(entry.name, error); }
     }
     this.commands = new PluginCommandRegistry(this.active.map(({ entry, plugin }) => ({ name: entry.name, scope: entry.scope, commands: plugin.commands })));

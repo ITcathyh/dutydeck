@@ -1,3 +1,4 @@
+import type { PluginResultTool } from './plugin-results.js';
 import safeRegex from 'safe-regex2';
 import { z } from 'zod';
 import type { ScenarioProvider } from './scenarios.js';
@@ -205,6 +206,7 @@ export interface PluginApi {
   /** userConfig 的当前取值，含 sensitive 值；未设置的键不出现。 */
   config: Readonly<Record<string, string>>;
   registerCiProvider(provider: CiProvider): void;
+  registerResultTool(tool: PluginResultTool): void;
   registerHookHandler(event: PluginHookEvent, handler: PluginHookHandler, options?: { timeout?: number; matcher?: string }): void;
   /** 本插件场景包里引用的 provider；只在信任确认之后加载时调用。 */
   registerScenarioProvider(provider: ScenarioProvider): void;

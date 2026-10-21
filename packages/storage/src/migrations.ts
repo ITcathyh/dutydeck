@@ -1,3 +1,4 @@
+import { createPluginResultSchema } from './plugin-results-migration.js';
 import { createMemoryConsumedTaskSchema, createMemoryJobSchema } from './memory-jobs.js';
 import { createWorkItemIndexSchema } from './work-item-index.js';
 import { createScheduleExecutionSchema } from './schedule-execution-migration.js'
@@ -618,7 +619,8 @@ export const migrations: Migration[] = [
     name: 'collaboration_scenarios',
     up: addCollaborationScenarios
   },
-  { version: 39, name: 'memory_consumed_tasks', up: createMemoryConsumedTaskSchema }
+  { version: 39, name: 'memory_consumed_tasks', up: createMemoryConsumedTaskSchema },
+  { version: 40, name: 'plugin_results', up: createPluginResultSchema }
 ]
 
 /** v38：collaboration_duties 加 scenarios_json 列，把旧的 alarm_json 转进去。 */

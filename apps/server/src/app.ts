@@ -1,3 +1,4 @@
+import { registerPluginResultRoutes, type PluginResultRoutes } from './plugins/result-routes.js';
 import { readLarkConfig } from './lark/config.js';
 import { createLarkSessionSourceResolver } from './lark/session-source.js';
 import type { AgentModelSettings } from './agent-model-settings.js';
@@ -71,6 +72,7 @@ export interface SessionExecutionPolicy {
 }
 
 export interface BuildAppOptions {
+  pluginResults?: PluginResultRoutes;
   agentModelSettings?: AgentModelSettings;
   terminalSettings?: TerminalSettings;
   recovery?: RecoveryRouteOptions;
@@ -122,7 +124,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   const sessionSource = createLarkSessionSourceResolver(options.lark ?? {});
   // 分享页的实时流只能把分享 token 放进查询串（EventSource 带不了请求头），请求日志里抹掉它。
   const app = Fastify({ rewriteUrl: rewriteSharedSessionProxyUrl, logger: process.env.NODE_ENV !== 'test' && { serializers: { req: (request: FastifyRequest) => ({
-    method: request.method, url: request.url.replace(/([?&]share=)[^&#]*/g, '$1[redacted]'), host: request.host, remoteAddress: request.ip, remotePort: request.socket?.remotePort
+    method: request.method, url: request.url.startsWith('/api/plugin-results/') ? '/api/plugin-results/[redacted]' : request.url.replace(/([?&]share=)[^&#]*/g, '$1[redacted]'), host: request.host, remoteAddress: request.ip, remotePort: request.socket?.remotePort
   }) } } });
   const streams = new Set<import('node:http').ServerResponse>();
   const requireSessionExecution = async (request: FastifyRequest, sessionId: string, boundary: 'session' | 'high_risk', action: PolicyAction) => {
@@ -164,6 +166,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         // 登录链接：GET（及自动生成的 HEAD）只回确认页，POST 才兑换；其余方法照常鉴权。
         || (pathname === '/api/auth/link' && (method === 'GET' || method === 'HEAD' || method === 'POST'))
         || pathname === '/api/auth/logout'
+        || (options.pluginResults !== undefined && pathname.startsWith('/api/plugin-results/'))
         || pathname.startsWith('/api/lark/agent-tools/')
         || isRelayCapabilityRequest(method, pathname)
         || pathname.startsWith('/api/hooks/')
@@ -171,6 +174,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         || userExempt?.(method, pathname) === true
     });
   }
+  if (options.pluginResults) registerPluginResultRoutes(app, options.pluginResults);
   registerRecoveryRoutes(app, runtime, options.recovery);
   registerWorkspaceGroupRoutes(app, options.workspaceGroups);
   registerSessionNameRoutes(app, runtime, options.sessionNames);

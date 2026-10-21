@@ -1,3 +1,4 @@
+import { registerPluginResultCli } from './plugins/result-cli.js';
 import { workbenchHelp, layeredWorkbenchHelp, collaborationHelp, groupToolsHelp, memoryToolsHelp, herdrHelp } from './agent-tool-help.js';
 import type { RecoveryCliOptions, RecoveryOperation } from './recovery-cli.js';
 import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
@@ -1154,6 +1155,7 @@ Examples:
   const daemon = program.command('daemon').description('Run the Dutydeck server in the background and manage it');
   addProcessCommands(daemon);
 
+  registerPluginResultCli(program);
   return program
     .addHelpText('after', `
 Getting started:

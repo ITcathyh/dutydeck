@@ -1,3 +1,7 @@
+import { PluginResultService, PluginResultError } from './plugins/result-service.js';
+import { PluginResultToolRegistry } from './plugins/result-tools.js';
+import { LarkPluginResultAdapter } from './lark/plugin-result-delivery.js';
+import { LarkPluginResultIdentity, type PluginResultIdentityOptions } from './lark/plugin-result-identity.js';
 import { AgentModelSettings } from './agent-model-settings.js';
 import { sessionUsageSnapshot } from './session-usage.js';
 import { HerdrBackend } from '@dutydeck/session-backends';
@@ -78,6 +82,7 @@ import { sessionHookContext } from './plugins/integration.js';
 import type { StoredLarkConfig } from './lark/config.js';
 
 export interface StartLocalServerOptions {
+  pluginResultIdentity?: PluginResultIdentityOptions;
   configureCollaborationExtensions?: (extensions: CollaborationExtensions) => void;
   env?: NodeJS.ProcessEnv;
   webRoot?: string;
@@ -448,7 +453,10 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     sessionPrompt: async (session, prompt, context) => {
       const version = context?.promptPolicyVersion ?? 'legacy-v1';
       const toolsPrompt = await agentTools.promptForSession(session, prompt);
-      const prefix = toolsPrompt.slice(0, toolsPrompt.length - prompt.length);
+      const active = runtime.getActiveTaskContext(session.id);
+      const resultTools = pluginHost?.resultTools.list({ botAppId: session.sourceId?.split(':')[0], cwd: session.cwd }) ?? [];
+      const resultPrompt = session.source === 'lark' && active?.actorId && active.attemptId && !isAutomatedTask(active.taskId) && resultTools.length ? `受控插件结果工具：只返回回执，正文仅原请求者登录下载。调用 dutydeck plugin-tool call <工具> --json '<参数>' --call-id <稳定调用ID> --turn ${capabilities.finalTurnToken(session.id, active.taskId, active.attemptId)}；重试保持 call-id。可用工具：${resultTools.map(t => `${t.id}：${t.description}`).join('；')}\n\n` : '';
+      const prefix = toolsPrompt.slice(0, toolsPrompt.length - prompt.length) + resultPrompt;
       // 飞书会话的工具块已经定义了 dutydeck 简写，Herdr 入口排在它后面并沿用简写。
       const herdrPrompt = session.terminalBackend === 'herdr' ? '你正在 Herdr 的真实主终端 pane 内运行；HERDR_* 由 Herdr 注入，使用 herdr pane current 核实自身上下文，可用 --current 管理本 pane。不要伪造身份或操作用户 default session。侧边任务可继续使用本会话的 dutydeck session herdr 专属入口。' : herdr.prompt(prefix ? 'dutydeck' : undefined);
       const legacyPrompt = `${prefix}${herdrPrompt ? `${herdrPrompt}\n\n` : ''}${prompt}`;
@@ -496,6 +504,21 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     process.stderr.write('[dutydeck] Session insight service disabled: INSIGHT_STARTUP_FAILED\n');
     insightService = undefined;
   }
+  const pluginResultIdentity = new LarkPluginResultIdentity(repos.config, options.pluginResultIdentity);
+  const pluginResultRegistry = pluginHost?.resultTools ?? new PluginResultToolRegistry();
+  const pluginResultAdapter = new LarkPluginResultAdapter({ repositories: repos, capabilities, runtime, groupManager,
+    identity: pluginResultIdentity, client: bot => createLarkCardService(env, workbenchHttp.fetch, bot),
+    authorizePolicy: () => legacyExecutionPolicy.authorize('group_tools', 'group_tools.send') });
+  const pluginResultService = new PluginResultService(repos.pluginResults, pluginResultRegistry, pluginResultAdapter);
+  let pluginResultSweep: Promise<void> | undefined;
+  let pluginResultTimer: ReturnType<typeof setInterval> | undefined;
+  const sweepPluginResults = () => pluginResultSweep ??= (async () => {
+    try { await pluginResultService.sweep(env.DUTYDECK_DISABLE_LARK_LISTENER === 'true' ? [] : env.DUTYDECK_BOT_APP_ID ? [env.DUTYDECK_BOT_APP_ID] : (await readLarkConfigs(repos.config)).filter(bot => bot.listening).map(bot => bot.appId)); }
+    catch { app?.log.warn({ code: 'RESULT_RECOVERY_FAILED' }, '受控结果恢复失败'); }
+    finally { pluginResultSweep = undefined; }
+  })();
+  const closePluginResults = async () => { if (pluginResultTimer) clearInterval(pluginResultTimer); await pluginResultSweep; };
+  setupCleanup.push(closePluginResults);
   const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, client: config => createLarkCardService(env, workbenchHttp.fetch, config), log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
   // CI 平台全部来自插件；没有 CI 插件时注册表为空，/ci 与 Web 提示「未安装 CI 插件」。
   const ciProviders = pluginHost?.ciProviders ?? new CiProviderRegistry();
@@ -587,6 +610,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         const results = await Promise.allSettled(operations.map(operation => Promise.resolve().then(operation)));
         errors.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason));
       };
+      await settle([closePluginResults]);
       await settle([() => workbench.close(), () => workbenchHttp.close(), () => workItems.close(), () => delegations.close(), () => automation.close(), () => ciWebhook?.close(), () => pullRequests.close()]);
       // Wake blocked asks before waiting for HTTP shutdown.
       await settle([() => relayBroker.close()]);
@@ -712,6 +736,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       agentRequests: { runtime, tools: agentTools, automation, automatedTask: isAutomatedTask, prepareDelivery: automationIntegration.prepareTaskDelivery, sendConfirmation: automationIntegration.sendScheduleRequest },
       // 与 coordinator 的记忆存储同一个 configs 仓库（listener 的 workflowStore 就是 repos.config）。
       memoryTools: { tools: agentTools, store: memoryStore, runtime },
+      pluginResults: { service: pluginResultService, viewer: { repository: repos.pluginResults, identity: pluginResultIdentity, authorize: async delivery => { if (!pluginResultRegistry.get(`${delivery.plugin}/${delivery.tool}`, { botAppId: delivery.requester.tenant, cwd: String(delivery.target.cwd ?? '') })) throw new PluginResultError('RESULT_TOOL_UNAVAILABLE'); await pluginResultAdapter.assertDeliveryAuthorized(delivery); } } },
       workItems: { service: workItems, interactions: workInteractions, authorize: async (request, sessionId, action) => {
         if (!await resolveInstallationPrincipal(request)) return false;
         const decision = await groupManager.authorizeSession(sessionId, action, true) ?? await foundationExecution.authorizeSessionId(sessionId, { boundary: 'session', action, request });
@@ -733,6 +758,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     });
     logDroppedAgents(app.log, droppedAgents);
     await app.listen(listenOptions(config));
+    pluginResultTimer = setInterval(() => { void sweepPluginResults(); }, 30_000);
+    pluginResultTimer.unref();
+    void sweepPluginResults();
     workItems.start();
     void delegations.start().catch(error => app?.log.warn({ error }, '分层协作规划恢复失败'));
     const tick = () => {

@@ -80,7 +80,15 @@
     "src/bot-credential-commands.ts",
     "dist/bot-credential-commands.js",
     "dist/bot-credential-commands.js.map",
-    "dist/bot-credential-commands.d.ts"
+    "dist/bot-credential-commands.d.ts",
+    "src/plugin-results.ts",
+    "dist/plugin-results.js",
+    "dist/plugin-results.js.map",
+    "dist/plugin-results.d.ts",
+    "src/plugin-results-migration.ts",
+    "dist/plugin-results-migration.js",
+    "dist/plugin-results-migration.js.map",
+    "dist/plugin-results-migration.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

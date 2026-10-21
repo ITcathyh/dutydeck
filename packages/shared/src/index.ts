@@ -1,3 +1,4 @@
+export * from './plugin-results.js';
 import { z } from 'zod';
 import {
   channelBotBrands,
@@ -478,6 +479,7 @@ export interface FoundationRepository {
 }
 
 export interface RepositoryBundle {
+  pluginResults: import('./plugin-results.js').PluginResultRepository;
   workItems: {
     listScheduledIds(): Promise<string[]>;
     listByParent(parentSessionId: string): Promise<Array<{ key: string; value: string }>>;

@@ -110,7 +110,11 @@
     "src/agent-command-approval.ts",
     "dist/agent-command-approval.js",
     "dist/agent-command-approval.js.map",
-    "dist/agent-command-approval.d.ts"
+    "dist/agent-command-approval.d.ts",
+    "src/plugin-results.ts",
+    "dist/plugin-results.js",
+    "dist/plugin-results.js.map",
+    "dist/plugin-results.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
