@@ -225,6 +225,22 @@ pnpm dev
 
 结果首次投递前记录时间；发送结果未知时，跨重启仍只在首次投递起一小时内自动重试。超过窗口后停止重发，需核查原话题和 Web 执行记录；已确认的送达回执仍可恢复。这不保证远端只执行一次。
 
+#### Agent 提前交付与自定义最终卡
+
+飞书当前轮的 Agent 可用 `dutydeck agent group send '完整答复' --final` 提前交付最终结果。默认 `--delivery publish` 发到本轮原回复位置；`--delivery reply-agent` 只向交接任务的机器人回传摘要，`--delivery both` 同时发布并回传。回传要求原消息来自可解析且仍在当前群内的机器人，宿主在发布前核对目标。首次提交后，正文、卡片、模式和目标固定，重试须保持一致；发布成功而回传失败时只补回传，完成或重启恢复不会另发一份已确认的结果。
+
+自定义卡片使用静态 Card 2.0 **body**，不包含 `schema`、`header` 或 `config`。例如 `/path/body.json`：
+
+```json
+{"elements":[{"tag":"markdown","content":"**结论**：已完成"},{"tag":"hr"}]}
+```
+
+```bash
+dutydeck agent group send '可检索摘要' --final --card-file /path/body.json --delivery both
+```
+
+摘要必填，但不必重复整张卡的数据。body 最多 28,000 字节，仅接受白名单内的静态文本、图片、布局和表格等组件；交互组件、回调、`element_id` 和脚本 URL 会被拒绝，具体样式仍由飞书校验。`reply-agent` 只接受摘要，不接受发布卡片。宿主继续管理状态、原回复位置、任务与轮次校验及完成收尾；平台拒收自定义 body 时不会替换成另一份结果。旧的 `dutydeck group send` 同样支持这些参数。命令需要当前会话的工具凭证和正在执行的一轮；省略 `--turn` 时解析当前轮，显式提供时必须匹配。
+
 ### 结果未知的任务
 
 重启、断线等情况下，一轮任务可能“不知道是否执行成功”。这时飞书原话题会收到一张提醒卡，有「重新执行 / 标为已完成 / 标为失败」三个按钮和「查看详情」链接。
@@ -291,6 +307,8 @@ pnpm dev
 分身只允许源会话第一条任务的发起人操作，沿用原会话的 Agent、模型和推理强度，权限按机器人当前设置执行。Claude Code 终端模式用 `--resume 编号 --fork-session`，Codex 终端模式用 `fork 编号` 复制已落盘的上下文；ACP、其他 Agent、换 Agent 或找不到已落盘上下文时，改用 `/new --handoff` 的最近结果、git 状态和备注交接。原生分身也附上 git 状态。Codex 显式使用相同共享目录时走交接，避免后续把复制出来的记录误认成源会话。独立 worktree 从已提交的代码开始，不含原会话未提交的改动；首条消息会说明。分身回执能跳转到新话题。整段私聊共用一个会话时不能开分身，请先把机器人设置中的私聊模式改成“每条消息一个话题”。
 
 > **提示**：`/new` 带选项时，选项和正文之间用 `--` 分隔，例如 `/new --workspace worktree --model "claude-sonnet-5-5" -- 修复单测`。
+
+裸 `/new` 确实结束独立 worktree 会话、且配置了有效 Web 地址时，结束回执提供「检查并清理 worktree」链接，打开旧会话的登录工作台和「工作目录」面板。仍需点击预览并确认清理；正在使用或有未提交改动时会拒绝。打开链接不执行清理，也不解散群聊。`/stop` 只停止任务，不提供此清理入口。
 
 #### 先出计划（`/plan`）
 
@@ -417,6 +435,9 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 - 支持新指令排队，也可以「立即中断」抢占。
 - 中断任务会取消这一轮的待回答提问，正在校验的提问也不会随后弹出；迟到回答会被拒绝。会话空闲时仍可正常提问。
 - 会话的交付面板里有「每轮改动」列表。
+- 原生后台子任务独立显示数量和生命周期；主回合结束但仍有后台任务时显示「主回合已结束 · 后台子任务运行中（N）」，不把晚到通知当作新回答。
+- 会话流会自动恢复静默断流；标签页进入后台 60 秒后释放连接，回到前台重新连接并校准事件、任务和会话状态。已观测到批量缓冲的连接不按静默判死；这些行为不需要新设置。
+- `/sessions/<会话 ID>?panel=workspace` 可直接打开既有工作目录面板，包括归档会话；沿用登录门禁，链接本身不触发清理预检或删除。
 - 飞书卡片打开的只读任务详情显示来源话题、来源群聊（私聊显示来源聊天）和最初发起人，可跳回已知话题或聊天；未记录的话题和缺失的历史来源记录会明确标注，名称读取失败时显示已有 ID。
 
 ### 2. 验证与返修
@@ -467,6 +488,8 @@ dutydeck schedule delete schedule_xxx --session ses_xxx
 「立即执行」可用于停用的计划，只跳过时间等待，仍检查执行条件与权限，不改变下一次定时；同一个幂等键始终返回原执行，脚本重试应复用 `--idempotency-key`。删除后停止后续触发并使尚未提交的任务失效，已提交的任务继续收尾，历史和结果保留。`history` 返回该计划最近 1000 条记录，按时间从新到旧排列；查询已删除计划的历史请指定 `--session`。`show --session` 可查看删除记录。用 `--input '<JSON>'` 或 `--file plan.json` 设置完整创建参数或更新补丁（含 `condition`、`dstPolicy`），`--expected-revision` 可拒绝并发修改。`--instance <id>`、`--url`、`--database` 的目标规则与 `dutydeck settings` 相同。创建新会话后若保存失败或响应丢失，CLI 会返回会话 ID；先用 `list --session <id>` 检查是否已经保存，确认不存在后再用该 `--session` 重试。
 
 后台任务沿用选定的权限姿态；`ask` 可能等待人工审批，需要无人值守时应显式选择适当权限。计划和执行记录保存在所属运行时的数据库中，每个数据库只允许一个运行时持有执行权；Web 与机器人实例通过实例切换访问各自的计划。
+
+周期任务达到用户设定的停止条件时，Agent 可用 `dutydeck agent schedule stop-self` 请求停用自身计划，不接受计划编号。仅限正在执行的宿主定时触发轮次，手动执行和一次性计划不可用。宿主在本轮成功且结果确认送达后，再核对原执行身份和计划是否仍是原版本，才停用并保留历史。任务失败、投递未知、权限撤销或用户修改过计划时不会因此停用。
 
 ### 6. 实验功能（草稿页）
 “群与权限”策略页、定时任务页的导入草稿、设置里的“迁移与高级草稿”目前只保存草稿，不会生效或执行，所以默认隐藏。在「设置与接入 → 实验功能」打开“显示实验功能”后才显示。开关只保存在当前浏览器。
@@ -541,6 +564,12 @@ TraeX 用完整终端画面区分忙碌与就绪，兼容独立一行的快捷�
 
 Codex 当前父轮明确启动的直接子任务若报告额度耗尽或请求限流，Web 和飞书进度记录会显示固定诊断，不展示上游错误原文。父任务继续；Dutydeck 不因该诊断自动重试或切换账号。这是有界的尽力观察，恢复前已启动的子任务不会补报；TraeX 尚未启用此诊断。
 
+Claude 的后台 Agent、Bash 和 Monitor 按原生任务 ID 单独计数。主轮已有明确回答、且 CLI 没有继续等待子任务时可以完成，后台任务继续运行；旧版 pending 计数和明确的 Waiting 画面仍等待合并结果。晚到通知保留原输入归属，不成为下一轮回答。重启会重建后台状态，非持久 Monitor 按 CLI 期限到期；`/clear` 后仅核对已知任务的停止通知。Claude 在已知项目 memory 目录成功执行 Write/Edit 后，最终结果保留同轮正文和后记；普通业务文件或 Bash 命令不触发此规则。
+
+Codex 明确报告模型容量已满、且本次没有业务工具或权限调用时，最多自动续跑两次，分别等待 30 秒和 90 秒，每次单独记录执行 attempt。停止或新输入取消尚未提交的续跑；每次提交重新检查原请求者的当前权限，重启保留等待时间和取消状态。提交或完成结果未知时不自动重放；429、额度、鉴权和普通服务端错误不属于模型容量错误。
+
+Codex 显示可识别的模型迁移菜单时，Dutydeck 只选 “Use existing model”，再等待输入框；选中行或菜单不明确时留给人工处理。终端采集 socket 支持较长或非 ASCII 的临时目录路径。
+
 #### 终端模式 Agent 与飞书审批
 
 - Claude Code / Seed / Relay 的终端模式支持飞书审批，`ask` 和 `approve-reads` 都可用，靠 PermissionRequest hook 实现。
@@ -587,7 +616,7 @@ CI 相关的令牌和 webhook 密钥**不再是环境变量**，见[插件](#plu
 
 ## 插件 <a id="plugins"></a>
 
-插件给 Dutydeck 加命令、Agent、skills、外部触发器、hook、CI 提供方和场景包。核心里没有任何平台专用代码，GitHub、Codebase 的 CI 能力和告警初筛都是插件。
+插件给 Dutydeck 加命令、Agent、skills、外部触发器、hook、CI 提供方、受控结果工具和场景包。核心里没有任何平台专用代码，GitHub、Codebase 的 CI 能力和告警初筛都是插件。
 
 ### 目录结构
 
@@ -709,6 +738,38 @@ curl -X POST http://127.0.0.1:4310/api/plugins/hello/triggers/ping \
   -H 'content-type: application/json' -H "x-dutydeck-token: $TOKEN" \
   -d '{"id":"1","message":"hi"}'
 ```
+
+### 受控插件结果
+
+可信 `providers` 插件可通过 `api.registerResultTool({ name, description, inputSchema, execute })` 注册导出工具：`inputSchema.parse(input)` 校验参数，`execute(input, { invocationId, requester, signal })` 返回 `Promise<{ files: Array<{ name: string, data: Uint8Array }> }>`。工具返回文件名与字节，不提供文件路径、接收人或模型可见正文。宿主保存字节并发固定查看回执，模型只收到 `deliveryId`、`status`、`fileCount`；`delivered` 仅表示通知送达，不表示下载成功或整轮任务完成。
+
+可选示例 [private-export](examples/plugins/private-export/README.md) 使用真实清单 `.dutydeck-plugin/plugin.json`，其 `providers` 指向 `providers.mjs`。从源码检出目录安装，私有数据源 `<source_url>/<reportId>` 返回报告字节：
+
+```bash
+dutydeck plugin install ./examples/plugins/private-export
+# 从 stdin 提供私有数据源 URL，不把报告正文放进 Agent 参数
+dutydeck plugin config private-export source_url --value-fd 0
+dutydeck restart
+```
+
+设置机器人的既有 `webBaseUrl` 为与机器人共享数据库的 HTTPS Web 地址，例如 `dutydeck settings bot set cli_xxx webBaseUrl=https://dutydeck.example`。在**同一个飞书/Lark 应用**启用网页登录，将 `<webBaseUrl>/api/plugin-results/oauth/callback` 加入 OAuth redirect allowlist。回调来自已保存配置，不使用请求 Host；没有新增设置键或面板。配置步骤参见[飞书官方网页登录流程](https://open.feishu.cn/solutions/detail/qrcode?lang=zh-CN)；用户 `open_id` [按应用隔离](https://open.feishu.cn/document/platform-overveiw/basic-concepts/user-identity-introduction/introduction)。
+
+Agent 必须处在可信真人发起的飞书当前任务中，使用本轮提示词提供的 turn（下例 `$TURN` 表示该值）：
+
+```bash
+dutydeck plugin-tool list --turn "$TURN"
+dutydeck plugin-tool call private-export/export-report --json '{"reportId":"weekly"}' --call-id weekly-export-1 --turn "$TURN"
+```
+
+同一次调用重试保持 call ID 和参数不变；缺少或过期 turn、同 ID 不同参数会被拒绝。定时或自动任务、机器人来源、Web 安装管理员及无法证明真人身份的请求不能导出。
+
+打开回执链接后，原请求者须在原机器人应用中以飞书账号登录；独立浏览器会话有效 30 分钟。安装管理员 token、普通 Web 登录、share token 和 Agent capability 不提供下载权限，转发链接也不授权其他人。每次下载复验原任务与原 actor 的当前权限；确认撤权、取消或中断时拒绝并删除结果字节。任务状态待核对时保持 pending，等待核对或过期，不重新执行未知调用。
+
+固定限制：每调用最多 8 文件、每文件 10 MiB、每调用 32 MiB；每请求者未过期结果 128 MiB、全局 1 GiB；每请求者同时执行 1 次、全局 4 次；执行超时 60 秒，迟到输出丢弃。结果 24 小时后立即不可访问，清理回收字节，保留小型幂等记录；过期调用不自动重跑。文件始终作为 `application/octet-stream` 附件下载，不内联 HTML/SVG。
+
+通知沿用原任务位置、相同 provider UUID 和持久确认回执。未确认发送仅在首次发送起一小时内重试，超出后显示 unknown 并停止重发；通知失败不重新执行插件。OAuth 只取本应用登录身份，不请求 `offline_access` 或业务资源 scope；access token 仅在后端短暂用于 `user_info`，不保存或刷新。
+
+此保证覆盖宿主受控 API 数据流。插件是同进程可信 JS，无法阻止恶意可信插件自行打印秘密或同一 OS UID 进程读取宿主文件。独立数据库的实例必须使用保存该结果的 Web 地址，不做跨实例代理。真实飞书 OAuth/redirect 配置与生产联通性在本次隔离验证中为 **unverified**，需部署者另行配置和验证。
 
 ### Hook 协议
 
@@ -983,7 +1044,7 @@ Dutydeck 发出 `POST`，带 `Authorization: Bearer <token>` 和 `Content-Type: 
 {"version":1,"app_id":"<连接配置中的 App ID>","handler_id":"buttons","event_type":"card.action.trigger","event":{"event_id":"<平台事件 ID>","operator":{},"context":{},"action":{}}}
 ```
 
-`event` 是完整的 SDK 事件，保留 event_id、operator、context、action、token 以及消息内容等原字段；示例仅展示部分字段。顶层 `app_id` 来自可信连接配置，`handler_id` 来自注册项。接收服务返回 HTTP 200 或 202，JSON 必须包含同一 `event_id` 和 `decision`：
+`event` 是完整的 SDK 事件，保留 event_id、operator、context、action、token 以及消息内容等原字段；示例仅展示部分字段。卡片回调会先统一平铺或 `{event,header}` 包装、对象或 JSON 字符串的 action value，以及无显式 value 时的 behavior value；表单结果统一放在 `action.value.form_value`。操作者和群/消息身份只取事件字段，不取 value 中的同名内容。顶层 `app_id` 来自可信连接配置，`handler_id` 来自注册项。接收服务返回 HTTP 200 或 202，JSON 必须包含同一 `event_id` 和 `decision`：
 
 ```json
 {"event_id":"<同一事件 ID>","decision":"continue"}
@@ -1026,15 +1087,15 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 
 ### 7. 给 Agent 用的命令行（`dutydeck agent`）
 
-飞书会话里的 Agent 用 `dutydeck agent` 做它能做的全部操作。每轮提示词只给命令前缀（绝对路径）、`先看 dutydeck agent --help` 和本轮能用的能力，不含凭证。
+飞书会话里的 Agent 用 `dutydeck agent` 做通用操作。通用提示词给命令前缀（绝对路径）、`先看 dutydeck agent --help` 和本轮能用的能力，不含凭证；受控插件导出另有 `plugin-tool` 入口和本轮 turn，见[受控插件结果](#受控插件结果)。
 
 - **工具审批**：在 `ask` / `approve-reads` 下，已注入工具凭证的会话使用本会话的精确命令前缀执行单条 `dutydeck agent …` 时，Claude Code / Seed / Relay 终端模式和 ACP 会自动放行工具审批，并记录原因。拼接、重定向、展开等 shell 语法仍照常审批；高风险拦截和写操作确认卡照旧。其他终端 CLI 不支持这项精确放行。
 - **帮助**：`dutydeck agent --help` 开头是写给 Agent 的快速说明；每个子命令的 `--help` 有一行 `Risk`（`read` 只读、`write-confirm` 发确认卡、`write` 直接生效）和例子。帮助不需要服务或凭证。
 - **输出**：stdout 只有一个 JSON。成功 `{"ok":true,"data":...}`；失败 `{"ok":false,"error":{"code","message","hint"?,"params"?:[{"name","reason"}]}}`，退出码非 0。`params` 指出哪个参数不对，能给可选值时写在 `reason` 里。
 - **查看**：`status`、`agents`、`tasks [--page]`、`queue`、`schedules`、`ci`，以及 `group`、`history`、`memory`、`work`、`collaborate` 的读取命令。结果直接交给 Agent，不在群里发卡；权限与这一轮的发起人在原话题自己发这条命令相同。
 - **写入**：`session new/resume/fork`、`retry`、`plan --task`、`schedule create/enable/disable`、`queue cancel/top`、`access grant/revoke --member`、`pr open`、`ci wait/fix/cancel`、`repair` 在这一轮的请求消息下发确认卡，点「确认」后与对应的斜杠命令走同一条路执行。`group send`、`memory add` 等照旧直接生效。写入命令都支持 `--dry-run`：只返回将要做什么、要不要确认、确认卡上写什么，不执行、不发卡。
-- **不用带 `--turn`**：按本会话正在执行的这一轮认，没有执行中的一轮时拒绝；带了照旧校验。`group send --final`、`group handoff`、`group reply-agent` 同样。
-- **旧命令**：`dutydeck group/history/memory/work/collaborate/command`、`dutydeck schedule request` 保留不变，升级前已经在跑的会话照常可用；新的提示词只给 `dutydeck agent`。
+- **不用带 `--turn`**：`dutydeck agent` 按本会话正在执行的这一轮认，没有执行中的一轮时拒绝；带了照旧校验。`group send --final`、`group handoff`、`group reply-agent` 同样。独立的受控导出入口 `dutydeck plugin-tool` 必须显式提供本轮 turn，见[受控插件结果](#受控插件结果)。
+- **旧命令**：`dutydeck group/history/memory/work/collaborate/command`、`dutydeck schedule request` 保留，升级前已经在跑的会话照常可用；新的通用操作提示词使用 `dutydeck agent`。
 
 ---
 

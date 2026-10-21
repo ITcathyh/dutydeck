@@ -36,6 +36,14 @@ Dutydeck 源码中包含或派生自以下第三方开源项目的代码与资�
 
   原生终态、TraeX 分段与 canonical 适配另参考 `bf6507dd4`、`0f332b75a`、`20e5f32cf`、`9308dbc90`；上述既有 transcript 派生范围继续适用。终端就绪与提交语义修复参考 `3c5371bef90a1f52633c2d632760ed01c171c28b`、`69ed3c2dde5ce8714ff529f4de50da68d943fead`、`0623210c2bdc9b5bb351bd9f1334925c0ec8099c`、`0064e4e6a`，没有复制官方 Codex/Cursor 发行源码。问答、图片提取、投递保护、timer、模型探测和子任务诊断修复按 Dutydeck 现有接口独立实现，相关上游设计参考不表示复制其全部实现。
 
+  2026-10-21 新增的实际派生、复制材料与设计参考：
+
+  - `packages/pty-driver/src/fixtures/claude-background-tasks/{before-clear,after-clear}.jsonl`：从 commit `f894190935bc994ef46ff8c03c4eefc613cd27e8` 的 `test/fixtures/claude-background-tasks/` 原样复制两份已脱敏原生 JSONL 样本；样本中的命令不执行，按下列 MIT 许可使用。后台生命周期解析参考该提交的 `src/services/claude-transcript.ts` 所用结构化启动、通知、Monitor 与 TaskStop 约定，按 Dutydeck 数据流独立实现。
+  - `apps/web/src/sse.ts`：心跳节奏判定、旧连接所有权隔离与后台挂起设计参考并适配自 commit `6f7182642d271991ceb3f84b8389d90ed1c7e03e` 的 `src/dashboard/web/store.ts`，按下列 MIT 许可使用。保留 Dutydeck 的 EventSource 退避、sequence 游标、分页恢复和查询校准，并增加零/一心跳启动门限与完整销毁；新增测试独立编写，未复制上游 fixture。
+  - `packages/session-backends/src/program-status-relay.ts`：在既有派生中继上应用 commit `d7c65f0d6` 的提前初始化 stderr 修复，按下列 MIT 许可使用。
+  - Claude memory 正文保留行为参考 `1d7dbbfe3`，socket 字节预算与失败清理参考 `ad545ca54`，Codex 容量判别参考 `bbd4b3a23` 的 `src/services/codex-transcript.ts`，模型迁移菜单判定参考 `b1fc8a2b3` 的 `src/utils/codex-model-migration-dialog.ts`。这些实现按 Dutydeck 现有接口独立编写，未复制上游宽泛正文提取、重试调度器或 worker 状态机。菜单测试文字转录自该工具记载的 Codex 0.162.1 原生画面样例（`Meet GPT-6 Sol`、两项模型选项和确认页脚），不是本次真实 Codex 运行采集或复制的上游 fixture 文件。
+  - 受控插件结果的产品协议参考 `67e9ac6f3`、`dd97eeac6`，OAuth 字段链另参考 Botmux `src/utils/user-token.ts`。工具注册、SQLite 结果存储、独立 viewer session 与 CLI 按 Dutydeck 既有机制独立实现，未复制上游 MCP/stdio envelope、sandbox、业务 scope 集合或 token 持久化/刷新实现。`examples/plugins/private-export/` 和 `tests/fixtures/private-export-agent.mjs` 是本次构造的合成示例与测试，未复制上游业务数据或凭据。
+
 - **版权与许可证全文**:
 
 ```

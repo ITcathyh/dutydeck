@@ -153,6 +153,20 @@ Progress and result writes recheck task and turn ownership after rate-limit wait
 
 The first result delivery time is saved before sending. Unknown deliveries are automatically retried only within one hour of that first attempt, including across restarts. After that, resending stops; check the original topic and the Web execution record. Confirmed receipts remain recoverable. This does not guarantee exactly-once remote effects.
 
+**Early final delivery and custom cards.** An Agent in the active Lark turn can use `dutydeck agent group send 'complete answer' --final`. Default `--delivery publish` sends to the original reply location. `--delivery reply-agent` only relays the summary to the bot that handed over the task; `--delivery both` publishes and relays. Relay requires a resolvable original bot still in the group, checked before publication. Content, card, mode and targets are fixed on first submission; retries must match. If publication succeeded but relay failed, only relay is retried; completion and restart recovery do not send another confirmed result.
+
+A custom card is a static Card 2.0 **body**, without `schema`, `header` or `config`. For example, `/path/body.json`:
+
+```json
+{"elements":[{"tag":"markdown","content":"**Result**: complete"},{"tag":"hr"}]}
+```
+
+```bash
+dutydeck agent group send 'searchable summary' --final --card-file /path/body.json --delivery both
+```
+
+The summary is required but need not repeat all card data. Bodies are limited to 28,000 bytes and allowlisted static text, images, layouts and tables; interactive components, callbacks, `element_id` and script URLs are rejected. Lark still validates specific styles. Relay-only mode accepts a summary without a publication card. The host retains status, original routing, task/turn checks and completion handling; a rejected custom body is not replaced with another result. Legacy `dutydeck group send` supports the same options. These commands require session tool credentials and an active turn; omitting `--turn` resolves the current turn, while an explicit value must match.
+
 **Unknown outcomes.** After a restart or disconnect a turn may have an unknown result. The original Lark topic gets a card with "Run again / Mark done / Mark failed" and a details link. The initiator and admins can act; "Run again" needs a second click within 60 seconds. The Web session page has the same three actions. Who did what and when is shown on the card and recorded in the execution ledger. Tasks older than 24 hours get no Lark card and can only be handled on the Web. API: `GET /api/sessions/:id/unknown-tasks`, `POST /api/sessions/:id/unknown-tasks/:taskId` with `{target, action, allowDuplicateEffects?}`.
 
 **Notification tiers** (bot settings, effective only when the group-card @ switch is on):
@@ -199,6 +213,8 @@ Matches `/help` (6 per page by default; plugin commands are listed on the last p
 You can also ask the Agent in plain language. It uses `dutydeck agent session resume [--id ID]` or `dutydeck agent session fork [--task TASK]`, then posts a confirmation card before making changes. Failed restoration explains the reason and suggests `/new --handoff`. When restoring a task that has not yet started, launch options are re-checked against the requester's current permissions before creating the session.
 
 Only the requester of the source conversation’s first task can fork it. The fork inherits the actual Agent, model and reasoning effort; permissions follow the bot’s current settings. Claude Code terminal mode copies durable context with `--resume ID --fork-session`; Codex terminal mode uses `fork ID`. ACP, other Agents, switching Agents, or a source without durable context use the existing handoff of recent results, git status and a note. Native forks include git status as well. Codex uses handoff when explicitly sharing the same directory, so copied records cannot be mistaken for the source later. A worktree starts from committed code and excludes the original conversation’s uncommitted edits; the first message says so. The receipt links to the new topic. A private chat that shares one conversation cannot fork; first switch its bot setting to one topic per message.
+
+When bare `/new` actually ends a worktree session and a valid Web address is configured, its receipt links to that old session's authenticated workbench with the workspace panel open. Preview and explicit cleanup confirmation are still required; busy or dirty worktrees are refused. Opening the link does not clean the directory or dissolve the group. `/stop` only stops the task and does not add this cleanup link.
 
 **Plan first (`/plan <task>`).** The agent only investigates and produces a plan. On the card you can approve (runs in the same session with the bot's normal permission mode), request changes (on the card or by quoting it), or cancel. During planning, Dutydeck blocks tool calls that write files or run commands, plus common write commands in the shell. It is not a sandbox and cannot stop a deliberately crafted shell command, so don't have the agent read untrusted content while planning. Supported for Claude ACP and Claude terminal mode; other agents (e.g. codex) say they cannot plan first; terminal sessions that predate the feature need `/new`. Approve/revise/cancel need the same permission as interrupting a task (initiator or admin). Reminder after 30 minutes, closed after 24 hours; a newer task invalidates an old plan card. The Web composer has a "plan first" switch and an "execution plan awaiting approval" panel (Lark-initiated plans are read-only there).
 
@@ -256,6 +272,9 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 - **Task board**: Awaiting action / In progress / Completed / Archived; queueing and interrupt. **Terminal playback exists only for terminal-mode (`pty-cli`) agents**, 5000 lines at most. The delivery panel lists per-turn changes. The current task title and summary use loaded execution records and are not overwritten by a lagging task-list refresh; a late send acknowledgment does not overwrite loaded completion results. Selecting the current task again preserves unsent input. Directory, Agent and other configuration controls, along with close and cancel controls, are disabled while task creation or scheduled-task preparation is submitting. Refreshing the Agent list keeps closing disabled. After creation fails, configuration can be changed before retrying; if the first instruction fails to send, retrying reuses the created session.
 - **Read-only task details from Lark cards** show the source topic, group or private chat, and original initiator, with links back to known topics or chats. Unrecorded topics and missing historical origin records are marked explicitly; unavailable names fall back to known IDs.
 - Interrupting a task cancels its pending questions, including requests still being validated, and rejects late answers. Idle sessions can still ask questions normally.
+- **Native background tasks** show their count and lifecycle separately. When the main round has ended, the status says so while background tasks continue; late notices are not new answers.
+- **Session streams** recover from silent stalls. A background tab releases its connection after 60 seconds; returning to the foreground reconnects and reconciles events, tasks and sessions. Observed buffered streams are exempt from silence detection. No new setting is needed.
+- `/sessions/<session ID>?panel=workspace` opens the existing workspace panel, including archived sessions, through the usual login gate. Opening it does not preview or execute cleanup.
 - **Verification**: Lark tasks only, after a command is configured. Result states: passed, failed, expired, not verified.
 - **View changes on the phone**: the result-card link is valid for 14 days and shows only that turn. Only turns in a git repo run through the runtime are recorded. When a regular file and a symlink are swapped, the diff remains associated with the correct file. With too many un-ignored untracked files (over 20 MiB each, 50 MiB total, or 2000 files) no diff is recorded and the log says why, so add large files and build dirs to `.gitignore`. Line comments: signed-in Web users send them straight to the agent; people with only the share link create a confirmation card in the Lark topic, and someone with permission must tap "Hand to agent". Comment drafts added or edited during submission are kept. `dutydeck auth share-key rotate` invalidates all issued links.
 - **Session insight analyzer**: built into the npm package and built automatically with the server. It runs locally in an isolated child process using Dutydeck's current Node.js runtime; no Go compiler, external analyzer binary, or separate engine build is required. Source development uses the workspace's `tsx` loader. Metrics now use version `v2`: old snapshots remain readable, and different metric versions are excluded from shared deltas and group totals; reanalyze to align versions. A native user input for Codex is counted only once; inherited history from forks is excluded from independent session totals; and amounts and timestamps for priced entries are preserved in insights and exports. Refreshing generates a corrected snapshot while existing snapshots remain unchanged. Insight refresh does not change task usage or billing records.
@@ -284,6 +303,8 @@ dutydeck schedule delete schedule_xxx --session ses_xxx
 Run now also works while paused. It bypasses the clock, keeps conditions and permissions, and leaves the next scheduled time unchanged. Reuse `--idempotency-key` when retrying a manual request: the same key returns the original execution. Deletion prevents future triggers and invalidates work not yet submitted; submitted tasks finish, and their history/results remain available. `history` returns the latest 1000 occurrences of that plan, newest first; specify `--session` for deleted plan history. `show --session` reads its retained definition. CLI output is JSON. Use `--input '<JSON>'` or `--file plan.json` for complete create input or an update patch (including `condition` and `dstPolicy`), and `--expected-revision` to reject concurrent edits. Runtime targeting with `--instance`, `--url` and `--database` follows `dutydeck settings`. If saving fails or its response is lost after a new session is created, the CLI reports its ID. Inspect `list --session <id>` first, then retry with that `--session` only if the schedule is absent.
 
 Scheduled tasks keep the selected permission posture; `ask` can wait for human approval, so choose permissions explicitly for unattended work. Each runtime database owns its schedules and execution history and permits one runtime executor. Switch instances to reach the Web or bot runtime that owns the task.
+
+After reaching the user's stopping condition, a recurring task can request disabling its own schedule with `dutydeck agent schedule stop-self`. No schedule ID is accepted. Only the active host-triggered scheduled occurrence qualifies; manual runs and one-off schedules cannot use it. The host waits for successful execution and confirmed result delivery, then rechecks the original actor and that the schedule is still the same version before disabling it and retaining history. Failure, unknown delivery, revoked permission or a user edit prevents self-disabling.
 
 ---
 
@@ -324,6 +345,12 @@ TraeX uses the full terminal viewport to distinguish busy and ready states, incl
 
 When a direct child explicitly started by the current Codex parent turn reports quota exhaustion or rate limiting, Web and Lark progress records show a fixed diagnostic without the upstream error body. The parent continues; Dutydeck does not automatically retry or switch accounts because of this diagnostic. Observation is bounded and best effort; children started before recovery are not reported retroactively. This diagnostic is not enabled for TraeX.
 
+Claude background Agent, Bash and Monitor tasks are counted by native task ID. The main turn may complete after an explicit answer when the CLI is no longer waiting for a child result; background tasks continue. Legacy pending counters and an explicit Waiting screen retain wait-and-merge behavior. Late notices keep their original input identity instead of becoming the next turn's answer. Restart rebuilds background state; non-persistent Monitors expire at the CLI deadline, and `/clear` only reconciles stop notices for known tasks. Successful Write/Edit operations in the known project memory directory preserve the same-turn answer and postscript in the final result; business files and Bash commands do not trigger this rule.
+
+An exact Codex model-capacity failure without a business tool or permission call can retry automatically at most twice, after 30 and 90 seconds, each with a separate recorded execution attempt. Stop and new input cancel unsubmitted retries. Each submission rechecks the original requester's current permissions; restart retains deadlines and cancellation state. Unknown submission or completion is never automatically replayed. HTTP 429, quota, authentication and generic server errors are excluded.
+
+For a recognized Codex model-migration menu, Dutydeck selects only “Use existing model” and waits for the composer again. An unclear highlighted row or menu remains for manual handling. Terminal capture sockets support long and non-ASCII temporary-directory paths.
+
 ### 2. Permission modes
 
 Lark bots can use `ask`, `approve-reads` and `full-trust`. `deny-all` is not available for Lark bots.
@@ -359,7 +386,7 @@ CI tokens and webhook secrets are **no longer environment variables**; see Plugi
 
 ## Plugins <a id="plugins"></a>
 
-A plugin adds commands, agents, skills, external triggers, hooks, CI providers and scenario packs. The core has no platform-specific code; GitHub and Codebase CI support and alert triage are plugins.
+A plugin adds commands, agents, skills, external triggers, hooks, CI providers, controlled result tools and scenario packs. The core has no platform-specific code; GitHub and Codebase CI support and alert triage are plugins.
 
 ```text
 my-plugin/
@@ -398,7 +425,41 @@ dutydeck plugin update [name] [--yes] | enable <name> | disable <name> | uninsta
 
 Sources: a local directory, `git+https://…`, `git@…`, `file://…` (`#ref` pins a branch, tag or commit; git sources are pinned by SHA), or `npm:name@version`. Changes take effect after `dutydeck restart`. When multiple processes modify different plugins concurrently, each successful change is preserved. Each `plugin update` from a local directory copies it again and reports an update with a restart reminder, even if its version is unchanged. Data lives under `plugins/` next to the database (`plugins.lock.json`, installed copies, `.data/<name>/`, 0600 `.trigger-tokens.json` and `.config.json`).
 
-**Triggers.** `POST /api/plugins/<plugin>/triggers/<id>`, no Web login, authenticated by the trigger's own `token` header or `hmac-sha256` of the raw body. Responses: `202 {sessionId, taskId}`, `200 {duplicate:true}`, `400` not JSON, `401` bad token/signature, `404` unknown trigger or disabled plugin, `413` body over 1 MiB, `429` over `maxConcurrent` (default 4, 1 to 32), `502` delivery failed (the dedupe record is revoked, so retry). Dedupe lasts 24 hours and survives restarts. Template values in the prompt are wrapped as untrusted data; templates cannot read auth headers, `authorization` or `cookie`. See `examples/plugins/hello`:
+### Controlled plugin results
+
+A trusted `providers` plugin registers exports through `api.registerResultTool({ name, description, inputSchema, execute })`. `inputSchema.parse(input)` validates arguments; `execute(input, { invocationId, requester, signal })` returns `Promise<{ files: Array<{ name: string, data: Uint8Array }> }>`. Tools return names and bytes without filesystem paths, recipients or a model-visible body. The host stores bytes and sends a fixed viewing notice. The model receives only `deliveryId`, `status` and `fileCount`; `delivered` confirms the notice, not a download or overall task completion.
+
+The opt-in [private-export example](examples/plugins/private-export/README.md) uses `.dutydeck-plugin/plugin.json`, with `providers` pointing to `providers.mjs`. Install from a source checkout; the private endpoint `<source_url>/<reportId>` supplies report bytes:
+
+```bash
+dutydeck plugin install ./examples/plugins/private-export
+# Supply the private source URL on stdin; report bodies stay out of Agent arguments
+dutydeck plugin config private-export source_url --value-fd 0
+dutydeck restart
+```
+
+Set the bot's existing `webBaseUrl` to the HTTPS Web instance sharing its database, for example `dutydeck settings bot set cli_xxx webBaseUrl=https://dutydeck.example`. Enable web login in the **same Feishu/Lark application** and allow exactly `<webBaseUrl>/api/plugin-results/oauth/callback` as an OAuth redirect. The callback comes from saved configuration, not the request Host. No settings key or panel is added. See the [official web-login setup](https://open.feishu.cn/solutions/detail/qrcode?lang=zh-CN); user `open_id` is [scoped to each application](https://open.feishu.cn/document/platform-overveiw/basic-concepts/user-identity-introduction/introduction).
+
+Within an active human Lark request, use the current prompt's mandatory turn (`$TURN` represents that value):
+
+```bash
+dutydeck plugin-tool list --turn "$TURN"
+dutydeck plugin-tool call private-export/export-report --json '{"reportId":"weekly"}' --call-id weekly-export-1 --turn "$TURN"
+```
+
+Retries keep the same call ID and arguments. Missing or stale turns and the same ID with different arguments are rejected. Scheduled, automated, bot-originated, Web installation-admin and unverified-human requests cannot export.
+
+The original requester must sign in through the original bot application to open the receipt. A separate browser session lasts 30 minutes. Installation tokens, ordinary Web login, share tokens and Agent capabilities grant no download access; forwarding the URL does not authorize another person. Every download rechecks the original task and actor's current permissions. Confirmed revocation, cancellation or interruption denies access and deletes result bytes. Unresolved task state stays pending until reconciliation or expiry; unknown execution is not repeated.
+
+Fixed limits: 8 files/call, 10 MiB/file, 32 MiB/call; 128 MiB of unexpired results/requester and 1 GiB globally; 1 concurrent execution/requester and 4 globally; 60-second execution timeout with late output discarded. Results become unavailable after 24 hours; cleanup deletes bytes but retains small idempotency records. Expired calls are not rerun automatically. Files always download as `application/octet-stream` attachments, never inline HTML/SVG.
+
+Notices use the original task location, the same provider UUID and durable confirmed receipts. Unconfirmed sends retry only within one hour of the first attempt, then remain unknown without resending. Notice failure never reruns the plugin. OAuth requests only the application's login identity, without `offline_access` or business-resource scopes. Access tokens are used briefly in the backend for `user_info`, never persisted or refreshed.
+
+These guarantees cover the controlled host API path. Trusted plugins run as in-process JavaScript; this cannot prevent a malicious trusted plugin printing secrets or another process with the same OS UID reading host files. Instances with separate databases must use the Web address holding the result; there is no cross-instance proxy. Real Feishu OAuth/redirect configuration and production connectivity are **unverified** by this isolated validation and require operator setup and verification.
+
+### External triggers
+
+`POST /api/plugins/<plugin>/triggers/<id>`, no Web login, authenticated by the trigger's own `token` header or `hmac-sha256` of the raw body. Responses: `202 {sessionId, taskId}`, `200 {duplicate:true}`, `400` not JSON, `401` bad token/signature, `404` unknown trigger or disabled plugin, `413` body over 1 MiB, `429` over `maxConcurrent` (default 4, 1 to 32), `502` delivery failed (the dedupe record is revoked, so retry). Dedupe lasts 24 hours and survives restarts. Template values in the prompt are wrapped as untrusted data; templates cannot read auth headers, `authorization` or `cookie`. See `examples/plugins/hello`:
 
 ```bash
 dutydeck plugin install examples/plugins/hello --yes
@@ -533,7 +594,7 @@ Dutydeck sends a `POST` with `Authorization: Bearer <token>` and `Content-Type: 
 {"version":1,"app_id":"<trusted connection App ID>","handler_id":"buttons","event_type":"card.action.trigger","event":{"event_id":"<platform event ID>","operator":{},"context":{},"action":{}}}
 ```
 
-`event` preserves the complete SDK event, including event_id, operator, context, action, token, and message content; the example shows only selected fields. Top-level `app_id` comes from the trusted connection configuration, and `handler_id` comes from the registration. Receivers return HTTP 200 or 202 with the same `event_id` and an explicit `decision`:
+`event` preserves the complete SDK event, including event_id, operator, context, action, token, and message content; the example shows only selected fields. Card callbacks first normalize flat or `{event,header}` envelopes, object or JSON-string action values, and behavior values when explicit value is absent. Form results appear in `action.value.form_value`. Operator and chat/message identity come only from event fields, never similarly named fields inside value. Top-level `app_id` comes from the trusted connection configuration, and `handler_id` comes from the registration. Receivers return HTTP 200 or 202 with the same `event_id` and an explicit `decision`:
 
 ```json
 {"event_id":"<same event ID>","decision":"continue"}
@@ -566,15 +627,15 @@ Old clients ignore the additional decision field. Corrupt legacy forwarding stil
 
 ### Agent CLI (`dutydeck agent`)
 
-Agents in Lark sessions do everything they can do through `dutydeck agent`. Each turn's prompt only gives the command prefix (absolute path), "read `dutydeck agent --help` first" and what is available this turn; it carries no credentials.
+Agents in Lark sessions use `dutydeck agent` for general operations. The general prompt gives the command prefix (absolute path), "read `dutydeck agent --help` first" and what is available this turn, without credentials. Controlled exports have a separate `plugin-tool` entry and current turn; see [Controlled plugin results](#controlled-plugin-results).
 
 - **Tool approval**: In `ask` / `approve-reads`, sessions with injected tool credentials automatically approve a single `dutydeck agent …` command using the exact session command prefix, in Claude Code / Seed / Relay terminal mode and ACP. The approval reason is recorded. Shell chaining, redirection and expansions still require approval; high-risk guards and write confirmation cards remain in effect. Other terminal CLIs do not support this exact approval.
 - **Help**: `dutydeck agent --help` starts with a quick guide for the Agent; every subcommand's `--help` has a `Risk` line (`read`, `write-confirm` posts a confirm card, `write` takes effect at once) and examples. Help needs no service or credentials.
 - **Output**: stdout carries exactly one JSON. Success is `{"ok":true,"data":...}`; failure is `{"ok":false,"error":{"code","message","hint"?,"params"?:[{"name","reason"}]}}` with a non-zero exit code. `params` names the wrong parameter, with allowed values in `reason` when there are any.
 - **Read**: `status`, `agents`, `tasks [--page]`, `queue`, `schedules`, `ci`, plus the read commands under `group`, `history`, `memory`, `work` and `collaborate`. Results go back to the Agent without posting a card; permissions are the same as the turn's requester sending that command in the original topic.
 - **Write**: `session new/resume/fork`, `retry`, `plan --task`, `schedule create/enable/disable`, `queue cancel/top`, `access grant/revoke --member`, `pr open`, `ci wait/fix/cancel` and `repair` post a confirm card under the turn's request message; after 确认 they run the same way as the matching slash command. `group send`, `memory add` and the like still take effect directly. Every write command accepts `--dry-run`, which returns what would happen, whether it needs confirmation and what the card says, without running anything or posting a card.
-- **No `--turn` needed**: the service uses the turn currently running in the session and refuses when none is; a given `--turn` is still checked. The same holds for `group send --final`, `group handoff` and `group reply-agent`.
-- **Old commands**: `dutydeck group/history/memory/work/collaborate/command` and `dutydeck schedule request` are kept unchanged, so sessions started before the upgrade keep working; new prompts only mention `dutydeck agent`.
+- **No `--turn` needed**: `dutydeck agent` uses the turn currently running in the session and refuses when none is; a given `--turn` is still checked. The same holds for `group send --final`, `group handoff` and `group reply-agent`. The separate `dutydeck plugin-tool` export entry requires an explicit current turn; see [Controlled plugin results](#controlled-plugin-results).
+- **Old commands**: `dutydeck group/history/memory/work/collaborate/command` and `dutydeck schedule request` remain available, so sessions started before the upgrade keep working; new general-operation prompts use `dutydeck agent`.
 
 ---
 
