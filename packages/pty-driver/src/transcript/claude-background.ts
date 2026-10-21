@@ -73,4 +73,3 @@ export class ClaudeBackgroundTasks {
   independent(): boolean { return this.ended && this.snapshot().count > 0; }
 }
 import { claudeInputText } from './input-receipt.js';
-
