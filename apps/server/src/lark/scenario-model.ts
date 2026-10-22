@@ -6,6 +6,7 @@
 import { createHash } from 'node:crypto';
 import { SCENARIO_LIMITS, deciderMetaOf, wrapUntrusted, type CollaborationDecision, type CollaborationObservation, type CollaborationScenarioSnapshot, type CollaborationScope,
   type PromptPart, type ScenarioContextResult, type ScenarioMessage } from '@dutydeck/shared';
+import { prepareSkillPrompt } from '../skill-delivery.js';
 import type { RegisteredScenarioPack } from '../plugins/scenario-registry.js';
 import type { DeadlineResult } from '../plugins/scenario-providers.js';
 
@@ -40,7 +41,13 @@ const validItems = (value: unknown): value is ScenarioContextResult => {
  * 把上下文来源的结果冻结成快照里的 scenario（H4）。超时、出错、返回值不对，或一条材料都没取到又报了缺失，都算取材料失败：返回 abstained。
  * 条目转成观察（source scenario:<包 id>、origin external、senderKind system），每条正文不超过 4000 字、合计不超过 maxChars。
  */
-export function freezeScenario(input: { entry: RegisteredScenarioPack; scope: CollaborationScope; at: string; result?: DeadlineResult<ScenarioContextResult> }): CollaborationScenarioSnapshot {
+export async function freezeScenarioSkills(entry: RegisteredScenarioPack, scope: CollaborationScope, cwd: string) {
+  if (!entry.pack.skills?.length) return undefined;
+  const prepared = await prepareSkillPrompt(cwd, '', [], { botAppId: scope.appId, chatId: scope.chatId, requiredSkills: entry.pack.skills.map(ref => ({ ref })) });
+  return { prompt: prepared.agentPrompt, digest: digest(prepared.agentPrompt), refs: prepared.skillDeliveries.map(item => item.ref!) };
+}
+
+export function freezeScenario(input: { entry: RegisteredScenarioPack; scope: CollaborationScope; at: string; skills?: CollaborationScenarioSnapshot['skills']; result?: DeadlineResult<ScenarioContextResult> }): CollaborationScenarioSnapshot {
   const { entry, scope, at, result } = input;
   const pack = entry.pack;
   const base = { packId: pack.id, title: pack.title, version: pack.version, digest: entry.digest };
@@ -65,7 +72,7 @@ export function freezeScenario(input: { entry: RegisteredScenarioPack; scope: Co
       occurredAt: at, receivedAt: at, senderKind: 'system', text, refs: item.url ? [item.url.slice(0, 256)] : [], origin: 'external', missing: [], revision: 1 });
   }
   const missing = result?.status === 'ok' ? result.value.missing.map(item => item.slice(0, 256)).slice(0, 100) : [];
-  return { ...base, status: 'used', guidance: scenarioGuidance(pack), execution: { instruction: pack.execution.instruction, digest: digest(pack.execution.instruction) },
+  return { ...base, status: 'used', ...(input.skills ? { skills: input.skills } : {}), guidance: scenarioGuidance(pack), execution: { instruction: pack.execution.instruction, digest: digest(pack.execution.instruction) },
     ...(provider ? { context: { durationMs: Math.max(0, Math.round(result?.durationMs ?? 0)), decisionChars: limits.decisionChars,
       sources: [{ id: provider, status: missing.length ? 'partial' : 'complete', missing }], observations } } : {}) };
 }
@@ -78,7 +85,7 @@ export function humanScenarioMessage(event: { messageId: string; chatId: string;
 }
 
 /** act 交给执行 Agent 的冻结内容。 */
-export interface ModelScenarioExecution { packId: string; version: string; instruction: string; observations: CollaborationObservation[] }
+export interface ModelScenarioExecution { packId: string; version: string; instruction: string; observations: CollaborationObservation[]; skills?: CollaborationScenarioSnapshot['skills'] }
 
 /**
  * 收养字段指向的判定记录里的冻结内容（H5）。记录要属于本事件的 app 和群、判定的是这条消息、快照里这个包是 used；
@@ -90,7 +97,7 @@ export function modelScenarioExecution(decision: CollaborationDecision | undefin
   if (deciderMetaOf(decision)?.trigger?.messageId !== expected.messageId) return '判定记录判的不是这条消息';
   const scenario = (decision.inputSnapshot as { scenario?: CollaborationScenarioSnapshot }).scenario;
   if (scenario?.status !== 'used' || scenario.packId !== expected.packId || !scenario.execution) return '判定记录里没有这个场景包的冻结内容';
-  return { packId: scenario.packId, version: scenario.version, instruction: scenario.execution.instruction, observations: scenario.context?.observations ?? [] };
+  return { packId: scenario.packId, version: scenario.version, instruction: scenario.execution.instruction, ...(scenario.skills ? { skills: scenario.skills } : {}), observations: scenario.context?.observations ?? [] };
 }
 
 /** 执行 prompt 里的场景部分：执行指令是 dynamic_context，冻结材料每条一个不可信材料块。 */
@@ -99,8 +106,9 @@ export function modelScenarioInjection(execution: ModelScenarioExecution, source
     const source = `scenario:${execution.packId}:${item.eventId}`;
     return { source, content: wrapUntrusted(source, item.text) };
   });
-  return { text: [execution.instruction, ...blocks.map(block => block.content)].join('\n'), parts: [
-    { kind: 'dynamic_context', sourceId, trustScope: `scenario:${execution.packId}@${execution.version}`, content: execution.instruction, ...(blocks.length ? { suffix: '\n' } : {}) },
+  return { text: [execution.instruction, ...(execution.skills ? [execution.skills.prompt] : []), ...blocks.map(block => block.content)].join('\n'), parts: [
+    { kind: 'dynamic_context', sourceId, trustScope: `scenario:${execution.packId}@${execution.version}`, content: execution.instruction, ...(blocks.length || execution.skills ? { suffix: '\n' } : {}) },
+    ...(execution.skills ? [{ kind: 'skill' as const, sourceId: `scenario:${execution.packId}:skills`, trustScope: 'required_scenario_skill', digest: execution.skills.digest, content: execution.skills.prompt, ...(blocks.length ? { suffix: '\n' } : {}) }] : []),
     ...blocks.map((block, index): PromptPart => ({ kind: 'reference', sourceId: block.source, trustScope: `untrusted:scenario:${execution.packId}`, content: block.content,
       ...(index < blocks.length - 1 ? { suffix: '\n' } : {}) }))
   ] };

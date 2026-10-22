@@ -5,6 +5,28 @@
   "scenarios": "scenarios",
   "providers": "index.mjs",
   "userConfig": {
-    "docs_dir": { "description": "runbook 所在目录（Markdown）" }
+    "docs_dir": {
+      "description": "runbook 所在目录（Markdown）"
+    }
+  },
+  "apiVersion": 1,
+  "bindingConfig": {
+    "docs_dir": {
+      "type": "string",
+      "required": true,
+      "description": "Runbook directory for this Bot, group or workspace"
+    }
+  },
+  "skills": "skills",
+  "requiredSkills": [
+    "team-faq/answer"
+  ],
+  "skillResources": {
+    "answer": [
+      {
+        "path": "references/output-policy.md",
+        "maxBytes": 4096
+      }
+    ]
   }
 }

@@ -1,0 +1,19 @@
+{
+  "name": "fake-ticket",
+  "version": "1.0.0",
+  "description": "Self-contained ticket query/action example",
+  "providers": "index.mjs",
+  "bindingConfig": {
+    "endpoint": {
+      "type": "string",
+      "description": "Ticket API URL",
+      "required": true
+    },
+    "ticket_token": {
+      "type": "secret",
+      "description": "Ticket API credential",
+      "required": true
+    }
+  },
+  "apiVersion": 1
+}

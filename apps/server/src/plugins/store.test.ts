@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { cp, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm, stat, symlink } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -45,7 +46,7 @@ describe('PluginStore', () => {
     expect(entry).toMatchObject({ name: 'docs', version: '1.0.0', source: { kind: 'local', spec: source }, resolved: { version: '1.0.0' }, scope: 'bot:cli_a', enabled: true, trustedCapabilities: [] });
     expect(entry.installedAt).toBe(entry.updatedAt);
     expect(JSON.parse(await readFile(join(temp, 'data/plugins/plugins.lock.json'), 'utf8'))).toEqual({ version: 1, plugins: { docs: entry } });
-    expect(await readFile(join(temp, 'data/plugins/docs/commands/summary.md'), 'utf8')).toBe('总结 $ARGUMENTS');
+    expect(await readFile(join(store.pluginDir('docs'), 'commands/summary.md'), 'utf8')).toBe('总结 $ARGUMENTS');
     await expect(store.install(source)).rejects.toMatchObject({ code: 'PLUGIN_ALREADY_INSTALLED' });
 
     expect((await store.setEnabled('docs', false)).enabled).toBe(false);
@@ -72,6 +73,46 @@ describe('PluginStore', () => {
     expect(store.plainConfig('docs')).toEqual({});
     expect(store.secretProvider(false)!.inspect('plugin.docs.api_key').availability).toBe('missing');
     await expect(stat(store.pluginDir('docs'))).rejects.toThrow();
+  });
+
+  it.each(['file', 'directory', 'chain'] as const)('rejects an external %s symlink on both installation and update', async kind => {
+    const source = join(temp, 'src');
+    await writePlugin(source, declarative('linked'));
+    await writePlugin(join(temp, 'outside'), { 'helper.mjs': 'export default "mutable";' });
+    await store.install(source);
+    const original = store.get('linked');
+    if (kind === 'file') await symlink(join(temp, 'outside/helper.mjs'), join(source, 'helper.mjs'));
+    if (kind === 'directory') await symlink(join(temp, 'outside'), join(source, 'helpers'));
+    if (kind === 'chain') {
+      await symlink('bridge/helper.mjs', join(source, 'helper.mjs'));
+      await symlink(join(temp, 'outside'), join(source, 'bridge'));
+    }
+    await expect(store.update('linked')).rejects.toMatchObject({ code: 'PLUGIN_ARTIFACT_INVALID' });
+    expect(store.get('linked')).toEqual(original);
+    const fresh = new PluginStore(join(temp, 'fresh'));
+    await expect(fresh.install(source)).rejects.toMatchObject({ code: 'PLUGIN_ARTIFACT_INVALID' });
+    expect(fresh.list()).toEqual([]);
+  });
+
+  it('keeps relative internal directory and chained file links self-contained across updates', async () => {
+    const source = join(temp, 'src');
+    await writePlugin(source, { ...declarative('linked'), 'helpers/actual.mjs': 'export default "v1";' });
+    await symlink('helpers', join(source, 'alias'));
+    await symlink('actual.mjs', join(source, 'helpers/forward.mjs'));
+    await symlink('alias/forward.mjs', join(source, 'helper.mjs'));
+    await store.install(source);
+    const first = store.pluginDir('linked');
+    expect((await import(pathToFileURL(join(first, 'helper.mjs')).href)).default).toBe('v1');
+    await writePlugin(source, { 'helpers/actual.mjs': 'export default "v2";' });
+    const aliasedStore = new PluginStore(join(temp, 'data-link'));
+    await symlink(store.dataDir, aliasedStore.dataDir);
+    const update = await aliasedStore.update('linked');
+    expect(update.changed).toBe(true);
+    expect(update.entry.candidate?.id).not.toBe(update.entry.active?.id);
+    const candidate = store.artifactDir('linked', update.entry.candidate);
+    await rm(source, { recursive: true });
+    expect((await import(pathToFileURL(join(candidate, 'helper.mjs')).href)).default).toBe('v2');
+    expect(await readFile(join(first, 'helper.mjs'), 'utf8')).toContain('v1');
   });
 
   it('requires trust for hooks: refuses without confirmation, honours --yes and a declined prompt', async () => {
@@ -115,7 +156,7 @@ describe('PluginStore', () => {
     const confirm = vi.fn(async () => true);
     const updated = await store.update('gitdemo', { confirm });
     expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ capabilities: ['hooks:task.completed'] }));
-    expect(updated).toMatchObject({ changed: true, entry: { version: '1.1.0', resolved: { sha: secondSha }, trustedCapabilities: ['hooks:task.completed'], installedAt: entry.installedAt } });
+    expect(updated).toMatchObject({ changed: true, entry: { version: '1.0.0', resolved: { sha: firstSha }, candidate: { version: '1.1.0', resolved: { sha: secondSha }, trustedCapabilities: ['hooks:task.completed'] }, installedAt: entry.installedAt } });
     // 能力没变时不再询问
     const again = vi.fn(async () => true);
     expect(await store.update('gitdemo', { confirm: again })).toMatchObject({ changed: false });
@@ -128,6 +169,9 @@ describe('PluginStore', () => {
     await store.install(source);
     await writePlugin(source, { 'commands/summary.md': 'new contents' });
     expect(await store.update('local')).toMatchObject({ changed: true });
+    expect(await readFile(join(store.pluginDir('local'), 'commands/summary.md'), 'utf8')).toBe('总结 $ARGUMENTS');
+    expect(await readFile(join(store.artifactDir('local', store.get('local').candidate), 'commands/summary.md'), 'utf8')).toBe('new contents');
+    await store.activate('local');
     expect(await readFile(join(store.pluginDir('local'), 'commands/summary.md'), 'utf8')).toBe('new contents');
   });
 
@@ -169,12 +213,12 @@ describe('dutydeck plugin CLI', () => {
     expect((await cli('list', [])).out).toContain('还没有安装插件');
   });
 
-  it('prints restart guidance after updating local content without a version bump', async () => {
+  it('prints activation guidance after staging local content without a version bump', async () => {
     await writePlugin(join(temp, 'local'), declarative('local'));
     await cli('install', ['./local']);
     await writePlugin(join(temp, 'local'), { 'commands/summary.md': 'new contents' });
     const result = await cli('update', ['local']);
-    expect(result.out).toContain('dutydeck restart');
+    expect(result.out).toContain('dutydeck plugin activate');
     expect(result.out).not.toContain('已是最新');
   });
 

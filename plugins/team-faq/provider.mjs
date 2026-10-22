@@ -116,13 +116,14 @@ function fitBudget(ranked, maxChars) {
 export function createRunbookProvider({ docsDir } = {}) {
   return {
     id: 'runbook',
-    async context({ message, params, maxChars, signal }) {
+    async context({ message, params, maxChars, signal, binding }) {
+      const selectedDocsDir = binding ? binding.config.docs_dir : docsDir;
       const missing = [];
       const docs = [...new Set(asStrings(params.docs))];
       if (!docs.length) return { items: [], missing: ['群参数 docs 没有填 runbook 文件'] };
-      if (!docsDir) return { items: [], missing: ['插件配置 docs_dir 未设置'] };
+      if (!selectedDocsDir) return { items: [], missing: ['插件配置 docs_dir 未设置'] };
       let realRoot;
-      try { realRoot = await realpath(docsDir); }
+      try { realRoot = await realpath(selectedDocsDir); }
       catch { return { items: [], missing: ['docs_dir 不存在或无法读取'] }; }
 
       const text = (message?.text ?? '').toLowerCase();

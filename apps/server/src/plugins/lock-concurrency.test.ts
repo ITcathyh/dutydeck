@@ -94,6 +94,7 @@ it('releases a killed owner without deleting the persistent SQLite lock file', a
 });
 
 it.each(['disable', 'uninstall', 'reinstall'])('rechecks the latest entry after update trust confirmation while another caller can %s', async operation => {
+  const initial = store.get('one');
   await mkdir(join(directory, 'one/hooks'));
   await writeFile(join(directory, 'one/hooks/hooks.json'), JSON.stringify({ 'task.completed': [{ command: 'true', timeout: 1000 }] }));
   let confirm!: () => void;
@@ -114,8 +115,13 @@ it.each(['disable', 'uninstall', 'reinstall'])('rechecks the latest entry after 
   }
   confirm();
   if (operation === 'disable') {
-    expect(await pending).toMatchObject({ entry: { enabled: false, trustedCapabilities: ['hooks:task.completed'] } });
-    expect(store.get('one').enabled).toBe(false);
+    expect(await pending).toMatchObject({ entry: { enabled: false, active: initial.active, trustedCapabilities: [], candidate: { trustedCapabilities: ['hooks:task.completed'] } } });
+    const saved = store.get('one');
+    expect(saved.enabled).toBe(false);
+    expect(saved.active).toEqual(initial.active);
+    expect(saved.trustedCapabilities).toEqual([]);
+    expect(saved.candidate?.id).not.toBe(initial.active?.id);
+    expect(saved.candidate?.trustedCapabilities).toEqual(['hooks:task.completed']);
   } else if (operation === 'reinstall') {
     await expect(pending).rejects.toMatchObject({ code: 'PLUGIN_CHANGED' });
     expect(store.get('one')).toMatchObject({ scope: 'bot:replacement', source: { spec: join(directory, 'replacement') }, trustedCapabilities: [] });

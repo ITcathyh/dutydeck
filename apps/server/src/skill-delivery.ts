@@ -12,18 +12,29 @@ export interface SkillDelivery {
   source: SkillReference['source'];
   digest: string;
   mode: 'prompt';
+  ref?: string;
+  status?: 'included' | 'replaced';
+  required?: boolean;
+  resources?: Array<{ path: string; digest: string }>;
+  binding?: { id: string; revision: number };
 }
 
 export interface PrepareSkillPromptResult {
   agentPrompt: string;
   skillDeliveries: SkillDelivery[];
+  /** Ephemeral material used to verify post-hook delivery; not stored in metadata. */
+  deliveryTexts?: string[];
   promptParts?: PromptPart[];
   promptDiagnostics?: import('@dutydeck/shared').PromptSourceDiagnostics;
 }
 
 export interface PrepareSkillPromptOptions {
   homeDirectory?: string;
+  pluginWorkspaceRoot?: string;
+  pluginRoots?: import('./skill-catalog.js').PluginSkillRoot[];
   botAppId?: string;
+  chatId?: string;
+  requiredSkills?: Array<{ ref: string; binding?: { id: string; revision: number } }>;
   promptPolicyVersion?: 'legacy-v1' | 'optimized-v1';
   promptParts?: PromptPart[];
 }
@@ -76,6 +87,9 @@ export async function prepareSkillPrompt(
   skillRequests?: string[],
   options?: PrepareSkillPromptOptions
 ): Promise<PrepareSkillPromptResult> {
+  if (skillRequests !== undefined && !Array.isArray(skillRequests)) throw new RuntimeError('INVALID_SKILL_REQUESTS', 'skillRequests must be an array', 400);
+  const requested = [...new Set([...(Array.isArray(skillRequests) ? skillRequests : []), ...(options?.requiredSkills ?? []).map(skill => skill.ref)])];
+  if (requested.length) skillRequests = requested;
   const rawPrompt = typeof prompt === 'string' ? prompt : '';
   const { legacySkillNames, userPrompt } = parseLeadingDirectives(rawPrompt);
 
@@ -108,13 +122,13 @@ export async function prepareSkillPrompt(
   const workspaceRoot = resolve(cwd?.trim() || process.cwd());
   const homeRoot = resolve(options?.homeDirectory?.trim() || homedir());
 
-  const roots = skillRoots(workspaceRoot, homeRoot, options?.botAppId);
+  const roots = skillRoots(workspaceRoot, homeRoot, options?.botAppId, options?.pluginWorkspaceRoot, options?.chatId, options?.pluginRoots);
 
   const canonicalRoots = (
     await Promise.all(roots.map(root => realpath(root.path).catch(() => null)))
   ).filter((r): r is string => Boolean(r));
 
-  const catalog = await discoverSkills(workspaceRoot, { homeDirectory: homeRoot, ...(options?.botAppId ? { botAppId: options.botAppId } : {}) });
+  const catalog = await discoverSkills(workspaceRoot, { homeDirectory: homeRoot, pluginRoots: options?.pluginRoots, pluginWorkspaceRoot: options?.pluginWorkspaceRoot, chatId: options?.chatId, ...(options?.botAppId ? { botAppId: options.botAppId } : {}) });
 
   const matchedFromRequests: SkillReference[] = [];
   if (hasExplicitRequests) {
@@ -123,7 +137,7 @@ export async function prepareSkillPrompt(
       const realReq = await realpath(resolvedReq).catch(() => null);
 
       const matched = catalog.find(
-        s => s.path === reqPath || s.path === resolvedReq || (realReq !== null && s.path === realReq)
+        s => s.ref === reqPath || s.path === reqPath || s.path === resolvedReq || (realReq !== null && s.path === realReq)
       );
 
       if (!matched) {
@@ -148,8 +162,8 @@ export async function prepareSkillPrompt(
           404
         );
       }
-      // Workspace precedence for legacy directive resolution
-      const chosen = matches.find(s => s.source === 'workspace') ?? matches[0]!;
+      if (matches.length > 1) throw new RuntimeError('SKILL_AMBIGUOUS', `Skill ${name} is ambiguous; choose ${matches.map(skill => skill.ref ?? skill.path).join(', ')}`, 409);
+      const chosen = matches[0]!;
       matchedFromLegacy.push(chosen);
     }
   }
@@ -262,7 +276,30 @@ export async function prepareSkillPrompt(
       }
 
       const digest = createHash('sha256').update(buffer).digest('hex').toLowerCase();
-      const content = buffer.toString('utf8');
+      let content = buffer.toString('utf8');
+      const resources: Array<{ path: string; digest: string }> = [];
+      for (const resource of skill.resources ?? []) {
+        if (!skill.root) throw new RuntimeError('SKILL_RESOURCE_INVALID', 'Resource root is missing', 400);
+        const root = await realpath(skill.root);
+        const path = await realpath(resolve(root, resource.path)).catch(() => { throw new RuntimeError('SKILL_RESOURCE_INVALID', `Required text resource ${resource.path} is unavailable`, 400); });
+        if (!isPathInside(path, root)) throw new RuntimeError('SKILL_RESOURCE_INVALID', 'Resource escapes package', 403);
+        const file = await open(path, 'r');
+        try {
+          const actual = await realpath(`/proc/self/fd/${file.fd}`).catch(() => realpath(path));
+          const info = await file.stat();
+          const disk = await stat(path);
+          if (disk.ino !== info.ino || disk.dev !== info.dev) throw new RuntimeError('SKILL_RESOURCE_INVALID', 'Resource changed while opening', 400);
+          if (!isPathInside(actual, root) || !info.isFile() || info.size > resource.maxBytes) throw new RuntimeError('SKILL_RESOURCE_INVALID', 'Resource is outside the package or exceeds its limit', 400);
+          const bytes = await file.readFile();
+          totalBytes += bytes.length;
+          if (bytes.length > resource.maxBytes || totalBytes > MAX_TOTAL_SKILL_SIZE || bytes.includes(0)) throw new RuntimeError('SKILL_RESOURCE_INVALID', 'Resource is not bounded text', 400);
+          let text: string;
+          try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { throw new RuntimeError('SKILL_RESOURCE_INVALID', 'Resource must be UTF-8 text', 400); }
+          resources.push({ path: resource.path, digest: createHash('sha256').update(bytes).digest('hex') });
+          content += `\n\n# Reference: ${resource.path}\n${text}`;
+        } finally { await file.close(); }
+      }
+      const required = options?.requiredSkills?.find(request => request.ref === skill.ref || request.ref === skill.path);
 
       skillDeliveries.push({
         name: skill.name,
@@ -270,6 +307,10 @@ export async function prepareSkillPrompt(
         source: skill.source,
         digest,
         mode: 'prompt',
+        status: 'included',
+        ...(skill.ref ? { ref: skill.ref } : {}),
+        ...(required ? { required: true, ...(required.binding ? { binding: required.binding } : {}) } : {}),
+        ...(resources.length ? { resources } : {}),
       });
 
       loadedSkills.push({
@@ -304,5 +345,5 @@ export async function prepareSkillPrompt(
     promptParts.push(...userParts.map((part, index) => ({ ...part, prefix: `${index === 0 ? '\n\n---\n\n' : ''}${part.prefix ?? ''}` })));
   }
   const assembled = assemblePrompt(promptParts, agentPrompt, options?.promptPolicyVersion);
-  return { agentPrompt, skillDeliveries, promptParts, promptDiagnostics: { ...assembled.diagnostics, afterChars: agentPrompt.length, deduplicatedParts: 0 } };
+  return { agentPrompt, skillDeliveries, deliveryTexts: loadedSkills.map(skill => skill.content), promptParts, promptDiagnostics: { ...assembled.diagnostics, afterChars: agentPrompt.length, deduplicatedParts: 0 } };
 }

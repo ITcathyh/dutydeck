@@ -1,7 +1,9 @@
+import type { PluginQuery, PluginAction } from './plugin-tools.js';
 import type { PluginResultTool } from './plugin-results.js';
 import safeRegex from 'safe-regex2';
 import { z } from 'zod';
 import type { ScenarioProvider } from './scenarios.js';
+import { PLUGIN_API_VERSION, pluginConfigSchema, pluginSkillRefSchema, pluginTextResourceSchema, pluginConfigValueSchema } from './plugin-bindings.js';
 
 /**
  * Dutydeck 插件契约（v1）：清单、hooks、触发器的 schema，hook 子进程协议，
@@ -25,6 +27,10 @@ export const pluginManifestSchema = z.object({
   name: z.string().max(64).regex(pluginNamePattern, '必须是 kebab-case，例如 my-plugin'),
   version: z.string().min(1).max(64).optional(),
   description: z.string().max(1_000).optional(),
+  apiVersion: z.literal(PLUGIN_API_VERSION).optional(),
+  bindingConfig: pluginConfigSchema.optional(),
+  requiredSkills: z.array(pluginSkillRefSchema).max(16).optional(),
+  skillResources: z.record(z.string(), z.array(pluginTextResourceSchema).max(16)).optional(),
   commands: relativePath.optional(),
   agents: relativePath.optional(),
   skills: relativePath.optional(),
@@ -34,7 +40,12 @@ export const pluginManifestSchema = z.object({
   /** 场景包目录：每个 `<id>.json` 一个包（见 scenarios.ts）。只有声明式包的插件不需要信任确认。 */
   scenarios: relativePath.optional(),
   userConfig: z.record(z.string().regex(/^[a-z][a-z0-9_]*$/, '配置键必须是 snake_case'), pluginUserConfigEntrySchema).optional()
-}).strict();
+}).strict().superRefine((manifest, context) => {
+  for (const [key, field] of Object.entries(manifest.bindingConfig ?? {})) {
+    if (field.enum?.some(value => !pluginConfigValueSchema({ ...field, enum: undefined }).safeParse(value).success)) context.addIssue({ code: 'custom', path: ['bindingConfig', key, 'enum'], message: 'Enum values do not match the field type' });
+    if (field.default !== undefined && !pluginConfigValueSchema(field).safeParse(field.default).success) context.addIssue({ code: 'custom', path: ['bindingConfig', key, 'default'], message: 'Default does not match the field schema' });
+  }
+});
 export type PluginManifest = z.infer<typeof pluginManifestSchema>;
 
 export const pluginHookEvents = ['task.received', 'task.beforeRun', 'permission.request', 'task.completed', 'verification.completed', 'notify'] as const;
@@ -207,6 +218,8 @@ export interface PluginApi {
   config: Readonly<Record<string, string>>;
   registerCiProvider(provider: CiProvider): void;
   registerResultTool(tool: PluginResultTool): void;
+  registerQuery(tool: PluginQuery): void;
+  registerAction(tool: PluginAction): void;
   registerHookHandler(event: PluginHookEvent, handler: PluginHookHandler, options?: { timeout?: number; matcher?: string }): void;
   /** 本插件场景包里引用的 provider；只在信任确认之后加载时调用。 */
   registerScenarioProvider(provider: ScenarioProvider): void;

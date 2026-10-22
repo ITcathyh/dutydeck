@@ -15,7 +15,7 @@ import { botNameTokens, callsBotName, compactText, intrusionPattern, ownedItems,
 import { responderAnnouncementOf, responderClaimText, responderIntentOf, responderReleaseText } from './group-responder.js';
 import { LarkScenarios, type ScenarioMatch, type ScenarioPhrase } from './group-scenarios.js';
 import { runDirectScenario, type LarkScenarioAdoption } from './scenario-direct.js';
-import { SCENARIO_REF_PREFIX, freezeScenario, humanScenarioMessage, modelScenarioExecution, scenarioContextLimits, type ModelScenarioExecution } from './scenario-model.js';
+import { SCENARIO_REF_PREFIX, freezeScenario, freezeScenarioSkills, humanScenarioMessage, modelScenarioExecution, scenarioContextLimits, type ModelScenarioExecution } from './scenario-model.js';
 import { findScenarioRecall, materialEntries, type LarkScenarioRecall } from './scenario-recall.js';
 import { legacyConfirmAliases } from './scenario-legacy.js';
 import { renderScenarioTemplate, scenarioParamValues, scenarioSummary, templateText, type TemplateValues } from './scenario-template.js';
@@ -489,7 +489,7 @@ export class LarkGroupParticipation {
     const message = humanScenarioMessage(event, text, botOpenId);
     let chosen: string | undefined;
     for (const { entry, binding } of open) {
-      const matched = await this.scenarios.match(entry, binding, message);
+      const matched = await this.scenarios.match(entry, binding, message, { scope, cwd: config.workspace });
       if (!matched.matched) continue;
       if ('abstained' in matched) { this.options.log?.warn({ scope, messageId: event.messageId, scenario: entry.pack.id, reason: matched.abstained }, '场景包匹配出错，这条消息不算命中'); continue; }
       if (chosen) { this.options.log?.warn({ scope, messageId: event.messageId, scenario: entry.pack.id, chosen }, '同一条消息命中了多个场景包，只用包 id 排在最前的'); continue; }
@@ -658,9 +658,12 @@ export class LarkGroupParticipation {
     if (!open) return undefined;
     const { entry, binding } = open;
     const limits = scenarioContextLimits(entry.pack);
-    const result = entry.pack.context ? await entry.providers.get(entry.pack.context.provider)!.context({ scope,
+    const result = entry.pack.context ? await entry.providers.get(entry.pack.context.provider)!.context({ scope, cwd: config.workspace,
       message: humanScenarioMessage(pending.event, pending.observation.text, pending.botOpenId), params: binding.params, maxChars: limits.maxChars }, limits.timeoutMs) : undefined;
-    const scenario = freezeScenario({ entry, scope, at: this.now().toISOString(), ...(result ? { result } : {}) });
+    let skills: CollaborationScenarioSnapshot['skills'];
+    try { skills = await freezeScenarioSkills(entry, scope, config.workspace ?? process.cwd()); }
+    catch (error) { return { packId: entry.pack.id, title: entry.pack.title, version: entry.pack.version, digest: entry.digest, status: 'abstained', reason: `Required scenario SOP unavailable: ${String(error)}`.slice(0, 2000) }; }
+    const scenario = freezeScenario({ entry, scope, skills, at: this.now().toISOString(), ...(result ? { result } : {}) });
     if (scenario.status === 'abstained') this.options.log?.warn({ scope, messageId: pending.event.messageId, scenario: packId, reason: scenario.reason }, '场景包没取到材料，这条消息按没有这个包判定');
     return scenario;
   }
@@ -884,7 +887,7 @@ export class LarkGroupParticipation {
     let chosen: { entry: (typeof direct)[number]['entry']; matched: Extract<ScenarioMatch, { matched: true }> } | undefined;
     for (const { entry, binding } of [...direct].sort((a, b) => a.entry.pack.id < b.entry.pack.id ? -1 : a.entry.pack.id > b.entry.pack.id ? 1 : 0)) {
       if (!scenarioTriggerSources(entry.pack, binding).some(source => source.appId === appId)) continue;
-      const matched = await this.scenarios.match(entry, binding, message);
+      const matched = await this.scenarios.match(entry, binding, message, { scope, cwd: config.workspace });
       if (!matched.matched) continue;
       if (chosen) { this.options.log?.warn({ scope, messageId: event.messageId, scenario: entry.pack.id, chosen: chosen.entry.pack.id }, '同一条消息命中了多个场景包，只处理包 id 排在最前的'); continue; }
       chosen = { entry, matched };

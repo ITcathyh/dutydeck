@@ -358,6 +358,11 @@ export interface TaskExecutionContext {
   recovery?: import('./driver.js').DriverTurnRecovery;
 }
 export interface SkillDeliveryMetadata {
+  ref?: string;
+  status?: 'included' | 'replaced';
+  required?: boolean;
+  resources?: Array<{ path: string; digest: string }>;
+  binding?: { id: string; revision: number };
   name: string;
   path: string;
   source: 'workspace' | 'user' | 'plugin';
@@ -569,3 +574,7 @@ export * from './session-insight.js';
 export * from './session-insight-repository.js';
 export * from './plugins.js';
 export * from './scenarios.js';
+
+export * from './plugin-tools.js';
+export * from './action-transition.js';
+export * from './plugin-bindings.js';

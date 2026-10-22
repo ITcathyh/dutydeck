@@ -1,13 +1,15 @@
 import { execFile } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readdir, readFile, readlink, realpath, lstat, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import Database from 'better-sqlite3';
-import { LocalFileSecretProvider, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
+import { currentProcessIdentity } from '@dutydeck/storage';
+import { pluginActivationBlockers, pluginHostStates, validateProviderRegistration, type PluginHostState } from './activation.js';
+import { LocalFilePluginSecretResolver, LocalFileSecretProvider, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { defaultBuiltinPluginRoot, listBuiltinPlugins } from './builtin.js';
 import { loadPluginDirectory, type LoadedPlugin } from './manifest.js';
 import { parsePluginScope } from './scope.js';
@@ -22,6 +24,14 @@ export class PluginStoreError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = 'PluginStoreError'; }
 }
 
+const artifactSchema = z.object({
+  id: z.union([z.literal('legacy'), z.string().regex(/^[a-f0-9]{64}$/)]),
+  version: z.string().optional(),
+  resolved: z.object({ sha: z.string().optional(), version: z.string().optional() }).strict(),
+  trustedCapabilities: z.array(z.string()),
+  validation: z.object({ status: z.enum(['passed', 'failed']), checkedAt: z.string() }).optional()
+}).strict();
+export type PluginArtifact = z.infer<typeof artifactSchema>;
 const lockEntrySchema = z.object({
   name: z.string(),
   version: z.string().optional(),
@@ -31,7 +41,10 @@ const lockEntrySchema = z.object({
   enabled: z.boolean(),
   trustedCapabilities: z.array(z.string()),
   installedAt: z.string(),
-  updatedAt: z.string()
+  updatedAt: z.string(),
+  active: artifactSchema.optional(),
+  candidate: artifactSchema.optional(),
+  previous: artifactSchema.optional()
 }).strict();
 export type PluginLockEntry = z.infer<typeof lockEntrySchema>;
 const lockFileSchema = z.object({ version: z.literal(1), plugins: z.record(z.string(), lockEntrySchema) }).strict();
@@ -98,11 +111,109 @@ interface Staged { root: string; plugin: LoadedPlugin; resolved: PluginLockEntry
 export class PluginStore {
   readonly pluginsDir: string;
   /** builtinRoot：内置插件目录，外部插件不能和其中的插件同名。 */
-  constructor(readonly dataDir: string, readonly builtinRoot: string = defaultBuiltinPluginRoot()) { this.pluginsDir = join(dataDir, 'plugins'); }
+  constructor(readonly dataDir: string, readonly builtinRoot: string = defaultBuiltinPluginRoot(), readonly database = join(dataDir, 'dutydeck.db')) { this.pluginsDir = join(dataDir, 'plugins'); }
 
   builtinNames(): Set<string> { return new Set(listBuiltinPlugins(this.builtinRoot).map(item => item.name)); }
 
-  pluginDir(name: string) { return join(this.pluginsDir, name); }
+  pluginDir(name: string, entry = this.readLock().plugins[name]) { return this.artifactDir(name, entry?.active); }
+  artifactDir(name: string, artifact?: PluginArtifact) {
+    return !artifact || artifact.id === 'legacy' ? join(this.pluginsDir, name) : join(this.pluginsDir, '.artifacts', name, artifact.id);
+  }
+  private activeArtifact(entry: PluginLockEntry): PluginArtifact {
+    return entry.active ?? { id: 'legacy', ...(entry.version ? { version: entry.version } : {}), resolved: entry.resolved, trustedCapabilities: entry.trustedCapabilities };
+  }
+
+  /** Selection and lease acquisition share the mutation lock, so activation cannot race startup. */
+  async acquireHost(): Promise<{ entries: PluginLockEntry[]; record(loaded: string[], diagnostics: PluginHostState['diagnostics']): Promise<void>; release(): Promise<void> }> {
+    const snapshot = this.list();
+    if (!snapshot.some(entry => entry.enabled)) return { entries: snapshot, record: async () => {}, release: async () => {} };
+    return this.withStoreLock(async () => {
+      const entries = this.list();
+      const directory = join(this.pluginsDir, '.hosts');
+      await mkdir(directory, { recursive: true });
+      const path = join(directory, `${randomUUID()}.json`);
+      const state: PluginHostState = { identity: currentProcessIdentity(), ...(this.database !== ':memory:' ? { database: resolve(this.database) } : {}), stopped: false,
+        plugins: Object.fromEntries(entries.filter(entry => entry.enabled).map(entry => [entry.name, this.activeArtifact(entry).id])) };
+      const save = async () => { const temporary = `${path}.tmp`; await writeFile(temporary, JSON.stringify(state)); await rename(temporary, path); };
+      await save();
+      return { entries, record: async (loaded, diagnostics) => { state.loaded = loaded; state.diagnostics = diagnostics?.map(item => ({ plugin: item.plugin, message: '插件或场景未成功激活；请查看运行日志。' })); await save(); }, release: async () => { state.stopped = true; await save(); } };
+    });
+  }
+
+  async activationStatus(name: string) {
+    const entry = this.get(name);
+    const hosts = await pluginHostStates(this.pluginsDir);
+    return { selected: this.activeArtifact(entry), candidate: entry.candidate, previous: entry.previous,
+      hosts: hosts.filter(host => name in host.plugins && host.observation !== 'dead').map(host => ({ pid: host.identity.pid, observation: host.observation, artifact: host.plugins[name], activated: host.loaded?.includes(name) ?? false, diagnostics: host.diagnostics?.filter(item => item.plugin === name) ?? [] })),
+      blockers: await pluginActivationBlockers(this.pluginsDir, name, this.database) };
+  }
+
+  private async assertSwitchSafe(name: string) {
+    const blockers = await pluginActivationBlockers(this.pluginsDir, name, this.database);
+    if (blockers.length) throw new PluginStoreError('PLUGIN_ACTIVATION_BLOCKED', blockers.map(item => `${item.id}：${item.detail}`).join('\n') + '\n先在当前版本恢复并完成/取消任务、核对未决动作；然后 dutydeck stop（systemd 实例用 systemctl --user stop <unit>），停止共用此目录的所有实例，再重试。成功后 dutydeck start（systemd 实例用 systemctl --user start <unit>）。不要强制跳过存活 tmux。');
+  }
+
+  private async persistArtifact(name: string, staged: Staged): Promise<PluginArtifact> {
+    const artifact: PluginArtifact = { id: await treeDigest(staged.root), ...(staged.plugin.manifest.version ? { version: staged.plugin.manifest.version } : {}), resolved: staged.resolved, trustedCapabilities: staged.plugin.capabilities };
+    const root = this.artifactDir(name, artifact);
+    if (!existsSync(root)) { await mkdir(join(this.pluginsDir, '.artifacts', name), { recursive: true }); await rename(staged.root, root); }
+    else if (await treeDigest(root).catch(() => undefined) !== artifact.id) {
+      const entry = this.readLock().plugins[name];
+      if (!entry || entry.candidate?.id !== artifact.id || this.activeArtifact(entry).id === artifact.id || entry.previous?.id === artifact.id) {
+        throw new PluginStoreError('PLUGIN_ARTIFACT_CHANGED', '现存包已损坏，且不是可独立修复的候选；未覆盖活动或回退目录。先排空并停止服务，再卸载重装（会清除插件私有数据和配置；请先备份）。');
+      }
+      await this.assertSwitchSafe(name);
+      // The store lock excludes new Hosts. Only a candidate with no consumers can be replaced.
+      const damaged = join(dirname(staged.root), 'damaged');
+      await rename(root, damaged);
+      try { await rename(staged.root, root); }
+      catch (error) { await rename(damaged, root); throw error; }
+    }
+    return artifact;
+  }
+
+  async activate(name: string): Promise<PluginLockEntry> { return this.switchArtifact(name, 'candidate'); }
+  async rollback(name: string): Promise<PluginLockEntry> { return this.switchArtifact(name, 'previous'); }
+
+  private async switchArtifact(name: string, selection: 'candidate' | 'previous'): Promise<PluginLockEntry> {
+    return this.withStoreLock(async () => {
+      const lock = this.readLock(), entry = lock.plugins[name];
+      if (!entry) throw new PluginStoreError('PLUGIN_NOT_INSTALLED', `插件 ${name} 未安装`);
+      const artifact = entry[selection];
+      if (!artifact) throw new PluginStoreError('PLUGIN_VERSION_MISSING', `插件 ${name} 没有${selection === 'candidate' ? '候选' : '上一'}版本`);
+      await this.assertSwitchSafe(name);
+      const root = this.artifactDir(name, artifact), loaded = await loadPluginDirectory(root);
+      if (loaded.manifest.name !== name || loaded.capabilities.some(capability => !artifact.trustedCapabilities.includes(capability))) throw new PluginStoreError('PLUGIN_TRUST_REQUIRED', '目标包已变化或有未经确认的能力；重新 update 并确认信任。');
+      if (artifact.id !== 'legacy' && await treeDigest(root) !== artifact.id) throw new PluginStoreError('PLUGIN_ARTIFACT_CHANGED', '不可变包内容已被修改；请重新 update。');
+      await mkdir(join(this.pluginsDir, STAGING_DIR), { recursive: true });
+      const checkDir = await mkdtemp(join(this.pluginsDir, STAGING_DIR, 'validate-'));
+      try {
+        if (loaded.providersEntry) {
+          const config = this.plainConfig(name);
+          const provider = this.secretProvider(false);
+          const secrets = provider ? new LocalFilePluginSecretResolver(provider) : undefined;
+          for (const [key, declared] of Object.entries(loaded.manifest.userConfig ?? {})) if (declared.sensitive) {
+            const value = secrets?.read(pluginSecretKey(name, key));
+            if (value !== undefined) config[key] = value;
+          }
+          await validateProviderRegistration({ root, dataDir: checkDir, entry: { ...entry, enabled: true, version: artifact.version, active: artifact, trustedCapabilities: artifact.trustedCapabilities }, config });
+        }
+      } catch {
+        artifact.validation = { status: 'failed', checkedAt: new Date().toISOString() }; await this.writeLock(lock);
+        throw new PluginStoreError('PLUGIN_ACTIVATION_FAILED', 'Provider 隔离加载/注册验证失败或超时；活动版本未改变。');
+      } finally { await rm(checkDir, { recursive: true, force: true }); }
+      if (artifact.id !== 'legacy' && await treeDigest(root) !== artifact.id) throw new PluginStoreError('PLUGIN_ARTIFACT_CHANGED', '验证期间包内容发生变化；未激活。');
+      // Recheck after running trusted code, before publishing the selected generation.
+      await this.assertSwitchSafe(name);
+      artifact.validation = { status: 'passed', checkedAt: new Date().toISOString() };
+      const old = this.activeArtifact(entry);
+      const { version: _version, candidate: _candidate, previous: _previous, ...rest } = entry;
+      const next: PluginLockEntry = { ...rest, active: artifact, previous: old,
+        ...(selection === 'previous' && entry.candidate ? { candidate: entry.candidate } : {}),
+        ...(artifact.version ? { version: artifact.version } : {}), resolved: artifact.resolved, trustedCapabilities: artifact.trustedCapabilities, updatedAt: new Date().toISOString() };
+      lock.plugins[name] = next; await this.writeLock(lock); return next;
+    });
+  }
   /** 插件自己的可写目录（hook 与 providers 可用来放状态）。 */
   pluginDataDir(name: string) { return join(this.pluginsDir, '.data', name); }
 
@@ -195,11 +306,11 @@ export class PluginStore {
         if (lock.plugins[name] || existsSync(this.pluginDir(name))) {
           throw new PluginStoreError('PLUGIN_ALREADY_INSTALLED', `插件 ${name} 已安装；更新用 dutydeck plugin update ${name}，或先 uninstall`);
         }
-        await rename(staged.root, this.pluginDir(name));
+        const active = await this.persistArtifact(name, staged);
         const at = new Date().toISOString();
         const entry: PluginLockEntry = {
           name, ...(staged.plugin.manifest.version ? { version: staged.plugin.manifest.version } : {}),
-          source, resolved: staged.resolved, scope, enabled: true,
+          source, resolved: staged.resolved, scope, enabled: true, active,
           trustedCapabilities: staged.plugin.capabilities, installedAt: at, updatedAt: at
         };
         lock.plugins[name] = entry;
@@ -215,7 +326,7 @@ export class PluginStore {
     const staged = await this.stage(current.source);
     try {
       if (staged.plugin.manifest.name !== name) throw new PluginStoreError('PLUGIN_NAME_CHANGED', `来源里的插件名变成了 ${staged.plugin.manifest.name}，不会覆盖 ${name}`);
-      await this.confirmTrust(staged.plugin, current.trustedCapabilities, options);
+      await this.confirmTrust(staged.plugin, [...current.trustedCapabilities, ...(current.candidate?.trustedCapabilities ?? [])], options);
       return await this.withStoreLock(async () => {
         const lock = this.readLock();
         const latest = lock.plugins[name];
@@ -223,20 +334,11 @@ export class PluginStore {
         if (latest.installedAt !== current.installedAt || JSON.stringify(latest.source) !== JSON.stringify(current.source)) {
           throw new PluginStoreError('PLUGIN_CHANGED', `插件 ${name} 已重新安装，请重试更新`);
         }
-        const backup = join(this.pluginsDir, STAGING_DIR, `${name}.previous-${Date.now()}`);
-        await rename(this.pluginDir(name), backup);
-        try { await rename(staged.root, this.pluginDir(name)); }
-        catch (error) { await rename(backup, this.pluginDir(name)); throw error; }
-        await rm(backup, { recursive: true, force: true });
-        const entry: PluginLockEntry = {
-          ...latest,
-          ...(staged.plugin.manifest.version ? { version: staged.plugin.manifest.version } : {}),
-          resolved: staged.resolved,
-          trustedCapabilities: staged.plugin.capabilities,
-          updatedAt: new Date().toISOString()
-        };
-        const changed = latest.source.kind === 'local' || JSON.stringify(entry.resolved) !== JSON.stringify(latest.resolved) || entry.version !== latest.version
-          || entry.trustedCapabilities.join() !== latest.trustedCapabilities.join();
+        const candidate = await this.persistArtifact(name, staged);
+        const active = this.activeArtifact(latest);
+        const changed = candidate.id !== (latest.candidate ?? active).id;
+        const { candidate: _candidate, ...rest } = latest;
+        const entry: PluginLockEntry = { ...rest, active, ...(candidate.id !== active.id ? { candidate } : {}), updatedAt: new Date().toISOString() };
         lock.plugins[name] = entry;
         await this.writeLock(lock);
         return { entry, changed };
@@ -248,7 +350,9 @@ export class PluginStore {
     return this.withStoreLock(async () => {
       if (!this.readLock().plugins[name] && this.builtinNames().has(name)) throw new PluginStoreError('PLUGIN_BUILTIN', `${name} 是内置插件，随 Dutydeck 发布，不能卸载`);
       this.get(name);
-      await rm(this.pluginDir(name), { recursive: true, force: true });
+      await this.assertSwitchSafe(name);
+      await rm(join(this.pluginsDir, '.artifacts', name), { recursive: true, force: true });
+      await rm(join(this.pluginsDir, name), { recursive: true, force: true });
       await rm(this.pluginDataDir(name), { recursive: true, force: true });
       const lock = this.readLock();
       delete lock.plugins[name];
@@ -391,7 +495,30 @@ async function git(args: string[], cwd: string): Promise<string> {
   catch (error) { throw new PluginStoreError('PLUGIN_FETCH_FAILED', `git ${args[0]} 失败：${(error as { stderr?: string }).stderr?.trim() || (error as Error).message}`); }
 }
 
-/** 复制插件目录：不带 .git，符号链接原样保留（加载时只读普通文件，链接出去的内容不会被读到）。 */
+/** 复制插件目录：不带 .git，符号链接原样保留（持久化前摘要校验拒绝包外链接）。 */
 async function copyTree(from: string, to: string) {
   await cp(from, to, { recursive: true, verbatimSymlinks: true, filter: source => basename(source) !== '.git' });
+}
+
+/** Content identity includes relative names, executable mode and symlink targets. */
+async function treeDigest(root: string): Promise<string> {
+  const hash = createHash('sha256');
+  const canonicalRoot = await realpath(root);
+  const inside = (path: string) => { const value = relative(canonicalRoot, path); return value !== '..' && !value.startsWith(`..${sep}`) && !isAbsolute(value); };
+  const visit = async (relative: string) => {
+    const path = join(canonicalRoot, relative), info = await lstat(path);
+    hash.update(JSON.stringify([relative, info.mode & 0o777, info.isDirectory() ? 'directory' : info.isSymbolicLink() ? 'link' : 'file']));
+    if (info.isDirectory()) for (const name of (await readdir(path)).sort()) await visit(relative ? `${relative}/${name}` : name);
+    else if (info.isSymbolicLink()) {
+      const target = await readlink(path);
+      let resolved: string;
+      try { resolved = await realpath(path); }
+      catch { throw new PluginStoreError('PLUGIN_ARTIFACT_INVALID', `插件符号链接 ${relative} 无法解析；不允许悬空或循环链接`); }
+      if (isAbsolute(target) || !inside(resolve(dirname(path), target)) || !inside(resolved)) throw new PluginStoreError('PLUGIN_ARTIFACT_INVALID', `插件符号链接 ${relative} 必须是指向包内的相对链接`);
+      hash.update(JSON.stringify(target));
+    }
+    else if (info.isFile()) hash.update(await readFile(path));
+    else throw new PluginStoreError('PLUGIN_ARTIFACT_INVALID', '插件包只允许普通文件、目录和内部符号链接');
+  };
+  await visit(''); return hash.digest('hex');
 }

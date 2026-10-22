@@ -453,12 +453,79 @@ dutydeck plugin list | validate <dir> | init <name> [--dir <dir>]
 dutydeck plugin config <plugin> <key> --value <v>                      # non-sensitive
 printf %s "$SECRET" | dutydeck plugin config <plugin> <key> --value-fd 0   # sensitive values only via fd
 dutydeck plugin trigger-token <plugin>/<trigger> [--rotate]
-dutydeck plugin update [name] [--yes] | enable <name> | disable <name> | uninstall <name>
+dutydeck plugin update [name] [--yes]  # stage a candidate only
+dutydeck plugin status <name> [--json]
+dutydeck plugin activate <name> [--json] | rollback <name> [--json]
+dutydeck plugin enable <name> | disable <name> | uninstall <name>
 ```
 
 `plugin validate` also checks scenario packs (format, template variables, regexes, parameters) and reports file and field; `install` and `update` do not fail on scenario pack problems but list the packs that will not load and why.
 
-Sources: a local directory, `git+https://…`, `git@…`, `file://…` (`#ref` pins a branch, tag or commit; git sources are pinned by SHA), or `npm:name@version`. Changes take effect after `dutydeck restart`. When multiple processes modify different plugins concurrently, each successful change is preserved. Each `plugin update` from a local directory copies it again and reports an update with a restart reminder, even if its version is unchanged. Data lives under `plugins/` next to the database (`plugins.lock.json`, installed copies, `.data/<name>/`, 0600 `.trigger-tokens.json` and `.config.json`).
+Sources: a local directory, `git+https://…`, `git@…`, `file://…` (`#ref` pins a branch, tag or commit; git sources are pinned by SHA), or `npm:name@version`. `plugin update` stages an immutable candidate; the live Host keeps its provider, hook and skill paths on the original artifact. Restarting does not activate a candidate.  If a candidate is modified, drain and stop the service, run `plugin update` again from the same source, then activate it. Damaged active or previous artifacts are never overwritten in place. Internal relative symlinks are supported; external, absolute or unresolvable links are rejected during installation and updates. Content digests detect changes without a version bump; unchanged content does not produce another candidate. Concurrent mutations are serialized by the store lock. Startup fails if it cannot acquire the plugin store lock or lease; retry after the concurrent operation finishes. External plugins are never silently omitted on such failures.
+
+`plugin status` distinguishes the selected artifact, candidate, previous artifact, actual live Host generation and switch blockers. To activate or roll back, first finish or cancel unfinished tasks and reconcile this plugin's pending actions on the current version. Run `dutydeck stop`; for systemd-managed instances, use `systemctl --user stop <unit>` for every instance sharing this plugin directory. Run `plugin activate <name>` or `plugin rollback <name>`, then `dutydeck start` / `systemctl --user start <unit>`. Live Hosts, recoverable tasks and this plugin's unknown actions block switching. Dead process leases are recognized, but a dead daemon does not prove its tmux tasks ended. Unfinished legacy tasks without verifiable plugin dependencies conservatively block switching; terminal history and unrelated plugin actions do not.
+
+Activation imports and registers trusted providers in a terminable Node process with a temporary data directory and minimal environment. This is not a sandbox for malicious code. Previous artifacts remain available for rollback; there is no per-session multiversion provider dispatch or automatic private-data rollback. Installation and enable/disable changes still require a new Host; uninstall also requires no active consumers. Data lives under `plugins/` next to the database: `plugins.lock.json`, immutable `.artifacts/<name>/<content-digest>/`, `.hosts/` generation/database records, `.data/<name>/`, and 0600 `.trigger-tokens.json` / `.config.json`. Legacy `<name>/` roots remain compatible and are not moved during an update.
+
+Plugin installation unpacks artifacts without running npm install. Runtime imports of `definePlugin` or third-party libraries must be bundled into the provider entry before publishing, for example `esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs`. Include `dist` and `.dutydeck-plugin` in npm files; do not mark `@dutydeck/plugin-sdk` external. Type-only SDK imports need no runtime dependency. Acceptance covers an independently installed SDK, bundling, packing, deleting the author directory, and loading and calling the result through the real Host.
+
+Workspace binding edits resolve aliases and symlinks on the target server, preserve saved configuration and revisions, and can locate disabled bindings for re-enablement. The CLI does not resolve server paths on its own filesystem.
+
+### Business query and action tools
+
+Trusted providers register `api.registerQuery` / `api.registerAction` using the public `@dutydeck/plugin-sdk`. Each tool declares a serializable JSON Schema, compatibility version and resource selector. The supported schema subset is object, array, string, number, integer and boolean with the SDK's listed bounds; objects must reject additional properties. Queries return model-visible JSON; actions return short receipts. Private files use the separate controlled-result interface below.
+
+Installation and enablement require a separate Bot/group or exact workspace binding, plus explicit installation-owner grants. Business configuration cannot increase permission. Grants match toolId, bindingId, trusted actor, effect, resource and invoke/reconcile operation; default is deny. Resource `*` explicitly grants every resource for that tool.
+
+```bash
+dutydeck tool-grant set --database /path/to/dutydeck.db --json '{"id":"ticket-close","toolId":"fake-ticket/close","bindingId":"<binding ID>","actor":{"kind":"installation_owner","id":"installation_owner"},"effects":["write"],"resources":["ticket:T-1"],"operations":["invoke","reconcile"]}'
+dutydeck tool-grant list --database /path/to/dutydeck.db
+dutydeck tool-grant revoke ticket-close --database /path/to/dutydeck.db
+# Within the active task, reuse the host's complete command prefix and TURN
+dutydeck tool list --turn "$TURN"
+dutydeck tool call fake-ticket/get --json '{"ticket":"T-1"}' --call-id read-1 --turn "$TURN"
+dutydeck tool call fake-ticket/close --json '{"ticket":"T-1"}' --call-id close-1 --turn "$TURN"
+dutydeck tool reconcile <actionId> --turn "$TURN"
+```
+
+Lark actors use `{"kind":"channel","appId":"cli_xxx","id":"ou_xxx"}`. Web tasks use the authenticated installation owner. The host derives actor/session/task/attempt from persisted tasks; request arguments and MCP `_meta` cannot override them. `cwd` is the actual worktree, while `workspaceRoot` selects the original project's binding. Web identities have no synthetic chatId.
+
+HTTP exposes `/api/plugin-tools/list`, `/call` and `/reconcile`. The MCP Streamable HTTP tools endpoint `/api/plugin-tools/mcp` supports initialize, ping, tools/list and tools/call, without resources or sampling. Both require a session relay Bearer and `x-dutydeck-tool-turn`. MCP names are `plugin__tool`, with `{input,callId}` arguments; `dutydeck_reconcile` checks an actionId. JSON-RPC ids correlate requests only. Grant management at `/api/plugins/tool-grants` requires installation-owner authorization.
+
+The host namespaces action IDs by tool, session, task and stable callId. Retries retain arguments and callId. Duplicates return ledger state; timeouts and lost responses become unknown and are never automatically reexecuted. Reconciliation checks both the original actor's current invoke permission and the current operator's reconcile permission. Incompatible binding revisions or handler versions leave the action unresolved. Plugins must observe AbortSignal and pass actionId to the external system for idempotency; a host timeout cannot prove external effects were cancelled. Plugin code is trusted and runs without a process sandbox.
+
+See the packaged [fake-ticket example](examples/plugins/fake-ticket/README.md) and its fake service contract.
+
+### Package bindings, skills and author SDK
+
+Installation controls code and maximum scope. A binding selects configuration for each group or project at call time. Control Center → 插件与技能 (Plugins and skills) edits, disables and explains saved bindings; `dutydeck settings` uses the same validation:
+
+```bash
+dutydeck settings plugin-binding list
+dutydeck settings plugin-binding set team-faq --app cli_bot --chat oc_a 'config={"docs_dir":"/srv/runbooks/a"}'
+dutydeck settings plugin-binding set team-faq --app cli_bot --chat oc_b 'config={"docs_dir":"/srv/runbooks/b"}'
+dutydeck settings plugin-binding set team-faq --workspace /srv/project 'config={"docs_dir":"/srv/runbooks/project"}'
+dutydeck settings plugin-binding explain team-faq --app cli_bot --chat oc_a
+dutydeck settings plugin-binding set team-faq --app cli_bot --chat oc_a enabled=false --expected-revision 1
+```
+
+A group binding replaces the entire Bot default binding; missing fields use manifest defaults only. Web bindings match a canonical project directory exactly, including the trusted source directory of a managed worktree. Bot/group calls never fall back to a workspace binding. Saves compare revisions. Each controlled call resolves the current binding; old secret accessors reject changed or disabled bindings. Management requires installation administrator access and rejects task credentials.
+
+Manifests may declare `apiVersion: 1` (unsupported versions are rejected) and `bindingConfig`. Supported types are `string`, `number`, `integer`, `boolean`, `string_list`, and `secret`, with applicable `required/default/enum/min/max` constraints. Invalid values, defaults and enum types are rejected. Credentials are stored separately and created through hidden local input or an inherited file descriptor:
+
+```bash
+dutydeck settings plugin-binding secret-set my-plugin group-a --value-fd 0
+# Reads stdin and returns plugin.my-plugin.group-a; never pass plaintext as an argument.
+dutydeck settings plugin-binding set my-plugin --app cli_bot --chat oc_a 'secrets={"token":"plugin.my-plugin.group-a"}'
+```
+
+References belong to one plugin. To rotate, create a new reference and revision-update the binding. Scenario `context` / `match` and business tools receive host-injected `bindingId`, `revision`, immutable `config`, and `getSecret(key)` at call time. Undeclared secret keys are rejected; explanations and snapshots never contain values. Legacy `api.config`, hooks, Agent and CI retain installation-level behavior; the panel labels Agent/CI as legacy-global.
+
+Skills use stable `package/skill-directory` references and standard YAML multiline descriptions. Ambiguous legacy `/skills name` directives require a specific reference or path. Catalog and delivery both enforce current package, Bot/group binding and workspace scope. A manifest's `requiredSkills` plus the selected binding's `skills` apply to each task. Scenario `skills` are frozen only for the selected scenario, covering model decisions/replies/actions and direct bot messages; unselected scenario SOPs are excluded.
+
+The host inlines required SOPs and bounded text declared in `skillResources`, including readonly tasks: 128 KiB per skill, 64 KiB per resource (16 KiB default), 512 KiB total. Escaping links and non-text resources are rejected. After `task.beforeRun`, removed legacy content is marked `replaced`; removing required SOPs rejects the task. Historical records without a status remain unverified. Freezing text does not freeze scripts, provider processes or all executable code.
+
+The independent `@dutydeck/plugin-sdk` exports `definePlugin`, binding/scenario types and query/action author contracts without server or private shared dependencies. Packaging tests install its tarball into an empty directory, compile a third-party TypeScript plugin and import it at runtime. `plugins/team-faq` is a real `npm pack` sample containing its manifest, provider, scenarios, SOP and references; tests remove the source directory and exercise two group bindings through the installed tarball. See [team-faq usage](plugins/team-faq/README.md).
 
 ### Controlled plugin results
 

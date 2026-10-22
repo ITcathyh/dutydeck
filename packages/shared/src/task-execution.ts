@@ -86,7 +86,7 @@ const promptDiagnosticsSchema = z.object({
 export const acceptedTaskInputV1Schema = z.object({
   version: z.literal(1), prompt: z.string(),
   executionContext: z.object({ actorId: id.optional(), agentPrompt: z.string(), idleCompactHours: z.number().positive().optional(),
-    skillDeliveries: z.array(z.object({ name: id, path: id, source: z.enum(['workspace', 'user', 'plugin']), digest: id, mode: z.literal('prompt') }).strict()).optional(),
+    skillDeliveries: z.array(z.object({ name: id, path: id, source: z.enum(['workspace', 'user', 'plugin']), digest: id, mode: z.literal('prompt'), ref: id.optional(), status: z.enum(['included', 'replaced']).optional(), required: z.boolean().optional(), binding: z.object({ id, revision: z.number().int().positive() }).strict().optional(), resources: z.array(z.object({ path: id, digest: id }).strict()).max(16).optional() }).strict()).optional(),
     riskPolicy: z.object({ enabled: z.boolean(), authorized: z.boolean(), pattern: z.string(), actorEmail: z.string().optional(), reason: z.string().optional() }).strict().optional(),
     recovery: recoverySchema.optional(),
     promptPolicyVersion: z.enum(['legacy-v1', 'optimized-v1']).optional(),

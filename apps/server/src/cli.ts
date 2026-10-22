@@ -34,6 +34,7 @@ import { readPasswordInput } from './auth/password-input.js';
 import { LegacyImportError } from '@dutydeck/legacy-importer';
 import { LegacyImportCliError, runLegacyArchive, runLegacyDiscover, runLegacyPlan } from './legacy-import-cli.js';
 import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
+import { setPluginBindingSecret } from './plugins/binding-secret-cli.js';
 import { SecretCliError, readSecretValue, runSecretList, runSecretRemove, runSecretRotate, runSecretSet, type SecretCliContext } from './secret-cli.js';
 import { SettingsCliError, runSettingsCli } from './settings-cli.js';
 import { ScheduleCliError, runScheduleCli, runScheduleRequest } from './schedule-cli.js';
@@ -417,6 +418,7 @@ async function main() {
     legacyDiscover: runLegacyDiscover,
     legacyPlan: runLegacyPlan,
     legacyArchive: runLegacyArchive,
+    pluginBindingSecretSet: async (plugin, reference, options) => { output(await withSecretContext(options.database, context => setPluginBindingSecret(plugin, reference, options, context.provider))); },
     secretList: async options => { output(await withSecretContext(options.database, runSecretList)); },
     secretSet: async (id, options) => { output(await withSecretContext(options.database, context => runSecretSet(id, options, context))); },
     secretRotate: async (id, options) => { output(await withSecretContext(options.database, context => runSecretRotate(id, options, context))); },

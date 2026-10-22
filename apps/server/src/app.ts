@@ -1,3 +1,5 @@
+import { registerPluginBusinessToolRoutes, type PluginBusinessToolRoutes } from './plugins/tool-routes.js';
+import { registerPluginBindingRoutes, type PluginBindingRoutes } from './plugins/binding-routes.js';
 import { registerPluginResultRoutes, type PluginResultRoutes } from './plugins/result-routes.js';
 import { readLarkConfig } from './lark/config.js';
 import { createLarkSessionSourceResolver } from './lark/session-source.js';
@@ -73,7 +75,9 @@ export interface SessionExecutionPolicy {
 }
 
 export interface BuildAppOptions {
+  pluginBindings?: PluginBindingRoutes;
   pluginResults?: PluginResultRoutes;
+  pluginBusinessTools?: PluginBusinessToolRoutes;
   agentModelSettings?: AgentModelSettings;
   terminalSettings?: TerminalSettings;
   recovery?: RecoveryRouteOptions;
@@ -168,6 +172,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         || (pathname === '/api/auth/link' && (method === 'GET' || method === 'HEAD' || method === 'POST'))
         || pathname === '/api/auth/logout'
         || (options.pluginResults !== undefined && pathname.startsWith('/api/plugin-results/'))
+        || (options.pluginBusinessTools !== undefined && ['/api/plugin-tools/list', '/api/plugin-tools/call', '/api/plugin-tools/reconcile', '/api/plugin-tools/mcp'].includes(pathname))
         || pathname.startsWith('/api/lark/agent-tools/')
         || isRelayCapabilityRequest(method, pathname)
         || pathname.startsWith('/api/hooks/')
@@ -176,7 +181,9 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     });
   }
   if (options.lark?.agentTools) registerLarkAgentToolTurnGuard(app, options.lark.agentTools);
+  registerPluginBindingRoutes(app, options.pluginBindings);
   if (options.pluginResults) registerPluginResultRoutes(app, options.pluginResults);
+  if (options.pluginBusinessTools) registerPluginBusinessToolRoutes(app, options.pluginBusinessTools);
   registerRecoveryRoutes(app, runtime, options.recovery);
   registerWorkspaceGroupRoutes(app, options.workspaceGroups);
   registerSessionNameRoutes(app, runtime, options.sessionNames);

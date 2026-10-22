@@ -53,7 +53,7 @@ describe('PluginHost', () => {
     expect(host.agents.map(agent => agent.id)).toEqual(['good-agent']);
     expect(host.agents.map(agent => agent.origin)).toEqual(['plugin:good']);
     expect(host.diagnostics).toEqual([
-      { plugin: 'broken', message: 'boom' },
+      { plugin: 'broken', message: expect.stringContaining('PLUGIN_PROVIDER_REGISTRATION_FAILED') },
       { plugin: 'hello', message: expect.stringContaining('hooks:notify') }
     ]);
   });
@@ -84,7 +84,7 @@ describe('PluginHost', () => {
     const host = await PluginHost.load({ dataDir, builtinRoot: join(temp, 'no-builtin') });
     expect(host.active.map(item => item.entry.name)).toEqual(['a-ci']);
     expect(host.ciProviders.list().map(item => item.provider.id)).toEqual(['shared']);
-    expect(host.diagnostics).toEqual([{ plugin: 'b-ci', message: expect.stringContaining('a-ci') }]);
+    expect(host.diagnostics).toEqual([{ plugin: 'b-ci', message: expect.stringContaining('PLUGIN_PROVIDER_REGISTRATION_FAILED') }]);
   });
 
   it('bounds provider module evaluation, skips the stalled plugin and loads the next plugin', async () => {
@@ -100,7 +100,7 @@ describe('PluginHost', () => {
     const host = await Promise.race([PluginHost.load({ dataDir, builtinRoot: join(temp, 'empty') }), new Promise<never>((_, reject) => setTimer(() => reject(new Error('provider startup remained blocked')), 500))]);
     expect(host.active.map(item => item.entry.name)).toEqual(['b-valid']);
     expect(host.hooks.has('notify')).toBe(true);
-    expect(host.diagnostics).toEqual([{ plugin: 'a-stalled', message: expect.stringContaining('15000ms') }]);
+    expect(host.diagnostics).toEqual([{ plugin: 'a-stalled', message: expect.stringContaining('PLUGIN_PROVIDER_REGISTRATION_FAILED') }]);
   });
 
   it('does not invoke register when module evaluation resolves after the startup deadline', async () => {
@@ -114,7 +114,7 @@ describe('PluginHost', () => {
     await vi.waitFor(() => expect(existsSync(marker + '.evaluated')).toBe(true));
     expect(host.active).toEqual([]); expect(host.hooks.has('notify')).toBe(false);
     expect(existsSync(marker)).toBe(false);
-    expect(host.diagnostics).toEqual([{ plugin: 'late', message: expect.stringContaining('15000ms') }]);
+    expect(host.diagnostics).toEqual([{ plugin: 'late', message: expect.stringContaining('PLUGIN_PROVIDER_REGISTRATION_FAILED') }]);
   });
 
   it('resolves trigger targets from userConfig and hides triggers until configured', async () => {

@@ -1,3 +1,9 @@
+import { PluginBusinessToolService } from './plugins/tool-service.js';
+import { PluginToolLedger } from './plugins/tool-ledger.js';
+import { PluginToolGrants } from './plugins/tool-grants.js';
+import { TaskPluginToolIdentity } from './plugins/tool-identity.js';
+import { prepareBoundTaskPrompt } from './plugins/bound-skills.js';
+import { PluginHost } from './plugins/host.js';
 import { PluginResultService, PluginResultError } from './plugins/result-service.js';
 import { PluginResultToolRegistry } from './plugins/result-tools.js';
 import { LarkPluginResultAdapter } from './lark/plugin-result-delivery.js';
@@ -78,6 +84,7 @@ import type { SessionInsightResolver } from './session-insight-service.js';
 import { SessionInsightResolver as SessionInsightResolverImpl } from './session-insight-resolver.js';
 import { createTranscriptSourceKeys } from '@dutydeck/runtime';
 import { loadDaemonPlugins, wirePlugins } from './plugins/service-wiring.js';
+import { createPluginManagementAuthorizer } from './plugins/management-auth.js';
 import { sessionHookContext } from './plugins/integration.js';
 import type { StoredLarkConfig } from './lark/config.js';
 
@@ -209,11 +216,16 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   // （builtinAgents 内部按 commandExists 过滤，只暴露本机已安装的 CLI；可用的终端适配器优先，同 id 覆盖 ACPX）。
   // 插件在加载配置之前加载：插件 agents 要与 DUTYDECK_AGENTS_JSON 一起合并。没有启用的插件（或只有内置场景包）时为 undefined，下面不接线。
   const { host: pluginHost, scenarios } = await loadDaemonPlugins(options.env ?? process.env);
-  const { config, droppedAgents } = loadConfigWithDiagnostics(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS, pluginHost?.agents);
-  const refusal = unauthenticatedListenRefusal(config, options.env ?? process.env);
-  if (refusal) throw new Error(refusal);
-  assertBotProcessStartup(config.databaseUrl, (options.env ?? process.env).DUTYDECK_BOT_APP_ID);
-  const repos = createRepositories(config.databaseUrl, { mode: 'runtime', newDatabaseAuthority: 'ledger_v1' });
+  const { config, droppedAgents, repos } = await (async () => {
+    try {
+      const { config, droppedAgents } = loadConfigWithDiagnostics(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS, pluginHost?.agents);
+      const refusal = unauthenticatedListenRefusal(config, options.env ?? process.env);
+      if (refusal) throw new Error(refusal);
+      assertBotProcessStartup(config.databaseUrl, (options.env ?? process.env).DUTYDECK_BOT_APP_ID);
+      const repos = createRepositories(config.databaseUrl, { mode: 'runtime', newDatabaseAuthority: 'ledger_v1' });
+      return { config, droppedAgents, repos };
+    } catch (error) { await pluginHost?.dispose(); throw error; }
+  })();
   // 声明在 try 外：setup 失败路径与正常关闭路径都要先显式 await 分析服务关闭。
   let insightService: SessionInsightService | undefined;
   const insightCloseErrors: unknown[] = [];
@@ -222,7 +234,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     try { await insightService.close(); }
     catch (error) { insightCloseErrors.push(error); }
   };
-  const setupCleanup: Array<() => unknown> = [];
+  const setupCleanup: Array<() => unknown> = [() => pluginHost?.dispose()];
   let closeResources = async () => {
     // 初始化失败路径同样先显式关闭分析服务（拒新刷新/取消作业/清临时目录），
     // 再跑 setupCleanup 并行组与 repos.close。
@@ -446,10 +458,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return { version: promptTemplateVersion(policy.mode), ...(policy.diagnosticReason ? { diagnosticReason: policy.diagnosticReason } : {}) };
     },
     prepareTaskPrompt: pluginWiring
-      ? async (session, prompt, skills, context) => {
-        const botAppId = sessionHookContext(session).botAppId;
-        return pluginWiring.hooks.beforeRun(session, await prepareSkillPrompt(session.cwd, prompt, skills, { ...context, ...(botAppId ? { botAppId } : {}) }), context?.promptPolicyVersion);
-      }
+      ? (session, prompt, skills, context) => prepareBoundTaskPrompt(pluginHost!, pluginWiring.hooks, session, prompt, skills, context)
       : (session, prompt, skills, context) => prepareSkillPrompt(session.cwd, prompt, skills, context),
     sessionPrompt: async (session, prompt, context) => {
       const version = context?.promptPolicyVersion ?? 'legacy-v1';
@@ -462,7 +471,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       const active = runtime.getActiveTaskContext(session.id);
       const resultTools = pluginHost?.resultTools.list({ botAppId: session.sourceId?.split(':')[0], cwd: session.cwd }) ?? [];
       const resultPrompt = session.source === 'lark' && active?.actorId && active.attemptId && !isAutomatedTask(active.taskId) && resultTools.length ? `受控插件结果工具：只返回回执，正文仅原请求者登录下载。调用 dutydeck plugin-tool call <工具> --json '<参数>' --call-id <稳定调用ID> --turn ${capabilities.finalTurnToken(session.id, active.taskId, active.attemptId)}；重试保持 call-id。可用工具：${resultTools.map(t => `${t.id}：${t.description}`).join('；')}\n\n` : '';
-      const prefix = toolsPrompt.slice(0, toolsPrompt.length - prompt.length) + resultPrompt;
+      const businessPrompt = pluginHost?.businessTools.list({ botAppId: session.sourceId?.split(':')[0], cwd: session.workspaceSourceCwd ?? session.cwd }).length && active?.attemptId && !isAutomatedTask(active.taskId)
+        ? `业务工具：使用本轮凭证执行 ${options.groupToolsCommand ?? 'dutydeck'} tool list --turn ${capabilities.workbenchTurnToken(session.id, active.taskId, active.attemptId)}，按返回 schema 调用 ${options.groupToolsCommand ?? 'dutydeck'} tool call <工具> --json '<参数>' --call-id <稳定ID> --turn <本轮凭证>。同次重试保留 call-id；unknown 仅用 tool reconcile 核对，不新建写操作。MCP tools 端点为 /api/plugin-tools/mcp，使用会话 relay Bearer 与 x-dutydeck-tool-turn；身份由宿主决定。\n\n` : '';
+      const prefix = toolsPrompt.slice(0, toolsPrompt.length - prompt.length) + resultPrompt + businessPrompt;
       // 飞书会话的工具块已经定义了 dutydeck 简写，Herdr 入口排在它后面并沿用简写。
       const herdrPrompt = session.terminalBackend === 'herdr' ? '你正在 Herdr 的真实主终端 pane 内运行；HERDR_* 由 Herdr 注入，使用 herdr pane current 核实自身上下文，可用 --current 管理本 pane。不要伪造身份或操作用户 default session。侧边任务可继续使用本会话的 dutydeck session herdr 专属入口。' : herdr.prompt(prefix ? 'dutydeck' : undefined);
       const legacyPrompt = `${prefix}${herdrPrompt ? `${herdrPrompt}\n\n` : ''}${prompt}`;
@@ -510,6 +521,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     process.stderr.write('[dutydeck] Session insight service disabled: INSIGHT_STARTUP_FAILED\n');
     insightService = undefined;
   }
+  const businessToolGrants = new PluginToolGrants(repos.config);
+  const businessTools = pluginHost ? new PluginBusinessToolService(pluginHost, businessToolGrants, new PluginToolLedger(repos.config), new TaskPluginToolIdentity(repos, relayCapabilities, capabilities, runtime)) : undefined;
   const pluginResultIdentity = new LarkPluginResultIdentity(repos.config, options.pluginResultIdentity);
   const pluginResultRegistry = pluginHost?.resultTools ?? new PluginResultToolRegistry();
   const pluginResultAdapter = new LarkPluginResultAdapter({ repositories: repos, capabilities, runtime, groupManager,
@@ -623,6 +636,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       await settle([() => collaboration?.close(), () => relayBroker.flush(), () => app?.close(), () => runtime.shutdown()]);
       await settle([() => capabilities.close()]);
       await settle([() => repos.close()]);
+      await settle([() => pluginWiring?.dispose()]);
       if (errors.length) throw new AggregateError(errors, 'Dutydeck did not shut down cleanly');
     })();
     return closeRun;
@@ -675,6 +689,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return !bot || !larkMemoryEnabled(bot) ? '' : renderMemoryIndex(await memoryStore.list(memoryScope), await memoryStore.getState(memoryScope), { currentChatId: scope.chatId }).text;
     };
     app = await buildApp(runtime, {
+      pluginBindings: { host: pluginHost ?? PluginHost.empty(dirname(config.databaseUrl)), authorize: createPluginManagementAuthorizer({ authEnabled: config.authEnabled, mode, getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null), getPasswordHash: () => getPasswordHash(repos.config) }) },
     terminalSettings,
     agentModelSettings,
       ...(insightService
@@ -742,6 +757,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       agentRequests: { runtime, tools: agentTools, automation, automatedTask: isAutomatedTask, prepareDelivery: automationIntegration.prepareTaskDelivery, sendConfirmation: automationIntegration.sendScheduleRequest },
       // 与 coordinator 的记忆存储同一个 configs 仓库（listener 的 workflowStore 就是 repos.config）。
       memoryTools: { tools: agentTools, store: memoryStore, runtime },
+      ...(businessTools ? { pluginBusinessTools: { service: businessTools, grants: businessToolGrants, origin: new URL(localApiBaseUrl(config)).origin, authorize: createPluginManagementAuthorizer({ authEnabled: config.authEnabled, mode, getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null), getPasswordHash: () => getPasswordHash(repos.config) }) } } : {}),
       pluginResults: { service: pluginResultService, viewer: { repository: repos.pluginResults, identity: pluginResultIdentity, authorize: async delivery => { if (!pluginResultRegistry.get(`${delivery.plugin}/${delivery.tool}`, { botAppId: delivery.requester.tenant, cwd: String(delivery.target.cwd ?? '') })) throw new PluginResultError('RESULT_TOOL_UNAVAILABLE'); await pluginResultAdapter.assertDeliveryAuthorized(delivery); } } },
       workItems: { service: workItems, interactions: workInteractions, authorize: async (request, sessionId, action) => {
         if (!await resolveInstallationPrincipal(request)) return false;

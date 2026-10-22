@@ -9,11 +9,17 @@
 
 ```sh
 dutydeck plugin install ./plugins/team-faq     # 插件带 providers，安装时需要确认
-dutydeck plugin config team-faq docs_dir --value /path/to/runbooks
 dutydeck restart
+dutydeck settings plugin-binding set team-faq --app cli_bot --chat oc_a 'config={"docs_dir":"/srv/runbooks/a"}'
+dutydeck settings plugin-binding set team-faq --app cli_bot --chat oc_b 'config={"docs_dir":"/srv/runbooks/b"}'
+dutydeck settings plugin-binding explain team-faq --app cli_bot --chat oc_a
 ```
 
-`docs_dir` 是 runbook 所在目录。provider 只读这个目录内的文件：
+`docs_dir` 是该绑定的 runbook 目录，同一 provider 按调用时的群分别取值。没有绑定时仍兼容旧 `plugin config team-faq docs_dir --value ...` 安装级配置。绑定共同技能 `team-faq/answer` 与有限输出规范由宿主内联，@ 请求和只读自动接话都收到，不依赖模型读取本机文件。
+
+打包分发可在此目录运行 `npm pack --ignore-scripts`，再用 `dutydeck plugin install npm:/绝对路径/dutydeck-plugin-team-faq-0.1.0.tgz --yes` 安装；清单、provider、场景、技能与引用都随包分发。
+
+provider 只读这个目录内的文件：
 
 - `docs` 里只能写相对 `docs_dir` 的路径，且必须是 `.md` / `.markdown` 文件；
 - 带 `..`、绝对路径、解析后落在 `docs_dir` 之外的路径（包括指向目录外的符号链接）一律拒绝，写进 `missing`；

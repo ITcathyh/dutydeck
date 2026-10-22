@@ -6,13 +6,14 @@
 
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { DECIDER_META_KEY, SCENARIO_RECORD, RuntimeError, scenarioBindingStatus, scenarioDirectLimits, scenarioPolicyVersion, scenarioRecordOf, scenarioTriggerSources, resolveScenarioParams, wrapUntrusted,
+import { collaborationScenarioSchema, type CollaborationScenarioSnapshot, DECIDER_META_KEY, SCENARIO_RECORD, RuntimeError, scenarioBindingStatus, scenarioDirectLimits, scenarioPolicyVersion, scenarioRecordOf, scenarioTriggerSources, resolveScenarioParams, wrapUntrusted,
   type CollaborationDecision, type CollaborationDeciderMeta, type CollaborationRepository, type CollaborationScope, type ListedItems, type ParticipationLevel, type PromptPart,
   type ScenarioBinding, type ScenarioOutcome, type ScenarioPack, type ScenarioRecordSnapshot } from '@dutydeck/shared';
 import type { RegisteredScenarioPack } from '../plugins/scenario-registry.js';
 import type { StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkCardService } from './service.js';
+import { freezeScenarioSkills } from './scenario-model.js';
 import { keywordsMatch, sourceTextFingerprint } from './scenario-fingerprint.js';
 import { renderScenarioTemplate, sanitizeDisplayName, templateText } from './scenario-template.js';
 
@@ -30,12 +31,12 @@ export const directIntroKey = (packId: string, scope: CollaborationScope, messag
  */
 export type LarkScenarioAdoption = LarkDirectAdoption | { mode: 'model'; packId: string; decisionId: string };
 export type LarkDirectAdoption =
-  | { mode: 'direct'; packId: string; version: string; digest: string; instruction: string; sourceAppId: string; recordId: string }
+  | { mode: 'direct'; packId: string; version: string; digest: string; instruction: string; sourceAppId: string; recordId: string; skills?: CollaborationScenarioSnapshot['skills'] }
   | { mode: 'direct'; packId: string; legacyInstruction: string };
 
 /** 入站记录里读回的收养字段要符合这个形状，否则按没有场景处理。 */
 export const larkScenarioAdoptionSchema = z.union([
-  z.object({ mode: z.literal('direct'), packId: z.string().min(1), version: z.string().min(1), digest: z.string().min(1), instruction: z.string().min(1), sourceAppId: z.string().min(1), recordId: z.string().min(1) }).strict(),
+  z.object({ mode: z.literal('direct'), packId: z.string().min(1), version: z.string().min(1), digest: z.string().min(1), instruction: z.string().min(1), sourceAppId: z.string().min(1), recordId: z.string().min(1), skills: collaborationScenarioSchema.shape.skills }).strict(),
   z.object({ mode: z.literal('direct'), packId: z.string().min(1), legacyInstruction: z.string().min(1) }).strict(),
   z.object({ mode: z.literal('model'), packId: z.string().min(1), decisionId: z.string().min(1) }).strict()
 ]);
@@ -107,18 +108,19 @@ export const directReason = (pack: Pick<ScenarioPack, 'reasons'> | undefined, ou
 /** 执行 prompt 的请求部分：指令是用户请求，原文作为不可信材料跟在后面；旧版本入站记录沿用旧拼接。 */
 export function directScenarioPrompt(adoption: LarkDirectAdoption, text: string): string {
   if ('legacyInstruction' in adoption) return `${adoption.legacyInstruction}\n${text}`;
-  return `${adoption.instruction}\n\n${wrapUntrusted(`scenario:${adoption.packId}:${adoption.sourceAppId}`, text)}`;
+  return `${adoption.instruction}${adoption.skills ? `\n\n${adoption.skills.prompt}` : ''}\n\n${wrapUntrusted(`scenario:${adoption.packId}:${adoption.sourceAppId}`, text)}`;
 }
 
 /** 把材料里的用户请求拆成「指令」（user_request）和「原文」（reference，不可信材料）两部分；拼回去与原文一致。 */
 export function splitDirectScenarioRequest(parts: PromptPart[], adoption: LarkScenarioAdoption | undefined): PromptPart[] {
   const [request, ...rest] = parts;
   if (adoption?.mode !== 'direct' || 'legacyInstruction' in adoption || request?.kind !== 'user_request') return parts;
-  const head = `${adoption.instruction}\n\n`;
+  const head = `${adoption.instruction}${adoption.skills ? `\n\n${adoption.skills.prompt}` : ''}\n\n`;
   if (!request.content.startsWith(head)) return parts;
   const body = request.content.slice(head.length);
   return [
     { ...request, content: adoption.instruction, suffix: '\n\n' },
+    ...(adoption.skills ? [{ kind: 'skill' as const, trustScope: 'required_scenario_skill', content: adoption.skills.prompt, digest: adoption.skills.digest, suffix: '\n\n' }] : []),
     { kind: 'reference', sourceId: `scenario:${adoption.packId}:${adoption.sourceAppId}`, trustScope: `untrusted:scenario:${adoption.packId}`, content: body,
       ...(request.suffix ? { suffix: request.suffix } : {}) },
     ...rest
@@ -200,6 +202,7 @@ async function startDirect(deps: DirectRunDeps, input: DirectRunInput, binding: 
   if (!dispatch) throw new RuntimeError('COLLABORATION_DISPATCH_UNAVAILABLE', '机器人还没开始监听', 409);
   const { entry, event, scope } = input;
   const pack = entry.pack;
+  const skills = await freezeScenarioSkills(entry, scope, input.config.workspace ?? process.cwd());
   const name = scenarioTriggerSources(pack, binding).find(source => source.appId === input.sender.appId)?.name ?? input.sender.appId;
   const values = { source: templateText(sanitizeDisplayName(name)) };
   let thread = event.threadId ? { rootId: event.rootId ?? event.messageId, threadId: event.threadId } : undefined;
@@ -211,6 +214,6 @@ async function startDirect(deps: DirectRunDeps, input: DirectRunInput, binding: 
     if (threadId) thread = { rootId: event.messageId, threadId };
   }
   const scenario: LarkScenarioAdoption = { mode: 'direct', packId: pack.id, version: pack.version, digest: entry.digest,
-    instruction: renderScenarioTemplate(pack.execution.instruction, values), sourceAppId: input.sender.appId, recordId };
+    instruction: renderScenarioTemplate(pack.execution.instruction, values), ...(skills ? { skills } : {}), sourceAppId: input.sender.appId, recordId };
   await dispatch({ ...event, ...thread, senderOpenId: binding.requesterId, senderType: 'user', scenario }, input.config);
 }

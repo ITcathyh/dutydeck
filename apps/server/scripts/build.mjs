@@ -13,6 +13,7 @@ const aliases = new Map([
   ['@dutydeck/legacy-importer', 'packages/legacy-importer/src/index.ts'],
   ['@dutydeck/cli-adapters', 'packages/cli-adapters/src/index.ts'],
   ['@dutydeck/config', 'packages/config/src/index.ts'],
+  ['@dutydeck/plugin-sdk', 'packages/plugin-sdk/src/index.ts'],
   ['@dutydeck/pty-driver', 'packages/pty-driver/src/index.ts'],
   ['@dutydeck/relay', 'packages/relay/src/index.ts'],
   ['@dutydeck/runtime', 'packages/agent-runtime/src/index.ts'],
@@ -50,6 +51,12 @@ await build({
   packages: 'external',
   sourcemap: false,
   plugins: workspacePlugins
+});
+// Isolated plugin activation uses the same Host registries after installation, without tsx.
+await build({
+  entryPoints: [resolve(serverRoot, 'src/plugins/activation-worker.ts')],
+  outfile: resolve(serverRoot, 'dist/assets/plugin-validation/cli.js'),
+  bundle: true, format: 'esm', platform: 'node', target: 'node22', packages: 'external', plugins: workspacePlugins
 });
 // Pane-resident OSC handshake relay must survive bundling and npm packaging.
 await build({

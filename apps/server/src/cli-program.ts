@@ -1,10 +1,11 @@
+import { registerBusinessToolCli } from './plugins/tool-cli.js';
 import { registerPluginResultCli } from './plugins/result-cli.js';
 import { workbenchHelp, layeredWorkbenchHelp, collaborationHelp, groupToolsHelp, memoryToolsHelp, herdrHelp } from './agent-tool-help.js';
 import type { RecoveryCliOptions, RecoveryOperation } from './recovery-cli.js';
 import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
 import type { SessionNamesAction } from './session-names-cli.js';
 import type { ScheduleCliAction, ScheduleCliInput, ScheduleRequestCliInput } from './schedule-cli.js';
-import { agentFields, botFields, channelBotFields, fieldsHelp, groupFields, groupBindingFields, groupBindingCreateFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
+import { pluginBindingFields, agentFields, botFields, channelBotFields, fieldsHelp, groupFields, groupBindingFields, groupBindingCreateFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { agentCommandHelp } from './lark/agent-command.js';
 import { addAgentCommands } from './agent-cli.js';
 import { Option, Command } from 'commander';
@@ -234,6 +235,7 @@ export interface CliHandlers {
   legacyPlan?(options: LegacySourceCliOptions): void | Promise<void>;
   legacyArchive?(options: LegacyArchiveCliOptions): void | Promise<void>;
   secretList?(options: SecretListCliOptions): void | Promise<void>;
+  pluginBindingSecretSet?(plugin: string, reference: string, options: SecretValueCliOptions): void | Promise<void>;
   secretSet?(id: string, options: SecretValueCliOptions): void | Promise<void>;
   secretRotate?(id: string, options: SecretRotateCliOptions): void | Promise<void>;
   secretRemove?(id: string, options: SecretRemoveCliOptions): void | Promise<void>;
@@ -764,6 +766,23 @@ Examples:
   withTarget(settings.command('agents').description('List the Agents that bot and group settings can select'))
     .action((_options, command) => runSettings('agents', command));
 
+  const pluginBindings = settings.command('plugin-binding').description('Package bindings and effective skills (dashboard: 插件与技能)');
+  pluginBindings.command('secret-set <package> <reference>').description('Create a namespaced local plugin secret; values are never command arguments')
+    .option('--database <path>', 'Local runtime database location').option('--value-fd <fd>', 'Inherited input descriptor; otherwise hidden TTY input')
+    .action((plugin, reference, options, command) => handlers.pluginBindingSecretSet?.(plugin, reference, serverOptionsFrom(options, command)));
+  withTarget(pluginBindings.command('list')).action((_options, command) => runSettings('plugin-binding-list', command));
+  for (const action of ['set', 'explain'] as const) {
+    const command = withTarget(pluginBindings.command(action === 'set' ? 'set <package> [key=value...]' : 'explain <package>'))
+      .option('--app <app-id>', 'Bot binding target').option('--chat <chat-id>', 'Group binding target (requires --app)')
+      .option('--workspace <path>', 'Exact project directory for Web tasks, including managed worktrees')
+      .option('--expected-revision <number>', 'Reject concurrent edits');
+    if (action === 'set') command.addHelpText('after', fieldsHelp(pluginBindingFields)).action((pluginName, pairs, _options, command) => {
+      const options = command.optsWithGlobals();
+      return runSettings('plugin-binding-set', command, { pluginName, pairs, appId: options.app, chatId: options.chat, workspaceRoot: options.workspace, expectedRevision: options.expectedRevision });
+    });
+    else command.action((pluginName, _options, command) => { const options = command.optsWithGlobals(); return runSettings('plugin-binding-explain', command, { pluginName, appId: options.app, chatId: options.chat, workspaceRoot: options.workspace }); });
+  }
+
   const agentSettings = settings.command('agent').description('Claude Code model service settings (dashboard: Agent)');
   withTarget(agentSettings.command('show <agent-id>').description('Show model service settings; the API Key is never printed')
     .option('--app <app-id>', 'Show this bot’s independent model service settings'))
@@ -980,10 +999,14 @@ Examples:
   plugin.command('list').description('List installed plugins with their source, pinned version and problems')
     .option('--json', 'Print the result as a single line of JSON')
     .action((options, command) => handlers.plugin?.('list', [], pluginOptions(options, command)));
-  plugin.command('update [name]').description('Fetch the recorded source again; new hooks or providers must be trusted again')
+  plugin.command('update [name]').description('Stage an immutable candidate without changing the active version; trust new capabilities')
     .option('--yes', 'Trust newly added hooks and providers without prompting')
     .option('--json', 'Print the result as a single line of JSON')
     .action((name, options, command) => handlers.plugin?.('update', name ? [name] : [], pluginOptions(options, command)));
+  for (const action of ['activate', 'rollback', 'status'] as const) plugin.command(`${action} <name>`)
+    .description(action === 'status' ? 'Show selected, candidate, live Host generations and activation blockers' : `${action === 'activate' ? 'Activate a staged candidate' : 'Restore the previous artifact'} while all affected runtimes are stopped and no recovery dependencies remain`)
+    .option('--json', 'Print the result as a single line of JSON')
+    .action((name, options, command) => handlers.plugin?.(action, [name], pluginOptions(options, command)));
   plugin.command('validate <path>').description('Check a plugin directory and report every problem with its file and field')
     .option('--json', 'Print the result as a single line of JSON')
     .action((path, options, command) => handlers.plugin?.('validate', [path], pluginOptions(options, command)));
@@ -1157,6 +1180,7 @@ Examples:
   addProcessCommands(daemon);
 
   registerPluginResultCli(program);
+  registerBusinessToolCli(program);
   return program
     .addHelpText('after', `
 Getting started:

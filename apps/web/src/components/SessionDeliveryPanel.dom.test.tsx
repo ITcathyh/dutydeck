@@ -204,3 +204,13 @@ it('嵌入结果检视不渲染第二个 Dialog，环境默认折叠', async () 
   expect(screen.getByText('执行环境与用量').closest('details')?.open).toBe(false);
   expect(screen.getByRole('region', { name: '任务结果' }).textContent).toContain('执行完成与验证通过分别记录');
 });
+
+it('distinguishes replaced, verified included, and historical unverified skill records', async () => {
+  mount('completed', {tasks:[{id:'skills',sessionId:'s1',prompt:'skill request',status:'completed',createdAt:session.createdAt,updatedAt:session.createdAt,skillDeliveries:[
+    {name:'old',path:'/old',source:'plugin',digest:'a',mode:'prompt'},
+    {name:'included',path:'/included',source:'plugin',digest:'b',mode:'prompt',status:'included'},
+    {name:'replaced',path:'/replaced',source:'plugin',digest:'c',mode:'prompt',status:'replaced'}
+  ]}] as Task[]});
+  expect(await screen.findByText(/旧记录：未核实最终投递/)).toBeTruthy();
+  expect(screen.getByText(/正文被 hook 替换，未投递/)).toBeTruthy(); expect(screen.getByText(/正文已加入本轮指令/)).toBeTruthy();
+});

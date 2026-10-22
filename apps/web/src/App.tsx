@@ -388,7 +388,7 @@ export default function App() {
   const activeOutputLabel = active?.model ?? activeAgent?.name ?? active?.agentId ?? 'Agent';
   const streamStatus = useSessionStream(activeSessionId, active?.runId, events.isSuccess);
   const activeModels = useQuery({ queryKey: agentModelsQueryKey(active?.agentId, active?.model), queryFn: () => loadAgentModels(active!.agentId, active!.model), enabled: Boolean(active && !active.archivedAt), initialData: () => active ? readCachedAgentModels(active.agentId, active.model) : undefined, initialDataUpdatedAt: 0, refetchOnMount: 'always', staleTime: 60_000 });
-  const skills = useQuery({ queryKey: ['skills', active?.cwd], queryFn: () => api.skills(active?.cwd), enabled: Boolean(active && !active.archivedAt), staleTime: 60_000 });
+  const skills = useQuery({ queryKey: ['skills', active?.cwd, active?.sourceId], queryFn: () => api.skills(active?.cwd, active?.source === 'lark' || active?.source === 'plugin_trigger' ? active.sourceId?.split(':')[0] : undefined, active?.sourceId?.split(':')[1], active?.workspaceSourceCwd), enabled: Boolean(active && !active.archivedAt), staleTime: 60_000 });
   const pluginCommands = useQuery({ queryKey: ['plugin-commands', active?.cwd], queryFn: () => api.pluginCommands(active?.cwd), enabled: Boolean(active && !active.archivedAt), staleTime: 60_000 });
   const eventList = events.data?.events ?? [];
   const taskContext = currentContextStats(eventList, sessionUsage.data?.snapshot?.context);

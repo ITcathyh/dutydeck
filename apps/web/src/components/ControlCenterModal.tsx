@@ -1,3 +1,4 @@
+import { PluginBindingsPanel } from './PluginBindingsPanel';
 import { ConfirmDialog } from './ConfirmDialog';
 import { AgentModelSettings } from './AgentModelSettings';
 import { supportsModelServiceSettings } from '../agent-model-support';
@@ -26,7 +27,7 @@ import { useExperimental } from '../experimental';
 
 export type SettingsLeaveGuard = (action: () => void) => boolean;
 
-export type ControlCenterSection = 'agents' | 'lark' | 'groups' | 'automation' | 'experimental';
+export type ControlCenterSection = 'agents' | 'lark' | 'groups' | 'automation' | 'plugins' | 'experimental';
 
 type Props = {
   open: boolean;
@@ -50,6 +51,7 @@ type Props = {
 };
 
 const sections: Array<{ id: ControlCenterSection; label: string; description: string; Icon: typeof Bot }> = [
+  { id: 'plugins', label: '插件与技能', description: '业务包绑定与生效解释', Icon: Settings2 },
   { id: 'agents', label: 'Agent', description: '准备本机执行者', Icon: Bot },
   { id: 'lark', label: '飞书 Bot', description: '连接消息入口', Icon: MessageSquare },
   { id: 'groups', label: '群与权限', description: '群聊范围与操作权限', Icon: Users },
@@ -238,7 +240,7 @@ export function ControlCenterModal({
           {[
             { label: '本任务', ids: ['automation'] },
             { label: '机器人 / 群聊', ids: ['lark', 'groups'] },
-            { label: '实例与接入', ids: ['agents', 'experimental'] }
+            { label: '实例与接入', ids: ['agents', 'plugins', 'experimental'] }
           ].map(group => <div key={group.label}><h3 className="mb-1 px-3 text-caption font-semibold text-subtle">{group.label}</h3>{group.label === '本任务' && <p className="mb-2 px-3 text-caption text-secondary">目录、权限与模型在任务中查看；创建时可选择，影响该任务。</p>}<div className="grid grid-cols-2 gap-1 md:grid-cols-1">{visibleSections.filter(item => group.ids.includes(item.id)).map(item =>         <button key={item.id} type="button" data-dialog-initial-focus={activeSection === item.id ? '' : undefined} aria-current={activeSection === item.id ? 'page' : undefined} disabled={busy} onClick={() => { if (item.id !== activeSection) requestLeave(() => setSection(item.id)); }} className={`flex min-h-12 items-center gap-2 rounded-md px-3 text-left ${activeSection === item.id ? 'bg-surface text-primary shadow-card' : 'text-secondary hover:bg-hover'}`}><item.Icon size={15}/><span className="min-w-0"><strong className="block text-caption font-semibold">{item.label}</strong><span className="hidden truncate text-caption text-subtle md:block">{item.description}</span></span><ChevronRight size={13} className="ml-auto hidden md:block"/></button>)}</div></div>)}
         </nav>
       </aside>
@@ -248,6 +250,7 @@ export function ControlCenterModal({
         {activeSection === 'lark' && <LarkSection agents={agents} legacyBots={legacyBots} larkListeningDisabled={larkListeningDisabled} larkBotsLoading={larkBotsLoading} larkBotsFailed={larkBotsFailed} larkBotsRetrying={larkBotsRetrying} onRetryLarkBots={onRetryLarkBots} capabilities={capabilities} matrix={matrix} secretRefs={secretRefs} channelBots={channelBots} availableLarkRefs={availableLarkRefs} createOpen={createOpen} setCreateOpen={setCreateOpen} displayName={displayName} setDisplayName={setDisplayName} externalAppId={externalAppId} setExternalAppId={setExternalAppId} brand={brand} setBrand={setBrand} createBot={createBot} onOpenLarkSetup={target => requestLeave(() => onOpenLarkSetup(target))}/>}
         {activeSection === 'groups' && <GroupsSection cells={cells} missingBindings={missingBindings} repositoriesWired={capabilities.data?.repositoriesWired === true} onOpenLarkSetup={() => requestLeave(onOpenLarkSetup)} onOpenGroups={() => requestLeave(onOpenGroups)}/>}
         {activeSection === 'automation' && <AutomationSection scheduleCount={scheduleCount} capabilities={scheduleCapabilities} onOpenSchedules={() => requestLeave(onOpenSchedules)}/>}
+        {activeSection === 'plugins' && <PluginBindingsPanel/>}
         {activeSection === 'experimental' && <ExperimentalSection enabled={experimental} onChange={setExperimental}/>}
       </div>
     </div>

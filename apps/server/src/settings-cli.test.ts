@@ -603,3 +603,52 @@ it('passes a bot scope and a secret descriptor for Claude service settings witho
   expect(settings).toHaveBeenLastCalledWith('agent-show', expect.objectContaining({ agentId: 'claude', appId: 'cli_a' }));
   await expect(runSettingsCli('agent-set', { ...target, agentId: 'claude', appId: 'cli_a', pairs: ['apiKey=ARGV_SECRET'] }, { fetcher: vi.fn(), readToken })).rejects.toMatchObject({ code: 'SETTINGS_KEY_UNKNOWN' });
 });
+
+describe('plugin bindings management parity', () => {
+  it('uses real admin routes for typed config, revision conflicts, secret references, scope errors and explanations', async () => {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    const { PluginStore } = await import('./plugins/store.js');
+    const { setPluginSkillRoots } = await import('./skill-catalog.js');
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-binding-cli-')); cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const source = join(directory, 'package'); await mkdir(join(source, '.dutydeck-plugin'), { recursive: true });
+    await mkdir(join(source, 'skills', 'answer'), { recursive: true }); await writeFile(join(source, 'skills/answer/SKILL.md'), '---\nname: answer\ndescription: SOP\n---\nREQUIRED');
+    await writeFile(join(source, '.dutydeck-plugin/plugin.json'), JSON.stringify({ name: 'sample', apiVersion: 1, skills: 'skills', requiredSkills: ['sample/answer'], bindingConfig: { count: { type: 'integer', default: 2, min: 1, max: 5, description: 'Count' }, token: { type: 'secret', description: 'Credential', required: true } } }));
+    const store = new PluginStore(join(directory, 'data')); await store.install(source, { yes: true });
+    store.secretProvider(true)!.writeExclusive('plugin.sample.one', Buffer.from('synthetic-value'));
+    const host = await PluginHost.load({ dataDir: store.dataDir }); cleanups.push(setPluginSkillRoots(scope => host.skillEntries(scope)));
+    let allowed = true;
+    const { createPluginManagementAuthorizer } = await import('./plugins/management-auth.js');
+    let authMode: 'local' | 'token' = 'local';
+    const authorizers = { local: createPluginManagementAuthorizer({ authEnabled: false, mode: 'local', getToken: async () => 'owner-token', getPasswordHash: async () => null }), token: createPluginManagementAuthorizer({ authEnabled: true, mode: 'token', getToken: async () => 'owner-token', getPasswordHash: async () => null }) };
+    const authorize = (request: Parameters<typeof authorizers.local>[0]) => authorizers[authMode](request);
+    const app = await buildApp({} as any, { pluginBindings: { host, authorize: async request => allowed && authorize(request) } }); cleanups.push(() => app.close());
+    const run = (action: SettingsAction, input: SettingsCliInput = {}) => runSettingsCli(action, { ...target, pluginName: 'sample', appId: 'bot', chatId: 'group', ...input }, { fetcher: bridge(app), readToken });
+    expect(await run('plugin-binding-set', { pairs: ['config={"count":3}', 'secrets={"token":"plugin.sample.one"}'] })).toMatchObject({ binding: { revision: 1, config: { count: 3 } } });
+    expect(await run('plugin-binding-explain')).toMatchObject({ binding: { revision: 1, config: { count: 3 }, secretKeys: ['token'] }, skills: [{ ref: 'sample/answer' }] });
+    expect(JSON.stringify(await run('plugin-binding-list'))).not.toContain('synthetic-value');
+    await expect(run('plugin-binding-set', { pairs: ['config={"count":null}'] })).rejects.toMatchObject({ code: 'PLUGIN_BINDING_INVALID' });
+    await expect(run('plugin-binding-set', { pairs: ['skills=["sample/missing"]'] })).rejects.toMatchObject({ code: 'SKILL_NOT_FOUND' });
+    await run('plugin-binding-set', { pairs: ['enabled=false'] });
+    await expect(run('plugin-binding-set', { pairs: ['enabled=true'], expectedRevision: '1' })).rejects.toMatchObject({ code: 'PLUGIN_BINDING_CONFLICT' });
+    expect(await run('plugin-binding-set', { pairs: ['enabled=true'] })).toMatchObject({ binding: { enabled: true, revision: 3 } });
+    for (const mode of ['local', 'token'] as const) {
+      authMode = mode;
+      for (const headers of [{ authorization: 'Bearer v1.task-token' }, { authorization: 'Bearer raw-task-token' }, { 'x-dutydeck-tool-turn': 'turn' }, { 'x-dutydeck-work-turn': 'turn' }, { 'x-dutydeck-result-turn': 'turn' }, {authorization:'Bearer owner-token','x-dutydeck-tool-turn':'turn'}]) {
+        for (const [method, url, payload] of [['GET', '/api/plugin-bindings', undefined], ['PUT', '/api/plugin-bindings', { plugin:'sample',botAppId:'bot',expectedRevision:0 }], ['POST', '/api/plugin-bindings/explain', {plugin:'sample',botAppId:'bot'}]] as const) expect((await app.inject({method,url,headers,payload})).statusCode).toBe(403);
+      }
+      const headers = {authorization:'Bearer owner-token'};
+      expect((await app.inject({method:'GET',url:'/api/plugin-bindings',headers})).statusCode).toBe(200);
+      const current = host.bindings.list()[0]!; const {id,revision,...values}=current;
+      expect((await app.inject({method:'PUT',url:'/api/plugin-bindings',headers,payload:{...values,expectedRevision:revision}})).statusCode).toBe(200);
+      expect((await app.inject({method:'POST',url:'/api/plugin-bindings/explain',headers,payload:{plugin:'sample',botAppId:'bot',chatId:'group'}})).statusCode).toBe(200);
+      expect((await app.inject({method:'GET',url:'/api/plugin-bindings'})).statusCode).toBe(mode==='local'?200:403);
+    }
+    authMode = 'local';
+    allowed = false; for (const action of ['plugin-binding-list', 'plugin-binding-set', 'plugin-binding-explain'] as const) await expect(run(action)).rejects.toMatchObject({ code: 'PLUGIN_BINDING_FORBIDDEN' });
+  });
+  it('parses the local secret input descriptor without accepting plaintext value arguments', async () => {
+    const handler = vi.fn(); const program = createCliProgram('test', { pluginBindingSecretSet: handler });
+    await program.parseAsync(['node', 'dutydeck', 'settings', 'plugin-binding', 'secret-set', 'sample', 'group-a', '--value-fd', '3', '--database', '/tmp/test.db']);
+    expect(handler).toHaveBeenCalledWith('sample', 'group-a', expect.objectContaining({ valueFd: '3', database: '/tmp/test.db' }));
+  });
+});

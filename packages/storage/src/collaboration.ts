@@ -1,3 +1,4 @@
+import { actionTransition } from '@dutydeck/shared';
 import type Database from 'better-sqlite3';
 import {
   COLLABORATION_LIST_LIMIT,
@@ -63,14 +64,6 @@ import { fromLegacyDecision, legacyScenarioGate, retireLegacyDutyColumns, withLe
 const DEFAULT_SETTINGS_UPDATED_AT = '1970-01-01T00:00:00.000Z';
 const DEFAULT_OBSERVATION_WINDOW = 30;
 
-const ALLOWED_ACTION_TRANSITIONS: Record<ActionStatus, readonly ActionStatus[]> = {
-  intent: ['sending', 'suppressed', 'failed'],
-  sending: ['succeeded', 'failed', 'unknown', 'suppressed'],
-  unknown: ['succeeded', 'failed', 'suppressed'],
-  succeeded: [],
-  failed: [],
-  suppressed: []
-} as const;
 
 function now(): string {
   return new Date().toISOString();
@@ -1658,54 +1651,11 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
         }
 
         const existing = rowToAction(row);
-        if (validatedPatch.expectedRevision !== existing.revision) {
-          throw new RuntimeError(
-            'COLLABORATION_REVISION_CONFLICT',
-            `Action revision conflict: expected ${validatedPatch.expectedRevision}, current ${existing.revision}`,
-            409
-          );
-        }
-
-        const incomingReceipt = validatedPatch.receipt !== undefined
-          ? (validatedPatch.receipt ?? undefined)
-          : existing.receipt;
-        const incomingError = validatedPatch.error !== undefined
-          ? (validatedPatch.error ?? undefined)
-          : existing.error;
-        const receiptChanged = (existing.receipt ?? null) !== (incomingReceipt ?? null);
-        const errorChanged = (existing.error ?? null) !== (incomingError ?? null);
-
-        if (validatedPatch.status === existing.status) {
-          const isTerminal = ['succeeded', 'failed', 'suppressed'].includes(existing.status);
-          if (isTerminal) {
-            if (receiptChanged || errorChanged) {
-              throw new RuntimeError(
-                'COLLABORATION_ACTION_CONFLICT',
-                `Cannot modify confirmed receipt or error on terminal action '${id}' with status '${existing.status}'`,
-                409
-              );
-            }
-            return existing;
-          }
-
-          if (!receiptChanged && !errorChanged) {
-            return existing;
-          }
-        } else {
-          const allowed = ALLOWED_ACTION_TRANSITIONS[existing.status];
-          if (!allowed.includes(validatedPatch.status)) {
-            throw new RuntimeError(
-              'COLLABORATION_ACTION_INVALID_TRANSITION',
-              `Invalid action status transition from '${existing.status}' to '${validatedPatch.status}'`,
-              400
-            );
-          }
-        }
-
-        const newRevision = existing.revision + 1;
+        const transition = actionTransition(existing, validatedPatch);
+        if (!transition) return existing;
+        const newRevision = transition.revision;
         const updatedAt = now();
-        const receipt = incomingReceipt;
-        const error = incomingError;
+        const { receipt, error } = transition;
 
         sqlite.prepare(`
           UPDATE collaboration_actions SET
