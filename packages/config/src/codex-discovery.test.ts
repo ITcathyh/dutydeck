@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
+import { PTY_AGENT_CONTRIBUTIONS } from '../../pty-driver/src/contributions.js';
 import { commandExists } from '@dutydeck/transports';
 
 afterEach(() => vi.unstubAllEnvs());
@@ -28,4 +29,22 @@ it.each(['override', 'path'])('registers and versions the executable Codex used 
     await runtime.initialize(config.agents);
     expect(await repos.agents.get('codex')).toMatchObject({ id: 'codex', version: 'Codex discovery fixture 1.0' });
   } finally { await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); }
+});
+
+it('uses an explicit config CODEX_PATH for both terminal entries, their versions and launch command', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-codex-terminal-discovery-'));
+  const executable = join(cwd, 'custom-codex');
+  await writeFile(executable, '#!/bin/sh\necho "Codex terminal fixture 2.0"\n', { mode: 0o755 });
+  vi.stubEnv('PATH', '');
+  vi.stubEnv('CODEX_PATH', undefined);
+  vi.resetModules();
+  try {
+    const { loadConfig } = await import('./index.js');
+    const env = { CODEX_PATH: executable, DUTYDECK_DEFAULT_CWD: cwd };
+    const agents = loadConfig(env, PTY_AGENT_CONTRIBUTIONS).agents;
+    for (const id of ['codex', 'codex-cli']) {
+      expect(agents.find(agent => agent.id === id)).toMatchObject({ protocol: 'pty-cli', command: executable, version: 'Codex terminal fixture 2.0' });
+    }
+    expect(loadConfig({ ...env, CODEX_PATH: '/missing/codex' }, PTY_AGENT_CONTRIBUTIONS).agents.some(agent => ['codex', 'codex-cli'].includes(agent.id))).toBe(false);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
 });

@@ -137,6 +137,8 @@ export interface AgentDriver {
    * 结果未知的一轮靠它判断 Agent 是否已经停下。
    */
   isIdle?(): boolean;
+  /** Native background work can outlive the submitted main turn. */
+  hasBackgroundWork?(): boolean;
   /** 重连/恢复持久会话；受控驱动的新增资源使用本次显式许可。 */
   resume(operation?: OperationPermit): Promise<void>;
   /** Capture the output boundary before submitting a new turn, if recoverable. */

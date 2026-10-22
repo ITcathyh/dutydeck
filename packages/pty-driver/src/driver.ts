@@ -724,6 +724,10 @@ export class PtyCliDriver implements AgentDriver {
     return this.adapter.isIdleScreen(screen);
   }
 
+  hasBackgroundWork(): boolean {
+    return !this.stopped && (this.transcript?.pendingBackgroundWork?.() ?? 0) > 0;
+  }
+
   async interrupt(): Promise<void> {
     if (this.stopped) return;
     const backend = this.backend, generation = this.wiringGeneration;

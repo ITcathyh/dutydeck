@@ -206,7 +206,7 @@ export function createProductionPtyBackend(sessionId: string) {
 
 export async function startLocalServer(options: StartLocalServerOptions = {}): Promise<LocalServer> {
   // pty-cli agent 发现：PTY_AGENT_CONTRIBUTIONS 经 loadConfig 合并进 config.agents
-  // （builtinAgents 内部按 commandExists 过滤，只暴露本机已安装的 CLI；id 冲突时 ACPX 优先）。
+  // （builtinAgents 内部按 commandExists 过滤，只暴露本机已安装的 CLI；可用的终端适配器优先，同 id 覆盖 ACPX）。
   // 插件在加载配置之前加载：插件 agents 要与 DUTYDECK_AGENTS_JSON 一起合并。没有启用的插件（或只有内置场景包）时为 undefined，下面不接线。
   const { host: pluginHost, scenarios } = await loadDaemonPlugins(options.env ?? process.env);
   const { config, droppedAgents } = loadConfigWithDiagnostics(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS, pluginHost?.agents);

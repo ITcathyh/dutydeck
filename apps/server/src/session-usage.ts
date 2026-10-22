@@ -58,7 +58,7 @@ export async function sessionUsageSnapshot(repos: RepositoryBundle, sessionId: s
       native = path ? await readNativeTranscriptUsage({ client, path, dataRoot: source.dataRoot, nativeSessionId: source.nativeSessionId!, cwd: session.cwd })
         : await readCodexSessionUsage(source.nativeSessionId!, { CODEX_HOME: source.dataRoot }, session.cwd);
     } else {
-      if (!selected && (agent.protocol === 'acp' || agent.protocol === 'auto')) {
+      if (!selected && ['acp', 'auto'].includes(session.protocol ?? agent.protocol ?? 'auto')) {
         const record = await createRuntimeStore({ stateDir: join(session.cwd, '.dutydeck', 'acpx') }).load(session.id);
         if (record?.cwd === session.cwd && record.name === session.id) nativeId = record.agentSessionId ?? (client === 'codex' ? record.acpSessionId : undefined);
       }

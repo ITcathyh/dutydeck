@@ -37,14 +37,21 @@ export function cliVersion(command: string): string | undefined {
 
 const builtinCli = (id: string, env: Record<string, string | undefined> = process.env) => id === 'codex' ? env.CODEX_PATH || agentDetails[id]!.cli : agentDetails[id]!.cli;
 
-let scannedBuiltinAgents: Array<Omit<AgentConfig, 'cwd'>> | undefined;
-const scanBuiltinAgents = () => scannedBuiltinAgents ??= listAcpxBuiltinAgents().flatMap(({ id, argv }) => {
-  const detail = agentDetails[id];
-  if (!detail) return [];
-  const command = builtinCli(id);
-  if (!commandExists(command)) return [];
-  return [{ id, name: detail.name, command: argv[0]!, args: argv.slice(1), protocol: 'acp' as const, env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: { pause: false, resume: true }, builtin: true, version: cliVersion(command) }];
-});
+const scannedBuiltinAgents = new Map<string, Array<Omit<AgentConfig, 'cwd'>>>();
+const scanBuiltinAgents = (env: NodeJS.ProcessEnv) => {
+  const cacheKey = env.CODEX_PATH ?? '';
+  const cached = scannedBuiltinAgents.get(cacheKey);
+  if (cached) return cached;
+  const agents = listAcpxBuiltinAgents().flatMap(({ id, argv }) => {
+    const detail = agentDetails[id];
+    if (!detail) return [];
+    const command = builtinCli(id, env);
+    if (!commandExists(command)) return [];
+    return [{ id, name: detail.name, command: argv[0]!, args: argv.slice(1), protocol: 'acp' as const, env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: { pause: false, resume: true }, builtin: true, version: cliVersion(command) }];
+  });
+  scannedBuiltinAgents.set(cacheKey, agents);
+  return agents;
+};
 
 // PTY 适配器（@dutydeck/cli-adapters，由 server 组装时注入，本包不直接依赖）贡献的内置 agent 描述
 export interface PtyAgentContribution {
@@ -63,25 +70,26 @@ export interface PtyAgentContribution {
 /** 贡献未声明能力时的保守默认。 */
 const DEFAULT_PTY_CAPABILITIES = { pause: false, resume: true } as const;
 
-// PTY 贡献的扫描结果按贡献列表内容缓存：commandExists/cliVersion 都是 spawnSync 重操作，同一组贡献不重复探测
+// PTY 扫描结果按贡献列表和 CODEX_PATH 缓存：commandExists/cliVersion 都是 spawnSync 重操作，相同配置不重复探测
 const scannedPtyAgents = new Map<string, Array<Omit<AgentConfig, 'cwd'>>>();
-const scanPtyAgents = (contributions: PtyAgentContribution[], acpxIds: Set<string>): Array<Omit<AgentConfig, 'cwd'>> => {
-  const cacheKey = JSON.stringify(contributions);
+const scanPtyAgents = (contributions: PtyAgentContribution[], env: NodeJS.ProcessEnv): Array<Omit<AgentConfig, 'cwd'>> => {
+  const cacheKey = JSON.stringify([contributions, env.CODEX_PATH]);
   const cached = scannedPtyAgents.get(cacheKey);
   if (cached) return cached;
   const agents = contributions.flatMap(contribution => {
-    // id 冲突时 ACPX 优先：与 ACPX 内置 agent 同 id 的 PTY 贡献直接跳过，保证 ACP 基线不回归
-    if (acpxIds.has(contribution.id) || !commandExists(contribution.command)) return [];
-    return [{ id: contribution.id, name: contribution.name, command: contribution.command, args: contribution.args ?? [], protocol: 'pty-cli' as const, ...(contribution.adapterId && contribution.adapterId !== contribution.id ? { adapterId: contribution.adapterId } : {}), env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: contribution.capabilities ?? DEFAULT_PTY_CAPABILITIES, builtin: contribution.builtin ?? true, version: cliVersion(contribution.command) }];
+    const command = (contribution.id === 'codex' || contribution.id === 'codex-cli') ? env.CODEX_PATH || contribution.command : contribution.command;
+    if (!commandExists(command)) return [];
+    return [{ id: contribution.id, name: contribution.name, command, args: contribution.args ?? [], protocol: 'pty-cli' as const, ...(contribution.adapterId && contribution.adapterId !== contribution.id ? { adapterId: contribution.adapterId } : {}), env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: contribution.capabilities ?? DEFAULT_PTY_CAPABILITIES, builtin: contribution.builtin ?? true, version: cliVersion(command) }];
   });
   scannedPtyAgents.set(cacheKey, agents);
   return agents;
 };
 
-export const builtinAgents = (cwd = process.cwd(), ptyContributions: PtyAgentContribution[] = []): AgentConfig[] => {
-  const acpxAgents = scanBuiltinAgents();
-  const ptyAgents = scanPtyAgents(ptyContributions, new Set(acpxAgents.map(agent => agent.id)));
-  return [...acpxAgents, ...ptyAgents].map(agent => ({ ...agent, cwd }));
+export const builtinAgents = (cwd = process.cwd(), ptyContributions: PtyAgentContribution[] = [], env: NodeJS.ProcessEnv = process.env): AgentConfig[] => {
+  const ptyAgents = scanPtyAgents(ptyContributions, env);
+  const ptyIds = new Set(ptyAgents.map(agent => agent.id));
+  const acpxAgents = scanBuiltinAgents(env).filter(agent => !ptyIds.has(agent.id));
+  return [...ptyAgents, ...acpxAgents].map(agent => ({ ...agent, cwd }));
 };
 
 export interface DroppedAgent {
@@ -147,7 +155,7 @@ export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string
 export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): LoadedConfig {
   const extra = parseAgentsJson(env.DUTYDECK_AGENTS_JSON);
   const defaultCwd = env.DUTYDECK_DEFAULT_CWD ?? process.cwd();
-  const agents = new Map(builtinAgents(defaultCwd, ptyContributions).map(agent => [agent.id, agent]));
+  const agents = new Map(builtinAgents(defaultCwd, ptyContributions, { ...process.env, ...env }).map(agent => [agent.id, agent]));
   const builtinIds = new Set([...listAcpxBuiltinAgents().map(agent => agent.id), ...ptyContributions.map(agent => agent.id)]);
   const register = (configured: AgentConfig, plugin = false) => {
     // A custom CLI wrapper may change local settings even for --version.

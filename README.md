@@ -121,6 +121,7 @@ Claude Code 终端会话优先使用 OSC 7501 状态信号判断忙碌、等待�
 
 - **Node.js**：`>= 22.12.0`
 - **包管理器**：`pnpm >= 11`
+- **终端后端**：默认终端模式需要安装 `tmux`；已显式配置的 Herdr 仍可使用。
 - **已安装并登录的 Agent CLI**：Claude Code（`claude`）、Codex 或其他支持 ACP / CLI 的智能体。
 
 ### 2. 全局安装与配置
@@ -521,9 +522,9 @@ dutydeck schedule delete schedule_xxx --session ses_xxx
 
 ## Agent 配置与权限姿态 <a id="agent-config"></a>
 
-Dutydeck 支持 ACP（Agent Client Protocol），也支持用 PTY 驱动已有的 CLI Agent。
+Dutydeck 默认优先用终端适配器运行本机已安装的 CLI Agent，新会话的终端后端默认是 `tmux`；同一入口同时支持终端与 ACP 时优先终端。没有可用终端适配器或其命令不可用时，仍按原规则发现 ACP（Agent Client Protocol）入口。已配置的 Herdr 后端、已有会话的协议和权限保持不变；`DUTYDECK_AGENTS_JSON` 显式指定的协议、命令和权限优先。
 
-内置 Codex ACP 在发现探测和启动执行进程时，优先遵循显式设置的 `CODEX_PATH`，支持指向 `PATH` 之外的可执行程序；未显式设置时使用 Dutydeck 进程 `PATH` 中的 Codex，沿用用户的登录和配置；升级用户安装的 Codex 后，新启动的进程自动使用新版本。找不到用户安装或显式指定路径的 Codex 时会报错，不使用 ACP 适配器缓存中的版本。
+内置 Codex 的 `codex`、`codex-cli` 终端入口及已有 ACP 会话在发现探测和启动执行进程时，优先遵循显式设置的 `CODEX_PATH`，支持指向 `PATH` 之外的可执行程序；未显式设置时使用 Dutydeck 进程 `PATH` 中的 Codex，沿用用户的登录和配置；升级用户安装的 Codex 后，新启动的进程自动使用新版本。找不到用户安装或显式指定路径的 Codex 时会报错，不使用 ACP 适配器缓存中的版本。
 
 ### 1. 自定义 Agent (`DUTYDECK_AGENTS_JSON`)
 
@@ -970,9 +971,9 @@ dutydeck doctor
 
 `restart` 先暂停领取新任务。已提交成功、恢复日志与原轮身份可验证的 `full-trust` tmux 任务继续在原 CLI 进程里运行，新服务接回同一轮，不重发输入；其余任务继续等待结束。ACP、普通 PTY、Herdr、提交中、缺少恢复日志或身份，以及待审批或高危权限门禁未授权的任务都不会跳过等待。systemd 只在当前 `KillMode=process` 时保留任务；其他值或读不到时全量等待。旧服务不支持恢复计数、排空失败或租约续期失败时也全量等待。`--drain-timeout` 控制等待上限，`--force` 保留原来的强制重启行为，当前 Agent 自己的会话仍自动排除。`deploy` 继续等待所有正在执行的任务结束。
 
-Codex 的 `codex` 入口继续使用 ACP；选择独立的 `codex-cli`（Codex terminal）入口可使用终端模式，例如 `dutydeck settings bot set <appId> defaultAgentId=codex-cli`，再开启新会话。此设置不会改变已有会话或权限；只有原本已获 `full-trust` 权限、且恢复证据完整的 tmux 任务能跨服务重启继续运行。首次提交时尚无日志位置的任务仍会等待结束。
+Codex 的 `codex` 入口默认使用终端模式，`codex-cli` 入口继续兼容。已有 ACP 会话继续通过 ACP 续跑，新会话使用当前默认协议；机器人权限不会自动提升。Codex 等不支持飞书逐项审批的终端 Agent，在 `ask` / `approve-reads` 下新开飞书会话会被拒绝；需要逐项审批时，用 `DUTYDECK_AGENTS_JSON` 显式保留 ACP 启动命令，或选择 Claude Code / Seed / Relay 等支持审批的终端 Agent。只有原本已获 `full-trust` 权限、且恢复证据完整的 tmux 任务能跨服务重启继续运行；首次提交尚无日志位置的任务仍会等待结束。主轮结束后仍有原生后台任务时，安全重启和部署的排空也会等待它们结束；直接终止进程或 `--force` 不提供此保证。
 
-`GET /api/system/activity` 的 `runningTasks` 仍是当前正在执行的总数。显式加 `?restart=true` 才检查恢复证据并返回 `restartBlockers` 和 `recoverableTasks`；未进入排空时不减去可恢复任务，`excludeSessionId` 同时适用于这三个计数。
+`GET /api/system/activity` 的 `runningTasks` 包含正在执行主轮的会话，以及主轮已结束但仍有原生后台任务的会话；同一会话只计一次。显式加 `?restart=true` 才检查恢复证据并返回 `restartBlockers` 和 `recoverableTasks`；未进入排空时不减去可恢复任务，`excludeSessionId` 同时适用于这三个计数。
 
 ### 2. 版本发布与部署 (`deploy`)
 
@@ -1165,7 +1166,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 - **本机 `~/.claude/settings.json` 的 allow 规则会绕过飞书逐项审批。** 飞书里 `ask` / `approve-reads` 的 Claude 终端模式虽然固定用 `default` 权限模式启动，但本机 `permissions.allow` 里的规则仍然生效，命中的操作不会出飞书审批卡。需要严格逐项审批时，清理本机的 allow 规则。
 - **ACP 侧预先放行时，`/plan` 的计划阶段拦不住写操作。** 计划阶段靠拒绝 Agent 发来的每个权限请求来拦写。Claude ACP 如果自己预先配了允许规则（如 settings 里的 allow 列表）或默认模式是 bypass，这些操作根本不会来问 Dutydeck。用 `/plan` 时，ACP 侧不要预先放行写操作。
 - **凭据保护按规则匹配，不是隔离。** 换个写法（编码、拼接路径、写脚本再执行）可能绕过；完全信任模式下，不在允许名单里的人仍能让 Agent 以本机用户身份运行任意命令。对外开放的机器人用强制拦截，或者不给它完全信任。
-- 显式配置 Cursor 为 `pty-cli` 且只有原始屏幕输出时，即使回放中可见回答，也可能因缺少规范化最终正文而记为失败；默认 ACP Cursor 不在此范围。
+- Cursor 终端会话只有原始屏幕输出时，即使回放中可见回答，也可能因缺少规范化最终正文而记为失败。
 - 验证门禁目前只对飞书任务生效，且需要先配验证命令。
 - 终端模式下，Codex、Traex 没有用量数据；用量上限对它们不生效。
 - 用量金额是估算，不含加价项（见“用量与成本”），不是账单。

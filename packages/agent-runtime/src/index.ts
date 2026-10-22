@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
 import { deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, redactCredentialText } from '@dutydeck/shared';
-import { AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
+import { listAcpxBuiltinAgents, AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
@@ -524,7 +524,16 @@ export class DutydeckRuntime {
       this.enqueueDriverEvent(session, event, generation, attempt ?? lifecycle);
     };
   }
+  private agentForSessionProtocol(agent: AgentConfig, session: Session): AgentConfig {
+    // Existing ACP sessions keep their launcher when discovery now prefers a terminal adapter.
+    if (agent.builtin && agent.protocol === 'pty-cli' && session.protocol === 'acp') {
+      const builtin = listAcpxBuiltinAgents().find(candidate => candidate.id === agent.id);
+      if (builtin) agent = { ...agent, command: builtin.argv[0]!, args: builtin.argv.slice(1), protocol: 'acp', adapterId: undefined, capabilities: { pause: false, resume: true } };
+    }
+    return agent;
+  }
   private async configureAgentForSession(agent: AgentConfig, session: Session): Promise<AgentConfig> {
+    agent = this.agentForSessionProtocol(agent, session);
     if (this.options.configureAgent) agent = await this.mutations.wait(() => this.options.configureAgent!(agent, session));
     return {
       ...agent,
@@ -1760,14 +1769,15 @@ export class DutydeckRuntime {
   }
 
   getRunningTaskCount(excludeSessionId?: string): number {
-    let count = 0;
+    const running = new Set<string>();
     for (const [sessionId, task] of this.activeTasks) {
       if (sessionId === excludeSessionId) continue;
-      if (task.status === 'running') count++;
+      if (task.status === 'running') running.add(sessionId);
     }
     // An unanswered steering request may already be inside the agent's turn, so the restart drain waits for it too.
-    for (const sessionId of this.steeringSessions.keys()) if (sessionId !== excludeSessionId && this.activeTasks.get(sessionId)?.status !== 'running') count++;
-    return count;
+    for (const sessionId of this.steeringSessions.keys()) if (sessionId !== excludeSessionId) running.add(sessionId);
+    for (const [sessionId, driver] of this.drivers) if (sessionId !== excludeSessionId && driver.hasBackgroundWork?.()) running.add(sessionId);
+    return running.size;
   }
 
   /** Restart may detach only verified original turns while queue claiming stays held. */
@@ -3038,7 +3048,7 @@ export class DutydeckRuntime {
     return this.scoped(id, async () => {
       const { session } = await this.active(id);
       const agent = await this.mutations.wait(() => this.repos.agents.get(session.agentId));
-      if (!agent?.capabilities.pause) throw new RuntimeError('UNSUPPORTED_CAPABILITY', 'Agent does not support pause', 422);
+      if (!agent || !this.agentForSessionProtocol(agent, session).capabilities.pause) throw new RuntimeError('UNSUPPORTED_CAPABILITY', 'Agent does not support pause', 422);
       this.mutations.check();
       return this.interrupt(id);
     });
@@ -3053,7 +3063,7 @@ export class DutydeckRuntime {
     return this.scoped(id, async () => {
       const { session } = await this.active(id);
       const agent = await this.mutations.wait(() => this.repos.agents.get(session.agentId));
-      if (!agent?.capabilities.resume) throw new RuntimeError('UNSUPPORTED_CAPABILITY', 'Agent does not support resume', 422);
+      if (!agent || !this.agentForSessionProtocol(agent, session).capabilities.resume) throw new RuntimeError('UNSUPPORTED_CAPABILITY', 'Agent does not support resume', 422);
       await this.mutations.wait(() => this.configurations.assertClear(id));
       await this.saveState(session, 'starting');
       const driver = await this.reconnect(session, false);

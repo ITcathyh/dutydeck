@@ -87,6 +87,7 @@ A local daemon connects the coding agents on your machine or dev server (Claude 
 ### 1. Prerequisites
 
 - **Node.js** `>= 22.12.0`, **pnpm** `>= 11`
+- `tmux` for the default terminal backend; an explicitly configured Herdr backend remains supported.
 - An authenticated Agent CLI (Claude Code `claude`, Codex, or another ACP agent)
 
 ### 2. Install and set up
@@ -334,7 +335,9 @@ After reaching the user's stopping condition, a recurring task can request disab
 
 ## Agent Configuration & Permissions <a id="agent-config"></a>
 
-The built-in Codex ACP agent gives an explicit `CODEX_PATH` priority for discovery, version detection and launch, including executables outside `PATH`. Without that override, each new execution process resolves Codex from the Dutydeck process `PATH`, using the user's login and configuration. New processes use user-installed upgrades automatically. If the user-installed or explicitly configured Codex is missing, startup fails instead of using the ACP adapter's cached version.
+Dutydeck prefers terminal adapters for installed CLI agents, with `tmux` as the default backend for new sessions. When both terminal and ACP entries share an ID, the terminal entry wins. Agents without an available terminal adapter or executable are still discovered through ACP (Agent Client Protocol). Existing Herdr settings, session protocols and permissions are preserved. Explicit protocols, commands and permissions in `DUTYDECK_AGENTS_JSON` take priority.
+
+The built-in `codex` and `codex-cli` terminal entries and existing Codex ACP sessions give an explicit `CODEX_PATH` priority for discovery, version detection and launch, including executables outside `PATH`. Without that override, each new execution process resolves Codex from the Dutydeck process `PATH`, using the user's login and configuration. New processes use user-installed upgrades automatically. If the user-installed or explicitly configured Codex is missing, startup fails instead of using the ACP adapter's cached version.
 
 ### 1. Custom agents (`DUTYDECK_AGENTS_JSON`)
 
@@ -573,9 +576,9 @@ dutydeck auth share-key rotate
 
 `restart` first holds queued work. Successfully submitted `full-trust` tmux turns with verified recovery logs and original turn identity keep running in the same CLI process; the new service adopts the original turn without resending input. Other running tasks still drain, including ACP, plain PTY, Herdr, submissions in progress, missing recovery evidence, pending approvals and unauthorized high-risk gates. With systemd, preservation requires the current `KillMode=process`; other or unknown values use a full drain. Older services without recovery counts, failed drain requests and failed lease renewals also use a full drain. `--drain-timeout`, `--force` and automatic exclusion of the invoking Agent session retain their existing behavior. `deploy` continues to drain all running tasks.
 
-The `codex` entry keeps ACP as its default. Select the separate `codex-cli` (Codex terminal) entry for terminal mode, for example with `dutydeck settings bot set <appId> defaultAgentId=codex-cli`, then start a new session. This changes neither existing sessions nor permissions. Only tmux tasks already authorized for `full-trust` and backed by complete recovery evidence can continue across a service restart. A first submission without a known transcript path still drains.
+The `codex` entry defaults to terminal mode; `codex-cli` remains available for compatibility. Existing ACP sessions continue through ACP, while new sessions use the current default protocol. Bot permissions are never raised automatically. Terminal Agents such as Codex that lack Lark per-action approval reject new Lark sessions under `ask` / `approve-reads`; keep an explicit ACP launch command in `DUTYDECK_AGENTS_JSON`, or choose a terminal Agent with approval support, such as Claude Code / Seed / Relay. Only tmux tasks already authorized for `full-trust` and backed by complete recovery evidence can continue across a service restart. A first submission without a known transcript path still drains. Safe restart and deployment drain also wait for native background tasks that remain after the main turn completes; direct process termination and `--force` do not provide this guarantee.
 
-`GET /api/system/activity` keeps `runningTasks` as the total running count. Add `?restart=true` to verify recovery evidence and receive `restartBlockers` and `recoverableTasks`; no tasks are deducted unless queue claiming is held. `excludeSessionId` applies to all three counts.
+`GET /api/system/activity` counts sessions with an active main turn or native background tasks remaining after the main turn in `runningTasks`, once per session. Add `?restart=true` to verify recovery evidence and receive `restartBlockers` and `recoverableTasks`; no tasks are deducted unless queue claiming is held. `excludeSessionId` applies to all three counts.
 
 Use `channel-bot` for the draft bots shown in the experimental “Groups & permissions” page. Its argument is the internal `id` returned by `list`, not the Lark App ID:
 
@@ -715,7 +718,7 @@ Confirmation requires bot settings management permission (`channel_bot.update`) 
 - **Allow rules in your local `~/.claude/settings.json` bypass Lark per-action approval.** Claude terminal sessions from Lark start in `default` mode, but `permissions.allow` rules still apply, and matching actions never produce an approval card. Clear those rules if you need strict per-action approval.
 - **With `/plan`, pre-approved writes on the ACP side cannot be blocked.** Planning blocks writes by rejecting every permission request the agent sends. If Claude ACP has its own allow rules (e.g. in settings) or runs in bypass mode, those actions never ask Dutydeck. Don't pre-approve writes on the ACP side when you use `/plan`.
 - **Credential protection matches rules; it is not isolation.** Rewriting a command (encoding, building the path, writing a script and running it) may get past it, and in full-trust mode senders outside the allowlist can still make the agent run any command as the local user. For bots open to others, use enforced mode or don't give them full trust.
-- Explicit Cursor `pty-cli` sessions with raw-screen output only may show an answer in playback but still be recorded as failed because normalized final text is unavailable. This does not apply to the default ACP Cursor.
+- Cursor terminal sessions with raw-screen output only may show an answer in playback but still be recorded as failed because normalized final text is unavailable.
 - The verification gate only applies to Lark tasks and needs a command configured.
 - Codex and Traex terminal modes report no usage, so caps don't apply to them; cost figures are estimates.
 - Trigger auth has no timestamp (see Plugins → Security).

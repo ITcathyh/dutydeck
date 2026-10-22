@@ -175,7 +175,7 @@ describe('PTY_AGENT_CONTRIBUTIONS', () => {
     const ids = PTY_AGENT_CONTRIBUTIONS.map(c => c.id);
     expect(new Set(ids).size).toBe(ids.length);
     for (const c of PTY_AGENT_CONTRIBUTIONS) {
-      expect(c.adapterId).toBe(c.id === 'codex-cli' ? 'codex' : c.id);
+      expect(c.adapterId).toBe(({ claude: 'claude-code', 'codex-cli': 'codex', 'grok-build': 'grok' } as Record<string, string>)[c.id] ?? c.id);
       expect(c.command).toBeTruthy();
       expect(c.name).toBeTruthy();
       expect(c.capabilities.pause).toBe(false);

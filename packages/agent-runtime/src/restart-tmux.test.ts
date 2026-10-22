@@ -39,7 +39,7 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
         id: 'claude-code', capabilities: {}, buildArgs: () => [], buildResumeCommand: () => [], injectSessionContext: () => '',
         async writeInput(backend, prompt) {
           prompts.push(prompt);
-          backend.write(`echo $$ > '${pidPath}'; while [ ! -f '${finishPath}' ]; do sleep 0.1; done; echo FIXTURE-DONE\n`);
+          backend.write(`echo $$ > '${pidPath}'; while [ ! -f '${finishPath}-${prompts.length}' ]; do sleep 0.1; done; echo FIXTURE-DONE; touch '${finishPath}-${prompts.length}-completed'\n`);
           await submissionGate;
         },
         completionPattern: /FIXTURE-DONE/,
@@ -66,8 +66,9 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
     return { ...first, open, session, task, prompts, drivers, pid: () => Number(readFileSync(pidPath, 'utf8').trim()),
       transcript: () => transcript,
       backend: () => new TmuxBackend(name, { ownerId: `dutydeck:${session.id}` }),
-      complete: () => {
-        writeFileSync(finishPath, 'done');
+      completed: (turn = 1) => existsSync(`${finishPath}-${turn}-completed`),
+      complete: (turn = 1) => {
+        writeFileSync(`${finishPath}-${turn}`, 'done');
         appendFileSync(transcript, JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'fixture result' }], stop_reason: 'end_turn' } }) + '\n');
       } };
   }
@@ -97,6 +98,34 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
     });
     expect((await second.runtime.getEvents(h.session.id)).filter(event => event.type === 'completed')).toHaveLength(1);
     expect(h.prompts).toEqual(['long original input']);
+  });
+
+  it('collects a result completed while stopped and continues queued tasks in order', async () => {
+    const h = await fixture(), pid = h.pid();
+    const attempt = h.repos.execution.getTaskExecution(h.task.id)!.currentAttempt!;
+    h.runtime.setQueueHeld(true);
+    const secondTask = await h.runtime.dispatch(h.session.id, 'queued second');
+    const thirdTask = await h.runtime.dispatch(h.session.id, 'queued third');
+    expect([secondTask.status, thirdTask.status]).toEqual(['queued', 'queued']);
+    await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1));
+    await h.close();
+    h.complete();
+    await vi.waitFor(() => expect(h.completed()).toBe(true));
+
+    const restored = await h.open();
+    await vi.waitFor(() => expect(h.prompts).toEqual(['long original input', 'queued second']), { timeout: 10_000 });
+    expect(h.pid()).toBe(pid);
+    expect(restored.repos.execution.getTaskExecution(h.task.id)?.currentAttempt).toMatchObject({
+      attemptId: attempt.attemptId, state: 'settled', outcome: 'completed', submission: { submissionId: attempt.submission!.submissionId }
+    });
+    expect((await restored.runtime.getTasks(h.session.id)).find(task => task.id === thirdTask.id)?.status).toBe('queued');
+    expect((await restored.runtime.getEvents(h.session.id)).filter(event => event.type === 'completed')).toHaveLength(1);
+    h.complete(2);
+    await vi.waitFor(() => expect(h.prompts).toEqual(['long original input', 'queued second', 'queued third']), { timeout: 10_000 });
+    h.complete(3);
+    await vi.waitFor(async () => expect((await restored.runtime.getTasks(h.session.id)).every(task => task.status === 'completed')).toBe(true), { timeout: 10_000 });
+    expect((await restored.runtime.getEvents(h.session.id)).filter(event => event.type === 'completed')).toHaveLength(3);
+    expect(h.prompts).toEqual(['long original input', 'queued second', 'queued third']);
   });
 
   it('waits for submission completion before trusting a prepared checkpoint', async () => {

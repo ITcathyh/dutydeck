@@ -364,7 +364,20 @@ async function main() {
       builtin: false,
       version: 'mock-1.0'
     };
-    serverEnv.DUTYDECK_AGENTS_JSON = JSON.stringify([mockAgent, {
+    const acpPath = join(binDir, 'mock-acp.mjs');
+    writeFileSync(acpPath, `import readline from 'node:readline';
+const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const { id, method, params = {} } = JSON.parse(line);
+  if (method === 'initialize') send({ jsonrpc: '2.0', id, result: { protocolVersion: params.protocolVersion, agentCapabilities: {}, authMethods: [] } });
+  if (method === 'session/new') send({ jsonrpc: '2.0', id, result: { sessionId: 'smoke-acp-session' } });
+  if (method === 'session/prompt') send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });
+});
+`);
+    serverEnv.DUTYDECK_AGENTS_JSON = JSON.stringify([{
+      id: 'smoke-acp', name: 'Mock ACP', command: process.execPath, args: [acpPath],
+      protocol: 'acp', permissionMode: 'ask', version: 'mock-acp-1.0'
+    }, mockAgent, {
       ...mockAgent, id: 'ccflash', name: 'Mock CCFlash', adapterId: 'claude-code',
       args: ['--wrapper-profile', 'flash'], model: 'gemini-custom-flash', version: undefined
     }]);
@@ -460,7 +473,9 @@ async function main() {
   const acpAgents = agents.filter(agent => agent.protocol === 'acp');
   const ptyAgents = agents.filter(agent => agent.protocol === 'pty-cli');
   debug('agents', agents.map(agent => `${agent.id}:${agent.protocol}`).join(', '));
-  assert(acpAgents.length > 0, `发现 ACP agent ${acpAgents.length} 个：${acpAgents.map(a => a.id).join(', ')}`);
+  if (!REAL) assert(acpAgents.some(agent => agent.id === 'smoke-acp'), '显式 ACP Agent 与终端默认入口同时保留');
+  const builtinClaude = agents.find(agent => agent.id === 'claude');
+  if (builtinClaude) assert(builtinClaude.protocol === 'pty-cli', '内置 Claude 默认使用终端适配器');
   assert(ptyAgents.length > 0, `发现 pty-cli agent ${ptyAgents.length} 个：${ptyAgents.map(a => a.id).join(', ')}`);
   const claudeCode = ptyAgents.find(agent => agent.id === 'claude-code');
   assert(Boolean(claudeCode), 'pty-cli 列表里有 claude-code');

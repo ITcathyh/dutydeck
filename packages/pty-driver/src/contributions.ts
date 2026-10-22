@@ -27,11 +27,13 @@ export interface PtyAgentContribution {
 }
 
 export const PTY_AGENT_CONTRIBUTIONS: PtyAgentContribution[] = [
+  { id: 'claude', name: 'Claude Code', command: 'claude', adapterId: 'claude-code', capabilities: { pause: false, resume: true } },
   { id: 'claude-code', name: 'Claude', command: 'claude', adapterId: 'claude-code', capabilities: { pause: false, resume: true } },
   { id: 'codex', name: 'Codex', command: 'codex', adapterId: 'codex', capabilities: { pause: false, resume: true } },
   { id: 'codex-cli', name: 'Codex (terminal)', command: 'codex', adapterId: 'codex', capabilities: { pause: false, resume: true } },
   { id: 'gemini', name: 'Gemini', command: 'gemini', adapterId: 'gemini', capabilities: { pause: false, resume: false } },
   { id: 'opencode', name: 'OpenCode', command: 'opencode', adapterId: 'opencode', capabilities: { pause: false, resume: true } },
+  { id: 'grok-build', name: 'Grok Build', command: 'grok', adapterId: 'grok', capabilities: { pause: false, resume: true } },
   { id: 'grok', name: 'Grok Build', command: 'grok', adapterId: 'grok', capabilities: { pause: false, resume: true } },
   { id: 'cursor', name: 'Cursor', command: 'cursor-agent', adapterId: 'cursor', capabilities: { pause: false, resume: true } },
   { id: 'kimi', name: 'Kimi', command: 'kimi', adapterId: 'kimi', capabilities: { pause: false, resume: true } },

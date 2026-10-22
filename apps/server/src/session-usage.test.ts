@@ -127,6 +127,9 @@ it('reads the exact built-in ACP Claude shape with a real ACPX native-session re
     const fixture = await readFile(new URL('../../../packages/pty-driver/src/transcript/fixtures/usage-claude-2.1.295.jsonl', import.meta.url), 'utf8');
     await writeFile(join(project, 'native-claude.jsonl'), fixture.replaceAll('/workspace/usage', cwd));
     expect(await sessionUsageSnapshot(repos, 'acp-bound')).toMatchObject({ nativeTokens: { source: 'claude_transcript', totalTokens: 117160 }, context: { used: 116348 } });
+    const beforeUpgrade = await sessionUsageSnapshot(repos, 'acp-bound');
+    await repos.agents.save({ ...agent, command: 'claude', protocol: 'pty-cli', adapterId: 'claude-code' });
+    expect(await sessionUsageSnapshot(repos, 'acp-bound')).toEqual(beforeUpgrade);
     record.agentSessionId = undefined; await store.save(record);
     expect(await sessionUsageSnapshot(repos, 'acp-bound')).toEqual({});
   } finally { repos.close(); }

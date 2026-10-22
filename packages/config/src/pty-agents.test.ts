@@ -61,19 +61,40 @@ describe('builtinAgents PTY contributions', () => {
     expect(agents.some(agent => agent.id === 'ghost')).toBe(false);
   });
 
-  it('skips PTY contributions whose id collides with an ACPX agent', () => {
+  it('prefers an installed PTY contribution with the same id over ACPX', () => {
     const contribution: PtyAgentContribution = { id: 'claude', name: 'Claude PTY', command: process.execPath };
     const agents = builtinAgents('/tmp/dutydeck-pty-test', [contribution]);
     const claude = agents.find(agent => agent.id === 'claude');
-    expect(claude?.protocol).toBe('acp');
-    expect(agents.every(agent => agent.protocol !== 'pty-cli')).toBe(true);
+    expect(claude?.protocol).toBe('pty-cli');
+    expect(agents.map(agent => agent.id)).toEqual(['claude', 'codex']);
   });
 
-  it('keeps Codex ACP and adds a separate terminal entry using the Codex adapter', () => {
+  it('defaults Codex to terminal mode and keeps the codex-cli entry', () => {
     const contributions = PTY_AGENT_CONTRIBUTIONS.filter(agent => ['codex', 'codex-cli'].includes(agent.id));
     const agents = builtinAgents('/tmp/dutydeck-pty-test', contributions);
-    expect(agents.find(agent => agent.id === 'codex')).toMatchObject({ protocol: 'acp', permissionMode: 'ask' });
+    expect(agents.find(agent => agent.id === 'codex')).toMatchObject({ protocol: 'pty-cli', command: 'codex', permissionMode: 'ask' });
     expect(agents.find(agent => agent.id === 'codex-cli')).toMatchObject({ protocol: 'pty-cli', adapterId: 'codex', command: 'codex', permissionMode: 'ask' });
+  });
+
+  it('lists terminal candidates first and retains ACP when the terminal executable is unavailable', () => {
+    const agents = builtinAgents('/tmp/dutydeck-pty-test', [
+      { id: 'claude', name: 'Unavailable terminal', command: '/missing/claude-terminal' },
+      { id: 'terminal-only', name: 'Terminal', command: process.execPath }
+    ]);
+    expect(agents.map(agent => [agent.id, agent.protocol])).toEqual([
+      ['terminal-only', 'pty-cli'], ['claude', 'acp'], ['codex', 'acp']
+    ]);
+  });
+
+  it('binds the ACP Claude id to its terminal adapter', () => {
+    const agents = builtinAgents('/tmp/dutydeck-pty-test', PTY_AGENT_CONTRIBUTIONS);
+    expect(agents.find(agent => agent.id === 'claude')).toMatchObject({ protocol: 'pty-cli', adapterId: 'claude-code', command: 'claude' });
+  });
+
+  it('preserves an explicit ACP command, args and permissions over the terminal default', () => {
+    const explicit = { id: 'codex', name: 'Custom Codex', protocol: 'acp', command: process.execPath, args: ['custom-acp.mjs'], permissionMode: 'approve-reads' };
+    const config = loadConfig({ DUTYDECK_AGENTS_JSON: JSON.stringify([explicit]) }, PTY_AGENT_CONTRIBUTIONS);
+    expect(config.agents.find(agent => agent.id === 'codex')).toMatchObject({ ...explicit, builtin: false });
   });
 
   it('probes each contribution command only once across repeated calls with the same arguments', () => {
