@@ -592,20 +592,23 @@ export class CiWebhookService {
   async authorizeTask(task: TaskRecord, phase: 'prepare' | 'submit') {
     const subscriptionId = this.options.repositories.ciWebhook.taskSubscription(task.id);
     if (!subscriptionId) return;
-    const stored = await this.read(subscriptionId);
-    const value = stored?.value;
-    if (!stored || !value?.task || value.status !== 'running' || value.task.id !== task.id || value.sessionId !== task.sessionId) {
-      throw new RuntimeError('CI_WEBHOOK_TASK_REVOKED', 'CI 续作已取消或已被新的状态取代', 403);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const stored = await this.read(subscriptionId);
+      const value = stored?.value;
+      if (!stored || !value?.task || value.status !== 'running' || value.task.id !== task.id || value.sessionId !== task.sessionId) {
+        throw new RuntimeError('CI_WEBHOOK_TASK_REVOKED', 'CI 续作已取消或已被新的状态取代', 403);
+      }
+      if (value.task.kind !== 'fix' || value.task.startedAt) return;
+      const session = await this.options.runtime.getSession(task.sessionId);
+      const head = session ? await this.head(value, session.cwd) : undefined;
+      if (!head || head.branch !== value.branch || head.headSha !== value.task.baseSha) {
+        const reason = `动手前核对 head SHA 不一致：失败流水线对应 ${short(value.task.baseSha)}，本地 ${value.branch} 现在是 ${head ? short(head.headSha) : '未知'}。为避免修错版本，已停止。`;
+        await this.stop(stored, reason);
+        throw new RuntimeError('CI_FIX_HEAD_CHANGED', reason, 409);
+      }
+      if (phase !== 'submit' || await this.save(stored, { ...value, task: { ...value.task, startedAt: iso(this.clock().getTime()) } })) return;
     }
-    if (value.task.kind !== 'fix' || value.task.startedAt) return;
-    const session = await this.options.runtime.getSession(task.sessionId);
-    const head = session ? await this.head(value, session.cwd) : undefined;
-    if (!head || head.branch !== value.branch || head.headSha !== value.task.baseSha) {
-      const reason = `动手前核对 head SHA 不一致：失败流水线对应 ${short(value.task.baseSha)}，本地 ${value.branch} 现在是 ${head ? short(head.headSha) : '未知'}。为避免修错版本，已停止。`;
-      await this.stop(stored, reason);
-      throw new RuntimeError('CI_FIX_HEAD_CHANGED', reason, 409);
-    }
-    if (phase === 'submit') await this.save(stored, { ...value, task: { ...value.task, startedAt: iso(this.clock().getTime()) } });
+    throw new RuntimeError('CI_WEBHOOK_CONFLICT', '任务授权记录持续变化，请稍后重试。', 409);
   }
 
   tick(): Promise<void> {

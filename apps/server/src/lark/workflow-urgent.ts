@@ -58,6 +58,8 @@ export class LarkUrgentManager {
   private readonly chatUrgentHistory = new Map<string, number[]>();
   /** 内存去重标记，防止单会话单卡片重复加急 */
   private readonly urgedIds = new Set<string>();
+  /** 在途请求同步预占卡片和群名额，远程失败后释放。 */
+  private readonly pendingUrgencies = new Map<string, string>();
 
   constructor(options: LarkUrgentManagerOptions) {
     this.service = options.service;
@@ -119,7 +121,7 @@ export class LarkUrgentManager {
       }
 
       // 2. 每条卡片最多加急一次（内存与持久化标记双重判断）
-      if (record.urgentAt || this.urgedIds.has(record.id)) {
+      if (record.urgentAt || this.urgedIds.has(record.id) || this.pendingUrgencies.has(record.id)) {
         result.skippedNotEligible.push(record.id);
         continue;
       }
@@ -151,9 +153,10 @@ export class LarkUrgentManager {
       const history = (this.chatUrgentHistory.get(chatId) ?? []).filter(t => t > oneHourAgo && t <= now);
       this.chatUrgentHistory.set(chatId, history);
 
-      if (history.length >= this.maxPerHourPerChat) {
+      const count = history.length + [...this.pendingUrgencies.values()].filter(pendingChatId => pendingChatId === chatId).length;
+      if (count >= this.maxPerHourPerChat) {
         this.log?.warn?.(
-          { chatId, interactionId: record.id, count: history.length, limit: this.maxPerHourPerChat },
+          { chatId, interactionId: record.id, count, limit: this.maxPerHourPerChat },
           '当前群每小时加急次数已达上限，跳过加急'
         );
         result.skippedRateLimited.push(record.id);
@@ -161,6 +164,7 @@ export class LarkUrgentManager {
       }
 
       // 6. 执行出站应用内加急（失败兜底，绝不抛出）
+      this.pendingUrgencies.set(record.id, chatId);
       try {
         await this.service.urgentApp({
           messageId: record.cardId,
@@ -169,8 +173,12 @@ export class LarkUrgentManager {
         });
 
         // 记录频率与去重状态
-        history.push(now);
+        // await 期间其他扫描可能替换历史数组，必须写回当前 Map 中的窗口。
+        const completedHistory = this.chatUrgentHistory.get(chatId) ?? [];
+        completedHistory.push(now);
+        this.chatUrgentHistory.set(chatId, completedHistory);
         this.urgedIds.add(record.id);
+        this.pendingUrgencies.delete(record.id);
         const urgentAtIso = new Date(now).toISOString();
         record.urgentAt = urgentAtIso;
 
@@ -189,6 +197,8 @@ export class LarkUrgentManager {
           '飞书卡片应用内加急失败，不影响主任务'
         );
         result.failed.push({ id: record.id, error });
+      } finally {
+        this.pendingUrgencies.delete(record.id);
       }
     }
 
@@ -210,22 +220,28 @@ export class LarkUrgentManager {
       const at = Date.parse(notice.urgentAt);
       if (Number.isFinite(at) && at > oneHourAgo && at <= now) history.push(at);
     }
-    if (notice.urgentAt || this.urgedIds.has(notice.id)) return 'already';
+    if (notice.urgentAt || this.urgedIds.has(notice.id) || this.pendingUrgencies.has(notice.id)) return 'already';
     const decision = larkNotice(kind, { notifyQuietHours: this.quietHours }, undefined, now);
     if (!decision.urgent) return 'not_eligible';
     if (now - notice.since < this.thresholdMs) return 'not_due';
     if (decision.urgentNotBefore !== undefined) return 'quiet_hours';
-    if (history.length >= this.maxPerHourPerChat) {
-      this.log?.warn?.({ chatId: notice.chatId, noticeId: notice.id, count: history.length, limit: this.maxPerHourPerChat }, '当前群每小时加急次数已达上限，跳过加急');
+    const count = history.length + [...this.pendingUrgencies.values()].filter(chatId => chatId === notice.chatId).length;
+    if (count >= this.maxPerHourPerChat) {
+      this.log?.warn?.({ chatId: notice.chatId, noticeId: notice.id, count, limit: this.maxPerHourPerChat }, '当前群每小时加急次数已达上限，跳过加急');
       return 'rate_limited';
     }
+    this.pendingUrgencies.set(notice.id, notice.chatId);
     try {
       await this.service.urgentApp({ messageId: notice.messageId, userIdList: [notice.targetUserId], userIdType: 'open_id' });
     } catch (error) {
       this.log?.warn?.({ error, noticeId: notice.id, messageId: notice.messageId }, '飞书卡片应用内加急失败，不影响主任务');
       return 'failed';
+    } finally {
+      this.pendingUrgencies.delete(notice.id);
     }
-    history.push(now);
+    const completedHistory = this.chatUrgentHistory.get(notice.chatId) ?? [];
+    completedHistory.push(now);
+    this.chatUrgentHistory.set(notice.chatId, completedHistory);
     this.urgedIds.add(notice.id);
     return 'urged';
   }

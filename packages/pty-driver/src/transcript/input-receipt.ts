@@ -14,6 +14,9 @@ function contentText(content: unknown, textTypes = ['text', 'input_text']): stri
 
 export function claudeInputText(entry: any): string | undefined {
   if (entry?.type === 'api-request-blob') return undefined;
+  // Skill instructions are user-role tool context, not a submitted input.
+  // Keep the record in the transcript's UUID ancestry without acknowledging it.
+  if (entry?.isMeta === true || typeof entry?.sourceToolUseID === 'string') return undefined;
   if (entry?.isSidechain === true || (entry?.message?.role ?? entry?.type) !== 'user') return undefined;
   const text = contentText(entry.message?.content);
   // Claude 2.1.287 persists bracketed paste in this exact envelope. Remove

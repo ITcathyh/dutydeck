@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { LarkUrgentManager } from './workflow-urgent.js';
+import { LarkUrgentManager, type LarkUrgentNotice } from './workflow-urgent.js';
 import type { LarkCardService } from './service.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 
@@ -332,6 +332,143 @@ describe('LarkUrgentManager', () => {
     expect(result.failed[0]?.id).toBe('failing_1');
     expect(result.urged).toEqual([]);
     expect(warn).toHaveBeenCalled();
+  });
+});
+
+describe('并发加急预占', () => {
+  const now = Date.UTC(2026, 9, 22, 4);
+  const pending = (id = 'ask_1', chatId = 'oc_group_1') => mockInteraction({
+    id, cardId: `om_${id}`, cardCreatedAt: new Date(now - 120_000).toISOString(),
+    event: { ...mockInteraction().event, chatId }
+  });
+  const notice = (id = 'notice_1', chatId = 'oc_group_1'): LarkUrgentNotice => ({
+    id, chatId, messageId: `om_${id}`, targetUserId: 'ou_target_person', since: now - 120_000
+  });
+  const setup = () => {
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const gate = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    const urgentApp = vi.fn().mockResolvedValue({ invalidUserIdList: [] }).mockImplementationOnce(async () => {
+      await gate;
+      return { invalidUserIdList: [] };
+    });
+    const manager = new LarkUrgentManager({ service: { urgentApp }, thresholdMs: 60_000, maxPerHourPerChat: 1 });
+    return { manager, urgentApp, resolve, reject };
+  };
+
+  it('同卡独立副本在响应前只出站一次，成功后旧副本仍不能重发', async () => {
+    const { manager, urgentApp, resolve } = setup();
+    const card = pending();
+    const first = manager.checkAndUrge([structuredClone(card)], now);
+    const second = manager.checkAndUrge([structuredClone(card)], now);
+    const outboundBeforeResponse = urgentApp.mock.calls.length;
+    resolve();
+    const [sent, skipped] = await Promise.all([first, second]);
+    expect(outboundBeforeResponse).toBe(1);
+    expect(sent.urged).toEqual([card.id]);
+    expect(skipped.skippedNotEligible).toEqual([card.id]);
+    expect((await manager.checkAndUrge([structuredClone(card)], now)).skippedNotEligible).toEqual([card.id]);
+    expect(urgentApp).toHaveBeenCalledOnce();
+  });
+
+  it('同群不同卡共享在途名额，另一轮清理历史后成功记录仍占频控', async () => {
+    const { manager, urgentApp, resolve } = setup();
+    const first = manager.checkAndUrge([pending()], now);
+    const second = manager.checkAndUrge([pending('ask_2')], now);
+    await manager.checkAndUrge([], now);
+    const outboundBeforeResponse = urgentApp.mock.calls.length;
+    resolve();
+    const [sent, limited] = await Promise.all([first, second]);
+    expect(outboundBeforeResponse).toBe(1);
+    expect(sent.urged).toEqual(['ask_1']);
+    expect(limited.skippedRateLimited).toEqual(['ask_2']);
+    expect((await manager.checkAndUrge([pending('ask_3')], now)).skippedRateLimited).toEqual(['ask_3']);
+    expect(urgentApp).toHaveBeenCalledOnce();
+  });
+
+  it('不同群的加急不等待另一群的远程响应', async () => {
+    const { manager, urgentApp, resolve } = setup();
+    const first = manager.checkAndUrge([pending()], now);
+    const other = await manager.checkAndUrge([pending('ask_2', 'oc_other')], now);
+    const outboundBeforeResponse = urgentApp.mock.calls.length;
+    resolve();
+    await first;
+    expect(other.urged).toEqual(['ask_2']);
+    expect(outboundBeforeResponse).toBe(2);
+  });
+
+  it('失败释放卡片和群名额，同卡旧副本能重试', async () => {
+    const { manager, urgentApp, reject } = setup();
+    const card = pending();
+    const first = manager.checkAndUrge([structuredClone(card)], now);
+    const skipped = manager.checkAndUrge([structuredClone(card)], now);
+    reject(new Error('temporary failure'));
+    const [failed, duplicate] = await Promise.all([first, skipped]);
+    expect(failed.failed.map(item => item.id)).toEqual([card.id]);
+    expect(duplicate.skippedNotEligible).toEqual([card.id]);
+    expect(card.urgentAt).toBeUndefined();
+    expect((await manager.checkAndUrge([structuredClone(card)], now)).urged).toEqual([card.id]);
+    expect(urgentApp).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['interaction', 'notice'] as const)('%s 先出站时，两种 API 共享同群在途和成功名额', async firstApi => {
+    const { manager, urgentApp, resolve } = setup();
+    const first = firstApi === 'interaction'
+      ? manager.checkAndUrge([pending()], now)
+      : manager.urgeNotice(notice(), 'unknown_task_notice', now);
+    const second = firstApi === 'interaction'
+      ? manager.urgeNotice(notice(), 'unknown_task_notice', now)
+      : manager.checkAndUrge([pending()], now);
+    const outboundBeforeResponse = urgentApp.mock.calls.length;
+    resolve();
+    const [, limited] = await Promise.all([first, second]);
+    expect(outboundBeforeResponse).toBe(1);
+    if (typeof limited === 'string') expect(limited).toBe('rate_limited');
+    else expect(limited.skippedRateLimited).toEqual(['ask_1']);
+    expect((await manager.checkAndUrge([pending('ask_2')], now)).skippedRateLimited).toEqual(['ask_2']);
+    expect(await manager.urgeNotice(notice('notice_2'), 'unknown_task_notice', now)).toBe('rate_limited');
+    expect(urgentApp).toHaveBeenCalledOnce();
+  });
+
+  it('提醒卡独立副本在途与成功后均去重，并保留被扫描清理过的群历史', async () => {
+    const { manager, urgentApp, resolve } = setup();
+    const first = manager.urgeNotice(notice(), 'unknown_task_notice', now);
+    const second = manager.urgeNotice(notice(), 'unknown_task_notice', now);
+    await manager.checkAndUrge([], now);
+    const outboundBeforeResponse = urgentApp.mock.calls.length;
+    resolve();
+    expect(await Promise.all([first, second])).toEqual(['urged', 'already']);
+    expect(outboundBeforeResponse).toBe(1);
+    expect(await manager.urgeNotice(notice(), 'unknown_task_notice', now)).toBe('already');
+    expect(await manager.urgeNotice(notice('notice_2'), 'unknown_task_notice', now)).toBe('rate_limited');
+    expect(urgentApp).toHaveBeenCalledOnce();
+  });
+
+  it('提醒卡失败释放预占，旧副本重试成功后占用共享群名额', async () => {
+    const { manager, urgentApp, reject } = setup();
+    const first = manager.urgeNotice(notice(), 'unknown_task_notice', now);
+    reject(new Error('temporary failure'));
+    expect(await first).toBe('failed');
+    expect(await manager.urgeNotice(notice(), 'unknown_task_notice', now)).toBe('urged');
+    expect((await manager.checkAndUrge([pending()], now)).skippedRateLimited).toEqual(['ask_1']);
+    expect(urgentApp).toHaveBeenCalledTimes(2);
+  });
+
+  it('重启后两种 API 从持久历史恢复共享频控，过期后释放名额但不重发旧卡', async () => {
+    const urgentApp = vi.fn().mockResolvedValue({ invalidUserIdList: [] });
+    const options = { service: { urgentApp }, thresholdMs: 60_000, maxPerHourPerChat: 1 };
+    const persisted = { ...pending(), urgentAt: new Date(now - 60_000).toISOString() };
+    const fromInteraction = new LarkUrgentManager(options);
+    await fromInteraction.checkAndUrge([structuredClone(persisted)], now);
+    await fromInteraction.checkAndUrge([structuredClone(persisted)], now);
+    expect(await fromInteraction.urgeNotice(notice(), 'unknown_task_notice', now)).toBe('rate_limited');
+    const later = now + 3600_000;
+    expect((await fromInteraction.checkAndUrge([structuredClone(persisted), pending('ask_2')], later)).urged).toEqual(['ask_2']);
+    const fromNotice = new LarkUrgentManager(options);
+    const persistedNotice = { ...notice(), urgentAt: new Date(now - 60_000).toISOString() };
+    expect(await fromNotice.urgeNotice(persistedNotice, 'unknown_task_notice', now)).toBe('already');
+    expect((await fromNotice.checkAndUrge([pending()], now)).skippedRateLimited).toEqual(['ask_1']);
+    expect(urgentApp).toHaveBeenCalledOnce();
   });
 });
 

@@ -22,7 +22,7 @@ const decided = { approve: 'approved', revise: 'needs_changes', cancel: 'cancell
 
 /**
  * Web 上的先出计划：计划轮与飞书 /plan 同一套（请求原文带 /plan、任务以 deny-all 运行），
- * 批准、提修改意见、取消在会话页的计划卡上做。飞书来的会话只读，决定留在飞书计划卡上。
+ * 批准、提修改意见、取消在会话页的计划卡上做。飞书会话从飞书 /plan 发起，Web 只展示计划，决定留在飞书计划卡上。
  */
 export function registerPlanRoutes(app: FastifyInstance, runtime: DutydeckRuntime, requireSessionExecution: RequireSessionExecution, options: PlanRouteOptions) {
   const actorOf = (decision: PolicyDecision | undefined) => decision?.source === 'owner' ? installationOwnerTaskActor : undefined;
@@ -59,6 +59,7 @@ export function registerPlanRoutes(app: FastifyInstance, runtime: DutydeckRuntim
     const prompt = startSchema.parse(request.body).prompt.trim();
     if (!prompt) throw new RuntimeError('INVALID_PROMPT', 'Prompt must not be empty', 400);
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'turn.append');
+    if ((await session(request.params.id)).source === 'lark') throw new RuntimeError('PLAN_IN_LARK', '飞书会话请在飞书发送 /plan 发起计划，并在飞书计划卡上批准、修改或取消。', 409);
     return reply.code(202).send({ accepted: true, task: await dispatchPlan(request.params.id, prompt, actorOf(decision)) });
   });
 

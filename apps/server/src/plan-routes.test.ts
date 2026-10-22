@@ -83,6 +83,22 @@ describe('Web plan routes', () => {
     expect(await h.runtime.getTasks(h.session.id)).toEqual([]);
   });
 
+  it('rejects Web plan creation in a Lark session before dispatch while preserving ordinary send', async () => {
+    const h = await harness();
+    const session = await h.runtime.start({ agentId: 'claude', source: 'lark', sourceId: 'test:chat:group' });
+    const dispatch = vi.spyOn(h.runtime, 'dispatch');
+    const started = await h.app.inject({ method: 'POST', url: `/api/sessions/${session.id}/plan`, payload: { prompt: '整理依赖' } });
+    expect(started.statusCode).toBe(409);
+    expect(started.json().error).toMatchObject({ code: 'PLAN_IN_LARK', message: expect.stringContaining('/plan') });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(await h.runtime.getTasks(session.id)).toEqual([]);
+    expect(h.turns).toEqual([]);
+
+    const sent = await h.app.inject({ method: 'POST', url: `/api/sessions/${session.id}/send`, payload: { prompt: '普通消息', mode: 'queue' } });
+    expect(sent.statusCode).toBe(202);
+    await vi.waitFor(() => expect(h.turns).toEqual([{ prompt: '普通消息', mode: 'ask' }]));
+  });
+
   it('leaves Feishu plans to the Feishu card', async () => {
     const h = await harness();
     await h.runtime.dispatch(h.session.id, '/plan 整理依赖', 'queue', '整理依赖', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'deny-all');

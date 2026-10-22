@@ -129,7 +129,7 @@ function processService(releases: string, port: number, database: string) {
     restart: async () => {
       if (child) await stop(child);
       ran.push(realpathSync(join(releases, 'current')));
-      child = spawn(process.execPath, [join(releases, 'current', 'dist', 'cli.js'), '--port', String(port), '--database', database], { stdio: 'ignore' });
+      child = spawn(process.execPath, [realpathSync(join(releases, 'current', 'dist', 'cli.js')), '--port', String(port), '--database', database], { stdio: 'ignore' });
       return undefined;
     },
     stop: async () => {
@@ -690,6 +690,77 @@ describe('dutydeck deploy', () => {
     expect(service.ran).toEqual([]);
   });
 
+  it('运行版本无法核实时拒绝部署，不把共享 current 当成该进程的版本', async () => {
+    const first = await runDeploy({ source, runtime: bot, restart: false }, deps());
+    await service.restart();
+    nextCommit(source);
+    const result = await runDeploy({ source, runtime: bot }, deps({ processRelease: () => undefined }));
+    expect(result).toMatchObject({ ok: false, status: 'refused' });
+    expect(result.error).toContain('实际运行的发布版本');
+    expect(service.ran).toEqual([first.release]);
+    expect(realpathSync(join(releases, 'current'))).toBe(first.release);
+  });
+
+  it.each([false, true])('--no-restart 不覆盖 unit 成功版本，启动失败仍回到 A（旧服务停止=%s）', async stopped => {
+    const first = await runDeploy({ source, runtime: bot }, deps());
+    nextCommit(source, { health: 503 });
+    const staged = await runDeploy({ source, runtime: bot, restart: false }, deps());
+    expect(staged.status).toBe('staged');
+    const units = join(dirname(releases), 'deployments/units');
+    const record = () => JSON.parse(readFileSync(join(units, readdirSync(units)[0]!), 'utf8'));
+    expect(record().release).toBe(first.release);
+    if (stopped) await service.stop();
+    const result = await runDeploy({ source, runtime: bot }, deps({ healthTimeoutMs: 300 }));
+    expect(result.status, result.error).toBe('rolled_back');
+    expect(result.previousRelease).toBe(first.release);
+    expect(service.ran).toEqual([first.release, result.release, first.release]);
+    expect(record()).toMatchObject({ release: first.release, process_identity: { pid: await service.mainPid() } });
+  }, 20_000);
+
+  it('备份期间目标被另行重启时释放排空且不切换版本', async () => {
+    const first = await runDeploy({ source, runtime: bot }, deps());
+    nextCommit(source);
+    const requests = recordRequests();
+    const result = await runDeploy({ source, runtime: bot }, deps({
+      fetch: requests.fetch,
+      backupDatabase: async (from, to) => {
+        const db = new Database(from, { readonly: true });
+        try { await db.backup(to); } finally { db.close(); }
+        await service.restart();
+      }
+    }));
+    expect(result).toMatchObject({ ok: false, status: 'failed' });
+    expect(result.error).toContain('主进程已变化');
+    expect(realpathSync(join(releases, 'current'))).toBe(first.release);
+    expect(service.ran).toEqual([first.release, first.release]);
+    expect(requests.calls).toContain('drain /api/system/drain false');
+  });
+
+  it.each([false, true])('迁移失败后再次部署失败，不用旧 unit 记录把已升级的数据库交给 A（旧记录缺 schema=%s）', async legacyRecord => {
+    nextCommit(source, { knownSchema: 24 });
+    const first = await runDeploy({ source, runtime: bot }, deps());
+    nextCommit(source, { knownSchema: 27, health: 503 });
+    const broken = await runDeploy({ source, runtime: bot }, deps({ healthTimeoutMs: 300 }));
+    expect(broken.status, broken.error).toBe('rollback_failed');
+    expect(await service.mainPid()).toBeUndefined();
+    const units = join(dirname(releases), 'deployments/units');
+    const recordFile = join(units, readdirSync(units)[0]!);
+    const record = JSON.parse(readFileSync(recordFile, 'utf8'));
+    const before = JSON.parse(readFileSync(broken.manifest!, 'utf8'));
+    expect(record).toMatchObject({ release: first.release, schema_fingerprint: before.schema_fingerprint_before });
+    if (legacyRecord) { delete record.schema_fingerprint; writeFileSync(recordFile, JSON.stringify(record)); }
+    const retried = await runDeploy({ source, runtime: bot }, deps({ healthTimeoutMs: 300 }));
+    expect(retried.status, retried.error).toBe('rollback_failed');
+    expect(retried.previousRelease).toBe(broken.release);
+    expect(service.ran).toEqual([first.release, broken.release, retried.release, broken.release]);
+    const after = JSON.parse(readFileSync(retried.manifest!, 'utf8'));
+    expect(after.schema_fingerprint_at_rollback).toBe(after.schema_fingerprint_before);
+    expect(after.database_restored).toBe(false);
+    const db = new Database(database, { readonly: true });
+    try { expect(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get()).toEqual({ version: 27 }); }
+    finally { db.close(); }
+  }, 20_000);
+
   /** 在 releases 下造几个更早的发布目录，版本名按时间递增。 */
   function oldReleases(count: number, suffix = '') {
     return Array.from({ length: count }, (_, index) => {
@@ -781,8 +852,8 @@ describe('dutydeck deploy 与 systemd unit', () => {
   beforeEach(() => { tmp = realpathSync(mkdtempSync(join(tmpdir(), 'dutydeck-deploy-unit-'))); });
   afterEach(() => { rmSync(tmp, { recursive: true, force: true }); });
 
-  function systemctl(script: string, fragmentPath: string, environment = 'PATH=/usr/bin', execArgs = `--database ${tmp}/bot.db --local-only --port 4311`) {
-    let pid = 4242;
+  function systemctl(script: string, fragmentPath: string, environment = 'PATH=/usr/bin', execArgs = `--database ${tmp}/bot.db --local-only --port 4311`, initialPid = 4242) {
+    let pid = initialPid;
     const calls: string[] = [];
     const runCommand = async (command: string, args: readonly string[]): Promise<AutostartCommandOutput> => {
       calls.push([command, ...args].join(' '));
@@ -812,7 +883,7 @@ describe('dutydeck deploy 与 systemd unit', () => {
       db.close();
     }
     writeFileSync(join(tmp, 'deployment.json'), JSON.stringify({ databasePath: metadata, address: 'http://127.0.0.1:4311' }));
-    const sys = systemctl(join(releases, 'current/dist/cli.js'), join(tmp, 'unit.service'), `DUTYDECK_DATABASE_URL=${custom}`, '--local-only --port 4311');
+    const sys = systemctl(join(releases, 'current/dist/cli.js'), join(tmp, 'unit.service'), `DUTYDECK_DATABASE_URL=${custom}`, '--local-only --port 4311', 0);
     const result = await runDeploy({ unit: 'dutydeck-fixture.service', source, node: process.execPath, ...(useMetadata ? { runtime: tmp } : {}) }, {
       ...sys, platform: 'linux', checkSqlite: passingSqlite, env: {}, processPaths: () => [], info: vi.fn(), warn: vi.fn(),
       fetch: async () => new Response(JSON.stringify({ ok: true, runningTasks: 0, draining: true }))
@@ -922,6 +993,20 @@ describe('dutydeck deploy prune', () => {
     // 保留 08、07；03 是 current、01 是上一版、02 被引用，04..06 删除
     expect(tight.items.map(item => item.name).sort()).toEqual([releaseName(4), releaseName(5), releaseName(6)]);
     expect(names(releases)).toEqual([releaseName(1), releaseName(2), releaseName(3), releaseName(7), releaseName(8), 'current'].sort());
+  });
+
+  it.each([false, true])('其他 unit 最近成功的 release 在无进程引用时也保留（发布根使用软链=%s）', async linked => {
+    const old = join(releases, '20260901T100000Z-aaaaaaa');
+    const current = join(releases, '20261001T100000Z-bbbbbbb');
+    mkdirSync(old); mkdirSync(current);
+    symlinkSync(basename(current), join(releases, 'current'));
+    write(join(deployments, 'units/other.json'), JSON.stringify({ unit: 'other.service', release: old }));
+    const alias = join(tmp, 'linked-releases');
+    if (linked) symlinkSync(basename(releases), alias);
+    const result = await runDeployPrune({ releases: linked ? alias : releases, keep: '1' }, { processPaths: noProcesses });
+    expect(result.ok).toBe(true);
+    expect(existsSync(old)).toBe(true);
+    expect(result.items).toEqual([]);
   });
 
   it('看不了进程时不删旧版本；刚改过的 .partial 当作进行中的部署不动，陈旧的才清', async () => {

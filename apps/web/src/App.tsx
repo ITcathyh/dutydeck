@@ -468,7 +468,7 @@ export default function App() {
   const blockingMainQueryFailures = mainQueryFailures.filter(failure => !failure.hasData);
   const staleMainQueryFailures = mainQueryFailures.filter(failure => failure.hasData);
   const retryingMainQueries = mainQueryFailures.some(failure => failure.retrying);
-  const submit = () => { if (modelReadiness.kind !== 'ready') return; const message = buildPrompt(prompt, composerReferences); if (message && activeSessionId) send.mutate({ sessionId: activeSessionId, message, draftKey: composerDraft.key!, draftRevision: composerDraft.draft.revision, mode: busyStates.has(active?.state ?? '') ? sendMode : 'queue', skillRequests: composerReferences.filter(reference => reference.kind === 'skill').map(reference => reference.value), plan: planFirst }); };
+  const submit = () => { if (modelReadiness.kind !== 'ready') return; if (planFirst && active?.source === 'lark') { setActionError('飞书会话请在飞书发送 /plan；如需直接执行，请先改为普通消息。'); return; } const message = buildPrompt(prompt, composerReferences); if (message && activeSessionId) send.mutate({ sessionId: activeSessionId, message, draftKey: composerDraft.key!, draftRevision: composerDraft.draft.revision, mode: busyStates.has(active?.state ?? '') ? sendMode : 'queue', skillRequests: composerReferences.filter(reference => reference.kind === 'skill').map(reference => reference.value), plan: planFirst }); };
   const act = async (action: string) => { try { setActionError(undefined); await api.action(activeSessionId!, action); } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); } };
 
   // 有浮层占用键盘时整套快捷键停用，避免和弹窗内的按键语义打架。

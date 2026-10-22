@@ -558,7 +558,8 @@ export function registerBrowserAuthRoutes(app: FastifyInstance, options: AuthMid
     reply.header('Cache-Control', 'no-store');
     reply.header('Set-Cookie', cookieAttributes(request, true));
     const required = browserAuthRequired(request, options);
-    return { authenticated: !required, required } satisfies BrowserAuthState;
+    const passwordHash = required ? await options.getPasswordHash?.() ?? null : null;
+    return { authenticated: !required, required, ...passwordFlag(passwordHash) } satisfies BrowserAuthState;
   });
 }
 

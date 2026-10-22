@@ -9,7 +9,7 @@ import App from './App';
 import { AuthGate } from './components/AuthGate';
 import { useDockStore } from './store';
 import { resetDrafts } from './draft-store';
-import { resetComposerDrafts } from './composer-draft';
+import { composerDraftKey, readComposerDraft, resetComposerDrafts } from './composer-draft';
 import type { EventWindow } from './event-history';
 import { shortcutDefinitions } from './useKeyboardShortcuts';
 import { toastStore } from './useToasts';
@@ -1801,4 +1801,57 @@ describe('App shared model draft navigation guard', () => {
     expect((screen.getByLabelText('服务地址') as HTMLInputElement).value).toBe('https://unsaved.example');
   });
 
+});
+
+
+describe('App plan creation channels', () => {
+  it('keeps ordinary Web plan creation available', async () => {
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1')] });
+    const plan = vi.spyOn(api, 'plan').mockResolvedValue({ accepted: true, task: { id: 'plan-task', sessionId: 's1', prompt: '/plan review', status: 'queued', createdAt: session('s1').createdAt, updatedAt: session('s1').updatedAt } });
+    const send = vi.spyOn(api, 'send');
+    const { client } = renderApp();
+    await userEvent.click(await screen.findByRole('button', { name: '先出计划' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '消息' }), { target: { value: 'review' } });
+    await userEvent.click(screen.getByRole('button', { name: '发送消息' }));
+    await waitFor(() => expect(plan).toHaveBeenCalledWith('s1', 'review'));
+    expect(send).not.toHaveBeenCalled();
+    client.clear();
+  });
+
+  it('blocks a restored Lark plan draft until explicitly changed to ordinary send, including after session navigation', async () => {
+    window.history.replaceState(null, '', '/sessions/s1');
+    const key = composerDraftKey('s2');
+    localStorage.setItem(key, JSON.stringify({ text: 'preserve plan intent', references: [], mode: 'queue', planFirst: true, revision: 7 }));
+    mockAppApi({ sessions: [session('s1'), { ...session('s2'), source: 'lark' }], summaries: [summary('s1', 'Web task'), summary('s2', 'Lark task')] });
+    const plan = vi.spyOn(api, 'plan');
+    const send = vi.spyOn(api, 'send').mockResolvedValue({ accepted: true, task: { id: 'ordinary-task', sessionId: 's2', prompt: 'preserve plan intent', status: 'queued', createdAt: session('s2').createdAt, updatedAt: session('s2').updatedAt } });
+    const first = renderApp();
+    await userEvent.click(await screen.findByRole('button', { name: '先出计划' }));
+    const nav = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
+    await userEvent.click(within(nav).getByRole('button', { name: /Lark task/ }));
+    const input = await screen.findByRole('textbox', { name: '消息' });
+    expect((input as HTMLTextAreaElement).value).toBe('preserve plan intent');
+    expect(screen.queryByRole('button', { name: '先出计划' })).toBeNull();
+    expect((screen.getByRole('button', { name: '发送消息' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(plan).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(readComposerDraft(key).planFirst).toBe(true);
+
+    await userEvent.click(within(nav).getByRole('button', { name: /Web task/ }));
+    expect(screen.getByRole('button', { name: '先出计划' }).getAttribute('aria-pressed')).toBe('true');
+    await userEvent.click(within(nav).getByRole('button', { name: /Lark task/ }));
+    expect((screen.getByRole('button', { name: '发送消息' }) as HTMLButtonElement).disabled).toBe(true);
+    first.unmount(); first.client.clear();
+    const second = renderApp();
+    await userEvent.click(await screen.findByRole('button', { name: '改为普通消息' }));
+    expect(readComposerDraft(key).planFirst).toBe(false);
+    expect((screen.getByRole('textbox', { name: '消息' }) as HTMLTextAreaElement).value).toBe('preserve plan intent');
+    await userEvent.click(screen.getByRole('button', { name: '发送消息' }));
+    await waitFor(() => expect(send).toHaveBeenCalledWith('s2', 'preserve plan intent', 'queue', []));
+    expect(plan).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: '先出计划' })).toBeNull();
+    second.client.clear();
+  });
 });

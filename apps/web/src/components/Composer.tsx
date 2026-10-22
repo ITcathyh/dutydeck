@@ -184,7 +184,7 @@ function ReferenceChips({ references, onChange }: { references: ComposerReferenc
 }
 
 export function Composer({ planFirst = false, onPlanFirstChange, state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, injectingTaskId, steerable, blockingPermissionId, rejectingPermission, onRejectPermission, skills, models, reasoningEfforts, currentModel, currentReasoningEffort, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onSteerQueued, onInjectQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp }: {
-  state: string; session?: Pick<Session, 'state' | 'archivedAt'>; value: string; references: ComposerReference[]; sending: boolean; mode: SendMode; queuedTasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string;
+  state: string; session?: Pick<Session, 'state' | 'archivedAt' | 'source'>; value: string; references: ComposerReference[]; sending: boolean; mode: SendMode; queuedTasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string;
   /** 先出计划：打开时这条消息让 Agent 只调研出计划，批准后才执行。未传 onPlanFirstChange 时不显示开关。 */
   planFirst?: boolean; onPlanFirstChange?(value: boolean): void;
   /** 当前 Agent 可能支持插话（ACP）；为假时不提供「插话」。 */
@@ -210,7 +210,8 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
   const modeAnchor = useRef<HTMLButtonElement>(null);
 
   const busy = busyStates.has(state);
-  const canSend = modelReadiness.kind === 'ready' && (value.trim().length > 0 || references.length > 0) && !sending && !['starting', 'interrupting', 'stopped', 'failed'].includes(state);
+  const blockedPlan = planFirst && session?.source === 'lark';
+  const canSend = !blockedPlan && modelReadiness.kind === 'ready' && (value.trim().length > 0 || references.length > 0) && !sending && !['starting', 'interrupting', 'stopped', 'failed'].includes(state);
   const modelLabel = modelReadiness.kind === 'ready' ? currentModel || '默认模型' : modelReadiness.label;
   const sendLabel = modelReadiness.kind === 'ready' ? busy ? mode === 'interrupt' ? '停止当前执行并发送' : mode === 'steer' && steerable ? '立即插话' : '加入队列' : '发送消息' : modelReadiness.reason;
   const query = slashQuery(value, textarea.current?.selectionStart ?? value.length);
@@ -293,6 +294,7 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
   const confirmFile = () => addReference('file', filePath.split('/').at(-1) || filePath, filePath);
 
   return <div className="bg-gradient-to-t from-canvas via-canvas to-transparent px-4 pb-5 pt-7 sm:px-8"><div className="mx-auto max-w-[880px]">
+    {blockedPlan && <div role="alert" className="mb-2 text-caption text-secondary">这份草稿选择了先出计划。飞书会话请在飞书发送 /plan；如需直接执行，<button type="button" className="text-action underline" onClick={() => onPlanFirstChange?.(false)}>改为普通消息</button>。</div>}
     <QueuedTasks tasks={queuedTasks} cancellingTaskId={cancellingTaskId} steeringTaskId={steeringTaskId} injectingTaskId={injectingTaskId} blockingPermissionId={blockingPermissionId} rejectingPermission={rejectingPermission} onCancel={onCancelQueued} onSteer={onSteerQueued} onInject={steerable && busy ? onInjectQueued : undefined} onRejectPermission={onRejectPermission}/>
 
     <div ref={shell} className={`relative rounded-xl border border-default bg-surface p-2 shadow-panel ring-1 ring-inset ring-subtle backdrop-blur-sm transition-[transform,border-color,box-shadow,background-color] duration-normal ease-out focus-within:-translate-y-0.5 focus-within:border-action focus-within:bg-raised ${queuedTasks.length ? 'rounded-t-md' : ''}`}>
@@ -376,7 +378,7 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
           className={panelTriggerClass}
         ><BrainCircuit size={13}/><span className="truncate">{currentReasoningEffort || '默认深度'}</span><ChevronDown size={12}/></button>
 
-        {onPlanFirstChange && <button
+        {onPlanFirstChange && session?.source !== 'lark' && <button
           type="button"
           aria-pressed={planFirst}
           title="先只调研、出计划，不改文件；你批准后再按计划执行"

@@ -1,4 +1,4 @@
-import { checkSqliteDriver, describeSqliteDriverFailure } from '@dutydeck/storage';
+import { checkSqliteDriver, childProcessIdentity, describeSqliteDriverFailure, observeProcess, type ProcessIdentity } from '@dutydeck/storage';
 import Database from 'better-sqlite3';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -31,6 +31,8 @@ export interface DeployDeps extends DaemonCommandDeps {
   backupDatabase?: (source: string, target: string) => Promise<void>;
   /** 运行中进程的 cwd、命令行、环境变量与已映射文件路径，清理旧发布目录前用来判断还有没有进程在用；默认读 /proc。 */
   processPaths?: () => string[] | undefined;
+  /** 目标 PID 实际加载的不可变 release；默认读取 /proc，不能解析 current 来代替运行版本。 */
+  processRelease?: (pid: number, releases: string) => string | undefined;
 }
 
 export type DeployStatus = 'deployed' | 'staged' | 'rolled_back' | 'rollback_failed' | 'failed' | 'refused' | 'unit';
@@ -219,6 +221,62 @@ function currentRelease(releases: string): string | undefined {
   try { return resolve(releases, readlinkSync(join(releases, 'current'))); } catch { return undefined; }
 }
 
+interface UnitRelease { unit: string; release: string; process_identity?: ProcessIdentity; schema_fingerprint?: string }
+
+function unitReleaseFile(deployments: string, unit: string): string {
+  return join(deployments, 'units', `${createHash('sha256').update(unit).digest('hex')}.json`);
+}
+
+function readUnitRelease(deployments: string, unit: string, releases: string): UnitRelease | undefined {
+  try {
+    const record = JSON.parse(readFileSync(unitReleaseFile(deployments, unit), 'utf8')) as UnitRelease;
+    return record.unit === unit && typeof record.release === 'string' && realpathSync(dirname(record.release)) === realpathSync(releases) && existsSync(join(record.release, 'dist/cli.js')) ? record : undefined;
+  } catch { return undefined; }
+}
+
+function writeUnitRelease(deployments: string, unit: string, release: string, pid: number | undefined, schema: string | undefined): void {
+  let identity: ProcessIdentity | undefined;
+  try { if (pid !== undefined) identity = childProcessIdentity(pid); } catch { /* 已退出的成功版本仍可供停服后的恢复使用 */ }
+  const file = unitReleaseFile(deployments, unit), temp = `${file}.${process.pid}.tmp`;
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  writeFileSync(temp, `${JSON.stringify({ unit, release, process_identity: identity, schema_fingerprint: schema })}\n`, { mode: 0o600 });
+  renameSync(temp, file);
+}
+
+/** 旧版没有自报 release：本 PID 映射的原生依赖路径仍指向启动时的真实 release，不受 current 切换影响。 */
+function readProcessRelease(pid: number, releases: string): string | undefined {
+  try {
+    const identity = childProcessIdentity(pid);
+    const root = realpathSync(releases);
+    const paths = readFileSync(`/proc/${pid}/maps`, 'utf8').split('\n').flatMap(line => {
+      const at = line.indexOf(' /');
+      const path = at < 0 ? '' : line.slice(at + 1).replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8)));
+      return path.endsWith('.node') ? [path] : [];
+    });
+    // 显式使用不可变 cli.js 的进程也可核实；current 参数只能表示启动入口，不能表示加载版本。
+    const cli = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')[1];
+    try { if (cli?.endsWith('/dist/cli.js') && realpathSync(cli) === cli) paths.push(cli); } catch { /* 入口已被移除，仍可从映射核实 */ }
+    const found = new Set(paths.flatMap(path => {
+      const local = relative(root, path), name = local.split(sep)[0];
+      if (!name || !RELEASE_NAME.test(name) || local.startsWith('..') || isAbsolute(local)) return [];
+      const release = join(root, name);
+      return existsSync(join(release, 'dist/cli.js')) ? [release] : [];
+    }));
+    return found.size === 1 && observeProcess(identity) === 'alive' ? [...found][0] : undefined;
+  } catch { return undefined; }
+}
+
+function recordedReleases(deployments: string): string[] {
+  try {
+    return readdirSync(join(deployments, 'units')).flatMap(name => {
+      try {
+        const record = JSON.parse(readFileSync(join(deployments, 'units', name), 'utf8')) as UnitRelease;
+        return typeof record.release === 'string' ? [resolve(record.release)] : [];
+      } catch { return []; }
+    });
+  } catch { return []; }
+}
+
 /** 新链接先建在临时名下，再 rename 覆盖 `current`：切换是原子的。 */
 function pointCurrent(releases: string, release: string): void {
   const temp = join(releases, `.current.${process.pid}.tmp`);
@@ -348,15 +406,17 @@ function pruneReleases(releases: string, previous: string | undefined, processPa
     if (recentlyModified(join(releases, name), opts)) opts.report?.skipped.push(name);
     else removeEntry(join(releases, name), name, 'partial', result, opts);
   }
-  const keep = new Set([currentRelease(releases), previous]);
-  const candidates = names.filter(name => RELEASE_NAME.test(name)).sort().reverse().slice(opts.keep ?? RELEASES_TO_KEEP).filter(name => !keep.has(join(releases, name)));
+  const real = realpathSync(releases);
+  const keep = new Set([currentRelease(releases), previous, ...recordedReleases(join(dirname(releases), 'deployments'))].flatMap(path => {
+    try { return path ? [realpathSync(path)] : []; } catch { return []; }
+  }));
+  const candidates = names.filter(name => RELEASE_NAME.test(name)).sort().reverse().slice(opts.keep ?? RELEASES_TO_KEEP).filter(name => !keep.has(join(real, name)));
   if (candidates.length === 0) return result;
   const paths = processPaths();
   if (!paths) {
     warn(`读不到 /proc，确认不了 ${candidates.length} 个旧发布目录是否仍被运行中的进程引用，这次不删。`);
     return result;
   }
-  const real = realpathSync(releases);
   for (const name of candidates) {
     if (referencedBy(paths, [join(releases, name), join(real, name)])) result.inUse.push(name);
     else removeEntry(join(releases, name), name, 'release', result, opts);
@@ -569,6 +629,21 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
   if ('error' in build) return refused(build.error);
   if (build.dirty) warn(`${source} 有未提交的改动；发布目录按提交 ${build.commit.slice(0, 7)} 命名，内容包含这些改动。`);
 
+  const service = deps.service ?? systemdServiceControl(target.unit, deps);
+  const previousPid = restart ? await service.mainPid() : undefined;
+  const recorded = readUnitRelease(target.deployments, target.unit, target.releases);
+  const recordedRunning = previousPid !== undefined && recorded?.process_identity?.pid === previousPid && observeProcess(recorded.process_identity) === 'alive';
+  // 停服可能是上一次迁移失败所致；历史成功版本必须仍认识当前 schema，才能代替 current。
+  const recordedStopped = restart && previousPid === undefined && recorded?.schema_fingerprint && target.endpoint.database &&
+    recorded.schema_fingerprint === databaseSchema(target.endpoint.database)?.fingerprint;
+  const previousRelease = !restart ? currentRelease(target.releases)
+    : previousPid !== undefined
+      ? recordedRunning ? recorded!.release : (deps.processRelease ?? readProcessRelease)(previousPid, target.releases)
+      : recordedStopped ? recorded!.release : currentRelease(target.releases);
+  if (restart && previousPid !== undefined && (!previousRelease || await service.mainPid() !== previousPid)) {
+    return refused(`无法核实 unit ${target.unit} 主进程 ${previousPid} 实际运行的发布版本，已拒绝切换 current。确认该进程的不可变 release 路径及读取 /proc 的权限后重试。`);
+  }
+
   const startedAt = now();
   const prefix = `${startedAt.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}-${build.commit.slice(0, 7)}${build.dirty ? '-dirty' : ''}`;
   mkdirSync(target.deployments, { recursive: true, mode: 0o700 });
@@ -576,13 +651,16 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
   const id = basename(record);
   const release = join(target.releases, id);
   const manifestPath = join(record, 'manifest.json');
-  const previousRelease = currentRelease(target.releases);
   const manifest: Record<string, unknown> = {
     created_by: DEPLOY_RECORD_CREATOR, commit: build.commit, dirty: build.dirty, source, unit: target.unit, release, previous_release: previousRelease ?? null,
     backup: record, status: 'preparing', started_at: startedAt.toISOString()
   };
   let pruned: PruneResult | undefined;
   let prunedRecords: DeployResult['prunedRecords'];
+  const remember = (path: string, pid: number | undefined) => {
+    try { writeUnitRelease(target.deployments, target.unit, path, pid, target.endpoint.database ? databaseSchema(target.endpoint.database)?.fingerprint : undefined); }
+    catch (error) { warn(`记录 ${target.unit} 的成功运行版本失败：${message(error)}`); }
+  };
   const finish = (status: DeployStatus, extra: Record<string, unknown> = {}): DeployResult => {
     Object.assign(manifest, { status, completed_at: now().toISOString() }, extra);
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
@@ -633,8 +711,7 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
     return finish('staged');
   }
 
-  const service = deps.service ?? systemdServiceControl(target.unit, deps);
-  const previousPid = await service.mainPid();
+  if (await service.mainPid() !== previousPid) return finish('failed', { error: '准备发布目录期间目标主进程已变化，没有切换版本；重新执行部署以核实它的运行版本。' });
   manifest.previous_pid = previousPid ?? null;
   let drain: DrainResult = { ok: true };
   if (previousPid !== undefined) {
@@ -660,6 +737,13 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
     }
   }
 
+  if (await service.mainPid() !== previousPid) {
+    await stopRenewing();
+    await drain.release?.();
+    return finish('failed', { error: '排空或备份期间目标主进程已变化，没有切换版本；重新执行部署以核实它的运行版本。' });
+  }
+  if (previousPid !== undefined && previousRelease) remember(previousRelease, previousPid);
+
   info(`切换 current → ${id}，重启 ${target.unit}`);
   pointCurrent(target.releases, release);
   const started = await restartAndCheck(service, previousPid, target.endpoint.address, deps);
@@ -667,6 +751,7 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
   if (started.ok) {
     info(`健康检查通过（pid ${started.pid}）`);
     updateDeploymentFile(target, release, build.commit, manifestPath, now());
+    remember(release, started.pid);
     prune();
     return finish('deployed', { new_pid: started.pid });
   }
@@ -697,6 +782,7 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
   pointCurrent(target.releases, previousRelease);
   await service.resetFailed?.();
   const back = await restartAndCheck(service, undefined, target.endpoint.address, deps);
+  if (back.ok) remember(previousRelease, back.pid);
   return back.ok
     ? finish('rolled_back', { new_pid: back.pid, error: `新版本 ${id} 没有通过健康检查，已切回 ${basename(previousRelease)}，保留当前数据库。原因：${started.error}` })
     : finish('rollback_failed', { error: `新版本没有通过健康检查，切回 ${basename(previousRelease)} 后仍不健康，数据库未恢复旧快照。新版本：${started.error}上一版：${back.error}` });

@@ -659,6 +659,18 @@ describe('密码登录', () => {
     await app.close();
   });
 
+  it('密码退出保留登录方式并清除 cookie，随后仍能用密码登录', async () => {
+    const { app } = await passwordApp();
+    try {
+      expect((await login(app, { password: 'dashboard pass' })).statusCode).toBe(200);
+      const logout = await app.inject({ method: 'POST', url: '/api/auth/logout', ...remote });
+      expect(logout.json()).toEqual({ authenticated: false, required: true, password: true });
+      expect(logout.headers['set-cookie']).toContain('Max-Age=0');
+      expect(logout.headers['cache-control']).toBe('no-store');
+      expect((await login(app, { password: 'dashboard pass' })).json()).toEqual({ authenticated: true, required: true, password: true });
+    } finally { await app.close(); }
+  });
+
   it('错误密码 401 且不发 cookie；重设密码后旧会话失效', async () => {
     const { app, configs } = await passwordApp();
     const rejected = await login(app, { password: 'wrong pass' });

@@ -139,6 +139,7 @@ export class PullRequestService {
   private closed = false;
   private currentTick?: Promise<void>;
   private readonly inflight = new Set<Promise<unknown>>();
+  private readonly pendingSettlements = new Map<string, () => Promise<void>>();
 
   constructor(private readonly options: PullRequestServiceOptions) {
     this.clock = options.clock ?? (() => new Date());
@@ -458,19 +459,22 @@ export class PullRequestService {
   async authorizeTask(task: TaskRecord, phase: 'prepare' | 'submit') {
     const id = await this.options.repositories.config.get(`${TASK_PREFIX}${task.id}`);
     if (!id) return;
-    const stored = await this.read(id);
-    const value = stored?.value;
-    if (!stored || !value?.task || value.status !== 'open' || value.task.id !== task.id || value.sessionId !== task.sessionId) {
-      throw new RuntimeError('PR_TASK_REVOKED', 'PR 跟进已停止或已被新的状态取代', 403);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const stored = await this.read(id);
+      const value = stored?.value;
+      if (!stored || !value?.task || value.status !== 'open' || value.task.id !== task.id || value.sessionId !== task.sessionId) {
+        throw new RuntimeError('PR_TASK_REVOKED', 'PR 跟进已停止或已被新的状态取代', 403);
+      }
+      if (value.task.startedAt) return;
+      const session = await this.options.runtime.getSession(task.sessionId);
+      const diverged = session ? await this.workspaceDivergence(session.cwd, value).catch(error => errorMessage(error)) : '会话已不存在';
+      if (diverged) {
+        await this.fail(value.id, diverged, ['open']);
+        throw new RuntimeError('PR_WORKSPACE_DIVERGED', diverged, 409);
+      }
+      if (phase !== 'submit' || await this.save(stored, { ...value, task: { ...value.task, startedAt: iso(this.clock().getTime()) } })) return;
     }
-    if (value.task.startedAt) return;
-    const session = await this.options.runtime.getSession(task.sessionId);
-    const diverged = session ? await this.workspaceDivergence(session.cwd, value).catch(error => errorMessage(error)) : '会话已不存在';
-    if (diverged) {
-      await this.fail(value.id, diverged, ['open']);
-      throw new RuntimeError('PR_WORKSPACE_DIVERGED', diverged, 409);
-    }
-    if (phase === 'submit') await this.save(stored, { ...value, task: { ...value.task, startedAt: iso(this.clock().getTime()) } });
+    throw new RuntimeError('PR_CONFLICT', '任务授权记录持续变化，请稍后重试。', 409);
   }
 
   /** 工作区里 PR 涉及的文件必须和 PR 分支一致，否则 Agent 改出来的东西对不上 PR。返回不一致的说明。 */
@@ -502,7 +506,9 @@ export class PullRequestService {
       const value = item.value;
       const now = this.clock().getTime();
       try {
-        if (value.status === 'proposed' && Date.parse(value.expiresAt) <= now) await this.save(item, { ...value, status: 'expired', reason: '确认已过期' });
+        const settlement = this.pendingSettlements.get(value.id);
+        if (settlement) await settlement();
+        else if (value.status === 'proposed' && Date.parse(value.expiresAt) <= now) await this.save(item, { ...value, status: 'expired', reason: '确认已过期' });
         else if (value.status === 'pushing' && now - Date.parse(value.updatedAt) >= STALE_PUSH_MS && !this.inflight.size) {
           await this.fail(value.id, `推送过程中断，请检查远端是否已有分支 ${value.branch}，必要时重新发起。`, ['pushing']);
         } else if (value.status === 'open' && value.task) await this.checkTask(item);
@@ -742,8 +748,7 @@ export class PullRequestService {
         await pushBranch(session.cwd, headSha, value.branch, value.target);
       } catch (error) { await this.fail(value.id, `${name}的改动推送失败：${errorMessage(error)}，已停止自动跟进。`, ['open']); return; }
     }
-    const paths = [...new Set([...value.paths, ...changes.contents.map(item => item.path)])];
-    let next: PullRequestRecord = { ...value, headSha, paths, task: undefined, nextPollAt: iso(this.clock().getTime() + POLL_INTERVAL_MS) };
+    const ownComments: string[] = [];
     const provider = this.options.providers.get(value.provider);
     const asked: Array<{ ref: string; id: string; excerpt: string; question: string }> = [];
     if (current.kind === 'review') {
@@ -756,21 +761,30 @@ export class PullRequestService {
             this.options.log?.warn({ error, pullRequestId: value.id }, 'PR 评论回复失败');
             return undefined;
           });
-          if (posted) next = { ...next, ownComments: [...next.ownComments, posted.id].slice(-2_000) };
+          if (posted) ownComments.push(posted.id);
         } else if (verdict?.kind !== 'DONE') {
           asked.push({ ...comment, question: verdict?.text ? oneLine(verdict.text, 500) : 'Agent 没有给出这条评论的处理结论，需要人决定怎么处理。' });
         }
       }
-      next = { ...next, questions: [...next.questions, ...asked.map(item => ({ commentId: item.id, question: item.question, excerpt: item.excerpt }))] };
     }
-    const saved = await this.save(stored, next);
-    if (!saved) return;
-    await this.notice(saved.value, {
-      key: `${value.id}:settle:${task.id}`, title: `${this.label(value)} ${name}结果`,
-      markdown: this.summary(saved.value, changes.files ? `${name}已推送 ${short(headSha)}（${changes.files} 个文件、${changes.lines} 行）。` : `${name}没有改动代码。`),
-      ...(output ? { output } : {})
-    });
-    await this.ask(saved.value, asked.map(item => ({ ...item, text: `Agent 的问题：${item.question}` })));
+    // 保留已完成的推送和回复；CAS 重试耗尽后，下次 tick 只重试合并，不重做外部操作。
+    const settlement = async () => {
+      const saved = await this.update(value.id, latest => latest.status === 'open' && latest.task?.id === current.id && latest.headSha === value.headSha ? {
+        ...latest, headSha, paths: [...new Set([...latest.paths, ...changes.contents.map(item => item.path)])], task: undefined,
+        nextPollAt: iso(this.clock().getTime() + POLL_INTERVAL_MS), ownComments: [...latest.ownComments, ...ownComments].slice(-2_000),
+        questions: [...latest.questions, ...asked.map(item => ({ commentId: item.id, question: item.question, excerpt: item.excerpt }))]
+      } : undefined);
+      this.pendingSettlements.delete(value.id);
+      if (!saved || saved.value.status !== 'open' || saved.value.task || saved.value.headSha !== headSha) return;
+      await this.notice(saved.value, {
+        key: `${value.id}:settle:${task.id}`, title: `${this.label(value)} ${name}结果`,
+        markdown: this.summary(saved.value, changes.files ? `${name}已推送 ${short(headSha)}（${changes.files} 个文件、${changes.lines} 行）。` : `${name}没有改动代码。`),
+        ...(output ? { output } : {})
+      });
+      await this.ask(saved.value, asked.map(item => ({ ...item, text: `Agent 的问题：${item.question}` })));
+    };
+    this.pendingSettlements.set(value.id, settlement);
+    await settlement();
   }
 
   /** 评论交给人决定：每条发一张带「按评论修改」「不处理」的卡片，记下卡片消息 ID。 */

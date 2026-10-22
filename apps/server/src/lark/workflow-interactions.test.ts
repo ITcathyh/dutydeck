@@ -974,6 +974,56 @@ describe('过期卡持久修复与结果附件引用', () => {
 });
 
 describe('conservative urgency in workflow interactions', () => {
+  it('deduplicates overlapping persisted scans and restores the hourly limit in a fresh manager', async () => {
+    const { directory, repositories } = await openDatabase();
+    let release!: () => void;
+    const response = new Promise<void>(resolve => { release = resolve; });
+    let first: ReturnType<LarkWorkflowInteractions['checkAndUrgePending']> | undefined;
+    try {
+      const now = Date.now();
+      const { runtime } = makeRuntime([], []);
+      const { service } = makeService();
+      const urgentApp = vi.fn().mockResolvedValue({ invalidUserIdList: [] }).mockImplementationOnce(async () => {
+        await response;
+        return { invalidUserIdList: [] };
+      });
+      service.urgentApp = urgentApp;
+      const options = { urgent: { thresholdMs: 60_000, maxPerHourPerChat: 1 } };
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true, options);
+      for (const id of ['urgent_one', 'urgent_two']) {
+        await persistInteraction(repositories.config, interaction({
+          id, cardId: `om_${id}`, cardCreatedAt: new Date(now - 120_000).toISOString(),
+          event: larkMessage({ senderOpenId: 'ou_requester' })
+        }));
+      }
+      const [snapshot, otherSnapshot] = await Promise.all([workflow.list('app_one'), workflow.list('app_one')]);
+      expect(snapshot).toEqual(otherSnapshot);
+      expect(snapshot[0]).not.toBe(otherSnapshot[0]);
+      first = workflow.checkAndUrgePending('app_one', { now });
+      await vi.waitFor(() => expect(urgentApp).toHaveBeenCalledOnce());
+      const overlapping = await workflow.checkAndUrgePending('app_one', { now });
+      expect(overlapping.urged).toEqual([]);
+      expect(overlapping.skippedNotEligible).toHaveLength(1);
+      expect(overlapping.skippedRateLimited).toHaveLength(1);
+      expect(urgentApp).toHaveBeenCalledOnce();
+      release();
+      expect((await first).urged).toHaveLength(1);
+      const persisted = await workflow.list('app_one');
+      expect(persisted.filter(record => record.urgentAt === new Date(now).toISOString())).toHaveLength(1);
+
+      const restarted = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true, options);
+      const afterRestart = await restarted.checkAndUrgePending('app_one', { now: now + 60_000 });
+      expect(afterRestart.urged).toEqual([]);
+      expect(afterRestart.skippedRateLimited).toHaveLength(1);
+      expect(urgentApp).toHaveBeenCalledOnce();
+    } finally {
+      release();
+      await first;
+      repositories.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('is disabled by default and reconcile makes zero urgentApp calls', async () => {
     const { directory, repositories } = await openDatabase();
     try {

@@ -11,6 +11,7 @@ import type { CiNotice } from './ci-webhook.js';
 import { assertPushTarget, redactGitOutput } from './pull-request-git.js';
 import { PR_COMMENT_MARKER, PullRequestService, parseReviewVerdicts, snapshotFailure } from './pull-requests.js';
 import { createTurnDiffObserver } from './turn-diff.js';
+import * as pullRequestGit from './pull-request-git.js';
 
 const run = promisify(execFile);
 const cleanups: Array<() => Promise<void>> = [];
@@ -118,7 +119,7 @@ async function fixture(options: { withoutPullRequests?: boolean } = {}) {
     await service.idle();
     return (await service.get(proposal.id))!;
   };
-  return { root, remote, cwd, git, remoteGit, now, session, tasks, dispatches, state, provider, service, notices, turn, finishLatest, poll, write, checkout, remoteBranches, open };
+  return { config: database.config, root, remote, cwd, git, remoteGit, now, session, tasks, dispatches, state, provider, service, notices, turn, finishLatest, poll, write, checkout, remoteBranches, open };
 }
 
 describe('开 PR：确认清单与推送', () => {
@@ -470,6 +471,105 @@ describe('PR 跟进：评审意见', () => {
 });
 
 describe('PR 跟进：停止', () => {
+  it.each(['settle', 'stop', 'close', 'merge', 'replace'] as const)('推送后 5 个真实 pipeline 事件耗尽合并重试，下一 tick 只合并结果并保留 %s', async action => {
+    const f = await fixture(); const pr = await f.open();
+    f.state.comments = [{ id: 'review:1', body: 'Please fix app.ts', trusted: true }, { id: 'review:2', body: 'Which behavior?', trusted: true }];
+    await f.poll();
+    const taskId = f.dispatches.at(-1)!.id;
+    const push = vi.spyOn(pullRequestGit, 'pushBranch');
+    cleanups.push(async () => { push.mockRestore(); });
+    let events!: Promise<PromiseSettledResult<void>[]>;
+    vi.mocked(f.provider.postComment!).mockImplementation(async () => {
+      events = Promise.allSettled(Array.from({ length: 5 }, () => f.service.onWebhookEvent('fake', { kind: 'pipeline', repository: 'group/repo', branch: pr.branch, state: 'success' })));
+      return { id: 'issue:101' };
+    });
+    await f.finishLatest(() => f.write('app.ts', 'export const a = 3;\n'), 'DUTYDECK_REVIEW c1 DONE fixed app\nDUTYDECK_REVIEW c2 ASK Need a decision');
+    expect((await events).map(result => result.status)).toEqual(Array(5).fill('fulfilled'));
+    const remoteHead = await f.remoteGit('rev-parse', pr.branch);
+    expect(remoteHead).not.toBe(pr.headSha);
+    // 所有 webhook 都成功，当前 tick 仍可能已耗尽有限的 CAS 重试。
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'open', headSha: pr.headSha, task: { id: taskId } });
+    expect(f.provider.postComment).toHaveBeenCalledTimes(1);
+    expect(push).toHaveBeenCalledTimes(1);
+    if (action === 'stop') await f.service.cancel(f.session.id, pr.id);
+    else if (action === 'close' || action === 'merge') await f.service.onWebhookEvent('fake', { kind: 'merge_request', repository: 'group/repo', branch: pr.branch, state: action });
+    else if (action === 'replace') {
+      const key = `pull_request/record/${pr.id}`;
+      const raw = (await f.config.get(key))!;
+      const latest = JSON.parse(raw);
+      expect(await f.config.compareAndSet!(key, raw, JSON.stringify({ ...latest, revision: latest.revision + 1, task: { ...latest.task, id: 'replacement-task' } }))).toBe(true);
+    }
+    await f.service.tick();
+    if (action === 'settle') {
+      expect(await f.service.get(pr.id)).toMatchObject({ status: 'open', headSha: remoteHead, ownComments: ['issue:101'], questions: [{ commentId: 'review:2', question: 'Need a decision', cardMessageId: expect.any(String) }] });
+      expect((await f.service.get(pr.id))!.task).toBeUndefined();
+      expect(f.notices.filter(notice => notice.key === `${pr.id}:settle:${taskId}`)).toHaveLength(1);
+    } else if (action === 'replace') expect(await f.service.get(pr.id)).toMatchObject({ status: 'open', headSha: pr.headSha, task: { id: 'replacement-task' } });
+    else expect(await f.service.get(pr.id)).toMatchObject({ status: action === 'stop' ? 'stopped' : action === 'close' ? 'closed' : 'merged' });
+    expect((f.service as unknown as { pendingSettlements: Map<string, unknown> }).pendingSettlements.size).toBe(0);
+    await f.service.tick();
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(remoteHead);
+    expect(f.provider.postComment).toHaveBeenCalledTimes(1);
+    expect(push).toHaveBeenCalledTimes(1);
+  });
+
+  it('推送后的 pipeline webhook 不丢结算的新 HEAD，也不重复推送或回复', async () => {
+    const f = await fixture(); const pr = await f.open();
+    f.state.comments = [{ id: 'review:1', body: 'Please fix app.ts', trusted: true }, { id: 'review:2', body: 'Which behavior?', trusted: true }];
+    await f.poll();
+    const taskId = f.dispatches.at(-1)!.id;
+    let conflicted = false;
+    vi.mocked(f.provider.postComment!).mockImplementation(async () => {
+      await f.service.onWebhookEvent('fake', { kind: 'pipeline', repository: 'group/repo', branch: pr.branch, state: 'success' });
+      const compareAndSet = f.config.compareAndSet!.bind(f.config);
+      vi.spyOn(f.config, 'compareAndSet').mockImplementation(async (key, expected, next) => {
+        if (!conflicted && key === `pull_request/record/${pr.id}` && !JSON.parse(next).task) {
+          conflicted = true;
+          const latest = JSON.parse(expected!);
+          expect(await compareAndSet(key, expected, JSON.stringify({ ...latest, revision: latest.revision + 1, reviewsPaused: true, ownComments: ['issue:prior'], questions: [{ commentId: 'older', question: 'Older question', excerpt: 'Older comment', answer: 'ignore' }] }))).toBe(true);
+          return false;
+        }
+        return compareAndSet(key, expected, next);
+      });
+      return { id: 'issue:101' };
+    });
+    await f.finishLatest(() => f.write('app.ts', 'export const a = 3;\n'), 'DUTYDECK_REVIEW c1 DONE fixed app\nDUTYDECK_REVIEW c2 ASK Need a decision');
+    const remoteHead = await f.remoteGit('rev-parse', pr.branch);
+    expect(remoteHead).not.toBe(pr.headSha);
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'open', headSha: remoteHead, reviewsPaused: true, ownComments: ['issue:prior', 'issue:101'], questions: [{ commentId: 'older', answer: 'ignore' }, { commentId: 'review:2', question: 'Need a decision', cardMessageId: expect.any(String) }] });
+    expect(conflicted).toBe(true);
+    expect((await f.service.get(pr.id))!.task).toBeUndefined();
+    expect(f.provider.postComment).toHaveBeenCalledTimes(1);
+    expect(f.notices.filter(notice => notice.key === `${pr.id}:settle:${taskId}`)).toHaveLength(1);
+    await f.service.tick();
+    await f.poll();
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'open', headSha: remoteHead });
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(remoteHead);
+    expect(f.dispatches).toHaveLength(1);
+    expect(f.provider.postComment).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['stop', 'close', 'merge'] as const)('推送后同时 %s，结算保留终态', async action => {
+    const f = await fixture(); const pr = await f.open();
+    f.state.comments = [{ id: 'review:1', body: 'Please fix app.ts', trusted: true }];
+    await f.poll();
+    vi.mocked(f.provider.postComment!).mockImplementation(async () => {
+      if (action === 'stop') await f.service.cancel(f.session.id, pr.id);
+      else await f.service.onWebhookEvent('fake', { kind: 'merge_request', repository: 'group/repo', branch: pr.branch, state: action });
+      return { id: 'issue:101' };
+    });
+    await f.finishLatest(() => f.write('app.ts', 'export const a = 3;\n'), 'DUTYDECK_REVIEW c1 DONE fixed app');
+    const remoteHead = await f.remoteGit('rev-parse', pr.branch);
+    expect(remoteHead).not.toBe(pr.headSha);
+    const status = action === 'stop' ? 'stopped' : action === 'close' ? 'closed' : 'merged';
+    expect(await f.service.get(pr.id)).toMatchObject({ status });
+    expect((await f.service.get(pr.id))!.task).toBeUndefined();
+    await f.poll();
+    expect(await f.service.get(pr.id)).toMatchObject({ status });
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(remoteHead);
+    expect(f.provider.postComment).toHaveBeenCalledTimes(1);
+  });
+
   it('PR 关闭或合并后停止跟进；手动停止后还没开始的跟进任务被拒绝', async () => {
     const f = await fixture();
     const pr = await f.open();
