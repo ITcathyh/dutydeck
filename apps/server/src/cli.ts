@@ -18,7 +18,7 @@ import { runWorkCommand } from './work-item-cli.js';
 import { AgentCliError, agentCliErrorBody, runAgentCli } from './agent-cli.js';
 import { AgentGroupToolCliError, runAgentCommand, runGroupBots, runGroupHandoff, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupReplyAgent, runGroupSelf, runGroupSend, runGroupSendFile, runGroupTeamSearch, runGroupWait, runHistoryList, runHistoryShow } from './lark/agent-tools-cli.js';
 import { runMemoryAdd, runMemoryList, runMemoryRemove, runMemorySearch, runMemoryShow } from './lark/memory-cli.js';
-import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
+import { acknowledgeDeferredAsk, askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { runPermissionHook } from './permission-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
@@ -482,7 +482,11 @@ async function main() {
     sessionSend: async text => { output(await runSessionSend(text)); },
     sessionNativeAsk: async () => {
       const result = await runNativeAskHook(await readNativeAskPayload(process.stdin));
-      if (result) process.stdout.write(`${result}\n`);
+      if (result) {
+        await new Promise<void>((resolve, reject) => process.stdout.write(`${result}\n`, error => error ? reject(error) : resolve()));
+        const deferred = /^deferred:([a-zA-Z0-9_-]+) /.exec(JSON.parse(result).stopReason ?? '');
+        if (deferred) await acknowledgeDeferredAsk(deferred[1]!, {}, false);
+      }
     },
     sessionPermissionHook: async () => {
       // 读不懂 stdin 也要交回明确裁决：hook 只挂在 PermissionRequest 上，当成无法识别的请求拒绝。
@@ -494,8 +498,9 @@ async function main() {
       // 不能套用通用的 output()：调用方要能 `answer=$(dutydeck session ask ...)`。
       const result = await runSessionAsk(question, options);
       const rendered = askOutput(result, options.json === true);
-      if (rendered.stdout) process.stdout.write(rendered.stdout);
-      if (rendered.stderr) process.stderr.write(rendered.stderr);
+      if (rendered.stdout) await new Promise<void>((resolve, reject) => process.stdout.write(rendered.stdout, error => error ? reject(error) : resolve()));
+      if (rendered.stderr) await new Promise<void>((resolve, reject) => process.stderr.write(rendered.stderr, error => error ? reject(error) : resolve()));
+      if (result.status === 'deferred' && result.askId) await acknowledgeDeferredAsk(result.askId);
       process.exitCode = rendered.exitCode;
     },
     databaseExecutionStatus: async options => { output(await runDatabaseExecutionStatus(options)); },

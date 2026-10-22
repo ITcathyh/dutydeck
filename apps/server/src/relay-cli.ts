@@ -72,6 +72,9 @@ export function askOutput(result: RelayAskResult, json = false) {
   if (result.status === 'answered') {
     return { stdout: `${result.answer ?? ''}\n`, stderr: '', exitCode: relayAskExitCodes.answered };
   }
+  if (result.status === 'deferred') {
+    return { stdout: '', stderr: `${result.reason ?? '确认已登记，等待用户点击；本轮结束'}\n`, exitCode: relayAskExitCodes.unavailable };
+  }
   if (result.status === 'expired') {
     return { stdout: '', stderr: '提问超时，用户未在期限内回答。\n', exitCode: relayAskExitCodes.timeout };
   }
@@ -86,4 +89,13 @@ function exitCodeFor(result: RelayAskResult) {
   if (result.status === 'answered') return relayAskExitCodes.answered;
   if (result.status === 'expired') return relayAskExitCodes.timeout;
   return relayAskExitCodes.unavailable;
+}
+
+/** Called only after the CLI has flushed deferred output. Stay inside the tool
+ * until the host ends its original turn; returning would resume a shell chain. */
+export async function acknowledgeDeferredAsk(askId: string, options: RelayClientOptions = {}, waitForInterrupt = true) {
+  const client = new RelayHttpClient(options);
+  try { await client.post(sessionPath('deferred-ack'), { askId }); }
+  catch { /* The host's bounded fallback still ends this turn; never resume it. */ }
+  if (waitForInterrupt) await new Promise<void>(() => { setInterval(() => {}, 60_000); });
 }

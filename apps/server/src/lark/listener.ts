@@ -89,6 +89,8 @@ export interface LarkRuntime {
 
 export interface LarkMessageEvent {
   messageId: string;
+  /** 内部合成入站的真实飞书回复锚点；messageId 仍用于入站去重。随 inbox 持久化。 */
+  replyMessageId?: string;
   chatId: string;
   chatType: string;
   rootId?: string;
@@ -455,7 +457,26 @@ export class LarkLongConnectionListener implements LarkListener {
     }
   }
 
+  private cardRepair?: { coordinator: LarkMessageCoordinator; http: NonNullable<LarkLongConnectionListener['http']>; done: Promise<void> };
+  get pendingCardRepairs() { return this.cardRepair?.done; }
+  async disable() {
+    const coordinator = this.coordinator, http = this.http, appId = this.config?.appId;
+    try { if (appId) await coordinator?.endDurableConfirmations(appId); }
+    finally {
+      // Close message/callback entry points now; keep only the HTTP client needed
+      // for already-terminal card PATCH retries, released after success or the cap.
+      this.http = undefined;
+      this.stop();
+      if (coordinator && http && appId) {
+        const done = coordinator.repairClosedCards(appId).catch(error => this.log.warn({ error, appId }, 'Closing disabled bot cards failed'))
+          .finally(() => { http.close(); this.cardRepair = undefined; });
+        this.cardRepair = { coordinator, http, done };
+      } else http?.close();
+    }
+  }
+
   stop() {
+    if (this.cardRepair) { this.cardRepair.coordinator.stop(); this.cardRepair.http.close(); this.cardRepair = undefined; }
     this.http?.close();
     this.http = undefined;
     if (this.config) this.options.participation?.closeApp(this.config.appId);
@@ -488,6 +509,7 @@ interface LarkListenerRetry { attempt: number; error: string; failedAt: string; 
 export class LarkLongConnectionListenerPool implements LarkListenerPool {
   private readonly listeners = new Map<string, LarkLongConnectionListener>();
   private readonly starting = new Set<LarkLongConnectionListener>();
+  private readonly repairing = new Set<LarkLongConnectionListener>();
   /** 连接失败、等待重连的机器人。一直重连，直到连上、配置被删除或关闭监听。 */
   private readonly retries = new Map<string, LarkListenerRetry>();
   private syncTail: Promise<void> = Promise.resolve();
@@ -517,8 +539,12 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
     const enabled = new Map(configs.filter(config => config.listening && larkExecutionConfirmed(config)).map(config => [config.appId, config]));
     for (const [appId, listener] of this.listeners) {
       if (enabled.has(appId)) continue;
-      listener.stop();
+      await listener.disable();
       this.listeners.delete(appId);
+      if (listener.pendingCardRepairs) {
+        this.repairing.add(listener);
+        void listener.pendingCardRepairs.finally(() => this.repairing.delete(listener));
+      }
     }
     const failures: unknown[] = [];
     for (const [appId, config] of enabled) {
@@ -608,6 +634,8 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
 
   stop() {
     this.closed = true;
+    for (const listener of this.repairing) listener.stop();
+    this.repairing.clear();
     for (const retry of this.retries.values()) clearTimeout(retry.timer);
     this.retries.clear();
     for (const listener of new Set([...this.listeners.values(), ...this.starting])) listener.stop();

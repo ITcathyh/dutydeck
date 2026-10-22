@@ -1,3 +1,4 @@
+import { larkMessageAnchor } from './message-anchor.js';
 import type { PromptPart } from '@dutydeck/shared';
 import { promptDigest } from '../prompt-context.js';
 import { readGitCodeSignature, readGitStatusLine } from './git-status.js';
@@ -234,7 +235,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     // 这两个审批按钮不在原审批卡上：登记成任务导航卡，回调才按 /tasks 行内审批的路径受理，鉴权与一次性决议照旧。
     if (approval && task.cardMessageId) {
       await this.workflowOptions.store?.set(`lark.task_dashboard.${task.config.appId}.${task.cardMessageId}`, JSON.stringify({
-        messageId: task.event.messageId, chatId: task.event.chatId, chatType: task.event.chatType,
+        messageId: task.event.messageId, ...(task.event.replyMessageId ? { replyMessageId: task.event.replyMessageId } : {}), chatId: task.event.chatId, chatType: task.event.chatType,
         senderOpenId: task.event.senderOpenId, messageType: 'text', content: '', mentions: []
       } satisfies LarkMessageEvent));
     }
@@ -666,7 +667,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           && original.sender.type === 'user' && original.sender.idType === 'open_id' && original.sender.id === event.senderOpenId
           && ['text', 'post', 'rich_text'].includes(original.messageType)) {
           const { prompt } = await parsePrompt({
-            ...event, messageId: original.messageId, messageType: original.messageType, content: original.rawContent,
+            ...event, messageId: original.messageId, replyMessageId: undefined, messageType: original.messageType, content: original.rawContent,
             mentions: original.mentions.map(mention => ({
               key: mention.key ?? '', name: mention.name ?? '',
               ...(mention.id && (mention.idType === 'open_id' || mention.id.startsWith('ou_')) ? { openId: mention.id } : {})
@@ -736,6 +737,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       return false;
     };
     if (restored) return notRecovered('restored_turn');
+    if (task.inbox?.event.messageId.startsWith('confirmation_')) return notRecovered('confirmation_original_session_required');
     if (task.launcherRecoveryAttempted) return notRecovered('already_attempted');
     if (!task.runtimeTaskId) return notRecovered('runtime_task_missing');
     if (!this.cardMappings) return notRecovered('card_mappings_unavailable');
@@ -794,6 +796,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
   }
 
   protected async runTurn(task: LarkTask, launcherRecovery = false) {
+    if (!await this.confirmationInputAllowed(task.inbox)) return;
     if (this.stopped) return;
     const resumeTask = task.resumeTask;
     task.resumeTask = undefined;
@@ -836,7 +839,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       return mention ? `${mention}\n\n${markdown}` : markdown;
     };
     if (!this.workflows && task.resources.length) {
-      task.prompt = await materializeLarkResources(event.messageId, task.prompt, task.resources, this.service);
+      task.prompt = await materializeLarkResources(larkMessageAnchor(event), task.prompt, task.resources, this.service);
       task.resources = [];
     }
     const beforeTurnSend = () => {
@@ -938,7 +941,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (riskPolicy) await this.requireExecution('high_risk', 'high_risk.execute');
       // 附件下载与身份解析都可能很慢，期间用户可能已经 /new。此刻建会话等于把旧请求
       // 送进一个用户已经宣布结束的上下文，还会顺带创建一条新会话污染新上下文。
-      if (await this.supersededTurn(task)) return;
+      if (await this.supersededTurn(task) || !await this.confirmationInputAllowed(task.inbox)) return;
       session = resumeTask ? (await this.runtime.getSession(resumeTask.sessionId))! : task.inbox?.sessionId ? (await this.runtime.getSession(task.inbox.sessionId))! : await this.sessionFor(group, config, event.chatId, event.chatType, task.scopeId, task.launchOptions,
         task.launchOptions && restoring ? async () => (task.launchOptions = await this.validateNewSession(config, event, task.launchOptions!)) : undefined);
       if (!session) throw new LarkServiceError('LARK_SESSION_MISSING', '原任务会话已不存在，请重新发送目标。', 409);
@@ -986,7 +989,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (launcherRecovery) throw new Error(unavailable.reason);
       task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
       await this.failPendingInbox(task, unavailable.reason);
-      await this.service.replyText({ beforeSend: beforeTurnSend, messageId: event.messageId, ...(event.threadId?.trim() ? { replyInThread: true } : {}),
+      await this.service.replyText({ beforeSend: beforeTurnSend, messageId: larkMessageAnchor(event), ...(event.threadId?.trim() ? { replyInThread: true } : {}),
         text: larkAgentUnavailableText(config.name?.trim() || 'Dutydeck', unavailable), idempotencyKey: `unavailable_${event.messageId}_${currentTurn}`.slice(0, 50) });
       await clearAcknowledgement();
       return;
@@ -1137,7 +1140,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           sessionId: task.sessionId, taskId: task.runtimeTaskId, turn: task.turn, recovery: notice,
           ...(recoveryMention ? { mention: recoveryMention } : {}),
           target: { chatId: event.chatId, ...(event.chatType === 'group'
-            ? { replyMessageId: event.messageId, replyInThread: Boolean(event.threadId?.trim()) } : {}) }
+            ? { replyMessageId: larkMessageAnchor(event), replyInThread: Boolean(event.threadId?.trim()) } : {}) }
         });
       };
       if (!task.cardMessageId || (!terminal && (silentProgress || task.progressFrozen))) {
@@ -1274,7 +1277,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
             app_id: config.appId, chat_id: event.chatId, chat_type: event.chatType,
             runtime_task_id: task.runtimeTaskId, task_name: taskTitle, prompt,
             state, started_at: task.startedAt!, turn: currentTurn,
-            ...(event.chatType === 'group' ? { reply_message_id: event.messageId, reply_in_thread: Boolean(event.threadId?.trim()) } : {})
+            ...(event.chatType === 'group' ? { reply_message_id: larkMessageAnchor(event), reply_in_thread: Boolean(event.threadId?.trim()) } : {})
           }, runtimeTask?.currentAttemptId) : undefined;
         const explicit = await hasExplicitFinal(this.workflowOptions.store, finalContext, state);
         // 完成时只贴表情：成功终态改为在原消息上贴一枚表情，不再发结果卡。
@@ -1282,7 +1285,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 任务通道的合成事件没有可贴的原消息，只能照常发结果卡，否则用户什么也收不到。
         // 计划轮必须发结果卡：计划和批准按钮都在卡上。
         if (!explicit && completionReactionOnly && state === 'completed' && planTask === undefined && !larkTaskAgentGuid(event.messageId)) {
-          const reacted = await deliverLarkStatusReaction(this.service, { appId: config.appId, messageId: event.messageId, completed: true }, this.log, this.workflowOptions.store);
+          const reacted = await deliverLarkStatusReaction(this.service, { appId: config.appId, messageId: larkMessageAnchor(event), completed: true }, this.log, this.workflowOptions.store);
           if (this.stopped || task.turn !== currentTurn) return;
           // 贴失败就不记「已交付」：这枚表情是用户唯一能看到的完成信号，交给对账重试。
           if (reacted) {
@@ -1327,7 +1330,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         if (this.stopped || task.turn !== currentTurn) return;
         // 同一轮的过程、审批与结果卡保留任务名；结论由正文和通知预览承载。
         const resultCardInput = {
-          ...cardContext, cardKind: 'result' as const, state, taskId: task.id, taskName: taskTitle,
+          ...cardContext, cardKind: 'result' as const, ...(config.adhdMode === true ? { adhdMode: true } : {}), state, taskId: task.id, taskName: taskTitle,
           // 只有完成的结果卡是只读收据；失败、中断、取消时过程卡已收成一行，「重试」只能放在这张卡上。
           sessionId: task.sessionId, turn: currentTurn, readOnly: state === 'completed',
           elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,
@@ -1347,7 +1350,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         }
         const result = await completeExplicitFinal(this.workflowOptions.store, this.service, finalContext, resultCardInput, elements, beforeSend, (scope, actorId) => this.authorizeFinalRelay(scope, actorId)) ?? await sendLarkResult(this.service, {
           chatId: event.chatId,
-          ...(event.chatType === 'group' ? { replyMessageId: event.messageId, replyInThread: Boolean(event.threadId?.trim()) } : {})
+          ...(event.chatType === 'group' ? { replyMessageId: larkMessageAnchor(event), replyInThread: Boolean(event.threadId?.trim()) } : {})
         }, { ...resultCardInput, elements, idempotencyKey: larkResultKey(task.cardMessageId ?? larkSilentResultAnchor(task.id, currentTurn)) }, this.log, this.workflowOptions.store, beforeSend);
         if (this.stopped || task.turn !== currentTurn) return;
         task.finalAttachmentMessageId = result.attachmentMessageId;
@@ -1371,7 +1374,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 结果送达后在原消息上留一枚状态表情，话题列表里不点进去就能看出成没成；用户自己取消、停下的不贴。
         // 贴失败只 warn：结果卡已经送达。
         if (state !== 'cancelled' && !task.interruptRequested && !runtimeTask?.interruptedByActor && !larkTaskAgentGuid(event.messageId)) {
-          await deliverLarkStatusReaction(this.service, { appId: config.appId, messageId: event.messageId, completed: state === 'completed' }, this.log, this.workflowOptions.store);
+          await deliverLarkStatusReaction(this.service, { appId: config.appId, messageId: larkMessageAnchor(event), completed: state === 'completed' }, this.log, this.workflowOptions.store);
         }
         if (this.stopped || task.turn !== currentTurn) return;
         await this.saveCardTask(task, state);
@@ -1445,7 +1448,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         const watermarkKey = `lark.group-context.${config.appId}.${session.id}`;
         const watermark = await store?.get(watermarkKey);
         const materialMessageIds = larkMaterialMessageIds(materialParts, event.chatId);
-        const observedContext = await withLarkContextReadTimeout(this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, { triggerMessageId: event.messageId, watermark, groupTools: config.groupToolsEnabled, materialMessageIds }), '群上下文读取');
+        const observedContext = await withLarkContextReadTimeout(this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, { triggerMessageId: larkMessageAnchor(event), watermark, groupTools: config.groupToolsEnabled, materialMessageIds }), '群上下文读取');
         if (observedContext) {
           injected.push(observedContext.text);
           if (observedContext.promptParts) knownParts.set(observedContext.text, observedContext.promptParts);
@@ -1554,7 +1557,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     // model 场景包判为 act 的消息：判定时冻结的执行指令和材料，用户请求仍是原文。读不到或对不上时这一轮不带。
     const scenarioAdoption = larkScenarioAdoptionOf(event);
     if (scenarioAdoption?.mode === 'model' && this.workflowOptions.participation) {
-      const execution = await this.workflowOptions.participation.scenarioExecution({ appId: config.appId, chatId: event.chatId }, scenarioAdoption, event.messageId)
+      const execution = await this.workflowOptions.participation.scenarioExecution({ appId: config.appId, chatId: event.chatId }, scenarioAdoption, larkMessageAnchor(event))
         .catch(error => { this.log.warn({ error, taskId: task.id }, '读取场景执行内容失败，本轮不带场景指令'); return undefined; });
       if (execution) {
         const injection = modelScenarioInjection(execution, `lark:${config.appId}:${event.chatId}:injection:${injected.length}`);
@@ -1581,7 +1584,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     if (planTask !== undefined) injected.push(planInstructionBlock);
     // 只给事实；能不能发、怎么接在这条消息下，由工具块按本轮实际授权说明。
     if (event.chatType === 'group' && config.groupToolsEnabled && config.groupToolsAllowSend) {
-      injected.push(`[Dutydeck 飞书当前消息 · 系统上下文] message_id：${event.messageId}`);
+      injected.push(`[Dutydeck 飞书当前消息 · 系统上下文] message_id：${larkMessageAnchor(event)}`);
     }
     const agentPrompt = injected.length ? `${injected.join('\n\n')}\n\n[用户请求]\n${materialPrompt}` : materialPrompt;
     const promptParts: PromptPart[] = injected.flatMap((content, index) => {
@@ -1675,7 +1678,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           // 记忆提取排在终态交付之后，且只记真实 dispatch 过的完成轮次；失败只留日志。
           const memoryPipeline = this.workflowOptions.memory?.pipeline;
           if (memoryPipeline && resolvedState === 'completed' && runtimeTaskId) {
-            void memoryPipeline.onTurnCompleted(larkMemoryScope(config.appId, event.chatId, event.chatType, config.groupMemoryScope), { sessionId: session.id, taskId: runtimeTaskId, senderId: event.senderOpenId, senderKind: botSender ? 'bot' : 'human', sourceMessageId: event.messageId })
+            void memoryPipeline.onTurnCompleted(larkMemoryScope(config.appId, event.chatId, event.chatType, config.groupMemoryScope), { sessionId: session.id, taskId: runtimeTaskId, senderId: event.senderOpenId, senderKind: botSender ? 'bot' : 'human', sourceMessageId: larkMessageAnchor(event) })
               .catch(error => this.log.warn({ error, appId: config.appId, chatId: event.chatId, taskId: runtimeTaskId }, '飞书会话记忆后台提取触发失败'));
           }
         })().catch(error => this.log.error({ error, taskId: task.id, runtimeTaskId }, '生成飞书任务终态失败'));

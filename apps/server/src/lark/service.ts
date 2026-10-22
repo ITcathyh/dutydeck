@@ -47,6 +47,7 @@ export interface LarkCardInput {
   /** Local authority check, repeated after token/quota waits before every provider attempt. */
   beforeSend?: LarkWriteGuard;
   cardKind?: 'process' | 'result';
+  adhdMode?: boolean;
   agentName?: string;
   showAgentName?: boolean;
   workspace?: string;
@@ -622,7 +623,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
     || (input.resultFollows === true && (state === 'failed' || state === 'interrupted' || state === 'cancelled')));
   // 结果卡的续问行（继续 / 给我对外回复 / 再详细点 / 每天自动执行 / 使用这个验证命令）放在正文之后：
   // 读者看完结论才会接着问。流式排布，窄屏上按钮自动折行，不挤成一排。
-  const followUpButtons = isResultCard ? buildLarkCardFollowUpActions(actionContext) : [];
+  const followUpButtons = isResultCard && input.adhdMode !== true ? buildLarkCardFollowUpActions(actionContext) : [];
   const followUpRow = followUpButtons.length ? [{
     tag: 'column_set', element_id: 'result_follow_up_row', flex_mode: 'flow', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
     columns: followUpButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }))
@@ -799,7 +800,9 @@ function buildDefaultLarkCard(input: LarkCardInput) {
         : liveState
           ? [spinnerSpeaks ? '' : `<text_tag color='${waitingForApproval ? 'orange' : presentation.color}'>${statusLabelText}</text_tag>`, elapsedText && grey(elapsedText)].filter(Boolean).join('　')
           : grey([statusLabelText, elapsedText].filter(Boolean).join('　'));
-      const showStatusRow = Boolean(statusContent) && (state !== 'completed' || explicitStatusLabel);
+      // ADHD 提问终态的正文已经是一行状态，不再重复添加状态栏；结果卡仍保留原有耗时。
+      const compactAnswer = input.adhdMode === true && input.readOnly === true && !input.cardKind && (!liveState || input.awaitingHuman === true);
+      const showStatusRow = !compactAnswer && Boolean(statusContent) && (state !== 'completed' || explicitStatusLabel);
       const loadingIcon = loadingImageKey
         ? { tag: 'custom_icon', img_key: loadingImageKey, size: '20px 20px' }
         : { tag: 'standard_icon', token: 'loading_outlined', color: 'grey', size: '14px 14px' };

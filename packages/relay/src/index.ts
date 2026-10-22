@@ -45,6 +45,9 @@ export {
   relayAskMinTimeoutMs,
   relayAskMaxChoices,
   relayAskChoiceMaxLength,
+  type RelayAskContext,
+  type RelayDeferredAsk,
+  type RelayDeferredHandler,
   type RelayAskOutcome
 } from './ask-broker.js';
 

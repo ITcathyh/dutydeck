@@ -54,7 +54,7 @@ export class LarkTaskInbox {
   }
   /** ACK 前仅做本地 CAS；重投不能替换原文，也不能重复启动路由。写入异常直接交给 SDK。 */
   async capture(appId: string, event: LarkMessageEvent): Promise<LarkInboxRecord | undefined> {
-    const { scenario: _untrustedScenario, triage: _untrustedTriage, ...original } = event;
+    const { scenario: _untrustedScenario, triage: _untrustedTriage, replyMessageId: _untrustedReplyMessageId, ...original } = event;
     const key = prefix(appId) + event.messageId;
     for (;;) {
       const raw = await this.store.get(key);
@@ -74,7 +74,7 @@ export class LarkTaskInbox {
   }
   /** 已验证编辑可重开 ignored 或已交还的 unrouted；正在认领/已受理的记录不替换。 */
   async reopenIgnored(appId: string, event: LarkMessageEvent) {
-    const { scenario: _untrustedScenario, triage: _untrustedTriage, ...original } = event;
+    const { scenario: _untrustedScenario, triage: _untrustedTriage, replyMessageId: _untrustedReplyMessageId, ...original } = event;
     const old = await this.lookup(appId, event.messageId);
     if (!old || (old.state !== 'ignored' && (old.state !== 'unrouted' || old.boot))) return;
     const next: LarkInboxRecord = { appId, event: original, originalEvent: old.originalEvent ?? old.event,
@@ -117,8 +117,8 @@ export class LarkTaskInbox {
    * boot 留空，handle 里的 claim 会像认领上个进程留下的记录一样认领它；进程在认领前退出时，
    * 重启后 recoverable 也会把它捞回来重放。返回 false 说明这条消息已经登记过。
    */
-  async seed(appId: string, event: LarkMessageEvent, request: NonNullable<LarkInboxRecord['request']>): Promise<boolean> {
-    const record: LarkInboxRecord = { appId, event, boot: '', state: 'received', receivedAt: new Date().toISOString(), request };
+  async seed(appId: string, event: LarkMessageEvent, request: NonNullable<LarkInboxRecord['request']>, target?: Pick<LarkInboxRecord, 'sessionId' | 'workflowRequestId'>): Promise<boolean> {
+    const record: LarkInboxRecord = { appId, event, boot: '', state: 'received', receivedAt: new Date().toISOString(), request, ...target };
     return this.store.compareAndSet!(prefix(appId) + event.messageId, undefined, JSON.stringify(record));
   }
   /**

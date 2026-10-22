@@ -25,7 +25,7 @@ export interface RelayRoutesOptions {
 /** Only child-to-host relay calls use the session HMAC as their sole credential. */
 export const isRelayCapabilityRequest = (method: string, pathname: string) =>
   method.toUpperCase() === 'POST'
-  && /^\/api\/relay\/sessions\/[^/]+\/(?:send|ask|herdr|permission)$/.test(pathname);
+  && /^\/api\/relay\/sessions\/[^/]+\/(?:send|ask|deferred-ack|herdr|permission)$/.test(pathname);
 
 /** 会话进入这些状态时，把该会话所有阻塞中的 ask 唤醒 */
 const terminalStates = new Set(['stopped', 'failed']);
@@ -86,6 +86,30 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
       : undefined);
   if (!service || !broker) return;
 
+  const deferredTurns = new Map<string, { sessionId: string; taskId: string; actorId?: string; timer?: NodeJS.Timeout; ended?: Promise<void> }>();
+  const endDeferredTurn = (askId: string) => {
+    const turn = deferredTurns.get(askId);
+    if (!turn || !runtime) return Promise.resolve();
+    clearTimeout(turn.timer);
+    return turn.ended ??= runtime.interrupt(turn.sessionId, turn.taskId, turn.actorId).then(() => undefined, error => {
+      // A newer turn is never interrupted by this old confirmation's ACK.
+      if ((error as { code?: string }).code !== 'TASK_NOT_ACTIVE') app.log.warn({ error, askId }, 'Ending deferred confirmation turn failed');
+    }).finally(() => {
+      turn.timer = setTimeout(() => deferredTurns.delete(askId), 60_000);
+      turn.timer.unref();
+    });
+  };
+  app.post<{ Params: { id: string }; Body: { askId?: string } }>('/api/relay/sessions/:id/deferred-ack', async (request, reply) => {
+    try {
+      const capability = service.verifySession(request.headers.authorization, request.params.id);
+      const askId = request.body?.askId ?? '';
+      const turn = deferredTurns.get(askId);
+      if (!turn || turn.sessionId !== capability.sessionId) throw new RelayError('RELAY_DEFERRED_NOT_FOUND', '未知的持久确认回执。', 404);
+      reply.raw.once('finish', () => { void endDeferredTurn(askId); });
+      return { ok: true };
+    } catch (error) { return handleRelayError(error, reply); }
+  });
+
   // 会话终态唤醒：ask 阻塞期间会话被 stop/archive/崩溃，必须把等待者放出来，
   // 否则 CLI 子进程会一直挂在那次 HTTP 长轮询上。只用公开的 runtime.subscribe。
   type Waiter = { taskId?: string; attemptId?: string; controller: AbortController };
@@ -122,6 +146,8 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
   };
 
   app.addHook('onClose', async () => {
+    for (const turn of deferredTurns.values()) clearTimeout(turn.timer);
+    deferredTurns.clear();
     for (const sessionId of [...watched.keys()]) unwatch(sessionId);
     // daemon 关停也要唤醒并取消所有等待中的 ask 请求
     broker.close();
@@ -159,6 +185,21 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
       const outcome = await service.ask(request.headers.authorization, request.params.id, request.body ?? {}, { ...owner, signal: controller.signal });
       // 长轮询结果一律 200：answered / expired / cancelled 都是通道正常工作的结果，
       // CLI 侧据 status 决定退出码，不靠 HTTP 状态码区分。
+      if (outcome.status === 'deferred' && runtime && owner) {
+        // Flush the explicit deferred result before ending the original driver turn.
+        // The expected task fence prevents a late response from interrupting another turn.
+        deferredTurns.set(outcome.askId, { sessionId: capability.sessionId, taskId: owner.taskId, actorId: owner.actorId });
+        reply.raw.once('finish', () => {
+          const turn = deferredTurns.get(outcome.askId)!;
+          // Supported CLI clients ACK after flushing their explicit result. Unknown
+          // clients cannot keep executing indefinitely by omitting that handshake.
+          turn.timer = setTimeout(() => {
+            app.log.warn({ askId: outcome.askId }, 'Deferred confirmation was not acknowledged; ending original turn');
+            void endDeferredTurn(outcome.askId);
+          }, 5_000);
+          turn.timer.unref();
+        });
+      }
       return outcome;
     } catch (error) { return handleRelayError(error, reply); }
     finally { release?.(); }

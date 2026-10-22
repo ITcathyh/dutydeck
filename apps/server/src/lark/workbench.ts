@@ -1,3 +1,4 @@
+import { larkMessageAnchor } from './message-anchor.js';
 import { createHash } from 'node:crypto';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
 import { RuntimeError, parseLarkSourceId, type AcceptedTask, type RepositoryBundle, type WorkItem, type WorkPlan } from '@dutydeck/shared';
@@ -336,7 +337,7 @@ export class LarkWorkbench {
   private client(config: StoredLarkConfig) { this.assertOpen(); return this.options.client?.(config) ?? createLarkCardService(this.options.env ?? process.env, this.http.fetch, config); }
 
   async recordOrigin(sessionId: string, key: string, event: LarkMessageEvent, config: StoredLarkConfig) {
-    const target: Target = { appId: config.appId, chatId: event.chatId, replyMessageId: event.messageId, replyInThread: event.chatType === 'group' };
+    const target: Target = { appId: config.appId, chatId: event.chatId, replyMessageId: larkMessageAnchor(event), replyInThread: event.chatType === 'group' };
     const savedKey = originKey(sessionId, key);
     const encoded = JSON.stringify(target);
     if (!this.repos.config.compareAndSet) throw new RuntimeError('WORK_ITEM_STORAGE_REQUIRED', '目标需要支持原子写入的存储', 503);
@@ -569,7 +570,7 @@ export class LarkWorkbench {
     const actorId = event.senderOpenId;
     if (!actorId || !await this.authorize(sessionId, actorId)) throw new RuntimeError('WORK_ITEM_FORBIDDEN', '当前账号无权操作此目标', 403);
     const [action, id, ...rest] = argsText.trim().split(/\s+/).filter(Boolean);
-    const target: Target = { appId: config.appId, chatId: event.chatId, replyMessageId: event.messageId, replyInThread: event.chatType === 'group' };
+    const target: Target = { appId: config.appId, chatId: event.chatId, replyMessageId: larkMessageAnchor(event), replyInThread: event.chatType === 'group' };
     let item: WorkItem | undefined;
     let text: string | undefined;
     let previewKey: string | undefined;

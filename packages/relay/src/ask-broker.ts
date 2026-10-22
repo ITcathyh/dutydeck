@@ -9,6 +9,7 @@ export const relayAskMaxChoices = 50;
 export const relayAskChoiceMaxLength = 200;
 
 export type RelayAskOutcome =
+  | { status: 'deferred'; askId: string; reason: string }
   | { status: 'answered'; answer: string; askId: string }
   | { status: 'expired'; askId: string }
   | { status: 'cancelled'; askId: string; reason: string };
@@ -48,6 +49,9 @@ function normalizeChoices(input: unknown): RelayAskChoice[] | undefined {
   return choices;
 }
 
+export interface RelayDeferredAsk { sessionId: string; question: string; choices: RelayAskChoice[]; multiple?: boolean }
+export type RelayDeferredHandler = (input: RelayDeferredAsk, context: RelayAskContext) => Promise<Extract<RelayAskOutcome, { status: 'deferred' }> | undefined>;
+
 export interface RelayAskContext {
   taskId?: string;
   attemptId?: string;
@@ -80,6 +84,12 @@ export class RelayAskBroker {
   private readonly ready: Promise<void>;
   private readonly writeErrors: unknown[] = [];
   private closed = false;
+  private readonly deferredHandlers = new Set<RelayDeferredHandler>();
+
+  addDeferredHandler(handler: RelayDeferredHandler) {
+    this.deferredHandlers.add(handler);
+    return () => { this.deferredHandlers.delete(handler); };
+  }
 
   constructor(private readonly publisher: RelayEventPublisher, private readonly store?: RelayAskStore) {
     this.ready = this.recover();
@@ -130,6 +140,12 @@ export class RelayAskBroker {
     // multiple 只在 choices 存在时成立，避免「多选但没有选项」的自相矛盾记录。
     const choices = normalizeChoices(input.choices);
     const multiple = choices !== undefined && input.multiple === true;
+    if (choices && !registration.reason) {
+      for (const handler of this.deferredHandlers) {
+        const deferred = await handler({ sessionId: input.sessionId, question, choices, ...(multiple ? { multiple } : {}) }, context);
+        if (deferred) return deferred;
+      }
+    }
     const record: RelayAskRecord = {
       id: 'ask_' + randomUUID(), sessionId: input.sessionId, question, status: 'pending',
       ...(context.taskId ? { taskId: context.taskId } : {}),
@@ -264,7 +280,7 @@ export class RelayAskBroker {
     void write.then(() => this.writes.delete(write), error => { this.writes.delete(write); this.writeErrors.push(error); });
   }
 
-  private finish(ask: PendingAsk, outcome: RelayAskOutcome): Promise<void> {
+  private finish(ask: PendingAsk, outcome: Exclude<RelayAskOutcome, { status: 'deferred' }>): Promise<void> {
     if (ask.settlement) return ask.settlement;
     if (!this.pending.has(ask.record.id)) return Promise.resolve();
     clearTimeout(ask.timer);

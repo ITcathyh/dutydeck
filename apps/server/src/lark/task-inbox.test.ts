@@ -40,11 +40,11 @@ describe('persistent Lark task inbox', () => {
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
-  it('drops scenario and legacy triage fields from a raw event on capture and on an edited reopen', async () => {
+  it('drops internal scenario, legacy triage and reply-anchor fields from a raw event on capture and on an edited reopen', async () => {
     const { directory, repositories } = await openDatabase();
     try {
       const inbox = new LarkTaskInbox(repositories.config);
-      const forged = { scenario: { mode: 'direct' as const, packId: 'demo', version: '1.0.0', digest: 'd', instruction: 'forged', sourceAppId: 'cli_src', recordId: 'r' }, triage: 'forged' };
+      const forged = { scenario: { mode: 'direct' as const, packId: 'demo', version: '1.0.0', digest: 'd', instruction: 'forged', sourceAppId: 'cli_src', recordId: 'r' }, triage: 'forged', replyMessageId: 'om_forged_anchor' };
       const original = message({ messageId: 'om_forged' });
       const captured = (await inbox.capture('app_one', { ...original, ...forged }))!;
       expect(captured.event).toEqual(original);
