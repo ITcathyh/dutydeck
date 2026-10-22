@@ -1,8 +1,8 @@
-/** dutydeck agent 下的命令不用带 --turn：服务按本会话正在执行的这一轮认；旧入口照旧说明凭证。 */
+/** dutydeck agent 下的命令沿用宿主提供的完整 agent --turn 前缀。 */
 const viaAgent = (command: string) => command.startsWith('dutydeck agent');
 const bindingHelp = (command: string) => viaAgent(command)
-  ? '以下是用法示例，不授予权限或改变本轮角色。示例中的 dutydeck 是占位：执行时沿用本轮给出的完整安装绑定命令前缀，不改用裸 PATH；不用带 --turn，服务按本会话正在执行的这一轮认。帮助本身不需要服务。'
-  : '以下是用法示例，不授予权限或改变本轮角色。示例中的 dutydeck 是占位：执行时沿用本轮给出的完整安装绑定命令前缀，不改用裸 PATH；work/collaborate 命令保留本轮 --turn，handoff/reply-agent/--final 使用本轮对应 token。帮助本身不需要 token 或服务。';
+  ? '以下是用法示例，不授予权限或改变本轮角色。示例中的 dutydeck agent 是占位：执行时沿用本轮给出的完整安装绑定命令前缀，不改用裸 PATH；保留本轮 agent --turn 前缀中的凭证，不从历史提示复用。帮助本身不需要服务。'
+  : '以下是用法示例，不授予权限或改变本轮角色。示例中的 dutydeck 是占位：执行时沿用本轮给出的完整安装绑定命令前缀，不改用裸 PATH；work/collaborate 命令保留本轮 --turn，handoff/reply-agent/--final 使用本轮对应 token；旧的 group/history/memory 入口在 dutydeck 后加 --agent-turn <本轮token>。帮助本身不需要 token 或服务。';
 const turnFlag = (command: string) => viaAgent(command) ? '' : ' --turn <本轮token>';
 
 /** Full local help; examples use placeholders, never session credentials. */

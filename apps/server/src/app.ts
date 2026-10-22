@@ -10,6 +10,7 @@ import { registerPlanRoutes, type PlanRouteOptions } from './plan-routes.js';
 import { z, ZodError } from 'zod';
 import { registerCollaborationRoutes, type CollaborationRouteOptions } from './collaboration-routes.js';
 import { AgentGroupToolError } from './lark/agent-tools.js';
+import { registerLarkAgentToolTurnGuard } from './lark/agent-tools-routes.js';
 import { AgentCommandParamError } from './lark/agent-command.js';
 import { LarkServiceError } from './lark/service.js';
 import Fastify, { type FastifyRequest } from 'fastify';
@@ -174,6 +175,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         || userExempt?.(method, pathname) === true
     });
   }
+  if (options.lark?.agentTools) registerLarkAgentToolTurnGuard(app, options.lark.agentTools);
   if (options.pluginResults) registerPluginResultRoutes(app, options.pluginResults);
   registerRecoveryRoutes(app, runtime, options.recovery);
   registerWorkspaceGroupRoutes(app, options.workspaceGroups);

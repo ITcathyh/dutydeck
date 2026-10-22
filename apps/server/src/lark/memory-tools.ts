@@ -10,7 +10,7 @@ import { agentGroupToolBearerToken, type LarkAgentToolsService } from './agent-t
 import { LarkMemoryError, larkMemoryScope, normalizeLarkMemoryTopic, type LarkMemoryStore } from './memory.js';
 
 export interface LarkMemoryToolsOptions {
-  tools: Pick<LarkAgentToolsService, 'memoryContext'>;
+  tools: Pick<LarkAgentToolsService, 'memoryContext' | 'requestTurn'>;
   store: LarkMemoryStore;
   /** 有活动任务时把触发该轮的发送人记为 createdBy、把该轮记为 taskId，便于追溯是谁的指令、哪一轮让 Agent 记住了它。 */
   runtime?: { getActiveTaskContext(sessionId: string): { taskId?: string; actorId?: string } | undefined };
@@ -21,7 +21,7 @@ export const larkMemoryToolsPath = '/api/lark/agent-tools/memory';
 export async function registerLarkMemoryTools(app: FastifyInstance, options: LarkMemoryToolsOptions) {
   const scopeFor = async (authorization?: string) => {
     const binding = await options.tools.memoryContext(agentGroupToolBearerToken(authorization));
-    const active = options.runtime?.getActiveTaskContext(binding.sessionId);
+    const active = options.tools.requestTurn(binding.sessionId) ?? options.runtime?.getActiveTaskContext(binding.sessionId);
     return {
       scope: larkMemoryScope(binding.appId, binding.chatId, binding.chatType, binding.groupMemoryScope),
       sessionId: binding.sessionId,

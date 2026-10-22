@@ -196,7 +196,7 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     const parent = await f.parent();
     const active = f.runtime.getActiveTaskContext(parent.id)!;
     const env = f.capabilities.environmentFor(parent);
-    const turn = f.capabilities.workbenchTurnToken(parent.id, active.taskId);
+    const turn = f.capabilities.workbenchTurnToken(parent.id, active.taskId, active.attemptId!);
     expect(f.prompts[0]!.prompt).toContain('awaiting_confirmation');
     expect(f.prompts[0]!.prompt).toContain('不能代用户确认、回答等待或批准权限');
     const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
@@ -499,9 +499,9 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
       await f.repos.channelMappings.save({ ...mapping, extra: JSON.stringify(saved) });
     }
     const env = f.capabilities.environmentFor(parent);
-    const turn = f.capabilities.workbenchTurnToken(parent.id, active.taskId);
+    const turn = f.capabilities.workbenchTurnToken(parent.id, active.taskId, active.attemptId!);
     expect(f.prompts[0]!.prompt).toContain('dutydeck agent work');
-    expect(f.prompts[0]!.prompt).not.toContain(turn);
+    expect(f.prompts[0]!.prompt).toContain(turn);
     const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
       const response = await f.app.inject({ method: init?.method as any ?? 'GET', url: new URL(String(url)).pathname, headers: Object.fromEntries(new Headers(init?.headers)), ...(init?.body ? { payload: String(init.body) } : {}) });
       return new Response(response.body, { status: response.statusCode, headers: { 'content-type': 'application/json' } });
@@ -512,10 +512,10 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     const created = await runWorkCommand('create', [], { file: path, turn }, { env, fetcher: fetcher as typeof fetch });
     expect(created).toMatchObject({ status: 'awaiting_confirmation', parentSessionId: parent.id });
     expect(await runWorkCommand('create', [], { file: path, turn }, { env, fetcher: fetcher as typeof fetch })).toMatchObject({ id: created.id });
-    // 不带本轮凭证时按正在执行的这一轮认；没有会话凭证仍被拒。
+    // 缺少本轮凭证不能隐式借用当前操作者；没有会话凭证仍被拒。
     const current = await f.app.inject({ method: 'POST', url: '/api/lark/agent-tools/work-items', headers: { authorization: `Bearer ${env.dutydeck_group_tools_token}` }, payload: { goal: 'x', plan: researchWorkPlan(['alpha']), idempotencyKey: 'no-turn' } });
-    expect(current.statusCode).toBe(200);
-    expect(current.json()).toMatchObject({ parentSessionId: parent.id });
+    expect(current.statusCode).toBe(403);
+    expect(current.json().error.code).toBe('WORK_ITEM_TURN_EXPIRED');
     const unauthorized = await f.app.inject({ method: 'POST', url: '/api/lark/agent-tools/work-items', payload: { goal: 'x', plan: researchWorkPlan(['alpha']), idempotencyKey: 'no-token' } });
     expect(unauthorized.statusCode).toBe(401);
     f.releases.get(parent.id)!();

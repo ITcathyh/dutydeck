@@ -55,7 +55,7 @@ export async function registerCollaborationRoutes(app: FastifyInstance, options:
     const { sessionId } = await options.tools.workbenchContext(agentGroupToolBearerToken(request.headers.authorization));
     const active = options.runtime.getActiveTaskContext(sessionId);
     if (!active?.actorId) throw new RuntimeError('COLLABORATION_ACTIVE_ACTOR_REQUIRED', '协作工具只接受当前正在执行的群指令。', 403);
-    options.tools.assertWorkbenchTurn(sessionId, active.taskId, typeof request.headers['x-dutydeck-work-turn'] === 'string' ? request.headers['x-dutydeck-work-turn'] : undefined);
+    options.tools.assertWorkbenchTurn(sessionId, active.taskId, active.attemptId, typeof request.headers['x-dutydeck-work-turn'] === 'string' ? request.headers['x-dutydeck-work-turn'] : undefined);
     const session = await options.runtime.getSession(sessionId);
     const binding = session && larkAgentSessionBinding(session);
     if (!binding || binding.chatType !== 'group' || parseLarkSourceId(session?.sourceId).scope[0] === 'collaboration') throw new RuntimeError('COLLABORATION_SCOPE_REQUIRED', '请在群内的当前指令中管理委托。', 403);

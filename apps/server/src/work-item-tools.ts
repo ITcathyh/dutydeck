@@ -18,7 +18,7 @@ export async function registerWorkItemTools(app: FastifyInstance, options: WorkI
     const scope = await options.tools.workbenchContext(agentGroupToolBearerToken(authorization));
     const active = options.runtime.getActiveTaskContext(scope.sessionId);
     if (!active?.actorId) throw new RuntimeError('WORK_ITEM_ACTIVE_ACTOR_REQUIRED', '编排工具只接受当前正在执行的飞书指令', 403);
-    options.tools.assertWorkbenchTurn(scope.sessionId, active.taskId, typeof turn === 'string' ? turn : undefined);
+    options.tools.assertWorkbenchTurn(scope.sessionId, active.taskId, active.attemptId, typeof turn === 'string' ? turn : undefined);
     return { sessionId: scope.sessionId, actorId: active.actorId, taskId: active.taskId };
   };
   const base = '/api/lark/agent-tools/work-items';

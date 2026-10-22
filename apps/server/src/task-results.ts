@@ -20,14 +20,37 @@ function fail(code: string, message: string): never { throw new RuntimeError(cod
  * 不看 Task.status 或 Session 高水位。同步读取，越界/坏记录/超限/摘要冲突抛 RuntimeError。
  */
 export function readAttemptResult(repositories: AttemptResultRepositories, sessionId: string, taskId: string, attemptId: string): AttemptResultRead {
+  return readResult(repositories, sessionId, taskId, attemptId);
+}
+
+/** Workflow admission stays pinned to its first attempt while safe capacity retries retain result provenance. */
+export function readWorkAttemptResult(repositories: AttemptResultRepositories & { execution: Pick<ExecutionRepository, 'getAcceptedTask'> }, sessionId: string, taskId: string, attemptId: string): AttemptResultRead {
+  return readResult(repositories, sessionId, taskId, attemptId, repositories.execution);
+}
+
+function readResult(repositories: AttemptResultRepositories, sessionId: string, taskId: string, attemptId: string, retryInput?: Pick<ExecutionRepository, 'getAcceptedTask'>): AttemptResultRead {
   const execution = repositories.execution;
   const projection = execution.getTaskExecution(taskId);
   if (!projection) return { status: 'blocked', reason: 'admission_conflict' };
   if (projection.task.sessionId !== sessionId) fail('TASK_RESULT_SCOPE_CONFLICT', `Task ${taskId} does not belong to session ${sessionId}`);
-  const attempt = projection.attempts.find(item => item.attemptId === attemptId);
+  let attempt = projection.attempts.find(item => item.attemptId === attemptId);
   if (!attempt) fail('TASK_RESULT_ATTEMPT_MISSING', `Attempt ${attemptId} is not recorded for task ${taskId}`);
   if (attempt.taskId !== taskId || attempt.sessionId !== sessionId) fail('TASK_RESULT_SCOPE_CONFLICT', 'Attempt identity does not match the fixed task and session');
   if (attempt.number !== 1) fail('TASK_RESULT_ATTEMPT_CONFLICT', 'Only the number=1 attempt is a valid source result');
+  while (retryInput) {
+    const successors = projection.attempts.filter(item => item.automaticRetry?.causeAttemptId === attempt!.attemptId);
+    if (!successors.length) break;
+    const next = successors[0]!;
+    const retry = next.automaticRetry!;
+    const accepted = retryInput.getAcceptedTask(taskId);
+    if (successors.length !== 1 || next.taskId !== taskId || next.sessionId !== sessionId || next.runId !== attempt.runId
+      || next.number !== attempt.number + 1 || retry.reason !== 'codex_capacity' || retry.ordinal !== next.number - 1 || retry.ordinal > 2
+      || accepted?.input?.version !== 2 || accepted.input.digest !== retry.inputDigest || !accepted.request || accepted.request.actor.kind === 'unspecified'
+      || attempt.state !== 'settled' || !attempt.settlementId || attempt.outcome !== 'failed' || attempt.submissionState === 'not_submitted' || attempt.settlement?.kind !== 'driver_result'
+      || attempt.settlement.outcome !== 'failed' || attempt.settlement.complete !== true || attempt.settlement.submissionId !== attempt.submission?.submissionId
+      || !safeCapacityFailure(execution, attempt)) fail('TASK_RESULT_RETRY_CONFLICT', 'Automatic retry does not preserve the verified task input and capacity-failure lineage');
+    attempt = next;
+  }
 
   if (attempt.state === 'preparing' || attempt.state === 'active' || attempt.state === 'suspended') return { status: 'pending' };
   if (attempt.state === 'reconcile_required') return { status: 'blocked', reason: 'reconcile_required' };
@@ -44,7 +67,7 @@ export function readAttemptResult(repositories: AttemptResultRepositories, sessi
     fail('TASK_RESULT_DIGEST_CONFLICT', `Generated output digest ${output.digest} does not match settlement ${settlement.outputDigest}`);
   }
   const result = attemptResultV1Schema.parse({
-    version: 1, taskId, attemptId, settlementId: attempt.settlementId, throughSequence, outcome: attempt.outcome, output
+    version: 1, taskId, attemptId: attempt.attemptId, settlementId: attempt.settlementId, throughSequence, outcome: attempt.outcome, output
   });
   return { status: 'settled', result };
 }
@@ -64,6 +87,24 @@ function owned(event: AgentEvent, attempt: TaskAttempt, cursor: { sequence: numb
     fail('TASK_RESULT_EVENT_ORDER', `Event ${event.sequence} breaks the strictly ordered attempt ownership boundary`);
   }
   cursor.sequence = event.sequence;
+}
+
+function safeCapacityFailure(execution: AttemptResultRepositories['execution'], attempt: TaskAttempt): boolean {
+  const cursor = { sequence: 0 };
+  let errors = 0;
+  for (;;) {
+    const page = execution.getAttemptEvents(attempt.attemptId, { afterSequence: cursor.sequence, direction: 'forward', limit: EVENT_PAGE_LIMIT });
+    for (const event of page) {
+      owned(event, attempt, cursor);
+      if (event.type === 'tool_call' || event.type === 'permission_request') return false;
+      if (event.type === 'error') {
+        const data = event.data as Record<string, unknown>;
+        if (data.code !== 'codex_capacity' || data.nativeSource !== 'codex' || data.capacityReason !== 'selected_model_capacity' || data.nativeTerminal !== true || typeof data.nativeTurnId !== 'string') return false;
+        errors++;
+      }
+    }
+    if (page.length < EVENT_PAGE_LIMIT) return errors > 0;
+  }
 }
 
 /** 定位同 attemptId+settlementId 的权威 completed 事件；缺边界是历史未决，不是错误。 */

@@ -8,6 +8,7 @@ const input = { permissionMode: 'ask' as const, kind: 'execute', env };
 describe('session-scoped agent command auto-approval', () => {
   it.each([
     'dutydeck agent status',
+    'dutydeck agent --turn immutable-attempt-token status',
     "dutydeck agent session new --agent codex --task '换 codex 重做：修复登录接口'",
     'dutydeck agent session new --agent codex --dry-run',
     'dutydeck agent session new --task "修复中文接口"',
@@ -21,6 +22,7 @@ describe('session-scoped agent command auto-approval', () => {
     'matches the injected prefix %s exactly', prefix => {
       const scoped = { ...input, env: { ...env, dutydeck_group_tools_command: prefix } };
       expect(isAgentCommandAutoApproval({ ...scoped, command: `${prefix} agent status` })).toBe(true);
+      expect(isAgentCommandAutoApproval({ ...scoped, command: `${prefix} agent --turn immutable-attempt-token status` })).toBe(true);
       expect(isAgentCommandAutoApproval({ ...scoped, command: 'dutydeck agent status' })).toBe(false);
     });
 

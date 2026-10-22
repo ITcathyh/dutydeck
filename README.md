@@ -227,7 +227,7 @@ pnpm dev
 
 #### Agent 提前交付与自定义最终卡
 
-飞书当前轮的 Agent 可用 `dutydeck agent group send '完整答复' --final` 提前交付最终结果。默认 `--delivery publish` 发到本轮原回复位置；`--delivery reply-agent` 只向交接任务的机器人回传摘要，`--delivery both` 同时发布并回传。回传要求原消息来自可解析且仍在当前群内的机器人，宿主在发布前核对目标。首次提交后，正文、卡片、模式和目标固定，重试须保持一致；发布成功而回传失败时只补回传，完成或重启恢复不会另发一份已确认的结果。
+飞书当前轮的 Agent 可用 `dutydeck agent --turn "$TURN" group send '完整答复' --final` 提前交付最终结果。默认 `--delivery publish` 发到本轮原回复位置；`--delivery reply-agent` 只向交接任务的机器人回传摘要，`--delivery both` 同时发布并回传。回传要求原消息来自可解析且仍在当前群内的机器人，宿主在发布前核对目标。首次提交后，正文、卡片、模式和目标固定，重试须保持一致；发布成功而回传失败时只补回传，完成或重启恢复不会另发一份已确认的结果。
 
 自定义卡片使用静态 Card 2.0 **body**，不包含 `schema`、`header` 或 `config`。例如 `/path/body.json`：
 
@@ -236,10 +236,10 @@ pnpm dev
 ```
 
 ```bash
-dutydeck agent group send '可检索摘要' --final --card-file /path/body.json --delivery both
+dutydeck agent --turn "$TURN" group send '可检索摘要' --final --card-file /path/body.json --delivery both
 ```
 
-摘要必填，但不必重复整张卡的数据。body 最多 28,000 字节，仅接受白名单内的静态文本、图片、布局和表格等组件；交互组件、回调、`element_id` 和脚本 URL 会被拒绝，具体样式仍由飞书校验。`reply-agent` 只接受摘要，不接受发布卡片。宿主继续管理状态、原回复位置、任务与轮次校验及完成收尾；平台拒收自定义 body 时不会替换成另一份结果。旧的 `dutydeck group send` 同样支持这些参数。命令需要当前会话的工具凭证和正在执行的一轮；省略 `--turn` 时解析当前轮，显式提供时必须匹配。
+摘要必填，但不必重复整张卡的数据。body 最多 28,000 字节，仅接受白名单内的静态文本、图片、布局和表格等组件；交互组件、回调、`element_id` 和脚本 URL 会被拒绝，具体样式仍由飞书校验。`reply-agent` 只接受摘要，不接受发布卡片。宿主继续管理状态、原回复位置、任务与轮次校验及完成收尾；平台拒收自定义 body 时不会替换成另一份结果。旧的 `dutydeck group send` 同样支持这些参数。命令需要当前会话的工具凭证和宿主给出的本轮 `--turn`；缺失、过期或属于其他执行的凭证会被拒绝。示例中的 `$TURN` 代表本轮凭证。
 
 ### 结果未知的任务
 
@@ -302,7 +302,7 @@ dutydeck agent group send '可检索摘要' --final --card-file /path/body.json 
 | `/grant` / `/revoke` | `/grant @成员` | 把本群对话权限开放给全部成员或加入名单 / 收回 |
 | `/repair` | `/repair` | 诊断并补齐飞书应用权限、事件订阅和卡片回调（执行前二次确认，不会自动发布） |
 
-恢复和分身也可以直接用大白话告诉 Agent，由它运行 `dutydeck agent session resume [--id 编号]` 或 `dutydeck agent session fork [--task 任务]`；它会先发确认卡，点确认后才执行。恢复失败会说明原因，并提示 `/new --handoff`。恢复尚未启动的任务时，创建会话前会按发起人的当前权限重新校验启动参数。
+恢复和分身也可以直接用大白话告诉 Agent，由它运行 `dutydeck agent --turn "$TURN" session resume [--id 编号]` 或 `dutydeck agent --turn "$TURN" session fork [--task 任务]`；它会先发确认卡，点确认后才执行。恢复失败会说明原因，并提示 `/new --handoff`。恢复尚未启动的任务时，创建会话前会按发起人的当前权限重新校验启动参数。
 
 分身只允许源会话第一条任务的发起人操作，沿用原会话的 Agent、模型和推理强度，权限按机器人当前设置执行。Claude Code 终端模式用 `--resume 编号 --fork-session`，Codex 终端模式用 `fork 编号` 复制已落盘的上下文；ACP、其他 Agent、换 Agent 或找不到已落盘上下文时，改用 `/new --handoff` 的最近结果、git 状态和备注交接。原生分身也附上 git 状态。Codex 显式使用相同共享目录时走交接，避免后续把复制出来的记录误认成源会话。独立 worktree 从已提交的代码开始，不含原会话未提交的改动；首条消息会说明。分身回执能跳转到新话题。整段私聊共用一个会话时不能开分身，请先把机器人设置中的私聊模式改成“每条消息一个话题”。
 
@@ -500,7 +500,7 @@ dutydeck schedule delete schedule_xxx --session ses_xxx
 
 后台任务沿用选定的权限姿态；`ask` 可能等待人工审批，需要无人值守时应显式选择适当权限。计划和执行记录保存在所属运行时的数据库中，每个数据库只允许一个运行时持有执行权；Web 与机器人实例通过实例切换访问各自的计划。
 
-周期任务达到用户设定的停止条件时，Agent 可用 `dutydeck agent schedule stop-self` 请求停用自身计划，不接受计划编号。仅限正在执行的宿主定时触发轮次，手动执行和一次性计划不可用。宿主在本轮成功且结果确认送达后，再核对原执行身份和计划是否仍是原版本，才停用并保留历史。任务失败、投递未知、权限撤销或用户修改过计划时不会因此停用。
+周期任务达到用户设定的停止条件时，Agent 可用 `dutydeck agent --turn "$TURN" schedule stop-self` 请求停用自身计划，不接受计划编号。仅限正在执行的宿主定时触发轮次，手动执行和一次性计划不可用。宿主在本轮成功且结果确认送达后，再核对原执行身份和计划是否仍是原版本，才停用并保留历史。任务失败、投递未知、权限撤销或用户修改过计划时不会因此停用。
 
 ### 6. 实验功能（草稿页）
 “群与权限”策略页、定时任务页的导入草稿、设置里的“迁移与高级草稿”目前只保存草稿，不会生效或执行，所以默认隐藏。在「设置与接入 → 实验功能」打开“显示实验功能”后才显示。开关只保存在当前浏览器。
@@ -577,7 +577,7 @@ Codex 当前父轮明确启动的直接子任务若报告额度耗尽或请求�
 
 Claude 的后台 Agent、Bash 和 Monitor 按原生任务 ID 单独计数。主轮已有明确回答、且 CLI 没有继续等待子任务时可以完成，后台任务继续运行；旧版 pending 计数和明确的 Waiting 画面仍等待合并结果。晚到通知保留原输入归属，不成为下一轮回答。重启会重建后台状态，非持久 Monitor 按 CLI 期限到期；`/clear` 后仅核对已知任务的停止通知。Claude 在已知项目 memory 目录成功执行 Write/Edit 后，最终结果保留同轮正文和后记；普通业务文件或 Bash 命令不触发此规则。
 
-Codex 明确报告模型容量已满、且本次没有业务工具或权限调用时，最多自动续跑两次，分别等待 30 秒和 90 秒，每次单独记录执行 attempt。停止或新输入取消尚未提交的续跑；每次提交重新检查原请求者的当前权限，重启保留等待时间和取消状态。提交或完成结果未知时不自动重放；429、额度、鉴权和普通服务端错误不属于模型容量错误。
+Codex 明确报告模型容量已满、且本次没有业务工具或权限调用时，最多自动续跑两次，分别等待 30 秒和 90 秒，每次单独记录执行 attempt。停止或新输入取消尚未提交的续跑；每次提交重新检查原请求者的当前权限，重启保留等待时间和取消状态。提交或完成结果未知时不自动重放；429、额度、鉴权和普通服务端错误不属于模型容量错误。多步骤工作会等待这条已核验的自动重试链，成功后继续下游步骤；人工另行重跑的结果不会被自动认领。
 
 Codex 显示可识别的模型迁移菜单时，Dutydeck 只选 “Use existing model”，再等待输入框；选中行或菜单不明确时留给人工处理。终端采集 socket 支持较长或非 ASCII 的临时目录路径。
 
@@ -901,7 +901,7 @@ dutydeck restart
 
 包的 JSON 校验不过时跳过这个包，插件其余部分照常加载，`plugin list` 和 `doctor` 会列出原因；引用的 provider 没注册、包 id 冲突时也跳过这个包，原因写在 daemon 日志里。运行时正则或 provider 出错、超时，这条消息这个包弃权：`direct` 记一条弃权记录，不起任务；`model` 的上下文 provider 超时、出错、返回格式不对，或者一条材料都没有而 `missing` 不为空时，这条消息按没有这个包重新判定，判定记录里记下原因，`/status` 计入「取材料失败」，「为什么没回」会说明。同一条消息命中多个 `direct` 包时，按包 id 排序只处理第一个。
 
-#`dutydeck agent settings show` 只读查看机器人常用设置；`dutydeck agent settings set defaultAgentId=codex notifyQuietHours=22:00-08:00` 先发确认卡，机器人管理员点确认才保存。用户可以直接说「以后默认用 codex」「晚上十点到早上八点别推送」，让 Agent 代办。可改的只有默认 Agent、模型、推理强度、私聊模式（`p2pMode`）、群回复模式（`groupReplyMode`）、免打扰（`notifyQuietHours`）、两档通知 @（`notifyMentionAction` / `notifyMentionDone`）和忙时判断（`busyTriage`）；权限、白名单和凭据不开放。免打扰留空可清除。群回复选择「自动」（或设置 `groupReplyMode=auto`）会清除已保存的显式覆盖，恢复默认自动路由；更新时省略的字段保持原值。群有单独覆盖时，`show` 仍返回机器人默认值；群回复模式为 `null` 表示尚未显式设置，沿用旧路由。
+#`dutydeck agent --turn "$TURN" settings show` 只读查看机器人常用设置；`dutydeck agent --turn "$TURN" settings set defaultAgentId=codex notifyQuietHours=22:00-08:00` 先发确认卡，机器人管理员点确认才保存。用户可以直接说「以后默认用 codex」「晚上十点到早上八点别推送」，让 Agent 代办。可改的只有默认 Agent、模型、推理强度、私聊模式（`p2pMode`）、群回复模式（`groupReplyMode`）、免打扰（`notifyQuietHours`）、两档通知 @（`notifyMentionAction` / `notifyMentionDone`）和忙时判断（`busyTriage`）；权限、白名单和凭据不开放。免打扰留空可清除。群回复选择「自动」（或设置 `groupReplyMode=auto`）会清除已保存的显式覆盖，恢复默认自动路由；更新时省略的字段保持原值。群有单独覆盖时，`show` 仍返回机器人默认值；群回复模式为 `null` 表示尚未显式设置，沿用旧路由。
 
 确认权限与管理机器人设置的入口一致：托管群需要机器人管理权限（`channel_bot.update`），只有高风险操作授权不能确认；未托管时，需要明确的部署成员或邮箱名单，名单为空不能确认。确认卡绑定发卡时的配置版本；期间 Web 改过设置，旧卡会拒绝覆盖，需要重新提出变更。
 
@@ -1098,7 +1098,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 
 ### 7. 给 Agent 用的命令行（`dutydeck agent`）
 
-飞书会话里的 Agent 用 `dutydeck agent` 做通用操作。通用提示词给命令前缀（绝对路径）、`先看 dutydeck agent --help` 和本轮能用的能力，不含凭证。下列通用能力才归 `agent` 子命令和免填 `--turn` 约定；其他入口按各自说明使用；受控插件导出另有 `plugin-tool` 入口和本轮 turn，见[受控插件结果](#受控插件结果)。
+飞书会话里的 Agent 用 `dutydeck agent` 做通用操作。宿主每轮提供绑定本次执行的完整命令前缀：`<绝对路径> agent --turn <本轮凭证>`，并列出可用能力。Agent 直接沿用该前缀，不自行查询或猜测当前任务。下文示例用 `$TURN` 表示宿主提供的本轮凭证；受控插件导出另有 `plugin-tool` 入口，见[受控插件结果](#受控插件结果)。
 
 群协作的无人交互后台委托在 `ask` 或未配置权限时，仅分析冻结材料，不提供工具、Herdr 或交互提问指引；显式配置 `approve-reads` / `full-trust` 的委托保留工具提示。材料不足会说明缺口和未完成部分，不能因此报告“没有新增”。结果由后台调度器投递。
 
@@ -1107,13 +1107,14 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 - **输出**：stdout 只有一个 JSON。成功 `{"ok":true,"data":...}`；失败 `{"ok":false,"error":{"code","message","hint"?,"params"?:[{"name","reason"}]}}`，退出码非 0。`params` 指出哪个参数不对，能给可选值时写在 `reason` 里。
 - **查看**：`status`、`agents`、`tasks [--page]`、`queue`、`schedules`、`ci`，以及 `group`、`history`、`memory`、`work`、`collaborate` 的读取命令。结果直接交给 Agent，不在群里发卡；权限与这一轮的发起人在原话题自己发这条命令相同。
 - **写入**：`session new/resume/fork`、`retry`、`plan --task`、`schedule create/enable/disable`、`queue cancel/top`、`access grant/revoke --member`、`pr open`、`ci wait/fix/cancel`、`repair` 在这一轮的请求消息下发确认卡，点「确认」后与对应的斜杠命令走同一条路执行。`group send`、`memory add` 等照旧直接生效。写入命令都支持 `--dry-run`：只返回将要做什么、要不要确认、确认卡上写什么，不执行、不发卡。
-- **不用带 `--turn`**：`dutydeck agent` 按本会话正在执行的这一轮认，没有执行中的一轮时拒绝；带了照旧校验。`group send --final`、`group handoff`、`group reply-agent` 同样。独立的受控导出入口 `dutydeck plugin-tool` 必须显式提供本轮 turn，见[受控插件结果](#受控插件结果)。
-- **旧命令**：`dutydeck group/history/memory/work/collaborate/command`、`dutydeck schedule request` 保留，升级前已经在跑的会话照常可用；新的通用操作提示词使用 `dutydeck agent`。
+- **任务归属**：读取、写入、最终交付和交接都校验本次执行的 `--turn`。缺失、旧任务或同任务旧尝试的凭证会被拒绝；晚到的旧请求不会改算到新任务和新请求人。帮助仍可离线查看。
+- **升级旧会话**：旧提示词里的无轮次工具调用不再接受。使用宿主在本轮提供的新命令前缀；上一轮的前缀不能跨轮复用。旧的群工具、历史和记忆入口可在顶层传入凭证，例如 `dutydeck --agent-turn "$TURN" group self`。
 
 ---
 
 ## 升级说明
 
+- **工作项恢复**：因执行结果未知而暂停的步骤，通过正式恢复接口核对原执行并确认成功后，会在下次调度继续剩余步骤；确认失败后可重试该步骤。恢复前重新核对权限和配置，已完成步骤不会重跑。结果仍不确定、工作已取消或审查要求停止时保持暂停。
 - **工作项历史**：升级时自动建立调度索引，已完成且交付结束的记录不再进入每秒扫描；历史仍可查看，未交付结果继续重试。
 - **断线与停止恢复**：跨实例实时流断开后可重新连接；服务关闭会回收代理连接和建连中的飞书监听。终端首次停止失败后可再次尝试回收进程。
 - **后台任务**：空白回答不再阻塞后续记忆提取；群通知按完整一小时窗口计算额度；cron 修复跨年闰日和夏令时重复时段。已启用的周期计划缺失下次执行时间时自动补算，已结束的单次计划不会重新执行。

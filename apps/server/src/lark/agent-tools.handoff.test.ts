@@ -521,7 +521,7 @@ describe('Agent Handoff & Reply-Agent integration suite', () => {
       code: 'FINAL_NO_ACTIVE_TASK',
       statusCode: 409
     });
-    // 不带 --turn 时按执行中的这一轮认；没有执行中的一轮照样拒绝。
+    // 没有执行中的一轮时仍拒绝，缺少凭证也不能借用当前轮次。
     await expect(tools.replyAgent(token, { content: 'done' })).rejects.toMatchObject({ code: 'FINAL_NO_ACTIVE_TASK' });
     activeTask = { taskId: 't1', attemptId: 'a1' };
 
@@ -531,7 +531,7 @@ describe('Agent Handoff & Reply-Agent integration suite', () => {
       code: 'FINAL_MAPPING_UNAVAILABLE',
       statusCode: 409
     });
-    await expect(tools.handoff(token, { to: 'Bot B', content: 'task' })).rejects.toMatchObject({ code: 'FINAL_MAPPING_UNAVAILABLE' });
+    await expect(tools.handoff(token, { to: 'Bot B', content: 'task' })).rejects.toMatchObject({ code: 'FINAL_TURN_EXPIRED' });
 
     // 4. Cross chat message
     mappingContext = {
@@ -688,7 +688,7 @@ describe('Agent Handoff & Reply-Agent integration suite', () => {
     const expectedTurn = capabilities.finalTurnToken('ses_a', 't1', 'a1');
     expect(prompt).toContain(`group handoff <机器人名称/appId/openId> '<目标、代码版本、工作区、读写边界和验收>'`);
     expect(prompt).toContain(`group reply-agent '<交付结果>'`);
-    expect(prompt).not.toContain(expectedTurn);
+    expect(prompt).toContain(expectedTurn);
 
     // 2. 此时若模型立即调用 handoff 工具，运行时由于 mapping 尚未就绪明确返回 FINAL_MAPPING_UNAVAILABLE
     const token = capabilities.environmentFor(session).dutydeck_group_tools_token!;

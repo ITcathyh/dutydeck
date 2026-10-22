@@ -52,17 +52,17 @@ async function setup() {
   });
   const requestScheduleStop = vi.fn(async () => ({ pendingDelivery: true, scheduleId: 'host_bound' }));
   await registerAgentRequestTools(app, { runtime: { getActiveTaskContext: () => active }, automatedTask: taskId => automated.has(taskId), tools, automation: { createSchedule, requestScheduleStop }, prepareDelivery, sendConfirmation });
-  const request = (target: Session, payload: object, turn = capabilities.workbenchTurnToken(target.id, active?.taskId ?? ''), path = 'schedules') => app.inject({
+  const request = (target: Session, payload: object, turn = capabilities.workbenchTurnToken(target.id, active?.taskId ?? '', active?.attemptId ?? ''), path = 'schedules') => app.inject({
     method: 'POST', url: `/api/lark/agent-tools/${path}`, payload,
     headers: { authorization: `Bearer ${capabilities.environmentFor(target).dutydeck_group_tools_token}`, 'x-dutydeck-work-turn': turn }
   });
   const command = (payload: object, turn?: string) => request(group, payload, turn, 'commands');
-  // dutydeck agent 默认不带 --turn：不发 x-dutydeck-work-turn。
-  const agent = (method: 'GET' | 'POST', path: string, payload?: object, turn?: string) => app.inject({
+  // 模拟本轮提示提供的不可变 agent --turn 前缀。
+  const agent = (method: 'GET' | 'POST', path: string, payload?: object, turn = capabilities.workbenchTurnToken(group.id, active?.taskId ?? '', active?.attemptId ?? '')) => app.inject({
     method, url: `/api/lark/agent-tools/${path}`, ...(payload ? { payload } : {}),
     headers: { authorization: `Bearer ${capabilities.environmentFor(group).dutydeck_group_tools_token}`, ...(turn ? { 'x-dutydeck-work-turn': turn } : {}) }
   });
-  const currentTurn = () => capabilities.workbenchTurnToken(group.id, active?.taskId ?? '');
+  const currentTurn = () => capabilities.workbenchTurnToken(group.id, active?.taskId ?? '', active?.attemptId ?? '');
   return { group, p2p, request, command, agent, requestScheduleStop, currentTurn, tools, createSchedule, prepareDelivery, sendConfirmation, saved, automated, setActive: (value: typeof active) => { active = value; } };
 }
 
@@ -175,26 +175,35 @@ describe('Agent schedule requests', () => {
 });
 
 describe('dutydeck agent views and actions', () => {
-  it('without --turn use the running turn; a wrong --turn or no running turn is refused as before', async () => {
+  it('rejects omitted and stale credentials after task or attempt changes, without borrowing the next actor', async () => {
     const f = await setup();
     const run = vi.fn(async (request: object) => ({ request }));
     const view = vi.fn(async (request: object) => ({ request }));
     f.tools.commands.set('cli_bot', run, view);
-    const status = await f.agent('GET', 'views/status');
-    expect(status.statusCode).toBe(200);
+    const oldTurn = f.currentTurn();
+    expect((await f.agent('GET', 'views/status')).statusCode).toBe(200);
     expect(view).toHaveBeenLastCalledWith({ sessionId: 'ses_group', taskId: 'task_1', actorId: 'ou_alice', view: 'status' });
-    expect((await f.agent('GET', 'views/tasks?page=2', undefined, f.currentTurn())).statusCode).toBe(200);
-    expect(view).toHaveBeenLastCalledWith({ sessionId: 'ses_group', taskId: 'task_1', actorId: 'ou_alice', view: 'tasks', page: 2 });
-    expect((await f.agent('GET', 'views/status', undefined, 'stale-turn')).json().error.code).toBe('WORK_ITEM_TURN_EXPIRED');
-    expect((await f.agent('POST', 'actions/retry', {}, 'stale-turn')).json().error.code).toBe('WORK_ITEM_TURN_EXPIRED');
+    f.setActive({ taskId: 'task_2', attemptId: 'attempt_2', actorId: 'ou_bob' });
+    for (const turn of ['', oldTurn, 'forged']) {
+      expect((await f.agent('POST', 'actions/retry', {}, turn)).json().error.code).toBe('WORK_ITEM_TURN_EXPIRED');
+      expect((await f.agent('GET', 'views/status', undefined, turn)).statusCode).toBe(403);
+    }
+    expect(run).not.toHaveBeenCalled();
+    expect(view).toHaveBeenCalledOnce();
+    expect((await f.agent('POST', 'actions/retry', {})).statusCode).toBe(200);
+    expect(run).toHaveBeenLastCalledWith(expect.objectContaining({ taskId: 'task_2', actorId: 'ou_bob' }));
+    const secondTurn = f.currentTurn();
+    f.setActive({ taskId: 'task_2', attemptId: 'attempt_3', actorId: 'ou_bob' });
+    expect((await f.agent('POST', 'actions/retry', {}, secondTurn)).statusCode).toBe(403);
+    expect((await f.agent('POST', 'actions/retry', {})).statusCode).toBe(200);
+    f.setActive({ taskId: 'task_2', actorId: 'ou_bob' });
+    expect((await f.agent('POST', 'actions/retry', {})).statusCode).toBe(403);
     f.setActive(undefined);
-    expect((await f.agent('GET', 'views/status')).json().error.code).toBe('AGENT_REQUEST_ACTOR_REQUIRED');
     expect((await f.agent('POST', 'actions/retry', {})).json().error.code).toBe('AGENT_REQUEST_ACTOR_REQUIRED');
-    f.setActive({ taskId: 'task_1', actorId: 'ou_alice' });
+    f.setActive({ taskId: 'task_1', attemptId: 'attempt_1', actorId: 'ou_alice' });
     f.automated.add('task_1');
     expect((await f.agent('GET', 'views/queue')).json().error.code).toBe('AGENT_REQUEST_AUTOMATED');
-    expect(view).toHaveBeenCalledTimes(2);
-    expect(run).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledTimes(2);
   });
 
   it('actions turn parameters into the same slash command and pass dryRun through; bad parameters are named', async () => {

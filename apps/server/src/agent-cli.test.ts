@@ -18,7 +18,7 @@ async function agent(args: string[], reply: unknown = { done: true }, status = 2
   const fetcher = vi.fn(async () => response(reply, status));
   const out: string[] = [];
   const program = createCliProgram('0.0.5', { agent: (operation, values, options) => runAgentCli(operation, values, options, { env, fetcher: fetcher as typeof fetch }, text => { out.push(text); }) });
-  await program.parseAsync(['node', 'dutydeck', 'agent', ...args]);
+  await program.parseAsync(['node', 'dutydeck', 'agent', '--turn', 'signed-turn', ...args]);
   const call = fetcher.mock.calls[0] as unknown as [string, RequestInit] | undefined;
   return {
     output: out.length ? JSON.parse(out.join('')) : undefined,
@@ -41,9 +41,9 @@ describe('dutydeck agent', () => {
     expect(await agent(['group', 'send', 'Summary', '--final', '--card-file', file, '--delivery', 'both'])).toMatchObject({ url: '/send', body: { content: 'Summary', final: true, cardBody, delivery: 'both' } });
   });
 
-  it('查看类发 GET 到 views，stdout 只有一个 {ok,data}，不带 --turn', async () => {
+  it('查看类发 GET 到 views，stdout 只有一个 {ok,data}，保留本轮 --turn', async () => {
     const status = await agent(['status'], { agent: 'codex', text: '…' });
-    expect(status).toMatchObject({ url: '/views/status', method: 'GET', body: undefined, authorization: 'Bearer capability-token', turn: null, lines: 1, output: { ok: true, data: { agent: 'codex' } } });
+    expect(status).toMatchObject({ url: '/views/status', method: 'GET', body: undefined, authorization: 'Bearer capability-token', turn: 'signed-turn', lines: 1, output: { ok: true, data: { agent: 'codex' } } });
     expect(process.exitCode).toBeUndefined();
     for (const [args, url] of [[['agents'], '/views/agents'], [['tasks', '--page', '2'], '/views/tasks?page=2'], [['queue'], '/views/queue'], [['schedules'], '/views/schedules'], [['ci'], '/views/ci']] as const) {
       expect((await agent([...args])).url).toBe(url);
@@ -135,7 +135,7 @@ it('routes common settings commands and lists their risk and whitelist in help',
   root.configureOutput({ writeOut: text => { quickstart.push(text); } });
   root.outputHelp();
   expect(quickstart.join('')).toContain('dutydeck agent 提供下列飞书会话操作');
-  expect(quickstart.join('')).toContain('这些 agent 子命令不用带 --turn');
+  expect(quickstart.join('')).toContain('agent --turn 命令前缀');
   expect(quickstart.join('')).not.toContain('能用的全部操作');
   const settings = root.commands.find(command => command.name() === 'settings')!;
   const set = settings.commands.find(command => command.name() === 'set')!;
@@ -145,4 +145,12 @@ it('routes common settings commands and lists their risk and whitelist in help',
   expect(output.join('')).toContain('write-confirm');
   expect(output.join('')).toContain('notifyQuietHours');
   expect(output.join('')).toContain('bot admin');
+});
+
+it('refuses missing immutable turn credentials without reading a replacement token or sending HTTP', async () => {
+  const fetcher = vi.fn();
+  const out: string[] = [];
+  await runAgentCli('retry', [], {}, { env, fetcher: fetcher as typeof fetch }, text => { out.push(text); });
+  expect(JSON.parse(out.join(''))).toMatchObject({ ok: false, error: { code: 'AGENT_TURN_REQUIRED', message: expect.stringContaining('本轮提供的完整 agent --turn') } });
+  expect(fetcher).not.toHaveBeenCalled();
 });

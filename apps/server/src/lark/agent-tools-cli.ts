@@ -18,6 +18,7 @@ export class AgentGroupToolCliError extends Error {
 }
 
 interface GroupToolClientOptions {
+  turn?: string;
   env?: NodeJS.ProcessEnv;
   fetcher?: typeof globalThis.fetch;
 }
@@ -25,12 +26,14 @@ interface GroupToolClientOptions {
 export class AgentGroupToolHttpClient {
   private readonly baseUrl: string;
   private readonly token: string;
+  private readonly turn?: string;
   private readonly fetcher: typeof globalThis.fetch;
 
   constructor(options: GroupToolClientOptions = {}) {
     const env = options.env ?? process.env;
     this.baseUrl = (env.dutydeck_group_tools_url ?? env.DUTYDECK_GROUP_TOOLS_URL)?.trim().replace(/\/$/, '') ?? '';
     this.token = (env.dutydeck_group_tools_token ?? env.DUTYDECK_GROUP_TOOLS_TOKEN)?.trim() ?? '';
+    this.turn = options.turn;
     this.fetcher = options.fetcher ?? globalThis.fetch;
     if (!this.baseUrl || !this.token) {
       throw new AgentGroupToolCliError({
@@ -45,6 +48,7 @@ export class AgentGroupToolHttpClient {
     try {
       const headers = new Headers(init.headers);
       headers.set('authorization', `Bearer ${this.token}`);
+      if (this.turn && !headers.has('x-dutydeck-work-turn')) headers.set('x-dutydeck-work-turn', this.turn);
       if (init.body !== undefined) headers.set('content-type', 'application/json; charset=utf-8');
       response = await this.fetcher(`${this.baseUrl}${path}`, {
         ...init,

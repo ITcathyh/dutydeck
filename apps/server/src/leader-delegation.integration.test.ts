@@ -112,7 +112,7 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
     const parent = (await runtime.listSessions()).find(session => session.source === 'lark')!;
     const active = runtime.getActiveTaskContext(parent.id)!;
     const env = capabilities.environmentFor(parent);
-    const turn = capabilities.workbenchTurnToken(parent.id, active.taskId);
+    const turn = capabilities.workbenchTurnToken(parent.id, active.taskId, active.attemptId!);
     const run = async (operation: string, body?: unknown) => {
       const path = join(directory, `${operation}-${Math.random()}.json`);
       if (body) await writeFile(path, JSON.stringify(body));

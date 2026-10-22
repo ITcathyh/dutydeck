@@ -1,6 +1,6 @@
 import { AgentGroupToolHttpClient } from './agent-tools-cli.js';
 
-export interface MemoryCliClientOptions { env?: NodeJS.ProcessEnv; fetcher?: typeof globalThis.fetch }
+export interface MemoryCliClientOptions { turn?: string; env?: NodeJS.ProcessEnv; fetcher?: typeof globalThis.fetch }
 
 const path = '/memory';
 

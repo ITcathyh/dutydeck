@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { canonicalExecutionJson, type BoundExecutionRepository, type RuntimeControlClaim, type TaskAttempt, type TaskRequestV1 } from '@dutydeck/shared';
 import * as storage from '@dutydeck/storage';
-import { readAttemptResult } from './task-results.js';
+import { readAttemptResult, readWorkAttemptResult } from './task-results.js';
 
 const directories: string[] = [];
 const opened: Array<{ repos: ReturnType<typeof storage.createRepositories>; claim: RuntimeControlClaim; path: string }> = [];
@@ -51,9 +51,59 @@ function settleDriver(repos: ReturnType<typeof storage.createRepositories>, x: B
   const active = current(repos, taskId);
   return x.settleAttempt(af(active), `settlement:${submissionId}`, { kind: 'driver_result', submissionId, outcome, outputDigest, stopReason: 'end_turn', complete: true }).attempt!;
 }
+function capacityRetry(repos: ReturnType<typeof storage.createRepositories>, x: BoundExecutionRepository, path: string, preparing: TaskAttempt) {
+  const submissionId = `capacity-submission:${preparing.attemptId}`;
+  x.markSubmissionPending(af(preparing), { submissionId, inputDigest: stableHash('turn'), resourceRefs: [], authorizationRefs: [] });
+  const active = current(repos, preparing.taskId);
+  x.appendEvent(af(active), { id: `capacity-error:${active.attemptId}`, type: 'error', data: { code: 'codex_capacity', nativeSource: 'codex', nativeTerminal: true, capacityReason: 'selected_model_capacity', nativeTurnId: 'turn' } });
+  const next = x.settleCapacityRetry(af(active), `capacity-settlement:${active.attemptId}`, { kind: 'driver_result', submissionId, outcome: 'failed', outputDigest: utf8Digest(''), stopReason: 'end_turn', complete: true }).attempt!;
+  const sql = new Database(path);
+  try { sql.prepare("UPDATE task_attempts SET json=json_set(json, '$.automaticRetry.dueAt', '2000-01-01T00:00:00.000Z') WHERE id=?").run(next.attemptId); }
+  finally { sql.close(); }
+  return current(repos, preparing.taskId);
+}
 const thrown = (fn: () => unknown) => { try { fn(); } catch (error) { return error; } throw new Error('Expected the function to throw'); };
 
 describe('readAttemptResult against the real execution ledger', () => {
+  it('follows only verified capacity successors for work results and keeps the shared reader pinned to the first attempt', () => {
+    const { repos, x, path } = open();
+    const first = claimed(repos, x);
+    const next = capacityRetry(repos, x, path, first);
+    expect(readWorkAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toEqual({ status: 'pending' });
+    expect(readAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toEqual({ status: 'blocked', reason: 'legacy_output_unresolved' });
+    const second = x.claimNext(fence)!.attempt!;
+    expect(second.attemptId).toBe(next.attemptId);
+    textEvents(x, second, ['retried output']);
+    settleDriver(repos, x, second.taskId, utf8Digest('retried output'));
+    expect(readWorkAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toMatchObject({ status: 'settled', result: { attemptId: second.attemptId, output: { text: 'retried output' } } });
+  });
+
+  it.each(['inputDigest', 'causeAttemptId', 'ordinal', 'side_effect'] as const)('rejects unsafe capacity lineage with changed %s', field => {
+    const { repos, x, path } = open();
+    const first = claimed(repos, x);
+    const next = capacityRetry(repos, x, path, first);
+    const sql = new Database(path);
+    try {
+      if (field === 'side_effect') sql.prepare("UPDATE events SET type='tool_call' WHERE id=?").run(`capacity-error:${first.attemptId}`);
+      else sql.prepare(`UPDATE task_attempts SET json=json_set(json, '$.automaticRetry.${field}', ?) WHERE id=?`).run(field === 'ordinal' ? 2 : 'unrelated', next.attemptId);
+    } finally { sql.close(); }
+    if (field === 'causeAttemptId') {
+      expect(readWorkAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toEqual({ status: 'blocked', reason: 'legacy_output_unresolved' });
+    } else expect(thrown(() => readWorkAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId))).toMatchObject({ code: 'TASK_RESULT_RETRY_CONFLICT' });
+  });
+
+  it('keeps an unknown automatic successor blocked after a later human retry completes', () => {
+    const { repos, x, path } = open();
+    const first = claimed(repos, x);
+    capacityRetry(repos, x, path, first);
+    const second = x.claimNext(fence)!.attempt!;
+    x.settleAttempt(af(second), 'unknown-auto', { kind: 'manual', outcome: 'unknown', decision: { decisionId: 'unknown-auto', actor: ownerActor, action: 'confirm_result', evidenceRefs: ['operator'], resourceChecks: [] } });
+    x.retryAttempt(af(current(repos, first.taskId)), { decisionId: 'human-retry', actor: ownerActor, action: 'retry', allowDuplicateEffects: true, resourceChecks: [], evidenceRefs: ['operator'] }, []);
+    const third = x.claimNext(fence)!.attempt!;
+    textEvents(x, third, ['unrelated replacement']);
+    settleDriver(repos, x, third.taskId, utf8Digest('unrelated replacement'));
+    expect(readWorkAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toEqual({ status: 'blocked', reason: 'reconcile_required' });
+  });
   it('atomically preserves old events and returns only verified manual output, with audited idempotency', async () => {
     const { repos, x, path } = open();
     const a = claimed(repos, x);

@@ -2,7 +2,7 @@
  * dutydeck agent：飞书会话里的 Agent 能用的全部操作，统一入口、统一输出。
  * - 帮助（--help）不需要服务或凭证；开头是写给 Agent 的快速说明，每个子命令的帮助有一行 Risk 和例子。
  * - stdout 只输出一个 JSON：成功 {"ok":true,"data":...}，失败 {"ok":false,"error":{code,message,hint?,params?}}，退出码非 0。
- * - 不用带 --turn：服务按本会话正在执行的这一轮认。写入命令都支持 --dry-run。
+ * - 沿用本轮完整的 agent --turn 命令前缀，凭证绑定当前任务尝试。写入命令都支持 --dry-run。
  * 请求都发到本机服务的 /api/lark/agent-tools/*；查看类与写入类的处理见 agent-request-tools.ts。
  */
 import { open } from 'node:fs/promises';
@@ -33,7 +33,7 @@ const riskLabels: Record<Risk, string> = {
 
 export const agentQuickstart = `QUICKSTART（给 Agent）
   dutydeck agent 提供下列飞书会话操作。先读这里，再用 dutydeck agent <命令> --help 看参数、风险和例子；帮助不需要服务或凭证。
-  例子里的 dutydeck 指本轮提示给出的完整命令前缀，原样使用，不要换成 PATH 里的 dutydeck。这些 agent 子命令不用带 --turn：服务按本会话正在执行的这一轮认。
+  例子里的 dutydeck agent 指本轮提示给出的完整 Agent 命令前缀，原样使用，不要换成 PATH 里的 dutydeck。所有操作沿用本轮 agent --turn 命令前缀，凭证绑定当前任务尝试。
 
 风险分级（每个命令的 --help 都有一行 Risk）
   read           只读：直接返回数据，不发卡、不改东西。
@@ -180,8 +180,11 @@ export async function runAgentOperation(operation: string, args: unknown[], opti
     return { dryRun: true, risk: spec.risk, request, needsConfirmation: spec.risk === 'write-confirm',
       effect: spec.risk === 'write-confirm' ? '执行后宿主在原话题发确认卡，用户点确认后才生效。' : '去掉 --dry-run 执行后立即生效。' };
   }
-  const body = options.dryRun && spec.serverDryRun ? { ...request.body, dryRun: true } : request.body;
-  return new AgentGroupToolHttpClient(client).request(request.path, { method: request.method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+  const http = new AgentGroupToolHttpClient(client);
+  if (!options.turn) throw new AgentCliError('AGENT_TURN_REQUIRED', '请使用本轮提供的完整 agent --turn 命令前缀。', [{ name: '--turn', reason: '需要本轮任务尝试凭证' }]);
+  let body = options.dryRun && spec.serverDryRun ? { ...request.body, dryRun: true } : request.body;
+  if (operation === 'group.handoff' || operation === 'group.reply-agent' || operation === 'group.send' && options.final) body = { ...body, turn: options.turn };
+  return http.request(request.path, { method: request.method, headers: { 'x-dutydeck-work-turn': options.turn }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
 }
 
 /** 失败统一成 {code,message,hint?,params?}；服务给的其他字段（如授权地址）原样带上。 */
@@ -227,6 +230,7 @@ const collect = (value: string, previous: string[] = []) => [...previous, value]
 /** 挂到 dutydeck 命令树上；run 收到操作名（如 session.new）、位置参数和选项。 */
 export function addAgentCommands(program: Command, run: AgentCliRunner) {
   const agent = program.command('agent')
+    .option('--turn <token>', 'Immutable task attempt capability supplied in the current prompt')
     .description('Lark Agent only: everything an Agent can do in its Dutydeck session, with JSON output; start here')
     .configureOutput({ writeErr: () => {}, outputError: () => {} })
     .addHelpText('before', agentQuickstart);
@@ -250,7 +254,7 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
     command.addHelpText('after', `\nRisk: ${riskLabels[risk]}\n\nExamples:\n${examples.map(example => `  $ dutydeck agent ${example}`).join('\n')}${help ? `\n\n${help}` : ''}`);
     return command.action((...values: unknown[]) => {
       const self = values.at(-1) as Command;
-      return run(operation, self.processedArgs, self.opts());
+      return run(operation, self.processedArgs, { ...self.opts(), turn: agent.opts().turn });
     });
   };
 

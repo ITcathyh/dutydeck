@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { canonicalExecutionJson, createWorkItemSchema, executionActorSchema, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
-import { readAttemptResult } from './task-results.js';
+import { readWorkAttemptResult } from './task-results.js';
 
 const PREFIX = 'work_item:';
 const TEMPLATES = 'work_template:';
@@ -473,7 +473,8 @@ export class WorkItemService {
     if (record.item.status === 'cancelling') { await this.cancelChildren(id); return; }
     // 待确认的计划只是持久记录，确认前不做任何执行准备，也不派发步骤。
     if (record.item.status === 'awaiting_confirmation') return;
-    if (record.item.status === 'cancelled' || record.item.status === 'blocked') return;
+    if (record.item.status === 'cancelled') return;
+    if (record.item.status === 'blocked' && !await this.reconcileBlocked(state)) return;
     if (record.item.status === 'completed') { this.scheduleDelivery(record.item.id); return; }
     await this.assertExecution(record);
     if (!record.actor) {
@@ -504,7 +505,7 @@ export class WorkItemService {
           let verified = false;
           if (attempt.sessionId && attempt.taskId) {
             try {
-              const read = readAttemptResult({ execution: this.repos.execution }, attempt.sessionId, attempt.taskId, attempt.runtimeAttemptId ?? attempt.id);
+              const read = readWorkAttemptResult({ execution: this.repos.execution }, attempt.sessionId, attempt.taskId, attempt.runtimeAttemptId ?? attempt.id);
               if (read.status === 'settled' && read.result.outcome === 'completed' && read.result.output.text.trim()) {
                 attempt.result = read.result;
                 attempt.output = read.result.output;
@@ -698,7 +699,41 @@ export class WorkItemService {
     if (admission.request && accepted.request && canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(admission.request)) return 'conflict';
     return true;
   }
-  /** 只消费固定 number=1 Attempt 的权威结算结果；unknown/legacy/越界/摘要冲突持久 blocked，不转 failed。 */
+  /** 人工已确认的原轮结果才可解锁；先验证全部阻塞步骤，防止部分恢复后重复派发。 */
+  private async reconcileBlocked(state: RecordState): Promise<boolean> {
+    const record = state.value;
+    if (record.cancellationActor || !record.actor || record.item.steps.some(step => step.status === 'cancelled')
+      || record.item.delivery.status === 'not_requested' && record.item.error?.startsWith('Cancellation')) return false;
+    const blocked = record.item.steps.filter(step => step.status === 'blocked');
+    if (!blocked.length) return false;
+    await this.assertExecution(record, true);
+    for (const step of blocked) {
+      const attempt = last(step)!;
+      const admission = record.admissions?.[attempt.id];
+      const accepted = admission ? this.repos.execution.getAcceptedTask(admission.taskId) : undefined;
+      if (attempt.blockReason !== 'reconcile_required' || attempt.result || attempt.output || !attempt.sessionId || !attempt.runtimeAttemptId
+        || !admission?.request || !accepted?.request || attempt.taskId !== admission.taskId || this.readAccepted(admission) !== true
+        || canonicalExecutionJson(accepted.request.actor) !== canonicalExecutionJson(record.actor)) return false;
+      const session = await this.repos.sessions.get(attempt.sessionId);
+      if (session?.source !== 'work_item' || session.sourceId !== attempt.id) return false;
+      const projection = this.repos.execution.getTaskExecution(admission.taskId);
+      if (projection?.attempts.find(value => value.number === 1)?.attemptId !== attempt.runtimeAttemptId) return false;
+      const read = readWorkAttemptResult({ execution: this.repos.execution }, attempt.sessionId, admission.taskId, attempt.runtimeAttemptId);
+      if (read.status !== 'settled' || !['completed', 'failed'].includes(read.result.outcome) || projection.task.currentAttemptId !== read.result.attemptId) return false;
+      const settlement = projection.attempts.find(value => value.attemptId === read.result.attemptId)?.settlement;
+      if (settlement?.kind !== 'manual' || settlement.decision.action !== 'confirm_result'
+        || settlement.decision.actor.kind !== 'installation_owner' && canonicalExecutionJson(settlement.decision.actor) !== canonicalExecutionJson(record.actor)) return false;
+    }
+    record.item.status = 'running'; delete record.item.error;
+    for (const step of blocked) {
+      // Manual confirmation already required proof that the original resources stopped.
+      const attempt = last(step)!;
+      if (!record.stoppedAttempts.includes(attempt.id)) record.stoppedAttempts.push(attempt.id);
+      await this.observeAttempt(state, step);
+    }
+    return true;
+  }
+  /** 读取固定首轮及安全自动重试的权威结果；unknown/legacy/越界/摘要冲突持久 blocked。 */
   private async observeAttempt(state: RecordState, step: WorkStep): Promise<void> {
     const record = state.value; const attempt = last(step)!;
     // 冻结后下游只读冻结快照。
@@ -745,7 +780,7 @@ export class WorkItemService {
     else if (attempt.runtimeAttemptId !== first.attemptId) { await this.blockAttempt(state, step, 'reconcile_required', 'Fixed number=1 attempt identity changed'); return; }
 
     let read;
-    try { read = readAttemptResult({ execution: this.repos.execution }, attempt.sessionId!, admission.taskId, attempt.runtimeAttemptId!); }
+    try { read = readWorkAttemptResult({ execution: this.repos.execution }, attempt.sessionId!, admission.taskId, attempt.runtimeAttemptId!); }
     catch (error) {
       const message = errorText(error);
       attempt.status = 'blocked'; attempt.blockReason = 'reconcile_required'; attempt.error = message; attempt.updatedAt = time();
@@ -782,6 +817,7 @@ export class WorkItemService {
       await this.write(state); return;
     }
     if (result.outcome === 'failed') {
+      delete attempt.blockReason;
       attempt.status = 'failed'; attempt.error = 'Agent execution failed; inspect child task evidence'; step.status = 'failed';
       state.value.item.status = 'failed'; await this.write(state); return;
     }

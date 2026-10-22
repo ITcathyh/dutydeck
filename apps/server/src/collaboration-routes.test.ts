@@ -30,7 +30,7 @@ async function fixture(extra: Partial<CollaborationRouteOptions> | ((repos: Repo
   const env = capabilities.environmentFor(session);
   const tools = new LarkAgentToolsService(capabilities, repos.config);
   let actorId: string | undefined = 'ou_alice'; let taskId = 'task-one';
-  const runtime = { getSession: (id: string) => repos.sessions.get(id), getActiveTaskContext: () => actorId ? { taskId, actorId } : undefined } as any;
+  const runtime = { getSession: (id: string) => repos.sessions.get(id), getActiveTaskContext: () => actorId ? { taskId, attemptId: `attempt-${taskId}`, actorId } : undefined } as any;
   const authorize = async (candidate: typeof scope, actor: string, action: string) => candidate.appId === scope.appId && candidate.chatId === scope.chatId && (actor === 'owner' || actor === 'ou_alice' && action !== 'manage');
   const service = new CollaborationService({ repositories: repos, authorize, resolveScheduleScope: async () => ({ channelBotId: 'bot', identityRef: 'identity', secretRef: 'secret' }) });
   const app = Fastify();
@@ -38,7 +38,7 @@ async function fixture(extra: Partial<CollaborationRouteOptions> | ((repos: Repo
   await registerCollaborationRoutes(app, { service, runtime, tools, authorizeManagement: async request => request.headers.authorization === 'Bearer management' ? 'owner' : undefined,
     bootstrap: async () => {}, extensions: new CollaborationExtensions({ repository: repos.collaboration, authorize }), evaluation: new CollaborationEvaluation({ repository: repos.collaboration, evaluate: async () => ({ action: 'silent', reason: '', evidenceIds: [] }) }), ...(typeof extra === 'function' ? await extra(repos, directory) : extra) });
   cleanups.push(async () => { capabilities.close(); await app.close(); repos.close(); await rm(directory, { recursive: true, force: true }); });
-  const headers = () => ({ authorization: `Bearer ${env.dutydeck_group_tools_token}`, 'x-dutydeck-work-turn': capabilities.workbenchTurnToken(session.id, taskId) });
+  const headers = () => ({ authorization: `Bearer ${env.dutydeck_group_tools_token}`, 'x-dutydeck-work-turn': capabilities.workbenchTurnToken(session.id, taskId, `attempt-${taskId}`) });
   return { repos, app, env, headers, capabilities, changeTask() { taskId = 'task-two'; }, endTask() { actorId = undefined; } };
 }
 it('binds a mutation to the active actor and turn, scopes stable retries and rejects body identity overrides', async () => {

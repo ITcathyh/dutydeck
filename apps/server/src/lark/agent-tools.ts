@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { commitLarkAgentReply } from './agent-reply-delivery.js';
 import { parseFinalCardBody } from './final-card.js';
 import { deliveryPrompt, isFrozenCollaborationSession } from '../prompt-context.js';
@@ -102,24 +103,20 @@ export class LarkAgentToolCapabilityRegistry {
     return createHmac('sha256', this.signingSecret).update(`dutydeck-final-turn-v1\0${sessionId}\0${taskId}\0${attemptId}`).digest('base64url');
   }
 
-  /** 不带凭证时按这个会话当前正在执行的那一次尝试认（调用方已确认有）；带了照旧校验，会话历史里的旧命令仍然可用。 */
   assertFinalTurn(sessionId: string, taskId: string, attemptId: string, presented?: string) {
-    if (!presented) return;
     const expected = Buffer.from(this.finalTurnToken(sessionId, taskId, attemptId));
     const actual = Buffer.from(typeof presented === 'string' ? presented : '');
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '最终答复凭证不属于当前任务轮次，请使用本轮提供的命令。', 403);
   }
 
-  workbenchTurnToken(sessionId: string, taskId: string) {
-    return createHmac('sha256', this.signingSecret).update(`dutydeck-work-turn-v1\0${sessionId}\0${taskId}`).digest('base64url');
+  workbenchTurnToken(sessionId: string, taskId: string, attemptId: string) {
+    return this.finalTurnToken(sessionId, taskId, attemptId);
   }
 
-  /** 不带凭证时按这个会话当前正在执行的那一轮认（调用方已确认有执行中的一轮）；带了照旧校验。 */
-  assertWorkbenchTurn(sessionId: string, taskId: string, presented?: string) {
-    if (!presented) return;
-    const expected = Buffer.from(this.workbenchTurnToken(sessionId, taskId));
+  assertWorkbenchTurn(sessionId: string, taskId: string, attemptId: string | undefined, presented?: string) {
+    const expected = Buffer.from(attemptId ? this.workbenchTurnToken(sessionId, taskId, attemptId) : '');
     const actual = Buffer.from(typeof presented === 'string' ? presented : '');
-    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new AgentGroupToolError('WORK_ITEM_TURN_EXPIRED', '编排凭证不属于当前指令，请使用本轮提供的 work 命令。', 403);
+    if (!attemptId || !actual.length || actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new AgentGroupToolError('WORK_ITEM_TURN_EXPIRED', '工具凭证不属于当前任务尝试，请使用本轮提供的完整 agent --turn 命令前缀。', 403);
   }
 
   environmentFor(session: Session): Record<string, string> {
@@ -513,7 +510,10 @@ export const deterministicAgentActionKey = (input: {
   return `${prefix}${hash.slice(0, 42)}`;
 };
 
+interface AgentToolTurn { sessionId: string; taskId: string; attemptId: string; actorId?: string }
+
 export class LarkAgentToolsService {
+  private readonly requestTurns = new AsyncLocalStorage<{ turn?: AgentToolTurn }>();
   private readonly clients = new Map<string, { secret: string; domain: string; client: LarkGroupToolClient }>();
   private readonly identities = new Map<string, { secret: string; domain: string; info: Promise<LarkBotInfo> }>();
   private readonly pollIntervalMs: number;
@@ -526,6 +526,26 @@ export class LarkAgentToolsService {
     private readonly options: LarkAgentToolsOptions = {}
   ) {
     this.pollIntervalMs = Math.max(50, options.pollIntervalMs ?? 1_000);
+  }
+
+  runInRequestScope(next: () => void) { this.requestTurns.run({}, next); }
+
+  async bindRequestTurn(token: string | undefined, presented?: string) {
+    const binding = await this.capabilities.resolve(token);
+    const active = this.options.workbenchTask?.(binding.sessionId);
+    this.capabilities.assertWorkbenchTurn(binding.sessionId, active?.taskId ?? '', active?.attemptId, presented);
+    const scope = this.requestTurns.getStore();
+    if (scope) scope.turn = { sessionId: binding.sessionId, taskId: active!.taskId, attemptId: active!.attemptId!, actorId: active!.actorId };
+  }
+
+  requestTurn(sessionId: string) {
+    const turn = this.requestTurns.getStore()?.turn;
+    if (!turn) return;
+    const active = this.options.workbenchTask?.(sessionId);
+    if (sessionId !== turn.sessionId || active?.taskId !== turn.taskId || active?.attemptId !== turn.attemptId || active?.actorId !== turn.actorId) {
+      throw new AgentGroupToolError('WORK_ITEM_TURN_EXPIRED', '任务尝试已结束，请使用本轮提供的完整 agent --turn 命令前缀。', 403);
+    }
+    return turn;
   }
 
   private clientFor(config: StoredLarkConfig) {
@@ -550,6 +570,7 @@ export class LarkAgentToolsService {
 
   private async context(token: string | undefined, action: 'group_tools.read' | 'group_tools.discover' | 'group_tools.send'): Promise<ToolContext> {
     const binding = await this.capabilities.resolve(token);
+    const turn = this.requestTurn(binding.sessionId);
     const toolAuthority = await this.options.authorizeTool?.(binding.sessionId, action);
     if (this.options.executionPolicy) {
       const decision = await this.options.executionPolicy.authorize('group_tools', action);
@@ -561,18 +582,25 @@ export class LarkAgentToolsService {
     let config = await readLarkConfig(this.configs, binding.appId);
     if (!config) throw new AgentGroupToolError('GROUP_TOOL_BOT_NOT_FOUND', `当前会话关联的飞书机器人 ${binding.appId} 已被删除。`, 404);
     if (this.options.groupManager) {
-      const decision = toolAuthority
-        ? await this.options.groupManager.authorize(binding.appId, binding.chatId, toolAuthority.actorId === 'installation_owner' ? undefined : toolAuthority.actorId, action, undefined, { installationOwner: toolAuthority.actorId === 'installation_owner' })
+      const authority = toolAuthority ?? (turn ? { actorId: turn.actorId } : undefined);
+      const decision = authority
+        ? await this.options.groupManager.authorize(binding.appId, binding.chatId, authority.actorId === 'installation_owner' ? undefined : authority.actorId, action, toolAuthority ? undefined : binding.sessionId, { installationOwner: authority.actorId === 'installation_owner', ...(!toolAuthority && authority.actorId !== 'installation_owner' ? { taskRequesterOpenId: authority.actorId } : {}) })
         : await this.options.groupManager.authorizeSession(binding.sessionId, action) ?? await this.options.groupManager.authorize(binding.appId, binding.chatId, undefined, action, binding.sessionId);
       if (decision && !decision.allowed) throw new AgentGroupToolError(decision.code, decision.reason, 403);
       config = await this.options.groupManager.resolved(config, binding.chatId);
     }
     if (!config.groupToolsEnabled) throw new AgentGroupToolError('GROUP_TOOLS_DISABLED', '当前飞书机器人的 Agent 群协作工具已被管理员关闭。', 403);
+    this.requestTurn(binding.sessionId);
     return { ...binding, config, client: this.clientFor(config) };
   }
 
   private async authorized<T>(context: ToolContext, operation: keyof typeof operationScopes, action: () => Promise<T>) {
-    try { return await action(); }
+    try {
+      this.requestTurn(context.sessionId);
+      const result = await action();
+      this.requestTurn(context.sessionId);
+      return result;
+    }
     catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'FINAL_CONTENT_CONFLICT') throw new AgentGroupToolError('FINAL_CONTENT_CONFLICT', error.message, 409);
       if (isPermissionError(error)) throw authorizationError(context, operation, error as LarkServiceError);
@@ -581,7 +609,7 @@ export class LarkAgentToolsService {
     }
   }
 
-  assertWorkbenchTurn(sessionId: string, taskId: string, presented?: string) { this.capabilities.assertWorkbenchTurn(sessionId, taskId, presented); }
+  assertWorkbenchTurn(sessionId: string, taskId: string, attemptId: string | undefined, presented?: string) { this.requestTurn(sessionId); this.capabilities.assertWorkbenchTurn(sessionId, taskId, attemptId, presented); }
 
   async workbenchContext(token?: string) {
     const context = await this.context(token, 'group_tools.read');
@@ -606,6 +634,7 @@ export class LarkAgentToolsService {
    */
   async memoryContext(token?: string): Promise<LarkAgentSessionBinding & { groupMemoryScope?: LarkGroupMemoryScope }> {
     const binding = await this.capabilities.resolve(token);
+    this.requestTurn(binding.sessionId);
     await this.options.authorizeTool?.(binding.sessionId, 'memory');
     const config = await readLarkConfig(this.configs, binding.appId);
     if (!config) {
@@ -614,6 +643,7 @@ export class LarkAgentToolsService {
     if (!larkMemoryEnabled(config)) {
       throw new AgentGroupToolError('MEMORY_DISABLED', '当前飞书机器人已关闭会话记忆。', 403);
     }
+    this.requestTurn(binding.sessionId);
     return { ...binding, groupMemoryScope: config.groupMemoryScope };
   }
 
@@ -743,8 +773,7 @@ export class LarkAgentToolsService {
       } catch { return false; }
     };
     const [memory, read, discover, send] = await Promise.all([allowed('memory'), allowed('group_tools.read'), allowed('group_tools.discover'), allowed('group_tools.send')]);
-    // 完整绑定命令只写一次，细节都在 dutydeck agent --help 里；这里只列本轮开着的能力和必须遵守的规则，不放凭证。
-    // 指向 releases/current 的写法在部署后仍然有效，留在会话历史里的命令不会失效。
+    // 每轮凭证只放在完整命令前缀中，绑定任务尝试；旧提示中的命令不能借用下一轮身份。
     const abilities: string[] = [];
     if (memory) abilities.push(larkMemoryToolsPrompt('dutydeck agent'));
     abilities.push(...larkGroupToolsPrompt(send, { read, discover }));
@@ -778,7 +807,8 @@ export class LarkAgentToolsService {
       ...(config.silentProgress ? ['本会话不显示中间进度，不要另发进度消息；提问和最终结果不受影响。'] : [])
     ];
     const blocks: string[] = [larkCommandPrompt(stableMemoryCommand(this.options.groupToolsCommand ?? 'dutydeck'),
-      deliveryPrompt({ background: collaborationSession, reactionOnly: config.completionReactionOnly }))];
+      deliveryPrompt({ background: collaborationSession, reactionOnly: config.completionReactionOnly }),
+      task?.attemptId ? this.capabilities.finalTurnToken(session.id, task.taskId, task.attemptId) : undefined)];
     if (abilities.length) blocks.push(`本轮可用（都在 dutydeck agent 下）：\n${abilities.map(line => `- ${line}`).join('\n')}`);
     if (rules.length) blocks.push(`规则：\n${rules.map(line => `- ${line}`).join('\n')}`);
     // 没有代办入口（没有发起人、定时任务触发的一轮、监听没在运行）时仍按原说法，由用户自己操作。
@@ -1490,7 +1520,7 @@ const userOnlyPrompt = '停止当前任务、批准工具调用、回答你的�
 export const larkCapabilityPrompt = (cannotSchedule: boolean) => `[Dutydeck 能力限制与操作指引] 下面这些由用户自己操作，遇到时在回复里给出做法，不要说“已完成”或“已设置”：${cannotSchedule ? '定时任务用 /schedule（如 /schedule every 分钟 指令），不要用 crontab、后台 sleep 或循环脚本代替；' : ''}切换 agent、模型或工作目录用 /new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容；查看任务用 /tasks；停止当前任务点进度卡上的“中断”；重新开始用 /new。`;
 
 /** 每轮工具块的开头：完整绑定命令只在这里出现一次，最终答复的交付方式也只在这里说。 */
-export const larkCommandPrompt = (command: string, delivery: string) => `[Dutydeck 命令] ${command === 'dutydeck' ? '' : `本会话的 dutydeck 命令是 ${command}，下文的 dutydeck 都指它：原样使用，不要换成 PATH 里的 dutydeck。`}下列能力使用 dutydeck agent，先看 dutydeck agent --help；子命令加 --help 看参数、风险和例子。这些 agent 子命令不用带 --turn。帮助不需要服务或凭证。
+export const larkCommandPrompt = (command: string, delivery: string, turn?: string) => `[Dutydeck 命令] ${turn ? `本轮完整 Agent 命令前缀是 ${command} agent --turn ${turn}，下文的 dutydeck agent 都指此前缀：原样使用，不换成 PATH 里的 dutydeck，不从历史提示借用凭证。` : `${command === 'dutydeck' ? '' : `本会话的 dutydeck 命令是 ${command}，下文的 dutydeck 都指它：原样使用，不要换成 PATH 里的 dutydeck。`}本轮没有任务尝试凭证，不能执行 Agent 操作。`}下列能力使用 dutydeck agent，先看 dutydeck agent --help；子命令加 --help 看参数、风险和例子。帮助不需要服务或凭证。
 ${delivery}`;
 
 /** 群工具的能力行，只列本轮确实可用的入口；消息范围、cursor、幂等键、交接格式等细节在 dutydeck agent group --help 里。 */

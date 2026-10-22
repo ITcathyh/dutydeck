@@ -402,6 +402,7 @@ const localRuntimeOptionsFrom = (options: SessionNamesCommandOptions, command: C
 
 export function createCliProgram(version: string, handlers: CliHandlers = {}) {
   const program = new Command()
+    .option('--agent-turn <token>', 'Immutable task attempt capability for legacy Agent tool commands')
     .name('dutydeck')
     .description('Run the Dutydeck local session server')
     .version(version, '-V, --version', 'Show the installed version');

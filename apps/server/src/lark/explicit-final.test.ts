@@ -405,11 +405,11 @@ describe('explicit final: real tools, runtime, coordinator and SQLite', () => {
     expect(resultSends(progress)).toHaveLength(1);
   });
 
-  it('without --turn delivers for the running attempt; with no running task it is refused as before', async () => {
+  it('rejects omitted credentials even while a task is running', async () => {
     const h = await harness();
-    const sent = await h.sendFinal(undefined, { turn: undefined });
-    expect(resultSends(h)).toHaveLength(1);
-    expect((await h.sendFinal()).messageId).toBe(sent.messageId);
+    await expect(h.sendFinal(undefined, { turn: undefined })).rejects.toMatchObject({ code: 'FINAL_TURN_EXPIRED' });
+    expect(resultSends(h)).toHaveLength(0);
+    const sent = await h.sendFinal();
     h.release();
     expect((await h.resultCard()).final_message_id).toBe(sent.messageId);
     await expect(h.sendFinal('answer', { turn: undefined })).rejects.toMatchObject({ code: 'FINAL_NO_ACTIVE_TASK' });
@@ -754,12 +754,12 @@ it('restart delivers a cancellation diagnostic even if an explicit answer exists
   } finally { restarted.stop(); }
 });
 
-it('publishes a domain-separated attempt token in the prompt only', async () => {
+it('publishes an immutable shared attempt token in the prompt only', async () => {
   const h = await harness();
   const prompt = await h.tools.promptForSession(h.session, 'request');
   expect(prompt).toContain(`group send '<完整答复>' --final`);
-  expect(prompt).not.toContain(h.turn);
-  expect(h.turn).not.toBe(h.capabilities.workbenchTurnToken(h.session.id, h.active.taskId));
+  expect(prompt).toContain(h.turn);
+  expect(h.turn).toBe(h.capabilities.workbenchTurnToken(h.session.id, h.active.taskId, h.active.attemptId!));
   expect(JSON.stringify(h.capabilities.environmentFor(h.session))).not.toContain(h.turn);
   await h.repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...h.config, groupToolsAllowSend: false }]));
   expect(await h.tools.promptForSession(h.session, 'request')).not.toContain('--final');

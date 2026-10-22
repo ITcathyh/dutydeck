@@ -48,6 +48,21 @@ function handleToolError(error: unknown, reply: FastifyReply) {
   throw error;
 }
 
+/** Attach only to the Agent capability endpoints, including memory and plugin result tools. */
+export function registerLarkAgentToolTurnGuard(app: FastifyInstance, service: LarkAgentToolsService) {
+  app.addHook('onRoute', route => {
+    if (!route.url.startsWith('/api/lark/agent-tools/')) return;
+    const onRequest = route.onRequest ? (Array.isArray(route.onRequest) ? route.onRequest : [route.onRequest]) : [];
+    route.onRequest = [(request, reply, done) => service.runInRequestScope(done), ...onRequest];
+    const preHandler = route.preHandler ? (Array.isArray(route.preHandler) ? route.preHandler : [route.preHandler]) : [];
+    route.preHandler = [async request => {
+      const body = request.body as { turn?: unknown } | undefined;
+      const presented = request.headers['x-dutydeck-work-turn'] ?? request.headers['x-dutydeck-result-turn'] ?? body?.turn;
+      await service.bindRequestTurn(tokenFrom(request.headers.authorization), typeof presented === 'string' ? presented : undefined);
+    }, ...preHandler];
+  });
+}
+
 export async function registerLarkAgentToolRoutes(app: FastifyInstance, service?: LarkAgentToolsService) {
   if (!service) return;
 
