@@ -170,8 +170,8 @@ it('preserves the surviving driver and events when simultaneous resumes finish a
   const first = runtime.resume(session.id), second = runtime.resume(session.id);
   await both; release();
   const results = await Promise.allSettled([first, second]);
-  expect(results[0].status).toBe('fulfilled');
-  expect(results[1]).toMatchObject({ status: 'rejected', reason: { code: 'SESSION_RESOURCE_BLOCKED' } });
+  expect(results.map(result => result.status).sort()).toEqual(['fulfilled', 'rejected']);
+  expect(results.find(result => result.status === 'rejected')).toMatchObject({ status: 'rejected', reason: { code: 'SESSION_RESOURCE_BLOCKED' } });
   expect(factories).toHaveLength(2);
   factories[1].emit({ type: 'text', data: { text: 'resumed driver remains current' } });
   await vi.waitFor(async () => expect((await runtime.getEvents(session.id)).some(event => (event.data as { text?: string }).text === 'resumed driver remains current')).toBe(true));
