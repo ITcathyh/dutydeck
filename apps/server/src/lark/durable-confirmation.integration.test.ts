@@ -134,7 +134,8 @@ async function harness(options: { deliveryFailures?: number; threaded?: boolean;
       runtime = createRuntime(); await runtime.initialize([agent]); broker = createBroker(); await broker.initialize();
       coordinator = create(); await coordinator.initializeWorkflows(config);
     },
-    waitConfirmed: () => vi.waitFor(async () => expect((await interactions()).find(item => item.id === record.id)?.state).toBe('answered')) };
+    waitConfirmed: () => vi.waitFor(async () => expect((await interactions()).find(item => item.id === record.id))
+      .toMatchObject({ state: 'answered', cardClosedAt: expect.any(String) }), { timeout: 2_000 }) };
 }
 
 describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
@@ -148,7 +149,7 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
     await h.click(); await h.waitConfirmed();
     await vi.waitFor(() => expect(h.service.reply.mock.calls.some(([input]) => input.cardKind === 'result' && input.taskId === `confirmation_${h.record.id}`)).toBe(true));
     await vi.waitFor(async () => expect(JSON.parse((await h.repos.channelMappings.get(`lark-card:${h.config.appId}`, `confirmation_${h.record.id}`))!.extra!).final_delivery_state).toBe('delivered'));
-    const expected = kind === 'original' ? larkTaskTitle(original, h.config.name) : '确认写入';
+    const expected = kind === 'original' ? larkTaskTitle(original, h.config.name) : '已确认';
     const inputs = [...h.service.reply.mock.calls, ...h.service.update.mock.calls].map(([input]) => input)
       .filter(input => input.taskId === `confirmation_${h.record.id}`);
     expect(inputs.length).toBeGreaterThan(1);
@@ -503,7 +504,7 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
     expect(await h.click()).toMatchObject({ type: 'error', content: '已结束，未执行' });
     expect((await h.interactions())[0]!.state).toBe('expired');
     expect(await h.repos.config.list!(`lark.inbox.${h.config.appId}.confirmation_`)).toEqual([]);
-    expect(JSON.stringify(h.service.update.mock.calls)).toContain('已结束，未执行');
+    await vi.waitFor(() => expect(JSON.stringify(h.service.update.mock.calls)).toContain('已结束，未执行'), { timeout: 2_000 });
     expect(h.sends).toHaveLength(1);
   });
   it.each(['before', 'after'] as const)('recovers a resolving crash %s inbox seed, retaining one original-session input', async where => {

@@ -785,7 +785,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     expect(await h.coordinator.handleAction({ dutydeck_workflow: 'approve', request_id: second.id, generation: second.boot }, 'ou_bob', { messageId: second.cardId, chatId: 'oc_group' }))
       .toMatchObject({ type: 'success', content: '执行端已接受本次批准。' });
     expect(h.resolvePermission).toHaveBeenCalledExactlyOnceWith('native_permission', true);
-    expect(JSON.stringify(h.cards.get(second.cardId!))).toMatch(/已允许 · <at id=ou_bob><\/at> · \d{2}:\d{2}/);
+    await vi.waitFor(() => expect(JSON.stringify(h.cards.get(second.cardId!))).toMatch(/已允许 · <at id=ou_bob><\/at> · \d{2}:\d{2}/), { timeout: 2_000 });
   });
 
   it('lets only the requester allow an exact command for the session, then auto-approves it without another card', async () => {
@@ -802,7 +802,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: request.cardId, chatId: 'oc_group' }))
       .toMatchObject({ type: 'success', content: '已允许，本会话内完全相同的命令之后会自动允许。' });
     expect(h.resolvePermission).toHaveBeenCalledExactlyOnceWith('native_permission', true);
-    expect(h.cards.get(request.cardId!).statusLabel).toBe('已允许');
+    await vi.waitFor(() => expect(h.cards.get(request.cardId!).statusLabel).toBe('已允许'), { timeout: 2_000 });
     await h.completed();
     const cardCount = h.cards.size;
 

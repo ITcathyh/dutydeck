@@ -234,6 +234,7 @@ export class LarkWorkflowInteractions {
   private repairCancelled = false;
   private readonly closedCards = new Set<string>();
   private readonly closingCards = new Set<string>();
+  private readonly deferredCloses = new Map<string, { active: number; timer?: NodeJS.Timeout }>();
   private readonly log?: Pick<ListenerLog, 'warn'>;
   private readonly delivering = new Set<string>();
   private readonly retryAfter = new Map<string, number>();
@@ -396,6 +397,11 @@ export class LarkWorkflowInteractions {
   }
   private async renderClosed(record: LarkInteraction, message: string) {
     if (!record.cardId || record.kind === 'result') return true;
+    if (this.deferredCloses.has(this.key(record))) {
+      record = await this.current(record);
+      if (record.closeMessage !== message) await this.annotate(record, { closeMessage: message });
+      return true;
+    }
     const key = `${record.cardId}:${record.state}:${message}`;
     if (this.closedCards.has(key)) return true;
     if (this.closingCards.has(record.id)) return false;
@@ -571,6 +577,8 @@ export class LarkWorkflowInteractions {
     if (this.repairWait) { clearTimeout(this.repairWait.timer); this.repairWait.release(); this.repairWait = undefined; }
     for (const timer of this.planTimers.values()) clearTimeout(timer);
     this.planTimers.clear();
+    for (const entry of this.deferredCloses.values()) clearTimeout(entry.timer);
+    this.deferredCloses.clear();
   }
   private async move(record: LarkInteraction, state: LarkInteraction['state'], actorId?: string, patch: Partial<LarkInteraction> = {}) {
     const next = { ...record, ...patch, state, updatedAt: new Date().toISOString(), ...(actorId ? { actorId } : {}) };
@@ -1056,7 +1064,30 @@ export class LarkWorkflowInteractions {
     catch { return false; }
     return true;
   }
-  async respond(input: { appId: string; chatId: string; actorId?: string; requestId: string; action: 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session' | 'plan_approve' | 'plan_revise' | 'plan_cancel'; answer?: string; selected?: string[]; cardId?: string; generation?: string; callback?: boolean }) {
+  async respond(input: { appId: string; chatId: string; actorId?: string; requestId: string; action: 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session' | 'plan_approve' | 'plan_revise' | 'plan_cancel'; answer?: string; selected?: string[]; cardId?: string; generation?: string; callback?: boolean; deferClose?: boolean }): Promise<string> {
+    if (!input.deferClose) return this.respondNow(input);
+    const key = prefix(input.appId) + input.requestId;
+    const entry = this.deferredCloses.get(key) ?? { active: 0, timer: undefined };
+    clearTimeout(entry.timer);
+    entry.active++;
+    this.deferredCloses.set(key, entry);
+    try { return await this.respondNow(input); }
+    finally {
+      if (--entry.active === 0 && !this.closed) {
+        entry.timer = setTimeout(() => {
+          this.deferredCloses.delete(key);
+          void (async () => {
+            const raw = await this.store.get(key);
+            if (this.closed || !raw) return;
+            const record = JSON.parse(raw) as LarkInteraction;
+            if (!['pending', 'resolving'].includes(record.state)) await this.renderClosed(record, await this.closedMessage(record));
+          })().catch(error => this.log?.warn({ error, requestId: input.requestId }, '延迟收卡失败，等待终态补关'));
+        }, 1_000);
+        entry.timer.unref();
+      }
+    }
+  }
+  private async respondNow(input: Parameters<LarkWorkflowInteractions['respond']>[0]) {
     const raw = await this.store.get(prefix(input.appId) + input.requestId);
     if (!raw || !input.actorId) throw stale();
     let record = JSON.parse(raw) as LarkInteraction;

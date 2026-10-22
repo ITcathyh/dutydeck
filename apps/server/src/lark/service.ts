@@ -1036,7 +1036,8 @@ function buildDefaultLarkCard(input: LarkCardInput) {
       config: {
         update_multi: true,
         width_mode: 'default',
-        streaming_mode: state === 'running',
+        // 独立的待处理交互卡不生成流式内容；过程和结果卡保留原来的协议。
+        streaming_mode: state === 'running' && (isProcessCard || isResultCard || !(input.awaitingHuman || input.awaitingAnswer || input.readOnly)),
         // 语义色：绿=好 / 蓝=进行中 / 橙=要注意。执行中色会当状态文字用（`● 执行中`），
         // 所以必须在白底上可读。成功色只当圆点用（成功不再渲染文字后缀），按图形元素的 3:1 要求取值。
         // 步骤级的失败只是过程，用灰色；红色留给任务真的失败（failure_bg 与红色标题栏）。

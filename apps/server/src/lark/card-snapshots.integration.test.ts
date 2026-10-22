@@ -1,4 +1,5 @@
 // 飞书卡片快照：把用户在飞书里看到的卡片逐字节钉住，拆分 coordinator.ts 前后必须一致。
+// 协议例外：静态待处理交互卡的 streaming_mode 固定 false，其余正文布局逐字节比较。
 //
 // 链路尽量贴近线上：飞书 SDK 只替换长连接与事件分发（与 listener.test.ts 同一个替身），入站事件按
 // im.message.receive_v1 / card.action.trigger 的真实字段形态构造，内容全部是合成的；之后走真实的
@@ -394,6 +395,18 @@ async function harness(options: { config?: Partial<StoredLarkConfig>; turns?: Tu
       action: { value, tag: 'button', ...(options.formValue ? { form_value: options.formValue } : {}) },
       host: 'im_message', context: { open_message_id: messageId, open_chat_id: chatId }
     }) as { toast?: unknown } | undefined;
+    if (typeof value.request_id === 'string' && (result?.toast as { type?: string } | undefined)?.type === 'success') {
+      const key = `lark.interaction.${appId}.${value.request_id}`;
+      const raw = await current.repos.config.get(key);
+      const record = raw ? JSON.parse(raw) as { kind: string; state: string } : undefined;
+      // Closing is delayed after the Toast; /tasks callbacks still close the original approval card.
+      if (record && record.kind !== 'result' && !['pending', 'resolving'].includes(record.state)) {
+        await vi.waitFor(async () => {
+          const currentRecord = JSON.parse((await current.repos.config.get(key))!);
+          expect(currentRecord.cardClosedAt).toEqual(expect.any(String));
+        }, { timeout: 2_000 });
+      }
+    }
     if (options.record !== false) timeline.push({ click: label, message: messageId, ...(options.formValue ? { form_value: options.formValue } : {}), toast: result?.toast });
     return result?.toast;
   };

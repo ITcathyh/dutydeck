@@ -341,7 +341,7 @@
           "config": {
             "update_multi": true,
             "width_mode": "default",
-            "streaming_mode": true,
+            "streaming_mode": false,
             "style": {
               "color": {
                 "current_bg": {

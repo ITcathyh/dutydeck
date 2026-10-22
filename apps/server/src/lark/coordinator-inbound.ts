@@ -2784,7 +2784,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
               : typeof formAnswer === 'string' ? formAnswer : '' };
           }
         }
-        const content = await this.workflows.respond({ appId: this.reconcileConfig.appId, chatId: context.chatId,
+        const content = await this.workflows.respond({ appId: this.reconcileConfig.appId, chatId: context.chatId, deferClose: true,
           actorId: operatorOpenId, requestId, action: action as 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session' | 'plan_approve' | 'plan_revise' | 'plan_cancel',
           ...(fromDashboard ? {} : { cardId: context.messageId, generation: String(workflow.generation ?? ''), callback: true }),
           ...answer });

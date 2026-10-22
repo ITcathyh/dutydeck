@@ -279,7 +279,7 @@ export abstract class LarkCoordinatorCore {
 
   protected taskTitle(task: LarkTask, prompt = task.prompt, titleConfig = task.config) {
     return task.config.adhdMode === true && task.id.startsWith('confirmation_')
-      ? task.displayName || '确认写入' : larkTaskTitle(prompt, titleConfig.name);
+      ? task.displayName || '已确认' : larkTaskTitle(prompt, titleConfig.name);
   }
 
   protected async taskDisplayPrompt(config: StoredLarkConfig, chatId: string, sessionId: string, task: { id: string; prompt: string }) {
@@ -294,7 +294,7 @@ export abstract class LarkCoordinatorCore {
       && item.id === task.inbox?.workflowRequestId && task.id === `confirmation_${item.id}` && item.sessionId === task.inbox?.sessionId);
     const original = record?.durable?.snapshot?.prompt;
     task.displayName = typeof original === 'string' && original.trim() && !original.startsWith('持久确认记录 ID：')
-      ? larkTaskTitle(original, task.config.name) : '确认写入';
+      ? larkTaskTitle(original, task.config.name) : '已确认';
   }
 
   private async deferConfirmation(input: RelayDeferredAsk, context: RelayAskContext) {

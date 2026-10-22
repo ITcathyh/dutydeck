@@ -19,7 +19,7 @@ import { LarkGroupManager } from './group-management.js';
 import { LarkGroupParticipation } from './group-participation.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
-import type { LarkInteraction } from './workflow-interactions.js';
+import { LarkWorkflowInteractions, type LarkInteraction } from './workflow-interactions.js';
 import { buildLarkCard, larkCardSafeLimits, type LarkChatMessage } from './service.js';
 import { buildRepairConfirmCard } from './repair.js';
 import { TERMINAL_PROTOCOL_NOTE } from './protocol-hints.js';
@@ -332,6 +332,30 @@ describe('P0-1 他人操作二次确认 / overflow 门 / 行内审批反伪造',
     expect(await h.coordinator.handleAction(reject, 'ou_alice', { messageId: 'om_forged', chatId: 'oc_group' }))
       .toMatchObject({ type: 'error', content: '请在最新的审批卡片或 /tasks 卡片上操作。' });
     expect(h.resolvePermission).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('workflow clicks defer closing while preserving original-card identity checks (dashboard=%s)', async dashboard => {
+    const h = await harness('permission');
+    await h.coordinator.handle(event('om_deferred', '等待批准'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).some(item => item.kind === 'permission' && item.state === 'pending')).toBe(true));
+    const request = (await h.interactions()).find(item => item.kind === 'permission' && item.state === 'pending')!;
+    let messageId = request.cardId!;
+    if (dashboard) {
+      await h.coordinator.handle(event('om_tasks_deferred', '/tasks'), h.config);
+      messageId = [...h.cards].find(([, card]) => card.taskId === 'om_tasks_deferred')![0];
+    }
+    const respond = vi.spyOn(LarkWorkflowInteractions.prototype, 'respond');
+    try {
+      expect(await h.coordinator.handleAction({ dutydeck_workflow: 'approve', request_id: request.id, generation: request.boot },
+        'ou_alice', { messageId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
+      const input = respond.mock.calls.at(-1)![0];
+      expect(input.deferClose).toBe(true);
+      expect(input.callback).toBe(dashboard ? undefined : true);
+      if (!dashboard) expect(input).toMatchObject({ cardId: request.cardId, generation: request.boot });
+      expect((await h.interactions()).find(item => item.id === request.id)).toMatchObject({ state: 'approved', closeMessage: expect.any(String) });
+      expect(h.service.update.mock.calls.filter(([input]) => input.taskId === request.id)).toHaveLength(0);
+      await vi.waitFor(async () => expect((await h.interactions()).find(item => item.id === request.id)!.cardClosedAt).toEqual(expect.any(String)), { timeout: 2_000 });
+    } finally { respond.mockRestore(); }
   });
 
   it('/tasks 行内审批走 kv 登记门 + 世代校验 + 一次性 CAS；overflow 拒绝同路径', async () => {

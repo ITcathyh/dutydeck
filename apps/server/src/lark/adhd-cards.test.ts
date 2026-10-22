@@ -70,7 +70,7 @@ describe('ADHD card presentation', () => {
     expect(JSON.stringify(card)).toContain('primary');
     await expect(JSON.stringify(card, null, 2)).toMatchFileSnapshot('./__fixtures__/adhd-ask-minimal.json');
   });
-  it('matches 825e9ee card JSON byte for byte with ADHD disabled', async () => {
+  it('preserves 825e9ee card JSON with ADHD disabled except for pending interaction streaming_mode', async () => {
     vi.useFakeTimers({ now: fixedTime });
     const snapshots: Record<string, unknown> = { result: buildLarkCard(resultInput(false)) };
     for (const [name, options] of Object.entries({ single: {}, multiple: { multiple: true }, freeText: { freeText: true }, textOnly: { structured: false } })) {
@@ -83,6 +83,7 @@ describe('ADHD card presentation', () => {
     h.cancel();
     await h.workflow.reconcile(ctx.appId);
     snapshots.cancelled = buildLarkCard(h.update.mock.calls.at(-1)![0]);
+    // 825e9ee 的唯一协议差异：四种 pending 交互卡的 streaming_mode 从 true 改为 false。
     await expect(JSON.stringify(snapshots, null, 2)).toMatchFileSnapshot('./__fixtures__/adhd-off-825e9ee.json');
   });
 

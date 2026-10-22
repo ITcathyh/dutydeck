@@ -243,6 +243,17 @@ describe('Lark card service', () => {
     expect(secondColMarkdown.content).toContain('[查看详情](https://web.example.com/sessions/ses_1)');
   });
 
+  it.each(['awaitingHuman', 'awaitingAnswer', 'readOnly'] as const)('keeps static %s interaction cards out of streaming mode', flag => {
+    for (const adhdMode of [false, true]) {
+      const input = { state: 'running' as const, taskName: '确认本次操作', adhdMode, [flag]: true };
+      expect(buildLarkCard(input).config.streaming_mode).toBe(false);
+      for (const cardKind of ['process', 'result'] as const) {
+        expect(buildLarkCard({ ...input, cardKind }).config.streaming_mode).toBe(true);
+      }
+      expect(buildLarkCard({ state: 'running', adhdMode }).config.streaming_mode).toBe(true);
+    }
+  });
+
   it('keeps state-specific actions in the top prompt row', () => {
     const queued: any = buildLarkCard({ state: 'queued', taskId: 'queued' });
     const running: any = buildLarkCard({ state: 'running', taskId: 'running', elapsedSeconds: 31 });

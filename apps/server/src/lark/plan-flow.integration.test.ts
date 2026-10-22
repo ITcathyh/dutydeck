@@ -109,7 +109,7 @@ describe('/plan in Feishu', () => {
     expect(h.turns[1]).toMatchObject({ mode: 'ask', prompt: expect.stringContaining(planApprovedPrompt) });
     expect(h.turns[1]!.prompt).not.toContain(planInstructionBlock);
     expect((await h.plans())[0]).toMatchObject({ state: 'approved', actorId: 'ou_alice', decision: 'approve' });
-    expect(h.cards.get(record.cardId!)).toMatchObject({ statusLabel: '已批准', readOnly: true });
+    await vi.waitFor(() => expect(h.cards.get(record.cardId!)).toMatchObject({ statusLabel: '已批准', readOnly: true }), { timeout: 2_000 });
     expect(await h.runtime.listSessions()).toHaveLength(1);
 
     // 重复点击只生效一次。
