@@ -44,6 +44,7 @@ export type LarkBotConfig = {
   /** 配置向导里答了手机打不开 Web 地址；此时没有 webBaseUrl，卡片不显示「查看详情」 */
   webMobileReachable?: false;
   defaultAgentId?: string;
+  fallbackAgentId?: string;
   defaultAgentWeights?: AgentWeight[];
   defaultModel?: string;
   defaultReasoningEffort?: string;
@@ -417,6 +418,7 @@ export const api = {
     webBaseUrl?: string;
     webMobileReachable?: boolean;
     defaultAgentId?: string;
+  fallbackAgentId?: string;
   defaultAgentWeights?: AgentWeight[];
     defaultModel?: string;
     defaultReasoningEffort?: string;

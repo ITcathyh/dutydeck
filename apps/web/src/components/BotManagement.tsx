@@ -48,6 +48,7 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     baseRevision: bot.revision,
     workspace: bot.workspace ?? '',
     defaultAgentId: bot.defaultAgentId ?? '',
+    fallbackAgentId: bot.fallbackAgentId ?? '',
     defaultModel: bot.defaultModel ?? '',
     defaultReasoningEffort: bot.defaultReasoningEffort ?? '',
     p2pMode: bot.p2pMode ?? 'chat',
@@ -244,6 +245,7 @@ export function BotManagement({
       originalAppId: appId,
       appId,
       defaultAgentId: draft.defaultAgentId,
+      fallbackAgentId: draft.fallbackAgentId,
       defaultModel: draft.defaultModel,
       defaultReasoningEffort: draft.defaultReasoningEffort,
       workspace: draft.workspace,
@@ -559,7 +561,7 @@ export function BotManagement({
                     <AgentSelect
                       agents={agents}
                       value={currentDraft.defaultAgentId}
-                      onChange={val => updateCurrentDraft({ defaultAgentId: val, defaultModel: '', defaultReasoningEffort: '' })}
+                      onChange={val => updateCurrentDraft({ defaultAgentId: val, ...(val === currentDraft.fallbackAgentId ? { fallbackAgentId: '' } : {}), defaultModel: '', defaultReasoningEffort: '' })}
                     />
                   </div>
 
@@ -578,6 +580,12 @@ export function BotManagement({
                       onChange={val => updateCurrentDraft({ defaultModel: val, defaultReasoningEffort: '' })}
                     />}
                   </div>
+                </div>
+
+                <div><label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-fallback-agent">兜底 Agent</label>
+                  <Select id="bot-fallback-agent" value={currentDraft.fallbackAgentId} onChange={event => updateCurrentDraft({ fallbackAgentId: event.target.value })}>
+                    <option value="">不启用兜底</option>{agents.filter(agent => agent.id !== currentDraft.defaultAgentId).map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+                  </Select><p className="mt-1 text-caption text-subtle">主 Agent 不可用且本轮尚无输出或工具调用时，自动切换一次。兜底使用自己的默认模型。</p>
                 </div>
 
                 {claudeModelSettings && <AgentModelSettings key={`${activeBot.appId}:${currentDraft.defaultAgentId}`} agentId={currentDraft.defaultAgentId} botAppId={activeBot.appId}/>}

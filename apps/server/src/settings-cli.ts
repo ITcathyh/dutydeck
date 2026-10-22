@@ -56,7 +56,7 @@ export const channelBotFields = {
 export const botFields = {
   eventHandlers: 'json', cardActionForwarding: 'json', welcomeEnabled: 'boolean',
   workspace: 'string', workspaceAliases: 'json', webBaseUrl: 'string', webMobileReachable: 'boolean', displayName: 'string', brand: ['feishu', 'lark'],
-  defaultAgentId: 'string', defaultAgentWeights: 'json', defaultModel: 'string', defaultReasoningEffort: 'string',
+  defaultAgentId: 'string', fallbackAgentId: 'string', defaultAgentWeights: 'json', defaultModel: 'string', defaultReasoningEffort: 'string',
   permissionMode: ['ask', 'approve-reads', 'full-trust'], fullTrustConfirmed: 'boolean',
   roleTitle: 'string', roleScope: 'string',
   preInjectPrompt: 'string', verificationCommand: 'string', listening: 'boolean',

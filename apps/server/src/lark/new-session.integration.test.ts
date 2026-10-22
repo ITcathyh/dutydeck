@@ -159,7 +159,7 @@ describe('Lark /new first-turn launch options', () => {
     const sourceId = larkSourceId(h.config, 'ou_alice', 'p2p', 'p2p');
     expect(await h.repos.channelMappings.get(`lark-launch:${h.config.appId}`, sourceId)).toMatchObject({
       id: `lark-launch:${sourceId}`, channel: `lark-launch:${h.config.appId}`,
-      externalId: sourceId, sessionId: 'ses_2', extra: JSON.stringify({ baseConfigKey: larkSessionConfigKey(h.config) })
+      externalId: sourceId, sessionId: 'ses_2', extra: JSON.stringify({ baseConfigKey: larkSessionConfigKey(h.config), explicitAgent: true })
     });
 
     await coordinator.handle(dm('om_followup', 'same session'), h.config);
@@ -457,7 +457,7 @@ describe('Lark /new first-turn launch options', () => {
     expect(h.runtime.send.mock.calls[0]?.[0]).toBe('ses_started');
     expect(sentPrompt(h.runtime, 0)).toBe('recover goal');
     expect(await h.repos.channelMappings.get(`lark-launch:${config.appId}`, sourceId)).toMatchObject({
-      sessionId: 'ses_started', extra: JSON.stringify({ baseConfigKey: larkSessionConfigKey(config) })
+      sessionId: 'ses_started', extra: JSON.stringify({ baseConfigKey: larkSessionConfigKey(config), explicitAgent: true })
     });
     await rm(directory, { recursive: true, force: true });
   });

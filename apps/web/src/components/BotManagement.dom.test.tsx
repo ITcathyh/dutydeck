@@ -1167,3 +1167,24 @@ it('defaults busy triage off and saves the enabled bot setting', async () => {
   await user.click(screen.getByRole('button', { name: '保存配置' }));
   await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ busyTriage: true })));
 });
+
+
+it('saves and clears the fallback Agent with the bot draft revision', async () => {
+  const user = userEvent.setup();
+  const config = { configured: true, bots: [mockBot], listeningDisabled: false };
+  vi.spyOn(api, 'larkConfig').mockResolvedValue(config);
+  vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+  vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+  const save = vi.spyOn(api, 'saveLarkConfig').mockImplementation(async input => {
+    const next = { ...config, bots: [{ ...mockBot, fallbackAgentId: input.fallbackAgentId || undefined, revision: 4 }] };
+    vi.mocked(api.larkConfig).mockResolvedValue(next);
+    return next;
+  });
+  renderWithClient(<BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={[...mockAgents, { id: 'ccflash', name: 'CCFlash', protocol: 'acp', permissionMode: 'ask' }]}/>);
+  await user.selectOptions(await screen.findByLabelText('兜底 Agent'), 'ccflash');
+  await user.click(screen.getByRole('button', { name: '保存配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ fallbackAgentId: 'ccflash', expectedRevision: 3 })));
+  await user.selectOptions(screen.getByLabelText('兜底 Agent'), '');
+  await user.click(screen.getByRole('button', { name: '保存配置' }));
+  await waitFor(() => expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ fallbackAgentId: '', expectedRevision: 4 })));
+});

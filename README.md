@@ -415,6 +415,15 @@ dutydeck settings bot set cli_xxx 'defaultAgentWeights=[{"agentId":"codex","weig
 dutydeck settings bot set cli_xxx 'defaultAgentWeights=[]' # 关闭分流
 ```
 
+**兜底 Agent。** 在机器人默认设置或接入向导中选择「兜底 Agent」，也可通过 CLI 配置：
+
+```bash
+dutydeck settings bot set cli_xxx defaultAgentId=ccflash fallbackAgentId=codex
+dutydeck settings bot set cli_xxx 'fallbackAgentId=' # 关闭兜底
+```
+
+主 Agent 无法启动、未登录、凭据失效，或返回明确的限流、额度耗尽、上游不可用错误时，当前请求最多自动切换一次。只有本轮尚无正文、思考、工具调用或审批请求时才会切换；普通任务失败、取消、权限拒绝和结果未知不会自动重放。有其他排队或运行任务时保留原会话，避免丢失请求。兜底使用自己的默认模型和推理强度，沿用机器人的审批与风险控制；强制拦截会检查、安装兜底 Agent 的 Hook。切换时在卡片说明原因，并开启新会话，仅携带最近完成结果作为背景，完整原生对话历史不会跨 Agent 迁移。已有兜底会话继续沿用；新对话重新优先选择主 Agent。显式 `/new --agent`、模型或推理参数不启用自动兜底。
+
 #### Claude Code 自定义网关与 API Key
 
 注册第二步选择 Claude Code，展开「模型服务配置」，填写网关 URL、认证方式和 API Key，先点「保存模型配置」，再点「完成配置」。已有机器人可在默认执行设置里修改；网关模型 ID 填在「默认模型」。支持内置 Claude Code 和 `adapterId` 为 `claude` / `claude-code` 的自定义 Agent（如 ccflash），网关须兼容 Anthropic Messages API。

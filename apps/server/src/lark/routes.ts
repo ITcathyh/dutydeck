@@ -255,7 +255,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       const patternValidation = validateHighRiskPattern(pattern);
       if (!patternValidation.valid) throw new LarkServiceError('INVALID_HIGH_RISK_PATTERN', patternValidation.error, 400);
       let hook;
-      for (const agentId of new Set([config.defaultAgentId, ...(config.defaultAgentWeights ?? []).map(row => row.agentId)])) {
+      for (const agentId of new Set([config.defaultAgentId, ...(config.fallbackAgentId ? [config.fallbackAgentId] : []), ...(config.defaultAgentWeights ?? []).map(row => row.agentId)])) {
         hook = await installLarkHook(agentId, config.workspace, agentId ? await options.agents?.get(agentId) : undefined);
       }
       const saved = await saveLarkConfig(options.config, options.agents, {
@@ -348,9 +348,10 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     const existing = input.originalAppId ? await readLarkConfig(options.config, input.originalAppId) : undefined;
     const weightsResult = agentWeightsSchema.safeParse(input.defaultAgentWeights === undefined ? existing?.defaultAgentWeights ?? [] : input.defaultAgentWeights);
     if (!weightsResult.success) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Agent weights must contain distinct Agent IDs and finite positive weights.', 400);
+    const fallbackAgentId = input.fallbackAgentId === undefined ? existing?.fallbackAgentId : input.fallbackAgentId.trim();
     const requestedRiskControlMode = resolveRiskControlModeInput(input, existing?.riskControlMode ?? 'off');
     if (requestedRiskControlMode === 'enforced') {
-      const agentIds = new Set([input.defaultAgentId ?? existing?.defaultAgentId, ...weightsResult.data.map(row => row.agentId)]);
+      const agentIds = new Set([input.defaultAgentId ?? existing?.defaultAgentId, ...(fallbackAgentId ? [fallbackAgentId] : []), ...weightsResult.data.map(row => row.agentId)]);
       for (const agentId of agentIds) {
         const hook = await larkHookStatus(agentId, input.workspace ?? existing?.workspace, agentId ? await options.agents?.get(agentId) : undefined);
         if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', `${agentId}: ${hook.reason ?? 'Install the selected Agent hook before enabling enforced risk control'}`, 409);

@@ -84,6 +84,9 @@ export type LarkTask = {
   requestUpdate?: (state: Exclude<LarkTaskState, 'interrupting'>, completed?: boolean) => Promise<void>;
   retryable?: boolean;
   /** 本条请求最多自动换一次；只在当前进程内接着执行。 */
+  fallbackAttempted?: boolean;
+  fallbackNote?: string;
+  fallbackHasActivity?: boolean;
   launcherRecoveryAttempted?: boolean;
   launcherRecoveryPending?: boolean;
   launcherRecoveryNote?: boolean;

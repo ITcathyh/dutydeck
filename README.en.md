@@ -260,6 +260,15 @@ dutydeck settings bot set cli_xxx 'defaultAgentWeights=[{"agentId":"codex","weig
 dutydeck settings bot set cli_xxx 'defaultAgentWeights=[]' # Disable routing
 ```
 
+**Fallback Agent.** Select “兜底 Agent” in bot defaults or the setup wizard, or use the CLI:
+
+```bash
+dutydeck settings bot set cli_xxx defaultAgentId=ccflash fallbackAgentId=codex
+dutydeck settings bot set cli_xxx 'fallbackAgentId=' # Disable fallback
+```
+
+A request switches at most once when the primary cannot start, is signed out, has invalid credentials, or reports a recognized rate limit, exhausted quota, or unavailable upstream. Switching requires no answer, reasoning, tool call, or approval request in the current turn. Ordinary task failures, cancellation, permission denial, and unknown outcomes are never replayed. Other queued or running work prevents switching. The fallback uses its own default model and effort with the bot's approval and risk controls; enforced mode checks and installs its hook too. Cards explain the switch. A new session receives recent completed results as background; full native history does not transfer between Agents. Existing fallback sessions remain sticky, while new conversations try the primary again. Explicit `/new --agent`, model, or effort settings disable automatic fallback.
+
 **Claude Code gateway and API key.** In step 2 of bot registration, choose Claude Code, expand “模型服务配置” (model service settings), enter the gateway URL, auth mode and key, then save the model service settings before completing registration. Existing bots have the same panel beside their default Agent settings. Enter the gateway model ID in the bot's default model field. Built-in Claude Code and custom Agents with `adapterId: "claude"` or `"claude-code"` (such as ccflash) are supported. The gateway must implement the Anthropic Messages API.
 
 ```bash

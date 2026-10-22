@@ -77,10 +77,10 @@ const groupMessage = (id: string): LarkMessageEvent => ({
   mentions: [{ key: '@_user_1', name: 'Dutydeck', openId: 'ou_bot' }]
 });
 
-async function setup(prepareError: Error | ((sessionId: string) => Promise<void>), managedGroup = false) {
+async function setup(prepareError: Error | ((sessionId: string) => Promise<void>), managedGroup = false, fallback = false) {
   const cwd = await mkdtemp(join(tmpdir(), 'dd-launcher-changed-'));
   const config: StoredLarkConfig = {
-    appId: 'app', appSecret: 'fixture', name: 'Dutydeck', workspace: cwd, defaultAgentId: 'launcher-fixture',
+    appId: 'app', appSecret: 'fixture', name: 'Dutydeck', workspace: cwd, defaultAgentId: 'launcher-fixture', ...(fallback ? { fallbackAgentId: 'spare' } : {}),
     fullTrustConfirmed: true, listening: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false,
     ...(managedGroup ? { groupReplyMode: 'shared' as const } : {}),
     groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 60_000, hideTraceOnComplete: false,
@@ -121,7 +121,7 @@ async function setup(prepareError: Error | ((sessionId: string) => Promise<void>
     driverFactory: factory,
     ...(managedGroup ? { authorizeExecution: (sessionId: string, actorId?: string) => groupManager!.prepareTurn(sessionId, actorId) } : {})
   });
-  await runtime.initialize([agent]);
+  await runtime.initialize([agent, ...(fallback ? [{ ...agent, id: 'spare', name: 'Spare' }] : [])]);
   if (managedGroup) {
     groupManager = new LarkGroupManager(repos, { client: () => ({
       getBotInfo: async () => ({ appName: config.appId, openId: 'ou_bot' }),
@@ -747,4 +747,34 @@ it('重启后接回的轮次遇到启动器失败时不自动换新，并记录�
   expect(log.info).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_resumed', reason: 'restored_turn' }), '未自动更换旧启动器会话');
   expect(h.prepared).toHaveLength(1);
   expect(h.issued.find(input => input.cardKind === 'result' && input.taskId === 'om_resumed').state).toBe('failed');
+});
+
+
+it('restores administrator-configured fallback for a managed-group member with task.create but no Agent-change permission', async () => {
+  const h = await setup(async () => {}, true, true);
+  cleanups.push(() => h.teardown());
+  const original = await h.runTurn('om_owner', { rootId: undefined, threadId: undefined, senderOpenId: 'ou_owner' });
+  expect(await h.groupManager!.authorize('app', 'oc_group', 'ou_alice', 'task.create', original.sessionId)).toMatchObject({ allowed: true });
+  expect(await h.groupManager!.authorize('app', 'oc_group', 'ou_alice', 'run.change_agent')).toMatchObject({ allowed: false });
+  expect(await h.groupManager!.authorize('app', 'oc_group', 'ou_alice', 'run.change_cwd')).toMatchObject({ allowed: false });
+  h.coordinator.stop();
+  const event = { ...groupMessage('om_restored_fallback'), rootId: undefined, threadId: undefined };
+  await h.repos.config.set('lark.inbox.app.om_restored_fallback', JSON.stringify({
+    appId: 'app', boot: 'previous-daemon', state: 'received', receivedAt: new Date().toISOString(), event, turn: 2,
+    fallbackFromSessionId: original.sessionId, fallbackNote: '主 Agent 不可用，自动切换到兜底 Agent spare。',
+    request: { prompt: '恢复尚未执行的原请求', scopeId: 'chat:oc_group', resources: [], materialPrompt: '恢复尚未执行的原请求',
+      launchOptions: { agentId: 'spare', cwd: h.cwd, useAgentDefaults: true, automaticFallback: true } }
+  }));
+  const restarted = new LarkMessageCoordinator(h.runtime, h.service as any, h.log, Math.random, 'ou_bot',
+    undefined, h.repos.channelMappings, undefined, undefined, h.groupManager, { store: h.repos.config });
+  cleanups.push(async () => restarted.stop());
+  const authorize = vi.spyOn(h.groupManager!, 'authorize');
+  await restarted.initializeWorkflows(h.config);
+  await h.until(() => h.issued.some(input => input.cardKind === 'result' && input.taskId === event.messageId && input.state === 'completed'));
+  const result = h.issued.find(input => input.cardKind === 'result' && input.taskId === event.messageId)!;
+  expect((await h.runtime.getSession(result.sessionId))?.agentId).toBe('spare');
+  const task = (await h.runtime.getTasks(result.sessionId))[0];
+  expect((await h.repos.tasks.get!(task.id))?.executionContext?.actorId).toBe('ou_alice');
+  expect(authorize.mock.calls.some(call => ['run.change_agent', 'run.change_cwd'].includes(call[3]))).toBe(false);
+  expect(authorize.mock.calls.some(call => call[2] === 'ou_alice' && call[3] === 'task.create')).toBe(true);
 });

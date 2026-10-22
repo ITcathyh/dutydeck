@@ -1813,7 +1813,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
    * `/new --handoff` 的交接前缀：最近 3 轮已结束任务的标题与结果摘录（已交付的显式最终答复优先，否则与结果卡同一口径；已脱敏）、
    * 旧会话链接、工作目录 git 快照和备注。只读执行记录，不调用模型；读不到的部分缺省，不让 /new 失败。
    */
-  private async newSessionHandoff(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, tasks: TaskRecord[], note: string, nativeContextCopied = false) {
+  protected async newSessionHandoff(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, tasks: TaskRecord[], note: string, nativeContextCopied = false) {
     const recent = tasks.filter(task => terminalTaskStates.has(task.status))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt)).slice(-3);
     const window = sessionId && recent.length && (this.runtime.getRecentEvents || this.runtime.getEvents)

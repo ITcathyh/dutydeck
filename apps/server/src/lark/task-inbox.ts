@@ -22,6 +22,8 @@ export interface LarkInboxRecord {
   taskId?: string;
   turn?: number;
   workflowRequestId?: string;
+  fallbackNote?: string;
+  fallbackFromSessionId?: string;
   request?: { prompt: string; scopeId: string; resources: LarkMessageResource[]; materialPrompt?: string; launchOptions?: LarkLaunchOptions };
   materials?: { prompt: string; promptParts?: PromptPart[]; cursor?: LarkContextCursor; readMessageIds: string[]; contextBefore?: string };
   /** 这一轮是服务重启切断之后的重投：Agent prompt 前附说明，count 也是下一次能不能自动重投的依据。 */
@@ -144,7 +146,7 @@ export class LarkTaskInbox {
     const next = { ...record, boot: this.boot };
     return await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next)) ? next : undefined;
   }
-  async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'event' | 'workflowRequestId' | 'redispatch' | 'mergeFrom' | 'mergedInto'>>) {
+  async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'event' | 'workflowRequestId' | 'fallbackNote' | 'fallbackFromSessionId' | 'redispatch' | 'mergeFrom' | 'mergedInto'>>) {
     // 同一认领的准备和 /new 可并发更新；串行合并字段，同时保留跨进程 CAS。
     const operation = (this.updates.get(record) ?? Promise.resolve()).then(async () => {
       const next = { ...record, ...patch };

@@ -40,6 +40,7 @@ it('returns the exact configuration revision written by hook installation', asyn
   const f = await fixture();
   const response = await f.install(1);
   expect(response.statusCode).toBe(200);
+  expect(installLarkHook).toHaveBeenCalledExactlyOnceWith('codex', undefined, undefined);
   expect(response.json()).toMatchObject({ ...f.hook, configRevision: 2 });
   expect(await readLarkConfig(f.repos.config, 'cli_test')).toMatchObject({ revision: 2, riskControlMode: 'guidance' });
 });

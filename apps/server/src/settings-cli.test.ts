@@ -118,6 +118,14 @@ async function botRuntime() {
 }
 
 describe('settings CLI against the real bot routes', () => {
+  it('saves, reads, rejects the primary and clears a fallback Agent', async () => {
+    const { run } = await botRuntime();
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['fallbackAgentId=ccflash'] })).bot).toMatchObject({ fallbackAgentId: 'ccflash' });
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ fallbackAgentId: 'ccflash' });
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['fallbackAgentId=codex'] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['fallbackAgentId='] })).bot).not.toHaveProperty('fallbackAgentId');
+  });
+
   it.each(['{}', '[null]', 'null'])('rejects malformed routing weights before enforced hook checks: %s', async weights => {
     const { run } = await botRuntime();
     await expect(run('bot-set', { appId: 'cli_a', pairs: [`defaultAgentWeights=${weights}`, 'riskControlMode=enforced'] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });

@@ -1274,3 +1274,15 @@ describe('Lark Agent routing weights', () => {
     expect(save.mock.calls[1]![0]).toMatchObject({ defaultAgentWeights: [] });
   });
 });
+
+
+it('saves and clears the fallback Agent from the setup wizard', async () => {
+  const user = userEvent.setup();
+  const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', setupComplete: true }));
+  renderModal(collection({ fullTrustConfirmed: true, defaultAgentId: 'codex', fallbackAgentId: 'claude' }));
+  await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+  await user.click(await screen.findByRole('button', { name: '兜底：Claude' }));
+  await user.click(await screen.findByRole('option', { name: '不启用兜底' }));
+  await user.click(screen.getByRole('button', { name: '完成配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ fallbackAgentId: '' })));
+});

@@ -7,6 +7,7 @@ import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentConfig, DriverFactory, NormalizedDriverEvent } from '@dutydeck/shared';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
+import { explicitFinalContext, sendExplicitFinal } from './explicit-final.js';
 import { larkControlPhrase } from './coordinator-inbound.js';
 import { larkAgentAvailabilityLine } from './commands.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -27,7 +28,7 @@ const until = async (check: () => boolean | Promise<boolean>) => {
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-type Step = { kind: 'ok' } | { kind: 'unconfirmed'; tools?: NormalizedDriverEvent[] } | { kind: 'idle_timeout'; unconfirmed?: boolean } | { kind: 'login' };
+type Step = { kind: 'ok' } | { kind: 'unconfirmed'; tools?: NormalizedDriverEvent[] } | { kind: 'idle_timeout'; unconfirmed?: boolean } | { kind: 'login' } | { kind: 'provider'; code: string; activity?: NormalizedDriverEvent[] };
 
 function feishu() {
   let issued = 0;
@@ -72,11 +73,11 @@ const callbackValueOf = (card: any, elementId: string) => {
 const buttonTexts = (card: any) => [...JSON.stringify(buildLarkCard(card)).matchAll(/"tag":"plain_text","content":"([^"]+)"/g)].map(match => match[1]);
 const push: NormalizedDriverEvent = { type: 'tool_call', data: { id: 'call_push', name: 'Bash', status: 'running', input: { command: 'git push origin master' } } };
 
-async function topic(options: { agentStatusCheck?: () => Promise<'logged_in' | 'logged_out' | 'unknown'> } = {}) {
+async function topic(options: { fallback?: boolean; agentStatusCheck?: () => Promise<'logged_in' | 'logged_out' | 'unknown'> } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-reliability-'));
   const agent: AgentConfig = { id: 'reliability-fixture', name: 'Fixture', command: 'unused', args: [], protocol: 'acp', cwd, env: {},
     permissionMode: 'full-trust', timeout: 60, capabilities: { pause: false, resume: true }, builtin: false };
-  const config: StoredLarkConfig = { appId: 'app', appSecret: 'fixture', workspace: cwd, defaultAgentId: agent.id,
+  const config: StoredLarkConfig = { appId: 'app', appSecret: 'fixture', workspace: cwd, defaultAgentId: agent.id, ...(options.fallback ? { fallbackAgentId: 'spare' } : {}),
     fullTrustConfirmed: true, listening: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false,
     groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 60_000, hideTraceOnComplete: false,
     allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
@@ -101,6 +102,12 @@ async function topic(options: { agentStatusCheck?: () => Promise<'logged_in' | '
         emit({ type: 'completed', data: { stopReason: 'idle_timeout' } });
         return;
       }
+      if (step.kind === 'provider') {
+        for (const event of step.activity ?? []) emit(event);
+        emit({ type: 'error', data: { code: step.code, message: 'Provider unavailable' } });
+        emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+        return;
+      }
       if (step.kind === 'login') {
         emit({ type: 'error', data: { message: 'Agent 未登录，没有处理这条消息', code: 'AGENT_LOGIN_REQUIRED', retryable: false } });
         emit({ type: 'completed', data: { stopReason: 'end_turn' } });
@@ -117,7 +124,7 @@ async function topic(options: { agentStatusCheck?: () => Promise<'logged_in' | '
     if (first) await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
     const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe, driverFactory: factory,
       ...(options.agentStatusCheck ? { agentStatusCheck: options.agentStatusCheck } : {}) } as any);
-    await runtime.initialize([agent]);
+    await runtime.initialize([agent, ...(options.fallback ? [{ ...agent, id: 'spare', name: 'Spare', model: 'spare-model' }] : [])]);
     age?.(runtime);
     const service = feishu();
     const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any, Math.random, 'ou_bot',
@@ -554,4 +561,107 @@ describe('/status 的 Agent 状态行', () => {
     expect(larkAgentAvailabilityLine()).toBe('**Agent 状态**：可用');
     expect(larkAgentAvailabilityLine({ reason: 'Claude Code 未登录', at: '2026-10-07T02:05:00.000Z' })).toBe('**Agent 状态**：不可用（Claude Code 未登录，10-07 10:05）');
   });
+});
+
+
+describe('Bot Agent fallback with real Runtime and SQLite', () => {
+  it.each(['AGENT_LOGIN_REQUIRED', 'claude_api_rate_limit', 'claude_api_overloaded', 'usage_limit_exceeded'])('switches once for %s before activity, then keeps the fallback after restart', async code => {
+    const h = await topic({ fallback: true });
+    h.config.defaultModel = 'primary-model';
+    h.steps.push({ kind: 'provider', code, activity: [{ type: 'raw_terminal', data: { text: 'provider status screen' } } as any] });
+    await h.send('om_first', '完成原任务');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && (await h.resultCard())?.card.state === 'completed');
+    const first = await h.mapping();
+    expect((await h.runtime.getSession(first.sessionId))?.agentId).toBe('spare');
+    expect((await h.runtime.getSession(first.sessionId))?.model).toBe('spare-model');
+    expect(h.prompts).toHaveLength(2);
+    expect(h.prompts[0].sessionId).not.toBe(h.prompts[1].sessionId);
+    expect(JSON.stringify((await h.resultCard())?.card)).toContain('兜底 Agent spare');
+    const inbox = JSON.parse((await h.repos.config.get('lark.inbox.app.om_first'))!);
+    expect(inbox).toMatchObject({ sessionId: first.sessionId, taskId: first.saved.runtime_task_id, state: 'accepted' });
+    await h.restart();
+    await h.send('om_second', '继续处理下一项');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_second')) && (await h.tasks('om_second')).some(task => task.status === 'completed'));
+    expect(h.prompts.at(-1)?.sessionId).toBe(first.sessionId);
+  });
+
+  it.each([
+    { type: 'text', data: { text: '已经开始处理' } },
+    { type: 'thinking', data: { text: '正在分析' } },
+    push
+  ] as NormalizedDriverEvent[])('does not replay after $type activity even when the final window is truncated', async activity => {
+    const h = await topic({ fallback: true });
+    h.steps.push({ kind: 'provider', code: 'claude_api_rate_limit', activity: [activity, ...Array.from({ length: 520 }, () => ({ type: 'status', data: { state: 'heartbeat' } } as NormalizedDriverEvent))] });
+    await h.send('om_first', '执行任务');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && (await h.resultCard())?.card.state === 'failed');
+    expect(h.prompts).toHaveLength(1);
+    expect((await h.runtime.listSessions()).some(session => session.agentId === 'spare')).toBe(false);
+  });
+
+  it('reports fallback failure and never switches back', async () => {
+    const h = await topic({ fallback: true });
+    h.steps.push({ kind: 'provider', code: 'claude_api_rate_limit' }, { kind: 'provider', code: 'claude_api_rate_limit' });
+    await h.send('om_first', '执行任务');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && (await h.resultCard())?.card.state === 'failed');
+    expect(h.prompts).toHaveLength(2);
+    expect((await h.runtime.getSession((await h.mapping()).sessionId))?.agentId).toBe('spare');
+  });
+
+  it('preserves completed results as background when an existing primary becomes unavailable', async () => {
+    const h = await topic({ fallback: true });
+    await h.send('om_first', '第一项任务');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && (await h.resultCard())?.card.state === 'completed');
+    const first = await h.mapping();
+    const completedTask = (await h.tasks()).find(item => item.id === first.saved.runtime_task_id)!;
+    const finalContext = explicitFinalContext({ externalId: 'om_first', sessionId: first.sessionId }, first.saved, completedTask.currentAttemptId)!;
+    await sendExplicitFinal(h.repos.config, h.service as any, finalContext, '已通过 group send --final 交付的实际结论：修复了 502 错误。');
+    h.steps.push({ kind: 'login' });
+    await h.send('om_second', '完成后续任务');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_second')) && (await h.resultCard('om_second'))?.card.state === 'completed');
+    expect(h.prompts.at(-1)?.prompt).toContain('[Dutydeck 会话交接]');
+    expect(h.prompts.at(-1)?.prompt).toContain('第一项任务');
+    expect(h.prompts.at(-1)?.prompt).toContain('修复了 502 错误');
+    expect(h.prompts.at(-1)?.prompt).toContain('完成后续任务');
+  });
+});
+
+
+it('switches a cached unavailable primary before submitting another task', async () => {
+  const h = await topic({ fallback: true, agentStatusCheck: async () => 'unknown' });
+  h.config.fallbackAgentId = undefined;
+  await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+  h.steps.push({ kind: 'login' });
+  await h.send('om_first', '先记录登录失败');
+  await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && (await h.resultCard())?.card.state === 'failed');
+  h.config.fallbackAgentId = 'spare';
+  await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+  await h.send('om_second', '这条直接交给备用');
+  await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_second')) && (await h.resultCard('om_second'))?.card.state === 'completed');
+  expect(h.prompts).toHaveLength(2);
+  expect((await h.runtime.getSession(h.prompts[1].sessionId))?.agentId).toBe('spare');
+});
+
+it('returns to the primary after /new ends a fallback conversation', async () => {
+  const h = await topic({ fallback: true });
+  h.steps.push({ kind: 'provider', code: 'claude_api_rate_limit' });
+  await h.send('om_first', '完成原任务');
+  await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && (await h.resultCard())?.card.state === 'completed');
+  const fallbackId = (await h.mapping()).sessionId;
+  await h.send('om_reset', '/new');
+  await until(async () => (await h.runtime.getSession(fallbackId))?.state === 'stopped');
+  await h.send('om_second', '新对话');
+  await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_second')) && (await h.resultCard('om_second'))?.card.state === 'completed');
+  expect((await h.runtime.getSession((await h.mapping('om_second')).sessionId))?.agentId).toBe('reliability-fixture');
+});
+
+it('does not fallback for a user-selected Agent or an ordinary task failure', async () => {
+  const h = await topic({ fallback: true });
+  h.steps.push({ kind: 'provider', code: 'TASK_FAILED' });
+  await h.send('om_first', '普通失败');
+  await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && (await h.resultCard())?.card.state === 'failed');
+  h.steps.push({ kind: 'provider', code: 'claude_api_rate_limit' });
+  await h.send('om_explicit', '/new --agent reliability-fixture -- 明确选择主 Agent');
+  await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_explicit')) && (await h.resultCard('om_explicit'))?.card.state === 'failed');
+  expect(h.prompts).toHaveLength(2);
+  expect((await h.runtime.listSessions()).some(session => session.agentId === 'spare')).toBe(false);
 });

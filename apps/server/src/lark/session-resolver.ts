@@ -1,3 +1,6 @@
+import { redactTraceText } from './secret-redaction.js';
+import { larkAgentUnavailableReason } from './agent-fallback.js';
+import { larkReliability } from './task-recovery.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
@@ -323,7 +326,7 @@ export const larkSessionMatchesScope = (session: Session, config: StoredLarkConf
 
 /** A started routing candidate may not yet have its durable launch binding. */
 const routingRecoveryConfig = (config: StoredLarkConfig, session: Session): StoredLarkConfig =>
-  config.defaultAgentWeights?.some(row => row.agentId === session.agentId)
+  (session.agentId === config.fallbackAgentId || config.defaultAgentWeights?.some(row => row.agentId === session.agentId))
     ? { ...config, defaultAgentId: session.agentId, ...(session.agentId !== config.defaultAgentId ? { defaultModel: undefined, defaultReasoningEffort: undefined } : {}) }
     : config;
 
@@ -411,12 +414,12 @@ export async function resolveLarkSession(
   const launchConfigKey = launch?.extra ? (JSON.parse(launch.extra) as { baseConfigKey?: string }).baseConfigKey : undefined;
   const launchCompatible = (session: Session) => session.id !== launch?.sessionId || launchConfigKey === configKey;
   const saveLaunchBinding = async (session: Session) => {
-    if (!launchOptions && !launch && !config.defaultAgentWeights?.length) return;
+    if (!launchOptions && !launch && !config.defaultAgentWeights?.length && (!config.fallbackAgentId || session.agentId !== config.fallbackAgentId)) return;
     if (launch?.sessionId === session.id && launchConfigKey === configKey) return;
     try {
       if (!mappings) throw new Error('当前运行时不支持保存首轮会话配置。');
       await mappings.save({ id: `lark-launch:${sourceId}`, channel: `lark-launch:${config.appId}`, externalId: sourceId,
-        sessionId: session.id, extra: JSON.stringify({ baseConfigKey: configKey }), createdAt: new Date().toISOString() });
+        sessionId: session.id, extra: JSON.stringify({ baseConfigKey: configKey, explicitAgent: Boolean(explicitAgentId && !launchOptions?.automaticFallback) }), createdAt: new Date().toISOString() });
     } catch (error) {
       await runtime.stop?.(session.id);
       throw error;
@@ -491,39 +494,63 @@ export async function resolveLarkSession(
   }
   // Revalidate restored first-turn options before choosing an Agent or starting a process.
   if (beforeStart) launchOptions = await beforeStart();
-  const agentId = launchOptions?.agentId ?? (launchOptions?.model || launchOptions?.reasoningEffort || launchOptions?.nativeForkSessionId
+  let agentId = launchOptions?.agentId ?? (launchOptions?.model || launchOptions?.reasoningEffort || launchOptions?.nativeForkSessionId
     ? config.defaultAgentId : selectLarkAgent(config));
-  const agents = await runtime.listAgents?.();
-  const configuredAgent = agents?.find(item => item.id === agentId);
-  const executionConfig = { ...config, defaultAgentId: agentId };
-  if (agents && !configuredAgent) throw new LarkServiceError('LARK_AGENT_NOT_FOUND', `Agent「${agentId}」不存在，可能随提供它的插件停用或卸载了。请在 Dutydeck 飞书设置的“Agent 与风险控制”中改选其他 Agent。`, 409);
-  if (larkPermissionMode(config) !== 'full-trust' && configuredAgent?.protocol === 'pty-cli'
-    && !supportsRemoteApproval({ id: configuredAgent.id, adapterId: configuredAgent.adapterId, protocol: 'pty-cli' })) throw larkApprovalUnsupported(executionConfig);
-  if (config.riskControlMode === 'enforced') {
-    const hook = await larkHookStatus(agentId, launchOptions?.cwd ?? config.workspace, configuredAgent);
-    if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', hook.reason ?? `Agent ${agentId} 尚未配置可写 Hook。`, 409);
-  }
-  const inheritModel = agentId === config.defaultAgentId && !launchOptions?.useAgentDefaults;
-  const session = await runtime.start({
-    ...(config.workspace ? { cwd: config.workspace } : {}),
-    ...(inheritModel && config.defaultModel ? { model: config.defaultModel } : {}),
-    ...(inheritModel && config.defaultReasoningEffort ? { reasoningEffort: config.defaultReasoningEffort } : {}),
-    ...launchOptions,
-    agentId: agentId!,
-    permissionMode: larkPermissionMode(config),
-    source: 'lark',
-    sourceId
-  });
-  if (larkPermissionMode(config) !== 'full-trust' && !await larkApprovalSupported(runtime, session)) {
-    await runtime.stop?.(session.id);
-    throw larkApprovalUnsupported(config);
+  let fallbackNote: string | undefined;
+  const canFallback = !explicitAgentId && !launchOptions?.useAgentDefaults && config.fallbackAgentId && config.fallbackAgentId !== agentId;
+  const start = async (): Promise<Session> => {
+    const reliability = larkReliability(runtime);
+    const known = reliability.getAgentAvailability?.(agentId!)
+      ? await reliability.checkAgentAvailability?.(agentId!).catch(() => reliability.getAgentAvailability?.(agentId!)) : undefined;
+    if (known) throw new LarkServiceError('AGENT_UNAVAILABLE', known.reason, 503);
+    const agents = await runtime.listAgents?.();
+    const configuredAgent = agents?.find(item => item.id === agentId);
+    const executionConfig = { ...config, defaultAgentId: agentId };
+    if (agents && !configuredAgent) throw new LarkServiceError('LARK_AGENT_NOT_FOUND', `Agent「${agentId}」不存在，可能随提供它的插件停用或卸载了。请在 Dutydeck 飞书设置的“Agent 与风险控制”中改选其他 Agent。`, 409);
+    if (larkPermissionMode(config) !== 'full-trust' && configuredAgent?.protocol === 'pty-cli'
+      && !supportsRemoteApproval({ id: configuredAgent.id, adapterId: configuredAgent.adapterId, protocol: 'pty-cli' })) throw larkApprovalUnsupported(executionConfig);
+    if (config.riskControlMode === 'enforced') {
+      const hook = await larkHookStatus(agentId, launchOptions?.cwd ?? config.workspace, configuredAgent);
+      if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', hook.reason ?? `Agent ${agentId} 尚未配置可写 Hook。`, 409);
+    }
+    const inheritModel = agentId === config.defaultAgentId && !launchOptions?.useAgentDefaults;
+    const session = await runtime.start({
+      ...(config.workspace ? { cwd: config.workspace } : {}),
+      ...(inheritModel && config.defaultModel ? { model: config.defaultModel } : {}),
+      ...(inheritModel && config.defaultReasoningEffort ? { reasoningEffort: config.defaultReasoningEffort } : {}),
+      ...launchOptions,
+      agentId: agentId!,
+      permissionMode: larkPermissionMode(config),
+      source: 'lark',
+      sourceId
+    });
+    if (larkPermissionMode(config) !== 'full-trust' && !await larkApprovalSupported(runtime, session)) {
+      await runtime.stop?.(session.id);
+      throw larkApprovalUnsupported(config);
+    }
+    return session;
+  };
+  let session: Session;
+  try { session = await start(); }
+  catch (error) {
+    const reason = larkAgentUnavailableReason(error);
+    if (!canFallback || !reason) throw error;
+    const primary = agentId;
+    agentId = config.fallbackAgentId;
+    try { session = await start(); }
+    catch (fallbackError) {
+      const detail = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+      throw new LarkServiceError('LARK_AGENT_FALLBACK_FAILED', `主 Agent ${primary} 不可用（${redactTraceText(reason).slice(0, 200)}）；兜底 Agent ${agentId} 启动失败：${redactTraceText(detail).slice(0, 200)}`, 503);
+    }
+    fallbackNote = `Agent ${primary} 不可用，已切换到兜底 Agent ${agentId}（${redactTraceText(reason).slice(0, 200)}）。使用新会话，原生对话历史未迁移。`;
   }
   await saveLaunchBinding(session);
   group.sessionId = session.id;
   group.sessionConfigKey = configKey;
   if (retiredLegacy) group.legacyUpgradeSessionId = session.id;
   // 带首轮参数说明是 /new 主动要求的新会话；升级退休另有注记。
-  if (replacedReason && !launchOptions && !retiredLegacy) newSessionNotes.set(session, `已开新会话（${replacedReason}）。`);
+  if (fallbackNote) newSessionNotes.set(session, fallbackNote);
+  else if (replacedReason && !launchOptions && !retiredLegacy) newSessionNotes.set(session, `已开新会话（${replacedReason}）。`);
   return session;
 }
 

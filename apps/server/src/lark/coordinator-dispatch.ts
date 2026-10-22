@@ -1,3 +1,4 @@
+import { larkAgentUnavailableReason, larkFallbackHasActivity } from './agent-fallback.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import type { PromptPart } from '@dutydeck/shared';
 import { promptDigest } from '../prompt-context.js';
@@ -49,7 +50,8 @@ import {
   materializeLarkResources,
   parsePrompt,
   resolveLarkSession,
-  takeLarkNewSessionNote
+  takeLarkNewSessionNote,
+  larkSourceId
 } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTaskState, LarkTask, PersistedLarkCardTask } from './coordinator.js';
@@ -800,6 +802,70 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
   }
 
+  protected async validateFallbackRecovery(task: LarkTask, config: StoredLarkConfig, options: LarkLaunchOptions): Promise<LarkLaunchOptions> {
+    const saved = task.inbox?.request?.launchOptions;
+    const origin = task.inbox?.fallbackFromSessionId ? await this.runtime.getSession(task.inbox.fallbackFromSessionId) : undefined;
+    // Only the server's persisted switch from this exact scope may restore administrator routing.
+    // runTurn has already rechecked task.create and group access; resolver rechecks approval and hooks.
+    if (!task.inbox?.fallbackNote || !saved?.automaticFallback || !options.automaticFallback
+      || options.agentId !== config.fallbackAgentId || JSON.stringify(options) !== JSON.stringify(saved)
+      || !origin || origin.source !== 'lark' || origin.sourceId !== larkSourceId(config, task.event.chatId, task.event.chatType, task.scopeId)
+      || options.cwd !== origin.cwd || options.model || options.reasoningEffort || options.nativeForkSessionId || options.workspaceMode
+      || options.useAgentDefaults !== true) throw new LarkServiceError('LARK_FALLBACK_RECOVERY_INVALID', '兜底配置或原会话已变化，无法安全恢复自动切换。请重新发送请求。', 409);
+    const agent = (await this.runtime.listAgents?.())?.find(item => item.id === options.agentId);
+    if (!agent) throw new LarkServiceError('LARK_AGENT_NOT_FOUND', '兜底 Agent 已不可用，请修改机器人配置后重新发送。', 409);
+    return validateLarkLaunchOptions(options, { ...agent, cwd: origin.cwd, permissionMode: larkPermissionMode(config) }, config.workspaceAliases);
+  }
+
+  protected abstract newSessionHandoff(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, tasks: TaskRecord[], note: string, nativeContextCopied?: boolean): Promise<string>;
+
+  private async recoverFallbackSession(task: LarkTask, session: Session, reason: string, restored: boolean): Promise<boolean> {
+    const { config, group, event } = task;
+    const fallback = config.fallbackAgentId;
+    const turn = task.turn;
+    if (!fallback || fallback === session.agentId || task.fallbackAttempted || task.fallbackHasActivity || restored
+      || task.interruptRequested || this.stopped || !this.cardMappings || task.launchOptions
+      || task.inbox?.event.messageId.startsWith('confirmation_') || task.epoch !== (group.epoch ?? 0)
+      || group.sessionId !== session.id) return false;
+    // Do not abandon, cancel, or transfer anyone else's pending work in this scope.
+    const binding = await this.cardMappings.get(`lark-launch:${config.appId}`, session.sourceId!);
+    if (binding?.sessionId === session.id && binding.extra && JSON.parse(binding.extra).explicitAgent !== false) return false;
+    const tasks = await this.runtime.getTasks?.(session.id);
+    if (!tasks || tasks.some(item => item.id !== task.runtimeTaskId && ['queued', 'running'].includes(item.status))) return false;
+    if ([...this.tasks.values()].some(other => other !== task && other.group === group && ['queued', 'running'].includes(other.state))) return false;
+    if (await this.currentTurnInterruptDenial(config, event, session.id)) return false;
+    if (this.stopped || task.interruptRequested || task.epoch !== (group.epoch ?? 0) || group.sessionId !== session.id) return false;
+    task.fallbackAttempted = true;
+    const handoff = await this.newSessionHandoff(config, event, session.id, tasks.filter(item => item.status === 'completed'),
+      '主 Agent 不可用，自动切换兜底 Agent；只作为上下文，继续处理当前请求。');
+    if (this.stopped || task.interruptRequested || task.epoch !== (group.epoch ?? 0) || group.sessionId !== session.id) return false;
+    const pending = await this.runtime.getTasks?.(session.id);
+    if (!pending || pending.some(item => item.id !== task.runtimeTaskId && ['queued', 'running'].includes(item.status))
+      || [...this.tasks.values()].some(other => other !== task && other.group === group && ['queued', 'running'].includes(other.state))
+      || task.turn !== turn || this.stopped || task.interruptRequested || task.epoch !== (group.epoch ?? 0) || group.sessionId !== session.id) return false;
+    // From the final scope/queue check through retirement, keep this transition synchronous.
+    const previous = { ...task };
+    try {
+      task.fallbackNote = `Agent ${session.agentId} 不可用，已切换到兜底 Agent ${fallback}（${redactTraceText(reason).slice(0, 200)}）。使用新会话，仅带最近完成结果，原生对话历史未迁移。`;
+      task.retryMaterialPrompt = `${handoff}\n\n${task.retryMaterialPrompt ?? task.prompt}`;
+      task.launchOptions = { agentId: fallback, cwd: session.cwd, useAgentDefaults: true, automaticFallback: true };
+      (group.retiredSessionIds ??= new Set()).add(session.id);
+      group.sessionId = undefined;
+      group.sessionConfigKey = undefined;
+      if (task.inbox) await this.inbox!.update(task.inbox, { state: 'received', sessionId: undefined, taskId: undefined, fallbackNote: task.fallbackNote, fallbackFromSessionId: session.id,
+        request: { ...task.inbox.request!, materialPrompt: task.retryMaterialPrompt, launchOptions: task.launchOptions } });
+      await this.runTurn(task, true);
+      return true;
+    } catch (error) {
+      Object.assign(task, previous);
+      task.fallbackNote = `兜底 Agent ${fallback} 启动失败：${redactTraceText(error instanceof Error ? error.message : String(error)).slice(0, 200)}`;
+      task.events.push({ id: `fallback-error-${task.id}`, sessionId: session.id, sequence: Number.MAX_SAFE_INTEGER, timestamp: new Date().toISOString(), type: 'error', data: { message: task.fallbackNote } });
+      await this.failPendingInbox(task, task.fallbackNote);
+      this.log.warn({ error, taskId: task.id }, '切换兜底 Agent 失败');
+      return false;
+    }
+  }
+
   protected async runTurn(task: LarkTask, launcherRecovery = false) {
     if (!await this.confirmationInputAllowed(task.inbox)) return;
     if (this.stopped) return;
@@ -808,6 +874,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const restoring = task.restoring;
     task.restoring = false;
     task.submissionStarted = false;
+    task.fallbackNote ??= task.inbox?.fallbackNote;
+    task.fallbackAttempted ||= Boolean(task.fallbackNote);
+    task.fallbackHasActivity = false;
     // 每次 runTurn 递增轮次编号，用于让上一轮的终态回调（finish）识别自己已过期，
     // 避免它在 await getEvents 期间被重试打断后，把 task.state 覆盖回终态。
     task.turn = (task.turn ?? 0) + 1;
@@ -818,7 +887,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     // 先递增 turn，再清理关联，防止旧轮在途请求覆盖新轮消息归属。
     if (currentTurn > 1 && !restoring) {
       if (!launcherRecovery) task.launcherRecoveryNote = undefined;
-      if (task.inbox) await this.inbox!.update(task.inbox, { state: launcherRecovery ? 'failed' : 'received', turn: currentTurn, cardId: launcherRecovery ? task.cardMessageId : undefined, taskId: undefined, materials: undefined, ...(launcherRecovery ? { sessionId: undefined } : {}) });
+      if (task.inbox) await this.inbox!.update(task.inbox, { state: launcherRecovery && !task.fallbackAttempted ? 'failed' : 'received', turn: currentTurn, cardId: launcherRecovery ? task.cardMessageId : undefined, taskId: undefined, materials: undefined, ...(launcherRecovery ? { sessionId: undefined } : {}) });
       if (!launcherRecovery) task.cardMessageId = undefined;
       task.finalMessageId = undefined;
       task.finalAttachmentMessageId = undefined;
@@ -950,7 +1019,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       // 送进一个用户已经宣布结束的上下文，还会顺带创建一条新会话污染新上下文。
       if (await this.supersededTurn(task) || !await this.confirmationInputAllowed(task.inbox)) return;
       session = resumeTask ? (await this.runtime.getSession(resumeTask.sessionId))! : task.inbox?.sessionId ? (await this.runtime.getSession(task.inbox.sessionId))! : await this.sessionFor(group, config, event.chatId, event.chatType, task.scopeId, task.launchOptions,
-        task.launchOptions && restoring ? async () => (task.launchOptions = await this.validateNewSession(config, event, task.launchOptions!)) : undefined);
+        task.launchOptions && restoring ? async () => (task.launchOptions = task.launchOptions!.automaticFallback
+          ? await this.validateFallbackRecovery(task, config, task.launchOptions!) : await this.validateNewSession(config, event, task.launchOptions!)) : undefined);
       if (!session) throw new LarkServiceError('LARK_SESSION_MISSING', '原任务会话已不存在，请重新发送目标。', 409);
       cardContext.agentName = await this.resolveAgentName(config, session.agentId);
       // 建会话本身也可能卡住（runtime.start 未返回）。回来后再确认一次，
@@ -993,11 +1063,12 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const unavailable = !resumeTask && !task.restoring && reliability.getAgentAvailability?.(session.agentId)
       ? await reliability.checkAgentAvailability?.(session.agentId).catch(() => reliability.getAgentAvailability?.(session!.agentId)) : undefined;
     if (unavailable) {
+      if (await this.recoverFallbackSession(task, session, unavailable.reason, restoring || Boolean(resumeTask))) return;
       if (launcherRecovery) throw new Error(unavailable.reason);
       task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
       await this.failPendingInbox(task, unavailable.reason);
       await this.service.replyText({ beforeSend: beforeTurnSend, messageId: larkMessageAnchor(event), ...(event.threadId?.trim() ? { replyInThread: true } : {}),
-        text: larkAgentUnavailableText(config.name?.trim() || 'Dutydeck', unavailable), idempotencyKey: `unavailable_${event.messageId}_${currentTurn}`.slice(0, 50) });
+        text: larkAgentUnavailableText(config.name?.trim() || 'Dutydeck', task.fallbackNote ? { ...unavailable, reason: `${unavailable.reason}。${task.fallbackNote}` } : unavailable), idempotencyKey: `unavailable_${event.messageId}_${currentTurn}`.slice(0, 50) });
       await clearAcknowledgement();
       return;
     }
@@ -1011,7 +1082,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       }
     }
     task.sessionId = session.id;
-    task.newSessionNote = takeLarkNewSessionNote(session);
+    task.newSessionNote = task.fallbackNote ?? takeLarkNewSessionNote(session);
+    if (session.agentId === config.fallbackAgentId && task.newSessionNote) task.fallbackNote ??= task.newSessionNote;
+    if (task.inbox && task.fallbackNote && task.inbox.fallbackNote !== task.fallbackNote) await this.inbox!.update(task.inbox, { fallbackNote: task.fallbackNote });
     const legacyUpgradeNote = task.group.legacyUpgradeSessionId === session.id
       ? '这是升级后创建的新上下文；旧会话历史仍可查看，但原上下文未自动恢复。'
       : undefined;
@@ -1271,6 +1344,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       terminalDelivery = withExplicitFinalLock(this.workflowOptions.store, task.runtimeTaskId ?? task.id, async () => {
         // 启动器版本变化优先自动换一次会话；无法换新时不允许在旧会话重试。
         // 必须在 update(state) 之前，过程卡终态帧与结果卡才会一起隐藏「重试」。
+        if (state === 'failed') {
+          const reason = task.events.filter(item => item.type === 'error').map(item => larkAgentUnavailableReason(item.data)).find(Boolean);
+          if (reason && await this.recoverFallbackSession(task, session, reason, restoring || Boolean(resumeTask))) return;
+        }
         if (state === 'failed' && isLarkLauncherVersionChanged(task.events)) {
           task.retryable = false;
           if (await this.recoverLauncherSession(task, restoring || Boolean(resumeTask))) return;
@@ -1294,7 +1371,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 只对成功终态生效——失败/中断/取消仍必须发结果卡，一个表情等于把失败藏起来。
         // 任务通道的合成事件没有可贴的原消息，只能照常发结果卡，否则用户什么也收不到。
         // 计划轮必须发结果卡：计划和批准按钮都在卡上。
-        if (!explicit && completionReactionOnly && state === 'completed' && planTask === undefined && !larkTaskAgentGuid(event.messageId)) {
+        if (!explicit && !task.fallbackNote && completionReactionOnly && state === 'completed' && planTask === undefined && !larkTaskAgentGuid(event.messageId)) {
           const reacted = await deliverLarkStatusReaction(this.service, { appId: config.appId, messageId: larkMessageAnchor(event), completed: true }, this.log, this.workflowOptions.store);
           if (this.stopped || task.turn !== currentTurn) return;
           // 贴失败就不记「已交付」：这枚表情是用户唯一能看到的完成信号，交给对账重试。
@@ -1324,6 +1401,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         const turnDiff = task.sessionId && task.runtimeTaskId && this.workflowOptions.store
           ? larkTurnDiffElement(await readTurnDiffRecord(this.workflowOptions.store, task.sessionId, task.runtimeTaskId).catch(() => undefined), config.webBaseUrl) : undefined;
         const elements = [
+          ...(task.fallbackNote ? [{ tag: 'markdown', element_id: 'agent_fallback_note', content: task.fallbackNote, text_size: 'notation' }] : []),
           ...(continueCause?.settled ? [{ tag: 'markdown', element_id: 'recovery_note', content: larkQuietSettledNote(continueCause) }] : []),
           ...(explicit ? [] : task.steered ? [{ tag: 'markdown', element_id: 'steer_note', content: task.steerNote ?? steeringOutcomeText(task.steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events, { state, agentName: cardContext.agentName })),
           ...(context && this.workflows ? await this.workflows.result(context, '') : []),
@@ -1611,6 +1689,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     if (this.stopped || task.turn !== currentTurn || await closeSupersededPreparedTurn()) return;
 
     const appendEvent = (agentEvent: AgentEvent) => {
+      if (larkFallbackHasActivity(agentEvent)) task.fallbackHasActivity = true;
       const previous = task.events.at(-1);
       const data = agentEvent.data as any;
       const previousData = previous?.data as any;
