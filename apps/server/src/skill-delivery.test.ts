@@ -78,6 +78,40 @@ describe('skill-delivery', () => {
       expect(result2.skillDeliveries).toEqual([]);
     });
 
+    it.each([null, 'skill', {}])('rejects non-array skill requests %j before adding required skills', async requests => {
+      await expect(prepareSkillPrompt(workspaceDir, 'Prompt', requests as unknown as string[], {
+        homeDirectory: userHomeDir, requiredSkills: [{ ref: 'sample/answer' }]
+      })).rejects.toMatchObject({ code: 'INVALID_SKILL_REQUESTS', message: 'skillRequests must be an array' });
+    });
+
+    it.each(['omitted', 'empty', 'overlapping'])('delivers required skills with %s explicit requests', async mode => {
+      const skillDir = join(workspaceDir, '.agents', 'skills', 'required');
+      await mkdir(skillDir, { recursive: true });
+      const skillPath = join(skillDir, 'SKILL.md');
+      await writeFile(skillPath, '---\nname: required\n---\nRequired procedure');
+      let requests: string[] | undefined;
+      if (mode === 'empty') requests = [];
+      if (mode === 'overlapping') requests = Array(17).fill(skillPath);
+      const result = await prepareSkillPrompt(workspaceDir, 'Prompt', requests, {
+        homeDirectory: userHomeDir, requiredSkills: [{ ref: skillPath, binding: { id: 'binding', revision: 2 } }]
+      });
+      expect(result.skillDeliveries).toMatchObject([{ path: skillPath, required: true, binding: { id: 'binding', revision: 2 } }]);
+      expect(result.skillDeliveries).toHaveLength(1);
+      expect(result.agentPrompt.match(/# Skill: required/g)).toHaveLength(1);
+    });
+
+    it('counts legacy requests separately and reports matching errors before the combined limit', async () => {
+      const skillDir = join(workspaceDir, '.agents', 'skills', 'repeat');
+      await mkdir(skillDir, { recursive: true });
+      const skillPath = join(skillDir, 'SKILL.md');
+      await writeFile(skillPath, '---\nname: repeat\n---\nRepeat procedure');
+      const prompt = Array(16).fill('/skills repeat').join('\n');
+      await expect(prepareSkillPrompt(workspaceDir, prompt, [skillPath], { homeDirectory: userHomeDir }))
+        .rejects.toMatchObject({ code: 'INVALID_SKILL_REQUESTS', message: 'Maximum 16 skill requests allowed' });
+      await expect(prepareSkillPrompt(workspaceDir, `${prompt}\n/skills missing`, [skillPath], { homeDirectory: userHomeDir }))
+        .rejects.toMatchObject({ code: 'SKILL_NOT_FOUND', message: 'Unknown skill "missing" requested via legacy directive' });
+    });
+
     it('delivers skill with actual body and exact SHA256 digest in prompt mode', async () => {
       const skillDir = join(workspaceDir, '.agents', 'skills', 'linter');
       await mkdir(skillDir, { recursive: true });

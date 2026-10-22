@@ -389,11 +389,15 @@ export class PluginStore {
     return existsSync(path) ? JSON.parse(await readFile(path, 'utf8')) as Record<string, string> : {};
   }
   private async writeTokens(tokens: Record<string, string>) {
+    await this.writePrivateJson(TOKENS_FILE, tokens);
+  }
+
+  private async writePrivateJson(filename: string, value: unknown): Promise<void> {
     await mkdir(this.pluginsDir, { recursive: true });
-    const path = join(this.pluginsDir, TOKENS_FILE);
+    const path = join(this.pluginsDir, filename);
     const temporary = `${path}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
     try {
-      await writeFile(temporary, `${JSON.stringify(tokens, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+      await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
       await rename(temporary, path);
     } finally { await rm(temporary, { force: true }); }
   }
@@ -445,13 +449,7 @@ export class PluginStore {
     return existsSync(path) ? JSON.parse(await readFile(path, 'utf8')) as Record<string, Record<string, string>> : {};
   }
   private async writeConfigFile(config: Record<string, Record<string, string>>) {
-    await mkdir(this.pluginsDir, { recursive: true });
-    const path = join(this.pluginsDir, CONFIG_FILE);
-    const temporary = `${path}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
-    try {
-      await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-      await rename(temporary, path);
-    } finally { await rm(temporary, { force: true }); }
+    await this.writePrivateJson(CONFIG_FILE, config);
   }
 
   secretProvider(create: boolean): LocalFileSecretProvider | undefined {

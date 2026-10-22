@@ -66,13 +66,8 @@ export function SessionList({ open, collapsed = false, onToggleCollapsed, onClos
   const activeOutsideView = sessions.some(session => session.id === activeSessionId && !sessionMatchesView(session, view, summaries[session.id]));
   const matchesDesktop = useMediaQuery('(min-width: 768px)');
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
-  const toggleWorkspace = (id: string) => setOverrides(current => ({ ...current, [id]: !isExpandedById(id) }));
   const containsActive = (workspace: WorkspaceGroup) => workspace.sessions.some(session => session.id === activeSessionId);
   const autoExpanded = (workspace: WorkspaceGroup) => workspaces.length === 1 || workspace.sessions.length === 1 || containsActive(workspace);
-  const isExpandedById = (id: string) => {
-    const workspace = workspaces.find(item => item.id === id);
-    return overrides[id] ?? (workspace ? autoExpanded(workspace) : false);
-  };
   const isExpanded = (workspace: WorkspaceGroup) => overrides[workspace.id] ?? autoExpanded(workspace);
   const desktop = typeof window === 'undefined' || typeof window.matchMedia !== 'function' ? true : matchesDesktop;
   const compact = collapsed && desktop;
@@ -129,7 +124,7 @@ export function SessionList({ open, collapsed = false, onToggleCollapsed, onClos
         return <section key={workspace.id} className="mb-1.5">
           <button
             type="button"
-            onClick={() => toggleWorkspace(workspace.id)}
+            onClick={() => setOverrides(current => ({ ...current, [workspace.id]: !expanded }))}
             aria-expanded={expanded}
             title={workspace.cwd}
             className="flex min-h-10 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left transition-colors duration-fast ease-out hover:bg-sidebar-hover"

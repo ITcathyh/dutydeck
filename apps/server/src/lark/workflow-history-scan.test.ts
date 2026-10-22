@@ -101,3 +101,33 @@ it('does not restore the plan timer when stopped during the authoritative schedu
   await (h.workflow as any).schedulePlanCheck('app');
   expect(vi.getTimerCount()).toBe(0);
 });
+
+it('ends a durable confirmation by its persisted key without scanning history', async () => {
+  const h = await harness(100);
+  const record: LarkInteraction = { ...h.record, id: 'confirmation', kind: 'ask', state: 'pending', cardId: undefined,
+    durable: { choices: [{ label: '确认' }], snapshot: { prompt: '原请求', cwd: '/tmp', scopeId: 'scope_one' } } };
+  await h.save(record);
+  const list = vi.spyOn(h.repos.config, 'list');
+  const get = vi.spyOn(h.repos.config, 'get');
+  const compareAndSet = vi.spyOn(h.repos.config, 'compareAndSet');
+  await h.workflow.endConfirmation('app', record.id);
+  expect(list).not.toHaveBeenCalled();
+  expect(get).toHaveBeenCalledWith('lark.interaction.app.confirmation');
+  expect(compareAndSet).toHaveBeenCalledWith('lark.interaction.app.confirmation', JSON.stringify(record), expect.any(String));
+  expect(await h.workflow.get('app', record.id)).toMatchObject({ state: 'expired' });
+  expect(h.update).not.toHaveBeenCalled();
+});
+
+it.each(['missing', 'non-durable', 'expired'])('leaves %s confirmations untouched without scanning history', async kind => {
+  const h = await harness(0);
+  const record: LarkInteraction = { ...h.record, id: 'confirmation', state: kind === 'expired' ? 'expired' : 'pending',
+    ...(kind === 'expired' ? { durable: { choices: [{ label: '确认' }], snapshot: { prompt: '原请求', cwd: '/tmp', scopeId: 'scope_one' } } } : {}) };
+  if (kind !== 'missing') await h.save(record);
+  const list = vi.spyOn(h.repos.config, 'list');
+  const compareAndSet = vi.spyOn(h.repos.config, 'compareAndSet');
+  await h.workflow.endConfirmation('app', record.id);
+  expect(list).not.toHaveBeenCalled();
+  expect(compareAndSet).not.toHaveBeenCalled();
+  expect(await h.workflow.get('app', record.id)).toEqual(kind === 'missing' ? undefined : record);
+  expect(h.update).not.toHaveBeenCalled();
+});

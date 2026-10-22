@@ -20,6 +20,14 @@ describe('plugin manifest schema', () => {
     expect(parsed.error!.issues.map(issue => issue.path.join('.'))).toContain(field);
   });
 
+  it('rejects a correctly typed default outside the declared enum', () => {
+    const parsed = pluginManifestSchema.safeParse({ name: 'hello', bindingConfig: {
+      mode: { type: 'string', description: 'Mode', enum: ['brief', 'full'], default: 'other' }
+    } });
+    expect(parsed.success).toBe(false);
+    expect(parsed.error!.issues).toMatchObject([{ path: ['bindingConfig', 'mode', 'default'], message: 'Default does not match the field schema' }]);
+  });
+
   it('validates hooks and triggers', () => {
     expect(pluginHooksFileSchema.parse({ 'task.received': [{ command: 'true', timeout: 1000 }] })['task.received']![0]!.onFailure).toBe('ignore');
     expect(pluginHooksFileSchema.safeParse({ 'task.unknown': [] }).success).toBe(false);

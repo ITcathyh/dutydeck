@@ -42,7 +42,10 @@ export const pluginManifestSchema = z.object({
   userConfig: z.record(z.string().regex(/^[a-z][a-z0-9_]*$/, '配置键必须是 snake_case'), pluginUserConfigEntrySchema).optional()
 }).strict().superRefine((manifest, context) => {
   for (const [key, field] of Object.entries(manifest.bindingConfig ?? {})) {
-    if (field.enum?.some(value => !pluginConfigValueSchema({ ...field, enum: undefined }).safeParse(value).success)) context.addIssue({ code: 'custom', path: ['bindingConfig', key, 'enum'], message: 'Enum values do not match the field type' });
+    if (field.enum) {
+      const schema = pluginConfigValueSchema({ ...field, enum: undefined });
+      if (field.enum.some(value => !schema.safeParse(value).success)) context.addIssue({ code: 'custom', path: ['bindingConfig', key, 'enum'], message: 'Enum values do not match the field type' });
+    }
     if (field.default !== undefined && !pluginConfigValueSchema(field).safeParse(field.default).success) context.addIssue({ code: 'custom', path: ['bindingConfig', key, 'default'], message: 'Default does not match the field schema' });
   }
 });

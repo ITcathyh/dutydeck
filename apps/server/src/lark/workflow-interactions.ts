@@ -901,8 +901,8 @@ export class LarkWorkflowInteractions {
   }
   /** 计划卡可操作：计划轮已完成，且会话里没有更新的任务（之后又发了消息，这份计划就不是最新的上文了）。 */
   async endConfirmation(appId: string, requestId: string) {
-    const record = (await this.list(appId)).find(item => item.id === requestId && item.durable);
-    if (!record || record.state === 'expired') return;
+    const record = await this.get(appId, requestId);
+    if (!record?.durable || record.state === 'expired') return;
     const ended = await this.move(record, 'expired');
     await this.renderClosed(ended, '已结束，未执行');
   }

@@ -88,25 +88,19 @@ export async function prepareSkillPrompt(
   options?: PrepareSkillPromptOptions
 ): Promise<PrepareSkillPromptResult> {
   if (skillRequests !== undefined && !Array.isArray(skillRequests)) throw new RuntimeError('INVALID_SKILL_REQUESTS', 'skillRequests must be an array', 400);
-  const requested = [...new Set([...(Array.isArray(skillRequests) ? skillRequests : []), ...(options?.requiredSkills ?? []).map(skill => skill.ref)])];
-  if (requested.length) skillRequests = requested;
+  const requested = [...new Set([...(skillRequests ?? []), ...(options?.requiredSkills ?? []).map(skill => skill.ref)])];
   const rawPrompt = typeof prompt === 'string' ? prompt : '';
   const { legacySkillNames, userPrompt } = parseLeadingDirectives(rawPrompt);
 
-  const hasExplicitRequests = Array.isArray(skillRequests) && skillRequests.length > 0;
+  const hasExplicitRequests = requested.length > 0;
   const hasLegacyRequests = legacySkillNames.length > 0;
 
-  if (skillRequests !== undefined) {
-    if (!Array.isArray(skillRequests)) {
-      throw new RuntimeError('INVALID_SKILL_REQUESTS', 'skillRequests must be an array', 400);
-    }
-    if (skillRequests.length > MAX_SKILL_REQUESTS) {
-      throw new RuntimeError('INVALID_SKILL_REQUESTS', `Maximum ${MAX_SKILL_REQUESTS} skills allowed`, 400);
-    }
-    for (const req of skillRequests) {
-      if (typeof req !== 'string' || !req.trim()) {
-        throw new RuntimeError('INVALID_SKILL_REQUESTS', 'Invalid skill request path', 400);
-      }
+  if (requested.length > MAX_SKILL_REQUESTS) {
+    throw new RuntimeError('INVALID_SKILL_REQUESTS', `Maximum ${MAX_SKILL_REQUESTS} skills allowed`, 400);
+  }
+  for (const req of requested) {
+    if (typeof req !== 'string' || !req.trim()) {
+      throw new RuntimeError('INVALID_SKILL_REQUESTS', 'Invalid skill request path', 400);
     }
   }
 
@@ -132,7 +126,7 @@ export async function prepareSkillPrompt(
 
   const matchedFromRequests: SkillReference[] = [];
   if (hasExplicitRequests) {
-    for (const reqPath of skillRequests!) {
+    for (const reqPath of requested) {
       const resolvedReq = resolve(reqPath);
       const realReq = await realpath(resolvedReq).catch(() => null);
 
@@ -168,7 +162,7 @@ export async function prepareSkillPrompt(
     }
   }
 
-  const totalRawCount = (skillRequests?.length ?? 0) + legacySkillNames.length;
+  const totalRawCount = requested.length + legacySkillNames.length;
   if (totalRawCount > MAX_SKILL_REQUESTS) {
     throw new RuntimeError('INVALID_SKILL_REQUESTS', `Maximum ${MAX_SKILL_REQUESTS} skill requests allowed`, 400);
   }
@@ -179,18 +173,6 @@ export async function prepareSkillPrompt(
     if (seenPaths.has(skill.path)) continue;
     seenPaths.add(skill.path);
     deduplicatedSkills.push(skill);
-  }
-
-  if (deduplicatedSkills.length > MAX_SKILL_REQUESTS) {
-    throw new RuntimeError('INVALID_SKILL_REQUESTS', `Maximum ${MAX_SKILL_REQUESTS} skills allowed`, 400);
-  }
-
-  if (deduplicatedSkills.length === 0) {
-    return {
-      agentPrompt: rawPrompt,
-      skillDeliveries: [],
-      ...(options?.promptParts ? { promptParts: options.promptParts, promptDiagnostics: assemblePrompt(options.promptParts, rawPrompt, options.promptPolicyVersion).diagnostics } : {}),
-    };
   }
 
   let totalBytes = 0;
