@@ -15,7 +15,7 @@ import { redactTraceText } from './secret-redaction.js';
 import { readGitSnapshot } from './git-status.js';
 import { buildLarkTaskDashboard, pageLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { isLarkGroupChatMemoryPool, isLarkGroupMemoryPool, isLarkPerGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
-import { describeScheduleTrigger, parseLarkSourceId, resolveParticipation, RuntimeError, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
+import { deferredConfirmationId, describeScheduleTrigger, parseLarkSourceId, resolveParticipation, RuntimeError, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-decision.js';
 import { directScenarioPrompt } from './scenario-direct.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
@@ -1621,6 +1621,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const memoryTask = !runtimeTasks?.length && latestTask && ['failed', 'interrupted', 'cancelled'].includes(latestTask.state)
           ? latestTask
           : undefined;
+        if (target && await this.isDeferredTask(sessionId!, target.id) || memoryTask && deferredConfirmationId(memoryTask.events, memoryTask.runtimeTaskId ?? memoryTask.id)) {
+          await replyCard('/retry 未执行', '确认已登记，请使用原确认卡。', { failed: true });
+          return 'handled';
+        }
         if (!target && !memoryTask) {
           await replyCard('/retry 未执行', '**只有失败、已中断或已取消的任务可以重试。**\n\n当前没有可重试的任务，请直接发送新的请求。', { failed: true });
           return 'handled';
@@ -2802,6 +2806,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const task = this.tasks.get(taskId) ?? (action === 'cancel'
       ? await this.restoreQueuedCardAction(taskId, parsed.turn, context)
       : action === 'verify' || action === 'use_verification_command' ? await this.restoreVerifyCardAction(taskId, parsed.turn, context) : undefined);
+    if (!task && action === 'retry' && this.reconcileConfig) {
+      const mapping = await this.cardMappings?.get(larkCardChannel(this.reconcileConfig.appId), taskId);
+      const saved = mapping && parseOptionalCardTask(mapping.extra);
+      if (mapping && saved?.runtime_task_id && await this.isDeferredTask(mapping.sessionId, saved.runtime_task_id)) return { type: 'warning', content: '确认已登记，请使用原确认卡。' };
+    }
     // 结果卡活过服务重启，「重试」回调却只在内存里找任务；/retry 和「重来」从持久化记录恢复原请求，重启后照样可用。
     if (!task) return { type: 'warning', content: action === 'retry' ? '这张卡上的「重试」已失效，请在原话题里说「重来」或发送 /retry 重新执行' : '此卡当前不可操作，请回原话题发送 /status 或 /cancel 查看和处理任务' };
 
@@ -3009,6 +3018,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     }
 
     if (action === 'retry') {
+      if (deferredConfirmationId(task.events, task.runtimeTaskId ?? task.id) || task.sessionId && task.runtimeTaskId && await this.isDeferredTask(task.sessionId, task.runtimeTaskId)) return { type: 'warning', content: '确认已登记，请使用原确认卡。' };
       if (task.state !== 'failed' && task.state !== 'interrupted' && task.state !== 'cancelled') return { type: 'warning', content: '只有失败、已中断或已取消的任务可以重试' };
       // 与渲染端同一张表：标记为不可重试（例如旧对话启动器版本变化）时卡上没有「重试」，
       // 回调端同样拒绝，不在旧会话上再跑一遍注定失败的请求。

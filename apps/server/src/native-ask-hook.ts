@@ -49,7 +49,7 @@ export async function runNativeAskHook(payload: unknown, options: RelayClientOpt
     // Ask one question at a time so an ordinary topic reply has one clear target.
     for (const question of parsed) {
       const result = await runSessionAsk(question.prompt, {
-        choices: JSON.stringify(question.choices), multiple: question.multiple,
+        choices: JSON.stringify(question.choices), multiple: question.multiple, questionBody: question.question,
       }, options);
       if (result.status === 'deferred') {
         const reason = `确认已登记（${result.askId}），等待用户点击后另起一轮；本轮停止，不执行依赖该确认的操作，也不继续后续问题。`;

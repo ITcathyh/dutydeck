@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, redactCredentialText } from '@dutydeck/shared';
+import { deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, redactCredentialText } from '@dutydeck/shared';
 import { AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
@@ -501,13 +501,14 @@ export class DutydeckRuntime {
       afterSequence = page.at(-1)!.sequence;
     }
     const finalActivity = [...events].reverse().find(event => ['text', 'thinking', 'tool_call', 'tool_result'].includes(event.type) && !(event.type === 'text' && (event.data as { role?: string })?.role === 'user'));
-    const stopReason = this.driverStopReasons.get(ref.attemptId) ?? 'end_turn';
+    const confirmation = deferredConfirmationId(events, ref.taskId);
+    const stopReason = confirmation ? `deferred:${confirmation}` : this.driverStopReasons.get(ref.attemptId) ?? 'end_turn';
     const error = this.turnErrors.get(ref.attemptId);
-    const status = stopReason === 'cancelled' ? 'interrupted'
+    const status = confirmation ? 'cancelled' : stopReason === 'cancelled' ? 'interrupted'
       : error || DutydeckRuntime.isTruncatedStopReason(stopReason) || finalActivity?.type !== 'text' ? 'failed' : 'completed';
     const text = events.filter(event => event.type === 'text').map(event => event.data as { role?: string; text?: unknown })
       .filter(data => data.role !== 'user' && typeof data.text === 'string').map(data => data.text).join('');
-    return { status, stopReason, outputDigest: createHash('sha256').update(text, 'utf8').digest('hex') } as const;
+    return { status, stopReason, confirmation, outputDigest: createHash('sha256').update(text, 'utf8').digest('hex') } as const;
   }
   private nextSessionGeneration(sessionId: string) {
     const generation = (this.sessionGenerations.get(sessionId) ?? 0) + 1;
@@ -2973,6 +2974,20 @@ export class DutydeckRuntime {
       this.wake(this.bound().cancelQueued(this.fence(session), task.id, current.revision, { decisionId: `stop_cancel:${task.id}:${current.revision}`, actor, action: 'cancel', evidenceRefs: ['runtime:session-stop'], resourceChecks: [] }));
     }
     this.queues.delete(id); return true;
+  }
+  /** Persist the confirmation handoff before returning it; ACK later cancels only this original turn. */
+  async deferTurn(id: string, expectedTaskId: string, askId: string, stop: boolean, expectedAttemptId: string) {
+    return this.scoped(id, async () => {
+      const { driver } = await this.active(id);
+      const token = this.attempts.get(id), ref = token && this.attemptRefs.get(token);
+      if (!ref || ref.taskId !== expectedTaskId || ref.attemptId !== expectedAttemptId) throw new RuntimeError('TASK_NOT_ACTIVE', 'The requested task is no longer active', 409);
+      const confirmation = this.turnOutput(ref).confirmation;
+      if (confirmation && confirmation !== askId) throw new RuntimeError('DEFERRED_CONFIRMATION_CONFLICT', 'This turn already registered a confirmation', 409);
+      if (!confirmation) await this.eventScope.run(ref, () => this.emit(id, 'status', { state: 'confirmation_deferred', askId }, undefined, `deferred:${ref.attemptId}`));
+      // Cancellation is a host handoff, with no user interrupt intent or actor.
+      // Settlement still waits for the driver's actual terminal result.
+      if (stop && driver && this.attempts.get(id) === token) await this.driverOperation(driver, () => driver.interrupt());
+    });
   }
   async interrupt(id: string, expectedTaskId?: string, actorId?: string, operationId = makeId('interrupt')) {
     return this.scoped(id, async () => {

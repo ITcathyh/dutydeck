@@ -114,7 +114,7 @@ export class RelayAskBroker {
     }
   }
 
-  register(input: { sessionId: string; question: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }, context: RelayAskContext = {}): Promise<RelayAskOutcome> {
+  register(input: { sessionId: string; question: string; questionBody?: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }, context: RelayAskContext = {}): Promise<RelayAskOutcome> {
     // Register the cancellation fence before readiness or the first storage await.
     let prepared!: () => void;
     this.track(new Promise<void>(resolve => { prepared = resolve; }));
@@ -130,7 +130,7 @@ export class RelayAskBroker {
     });
   }
 
-  private async registerAsk(input: { sessionId: string; question: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }, context: RelayAskContext, registration: AskRegistration): Promise<RelayAskOutcome> {
+  private async registerAsk(input: { sessionId: string; question: string; questionBody?: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }, context: RelayAskContext, registration: AskRegistration): Promise<RelayAskOutcome> {
     await this.ready;
     if (this.closed) throw new RelayError('RELAY_CLOSED', 'Dutydeck 提问通道已关闭。', 409);
     const question = input.question.trim();
@@ -144,7 +144,7 @@ export class RelayAskBroker {
     const multiple = choices !== undefined && input.multiple === true;
     if (choices && !registration.reason) {
       for (const handler of this.deferredHandlers) {
-        const deferred = await handler({ sessionId: input.sessionId, question, choices, ...(multiple ? { multiple } : {}) }, context);
+        const deferred = await handler({ sessionId: input.sessionId, question: input.questionBody ?? question, choices, ...(multiple ? { multiple } : {}) }, context);
         if (deferred) return deferred;
       }
     }

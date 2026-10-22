@@ -8,7 +8,7 @@ import type { LarkLaunchOptions } from './new-session.js';
 import { LarkMemoryStore } from './memory.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import type { LarkGroupManager } from './group-management.js';
-import { parseLarkSourceId } from '@dutydeck/shared';
+import { deferredConfirmationId, parseLarkSourceId } from '@dutydeck/shared';
 import type { ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision } from '@dutydeck/shared';
 import { defaultHighRiskPattern, readLarkConfig, type StoredLarkConfig } from './config.js';
 import { LarkServiceError, type LarkCardService } from './service.js';
@@ -24,6 +24,7 @@ import { escapeLarkPromptEcho } from './queue-summary.js';
 import type { ListenerLog, LarkMessageEvent, LarkRuntime } from './listener.js';
 import type { LarkGroup, LarkTask } from './coordinator.js';
 import { parseCardTask } from './persisted-card-task.js';
+import { loadLarkTaskEvents } from './card-renderer.js';
 
 // 飞书消息协调器 · 公共层：实例状态与构造、各层共用的权限判定和工具函数。分层说明见 coordinator.ts。
 
@@ -267,6 +268,15 @@ export abstract class LarkCoordinatorCore {
     try { await this.requireExecution('listener', 'task.create'); } catch { return false; }
     return this.currentAccess(config, record.event.chatId, record.event.chatType, record.event.senderOpenId, 'run.interrupt', record.sessionId, record.event.senderOpenId);
   }
+  protected async isDeferredTask(sessionId: string, taskId: string) {
+    // Confirmations registered before the host marker was introduced still own their original request.
+    const appId = this.reconcileConfig?.appId;
+    if (appId && (await this.workflows?.list(appId))?.some(record => record.kind === 'ask' && record.durable
+      && record.sessionId === sessionId && record.taskId === taskId)) return true;
+    if (!this.runtime.getEvents && !this.runtime.getRecentEvents) return false;
+    return Boolean(deferredConfirmationId(await loadLarkTaskEvents(this.runtime, sessionId, taskId, 500), taskId));
+  }
+
   private async deferConfirmation(input: RelayDeferredAsk, context: RelayAskContext) {
     const appId = this.reconcileConfig?.appId;
     if (this.stopped || !appId || !this.workflows || !this.inbox) return undefined;

@@ -20,13 +20,13 @@ const ctx: LarkInteractionContext = {
     messageType: 'text', content: '{"text":"确认写入待办"}', mentions: [] }
 };
 
-async function harness(adhdMode: boolean, options: { multiple?: boolean; freeText?: boolean; structured?: boolean; deny?: boolean } = {}) {
+async function harness(adhdMode: boolean, options: { multiple?: boolean; freeText?: boolean; structured?: boolean; deny?: boolean; single?: boolean; question?: string } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-adhd-cards-'));
   const repos = createRepositories(join(directory, 'state.db'));
   let active = true;
-  const ask = { id: 'ask_example', sessionId: ctx.sessionId, status: 'pending', question: '确认把这件事记为待办？',
+  const ask = { id: 'ask_example', sessionId: ctx.sessionId, status: 'pending', question: options.question ?? '确认把这件事记为待办？',
     expiresAt: '2026-10-22T00:08:00.000Z', multiple: options.multiple,
-    choices: options.freeText ? undefined : [{ label: '确认写入', value: 'write' }, { label: '取消', value: 'cancel' }] };
+    choices: options.freeText ? undefined : [{ label: '确认写入', value: 'write' }, ...(options.single ? [] : [{ label: '取消', value: 'cancel' }])] };
   const broker = { get: () => ask, answer: vi.fn(async () => { ask.status = 'answered'; ask.choices = undefined; }) };
   const runtime = { getTasks: async () => active ? [{ id: ctx.taskId, status: 'running' }] : [] } as unknown as LarkRuntime;
   const reply = vi.fn(async (_input: any) => ({ messageId: 'om_question' }));
@@ -57,6 +57,19 @@ const resultInput = (adhdMode: boolean) => ({ cardKind: 'result' as const, adhdM
   elements: [{ tag: 'markdown', element_id: 'final_output', content: '已记录待办。' }] });
 
 describe('ADHD card presentation', () => {
+  it('renders only original markdown and a primary single-choice button, without header or branding', async () => {
+    vi.useFakeTimers({ now: fixedTime });
+    const question = '确认写入？\n\n实际目标表：[待办表](https://example.com/table)';
+    const h = await harness(true, { single: true, question });
+    const card = buildLarkCard(h.reply.mock.calls[0]![0]);
+    expect(card).not.toHaveProperty('header');
+    expect(JSON.stringify(card)).not.toContain('dutydeck_brand');
+    expect(JSON.stringify(card)).not.toContain('github.com');
+    const elements = (card as any).body.elements;
+    expect(elements[0]).toMatchObject({ tag: 'markdown', content: question });
+    expect(JSON.stringify(card)).toContain('primary');
+    await expect(JSON.stringify(card, null, 2)).toMatchFileSnapshot('./__fixtures__/adhd-ask-minimal.json');
+  });
   it('matches 825e9ee card JSON byte for byte with ADHD disabled', async () => {
     vi.useFakeTimers({ now: fixedTime });
     const snapshots: Record<string, unknown> = { result: buildLarkCard(resultInput(false)) };

@@ -13,6 +13,9 @@ import type { LarkInteraction } from './workflow-interactions.js';
 import type { LarkMessageEvent } from './listener.js';
 import { LarkLongConnectionListener, LarkLongConnectionListenerPool } from './listener.js';
 import { LarkTaskInbox } from './task-inbox.js';
+import { buildApp } from '../app.js';
+import { runNativeAskHook } from '../native-ask-hook.js';
+import { RelayCapabilityRegistry } from '@dutydeck/relay';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { vi.restoreAllMocks(); vi.useRealTimers(); for (const close of cleanups.splice(0).reverse()) await close(); });
@@ -21,7 +24,7 @@ const event = (messageId: string, text = '把发布会事项记到待办 A', act
   senderType: 'user', messageType: 'text', content: JSON.stringify({ text: `@_user_1 ${text}` }),
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot', mentionedType: 'bot' }]
 });
-async function harness(options: { deliveryFailures?: number; threaded?: boolean; chatType?: string; continuation?: 'ask' | 'permission' } = {}) {
+async function harness(options: { deliveryFailures?: number; threaded?: boolean; chatType?: string; continuation?: 'ask' | 'permission'; native?: boolean; legacy?: boolean; beforeMarkerCrash?: boolean } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-durable-confirmation-'));
   let repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const sends: string[] = [];
@@ -86,14 +89,41 @@ async function harness(options: { deliveryFailures?: number; threaded?: boolean;
   const sessionId = (await repos.sessions.list())[0]!.id;
   const owner = runtime.getActiveTaskContext(sessionId)!;
   const defer = () => broker.register({ sessionId, question: '确认写入 A？', choices: [{ label: '确认写入', value: 'write' }, { label: '取消', value: 'cancel' }] }, owner);
-  const result = await defer();
+  const capabilities = new RelayCapabilityRegistry({ get: id => runtime.getSession(id) }, 'http://localhost', 'fixture');
+  // Delivery-backoff tests own the fake clock; HTTP handshake coverage uses real timers.
+  const app = options.deliveryFailures === undefined && !options.legacy ? await buildApp(runtime, { relay: { runtime, broker, capabilities } }) : undefined;
+  const headers = { authorization: `Bearer ${capabilities.tokenFor(sessionId)}` };
+  if (options.beforeMarkerCrash) vi.spyOn(runtime, 'deferTurn').mockRejectedValueOnce(new Error('crash before host marker commit'));
+  let result: { status: string; askId: string };
+  if (options.native) {
+    const output = JSON.parse(await runNativeAskHook({ hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', tool_input: { questions: [{
+      question: '确认写入 A？\n\n实际目标表：[待办表](https://example.com/table)', options: [{ label: '确认写入', description: '不应在卡正文里显示的说明' }]
+    }] } }, { env: { dutydeck_relay_url: 'http://localhost/api/relay', dutydeck_relay_token: capabilities.tokenFor(sessionId) },
+      fetcher: async (_url, init) => {
+        const response = await app!.inject({ method: 'POST', url: '/api/relay/sessions/self/ask', headers, payload: JSON.parse(String(init?.body)) });
+        return new Response(response.body, { status: response.statusCode });
+      } }));
+    expect(output.continue).toBe(false);
+    result = { status: 'deferred', askId: /^deferred:([^ ]+)/.exec(output.stopReason)![1]! };
+  } else {
+    const response = await app?.inject({ method: 'POST', url: '/api/relay/sessions/self/ask', headers,
+      payload: { question: '确认写入 A？', choices: [{ label: '确认写入', value: 'write' }, { label: '取消', value: 'cancel' }] } });
+    if (options.beforeMarkerCrash) {
+      expect(response!.statusCode).toBe(500);
+      const registered = (await interactions()).find(item => item.durable)!;
+      result = { status: 'deferred', askId: registered.id };
+    } else result = response ? response.json() : await defer();
+  }
   expect(result.status).toBe('deferred');
   const record = (await interactions()).find(item => item.durable)!;
-  await runtime.interrupt(sessionId, owner.taskId, 'ou_alice');
+  if (options.beforeMarkerCrash) await runtime.shutdown();
+  else if (app) await app.inject({ method: 'POST', url: '/api/relay/sessions/self/deferred-ack', headers, payload: { askId: result.askId } });
+  else if (options.legacy) await runtime.interrupt(sessionId, owner.taskId, 'ou_alice');
+  else { await runtime.deferTurn(sessionId, owner.taskId, result.askId, false, owner.attemptId); await runtime.deferTurn(sessionId, owner.taskId, result.askId, true, owner.attemptId); }
   await vi.waitFor(() => expect(runtime.getActiveTaskContext(sessionId)).toBeUndefined());
   const click = (actor = 'ou_alice', answer = 'write') => coordinator.handleAction({ dutydeck_workflow: 'answer', request_id: record.id,
     generation: record.boot, answer }, actor, { messageId: record.cardId!, chatId: original.chatId });
-  cleanups.push(async () => { coordinator.stop(); broker.close(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
+  cleanups.push(async () => { await app?.close(); coordinator.stop(); broker.close(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
   return { get repos() { return repos; }, get runtime() { return runtime; }, get broker() { return broker; }, service, log, rejectedIds, record, sessionId, owner, sends, save, click, defer, interactions, get config() { return config; }, get coordinator() { return coordinator; },
     restart: async () => { coordinator.stop(); coordinator = create(); await coordinator.initializeWorkflows(config); },
     restartService: async () => {
@@ -106,6 +136,114 @@ async function harness(options: { deliveryFailures?: number; threaded?: boolean;
 }
 
 describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
+  it('never redispatches a confirmation if the service exits after card registration but before its host marker', async () => {
+    const h = await harness({ beforeMarkerCrash: true });
+    expect((await h.runtime.getEvents(h.sessionId)).some(event => event.id.startsWith('deferred:'))).toBe(false);
+    expect(h.repos.execution.getTaskExecution(h.owner.taskId)?.task.status).toBe('reconcile_required');
+    await h.restartService();
+    for (let count = 0; count < 3; count++) await h.coordinator.reconcile(h.config);
+    expect(h.sends).toHaveLength(1);
+    expect(await h.repos.config.list!(`lark.redispatch.${h.config.appId}.`)).toEqual([]);
+    expect(h.repos.execution.getTaskExecution(h.owner.taskId)?.currentAttempt?.settlement).toBeUndefined();
+    expect((await h.interactions()).find(item => item.id === h.record.id)?.state).toBe('pending');
+    await h.click(); await h.waitConfirmed();
+    const replay = await new LarkTaskInbox(h.repos.config).lookup(h.config.appId, `confirmation_${h.record.id}`);
+    expect(replay?.workflowRequestId).toBe(h.record.id);
+    expect(replay?.sessionId).toBe(h.sessionId);
+    expect(h.repos.execution.getTaskExecution(h.owner.taskId)?.task.status).toBe('reconcile_required');
+    expect(h.repos.execution.getTaskExecution(h.owner.taskId)?.currentAttempt?.settlement).toBeUndefined();
+    expect(h.sends).toHaveLength(1);
+  });
+
+  it('rejects an old held replay action for an already registered confirmation', async () => {
+    const h = await harness({ legacy: true });
+    const mapping = (await h.repos.channelMappings.list(`lark-card:${h.config.appId}`)).find(item => item.externalId === 'om_original')!;
+    const saved = JSON.parse(mapping.extra!);
+    const key = `lark.redispatch.${h.config.appId}.om_original.1`;
+    const held = { id: 'held_old', boot: 'old', phase: 'held', action: 'rerun_in_new_session', appId: h.config.appId, taskId: 'om_original', turn: 1,
+      chatId: 'oc_group', cardMessageId: saved.card_message_id, taskName: '原请求', sessionId: h.sessionId, runtimeTaskId: h.owner.taskId, operatorOpenId: 'ou_alice',
+      redispatch: { count: 0, resumed: false, auto: true, code: 'DAEMON_SHUTDOWN' } };
+    await h.repos.config.set(key, JSON.stringify(held));
+    const retry = await h.coordinator.handleAction({ action: 'replay_turn', task_id: 'om_original', turn: 1 }, 'ou_alice', { messageId: saved.card_message_id, chatId: 'oc_group' });
+    expect(retry).toMatchObject({ type: 'warning', content: '确认已登记，请使用原确认卡。' });
+    expect(JSON.parse((await h.repos.config.get(key))!).phase).toBe('held');
+    expect(h.sends).toHaveLength(1);
+  });
+
+  it('rejects an old retry callback after durable registration rather than dispatching the same message as turn two', async () => {
+    const h = await harness();
+    await vi.waitFor(async () => {
+      const mapping = await h.repos.channelMappings.get(`lark-card:${h.config.appId}`, 'om_original');
+      expect(['cancelled', 'interrupted']).toContain(JSON.parse(mapping!.extra!).state);
+    });
+    const retry = await h.coordinator.handleAction({ action: 'retry', task_id: 'om_original', turn: 1 }, 'ou_alice', { messageId: 'om_original', chatId: 'oc_group' });
+    // A successful retry response schedules dispatch asynchronously; observe its actual admission before asserting no replay.
+    if (retry.type === 'success') await vi.waitFor(async () => expect(await h.runtime.getTasks(h.sessionId)).toHaveLength(2));
+    expect(await h.runtime.getTasks(h.sessionId)).toHaveLength(1);
+    expect(h.sends).toHaveLength(1);
+    expect(retry).toMatchObject({ type: 'warning', content: '确认已登记，请使用原确认卡。' });
+  });
+
+  it('recognizes confirmations registered before host markers existed when rejecting a restored retry card', async () => {
+    const h = await harness({ legacy: true });
+    expect((await h.runtime.getEvents(h.sessionId)).some(event => event.id.startsWith('deferred:'))).toBe(false);
+    const retry = await h.coordinator.handleAction({ action: 'retry', task_id: 'om_original', turn: 1 }, 'ou_alice', { messageId: 'om_original', chatId: 'oc_group' });
+    expect(retry).toMatchObject({ type: 'warning', content: '确认已登记，请使用原确认卡。' });
+    await h.restart();
+    await h.coordinator.handle(event('om_retry_legacy', '/retry'), h.config);
+    expect(h.sends).toHaveLength(1);
+  });
+
+  it('does not treat a later queued cancellation as the earlier task confirmation', async () => {
+    const h = await harness({ continuation: 'ask' });
+    await h.coordinator.handle(event('om_hold', '先处理另一项'), h.config);
+    await vi.waitFor(() => expect(h.sends).toHaveLength(2));
+    await h.coordinator.handle(event('om_queued', '排队的独立请求'), h.config);
+    await vi.waitFor(async () => expect(await h.runtime.getTasks(h.sessionId)).toHaveLength(3));
+    const queued = (await h.runtime.getTasks(h.sessionId))[2]!;
+    await h.runtime.cancelQueued(h.sessionId, queued.id, 'ou_alice');
+    await vi.waitFor(() => expect([...h.service.send.mock.calls, ...h.service.reply.mock.calls].some(([input]: any) => input.cardKind === 'result' && input.taskId === 'om_queued' && input.state === 'cancelled')).toBe(true));
+    await h.coordinator.reconcile(h.config);
+    const retry = await h.coordinator.handleAction({ action: 'retry', task_id: 'om_queued', turn: 1 }, 'ou_alice', { messageId: 'om_queued', chatId: 'oc_group' });
+    expect(retry).toMatchObject({ type: 'success', content: '已开始重试' });
+  });
+  it('keeps a native question markdown intact while excluding option descriptions from the ADHD card', async () => {
+    const h = await harness({ native: true });
+    const question = '确认写入 A？\n\n实际目标表：[待办表](https://example.com/table)';
+    expect(h.record.question).toBe(question);
+    const cardInput = h.service.reply.mock.calls.find(([input]) => input.taskId === h.record.id)![0];
+    expect(cardInput.elements[0]).toEqual({ tag: 'markdown', content: question });
+    const card = buildLarkCard(cardInput);
+    expect(card).not.toHaveProperty('header');
+    expect(JSON.stringify(card)).not.toContain('不应在卡正文里显示的说明');
+    expect(cardInput.elements[1]).toMatchObject({ tag: 'button', type: 'primary' });
+    expect(cardInput.elements).toHaveLength(2);
+  });
+
+  it('settles a deferred ask quietly without attributing a user interrupt, retrying or replaying the original request', async () => {
+    const h = await harness();
+    const tasks = await h.runtime.getTasks(h.sessionId);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({ status: 'cancelled' });
+    expect(tasks[0]!.interruptedByActor).toBeUndefined();
+    const attempt = h.repos.execution.getTaskExecution(h.owner.taskId)!.currentAttempt!;
+    expect(attempt.settlement).toMatchObject({ kind: 'driver_result', outcome: 'cancelled', stopReason: `deferred:${h.record.id}` });
+    await h.coordinator.reconcile(h.config);
+    await h.restart();
+    await h.coordinator.reconcile(h.config);
+    expect(h.sends).toHaveLength(1);
+    const retry = await h.coordinator.handleAction({ action: 'retry', task_id: 'om_original', turn: 1 }, 'ou_alice', { messageId: 'om_original', chatId: 'oc_group' });
+    expect(retry.type).toBe('warning');
+    await h.coordinator.handle(event('om_retry', '/retry'), h.config);
+    expect(h.sends).toHaveLength(1);
+    const results = [...h.service.send.mock.calls, ...h.service.reply.mock.calls].filter(([input]: any) => input.cardKind === 'result');
+    expect(results).toEqual([]);
+    expect(h.service.addReaction).not.toHaveBeenCalledWith(expect.anything(), 'THUMBSDOWN');
+    expect((await h.interactions()).find(item => item.id === h.record.id)?.state).toBe('pending');
+    await h.click(); await h.waitConfirmed();
+    await vi.waitFor(() => expect(h.sends).toHaveLength(2));
+    expect(h.sends[1]).toContain(h.record.id);
+  });
   it.each([true, false])('uses real reply anchors after confirmation for nested ask, permission and results (threaded=%s)', async threaded => {
     for (const continuation of ['ask', 'permission', undefined] as const) {
       const h = await harness({ threaded, continuation });

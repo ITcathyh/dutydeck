@@ -4,6 +4,7 @@ export interface RelaySessionCliOptions {
   timeout?: string;
   json?: boolean;
   choices?: string;
+  questionBody?: string;
   multiple?: boolean;
 }
 
@@ -56,6 +57,7 @@ export async function runSessionAsk(
   const client = new RelayHttpClient(options);
   const payload = await client.post(sessionPath('ask'), {
     question,
+    ...(cliOptions.questionBody === undefined ? {} : { questionBody: cliOptions.questionBody }),
     // RelayAskBroker owns choice shape, length, and duplicate-value validation.
     ...(cliOptions.choices === undefined ? {} : { choices }),
     ...(cliOptions.multiple ? { multiple: true } : {}),

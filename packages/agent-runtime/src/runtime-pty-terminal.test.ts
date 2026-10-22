@@ -22,11 +22,12 @@ async function fixture(kind: 'codex' | 'traex') {
   const path = join(day, `rollout-2026-10-15T10-00-00-${thread}.jsonl`);
   writeFileSync(path, line({ type: 'session_meta', payload: { id: thread, cwd: dir } }));
   writeFileSync(join(root, 'history.jsonl'), '');
-  const writes: string[] = [], drivers: PtyCliDriver[] = [];
+  const writes: string[] = [], drivers: PtyCliDriver[] = [], errors: unknown[] = [];
   let paint!: (data: string) => void;
   let currentTurn = '';
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, {
+    log: { warn: data => { errors.push(data); } },
     probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
     driverFactory: (agent, _protocol, onEvent, onExit, sessionId) => {
       const backend: SessionBackend = { kind: 'pty', spawn() {}, write() {}, resize() {}, kill() {}, interrupt() {}, onData(cb) { paint = cb; }, onExit() {} };
@@ -44,7 +45,7 @@ async function fixture(kind: 'codex' | 'traex') {
     env: kind === 'codex' ? { CODEX_HOME: dir } : { TRAE_HOME: dir }, permissionMode: 'full-trust', timeout: 10, capabilities: { pause: false, resume: true } });
   await runtime.initialize([agent]);
   const session = await runtime.start({ agentId: kind });
-  return { runtime, repos, session, path, writes, drivers, paint: (text: string) => paint(`\x1b[2J\x1b[H${text.replaceAll('\n', '\r\n')}`),
+  return { runtime, repos, session, path, writes, drivers, errors, paint: (text: string) => paint(`\x1b[2J\x1b[H${text.replaceAll('\n', '\r\n')}`),
     turn: () => currentTurn,
     send: async (text = 'question') => {
       const pending = runtime.send(session.id, text); void pending.catch(() => {});
@@ -121,4 +122,24 @@ it.each(['codex', 'traex'] as const)('%s settles a late empty success terminal a
   const next = await h.send('next input after terminal');
   appendFileSync(h.path, line(record('turn_aborted', h.turn())));
   expect((await next.pending).status).toBe('interrupted');
+});
+
+it.each(['codex', 'traex'] as const)('%s waits for physical cancellation proof before settling a durable confirmation', async kind => {
+  const h = await fixture(kind), first = await h.send();
+  const task = h.runtime.getActiveTaskContext(h.session.id)!;
+  await vi.waitFor(async () => expect((await h.runtime.getEvents(h.session.id)).some(event => event.type === 'status' && (event.data as any)?.state === 'input_receipt' && (event.data as any)?.phase === 'confirmed')).toBe(true));
+  await h.runtime.deferTurn(h.session.id, task.taskId, 'confirmation_pty', false, task.attemptId);
+  await h.runtime.deferTurn(h.session.id, task.taskId, 'confirmation_pty', true, task.attemptId);
+  // Sending Ctrl-C alone cannot turn a still-running terminal into a settled task.
+  expect(h.repos.execution.getTaskExecution(task.taskId)?.task.status).toBe('running');
+  appendFileSync(h.path, line(record('turn_aborted', h.turn(), { reason: 'interrupted' })));
+  h.paint(kind === 'traex' ? '❯ Ask TraeCode CLI\nContext 100% left' : '› \n100% context left');
+  const result = await first.pending;
+  expect(result.status, JSON.stringify(h.errors)).toBe('cancelled');
+  expect(result.interruptedByActor).toBeUndefined();
+  expect(h.repos.execution.getTaskExecution(task.taskId)?.currentAttempt?.settlement).toMatchObject({ kind: 'driver_result', outcome: 'cancelled', stopReason: 'deferred:confirmation_pty' });
+  const next = await h.send('confirmed input');
+  await expect(h.runtime.deferTurn(h.session.id, task.taskId, 'confirmation_pty', true, task.attemptId)).rejects.toMatchObject({ code: 'TASK_NOT_ACTIVE' });
+  appendFileSync(h.path, line(record('task_complete', h.turn(), { last_agent_message: 'written' })));
+  expect((await next.pending).status).toBe('completed');
 });

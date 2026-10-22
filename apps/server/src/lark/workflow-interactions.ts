@@ -150,7 +150,7 @@ const button = (record: LarkInteraction, action: string, label: string): LarkCar
 /** 单选：每个选项一个回调按钮，点按即提交，回调 value 复用 dutydeck_workflow 命名空间。 */
 const singleChoiceElements = (record: LarkInteraction, choices: RelayAskChoice[]): LarkCardElement[] =>
   choices.map((choice, index) => ({
-    tag: 'button', element_id: `workflow_answer_choice_${index}`, type: 'default',
+    tag: 'button', element_id: `workflow_answer_choice_${index}`, type: record.adhdMode === true && choices.length === 1 ? 'primary' : 'default',
     text: { tag: 'plain_text', content: choice.label },
     behaviors: [{ type: 'callback', value: {
       dutydeck_workflow: 'answer', request_id: record.id, generation: record.boot,
@@ -711,10 +711,11 @@ export class LarkWorkflowInteractions {
       : record.sessionAllowKey && requesterApproves
         ? '「允许本次」只处理这一条请求；「本会话允许此命令」仅允许目录、资源与命令完全相同的后续请求，服务重启后失效。'
         : '本次选择只处理这一条请求，不改变后续授权方式。' };
-    const displayedQuestion = questionElement(kind, question);
+    const minimalAsk = kind === 'ask' && record.adhdMode === true;
+    const displayedQuestion = minimalAsk ? { tag: 'markdown', content: question } : questionElement(kind, question);
     const elements: LarkCardElement[] = [
-      ...(groupMentionTag ? [{ tag: 'markdown', element_id: 'group_mention', content: groupMentionTag }] : []),
-      ...intentElements(record),
+      ...(!minimalAsk && groupMentionTag ? [{ tag: 'markdown', element_id: 'group_mention', content: groupMentionTag }] : []),
+      ...(minimalAsk ? [] : intentElements(record)),
       displayedQuestion,
       // 正文只写读者做决定时需要知道的东西：授权范围（permission）、怎么答（ask）。
       // 原先还各带一份完整 slash 指令，`/approve wf_01H…` 里那串请求编号在 permission 卡上
@@ -725,7 +726,7 @@ export class LarkWorkflowInteractions {
       // 而不做那个回落，等于把这条备用路径一起删掉——命令会以「请填写请求编号」失败，
       // 而那个编号已经没有任何卡会显示。
       // 命令本身的可发现性由 `/help` 承担（commands.ts:173-175 已列出三条命令及其用法）。
-      hintElement,
+      ...(minimalAsk ? [] : [hintElement]),
       ...(kind === 'permission' && !approvers.length ? [{ tag: 'markdown', content: '飞书里没有人能批准这条请求，需要在 Web 上处理。' }] : []),
       ...(kind === 'permission' ? [button(record, 'approve', '允许本次'), button(record, 'reject', '拒绝')] : []),
       // 只有发起人能点、且只在发起人本人能批准时给；高危、被脱敏或被截断的命令没有匹配键，不给。
@@ -799,7 +800,7 @@ export class LarkWorkflowInteractions {
         }
       }
       if (!await this.live(record)) { await this.move(record, 'expired'); return; }
-      const card = await this.service.reply({ messageId: larkMessageAnchor(context.event), ...(context.event.threadId ? { replyInThread: true } : {}),
+      const card = await this.service.reply({ ...(minimalAsk ? { adhdMode: true } : {}), messageId: larkMessageAnchor(context.event), ...(context.event.threadId ? { replyInThread: true } : {}),
         state: 'running', statusLabel: kind === 'ask' ? '待回答' : '待审批', awaitingHuman: true, readOnly: true,
         taskId: record.id, taskName: record.taskName || (kind === 'ask' ? 'Agent 需要你的回答' : '确认本次操作'), permissionMode: 'ask', elements,
         ...(safeWebBaseUrl ? { webBaseUrl: safeWebBaseUrl } : {}),
@@ -916,7 +917,7 @@ export class LarkWorkflowInteractions {
     return { status: 'deferred' as const, askId: record.id, reason: '确认已登记，等待用户点击后另起一轮；本轮结束，不执行依赖该确认的操作。' };
   }
   private confirmationElements(record: LarkInteraction) {
-    return [questionElement('ask', record.question), ...(record.multiple
+    return [{ tag: 'markdown', content: record.question }, ...(record.multiple
       ? [multipleChoiceForm(record, record.durable!.choices)] : singleChoiceElements(record, record.durable!.choices))];
   }
   private async deliverConfirmation(record: LarkInteraction) {

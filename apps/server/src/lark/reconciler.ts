@@ -1,5 +1,6 @@
 import { explicitFinalTextReceiptReader, completeExplicitFinal, readConfirmedExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import { describeLarkTaskRecovery, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
+import { deferredConfirmationId } from '@dutydeck/shared';
 import type { ChannelMapping, ChannelMappingRepository, ConfigRepository, TaskRecord } from '@dutydeck/shared';
 import { defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, type LarkCardInput, type LarkCardService, LarkServiceError } from './service.js';
@@ -90,6 +91,8 @@ export async function performLarkCardReconcile(input: {
   config: StoredLarkConfig;
   channel: string;
   deliveryStore?: ConfigRepository;
+  /** Registered confirmations own the original request, including crashes before its host marker. */
+  deferredTask?(sessionId: string, taskId: string): Promise<boolean>;
   authorizeFinalRelay?: (scope: import('./explicit-final.js').ExplicitFinalScope, actorId: string) => Promise<void>;
   resultElements?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, cardId: string) => Promise<Array<Record<string, any>>>;
   terminalDecoration?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, config: StoredLarkConfig) => Promise<{ elements: Array<Record<string, any>>; cardInput: LarkCardInput }>;
@@ -227,6 +230,14 @@ export async function performLarkCardReconcile(input: {
       const runtimeTask = (persisted.runtime_task_id ? runtimeTasks.find(item => item.id === persisted.runtime_task_id) : undefined)
         ?? [...runtimeTasks].reverse().find(item => item.prompt === persisted.prompt && Date.parse(item.createdAt) >= persisted.started_at - 5_000);
       if (!runtimeTask) { unresolved++; continue; }
+      const registeredConfirmation = await input.deferredTask?.(mapping.sessionId, runtimeTask.id);
+      if (registeredConfirmation && !terminalTaskStates.has(runtimeTask.status)) { unresolved++; continue; }
+      if (runtimeTask.status === 'reconcile_required') {
+        const window = await loadLarkTaskWindow(runtime, mapping.sessionId, runtimeTask.id, 500);
+        // A registered confirmation is never an interrupted request to redispatch.
+        // Unknown termination remains blocked until recovery proves the driver stopped.
+        if (deferredConfirmationId(eventsForRuntimeTask(window, runtimeTask.id), runtimeTask.id)) { unresolved++; continue; }
+      }
       if (!terminalTaskStates.has(runtimeTask.status)) {
         unresolved++;
         const interrupted = runtimeTask.status === 'reconcile_required' ? await input.interruptedTurn?.(mapping, persisted, runtimeTask) : undefined;
@@ -328,12 +339,13 @@ export async function performLarkCardReconcile(input: {
         log.warn({ error, taskId: runtimeTask.id, sessionId: mapping.sessionId, externalId: mapping.externalId }, '读取执行结果失败，等待下次对账');
         continue;
       }
+      const confirmation = registeredConfirmation || deferredConfirmationId(events, runtimeTask.id);
       const verifiedOutput = state === 'completed'
         ? await verifiedLarkRecoveryOutput(runtime, mapping.sessionId, runtimeTask.id, events) : undefined;
       if (state === 'completed' && !verifiedOutput && hasUnresolvedToolCalls(events)) state = 'failed';
       if (input.skipTask?.(mapping.externalId, mapping.sessionId, persisted.turn ?? 0)) continue;
       const completed = state === 'completed';
-      const quietNote = completed ? undefined : await input.quietTerminalNote?.(mapping, persisted);
+      const quietNote = confirmation ? '等待确认' : completed ? undefined : await input.quietTerminalNote?.(mapping, persisted);
       const elapsedSeconds = Math.max(0, (Date.parse(runtimeTask.updatedAt) - persisted.started_at) / 1_000);
       const cardMessageId = persisted.card_message_id;
       // 没有过程卡的轮次直接视为「过程已收敛」，只补结果这条腿。

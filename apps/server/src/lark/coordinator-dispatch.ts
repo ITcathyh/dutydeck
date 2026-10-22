@@ -21,7 +21,7 @@ import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type Lark
 import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
 import { larkAdhdModePrompt } from './adhd-mode.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
-import { RuntimeError, supportsRemoteApproval } from '@dutydeck/shared';
+import { deferredConfirmationId, RuntimeError, supportsRemoteApproval } from '@dutydeck/shared';
 import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import { formatRolePrompt } from './role-format.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError } from './service.js';
@@ -1309,7 +1309,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         messageId: task.cardMessageId!,
         permissionMode: larkPermissionMode(config),
         state,
-        ...(recovery ? { statusLabel: recovery.label } : task.state === 'interrupting' ? { statusLabel: '等待停止确认', actionState: 'interrupting' as const } : compacting ? { statusLabel: '正在压缩历史上下文' } : stalled ? { statusLabel: '可能卡住' } : {}),
+        ...(terminal && deferredConfirmationId(task.events, task.runtimeTaskId ?? task.id) ? { statusLabel: '等待确认' } : recovery ? { statusLabel: recovery.label } : task.state === 'interrupting' ? { statusLabel: '等待停止确认', actionState: 'interrupting' as const } : compacting ? { statusLabel: '正在压缩历史上下文' } : stalled ? { statusLabel: '可能卡住' } : {}),
         ...(awaitingAnswer ? { awaitingAnswer: true } : {}),
         taskId: task.id,
         taskName: taskTitle,
@@ -1324,7 +1324,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         ...(terminal && task.retryable !== undefined ? { retryable: task.retryable } : {}),
         // 结束后的过程卡收成一行，原因与按钮交给随后发的结果卡：只贴表情的模式下成功不会再发结果消息，
         // 失败、中断、取消总会发。
-        ...(terminal && !(state === 'completed' && completionReactionOnly) ? { resultFollows: true } : {}),
+        ...(terminal && !deferredConfirmationId(task.events, task.runtimeTaskId ?? task.id) && !(state === 'completed' && completionReactionOnly) ? { resultFollows: true } : {}),
         capabilities: { ...this.capabilitiesForTask(task), ...(recovery?.relaunch ? { canRelaunch: true } : {}), ...(recovery?.continueInPlace ? { canContinueInPlace: true } : {}), ...turnOptions?.capabilities },
         ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
         elements
@@ -1351,6 +1351,16 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         if (state === 'failed' && isLarkLauncherVersionChanged(task.events)) {
           task.retryable = false;
           if (await this.recoverLauncherSession(task, restoring || Boolean(resumeTask))) return;
+        }
+        const confirmation = deferredConfirmationId(task.events, task.runtimeTaskId ?? task.id);
+        if (confirmation) {
+          task.retryable = false;
+          await update('cancelled');
+          await this.unpinTaskCard(task);
+          task.finalDeliveredTurn = currentTurn;
+          task.finalDeliveryState = 'delivered';
+          await this.saveCardTask(task, 'cancelled');
+          return;
         }
         await update(state);
         // 终态先撤置顶：轮次校验之后再撤，重试开的新一轮会让上一轮的进度卡永远挂在置顶里。

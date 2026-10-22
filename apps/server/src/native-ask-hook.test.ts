@@ -58,9 +58,9 @@ describe('native Claude questions over the session relay', () => {
       },
     } });
     expect(received).toEqual([
-      { url: '/api/relay/sessions/self/ask', token: 'Bearer fixture-token', question: '要检查哪些项？\n代码：检查实现\n文档：检查说明',
+      { url: '/api/relay/sessions/self/ask', token: 'Bearer fixture-token', question: '要检查哪些项？\n代码：检查实现\n文档：检查说明', questionBody: '要检查哪些项？',
         choices: [{ label: '代码' }, { label: '文档' }], multiple: true },
-      { url: '/api/relay/sessions/self/ask', token: 'Bearer fixture-token', question: '下一步？',
+      { url: '/api/relay/sessions/self/ask', token: 'Bearer fixture-token', question: '下一步？', questionBody: '下一步？',
         choices: [{ label: '继续' }, { label: '暂停' }] },
     ]);
     expect(broker.listPending()).toHaveLength(0);

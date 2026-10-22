@@ -74,6 +74,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         ));
       },
       deliveryStore: this.workflowOptions.store,
+      deferredTask: (sessionId, taskId) => this.isDeferredTask(sessionId, taskId),
       authorizeFinalRelay: (scope, actorId) => this.authorizeFinalRelay(scope, actorId),
       relaunchReady: (taskId, status, turn) => this.relaunchReady(config.appId, taskId, status, turn),
       interruptedTurn: (mapping, saved, runtimeTask) => this.redispatchInterruptedTurn(config, mapping, saved, runtimeTask),
@@ -522,6 +523,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
    * 重投记录按 App + 原消息 + 轮次落库（redispatchKey），并发的对账、重启后的对账与按钮点击读到的都是这一条。
    */
   private async redispatchInterruptedTurn(config: StoredLarkConfig, mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord): Promise<LarkInterruptedTurn | undefined> {
+    if (await this.isDeferredTask(mapping.sessionId, runtimeTask.id)) return { kind: 'handled' };
     const store = this.workflowOptions.store;
     if (!store?.compareAndSet || !this.inbox || !this.runtime.inspectExecutionRecovery || !this.runtime.confirmExecutionRecovery || !this.runtime.getEvents) return undefined;
     const turn = saved.turn ?? 0;
@@ -612,6 +614,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
    */
   private async startRedispatch(config: StoredLarkConfig, key: string, previousRaw: string | undefined, base: LarkRelaunchClaim,
     saved: PersistedLarkCardTask, inbox: LarkInboxRecord, next: { count: number; auto: boolean; operatorOpenId?: string }) {
+    if (await this.isDeferredTask(base.sessionId, base.runtimeTaskId)) return false;
     const session = await this.runtime.getSession(base.sessionId);
     const resumed = Boolean(session && !session.archivedAt && session.state !== 'stopped');
     const claim: LarkRelaunchClaim = { ...base, id: randomUUID(), boot: this.relaunchBoot, phase: 'claimed',
@@ -891,6 +894,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         return { type: 'warning', content: '当前账号没有在这个话题操作这条任务的权限，未执行' };
       }
       if (action === 'replay_turn') {
+        if (await this.isDeferredTask(mapping.sessionId, record.runtimeTaskId)) return { type: 'warning', content: '确认已登记，请使用原确认卡。' };
         await this.requireExecution('listener', 'task.create');
         await this.requireExecution('session', 'task.create');
       }

@@ -86,12 +86,12 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
       : undefined);
   if (!service || !broker) return;
 
-  const deferredTurns = new Map<string, { sessionId: string; taskId: string; actorId?: string; timer?: NodeJS.Timeout; ended?: Promise<void> }>();
+  const deferredTurns = new Map<string, { sessionId: string; taskId: string; attemptId: string; timer?: NodeJS.Timeout; ended?: Promise<void> }>();
   const endDeferredTurn = (askId: string) => {
     const turn = deferredTurns.get(askId);
     if (!turn || !runtime) return Promise.resolve();
     clearTimeout(turn.timer);
-    return turn.ended ??= runtime.interrupt(turn.sessionId, turn.taskId, turn.actorId).then(() => undefined, error => {
+    return turn.ended ??= runtime.deferTurn(turn.sessionId, turn.taskId, askId, true, turn.attemptId).then(() => undefined, error => {
       // A newer turn is never interrupted by this old confirmation's ACK.
       if ((error as { code?: string }).code !== 'TASK_NOT_ACTIVE') app.log.warn({ error, askId }, 'Ending deferred confirmation turn failed');
     }).finally(() => {
@@ -185,10 +185,12 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
       const outcome = await service.ask(request.headers.authorization, request.params.id, request.body ?? {}, { ...owner, signal: controller.signal });
       // 长轮询结果一律 200：answered / expired / cancelled 都是通道正常工作的结果，
       // CLI 侧据 status 决定退出码，不靠 HTTP 状态码区分。
-      if (outcome.status === 'deferred' && runtime && owner) {
+      if (outcome.status === 'deferred') {
+        if (!runtime || !owner?.attemptId) throw new RelayError('RELAY_DEFERRED_NOT_ACTIVE', '确认已登记，但原执行轮次无法核实，未结束其他任务。', 409);
         // Flush the explicit deferred result before ending the original driver turn.
         // The expected task fence prevents a late response from interrupting another turn.
-        deferredTurns.set(outcome.askId, { sessionId: capability.sessionId, taskId: owner.taskId, actorId: owner.actorId });
+        await runtime.deferTurn(capability.sessionId, owner.taskId, outcome.askId, false, owner.attemptId);
+        deferredTurns.set(outcome.askId, { sessionId: capability.sessionId, taskId: owner.taskId, attemptId: owner.attemptId });
         reply.raw.once('finish', () => {
           const turn = deferredTurns.get(outcome.askId)!;
           // Supported CLI clients ACK after flushing their explicit result. Unknown

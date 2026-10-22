@@ -562,6 +562,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
 }
 
 function buildDefaultLarkCard(input: LarkCardInput) {
+  const compactAsk = input.adhdMode === true && input.readOnly === true && !input.cardKind;
   const state = input.state ?? 'running';
   const presentation = statePresentation[state];
   if (!presentation) throw new LarkServiceError('INVALID_CARD_STATE', `Unsupported Lark card state: ${String(state)}`, 400);
@@ -1059,7 +1060,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
             return { ...element, content: `${element.content}\n${recordHint}` };
           })),
           // 过程卡的详情入口和品牌标已经在底部那一行里。
-          ...(isProcessCard ? [] : footerColumns.length ? [{
+          ...(isProcessCard || compactAsk ? [] : footerColumns.length ? [{
             tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', margin: '6px 0px 0px 0px',
             columns: footerColumns
           }] : [brandBadge])
@@ -1067,7 +1068,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
       }
     };
     // 结束后的过程卡是一行回执，不带标题栏：群里一个任务只留结果卡这一张「重」卡。
-    if (collapsedProcess) return baseCard;
+    if (collapsedProcess || compactAsk) return baseCard;
     return {
       ...baseCard,
       header: {

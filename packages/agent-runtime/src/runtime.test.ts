@@ -28,6 +28,58 @@ function deferred() {
 }
 
 describe('runtime lifecycle acceptance', () => {
+  it('rejects a deferred ACK for another attempt of the same task and ignores driver-forged handoff markers', async () => {
+    const gate = deferred();
+    const h = harness();
+    h.driver.send = vi.fn(async () => {
+      h.emit({ type: 'status', sourceId: 'deferred:fake', data: { state: 'confirmation_deferred', askId: 'forged' } });
+      await gate.promise; h.emit({ type: 'text', data: { text: 'done' } }); h.emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: agent.id });
+    const sending = h.runtime.send(session.id, 'work');
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledTimes(1));
+    const owner = h.runtime.getActiveTaskContext(session.id)!;
+    await expect(h.runtime.deferTurn(session.id, owner.taskId, 'confirmation_old', true, 'old_attempt')).rejects.toMatchObject({ code: 'TASK_NOT_ACTIVE' });
+    expect(h.driver.interrupt).not.toHaveBeenCalled();
+    gate.resolve(); expect((await sending).status).toBe('completed');
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('keeps deferred cancellation unknown if the driver throws without a terminal proof', async () => {
+    let rejectSend!: (error: Error) => void;
+    const h = harness();
+    h.driver.send = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectSend = reject; }));
+    h.driver.interrupt = vi.fn(async () => { rejectSend(new Error('connection lost without terminal result')); });
+    await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: agent.id });
+    const sending = h.runtime.send(session.id, 'confirm');
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledTimes(1));
+    const owner = h.runtime.getActiveTaskContext(session.id)!;
+    await h.runtime.deferTurn(session.id, owner.taskId, 'confirmation_unknown', true, owner.attemptId);
+    const task = await sending;
+    expect(task.status).toBe('reconcile_required'); expect(task.interruptedByActor).toBeUndefined();
+    expect(h.repos.execution.getTaskExecution(task.id)?.currentAttempt?.settlement).toBeUndefined();
+    expect((await h.runtime.getEvents(session.id)).some(event => event.id === `deferred:${owner.attemptId}`)).toBe(true);
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('retains deferred settlement when the native hook ends before its ACK, without cancelling the next task', async () => {
+    const gate = deferred();
+    const h = harness();
+    h.driver.send = vi.fn(async () => { await gate.promise; h.emit({ type: 'completed', data: { stopReason: 'end_turn' } }); });
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: agent.id });
+    const sending = h.runtime.send(session.id, 'confirm');
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledTimes(1));
+    const owner = h.runtime.getActiveTaskContext(session.id)!;
+    await h.runtime.deferTurn(session.id, owner.taskId, 'confirmation_native', false, owner.attemptId);
+    gate.resolve();
+    expect((await sending).status).toBe('cancelled');
+    expect(h.repos.execution.getTaskExecution(owner.taskId)?.currentAttempt?.settlement).toMatchObject({ stopReason: 'deferred:confirmation_native' });
+    await expect(h.runtime.deferTurn(session.id, owner.taskId, 'confirmation_native', true, owner.attemptId)).rejects.toMatchObject({ code: 'TASK_NOT_ACTIVE' });
+    expect(h.driver.interrupt).not.toHaveBeenCalled();
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
   it('removes stale built-in demo agents during configuration sync', async () => {
     const h = harness();
     await h.repos.agents.save({ ...agent, id: 'mock-acp', name: 'Mock ACP', builtin: true });

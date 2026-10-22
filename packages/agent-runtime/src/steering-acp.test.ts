@@ -117,3 +117,17 @@ it.each(['task', 'attempt'])('keeps supplements queued when the expected running
   expect(await h.status(first.id)).toBe('running');
   expect(await h.texts()).not.toContain('extra requirement');
 });
+
+// The real ACP cancellation path must retain the host handoff instead of a user interrupt.
+it('settles a durable confirmation through real ACP cancellation and can run the confirmed input next', async () => {
+  const h = await fixture();
+  const first = await h.running();
+  await h.runtime.deferTurn(h.session.id, first.id, 'confirmation_acp', false, h.runtime.getActiveTaskContext(h.session.id)!.attemptId);
+  expect(await h.status(first.id)).toBe('running');
+  await h.runtime.deferTurn(h.session.id, first.id, 'confirmation_acp', true, h.runtime.getActiveTaskContext(h.session.id)!.attemptId);
+  await expect.poll(() => h.status(first.id), { timeout: 10_000 }).toBe('cancelled');
+  const execution = h.repos.execution.getTaskExecution(first.id)!;
+  expect(execution.task.interruptedByActor).toBeUndefined();
+  expect(execution.currentAttempt?.settlement).toMatchObject({ kind: 'driver_result', outcome: 'cancelled', stopReason: 'deferred:confirmation_acp' });
+  expect((await h.runtime.send(h.session.id, 'confirmed input')).status).toBe('completed');
+});

@@ -58,7 +58,7 @@ export function relayHintLines(env: RelayPromptEnv = {}): string[] {
   const command = relayCommandFrom(env);
   return [
     `中途进展用 ${command} session send "内容"；成功只表示事件已发布，实际展示取决于会话设置，不证明 IM 已送达。${env.dutydeck_session_source === 'lark' ? '' : '最终答复直接输出，由运行时按设置交付。'}`,
-    `需要用户决定时用 ${command} session ask "问题"，仅退出 0 表示已回答，答案从 stdout 返回；2 表示参数或凭证缺失等用法错误，3 表示通道不可用或提问取消，124 表示超时。不要猜测用户选择；--choices/--multiple 等完整选项见同一命令加 --help（无需服务或凭证）。`,
+    `需要用户决定时用 ${command} session ask "问题"，仅退出 0 表示已回答，答案从 stdout 返回；2 表示参数或凭证缺失等用法错误，3 表示通道不可用、提问取消或已登记持久确认，124 表示超时。结构化单选直接用 --choices '[{"label":"选项"}]'；Claude 可直接用原生 AskUserQuestion，宿主会转成提问卡；其他参数按需查看同一命令的 session ask --help（无需服务或凭证）。只发送真实问题，不发测试卡；返回 deferred 表示确认已登记，宿主结束本轮，等待用户点击后另起一轮，不是用户取消或操作完成。`,
     '必须原样使用完整绑定命令，不要改用 PATH 中其他 dutydeck；超时或通道不可用不能视为用户已回答。'
   ];
 }

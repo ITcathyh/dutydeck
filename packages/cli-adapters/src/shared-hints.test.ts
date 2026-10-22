@@ -17,7 +17,7 @@ describe('routing block — relay command hints', () => {
     // 退出码契约要写进文案，否则 CLI 不知道怎么判读
     expect(block).toContain('仅退出 0 表示已回答');
     expect(block).toContain('2 表示参数或凭证缺失等用法错误');
-    expect(block).toContain('3 表示通道不可用或提问取消');
+    expect(block).toContain('3 表示通道不可用、提问取消或已登记持久确认');
     expect(block).toContain('124 表示超时');
     expect(block).toContain('超时或通道不可用不能视为用户已回答');
     // 与 larkGroupToolsPrompt 同样的告诫：不要改用 PATH 里的其他 dutydeck
@@ -25,6 +25,16 @@ describe('routing block — relay command hints', () => {
     // 不能再残留 M2 的占位文案
     expect(block).not.toContain('M2');
     expect(block).not.toContain('专用回传命令');
+  });
+
+  it('provides directly usable structured-choice JSON and distinguishes deferred from a user answer', () => {
+    const block = buildDutydeckRoutingBlock(undefined, relayEnv);
+    const json = /--choices '([^']+)'/.exec(block)?.[1];
+    expect(json).toBeDefined();
+    expect(JSON.parse(json!)).toEqual([{ label: '选项' }]);
+    expect(block).toContain('返回 deferred 表示确认已登记');
+    expect(block).toContain('本轮');
+    expect(block).toContain('原生 AskUserQuestion');
   });
 
   it('falls back to bare dutydeck when only the command prefix is missing', () => {

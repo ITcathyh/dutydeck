@@ -11,6 +11,12 @@ export const attemptStates = ['preparing', 'active', 'suspended', 'reconcile_req
 export type AttemptState = typeof attemptStates[number];
 export type SubmissionState = 'not_submitted' | 'intent_recorded' | 'acknowledged' | 'legacy_unknown';
 export type AttemptOutcome = 'completed' | 'failed' | 'interrupted' | 'cancelled' | 'unknown';
+/** Host-owned durable handoff; driver-generated status events cannot impersonate it. */
+export function deferredConfirmationId(events: AgentEvent[], taskId: string): string | undefined {
+  const event = events.find(item => item.taskId === taskId && item.type === 'status' && item.attemptId && item.id === `deferred:${item.attemptId}`);
+  const data = event?.data as { state?: string; askId?: string } | undefined;
+  return data?.state === 'confirmation_deferred' && typeof data.askId === 'string' ? data.askId : undefined;
+}
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 /** Reject lossy JSON coercion, accessors, cycles, sparse arrays and non-plain objects. */
 export function canonicalExecutionJson(value: unknown): string {
@@ -128,7 +134,7 @@ export interface RecoveryDecisionInput {
   evidenceRefs: string[]; resourceChecks: ResourceCheckRef[]; allowDuplicateEffects?: boolean;
 }
 export type SettlementEvidence =
-  | { kind: 'driver_result'; submissionId: string; outcome: 'completed' | 'failed' | 'interrupted'; outputDigest: string; stopReason: string; complete: true }
+  | { kind: 'driver_result'; submissionId: string; outcome: 'completed' | 'failed' | 'interrupted' | 'cancelled'; outputDigest: string; stopReason: string; complete: true }
   | { kind: 'not_submitted'; outcome: 'failed' | 'cancelled'; reason: string }
   | { kind: 'manual'; outcome: AttemptOutcome; decision: RecoveryDecisionInput; verifiedOutput?: { eventId: string; digest: string } };
 export interface ReconcileReason { reasonId: string; code: string; evidenceRefs: string[] }
@@ -359,7 +365,7 @@ export const taskExecutionSchemas = {
   observationSchema: z.object({ observationId: id, state: z.enum(['live', 'gone', 'unknown']), identityId: id.optional(), evidenceRef: id, observedAt: z.string().datetime() }).strict(),
   intentSchema: z.object({ submissionId: id, inputDigest: executionDigestSchema, resourceRefs: z.array(z.object({ resourceId: id, identityId: id }).strict()), recovery: recoverySchema.optional(), authorizationRefs: z.array(id), nativeContextRef:nativeContextRefSchema.optional(),contextProofId:id.optional(),driverInstanceId:id.optional() }).strict(),
   sessionSchema: z.object({ id, agentId: id, state: z.enum(['created','starting','idle','thinking','running_tool','waiting_for_permission','interrupting','interrupted','completed','failed','stopped']), cwd: id, runId: id, createdAt: z.string().datetime(), updatedAt: z.string().datetime(), model: z.string().optional(), reasoningEffort: z.string().optional(), systemPrompt: z.string().optional(), permissionMode: z.enum(permissionModes).optional(), source: id.optional(), sourceId: id.optional(), archivedAt: z.string().optional(), protocol: z.enum(['acp','jsonl','pipe','pty','pty-cli']).optional(), terminalBackend: z.enum(['tmux','herdr']).optional(), error: z.string().optional(), workspaceMode: z.enum(['shared','worktree']).optional(), workspaceSourceCwd: id.optional() }).strict(),
-  driverResult: z.object({ kind:z.literal('driver_result'), submissionId:id, outcome:z.enum(['completed','failed','interrupted']), outputDigest:executionDigestSchema, stopReason:id, complete:z.literal(true) }).strict(),
+  driverResult: z.object({ kind:z.literal('driver_result'), submissionId:id, outcome:z.enum(['completed','failed','interrupted','cancelled']), outputDigest:executionDigestSchema, stopReason:id, complete:z.literal(true) }).strict(),
   notSubmitted: z.object({ kind:z.literal('not_submitted'), outcome:z.enum(['failed','cancelled']), reason:id }).strict(),
   manual: z.object({ kind:z.literal('manual'), outcome:z.enum(['completed','failed','interrupted','cancelled','unknown']), decision:decisionSchema, verifiedOutput:z.object({eventId:id,digest:executionDigestSchema}).strict().optional() }).strict(),
   position: z.enum(['front','back']),
