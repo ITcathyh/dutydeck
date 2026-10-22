@@ -9,6 +9,8 @@ const resumedComposer = readFileSync(new URL('../fixtures/claude-resume-ready/sc
 // Real 2.1.287 smoke startup screen; only the isolated workspace is anonymized.
 // Readiness means input can be written, independently of provider login.
 const placeholderComposer = readFileSync(new URL('../fixtures/claude-placeholder-ready/screen.txt', import.meta.url), 'utf8');
+// 2.1.303 resumed pane with a two-line user statusLine; history/model/workspace anonymized.
+const statuslineComposer = readFileSync(new URL('../fixtures/claude-statusline-ready/screen.txt', import.meta.url), 'utf8');
 const cwd = '/workspace/trusted-project';
 const trustScreen = (selected: 'No, exit' | 'Yes, I trust this folder', path = cwd) => [
   '─'.repeat(120), 'Accessing workspace:', '', path, '',
@@ -56,6 +58,19 @@ class TrustBackend implements PtyLike {
 }
 
 describe('Claude family startup trust confirmation', () => {
+  it('accepts the recorded resumed composer with two statusLine rows before its mode footer', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = new TrustBackend(statuslineComposer);
+      let ready = false;
+      const preparing = prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd, permissionMode: 'full-trust' }).then(() => { ready = true; });
+      void preparing.catch(() => {});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(ready).toBe(true);
+      await preparing;
+      expect(backend.writes).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
   it('accepts a boxed native placeholder without sending startup keys', async () => {
     const backend = new TrustBackend(placeholderComposer);
     await prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd, permissionMode: 'full-trust' });
@@ -203,6 +218,18 @@ describe('Claude family startup trust confirmation', () => {
 
 describe('Claude family idle screen', () => {
   const adapter = createClaudeFamilyAdapter('claude-code');
+  it('recognizes the recorded two-line statusLine composer as idle', () => {
+    expect(adapter.isIdleScreen!(statuslineComposer)).toBe(true);
+  });
+  it.each([
+    statuslineComposer.replace('❯ ', '❯ unfinished draft'),
+    statuslineComposer.replace('  Context ██░░░░░░░░ 18%', '❯ Continue'),
+    statuslineComposer.replace('  Context ██░░░░░░░░ 18%', 'Enter to confirm'),
+    statuslineComposer.replace('  Context ██░░░░░░░░ 18%', 'Permission required'),
+    statuslineComposer.replace('  Context ██░░░░░░░░ 18%', 'Context 18%\nthird status row'),
+  ])('keeps an unsubmitted draft or interactive/oversized footer non-idle: %s', screen => {
+    expect(adapter.isIdleScreen!(screen)).toBe(false);
+  });
   it.each(Object.entries(idleScreens))('recognizes the empty composer at the bottom (%s)', (_name, screen) => {
     expect(adapter.isIdleScreen!(`❯ old request\nPrevious answer\n${screen}`)).toBe(true);
   });

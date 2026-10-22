@@ -139,13 +139,21 @@ const emptyComposerLine = (lines: string[], index: number) => lines[index] === '
  */
 const MODE_FOOTER_RE = /^(?:(?:⏵⏵|⏸) [a-z ]+ on\b|\? for shortcuts\b)/;
 /**
- * 屏幕底部是当前的空输入框：分隔线、空的 ❯、同样的分隔线，紧接权限模式状态栏，之后最多一行 ✔ 开头的通知（「✔ Update installed · Restart to apply」）。
- * 只认底部这一个框，历史里的 ❯、没提交的草稿、框下面还有别的输出都不算。
+ * 屏幕底部是当前的空输入框：分隔线、空的 ❯、同样的分隔线，之后可有最多两行自定义 statusLine，再接权限模式状态栏及最多一行 ✔ 通知。
+ * 只认底部这一个框，历史里的 ❯、没提交的草稿、页脚之后的正文都不算。
  */
 function emptyComposerAtBottom(lines: string[]): boolean {
   const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
-  return footer >= 3 && MODE_FOOTER_RE.test(lines[footer]!) && /^─{8,}$/.test(lines[footer - 1]!)
-    && lines[footer - 3] === lines[footer - 1] && emptyComposerLine(lines, footer - 2);
+  if (footer < 3 || !MODE_FOOTER_RE.test(lines[footer]!)) return false;
+  for (let statusRows = 0; statusRows <= 2; statusRows++) {
+    const border = footer - statusRows - 1;
+    if (border < 2 || !/^─{8,}$/.test(lines[border]!) || lines[border - 2] !== lines[border]
+      || !emptyComposerLine(lines, border - 1)) continue;
+    // A statusLine is display-only. Never skip a draft, menu, or confirmation
+    // while looking for the mode footer below the current composer.
+    return lines.slice(border + 1, footer).every(line => !/[❯›]|^(?:Permission required|Do you want to (?:proceed|allow)|Select an option|Enter to (?:select|confirm)|Accessing workspace:|Quick safety check:|Security guide)\b/i.test(line));
+  }
+  return false;
 }
 
 function isComposerScreen(screen: string): boolean {

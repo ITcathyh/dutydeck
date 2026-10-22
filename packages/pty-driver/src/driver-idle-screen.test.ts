@@ -6,7 +6,7 @@ import { PtyCliDriver } from './driver.js';
 
 const snapshots: TerminalSnapshot[] = [];
 afterEach(() => { for (const snapshot of snapshots.splice(0)) snapshot.dispose(); });
-const screens = ['claude-resume-ready', 'claude-placeholder-ready'].map(name => readFileSync(new URL(`../../cli-adapters/src/fixtures/${name}/screen.txt`, import.meta.url), 'utf8'));
+const screens = ['claude-resume-ready', 'claude-placeholder-ready', 'claude-statusline-ready'].map(name => readFileSync(new URL(`../../cli-adapters/src/fixtures/${name}/screen.txt`, import.meta.url), 'utf8'));
 const composer = '─'.repeat(80) + '\n❯ \n' + '─'.repeat(80) + '\n? for shortcuts';
 screens.push(composer, composer.replace('? for shortcuts', '⏸ manual mode on'), composer.replace('? for shortcuts', '⏵⏵ auto mode on (shift+tab to cycle)'));
 

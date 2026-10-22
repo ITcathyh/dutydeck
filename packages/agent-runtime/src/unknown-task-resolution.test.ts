@@ -148,11 +148,13 @@ describe('resolving result-unknown tasks', () => {
   });
 });
 
-it.each(['failed', 'completed', 'retry', 'settle'] as const)('resolves %s beside a real parsed idle Claude composer and releases queued work', async action => {
+it.each((['failed', 'completed', 'retry', 'settle'] as const).flatMap(action =>
+  ['claude-placeholder-ready', 'claude-statusline-ready'].map(screen => ({ action, screen }))
+))('resolves $action beside a real parsed idle Claude composer ($screen) and releases queued work', async ({ action, screen: fixtureName }) => {
   const snapshot = new TerminalSnapshot(120, 30);
   cleanups.push(async () => snapshot.dispose());
   const idleDriver = Object.assign(Object.create(PtyCliDriver.prototype), { snapshot, adapter: createCliAdapter('claude-code'), stopped: false, turnActive: false });
-  const screen = readFileSync(new URL('../../cli-adapters/src/fixtures/claude-placeholder-ready/screen.txt', import.meta.url), 'utf8');
+  const screen = readFileSync(new URL(`../../cli-adapters/src/fixtures/${fixtureName}/screen.txt`, import.meta.url), 'utf8');
   await snapshot.writeAndFlush(screen.replaceAll('\n', '\r\n'));
   const h = await fixture({ idle: () => idleDriver.isIdle() });
   await vi.waitFor(() => expect(h.runtime.inspectAgentQuiescence(h.session.id)).not.toBe('busy'));

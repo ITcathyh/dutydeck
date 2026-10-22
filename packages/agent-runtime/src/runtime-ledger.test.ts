@@ -66,6 +66,38 @@ async function fixture(options: RuntimeOptions = {}, onSend?: (emit: (event: Nor
 }
 
 describe('Runtime uses the execution ledger', () => {
+  it('logs the original driver exception when submission intent leaves its result unknown', async () => {
+    const warn = vi.fn();
+    const error = new Error('Claude 启动尚未就绪，请打开终端处理启动确认后再发送任务。');
+    const h = await fixture({ log: { warn } }, async () => { throw error; });
+    const task = await h.runtime.send(h.session.id, 'after resume');
+    expect(task.status).toBe('reconcile_required');
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: h.session.id, taskId: task.id, attemptId: task.currentAttemptId,
+      submissionState: 'intent_recorded', error: error.message,
+    }), 'Agent task execution failed');
+    expect(h.repos.execution.getTaskExecution(task.id)?.currentAttempt).toMatchObject({
+      state: 'reconcile_required', submissionState: 'intent_recorded', reconcileReason: { code: 'DRIVER_RESULT_UNKNOWN' },
+    });
+  });
+
+  it.each([false, true])('redacts credential canaries from newly logged driver diagnostics (Error=%s)', async asError => {
+    const warn = vi.fn();
+    const message = 'Claude startup failed: token=diagnostic-token-canary --password diagnostic-password-canary';
+    const error = asError ? Object.assign(new Error(message), {
+      stack: `${message}\n at spawn ANTHROPIC_API_KEY=diagnostic-key-canary`,
+      code: { token: 'diagnostic-code-canary' },
+    }) : message;
+    const h = await fixture({ log: { warn } }, async () => { throw error; });
+    const task = await h.runtime.send(h.session.id, 'after resume');
+    expect(task.status).toBe('reconcile_required');
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({
+      error: 'Claude startup failed: token=[REDACTED] --password [REDACTED]',
+      ...(asError ? { stack: expect.stringContaining('ANTHROPIC_API_KEY=[REDACTED]') } : {}),
+    }), 'Agent task execution failed');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('canary');
+  });
+
   it.each([false, true])('finishes an already completed send without replaying history (sync subscribe callback: %s)', async synchronous => {
     const h = await fixture();
     const envelope = request(h.session.id, 'already-completed');

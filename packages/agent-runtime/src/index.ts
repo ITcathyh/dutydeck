@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval } from '@dutydeck/shared';
+import { agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, redactCredentialText } from '@dutydeck/shared';
 import { AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
@@ -2586,6 +2586,12 @@ export class DutydeckRuntime {
         await observeEnd();
         // 提交前失败时 Agent 没产生任何事件，原因只记在结算上；先补一条错误事件，结果卡和 Web 才写得出为什么失败。
         const unsubmitted = this.repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.attemptId === ref.attemptId);
+        const failureCode = (error as { code?: unknown } | undefined)?.code;
+        this.options.log?.warn({ sessionId: id, taskId: task.id, attemptId: ref.attemptId,
+          submissionState: unsubmitted?.submissionState, error: redactCredentialText(error instanceof Error ? error.message : String(error)),
+          ...(error instanceof Error && error.stack ? { stack: redactCredentialText(error.stack) } : {}),
+          ...(typeof failureCode === 'string' && /^[A-Z0-9_]+$/.test(failureCode) ? { code: failureCode } : {}),
+        }, 'Agent task execution failed');
         if (unsubmitted && unsubmitted.state !== 'settled' && unsubmitted.submissionState === 'not_submitted' && !isTaskFenceRevocation(error)) {
           await this.emit(id, 'error', { message: error instanceof Error ? error.message : String(error) }).catch(() => {});
         }
