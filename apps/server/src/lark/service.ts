@@ -1220,6 +1220,7 @@ export class LarkCardService {
   private budget() { return requestBudgets.getStore()?.get(this); }
   private loadingImageKey?: string;
   private loadingImagePromise?: Promise<string | undefined>;
+  private identityFailures = new Map<string, { error: LarkServiceError; expiresAt: number }>();
 
   constructor(private readonly config: LarkBotConfig, private readonly fetcher: Fetch = globalThis.fetch) {}
 
@@ -1963,8 +1964,34 @@ export class LarkCardService {
     return payload.data.is_in_chat;
   }
 
+  /** Configuration refreshes discard failures, including results from requests already in flight. */
+  clearIdentityFailures(): void { this.identityFailures = new Map(); }
+
+  private identityRequest(path: string) {
+    return this.withRequestBudget(async signal => {
+      signal.throwIfAborted();
+      const failures = this.identityFailures;
+      const cached = failures.get(path);
+      if (cached && cached.expiresAt > Date.now()) throw cached.error;
+      failures.delete(path);
+      try { return await this.request(path, { method: 'GET' }); }
+      catch (error) {
+        // Only explicit invalid/cross-app/not-visible identity codes are definitive.
+        // Permission scopes, throttling and transport failures must remain retryable.
+        if (error instanceof LarkServiceError && error.code === 'LARK_OPENAPI_ERROR' && !signal.aborted
+          && [41050, 41012, 40001, 99992361].includes(Number(error.details?.upstreamCode))
+          && [200, 400, 403, 404].includes(Number(error.details?.upstreamHttpStatus))) {
+          failures.delete(path);
+          if (failures.size >= 1000) failures.delete(failures.keys().next().value!);
+          failures.set(path, { error, expiresAt: Date.now() + 60_000 });
+        }
+        throw error;
+      }
+    });
+  }
+
   async getUserEmails(openId: string): Promise<string[]> {
-    const payload = await this.request(`/open-apis/contact/v3/users/${encodeURIComponent(required(openId, 'openId'))}?user_id_type=open_id`, { method: 'GET' });
+    const payload = await this.identityRequest(`/open-apis/contact/v3/users/${encodeURIComponent(required(openId, 'openId'))}?user_id_type=open_id`);
     const user = payload.data?.user ?? {};
     return [...new Set([user.email, user.enterprise_email].map(value => String(value ?? '').trim().toLowerCase()).filter(Boolean))];
   }
@@ -1994,7 +2021,7 @@ export class LarkCardService {
 
   /** Preserve the contact lookup's numeric-code contract while using the common HTTP path. */
   private async contactRequest(path: string, options: { method?: string; body?: unknown }) {
-    try { return await this.request(path, options); }
+    try { return await (options.method === 'GET' ? this.identityRequest(path) : this.request(path, options)); }
     catch (error) {
       if (error instanceof LarkServiceError && error.code === 'LARK_OPENAPI_ERROR') {
         const code = Number(error.details?.upstreamCode);

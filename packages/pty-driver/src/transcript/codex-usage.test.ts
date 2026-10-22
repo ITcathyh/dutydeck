@@ -28,7 +28,7 @@ it('reads only appended bytes after the first poll and retains a partial JSONL l
     const calls = vi.mocked(fs.createReadStream).mock.calls.length;
     const walks = vi.mocked(walkFiles).mock.calls.length;
     const heads = vi.mocked(readHead).mock.calls.length;
-    expect(heads).toBe(0); // Exact filename match avoids scanning unrelated rollout heads.
+    expect(heads).toBe(1); // Verify only the named file, without reading unrelated rollout heads.
     expect((await readCodexSessionUsage('native-id', env, cwd))?.context?.used).toBe(10);
     expect(vi.mocked(fs.createReadStream).mock.calls.length).toBe(calls);
     expect(vi.mocked(walkFiles).mock.calls.length).toBe(walks);

@@ -290,6 +290,8 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 - **Task views**: Conversation, Changes, and Terminal for PTY connections only. The Results inspector contains changes, verification evidence, PRs and delivery records, with execution environment and task automation folded below. Turn completion, verification and PR status are separate facts.
 - **Reading state**: reading position, follow-latest state, and activity / tool expansion choices are stored per instance and task in the current tab's `sessionStorage`, including across task switches, settings and refresh. Theme, sidebar layout, task tab and inspector preferences stay in this browser. None of these preferences or drafts sync across devices.
 - **Settings scope**: personal interface, current task, bot / group, and instance access are labeled separately. Advanced model and reasoning settings stay collapsed during creation; Web tasks still default to an independent Git worktree, and full trust still needs explicit confirmation.
+- **Shared Agent model settings drafts** require confirmation before switching settings sections, closing or navigating away; browser refresh and page exit prompt while edits remain unsaved. Canceling departure or a failed save preserves the inputs; leaving is disabled during saving. Drafts stay in page memory, and API keys are never written to browser storage.
+- **Terminal connection status** distinguishes initialization, connecting and connected while waiting for output. Empty snapshots are valid. A handshake taking more than 10 seconds triggers automatic reconnection while retaining the received screen; read-only terminals never send input or remote resize requests.
 
 - **Task board**: Awaiting action / In progress / Completed / Archived; queueing and interrupt. **Terminal playback exists only for terminal-mode (`pty-cli`) agents**, 5000 lines at most. The delivery panel lists per-turn changes. The current task title and summary use loaded execution records and are not overwritten by a lagging task-list refresh; a late send acknowledgment does not overwrite loaded completion results. Selecting the current task again preserves unsent input. Directory, Agent and other configuration controls, along with close and cancel controls, are disabled while task creation or scheduled-task preparation is submitting. Refreshing the Agent list keeps closing disabled. After creation fails, configuration can be changed before retrying; if the first instruction fails to send, retrying reuses the created session.
 - **Read-only task details from Lark cards** show the source topic, group or private chat, and original initiator, with links back to known topics or chats. Unrecorded topics and missing historical origin records are marked explicitly; unavailable names fall back to known IDs.
@@ -359,6 +361,10 @@ The built-in Codex ACP agent gives an explicit `CODEX_PATH` priority for discove
 
 #### Terminal task status and recovery
 
+Once Claude Code logs show support for a full-turn completion marker (`turn_duration`), split answers wait for that marker, retaining later text, Stop-hook continuation and late errors from the same turn. Older formats without the marker retain their compatibility completion path.
+
+When Codex switches log files within the same native session, Dutydeck verifies ownership, drains complete records from the old file and continues from the new one. Copied history is not delivered again, and files belonging to another session are rejected.
+
 Codex and TraeX native recovery uses only records confirmed to belong to the current session. If inherited context cannot establish ownership, recovery is refused to avoid resuming another session. After an idle Codex session is released, the next turn resumes its verified native context.
 
 Codex and TraeX terminal tasks settle from success, failure or cancellation events bound to the current native turn. A partial answer does not override a later failure; cancellation is recorded as an interruption. A recovering Codex turn without text output still ends with the confirmed cancellation or error when the corresponding input is verified. TraeX reads session metadata containing large model catalogs so final answers arrive and tasks complete. Recovery drains the old log segment before reading the next segment for the same session. New canonical records retain progress, input receipts and final answers while deduplicating mirrored records.
@@ -385,6 +391,8 @@ Lark bots can use `ask`, `approve-reads` and `full-trust`. `deny-all` is not ava
 | `full-trust` | No confirmation. The only option when the Agent cannot do Lark approval; needs an explicit confirmation |
 
 `lark create` defaults to `ask` and refuses unsupported Agents without `--full-trust`; the Web wizard defaults to `ask` when the Agent supports approval, else `full-trust`.
+
+Lark email admission and identity lookups cache confirmed invalid, cross-app or invisible-user failures for up to 60 seconds per client, so a permission repair may take that long to be retried. Bot configuration refreshes or credential changes clear the cache. Successful identities, rate limits, server errors, network errors and timeouts are not cached; subsequent lookups still check for revoked access.
 
 ### 3. Environment variables
 

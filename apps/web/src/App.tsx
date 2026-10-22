@@ -33,7 +33,7 @@ import { createEventWindow, type EventWindow } from './event-history';
 import { summaryFromTasks } from './run-summary';
 import { nextActionForState, sessionWorkspaceName, type WorkbenchView } from './workspace-model';
 import { appLocationPath, OVERLAY_HISTORY_MARK, parseAppLocation, sessionPath, type AppLocation, type AppRoute, type OverlayRoute, type PrimaryNav, type LarkSetupTarget } from './app-route';
-import type { ControlCenterSection } from './components/ControlCenterModal';
+import type { ControlCenterSection, SettingsLeaveGuard } from './components/ControlCenterModal';
 import { useMediaQuery } from './useMediaQuery';
 import { currentInstance, instanceHomePath } from './instance';
 import { captureDialogOpener } from './useDialogFocus';
@@ -67,6 +67,7 @@ const WorkspaceGroupsModal = lazy(() => import('./components/WorkspaceGroupsModa
 type DetailTab = 'timeline' | 'changes' | 'terminal';
 type TaskListFilters = { view: WorkbenchView; query: string; project: string };
 const LIST_HISTORY_KEY = 'dutydeckTaskFilters';
+const HISTORY_POSITION_KEY = 'dutydeckHistoryPosition';
 const isTaskListFilters = (value: unknown): value is TaskListFilters => value !== null && typeof value === 'object' && 'view' in value && ['all', 'attention', 'active', 'completed', 'archived'].includes(String(value.view)) && 'query' in value && typeof value.query === 'string' && 'project' in value && typeof value.project === 'string';
 
 type TaskView = { tab: DetailTab; inspector: boolean; terminalVisited?: boolean; changesVisited?: boolean };
@@ -123,6 +124,10 @@ export default function App() {
   // 路由与「可深链的浮层」是同一个东西的两半，合成一个 state：分开存会让 URL 与界面
   // 各走各的，回退键、刷新、分享链接三者立刻打架（见 app-route.ts 的说明）。
   const [location, setLocation] = useState<AppLocation>(currentLocation);
+  const settingsLeaveGuard = useRef<SettingsLeaveGuard | undefined>(undefined);
+  const registerSettingsLeaveGuard = useCallback((guard: SettingsLeaveGuard | undefined) => { settingsLeaveGuard.current = guard; }, []);
+  const historyEntry = useRef({ path: `${window.location.pathname}${window.location.search}`, state: window.history.state, position: Number(window.history.state?.[HISTORY_POSITION_KEY] ?? 0) });
+  const restoringSettingsHistory = useRef<{ path: string; restored(): void } | undefined>(undefined);
   const route = location.route;
   const [experimental] = useExperimental();
   // 群与权限只有草稿态：实验功能关闭时，?panel=groups 深链不打开浮层。
@@ -172,12 +177,18 @@ export default function App() {
    * 甩过来的深链（此时 back() 会离开站点，改用 replaceState 抹掉 query）。
    */
   const navigate = useCallback((next: AppLocation, options?: { replace?: boolean }) => {
-    setLocation(next);
-    const nextPath = appLocationPath(next);
-    if (`${window.location.pathname}${window.location.search}` === nextPath) return;
-    const state = { [LIST_HISTORY_KEY]: taskFiltersRef.current, sessionId: next.route.kind === 'session' ? next.route.sessionId : undefined, ...(next.overlay ? { [OVERLAY_HISTORY_MARK]: true } : {}) };
-    if (options?.replace) window.history.replaceState(state, '', nextPath);
-    else window.history.pushState(state, '', nextPath);
+    const commit = () => {
+      setLocation(next);
+      const nextPath = appLocationPath(next);
+      if (`${window.location.pathname}${window.location.search}` === nextPath) return;
+      const position = historyEntry.current.position + (options?.replace ? 0 : 1);
+      const state = { [HISTORY_POSITION_KEY]: position, [LIST_HISTORY_KEY]: taskFiltersRef.current, sessionId: next.route.kind === 'session' ? next.route.sessionId : undefined, ...(next.overlay ? { [OVERLAY_HISTORY_MARK]: true } : {}) };
+      if (options?.replace) window.history.replaceState(state, '', nextPath);
+      else window.history.pushState(state, '', nextPath);
+      historyEntry.current = { path: nextPath, state, position };
+    };
+    if (settingsLeaveGuard.current) settingsLeaveGuard.current(commit);
+    else commit();
   }, []);
 
   const openOverlay = useCallback((next: OverlayRoute) => {
@@ -287,14 +298,48 @@ export default function App() {
 
   useEffect(() => {
     const syncSelectionFromLocation = () => {
+      const path = `${window.location.pathname}${window.location.search}`;
+      const restoration = restoringSettingsHistory.current;
+      if (restoration?.path === path) {
+        restoringSettingsHistory.current = undefined;
+        restoration.restored();
+        return;
+      }
       const next = currentLocation();
-      const savedFilters: unknown = window.history.state?.[LIST_HISTORY_KEY];
-      if (isTaskListFilters(savedFilters)) {
-        taskFiltersRef.current = savedFilters;
-        setTaskFiltersPreference(savedFilters);
-      } else window.history.replaceState({ ...window.history.state, [LIST_HISTORY_KEY]: taskFiltersRef.current }, '', window.location.href);
-      setLocation(next);
-      applySessionSelection(next.route.kind === 'session' ? next.route.sessionId : undefined);
+      const state = window.history.state;
+      const position: unknown = state?.[HISTORY_POSITION_KEY];
+      const commit = () => {
+        const savedFilters: unknown = state?.[LIST_HISTORY_KEY];
+        if (isTaskListFilters(savedFilters)) {
+          taskFiltersRef.current = savedFilters;
+          setTaskFiltersPreference(savedFilters);
+        }
+        const nextPosition = typeof position === 'number' ? position : historyEntry.current.position;
+        const nextState = { ...state, [HISTORY_POSITION_KEY]: nextPosition, [LIST_HISTORY_KEY]: taskFiltersRef.current };
+        window.history.replaceState(nextState, '', path);
+        historyEntry.current = { path, state: nextState, position: nextPosition };
+        setLocation(next);
+        applySessionSelection(next.route.kind === 'session' ? next.route.sessionId : undefined);
+      };
+      if (!settingsLeaveGuard.current || path === historyEntry.current.path) { commit(); return; }
+      // popstate 已经移动了浏览器历史。先回到草稿 entry，确认后才重新走向目标。
+      const source = historyEntry.current;
+      const delta = typeof position === 'number' ? position - source.position : 0;
+      let restored = false;
+      let approved = false;
+      const replay = () => { settingsLeaveGuard.current = undefined; window.history.go(delta || -1); };
+      const allowed = settingsLeaveGuard.current(() => { approved = true; if (restored) replay(); });
+      if (allowed) { commit(); return; }
+      if (delta) {
+        restoringSettingsHistory.current = { path: source.path, restored: () => { restored = true; if (approved) replay(); } };
+        window.history.go(-delta);
+      } else {
+        // 旧 entry 没有位置标记：保留目标，再补回当前设置 entry，避免守卫反复触发。
+        window.history.replaceState({ ...state, [HISTORY_POSITION_KEY]: source.position - 1 }, '', path);
+        window.history.pushState(source.state, '', source.path);
+        restored = true;
+        if (approved) replay();
+      }
     };
     syncSelectionFromLocation();
     window.addEventListener('popstate', syncSelectionFromLocation);
@@ -554,7 +599,7 @@ export default function App() {
     </div>
     {newOpen && <NewSessionModal open initialAgentId={newAgentId} onClose={() => setNewOpen(false)} onOpenAgentSetup={() => { setNewOpen(false); openSettings('agents'); }} onCreated={(session, task) => { setRunSummaries(current => ({ ...current, [session.id]: { sessionId: session.id, taskId: task.id, prompt: task.prompt, status: task.status, queuedCount: task.status === 'queued' ? 1 : 0, updatedAt: task.updatedAt || task.createdAt } })); void qc.invalidateQueries({ queryKey: ['sessions'] }); selectSession(session.id); setNewOpen(false); setActionError(undefined); }} agents={agents.data ?? []} capabilities={systemCapabilities.data}/>}
     {overlay?.kind === 'lark-setup' && <Suspense fallback={overlayFallback('正在打开 Bot 绑定向导…')}><LarkConfigModal key={overlay.target === 'new' ? 'new' : overlay.target?.appId ?? 'manage'} target={overlay.target} agents={agents.data ?? []} onClose={() => { closeOverlay(); void qc.invalidateQueries({ queryKey: ['lark-config'] }); }}/></Suspense>}
-    {overlay?.kind === 'settings' && <Suspense fallback={overlayFallback('正在打开设置与接入…')}><ControlCenterModal open initialSection={overlay.section} agents={agents.data ?? []} legacyBots={larkConfig.data?.bots ?? []} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsLoading={larkConfig.isLoading} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} authRequired={authStatus.data?.required} onClose={closeOverlay} onCreateTask={agentId => { closeOverlay(); openCreateTaskForAgent(agentId); }} onOpenLarkSetup={openLarkSetup} onOpenGroups={() => openOverlay({ kind: 'groups' })} onOpenSchedules={() => openOverlay({ kind: 'automation' })}/></Suspense>}
+    {overlay?.kind === 'settings' && <Suspense fallback={overlayFallback('正在打开设置与接入…')}><ControlCenterModal open onLeaveGuardChange={registerSettingsLeaveGuard} initialSection={overlay.section} agents={agents.data ?? []} legacyBots={larkConfig.data?.bots ?? []} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsLoading={larkConfig.isLoading} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} authRequired={authStatus.data?.required} onClose={closeOverlay} onCreateTask={agentId => { closeOverlay(); openCreateTaskForAgent(agentId); }} onOpenLarkSetup={openLarkSetup} onOpenGroups={() => openOverlay({ kind: 'groups' })} onOpenSchedules={() => openOverlay({ kind: 'automation' })}/></Suspense>}
     {overlay?.kind === 'groups' && <Suspense fallback={overlayFallback('正在打开群配置…')}><GroupPolicyModal open onClose={closeOverlay}/></Suspense>}
     {overlay?.kind === 'automation' && <Dialog open onClose={closeOverlay} label="任务自动化" size="lg">
       <Dialog.Header><h2 className="text-title font-semibold">任务自动化</h2><span className="ml-auto"><IconButton label="关闭自动化" onClick={closeOverlay}><X size={16}/></IconButton></span></Dialog.Header>

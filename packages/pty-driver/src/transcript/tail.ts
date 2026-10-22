@@ -100,6 +100,11 @@ export interface JsonlTailerOptions {
   watchForSwitch?: boolean;
   /** Verified segments of the same native session: drain old, read new from 0. */
   followSegments?: boolean;
+  /** Same-session copied rollout generations: preserve mapping and exclude
+   * previously consumed raw records before receipt matching or projection. */
+  followGenerations?: boolean;
+  generationScope?: () => string | undefined;
+  generationRecordKey?: (entry: TranscriptEntry, rawLine: string) => string;
   validateRestorePath?: (path: string) => boolean;
   inputText?: (entry: TranscriptEntry) => string | undefined;
   inputTimestamp?: (entry: TranscriptEntry) => number;
@@ -126,6 +131,11 @@ export class JsonlTailer implements TranscriptEventSource {
   private readonly pollIntervalMs: number;
   private readonly watchForSwitch: boolean;
   private readonly followSegments: boolean;
+  private readonly followGenerations: boolean;
+  private readonly generationScope?: () => string | undefined;
+  private readonly generationRecordKey?: JsonlTailerOptions['generationRecordKey'];
+  private readonly consumedRecords = new Map<string, number>();
+  private readonly generationRecords = new Map<string, number>();
   private readonly validateRestorePath?: JsonlTailerOptions['validateRestorePath'];
   private readonly inputText?: JsonlTailerOptions['inputText'];
   private readonly inputTimestamp?: JsonlTailerOptions['inputTimestamp'];
@@ -166,6 +176,9 @@ export class JsonlTailer implements TranscriptEventSource {
     this.pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_MS;
     this.watchForSwitch = opts.watchForSwitch ?? true;
     this.followSegments = opts.followSegments ?? false;
+    this.followGenerations = opts.followGenerations ?? false;
+    this.generationScope = opts.generationScope;
+    this.generationRecordKey = opts.generationRecordKey;
     this.validateRestorePath = opts.validateRestorePath;
     this.inputText = opts.inputText;
     this.inputTimestamp = opts.inputTimestamp;
@@ -274,6 +287,7 @@ export class JsonlTailer implements TranscriptEventSource {
   stop(): void {
     for (const receipt of this.receipts) receipt.finish(new Error('Transcript stopped before native input receipt'));
     this.toolEvents.clear();
+    this.consumedRecords.clear(); this.generationRecords.clear();
     this.resetMapping?.();
     this.generation++;
     this.polling = false;
@@ -294,7 +308,7 @@ export class JsonlTailer implements TranscriptEventSource {
   private async tick(resolvedPath: string | undefined, waterline: number | undefined, generation: number, previousSize?: number): Promise<void> {
     try {
       if (!this.currentPath) {
-        const path = this.followSegments && this.restoreCursor?.path && this.validateRestorePath?.(this.restoreCursor.path)
+        const path = (this.followSegments || this.followGenerations) && this.restoreCursor?.path && this.validateRestorePath?.(this.restoreCursor.path)
           ? this.restoreCursor.path : resolvedPath;
         if (!path) {
           if (this.restoreCursor?.path) {
@@ -324,7 +338,7 @@ export class JsonlTailer implements TranscriptEventSource {
           // Rebuild only the native tool identity set, without publishing old
           // events. A legacy call before the durable cursor can have its modern
           // mirror after it. Chunked reads keep restore memory and I/O bounded.
-          if (this.deduplicateTools || this.baselineMapping) await this.drain(restoreOffset, generation, true);
+          if (this.deduplicateTools || this.baselineMapping || this.followGenerations) await this.drain(restoreOffset, generation, true);
           if (generation !== this.generation) return;
           this.offset = restoreOffset;
           this.completedOffset = restoreOffset;
@@ -337,7 +351,7 @@ export class JsonlTailer implements TranscriptEventSource {
           await this.drain(size, generation);
           return;
         }
-        if ((this.deduplicateTools || this.baselineMapping) && !this.pendingBirth) {
+        if ((this.deduplicateTools || this.baselineMapping || this.followGenerations) && !this.pendingBirth) {
           await this.drain(size, generation, true);
           return;
         }
@@ -369,6 +383,20 @@ export class JsonlTailer implements TranscriptEventSource {
       if (this.watchForSwitch) {
         const path = resolvedPath;
         if (path && path !== this.currentPath) {
+          if (this.followGenerations) {
+            // A generation can replace an already-unlinked old file, or copy
+            // its unfinished UTF-8 suffix as a complete new record. Drain all
+            // available complete old lines, then reread the new file from 0.
+            if (previousSize !== undefined) await this.drain(previousSize, generation);
+            if (generation !== this.generation || waterline === undefined) return;
+            this.currentPath = path;
+            this.offset = this.completedOffset = this.pendingStartOffset = 0;
+            this.pending = []; this.pendingBytes = 0; this.pendingPosition = undefined;
+            this.generationRecords.clear();
+            for (const receipt of this.receipts) { receipt.path = path; receipt.offset = 0; }
+            await this.drain(waterline, generation);
+            return;
+          }
           if (this.followSegments) {
             await this.drain(previousSize, generation);
             if (generation !== this.generation || this.pendingBytes || waterline === undefined) return;
@@ -483,6 +511,15 @@ export class JsonlTailer implements TranscriptEventSource {
       return; // Malformed line — skip silently.
     }
     if (!entry || typeof entry !== 'object') return;
+    let recordIdentity: string | undefined;
+    if (this.followGenerations) {
+      const hash = createHash('sha256').update(this.generationRecordKey?.(entry, rawLine) ?? rawLine).digest('hex');
+      const occurrence = (this.generationRecords.get(hash) ?? 0) + 1;
+      this.generationRecords.set(hash, occurrence);
+      if (occurrence <= (this.consumedRecords.get(hash) ?? 0)) return;
+      this.consumedRecords.set(hash, occurrence);
+      recordIdentity = `${this.generationScope?.() ?? ''}\0${hash}\0${occurrence}`;
+    }
     if (!baseline && this.inputText && this.receipts.size) {
       const input = this.inputText(entry);
       if (input !== undefined) {
@@ -517,11 +554,7 @@ export class JsonlTailer implements TranscriptEventSource {
       }
       if (baseline) continue;
       const sourceId = createHash('sha256')
-        .update(this.currentPath ?? '')
-        .update('\0')
-        .update(String(lineOffset))
-        .update('\0')
-        .update(rawLine)
+        .update(recordIdentity ?? `${this.currentPath ?? ''}\0${lineOffset}\0${rawLine}`)
         .update('\0')
         .update(String(eventIndex))
         .digest('hex');

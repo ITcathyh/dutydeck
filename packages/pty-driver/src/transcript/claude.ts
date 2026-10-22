@@ -405,6 +405,11 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private inputError: NormalizedDriverEvent | undefined;
   private terminalScope = false;
   private turnTerminal = false;
+  /** Learned from both historical and live main-thread records. */
+  private durationMarkerSeen = false;
+  private readonly durationUuids = new Set<string>();
+  private durationComplete = false;
+  private inputAssistantSeen = false;
   private terminalRevision = 0;
   private terminalPosition: TranscriptPosition | undefined;
   private recoveredInput = false;
@@ -468,6 +473,12 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         if (nativeInput && !notification) { this.observedInputId = entry.uuid; this.memoryCalls.clear(); this.backgroundReported = false; }
         const reportedBackground = claudePendingBackgroundWork(entry);
         if (reportedBackground !== undefined) {
+          this.durationMarkerSeen = true;
+          if (typeof entry.uuid === 'string') {
+            const replay = this.durationUuids.has(entry.uuid);
+            this.durationUuids.add(entry.uuid);
+            if (replay && !baseline) return backgroundChanged ? [{ type: 'status', data: this.backgroundTasks.snapshot() }] : undefined;
+          }
           this.backgroundReported = true;
           if (baseline) this.backgroundWork = reportedBackground;
         }
@@ -485,19 +496,26 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         } else if (nativeInput && !notification && entry !== this.receiptEntry) {
           this.terminalScope = false; this.turnTerminal = false; this.recoveredInput = false;
         }
-        if (this.inputUuid && entry.isSidechain !== true) {
-          // A different native user input starts another turn, even when it
-          // follows our history. Its errors cannot settle our submission.
-          if (nativeInput && !notification && entry.uuid !== this.inputUuid) {
-            this.inputEntries.clear(); this.turnError = undefined; this.inputError = undefined;
-          } else if (typeof entry.uuid === 'string' && this.inputEntries.has(entry.parentUuid)) {
-            this.inputEntries.add(entry.uuid);
-          }
+        // A newer human input closes this receipt's output scope. The driver
+        // may still be draining its previous screen; never attach the new
+        // input's answer or failure to that original Attempt.
+        if (this.receiptEntry && !this.terminalScope) {
+          this.inputEntries.clear();
+          return backgroundChanged ? [backgroundEvent] : undefined;
+        }
+        if (this.inputUuid && entry.isSidechain !== true && typeof entry.uuid === 'string'
+          && (this.inputEntries.has(entry.parentUuid)
+            // Some native dialects omit parentUuid on every record. Their
+            // physical user boundary scopes output; a parentless duration
+            // still needs this input's assistant evidence before it can end it.
+            || (this.terminalScope && entry.parentUuid === undefined && this.observedInputId === this.inputUuid
+              && (entry.type === 'assistant' || (reportedBackground !== undefined && this.inputAssistantSeen))))) {
+          this.inputEntries.add(entry.uuid);
         }
         const pending = claudePendingBackgroundWork(entry);
         if (pending !== undefined) this.backgroundWork = pending;
         const terminal = pending === 0 || (entry.type === 'assistant'
-          && (['end_turn', 'stop_sequence'].includes(entry.message?.stop_reason)
+          && ((!this.durationMarkerSeen && ['end_turn', 'stop_sequence'].includes(entry.message?.stop_reason))
             || (entry.message?.model === '<synthetic>' && entry.isApiErrorMessage !== true)));
         const bound = this.terminalScope && entry.isSidechain !== true
           && (this.inputUuid ? this.inputEntries.has(entry.uuid)
@@ -508,6 +526,9 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
           this.inputEntries.add(entry.uuid);
         }
         if (bound) {
+          if (entry.type === 'assistant') this.inputAssistantSeen = true;
+          if (pending !== undefined) this.durationComplete = true;
+          else if (entry.type === 'assistant') this.durationComplete = false;
           if (notification || (pending !== undefined && pending > 0)) this.turnTerminal = false;
           else if (terminal) {
             const uuid = typeof entry.uuid === 'string' ? entry.uuid : undefined;
@@ -522,12 +543,11 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         }
         const apiError = claudeApiError(entry);
         if (apiError) {
-          // Right after a text step the runtime already completes the turn (a
-          // stop-hook continuation, or an answer cut short mid-stream), and
-          // reporting the error would fail an answer the user has. Otherwise
-          // it is the reason the turn ends without final text.
+          // In marker dialects a Stop hook can fail after partial text. Keep
+          // that failure on this input until its complete turn boundary.
+          // Legacy dialects retain their existing last-text compatibility.
           if (!this.inputUuid || this.inputEntries.has(entry.uuid)) {
-            this.turnError = this.lastActivity === 'text' ? undefined : apiError;
+            this.turnError = !this.durationMarkerSeen && this.lastActivity === 'text' ? undefined : apiError;
             this.inputError = this.inputUuid ? this.turnError : undefined;
           }
           return undefined;
@@ -656,6 +676,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   }
   pendingBackgroundWork(): number { return Math.max(this.backgroundWork, this.backgroundReported ? this.backgroundTasks.snapshot().count : 0); }
   hasIndependentBackgroundWork(): boolean { return this.backgroundWork === 0 && this.backgroundTasks.independent(); }
+  get requiresTurnTerminal(): boolean { return this.durationMarkerSeen && this.terminalScope && !this.durationComplete; }
   hasTurnTerminal(): boolean { return this.turnTerminal; }
   turnTerminalRevision(): number { return this.terminalRevision; }
   captureWatermark(): TranscriptPosition | undefined { return this.tailer.captureWatermark(); }
@@ -669,6 +690,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   hasRecoveredInput(): boolean { return this.recoveredInput && this.terminalScope; }
   private bindInput(entry: any): void {
     this.receiptEntry = entry;
+    this.durationComplete = false; this.inputAssistantSeen = false;
     this.terminalPosition = undefined; this.recoveredInput = false;
     this.terminalScope = true; this.turnTerminal = false; this.terminalUuids.clear();
     this.inputUuid = typeof entry.uuid === 'string' ? entry.uuid : undefined;
@@ -730,6 +752,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     };
   }
   takeTurnError(): NormalizedDriverEvent | undefined {
+    if (this.requiresTurnTerminal && !this.turnTerminal) return undefined;
     const error = this.turnError;
     this.turnError = undefined; this.inputError = undefined;
     this.lastActivity = undefined;

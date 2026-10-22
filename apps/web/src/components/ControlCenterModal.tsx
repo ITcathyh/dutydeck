@@ -1,8 +1,9 @@
+import { ConfirmDialog } from './ConfirmDialog';
 import { AgentModelSettings } from './AgentModelSettings';
 import { supportsModelServiceSettings } from '../agent-model-support';
 import { currentInstance } from '../instance';
 import type { LarkSetupTarget } from '../app-route';
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowRight,
@@ -23,6 +24,8 @@ import { Badge, Banner, Button, Card, Dialog, EmptyState, Field, IconButton, Inp
 import { permissionLabels } from './ui';
 import { useExperimental } from '../experimental';
 
+export type SettingsLeaveGuard = (action: () => void) => boolean;
+
 export type ControlCenterSection = 'agents' | 'lark' | 'groups' | 'automation' | 'experimental';
 
 type Props = {
@@ -37,6 +40,7 @@ type Props = {
   larkBotsFailed?: boolean;
   larkBotsRetrying?: boolean;
   onRetryLarkBots?(): void;
+  onLeaveGuardChange?(guard: SettingsLeaveGuard | undefined): void;
   authRequired?: boolean;
   onClose(): void;
   onCreateTask(agentId: string): void;
@@ -86,6 +90,7 @@ export function ControlCenterModal({
   larkBotsFailed = false,
   larkBotsRetrying = false,
   onRetryLarkBots,
+  onLeaveGuardChange,
   authRequired,
   onClose,
   onCreateTask,
@@ -100,6 +105,22 @@ export function ControlCenterModal({
   const [displayName, setDisplayName] = useState('');
   const [externalAppId, setExternalAppId] = useState('');
   const [brand, setBrand] = useState<'feishu' | 'lark'>('feishu');
+  const [modelStates, setModelStates] = useState<Record<string, { dirty: boolean; saving: boolean }>>({});
+  const [modelReset, setModelReset] = useState(0);
+  const previousNavigation = useRef({ open: false, section: initialSection });
+  const [pendingLeave, setPendingLeave] = useState<(() => void) | undefined>();
+  const modelDirty = Object.values(modelStates).some(state => state.dirty);
+  const modelSaving = Object.values(modelStates).some(state => state.saving);
+  const reportModelState = useCallback((agentId: string, dirty: boolean, saving = false) => {
+    setModelStates(states => states[agentId]?.dirty === dirty && states[agentId]?.saving === saving ? states : { ...states, [agentId]: { dirty, saving } });
+  }, []);
+  const modelCallbacks = useMemo(() => Object.fromEntries(agents.map(agent => [agent.id, (dirty: boolean, saving?: boolean) => reportModelState(agent.id, dirty, saving)])), [agents, reportModelState]);
+  useEffect(() => {
+    if (!open || !modelDirty) return;
+    const beforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', beforeUnload);
+    return () => window.removeEventListener('beforeunload', beforeUnload);
+  }, [open, modelDirty]);
 
   const capabilities = useQuery({ queryKey: ['foundation-capabilities'], queryFn: foundationApi.capabilities, enabled: open && experimental, retry: false });
   const matrix = useQuery({ queryKey: ['foundation-group-matrix'], queryFn: foundationApi.groupMatrix, enabled: open && experimental && capabilities.data?.repositoriesWired === true, retry: false });
@@ -116,12 +137,28 @@ export function ControlCenterModal({
     }
   });
 
+  const requestLeave = useCallback<SettingsLeaveGuard>(action => {
+    if (createBot.isPending || modelSaving) return false;
+    if (modelDirty) { setPendingLeave(() => action); return false; }
+    action();
+    return true;
+  }, [createBot.isPending, modelSaving, modelDirty]);
   useEffect(() => {
-    if (open) setSection(initialSection);
-    else {
+    onLeaveGuardChange?.(open && (modelDirty || modelSaving) ? requestLeave : undefined);
+    return () => onLeaveGuardChange?.(undefined);
+  }, [open, modelDirty, modelSaving, requestLeave, onLeaveGuardChange]);
+
+  useEffect(() => {
+    if (open) {
+      if (!previousNavigation.current.open) setSection(initialSection);
+      else if (previousNavigation.current.section !== initialSection) requestLeave(() => setSection(initialSection));
+    } else {
       setCreateOpen(false);
+      setModelStates({});
+      setPendingLeave(undefined);
       createBot.reset();
     }
+    previousNavigation.current = { open, section: initialSection };
   }, [open, initialSection]);
 
   const channelBots = matrix.data?.bots ?? [];
@@ -167,19 +204,19 @@ export function ControlCenterModal({
     而不是在 onClose 里 return——后者仍会让 Escape 被 preventDefault 吃掉，
     嵌套浮层就再也收不到那次按键。
   */
-  const busy = createBot.isPending;
+  const busy = createBot.isPending || modelSaving;
   const visibleSections = sections.filter(item => experimental || !draftSections.includes(item.id));
   // 深链或旧状态指向被隐藏的分区时回落到 Agent。
   const activeSection = visibleSections.some(item => item.id === section) ? section : 'agents';
 
-  return <Dialog open={open} onClose={onClose} label="Dutydeck 设置与接入" size="xl" closeOnEscape={!busy} closeOnScrim={!busy}>
+  return <><Dialog open={open} onClose={() => requestLeave(onClose)} label="Dutydeck 设置与接入" size="xl" closeOnEscape={!busy && !pendingLeave} closeOnScrim={!busy && !pendingLeave}>
     <Dialog.Header>
       <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-action-soft text-action"><Settings2 size={18}/></span>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2"><h2 className="text-title font-semibold text-primary">设置与接入</h2>{authRequired === false ? statePill('受信开发机模式', 'ready') : authRequired === true ? statePill('访问令牌保护') : statePill('正在检查访问模式')}</div>
         <p className="mt-1 text-caption text-subtle">按作用范围查找设置。机器人配置影响对应机器人；实例接入影响当前实例。</p>
       </div>
-      <IconButton label="关闭设置与接入" onClick={onClose}><X size={16}/></IconButton>
+      <IconButton label="关闭设置与接入" disabled={busy} onClick={() => requestLeave(onClose)}><X size={16}/></IconButton>
     </Dialog.Header>
     {authRequired === false && <div className="shrink-0 px-5 pt-3"><Banner tone="info"><strong>受信开发机模式：</strong>当前实例无需粘贴访问 token。请只在受信网络或已有上游鉴权的环境中使用。</Banner></div>}
 
@@ -189,7 +226,7 @@ export function ControlCenterModal({
           <div className="text-caption font-semibold uppercase tracking-[.12em] text-subtle">建议下一步</div>
           <div className="mt-1 text-body font-semibold text-primary">{nextStep.title}</div>
           <p className="mt-1 text-caption text-secondary">{nextStep.detail}</p>
-          <Button variant="primary" className="mt-2 w-full" onClick={() => nextStep.action()}><span className="flex w-full items-center justify-between">继续<ArrowRight size={14}/></span></Button>
+          <Button variant="primary" className="mt-2 w-full" onClick={() => requestLeave(nextStep.action)}><span className="flex w-full items-center justify-between">继续<ArrowRight size={14}/></span></Button>
         </Card>
         {/*
           可访问名是 label + description 两段拼出来的（App.dom.test.tsx 断言
@@ -202,22 +239,31 @@ export function ControlCenterModal({
             { label: '本任务', ids: ['automation'] },
             { label: '机器人 / 群聊', ids: ['lark', 'groups'] },
             { label: '实例与接入', ids: ['agents', 'experimental'] }
-          ].map(group => <div key={group.label}><h3 className="mb-1 px-3 text-caption font-semibold text-subtle">{group.label}</h3>{group.label === '本任务' && <p className="mb-2 px-3 text-caption text-secondary">目录、权限与模型在任务中查看；创建时可选择，影响该任务。</p>}<div className="grid grid-cols-2 gap-1 md:grid-cols-1">{visibleSections.filter(item => group.ids.includes(item.id)).map(item =>         <button key={item.id} type="button" data-dialog-initial-focus={activeSection === item.id ? '' : undefined} aria-current={activeSection === item.id ? 'page' : undefined} onClick={() => setSection(item.id)} className={`flex min-h-12 items-center gap-2 rounded-md px-3 text-left ${activeSection === item.id ? 'bg-surface text-primary shadow-card' : 'text-secondary hover:bg-hover'}`}><item.Icon size={15}/><span className="min-w-0"><strong className="block text-caption font-semibold">{item.label}</strong><span className="hidden truncate text-caption text-subtle md:block">{item.description}</span></span><ChevronRight size={13} className="ml-auto hidden md:block"/></button>)}</div></div>)}
+          ].map(group => <div key={group.label}><h3 className="mb-1 px-3 text-caption font-semibold text-subtle">{group.label}</h3>{group.label === '本任务' && <p className="mb-2 px-3 text-caption text-secondary">目录、权限与模型在任务中查看；创建时可选择，影响该任务。</p>}<div className="grid grid-cols-2 gap-1 md:grid-cols-1">{visibleSections.filter(item => group.ids.includes(item.id)).map(item =>         <button key={item.id} type="button" data-dialog-initial-focus={activeSection === item.id ? '' : undefined} aria-current={activeSection === item.id ? 'page' : undefined} disabled={busy} onClick={() => { if (item.id !== activeSection) requestLeave(() => setSection(item.id)); }} className={`flex min-h-12 items-center gap-2 rounded-md px-3 text-left ${activeSection === item.id ? 'bg-surface text-primary shadow-card' : 'text-secondary hover:bg-hover'}`}><item.Icon size={15}/><span className="min-w-0"><strong className="block text-caption font-semibold">{item.label}</strong><span className="hidden truncate text-caption text-subtle md:block">{item.description}</span></span><ChevronRight size={13} className="ml-auto hidden md:block"/></button>)}</div></div>)}
         </nav>
       </aside>
 
       <div className="min-h-0 overflow-y-auto p-5">
-        {activeSection === 'agents' && <AgentSection agents={agents} legacyBots={legacyBots} onCreateTask={onCreateTask} onOpenLarkSetup={onOpenLarkSetup}/>}
-        {activeSection === 'lark' && <LarkSection agents={agents} legacyBots={legacyBots} larkListeningDisabled={larkListeningDisabled} larkBotsLoading={larkBotsLoading} larkBotsFailed={larkBotsFailed} larkBotsRetrying={larkBotsRetrying} onRetryLarkBots={onRetryLarkBots} capabilities={capabilities} matrix={matrix} secretRefs={secretRefs} channelBots={channelBots} availableLarkRefs={availableLarkRefs} createOpen={createOpen} setCreateOpen={setCreateOpen} displayName={displayName} setDisplayName={setDisplayName} externalAppId={externalAppId} setExternalAppId={setExternalAppId} brand={brand} setBrand={setBrand} createBot={createBot} onOpenLarkSetup={onOpenLarkSetup}/>}
-        {activeSection === 'groups' && <GroupsSection cells={cells} missingBindings={missingBindings} repositoriesWired={capabilities.data?.repositoriesWired === true} onOpenLarkSetup={onOpenLarkSetup} onOpenGroups={onOpenGroups}/>}
-        {activeSection === 'automation' && <AutomationSection scheduleCount={scheduleCount} capabilities={scheduleCapabilities} onOpenSchedules={onOpenSchedules}/>}
+        {activeSection === 'agents' && <AgentSection agents={agents} legacyBots={legacyBots} modelReset={modelReset} onModelDirtyChange={modelCallbacks} onCreateTask={agentId => requestLeave(() => onCreateTask(agentId))} onOpenLarkSetup={() => requestLeave(onOpenLarkSetup)}/>}
+        {activeSection === 'lark' && <LarkSection agents={agents} legacyBots={legacyBots} larkListeningDisabled={larkListeningDisabled} larkBotsLoading={larkBotsLoading} larkBotsFailed={larkBotsFailed} larkBotsRetrying={larkBotsRetrying} onRetryLarkBots={onRetryLarkBots} capabilities={capabilities} matrix={matrix} secretRefs={secretRefs} channelBots={channelBots} availableLarkRefs={availableLarkRefs} createOpen={createOpen} setCreateOpen={setCreateOpen} displayName={displayName} setDisplayName={setDisplayName} externalAppId={externalAppId} setExternalAppId={setExternalAppId} brand={brand} setBrand={setBrand} createBot={createBot} onOpenLarkSetup={target => requestLeave(() => onOpenLarkSetup(target))}/>}
+        {activeSection === 'groups' && <GroupsSection cells={cells} missingBindings={missingBindings} repositoriesWired={capabilities.data?.repositoriesWired === true} onOpenLarkSetup={() => requestLeave(onOpenLarkSetup)} onOpenGroups={() => requestLeave(onOpenGroups)}/>}
+        {activeSection === 'automation' && <AutomationSection scheduleCount={scheduleCount} capabilities={scheduleCapabilities} onOpenSchedules={() => requestLeave(onOpenSchedules)}/>}
         {activeSection === 'experimental' && <ExperimentalSection enabled={experimental} onChange={setExperimental}/>}
       </div>
     </div>
-  </Dialog>;
+  </Dialog>
+    <ConfirmDialog open={Boolean(pendingLeave)} title="放弃未保存的模型配置？" description="离开后，尚未保存的模型服务地址和密钥将丢失。" confirmLabel="放弃更改并离开" busy={busy} onCancel={() => setPendingLeave(undefined)} onConfirm={() => {
+      const leave = pendingLeave;
+      onLeaveGuardChange?.(undefined);
+      setPendingLeave(undefined);
+      setModelStates({});
+      setModelReset(value => value + 1);
+      leave?.();
+    }}/>
+  </>;
 }
 
-function AgentSection({ agents, legacyBots, onCreateTask, onOpenLarkSetup }: { agents: Agent[]; legacyBots: LarkBotConfig[]; onCreateTask(agentId: string): void; onOpenLarkSetup(): void }) {
+function AgentSection({ agents, legacyBots, modelReset, onModelDirtyChange, onCreateTask, onOpenLarkSetup }: { agents: Agent[]; legacyBots: LarkBotConfig[]; modelReset: number; onModelDirtyChange: Record<string, (dirty: boolean, saving?: boolean) => void>; onCreateTask(agentId: string): void; onOpenLarkSetup(): void }) {
   return <section aria-labelledby="control-agents">
     <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 id="control-agents" className="text-title font-semibold text-primary">Agent</h3><p className="mt-1 text-caption text-subtle">Agent 是在这台机器上执行任务的 CLI。Dutydeck 会自动发现已安装并登录的受支持 CLI。</p></div>{statePill(agents.length ? `${agents.length} 个可用` : '尚未找到', agents.length ? 'ready' : 'blocked')}</div>
     <TerminalBackendSettings/>
@@ -228,7 +274,7 @@ function AgentSection({ agents, legacyBots, onCreateTask, onOpenLarkSetup }: { a
         <p className="mt-1 text-meta text-subtle">{agent.version ? `${agent.version} · ` : ''}{agent.protocol === 'pty-cli' ? '终端 CLI' : agent.protocol.toUpperCase()}</p>
         {/* 「已绑定」不是「已连接」：这里只数了 defaultAgentId 指向本 Agent 的 Bot，没有读任何监听状态。 */}
         <div className="mt-3 grid grid-cols-2 gap-2 text-caption text-secondary"><div className="rounded-md bg-muted p-2">默认权限<br/><strong className="text-primary">{permissionLabel(agent.permissionMode)}</strong></div><div className="rounded-md bg-muted p-2">飞书 Bot<br/><strong className="text-primary">{boundBots.length ? `${boundBots.length} 个已绑定` : '尚未绑定'}</strong></div></div>
-        {supportsModelServiceSettings(agent) && <AgentModelSettings agentId={agent.id}/>}
+        {supportsModelServiceSettings(agent) && <AgentModelSettings key={`${agent.id}:${modelReset}`} agentId={agent.id} onDirtyChange={onModelDirtyChange[agent.id]}/>}
         <div className="mt-3 flex gap-2"><Button variant="primary" className="flex-1" onClick={() => onCreateTask(agent.id)}>用它创建任务</Button><Button variant="secondary" onClick={() => onOpenLarkSetup()}>{boundBots.length ? '管理 Bot' : '连接 Bot'}</Button></div>
       </Card>;
     })}</div>}
@@ -269,6 +315,7 @@ function LarkSection({ agents, legacyBots, larkListeningDisabled, larkBotsLoadin
   larkBotsFailed: boolean;
   larkBotsRetrying: boolean;
   onRetryLarkBots?(): void;
+  onLeaveGuardChange?(guard: SettingsLeaveGuard | undefined): void;
   capabilities: QueryLike<Awaited<ReturnType<typeof foundationApi.capabilities>>>;
   matrix: QueryLike<Awaited<ReturnType<typeof foundationApi.groupMatrix>>>;
   secretRefs: QueryLike<Awaited<ReturnType<typeof foundationApi.secretRefs>>>;

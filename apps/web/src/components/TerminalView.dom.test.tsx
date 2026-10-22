@@ -216,3 +216,73 @@ it('waits for both visible dimensions before fitting an initially hidden termina
   expect(socket.sent).toEqual([{ type: 'resize', cols: 60, rows: 20 }]);
   expect(term.options.fontSize).toBe(12);
 });
+
+
+it('shows connection and output states, treats empty frames as healthy and reconnects stalled handshakes', () => {
+  render(<TerminalView sessionId="stalled_handshake" readOnly/>);
+  expect(screen.getByRole('status').textContent).toContain('正在连接终端');
+  const first = Socket.instances[0];
+  act(() => { vi.advanceTimersByTime(10_000); });
+  expect(first.close).toHaveBeenCalledOnce();
+  act(() => { vi.advanceTimersByTime(1_000); });
+  const second = Socket.instances[1];
+  expect(second).toBeTruthy();
+  act(() => second.open());
+  expect(screen.getByRole('status').textContent).toContain('已连接，等待终端输出');
+  act(() => { second.frame({ type: 'snapshot', cols: 80, rows: 24, data: '' }); terminals[0].writeCallbacks.shift()!(); });
+  expect(screen.getByRole('status').textContent).toContain('已连接，等待终端输出');
+  act(() => { second.frame({ type: 'data', data: '' }); vi.advanceTimersByTime(60_000); });
+  expect(second.close).not.toHaveBeenCalled();
+  act(() => second.frame({ type: 'data', data: 'visible output' }));
+  expect(screen.queryByRole('status')).toBeNull();
+  expect(second.sent).toEqual([]);
+});
+it('ignores late callbacks from old connections, retains history while reconnecting and cleans up timers', () => {
+  const view = render(<TerminalView sessionId="connection_generation" readOnly/>);
+  const old = Socket.instances[0];
+  const term = terminals[0];
+  act(() => { old.open(); old.frame({ type: 'data', data: 'history' }); old.close(); });
+  expect(term.writes).toEqual(['history']);
+  expect(screen.getByRole('status').textContent).toContain('正在连接终端');
+  act(() => vi.advanceTimersByTime(1_000));
+  const current = Socket.instances[1];
+  act(() => { current.open(); current.frame({ type: 'data', data: 'current' }); });
+  const resetCount = term.reset.mock.calls.length;
+  act(() => {
+    old.open();
+    old.frame({ type: 'snapshot', cols: 10, rows: 10, data: 'stale' });
+    old.close();
+    vi.advanceTimersByTime(2_000);
+  });
+  expect(term.reset).toHaveBeenCalledTimes(resetCount);
+  expect(term.writes).toEqual(['history', 'current']);
+  expect(Socket.instances).toHaveLength(2);
+  view.unmount();
+  act(() => { current.open(); current.frame({ type: 'data', data: 'after unmount' }); vi.advanceTimersByTime(60_000); });
+  expect(Socket.instances).toHaveLength(2);
+  expect(term.writes).toEqual(['history', 'current']);
+  expect(term.dispose).toHaveBeenCalledOnce();
+});
+
+it('ignores a retired snapshot write callback and cancels a pending handshake on unmount', () => {
+  const view = render(<TerminalView sessionId="pending_snapshot" showKeyBar={false}/>);
+  const first = Socket.instances[0];
+  const term = terminals[0];
+  act(() => {
+    first.open();
+    first.frame({ type: 'snapshot', cols: 120, rows: 30, data: 'history before disconnect' });
+    first.close();
+    vi.advanceTimersByTime(1_000);
+  });
+  const second = Socket.instances[1];
+  act(() => term.writeCallbacks.shift()!());
+  expect(first.sent).toEqual([]);
+  expect(second.sent).toEqual([]);
+  expect(term.writes).toEqual(['history before disconnect']);
+  view.unmount();
+  expect(second.close).toHaveBeenCalledOnce();
+  act(() => vi.advanceTimersByTime(60_000));
+  expect(Socket.instances).toHaveLength(2);
+  expect(second.close).toHaveBeenCalledOnce();
+  expect(term.dispose).toHaveBeenCalledOnce();
+});

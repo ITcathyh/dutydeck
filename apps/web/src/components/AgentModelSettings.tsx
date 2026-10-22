@@ -5,7 +5,7 @@ import { currentInstance } from '../instance';
 import { clearCachedAgentModels } from '../model-cache';
 import { Banner, Button, Field, Input, Select, Spinner } from './primitives';
 
-export function AgentModelSettings({ agentId, botAppId, onDirtyChange }: { agentId: string; botAppId?: string; onDirtyChange?: (dirty: boolean) => void }) {
+export function AgentModelSettings({ agentId, botAppId, onDirtyChange }: { agentId: string; botAppId?: string; onDirtyChange?: (dirty: boolean, saving?: boolean) => void }) {
   const client = useQueryClient();
   const key = ['agent-model-settings', currentInstance(), agentId, botAppId ?? ''];
   const query = useQuery({ queryKey: key, queryFn: () => botAppId ? agentModelSettingsApi.get(agentId, botAppId) : agentModelSettingsApi.get(agentId), retry: false });
@@ -24,7 +24,7 @@ export function AgentModelSettings({ agentId, botAppId, onDirtyChange }: { agent
     }
   });
   const dirty = Object.keys(draft).length > 0;
-  useEffect(() => { onDirtyChange?.(dirty || save.isPending); }, [dirty, save.isPending, onDirtyChange]);
+  useEffect(() => { onDirtyChange?.(dirty || save.isPending, save.isPending); }, [dirty, save.isPending, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const submit = () => { const { apiKey, ...fields } = draft; save.mutate({ ...fields, ...(apiKey?.trim() ? { apiKey } : {}) }); };
   const Form = botAppId ? 'div' : 'form';

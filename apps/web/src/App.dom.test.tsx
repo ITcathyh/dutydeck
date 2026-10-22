@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { api, foundationApi, insightApi, scheduleApi, type Agent, type DockEvent, type RunSummary, type Session } from './api';
+import { api, agentModelSettingsApi, foundationApi, insightApi, scheduleApi, terminalSettingsApi, type Agent, type DockEvent, type RunSummary, type Session } from './api';
 import type { SessionInsightDetailsResponse } from '@dutydeck/shared';
 import App from './App';
 import { AuthGate } from './components/AuthGate';
@@ -350,7 +350,7 @@ describe('App browser navigation and shell states', () => {
 
     const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
     await userEvent.click(await within(navigation).findByRole('button', { name: /任务一/ }));
-    expect(pushState).toHaveBeenCalledWith({ sessionId: 's1', dutydeckTaskFilters: { view: 'all', query: '', project: '' } }, '', '/sessions/s1');
+    expect(pushState).toHaveBeenCalledWith({ sessionId: 's1', dutydeckHistoryPosition: 1, dutydeckTaskFilters: { view: 'all', query: '', project: '' } }, '', '/sessions/s1');
     expect(window.location.pathname).toBe('/sessions/s1');
     await screen.findByRole('button', { name: '归档任务' });
 
@@ -1713,4 +1713,92 @@ it('shows managed-step approval as read-only and never offers an ineffective per
   expect(within(card).queryByRole('button', { name: '拒绝' })).toBeNull();
   expect(screen.getByText('此后台步骤由目标管理，请从原目标处理问题、授权、重试或停止。')).toBeTruthy();
   expect(permission).not.toHaveBeenCalled();
+});
+
+
+describe('App shared model draft navigation guard', () => {
+  async function setup() {
+    mockAppApi({ agents: [{ id: 'claude-code', name: 'Claude Code', protocol: 'pty-cli', permissionMode: 'ask' }] });
+    vi.spyOn(terminalSettingsApi, 'get').mockResolvedValue({ terminalBackend: 'tmux', scope: 'pty-cli' });
+    vi.spyOn(agentModelSettingsApi, 'get').mockResolvedValue({ agentId: 'claude-code', model: '', baseUrl: 'https://saved.example', authMode: 'bearer', hasApiKey: false, apiKeyAvailable: false, appliesTo: 'next_process' });
+    renderApp();
+    const nav = await screen.findByRole('complementary', { name: 'Dutydeck 工作台导航' });
+    await userEvent.click(within(nav).getByRole('button', { name: /Agent 与设置/ }));
+    await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
+    await userEvent.click(screen.getByText('模型服务配置'));
+    const input = await screen.findByLabelText('服务地址');
+    fireEvent.change(input, { target: { value: 'https://unsaved.example' } });
+    return input as HTMLInputElement;
+  }
+  it('retains the real settings draft and URL on cancelled browser back, then confirms one back navigation', async () => {
+    const input = await setup();
+    act(() => window.history.back());
+    expect(await screen.findByRole('alertdialog')).toBeTruthy();
+    await waitFor(() => expect(window.location.search).toBe('?panel=settings&section=agents'));
+    await userEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(input.value).toBe('https://unsaved.example');
+    expect(screen.getByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeTruthy();
+    act(() => window.history.back());
+    await screen.findByRole('alertdialog');
+    await userEvent.click(screen.getByRole('button', { name: '放弃更改并离开' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeNull());
+    expect(window.location.search).toBe('');
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    act(() => window.history.forward());
+    await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
+    await userEvent.click(screen.getByText('模型服务配置'));
+    expect((await screen.findByLabelText('服务地址') as HTMLInputElement).value).toBe('https://saved.example');
+  });
+  it('restores a cancelled browser forward and follows the forward entry only after confirmation', async () => {
+    const input = await setup();
+    const settingsPath = window.location.search;
+    const nextPosition = Number(window.history.state.dutydeckHistoryPosition) + 1;
+    // Seed a real forward entry while leaving React's current settings view mounted.
+    window.history.pushState({ dutydeckHistoryPosition: nextPosition }, '', '/?nav=tasks');
+    act(() => window.history.back());
+    await waitFor(() => expect(window.location.search).toBe(settingsPath));
+    act(() => window.history.forward());
+    await screen.findByRole('alertdialog');
+    await waitFor(() => expect(window.location.search).toBe(settingsPath));
+    await userEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(input.value).toBe('https://unsaved.example');
+    act(() => window.history.forward());
+    await screen.findByRole('alertdialog');
+    await userEvent.click(screen.getByRole('button', { name: '放弃更改并离开' }));
+    await waitFor(() => expect(window.location.search).toBe('?nav=tasks'));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeNull();
+  });
+  it('restores an unindexed legacy history entry without looping, and permits a confirmed close exactly once', async () => {
+    await setup();
+    // A history entry created before this app version has no position marker.
+    window.history.pushState(null, '', '/?nav=tasks');
+    act(() => window.dispatchEvent(new PopStateEvent('popstate')));
+    await screen.findByRole('alertdialog');
+    expect(window.location.search).toBe('?panel=settings&section=agents');
+    await userEvent.click(screen.getByRole('button', { name: '取消' }));
+    await userEvent.click(screen.getByRole('button', { name: '关闭设置与接入' }));
+    await userEvent.click(screen.getByRole('button', { name: '放弃更改并离开' }));
+    await waitFor(() => expect(window.location.search).toBe('?nav=tasks'));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeNull();
+  });
+  it('keeps settings and its URL while saving even when browser back bypasses its disabled buttons', async () => {
+    await setup();
+    let reject!: (error: Error) => void;
+    vi.spyOn(agentModelSettingsApi, 'set').mockImplementation(() => new Promise((_resolve, fail) => { reject = fail; }));
+    await userEvent.click(screen.getByRole('button', { name: '保存模型配置' }));
+    await screen.findByRole('button', { name: '保存中…' });
+    act(() => window.history.back());
+    await waitFor(() => expect(window.location.search).toBe('?panel=settings&section=agents'));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(screen.getByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeTruthy();
+    await act(async () => reject(new Error('save rejected')));
+    await screen.findByText('save rejected');
+    act(() => window.history.back());
+    await screen.findByRole('alertdialog');
+    await userEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect((screen.getByLabelText('服务地址') as HTMLInputElement).value).toBe('https://unsaved.example');
+  });
+
 });

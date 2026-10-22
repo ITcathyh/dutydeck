@@ -24,7 +24,9 @@ it('binds terminal markers to the exact receipt and rejects old, sidechain and f
   await append({ ...final, uuid: 'side', isSidechain: true }, { ...final, uuid: 'old', parentUuid: 'old-input' },
     { type: 'system', subtype: 'turn_duration' });
   expect(source.hasTurnTerminal()).toBe(false);
-  await append(final); expect(source.hasTurnTerminal()).toBe(true);
+  await append(final); expect(source.hasTurnTerminal()).toBe(false);
+  await append({ type: 'system', subtype: 'turn_duration', uuid: 'own-duration', parentUuid: 'final' });
+  expect(source.hasTurnTerminal()).toBe(true);
   await append({ type: 'assistant', uuid: 'continuation', parentUuid: 'final', message: { stop_reason: null, content: [] } });
   expect(source.hasTurnTerminal()).toBe(false);
   await append({ type: 'user', uuid: 'foreign', message: { role: 'user', content: 'other prompt' } }, { ...final, uuid: 'foreign-final', parentUuid: 'foreign' });
@@ -78,4 +80,35 @@ it('invalidates a busy watermark after detected transcript truncation', async ()
   writeFileSync(path, ''); await source.flush();
   await append(input, final);
   expect(source.hasTurnTerminalAfter(watermark)).toBe(false);
+});
+
+it('learns duration support from a restored baseline and releases the requirement at the next real input', async () => {
+  const history = line({ type: 'system', subtype: 'turn_duration', uuid: 'old-duration', parentUuid: 'old-input' });
+  const { path, append } = await harness(history);
+  source.restore({ path, offset: Buffer.byteLength(history) }); source.start(); await source.flush();
+  await append(input, final);
+  expect(source.requiresTurnTerminal).toBe(true); expect(source.hasTurnTerminal()).toBe(false);
+  await append({ type: 'user', uuid: 'next-input', message: { role: 'user', content: 'typed next' } });
+  expect(source.requiresTurnTerminal).toBe(false); expect(source.hasTurnTerminal()).toBe(false);
+  await append({ type: 'system', subtype: 'turn_duration', uuid: 'foreign-duration', parentUuid: 'next-input' });
+  expect(source.hasTurnTerminal()).toBe(false);
+});
+it('learns duration support live and requires the next input complete marker', async () => {
+  const { append } = await harness(); source.start(); await source.flush();
+  await append({ type: 'system', subtype: 'turn_duration', uuid: 'previous-duration' });
+  const receipt = source.waitForInput('exact prompt', new AbortController().signal); await append(input); await receipt;
+  await append(final); expect(source.requiresTurnTerminal).toBe(true); expect(source.hasTurnTerminal()).toBe(false);
+  await append({ type: 'system', subtype: 'turn_duration', uuid: 'duration', parentUuid: 'final' });
+  expect(source.hasTurnTerminal()).toBe(true);
+});
+
+it('scopes parentless native records by the exact physical input and rejects replayed historical durations', async () => {
+  const previous = { type: 'system', subtype: 'turn_duration', uuid: 'historical-duration' };
+  const { append } = await harness(line(previous)); source.start(); await source.flush();
+  const receipt = source.waitForInput('exact prompt', new AbortController().signal); await append(input); await receipt;
+  await append({ ...final, parentUuid: undefined });
+  expect(source.hasTurnTerminal()).toBe(false);
+  await append(previous); expect(source.hasTurnTerminal()).toBe(false);
+  await append({ type: 'system', subtype: 'turn_duration', uuid: 'current-duration' });
+  expect(source.hasTurnTerminal()).toBe(true);
 });

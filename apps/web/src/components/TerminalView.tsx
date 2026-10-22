@@ -23,6 +23,7 @@ function readTerminalTheme(): { background: string; foreground: string; cursor: 
 const KEY_BAR_MEDIA = '(pointer: coarse), (max-width: 767px)';
 // 触屏拖选的抑制规则单独用「只有粗指针」判定：窄窗口的桌面浏览器仍是鼠标，不该被剥掉拖选复制。
 const COARSE_MEDIA = '(pointer: coarse)';
+const HANDSHAKE_TIMEOUT_MS = 10_000;
 
 // PTY 实时终端视图：xterm.js 直连 WebSocket，协议见 apps/web/TERMINAL_API.md
 // showKeyBar 显式指定是否渲染快捷键条；不传时按媒体查询判断（jsdom 查不出粗指针，所以留出这个口子）
@@ -47,6 +48,7 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
     文案不猜原因：进程已退出与运行时拒绝挂接在这里无法区分。
   */
   const [unreachable, setUnreachable] = useState(false);
+  const [connectionState, setConnectionState] = useState<'initializing' | 'connecting' | 'waiting' | 'ready'>('initializing');
 
   useEffect(() => {
     const host = hostRef.current;
@@ -87,6 +89,7 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
 
     let ws: WebSocket | undefined;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
     let attempt = 0;
     let disposed = false;
     let waitingForSnapshot = true;
@@ -105,17 +108,38 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
       if (disposed) return;
       waitingForSnapshot = true;
       restoring = false;
+      setConnectionState('connecting');
       ws = new WebSocket(terminalWsUrl(sessionId));
       const connection = ws;
+      const disconnected = () => {
+        if (disposed || ws !== connection) return;
+        if (handshakeTimer) clearTimeout(handshakeTimer);
+        ws = undefined;
+        setConnectionState('connecting');
+        // 断线后指数退避重连，上限 30s；保留终端里的可读输出。
+        reconnectTimer = setTimeout(connect, nextTerminalBackoffMs(attempt));
+        attempt += 1;
+        if (attempt >= 2) setUnreachable(true);
+      };
+      handshakeTimer = setTimeout(() => {
+        if (disposed || ws !== connection) return;
+        disconnected();
+        connection.close();
+      }, HANDSHAKE_TIMEOUT_MS);
       ws.onopen = () => {
+        if (disposed || ws !== connection) return;
+        if (handshakeTimer) clearTimeout(handshakeTimer);
+        setConnectionState('waiting');
         attempt = 0;
         setUnreachable(false);
         sendResize();
       };
       ws.onmessage = event => {
+        if (disposed || ws !== connection) return;
         const frame = parseTerminalFrame(String(event.data));
         if (!frame) return;
         if (frame.type === 'snapshot') {
+          setConnectionState(frame.data ? 'ready' : 'waiting');
           waitingForSnapshot = false;
           restoring = true;
           term.reset();
@@ -127,20 +151,18 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
             sendResize();
           });
         } else if (frame.type === 'data') {
+          if (frame.data) setConnectionState('ready');
           // Compatibility with streams that do not provide snapshots.
           if (waitingForSnapshot) { waitingForSnapshot = false; sendResize(); }
           term.write(frame.data);
         }
-        else if (frame.type === 'exit') term.write(`\r\n\x1b[90m[进程已退出，code=${frame.code}]\x1b[0m\r\n`);
-        else term.write(`\r\n\x1b[90m[终端错误] ${frame.message}\x1b[0m\r\n`);
+        else {
+          setConnectionState('ready');
+          if (frame.type === 'exit') term.write(`\r\n\x1b[90m[进程已退出，code=${frame.code}]\x1b[0m\r\n`);
+          else term.write(`\r\n\x1b[90m[终端错误] ${frame.message}\x1b[0m\r\n`);
+        }
       };
-      ws.onclose = () => {
-        if (disposed) return;
-        // 断线后指数退避重连，上限 30s
-        reconnectTimer = setTimeout(connect, nextTerminalBackoffMs(attempt));
-        attempt += 1;
-        if (attempt >= 2) setUnreachable(true);
-      };
+      ws.onclose = disconnected;
     }
 
     // 键盘输入转发给 PTY
@@ -168,6 +190,7 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
     return () => {
       disposed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (handshakeTimer) clearTimeout(handshakeTimer);
       observer.disconnect();
       themeObserver.disconnect();
       colorScheme?.removeEventListener('change', applyTheme);
@@ -189,12 +212,11 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
 
   return <div className={`relative ${className ?? ''}`}>
     <div ref={hostRef} data-touch-scroll={touchScroll ? 'on' : undefined} className={`h-full w-full ${touchScroll ? '[&_.xterm-screen]:select-none [&_.xterm-screen]:[-webkit-touch-callout:none] [&_.xterm-screen_*]:select-none [&_.xterm-viewport]:overscroll-none' : ''}`}/>
-    {unreachable && <div role="status" className="absolute inset-0 z-sticky grid place-items-center bg-terminal-bg p-6">
-      <div className="max-w-md text-center">
-        <p className="text-body font-medium text-primary">终端暂时连不上</p>
-        <p className="mt-1 text-caption text-secondary">服务端没有接受终端连接，浏览器拿不到具体原因。任务进度仍可在「执行记录」查看。</p>
-        <p className="mt-2 text-caption text-subtle">仍在自动重试，连上后这条提示会自动消失。</p>
-      </div>
+    {connectionState !== 'ready' && <div role="status" className="pointer-events-none absolute bottom-14 left-2 right-2 z-sticky rounded-md border border-default bg-surface p-3 text-caption text-secondary shadow-panel">
+      {unreachable ? <><p className="font-medium text-primary">终端暂时连不上</p><p>服务端没有接受终端连接，浏览器拿不到具体原因。任务进度仍可在「执行记录」查看。仍在自动重试。</p></>
+        : connectionState === 'initializing' ? '正在初始化终端…'
+          : connectionState === 'connecting' ? '正在连接终端…'
+            : '已连接，等待终端输出…'}
     </div>}
     {scrolledUp && <button type="button" onPointerDown={event => event.preventDefault()} onMouseDown={event => event.preventDefault()} onClick={event => scrollToBottomRef.current(document.activeElement === event.currentTarget)} className="absolute right-2 top-2 z-sticky min-h-11 rounded-md border border-default bg-surface px-3 text-caption text-secondary shadow-panel">回到底部</button>}
     {keyBarVisible && <TerminalKeyBar onKey={onKey} selectMode={selectMode} onSelectModeChange={setSelectMode}/>}

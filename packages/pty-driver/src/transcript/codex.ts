@@ -21,12 +21,13 @@
  *   event_msg task_complete.last_agent_message    → text (modern schema,
  *                                                   sole final-answer source)
  */
-import { existsSync, opendirSync, statSync } from 'node:fs';
+import { existsSync, opendirSync, realpathSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { createRequire } from 'node:module';
 import { codexRateLimits, contextUsage, type NormalizedDriverEvent, type SessionUsageSnapshot } from '@dutydeck/shared';
 import { codexHistoryPath, codexSessionsRoot, type CliPathEnv } from '../cli-paths.js';
-import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
+import { readHead, walkFiles } from '../session-id/fs-scan.js';
 import { resolveCliSessionId } from '../session-id/index.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource } from './tail.js';
 import { readNativeTranscriptUsage } from './session-usage.js';
@@ -37,9 +38,6 @@ import { CodexChildLimits, childDiagnosticLimits } from './codex-child-limits.js
 import { NativeTurn, nativeTaskError } from './native-turn.js';
 
 const SESSION_SCAN_MAX_DEPTH = 3;
-/** Head window per rollout candidate — session_meta rides the first record.
- *  Matches session-id/codex.ts. */
-const ROLLOUT_HEAD_BYTES = 256 * 1024;
 /** Newest-first cap on rollout candidates examined. */
 const MAX_ROLLOUT_CANDIDATES = 60;
 
@@ -92,31 +90,71 @@ export function resolveNewestRollout(sessionsRoot: string): string | undefined {
   return latest;
 }
 
-/**
- * The rollout file belonging to one CLI session id, searched newest-first.
- *
- * Codex names rollouts `rollout-<ts>-<uuid>.jsonl` and also records
- * `session_meta.session_id` in the head, so either can identify the file. The
- * filename is checked first because it costs no read.
- */
+/** A generation is accepted only after its complete first record identifies
+ * the already-bound native session. Copied/touched old files are not newer. */
+const CODEX_GENERATION_RE = /^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_([0-9a-f-]{36}))?\.jsonl$/i;
+const SESSION_META_BYTES = 1024 * 1024;
+function rolloutHeader(path: string): { id?: string; complete: boolean } {
+  const head = readHead(path, SESSION_META_BYTES), newline = head.indexOf('\n');
+  if (newline < 0) return { complete: false };
+  try {
+    const entry = JSON.parse(head.slice(0, newline));
+    const id = entry?.type === 'session_meta' ? entry.payload?.id ?? entry.payload?.session_id : undefined;
+    return { complete: true, ...(typeof id === 'string' ? { id } : {}) };
+  } catch { return { complete: false }; }
+}
+function insideRoot(root: string, path: string): boolean {
+  try {
+    const rel = relative(realpathSync(root), realpathSync(path));
+    return !!rel && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel) && statSync(path).isFile();
+  } catch { return false; }
+}
+function matchesRollout(root: string, path: string, sid: string, requireMeta = false): boolean {
+  if (!insideRoot(root, path)) return false;
+  const name = basename(path), parsed = CODEX_GENERATION_RE.exec(name);
+  if (parsed && parsed[1]!.toLowerCase() !== sid.toLowerCase()) return false;
+  const header = rolloutHeader(path);
+  if (header.id && header.id !== sid) return false;
+  if (requireMeta || parsed?.[2]) return header.complete && header.id === sid;
+  return name.endsWith(`-${sid}.jsonl`) || header.id === sid;
+}
+function indexedRollout(root: string, sid: string): string | undefined {
+  const path = join(dirname(root), 'state_5.sqlite');
+  if (!existsSync(path)) return undefined;
+  let db: { prepare(sql: string): { get(id: string): unknown }; close(): void } | undefined;
+  try {
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
+    db = new DatabaseSync(path, { readOnly: true });
+    const row = db!.prepare('SELECT rollout_path FROM threads WHERE id = ?').get(sid) as { rollout_path?: unknown } | undefined;
+    return typeof row?.rollout_path === 'string' && isAbsolute(row.rollout_path) && matchesRollout(root, row.rollout_path, sid, true) ? row.rollout_path : undefined;
+  } catch { return undefined; }
+  finally { db?.close(); }
+}
+
+/** Native index first, otherwise filename creation order within this session.
+ * The scan and metadata reads are bounded; mtime never promotes an old copy. */
 export function findRolloutBySessionId(
   sessionsRoot: string,
   cliSessionId: string,
   maxCandidates = MAX_ROLLOUT_CANDIDATES,
+  requireMeta = false,
 ): string | undefined {
   if (!existsSync(sessionsRoot)) return undefined;
+  const indexed = indexedRollout(sessionsRoot, cliSessionId);
+  if (indexed) return indexed;
   const candidates = walkFiles(sessionsRoot, {
     maxDepth: SESSION_SCAN_MAX_DEPTH,
     accept: name => name.startsWith('rollout-') && name.endsWith('.jsonl'),
-  }).sort(byMtimeDesc).slice(0, maxCandidates);
-  const named = candidates.find(candidate => candidate.path.endsWith(`-${cliSessionId}.jsonl`));
-  if (named) return named.path;
-  for (const candidate of candidates) {
-    for (const entry of parseJsonlObjects(readHead(candidate.path, ROLLOUT_HEAD_BYTES))) {
-      if (entry?.type !== 'session_meta') continue;
-      if ((entry.payload?.id ?? entry.payload?.session_id) === cliSessionId) return candidate.path;
-      break; // session_meta is the head record; past it there is nothing to learn.
-    }
+  }).sort((a, b) => basename(b.path).localeCompare(basename(a.path)));
+  // Bound expensive head reads, but do not let unrelated sessions crowd out
+  // this session's named generations before applying the candidate limit.
+  const named = candidates.filter(candidate => candidate.path.endsWith(`-${cliSessionId}.jsonl`)
+    || CODEX_GENERATION_RE.exec(basename(candidate.path))?.[1]?.toLowerCase() === cliSessionId.toLowerCase());
+  for (const candidate of named.slice(0, maxCandidates)) {
+    if (matchesRollout(sessionsRoot, candidate.path, cliSessionId, requireMeta)) return candidate.path;
+  }
+  for (const candidate of candidates.slice(0, maxCandidates)) {
+    if (matchesRollout(sessionsRoot, candidate.path, cliSessionId, true)) return candidate.path;
   }
   return undefined;
 }
@@ -329,24 +367,42 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
   private readonly childCallbacks = new Set<(event: NormalizedDriverEvent) => void>();
 
   constructor(opts: CodexTranscriptTailerOptions) {
-    this.children = new CodexChildLimits(codexSessionsRoot(opts.env));
-    if (opts.sessionId) this.inputReceipt = new CodexInputReceipt(codexHistoryPath(opts.env),
-      () => resolveCliSessionId('codex', { sessionId: opts.sessionId!, cwd: opts.cwd, env: opts.env }), text => this.turn.bindHistory(text));
+    const root = codexSessionsRoot(opts.env);
+    this.children = new CodexChildLimits(root);
+    let cliSessionId: string | undefined;
+    const nativeId = () => cliSessionId ??= opts.sessionId ? resolveCliSessionId('codex', { sessionId: opts.sessionId, cwd: opts.cwd, env: opts.env }) : undefined;
+    if (opts.sessionId) this.inputReceipt = new CodexInputReceipt(codexHistoryPath(opts.env), nativeId, text => this.turn.bindHistory(text));
     const explicit = opts.transcriptPath;
-    // Memoise the session-scoped resolution: JsonlTailer re-resolves every
-    // ~300ms tick, and recovering the CLI's own session id means reading
-    // history/rollout heads. The rollout path never changes once found, so
-    // resolve until it succeeds and then hold the answer. See the Claude
-    // tailer for the full reasoning.
-    let resolved: string | undefined;
-    const resolveOnce = () => (resolved ??= resolveCodexRolloutPath(opts.cwd, opts.env, opts.sessionId));
+    let resolved: string | undefined, refreshAt = 0;
+    const resolveActive = () => {
+      if (!nativeId()) return undefined;
+      if (Date.now() >= refreshAt || !resolved || !existsSync(resolved)) {
+        // Initial legacy canonical files may be name-bound. Filter every
+        // handoff candidate by complete same-ID meta, so an unfinished newer
+        // canonical file cannot hide the next verified generation.
+        resolved = findRolloutBySessionId(root, nativeId()!, MAX_ROLLOUT_CANDIDATES, !!resolved) ?? resolved;
+        refreshAt = Date.now() + 1_000;
+      }
+      return resolved;
+    };
+    let replayTurn: string | undefined;
     const projection = new CodexToolProjection(mapCodexEntry);
     this.tailer = new JsonlTailer({
       resolvePath: explicit
         ? () => explicit
         : opts.sessionId
-          ? resolveOnce
+          ? resolveActive
           : () => resolveCodexRolloutPath(opts.cwd, opts.env),
+      followGenerations: !explicit && !!opts.sessionId,
+      generationScope: nativeId,
+      generationRecordKey: (entry, raw) => {
+        if (entry.type === 'session_meta') replayTurn = undefined;
+        if (entry.type === 'event_msg' && ['task_started', 'turn_started'].includes(entry.payload?.type)) replayTurn = entry.payload.turn_id;
+        // Legacy user, assistant and tool records can omit timestamp and
+        // turn_id. Identical content in a later turn is still new activity.
+        return entry.type === 'session_meta' ? raw : `${entry.payload?.turn_id ?? replayTurn ?? ''}\0${raw}`;
+      },
+      validateRestorePath: path => !explicit && !!nativeId() && matchesRollout(root, path, nativeId()!),
       mapEntry: (entry, baseline) => {
         const bound = this.turn.observe(entry, baseline);
         this.children.observe(entry, baseline, this.turn.activeTurnId());
@@ -360,10 +416,8 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
       deduplicateTools: true,
       pollIntervalMs: opts.pollIntervalMs,
       // Re-resolving each tick is what lets the tailer attach late: the
-      // rollout appears a beat after spawn, and the CLI's id is only
-      // recoverable once history.jsonl carries our marker. With a sessionId
-      // every resolution names the same session, so this cannot drift onto a
-      // concurrent session's rollout. See the Claude tailer for the tradeoff.
+      // rollout appears a beat after spawn. Once bound, only generations
+      // verified against that native session can replace the active file.
       watchForSwitch: !explicit,
     });
   }

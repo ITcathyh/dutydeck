@@ -50,10 +50,10 @@ it('saves only the selected bot account inside an outer form, reports unsaved ch
   expect(screen.queryByLabelText('默认模型')).toBeNull();
   await userEvent.type(screen.getByLabelText('服务地址'), 'https://gateway.example');
   await userEvent.type(input, 'BOT_UI_CANARY');
-  await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(true));
+  await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(true, false));
   await userEvent.click(screen.getByRole('button', { name: '保存模型配置' }));
   await waitFor(() => expect(set).toHaveBeenCalledWith('claude', { baseUrl: 'https://gateway.example', apiKey: 'BOT_UI_CANARY', clearApiKey: false }, 'cli_a'));
-  await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(false));
+  await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(false, false));
   expect(submit).not.toHaveBeenCalled();
   expect(readCachedAgentModels('claude', 'shared')).toEqual(shared);
   expect(client.getQueryData(['agent-models', 'claude', 'shared'])).toEqual(shared);

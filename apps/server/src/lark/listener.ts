@@ -11,7 +11,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type { AgentConfig, AgentEvent, ChannelMappingRepository, ConfigRepository, PermissionRequestData, PermissionMode, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceResponse } from '@dutydeck/shared';
 import type { LarkGroupManager } from './group-management.js';
 import type { StoredLarkConfig } from './config.js';
-import { createLarkCardService, larkConfigurationStatus, LarkServiceError } from './service.js';
+import { createLarkCardService, larkConfigurationStatus, LarkServiceError, type LarkCardService } from './service.js';
 import { setLarkGateLog } from './api-gate.js';
 import { getChatMode } from './chat-mode.js';
 import { larkCommandCapabilities } from './commands.js';
@@ -159,6 +159,7 @@ export interface LarkLongConnectionListenerOptions {
 export class LarkLongConnectionListener implements LarkListener {
   private client?: lark.WSClient;
   private http?: ReturnType<typeof createWorkbenchFetch>;
+  private service?: LarkCardService;
   private coordinator?: LarkMessageCoordinator;
   private agentCommand?: LarkAgentCommandHandler;
   private welcome?: LarkWelcomeService;
@@ -190,6 +191,7 @@ export class LarkLongConnectionListener implements LarkListener {
     const credentials = `${config.appId}\u0000${config.appSecret}\u0000${domain}`;
     if (this.listening && this.credentials === credentials) {
       const participationChanged = this.config?.defaultGroupParticipation !== config.defaultGroupParticipation;
+      this.service?.clearIdentityFailures();
       this.config = config;
       try { await this.coordinator?.startReconciliation(config); }
       catch (error) { this.log.warn({ error, appId: config.appId }, '飞书卡片终态对账刷新失败，继续保持消息监听'); }
@@ -210,6 +212,7 @@ export class LarkLongConnectionListener implements LarkListener {
 
   private async connect(config: StoredLarkConfig, domain: string, credentials: string, http: ReturnType<typeof createWorkbenchFetch>) {
     const service = createLarkCardService(this.options.env ?? process.env, http.fetch, { ...config, resolveShowAgentName: () => (this.config ?? config).showAgentName === true });
+    this.service = service;
     let botOpenId: string;
     try { botOpenId = await service.getBotOpenId(); }
     catch (error) { http.close(); throw new LarkServiceError('LARK_LISTENER_START_FAILED', `Failed to resolve Lark bot identity: ${error instanceof Error ? error.message : String(error)}`, 502); }
@@ -479,6 +482,7 @@ export class LarkLongConnectionListener implements LarkListener {
     if (this.cardRepair) { this.cardRepair.coordinator.stop(); this.cardRepair.http.close(); this.cardRepair = undefined; }
     this.http?.close();
     this.http = undefined;
+    this.service = undefined;
     if (this.config) this.options.participation?.closeApp(this.config.appId);
     if (this.config && this.agentCommand) this.options.agentCommands?.delete(this.config.appId, this.agentCommand);
     this.agentCommand = undefined;

@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { foundationApi, scheduleApi, type FoundationCapability, type GroupMatrix, type LarkBotConfig, type ScheduleCapability } from '../api';
+import { agentModelSettingsApi, foundationApi, scheduleApi, terminalSettingsApi, type FoundationCapability, type GroupMatrix, type LarkBotConfig, type ScheduleCapability } from '../api';
 import { ControlCenterModal } from './ControlCenterModal';
 import { EXPERIMENTAL_STORAGE_KEY, writeExperimental } from '../experimental';
 
@@ -24,7 +24,8 @@ function mocks(groupMatrix: GroupMatrix = matrix) {
 function renderModal(props: Partial<Parameters<typeof ControlCenterModal>[0]> = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const defaults: Parameters<typeof ControlCenterModal>[0] = { open: true, agents: [{ id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'ask' }], legacyBots: [], authRequired: false, onClose: () => {}, onCreateTask: () => {}, onOpenLarkSetup: () => {}, onOpenGroups: () => {}, onOpenSchedules: () => {} };
-  return render(<QueryClientProvider client={client}><ControlCenterModal {...defaults} {...props}/></QueryClientProvider>);
+  const view = render(<QueryClientProvider client={client}><ControlCenterModal {...defaults} {...props}/></QueryClientProvider>);
+  return { ...view, rerenderModal: (updated: Partial<Parameters<typeof ControlCenterModal>[0]>) => view.rerender(<QueryClientProvider client={client}><ControlCenterModal {...defaults} {...props} {...updated}/></QueryClientProvider>) };
 }
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); window.localStorage.removeItem(EXPERIMENTAL_STORAGE_KEY); });
@@ -294,4 +295,118 @@ describe('ControlCenterModal information architecture', () => {
       expect(screen.queryByText('还没有飞书 Bot')).toBeNull();
     });
   });
+});
+
+
+const sharedModelState = { agentId: 'claude-code', model: '', baseUrl: 'https://saved.example', authMode: 'bearer' as const, hasApiKey: false, apiKeyAvailable: false, appliesTo: 'next_process' as const };
+const modelAgents = [{ id: 'claude-code', name: 'Claude Code', protocol: 'pty-cli' as const, permissionMode: 'ask' as const }];
+function mockModels() {
+  mocks();
+  vi.spyOn(terminalSettingsApi, 'get').mockResolvedValue({ terminalBackend: 'tmux', scope: 'pty-cli' });
+  vi.spyOn(agentModelSettingsApi, 'get').mockImplementation(async agentId => ({ ...sharedModelState, agentId }));
+}
+async function editModel() {
+  await userEvent.click(screen.getByText('模型服务配置'));
+  const input = await screen.findByLabelText('服务地址');
+  fireEvent.change(input, { target: { value: 'https://unsaved.example' } });
+  return input as HTMLInputElement;
+}
+it('guards section changes and Escape, keeps cancelled drafts in memory and discards only after confirmation', async () => {
+  mockModels();
+  const onClose = vi.fn();
+  renderModal({ agents: modelAgents, onClose });
+  const input = await editModel();
+  fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'SECRET_DRAFT_CANARY' } });
+  await userEvent.click(screen.getByRole('button', { name: /实验功能/ }));
+  const confirm = await screen.findByRole('alertdialog');
+  expect(input.value).toBe('https://unsaved.example');
+  expect(JSON.stringify(localStorage)).not.toContain('SECRET_DRAFT_CANARY');
+  await userEvent.click(within(confirm).getByRole('button', { name: '取消' }));
+  expect(input.value).toBe('https://unsaved.example');
+  await userEvent.keyboard('{Escape}');
+  expect(onClose).not.toHaveBeenCalled();
+  await userEvent.keyboard('{Escape}');
+  expect(screen.queryByRole('alertdialog')).toBeNull();
+  expect(input.value).toBe('https://unsaved.example');
+  await userEvent.click(screen.getByRole('button', { name: /实验功能/ }));
+  await userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '放弃更改并离开' }));
+  expect(screen.getByRole('heading', { name: '实验功能' })).toBeTruthy();
+  await userEvent.click(screen.getByRole('button', { name: /^Agent 准备本机执行者$/ }));
+  await userEvent.click(screen.getByText('模型服务配置'));
+  expect((await screen.findByLabelText('服务地址') as HTMLInputElement).value).toBe('https://saved.example');
+});
+it('guards external actions and refresh, clears the guard on successful save and preserves failed drafts', async () => {
+  mockModels();
+  const set = vi.spyOn(agentModelSettingsApi, 'set').mockRejectedValueOnce(new Error('save failed')).mockResolvedValue(sharedModelState);
+  const onCreateTask = vi.fn(), onClose = vi.fn(), onOpenLarkSetup = vi.fn();
+  renderModal({ agents: modelAgents, onCreateTask, onClose, onOpenLarkSetup });
+  const input = await editModel();
+  const refresh = new Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(refresh);
+  expect(refresh.defaultPrevented).toBe(true);
+  await userEvent.click(screen.getByRole('button', { name: '用它创建任务' }));
+  expect(onCreateTask).not.toHaveBeenCalled();
+  await userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '取消' }));
+  await userEvent.click(screen.getByRole('button', { name: '连接 Bot' }));
+  expect(onOpenLarkSetup).not.toHaveBeenCalled();
+  await userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '取消' }));
+  await userEvent.click(screen.getByRole('button', { name: '保存模型配置' }));
+  await screen.findByText('save failed');
+  expect(input.value).toBe('https://unsaved.example');
+  await userEvent.click(screen.getByRole('button', { name: '关闭设置与接入' }));
+  expect(onClose).not.toHaveBeenCalled();
+  await userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '取消' }));
+  await userEvent.click(screen.getByRole('button', { name: '保存模型配置' }));
+  await waitFor(() => expect(set).toHaveBeenCalledTimes(2));
+  await screen.findByText('已保存；下次启动 Agent 进程时生效。');
+  const cleanRefresh = new Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(cleanRefresh);
+  expect(cleanRefresh.defaultPrevented).toBe(false);
+  await userEvent.click(screen.getByRole('button', { name: '用它创建任务' }));
+  expect(onCreateTask).toHaveBeenCalledWith('claude-code');
+});
+it('aggregates all Agent drafts and prevents leaving while a model save is pending', async () => {
+  mockModels();
+  let finish!: (value: typeof sharedModelState) => void;
+  vi.spyOn(agentModelSettingsApi, 'set').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const onClose = vi.fn();
+  renderModal({ agents: [...modelAgents, { id: 'custom-claude', name: 'Custom Claude', protocol: 'pty-cli', permissionMode: 'ask', modelServiceSettings: true }], onClose });
+  for (const summary of screen.getAllByText('模型服务配置')) await userEvent.click(summary);
+  const inputs = await screen.findAllByLabelText('服务地址');
+  fireEvent.change(inputs[0]!, { target: { value: 'first draft' } });
+  fireEvent.change(inputs[1]!, { target: { value: 'second draft' } });
+  await userEvent.click(screen.getAllByRole('button', { name: '保存模型配置' })[0]!);
+  await screen.findByRole('button', { name: '保存中…' });
+  await userEvent.click(screen.getByRole('button', { name: /实验功能/ }));
+  await userEvent.click(screen.getByRole('button', { name: '关闭设置与接入' }));
+  await userEvent.keyboard('{Escape}');
+  expect(onClose).not.toHaveBeenCalled();
+  expect(screen.queryByRole('alertdialog')).toBeNull();
+  expect(screen.getByRole('heading', { name: 'Agent' })).toBeTruthy();
+  finish(sharedModelState);
+  await screen.findByText('已保存；下次启动 Agent 进程时生效。');
+  await userEvent.click(screen.getByRole('button', { name: /实验功能/ }));
+  expect(screen.getByRole('alertdialog')).toBeTruthy();
+  await userEvent.click(screen.getByRole('button', { name: '取消' }));
+  expect((inputs[1] as HTMLInputElement).value).toBe('second draft');
+});
+
+it('guards deep-link section changes and clears discarded drafts even when an external action leaves settings mounted', async () => {
+  mockModels();
+  const onCreateTask = vi.fn();
+  const view = renderModal({ agents: modelAgents, onCreateTask });
+  await editModel();
+  view.rerenderModal({ initialSection: 'experimental' });
+  expect(await screen.findByRole('alertdialog')).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Agent', hidden: true })).toBeTruthy();
+  await userEvent.click(screen.getByRole('button', { name: '取消' }));
+  expect((screen.getByLabelText('服务地址') as HTMLInputElement).value).toBe('https://unsaved.example');
+  await userEvent.click(screen.getByRole('button', { name: '用它创建任务' }));
+  await userEvent.click(screen.getByRole('button', { name: '放弃更改并离开' }));
+  expect(onCreateTask).toHaveBeenCalledWith('claude-code');
+  await userEvent.click(screen.getByText('模型服务配置'));
+  expect((await screen.findByLabelText('服务地址') as HTMLInputElement).value).toBe('https://saved.example');
+  await userEvent.click(screen.getByRole('button', { name: /实验功能/ }));
+  expect(screen.queryByRole('alertdialog')).toBeNull();
+  expect(screen.getByRole('heading', { name: '实验功能' })).toBeTruthy();
 });

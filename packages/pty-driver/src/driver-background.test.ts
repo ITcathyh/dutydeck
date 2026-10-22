@@ -190,8 +190,8 @@ describe('PTY completion while Claude background agents are still running', () =
     expect(processKey).toBeDefined();
     append([JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Current turn answer.' }] } })]);
     output(repaint(turnOneScreen));
-    // This legacy fixture has output and a completion screen, but no native
-    // terminal field, so it closes through the bounded compatibility window.
+    append([JSON.stringify({ type: 'system', subtype: 'turn_duration' })]);
+    // This fixture's baseline already declares duration-marker support.
     await vi.advanceTimersByTimeAsync(3_000);
     await first.pending;
     submitted = false;
