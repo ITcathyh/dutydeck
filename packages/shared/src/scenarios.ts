@@ -1,5 +1,6 @@
 import safeRegex from 'safe-regex2';
 import { z } from 'zod';
+import { pluginSkillRefSchema, type PluginBindingContext } from './plugin-bindings.js';
 
 /**
  * 场景包格式：插件清单 `scenarios` 目录下的每个 `<id>.json` 是一个包。
@@ -89,6 +90,7 @@ const scenarioPackObject = z.object({
     filter: z.object({ keywordsAnyParam: paramRef }).strict().optional()
   }).strict(),
   decision: z.object({ guidance: text(SCENARIO_LIMITS.guidanceChars) }).strict().optional(),
+  skills: z.array(pluginSkillRefSchema).max(16).optional(),
   execution: z.object({ instruction: text(4_000), intro: text(500).optional() }).strict(),
   dedupe: z.union([z.object({ algorithm: z.literal('source_text_v1') }).strict(), z.object({ provider: providerId }).strict()]).optional(),
   dedupeWindowHoursParam: paramRef.optional(),
@@ -411,9 +413,9 @@ export interface ScenarioContextResult { items: Array<{ id: string; title: strin
 export interface ScenarioProvider {
   id: string;
   /** 截止 500ms。 */
-  match?(input: { message: ScenarioMessage; params: Readonly<Record<string, unknown>>; signal: AbortSignal }): ScenarioMatchResult | Promise<ScenarioMatchResult>;
+  match?(input: { binding?: PluginBindingContext; message: ScenarioMessage; params: Readonly<Record<string, unknown>>; signal: AbortSignal }): ScenarioMatchResult | Promise<ScenarioMatchResult>;
   /** 截止按包声明，默认 5s、上限 15s。 */
-  context?(input: { scope: { appId: string; chatId: string }; message: ScenarioMessage; params: Readonly<Record<string, unknown>>; maxChars: number; signal: AbortSignal }): Promise<ScenarioContextResult>;
+  context?(input: { binding?: PluginBindingContext; scope: { appId: string; chatId: string }; message: ScenarioMessage; params: Readonly<Record<string, unknown>>; maxChars: number; signal: AbortSignal }): Promise<ScenarioContextResult>;
   /** 同步；整轮关联共 1s 截止。 */
   correlationKey?(input: { entries: Array<{ label: string; lines: string[] }> }): Record<string, string> | undefined;
 }

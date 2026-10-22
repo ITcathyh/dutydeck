@@ -1,4 +1,4 @@
-import { SCENARIO_LIMITS, type ScenarioContextResult, type ScenarioMatchResult, type ScenarioMessage, type ScenarioProvider } from '@dutydeck/shared';
+import { SCENARIO_LIMITS, type ScenarioContextResult, type ScenarioMatchResult, type ScenarioMessage, type ScenarioProvider, type PluginBindingContext } from '@dutydeck/shared';
 
 export type DeadlineResult<T> =
   | { status: 'ok'; value: T; durationMs: number }
@@ -51,16 +51,16 @@ type Log = { warn(data: Record<string, unknown>, message: string): void };
  * correlationKey 用调用方给的本轮剩余时间（整轮 1s）。核心只通过这里调用 provider。
  */
 export class ScenarioProviderCaller {
-  constructor(readonly plugin: string, readonly provider: ScenarioProvider, private readonly log?: Log) {}
+  constructor(readonly plugin: string, readonly provider: ScenarioProvider, private readonly log?: Log, private readonly resolveBinding?: (scope: { appId: string; chatId: string }, cwd?: string) => Promise<PluginBindingContext | undefined>) {}
 
   private late(method: string) {
     return (late: LateResult) => this.log?.warn({ plugin: this.plugin, provider: this.provider.id, method, ...late }, '场景 provider 迟到的结果已丢弃');
   }
 
-  async match(input: { message: ScenarioMessage; params: Readonly<Record<string, unknown>> }): Promise<DeadlineResult<ScenarioMatchResult>> {
+  async match(input: { scope?: { appId: string; chatId: string }; cwd?: string; message: ScenarioMessage; params: Readonly<Record<string, unknown>> }): Promise<DeadlineResult<ScenarioMatchResult>> {
     const match = this.provider.match;
     if (!match) return { status: 'error', error: `provider ${this.provider.id} 没有 match`, durationMs: 0 };
-    const result = await callWithDeadline(signal => match.call(this.provider, { ...input, signal }), SCENARIO_LIMITS.matchTimeoutMs, this.late('match'));
+    const result = await callWithDeadline(async signal => match.call(this.provider, { ...input, signal, binding: input.scope ? await this.resolveBinding?.(input.scope, input.cwd) : undefined }), SCENARIO_LIMITS.matchTimeoutMs, this.late('match'));
     if (result.status !== 'ok') return result;
     const value = result.value as Partial<ScenarioMatchResult> | undefined;
     if (typeof value?.matched !== 'boolean' || (value.dedupeKey !== undefined && (typeof value.dedupeKey !== 'string' || value.dedupeKey.length > 200))) {
@@ -69,13 +69,13 @@ export class ScenarioProviderCaller {
     return { status: 'ok', value: { matched: value.matched, ...(value.dedupeKey ? { dedupeKey: value.dedupeKey } : {}) }, durationMs: result.durationMs };
   }
 
-  context(input: { scope: { appId: string; chatId: string }; message: ScenarioMessage; params: Readonly<Record<string, unknown>>; maxChars?: number }, timeoutMs?: number): Promise<DeadlineResult<ScenarioContextResult>> {
+  context(input: { cwd?: string; scope: { appId: string; chatId: string }; message: ScenarioMessage; params: Readonly<Record<string, unknown>>; maxChars?: number }, timeoutMs?: number): Promise<DeadlineResult<ScenarioContextResult>> {
     const context = this.provider.context;
     if (!context) return Promise.resolve({ status: 'error', error: `provider ${this.provider.id} 没有 context`, durationMs: 0 });
     const limits = SCENARIO_LIMITS.context;
     const deadline = Math.min(timeoutMs ?? limits.timeoutMs.default, limits.timeoutMs.max);
     const maxChars = Math.min(input.maxChars ?? limits.maxChars.default, limits.maxChars.max);
-    return callWithDeadline(signal => context.call(this.provider, { ...input, maxChars, signal }), deadline, this.late('context'));
+    return callWithDeadline(async signal => context.call(this.provider, { ...input, maxChars, signal, binding: await this.resolveBinding?.(input.scope, input.cwd) }), deadline, this.late('context'));
   }
 
   /** remainingMs：本轮关联剩下的时间，封顶 1s。 */

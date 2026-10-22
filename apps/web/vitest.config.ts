@@ -15,6 +15,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
+      '@dutydeck/plugin-sdk': fileURLToPath(new URL('../../packages/plugin-sdk/src/index.ts', import.meta.url)),
       '@dutydeck/acp-client': fileURLToPath(new URL('../../packages/acp-client/src/index.ts', import.meta.url)),
       '@dutydeck/runtime': fileURLToPath(new URL('../../packages/agent-runtime/src/index.ts', import.meta.url)),
       '@dutydeck/config': fileURLToPath(new URL('../../packages/config/src/index.ts', import.meta.url)),

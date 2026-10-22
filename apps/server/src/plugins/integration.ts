@@ -68,12 +68,19 @@ export class PluginRuntimeHooks {
     }
     const context = result.additionalContext.length ? `\n\n${result.additionalContext.join('\n\n')}` : '';
     const agentPrompt = `${result.updatedPrompt ?? prepared.agentPrompt}${context}`;
-    if (!prepared.promptParts) return { ...prepared, agentPrompt };
+    for (const part of prepared.promptParts ?? []) if (part.trustScope === 'required_scenario_skill' && !agentPrompt.includes(part.content)) throw new RuntimeError('REQUIRED_SKILL_REPLACED', 'Hook removed required frozen scenario SOP', 409);
+    const skillDeliveries = prepared.skillDeliveries.map((skill, index) => {
+      const content = prepared.deliveryTexts?.[index];
+      const included = content !== undefined && agentPrompt.includes(content);
+      if (!included && skill.required) throw new RuntimeError('REQUIRED_SKILL_REPLACED', `Hook removed required SOP ${skill.ref ?? skill.name}`, 409);
+      return { ...skill, status: included ? 'included' as const : 'replaced' as const };
+    });
+    if (!prepared.promptParts) return { ...prepared, agentPrompt, skillDeliveries };
     const parts: PromptPart[] = [
       ...(result.updatedPrompt ? [{ kind: 'user_request' as const, trustScope: 'plugin_hook', content: result.updatedPrompt }] : prepared.promptParts),
       ...(context ? [{ kind: 'dynamic_context' as const, trustScope: 'plugin_hook', content: context }] : [])
     ];
-    return { ...prepared, agentPrompt, promptParts: parts, promptDiagnostics: assemblePrompt(parts, agentPrompt, policyVersion).diagnostics };
+    return { ...prepared, agentPrompt, skillDeliveries, promptParts: parts, promptDiagnostics: assemblePrompt(parts, agentPrompt, policyVersion).diagnostics };
   }
 
   async reviewPermission(session: Session, request: PermissionRequestData): Promise<'allow' | 'deny' | undefined> {

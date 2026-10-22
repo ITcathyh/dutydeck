@@ -1,3 +1,4 @@
+import type { PluginBinding, SavePluginBinding, PluginConfigSchema, PluginBindingScope } from '@dutydeck/shared';
 import type { AgentWeight, LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
 import type {
   SessionInsightDetailsResponse,
@@ -30,7 +31,7 @@ export type Agent = PublicAgent;
 export type AgentModel = { id: string; name: string };
 export type AgentModelsResult = { models: AgentModel[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent'; protocol?: 'acp' };
 export type SessionCapabilities = { observedAt: string; protocol?: string; structuredApproval: string; terminal: string; turnRecovery: string; verification: string; localFileDelivery: string };
-export type SkillReference = { name: string; description: string; path: string; source: 'workspace' | 'user' | 'plugin' };
+export type SkillReference = { ref?: string; name: string; description: string; path: string; source: 'workspace' | 'user' | 'plugin' };
 export type LarkAllowedUser = { openId: string; name: string };
 export type RiskControlMode = 'off' | 'guidance' | 'enforced';
 export type LarkBotConfig = {
@@ -500,7 +501,7 @@ export const api = {
   forgetSessionMemory: (sessionId: string, taskId: string, memoryId: string) => json<{ removed: { id: string } }>(`/api/sessions/${encodeURIComponent(sessionId)}/memory/${encodeURIComponent(taskId)}/entries/${encodeURIComponent(memoryId)}`, { method: 'DELETE' }),
   installLarkHook: (appId: string, highRiskPattern: string, expectedRevision?: number) => json<LarkHookStatus & { configRevision?: number }>('/api/lark/hooks/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, highRiskPattern, expectedRevision }) }),
   systemCapabilities: () => json<{ platform: string; directoryPicker: boolean; filePicker: boolean }>('/api/system/capabilities'),
-  skills: (cwd?: string) => json<SkillReference[]>(`/api/system/skills${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`),
+  skills: (cwd?: string, botAppId?: string, chatId?: string, pluginWorkspaceRoot?: string) => json<SkillReference[]>(`/api/system/skills?${new URLSearchParams({ ...(cwd ? { cwd } : {}), ...(botAppId ? { botAppId } : {}), ...(chatId ? { chatId } : {}), ...(pluginWorkspaceRoot ? { pluginWorkspaceRoot } : {}) })}`),
   /** 已启用插件提供的斜杠命令；没有插件时服务端不注册这个接口，按空列表处理。 */
   pluginCommands: async (cwd?: string) => {
     try { return (await json<{ commands: Array<{ name: string; description: string }> }>(`/api/plugins/commands${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`)).commands; }
@@ -1016,4 +1017,10 @@ const modelSettingsUrl = (id: string, appId?: string) => `${botAgentPath(id, app
 export const agentModelSettingsApi = {
   get: (id: string, appId?: string) => json<AgentModelSettings>(modelSettingsUrl(id, appId), { cache: 'no-store' }),
   set: (id: string, body: AgentModelSettingsPatch, appId?: string) => json<AgentModelSettings>(modelSettingsUrl(id, appId), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+};
+
+export const pluginBindingsApi = {
+  list: () => json<{ bindings: PluginBinding[]; packages: Array<{ name: string; version?: string; scope: string; apiVersion: number | string; configSchema: PluginConfigSchema; requiredSkills: string[]; legacyGlobal: string[] }>; diagnostics: Array<{ plugin: string; message: string }> }>('/api/plugin-bindings'),
+  save: (body: SavePluginBinding) => json<{ binding: PluginBinding }>('/api/plugin-bindings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  explain: (body: PluginBindingScope & { plugin: string }) => json<Record<string, unknown>>('/api/plugin-bindings/explain', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
 };

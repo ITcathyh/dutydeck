@@ -725,16 +725,21 @@ dutydeck plugin init <名字> [--dir <目录>]
 dutydeck plugin config <插件> <键> --value <值>          # 非敏感值
 printf %s "$SECRET" | dutydeck plugin config <插件> <键> --value-fd 0   # 敏感值只能这样传
 dutydeck plugin trigger-token <插件>/<触发器> [--rotate]
-dutydeck plugin update [名字] [--yes]
+dutydeck plugin update [名字] [--yes]       # 只准备候选包
+dutydeck plugin status <名字> [--json]
+dutydeck plugin activate <名字> [--json]  # 离线激活候选
+dutydeck plugin rollback <名字> [--json]  # 离线恢复上一版本
 dutydeck plugin enable <名字>
 dutydeck plugin disable <名字>
 dutydeck plugin uninstall <名字>
 ```
 
 - `<来源>`：本地目录、`git+https://…`、`git@…`、`file://…`（`#ref` 固定分支、标签或提交）、`npm:包名@版本`。git 来源按提交 SHA 固定。
-- 插件的增删改、启停都要 `dutydeck restart` 后才生效。多进程同时修改不同插件时，各次成功操作都会保留。本地目录来源每次 `plugin update` 都重新复制并报告“已更新”，即使版本号未变，也会提示重启。
+- `plugin update` 只准备不可变候选包；活动 Host 的 provider、hook 和技能路径始终指向原包，重启也不会自动激活候选。若候选包被修改，排空并停止服务后再次 `plugin update` 可从相同来源修复，再执行激活；活动或上一版本的损坏目录不会被原地覆盖。包内相对符号链接受支持；包外、绝对或无法解析的链接会拒绝安装和更新。内容摘要能识别不改版本号的变化；没有内容变化时不重复产生候选。多进程修改通过存储锁串行提交；启动时无法获取插件存储锁或租约会报错停止，待并发操作结束后重试，不会静默略过全部外部插件。
+- `plugin status` 区分选定包、候选、上一版本、实际加载的 Host 和切换阻塞。激活/回退使用离线检查：先在当前版本完成或取消未完成任务，并核对该插件未决动作；运行 `dutydeck stop`，systemd 托管实例用 `systemctl --user stop <unit>` 停止共用插件目录的所有实例，再执行 `plugin activate` 或 `plugin rollback`，成功后 `dutydeck start` / `systemctl --user start <unit>`。存在存活 Host、待恢复任务或该插件 unknown 操作时拒绝切换；租约会识别已退出进程，但 daemon 退出不代表 tmux 任务已完成。缺少插件依赖信息的未完成旧任务会保守阻塞，已终态历史和无关插件动作不阻塞。
+- 激活会在可终止的独立 Node 进程里验证已信任 provider 的导入/注册，使用临时数据目录和最小环境；这不是恶意代码沙箱。原活动版本保留供回退，不承诺按会话运行多版 provider，也不自动回退插件私有数据。安装与启停仍需重新启动 Host；卸载同样要求没有活动消费者。
 - `plugin validate` 也校验场景包（格式、模板变量、正则、参数），出错报文件和字段；`install`、`update` 不因场景包的问题失败，但会列出不会加载的包和原因。
-- 数据放在数据库所在目录的 `plugins/` 下：`plugins.lock.json`（来源、固定版本、作用域、已确认能力）、`<名字>/`（安装副本）、`.data/<名字>/`（插件自己的可写目录）。`.trigger-tokens.json` 和 `.config.json` 权限 0600；敏感配置存在本机密钥存储里。
+- 数据放在数据库所在目录的 `plugins/` 下：`plugins.lock.json`（来源、固定版本、作用域、已确认能力）、`.artifacts/<名字>/<内容摘要>/`（不可变安装副本）、`.hosts/`（Host 代际及数据库记录；旧 `<名字>/` 布局保留兼容）、`.data/<名字>/`（插件自己的可写目录）。`.trigger-tokens.json` 和 `.config.json` 权限 0600；敏感配置存在本机密钥存储里。
 
 ### 外部触发器
 
@@ -770,6 +775,67 @@ curl -X POST http://127.0.0.1:4310/api/plugins/hello/triggers/ping \
   -H 'content-type: application/json' -H "x-dutydeck-token: $TOKEN" \
   -d '{"id":"1","message":"hi"}'
 ```
+
+### 业务查询与动作工具
+
+可信 provider 用公开 `@dutydeck/plugin-sdk` 的 `api.registerQuery` / `api.registerAction` 注册工具。必须声明可序列化的 JSON Schema、兼容版本和资源选择器；输入只支持 object、array、string、number、integer、boolean 及 SDK 列出的边界字段，object 必须关闭额外字段。查询返回模型可见 JSON；动作返回短回执。私有文件继续走下节受控结果接口。
+
+安装和启用插件后，还要配置 Bot/群或精确工作区绑定，并由安装管理员单独授予工具权限。绑定业务配置不能扩大授权。授权按 `toolId`、`bindingId`、可信 actor、读写效果、资源及 invoke/reconcile 操作匹配，默认拒绝；资源 `*` 显式允许该工具的所有资源。示例授权：
+
+```bash
+dutydeck tool-grant set --database /path/to/dutydeck.db --json '{"id":"ticket-close","toolId":"fake-ticket/close","bindingId":"<绑定ID>","actor":{"kind":"installation_owner","id":"installation_owner"},"effects":["write"],"resources":["ticket:T-1"],"operations":["invoke","reconcile"]}'
+dutydeck tool-grant list --database /path/to/dutydeck.db
+dutydeck tool-grant revoke ticket-close --database /path/to/dutydeck.db
+```
+
+飞书 actor 使用 `{"kind":"channel","appId":"cli_xxx","id":"ou_xxx"}`。Web 当前任务使用已认证的安装者；宿主从持久化任务取得 actor/session/task/attempt，不接受调用参数或 MCP `_meta` 覆盖。`cwd` 是实际工作目录，`workspaceRoot` 是绑定选择使用的原项目目录；Web 不伪造 chatId。
+
+```bash
+# 当前任务内，沿用宿主给出的完整命令前缀与 TURN
+dutydeck tool list --turn "$TURN"
+dutydeck tool call fake-ticket/get --json '{"ticket":"T-1"}' --call-id read-1 --turn "$TURN"
+dutydeck tool call fake-ticket/close --json '{"ticket":"T-1"}' --call-id close-1 --turn "$TURN"
+dutydeck tool reconcile <actionId> --turn "$TURN"
+```
+
+HTTP 提供 `/api/plugin-tools/list`、`/call`、`/reconcile`；MCP Streamable HTTP 工具端点为 `/api/plugin-tools/mcp`，支持 initialize、ping、tools/list、tools/call，未提供资源或采样能力。两者都要求会话 relay Bearer 和 `x-dutydeck-tool-turn`。MCP 工具名为 `插件__工具`，参数为 `{input,callId}`；核对工具为 `dutydeck_reconcile`。JSON-RPC id 只关联请求，不作为幂等键。管理 `/api/plugins/tool-grants` 只接受安装管理员权限。
+
+动作 ID 由宿主按工具、会话、任务和稳定 callId 生成；同次重试保留参数和 callId。重复执行返回账本状态，超时或失去响应记为 unknown，不自动重新执行。核对同时检查原操作者的当前 invoke 权限与当前核对人的 reconcile 权限；绑定修订或 handler 版本不兼容时拒绝核对并保留未知状态。工具执行须遵守 AbortSignal，并在外部系统用 actionId 去重；宿主超时不能保证外部副作用已取消。插件代码属于受信代码，不提供进程沙箱。
+
+可打包示例与假工单服务协议见 [fake-ticket](examples/plugins/fake-ticket/README.md)。
+
+### 插件绑定、技能与作者 SDK
+
+安装决定允许加载哪些代码和作用域；绑定决定每次调用使用哪个群或项目的配置。控制中心「插件与技能」提供绑定编辑、停用和已保存配置解释，命令行走相同校验：
+
+```bash
+dutydeck settings plugin-binding list
+dutydeck settings plugin-binding set team-faq --app cli_bot --chat oc_a 'config={"docs_dir":"/srv/runbooks/a"}'
+dutydeck settings plugin-binding set team-faq --app cli_bot --chat oc_b 'config={"docs_dir":"/srv/runbooks/b"}'
+dutydeck settings plugin-binding set team-faq --workspace /srv/project 'config={"docs_dir":"/srv/runbooks/project"}'
+dutydeck settings plugin-binding explain team-faq --app cli_bot --chat oc_a
+dutydeck settings plugin-binding set team-faq --app cli_bot --chat oc_a enabled=false --expected-revision 1
+```
+
+群绑定完整覆盖 Bot 默认绑定，未填字段只取清单默认值。Web 按规范化后的项目根目录精确匹配；CLI 编辑时由目标服务器解析工作区别名（包括符号链接），并保留已有配置和版本；停用绑定也可重新启用。托管 worktree 使用可信会话的原项目目录。带 Bot/群的请求不回退到工作区绑定。绑定更新使用版本比较，下一次受控调用重新解析；旧调用的秘密访问器发现版本变化或停用会拒绝。新管理接口只接受安装管理员，任务凭据不能改绑定。
+
+清单可声明 `apiVersion: 1`（不支持的版本拒绝加载）、`bindingConfig`（`string`、`number`、`integer`、`boolean`、`string_list`、`secret`，支持 `required/default/enum/min/max` 中适用的字段）。普通配置与秘密引用分开保存，值、默认值和枚举类型不匹配时拒绝。秘密只能通过本地隐藏输入或文件描述符创建：
+
+```bash
+dutydeck settings plugin-binding secret-set my-plugin group-a --value-fd 0
+# 上一条从 stdin 读取，返回引用 plugin.my-plugin.group-a；不把明文写进命令参数。
+dutydeck settings plugin-binding set my-plugin --app cli_bot --chat oc_a 'secrets={"token":"plugin.my-plugin.group-a"}'
+```
+
+秘密引用按插件隔离；轮换时新建引用并更新绑定版本，不覆盖旧引用。provider 的 `context` / `match` 和业务工具在调用时取得宿主注入的 `bindingId`、`revision`、只读 `config` 与 `getSecret(key)`；读取未声明的秘密键会拒绝。解释与任务快照不保存秘密值。旧 `api.config` 仍是安装级字符串配置，旧 hooks、Agent 和 CI 的安装级行为保留，面板标明 Agent/CI 的全局兼容能力。
+
+技能使用稳定引用 `包名/技能目录名`，`SKILL.md` 支持标准 YAML 多行说明。旧 `/skills 名字` 遇到同名歧义会要求选择具体引用或路径。插件、Bot、群绑定和工作区作用域同时限制目录发现与实际读取；停用后不能借显式引用继续读取。清单 `requiredSkills` 与绑定 `skills` 是每轮共同 SOP；场景的 `skills` 只在该场景实际被选中后冻结，支持 model 判定/回复/执行及 direct 机器人消息。未选场景的 SOP 不混入当前任务。
+
+宿主把必需 SOP 与清单 `skillResources` 声明的有限文本直接加入提示词，readonly 后端也能收到；单个技能最多 128 KiB，单份引用最多 64 KiB（默认 16 KiB），合计最多 512 KiB，拒绝包外链接与非文本资源。最终内容在 `task.beforeRun` 后检查并冻结：旧 hook 替换的技能标为 `replaced`；删掉必需 SOP 会明确拒收。旧记录缺少状态时显示「未核实」，不能证明最终投递。正文与引用快照不承诺冻结脚本、provider 进程或所有可执行代码。
+
+插件安装只解包产物，不运行 npm install。作者若运行时 import `definePlugin` 或第三方库，须在发布前将依赖 bundle 到 provider 入口（例如 `esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs`），并把 `dist` 和 `.dutydeck-plugin` 纳入 npm files；不要把 `@dutydeck/plugin-sdk` 标记为 external。只使用 `import type` 时无需 SDK 运行依赖。验收另覆盖独立安装 SDK、bundle、打包、删除作者目录，再由真实 Host 加载和调用。
+
+作者可使用独立发布包 `@dutydeck/plugin-sdk`，其中 `definePlugin`、`PluginBindingContext`、场景及 query/action 作者类型不依赖 server 或私有 shared 包。仓库验收会将 SDK tarball 安装进空目录，用 TypeScript 编译第三方示例并实际 import。`plugins/team-faq` 是可独立 `npm pack` 的双群示例；打包包含清单、provider、场景、SOP 与引用文本，移除源目录后仍可安装运行。详见 [team-faq 用法](plugins/team-faq/README.md)。
 
 ### 受控插件结果
 

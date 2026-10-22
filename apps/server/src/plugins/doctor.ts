@@ -54,14 +54,17 @@ export async function pluginDoctorChecks(dataDir: string, builtinRoot?: string):
       for (const [key, declared] of Object.entries(plugin.manifest.userConfig ?? {})) {
         if (declared.sensitive && secrets?.inspect(pluginSecretKey(entry.name, key)).availability === 'available') config[key] = 'set';
       }
+      const activation = await store.activationStatus(entry.name);
       const problems: Array<{ text: string; command: string }> = [];
+      if (entry.candidate) problems.push({ text: `候选 ${entry.candidate.version ?? entry.candidate.id} 尚未激活${entry.candidate.validation?.status === 'failed' ? '；隔离注册验证失败' : ''}`, command: `dutydeck plugin status ${entry.name}` });
+      for (const host of activation.hosts) if (!host.activated) problems.push({ text: `Host PID ${host.pid} 未完成实际激活或加载失败`, command: `dutydeck plugin status ${entry.name}` });
       for (const [triggerId, trigger] of plugin.triggers) {
         if (!resolveTriggerTarget(trigger.target, config)) problems.push({ text: `触发器 ${triggerId} 的目标缺少配置`, command: `dutydeck plugin config ${entry.name} <配置项> --value <值>` });
         if (!store.triggerToken(entry.name, triggerId)) problems.push({ text: `触发器 ${triggerId} 还没有令牌`, command: `dutydeck plugin trigger-token ${entry.name}/${triggerId}` });
       }
       problems.push(...scenarioProblems(plugin));
       if (problems.length) checks.push({ id, label, level: 'warn', detail: problems.map(problem => problem.text).join('；'), remedy: '补齐后重启 daemon。', command: problems[0]!.command });
-      else checks.push({ id, label, level: 'ok', detail: `${entry.version ?? ''}${entry.version ? ' · ' : ''}${entry.scope}` });
+      else checks.push({ id, label, level: 'ok', detail: `${entry.version ?? ''}${entry.version ? ' · ' : ''}${entry.scope} · 静态合法 · ${activation.hosts.some(host => host.activated) ? '有 Host 已激活' : '当前无已验证的活动 Host'}` });
     } catch (error) {
       checks.push({ id, label, level: 'fail', detail: error instanceof Error ? error.message : String(error), remedy: '这个插件不会被加载，其余功能不受影响。修好插件目录后执行 update，或先停用。', command: `dutydeck plugin disable ${entry.name}` });
     }

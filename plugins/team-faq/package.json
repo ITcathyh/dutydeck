@@ -1,0 +1,13 @@
+{
+  "name": "dutydeck-plugin-team-faq",
+  "version": "0.1.0",
+  "type": "module",
+  "files": [
+    ".dutydeck-plugin",
+    "index.mjs",
+    "provider.mjs",
+    "scenarios",
+    "skills",
+    "references"
+  ]
+}

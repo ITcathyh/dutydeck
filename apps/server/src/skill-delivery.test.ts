@@ -149,7 +149,7 @@ describe('skill-delivery', () => {
       expect(wsResult.agentPrompt).toContain('Workspace compile procedure');
     });
 
-    it('delivers selected Claude skill body while preserving workspace precedence for names', async () => {
+    it('delivers selected Claude skill body and rejects ambiguous bare names', async () => {
       const workspaceSkillPath = join(workspaceDir, '.claude', 'skills', 'review', 'SKILL.md');
       const userSkillPath = join(userHomeDir, '.claude', 'skills', 'review', 'SKILL.md');
       await mkdir(join(workspaceDir, '.claude', 'skills', 'review'), { recursive: true });
@@ -164,13 +164,10 @@ describe('skill-delivery', () => {
       expect(explicit.agentPrompt).toContain(userBody);
       expect(explicit.agentPrompt).not.toContain('Workspace Claude instructions');
 
-      const legacy = await prepareSkillPrompt(workspaceDir, '/skills review\nReview this', undefined, { homeDirectory: userHomeDir });
-      expect(legacy.skillDeliveries[0]?.path).toBe(workspaceSkillPath);
-      expect(legacy.agentPrompt).toContain('Workspace Claude instructions');
-      expect(legacy.agentPrompt).not.toContain('User Claude instructions');
+      await expect(prepareSkillPrompt(workspaceDir, '/skills review\nReview this', undefined, { homeDirectory: userHomeDir })).rejects.toMatchObject({ code: 'SKILL_AMBIGUOUS', message: expect.stringContaining(workspaceSkillPath) });
     });
 
-    it('resolves legacy /skills directives with workspace precedence', async () => {
+    it('rejects ambiguous legacy names with both eligible candidates', async () => {
       // Both workspace and user have skill named "test"
       const wsSkillDir = join(workspaceDir, '.agents', 'skills', 'test');
       await mkdir(wsSkillDir, { recursive: true });
@@ -183,15 +180,7 @@ describe('skill-delivery', () => {
       await writeFile(join(userSkillDir, 'SKILL.md'), userContent, 'utf8');
 
       const prompt = '/skills test\n\nRun the test suite now';
-      const result = await prepareSkillPrompt(workspaceDir, prompt, undefined, { homeDirectory: userHomeDir });
-
-      expect(result.skillDeliveries).toHaveLength(1);
-      // Legacy name resolution must choose workspace first
-      expect(result.skillDeliveries[0]!.source).toBe('workspace');
-      expect(result.skillDeliveries[0]!.name).toBe('test');
-      expect(result.agentPrompt).toContain('Workspace test runner');
-      expect(result.agentPrompt).toContain('Run the test suite now');
-      expect(result.agentPrompt).not.toContain('/skills test');
+      await expect(prepareSkillPrompt(workspaceDir, prompt, undefined, { homeDirectory: userHomeDir })).rejects.toMatchObject({ code: 'SKILL_AMBIGUOUS', message: expect.stringContaining(join(userSkillDir, 'SKILL.md')) });
     });
 
     it('resolves legacy /skills directives to user skill if not in workspace', async () => {

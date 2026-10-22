@@ -11,7 +11,7 @@ import { listBuiltinPlugins } from './builtin.js';
 import { loadPluginDirectory, PluginValidationError, type LoadedPlugin } from './manifest.js';
 import { PluginStore, PluginStoreError, type PluginLockEntry, type PluginTrustPrompt } from './store.js';
 
-export type PluginCliAction = 'install' | 'uninstall' | 'enable' | 'disable' | 'list' | 'update' | 'validate' | 'init' | 'trigger-token' | 'config';
+export type PluginCliAction = 'install' | 'uninstall' | 'enable' | 'disable' | 'list' | 'update' | 'activate' | 'rollback' | 'status' | 'validate' | 'init' | 'trigger-token' | 'config';
 
 export interface PluginCliOptions {
   scope?: string;
@@ -73,7 +73,7 @@ const restartHint = (ui: CliUi) => ui.hint('运行 dutydeck restart 后生效。
 export async function runPluginCli(action: PluginCliAction, args: string[], options: PluginCliOptions, io: PluginCliIo = {}): Promise<{ ok: boolean }> {
   const ui = io.ui ?? createCliUi();
   const json = options.json === true;
-  const store = () => new PluginStore(pluginDataDir(options.database, io.env), io.builtinRoot);
+  const store = () => new PluginStore(pluginDataDir(options.database, io.env), io.builtinRoot, options.database ? resolve(options.database) : readDaemonStatus(resolveDaemonDir())?.database ?? resolveDatabaseUrl(io.env ?? process.env));
   // 非交互时不问：store 直接报出要信任的能力并提示加 --yes。
   const confirm = io.confirm ?? (process.stdin.isTTY && process.stderr.isTTY ? confirmOnTerminal : undefined);
   const emit = (value: Record<string, unknown>) => { if (json) ui.json({ ok: true, ...value }); };
@@ -131,7 +131,7 @@ export async function runPluginCli(action: PluginCliAction, args: string[], opti
 
   const plugins = store();
   // 安装和更新不因场景包的问题失败（插件其余部分照常加载），但要把不会加载的包说出来，说法和 validate 一致。
-  const scenarioIssuesOf = async (name: string) => (await loadPluginDirectory(plugins.pluginDir(name))).scenarioIssues;
+  const scenarioIssuesOf = async (name: string, candidate = false) => { const entry = plugins.get(name); return (await loadPluginDirectory(candidate && entry.candidate ? plugins.artifactDir(name, entry.candidate) : plugins.pluginDir(name))).scenarioIssues; };
   const warnScenarioIssues = (name: string, issues: LoadedPlugin['scenarioIssues']) => {
     if (!issues.length) return;
     ui.status('warn', `插件 ${name} 有场景包没通过校验，不会加载`);
@@ -149,16 +149,34 @@ export async function runPluginCli(action: PluginCliAction, args: string[], opti
     const results = [];
     for (const name of names) {
       const result = await plugins.update(name, { yes: options.yes === true, ...(confirm ? { confirm } : {}) });
-      const scenarioIssues = await scenarioIssuesOf(name);
+      const scenarioIssues = await scenarioIssuesOf(name, true);
       results.push({ ...result, ...(scenarioIssues.length ? { scenarioIssues } : {}) });
     }
     if (json) emit({ plugins: results });
     else {
       for (const result of results) {
-        ui.status(result.changed ? 'done' : 'ok', result.changed ? `已更新插件 ${result.entry.name}` : `插件 ${result.entry.name} 已是最新`, describeSource(result.entry));
+        ui.status(result.changed ? 'done' : 'ok', result.changed ? `已准备插件候选 ${result.entry.name}` : `插件 ${result.entry.name} 已是最新`, result.entry.candidate?.version ?? describeSource(result.entry));
         warnScenarioIssues(result.entry.name, result.scenarioIssues ?? []);
       }
-      if (results.some(result => result.changed)) restartHint(ui);
+      if (results.some(result => result.changed)) ui.hint('活动版本未改变。运行 dutydeck plugin status <name> 检查切换条件，再 dutydeck plugin activate <name>；成功后启动服务。');
+    }
+    return { ok: true };
+  }
+  if (action === 'activate' || action === 'rollback') {
+    const entry = action === 'activate' ? await plugins.activate(args[0]!) : await plugins.rollback(args[0]!);
+    if (json) emit({ plugin: entry });
+    else { ui.status('done', `${action === 'activate' ? '已激活' : '已回退'}插件 ${entry.name}`, entry.version); ui.hint('运行 dutydeck start；systemd 实例运行 systemctl --user start <unit>。'); }
+    return { ok: true };
+  }
+  if (action === 'status') {
+    const status = await plugins.activationStatus(args[0]!);
+    if (json) emit({ name: args[0], ...status });
+    else {
+      ui.keyValues([['选定版本', `${status.selected.version ?? '(无版本)'} · ${status.selected.id}`], ['候选', status.candidate?.version ?? status.candidate?.id ?? '无'], ['上一版本', status.previous?.version ?? status.previous?.id ?? '无']]);
+      for (const host of status.hosts) ui.status(host.activated ? 'ok' : 'warn', `Host PID ${host.pid}`, `${host.artifact} · ${host.activated ? '已激活' : '加载失败或未完成'}`);
+      for (const blocker of status.blockers) ui.status('warn', blocker.id, blocker.detail);
+      if (!status.blockers.length) ui.hint('当前可离线切换；这不代表静态校验已证明 provider 能加载。');
+      else ui.hint('先在当前版本完成/取消任务并核对动作，再 dutydeck stop；systemd 实例用 systemctl --user stop <unit> 停止所有共用此目录的实例。切换后 dutydeck start / systemctl --user start <unit>。');
     }
     return { ok: true };
   }
@@ -183,15 +201,15 @@ export async function runPluginCli(action: PluginCliAction, args: string[], opti
       } catch (error) { return { name, problem: error instanceof Error ? error.message : String(error) }; }
     }));
     const checked = await Promise.all(entries.map(async entry => {
-      if (builtinNames.has(entry.name)) return { entry, problem: `和内置插件 ${entry.name} 同名，不会加载；卸载后改名重新安装` };
+      if (builtinNames.has(entry.name)) return { entry, activation: undefined, problem: `和内置插件 ${entry.name} 同名，不会加载；卸载后改名重新安装` };
       try {
         const loaded = await loadPluginDirectory(plugins.pluginDir(entry.name));
         const untrusted = loaded.capabilities.filter(capability => !entry.trustedCapabilities.includes(capability));
         const problem = untrusted.length ? `能力未经确认：${untrusted.join('、')}` : scenarioProblem(loaded);
-        return { entry, ...(problem ? { problem } : {}) };
-      } catch (error) { return { entry, problem: error instanceof Error ? error.message : String(error) }; }
+        return { entry, activation: await plugins.activationStatus(entry.name), ...(problem ? { problem } : {}) };
+      } catch (error) { return { entry, activation: undefined, problem: error instanceof Error ? error.message : String(error) }; }
     }));
-    if (json) { emit({ plugins: [...builtins.map(item => ({ ...item, builtin: true, scope: 'global', enabled: true })), ...checked.map(({ entry, problem }) => ({ ...entry, ...(problem ? { problem } : {}) }))] }); return { ok: true }; }
+    if (json) { emit({ plugins: [...builtins.map(item => ({ ...item, builtin: true, scope: 'global', enabled: true })), ...checked.map(({ entry, problem, activation }) => ({ ...entry, ...(activation ? { activation } : {}), ...(problem ? { problem } : {}) }))] }); return { ok: true }; }
     if (!entries.length && !builtins.length) { ui.status('info', '还没有安装插件'); ui.hint('安装：dutydeck plugin install <目录|git 地址|npm 包>'); return { ok: true }; }
     for (const { name, version, problem } of builtins) {
       ui.status(problem ? 'warn' : 'ok', `${name}${version ? ` ${version}` : ''}`, '内置 · 已启用 · global');
@@ -200,6 +218,7 @@ export async function runPluginCli(action: PluginCliAction, args: string[], opti
     for (const { entry, problem } of checked) {
       ui.status(problem ? 'warn' : entry.enabled ? 'ok' : 'skip', `${entry.name}${entry.version ? ` ${entry.version}` : ''}`, `${entry.enabled ? '已启用' : '已停用'} · ${entry.scope}`);
       ui.hint(describeSource(entry));
+      if (entry.candidate) ui.hint(`候选：${entry.candidate.version ?? entry.candidate.id}；尚未激活，查看 dutydeck plugin status ${entry.name}`);
       if (problem) ui.hint(problem);
     }
     return { ok: true };

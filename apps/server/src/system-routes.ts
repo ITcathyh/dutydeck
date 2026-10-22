@@ -78,7 +78,7 @@ export async function registerSystemRoutes(app: FastifyInstance, options: System
       throw error;
     }
   });
-  app.get<{ Querystring: { cwd?: string } }>('/api/system/skills', async request => (options.discoverSkills ?? discoverSkills)(request.query.cwd));
+  app.get<{ Querystring: { cwd?: string; botAppId?: string; chatId?: string; pluginWorkspaceRoot?: string } }>('/api/system/skills', async request => (options.discoverSkills ?? discoverSkills)(request.query.cwd, { botAppId: request.query.botAppId, chatId: request.query.chatId, pluginWorkspaceRoot: request.query.pluginWorkspaceRoot }));
   app.post('/api/system/select-directory', async (_request, reply) => {
     if (!supported) return reply.code(501).send({ error: { code: 'DIRECTORY_PICKER_UNSUPPORTED', message: 'The native directory picker is currently available on macOS only' } });
     try {

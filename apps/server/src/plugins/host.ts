@@ -1,5 +1,9 @@
+import { PluginBusinessToolRegistry } from './business-tools.js';
+import { PluginBindings } from './bindings.js';
+import { RuntimeError, type PluginBindingScope, type PluginBindingContext } from '@dutydeck/shared';
 import { PluginResultToolRegistry } from './result-tools.js';
 import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { pluginHookEvents, scenarioProviderIdPattern, scenarioProviderRefs, type AgentConfig, type CiProvider, type PluginApi, type PluginHookEvent, type PluginTrigger, type ScenarioProvider } from '@dutydeck/shared';
 import { CiProviderRegistry } from '../ci-providers.js';
@@ -31,6 +35,7 @@ export function resolveTriggerTarget(target: PluginTrigger['target'], config: Re
 export interface PluginHostOptions {
   /** daemon 数据目录（数据库所在目录）；插件装在其下 plugins/。 */
   dataDir: string;
+  database?: string;
   /** 内置插件目录；默认随包发布的 builtin-plugins。 */
   builtinRoot?: string;
   log?: { warn(data: Record<string, unknown>, message: string): void };
@@ -42,45 +47,97 @@ const PROVIDER_REGISTER_TIMEOUT_MS = 15_000;
 
 /**
  * daemon 启动时先加载内置插件，再加载已启用、能力已信任的外部插件。单个插件出错只记诊断、跳过它，不影响 daemon；
- * 单个场景包出错只跳过那个包。插件改动（安装、启用、更新）在下次启动时生效。
+ * 单个场景包出错只跳过那个包。安装/启停在下次启动时生效；update 只准备候选，显式激活后加载新包。
  */
 export class PluginHost {
   readonly diagnostics: PluginDiagnostic[] = [];
   readonly active: ActivePlugin[] = [];
   readonly ciProviders = new CiProviderRegistry();
   readonly resultTools = new PluginResultToolRegistry();
+  readonly businessTools = new PluginBusinessToolRegistry();
   /** 场景注册表总是存在，只有内置包时也一样。 */
   readonly scenarios = new ScenarioRegistry();
   commands = new PluginCommandRegistry([]);
   hooks = new PluginHookBus([]);
   /** 有外部插件，或内置插件带了场景包以外的东西（命令、agents、skills、触发器、hooks、CI 提供方）时才需要接到 daemon。 */
   needsWiring = false;
-  private constructor(readonly store: PluginStore, private readonly builtinRoot: string, private readonly log?: PluginHostOptions['log']) {}
+  private releaseHost: (() => Promise<void>) | undefined;
+  async dispose(): Promise<void> { const release = this.releaseHost; this.releaseHost = undefined; await release?.(); }
+  readonly bindings: PluginBindings;
+  private constructor(readonly store: PluginStore, private readonly builtinRoot: string, private readonly log?: PluginHostOptions['log']) {
+    this.bindings = new PluginBindings(store.dataDir, reference => {
+      const provider = store.secretProvider(false);
+      return provider ? new LocalFilePluginSecretResolver(provider).read(reference) : undefined;
+    });
+  }
+
+  async resolveBinding(pluginName: string, context: PluginBindingScope): Promise<PluginBindingContext | undefined> {
+    const active = this.active.find(item => item.entry.name === pluginName);
+    if (!active || !scopeApplies(active.entry.scope, context)) throw new RuntimeError('PLUGIN_UNAVAILABLE', 'Plugin is not active in this scope', 403);
+    if (!active.builtin && !this.store.get(pluginName).enabled) throw new RuntimeError('PLUGIN_DISABLED', 'Plugin was disabled', 403);
+    const binding = this.bindings.resolve(pluginName, context, active.plugin.manifest);
+    return binding ? Object.freeze({ ...binding, getSecret: async (key: string) => {
+      if (!active.builtin && !this.store.get(pluginName).enabled) throw new RuntimeError('PLUGIN_DISABLED', 'Plugin was disabled', 403);
+      return binding.getSecret(key);
+    } }) : undefined;
+  }
+
+  async requiredSkillRequests(context: PluginBindingScope) {
+    const requests: Array<{ ref: string; binding: { id: string; revision: number } }> = [];
+    for (const name of new Set(this.bindings.list().map(binding => binding.plugin))) {
+      if (this.bindings.select(name, context)?.enabled && !this.active.some(item => item.entry.name === name)) throw new RuntimeError('PLUGIN_BINDING_UNAVAILABLE', `Bound package ${name} failed to load or is disabled; repair it or disable this binding before accepting tasks`, 409);
+    }
+    for (const active of this.active) {
+      if (!scopeApplies(active.entry.scope, context)) continue;
+      const selected = this.bindings.select(active.entry.name, context);
+      if (!selected?.enabled) continue;
+      const binding = await this.resolveBinding(active.entry.name, context);
+      if (!binding) continue;
+      for (const ref of new Set([...(active.plugin.manifest.requiredSkills ?? []), ...selected.skills])) requests.push({ ref, binding: { id: binding.bindingId, revision: binding.revision } });
+    }
+    return requests;
+  }
+
+  skillEntries(context: { workspaceRoot: string; botAppId?: string; chatId?: string }) {
+    return this.active.filter(({ entry, plugin, builtin }) => (builtin || this.store.get(entry.name).enabled) && this.bindings.select(entry.name, { ...context, cwd: context.workspaceRoot })?.enabled !== false && plugin.skillsDir && scopeApplies(entry.scope, { cwd: context.workspaceRoot, botAppId: context.botAppId })).map(({ entry, plugin }) => ({ path: plugin.skillsDir!, plugin: entry.name, version: plugin.manifest.version, root: plugin.root, resources: plugin.manifest.skillResources }));
+  }
 
   static empty(dataDir: string): PluginHost { return new PluginHost(new PluginStore(dataDir), defaultBuiltinPluginRoot()); }
 
   static async load(options: PluginHostOptions): Promise<PluginHost> {
     const builtinRoot = options.builtinRoot ?? defaultBuiltinPluginRoot();
-    const host = new PluginHost(new PluginStore(options.dataDir, builtinRoot), builtinRoot, options.log);
-    await host.initialize();
-    return host;
+    const host = new PluginHost(new PluginStore(options.dataDir, builtinRoot, options.database), builtinRoot, options.log);
+    // Store/lease failures invalidate the whole generation; do not silently omit external plugins.
+    const lease = await host.store.acquireHost();
+    host.releaseHost = lease.release;
+    try {
+      await host.initialize(lease.entries);
+      await lease.record(host.active.filter(item => !item.builtin).map(item => item.entry.name), host.diagnostics);
+      return host;
+    } catch (error) { await host.dispose(); throw error; }
   }
 
-  private async initialize() {
+  /** Used only by the trusted, isolated activation worker; no runtime lease or live dataDir. */
+  static async validatePlugin(input: { root: string; dataDir: string; entry: PluginLockEntry; config: Record<string, string> }): Promise<boolean> {
+    const builtinRoot = join(input.dataDir, 'no-builtins');
+    const host = new PluginHost(new PluginStore(input.dataDir, builtinRoot), builtinRoot);
+    await host.initialize([input.entry], input);
+    return host.active.length === 1 && host.diagnostics.length === 0;
+  }
+
+  private async initialize(entries: PluginLockEntry[], validation?: { root: string; config: Record<string, string> }) {
     const builtins = listBuiltinPlugins(this.builtinRoot);
     const builtinNames = new Set(builtins.map(item => item.name));
     const reservedScenarioIds = reservedBuiltinScenarioIds(this.builtinRoot);
-    let entries: PluginLockEntry[] = [];
-    try { entries = this.store.list(); }
-    catch (error) { this.fail('*', error); }
     const candidates = [
       ...builtins.map(item => ({ entry: { name: item.name, source: { kind: 'builtin', spec: item.root }, scope: 'global', enabled: true, trustedCapabilities: [] } as BuiltinPluginEntry, root: item.root, builtin: true })),
-      ...entries.filter(item => item.enabled).sort((left, right) => left.name.localeCompare(right.name)).map(entry => ({ entry, root: this.store.pluginDir(entry.name), builtin: false }))
+      ...entries.filter(item => item.enabled).sort((left, right) => left.name.localeCompare(right.name)).map(entry => ({ entry, root: validation?.root ?? this.store.pluginDir(entry.name, entry), builtin: false }))
     ];
     const registrations: HookRegistration[] = [];
     let secrets: LocalFilePluginSecretResolver | undefined;
     for (const { entry: candidate, root, builtin } of candidates) {
       let entry = candidate;
+      let providerCodeEvaluated = false;
       try {
         if (!builtin && builtinNames.has(entry.name)) throw new Error(`和内置插件 ${entry.name} 同名，没有加载；卸载后改名重新安装`);
         const plugin = await loadPluginDirectory(root);
@@ -93,7 +150,7 @@ export class PluginHost {
           this.diagnostics.push({ plugin: entry.name, message });
           this.log?.warn({ plugin: entry.name, error: message }, '场景包已跳过');
         }
-        const config: Record<string, string> = { ...this.store.plainConfig(entry.name) };
+        const config: Record<string, string> = { ...(validation?.config ?? this.store.plainConfig(entry.name)) };
         for (const [key, declared] of Object.entries(plugin.manifest.userConfig ?? {})) {
           if (!declared.sensitive) continue;
           secrets ??= (() => { const provider = this.store.secretProvider(false); return provider ? new LocalFilePluginSecretResolver(provider) : undefined; })();
@@ -103,6 +160,7 @@ export class PluginHost {
         const dataDir = this.store.pluginDataDir(entry.name);
         const pluginRegistrations: HookRegistration[] = [];
         const resultTools: import('@dutydeck/shared').PluginResultTool[] = [];
+        const businessTools: Array<{ kind: 'query' | 'action'; tool: import('@dutydeck/shared').PluginQuery | import('@dutydeck/shared').PluginAction }> = [];
         const env = {
           DUTYDECK_PLUGIN_NAME: entry.name, DUTYDECK_PLUGIN_ROOT: plugin.root, DUTYDECK_PLUGIN_DATA: dataDir,
           ...Object.fromEntries(Object.entries(config).map(([key, value]) => [configEnvName(key), value]))
@@ -113,12 +171,15 @@ export class PluginHost {
         const providers: CiProvider[] = [];
         const scenarioProviders = new Map<string, ScenarioProvider>();
         if (plugin.providersEntry) {
+          providerCodeEvaluated = true;
           // 内置插件随每次启动加载，不为它们建数据目录：没装插件时数据目录下什么都不多（用到时插件自己建）。
           if (!builtin) await mkdir(dataDir, { recursive: true });
           let registering = true;
           const api: PluginApi = {
             plugin: { name: entry.name, ...(plugin.manifest.version ? { version: plugin.manifest.version } : {}), root: plugin.root, dataDir },
             config: Object.freeze({ ...config }),
+            registerQuery: tool => { if (registering) businessTools.push({ kind: 'query', tool }); },
+            registerAction: tool => { if (registering) businessTools.push({ kind: 'action', tool }); },
             registerResultTool: tool => { if (registering) resultTools.push(tool); },
             registerCiProvider: provider => { if (registering) providers.push(provider); },
             registerHookHandler: (event: PluginHookEvent, handler, options) => {
@@ -150,16 +211,23 @@ export class PluginHost {
           const existing = this.ciProviders.list().find(item => item.provider.id === provider.id);
           if (existing) throw new Error(`CI 提供方 ${provider.id} 已由插件 ${existing.plugin} 注册`);
         }
+        const checkedBusiness = new PluginBusinessToolRegistry();
+        for (const { kind, tool } of businessTools) checkedBusiness.register(entry.name, entry.scope, plugin.manifest.version ?? 'unversioned', kind, tool);
         const checkedResults = new PluginResultToolRegistry();
         for (const tool of resultTools) checkedResults.register(entry.name, entry.scope, tool);
         const scenarios = this.resolveScenarios(entry.name, entry.scope, builtin, plugin, scenarioProviders, reservedScenarioIds);
         for (const provider of providers) this.ciProviders.register(entry.name, provider);
         for (const tool of resultTools) this.resultTools.register(entry.name, entry.scope, tool);
+        for (const { kind, tool } of businessTools) this.businessTools.register(entry.name, entry.scope, plugin.manifest.version ?? 'unversioned', kind, tool);
         this.scenarios.add(scenarios);
         registrations.push(...pluginRegistrations);
         this.active.push({ entry, plugin, config: Object.freeze({ ...config }), builtin });
-        if (!builtin || plugin.commands.length || plugin.agents.length || plugin.skillsDir || plugin.triggers.size || pluginRegistrations.length || providers.length || resultTools.length) this.needsWiring = true;
-      } catch (error) { this.fail(entry.name, error); }
+        if (!builtin || plugin.commands.length || plugin.agents.length || plugin.skillsDir || plugin.triggers.size || pluginRegistrations.length || providers.length || resultTools.length || businessTools.length) this.needsWiring = true;
+      } catch (error) {
+        // Provider exceptions may include installation secrets or other private input.
+        // Keep the package and registration stage, never its arbitrary error text.
+        this.fail(entry.name, providerCodeEvaluated ? new Error('PLUGIN_PROVIDER_REGISTRATION_FAILED: provider import or registration failed; check package compatibility and installation configuration') : error);
+      }
     }
     this.commands = new PluginCommandRegistry(this.active.map(({ entry, plugin }) => ({ name: entry.name, scope: entry.scope, commands: plugin.commands })));
     this.hooks = new PluginHookBus(registrations, this.log);
@@ -175,7 +243,7 @@ export class PluginHost {
         const provider = providers.get(ref.id);
         if (!provider) problems.push(`${ref.field} 引用的 provider ${ref.id} 没有注册`);
         else if (typeof provider[ref.method] !== 'function') problems.push(`provider ${ref.id} 没有 ${ref.method} 方法（${ref.field} 需要）`);
-        else callers.set(ref.id, new ScenarioProviderCaller(plugin, provider, this.log));
+        else callers.set(ref.id, new ScenarioProviderCaller(plugin, provider, this.log, (scope, cwd) => this.resolveBinding(plugin, { botAppId: scope.appId, chatId: scope.chatId, cwd })));
       }
       const owner = this.scenarios.get(pack.id);
       const reservedBy = builtin ? undefined : reserved.get(pack.id);

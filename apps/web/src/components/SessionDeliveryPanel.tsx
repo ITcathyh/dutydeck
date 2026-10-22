@@ -105,7 +105,7 @@ export function SessionDeliveryPanel({ session, tasks, onClose, presentation = '
           <h3 className="text-body font-semibold">Skill 投递记录</h3>
           {!skillTasks.length && <p className="text-caption text-subtle">尚无明确选中的 Skill。发送时可在输入框选择。</p>}
           {skillTasks.map(task => <details key={task.id} className="rounded-lg border border-default p-3"><summary className="cursor-pointer text-caption">{task.prompt.slice(0, 100)} · {task.skillDeliveries!.length} 项</summary>
-            {task.skillDeliveries!.map(skill => <div key={skill.path} className="mt-2 break-all text-caption"><strong>{skill.name}</strong> · 正文已加入本轮指令<p className="text-subtle">{skill.source === 'workspace' ? '项目' : skill.source === 'plugin' ? '插件' : '个人'} · {skill.path}<br/>SHA256 {skill.digest}</p></div>)}
+            {task.skillDeliveries!.map(skill => <div key={skill.path} className="mt-2 break-all text-caption"><strong>{skill.ref ?? skill.name}</strong> · {skill.status === 'replaced' ? '正文被 hook 替换，未投递' : skill.status === 'included' ? '正文已加入本轮指令' : '旧记录：未核实最终投递'}<p className="text-subtle">{skill.source === 'workspace' ? '项目' : skill.source === 'plugin' ? '插件' : '个人'} · {skill.path}<br/>SHA256 {skill.digest}</p></div>)}
           </details>)}
         </section>
         <details className="rounded-lg border border-default p-3">

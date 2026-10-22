@@ -43,7 +43,8 @@
     "qrcode": "^1.5.4",
     "safe-regex2": "5.1.1",
     "ws": "^8.19.0",
-    "zod": "3.25.67"
+    "zod": "3.25.67",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
     "@dutydeck/legacy-importer": "workspace:*",

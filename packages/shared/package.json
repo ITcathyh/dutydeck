@@ -114,7 +114,19 @@
     "src/plugin-results.ts",
     "dist/plugin-results.js",
     "dist/plugin-results.js.map",
-    "dist/plugin-results.d.ts"
+    "dist/plugin-results.d.ts",
+    "src/plugin-tools.ts",
+    "dist/plugin-tools.js",
+    "dist/plugin-tools.js.map",
+    "dist/plugin-tools.d.ts",
+    "src/action-transition.ts",
+    "dist/action-transition.js",
+    "dist/action-transition.js.map",
+    "dist/action-transition.d.ts",
+    "src/plugin-bindings.ts",
+    "dist/plugin-bindings.js",
+    "dist/plugin-bindings.js.map",
+    "dist/plugin-bindings.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -123,7 +135,8 @@
   },
   "dependencies": {
     "safe-regex2": "5.1.1",
-    "zod": "3.25.67"
+    "zod": "3.25.67",
+    "@dutydeck/plugin-sdk": "workspace:*"
   },
   "devDependencies": {
     "typescript": "5.8.3"

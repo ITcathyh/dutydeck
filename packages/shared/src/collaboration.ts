@@ -644,6 +644,8 @@ export const collaborationScenarioSchema = z.object({
   reason: z.string().max(2000).optional(),
   /** 判定 prompt 里那一段宿主管理者规则的完整文字。 */
   guidance: z.string().max(4000).optional(),
+  /** Selected scenario SOP and bounded text resources, frozen before the decision. */
+  skills: z.object({ prompt: z.string().max(600_000), digest: z.string().length(64), refs: z.array(z.string()).max(16) }).strict().optional(),
   /** act 交给执行 Agent 的指令。 */
   execution: z.object({ instruction: z.string().min(1).max(4000), digest: z.string().min(1).max(128) }).strict().optional(),
   /** 上下文来源取到的材料：observations 是转成观察的条目，判定材料按 decisionChars 截取，回复和执行用全部。 */

@@ -15,11 +15,15 @@ const stderrLog = { warn: (data: Record<string, unknown>, message: string) => pr
 
 /**
  * daemon 启动时加载插件。场景注册表总是返回（只有内置包时也一样）；host 只在需要接线时返回
- * （有外部插件，或内置插件带了场景包以外的东西），否则为 undefined，调用方据此完全不接线，任务链路和没有插件时一样。
+ * （有外部插件、绑定、加载错误，或内置插件带了场景包以外的东西），否则为 undefined，调用方据此完全不接线，任务链路和没有插件时一样。
  */
 export async function loadDaemonPlugins(env: NodeJS.ProcessEnv, options: { builtinRoot?: string } = {}): Promise<{ host?: PluginHost; scenarios: ScenarioRegistry }> {
-  const host = await PluginHost.load({ dataDir: dirname(resolveDatabaseUrl(env)), log: stderrLog, ...options });
-  return { scenarios: host.scenarios, ...(host.needsWiring ? { host } : {}) };
+  const host = await PluginHost.load({ dataDir: dirname(resolveDatabaseUrl(env)), database: resolveDatabaseUrl(env), log: stderrLog, ...options });
+  try {
+    const keepHost = host.needsWiring || host.bindings.list().length > 0 || host.diagnostics.length > 0;
+    if (!keepHost) await host.dispose();
+    return { scenarios: host.scenarios, ...(keepHost ? { host } : {}) };
+  } catch (error) { await host.dispose(); throw error; }
 }
 
 export interface PluginWiringDeps {
@@ -38,7 +42,7 @@ export interface PluginWiringDeps {
 export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
   const hooks = new PluginRuntimeHooks(host.hooks, deps.log);
   const disposers = [
-    setPluginSkillRoots(context => host.skillRoots(context)),
+    setPluginSkillRoots(context => host.skillEntries(context)),
     setLarkPluginCommands(host.commands)
   ];
   const triggers = new PluginTriggerService({
@@ -75,5 +79,5 @@ export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
   };
 
   const routes: PluginRouteOptions = { commands: host.commands, triggers };
-  return { hooks, triggers, runtimeOptions, routes, dispose: () => { for (const dispose of disposers) dispose(); } };
+  return { hooks, triggers, runtimeOptions, routes, dispose: async () => { for (const dispose of disposers) dispose(); await host.dispose(); } };
 }

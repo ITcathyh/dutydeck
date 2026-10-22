@@ -75,7 +75,7 @@ export class LarkScenarios {
    * 来源消息过不过这个包的匹配：消息类型 → 文字包含任一参数值（空列表不匹配）→ 正则 → provider，任一步不过就不匹配，不留记录。
    * 正则或 provider 出错、超时时返回 abstained。包声明了去重 provider 时，取它 match 返回的 dedupeKey。
    */
-  async match(entry: RegisteredScenarioPack, binding: ScenarioBinding, message: ScenarioMessage): Promise<ScenarioMatch> {
+  async match(entry: RegisteredScenarioPack, binding: ScenarioBinding, message: ScenarioMessage, context?: { scope: { appId: string; chatId: string }; cwd?: string }): Promise<ScenarioMatch> {
     const { pack } = entry;
     const { messageTypes, match } = pack.trigger;
     if (messageTypes && !messageTypes.includes(message.messageType)) return { matched: false };
@@ -95,7 +95,7 @@ export class LarkScenarios {
     let dedupeKey: string | undefined;
     for (const id of new Set([match?.provider, pack.dedupe && 'provider' in pack.dedupe ? pack.dedupe.provider : undefined])) {
       if (!id) continue;
-      const result = await entry.providers.get(id)!.match({ message, params: binding.params });
+      const result = await entry.providers.get(id)!.match({ message, params: binding.params, ...context });
       if (result.status !== 'ok') return { matched: true, abstained: result.status === 'timeout' ? `provider ${id} 超时` : `provider ${id} 出错：${result.error}` };
       if (id === match?.provider && !result.value.matched) return { matched: false };
       if (pack.dedupe && 'provider' in pack.dedupe && id === pack.dedupe.provider) dedupeKey = result.value.dedupeKey;
