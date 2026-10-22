@@ -26,6 +26,7 @@ import { TurnCpu } from './turn-cpu.js';
 import { createTranscriptTailer, type TranscriptEventSource, type TranscriptPosition } from './transcript/index.js';
 import { buildSessionMarker, resolveCliSessionId, hasPinnedClaudeSession, claudeSessionIdLookup } from './session-id/index.js';
 import { hostname } from 'node:os';
+import { statSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { ClaudeSettings } from './claude-settings.js';
 import { TranscriptSourceTracker, freezeTranscriptSource, verifyLaunchedTranscript } from './transcript-source.js';
@@ -610,6 +611,24 @@ export class PtyCliDriver implements AgentDriver {
     const turnId = randomUUID();
     this.preparedTurnId = turnId;
     return { kind: 'pty-jsonl-v1', turnId, transcript: transcript.checkpoint() };
+  }
+
+  async canRecoverTurn(state: DriverTurnRecovery): Promise<boolean> {
+    const backend = this.backend, generation = this.wiringGeneration;
+    if (!(backend instanceof TmuxBackend) || !backend.ownerId || !this.started || this.stopped || !this.turnActive
+      || this.spawnPermissionMode !== 'full-trust' || this.planGuardActive || this.hookPermissions.size || this.activeSubmission || this.awaitingAnswer?.()
+      || this.idleDetector?.programStatusBlock()?.kind === 'permission'
+      || !state || state.kind !== 'pty-jsonl-v1' || !state.turnId || !state.transcript?.path
+      || !Number.isSafeInteger(state.transcript.offset) || state.transcript.offset < 0) return false;
+    try {
+      if (this.transcript?.checkpoint().path !== state.transcript.path || statSync(state.transcript.path).size < state.transcript.offset) return false;
+      if (await TmuxBackend.probeSession(backend.sessionName) !== 'exists'
+        || await TmuxBackend.sessionOwner(backend.sessionName) !== backend.ownerId
+        || await backend.getDutydeckMetadata('turn_id') !== state.turnId) return false;
+      return this.backend === backend && this.wiringGeneration === generation && !this.stopped && this.turnActive
+        && !this.planGuardActive && !this.activeSubmission && !this.awaitingAnswer?.()
+        && this.hookPermissions.size === 0 && this.idleDetector?.programStatusBlock()?.kind !== 'permission';
+    } catch { return false; }
   }
 
   async recover(state: DriverTurnRecovery, onAttached?: () => Promise<void>): Promise<void> {

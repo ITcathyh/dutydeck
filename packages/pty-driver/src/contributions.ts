@@ -1,20 +1,19 @@
 /**
  * pty-cli 驱动的内置 Agent 贡献清单。
  *
- * id/adapterId 与 @dutydeck/cli-adapters 的适配器 id 一致；
+ * adapterId 对应 @dutydeck/cli-adapters 的适配器；id 是独立的入口标识；
  * command 按各 CLI 常见可执行文件名核对；
  * capabilities.resume 按各适配器 buildArgs 的实际 resume 支持核对
  * （gemini 适配器明确 always start fresh，无 resume）。
  * pause 全 false：这些供应商 CLI 没有可由 Dutydeck 可靠兑现的暂停语义。
  *
  * 与 @dutydeck/config 的 PtyAgentContribution 对齐：config 包定义的形状是
- * `{ id, name, command, args?, builtin? }`，本接口是它的超集——多出的
- * adapterId / capabilities 是 server 组装 driver 时的元数据；当前贡献的 id 与
- * adapterId 恒等，server 可直接用 agent.id 经 createCliAdapter 取适配器。
+ * `{ id, name, command, args?, builtin?, adapterId?, capabilities? }`。
+ * id 与 adapterId 不同时，config 保留 adapterId 供 server 选择适配器。
  * config 会逐项传播这里声明的能力，避免把 fresh-only CLI 错报为可恢复。
  */
 export interface PtyAgentContribution {
-  /** 与 adapter id 一致 */
+  /** 独立的 Agent 入口标识 */
   id: string;
   /** 展示名 */
   name: string;
@@ -22,7 +21,7 @@ export interface PtyAgentContribution {
   command: string;
   /** 透传进 AgentConfig.args 的默认参数（一般为空：spawn 参数由 adapter.buildArgs 构造） */
   args?: string[];
-  /** cli-adapters 里的适配器 id（当前内置贡献与 id 恒等） */
+  /** cli-adapters 里的适配器 id */
   adapterId: string;
   capabilities: { pause: boolean; resume: boolean };
 }
@@ -30,6 +29,7 @@ export interface PtyAgentContribution {
 export const PTY_AGENT_CONTRIBUTIONS: PtyAgentContribution[] = [
   { id: 'claude-code', name: 'Claude', command: 'claude', adapterId: 'claude-code', capabilities: { pause: false, resume: true } },
   { id: 'codex', name: 'Codex', command: 'codex', adapterId: 'codex', capabilities: { pause: false, resume: true } },
+  { id: 'codex-cli', name: 'Codex (terminal)', command: 'codex', adapterId: 'codex', capabilities: { pause: false, resume: true } },
   { id: 'gemini', name: 'Gemini', command: 'gemini', adapterId: 'gemini', capabilities: { pause: false, resume: false } },
   { id: 'opencode', name: 'OpenCode', command: 'opencode', adapterId: 'opencode', capabilities: { pause: false, resume: true } },
   { id: 'grok', name: 'Grok Build', command: 'grok', adapterId: 'grok', capabilities: { pause: false, resume: true } },
@@ -84,6 +84,7 @@ type ConfigContributionShape = {
   command: string;
   args?: string[];
   builtin?: boolean;
+  adapterId?: string;
 };
 const _alignmentCheck: ConfigContributionShape[] = PTY_AGENT_CONTRIBUTIONS;
 void _alignmentCheck;

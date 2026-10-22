@@ -73,6 +73,19 @@ describe('GET /api/system/activity', () => {
     }
   });
 
+  it('requests restart proof explicitly and keeps the total running count', async () => {
+    const getRestartActivity = vi.fn(async () => ({ runningTasks: 3, restartBlockers: 1, recoverableTasks: 2 }));
+    const getRunningTaskCount = vi.fn(() => 3);
+    const app = await buildApp({ getRestartActivity, getRunningTaskCount } as unknown as DutydeckRuntime);
+    try {
+      expect((await app.inject('/api/system/activity')).json()).toEqual({ runningTasks: 3 });
+      expect(getRestartActivity).not.toHaveBeenCalled();
+      const response = await app.inject('/api/system/activity?restart=true&excludeSessionId=ses_self');
+      expect(response.json()).toEqual({ runningTasks: 3, restartBlockers: 1, recoverableTasks: 2 });
+      expect(getRestartActivity).toHaveBeenCalledWith('ses_self');
+    } finally { await app.close(); }
+  });
+
   it('counts only tasks with status === running and excludes the given session', () => {
     // 验证 DutydeckRuntime 原型上的 getRunningTaskCount 逻辑只计数 running 状态
     const mockTasks = new Map<string, any>([

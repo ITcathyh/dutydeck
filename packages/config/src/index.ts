@@ -53,6 +53,7 @@ export interface PtyAgentContribution {
   command: string
   args?: string[]
   builtin?: boolean
+  adapterId?: string
   /** 该 CLI 的真实能力。省略时按保守默认 { pause: false, resume: true } 处理——
    *  贡献方（@dutydeck/pty-driver 的 PTY_AGENT_CONTRIBUTIONS）应显式声明，
    *  否则像 gemini 这种「每次都全新会话、无 resume」的 CLI 会被错报为可恢复。 */
@@ -71,7 +72,7 @@ const scanPtyAgents = (contributions: PtyAgentContribution[], acpxIds: Set<strin
   const agents = contributions.flatMap(contribution => {
     // id 冲突时 ACPX 优先：与 ACPX 内置 agent 同 id 的 PTY 贡献直接跳过，保证 ACP 基线不回归
     if (acpxIds.has(contribution.id) || !commandExists(contribution.command)) return [];
-    return [{ id: contribution.id, name: contribution.name, command: contribution.command, args: contribution.args ?? [], protocol: 'pty-cli' as const, env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: contribution.capabilities ?? DEFAULT_PTY_CAPABILITIES, builtin: contribution.builtin ?? true, version: cliVersion(contribution.command) }];
+    return [{ id: contribution.id, name: contribution.name, command: contribution.command, args: contribution.args ?? [], protocol: 'pty-cli' as const, ...(contribution.adapterId && contribution.adapterId !== contribution.id ? { adapterId: contribution.adapterId } : {}), env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: contribution.capabilities ?? DEFAULT_PTY_CAPABILITIES, builtin: contribution.builtin ?? true, version: cliVersion(contribution.command) }];
   });
   scannedPtyAgents.set(cacheKey, agents);
   return agents;

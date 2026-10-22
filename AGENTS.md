@@ -18,6 +18,6 @@
 
 - 线上实例：`systemctl --user list-units 'dutydeck*' --all` 列出所有 unit（通常一个 Web 实例加每个机器人一个进程，默认的 `dutydeck.service` 可能已 mask），`systemctl --user cat <unit>` 看发布目录、数据库和端口。`dutydeck` 不在 PATH 上时，用 unit `ExecStart` 里的 node 执行 `<releases>/current/dist/cli.js`。
 - 排查：`dutydeck status`、`dutydeck doctor`；日志看 `journalctl --user -u <unit>`。
-- 重启：用 `dutydeck restart --unit <unit>`，它会等正在执行的任务结束，并自动排除当前 Agent 会话自己那一轮；不用 `systemctl --user restart`。
+- 重启：用 `dutydeck restart --unit <unit>`，它会保留已验证可恢复、无权限等待或未授权高危门禁的 full-trust tmux 任务（systemd 须确认当前 KillMode=process），等待其余正在执行的任务结束，并自动排除当前 Agent 会话自己那一轮；不用 `systemctl --user restart`。
 - 部署：改动已在主检出提交，在主检出跑 `pnpm install --frozen-lockfile && pnpm build`，再对每个 unit 依次执行 `dutydeck deploy --source <主检出> --unit <unit>`。所有 unit 共用同一个 `<releases>/current`，只部署一部分会让其余 unit 在下次重启时换版本。每个 unit 部署后确认 `<releases>/../deployments/<时间>-<sha>/manifest.json` 的 `status` 是 `deployed`，且日志里没有启动错误。
 - 以下操作先征得用户同意：`--force`（不等任务结束就重启）、`deploy --now`（越过 `DUTYDECK_DEPLOY_WINDOW`）；修改 systemd unit、`.env`、机器人凭据或权限模式；删除或覆盖 `.dutydeck/` 下的数据库、发布目录和部署记录（清理旧版本先跑 `dutydeck deploy prune --unit <unit> --dry-run`）。

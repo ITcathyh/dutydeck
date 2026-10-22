@@ -206,9 +206,10 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     authorize: (request, sessionId, action) => requireSessionExecution(request, sessionId, 'session', action) });
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, clearBotModelSettings: appId => options.agentModelSettings?.clearBot(appId) ?? Promise.resolve(), renameBotModelSettings: (oldAppId, newAppId) => options.agentModelSettings?.renameBot(oldAppId, newAppId) ?? Promise.resolve(), runtime: options.lark?.runtime ?? runtime });
-  app.get<{ Querystring: { excludeSessionId?: string } }>('/api/system/activity', async request => {
+  app.get<{ Querystring: { excludeSessionId?: string; restart?: string } }>('/api/system/activity', async request => {
     const excludeSessionId = request.query.excludeSessionId?.trim() || undefined;
-    return { runningTasks: runtime.getRunningTaskCount(excludeSessionId) };
+    return request.query.restart === 'true' ? runtime.getRestartActivity(excludeSessionId)
+      : { runningTasks: runtime.getRunningTaskCount(excludeSessionId) };
   });
   // restart / deploy 等待任务结束期间进入排空：新消息照常入队，但不开始新的轮次，重启后由新进程执行。
   // 排空带租约，调用方每轮查询时续租；它中途退出（Ctrl-C、被杀）时租约到期自动恢复，队列不会一直停着。

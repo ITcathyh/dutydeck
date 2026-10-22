@@ -49,6 +49,7 @@ function persistentTurn(recoverable = false) {
       recover: entry.recover,
       ...(recoverable ? {
         checkpoint: () => ({ kind: 'pty-jsonl-v1' as const, turnId: 'verified-turn', transcript: { offset: 0 } }),
+        canRecoverTurn: async () => true,
         prepareForDaemonShutdown: (keep: boolean) => { preserve = keep; },
         isDetachedForShutdown: () => detached,
       } : {}),
@@ -229,6 +230,24 @@ describe('persistent task recovery across a reopened database', () => {
     expect(events.filter(event => event.type === 'completed')).toHaveLength(2);
     expect(events.filter(event => event.type === 'tool_call')).toHaveLength(1);
     expect(events.filter(event => event.type === 'tool_result')).toHaveLength(1);
+  });
+
+  it('keeps mixed ACP work as a restart blocker while preserving the verified tmux turn', async () => {
+    const pty = persistentTurn(true), acp = persistentTurn();
+    const factory: DriverFactory = (...args) => (args[1] === 'acp' ? acp : pty).factory(...args);
+    const h = open(database(), factory, { probe: candidate => ({ available: true, protocol: candidate.protocol ?? 'acp', pause: false, resume: true }) });
+    await h.runtime.initialize([agent, { ...agent, id: 'acp', protocol: 'acp' }]);
+    const terminal = await h.runtime.start({ agentId: agent.id }), other = await h.runtime.start({ agentId: 'acp' });
+    await h.runtime.dispatch(terminal.id, 'terminal input');
+    await h.runtime.dispatch(other.id, 'ACP input');
+    await vi.waitFor(() => expect(acp.prompts).toHaveLength(1));
+    h.runtime.setQueueHeld(true);
+    expect(await h.runtime.getRestartActivity()).toEqual({ runningTasks: 2, restartBlockers: 1, recoverableTasks: 1 });
+    expect(await h.runtime.getRestartActivity(terminal.id)).toEqual({ runningTasks: 1, restartBlockers: 1, recoverableTasks: 0 });
+    acp.complete();
+    await vi.waitFor(() => expect(h.runtime.getRunningTaskCount()).toBe(1));
+    expect(await h.runtime.getRestartActivity()).toEqual({ runningTasks: 1, restartBlockers: 0, recoverableTasks: 1 });
+    pty.complete();
   });
 
   it('counts running tasks as 1 during initial run and keeps 1 after recovering persistent turn', async () => {

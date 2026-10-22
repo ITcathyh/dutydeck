@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { builtinAgents, loadConfig, type PtyAgentContribution } from './index.js';
 import { commandExists } from '@dutydeck/transports';
+import { PTY_AGENT_CONTRIBUTIONS } from '../../pty-driver/src/contributions.js';
 
 // ACPX 发现固定返回 claude/codex 两个内置 agent，与真实环境解耦
 vi.mock('@dutydeck/acp-client', () => ({
@@ -66,6 +67,13 @@ describe('builtinAgents PTY contributions', () => {
     const claude = agents.find(agent => agent.id === 'claude');
     expect(claude?.protocol).toBe('acp');
     expect(agents.every(agent => agent.protocol !== 'pty-cli')).toBe(true);
+  });
+
+  it('keeps Codex ACP and adds a separate terminal entry using the Codex adapter', () => {
+    const contributions = PTY_AGENT_CONTRIBUTIONS.filter(agent => ['codex', 'codex-cli'].includes(agent.id));
+    const agents = builtinAgents('/tmp/dutydeck-pty-test', contributions);
+    expect(agents.find(agent => agent.id === 'codex')).toMatchObject({ protocol: 'acp', permissionMode: 'ask' });
+    expect(agents.find(agent => agent.id === 'codex-cli')).toMatchObject({ protocol: 'pty-cli', adapterId: 'codex', command: 'codex', permissionMode: 'ask' });
   });
 
   it('probes each contribution command only once across repeated calls with the same arguments', () => {

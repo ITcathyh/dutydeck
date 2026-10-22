@@ -571,6 +571,12 @@ dutydeck auth token [--rotate]            # token for CLI/scripts/API
 dutydeck auth share-key rotate
 ```
 
+`restart` first holds queued work. Successfully submitted `full-trust` tmux turns with verified recovery logs and original turn identity keep running in the same CLI process; the new service adopts the original turn without resending input. Other running tasks still drain, including ACP, plain PTY, Herdr, submissions in progress, missing recovery evidence, pending approvals and unauthorized high-risk gates. With systemd, preservation requires the current `KillMode=process`; other or unknown values use a full drain. Older services without recovery counts, failed drain requests and failed lease renewals also use a full drain. `--drain-timeout`, `--force` and automatic exclusion of the invoking Agent session retain their existing behavior. `deploy` continues to drain all running tasks.
+
+The `codex` entry keeps ACP as its default. Select the separate `codex-cli` (Codex terminal) entry for terminal mode, for example with `dutydeck settings bot set <appId> defaultAgentId=codex-cli`, then start a new session. This changes neither existing sessions nor permissions. Only tmux tasks already authorized for `full-trust` and backed by complete recovery evidence can continue across a service restart. A first submission without a known transcript path still drains.
+
+`GET /api/system/activity` keeps `runningTasks` as the total running count. Add `?restart=true` to verify recovery evidence and receive `restartBlockers` and `recoverableTasks`; no tasks are deducted unless queue claiming is held. `excludeSessionId` applies to all three counts.
+
 Use `channel-bot` for the draft bots shown in the experimental “Groups & permissions” page. Its argument is the internal `id` returned by `list`, not the Lark App ID:
 
 ```bash

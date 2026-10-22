@@ -954,7 +954,7 @@ dutydeck start [--cwd /path] [--port 4310] [--host 0.0.0.0]
 # 查看服务状态
 dutydeck status
 
-# 平滑重启（先排空正在执行的任务）
+# 平滑重启（保留已验证可恢复的 tmux 任务，等待其余任务）
 dutydeck restart
 
 # 停止守护进程
@@ -966,6 +966,12 @@ dutydeck update
 # 一键诊断（端口、SQLite、Agent 可执行性与默认 Agent、飞书监听等）
 dutydeck doctor
 ```
+
+`restart` 先暂停领取新任务。已提交成功、恢复日志与原轮身份可验证的 `full-trust` tmux 任务继续在原 CLI 进程里运行，新服务接回同一轮，不重发输入；其余任务继续等待结束。ACP、普通 PTY、Herdr、提交中、缺少恢复日志或身份，以及待审批或高危权限门禁未授权的任务都不会跳过等待。systemd 只在当前 `KillMode=process` 时保留任务；其他值或读不到时全量等待。旧服务不支持恢复计数、排空失败或租约续期失败时也全量等待。`--drain-timeout` 控制等待上限，`--force` 保留原来的强制重启行为，当前 Agent 自己的会话仍自动排除。`deploy` 继续等待所有正在执行的任务结束。
+
+Codex 的 `codex` 入口继续使用 ACP；选择独立的 `codex-cli`（Codex terminal）入口可使用终端模式，例如 `dutydeck settings bot set <appId> defaultAgentId=codex-cli`，再开启新会话。此设置不会改变已有会话或权限；只有原本已获 `full-trust` 权限、且恢复证据完整的 tmux 任务能跨服务重启继续运行。首次提交时尚无日志位置的任务仍会等待结束。
+
+`GET /api/system/activity` 的 `runningTasks` 仍是当前正在执行的总数。显式加 `?restart=true` 才检查恢复证据并返回 `restartBlockers` 和 `recoverableTasks`；未进入排空时不减去可恢复任务，`excludeSessionId` 同时适用于这三个计数。
 
 ### 2. 版本发布与部署 (`deploy`)
 

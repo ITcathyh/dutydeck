@@ -168,14 +168,14 @@ describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
 });
 
 describe('PTY_AGENT_CONTRIBUTIONS', () => {
-  it('id 与 adapterId 一致且唯一，字段齐备，pause 全 false', () => {
+  it('入口 id 唯一，适配器绑定明确，字段齐备，pause 全 false', () => {
     // 不锁总条数：每移植一个适配器就要改一次数字的断言只会制造无谓冲突，
     // 且「数量对」并不能证明任何东西。锁的是每条都必须成立的不变量。
     expect(PTY_AGENT_CONTRIBUTIONS.length).toBeGreaterThan(0);
     const ids = PTY_AGENT_CONTRIBUTIONS.map(c => c.id);
     expect(new Set(ids).size).toBe(ids.length);
     for (const c of PTY_AGENT_CONTRIBUTIONS) {
-      expect(c.adapterId).toBe(c.id);
+      expect(c.adapterId).toBe(c.id === 'codex-cli' ? 'codex' : c.id);
       expect(c.command).toBeTruthy();
       expect(c.name).toBeTruthy();
       expect(c.capabilities.pause).toBe(false);
@@ -205,6 +205,7 @@ describe('PTY_AGENT_CONTRIBUTIONS', () => {
     expect(byId).toMatchObject({
       'claude-code': 'claude',
       codex: 'codex',
+      'codex-cli': 'codex',
       gemini: 'gemini',
       opencode: 'opencode',
       grok: 'grok',

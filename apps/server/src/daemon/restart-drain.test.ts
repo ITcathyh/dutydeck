@@ -7,7 +7,7 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AutostartCommandOutput } from '../autostart/autostart.js';
-import { daemonRestart, daemonStart, waitForRunningTasksDrain } from './command.js';
+import { daemonRestart, daemonStart, drainRuntime, waitForRunningTasksDrain } from './command.js';
 import { localLoopbackUrl } from '../local-api-url.js';
 import { defaultDaemonDir, pidAlive, readDaemonStatus, writeState, type DaemonState } from './daemon.js';
 
@@ -20,6 +20,7 @@ type Verb = 'show' | 'start' | 'stop' | 'restart';
 interface World {
   loaded?: boolean;
   subState?: string;
+  killMode?: string;
   mainPid?: number;
   environment?: string;
   workingDirectory?: string;
@@ -44,6 +45,7 @@ function systemctl(world: World) {
           `LoadState=${world.loaded === false ? 'not-found' : 'loaded'}`,
           `SubState=${world.subState ?? 'running'}`,
           `MainPID=${world.mainPid ?? 0}`,
+          ...(world.killMode ? [`KillMode=${world.killMode}`] : []),
           `Environment=${world.environment ?? `PATH=/usr/bin DUTYDECK_SUPERVISOR=systemd DUTYDECK_SYSTEMD_UNIT=${UNIT}`}`,
           `WorkingDirectory=${world.workingDirectory ?? ''}`,
           `ExecStart={ path=${UNIT_EXEC} ; argv[]=${UNIT_EXEC} ${UNIT_SCRIPT} ${world.args ?? 'start --foreground'} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }`
@@ -135,6 +137,93 @@ describe('restart 前等待正在执行的任务结束（drain）', () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it.each(['process', 'control-group', 'mixed', undefined])('only retains tmux work when systemd KillMode is process (%s)', async killMode => {
+    const old = idleProcess();
+    writeState(dir, daemonState(old, 'gen-1'));
+    const world = systemctl({ mainPid: old.pid, workingDirectory: tmp, killMode });
+    let clock = 0;
+    const fetch = vi.fn(async (url: string) => ({ ok: true, status: 200, json: async () =>
+      new URL(url).pathname === '/api/system/drain' ? { draining: true } : { runningTasks: 1, restartBlockers: 0, recoverableTasks: 1 }
+    }) as Response);
+    // Stop at the attempted restart; the test never controls a real systemd unit.
+    const runCommand = async (command: string, args: readonly string[]) => args[1] === 'restart'
+      ? { status: 1, stdout: '', stderr: 'fixture restart attempted' } : world.run(command, args);
+    const result = await daemonRestart({ drainTimeout: '1' }, {
+      serve() {}, runCommand, platform: 'linux', checkSqlite: passingSqlite, fetch,
+      sleep: async () => { clock += 2000; }, now: () => clock, info() {}, warn() {}
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain(killMode === 'process' ? 'fixture restart attempted' : '超时');
+    const activityUrls = fetch.mock.calls.map(([url]) => new URL(url)).filter(url => url.pathname === '/api/system/activity');
+    expect(activityUrls.every(url => url.searchParams.get('restart') === (killMode === 'process' ? 'true' : null))).toBe(true);
+  });
+
+  it.each([
+    {}, { restartBlockers: -1, recoverableTasks: 2 }, { restartBlockers: 0 },
+    { restartBlockers: 0, recoverableTasks: 0 }, { restartBlockers: '0', recoverableTasks: 1 },
+    { restartBlockers: 0.5, recoverableTasks: 0.5 }
+  ])('keeps waiting for old or malformed restart counts: %j', async extra => {
+    const old = idleProcess(), state = daemonState(old, 'gen-1', false);
+    writeState(dir, state);
+    let clock = 0;
+    const result = await waitForRunningTasksDrain(dir, state, { drainTimeout: '1' }, {
+      fetch: async url => ({ ok: true, status: 200, json: async () =>
+        new URL(String(url)).pathname === '/api/system/drain' ? { draining: true } : { runningTasks: 1, ...extra }
+      }) as Response,
+      sleep: async () => { clock += 2000; }, now: () => clock, info() {}, warn() {}
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it('reports an unchanged recoverable count only once while waiting for other tasks', async () => {
+    const old = idleProcess(), state = daemonState(old, 'gen-1', false);
+    writeState(dir, state);
+    const blockers = [1, 1, 0], info = vi.fn();
+    const result = await waitForRunningTasksDrain(dir, state, {}, {
+      fetch: async url => ({ ok: true, status: 200, json: async () => {
+        if (new URL(String(url)).pathname === '/api/system/drain') return { draining: true };
+        const restartBlockers = blockers.shift()!;
+        return { runningTasks: restartBlockers + 1, restartBlockers, recoverableTasks: 1 };
+      } }) as Response,
+      sleep: async () => {}, info, warn() {}
+    });
+    expect(result.ok).toBe(true);
+    expect(info.mock.calls.filter(([message]) => message.includes('已验证可恢复'))).toHaveLength(1);
+    if (result.ok) await result.release?.();
+  });
+
+  it('refuses inconsistent restart fields even when the legacy count says zero', async () => {
+    const old = idleProcess(), state = daemonState(old, 'gen-1', false);
+    writeState(dir, state);
+    const result = await waitForRunningTasksDrain(dir, state, {}, {
+      fetch: async url => ({ ok: true, status: 200, json: async () =>
+        new URL(String(url)).pathname === '/api/system/drain' ? { draining: true } : { runningTasks: 0, restartBlockers: 1, recoverableTasks: 0 }
+      }) as Response,
+      info() {}, warn() {}
+    });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.error).toContain('格式错误');
+  });
+
+  it.each(['detached', 'deploy', 'no-drain', 'lost-lease'])('uses recovery counts only for a restart with a maintained drain (%s)', async mode => {
+    const old = idleProcess(), state = daemonState(old, 'gen-1', false);
+    writeState(dir, state);
+    let clock = 0, holds = 0;
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (new URL(url).pathname === '/api/system/drain') {
+        if (JSON.parse(String(init?.body)).draining) holds++;
+        const ok = mode !== 'no-drain' && !(mode === 'lost-lease' && holds > 1);
+        return { ok, status: ok ? 200 : 404, json: async () => ({ draining: ok }) } as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({ runningTasks: 1, restartBlockers: mode === 'lost-lease' && holds === 1 ? 1 : 0, recoverableTasks: mode === 'lost-lease' && holds === 1 ? 0 : 1 }) } as Response;
+    });
+    const deps = { fetch, sleep: async () => { clock += 2000; }, now: () => clock, info() {}, warn() {} };
+    const result = mode === 'deploy' ? await drainRuntime(state, { drainTimeout: '1' }, deps)
+      : await waitForRunningTasksDrain(dir, state, { drainTimeout: '1' }, deps);
+    expect(result.ok).toBe(mode === 'detached');
+    if (result.ok) await result.release?.();
   });
 
   it('有任务在执行时先等待，归零后才 systemctl restart', async () => {

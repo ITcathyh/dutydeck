@@ -1769,6 +1769,41 @@ export class DutydeckRuntime {
     return count;
   }
 
+  /** Restart may detach only verified original turns while queue claiming stays held. */
+  async getRestartActivity(excludeSessionId?: string): Promise<{ runningTasks: number; restartBlockers: number; recoverableTasks: number }> {
+    const recoverable = new Map<string, () => boolean>();
+    if (this.queueHeld && !this.shuttingDown) for (const [id, task] of this.activeTasks) {
+      if (id === excludeSessionId || task.status !== 'running') continue;
+      try {
+        const session = await this.repos.sessions.get(id), driver = this.drivers.get(id);
+        const attempt = this.repos.execution.getTaskExecution(task.id)?.currentAttempt;
+        const submission = attempt?.submission, recovery = submission?.recovery;
+        if (!session || session.protocol !== 'pty-cli' || session.terminalBackend !== 'tmux'
+          || !driver?.canRecoverTurn || !attempt || attempt.state !== 'active' || !submission || !recovery
+          || task.interruptedByActor || this.acceptedInput(task).executionOptions.permissionMode !== 'full-trust') continue;
+        const refs = submission.resourceRefs;
+        const resource = refs.length === 1 ? this.repos.execution.getResources(id).find(row => row.resourceId === refs[0]!.resourceId) : undefined;
+        if (!resource || resource.kind !== 'local_only' || resource.stage !== 'created' || resource.runId !== session.runId
+          || resource.identity?.identityId !== refs[0]!.identityId || resource.observations.at(-1)?.state === 'gone'
+          || this.resourceBlockers(id).some(block => block.resourceId !== resource.resourceId)) continue;
+        const unchanged = () => this.queueHeld && !this.shuttingDown && this.activeTasks.get(id) === task && task.status === 'running'
+          && this.drivers.get(id) === driver && !this.stopBlocks.has(id) && !this.verifyingSessions.has(id)
+          && !this.steeringSessions.has(id) && !this.permissionsForSession(id).length
+          && !this.oscPermissionWaits.has(attempt.attemptId)
+          && this.repos.execution.getTaskExecution(task.id)?.currentAttempt?.revision === attempt.revision
+          && this.repos.execution.getResources(id).find(row => row.resourceId === resource.resourceId)?.revision === resource.revision
+          && !this.bound().getPendingQueueActions(this.fence(session)).some(action => action.target?.attemptId === attempt.attemptId);
+        if (!unchanged()) continue;
+        const policy = this.options.resolveRiskPolicy ? await this.options.resolveRiskPolicy(id, task.executionContext?.riskPolicy) : task.executionContext?.riskPolicy;
+        if (policy?.enabled && !policy.authorized) continue;
+        if (await driver.canRecoverTurn(recovery) && unchanged()) recoverable.set(id, unchanged);
+      } catch { /* Missing or changing recovery evidence remains a restart blocker. */ }
+    }
+    const runningTasks = this.getRunningTaskCount(excludeSessionId);
+    const recoverableTasks = [...recoverable.values()].filter(unchanged => unchanged()).length;
+    return { runningTasks, restartBlockers: runningTasks - recoverableTasks, recoverableTasks };
+  }
+
   async start(input: StartSessionInput): Promise<Session> {
     this.assertReady();
     if (input?.source === 'work_item') throw new RuntimeError('INVALID_WORK_SESSION', 'Work-item sessions require the internal admission API', 403);

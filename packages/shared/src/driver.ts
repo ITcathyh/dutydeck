@@ -141,6 +141,8 @@ export interface AgentDriver {
   resume(operation?: OperationPermit): Promise<void>;
   /** Capture the output boundary before submitting a new turn, if recoverable. */
   checkpoint?(): DriverTurnRecovery | undefined | Promise<DriverTurnRecovery | undefined>;
+  /** Read-only proof that this submitted turn can survive a daemon restart. Never prepare a new checkpoint. */
+  canRecoverTurn?(state: DriverTurnRecovery): Promise<boolean>;
   /** Attach to the original live backend and await this turn without resending its prompt. */
   recover?(state: DriverTurnRecovery, onAttached?: () => Promise<void>): Promise<void>;
   /** Local attachment closed for daemon shutdown; the persistent resource remains live. */
