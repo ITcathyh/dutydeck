@@ -1,11 +1,12 @@
 import { readFileSync, readdirSync } from 'node:fs';
 
 /** Includes roots; callers validate ownership and resolve physical identities. */
-export function descendantPids(roots: number[]): number[] {
+export function descendantPids(roots: number[], stats?: Map<string, string>): number[] {
   const children = new Map<number, number[]>();
   for (const entry of readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
     try {
       const raw = readFileSync(`/proc/${entry}/stat`, 'utf8');
+      stats?.set(entry, raw);
       const parent = Number(raw.slice(raw.lastIndexOf(')') + 2).split(' ')[1]);
       children.set(parent, [...(children.get(parent) ?? []), Number(entry)]);
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }

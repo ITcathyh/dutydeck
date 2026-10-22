@@ -20,7 +20,7 @@ type LarkContextSource = {
 
 type SourcedResource = LarkMessageResource & { sourceMessageId: string };
 
-type ReadDocument = (url: string) => Promise<{ url: string; title?: string; text: string; links?: string[]; linkTitles?: Array<{ url: string; title: string }>; linkError?: string }>;
+type ReadDocument = (url: string, signal?: AbortSignal) => Promise<{ url: string; title?: string; text: string; links?: string[]; linkTitles?: Array<{ url: string; title: string }>; linkError?: string }>;
 
 type TaskContextService = Pick<LarkCardService, 'getMessage' | 'getMessageItems' | 'listChatMessages'> & {
   readDocument?: ReadDocument;
@@ -32,6 +32,7 @@ export interface CollectLarkTaskContextInput {
   resources: LarkMessageResource[];
   service: TaskContextService;
   cursor?: LarkContextCursor;
+  signal?: AbortSignal;
   readMessageIds?: string[];
   /** 本 Bot 的 app_id；给了才会读取同话题里其他 Bot 的结论。 */
   selfAppId?: string;
@@ -384,7 +385,8 @@ async function collectReferencedParent(
   sources: LarkContextSource[],
   addRead: (messageId: string) => void,
   ingest: (message: LarkChatMessage, parsed: ParsedVerifiedMessage) => void,
-  alreadyRead: boolean
+  alreadyRead: boolean,
+  signal?: AbortSignal
 ) {
   const label = `引用消息 ${parentId}`;
   if (alreadyRead) return;
@@ -392,6 +394,7 @@ async function collectReferencedParent(
   try {
     parent = await service.getMessage(parentId);
   } catch (error) {
+    signal?.throwIfAborted();
     const source = appendSourceError(sources, label, error, parentId);
     materials.addMissing(source);
     return;
@@ -407,6 +410,7 @@ async function collectReferencedParent(
   try {
     items = await service.getMessageItems(parentId);
   } catch (error) {
+    signal?.throwIfAborted();
     expansionError = appendSourceError(sources, label, error, parentId);
   }
   if (expansionError && parent.messageType === 'merge_forward') {
@@ -420,7 +424,21 @@ async function collectReferencedParent(
 }
 
 export async function collectLarkTaskContext(input: CollectLarkTaskContextInput): Promise<CollectLarkTaskContextResult> {
-  const { event, prompt, service } = input;
+  const { event, prompt, signal } = input;
+  const checked = async <T>(read: () => Promise<T>): Promise<T> => {
+    signal?.throwIfAborted();
+    const result = await read();
+    signal?.throwIfAborted();
+    return result;
+  };
+  const original = input.service;
+  const service: TaskContextService = signal ? {
+    getMessage: id => checked(() => original.getMessage(id, signal)),
+    getMessageItems: id => checked(() => original.getMessageItems(id, signal)),
+    listChatMessages: query => checked(() => original.listChatMessages(query, signal)),
+    ...(original.readDocument ? { readDocument: (url: string) => checked(() => original.readDocument!(url, signal)) } : {})
+  } : original;
+  signal?.throwIfAborted();
   const expandDocuments = wantsChildDocuments(prompt);
   const maxDocuments = expandDocuments ? MAX_EXPANDED_DOCUMENTS : MAX_DOCUMENTS;
   const readIds = normalizeReadIds(input.readMessageIds);
@@ -473,6 +491,7 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
     try {
       items = await service.getMessageItems(currentMessageId);
     } catch (error) {
+      signal?.throwIfAborted();
       expansionError = appendSourceError(sources, messageLabel(currentMessageId), error, currentMessageId);
     }
     if (expansionError) {
@@ -502,7 +521,7 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
 
   const parentId = trimMessageId(event.parentId);
   if (parentId) {
-    await collectReferencedParent(event, parentId, service, materials, sources, addRead, ingest, readSet.has(parentId));
+    await collectReferencedParent(event, parentId, service, materials, sources, addRead, ingest, readSet.has(parentId), signal);
   }
 
   let nextCursor: LarkContextCursor | undefined = input.cursor;
@@ -555,6 +574,7 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
             const verifiedItems = items.filter(item => childInScope(item, event.chatId, threadId));
             parsed = await parseVerifiedMessage(message, verifiedItems.length ? verifiedItems : undefined);
           } catch (error) {
+            signal?.throwIfAborted();
             const source = appendSourceError(sources, messageLabel(message.messageId, message.sender?.name), error, message.messageId);
             materials.addMissing(source);
             addRead(message.messageId);
@@ -585,6 +605,7 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
           : position;
       }
     } catch (error) {
+      signal?.throwIfAborted();
       appendSourceError(sources, `话题 ${threadId}`, error);
       // A stale/invalid token must not poison all future scans. Re-anchor at
       // the local watermark and let the next turn request a fresh asc page.
@@ -604,7 +625,7 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
         const note: LarkContextSource = { label: '多 Bot 核对说明' };
         materials.addMessage(note, `用户让你“一起查/一起分析/也看看”时，先独立分析，最后单独写一段「与 ${peers.map(peer => peer.name).join('、')} 结论的异同」。`);
       }
-    } catch { /* 读不到就不带，不影响本轮任务 */ }
+    } catch { signal?.throwIfAborted(); /* 读不到就不带，不影响本轮任务 */ }
   }
 
   if (expandDocuments) materials.expandForDocuments();
@@ -616,6 +637,7 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
         if (!service.readDocument) throw new Error('当前未接入飞书文档读取能力');
         return { item, document: await service.readDocument(item.url) };
       } catch (error) {
+        signal?.throwIfAborted();
         return { item, error };
       }
     }));
@@ -660,6 +682,7 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
     }
   }
 
+  signal?.throwIfAborted();
   addRead(currentMessageId);
   const materialBody = materials.entries.map(materialText).join('\n\n');
   const agentPrompt = materialBody

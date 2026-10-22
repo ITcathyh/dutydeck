@@ -416,6 +416,10 @@ export interface EventRepository {
   listWindow(sessionId: string, options?: EventWindowOptions): Promise<AgentEvent[]>;
 }
 export interface ConfigRepository {
+  /** Optional synchronous lookup for consumers whose live read contract is synchronous. */
+  getSync?(key: string): string | undefined;
+  /** Indexed JSON discriminator lookup; source rows remain authoritative. */
+  listByJsonField?(prefix: string, filter: { field: 'status' | 'runStatus' | 'delivery.status'; values: string[]; scheduleId?: string }): Promise<Array<{ key: string; value: string }>>;
   get(key: string): Promise<string | undefined>;
   set(key: string, value: string): Promise<void>;
   compareAndSet?(key: string, expected: string | undefined, value: string): Promise<boolean>;

@@ -10,6 +10,7 @@ import { LarkMessageCoordinator } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
 import { LarkServiceError } from './service.js';
 import { LarkTaskInbox } from './task-inbox.js';
+import * as sessionResolver from './session-resolver.js';
 
 // 真实 coordinator 与 SQLite 入站记录；飞书发送与 runtime 用替身，按脚本让首卡失败几次。
 const config: StoredLarkConfig = {
@@ -225,17 +226,22 @@ it('drops the old request when /new arrives after the retry has reclaimed it but
   const coordinator = h.createCoordinator();
   await coordinator.handle(message(), config);
   await settle();
-  // 重试重新认领之后，卡在确认表情这一步，此时用户发 /new
+  // 重试认领已经交给旧 task，停在建新 task 前的 scope 解析；确认表情现在与准备并行，不能用它拦住准备。
   let resume!: () => void;
-  const reactionGate = new Promise<void>(resolve => { resume = resolve; });
-  h.service.addReaction.mockImplementation(async (messageId: unknown) => {
-    if (messageId === 'om_request') await reactionGate;
-    return { reactionId: 'reaction' };
+  const routeGate = new Promise<void>(resolve => { resume = resolve; });
+  const resolveScope = sessionResolver.resolveLarkScopeId;
+  const scopeRead = vi.spyOn(sessionResolver, 'resolveLarkScopeId').mockImplementation(async (...args) => {
+    const result = await resolveScope(...args);
+    if (args[0].messageId === 'om_request') await routeGate;
+    return result;
   });
+  cleanups.push(async () => { scopeRead.mockRestore(); });
   const runTurn = vi.spyOn(coordinator as any, 'runTurn');
   await vi.advanceTimersByTimeAsync(30_000);
   await settle();
   expect((await h.inbox()).boot).not.toBe('');
+  expect(runTurn).not.toHaveBeenCalled();
+  expect(h.runtime.dispatch).not.toHaveBeenCalled();
   await coordinator.handle(message('om_new', '/new'), config);
   await settle();
   expect(h.delivered.map(input => input.taskName)).toContain('/new 已受理');

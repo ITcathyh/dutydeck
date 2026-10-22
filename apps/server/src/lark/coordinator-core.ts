@@ -434,16 +434,41 @@ export abstract class LarkCoordinatorCore {
     return { allowed, reason: allowed ? undefined : 'unauthorized' };
   }
 
-  /**
-   * 撤销「请求已接入」的 OK reaction。
-   * 设计契约（见 docs/interaction-design-2026-08-30.md §4.1）：reaction 只是回执，
-   * 进度卡或失败回执送达后移除；静默进展时保留到终态交付结束。
-   * 撤销失败只记日志、不阻断任务执行；reactionId 先清空再调用，保证幂等——
-   * 重复调用（正常路径 + 异常兜底）不会重复打 OpenAPI。
-   */
-  protected async clearAcknowledgementReaction(task: LarkTask) {
-    const reactionId = task.acknowledgementReactionId;
-    task.acknowledgementReactionId = undefined;
+  private readonly acknowledgements = new Map<NonNullable<LarkTask['acknowledgement']>, LarkMessageEvent>();
+  private readonly acknowledgementFlights = new Map<string, Promise<void>>();
+
+  /** 原接收点立即启动反馈；同消息的首卡重试等待旧反馈收敛，不阻塞路由或派发。 */
+  protected beginAcknowledgementReaction(event: LarkMessageEvent): NonNullable<LarkTask['acknowledgement']> {
+    const acknowledgement: NonNullable<LarkTask['acknowledgement']> = { clearRequested: false };
+    this.acknowledgements.set(acknowledgement, event);
+    const previous = this.acknowledgementFlights.get(event.messageId);
+    // This object belongs to this inbound message, including results arriving after its task was removed.
+    const pending = (async () => {
+      try {
+        // A first-card retry can reuse the same message and platform reaction ID.
+        // Finish the previous add/late cleanup before posting its replacement.
+        if (previous) await previous;
+        if (acknowledgement.clearRequested || this.stopped) {
+          await this.clearAcknowledgementReaction({ event, acknowledgement });
+          return;
+        }
+        acknowledgement.reactionId = (await this.service.addReaction(event.messageId, 'OK')).reactionId;
+        if (acknowledgement.clearRequested || this.stopped) await this.clearAcknowledgementReaction({ event, acknowledgement });
+      } catch (error) { this.log.warn({ error, messageId: event.messageId }, '发送飞书确认表情失败，继续处理消息'); }
+    })();
+    this.acknowledgementFlights.set(event.messageId, pending);
+    void pending.then(() => { if (this.acknowledgementFlights.get(event.messageId) === pending) this.acknowledgementFlights.delete(event.messageId); });
+    return acknowledgement;
+  }
+
+  /** 进度/失败回执送达后撤销；静默时保留到终态。先登记清理意图，再幂等删除已知 ID。 */
+  protected async clearAcknowledgementReaction(task: Pick<LarkTask, 'event' | 'acknowledgement'>) {
+    if (task.acknowledgement) {
+      task.acknowledgement.clearRequested = true;
+      this.acknowledgements.delete(task.acknowledgement);
+    }
+    const reactionId = task.acknowledgement?.reactionId;
+    if (task.acknowledgement) task.acknowledgement.reactionId = undefined;
     if (!reactionId) return;
     try { await this.service.deleteReaction(task.event.messageId, reactionId); }
     catch (error) { this.log.warn({ error, messageId: task.event.messageId, reactionId }, '撤销飞书确认表情失败'); }
@@ -484,6 +509,11 @@ export abstract class LarkCoordinatorCore {
 
   stop() {
     this.stopped = true;
+    for (const [acknowledgement, event] of this.acknowledgements) void this.clearAcknowledgementReaction({ event, acknowledgement });
+    for (const task of this.tasks.values()) {
+      task.contextReadAbort?.abort(new DOMException('Lark coordinator is stopped', 'AbortError'));
+      void this.clearAcknowledgementReaction(task);
+    }
     this.workflows?.close();
     for (const cleanup of this.turnCleanups) cleanup();
     if (this.reconcileTimer) clearTimeout(this.reconcileTimer);

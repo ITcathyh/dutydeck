@@ -203,10 +203,14 @@ it('parses unchanged occurrence history once per tick and batches schedule looku
   const parse = vi.spyOn(JSON, 'parse');
   const schemaParse = vi.spyOn(sessionScheduleOccurrenceSchema, 'parse');
   const get = vi.spyOn(h.repositories.config, 'get');
+  const list = vi.spyOn(h.repositories.config, 'list');
+  const candidates = vi.spyOn(h.repositories.config, 'listByJsonField');
   try {
     await h.service.tick();
     expect(parse.mock.calls.filter(([raw]) => raws.has(raw))).toHaveLength(100);
     expect(schemaParse).toHaveBeenCalledTimes(100);
+    expect(list.mock.calls.filter(([prefix]) => prefix === 'session_automation/occurrence/')).toHaveLength(1);
+    expect(candidates.mock.calls.filter(([prefix]) => prefix === 'session_automation/occurrence/')).toHaveLength(2);
     expect(get.mock.calls.filter(([key]) => key.startsWith('session_automation/schedule/'))).toHaveLength(0);
     expect(h.dispatches).toHaveLength(0);
     expect(deliver).not.toHaveBeenCalled();
@@ -214,7 +218,7 @@ it('parses unchanged occurrence history once per tick and batches schedule looku
     await h.service.tick();
     expect(parse.mock.calls.filter(([raw]) => raws.has(raw))).toHaveLength(100);
   } finally {
-    parse.mockRestore(); schemaParse.mockRestore(); get.mockRestore();
+    parse.mockRestore(); schemaParse.mockRestore(); get.mockRestore(); list.mockRestore(); candidates.mockRestore();
   }
 });
 

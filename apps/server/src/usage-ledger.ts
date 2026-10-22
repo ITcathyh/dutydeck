@@ -417,16 +417,17 @@ export class UsageLedger {
     const rangeFilter: UsageFilter = { since: range.since, until: range.until };
     const filter = this.usageFilter(query, range);
     const usage = this.repos.usage;
-    const [totals, daily, models, agents, bots, origins, allModels, allAgents, allBots, allOrigins] = await Promise.all([
-      usage.totals(filter), usage.summarize('day', filter), usage.summarize('model', filter), usage.summarize('agentId', filter), usage.summarize('appId', filter), usage.summarize('origin', filter),
-      usage.summarize('model', rangeFilter), usage.summarize('agentId', rangeFilter), usage.summarize('appId', rangeFilter), usage.summarize('origin', rangeFilter)
+    const [totals, daily, models, agents, bots, origins] = await Promise.all([
+      usage.totals(filter), usage.summarize('day', filter), usage.summarize('model', filter), usage.summarize('agentId', filter), usage.summarize('appId', filter), usage.summarize('origin', filter)
     ]);
+    // With no dimension filters the distributions already contain every choice.
+    const options = Object.keys(filter).length === Object.keys(rangeFilter).length ? undefined : await usage.listOptions(rangeFilter);
     const known = <T>(values: Array<T | undefined>) => values.filter((value): value is T => value !== undefined).sort();
     return {
       timezone: { name: Intl.DateTimeFormat().resolvedOptions().timeZone, offsetMinutes: -this.now().getTimezoneOffset() },
       range, filter: { ...(query.model ? { model: query.model } : {}), ...(query.agentId ? { agentId: query.agentId } : {}), ...(query.appId ? { appId: query.appId } : {}), ...(query.origin ? { origin: query.origin } : {}) },
       totals, daily, models, agents, bots, origins,
-      options: { models: [...known(allModels.map(group => group.model)), ...(allModels.some(group => group.model === undefined) ? [null] : [])], agentIds: known(allAgents.map(group => group.agentId)), appIds: known(allBots.map(group => group.appId)), origins: known(allOrigins.map(group => group.origin)) }
+      options: options ?? { models: [...known(models.map(group => group.model)), ...(models.some(group => group.model === undefined) ? [null] : [])], agentIds: known(agents.map(group => group.agentId)), appIds: known(bots.map(group => group.appId)), origins: known(origins.map(group => group.origin)) }
     };
   }
 

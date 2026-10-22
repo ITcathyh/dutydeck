@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -101,4 +101,18 @@ it('requires session metadata before accepting a canonical marker from a named r
   writeFileSync(path, line({ type: 'history_mutation', payload: { operation: 'append', turn_id: turn,
     display_completions: [{ thread_id: thread, turn_id: turn, item: { type: 'UserMessage', content: [{ type: 'text', text: 'ses_segment-fixture' }] } }] } }));
   expect(resolveTraexRolloutPath(h.opts.cwd, h.opts.env, h.opts.sessionId)).toBeUndefined();
+});
+
+it('discovers a segment created after the last scan in the same flush and at the default 300ms poll', async () => {
+  vi.useFakeTimers();
+  try {
+    const h = fixture(); h.segment('14', '10-00-00'); const source = h.source();
+    const events: NormalizedDriverEvent[] = []; source.onEvent(event => events.push(event)); source.start(); await source.flush();
+    const next = h.segment('14', '11-00-00', thread, `_${turn}`); appendFileSync(next, answer('flush'));
+    await source.flush(); expect(events.map(event => event.data.text)).toEqual(['flush']);
+    const last = h.segment('15', '10-00-00', thread, `_${turn}`); appendFileSync(last, answer('poll'));
+    await vi.advanceTimersByTimeAsync(299); expect(events).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1); expect(events.map(event => event.data.text)).toEqual(['flush', 'poll']);
+    expect(source.checkpoint().path).toBe(last);
+  } finally { vi.useRealTimers(); }
 });

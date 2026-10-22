@@ -88,7 +88,11 @@
     "src/plugin-results-migration.ts",
     "dist/plugin-results-migration.js",
     "dist/plugin-results-migration.js.map",
-    "dist/plugin-results-migration.d.ts"
+    "dist/plugin-results-migration.d.ts",
+    "src/config-query.ts",
+    "dist/config-query.js",
+    "dist/config-query.js.map",
+    "dist/config-query.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { installLarkHook } from './security-hooks.js';
 import type { AgentEvent, PromptPart, Session } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import type { LarkLongConnectionListenerOptions } from './listener.js';
@@ -42,6 +46,14 @@ const config: StoredLarkConfig = {
   groupToolsEnabled: false, groupToolsAllowSend: false,
   pushIntervalMs: 1_000, hideTraceOnComplete: false, allowedUsers: [], allowedEmails: [], highRiskAllowedUsers: [], highRiskAllowedEmails: [],
   highRiskPattern: 'rm\\b', riskControlMode: 'off'
+};
+const hookWorkspaces: string[] = [];
+afterEach(async () => { for (const path of hookWorkspaces.splice(0)) await rm(path, { recursive: true, force: true }); });
+const readyHookWorkspace = async () => {
+  const path = await mkdtemp(join(tmpdir(), 'dutydeck-listener-hook-'));
+  hookWorkspaces.push(path);
+  await installLarkHook('codex', path);
+  return path;
 };
 const session: Session = { id: 'ses_1', agentId: 'codex', state: 'idle', cwd: '/tmp', permissionMode: 'full-trust', runId: 'run_1', createdAt: '', updatedAt: '' };
 const agentEvent = (sequence: number, type: AgentEvent['type'], data: any): AgentEvent => ({ id: `e${sequence}`, sessionId: session.id, sequence, type, timestamp: '', data });
@@ -117,7 +129,7 @@ describe('Lark message coordinator', () => {
     );
     await coordinator.handle(
       { messageId: 'om_policy_edges', chatId: 'ou_user', chatType: 'p2p', messageType: 'text', content: '{"text":"检查"}', mentions: [] },
-      { ...config, riskControlMode: 'enforced' }
+      { ...config, workspace: await readyHookWorkspace(), riskControlMode: 'enforced' }
     );
     await vi.waitFor(() => expect(authorize).toHaveBeenCalledWith('high_risk', 'high_risk.execute'));
     expect(authorize).toHaveBeenCalledWith('listener', 'task.create');
@@ -175,7 +187,8 @@ describe('Lark message coordinator', () => {
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
     coordinator.handle({ messageId: 'om_image', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'image', content: '{"image_key":"img_1"}', mentions: [] }, config);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
-    expect(service.downloadMessageResource).toHaveBeenCalledWith('om_image', 'img_1', 'image');
+    expect(service.downloadMessageResource).toHaveBeenCalledWith('om_image', 'img_1', 'image', expect.any(AbortSignal));
+    expect((service.downloadMessageResource.mock.calls[0] as unknown as [string, string, string, AbortSignal])[3].aborted).toBe(false);
     expect(runtime.send.mock.calls[0]?.[1]).toContain('/dutydeck/lark-resources/om_image/image-');
     expect(runtime.send.mock.calls[0]?.[1]).toContain('请使用本地文件读取工具查看');
   });
@@ -734,7 +747,7 @@ describe('Lark message coordinator', () => {
     };
     const peerBotAuthorized = vi.fn(async () => true);
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_current', peerBotAuthorized);
-    coordinator.handle({ messageId: 'om_peer', chatId: 'oc_group', chatType: 'group', messageType: 'text', content: '{"text":"@bot 请接手"}', senderOpenId: 'ou_peer', senderType: 'app', mentions: [{ key: '@bot', name: 'bot', openId: 'ou_current' }] }, { ...config, groupToolsEnabled: true, allowedEmails: ['user@example.com'], riskControlMode: 'enforced', highRiskAllowedEmails: ['admin@example.com'] });
+    coordinator.handle({ messageId: 'om_peer', chatId: 'oc_group', chatType: 'group', messageType: 'text', content: '{"text":"@bot 请接手"}', senderOpenId: 'ou_peer', senderType: 'app', mentions: [{ key: '@bot', name: 'bot', openId: 'ou_current' }] }, { ...config, workspace: await readyHookWorkspace(), groupToolsEnabled: true, allowedEmails: ['user@example.com'], riskControlMode: 'enforced', highRiskAllowedEmails: ['admin@example.com'] });
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     expect(peerBotAuthorized).toHaveBeenCalledWith('oc_group', 'ou_peer');
     expect(service.getUserEmails).not.toHaveBeenCalled();
@@ -1664,7 +1677,7 @@ describe('Lark message coordinator', () => {
       deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' })), getUserEmails: vi.fn(async () => ['user@example.com'])
     };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
-    coordinator.handle({ messageId: 'om_guard', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"请 rm -rf 临时目录"}', senderOpenId: 'ou_user', mentions: [] }, { ...config, preInjectPrompt: '始终使用中文回答。', riskControlMode, highRiskAllowedEmails: ['admin@example.com'] });
+    coordinator.handle({ messageId: 'om_guard', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"请 rm -rf 临时目录"}', senderOpenId: 'ou_user', mentions: [] }, { ...config, workspace: riskControlMode === 'enforced' ? await readyHookWorkspace() : config.workspace, preInjectPrompt: '始终使用中文回答。', riskControlMode, highRiskAllowedEmails: ['admin@example.com'] });
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     expect(runtime.send.mock.calls[0]?.[1]).toBe('请 rm -rf 临时目录');
     expect(runtime.send.mock.calls[0]?.[2]).toContain('[Dutydeck 安全策略 · 自动注入]');
@@ -1719,7 +1732,7 @@ describe('Lark message coordinator', () => {
       deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' })), getUserEmails: vi.fn(async () => ['allowed@example.com'])
     };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
-    coordinator.handle({ messageId: 'om_inherited', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', senderOpenId: 'ou_user', mentions: [] }, { ...config, riskControlMode: 'enforced', allowedEmails: ['allowed@example.com'], highRiskAllowedEmails: [] });
+    coordinator.handle({ messageId: 'om_inherited', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', senderOpenId: 'ou_user', mentions: [] }, { ...config, workspace: await readyHookWorkspace(), riskControlMode: 'enforced', allowedEmails: ['allowed@example.com'], highRiskAllowedEmails: [] });
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     expect(runtime.send).toHaveBeenCalledWith('ses_1', '执行任务', expect.any(String), expect.objectContaining({ enabled: true, authorized: true }));
   });

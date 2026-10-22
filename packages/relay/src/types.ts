@@ -83,6 +83,9 @@ export interface RelayAskRecord {
 }
 
 export interface RelayAskStore {
+  /** Together these allow durable history reads without restoring terminal records. */
+  getSync?(id: string): RelayAskRecord | undefined;
+  listUnsettled?(): Promise<RelayAskRecord[]>;
   get(id: string): Promise<RelayAskRecord | undefined>;
   list(): Promise<RelayAskRecord[]>;
   compareAndSet(expected: RelayAskRecord | undefined, record: RelayAskRecord): Promise<boolean>;

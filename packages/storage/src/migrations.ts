@@ -1,3 +1,4 @@
+import { createConfigReadIndexes } from './config-query.js';
 import { createPluginResultSchema } from './plugin-results-migration.js';
 import { createMemoryConsumedTaskSchema, createMemoryJobSchema } from './memory-jobs.js';
 import { createWorkItemIndexSchema } from './work-item-index.js';
@@ -620,7 +621,13 @@ export const migrations: Migration[] = [
     up: addCollaborationScenarios
   },
   { version: 39, name: 'memory_consumed_tasks', up: createMemoryConsumedTaskSchema },
-  { version: 40, name: 'plugin_results', up: createPluginResultSchema }
+  { version: 40, name: 'plugin_results', up: createPluginResultSchema },
+  { version: 41, name: 'summary_and_usage_read_indexes', up(db) {
+    if (tableExistsForMigration(db, 'sessions')) db.exec('CREATE INDEX sessions_created_id ON sessions(created_at,id)');
+    if (tableExistsForMigration(db, 'events')) db.exec(`CREATE INDEX events_session_status ON events(session_id,sequence)
+      WHERE type='status'`);
+  } },
+  { version: 42, name: 'automation_and_relay_read_indexes', up: createConfigReadIndexes }
 ]
 
 /** v38：collaboration_duties 加 scenarios_json 列，把旧的 alarm_json 转进去。 */

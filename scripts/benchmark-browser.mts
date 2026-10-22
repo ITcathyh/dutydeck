@@ -117,7 +117,14 @@ async function main() {
     const baseUrl = `http://127.0.0.1:${address.port}`;
 
     browser = await chromium.launch({ headless: true, args: ['--enable-precise-memory-info'] });
-    const controlPage = await browser.newPage();
+    const pageErrors: string[] = [];
+    const newPage = async (options?: Parameters<NonNullable<typeof browser>['newPage']>[0]) => {
+      const page = await browser!.newPage(options);
+      page.on('pageerror', error => { pageErrors.push(error.stack ?? error.message); });
+      return page;
+    };
+    Object.assign(progress, { pageErrors });
+    const controlPage = await newPage();
     await controlPage.setContent('<main></main>');
     const controlStarted = performance.now();
     const controlPaint = waitForPaint(controlPage, 'delayed fixture');
@@ -136,8 +143,7 @@ async function main() {
     // Twenty samples make p95 meaningful: one cold-start/outlier sample does
     // not become the percentile itself, while repeated regressions still fail.
     for (let index = 0; index < SAMPLE_COUNT; index++) {
-      const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
-      page.on('pageerror', error => process.stderr.write(`[browser] ${error.message}\n`));
+      const page = await newPage({ viewport: { width: 1440, height: 960 } });
       page.on('requestfailed', request => process.stderr.write(`[browser] ${request.method()} ${request.url()} ${request.failure()?.errorText ?? 'failed'}\n`));
       let initialPages = 0;
       page.on('request', request => { if (request.url().includes('/events?')) initialPages++; });
@@ -155,9 +161,13 @@ async function main() {
       if (await page.getByRole('button', { name: '加载更早记录' }).count()) throw new Error('history still requires manual pagination');
       const previousCount = await page.locator('[data-timeline-scroll]').evaluate(element => Number((element as HTMLElement).dataset.historyLoaded));
       await page.waitForFunction(count => Number(document.querySelector<HTMLElement>('[data-timeline-scroll]')?.dataset.historyLoaded) > count, previousCount);
-      const targetSequence = await page.locator('[data-timeline-scroll]').evaluate(element => Number((element as HTMLElement).dataset.historyStart) + 1);
-      // Background pagination starts without user input; navigation remains responsive.
-      await page.locator('[data-timeline-scroll]').evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
+      // Automatic prepends can advance between Playwright calls. Read the
+      // target and scroll in one browser task so they refer to the same page.
+      const targetSequence = await page.locator('[data-timeline-scroll]').evaluate(element => {
+        const target = Number((element as HTMLElement).dataset.historyStart) + 1;
+        element.scrollTop = 0; element.dispatchEvent(new Event('scroll'));
+        return target;
+      });
       await waitForPaint(page, `event ${targetSequence}`);
       if (await page.locator('[data-timeline-turn]').count() > 40) throw new Error('timeline DOM grew beyond the viewport');
       scrollSamples.push(performance.now() - scrollStarted);
@@ -165,7 +175,7 @@ async function main() {
     }
     await waitFor(() => subscribers.size === 0);
 
-    const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+    const page = await newPage({ viewport: { width: 1440, height: 960 } });
     let automaticHistoryPages = 0;
     page.on('request', request => { if (request.url().includes('/events?') && request.url().includes('direction=backward')) automaticHistoryPages++; });
     const automaticLoadStarted = performance.now();
@@ -271,7 +281,7 @@ async function main() {
 
     // Positive/negative controls exercise the same retained-growth gate with
     // real JS heap storage: a dense ordinary array, not an ArrayBuffer or holes.
-    const memoryControlPage = await browser.newPage();
+    const memoryControlPage = await newPage();
     const controlCdp = await memoryControlPage.context().newCDPSession(memoryControlPage);
     let heapControlHeldGrowthBytes = 0, heapControlReleasedGrowthBytes = 0, heapControlRejected = false;
     try {
@@ -309,7 +319,7 @@ async function main() {
           JSON.stringify({ id: `long_tool_${sequence}`, name: `tool ${sequence}`, input: { description: `step ${sequence}` }, output: `long output ${sequence}`, status: 'completed', taskId: 'task_long' }), 'task_long');
       } })();
     } finally { longSeed.close(); }
-    const longPage = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+    const longPage = await newPage({ viewport: { width: 1440, height: 960 } });
     let releaseOlder!: () => void, releaseLast!: () => void;
     const longOlderGate = new Promise<void>(resolve => { releaseOlder = resolve; });
     const longLastGate = new Promise<void>(resolve => { releaseLast = resolve; });
@@ -374,6 +384,7 @@ async function main() {
     assertBudget('browser retained JS heap growth', browserRetainedHeapGrowthBytes, budgets.browserRetainedHeapGrowthBytes, 'B');
     assertBudget('server RSS growth after SSE soak', serverRssGrowthBytes, budgets.serverRssGrowthBytes, 'B');
     assertBudget('server external growth after SSE soak', serverExternalGrowthBytes, budgets.serverExternalGrowthBytes, 'B');
+    if (pageErrors.length) throw new Error(`Browser page errors: ${pageErrors.join('\n')}`);
     if (subscribers.size !== 0) throw new Error(`${subscribers.size} SSE subscribers leaked after soak`);
 
 

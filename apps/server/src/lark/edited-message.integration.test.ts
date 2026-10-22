@@ -92,8 +92,10 @@ describe('edited-message real coordinator and SQLite inbox', () => {
       messageId: event.messageId, senderOpenId: 'ou_author', threadId: 'omt_topic', rootId: 'om_root', parentId: 'om_parent'
     } });
     expect(h.runtime.dispatch.mock.calls[0]?.[5]).toBe('ou_author');
-    expect(h.service.listChatMessages).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'omt_topic' }));
-    expect(h.service.getMessage).toHaveBeenCalledWith('om_parent');
+    expect(h.service.listChatMessages).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'omt_topic' }), expect.any(AbortSignal));
+    expect((h.service.listChatMessages.mock.calls[0] as unknown as [unknown, AbortSignal])[1].aborted).toBe(false);
+    expect(h.service.getMessage).toHaveBeenCalledWith('om_parent', expect.any(AbortSignal));
+    expect((h.service.getMessage.mock.calls[0] as unknown as [unknown, AbortSignal])[1].aborted).toBe(false);
 
     h.restart();
     await h.coordinator.initializeWorkflows(h.config);
@@ -126,7 +128,10 @@ describe('edited-message real coordinator and SQLite inbox', () => {
     await vi.waitFor(async () => expect(await h.inbox(event.messageId)).toMatchObject({ state: 'accepted' }));
     expect(h.runtime.dispatch).toHaveBeenCalledOnce();
     const agentPrompt = String(h.runtime.dispatch.mock.calls[0]?.[3]);
-    if (messageType !== 'file') expect(h.service.downloadMessageResource).toHaveBeenCalledWith(event.messageId, 'img_edit', 'image');
+    if (messageType !== 'file') {
+      expect(h.service.downloadMessageResource).toHaveBeenCalledWith(event.messageId, 'img_edit', 'image', expect.any(AbortSignal));
+      expect((h.service.downloadMessageResource.mock.calls[0] as unknown as [string, string, string, AbortSignal])[3].aborted).toBe(false);
+    }
     if (messageType !== 'image') expect(h.service.downloadMessageResourceToFile).toHaveBeenCalledWith(event.messageId, 'file_edit', expect.stringContaining(resourcesPath), expect.any(AbortSignal));
     expect(agentPrompt).toContain(resourcesPath);
     const files = await readdir(resourcesPath);

@@ -114,8 +114,8 @@ export class SessionStream {
     this.onStatus = opts.onStatus;
     this.onReconnect = opts.onReconnect ?? (() => {});
     this.eventSourceFactory = opts.eventSourceFactory ?? (url => new EventSource(url));
-    this.setTimeoutFn = opts.setTimeoutFn ?? setTimeout;
-    this.clearTimeoutFn = opts.clearTimeoutFn ?? clearTimeout;
+    this.setTimeoutFn = opts.setTimeoutFn ?? globalThis.setTimeout.bind(globalThis);
+    this.clearTimeoutFn = opts.clearTimeoutFn ?? globalThis.clearTimeout.bind(globalThis);
   }
 
   // 首次连接（重复调用无效果）

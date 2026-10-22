@@ -131,6 +131,8 @@ export interface UsageLedgerRepository {
   listEntries(filter: UsageFilter, taskIds?: string[]): Promise<UsageLedgerEntry[]>;
   totals(filter: UsageFilter): Promise<UsageTotals>;
   summarize(dimension: UsageDimension, filter: UsageFilter): Promise<UsageGroup[]>;
+  /** Distinct filter choices without token/cost aggregation. */
+  listOptions(filter: UsageFilter): Promise<UsageReport['options']>;
   /** 按根任务合并后的分页列表，最近的在前；各行合计等于同一筛选下的 totals。 */
   listTasks(filter: UsageFilter, page: { limit: number; offset: number }): Promise<UsageTaskPage>;
   listCaps(): Promise<UsageCap[]>;

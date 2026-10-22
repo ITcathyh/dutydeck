@@ -87,9 +87,11 @@ export class RelayAskBroker {
 
   async initialize() { await this.ready; }
 
+  private get durableHistory() { return Boolean(this.store?.getSync && this.store.listUnsettled); }
+
   private async recover() {
     if (!this.store) return;
-    for (const initial of await this.store.list()) {
+    for (const initial of await (this.durableHistory ? this.store.listUnsettled!() : this.store.list())) {
       let record: RelayAskRecord | undefined = initial;
       for (let attempt = 0; record && attempt < 3; attempt++) {
         if (record.status !== 'pending' && record.status !== 'answering') break;
@@ -98,7 +100,7 @@ export class RelayAskBroker {
         record = await this.store.get(record.id);
       }
       if (record?.status === 'pending' || record?.status === 'answering') throw new RelayError('RELAY_RECOVERY_CONFLICT', '未能收敛上次运行的提问记录。', 503);
-      if (record) this.history.set(record.id, record);
+      if (record && !this.durableHistory) this.history.set(record.id, record);
     }
   }
 
@@ -208,7 +210,7 @@ export class RelayAskBroker {
         ask.outcome.then(() => { throw new RelayError('RELAY_ASK_SETTLED', '提问已结束，答案未继续提交。', 409); })
       ]);
       await this.finish(ask, { status: 'answered', answer: text, askId });
-      const result = this.history.get(askId)!;
+      const result = ask.record;
       if (result.status !== 'answered') throw new RelayError('RELAY_ASK_SETTLED', '提问已结束，答案未继续提交。', 409);
       return result;
     } catch (error) {
@@ -222,7 +224,16 @@ export class RelayAskBroker {
   }
 
   get(askId: string): RelayAskRecord | undefined {
-    const record = this.pending.get(askId)?.record ?? this.history.get(askId);
+    let record = this.pending.get(askId)?.record;
+    if (!record && this.durableHistory) {
+      try {
+        record = this.store!.getSync!(askId);
+        if (record && record.status !== 'pending' && record.status !== 'answering') this.history.delete(askId);
+      } catch (error) {
+        if (!this.history.has(askId)) throw error;
+      }
+    }
+    record ??= this.history.get(askId);
     return record ? { ...record } : undefined;
   }
 
@@ -288,9 +299,11 @@ export class RelayAskBroker {
         : { status: 'cancelled', askId: committed.id, reason: committed.reason ?? '提问已结束' };
       ask.record = committed;
       this.pending.delete(committed.id);
-      this.history.set(committed.id, committed);
+      if (!this.durableHistory) this.history.set(committed.id, committed);
       ask.resolve(committedOutcome);
     })().catch(error => {
+      // Failed persistence must not evict the last known record. It is not a live waiter.
+      if (this.durableHistory) this.history.set(previous.id, previous);
       this.pending.delete(previous.id);
       ask.reject(error);
       throw error;

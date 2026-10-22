@@ -67,7 +67,7 @@ export interface LarkGateOptions {
   random?: () => number;
   /** Shared request budget can stop retries before another backoff. */
   canRetry?: () => boolean;
-  onFailure?: () => void;
+  onFailure?: (error: unknown) => void;
   /** Local checks are outside the transport catch: they neither retry nor affect the circuit. */
   beforeAttempt?: () => void | Promise<void>;
 }
@@ -594,7 +594,7 @@ export async function executeWithLarkGate<T>(
         return result;
       } catch (error) {
         if (signal?.aborted) throw gateAbortError(signal);
-        options?.onFailure?.();
+        options?.onFailure?.(error);
         const retryable = isRetryableLarkError(error);
         if (retryable && current() && attempt < config.retryMaxAttempts && (options?.canRetry?.() ?? true)) {
           previousError = error;

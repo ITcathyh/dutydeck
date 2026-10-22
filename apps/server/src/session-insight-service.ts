@@ -36,7 +36,7 @@ import {
   type SessionInsightRepository,
   type SessionInsightSnapshotRecord,
   type SessionInsightSummaryQuery,
-  type SessionInsightSummaryRawRow,
+  type SessionInsightSummaryCatalogRow,
   type SessionInsightSummaryResponse,
   type TaskExecutionProjection,
   type TaskRequestV1,
@@ -754,32 +754,20 @@ export class SessionInsightService {
   }
 
   // -------------------------------------------------------------------------
-  // API: summary（完整 catalog 全页冻结，再 T4d 全队列过滤/全局去重/分组/计数）
+  // API: summary（完整 catalog 冻结，再 T4d 全队列过滤/全局去重/分组/计数）
   // -------------------------------------------------------------------------
 
   async summary(query: SessionInsightSummaryQuery): Promise<SessionInsightSummaryResponse> {
     // workspace organization 是当前事实配置，先 await，不把 async repo 放进读事务。
     const organization = await this.loadWorkspaceOrganization();
 
-    // 完整 catalog（含真实 accepted request 与已发布快照 DTO）必须在同一个短同步读事务内
-    // 一次冻结全部页，避免分页之间被 prune/新发布割裂；之后事务外做 T4d 纯投影。
-    const rows: SessionInsightSummaryRawRow[] = this.hostEvidence.readTransaction(() => {
-      const all: SessionInsightSummaryRawRow[] = [];
-      let cursor: string | undefined;
-      for (;;) {
-        const page = this.repos.listSummaryRows({
-          ...(query.from ? { from: query.from } : {}),
-          ...(query.to ? { to: query.to } : {}),
-          includeArchived: query.includeArchived,
-          ...(query.agentId ? { agentId: query.agentId } : {}),
-          limit: SESSION_INSIGHT_LIMITS.maxSummaryRowsPerPageMax,
-          ...(cursor ? { cursor } : {})
-        });
-        all.push(...page.rows);
-        if (!page.nextCursor) return all;
-        cursor = page.nextCursor;
-      }
-    });
+    // Freeze the complete input for global deduplication/counts before response pagination.
+    const rows = this.hostEvidence.readTransaction(() => this.repos.readSummaryCatalog({
+      ...(query.from ? { from: query.from } : {}),
+      ...(query.to ? { to: query.to } : {}),
+      includeArchived: query.includeArchived,
+      ...(query.agentId ? { agentId: query.agentId } : {})
+    }));
 
     const candidates: SummaryCandidate[] = rows.map(row => this.toSummaryCandidate(row));
     return buildSessionInsightSummaryResponse({
@@ -1252,7 +1240,7 @@ export class SessionInsightService {
     );
   }
 
-  private toSummaryCandidate(row: SessionInsightSummaryRawRow): SummaryCandidate {
+  private toSummaryCandidate(row: SessionInsightSummaryCatalogRow): SummaryCandidate {
     // 用途证据只用真实 accepted request；proactive 证据在 catalog 行中不可得，留 unknown，
     // 不用 prompt / Usage 反推（T4d deriveSessionUsage 对证据缺失保守返回 unknown）。
     const tasks = row.tasks.map(task => ({ request: this.parseAcceptedRequest(task.acceptedRequest) }));

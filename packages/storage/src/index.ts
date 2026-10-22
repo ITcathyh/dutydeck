@@ -1,3 +1,4 @@
+import { listConfigByJsonField } from './config-query.js';
 import { createPluginResultRepository } from './plugin-results.js';
 import { createMemoryJobRepository } from './memory-jobs.js';
 import { createWorkItemIndexRepository } from './work-item-index.js';
@@ -212,17 +213,20 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
         // SQLite's default TRIM only removes ASCII spaces; match JS trim so a
         // whitespace-only first task never hides the first meaningful prompt.
         const whitespace = '\u0009\u000a\u000b\u000c\u000d \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
-        return sqlite.prepare(`WITH valid AS (
-          SELECT session_id, id, trim(prompt, ?) AS prompt, status, created_at, rowid AS ordinal,
-            COALESCE(NULLIF(updated_at,''),created_at) AS updated_at
+        return sqlite.prepare(`WITH grouped AS (
+          SELECT session_id, MIN(created_at) AS first_created_at,
+            MAX(COALESCE(NULLIF(updated_at,''),created_at)) AS latest,
+            SUM(status='queued') AS queued
           FROM tasks WHERE status != 'cancelled' AND length(trim(prompt, ?)) > 0
-        ), ranked AS (
-          SELECT *, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at,ordinal) AS position,
-            MAX(updated_at) OVER (PARTITION BY session_id) AS latest,
-            SUM(status='queued') OVER (PARTITION BY session_id) AS queued
-          FROM valid
-        ) SELECT session_id AS sessionId,id AS taskId,prompt,status,latest AS updatedAt,queued AS queuedCount
-          FROM ranked WHERE position=1`).all(whitespace, whitespace) as import('@dutydeck/shared').RunSummary[];
+          GROUP BY session_id
+        ) SELECT g.session_id AS sessionId,t.id AS taskId,trim(t.prompt, ?) AS prompt,t.status,
+            g.latest AS updatedAt,g.queued AS queuedCount
+          FROM grouped g JOIN tasks t ON t.rowid = (
+            SELECT rowid FROM tasks
+            WHERE session_id=g.session_id AND created_at=g.first_created_at
+              AND status != 'cancelled' AND length(trim(prompt, ?)) > 0
+            ORDER BY rowid LIMIT 1
+          ) ORDER BY g.session_id`).all(whitespace, whitespace, whitespace) as import('@dutydeck/shared').RunSummary[];
       },
       async get(id) {
         const row = db.select().from(tasks).where(eq(tasks.id, id)).get();
@@ -362,6 +366,8 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       }
     },
     config: {
+      getSync(key) { return (sqlite.prepare('SELECT value FROM configs WHERE key=?').get(key) as { value: string } | undefined)?.value; },
+      async listByJsonField(prefix, filter) { return listConfigByJsonField(sqlite, prefix, filter); },
       async remove(key, expected) {
         if (!key.startsWith('lark.inbox.') || JSON.parse(expected)?.state !== 'ignored') throw new RuntimeError('CONFIG_DELETE_NOT_SUPPORTED', 'Only ignored Lark inbox receipts can be removed', 409);
         return sqlite.prepare('DELETE FROM configs WHERE key = ? AND value = ?').run(key, expected).changes === 1;

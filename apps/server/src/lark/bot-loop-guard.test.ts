@@ -8,6 +8,10 @@
 // 门禁的两条硬约束（门禁记录按小时分桶、被挡下不发群消息）
 // 只有在真的读写同一张 decisions 表时才能被锁住。
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { installLarkHook } from './security-hooks.js';
 import Database from 'better-sqlite3';
 import { createCollaborationSchema } from '../../../../packages/storage/src/collaboration-migration.js';
 import { createCollaborationRepository } from '../../../../packages/storage/src/collaboration.js';
@@ -25,7 +29,7 @@ import type { StoredLarkConfig } from './config.js';
 
 const scope = { appId: 'cli_guard', chatId: 'oc_guard' };
 const config: StoredLarkConfig = {
-  appId: scope.appId, appSecret: 'test', listening: true, defaultAgentId: 'mock', workspace: '/tmp', fullTrustConfirmed: true,
+  appId: scope.appId, appSecret: 'test', listening: true, defaultAgentId: 'codex', workspace: '/tmp', fullTrustConfirmed: true,
   permissionMode: 'ask', preInjectPrompt: '', groupToolsEnabled: false, groupToolsAllowSend: false, structuredAskCards: false,
   groupCardMention: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
   allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: true,
@@ -61,7 +65,7 @@ function harness(clock: { now: Date } = { now: new Date('2026-09-18T10:00:00.000
     readGroupDescription: async () => '门禁测试群', listScopes: async () => [scope], debounceMs: 10_000,
     now: () => clock.now
   });
-  const session = { id: 's1', protocol: 'acp', state: 'idle', agentId: 'mock', cwd: '/tmp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
+  const session = { id: 's1', protocol: 'acp', state: 'idle', agentId: 'codex', cwd: '/tmp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
   const runtime = {
     start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
     send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resolvePermission: vi.fn(async () => {})
@@ -100,8 +104,11 @@ describe.each(['off', 'observe', 'selective'] as const)('机器人定向交接�
 
   it.each(['peer', 'allowlist'] as const)('允许通过%s授权的机器人@，保留机器人身份与工具风险限制', async authorization => {
     const h = await configuredHarness();
-    const current = authorization === 'peer' ? restrictedConfig : { ...restrictedConfig, peerBotsAllowed: false,
-      allowedBots: [{ openId: 'ou_peer_bot', name: 'Peer' }] };
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-bot-loop-hook-'));
+    cleanups.push(() => rm(workspace, { recursive: true, force: true }));
+    await installLarkHook('codex', workspace);
+    const current = { ...restrictedConfig, workspace, ...(authorization === 'allowlist' ? { peerBotsAllowed: false,
+      allowedBots: [{ openId: 'ou_peer_bot', name: 'Peer' }] } : {}) };
     if (authorization === 'allowlist') h.peerBotAuthorized.mockResolvedValue(false);
     await h.coordinator.handle(botMessage('om_peer_request'), current);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());

@@ -69,6 +69,7 @@ export class HerdrBackend implements SessionBackend {
     // reserved a new launch in this same file. It must never overwrite it.
     const persisted: State = JSON.parse(readFileSync(this.options.stateFile, 'utf8'));
     if (persisted.launch_id !== this.state?.launch_id) throw new Error('HERDR_STATE_GENERATION_CHANGED');
+    if (isDeepStrictEqual(persisted, this.state)) return;
     mkdirSync(dirname(this.options.stateFile), { recursive: true, mode: 0o700 });
     const temporary = `${this.options.stateFile}.${process.pid}.tmp`;
     writeFileSync(temporary, JSON.stringify(this.state), { mode: 0o600 });
@@ -82,12 +83,13 @@ export class HerdrBackend implements SessionBackend {
   }
   private async checked(requireLaunched = true): Promise<State> {
     const state = this.state, generation = this.lifecycle;
-    const check = () => { if (this.state !== state || this.lifecycle !== generation) throw new Error('HERDR_LIFECYCLE_CHANGED'); };
+    const check = () => {
+      if (!state || this.state !== state || this.lifecycle !== generation) throw new Error('HERDR_LIFECYCLE_CHANGED');
+      const stat = this.socketStat(state.socket);
+      if (stat.dev !== state.dev || stat.ino !== state.ino || this.options.processProbe.observe(state.server) !== 'alive') throw new Error('HERDR_SERVER_IDENTITY_CHANGED');
+    };
     if (!state?.root || !state.server) throw new Error('HERDR_LAUNCH_IDENTITY_INCOMPLETE; refusing duplicate launch');
-    const stat = this.socketStat(state.socket);
-    if (stat.dev !== state.dev || stat.ino !== state.ino || this.options.processProbe.observe(state.server) !== 'alive') {
-      throw new Error('HERDR_SERVER_IDENTITY_CHANGED');
-    }
+    check();
     if (state.launching) {
       if (requireLaunched) throw new Error('HERDR_LAUNCH_IDENTITY_INCOMPLETE; refusing to attach a launch reservation');
       return state;
@@ -412,15 +414,15 @@ export class HerdrBackend implements SessionBackend {
     this.output.reset(!preserveSubscriptions);
     if (!preserveSubscriptions) { this.exitCallbacks = []; this.disconnectCallbacks = []; }
   }
-  private ownedProcesses(): PhysicalProcessIdentity[] {
+  private ownedProcesses(stats?: Map<string, string>): PhysicalProcessIdentity[] {
     const state = this.state;
     if (!state || !/^[a-f0-9]{64}$/.test(state.launch_id)) throw new Error('HERDR_OWNERSHIP_MARKER_UNAVAILABLE');
     const marker = `dutydeck_terminal_launch_id=${state.launch_id}`;
     const identities: PhysicalProcessIdentity[] = [];
-    for (const entry of readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
+    for (const entry of stats ? stats.keys() : readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
       let stage = 'stat', originalStart: string | undefined;
       try {
-        const stat = readFileSync(`/proc/${entry}/stat`, 'utf8').split(') ').at(-1)!.split(' ');
+        const stat = (stats?.get(entry) ?? readFileSync(`/proc/${entry}/stat`, 'utf8')).split(') ').at(-1)!.split(' ');
         originalStart = stat[19];
         if (stat[0] === 'Z' || stat[0] === 'X') continue;
         // A process born before this immutable root cannot inherit this launch's private marker.
@@ -432,7 +434,10 @@ export class HerdrBackend implements SessionBackend {
         if (!uids.includes(String(process.getuid!()))) continue;
         stage = 'environ';
         if (readFileSync(`/proc/${entry}/environ`, 'utf8').split('\0').includes(marker)) {
-          stage = 'identity'; identities.push(this.options.processProbe.identify(Number(entry)));
+          stage = 'identity';
+          const identity = this.options.processProbe.identify(Number(entry));
+          if (stats && identity.start !== originalStart) throw new Error('PROCESS_IDENTITY_CHANGED');
+          identities.push(identity);
         }
       } catch (error) {
         const errno = (error as NodeJS.ErrnoException).code;
@@ -546,12 +551,24 @@ export class HerdrBackend implements SessionBackend {
     } catch { return false; }
   }
   async captureOwnedIdentity(): Promise<unknown> {
+    const original = this.state, generation = this.lifecycle;
     try {
-      (await this.checked(false));
-      const state = structuredClone(this.state!);
-      state.identities = [...new Map([...state.identities, ...(await this.descendants()), ...this.ownedProcesses()].map(item => [JSON.stringify(item), item])).values()];
+      const current = await this.checked(false);
+      // checked() yielded to the caller; retain its generation and socket fence
+      // before taking one synchronous process-table sample for this capture.
+      if (this.state !== current || this.lifecycle !== generation) throw new Error('HERDR_LIFECYCLE_CHANGED');
+      this.boundServer(current);
+      const state = structuredClone(current), stats = new Map<string, string>();
+      const descendants = descendantPids([current.root.pid], stats).map(pid => {
+        const identity = this.options.processProbe.identify(pid), raw = stats.get(String(pid));
+        if (pid === current.root.pid && !isDeepStrictEqual(identity, current.root)) throw new Error('HERDR_PROCESS_IDENTITY_CHANGED');
+        if (raw && raw.split(') ').at(-1)!.split(' ')[19] !== identity.start) throw new Error('HERDR_PROCESS_IDENTITY_CHANGED');
+        return identity;
+      });
+      state.identities = [...new Map([...state.identities, ...descendants, ...this.ownedProcesses(stats)].map(item => [JSON.stringify(item), item])).values()];
       return state;
     } catch (error) {
+      if (this.state !== original || this.lifecycle !== generation) throw error;
       if (this.state && this.options.processProbe.observe(this.state.root) === 'dead') return this.exitedSnapshot();
       throw error;
     }

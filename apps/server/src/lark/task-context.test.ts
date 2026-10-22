@@ -5,7 +5,7 @@ import type { LarkMessageResource } from './message-content.js';
 import { collectLarkTaskContext, larkMaterialMessageIds, type CollectLarkTaskContextInput } from './task-context.js';
 
 type FakeService = Pick<LarkCardService, 'getMessage' | 'getMessageItems' | 'listChatMessages'> & {
-  readDocument?: (url: string) => Promise<{ url: string; title?: string; text: string; links?: string[]; linkTitles?: Array<{ url: string; title: string }>; linkError?: string }>;
+  readDocument?: (url: string, signal?: AbortSignal) => Promise<{ url: string; title?: string; text: string; links?: string[]; linkTitles?: Array<{ url: string; title: string }>; linkError?: string }>;
 };
 
 const textContent = (text: string) => JSON.stringify({ text });
@@ -689,4 +689,73 @@ describe('同话题其他 Bot 的结论', () => {
     const result = await collect({ service: listing([botMessage('om_a', '1000', 'cli_a', 'Bot A', resultCard('t', '结论'))]) });
     expect(result.agentPrompt).not.toContain('同话题里');
   });
+});
+
+describe('context cancellation preserves uncommitted material', () => {
+  it.each(['parent', 'parent-items', 'thread', 'forward-items', 'peer', 'document', 'child-document'] as const)(
+    'does not degrade an abort during %s into partial success or start later reads', async stage => {
+      const controller = new AbortController();
+      const reads: string[] = [];
+      let started!: () => void;
+      const atStage = new Promise<void>(resolve => { started = resolve; });
+      const read = async <T>(name: string, signal: AbortSignal | undefined, value: T): Promise<T> => {
+        reads.push(name);
+        expect(signal).toBe(controller.signal);
+        if (name === stage) {
+          started();
+          return new Promise<T>((_, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+        }
+        return value;
+      };
+      const svc = service({
+        getMessage: (id, signal) => read('parent', signal, message(id, '1000', 'quoted')),
+        getMessageItems: (id, signal) => read(id === 'om_forward' ? 'forward-items' : 'parent-items', signal, []),
+        listChatMessages: (input, signal) => read(input.pageSize === 30 ? 'peer' : 'thread', signal, {
+          items: [mergeMessage('om_forward', '2000')], hasMore: true, pageToken: 'next'
+        }),
+        readDocument: (url, signal) => read(url.endsWith('/child') ? 'child-document' : 'document', signal, {
+          url, text: 'full document', links: ['https://example.feishu.cn/docx/child']
+        })
+      });
+      const cursor = { createTime: 100, messageId: 'om_before', pageToken: 'original', scanStartTime: 0 };
+      const readMessageIds = ['om_seen'];
+      const pending = collect({ service: svc, event: event({ parentId: 'om_parent' }), prompt: '包括子文档 https://example.feishu.cn/docx/root',
+        selfAppId: 'cli_self', signal: controller.signal, cursor, readMessageIds });
+      const rejected = expect(pending).rejects.toHaveProperty('name', 'AbortError');
+      await atStage;
+      const count = reads.length;
+      controller.abort();
+      await rejected;
+      await Promise.resolve();
+      expect(reads).toHaveLength(count);
+      expect(cursor).toEqual({ createTime: 100, messageId: 'om_before', pageToken: 'original', scanStartTime: 0 });
+      expect(readMessageIds).toEqual(['om_seen']);
+      // A subsequent independent read still receives the original unread material.
+      const retried = await collect({ service: service({ listChatMessages: async () => ({ items: [message('om_unread', '2000', 'still unread')], hasMore: false }) }), cursor, readMessageIds });
+      expect(retried.agentPrompt).toContain('still unread');
+      expect(retried.readMessageIds).toContain('om_unread');
+    }
+  );
+});
+
+it('keeps peer results from the 21–30 window and rereads edits when the main list uses an incremental cursor', async () => {
+  const peer = (text: string) => message('om_peer_25', '25000', '', { messageType: 'interactive', sender: { id: 'cli_peer', type: 'app', name: 'Peer' },
+    rawContent: JSON.stringify({ schema: '2.0', body: { elements: [{ tag: 'markdown', element_id: 'final_output', content: text }] } }) });
+  let content = 'peer outside the main twenty';
+  const listChatMessages = vi.fn(async (input: any) => input.pageSize === 30
+    ? { items: [peer(content)], hasMore: false }
+    : { items: [message('om_latest', '30000', 'latest human message')], hasMore: false });
+  const svc = service({ listChatMessages });
+  const first = await collect({ service: svc, selfAppId: 'cli_self' });
+  expect(first.agentPrompt).toContain(content);
+  content = 'edited conclusion with the same message id';
+  const second = await collect({ service: svc, selfAppId: 'cli_self', cursor: first.cursor, readMessageIds: first.readMessageIds });
+  expect(second.agentPrompt).toContain(content);
+  expect(second.agentPrompt).not.toContain('peer outside the main twenty');
+  expect(listChatMessages.mock.calls.map(([input]) => input)).toEqual([
+    { threadId: 'omt_topic', order: 'desc', pageSize: 20 },
+    { threadId: 'omt_topic', order: 'desc', pageSize: 30 },
+    { threadId: 'omt_topic', order: 'asc', pageSize: 20, startTime: 30 },
+    { threadId: 'omt_topic', order: 'desc', pageSize: 30 }
+  ]);
 });

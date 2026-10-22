@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  type ConfigRepository,
   RuntimeError,
   canonicalExecutionJson,
   previewSessionSchedule,
@@ -372,8 +373,9 @@ export class SessionAutomationService {
     return session;
   }
 
-  private async listRecords<T>(prefix: string, parse: (input: unknown) => T, cache?: Map<string, T>): Promise<Array<{ raw: string; value: T }>> {
-    const rows = await this.requireStore().list(prefix);
+  private async listRecords<T>(prefix: string, parse: (input: unknown) => T, cache?: Map<string, T>, filter?: Parameters<NonNullable<ConfigRepository['listByJsonField']>>[1]): Promise<Array<{ raw: string; value: T }>> {
+    const store = this.requireStore();
+    const rows = filter && store.listByJsonField ? await store.listByJsonField(prefix, filter) : await store.list(prefix);
     const parsed: Array<{ raw: string; value: T }> = [];
     for (const row of rows) {
       try {
@@ -1028,8 +1030,8 @@ export class SessionAutomationService {
     if (this.closed) return;
     const [schedules, occurrences, subscriptions] = await Promise.all([
       this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule),
-      this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), parsed.occurrences),
-      this.listRecords(CI_PREFIX, value => ciSubscriptionSchema.parse(value), parsed.subscriptions)
+      this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), parsed.occurrences, { field: 'runStatus', values: ['pending'] }),
+      this.listRecords(CI_PREFIX, value => ciSubscriptionSchema.parse(value), parsed.subscriptions, { field: 'status', values: ['waiting', 'dispatching', 'accepted'] })
     ]);
     for (const item of occurrences) {
       if (this.closed) return;
@@ -1058,7 +1060,7 @@ export class SessionAutomationService {
       if (!stored || openRunStatuses.has(stored.value.runStatus)) return true;
     }
     // Legacy sources have no reservation, and blocked/unknown work must continue to hold the slot.
-    return (await this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value)))
+    return (await this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), undefined, { field: 'runStatus', values: [...openRunStatuses], scheduleId: schedule.id }))
       .some(item => item.value.scheduleId === schedule.id && openRunStatuses.has(item.value.runStatus));
   }
 
@@ -1923,8 +1925,8 @@ export class SessionAutomationService {
   private async startPendingDeliveries(parsed: TickParseCache) {
     if (this.closed || !this.options.deliver || this.deliveries.size >= MAX_DELIVERIES) return;
     const [occurrences, subscriptions] = await Promise.all([
-      this.listRecords(OCCURRENCE_PREFIX, input => sessionScheduleOccurrenceSchema.parse(input), parsed.occurrences),
-      this.listRecords(CI_PREFIX, input => ciSubscriptionSchema.parse(input), parsed.subscriptions)
+      this.listRecords(OCCURRENCE_PREFIX, input => sessionScheduleOccurrenceSchema.parse(input), parsed.occurrences, { field: 'delivery.status', values: ['pending', 'error'] }),
+      this.listRecords(CI_PREFIX, input => ciSubscriptionSchema.parse(input), parsed.subscriptions, { field: 'delivery.status', values: ['pending', 'error'] })
     ]);
     const candidates = [
       ...occurrences.map(item => ({ key: occurrenceKey(item.value.id), raw: item.raw, value: migrateOccurrence(item.value) })),

@@ -183,34 +183,38 @@ const resourceFailureGuidance = (error: unknown) => {
   return `请管理员确认机器人已开通 \`im:message:readonly\` 权限${consoleUrl ? `，权限配置地址：${consoleUrl}` : ''}；如果权限已开通，请用户重新上传可能已过期或删除的附件。`;
 };
 
-export async function materializeLarkResources(messageId: string, prompt: string, resources: LarkMessageResource[], service: Pick<LarkCardService, 'downloadMessageResource' | 'downloadMessageResourceToFile'>) {
+export async function materializeLarkResources(messageId: string, prompt: string, resources: LarkMessageResource[], service: Pick<LarkCardService, 'downloadMessageResource' | 'downloadMessageResourceToFile'>, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   if (!resources.length) return prompt;
   const directory = join(tmpdir(), 'dutydeck', 'lark-resources', messageId.replace(/[^a-zA-Z0-9_-]/g, '_'));
   const notes: string[] = [];
   let failedCardImages = 0;
   for (const resource of resources) {
+    signal?.throwIfAborted();
     try {
       if (resource.type === 'file') {
         await mkdir(directory, { recursive: true, mode: 0o700 });
         const staging = join(directory, `.download-${randomUUID()}`);
         const abort = new AbortController();
-        const download = service.downloadMessageResourceToFile(messageId, resource.key, staging, abort.signal);
+        const downloadSignal = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
+        const download = service.downloadMessageResourceToFile(messageId, resource.key, staging, downloadSignal);
         try {
           let downloaded: { contentType?: string };
-          try { downloaded = await withLarkContextReadTimeout(download, '附件下载'); }
+          try { downloaded = await withLarkContextReadTimeout(download, '附件下载', undefined, signal); }
           catch (error) {
             abort.abort(error);
             await download.catch(() => {});
             throw error;
           }
-          abort.signal.throwIfAborted();
+          downloadSignal.throwIfAborted();
           const path = join(directory, safeResourceName(resource, downloaded.contentType));
           await rename(staging, path);
           notes.push(`- ${resource.label}已下载到本地：${path}。请使用本地文件读取工具查看。`);
         } finally { await rm(staging, { force: true }); }
         continue;
       }
-      const downloaded = await withLarkContextReadTimeout(service.downloadMessageResource(messageId, resource.key, resource.type), '附件下载');
+      const downloaded = await withLarkContextReadTimeout(readSignal => service.downloadMessageResource(messageId, resource.key, resource.type, readSignal), '附件下载', undefined, signal);
+      signal?.throwIfAborted();
       // 图片按文件头识别真实格式：下载接口的 contentType 与资源自带扩展名都可能与实际字节不符。
       let fileName = safeResourceName(resource, downloaded.contentType);
       let gifHint: string | undefined;
@@ -223,15 +227,22 @@ export async function materializeLarkResources(messageId: string, prompt: string
       }
       await mkdir(directory, { recursive: true, mode: 0o700 });
       const path = join(directory, fileName);
-      await writeFile(path, downloaded.data, { mode: 0o600 });
+      const staging = join(directory, `.download-${randomUUID()}`);
+      try {
+        await writeFile(staging, downloaded.data, { mode: 0o600, signal });
+        signal?.throwIfAborted();
+        await rename(staging, path);
+      } finally { await rm(staging, { force: true }); }
       notes.push(`- ${resource.label}已下载到本地：${path}。请使用本地文件读取工具查看。${gifHint ? ` ${gifHint}` : ''}`);
     } catch (error) {
+      signal?.throwIfAborted();
       const reason = error instanceof Error ? error.message : String(error);
       // 卡片图片只是附带的配图：汇总成一句，不要求 Agent 逐张向用户道歉。
       if (resource.fromCard) { failedCardImages++; continue; }
       notes.push(`- ${resource.label}下载失败：${reason}。你无法读取该附件；请在回复中明确告知用户。${resourceFailureGuidance(error)}`);
     }
   }
+  signal?.throwIfAborted();
   if (failedCardImages) notes.push(`- 卡片图片 ${failedCardImages} 张未能下载，请仅依据卡片文字继续，不必中断任务。`);
   return `${prompt}\n\n[Dutydeck 飞书附件处理结果]\n${notes.join('\n')}`.trim();
 }

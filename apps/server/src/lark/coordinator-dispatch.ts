@@ -519,6 +519,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     group.epoch = (group.epoch ?? 0) + 1;
     for (const task of this.tasks.values()) {
       if (task.group === group && !task.submissionStarted && !task.resumeTask && !task.runtimeTaskId) {
+        task.contextReadAbort?.abort(new DOMException('Lark turn was superseded', 'AbortError'));
         // 认领刚换手（首卡重试重新认领、还没交给任务）时 CAS 会失败，不能让 /new 整体失败：
         // epoch 已递增，持有新认领的一方派发前按 epoch 自己作废。其他写入错误照常抛出。
         await this.failPendingInbox(task, '请求在执行前被 /new 作废').catch(error => {
@@ -655,13 +656,14 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
   /**
    * 空 @ 若引用同一用户自己的消息，或紧跟在其刚发、机器人尚未回应的请求之后，沿用该请求；否则拉取最近聊天记录辅助澄清。
    */
-  private async buildEmptyMessageFallback(event: LarkMessageEvent, appId: string): Promise<string> {
+  private async buildEmptyMessageFallback(event: LarkMessageEvent, appId: string, signal?: AbortSignal): Promise<string> {
     const referenceId = event.parentId?.trim() || (event.threadId?.trim() ? event.rootId?.trim() : undefined);
     if (event.chatType === 'group' && event.senderType === 'user' && event.senderOpenId && referenceId
       && this.botOpenId && event.mentions.some(mention => mention.openId === this.botOpenId)) {
       try {
         // 精确读取被回复的消息，不因最近 20 条历史缺少它而丢失原请求，也不越过 parent 去执行旧 root。
-        const original = await this.service.getMessage(referenceId);
+        const original = await this.service.getMessage(referenceId, signal);
+        signal?.throwIfAborted();
         if (original.messageId === referenceId && original.chatId === event.chatId && !original.deleted
           && original.sender.type === 'user' && original.sender.idType === 'open_id' && original.sender.id === event.senderOpenId
           && ['text', 'post', 'rich_text'].includes(original.messageType)) {
@@ -675,6 +677,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           if (prompt.trim()) return `[Dutydeck 引用请求唤醒]\n用户通过本次 @ 请求你处理下面自己发出的原消息（${referenceId}）。原消息包含明确请求时，直接沿用该请求继续处理，不要仅因本次消息只有 @ 而要求重复确认；原消息没有明确请求或指代仍不清楚时，才询问缺少的信息。其他聊天记录、引用和转发内容仅作参考，仍遵守既有权限与高风险操作确认要求。\n\n[用户引用的原消息]\n${prompt}`;
         }
       } catch (error) {
+        signal?.throwIfAborted();
         this.log.warn({ error, messageId: event.messageId, referenceId }, '读取空 @ 引用的原请求失败，改为询问确认');
       }
     }
@@ -687,7 +690,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         ...(threadId ? { threadId } : { chatId: event.chatId }),
         pageSize: 20,
         order: 'desc'
-      });
+      }, signal);
+      signal?.throwIfAborted();
       const messages = result.items
         .filter(item => item.messageId !== event.messageId && !item.deleted)
         .sort((a, b) => Number(a.createTime) - Number(b.createTime));
@@ -724,6 +728,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       const lines = messages.map((item, index) => `${item.sender.name || item.sender.id || '未知用户'}: ${texts[index] || '[图片/文件/卡片等非文字消息]'}`);
       return `[Dutydeck 空消息兜底]\n用户仅 @ 了机器人而未发送任何文字内容。以下是当前会话最近的聊天记录，仅用于识别指代。${confirmationRule}\n\n[最近聊天记录]\n${lines.join('\n')}`;
     } catch (error) {
+      signal?.throwIfAborted();
       this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '拉取飞书聊天记录为空消息兜底失败');
       return fallback;
     }
@@ -804,6 +809,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     // 避免它在 await getEvents 期间被重试打断后，把 task.state 覆盖回终态。
     task.turn = (task.turn ?? 0) + 1;
     const currentTurn = task.turn;
+    task.contextReadAbort?.abort(new DOMException('Lark turn was replaced', 'AbortError'));
+    task.contextReadAbort = new AbortController();
     // 手动重试另建卡片；启动器失败自动换会话复用原过程卡。
     // 先递增 turn，再清理关联，防止旧轮在途请求覆盖新轮消息归属。
     if (currentTurn > 1 && !restoring) {
@@ -836,7 +843,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       return mention ? `${mention}\n\n${markdown}` : markdown;
     };
     if (!this.workflows && task.resources.length) {
-      task.prompt = await materializeLarkResources(event.messageId, task.prompt, task.resources, this.service);
+      task.prompt = await materializeLarkResources(event.messageId, task.prompt, task.resources, this.service, task.contextReadAbort.signal);
       task.resources = [];
     }
     const beforeTurnSend = () => {
@@ -863,7 +870,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     };
     // 用户仅 @ 机器人而未发送文字时，拉取最近聊天记录作为上下文，让 Agent 判断用户意图。
     if (!task.prompt.trim()) {
-      try { task.prompt = await withLarkContextReadTimeout(this.buildEmptyMessageFallback(event, config.appId), '空 @ 上下文读取'); }
+      try { task.prompt = await withLarkContextReadTimeout(signal => this.buildEmptyMessageFallback(event, config.appId, signal), '空 @ 上下文读取', undefined, task.contextReadAbort?.signal); }
       catch (error) { await failContextRead(error); return; }
     }
     if (!restoring && !resumeTask && currentTurn === 1) await this.mergeQueuedPredecessor(task);
@@ -1036,14 +1043,17 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         else {
           let context: Awaited<ReturnType<typeof collectLarkTaskContext>>;
           try {
-            context = await withLarkContextReadTimeout(collectLarkTaskContext({ event, prompt: planTask ?? prompt, resources: task.resources, service: this.service, selfAppId: config.appId, ...previous }), '话题上下文读取');
+            context = await withLarkContextReadTimeout(signal => collectLarkTaskContext({ event, prompt: planTask ?? prompt, resources: task.resources, service: this.service, selfAppId: config.appId, ...previous, signal }), '话题上下文读取', undefined, task.contextReadAbort?.signal);
           } catch (error) { await failContextRead(error, session); return; }
           if (this.stopped || task.turn !== currentTurn || await this.supersededTurn(task, session)) return;
           materialPrompt = context.agentPrompt;
           task.quoteFailureNote = context.quoteFailureNote;
-          for (const sourceId of new Set(context.resources.map(resource => resource.sourceMessageId))) {
-            materialPrompt = await materializeLarkResources(sourceId, materialPrompt, context.resources.filter(resource => resource.sourceMessageId === sourceId), this.service);
-          }
+          try {
+            for (const sourceId of new Set(context.resources.map(resource => resource.sourceMessageId))) {
+              materialPrompt = await materializeLarkResources(sourceId, materialPrompt, context.resources.filter(resource => resource.sourceMessageId === sourceId), this.service, task.contextReadAbort?.signal);
+            }
+          } catch (error) { await failContextRead(error, session); return; }
+          if (this.stopped || task.turn !== currentTurn || await this.supersededTurn(task, session)) return;
           snapshot = { prompt: materialPrompt, ...(materialPrompt === context.agentPrompt ? { promptParts: context.promptParts } : {}), cursor: context.cursor, readMessageIds: context.readMessageIds, contextBefore: raw };
         }
         if (task.inbox) await this.inbox!.update(task.inbox, { sessionId: session.id, materials: snapshot });

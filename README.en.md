@@ -662,6 +662,10 @@ Confirmation requires bot settings management permission (`channel_bot.update`) 
 
 ## Upgrade Notes
 
+- **Long conversations and live updates**: fixed automatic browser stream reconnection and reduced repeated work for long turns, history backfill and raw logs. History still fills automatically; raw logs remain fully viewable and copyable. No new setting is required.
+- **Lark message handling**: receipt reactions start promptly while task preparation continues; late reactions are cleaned up after the task ends. A context timeout stops subsequent reads for that turn, preserving failure feedback and the material available to a retry. Concurrent authentication for the same bot is shared, while each request keeps its own deadline and retry budget.
+- **Read indexes (v42)**: upgrades add indexes for sessions, usage events, automation and question state while retaining history. Persisted questions are read by ID; questions awaiting an answer remain immediately available. Older program versions reject the newer database schema after migration.
+- **Terminal size**: resize requests accept positive integer rows and columns. Invalid requests return an error and leave the connection usable.
 - **Work item recovery**: steps blocked by an unknown execution resume remaining work on the next scheduler pass after the recovery API verifies the original execution and confirms success. A confirmed failure allows an explicit step retry. Permissions and configuration are rechecked; completed steps are not rerun. Unknown results, cancelled work and review stop decisions remain blocked.
 - **Work item history**: upgrades automatically build a scheduling index. Completed items with settled delivery no longer enter the per-second scan; history remains available and pending deliveries keep retrying.
 - **Disconnect and stop recovery**: cross-instance live streams can reconnect after an upstream disconnect. Shutdown closes proxy connections and pending Lark listener connections. A failed terminal stop can be retried to release the process.

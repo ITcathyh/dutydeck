@@ -1031,7 +1031,7 @@ describe('话题内引用自己的请求后补 @', () => {
     await h.coordinator.handle(wake(reference === 'root' ? { parentId: undefined } : {}), h.config);
     await h.waitDelivered(1);
     const prompt = h.send.mock.calls[0]?.[0] as string;
-    expect(h.service.getMessage).toHaveBeenCalledWith('om_request');
+    expect(h.service.getMessage).toHaveBeenCalledWith('om_request', expect.any(AbortSignal));
     expect(prompt).toContain(request);
     expect(prompt).toContain('用户通过本次 @ 请求你处理下面自己发出的原消息');
     expect(prompt).toContain('原消息没有明确请求或指代仍不清楚时，才询问缺少的信息');
@@ -1108,7 +1108,7 @@ describe('执行前上下文读取超时', () => {
     vi.useFakeTimers();
     await h.coordinator.handle(event('om_empty_stalled', '@_user_1', { parentId: 'om_parent' }), h.config);
     for (let i = 0; i < 100 && !h.service.getMessage.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
-    expect(h.service.getMessage).toHaveBeenCalledWith('om_parent');
+    expect(h.service.getMessage).toHaveBeenCalledWith('om_parent', expect.any(AbortSignal));
     await vi.advanceTimersByTimeAsync(15_001);
     vi.useRealTimers();
     await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({
@@ -1580,4 +1580,103 @@ describe('插件命令接入飞书', () => {
     expect(JSON.stringify(helpCard)).toContain('插件命令');
     expect(JSON.stringify(helpCard)).toContain('/greet <名字>');
   });
+});
+
+
+describe('并行确认表情的消息归属', () => {
+  it('routes consecutive same-chat messages and completes before a slow confirmation, then removes only its late reaction', async () => {
+    const h = await harness();
+    let release!: (value: { messageId: string; reactionId: string }) => void;
+    h.service.addReaction.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    await h.coordinator.handle(event('om_slow_ack', '@_user_1 第一件事'), h.config);
+    await h.coordinator.handle(event('om_fast_ack', '@_user_1 第二件事'), h.config);
+    await h.waitDelivered(2);
+    expect(h.send.mock.calls.map(([prompt]) => prompt)).toEqual([
+      expect.stringContaining('第一件事'), expect.stringContaining('第二件事')
+    ]);
+    expect(h.service.addReaction.mock.calls.filter(([, emoji]) => emoji === 'OK')).toEqual([
+      ['om_slow_ack', 'OK'], ['om_fast_ack', 'OK']
+    ]);
+    expect(h.service.deleteReaction).not.toHaveBeenCalledWith('om_slow_ack', expect.anything());
+    release({ messageId: 'om_slow_ack', reactionId: 'late_first' });
+    await vi.waitFor(() => expect(h.service.deleteReaction).toHaveBeenCalledWith('om_slow_ack', 'late_first'));
+    expect(h.service.deleteReaction.mock.calls.filter(([id]) => id === 'om_slow_ack')).toHaveLength(1);
+    expect(h.service.deleteReaction).toHaveBeenCalledWith('om_fast_ack', 'reaction_om_fast_ack_OK');
+    await h.coordinator.handle(event('om_slow_ack', '@_user_1 重复投递'), h.config);
+    expect(h.service.addReaction.mock.calls.filter(([id, emoji]) => id === 'om_slow_ack' && emoji === 'OK')).toHaveLength(1);
+  });
+
+  it.each(['/help', '/new', '/cancel'])('cleans a late reaction on the %s early return', async command => {
+    const h = await harness();
+    let release!: (value: { messageId: string; reactionId: string }) => void;
+    h.service.addReaction.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    await h.coordinator.handle(event('om_command_ack', command), h.config);
+    expect(h.service.reply).toHaveBeenCalled();
+    expect(h.send).not.toHaveBeenCalled();
+    release({ messageId: 'om_command_ack', reactionId: 'late_command' });
+    await vi.waitFor(() => expect(h.service.deleteReaction).toHaveBeenCalledWith('om_command_ack', 'late_command'));
+    expect(h.service.deleteReaction.mock.calls.filter(([id]) => id === 'om_command_ack')).toHaveLength(1);
+  });
+
+  it('logs failed confirmation without losing execution and cleans pending feedback after stop', async () => {
+    const h = await harness();
+    h.service.addReaction.mockRejectedValueOnce(new Error('synthetic reaction failure'));
+    await h.coordinator.handle(event('om_failed_ack', '@_user_1 继续处理'), h.config);
+    await h.waitDelivered(1);
+    expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_failed_ack' }), expect.stringContaining('确认表情失败'));
+    let release!: (value: { messageId: string; reactionId: string }) => void;
+    h.service.addReaction.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    await h.coordinator.handle(event('om_stop_ack', '@_user_1 第二件事'), h.config);
+    h.coordinator.stop();
+    release({ messageId: 'om_stop_ack', reactionId: 'late_stopped' });
+    await vi.waitFor(() => expect(h.service.deleteReaction).toHaveBeenCalledWith('om_stop_ack', 'late_stopped'));
+  });
+});
+
+it('does not publish a material snapshot or cursor when peer reading times out, and retries the unread message', async () => {
+  const h = await harness();
+  const unread = { messageId: 'om_unread_material', chatId: 'oc_group', threadId: 'omt_topic', messageType: 'text', createTime: '1000',
+    rawContent: JSON.stringify({ text: 'material must survive retry' }), sender: { id: 'ou_alice', type: 'user' }, mentions: [], deleted: false, updated: false };
+  h.service.listChatMessages.mockResolvedValueOnce({ items: [unread], hasMore: false })
+    .mockImplementationOnce(() => new Promise(() => {}));
+  vi.useFakeTimers();
+  await h.coordinator.handle(event('om_cancel_material', '@_user_1 first request'), h.config);
+  for (let i = 0; i < 100 && h.service.listChatMessages.mock.calls.length < 2; i++) await vi.advanceTimersByTimeAsync(1);
+  expect(h.service.listChatMessages).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(15_001);
+  vi.useRealTimers();
+  await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ taskName: '上下文读取失败' })));
+  expect(h.send).not.toHaveBeenCalled();
+  expect(await h.repos.config.list!(`lark.context.${h.config.appId}.`)).toEqual([]);
+  const inbox = new LarkTaskInbox(h.repos.config);
+  expect((await inbox.lookup(h.config.appId, 'om_cancel_material'))?.materials).toBeUndefined();
+  h.service.listChatMessages.mockResolvedValue({ items: [unread], hasMore: false });
+  await h.coordinator.handle(event('om_retry_material', '@_user_1 retry request'), h.config);
+  await h.waitDelivered(1);
+  expect(h.send.mock.calls[0]![0]).toContain('material must survive retry');
+  const [context] = await h.repos.config.list!(`lark.context.${h.config.appId}.`);
+  expect(JSON.parse(context!.value)).toMatchObject({ cursor: { createTime: 1000, messageId: 'om_unread_material' }, readMessageIds: expect.arrayContaining(['om_unread_material']) });
+});
+
+it('finishes late cleanup before another acknowledgement for the same platform message can reuse its reaction id', async () => {
+  const h = await harness();
+  let release!: () => void;
+  const writes: string[] = [];
+  h.service.addReaction.mockImplementationOnce(async messageId => {
+    writes.push('add old');
+    await new Promise<void>(resolve => { release = resolve; });
+    return { messageId, reactionId: 'same_platform_id' };
+  }).mockImplementationOnce(async messageId => { writes.push('add new'); return { messageId, reactionId: 'same_platform_id' }; });
+  h.service.deleteReaction.mockImplementation(async () => { writes.push('delete'); });
+  const owner = h.coordinator as any;
+  const original = event('om_same_platform_message', 'retry');
+  const old = owner.beginAcknowledgementReaction(original);
+  await owner.clearAcknowledgementReaction({ event: original, acknowledgement: old });
+  const next = owner.beginAcknowledgementReaction(original);
+  expect(writes).toEqual(['add old']);
+  release();
+  await vi.waitFor(() => expect(writes).toEqual(['add old', 'delete', 'add new']));
+  expect(next.clearRequested).toBe(false);
+  await owner.clearAcknowledgementReaction({ event: original, acknowledgement: next });
+  expect(writes).toEqual(['add old', 'delete', 'add new', 'delete']);
 });

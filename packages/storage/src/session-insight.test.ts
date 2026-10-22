@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -977,6 +977,12 @@ describe('session insight catalog rows', () => {
     expect(analysed.refreshState).toBe('succeeded');
     expect(analysed.currentSnapshotId).toBe('snap-catalog');
     expect(analysed.snapshot?.summary.snapshotId).toBe('snap-catalog');
+    const catalog = repos.insight.readSummaryCatalog({ includeArchived: true });
+    expect(catalog.find(row => row.sessionId === 's1')?.snapshot).toEqual({
+      snapshotId: analysed.snapshot!.snapshotId, summary: analysed.snapshot!.summary, manifest: analysed.snapshot!.manifest
+    });
+    expect(catalog.map(row => row.sessionId)).toEqual(all.rows.map(row => row.sessionId));
+
     const unanalysed = all.rows.find(r => r.sessionId === 's2')!;
     expect(unanalysed.refreshState).toBe('idle');
     expect(unanalysed.snapshot).toBeUndefined();
@@ -1378,4 +1384,56 @@ describe('session insight single running job per instance', () => {
     expect(repos.insight.markRunning('waiting', 'req-wait')).toBe(true);
     expect(repos.insight.getState('waiting').state).toBe('running');
   });
+});
+
+it('reads the narrow complete catalog in two queries with current cross-connection metadata and requests', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'insight-catalog-'));
+  const path = join(directory, 'test.db');
+  const reader = createRepositories(path), writer = createRepositories(path), db = new Database(path);
+  const at = '2026-10-03T00:00:00.000Z';
+  const project = (row: ReturnType<typeof reader.insight.listSummaryRows>['rows'][number]) => {
+    const keys = ['sessionId', 'agentId', 'cwd', 'workspaceSourceCwd', 'source', 'sourceId', 'archivedAt', 'createdAt', 'refreshState', 'errorCode', 'lastCheckedAt'] as const;
+    return { ...Object.fromEntries(keys.map(key => [key, row[key]])),
+      tasks: row.tasks.map(task => ({ acceptedRequest: task.acceptedRequest })),
+      ...(row.snapshot ? { snapshot: { snapshotId: row.snapshot.snapshotId, summary: row.snapshot.summary, manifest: row.snapshot.manifest } } : {}) };
+  };
+  try {
+    await writer.sessions.save({ id: 's', agentId: 'a', state: 'idle', cwd: '/tmp', runId: 'r', createdAt: at, updatedAt: at });
+    await writer.tasks.save({ id: 't', sessionId: 's', prompt: 'large prompt', status: 'queued', createdAt: at, updatedAt: at });
+    await writer.tasks.save({ id: 'legacy', sessionId: 's', prompt: 'legacy prompt', status: 'completed', createdAt: at, updatedAt: at });
+    const request = { namespace: 'schedule', actor: { kind: 'installation_owner' }, prompt: 'private accepted body' };
+    db.prepare("INSERT INTO task_requests(task_id,namespace,session_id,request_key,request_digest,request_json) VALUES ('t','schedule','s','key','digest',?)").run(JSON.stringify(request));
+    await writer.config.set('runtime_workspace:s', JSON.stringify({ sourceCwd: '/workspace' }));
+    const expected = reader.insight.listSummaryRows({ includeArchived: true }).rows.map(project);
+    const spy = vi.spyOn(Database.prototype, 'prepare');
+    const result = reader.insight.readSummaryCatalog({ includeArchived: true });
+    expect(spy).toHaveBeenCalledTimes(2); spy.mockRestore();
+    expect(result).toEqual(expected);
+    expect(result[0]!.tasks).toEqual([{ acceptedRequest: request }, { acceptedRequest: null }]);
+    expect(result[0]!.workspaceSourceCwd).toBe('/workspace');
+    // Commit a request change between the session read and task read. The response
+    // must retain the read transaction's old request, then see the commit next time.
+    const changedRequest = { ...request, namespace: 'automation' };
+    const prepare = Database.prototype.prepare;
+    let injected = false;
+    const concurrent = vi.spyOn(Database.prototype, 'prepare').mockImplementation(function(this: Database.Database, sql: string) {
+      if (!injected && sql.includes('SELECT t.session_id AS sessionId')) {
+        injected = true;
+        db.prepare("UPDATE task_requests SET request_json=? WHERE task_id='t'").run(JSON.stringify(changedRequest));
+      }
+      return prepare.call(this, sql);
+    });
+    try { expect(reader.insight.readSummaryCatalog({ includeArchived: true })).toEqual(result); }
+    finally { concurrent.mockRestore(); }
+    expect(injected).toBe(true);
+    expect(reader.insight.readSummaryCatalog()[0]!.tasks[0]!.acceptedRequest).toEqual(changedRequest);
+
+    await writer.config.set('runtime_workspace:s', JSON.stringify({ sourceCwd: '/changed' }));
+    expect(reader.insight.readSummaryCatalog()[0]!.workspaceSourceCwd).toBe('/changed');
+    expect(reader.insight.readSummaryCatalog({ agentId: 'missing' })).toEqual([]);
+    expect(reader.insight.readSummaryCatalog({ from: '2026-10-04T00:00:00.000Z' })).toEqual([]);
+    await writer.sessions.save({ id: 's', agentId: 'a', state: 'idle', cwd: '/tmp', runId: 'r', createdAt: at, updatedAt: at, archivedAt: at });
+    expect(reader.insight.readSummaryCatalog()).toEqual([]);
+    expect(reader.insight.readSummaryCatalog({ includeArchived: true })).toEqual(reader.insight.listSummaryRows({ includeArchived: true }).rows.map(project));
+  } finally { db.close(); reader.close(); writer.close(); rmSync(directory, { recursive: true, force: true }); }
 });

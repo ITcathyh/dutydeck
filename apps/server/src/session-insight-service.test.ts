@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -851,6 +851,18 @@ describe('SessionInsightService summary catalog', () => {
     expect(after.candidateSessions).toBe(total);
     expect(after.withSnapshot).toBe(1);
     expect(after.withoutSnapshot).toBe(total - 1);
+    // Narrow storage input must produce exactly the same public fields as the full catalog.
+    const fullRows = h.repos.insight.listSummaryRows({ limit: 100 });
+    const legacyRows = [...fullRows.rows, ...h.repos.insight.listSummaryRows({ limit: 100, cursor: fullRows.nextCursor! }).rows];
+    const catalog = vi.spyOn(h.repos.insight, 'readSummaryCatalog').mockReturnValue(legacyRows);
+    const legacy = await h.service.summary({ groupBy: 'workspace', limit: 50 });
+    catalog.mockRestore();
+    expect(after).toEqual(legacy);
+    const one = await h.service.summary({ groupBy: 'workspace', limit: 1 });
+    expect(one.candidateSessions).toBe(after.candidateSessions);
+    expect(one.withSnapshot).toBe(after.withSnapshot);
+    expect(one.withoutSnapshot).toBe(after.withoutSnapshot);
+
   });
 });
 

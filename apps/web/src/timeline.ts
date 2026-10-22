@@ -66,6 +66,12 @@ export function buildTimeline(events: DockEvent[] = [], tasks: Task[] = []): Tim
     taskEvents.push({ id: `task-event-${task.id}`, sequence: -1, type: 'text', timestamp: task.createdAt, data: { text: task.prompt, role: 'user', taskId: task.id } });
   }
   const source = [...events, ...taskEvents].sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.sequence - right.sequence);
+  appendTimeline(timeline, source, toolIndexes, seenWarnings);
+  return timeline;
+}
+
+/** Copy on write keeps every previously returned event and section immutable. */
+function appendTimeline(timeline: TimelineEvent[], source: DockEvent[], toolIndexes: Map<string, number>, seenWarnings: Set<string>) {
   for (let event of source) {
     if (event.type === 'status' && isChildDiagnostic(event.data)) event = { ...event, type: 'tool_result' };
     if (event.type === 'status' || event.type === 'task' || event.type === 'completed' || event.type === 'raw_terminal') continue;
@@ -85,9 +91,7 @@ export function buildTimeline(events: DockEvent[] = [], tasks: Task[] = []): Tim
     if (current.type === 'text' && current.data.role === 'user' && !current.data.steering) toolIndexes.clear();
 
     if ((current.type === 'text' || current.type === 'thinking') && previous?.type === current.type && (previous.data.role ?? 'assistant') === role && !current.data.steering && !previous.data.steering) {
-      previous.data.text = `${previous.data.text ?? ''}${current.data.text ?? ''}`;
-      previous.sequence = current.sequence;
-      previous.timestamp = current.timestamp;
+      timeline[timeline.length - 1] = { ...previous, data: { ...previous.data, text: `${previous.data.text ?? ''}${current.data.text ?? ''}` }, sequence: current.sequence, timestamp: current.timestamp };
       continue;
     }
 
@@ -97,8 +101,7 @@ export function buildTimeline(events: DockEvent[] = [], tasks: Task[] = []): Tim
       if (existingIndex !== undefined) {
         const existing = timeline[existingIndex];
         const completed = current.data.status === 'completed' || current.data.status === 'failed';
-        existing.type = current.type;
-        existing.data = {
+        timeline[existingIndex] = { ...existing, type: current.type, data: {
           ...existing.data,
           ...current.data,
           name: mergedToolName(existing.data.name, current.data.name),
@@ -106,8 +109,7 @@ export function buildTimeline(events: DockEvent[] = [], tasks: Task[] = []): Tim
           output: current.data.output ?? existing.data.output,
           startedAt: existing.data.startedAt ?? existing.timestamp,
           ...(completed ? { completedAt: current.timestamp } : {})
-        };
-        existing.sequence = current.sequence;
+        }, sequence: current.sequence };
         continue;
       }
       current.data.startedAt = current.timestamp;
@@ -121,18 +123,30 @@ export function buildTimeline(events: DockEvent[] = [], tasks: Task[] = []): Tim
     }
     timeline.push(current);
   }
-  return timeline;
 }
 
 const terminalTaskStatuses = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
 const assistantDescription = (event: TimelineEvent) => event.type === 'text' && event.data.role !== 'user';
+const stripPreviewLinks = (text: string) => text.replace(/\[([^\]]+)]\([^)]+\)/g, '$1');
+const stripPreviewMarkup = (text: string) => stripPreviewLinks(text).replace(/<[^>]+>/g, '');
+const normalizePreviewText = (text: string) => text
+  .replace(/[*_~`>#]+/g, '')
+  .replace(/^\s*(?:[-+]|\d+[.)])\s+/gm, '')
+  .replace(/\s+/g, ' ').trim();
 const previewText = (value: unknown, limit = 100) => {
-  const text = typeof value === 'string' ? value
-    .replace(/\[([^\]]+)]\([^)]+\)/g, '$1')
-    .replace(/<[^>]+>/g, '')
-    .replace(/[*_~`>#]+/g, '')
-    .replace(/^\s*(?:[-+]|\d+[.)])\s+/gm, '')
-    .replace(/\s+/g, ' ').trim() : '';
+  let text = '';
+  if (typeof value === 'string') {
+    const prefix = value.slice(0, 512), linked = stripPreviewLinks(prefix), stripped = linked.replace(/<[^>]+>/g, '');
+    const unstyled = stripped.replace(/[*_~`>#]+/g, '');
+    const lastLine = unstyled.slice(unstyled.lastIndexOf('\n') + 1);
+    // A later chunk can close a link/tag or finish a list marker. In those
+    // cases retain the full parser; otherwise a sufficient prefix is exact.
+    if (!linked.includes('[') && !stripped.includes('<') && (unstyled.endsWith('\n') || !/^\s*(?:[-+]|\d+[.)]?)?\s*$/.test(lastLine))) {
+      const candidate = normalizePreviewText(stripped);
+      if (candidate.length > limit) text = candidate;
+    }
+    if (!text) text = normalizePreviewText(stripPreviewMarkup(value));
+  }
   return text.length <= limit ? text : `${text.slice(0, Math.max(1, limit - 1)).trimEnd()}…`;
 };
 
@@ -236,7 +250,7 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
 /** Cache derived turns by their input references. Appending a token rebuilds
  * only its turn; old Markdown, tool groups and permission cards keep identity. */
 export function createTimelineProjector() {
-  type Cached = { source: DockEvent[]; task?: Task; latest: boolean; timeline: TimelineEvent[]; sections: TimelineSection[] };
+  type Cached = { toolIndexes?: Map<string, number>; source: DockEvent[]; task?: Task; latest: boolean; timeline: TimelineEvent[]; sections: TimelineSection[] };
   let cache = new Map<string, Cached>();
   let lastEvents: DockEvent[] | undefined;
   let lastTasks: Task[] | undefined;
@@ -258,7 +272,7 @@ export function createTimelineProjector() {
     }
     return { timeline, timelineSections };
   };
-  const taskFor = (source: DockEvent[]) => byTask.get(source.find(event => event.data.role === 'user')?.data.steering?.target?.taskId ?? source.find(event => event.data.role === 'user')?.data.taskId ?? source.find(event => event.taskId || event.data.taskId)?.taskId ?? source.find(event => event.data.taskId)?.data.taskId);
+  const taskFor = (source: DockEvent[]) => !byTask.size ? undefined : byTask.get(source.find(event => event.data.role === 'user')?.data.steering?.target?.taskId ?? source.find(event => event.data.role === 'user')?.data.taskId ?? source.find(event => event.taskId || event.data.taskId)?.taskId ?? source.find(event => event.data.taskId)?.data.taskId);
   return (events: DockEvent[], tasks: Task[] = [], hasOlder = false, delta?: { previousEvents?: DockEvent[]; changes?: DockEvent[] }) => {
     const changes = delta?.changes;
     const previous = entries.at(-1);
@@ -268,20 +282,54 @@ export function createTimelineProjector() {
       && changes.every((event, index) => (index === 0 || event.timestamp >= changes[index - 1]!.timestamp) && event.sequence > (lastEvents?.at(-1)?.sequence ?? 0) && event.timestamp >= previous.source.at(-1)!.timestamp
         && event.type !== 'permission_request' && !warningText(event as TimelineEvent)
         && !(hasSyntheticPrompts && event.data.role === 'user'))) {
-      const tail = [previous.source.slice()];
+      // Source arrays are private to this projector; only derived snapshots escape.
+      const tail = [previous.source];
+      const additions: DockEvent[][] = [[]];
       for (const event of changes) {
-        if (event.type === 'text' && event.data.role === 'user' && !event.data.steering) tail.push([]);
-        tail.at(-1)!.push(event);
+        if (event.type === 'text' && event.data.role === 'user' && !event.data.steering) { tail.push([]); additions.push([]); }
+        tail.at(-1)!.push(event); additions.at(-1)!.push(event);
       }
       cache.delete(previous.source[0]!.id);
       entries.pop();
       for (let index = 0; index < tail.length; index++) {
-        const source = tail[index]!, task = taskFor(source), latest = index === tail.length - 1;
-        const timeline = buildTimeline(source);
-        const entry = { source, task, latest, timeline, sections: buildTimelineSections(timeline, task ? [task] : [], latest) };
+        const source = tail[index]!, task = index === 0 && previous.task && !additions[index]!.some(event => event.data.role === 'user') ? previous.task : taskFor(source), latest = index === tail.length - 1;
+        let timeline: TimelineEvent[], toolIndexes: Map<string, number> | undefined;
+        if (index === 0) {
+          timeline = previous.timeline.slice();
+          toolIndexes = previous.toolIndexes ?? new Map(previous.timeline.flatMap((event, offset) =>
+            (event.type === 'tool_call' || event.type === 'tool_result') && typeof event.data.id === 'string' && event.data.id ? [[event.data.id, offset] as const] : []));
+          appendTimeline(timeline, additions[index]!, toolIndexes, new Set());
+        } else timeline = buildTimeline(source);
+        const entry = { source, task, latest, timeline, toolIndexes, sections: buildTimelineSections(timeline, task ? [task] : [], latest) };
         entries.push(entry); cache.set(source[0]!.id, entry);
       }
       lastEvents = events;
+      return result();
+    }
+    const first = entries[0];
+    // Older pages only affect their new turns and the formerly partial first turn.
+    // Legacy task synthesis and global warning/permission replacement use the full path.
+    if (first && tasks === lastTasks && !hasSyntheticPrompts
+      && tasks.every(task => task.status === 'queued' || task.status === 'cancelled' || task.createdAt >= lastEvents![0]!.timestamp || (hasOlder && task.createdAt < events[0]!.timestamp))
+      && delta?.previousEvents === lastEvents && changes?.length
+      && changes.every((event, index) => event.sequence < lastEvents![0]!.sequence
+        && event.timestamp <= first.source[0]!.timestamp && (index === 0 || event.timestamp >= changes[index - 1]!.timestamp)
+        && event.type !== 'permission_request' && !warningText(event as TimelineEvent))) {
+      const turns: DockEvent[][] = [];
+      for (const event of [...changes, ...first.source]) {
+        if (!turns.length || (event.type === 'text' && event.data.role === 'user' && !event.data.steering)) turns.push([]);
+        turns.at(-1)!.push(event);
+      }
+      const prefix = turns.map((source, index) => {
+        const latest = entries.length === 1 && index === turns.length - 1;
+        if (source.length === first.source.length && source[0] === first.source[0] && latest === first.latest) return first;
+        const timeline = buildTimeline(source), task = taskFor(source);
+        return { source, task, latest, timeline, sections: buildTimelineSections(timeline, task ? [task] : [], latest) };
+      });
+      entries = [...prefix, ...entries.slice(1)];
+      cache.delete(first.source[0]!.id);
+      for (const entry of prefix) cache.set(entry.source[0]!.id, entry);
+      lastEvents = events; lastHasOlder = hasOlder;
       return result();
     }
     byTask = new Map(tasks.map(task => [task.id, task]));

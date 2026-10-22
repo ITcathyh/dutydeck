@@ -37,6 +37,9 @@ export function mergeReconciledEvents(current: EventWindow | undefined, incoming
   if (page[0]!.sequence > (current.events.at(-1)?.sequence ?? -Infinity)) {
     return { ...current, events: current.events.concat(page), previousEvents: current.events, changes: page };
   }
+  if (page.at(-1)!.sequence < (current.events[0]?.sequence ?? Infinity)) {
+    return { ...current, events: page.concat(current.events), previousEvents: current.events, changes: page };
+  }
   const events: DockEvent[] = [];
   let index = 0;
   for (const event of current.events) {

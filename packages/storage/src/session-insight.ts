@@ -26,6 +26,7 @@ import {
   type SessionInsightSummaryRawOptions,
   type SessionInsightSummaryRawResult,
   type SessionInsightSummaryRawRow,
+  type SessionInsightSummaryCatalogRow,
   type SessionInsightRawTaskRow,
   type HostEvidenceRaw,
   type InsightPruneResult,
@@ -1114,6 +1115,61 @@ export function createSessionInsightRepository(
           nextCursor = encodeCursor({ createdAt: last.created_at, sessionId: last.session_id, filterKey });
         }
         return { rows, totalMatching: totalRow.c, nextCursor };
+      })();
+    },
+
+    readSummaryCatalog(options = {}): SessionInsightSummaryCatalogRow[] {
+      return db.transaction(() => {
+        const conditions: string[] = [];
+        const params: string[] = [];
+        if (!options.includeArchived) conditions.push('s.archived_at IS NULL');
+        for (const [column, value, operator] of [
+          ['s.agent_id', options.agentId, '='], ['s.id', options.sessionId, '='],
+          ['s.created_at', options.from, '>='], ['s.created_at', options.to, '<']
+        ] as const) {
+          if (value) { conditions.push(`${column} ${operator} ?`); params.push(value); }
+        }
+        const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+        const rows = db.prepare(`SELECT s.id AS sessionId,s.agent_id AS agentId,s.cwd,
+            s.source,s.source_id AS sourceId,s.archived_at AS archivedAt,s.created_at AS createdAt,
+            COALESCE(r.state,'idle') AS refreshState,r.error_code AS errorCode,r.last_checked_at AS lastCheckedAt,
+            w.value AS workspaceJson,p.snapshot_id AS snapshotId,p.summary_json AS summaryJson,p.manifest_json AS manifestJson
+          FROM sessions s
+          LEFT JOIN insight_refresh r ON r.session_id=s.id
+          LEFT JOIN configs w ON w.key='runtime_workspace:' || s.id
+          LEFT JOIN insight_snapshots p ON p.snapshot_id=r.current_snapshot_id AND p.tombstoned=0
+            AND p.summary_json IS NOT NULL AND p.manifest_json IS NOT NULL AND p.host_evidence_json IS NOT NULL
+          ${where} ORDER BY s.created_at,s.id`).all(...params) as Array<Omit<SessionInsightSummaryCatalogRow, 'snapshot' | 'tasks' | 'workspaceSourceCwd'> & {
+            workspaceJson: string | null; snapshotId: string | null; summaryJson: string | null; manifestJson: string | null;
+          }>;
+        // One joined task read, including tasks with no accepted request. Their absence is
+        // usage evidence too; dropping them would turn unknown usage into a known category.
+        const taskRows = db.prepare(`SELECT t.session_id AS sessionId,r.request_json AS requestJson
+          FROM sessions s JOIN tasks t ON t.session_id=s.id
+          LEFT JOIN task_requests r ON r.task_id=t.id
+          ${where} ORDER BY t.created_at,t.rowid`).all(...params) as Array<{ sessionId: string; requestJson: string | null }>;
+        const tasksBySession = new Map<string, SessionInsightSummaryCatalogRow['tasks']>();
+        for (const task of taskRows) {
+          let tasks = tasksBySession.get(task.sessionId);
+          if (!tasks) { tasks = []; tasksBySession.set(task.sessionId, tasks); }
+          tasks.push({ acceptedRequest: task.requestJson ? JSON.parse(task.requestJson) : null });
+        }
+        return rows.map(({ workspaceJson, snapshotId, summaryJson, manifestJson, ...row }) => {
+          let workspaceSourceCwd: string | null = null;
+          if (workspaceJson) {
+            try {
+              const record = JSON.parse(workspaceJson) as { sourceCwd?: unknown };
+              if (typeof record.sourceCwd === 'string' && record.sourceCwd.length > 0) workspaceSourceCwd = record.sourceCwd;
+            } catch { /* Invalid runtime workspace metadata has no source directory. */ }
+          }
+          return {
+            ...row, workspaceSourceCwd, tasks: tasksBySession.get(row.sessionId) ?? [],
+            ...(snapshotId && summaryJson && manifestJson ? { snapshot: {
+              snapshotId, summary: JSON.parse(summaryJson) as SessionInsightSummary,
+              manifest: JSON.parse(manifestJson) as SessionInsightManifest
+            } } : {})
+          };
+        });
       })();
     },
 

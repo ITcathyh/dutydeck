@@ -506,3 +506,22 @@ describe('usage report (drill-down)', () => {
     expect(() => resolveUsageRange({ from: '2026-09-26', to: '2026-09-25' }, new Date())).toThrow(/不能晚于/);
   });
 });
+
+it('reuses unfiltered distributions and keeps date-range choices when selected filters match nothing', async () => {
+  const h = harness();
+  try {
+    await h.repos.usage.append({ id: 'one', attemptId: 'one', recordedAt: at, sessionId: 's', taskId: 't', category: 'explicit', origin: 'web', agentId: 'a', model: 'm1', appId: 'bot1', costUsd: 0, inputTokens: 0, costEstimated: false, dataStatus: 'reported' });
+    await h.repos.usage.append({ id: 'two', attemptId: 'two', recordedAt: at, sessionId: 's', taskId: 't2', category: 'explicit', origin: 'web', agentId: 'b', appId: 'bot2', costEstimated: false, dataStatus: 'unavailable' });
+    const summarize = vi.spyOn(h.repos.usage, 'summarize');
+    const choices = vi.spyOn(h.repos.usage, 'listOptions');
+    const full = await h.ledger.report({});
+    expect(summarize).toHaveBeenCalledTimes(5);
+    expect(choices).not.toHaveBeenCalled();
+    expect(full.options).toEqual({ models: ['m1', null], agentIds: ['a', 'b'], appIds: ['bot1', 'bot2'], origins: ['web'] });
+    const empty = await h.ledger.report({ model: 'm1', appId: 'bot2' });
+    expect(empty.totals.entries).toBe(0);
+    expect(empty.models).toEqual([]);
+    expect(empty.options).toEqual(full.options);
+    expect(choices).toHaveBeenCalledTimes(1);
+  } finally { h.repos.close(); }
+});

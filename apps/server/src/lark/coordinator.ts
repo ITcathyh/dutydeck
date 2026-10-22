@@ -63,7 +63,8 @@ export type LarkTask = {
   cardMessageId?: string;
   runtimeTaskId?: string;
   startedAt?: number;
-  acknowledgementReactionId?: string;
+  acknowledgement?: { reactionId?: string; clearRequested: boolean };
+  contextReadAbort?: AbortController;
   /** Immutable terminal notification for the current turn. */
   finalMessageId?: string;
   /**

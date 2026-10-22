@@ -1212,6 +1212,7 @@ const requestBudgets = new AsyncLocalStorage<ReadonlyMap<LarkCardService, { sign
 export class LarkCardService {
   private token?: string;
   private tokenExpiresAt = 0;
+  private tokenFlight?: { promise: Promise<string>; abort: AbortController; waiters: Set<(error: unknown) => void>; settled: boolean };
   private readonly lifecycle = new AbortController();
   private budget() { return requestBudgets.getStore()?.get(this); }
   private loadingImageKey?: string;
@@ -1465,7 +1466,7 @@ export class LarkCardService {
     };
   }
 
-  async listChatMessages(input: LarkChatMessagesInput): Promise<LarkChatMessagesResult> {
+  async listChatMessages(input: LarkChatMessagesInput, signal?: AbortSignal): Promise<LarkChatMessagesResult> {
     const threadId = input.threadId?.trim();
     const chatId = input.chatId?.trim();
     // 话题消息优先按 thread 拉取，确保上下文限定在当前话题内；否则按群拉取。
@@ -1484,16 +1485,16 @@ export class LarkCardService {
     if (input.pageToken) query.set('page_token', input.pageToken);
     if (Number.isFinite(input.startTime)) query.set('start_time', String(Math.max(0, Math.floor(input.startTime!))));
     if (Number.isFinite(input.endTime)) query.set('end_time', String(Math.max(0, Math.floor(input.endTime!))));
-    const payload = await this.request(`/open-apis/im/v1/messages?${query}`, { method: 'GET' });
+    const payload = await this.request(`/open-apis/im/v1/messages?${query}`, { method: 'GET', signal });
     const rawItems = Array.isArray(payload.data?.items) ? payload.data.items : [];
     const items = rawItems.map((item: any) => this.normalizeMessageItem(item)).filter((item: LarkChatMessage | undefined): item is LarkChatMessage => Boolean(item));
     const pageToken = String(payload.data?.page_token ?? '').trim() || undefined;
     return { items, hasMore: payload.data?.has_more === true, ...(pageToken ? { pageToken } : {}) };
   }
 
-  async getMessage(messageId: string): Promise<LarkChatMessage> {
+  async getMessage(messageId: string, signal?: AbortSignal): Promise<LarkChatMessage> {
     const resolvedMessageId = required(messageId, 'messageId');
-    const items = await this.getMessageItems(resolvedMessageId);
+    const items = await this.getMessageItems(resolvedMessageId, signal);
     const first = items[0];
     if (!first) throw new LarkServiceError('LARK_MESSAGE_NOT_FOUND', `Message ${resolvedMessageId} not found`, 404);
     return first;
@@ -1504,9 +1505,9 @@ export class LarkCardService {
    * 对于普通消息，items 仅包含该消息本身；
    * 对于合并转发（merge_forward）消息，items[0] 为合并转发消息本身，其余为被转发的子消息。
    */
-  async getMessageItems(messageId: string): Promise<LarkChatMessage[]> {
+  async getMessageItems(messageId: string, signal?: AbortSignal): Promise<LarkChatMessage[]> {
     const resolvedMessageId = required(messageId, 'messageId');
-    const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(resolvedMessageId)}?user_id_type=open_id&card_msg_content_type=raw_card_content`, { method: 'GET' });
+    const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(resolvedMessageId)}?user_id_type=open_id&card_msg_content_type=raw_card_content`, { method: 'GET', signal });
     const rawItems = Array.isArray(payload.data?.items) ? payload.data.items : (payload.data?.message ? [payload.data.message] : []);
     return rawItems.map((item: any) => this.normalizeMessageItem(item)).filter((item: LarkChatMessage | undefined): item is LarkChatMessage => Boolean(item));
   }
@@ -1724,10 +1725,11 @@ export class LarkCardService {
     return response;
   }
 
-  async downloadMessageResource(messageId: string, fileKey: string, type: 'image' | 'file'): Promise<LarkMessageResourceResult> {
+  async downloadMessageResource(messageId: string, fileKey: string, type: 'image' | 'file', callerSignal?: AbortSignal): Promise<LarkMessageResourceResult> {
     const resolvedMessageId = required(messageId, 'messageId');
     const resolvedFileKey = required(fileKey, 'fileKey');
-    return this.withRequestBudget(async signal => {
+    return this.withRequestBudget(async budgetSignal => {
+      const signal = callerSignal ? AbortSignal.any([budgetSignal, callerSignal]) : budgetSignal;
       const token = await this.tenantToken(signal);
       const url = `${this.config.baseUrl}/open-apis/im/v1/messages/${encodeURIComponent(resolvedMessageId)}/resources/${encodeURIComponent(resolvedFileKey)}?type=${type}`;
       return executeWithLarkGate(this.config.appId, 'GET message resource', async () => {
@@ -1799,7 +1801,7 @@ export class LarkCardService {
     });
   }
 
-  async readDocument(urlInput: string): Promise<{ url: string; title?: string; text: string; links: string[]; linkTitles: Array<{ url: string; title: string }>; linkError?: string }> {
+  async readDocument(urlInput: string, signal?: AbortSignal): Promise<{ url: string; title?: string; text: string; links: string[]; linkTitles: Array<{ url: string; title: string }>; linkError?: string }> {
     let url: URL;
     try { url = new URL(urlInput); } catch { throw new LarkServiceError('INVALID_DOCUMENT_URL', '文档链接必须是飞书或 Lark 的 https docx/wiki URL。', 400); }
     const host = url.hostname.toLowerCase();
@@ -1808,11 +1810,11 @@ export class LarkCardService {
     const kind = parts.at(-2); let token = parts.at(-1);
     if ((kind !== 'docx' && kind !== 'wiki') || !token) throw new LarkServiceError('INVALID_DOCUMENT_URL', '只允许读取 docx 或 wiki 文档链接。', 400);
     if (kind === 'wiki') {
-      const node = await this.request(`/open-apis/wiki/v2/spaces/get_node?token=${encodeURIComponent(token)}`, { method: 'GET' });
+      const node = await this.request(`/open-apis/wiki/v2/spaces/get_node?token=${encodeURIComponent(token)}`, { method: 'GET', signal });
       if (node.data?.node?.obj_type !== 'docx' || !node.data?.node?.obj_token) throw new LarkServiceError('UNSUPPORTED_DOCUMENT_TYPE', '知识库节点不是 docx，不能读取。', 400);
       token = String(node.data.node.obj_token);
     }
-    const raw = await this.request(`/open-apis/docx/v1/documents/${encodeURIComponent(token)}/raw_content`, { method: 'GET' });
+    const raw = await this.request(`/open-apis/docx/v1/documents/${encodeURIComponent(token)}/raw_content`, { method: 'GET', signal });
     const text = raw.data?.content;
     if (typeof text !== 'string') throw new LarkServiceError('INVALID_LARK_RESPONSE', '文档读取响应未包含 raw_content。', 502);
     const links: string[] = [];
@@ -1824,7 +1826,7 @@ export class LarkCardService {
     try {
       for (let page = 0; page < 5; page++) {
         const path = `/open-apis/docx/v1/documents/${encodeURIComponent(token)}/blocks?page_size=500${pageToken ? `&page_token=${encodeURIComponent(pageToken)}` : ''}`;
-        const payload = await this.request(path, { method: 'GET' });
+        const payload = await this.request(path, { method: 'GET', signal });
         if (!Array.isArray(payload.data?.items)) throw new Error('文档 blocks 响应未包含 items');
         for (const block of payload.data.items) {
           for (const value of Object.values(block as Record<string, any>)) {
@@ -1854,6 +1856,7 @@ export class LarkCardService {
         pageToken = nextToken;
       }
     } catch (error) {
+      signal?.throwIfAborted();
       linkError = `文档引用链接读取失败：${error instanceof Error ? error.message : String(error)}`;
     }
     return { url: url.toString(), ...(typeof raw.data?.title === 'string' ? { title: raw.data.title } : {}), text, links, linkTitles, ...(linkError ? { linkError } : {}) };
@@ -2041,21 +2044,66 @@ export class LarkCardService {
   }
 
   private async tenantToken(signal?: AbortSignal) {
+    const caller = this.budget()!;
+    signal = signal ? AbortSignal.any([caller.signal, signal]) : caller.signal;
+    signal.throwIfAborted();
     if (this.token && Date.now() < this.tokenExpiresAt) return this.token;
-    const payload = await this.request('/open-apis/auth/v3/tenant_access_token/internal/', {
-      token: false, signal, body: { app_id: this.config.appId, app_secret: this.config.appSecret }
-    });
-    this.token = payload.tenant_access_token;
-    if (!this.token) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark token response did not include tenant_access_token', 502);
-    this.tokenExpiresAt = Date.now() + Math.max(60, Number(payload.expire ?? 7200) - 60) * 1000;
-    return this.token;
+    if (caller.remaining <= 0) throw new LarkServiceError('LARK_REQUEST_BUDGET_EXHAUSTED', '飞书请求的总尝试预算已用尽，等待持久化对账重投。', 503);
+    if (!this.tokenFlight) {
+      const flight = { abort: new AbortController(), waiters: new Set<(error: unknown) => void>(), settled: false, promise: undefined as unknown as Promise<string> };
+      // Authentication owns its deadline; no waiter's cancellation or ALS budget owns the shared I/O.
+      const budgets = new Map(requestBudgets.getStore());
+      budgets.delete(this);
+      flight.promise = requestBudgets.run(budgets, () => this.withRequestBudget(async () => {
+        const payload = await this.request('/open-apis/auth/v3/tenant_access_token/internal/', {
+          token: false, signal: flight.abort.signal, body: { app_id: this.config.appId, app_secret: this.config.appSecret },
+          onFailure: error => { for (const failed of flight.waiters) failed(error); }
+        });
+        flight.abort.signal.throwIfAborted();
+        const token = payload.tenant_access_token;
+        if (!token) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark token response did not include tenant_access_token', 502);
+        this.token = token;
+        this.tokenExpiresAt = Date.now() + Math.max(60, Number(payload.expire ?? 7200) - 60) * 1000;
+        return token as string;
+      }));
+      this.tokenFlight = flight;
+      const clear = () => { flight.settled = true; if (this.tokenFlight === flight) this.tokenFlight = undefined; };
+      void flight.promise.then(clear, clear);
+    }
+    const flight = this.tokenFlight;
+    let failed: (error: unknown) => void = () => {};
+    let onAbort: () => void = () => {};
+    try {
+      return await Promise.race([flight.promise, new Promise<never>((_, reject) => {
+        failed = error => {
+          if (--caller.remaining > 0) return;
+          // One exhausted caller must not mark the error seen by the other waiters.
+          const exhausted = error instanceof Error
+            ? Object.assign(Object.create(Object.getPrototypeOf(error)), error, { message: error.message, name: error.name, larkRequestExhausted: true })
+            : error;
+          reject(exhausted);
+        };
+        flight.waiters.add(failed);
+        onAbort = () => reject(signal!.reason);
+        signal!.addEventListener('abort', onAbort, { once: true });
+        if (signal!.aborted) onAbort();
+      })]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+      flight.waiters.delete(failed);
+      if (flight.waiters.size === 0) {
+        if (this.tokenFlight === flight) this.tokenFlight = undefined;
+        if (!flight.settled) flight.abort.abort(new DOMException('Lark authentication has no waiters', 'AbortError'));
+      }
+    }
   }
 
-  private request(path: string, options: { method?: string; body?: unknown; token?: boolean; form?: FormData; retry?: boolean; beforeSend?: LarkWriteGuard; signal?: AbortSignal }) {
+  private request(path: string, options: { method?: string; body?: unknown; token?: boolean; form?: FormData; retry?: boolean; beforeSend?: LarkWriteGuard; signal?: AbortSignal; onFailure?: (error: unknown) => void }) {
     return this.withRequestBudget(async budgetSignal => {
       const signal = options.signal ? AbortSignal.any([budgetSignal, options.signal]) : budgetSignal;
       const headers: Record<string, string> = options.form ? {} : { 'content-type': 'application/json; charset=utf-8' };
-      if (options.token !== false) headers.authorization = `Bearer ${await this.tenantToken()}`;
+      signal.throwIfAborted();
+      if (options.token !== false) headers.authorization = `Bearer ${await this.tenantToken(signal)}`;
       try {
         return await executeWithLarkGate(this.config.appId, `${options.method ?? 'POST'} ${path.split('?')[0]}`, async () => {
           const response = await this.fetch(`${this.config.baseUrl}${path}`, {
@@ -2081,7 +2129,10 @@ export class LarkCardService {
         }, { env: options.retry === false ? { ...this.config.env, LARK_API_RETRY_MAX_ATTEMPTS: '0' } : this.config.env, signal,
           beforeAttempt: options.beforeSend,
           canRetry: () => this.budget()!.remaining > 0,
-          onFailure: () => { if (options.retry !== false) this.budget()!.remaining--; } });
+          onFailure: error => {
+            if (options.retry !== false) this.budget()!.remaining--;
+            options.onFailure?.(error);
+          } });
       } catch (error) {
         if (this.budget()!.remaining <= 0 && error instanceof Error) Object.assign(error, { larkRequestExhausted: true });
         if (error instanceof LarkCircuitOpenError) {

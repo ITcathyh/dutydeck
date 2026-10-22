@@ -14,6 +14,7 @@ import { FolderCog, Menu, PanelRightClose, PanelRightOpen, Terminal, X } from 'l
 import { api, type RunSummary, type Session, type SteeringResult, type Task } from './api';
 import { useDockStore } from './store';
 import { createTimelineProjector, pendingPermissionId } from './timeline';
+import { createRawLogProjector } from './raw-log';
 import { Composer, type SendMode } from './components/Composer';
 import { busyStates, effectiveStatus, ToolbarButton } from './components/ui';
 import { Banner, Button, Card, Dialog, IconButton, Spinner } from './components/primitives';
@@ -348,7 +349,8 @@ export default function App() {
   const taskContext = currentContextStats(eventList, sessionUsage.data?.snapshot?.context);
   const projectTimeline = useMemo(() => createTimelineProjector(), [activeSessionId]);
   const { timeline, timelineSections } = useMemo(() => projectTimeline(eventList, tasks.data, events.data?.hasOlder, events.data), [projectTimeline, eventList, tasks.data, events.data?.hasOlder]);
-  const raw = useMemo(() => eventList.filter(event => event.type === 'raw_terminal').map(event => event.raw ?? event.data.text).join(''), [eventList]);
+  const projectRaw = useMemo(() => createRawLogProjector(), [activeSessionId]);
+  const raw = useMemo(() => projectRaw(eventList, events.data), [projectRaw, eventList, events.data]);
   const queuedTasks = useMemo(() => tasks.data?.filter(task => task.status === 'queued') ?? [], [tasks.data]);
   const blockingPermissionId = useMemo(() => active?.state === 'waiting_for_permission' ? pendingPermissionId(timeline) : undefined, [active?.state, timeline]);
   const latestUserIndex = useMemo(() => {

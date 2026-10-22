@@ -218,6 +218,13 @@ export function createUsageLedgerRepository(sqlite: Database.Database): UsageLed
         return { ...group, ...totalsOf(row) } as UsageGroup;
       });
     },
+    async listOptions(filter) {
+      const { sql, values } = where(filter);
+      const distinct = (column: string) => (sqlite.prepare(`SELECT DISTINCT ${column} AS value FROM usage_ledger ${sql}`).all(...values) as Array<{ value: string | null }>).map(row => row.value);
+      const known = (values: Array<string | null>) => values.filter((value): value is string => value !== null).sort();
+      const models = distinct('model');
+      return { models: [...known(models), ...(models.includes(null) ? [null] : [])], agentIds: known(distinct('agent_id')), appIds: known(distinct('app_id')), origins: known(distinct('origin')) };
+    },
     async listTasks(filter: UsageFilter, page: { limit: number; offset: number }): Promise<UsageTaskPage> {
       const { sql, values } = where(filter);
       // 子步骤（root_task_id 不为空）并到根任务；根任务自身的行没有 root_task_id。

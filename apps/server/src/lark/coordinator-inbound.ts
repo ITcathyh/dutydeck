@@ -760,112 +760,113 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     // 不应让用户在这些步骤中面对无反馈的聊天界面。
     // 任务通道派来的是合成事件，背后没有真实消息：给它贴表情必然失败，
     // 每条任务留一条 warn 就是纯噪声，因此在调用前跳过。
-    let acknowledgementReactionId: string | undefined;
-    if (!larkTaskAgentGuid(event.messageId)) {
-      try {
-        acknowledgementReactionId = (await this.service.addReaction(event.messageId, 'OK')).reactionId;
-      } catch (error) {
-        this.log.warn({ error, messageId: event.messageId }, '发送飞书确认表情失败，继续处理消息');
-      }
-    }
-    let prompt: string;
-    let resources: LarkMessageResource[];
-    let scopeId: string;
+    const acknowledgement = larkTaskAgentGuid(event.messageId) ? undefined : this.beginAcknowledgementReaction(event);
+    const clearAcknowledgement = () => this.clearAcknowledgementReaction({ event, acknowledgement });
+    let handedOff = false;
     try {
-      ({ prompt, resources } = await parsePrompt(event, this.botOpenId));
-      // 路由解析（话题群种子 / 普通群回复模式 / legacy）与 group key 共用同一 scopeId，
-      // 保证同一会话的消息串行化到同一个 group。
-      scopeId = await resolveLarkScopeId(event, config, this.chatModeResolver);
-    } catch (error) {
-      this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '解析飞书消息失败，已向用户回执');
-      // P0-4：解析失败回执是独立新消息，群聊开启时与其他失败回执同口径 @ 发起人；私聊不 @。
-      const parseFailMention = larkNotice('failure_receipt', config, event).mention;
-      await sendTaskCard(this.service, event, {
-        state: 'failed', retryable: false, readOnly: true,
-        taskId: event.messageId, taskName: '消息接收失败',
-        markdown: `${parseFailMention ? `${parseFailMention}\n\n` : ''}**消息未能解析，Agent 尚未执行。**\n\n${error instanceof Error ? error.message : String(error)}\n\n请检查消息内容或附件后重新发送。`,
-        idempotencyKey: `parse_failed_${event.messageId}`.slice(0, 50),
-        ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
-      }, this.log).catch(cardError => this.log.error({ error: cardError, messageId: event.messageId }, '发送飞书解析失败回执失败'));
-      if (acknowledgementReactionId) await this.service.deleteReaction(event.messageId, acknowledgementReactionId).catch(() => undefined);
-      if (inbox) await this.inbox!.update(inbox, { state: 'failed', error: '消息解析失败' });
-      return;
-    }
-    if (scenario) prompt = directScenarioPrompt(scenario, prompt);
-    if (inbox?.request) { prompt = inbox.request.prompt; resources = inbox.request.resources; scopeId = inbox.request.scopeId; }
-    // 这条曾并入前一条排队消息：先按合并意图收口，决定执行合并后的原文还是自己的原文（见 resumeMergedInbox）。
-    if (inbox?.request && inbox.mergeFrom) prompt = await this.resumeMergedInbox(inbox);
-    const workflowScope: { id: string; prompt?: string } = { id: scopeId };
-    if (!inbox?.request && (await this.routeWorkflow(event, config, prompt, workflowScope)
-      || await this.routePendingAsk(event, config, prompt, resources, workflowScope, inbox, recovering))) {
-      if (inbox) await this.inbox!.update(inbox, { state: 'accepted' });
-      if (acknowledgementReactionId) await this.service.deleteReaction(event.messageId, acknowledgementReactionId).catch(() => undefined);
-      return;
-    }
-    scopeId = workflowScope.id;
-    if (workflowScope.prompt) prompt = workflowScope.prompt;
-    // 聊天内斜杠命令：必须在解析之后（拿到剥离 @机器人 的纯文本）、建任务之前。
-    // 命令不是 Agent 任务，不应占用一次 Agent 轮次，也不应留下进度卡。
-    // 未识别的 /xxx 会被归一化成普通文字继续走建任务流程（用户发路径不该收到失败回执）。
-    // group 必须先于命令路由取出：/new 要在这个 group 上登记「已结束的会话」，
-    // 之后同一 group 的消息（包括本条 /new 自带的任务内容）才不会把旧上下文绑回来。
-    const groupKey = larkGroupKey(event, scopeId, config.appId);
-    const group = this.groups.get(groupKey) ?? { tail: Promise.resolve() };
-    this.groups.set(groupKey, group);
-    // 话题续接发起人的顶层任务时，先把内存绑定指向那个会话：命令和后续消息都按它处理。
-    if (!group.sessionId) {
-      const continued = await this.threadContinuation(event, config, scopeId);
-      if (continued && !group.retiredSessionIds?.has(continued.id)) { group.sessionId = continued.id; group.sessionConfigKey = larkSessionConfigKey(config); }
-    }
-    if (inbox && !inbox.request && parseSlashCommand(prompt)) await this.inbox!.update(inbox, { state: 'command' });
-    let commandRoute = inbox?.request ? undefined : await this.routeChatCommand(event, config, prompt, group, scopeId, acknowledgementReactionId);
-    // C2：机器人话题里的「继续」「停」「重来」先按控制处理，不适用时照常当普通消息。
-    const control = !inbox?.request && commandRoute === undefined ? larkControlPhrase(prompt) : undefined;
-    if (control) commandRoute = await this.routeControlPhrase(control, event, config, prompt, group, scopeId, acknowledgementReactionId);
-    if (commandRoute === 'handled') {
-      if (inbox) await this.inbox!.update(inbox, { state: 'accepted' });
-      return;
-    }
-    const busy = config.busyTriage === true && !recovering && !inbox?.request && !commandRoute && !control
-      && !prompt.trimStart().startsWith('/') && event.senderType === 'user' && event.senderOpenId
-      && !quotedWorkflow && !scenario && !event.scenario && !larkTaskAgentGuid(event.messageId)
-      ? await this.routeBusyMessage(event, config, prompt, group, scopeId).catch(error => {
-        this.log.warn({ error, messageId: event.messageId }, '忙时判断失败，按普通消息排队');
-        return undefined;
-      }) : undefined;
-    if (busy === 'handled') {
-      if (inbox) await this.inbox!.update(inbox, { state: 'accepted' });
-      if (acknowledgementReactionId) await this.service.deleteReaction(event.messageId, acknowledgementReactionId).catch(() => undefined);
-      return;
-    }
-    let retryMaterialPrompt = inbox?.request?.materialPrompt;
-    let launchOptions = inbox?.request?.launchOptions;
-    let commandEpoch: number | undefined;
-    if (typeof commandRoute === 'string') prompt = commandRoute;
-    else if (commandRoute) { prompt = commandRoute.prompt; retryMaterialPrompt = commandRoute.materialPrompt; launchOptions = commandRoute.launchOptions; commandEpoch = commandRoute.epoch; }
-    if (inbox && !inbox.request) await this.inbox!.update(inbox, { state: 'received', request: { prompt, scopeId, resources, ...(retryMaterialPrompt ? { materialPrompt: retryMaterialPrompt } : {}), ...(launchOptions ? { launchOptions } : {}) } });
-    // 首卡重试从触发到这里有多步异步操作，期间用户可能发了 /new。
-    if (retrying && (retrying.epoch !== (group.epoch ?? 0) || (inbox?.sessionId && group.retiredSessionIds?.has(inbox.sessionId)))) {
-      if (inbox?.state === 'received') await this.inbox!.update(inbox, { state: 'failed', error: '请求在执行前被 /new 作废' });
-      if (acknowledgementReactionId) await this.service.deleteReaction(event.messageId, acknowledgementReactionId).catch(() => undefined);
-      return;
-    }
-    // 空 @ 消息（仅 @ 机器人无文字）仍需创建任务，由 runTurn 拉取聊天记录做兜底意图判断。
-    const task: LarkTask = { id: event.messageId, group, event, prompt, resources, inbox, retryMaterialPrompt, launchOptions, ...(inbox?.cardId ? { cardMessageId: inbox.cardId } : {}), ...(inbox?.redispatch ? { redispatch: inbox.redispatch } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.suggestion ? { commandSuggestion: commandRoute.suggestion } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.steer ? { steer: true } : {}), config, ...(busy ? { busySupplement: busy } : {}), state: 'queued', events: [], restoring: recovering, turn: (inbox?.turn ?? 1) - 1, scopeId, epoch: commandEpoch ?? retrying?.epoch ?? group.epoch ?? 0, acknowledgementReactionId };
-    this.tasks.set(task.id, task);
-    if (this.tasks.size > 5_000) this.tasks.delete(this.tasks.keys().next().value!);
-    group.tail = group.tail.then(() => this.runTurn(task)).catch(async error => {
-      this.log.error({ error, chatId: event.chatId, messageId: event.messageId }, '处理飞书唤醒消息失败');
-      // runTurn 在首张卡片送达前抛出（附件下载、空 @ 兜底、卡片发送本身失败）时，
-      // OK reaction 会永远留在原消息上：用户看到「已接收」却永远等不到进度卡，
-      // 正是设计契约禁止的两个竞争状态并存。此处兜底撤销，保证回执不会悬挂。
-      await this.clearAcknowledgementReaction(task);
-      if (inbox?.state === 'received' && !task.runtimeTaskId && isLarkFirstCardUndelivered(error)) {
-        await this.retryUndeliveredInbound(task, inbox, config, recovering, adopted, error);
+      let prompt: string;
+      let resources: LarkMessageResource[];
+      let scopeId: string;
+      try {
+        ({ prompt, resources } = await parsePrompt(event, this.botOpenId));
+        // 路由解析（话题群种子 / 普通群回复模式 / legacy）与 group key 共用同一 scopeId，
+        // 保证同一会话的消息串行化到同一个 group。
+        scopeId = await resolveLarkScopeId(event, config, this.chatModeResolver);
+      } catch (error) {
+        this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '解析飞书消息失败，已向用户回执');
+        // P0-4：解析失败回执是独立新消息，群聊开启时与其他失败回执同口径 @ 发起人；私聊不 @。
+        const parseFailMention = larkNotice('failure_receipt', config, event).mention;
+        await sendTaskCard(this.service, event, {
+          state: 'failed', retryable: false, readOnly: true,
+          taskId: event.messageId, taskName: '消息接收失败',
+          markdown: `${parseFailMention ? `${parseFailMention}\n\n` : ''}**消息未能解析，Agent 尚未执行。**\n\n${error instanceof Error ? error.message : String(error)}\n\n请检查消息内容或附件后重新发送。`,
+          idempotencyKey: `parse_failed_${event.messageId}`.slice(0, 50),
+          ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
+        }, this.log).catch(cardError => this.log.error({ error: cardError, messageId: event.messageId }, '发送飞书解析失败回执失败'));
+        await clearAcknowledgement();
+        if (inbox) await this.inbox!.update(inbox, { state: 'failed', error: '消息解析失败' });
         return;
       }
-      if (inbox?.state === 'received') await this.inbox!.update(inbox, { state: 'failed', error: error instanceof Error ? error.message : String(error) });
-    });
+      if (scenario) prompt = directScenarioPrompt(scenario, prompt);
+      if (inbox?.request) { prompt = inbox.request.prompt; resources = inbox.request.resources; scopeId = inbox.request.scopeId; }
+      // 这条曾并入前一条排队消息：先按合并意图收口，决定执行合并后的原文还是自己的原文（见 resumeMergedInbox）。
+      if (inbox?.request && inbox.mergeFrom) prompt = await this.resumeMergedInbox(inbox);
+      const workflowScope: { id: string; prompt?: string } = { id: scopeId };
+      if (!inbox?.request && (await this.routeWorkflow(event, config, prompt, workflowScope)
+        || await this.routePendingAsk(event, config, prompt, resources, workflowScope, inbox, recovering))) {
+        if (inbox) await this.inbox!.update(inbox, { state: 'accepted' });
+        await clearAcknowledgement();
+        return;
+      }
+      scopeId = workflowScope.id;
+      if (workflowScope.prompt) prompt = workflowScope.prompt;
+      // 聊天内斜杠命令：必须在解析之后（拿到剥离 @机器人 的纯文本）、建任务之前。
+      // 命令不是 Agent 任务，不应占用一次 Agent 轮次，也不应留下进度卡。
+      // 未识别的 /xxx 会被归一化成普通文字继续走建任务流程（用户发路径不该收到失败回执）。
+      // group 必须先于命令路由取出：/new 要在这个 group 上登记「已结束的会话」，
+      // 之后同一 group 的消息（包括本条 /new 自带的任务内容）才不会把旧上下文绑回来。
+      const groupKey = larkGroupKey(event, scopeId, config.appId);
+      const group = this.groups.get(groupKey) ?? { tail: Promise.resolve() };
+      this.groups.set(groupKey, group);
+      // 话题续接发起人的顶层任务时，先把内存绑定指向那个会话：命令和后续消息都按它处理。
+      if (!group.sessionId) {
+        const continued = await this.threadContinuation(event, config, scopeId);
+        if (continued && !group.retiredSessionIds?.has(continued.id)) { group.sessionId = continued.id; group.sessionConfigKey = larkSessionConfigKey(config); }
+      }
+      if (inbox && !inbox.request && parseSlashCommand(prompt)) await this.inbox!.update(inbox, { state: 'command' });
+      let commandRoute = inbox?.request ? undefined : await this.routeChatCommand(event, config, prompt, group, scopeId, acknowledgement);
+      // C2：机器人话题里的「继续」「停」「重来」先按控制处理，不适用时照常当普通消息。
+      const control = !inbox?.request && commandRoute === undefined ? larkControlPhrase(prompt) : undefined;
+      if (control) commandRoute = await this.routeControlPhrase(control, event, config, prompt, group, scopeId, acknowledgement);
+      if (commandRoute === 'handled') {
+        await clearAcknowledgement();
+        if (inbox) await this.inbox!.update(inbox, { state: 'accepted' });
+        return;
+      }
+      const busy = config.busyTriage === true && !recovering && !inbox?.request && !commandRoute && !control
+        && !prompt.trimStart().startsWith('/') && event.senderType === 'user' && event.senderOpenId
+        && !quotedWorkflow && !scenario && !event.scenario && !larkTaskAgentGuid(event.messageId)
+        ? await this.routeBusyMessage(event, config, prompt, group, scopeId).catch(error => {
+          this.log.warn({ error, messageId: event.messageId }, '忙时判断失败，按普通消息排队');
+          return undefined;
+        }) : undefined;
+      if (busy === 'handled') {
+        if (inbox) await this.inbox!.update(inbox, { state: 'accepted' });
+        await clearAcknowledgement();
+        return;
+      }
+      let retryMaterialPrompt = inbox?.request?.materialPrompt;
+      let launchOptions = inbox?.request?.launchOptions;
+      let commandEpoch: number | undefined;
+      if (typeof commandRoute === 'string') prompt = commandRoute;
+      else if (commandRoute) { prompt = commandRoute.prompt; retryMaterialPrompt = commandRoute.materialPrompt; launchOptions = commandRoute.launchOptions; commandEpoch = commandRoute.epoch; }
+      if (inbox && !inbox.request) await this.inbox!.update(inbox, { state: 'received', request: { prompt, scopeId, resources, ...(retryMaterialPrompt ? { materialPrompt: retryMaterialPrompt } : {}), ...(launchOptions ? { launchOptions } : {}) } });
+      // 首卡重试从触发到这里有多步异步操作，期间用户可能发了 /new。
+      if (retrying && (retrying.epoch !== (group.epoch ?? 0) || (inbox?.sessionId && group.retiredSessionIds?.has(inbox.sessionId)))) {
+        if (inbox?.state === 'received') await this.inbox!.update(inbox, { state: 'failed', error: '请求在执行前被 /new 作废' });
+        await clearAcknowledgement();
+        return;
+      }
+      // 空 @ 消息（仅 @ 机器人无文字）仍需创建任务，由 runTurn 拉取聊天记录做兜底意图判断。
+      const task: LarkTask = { id: event.messageId, group, event, prompt, resources, inbox, retryMaterialPrompt, launchOptions, ...(inbox?.cardId ? { cardMessageId: inbox.cardId } : {}), ...(inbox?.redispatch ? { redispatch: inbox.redispatch } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.suggestion ? { commandSuggestion: commandRoute.suggestion } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.steer ? { steer: true } : {}), config, ...(busy ? { busySupplement: busy } : {}), state: 'queued', events: [], restoring: recovering, turn: (inbox?.turn ?? 1) - 1, scopeId, epoch: commandEpoch ?? retrying?.epoch ?? group.epoch ?? 0, acknowledgement };
+      this.tasks.set(task.id, task);
+      handedOff = true;
+      if (this.tasks.size > 5_000) this.tasks.delete(this.tasks.keys().next().value!);
+      group.tail = group.tail.then(() => this.runTurn(task)).catch(async error => {
+        this.log.error({ error, chatId: event.chatId, messageId: event.messageId }, '处理飞书唤醒消息失败');
+        // runTurn 在首张卡片送达前抛出（附件下载、空 @ 兜底、卡片发送本身失败）时，
+        // OK reaction 会永远留在原消息上：用户看到「已接收」却永远等不到进度卡，
+        // 正是设计契约禁止的两个竞争状态并存。此处兜底撤销，保证回执不会悬挂。
+        await this.clearAcknowledgementReaction(task);
+        if (inbox?.state === 'received' && !task.runtimeTaskId && isLarkFirstCardUndelivered(error)) {
+          await this.retryUndeliveredInbound(task, inbox, config, recovering, adopted, error);
+          return;
+        }
+        if (inbox?.state === 'received') await this.inbox!.update(inbox, { state: 'failed', error: error instanceof Error ? error.message : String(error) });
+      });
+    } finally {
+      if (!handedOff) await clearAcknowledgement();
+    }
   }
 
   /** 只接已授权的真人普通消息；任何判定或校验失败都保留原来的排队路径。 */
@@ -1062,7 +1063,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     prompt: string,
     group: LarkGroup,
     scopeId: string,
-    acknowledgementReactionId?: string,
+    acknowledgement?: LarkTask['acknowledgement'],
     receipts?: LarkCommandReceipts
   ): Promise<'handled' | string | LarkCommandPrompt | undefined> {
     // 插件命令展开成 prompt 模板后照普通请求处理（授权与建任务都不变）；内置命令名在安装时已拒绝。
@@ -1106,9 +1107,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
       }, this.log).catch(error => { this.log.error({ error, messageId: event.messageId, command: route.command }, '发送飞书命令回执失败'); if (receipts) receipts.deliveryFailed = true; return undefined; });
       // reaction 是「请求已接入」的回执，命令回执落地后必须撤销，避免两个状态并存。
-      if (acknowledgementReactionId) {
-        await this.service.deleteReaction(event.messageId, acknowledgementReactionId).catch(() => undefined);
-      }
+      await this.clearAcknowledgementReaction({ event, acknowledgement });
       return card;
     };
 
@@ -1125,7 +1124,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       this.log.info({ messageId: event.messageId, command: route.command, kind: route.kind }, '飞书命令未执行');
       return 'handled';
     }
-    return await this.executeChatCommandIntent(route, event, config, group, scopeId, replyCard, acknowledgementReactionId);
+    return await this.executeChatCommandIntent(route, event, config, group, scopeId, replyCard, acknowledgement);
   }
 
   /**
@@ -1137,11 +1136,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
    * - 重来：停在结果未知、等人选的那一轮同卡上「重新执行」（只限发起人本人）；上一轮失败、中断或取消同 /retry。其余当普通消息。
    */
   private async routeControlPhrase(kind: 'continue' | 'stop' | 'restart', event: LarkMessageEvent, config: StoredLarkConfig, prompt: string,
-    group: LarkGroup, scopeId: string, acknowledgementReactionId?: string): Promise<'handled' | LarkCommandPrompt | undefined> {
+    group: LarkGroup, scopeId: string, acknowledgement?: LarkTask['acknowledgement']): Promise<'handled' | LarkCommandPrompt | undefined> {
     const boundSessionId = group.sessionId && !group.retiredSessionIds?.has(group.sessionId) ? group.sessionId : undefined;
     const sessionId = boundSessionId ?? (await this.findScopeSession(config, event, scopeId, group).catch(() => undefined))?.id;
     if (!sessionId || !this.runtime.getTasks) return undefined;
-    if (kind === 'stop') return await this.routeChatCommand(event, config, '/cancel', group, scopeId, acknowledgementReactionId) === 'handled' ? 'handled' : undefined;
+    if (kind === 'stop') return await this.routeChatCommand(event, config, '/cancel', group, scopeId, acknowledgement) === 'handled' ? 'handled' : undefined;
     const confirm = (text: string) => this.service.replyText({ messageId: event.messageId, ...(event.threadId?.trim() ? { replyInThread: true } : {}),
       text, idempotencyKey: `control_${event.messageId}`.slice(0, 50) }).catch(error => this.log.warn({ error, messageId: event.messageId }, '控制语回执发送失败'));
     const tasks = await this.runtime.getTasks(sessionId);
@@ -1168,11 +1167,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const result = await this.interruptedTurnAction('replay_turn', mapping.externalId, saved.turn ?? 0, event.senderOpenId, { messageId: saved.card_message_id, chatId: saved.chat_id });
         if (result.type !== 'success') return undefined;
         await confirm('好，重新执行上一条请求。');
-        if (acknowledgementReactionId) await this.service.deleteReaction(event.messageId, acknowledgementReactionId).catch(() => undefined);
+        await this.clearAcknowledgementReaction({ event, acknowledgement });
         return 'handled';
       }
       if (!last || !['failed', 'interrupted', 'cancelled'].includes(last.status)) return undefined;
-      const retry = await this.routeChatCommand(event, config, '/retry', group, scopeId, acknowledgementReactionId);
+      const retry = await this.routeChatCommand(event, config, '/retry', group, scopeId, acknowledgement);
       if (retry === 'handled' || retry === undefined) return retry;
       await confirm('好，重新执行上一条请求。');
       return typeof retry === 'string' ? { prompt: retry } : retry;
@@ -1208,7 +1207,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     group: LarkGroup,
     scopeId: string,
     replyCard: (taskName: string, markdown: string, options?: { elements?: LarkCardElement[]; failed?: boolean }) => Promise<{ messageId: string } | undefined>,
-    acknowledgementReactionId?: string
+    acknowledgement?: LarkTask['acknowledgement']
   ): Promise<'handled' | string | LarkCommandPrompt> {
     // 最近一轮任务：/cancel 与 /retry 需要它，按插入顺序取该 group 的最后一个任务。
     const latestTask = [...this.tasks.values()].reverse().find(task => task.group === group);
@@ -1250,7 +1249,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         }
         const parentSessionId = sessionId ?? (await this.sessionFor(group, config, event.chatId, event.chatType, scopeId)).id;
         await workbench.command(parentSessionId, route.argsText, event, config);
-        if (acknowledgementReactionId) await this.service.deleteReaction(event.messageId, acknowledgementReactionId).catch(() => undefined);
+        await this.clearAcknowledgementReaction({ event, acknowledgement });
         return 'handled';
       }
       if (route.command === 'schedule') {

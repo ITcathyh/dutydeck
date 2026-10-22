@@ -219,3 +219,41 @@ it('bounds actual coordinator terminal PATCH retries while persisting the indepe
     expect(messages).toBe(2);
   } finally { coordinator.stop(); }
 });
+
+it.each(['thread', 'peer', 'document', 'blocks'] as const)('physically aborts the abandoned context %s body and keeps the shared service usable', async stage => {
+  const { collectLarkTaskContext } = await import('./task-context.js');
+  const { withLarkContextReadTimeout } = await import('./context-read-timeout.js');
+  route = (path, response) => {
+    if (path.includes('/auth/')) { token(response); return; }
+    const current = path.includes('/raw_content') ? 'document' : path.includes('/blocks') ? 'blocks'
+      : path.includes('page_size=30') ? 'peer' : 'thread';
+    if (stage === current) {
+      response.writeHead(200, { 'content-type': 'application/json' }); response.write('{"code":');
+    } else json(response, { code: 0, data: { items: [], content: 'complete document' } });
+  };
+  const client = service({ LARK_API_REQUEST_TIMEOUT_MS: '2000' });
+  await expect(withLarkContextReadTimeout(signal => collectLarkTaskContext({
+    event: { messageId: 'om_context', chatId: 'oc_test', threadId: 'omt_test', chatType: 'group', messageType: 'text', content: '{"text":"read"}', mentions: [] },
+    prompt: 'read https://example.feishu.cn/docx/test', resources: [], service: client, selfAppId: 'cli_self', signal
+  }), 'context', 120)).rejects.toThrow('context超时');
+  await vi.waitFor(() => expect(disconnected).toBe(1));
+  expect(paths.filter(path => path.includes('/messages?'))).toHaveLength(stage === 'thread' ? 1 : 2);
+  expect(paths.some(path => path.includes('/blocks'))).toBe(stage === 'blocks');
+  const count = paths.length;
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(paths).toHaveLength(count);
+  route = (_path, response) => json(response, { code: 0, data: { items: [] } });
+  await expect(client.listChatMessages({ threadId: 'omt_other' })).resolves.toEqual({ items: [], hasMore: false });
+});
+
+it('physically aborts an abandoned image download body', async () => {
+  const { withLarkContextReadTimeout } = await import('./context-read-timeout.js');
+  route = (path, response) => {
+    if (path.includes('/auth/')) { token(response); return; }
+    response.writeHead(200, { 'content-type': 'image/png' }); response.write('partial');
+  };
+  const client = service({ LARK_API_REQUEST_TIMEOUT_MS: '2000' });
+  await expect(withLarkContextReadTimeout(signal => client.downloadMessageResource('om_image', 'image_key', 'image', signal), 'image', 120)).rejects.toThrow('image超时');
+  await vi.waitFor(() => expect(disconnected).toBe(1));
+  expect(paths).toHaveLength(2);
+});

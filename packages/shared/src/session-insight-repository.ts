@@ -107,6 +107,14 @@ export interface SessionInsightSummaryRawRow {
   tasks: SessionInsightRawTaskRow[];
 }
 
+/** Complete summary input without task execution fields, attempts or host evidence. */
+export type SessionInsightSummaryCatalogRow = Pick<SessionInsightSummaryRawRow,
+  'sessionId' | 'agentId' | 'cwd' | 'workspaceSourceCwd' | 'source' | 'sourceId' |
+  'archivedAt' | 'createdAt' | 'refreshState' | 'errorCode' | 'lastCheckedAt'> & {
+  snapshot?: Pick<NonNullable<SessionInsightSummaryRawRow['snapshot']>, 'snapshotId' | 'summary' | 'manifest'>;
+  tasks: Array<Pick<SessionInsightRawTaskRow, 'acceptedRequest'>>;
+};
+
 export interface SessionInsightSummaryRawOptions {
   /** Session.createdAt 的 [from,to) UTC 时间窗。 */
   from?: string;
@@ -210,6 +218,9 @@ export interface SessionInsightRepository {
 
   /** 完整 catalog 原始行（不排除未分析 session），不含任何汇总业务策略。 */
   listSummaryRows(options?: SessionInsightSummaryRawOptions): SessionInsightSummaryRawResult;
+
+  /** Complete narrow catalog in a single read transaction, for global summary projection. */
+  readSummaryCatalog(options?: Omit<SessionInsightSummaryRawOptions, 'limit' | 'cursor'>): SessionInsightSummaryCatalogRow[];
 
   /** 当前 + 最近 1 份旧快照 + 全实例 512 MiB 逻辑 payload 淘汰；与指针清空原子完成。 */
   prune(maxPayloadBytes?: number): InsightPruneResult;

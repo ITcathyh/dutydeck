@@ -488,3 +488,31 @@ describe('materializeLarkResources 卡片图片', () => {
     expect(result).not.toContain('你无法读取该附件');
   });
 });
+
+it.each(['file', 'image'] as const)('propagates turn cancellation during a %s download and removes unpublished attachment data', async type => {
+  const controller = new AbortController();
+  const messageId = `om_cancelled_${type}_${Date.now()}`;
+  const directory = join(tmpdir(), 'dutydeck', 'lark-resources', messageId);
+  let started!: () => void;
+  const atDownload = new Promise<void>(resolve => { started = resolve; });
+  const service = {
+    downloadMessageResourceToFile: vi.fn(async (_messageId: string, _key: string, destination: string, signal?: AbortSignal) => {
+      const { writeFile } = await import('node:fs/promises');
+      await writeFile(destination, 'partial'); started();
+      return new Promise<{ contentType: string }>((_, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+    }),
+    downloadMessageResource: vi.fn(async (_messageId: string, _key: string, _type: string, signal?: AbortSignal) => {
+      started();
+      return new Promise<{ data: Uint8Array }>((_, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+    })
+  };
+  const pending = materializeLarkResources(messageId, 'original request', [
+    { type, key: 'first', label: 'first', fromCard: true }, { type, key: 'second', label: 'second' }
+  ], service, controller.signal);
+  const rejected = expect(pending).rejects.toHaveProperty('name', 'AbortError');
+  await atDownload; controller.abort(); await rejected;
+  expect(service.downloadMessageResource.mock.calls.length + service.downloadMessageResourceToFile.mock.calls.length).toBe(1);
+  const { readdir } = await import('node:fs/promises');
+  expect(await readdir(directory).catch(error => { if (error.code === 'ENOENT') return []; throw error; })).toEqual([]);
+  await rm(directory, { recursive: true, force: true });
+});

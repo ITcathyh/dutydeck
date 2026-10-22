@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { installLarkHook } from './security-hooks.js';
 import { execFileSync } from 'node:child_process';
 import type { AgentConfig, AgentDriver, ChannelMapping, Session, TaskRecord } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
@@ -28,6 +29,15 @@ const config: StoredLarkConfig = {
   pushIntervalMs: 1_000, hideTraceOnComplete: false,
   allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [], highRiskAllowedEmails: [],
   highRiskPattern: 'rm\\b', riskControlMode: 'off'
+};
+
+const hookWorkspaces: string[] = [];
+afterEach(async () => { for (const path of hookWorkspaces.splice(0)) await rm(path, { recursive: true, force: true }); });
+const readyHookWorkspace = async () => {
+  const path = await mkdtemp(join(tmpdir(), 'dutydeck-recovery-hook-'));
+  hookWorkspaces.push(path);
+  await installLarkHook('codex', path);
+  return path;
 };
 
 /** 跨 coordinator 重建存活的持久化 runtime 替身：sessions 数组即「数据库」。 */
@@ -859,7 +869,7 @@ describe('/retry 在 coordinator 重建后', () => {
   it('重试按当前发送人重新算风险：非高危授权者不得继承原发起人的授权', async () => {
     const { runtime, tasks } = persistentRuntime();
     const risky = {
-      ...config, riskControlMode: 'enforced' as const,
+      ...config, workspace: await readyHookWorkspace(), riskControlMode: 'enforced' as const,
       highRiskAllowedUsers: [{ openId: 'ou_privileged', name: '有权限的人' }]
     };
     await coordinatorFor(runtime, cardService()).handle(
@@ -920,7 +930,7 @@ describe('/retry 在 coordinator 重建后', () => {
     // 必须按 Bob 自己的权限重新判定——内存里还留着 Alice 的 task 不是继承授权的理由。
     const { runtime } = persistentRuntime();
     const risky = {
-      ...config, riskControlMode: 'enforced' as const,
+      ...config, workspace: await readyHookWorkspace(), riskControlMode: 'enforced' as const,
       highRiskAllowedUsers: [{ openId: 'ou_alice', name: 'Alice' }]
     };
     const service = cardService();

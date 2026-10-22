@@ -1,6 +1,7 @@
 import type { DockEvent, Task } from './api';
 import { describe, expect, it } from 'vitest';
-import { buildTimeline, buildTimelineSections, pendingPermissionId, toolDisplayName } from './timeline';
+import { buildTimeline, buildTimelineSections, createTimelineProjector, pendingPermissionId, toolDisplayName } from './timeline';
+import { createEventWindow, mergeReconciledEvents } from './event-history';
 
 const event = (sequence: number, type: string, data: any) => ({ id: `e${sequence}`, sequence, type, timestamp: '', data });
 
@@ -284,6 +285,88 @@ describe('conversation timeline', () => {
 });
 
 describe('incremental turn projection', () => {
+  it('keeps long activity labels identical around incomplete Markdown and list boundaries', () => {
+    const originalPreview = (text: string) => {
+      const plain = text.replace(/\[([^\]]+)]\([^)]+\)/g, '$1').replace(/<[^>]+>/g, '')
+        .replace(/[*_~`>#]+/g, '').replace(/^\s*(?:[-+]|\d+[.)])\s+/gm, '').replace(/\s+/g, ' ').trim();
+      return plain.length <= 100 ? plain : `${plain.slice(0, 99).trimEnd()}…`;
+    };
+    const inputs = [
+      'ordinary text '.repeat(1000), '```ts\nconst value = 1;\n'.repeat(1000),
+      `[${'link title '.repeat(100)}](https://example.test) trailing`,
+      `<${'long tag '.repeat(100)}>visible description`,
+      `${' '.repeat(15)}${'1'.repeat(600)}. actual list`,
+      `<i>${'1'.repeat(600)}. actual list`,
+      `**${'1'.repeat(600)}**. actual list`,
+      `<tag [title](url>${'x'.repeat(600)})>actual text`,
+      `${'\n'.repeat(520)}- actual list`,
+      `${'words '.repeat(70)}\n${'1'.repeat(600)}) actual list`,
+      `${'**'.repeat(210)}[unfinished title${' text'.repeat(100)}`
+    ];
+    for (const text of inputs) for (const length of [100, 511, 512, 513, text.length]) {
+      const value = text.slice(0, length);
+      const sections = buildTimelineSections(buildTimeline([event(1, 'text', { role: 'user', text: 'question' }), event(2, 'text', { text: value }), event(3, 'tool_call', { id: 'tool', name: 'Read' })]));
+      const label = sections.find(section => section.kind === 'activity')?.groups[0]?.label;
+      expect(label).toBe(originalPreview(value) || 'Read');
+    }
+  });
+
+  it('matches complete projections at every append, duplicate, edit and history prepend without mutating snapshots', () => {
+    const make = (sequence: number, type: string, data: Record<string, unknown>): DockEvent => ({ id: `delta-${sequence}`, sequence, type, timestamp: String(sequence).padStart(5, '0'), data });
+    const tasks: Task[] = [{ id: 'task', sessionId: 'session', prompt: 'question', status: 'running', createdAt: '00001', updatedAt: '00001' }];
+    const project = createTimelineProjector();
+    let window = createEventWindow([make(1, 'text', { role: 'user', text: 'question', taskId: 'task' })], true);
+    const retained: { value: ReturnType<typeof project>; json: string }[] = [];
+    const freeze = (value: unknown) => {
+      if (!value || typeof value !== 'object' || Object.isFrozen(value)) return;
+      Object.freeze(value);
+      for (const child of Object.values(value)) freeze(child);
+    };
+    const check = () => {
+      freeze(window.events);
+      const value = project(window.events, tasks, Boolean(window.hasOlder), window);
+      expect(value).toEqual(createTimelineProjector()(window.events, tasks, Boolean(window.hasOlder)));
+      for (const snapshot of retained) expect(JSON.stringify(snapshot.value)).toBe(snapshot.json);
+      freeze(value);
+      retained.push({ value, json: JSON.stringify(value) });
+    };
+    check();
+    const batches = [
+      [make(2, 'text', { text: '```ts\nconst value = ' })],
+      [make(3, 'text', { text: '"中文";\n' })],
+      [make(4, 'text', { text: '```\n' })],
+      [make(5, 'tool_call', { id: 'a', name: 'Read', input: { path: 'a' }, status: 'running' })],
+      [make(6, 'tool_call', { id: 'b', name: 'Terminal', status: 'running' })],
+      [make(7, 'tool_result', { id: 'a', name: 'tool call', output: 'ok', status: 'completed' })],
+      [make(8, 'text', { role: 'user', text: 'steer', steering: { target: { taskId: 'task' } } })],
+      [make(9, 'tool_result', { id: 'b', output: 'failed', status: 'failed' })],
+      [make(10, 'permission_request', { id: 'permission', status: 'pending' })],
+      [make(11, 'permission_request', { id: 'permission', status: 'approved' })],
+      [make(12, 'text', { text: 'Warning: skills shortened' })],
+      [make(13, 'text', { text: 'Warning: skills shortened' })],
+      [make(9, 'tool_result', { id: 'b', output: 'corrected', status: 'completed' })],
+      [make(14, 'thinking', { text: 'finishing' }), make(15, 'text', { text: 'done' })],
+      [make(16, 'text', { role: 'user', text: 'next' }), make(17, 'text', { text: 'next answer' })],
+      [make(0, 'text', { text: 'older partial answer' })]
+    ];
+    for (const batch of batches) { window = mergeReconciledEvents(window, batch); check(); }
+    window = { ...window, hasOlder: false }; check();
+    tasks[0] = { ...tasks[0]!, status: 'interrupted', updatedAt: '99999' }; check();
+  });
+
+  it('reuses settled turns through historical pages, including a partial first turn and live appends', () => {
+    const make = (sequence: number, role?: string): DockEvent => ({ id: `history-${sequence}`, sequence, type: 'text', timestamp: String(sequence).padStart(4, '0'), data: { text: `${sequence}`, role } });
+    const tasks: Task[] = [], project = createTimelineProjector();
+    let window = createEventWindow([make(5), make(6, 'user'), make(7)]), value = project(window.events, tasks, true);
+    let settled = value.timeline.at(-1);
+    for (const batch of [[make(3), make(4)], [make(1, 'user'), make(2)], [make(8)], [make(0, 'user')]]) {
+      window = mergeReconciledEvents(window, batch);
+      value = project(window.events, tasks, true, window);
+      expect(value).toEqual(createTimelineProjector()(window.events, tasks, true));
+      if (batch[0]!.sequence < 5) expect(value.timeline.find(event => event.id === settled!.id)).toBe(settled);
+      settled = value.timeline.at(-1);
+    }
+  });
   it('keeps settled turn references while updating the active tool and permission', async () => {
     const { createTimelineProjector } = await import('./timeline');
     const project = createTimelineProjector();

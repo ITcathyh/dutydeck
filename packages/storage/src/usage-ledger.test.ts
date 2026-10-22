@@ -278,3 +278,18 @@ it('reports token coverage independently of costs, including zero and partial re
     expect(await repos.usage.totals({ sessionId: 'ses_1' })).toMatchObject({ entries: 3, tokenEntries: 2, partialTokenEntries: 1, inputTokens: 25, outputTokens: 0 });
   } finally { repos.close(); }
 });
+
+it('distinct options match aggregate keys, preserve unknown models and see another connection writes', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'usage-options-'));
+  const path = join(directory, 'test.db');
+  const reader = createRepositories(path), writer = createRepositories(path);
+  try {
+    await writer.usage.append(entry({ attemptId: 'a', model: 'model-b', costUsd: 0, inputTokens: 0 }));
+    await writer.usage.append(entry({ attemptId: 'b', model: 'model-a', appId: undefined, dataStatus: 'unpriced' }));
+    const range = { since: '2026-09-01T00:00:00.000Z', until: '2026-10-01T00:00:00.000Z' };
+    expect(await reader.usage.listOptions(range)).toEqual({ models: ['model-a', 'model-b'], agentIds: ['claude'], appIds: ['cli_a'], origins: ['lark_group'] });
+    await writer.usage.append(entry({ attemptId: 'c', model: undefined, agentId: 'codex', origin: 'web' }));
+    expect(await reader.usage.listOptions(range)).toEqual({ models: ['model-a', 'model-b', null], agentIds: ['claude', 'codex'], appIds: ['cli_a'], origins: ['lark_group', 'web'] });
+    expect(await reader.usage.listOptions({ ...range, model: 'missing' })).toEqual({ models: [], agentIds: [], appIds: [], origins: [] });
+  } finally { reader.close(); writer.close(); rmSync(directory, { recursive: true, force: true }); }
+});

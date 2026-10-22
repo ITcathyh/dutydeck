@@ -6,6 +6,15 @@ const prefix = 'relay.ask.';
 export function createRelayAskStore(config: ConfigRepository): RelayAskStore {
   if (!config.compareAndSet || !config.list) throw new Error('Persistent relay questions require atomic config storage and prefix listing.');
   return {
+    ...(config.getSync && config.listByJsonField ? {
+      getSync(id: string) {
+        const value = config.getSync!(prefix + id);
+        return value ? JSON.parse(value) as RelayAskRecord : undefined;
+      },
+      async listUnsettled() {
+        return (await config.listByJsonField!(prefix, { field: 'status', values: ['pending', 'answering'] })).map(row => JSON.parse(row.value) as RelayAskRecord);
+      }
+    } : {}),
     async get(id) {
       const value = await config.get(prefix + id);
       return value ? JSON.parse(value) as RelayAskRecord : undefined;

@@ -198,6 +198,33 @@ describe('terminal WS proxy', () => {
     ws.close();
   });
 
+  it.each([[120.5, 30], [120, 30.5], [0, 30], [-1, 30], [120, 0], ['Infinity', 30]])('拒绝无效尺寸 %s×%s 后仍可继续使用终端', async (cols, rows) => {
+    const fake = createFakeStream();
+    const { port } = await startServer(providerFrom({ s1: fake.handle }));
+    const ws = await connect(port, '/api/terminal/s1');
+    const response = nextMessage(ws);
+    ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+    expect(await response).toMatchObject({ type: 'error' });
+    expect(fake.resizeCalls).toEqual([]);
+    ws.send(JSON.stringify({ type: 'resize', cols: '2000', rows: '2000' }));
+    await vi.waitFor(() => expect(fake.resizeCalls).toEqual([[2000, 2000]]));
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    ws.close();
+  });
+
+  it('保留同一终端多个客户端交替 resize 的顺序', async () => {
+    const fake = createFakeStream();
+    const { port } = await startServer(providerFrom({ s1: fake.handle }));
+    const first = await connect(port, '/api/terminal/s1'), second = await connect(port, '/api/terminal/s1');
+    first.send(JSON.stringify({ type: 'resize', cols: 240, rows: 60 }));
+    await vi.waitFor(() => expect(fake.resizeCalls).toHaveLength(1));
+    second.send(JSON.stringify({ type: 'resize', cols: 80, rows: 24 }));
+    await vi.waitFor(() => expect(fake.resizeCalls).toHaveLength(2));
+    first.send(JSON.stringify({ type: 'resize', cols: 240, rows: 60 }));
+    await vi.waitFor(() => expect(fake.resizeCalls).toEqual([[240, 60], [80, 24], [240, 60]]));
+    first.close(); second.close();
+  });
+
   it('进程退出时发 exit 帧并关闭连接，且 dispose 只调一次', async () => {
     const fake = createFakeStream();
     const { port } = await startServer(providerFrom({ s1: fake.handle }));

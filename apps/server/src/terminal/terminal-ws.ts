@@ -199,8 +199,8 @@ function bindConnection(
     if (message?.type === 'resize') {
       const cols = Number(message.cols);
       const rows = Number(message.rows);
-      if (!Number.isFinite(cols) || !Number.isFinite(rows)) {
-        sendFrame({ type: 'error', message: 'resize requires numeric cols and rows' });
+      if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) {
+        sendFrame({ type: 'error', message: 'resize requires positive integer cols and rows' });
         return;
       }
       try {

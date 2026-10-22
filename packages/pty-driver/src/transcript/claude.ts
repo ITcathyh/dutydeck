@@ -29,7 +29,7 @@
  * are not model output either: the tailer holds the latest one back as the
  * turn's failure reason (see claudeApiError / takeTurnError).
  */
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
@@ -391,9 +391,11 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private observedInputId?: string;
   private readonly memoryCalls = new Map<string, string>();
   private readonly backgroundCallbacks = new Set<(event: NormalizedDriverEvent) => void>();
-  private readonly backgroundOffsets = new Map<string, number>();
+  private readonly backgroundOffsets = new Map<string, { dev: number; ino: number; offset: number }>();
   private backgroundSnapshot = '';
   private backgroundTimer?: NodeJS.Timeout;
+  private backgroundGeneration = 0;
+  private backgroundStopped = false;
   /** Latest API error of this turn not yet superseded by model output. */
   private turnError: NormalizedDriverEvent | undefined;
   /** Type of this turn's latest model activity, ranked as the runtime ranks it. */
@@ -570,6 +572,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   }
 
   start(): void {
+    this.backgroundStopped = false;
     if (!this.subagentsBaselined) {
       this.subagentsBaselined = true;
       // A restored tailer cannot tell which sub-agent records the recovered turn already wrote.
@@ -581,10 +584,12 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     this.backgroundTimer.unref();
   }
   async flush(): Promise<void> {
+    const generation = this.backgroundGeneration;
     await this.tailer.flush();
-    this.refreshBackgroundTasks();
+    if (generation === this.backgroundGeneration) this.refreshBackgroundTasks();
   }
   private refreshBackgroundTasks(): void {
+    if (this.backgroundStopped) return;
     // /clear changes the main transcript. Read only native stop notices for
     // task identities already owned here; never follow another session's text.
     const path = this.tailer.checkpoint().path;
@@ -592,10 +597,30 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
       try {
         for (const name of readdirSync(dirname(path)).filter(name => name.endsWith('.jsonl')).slice(-40)) {
           const sibling = join(dirname(path), name); if (sibling === path) continue;
-          const size = statSync(sibling).size; if (size > 4 * 1024 * 1024) continue;
-          const old = this.backgroundOffsets.get(sibling) ?? 0, offset = size < old ? 0 : old;
-          if (size === offset) continue;
-          const bytes = readFileSync(sibling).subarray(offset), end = bytes.lastIndexOf(10); if (end < 0) continue;
+          const observed = statSync(sibling), old = this.backgroundOffsets.get(sibling);
+          if (observed.size > 4 * 1024 * 1024) continue;
+          if (old && old.dev === observed.dev && old.ino === observed.ino && old.offset === observed.size) continue;
+          const fd = openSync(sibling, 'r');
+          let bytes: Buffer, offset: number, stat: ReturnType<typeof fstatSync>;
+          try {
+            stat = fstatSync(fd);
+            if (stat.size > 4 * 1024 * 1024) continue;
+            offset = old && old.dev === stat.dev && old.ino === stat.ino && old.offset <= stat.size ? old.offset : 0;
+            bytes = Buffer.allocUnsafe(stat.size - offset);
+            let read = 0;
+            while (read < bytes.length) {
+              const count = readSync(fd, bytes, read, bytes.length - read, offset + read);
+              if (!count) break;
+              read += count;
+            }
+            // A concurrent truncation invalidates this cursor, including any partial line.
+            if (fstatSync(fd).size < stat.size) { this.backgroundOffsets.delete(sibling); continue; }
+            bytes = bytes.subarray(0, read);
+          } finally { closeSync(fd); }
+          const end = bytes.lastIndexOf(10);
+          // Only decode complete lines: a split UTF-8 character is reread as bytes next time.
+          this.backgroundOffsets.set(sibling, { dev: stat.dev, ino: stat.ino, offset: offset + end + 1 });
+          if (end < 0) continue;
           for (const line of bytes.subarray(0, end).toString('utf8').split('\n')) {
             try {
               const entry = JSON.parse(line);
@@ -605,7 +630,6 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
               if (typeof content === 'string') this.backgroundTasks.observe({ type: 'queue-operation', operation: 'enqueue', content });
             } catch { /* Unknown records cannot change lifecycle state. */ }
           }
-          this.backgroundOffsets.set(sibling, offset + end + 1);
         }
       } catch { /* Clear does not authorize guessing another transcript's output. */ }
     }
@@ -621,7 +645,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     this.restored = true;
     this.terminalScope = false; this.turnTerminal = false; this.terminalUuids.clear(); this.restoringTurn = true;
   }
-  stop(): void { if (this.backgroundTimer) clearInterval(this.backgroundTimer); this.backgroundTimer = undefined; this.tailer.stop(); }
+  stop(): void { this.backgroundStopped = true; this.backgroundGeneration++; this.backgroundOffsets.clear(); if (this.backgroundTimer) clearInterval(this.backgroundTimer); this.backgroundTimer = undefined; this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); this.backgroundCallbacks.add(cb); }
   onProgress(cb: () => void): void { this.tailer.onProgress(cb); }
   waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
