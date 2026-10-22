@@ -9,9 +9,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createRepositories } from '@dutydeck/storage';
 import { createCliUi, symbolFor } from '../cli-ui.js';
 import type { DetectedAgent } from './detect.js';
-import type { ExistingBot, SaveBotInput, SaveBotResult } from './bot-store.js';
+import { saveBot as saveRealBot, type ExistingBot, type SaveBotInput, type SaveBotResult } from './bot-store.js';
+import { readLarkConfig } from '../lark/config.js';
 import type { WriteEnvResult } from './env-file.js';
 import type { LarkBindOptions, LarkBindResult } from './lark-bind.js';
 import { PromptUnavailableError, type AskOptions, type Prompter } from './prompts.js';
@@ -411,6 +413,45 @@ describe('runSetup —— 默认 Agent 与 App Secret', () => {
   const CODEX: DetectedAgent = { id: 'codex', name: 'Codex', command: 'codex', version: '0.9.0', protocol: 'acp', builtin: true };
   const SECRET = 'real-app-secret-must-never-leak';
   const ready = () => larkResult({ outcome: 'ready', appId: 'cli_ok' });
+
+  it.each([AGENT, { ...AGENT, protocol: 'pty-cli' as const, adapterId: 'claude-code' }])('真实保存支持审批的 $protocol Agent，未指定 --agent 时仍选首个探测结果', async agent => {
+    const dir = await makeTempDir();
+    const { deps } = harness({ cwd: dir, agents: [agent, CODEX], bind: async () => ready(), readSecretFd: async () => SECRET });
+    const result = await runSetup({ cwd: dir, larkAppId: 'cli_ok', larkAppSecretFd: '0', yes: true }, { ...deps, saveBot: saveRealBot });
+    expect(result.ok).toBe(true);
+    expect(result.defaultAgentId).toBe(agent.id);
+    const repositories = createRepositories(deps.database!);
+    try {
+      expect(await readLarkConfig(repositories.config, 'cli_ok')).toMatchObject({ defaultAgentId: agent.id, permissionMode: 'ask' });
+    } finally { repositories.close(); }
+  });
+
+  it.each([false, true])('真实保存拒绝不支持审批的新建机器人，给出可操作失败且不泄密（json=%s）', async json => {
+    const dir = await makeTempDir();
+    const { deps, out, err, writeEnv } = harness({ cwd: dir, agents: [{ ...CODEX, protocol: 'pty-cli', adapterId: 'codex' }], bind: async () => ready(), readSecretFd: async () => SECRET });
+    const result = await runSetup({ cwd: dir, larkAppId: 'cli_ok', agent: 'codex', larkAppSecretFd: '0', yes: true, json }, { ...deps, saveBot: saveRealBot });
+    expect(result).toMatchObject({ ok: false, changed: false, error: { code: 'LARK_APPROVAL_UNSUPPORTED', message: expect.stringContaining('请选择支持审批的 Agent') }, next: 'dutydeck setup --lark-app-id cli_ok --agent <id>' });
+    expect(writeEnv).not.toHaveBeenCalled();
+    expect(JSON.stringify(result) + out.read() + err.read()).not.toContain(SECRET);
+    if (json) expect(JSON.parse(out.read().trim())).toEqual(result);
+    else {
+      expect(out.read() + err.read()).toContain(result.next);
+      expect(out.read() + err.read()).not.toContain('未写入任何配置');
+    }
+    const repositories = createRepositories(deps.database!);
+    try {
+      expect(await readLarkConfig(repositories.config, 'cli_ok')).toBeUndefined();
+    } finally { repositories.close(); }
+  });
+
+  it('没有探测到 Agent 时真实保存凭据并提示补选，不自动选择 Agent', async () => {
+    const dir = await makeTempDir();
+    const { deps } = harness({ cwd: dir, agents: [], bind: async () => ready(), readSecretFd: async () => SECRET });
+    const result = await runSetup({ cwd: dir, larkAppId: 'cli_ok', larkAppSecretFd: '0', yes: true }, { ...deps, saveBot: saveRealBot });
+    expect(result.ok).toBe(true);
+    expect(result.defaultAgentId).toBeUndefined();
+    expect(result.warnings).toContain('机器人没有默认 Agent：本机没有检测到 Agent CLI。装好后重跑 dutydeck setup --agent <id>。');
+  });
 
   it('拒绝未检测到的 --agent，且在任何写入或飞书绑定之前', async () => {
     const dir = await makeTempDir();

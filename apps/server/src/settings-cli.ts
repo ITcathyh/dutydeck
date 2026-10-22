@@ -84,8 +84,8 @@ export const botFields = {
   highRiskAllowedUsers: 'users', highRiskAllowedUserNames: 'list', highRiskAllowedEmails: 'list',
   highRiskPattern: 'string', riskControlMode: riskControlModes
 } satisfies Record<BotField, FieldKind>;
-// 这些键和 App Secret 走 Lark 校验那一步（解析姓名、核对 open_id 属于本应用）；其余键要走 Agent 设置那一步的校验（如完全信任确认），不能同一次提交。
-const larkStageFields = ['allowedUserNames', 'allowedBotNames', 'allowedUsers', 'allowedEmails', 'allowedBots'];
+// 这些键和 App Secret 走 Lark 校验那一步（按品牌选域、解析姓名、核对 open_id 属于本应用）；其余键要走 Agent 设置那一步的校验（如完全信任确认），不能同一次提交。
+const larkStageFields = ['brand', 'allowedUserNames', 'allowedBotNames', 'allowedUsers', 'allowedEmails', 'allowedBots'];
 
 // 群设置分三处保存：群绑定、群协作、接话分工；一条 set 命令按键分发。
 const bindingFields = {
@@ -384,7 +384,7 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
       if (!input.pairs?.length && !input.appSecret) throw new SettingsCliError('SETTINGS_ARGUMENT_REQUIRED', 'Pass at least one key=value or --app-secret-fd');
       const fields = parsePairs(input.pairs ?? [], botFields, 'dutydeck settings bot set --help');
       const larkStage = input.appSecret !== undefined || larkStageFields.some(key => key in fields);
-      if (larkStage) larkStageOnly(fields, 'an App Secret or member list change');
+      if (larkStage) larkStageOnly(fields, 'a brand, App Secret or member list change');
       const bot = await findBot(request, appId);
       return saveBot(request, { stage: larkStage ? 'lark' : 'agent', originalAppId: appId, expectedRevision: bot.revision ?? 1, ...fields, ...(input.appSecret ? { appSecret: input.appSecret } : {}) }, appId);
     }

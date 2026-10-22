@@ -138,6 +138,7 @@ dutydeck setup
 
 - 默认 Agent 和 App Secret 存在机器人配置里（与 Web 面板是同一份），不写进 `.env`。交互时 App Secret 用隐藏输入。
 - 新建机器人时会问是否立即开启监听，默认是。
+- 新建机器人的权限为 `ask`。所选 Agent 必须支持飞书审批（ACP 或 Claude Code / Seed / Relay 终端模式）；不支持时不会保存机器人配置，需换用支持审批的 Agent 后以 `--agent <id>` 重跑，向导不会自动开启完全信任。此前已完成的开放平台绑定不会回滚。
 
 脚本和 CI 里跳过交互：
 
@@ -218,6 +219,8 @@ pnpm dev
 5. **交付验收**：结果卡包含改动摘要、验证结果（通过 / 未通过 / 未验证 / 已过期）和超长 Markdown 附件；有改动的轮次带「查看改动」链接。结论后的「需要你：…」提示会单独显示为醒目块，标签加粗。任务完成、等待决策和验证结果分别标明；本轮完成不代表验证通过。
 
 ### 附件读取与结果投递
+
+结果卡和执行记录导出会按凭据规则脱敏文本；JSON 凭据值中的转义引号不会提前结束脱敏，也会保留后续非敏感字段和命令。
 
 卡片的 Markdown 图片和结构化图片共用最多 4 张的读取上限，并去重；Markdown 中仅识别实际图片语法里的合法飞书 `img_key`，代码示例和普通图片 URL 不会触发下载。
 
@@ -457,6 +460,7 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 - **共享 Agent 模型配置草稿**未保存时，切换设置分区、关闭或跳转前会要求确认，刷新或离开页面由浏览器提醒。取消离开与保存失败都保留输入；保存期间暂时禁止离开。草稿只留在当前页面内，API Key 不写入浏览器存储。
 - 任务按 **「待处理」**（等审批 / 待回答）、**「进行中」**、**「已完成」**、**「已归档」** 分层。
 - 卡片显示耗时、工具调用明细和最终产物。
+- 会话首次加载期间收到任务变化时，会在当前读取完成后补取完整任务状态，更新完成状态和结果未知任务的恢复操作。
 - 当前任务的标题和摘要以已加载的执行记录为准，不会被滞后的任务列表刷新覆盖；迟到的发送确认不会覆盖已加载的完成结果；再次选择当前任务会保留未发送的输入。创建任务或准备定时任务提交期间，目录与 Agent 等配置、关闭和取消入口暂时禁用，Agent 列表刷新也不会解除关闭限制。创建失败后可修改配置并重试；首条指令发送失败时，重试会复用已创建的会话。
 - **终端回放只有终端模式（`pty-cli`）Agent 才有**，最多保留 5000 行；ACP Agent 没有终端。
 - 终端分别显示初始化、连接中和已连接等待输出；空快照不会判为故障。握手超过 10 秒会自动重连，等待期间保留已收到的画面；只读终端不发送输入或调整远端尺寸。
@@ -583,6 +587,8 @@ Dutydeck 默认优先用终端适配器运行本机已安装的 CLI Agent，新�
 
 #### 终端任务状态与恢复
 
+终端模式（`pty-cli`）CLI 空闲时自行退出后，下一条任务会先确认旧进程已退出并退役，再按既有原生会话恢复规则重建终端；无法确认安全恢复时，该任务会以“未提交”失败。已提交但结果未知的任务仍需核对，不自动重发。
+
 Claude Code 日志已显示支持整轮结束标记（`turn_duration`）时，分块回答会等该标记再结束，保留同轮后续文本、Stop hook 收尾和晚到错误；没有该标记的旧格式保留兼容收尾。调用 Skill 工具产生的工具上下文不会被误判为新的用户输入，Skill 调用结束后的最终答案和任务完成事件正常交付。
 
 Codex 在同一原生会话切换日志文件时，会校验会话归属、读完旧文件的完整记录，再接续新文件；复制的历史不会重复投递，其他会话的文件不会被接入。
@@ -604,7 +610,7 @@ Codex 显示可识别的模型迁移菜单时，Dutydeck 只选 “Use existing 
 #### 终端模式 Agent 与飞书审批
 
 - Claude Code / Seed / Relay 的终端模式支持飞书审批，`ask` 和 `approve-reads` 都可用，靠 PermissionRequest hook 实现。
-- 其它终端模式 CLI 只能用 `full-trust`；用 `ask` / `approve-reads` 时，会话启动会报错并给出两条修法：`dutydeck settings bot set <appId> permissionMode=full-trust fullTrustConfirmed=true`，或换成 ACP / Claude 终端模式 Agent。
+- 其它终端模式 CLI 只能用 `full-trust`。已有 `ask` / `approve-reads` 机器人切换默认 Agent 时，保存会拒绝不支持审批的 Agent，保留原 Agent 与权限；不会自动提升权限。历史不兼容配置在会话启动时仍会报错，两条修法是：`dutydeck settings bot set <appId> permissionMode=full-trust fullTrustConfirmed=true`，或换成 ACP / Claude 终端模式 Agent。
 - 飞书会话里的 Claude 终端模式固定用 `default` 权限模式启动，本机 `~/.claude` 里设的 `auto` 等默认模式不生效。注意下面[已知限制](#known-limits)里的 allow 规则。
 
 ---
@@ -1061,7 +1067,7 @@ dutydeck deploy prune --releases /path/to/releases
 - **自动清理**：每次部署成功后保留最新 5 个发布目录和部署记录（含数据库备份）。`current`、它的上一版和仍被运行中进程引用的版本永远保留；自动清理和手动 `deploy prune` 都会额外保留各 unit 最近一次成功部署的版本。清理失败只告警，不影响部署结果。
 - **手动清理** `deploy prune`：选项 `--releases/--runtime/--unit`、`--keep N`（默认 5）、`--dry-run`、`--include-unmarked`、`--json`。手工部署留下的记录（没有 `created_by: dutydeck deploy` 标记）默认不动，只有加 `--include-unmarked` 才会清，并且仍被进程引用或 1 小时内改过的会跳过。最近 1 小时内改过的 `.partial` 目录同样跳过（可能是正在进行的部署）。
 - **单 Bot 独立进程**：`dutydeck start --foreground --database /path/to/bot.db --bot-app-id cli_xxx`。
-- **systemd 服务与数据库解析**：直接启动服务的 systemd user unit 根入口为 `node cli.js`。管理命令（`restart`、`status`、`deploy` 等）推导运行时时，按优先级依次从 ExecStart 的显式 `--database`、unit 环境变量 `DUTYDECK_DATABASE_URL`，再回落到默认的 `<cwd>/.dutydeck/dutydeck.db`（结合 `--cwd` 或 `DUTYDECK_DEFAULT_CWD` 解析）；现有的 `start --foreground` 模板与部署运行时元数据继续保持优先。
+- **systemd 服务与数据库解析**：对直接以 `node cli.js` 启动的 unit，管理命令（`restart`、`status`、`deploy` 等）按 ExecStart 显式参数 > unit 环境变量 > `WorkingDirectory/.env` 解析目标数据库和监听地址；相对工作目录以 `WorkingDirectory` 为基准。缺少 `.env` 可继续，不可读或关键配置无效时拒绝操作；数据库未配置时回落到 `<cwd>/.dutydeck/dutydeck.db`。部署备份和 schema 回滚检查使用同一实际数据库。`start --foreground` 仍读取守护状态，`deploy --runtime` 显式元数据继续优先。
 
 ### 3. 开机自启 (`autostart`)
 
@@ -1074,6 +1080,8 @@ dutydeck autostart disable  # 关闭自启
 ### 4. 命令行管理配置 (`dutydeck settings`)
 
 Web 控制台里的机器人设置、群聊策略和用量上限，都可以用命令行改，方便脚本化和让 Agent 自己管理配置：
+
+绑定国际 Lark 应用时，用 `dutydeck settings bot add <app-id> brand=lark --app-secret-fd 0`。未通过 `LARK_OPEN_API_BASE_URL` 覆盖服务地址时，`brand=lark` 向国际 Lark 域校验凭据，省略品牌默认走飞书。`brand`、App Secret 和成员名单走同一校验步骤，与默认 Agent、权限或监听等设置分开提交。
 
 | 控制台模块 | CLI 命令 |
 |---|---|

@@ -18,6 +18,7 @@ export interface DetectedAgent {
   /** 探测到的版本串；取不到说明 CLI 存在但 `--version` 没给出可用输出。 */
   version?: string;
   protocol: 'acp' | 'pty-cli';
+  adapterId?: string;
   builtin: boolean;
 }
 
@@ -48,6 +49,7 @@ export function detectAgents(options: DetectAgentsOptions = {}): DetectedAgent[]
     command: agent.command,
     version: agent.version,
     protocol: agent.protocol === 'pty-cli' ? 'pty-cli' : 'acp',
+    ...(agent.adapterId ? { adapterId: agent.adapterId } : {}),
     builtin: agent.builtin === true
   }));
 }

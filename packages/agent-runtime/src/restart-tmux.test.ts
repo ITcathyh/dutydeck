@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pinnedSessionUuid, type CliAdapter } from '@dutydeck/cli-adapters';
 import { isTmuxAvailable, TmuxBackend } from '@dutydeck/session-backends';
-import { createRepositories } from '@dutydeck/storage';
+import { childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
 import type { AgentConfig, DriverFactory } from '@dutydeck/shared';
 import { PtyCliDriver } from '../../pty-driver/src/driver.js';
 import { buildSessionMarker } from '../../pty-driver/src/session-id/index.js';
@@ -28,6 +28,7 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
     cleanup.push(() => rmSync(cwd, { recursive: true, force: true }));
     const database = join(cwd, 'dutydeck.db'), pidPath = join(cwd, 'pid'), finishPath = join(cwd, 'finish');
     const prompts: string[] = [], drivers: PtyCliDriver[] = [];
+    const exitCallbacks: Array<(code: number | null) => void> = [];
     let transcript = '', name = '';
     const factory: DriverFactory = (agent, _protocol, onEvent, onExit, sessionId) => {
       const project = join(cwd, 'projects', realpathSync(cwd).replace(/[^A-Za-z0-9-]/g, '-'));
@@ -44,8 +45,9 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
         },
         completionPattern: /FIXTURE-DONE/,
       };
-      const driver = new PtyCliDriver({ agent, adapter, backend: new TmuxBackend(name, { ownerId: `dutydeck:${sessionId}` }), onEvent, onExit, sessionId });
-      drivers.push(driver); return driver;
+      const driver = new PtyCliDriver({ agent, adapter, backend: new TmuxBackend(name, { ownerId: `dutydeck:${sessionId}` }), onEvent, onExit, sessionId,
+        processProbe: { identify: childProcessIdentity, observe: observeProcess } });
+      drivers.push(driver); exitCallbacks.push(onExit); return driver;
     };
     const agent: AgentConfig = { id: 'claude-code', name: 'Fixture', command: '/bin/sh', args: ['-c', 'exec /bin/sh'], protocol: 'pty-cli', cwd,
       env: { CLAUDE_CONFIG_DIR: cwd }, permissionMode, timeout: 60, capabilities: { pause: false, resume: true }, builtin: false };
@@ -63,7 +65,7 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
     const session = await first.runtime.start({ agentId: agent.id });
     const task = await first.runtime.dispatch(session.id, 'long original input');
     await vi.waitFor(() => expect(existsSync(pidPath)).toBe(true));
-    return { ...first, open, session, task, prompts, drivers, pid: () => Number(readFileSync(pidPath, 'utf8').trim()),
+    return { ...first, open, session, task, prompts, drivers, exitCallbacks, pid: () => Number(readFileSync(pidPath, 'utf8').trim()),
       transcript: () => transcript,
       backend: () => new TmuxBackend(name, { ownerId: `dutydeck:${session.id}` }),
       completed: (turn = 1) => existsSync(`${finishPath}-${turn}-completed`),
@@ -126,6 +128,60 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
     await vi.waitFor(async () => expect((await restored.runtime.getTasks(h.session.id)).every(task => task.status === 'completed')).toBe(true), { timeout: 10_000 });
     expect((await restored.runtime.getEvents(h.session.id)).filter(event => event.type === 'completed')).toHaveLength(3);
     expect(h.prompts).toEqual(['long original input', 'queued second', 'queued third']);
+  });
+
+  it('rebuilds after a recovered turn settles and its idle CLI naturally exits', async () => {
+    const h = await fixture();
+    const original = h.repos.execution.getTaskExecution(h.task.id)!.currentAttempt!;
+    h.runtime.setQueueHeld(true);
+    await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1));
+    await h.close();
+    const restored = await h.open();
+    h.complete();
+    await vi.waitFor(() => expect(restored.repos.execution.getTaskExecution(h.task.id)?.task.status).toBe('completed'));
+    await vi.waitFor(() => expect(restored.runtime.getActiveTaskContext(h.session.id)).toBeUndefined());
+    let exits = 0;
+    restored.runtime.onDriverExit(h.session.id, () => { exits++; });
+    const stream = h.drivers[1]!.createTerminalStream();
+    await stream.write('exit\n');
+    await vi.waitFor(() => expect(exits).toBe(1), { timeout: 6_000 });
+    stream.dispose();
+    expect(await TmuxBackend.probeSession(h.backend().sessionName)).toBe('missing');
+    const next = await restored.runtime.dispatch(h.session.id, 'next input');
+    await vi.waitFor(() => {
+      expect(restored.repos.execution.getTaskExecution(next.id)?.task.status).not.toBe('reconcile_required');
+      expect(h.prompts).toEqual(['long original input', 'next input']);
+    }, { timeout: 10_000 });
+    h.complete(2);
+    await vi.waitFor(() => expect(restored.repos.execution.getTaskExecution(next.id)?.task.status).toBe('completed'));
+    expect(h.drivers).toHaveLength(3);
+    expect(restored.repos.execution.getTaskExecution(h.task.id)?.currentAttempt).toMatchObject({ attemptId: original.attemptId, submission: original.submission, state: 'settled' });
+    h.exitCallbacks[1]!(17);
+    expect(exits).toBe(1);
+    const later = await restored.runtime.dispatch(h.session.id, 'later input');
+    await vi.waitFor(() => expect(h.prompts).toEqual(['long original input', 'next input', 'later input']), { timeout: 10_000 });
+    h.complete(3);
+    await vi.waitFor(() => expect(restored.repos.execution.getTaskExecution(later.id)?.task.status).toBe('completed'));
+    expect(h.drivers).toHaveLength(3);
+  });
+
+  it('keeps an exited recovered turn unresolved without replaying its input', async () => {
+    const h = await fixture();
+    const original = h.repos.execution.getTaskExecution(h.task.id)!.currentAttempt!;
+    h.runtime.setQueueHeld(true);
+    await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1));
+    await h.close();
+    const restored = await h.open();
+    expect(restored.runtime.getRunningTaskCount()).toBe(1);
+    process.kill(h.pid(), 'SIGKILL');
+    await vi.waitFor(() => expect(restored.repos.execution.getTaskExecution(h.task.id)?.currentAttempt?.state).toBe('reconcile_required'), { timeout: 6_000 });
+    const queued = await restored.runtime.dispatch(h.session.id, 'later input');
+    expect(restored.repos.execution.getTaskExecution(queued.id)?.attempts).toHaveLength(0);
+    expect(restored.repos.execution.getTaskExecution(h.task.id)?.currentAttempt).toMatchObject({
+      attemptId: original.attemptId, submission: original.submission, state: 'reconcile_required'
+    });
+    expect(h.prompts).toEqual(['long original input']);
+    expect(h.drivers).toHaveLength(2);
   });
 
   it('waits for submission completion before trusting a prepared checkpoint', async () => {

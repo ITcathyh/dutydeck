@@ -19,6 +19,33 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
     let frame: number | undefined;
     let pending: import('./api').DockEvent[] = [];
     let received = newestSequence(qc.getQueryData<EventWindow>(['events', sessionId]));
+    let refreshingTasks = false;
+    let tasksRefreshPending = false;
+    let tasksInvalidated = false;
+    const refreshTasks = (invalidate = false) => {
+      tasksRefreshPending = true;
+      tasksInvalidated ||= invalidate;
+      if (refreshingTasks) return;
+      refreshingTasks = true;
+      void (async () => {
+        try {
+          const filters = { queryKey: ['tasks', sessionId], exact: true };
+          // Query deduplicates a cold GET even when invalidated. Wait for that
+          // snapshot before consuming the demand for a newer authoritative read.
+          if (qc.getQueryState(filters.queryKey)?.fetchStatus === 'fetching') {
+            await qc.refetchQueries(filters, { cancelRefetch: false });
+          }
+          while (tasksRefreshPending && !controller.signal.aborted) {
+            tasksRefreshPending = false;
+            const invalidate = tasksInvalidated;
+            tasksInvalidated = false;
+            await (invalidate ? qc.invalidateQueries(filters, { cancelRefetch: false }) : qc.refetchQueries(filters, { cancelRefetch: false }));
+          }
+        } finally {
+          refreshingTasks = false;
+        }
+      })();
+    };
     const applyEvents = (batch: import('./api').DockEvent[]) => {
       if (!batch.length) return;
       const cached = qc.getQueryData<EventWindow>(['events', sessionId]);
@@ -37,7 +64,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
         recordSessionStatusUpdates(qc, updated, statuses);
         return updated;
       }));
-      if (newTask) void qc.invalidateQueries({ queryKey: ['tasks', sessionId], exact: true });
+      if (newTask) refreshTasks(true);
     };
     const flush = () => {
       frame = undefined;
@@ -77,7 +104,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
     };
     const calibrate = () => {
       reconcileEvents(newestSequence(qc.getQueryData<EventWindow>(['events', sessionId])));
-      void qc.refetchQueries({ queryKey: ['tasks', sessionId], exact: true });
+      refreshTasks();
       void qc.refetchQueries({ queryKey: ['sessions'], exact: true });
     };
     const stream = new SessionStream({

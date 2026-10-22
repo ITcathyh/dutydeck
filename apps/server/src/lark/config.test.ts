@@ -314,7 +314,7 @@ describe('publicLarkConfig new-field exposure', () => {
 
 describe('Lark permission posture persistence', () => {
   it('defaults a new bot to ask and never recomputes the saved mode of an existing bot', async () => {
-    const agents = { get: vi.fn(async (id: string) => ({ claude: { id, protocol: 'pty-cli', adapterId: 'claude-code' }, codex: { id, protocol: 'pty-cli' } } as Record<string, object>)[id]) } as any;
+    const agents = { get: vi.fn(async (id: string) => ({ claude: { id, protocol: 'pty-cli', adapterId: 'claude-code' }, acp: { id, protocol: 'acp' } } as Record<string, object>)[id]) } as any;
     const repository = createRepository();
     await saveLarkConfig(repository, agents, { appId: 'cli_new', appSecret: 'secret', stage: 'lark' });
     expect(larkPermissionMode((await readLarkConfigs(repository))[0]!)).toBe('ask');
@@ -322,8 +322,24 @@ describe('Lark permission posture persistence', () => {
     await saveLarkConfig(trusted, agents, { originalAppId: 'cli_old', stage: 'agent', defaultAgentId: 'claude' });
     expect(larkPermissionMode((await readLarkConfigs(trusted))[0]!)).toBe('full-trust');
     const asking = seedBots([{ appId: 'cli_ask', appSecret: 'secret', defaultAgentId: 'claude', permissionMode: 'ask' }]);
-    await saveLarkConfig(asking, agents, { originalAppId: 'cli_ask', stage: 'agent', defaultAgentId: 'codex' });
-    expect(larkPermissionMode((await readLarkConfigs(asking))[0]!)).toBe('ask');
+    await saveLarkConfig(asking, agents, { originalAppId: 'cli_ask', stage: 'agent', defaultAgentId: 'acp' });
+    expect((await readLarkConfigs(asking))[0]).toMatchObject({ defaultAgentId: 'acp', permissionMode: 'ask' });
+  });
+
+  it.each(['ask', 'approve-reads'] as const)('rejects an incompatible default Agent without changing saved %s permissions', async permissionMode => {
+    const agents = { get: vi.fn(async (id: string) => ({ id, protocol: 'pty-cli', adapterId: id === 'claude' ? 'claude-code' : 'codex' })) } as any;
+    const repository = seedBots([{ appId: 'cli_ask', appSecret: 'secret', defaultAgentId: 'claude', permissionMode, revision: 3 }]);
+    await readLarkConfigs(repository);
+    const before = await repository.get(larkBotsConfigKey);
+    await expect(saveLarkConfig(repository, agents, { originalAppId: 'cli_ask', stage: 'agent', defaultAgentId: 'codex', expectedRevision: 3 }))
+      .rejects.toMatchObject({ code: 'LARK_APPROVAL_UNSUPPORTED', statusCode: 422 });
+    expect(await repository.get(larkBotsConfigKey)).toBe(before);
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ defaultAgentId: 'claude', permissionMode, revision: 3 });
+    await expect(saveLarkConfig(repository, agents, { originalAppId: 'cli_ask', stage: 'agent', defaultAgentId: 'codex', permissionMode: 'full-trust', expectedRevision: 3 }))
+      .rejects.toMatchObject({ code: 'LARK_FULL_TRUST_CONFIRMATION_REQUIRED' });
+    expect(await repository.get(larkBotsConfigKey)).toBe(before);
+    await saveLarkConfig(repository, agents, { originalAppId: 'cli_ask', stage: 'agent', defaultAgentId: 'codex', permissionMode: 'full-trust', fullTrustConfirmed: true, expectedRevision: 3 });
+    expect(publicLarkConfig((await readLarkConfigs(repository))[0]!)).toMatchObject({ defaultAgentId: 'codex', permissionMode: 'full-trust', fullTrustConfirmed: true, revision: 4 });
   });
 
   it('keeps a legacy configuration without permissionMode as full-trust when full trust was confirmed', async () => {

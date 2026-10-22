@@ -17,9 +17,12 @@ export function redactCredentialText(value: string, placeholder = '[REDACTED]', 
     .replace(/-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?(?:-----END(?: [A-Z0-9]+)* PRIVATE KEY-----|$)/g, () => privateKeyPlaceholder)
     // Userinfo ends at the last @ in the authority, including passwords with @.
     .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, (_match, scheme: string) => `${scheme}${placeholder}@`)
-    // Consume escaped quotes before assignment matching can stop at an inner space.
-    .replace(/(\b(?:authorization|[A-Za-z0-9_]*(?:api[_-]?key|secret[_-]?key|access[_-]?key|access[_-]?token|token|secret|password|passwd|pwd))(?:\\?["'])?\s*[:=]\s*)(\\?")(?:(?!\2)[\s\S])*\2/gi,
-      (_match, prefix: string, quote: string) => prefix + quote + placeholder + quote)
+    // Consume JSON string escapes and JSON-escaped command quotes before matching bare assignments.
+    .replace(/(\b(?:authorization|[A-Za-z0-9_]*(?:api[_-]?key|secret[_-]?key|access[_-]?key|access[_-]?token|token|secret|password|passwd|pwd))(?:\\?["'])?\s*[:=]\s*)("(?:\\[\s\S]|[^"\\])*"|\\"(?:(?!\\")[\s\S])*\\")/gi,
+      (_match, prefix: string, quoted: string) => {
+        const quote = quoted.startsWith('\\') ? '\\"' : '"';
+        return prefix + quote + placeholder + quote;
+      })
     .replace(/(\bauthorization\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n"',;&}]+)/gi, (_match, prefix: string) => prefix + placeholder)
     .replace(/(\b(?:cookie|set-cookie)\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n"'}]+)/gi, (_match, prefix: string) => prefix + placeholder)
     .replace(/\b(Bearer|Basic)\s+[^"'\s,;}&]+/gi, (_match, scheme: string) => `${scheme} ${placeholder}`)

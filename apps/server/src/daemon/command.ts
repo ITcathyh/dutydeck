@@ -28,11 +28,13 @@ import {
   type DaemonProcessStatus,
   type DaemonState
 } from './daemon.js';
-import type { CliOptions } from '../cli-program.js';
+import { environmentFromCli, type CliOptions } from '../cli-program.js';
+import { appConfigSchema, resolveDatabaseUrl } from '@dutydeck/config';
 import { AUTOSTART_LINUX_UNIT, defaultRunCommand, type AutostartCommandOutput, type AutostartRunCommand } from '../autostart/autostart.js';
 import { sleep } from './time.js';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parseEnv } from 'node:util';
 import { localLoopbackUrl } from '../local-api-url.js';
 
 export interface DaemonCommandResult {
@@ -952,14 +954,17 @@ export interface UnitRuntime {
 }
 
 function flagValue(args: string[], name: string): string | undefined {
-  const at = args.indexOf(name);
-  if (at >= 0) return args[at + 1];
-  return args.find(arg => arg.startsWith(`${name}=`))?.slice(name.length + 1);
+  for (let at = args.length - 1; at >= 0; at--) {
+    const flag = args[at]!;
+    if (flag === name) return args[at + 1];
+    if (flag.startsWith(`${name}=`)) return flag.slice(name.length + 1);
+  }
+  return undefined;
 }
 
 /**
- * 按 unit 找到它托管的运行时。`start --foreground` 的 unit 从守护状态读地址和数据库；直接 serve 的
- * unit（如 Tag 运行时）没有守护状态，按 ExecStart 参数和环境变量推出来。
+ * 按 unit 找到它托管的运行时。`start --foreground` 的 unit 从守护状态读地址和数据库；直接运行根 CLI 的
+ * unit（如 Tag 运行时）没有守护状态，按 CLI 的 .env、unit 环境和 ExecStart 参数优先级推出来。
  */
 export async function unitRuntime(unit: string, deps: DaemonCommandDeps): Promise<UnitRuntime | { error: string }> {
   if ((deps.platform ?? process.platform) !== 'linux') return { error: `--unit 只支持 Linux 上的 systemd user unit。` };
@@ -974,15 +979,36 @@ export async function unitRuntime(unit: string, deps: DaemonCommandDeps): Promis
     const state = readDaemonStatus(defaultDaemonDir(root));
     return { ...base, endpoint: { address: state?.address, database: state?.database, authEnabled: state?.authEnabled } };
   }
-  const env = Object.fromEntries(info.environment.map(item => [item.slice(0, item.indexOf('=')), item.slice(item.indexOf('=') + 1)]));
-  const { address, authEnabled } = addressFromCli({
+  const envFile = resolve(root, '.env');
+  let fileEnv: NodeJS.ProcessEnv = {};
+  try { fileEnv = parseEnv(readFileSync(envFile, 'utf8')); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') return { error: `无法读取或解析 unit ${unit} 的 ${envFile}（${code ?? '解析失败'}），无法核实运行时配置，已拒绝操作。` };
+  }
+  const unitEnv = Object.fromEntries(info.environment.map(item => [item.slice(0, item.indexOf('=')), item.slice(item.indexOf('=') + 1)]));
+  const authFlag = [...info.args].reverse().find(arg => arg === '--auth' || arg === '--no-auth');
+  const env = environmentFromCli({
     host: flagValue(info.args, '--host'),
     port: flagValue(info.args, '--port'),
+    cwd: flagValue(info.args, '--cwd'),
+    database: flagValue(info.args, '--database'),
     ...(info.args.includes('--local-only') ? { localOnly: true } : {}),
-    ...(info.args.includes('--no-auth') ? { auth: false } : {})
-  }, env);
-  const cwd = flagValue(info.args, '--cwd') ?? env.DUTYDECK_DEFAULT_CWD ?? '.';
-  const database = resolve(root, cwd, flagValue(info.args, '--database') ?? env.DUTYDECK_DATABASE_URL ?? '.dutydeck/dutydeck.db');
+    ...(authFlag ? { auth: authFlag === '--auth' } : {}),
+    ...(info.args.includes('--unsafe-no-auth') ? { unsafeNoAuth: true } : {})
+  }, { ...fileEnv, ...unitEnv });
+  const config = appConfigSchema.pick({ host: true, port: true, authEnabled: true }).safeParse({
+    host: env.DUTYDECK_LOCAL_ONLY === 'true' ? '127.0.0.1' : env.DUTYDECK_HOST,
+    port: env.DUTYDECK_PORT ? Number(env.DUTYDECK_PORT) : undefined,
+    authEnabled: env.DUTYDECK_AUTH === undefined ? undefined : env.DUTYDECK_AUTH === 'true' ? true : env.DUTYDECK_AUTH === 'false' ? false : env.DUTYDECK_AUTH
+  });
+  if (!config.success) return { error: `unit ${unit} 的运行时配置无效（${config.error.issues.map(issue => issue.path.join('.')).join('、')}；配置文件 ${envFile}），已拒绝操作。` };
+  if ([env.DUTYDECK_DEFAULT_CWD, env.DUTYDECK_DATABASE_URL].some(value => value?.includes('\0'))) {
+    return { error: `unit ${unit} 的 DUTYDECK_DEFAULT_CWD 或 DUTYDECK_DATABASE_URL 含无效路径字符（配置文件 ${envFile}），已拒绝操作。` };
+  }
+  const database = resolveDatabaseUrl({ ...env, DUTYDECK_DEFAULT_CWD: resolve(root, env.DUTYDECK_DEFAULT_CWD ?? '.') });
+  const address = localLoopbackUrl(config.data.host, config.data.port);
+  const authEnabled = config.data.authEnabled;
   return { ...base, endpoint: { address, authEnabled, database } };
 }
 

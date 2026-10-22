@@ -17,11 +17,12 @@ const line = (record: unknown) => JSON.stringify(record) + '\n';
 const terminal = JSON.parse(readFileSync(new URL('../../pty-driver/src/fixtures/transcript-dialects/codex.jsonl', import.meta.url), 'utf8'));
 const ready = 'Codex\r\n›\r\n100% left';
 
-it.each([false, true])('Codex continues the same verified native session after idle cleanup=%s', async cleanup => {
+it.each([false, true, 'exited'] as const)('Codex continues the same verified native session after idle retirement=%s', async cleanup => {
   const cwd = mkdtempSync(join(tmpdir(), 'dd-codex-idle-reconnect-'));
   releases.push(async () => rmSync(cwd, { recursive: true, force: true }));
   const panes = new Map<string, { id: string; path: string; owner?: string; killed: boolean; prompt: string; writes: number; metadata: Map<string, string>; paint: (data: string) => void; screen: string }>();
   const launches: string[][] = [];
+  const exits = new Map<string, (code: number | null, signal: string | null) => void>();
   vi.spyOn(TmuxBackend, 'probeSession').mockImplementation(async name => panes.has(name) && !panes.get(name)!.killed ? 'exists' : 'missing');
   vi.spyOn(TmuxBackend, 'sessionOwner').mockImplementation(async name => panes.get(name)?.owner);
   vi.spyOn(TmuxBackend.prototype, 'spawn').mockImplementation(async function (_command, args) {
@@ -33,7 +34,7 @@ it.each([false, true])('Codex continues the same verified native session after i
   });
   vi.spyOn(TmuxBackend.prototype, 'getPid').mockResolvedValue(undefined);
   vi.spyOn(TmuxBackend.prototype, 'onData').mockImplementation(function (cb) { panes.get(this.sessionName)!.paint = cb; });
-  vi.spyOn(TmuxBackend.prototype, 'onExit').mockImplementation(() => {});
+  vi.spyOn(TmuxBackend.prototype, 'onExit').mockImplementation(function (callback) { exits.set(this.sessionName, callback); });
   vi.spyOn(TmuxBackend.prototype, 'captureCurrentScreen').mockImplementation(async function () { return panes.get(this.sessionName)!.screen; });
   vi.spyOn(TmuxBackend.prototype, 'getDutydeckMetadata').mockImplementation(async function (key) { return panes.get(this.sessionName)!.metadata.get(key); });
   vi.spyOn(TmuxBackend.prototype, 'setDutydeckMetadata').mockImplementation(async function (key, value) { panes.get(this.sessionName)!.metadata.set(key, value); });
@@ -75,11 +76,20 @@ it.each([false, true])('Codex continues the same verified native session after i
   expect((await runtime.send(session.id, 'first task')).status).toBe('completed');
   const nativeId = resolveCliSessionId('codex', { sessionId: session.id, cwd, env: agent.env, requireMarker: true });
   expect(nativeId).toBeDefined();
-  if (cleanup) {
+  if (cleanup === true) {
     await vi.waitFor(() => expect(runtime.getActiveTaskContext(session.id)).toBeUndefined());
     await runtime.cleanupIdleDrivers(Date.now() + 6 * 60 * 60_000 + 1);
     expect(panes.get(`idle-${session.id}`)?.killed).toBe(true);
     expect((await runtime.getSession(session.id)).state).toBe('interrupted');
+  }
+  if (cleanup === 'exited') {
+    await vi.waitFor(() => expect(runtime.getActiveTaskContext(session.id)).toBeUndefined());
+    let exited = false;
+    const unsubscribe = runtime.onDriverExit(session.id, () => { exited = true; });
+    panes.get(`idle-${session.id}`)!.killed = true;
+    exits.get(`idle-${session.id}`)!(null, null);
+    await vi.waitFor(() => expect(exited).toBe(true));
+    unsubscribe();
   }
   const eventOffset = events.length;
   const sending = runtime.send(session.id, 'second task');
@@ -89,7 +99,7 @@ it.each([false, true])('Codex continues the same verified native session after i
   const second = await sending;
   expect(second.status).toBe('completed');
   expect(drivers).toHaveLength(cleanup ? 2 : 1);
-  expect(launches.at(-1)!.includes('resume')).toBe(cleanup);
+  expect(launches.at(-1)!.includes('resume')).toBe(Boolean(cleanup));
   expect(panes.get(`idle-${session.id}`)?.id).toBe(nativeId);
   expect(panes.get(`idle-${session.id}`)?.prompt).not.toContain(buildSessionMarker(session.id));
   expect(events.slice(eventOffset).find(event => event.type === 'text')?.data.text).toBe(cleanup ? 'answer-1' : 'answer-2');

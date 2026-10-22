@@ -981,6 +981,84 @@ describe('dutydeck deploy 与 systemd unit', () => {
     return { calls, runCommand };
   }
 
+  it.each(['unreadable', 'invalid'])('refuses deployment before staging when target .env is %s', async mode => {
+    const releases = join(tmp, 'releases');
+    if (mode === 'unreadable') mkdirSync(join(tmp, '.env'));
+    else writeFileSync(join(tmp, '.env'), 'DUTYDECK_PORT=credential-invalid-port\n');
+    const sys = systemctl(join(releases, 'current/dist/cli.js'), join(tmp, 'unit.service'), '', '');
+    const result = await runDeploy({ unit: 'dutydeck-fixture.service', source: join(tmp, 'unused') }, {
+      ...sys, platform: 'linux', env: {}, info: vi.fn(), warn: vi.fn(), fetch: vi.fn()
+    });
+    expect(result).toMatchObject({ ok: false, status: 'refused', error: expect.stringContaining(join(tmp, '.env')) });
+    expect(result.error).not.toContain('credential');
+    expect(sys.calls.some(call => call.includes(' restart '))).toBe(false);
+    expect(existsSync(releases)).toBe(false);
+  });
+
+  it.each([false, true])('backs up the .env-only database and protects it from rollback after migration=%s', async migrate => {
+    const source = fakeCheckout(join(tmp, 'checkout'));
+    const releases = join(tmp, 'releases');
+    const database = join(tmp, 'workspace', 'actual.db');
+    const wrongDatabase = join(tmp, '.dutydeck', 'dutydeck.db');
+    for (const [path, marker] of [[database, 'actual'], [wrongDatabase, 'wrong-default']] as const) {
+      mkdirSync(dirname(path), { recursive: true });
+      const db = new Database(path);
+      db.exec('CREATE TABLE configs (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+      db.prepare('INSERT INTO configs VALUES (?, ?)').run('marker', marker);
+      db.close();
+    }
+    writeFileSync(join(tmp, '.env'), 'DUTYDECK_DEFAULT_CWD=workspace\nDUTYDECK_DATABASE_URL=actual.db\nDUTYDECK_PORT=4311\nDUTYDECK_LOCAL_ONLY=true\n');
+    const previous = join(releases, '20261021T000000Z-aaaaaaa');
+    write(join(previous, 'dist/cli.js'), "console.log('old-version');\n");
+    link('20261021T000000Z-aaaaaaa', join(releases, 'current'));
+    const sys = systemctl(join(releases, 'current/dist/cli.js'), join(tmp, 'unit.service'), '', '--port 4311 --local-only', process.pid);
+    let stopped = false;
+    let restarts = 0;
+    const requests: string[] = [];
+    const result = await runDeploy({ unit: 'dutydeck-fixture.service', source, node: process.execPath }, {
+      platform: 'linux', checkSqlite: passingSqlite, env: {}, processRelease: () => previous, processPaths: () => [], info: vi.fn(), warn: vi.fn(), healthTimeoutMs: 0,
+      runCommand: async (command, args) => {
+        if (args[1] === 'stop') stopped = true;
+        if (args[1] === 'restart') {
+          restarts++;
+          if (migrate && restarts === 1) {
+            const db = new Database(database);
+            try { db.exec("ALTER TABLE configs ADD COLUMN migrated TEXT; INSERT INTO schema_migrations VALUES (999999, 'test')"); }
+            finally { db.close(); }
+          }
+        }
+        const shown = await sys.runCommand(command, args);
+        return stopped && args[1] === 'show' ? { ...shown, stdout: shown.stdout.replace(/MainPID=\d+/, 'MainPID=0') } : shown;
+      },
+      fetch: async input => {
+        const url = new URL(String(input));
+        expect(url.origin).toBe('http://127.0.0.1:4311');
+        requests.push(url.pathname);
+        return new Response(JSON.stringify({ ok: !migrate, runningTasks: 0, draining: true }), { status: url.pathname === '/health' && migrate ? 503 : 200 });
+      }
+    });
+    expect(result, result.error).toMatchObject({ ok: !migrate, status: migrate ? 'rollback_failed' : 'deployed' });
+    const manifest = JSON.parse(readFileSync(result.manifest!, 'utf8'));
+    expect(basename(manifest.database_backup)).toBe('actual.db');
+    const backup = new Database(manifest.database_backup, { readonly: true });
+    try {
+      expect(backup.prepare('SELECT value FROM configs WHERE key=?').get('marker')).toEqual({ value: 'actual' });
+      expect(backup.prepare('SELECT COUNT(*) FROM schema_migrations').pluck().get()).toBe(0);
+    } finally { backup.close(); }
+    expect(restarts).toBe(1);
+    expect(realpathSync(join(releases, 'current'))).toBe(result.release);
+    expect(requests).toContain('/api/system/drain');
+    expect(requests).toContain('/api/system/activity');
+    if (migrate) {
+      expect(stopped).toBe(true);
+      expect(manifest.rollback_blocked_reason).toContain('schema');
+      expect(manifest.schema_fingerprint_before).not.toBe(manifest.schema_fingerprint_at_rollback);
+      const db = new Database(database, { readonly: true });
+      try { expect(db.prepare('SELECT MAX(version) FROM schema_migrations').pluck().get()).toBe(999999); }
+      finally { db.close(); }
+    }
+  });
+
   it.each([false, true])('backs up the environment database, with deployment metadata priority=%s', async useMetadata => {
     const source = fakeCheckout(join(tmp, 'checkout'));
     const releases = join(tmp, 'releases');

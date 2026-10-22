@@ -78,6 +78,11 @@ describe('detectAgents', () => {
     ]);
   });
 
+  it('preserves the terminal adapter ID needed for approval capability checks', () => {
+    expect(detectAgents({ scan: () => [agent({ id: 'claude', protocol: 'pty-cli', adapterId: 'claude-code' })] }))
+      .toEqual([expect.objectContaining({ id: 'claude', protocol: 'pty-cli', adapterId: 'claude-code' })]);
+  });
+
   it('reports builtin only when it is exactly true', () => {
     // scan 可能来自存储层的松散数据，所以用 cast 覆盖非布尔真值。
     const loose = [

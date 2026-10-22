@@ -23,7 +23,7 @@ import { bindLarkApp, renderLarkBindResult, type LarkBindResult } from './lark-b
 import { isValidLarkAppId } from '../lark/open-platform-configurator.js';
 import { readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
 import { readSecretValue } from '../secret-cli.js';
-import { readBot, saveBot, type ReadBot, type SaveBot, type SaveBotResult } from './bot-store.js';
+import { BotSetupApprovalError, readBot, saveBot, type ReadBot, type SaveBot, type SaveBotResult } from './bot-store.js';
 
 export interface SetupCliOptions {
   /** 非交互确认；也是跳过危险确认（发布飞书版本）的唯一方式。 */
@@ -441,14 +441,15 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
       return fail(error.code, error.message, next);
     }
     const message = error instanceof Error ? error.message : String(error);
-    const next = 'dutydeck setup';
-    if (json) ui.json(fail('SETUP_FAILED', message, next));
+    const next = error instanceof BotSetupApprovalError ? error.next : 'dutydeck setup';
+    const code = error instanceof BotSetupApprovalError ? error.code : 'SETUP_FAILED';
+    if (json) ui.json(fail(code, message, next));
     else {
       ui.status('fail', message);
-      ui.hint('未写入任何配置。修正后重跑：');
+      ui.hint(error instanceof BotSetupApprovalError ? '换用支持飞书审批的 Agent 后重跑：' : '未写入任何配置。修正后重跑：');
       ui.command(next);
     }
-    return fail('SETUP_FAILED', message, next);
+    return fail(code, message, next);
   } finally {
     prompter.close();
   }

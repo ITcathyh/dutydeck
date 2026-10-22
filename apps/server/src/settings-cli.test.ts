@@ -9,6 +9,7 @@ import { buildApp } from './app.js';
 import { createCliProgram } from './cli-program.js';
 import { registerCollaborationRoutes } from './collaboration-routes.js';
 import { CollaborationService } from './collaboration-service.js';
+import { registerLarkRoutes } from './lark/routes.js';
 import { larkBotsConfigKey, readLarkConfig } from './lark/config.js';
 import { LarkGroupManager } from './lark/group-management.js';
 import { LarkGroupParticipation } from './lark/group-participation.js';
@@ -116,6 +117,69 @@ async function botRuntime() {
   const fetcher = bridge(app);
   return { repos, fetcher, run: (action: SettingsAction, input: SettingsCliInput = {}) => runSettingsCli(action, { ...target, ...input }, { fetcher, readToken }) };
 }
+
+describe('settings CLI Lark credential stage', () => {
+  it('binds an international Lark app on its own domain and keeps stage restrictions and CAS', async () => {
+    const values = new Map<string, string>();
+    const config = { get: async (key: string) => values.get(key), set: async (key: string, value: string) => { values.set(key, value); } };
+    const upstream = vi.fn(async (input: URL | string | Request) => {
+      const url = String(input);
+      expect(url).toMatch(/^https:\/\/open\.larksuite\.com\//);
+      if (url.includes('/auth/v3/tenant_access_token/internal')) return json({ code: 0, tenant_access_token: 'fixture-token', expire: 7200 });
+      if (url.includes('/bot/v3/info')) return json({ code: 0, bot: { app_name: 'Lark bot', open_id: 'ou_bot', activate_status: 2 } });
+      throw new Error(`Unexpected endpoint: ${url}`);
+    });
+    const app = Fastify();
+    cleanups.push(() => app.close());
+    await registerLarkRoutes(app, { config, env: {}, listeningDisabled: true, fetcher: upstream });
+    const request = bridge(app);
+    let race = false;
+    const fetcher = vi.fn(async (url: URL | string | Request, init?: RequestInit) => {
+      if (race && init?.method === 'PUT') {
+        race = false;
+        const bots = JSON.parse(values.get(larkBotsConfigKey)!);
+        bots[0].revision++;
+        values.set(larkBotsConfigKey, JSON.stringify(bots));
+      }
+      return request(url, init);
+    });
+    const run = (action: SettingsAction, input: SettingsCliInput) => runSettingsCli(action, { ...target, ...input }, { fetcher, readToken });
+    const input = { appId: 'cli_lark', appSecret: 'synthetic', pairs: ['brand=lark'] };
+    expect(await run('bot-add', input)).toMatchObject({ bot: { appId: 'cli_lark', brand: 'lark', revision: 1 } });
+    expect(upstream).toHaveBeenCalledTimes(2);
+    expect(await readLarkConfig(config, 'cli_lark')).toMatchObject({ appSecret: 'synthetic', brand: 'lark', revision: 1 });
+    expect(JSON.parse(String(fetcher.mock.calls[0]![1]!.body))).toMatchObject({ stage: 'lark', expectedRevision: 0, brand: 'lark' });
+    await expect(run('bot-add', input)).rejects.toMatchObject({ code: 'LARK_BOT_ALREADY_CONFIGURED' });
+    race = true;
+    await expect(run('bot-set', { appId: 'cli_lark', pairs: ['brand=lark'] })).rejects.toMatchObject({ code: 'LARK_CONFIG_REVISION_CONFLICT' });
+    expect(JSON.parse(String(fetcher.mock.calls.at(-1)![1]!.body))).toMatchObject({ stage: 'lark', expectedRevision: 1, brand: 'lark' });
+    const before = values.get(larkBotsConfigKey);
+    for (const pairs of [['brand=lark', 'defaultAgentId=codex'], ['brand=lark', 'permissionMode=full-trust'], ['brand=lark', 'listening=true']]) {
+      await expect(run('bot-add', { ...input, appId: 'cli_other', pairs })).rejects.toMatchObject({ code: 'SETTINGS_KEYS_CONFLICT' });
+      await expect(run('bot-set', { appId: 'cli_lark', pairs })).rejects.toMatchObject({ code: 'SETTINGS_KEYS_CONFLICT' });
+    }
+    expect(values.get(larkBotsConfigKey)).toBe(before);
+  });
+});
+
+describe('settings CLI default Agent approval', () => {
+  it.each(['ask', 'approve-reads'] as const)('preserves %s bot settings when switching to an incompatible terminal Agent', async permissionMode => {
+    const values = new Map([[larkBotsConfigKey, JSON.stringify([{ appId: 'cli_a', appSecret: 'synthetic', defaultAgentId: 'claude', permissionMode, revision: 1 }])]]);
+    const config = { get: async (key: string) => values.get(key), set: async (key: string, value: string) => { values.set(key, value); } };
+    const agents = { get: async (id: string) => ({ id, protocol: 'pty-cli', adapterId: id === 'claude' ? 'claude-code' : 'codex' }) } as any;
+    const app = Fastify();
+    cleanups.push(() => app.close());
+    await registerLarkRoutes(app, { config, agents, env: {}, listeningDisabled: true });
+    const fetcher = bridge(app);
+    const run = (pairs: string[]) => runSettingsCli('bot-set', { ...target, appId: 'cli_a', pairs }, { fetcher, readToken });
+    await expect(run(['defaultAgentId=codex'])).rejects.toMatchObject({ code: 'LARK_APPROVAL_UNSUPPORTED' });
+    expect(await readLarkConfig(config, 'cli_a')).toMatchObject({ defaultAgentId: 'claude', permissionMode, revision: 1 });
+    await expect(run(['defaultAgentId=codex', 'permissionMode=full-trust'])).rejects.toMatchObject({ code: 'LARK_FULL_TRUST_CONFIRMATION_REQUIRED' });
+    expect(await readLarkConfig(config, 'cli_a')).toMatchObject({ defaultAgentId: 'claude', permissionMode, revision: 1 });
+    expect(await run(['defaultAgentId=codex', 'permissionMode=full-trust', 'fullTrustConfirmed=true']))
+      .toMatchObject({ bot: { defaultAgentId: 'codex', permissionMode: 'full-trust', fullTrustConfirmed: true, revision: 2 } });
+  });
+});
 
 describe('settings CLI against the real bot routes', () => {
   it('prepares draft fallback hooks without saving or downgrading an enforced bot, then saves normally', async () => {

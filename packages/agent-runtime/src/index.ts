@@ -250,6 +250,7 @@ export class DutydeckRuntime {
   private readonly permissions = new Map<string, { request: PermissionRequestData; nativeId: string; fence: AttemptRef & SessionFence; generation: number; owner?: Owner }>();
   private readonly permissionResolutions = new Map<string, string>();
   private readonly sessionGenerations = new Map<string, number>();
+  private readonly exitedDriverGenerations = new Map<string, number>();
   private readonly driverEventChains = new Map<string, Promise<void>>();
   private readonly driverEventErrors = new Map<string, unknown>();
   private readonly driverStopReasons = new Map<string, string>();
@@ -733,7 +734,7 @@ export class DutydeckRuntime {
     const options = this.acceptedInput(task).executionOptions;
     await this.authorize(session.id, task.executionContext?.actorId, true);
     await this.mutations.wait(() => this.options.authorizeTask?.(session, task, 'prepare') ?? Promise.resolve());
-    const token = owner(session.id, this.lifecycle(session.id));
+    const lifecycle = this.lifecycle(session.id), token = owner(session.id, lifecycle);
     const ref = { sessionId: session.id, runId: attempt.runId, taskId: task.id, attemptId: attempt.attemptId };
     const generation = this.nextSessionGeneration(session.id);
     const buffered: NormalizedDriverEvent[] = [];
@@ -741,7 +742,11 @@ export class DutydeckRuntime {
     const emit = this.onDriverEvent(session, generation);
     const driver = this.factory({ ...await this.configureAgentForSession(agent, session), ...options }, session.protocol,
       event => { if (attached) emit(event); else buffered.push(event); },
-      code => { if (attached) this.notifyDriverExit(session.id, code); }, session.id,
+      code => {
+        if (!attached || !this.mutations.valid(lifecycle) || this.sessionGenerations.get(session.id) !== generation) return;
+        this.exitedDriverGenerations.set(session.id, generation);
+        this.notifyDriverExit(session.id, code);
+      }, session.id,
       localOnlyDriverContext(this.fence(session), resource.resourceId));
     if (!driver.recover) return false;
     // attach/recover 前订阅；未采纳（!attached）时在 finally 取消。
@@ -2145,6 +2150,7 @@ export class DutydeckRuntime {
     let driver:AgentDriver;
     try {driver = this.factory({ ...configured, model: options.model, reasoningEffort: options.reasoningEffort, permissionMode: options.permissionMode }, session.protocol!, this.onDriverEvent(session, generation), code => {
       if (!this.mutations.valid(lifecycle) || this.sessionGenerations.get(session.id) !== generation) return;
+      if (session.protocol === 'pty-cli') this.exitedDriverGenerations.set(session.id, generation);
       this.notifyDriverExit(session.id, code);
       // An executing turn owns its result. A lifecycle exit never overwrites it.
       if (code && !this.attempts.has(session.id)) void this.mutations.run(lifecycle, () => this.saveState(session, 'failed', `Agent exited with code ${code}`)).catch(() => {});
@@ -2467,11 +2473,17 @@ export class DutydeckRuntime {
   }
   private async configureTaskDriver(session: Session, options: ExecutionOptions) {
     await this.mutations.wait(() => this.configurations.assertClear(session.id));
-    const existing = this.drivers.get(session.id);
+    let existing = this.drivers.get(session.id);
     if (session.protocol === 'pty-cli' && !['ask', 'full-trust'].includes(options.permissionMode)) {
       // deny-all 只作任务级选项（先出计划）出现，由 Claude 家族终端的 PreToolUse 守卫拦写操作。
       const agent = ['approve-reads', 'deny-all'].includes(options.permissionMode) ? await this.repos.agents.get(session.agentId) : undefined;
       if (!agent || !supportsRemoteApproval({ ...agent, protocol: 'pty-cli' })) throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY CLI cannot enforce the requested permission mode', 422);
+    }
+    if (existing && this.exitedDriverGenerations.get(session.id) === this.sessionGenerations.get(session.id)) {
+      // Only an unsubmitted Attempt reaches here. Retain the normal physical
+      // exit proof and native recovery checks before constructing its replacement.
+      await this.stopDriver(session.id, existing);
+      this.mutations.check(); existing = undefined;
     }
     if (!existing) return this.reconnect(session, true, options);
     const owned=this.localResources.get(existing);
@@ -2563,6 +2575,7 @@ export class DutydeckRuntime {
         this.mutations.check();
         prepared = controlled ? driver.prepareSubmission?.(submissionInput) : undefined;
         if (controlled && !prepared) throw new RuntimeError('DRIVER_SUBMISSION_UNSUPPORTED','Controlled driver must freeze its submission',409);
+        if (this.drivers.get(id) !== driver || this.exitedDriverGenerations.get(id) === this.sessionGenerations.get(id)) throw new RuntimeError('DRIVER_EXITED_BEFORE_SUBMISSION', 'Agent exited before submission; input was not sent', 409);
         this.wake(this.bound().markSubmissionPending(this.attemptFence(ref), { submissionId, inputDigest: prepared?.inputDigest ?? digest({ prompt, executionOptions: input.executionOptions }), resourceRefs: prepared?.resourceRefs ?? this.localResources.refs(driver), authorizationRefs: [], ...(controlled?{driverInstanceId:controlled.driverInstanceId}:{}),...(prepared?.nativeContextRef ? {nativeContextRef:prepared.nativeContextRef,contextProofId:prepared.contextProofId}:{}), ...(prepared?.recovery || recovery ? { recovery:prepared?.recovery ?? recovery } : {}) }));
       });
       if (controlled && prepared) {

@@ -935,7 +935,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (!patternValidation.valid) throw new LarkServiceError('INVALID_HIGH_RISK_PATTERN', patternValidation.error, 400);
   if (agents && defaultAgentId && !(await agents.get(defaultAgentId))) throw new LarkServiceError('INVALID_LARK_CONFIG', `Unknown default Agent: ${defaultAgentId}`, 400);
   if (fallbackAgentId && fallbackAgentId === defaultAgentId) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Fallback Agent must differ from the default Agent.', 400);
-  for (const row of [...defaultAgentWeights, ...(fallbackAgentId ? [{ agentId: fallbackAgentId }] : [])]) {
+  for (const row of [...(defaultAgentId ? [{ agentId: defaultAgentId }] : []), ...defaultAgentWeights, ...(fallbackAgentId ? [{ agentId: fallbackAgentId }] : [])]) {
     const agent = await agents?.get(row.agentId);
     if (agents && !agent) throw new LarkServiceError('INVALID_LARK_CONFIG', `Unknown Agent: ${row.agentId}`, 400);
     if (agent && permissionMode !== 'full-trust' && !supportsRemoteApproval(agent)) throw new LarkServiceError('LARK_APPROVAL_UNSUPPORTED', `Agent ${row.agentId} does not support Lark approval.`, 422);
