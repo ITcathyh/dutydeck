@@ -59,7 +59,7 @@ import { parseCardTask } from './persisted-card-task.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 import { planInstructionBlock, planTaskOf, planUnsupportedReason } from '../plan-mode.js';
 import type { LarkCardCapabilities } from './card-actions.js';
-import { type LarkCommandPrompt, larkCardChannel, relaunchRetainedPrefix, relaunchRetainedKey, larkTaskTitle, sendTaskCard, withoutLeadingBotMention } from './coordinator-core.js';
+import { type LarkCommandPrompt, larkCardChannel, relaunchRetainedPrefix, relaunchRetainedKey, sendTaskCard, withoutLeadingBotMention } from './coordinator-core.js';
 import { LarkCoordinatorRecovery } from './coordinator-recovery.js';
 
 // 飞书消息协调器 · 派发：为一条请求找到或新建会话、交给 runtime 执行，并跟随这一轮直到终态交付。
@@ -332,7 +332,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       const card = this.processCard(task);
       const webBaseUrl = task.config.webBaseUrl?.trim().replace(/\/$/, '');
       await card.rewriteReceipt({
-        cardKind: 'process', messageId: task.cardMessageId, taskId: task.id, taskName: larkTaskTitle(task.prompt, task.config.name), turn: task.turn,
+        cardKind: 'process', messageId: task.cardMessageId, taskId: task.id, taskName: this.taskTitle(task), turn: task.turn,
         sessionId: task.sessionId, state: 'cancelled', statusLabel, readOnly: true, markdown,
         capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false,
           ...(webBaseUrl ? { webUrl: `${webBaseUrl}/sessions/${encodeURIComponent(task.sessionId)}` } : {}),
@@ -921,7 +921,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const beforeTurnSend = () => {
       if (this.stopped || task.turn !== currentTurn) throw new LarkServiceError('LARK_WRITE_OBSOLETE', '飞书写入已失去当前轮次归属。', 409);
     };
-    const cardContext: { beforeSend: () => void; agentName: string; showAgentName: boolean; permissionMode: ReturnType<typeof larkPermissionMode>; workspace?: string; scenarioRecall?: LarkScenarioRecallLine } = { beforeSend: beforeTurnSend, agentName: await this.resolveAgentName(config), showAgentName: config.showAgentName === true, permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
+    const cardContext: { beforeSend: () => void; agentName: string; showAgentName: boolean; permissionMode: ReturnType<typeof larkPermissionMode>; workspace?: string; scenarioRecall?: LarkScenarioRecallLine; adhdMode?: true } = { beforeSend: beforeTurnSend, agentName: await this.resolveAgentName(config), showAgentName: config.showAgentName === true, permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}), ...(config.adhdMode === true && task.id.startsWith('confirmation_') ? { adhdMode: true } : {}) };
     const clearAcknowledgement = () => this.clearAcknowledgementReaction(task);
     /** 执行前就失败：结束待办记录、发失败卡、撤掉收到表情。inboxReason 缺省同 taskName。 */
     const failBeforeRun = async (taskName: string, markdown: string, idempotencyKey: string, options: { inboxReason?: string; readOnly?: true } = {}) => {
@@ -947,9 +947,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
     if (!restoring && !resumeTask && currentTurn === 1) await this.mergeQueuedPredecessor(task);
     const prompt = task.prompt;
+    await this.prepareConfirmationTitle(task);
     /** 先出计划的计划轮（请求原文以 /plan 开头）：只调研出计划，以 deny-all 运行，结果卡带计划操作。 */
     const planTask = planTaskOf(prompt);
-    const taskTitle = larkTaskTitle(planTask !== undefined ? `计划：${planTask}` : prompt, config.name);
+    const taskTitle = this.taskTitle(task, planTask !== undefined ? `计划：${planTask}` : prompt);
     if (task.inbox?.request && task.inbox.request.prompt !== prompt) await this.inbox!.update(task.inbox, { request: { ...task.inbox.request, prompt } });
 
     let actorEmails: string[] = [];
@@ -1248,13 +1249,16 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         if (task.steerNote) frameNotes.push({ tag: 'markdown', element_id: 'steer_note', content: task.steerNote, text_size: 'notation', margin: '0px' });
         if (task.sessionId && this.runtime.getTasks) {
           try {
+            const sessionId = task.sessionId;
             // 排队摘要只数「排在前面的」任务：update('queued') 重绘帧里当前任务自身也是 queued，
             // 不过滤会把自己计入「排队 N 条」，与排队 PATCH 使用的 queuedAhead 口径不一致。
             const queuedTasks = (await this.runtime.getTasks(task.sessionId))
               .filter(item => item.status === 'queued' && item.id !== task.runtimeTaskId);
             // 当前一轮停在审批上时，排队的都要等它处理完，摘要标题写明被审批阻塞。
             const blockedByApproval = queuedTasks.length > 0 && (await this.runtime.getPendingPermissions?.(task.sessionId) ?? []).length > 0;
-            const queueSummary = renderQueueSummaryElement(queuedTasks, { blockedByApproval });
+            const displayedTasks = await Promise.all(queuedTasks.map(async item => ({ id: item.id,
+              prompt: await this.taskDisplayPrompt(config, event.chatId, sessionId, item) })));
+            const queueSummary = renderQueueSummaryElement(displayedTasks, { blockedByApproval });
             if (queueSummary) frameNotes.push(queueSummary);
             // 排队卡上的审批说明跟着这里的心跳收：挡住它们的那条审批有了结果（或换了一条），就把这几张排队卡重绘成当前的样子。
             const showingApproval = [...this.tasks.values()].filter(item => item !== task && item.sessionId === task.sessionId && item.state === 'queued' && item.queuedApproval);

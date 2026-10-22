@@ -1331,7 +1331,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const memoryApi = this.workflowOptions.memory;
         const memoryLine = memoryApi && larkMemoryEnabled(config)
           ? await (memoryApi.pipeline ?? memoryApi.store).status(larkMemoryScope(config.appId, event.chatId, event.chatType, config.groupMemoryScope)).then(renderLarkMemoryStatusLine).catch(() => undefined) : undefined;
-        const status = [await this.describeChatStatus(config, sessionId, latestTask), participation, usage, memoryLine].filter(Boolean).join('\n\n');
+        const status = [await this.describeChatStatus(config, sessionId, latestTask, event.chatId), participation, usage, memoryLine].filter(Boolean).join('\n\n');
         // 卡片带了 elements 就不再渲染 markdown 正文，正文要作为第一个元素放在按钮前面。
         const card = await replyCard('任务状态', status,
           approval ? { elements: [{ tag: 'markdown', element_id: 'status_body', content: status, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
@@ -1363,7 +1363,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const queued = (await this.runtime.getTasks!(sessionId)).filter(task => task.status === 'queued');
         const [action, argument, ...extra] = route.args;
         if (!action) {
-          const summary = renderQueueSummary(queued, { blockedByApproval: queued.length > 0 && (await this.runtime.getPendingPermissions?.(sessionId) ?? []).length > 0 });
+          const displayed = await Promise.all(queued.map(async task => ({ id: task.id,
+            prompt: await this.taskDisplayPrompt(config, event.chatId, sessionId, task) })));
+          const summary = renderQueueSummary(displayed, { blockedByApproval: queued.length > 0 && (await this.runtime.getPendingPermissions?.(sessionId) ?? []).length > 0 });
           // 摘要为卡片预算只列前几条，编号却一直有效：不写这句，第 6 条以后就成了看不见也够不着的死区。
           const hidden = queued.length > QUEUE_SUMMARY_MAX_ITEMS ? `上面只列出前 ${QUEUE_SUMMARY_MAX_ITEMS} 条，编号 ${QUEUE_SUMMARY_MAX_ITEMS + 1}-${queued.length} 同样可用。` : '';
           await replyCard('待执行指令', summary
@@ -1385,10 +1387,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           await replyCard('/queue 未执行', '当前账号没有操作这条排队指令的权限。', { failed: true });
           return 'handled';
         }
+        const displayedPrompt = await this.taskDisplayPrompt(config, event.chatId, sessionId, target);
         if (action === 'cancel') {
           if (!this.runtime.cancelQueued) throw new Error('当前 Dutydeck 运行时无法取消排队任务，请前往 Dutydeck Web 处理。');
           await this.runtime.cancelQueued(sessionId, target.id, event.senderOpenId);
-          await replyCard('已取消排队指令', `**第 ${index} 条待执行指令不会再执行。**\n\n${escapeLarkPromptEcho(larkCommandEcho(target.prompt, 120))}`);
+          await replyCard('已取消排队指令', `**第 ${index} 条待执行指令不会再执行。**\n\n${escapeLarkPromptEcho(larkCommandEcho(displayedPrompt, 120))}`);
         } else if (action === 'steer') {
           if (!this.runtime.injectQueued) throw new Error('当前 Dutydeck 运行时不支持插话，可用 `/queue top <编号>` 提到队首。');
           // 插话会改变正在执行的那一轮，与提到队首同一道中断门。
@@ -1398,7 +1401,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
             return 'handled';
           }
           const steering = await this.runtime.injectQueued(sessionId, target.id, event.senderOpenId);
-          const echo = escapeLarkPromptEcho(larkCommandEcho(target.prompt, 120));
+          const echo = escapeLarkPromptEcho(larkCommandEcho(displayedPrompt, 120));
           if (steering.task.status === 'reconcile_required') await replyCard('/queue 插话结果未知', `**${larkSteeringUnknownNote}**\n\n${echo}`, { failed: true });
           else if (steering.outcome === 'injected' || steering.outcome === 'startedNewTurn') await replyCard('已插话', `**${steeringOutcomeText(steering.outcome)}**\n\n${echo}`);
           else if (steering.task.status !== 'queued') await replyCard('/queue 状态已变化', `**这条指令已不在队列中，请通过 \`/status\` 核对最新执行记录。**\n\n${echo}`, { failed: true });
@@ -1412,7 +1415,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           }
           await this.runtime.steerQueued(sessionId, target.id, event.senderOpenId);
           for (const task of this.tasks.values()) if (task.runtimeTaskId === target.id) task.promoted = true;
-          await replyCard('已提到队首', `**第 ${index} 条待执行指令已排到队首，当前这一轮会被中断。**\n\n${escapeLarkPromptEcho(larkCommandEcho(target.prompt, 120))}`);
+          await replyCard('已提到队首', `**第 ${index} 条待执行指令已排到队首，当前这一轮会被中断。**\n\n${escapeLarkPromptEcho(larkCommandEcho(displayedPrompt, 120))}`);
         }
         return 'handled';
       }
@@ -1588,7 +1591,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           return 'handled';
         }
         const runningOrigin = running && !liveTurn ? await this.larkTaskOrigin(config, event.chatId, { id: running.id, sessionId: sessionId! }) : undefined;
-        const title = escapeLarkPromptEcho(larkCommandEcho(liveTurn ? larkTaskTitle(liveTurn.prompt, config.name) : runningOrigin?.title ?? larkTaskTitle(running!.prompt, config.name), 40));
+        const title = escapeLarkPromptEcho(larkCommandEcho(liveTurn ? this.taskTitle(liveTurn, liveTurn.prompt, config) : runningOrigin?.title ?? larkTaskTitle(running!.prompt, config.name), 40));
         const requester = liveTurn?.event.senderOpenId ?? (running ? await requesterOf(running.id) : undefined);
         if (!await this.isInterruptOperatorAllowed(config, event.senderOpenId, event.chatId, sessionId ?? liveTurn?.sessionId, requester)) {
           const denial = this.requesterOnlyReason(config, requester, '中断正在执行的这一轮', true);
@@ -1944,7 +1947,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     return larkAgentAvailabilityLine(mark);
   }
 
-  private async describeChatStatus(config: StoredLarkConfig, sessionId?: string, latestTask?: LarkTask): Promise<string> {
+  private async describeChatStatus(config: StoredLarkConfig, sessionId?: string, latestTask?: LarkTask, chatId = latestTask?.event.chatId ?? ''): Promise<string> {
     const lines: string[] = [];
     const configuredAgent = config.defaultAgentId ?? 'Dutydeck';
     if (!sessionId) {
@@ -1999,7 +2002,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         }
         for (const task of [...unresolved, ...tasks.filter(task => task.status === 'queued')].slice(0, 3)) {
           const recovery = await describeLarkTaskRecovery(this.runtime, sessionId, task.id, task.status);
-          lines.push(`${larkCommandEcho(task.prompt, 80)}\n\n${approval && task.status === 'queued' && !recovery.blocked
+          const displayedPrompt = await this.taskDisplayPrompt(config, chatId, sessionId, task);
+          lines.push(`${larkCommandEcho(displayedPrompt, 80)}\n\n${approval && task.status === 'queued' && !recovery.blocked
             ? '**被审批阻塞**\n\n前一轮在等审批，处理完后才会执行。' : recovery.markdown}`);
         }
       } catch (error) {

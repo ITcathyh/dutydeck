@@ -6,7 +6,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { RelayAskBroker } from '@dutydeck/relay';
 import type { AgentConfig, AgentDriver } from '@dutydeck/shared';
-import { LarkMessageCoordinator } from './coordinator.js';
+import { LarkMessageCoordinator, larkTaskTitle } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { buildLarkCard, LarkServiceError } from './service.js';
 import type { LarkInteraction } from './workflow-interactions.js';
@@ -18,6 +18,8 @@ import { runNativeAskHook } from '../native-ask-hook.js';
 import { RelayCapabilityRegistry } from '@dutydeck/relay';
 
 const cleanups: Array<() => Promise<void>> = [];
+const displayedText = (value: unknown): string => value && typeof value === 'object'
+  ? Object.entries(value).map(([key, item]) => key === 'content' && typeof item === 'string' ? item : displayedText(item)).join('\n') : '';
 afterEach(async () => { vi.restoreAllMocks(); vi.useRealTimers(); for (const close of cleanups.splice(0).reverse()) await close(); });
 const event = (messageId: string, text = '把发布会事项记到待办 A', actor = 'ou_alice'): LarkMessageEvent => ({
   messageId, chatId: 'oc_group', chatType: 'group', threadId: 'omt_topic', rootId: 'om_root', senderOpenId: actor,
@@ -136,6 +138,98 @@ async function harness(options: { deliveryFailures?: number; threaded?: boolean;
 }
 
 describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
+  it.each(['original', 'empty', 'internal'])('names replay cards from the original snapshot without changing Agent input (%s)', async kind => {
+    const h = await harness();
+    const original = '@Dock 发布事项\n\n' + '原请求内容'.repeat(25);
+    const raw = (await h.repos.config.get(`lark.interaction.${h.config.appId}.${h.record.id}`))!;
+    const record = JSON.parse(raw) as LarkInteraction;
+    record.durable!.snapshot.prompt = kind === 'original' ? original : kind === 'internal' ? `持久确认记录 ID：${h.record.id}` : '';
+    await h.repos.config.set(`lark.interaction.${h.config.appId}.${h.record.id}`, JSON.stringify(record));
+    await h.click(); await h.waitConfirmed();
+    await vi.waitFor(() => expect(h.service.reply.mock.calls.some(([input]) => input.cardKind === 'result' && input.taskId === `confirmation_${h.record.id}`)).toBe(true));
+    await vi.waitFor(async () => expect(JSON.parse((await h.repos.channelMappings.get(`lark-card:${h.config.appId}`, `confirmation_${h.record.id}`))!.extra!).final_delivery_state).toBe('delivered'));
+    const expected = kind === 'original' ? larkTaskTitle(original, h.config.name) : '确认写入';
+    const inputs = [...h.service.reply.mock.calls, ...h.service.update.mock.calls].map(([input]) => input)
+      .filter(input => input.taskId === `confirmation_${h.record.id}`);
+    expect(inputs.length).toBeGreaterThan(1);
+    for (const input of inputs) {
+      expect(input.taskName).toBe(expected);
+      const card = buildLarkCard(input);
+      if ('header' in card) expect(card.header!.title.content).toBe(buildLarkCard({ ...input, taskId: 'om_title_control', adhdMode: false, taskName: expected }).header!.title.content);
+      expect(card.config.summary.content).toContain(expected);
+      expect(card.config.summary.content).not.toContain('持久确认记录 ID');
+      expect(card.config.summary.content).not.toContain(h.record.id);
+    }
+    const mapping = (await h.repos.channelMappings.get(`lark-card:${h.config.appId}`, `confirmation_${h.record.id}`))!;
+    expect(JSON.parse(mapping.extra!).task_name).toBe(expected);
+    const inbox = (await new LarkTaskInbox(h.repos.config).lookup(h.config.appId, `confirmation_${h.record.id}`))!;
+    const internal = JSON.parse(inbox.event.content).text.slice('@_user_1 '.length);
+    expect(internal).toContain(`持久确认记录 ID：${h.record.id}`);
+    expect((await h.runtime.getTasks(h.sessionId))[1]!.prompt).toBe(internal);
+    expect(h.sends[1]).toContain(internal);
+    await h.restart();
+    await h.coordinator.handle(event('om_title_tasks', '/tasks'), h.config);
+    const dashboard = h.service.reply.mock.calls.at(-1)![0];
+    expect(displayedText(dashboard.elements)).toContain(expected);
+    expect(displayedText(dashboard.elements)).not.toContain('持久确认记录 ID');
+    expect(displayedText(dashboard.elements)).not.toContain(h.record.id);
+    const saved = JSON.parse(mapping.extra!);
+    delete saved.final_delivery_state;
+    delete saved.final_message_id;
+    delete saved.final_card_input;
+    await h.repos.channelMappings.save({ ...mapping, extra: JSON.stringify(saved) });
+    await h.coordinator.reconcile(h.config);
+    const recovered = JSON.parse((await h.repos.channelMappings.get(`lark-card:${h.config.appId}`, `confirmation_${h.record.id}`))!.extra!).final_card_input;
+    expect(recovered.taskName).toBe(expected);
+    expect(buildLarkCard(recovered).config.summary.content).toContain(expected);
+  });
+
+  it('uses the original replay name in queued status and the dashboard across listener restart', async () => {
+    const h = await harness({ continuation: 'ask' });
+    await h.coordinator.handle(event('om_title_blocker', '先处理另一项'), h.config);
+    await vi.waitFor(() => expect(h.sends).toHaveLength(2));
+    await h.click(); await h.waitConfirmed();
+    const key = `confirmation_${h.record.id}`;
+    await vi.waitFor(async () => expect(JSON.parse((await h.repos.channelMappings.get(`lark-card:${h.config.appId}`, key))!.extra!).runtime_task_id).toBeTruthy());
+    const queued = (await h.runtime.getTasks(h.sessionId)).find(task => task.status === 'queued')!;
+    const combined = { ...queued, prompt: `先前的排队请求\n\n${queued.prompt}` };
+    expect(await (h.coordinator as any).taskDisplayPrompt(h.config, 'oc_group', h.sessionId, combined)).toBe('把发布会事项记到待办 A');
+    expect(combined.prompt).toBe(`先前的排队请求\n\n${queued.prompt}`);
+    for (const restarted of [false, true]) {
+      if (restarted) await h.restart();
+      for (const command of ['/status', '/tasks', '/queue']) {
+        await h.coordinator.handle(event(`om_title_${command.slice(1)}_${restarted}`, command), h.config);
+        const input = h.service.reply.mock.calls.at(-1)![0];
+        const text = input.elements ? displayedText(input.elements) : input.markdown;
+        expect(text).toContain('把发布会事项记到待办 A');
+        expect(text).not.toContain('持久确认记录 ID');
+        expect(text).not.toContain(h.record.id);
+      }
+      await vi.waitFor(() => expect((h.coordinator as any).tasks.get('om_title_blocker').requestUpdate).toBeTypeOf('function'));
+      await (h.coordinator as any).tasks.get('om_title_blocker').requestUpdate('running');
+      const queue = h.service.update.mock.calls.at(-1)![0].elements.find((item: any) => item.element_id === 'queue_summary');
+      expect(queue.content).toContain('把发布会事项记到待办 A');
+      expect(queue.content).not.toContain('持久确认记录 ID');
+      expect(queue.content).not.toContain(h.record.id);
+    }
+  });
+
+  it.each(['cancel', 'top', 'steer'])('uses the original replay name in /queue %s receipts without changing the queued input', async action => {
+    const h = await harness({ continuation: 'ask' });
+    await h.coordinator.handle(event('om_title_blocker', '先处理另一项'), h.config);
+    await vi.waitFor(() => expect(h.sends).toHaveLength(2));
+    await h.click(); await h.waitConfirmed();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(h.sessionId)).filter(task => task.status === 'queued')).toHaveLength(1));
+    const queued = (await h.runtime.getTasks(h.sessionId)).find(task => task.status === 'queued')!;
+    await h.coordinator.handle(event(`om_title_action_${action}`, `/queue ${action} 1`), h.config);
+    const input = h.service.reply.mock.calls.at(-1)![0];
+    expect(input.markdown).toContain('把发布会事项记到待办 A');
+    expect(input.markdown).not.toContain('持久确认记录 ID');
+    expect(input.markdown).not.toContain(h.record.id);
+    expect((await h.runtime.getTasks(h.sessionId)).find(task => task.id === queued.id)!.prompt).toBe(queued.prompt);
+    expect(queued.prompt).toContain(`持久确认记录 ID：${h.record.id}`);
+  });
+
   it('never redispatches a confirmation if the service exits after card registration but before its host marker', async () => {
     const h = await harness({ beforeMarkerCrash: true });
     expect((await h.runtime.getEvents(h.sessionId)).some(event => event.id.startsWith('deferred:'))).toBe(false);

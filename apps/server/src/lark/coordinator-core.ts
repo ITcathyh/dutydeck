@@ -277,6 +277,26 @@ export abstract class LarkCoordinatorCore {
     return Boolean(deferredConfirmationId(await loadLarkTaskEvents(this.runtime, sessionId, taskId, 500), taskId));
   }
 
+  protected taskTitle(task: LarkTask, prompt = task.prompt, titleConfig = task.config) {
+    return task.config.adhdMode === true && task.id.startsWith('confirmation_')
+      ? task.displayName || '确认写入' : larkTaskTitle(prompt, titleConfig.name);
+  }
+
+  protected async taskDisplayPrompt(config: StoredLarkConfig, chatId: string, sessionId: string, task: { id: string; prompt: string }) {
+    if (config.adhdMode !== true) return task.prompt;
+    const origin = await this.larkTaskOrigin(config, chatId, { id: task.id, sessionId });
+    return origin?.confirmation ? origin.title : task.prompt;
+  }
+
+  protected async prepareConfirmationTitle(task: LarkTask) {
+    if (task.config.adhdMode !== true || !task.id.startsWith('confirmation_')) return;
+    const record = (await this.workflows?.list(task.config.appId))?.find(item => item.durable
+      && item.id === task.inbox?.workflowRequestId && task.id === `confirmation_${item.id}` && item.sessionId === task.inbox?.sessionId);
+    const original = record?.durable?.snapshot?.prompt;
+    task.displayName = typeof original === 'string' && original.trim() && !original.startsWith('持久确认记录 ID：')
+      ? larkTaskTitle(original, task.config.name) : '确认写入';
+  }
+
   private async deferConfirmation(input: RelayDeferredAsk, context: RelayAskContext) {
     const appId = this.reconcileConfig?.appId;
     if (this.stopped || !appId || !this.workflows || !this.inbox) return undefined;
@@ -293,7 +313,7 @@ export abstract class LarkCoordinatorCore {
     const task = (await this.runtime.getTasks?.(input.sessionId))?.find(item => item.id === context.taskId);
     if (context.signal?.aborted || task?.status !== 'running' || !original || !saved.scope_id || !session || session.archivedAt) throw new LarkServiceError('LARK_CONFIRMATION_ENDED', '已结束，未执行', 409);
     return this.workflows.defer({ appId, sessionId: input.sessionId, taskId: context.taskId, turn: saved.turn ?? 1,
-      event: original.event, taskName: larkTaskTitle(saved.prompt, config.name) }, input,
+      event: original.event, taskName: original.event.messageId.startsWith('confirmation_') ? saved.task_name : larkTaskTitle(saved.prompt, config.name) }, input,
       { prompt: saved.prompt, cwd: session.cwd, scopeId: saved.scope_id }, context.signal);
   }
   protected async authorizeInteraction(record: LarkInteraction, actor: string, action: PolicyAction) {
@@ -325,7 +345,7 @@ export abstract class LarkCoordinatorCore {
 
   protected interactionContext(task: LarkTask): LarkInteractionContext | undefined {
     return task.sessionId && task.runtimeTaskId ? { appId: task.config.appId, sessionId: task.sessionId,
-      taskId: task.runtimeTaskId, taskName: larkTaskTitle(task.prompt, task.config.name), turn: task.turn, event: task.event } : undefined;
+      taskId: task.runtimeTaskId, taskName: this.taskTitle(task), turn: task.turn, event: task.event } : undefined;
   }
 
   protected async requireExecution(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction) {
@@ -396,18 +416,20 @@ export abstract class LarkCoordinatorCore {
    * 一轮 runtime 任务在飞书这边的发起人、标题与开始时间：内存里的任务优先，重启后从本群的卡片映射读。
    * 都找不到时返回 undefined（历史记录，或不是从飞书消息派发的任务）。
    */
-  protected async larkTaskOrigin(config: StoredLarkConfig, chatId: string, target: { id: string; sessionId: string }) {
+  protected async larkTaskOrigin(config: StoredLarkConfig, chatId: string, target: { id: string; sessionId: string }): Promise<{ requester?: string; title: string; startedAt?: number; confirmation?: boolean } | undefined> {
     const live = [...this.tasks.values()].find(task => task.runtimeTaskId === target.id && task.sessionId === target.sessionId
       && task.config.appId === config.appId && task.event.chatId === chatId);
-    if (live?.event.senderOpenId) return { requester: live.event.senderOpenId, title: larkTaskTitle(live.prompt, config.name), startedAt: live.startedAt };
+    if (live?.event.senderOpenId) return { requester: live.event.senderOpenId, title: this.taskTitle(live, live.prompt, config), startedAt: live.startedAt,
+      ...(config.adhdMode === true && live.id.startsWith('confirmation_') ? { confirmation: true } : {}) };
     for (const mapping of await this.cardMappings?.list(larkCardChannel(config.appId)) ?? []) {
       if (mapping.sessionId !== target.sessionId) continue;
       const saved = parseCardTask(mapping.extra ?? '{}');
       if (saved.app_id === config.appId && saved.chat_id === chatId && saved.runtime_task_id === target.id) {
-        return { requester: saved.sender_open_id, title: saved.task_name, startedAt: saved.started_at };
+        return { requester: saved.sender_open_id, title: saved.task_name, startedAt: saved.started_at,
+          ...(config.adhdMode === true && mapping.externalId.startsWith('confirmation_') ? { confirmation: true } : {}) };
       }
     }
-    return live ? { title: larkTaskTitle(live.prompt, config.name), startedAt: live.startedAt } : undefined;
+    return live ? { title: this.taskTitle(live, live.prompt, config), startedAt: live.startedAt } : undefined;
   }
 
   /**

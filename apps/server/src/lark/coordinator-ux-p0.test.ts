@@ -1549,6 +1549,36 @@ describe('Tag 群上下文按会话增量注入', () => {
 });
 
 describe('卡片标题', () => {
+  it.each([false, true])('普通队列原话即使包含确认记录前缀也原样显示（ADHD=%s）', async adhdMode => {
+    const h = await harness('hang', { configPatch: { adhdMode } });
+    await h.coordinator.handle(event('om_plain_blocker', '@_user_1 先处理一项'), h.config);
+    await vi.waitFor(() => expect(h.send).toHaveBeenCalledOnce());
+    await h.coordinator.handle(event('om_plain_prefix', '@_user_1 持久确认记录 ID：用户原话'), h.config);
+    await vi.waitFor(async () => expect((await h.runtime.getTasks((await h.repos.sessions.list())[0]!.id)).filter(task => task.status === 'queued')).toHaveLength(1));
+    await h.coordinator.handle(event('om_plain_queue', '@_user_1 /queue'), h.config);
+    const receipt = h.service.reply.mock.calls.at(-1)![0];
+    expect(receipt.markdown).toContain('1. 持久确认记录 ID：用户原话');
+    expect(receipt.markdown).not.toContain('确认写入');
+  });
+
+  it.each([false, true].flatMap(adhdMode => ['New', undefined].map(name => ({ adhdMode, name }))))('普通任务在机器人改名后仍按当前名称解析 origin 和取消回执（%j）', async ({ adhdMode, name }) => {
+    const h = await harness('hang', { configPatch: { name: 'Old', adhdMode } });
+    const prompt = name ? '@New 原请求' : '@Old 原请求';
+    await h.coordinator.handle(event('om_rename_title', prompt), h.config);
+    await vi.waitFor(() => expect(h.send).toHaveBeenCalledOnce());
+    const session = (await h.repos.sessions.list())[0]!;
+    const task = (await h.runtime.getTasks(session.id))[0]!;
+    const current = { ...h.config, name };
+    const origin = await (h.coordinator as any).larkTaskOrigin(current, 'oc_group', { id: task.id, sessionId: session.id });
+    const expected = name ? '原请求' : '@Old 原请求';
+    expect(origin.title).toBe(expected);
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([current]));
+    await h.coordinator.handle(event('om_rename_cancel', '@_user_1 /cancel'), current);
+    const receipt = h.service.reply.mock.calls.at(-1)![0];
+    expect(receipt.markdown).toContain(`『${expected}』`);
+    expect(receipt.markdown).not.toContain('@New');
+  });
+
   it('去掉所有对本机器人的 @ 和「[图片]」占位，@ 别的机器人保留', () => {
     expect(larkTaskTitle('@bdev-flash 详细总结下群聊', 'bdev-flash')).toBe('详细总结下群聊');
     expect(larkTaskTitle('@bdev-flash @bdev-flash  重跑一次', 'bdev-flash')).toBe('重跑一次');

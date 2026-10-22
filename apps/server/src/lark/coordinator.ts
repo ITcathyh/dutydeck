@@ -47,6 +47,8 @@ export type LarkTask = {
   group: LarkGroup;
   event: LarkMessageEvent;
   prompt: string;
+  /** Host confirmation replay name; never used as Agent input. */
+  displayName?: string;
   resources: LarkMessageResource[];
   inbox?: LarkInboxRecord;
   resumeTask?: TaskRecord;

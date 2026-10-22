@@ -1025,7 +1025,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
     const progress = isProcessCard && state === 'running' && !waitingForApproval
       ? plainCardText(findCardElement(mainElements, 'current_title')?.content) : '';
     const conclusion = isResultCard ? larkConclusionHeadline(findCardElement(mainElements, 'final_output')?.content, 40) : undefined;
-    const summaryTitle = conclusion ?? (isProcessCard || isResultCard
+    const summaryTitle = input.adhdMode === true && input.taskId?.startsWith('confirmation_') ? `${statusLabel} · ${taskName}` : conclusion ?? (isProcessCard || isResultCard
       ? `${statusLabel} · ${progress || taskName}`
       : `${taskName} · ${statusLabel}`);
     // 标题只占一行：卡片回复在原消息下面，用户原话已经在引用里，标题只需要让人认出是哪件事。

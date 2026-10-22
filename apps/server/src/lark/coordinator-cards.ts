@@ -17,7 +17,7 @@ import { larkTurnDiffReviewKind } from './turn-diff.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkTaskState, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
-import { larkCardChannel, withoutLeadingBotMention, larkTaskTitle, larkScopeContinuesFor, sendTaskCard } from './coordinator-core.js';
+import { larkCardChannel, withoutLeadingBotMention, larkScopeContinuesFor, sendTaskCard } from './coordinator-core.js';
 import { LarkCoordinatorCore } from './coordinator-core.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 import { planFollowUpEvent } from './plan-flow.js';
@@ -90,7 +90,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       chat_id: task.event.chatId,
       ...(task.cardMessageId ? { card_message_id: task.cardMessageId } : {}),
       ...(task.runtimeTaskId ? { runtime_task_id: task.runtimeTaskId } : {}),
-      task_name: larkTaskTitle(task.prompt, task.config.name),
+      task_name: this.taskTitle(task),
       prompt: task.prompt,
       ...(task.retryMaterialPrompt ? { retry_material_prompt: task.retryMaterialPrompt } : {}),
       state,
@@ -173,6 +173,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       ...(saved.launcher_recovery_note ? { launcherRecoveryNote: true } : {}),
       id: mapping.externalId, group: { tail: Promise.resolve() }, config, state: saved.state,
       turn: saved.turn ?? 0, epoch: 0, scopeId: saved.scope_id ?? '', prompt: saved.prompt,
+      ...(config.adhdMode === true && mapping.externalId.startsWith('confirmation_') && !saved.task_name.startsWith('持久确认记录 ID：') ? { displayName: saved.task_name } : {}),
       resources: [], events: [], sessionId: mapping.sessionId, startedAt: saved.started_at,
       ...(saved.runtime_task_id ? { runtimeTaskId: saved.runtime_task_id } : {}),
       ...(saved.card_message_id ? { cardMessageId: saved.card_message_id } : {}),
