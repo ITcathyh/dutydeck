@@ -529,7 +529,7 @@ export class LarkGroupParticipation {
     slot.running = run;
     try { await run; } finally { slot.running = undefined; }
   }
-  private async current(scope: CollaborationScope, snapshot: CollaborationSnapshot, actorId: string, slot: Slot, deliver = false, accepted = false) {
+  private async current(scope: CollaborationScope, snapshot: CollaborationSnapshot, slot: Slot, deliver = false, accepted = false) {
     if (this.closed || slot.stopped || !(await this.options.readConfig(scope.appId, scope.chatId))?.listening || !await this.options.authorize(scope, undefined, 'observe')) return false;
     if (snapshot.teamContext && await this.teamContextAllowed(scope, snapshot.teamContext) !== true) return false;
     // 判定用到的 model 场景包在投递前再看一次绑定：判定期间群里关掉了，这一条就不发。
@@ -638,7 +638,7 @@ export class LarkGroupParticipation {
       enrich: async () => {
         await this.bootstrapper.ensure(scope);
         const full = await this.snapshot(scope, pending.observation);
-        if (full.settings.participation === 'off' || !await this.current(scope, full, pending.event.senderOpenId!, slot)) return undefined;
+        if (full.settings.participation === 'off' || !await this.current(scope, full, slot)) return undefined;
         const trigger = full.observations.find(item => item.messageId === larkMessageAnchor(pending.event) && item.origin === 'live' && item.senderKind === 'human');
         if (!trigger) return undefined;
         // 第二轮规则：补上最近发言（续问、「这个任务」）和事项名称。
@@ -717,7 +717,7 @@ export class LarkGroupParticipation {
       try { result = parseParticipationResult(JSON.stringify(await this.options.decider.decide(config, snapshot, trigger.id, modelFacts)), snapshot, trigger.id); }
       finally { meta.durationMs = Date.now() - started; }
       if (result.action === 'reply' && result.teamQuery && this.options.readTeamContext) {
-        if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot)) return;
+        if (!await this.current(scope, snapshot, slot)) return;
         // A second budget check covers configuration changes while the classifier ran.
         if (await this.options.usageRefusal?.(scope)) return;
         try {
@@ -740,7 +740,7 @@ export class LarkGroupParticipation {
       action: result.action, reason: result.reason, evidenceIds: result.evidenceIds, status: 'candidate', inputSnapshot, createdAt: this.now().toISOString() };
     await repo.recordDecision(decision);
     if (!activeModes.has(snapshot.settings.participation)) return;
-    if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot)) { await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
+    if (!await this.current(scope, snapshot, slot)) { await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
     let updated: CollaborationSnapshot | undefined;
     try { updated = await this.applyUpdates(scope, pending, trigger, snapshot, result, slot); }
     catch { await repo.updateDecision(scope, id, { status: 'failed' }); return; }
@@ -752,7 +752,7 @@ export class LarkGroupParticipation {
         snapshot.scenario?.status === 'used' ? { mode: 'model', packId: snapshot.scenario.packId, decisionId: id } : undefined);
       return;
     }
-    if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true)) { await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
+    if (!await this.current(scope, snapshot, slot, true)) { await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
     const actions = await repo.listActions(scope, COLLABORATION_LIST_LIMIT);
     if (this.proactiveBudgetExhausted(actions, snapshot.settings.maxProactivePerHour)) { await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
     // Keep uncertain/in-flight delivery deduplicated. A completed answer must not
@@ -785,7 +785,7 @@ export class LarkGroupParticipation {
     const begun = await repo.beginAction({ id: actionId, scope, kind: 'participation.reply', requesterId: 'policy:group-participation', inputDigest,
       contextRevision: snapshot.contextRevision, payload: { notificationKey, decisionId: id, messageId: pending.event.messageId, settingsRevision: snapshot.settings.revision } });
     if (!begun.created) return;
-    if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true)) {
+    if (!await this.current(scope, snapshot, slot, true)) {
       await repo.updateAction(scope, actionId, { expectedRevision: begun.action.revision, status: 'suppressed' });
       await repo.updateDecision(scope, id, { status: 'suppressed' }); return;
     }
@@ -795,11 +795,11 @@ export class LarkGroupParticipation {
     let providerStarted = false;
     try {
       const config = await this.options.readConfig(scope.appId, scope.chatId);
-      if (!config || !await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true, true)) {
+      if (!config || !await this.current(scope, snapshot, slot, true, true)) {
         throw new RuntimeError('COLLABORATION_DELIVERY_SUPPRESSED', 'Listener or authorization changed before acceptance', 409);
       }
       acknowledgement = await this.acknowledge(scope, larkMessageAnchor(pending.event), actionId, config);
-      if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true, true)) {
+      if (!await this.current(scope, snapshot, slot, true, true)) {
         throw new RuntimeError('COLLABORATION_DELIVERY_SUPPRESSED', 'Listener or authorization changed before generation', 409);
       }
       let response: string;
@@ -815,7 +815,7 @@ export class LarkGroupParticipation {
       action = await repo.updateAction(scope, actionId, { expectedRevision: action.revision, status: 'sending' });
       const send = async () => {
         // Shared group delivery serialization may wait: recheck inside the acquired guard.
-        if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true, true)) {
+        if (!await this.current(scope, snapshot, slot, true, true)) {
           throw new RuntimeError('COLLABORATION_DELIVERY_SUPPRESSED', 'Context or authorization changed before delivery', 409);
         }
         const config = await this.options.readConfig(scope.appId, scope.chatId);
@@ -847,7 +847,7 @@ export class LarkGroupParticipation {
   private async dispatch(scope: CollaborationScope, pending: Pending, trigger: CollaborationObservation, snapshot: CollaborationSnapshot, evidenceIds: string[], id: string, slot: Slot, addressed = false, scenario?: LarkScenarioAdoption) {
     const repo = this.options.repository;
     const dispatch = this.dispatchers.get(scope.appId);
-    if (!dispatch || !evidenceIds.includes(trigger.id) || !await this.current(scope, snapshot, pending.event.senderOpenId!, slot, !addressed, addressed)
+    if (!dispatch || !evidenceIds.includes(trigger.id) || !await this.current(scope, snapshot, slot, !addressed, addressed)
       || !addressed && this.proactiveBudgetExhausted(await repo.listActions(scope, COLLABORATION_LIST_LIMIT), snapshot.settings.maxProactivePerHour)) {
       await repo.updateDecision(scope, id, { status: 'suppressed' }); return;
     }
@@ -1225,7 +1225,7 @@ export class LarkGroupParticipation {
       full = await this.snapshot(scope, pending.observation);
     }
     // 规则只看这一条消息本身，期间来了新消息也不影响结论，所以按已受理处理，不比对上下文版本。
-    if (full.settings.participation === 'off' || !await this.current(scope, full, pending.event.senderOpenId!, slot, false, true)) return;
+    if (full.settings.participation === 'off' || !await this.current(scope, full, slot, false, true)) return;
     const trigger = full.observations.find(item => item.messageId === larkMessageAnchor(pending.event) && item.origin === 'live' && item.senderKind === 'human');
     if (!trigger) return;
     const snapshot = decisionInput(full, trigger.id);
@@ -1488,7 +1488,7 @@ export class LarkGroupParticipation {
       const followup = snapshot.followups.find(item => item.id === update.followupId && item.revision === update.expectedRevision && item.status === 'open');
       if (!followup || !await this.options.authorize(scope, pending.event.senderOpenId, 'update', followup)) return undefined;
       if (update.steps && (update.steps.length !== followup.steps.length || update.steps.some(step => !followup.steps.some(old => old.id === step.id && old.label === step.label)) || new Set(update.steps.map(step => step.id)).size !== update.steps.length)) return undefined;
-      if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot)) return undefined;
+      if (!await this.current(scope, snapshot, slot)) return undefined;
       await this.options.repository.updateFollowup(scope, followup.id, { expectedRevision: followup.revision, ...(update.progress !== undefined ? { progress: update.progress } : {}), ...(update.steps ? { steps: update.steps } : {}), provenance: 'inferred', sourceRefs: [...new Set([...followup.sourceRefs, ...update.evidenceIds])].slice(-100) }, pending.event.senderOpenId!);
       // Account only for our own single state transition; any concurrent material change invalidates delivery.
       const after = participationInput(await this.options.repository.snapshot(scope, 30));

@@ -7,7 +7,7 @@ import { agentConfigSchema, type RepositoryBundle, type Session } from '@dutydec
 import { createRepositories } from '@dutydeck/storage';
 import { RelayAskBroker, RelayCapabilityRegistry } from '@dutydeck/relay';
 import { buildApp } from '../app.js';
-import { LarkGroupManager } from './group-management.js';
+import { LarkGroupManager, type ManagedGroupBot } from './group-management.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './agent-tools.js';
 import { deleteLarkConfig, readLarkConfig, saveLarkConfig } from './config.js';
 import { resolveLarkSession } from './session-resolver.js';
@@ -118,6 +118,99 @@ describe('live group configuration', () => {
     expect(groups.every(group => group.bots.length === 2)).toBe(true);
     expect(groups.flatMap(group => group.bots).every(bot => bot.validity === 'valid' && !bot.applied && !bot.binding)).toBe(true);
     expect(JSON.stringify(groups)).not.toContain('synthetic_cli');
+  });
+
+  it('shares Bot reads only within each group listing and preserves group roles and current disablement', async () => {
+    const expected = new Map<string, ManagedGroupBot>();
+    for (const appId of ['cli_one', 'cli_two']) {
+      const member = (await manager.members(appId, 'oc_one')).members[0]!;
+      for (const chatId of ['oc_one', 'oc_two']) {
+        const detail = await manager.save(appId, chatId, { expectedRevision: 0, patch: {}, roleChanges: [{
+          kind: 'create', principalId: member.principalId, role: 'can_talk', operateScope: 'none',
+          actionGates: { terminalWrite: false, highRisk: false, groupToolsSend: false }
+        }] });
+        expected.set(`${appId}:${chatId}`, detail);
+      }
+      const owner = (await manager.owner(appId))!;
+      await repos.roleAssignments.create({ id: `bot_role_${appId}`, channelBotId: owner.channelBotId,
+        principalId: member.principalId, role: 'can_operate', operateScope: 'own_runs',
+        actionGates: { terminalWrite: false, highRisk: false, groupToolsSend: false } });
+    }
+    const identity = vi.spyOn(repos.remoteIdentityFacts, 'getByChannelBot');
+    const roles = vi.spyOn(repos.roleAssignments, 'listByChannelBot');
+    const bots = vi.spyOn(repos.channelBots, 'get');
+    const facts = vi.spyOn(repos.remoteChatFacts, 'getByNaturalKey');
+    const bindings = vi.spyOn(repos.groupBindings, 'getByNaturalKey');
+    const { groups } = await manager.groups();
+    expect(groups.map(group => group.name)).toEqual(['值班群', '项目群']);
+    for (const group of groups) {
+      expect(group.bots.map(bot => bot.appId)).toEqual(['cli_one', 'cli_two']);
+      for (const bot of group.bots) {
+        expect(bot).toEqual(expected.get(`${bot.appId}:${group.chatId}`));
+        expect(bot.roles).toHaveLength(1);
+        expect(bot.applied).toBe(true);
+      }
+    }
+    expect(identity).toHaveBeenCalledTimes(2);
+    expect(roles).toHaveBeenCalledTimes(2);
+    expect(bots).toHaveBeenCalledTimes(2);
+    expect(facts).toHaveBeenCalledTimes(4);
+    expect(bindings).toHaveBeenCalledTimes(4);
+    for (const detail of expected.values()) expect(roles).toHaveBeenCalledWith(detail.channelBotId, 500);
+
+    const owner = (await manager.owner('cli_one'))!;
+    const bot = (await repos.channelBots.get(owner.channelBotId))!;
+    await repos.channelBots.update(bot.id, { expectedRevision: bot.revision, state: 'disabled' });
+    await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_two', appSecret: 'rotated-synthetic' });
+    identity.mockClear(); roles.mockClear(); bots.mockClear();
+    const refreshed = (await manager.groups()).groups.flatMap(group => group.bots);
+    expect(identity).toHaveBeenCalledTimes(2);
+    expect(roles).toHaveBeenCalledTimes(2);
+    expect(bots).toHaveBeenCalledTimes(2);
+    expect(refreshed.filter(item => item.appId === 'cli_one')).toEqual([
+      expect.objectContaining({ validity: 'valid', applied: false, error: '群配置已停用或 Bot 尚未确认运行权限。' }),
+      expect.objectContaining({ validity: 'valid', applied: false, error: '群配置已停用或 Bot 尚未确认运行权限。' })
+    ]);
+    expect(refreshed.filter(item => item.appId === 'cli_two')).toEqual([
+      expect.objectContaining({ validity: 'credential_mismatch', applied: false, error: '群身份或凭据校验已失效，请重新同步群聊。' }),
+      expect.objectContaining({ validity: 'credential_mismatch', applied: false, error: '群身份或凭据校验已失效，请重新同步群聊。' })
+    ]);
+  });
+
+  it('looks up both sides of groups from disjoint truncated fact and binding windows', async () => {
+    await deleteLarkConfig(repos.config, 'cli_two');
+    const owner = (await manager.owner('cli_one'))!;
+    const identity = (await repos.remoteIdentityFacts.getByChannelBot(owner.channelBotId))!;
+    await repos.groupPolicy.transact(tx => {
+      for (let index = 0; index < 1000; index++) {
+        const chatId = `oc_window_${index.toString().padStart(4, '0')}`;
+        tx.groupBindings.create({ id: `binding_window_${index.toString().padStart(4, '0')}`, channelBotId: owner.channelBotId, externalChatId: chatId });
+        tx.remoteChatFacts.upsert({ id: `fact_window_${index}`, expectedRevision: 0, channelBotId: owner.channelBotId, externalChatId: chatId,
+          displayName: `Group ${index}`, membershipState: 'member', chatType: 'group', observedAt: new Date(time.getTime() + index + 1).toISOString(),
+          credentialRefId: identity.credentialRefId, credentialRevision: identity.credentialRevision, credentialFingerprint: identity.credentialFingerprint,
+          identityFactId: identity.id, identityRevision: identity.revision, expiresAt: identity.expiresAt });
+      }
+    });
+    const factWindow = await repos.remoteChatFacts.listByChannelBot(owner.channelBotId, 500);
+    const bindingWindow = await repos.groupBindings.listByChannelBot(owner.channelBotId, 500);
+    expect(factWindow).toHaveLength(500); expect(bindingWindow).toHaveLength(500);
+    const factIds = new Set(factWindow.map(fact => fact.externalChatId));
+    expect(bindingWindow.every(binding => !factIds.has(binding.externalChatId))).toBe(true);
+    const facts = vi.spyOn(repos.remoteChatFacts, 'getByNaturalKey');
+    const bindings = vi.spyOn(repos.groupBindings, 'getByNaturalKey');
+    const factList = vi.spyOn(repos.remoteChatFacts, 'listByChannelBot');
+    const bindingList = vi.spyOn(repos.groupBindings, 'listByChannelBot');
+    const roles = vi.spyOn(repos.roleAssignments, 'listByChannelBot');
+    const { groups } = await manager.groups();
+    expect(groups).toHaveLength(1000);
+    expect(groups.every(group => group.bots.length === 1 && group.bots[0]!.binding?.externalChatId === group.chatId
+      && group.bots[0]!.validity === 'valid' && group.bots[0]!.membership === 'member')).toBe(true);
+    expect(groups.find(group => group.chatId === 'oc_window_0000')!.name).toBe('oc_window_0000');
+    expect(groups.find(group => group.chatId === 'oc_window_0999')!.name).toBe('Group 999');
+    expect(facts).toHaveBeenCalledTimes(1000); expect(bindings).toHaveBeenCalledTimes(1000);
+    expect(factList).toHaveBeenCalledExactlyOnceWith(owner.channelBotId, 500);
+    expect(bindingList).toHaveBeenCalledExactlyOnceWith(owner.channelBotId, 500);
+    expect(roles).toHaveBeenCalledExactlyOnceWith(owner.channelBotId, 500);
   });
 
   it('rejects read context in an unbound participation-off group without activating or syncing it', async () => {

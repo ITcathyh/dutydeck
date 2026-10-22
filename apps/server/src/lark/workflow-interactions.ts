@@ -8,6 +8,7 @@ import type { LarkMessageEvent, LarkRuntime, ListenerLog } from './listener.js';
 import { LarkServiceError, buildLarkCard, larkCardSafeLimits } from './service.js';
 import type { LarkCardService } from './service.js';
 import { safeLarkWebUrl } from './card-actions.js';
+import { countCardComponents } from './card-elements.js';
 import { isBotSenderType, isGroupChat, renderGroupMention } from './card-mentions.js';
 import type { LarkCardElement } from './card-renderer.js';
 import { sendLarkFile } from './result-delivery.js';
@@ -19,6 +20,8 @@ import { redactTraceText } from './secret-redaction.js';
 import { testRegexWithTimeout } from '@dutydeck/acp-client';
 import { permissionIntent } from './permission-intent.js';
 import { planClosedText, planPendingElements, planStaleText, type LarkPlanDecision } from './plan-flow.js';
+
+export { countCardComponents } from './card-elements.js';
 
 /**
  * 询问（ask）问题正文保留 Markdown 网页链接，改用 markdown 元素；
@@ -188,18 +191,6 @@ const freeTextForm = (record: LarkInteraction): LarkCardElement => ({
       behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'answer', request_id: record.id, generation: record.boot } }] }
   ]
 });
-
-/**
- * 组件计数与 service.ts 的 cardComponents 同一口径（带 tag 的对象算 1 个，递归子节点）；
- * 那个函数未导出，这里保留同形实现，改口径时两处一起改。导出供预算测试锁定口径。
- */
-export const countCardComponents = (value: unknown): number => {
-  if (Array.isArray(value)) return value.reduce((sum, item) => sum + countCardComponents(item), 0);
-  if (!value || typeof value !== 'object') return 0;
-  const record = value as Record<string, unknown>;
-  return (typeof record.tag === 'string' ? 1 : 0)
-    + Object.values(record).reduce<number>((sum, item) => sum + countCardComponents(item), 0);
-};
 
 /** 给 reply 时才注入的 header/agentName 等固定开销留 1KB 余量，按 24KB/180 做真整卡试算。 */
 const structuredCardBudgetHeadroomBytes = 1024;

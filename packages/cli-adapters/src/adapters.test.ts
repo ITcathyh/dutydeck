@@ -993,7 +993,14 @@ describe('PTY_AGENT_CONTRIBUTIONS 覆盖度', () => {
   it('不可直接 spawn 的适配器不得登记，其余都已登记，且 contributions 无重复 id', async () => {
     const { PTY_AGENT_CONTRIBUTIONS } = await import('@dutydeck/pty-driver');
     const contributed = new Set(PTY_AGENT_CONTRIBUTIONS.map(c => c.adapterId));
-    expect(contributed.size, 'contributions 的 adapterId 不应重复').toBe(PTY_AGENT_CONTRIBUTIONS.length);
+    expect(new Set(PTY_AGENT_CONTRIBUTIONS.map(c => c.id)).size, 'Agent 入口 id 不应重复').toBe(PTY_AGENT_CONTRIBUTIONS.length);
+    expect(Object.fromEntries(
+      PTY_AGENT_CONTRIBUTIONS.filter(c => c.id !== c.adapterId).map(c => [c.id, c.adapterId])
+    )).toEqual({
+      claude: 'claude-code',
+      'codex-cli': 'codex',
+      'grok-build': 'grok'
+    });
     for (const id of EXPECTED_IDS) {
       if (NOT_CONTRIBUTED.has(id)) {
         expect(contributed.has(id), `${id} 不可由 dutydeck 直接 spawn，不该登记`).toBe(false);

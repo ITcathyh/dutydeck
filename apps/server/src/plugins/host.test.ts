@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,18 +7,11 @@ import { createCliUi } from '../cli-ui.js';
 import { discoverSkills, setPluginSkillRoots } from '../skill-catalog.js';
 import { runPluginCli } from './cli.js';
 import { PluginHost, resolveTriggerTarget } from './host.js';
-import { directPack, markerProviders, providerPack, scenarioMessage } from './scenario-fixtures.test-helpers.js';
+import { directPack, markerProviders, providerPack, scenarioMessage, writePlugin } from './scenario-fixtures.test-helpers.js';
 import { loadDaemonPlugins } from './service-wiring.js';
 import { PluginStore } from './store.js';
 
 const examplePlugin = resolve(import.meta.dirname, '../../../../examples/plugins/hello');
-
-async function writePlugin(root: string, files: Record<string, string>) {
-  for (const [path, content] of Object.entries(files)) {
-    await mkdir(join(root, path, '..'), { recursive: true });
-    await writeFile(join(root, path), content);
-  }
-}
 
 describe('PluginHost', () => {
   let temp: string;

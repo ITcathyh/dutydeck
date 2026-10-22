@@ -75,6 +75,7 @@ export function SessionList({ open, collapsed = false, onToggleCollapsed, onClos
   };
   const isExpanded = (workspace: WorkspaceGroup) => overrides[workspace.id] ?? autoExpanded(workspace);
   const desktop = typeof window === 'undefined' || typeof window.matchMedia !== 'function' ? true : matchesDesktop;
+  const compact = collapsed && desktop;
   const [experimental] = useExperimental();
   const createTask = createTaskAffordance({ agents, agentsLoading, onCreate: onNewSession, onPrepareAgents: onOpenControlCenter });
   const hiddenOnMobile = !desktop && !open;
@@ -108,20 +109,20 @@ export function SessionList({ open, collapsed = false, onToggleCollapsed, onClos
     aria-label="Dutydeck 工作台导航"
     aria-hidden={hiddenOnMobile || undefined}
     inert={hiddenOnMobile || undefined}
-    className={`ui-sidebar ${collapsed && desktop ? 'ui-sidebar-collapsed' : ''} fixed inset-y-0 left-0 z-drawer flex w-sidebar flex-col overflow-hidden border-r border-sidebar-border bg-sidebar-surface text-sidebar-text transition-transform duration-normal ease-emphasized md:bottom-shell-gap md:left-shell-gap md:top-0 md:translate-x-0 md:border-r ${open ? 'translate-x-0' : '-translate-x-full'}`}
+    className={`ui-sidebar fixed inset-y-0 left-0 z-drawer flex w-sidebar flex-col overflow-hidden border-r border-sidebar-border bg-sidebar-surface text-sidebar-text transition-transform duration-normal ease-emphasized md:bottom-shell-gap md:left-shell-gap md:top-0 md:translate-x-0 md:border-r ${open ? 'translate-x-0' : '-translate-x-full'}`}
   >
-    <div className="flex h-14 shrink-0 items-center gap-2 px-3">
-      <DutydeckIcon className="h-7 w-7 shrink-0"/><strong className="ui-sidebar-copy min-w-0 flex-1 text-title font-semibold tracking-[-.025em] text-sidebar-text-strong">dutydeck</strong>
+    <div className={`flex shrink-0 items-center gap-2 ${compact ? 'h-auto flex-col px-0 pt-3 pb-1' : 'h-14 px-3'}`}>
+      <DutydeckIcon className="h-7 w-7 shrink-0"/><strong className={`min-w-0 flex-1 text-title font-semibold tracking-[-.025em] text-sidebar-text-strong ${compact ? 'hidden' : ''}`}>dutydeck</strong>
       {onToggleCollapsed && <span className="hidden md:block"><IconButton label={collapsed ? '展开侧栏' : '收起侧栏'} onClick={onToggleCollapsed}>{collapsed ? <PanelLeftOpen size={16}/> : <PanelLeftClose size={16}/>}</IconButton></span>}
     </div>
 
-    <div className="shrink-0 px-3 pt-2 md:pt-3">
-      <button type="button" disabled={createTask.disabled} onClick={createTask.onClick} className="flex min-h-10 w-full items-center justify-center gap-2 rounded-md border border-sidebar-border px-3 text-body font-medium text-sidebar-text transition-colors duration-fast ease-out hover:bg-sidebar-hover hover:text-sidebar-text-strong active:translate-y-px disabled:opacity-60"><Plus aria-hidden="true" size={16}/><span className={collapsed && desktop ? 'sr-only' : 'ui-sidebar-copy'}>{createTask.label}</span></button>
+    <div className={`shrink-0 pt-2 md:pt-3 ${compact ? 'px-2.5' : 'px-3'}`}>
+      <button type="button" disabled={createTask.disabled} onClick={createTask.onClick} className={`flex min-h-10 w-full items-center justify-center gap-2 rounded-md border border-sidebar-border text-body font-medium text-sidebar-text transition-colors duration-fast ease-out hover:bg-sidebar-hover hover:text-sidebar-text-strong active:translate-y-px disabled:opacity-60 ${compact ? 'p-0' : 'px-3'}`}><Plus aria-hidden="true" size={16}/><span className={compact ? 'sr-only' : undefined}>{createTask.label}</span></button>
     </div>
 
-    {onPrimaryNavChange && <div className="mt-1 shrink-0"><SidebarNav groups={primaryNavGroups} compact={collapsed && desktop}/></div>}
+    {onPrimaryNavChange && <div className="mt-1 shrink-0"><SidebarNav groups={primaryNavGroups} compact={compact}/></div>}
 
-    <div className={`ui-sidebar-projects mt-3 min-h-0 flex-1 flex-col ${!collapsed || !desktop ? 'flex' : 'hidden'}`}><div className="flex items-center px-4 pb-2 text-caption font-semibold text-sidebar-text-muted"><FolderKanban size={13} className="mr-2"/>项目<span className="ml-auto font-mono text-meta">{workspaces.length}</span>{onManageWorkspaces && <span className="ml-1 -mr-2"><IconButton label="整理分组" size="sm" onClick={onManageWorkspaces}><SlidersHorizontal size={13}/></IconButton></span>}</div><div className="min-h-0 flex-1 overflow-y-auto px-2.5 pb-2">{sessionsLoading
+    <div className={`ui-sidebar-projects mt-3 min-h-0 flex-1 flex-col ${compact ? 'hidden' : 'flex'}`}><div className="flex items-center px-4 pb-2 text-caption font-semibold text-sidebar-text-muted"><FolderKanban size={13} className="mr-2"/>项目<span className="ml-auto font-mono text-meta">{workspaces.length}</span>{onManageWorkspaces && <span className="ml-1 -mr-2"><IconButton label="整理分组" size="sm" onClick={onManageWorkspaces}><SlidersHorizontal size={13}/></IconButton></span>}</div><div className="min-h-0 flex-1 overflow-y-auto px-2.5 pb-2">{sessionsLoading
       ? <Skeleton variant="block" lines={2} className="px-1 [&>div]:bg-sidebar-hover"/>
       : workspaces.length ? workspaces.map(workspace => {
         const expanded = isExpanded(workspace);
@@ -142,7 +143,7 @@ export function SessionList({ open, collapsed = false, onToggleCollapsed, onClos
       })
       : <div className="rounded-lg border border-dashed border-sidebar-border px-4 py-6 text-center text-caption text-sidebar-text-muted">当前视图没有任务。</div>}</div></div>
 
-    <div className="mt-auto min-h-0 shrink overflow-y-auto border-t border-sidebar-border py-2"><SidebarNav groups={navGroups} compact={collapsed && desktop}/></div>
-    <div className="flex shrink-0 items-center border-t border-sidebar-border pl-4 pr-2 text-meta text-sidebar-text-faint"><span className="ui-sidebar-copy min-w-0 flex-1 py-2">{authRequired === false ? <span className="flex items-center gap-1.5 text-sidebar-accent"><ShieldCheck size={12}/>受信开发机模式 · 无需 token</span> : '本机运行'}</span><RemoteAccessLogout/></div>
+    <div className="mt-auto min-h-0 shrink overflow-y-auto border-t border-sidebar-border py-2"><SidebarNav groups={navGroups} compact={compact}/></div>
+    <div className="flex shrink-0 items-center border-t border-sidebar-border pl-4 pr-2 text-meta text-sidebar-text-faint"><span className={`min-w-0 flex-1 py-2 ${compact ? 'hidden' : ''}`}>{authRequired === false ? <span className="flex items-center gap-1.5 text-sidebar-accent"><ShieldCheck size={12}/>受信开发机模式 · 无需 token</span> : '本机运行'}</span><RemoteAccessLogout/></div>
   </aside>;
 }

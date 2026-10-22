@@ -36,6 +36,15 @@ describe('Linux descendant PID scan', () => {
     expect(descendantPids([10])).toEqual([10, 12, 13]);
   });
 
+  it('keeps a wide sibling group in DFS order and preserves the full stat scan order', () => {
+    const siblings = Array.from({ length: 2000 }, (_, index) => 3000 - index);
+    const entries: Array<[number, number]> = [...siblings.map((pid): [number, number] => [pid, 10]), [4000, 3000], [5000, 1], [10, 1]];
+    proc(entries);
+    const stats = new Map<string, string>();
+    expect(descendantPids([10], stats)).toEqual([10, ...siblings.toReversed(), 4000]);
+    expect([...stats]).toEqual(entries.map(([pid, parent]) => [String(pid), `${pid} (fixture) S ${parent} 0 0 0`]));
+  });
+
   it('deduplicates overlapping roots and cyclic parent data', () => {
     proc([[10, 20], [20, 10], [30, 20]]);
     expect(descendantPids([20, 10, 20])).toEqual([20, 30, 10]);

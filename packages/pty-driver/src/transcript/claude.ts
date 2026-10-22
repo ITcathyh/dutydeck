@@ -738,7 +738,11 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
       return { inputTokens: sum('inputTokens'), outputTokens: sum('outputTokens'), cachedReadTokens: sum('cacheReadTokens'), cachedWriteTokens: sum('cacheWriteTokens') };
     };
     const byModel = new Map<string, ClaudeMessageUsage[]>();
-    for (const [, usage] of messages) byModel.set(usage.model ?? '', [...byModel.get(usage.model ?? '') ?? [], usage]);
+    for (const [, usage] of messages) {
+      const model = usage.model ?? '', group = byModel.get(model);
+      if (group) group.push(usage);
+      else byModel.set(model, [usage]);
+    }
     const models = [...byModel.keys()].filter(Boolean).sort();
     return {
       type: 'status',

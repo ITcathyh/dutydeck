@@ -84,6 +84,20 @@ describe('team-faq: scoring and ranking', () => {
     expect(scoreSection({ heading: 'x', text: 'nothing' }, ['order'])).toBe(0);
   });
 
+  it('caps each body keyword in a large section while continuing to count title hits', () => {
+    const heading = 'Order 订单 '.repeat(8);
+    const capped = { heading, text: 'order 订单 '.repeat(5) };
+    const repeated = { heading, text: 'Order 订单 '.repeat(50_000) };
+    expect(scoreSection(capped, ['order', '订单'])).toBe(58);
+    expect(scoreSection(repeated, ['order', '订单'])).toBe(58);
+  });
+
+  it('keeps non-overlapping matches at and beyond the body cap', () => {
+    expect(scoreSection({ heading: 'aaa', text: 'a'.repeat(9) }, ['aa'])).toBe(7);
+    expect(scoreSection({ heading: 'aaa', text: 'a'.repeat(10) }, ['aa'])).toBe(8);
+    expect(scoreSection({ heading: 'aaa', text: 'a'.repeat(100_000) }, ['aa'])).toBe(8);
+  });
+
   it('returns the best sections first, only those that scored, with stable ids and titles', async () => {
     const { docs } = await workspace();
     await write(join(docs, 'orders.md'), orders);

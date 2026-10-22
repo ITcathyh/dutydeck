@@ -21,3 +21,12 @@ export const collapsiblePanel = (elementId: string, title: CardElement, elements
   },
   elements
 });
+
+/** 带字符串 tag 的对象算一个组件，包含所有嵌套字段。 */
+export const countCardComponents = (value: unknown): number => {
+  if (Array.isArray(value)) return value.reduce((sum, item) => sum + countCardComponents(item), 0);
+  if (!value || typeof value !== 'object') return 0;
+  const record = value as Record<string, unknown>;
+  return (typeof record.tag === 'string' ? 1 : 0)
+    + Object.values(record).reduce<number>((sum, item) => sum + countCardComponents(item), 0);
+};

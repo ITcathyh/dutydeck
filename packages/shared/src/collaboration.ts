@@ -167,22 +167,9 @@ export const collaborationObservationSchema = z.object({
 }).strict();
 export type CollaborationObservation = z.infer<typeof collaborationObservationSchema>;
 
-export const observeCollaborationInputSchema = z.object({
-  id: z.string().min(1).max(128).optional(),
-  scope: collaborationScopeSchema,
-  source: z.string().min(1).max(64),
-  eventId: z.string().min(1).max(128),
-  occurredAt: z.string().datetime(),
-  receivedAt: z.string().datetime(),
-  senderId: z.string().max(128).optional(),
-  senderKind: z.enum(senderKinds),
-  threadId: z.string().max(128).optional(),
-  messageId: z.string().max(128).optional(),
-  text: z.string().max(16000),
-  refs: z.array(z.string().max(256)).max(100).default([]),
-  origin: z.enum(observationOrigins),
-  missing: z.array(z.string().max(256)).max(100).default([])
-}).strict();
+export const observeCollaborationInputSchema = collaborationObservationSchema
+  .omit({ sequence: true, revision: true })
+  .extend({ id: collaborationObservationSchema.shape.id.optional() });
 export type ObserveCollaborationInput = z.infer<typeof observeCollaborationInputSchema>;
 
 export const listObservationsOptionsSchema = z.object({
@@ -329,24 +316,14 @@ export const collaborationFollowupSchema = z.object({
 }).strict();
 export type CollaborationFollowup = z.infer<typeof collaborationFollowupSchema>;
 
-export const createFollowupInputSchema = z.object({
-  id: z.string().min(1).max(128).optional(),
-  scope: collaborationScopeSchema,
-  goal: z.string().trim().min(1).max(2000),
-  status: z.enum(followupStatuses).default('open'),
-  progress: z.string().max(8000).default(''),
-  steps: z.array(collaborationFollowupStepSchema).max(50).default([]),
-  ownerId: z.string().max(128).optional(),
-  dueAt: z.string().datetime().optional(),
-  result: z.string().max(8000).optional(),
-  sourceRefs: z.array(z.string().max(256)).max(100).default([]),
-  taskIds: z.array(z.string().max(128)).max(100).default([]),
-  externalRefs: z.array(z.string().max(256)).max(100).default([]),
-  fields: followupFieldsSchema,
-  createdBy: z.string().min(1).max(128),
-  updatedBy: z.string().min(1).max(128).optional(),
-  provenance: z.enum(collaborationProvenances).default('observed')
-}).strict();
+export const createFollowupInputSchema = collaborationFollowupSchema
+  .omit({ revision: true, createdAt: true, updatedAt: true })
+  .extend({
+    id: collaborationFollowupSchema.shape.id.optional(),
+    status: collaborationFollowupSchema.shape.status.default('open'),
+    updatedBy: collaborationFollowupSchema.shape.updatedBy.optional(),
+    provenance: collaborationFollowupSchema.shape.provenance.default('observed')
+  });
 export type CreateFollowupInput = z.infer<typeof createFollowupInputSchema>;
 
 export const updateFollowupInputSchema = z.object({
@@ -611,19 +588,9 @@ export const collaborationActionSchema = z.object({
 }).strict();
 export type CollaborationAction = z.infer<typeof collaborationActionSchema>;
 
-export const beginActionInputSchema = z.object({
-  id: z.string().min(1).max(128),
-  scope: collaborationScopeSchema,
-  kind: z.string().min(1).max(64),
-  mandateId: z.string().max(128).optional(),
-  mandateRevision: z.number().int().min(1).optional(),
-  scheduleGeneration: z.number().int().min(1).optional(),
-  contextRevision: z.number().int().min(0).optional(),
-  followupRevision: z.number().int().min(1).optional(),
-  requesterId: z.string().min(1).max(128),
-  inputDigest: z.string().min(1).max(128),
-  payload: boundedJsonRecordSchema.default({})
-}).strict();
+export const beginActionInputSchema = collaborationActionSchema
+  .omit({ revision: true, status: true, receipt: true, error: true, createdAt: true, updatedAt: true })
+  .extend({ payload: collaborationActionSchema.shape.payload.default({}) });
 export type BeginActionInput = z.infer<typeof beginActionInputSchema>;
 
 export const updateActionInputSchema = z.object({

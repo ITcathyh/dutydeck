@@ -1,18 +1,11 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadPluginDirectory, parseCommandMarkdown, PluginValidationError } from './manifest.js';
-import { directPack, providerPack } from './scenario-fixtures.test-helpers.js';
+import { directPack, providerPack, writePlugin } from './scenario-fixtures.test-helpers.js';
 
 const examplePlugin = resolve(import.meta.dirname, '../../../../examples/plugins/hello');
-
-async function writePlugin(root: string, files: Record<string, string>) {
-  for (const [path, content] of Object.entries(files)) {
-    await mkdir(join(root, path, '..'), { recursive: true });
-    await writeFile(join(root, path), content);
-  }
-}
 
 const issuesOf = async (root: string) => {
   try { await loadPluginDirectory(root); }

@@ -7,8 +7,8 @@ import { z } from 'zod';
 import {
   RuntimeError, canonicalExecutionJson, parseLarkSourceId, createGroupBindingInputSchema, createRoleAssignmentInputSchema, evaluatePolicyAction, installationOwnerTaskActor,
   groupBindingSchema, remoteChatFactValidity, resolveGroupEffectiveConfig, resolveParticipation, updateRoleAssignmentInputSchema,
-  type ChannelBotGroupPolicy, type EffectiveGroupConfig, type GroupBinding, type PolicyAction,
-  type PolicyDecision, type PresentationSettings, type RepositoryBundle, type RoleAssignment, type Session, type ToolRiskPolicy
+  type ChannelBotFoundation, type ChannelBotGroupPolicy, type EffectiveGroupConfig, type GroupBinding, type PolicyAction,
+  type PolicyDecision, type PresentationSettings, type RepositoryBundle, type RemoteIdentityFact, type RoleAssignment, type Session, type ToolRiskPolicy
 } from '@dutydeck/shared';
 import { defaultLarkTraceLimit, larkExecutionConfirmed, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import { createLarkCardService, LarkServiceError, type LarkCardService, type LarkChat } from './service.js';
@@ -153,10 +153,14 @@ export class LarkGroupManager {
     };
   }
 
-  private async detail(config: StoredLarkConfig, owner: LiveOwner, chatId: string): Promise<ManagedGroupBot> {
+  private async detail(config: StoredLarkConfig, owner: LiveOwner, chatId: string, botState?: {
+    identity: RemoteIdentityFact | undefined; roles: RoleAssignment[]; bot: ChannelBotFoundation | undefined;
+  }): Promise<ManagedGroupBot> {
     const [binding, fact, identity, roles, bot] = await Promise.all([
       this.repos.groupBindings.getByNaturalKey(owner.channelBotId, chatId), this.repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, chatId),
-      this.repos.remoteIdentityFacts.getByChannelBot(owner.channelBotId), this.repos.roleAssignments.listByChannelBot(owner.channelBotId, 500), this.repos.channelBots.get(owner.channelBotId)
+      botState ? botState.identity : this.repos.remoteIdentityFacts.getByChannelBot(owner.channelBotId),
+      botState ? botState.roles : this.repos.roleAssignments.listByChannelBot(owner.channelBotId, 500),
+      botState ? botState.bot : this.repos.channelBots.get(owner.channelBotId)
     ]);
     const validity = owner.fingerprint !== fingerprint(config) ? 'credential_mismatch' : fact ? remoteChatFactValidity(fact, identity, this.now()) : 'unknown';
     const effective = binding ? resolveGroupEffectiveConfig(this.policy(config, owner.channelBotId), binding, presentationDefaults(config)) : undefined;
@@ -176,11 +180,12 @@ export class LarkGroupManager {
       const identity = await this.repos.remoteIdentityFacts.getByChannelBot(owner.channelBotId);
       const facts = await this.repos.remoteChatFacts.listByChannelBot(owner.channelBotId, 500);
       const bindings = await this.repos.groupBindings.listByChannelBot(owner.channelBotId, 500);
+      const [roles, bot] = await Promise.all([this.repos.roleAssignments.listByChannelBot(owner.channelBotId, 500), this.repos.channelBots.get(owner.channelBotId)]);
       for (const chatId of new Set([...facts.map(fact => fact.externalChatId), ...bindings.map(binding => binding.externalChatId)])) {
         const fact = facts.find(item => item.externalChatId === chatId);
         const key = `${config.brand ?? 'feishu'}:${identity?.tenantRef ?? config.appId}:${chatId}`;
         const group = groups.get(key) ?? { key, chatId, name: fact?.displayName ?? chatId, bots: [] };
-        group.bots.push(await this.detail(config, owner, chatId));
+        group.bots.push(await this.detail(config, owner, chatId, { identity, roles, bot }));
         groups.set(key, group);
       }
     }

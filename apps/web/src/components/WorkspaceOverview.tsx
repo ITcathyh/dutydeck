@@ -159,9 +159,9 @@ function LarkBotsOverview({ bots, agents, loading, agentsLoading, listeningDisab
   const noAgents = agents.length === 0 && !agentsLoading;
   const exceptions = bots.map(bot => ({ bot, status: projectLarkBotStatus(bot, listeningDisabled, loading, failed) })).filter(({ status }) => status.key !== 'listening');
 
-  return <Card as="aside" aria-label="协作入口" padding="sm">
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <div className="flex min-w-0 items-center gap-3"><span aria-hidden="true" className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-info-soft text-info"><MessageSquare size={17}/></span><div><h2 className="text-body font-semibold text-primary">飞书机器人</h2><p className="text-caption text-secondary">{summary}</p></div></div>
+  return <Card as="aside" aria-label="协作入口" padding="sm" className="ui-lark-bots-card">
+    <div className="ui-lark-bots-header flex flex-wrap items-center justify-between gap-2">
+      <div className="flex min-w-0 items-center gap-3"><span aria-hidden="true" className="ui-lark-bots-icon grid h-9 w-9 shrink-0 place-items-center rounded-md bg-info-soft text-info"><MessageSquare size={17}/></span><div><h2 className="text-body font-semibold text-primary">飞书机器人</h2><p className="text-caption text-secondary">{summary}</p></div></div>
       <Button variant={firstUse ? 'primary' : 'secondary'} onClick={firstUse ? onOpenLarkSetup : onManageBots} icon={firstUse ? <Plus size={15}/> : <Settings2 size={15}/>}>{firstUse ? '绑定飞书 Bot' : '管理飞书 Bot'}</Button>
     </div>
     {noAgents && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-warning-border bg-warning-soft p-3 text-caption text-warning"><span>尚未检测到本机可用 Agent，机器人收到消息后无法执行任务。</span><Button variant="secondary" onClick={onOpenAgentSetup}>准备 Agent</Button></div>}

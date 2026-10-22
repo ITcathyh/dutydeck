@@ -10,7 +10,7 @@ import type { ContactIdType, ContactUser } from './owner-identity.js';
 import { executeWithLarkGate, resolveLarkGateConfig, LarkCircuitOpenError } from './api-gate.js';
 import { buildLarkCardActions, buildLarkCardDetailButton, buildLarkCardFollowUpActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
 import { larkSessionDetailUrl } from './detail-link.js';
-import { collapsiblePanel } from './card-elements.js';
+import { collapsiblePanel, countCardComponents } from './card-elements.js';
 import type { LarkScenarioRecallLine } from './scenario-recall.js';
 import { larkConclusionHeadline, larkElapsedLabel, larkStoppedAtLabel, larkUserStatus } from './card-status.js';
 
@@ -442,16 +442,10 @@ const stripFirstToolSection = (group: Record<string, unknown>): boolean => {
   tool.elements = [(tool.elements as Array<Record<string, unknown>>)[0]!];
   return true;
 };
-const cardComponents = (value: unknown): number => {
-  if (Array.isArray(value)) return value.reduce((sum, item) => sum + cardComponents(item), 0);
-  if (!value || typeof value !== 'object') return 0;
-  const record = value as Record<string, unknown>;
-  return (typeof record.tag === 'string' ? 1 : 0) + Object.values(record).reduce<number>((sum, item) => sum + cardComponents(item), 0);
-};
 
 export function boundLarkCardElements(elements: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
   const withinLimits = (value: unknown) => cardBytes(value) <= larkCardSnapshotLimits.bytes
-    && cardComponents(value) <= larkCardSnapshotLimits.components;
+    && countCardComponents(value) <= larkCardSnapshotLimits.components;
   const omissionNotice = (count: number) => ({
     tag: 'markdown', element_id: 'dutydeck_snapshot_omission',
     content: `<font color='grey'>内容较长，已省略 ${count} 个较早执行分组。</font>`,
@@ -1083,7 +1077,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
       }
     };
   };
-  const withinLimits = (card: unknown) => cardBytes(card) <= larkCardSafeLimits.bytes && cardComponents(card) <= larkCardSafeLimits.components;
+  const withinLimits = (card: unknown) => cardBytes(card) <= larkCardSafeLimits.bytes && countCardComponents(card) <= larkCardSafeLimits.components;
   const omissionNotice = (count: number) => ({
     tag: 'markdown', element_id: 'dutydeck_omission',
     content: `<font color='grey'>内容较长，已省略 ${count} 个较早执行分组。</font>`,

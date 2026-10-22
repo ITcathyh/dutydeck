@@ -177,7 +177,6 @@ export class JsonlTransport implements AgentDriver {
   private preparedOwned?: OwnedProcess;
 
   get resourceCapabilities(): DriverResourceCapabilities {
-    const strict = this.options.context?.protocol === 'controlled-v1';
     return {
       observe: true,
       originalObjectStop: true,

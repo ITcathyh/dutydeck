@@ -8,7 +8,9 @@ export function descendantPids(roots: number[], stats?: Map<string, string>): nu
       const raw = readFileSync(`/proc/${entry}/stat`, 'utf8');
       stats?.set(entry, raw);
       const parent = Number(raw.slice(raw.lastIndexOf(')') + 2).split(' ')[1]);
-      children.set(parent, [...(children.get(parent) ?? []), Number(entry)]);
+      const siblings = children.get(parent);
+      if (siblings) siblings.push(Number(entry));
+      else children.set(parent, [Number(entry)]);
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   const pids = new Set<number>();

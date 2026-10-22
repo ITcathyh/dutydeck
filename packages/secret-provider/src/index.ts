@@ -136,7 +136,6 @@ export class LocalFileSecretProvider {
       return { referenceKey, availability: 'available' };
     } catch (error) {
       if (isMissing(error)) return { referenceKey, availability: 'missing' };
-      if (error instanceof SecretProviderError) return { referenceKey, availability: 'unreadable' };
       return { referenceKey, availability: 'unreadable' };
     }
   }

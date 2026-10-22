@@ -1273,13 +1273,12 @@ export class SessionAutomationService {
       if (!await this.replace(occurrenceKey(occurrence.id), JSON.stringify(accepted), withAdmission)) return;
       occurrenceWithAdmission = { raw: JSON.stringify(withAdmission), value: withAdmission };
     }
-    await this.dispatchOccurrence(occurrenceWithAdmission, schedule, request, taskId, taskIdVersion);
+    await this.dispatchOccurrence(occurrenceWithAdmission, request, taskId, taskIdVersion);
     if (occurrence.triggerSource !== 'manual') await this.advanceSchedule(schedule, occurrence.scheduledForUtc);
   }
 
   private async dispatchOccurrence(
     stored: { raw: string; value: SessionScheduleOccurrenceV2 },
-    schedule: SessionSchedule,
     request: TaskRequestV1,
     taskId: string,
     taskIdVersion: 'v1' | 'legacy'

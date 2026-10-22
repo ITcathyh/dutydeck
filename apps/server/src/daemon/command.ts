@@ -520,7 +520,7 @@ function changedResult(action: DaemonCommandResult['action']): DaemonCommandResu
 export async function daemonStop(deps: DaemonCommandDeps = {}, dir = resolveDaemonDir()): Promise<DaemonCommandResult> {
   const state = readDaemonStatus(dir);
   // 受 systemd 托管（Restart=always）的 daemon 直接发信号会被立刻重拉，交给 systemctl 停。
-  const supervised = await systemdSupervisor(dir, state, deps);
+  const supervised = await systemdSupervisor(state, deps);
   if (supervised && 'error' in supervised) return { ok: false, action: 'stop', running: true, pid: state?.pid, error: supervised.error };
   if (supervised) return await systemdStop(dir, state!, supervised.unit, deps);
   // 崩溃后 unit 正在 RestartSec 间隙里等着重拉：状态已经 stale，但 systemd 马上会再拉起一代，同样交给 systemctl stop。
@@ -581,7 +581,7 @@ export async function daemonRestart(options: CliOptions, handlers: DaemonCommand
     }
   }
   // 受 systemd 托管：交给 systemctl restart，由 unit 的 ExecStart 拉起新一代。
-  const supervised = await systemdSupervisor(runningDir, previousState, handlers);
+  const supervised = await systemdSupervisor(previousState, handlers);
   if (supervised && 'error' in supervised) return { ok: false, action: 'restart', running: true, pid: previousState?.pid, error: supervised.error };
   if (supervised) return await systemdRestart(runningDir, previousState!, supervised.unit, supervised.info, options, handlers);
   // 没有 daemon 在跑、上一代也是 unit 拉起的（或没有记录）时，restart 就是 start：交给 systemd，
@@ -696,7 +696,7 @@ function systemdSupervisionFromEnv(env: NodeJS.ProcessEnv): Pick<DaemonState, 's
  * 且 systemd 报告该 unit 的 MainPID 正是它。三者都满足才改走 systemctl；记录了托管却无法
  * 向 systemd 核实时返回 error，调用方不做任何改动。
  */
-async function systemdSupervisor(dir: string, state: DaemonState | undefined, deps: DaemonCommandDeps): Promise<{ unit: string; info: SystemdUnitInfo } | { error: string } | undefined> {
+async function systemdSupervisor(state: DaemonState | undefined, deps: DaemonCommandDeps): Promise<{ unit: string; info: SystemdUnitInfo } | { error: string } | undefined> {
   if ((deps.platform ?? process.platform) !== 'linux') return undefined;
   if (state?.supervisor !== 'systemd' || !state.systemdUnit || inspectDaemonState(state).status !== 'verified') return undefined;
   const unit = state.systemdUnit;
@@ -873,7 +873,7 @@ async function systemdRestart(dir: string, state: DaemonState, unit: string, inf
  */
 export async function systemdRestartTarget(deps: DaemonCommandDeps = {}): Promise<{ unit: string; execPath?: string; script?: string } | undefined> {
   const dir = resolveDaemonDir();
-  const supervised = await systemdSupervisor(dir, readDaemonStatus(dir), deps);
+  const supervised = await systemdSupervisor(readDaemonStatus(dir), deps);
   return supervised && !('error' in supervised) ? { unit: supervised.unit, execPath: supervised.info.execPath, script: supervised.info.script } : undefined;
 }
 
@@ -997,7 +997,7 @@ async function unitRestart(unit: string, options: CliOptions, deps: DaemonComman
   const dir = defaultDaemonDir(target.root);
   if (target.foreground) {
     const state = readDaemonStatus(dir);
-    const supervised = await systemdSupervisor(dir, state, deps);
+    const supervised = await systemdSupervisor(state, deps);
     if (supervised && 'error' in supervised) return { ok: false, action: 'restart', running: true, pid: state?.pid, error: supervised.error };
     if (supervised?.unit === unit) return await systemdRestart(dir, state!, unit, supervised.info, options, deps);
   }

@@ -44,6 +44,38 @@ it('counts sub-agent (sidechain) messages and names several models together inst
   expect(source.takeTurnUsage()?.data).toMatchObject({ model: 'claude-haiku-4-5 + claude-opus-5-5', breakdown: { inputTokens: 105, outputTokens: 11 } });
 });
 
+it('totals a large same-model batch with interleaved models without changing an earlier reading', async () => {
+  const { append } = await tail();
+  const batch = Array.from({ length: 2048 }, (_, index) => message(`msg_${index}`, 'claude-opus-5-5', {
+    input_tokens: index + 1, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4,
+  }));
+  await append(
+    message('msg_first', 'claude-haiku-4-5', { input_tokens: 7, output_tokens: 11 }),
+    ...batch.slice(0, 1024),
+    message('msg_unknown', '', { input_tokens: 13, output_tokens: 17 }),
+    ...batch.slice(1024),
+    message('msg_last', 'claude-haiku-4-5', { input_tokens: 19, output_tokens: 23 }),
+  );
+  const event = source.takeTurnUsage();
+  const expected = { type: 'status', data: {
+    state: 'turn_usage', usageRef: 'claude:msg_last', model: 'claude-haiku-4-5 + claude-opus-5-5',
+    breakdown: { inputTokens: 2098215, outputTokens: 4147, cachedReadTokens: 6144, cachedWriteTokens: 8192 },
+    byModel: [
+      { breakdown: { inputTokens: 13, outputTokens: 17, cachedReadTokens: 0, cachedWriteTokens: 0 } },
+      { model: 'claude-haiku-4-5', breakdown: { inputTokens: 26, outputTokens: 34, cachedReadTokens: 0, cachedWriteTokens: 0 } },
+      { model: 'claude-opus-5-5', breakdown: { inputTokens: 2098176, outputTokens: 4096, cachedReadTokens: 6144, cachedWriteTokens: 8192 } },
+    ],
+  } };
+  expect(event).toEqual(expected);
+  expect(source.takeTurnUsage()).toBeUndefined();
+  await append(message('msg_next', 'claude-opus-5-5', { input_tokens: 1, output_tokens: 2 }));
+  expect(source.takeTurnUsage()).toEqual({ type: 'status', data: {
+    state: 'turn_usage', usageRef: 'claude:msg_next', model: 'claude-opus-5-5',
+    breakdown: { inputTokens: 1, outputTokens: 2, cachedReadTokens: 0, cachedWriteTokens: 0 },
+  } });
+  expect(event).toEqual(expected);
+});
+
 it('does not report the same message again after the transcript is re-read', async () => {
   const { append } = await tail();
   await append(message('msg_1', 'claude-opus-5-5', { input_tokens: 1, output_tokens: 1 }));

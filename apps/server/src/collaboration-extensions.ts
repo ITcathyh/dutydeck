@@ -183,19 +183,7 @@ export class CollaborationExtensions {
     return result;
   }
 
-  registerQuery(
-    id: string,
-    queryDef: {
-      parse: (input: unknown) => unknown;
-      query: (
-        input: unknown,
-        context: { scope: CollaborationScope; actorId: string }
-      ) => Promise<{
-        evidence: Array<{ id: string; scope: CollaborationScope; text: string; occurredAt: string }>;
-        missing: string[];
-      }>;
-    }
-  ): void {
+  registerQuery(id: string, queryDef: RegisteredQuery): void {
     if (this.queries.has(id)) {
       throw new Error(`Query '${id}' is already registered`);
     }
@@ -255,25 +243,7 @@ export class CollaborationExtensions {
     };
   }
 
-  registerAction(
-    id: string,
-    actionDef: {
-      parse: (input: unknown) => unknown;
-      execute: (
-        input: unknown,
-        context: { scope: CollaborationScope; actorId: string; actionId: string }
-      ) => Promise<{ receipt: string }>;
-      reconcile?: (context: {
-        scope: CollaborationScope;
-        actorId: string;
-        action: CollaborationAction;
-      }) => Promise<{
-        status: 'succeeded' | 'failed' | 'unknown';
-        receipt?: string;
-        error?: string;
-      }>;
-    }
-  ): void {
+  registerAction(id: string, actionDef: RegisteredAction): void {
     if (this.actions.has(id)) {
       throw new Error(`Action '${id}' is already registered`);
     }

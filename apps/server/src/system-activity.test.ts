@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildApp } from './app.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
+import type { AgentDriver } from '@dutydeck/shared';
 
 describe('GET /api/system/activity', () => {
   it('requires authentication when auth is enabled', async () => {
@@ -86,8 +87,8 @@ describe('GET /api/system/activity', () => {
     } finally { await app.close(); }
   });
 
-  it('counts only tasks with status === running and excludes the given session', () => {
-    // 验证 DutydeckRuntime 原型上的 getRunningTaskCount 逻辑只计数 running 状态
+  it('merges running, steering and background work by session and excludes the given session', () => {
+    // 按会话合并 running、steering 与后台任务，并排除指定会话
     const mockTasks = new Map<string, any>([
       ['session-1', { id: 'task-1', status: 'running' }],
       ['session-2', { id: 'task-2', status: 'queued' }],
@@ -108,6 +109,9 @@ describe('GET /api/system/activity', () => {
       writable: true
     });
 
+    const drivers = new Map<string, Pick<AgentDriver, 'hasBackgroundWork'>>();
+    Object.defineProperty(fakeRuntime, 'drivers', { value: drivers });
+
     expect(fakeRuntime.getRunningTaskCount()).toBe(2);
     // 排除其中一个 running 会话后只剩 1（Agent 在自己会话里重启时排除本会话）
     expect(fakeRuntime.getRunningTaskCount('session-1')).toBe(1);
@@ -118,5 +122,20 @@ describe('GET /api/system/activity', () => {
     steeringSessions.set('session-4', 'task-8');
     expect(fakeRuntime.getRunningTaskCount()).toBe(3);
     expect(fakeRuntime.getRunningTaskCount('session-4')).toBe(2);
+
+    let backgroundActive = true;
+    drivers.set('session-1', { hasBackgroundWork: () => true });
+    drivers.set('session-4', { hasBackgroundWork: () => true });
+    drivers.set('session-7', { hasBackgroundWork: () => backgroundActive });
+    drivers.set('session-8', { hasBackgroundWork: () => false });
+    drivers.set('session-9', {});
+    expect(fakeRuntime.getRunningTaskCount()).toBe(4);
+    expect(fakeRuntime.getRunningTaskCount('session-7')).toBe(3);
+    expect(fakeRuntime.getRunningTaskCount('session-1')).toBe(3);
+    expect(fakeRuntime.getRunningTaskCount('session-4')).toBe(3);
+    expect(fakeRuntime.getRunningTaskCount('session-8')).toBe(4);
+    expect(fakeRuntime.getRunningTaskCount('session-9')).toBe(4);
+    backgroundActive = false;
+    expect(fakeRuntime.getRunningTaskCount()).toBe(3);
   });
 });

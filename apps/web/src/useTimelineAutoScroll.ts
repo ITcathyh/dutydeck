@@ -17,22 +17,21 @@ export function useTimelineAutoScroll(scopeKey: string | undefined, contentVersi
     setIsFollowing(next);
   };
 
+  const followContentResize = () => {
+    const container = containerRef.current;
+    if (container && enabled && followingRef.current) container.scrollTop = container.scrollHeight;
+  };
+
   useLayoutEffect(() => {
     followingRef.current = initialFollowing;
     setIsFollowing(initialFollowing);
-    const frame = requestAnimationFrame(() => {
-      const container = containerRef.current;
-      if (container && enabled && followingRef.current) container.scrollTop = container.scrollHeight;
-    });
+    const frame = requestAnimationFrame(followContentResize);
     return () => cancelAnimationFrame(frame);
   }, [scopeKey]);
 
   useEffect(() => {
     if (!enabled || !followingRef.current) return;
-    const frame = requestAnimationFrame(() => {
-      const container = containerRef.current;
-      if (container && enabled && followingRef.current) container.scrollTop = container.scrollHeight;
-    });
+    const frame = requestAnimationFrame(followContentResize);
     return () => cancelAnimationFrame(frame);
   }, [contentVersion, activityVersion, enabled]);
 
@@ -45,11 +44,6 @@ export function useTimelineAutoScroll(scopeKey: string | undefined, contentVersi
     const container = containerRef.current;
     updateFollowing(true);
     if (container) container.scrollTop = container.scrollHeight;
-  };
-
-  const followContentResize = () => {
-    const container = containerRef.current;
-    if (container && enabled && followingRef.current) container.scrollTop = container.scrollHeight;
   };
 
   return { containerRef, isFollowing, onScroll, scrollToBottom, followContentResize, stopFollowing: () => updateFollowing(false) };

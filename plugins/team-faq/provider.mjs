@@ -8,9 +8,12 @@ const BODY_HITS_CAP = 5;
 
 const asStrings = value => (Array.isArray(value) ? value : []).filter(item => typeof item === 'string').map(item => item.trim()).filter(Boolean);
 
-const countOccurrences = (haystack, needle) => {
+const countOccurrences = (haystack, needle, limit = Infinity) => {
   let count = 0;
-  for (let index = haystack.indexOf(needle); index !== -1; index = haystack.indexOf(needle, index + needle.length)) count += 1;
+  for (let index = haystack.indexOf(needle); index !== -1; index = haystack.indexOf(needle, index + needle.length)) {
+    count += 1;
+    if (count === limit) break;
+  }
   return count;
 };
 
@@ -54,7 +57,7 @@ export function scoreSection(section, keywords) {
   const heading = section.heading.toLowerCase();
   const body = section.text.toLowerCase();
   let score = 0;
-  for (const keyword of keywords) score += countOccurrences(heading, keyword) * TITLE_WEIGHT + Math.min(countOccurrences(body, keyword), BODY_HITS_CAP);
+  for (const keyword of keywords) score += countOccurrences(heading, keyword) * TITLE_WEIGHT + countOccurrences(body, keyword, BODY_HITS_CAP);
   return score;
 }
 

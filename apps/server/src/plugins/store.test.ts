@@ -1,21 +1,16 @@
 import { execFileSync } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCliUi } from '../cli-ui.js';
 import { runPluginCli } from './cli.js';
 import { parsePluginSource, PluginStore } from './store.js';
+import { writePlugin } from './scenario-fixtures.test-helpers.js';
 
 const examplePlugin = resolve(import.meta.dirname, '../../../../examples/plugins/hello');
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();
 
-async function writePlugin(root: string, files: Record<string, string>) {
-  for (const [path, content] of Object.entries(files)) {
-    await mkdir(join(root, path, '..'), { recursive: true });
-    await writeFile(join(root, path), content);
-  }
-}
 const declarative = (name: string, version = '1.0.0') => ({
   '.dutydeck-plugin/plugin.json': JSON.stringify({ name, version, userConfig: { region: { description: 'r' }, api_key: { description: 'k', sensitive: true } } }),
   'commands/summary.md': '总结 $ARGUMENTS',
