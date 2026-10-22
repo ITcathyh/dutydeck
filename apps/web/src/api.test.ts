@@ -5,6 +5,14 @@ import { setInstance } from './instance';
 afterEach(() => vi.unstubAllGlobals());
 
 describe('web api adapter', () => {
+  it('passes sessions query cancellation to fetch', async () => {
+    const controller = new AbortController();
+    const fetcher = vi.fn(async () => ({ ok: true, json: async () => [] }));
+    vi.stubGlobal('fetch', fetcher);
+    await expect(api.sessions(controller.signal)).resolves.toEqual([]);
+    expect(fetcher).toHaveBeenCalledWith('/api/sessions', { credentials: 'same-origin', signal: controller.signal });
+  });
+
   it('构造 backward / forward 有界事件窗口 URL', () => {
     expect(eventsUrl('s1', { before: 200, limit: 50, direction: 'backward' })).toBe('/api/sessions/s1/events?before=200&limit=50&direction=backward');
     expect(eventsUrl('s1', { after: 200, limit: 50, direction: 'forward' })).toBe('/api/sessions/s1/events?after=200&limit=50&direction=forward');

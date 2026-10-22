@@ -169,6 +169,12 @@ export function parseJsonlObjects(text: string): any[] {
 /** Scan a selected native transcript without a head/tail window: a fork's
  * ownership marker can be between inherited history and later output. */
 export function* nativeTranscriptObjects(path: string): Generator<any> {
+  for (const entry of nativeTranscriptScan(path)) if (entry !== undefined) yield entry;
+}
+
+/** Same complete scan, with an undefined checkpoint after each 64 KiB read so
+ * diagnostic callers can yield without dropping records or ownership checks. */
+export function* nativeTranscriptScan(path: string): Generator<any> {
   let fd: number | undefined;
   try {
     if (!statSync(path).isFile()) return;
@@ -184,6 +190,7 @@ export function* nativeTranscriptObjects(path: string): Generator<any> {
         try { yield JSON.parse(line); } catch { /* Partial or malformed native record. */ }
       }
       if (!count) { if (pending.trim()) { try { yield JSON.parse(pending); } catch { /* Incomplete last record. */ } } break; }
+      yield undefined;
     }
   } catch { /* Missing or unreadable native history is not a match. */ }
   finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* Already closed. */ } } }

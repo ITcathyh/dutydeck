@@ -337,10 +337,16 @@ importers:
 
   packages/secret-provider:
     dependencies:
+      better-sqlite3:
+        specifier: 12.11.1
+        version: 12.11.1
       zod:
         specifier: 3.25.67
         version: 3.25.67
     devDependencies:
+      '@types/better-sqlite3':
+        specifier: 9.6.0
+        version: 9.6.0
       typescript:
         specifier: 5.8.3
         version: 5.8.3

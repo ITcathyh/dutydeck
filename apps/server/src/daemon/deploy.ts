@@ -62,6 +62,20 @@ const defaultWarn = (message: string) => { process.stderr.write(`警告：${mess
 const refused = (error: string): DeployResult => ({ ok: false, status: 'refused', error });
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
+/** 同一真实 releases 根共用锁；连接关闭或进程退出时释放，不能删除持久锁文件。 */
+function acquireDeployLock(releases: string): Database.Database | { error: string } {
+  mkdirSync(releases, { recursive: true });
+  const lock = new Database(join(realpathSync(releases), '.deploy-lock.sqlite'), { timeout: 0 });
+  try {
+    lock.exec('BEGIN IMMEDIATE');
+    return lock;
+  } catch (error) {
+    lock.close();
+    if ((error as { code?: string }).code === 'SQLITE_BUSY') return { error: `发布目录 ${releases} 正在被另一个部署或清理操作使用，请稍后重试。` };
+    throw error;
+  }
+}
+
 // ─── 部署窗口 ────────────────────────────────────────────────────────────────
 
 /** 解析部署窗口，例如 `10:00-11:00,16:00-17:00`；结束早于开始表示跨过零点。格式不对返回 undefined。 */
@@ -596,10 +610,7 @@ async function restartAndCheck(service: ServiceControl, previousPid: number | un
 }
 
 export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}): Promise<DeployResult> {
-  const info = deps.info ?? defaultInfo;
-  const warn = deps.warn ?? defaultWarn;
   const now = () => new Date((deps.now ?? Date.now)());
-  const restart = options.restart !== false;
 
   if (options.printUnit) {
     const target = await resolveTarget(options, deps);
@@ -617,6 +628,17 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
 
   const target = await resolveTarget(options, deps);
   if ('error' in target) return refused(target.error);
+  const lock = acquireDeployLock(target.releases);
+  if ('error' in lock) return refused(lock.error);
+  try { return await deployLocked(options, deps, target); }
+  finally { lock.close(); }
+}
+
+async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target: DeployTarget): Promise<DeployResult> {
+  const info = deps.info ?? defaultInfo;
+  const warn = deps.warn ?? defaultWarn;
+  const now = () => new Date((deps.now ?? Date.now)());
+  const restart = options.restart !== false;
   const script = join(target.releases, 'current', 'dist', 'cli.js');
   if (restart && !deps.service && (!target.service?.script || resolve(target.service.script) !== script)) {
     return refused(`unit ${target.unit} 的 ExecStart 运行的是 ${target.service?.script ?? '（读不到）'}，不是 ${script}，切换 current 不会生效。首次切换：先 dutydeck deploy --no-restart 准备发布目录，再按 dutydeck deploy --print-unit 的输出改写 unit，daemon-reload 后 dutydeck restart --unit ${target.unit}。`);
@@ -848,24 +870,28 @@ export async function runDeployPrune(options: DeployPruneCliOptions, deps: Deplo
   const deployments = join(dirname(releases), 'deployments');
   if (!existsSync(releases)) return { ...base, releases, deployments, error: `发布目录 ${releases} 不存在。` };
 
-  const report: NonNullable<PruneOptions['report']> = { items: [], skipped: [], errors: [] };
-  const opts: PruneOptions = {
-    keep: base.keep, dryRun, includeUnmarked: options.includeUnmarked === true,
-    protectRecentMs: IN_PROGRESS_WINDOW_MS, now: (deps.now ?? Date.now)(), report
-  };
-  const processPaths = deps.processPaths ?? readProcessPaths;
-  const previous = rollbackTarget(releases, deployments);
-  const current = currentRelease(releases);
-  let inUse: string[] = [];
+  const lock = acquireDeployLock(releases);
+  if ('error' in lock) return { ...base, releases, deployments, error: lock.error };
   try {
-    inUse = pruneReleases(releases, previous, processPaths, warn, opts).inUse;
-    if (existsSync(deployments)) pruneRecords(deployments, current ? basename(current) : '', previous && basename(previous), opts, processPaths);
-  } catch (error) {
-    report.errors.push(message(error));
-  }
-  return {
-    ...base, ok: report.errors.length === 0, releases, deployments, items: report.items, inUse, skipped: report.skipped,
-    freedBytes: report.items.reduce((total, item) => total + item.bytes, 0),
-    ...(report.errors.length > 0 ? { error: `有 ${report.errors.length} 项没清理成功：${report.errors.join('；')}` } : {})
-  };
+    const report: NonNullable<PruneOptions['report']> = { items: [], skipped: [], errors: [] };
+    const opts: PruneOptions = {
+      keep: base.keep, dryRun, includeUnmarked: options.includeUnmarked === true,
+      protectRecentMs: IN_PROGRESS_WINDOW_MS, now: (deps.now ?? Date.now)(), report
+    };
+    const processPaths = deps.processPaths ?? readProcessPaths;
+    const previous = rollbackTarget(releases, deployments);
+    const current = currentRelease(releases);
+    let inUse: string[] = [];
+    try {
+      inUse = pruneReleases(releases, previous, processPaths, warn, opts).inUse;
+      if (existsSync(deployments)) pruneRecords(deployments, current ? basename(current) : '', previous && basename(previous), opts, processPaths);
+    } catch (error) {
+      report.errors.push(message(error));
+    }
+    return {
+      ...base, ok: report.errors.length === 0, releases, deployments, items: report.items, inUse, skipped: report.skipped,
+      freedBytes: report.items.reduce((total, item) => total + item.bytes, 0),
+      ...(report.errors.length > 0 ? { error: `有 ${report.errors.length} 项没清理成功：${report.errors.join('；')}` } : {})
+    };
+  } finally { lock.close(); }
 }

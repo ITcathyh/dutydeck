@@ -48,10 +48,10 @@ test('selecting a Claude skill in the browser delivers its body to the PTY and r
     }]);
 
     await page.getByRole('button', { name: '工作目录、验证与自动化' }).click();
-    const dialog = page.getByRole('dialog', { name: '工作目录与自动化' });
-    await expect(dialog.getByText('Skill 投递记录')).toBeVisible();
-    await dialog.getByText('VERIFY_CLAUDE_SKILL_DELIVERY · 1 项').click();
-    await expect(dialog.getByText(skillPath, { exact: false })).toBeVisible();
+    const inspector = page.getByRole('complementary', { name: '结果检视', exact: true });
+    await expect(inspector.getByText('Skill 投递记录')).toBeVisible();
+    await inspector.getByText('VERIFY_CLAUDE_SKILL_DELIVERY · 1 项').click();
+    await expect(inspector.getByText(skillPath, { exact: false })).toBeVisible();
 
     const projectDir = join(instance.dataDir, 'claude', 'projects');
     const transcript = readdirSync(projectDir).flatMap(project =>

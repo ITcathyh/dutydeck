@@ -1,5 +1,5 @@
 import { larkMessageAnchor } from './message-anchor.js';
-import { explicitFinalTextReceiptReader } from './explicit-final.js';
+import { explicitFinalTextReceiptReader, type ExplicitFinalTextReceiptReader } from './explicit-final.js';
 import { createHash } from 'node:crypto';
 import { isLarkTurnMemoryElement } from './memory-view.js';
 import type { ChannelMapping, PublicSessionSchedule, Session, VerificationResponse } from '@dutydeck/shared';
@@ -194,15 +194,15 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     };
   }
 
-  protected async refreshResultFeedback(config: StoredLarkConfig, requestId: string) {
-    const record = (await this.workflows?.list(config.appId))?.find(item => item.id === requestId && item.kind === 'result');
-    if (!record?.cardId) return;
+  protected async refreshResultFeedback(config: StoredLarkConfig, requestId: string, textReceiptReader?: ExplicitFinalTextReceiptReader) {
+    const record = await this.workflows?.get(config.appId, requestId);
+    if (!record?.cardId || record.kind !== 'result') return;
     const mapping = await this.cardMappings?.get(larkCardChannel(config.appId), record.event.messageId);
     if (!mapping) return;
     const saved = parseCardTask(mapping.extra ?? '{}');
     if (saved.state !== 'completed' || saved.final_delivery_state !== 'delivered'
       || saved.final_message_id !== record.cardId || saved.runtime_task_id !== record.taskId || saved.turn !== record.turn) return;
-    const isTextReceipt = await explicitFinalTextReceiptReader(this.workflowOptions.store);
+    const isTextReceipt = textReceiptReader ?? await explicitFinalTextReceiptReader(this.workflowOptions.store);
     if (await isTextReceipt(mapping, saved, record.cardId)) return;
     // S4：文件型结果先补验收 reaction，再做「状态未变」短路——重启对账靠这个顺序补偿漏写。
     await this.addAcceptanceReaction(config, saved, record);

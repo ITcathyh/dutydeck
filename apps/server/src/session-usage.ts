@@ -55,8 +55,8 @@ export async function sessionUsageSnapshot(repos: RepositoryBundle, sessionId: s
     let native: SessionUsageSnapshot | undefined;
     if (source) {
       const path = source.verifiedPath ?? (client === 'claude' ? join(claudeProjectDir(session.cwd, { CLAUDE_CONFIG_DIR: source.dataRoot }), `${source.nativeSessionId}.jsonl`) : undefined);
-      native = path ? await readNativeTranscriptUsage({ client, path, dataRoot: source.dataRoot, nativeSessionId: source.nativeSessionId!, cwd: session.cwd })
-        : await readCodexSessionUsage(source.nativeSessionId!, { CODEX_HOME: source.dataRoot }, session.cwd);
+      if (client === 'codex') native = await readCodexSessionUsage(source.nativeSessionId!, { CODEX_HOME: source.dataRoot }, session.cwd);
+      if (!native && path) native = await readNativeTranscriptUsage({ client, path, dataRoot: source.dataRoot, nativeSessionId: source.nativeSessionId!, cwd: session.cwd });
     } else {
       if (!selected && ['acp', 'auto'].includes(session.protocol ?? agent.protocol ?? 'auto')) {
         const record = await createRuntimeStore({ stateDir: join(session.cwd, '.dutydeck', 'acpx') }).load(session.id);
@@ -79,7 +79,10 @@ export async function sessionUsageSnapshot(repos: RepositoryBundle, sessionId: s
               if (checkpointSources.size > 32) checkpointSources.delete(checkpointSources.keys().next().value!);
             }
           }
-          if (bound) native = await readNativeTranscriptUsage(bound);
+          if (bound) {
+            if (bound.client === 'codex') native = await readCodexSessionUsage(bound.nativeSessionId, { CODEX_HOME: bound.dataRoot }, bound.cwd);
+            native ??= await readNativeTranscriptUsage(bound);
+          }
         }
       }
     }

@@ -26,6 +26,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, opendirSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { setImmediate } from 'node:timers/promises';
 import type {
   DriverTranscriptSourceObservation,
   InsightClient,
@@ -44,7 +45,7 @@ import {
   traeSessionsRoot,
   type CliPathEnv,
 } from './cli-paths.js';
-import { nativeTranscriptObjects, parseJsonlObjects, readHead, readTail } from './session-id/fs-scan.js';
+import { nativeTranscriptObjects, nativeTranscriptScan, parseJsonlObjects, readHead, readTail } from './session-id/fs-scan.js';
 import { buildSessionMarker, isUsableMarker } from './session-id/marker.js';
 import { lastCodexSessionMarker } from './session-id/codex.js';
 import { codexInputText } from './transcript/input-receipt.js';
@@ -298,12 +299,12 @@ function codexHistoryMarkerIds(historyPath: string, marker: string): Set<string>
  *  - If multiple physical rollouts match the same native ID, reject as path-ambiguous.
  *  - Pinned/symlinked paths outside dataRoot are rejected before read.
  */
-function verifyCodexFamily(
+function* verifyCodexFamily(
   client: InsightClient,
   dataRoot: string,
   sessionId: string,
   cwd: string,
-): VerifiedTranscriptIdentity | undefined {
+): Generator<void, VerifiedTranscriptIdentity | undefined> {
   if (!isUsableMarker(sessionId)) return undefined;
   const marker = buildSessionMarker(sessionId);
   const env: CliPathEnv = client === 'codex' ? { CODEX_HOME: dataRoot } : { TRAE_HOME: dataRoot };
@@ -345,7 +346,8 @@ function verifyCodexFamily(
     let inheritedMeta = false;
     let sawMeta = false;
     let internalAgent = false;
-    for (const entry of nativeTranscriptObjects(candidate.path)) {
+    for (const entry of nativeTranscriptScan(candidate.path)) {
+      if (entry === undefined) { yield; continue; }
       if (entry?.type === 'session_meta') {
         if (sawMeta) {
           if ((entry.payload?.id ?? entry.payload?.session_id) !== metaId) { inheritedMeta = true; break; }
@@ -424,11 +426,38 @@ export function verifyLaunchedTranscript(
 ): VerifiedTranscriptIdentity | undefined {
   try {
     if (client === 'claude') return verifyClaude(dataRoot, ctx.sessionId, ctx.cwd);
-    return verifyCodexFamily(client, dataRoot, ctx.sessionId, ctx.cwd);
+    const scan = verifyCodexFamily(client, dataRoot, ctx.sessionId, ctx.cwd);
+    let result = scan.next();
+    while (!result.done) result = scan.next();
+    return result.value;
   } catch {
     // Hostile/unreadable files are "not verified", never a driver failure.
     return undefined;
   }
+}
+
+/** Diagnostic launch verification shares the complete synchronous algorithm,
+ * but gives timers, output and other sessions a turn between read chunks. */
+export async function verifyLaunchedTranscriptAsync(
+  client: InsightClient,
+  dataRoot: string,
+  ctx: { sessionId: string; cwd: string },
+  signal?: AbortSignal,
+): Promise<VerifiedTranscriptIdentity | undefined> {
+  if (signal?.aborted) return;
+  if (client === 'claude') return verifyLaunchedTranscript(client, dataRoot, ctx);
+  const scan = verifyCodexFamily(client, dataRoot, ctx.sessionId, ctx.cwd);
+  try {
+    let result = scan.next();
+    while (!result.done) {
+      await setImmediate(undefined, { signal });
+      result = scan.next();
+    }
+    return result.value;
+  } catch {
+    // Cancellation and unreadable histories leave the launch unverified.
+    return undefined;
+  } finally { scan.return(undefined); }
 }
 
 /** An execution checkpoint supplies the file; content must still prove its native identity. */

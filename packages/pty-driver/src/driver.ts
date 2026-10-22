@@ -29,7 +29,7 @@ import { hostname } from 'node:os';
 import { statSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { ClaudeSettings } from './claude-settings.js';
-import { TranscriptSourceTracker, freezeTranscriptSource, verifyLaunchedTranscript } from './transcript-source.js';
+import { TranscriptSourceTracker, freezeTranscriptSource, verifyLaunchedTranscriptAsync } from './transcript-source.js';
 
 export interface PtyCliDriverOptions {
   agent: AgentConfig;
@@ -192,6 +192,7 @@ export class PtyCliDriver implements AgentDriver {
   /** Session Insight 来源观察（design §3.1）。Driver 级持有：reattach/rewire
    *  不重建；只有真正 spawn/respawn 追加 launch。 */
   private readonly transcriptSources = new TranscriptSourceTracker();
+  private transcriptVerification?: { observationId: string; controller: AbortController; pending?: Promise<void> };
   /** 当前后端里 CLI 进程的进程号，按后端实例缓存：tmux 每问一次都要同步起一个 tmux 子进程。 */
   private backendPid: { backend: SessionBackend; pid: number } | undefined;
 
@@ -381,10 +382,12 @@ export class PtyCliDriver implements AgentDriver {
       const binding = freezeTranscriptSource(this.adapter.id, env);
       if (!binding) return;
       const launch = this.transcriptSources.recordLaunch(binding, this.cwd);
+      this.transcriptVerification?.controller.abort();
+      this.transcriptVerification = { observationId: launch.observationId, controller: new AbortController() };
       // A resumed CLI already has its transcript on disk; verify immediately.
       // A fresh launch verifies again once prompt #1 is persisted (see the
       // post-flush check in wire()'s idle path).
-      this.verifyTranscriptLaunch(launch.observationId, binding.client, binding.dataRoot);
+      void this.verifyTranscriptLaunch(launch.observationId, binding.client, binding.dataRoot);
     } catch {
       // Insight collection must never interrupt a task.
     }
@@ -392,27 +395,38 @@ export class PtyCliDriver implements AgentDriver {
 
   /** Append content-verified native identity for the current launch. Reading
    *  files here never throws into the driver. */
-  private verifyTranscriptLaunch(
+  private async verifyTranscriptLaunch(
     launchObservationId: string,
     client: import('@dutydeck/shared').InsightClient,
     dataRoot: string,
-  ): void {
-    try {
-      const verified = verifyLaunchedTranscript(client, dataRoot, {
-        sessionId: this.sessionId,
-        cwd: this.cwd,
-      });
-      if (verified) this.transcriptSources.recordIdentity(launchObservationId, verified);
-    } catch {
-      // Best-effort content verification; an unreadable tree stays unverified.
+  ): Promise<void> {
+    const work = this.transcriptVerification;
+    if (!work || work.observationId !== launchObservationId || work.controller.signal.aborted || this.stopped) return;
+    if (work.pending) {
+      await work.pending;
+      // Prompt #1 can land after this scan passed its file. Re-check after
+      // its finally cleared pending, including requests at the settlement edge.
+      if (this.transcriptSources.pendingLaunches().some(launch => launch.observationId === launchObservationId)) {
+        await this.verifyTranscriptLaunch(launchObservationId, client, dataRoot);
+      }
+      return;
     }
+    work.pending = verifyLaunchedTranscriptAsync(client, dataRoot, {
+      sessionId: this.sessionId, cwd: this.cwd,
+    }, work.controller.signal).then(verified => {
+      if (this.stopped || work.controller.signal.aborted || this.transcriptVerification !== work) return;
+      if (verified) this.transcriptSources.recordIdentity(launchObservationId, verified);
+    }).catch(() => {
+      // Best-effort content verification; an unreadable tree stays unverified.
+    }).finally(() => { work.pending = undefined; });
+    await work.pending;
   }
 
   /** Re-check the current launch after a transcript flush — by then prompt
    *  #1 (with the marker) is persisted for a fresh spawn. */
-  private verifyPendingTranscriptLaunches(): void {
+  private async verifyPendingTranscriptLaunches(): Promise<void> {
     for (const pending of this.transcriptSources.pendingLaunches()) {
-      this.verifyTranscriptLaunch(pending.observationId, pending.client, pending.dataRoot);
+      await this.verifyTranscriptLaunch(pending.observationId, pending.client, pending.dataRoot);
     }
   }
 
@@ -969,6 +983,7 @@ export class PtyCliDriver implements AgentDriver {
     if (this.stopping) return this.stopping;
     const alreadyStopped = this.stopped;
     this.stopped = true;
+    this.transcriptVerification?.controller.abort();
     const run = this.stopOnce(options, alreadyStopped);
     this.stopping = run;
     const release = () => { if (this.stopping === run) this.stopping = undefined; };
@@ -1224,6 +1239,10 @@ export class PtyCliDriver implements AgentDriver {
         const outputAt = this.lastOutputAt;
         await this.transcript?.flush();
         if (backend !== this.backend || this.stopped || !this.turnActive || this.turnResolve !== resolve) return;
+        // Preserve identity-before-completion ordering while large diagnostic
+        // scans yield to output, timers and other sessions.
+        await this.verifyPendingTranscriptLaunches();
+        if (backend !== this.backend || this.stopped || !this.turnActive || this.turnResolve !== resolve) return;
         if (!this.idleDetector?.programStatusAllowsIdle()) return;
         // A fallback during flush retires the old OSC completion and its
         // screen exemptions. The fallback's screen timer owns the next check.
@@ -1233,9 +1252,6 @@ export class PtyCliDriver implements AgentDriver {
           this.idleDetector?.seedReadyEvidence();
           return;
         }
-        // Prompt #1 (with the session marker) is now persisted: content-verify
-        // the current launch's native identity. No-op once verified.
-        this.verifyPendingTranscriptLaunches();
         if (this.holdForBackgroundWork(source === 'program-status' ? undefined : statusLine)) {
           this.idleDetector?.reset();
           this.idleDetector?.seedReadyEvidence();
@@ -1657,6 +1673,7 @@ export class PtyCliDriver implements AgentDriver {
     if (this.exitReported) return;
     this.exitReported = true;
     this.stopped = true;
+    this.transcriptVerification?.controller.abort();
     const exitingBackend = this.backend;
     await this.transcript?.flush().catch(() => {});
     if (this.backend !== exitingBackend) return;
@@ -1917,6 +1934,7 @@ export class PtyCliDriver implements AgentDriver {
 
   private async respawn(args: string[]): Promise<void> {
     const launchArgs = this.claudeSettings.args(this.agent.args, args, this.cwd, this.agent.env);
+    this.transcriptVerification?.controller.abort();
     this.teardownWiring();
     this.inputPrepared = false;
     const generation = this.wiringGeneration;

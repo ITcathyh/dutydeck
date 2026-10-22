@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
@@ -11,6 +12,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -274,19 +276,32 @@ export class LocalFileSecretProvider {
 
   private acquireLock(referenceKey: string): () => void {
     this.assertProviderDirectory();
-    const lockPath = join(this.directory, `.${referenceKey}.lock`);
-    let descriptor: number;
-    try { descriptor = openSync(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), SECRET_FILE_MODE); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new SecretProviderError('SECRET_BUSY', 'Secret reference is already being changed');
+    // 每个 key 独立互斥；旧版 O_EXCL 锁保留但不使用，崩溃残留不会阻断新操作。
+    const lockPath = join(realpathSync(this.directory), `.${referenceKey}.lock.sqlite`);
+    try {
+      const descriptor = openSync(lockPath, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), SECRET_FILE_MODE);
+      try { if (process.platform !== 'win32') fchmodSync(descriptor, SECRET_FILE_MODE); }
+      finally { closeSync(descriptor); }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    // 既存文件只用 lstat：另行 open/close 相同 inode 会解除本进程持有的 POSIX 锁。
+    const stats = lstatSync(lockPath);
+    assertOwner(stats, 'file');
+    if (!stats.isFile() || stats.isSymbolicLink() || (process.platform !== 'win32' && (stats.nlink !== 1 || (stats.mode & 0o777) !== SECRET_FILE_MODE))) {
+      throw new SecretProviderError('SECRET_LOCK_INVALID', 'Secret lock must be an owner-only regular file without additional links');
+    }
+    let lock: Database.Database | undefined;
+    try {
+      lock = new Database(lockPath, { timeout: 0 });
+      lock.exec('BEGIN IMMEDIATE');
+    } catch (error) {
+      lock?.close();
+      if ((error as { code?: string }).code === 'SQLITE_BUSY') throw new SecretProviderError('SECRET_BUSY', 'Secret reference is already being changed');
       throw error;
     }
-    if (process.platform !== 'win32') fchmodSync(descriptor, SECRET_FILE_MODE);
-    return () => {
-      closeSync(descriptor);
-      safeUnlink(lockPath);
-      syncDirectory(this.directory);
-    };
+    // 持久文件不能删除；释放靠连接关闭，SIGKILL 后由操作系统回收锁。
+    return () => lock!.close();
   }
 
   private assertInputValue(value: Buffer): void {

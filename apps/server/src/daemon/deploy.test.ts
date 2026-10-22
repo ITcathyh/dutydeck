@@ -2,7 +2,7 @@ import { createRepositories, type SqliteDriverCheck, type SqliteDriverCheckOptio
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
 import Database from 'better-sqlite3';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { fork, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
@@ -12,7 +12,7 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AutostartCommandOutput } from '../autostart/autostart.js';
 import { DRAIN_INTERVAL_MS } from './command.js';
-import { parseDeployWindows, runDeploy, runDeployPrune, shanghaiMinuteOfDay, withinDeployWindow, type DeployDeps } from './deploy.js';
+import { parseDeployWindows, runDeploy, runDeployPrune, shanghaiMinuteOfDay, withinDeployWindow, type DeployDeps, type DeployResult } from './deploy.js';
 
 const passingSqlite = (options?: SqliteDriverCheckOptions): SqliteDriverCheck => ({ ok: true, execPath: options?.execPath ?? process.execPath });
 
@@ -169,6 +169,7 @@ describe('dutydeck deploy', () => {
   let service: ReturnType<typeof processService>;
   const info = vi.fn();
   const warn = vi.fn();
+  const children: ChildProcess[] = [];
 
   beforeEach(async () => {
     tmp = realpathSync(mkdtempSync(join(tmpdir(), 'dutydeck-deploy-')));
@@ -188,11 +189,121 @@ describe('dutydeck deploy', () => {
   });
 
   afterEach(async () => {
+    for (const child of children.splice(0)) await stop(child);
     await service.stop();
     rmSync(tmp, { recursive: true, force: true });
   });
 
   const deps = (extra: Partial<DeployDeps> = {}): DeployDeps => ({ service, checkSqlite: passingSqlite, readToken: () => undefined, info, warn, healthTimeoutMs: 10_000, env: {}, ...extra });
+
+  async function owner(stage: string) {
+    const messages: Array<{ type: string; result?: DeployResult; message?: string }> = [];
+    const child = fork(new URL('./deploy-owner.test-helper.mjs', import.meta.url), [source, bot, releases, stage], {
+      execArgv: ['--conditions=development', '--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc']
+    });
+    children.push(child);
+    let stderr = ''; child.stderr!.on('data', chunk => { stderr += chunk; });
+    child.on('message', message => messages.push(message as typeof messages[number]));
+    const wait = async (type: string) => { await vi.waitFor(() => {
+      expect(messages.find(message => message.type === 'error'), stderr).toBeUndefined();
+      expect(type === 'locked' && stage === 'no-restart' ? existsSync(join(bot, `locked-${child.pid}`)) : messages.some(message => message.type === type), stderr).toBe(true);
+    }, { timeout: 10_000 }); };
+    await wait('ready');
+    child.send('start');
+    return { child, wait, release: () => child.send('release'), result: async () => { await wait('result'); return messages.find(message => message.type === 'result')!.result!; } };
+  }
+
+  it.each(['read', 'restart', 'health', 'rollback'])('独立进程在 %s 阶段持有同根锁，完成后释放', async stage => {
+    const first = await owner(stage);
+    await first.wait('locked');
+    try {
+      const result = await runDeploy({ source, runtime: bot, restart: false }, deps());
+      expect(result).toMatchObject({ status: 'refused', error: expect.stringContaining('正在') });
+      expect(await runDeployPrune({ releases }, deps())).toMatchObject({ ok: false, error: expect.stringContaining('正在') });
+      expect(service.ran).toEqual([]);
+    } finally { first.release(); }
+    expect(await first.result()).toMatchObject({ status: stage === 'rollback' ? 'failed' : 'deployed' });
+    expect(await runDeploy({ source, runtime: bot, restart: false }, deps())).toMatchObject({ status: 'staged' });
+    expect(existsSync(join(releases, '.deploy-lock.sqlite'))).toBe(true);
+  });
+
+  it.each(['restart', 'prune', 'no-restart'])('持锁 %s 进程被 SIGKILL 后新进程立即恢复部署，不删除锁文件', async stage => {
+    if (stage === 'prune') {
+      expect(await runDeploy({ source, runtime: bot, restart: false }, deps())).toMatchObject({ ok: true });
+      oldReleases(7);
+    }
+    const first = await owner(stage);
+    await first.wait('locked');
+    expect(await runDeploy({ source, runtime: bot, restart: false }, deps())).toMatchObject({ status: 'refused' });
+    await stop(first.child);
+    expect(existsSync(join(releases, '.deploy-lock.sqlite'))).toBe(true);
+    const next = await owner('staged');
+    expect(await next.result()).toMatchObject({ status: 'staged' });
+  });
+
+  it.each(['copy', 'health', 'rollback'])('%s 异常也释放部署锁，随后能重试', async stage => {
+    if (stage === 'rollback') expect(await runDeploy({ source, runtime: bot, restart: false }, deps())).toMatchObject({ ok: true });
+    const broken = {
+      mainPid: async () => undefined,
+      restart: async () => { if (stage === 'health') throw new Error('restart failed'); return undefined; },
+      stop: async () => undefined
+    };
+    if (stage === 'copy') {
+      const dependency = join(source, 'apps/server/node_modules/dep-a');
+      const original = readlinkSync(dependency);
+      rmSync(dependency);
+      symlinkSync(join(tmp, 'missing'), dependency);
+      expect(await runDeploy({ source, runtime: bot, restart: false }, deps())).toMatchObject({ status: 'failed', error: expect.stringContaining('复制') });
+      rmSync(dependency);
+      symlinkSync(original, dependency);
+    } else if (stage === 'health') {
+      await expect(runDeploy({ source, runtime: bot }, deps({ service: broken }))).rejects.toThrow('restart failed');
+    } else {
+      let pid: number | undefined, clock = Date.now();
+      await expect(runDeploy({ source, runtime: bot }, deps({
+        service: { ...broken, mainPid: async () => pid, restart: async () => { pid = 1_000_000; }, stop: async () => { pid = undefined; } },
+        healthTimeoutMs: 1, now: () => clock, sleep: async () => { clock += 10; },
+        fetch: async () => Response.json({ ok: false }, { status: 503 }),
+        info: text => { if (text.startsWith('服务已停止，数据库 schema 兼容')) throw new Error('rollback failed'); }
+      }))).rejects.toThrow('rollback failed');
+    }
+    expect(await runDeploy({ source, runtime: bot, restart: false }, deps())).toMatchObject({ status: 'staged' });
+  });
+
+  it('共享 releases 的不同 unit 部署互斥，别名、no-restart 与手工 prune 也不能越过持锁部署', async () => {
+    let entered!: () => void, resume!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { resume = resolve; });
+    const pending = runDeploy({ source, runtime: bot, unit: 'a.service' }, deps({ service: {
+      ...service,
+      restart: async () => { entered(); await gate; return service.restart(); }
+    } }));
+    await ready;
+    const current = realpathSync(join(releases, 'current'));
+    const alias = join(tmp, 'releases-alias');
+    symlinkSync(releases, alias);
+    const untouched = { mainPid: vi.fn(async () => undefined), restart: vi.fn(async () => undefined), stop: vi.fn(async () => undefined) };
+    try {
+      for (const root of [releases, alias]) for (const restart of [true, false]) {
+        const contender = await runDeploy({ source, releases: root, unit: 'b.service', restart }, deps({ service: untouched }));
+        expect(contender).toMatchObject({ status: 'refused', error: expect.stringContaining('正在') });
+      }
+      for (const dryRun of [true, false]) {
+        expect(await runDeployPrune({ releases: alias, dryRun }, deps())).toMatchObject({ ok: false, error: expect.stringContaining('正在') });
+      }
+      expect(realpathSync(join(releases, 'current'))).toBe(current);
+      expect(untouched.mainPid).not.toHaveBeenCalled();
+      expect(untouched.restart).not.toHaveBeenCalled();
+      expect(untouched.stop).not.toHaveBeenCalled();
+      const independent = await runDeploy({ source, releases: join(tmp, 'independent/releases'), restart: false }, deps());
+      expect(independent).toMatchObject({ ok: true, status: 'staged' });
+    } finally { resume(); await pending; }
+    const first = await pending;
+    expect(first).toMatchObject({ ok: true, status: 'deployed' });
+    expect(service.ran).toEqual([first.release]);
+    expect(await runDeployPrune({ releases, dryRun: true }, deps())).toMatchObject({ ok: true });
+    expect(await runDeploy({ source, runtime: bot, restart: false }, deps())).toMatchObject({ ok: true, previousRelease: first.release });
+  });
 
   it('复制出只含生产依赖、脱离源检出也能加载的发布目录，排空、备份后切换 current，重启并通过健康检查', async () => {
     const first = await runDeploy({ source, runtime: bot }, deps());
@@ -784,7 +895,7 @@ describe('dutydeck deploy', () => {
     expect(result.pruned).toMatchObject({ removed: ['.20260108T000000Z-7777777.partial', basename(old[2]!)], inUse: [basename(old[1]!)] });
     expect(result.pruned!.freedBytes).toBeGreaterThanOrEqual(8192);
     const kept = [result.release!, ...old.slice(3), old[0]!, old[1]!].map(dir => basename(dir));
-    expect(readdirSync(releases).sort()).toEqual([...kept, 'current', 'notes'].sort());
+    expect(readdirSync(releases).sort()).toEqual([...kept, 'current', 'notes', '.deploy-lock.sqlite'].sort());
     expect(JSON.parse(readFileSync(result.manifest!, 'utf8'))).toMatchObject({ pruned_releases: result.pruned!.removed, releases_in_use: [basename(old[1]!)], freed_bytes: result.pruned!.freedBytes });
   }, 60_000);
 
@@ -909,7 +1020,11 @@ describe('dutydeck deploy 与 systemd unit', () => {
     expect(refusedResult.error).toContain('--print-unit');
     expect(sys.calls.some(call => call.includes(' restart '))).toBe(false);
 
-    const printed = await runDeploy({ unit: 'dutydeck-tag.service', releases: join(tmp, 'releases'), printUnit: true }, deps);
+    const lock = new Database(join(tmp, 'releases/.deploy-lock.sqlite'), { timeout: 0 });
+    lock.exec('BEGIN IMMEDIATE');
+    let printed: DeployResult;
+    try { printed = await runDeploy({ unit: 'dutydeck-tag.service', releases: join(tmp, 'releases'), printUnit: true }, deps); }
+    finally { lock.close(); }
     expect(printed).toMatchObject({ ok: true, status: 'unit', unitPath: unitFile });
     expect(printed.unitFile).toBe(original.replace(`${tmp}/runtime/dist/cli.js`, `${tmp}/releases/current/dist/cli.js`));
     expect(readFileSync(unitFile, 'utf8')).toBe(original);
@@ -972,7 +1087,7 @@ describe('dutydeck deploy prune', () => {
     expect(result.items.map(item => item.name)).toEqual([releaseName(3), releaseName(2), releaseName(1)]);
     expect(result.items.every(item => item.kind === 'release' && item.bytes >= 8192)).toBe(true);
     expect(result.freedBytes).toBe(result.items.reduce((sum, item) => sum + item.bytes, 0));
-    expect(names(releases)).toEqual(before);
+    expect(names(releases)).toEqual([...before, '.deploy-lock.sqlite'].sort());
   });
 
   it('实删只删超出保留个数的旧版本，不删 current、它的上一版和仍被进程引用的', async () => {
@@ -987,12 +1102,12 @@ describe('dutydeck deploy prune', () => {
 
     expect(result, result.error).toMatchObject({ ok: true, dryRun: false, inUse: [releaseName(2)] });
     expect(result.items).toEqual([]);
-    expect(names(releases)).toEqual([...rel.map(dir => basename(dir)), 'current'].sort());
+    expect(names(releases)).toEqual([...rel.map(dir => basename(dir)), 'current', '.deploy-lock.sqlite'].sort());
 
     const tight = await runDeployPrune({ releases, keep: '2' }, { processPaths });
     // 保留 08、07；03 是 current、01 是上一版、02 被引用，04..06 删除
     expect(tight.items.map(item => item.name).sort()).toEqual([releaseName(4), releaseName(5), releaseName(6)]);
-    expect(names(releases)).toEqual([releaseName(1), releaseName(2), releaseName(3), releaseName(7), releaseName(8), 'current'].sort());
+    expect(names(releases)).toEqual([releaseName(1), releaseName(2), releaseName(3), releaseName(7), releaseName(8), 'current', '.deploy-lock.sqlite'].sort());
   });
 
   it.each([false, true])('其他 unit 最近成功的 release 在无进程引用时也保留（发布根使用软链=%s）', async linked => {
@@ -1019,7 +1134,7 @@ describe('dutydeck deploy prune', () => {
 
     expect(result.items.map(item => item.name)).toEqual(['.stale.partial']);
     expect(result.skipped).toEqual(['.fresh.partial']);
-    expect(names(releases)).toEqual(['.fresh.partial', ...Array.from({ length: 7 }, (_, i) => releaseName(i + 1))].sort());
+    expect(names(releases)).toEqual(['.deploy-lock.sqlite', '.fresh.partial', ...Array.from({ length: 7 }, (_, i) => releaseName(i + 1))].sort());
   });
 
   it('部署记录默认只清 deploy 写的；--include-unmarked 才算上手工部署的，进行中或仍被引用的不动', async () => {

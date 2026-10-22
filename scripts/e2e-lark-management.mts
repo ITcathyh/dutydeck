@@ -159,7 +159,7 @@ async function runTest() {
     await page.getByRole('button', { name: '选择模型…', exact: true }).click();
     await page.getByRole('option', { name: 'project-model', exact: true }).click();
     // A real navigation unmounts the editor; returning must retain the draft.
-    await nav('任务').click(); await nav('群聊').click();
+    await nav('全部任务').click(); await nav('群聊').click();
     await groupRow().click();
     await expect(page.getByTestId('directory-picker').getByRole('textbox')).toHaveValue(harness.workspaces[0]!);
     await expect(page.getByRole('button', { name: 'project-model', exact: true })).toBeVisible();
@@ -204,7 +204,7 @@ async function runTest() {
     await nav('机器人').click();
     await page.getByRole('button').filter({ has: page.locator('strong', { hasText: /^开发助手$/ }) }).click();
     await page.getByLabel('默认工作目录', { exact: true }).fill(harness.workspaces[1]!);
-    await nav('任务').click(); await nav('机器人').click();
+    await nav('全部任务').click(); await nav('机器人').click();
     await page.getByRole('button').filter({ has: page.locator('strong', { hasText: /^开发助手$/ }) }).click();
     await expect(page.getByLabel('默认工作目录', { exact: true })).toHaveValue(harness.workspaces[1]!);
     await page.getByRole('button', { name: '保存配置', exact: true }).click();
@@ -407,10 +407,10 @@ async function runTest() {
   const nativeHookGate = await fetch(`${harness.base}/api/lark/config`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ originalAppId: 'cli_one', expectedRevision: riskBot.revision, riskControlMode: 'enforced', highRiskPattern: 'Edit' }) });
   assert.equal(nativeHookGate.status, 409);
   assert.equal((await nativeHookGate.json()).error.code, 'RISK_CONTROL_HOOK_NOT_READY');
-  await harness.configureAcpRiskFixture();
+  const riskAgentId = await harness.configureAcpRiskFixture();
   const riskGroup = (await request('GET', '/api/lark/management/groups')).groups.find((g: any) => g.chatId === 'oc_project').bots.find((b: any) => b.appId === 'cli_one');
   const bob = (await request('GET', `${groupPath('cli_one', 'oc_project')}/members`)).members.find((member: any) => member.openId === 'ou_bob');
-  await request('PUT', groupPath('cli_one', 'oc_project'), { expectedRevision: riskGroup.binding.revision, patch: {}, roleChanges: [{ kind: 'create', principalId: bob.principalId, role: 'can_operate', operateScope: 'group_runs', actionGates: { terminalWrite: false, highRisk: true, groupToolsSend: false } }] });
+  await request('PUT', groupPath('cli_one', 'oc_project'), { expectedRevision: riskGroup.binding.revision, patch: { agentOverride: { mode: 'set', value: riskAgentId } }, roleChanges: [{ kind: 'create', principalId: bob.principalId, role: 'can_operate', operateScope: 'group_runs', actionGates: { terminalWrite: false, highRisk: true, groupToolsSend: false } }] });
   const held = await harness.ingress('cli_one', { content: '{"text":"hold-check-risk from Alice"}' });
   await waitFor('Alice active before Bob queues', async () => (await harness!.observations()).length === 8);
   await harness.ingress('cli_one', { rootId: held.messageId, threadId: 'omt_risk', senderOpenId: 'ou_bob', mentions: [], content: '{"text":"check-risk from Bob"}' });

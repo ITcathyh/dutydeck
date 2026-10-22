@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { explicitFinalTextReceiptReader } from './explicit-final.js';
 import { describeLarkTaskRecovery, larkContinuePrompt, larkIdleTimeoutMinutes, larkQuietSettledNote, larkRecoveryRetainedNote, larkReliability, larkStaleSettledNote,
   larkUnknownTaskNoticeKey, larkUnknownTaskNoticeRecordKey, notifyLarkUnknownTask, urgeLarkUnknownTask, type LarkUnknownTaskNotice } from './task-recovery.js';
 import { isBotSenderType } from './card-mentions.js';
@@ -111,9 +112,13 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       }
     });
     unresolved += await this.workflows?.reconcile(config.appId) ?? 0;
+    let textReceiptReader: Awaited<ReturnType<typeof explicitFinalTextReceiptReader>> | undefined;
     for (const record of await this.workflows?.list(config.appId) ?? []) {
       if (record.kind !== 'result' || !['accepted', 'needs_changes'].includes(record.state)) continue;
-      try { await this.refreshResultFeedback(config, record.id); }
+      try {
+        textReceiptReader ??= await explicitFinalTextReceiptReader(this.workflowOptions.store);
+        await this.refreshResultFeedback(config, record.id, textReceiptReader);
+      }
       catch (error) { unresolved++; this.log.warn({ error, requestId: record.id }, '验收状态刷新待重试'); }
     }
     return unresolved;

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { claudeProjectDir } from '../cli-paths.js';
 import { buildSessionMarker, resolveCliSessionId } from '../session-id/index.js';
-import { verifyLaunchedTranscript, verifyTranscriptCheckpoint } from '../transcript-source.js';
+import { verifyLaunchedTranscript, verifyLaunchedTranscriptAsync, verifyTranscriptCheckpoint } from '../transcript-source.js';
 import { resolveClaudeTranscriptPath } from './claude.js';
 import { readNativeTranscriptUsage } from './session-usage.js';
 
@@ -56,13 +56,13 @@ function fork(inherited: Record<string, unknown> = {}) {
   return { home, path, own, parent, ctx, source };
 }
 
-describe('Codex fork first metadata ownership', () => {
+describe.each([['sync', verifyLaunchedTranscript], ['async', verifyLaunchedTranscriptAsync]] as const)('Codex fork first metadata ownership (%s)', (_name, verifyLaunchedTranscript) => {
   it.each([{}, { cwd: '/inherited-parent' }, { source: { subagent: 'review' } }])('shares the first identity across native lookup, launch, checkpoint and usage: %j', async inherited => {
     const f = fork(inherited);
     writeFileSync(f.path, jsonl([f.own, f.parent, inheritedInput(), user(marker), usage]));
     writeFileSync(join(f.home, 'history.jsonl'), jsonl([{ session_id: childId, text: marker }]));
     expect(resolveCliSessionId('codex', { ...f.ctx, env: { CODEX_HOME: f.home }, requireMarker: true })).toBe(childId);
-    expect(verifyLaunchedTranscript('codex', f.home, f.ctx)?.nativeSessionId).toBe(childId);
+    expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))?.nativeSessionId).toBe(childId);
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)?.nativeSessionId).toBe(childId);
     expect((await readNativeTranscriptUsage(f.source))?.nativeTokens).toMatchObject({ inputTokens: 100, outputTokens: 20, totalTokens: 120 });
     expect(await readNativeTranscriptUsage({ ...f.source, nativeSessionId: parentId })).toBeUndefined();
@@ -76,16 +76,16 @@ describe('Codex fork first metadata ownership', () => {
     expect((await readNativeTranscriptUsage(f.source))?.nativeTokens?.totalTokens).toBe(120);
   });
 
-  it.each([false, true])('finds a middle marker beyond the head window (inherited metadata: %s)', inherited => {
+  it.each([false, true])('finds a middle marker beyond the head window (inherited metadata: %s)', async inherited => {
     const f = fork();
     const padding = { type: 'response_item', payload: { type: 'message', role: 'assistant', content: 'x'.repeat(300_000) } };
     writeFileSync(f.path, jsonl([f.own, ...(inherited ? [f.parent, inheritedInput()] : []), padding, user(marker), padding]));
     if (inherited) {
-      expect(verifyLaunchedTranscript('codex', f.home, f.ctx)).toBeUndefined();
+      expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))).toBeUndefined();
       expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)).toBeUndefined();
       writeFileSync(join(f.home, 'history.jsonl'), jsonl([{ session_id: childId, text: marker }]));
     }
-    expect(verifyLaunchedTranscript('codex', f.home, f.ctx)?.nativeSessionId).toBe(childId);
+    expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))?.nativeSessionId).toBe(childId);
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)?.nativeSessionId).toBe(childId);
   });
 
@@ -95,20 +95,20 @@ describe('Codex fork first metadata ownership', () => {
       : invalid === 'wrong-cwd' ? { ...f.own.payload, cwd: '/foreign' } : { cwd: f.home };
     writeFileSync(f.path, jsonl([{ type: 'session_meta', payload }, { ...f.parent, payload: { id: childId, cwd: f.home } }, user(marker), usage]));
     writeFileSync(join(f.home, 'history.jsonl'), jsonl([{ session_id: childId, text: marker }]));
-    expect(verifyLaunchedTranscript('codex', f.home, f.ctx)).toBeUndefined();
+    expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))).toBeUndefined();
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)).toBeUndefined();
     expect(await readNativeTranscriptUsage(f.source)).toBeUndefined();
   });
 
-  it('skips malformed and non-object records while reaching the fork marker', () => {
+  it('skips malformed and non-object records while reaching the fork marker', async () => {
     const f = fork();
     writeFileSync(f.path, jsonl([f.own, null, 42, f.parent]) + '{malformed}\n' + jsonl([inheritedInput(), user(marker)]));
     writeFileSync(join(f.home, 'history.jsonl'), jsonl([{ session_id: childId, text: marker }]));
-    expect(verifyLaunchedTranscript('codex', f.home, f.ctx)?.nativeSessionId).toBe(childId);
+    expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))?.nativeSessionId).toBe(childId);
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)?.nativeSessionId).toBe(childId);
   });
 
-  it.each([false, true])('does not bind inherited parent input to the child (fork metadata: %s)', declaredFork => {
+  it.each([false, true])('does not bind inherited parent input to the child (fork metadata: %s)', async declaredFork => {
     const f = fork();
     const parentSession = 'ses_inherited_parent_regression';
     const parentMarker = buildSessionMarker(parentSession);
@@ -120,43 +120,43 @@ describe('Codex fork first metadata ownership', () => {
     utimesSync(parentPath, 1, 1); utimesSync(f.path, 2, 2);
     const parentCtx = { ...f.ctx, sessionId: parentSession };
     const resolve = (sessionId: string) => resolveCliSessionId('codex', { ...f.ctx, sessionId, env: { CODEX_HOME: f.home }, requireMarker: true });
-    expect(verifyLaunchedTranscript('codex', f.home, parentCtx)?.nativeSessionId).toBe(parentId);
-    expect(verifyLaunchedTranscript('codex', f.home, f.ctx)).toBeUndefined();
+    expect((await verifyLaunchedTranscript('codex', f.home, parentCtx))?.nativeSessionId).toBe(parentId);
+    expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))).toBeUndefined();
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, parentCtx)).toBeUndefined();
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)).toBeUndefined();
     writeFileSync(join(f.home, 'history.jsonl'), jsonl([{ session_id: childId, text: marker }]));
-    expect(verifyLaunchedTranscript('codex', f.home, f.ctx)?.nativeSessionId).toBe(childId);
+    expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))?.nativeSessionId).toBe(childId);
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)?.nativeSessionId).toBe(childId);
     expect(resolve(parentSession)).toBe(parentId); expect(resolve(sessionId)).toBe(childId);
     rmSync(parentPath);
-    expect(verifyLaunchedTranscript('codex', f.home, parentCtx)).toBeUndefined();
+    expect((await verifyLaunchedTranscript('codex', f.home, parentCtx))).toBeUndefined();
     expect(resolve(parentSession)).toBeUndefined();
   });
 
-  it('retains modern identity when a later legacy envelope names the same session', () => {
+  it('retains modern identity when a later legacy envelope names the same session', async () => {
     const f = fork();
     writeFileSync(f.path, jsonl([f.own, user(marker), user(`[dutydeck-session:${sessionId}]`)]));
-    expect(verifyLaunchedTranscript('codex', f.home, f.ctx)?.nativeSessionId).toBe(childId);
+    expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))?.nativeSessionId).toBe(childId);
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)?.nativeSessionId).toBe(childId);
   });
 
-  it.each([false, true])('does not verify a single marker beside inherited metadata (fork metadata: %s)', declaredFork => {
+  it.each([false, true])('does not verify a single marker beside inherited metadata (fork metadata: %s)', async declaredFork => {
     const f = fork();
     const own = declaredFork ? { ...f.own, payload: { ...f.own.payload, forked_from_id: parentId } } : f.own;
     writeFileSync(f.path, jsonl([own, f.parent, user(marker)]));
-    expect(verifyLaunchedTranscript('codex', f.home, f.ctx)).toBeUndefined();
+    expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))).toBeUndefined();
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)).toBeUndefined();
     // Generic inherited input is also insufficient for an executable resume target.
     expect(resolveCliSessionId('codex', { ...f.ctx, env: { CODEX_HOME: f.home }, requireMarker: true })).toBeUndefined();
     writeFileSync(join(f.home, 'history.jsonl'), jsonl([{ session_id: childId, text: marker }]));
-    expect(verifyLaunchedTranscript('codex', f.home, f.ctx)?.nativeSessionId).toBe(childId);
+    expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))?.nativeSessionId).toBe(childId);
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)?.nativeSessionId).toBe(childId);
   });
 
   it.each([
     { ownPrompt: false, ownHistory: false }, { ownPrompt: true, ownHistory: false },
     { ownPrompt: false, ownHistory: true }, { ownPrompt: true, ownHistory: true },
-  ])('requires independent history for nested forks: %j', ({ ownPrompt, ownHistory }) => {
+  ])('requires independent history for nested forks: %j', async ({ ownPrompt, ownHistory }) => {
     const f = fork();
     const parentSession = 'ses_nested_parent';
     const parentMarker = buildSessionMarker(parentSession);
@@ -166,40 +166,40 @@ describe('Codex fork first metadata ownership', () => {
     writeFileSync(f.path, jsonl([f.own, f.parent, grandparent, user(buildSessionMarker('ses_nested_grandparent')), user(parentMarker), ...(ownPrompt ? [user(marker)] : [])]));
     if (ownHistory) writeFileSync(join(f.home, 'history.jsonl'), jsonl([{ session_id: childId, text: marker }]));
     const parentCtx = { ...f.ctx, sessionId: parentSession };
-    expect(verifyLaunchedTranscript('codex', f.home, parentCtx)?.nativeSessionId).toBe(parentId);
+    expect((await verifyLaunchedTranscript('codex', f.home, parentCtx))?.nativeSessionId).toBe(parentId);
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, parentCtx)).toBeUndefined();
-    expect(verifyLaunchedTranscript('codex', f.home, f.ctx)?.nativeSessionId).toBe(ownHistory ? childId : undefined);
+    expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))?.nativeSessionId).toBe(ownHistory ? childId : undefined);
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)?.nativeSessionId).toBe(ownHistory ? childId : undefined);
     if (ownHistory) {
       // Visible conflicting submissions remain ambiguous even for a known file.
       appendFileSync(join(f.home, 'history.jsonl'), jsonl([{ session_id: parentId, text: marker }]));
-      expect(verifyLaunchedTranscript('codex', f.home, f.ctx)).toBeUndefined();
+      expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))).toBeUndefined();
       expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)).toBeUndefined();
     }
   });
 
-  it('requires the checkpoint first metadata cwd even with independent fork history', () => {
+  it('requires the checkpoint first metadata cwd even with independent fork history', async () => {
     const f = fork();
     writeFileSync(f.path, jsonl([{ type: 'session_meta', payload: { id: childId, source: 'cli' } }, f.parent, user(marker)]));
     writeFileSync(join(f.home, 'history.jsonl'), jsonl([{ session_id: childId, text: marker }]));
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)).toBeUndefined();
   });
 
-  it('rejects incomplete history for a fork even when the visible tail names its own ID', () => {
+  it('rejects incomplete history for a fork even when the visible tail names its own ID', async () => {
     const f = fork();
     writeFileSync(f.path, jsonl([f.own, f.parent, inheritedInput(), user(marker)]));
     writeFileSync(join(f.home, 'history.jsonl'), 'x'.repeat(4 * 1024 * 1024 + 1) + '\n' + jsonl([{ session_id: childId, text: marker }]));
-    expect(verifyLaunchedTranscript('codex', f.home, f.ctx)).toBeUndefined();
+    expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))).toBeUndefined();
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)).toBeUndefined();
   });
 
-  it('keeps duplicate-file ambiguity and rejects history contradicting the first identity', () => {
+  it('keeps duplicate-file ambiguity and rejects history contradicting the first identity', async () => {
     const f = fork(); writeFileSync(f.path, jsonl([f.own, f.parent, user(marker)]));
     writeFileSync(join(f.home, 'history.jsonl'), jsonl([{ session_id: parentId, text: marker }]));
-    expect(verifyLaunchedTranscript('codex', f.home, f.ctx)).toBeUndefined();
+    expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))).toBeUndefined();
     writeFileSync(join(f.home, 'history.jsonl'), jsonl([{ session_id: childId, text: marker }]));
     writeFileSync(join(f.home, 'sessions', 'rollout-copy.jsonl'), jsonl([f.own]));
-    expect(verifyLaunchedTranscript('codex', f.home, f.ctx)).toBeUndefined();
+    expect((await verifyLaunchedTranscript('codex', f.home, f.ctx))).toBeUndefined();
     expect(verifyTranscriptCheckpoint('codex', f.path, f.home, f.ctx)).toBeUndefined();
   });
 });
@@ -215,10 +215,12 @@ it.each(['codex', 'traex', 'claude-main', 'claude-subagent'])('reads the checked
     const path = join(project, 'sample.jsonl'); writeFileSync(path, jsonl(entries));
     if (name === 'claude-subagent') {
       expect(resolveClaudeTranscriptPath(cwd, env, sessionId)).toBeUndefined();
+      expect(await verifyLaunchedTranscriptAsync('claude', home, { sessionId, cwd })).toBeUndefined();
       expect(await readNativeTranscriptUsage({ client: 'claude', path, dataRoot: home, cwd, nativeSessionId: nativeId })).toBeUndefined();
     } else {
       expect(resolveClaudeTranscriptPath(cwd, env, sessionId)).toBe(path);
       expect(verifyLaunchedTranscript('claude', home, { sessionId, cwd })?.nativeSessionId).toBe(nativeId);
+      expect(await verifyLaunchedTranscriptAsync('claude', home, { sessionId, cwd })).toEqual(verifyLaunchedTranscript('claude', home, { sessionId, cwd }));
       expect((await readNativeTranscriptUsage({ client: 'claude', path, dataRoot: home, cwd, nativeSessionId: nativeId }))?.nativeTokens).toMatchObject({ inputTokens: 26501, outputTokens: 828 });
     }
   } else {
@@ -228,6 +230,7 @@ it.each(['codex', 'traex', 'claude-main', 'claude-subagent'])('reads the checked
     const env = name === 'traex' ? { TRAE_HOME: home } : { CODEX_HOME: home };
     expect(resolveCliSessionId(name, { sessionId, cwd, env, requireMarker: true })).toBe(nativeId);
     expect(verifyLaunchedTranscript(name as 'codex' | 'traex', home, { sessionId, cwd })?.nativeSessionId).toBe(nativeId);
+    expect(await verifyLaunchedTranscriptAsync(name as 'codex' | 'traex', home, { sessionId, cwd })).toEqual(verifyLaunchedTranscript(name as 'codex' | 'traex', home, { sessionId, cwd }));
     if (name === 'codex') expect((await readNativeTranscriptUsage({ client: 'codex', path, dataRoot: home, cwd, nativeSessionId: nativeId }))?.nativeTokens?.totalTokens).toBe(92353);
   }
 });

@@ -1,9 +1,11 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRuntimeStore } from 'acpx/runtime';
 import { AcpxAdapter } from '@dutydeck/acp-client';
+import { buildSessionMarker } from '@dutydeck/pty-driver';
 import { createRepositories } from '@dutydeck/storage';
 import { sessionUsageSnapshot } from './session-usage.js';
 import { UsageLedger } from './usage-ledger.js';
@@ -132,5 +134,86 @@ it('reads the exact built-in ACP Claude shape with a real ACPX native-session re
     expect(await sessionUsageSnapshot(repos, 'acp-bound')).toEqual(beforeUpgrade);
     record.agentSessionId = undefined; await store.save(record);
     expect(await sessionUsageSnapshot(repos, 'acp-bound')).toEqual({});
+  } finally { repos.close(); }
+});
+
+const codexNativeId = '11111111-1111-4111-8111-111111111111';
+const codexGeneration = '22222222-2222-4222-8222-222222222222';
+const codexUsageLines = (sessionId: string, nativeId: string, cwd: string, used: number) => [
+  { type: 'session_meta', payload: { id: nativeId, cwd } },
+  { type: 'event_msg', payload: { type: 'user_message', message: buildSessionMarker(sessionId) } },
+  { type: 'event_msg', timestamp: '2026-10-22T01:00:00Z', payload: { type: 'token_count', info: { last_token_usage: { total_tokens: used }, model_context_window: 1000 } } },
+].map(entry => JSON.stringify(entry)).join('\n') + '\n';
+
+it.each([
+  ['source', 'generation'], ['source', 'native index'], ['checkpoint', 'generation'], ['checkpoint', 'native index'],
+] as const)('refreshes the %s Codex usage API after a %s switch while the verified file remains', async (binding, kind) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-usage-api-generation-')); dirs.push(cwd);
+  const root = join(cwd, 'frozen-codex'); const sessions = join(root, 'sessions'); await mkdir(sessions, { recursive: true });
+  const sessionId = 'ses_usage_api_generation';
+  const old = join(sessions, `rollout-2026-10-20T00-00-00-${codexNativeId}.jsonl`);
+  const next = join(sessions, `rollout-2026-10-${kind === 'native index' ? '19' : '21'}T00-00-00-${codexNativeId}_${codexGeneration}.jsonl`);
+  const repos = createRepositories(':memory:'); const app = Fastify();
+  const now = Date.now(); const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+  const index = (path: string) => {
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
+    const db = new DatabaseSync(join(root, 'state_5.sqlite'));
+    try { db.exec('CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, rollout_path TEXT)'); db.prepare('INSERT OR REPLACE INTO threads VALUES (?, ?)').run(codexNativeId, path); }
+    finally { db.close(); }
+  };
+  try {
+    await repos.agents.save({ id: 'codex', name: 'Codex', command: 'codex', args: [], protocol: 'pty-cli', env: { CODEX_HOME: binding === 'source' ? join(cwd, 'changed-account') : root }, permissionMode: 'deny-all', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false });
+    await repos.sessions.save({ id: sessionId, runId: 'run-generation', agentId: 'codex', protocol: 'pty-cli', cwd, state: 'completed', createdAt: '2026-10-22T00:00:00Z', updatedAt: '2026-10-22T00:00:00Z' });
+    await writeFile(old, codexUsageLines(sessionId, codexNativeId, cwd, 10));
+    if (kind === 'native index') index(old);
+    if (binding === 'source') {
+      vi.spyOn(repos.insight, 'listSources').mockReturnValue([{ observationId: 'verified-source', sessionId, activeRunId: 'run-generation', driverInstanceId: 'driver-generation', client: 'codex', launchKind: 'created', proofKind: 'launch_observed', capturedAt: '2026-10-22T00:00:00Z', dataRoot: root, cwd, nativeSessionId: codexNativeId, verifiedPath: old, identityProof: 'content_verified', streamIdentity: { kind: 'main', nativeAgentId: null } }]);
+    } else {
+      vi.spyOn(repos.execution, 'authority').mockReturnValue('ledger_v1');
+      vi.spyOn(repos.execution, 'getSessionExecutions').mockReturnValue([{ attempts: [{ recoveryControllers: [{ evidence: { kind: 'original_turn', recovery: { transcript: { path: old } } } }] }] }] as any);
+    }
+    registerUsageRoutes(app, { ledger: new UsageLedger({ repositories: repos }), snapshot: id => sessionUsageSnapshot(repos, id, { CODEX_HOME: join(cwd, 'daemon-account') }), authorize: () => false }, async () => {});
+    const snapshot = async () => (await app.inject(`/api/sessions/${sessionId}/usage`)).json().snapshot;
+    expect(await snapshot()).toMatchObject({ context: { used: 10, source: 'codex_transcript' } });
+    await writeFile(next, codexUsageLines(sessionId, codexNativeId, cwd, 30));
+    await writeFile(join(sessions, 'rollout-2026-10-25T00-00-00-99999999-9999-4999-8999-999999999999.jsonl'), codexUsageLines('ses_unrelated', '99999999-9999-4999-8999-999999999999', cwd, 999));
+    if (kind === 'native index') index(next);
+    clock.mockReturnValue(now + 1_001);
+    expect(await snapshot()).toMatchObject({ context: { used: 30, size: 1000, source: 'codex_transcript' } });
+    expect(await readFile(old, 'utf8')).toContain('"total_tokens":10');
+  } finally { clock.mockRestore(); await app.close(); repos.close(); }
+});
+
+it.each(['source', 'checkpoint'] as const)('retains the %s Codex verified-path fallback outside the sessions layout', async binding => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-usage-custom-path-')); dirs.push(cwd);
+  const root = join(cwd, 'frozen-codex'); const custom = join(root, 'archives', 'custom'); await mkdir(custom, { recursive: true });
+  const sessionId = 'ses_usage_custom_path'; const path = join(custom, 'verified-transcript.data');
+  const repos = createRepositories(':memory:');
+  try {
+    await repos.agents.save({ id: 'codex', name: 'Codex', command: 'codex', args: [], protocol: 'pty-cli', env: { CODEX_HOME: root }, permissionMode: 'deny-all', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false });
+    await repos.sessions.save({ id: sessionId, runId: 'run-custom', agentId: 'codex', protocol: 'pty-cli', cwd, state: 'completed', createdAt: '2026-10-22T00:00:00Z', updatedAt: '2026-10-22T00:00:00Z' });
+    await writeFile(path, codexUsageLines(sessionId, codexNativeId, cwd, 10));
+    if (binding === 'source') {
+      const source = { observationId: 'verified-source', sessionId, activeRunId: 'run-custom', driverInstanceId: 'current-driver', client: 'codex' as const, launchKind: 'created' as const, proofKind: 'launch_observed' as const, capturedAt: '2026-10-22T00:00:00Z', dataRoot: root, cwd, nativeSessionId: codexNativeId, verifiedPath: path, identityProof: 'content_verified', streamIdentity: { kind: 'main' as const, nativeAgentId: null } };
+      const sources = vi.spyOn(repos.insight, 'listSources').mockReturnValue([source]);
+      const resources = vi.spyOn(repos.execution, 'getResources').mockReturnValue([{ runId: 'run-custom', stage: 'created', kind: 'local_only', resourceId: 'current-driver', identity: { identityId: 'identity' } }] as any);
+      expect((await sessionUsageSnapshot(repos, sessionId)).context?.used).toBe(10);
+      sources.mockReturnValue([{ ...source, driverInstanceId: 'retired-driver' }]);
+      expect(await sessionUsageSnapshot(repos, sessionId)).toEqual({});
+      sources.mockReturnValue([{ ...source, cwd: join(cwd, 'other-project') }]);
+      expect(await sessionUsageSnapshot(repos, sessionId)).toEqual({});
+      resources.mockReturnValue([]);
+      sources.mockReturnValue([{ ...source, activeRunId: 'historical' }, { ...source, activeRunId: 'historical', nativeSessionId: 'other-native' }]);
+      expect(await sessionUsageSnapshot(repos, sessionId)).toEqual({});
+      sources.mockReturnValue([source]);
+      await writeFile(path, codexUsageLines(sessionId, 'other-native', cwd, 999));
+      expect(await sessionUsageSnapshot(repos, sessionId)).toEqual({});
+    } else {
+      vi.spyOn(repos.execution, 'authority').mockReturnValue('ledger_v1');
+      vi.spyOn(repos.execution, 'getSessionExecutions').mockReturnValue([{ attempts: [{ recoveryControllers: [{ evidence: { kind: 'original_turn', recovery: { transcript: { path } } } }] }] }] as any);
+      expect((await sessionUsageSnapshot(repos, sessionId)).context?.used).toBe(10);
+      await writeFile(path, codexUsageLines(sessionId, 'other-native', cwd, 999));
+      expect(await sessionUsageSnapshot(repos, sessionId)).toEqual({});
+    }
   } finally { repos.close(); }
 });

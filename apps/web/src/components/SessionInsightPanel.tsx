@@ -303,7 +303,7 @@ export function SessionInsightPanel({ sessionId, compareSessionId, onCompareSess
     queryFn: ({ signal }) => insightApi.details(compareSessionId!, null, signal),
     enabled: Boolean(compareSessionId)
   });
-  const sessionsForCompare = useQuery({ queryKey: ['sessions', instance ?? null], queryFn: api.sessions, staleTime: 30_000 });
+  const sessionsForCompare = useQuery({ queryKey: ['sessions', instance ?? null], queryFn: ({ signal }) => api.sessions(signal), staleTime: 30_000 });
 
   const currentContextKey = compareSessionId ? `${instance ?? ''}:${sessionId}:${compareSessionId}` : null;
   const currentLeftSnapshotId = status?.currentSnapshotId;

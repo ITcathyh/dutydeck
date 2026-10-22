@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { api, type Session } from './api';
 import { EVENT_PAGE_SIZE, mergeReconciledEvents, newestSequence, type EventWindow } from './event-history';
 import { SessionStream, applyStatusEvent, type StreamStatus } from './sse';
+import { recordSessionStatusUpdates } from './sessions-query';
 
 // 订阅当前任务的 SSE 事件流，把事件 merge 进 TanStack Query 缓存；
 // 断线时由 SessionStream 按指数退避自动重连（原生 EventSource 重连会自动带 Last-Event-ID header）
@@ -30,7 +31,12 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
       }
       const newTask = batch.some(event => event.type === 'task' && !cached?.events.some(item => item.sequence === event.sequence));
       qc.setQueryData<EventWindow>(['events', sessionId], current => mergeReconciledEvents(current, batch));
-      if (statuses.length) qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === sessionId ? statuses.reduce(applyStatusEvent, session) : session));
+      if (statuses.length) qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => {
+        if (session.id !== sessionId) return session;
+        const updated = statuses.reduce(applyStatusEvent, session);
+        recordSessionStatusUpdates(qc, updated, statuses);
+        return updated;
+      }));
       if (newTask) void qc.invalidateQueries({ queryKey: ['tasks', sessionId], exact: true });
     };
     const flush = () => {
@@ -40,23 +46,32 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
     };
     let reconciling = false;
     let desiredTarget: number | undefined;
+    let recoveryVersion = 0;
     const reconcileEvents = (after: number, target?: number) => {
       recoveryCursors.current.set(sessionId, Math.min(recoveryCursors.current.get(sessionId) ?? after, after));
       if (target !== undefined) desiredTarget = Math.max(desiredTarget ?? 0, target);
+      recoveryVersion += 1;
       if (reconciling) return;
       reconciling = true;
       void (async () => {
         let cursor = recoveryCursors.current.get(sessionId)!;
         while (true) {
+          const requestVersion = recoveryVersion;
           const missed = await api.events(sessionId, { after: cursor, limit: EVENT_PAGE_SIZE, direction: 'forward' }, controller.signal);
           if (controller.signal.aborted) return;
           applyEvents(missed);
           const nextCursor = missed.at(-1)?.sequence ?? cursor;
-          if (!missed.length || nextCursor <= cursor || missed.length < EVENT_PAGE_SIZE || (desiredTarget !== undefined && nextCursor >= desiredTarget - 1)) {
-            if (desiredTarget === undefined || nextCursor >= desiredTarget - 1) recoveryCursors.current.delete(sessionId);
+          if (!missed.length || nextCursor <= cursor) {
+            if (desiredTarget === undefined && requestVersion === recoveryVersion) recoveryCursors.current.delete(sessionId);
             break;
           }
           cursor = nextCursor;
+          recoveryCursors.current.set(sessionId, cursor);
+          // A short response only exhausts the demand that existed when its request began.
+          if (requestVersion === recoveryVersion && (missed.length < EVENT_PAGE_SIZE || (desiredTarget !== undefined && cursor >= desiredTarget - 1))) {
+            if (desiredTarget === undefined || cursor >= desiredTarget - 1) recoveryCursors.current.delete(sessionId);
+            break;
+          }
         }
       })().catch(() => { /* 下一次 open / gap 会再次校准 */ }).finally(() => { reconciling = false; desiredTarget = undefined; });
     };

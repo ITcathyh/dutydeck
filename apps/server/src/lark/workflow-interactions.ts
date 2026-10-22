@@ -298,6 +298,10 @@ export class LarkWorkflowInteractions {
   async list(appId: string): Promise<LarkInteraction[]> {
     return (await this.store.list!(prefix(appId))).map(row => JSON.parse(row.value));
   }
+  async get(appId: string, id: string): Promise<LarkInteraction | undefined> {
+    const raw = await this.store.get(this.key({ appId, id }));
+    return raw ? JSON.parse(raw) as LarkInteraction : undefined;
+  }
   async initialize(appId: string) {
     for (const record of await this.list(appId)) {
       if (record.durable && ['pending', 'resolving'].includes(record.state)) {
@@ -397,14 +401,17 @@ export class LarkWorkflowInteractions {
     if (this.closedCards.has(key)) return true;
     if (this.closingCards.has(record.id)) return false;
     this.closingCards.add(record.id);
+    let changed = false;
     try {
       record = await this.current(record);
       if (record.cardClosedAt && record.closeMessage === message) return true;
       if (record.closeMessage && record.closeMessage !== message) {
+        changed = true;
         record = await this.annotate(record, { cardClosedAt: undefined, closeAttempts: 0, closeRetryAt: undefined });
       }
       if ((record.closeAttempts ?? 0) >= 5 || (record.closeRetryAt ?? 0) > Date.now()) return false;
       const attempts = (record.closeAttempts ?? 0) + 1;
+      changed = true;
       record = await this.annotate(record, { closeMessage: message, closeAttempts: attempts,
         closeRetryAt: Date.now() + Math.min(60_000, 5_000 * 2 ** (attempts - 1)) });
       // ADHD 提问终态只保留决定、操作人和时间；普通模式沿用原卡正文。
@@ -426,7 +433,7 @@ export class LarkWorkflowInteractions {
       return false;
     } finally {
       this.closingCards.delete(record.id);
-      await this.schedulePlanCheck(record.appId);
+      if (changed) await this.schedulePlanCheck(record.appId);
     }
   }
   private async renderPendingPermission(record: LarkInteraction) {
@@ -529,8 +536,7 @@ export class LarkWorkflowInteractions {
     return this.renderClosed(record, await this.expiryMessage(record));
   }
   private async current(record: LarkInteraction) {
-    const raw = await this.store.get(this.key(record));
-    return raw ? JSON.parse(raw) as LarkInteraction : record;
+    return await this.get(record.appId, record.id) ?? record;
   }
   /** 只补写附加字段；记录已被别处改写时按最新值重试，状态流转仍由 move 的 CAS 负责。 */
   private async annotate(record: LarkInteraction, patch: Partial<LarkInteraction>) {
@@ -998,6 +1004,7 @@ export class LarkWorkflowInteractions {
     if (this.closed) return;
     const now = Date.now();
     const records = await this.list(appId);
+    if (this.closed) return;
     const due = records.filter(record => record.kind === 'plan' && record.state === 'pending' && record.expiresAt && record.cardId)
       .flatMap(record => [Date.parse(record.expiresAt!), ...(record.remindedAt ? [] : [Date.parse(record.expiresAt!) - larkPermissionTimeoutMs + larkPermissionReminderAfterMs])])
       .filter(at => at > now);

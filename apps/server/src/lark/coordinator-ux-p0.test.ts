@@ -482,7 +482,9 @@ describe('S4 文件型结果验收 reaction：先查 kv 后写、重启不重复
 
     await h.repos.config.set(`lark.interaction.${h.config.appId}.${record.id}`, JSON.stringify({ ...record, state: 'accepted' }));
     get.mockClear();
+    const interactionList = vi.spyOn(h.repos.config, 'list');
     await (h.coordinator as any).refreshResultFeedback(h.config, record.id);
+    expect(interactionList.mock.calls.filter(([prefix]) => prefix.startsWith('lark.interaction.'))).toHaveLength(0);
     expect(get.mock.calls.filter(([channel]) => channel === h.channel)).toEqual([[h.channel, record.event.messageId]]);
     expect(list).toHaveBeenCalledExactlyOnceWith(h.channel); // Re-read by mapping.id after the external update.
     expect(JSON.parse((await h.repos.channelMappings.get(h.channel, record.event.messageId))!.extra!).result_feedback_state).toBe('accepted');
@@ -495,6 +497,33 @@ describe('S4 文件型结果验收 reaction：先查 kv 后写、重启不重复
     });
     await (h.coordinator as any).refreshResultFeedback(h.config, record.id);
     expect(JSON.parse((await h.repos.channelMappings.get(h.channel, record.event.messageId))!.extra!).result_feedback_state).toBe('concurrent-update');
+  });
+
+  it('refreshes a batch of accepted historical results without listing interactions for each result', async () => {
+    const { h, record } = await fileHarness();
+    h.coordinator.stop();
+    const count = 100;
+    for (let index = 0; index < count; index++) {
+      const id = `accepted_history_${index}`;
+      await h.repos.config.set(`lark.interaction.${h.config.appId}.${id}`, JSON.stringify({ ...record, id, state: 'accepted' }));
+    }
+    // Persisted feedback already matches; recovery must still read every addressed record.
+    await (h.coordinator as any).refreshResultFeedback(h.config, 'accepted_history_0');
+    const list = vi.spyOn(h.repos.config, 'list'), get = vi.spyOn(h.repos.config, 'get');
+    for (let index = 0; index < count; index++) await (h.coordinator as any).refreshResultFeedback(h.config, `accepted_history_${index}`);
+    expect(list.mock.calls.filter(([prefix]) => prefix.startsWith('lark.interaction.'))).toHaveLength(0);
+    expect(get.mock.calls.filter(([key]) => key.startsWith(`lark.interaction.${h.config.appId}.`))).toHaveLength(count);
+    expect(list.mock.calls.filter(([prefix]) => prefix === 'lark.explicit_final.')).toHaveLength(count);
+    expect(h.service.addReaction.mock.calls.filter(([id]) => id === record.relatedCardIds![0])).toHaveLength(1);
+    const restored = h.createCoordinator();
+    try {
+      await restored.initializeWorkflows(h.config);
+      list.mockClear();
+      expect(await restored.reconcile(h.config)).toBe(0);
+      expect(list.mock.calls.filter(([prefix]) => prefix.startsWith('lark.interaction.'))).toHaveLength(3);
+      expect(list.mock.calls.filter(([prefix]) => prefix === 'lark.explicit_final.')).toHaveLength(2);
+      expect(h.service.addReaction.mock.calls.filter(([id]) => id === record.relatedCardIds![0])).toHaveLength(1);
+    } finally { restored.stop(); }
   });
 
   it('「需要修改」补 Typing；内联结果与 final_message_id 同卡两种形态均不加 reaction', async () => {

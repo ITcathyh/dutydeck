@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -287,10 +287,11 @@ export class PluginStore {
   private async writeTokens(tokens: Record<string, string>) {
     await mkdir(this.pluginsDir, { recursive: true });
     const path = join(this.pluginsDir, TOKENS_FILE);
-    const temporary = `${path}.${process.pid}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(tokens, null, 2)}\n`, { mode: 0o600 });
-    await chmod(temporary, 0o600);
-    await rename(temporary, path);
+    const temporary = `${path}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
+    try {
+      await writeFile(temporary, `${JSON.stringify(tokens, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+      await rename(temporary, path);
+    } finally { await rm(temporary, { force: true }); }
   }
 
   /** 同步读，触发器请求路径上用；文件不存在即没有令牌。 */
@@ -301,20 +302,22 @@ export class PluginStore {
   }
 
   async ensureTriggerToken(plugin: string, triggerId: string, rotate = false): Promise<{ token: string; created: boolean }> {
-    this.get(plugin);
-    const loaded = await loadPluginDirectory(this.pluginDir(plugin));
-    if (!loaded.triggers.has(triggerId)) throw new PluginStoreError('PLUGIN_TRIGGER_NOT_FOUND', `插件 ${plugin} 没有触发器 ${triggerId}`);
-    const tokens = await this.readTokens();
-    const key = `${plugin}/${triggerId}`;
-    if (tokens[key] && !rotate) return { token: tokens[key], created: false };
-    tokens[key] = randomBytes(32).toString('base64url');
-    await this.writeTokens(tokens);
-    return { token: tokens[key], created: true };
+    return this.withStoreLock(async () => {
+      this.get(plugin);
+      const loaded = await loadPluginDirectory(this.pluginDir(plugin));
+      if (!loaded.triggers.has(triggerId)) throw new PluginStoreError('PLUGIN_TRIGGER_NOT_FOUND', `插件 ${plugin} 没有触发器 ${triggerId}`);
+      const tokens = await this.readTokens();
+      const key = `${plugin}/${triggerId}`;
+      if (tokens[key] && !rotate) return { token: tokens[key], created: false };
+      tokens[key] = randomBytes(32).toString('base64url');
+      await this.writeTokens(tokens);
+      return { token: tokens[key], created: true };
+    });
   }
 
   // ---- userConfig：普通值存 .config.json，sensitive 值存 secret-provider ----
 
-  /** 插件清单和配置共用 SQLite 互斥；连接关闭或进程退出时由系统释放，不删除锁文件。 */
+  /** 插件清单、令牌和配置共用 SQLite 互斥；连接关闭或进程退出时由系统释放，不删除锁文件。 */
   private async withStoreLock<T>(action: () => Promise<T>): Promise<T> {
     await mkdir(this.pluginsDir, { recursive: true });
     const lock = new Database(join(this.pluginsDir, '.config-lock.sqlite'), { timeout: 0 });

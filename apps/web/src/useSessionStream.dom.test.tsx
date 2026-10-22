@@ -5,6 +5,7 @@ import { api, type DockEvent, type Session, type Task } from './api';
 import { createEventWindow } from './event-history';
 import type { MockableEventSource } from './sse';
 import { useSessionStream } from './useSessionStream';
+import { loadSessions, recordSessionStatusUpdates } from './sessions-query';
 
 const event = (sequence: number): DockEvent => ({ id: `e${sequence}`, sequence, type: 'text', timestamp: '', data: { text: String(sequence) } });
 const session: Session = { id: 's1', agentId: 'codex', state: 'idle', cwd: '/repo', runId: 'r1', createdAt: '', updatedAt: '' };
@@ -367,4 +368,295 @@ it.each([
       expect(eventLoader).toHaveBeenLastCalledWith('s1', { after: 2, limit: 200, direction: 'forward' }, expect.any(AbortSignal));
     }
   } finally { view.unmount(); client.clear(); vi.useRealTimers(); }
+});
+
+
+it('continues recovery when a second gap arrives during a short page request', async () => {
+  let release!: (events: DockEvent[]) => void;
+  const loader = vi.spyOn(api, 'events')
+    .mockImplementationOnce(() => new Promise(resolve => { release = resolve; }))
+    .mockResolvedValueOnce(Array.from({ length: 7 }, (_, index) => event(14 + index)));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['events', 's1'], createEventWindow([event(10)]));
+  function Harness() { useSessionStream('s1', 'r1', true); return null; }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  try {
+    act(() => MockEventSource.instances[0]!.emit('text', event(13)));
+    act(() => MockEventSource.instances[0]!.emit('text', event(20)));
+    await act(async () => release([event(11), event(12), event(13)]));
+    await waitFor(() => expect(loader).toHaveBeenCalledTimes(2));
+    expect(loader).toHaveBeenLastCalledWith('s1', { after: 13, limit: 200, direction: 'forward' }, expect.any(AbortSignal));
+    await waitFor(() => expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.map(item => item.sequence)).toEqual(Array.from({ length: 11 }, (_, index) => index + 10)));
+  } finally { view.unmount(); client.clear(); }
+});
+
+it('keeps in-flight SSE status updates when an older sessions snapshot arrives', async () => {
+  const initial = { ...session, model: 'old-model', updatedAt: '2026-10-22T00:00:00.000Z' };
+  let release!: (sessions: Session[]) => void;
+  vi.spyOn(api, 'sessions').mockImplementation(() => new Promise(resolve => { release = resolve; }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['sessions'], [initial]);
+  function Harness() {
+    useQuery({ queryKey: ['sessions'], queryFn: ({ signal }) => loadSessions(client, signal) });
+    useSessionStream('s1', 'r1', true);
+    return null;
+  }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  try {
+    act(() => MockEventSource.instances[0]!.emit('status', { ...event(1), type: 'status', timestamp: '2026-10-22T00:00:10.000Z', data: { state: 'thinking', reasoningEffort: 'high' } }));
+    await waitFor(() => expect(client.getQueryData<Session[]>(['sessions'])?.[0]?.state).toBe('thinking'));
+    await act(async () => release([{ ...initial, name: 'renamed', model: 'snapshot-model' }]));
+    await waitFor(() => expect(client.getQueryState(['sessions'])?.fetchStatus).toBe('idle'));
+    expect(client.getQueryData<Session[]>(['sessions'])?.[0]).toMatchObject({ state: 'thinking', updatedAt: '2026-10-22T00:00:10.000Z', name: 'renamed', model: 'snapshot-model', reasoningEffort: 'high' });
+    const refreshed = client.refetchQueries({ queryKey: ['sessions'], exact: true });
+    await act(async () => { release([{ ...initial, state: 'completed', updatedAt: '2026-10-22T00:00:20.000Z' }]); await refreshed; });
+    expect(client.getQueryData<Session[]>(['sessions'])?.[0]).toMatchObject({ state: 'completed', updatedAt: '2026-10-22T00:00:20.000Z', model: 'old-model' });
+  } finally { view.unmount(); client.clear(); }
+});
+
+
+it.each([
+  { name: 'empty', page: [] },
+  { name: 'non-advancing full', page: Array.from({ length: 200 }, () => event(10)) },
+  { name: 'permanently sparse', page: [event(11)] }
+])('stops bounded recovery on a $name page and retains its cursor for reconnect', async ({ page }) => {
+  let release!: (events: DockEvent[]) => void;
+  const loader = vi.spyOn(api, 'events')
+    .mockImplementationOnce(() => new Promise(resolve => { release = resolve; }))
+    .mockResolvedValue(page);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['events', 's1'], createEventWindow([event(10)]));
+  function Harness() { useSessionStream('s1', 'r1', true); return null; }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  try {
+    act(() => MockEventSource.instances[0]!.emit('text', event(13)));
+    act(() => MockEventSource.instances[0]!.emit('text', event(20)));
+    await act(async () => release(page));
+    // A progressing short page gets one follow-up for the new gap; stationary
+    // responses stop immediately even when another gap arrived in flight.
+    const calls = page.length === 1 ? 2 : 1;
+    expect(loader).toHaveBeenCalledTimes(calls);
+    await waitFor(() => expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.at(-1)?.sequence).toBe(20));
+    expect(loader).toHaveBeenCalledTimes(calls);
+    act(() => MockEventSource.instances[0]!.onopen?.(new Event('open')));
+    await waitFor(() => expect(loader).toHaveBeenCalledTimes(calls + 1));
+    expect(loader).toHaveBeenLastCalledWith('s1', { after: page.length === 1 ? 11 : 10, limit: 200, direction: 'forward' }, expect.any(AbortSignal));
+  } finally { view.unmount(); client.clear(); }
+});
+
+it('cancels a short recovery page with a queued gap when unmounted', async () => {
+  let release!: (events: DockEvent[]) => void;
+  const loader = vi.spyOn(api, 'events').mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['events', 's1'], createEventWindow([event(10)]));
+  function Harness() { useSessionStream('s1', 'r1', true); return null; }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  act(() => MockEventSource.instances[0]!.emit('text', event(13)));
+  act(() => MockEventSource.instances[0]!.emit('text', event(20)));
+  view.unmount();
+  expect(loader.mock.calls[0]?.[2]?.aborted).toBe(true);
+  await act(async () => release([event(11), event(12), event(13)]));
+  expect(loader).toHaveBeenCalledTimes(1);
+  expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.map(item => item.sequence)).toEqual([10]);
+  client.clear();
+});
+
+it('merges status fields per session while keeping newer snapshots, deletions and run changes authoritative', async () => {
+  const at = (second: number) => `2026-10-22T00:00:${String(second).padStart(2, '0')}.000Z`;
+  const initial = ['s1', 's2', 's3', 's4', 's5'].map(id => ({ ...session, id, model: 'old-model', reasoningEffort: 'low', updatedAt: at(0) }));
+  let release!: (sessions: Session[]) => void;
+  vi.spyOn(api, 'sessions').mockImplementation(() => new Promise(resolve => { release = resolve; }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['sessions'], initial);
+  function Harness() {
+    useQuery({ queryKey: ['sessions'], queryFn: ({ signal }) => loadSessions(client, signal) });
+    useSessionStream('s1', 'r1', true);
+    useSessionStream('s2', 'r1', true);
+    useSessionStream('s3', 'r1', true);
+    useSessionStream('s4', 'r1', true);
+    useSessionStream('s5', 'r1', true);
+    return null;
+  }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  try {
+    act(() => MockEventSource.instances.forEach(source => source.emit('status', { ...event(1), type: 'status', timestamp: at(10), data: { state: 'thinking', model: 'live-model', reasoningEffort: 'high' } })));
+    await waitFor(() => expect(client.getQueryData<Session[]>(['sessions'])?.every(session => session.state === 'thinking')).toBe(true));
+    await act(async () => release([
+      { ...initial[0]!, name: 'new name', archivedAt: at(5), permissionMode: 'full-trust' },
+      { ...initial[1]!, state: 'completed', model: 'newer-model', updatedAt: at(20) },
+      { ...initial[3]!, runId: 'r2', state: 'starting' },
+      { ...initial[4]!, state: 'idle', updatedAt: at(10) }
+    ]));
+    await waitFor(() => expect(client.getQueryState(['sessions'])?.fetchStatus).toBe('idle'));
+    const rows = client.getQueryData<Session[]>(['sessions'])!;
+    expect(rows.map(session => session.id)).toEqual(['s1', 's2', 's4', 's5']);
+    expect(rows[0]).toMatchObject({ state: 'thinking', model: 'live-model', reasoningEffort: 'high', updatedAt: at(10), name: 'new name', archivedAt: at(5), permissionMode: 'full-trust' });
+    expect(rows[1]).toMatchObject({ state: 'completed', model: 'newer-model', reasoningEffort: 'low', updatedAt: at(20) });
+    expect(rows[2]).toMatchObject({ runId: 'r2', state: 'starting', model: 'old-model', reasoningEffort: 'low' });
+    expect(rows[3]).toMatchObject({ state: 'thinking', updatedAt: at(10) });
+  } finally { view.unmount(); client.clear(); }
+});
+
+it('reconnect cancels an older sessions GET and a late response cannot replace the new request', async () => {
+  const initial = { ...session, updatedAt: '2026-10-22T00:00:00.000Z' };
+  const releases: Array<(sessions: Session[]) => void> = [];
+  const loader = vi.spyOn(api, 'sessions').mockImplementation(() => new Promise(resolve => { releases.push(resolve); }));
+  vi.spyOn(api, 'events').mockResolvedValue([]);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['sessions'], [initial]);
+  function Harness() {
+    useQuery({ queryKey: ['sessions'], queryFn: ({ signal }) => loadSessions(client, signal) });
+    useSessionStream('s1', 'r1', true);
+    return null;
+  }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  try {
+    expect(loader).toHaveBeenCalledTimes(1);
+    act(() => MockEventSource.instances[0]!.onopen?.(new Event('open')));
+    expect(loader).toHaveBeenCalledTimes(2);
+    expect(loader.mock.calls[0]?.[0]?.aborted).toBe(true);
+    expect(loader.mock.calls[1]?.[0]?.aborted).toBe(false);
+    act(() => MockEventSource.instances[0]!.emit('status', { ...event(1), type: 'status', timestamp: '2026-10-22T00:00:10.000Z', data: { state: 'thinking' } }));
+    await waitFor(() => expect(client.getQueryData<Session[]>(['sessions'])?.[0]?.state).toBe('thinking'));
+    await act(async () => releases[0]!([initial]));
+    expect(client.getQueryData<Session[]>(['sessions'])?.[0]?.state).toBe('thinking');
+    await act(async () => releases[1]!([{ ...initial, name: 'latest name' }]));
+    await waitFor(() => expect(client.getQueryState(['sessions'])?.fetchStatus).toBe('idle'));
+    expect(client.getQueryData<Session[]>(['sessions'])?.[0]).toMatchObject({ state: 'thinking', name: 'latest name', updatedAt: '2026-10-22T00:00:10.000Z' });
+    const refresh = client.refetchQueries({ queryKey: ['sessions'], exact: true });
+    expect(loader).toHaveBeenCalledTimes(3);
+    await act(async () => { await client.cancelQueries({ queryKey: ['sessions'], exact: true }); await refresh; });
+    expect(loader.mock.calls[2]?.[0]?.aborted).toBe(true);
+    await act(async () => releases[2]!([initial]));
+    expect(client.getQueryData<Session[]>(['sessions'])?.[0]).toMatchObject({ state: 'thinking', name: 'latest name' });
+  } finally { view.unmount(); client.clear(); }
+});
+
+
+it.each([['thinking', 'idle'], ['idle']])('preserves a live status that finishes in the initial state: %j', async (...states) => {
+  const initial = { ...session, model: 'old-model', updatedAt: '2026-10-22T00:00:00.000Z' };
+  let release!: (sessions: Session[]) => void;
+  vi.spyOn(api, 'sessions').mockImplementation(() => new Promise(resolve => { release = resolve; }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['sessions'], [initial]);
+  function Harness() {
+    useQuery({ queryKey: ['sessions'], queryFn: ({ signal }) => loadSessions(client, signal) });
+    useSessionStream('s1', 'r1', true);
+    return null;
+  }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  try {
+    act(() => states.forEach((state, index) => MockEventSource.instances[0]!.emit('status', { ...event(index + 1), type: 'status', timestamp: '2026-10-22T00:00:10.000Z', data: { state, ...(index === 0 ? { model: 'live-model' } : { reasoningEffort: 'high' }) } })));
+    await waitFor(() => expect(client.getQueryData<Session[]>(['sessions'])?.[0]?.model).toBe('live-model'));
+    await act(async () => release([{ ...initial, state: 'thinking', name: 'latest name' }]));
+    await waitFor(() => expect(client.getQueryState(['sessions'])?.fetchStatus).toBe('idle'));
+    expect(client.getQueryData<Session[]>(['sessions'])?.[0]).toMatchObject({ state: 'idle', model: 'live-model', name: 'latest name', updatedAt: '2026-10-22T00:00:10.000Z' });
+  } finally { view.unmount(); client.clear(); }
+});
+
+
+it.each([
+  { delivery: 'separate frames', values: ['model-b', 'model-a'] },
+  { delivery: 'same frame', values: ['model-b', 'model-a'] },
+  { delivery: 'same explicit value', values: ['model-a'] }
+])('keeps explicit model/effort updates returning to their initial values: $delivery', async ({ delivery, values }) => {
+  const initial = { ...session, model: 'model-a', reasoningEffort: 'low', updatedAt: '2026-10-22T00:00:00.000Z' };
+  let release!: (sessions: Session[]) => void;
+  vi.spyOn(api, 'sessions').mockImplementation(() => new Promise(resolve => { release = resolve; }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['sessions'], [initial]);
+  function Harness() {
+    useQuery({ queryKey: ['sessions'], queryFn: ({ signal }) => loadSessions(client, signal) });
+    useSessionStream('s1', 'r1', true);
+    return null;
+  }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  const status = (model: string, index: number): DockEvent => ({ ...event(index + 1), type: 'status', timestamp: `2026-10-22T00:00:0${index + 2}.000Z`, data: { state: 'idle', model, reasoningEffort: model === 'model-a' ? 'low' : 'high' } });
+  try {
+    for (const [index, model] of values.entries()) {
+      act(() => MockEventSource.instances[0]!.emit('status', status(model, index)));
+      if (delivery === 'separate frames') await waitFor(() => expect(client.getQueryData<Session[]>(['sessions'])?.[0]?.updatedAt).toBe(status(model, index).timestamp));
+    }
+    await waitFor(() => expect(client.getQueryData<Session[]>(['sessions'])?.[0]?.updatedAt).toBe(status('model-a', values.length - 1).timestamp));
+    await act(async () => release([{ ...initial, model: 'model-b', reasoningEffort: 'high', updatedAt: '2026-10-22T00:00:01.000Z' }]));
+    await waitFor(() => expect(client.getQueryState(['sessions'])?.fetchStatus).toBe('idle'));
+    expect(client.getQueryData<Session[]>(['sessions'])?.[0]).toMatchObject({ model: 'model-a', reasoningEffort: 'low', updatedAt: status('model-a', values.length - 1).timestamp });
+  } finally { view.unmount(); client.clear(); }
+});
+
+it('preserves model/effort mutation responses returning to initial values during a GET', async () => {
+  const initial = { ...session, model: 'model-a', reasoningEffort: 'low', updatedAt: '2026-10-22T00:00:00.000Z' };
+  let release!: (sessions: Session[]) => void;
+  vi.spyOn(api, 'sessions').mockImplementation(() => new Promise(resolve => { release = resolve; }));
+  const client = new QueryClient();
+  client.setQueryData(['sessions'], [initial]);
+  const pending = loadSessions(client, new AbortController().signal);
+  client.setQueryData(['sessions'], [{ ...initial, model: 'model-b', reasoningEffort: 'high', updatedAt: '2026-10-22T00:00:01.000Z' }]);
+  const latest = { ...initial, updatedAt: '2026-10-22T00:00:02.000Z' };
+  client.setQueryData(['sessions'], [latest]);
+  release([{ ...initial, model: 'model-b', reasoningEffort: 'high', updatedAt: '2026-10-22T00:00:01.000Z' }]);
+  expect((await pending)[0]).toMatchObject({ model: 'model-a', reasoningEffort: 'low', updatedAt: latest.updatedAt });
+  client.clear();
+});
+
+
+describe('sessions request observer cleanup', () => {
+  const initial = { ...session, model: 'model-a', reasoningEffort: 'low', updatedAt: '2026-10-22T00:00:02.000Z' };
+  const intermediate = { ...initial, model: 'model-b', reasoningEffort: 'high', updatedAt: '2026-10-22T00:00:01.000Z' };
+  const sameValue: DockEvent = { ...event(1), type: 'status', timestamp: initial.updatedAt, data: { state: 'idle', model: 'model-a', reasoningEffort: 'low' } };
+  function trackSubscriptions(client: QueryClient) {
+    const cache = client.getQueryCache();
+    const subscribe = cache.subscribe.bind(cache);
+    const stops: Array<ReturnType<typeof vi.fn>> = [];
+    vi.spyOn(cache, 'subscribe').mockImplementation(listener => {
+      const stop = vi.fn(subscribe(listener));
+      stops.push(stop);
+      return stop;
+    });
+    return stops;
+  }
+
+  it('unsubscribes immediately on cancel and an old late response leaves the next request observer active', async () => {
+    const releases: Array<(sessions: Session[]) => void> = [];
+    vi.spyOn(api, 'sessions').mockImplementation(() => new Promise(resolve => { releases.push(resolve); }));
+    const client = new QueryClient();
+    client.setQueryData(['sessions'], [initial]);
+    const stops = trackSubscriptions(client);
+    const controller = new AbortController();
+    const oldRequest = loadSessions(client, controller.signal);
+    const rejected = expect(oldRequest).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    expect(stops[0]).toHaveBeenCalledTimes(1);
+    const newRequest = loadSessions(client, new AbortController().signal);
+    releases[0]!([intermediate]);
+    await rejected;
+    expect(stops[0]).toHaveBeenCalledTimes(1);
+    expect(stops[1]).not.toHaveBeenCalled();
+    // All values equal the cached row: only the explicit-field observer can
+    // protect this update, independent of Query's structural sharing.
+    recordSessionStatusUpdates(client, initial, [sameValue]);
+    releases[1]!([intermediate]);
+    expect((await newRequest)[0]).toMatchObject({ model: 'model-a', reasoningEffort: 'low' });
+    expect(stops[1]).toHaveBeenCalledTimes(1);
+    client.clear();
+  });
+
+  it('unsubscribes on failure and never carries the failed request fields into the next GET', async () => {
+    let fail!: (error: Error) => void;
+    vi.spyOn(api, 'sessions')
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }))
+      .mockResolvedValueOnce([intermediate]);
+    const client = new QueryClient();
+    client.setQueryData(['sessions'], [initial]);
+    const stops = trackSubscriptions(client);
+    const failed = loadSessions(client, new AbortController().signal);
+    recordSessionStatusUpdates(client, initial, [sameValue]);
+    fail(new Error('offline'));
+    await expect(failed).rejects.toThrow('offline');
+    expect(stops[0]).toHaveBeenCalledTimes(1);
+    const result = await loadSessions(client, new AbortController().signal);
+    expect(result[0]).toMatchObject({ model: 'model-b', reasoningEffort: 'high' });
+    expect(stops[1]).toHaveBeenCalledTimes(1);
+    client.clear();
+  });
 });

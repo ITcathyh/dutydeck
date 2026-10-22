@@ -26,6 +26,7 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { WorkspaceOverview } from './components/WorkspaceOverview';
 import { RunDetailTabs, RunHeader } from './components/RunHeader';
 import { useSessionStream } from './useSessionStream';
+import { loadSessions } from './sessions-query';
 import { buildPrompt, commandsFromEvents, currentContextStats, getModelReadiness } from './composer-utils';
 import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from './model-cache';
 import { useEventHistory } from './useEventHistory';
@@ -248,7 +249,7 @@ export default function App() {
 
   const agents = useQuery({ queryKey: ['agents'], queryFn: api.agents, staleTime: 5 * 60_000 });
   // 非当前任务没有 SSE，低频同步用于捕获飞书创建等外部变化；当前任务状态仍由 SSE 即时写入缓存。
-  const sessions = useQuery({ queryKey: ['sessions'], queryFn: api.sessions, refetchInterval: 15_000, refetchIntervalInBackground: false });
+  const sessions = useQuery({ queryKey: ['sessions'], queryFn: ({ signal }) => loadSessions(qc, signal), refetchInterval: 15_000, refetchIntervalInBackground: false });
   const summaries = useQuery({ queryKey: ['run-summaries'], queryFn: api.runSummaries, refetchInterval: 15_000, refetchIntervalInBackground: false });
   const workspaceGroups = useQuery({ queryKey: ['workspace-groups'], queryFn: api.workspaceGroups, refetchInterval: 15_000, refetchIntervalInBackground: false });
   const larkConfig = useQuery({ queryKey: ['lark-config'], queryFn: api.larkConfig, staleTime: 30_000, refetchOnWindowFocus: true });

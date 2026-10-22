@@ -448,16 +448,17 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
   }
 }
 
-const usagePaths = new Map<string, string>();
+const usagePaths = new Map<string, { path: string; refreshAt: number }>();
 /** Read only the named native session. Repeated polling reads appended bytes only. */
 export async function readCodexSessionUsage(nativeSessionId: string, env: CliPathEnv, cwd: string): Promise<SessionUsageSnapshot | undefined> {
   const root = codexSessionsRoot(env);
   const key = `${root}\0${nativeSessionId}\0${cwd}`;
-  let path = usagePaths.get(key);
-  if (path && !existsSync(path)) { usagePaths.delete(key); path = undefined; }
-  path ??= findRolloutBySessionId(root, nativeSessionId, Infinity);
+  const cached = usagePaths.get(key);
+  let path = cached && existsSync(cached.path) ? cached.path : undefined;
+  const refresh = !path || !cached || Date.now() >= cached.refreshAt;
+  if (refresh) path = findRolloutBySessionId(root, nativeSessionId, Infinity, !!cached) ?? path;
   if (!path) return undefined;
-  usagePaths.delete(key); usagePaths.set(key, path);
+  usagePaths.delete(key); usagePaths.set(key, { path, refreshAt: refresh ? Date.now() + 1_000 : cached!.refreshAt });
   if (usagePaths.size > 32) usagePaths.delete(usagePaths.keys().next().value!);
   return readNativeTranscriptUsage({ client: 'codex', path, dataRoot: root, nativeSessionId, cwd });
 }

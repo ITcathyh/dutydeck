@@ -9,6 +9,7 @@ import { buildApp } from '../apps/server/src/app.js';
 import { LarkGroupManager } from '../apps/server/src/lark/group-management.js';
 import { readLarkConfig, saveLarkConfig } from '../apps/server/src/lark/config.js';
 import { LarkMessageCoordinator, type LarkMessageEvent } from '../apps/server/src/lark/listener.js';
+import { installLarkHook } from '../apps/server/src/lark/security-hooks.js';
 
 export interface LarkManagementDelivery {
   appId: string;
@@ -165,7 +166,22 @@ export async function createLarkManagementHarness(
       memberIds,
       observations,
       syntheticClient: (appId: string) => client(appId),
-      configureAcpRiskFixture: () => saveLarkConfig(repositories!.config, repositories!.agents, { originalAppId: 'cli_one', riskControlMode: 'enforced', highRiskPattern: 'Edit' }),
+      async configureAcpRiskFixture() {
+        const agent = { ...agents[0]!, id: 'codex' };
+        await repositories!.agents.save(agent);
+        for (const workspace of workspaces) {
+          const hook = await installLarkHook(agent.id, workspace, agent);
+          if (!hook.supported || !hook.installed || !hook.writable) throw new Error(`Risk fixture hook is not ready in ${workspace}`);
+        }
+        const config = (await readLarkConfig(repositories!.config, 'cli_one'))!;
+        const response = await fetch(`${base}/api/lark/config`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ originalAppId: 'cli_one', expectedRevision: config.revision, defaultAgentId: agent.id, riskControlMode: 'enforced', highRiskPattern: 'Edit' })
+        });
+        if (!response.ok) throw new Error(`Risk fixture configuration failed: ${response.status} ${await response.text()}`);
+        return agent.id;
+      },
       releasePermission: () => writeFile(`${record}.release`, 'release'),
       permissions: async (): Promise<any[]> => (await readFile(`${record}.permissions`, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line)),
       async ingress(appId: string, overrides: Partial<LarkMessageEvent> = {}) {

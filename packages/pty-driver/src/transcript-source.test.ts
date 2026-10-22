@@ -9,11 +9,13 @@ import { PtyBackend, TmuxBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 import { claudeProjectDir, codexHome, traeHome } from './cli-paths.js';
 import { buildSessionMarker } from './session-id/index.js';
+import * as transcriptSource from './transcript-source.js';
 import {
   TranscriptSourceTracker,
   freezeTranscriptSource,
   transcriptClientForAdapter,
   verifyLaunchedTranscript,
+  verifyLaunchedTranscriptAsync,
 } from './transcript-source.js';
 
 const repaint = (text: string) => `\x1b[2J\x1b[H${text.replaceAll('\n', '\r\n')}`;
@@ -160,6 +162,46 @@ describe('PTY launch observations at the real spawn boundary', () => {
     await driver.stop();
   });
 
+  it('aborts the previous launch scan on respawn and never publishes its late identity', async () => {
+    const { script } = writeIdleScript(cwd);
+    const dataRoot = join(cwd, 'codex-root');
+    const root = join(dataRoot, 'sessions'); mkdirSync(root, { recursive: true });
+    const sessionId = 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const nativeSessionId = '11111111-1111-4111-8111-111111111111';
+    const path = join(root, `rollout-now-${nativeSessionId}.jsonl`);
+    writeFileSync(path, JSON.stringify({ type: 'session_meta', payload: { id: nativeSessionId, cwd } }) + '\n'
+      + JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: buildSessionMarker(sessionId) } }) + '\n');
+    const verified = verifyLaunchedTranscript('codex', dataRoot, { sessionId, cwd });
+    expect(verified?.nativeSessionId).toBe(nativeSessionId);
+    let finishScan!: (value: transcriptSource.VerifiedTranscriptIdentity | undefined) => void;
+    const scan = new Promise<transcriptSource.VerifiedTranscriptIdentity | undefined>(resolve => { finishScan = resolve; });
+    const verify = vi.spyOn(transcriptSource, 'verifyLaunchedTranscriptAsync').mockReturnValueOnce(scan);
+    const observations: DriverTranscriptSourceObservation[] = [];
+    const backend = new PtyBackend();
+    const kill = backend.kill.bind(backend);
+    let finishKill!: () => void, killing!: () => void;
+    const killGate = new Promise<void>(resolve => { finishKill = resolve; });
+    const killStarted = new Promise<void>(resolve => { killing = resolve; });
+    vi.spyOn(backend, 'kill').mockImplementationOnce(async () => { killing(); await killGate; await kill(); });
+    const driver = new PtyCliDriver({ agent: makeAgent(cwd, process.execPath, { CODEX_HOME: dataRoot }),
+      adapter: makeAdapter('codex', script), backend, sessionId, onEvent() {}, onExit() {} });
+    driver.subscribeTranscriptSource(o => observations.push(o));
+    let resume: Promise<void> | undefined;
+    try {
+      await driver.start();
+      resume = driver.resume();
+      await killStarted;
+      expect(verify.mock.calls[0]?.[3]?.aborted).toBe(true);
+      finishScan(verified);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(observations).toHaveLength(1);
+      finishKill(); await resume;
+      await expect.poll(() => observations.length).toBe(3);
+      expect(observations.map(o => o.nativeSessionId)).toEqual([null, null, nativeSessionId]);
+      expect(observations[0]?.observationId).not.toBe(observations[1]?.observationId);
+    } finally { finishScan(verified); finishKill(); await resume?.catch(() => {}); await driver.stop(); verify.mockRestore(); }
+  });
+
   it('emits no launch when attaching to an existing tmux session (old process env unknowable)', async () => {
     const tmuxName = `dd-insight-attach-${process.pid}`;
     // Simulate a daemon restart: the pane survives from a previous driver,
@@ -201,7 +243,7 @@ describe('PTY launch observations at the real spawn boundary', () => {
   });
 });
 
-describe('native identity is content-verified, never filename/mtime based', () => {
+describe.each([['sync', verifyLaunchedTranscript], ['async', verifyLaunchedTranscriptAsync]] as const)('native identity is content-verified, never filename/mtime based (%s)', (_name, verifyLaunchedTranscript) => {
   let cwd: string;
   beforeEach(() => { cwd = mkdtempSync(join(tmpdir(), 'dd-insight-id-')); });
   afterEach(() => rmSync(cwd, { recursive: true, force: true }));
@@ -209,7 +251,7 @@ describe('native identity is content-verified, never filename/mtime based', () =
   const sessionA = 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
   const sessionB = 'ses_bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-  it('two same-cwd sessions never cross native ids, and a bare pinned file stays unverified', () => {
+  it('two same-cwd sessions never cross native ids, and a bare pinned file stays unverified', async () => {
     const configDir = join(cwd, 'config');
     const env = { CLAUDE_CONFIG_DIR: configDir };
     const project = claudeProjectDir(cwd, env);
@@ -226,8 +268,8 @@ describe('native identity is content-verified, never filename/mtime based', () =
       message: { role: 'user', content: buildSessionMarker(sessionB) },
     }) + '\n');
     const root = freezeTranscriptSource('claude-code', env)!.dataRoot;
-    const verifiedA = verifyLaunchedTranscript('claude', root, { sessionId: sessionA, cwd });
-    const verifiedB = verifyLaunchedTranscript('claude', root, { sessionId: sessionB, cwd });
+    const verifiedA = (await verifyLaunchedTranscript('claude', root, { sessionId: sessionA, cwd }));
+    const verifiedB = (await verifyLaunchedTranscript('claude', root, { sessionId: sessionB, cwd }));
     expect(verifiedA?.nativeSessionId).toBe(pinnedSessionUuid(sessionA));
     expect(verifiedA?.verifiedPath).toBe(fileA);
     expect(verifiedB?.nativeSessionId).toBe(pinnedSessionUuid(sessionB));
@@ -236,10 +278,10 @@ describe('native identity is content-verified, never filename/mtime based', () =
     // A pinned file whose content lacks the marker is not identity.
     rmSync(fileA);
     writeFileSync(fileA, JSON.stringify({ type: 'user', message: { role: 'user', content: 'unrelated' } }) + '\n');
-    expect(verifyLaunchedTranscript('claude', root, { sessionId: sessionA, cwd })).toBeUndefined();
+    expect((await verifyLaunchedTranscript('claude', root, { sessionId: sessionA, cwd }))).toBeUndefined();
   });
 
-  it('stays ambiguous when two distinct Claude native ids carry the same marker', () => {
+  it('stays ambiguous when two distinct Claude native ids carry the same marker', async () => {
     const configDir = join(cwd, 'config-amb');
     const env = { CLAUDE_CONFIG_DIR: configDir };
     const project = claudeProjectDir(cwd, env);
@@ -255,10 +297,10 @@ describe('native identity is content-verified, never filename/mtime based', () =
       type: 'user', sessionId: idB, message: { role: 'user', content: buildSessionMarker(sessionA) },
     }) + '\n');
     const root = freezeTranscriptSource('claude-code', env)!.dataRoot;
-    expect(verifyLaunchedTranscript('claude', root, { sessionId: sessionA, cwd })).toBeUndefined();
+    expect((await verifyLaunchedTranscript('claude', root, { sessionId: sessionA, cwd }))).toBeUndefined();
   });
 
-  it('verifies a codex launch via history.jsonl marker, ignoring filename-only candidates', () => {
+  it('verifies a codex launch via history.jsonl marker, ignoring filename-only candidates', async () => {
     const root = join(cwd, 'codex-root');
     const env = { CODEX_HOME: root };
     mkdirSync(join(root, 'sessions', '2026', '10', '03'), { recursive: true });
@@ -268,13 +310,13 @@ describe('native identity is content-verified, never filename/mtime based', () =
       type: 'session_meta', payload: { id: nativeId, cwd: realpathSync(cwd) },
     }) + '\n');
     // No marker anywhere yet: launch stays unverified despite the UUID filename.
-    expect(verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd })).toBeUndefined();
+    expect((await verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd }))).toBeUndefined();
     // Marker lands in history.jsonl → content identity confirmed.
     mkdirSync(root, { recursive: true });
     appendFileSync(join(root, 'history.jsonl'), JSON.stringify({
       session_id: nativeId, ts: '2026-10-03T00:00:00Z', text: `do work ${buildSessionMarker(sessionA)}`,
     }) + '\n');
-    const verified = verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd });
+    const verified = (await verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd }));
     expect(verified?.nativeSessionId).toBe(nativeId);
     expect(verified?.verifiedPath).toBe(rollout);
   });
@@ -283,7 +325,7 @@ describe('native identity is content-verified, never filename/mtime based', () =
     ['no session_meta (events only)', JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: 'x' } }) + '\n'],
     ['empty file', ''],
     ['session_meta naming a different id', JSON.stringify({ type: 'session_meta', payload: { id: '99999999-9999-9999-9999-999999999999', cwd: '/fixture' } }) + '\n'],
-  ])('rejects codex history marker when the rollout is %s', (_label, rolloutBody) => {
+  ])('rejects codex history marker when the rollout is %s', async (_label, rolloutBody) => {
     const root = join(cwd, `codex-root-${_label.replace(/\W/g, '-')}`);
     mkdirSync(join(root, 'sessions'), { recursive: true });
     const nativeId = '11111111-2222-3333-4444-555555555555';
@@ -292,10 +334,10 @@ describe('native identity is content-verified, never filename/mtime based', () =
       session_id: nativeId, ts: '2026-10-03T00:00:00Z', text: buildSessionMarker(sessionA),
     }) + '\n');
     // Filename + history marker must NOT verify without a self-consistent content meta.
-    expect(verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd: '/fixture' })).toBeUndefined();
+    expect((await verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd: '/fixture' }))).toBeUndefined();
   });
 
-  it('stays ambiguous when two distinct codex native ids carry the same marker', () => {
+  it('stays ambiguous when two distinct codex native ids carry the same marker', async () => {
     const root = join(cwd, 'codex-ambiguous');
     const sessions = join(root, 'sessions', '2026', '10', '03');
     mkdirSync(sessions, { recursive: true });
@@ -310,10 +352,10 @@ describe('native identity is content-verified, never filename/mtime based', () =
         type: 'session_meta', payload: { id, cwd: realpathSync(cwd) },
       }) + '\n');
     }
-    expect(verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd })).toBeUndefined();
+    expect((await verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd }))).toBeUndefined();
   });
 
-  it('accepts repeated marker lines naming the SAME codex id (legit resume, not ambiguous)', () => {
+  it('accepts repeated marker lines naming the SAME codex id (legit resume, not ambiguous)', async () => {
     const root = join(cwd, 'codex-resume');
     mkdirSync(join(root, 'sessions'), { recursive: true });
     const nativeId = '11111111-2222-3333-4444-555555555555';
@@ -323,10 +365,10 @@ describe('native identity is content-verified, never filename/mtime based', () =
     appendFileSync(join(root, 'history.jsonl'),
       JSON.stringify({ session_id: nativeId, text: `first ${buildSessionMarker(sessionA)}` }) + '\n'
       + JSON.stringify({ session_id: nativeId, text: `again ${buildSessionMarker(sessionA)}` }) + '\n');
-    expect(verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd })?.nativeSessionId).toBe(nativeId);
+    expect((await verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd }))?.nativeSessionId).toBe(nativeId);
   });
 
-  it('does not verify when candidates exceed budget and an older file holds a conflicting id (41-file case)', () => {
+  it('does not verify when candidates exceed budget and an older file holds a conflicting id (41-file case)', async () => {
     // Exact shape of t3a-limit-ambiguity-probe: 41 files; OLDEST (index 0)
     // and NEWEST (index 40) carry the SAME marker under DIFFERENT ids, 39 in
     // between are unrelated. A newest-40 slice drops the oldest conflict and
@@ -346,10 +388,10 @@ describe('native identity is content-verified, never filename/mtime based', () =
       utimesSync(f, t, t);
     }
     const root = freezeTranscriptSource('claude-code', env)!.dataRoot;
-    expect(verifyLaunchedTranscript('claude', root, { sessionId: sessionA, cwd: '/fixture' })).toBeUndefined();
+    expect((await verifyLaunchedTranscript('claude', root, { sessionId: sessionA, cwd: '/fixture' }))).toBeUndefined();
   });
 
-  it('does not verify a normal small directory as over-budget (budget boundary is exact)', () => {
+  it('does not verify a normal small directory as over-budget (budget boundary is exact)', async () => {
     const configDir = join(cwd, 'config-at-budget');
     const env = { CLAUDE_CONFIG_DIR: configDir };
     const project = claudeProjectDir('/fixture', env);
@@ -362,11 +404,11 @@ describe('native identity is content-verified, never filename/mtime based', () =
       }) + '\n');
     }
     const root = freezeTranscriptSource('claude-code', env)!.dataRoot;
-    expect(verifyLaunchedTranscript('claude', root, { sessionId: sessionA, cwd: '/fixture' })?.nativeSessionId)
+    expect((await verifyLaunchedTranscript('claude', root, { sessionId: sessionA, cwd: '/fixture' }))?.nativeSessionId)
       .toBe('the-one-id');
   });
 
-  it('rejects two physical codex rollouts whose session_meta names the SAME native id', () => {
+  it('rejects two physical codex rollouts whose session_meta names the SAME native id', async () => {
     const root = join(cwd, 'codex-dup-file');
     const sessions = join(root, 'sessions', '2026', '10', '03');
     mkdirSync(sessions, { recursive: true });
@@ -378,10 +420,10 @@ describe('native identity is content-verified, never filename/mtime based', () =
       session_id: nativeId, text: buildSessionMarker(sessionA),
     }) + '\n');
     // Unique native id, but the physical FILE is ambiguous → no verifiedPath.
-    expect(verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd })).toBeUndefined();
+    expect((await verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd }))).toBeUndefined();
   });
 
-  it('rejects a pinned Claude path that symlinks outside the approved root', () => {
+  it('rejects a pinned Claude path that symlinks outside the approved root', async () => {
     const configDir = join(cwd, 'config-symlink');
     const outsideDir = join(cwd, 'outside-root');
     const env = { CLAUDE_CONFIG_DIR: configDir };
@@ -397,10 +439,10 @@ describe('native identity is content-verified, never filename/mtime based', () =
     // The pinned path existsSync() (follows links) but resolves out of root.
     symlinkSync(escaped, join(project, `${pinnedSessionUuid(sessionA)}.jsonl`));
     const root = freezeTranscriptSource('claude-code', env)!.dataRoot;
-    expect(verifyLaunchedTranscript('claude', root, { sessionId: sessionA, cwd })).toBeUndefined();
+    expect((await verifyLaunchedTranscript('claude', root, { sessionId: sessionA, cwd }))).toBeUndefined();
   });
 
-  it('still verifies a self-attributing codex rollout when history.jsonl exceeds the tail window', () => {
+  it('still verifies a self-attributing codex rollout when history.jsonl exceeds the tail window', async () => {
     // Truncated history-only evidence is not enough, but a rollout whose OWN
     // head carries marker + session_meta(id,cwd) is independent strong evidence.
     const root = join(cwd, 'codex-huge-history');
@@ -415,11 +457,11 @@ describe('native identity is content-verified, never filename/mtime based', () =
       } }) + '\n');
     // history.jsonl > 4 MiB; the visible tail does NOT name our id at all.
     writeFileSync(join(root, 'history.jsonl'), 'x'.repeat(4 * 1024 * 1024 + 10));
-    expect(verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd })?.verifiedPath)
+    expect((await verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd }))?.verifiedPath)
       .toBe(realpathSync(rollout));
   });
 
-  it('refuses truncated history-only evidence with no self-attributing rollout', () => {
+  it('refuses truncated history-only evidence with no self-attributing rollout', async () => {
     const root = join(cwd, 'codex-huge-history-only');
     mkdirSync(join(root, 'sessions', '2026', '10', '03'), { recursive: true });
     const nativeId = '11111111-2222-3333-4444-555555555555';
@@ -430,7 +472,7 @@ describe('native identity is content-verified, never filename/mtime based', () =
     writeFileSync(join(root, 'history.jsonl'),
       'y'.repeat(4 * 1024 * 1024 + 10) + '\n'
       + JSON.stringify({ session_id: nativeId, text: buildSessionMarker(sessionA) }) + '\n');
-    expect(verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd })).toBeUndefined();
+    expect((await verifyLaunchedTranscript('codex', root, { sessionId: sessionA, cwd }))).toBeUndefined();
   });
 });
 
@@ -439,7 +481,7 @@ describe('driver appends content-verified identity through the real transcript p
   let output: (data: string) => void;
 
   beforeEach(() => { vi.useFakeTimers(); });
-  afterEach(() => { vi.useRealTimers(); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
   const sessionId = 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
   const nativeId = pinnedSessionUuid(sessionId);
@@ -451,6 +493,7 @@ describe('driver appends content-verified identity through the real transcript p
     const transcript = join(project, `${nativeId}.jsonl`);
     writeFileSync(transcript, '');
     const observations: DriverTranscriptSourceObservation[] = [];
+    const sequence: string[] = [];
     const driver = new PtyCliDriver({
       agent: { id: 'claude-code', name: 'Claude', command: 'unused', args: [], protocol: 'pty-cli', cwd: directory,
         env: { CLAUDE_CONFIG_DIR: directory }, permissionMode: 'full-trust', timeout: 60,
@@ -469,13 +512,13 @@ describe('driver appends content-verified identity through the real transcript p
         kind: 'pty', spawn() {}, write() {}, resize() {}, kill() {}, onExit() {},
         onData(callback: (data: string) => void) { output = callback; }, interrupt() {},
       },
-      sessionId, onEvent() {}, onExit() {},
+      sessionId, onEvent(event) { if (event.type === 'completed') sequence.push('completed'); }, onExit() {},
     });
-    driver.subscribeTranscriptSource(o => observations.push(o));
+    driver.subscribeTranscriptSource(o => { observations.push(o); if (o.nativeSessionId) sequence.push('identity'); });
     await driver.start();
     output(repaint(`Claude Code\n${directory}\n❯\n${idleFooter}`));
     await vi.advanceTimersByTimeAsync(250);
-    return { driver, transcript, observations, answer: () => appendFileSync(transcript,
+    return { driver, transcript, observations, sequence, answer: () => appendFileSync(transcript,
       JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'done result' }] } }) + '\n') };
   }
 
@@ -484,7 +527,7 @@ describe('driver appends content-verified identity through the real transcript p
   });
 
   it('emits root observation at launch then the verified identity once prompt #1 is persisted', async () => {
-    const { driver, transcript, observations, answer } = await startDriver({
+    const { driver, transcript, observations, sequence, answer } = await startDriver({
       // A throwing listener on the launch observation must not break the turn
       // or suppress the later identity observation.
     });
@@ -509,8 +552,96 @@ describe('driver appends content-verified identity through the real transcript p
       streamIdentity: { kind: 'main', nativeAgentId: null },
     });
     expect(observations[1]!.identityProof).toMatch(/^pty-marker-v1:[0-9a-f]{64}$/);
+    expect(sequence).toEqual(['identity', 'completed']);
     await driver.stop();
   });
+
+  it('rechecks a launch when prompt #1 lands during the initial scan and emits identity before completed', async () => {
+    let finishScan!: (value: undefined) => void;
+    const firstScan = new Promise<undefined>(resolve => { finishScan = resolve; });
+    const verify = vi.spyOn(transcriptSource, 'verifyLaunchedTranscriptAsync').mockReturnValueOnce(firstScan);
+    const { driver, observations, sequence, answer } = await startDriver();
+    try {
+      const pending = driver.send('do the work');
+      answer();
+      output(repaint(`done result\n✻ done 12:00 PM\n❯\n${idleFooter}`));
+      await vi.advanceTimersByTimeAsync(700);
+      expect(verify).toHaveBeenCalledTimes(1);
+      expect(observations).toHaveLength(1);
+      expect(sequence).toEqual([]);
+      finishScan(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      await pending;
+      expect(verify).toHaveBeenCalledTimes(2);
+      expect(observations[1]?.nativeSessionId).toBe(nativeId);
+      expect(sequence).toEqual(['identity', 'completed']);
+    } finally { finishScan(undefined); await driver.stop(); }
+  });
+
+  it('aborts an in-flight scan on stop and rejects even a late verified result', async () => {
+    let finishScan!: (value: transcriptSource.VerifiedTranscriptIdentity | undefined) => void;
+    const scan = new Promise<transcriptSource.VerifiedTranscriptIdentity | undefined>(resolve => { finishScan = resolve; });
+    const verify = vi.spyOn(transcriptSource, 'verifyLaunchedTranscriptAsync').mockReturnValueOnce(scan);
+    const { driver, transcript, observations } = await startDriver();
+    appendFileSync(transcript, JSON.stringify({ type: 'user', sessionId: nativeId, message: { role: 'user', content: buildSessionMarker(sessionId) } }) + '\n');
+    const verified = verifyLaunchedTranscript('claude', directory, { sessionId, cwd: directory });
+    expect(verified?.nativeSessionId).toBe(nativeId);
+    await driver.stop();
+    expect(verify.mock.calls[0]?.[3]?.aborted).toBe(true);
+    finishScan(verified);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(observations).toHaveLength(1);
+  });
+
+  it('rechecks output after awaiting launch verification before completing the turn', async () => {
+    let finishScan!: (value: undefined) => void;
+    const firstScan = new Promise<undefined>(resolve => { finishScan = resolve; });
+    vi.spyOn(transcriptSource, 'verifyLaunchedTranscriptAsync').mockReturnValueOnce(firstScan);
+    const { driver, sequence, answer } = await startDriver();
+    try {
+      let complete = false;
+      const pending = driver.send('do the work').then(() => { complete = true; });
+      answer();
+      output(repaint(`done result\n✻ done 12:00 PM\n❯\n${idleFooter}`));
+      await vi.advanceTimersByTimeAsync(700);
+      output(repaint('Still working\nEsc to interrupt'));
+      finishScan(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sequence).toEqual(['identity']);
+      expect(complete).toBe(false);
+      output(repaint(`done result\n✻ done 12:00 PM\n❯\n${idleFooter}`));
+      await vi.advanceTimersByTimeAsync(700);
+      await pending;
+      expect(sequence).toEqual(['identity', 'completed']);
+    } finally { finishScan(undefined); await driver.stop(); }
+  });
+});
+
+it('yields during complete launch verification and closes a cancelled scan', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dd-source-cooperative-'));
+  const sessions = join(root, 'sessions'); mkdirSync(sessions);
+  const sessionId = 'ses_cooperative_scan';
+  const nativeSessionId = '11111111-1111-4111-8111-111111111111';
+  const path = join(sessions, `rollout-now-${nativeSessionId}.jsonl`);
+  const padding = JSON.stringify({ type: 'response_item', payload: { type: 'function_call_output', output: 'x'.repeat(4000) } }) + '\n';
+  writeFileSync(path, JSON.stringify({ type: 'session_meta', payload: { id: nativeSessionId, cwd: root } }) + '\n' + padding.repeat(512)
+    + JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: buildSessionMarker(sessionId) } }) + '\n');
+  try {
+    const ctx = { sessionId, cwd: root };
+    let complete = false;
+    const tick = new Promise<void>(resolve => setImmediate(resolve));
+    const pending = verifyLaunchedTranscriptAsync('codex', root, ctx).then(result => { complete = true; return result; });
+    await tick;
+    expect(complete).toBe(false);
+    const verified = await pending;
+    expect(verified?.nativeSessionId).toBe(nativeSessionId);
+    expect(verified).toEqual(verifyLaunchedTranscript('codex', root, ctx));
+    const controller = new AbortController();
+    const cancelled = verifyLaunchedTranscriptAsync('codex', root, ctx, controller.signal);
+    controller.abort();
+    expect(await cancelled).toBeUndefined();
+    expect(await verifyLaunchedTranscriptAsync('codex', root, ctx)).toEqual(verified);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 describe('TranscriptSourceTracker subscription semantics', () => {
