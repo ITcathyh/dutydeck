@@ -7,7 +7,7 @@ import { AcpxAdapter } from './index.js';
 
 afterEach(() => vi.unstubAllEnvs());
 
-it.each(['path', 'agent', 'parent'])('uses the user Codex across real ACP launches and resume (path source: %s)', async source => {
+it.each(['codex', 'codex-acp'].flatMap(id => ['path', 'agent', 'parent'].map(source => ({ id, source }))))('uses the user Codex across real ACP launches and resume ($id, path source: $source)', async ({ id, source }) => {
   const cwd = await mkdtemp(join(tmpdir(), 'dd-codex-environment-'));
   const bin = join(cwd, 'user bin'), nextBin = join(cwd, 'next bin'), bundled = join(cwd, 'bundled');
   await mkdir(bin); await mkdir(nextBin); await mkdir(bundled);
@@ -21,7 +21,7 @@ it.each(['path', 'agent', 'parent'])('uses the user Codex across real ACP launch
   await writeFile(join(bundled, 'codex'), `#!${process.execPath}\nthrow new Error('bundled Codex must not run');\n`);
   await chmod(join(bundled, 'codex'), 0o755);
   const config = {
-    id: 'codex', name: 'Codex', command: npx, args: ['-y', '@agentclientprotocol/codex-acp@^1.1.5'],
+    id, name: 'Codex', command: npx, args: ['-y', '@agentclientprotocol/codex-acp@^1.1.5'],
     protocol: 'acp' as const, cwd, env: { probe_output: output, ...(source === 'agent' ? { CODEX_PATH: executable } : {}) },
     permissionMode: 'ask' as const, timeout: 10, capabilities: { pause: false, resume: true }, builtin: true
   };
@@ -56,11 +56,11 @@ it.each(['path', 'agent', 'parent'])('uses the user Codex across real ACP launch
   } finally { await adapter?.stop(); await rm(cwd, { recursive: true, force: true }); }
 });
 
-it('reports a missing user Codex before starting the bundled executable', async () => {
+it.each(['codex', 'codex-acp'])('reports a missing user Codex before starting the bundled executable (%s)', async id => {
   const cwd = await mkdtemp(join(tmpdir(), 'dd-missing-codex-'));
   vi.stubEnv('PATH', cwd); vi.stubEnv('CODEX_PATH', undefined);
   const adapter = new AcpxAdapter({
-    id: 'codex', name: 'Codex', command: process.execPath, args: [resolve('tests/fixtures/mock-acp-agent.mjs')],
+    id, name: 'Codex', command: process.execPath, args: [resolve('tests/fixtures/mock-acp-agent.mjs')],
     protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: true
   }, { sessionKey: 'missing-user-codex', onEvent() {} });
   try { await expect(adapter.start()).rejects.toThrow('CODEX_CLI_NOT_FOUND'); }

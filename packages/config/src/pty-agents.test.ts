@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { builtinAgents, loadConfig, type PtyAgentContribution } from './index.js';
+import { agentProbeTarget, builtinAgents, loadConfig, type PtyAgentContribution } from './index.js';
+import { toPublicAgent } from '@dutydeck/shared';
 import { commandExists } from '@dutydeck/transports';
 import { PTY_AGENT_CONTRIBUTIONS } from '../../pty-driver/src/contributions.js';
 
@@ -22,7 +23,7 @@ const mockCommandExists = vi.mocked(commandExists);
 describe('builtinAgents PTY contributions', () => {
   it('returns only ACPX agents when no PTY contributions are given', () => {
     const agents = builtinAgents('/tmp/dutydeck-pty-test');
-    expect(agents.map(agent => agent.id)).toEqual(['claude', 'codex']);
+    expect(agents.map(agent => agent.id)).toEqual(['claude', 'codex', 'codex-acp']);
     expect(agents.every(agent => agent.protocol === 'acp')).toBe(true);
   });
 
@@ -66,7 +67,7 @@ describe('builtinAgents PTY contributions', () => {
     const agents = builtinAgents('/tmp/dutydeck-pty-test', [contribution]);
     const claude = agents.find(agent => agent.id === 'claude');
     expect(claude?.protocol).toBe('pty-cli');
-    expect(agents.map(agent => agent.id)).toEqual(['claude', 'codex']);
+    expect(agents.map(agent => agent.id)).toEqual(['claude', 'codex', 'codex-acp']);
   });
 
   it('defaults Codex to terminal mode and keeps the codex-cli entry', () => {
@@ -74,6 +75,10 @@ describe('builtinAgents PTY contributions', () => {
     const agents = builtinAgents('/tmp/dutydeck-pty-test', contributions);
     expect(agents.find(agent => agent.id === 'codex')).toMatchObject({ protocol: 'pty-cli', command: 'codex', permissionMode: 'ask' });
     expect(agents.find(agent => agent.id === 'codex-cli')).toMatchObject({ protocol: 'pty-cli', adapterId: 'codex', command: 'codex', permissionMode: 'ask' });
+    const acp = agents.find(agent => agent.id === 'codex-acp')!;
+    expect(acp).toMatchObject({ name: 'Codex (ACP)', command: '/bin/codex-acp', args: [], protocol: 'acp', builtin: true });
+    expect(toPublicAgent(acp)).toMatchObject({ remoteApproval: true });
+    expect(agentProbeTarget(acp)).toEqual({ command: 'codex', execute: true });
   });
 
   it('lists terminal candidates first and retains ACP when the terminal executable is unavailable', () => {
@@ -82,7 +87,7 @@ describe('builtinAgents PTY contributions', () => {
       { id: 'terminal-only', name: 'Terminal', command: process.execPath }
     ]);
     expect(agents.map(agent => [agent.id, agent.protocol])).toEqual([
-      ['terminal-only', 'pty-cli'], ['claude', 'acp'], ['codex', 'acp']
+      ['terminal-only', 'pty-cli'], ['claude', 'acp'], ['codex', 'acp'], ['codex-acp', 'acp']
     ]);
   });
 
@@ -91,10 +96,16 @@ describe('builtinAgents PTY contributions', () => {
     expect(agents.find(agent => agent.id === 'claude')).toMatchObject({ protocol: 'pty-cli', adapterId: 'claude-code', command: 'claude' });
   });
 
-  it('preserves an explicit ACP command, args and permissions over the terminal default', () => {
-    const explicit = { id: 'codex', name: 'Custom Codex', protocol: 'acp', command: process.execPath, args: ['custom-acp.mjs'], permissionMode: 'approve-reads' };
+  it.each(['codex', 'codex-acp'])('preserves an explicit ACP command, args and permissions over the builtin %s', id => {
+    const explicit = { id, name: 'Custom Codex', protocol: 'acp', command: process.execPath, args: ['custom-acp.mjs'], permissionMode: 'approve-reads' };
     const config = loadConfig({ DUTYDECK_AGENTS_JSON: JSON.stringify([explicit]) }, PTY_AGENT_CONTRIBUTIONS);
-    expect(config.agents.find(agent => agent.id === 'codex')).toMatchObject({ ...explicit, builtin: false });
+    expect(config.agents.find(agent => agent.id === id)).toMatchObject({ ...explicit, builtin: false });
+  });
+
+  it('reserves the explicit Codex ACP id against plugin replacement', () => {
+    const plugin = { id: 'codex-acp', name: 'Plugin replacement', command: process.execPath, protocol: 'acp' as const, args: [], env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: { pause: false, resume: true }, builtin: false };
+    const config = loadConfig({}, PTY_AGENT_CONTRIBUTIONS, [plugin]);
+    expect(config.agents.find(agent => agent.id === 'codex-acp')).toMatchObject({ builtin: true, command: '/bin/codex-acp', name: 'Codex (ACP)' });
   });
 
   it('probes each contribution command only once across repeated calls with the same arguments', () => {

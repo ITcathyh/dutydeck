@@ -19,7 +19,7 @@ export const appConfigSchema = z.object({
 export type AppConfig = z.infer<typeof appConfigSchema>;
 
 const agentDetails: Record<string, { name: string; cli: string }> = {
-  pi: { name: 'Pi', cli: 'pi' }, openclaw: { name: 'OpenClaw', cli: 'openclaw' }, codex: { name: 'Codex', cli: 'codex' }, claude: { name: 'Claude Code', cli: 'claude' },
+  pi: { name: 'Pi', cli: 'pi' }, openclaw: { name: 'OpenClaw', cli: 'openclaw' }, codex: { name: 'Codex', cli: 'codex' }, 'codex-acp': { name: 'Codex (ACP)', cli: 'codex' }, claude: { name: 'Claude Code', cli: 'claude' },
   gemini: { name: 'Gemini', cli: 'gemini' }, cursor: { name: 'Cursor Agent', cli: 'cursor-agent' }, copilot: { name: 'GitHub Copilot', cli: 'copilot' }, droid: { name: 'Factory Droid', cli: 'droid' },
   'fast-agent': { name: 'fast-agent', cli: 'fast-agent-mcp' }, 'grok-build': { name: 'Grok Build', cli: 'grok' }, iflow: { name: 'iFlow', cli: 'iflow' }, kilocode: { name: 'Kilocode', cli: 'kilocode' },
   kimi: { name: 'Kimi', cli: 'kimi' }, kiro: { name: 'Kiro', cli: 'kiro-cli-chat' }, mux: { name: 'Mux', cli: 'mux' }, opencode: { name: 'OpenCode', cli: 'opencode' },
@@ -35,7 +35,7 @@ export function cliVersion(command: string): string | undefined {
   return undefined;
 }
 
-const builtinCli = (id: string, env: Record<string, string | undefined> = process.env) => id === 'codex' ? env.CODEX_PATH || agentDetails[id]!.cli : agentDetails[id]!.cli;
+const builtinCli = (id: string, env: Record<string, string | undefined> = process.env) => (id === 'codex' || id === 'codex-acp') ? env.CODEX_PATH || agentDetails[id]!.cli : agentDetails[id]!.cli;
 
 const scannedBuiltinAgents = new Map<string, Array<Omit<AgentConfig, 'cwd'>>>();
 const scanBuiltinAgents = (env: NodeJS.ProcessEnv) => {
@@ -47,7 +47,8 @@ const scanBuiltinAgents = (env: NodeJS.ProcessEnv) => {
     if (!detail) return [];
     const command = builtinCli(id, env);
     if (!commandExists(command)) return [];
-    return [{ id, name: detail.name, command: argv[0]!, args: argv.slice(1), protocol: 'acp' as const, env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: { pause: false, resume: true }, builtin: true, version: cliVersion(command) }];
+    const agent = { id, name: detail.name, command: argv[0]!, args: argv.slice(1), protocol: 'acp' as const, env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: { pause: false, resume: true }, builtin: true, version: cliVersion(command) };
+    return id === 'codex' ? [agent, { ...agent, id: 'codex-acp', name: agentDetails['codex-acp']!.name }] : [agent];
   });
   scannedBuiltinAgents.set(cacheKey, agents);
   return agents;
@@ -156,7 +157,7 @@ export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, 
   const extra = parseAgentsJson(env.DUTYDECK_AGENTS_JSON);
   const defaultCwd = env.DUTYDECK_DEFAULT_CWD ?? process.cwd();
   const agents = new Map(builtinAgents(defaultCwd, ptyContributions, { ...process.env, ...env }).map(agent => [agent.id, agent]));
-  const builtinIds = new Set([...listAcpxBuiltinAgents().map(agent => agent.id), ...ptyContributions.map(agent => agent.id)]);
+  const builtinIds = new Set(['codex-acp', ...listAcpxBuiltinAgents().map(agent => agent.id), ...ptyContributions.map(agent => agent.id)]);
   const register = (configured: AgentConfig, plugin = false) => {
     // A custom CLI wrapper may change local settings even for --version.
     const customCli = configured.protocol === 'pty-cli' && configured.adapterId;

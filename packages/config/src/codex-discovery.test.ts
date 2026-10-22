@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { PTY_AGENT_CONTRIBUTIONS } from '../../pty-driver/src/contributions.js';
+import { toPublicAgent } from '@dutydeck/shared';
 import { commandExists } from '@dutydeck/transports';
 
 afterEach(() => vi.unstubAllEnvs());
@@ -39,12 +40,16 @@ it('uses an explicit config CODEX_PATH for both terminal entries, their versions
   vi.stubEnv('CODEX_PATH', undefined);
   vi.resetModules();
   try {
-    const { loadConfig } = await import('./index.js');
+    const { loadConfig, agentProbeTarget } = await import('./index.js');
     const env = { CODEX_PATH: executable, DUTYDECK_DEFAULT_CWD: cwd };
     const agents = loadConfig(env, PTY_AGENT_CONTRIBUTIONS).agents;
     for (const id of ['codex', 'codex-cli']) {
       expect(agents.find(agent => agent.id === id)).toMatchObject({ protocol: 'pty-cli', command: executable, version: 'Codex terminal fixture 2.0' });
     }
-    expect(loadConfig({ ...env, CODEX_PATH: '/missing/codex' }, PTY_AGENT_CONTRIBUTIONS).agents.some(agent => ['codex', 'codex-cli'].includes(agent.id))).toBe(false);
+    const acp = agents.find(agent => agent.id === 'codex-acp')!;
+    expect(acp).toMatchObject({ name: 'Codex (ACP)', protocol: 'acp', builtin: true, version: 'Codex terminal fixture 2.0' });
+    expect(toPublicAgent(acp)).toMatchObject({ remoteApproval: true });
+    expect(agentProbeTarget({ ...acp, env: { CODEX_PATH: executable } })).toEqual({ command: executable, execute: true });
+    expect(loadConfig({ ...env, CODEX_PATH: '/missing/codex' }, PTY_AGENT_CONTRIBUTIONS).agents.some(agent => ['codex', 'codex-cli', 'codex-acp'].includes(agent.id))).toBe(false);
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });

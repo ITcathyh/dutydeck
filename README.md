@@ -419,10 +419,10 @@ dutydeck settings bot set cli_xxx 'defaultAgentWeights=[{"agentId":"codex","weig
 dutydeck settings bot set cli_xxx 'defaultAgentWeights=[]' # 关闭分流
 ```
 
-**兜底 Agent。** 在机器人默认设置或接入向导中选择「兜底 Agent」，也可通过 CLI 配置：
+**兜底 Agent。** 在机器人默认设置或接入向导中选择「兜底 Agent」。机器人使用 `ask` / `approve-reads` 且需要 Codex 兜底时，选「Codex (ACP)」（`codex-acp`）；`codex` 和 `codex-cli` 继续默认使用终端模式。也可通过 CLI 配置：
 
 ```bash
-dutydeck settings bot set cli_xxx defaultAgentId=ccflash fallbackAgentId=codex fallbackModel=gpt-6.1-sol
+dutydeck settings bot set cli_xxx defaultAgentId=ccflash fallbackAgentId=codex-acp fallbackModel=gpt-6.1-sol
 dutydeck settings bot set cli_xxx 'fallbackModel=' # 恢复兜底 Agent 默认模型
 dutydeck settings bot set cli_xxx 'fallbackAgentId=' # 关闭兜底并清除兜底模型
 ```
@@ -527,7 +527,7 @@ dutydeck schedule delete schedule_xxx --session ses_xxx
 
 Dutydeck 默认优先用终端适配器运行本机已安装的 CLI Agent，新会话的终端后端默认是 `tmux`；同一入口同时支持终端与 ACP 时优先终端。没有可用终端适配器或其命令不可用时，仍按原规则发现 ACP（Agent Client Protocol）入口。已配置的 Herdr 后端、已有会话的协议和权限保持不变；`DUTYDECK_AGENTS_JSON` 显式指定的协议、命令和权限优先。
 
-内置 Codex 的 `codex`、`codex-cli` 终端入口及已有 ACP 会话在发现探测和启动执行进程时，优先遵循显式设置的 `CODEX_PATH`，支持指向 `PATH` 之外的可执行程序；未显式设置时使用 Dutydeck 进程 `PATH` 中的 Codex，沿用用户的登录和配置；升级用户安装的 Codex 后，新启动的进程自动使用新版本。找不到用户安装或显式指定路径的 Codex 时会报错，不使用 ACP 适配器缓存中的版本。
+内置 Codex 的 `codex`、`codex-cli` 终端入口及「Codex (ACP)」（`codex-acp`）在发现探测和启动执行进程时，优先遵循显式设置的 `CODEX_PATH`，支持指向 `PATH` 之外的可执行程序；未显式设置时使用 Dutydeck 进程 `PATH` 中的 Codex，沿用用户的登录和配置；升级用户安装的 Codex 后，新启动的进程自动使用新版本。找不到用户安装或显式指定路径的 Codex 时会报错，不使用 ACP 适配器缓存中的版本。
 
 ### 1. 自定义 Agent (`DUTYDECK_AGENTS_JSON`)
 
@@ -1040,7 +1040,7 @@ dutydeck doctor
 
 `restart` 先暂停领取新任务。已提交成功、恢复日志与原轮身份可验证的 `full-trust` tmux 任务继续在原 CLI 进程里运行，新服务接回同一轮，不重发输入；其余任务继续等待结束。ACP、普通 PTY、Herdr、提交中、缺少恢复日志或身份，以及待审批或高危权限门禁未授权的任务都不会跳过等待。systemd 只在当前 `KillMode=process` 时保留任务；其他值或读不到时全量等待。旧服务不支持恢复计数、排空失败或租约续期失败时也全量等待。`--drain-timeout` 控制等待上限，`--force` 保留原来的强制重启行为，当前 Agent 自己的会话仍自动排除。`deploy` 继续等待所有正在执行的任务结束。
 
-Codex 的 `codex` 入口默认使用终端模式，`codex-cli` 入口继续兼容。已有 ACP 会话继续通过 ACP 续跑，新会话使用当前默认协议；机器人权限不会自动提升。Codex 等不支持飞书逐项审批的终端 Agent，在 `ask` / `approve-reads` 下新开飞书会话会被拒绝；需要逐项审批时，用 `DUTYDECK_AGENTS_JSON` 显式保留 ACP 启动命令，或选择 Claude Code / Seed / Relay 等支持审批的终端 Agent。只有原本已获 `full-trust` 权限、且恢复证据完整的 tmux 任务能跨服务重启继续运行；首次提交尚无日志位置的任务仍会等待结束。主轮结束后仍有原生后台任务时，安全重启和部署的排空也会等待它们结束；直接终止进程或 `--force` 不提供此保证。
+Codex 的 `codex` 入口默认使用终端模式，`codex-cli` 入口继续兼容。已有 ACP 会话继续通过 ACP 续跑，新会话使用当前默认协议；机器人权限不会自动提升。Codex 等不支持飞书逐项审批的终端 Agent，在 `ask` / `approve-reads` 下新开飞书会话会被拒绝；需要逐项审批时，选择内置「Codex (ACP)」（`codex-acp`），或选择 Claude Code / Seed / Relay 等支持审批的终端 Agent。只有原本已获 `full-trust` 权限、且恢复证据完整的 tmux 任务能跨服务重启继续运行；首次提交尚无日志位置的任务仍会等待结束。主轮结束后仍有原生后台任务时，安全重启和部署的排空也会等待它们结束；直接终止进程或 `--force` 不提供此保证。
 
 `GET /api/system/activity` 的 `runningTasks` 包含正在执行主轮的会话，以及主轮已结束但仍有原生后台任务的会话；同一会话只计一次。显式加 `?restart=true` 才检查恢复证据并返回 `restartBlockers` 和 `recoverableTasks`；未进入排空时不减去可恢复任务，`excludeSessionId` 同时适用于这三个计数。
 
@@ -1090,7 +1090,7 @@ dutydeck settings bot show cli_xxx                           # 查看机器人�
 dutydeck settings bot set cli_xxx adhdMode=true              # 开启 ADHD 友好模式
 dutydeck settings bot set cli_xxx notifyQuietHours=22:00-08:00
 dutydeck settings bot set cli_xxx groupReplyMode=auto        # 清除群回复模式覆盖，恢复默认自动路由
-dutydeck settings bot install-hook cli_xxx --prepare fallbackAgentId=codex workspace=/path/to/workspace  # 按未保存配置准备 Hook
+dutydeck settings bot install-hook cli_xxx --prepare fallbackAgentId=codex-acp workspace=/path/to/workspace  # 按未保存配置准备 Hook
 dutydeck settings group set oc_xxx participation=selective   # 设置群聊按需参与
 dutydeck settings usage set-cap 50 --app cli_xxx             # 设置月度用量上限（美元）
 dutydeck settings group set oc_xxx 'scenarios={"alarm":{"enabled":true,"params":{"levels":["P0","P1"]}}}'  # 改告警初筛的级别

@@ -29,7 +29,7 @@ const adapters: Record<HookAgentId, HookAdapter> = {
 };
 
 const aliases: Record<string, HookAgentId> = {
-  codex: 'codex', claude: 'claude', claudecode: 'claude', 'claude-code': 'claude',
+  codex: 'codex', 'codex-acp': 'codex', claude: 'claude', claudecode: 'claude', 'claude-code': 'claude',
   trae: 'trae', cursor: 'cursor', cursoragent: 'cursor', 'cursor-agent': 'cursor', pi: 'pi'
 };
 
@@ -181,7 +181,7 @@ export async function larkHookStatus(agentId?: string, workspace?: string, agent
     if (error?.code !== 'ENOENT') statusError = error instanceof Error ? error.message : String(error);
   }
   return {
-    agentId: adapter.id,
+    agentId: agentId === 'codex-acp' ? agentId : adapter.id,
     supported: true,
     installed,
     writable,
@@ -225,5 +225,5 @@ export async function installLarkHook(agentId: string | undefined, workspace: st
     await mkdir(dirname(scriptPath), { recursive: true });
     await writeFile(scriptPath, piGuardExtension, { mode: 0o600 });
   } else await installJsonHook(adapter, workspace);
-  return larkHookStatus(adapter.id, workspace);
+  return larkHookStatus(agentId, workspace);
 }

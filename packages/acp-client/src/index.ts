@@ -37,7 +37,7 @@ function envLauncherPath() { return agentsFile('env-launcher.mjs'); }
 
 /** Resolve before npx prepends its bundled Codex to PATH; never persist this override. */
 export function acpxAgentEnvironment(agent: AgentConfig): Record<string, string> {
-  if (!agent.builtin || agent.id !== 'codex') return {};
+  if (!agent.builtin || !['codex', 'codex-acp'].includes(agent.id)) return {};
   const env = childEnvironment(process.env, agent.env);
   if (env.CODEX_PATH) return {};
   const extensions = process.platform === 'win32'
