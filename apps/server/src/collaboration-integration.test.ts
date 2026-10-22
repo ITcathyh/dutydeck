@@ -15,6 +15,12 @@ import type { LarkMessageEvent } from './lark/listener.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0)) await close(); });
+// These simulated Agents have a ready Hook; native Hook verification is covered in security-hooks.test.ts.
+vi.mock('./lark/security-hooks.js', async importOriginal => ({
+  ...await importOriginal<typeof import('./lark/security-hooks.js')>(),
+  larkHookStatus: async (agentId?: string) => ({ agentId, supported: true, installed: true, writable: true, trustRequired: false })
+}));
+
 const scope = { appId: 'cli_collaboration', chatId: 'oc_group' };
 async function eventually(check: () => Promise<boolean>) {
   for (let count = 0; count < 100; count++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }

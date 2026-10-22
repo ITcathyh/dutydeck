@@ -36,6 +36,12 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
   }
 }));
 
+// These simulated Agents have a ready Hook; native Hook verification is covered in security-hooks.test.ts.
+vi.mock('./security-hooks.js', async importOriginal => ({
+  ...await importOriginal<typeof import('./security-hooks.js')>(),
+  larkHookStatus: async (agentId?: string) => ({ agentId, supported: true, installed: true, writable: true, trustRequired: false })
+}));
+
 const config: StoredLarkConfig = {
   appId: 'cli_test', appSecret: 'secret', workspace: '/workspace', defaultAgentId: 'codex', fullTrustConfirmed: true, listening: true,
   preInjectPrompt: '',

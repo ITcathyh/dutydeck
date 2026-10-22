@@ -39,6 +39,8 @@ async function harness(mode: HarnessMode = 'normal', configPatch: Partial<Stored
   let release: (() => void) | undefined;
   const gate = new Promise<void>(done => { release = done; });
   let sends = 0;
+  let markSendEntered!: () => void;
+  const sendEntered = new Promise<void>(resolve => { markSendEntered = resolve; });
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
@@ -49,6 +51,7 @@ async function harness(mode: HarnessMode = 'normal', configPatch: Partial<Stored
         interrupt: async () => { if (mode === 'hang') release?.(); },
         send: async () => {
           sends++;
+          markSendEntered();
           if (mode === 'delayed') await gate;
           if (mode === 'hang') {
             await gate;
@@ -129,7 +132,7 @@ async function harness(mode: HarnessMode = 'normal', configPatch: Partial<Stored
   }, { timeout: 5_000 }).then(saved => { void messageId; return saved; });
 
   return { repos, runtime, config, coordinator, createCoordinator, service, log, channel,
-    sentCards, cardsOfKind, completionReactions, statusReactions, mappings, settled, releaseGate: () => release?.() };
+    sentCards, cardsOfKind, completionReactions, statusReactions, mappings, settled, sendEntered, releaseGate: () => release?.() };
 }
 
 describe('完成时只贴表情（completionReactionOnly）', () => {
@@ -216,6 +219,9 @@ describe('原消息上的状态表情', () => {
       expect(session).toBeTruthy();
       expect((await h.runtime.getTasks(session!.id)).some(task => task.status === 'running')).toBe(true);
     }, { timeout: 5_000 });
+    // The runtime marks a task running before the driver receives its prompt.
+    // Interrupt the actual hanging send, after preparation has completed.
+    await h.sendEntered;
     expect(h.service.deleteReaction).toHaveBeenCalledTimes(silentProgress ? 0 : 1);
     await vi.waitFor(async () => expect(await h.coordinator.handleAction({ action: 'interrupt', task_id: 'om_stop', turn: '1' }, 'ou_alice'))
       .toMatchObject({ type: 'success' }), { timeout: 5_000 });

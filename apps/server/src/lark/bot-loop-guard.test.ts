@@ -23,6 +23,12 @@ import type { LarkGroupManager } from './group-management.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { StoredLarkConfig } from './config.js';
 
+// These simulated Agents have a ready Hook; native Hook verification is covered in security-hooks.test.ts.
+vi.mock('./security-hooks.js', async importOriginal => ({
+  ...await importOriginal<typeof import('./security-hooks.js')>(),
+  larkHookStatus: async (agentId?: string) => ({ agentId, supported: true, installed: true, writable: true, trustRequired: false })
+}));
+
 const scope = { appId: 'cli_guard', chatId: 'oc_guard' };
 const config: StoredLarkConfig = {
   appId: scope.appId, appSecret: 'test', listening: true, defaultAgentId: 'mock', workspace: '/tmp', fullTrustConfirmed: true,

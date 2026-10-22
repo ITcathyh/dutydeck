@@ -48,11 +48,13 @@ it('real plugin install, daemon, human resolver, CLI, BLOB, receipt and OAuth do
   expect(receipt).toMatchObject({status:'delivered',fileCount:1});expect(exports).toBe(1);
   const delivery=repos.pluginResults.get(receipt.deliveryId)!;expect(delivery.requester).toEqual({provider:'lark',tenant:'cli_export',subject:'ou_alice'});
   const context=JSON.parse(await readFile(contextPath,'utf8'));
-  const call=(body:any)=>fetch(`${context.url}/plugin-tools/private-export/export-report`,{method:'POST',headers:{authorization:`Bearer ${context.token}`,'content-type':'application/json'},body:JSON.stringify(body)});
+  // Match the real plugin CLI: the request guard uses the header, independently of body validation.
+  const call=(body:any,turn=context.turn)=>fetch(`${context.url}/plugin-tools/private-export/export-report`,{method:'POST',headers:{authorization:`Bearer ${context.token}`,'x-dutydeck-result-turn':turn,'content-type':'application/json'},body:JSON.stringify(body)});
   expect(await (await call({input:{reportId:'weekly'},callId:'first-export',turn:context.turn})).json()).toEqual(receipt);expect(exports).toBe(1);
   expect((await call({input:{reportId:'other'},callId:'first-export',turn:context.turn})).status).toBe(409);
   expect((await call({input:{reportId:'weekly'},callId:'second',turn:'stale'})).status).toBe(403);
   expect((await call({input:{reportId:'weekly'},callId:'second'})).status).toBe(400);
+  expect((await call({input:{reportId:'weekly'},callId:'second'},'')).status).toBe(403);
   const file=repos.pluginResults.files(delivery.id)[0]!;
   for(const headers of [{},{authorization:`Bearer ${context.token}`},{authorization:'Bearer admin'},{cookie:'dutydeck_session=admin'}]) expect((await fetch(`${base}/api/plugin-results/${delivery.id}/files/${file.id}`,{headers})).status).toBe(401);
   const shell=await fetch(`${base}/plugin-results/${delivery.id}`);const html=await shell.text();expect(html).not.toContain('report.csv');const nonceCookie=shell.headers.get('set-cookie')!.split(';')[0]!,nonce=html.match(/name="nonce" value="([^"]+)"/)![1];

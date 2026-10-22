@@ -3,12 +3,36 @@ import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { build } from 'esbuild';
 import { createRepositories } from '@dutydeck/storage';
 
 const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const cliPath = join(workspaceRoot, 'apps/server/src/cli.ts');
-const tsxPath = join(workspaceRoot, 'node_modules/.bin/tsx');
+let cliDirectory: string;
+let bundledCliPath: string;
+
+// Compile this checkout once: repeated TypeScript loader + dependency cold starts
+// otherwise consume most of the test budget before secret operations begin.
+beforeAll(async () => {
+  cliDirectory = await mkdtemp(join(workspaceRoot, 'apps/server/.test-secret-cli-'));
+  bundledCliPath = join(cliDirectory, 'cli.js');
+  await build({
+    entryPoints: [cliPath], outfile: bundledCliPath, bundle: true, format: 'esm', platform: 'node', target: 'node22',
+    external: ['better-sqlite3', 'node-pty', 'acpx/runtime'],
+    banner: { js: "import { createRequire as __ddCreateRequire } from 'node:module'; const require = __ddCreateRequire(import.meta.url);" },
+    plugins: [{ name: 'workspace-sources', setup(builder) {
+      builder.onResolve({ filter: /^@dutydeck\// }, ({ path }) => {
+        const name = path.slice('@dutydeck/'.length);
+        const source = name === 'shared/child-environment' || name === 'shared/secret-guard'
+          ? `packages/shared/runtime/${name.slice('shared/'.length)}.mjs`
+          : `packages/${name === 'runtime' ? 'agent-runtime' : name}/src/index.ts`;
+        return { path: join(workspaceRoot, source) };
+      });
+    } }]
+  });
+});
+afterAll(async () => { if (cliDirectory) await rm(cliDirectory, { recursive: true, force: true }); });
 const roots: string[] = [];
 const INITIAL_SECRET = 'INITIAL_SECRET_VALUE_NEVER_PRINT';
 const ROTATED_SECRET = 'ROTATED_SECRET_VALUE_NEVER_PRINT';
@@ -18,9 +42,9 @@ function bundle(appSecret: string): string {
 }
 
 function invoke(root: string, args: string[], input?: string, extraEnv: Record<string, string> = {}) {
-  return spawnSync(tsxPath, [cliPath, '--database', join(root, 'dutydeck.db'), ...args], {
+  return spawnSync(process.execPath, [bundledCliPath, '--database', join(root, 'dutydeck.db'), ...args], {
     cwd: root,
-    env: { HOME: root, PATH: process.env.PATH, TMPDIR: tmpdir(), NODE_OPTIONS: '--conditions=development', ...extraEnv },
+    env: { HOME: root, PATH: process.env.PATH, TMPDIR: tmpdir(), ...extraEnv },
     encoding: 'utf8',
     input,
     timeout: 30_000
