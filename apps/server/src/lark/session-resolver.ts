@@ -1,3 +1,4 @@
+import { larkMessageAnchor } from './message-anchor.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -79,7 +80,7 @@ const larkApprovalUnsupported = (config: StoredLarkConfig) => new LarkServiceErr
 
 export const larkReplyContext = (event: LarkMessageEvent) => ({
   // 回复 API 的路径参数只能使用真实的 om_* 消息 ID。回复触发消息即可保留准确的上下文位置。
-  messageId: event.messageId,
+  messageId: larkMessageAnchor(event),
   // thread_id 只用于识别话题和隔离 Agent 会话，不可作为回复 API 的 messageId。
   ...(event.threadId?.trim() ? { replyInThread: true } : {}),
   // 话题根消息 id 一并带入回复上下文，让后续回复能锚到话题根；
@@ -138,7 +139,7 @@ export async function parsePrompt(event: LarkMessageEvent, botOpenId?: string) {
     ? markSelfRichTextMentions(event.content, botOpenId)
     : event.content;
   const parsed = await parseLarkMessageContent(event.messageType, content, {
-    messageId: event.messageId
+    messageId: larkMessageAnchor(event)
   });
   let text = removeMentionToken(parsed.text, selfMentionMarker);
   // 飞书 text 消息用 mention key 占位。按 key 长度倒序替换，避免 @_user_1
@@ -273,7 +274,7 @@ export async function resolveLarkScopeId(
     if (config.p2pMode === 'thread') {
       if (rootId && threadId) return `thread:${rootId}`;
       if (threadId) return `thread:${threadId}`;
-      return `thread:${event.messageId}`;
+      return `thread:${larkMessageAnchor(event)}`;
     }
     return event.chatType;
   }
@@ -283,7 +284,7 @@ export async function resolveLarkScopeId(
   if (chatModeResolver) {
     try {
       const mode = await chatModeResolver(config.appId, event.chatId);
-      if (mode === 'topic') return `thread:${event.messageId}`;
+      if (mode === 'topic') return `thread:${larkMessageAnchor(event)}`;
     } catch {
       // 群形态查询失败时降级为普通群路由，不能阻塞消息处理。
     }
@@ -291,13 +292,13 @@ export async function resolveLarkScopeId(
   // 普通群：按 groupReplyMode 路由（规则 5）；未设置走 dutydeck legacy。
   switch (config.groupReplyMode) {
     case 'new-topic':
-      return `thread:${event.messageId}`;
+      return `thread:${larkMessageAnchor(event)}`;
     case 'chat':
     case 'shared':
       return `chat:${event.chatId}`;
     case 'chat-topic':
       // 顶层平铺；但 omt_ 开头的原生话题种子各自独立会话。
-      return threadId?.startsWith('omt_') ? `thread:${event.messageId}` : `chat:${event.chatId}`;
+      return threadId?.startsWith('omt_') ? `thread:${larkMessageAnchor(event)}` : `chat:${event.chatId}`;
     default:
       // legacy：有 thread_id 按话题隔离（无 root_id 时锚点回退 thread_id），否则按发送人，再否则按消息。
       return larkGroupScopeId(event);

@@ -1,3 +1,4 @@
+import { larkMessageAnchor } from './message-anchor.js';
 import { runAgentScheduleRequest } from '../agent-schedule-request.js';
 import { larkElapsedLabel } from './card-status.js';
 import { agentSettingsConfirmKind, parseAgentSettings, showAgentSettings } from './agent-settings.js';
@@ -273,7 +274,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
 
   private saveTaskDashboardOrigin(config: StoredLarkConfig, card: { messageId: string }, event: LarkMessageEvent) {
     return this.workflowOptions.store?.set(`lark.task_dashboard.${config.appId}.${card.messageId}`, JSON.stringify({
-      messageId: event.messageId, chatId: event.chatId, chatType: event.chatType,
+      messageId: event.messageId, ...(event.replyMessageId ? { replyMessageId: event.replyMessageId } : {}), chatId: event.chatId, chatType: event.chatType,
       senderOpenId: event.senderOpenId, messageType: 'text', content: '', mentions: []
     } satisfies LarkMessageEvent));
   }
@@ -413,8 +414,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       continued ??= this.threadContinuation(event, config, scopeId).then(session => session?.id);
       if (record.sessionId === await continued && record.event.chatId === event.chatId && record.event.senderOpenId === event.senderOpenId) { candidates.push(record); continue; }
       if (record.event.threadId && event.threadId && record.event.threadId !== event.threadId) continue;
-      const originalRoot = record.event.rootId ?? (record.event.threadId ? record.event.messageId : undefined);
-      const replyRoot = event.rootId ?? (event.threadId ? event.messageId : undefined);
+      const originalRoot = record.event.rootId ?? (record.event.threadId ? larkMessageAnchor(record.event) : undefined);
+      const replyRoot = event.rootId ?? (event.threadId ? larkMessageAnchor(event) : undefined);
       if (originalRoot !== replyRoot) continue;
       if (record.event.chatId === event.chatId && record.event.senderOpenId === event.senderOpenId
         && await resolveLarkScopeId(record.event, config, this.chatModeResolver) === scopeId) candidates.push(record);
@@ -658,6 +659,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   /** retrying：首卡重试重新走入站处理时传入原任务，按它触发时的 epoch 判断 /new。 */
   async handle(event: LarkMessageEvent, config: StoredLarkConfig, recovering = false, adopted = false, retrying?: LarkTask, captured?: LarkInboxRecord, adoption?: LarkInboxAdoption) {
     const persisted = captured ?? await this.inbox?.lookup(config.appId, event.messageId);
+    if (persisted && !await this.confirmationInputAllowed(persisted)) return;
     if (persisted) {
       if (persisted.state !== 'received' && !((captured || adopted) && persisted.state === 'unrouted') && !(adopted && persisted.state === 'ignored')) return;
       event = persisted.event;
@@ -915,7 +917,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const automation = this.workflowOptions.automation;
       const requests = this.workflowOptions.scheduleRequests;
       if (!automation || !requests) return;
-      const messageOrigin = { appId: config.appId, chatId: event.chatId, messageId: event.messageId, replyInThread: Boolean(event.threadId?.trim()) };
+      const messageOrigin = { appId: config.appId, chatId: event.chatId, messageId: larkMessageAnchor(event), replyInThread: Boolean(event.threadId?.trim()) };
       const result = await runAgentScheduleRequest({ automation, prepareDelivery: id => requests.prepareDelivery(sessionId, messageOrigin, id),
         sendConfirmation: schedule => requests.sendConfirmation(schedule, '按控制操作处理。')
       }, { sessionId, requestId: event.messageId, actorId: event.senderOpenId }, decision.params);
@@ -958,7 +960,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (delayMs === undefined) {
       this.undeliveredRetries.delete(key);
       if (typeof this.service.replyText === 'function') {
-        await this.service.replyText({ messageId: task.event.messageId, ...(task.event.threadId ? { replyInThread: true } : {}), text: '这条请求没有执行，请重发。', idempotencyKey: `request_not_run_${task.id}`.slice(0, 50) })
+        await this.service.replyText({ messageId: larkMessageAnchor(task.event), ...(task.event.threadId ? { replyInThread: true } : {}), text: '这条请求没有执行，请重发。', idempotencyKey: `request_not_run_${task.id}`.slice(0, 50) })
           .catch(replyError => this.log.warn({ error: replyError, messageId: task.id }, '发送「请求没有执行」提示失败'));
       }
       await this.inbox!.update(inbox, { state: 'failed', error: error instanceof Error ? error.message : String(error) })
@@ -1141,7 +1143,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const sessionId = boundSessionId ?? (await this.findScopeSession(config, event, scopeId, group).catch(() => undefined))?.id;
     if (!sessionId || !this.runtime.getTasks) return undefined;
     if (kind === 'stop') return await this.routeChatCommand(event, config, '/cancel', group, scopeId, acknowledgement) === 'handled' ? 'handled' : undefined;
-    const confirm = (text: string) => this.service.replyText({ messageId: event.messageId, ...(event.threadId?.trim() ? { replyInThread: true } : {}),
+    const confirm = (text: string) => this.service.replyText({ messageId: larkMessageAnchor(event), ...(event.threadId?.trim() ? { replyInThread: true } : {}),
       text, idempotencyKey: `control_${event.messageId}`.slice(0, 50) }).catch(error => this.log.warn({ error, messageId: event.messageId }, '控制语回执发送失败'));
     const tasks = await this.runtime.getTasks(sessionId);
     const unresolved = this.runtime.inspectExecutionRecovery ? await this.unresolvedTurns(sessionId) : [];
@@ -1709,7 +1711,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const workspaceNote = launchOptions.workspaceMode === 'worktree' ? '分身使用独立 worktree，不含原会话未提交的改动；这些改动只列在 git 状态交接中。' : '分身与原会话共享目录，同时修改同一文件可能冲突。';
         const seed = await this.service.sendText({ chatId: event.chatId, text: `从会话 ${source.id} 分出的新话题。\n携带：${context}。\n${workspaceNote}\n任务：${escapeLarkPromptEcho(larkCommandEcho(request.prompt || '继续原会话的任务', 160))}`, idempotencyKey: `fork_${event.messageId}`.slice(0, 50) });
         const goal = request.prompt || '请先阅读继承的上下文，简短确认已接手并等待我的下一条任务。';
-        const forkEvent: LarkMessageEvent = { ...event, messageId: seed.messageId, rootId: seed.messageId, threadId: seed.messageId, content: JSON.stringify({ text: goal }), messageType: 'text', mentions: [] };
+        const forkEvent: LarkMessageEvent = { ...event, messageId: seed.messageId, replyMessageId: undefined, rootId: seed.messageId, threadId: seed.messageId, content: JSON.stringify({ text: goal }), messageType: 'text', mentions: [] };
         const forkScope = `thread:${seed.messageId}`;
         const seeded = await this.inbox.seed(config.appId, forkEvent, { prompt: goal, scopeId: forkScope, resources: [], launchOptions,
           materialPrompt: `${handoff}\n\n${workspaceNote}\n\n${goal}` });

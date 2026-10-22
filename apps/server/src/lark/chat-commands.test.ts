@@ -639,13 +639,13 @@ describe('恢复已关闭会话与并行分身', () => {
     expect((await h.runtime.getSession(id))?.state).toBe('stopped');
   });
 
-  it('ACP 分身用交接，保留原会话正在执行的任务和排队内容', async () => {
+  it.each([undefined, 'om_prior_confirmation'])('ACP 分身用交接，保留原会话正在执行的任务和排队内容（原锚点=%s）', async replyMessageId => {
     const h = await harness();
     await h.dispatch('om_task', '第一条任务'); await h.waitRunning('第一条任务');
     await h.dispatch('om_queue', '排队任务');
     const id = await h.sessionId(); const before = await h.runtime.getTasks(id); const source = await h.runtime.getSession(id);
     h.config.defaultAgentWeights = [{ agentId: 'spare', weight: 100 }];
-    await h.coordinator.handle(event('om_fork', '/fork 检查另一种实现'), h.config);
+    await h.coordinator.handle(event('om_fork', '/fork 检查另一种实现', { ...(replyMessageId ? { replyMessageId } : {}) }), h.config);
     expect(h.markdownOf(h.lastReceipt())).toContain('已在新话题开分身');
     // 原会话还在执行，updatedAt 会随事件变化；其余字段（状态、绑定、配置）必须不变。
     expect({ ...(await h.runtime.getSession(id)), updatedAt: undefined }).toEqual({ ...source, updatedAt: undefined });
@@ -657,6 +657,8 @@ describe('恢复已关闭会话与并行分身', () => {
     await vi.waitFor(async () => expect((await h.runtime.getTasks(child.id))[0]?.status).toBe('running'));
     await vi.waitFor(() => expect(h.prompts).toEqual(expect.arrayContaining([expect.stringContaining('会话交接')])));
     expect(h.service.sendText.mock.calls[0]![0].text).toContain('最近结果');
+    const childMapping = (await h.repos.channelMappings.list(`lark-card:${h.config.appId}`)).find(item => item.sessionId === child.id)!;
+    expect(JSON.parse(childMapping.extra!).reply_message_id).toBe(childMapping.externalId);
   });
 
   it('Claude 有落盘上下文时传递原生分身 ID，并默认独立 worktree', async () => {

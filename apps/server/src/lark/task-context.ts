@@ -1,3 +1,4 @@
+import { larkMessageAnchor } from './message-anchor.js';
 import type { PromptPart } from '@dutydeck/shared';
 import { promptDigest } from '../prompt-context.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
@@ -443,7 +444,7 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
   const maxDocuments = expandDocuments ? MAX_EXPANDED_DOCUMENTS : MAX_DOCUMENTS;
   const readIds = normalizeReadIds(input.readMessageIds);
   const readSet = new Set(readIds);
-  const currentMessageId = trimMessageId(event.messageId);
+  const currentMessageId = trimMessageId(larkMessageAnchor(event));
   const sources: LarkContextSource[] = [];
   const materials = new MaterialCollector();
   const outputResources: SourcedResource[] = [];

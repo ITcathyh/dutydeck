@@ -924,6 +924,8 @@ describe('structured ask cards (P0-2)', () => {
 
 describe('过期卡持久修复与结果附件引用', () => {
   it('旧expired记录在重启修复失败后可重试，成功只更新一次且无按钮', async () => {
+    const at = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(at);
     const { directory, repositories } = await openDatabase();
     try {
       const { runtime } = makeRuntime([], []);
@@ -934,12 +936,15 @@ describe('过期卡持久修复与结果附件引用', () => {
       const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
       await workflow.initialize('app_one');
       await workflow.reconcile('app_one');
+      expect(update).toHaveBeenCalledTimes(1);
+      clock.mockReturnValue(at + 5_000);
+      await workflow.reconcile('app_one');
       await workflow.reconcile('app_one');
       expect(update).toHaveBeenCalledTimes(2);
       expect(update.mock.calls[1]![0]).toMatchObject({ statusLabel: '已失效', readOnly: true });
       expect(JSON.stringify(update.mock.calls[1])).toContain('2026/9/16 09:00:00（北京时间）');
       expect(JSON.stringify(update.mock.calls[1])).not.toContain('callback');
-    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+    } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
   it('摘要和附件引用同一旧验收，鉴权与一次性决议不变，附件不能伪造主卡回调', async () => {
@@ -1329,6 +1334,9 @@ describe('权限卡截止时间与自动拒绝', () => {
       vi.mocked(service.update).mockRejectedValueOnce(new Error('rate limited'));
       const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
       expect(await workflow.reconcile('app_one')).toBe(1);
+      expect(await workflow.reconcile('app_one')).toBe(1);
+      expect(service.update).toHaveBeenCalledTimes(1);
+      clock.mockReturnValue(at + 5_000);
       expect(await workflow.reconcile('app_one')).toBe(0);
       expect(await workflow.reconcile('app_one')).toBe(0);
       expect(service.update).toHaveBeenCalledTimes(2);

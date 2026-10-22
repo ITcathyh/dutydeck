@@ -1,3 +1,4 @@
+import { larkMessageAnchor } from './message-anchor.js';
 import type { ConfigRepository, PublicSessionSchedule } from '@dutydeck/shared';
 import { RuntimeError, describeScheduleTrigger } from '@dutydeck/shared';
 import type { SessionAutomationService } from '../session-automation.js';
@@ -51,7 +52,7 @@ export async function executeScheduleCommand(automation: SessionAutomationServic
       key: `${config.appId}:${event.messageId}`,
       prepareDelivery: async automationId => {
         if (!store?.compareAndSet) throw new RuntimeError('SCHEDULE_ORIGIN_UNAVAILABLE', '无法持久保存此话题的回报位置', 503);
-        await store.compareAndSet(`automation.delivery-target.${automationId}`, undefined, JSON.stringify({ appId: config.appId, chatId: event.chatId, replyMessageId: event.messageId, replyInThread: event.chatType === 'group' }));
+        await store.compareAndSet(`automation.delivery-target.${automationId}`, undefined, JSON.stringify({ appId: config.appId, chatId: event.chatId, replyMessageId: larkMessageAnchor(event), replyInThread: event.chatType === 'group' }));
       }
     });
     return `已保存「${schedule.name}」，每 ${minutes} 分钟执行一次，当前停用。\n\n执行内容：${schedule.prompt}\n\n启用：\`/schedule enable ${schedule.id}\``;

@@ -49,7 +49,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   private async reconciledResult(mapping: { externalId: string; sessionId: string }, saved: PersistedLarkCardTask, cardId: string) {
     if (!this.workflows || !saved.sender_open_id || !saved.runtime_task_id || !saved.turn) return [];
     const context = { appId: saved.app_id, sessionId: mapping.sessionId, taskId: saved.runtime_task_id, turn: saved.turn,
-      event: { messageId: mapping.externalId, chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', senderOpenId: saved.sender_open_id,
+      event: { messageId: mapping.externalId, ...(saved.reply_message_id && saved.reply_message_id !== mapping.externalId ? { replyMessageId: saved.reply_message_id } : {}), chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', senderOpenId: saved.sender_open_id,
         threadId: saved.thread_id, messageType: 'text', content: JSON.stringify({ text: saved.prompt }), mentions: [] } };
     const related = saved.final_attachment_message_id ? [saved.final_attachment_message_id] : undefined;
     // 计划轮的结果卡补发时带回计划操作（计划记录在首次交付时已建）。
@@ -105,7 +105,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         if (isLarkLauncherVersionChanged(events)) restored.retryable = false;
         const cause = await this.continueCause(config.appId, mapping.externalId, saved.turn ?? 0, saved.scope_id, saved.state, events);
         return { elements: [...cause?.settled ? [{ tag: 'markdown', element_id: 'recovery_note', content: larkQuietSettledNote(cause) }] : [], ...verification.element ? [verification.element] : []],
-          cardInput: { capabilities: { ...this.capabilitiesForTask(restored), ...verification.capabilities, ...await this.resultActionCapabilities(restored, effective, saved.state),
+          cardInput: { ...(effective.adhdMode === true ? { adhdMode: true } : {}), capabilities: { ...this.capabilitiesForTask(restored), ...verification.capabilities, ...await this.resultActionCapabilities(restored, effective, saved.state),
             ...cause ? { canContinueInPlace: true } : {} } } };
       }
     });
@@ -210,7 +210,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     return { id: taskId, group: { tail: Promise.resolve() }, config, state: 'queued', turn: saved.turn ?? 0, epoch: 0,
       scopeId: saved.scope_id ?? '', prompt: saved.prompt, resources: [], events: [], sessionId: mapping.sessionId,
       runtimeTaskId: target.id, cardMessageId: saved.card_message_id, startedAt: saved.started_at,
-      event: { messageId: taskId, chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', messageType: 'text',
+      event: { messageId: taskId, ...(saved.reply_message_id && saved.reply_message_id !== taskId ? { replyMessageId: saved.reply_message_id } : {}), chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', messageType: 'text',
         content: '', mentions: [], senderOpenId: saved.sender_open_id, ...(saved.thread_id ? { threadId: saved.thread_id } : {}) },
       requestUpdate: async () => { await this.performReconcile(config); } };
   }

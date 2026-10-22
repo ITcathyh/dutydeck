@@ -43,7 +43,7 @@ const event = (id: string, text = '改一下登录逻辑'): LarkMessageEvent => 
  * memory：开启会话记忆，结果卡带「本轮记忆」区。
  * managed：群绑定为管理群，执行授权走真实的 LarkGroupManager.prepareTurn（与 service.ts 的接线一致）。
  */
-async function harness(options: { verificationCommand?: string; files?: Record<string, string>; edit?: (repo: string, round: number, prompt: string) => void; unpushed?: boolean; memory?: boolean; managed?: boolean }) {
+async function harness(options: { adhdMode?: boolean; verificationCommand?: string; files?: Record<string, string>; edit?: (repo: string, round: number, prompt: string) => void; unpushed?: boolean; memory?: boolean; managed?: boolean }) {
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-lark-autoverify-'));
   // 状态库放在仓库外面：它一直在写，放在仓库里会让验证期间的代码指纹对不上。
   const repo = join(root, 'repo');
@@ -73,7 +73,7 @@ async function harness(options: { verificationCommand?: string; files?: Record<s
     completionReactionOnly: false, silentProgress: false, urgentEnabled: false, pinLongTasks: false, memoryEnabled: options.memory === true,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
     highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off',
-    ...(options.verificationCommand ? { verificationCommand: options.verificationCommand } : {}) };
+    ...(options.verificationCommand ? { verificationCommand: options.verificationCommand } : {}), ...(options.adhdMode === true ? { adhdMode: true } : {}) };
 
   let nextMessage = 0;
   const cards = new Map<string, any>();
@@ -445,4 +445,39 @@ describe('旧结果卡记忆删除回调', () => {
     const layout = (items: Array<Record<string, any>>) => items.map(element => String(element.element_id ?? ''));
     expect(layout(elements)).toEqual(layout(before.elements));
   }, 60_000);
+});
+
+
+describe('ADHD 结果卡验证状态', () => {
+  it('无命令无候选时隐藏占位验证行，配置命令仍展示真实验证结果', async () => {
+    const empty = await harness({ adhdMode: true });
+    await empty.coordinator.handle(event('om_empty'), empty.config);
+    const emptyResult = await empty.resultCard('om_empty');
+    expect(await empty.verificationLine('om_empty')).toBe('');
+    expect(JSON.stringify(buildLarkCard(emptyResult.card))).not.toContain('result_follow_up_row');
+    const configured = await harness({ adhdMode: true, verificationCommand: 'test -f work.txt',
+      edit: repo => writeFileSync(join(repo, 'work.txt'), 'done\n') });
+    await configured.coordinator.handle(event('om_configured'), configured.config);
+    expect(await configured.settledLine('om_configured', '验证通过')).toContain('`test -f work.txt` 退出码 0');
+    expect(JSON.stringify(buildLarkCard((await configured.resultCard('om_configured')).card))).not.toContain('result_follow_up_row');
+  }, 30_000);
+
+  it('有候选命令时仍展示建议，恢复补发沿用精简模式', async () => {
+    const h = await harness({ adhdMode: true, files: { 'package.json': JSON.stringify({ scripts: { test: 'node --test' } }) },
+      edit: repo => writeFileSync(join(repo, 'work.txt'), 'done\n') });
+    await h.coordinator.handle(event('om_suggestion'), h.config);
+    expect(await h.verificationLine('om_suggestion')).toContain('`npm test`');
+    const channel = `lark-card:${h.config.appId}`;
+    const mapping = (await h.repos.channelMappings.get(channel, 'om_suggestion'))!;
+    const saved = JSON.parse(mapping.extra!);
+    delete saved.final_message_id; delete saved.final_delivery_state; delete saved.final_card_input;
+    saved.progress_frozen = false;
+    await h.repos.channelMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify(saved));
+    await h.restart();
+    await h.coordinator.reconcile(h.config);
+    const recovered = await h.resultCard('om_suggestion');
+    expect(recovered.saved.final_card_input?.adhdMode).toBe(true);
+    expect(recovered.card.adhdMode).toBe(true);
+    expect(JSON.stringify(buildLarkCard(recovered.card))).not.toContain('result_follow_up_row');
+  }, 30_000);
 });

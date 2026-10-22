@@ -374,6 +374,18 @@ describe('重复请求时提议每天自动执行', () => {
     expect(h.prompts).toHaveLength(2);
   });
 
+  it('a synthetic input keeps its reply anchor for delivery, while the daily receipt replies to the selected result card', async () => {
+    const h = await harness({ automation: true });
+    await h.run(event('om_1', '详细总结下今天的聊天内容'));
+    const second = await h.run(event('confirmation_fixture', '详细总结下今天的聊天内容', { replyMessageId: 'om_prior_confirmation' }));
+    const value = callbackOf(h.card(second.final_message_id!), 'schedule_daily');
+    expect(await h.click(value, 'ou_alice', second)).toMatchObject({ type: 'success' });
+    const [schedule] = (await h.automation!.listBySession(second.sessionId, 'ou_alice')).schedules;
+    expect(JSON.parse((await h.repos.config.get(`automation.delivery-target.${schedule!.id}`))!)).toMatchObject({ replyMessageId: 'om_prior_confirmation' });
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ taskName: '定时任务', messageId: second.final_message_id })));
+    expect(h.prompts).toHaveLength(2);
+  });
+
   it.each([
     ['建计划之前', 'createSchedule'],
     ['计划已建好、启用之前', 'updateSchedule']

@@ -51,6 +51,11 @@ export async function runNativeAskHook(payload: unknown, options: RelayClientOpt
       const result = await runSessionAsk(question.prompt, {
         choices: JSON.stringify(question.choices), multiple: question.multiple,
       }, options);
+      if (result.status === 'deferred') {
+        const reason = `确认已登记（${result.askId}），等待用户点击后另起一轮；本轮停止，不执行依赖该确认的操作，也不继续后续问题。`;
+        return JSON.stringify({ continue: false, stopReason: `deferred:${result.askId} ${reason}`,
+          hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
+      }
       if (result.status !== 'answered' || !result.answer?.trim()) {
         return deny(result.status === 'expired'
           ? '飞书提问已过期，尚未获得用户答案。请说明需要用户补充什么，或重新发起提问；不要自行选择。'

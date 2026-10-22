@@ -1,3 +1,4 @@
+import { larkMessageAnchor } from './message-anchor.js';
 import { RuntimeError, COLLABORATION_LIST_LIMIT, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GATE, countDecisionUsage, listWindowIncomplete, type ListedItems } from '@dutydeck/shared';
 import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_RECORD } from '@dutydeck/shared';
 import { DECIDER_META_KEY, INTRUSIVE_FEEDBACK_PREFIX, MISSED_FEEDBACK_PREFIX, deciderMetaOf, isDecisionGate, participationLevelBehaviors, participationLevelLabels, participationLevelPhraseHint, participationLevelPhrases, participationLevels, resolveParticipation } from '@dutydeck/shared';
@@ -438,7 +439,7 @@ export class LarkGroupParticipation {
     // 漏接、误插和改档短语与参与模式无关：只在 @ 时的群也要能在群里改回来。
     let intrusive = false;
     if (human) {
-      const text = await parseLarkMessageContent(event.messageType, event.content, { messageId: event.messageId }).then(parsed => parsed.text, () => '');
+      const text = await parseLarkMessageContent(event.messageType, event.content, { messageId: larkMessageAnchor(event) }).then(parsed => parsed.text, () => '');
       const result = await this.corrections(scope, event, config, text, input);
       if (result.handled) return { enabled: true, instructions: '', handled: true };
       intrusive = result.intrusive;
@@ -453,7 +454,7 @@ export class LarkGroupParticipation {
     const missing: string[] = [];
     let text = '';
     try {
-      const parsed = await parseLarkMessageContent(event.messageType, event.content, { messageId: event.messageId });
+      const parsed = await parseLarkMessageContent(event.messageType, event.content, { messageId: larkMessageAnchor(event) });
       text = parsed.text;
       if (parsed.resources.length) missing.push('resource_binary_not_loaded');
     } catch { missing.push('message_parse_failed'); }
@@ -463,8 +464,8 @@ export class LarkGroupParticipation {
     const scenarioRef = human && !input.explicit && !intrusive ? await this.matchModelScenario(scope, event, config, text, settings, input.botOpenId) : undefined;
     const result = await this.options.repository.observe({ scope, source: 'lark.message', eventId: event.messageId,
       occurredAt: observationTime(event.createTime, '1970-01-01T00:00:00.000Z'), receivedAt: now, senderId: event.senderOpenId,
-      senderKind: bot ? 'bot' : event.senderOpenId ? 'human' : 'system', threadId: event.threadId, messageId: event.messageId,
-      text: text.slice(0, 16_000), refs: [event.messageId, ...(event.parentId ? [event.parentId] : []), ...(input.explicit ? ['dutydeck:explicit'] : []),
+      senderKind: bot ? 'bot' : event.senderOpenId ? 'human' : 'system', threadId: event.threadId, messageId: larkMessageAnchor(event),
+      text: text.slice(0, 16_000), refs: [larkMessageAnchor(event), ...(event.parentId ? [event.parentId] : []), ...(input.explicit ? ['dutydeck:explicit'] : []),
         ...(input.botOpenId ? [`dutydeck:self:${input.botOpenId}`] : []),
         ...(event.parentId ? [`dutydeck:parent:${event.parentId}`] : []), ...(input.ownedTopic ? [OWNED_TOPIC_REF] : []), ...(scenarioRef ? [`${SCENARIO_REF_PREFIX}${scenarioRef}`] : []),
         ...new Set(event.mentions.map(mention => `dutydeck:mention:${!input.botOpenId || !mention.openId ? 'unknown' : mention.openId === input.botOpenId ? 'self' : 'other'}`))], origin: 'live', missing });
@@ -638,7 +639,7 @@ export class LarkGroupParticipation {
         await this.bootstrapper.ensure(scope);
         const full = await this.snapshot(scope, pending.observation);
         if (full.settings.participation === 'off' || !await this.current(scope, full, pending.event.senderOpenId!, slot)) return undefined;
-        const trigger = full.observations.find(item => item.messageId === pending.event.messageId && item.origin === 'live' && item.senderKind === 'human');
+        const trigger = full.observations.find(item => item.messageId === larkMessageAnchor(pending.event) && item.origin === 'live' && item.senderKind === 'human');
         if (!trigger) return undefined;
         // 第二轮规则：补上最近发言（续问、「这个任务」）和事项名称。
         const merged: RuleFacts = { ...facts, ...await this.recentFacts(config, pending, full) };
@@ -797,7 +798,7 @@ export class LarkGroupParticipation {
       if (!config || !await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true, true)) {
         throw new RuntimeError('COLLABORATION_DELIVERY_SUPPRESSED', 'Listener or authorization changed before acceptance', 409);
       }
-      acknowledgement = await this.acknowledge(scope, pending.event.messageId, actionId, config);
+      acknowledgement = await this.acknowledge(scope, larkMessageAnchor(pending.event), actionId, config);
       if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true, true)) {
         throw new RuntimeError('COLLABORATION_DELIVERY_SUPPRESSED', 'Listener or authorization changed before generation', 409);
       }
@@ -820,7 +821,7 @@ export class LarkGroupParticipation {
         const config = await this.options.readConfig(scope.appId, scope.chatId);
         if (this.closed || slot.stopped || !config?.listening) throw new RuntimeError('COLLABORATION_DELIVERY_SUPPRESSED', 'Listener stopped before delivery', 409);
         providerStarted = true;
-        return this.options.serviceFor(config).replyText({ messageId: pending.event.messageId, replyInThread: true, text: response, idempotencyKey: actionId.slice(0, 50) });
+        return this.options.serviceFor(config).replyText({ messageId: larkMessageAnchor(pending.event), replyInThread: true, text: response, idempotencyKey: actionId.slice(0, 50) });
       };
       const sent = await (this.options.withDelivery ? this.options.withDelivery(scope, actionId, send) : send());
       await repo.updateAction(scope, actionId, { expectedRevision: action.revision, status: 'succeeded', receipt: sent.messageId, ...(generationError ? { error: generationError } : {}) });
@@ -870,7 +871,7 @@ export class LarkGroupParticipation {
     const duty = await this.options.repository.getDuty(scope);
     const direct = this.scenarios.direct(config, duty);
     if (!direct.length && event.messageType !== 'text') return;
-    const text = await parseLarkMessageContent(event.messageType, event.content, { messageId: event.messageId }).then(parsed => parsed.text, () => '');
+    const text = await parseLarkMessageContent(event.messageType, event.content, { messageId: larkMessageAnchor(event) }).then(parsed => parsed.text, () => '');
     const announcement = responderAnnouncementOf(text);
     if (!announcement && !direct.length) return;
     const appId = await this.senderAppId(config, event);
@@ -908,7 +909,7 @@ export class LarkGroupParticipation {
     const cached = openId ? this.botApps.get(key) : undefined;
     const service = this.options.serviceFor(config);
     if (cached || !service.getMessage) return cached;
-    const sender = (await service.getMessage(event.messageId)).sender;
+    const sender = (await service.getMessage(larkMessageAnchor(event))).sender;
     const appId = sender.idType === 'app_id' || sender.id?.startsWith('cli_') ? sender.id : undefined;
     if (appId && openId) {
       this.botApps.set(key, appId);
@@ -1225,7 +1226,7 @@ export class LarkGroupParticipation {
     }
     // 规则只看这一条消息本身，期间来了新消息也不影响结论，所以按已受理处理，不比对上下文版本。
     if (full.settings.participation === 'off' || !await this.current(scope, full, pending.event.senderOpenId!, slot, false, true)) return;
-    const trigger = full.observations.find(item => item.messageId === pending.event.messageId && item.origin === 'live' && item.senderKind === 'human');
+    const trigger = full.observations.find(item => item.messageId === larkMessageAnchor(pending.event) && item.origin === 'live' && item.senderKind === 'human');
     if (!trigger) return;
     const snapshot = decisionInput(full, trigger.id);
     const id = `decision_${digest([scope, snapshot.contextRevision, snapshot.settings.policyVersion])}`;
@@ -1285,7 +1286,7 @@ export class LarkGroupParticipation {
       )
       : !active && duty.responder?.appId === scope.appId ? '我现在是本群接话人，确认后在群里发卸任声明，没 @ 的消息不再由我接。' : '';
     const record = await this.confirmations.request({ kind: LEVEL_CONFIRM_KIND, scope, requesterId: sender,
-      replyTo: { messageId: event.messageId, ...(event.threadId ? { threadId: event.threadId } : {}) },
+      replyTo: { messageId: larkMessageAnchor(event), ...(event.threadId ? { threadId: event.threadId } : {}) },
       title: '调整参与强度', summary: `把本群改成「${label}」：${behavior}。${note}`, payload: { level: intent.level, ...(claim ? { claim: true } : {}) } });
     if (!record) await this.replyText(config, event, '确认卡没发出去，请稍后再说一次，或在 Dutydeck Web 的群设置里调整。', key);
     return true;
@@ -1326,7 +1327,7 @@ export class LarkGroupParticipation {
       ? `由我（${botName(config)}）按负责范围判断接本群没 @ 机器人的消息，明确叫我照常处理。`
       : `由我（${botName(config)}）接本群没 @ 机器人的消息。`;
     const record = await this.confirmations.request({ kind: RESPONDER_CONFIRM_KIND, scope, requesterId: sender,
-      replyTo: { messageId: event.messageId, ...(event.threadId ? { threadId: event.threadId } : {}) }, title: '指定接话人',
+      replyTo: { messageId: larkMessageAnchor(event), ...(event.threadId ? { threadId: event.threadId } : {}) }, title: '指定接话人',
       summary: `${deaf ? `${deafLevelText(level)}，确认后调到「按需」并负责接话：` : ''}${takeoverSummary}确认后我在群里发一条声明，其他 Dutydeck 机器人收到后只接 @ 和自己接手的话题。`,
       payload: deaf ? { level: 'selective' } : {} });
     if (!record) await this.replyText(config, event, '确认卡没发出去，请稍后再说一次，或在 Dutydeck Web 的群设置里指定。', key);
@@ -1349,7 +1350,7 @@ export class LarkGroupParticipation {
     const { pack } = phrase.entry;
     const duty = await this.options.repository.getDuty(scope);
     const binding = duty.scenarios?.[pack.id];
-    const replyTo = { messageId: event.messageId, ...(event.threadId ? { threadId: event.threadId } : {}) };
+    const replyTo = { messageId: larkMessageAnchor(event), ...(event.threadId ? { threadId: event.threadId } : {}) };
     if (phrase.kind === 'disable') {
       if (!binding?.enabled) { await this.replyText(config, event, `本群没开${pack.title}。`, key); return true; }
       const record = await this.confirmations.request({ kind: scenarioConfirmKind(pack.id), scope, requesterId: sender, replyTo, title: pack.confirm.disableTitle,
@@ -1405,7 +1406,7 @@ export class LarkGroupParticipation {
     return { chosen: ranked.slice(0, 1), others: ranked.slice(1) };
   }
   private async replyText(config: StoredLarkConfig, event: LarkMessageEvent, text: string, idempotencyKey: string) {
-    await this.options.serviceFor(config).replyText({ messageId: event.messageId, replyInThread: Boolean(event.threadId), text, idempotencyKey });
+    await this.options.serviceFor(config).replyText({ messageId: larkMessageAnchor(event), replyInThread: Boolean(event.threadId), text, idempotencyKey });
   }
   /**
    * 按这个人最近一小时在本群被判为不接的那条消息说明原因；没有这样的记录时说明闸门或档位。
