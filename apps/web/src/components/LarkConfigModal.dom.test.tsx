@@ -60,7 +60,7 @@ describe('LarkConfigModal revision conflicts', () => {
     const initial = collection({ revision: 1, setupComplete: true, fullTrustConfirmed: true, defaultAgentId: 'codex' });
     const client = renderModal(initial);
     const save = vi.spyOn(api, 'saveLarkConfig').mockRejectedValue(new ApiError('此 Bot 已被修改', 'LARK_CONFIG_REVISION_CONFLICT', 409));
-    const install = vi.spyOn(api, 'installLarkHook');
+    const install = vi.spyOn(api, 'installLarkHook').mockRejectedValue(new ApiError('此 Bot 已被修改', 'LARK_CONFIG_REVISION_CONFLICT', 409));
     vi.spyOn(api, 'larkHookStatus').mockResolvedValue({ agentId: 'codex', supported: true, installed: false, writable: true, trustRequired: false });
     await screen.findByDisplayValue('/repo');
     if (stage !== 'lark') await user.click(screen.getByRole('button', { name: /选择 Agent 并启用/ }));
@@ -69,10 +69,15 @@ describe('LarkConfigModal revision conflicts', () => {
     if (stage === 'hook') await user.selectOptions(screen.getByRole('combobox', { name: '风险控制' }), 'enforced');
     await act(async () => client.setQueryData(['lark-config'], collection({ ...initial.bots[0], revision: 2, workspace: '/new-server', preInjectPrompt: 'new server prompt' })));
     await user.click(await screen.findByRole('button', { name: stage === 'hook' ? '配置拦截 Hook' : stage === 'lark' ? '下一步' : '完成配置' }));
-    await waitFor(() => expect(save).toHaveBeenCalledOnce());
-    expect(save.mock.calls[0]![0]).toMatchObject({ expectedRevision: 1 });
+    if (stage === 'hook') {
+      await waitFor(() => expect(install).toHaveBeenCalledWith('cli_test', 'rm\\b', 1, expect.objectContaining({ defaultAgentId: 'codex', workspace: '/repo' })));
+      expect(save).not.toHaveBeenCalled();
+    } else {
+      await waitFor(() => expect(save).toHaveBeenCalledOnce());
+      expect(save.mock.calls[0]![0]).toMatchObject({ expectedRevision: 1 });
+    }
     expect((field as HTMLInputElement).value).toBe('/my-draft');
-    expect(install).not.toHaveBeenCalled();
+    if (stage !== 'hook') expect(install).not.toHaveBeenCalled();
     expect(await screen.findByRole('button', { name: '加载最新配置并放弃草稿' })).toBeTruthy();
   });
 
@@ -94,7 +99,7 @@ describe('LarkConfigModal revision conflicts', () => {
     expect(save.mock.calls[1]![0]).toMatchObject({ expectedRevision: 2, workspace: '/latest' });
   });
 
-  it('advances the draft revision through connection save, hook installation and final save', async () => {
+  it('keeps the revision unchanged while preparing hooks between connection and final save', async () => {
     const user = userEvent.setup();
     let server = collection({ revision: 5, setupComplete: true, fullTrustConfirmed: true, defaultAgentId: 'codex' });
     renderModal(server);
@@ -107,10 +112,9 @@ describe('LarkConfigModal revision conflicts', () => {
       return server;
     });
     const install = vi.spyOn(api, 'installLarkHook').mockImplementation(async (_appId, _pattern, expectedRevision) => {
-      expect(expectedRevision).toBe(7);
-      server = collection({ ...server.bots[0], revision: 8 });
+      expect(expectedRevision).toBe(6);
       status.installed = true;
-      return { ...status, configRevision: 8 };
+      return { ...status };
     });
     await screen.findByDisplayValue('/repo');
     await user.click(await screen.findByRole('button', { name: '下一步' }));
@@ -120,8 +124,8 @@ describe('LarkConfigModal revision conflicts', () => {
     const complete = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
     await waitFor(() => expect(complete.disabled).toBe(false));
     await user.click(complete);
-    await waitFor(() => expect(save).toHaveBeenCalledTimes(3));
-    expect(save.mock.calls.map(([input]) => input.expectedRevision)).toEqual([5, 6, 8]);
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(save.mock.calls.map(([input]) => input.expectedRevision)).toEqual([5, 6]);
   });
 });
 
@@ -228,7 +232,11 @@ describe('LarkConfigModal risk control', () => {
     const user = userEvent.setup();
     vi.spyOn(api, 'larkHookStatus').mockResolvedValue({ agentId: 'codex', supported: true, installed: false, writable: true, trustRequired: false, reason: '尚未安装' });
     const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', fullTrustConfirmed: true, setupComplete: true, riskControlMode: 'guidance' }));
-    const install = vi.spyOn(api, 'installLarkHook').mockResolvedValue({ agentId: 'codex', supported: true, installed: true, writable: true, trustRequired: false });
+    const install = vi.spyOn(api, 'installLarkHook').mockImplementation(async () => {
+      const ready = { agentId: 'codex', supported: true, installed: true, writable: true, trustRequired: false };
+      vi.mocked(api.larkHookStatus).mockResolvedValue(ready);
+      return ready;
+    });
     renderModal();
 
     const selector = await screen.findByRole('combobox', { name: '风险控制' });
@@ -247,10 +255,26 @@ describe('LarkConfigModal risk control', () => {
     expect(submit.disabled).toBe(true);
 
     await user.click(screen.getByRole('button', { name: '配置拦截 Hook' }));
-    await waitFor(() => expect(install).toHaveBeenCalledWith('cli_test', 'rm\\b', 1));
-    expect(save).toHaveBeenCalledWith(expect.objectContaining({ defaultAgentId: 'codex', fullTrustConfirmed: true, listening: true, riskControlMode: 'guidance' }));
+    await waitFor(() => expect(install).toHaveBeenCalledWith('cli_test', 'rm\\b', 1, { workspace: '/repo', defaultAgentId: 'codex', fallbackAgentId: '', defaultAgentWeights: [] }));
+    expect(save).not.toHaveBeenCalled();
     expect((selector as HTMLSelectElement).value).toBe('enforced');
     await waitFor(() => expect(submit.disabled).toBe(false));
+  });
+
+  it('prepares an unsaved workspace from the connection step without saving or downgrading the bot', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({ revision: 4, setupComplete: true, fullTrustConfirmed: true, defaultAgentId: 'codex', riskControlMode: 'enforced' }));
+    vi.spyOn(api, 'larkHookStatus').mockResolvedValue({ agentId: 'codex', supported: true, installed: false, writable: true, trustRequired: false });
+    const save = vi.spyOn(api, 'saveLarkConfig');
+    const install = vi.spyOn(api, 'installLarkHook').mockRejectedValue(new ApiError('工作区不可写', 'HOOK_NOT_WRITABLE', 403));
+    const workspace = await screen.findByDisplayValue('/repo');
+    await user.clear(workspace); await user.type(workspace, '/unsaved-workspace');
+    await user.click(await screen.findByRole('button', { name: '配置拦截 Hook' }));
+    await waitFor(() => expect(install).toHaveBeenCalledWith('cli_test', 'rm\\b', 4, { workspace: '/unsaved-workspace', defaultAgentId: 'codex', fallbackAgentId: '', defaultAgentWeights: [] }));
+    expect(save).not.toHaveBeenCalled();
+    expect(await screen.findByText('工作区不可写')).toBeTruthy();
+    expect((workspace as HTMLInputElement).value).toBe('/unsaved-workspace');
+    expect(screen.queryByRole('button', { name: '加载最新配置并放弃草稿' })).toBeNull();
   });
 
   it('does not lock Agent selection and checks the newly selected Agent hook', async () => {
@@ -270,7 +294,7 @@ describe('LarkConfigModal risk control', () => {
     await user.click(screen.getByRole('button', { name: 'Codex' }));
     await user.click(screen.getByRole('option', { name: 'Claude' }));
 
-    await waitFor(() => expect(hookStatus).toHaveBeenCalledWith('cli_test', 'claude'));
+    await waitFor(() => expect(hookStatus).toHaveBeenCalledWith('cli_test', 'claude', '/repo'));
     expect(await screen.findByText('Claude Hook 尚未安装')).toBeTruthy();
     expect(screen.getByRole('button', { name: '配置拦截 Hook' })).toBeTruthy();
   });
@@ -1276,13 +1300,16 @@ describe('Lark Agent routing weights', () => {
 });
 
 
-it('saves and clears the fallback Agent from the setup wizard', async () => {
+it('saves and clears the fallback model from the setup wizard', async () => {
   const user = userEvent.setup();
   const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', setupComplete: true }));
   renderModal(collection({ fullTrustConfirmed: true, defaultAgentId: 'codex', fallbackAgentId: 'claude' }));
   await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+  await user.type(await screen.findByLabelText('兜底模型'), 'gpt-6.1-sol');
+  await user.click(screen.getByRole('button', { name: '完成配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ fallbackAgentId: 'claude', fallbackModel: 'gpt-6.1-sol' })));
   await user.click(await screen.findByRole('button', { name: '兜底：Claude' }));
   await user.click(await screen.findByRole('option', { name: '不启用兜底' }));
   await user.click(screen.getByRole('button', { name: '完成配置' }));
-  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ fallbackAgentId: '' })));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ fallbackAgentId: '', fallbackModel: '' })));
 });

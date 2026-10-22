@@ -808,9 +808,11 @@ Examples:
   withTarget(botSettings.command('remove <app-id>').description('Delete a bot with its saved credentials and settings')
     .option('--yes', 'Confirm the deletion'))
     .action((appId, options, command) => runSettings('bot-remove', command, { appId, yes: options.yes === true }));
-  withTarget(botSettings.command('install-hook <app-id>').description('Install the high-risk command hook for the bot Agent; needed before riskControlMode=enforced')
-    .option('--pattern <regex>', 'High-risk command pattern; defaults to the saved one'))
-    .action((appId, options, command) => runSettings('bot-install-hook', command, { appId, pattern: options.pattern }));
+  withTarget(botSettings.command('install-hook <app-id> [key=value...]').description('Install the high-risk command hook for the bot Agent; needed before riskControlMode=enforced')
+    .option('--pattern <regex>', 'High-risk command pattern; defaults to the saved one')
+    .option('--prepare', 'Only prepare hook files; do not save bot settings'))
+    .addHelpText('after', fieldsHelp({ workspace: 'string', defaultAgentId: 'string', fallbackAgentId: 'string', defaultAgentWeights: 'json' }))
+    .action((appId, pairs, options, command) => runSettings('bot-install-hook', command, { appId, pairs, pattern: options.pattern, prepare: options.prepare === true }));
 
   const channelBotSettings = settings.command('channel-bot').description('Foundation draft bot settings and SecretRef selection (dashboard: 群配置与权限)');
   withTarget(channelBotSettings.command('list').description('List foundation bot IDs and credential metadata'))

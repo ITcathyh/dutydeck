@@ -34,6 +34,7 @@ export type BotDraft = {
   workspace: string;
   defaultAgentId: string;
   fallbackAgentId: string;
+  fallbackModel: string;
   defaultModel: string;
   defaultReasoningEffort: string;
   p2pMode: 'chat' | 'thread';

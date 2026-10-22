@@ -497,6 +497,7 @@ export async function resolveLarkSession(
   let agentId = launchOptions?.agentId ?? (launchOptions?.model || launchOptions?.reasoningEffort || launchOptions?.nativeForkSessionId
     ? config.defaultAgentId : selectLarkAgent(config));
   let fallbackNote: string | undefined;
+  let automaticFallback = false;
   const canFallback = !explicitAgentId && !launchOptions?.useAgentDefaults && config.fallbackAgentId && config.fallbackAgentId !== agentId;
   const start = async (): Promise<Session> => {
     const reliability = larkReliability(runtime);
@@ -519,6 +520,7 @@ export async function resolveLarkSession(
       ...(inheritModel && config.defaultModel ? { model: config.defaultModel } : {}),
       ...(inheritModel && config.defaultReasoningEffort ? { reasoningEffort: config.defaultReasoningEffort } : {}),
       ...launchOptions,
+      ...(automaticFallback && config.fallbackModel ? { model: config.fallbackModel } : {}),
       agentId: agentId!,
       permissionMode: larkPermissionMode(config),
       source: 'lark',
@@ -537,6 +539,7 @@ export async function resolveLarkSession(
     if (!canFallback || !reason) throw error;
     const primary = agentId;
     agentId = config.fallbackAgentId;
+    automaticFallback = true;
     try { session = await start(); }
     catch (fallbackError) {
       const detail = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);

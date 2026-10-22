@@ -585,6 +585,25 @@ describe('Bot Agent fallback with real Runtime and SQLite', () => {
     expect(h.prompts.at(-1)?.sessionId).toBe(first.sessionId);
   });
 
+  it('uses and persists a bot fallback model during mid-turn switching with real Runtime and SQLite', async () => {
+    const h = await topic({ fallback: true });
+    h.config.defaultModel = 'primary-model';
+    h.config.fallbackModel = 'gpt-6.1-sol';
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+    h.steps.push({ kind: 'provider', code: 'usage_limit_exceeded' });
+    await h.send('om_first', '执行任务');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && (await h.resultCard())?.card.state === 'completed');
+    const first = await h.mapping();
+    expect((await h.runtime.getSession(h.prompts[0].sessionId))?.model).toBe('primary-model');
+    expect((await h.runtime.getSession(first.sessionId))?.model).toBe('gpt-6.1-sol');
+    expect(JSON.parse((await h.repos.config.get('lark.inbox.app.om_first'))!).request.launchOptions)
+      .toMatchObject({ agentId: 'spare', model: 'gpt-6.1-sol', automaticFallback: true, useAgentDefaults: true });
+    await h.restart();
+    await h.send('om_second', '继续');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_second')) && (await h.tasks('om_second')).some(task => task.status === 'completed'));
+    expect(h.prompts.at(-1)?.sessionId).toBe(first.sessionId);
+  });
+
   it.each([
     { type: 'text', data: { text: '已经开始处理' } },
     { type: 'thinking', data: { text: '正在分析' } },

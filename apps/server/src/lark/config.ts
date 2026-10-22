@@ -46,6 +46,7 @@ export interface StoredLarkConfig {
   webMobileReachable?: false;
   defaultAgentId?: string;
   fallbackAgentId?: string;
+  fallbackModel?: string;
   defaultAgentWeights?: AgentWeight[];
   defaultModel?: string;
   defaultReasoningEffort?: string;
@@ -210,6 +211,7 @@ export interface SaveLarkConfigInput {
   webMobileReachable?: boolean;
   defaultAgentId?: string;
   fallbackAgentId?: string;
+  fallbackModel?: string;
   defaultAgentWeights?: AgentWeight[];
   defaultModel?: string;
   defaultReasoningEffort?: string;
@@ -323,6 +325,7 @@ export interface PublicLarkConfig {
   webMobileReachable?: false;
   defaultAgentId?: string;
   fallbackAgentId?: string;
+  fallbackModel?: string;
   defaultAgentWeights?: AgentWeight[];
   defaultModel?: string;
   defaultReasoningEffort?: string;
@@ -603,6 +606,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(parsed.webMobileReachable !== false && normalizeWebBaseUrl(parsed.webBaseUrl) ? { webBaseUrl: normalizeWebBaseUrl(parsed.webBaseUrl) } : {}),
     ...(parsed.webMobileReachable === false ? { webMobileReachable: false as const } : {}),
     ...(parsed.fallbackAgentId ? { fallbackAgentId: parsed.fallbackAgentId } : {}),
+    ...(parsed.fallbackAgentId && parsed.fallbackModel?.trim() ? { fallbackModel: parsed.fallbackModel.trim() } : {}),
     ...(parsed.defaultAgentId ? { defaultAgentId: parsed.defaultAgentId } : {}),
     ...(parsed.defaultAgentWeights ? { defaultAgentWeights: agentWeightsSchema.parse(parsed.defaultAgentWeights) } : {}),
     ...(parsed.defaultModel ? { defaultModel: parsed.defaultModel } : {}),
@@ -724,6 +728,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
   ...(config.webMobileReachable === false ? { webMobileReachable: false as const } : {}),
   ...(config.fallbackAgentId ? { fallbackAgentId: config.fallbackAgentId } : {}),
+  ...(config.fallbackAgentId && config.fallbackModel ? { fallbackModel: config.fallbackModel } : {}),
   ...(config.defaultAgentId ? { defaultAgentId: config.defaultAgentId } : {}),
   ...(config.defaultAgentWeights ? { defaultAgentWeights: config.defaultAgentWeights } : {}),
   ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
@@ -853,6 +858,8 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     : current ? current.webBaseUrl : configs.find(config => config.webBaseUrl)?.webBaseUrl;
   const defaultAgentId = input.defaultAgentId?.trim() || current?.defaultAgentId;
   const fallbackAgentId = input.fallbackAgentId === undefined ? current?.fallbackAgentId : input.fallbackAgentId.trim() || undefined;
+  const fallbackModel = !fallbackAgentId ? undefined : input.fallbackModel !== undefined ? input.fallbackModel.trim() || undefined
+    : fallbackAgentId === current?.fallbackAgentId ? current?.fallbackModel : undefined;
   const weightsResult = agentWeightsSchema.safeParse(input.defaultAgentWeights === undefined ? current?.defaultAgentWeights ?? [] : input.defaultAgentWeights);
   if (!weightsResult.success) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Agent weights must contain distinct Agent IDs and finite positive weights.', 400);
   const defaultAgentWeights = weightsResult.data;
@@ -950,7 +957,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   }
   const duplicate = configs.find((config, configIndex) => config.appId === appId && configIndex !== index);
   if (duplicate) throw new LarkServiceError('LARK_BOT_ALREADY_CONFIGURED', `Lark bot ${appId} already has a configuration panel`, 409);
-  if ((input.stage === 'agent' || input.defaultAgentId !== undefined || input.defaultAgentWeights !== undefined || input.fallbackAgentId !== undefined || input.listening === true) && permissionMode === 'full-trust' && !fullTrustConfirmed) {
+  if ((input.stage === 'agent' || input.defaultAgentId !== undefined || input.defaultAgentWeights !== undefined || input.fallbackAgentId !== undefined || input.fallbackModel !== undefined || input.listening === true) && permissionMode === 'full-trust' && !fullTrustConfirmed) {
     throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '请先确认飞书任务将以完全信任模式无人值守运行。', 409);
   }
   const config: StoredLarkConfig = {
@@ -969,6 +976,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     ...(webBaseUrl ? { webBaseUrl } : {}),
     ...(webMobileReachable ? {} : { webMobileReachable: false as const }),
     ...(fallbackAgentId ? { fallbackAgentId } : {}),
+    ...(fallbackModel ? { fallbackModel } : {}),
     ...(defaultAgentId ? { defaultAgentId } : {}),
     ...(defaultAgentWeights.length ? { defaultAgentWeights } : {}),
     ...(defaultModel ? { defaultModel } : {}),

@@ -1008,3 +1008,35 @@ describe('busy triage bot setting', () => {
     await expect(saveLarkConfig(repository, undefined, { originalAppId: 'cli_busy', busyTriage: 'true' as any })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
   });
 });
+
+
+describe('per-bot fallback model', () => {
+  it('normalizes, serializes and projects the model without changing other bots', async () => {
+    const repository = seedBots([
+      { appId: 'cli_one', appSecret: 'one', defaultAgentId: 'primary', fallbackAgentId: 'spare', fallbackModel: '  gpt-6.1-sol  ' },
+      { appId: 'cli_two', appSecret: 'two', defaultAgentId: 'primary', fallbackAgentId: 'spare' }
+    ]);
+    const configs = await readLarkConfigs(repository);
+    expect(configs[0].fallbackModel).toBe('gpt-6.1-sol');
+    expect(publicLarkConfig(configs[0]).fallbackModel).toBe('gpt-6.1-sol');
+    expect(configs[1]).not.toHaveProperty('fallbackModel');
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_one', preInjectPrompt: 'unrelated' });
+    expect(JSON.parse((await repository.get(larkBotsConfigKey))!)[0].fallbackModel).toBe('gpt-6.1-sol');
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_one', fallbackModel: '  new-model  ' });
+    expect((await readLarkConfigs(repository))[0].fallbackModel).toBe('new-model');
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_one', fallbackModel: '  ' });
+    expect((await readLarkConfigs(repository))[0]).not.toHaveProperty('fallbackModel');
+  });
+
+  it('clears stale models on changing or disabling the fallback Agent', async () => {
+    const repository = seedBots([{ appId: 'cli_one', appSecret: 'one', fallbackAgentId: 'spare', fallbackModel: 'old-model' }]);
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_one', fallbackAgentId: 'other' });
+    expect((await readLarkConfigs(repository))[0]).not.toHaveProperty('fallbackModel');
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_one', fallbackAgentId: 'spare', fallbackModel: 'new-model' });
+    expect((await readLarkConfigs(repository))[0].fallbackModel).toBe('new-model');
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_one', fallbackAgentId: '', fallbackModel: 'ignored' });
+    expect((await readLarkConfigs(repository))[0]).not.toHaveProperty('fallbackModel');
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_one', fallbackAgentId: 'spare' });
+    expect((await readLarkConfigs(repository))[0]).not.toHaveProperty('fallbackModel');
+  });
+});

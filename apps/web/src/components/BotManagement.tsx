@@ -21,6 +21,7 @@ import {
   ApiError,
   type Agent,
   type LarkBotConfig,
+  type LarkHookDraft,
   type RiskControlMode
 } from '../api';
 import { buildLarkBotAppLink, projectLarkBotStatus } from '../lark-status';
@@ -49,6 +50,7 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     workspace: bot.workspace ?? '',
     defaultAgentId: bot.defaultAgentId ?? '',
     fallbackAgentId: bot.fallbackAgentId ?? '',
+    fallbackModel: bot.fallbackModel ?? '',
     defaultModel: bot.defaultModel ?? '',
     defaultReasoningEffort: bot.defaultReasoningEffort ?? '',
     p2pMode: bot.p2pMode ?? 'chat',
@@ -246,6 +248,7 @@ export function BotManagement({
       appId,
       defaultAgentId: draft.defaultAgentId,
       fallbackAgentId: draft.fallbackAgentId,
+      fallbackModel: draft.fallbackModel,
       defaultModel: draft.defaultModel,
       defaultReasoningEffort: draft.defaultReasoningEffort,
       workspace: draft.workspace,
@@ -305,7 +308,7 @@ export function BotManagement({
     },
     onError: (error: unknown, variables) => {
       const { appId } = variables;
-      if (error instanceof ApiError && error.status === 409) {
+      if (error instanceof ApiError && ['LARK_CONFIG_REVISION_CONFLICT', 'REVISION_CONFLICT'].includes(error.code)) {
         setBotConflict(appId, error.message);
         toastStore.push({
           kind: 'error',
@@ -333,6 +336,28 @@ export function BotManagement({
 
   /** 只有「正在保存的就是当前这个对象」时才显示忙碌态，否则切过去的 B 会跟着转圈。 */
   const savingThisBot = saveMutation.isPending && saveMutation.variables?.appId === activeAppId;
+
+  const hookDraft: LarkHookDraft = { workspace: currentDraft?.workspace, defaultAgentId: currentDraft?.defaultAgentId, fallbackAgentId: currentDraft?.fallbackAgentId, defaultAgentWeights: activeBot?.defaultAgentWeights ?? [] };
+  const routingAgentIds = [...new Set([currentDraft?.defaultAgentId, currentDraft?.fallbackAgentId, ...(activeBot?.defaultAgentWeights ?? []).map(row => row.agentId)].filter((id): id is string => Boolean(id)))];
+  const hookQueryKey = ['lark-hook-status', activeAppId, 'routing', currentDraft?.workspace, ...routingAgentIds];
+  const hookStatus = useQuery({
+    queryKey: hookQueryKey,
+    queryFn: () => Promise.all(routingAgentIds.map(id => api.larkHookStatus(activeAppId!, id, currentDraft!.workspace))),
+    enabled: Boolean(activeAppId && currentDraft?.riskControlMode === 'enforced' && routingAgentIds.length)
+  });
+  const missingHook = hookStatus.data?.find(status => !status.supported || !status.installed || !status.writable);
+  const installHook = useMutation({
+    mutationFn: ({ appId, draft, targets }: { appId: string; draft: BotDraft; targets: LarkHookDraft; queryKey: typeof hookQueryKey }) => api.installLarkHook(appId, draft.highRiskPattern, draft.baseRevision, targets),
+    onSuccess: (_result, variables) => {
+      void qc.invalidateQueries({ queryKey: variables.queryKey, exact: true });
+      toastStore.push({ kind: 'success', key: `hook-bot-${variables.appId}`, title: '拦截 Hook 已配置', description: '草稿尚未保存，请确认配置后保存。' });
+    },
+    onError: (error, variables) => {
+      if (error instanceof ApiError && ['LARK_CONFIG_REVISION_CONFLICT', 'REVISION_CONFLICT'].includes(error.code)) setBotConflict(variables.appId, error.message);
+      toastStore.push({ kind: 'error', key: `hook-bot-${variables.appId}`, title: '配置拦截 Hook 失败', description: error instanceof Error ? error.message : String(error) });
+    }
+  });
+  const installingThisBot = installHook.isPending && installHook.variables?.appId === activeAppId;
 
   // 删除 Bot
   const deleteMutation = useMutation({
@@ -561,7 +586,7 @@ export function BotManagement({
                     <AgentSelect
                       agents={agents}
                       value={currentDraft.defaultAgentId}
-                      onChange={val => updateCurrentDraft({ defaultAgentId: val, ...(val === currentDraft.fallbackAgentId ? { fallbackAgentId: '' } : {}), defaultModel: '', defaultReasoningEffort: '' })}
+                      onChange={val => updateCurrentDraft({ defaultAgentId: val, ...(val === currentDraft.fallbackAgentId ? { fallbackAgentId: '', fallbackModel: '' } : {}), defaultModel: '', defaultReasoningEffort: '' })}
                     />
                   </div>
 
@@ -583,10 +608,15 @@ export function BotManagement({
                 </div>
 
                 <div><label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-fallback-agent">兜底 Agent</label>
-                  <Select id="bot-fallback-agent" value={currentDraft.fallbackAgentId} onChange={event => updateCurrentDraft({ fallbackAgentId: event.target.value })}>
+                  <Select id="bot-fallback-agent" value={currentDraft.fallbackAgentId} onChange={event => updateCurrentDraft({ fallbackAgentId: event.target.value, fallbackModel: '' })}>
                     <option value="">不启用兜底</option>{agents.filter(agent => agent.id !== currentDraft.defaultAgentId).map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
-                  </Select><p className="mt-1 text-caption text-subtle">主 Agent 不可用且本轮尚无输出或工具调用时，自动切换一次。兜底使用自己的默认模型。</p>
+                  </Select><p className="mt-1 text-caption text-subtle">主 Agent 不可用且本轮尚无输出或工具调用时，自动切换一次。兜底模型留空时使用 Agent 自己的默认模型。</p>
                 </div>
+
+                {currentDraft.fallbackAgentId && <div>
+                  <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-fallback-model">兜底模型</label>
+                  <Input id="bot-fallback-model" value={currentDraft.fallbackModel} onChange={event => updateCurrentDraft({ fallbackModel: event.target.value })} placeholder="留空使用兜底 Agent 默认模型"/>
+                </div>}
 
                 {claudeModelSettings && <AgentModelSettings key={`${activeBot.appId}:${currentDraft.defaultAgentId}`} agentId={currentDraft.defaultAgentId} botAppId={activeBot.appId}/>}
 
@@ -1089,6 +1119,15 @@ export function BotManagement({
                   </div>
                 )}
               </Card>
+
+              {currentDraft.riskControlMode === 'enforced' && <Card className="p-4">
+                <div className="text-caption font-medium text-primary">拦截 Hook</div>
+                <p className="mt-1 text-caption text-subtle">{hookStatus.isFetching ? '正在检查当前工作区和 Agent…' : missingHook ? `${missingHook.agentId}: ${missingHook.reason ?? '尚未安装拦截 Hook，请先配置再保存。'}` : hookStatus.isSuccess ? `已为 ${routingAgentIds.join('、')} 配置拦截 Hook。` : '检查拦截 Hook 失败，请重试。'}</p>
+                {hookStatus.error && <Banner tone="danger">{hookStatus.error.message}</Banner>}
+                {hookStatus.data?.map(status => status.trustInstructions ? <p key={status.agentId} className="mt-1 text-caption text-subtle">{status.trustInstructions}</p> : null)}
+                <Button variant="secondary" className="mt-2" loading={installingThisBot} disabled={savingThisBot || missingHook?.supported === false || !currentDraft.workspace.trim()} onClick={() => installHook.mutate({ appId: activeAppId!, draft: currentDraft, targets: hookDraft, queryKey: hookQueryKey })}>配置拦截 Hook</Button>
+                <p className="mt-1 text-meta text-subtle">按当前草稿的工作区、默认、兜底和分流 Agent 安装，不保存其他修改。</p>
+              </Card>}
 
               {/* 底部保存条 */}
               <div className="sticky bottom-0 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-default bg-surface p-4 shadow-card">

@@ -46,6 +46,7 @@ export type LarkBotConfig = {
   webMobileReachable?: false;
   defaultAgentId?: string;
   fallbackAgentId?: string;
+  fallbackModel?: string;
   defaultAgentWeights?: AgentWeight[];
   defaultModel?: string;
   defaultReasoningEffort?: string;
@@ -246,6 +247,8 @@ export type SystemDirectoriesResult = {
   host: string;
   entries: SystemDirectoryEntry[];
 };
+export type LarkHookDraft = { workspace?: string; defaultAgentId?: string; fallbackAgentId?: string; defaultAgentWeights?: Array<{ agentId: string; weight: number }> };
+
 export type LarkHookStatus = { agentId?: string; supported: boolean; installed: boolean; writable: boolean; trustRequired: boolean; hooksPath?: string; reason?: string; trustInstructions?: string };
 export type LarkOpenPlatformSetupJob = {
   id: string;
@@ -420,6 +423,7 @@ export const api = {
     webMobileReachable?: boolean;
     defaultAgentId?: string;
   fallbackAgentId?: string;
+  fallbackModel?: string;
   defaultAgentWeights?: AgentWeight[];
     defaultModel?: string;
     defaultReasoningEffort?: string;
@@ -489,9 +493,10 @@ export const api = {
   updateGroupBotBinding: (appId: string, chatId: string, body: { expectedRevision: number; patch: Partial<Pick<GroupBinding, 'agentOverride' | 'workspaceOverride' | 'modelOverride' | 'reasoningOverride' | 'routingOverride' | 'accessOverride' | 'groupToolsOverride' | 'presentationOverride' | 'oncall' | 'state'>>; roleChanges?: RoleChange[] }) => json<ManagedGroupBot>(`/api/lark/bots/${encodeURIComponent(appId)}/groups/${encodeURIComponent(chatId)}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   groupMembers: (appId: string, chatId: string, pageToken?: string) => json<GroupMembersResult>(`/api/lark/bots/${encodeURIComponent(appId)}/groups/${encodeURIComponent(chatId)}/members${pageToken ? `?pageToken=${encodeURIComponent(pageToken)}` : ''}`, { cache: 'no-store' }),
   systemDirectories: (path?: string) => json<SystemDirectoriesResult>(`/api/system/directories${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
-  larkHookStatus: (appId: string, agentId?: string) => {
+  larkHookStatus: (appId: string, agentId?: string, workspace?: string) => {
     const query = new URLSearchParams({ appId });
     if (agentId) query.set('agentId', agentId);
+    if (workspace !== undefined) query.set('workspace', workspace);
     return json<LarkHookStatus>(`/api/lark/hooks/status?${query.toString()}`);
   },
   larkMemoryStatus: (appId: string) => json<LarkMemoryStatusResult>(`/api/lark/bots/${encodeURIComponent(appId)}/memory/status`, { cache: 'no-store' }),
@@ -499,7 +504,7 @@ export const api = {
   resolveUnknownTask: (sessionId: string, taskId: string, input: { target: string; action: UnknownTaskAction; allowDuplicateEffects?: true }) => json<{ replayed: boolean; status: string; decisionId: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/unknown-tasks/${encodeURIComponent(taskId)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   sessionMemory: (sessionId: string) => json<{ turns: LarkTurnMemory[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/memory`, { cache: 'no-store' }),
   forgetSessionMemory: (sessionId: string, taskId: string, memoryId: string) => json<{ removed: { id: string } }>(`/api/sessions/${encodeURIComponent(sessionId)}/memory/${encodeURIComponent(taskId)}/entries/${encodeURIComponent(memoryId)}`, { method: 'DELETE' }),
-  installLarkHook: (appId: string, highRiskPattern: string, expectedRevision?: number) => json<LarkHookStatus & { configRevision?: number }>('/api/lark/hooks/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, highRiskPattern, expectedRevision }) }),
+  installLarkHook: (appId: string, highRiskPattern: string, expectedRevision?: number, draft?: LarkHookDraft) => json<LarkHookStatus & { configRevision?: number }>('/api/lark/hooks/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, highRiskPattern, expectedRevision, ...(draft ? { draft } : {}) }) }),
   systemCapabilities: () => json<{ platform: string; directoryPicker: boolean; filePicker: boolean }>('/api/system/capabilities'),
   skills: (cwd?: string, botAppId?: string, chatId?: string, pluginWorkspaceRoot?: string) => json<SkillReference[]>(`/api/system/skills?${new URLSearchParams({ ...(cwd ? { cwd } : {}), ...(botAppId ? { botAppId } : {}), ...(chatId ? { chatId } : {}), ...(pluginWorkspaceRoot ? { pluginWorkspaceRoot } : {}) })}`),
   /** 已启用插件提供的斜杠命令；没有插件时服务端不注册这个接口，按空列表处理。 */

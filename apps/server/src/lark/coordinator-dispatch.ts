@@ -810,7 +810,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     if (!task.inbox?.fallbackNote || !saved?.automaticFallback || !options.automaticFallback
       || options.agentId !== config.fallbackAgentId || JSON.stringify(options) !== JSON.stringify(saved)
       || !origin || origin.source !== 'lark' || origin.sourceId !== larkSourceId(config, task.event.chatId, task.event.chatType, task.scopeId)
-      || options.cwd !== origin.cwd || options.model || options.reasoningEffort || options.nativeForkSessionId || options.workspaceMode
+      || options.cwd !== origin.cwd || options.model !== config.fallbackModel || options.reasoningEffort || options.nativeForkSessionId || options.workspaceMode
       || options.useAgentDefaults !== true) throw new LarkServiceError('LARK_FALLBACK_RECOVERY_INVALID', '兜底配置或原会话已变化，无法安全恢复自动切换。请重新发送请求。', 409);
     const agent = (await this.runtime.listAgents?.())?.find(item => item.id === options.agentId);
     if (!agent) throw new LarkServiceError('LARK_AGENT_NOT_FOUND', '兜底 Agent 已不可用，请修改机器人配置后重新发送。', 409);
@@ -848,7 +848,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     try {
       task.fallbackNote = `Agent ${session.agentId} 不可用，已切换到兜底 Agent ${fallback}（${redactTraceText(reason).slice(0, 200)}）。使用新会话，仅带最近完成结果，原生对话历史未迁移。`;
       task.retryMaterialPrompt = `${handoff}\n\n${task.retryMaterialPrompt ?? task.prompt}`;
-      task.launchOptions = { agentId: fallback, cwd: session.cwd, useAgentDefaults: true, automaticFallback: true };
+      task.launchOptions = { agentId: fallback, cwd: session.cwd, ...(config.fallbackModel ? { model: config.fallbackModel } : {}), useAgentDefaults: true, automaticFallback: true };
       (group.retiredSessionIds ??= new Set()).add(session.id);
       group.sessionId = undefined;
       group.sessionConfigKey = undefined;

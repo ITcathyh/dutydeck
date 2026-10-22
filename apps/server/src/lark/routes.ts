@@ -1,3 +1,5 @@
+import { isAbsolute } from 'node:path';
+import { z } from 'zod';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
 import type { LarkGroupParticipation } from './group-participation.js';
 import { LarkAppCreationJobManager } from './app-creation.js';
@@ -22,6 +24,8 @@ import type { LoginLinkStore } from '../auth/auth.js';
 
 type LarkSendRequest = LarkSendInput & { bot?: LarkBotConfigInput; botAppId?: string };
 type LarkUpdateRequest = LarkUpdateInput & { bot?: LarkBotConfigInput; botAppId?: string };
+const hookDraftSchema = z.object({ workspace: z.string().optional(), defaultAgentId: z.string().optional(), fallbackAgentId: z.string().optional(), defaultAgentWeights: agentWeightsSchema.optional() }).strict();
+export type LarkHookDraft = z.infer<typeof hookDraftSchema>;
 export type SaveLarkConfigRequest = SaveLarkConfigInput & { allowedUserNames?: string[]; allowedBotNames?: string[]; highRiskAllowedUserNames?: string[] };
 
 /** LarkServiceError 按其状态码回给调用方，其他错误原样抛出。 */
@@ -238,13 +242,13 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       return larkError(reply, error);
     }
   });
-  app.get<{ Querystring: { appId?: string; agentId?: string } }>('/api/lark/hooks/status', async (request, reply) => {
+  app.get<{ Querystring: { appId?: string; agentId?: string; workspace?: string } }>('/api/lark/hooks/status', async (request, reply) => {
     const config = await readLarkConfig(options.config, request.query.appId);
     if (!config) return reply.code(404).send({ error: { code: 'LARK_BOT_NOT_FOUND', message: 'Unknown Lark bot' } });
     const agentId = request.query.agentId?.trim() || config.defaultAgentId;
-    return larkHookStatus(agentId, config.workspace, agentId ? await options.agents?.get(agentId) : undefined);
+    return larkHookStatus(agentId, request.query.workspace === undefined ? config.workspace : request.query.workspace.trim(), agentId ? await options.agents?.get(agentId) : undefined);
   });
-  app.post<{ Body: { appId?: string; highRiskPattern?: string; expectedRevision?: number } }>('/api/lark/hooks/install', async (request, reply) => {
+  app.post<{ Body: { appId?: string; highRiskPattern?: string; expectedRevision?: number; draft?: LarkHookDraft } }>('/api/lark/hooks/install', async (request, reply) => {
     try {
       const config = await readLarkConfig(options.config, request.body?.appId);
       if (!config) throw new LarkServiceError('LARK_BOT_NOT_FOUND', 'Unknown Lark bot', 404);
@@ -254,16 +258,30 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       const pattern = request.body?.highRiskPattern === undefined ? config.highRiskPattern : request.body.highRiskPattern.trim() || defaultHighRiskPattern;
       const patternValidation = validateHighRiskPattern(pattern);
       if (!patternValidation.valid) throw new LarkServiceError('INVALID_HIGH_RISK_PATTERN', patternValidation.error, 400);
+      const parsedDraft = hookDraftSchema.safeParse(request.body?.draft === undefined ? {} : request.body.draft);
+      if (!parsedDraft.success) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Hook 准备参数无效，请检查工作区和 Agent 分流权重。', 400);
+      const draft = parsedDraft.data;
+      const workspace = draft.workspace === undefined ? config.workspace : draft.workspace.trim() || undefined;
+      if (workspace && !isAbsolute(workspace)) throw new LarkServiceError('INVALID_LARK_CONFIG', '工作区必须是绝对路径。', 400);
+      const defaultAgentId = draft.defaultAgentId?.trim() || config.defaultAgentId;
+      const fallbackAgentId = draft.fallbackAgentId === undefined ? config.fallbackAgentId : draft.fallbackAgentId.trim();
+      if (fallbackAgentId && fallbackAgentId === defaultAgentId) throw new LarkServiceError('INVALID_LARK_CONFIG', '兜底 Agent 不能与默认 Agent 相同。', 400);
+      const agentIds = [...new Set([defaultAgentId, ...(fallbackAgentId ? [fallbackAgentId] : []), ...(draft.defaultAgentWeights ?? config.defaultAgentWeights ?? []).map(row => row.agentId)])];
+      const agents = await Promise.all(agentIds.map(async agentId => {
+        const agent = agentId ? await options.agents?.get(agentId) : undefined;
+        if (!agentId || options.agents && !agent) throw new LarkServiceError('INVALID_LARK_CONFIG', `Agent 不存在：${agentId || '未选择'}`, 400);
+        return agent;
+      }));
       let hook;
-      for (const agentId of new Set([config.defaultAgentId, ...(config.fallbackAgentId ? [config.fallbackAgentId] : []), ...(config.defaultAgentWeights ?? []).map(row => row.agentId)])) {
-        hook = await installLarkHook(agentId, config.workspace, agentId ? await options.agents?.get(agentId) : undefined);
-      }
+      for (const [index, agentId] of agentIds.entries()) hook = await installLarkHook(agentId, workspace, agents[index]);
+      // 草稿准备只写 Hook 文件。保留编辑起点的版本，正常保存仍走 CAS 和强制风控校验。
+      if (request.body?.draft !== undefined) return hook;
       const saved = await saveLarkConfig(options.config, options.agents, {
         stage: 'agent',
         originalAppId: config.appId,
         expectedRevision: config.revision ?? 1,
         ...(request.body?.highRiskPattern !== undefined ? { highRiskPattern: request.body.highRiskPattern } : {}),
-        riskControlMode: 'guidance'
+        riskControlMode: config.riskControlMode === 'enforced' ? 'enforced' : 'guidance'
       });
       if (!listeningDisabled) await syncListeners();
       if (options.runtime) await options.groupManager?.refreshPolicies(options.runtime);
@@ -346,15 +364,16 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       if (resolvedHighRiskAllowedUsers !== undefined) input = { ...input, highRiskAllowedUsers: resolvedHighRiskAllowedUsers, highRiskAllowedEmails: [] };
     }
     const existing = input.originalAppId ? await readLarkConfig(options.config, input.originalAppId) : undefined;
+    if (existing && input.expectedRevision !== undefined && input.expectedRevision !== (existing.revision ?? 1)) throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '此 Bot 已被修改，请比较最新配置后再保存。', 409);
     const weightsResult = agentWeightsSchema.safeParse(input.defaultAgentWeights === undefined ? existing?.defaultAgentWeights ?? [] : input.defaultAgentWeights);
     if (!weightsResult.success) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Agent weights must contain distinct Agent IDs and finite positive weights.', 400);
     const fallbackAgentId = input.fallbackAgentId === undefined ? existing?.fallbackAgentId : input.fallbackAgentId.trim();
     const requestedRiskControlMode = resolveRiskControlModeInput(input, existing?.riskControlMode ?? 'off');
     if (requestedRiskControlMode === 'enforced') {
-      const agentIds = new Set([input.defaultAgentId ?? existing?.defaultAgentId, ...(fallbackAgentId ? [fallbackAgentId] : []), ...weightsResult.data.map(row => row.agentId)]);
+      const agentIds = new Set([input.defaultAgentId?.trim() || existing?.defaultAgentId, ...(fallbackAgentId ? [fallbackAgentId] : []), ...weightsResult.data.map(row => row.agentId)]);
       for (const agentId of agentIds) {
-        const hook = await larkHookStatus(agentId, input.workspace ?? existing?.workspace, agentId ? await options.agents?.get(agentId) : undefined);
-        if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', `${agentId}: ${hook.reason ?? 'Install the selected Agent hook before enabling enforced risk control'}`, 409);
+        const hook = await larkHookStatus(agentId, input.workspace === undefined ? existing?.workspace : input.workspace.trim() || undefined, agentId ? await options.agents?.get(agentId) : undefined);
+        if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', `${agentId}: ${hook.reason ?? '请先为当前工作区的默认、兜底和分流 Agent 配置拦截 Hook，再保存强制风控设置。'}`, 409);
       }
     }
     const saved = await saveLarkConfig(options.config, options.agents, listeningDisabled ? { ...input, listening: undefined } : input);
@@ -373,7 +392,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     try {
       return await saveBotConfig(request.body ?? {});
     } catch (error) {
-      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message }, ...(error.statusCode === 409 ? { current: (await publicLarkConfigs(await readLarkConfigs(options.config))).bots.find(bot => bot.appId === request.body.originalAppId) } : {}) });
+      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message }, ...(error.code === 'LARK_CONFIG_REVISION_CONFLICT' ? { current: (await publicLarkConfigs(await readLarkConfigs(options.config))).bots.find(bot => bot.appId === request.body.originalAppId) } : {}) });
       throw error;
     }
   });

@@ -47,6 +47,27 @@ describe('fallback session resolution', () => {
     expect(h.runtime.stop).not.toHaveBeenCalled();
   });
 
+  it('uses the configured fallback model only after primary startup fails', async () => {
+    const h = fixture();
+    h.config.fallbackModel = 'gpt-6.1-sol';
+    const session = await h.resolve();
+    expect(h.runtime.start.mock.calls[0][0]).toMatchObject({ agentId: 'primary', model: 'primary-model', reasoningEffort: 'high' });
+    expect(h.runtime.start.mock.calls[1][0]).toMatchObject({ agentId: 'spare', model: 'gpt-6.1-sol' });
+    expect(h.runtime.start.mock.calls[1][0]).not.toHaveProperty('reasoningEffort');
+    h.config.fallbackModel = 'changed-model';
+    expect(await h.resolve()).toBe(session);
+    expect(h.runtime.start).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['manual', 'weighted'])('does not apply the fallback model to %s selection of the same Agent', async selection => {
+    const h = fixture();
+    h.config.fallbackModel = 'fallback-only';
+    if (selection === 'weighted') h.config.defaultAgentWeights = [{ agentId: 'spare', weight: 100 }];
+    await h.resolve(undefined, selection === 'manual' ? { agentId: 'spare' } : undefined);
+    expect(h.runtime.start).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ agentId: 'spare' }));
+    expect(h.runtime.start.mock.calls[0][0]).not.toHaveProperty('model');
+  });
+
   it('uses the fallback directly when a cached login check confirms the primary is unavailable', async () => {
     const h = fixture();
     Object.assign(h.runtime, { getAgentAvailability: (id: string) => id === 'primary' ? { reason: 'signed out' } : undefined,
@@ -152,4 +173,31 @@ it('conservatively keeps a legacy explicit launch binding pinned to its Agent', 
   expect(runtime.getTasks).not.toHaveBeenCalled();
   expect(runtime.start).not.toHaveBeenCalled();
   coordinator.stop();
+});
+
+
+it.each([
+  { configured: undefined, persisted: undefined, valid: true },
+  { configured: 'gpt-6.1-sol', persisted: 'gpt-6.1-sol', valid: true },
+  { configured: 'changed-model', persisted: 'gpt-6.1-sol', valid: false },
+  { configured: undefined, persisted: 'gpt-6.1-sol', valid: false },
+  { configured: 'gpt-6.1-sol', persisted: undefined, valid: false }
+])('validates persisted automatic fallback against the current model: %j', async ({ configured, persisted, valid }) => {
+  const h = fixture();
+  h.config.fallbackModel = configured;
+  h.runtime.listAgents.mockResolvedValue([{ id: 'spare', name: 'Spare', protocol: 'pty-cli', adapterId: 'codex' }] as any);
+  const origin = { id: 'origin', source: 'lark', sourceId: 'app:chat:p2p', cwd: '/tmp' } as Session;
+  h.sessions.push(origin);
+  const options = { agentId: 'spare', cwd: '/tmp', ...(persisted ? { model: persisted } : {}), useAgentDefaults: true, automaticFallback: true };
+  const task = { scopeId: 'p2p', event: { chatId: 'chat', chatType: 'p2p' },
+    inbox: { fallbackNote: 'switched', fallbackFromSessionId: origin.id, request: { launchOptions: options } } } as any;
+  const coordinator = new LarkMessageCoordinator(h.runtime as any, {} as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() });
+  try {
+    const result = (coordinator as any).validateFallbackRecovery(task, h.config, options);
+    if (valid) {
+      await expect(result).resolves.toEqual(options);
+      await expect((coordinator as any).validateFallbackRecovery(task, h.config, { ...options, model: 'tampered-model' }))
+        .rejects.toMatchObject({ code: 'LARK_FALLBACK_RECOVERY_INVALID' });
+    } else await expect(result).rejects.toMatchObject({ code: 'LARK_FALLBACK_RECOVERY_INVALID' });
+  } finally { coordinator.stop(); }
 });

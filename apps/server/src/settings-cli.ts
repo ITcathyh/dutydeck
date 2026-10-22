@@ -39,6 +39,7 @@ export interface SettingsCliInput {
   agentId?: string;
   apiKey?: string;
   pattern?: string;
+  prepare?: boolean;
   amount?: string;
   pageToken?: string;
   yes?: boolean;
@@ -62,7 +63,7 @@ export const channelBotFields = {
 export const botFields = {
   eventHandlers: 'json', cardActionForwarding: 'json', welcomeEnabled: 'boolean',
   workspace: 'string', workspaceAliases: 'json', webBaseUrl: 'string', webMobileReachable: 'boolean', displayName: 'string', brand: ['feishu', 'lark'],
-  defaultAgentId: 'string', fallbackAgentId: 'string', defaultAgentWeights: 'json', defaultModel: 'string', defaultReasoningEffort: 'string',
+  defaultAgentId: 'string', fallbackAgentId: 'string', fallbackModel: 'string', defaultAgentWeights: 'json', defaultModel: 'string', defaultReasoningEffort: 'string',
   permissionMode: ['ask', 'approve-reads', 'full-trust'], fullTrustConfirmed: 'boolean',
   roleTitle: 'string', roleScope: 'string',
   preInjectPrompt: 'string', verificationCommand: 'string', listening: 'boolean',
@@ -397,7 +398,8 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
     case 'bot-install-hook': {
       const appId = required(input.appId, 'App ID');
       const bot = await findBot(request, appId);
-      return request('POST', '/api/lark/hooks/install', { appId, expectedRevision: bot.revision ?? 1, ...(input.pattern !== undefined ? { highRiskPattern: input.pattern } : {}) });
+      const draft = input.prepare || input.pairs?.length ? parsePairs(input.pairs ?? [], { workspace: 'string', defaultAgentId: 'string', fallbackAgentId: 'string', defaultAgentWeights: 'json' }, 'dutydeck settings bot install-hook --help') : undefined;
+      return request('POST', '/api/lark/hooks/install', { appId, expectedRevision: bot.revision ?? 1, ...(input.pattern !== undefined ? { highRiskPattern: input.pattern } : {}), ...(draft ? { draft } : {}) });
     }
     case 'group-list': {
       const { groups } = await request('GET', '/api/lark/management/groups') as { groups: ManagedGroup[] };

@@ -4,7 +4,8 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agentModelSettingsApi, api, ApiError, type Agent, type LarkBotConfig, type LarkConfig, type ManagedGroup } from '../api';
-import { resetDrafts } from '../draft-store';
+import { resetDrafts, useDraftStore } from '../draft-store';
+import { LarkConfigModal } from './LarkConfigModal';
 import { BotManagement } from './BotManagement';
 
 // 草稿是模块级 store（切走视图也要留住），用例之间必须显式清空，否则互相串。
@@ -1169,22 +1170,91 @@ it('defaults busy triage off and saves the enabled bot setting', async () => {
 });
 
 
-it('saves and clears the fallback Agent with the bot draft revision', async () => {
+it('saves and clears the fallback Agent and model with the bot draft revision', async () => {
   const user = userEvent.setup();
   const config = { configured: true, bots: [mockBot], listeningDisabled: false };
   vi.spyOn(api, 'larkConfig').mockResolvedValue(config);
   vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
   vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
   const save = vi.spyOn(api, 'saveLarkConfig').mockImplementation(async input => {
-    const next = { ...config, bots: [{ ...mockBot, fallbackAgentId: input.fallbackAgentId || undefined, revision: 4 }] };
+    const next = { ...config, bots: [{ ...mockBot, fallbackAgentId: input.fallbackAgentId || undefined, fallbackModel: input.fallbackModel || undefined, revision: 4 }] };
     vi.mocked(api.larkConfig).mockResolvedValue(next);
     return next;
   });
   renderWithClient(<BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={[...mockAgents, { id: 'ccflash', name: 'CCFlash', protocol: 'acp', permissionMode: 'ask' }]}/>);
   await user.selectOptions(await screen.findByLabelText('兜底 Agent'), 'ccflash');
+  await user.type(screen.getByLabelText('兜底模型'), 'gpt-6.1-sol');
   await user.click(screen.getByRole('button', { name: '保存配置' }));
-  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ fallbackAgentId: 'ccflash', expectedRevision: 3 })));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ fallbackAgentId: 'ccflash', fallbackModel: 'gpt-6.1-sol', expectedRevision: 3 })));
   await user.selectOptions(screen.getByLabelText('兜底 Agent'), '');
   await user.click(screen.getByRole('button', { name: '保存配置' }));
-  await waitFor(() => expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ fallbackAgentId: '', expectedRevision: 4 })));
+  await waitFor(() => expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ fallbackAgentId: '', fallbackModel: '', expectedRevision: 4 })));
+});
+
+
+describe('draft hook preparation', () => {
+  const guardedBot = { ...mockBot, defaultAgentId: 'ccflash', defaultModel: '', riskControlMode: 'enforced' as const };
+  const guardedAgents: Agent[] = [...mockAgents, { id: 'ccflash', name: 'ccflash', protocol: 'pty-cli', permissionMode: 'full-trust' }];
+  function setup() {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [guardedBot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    return renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={guardedAgents}/>);
+  }
+
+  it('can open the setup wizard with the same query cache after checking routing hooks', async () => {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [{ ...guardedBot, fallbackAgentId: 'codex', setupComplete: false }], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    vi.spyOn(api, 'larkHookStatus').mockImplementation(async (_appId, id) => ({ agentId: id, supported: true, installed: true, writable: true, trustRequired: false }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const management = <BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={guardedAgents}/>;
+    const view = render(<QueryClientProvider client={client}>{management}</QueryClientProvider>);
+    await screen.findByText('已为 ccflash、codex 配置拦截 Hook。');
+    view.rerender(<QueryClientProvider client={client}>{management}<LarkConfigModal agents={guardedAgents} onClose={() => {}}/></QueryClientProvider>);
+    expect(await screen.findByText('已为 ccflash、codex 配置，可启用强制拦截')).toBeTruthy();
+    expect(screen.getByText('已为 ccflash、codex 配置拦截 Hook。')).toBeTruthy();
+  });
+
+  it('keeps a missing-hook save failure out of concurrency handling and prepares the unsaved fallback/workspace', async () => {
+    const user = userEvent.setup();
+    let installed = false;
+    const status = vi.spyOn(api, 'larkHookStatus').mockImplementation(async (_appId, id) => ({ agentId: id, supported: true, installed: id !== 'codex' || installed, writable: true, trustRequired: false }));
+    const install = vi.spyOn(api, 'installLarkHook').mockImplementation(async () => { installed = true; return { agentId: 'codex', supported: true, installed: true, writable: true, trustRequired: false }; });
+    const save = vi.spyOn(api, 'saveLarkConfig').mockRejectedValueOnce(new ApiError('codex: 请先配置拦截 Hook', 'RISK_CONTROL_HOOK_NOT_READY', 409));
+    setup();
+    await user.selectOptions(await screen.findByLabelText('兜底 Agent'), 'codex');
+    const workspace = screen.getByDisplayValue(mockBot.workspace!);
+    await user.clear(workspace); await user.type(workspace, '/draft-workspace');
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(useDraftStore.getState().botConflicts[mockBot.appId]).toBeUndefined();
+    expect(useDraftStore.getState().botDrafts[mockBot.appId]).toMatchObject({ fallbackAgentId: 'codex', workspace: '/draft-workspace', baseRevision: 3, riskControlMode: 'enforced' });
+    await user.click(screen.getByRole('button', { name: '配置拦截 Hook' }));
+    await waitFor(() => expect(install).toHaveBeenCalledWith(mockBot.appId, '', 3, { defaultAgentId: 'ccflash', fallbackAgentId: 'codex', defaultAgentWeights: [], workspace: '/draft-workspace' }));
+    expect(save).toHaveBeenCalledOnce();
+    await waitFor(() => expect(screen.getByText('已为 ccflash、codex 配置拦截 Hook。')).toBeTruthy());
+    expect(status).toHaveBeenCalledWith(mockBot.appId, 'codex', '/draft-workspace');
+    save.mockResolvedValueOnce({ configured: true, bots: [{ ...guardedBot, fallbackAgentId: 'codex', workspace: '/draft-workspace', revision: 4 }], listeningDisabled: false });
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(save.mock.calls[1]![0]).toMatchObject({ expectedRevision: 3, fallbackAgentId: 'codex', riskControlMode: 'enforced', workspace: '/draft-workspace' });
+  });
+
+  it('keeps edits made while preparation is running and checks their new workspace independently', async () => {
+    const user = userEvent.setup();
+    let release!: (value: any) => void;
+    const status = vi.spyOn(api, 'larkHookStatus').mockImplementation(async (_appId, id) => ({ agentId: id, supported: true, installed: false, writable: true, trustRequired: false }));
+    const install = vi.spyOn(api, 'installLarkHook').mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    setup();
+    await user.selectOptions(await screen.findByLabelText('兜底 Agent'), 'codex');
+    await user.click(screen.getByRole('button', { name: '配置拦截 Hook' }));
+    await waitFor(() => expect(install).toHaveBeenCalledOnce());
+    const workspace = screen.getByDisplayValue(mockBot.workspace!);
+    await user.clear(workspace); await user.type(workspace, '/later-workspace');
+    await act(async () => release({ agentId: 'codex', supported: true, installed: true, writable: true, trustRequired: false }));
+    expect(useDraftStore.getState().botDrafts[mockBot.appId]).toMatchObject({ workspace: '/later-workspace', fallbackAgentId: 'codex', baseRevision: 3 });
+    await waitFor(() => expect(status).toHaveBeenCalledWith(mockBot.appId, 'codex', '/later-workspace'));
+    expect(screen.queryByText('已为 ccflash、codex 配置拦截 Hook。')).toBeNull();
+  });
 });

@@ -422,11 +422,12 @@ dutydeck settings bot set cli_xxx 'defaultAgentWeights=[]' # 关闭分流
 **兜底 Agent。** 在机器人默认设置或接入向导中选择「兜底 Agent」，也可通过 CLI 配置：
 
 ```bash
-dutydeck settings bot set cli_xxx defaultAgentId=ccflash fallbackAgentId=codex
-dutydeck settings bot set cli_xxx 'fallbackAgentId=' # 关闭兜底
+dutydeck settings bot set cli_xxx defaultAgentId=ccflash fallbackAgentId=codex fallbackModel=gpt-6.1-sol
+dutydeck settings bot set cli_xxx 'fallbackModel=' # 恢复兜底 Agent 默认模型
+dutydeck settings bot set cli_xxx 'fallbackAgentId=' # 关闭兜底并清除兜底模型
 ```
 
-主 Agent 无法启动、未登录、凭据失效，或返回明确的限流、额度耗尽、上游不可用错误时，当前请求最多自动切换一次。只有本轮尚无正文、思考、工具调用或审批请求时才会切换；普通任务失败、取消、权限拒绝和结果未知不会自动重放。有其他排队或运行任务时保留原会话，避免丢失请求。兜底使用自己的默认模型和推理强度，沿用机器人的审批与风险控制；强制拦截会检查、安装兜底 Agent 的 Hook。切换时在卡片说明原因，并开启新会话，仅携带最近完成结果作为背景，完整原生对话历史不会跨 Agent 迁移。已有兜底会话继续沿用；新对话重新优先选择主 Agent。显式 `/new --agent`、模型或推理参数不启用自动兜底。
+主 Agent 无法启动、未登录、凭据失效，或返回明确的限流、额度耗尽、上游不可用错误时，当前请求最多自动切换一次。只有本轮尚无正文、思考、工具调用或审批请求时才会切换；普通任务失败、取消、权限拒绝和结果未知不会自动重放。有其他排队或运行任务时保留原会话，避免丢失请求。「兜底模型」仅作用于这个机器人自动切换时的新会话；留空使用兜底 Agent 默认模型，推理强度始终使用兜底 Agent 默认值。更换或关闭兜底 Agent 会清除旧兜底模型；手动选择或按权重选中同一个 Agent 时不使用兜底模型。兜底沿用机器人的审批与风险控制；强制拦截会检查、安装兜底 Agent 的 Hook。切换时在卡片说明原因，并开启新会话，仅携带最近完成结果作为背景，完整原生对话历史不会跨 Agent 迁移。已有兜底会话继续沿用；新对话重新优先选择主 Agent。显式 `/new --agent`、模型或推理参数不启用自动兜底。
 
 #### Claude Code 自定义网关与 API Key
 
@@ -1089,10 +1090,13 @@ dutydeck settings bot show cli_xxx                           # 查看机器人�
 dutydeck settings bot set cli_xxx adhdMode=true              # 开启 ADHD 友好模式
 dutydeck settings bot set cli_xxx notifyQuietHours=22:00-08:00
 dutydeck settings bot set cli_xxx groupReplyMode=auto        # 清除群回复模式覆盖，恢复默认自动路由
+dutydeck settings bot install-hook cli_xxx --prepare fallbackAgentId=codex workspace=/path/to/workspace  # 按未保存配置准备 Hook
 dutydeck settings group set oc_xxx participation=selective   # 设置群聊按需参与
 dutydeck settings usage set-cap 50 --app cli_xxx             # 设置月度用量上限（美元）
 dutydeck settings group set oc_xxx 'scenarios={"alarm":{"enabled":true,"params":{"levels":["P0","P1"]}}}'  # 改告警初筛的级别
 ```
+
+强制风控下更换工作区、默认 Agent、兜底或分流 Agent 时，先在机器人设置点「配置拦截 Hook」，再保存。Hook 检查和安装使用当前草稿的工作区及所有候选 Agent；安装只写 Hook 文件，不保存其他草稿，也不降低现有强制风控。CLI 的 `install-hook --prepare [key=value...]` 同样只准备文件，支持 `workspace`、`defaultAgentId`、`fallbackAgentId` 和 `defaultAgentWeights`；准备后再用 `bot set` 保存。省略 `--prepare` 且不传草稿参数时，沿用安装并保存高危正则/提醒模式的行为，已开启强制风控的机器人保持强制模式。保存失败会保留草稿，只有版本冲突才提示并发修改。
 
 群里的场景包用 `scenarios={"<包 id>":{"enabled":true|false,"params":{...}}}` 改，`params` 只写要改的键，`{"<包 id>":null}` 删掉这个包的绑定；`group show` 列出本群可用的包、参数和当前绑定。`direct` 模式的包（如告警初筛）要先在群里点确认卡开启过一次，之后才能用命令行或 Web 改。旧的 `alarm=<JSON>`（平铺的告警订阅）作为弃用别名保留一个版本，会转成 `scenarios.alarm`，输出里带弃用提示。
 

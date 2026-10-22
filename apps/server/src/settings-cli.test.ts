@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -118,12 +118,39 @@ async function botRuntime() {
 }
 
 describe('settings CLI against the real bot routes', () => {
+  it('prepares draft fallback hooks without saving or downgrading an enforced bot, then saves normally', async () => {
+    const { repos, run } = await botRuntime();
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-draft-hook-'));
+    cleanups.push(() => rm(workspace, { recursive: true, force: true }));
+    await repos.config.set(larkBotsConfigKey, JSON.stringify([{ appId: 'cli_a', appSecret: 'secret-a', listening: false, permissionMode: 'ask', defaultAgentId: 'claude', riskControlMode: 'enforced', revision: 7, workspace: '/saved-workspace' }]));
+    const before = await readLarkConfig(repos.config, 'cli_a');
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['fallbackAgentId=codex', `workspace=${workspace}`] })).rejects.toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY' });
+    await run('bot-install-hook', { appId: 'cli_a', prepare: true, pairs: ['fallbackAgentId=codex', `workspace=${workspace}`] });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toEqual(before);
+    expect(await readFile(join(workspace, '.codex/hooks.json'), 'utf8')).toContain('dutydeck-lark-high-risk-guard-codex.mjs');
+    expect(await readFile(join(workspace, '.claude/settings.json'), 'utf8')).toContain('dutydeck-lark-high-risk-guard-claude.mjs');
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['fallbackAgentId=codex', `workspace=${workspace}`] })).bot).toMatchObject({ revision: 8, fallbackAgentId: 'codex', workspace, riskControlMode: 'enforced' });
+    await run('bot-install-hook', { appId: 'cli_a' });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ revision: 9, riskControlMode: 'enforced' });
+    await expect(run('bot-install-hook', { appId: 'cli_a', prepare: true, pairs: ['preInjectPrompt=unrelated'] })).rejects.toMatchObject({ code: 'SETTINGS_KEY_UNKNOWN' });
+  });
+
   it('saves, reads, rejects the primary and clears a fallback Agent', async () => {
     const { run } = await botRuntime();
     expect((await run('bot-set', { appId: 'cli_a', pairs: ['fallbackAgentId=ccflash'] })).bot).toMatchObject({ fallbackAgentId: 'ccflash' });
     expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ fallbackAgentId: 'ccflash' });
     await expect(run('bot-set', { appId: 'cli_a', pairs: ['fallbackAgentId=codex'] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
     expect((await run('bot-set', { appId: 'cli_a', pairs: ['fallbackAgentId='] })).bot).not.toHaveProperty('fallbackAgentId');
+  });
+
+  it('roundtrips and clears the per-bot fallback model without changing the primary model', async () => {
+    const { run } = await botRuntime();
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['fallbackAgentId=ccflash', 'fallbackModel=gpt-6.1-sol', 'defaultModel=primary-model'] })).bot)
+      .toMatchObject({ fallbackAgentId: 'ccflash', fallbackModel: 'gpt-6.1-sol', defaultModel: 'primary-model' });
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ fallbackModel: 'gpt-6.1-sol' });
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['fallbackModel='] })).bot).not.toHaveProperty('fallbackModel');
+    await run('bot-set', { appId: 'cli_a', pairs: ['fallbackModel=gpt-6.1-sol'] });
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['fallbackAgentId='] })).bot).not.toHaveProperty('fallbackModel');
   });
 
   it.each(['{}', '[null]', 'null'])('rejects malformed routing weights before enforced hook checks: %s', async weights => {
