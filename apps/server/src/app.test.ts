@@ -190,7 +190,7 @@ describe('HTTP API boundary', () => {
     expect((await app.inject({ method: 'GET', url: '/api/system/skills?cwd=%2Frepo' })).json()).toEqual([{ name: 'review', description: 'Review code', path: '/Users/test/.codex/skills/review/SKILL.md', source: 'user' }]);
     expect(selectDirectory).toHaveBeenCalledOnce();
     expect(selectFile).toHaveBeenCalledOnce();
-    expect(discoverSkills).toHaveBeenCalledWith('/repo');
+    expect(discoverSkills).toHaveBeenCalledWith('/repo', { botAppId: undefined, chatId: undefined, pluginWorkspaceRoot: undefined });
   });
 
   it('routes lifecycle actions exclusively through Runtime', async () => {
