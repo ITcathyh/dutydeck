@@ -6,6 +6,9 @@ import { agentConfigSchema, installationOwnerTaskActor, RuntimeError, type Agent
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type RuntimeOptions } from '@dutydeck/runtime';
 import { createAutomationIntegration } from './automation-integration.js';
+import { CollaborationBackground } from './collaboration-background.js';
+import { ScheduleExecutor } from './schedule-executor.js';
+import { CollaborationDelivery } from './collaboration-delivery.js';
 import { createCollaborationIntegration } from './collaboration-integration.js';
 import { LarkGroupManager } from './lark/group-management.js';
 import { readLarkConfig, saveLarkConfig } from './lark/config.js';
@@ -26,7 +29,7 @@ async function eventually(check: () => Promise<boolean>) {
   for (let count = 0; count < 100; count++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
   throw new Error('Condition did not converge');
 }
-async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions['admitTask']; members?: string[] } = {}) {
+async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions['admitTask']; members?: string[]; stopDriver?(sessionId: string): Promise<void>; controlWait?(): Promise<void> } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'collaboration-wiring-'));
   const repos = createRepositories(join(directory, 'test.db'), { newDatabaseAuthority: 'ledger_v1' });
   const agent = agentConfigSchema.parse({ id: 'agent', name: 'Agent', command: options.realAcp ? process.execPath : 'fake', ...(options.realAcp ? { args: [resolve('tests/fixtures/mock-acp-agent.mjs')], timeout: 2 } : {}), protocol: 'acp', cwd: directory, permissionMode: 'full-trust' });
@@ -34,6 +37,7 @@ async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions[
   await saveLarkConfig(repos.config, repos.agents, { ...scope, appSecret: 'synthetic', defaultAgentId: agent.id, workspace: directory, fullTrustConfirmed: true, listening: true, groupToolsEnabled: true, groupToolsAllowSend: true, riskControlMode: 'enforced', highRiskPattern: 'rm\\s' });
   let members = options.members ?? ['ou_alice'];
   const client = {
+    getMessage: vi.fn(async (_id: string) => ({ chatId: scope.chatId })),
     getBotInfo: async () => ({ appName: 'Agent', openId: 'ou_bot' }),
     checkApplicationIdentity: async () => ({ verified: true, reportedAppId: scope.appId, tenantKey: 'synthetic' }),
     listChats: vi.fn(async () => ({ items: [{ chatId: scope.chatId, name: '文档协作', external: false }], hasMore: false })),
@@ -60,14 +64,14 @@ async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions[
     probe: (() => ({ available: true, protocol: 'acp', acp: true })) as any,
     authorizeExecution: async (id, actor) => { await collaboration.background.authorizeExecution(id, actor); },
     authorizeTask: (session, task) => collaboration.background.authorizeTask(session, task),
-    authorizeControl: async (id, actor) => { await collaboration.background.authorizeControl(id, actor); },
+    authorizeControl: async (id, actor) => { await collaboration.background.authorizeControl(id, actor); await options.controlWait?.(); },
     resolveRiskPolicy: async (id, fallback) => (await collaboration.riskPolicy(id, fallback))?.policy,
     admitTask: options.admitTask,
     driverFactory: options.realAcp ? undefined : (_agent, _protocol, onEvent, _exit, sessionId) => {
       let end: (() => void) | undefined;
       return {
         start: async () => {}, resume: async () => {},
-        stop: async () => { stopped.push(sessionId); end?.(); }, isStopped: async () => stopped.includes(sessionId),
+        stop: async () => { try { await options.stopDriver?.(sessionId); } catch (error) { end?.(); throw error; } stopped.push(sessionId); end?.(); }, isStopped: async () => stopped.includes(sessionId),
         interrupt: async () => { end?.(); },
         send: (prompt: string) => new Promise<void>(resolve => {
           end = () => { onEvent({ type: 'completed', data: { stopReason: 'cancelled' } }); resolve(); };
@@ -84,7 +88,7 @@ async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions[
   cleanups.push(async () => { await collaboration.close(); await runtime.shutdown(); repos.close(); await rm(directory, { recursive: true, force: true }); });
   const create = (id = 'review', prompt = '总结还缺的资料') => collaboration.service.createMandate(scope, 'ou_alice', { id, goal: '检查资料进展', mode: 'agent', prompt, condition: 'always', trigger: { kind: 'interval', everySeconds: 60, anchorAt: clock.toISOString() }, timezone: 'UTC' });
   return { repos, runtime, collaboration, groups, client, group, calls, stopped, create,
-    advance() { clock = new Date(clock.getTime() + 60_000); }, revoke() { members = []; } };
+    advance(ms = 60_000) { clock = new Date(clock.getTime() + ms); }, revoke() { members = []; }, allow() { members = options.members ?? ['ou_alice']; } };
 }
 
 it('delivers a verified capacity successor once and continues future schedule occurrences', async () => {
@@ -1042,4 +1046,202 @@ describe('CollaborationBackground - Bot role in scheduled execution', () => {
     const action = (await f.repos.collaboration.listActions(scope)).find(a => a.kind === 'agent_execution');
     expect(action?.status).toBe('succeeded');
   });
+});
+
+it('keeps the delivery intent through real target preparation and shared queue expiry before claiming dispatch', async () => {
+  const f = await fixture();
+  const { mandate } = await f.collaboration.service.createMandate(scope, 'ou_alice', { id: 'queued', goal: 'Notify', mode: 'notify', prompt: 'Frozen notification',
+    trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.collaboration.scheduler.options.now!().toISOString() }, timezone: 'UTC' });
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), waiting = new Promise<void>(resolve => { release = resolve; });
+  const run = CollaborationDelivery.prototype.run;
+  let blocker: Promise<unknown> | undefined;
+  const spy = vi.spyOn(CollaborationDelivery.prototype, 'run').mockImplementation(function (target, id, send) {
+    if (id.startsWith('collaboration_delivery_') && !blocker) {
+      // Both entries use the integration's actual per-chat queue and real quota ledger.
+      blocker = run.call(this, target, id, async () => { enter(); await waiting; });
+    }
+    return run.call(this, target, id, send);
+  });
+  f.advance(600_000); const tick = f.collaboration.scheduler.tick(); await entered;
+  try {
+    const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_delivery')!;
+    expect(action.status).toBe('intent'); expect(f.client.send).not.toHaveBeenCalled();
+    f.advance(61_000);
+  } finally { release(); await tick; await blocker; spy.mockRestore(); }
+  const original = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_delivery')!;
+  expect(original.status).toBe('intent'); expect(f.client.send).not.toHaveBeenCalled();
+  await f.collaboration.scheduler.tick();
+  expect(f.client.send).toHaveBeenCalledOnce();
+  expect(await f.repos.collaboration.getAction(scope, original.id)).toMatchObject({ status: 'succeeded', receipt: 'om_result' });
+  expect((await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId))[0]).toMatchObject({ state: 'settled' });
+});
+
+it('retries the exact revoked background session after a real driver stop failure without publishing its late result', async () => {
+  let stopCalls = 0;
+  const f = await fixture({ stopDriver: async () => { if (++stopCalls === 1) throw new Error('driver stop failed'); } });
+  const { mandate } = await f.create('stop-retry'); f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  const call = f.calls[0]!, task = (await f.runtime.getTasks(call.sessionId))[0]!;
+  await f.collaboration.service.updateMandate(scope, 'ou_alice', mandate.id, { expectedRevision: mandate.revision, status: 'paused' });
+  await expect(f.collaboration.scheduler.tick()).rejects.toThrow();
+  const records = await f.repos.collaboration.listActions(scope);
+  expect(records.find(item => item.kind === 'agent_execution')).toMatchObject({ status: 'suppressed' });
+  expect(records.find(item => item.kind === 'schedule_agent')?.status).toBe('sending');
+  expect((await f.repos.scheduleOccurrences.listUnsettled(mandate.scheduleDefinitionId))).toHaveLength(1);
+  // Even after business authorization resumes, this admission's cancellation remains final.
+  const paused = (await f.repos.collaboration.getMandate(scope, mandate.id))!;
+  await f.collaboration.service.updateMandate(scope, 'ou_alice', mandate.id, { expectedRevision: paused.revision, status: 'active' });
+  call.finish('late output that must not be adopted');
+  await f.collaboration.scheduler.tick();
+  expect(stopCalls).toBe(2); expect(f.stopped).toContain(call.sessionId);
+  expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')).toMatchObject({ status: 'suppressed' });
+  expect(await f.repos.scheduleOccurrences.listUnsettled(mandate.scheduleDefinitionId)).toEqual([]);
+  expect(f.calls).toHaveLength(1); expect((await f.runtime.getTasks(call.sessionId))[0]?.id).toBe(task.id);
+  expect(f.client.send).not.toHaveBeenCalled();
+});
+
+it('persists cancellation before real runtime stop authorization waits across a writer takeover', async () => {
+  let enter!: () => void, release!: () => void, waiting = true;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const f = await fixture({ controlWait: async () => { if (waiting) { waiting = false; enter(); await gate; } } });
+  const { mandate } = await f.create('cancel-takeover'); f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  const sessionId = f.calls[0]!.sessionId, taskId = (await f.runtime.getTasks(sessionId))[0]!.id;
+  await f.collaboration.service.updateMandate(scope, 'ou_alice', mandate.id, { expectedRevision: mandate.revision, status: 'paused' });
+  const oldTick = f.collaboration.scheduler.tick(); await entered;
+  try {
+    expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution')).toMatchObject({ status: 'suppressed' });
+    await expect(f.collaboration.background.authorizeExecution(sessionId, 'ou_alice')).rejects.toMatchObject({ code: 'COLLABORATION_EXECUTION_REVOKED' });
+    f.advance(61_000);
+    const successor = new ScheduleExecutor({ ...f.collaboration.scheduler.options, holderId: 'successor' });
+    await successor.tick(); await successor.close();
+    expect(f.calls).toHaveLength(1); expect((await f.runtime.getTasks(sessionId))[0]?.id).toBe(taskId);
+  } finally { release(); await oldTick; }
+  expect(f.stopped).toContain(sessionId); expect(f.client.send).not.toHaveBeenCalled();
+  expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')).toMatchObject({ status: 'suppressed' });
+});
+
+it('rejects a persisted cancellation written during asynchronous execution authorization and drains it while business remains active', async () => {
+  const f = await fixture();
+  let input!: Parameters<NonNullable<typeof f.collaboration.scheduler.options.executeAgent>>[0];
+  const execute = f.collaboration.scheduler.options.executeAgent!;
+  f.collaboration.scheduler.options.executeAgent = async value => { input = value; return execute(value); };
+  await f.create('authorization-race'); f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  const sessionId = f.calls[0]!.sessionId;
+  const child = (await f.repos.collaboration.getAction(scope, sessionId))!;
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const authorize = f.collaboration.background.options.authorize;
+  f.collaboration.background.options.authorize = async () => { enter(); await gate; return true; };
+  const checking = f.collaboration.background.authorizeExecution(sessionId, 'ou_alice');
+  const rejected = expect(checking).rejects.toMatchObject({ code: 'COLLABORATION_EXECUTION_REVOKED' });
+  await entered;
+  await f.repos.collaboration.updateAction(scope, child.id, { expectedRevision: child.revision, status: 'suppressed' }, input.writerFence());
+  release(); await rejected; f.collaboration.background.options.authorize = authorize;
+  const session = (await f.runtime.getSession(sessionId))!, task = (await f.runtime.getTasks(sessionId))[0]!;
+  await expect(f.collaboration.background.authorizeTask(session, task)).rejects.toMatchObject({ code: 'COLLABORATION_EXECUTION_REVOKED' });
+  expect(await f.collaboration.background.authorizeControl(sessionId, { kind: 'channel', id: 'ou_alice', appId: scope.appId })).toBe(true);
+  const restored = new CollaborationBackground(f.collaboration.background.options);
+  expect(await restored.execute({ ...input, resume: true })).toMatchObject({ status: 'suppressed' });
+  await f.collaboration.scheduler.tick();
+  expect(f.calls).toHaveLength(1); expect(f.stopped).toContain(sessionId); expect(f.client.send).not.toHaveBeenCalled();
+  expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')).toMatchObject({ status: 'suppressed' });
+});
+
+it('does not cancel the real pending admission when the old cancellation reader loses its writer before claiming', async () => {
+  const f = await fixture(); const { mandate } = await f.create('cancel-before-claim');
+  f.advance(); await f.collaboration.scheduler.tick(); await eventually(async () => f.calls.length === 1);
+  const sessionId = f.calls[0]!.sessionId, taskId = (await f.runtime.getTasks(sessionId))[0]!.id;
+  const child = (await f.repos.collaboration.getAction(scope, sessionId))!;
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const get = f.runtime.getSession.bind(f.runtime);
+  const spy = vi.spyOn(f.runtime, 'getSession').mockImplementationOnce(async id => { enter(); await gate; return get(id); });
+  f.revoke(); const tick = f.collaboration.scheduler.tick(); await entered;
+  try {
+    f.allow(); f.advance(61_000);
+    const successor = new ScheduleExecutor({ ...f.collaboration.scheduler.options, holderId: 'successor' });
+    await successor.tick(); await successor.close();
+  } finally { release(); await tick; spy.mockRestore(); }
+  expect(f.calls).toHaveLength(1); expect(f.stopped).toEqual([]); expect(f.client.send).not.toHaveBeenCalled();
+  expect(await f.repos.collaboration.getAction(scope, child.id)).toEqual(child);
+  expect((await f.runtime.getTasks(sessionId))[0]?.id).toBe(taskId);
+  expect(await f.repos.collaboration.getMandate(scope, mandate.id)).toMatchObject({ status: 'active' });
+});
+
+it('keeps real scheduled work recoverable when the group authorization reader fails', async () => {
+  const f = await fixture(); await f.create('authorization-read-error'); f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  const before = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution')!;
+  const spy = vi.spyOn(f.groups, 'authorize').mockRejectedValue(new Error('authorization reader unavailable'));
+  try { await expect(f.collaboration.scheduler.tick()).rejects.toThrow('authorization reader unavailable'); }
+  finally { spy.mockRestore(); }
+  expect(await f.repos.collaboration.getAction(scope, before.id)).toEqual(before);
+  expect(f.stopped).toEqual([]); expect(f.calls).toHaveLength(1); expect(f.client.send).not.toHaveBeenCalled();
+});
+
+it('preserves a healthy admission when refreshing expired group facts fails', async () => {
+  const f = await fixture(); await f.create('refresh-error'); f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  const before = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution')!;
+  const read = f.repos.remoteChatFacts.getByNaturalKey.bind(f.repos.remoteChatFacts);
+  const facts = vi.spyOn(f.repos.remoteChatFacts, 'getByNaturalKey').mockImplementation(async (...args) => {
+    const fact = await read(...args); return fact && { ...fact, expiresAt: '1970-01-01T00:00:00.000Z' };
+  });
+  const refresh = vi.spyOn(f.groups, 'sync').mockRejectedValue(new Error('group refresh unavailable'));
+  try { await expect(f.collaboration.scheduler.tick()).rejects.toThrow('group refresh unavailable'); }
+  finally { facts.mockRestore(); refresh.mockRestore(); }
+  expect(await f.repos.collaboration.getAction(scope, before.id)).toEqual(before);
+  expect(f.stopped).toEqual([]); expect(f.calls).toHaveLength(1); expect(f.client.send).not.toHaveBeenCalled();
+});
+
+it('retains an unsent thread delivery intent when its target message reader fails', async () => {
+  const f = await fixture();
+  await f.collaboration.service.createMandate(scope, 'ou_alice', { id: 'target-read-error', goal: 'Notify', mode: 'notify', prompt: 'Frozen notification',
+    delivery: { mode: 'thread', chatRef: scope.chatId, rootMessageRef: 'om_root', continuation: 'same_thread' },
+    trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.collaboration.scheduler.options.now!().toISOString() }, timezone: 'UTC' });
+  f.client.getMessage.mockRejectedValueOnce(new Error('target reader unavailable'));
+  f.advance(600_000); await f.collaboration.scheduler.tick();
+  const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_delivery')!;
+  expect(action.status).toBe('intent'); expect(f.client.reply).not.toHaveBeenCalled();
+  await f.collaboration.scheduler.tick();
+  expect(f.client.reply).toHaveBeenCalledOnce();
+  expect(await f.repos.collaboration.getAction(scope, action.id)).toMatchObject({ status: 'succeeded', receipt: 'om_card_reply' });
+});
+
+it('suppresses an unsent thread delivery only after its message is proven to belong to another chat', async () => {
+  const f = await fixture();
+  await f.collaboration.service.createMandate(scope, 'ou_alice', { id: 'foreign-target', goal: 'Notify', mode: 'notify', prompt: 'Frozen notification',
+    delivery: { mode: 'thread', chatRef: scope.chatId, rootMessageRef: 'om_root', continuation: 'same_thread' },
+    trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.collaboration.scheduler.options.now!().toISOString() }, timezone: 'UTC' });
+  f.client.getMessage.mockResolvedValueOnce({ chatId: 'oc_other' });
+  f.advance(600_000); await f.collaboration.scheduler.tick();
+  expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_delivery')).toMatchObject({ status: 'suppressed' });
+  expect(f.client.reply).not.toHaveBeenCalled(); expect(f.client.send).not.toHaveBeenCalled();
+});
+
+it('uses the original frozen instructions to revoke and stop the real pending background admission', async () => {
+  const f = await fixture(); await f.create('instructions-changed'); f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  const sessionId = f.calls[0]!.sessionId, settings = await f.repos.collaboration.getSettings(scope);
+  await f.repos.collaboration.updateSettings(scope, { expectedRevision: settings.revision, instructions: 'New execution instructions' }, 'ou_alice');
+  await f.collaboration.scheduler.tick();
+  expect(f.stopped).toContain(sessionId); expect(f.calls).toHaveLength(1); expect(f.client.send).not.toHaveBeenCalled();
+  expect(await f.repos.collaboration.getAction(scope, sessionId)).toMatchObject({ status: 'suppressed' });
+});
+
+it('does not manufacture a replacement admission after losing the writer before its background record becomes durable', async () => {
+  const f = await fixture(); await f.create('pre-admission-expiry');
+  const resolve = f.collaboration.background.options.resolveConfig;
+  f.collaboration.background.options.resolveConfig = async target => { const config = await resolve(target); f.advance(61_000); return config; };
+  f.advance(); await f.collaboration.scheduler.tick();
+  expect(f.calls).toHaveLength(0);
+  expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution')).toBeUndefined();
+  const successor = new ScheduleExecutor({ ...f.collaboration.scheduler.options, holderId: 'successor' });
+  try { await successor.tick(); await successor.tick(); } finally { await successor.close(); }
+  expect(f.calls).toHaveLength(0);
+  expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')).toMatchObject({ status: 'unknown' });
+  expect(f.client.send).not.toHaveBeenCalled();
 });

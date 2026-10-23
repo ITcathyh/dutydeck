@@ -1,6 +1,6 @@
 import { CollaborationDelivery } from './collaboration-delivery.js';
 import { createHash } from 'node:crypto';
-import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, participationLevelFields, resolveParticipation, RuntimeError, type CollaborationRepository, type CollaborationScope, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
+import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, participationLevelFields, resolveParticipation, RuntimeError, type CollaborationRepository, type CollaborationScope, type ScheduleDelivery, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { CollaborationService, type CollaborationAuthorization } from './collaboration-service.js';
 import { ScheduleExecutor } from './schedule-executor.js';
@@ -59,26 +59,30 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     if (!config || !owner || !binding) throw new RuntimeError('COLLABORATION_GROUP_REQUIRED', '请先同步并配置此群。', 403);
     return { config, owner, binding };
   };
-  const live = async (scope: CollaborationScope, readOnly = false) => {
+  const live = async (scope: CollaborationScope, readOnly = false, propagateRefreshErrors = false) => {
     const result = await known(scope, readOnly);
     if (options.listeningDisabled || !result.config.listening || !larkExecutionConfirmed(result.config) || !result.owner.activeGroups.includes(result.binding.id) || result.binding.state !== 'staged') throw new RuntimeError('COLLABORATION_GROUP_INACTIVE', '此群的 Agent 接入当前不可用。', 403);
-    return { ...result, config: await groups.resolved(result.config, scope.chatId, readOnly) };
+    return { ...result, config: await groups.resolved(result.config, scope.chatId, readOnly, propagateRefreshErrors) };
   };
-  const policy = async (scope: CollaborationScope, actorId: string, action: PolicyAction, readOnly = false) => {
+  const policy = async (scope: CollaborationScope, actorId: string, action: PolicyAction, readOnly = false, propagateRefreshErrors = false) => {
     const owner = actorId === installationOwnerTaskActor;
-    const result = await groups.authorize(scope.appId, scope.chatId, owner ? undefined : actorId, action, undefined, { installationOwner: owner, readOnly });
+    const result = await groups.authorize(scope.appId, scope.chatId, owner ? undefined : actorId, action, undefined, { installationOwner: owner, readOnly, propagateRefreshErrors });
     return result?.allowed === true;
   };
-  const authorize = async (scope: CollaborationScope, actorId: string, action: Parameters<CollaborationAuthorization>[2], readOnly = false) => {
+  const authorize = async (scope: CollaborationScope, actorId: string, action: Parameters<CollaborationAuthorization>[2], readOnly = false, propagateRefreshErrors = false) => {
     try {
       await known(scope, readOnly);
       // Local management identity is resolved by the existing server auth boundary.
       if (actorId === installationOwnerTaskActor && ['read', 'write', 'manage'].includes(action)) return true;
       if (action === 'manage') return false;
-      await live(scope, readOnly);
-      return policy(scope, actorId, action === 'read' ? 'group_tools.read' : action === 'deliver' ? 'group_tools.send' : 'task.create', readOnly);
-    } catch { return false; }
+      await live(scope, readOnly, propagateRefreshErrors);
+      return policy(scope, actorId, action === 'read' ? 'group_tools.read' : action === 'deliver' ? 'group_tools.send' : 'task.create', readOnly, propagateRefreshErrors);
+    } catch (error) {
+      if (propagateRefreshErrors && !(error instanceof RuntimeError && ['COLLABORATION_GROUP_REQUIRED', 'COLLABORATION_GROUP_INACTIVE', 'LARK_GROUP_NOT_APPLIED', 'LARK_BOT_NOT_FOUND', 'LARK_APP_ID_MISMATCH'].includes(error.code))) throw error;
+      return false;
+    }
   };
+  const scheduleAuthorize: CollaborationAuthorization = (scope, actorId, action) => authorize(scope, actorId, action, false, true);
   const previewAuthorize: CollaborationAuthorization = (scope, actorId, action) => authorize(scope, actorId, action, true);
   const scopeGrant = async (scope: CollaborationScope, action: 'observe' | 'deliver', settingsRepository: Pick<CollaborationRepository, 'getSettings'> = repos.collaboration) => {
     try {
@@ -159,6 +163,12 @@ export function createCollaborationIntegration(options: CollaborationIntegration
       return [metadata.name, metadata.description].filter(Boolean).join('\n');
     }
   });
+  const validateDelivery = async (scope: CollaborationScope, delivery: ScheduleDelivery, propagateReadErrors = false) => {
+    if (delivery.chatRef !== scope.chatId) return false;
+    if (!delivery.rootMessageRef) return true;
+    try { const { config } = await live(scope, false, propagateReadErrors); return (await client(config).getMessage(delivery.rootMessageRef)).chatId === scope.chatId; }
+    catch (error) { if (propagateReadErrors) throw error; return false; }
+  };
   const service = new CollaborationService({ repositories: repos, authorize,
     resolveScheduleScope: async scope => {
       const { owner, binding } = await live(scope);
@@ -166,14 +176,9 @@ export function createCollaborationIntegration(options: CollaborationIntegration
       if (!identity?.appIdMatch || identity.credentialRefId !== owner.credentialRefId) throw new RuntimeError('COLLABORATION_IDENTITY_REQUIRED', '群身份验证已过期，请重新同步群聊。', 403);
       return { channelBotId: owner.channelBotId, groupBindingId: binding.id, identityRef: identity.id, secretRef: owner.credentialRefId };
     },
-    validateDelivery: async (scope, delivery) => {
-      if (delivery.chatRef !== scope.chatId) return false;
-      if (!delivery.rootMessageRef) return true;
-      try { const { config } = await live(scope); return (await client(config).getMessage(delivery.rootMessageRef)).chatId === scope.chatId; }
-      catch { return false; }
-    }
+    validateDelivery
   });
-  const background = new CollaborationBackground({ repositories: repos, runtime, authorize, previewAuthorize, resolveConfig: async scope => (await live(scope)).config });
+  const background = new CollaborationBackground({ repositories: repos, runtime, authorize: scheduleAuthorize, previewAuthorize, resolveConfig: async scope => (await live(scope, false, true)).config });
   const riskPolicy = async (sessionId: string, _fallback?: ToolRiskPolicy): Promise<{ policy?: ToolRiskPolicy } | undefined> => {
     const session = await runtime.getSession(sessionId);
     const { appId, chatId, chatType: kind, scope: [origin] } = parseLarkSourceId(session?.sourceId);
@@ -200,14 +205,14 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   const mandateCards = new MandateCards({ service, config: repos.config, onChange, log: options.log,
     client: async scope => { const config = await readLarkConfig(repos.config, scope.appId); if (!config) throw new RuntimeError('COLLABORATION_GROUP_REQUIRED', '请先同步并配置此群。', 403); return client(config); },
     canOperate: async (scope, operatorId) => operatorId === installationOwnerTaskActor || policy(scope, operatorId, 'run.interrupt').catch(() => false) });
-  const scheduler = new ScheduleExecutor({ repositories: repos, service, authorize,
+  const scheduler = new ScheduleExecutor({ repositories: repos, service, authorize: scheduleAuthorize,
     executeAgent: input => background.execute(input), cancelAgent: input => background.cancel(input),
     deliver: async input => {
-      const { config } = await live(input.scope);
+      const { config } = await live(input.scope, false, true);
       const delivery = input.schedule.delivery;
-      if (!await service.options.validateDelivery!(input.scope, delivery)) throw new RuntimeError('COLLABORATION_DESTINATION_CONFLICT', '当前结果投递位置不属于授权群。', 403);
+      if (!await validateDelivery(input.scope, delivery, true)) throw new RuntimeError('COLLABORATION_DESTINATION_CONFLICT', '当前结果投递位置不属于授权群。', 403);
       return deliveries.run(input.scope, input.actionId, async () => {
-      await input.assertCurrent();
+      await input.claimDispatch();
       const idempotencyKey = createHash('sha256').update(input.actionId).digest('hex').slice(0, 32);
       // 产出是带暂停/停止按钮的卡片，用户在消息上就能管这个委托。
       const messageId = await mandateCards.deliver({ client: client(config), scope: input.scope, delivery, mandate: input.mandate, text: input.text, idempotencyKey });

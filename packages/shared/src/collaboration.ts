@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ScheduleExecutionFence } from './schedule-foundation.js';
 import { scenarioBindingSchema, scenarioPackIdPattern, type ScenarioRecordSnapshot } from './scenarios.js';
 
 export const collaborationScopeSchema = z.object({
@@ -591,6 +592,7 @@ export type CollaborationAction = z.infer<typeof collaborationActionSchema>;
 export const beginActionInputSchema = collaborationActionSchema
   .omit({ revision: true, status: true, receipt: true, error: true, createdAt: true, updatedAt: true })
   .extend({ payload: collaborationActionSchema.shape.payload.default({}) });
+export interface ScheduleActionFence extends ScheduleExecutionFence { occurrenceId: string }
 export type BeginActionInput = z.infer<typeof beginActionInputSchema>;
 
 export const updateActionInputSchema = z.object({
@@ -701,12 +703,12 @@ export interface CollaborationRepository {
   updateDecision(scope: CollaborationScope, id: string, patch: UpdateDecisionInput): Promise<CollaborationDecision>;
   addFeedback(input: CollaborationFeedback): Promise<CollaborationFeedback>;
   listFeedback(scope: CollaborationScope, decisionId?: string): Promise<CollaborationFeedback[]>;
-  beginAction(input: BeginActionInput): Promise<{ action: CollaborationAction; created: boolean }>;
+  beginAction(input: BeginActionInput, fence?: ScheduleActionFence): Promise<{ action: CollaborationAction; created: boolean }>;
   getAction(scope: CollaborationScope, id: string): Promise<CollaborationAction | undefined>;
   listActions(scope?: CollaborationScope, limit?: number): Promise<ListedItems<CollaborationAction>>;
   /** Position among all in-window delivery reservations; -1 if this action is ineligible. */
   getDeliveryPosition(scope: CollaborationScope, actionId: string, since: string): Promise<number>;
   listPendingActions(appId: string, kind: string): Promise<CollaborationAction[]>;
-  updateAction(scope: CollaborationScope, id: string, patch: UpdateActionInput): Promise<CollaborationAction>;
+  updateAction(scope: CollaborationScope, id: string, patch: UpdateActionInput, fence?: ScheduleActionFence): Promise<CollaborationAction>;
   listActivities(scope: CollaborationScope, limit?: number): Promise<ListedItems<CollaborationActivity>>;
 }

@@ -56,9 +56,11 @@ import {
   type UpdateFollowupInput,
   type UpdateMandateInput,
   type ScenarioBinding,
+  type ScheduleActionFence,
   SCENARIO_WINDOW_LIMIT,
   SCENARIO_RECORD
 } from '@dutydeck/shared';
+import { scheduleWriterLeaseKey } from './schedule-foundation.js';
 import { fromLegacyDecision, legacyScenarioGate, retireLegacyDutyColumns, withLegacyDutyScenarios } from './scenario-legacy.js';
 
 const DEFAULT_SETTINGS_UPDATED_AT = '1970-01-01T00:00:00.000Z';
@@ -528,6 +530,28 @@ function clampLimit(limit: number | undefined, fallback: number): number {
 }
 
 export function createCollaborationRepository(sqlite: Database.Database): CollaborationRepository {
+  const assertScheduleWriter = (action: BeginActionInput | CollaborationAction, fence?: ScheduleActionFence, dispatch = false) => {
+    if (!['schedule_agent', 'schedule_delivery', 'agent_execution'].includes(action.kind)) return;
+    const conflict = () => new RuntimeError('SCHEDULE_LEASE_CONFLICT', 'Scheduled action requires its current occurrence writer', 409);
+    if (!fence || !action.mandateId) throw conflict();
+    const owner = sqlite.prepare(`SELECT d.channel_bot_id, d.source_namespace, d.source_ownership, d.current_generation, d.state, m.status AS mandate_status, m.delivery_paused, COALESCE(s.notifications_paused, 0) AS notifications_paused, o.idempotency_key, o.generation
+      FROM collaboration_mandates m JOIN schedule_definitions d ON d.id=m.schedule_definition_id
+      JOIN schedule_occurrences o ON o.schedule_definition_id=d.id
+      JOIN channel_bots b ON b.id=d.channel_bot_id
+      LEFT JOIN collaboration_settings s ON s.app_id=m.app_id AND s.chat_id=m.chat_id
+      WHERE m.id=? AND m.app_id=? AND m.chat_id=? AND o.id=? AND b.external_app_id=m.app_id AND d.chat_ref=m.chat_id AND m.requester_id=?`)
+      .get(action.mandateId, action.scope.appId, action.scope.chatId, fence.occurrenceId, action.requesterId) as { delivery_paused: number; notifications_paused: number; current_generation: number; state: string; mandate_status: string; channel_bot_id: string; source_namespace: string; source_ownership: string; idempotency_key: string; generation: number } | undefined;
+    if (!owner || owner.source_namespace !== 'collaboration' || owner.source_ownership !== 'dutydeck' || owner.generation !== action.scheduleGeneration || fence.leaseKey !== scheduleWriterLeaseKey(owner.channel_bot_id)) throw conflict();
+    const expectedId = `collaboration_${action.kind === 'schedule_delivery' ? 'delivery' : 'agent'}_${owner.idempotency_key}`;
+    if (action.kind === 'agent_execution') {
+      const request = action.payload.request as { key?: string; sourcePayload?: { occurrenceId?: string }; sessionId?: string } | undefined;
+      if (request?.key !== `collaboration:${expectedId}` || request.sourcePayload?.occurrenceId !== fence.occurrenceId || request.sessionId !== action.id || action.payload.sessionId !== action.id) throw conflict();
+    } else if (action.id !== expectedId) throw conflict();
+    const lease = sqlite.prepare('SELECT state, holder_id, fence_token, expires_at FROM schedule_leases WHERE lease_key=?').get(fence.leaseKey) as { state: string; holder_id: string; fence_token: number; expires_at: string } | undefined;
+    if (!lease || lease.state !== 'held' || lease.holder_id !== fence.holderId || lease.fence_token !== fence.fenceToken || !lease.expires_at || lease.expires_at <= fence.now) throw conflict();
+    if (dispatch && (owner.current_generation !== owner.generation || owner.state !== 'enabled' || owner.mandate_status !== 'active' || action.kind === 'schedule_delivery' && (owner.delivery_paused || owner.notifications_paused))) throw new RuntimeError('COLLABORATION_EXECUTION_STALE', 'Schedule changed before dispatch', 409);
+  };
+
   return {
     async getSettings(scope: CollaborationScope): Promise<CollaborationSettings> {
       const row = sqlite
@@ -1494,11 +1518,12 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
       return rows.map(rowToFeedback);
     },
 
-    async beginAction(input: BeginActionInput): Promise<{ action: CollaborationAction; created: boolean }> {
+    async beginAction(input: BeginActionInput, fence?: ScheduleActionFence): Promise<{ action: CollaborationAction; created: boolean }> {
       const validated = beginActionInputSchema.parse(input);
       const scope = validated.scope;
 
       return sqlite.transaction(() => {
+        assertScheduleWriter(validated, fence);
         const existingRow = sqlite
           .prepare('SELECT * FROM collaboration_actions WHERE id = ?')
           .get(validated.id) as ActionRow | undefined;
@@ -1639,7 +1664,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
       return rows.map(rowToAction);
     },
 
-    async updateAction(scope: CollaborationScope, id: string, patch: UpdateActionInput): Promise<CollaborationAction> {
+    async updateAction(scope: CollaborationScope, id: string, patch: UpdateActionInput, fence?: ScheduleActionFence): Promise<CollaborationAction> {
       const validatedPatch = updateActionInputSchema.parse(patch);
 
       return sqlite.transaction(() => {
@@ -1651,6 +1676,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
         }
 
         const existing = rowToAction(row);
+        assertScheduleWriter(existing, fence, validatedPatch.status === 'sending');
         const transition = actionTransition(existing, validatedPatch);
         if (!transition) return existing;
         const newRevision = transition.revision;

@@ -39,6 +39,7 @@ export class CollaborationBackground {
     return record;
   }
   private async assertRecord(record: CollaborationAction, readOnly = false) {
+    if (record.status === 'suppressed') throw denied();
     const mandate = record.mandateId && await this.repo.getMandate(record.scope, record.mandateId);
     if (!mandate || mandate.status !== 'active' || mandate.requesterId !== record.requesterId) throw denied();
     const schedule = await this.options.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId);
@@ -49,6 +50,8 @@ export class CollaborationBackground {
       const followup = await this.repo.getFollowup(record.scope, mandate.followupId);
       if (!followup || (record.followupRevision !== undefined && record.followupRevision !== followup.revision) || (mandate.condition !== 'always' && followup.status !== 'open')) throw denied();
     }
+    const latest = await this.repo.getAction(record.scope, record.id);
+    if (!latest || latest.status === 'suppressed') throw denied();
   }
   async authorizeExecution(sessionId: string, actorId?: string): Promise<boolean> {
     const session = await this.options.runtime.getSession(sessionId); if (!session || !scopeOf(session)) return false;
@@ -77,9 +80,8 @@ export class CollaborationBackground {
     if (action === 'group_tools.send') throw new RuntimeError('COLLABORATION_MANAGED_DELIVERY', '此后台任务由调度器统一投递结果，请直接返回最终内容。', 403);
     return { actorId: record.requesterId };
   }
-  private async finish(record: CollaborationAction, status: 'succeeded' | 'failed' | 'unknown', receipt?: string, error?: string) {
-    const latest = await this.repo.getAction(record.scope, record.id);
-    if (latest && !['succeeded', 'failed', 'suppressed'].includes(latest.status)) await this.repo.updateAction(record.scope, record.id, { expectedRevision: latest.revision, status, receipt, error });
+  private async finish(input: ScheduleExecutionInput, record: CollaborationAction, status: 'succeeded' | 'failed' | 'unknown', receipt?: string, error?: string) {
+    if (!['succeeded', 'failed', 'suppressed'].includes(record.status)) await this.repo.updateAction(record.scope, record.id, { expectedRevision: record.revision, status, receipt, error }, input.writerFence());
   }
   async execute(input: ScheduleExecutionInput & { resume: boolean }): Promise<ScheduleAgentResult> {
     const { scope, mandate } = input;
@@ -108,9 +110,13 @@ export class CollaborationBackground {
         sourceId: `${scope.appId}:${scope.chatId}:group:collaboration:${mandate.id}` };
       record = (await this.repo.beginAction({ id: sessionId, scope, kind: 'agent_execution', mandateId: mandate.id, mandateRevision: mandate.revision,
         scheduleGeneration: input.schedule.currentGeneration, followupRevision: mandate.followupId ? input.snapshot.followups.find(item => item.id === mandate.followupId)?.revision : undefined,
-        requesterId: input.actorId, inputDigest: hash(payload), payload })).action;
+        requesterId: input.actorId, inputDigest: hash(payload), payload }, input.writerFence())).action;
     }
     if (record.kind !== 'agent_execution' || record.mandateId !== mandate.id || record.mandateRevision !== input.action.mandateRevision) throw denied();
+    if (record.status === 'suppressed') {
+      await this.cancel(input);
+      return { status: 'suppressed', error: '委托已取消，原执行已停止。' };
+    }
     const request = taskRequestV1Schema.parse(record.payload.request), taskId = executionTaskId(request.namespace, request.sessionId, request.key);
     if (taskId !== record.payload.taskId || request.sessionId !== sessionId || canonicalExecutionJson(request.actor) !== canonicalExecutionJson(this.actor(scope, record.requesterId))) throw denied();
     let accepted = this.options.repositories.execution.getAcceptedTask(taskId);
@@ -122,17 +128,17 @@ export class CollaborationBackground {
         source: 'lark', sourceId: String(record.payload.sourceId), workspaceMode: 'shared' }, sessionId, () => this.assertRecord(record!));
       if (session.archivedAt || ['stopped', 'failed'].includes(session.state)) return { status: 'unknown', error: '原后台会话已停止，不自动重开。' };
       await input.assertCurrent();
-      record = await this.repo.updateAction(scope, record.id, { expectedRevision: record.revision, status: 'sending' });
+      record = await this.repo.updateAction(scope, record.id, { expectedRevision: record.revision, status: 'sending' }, input.writerFence());
       try {
         await this.options.runtime.dispatchRequest(request);
       } catch (error) {
         if (!this.options.repositories.execution.getAcceptedTask(taskId)) {
           // 预算上限在接收前就拒绝了，确定没有执行：按失败收尾，不留成待核对。
           if (error instanceof RuntimeError && ['USAGE_CAP_EXCEEDED', 'USAGE_BACKGROUND_CAP_EXCEEDED'].includes(error.code)) {
-            await this.finish(record, 'failed', undefined, error.message);
+            await this.finish(input, record, 'failed', undefined, error.message);
             return { status: 'failed', error: error.message };
           }
-          await this.finish(record, 'unknown', undefined, error instanceof Error ? error.message : String(error));
+          await this.finish(input, record, 'unknown', undefined, error instanceof Error ? error.message : String(error));
           return { status: 'unknown', error: '无法确认原任务是否被接收，需要核对。' };
         }
       }
@@ -147,17 +153,24 @@ export class CollaborationBackground {
     }
     const result = readTaskAttemptResult({ execution: this.options.repositories.execution }, sessionId, taskId, attempt.attemptId);
     if (result.status === 'pending') return { status: 'pending', receipt: taskId };
-    if (result.status === 'blocked') { await this.finish(record, 'unknown', taskId, result.reason); return { status: 'unknown', receipt: taskId, error: result.reason }; }
-    if (result.result.outcome !== 'completed') { await this.finish(record, 'failed', taskId); return { status: 'failed', receipt: taskId, error: result.result.outcome }; }
-    await this.finish(record, 'succeeded', taskId);
+    if (result.status === 'blocked') { await this.finish(input, record, 'unknown', taskId, result.reason); return { status: 'unknown', receipt: taskId, error: result.reason }; }
+    if (result.result.outcome !== 'completed') { await this.finish(input, record, 'failed', taskId); return { status: 'failed', receipt: taskId, error: result.result.outcome }; }
+    await this.finish(input, record, 'succeeded', taskId);
     return { status: 'completed', text: result.result.output.text, receipt: taskId };
   }
   async cancel(input: ScheduleExecutionInput): Promise<void> {
-    const id = sessionIdFor(input.actionId); const record = await this.repo.getAction(input.scope, id);
+    const id = sessionIdFor(input.actionId);
+    let record = await this.repo.getAction(input.scope, id);
     if (!record) return;
+    if (record.kind !== 'agent_execution' || record.payload.sessionId !== id || record.mandateId !== input.mandate.id) throw denied();
+    if (record.status === 'succeeded' || record.status === 'failed') return;
     const session = await this.options.runtime.getSession(id);
+    if (record.status !== 'suppressed') {
+      await input.assertInvalidated();
+      // This fenced terminal decision revokes this exact admission before any asynchronous stop.
+      // The outer schedule action stays pending until stop succeeds, so a crash can retry it.
+      record = await this.repo.updateAction(input.scope, id, { expectedRevision: record.revision, status: 'suppressed', error: '委托已失效，正在停止原执行。' }, input.writerFence());
+    }
     if (session) await this.options.runtime.stop(id, this.actor(record.scope, record.requesterId));
-    const latest = await this.repo.getAction(input.scope, id);
-    if (latest && !['succeeded', 'failed', 'suppressed'].includes(latest.status)) await this.repo.updateAction(input.scope, id, { expectedRevision: latest.revision, status: 'suppressed', error: '委托已失效，原执行已停止。' });
   }
 }

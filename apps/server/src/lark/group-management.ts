@@ -412,18 +412,18 @@ export class LarkGroupManager {
     return openIds;
   }
 
-  private async runtimeDetail(config: StoredLarkConfig, owner: LiveOwner, chatId: string) {
+  private async runtimeDetail(config: StoredLarkConfig, owner: LiveOwner, chatId: string, propagateRefreshErrors = false) {
     let detail = await this.detail(config, owner, chatId);
     if (detail.binding && detail.validity !== 'valid' && detail.binding.state === 'staged') {
       try { await this.sync(config.appId); detail = await this.detail(config, (await this.owner(config.appId))!, chatId); }
-      catch { return { ...detail, applied: false, error: '无法重新验证群身份，请检查连接并同步群聊。' }; }
+      catch (error) { if (propagateRefreshErrors) throw error; return { ...detail, applied: false, error: '无法重新验证群身份，请检查连接并同步群聊。' }; }
     }
     return detail;
   }
-  async resolved(config: StoredLarkConfig, chatId: string, readOnly = false) {
+  async resolved(config: StoredLarkConfig, chatId: string, readOnly = false, propagateRefreshErrors = false) {
     const owner = await this.owner(config.appId);
     if (!owner) return config;
-    const detail = readOnly ? await this.detail(config, owner, chatId) : await this.runtimeDetail(config, owner, chatId);
+    const detail = readOnly ? await this.detail(config, owner, chatId) : await this.runtimeDetail(config, owner, chatId, propagateRefreshErrors);
     if (!detail.binding) return config;
     if (!detail.applied) throw new RuntimeError('LARK_GROUP_NOT_APPLIED', detail.error ?? '群配置尚未生效。', 403);
     const effective = detail.effective!;
@@ -455,12 +455,12 @@ export class LarkGroupManager {
   }
 
   /** readOnly previews local policy for a known actor; membership/email and platform grants are rechecked on invocation. */
-  async authorize(appId: string, chatId: string, openId: string | undefined, action: PolicyAction, sessionId?: string, options: { memberObserved?: boolean; installationOwner?: boolean; taskRequesterOpenId?: string; readOnly?: boolean } = {}): Promise<PolicyDecision | undefined> {
+  async authorize(appId: string, chatId: string, openId: string | undefined, action: PolicyAction, sessionId?: string, options: { memberObserved?: boolean; installationOwner?: boolean; taskRequesterOpenId?: string; readOnly?: boolean; propagateRefreshErrors?: boolean } = {}): Promise<PolicyDecision | undefined> {
     const config = await readLarkConfig(this.repos.config, appId, { readOnly: options.readOnly });
     if (!config) return deny(action, '此 Bot 已删除。');
     const owner = await this.owner(appId);
     if (!owner) return undefined;
-    const detail = options.readOnly ? await this.detail(config, owner, chatId) : await this.runtimeDetail(config, owner, chatId);
+    const detail = options.readOnly ? await this.detail(config, owner, chatId) : await this.runtimeDetail(config, owner, chatId, options.propagateRefreshErrors);
     if (!detail.binding) return undefined;
     if (options.installationOwner && action === 'task.view_result') return { allowed: true, action, code: 'allowed_owner', reason: '安装管理员可查看任务记录。', source: 'owner' };
     if (!detail.applied) return deny(action, detail.error ?? '群配置已停用。');

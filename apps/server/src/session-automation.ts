@@ -1752,9 +1752,10 @@ export class SessionAutomationService {
     // refresh 先保护既有 delivered 历史，缺新 result 不能降 blocked/not_requested 或重发。
     if (value.delivery.status === 'delivered') return;
 
-    // 来源 blocked/reconcile_required 时仍仅重读已固定 number=1：原 Attempt 经明确人工结算后可更新同一来源；Attempt 2 成功不能代替。
+    const recoverLegacyCapacity = value.runStatus === 'blocked' && value.blockReason === 'legacy_output_unresolved' && Boolean(value.runtimeAttemptId);
+    // 历史 legacy 阻塞只重新核验冻结首 Attempt 的严格自动容量链，不解除其他阻塞。
     if (value.runStatus === 'blocked') {
-      if (value.blockReason !== 'reconcile_required' || !value.runtimeAttemptId) return;
+      if (!value.runtimeAttemptId || value.blockReason !== 'reconcile_required' && !recoverLegacyCapacity) return;
     }
 
     // 先在自身 CAS 固定 number=1 Attempt.id，再读结果。
@@ -1793,6 +1794,8 @@ export class SessionAutomationService {
       return;
     }
     const result = outcome.result!;
+    // 原首 Attempt 补齐边界不能解除历史 legacy 阻塞，只有已验证的自动后继结果可以恢复。
+    if (recoverLegacyCapacity && result.attemptId === value.runtimeAttemptId) return;
     const settlingNow = working.value.runStatus === 'accepted' || working.value.runStatus === 'pending' || working.value.runStatus === 'blocked';
     if (settlingNow) {
       const runStatus = result.outcome === 'completed' ? 'completed' : result.outcome === 'cancelled' ? 'interrupted' : result.outcome === 'interrupted' ? 'interrupted' : 'failed';
@@ -1807,6 +1810,8 @@ export class SessionAutomationService {
         // 来源恢复时死 owner 租约必须清除，否则交付租约领取会被未过期租约挡住。
         leaseOwner: undefined,
         leaseExpiresAt: undefined,
+        ...(recoverLegacyCapacity && working.value.delivery.status === 'not_requested' && this.options.deliver
+          ? { delivery: { status: 'pending', attempts: working.value.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
         ...(result.outcome === 'cancelled' ? { delivery: { status: 'not_requested', attempts: working.value.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
         updatedAt: iso(this.clock())
       });
@@ -1844,8 +1849,9 @@ export class SessionAutomationService {
 
     if (value.delivery.status === 'delivered') return;
 
+    const recoverLegacyCapacity = value.status === 'blocked' && value.blockReason === 'legacy_output_unresolved' && Boolean(value.runtimeAttemptId);
     if (value.status === 'blocked') {
-      if (value.blockReason !== 'reconcile_required' || !value.runtimeAttemptId) return;
+      if (!value.runtimeAttemptId || value.blockReason !== 'reconcile_required' && !recoverLegacyCapacity) return;
     }
     if (!value.runtimeAttemptId) {
       const projection = this.execution.getTaskExecution(value.admission!.taskId);
@@ -1875,6 +1881,7 @@ export class SessionAutomationService {
       return;
     }
     const result = outcome.result!;
+    if (recoverLegacyCapacity && result.attemptId === value.runtimeAttemptId) return;
     const settlingNow = working.value.status === 'accepted' || working.value.status === 'dispatching' || working.value.status === 'blocked';
     if (settlingNow) {
       // 完成/失败/中断都收口为 completed 来源状态，具体 outcome 由冻结 result 表达并驱动卡片状态。
@@ -1889,6 +1896,8 @@ export class SessionAutomationService {
         error: undefined,
         leaseOwner: undefined,
         leaseExpiresAt: undefined,
+        ...(recoverLegacyCapacity && working.value.delivery.status === 'not_requested' && this.options.deliver
+          ? { delivery: { status: 'pending', attempts: working.value.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
         ...(result.outcome === 'cancelled' ? { delivery: { status: 'not_requested', attempts: working.value.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
         updatedAt: iso(this.clock())
       });

@@ -1,6 +1,6 @@
 import { boundCollaborationSnapshot } from './collaboration-context.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { canonicalExecutionJson, previewNextSchedule, RuntimeError, type CollaborationAction, type CollaborationMandate, type CollaborationScope, type CollaborationSnapshot, type ScheduleDefinition, type ScheduleExecutionFence, type ScheduleLease, type ScheduleOccurrence } from '@dutydeck/shared';
+import { canonicalExecutionJson, previewNextSchedule, RuntimeError, type CollaborationAction, type CollaborationMandate, type CollaborationScope, type CollaborationSnapshot, type ScheduleDefinition, type ScheduleActionFence, type ScheduleExecutionFence, type ScheduleLease, type ScheduleOccurrence } from '@dutydeck/shared';
 import { scheduleWriterLeaseKey } from '@dutydeck/storage';
 import { CollaborationService, collaborationContextSignature, scheduleMatchesMandate, type CollaborationAuthorization, type CollaborationRepositories } from './collaboration-service.js';
 import { LarkServiceError } from './lark/service.js';
@@ -10,8 +10,10 @@ export interface ScheduleExecutionInput {
   occurrence: ScheduleOccurrence; snapshot: CollaborationSnapshot; actionId: string; action: CollaborationAction;
   /** Recheck immediately before provider dispatch/send, including after queued preparation. */
   assertCurrent(): Promise<void>;
+  writerFence(): ScheduleActionFence;
+  assertInvalidated(): Promise<void>;
 }
-export type ScheduleAgentResult = { status: 'pending' | 'completed' | 'failed' | 'unknown'; text?: string; receipt?: string; error?: string };
+export type ScheduleAgentResult = { status: 'pending' | 'completed' | 'failed' | 'unknown' | 'suppressed'; text?: string; receipt?: string; error?: string };
 export interface ScheduleExecutorOptions {
   repositories: CollaborationRepositories;
   service: CollaborationService;
@@ -19,7 +21,7 @@ export interface ScheduleExecutorOptions {
   /** resume=true must inspect the same durable task; never start a replacement task. */
   executeAgent?: (input: ScheduleExecutionInput & { resume: boolean }) => Promise<ScheduleAgentResult>;
   cancelAgent?: (input: ScheduleExecutionInput) => Promise<void>;
-  deliver: (input: ScheduleExecutionInput & { text: string }) => Promise<{ receipt: string }>;
+  deliver: (input: ScheduleExecutionInput & { text: string; claimDispatch(): Promise<void> }) => Promise<{ receipt: string }>;
   reconcile?: (input: ScheduleExecutionInput) => Promise<{ status: 'succeeded' | 'failed' | 'unknown'; receipt?: string; error?: string }>;
   now?: () => Date;
   holderId?: string;
@@ -29,6 +31,8 @@ const bootstrapSignature = (snapshot: CollaborationSnapshot) => hash({ status: s
 const actionId = (occurrence: ScheduleOccurrence, kind: string) => `collaboration_${kind}_${occurrence.idempotencyKey}`;
 const terminal = (state: string) => ['settled','failed','suppressed'].includes(state);
 const stale = () => new RuntimeError('COLLABORATION_EXECUTION_STALE', 'Delegation, context or authorization changed', 409);
+const leaseLost = () => new RuntimeError('SCHEDULE_LEASE_CONFLICT', 'Schedule writer lease expired or was replaced', 409);
+const invalidated = (error: unknown) => error instanceof RuntimeError && ['COLLABORATION_EXECUTION_STALE', 'COLLABORATION_DELIVERY_SUPPRESSED', 'COLLABORATION_BUDGET_EXHAUSTED', 'COLLABORATION_DESTINATION_CONFLICT'].includes(error.code);
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export class ScheduleExecutor {
@@ -64,11 +68,17 @@ export class ScheduleExecutor {
   private async advance(occurrence: ScheduleOccurrence, state: ScheduleOccurrence['state'], lease: ScheduleLease, error?: string) {
     return this.repos.scheduleOccurrences.advance(occurrence.id, occurrence.revision, state, this.fence(lease), error);
   }
+  private async assertWriter(schedule: ScheduleDefinition, lease: ScheduleLease) {
+    const writer = await this.repos.scheduleLeases.getByKey(lease.leaseKey);
+    if (lease.leaseKey !== scheduleWriterLeaseKey(schedule.channelBotId) || !writer || writer.state !== 'held' || writer.holderId !== this.holderId || writer.fenceToken !== lease.fenceToken || !writer.expiresAt || writer.expiresAt <= this.now().toISOString()) throw leaseLost();
+  }
   private async valid(mandate: CollaborationMandate, schedule: ScheduleDefinition, snapshot: CollaborationSnapshot, lease: ScheduleLease, phase: 'execute' | 'deliver', coverageSignature?: string) {
+    await this.assertWriter(schedule, lease);
     if (this.closed) throw stale();
-    const [current, definition, writer, latest] = await Promise.all([this.repos.collaboration.getMandate(mandate.scope, mandate.id), this.repos.scheduleDefinitions.get(schedule.id), this.repos.scheduleLeases.getByKey(lease.leaseKey), this.repos.collaboration.snapshot(mandate.scope)]);
+    const [current, definition, latest] = await Promise.all([this.repos.collaboration.getMandate(mandate.scope, mandate.id), this.repos.scheduleDefinitions.get(schedule.id), this.repos.collaboration.snapshot(mandate.scope)]);
     const readiness = definition && await this.repos.scheduleDefinitions.readiness(definition.id, this.now().toISOString());
-    if (!readiness?.executionEligible || !current || current.status !== 'active' || !scheduleMatchesMandate(schedule, mandate) || !definition || !scheduleMatchesMandate(definition, current) || definition.state !== 'enabled' || definition.currentGeneration !== schedule.currentGeneration || definition.delivery.chatRef !== current.scope.chatId || !writer || writer.state !== 'held' || writer.holderId !== this.holderId || writer.fenceToken !== lease.fenceToken || !writer.expiresAt || writer.expiresAt <= this.now().toISOString()) throw stale();
+    await this.assertWriter(schedule, lease);
+    if (!readiness?.executionEligible || !current || current.status !== 'active' || !scheduleMatchesMandate(schedule, mandate) || !definition || !scheduleMatchesMandate(definition, current) || definition.state !== 'enabled' || definition.currentGeneration !== schedule.currentGeneration || definition.delivery.chatRef !== current.scope.chatId) throw stale();
     const executionSettings = ({ notificationsPaused: _paused, revision: _revision, updatedAt: _updatedAt, ...settings }: CollaborationSnapshot['settings']) => settings;
     if (canonicalExecutionJson(executionSettings(latest.settings)) !== canonicalExecutionJson(executionSettings(snapshot.settings))) throw stale();
     if (phase === 'deliver') {
@@ -77,22 +87,37 @@ export class ScheduleExecutor {
       // Coverage changes still invalidate the result, as do the live plan/permission/follow-up checks.
       if (bootstrapSignature(latest) !== (coverageSignature ?? bootstrapSignature(snapshot))) throw stale();
     }
-    if (!await this.options.authorize(mandate.scope, mandate.requesterId, phase)) throw stale();
+    const allowed = await this.options.authorize(mandate.scope, mandate.requesterId, phase);
+    await this.assertWriter(schedule, lease);
+    if (!allowed) throw stale();
     const followup = current.followupId ? await this.repos.collaboration.getFollowup(current.scope, current.followupId) : undefined;
+    await this.assertWriter(schedule, lease);
     if (current.condition !== 'always' && (!followup || followup.status !== 'open')) throw stale();
     if (phase === 'deliver' && current.followupId && followup?.revision !== snapshot.followups.find(item => item.id === current.followupId)?.revision) throw stale();
     if (current.condition === 'no_progress' && followup?.revision !== current.lastProgressRevision) throw stale();
     if (this.closed) throw stale();
   }
-  private async begin(mandate: CollaborationMandate, schedule: ScheduleDefinition, occurrence: ScheduleOccurrence, snapshot: CollaborationSnapshot, kind: string, payload: Record<string, unknown>, contextSignature = collaborationContextSignature(snapshot), coverageSignature = bootstrapSignature(snapshot)) {
+  private async begin(mandate: CollaborationMandate, schedule: ScheduleDefinition, occurrence: ScheduleOccurrence, snapshot: CollaborationSnapshot, lease: ScheduleLease, kind: string, payload: Record<string, unknown>, contextSignature = collaborationContextSignature(snapshot), coverageSignature = bootstrapSignature(snapshot)) {
     payload = JSON.parse(JSON.stringify({ ...payload, contextSignature, coverageSignature })) as Record<string, unknown>;
-    return this.repos.collaboration.beginAction({ id: actionId(occurrence, kind), scope: mandate.scope, kind: `schedule_${kind}`, mandateId: mandate.id, mandateRevision: mandate.revision, scheduleGeneration: schedule.currentGeneration, contextRevision: snapshot.contextRevision, ...(mandate.followupId ? { followupRevision: snapshot.followups.find(item => item.id === mandate.followupId)?.revision } : {}), requesterId: mandate.requesterId, inputDigest: hash(payload), payload });
+    return this.repos.collaboration.beginAction({ id: actionId(occurrence, kind), scope: mandate.scope, kind: `schedule_${kind}`, mandateId: mandate.id, mandateRevision: mandate.revision, scheduleGeneration: schedule.currentGeneration, contextRevision: snapshot.contextRevision, ...(mandate.followupId ? { followupRevision: snapshot.followups.find(item => item.id === mandate.followupId)?.revision } : {}), requesterId: mandate.requesterId, inputDigest: hash(payload), payload }, { ...this.fence(lease), occurrenceId: occurrence.id });
   }
   private input(mandate: CollaborationMandate, schedule: ScheduleDefinition, occurrence: ScheduleOccurrence, snapshot: CollaborationSnapshot, lease: ScheduleLease, action: CollaborationAction, phase: 'execute' | 'deliver'): ScheduleExecutionInput {
-    return { scope: mandate.scope, actorId: mandate.requesterId, mandate, schedule, occurrence, snapshot, actionId: action.id, action, assertCurrent: () => this.valid(mandate, schedule, snapshot, lease, phase, typeof action.payload.coverageSignature === 'string' ? action.payload.coverageSignature : undefined) };
+    return { scope: mandate.scope, actorId: mandate.requesterId, mandate, schedule, occurrence, snapshot, actionId: action.id, action, assertInvalidated: async () => {
+      await this.assertWriter(schedule, lease);
+      if (this.closed) throw leaseLost();
+      try {
+        if (occurrence.generation !== schedule.currentGeneration) throw stale();
+        await this.valid(mandate, schedule, snapshot, lease, 'execute');
+      } catch (error) {
+        await this.assertWriter(schedule, lease);
+        if (invalidated(error)) return;
+        throw error;
+      }
+      throw new RuntimeError('COLLABORATION_EXECUTION_CURRENT', 'Healthy background execution cannot be cancelled', 409);
+    }, writerFence: () => ({ ...this.fence(lease), occurrenceId: occurrence.id }), assertCurrent: () => this.valid(mandate, schedule, snapshot, lease, phase, typeof action.payload.coverageSignature === 'string' ? action.payload.coverageSignature : undefined) };
   }
-  private async actionState(action: CollaborationAction, status: CollaborationAction['status'], receipt?: string, error?: string) {
-    return this.repos.collaboration.updateAction(action.scope, action.id, { expectedRevision: action.revision, status, ...(receipt !== undefined ? { receipt } : {}), ...(error !== undefined ? { error } : {}) });
+  private async actionState(action: CollaborationAction, status: CollaborationAction['status'], lease: ScheduleLease, occurrence: ScheduleOccurrence, receipt?: string, error?: string) {
+    return this.repos.collaboration.updateAction(action.scope, action.id, { expectedRevision: action.revision, status, ...(receipt !== undefined ? { receipt } : {}), ...(error !== undefined ? { error } : {}) }, { ...this.fence(lease), occurrenceId: occurrence.id });
   }
   private async run() {
     let processed = 0;
@@ -120,14 +145,17 @@ export class ScheduleExecutor {
           await this.process(mandate, schedule, occurrence, lease);
         }
         if (this.closed) break;
+        await this.assertWriter(schedule, lease);
         // Progress restarts interval waits; calendar triggers keep their agreed time.
         // A new mandate generation fences old pending Agents before the next check.
         const followup = mandate.condition === 'no_progress' && mandate.followupId ? await this.repos.collaboration.getFollowup(mandate.scope, mandate.followupId) : undefined;
+        await this.assertWriter(schedule, lease);
         if (mandate.status === 'active' && followup?.status === 'open' && followup.revision !== mandate.lastProgressRevision) {
           await this.options.service.updateMandate(mandate.scope, mandate.requesterId, mandate.id, { expectedRevision: mandate.revision, condition: 'no_progress', ...(schedule.trigger.kind === 'interval' ? { trigger: { ...schedule.trigger, anchorAt: followup.updatedAt } } : {}) });
           continue;
         }
         schedule = await this.options.service.reconcileMandate(mandate) ?? schedule;
+        await this.assertWriter(schedule, lease);
         if (mandate.status !== 'active' || schedule.state !== 'enabled' || !scheduleMatchesMandate(schedule, mandate) || (await this.repos.scheduleOccurrences.listUnsettled(schedule.id)).length || processed >= 20) continue;
         let watermark = await this.repos.scheduleWatermarks.get(schedule.id);
         if (!watermark?.nextDueAt && schedule.trigger.kind !== 'at') {
@@ -152,6 +180,7 @@ export class ScheduleExecutor {
   }
   private async process(mandate: CollaborationMandate, schedule: ScheduleDefinition, initial: ScheduleOccurrence, lease: ScheduleLease) {
     let occurrence = initial;
+    const actionState = (action: CollaborationAction, status: CollaborationAction['status'], receipt?: string, error?: string) => this.actionState(action, status, lease, occurrence, receipt, error);
     if (terminal(occurrence.state)) return;
     const fullSnapshot = await this.repos.collaboration.snapshot(mandate.scope);
     const contextSignature = collaborationContextSignature(fullSnapshot);
@@ -163,11 +192,11 @@ export class ScheduleExecutor {
     // A provider result is a historical fact even when the plan was subsequently cancelled.
     if (delivery?.status === 'succeeded') { await this.advance(occurrence, 'settled', lease); return; }
     if (delivery && ['sending','unknown'].includes(delivery.status)) {
-      if (delivery.status === 'sending') delivery = await this.actionState(delivery, 'unknown', undefined, 'Previous delivery has no durable receipt');
+      if (delivery.status === 'sending') delivery = await actionState(delivery, 'unknown', undefined, 'Previous delivery has no durable receipt');
       if (occurrence.state !== 'unknown') occurrence = await this.advance(occurrence, 'unknown', lease);
       const result = await this.options.reconcile?.(this.input(mandate, schedule, occurrence, snapshot, lease, delivery, 'deliver'));
       if (result && result.status !== 'unknown') {
-        await this.actionState(delivery, result.status, result.receipt, result.error);
+        await actionState(delivery, result.status, result.receipt, result.error);
         await this.advance(occurrence, result.status === 'succeeded' ? 'settled' : 'failed', lease, result.error);
       }
       return;
@@ -175,13 +204,16 @@ export class ScheduleExecutor {
     try {
       if (occurrence.generation !== schedule.currentGeneration) throw stale();
       await this.valid(mandate, schedule, (agent?.payload.snapshot as CollaborationSnapshot | undefined) ?? snapshot, lease, 'execute');
-    } catch {
+    } catch (error) {
+      await this.assertWriter(schedule, lease);
+      if (!invalidated(error)) throw error;
       if (agent && ['sending','unknown'].includes(agent.status)) {
         if (!this.options.cancelAgent) return;
-        await this.options.cancelAgent(this.input(mandate, schedule, occurrence, snapshot, lease, agent, 'execute'));
-        await this.actionState(agent, 'suppressed', undefined, 'Delegation invalidated');
+        try { await this.options.cancelAgent(this.input(mandate, schedule, occurrence, (agent.payload.snapshot as CollaborationSnapshot | undefined) ?? snapshot, lease, agent, 'execute')); }
+        catch (error) { await this.assertWriter(schedule, lease); throw error; }
+        await actionState(agent, 'suppressed', undefined, 'Delegation invalidated');
       }
-      if (delivery?.status === 'intent') await this.actionState(delivery, 'suppressed', undefined, 'Delegation invalidated');
+      if (delivery?.status === 'intent') await actionState(delivery, 'suppressed', undefined, 'Delegation invalidated');
       await this.advance(occurrence, 'suppressed', lease, 'Delegation, progress, pause or authorization changed');
       return;
     }
@@ -190,15 +222,15 @@ export class ScheduleExecutor {
     let content = mandate.prompt;
     if (mandate.mode === 'agent') {
       if (!this.options.executeAgent) { await this.advance(occurrence, 'failed', lease, 'Agent execution integration is unavailable'); return; }
-      if (!agent) agent = (await this.begin(mandate, schedule, occurrence, snapshot, 'agent', { prompt: mandate.prompt, snapshot }, contextSignature, coverageSignature)).action;
+      if (!agent) agent = (await this.begin(mandate, schedule, occurrence, snapshot, lease, 'agent', { prompt: mandate.prompt, snapshot }, contextSignature, coverageSignature)).action;
 
       if (agent.status === 'failed' || agent.status === 'suppressed') { await this.advance(occurrence, agent.status === 'failed' ? 'failed' : 'suppressed', lease, agent.error); return; }
       if (agent.status !== 'succeeded') {
         const resume = agent.status === 'sending' || agent.status === 'unknown';
-        if (!resume) agent = await this.actionState(agent, 'sending');
+        if (!resume) agent = await actionState(agent, 'sending');
         let result: ScheduleAgentResult;
         if (this.closed) {
-          if (!resume) { await this.actionState(agent, 'suppressed', undefined, 'Executor closed before Agent dispatch'); await this.advance(occurrence, 'suppressed', lease); }
+          if (!resume) { await actionState(agent, 'suppressed', undefined, 'Executor closed before Agent dispatch'); await this.advance(occurrence, 'suppressed', lease); }
           return;
         }
         try { result = await this.options.executeAgent({ ...this.input(mandate, schedule, occurrence, agent.payload.snapshot as CollaborationSnapshot, lease, agent, 'execute'), resume }); }
@@ -207,20 +239,25 @@ export class ScheduleExecutor {
           if (occurrence.state === 'unknown') await this.advance(occurrence, 'running', lease);
           return;
         }
+        if (result.status === 'suppressed') {
+          await actionState(agent, 'suppressed', result.receipt, result.error);
+          await this.advance(occurrence, 'suppressed', lease, result.error);
+          return;
+        }
         if (result.status !== 'completed' || typeof result.text !== 'string') {
           const status = result.status === 'failed' ? 'failed' : 'unknown';
-          await this.actionState(agent, status, result.receipt, result.error ?? 'Agent result is not proven');
+          await actionState(agent, status, result.receipt, result.error ?? 'Agent result is not proven');
           // Poll the original task without manufacturing new execution progress for an unchanged unknown result.
           if (occurrence.state !== status) await this.advance(occurrence, status, lease, result.error);
           return;
         }
-        if (!delivery) delivery = (await this.begin(mandate, schedule, occurrence, agent.payload.snapshot as CollaborationSnapshot, 'delivery', { text: result.text, delivery: schedule.delivery, snapshot: agent.payload.snapshot }, typeof agent.payload.contextSignature === 'string' ? agent.payload.contextSignature : undefined, typeof agent.payload.coverageSignature === 'string' ? agent.payload.coverageSignature : undefined)).action;
-        agent = await this.actionState(agent, 'succeeded', result.receipt ?? 'completed');
+        if (!delivery) delivery = (await this.begin(mandate, schedule, occurrence, agent.payload.snapshot as CollaborationSnapshot, lease, 'delivery', { text: result.text, delivery: schedule.delivery, snapshot: agent.payload.snapshot }, typeof agent.payload.contextSignature === 'string' ? agent.payload.contextSignature : undefined, typeof agent.payload.coverageSignature === 'string' ? agent.payload.coverageSignature : undefined)).action;
+        agent = await actionState(agent, 'succeeded', result.receipt ?? 'completed');
       }
       if (!delivery) { await this.advance(occurrence, 'unknown', lease, 'Completed agent result has no persisted delivery content'); return; }
       content = delivery.payload.text as string;
     }
-    if (!delivery) delivery = (await this.begin(mandate, schedule, occurrence, snapshot, 'delivery', { text: content, delivery: schedule.delivery, snapshot }, contextSignature, coverageSignature)).action;
+    if (!delivery) delivery = (await this.begin(mandate, schedule, occurrence, snapshot, lease, 'delivery', { text: content, delivery: schedule.delivery, snapshot }, contextSignature, coverageSignature)).action;
     if (delivery.status === 'failed' || delivery.status === 'suppressed') { await this.advance(occurrence, delivery.status === 'failed' ? 'failed' : 'suppressed', lease, delivery.error); return; }
     if (occurrence.state === 'unknown') occurrence = await this.advance(occurrence, 'running', lease);
     const originalSnapshot = delivery.payload.snapshot as CollaborationSnapshot;
@@ -231,22 +268,30 @@ export class ScheduleExecutor {
       const position = await this.repos.collaboration.getDeliveryPosition(mandate.scope, delivery.id, since);
       if (position < 0 || position >= originalSnapshot.settings.maxProactivePerHour) throw new RuntimeError('COLLABORATION_BUDGET_EXHAUSTED', 'Group notification budget exhausted', 409);
     } catch (error) {
-      await this.actionState(delivery, 'suppressed', undefined, message(error));
+      await this.assertWriter(schedule, lease);
+      if (!invalidated(error)) throw error;
+      await actionState(delivery, 'suppressed', undefined, message(error));
       await this.advance(occurrence, 'suppressed', lease, message(error)); return;
     }
-    delivery = await this.actionState(delivery, 'sending');
+    let claimed: CollaborationAction | undefined;
     try {
       if (this.closed) throw stale();
-      const result = await this.options.deliver({ ...input, action: delivery, text: delivery.payload.text as string });
-      await this.actionState(delivery, 'succeeded', result.receipt);
+      const result = await this.options.deliver({ ...input, text: delivery.payload.text as string, claimDispatch: async () => {
+        await input.assertCurrent();
+        // The storage transaction is the last claim after preparation, authorization and queueing.
+        claimed = await actionState(delivery!, 'sending');
+      } });
+      if (!claimed) throw new Error('Delivery returned without claiming dispatch');
+      await actionState(claimed, 'succeeded', result.receipt);
       await this.advance(occurrence, 'settled', lease);
     } catch (error) {
-      const state = error instanceof RuntimeError && ['COLLABORATION_DELIVERY_SUPPRESSED', 'COLLABORATION_EXECUTION_STALE', 'COLLABORATION_BUDGET_EXHAUSTED'].includes(error.code) ? 'suppressed'
+      await this.assertWriter(schedule, lease);
+      // Before the claim, an ordinary preparation/read error leaves a retryable intent.
+      if (!claimed && !invalidated(error) && !(error instanceof LarkServiceError && error.code === 'LARK_CIRCUIT_OPEN')) return;
+      const state = !claimed && invalidated(error) ? 'suppressed'
         : error instanceof LarkServiceError && error.code === 'LARK_CIRCUIT_OPEN' ? 'failed' : 'unknown';
-      const current = await this.repos.collaboration.getAction(mandate.scope, delivery.id);
-      if (current?.status === 'sending') await this.actionState(current, state, undefined, message(error));
-      const currentOccurrence = await this.repos.scheduleOccurrences.get(occurrence.id);
-      if (currentOccurrence?.state === 'running') await this.advance(currentOccurrence, state, lease, message(error));
+      await actionState(claimed ?? delivery, state, undefined, message(error));
+      await this.advance(occurrence, state, lease, message(error));
     }
   }
 }

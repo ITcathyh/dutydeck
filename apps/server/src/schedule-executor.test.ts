@@ -25,7 +25,7 @@ async function fixture(initialNow = new Date()) {
   await repos.channelBots.create({ id: 'bot', channel: 'lark', externalAppId: 'app', displayName: 'Bot', brand: 'feishu', credentialRef: 'secret', state: 'staged' });
   const authorize = vi.fn(async (_scope: typeof scope, actor: string) => allowed && actor === 'requester');
   const service = new CollaborationService({ repositories: repos, authorize, now, resolveScheduleScope: async () => ({ channelBotId: 'bot', identityRef: 'identity', secretRef: 'secret' }) });
-  const deliver = vi.fn(async input => { await input.assertCurrent(); return { receipt: 'message-one' }; });
+  const deliver = vi.fn(async input => { await input.claimDispatch(); return { receipt: 'message-one' }; });
   const instances: ScheduleExecutor[] = [];
   const executor = (options: Partial<ScheduleExecutorOptions> = {}) => {
     const instance = new ScheduleExecutor({ repositories: repos, service, authorize, deliver, now, holderId: 'writer', ...options }); instances.push(instance); return instance;
@@ -235,7 +235,7 @@ it('settles a never-sent circuit rejection and permits the next authorized occur
 
 it('does not resend an unknown delivery after restart; a receipt query settles it', async () => {
   const f = await fixture(); await f.create();
-  f.deliver.mockRejectedValueOnce(new Error('response lost after send'));
+  f.deliver.mockImplementationOnce(async input => { await input.claimDispatch(); throw new Error('response lost after send'); });
   const first = f.executor(); f.advance(); await first.tick(); first.close();
   const restarted = f.executor({ holderId: 'new-writer' }); f.advance(61_000); await restarted.tick();
   expect(f.deliver).toHaveBeenCalledTimes(1);
@@ -689,7 +689,7 @@ it('drains an accepted provider send on close and persists its actual receipt be
   const f = await fixture(); const { mandate } = await f.create();
   let enter!: () => void; const entered = new Promise<void>(resolve => { enter = resolve; });
   let release!: () => void; const network = new Promise<void>(resolve => { release = resolve; });
-  const deliver = vi.fn(async input => { await input.assertCurrent(); enter(); await network; return { receipt: 'accepted-provider-receipt' }; });
+  const deliver = vi.fn(async input => { await input.claimDispatch(); enter(); await network; return { receipt: 'accepted-provider-receipt' }; });
   const run = f.executor({ deliver }); f.advance();
   const tick = run.tick(); await entered;
   let drained = false; const close = run.close().then(() => { drained = true; });
@@ -708,8 +708,8 @@ it('blocks Agent dispatch when closing races the persisted sending claim', async
   const run = f.executor({ executeAgent });
   const update = f.repos.collaboration.updateAction.bind(f.repos.collaboration);
   let closing: Promise<void> | undefined;
-  vi.spyOn(f.repos.collaboration, 'updateAction').mockImplementation(async (scope, id, patch) => {
-    const action = await update(scope, id, patch);
+  vi.spyOn(f.repos.collaboration, 'updateAction').mockImplementation(async (scope, id, patch, fence) => {
+    const action = await update(scope, id, patch, fence);
     if (action.kind === 'schedule_agent' && patch.status === 'sending') closing = run.close();
     return action;
   });
@@ -730,4 +730,132 @@ it('rejects invalid calendar dates during collaboration prepare, create and upda
   }
   expect(await f.repos.scheduleDefinitions.list()).toHaveLength(1);
   expect((await f.repos.collaboration.getMandate(scope, mandate.id))?.revision).toBe(1);
+});
+
+
+it('preserves an unsent intent across lease expiry and lets the next writer deliver the same action once', async () => {
+  const f = await fixture(); const { mandate } = await f.create({ trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.now().toISOString() } });
+  let delayed = true, sends = 0;
+  const deliver: ScheduleExecutorOptions['deliver'] = async input => {
+    if (delayed) { delayed = false; f.advance(61_000); }
+    await input.claimDispatch(); sends++; return { receipt: 'only-receipt' };
+  };
+  f.advance(600_000); await f.executor({ deliver }).tick();
+  const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_delivery')!;
+  const occurrence = (await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId))[0]!;
+  expect(sends).toBe(0); expect(action.status).toBe('intent');
+  await f.executor({ deliver, holderId: 'successor' }).tick();
+  expect(sends).toBe(1);
+  expect(await f.repos.collaboration.getAction(scope, action.id)).toMatchObject({ status: 'succeeded', receipt: 'only-receipt' });
+  expect(await f.repos.scheduleOccurrences.get(occurrence.id)).toMatchObject({ state: 'settled' });
+  expect(await f.repos.collaboration.getMandate(scope, mandate.id)).toMatchObject({ status: 'active' });
+});
+
+it('does not cancel or suppress the same healthy Agent after another writer takes over', async () => {
+  const f = await fixture(); await f.create({ mode: 'agent', trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.now().toISOString() } });
+  const executeAgent = vi.fn(async (_input: Parameters<NonNullable<ScheduleExecutorOptions['executeAgent']>>[0]) => ({ status: 'pending' as const, receipt: 'same-task' }));
+  const cancelAgent = vi.fn(async () => {});
+  const old = f.executor({ executeAgent, cancelAgent });
+  f.advance(600_000); await old.tick();
+  const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')!;
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), blocked = new Promise<void>(resolve => { release = resolve; });
+  const snapshot = f.repos.collaboration.snapshot.bind(f.repos.collaboration);
+  vi.spyOn(f.repos.collaboration, 'snapshot').mockImplementationOnce(async (...args) => { enter(); await blocked; return snapshot(...args); });
+  const tick = old.tick(); await entered;
+  try { f.advance(61_000); await f.executor({ executeAgent, cancelAgent, holderId: 'successor' }).tick(); }
+  finally { release(); await tick; }
+  expect(executeAgent).toHaveBeenCalledTimes(2);
+  expect(executeAgent.mock.calls.map(args => args[0]?.actionId)).toEqual([action.id, action.id]);
+  expect(cancelAgent).not.toHaveBeenCalled();
+  expect(await f.repos.collaboration.getAction(scope, action.id)).toMatchObject({ status: 'sending' });
+});
+
+it('rechecks the writer after asynchronous authorization crosses the lease expiry', async () => {
+  const f = await fixture(); await f.create(); let sending = false, sends = 0;
+  const authorize = async () => { if (sending) { sending = false; f.advance(61_000); } return true; };
+  const deliver: ScheduleExecutorOptions['deliver'] = async input => { sending = true; await input.claimDispatch(); sends++; return { receipt: 'never' }; };
+  f.advance(); await f.executor({ authorize, deliver }).tick();
+  expect(sends).toBe(0);
+  expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_delivery')).toMatchObject({ status: 'intent' });
+});
+
+it('leaves healthy work unchanged when an authorization read throws', async () => {
+  const f = await fixture(); await f.create({ mode: 'agent' });
+  const executeAgent = vi.fn(async () => ({ status: 'pending' as const })), cancelAgent = vi.fn(async () => {});
+  const run = f.executor({ executeAgent, cancelAgent }); f.advance(); await run.tick();
+  const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')!;
+  run.options.authorize = async () => { throw new Error('authorization temporarily unavailable'); };
+  await expect(run.tick()).rejects.toThrow('authorization temporarily unavailable');
+  expect(cancelAgent).not.toHaveBeenCalled();
+  expect(await f.repos.collaboration.getAction(scope, action.id)).toEqual(action);
+});
+
+it('never replays a delivery after the durable dispatch claim even if the process failed before getting a receipt', async () => {
+  const f = await fixture(); await f.create();
+  const deliver = vi.fn(async (input: Parameters<ScheduleExecutorOptions['deliver']>[0]) => { await input.claimDispatch(); throw new Error('crash after claim'); });
+  f.advance(); await f.executor({ deliver }).tick();
+  const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_delivery')!;
+  expect(action.status).toBe('unknown');
+  f.advance(61_000); await f.executor({ deliver, holderId: 'successor' }).tick();
+  expect(deliver).toHaveBeenCalledOnce(); expect(await f.repos.collaboration.getAction(scope, action.id)).toEqual(action);
+});
+
+it.each(['unknown', 'succeeded'] as const)('rejects a lost writer late result after its successor leaves the delivery %s', async status => {
+  const f = await fixture(); await f.create();
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const deliver: ScheduleExecutorOptions['deliver'] = async input => { await input.claimDispatch(); enter(); await gate; throw new Error('late provider exception'); };
+  f.advance(); const old = f.executor({ deliver }); const tick = old.tick(); await entered;
+  const id = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_delivery')!.id;
+  try {
+    f.advance(61_000); await f.executor({ holderId: 'successor', reconcile: async () => ({ status, ...(status === 'succeeded' ? { receipt: 'proven-receipt' } : {}) }) }).tick();
+  } finally { release(); await tick; }
+  expect(await f.repos.collaboration.getAction(scope, id)).toMatchObject({ status, ...(status === 'succeeded' ? { receipt: 'proven-receipt' } : {}) });
+});
+
+it('lets only the successor claim the same intent when preparation from the old writer is still queued', async () => {
+  const f = await fixture(); await f.create({ trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.now().toISOString() } });
+  let enter!: () => void, release!: () => void, sends = 0;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const oldDeliver: ScheduleExecutorOptions['deliver'] = async input => { enter(); await gate; await input.claimDispatch(); sends++; return { receipt: 'old' }; };
+  f.advance(600_000); const tick = f.executor({ deliver: oldDeliver }).tick(); await entered;
+  const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_delivery')!;
+  expect(action.status).toBe('intent');
+  try {
+    f.advance(61_000);
+    await f.executor({ holderId: 'successor', deliver: async input => { await input.claimDispatch(); sends++; return { receipt: 'successor' }; } }).tick();
+  } finally { release(); await tick; }
+  expect(sends).toBe(1);
+  expect(await f.repos.collaboration.getAction(scope, action.id)).toMatchObject({ status: 'succeeded', receipt: 'successor' });
+});
+
+it('rejects a generation change atomically between final validation and the dispatch claim', async () => {
+  const f = await fixture(); const { mandate } = await f.create();
+  const update = f.repos.collaboration.updateAction.bind(f.repos.collaboration);
+  let changed = false, sends = 0;
+  vi.spyOn(f.repos.collaboration, 'updateAction').mockImplementation(async (scope, id, patch, fence) => {
+    if (!changed && id.includes('_delivery_') && patch.status === 'sending') {
+      changed = true; await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: mandate.revision, prompt: 'Changed prompt' });
+    }
+    return update(scope, id, patch, fence);
+  });
+  f.advance(); await f.executor({ deliver: async input => { await input.claimDispatch(); sends++; return { receipt: 'never' }; } }).tick();
+  expect(changed).toBe(true); expect(sends).toBe(0);
+  expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_delivery')).toMatchObject({ status: 'suppressed' });
+});
+
+it.each(['mandate', 'group'] as const)('atomically rejects a %s notification pause that races asynchronous final authorization', async target => {
+  const f = await fixture(); const { mandate } = await f.create(); let final = false, sends = 0;
+  const authorize = async () => {
+    if (final) {
+      final = false;
+      if (target === 'mandate') await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: mandate.revision, deliveryPaused: true });
+      else { const settings = await f.repos.collaboration.getSettings(scope); await f.repos.collaboration.updateSettings(scope, { expectedRevision: settings.revision, notificationsPaused: true }, 'requester'); }
+    }
+    return true;
+  };
+  f.advance(); await f.executor({ authorize, deliver: async input => { final = true; await input.claimDispatch(); sends++; return { receipt: 'never' }; } }).tick();
+  expect(sends).toBe(0);
+  expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_delivery')).toMatchObject({ status: 'suppressed' });
 });

@@ -330,7 +330,15 @@ describe('live group configuration', () => {
     members = ['ou_alice']; time = new Date(time.getTime() + 3_600_001);
     listChats.mockRejectedValueOnce(new Error('identity refresh unavailable'));
     expect((await manager.authorize('cli_one', 'oc_one', 'ou_alice', 'task.create'))?.allowed).toBe(false);
+    listChats.mockRejectedValueOnce(new Error('strict identity refresh unavailable'));
+    await expect(manager.authorize('cli_one', 'oc_one', 'ou_alice', 'task.create', undefined, { propagateRefreshErrors: true })).rejects.toThrow('strict identity refresh unavailable');
+    const expired = (await readLarkConfig(repos.config, 'cli_one'))!;
+    listChats.mockRejectedValueOnce(new Error('strict resolved refresh unavailable'));
+    await expect(manager.resolved(expired, 'oc_one', false, true)).rejects.toThrow('strict resolved refresh unavailable');
     await manager.sync('cli_one');
+    members = ['ou_bob'];
+    expect((await manager.authorize('cli_one', 'oc_one', 'ou_alice', 'task.create', undefined, { propagateRefreshErrors: true }))?.allowed).toBe(false);
+    members = ['ou_alice'];
     await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', appSecret: 'rotated-synthetic' });
     listChats.mockRejectedValueOnce(new Error('credential refresh unavailable'));
     expect((await manager.authorize('cli_one', 'oc_one', 'ou_alice', 'task.create'))?.allowed).toBe(false);

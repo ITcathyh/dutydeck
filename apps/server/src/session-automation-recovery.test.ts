@@ -18,6 +18,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ciProviders, ciStatus, TEST_CI_REMOTE, type StatusMock } from './ci-provider.test-helpers.js';
 import { SessionAutomationService, type SessionAutomationRuntime } from './session-automation.js';
+import { readAttemptResult } from './task-results.js';
 
 const run = promisify(execFile);
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -859,5 +860,168 @@ describe('SessionAutomation independent-review regression fixes', () => {
     const after = JSON.parse((await h.repositories.config.get(sourceKey))!)!;
     expect(after.runStatus).toBe('completed');
     expect(after.result.output.text).toBe('REAL-COMPLETED');
+  });
+});
+
+describe('SessionAutomation historical capacity-result recovery', () => {
+  async function historical(kind: 'schedule' | 'ci') {
+    const delivered = vi.fn(async () => {});
+    let head = '';
+    const h = await fixture({ deliver: delivered, status: vi.fn(async () => ciStatus(head, [{ id: 88, conclusion: 'success' }])) as StatusMock });
+    head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
+    if (kind === 'schedule') await scheduled(h);
+    else await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
+    await h.service.tick();
+    const taskId = h.dispatches[0]!.id;
+    const x = bound(h.repositories);
+    const first = x.claimNext({ sessionId: h.session.id, runId: h.session.runId })!.attempt!;
+    const fence = { sessionId: h.session.id, runId: h.session.runId, taskId, attemptId: first.attemptId, expectedRevision: first.revision };
+    x.markSubmissionPending(fence, { submissionId: 'capacity-submission', inputDigest: h.repositories.execution.getAcceptedTask(taskId)!.input!.digest, resourceRefs: [], authorizationRefs: [] });
+    fence.expectedRevision = h.repositories.execution.getTaskExecution(taskId)!.currentAttempt!.revision;
+    x.appendEvent(fence, { id: 'capacity-error', type: 'error', data: { code: 'codex_capacity', nativeSource: 'codex', nativeTerminal: true, capacityReason: 'selected_model_capacity', nativeTurnId: 'turn' } });
+    const successor = x.settleCapacityRetry(fence, 'capacity-settlement', { kind: 'driver_result', submissionId: 'capacity-submission', outcome: 'failed', outputDigest: createHash('sha256').update('').digest('hex'), stopReason: 'end_turn', complete: true }).attempt!;
+    expect(readAttemptResult(h.repositories, h.session.id, taskId, first.attemptId)).toEqual({ status: 'blocked', reason: 'legacy_output_unresolved' });
+    const key = (await h.repositories.config.list!(kind === 'schedule' ? 'session_automation/occurrence/' : 'session_automation/ci/'))[0]!.key;
+    const raw = JSON.parse((await h.repositories.config.get(key))!);
+    // Persist the exact blocked/not_requested shape emitted by the old fixed-attempt reader.
+    const blocked = { ...raw, revision: raw.revision + 1, runtimeAttemptId: first.attemptId,
+      ...(kind === 'schedule' ? { runStatus: 'blocked' } : { status: 'blocked' }),
+      blockReason: 'legacy_output_unresolved', resultBoundary: 'legacy_output_unresolved', error: 'legacy_output_unresolved',
+      delivery: { status: 'not_requested', attempts: raw.delivery.attempts, updatedAt: raw.updatedAt } };
+    await h.repositories.config.set(key, JSON.stringify(blocked));
+    const sql = new Database(h.database);
+    try { sql.prepare("UPDATE task_attempts SET json=json_set(json, '$.automaticRetry.dueAt', '2000-01-01T00:00:00.000Z') WHERE id=?").run(successor.attemptId); }
+    finally { sql.close(); }
+    return { h, delivered, taskId, first, successor, key, blocked };
+  }
+
+  async function reopen(h: Awaited<ReturnType<typeof fixture>>, deliver: NonNullable<Parameters<typeof fixture>[0]>['deliver']) {
+    await h.service.close();
+    claims.get(h.repositories)!.release();
+    claims.delete(h.repositories);
+    h.repositories.close();
+    const repositories = createRepositories(h.database, { newDatabaseAuthority: 'ledger_v1' });
+    cleanups.push(() => { claims.get(repositories)?.release(); repositories.close(); });
+    const runtime = ledgerRuntime(repositories, h.session);
+    const service = new SessionAutomationService({ repositories, runtime, deliver, authorize: async () => true,
+      clock: () => new Date(h.now.value),
+      ciProviders: ciProviders(vi.fn(async () => { throw new Error('Recovery must not reread CI materials'); }) as StatusMock) });
+    cleanups.push(() => service.close());
+    return { repositories, runtime, service };
+  }
+
+  it.each([
+    { kind: 'schedule', completedBeforeReopen: false }, { kind: 'ci', completedBeforeReopen: false },
+    { kind: 'schedule', completedBeforeReopen: true }, { kind: 'ci', completedBeforeReopen: true }
+  ] as const)('recovers historical $kind after SQLite reopen (already completed: $completedBeforeReopen), delivers once, and permits subsequent work', async ({ kind, completedBeforeReopen }) => {
+    const { h, delivered, taskId, first, successor, key, blocked } = await historical(kind);
+    if (completedBeforeReopen) h.settleTask(taskId, 'completed', 'successful capacity successor');
+    const fresh = await reopen(h, delivered);
+    if (!completedBeforeReopen) {
+      // A verified but unfinished successor leaves the historical source untouched and never dispatches.
+      await fresh.service.tick();
+      expect(JSON.parse((await fresh.repositories.config.get(key))!)).toEqual(blocked);
+      expect(fresh.runtime.dispatches).toHaveLength(0);
+      expect(delivered).not.toHaveBeenCalled();
+      fresh.runtime.settleTask(taskId, 'completed', 'successful capacity successor');
+    }
+    await fresh.service.tick();
+    await vi.waitFor(async () => expect(JSON.parse((await fresh.repositories.config.get(key))!).delivery.status).toBe('delivered'));
+    await fresh.service.tick();
+    const after = JSON.parse((await fresh.repositories.config.get(key))!);
+    expect(after).toMatchObject({ admission: blocked.admission, runtimeAttemptId: first.attemptId,
+      resultBoundary: 'verified', result: { taskId, attemptId: successor.attemptId, output: { text: 'successful capacity successor' } },
+      delivery: { status: 'delivered', attempts: 1 } });
+    expect(kind === 'schedule' ? after.runStatus : after.status).toBe('completed');
+    expect(after.blockReason).toBeUndefined();
+    expect(after.error).toBeUndefined();
+    expect(delivered).toHaveBeenCalledTimes(1);
+    expect(fresh.runtime.dispatches).toHaveLength(0);
+    expect(await fresh.repositories.tasks.listBySession(h.session.id)).toHaveLength(1);
+    if (kind === 'schedule') {
+      h.now.value = new Date('2026-09-12T00:02:01Z');
+      await fresh.service.tick();
+      expect(fresh.runtime.dispatches).toHaveLength(1);
+      expect(fresh.runtime.dispatches[0]!.id).not.toBe(taskId);
+    } else {
+      const next = await fresh.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
+      expect(next.id).not.toBe(blocked.id);
+      expect(next.status).toBe('waiting');
+    }
+    expect(delivered).toHaveBeenCalledTimes(1);
+  });
+
+  it.each((['schedule', 'ci'] as const).flatMap(kind => [
+    'manual_successor', 'input_conflict', 'scope_conflict', 'missing_boundary', 'unknown_then_manual_retry',
+    'admission_conflict', 'unrelated_block', 'missing_frozen_attempt', 'wrong_frozen_attempt', 'already_delivered'
+  ].map(scenario => ({ kind, scenario }))))('keeps historical $kind unchanged for $scenario after SQLite reopen', async ({ kind, scenario }) => {
+    const { h, delivered, taskId, successor, key, blocked } = await historical(kind);
+    if (scenario === 'unknown_then_manual_retry') {
+      const x = bound(h.repositories);
+      const current = () => h.repositories.execution.getTaskExecution(taskId)!.currentAttempt!;
+      const fence = () => ({ sessionId: h.session.id, runId: h.session.runId, taskId, attemptId: current().attemptId, expectedRevision: current().revision });
+      x.claimNext({ sessionId: h.session.id, runId: h.session.runId });
+      x.settleAttempt(fence(), 'unknown-successor', { kind: 'manual', outcome: 'unknown', decision: {
+        decisionId: 'unknown-successor', actor: { kind: 'installation_owner', id: 'installation_owner' },
+        action: 'confirm_result', evidenceRefs: ['test'], resourceChecks: []
+      } });
+      x.retryAttempt(fence(), { decisionId: 'human-retry', actor: { kind: 'installation_owner', id: 'installation_owner' },
+        action: 'retry', allowDuplicateEffects: true, evidenceRefs: ['test'], resourceChecks: [] }, []);
+    }
+    h.settleTask(taskId, 'completed', 'must not deliver this result');
+    const sql = new Database(h.database);
+    try {
+      if (scenario === 'manual_successor') sql.prepare("UPDATE task_attempts SET json=json_remove(json, '$.automaticRetry') WHERE id=?").run(successor.attemptId);
+      if (scenario === 'input_conflict') sql.prepare("UPDATE task_attempts SET json=json_set(json, '$.automaticRetry.inputDigest', ?) WHERE id=?").run('f'.repeat(64), successor.attemptId);
+      if (scenario === 'scope_conflict') sql.prepare("UPDATE task_attempts SET json=json_set(json, '$.sessionId', 'another-session') WHERE id=?").run(successor.attemptId);
+      if (scenario === 'missing_boundary') sql.prepare("DELETE FROM events WHERE attempt_id=? AND type='completed'").run(successor.attemptId);
+    } finally { sql.close(); }
+    if (scenario === 'admission_conflict') blocked.admission.request.prompt = 'conflicting admission prompt';
+    if (scenario === 'unrelated_block') blocked.blockReason = 'admission_conflict';
+    if (scenario === 'missing_frozen_attempt') delete blocked.runtimeAttemptId;
+    if (scenario === 'wrong_frozen_attempt') blocked.runtimeAttemptId = successor.attemptId;
+    if (scenario === 'already_delivered') blocked.delivery = { status: 'delivered', attempts: 1, updatedAt: blocked.updatedAt };
+    await h.repositories.config.set(key, JSON.stringify(blocked));
+    const fresh = await reopen(h, delivered);
+    await fresh.service.tick();
+    await fresh.service.tick();
+    expect(JSON.parse((await fresh.repositories.config.get(key))!)).toEqual(blocked);
+    expect(delivered).not.toHaveBeenCalled();
+    expect(fresh.runtime.dispatches).toHaveLength(0);
+  });
+
+  it.each((['schedule', 'ci'] as const).flatMap(kind => [false, true].map(restoreBoundary => ({ kind, restoreBoundary }))))('keeps original legacy $kind blocked when the first attempt boundary is restored: $restoreBoundary', async ({ kind, restoreBoundary }) => {
+    const delivered = vi.fn(async () => {});
+    let head = '';
+    const h = await fixture({ deliver: delivered, status: vi.fn(async () => ciStatus(head, [{ id: 89, conclusion: 'success' }])) as StatusMock });
+    head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
+    if (kind === 'schedule') await scheduled(h);
+    else await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
+    await h.service.tick();
+    const taskId = h.dispatches[0]!.id;
+    const result = h.settleTask(taskId);
+    const key = (await h.repositories.config.list!(kind === 'schedule' ? 'session_automation/occurrence/' : 'session_automation/ci/'))[0]!.key;
+    const raw = JSON.parse((await h.repositories.config.get(key))!);
+    const blocked = { ...raw, revision: raw.revision + 1, runtimeAttemptId: result.attemptId,
+      ...(kind === 'schedule' ? { runStatus: 'blocked' } : { status: 'blocked' }),
+      blockReason: 'legacy_output_unresolved', resultBoundary: 'legacy_output_unresolved',
+      delivery: { status: 'not_requested', attempts: 0, updatedAt: raw.updatedAt } };
+    await h.repositories.config.set(key, JSON.stringify(blocked));
+    const sql = new Database(h.database);
+    try {
+      const boundary = sql.prepare("SELECT * FROM events WHERE attempt_id=? AND type='completed'").get(result.attemptId) as Record<string, unknown>;
+      sql.prepare("DELETE FROM events WHERE attempt_id=? AND type='completed'").run(result.attemptId);
+      expect(readAttemptResult(h.repositories, h.session.id, taskId, result.attemptId)).toEqual({ status: 'blocked', reason: 'legacy_output_unresolved' });
+      if (restoreBoundary) {
+        const columns = Object.keys(boundary);
+        sql.prepare(`INSERT INTO events (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`).run(...Object.values(boundary));
+      }
+    } finally { sql.close(); }
+    const fresh = await reopen(h, delivered);
+    await fresh.service.tick();
+    await fresh.service.tick();
+    expect(JSON.parse((await fresh.repositories.config.get(key))!)).toEqual(blocked);
+    expect(delivered).not.toHaveBeenCalled();
+    expect(fresh.runtime.dispatches).toHaveLength(0);
   });
 });
