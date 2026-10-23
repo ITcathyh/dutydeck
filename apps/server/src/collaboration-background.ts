@@ -83,7 +83,7 @@ export class CollaborationBackground {
   private async finish(input: ScheduleExecutionInput, record: CollaborationAction, status: 'succeeded' | 'failed' | 'unknown', receipt?: string, error?: string) {
     if (!['succeeded', 'failed', 'suppressed'].includes(record.status)) await this.repo.updateAction(record.scope, record.id, { expectedRevision: record.revision, status, receipt, error }, input.writerFence());
   }
-  async execute(input: ScheduleExecutionInput & { resume: boolean }): Promise<ScheduleAgentResult> {
+  async execute(input: ScheduleExecutionInput & { resume: boolean; claimExecution(): Promise<void> }): Promise<ScheduleAgentResult> {
     const { scope, mandate } = input;
     const sessionId = sessionIdFor(input.actionId);
     let record = await this.repo.getAction(scope, sessionId);
@@ -119,6 +119,7 @@ export class CollaborationBackground {
     }
     const request = taskRequestV1Schema.parse(record.payload.request), taskId = executionTaskId(request.namespace, request.sessionId, request.key);
     if (taskId !== record.payload.taskId || request.sessionId !== sessionId || canonicalExecutionJson(request.actor) !== canonicalExecutionJson(this.actor(scope, record.requesterId))) throw denied();
+    if (!input.resume) { await this.assertRecord(record); await input.claimExecution(); }
     let accepted = this.options.repositories.execution.getAcceptedTask(taskId);
     if (!accepted) {
       if (record.status !== 'intent') return { status: 'unknown', error: '执行已提交但接受结果缺失，需要核对。' };

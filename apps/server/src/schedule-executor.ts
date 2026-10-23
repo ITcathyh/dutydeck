@@ -18,8 +18,8 @@ export interface ScheduleExecutorOptions {
   repositories: CollaborationRepositories;
   service: CollaborationService;
   authorize: CollaborationAuthorization;
-  /** resume=true must inspect the same durable task; never start a replacement task. */
-  executeAgent?: (input: ScheduleExecutionInput & { resume: boolean }) => Promise<ScheduleAgentResult>;
+  /** Persist the child before claimExecution; resume=true must inspect that same durable task. */
+  executeAgent?: (input: ScheduleExecutionInput & { resume: boolean; claimExecution(): Promise<void> }) => Promise<ScheduleAgentResult>;
   cancelAgent?: (input: ScheduleExecutionInput) => Promise<void>;
   deliver: (input: ScheduleExecutionInput & { text: string; claimDispatch(): Promise<void> }) => Promise<{ receipt: string }>;
   reconcile?: (input: ScheduleExecutionInput) => Promise<{ status: 'succeeded' | 'failed' | 'unknown'; receipt?: string; error?: string }>;
@@ -207,9 +207,9 @@ export class ScheduleExecutor {
     } catch (error) {
       await this.assertWriter(schedule, lease);
       if (!invalidated(error)) throw error;
-      if (agent && ['sending','unknown'].includes(agent.status)) {
-        if (!this.options.cancelAgent) return;
-        try { await this.options.cancelAgent(this.input(mandate, schedule, occurrence, (agent.payload.snapshot as CollaborationSnapshot | undefined) ?? snapshot, lease, agent, 'execute')); }
+      if (agent && ['intent','sending','unknown'].includes(agent.status)) {
+        if (!this.options.cancelAgent && agent.status !== 'intent') return;
+        try { await this.options.cancelAgent?.(this.input(mandate, schedule, occurrence, (agent.payload.snapshot as CollaborationSnapshot | undefined) ?? snapshot, lease, agent, 'execute')); }
         catch (error) { await this.assertWriter(schedule, lease); throw error; }
         await actionState(agent, 'suppressed', undefined, 'Delegation invalidated');
       }
@@ -227,14 +227,37 @@ export class ScheduleExecutor {
       if (agent.status === 'failed' || agent.status === 'suppressed') { await this.advance(occurrence, agent.status === 'failed' ? 'failed' : 'suppressed', lease, agent.error); return; }
       if (agent.status !== 'succeeded') {
         const resume = agent.status === 'sending' || agent.status === 'unknown';
-        if (!resume) agent = await actionState(agent, 'sending');
+        const intent = agent;
+        const input = this.input(mandate, schedule, occurrence, agent.payload.snapshot as CollaborationSnapshot, lease, agent, 'execute');
         let result: ScheduleAgentResult;
         if (this.closed) {
           if (!resume) { await actionState(agent, 'suppressed', undefined, 'Executor closed before Agent dispatch'); await this.advance(occurrence, 'suppressed', lease); }
           return;
         }
-        try { result = await this.options.executeAgent({ ...this.input(mandate, schedule, occurrence, agent.payload.snapshot as CollaborationSnapshot, lease, agent, 'execute'), resume }); }
-        catch (error) { result = { status: 'unknown', error: message(error) }; }
+        try { result = await this.options.executeAgent({ ...input, resume, claimExecution: async () => {
+          if (intent.status !== 'intent') throw new Error('Agent execution was already claimed');
+          await input.assertCurrent();
+          agent = await actionState(intent, 'sending');
+          if (this.closed) {
+            agent = await actionState(agent, 'suppressed', undefined, 'Executor closed before Agent dispatch');
+            await this.advance(occurrence, 'suppressed', lease);
+            throw stale();
+          }
+        } }); }
+        catch (error) {
+          await this.assertWriter(schedule, lease);
+          if (['suppressed'].includes(agent.status)) return;
+          if (agent.status === 'intent') {
+            if (invalidated(error)) {
+              await this.options.cancelAgent?.(input);
+              await actionState(agent, 'suppressed', undefined, message(error));
+              await this.advance(occurrence, 'suppressed', lease, message(error));
+            }
+            return;
+          }
+          result = { status: 'unknown', error: message(error) };
+        }
+        if (agent.status === 'intent' && !['failed', 'suppressed'].includes(result.status)) throw new Error('Agent execution returned without claiming execution');
         if (result.status === 'pending') {
           if (occurrence.state === 'unknown') await this.advance(occurrence, 'running', lease);
           return;

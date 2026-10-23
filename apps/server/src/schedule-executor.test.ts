@@ -247,9 +247,22 @@ it('does not resend an unknown delivery after restart; a receipt query settles i
   expect((await f.repos.collaboration.listActions(scope)).find(action => action.id.includes('delivery'))).toMatchObject({ status: 'succeeded' });
 });
 
+it.each(['pending', 'completed', 'unknown'] as const)('rejects an unclaimed %s Agent result while preserving the retryable intent', async status => {
+  const f = await fixture(); await f.create({ mode: 'agent' });
+  const executeAgent = vi.fn(async () => ({ status, text: 'Unclaimed result' }));
+  const run = f.executor({ executeAgent }); f.advance();
+  await expect(run.tick()).rejects.toThrow('Agent execution returned without claiming execution');
+  const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')!;
+  expect(action.status).toBe('intent'); expect(f.deliver).not.toHaveBeenCalled();
+  run.options.executeAgent = async input => { await input.claimExecution(); return { status: 'completed', text: 'Claimed result' }; };
+  await run.tick();
+  expect(await f.repos.collaboration.getAction(scope, action.id)).toMatchObject({ status: 'succeeded' });
+  expect(f.deliver).toHaveBeenCalledOnce();
+});
+
 it('resumes the same pending Agent action and sends its persisted result once', async () => {
   const f = await fixture(); await f.create({ mode: 'agent' });
-  const executeAgent = vi.fn(async input => { await input.assertCurrent(); return input.resume ? { status: 'completed' as const, text: 'Only the remaining section is missing', receipt: 'task-one' } : { status: 'pending' as const, receipt: 'task-one' }; });
+  const executeAgent = vi.fn(async input => { if (!input.resume) await input.claimExecution(); await input.assertCurrent(); return input.resume ? { status: 'completed' as const, text: 'Only the remaining section is missing', receipt: 'task-one' } : { status: 'pending' as const, receipt: 'task-one' }; });
   const run = f.executor({ executeAgent }); f.advance(); await run.tick();
   expect(f.deliver).not.toHaveBeenCalled();
   await run.tick(); await run.tick();
@@ -265,6 +278,7 @@ it('keeps unchanged unknown occurrences stable and reconciles the same Agent onc
   const { mandate } = await f.create({ mode: 'agent', trigger: { kind: 'at', localDateTime: '2026-09-20T05:31:00' } });
   let completed = false;
   const executeAgent = vi.fn(async input => {
+    if (!input.resume) await input.claimExecution();
     await input.assertCurrent();
     return completed ? { status: 'completed' as const, text: 'Original result', receipt: 'task-one' }
       : { status: 'unknown' as const, receipt: 'task-one', error: 'reconcile_required' };
@@ -289,7 +303,7 @@ it('keeps unchanged unknown occurrences stable and reconciles the same Agent onc
 
 it('cancels the old pending Agent after delegation cancellation and suppresses its result', async () => {
   const f = await fixture(); const { mandate } = await f.create({ mode: 'agent' });
-  const executeAgent = vi.fn(async () => ({ status: 'pending' as const, receipt: 'task-one' })), cancelAgent = vi.fn(async () => {});
+  const executeAgent = vi.fn(async input => { if (!input.resume) await input.claimExecution(); return { status: 'pending' as const, receipt: 'task-one' }; }), cancelAgent = vi.fn(async () => {});
   const run = f.executor({ executeAgent, cancelAgent }); f.advance(); await run.tick();
   await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 1, status: 'cancelled' });
   await run.tick(); expect(cancelAgent).toHaveBeenCalledTimes(1);
@@ -327,7 +341,7 @@ it('renews the held lease across ticks without appending schedule_lease version 
 it('delivers the frozen scheduled summary when an unrelated follow-up is added during analysis', async () => {
   const f = await fixture(); await f.create({ mode: 'agent' });
   let completed = false;
-  const run = f.executor({ executeAgent: async () => completed ? { status: 'completed', text: 'Old summary' } : { status: 'pending' } });
+  const run = f.executor({ executeAgent: async input => { if (!input.resume) await input.claimExecution(); return completed ? { status: 'completed', text: 'Old summary' } : { status: 'pending' }; } });
   f.advance(); await run.tick();
   await f.service.createFollowup(scope, 'requester', { id: 'new', goal: 'New information' }); completed = true;
   await run.tick(); await run.tick(); expect(f.deliver).toHaveBeenCalledOnce();
@@ -342,6 +356,7 @@ it.each(['human', 'bot'] as const)('delivers the original scheduled summary afte
   await f.create({ mode: 'agent' });
   let completed = false;
   const executeAgent = vi.fn(async (input: Parameters<NonNullable<ScheduleExecutorOptions['executeAgent']>>[0]) => {
+    if (!input.resume) await input.claimExecution();
     await input.assertCurrent(); return completed ? { status: 'completed' as const, text: 'ATLAS recovered after three timeouts' } : { status: 'pending' as const };
   });
   const run = f.executor({ executeAgent }); f.advance(); await run.tick();
@@ -361,7 +376,7 @@ it.each(['execute', 'deliver', 'completed', 'progress', 'paused', 'deliveryPause
   const { followup } = await f.service.createFollowup(scope, 'requester', { id: 'tracked', goal: 'Finish the material' });
   const { mandate } = await f.create({ mode: 'agent', followupId: followup.id, condition: 'followup_open' });
   let completed = false, revoked = false;
-  const run = f.executor({ authorize: async (_scope, _actor, action) => !(revoked && action === change), cancelAgent: async () => {}, executeAgent: async () => completed ? { status: 'completed', text: 'Do not send' } : { status: 'pending' } });
+  const run = f.executor({ authorize: async (_scope, _actor, action) => !(revoked && action === change), cancelAgent: async () => {}, executeAgent: async input => { if (!input.resume) await input.claimExecution(); return completed ? { status: 'completed', text: 'Do not send' } : { status: 'pending' }; } });
   f.advance(); await run.tick();
   await f.repos.collaboration.observe({ scope, source: 'lark.message', eventId: 'new-chat', occurredAt: f.now().toISOString(), receivedAt: f.now().toISOString(), senderKind: 'human', text: 'Unrelated discussion', refs: [], origin: 'live', missing: [] });
   if (change === 'execute' || change === 'deliver') revoked = true;
@@ -379,7 +394,7 @@ it('checks original history coverage even when model input truncation adds its o
   await f.repos.collaboration.saveBootstrap({ scope, status: 'complete', missing: [], updatedAt: f.now().toISOString() });
   await f.repos.collaboration.observe({ scope, source: 'lark.message', eventId: 'large-message', occurredAt: f.now().toISOString(), receivedAt: f.now().toISOString(), senderKind: 'human', text: 'x'.repeat(12_000), refs: [], origin: 'live', missing: [] });
   await f.create({ mode: 'agent' });
-  const executeAgent = vi.fn(async () => ({ status: 'completed' as const, text: 'Bounded summary' }));
+  const executeAgent = vi.fn(async input => { if (!input.resume) await input.claimExecution(); return { status: 'completed' as const, text: 'Bounded summary' }; });
   f.advance(); await f.executor({ executeAgent }).tick();
   expect(f.deliver).toHaveBeenCalledOnce();
   expect(f.deliver.mock.calls[0]![0].snapshot.bootstrap?.status).toBe('partial');
@@ -425,7 +440,7 @@ it('restarts the no-progress window after partial progress and subsequently remi
 
 it('uses one live writer and resumes an Agent across lease takeover without replacing its action', async () => {
   const f = await fixture(); await f.create({ mode: 'agent', trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.now().toISOString() } });
-  const executeAgent = vi.fn(async input => input.resume ? { status: 'completed' as const, text: 'x'.repeat(9000) } : { status: 'pending' as const });
+  const executeAgent = vi.fn(async input => { if (!input.resume) await input.claimExecution(); return input.resume ? { status: 'completed' as const, text: 'x'.repeat(9000) } : { status: 'pending' as const }; });
   const first = f.executor({ executeAgent }), other = f.executor({ executeAgent, holderId: 'other' });
   f.advance(600_000); await first.tick(); await other.tick(); expect(executeAgent).toHaveBeenCalledTimes(1);
   first.close(); f.advance(61_000); await other.tick();
@@ -471,7 +486,7 @@ it.each(['pending', 'unknown'] as const)('fairly runs the 21st delegation while 
   const f = await fixture();
   for (let index = 0; index < 20; index++) await f.create({ id: `blocked-${index}`, mode: 'agent' });
   await f.create({ id: 'tail' });
-  const executeAgent = vi.fn(async () => ({ status }));
+  const executeAgent = vi.fn(async input => { if (!input.resume) await input.claimExecution(); return { status }; });
   const run = f.executor({ executeAgent }); f.advance();
   await run.tick();
   expect(executeAgent).toHaveBeenCalledTimes(20); expect(f.deliver).not.toHaveBeenCalled();
@@ -487,7 +502,7 @@ it('fairly stops the 21st cancelled Agent while the first 20 remain pending', as
   const f = await fixture();
   for (let index = 0; index < 20; index++) await f.create({ id: `blocked-${index}`, mode: 'agent' });
   const { mandate } = await f.create({ id: 'tail', mode: 'agent' });
-  const executeAgent = vi.fn(async (_input: Parameters<NonNullable<ScheduleExecutorOptions['executeAgent']>>[0]) => ({ status: 'pending' as const }));
+  const executeAgent = vi.fn(async (input: Parameters<NonNullable<ScheduleExecutorOptions['executeAgent']>>[0]) => { if (!input.resume) await input.claimExecution(); return { status: 'pending' as const }; });
   const cancelAgent = vi.fn(async (_input: Parameters<NonNullable<ScheduleExecutorOptions['cancelAgent']>>[0]) => {});
   const run = f.executor({ executeAgent, cancelAgent }); f.advance();
   await run.tick(); await run.tick();
@@ -507,6 +522,7 @@ it.each(['mandate', 'group'] as const)('continues the same pending Agent while %
   const f = await fixture(); const { mandate, schedule } = await f.create({ mode: 'agent' });
   let completed = false;
   const executeAgent = vi.fn(async (input: Parameters<NonNullable<ScheduleExecutorOptions['executeAgent']>>[0]) => {
+    if (!input.resume) await input.claimExecution();
     await input.assertCurrent(); return completed ? { status: 'completed' as const, text: 'Analysis saved' } : { status: 'pending' as const };
   });
   const cancelAgent = vi.fn(async () => {});
@@ -532,7 +548,7 @@ it.each(['mandate', 'group'] as const)('starts authorized analysis with %s notif
   const f = await fixture(); const { mandate } = await f.create({ mode: 'agent' });
   if (level === 'mandate') await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 1, deliveryPaused: true });
   else await f.service.updateSettings(scope, 'requester', { expectedRevision: 0, notificationsPaused: true });
-  const executeAgent = vi.fn(async (input: Parameters<NonNullable<ScheduleExecutorOptions['executeAgent']>>[0]) => { await input.assertCurrent(); return { status: 'completed' as const, text: 'Analysis saved' }; });
+  const executeAgent = vi.fn(async (input: Parameters<NonNullable<ScheduleExecutorOptions['executeAgent']>>[0]) => { if (!input.resume) await input.claimExecution(); await input.assertCurrent(); return { status: 'completed' as const, text: 'Analysis saved' }; });
   const run = f.executor({ executeAgent }); f.advance(); await run.tick();
   expect(executeAgent).toHaveBeenCalledTimes(1); expect(f.deliver).not.toHaveBeenCalled();
   expect((await f.repos.collaboration.listActions(scope)).find(action => action.kind === 'schedule_agent')).toMatchObject({ status: 'succeeded' });
@@ -540,7 +556,7 @@ it.each(['mandate', 'group'] as const)('starts authorized analysis with %s notif
 
 it('still fences and physically stops pending work on execution pause after a delivery-only toggle', async () => {
   const f = await fixture(); const { mandate, schedule } = await f.create({ mode: 'agent' });
-  const executeAgent = vi.fn(async () => ({ status: 'pending' as const })), cancelAgent = vi.fn(async () => {});
+  const executeAgent = vi.fn(async input => { if (!input.resume) await input.claimExecution(); return { status: 'pending' as const }; }), cancelAgent = vi.fn(async () => {});
   const run = f.executor({ executeAgent, cancelAgent }); f.advance(); await run.tick();
   await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 1, deliveryPaused: true });
   await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 2, status: 'paused' });
@@ -560,7 +576,7 @@ it('matches delivery-only revisions but rejects changed execution identity and i
 
 it('still stops pending analysis when group execution instructions change', async () => {
   const f = await fixture(); await f.create({ mode: 'agent' });
-  const executeAgent = vi.fn(async () => ({ status: 'pending' as const })), cancelAgent = vi.fn(async () => {});
+  const executeAgent = vi.fn(async input => { if (!input.resume) await input.claimExecution(); return { status: 'pending' as const }; }), cancelAgent = vi.fn(async () => {});
   const run = f.executor({ executeAgent, cancelAgent }); f.advance(); await run.tick();
   await f.service.updateSettings(scope, 'requester', { expectedRevision: 0, instructions: 'Use the revised instructions' });
   await run.tick();
@@ -572,6 +588,7 @@ it.each(['mandate', 'group'] as const)('delivers one original result when %s not
   const f = await fixture(); const { mandate } = await f.create({ mode: 'agent' });
   let completed = false;
   const executeAgent = vi.fn(async (input: Parameters<NonNullable<ScheduleExecutorOptions['executeAgent']>>[0]) => {
+    if (!input.resume) await input.claimExecution();
     await input.assertCurrent(); return completed ? { status: 'completed' as const, text: 'Original analysis' } : { status: 'pending' as const };
   });
   const cancelAgent = vi.fn(async () => {});
@@ -600,7 +617,7 @@ it.each(['message', 'progress', 'bootstrap'] as const)('uses frozen scheduled ma
   const { followup } = await f.service.createFollowup(scope, 'requester', { id: 'tracked', goal: 'Collect remaining material' });
   const { mandate } = await f.create({ mode: 'agent', followupId: followup.id });
   let completed = false;
-  const run = f.executor({ executeAgent: async () => completed ? { status: 'completed', text: 'Old analysis' } : { status: 'pending' } });
+  const run = f.executor({ executeAgent: async input => { if (!input.resume) await input.claimExecution(); return completed ? { status: 'completed', text: 'Old analysis' } : { status: 'pending' }; } });
   f.advance(); await run.tick();
   await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 1, deliveryPaused: true });
   if (change === 'message') await f.repos.collaboration.observe({ scope, source: 'lark', eventId: 'new-message', occurredAt: f.now().toISOString(), receivedAt: f.now().toISOString(), senderKind: 'human', text: 'The requirements have changed', refs: [], origin: 'live', missing: [] });
@@ -620,7 +637,7 @@ it.each(['missing', 'status', 'timestamp'] as const)('checks bootstrap %s withou
   await f.repos.collaboration.saveBootstrap(bootstrap);
   await f.create({ mode: 'agent' });
   let completed = false;
-  const run = f.executor({ executeAgent: async () => completed ? { status: 'completed', text: 'Analysis' } : { status: 'pending' } });
+  const run = f.executor({ executeAgent: async input => { if (!input.resume) await input.claimExecution(); return completed ? { status: 'completed', text: 'Analysis' } : { status: 'pending' }; } });
   f.advance(); await run.tick(); const before = await f.repos.collaboration.snapshot(scope);
   f.advance(1);
   await f.repos.collaboration.saveBootstrap({ ...bootstrap, status: change === 'status' ? 'partial' : 'complete', missing: change === 'missing' ? ['An earlier page is unavailable'] : [], updatedAt: f.now().toISOString() });
@@ -704,8 +721,8 @@ it('drains an accepted provider send on close and persists its actual receipt be
 
 it('blocks Agent dispatch when closing races the persisted sending claim', async () => {
   const f = await fixture(); await f.create({ mode: 'agent' });
-  const executeAgent = vi.fn(async () => ({ status: 'completed' as const, text: 'must not start' }));
-  const run = f.executor({ executeAgent });
+  const executeAgent = vi.fn(async (_input: Parameters<NonNullable<ScheduleExecutorOptions['executeAgent']>>[0]) => ({ status: 'completed' as const, text: 'must not start' }));
+  const run = f.executor({ executeAgent: async input => { await input.claimExecution(); return executeAgent(input); } });
   const update = f.repos.collaboration.updateAction.bind(f.repos.collaboration);
   let closing: Promise<void> | undefined;
   vi.spyOn(f.repos.collaboration, 'updateAction').mockImplementation(async (scope, id, patch, fence) => {
@@ -753,7 +770,7 @@ it('preserves an unsent intent across lease expiry and lets the next writer deli
 
 it('does not cancel or suppress the same healthy Agent after another writer takes over', async () => {
   const f = await fixture(); await f.create({ mode: 'agent', trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.now().toISOString() } });
-  const executeAgent = vi.fn(async (_input: Parameters<NonNullable<ScheduleExecutorOptions['executeAgent']>>[0]) => ({ status: 'pending' as const, receipt: 'same-task' }));
+  const executeAgent = vi.fn(async (input: Parameters<NonNullable<ScheduleExecutorOptions['executeAgent']>>[0]) => { if (!input.resume) await input.claimExecution(); return { status: 'pending' as const, receipt: 'same-task' }; });
   const cancelAgent = vi.fn(async () => {});
   const old = f.executor({ executeAgent, cancelAgent });
   f.advance(600_000); await old.tick();
@@ -782,7 +799,7 @@ it('rechecks the writer after asynchronous authorization crosses the lease expir
 
 it('leaves healthy work unchanged when an authorization read throws', async () => {
   const f = await fixture(); await f.create({ mode: 'agent' });
-  const executeAgent = vi.fn(async () => ({ status: 'pending' as const })), cancelAgent = vi.fn(async () => {});
+  const executeAgent = vi.fn(async input => { if (!input.resume) await input.claimExecution(); return { status: 'pending' as const }; }), cancelAgent = vi.fn(async () => {});
   const run = f.executor({ executeAgent, cancelAgent }); f.advance(); await run.tick();
   const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')!;
   run.options.authorize = async () => { throw new Error('authorization temporarily unavailable'); };

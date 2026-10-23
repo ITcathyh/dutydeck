@@ -1232,16 +1232,159 @@ it('uses the original frozen instructions to revoke and stop the real pending ba
   expect(await f.repos.collaboration.getAction(scope, sessionId)).toMatchObject({ status: 'suppressed' });
 });
 
-it('does not manufacture a replacement admission after losing the writer before its background record becomes durable', async () => {
-  const f = await fixture(); await f.create('pre-admission-expiry');
+it('recovers the same occurrence after the writer expires before its background record becomes durable and continues future periods', async () => {
+  const f = await fixture(); const { mandate } = await f.collaboration.service.createMandate(scope, 'ou_alice', { id: 'pre-admission-expiry', goal: 'Check', mode: 'agent', prompt: 'Frozen preparation', trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.collaboration.scheduler.options.now!().toISOString() }, timezone: 'UTC' });
   const resolve = f.collaboration.background.options.resolveConfig;
-  f.collaboration.background.options.resolveConfig = async target => { const config = await resolve(target); f.advance(61_000); return config; };
-  f.advance(); await f.collaboration.scheduler.tick();
+  let delay = true;
+  f.collaboration.background.options.resolveConfig = async target => { const config = await resolve(target); if (delay) { delay = false; f.advance(61_000); } return config; };
+  f.advance(600_000); await f.collaboration.scheduler.tick();
   expect(f.calls).toHaveLength(0);
   expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution')).toBeUndefined();
+  const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')!;
+  const occurrence = (await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId))[0]!;
+  expect(action.status).toBe('intent');
+  const successor = new ScheduleExecutor({ ...f.collaboration.scheduler.options, holderId: 'successor' });
+  try {
+    await successor.tick(); await eventually(async () => f.calls.length === 1);
+    const sessionId = f.calls[0]!.sessionId, task = (await f.runtime.getTasks(sessionId))[0]!;
+    f.calls[0]!.finish('Recovered original preparation');
+    await eventually(async () => (await f.runtime.getTasks(sessionId))[0]?.status === 'completed');
+    await successor.tick(); await successor.tick();
+    expect(await f.repos.collaboration.getAction(scope, action.id)).toMatchObject({ status: 'succeeded' });
+    expect(await f.repos.scheduleOccurrences.get(occurrence.id)).toMatchObject({ state: 'settled' });
+    expect(f.client.send).toHaveBeenCalledOnce();
+    expect(f.calls).toHaveLength(1); expect((await f.runtime.getTasks(sessionId)).map(item => item.id)).toEqual([task.id]);
+    f.advance(600_000); await successor.tick(); await eventually(async () => f.calls.length === 2);
+    f.calls[1]!.finish('Next period');
+    await eventually(async () => (await f.runtime.getTasks(f.calls[1]!.sessionId))[0]?.status === 'completed');
+    await successor.tick(); expect(f.client.send).toHaveBeenCalledTimes(2);
+  } finally { await successor.close(); }
+});
+
+it('reuses the frozen durable child when a successor claims execution before the preparing writer returns', async () => {
+  const f = await fixture(); await f.collaboration.service.createMandate(scope, 'ou_alice', { id: 'prepared-takeover', goal: 'Check', mode: 'agent', prompt: 'Frozen preparation',
+    trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.collaboration.scheduler.options.now!().toISOString() }, timezone: 'UTC' });
+  const config = vi.spyOn(f.collaboration.background.options, 'resolveConfig');
+  const repository = f.collaboration.background.options.repositories.collaboration;
+  const begin = repository.beginAction.bind(repository);
+  let enter!: () => void, release!: () => void, paused = false;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+  const spy = vi.spyOn(repository, 'beginAction').mockImplementation(async (...args) => {
+    const result = await begin(...args);
+    if (args[0].kind === 'agent_execution' && !paused) { paused = true; enter(); await gate; }
+    return result;
+  });
+  f.advance(600_000); const oldTick = f.collaboration.scheduler.tick(); await entered;
+  const child = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution')!;
+  const outer = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')!;
+  expect(child.status).toBe('intent'); expect(outer.status).toBe('intent');
+  expect(f.calls).toHaveLength(0); expect(await f.runtime.getSession(child.id)).toBeUndefined();
+  f.advance(61_000);
+  const successor = new ScheduleExecutor({ ...f.collaboration.scheduler.options, holderId: 'successor' });
+  try {
+    await successor.tick(); await eventually(async () => f.calls.length === 1);
+    release(); await oldTick;
+    expect(config).toHaveBeenCalledOnce();
+    expect((await f.repos.collaboration.getAction(scope, child.id))?.payload).toEqual(child.payload);
+    expect(f.calls[0]!.sessionId).toBe(child.id);
+    expect((await f.runtime.getTasks(child.id)).map(task => task.id)).toEqual([child.payload.taskId]);
+    f.calls[0]!.finish('One frozen admission');
+    await eventually(async () => (await f.runtime.getTasks(child.id))[0]?.status === 'completed');
+    await successor.tick(); await successor.tick();
+    expect(f.calls).toHaveLength(1); expect(f.client.send).toHaveBeenCalledOnce();
+    expect(await f.repos.collaboration.getAction(scope, outer.id)).toMatchObject({ status: 'succeeded' });
+  } finally { release(); await oldTick; spy.mockRestore(); config.mockRestore(); await successor.close(); }
+});
+
+it('keeps an unclaimed Agent intent retryable after a configuration reader throws', async () => {
+  const f = await fixture(); await f.create('prepare-read-error');
+  const resolve = f.collaboration.background.options.resolveConfig;
+  f.collaboration.background.options.resolveConfig = async () => { throw new Error('configuration reader unavailable'); };
+  f.advance(); await f.collaboration.scheduler.tick();
+  const outer = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')!;
+  expect(outer.status).toBe('intent'); expect(f.calls).toHaveLength(0);
+  expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution')).toBeUndefined();
+  f.collaboration.background.options.resolveConfig = resolve;
+  await f.collaboration.scheduler.tick(); await eventually(async () => f.calls.length === 1);
+  const sessionId = f.calls[0]!.sessionId;
+  f.calls[0]!.finish('Recovered the original preparation');
+  await eventually(async () => (await f.runtime.getTasks(sessionId))[0]?.status === 'completed');
+  await f.collaboration.scheduler.tick(); await f.collaboration.scheduler.tick();
+  expect(f.calls).toHaveLength(1); expect(f.client.send).toHaveBeenCalledOnce();
+  expect(await f.repos.collaboration.getAction(scope, outer.id)).toMatchObject({ status: 'succeeded' });
+});
+
+it.each(['sending', 'unknown'] as const)('does not rebuild a missing child for a historical %s outer action', async status => {
+  const f = await fixture(); await f.create(`historical-missing-${status}`);
+  let input!: Parameters<NonNullable<typeof f.collaboration.scheduler.options.executeAgent>>[0];
+  const execute = f.collaboration.scheduler.options.executeAgent!;
+  f.collaboration.scheduler.options.executeAgent = async value => { input = value; throw new Error('leave preparation unclaimed'); };
+  f.advance(); await f.collaboration.scheduler.tick();
+  // Fault injection models an older ledger record whose dispatch history is not proven.
+  let outer = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')!;
+  outer = await f.repos.collaboration.updateAction(scope, outer.id, { expectedRevision: outer.revision, status: 'sending' }, input.writerFence());
+  if (status === 'unknown') outer = await f.repos.collaboration.updateAction(scope, outer.id, { expectedRevision: outer.revision, status }, input.writerFence());
+  f.collaboration.scheduler.options.executeAgent = execute;
+  const config = vi.spyOn(f.collaboration.background.options, 'resolveConfig');
+  f.advance(61_000);
   const successor = new ScheduleExecutor({ ...f.collaboration.scheduler.options, holderId: 'successor' });
   try { await successor.tick(); await successor.tick(); } finally { await successor.close(); }
-  expect(f.calls).toHaveLength(0);
-  expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')).toMatchObject({ status: 'unknown' });
-  expect(f.client.send).not.toHaveBeenCalled();
+  expect(config).not.toHaveBeenCalled(); config.mockRestore();
+  expect(f.calls).toHaveLength(0); expect(f.client.send).not.toHaveBeenCalled();
+  expect((await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution')).toBeUndefined();
+  expect(await f.repos.collaboration.getAction(scope, outer.id)).toMatchObject({ status: 'unknown' });
+});
+
+it.each(['sending', 'unknown'] as const)('resumes the exact child intent from a %s outer action before any Runtime session was started', async status => {
+  const f = await fixture(); await f.collaboration.service.createMandate(scope, 'ou_alice', { id: `claimed-child-intent-${status}`, goal: 'Check', mode: 'agent', prompt: 'Frozen preparation',
+    trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.collaboration.scheduler.options.now!().toISOString() }, timezone: 'UTC' });
+  const config = vi.spyOn(f.collaboration.background.options, 'resolveConfig');
+  const start = vi.spyOn(f.runtime, 'startBackgroundSession').mockRejectedValueOnce(new Error('crash before session creation'));
+  const repository = f.collaboration.background.options.repositories.collaboration;
+  const update = repository.updateAction.bind(repository);
+  const outcome = vi.spyOn(repository, 'updateAction').mockImplementation(async (...args) => {
+    if (status === 'sending' && args[1].startsWith('collaboration_agent_') && args[2].status === 'unknown') throw new Error('crash before persisting outer outcome');
+    return update(...args);
+  });
+  f.advance(600_000);
+  if (status === 'sending') await expect(f.collaboration.scheduler.tick()).rejects.toThrow('crash before persisting outer outcome');
+  else await f.collaboration.scheduler.tick();
+  const child = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution')!;
+  const outer = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_agent')!;
+  expect(child.status).toBe('intent'); expect(outer.status).toBe(status);
+  expect(f.calls).toHaveLength(0); expect(await f.runtime.getSession(child.id)).toBeUndefined();
+  f.advance(61_000);
+  const successor = new ScheduleExecutor({ ...f.collaboration.scheduler.options, holderId: 'successor' });
+  try {
+    await successor.tick(); await eventually(async () => f.calls.length === 1);
+    expect(config).toHaveBeenCalledOnce();
+    expect((await f.repos.collaboration.getAction(scope, child.id))?.payload).toEqual(child.payload);
+    expect((await f.runtime.getTasks(child.id)).map(task => task.id)).toEqual([child.payload.taskId]);
+    f.calls[0]!.finish('Recovered known unsubmitted admission');
+    await eventually(async () => (await f.runtime.getTasks(child.id))[0]?.status === 'completed');
+    await successor.tick(); await successor.tick();
+    expect(f.calls).toHaveLength(1); expect(f.client.send).toHaveBeenCalledOnce();
+  } finally { start.mockRestore(); config.mockRestore(); outcome.mockRestore(); await successor.close(); }
+});
+
+it.each(['sending', 'unknown'] as const)('does not resubmit a %s child without durable Runtime acceptance', async status => {
+  const f = await fixture(); await f.create(`uncertain-child-${status}`);
+  const repository = f.collaboration.background.options.repositories.collaboration;
+  const update = repository.updateAction.bind(repository);
+  const outcome = vi.spyOn(repository, 'updateAction').mockImplementation(async (...args) => {
+    if (status === 'sending' && args[1].startsWith('ses_collab_') && args[2].status === 'unknown') throw new Error('crash before persisting dispatch outcome');
+    return update(...args);
+  });
+  const dispatch = vi.spyOn(f.runtime, 'dispatchRequest').mockRejectedValue(new Error('dispatch acceptance unknown'));
+  f.advance(); await f.collaboration.scheduler.tick();
+  const child = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution')!;
+  expect(child.status).toBe(status);
+  expect(f.repos.execution.getAcceptedTask(String(child.payload.taskId))).toBeUndefined();
+  f.advance(61_000);
+  const successor = new ScheduleExecutor({ ...f.collaboration.scheduler.options, holderId: 'successor' });
+  try {
+    await successor.tick(); await successor.tick();
+    expect(dispatch).toHaveBeenCalledOnce(); expect(f.calls).toHaveLength(0); expect(f.client.send).not.toHaveBeenCalled();
+    expect(await f.repos.collaboration.getAction(scope, child.id)).toEqual(child);
+  } finally { await successor.close(); dispatch.mockRestore(); outcome.mockRestore(); }
 });
