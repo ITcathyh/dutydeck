@@ -627,7 +627,14 @@ export const migrations: Migration[] = [
     if (tableExistsForMigration(db, 'events')) db.exec(`CREATE INDEX events_session_status ON events(session_id,sequence)
       WHERE type='status'`);
   } },
-  { version: 42, name: 'automation_and_relay_read_indexes', up: createConfigReadIndexes }
+  { version: 42, name: 'automation_and_relay_read_indexes', up: createConfigReadIndexes },
+  { version: 43, name: 'permission_receipt_read_index', up(db) {
+    if (!tableExistsForMigration(db, 'events')) return;
+    // Older event rows have no JSON validity constraint; keep upgrades additive.
+    db.exec(`CREATE INDEX events_permission_request ON events(session_id,task_id,
+      CASE WHEN json_valid(data) THEN json_extract(data,'$.id') END,sequence)
+      WHERE type='permission_request'`);
+  } }
 ]
 
 /** v38：collaboration_duties 加 scenarios_json 列，把旧的 alarm_json 转进去。 */

@@ -1159,6 +1159,7 @@ export class DutydeckRuntime {
     await this.mutations.write(id, async () => this.localResources.gone(driver, 'terminal-attach-found-no-pane'));
   }
   getEvents(id: string, after = 0) { return this.repos.events.list(id, after); }
+  getLatestPermissionRequest(id: string, taskId: string, nativeId: string) { return this.repos.events.getLatestPermissionRequest(id, taskId, nativeId); }
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }
   getEventWindow(id: string, options?: EventWindowOptions) { return this.repos.events.listWindow(id, options); }
   async getTasks(id: string) { return (await this.repos.tasks.listBySession(id)).map(task => this.publicTask(task)); }

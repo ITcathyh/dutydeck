@@ -1,4 +1,5 @@
 import { useTimelineDisclosure } from '../timeline-disclosure';
+import { memo } from 'react';
 import { BookOpen, BrainCircuit, ChevronDown, ChevronRight, Database, FilePenLine, FlaskConical, GitBranch, Globe2, LoaderCircle, Search, Terminal, Users, Wrench } from 'lucide-react';
 import type { TimelineActivityGroup, TimelineEvent } from '../timeline';
 import { CodeBlock, MarkdownContent } from '../MarkdownContent';
@@ -23,7 +24,7 @@ export function ToolKindIcon({ kind, size = 14 }: { kind: ToolKind; size?: numbe
   return <Wrench size={size}/>;
 }
 
-export function ToolCard({ event, ongoing = false, preferDescription = true }: { event: TimelineEvent; ongoing?: boolean; preferDescription?: boolean }) {
+export const ToolCard = memo(function ToolCard({ event, ongoing = false, preferDescription = true }: { event: TimelineEvent; ongoing?: boolean; preferDescription?: boolean }) {
   const data = event.data; const done = data.status === 'completed'; const failed = data.status === 'failed'; const terminal = done || failed;
   const [open, setOpen] = useTimelineDisclosure(`tool:${event.id}`, ongoing && !terminal); const hasDetails = data.input !== undefined || data.output !== undefined;
   const presentation = toolPresentation(data);
@@ -39,7 +40,11 @@ export function ToolCard({ event, ongoing = false, preferDescription = true }: {
     </button>
     {open && hasDetails && <div className="mb-2 ml-7 border-l border-default pl-3"><CodeBlock className="language-json" code={detailJson}/></div>}
   </div>;
-}
+}, (previous, next) => previous.event === next.event
+  && previous.ongoing === next.ongoing && previous.preferDescription === next.preferDescription
+  // 运行中或缺少固定结束时间的卡片仍跟随父组件刷新耗时。
+  && (next.event.data.status === 'completed' || next.event.data.status === 'failed')
+  && Boolean(next.event.data.completedAt ?? next.event.timestamp));
 
 export function ToolBatch({ description, events, ongoing = false }: { description: string; events: TimelineEvent[]; ongoing?: boolean }) {
   const [open, setOpen] = useTimelineDisclosure(`batch:${events[0]?.id}`, ongoing && events.some(event => event.data.status !== 'completed' && event.data.status !== 'failed'));

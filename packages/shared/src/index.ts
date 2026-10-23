@@ -415,6 +415,7 @@ export interface EventRepository {
   append(event: AgentEvent): Promise<void>;
   list(sessionId: string, afterSequence?: number): Promise<AgentEvent[]>;
   listRecent(sessionId: string, limit: number): Promise<AgentEvent[]>;
+  getLatestPermissionRequest(sessionId: string, taskId: string, nativeId: string): Promise<AgentEvent | undefined>;
   /** Latest context and each quota window, independent of the timeline window. */
   listLatestUsage?(sessionId: string): Promise<AgentEvent[]>;
   /** 有硬上限的游标窗口；无论查询方向如何，结果均按 sequence 升序。 */

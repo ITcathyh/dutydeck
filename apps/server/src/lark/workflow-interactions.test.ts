@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { RelayAskBroker, type RelayAskChoice } from '@dutydeck/relay';
 import { createRepositories } from '@dutydeck/storage';
+import { DutydeckRuntime } from '@dutydeck/runtime';
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { buildLarkCard, createLarkCardService, larkCardSafeLimits } from './service.js';
 import { defaultHighRiskPattern } from './config.js';
@@ -1773,6 +1774,27 @@ describe('permission cards follow authoritative Runtime decisions from every ent
     } finally { workflow.close(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
   };
 
+  it('queries a missing receipt once per reconciliation with a legacy runtime', async () => {
+    await withPermission(async h => {
+      h.events.splice(0);
+      h.runtime.getEvents.mockClear();
+      await persistInteraction(h.repositories.config, { ...h.record, state: 'expired', cardClosedAt: new Date().toISOString() });
+      await h.workflow.reconcile('app_one');
+      expect(h.runtime.getEvents).toHaveBeenCalledExactlyOnceWith('ses_one');
+    });
+  });
+
+  it('uses one directed lookup when the receipt is missing and never reads the timeline', async () => {
+    await withPermission(async h => {
+      h.runtime.getLatestPermissionRequest = vi.fn(async () => undefined);
+      h.runtime.getEvents.mockClear();
+      await persistInteraction(h.repositories.config, { ...h.record, state: 'expired', cardClosedAt: new Date().toISOString() });
+      await h.workflow.reconcile('app_one');
+      expect(h.runtime.getLatestPermissionRequest).toHaveBeenCalledExactlyOnceWith('ses_one', 'task_one', 'native_web');
+      expect(h.runtime.getEvents).not.toHaveBeenCalled();
+    });
+  });
+
   it.each(['approved', 'rejected'] as const)('closes the original permission card after an external %s event', async status => {
     await withPermission(async h => {
       h.permissions.splice(0);
@@ -1857,5 +1879,80 @@ describe('permission cards follow authoritative Runtime decisions from every ent
       expect(await h.workflow.get('app_one', h.record.id)).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
       expect(h.service.update.mock.calls.at(-1)[0]).toMatchObject({ statusLabel: '已过期' });
     });
+  });
+});
+
+
+describe('indexed permission receipts through the real runtime and SQLite', () => {
+  it('keeps one callback owner when an indexed decision arrives during concurrent approvals', async () => {
+    const { directory, repositories } = await openDatabase();
+    const permissions: PermissionRequestData[] = [{ id: 'indexed_concurrent', title: '执行命令', status: 'pending' }];
+    const gate = deferred();
+    const { service } = makeService();
+    let workflow!: LarkWorkflowInteractions;
+    const resolvePermission = vi.fn(async () => {
+      await gate.promise;
+      permissions.splice(0);
+      const decision = agentEvent('permission_request', { id: 'indexed_concurrent', status: 'approved' }, { id: 'decision', taskId: 'task_one', sequence: 2 });
+      await repositories.events.append(decision);
+      await workflow.observe(context(), decision);
+      await workflow.reconcile('app_one');
+      return true;
+    });
+    const { runtime } = makeRuntime([runningTask()], permissions, resolvePermission);
+    const eventRuntime = new DutydeckRuntime(repositories);
+    runtime.getLatestPermissionRequest = eventRuntime.getLatestPermissionRequest.bind(eventRuntime);
+    runtime.getEvents = vi.fn(async () => { throw new Error('Unexpected full timeline read'); });
+    workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+    try {
+      const pending = agentEvent('permission_request', permissions[0], { taskId: 'task_one' });
+      await repositories.events.append(pending);
+      await workflow.observe(context(), pending);
+      const record = (await workflow.list('app_one'))[0]!;
+      const outcomesPromise = Promise.allSettled([
+        workflow.respond(responseInput(record, { action: 'approve' })),
+        workflow.respond(responseInput(record, { action: 'approve' }))
+      ]);
+      await vi.waitFor(() => expect(resolvePermission).toHaveBeenCalledOnce());
+      gate.resolve();
+      const outcomes = await outcomesPromise;
+      expect(outcomes.filter(outcome => outcome.status === 'fulfilled')).toHaveLength(1);
+      expect(outcomes.filter(outcome => outcome.status === 'rejected')).toHaveLength(1);
+      expect(resolvePermission).toHaveBeenCalledOnce();
+      expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'approved', actorId: 'user_one' });
+      expect(service.update).toHaveBeenLastCalledWith(expect.objectContaining({ messageId: record.cardId, statusLabel: '已允许', readOnly: true }));
+      expect(runtime.getEvents).not.toHaveBeenCalled();
+    } finally { gate.resolve(); workflow.close(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it.each(['approved', 'rejected'] as const)('repairs expired cards after a late %s and preserves genuine timeouts', async status => {
+    const { directory, repositories } = await openDatabase();
+    const runtime = new DutydeckRuntime(repositories);
+    const fullRead = vi.spyOn(runtime, 'getEvents');
+    const lookup = vi.spyOn(runtime, 'getLatestPermissionRequest');
+    const { service } = makeService();
+    const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+    try {
+      await repositories.tasks.save(runningTask({ status: 'completed' }));
+      const record = interaction({ kind: 'permission', nativeId: 'native_web', state: 'expired', cardClosedAt: new Date().toISOString() });
+      await persistInteraction(repositories.config, record);
+      // The materialized permission artifact can precede the authoritative event.
+      await repositories.artifacts.savePermission('ses_one', { id: 'native_web', title: '执行命令', status });
+      await workflow.reconcile('app_one');
+      expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'expired' });
+      expect(lookup).toHaveBeenCalledExactlyOnceWith('ses_one', 'task_one', 'native_web');
+      await repositories.events.append(agentEvent('permission_request', { id: 'native_web', title: '执行命令', status: 'pending' }, { taskId: 'task_one' }));
+      await repositories.events.append(agentEvent('permission_request', { id: 'native_web', title: '执行命令', status }, { id: 'decision', taskId: 'task_one', sequence: 2 }));
+      await workflow.reconcile('app_one');
+      expect(await workflow.get('app_one', record.id)).toMatchObject({ state: status });
+      expect(service.update).toHaveBeenLastCalledWith(expect.objectContaining({ messageId: record.cardId, statusLabel: status === 'approved' ? '已允许' : '已拒绝', readOnly: true }));
+      const timedOutAt = new Date().toISOString();
+      await persistInteraction(repositories.config, { ...record, state: 'expired', timedOutAt });
+      lookup.mockClear();
+      await workflow.reconcile('app_one');
+      expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'expired', timedOutAt });
+      expect(lookup).not.toHaveBeenCalled();
+      expect(fullRead).not.toHaveBeenCalled();
+    } finally { workflow.close(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 });

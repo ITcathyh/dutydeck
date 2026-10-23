@@ -389,13 +389,18 @@ export class LarkWorkflowInteractions {
   }
   private async permissionReceipt(record: LarkInteraction): Promise<PermissionRequestData | undefined> {
     if (record.kind !== 'permission' || record.timedOutAt || !['pending', 'resolving', 'expired'].includes(record.state)) return undefined;
+    if (this.runtime.getLatestPermissionRequest) {
+      const event = await this.runtime.getLatestPermissionRequest(record.sessionId, record.taskId, record.nativeId);
+      return event?.data as PermissionRequestData | undefined;
+    }
     const events = await this.runtime.getEvents?.(record.sessionId);
     const event = events?.slice().reverse().find(event => event.type === 'permission_request' && event.taskId === record.taskId
       && (event.data as PermissionRequestData).id === record.nativeId);
     return event?.data as PermissionRequestData | undefined;
   }
-  private async refreshPermissionDecision(record: LarkInteraction, receipt?: PermissionRequestData) {
-    receipt ??= await this.permissionReceipt(record);
+  private async refreshPermissionDecision(record: LarkInteraction, ...receipts: [PermissionRequestData?]) {
+    // An explicitly supplied undefined means this reconciliation already queried.
+    const receipt = receipts.length ? receipts[0] : await this.permissionReceipt(record);
     if (receipt?.status !== 'approved' && receipt?.status !== 'rejected') return record;
     for (let attempt = 0; attempt < 3; attempt++) {
       // Finish any older expiry PATCH before writing the accepted decision, so

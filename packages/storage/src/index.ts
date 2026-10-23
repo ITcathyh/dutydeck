@@ -104,6 +104,10 @@ function backupBeforeV10(sqlite: Database.Database, filename: string) {
   sqlite.exec(`VACUUM INTO '${backupFilename.replaceAll("'", "''")}'`);
 }
 
+function decodeEvent(row: typeof events.$inferSelect): AgentEvent {
+  return { ...row, data: JSON.parse(row.data) } as AgentEvent;
+}
+
 type TaskRowLike = typeof tasks.$inferSelect | {
   id: string;
   session_id: string;
@@ -338,10 +342,17 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     events: {
       highWaterMark(sessionId) { return (sqlite.prepare('SELECT COALESCE(MAX(sequence),0) AS sequence FROM events WHERE session_id=?').get(sessionId) as { sequence: number }).sequence; },
       async append(e) { legacyWrite(() => db.insert(events).values({ ...e, data: JSON.stringify(e.data) }).run()); },
-      async list(sessionId, afterSequence = 0) { return db.select().from(events).where(and(eq(events.sessionId, sessionId), gt(events.sequence, afterSequence))).orderBy(asc(events.sequence)).all().map(r => ({ ...r, data: JSON.parse(r.data) })) as AgentEvent[]; },
+      async list(sessionId, afterSequence = 0) { return db.select().from(events).where(and(eq(events.sessionId, sessionId), gt(events.sequence, afterSequence))).orderBy(asc(events.sequence)).all().map(decodeEvent); },
+      async getLatestPermissionRequest(sessionId, taskId, nativeId) {
+        const row = db.select().from(events).where(and(eq(events.sessionId, sessionId), eq(events.taskId, taskId),
+          sql`${events.type} = 'permission_request'`,
+          sql`CASE WHEN json_valid(${events.data}) THEN json_extract(${events.data}, '$.id') END = ${nativeId}`))
+          .orderBy(desc(events.sequence)).limit(1).get();
+        return row ? decodeEvent(row) : undefined;
+      },
       async listRecent(sessionId, limit) {
         const rows = db.select().from(events).where(eq(events.sessionId, sessionId)).orderBy(desc(events.sequence)).limit(limit).all();
-        return rows.reverse().map(r => ({ ...r, data: JSON.parse(r.data) })) as AgentEvent[];
+        return rows.reverse().map(decodeEvent);
       },
       async listLatestUsage(sessionId) {
         const rows = await Promise.all(['used', 'rateLimits.fiveHour.usedPercent', 'rateLimits.sevenDay.usedPercent'].map(async field => {
@@ -351,7 +362,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
             sql`json_extract(${events.data}, ${`$.${field}`}) >= 0`))
             .orderBy(desc(events.sequence)).limit(1).all();
         }));
-        return rows.flat().map(r => ({ ...r, data: JSON.parse(r.data) })) as AgentEvent[];
+        return rows.flat().map(decodeEvent);
       },
       async listWindow(sessionId, options = {}) {
         const requestedLimit = Number.isFinite(options.limit) ? Math.trunc(options.limit!) : EVENT_WINDOW_DEFAULT_LIMIT;
@@ -362,7 +373,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
         const backward = options.direction === 'backward';
         const rows = db.select().from(events).where(and(...filters)).orderBy(backward ? desc(events.sequence) : asc(events.sequence)).limit(limit).all();
         if (backward) rows.reverse();
-        return rows.map(r => ({ ...r, data: JSON.parse(r.data) })) as AgentEvent[];
+        return rows.map(decodeEvent);
       }
     },
     config: {
