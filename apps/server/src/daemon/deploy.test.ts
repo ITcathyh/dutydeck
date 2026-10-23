@@ -344,6 +344,55 @@ describe('dutydeck deploy', () => {
     expect(version.stdout.trim()).toBe('0.0.3');
   }, 60_000);
 
+  it.each([false, true])('持续 WAL 写入时备份使用固定快照，结束后释放读事务（中途失败：%s）', async fail => {
+    const writer = new Database(database, { timeout: 0 });
+    writer.pragma('journal_mode = WAL');
+    writer.pragma('wal_autocheckpoint = 0');
+    writer.exec("CREATE TABLE payload (data BLOB); INSERT INTO configs VALUES ('stamp', '0');");
+    const insert = writer.prepare('INSERT INTO payload VALUES (zeroblob(4096))');
+    writer.transaction(() => { for (let i = 0; i < 2048; i++) insert.run(); })();
+    writer.pragma('wal_checkpoint(TRUNCATE)');
+    const update = writer.prepare("UPDATE configs SET value = ? WHERE key = 'stamp'");
+    const originalBackup = Database.prototype.backup;
+    let reader: Database.Database | undefined;
+    let writes = 0;
+    const spy = vi.spyOn(Database.prototype, 'backup').mockImplementation(function (this: Database.Database, target, options) {
+      reader = this;
+      // 首批备份前也提交一次，验证 BEGIN 后已经实际建立读取快照。
+      update.run(String(++writes));
+      return originalBackup.call(this, target, { ...options, progress: () => {
+        update.run(String(++writes));
+        if (fail && writes === 3) throw new Error('injected backup failure');
+        if (writes === 100) throw new Error('backup repeatedly restarted by concurrent writes');
+      } });
+    });
+    try {
+      const result = await runDeploy({ source, runtime: bot }, deps());
+      expect(reader?.open).toBe(false);
+      expect(writes).toBeGreaterThan(2);
+      expect(writes).toBeLessThan(100);
+      if (fail) {
+        expect(result).toMatchObject({ ok: false, status: 'failed' });
+        expect(result.error).toContain('injected backup failure');
+        expect(existsSync(join(releases, 'current'))).toBe(false);
+      } else {
+        expect(result, result.error).toMatchObject({ ok: true, status: 'deployed' });
+        const manifest = JSON.parse(readFileSync(result.manifest!, 'utf8'));
+        const backup = new Database(manifest.database_backup, { readonly: true });
+        try {
+          expect(backup.pragma('integrity_check', { simple: true })).toBe('ok');
+          expect(backup.prepare('SELECT COUNT(*) FROM payload').pluck().get()).toBe(2048);
+          expect(backup.prepare("SELECT value FROM configs WHERE key = 'stamp'").pluck().get()).toBe('0');
+        } finally { backup.close(); }
+      }
+      expect(writer.prepare("SELECT value FROM configs WHERE key = 'stamp'").pluck().get()).toBe(String(writes));
+      expect(writer.pragma('wal_checkpoint(TRUNCATE)')).toEqual([{ busy: 0, log: 0, checkpointed: 0 }]);
+    } finally {
+      spy.mockRestore();
+      writer.close();
+    }
+  });
+
   it('新版本健康检查不过时切回上一版并重启', async () => {
     const first = await runDeploy({ source, runtime: bot }, deps());
     expect(first.ok).toBe(true);
