@@ -19,3 +19,9 @@ describe('asynchronous management commands', () => {
     expect(Date.now() - started).toBeLessThan(2000);
   });
 });
+
+it('retains failed command stdout for stage classification without serializing it', async () => {
+  const error = await runCommand(process.execPath, ['-e', 'process.stdout.write("stage");process.stderr.write("failure");process.exitCode=1']).catch(error => error);
+  expect(error.stdout).toBe('stage'); expect(error.stderr).toBe('failure'); expect(error.status).toBe(1);
+  expect(Object.keys(error)).not.toContain('stdout');
+});

@@ -46,6 +46,29 @@ export function readHead(path: string, maxBytes: number): string {
   }
 }
 
+/** Read the first complete line, retaining the same byte cap as a head read. */
+export function readFirstLine(path: string, maxBytes: number): string {
+  let fd: number | undefined;
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) return '';
+    const limit = Math.min(st.size, Math.max(0, maxBytes));
+    if (!limit) return '';
+    fd = openSync(path, 'r');
+    const buffer = Buffer.alloc(limit);
+    let total = 0;
+    while (total < limit) {
+      const count = readSync(fd, buffer, total, Math.min(total ? 64 * 1024 : 4096, limit - total), null);
+      if (!count) break;
+      const newline = buffer.subarray(total, total + count).indexOf(10);
+      if (newline >= 0) return buffer.subarray(0, total + newline).toString('utf8');
+      total += count;
+    }
+    return '';
+  } catch { return ''; }
+  finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* Already closed. */ } } }
+}
+
 /** Read at most `maxBytes` from the END of a file, dropping the (almost
  *  certainly partial) first line when the window did not start at byte 0.
  *  Append-only index files (history.jsonl) put recent sessions at the end. */

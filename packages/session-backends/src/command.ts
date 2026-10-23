@@ -11,6 +11,7 @@ export function runCommand(binary: string, args: string[], options: { env?: Node
       clearTimeout(timer);
       if (error) {
         Object.assign(error, { stderr, status: typeof error.code === 'number' ? error.code : null });
+        Object.defineProperty(error, 'stdout', { value: stdout });
         reject(error);
       } else resolve(stdout);
     });
