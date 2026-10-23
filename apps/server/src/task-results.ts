@@ -23,15 +23,26 @@ export function readAttemptResult(repositories: AttemptResultRepositories, sessi
   return readResult(repositories, sessionId, taskId, attemptId);
 }
 
-/** Workflow admission stays pinned to its first attempt while safe capacity retries retain result provenance. */
-export function readWorkAttemptResult(repositories: AttemptResultRepositories & { execution: Pick<ExecutionRepository, 'getAcceptedTask'> }, sessionId: string, taskId: string, attemptId: string): AttemptResultRead {
+export type TaskResultRepositories = AttemptResultRepositories & { execution: Pick<ExecutionRepository, 'getAcceptedTask'> };
+
+/** The admission stays pinned to its first attempt; only verified automatic capacity successors supply its result. */
+export function readTaskAttemptResult(repositories: TaskResultRepositories, sessionId: string, taskId: string, attemptId: string): AttemptResultRead {
   return readResult(repositories, sessionId, taskId, attemptId, repositories.execution);
 }
 
-function readResult(repositories: AttemptResultRepositories, sessionId: string, taskId: string, attemptId: string, retryInput?: Pick<ExecutionRepository, 'getAcceptedTask'>): AttemptResultRead {
+export function readWorkAttemptResult(repositories: TaskResultRepositories, sessionId: string, taskId: string, attemptId: string): AttemptResultRead {
+  return readTaskAttemptResult(repositories, sessionId, taskId, attemptId);
+}
+
+/** Verified result ownership for explicit-final lookups; output validation remains in the result reader. */
+export function resolveTaskResultAttemptId(repositories: TaskResultRepositories, sessionId: string, taskId: string, attemptId: string): string | undefined {
+  return resolveResultAttempt(repositories, sessionId, taskId, attemptId, repositories.execution)?.attemptId;
+}
+
+function resolveResultAttempt(repositories: AttemptResultRepositories, sessionId: string, taskId: string, attemptId: string, retryInput?: Pick<ExecutionRepository, 'getAcceptedTask'>): TaskAttempt | undefined {
   const execution = repositories.execution;
   const projection = execution.getTaskExecution(taskId);
-  if (!projection) return { status: 'blocked', reason: 'admission_conflict' };
+  if (!projection) return undefined;
   if (projection.task.sessionId !== sessionId) fail('TASK_RESULT_SCOPE_CONFLICT', `Task ${taskId} does not belong to session ${sessionId}`);
   let attempt = projection.attempts.find(item => item.attemptId === attemptId);
   if (!attempt) fail('TASK_RESULT_ATTEMPT_MISSING', `Attempt ${attemptId} is not recorded for task ${taskId}`);
@@ -51,6 +62,14 @@ function readResult(repositories: AttemptResultRepositories, sessionId: string, 
       || !safeCapacityFailure(execution, attempt)) fail('TASK_RESULT_RETRY_CONFLICT', 'Automatic retry does not preserve the verified task input and capacity-failure lineage');
     attempt = next;
   }
+
+  return attempt;
+}
+
+function readResult(repositories: AttemptResultRepositories, sessionId: string, taskId: string, attemptId: string, retryInput?: Pick<ExecutionRepository, 'getAcceptedTask'>): AttemptResultRead {
+  const execution = repositories.execution;
+  const attempt = resolveResultAttempt(repositories, sessionId, taskId, attemptId, retryInput);
+  if (!attempt) return { status: 'blocked', reason: 'admission_conflict' };
 
   if (attempt.state === 'preparing' || attempt.state === 'active' || attempt.state === 'suspended') return { status: 'pending' };
   if (attempt.state === 'reconcile_required') return { status: 'blocked', reason: 'reconcile_required' };
@@ -72,12 +91,12 @@ function readResult(repositories: AttemptResultRepositories, sessionId: string, 
   return { status: 'settled', result };
 }
 
-/** Best-effort text for a settled first attempt; invalid or unavailable results have no output. */
-export function readFirstAttemptOutput(repositories: AttemptResultRepositories, sessionId: string, taskId: string): string | undefined {
+/** Best-effort final task text, including verified automatic retries; invalid or unavailable results have no output. */
+export function readTaskOutput(repositories: TaskResultRepositories, sessionId: string, taskId: string): string | undefined {
   try {
     const first = repositories.execution.getTaskExecution(taskId)?.attempts.find(attempt => attempt.number === 1);
     if (!first) return undefined;
-    const read = readAttemptResult(repositories, sessionId, taskId, first.attemptId);
+    const read = readTaskAttemptResult(repositories, sessionId, taskId, first.attemptId);
     return read.status === 'settled' ? read.result.output.text : undefined;
   } catch { return undefined; }
 }

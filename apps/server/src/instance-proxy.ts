@@ -17,7 +17,7 @@ export type PeerInstance = { id: string; name: string; url: string };
 const peerInstancesSchema = z.array(z.object({
   id: z.string().regex(/^[a-z0-9-]+$/),
   name: z.string().min(1),
-  url: z.string().url()
+  url: z.string().url().pipe(z.string().refine(url => new URL(url).protocol === 'http:', 'Peer instances require http: URLs'))
 }));
 
 /** DUTYDECK_INSTANCES_JSON，例如 [{"id":"tag","name":"Tag · CCFlash","url":"http://127.0.0.1:4311"}]。 */
@@ -82,6 +82,7 @@ const withoutHeaders = (headers: IncomingHttpHeaders, dropped: Set<string>) =>
   Object.fromEntries(Object.entries(headers).filter(([name, value]) => value !== undefined && !dropped.has(name)));
 
 export async function registerInstanceProxy(app: FastifyInstance, peers: PeerInstance[], auth: TerminalRouteAuth | undefined, config?: ConfigRepository): Promise<void> {
+  peers = peerInstancesSchema.parse(peers);
   const rawRoutes = await config?.get(BOT_SESSION_ROUTES_KEY);
   const routes = rawRoutes == null ? {} : sessionRoutesSchema.parse(JSON.parse(rawRoutes)).routes;
   for (const id of Object.values(routes)) {
@@ -120,8 +121,8 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
       if (closing) throw new RuntimeError('INSTANCE_PROXY_CLOSING', 'Instance proxy is closing', 503);
       const sharedRead = isSharedInstanceRead(request, peers);
       if (sharedRead) url.pathname = url.pathname.replace('/api/sessions/', '/api/shared-sessions/');
-      reply.hijack();
       const upstream = httpRequest(url, { method: request.method, headers: withoutHeaders(request.headers, DROPPED_REQUEST_HEADERS) });
+      reply.hijack();
       const body = request.body as Readable | undefined;
       let upstreamResponse: IncomingMessage | undefined;
       let closed = false;
@@ -180,7 +181,13 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
       };
       upgrades.add(close);
       socket.on('error', close).once('close', close);
-      upstream = httpRequest(upstreamTarget!.url, { method: 'GET', headers: withoutHeaders(request.headers, DROPPED_UPGRADE_HEADERS) });
+      try {
+        upstream = httpRequest(upstreamTarget!.url, { method: 'GET', headers: withoutHeaders(request.headers, DROPPED_UPGRADE_HEADERS) });
+      } catch {
+        rejectUpgrade(socket, 502, 'Bad Gateway', 'instance unavailable');
+        close();
+        return;
+      }
       upstream.on('upgrade', (response, upgradedSocket, peerHead) => {
         peerSocket = upgradedSocket;
         peerSocket.on('error', close).once('close', close);

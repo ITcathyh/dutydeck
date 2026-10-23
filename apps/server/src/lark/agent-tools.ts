@@ -12,7 +12,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import { resolve } from 'node:path';
 import { deliverArtifact, type ArtifactClient } from './artifact-delivery.js';
 import { parseLarkSourceId, workPlanConfirmationRequired, type ChannelMapping, type ChannelMappingRepository, type CollaborationObservation, type CollaborationScope, type CollaborationTeamContext, type ConfigRepository, type PolicyAction, type PolicyDecision, type Session, type SessionRepository, type TaskRecord, type TaskRepository } from '@dutydeck/shared';
-import { readAttemptResult, type AttemptResultRepositories } from '../task-results.js';
+import { readTaskAttemptResult, resolveTaskResultAttemptId, type TaskResultRepositories } from '../task-results.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import type { LarkTeamContextReader } from './team-context.js';
 import { parseLarkMessageContent } from './message-content.js';
@@ -204,7 +204,7 @@ export interface LarkAgentToolsOptions {
   pollIntervalMs?: number;
   groupToolsCommand?: string;
   /** history list/show：只读会话、任务、执行账本和结果卡映射（显式最终答复的路由）。 */
-  history?: AttemptResultRepositories & { sessions: Pick<SessionRepository, 'list'>; tasks: Pick<TaskRepository, 'listBySession'>; channelMappings: Pick<ChannelMappingRepository, 'list'> };
+  history?: TaskResultRepositories & { sessions: Pick<SessionRepository, 'list'>; tasks: Pick<TaskRepository, 'listBySession'>; channelMappings: Pick<ChannelMappingRepository, 'list'> };
   /** group team-search；群协作集成尚未就绪时返回 undefined。 */
   teamSearch?: () => { reader: Pick<LarkTeamContextReader, 'read' | 'authorize' | 'scorer'>; available(scope: CollaborationScope): Promise<boolean> } | undefined;
   /** Stored Lark sessions are explicitly legacy_unmanaged during WP1b. */
@@ -364,23 +364,25 @@ function inChat(session: Pick<Session, 'source' | 'sourceId'>, binding: LarkAgen
 
 /**
  * 任务的最终答复。这一轮用 group send --final 交付过答复时取那条记录（此时助手文本往往只剩一句确认）；
- * 否则取法同记忆提取管线：number=1 Attempt 正常完成时的助手文本。都读不到时没有回答。
+ * 否则取法同记忆提取管线：原任务及其安全自动容量重试正常完成时的助手文本。都读不到时没有回答。
  */
 type HistoryAnswerRead = { readStatus: 'missing' | 'unsettled' | 'read_error' | 'completed'; source?: 'explicit_final' | 'attempt'; text?: string; error?: string };
 export interface HistoryTaskInput { taskId?: string; field?: string; offset?: number; length?: number; cursor?: string }
 
-async function readHistoryAnswer(repos: AttemptResultRepositories, store: ConfigRepository, session: Session, task: TaskRecord, cards: ChannelMapping[] | undefined): Promise<HistoryAnswerRead> {
+async function readHistoryAnswer(repos: TaskResultRepositories, store: ConfigRepository, session: Session, task: TaskRecord, cards: ChannelMapping[] | undefined): Promise<HistoryAnswerRead> {
   let source: HistoryAnswerRead['source'];
   try {
     const attemptId = repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.number === 1)?.attemptId;
     if (!attemptId) return { readStatus: ['queued', 'running', 'reconcile_required'].includes(task.status) ? 'unsettled' : 'missing' };
+    const resultAttemptId = resolveTaskResultAttemptId(repos, task.sessionId, task.id, attemptId);
+    if (!resultAttemptId) return { readStatus: 'missing' };
     const binding = larkAgentSessionBinding(session);
-    const final = cards && binding ? await resolveExplicitFinalContext(cards, binding, { taskId: task.id, attemptId }) : undefined;
+    const final = cards && binding ? await resolveExplicitFinalContext(cards, binding, { taskId: task.id, attemptId: resultAttemptId }) : undefined;
     if (final) source = 'explicit_final';
     const explicit = final ? await readExplicitFinal(store, final, true) : undefined;
     if (explicit !== undefined) return { readStatus: 'completed', source: 'explicit_final', text: explicit };
     source = 'attempt';
-    const read = readAttemptResult(repos, task.sessionId, task.id, attemptId);
+    const read = readTaskAttemptResult(repos, task.sessionId, task.id, attemptId);
     if (read.status !== 'settled') return { readStatus: 'unsettled', source: 'attempt' };
     if (read.result.outcome !== 'completed' || !read.result.output.text) return { readStatus: 'missing', source: 'attempt' };
     return { readStatus: 'completed', source: 'attempt', text: read.result.output.text };
@@ -389,16 +391,18 @@ async function readHistoryAnswer(repos: AttemptResultRepositories, store: Config
   }
 }
 
-async function taskAnswer(repos: AttemptResultRepositories, store: ConfigRepository, session: Session, task: TaskRecord, cards: ChannelMapping[] | undefined): Promise<string | undefined> {
+async function taskAnswer(repos: TaskResultRepositories, store: ConfigRepository, session: Session, task: TaskRecord, cards: ChannelMapping[] | undefined): Promise<string | undefined> {
   try {
     const attemptId = repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.number === 1)?.attemptId;
     if (!attemptId) return undefined;
     // 与交付时同一套路由：用任务所在会话的绑定从卡片映射还原 scope，只认通过校验的记录。
+    const resultAttemptId = resolveTaskResultAttemptId(repos, task.sessionId, task.id, attemptId);
+    if (!resultAttemptId) return undefined;
     const binding = larkAgentSessionBinding(session);
-    const final = cards && binding ? await resolveExplicitFinalContext(cards, binding, { taskId: task.id, attemptId }) : undefined;
+    const final = cards && binding ? await resolveExplicitFinalContext(cards, binding, { taskId: task.id, attemptId: resultAttemptId }) : undefined;
     const explicit = final ? (await readExplicitFinal(store, final))?.trim() : undefined;
     if (explicit) return explicit;
-    const read = readAttemptResult(repos, task.sessionId, task.id, attemptId);
+    const read = readTaskAttemptResult(repos, task.sessionId, task.id, attemptId);
     return read.status === 'settled' && read.result.outcome === 'completed' ? read.result.output.text.trim() || undefined : undefined;
   } catch { return undefined; }
 }

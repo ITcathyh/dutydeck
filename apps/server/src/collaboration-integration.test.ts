@@ -53,7 +53,7 @@ async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions[
   await groups.sync(scope.appId);
   const group = await groups.save(scope.appId, scope.chatId, { expectedRevision: 0, patch: {} });
   let collaboration: ReturnType<typeof createCollaborationIntegration>;
-  const calls: Array<{ sessionId: string; prompt: string; finish(text: string): void }> = [];
+  const calls: Array<{ sessionId: string; prompt: string; finish(text: string): void; capacity(): void }> = [];
   const stopped: string[] = [];
   const runtime = new DutydeckRuntime(repos, {
     workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
@@ -71,7 +71,7 @@ async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions[
         interrupt: async () => { end?.(); },
         send: (prompt: string) => new Promise<void>(resolve => {
           end = () => { onEvent({ type: 'completed', data: { stopReason: 'cancelled' } }); resolve(); };
-          calls.push({ sessionId, prompt, finish(text) { onEvent({ type: 'text', data: { text } }); onEvent({ type: 'completed', data: { stopReason: 'end_turn' } }); end = undefined; resolve(); } });
+          calls.push({ sessionId, prompt, capacity() { onEvent({ type: 'error', data: { code: 'codex_capacity', nativeSource: 'codex', nativeTerminal: true, capacityReason: 'selected_model_capacity', nativeTurnId: 'turn' } }); onEvent({ type: 'completed', data: { stopReason: 'end_turn' } }); end = undefined; resolve(); }, finish(text) { onEvent({ type: 'text', data: { text } }); onEvent({ type: 'completed', data: { stopReason: 'end_turn' } }); end = undefined; resolve(); } });
         })
       } satisfies AgentDriver;
     }
@@ -86,6 +86,40 @@ async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions[
   return { repos, runtime, collaboration, groups, client, group, calls, stopped, create,
     advance() { clock = new Date(clock.getTime() + 60_000); }, revoke() { members = []; } };
 }
+
+it('delivers a verified capacity successor once and continues future schedule occurrences', async () => {
+  const f = await fixture();
+  const created = await f.create('capacity');
+  f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  f.calls[0]!.capacity();
+  const sessionId = f.calls[0]!.sessionId;
+  await eventually(async () => (await f.runtime.getTasks(sessionId))[0]?.status === 'queued');
+  await f.collaboration.scheduler.tick();
+  expect((await f.repos.scheduleOccurrences.listByDefinition(created.mandate.scheduleDefinitionId))[0]?.state).toBe('running');
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    vi.setSystemTime(Date.now() + 31_000);
+    f.runtime.setQueueHeld(true); f.runtime.setQueueHeld(false);
+    await eventually(async () => f.calls.length === 2);
+    f.calls[1]!.finish('successful successor output');
+    await eventually(async () => (await f.runtime.getTasks(sessionId))[0]?.status === 'completed');
+    await f.collaboration.scheduler.tick();
+    const task = (await f.runtime.getTasks(sessionId))[0]!;
+    expect(f.repos.execution.getTaskExecution(task.id)?.attempts.map(a => a.outcome)).toEqual(['failed', 'completed']);
+    expect((await f.repos.scheduleOccurrences.listByDefinition(created.mandate.scheduleDefinitionId))[0]?.state).toBe('settled');
+    expect(f.client.send).toHaveBeenCalledOnce();
+    expect(JSON.stringify(f.client.send.mock.calls)).toContain('successful successor output');
+    await f.collaboration.scheduler.tick();
+    expect(f.client.send).toHaveBeenCalledOnce();
+    f.advance(); await f.collaboration.scheduler.tick();
+    await eventually(async () => f.calls.length === 3);
+    f.calls[2]!.finish('next occurrence output');
+    await eventually(async () => (await f.runtime.getTasks(f.calls[2]!.sessionId))[0]?.status === 'completed');
+    await f.collaboration.scheduler.tick();
+    expect(f.client.send).toHaveBeenCalledTimes(2);
+  } finally { vi.useRealTimers(); }
+});
 
 it('previews work and collaboration independently with real group policy and no side effects', async () => {
   const f = await fixture();

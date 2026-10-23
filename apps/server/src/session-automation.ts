@@ -54,7 +54,7 @@ import { executionTaskId } from '@dutydeck/storage';
 import { CiProviderRegistry, ciProviderLabel, resolveCiHead, type CiHead } from './ci-providers.js';
 import type { CiWebhookService } from './ci-webhook.js';
 import type { PullRequestService } from './pull-requests.js';
-import { readAttemptResult } from './task-results.js';
+import { readTaskAttemptResult } from './task-results.js';
 import { z } from 'zod';
 
 const SCHEDULE_PREFIX = 'session_automation/schedule/';
@@ -476,7 +476,7 @@ export class SessionAutomationService {
       return { status: 'blocked', reason: 'reconcile_required', message: 'Fixed number=1 attempt identity changed' };
     }
     let read;
-    try { read = readAttemptResult({ execution: this.execution }, sessionId, admission.taskId, first.attemptId); }
+    try { read = readTaskAttemptResult({ execution: this.execution }, sessionId, admission.taskId, first.attemptId); }
     catch (error) {
       return { status: 'blocked', reason: 'reconcile_required', message: errorMessage(error) };
     }

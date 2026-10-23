@@ -4,7 +4,7 @@ import { executionTaskId } from '@dutydeck/storage';
 import { z } from 'zod';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { changeRequestLabel, ciProviderLabel, git, resolveCiBranchHead, type CiProviderRegistry } from './ci-providers.js';
-import { readFirstAttemptOutput } from './task-results.js';
+import { readTaskOutput } from './task-results.js';
 
 const SUBSCRIPTION_PREFIX = 'ci_webhook/subscription/';
 /** CI 提供方插件化之前只有一个内置平台，记录存在这个前缀下，provider 字段缺省。只读兼容，不再写入。 */
@@ -118,7 +118,7 @@ export interface CiNotice {
 export interface CiWebhookResponse { statusCode: number; body: Record<string, unknown> }
 
 export interface CiWebhookServiceOptions {
-  repositories: Pick<RepositoryBundle, 'config' | 'tasks' | 'ciWebhook'> & { execution: Pick<RepositoryBundle['execution'], 'getTaskExecution' | 'getAttemptEvents'> };
+  repositories: Pick<RepositoryBundle, 'config' | 'tasks' | 'ciWebhook'> & { execution: Pick<RepositoryBundle['execution'], 'getTaskExecution' | 'getAttemptEvents' | 'getAcceptedTask'> };
   runtime: Pick<DutydeckRuntime, 'getSession' | 'dispatch'>;
   providers: CiProviderRegistry;
   prepareDelivery?: (sessionId: string, id: string) => Promise<void>;
@@ -657,7 +657,7 @@ export class CiWebhookService {
   }
 
   private output(sessionId: string, taskId: string) {
-    return readFirstAttemptOutput({ execution: this.options.repositories.execution }, sessionId, taskId);
+    return readTaskOutput({ execution: this.options.repositories.execution }, sessionId, taskId);
   }
 
   private async settle(stored: Stored, task: TaskRecord) {

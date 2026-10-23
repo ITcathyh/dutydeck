@@ -209,6 +209,7 @@ export class SessionStream {
       }
       this.watchdog = this.setTimeoutFn(watch, SSE_WATCHDOG_TICK_MS);
     };
+    this.watchdog = this.setTimeoutFn(watch, SSE_WATCHDOG_TICK_MS);
     source.onopen = () => {
       if (!current()) return;
       this.backoff.reset();

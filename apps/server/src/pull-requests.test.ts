@@ -18,7 +18,7 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 /** 本地裸仓库当 origin；工作区是它的克隆，origin/HEAD 指向 main。 */
-async function fixture(options: { withoutPullRequests?: boolean } = {}) {
+async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (...args: any[]) => void } } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-pr-'));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const remote = join(root, 'remote.git');
@@ -83,7 +83,7 @@ async function fixture(options: { withoutPullRequests?: boolean } = {}) {
     repositories: { config: database.config, tasks: { get: async (id: string) => tasks.get(id), save: async () => {}, listBySession: async () => [] }, execution: {} as any },
     runtime, providers, readTaskOutput: (_sessionId, taskId) => outputs.get(taskId),
     notify: async (_sessionId, _id, notice) => { notices.push(notice); return `om_${notices.length}`; },
-    clock: () => new Date(now.value)
+    clock: () => new Date(now.value), log: options.log
   });
   cleanups.push(() => service.close());
   const observer = createTurnDiffObserver(database.config, { now: () => new Date(now.value) });
@@ -121,6 +121,42 @@ async function fixture(options: { withoutPullRequests?: boolean } = {}) {
   };
   return { config: database.config, root, remote, cwd, git, remoteGit, now, session, tasks, dispatches, state, provider, service, notices, turn, finishLatest, poll, write, checkout, remoteBranches, open };
 }
+
+describe('PR background tick failures', () => {
+  it.each(['{broken JSON', JSON.stringify({ schemaVersion: 1 })])('logs unreadable unrelated records after persisting an answer: %s', async bad => {
+    const warn = vi.fn();
+    const f = await fixture({ log: { warn } });
+    const pr = await f.open();
+    const key = `pull_request/record/${pr.id}`;
+    const stored = JSON.parse((await f.config.get(key))!);
+    await f.config.set(key, JSON.stringify({ ...stored, questions: [{ commentId: 'comment', question: 'Apply?', excerpt: 'change' }] }));
+    await f.config.set('pull_request/record/unrelated', bad);
+
+    expect(await f.service.answer(pr.id, { commentId: 'comment', choice: 'ignore' })).toBe('已记下，不处理这条评论。');
+    await f.service.idle();
+    expect(warn).toHaveBeenCalledWith({ error: expect.any(Error) }, 'PR 跟进失败');
+    expect(await f.service.get(pr.id)).toMatchObject({ questions: [{ commentId: 'comment', answer: 'ignore' }] });
+    await expect(f.service.tick()).rejects.toThrow();
+    expect(await f.config.get('pull_request/record/unrelated')).toBe(bad);
+    await f.config.set('pull_request/record/unrelated', JSON.stringify({ ...stored, id: 'unrelated', status: 'stopped' }));
+    await expect(f.service.tick()).resolves.toBeUndefined();
+    expect(f.provider.getPipelineStatus).toHaveBeenCalled();
+  });
+
+  it('logs a list failure in the webhook background tick and allows a later tick', async () => {
+    const warn = vi.fn();
+    const f = await fixture({ log: { warn } });
+    const pr = await f.open();
+    const list = f.config.list!.bind(f.config);
+    const error = new Error('temporary list failure');
+    vi.spyOn(f.config, 'list').mockImplementationOnce(list).mockRejectedValueOnce(error);
+    await f.service.onWebhookEvent('fake', { kind: 'pipeline', repository: 'group/repo', branch: pr.branch, state: 'success' });
+    await f.service.idle();
+    expect(warn).toHaveBeenCalledWith({ error }, 'PR 跟进失败');
+    await expect(f.service.tick()).resolves.toBeUndefined();
+    expect(f.provider.getPipelineStatus).toHaveBeenCalled();
+  });
+});
 
 describe('开 PR：确认清单与推送', () => {
   it('只带本会话改的文件，确认前不推送；确认后只推 dutydeck/ 新分支，用户的检出、index 和工作区不变', async () => {

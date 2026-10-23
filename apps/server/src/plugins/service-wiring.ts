@@ -2,7 +2,7 @@ import { dirname } from 'node:path';
 import { resolveDatabaseUrl } from '@dutydeck/config';
 import type { CiWebhookRepository, ExecutionRepository, PublicTaskRecord, Session } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
-import { readAttemptResult } from '../task-results.js';
+import { readTaskAttemptResult } from '../task-results.js';
 import { setPluginSkillRoots } from '../skill-catalog.js';
 import { setLarkPluginCommands } from '../lark/plugin-commands.js';
 import { PluginHost } from './host.js';
@@ -28,7 +28,7 @@ export async function loadDaemonPlugins(env: NodeJS.ProcessEnv, options: { built
 
 export interface PluginWiringDeps {
   runtime: () => DutydeckRuntime;
-  repositories: { execution: Pick<ExecutionRepository, 'getTaskExecution' | 'getAttemptEvents'>; ciWebhook: Pick<CiWebhookRepository, 'claimEvent' | 'releaseEvent'> };
+  repositories: { execution: Pick<ExecutionRepository, 'getTaskExecution' | 'getAttemptEvents' | 'getAcceptedTask'>; ciWebhook: Pick<CiWebhookRepository, 'claimEvent' | 'releaseEvent'> };
   readBot(appId: string): Promise<(TriggerBot & { appSecret?: string }) | undefined>;
   fallbackAgentId(): string | undefined;
   sendText(bot: TriggerBot & { appSecret?: string }, input: { chatId: string; text: string; idempotencyKey: string }): Promise<unknown>;
@@ -59,7 +59,7 @@ export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
 
   const deliverTriggerResult = async (session: Session, task: PublicTaskRecord) => {
     const attempt = deps.repositories.execution.getTaskExecution(task.id)?.attempts.find(item => item.number === 1);
-    const read = attempt ? readAttemptResult(deps.repositories, session.id, task.id, attempt.attemptId) : undefined;
+    const read = attempt ? readTaskAttemptResult(deps.repositories, session.id, task.id, attempt.attemptId) : undefined;
     const message = triggerResultText(session, task, read?.status === 'settled' ? read.result.output.text : undefined);
     if (!message) return;
     if (!await hooks.notify({ ...sessionHookContext(session) }, 'trigger_result', { taskId: task.id, status: task.status, text: message.text })) return;

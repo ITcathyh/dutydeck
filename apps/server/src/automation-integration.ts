@@ -21,7 +21,7 @@ import type { PersistedLarkCardTask } from './lark/coordinator.js';
 import { renderLarkResultTextElements } from './lark/card-renderer.js';
 import { sendLarkResult } from './lark/result-delivery.js';
 import { scheduleRequestCard } from './lark/schedule-command.js';
-import { readAttemptResult } from './task-results.js';
+import { readTaskAttemptResult } from './task-results.js';
 import type { CiNotice } from './ci-webhook.js';
 import { SessionAutomationService, type AutomationDeliveryContext } from './session-automation.js';
 
@@ -141,7 +141,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     if (session.source !== 'lark') return;
 
     // 1. 从实际 occurrence (Schedule) 或 subscription (CI) 读取冻结来源记录。
-    //    deliver 只在 refresh 冻结 number=1 result 后触发，来源必为含 admission/result 的 V2 记录；
+    //    deliver 只在 refresh 冻结原 admission 的已验证 result 后触发，来源必为含 admission/result 的 V2 记录；
     //    已 delivered 历史早退。Schedule 传 (occurrenceId, scheduleId)；CI 传 (subscriptionId, subscriptionId)。
     let frozenTaskId: string;
     let frozenAttemptId: string;
@@ -188,7 +188,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     if (frozenTaskId !== result.taskId) {
       throw new RuntimeError('AUTOMATION_RESULT_NOT_READY', '任务 ID 与来源记录不匹配', 409);
     }
-    if (frozenAttemptId !== result.attemptId) {
+    if (frozenResult.attemptId !== result.attemptId) {
       throw new RuntimeError('AUTOMATION_RESULT_NOT_READY', 'Attempt ID 与来源记录不匹配', 409);
     }
     if (
@@ -216,10 +216,10 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       throw new RuntimeError('AUTOMATION_RESULT_NOT_READY', '来源 actor 与真实接受 actor 不匹配', 409);
     }
 
-    // 3. 复用唯一 readAttemptResult 验证原 number=1 结算、throughSequence/全文/digest
+    // 3. 从冻结 number=1 admission 验证安全自动后继及其结算、throughSequence/全文/digest
     let read;
     try {
-      read = readAttemptResult({ execution: repos.execution }, sessionId, result.taskId, result.attemptId);
+      read = readTaskAttemptResult({ execution: repos.execution }, sessionId, result.taskId, frozenAttemptId);
     } catch (cause) {
       throw new RuntimeError('AUTOMATION_RESULT_NOT_READY', `结果验证失败: ${cause instanceof Error ? cause.message : String(cause)}`, 409);
     }
@@ -228,6 +228,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     }
     const verifiedResult = read.result;
     if (
+      verifiedResult.attemptId !== result.attemptId ||
       verifiedResult.throughSequence !== result.throughSequence ||
       verifiedResult.settlementId !== result.settlementId ||
       verifiedResult.outcome !== result.outcome ||

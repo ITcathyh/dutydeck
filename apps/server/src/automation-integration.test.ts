@@ -29,7 +29,7 @@ async function fixture() {
   const runtime = { getSession: vi.fn(async () => session), getEvents: vi.fn(async () => []) };
   const integration = createAutomationIntegration(repos, runtime as any, groups as any, { client: () => client as any, log: { warn: vi.fn() } });
   /** 经真实账本接受并结算 number=1 Attempt，冻结 AttemptResultV1；不依赖 getEvents 切片。 */
-  const settleTask = (status: 'completed' | 'failed' | 'interrupted', text = 'target result', occurrenceId = 'occ1', sourceId = 'automation1'): AttemptResultV1 => {
+  const settleTask = (status: 'completed' | 'failed' | 'interrupted', text = 'target result', occurrenceId = 'occ1', sourceId = 'automation1', retry?: 'capacity' | 'manual'): AttemptResultV1 => {
     const x = repos.execution.bind(claim);
     const requestKey = `session-automation:schedule:${occurrenceId}`;
     const request: TaskRequestV1 = { version: 1, namespace: 'schedule', key: requestKey, sessionId: 's1', actor: { kind: 'channel', id: 'ou_alice', appId: 'cli_a' }, prompt: 'target', mode: 'queue', skills: [], options: { permissionMode: 'ask' }, sources: [], sourcePayload: { agentPrompt: 'target', skills: [] } };
@@ -39,7 +39,26 @@ async function fixture() {
     const accepted = x.acceptTask({ sessionId: 's1', runId: 'r' }, request, input, 'back');
     const taskId = accepted.task!.id;
     const claimed = x.claimNext({ sessionId: 's1', runId: 'r' })!;
-    const attempt = claimed.attempt!;
+    const first = claimed.attempt!;
+    let attempt = first;
+    if (retry) {
+      let priorFence = { sessionId: 's1', runId: 'r', taskId, attemptId: first.attemptId, expectedRevision: first.revision };
+      x.markSubmissionPending(priorFence, { submissionId: 'prior-submission', inputDigest: input.digest, resourceRefs: [], authorizationRefs: [] });
+      priorFence = { ...priorFence, expectedRevision: repos.execution.getTaskExecution(taskId)!.currentAttempt!.revision };
+      const failed = { kind: 'driver_result' as const, submissionId: 'prior-submission', outcome: 'failed' as const, outputDigest: createHash('sha256').update('').digest('hex'), stopReason: 'end_turn', complete: true };
+      if (retry === 'capacity') {
+        x.appendEvent(priorFence, { id: 'capacity-error', type: 'error', data: { code: 'codex_capacity', nativeSource: 'codex', nativeTerminal: true, capacityReason: 'selected_model_capacity', nativeTurnId: 'turn' } });
+        x.settleCapacityRetry(priorFence, 'prior-settlement', failed);
+        vi.useFakeTimers({ toFake: ['Date'] });
+        try { vi.setSystemTime(Date.now() + 31_000); attempt = x.claimNext({ sessionId: 's1', runId: 'r' })!.attempt!; }
+        finally { vi.useRealTimers(); }
+      } else {
+        x.settleAttempt(priorFence, 'prior-settlement', failed);
+        const settled = repos.execution.getTaskExecution(taskId)!.currentAttempt!;
+        x.retryAttempt({ ...priorFence, expectedRevision: settled.revision }, { decisionId: 'manual-retry', actor: request.actor, action: 'retry', allowDuplicateEffects: true, evidenceRefs: ['operator'], resourceChecks: [] }, []);
+        attempt = x.claimNext({ sessionId: 's1', runId: 'r' })!.attempt!;
+      }
+    }
     let fence: any = { sessionId: 's1', runId: 'r', taskId, attemptId: attempt.attemptId, expectedRevision: attempt.revision };
     x.appendEvent(fence, { id: 'out', type: 'text', data: { role: 'assistant', text } });
     x.markSubmissionPending(fence, { submissionId: 'sub1', inputDigest: input.digest, resourceRefs: [], authorizationRefs: [] });
@@ -61,7 +80,7 @@ async function fixture() {
       conditionStatus: 'passed',
       runStatus: 'completed',
       taskId,
-      runtimeAttemptId: attempt.attemptId,
+      runtimeAttemptId: first.attemptId,
       result,
       admission: {
         version: 1,
@@ -81,6 +100,28 @@ async function fixture() {
 }
 
 describe('automation service integration', () => {
+  it('accepts only a verified automatic successor while keeping the source pinned to its first admission', async () => {
+    const f = await fixture();
+    const result = f.settleTask('completed', 'safe capacity result', 'occ1', 'automation1', 'capacity');
+    const source = JSON.parse((await f.repos.config.get('session_automation/occurrence/occ1'))!);
+    expect(source.runtimeAttemptId).not.toBe(result.attemptId);
+    await f.repos.config.set('automation.delivery-target.automation1', JSON.stringify({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_original', replyInThread: true }));
+    await f.deliver('s1', result, 'occ1', 'automation1');
+    await f.deliver('s1', result, 'occ1', 'automation1');
+    expect(f.client.reply).toHaveBeenCalledOnce();
+    expect(JSON.stringify(f.client.reply.mock.calls)).toContain('safe capacity result');
+    expect(JSON.parse((await f.repos.config.get('session_automation/occurrence/occ1'))!).runtimeAttemptId).toBe(source.runtimeAttemptId);
+  });
+
+  it('rejects a completed manual retry presented as the original admission result', async () => {
+    const f = await fixture();
+    const result = f.settleTask('completed', 'manual retry output', 'occ1', 'automation1', 'manual');
+    await f.repos.config.set('automation.delivery-target.automation1', JSON.stringify({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_original', replyInThread: true }));
+    await expect(f.deliver('s1', result, 'occ1', 'automation1')).rejects.toMatchObject({ code: 'AUTOMATION_RESULT_NOT_READY' });
+    expect(f.client.reply).not.toHaveBeenCalled();
+    expect(f.client.send).not.toHaveBeenCalled();
+  });
+
   it('checks the lease again after a slow authorization before any provider send or fallback', async () => {
     const f = await fixture(); const result = f.settleTask('completed');
     await f.repos.config.set('automation.delivery-target.automation1', JSON.stringify({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_original', replyInThread: true }));

@@ -13,7 +13,7 @@ import {
   assertPushTarget, buildCommit, defaultBranch, diffTrees, git, localCommits, pushBranch, remoteBranchSha, sameEntry, treeEntries,
   type PathContent, type TreeEntry
 } from './pull-request-git.js';
-import { readFirstAttemptOutput } from './task-results.js';
+import { readTaskOutput } from './task-results.js';
 import { listTurnDiffRecords, readTurnDiffRecord, snapshotWorkingTree } from './turn-diff.js';
 
 const RECORD_PREFIX = 'pull_request/record/';
@@ -95,12 +95,12 @@ export type PullRequestRecord = z.infer<typeof recordSchema>;
 type Stored = { key: string; raw: string; value: PullRequestRecord };
 
 export interface PullRequestServiceOptions {
-  repositories: Pick<RepositoryBundle, 'config' | 'tasks'> & { execution: Pick<RepositoryBundle['execution'], 'getTaskExecution' | 'getAttemptEvents'> };
+  repositories: Pick<RepositoryBundle, 'config' | 'tasks'> & { execution: Pick<RepositoryBundle['execution'], 'getTaskExecution' | 'getAttemptEvents' | 'getAcceptedTask'> };
   runtime: Pick<DutydeckRuntime, 'getSession' | 'dispatch'>;
   providers: CiProviderRegistry;
   prepareDelivery?: (sessionId: string, id: string) => Promise<void>;
   notify?: (sessionId: string, id: string, notice: CiNotice) => Promise<string | undefined>;
-  /** 读跟进任务的最终输出（评审意见的逐条结论在里面）；默认读账本里第一次 Attempt 的结算结果。 */
+  /** 读跟进任务的最终输出（评审意见的逐条结论在里面）；默认读原任务及其安全自动容量重试的结算结果。 */
   readTaskOutput?: (sessionId: string, taskId: string) => string | undefined;
   clock?: () => Date;
   log?: { warn: (...args: any[]) => void };
@@ -434,7 +434,7 @@ export class PullRequestService {
     if (!saved) throw new RuntimeError('PR_NOT_FOUND', '找不到这条 PR 记录。', 404);
     if (!found) return '这条评论已经处理过了。';
     if (saved.value.status !== 'open') return `已记下，但${this.statusText(saved.value)}`;
-    void this.tick();
+    void this.tick().catch(error => this.options.log?.warn({ error }, 'PR 跟进失败'));
     return input.choice === 'apply' ? '已记下，空闲时交给 Agent 按这条评论修改。' : '已记下，不处理这条评论。';
   }
 
@@ -447,7 +447,7 @@ export class PullRequestService {
       if (event.kind === 'merge_request' && (event.state === 'merge' || event.state === 'close')) await this.finish(value.id, event.state === 'merge' ? 'merged' : 'closed');
       else if (event.kind === 'pipeline') await this.update(value.id, latest => latest.status === 'open' ? { ...latest, nextPollAt: iso(this.clock().getTime()) } : undefined);
     }
-    void this.tick();
+    void this.tick().catch(error => this.options.log?.warn({ error }, 'PR 跟进失败'));
   }
 
   private async finish(id: string, status: 'merged' | 'closed') {
@@ -685,7 +685,7 @@ export class PullRequestService {
 
   private output(sessionId: string, taskId: string) {
     if (this.options.readTaskOutput) return this.options.readTaskOutput(sessionId, taskId);
-    return readFirstAttemptOutput({ execution: this.options.repositories.execution }, sessionId, taskId);
+    return readTaskOutput({ execution: this.options.repositories.execution }, sessionId, taskId);
   }
 
   /** 这一轮任务改了哪些路径，以及结束时的内容；来自每轮改动快照。 */

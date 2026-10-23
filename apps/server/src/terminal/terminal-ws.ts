@@ -281,6 +281,11 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
         return; // 非法 URL 不属本路由，交给其它 upgrade 处理者
       }
       if (!url.pathname.startsWith(TERMINAL_PATH_PREFIX)) return; // 非本路由，放行
+      const onSocketError = () => {
+        pending.delete(socket);
+        socket.destroy();
+      };
+      socket.on('error', onSocketError);
       if (closing) { socket.destroy(); return; }
       pending.add(socket);
       socket.once('close', () => pending.delete(socket));
@@ -336,6 +341,7 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
       if (closing || socket.destroyed) { lookup.handle.stream.dispose(); socket.destroy(); return; }
 
       wss.handleUpgrade(request, socket, head, ws => {
+        socket.removeListener('error', onSocketError);
         pending.delete(socket);
         active.add(ws);
         bindConnection(

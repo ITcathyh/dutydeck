@@ -1,6 +1,7 @@
 // history list/show 的端到端回归：真实 DutydeckRuntime + SQLite + HTTP 路由。
 // mock driver 按 prompt 回答，任务结果经执行账本结算，与线上读取最终回答的路径一致。
 import Fastify from 'fastify';
+import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -134,7 +135,7 @@ it('uses actual ledger settlement to distinguish unsettled and failed answers', 
 const finalAnswer = '最终结论：登录改为短信验证码，旧密码入口保留一个月。';
 
 /** 真实 coordinator 建卡与映射，Agent 用 group send --final 交付答复，transcript 里只回一句确认。 */
-async function explicitFinalHarness(options: { holdFinal?: boolean } = {}) {
+async function explicitFinalHarness(options: { holdFinal?: boolean; capacity?: boolean; manual?: boolean } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-history-final-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let release!: () => void;
@@ -142,18 +143,28 @@ async function explicitFinalHarness(options: { holdFinal?: boolean } = {}) {
   // holdFinal 时显式答复卡的发送停在这里，记录保持 pending，直到 deliverFinal()。
   let deliverFinal!: () => void;
   const finalGate = new Promise<void>(resolve => { deliverFinal = resolve; });
+  let initialFailure = false;
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
-    driverFactory: (_config, _protocol, emit, _exit, sessionId) => ({
-      start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
-      send: async prompt => {
-        if ((await repos.sessions.get(sessionId))?.sourceId?.includes(':thread:')) {
-          await gate;
-          emit({ type: 'text', data: { text: '已发送答复。' } });
-        } else emit({ type: 'text', data: { text: `回答：${prompt.split('\n').at(-1)}` } });
-        emit({ type: 'completed', data: { stopReason: 'end_turn' } });
-      }
-    } satisfies AgentDriver)
+    driverFactory: (_config, _protocol, emit, _exit, sessionId) => {
+      let stopped = false;
+      return {
+        start: async () => { stopped = false; }, resume: async () => { stopped = false; }, stop: async () => { stopped = true; }, isStopped: async () => stopped, interrupt: async () => {},
+        send: async prompt => {
+          if ((await repos.sessions.get(sessionId))?.sourceId?.includes(':thread:')) {
+            if ((options.capacity || options.manual) && !initialFailure) {
+              initialFailure = true;
+              emit({ type: 'error', data: options.capacity ? { code: 'codex_capacity', nativeSource: 'codex', nativeTerminal: true, capacityReason: 'selected_model_capacity', nativeTurnId: 'turn' } : { message: 'ordinary failure' } });
+              emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+              return;
+            }
+            await gate;
+            emit({ type: 'text', data: { text: '已发送答复。' } });
+          } else emit({ type: 'text', data: { text: `回答：${prompt.split('\n').at(-1)}` } });
+          emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+        }
+      } satisfies AgentDriver;
+    }
   });
   const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
   await runtime.initialize([agent]);
@@ -211,6 +222,24 @@ async function explicitFinalHarness(options: { holdFinal?: boolean } = {}) {
     workbenchTask: id => runtime.getActiveTaskContext(id),
     finalTaskContext: async (binding, task) => resolveExplicitFinalContext(await repos.channelMappings.list(channel), binding, task)
   });
+  if (options.capacity) {
+    await vi.waitFor(async () => expect((await runtime.getTasks(session.id))[0]?.status).toBe('queued'));
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 31_000);
+      runtime.setQueueHeld(true); runtime.setQueueHeld(false);
+      await vi.waitFor(() => expect(runtime.getActiveTaskContext(session.id)?.attemptId).toBe(repos.execution.getTaskExecution(JSON.parse(mapping.extra!).runtime_task_id)!.attempts[1]!.attemptId));
+    } finally { vi.useRealTimers(); }
+  }
+  if (options.manual) {
+    await vi.waitFor(async () => expect((await runtime.getTasks(session.id))[0]?.status).toBe('failed'));
+    await runtime.stop(session.id, { kind: 'installation_owner', id: 'installation_owner' });
+    const recovery = await runtime.inspectExecutionRecovery(session.id, { kind: 'installation_owner', id: 'installation_owner' });
+    const first = repos.execution.getTaskExecution(JSON.parse(mapping.extra!).runtime_task_id)!.attempts[0]!;
+    await runtime.confirmExecutionRecovery(session.id, { runId: session.runId, taskId: first.taskId, attemptId: first.attemptId, expectedRevision: first.revision,
+      decisionId: 'manual-retry', action: 'retry', allowDuplicateEffects: true, evidenceRefs: ['operator'], resourceChecks: recovery.resourceChecks }, { kind: 'installation_owner', id: 'installation_owner' });
+    await vi.waitFor(() => expect(runtime.getActiveTaskContext(session.id)?.attemptId).toBe(repos.execution.getTaskExecution(first.taskId)!.attempts[1]!.attemptId));
+  }
   const active = runtime.getActiveTaskContext(session.id)!;
   const sending = tools.send(token, { content: finalAnswer, final: true, turn: capabilities.finalTurnToken(session.id, active.taskId, active.attemptId!) });
   if (options.holdFinal) await vi.waitFor(() => expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: expect.stringMatching(/^final_/) })));
@@ -221,7 +250,7 @@ async function explicitFinalHarness(options: { holdFinal?: boolean } = {}) {
   const plain = await runtime.start({ agentId: 'mock', cwd, source: 'lark', sourceId: 'cli_final:oc_group:group:user:ou_bob' });
   const { id: plainTaskId } = await runtime.dispatch(plain.id, '普通问题', 'queue', '普通问题', undefined, 'ou_bob');
   await vi.waitFor(async () => expect((await runtime.getTasks(plain.id))[0]?.status).toBe('completed'));
-  return { repos, tools, token, plainToken: capabilities.environmentFor(plain).dutydeck_group_tools_token!,
+  return { repos, database: join(cwd, 'state.db'), tools, token, plainToken: capabilities.environmentFor(plain).dutydeck_group_tools_token!,
     finalTaskId: active.taskId, finalSessionId: session.id, finalAttemptId: active.attemptId!, plainTaskId, sending, deliverFinal };
 }
 
@@ -240,6 +269,42 @@ describe('history answers delivered with group send --final', () => {
     expect(await h.tools.historyTask(h.token, { taskId: h.plainTaskId })).toMatchObject({ answer: '回答：普通问题' });
     const listed = (await h.tools.history(h.token)).tasks;
     expect(listed.map(item => [item.taskId, item.answer])).toEqual([[h.plainTaskId, '回答：普通问题'], [h.finalTaskId, finalAnswer]]);
+  });
+
+  it('reads the explicit final of a verified capacity successor', async () => {
+    const h = await explicitFinalHarness({ capacity: true });
+    const attempts = h.repos.execution.getTaskExecution(h.finalTaskId)!.attempts;
+    expect(attempts.map(attempt => attempt.outcome)).toEqual(['failed', 'completed']);
+    expect(attempts[1]!.attemptId).toBe(h.finalAttemptId);
+    expect(await h.tools.historyTask(h.plainToken, { taskId: h.finalTaskId, field: 'answer' })).toMatchObject({ text: finalAnswer, source: 'explicit_final', complete: true });
+    expect((await h.tools.history(h.plainToken, { query: '短信验证码' })).tasks.map(item => item.taskId)).toEqual([h.finalTaskId]);
+  });
+
+  it('does not adopt an explicit final from an unrelated manual retry', async () => {
+    const h = await explicitFinalHarness({ manual: true });
+    const attempts = h.repos.execution.getTaskExecution(h.finalTaskId)!.attempts;
+    expect(attempts.map(attempt => attempt.outcome)).toEqual(['failed', 'completed']);
+    expect(attempts[1]!.automaticRetry).toBeUndefined();
+    expect(await h.tools.historyTask(h.plainToken, { taskId: h.finalTaskId, field: 'answer' })).toMatchObject({ readStatus: 'missing', source: 'attempt', complete: false });
+    expect((await h.tools.history(h.plainToken, { query: '短信验证码' })).tasks).toEqual([]);
+  });
+
+  it('does not read a successor final after its capacity lineage is invalidated', async () => {
+    const h = await explicitFinalHarness({ capacity: true });
+    const sql = new Database(h.database);
+    try { sql.prepare("UPDATE task_attempts SET json=json_set(json, '$.automaticRetry.inputDigest', ?) WHERE id=?").run('b'.repeat(64), h.finalAttemptId); }
+    finally { sql.close(); }
+    expect(await h.tools.historyTask(h.plainToken, { taskId: h.finalTaskId, field: 'answer' })).toMatchObject({ readStatus: 'read_error', error: 'TASK_RESULT_RETRY_CONFLICT', complete: false });
+    expect((await h.tools.history(h.plainToken, { query: '短信验证码' })).tasks).toEqual([]);
+  });
+
+  it('keeps a valid explicit final readable when the transcript digest is corrupt', async () => {
+    const h = await explicitFinalHarness();
+    const sql = new Database(h.database);
+    try { sql.prepare("UPDATE task_attempts SET json=json_set(json, '$.settlement.outputDigest', ?) WHERE id=?").run('a'.repeat(64), h.finalAttemptId); }
+    finally { sql.close(); }
+    expect(() => readAttemptResult(h.repos, h.finalSessionId, h.finalTaskId, h.finalAttemptId)).toThrow(/digest/);
+    expect(await h.tools.historyTask(h.plainToken, { taskId: h.finalTaskId, field: 'answer' })).toMatchObject({ text: finalAnswer, source: 'explicit_final', complete: true });
   });
 
   it('reports corrupt explicit final records as read_error and preserves legacy fallback', async () => {

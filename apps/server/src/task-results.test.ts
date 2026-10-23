@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { canonicalExecutionJson, type BoundExecutionRepository, type RuntimeControlClaim, type TaskAttempt, type TaskRequestV1 } from '@dutydeck/shared';
 import * as storage from '@dutydeck/storage';
-import { readAttemptResult, readWorkAttemptResult } from './task-results.js';
+import { readAttemptResult, readTaskAttemptResult, readWorkAttemptResult } from './task-results.js';
 
 const directories: string[] = [];
 const opened: Array<{ repos: ReturnType<typeof storage.createRepositories>; claim: RuntimeControlClaim; path: string }> = [];
@@ -70,6 +70,7 @@ describe('readAttemptResult against the real execution ledger', () => {
     const first = claimed(repos, x);
     const next = capacityRetry(repos, x, path, first);
     expect(readWorkAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toEqual({ status: 'pending' });
+    expect(readTaskAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toEqual({ status: 'pending' });
     expect(readAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toEqual({ status: 'blocked', reason: 'legacy_output_unresolved' });
     const second = x.claimNext(fence)!.attempt!;
     expect(second.attemptId).toBe(next.attemptId);
@@ -103,6 +104,7 @@ describe('readAttemptResult against the real execution ledger', () => {
     textEvents(x, third, ['unrelated replacement']);
     settleDriver(repos, x, third.taskId, utf8Digest('unrelated replacement'));
     expect(readWorkAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toEqual({ status: 'blocked', reason: 'reconcile_required' });
+    expect(readTaskAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toEqual({ status: 'blocked', reason: 'reconcile_required' });
   });
   it('atomically preserves old events and returns only verified manual output, with audited idempotency', async () => {
     const { repos, x, path } = open();

@@ -22,7 +22,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { currentProcessIdentity, observeProcess } from '@dutydeck/storage';
-import { readAttemptResult, type AttemptResultRepositories } from '../task-results.js';
+import { readTaskAttemptResult, type TaskResultRepositories } from '../task-results.js';
 import { installationOwnerTaskActor, RuntimeError, type AgentCapabilities, type AcceptedTask, type ConfigRepository, type MemoryJob, type MemoryJobRepository, type StartSessionInput, type TaskRequestV1, type AgentConfig, type AgentEvent, type ExecutionActor, type PermissionMode, type Session, type TaskRecord } from '@dutydeck/shared';
 import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
 import {
@@ -114,7 +114,7 @@ export interface LarkMemoryPipelineOptions {
   runtime: LarkMemoryPipelineRuntime;
   jobs: MemoryJobRepository;
   policyConfig: ConfigRepository;
-  repos: AttemptResultRepositories;
+  repos: TaskResultRepositories;
   /** 服务装配提供已授权的后台控制身份，管线不推断用户或安装者。 */
   controlActorId?: string;
   store: LarkMemoryStore;
@@ -612,7 +612,7 @@ export class LarkMemoryPipeline {
         const attemptId = this.attemptIdFor(turn.taskId);
         const task = (await this.options.runtime.getTasks(turn.sessionId)).find(item => item.id === turn.taskId);
         if (!attemptId || !task) throw new LarkMemoryError('MEMORY_RESULT_UNAVAILABLE', '待提取轮次没有可读账本。', 502);
-        const read = readAttemptResult(this.options.repos, turn.sessionId, turn.taskId, attemptId);
+        const read = readTaskAttemptResult(this.options.repos, turn.sessionId, turn.taskId, attemptId);
         if (read.status !== 'settled' || read.result.outcome !== 'completed') throw new LarkMemoryError('MEMORY_RESULT_UNAVAILABLE', '待提取轮次尚未确认完成。', 502);
         const answer = read.result.output.text.trim();
         if (!answer) continue;
@@ -932,7 +932,7 @@ export class LarkMemoryPipeline {
       try {
         const attemptId = this.attemptIdFor(taskId);
         if (attemptId) {
-          const read = readAttemptResult(this.options.repos, sessionId, taskId, attemptId);
+          const read = readTaskAttemptResult(this.options.repos, sessionId, taskId, attemptId);
           if (read.status === 'settled' && read.result.outcome === 'completed') return read.result.output.text;
         }
       } catch (error) { lastError = error; }

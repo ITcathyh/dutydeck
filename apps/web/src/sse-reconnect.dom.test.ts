@@ -47,11 +47,12 @@ describe('SessionStream 重连时序', () => {
   let events: DockEvent[];
   let after: number;
 
-  const makeStream = () => new SessionStream({
+  const makeStream = (onReconnect?: () => void) => new SessionStream({
     sessionId: 's1',
     getAfter: () => after,
     onEvent: event => { events.push(event); after = Math.max(after, event.sequence); },
-    onStatus: status => statuses.push(status)
+    onStatus: status => statuses.push(status),
+    onReconnect
   });
 
   beforeEach(() => {
@@ -92,6 +93,78 @@ describe('SessionStream 重连时序', () => {
     vi.advanceTimersByTime(120_000);
     expect(MockEventSource.instances).toHaveLength(2);
     stream.close();
+  });
+
+  it.each([false, true])('握手无 open/error 时在启动宽限后恢复（重连=%s）', retry => {
+    const onReconnect = vi.fn();
+    const stream = makeStream(onReconnect);
+    stream.start();
+    if (retry) { latest().fail(); vi.advanceTimersByTime(1_000); }
+    const first = latest();
+    const count = MockEventSource.instances.length;
+    vi.advanceTimersByTime(SSE_BOOTSTRAP_STALE_MS - 1);
+    expect(first.closed).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(first.closed).toBe(true);
+    first.open(); first.fail();
+    first.emit('text', JSON.stringify({ sequence: 99 }));
+    expect(statuses).not.toContain('open');
+    expect(events).toEqual([]);
+    const delay = retry ? 2_000 : 1_000;
+    vi.advanceTimersByTime(delay - 1);
+    expect(MockEventSource.instances).toHaveLength(count);
+    vi.advanceTimersByTime(1);
+    expect(MockEventSource.instances).toHaveLength(count + 1);
+    expect(onReconnect).toHaveBeenCalledTimes(retry ? 2 : 1);
+    stream.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('握手后 open 重置启动宽限，且仅保留一个 watchdog', () => {
+    const stream = makeStream();
+    stream.start();
+    vi.advanceTimersByTime(SSE_BOOTSTRAP_STALE_MS - 5_000);
+    latest().open();
+    expect(vi.getTimerCount()).toBe(1);
+    vi.advanceTimersByTime(SSE_BOOTSTRAP_STALE_MS - 1);
+    expect(latest().closed).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(latest().closed).toBe(true);
+    stream.close();
+  });
+
+  it('close 清除尚未 open 的握手 watchdog', () => {
+    const stream = makeStream();
+    stream.start();
+    expect(vi.getTimerCount()).toBe(1);
+    stream.close();
+    expect(vi.getTimerCount()).toBe(0);
+    latest().open(); latest().fail();
+    vi.advanceTimersByTime(SSE_BOOTSTRAP_STALE_MS * 2);
+    expect(MockEventSource.instances).toHaveLength(1);
+    expect(statuses).toEqual([]);
+  });
+
+  it('尚未 open 的连接在后台暂停，回前台只恢复和校准一次', () => {
+    let hidden = false;
+    vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+    const onReconnect = vi.fn();
+    const stream = makeStream(onReconnect);
+    stream.start();
+    const first = latest();
+    hidden = true; document.dispatchEvent(new Event('visibilitychange'));
+    vi.advanceTimersByTime(SSE_HIDDEN_SUSPEND_MS);
+    expect(first.closed).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    first.open(); first.fail();
+    vi.advanceTimersByTime(SSE_BOOTSTRAP_STALE_MS * 2);
+    expect(MockEventSource.instances).toHaveLength(1);
+    expect(onReconnect).not.toHaveBeenCalled();
+    hidden = false; document.dispatchEvent(new Event('visibilitychange'));
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(onReconnect).toHaveBeenCalledOnce();
+    stream.close();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('失败的连接被显式 close，不泄漏旧 EventSource', () => {

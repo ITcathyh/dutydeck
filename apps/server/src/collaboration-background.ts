@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, scheduleTriggerPeriod, taskRequestV1Schema, type CollaborationAction, type CollaborationScope, type ExecutionActor, type RepositoryBundle, type ScheduleTrigger, type Session, type TaskRecord, type TaskRequestV1 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
-import { readAttemptResult } from './task-results.js';
+import { readTaskAttemptResult } from './task-results.js';
 import { scheduleMatchesMandate, type CollaborationAuthorization } from './collaboration-service.js';
 import type { ScheduleAgentResult, ScheduleExecutionInput } from './schedule-executor.js';
 import type { StoredLarkConfig } from './lark/config.js';
@@ -145,7 +145,7 @@ export class CollaborationBackground {
       if (['cancelled', 'failed', 'interrupted'].includes(accepted.task.status)) return { status: 'failed', error: '任务未执行或已取消。' };
       return { status: 'pending', receipt: taskId };
     }
-    const result = readAttemptResult({ execution: this.options.repositories.execution }, sessionId, taskId, attempt.attemptId);
+    const result = readTaskAttemptResult({ execution: this.options.repositories.execution }, sessionId, taskId, attempt.attemptId);
     if (result.status === 'pending') return { status: 'pending', receipt: taskId };
     if (result.status === 'blocked') { await this.finish(record, 'unknown', taskId, result.reason); return { status: 'unknown', receipt: taskId, error: result.reason }; }
     if (result.result.outcome !== 'completed') { await this.finish(record, 'failed', taskId); return { status: 'failed', receipt: taskId, error: result.result.outcome }; }
