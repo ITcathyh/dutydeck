@@ -6,10 +6,12 @@ import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { agentConfigSchema } from '@dutydeck/shared';
 import { buildApp } from '../apps/server/src/app.js';
+import { AgentModelSettings } from '../apps/server/src/agent-model-settings.js';
 import { LarkGroupManager } from '../apps/server/src/lark/group-management.js';
 import { readLarkConfig, saveLarkConfig } from '../apps/server/src/lark/config.js';
 import { LarkMessageCoordinator, type LarkMessageEvent } from '../apps/server/src/lark/listener.js';
 import { installLarkHook } from '../apps/server/src/lark/security-hooks.js';
+import type { LarkRoutesOptions } from '../apps/server/src/lark/routes.js';
 
 export interface LarkManagementDelivery {
   appId: string;
@@ -36,8 +38,10 @@ export function createSyntheticTransportState(): SyntheticTransportState {
 export async function createLarkManagementHarness(
   webRoot?: string,
   existingDirectory?: string,
-  transportState: SyntheticTransportState = createSyntheticTransportState()
+  transportState: SyntheticTransportState = createSyntheticTransportState(),
+  options: Pick<LarkRoutesOptions, 'fetcher' | 'listener' | 'listeningDisabled'> & { agentAliases?: string[]; agentEnv?: Record<string, string> } = {}
 ) {
+  const { agentAliases = [], agentEnv = {}, ...larkOptions } = options;
   let directory: string | undefined = existingDirectory;
   let repositories: ReturnType<typeof createRepositories> | undefined;
   let runtime: DutydeckRuntime | undefined;
@@ -62,8 +66,10 @@ export async function createLarkManagementHarness(
       protocol: 'acp',
       cwd: workspaces[i],
       timeout: 30,
+      env: agentEnv,
       model: 'model-default'
     }));
+    for (const id of agentAliases) agents.push({ ...agents[0]!, id, name: id });
 
     const manager: LarkGroupManager = new LarkGroupManager(repositories, {
       client: config => client(config.appId),
@@ -140,9 +146,11 @@ export async function createLarkManagementHarness(
 
     app = await buildApp(runtime, {
       webRoot,
+      agentModelSettings: new AgentModelSettings(repositories, agents),
+      sessionNames: { authorize: async () => true },
       system: { directoryRoots: async () => workspaces },
       auth: { mode: 'local', localOnly: true, getToken: async () => null },
-      lark: { config: repositories.config, agents: repositories.agents, runtime, groupManager: manager, listeningDisabled: true },
+      lark: { config: repositories.config, agents: repositories.agents, runtime, groupManager: manager, listeningDisabled: true, ...larkOptions },
       executionPolicy: { authorize: async (_request, sessionId, _boundary, action) => await manager.authorizeSession(sessionId, action, true) ?? { allowed: true, action, code: 'local_owner', reason: 'Synthetic acceptance owner', source: 'owner' } }
     });
 
@@ -167,7 +175,8 @@ export async function createLarkManagementHarness(
       observations,
       syntheticClient: (appId: string) => client(appId),
       async configureAcpRiskFixture() {
-        const agent = { ...agents[0]!, id: 'codex' };
+        // This fixture checks ACP permission routing, not Codex native trust.
+        const agent = { ...agents[0]!, id: 'claude' };
         await repositories!.agents.save(agent);
         for (const workspace of workspaces) {
           const hook = await installLarkHook(agent.id, workspace, agent);

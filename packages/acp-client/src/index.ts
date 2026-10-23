@@ -35,25 +35,36 @@ function claudeLauncherPath() { return agentsFile('claude-acp.mjs'); }
 
 function envLauncherPath() { return agentsFile('env-launcher.mjs'); }
 
+const isCodexAcpAgent = (agent: AgentConfig) => Boolean(agent.builtin && ['codex', 'codex-acp'].includes(agent.id)) || inferAcpInsightClient(agent) === 'codex';
+
 /** Resolve before npx prepends its bundled Codex to PATH; never persist this override. */
 export function acpxAgentEnvironment(agent: AgentConfig): Record<string, string> {
-  if (!agent.builtin || !['codex', 'codex-acp'].includes(agent.id)) return {};
+  if (!isCodexAcpAgent(agent)) return {};
   const env = childEnvironment(process.env, agent.env);
-  if (env.CODEX_PATH) return {};
+  let executable = env.CODEX_PATH;
   const extensions = process.platform === 'win32'
     ? ['', ...(env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';')]
     : [''];
-  for (const directory of (env.PATH ?? '/usr/bin:/bin').split(delimiter)) {
+  for (const directory of executable ? [] : (env.PATH ?? '/usr/bin:/bin').split(delimiter)) {
     for (const extension of extensions) {
       const path = resolve(agent.cwd ?? process.cwd(), directory || '.', `codex${extension}`);
       try {
         if (!statSync(path).isFile()) continue;
         accessSync(path, constants.X_OK);
-        return { CODEX_PATH: path };
+        executable = path;
+        break;
       } catch {}
     }
+    if (executable) break;
   }
-  throw new Error('CODEX_CLI_NOT_FOUND: Install Codex in the Dutydeck process PATH, or set CODEX_PATH to its executable.');
+  if (!executable) throw new Error('CODEX_CLI_NOT_FOUND: Install Codex in the Dutydeck process PATH, or set CODEX_PATH to its executable.');
+  return {
+    CODEX_PATH: agentsFile('codex-permission-bridge.mjs'),
+    PATH: `${dirname(process.execPath)}${delimiter}${env.PATH ?? ''}`,
+    INITIAL_AGENT_MODE: agent.permissionMode === 'full-trust' ? 'agent-full-access' : 'read-only',
+    dutydeck_codex_executable: executable,
+    dutydeck_codex_permission_mode: agent.permissionMode
+  };
 }
 
 const persistedEnvKey = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
@@ -108,7 +119,10 @@ export function prepareAcpxAgentLaunch(agent: AgentConfig, options: { runtimeDir
   mkdirSync(options.runtimeDirectory, { recursive: true, mode: 0o700 });
   chmodSync(options.runtimeDirectory, 0o700);
   const identity = createHash('sha256').update(options.sessionKey).digest('hex');
-  const payload = JSON.stringify({ ...persisted, ...bridged });
+  const launchEnvironment = { ...persisted, ...bridged };
+  // The late-bound native bridge must win over persisted account overrides.
+  if (isCodexAcpAgent(agent)) for (const key of ['CODEX_PATH', 'INITIAL_AGENT_MODE', 'PATH', 'dutydeck_codex_executable', 'dutydeck_codex_permission_mode']) delete launchEnvironment[key];
+  const payload = JSON.stringify(launchEnvironment);
   const environmentFile = join(options.runtimeDirectory, `${identity}.json`);
   writeFileSync(environmentFile, payload, { encoding: 'utf8', mode: 0o600 });
   chmodSync(environmentFile, 0o600);

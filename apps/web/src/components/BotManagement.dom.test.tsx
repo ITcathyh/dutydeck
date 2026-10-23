@@ -1216,6 +1216,21 @@ describe('draft hook preparation', () => {
     expect(screen.getByText('已为 ccflash、codex 配置拦截 Hook。')).toBeTruthy();
   });
 
+  it('requires native Codex readiness and rechecks trust without rewriting installed hook files', async () => {
+    let trusted = false;
+    const status = vi.spyOn(api, 'larkHookStatus').mockImplementation(async (_appId, id) => ({ agentId: id, supported: true, installed: true, writable: true, nativeReady: id !== 'codex' || trusted, trustRequired: !trusted, reason: id === 'codex' && !trusted ? '请在 /hooks 审核 Dutydeck Hook' : undefined }));
+    const install = vi.spyOn(api, 'installLarkHook');
+    setup();
+    await userEvent.selectOptions(await screen.findByLabelText('兜底 Agent'), 'codex');
+    expect(await screen.findByText('codex: 请在 /hooks 审核 Dutydeck Hook')).toBeTruthy();
+    expect(screen.queryByText('已为 ccflash、codex 配置拦截 Hook。')).toBeNull();
+    trusted = true;
+    await userEvent.click(screen.getByRole('button', { name: '重新检查 Hook' }));
+    expect(await screen.findByText('已为 ccflash、codex 配置拦截 Hook。')).toBeTruthy();
+    expect(status).toHaveBeenCalledWith(mockBot.appId, 'codex', mockBot.workspace);
+    expect(install).not.toHaveBeenCalled();
+  });
+
   it('keeps a missing-hook save failure out of concurrency handling and prepares the unsaved fallback/workspace', async () => {
     const user = userEvent.setup();
     let installed = false;

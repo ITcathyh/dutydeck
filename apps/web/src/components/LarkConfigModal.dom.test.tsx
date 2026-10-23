@@ -277,6 +277,19 @@ describe('LarkConfigModal risk control', () => {
     expect(screen.queryByRole('button', { name: '加载最新配置并放弃草稿' })).toBeNull();
   });
 
+  it('keeps enforced completion disabled until an installed Codex hook is natively trusted', async () => {
+    let trusted = false;
+    vi.spyOn(api, 'larkHookStatus').mockImplementation(async () => ({ agentId: 'codex', supported: true, installed: true, writable: true, nativeReady: trusted, trustRequired: !trusted, reason: trusted ? undefined : '请在 /hooks 审核 Dutydeck Hook' }));
+    const install = vi.spyOn(api, 'installLarkHook');
+    renderModal(collection({ defaultAgentId: 'codex', fullTrustConfirmed: true, riskControlMode: 'enforced' }));
+    expect(await screen.findByText('请在 /hooks 审核 Dutydeck Hook')).toBeTruthy();
+    expect((screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement).disabled).toBe(true);
+    trusted = true;
+    await userEvent.click(screen.getByRole('button', { name: '重新检查 Hook' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement).disabled).toBe(false));
+    expect(install).not.toHaveBeenCalled();
+  });
+
   it('does not lock Agent selection and checks the newly selected Agent hook', async () => {
     const user = userEvent.setup();
     const hookStatus = vi.spyOn(api, 'larkHookStatus').mockImplementation(async (_appId, agentId) => ({

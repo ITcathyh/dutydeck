@@ -224,7 +224,7 @@ export class LarkWorkflowInteractions {
   private repairWait?: { timer: NodeJS.Timeout; release(): void };
   private repairCancelled = false;
   private readonly closedCards = new Set<string>();
-  private readonly closingCards = new Set<string>();
+  private readonly closingCards = new Map<string, Promise<void>>();
   private readonly deferredCloses = new Map<string, { active: number; timer?: NodeJS.Timeout }>();
   private readonly log?: Pick<ListenerLog, 'warn'>;
   private readonly delivering = new Set<string>();
@@ -303,7 +303,8 @@ export class LarkWorkflowInteractions {
     return raw ? JSON.parse(raw) as LarkInteraction : undefined;
   }
   async initialize(appId: string) {
-    for (const record of await this.list(appId)) {
+    for (let record of await this.list(appId)) {
+      record = await this.refreshPermissionDecision(record);
       if (record.durable && ['pending', 'resolving'].includes(record.state)) {
         await this.reconcileConfirmation(record).catch(error => this.log?.warn({ error, requestId: record.id }, 'Recovering durable confirmation failed'));
         continue;
@@ -344,7 +345,7 @@ export class LarkWorkflowInteractions {
     if (record.timedOutAt && record.expiresAt) return `超时自动拒绝 · ${shanghaiClock(Date.parse(record.expiresAt))}\n\n超过 ${timeoutHours} 小时未处理，这次操作没有执行，不再接受批准；需要的话请重新发起。`;
     if (record.kind === 'plan') return planStaleText;
     const task = (await this.runtime.getTasks?.(record.sessionId))?.find(item => item.id === record.taskId);
-    const recovery = task ? await describeLarkTaskRecovery(this.runtime, record.sessionId, record.taskId, task.status) : undefined;
+    const recovery = task && ['queued', 'reconcile_required', 'legacy_unresolved'].includes(task.status) ? await describeLarkTaskRecovery(this.runtime, record.sessionId, record.taskId, task.status) : undefined;
     if (recovery?.blocked || recovery?.label === '已核对，结果未确认') {
       return `此请求已失效，不再接受回答或批准。\n\n${recovery.markdown}`;
     }
@@ -355,11 +356,17 @@ export class LarkWorkflowInteractions {
     let unresolved = 0;
     for (let record of await this.list(appId)) {
       if (record.kind === 'result' || (taskId && record.taskId !== taskId)) continue;
+      const receipt = await this.permissionReceipt(record);
+      record = await this.refreshPermissionDecision(record, receipt);
       if (record.durable && ['pending', 'resolving'].includes(record.state)) {
         try { record = await this.reconcileConfirmation(record); if (record.state === 'pending') unresolved++; }
         catch (error) { this.log?.warn({ error, requestId: record.id }, 'Reconciling durable confirmation failed'); unresolved++; continue; }
       }
       if (record.state === 'pending' && !await this.live(record)) {
+        // Runtime hides a permission while its decision is being submitted.
+        // A still-running task with a pending receipt has no expiry evidence.
+        if (record.kind === 'permission' && record.boot === this.boot && receipt?.status === 'pending'
+          && (await this.runtime.getTasks?.(record.sessionId))?.some(task => task.id === record.taskId && task.status === 'running')) continue;
         if (record.kind === 'ask' && this.broker?.get(record.nativeId)?.status === 'answering') continue;
         try { record = await this.move(record, 'expired'); } catch { continue; }
       }
@@ -380,6 +387,32 @@ export class LarkWorkflowInteractions {
     const records = await this.list(appId);
     return this.urgentManager.checkAndUrge(records, options?.now);
   }
+  private async permissionReceipt(record: LarkInteraction): Promise<PermissionRequestData | undefined> {
+    if (record.kind !== 'permission' || record.timedOutAt || !['pending', 'resolving', 'expired'].includes(record.state)) return undefined;
+    const events = await this.runtime.getEvents?.(record.sessionId);
+    const event = events?.slice().reverse().find(event => event.type === 'permission_request' && event.taskId === record.taskId
+      && (event.data as PermissionRequestData).id === record.nativeId);
+    return event?.data as PermissionRequestData | undefined;
+  }
+  private async refreshPermissionDecision(record: LarkInteraction, receipt?: PermissionRequestData) {
+    receipt ??= await this.permissionReceipt(record);
+    if (receipt?.status !== 'approved' && receipt?.status !== 'rejected') return record;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      // Finish any older expiry PATCH before writing the accepted decision, so
+      // a delayed provider response cannot replace the final approval card.
+      await this.closingCards.get(record.id);
+      const current = await this.current(record);
+      if (this.closingCards.has(record.id)) continue;
+      if (current.timedOutAt || ['approved', 'rejected'].includes(current.state)
+        || current.state === 'resolving' && current.boot === this.boot) return current;
+      try {
+        return await this.move(current, receipt.status, undefined, { closeMessage: undefined, cardClosedAt: undefined, closeAttempts: 0, closeRetryAt: undefined });
+      } catch (error) {
+        if (!(error instanceof LarkServiceError) || error.code !== 'LARK_INTERACTION_EXPIRED') throw error;
+      }
+    }
+    return this.current(record);
+  }
   private async closedMessage(record: LarkInteraction) {
     if (record.state === 'expired') return this.expiryMessage(record);
     if (record.closeMessage) return record.closeMessage;
@@ -397,13 +430,19 @@ export class LarkWorkflowInteractions {
       if (record.closeMessage !== message) await this.annotate(record, { closeMessage: message });
       return true;
     }
+    const requestedState = record.state;
     const key = `${record.cardId}:${record.state}:${message}`;
     if (this.closedCards.has(key)) return true;
     if (this.closingCards.has(record.id)) return false;
-    this.closingCards.add(record.id);
+    let release!: () => void;
+    this.closingCards.set(record.id, new Promise<void>(resolve => { release = resolve; }));
     let changed = false;
     try {
       record = await this.current(record);
+      if (record.state !== requestedState) {
+        if (['pending', 'resolving'].includes(record.state)) return false;
+        message = await this.closedMessage(record);
+      }
       if (record.cardClosedAt && record.closeMessage === message) return true;
       if (record.closeMessage && record.closeMessage !== message) {
         changed = true;
@@ -433,6 +472,7 @@ export class LarkWorkflowInteractions {
       return false;
     } finally {
       this.closingCards.delete(record.id);
+      release();
       if (changed) await this.schedulePlanCheck(record.appId);
     }
   }
@@ -442,7 +482,11 @@ export class LarkWorkflowInteractions {
       elements: [...intentElements(record), { tag: 'div', text: { tag: 'plain_text', content: record.question.slice(0, 6000) } }, { tag: 'markdown', content: '上次提交未送达执行端，请重新批准或拒绝。' }, button(record, 'approve', '允许本次'), button(record, 'reject', '拒绝')] }).catch(() => undefined);
   }
   async expireTask(appId: string, taskId: string) {
-    for (const record of await this.list(appId)) {
+    for (let record of await this.list(appId)) {
+      if (record.kind === 'permission' && record.taskId === taskId) {
+        record = await this.refreshPermissionDecision(record);
+        if (['approved', 'rejected'].includes(record.state)) { await this.renderClosed(record, await this.closedMessage(record)); continue; }
+      }
       if (record.durable || record.taskId !== taskId || record.kind === 'result' || record.kind === 'plan' || record.state !== 'pending') continue;
       try { await this.renderClosed(await this.move(record, 'expired'), await this.expiryMessage(record)); }
       catch { /* A concurrently accepted decision owns this request. */ }
@@ -637,6 +681,14 @@ export class LarkWorkflowInteractions {
   ) {
     if (this.closed) return;
     const data = event.data as Record<string, any>;
+    if (event.type === 'permission_request' && ['approved', 'rejected'].includes(data.status)) {
+      for (let record of await this.list(context.appId)) {
+        if (record.kind !== 'permission' || record.sessionId !== context.sessionId || record.taskId !== context.taskId || record.nativeId !== data.id) continue;
+        record = await this.refreshPermissionDecision(record, data as PermissionRequestData);
+        if (['approved', 'rejected'].includes(record.state)) await this.renderClosed(record, await this.closedMessage(record));
+      }
+      return;
+    }
     let kind: 'ask' | 'permission';
     let nativeId: string;
     let question: string;

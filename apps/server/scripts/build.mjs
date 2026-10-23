@@ -85,6 +85,7 @@ mkdirSync(agentsDir, { recursive: true });
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/claude-acp.mjs'), resolve(agentsDir, 'claude-acp.mjs'));
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/claude-guard.mjs'), resolve(agentsDir, 'claude-guard.mjs'));
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/env-launcher.mjs'), resolve(agentsDir, 'env-launcher.mjs'));
+cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/codex-permission-bridge.mjs'), resolve(agentsDir, 'codex-permission-bridge.mjs'));
 cpSync(resolve(workspaceRoot, 'packages/shared/runtime/child-environment.mjs'), resolve(agentsDir, 'child-environment.mjs'));
 cpSync(resolve(workspaceRoot, 'packages/shared/runtime/secret-guard.mjs'), resolve(agentsDir, 'secret-guard.mjs'));
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/launcher-process.mjs'), resolve(agentsDir, 'launcher-process.mjs'));

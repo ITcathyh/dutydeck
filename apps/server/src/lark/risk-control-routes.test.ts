@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { buildApp } from '../app.js';
 import { loadConfig } from '@dutydeck/config';
@@ -41,7 +41,11 @@ it('saves an ask/enforced bot with the discovered Codex ACP fallback while termi
   const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-codex-acp-fallback-'));
   cleanups.push(() => rm(workspace, { recursive: true, force: true }));
   const codexPath = join(workspace, 'user-codex');
-  await writeFile(codexPath, '#!/bin/sh\necho "Codex fixture 1.0"\n', { mode: 0o755 });
+  await writeFile(codexPath, `#!${process.execPath}\nif (process.argv.includes('--version')) console.log('Codex fixture 1.0'); else await import(${JSON.stringify(resolve('tests/fixtures/mock-codex-hooks.mjs'))});\n`, { mode: 0o755 });
+  const codexHome = join(workspace, 'codex-home');
+  await mkdir(codexHome);
+  await writeFile(join(codexHome, 'hooks-probe-state.json'), JSON.stringify({}));
+  vi.stubEnv('CODEX_HOME', codexHome);
   vi.stubEnv('PATH', dirname(process.execPath));
   vi.stubEnv('CODEX_PATH', codexPath);
   const config = loadConfig({ DUTYDECK_DEFAULT_CWD: workspace, CODEX_PATH: codexPath, DUTYDECK_AGENTS_JSON: JSON.stringify([
@@ -66,7 +70,11 @@ it('saves an ask/enforced bot with the discovered Codex ACP fallback while termi
   await runSettingsCli('bot-install-hook', { ...input, prepare: true, pairs: ['fallbackAgentId=codex-acp'] }, dependencies);
   expect(await readLarkConfig(repos.config, input.appId)).toMatchObject({ revision: 7, permissionMode: 'ask', fullTrustConfirmed: false, riskControlMode: 'enforced', defaultAgentId: 'ccflash', defaultModel: 'gemini-3.8-flash-high' });
   expect(await readFile(join(workspace, '.codex/hooks.json'), 'utf8')).toContain('dutydeck-lark-high-risk-guard-codex.mjs');
-  expect((await app.inject({ method: 'GET', url: '/api/lark/hooks/status?appId=cli_guarded&agentId=codex-acp' })).json()).toMatchObject({ agentId: 'codex-acp', installed: true });
+  await expect(runSettingsCli('bot-set', { ...input, pairs: ['fallbackAgentId=codex-acp', 'fallbackModel=gpt-6.1-sol'] }, dependencies)).rejects.toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY', message: expect.stringContaining('项目信任') });
+  await writeFile(join(codexHome, 'hooks-probe-state.json'), JSON.stringify({ projectTrusted: true }));
+  await expect(runSettingsCli('bot-set', { ...input, pairs: ['fallbackAgentId=codex-acp', 'fallbackModel=gpt-6.1-sol'] }, dependencies)).rejects.toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY', message: expect.stringContaining('尚未受信任') });
+  await writeFile(join(codexHome, 'hooks-probe-state.json'), JSON.stringify({ projectTrusted: true, hookTrustStatus: 'trusted' }));
+  expect((await app.inject({ method: 'GET', url: '/api/lark/hooks/status?appId=cli_guarded&agentId=codex-acp' })).json()).toMatchObject({ agentId: 'codex-acp', installed: true, nativeReady: true });
   await expect(runSettingsCli('bot-set', { ...input, pairs: ['fallbackAgentId=codex', 'fallbackModel=gpt-6.1-sol'] }, dependencies)).rejects.toMatchObject({ code: 'LARK_APPROVAL_UNSUPPORTED' });
   expect((await runSettingsCli('bot-set', { ...input, pairs: ['fallbackAgentId=codex-acp', 'fallbackModel=gpt-6.1-sol'] }, dependencies)).bot).toMatchObject({ revision: 8, fallbackAgentId: 'codex-acp', fallbackModel: 'gpt-6.1-sol', permissionMode: 'ask', fullTrustConfirmed: false, riskControlMode: 'enforced', defaultAgentId: 'ccflash', defaultModel: 'gemini-3.8-flash-high' });
 });

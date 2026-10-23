@@ -109,3 +109,19 @@ it('leaves a concurrent configuration change intact during draft preparation and
   expect(saved.json().error.code).toBe('LARK_CONFIG_REVISION_CONFLICT');
   expect(await readLarkConfig(f.repos.config, 'cli_test')).toMatchObject({ revision: 2, preInjectPrompt: 'concurrent edit' });
 });
+
+
+it('does not save an enforced hook reinstall when any installed routing hook is natively unready', async () => {
+  const f = await fixture();
+  await saveLarkConfig(f.repos.config, undefined, { stage: 'agent', originalAppId: 'cli_test', expectedRevision: 1, fallbackAgentId: 'claude', riskControlMode: 'enforced' });
+  const before = await readLarkConfig(f.repos.config, 'cli_test');
+  vi.mocked(installLarkHook).mockImplementation(async agentId => ({ ...f.hook, agentId, nativeReady: agentId !== 'codex', ...(agentId === 'codex' ? { reason: '请审核 Codex 当前 Hook' } : {}) }));
+  const response = await f.install(2);
+  expect(response.statusCode).toBe(409);
+  expect(response.json().error).toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY', message: '请审核 Codex 当前 Hook' });
+  expect(await readLarkConfig(f.repos.config, 'cli_test')).toEqual(before);
+  const prepared = await f.app.inject({ method: 'POST', url: '/api/lark/hooks/install', payload: { appId: 'cli_test', expectedRevision: 2, draft: {} } });
+  expect(prepared.statusCode).toBe(200);
+  expect(prepared.json()).toMatchObject({ agentId: 'codex', nativeReady: false });
+  expect(await readLarkConfig(f.repos.config, 'cli_test')).toEqual(before);
+});

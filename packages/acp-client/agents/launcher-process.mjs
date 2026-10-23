@@ -4,10 +4,10 @@ import { constants } from 'node:os';
 
 // Nested launchers stay in the outer launcher's group so escalation cannot
 // kill an intermediate wrapper while leaving the actual Agent alive.
-export function launchAgent(command, args, env) {
+export function launchAgent(command, args, env, options = {}) {
   const ownGroup = process.platform !== 'win32' && env.dutydeck_launcher_group !== '1';
   const child = spawn(command, args, {
-    cwd: process.cwd(), stdio: 'inherit', detached: ownGroup,
+    cwd: process.cwd(), stdio: options.stdio ?? 'inherit', detached: ownGroup,
     env: { ...env, dutydeck_launcher_group: '1' }
   });
   let escalation;
@@ -35,6 +35,7 @@ export function launchAgent(command, args, env) {
     }
     process.exit(signal ? 128 + (constants.signals[signal] ?? 1) : code ?? 1);
   });
+  return child;
 }
 
 function groupAlive(group) {

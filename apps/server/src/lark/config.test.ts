@@ -54,13 +54,13 @@ describe('Lark group memory scope config', () => {
     expect((await readLarkConfigs(repository)).map(item => [item.appId, item.groupMemoryScope])).toEqual([['cli_old', 'shared'], ['cli_new', 'shared']]);
   });
 
-  it('saves per-group, keeps it across unrelated saves, and ignores invalid values', async () => {
+  it('saves per-group, keeps it across unrelated saves, and rejects invalid values', async () => {
     const repository = seedBots([{ appId: 'cli_scope', appSecret: 'secret', riskControlMode: 'off' }]);
     await saveLarkConfig(repository, undefined, { originalAppId: 'cli_scope', groupMemoryScope: 'per-group' });
     expect((await readLarkConfigs(repository))[0].groupMemoryScope).toBe('per-group');
     await saveLarkConfig(repository, undefined, { originalAppId: 'cli_scope', preInjectPrompt: 'updated' });
     expect((await readLarkConfigs(repository))[0].groupMemoryScope).toBe('per-group');
-    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_scope', groupMemoryScope: 'bogus' as never });
+    await expect(saveLarkConfig(repository, undefined, { originalAppId: 'cli_scope', groupMemoryScope: 'bogus' as never })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
     expect((await readLarkConfigs(repository))[0].groupMemoryScope).toBe('per-group');
     await saveLarkConfig(repository, undefined, { originalAppId: 'cli_scope', groupMemoryScope: 'shared' });
     expect((await readLarkConfigs(repository))[0].groupMemoryScope).toBe('shared');
@@ -252,16 +252,17 @@ describe('saveLarkConfig inheritance semantics', () => {
     expect(config.displayName).toBe('new name');
   });
 
-  it('drops invalid input values instead of persisting or inheriting them', async () => {
+  it('rejects invalid enum values and still normalizes unrelated free-form input', async () => {
     const repository = createRepository();
     await saveLarkConfig(repository, undefined, { appId: 'cli_test', appSecret: 'secret', p2pMode: 'thread', brand: 'lark' });
+    for (const patch of [{ p2pMode: 'bogus' }, { brand: 'wechat' }]) await expect(saveLarkConfig(repository, undefined, { originalAppId: 'cli_test', ...patch } as never)).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
     await saveLarkConfig(repository, undefined, {
       originalAppId: 'cli_test', appId: 'cli_test', appSecret: 'secret',
-      p2pMode: 'bogus', brand: 'wechat', env: { A: 1 }, startupCommands: ['  '], displayName: '  '
+      env: { A: 1 }, startupCommands: ['  '], displayName: '  '
     });
     const [config] = await readLarkConfigs(repository);
-    expect(config.p2pMode).toBeUndefined();
-    expect(config.brand).toBeUndefined();
+    expect(config.p2pMode).toBe('thread');
+    expect(config.brand).toBe('lark');
     expect(config.env).toBeUndefined();
     expect(config.startupCommands).toBeUndefined();
     expect(config.displayName).toBeUndefined();

@@ -1,6 +1,10 @@
 import { test } from './lark-fixture';
 
 test.describe('synthetic lark extended suite', () => {
+  test('e2e-bot-settings: all settings persist and browser drafts save through both editors', async ({ runLarkScenario }) => {
+    await runLarkScenario({ scriptName: 'e2e-bot-settings.mts' });
+  });
+
   test('e2e-lark-management: group discovery, permissions, and topic persistence', async ({ runLarkScenario }) => {
     await runLarkScenario({
       scriptName: 'e2e-lark-management.mts',

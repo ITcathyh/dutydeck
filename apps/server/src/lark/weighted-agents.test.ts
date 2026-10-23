@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 import { agentConfigSchema, agentWeightsSchema, type Session } from '@dutydeck/shared';
 import { createRepositories, type RepositoryBundle } from '@dutydeck/storage';
 import { readLarkConfig, publicLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
+import { installLarkHook } from './security-hooks.js';
 import { larkSessionConfigKey, listPersistedLarkSessions, resolveLarkSession, selectLarkAgent } from './session-resolver.js';
 
 const weights = [{ agentId: 'codex', weight: 30 }, { agentId: 'ccflash', weight: 70 }];
@@ -140,4 +141,20 @@ describe('weighted primary Agent routing', () => {
     await expect(resolve(undefined, { ...config, riskControlMode: 'enforced' })).rejects.toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY' });
     expect(runtime.start).not.toHaveBeenCalled();
   });
+});
+
+
+it('refuses to start an enforced session until the installed Codex hook is natively loaded and trusted', async () => {
+  const { config, repos, runtime, resolve } = await fixture();
+  const home = join(config.workspace!, 'codex-home');
+  await mkdir(home);
+  const agent = { ...(await repos.agents.get('codex'))!, env: { CODEX_PATH: resolvePath('tests/fixtures/mock-codex-hooks.mjs'), CODEX_HOME: home } };
+  await repos.agents.save(agent);
+  expect(await installLarkHook(agent.id, config.workspace, agent)).toMatchObject({ installed: true, nativeReady: false });
+  const enforced = { ...config, riskControlMode: 'enforced' as const, defaultAgentWeights: undefined };
+  await expect(resolve(undefined, enforced)).rejects.toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY' });
+  expect(runtime.start).not.toHaveBeenCalled();
+  await writeFile(join(home, 'hooks-probe-state.json'), JSON.stringify({ projectTrusted: true, hookTrustStatus: 'trusted' }));
+  await expect(resolve(undefined, enforced)).resolves.toMatchObject({ agentId: 'codex' });
+  expect(runtime.start).toHaveBeenCalledOnce();
 });

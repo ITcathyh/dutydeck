@@ -1763,3 +1763,16 @@ it('finishes late cleanup before another acknowledgement for the same platform m
   await owner.clearAcknowledgementReaction({ event: original, acknowledgement: next });
   expect(writes).toEqual(['add old', 'delete', 'add new', 'delete']);
 });
+
+
+it.each([true, false])('keeps the permission card consistent after a Web Runtime decision (approved=%s)', async approved => {
+  const h = await harness('permission');
+  await h.coordinator.handle(event('om_web_permission', '处理需要审批的文件操作'), h.config);
+  let record!: LarkInteraction;
+  await vi.waitFor(async () => { record = (await h.interactions()).find(item => item.kind === 'permission')!; expect(record?.cardId).toBeTruthy(); });
+  await h.runtime.resolvePermission(record.sessionId, record.nativeId, approved);
+  await vi.waitFor(() => expect(h.cards.get(record.cardId!)).toMatchObject({ statusLabel: approved ? '已允许' : '已拒绝', readOnly: true }));
+  await h.waitDelivered(1);
+  expect((await h.interactions()).find(item => item.id === record.id)).toMatchObject({ state: approved ? 'approved' : 'rejected' });
+  expect(JSON.stringify(h.cards.get(record.cardId!))).not.toMatch(/已失效|排队受阻|dutydeck recovery/);
+});

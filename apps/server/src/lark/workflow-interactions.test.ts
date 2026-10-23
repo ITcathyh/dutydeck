@@ -1753,3 +1753,109 @@ describe('文字回复作答', () => {
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 });
+
+
+describe('permission cards follow authoritative Runtime decisions from every entry point', () => {
+  const withPermission = async (check: (h: any) => Promise<void>) => {
+    const { directory, repositories } = await openDatabase();
+    const permissions: PermissionRequestData[] = [{ id: 'native_web', title: '执行命令', status: 'pending' }];
+    const tasks = [runningTask()];
+    const events = [agentEvent('permission_request', permissions[0], { taskId: 'task_one' })];
+    const { runtime, resolvePermission } = makeRuntime(tasks, permissions);
+    runtime.getEvents = vi.fn(async () => [...events]);
+    runtime.getTaskRecovery = vi.fn(async () => ({ status: 'running', blockers: [{ code: 'DRIVER_RESOURCE_UNSAFE' }] }));
+    const { service } = makeService();
+    const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+    try {
+      await workflow.observe(context(), events[0]);
+      const record = (await workflow.list('app_one'))[0]!;
+      await check({ workflow, record, runtime, service, permissions, tasks, events, resolvePermission, repositories });
+    } finally { workflow.close(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  };
+
+  it.each(['approved', 'rejected'] as const)('closes the original permission card after an external %s event', async status => {
+    await withPermission(async h => {
+      h.permissions.splice(0);
+      const decision = agentEvent('permission_request', { id: 'native_web', status }, { taskId: 'task_one', sequence: 2 });
+      h.events.push(decision);
+      await h.workflow.observe(context(), decision);
+      await h.workflow.reconcile('app_one');
+      expect(await h.workflow.get('app_one', h.record.id)).toMatchObject({ state: status });
+      const closed = h.service.update.mock.calls.at(-1)[0];
+      expect(closed).toMatchObject({ messageId: h.record.cardId, statusLabel: status === 'approved' ? '已允许' : '已拒绝', readOnly: true });
+      expect(JSON.stringify(h.service.update.mock.calls)).not.toMatch(/已失效|排队受阻|dutydeck recovery/);
+      expect(h.resolvePermission).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each(['pending', 'expired'])('keeps a temporarily hidden pending permission and recovers a %s card after reopening workflows', async savedState => {
+    await withPermission(async h => {
+      h.permissions.splice(0);
+      await h.workflow.reconcile('app_one');
+      expect(await h.workflow.get('app_one', h.record.id)).toMatchObject({ state: 'pending' });
+      expect(h.service.update).not.toHaveBeenCalled();
+      h.events.push(agentEvent('permission_request', { id: 'native_web', status: 'approved' }, { taskId: 'task_one', sequence: 2 }));
+      if (savedState === 'expired') await persistInteraction(h.repositories.config, { ...h.record, state: 'expired', closeMessage: '旧的失效正文', cardClosedAt: new Date().toISOString() });
+      h.workflow.close();
+      const reopened = new LarkWorkflowInteractions(h.repositories.config, h.runtime, h.service, undefined, async () => true);
+      try {
+        await reopened.initialize('app_one');
+        expect(await reopened.get('app_one', h.record.id)).toMatchObject({ state: 'approved' });
+        expect(h.service.update.mock.calls.at(-1)[0]).toMatchObject({ statusLabel: '已允许' });
+        expect(JSON.stringify(h.service.update.mock.calls)).not.toMatch(/已失效|排队受阻/);
+      } finally { reopened.close(); }
+    });
+  });
+
+  it('repaints an earlier expiry after its delayed PATCH completes instead of retaining the wrong text', async () => {
+    await withPermission(async h => {
+      h.permissions.splice(0);
+      h.runtime.getEvents = undefined;
+      const entered = deferred(), release = deferred();
+      let actualCard: any;
+      h.service.update.mockImplementation(async (input: any) => { if (input.statusLabel === '已失效') { entered.resolve(); await release.promise; } actualCard = input; return {}; });
+      const expiring = h.workflow.reconcile('app_one');
+      await entered.promise;
+      const deciding = h.workflow.observe(context(), agentEvent('permission_request', { id: 'native_web', status: 'approved' }, { taskId: 'task_one', sequence: 2 }));
+      release.resolve();
+      await Promise.all([expiring, deciding]);
+      const saved = await h.workflow.get('app_one', h.record.id);
+      expect(saved).toMatchObject({ state: 'approved', closeMessage: expect.stringContaining('已允许') });
+      expect(actualCard).toMatchObject({ statusLabel: '已允许', readOnly: true });
+      expect(JSON.stringify(actualCard)).not.toMatch(/已失效|排队受阻|dutydeck recovery/);
+      expect(h.runtime.getTaskRecovery).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each(['approve', 'reject'] as const)('keeps callback ownership when the Runtime emits its %s decision before resolving', async action => {
+    await withPermission(async h => {
+      h.resolvePermission.mockImplementation(async () => {
+        h.permissions.splice(0);
+        const decision = agentEvent('permission_request', { id: 'native_web', status: action === 'approve' ? 'approved' : 'rejected' }, { taskId: 'task_one', sequence: 2 });
+        h.events.push(decision);
+        await h.workflow.observe(context(), decision);
+        await h.workflow.reconcile('app_one');
+        return true;
+      });
+      await expect(h.workflow.respond(responseInput(h.record, { action }))).resolves.toContain('执行端已接受');
+      expect(await h.workflow.get('app_one', h.record.id)).toMatchObject({ state: action === 'approve' ? 'approved' : 'rejected', actorId: 'user_one' });
+      expect(h.resolvePermission).toHaveBeenCalledOnce();
+      expect(h.service.update.mock.calls.at(-1)[0]).toMatchObject({ statusLabel: action === 'approve' ? '已允许' : '已拒绝' });
+      expect(JSON.stringify(h.service.update.mock.calls)).not.toMatch(/已失效|排队受阻/);
+    });
+  });
+
+  it('does not consume a decision for another task or undo a genuine timeout', async () => {
+    await withPermission(async h => {
+      await h.workflow.observe(context({ taskId: 'different-task' }), agentEvent('permission_request', { id: 'native_web', status: 'approved' }, { taskId: 'different-task' }));
+      expect(await h.workflow.get('app_one', h.record.id)).toMatchObject({ state: 'pending' });
+      await persistInteraction(h.repositories.config, { ...h.record, state: 'expired', timedOutAt: new Date().toISOString() });
+      const decision = agentEvent('permission_request', { id: 'native_web', status: 'rejected' }, { taskId: 'task_one' });
+      h.events.push(decision);
+      await h.workflow.observe(context(), decision);
+      await h.workflow.reconcile('app_one');
+      expect(await h.workflow.get('app_one', h.record.id)).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
+      expect(h.service.update.mock.calls.at(-1)[0]).toMatchObject({ statusLabel: '已过期' });
+    });
+  });
+});

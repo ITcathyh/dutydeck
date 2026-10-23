@@ -272,10 +272,14 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
         if (!agentId || options.agents && !agent) throw new LarkServiceError('INVALID_LARK_CONFIG', `Agent 不存在：${agentId || '未选择'}`, 400);
         return agent;
       }));
-      let hook;
-      for (const [index, agentId] of agentIds.entries()) hook = await installLarkHook(agentId, workspace, agents[index]);
+      let hook, unreadyHook;
+      for (const [index, agentId] of agentIds.entries()) {
+        hook = await installLarkHook(agentId, workspace, agents[index]);
+        if (hook.nativeReady === false) unreadyHook ??= hook;
+      }
       // 草稿准备只写 Hook 文件。保留编辑起点的版本，正常保存仍走 CAS 和强制风控校验。
-      if (request.body?.draft !== undefined) return hook;
+      if (request.body?.draft !== undefined) return unreadyHook ?? hook;
+      if (config.riskControlMode === 'enforced' && unreadyHook) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', unreadyHook.reason ?? 'Codex Hook 已生成，但尚未通过原生加载与信任检查。请审核后重新检查。', 409);
       const saved = await saveLarkConfig(options.config, options.agents, {
         stage: 'agent',
         originalAppId: config.appId,
@@ -373,7 +377,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       const agentIds = new Set([input.defaultAgentId?.trim() || existing?.defaultAgentId, ...(fallbackAgentId ? [fallbackAgentId] : []), ...weightsResult.data.map(row => row.agentId)]);
       for (const agentId of agentIds) {
         const hook = await larkHookStatus(agentId, input.workspace === undefined ? existing?.workspace : input.workspace.trim() || undefined, agentId ? await options.agents?.get(agentId) : undefined);
-        if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', `${agentId}: ${hook.reason ?? '请先为当前工作区的默认、兜底和分流 Agent 配置拦截 Hook，再保存强制风控设置。'}`, 409);
+        if (!hook.supported || !hook.installed || !hook.writable || hook.nativeReady === false) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', `${agentId}: ${hook.reason ?? '请先为当前工作区的默认、兜底和分流 Agent 配置拦截 Hook，再保存强制风控设置。'}`, 409);
       }
     }
     const saved = await saveLarkConfig(options.config, options.agents, listeningDisabled ? { ...input, listening: undefined } : input);

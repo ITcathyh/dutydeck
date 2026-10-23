@@ -626,6 +626,8 @@ Codex 显示可识别的模型迁移菜单时，Dutydeck 只选 “Use existing 
 | `deny-all` | 自动拒绝一切特权操作。不能用于飞书机器人 | 只读探索 |
 | `full-trust` | 跳过所有确认，直接放行 | 隔离沙箱或无人值守流水线。所选 Agent 不支持飞书审批时，机器人只能用它，并需要确认 |
 
+Codex ACP 的非完全信任会话在每轮原生请求（包括恢复后）使用 `untrusted` 审批策略、用户审查和只读沙箱，写入或提权命令先交给 Dutydeck 审批；不会使用 Codex ACP 的自动审查。Codex 原生策略仍可直接放行其判定安全的读取，因此不保证每个只读动作都产生审批请求；`approve-reads` 也会放行执行端明确声明的读取和搜索。`full-trust` 明确使用原生完全访问策略。上述设置只作用于该子进程，不修改全局 Codex 配置。
+
 默认值按入口略有不同：`lark create` 默认 `ask`，所选 Agent 不支持审批时必须加 `--full-trust`；Web 向导里，所选 Agent 支持审批则默认 `ask`，否则默认 `full-trust`。
 
 飞书邮箱准入与身份查询遇到已确认的账号无效、跨应用或不可见错误时，同一客户端最多缓存失败 60 秒，修复权限后可能需等待这段时间再试。机器人配置刷新或凭据更换会清除缓存；成功身份、限流、服务端错误、网络错误和超时不缓存，撤销权限仍会在后续查询时检查。
@@ -1106,6 +1108,8 @@ dutydeck settings group set oc_xxx 'scenarios={"alarm":{"enabled":true,"params":
 
 强制风控下更换工作区、默认 Agent、兜底或分流 Agent 时，先在机器人设置点「配置拦截 Hook」，再保存。Hook 检查和安装使用当前草稿的工作区及所有候选 Agent；安装只写 Hook 文件，不保存其他草稿，也不降低现有强制风控。CLI 的 `install-hook --prepare [key=value...]` 同样只准备文件，支持 `workspace`、`defaultAgentId`、`fallbackAgentId` 和 `defaultAgentWeights`；准备后再用 `bot set` 保存。省略 `--prepare` 且不传草稿参数时，沿用安装并保存高危正则/提醒模式的行为，已开启强制风控的机器人保持强制模式。保存失败会保留草稿，只有版本冲突才提示并发修改。
 
+保存接口对私聊模式、群回复模式、群记忆范围和应用品牌使用严格枚举校验；非法值返回 `400 INVALID_LARK_CONFIG`，不会清除已保存值。`groupReplyMode=null` 仍用于清除覆盖，CLI 用 `groupReplyMode=auto`。
+
 群里的场景包用 `scenarios={"<包 id>":{"enabled":true|false,"params":{...}}}` 改，`params` 只写要改的键，`{"<包 id>":null}` 删掉这个包的绑定；`group show` 列出本群可用的包、参数和当前绑定。`direct` 模式的包（如告警初筛）要先在群里点确认卡开启过一次，之后才能用命令行或 Web 改。旧的 `alarm=<JSON>`（平铺的告警订阅）作为弃用别名保留一个版本，会转成 `scenarios.alarm`，输出里带弃用提示。
 
 实验页「群配置与权限」里的 Bot 用 `channel-bot` 管理，参数是 `list` 返回的内部 `id`，不是飞书 App ID：
@@ -1200,6 +1204,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 - **凭据保护**：机器人对外开放后，防止群里其他人借 Agent 套出本机的令牌、密钥和 Agent 会话记录。跟随机器人设置里的「风险控制」，只约束不在「高危操作允许名单」里的发送人和其他机器人；名单里的人照常使用，完全信任模式也不受影响。
   - 约束提示：给 Agent 加一条规则，不读取、复制、输出或发送凭据和 Agent 会话记录（如 `~/.claude`、`~/.claude.json`、`~/.codex`），被要求时一句话拒绝。
   - 强制拦截：另外在工具调用前检查，拦下读写凭据文件和会话记录（如 `~/.codex/auth.json`、`~/.ssh` 私钥、`.env`）、打印环境变量里的密钥这类操作，命令不会执行，Agent 收到拦截原因。Claude Code（终端和 ACP）和完全信任模式的 Codex 终端，这个检查随启动参数传给本次启动的 Agent，不改 `~/.claude`、`~/.codex` 下的全局配置；Codex 走 ACP 时由工作区里的拦截 Hook 检查。
+  - Codex（包括 `codex-acp`）的工作区 Hook 只有被原生 Codex 加载、启用，并信任当前内容哈希时才算就绪；仅有 `hooks.json` 文件不够。保存强制风控或启动会话时会通过无模型调用的 `config/read`、`hooks/list` 检查；不支持检查、出错或超过 5 秒均拒绝放行。请使用该 Agent 相同的 `CODEX_PATH` / `CODEX_HOME`，在目标工作区确认项目信任，再用 `/hooks` 仅审核 Dutydeck PreToolUse Hook，最后在 Web 点「重新检查 Hook」。Dutydeck 不自动信任项目或其他 Hook。
   - Claude Code 终端（包括 adapter 为 `claude-code` 的自定义 Agent，如 ccflash）和经 Dutydeck 启动的 ACP Claude，这个检查同时管高危操作正则，开强制拦截不用装工作区 Hook。自定义的 ACP Claude 要用随版本发布的 `dist/agents/claude-acp.mjs` 启动，自己拷贝出去的旧版本不带这个检查。
   - 任何模式下，飞书卡片、结果和群工具发出的消息都会把常见格式的密钥（如 `sk-ant-`、`ghp_`、JWT）和服务、Agent 环境变量里的密钥值替换成 `[REDACTED]`。
 
@@ -1209,7 +1214,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 
 群协作的无人交互后台委托在 `ask` 或未配置权限时，仅分析冻结材料，不提供工具、Herdr 或交互提问指引；显式配置 `approve-reads` / `full-trust` 的委托保留工具提示。材料不足会说明缺口和未完成部分，不能因此报告“没有新增”。结果由后台调度器投递。
 
-- **工具审批**：在 `ask` / `approve-reads` 下，已注入工具凭证的会话使用本会话的精确命令前缀执行单条 `dutydeck agent …` 时，Claude Code / Seed / Relay 终端模式和 ACP 会自动放行工具审批，并记录原因。拼接、重定向、展开等 shell 语法仍照常审批；高风险拦截和写操作确认卡照旧。其他终端 CLI 不支持这项精确放行。
+- **工具审批**：在 `ask` / `approve-reads` 下，已注入工具凭证的会话使用本会话的精确命令前缀执行单条 `dutydeck agent …` 时，Claude Code / Seed / Relay 终端模式和 ACP 会自动放行工具审批，并记录原因。拼接、重定向、展开等 shell 语法仍照常审批；高风险拦截和写操作确认卡照旧。其他终端 CLI 不支持这项精确放行。 Web 和飞书卡片审批共享执行端的最终回执；原审批卡按实际决定显示「已允许」「已拒绝」，真正过期或失效的请求保留相应状态。审批提交期间不会因待审批列表暂时隐藏请求而标成失效，服务重启后也会按持久回执补齐卡片。
 - **帮助**：`dutydeck agent --help` 开头是写给 Agent 的快速说明；每个子命令的 `--help` 有一行 `Risk`（`read` 只读、`write-confirm` 发确认卡、`write` 直接生效）和例子。帮助不需要服务或凭证。
 - **输出**：stdout 只有一个 JSON。成功 `{"ok":true,"data":...}`；失败 `{"ok":false,"error":{"code","message","hint"?,"params"?:[{"name","reason"}]}}`，退出码非 0。`params` 指出哪个参数不对，能给可选值时写在 `reason` 里。
 - **查看**：`status`、`agents`、`tasks [--page]`、`queue`、`schedules`、`ci`，以及 `group`、`history`、`memory`、`work`、`collaborate` 的读取命令。结果直接交给 Agent，不在群里发卡；权限与这一轮的发起人在原话题自己发这条命令相同。

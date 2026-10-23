@@ -833,6 +833,18 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (input.defaultGroupParticipation !== undefined && !collaborationParticipationModes.includes(input.defaultGroupParticipation)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '默认群参与模式无效。', 400);
   }
+  if (input.p2pMode !== undefined && !['chat', 'thread'].includes(input.p2pMode)) {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', '私聊模式必须为 chat 或 thread。', 400);
+  }
+  if (input.groupReplyMode !== undefined && input.groupReplyMode !== null && !['chat', 'shared', 'new-topic', 'chat-topic'].includes(input.groupReplyMode)) {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', '群回复模式无效；仅支持 chat、shared、new-topic、chat-topic，或 null 清除覆盖。', 400);
+  }
+  if (input.groupMemoryScope !== undefined && !isLarkGroupMemoryScope(input.groupMemoryScope)) {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', '群记忆范围必须为 shared 或 per-group。', 400);
+  }
+  if (input.brand !== undefined && !['feishu', 'lark'].includes(input.brand)) {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', '飞书应用品牌必须为 feishu 或 lark。', 400);
+  }
   if (input.executionMode !== undefined && !['single', 'layered'].includes(input.executionMode)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '执行方式无效。', 400);
   }

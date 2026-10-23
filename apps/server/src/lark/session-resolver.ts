@@ -512,7 +512,7 @@ export async function resolveLarkSession(
       && !supportsRemoteApproval({ id: configuredAgent.id, adapterId: configuredAgent.adapterId, protocol: 'pty-cli' })) throw larkApprovalUnsupported(executionConfig);
     if (config.riskControlMode === 'enforced') {
       const hook = await larkHookStatus(agentId, launchOptions?.cwd ?? config.workspace, configuredAgent);
-      if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', hook.reason ?? `Agent ${agentId} 尚未配置可写 Hook。`, 409);
+      if (!hook.supported || !hook.installed || !hook.writable || hook.nativeReady === false) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', hook.reason ?? `Agent ${agentId} 尚未配置可写 Hook。`, 409);
     }
     const inheritModel = agentId === config.defaultAgentId && !launchOptions?.useAgentDefaults;
     const session = await runtime.start({

@@ -345,7 +345,7 @@ export function BotManagement({
     queryFn: () => Promise.all(routingAgentIds.map(id => api.larkHookStatus(activeAppId!, id, currentDraft!.workspace))),
     enabled: Boolean(activeAppId && currentDraft?.riskControlMode === 'enforced' && routingAgentIds.length)
   });
-  const missingHook = hookStatus.data?.find(status => !status.supported || !status.installed || !status.writable);
+  const missingHook = hookStatus.data?.find(status => !status.supported || !status.installed || !status.writable || status.nativeReady === false);
   const installHook = useMutation({
     mutationFn: ({ appId, draft, targets }: { appId: string; draft: BotDraft; targets: LarkHookDraft; queryKey: typeof hookQueryKey }) => api.installLarkHook(appId, draft.highRiskPattern, draft.baseRevision, targets),
     onSuccess: (_result, variables) => {
@@ -1125,7 +1125,7 @@ export function BotManagement({
                 <p className="mt-1 text-caption text-subtle">{hookStatus.isFetching ? '正在检查当前工作区和 Agent…' : missingHook ? `${missingHook.agentId}: ${missingHook.reason ?? '尚未安装拦截 Hook，请先配置再保存。'}` : hookStatus.isSuccess ? `已为 ${routingAgentIds.join('、')} 配置拦截 Hook。` : '检查拦截 Hook 失败，请重试。'}</p>
                 {hookStatus.error && <Banner tone="danger">{hookStatus.error.message}</Banner>}
                 {hookStatus.data?.map(status => status.trustInstructions ? <p key={status.agentId} className="mt-1 text-caption text-subtle">{status.trustInstructions}</p> : null)}
-                <Button variant="secondary" className="mt-2" loading={installingThisBot} disabled={savingThisBot || missingHook?.supported === false || !currentDraft.workspace.trim()} onClick={() => installHook.mutate({ appId: activeAppId!, draft: currentDraft, targets: hookDraft, queryKey: hookQueryKey })}>配置拦截 Hook</Button>
+                {missingHook?.installed && missingHook.nativeReady === false ? <Button variant="secondary" className="mt-2" loading={hookStatus.isFetching} onClick={() => { void hookStatus.refetch(); }}>重新检查 Hook</Button> : <Button variant="secondary" className="mt-2" loading={installingThisBot} disabled={savingThisBot || missingHook?.supported === false || !currentDraft.workspace.trim()} onClick={() => installHook.mutate({ appId: activeAppId!, draft: currentDraft, targets: hookDraft, queryKey: hookQueryKey })}>配置拦截 Hook</Button>}
                 <p className="mt-1 text-meta text-subtle">按当前草稿的工作区、默认、兜底和分流 Agent 安装，不保存其他修改。</p>
               </Card>}
 

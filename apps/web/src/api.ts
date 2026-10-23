@@ -249,7 +249,7 @@ export type SystemDirectoriesResult = {
 };
 export type LarkHookDraft = { workspace?: string; defaultAgentId?: string; fallbackAgentId?: string; defaultAgentWeights?: Array<{ agentId: string; weight: number }> };
 
-export type LarkHookStatus = { agentId?: string; supported: boolean; installed: boolean; writable: boolean; trustRequired: boolean; hooksPath?: string; reason?: string; trustInstructions?: string };
+export type LarkHookStatus = { agentId?: string; supported: boolean; installed: boolean; nativeReady?: boolean; writable: boolean; trustRequired: boolean; hooksPath?: string; reason?: string; trustInstructions?: string };
 export type LarkOpenPlatformSetupJob = {
   id: string;
   appId: string;

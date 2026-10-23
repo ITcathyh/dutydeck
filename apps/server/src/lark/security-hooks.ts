@@ -4,6 +4,7 @@ import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { AgentConfig } from '@dutydeck/shared';
 import { secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
+import { codexHookReadiness } from './codex-hook-readiness.js';
 import { LarkServiceError } from './service.js';
 
 const guardVersion = 'dutydeck-high-risk-guard-v3';
@@ -64,6 +65,7 @@ export interface LarkHookStatus {
   agentId?: string;
   supported: boolean;
   installed: boolean;
+  nativeReady?: boolean;
   writable: boolean;
   trustRequired: boolean;
   hooksPath?: string;
@@ -180,17 +182,21 @@ export async function larkHookStatus(agentId?: string, workspace?: string, agent
   catch (error: any) {
     if (error?.code !== 'ENOENT') statusError = error instanceof Error ? error.message : String(error);
   }
+  const native = adapter.id === 'codex' ? installed ? await codexHookReadiness(workspace, hookCommand(adapter, workspace), agent) : { nativeReady: false } : undefined;
   return {
     agentId: agentId === 'codex-acp' ? agentId : adapter.id,
     supported: true,
     installed,
     writable,
-    trustRequired: installed,
+    trustRequired: installed && native?.nativeReady !== true,
+    ...native,
     hooksPath,
     ...(!writable ? { reason: '工作区不可写，无法安装 Hook' } : statusError ? { reason: statusError } : {}),
     ...(installed ? { trustInstructions: adapter.trustInstructions } : {})
   };
 }
+
+const hookCommand = (adapter: HookAdapter, workspace: string) => `DUTYDECK_POLICY_ROOT=${quote(workspace)} ${quote(process.execPath)} ${quote(paths(adapter, workspace).scriptPath)}`;
 
 async function installJsonHook(adapter: HookAdapter, workspace: string) {
   const { hooksPath, scriptPath } = paths(adapter, workspace);
@@ -201,7 +207,7 @@ async function installJsonHook(adapter: HookAdapter, workspace: string) {
   const config = await readableJson(hooksPath, fallback);
   const hooks = config.hooks && typeof config.hooks === 'object' && !Array.isArray(config.hooks) ? config.hooks : {};
   const entries = Array.isArray(hooks[adapter.eventKey!]) ? hooks[adapter.eventKey!] : [];
-  const command = `DUTYDECK_POLICY_ROOT=${quote(workspace)} ${quote(process.execPath)} ${quote(scriptPath)}`;
+  const command = hookCommand(adapter, workspace);
   const entry = adapter.kind === 'cursor-json'
     ? { command, matcher: '.*', timeout: 5, failClosed: true }
     : { matcher: '.*', hooks: [{ type: 'command', command, timeout: 5, statusMessage: 'Dutydeck 高危操作风险检查' }] };
@@ -225,5 +231,5 @@ export async function installLarkHook(agentId: string | undefined, workspace: st
     await mkdir(dirname(scriptPath), { recursive: true });
     await writeFile(scriptPath, piGuardExtension, { mode: 0o600 });
   } else await installJsonHook(adapter, workspace);
-  return larkHookStatus(agentId, workspace);
+  return larkHookStatus(agentId, workspace, agent);
 }

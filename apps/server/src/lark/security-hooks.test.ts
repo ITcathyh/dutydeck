@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { AgentConfig } from '@dutydeck/shared';
 import { installLarkHook, larkHookStatus, processGuardedAgent } from './security-hooks.js';
+
+vi.mock('./codex-hook-readiness.js', () => ({ codexHookReadiness: async () => ({ nativeReady: false }) }));
 
 const workspaces: string[] = [];
 afterEach(async () => Promise.all(workspaces.splice(0).map(path => rm(path, { recursive: true, force: true }))));

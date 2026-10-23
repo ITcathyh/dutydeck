@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { RuntimeError } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
@@ -17,7 +17,7 @@ import { PluginHost } from './plugins/host.js';
 import { botFields, fieldsHelp, groupFields, runSettingsCli, SettingsCliError, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 
 const cleanups: Array<() => unknown> = [];
-afterEach(async () => { for (const clean of cleanups.splice(0).reverse()) await clean(); });
+afterEach(async () => { for (const clean of cleanups.splice(0).reverse()) await clean(); vi.unstubAllEnvs(); });
 
 const target = { url: 'http://127.0.0.1:4310', database: '/tmp/runtime.db' };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -186,6 +186,9 @@ describe('settings CLI against the real bot routes', () => {
     const { repos, run } = await botRuntime();
     const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-draft-hook-'));
     cleanups.push(() => rm(workspace, { recursive: true, force: true }));
+    vi.stubEnv('CODEX_PATH', resolve('tests/fixtures/mock-codex-hooks.mjs'));
+    vi.stubEnv('CODEX_HOME', workspace);
+    await writeFile(join(workspace, 'hooks-probe-state.json'), JSON.stringify({ projectTrusted: true, hookTrustStatus: 'trusted' }));
     await repos.config.set(larkBotsConfigKey, JSON.stringify([{ appId: 'cli_a', appSecret: 'secret-a', listening: false, permissionMode: 'ask', defaultAgentId: 'claude', riskControlMode: 'enforced', revision: 7, workspace: '/saved-workspace' }]));
     const before = await readLarkConfig(repos.config, 'cli_a');
     await expect(run('bot-set', { appId: 'cli_a', pairs: ['fallbackAgentId=codex', `workspace=${workspace}`] })).rejects.toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY' });
@@ -197,6 +200,15 @@ describe('settings CLI against the real bot routes', () => {
     await run('bot-install-hook', { appId: 'cli_a' });
     expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ revision: 9, riskControlMode: 'enforced' });
     await expect(run('bot-install-hook', { appId: 'cli_a', prepare: true, pairs: ['preInjectPrompt=unrelated'] })).rejects.toMatchObject({ code: 'SETTINGS_KEY_UNKNOWN' });
+  });
+
+  it('rejects invalid reply and memory enums before writing, while retaining explicit automatic replies', async () => {
+    const { repos, run } = await botRuntime();
+    const before = await readLarkConfig(repos.config, 'cli_a');
+    for (const field of ['p2pMode', 'groupReplyMode', 'groupMemoryScope', 'brand']) await expect(run('bot-set', { appId: 'cli_a', pairs: [`${field}=invalid`] })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toEqual(before);
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['p2pMode=thread', 'groupReplyMode=auto'] })).bot).toMatchObject({ p2pMode: 'thread' });
+    expect(await readLarkConfig(repos.config, 'cli_a')).not.toHaveProperty('groupReplyMode');
   });
 
   it('saves, reads, rejects the primary and clears a fallback Agent', async () => {
