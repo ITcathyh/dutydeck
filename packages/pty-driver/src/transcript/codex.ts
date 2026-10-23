@@ -27,7 +27,7 @@ import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { createRequire } from 'node:module';
 import { codexRateLimits, contextUsage, type NormalizedDriverEvent, type SessionUsageSnapshot } from '@dutydeck/shared';
 import { codexHistoryPath, codexSessionsRoot, type CliPathEnv } from '../cli-paths.js';
-import { readHead, walkFiles } from '../session-id/fs-scan.js';
+import { readFirstLine, walkFiles } from '../session-id/fs-scan.js';
 import { resolveCliSessionId } from '../session-id/index.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource } from './tail.js';
 import { readNativeTranscriptUsage } from './session-usage.js';
@@ -95,10 +95,10 @@ export function resolveNewestRollout(sessionsRoot: string): string | undefined {
 const CODEX_GENERATION_RE = /^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_([0-9a-f-]{36}))?\.jsonl$/i;
 const SESSION_META_BYTES = 1024 * 1024;
 function rolloutHeader(path: string): { id?: string; complete: boolean } {
-  const head = readHead(path, SESSION_META_BYTES), newline = head.indexOf('\n');
-  if (newline < 0) return { complete: false };
+  const head = readFirstLine(path, SESSION_META_BYTES);
+  if (!head) return { complete: false };
   try {
-    const entry = JSON.parse(head.slice(0, newline));
+    const entry = JSON.parse(head);
     const id = entry?.type === 'session_meta' ? entry.payload?.id ?? entry.payload?.session_id : undefined;
     return { complete: true, ...(typeof id === 'string' ? { id } : {}) };
   } catch { return { complete: false }; }

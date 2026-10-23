@@ -12,6 +12,8 @@ const isChildDiagnostic = (data: TimelineEvent['data']) => data.diagnostic === d
   && typeof data.activityId === 'string' && typeof data.parentTurnId === 'string' && typeof data.childTurnId === 'string'
   && typeof data.parentThreadId === 'string' && typeof data.childThreadId === 'string'
   && (data.state === 'child_quota' && data.code === 'usage_limit_exceeded' || data.state === 'child_rate_limit' && data.code === 'rate_limit');
+const isInvisible = (event: DockEvent) => event.type === 'status' ? !isChildDiagnostic(event.data)
+  : event.type === 'task' || event.type === 'completed' || event.type === 'raw_terminal';
 const warningPrefix = /^warning:\s*/i;
 
 function compactCommand(value: unknown) {
@@ -74,7 +76,7 @@ export function buildTimeline(events: DockEvent[] = [], tasks: Task[] = []): Tim
 function appendTimeline(timeline: TimelineEvent[], source: DockEvent[], toolIndexes: Map<string, number>, seenWarnings: Set<string>) {
   for (let event of source) {
     if (event.type === 'status' && isChildDiagnostic(event.data)) event = { ...event, type: 'tool_result' };
-    if (event.type === 'status' || event.type === 'task' || event.type === 'completed' || event.type === 'raw_terminal') continue;
+    if (isInvisible(event)) continue;
     const current = { ...event, data: { ...event.data } } as TimelineEvent;
     const warning = warningText(current);
     if (warning) {
@@ -258,6 +260,7 @@ export function createTimelineProjector() {
   let entries: Cached[] = [];
   let byTask = new Map<string, Task>();
   let hasSyntheticPrompts = false;
+  let lastResult: { timeline: TimelineEvent[]; timelineSections: TimelineSection[] };
   const result = () => {
     let eventCount = 0, sectionCount = 0;
     for (let index = 0; index < entries.length; index++) {
@@ -270,7 +273,7 @@ export function createTimelineProjector() {
       for (let offset = 0; offset < entry.timeline.length; offset++) timeline[eventIndex++] = entry.timeline[offset]!;
       for (let offset = 0; offset < entry.sections.length; offset++) timelineSections[sectionIndex++] = entry.sections[offset]!;
     }
-    return { timeline, timelineSections };
+    return lastResult = { timeline, timelineSections };
   };
   const taskFor = (source: DockEvent[]) => !byTask.size ? undefined : byTask.get(source.find(event => event.data.role === 'user')?.data.steering?.target?.taskId ?? source.find(event => event.data.role === 'user')?.data.taskId ?? source.find(event => event.taskId || event.data.taskId)?.taskId ?? source.find(event => event.data.taskId)?.data.taskId);
   return (events: DockEvent[], tasks: Task[] = [], hasOlder = false, delta?: { previousEvents?: DockEvent[]; changes?: DockEvent[] }) => {
@@ -291,20 +294,27 @@ export function createTimelineProjector() {
       }
       cache.delete(previous.source[0]!.id);
       entries.pop();
+      let unchanged = tail.length === 1;
       for (let index = 0; index < tail.length; index++) {
         const source = tail[index]!, task = index === 0 && previous.task && !additions[index]!.some(event => event.data.role === 'user') ? previous.task : taskFor(source), latest = index === tail.length - 1;
         let timeline: TimelineEvent[], toolIndexes: Map<string, number> | undefined;
-        if (index === 0) {
+        if (index === 0 && additions[index]!.every(isInvisible)) {
+          timeline = previous.timeline;
+          toolIndexes = previous.toolIndexes;
+        } else if (index === 0) {
           timeline = previous.timeline.slice();
           toolIndexes = previous.toolIndexes ?? new Map(previous.timeline.flatMap((event, offset) =>
             (event.type === 'tool_call' || event.type === 'tool_result') && typeof event.data.id === 'string' && event.data.id ? [[event.data.id, offset] as const] : []));
           appendTimeline(timeline, additions[index]!, toolIndexes, new Set());
         } else timeline = buildTimeline(source);
-        const entry = { source, task, latest, timeline, toolIndexes, sections: buildTimelineSections(timeline, task ? [task] : [], latest) };
+        const sections = timeline === previous.timeline && task === previous.task && latest === previous.latest
+          ? previous.sections : buildTimelineSections(timeline, task ? [task] : [], latest);
+        unchanged &&= sections === previous.sections;
+        const entry = { source, task, latest, timeline, toolIndexes, sections };
         entries.push(entry); cache.set(source[0]!.id, entry);
       }
       lastEvents = events;
-      return result();
+      return unchanged ? lastResult! : result();
     }
     const first = entries[0];
     // Older pages only affect their new turns and the formerly partial first turn.
@@ -384,6 +394,6 @@ export function createTimelineProjector() {
       for (const event of entry.timeline) timeline.push(event); for (const section of entry.sections) sections.push(section);
     }
     cache = next; entries = [...next.values()]; lastEvents = events; lastTasks = tasks; lastHasOlder = hasOlder;
-    return { timeline, timelineSections: sections };
+    return lastResult = { timeline, timelineSections: sections };
   };
 }

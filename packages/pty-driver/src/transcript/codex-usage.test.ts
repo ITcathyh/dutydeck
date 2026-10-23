@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 vi.mock('node:fs', async importOriginal => { const original = await importOriginal<typeof import('node:fs')>(); return { ...original, createReadStream: vi.fn(original.createReadStream) }; });
-import { walkFiles, readHead } from '../session-id/fs-scan.js';
-vi.mock('../session-id/fs-scan.js', async importOriginal => { const original = await importOriginal<typeof import('../session-id/fs-scan.js')>(); return { ...original, walkFiles: vi.fn(original.walkFiles), readHead: vi.fn(original.readHead) }; });
+import { walkFiles, readFirstLine } from '../session-id/fs-scan.js';
+vi.mock('../session-id/fs-scan.js', async importOriginal => { const original = await importOriginal<typeof import('../session-id/fs-scan.js')>(); return { ...original, walkFiles: vi.fn(original.walkFiles), readFirstLine: vi.fn(original.readFirstLine) }; });
 import { mapCodexEntry, readCodexSessionUsage } from './codex.js';
 const sid = '11111111-1111-4111-8111-111111111111';
 const generation = '22222222-2222-4222-8222-222222222222';
@@ -84,12 +84,12 @@ it('reads only appended bytes after the first poll and retains a partial JSONL l
     expect((await readCodexSessionUsage('native-id', env, cwd))?.context?.used).toBe(10);
     const calls = vi.mocked(fs.createReadStream).mock.calls.length;
     const walks = vi.mocked(walkFiles).mock.calls.length;
-    const heads = vi.mocked(readHead).mock.calls.length;
+    const heads = vi.mocked(readFirstLine).mock.calls.length;
     expect(heads).toBe(1); // Verify only the named file, without reading unrelated rollout heads.
     expect((await readCodexSessionUsage('native-id', env, cwd))?.context?.used).toBe(10);
     expect(vi.mocked(fs.createReadStream).mock.calls.length).toBe(calls);
     expect(vi.mocked(walkFiles).mock.calls.length).toBe(walks);
-    expect(vi.mocked(readHead).mock.calls.length).toBe(heads);
+    expect(vi.mocked(readFirstLine).mock.calls.length).toBe(heads);
     const next = usage(20);
     await appendFile(path, next.slice(0, 30));
     expect((await readCodexSessionUsage('native-id', env, cwd))?.context?.used).toBe(10);
@@ -97,7 +97,7 @@ it('reads only appended bytes after the first poll and retains a partial JSONL l
     await appendFile(path, next.slice(30) + '\n');
     expect((await readCodexSessionUsage('native-id', env, cwd))?.context?.used).toBe(20);
     expect(vi.mocked(walkFiles).mock.calls.length).toBe(walks);
-    expect(vi.mocked(readHead).mock.calls.length).toBe(heads);
+    expect(vi.mocked(readFirstLine).mock.calls.length).toBe(heads);
     await rm(path);
     await writeFile(join(dir, 'rollout-renamed-native-id.jsonl'), JSON.stringify({ type: 'session_meta', payload: { id: 'native-id', cwd } }) + '\n' + usage(30) + '\n');
     expect((await readCodexSessionUsage('native-id', env, cwd))?.context?.used).toBe(30);

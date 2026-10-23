@@ -411,9 +411,12 @@ it('replaces a synthesized prompt when the real user event arrives in an append 
   const task = { id: 'task-1', sessionId: 's1', prompt: 'run it', status: 'running', createdAt: '001', updatedAt: '001' } as Task;
   const tasks = [task], source: DockEvent[] = [], project = createTimelineProjector();
   expect(project(source, tasks).timeline.map(event => event.id)).toEqual(['task-event-task-1']);
-  const real: DockEvent = { id: 'real', sequence: 1, type: 'text', timestamp: '002', data: { role: 'user', text: 'run it', taskId: task.id } };
-  const incremental = project([real], tasks, false, { previousEvents: source, changes: [real] });
-  expect(incremental).toEqual(createTimelineProjector()([real], tasks));
+  const raw: DockEvent = { id: 'raw', sequence: 1, type: 'raw_terminal', timestamp: '002', data: { text: 'before real prompt' } };
+  const withRaw = [raw];
+  project(withRaw, tasks, false, { previousEvents: source, changes: [raw] });
+  const real: DockEvent = { id: 'real', sequence: 2, type: 'text', timestamp: '003', data: { role: 'user', text: 'run it', taskId: task.id } };
+  const incremental = project([raw, real], tasks, false, { previousEvents: withRaw, changes: [real] });
+  expect(incremental).toEqual(createTimelineProjector()([raw, real], tasks));
   expect(incremental.timeline.map(event => event.id)).toEqual(['real']);
 });
 
@@ -444,4 +447,89 @@ it('keeps unknown or incomplete diagnostic statuses invisible and ordinary tool 
   ]);
   expect(timeline.map(e => e.type)).toEqual(['text', 'text', 'tool_result']);
   expect(buildTimelineSections(timeline, [], false).some(s => s.kind === 'event' && s.final)).toBe(false);
+});
+
+it('reuses invisible append snapshots and keeps later visible appends equal to complete projections', () => {
+  const make = (sequence: number, type: string, data: Record<string, unknown>): DockEvent => ({ id: `invisible-${sequence}`, sequence, type, timestamp: String(sequence).padStart(5, '0'), data });
+  const tasks: Task[] = [], project = createTimelineProjector();
+  let window = createEventWindow([make(1, 'text', { role: 'user', text: 'question' }), make(2, 'tool_call', { id: 'tool', name: 'Read', status: 'running' })]);
+  const initial = project(window.events, tasks, false, window), initialJson = JSON.stringify(initial);
+  Object.freeze(initial.timeline); Object.freeze(initial.timelineSections); Object.freeze(initial);
+  for (const [index, type] of ['raw_terminal', 'status', 'task', 'completed'].entries()) {
+    window = mergeReconciledEvents(window, [make(index + 3, type, { text: 'raw history', state: 'running' })]);
+    const value = project(window.events, tasks, false, window);
+    expect(value).toBe(initial);
+    expect(value.timeline).toBe(initial.timeline);
+    expect(value.timelineSections).toBe(initial.timelineSections);
+    expect(value.timelineSections[1]).toBe(initial.timelineSections[1]);
+    expect(value).toEqual(createTimelineProjector()(window.events, tasks));
+  }
+  expect(window.events).toHaveLength(6);
+  expect(window.events.filter(item => item.type === 'raw_terminal')[0]?.data.text).toBe('raw history');
+  for (const addition of [
+    make(7, 'tool_result', { id: 'tool', status: 'completed', output: 'done' }),
+    make(8, 'text', { text: 'answer' }),
+    make(9, 'text', { role: 'user', text: 'next' }),
+    make(10, 'thinking', { text: 'working' })
+  ]) {
+    window = mergeReconciledEvents(window, [addition]);
+    const value = project(window.events, tasks, false, window);
+    const timeline = buildTimeline(window.events, tasks);
+    expect(value).toEqual({ timeline, timelineSections: buildTimelineSections(timeline, tasks) });
+    expect(value).toEqual(createTimelineProjector()(window.events, tasks));
+    expect(JSON.stringify(initial)).toBe(initialJson);
+  }
+});
+
+it.each(['child_quota', 'child_rate_limit'])('projects appended %s diagnostics immediately after invisible events', state => {
+  const tasks: Task[] = [], project = createTimelineProjector();
+  let window = createEventWindow([event(1, 'text', { role: 'user', text: 'question' }), event(2, 'tool_call', { id: 'tool', name: 'Read', status: 'running' })]);
+  const initial = project(window.events, tasks, false, window);
+  window = mergeReconciledEvents(window, [event(3, 'status', { state: 'running' })]);
+  expect(project(window.events, tasks, false, window)).toBe(initial);
+  const diagnostic = { id: `child_diagnostic_${'a'.repeat(64)}`, state, diagnostic: state, code: state === 'child_quota' ? 'usage_limit_exceeded' : 'rate_limit', activityId: 'activity', parentTurnId: 'parent-turn', childTurnId: 'child-turn', parentThreadId: 'parent-thread', childThreadId: 'child-thread', status: 'failed', output: 'child needs attention' };
+  window = mergeReconciledEvents(window, [event(4, 'status', diagnostic)]);
+  const value = project(window.events, tasks, false, window);
+  expect(value).not.toBe(initial);
+  expect(value.timeline.at(-1)).toMatchObject({ type: 'tool_result', data: diagnostic });
+  expect(value).toEqual(createTimelineProjector()(window.events, tasks));
+});
+
+it('rebuilds sections when invisible events supply task identity and when task references change', () => {
+  const task: Task = { id: 'task', sessionId: 'session', prompt: 'question', status: 'completed', createdAt: event(1, 'text', {}).timestamp, updatedAt: event(8, 'text', {}).timestamp };
+  let tasks = [task];
+  const project = createTimelineProjector();
+  let window = createEventWindow([event(1, 'text', { role: 'user', text: 'question' }), event(2, 'tool_call', { id: 'tool', name: 'Read', status: 'running' })]);
+  const initial = project(window.events, tasks, false, window);
+  window = mergeReconciledEvents(window, [{ ...event(3, 'status', { state: 'running' }), taskId: task.id }]);
+  const identified = project(window.events, tasks, false, window);
+  expect(identified.timeline).toEqual(initial.timeline);
+  expect(identified.timelineSections).not.toBe(initial.timelineSections);
+  expect(identified).toEqual(createTimelineProjector()(window.events, tasks));
+  // The newly visible task identity must continue to select the complete task.
+  window = mergeReconciledEvents(window, [event(4, 'tool_result', { id: 'tool', taskId: task.id, status: 'completed' })]);
+  const completed = project(window.events, tasks, false, window);
+  expect(completed.timelineSections.find(section => section.kind === 'activity')?.taskStatus).toBe('incomplete');
+  tasks = [{ ...task, status: 'interrupted' }];
+  window = mergeReconciledEvents(window, [event(5, 'raw_terminal', { text: 'more' })]);
+  const interrupted = project(window.events, tasks, false, window);
+  expect(interrupted.timelineSections.find(section => section.kind === 'activity')?.taskStatus).toBe('interrupted');
+  expect(interrupted).toEqual(createTimelineProjector()(window.events, tasks));
+});
+
+it('retains append guards after invisible frames for replacements, old timestamps and pagination changes', () => {
+  const tasks: Task[] = [], project = createTimelineProjector();
+  let window = createEventWindow([event(2, 'text', { role: 'user', text: 'question' }), event(3, 'tool_call', { id: 'tool', status: 'running' })], true);
+  project(window.events, tasks, true, window);
+  for (const batch of [
+    [event(4, 'raw_terminal', { text: 'raw' })],
+    [event(1, 'text', { role: 'user', text: 'older' })],
+    [event(3, 'tool_result', { id: 'tool', status: 'completed', output: 'replacement' })],
+    [{ ...event(5, 'text', { text: 'out of order' }), timestamp: event(2, 'text', {}).timestamp }]
+  ]) {
+    window = mergeReconciledEvents(window, batch);
+    expect(project(window.events, tasks, true, window)).toEqual(createTimelineProjector()(window.events, tasks, true));
+  }
+  window = { ...window, hasOlder: false };
+  expect(project(window.events, tasks, false, window)).toEqual(createTimelineProjector()(window.events, tasks, false));
 });

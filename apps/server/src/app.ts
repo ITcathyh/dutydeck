@@ -16,7 +16,7 @@ import { registerLarkAgentToolTurnGuard } from './lark/agent-tools-routes.js';
 import { AgentCommandParamError } from './lark/agent-command.js';
 import { LarkServiceError } from './lark/service.js';
 import Fastify, { type FastifyRequest } from 'fastify';
-import { readFile } from 'node:fs/promises';
+import { open, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { extname, resolve, sep } from 'node:path';
 import { installationOwnerTaskActor, permissionModes, RuntimeError, toPublicAgent, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
@@ -60,6 +60,16 @@ const contentTypes: Record<string, string> = {
   '.woff': 'font/woff',
   '.woff2': 'font/woff2'
 };
+
+async function webFileSize(file: string) {
+  // Opening preserves the read-permission check without reading the HEAD body.
+  const handle = await open(file, 'r');
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error('Not a regular file');
+    return info.size;
+  } finally { await handle.close(); }
+}
 
 export interface TerminalRouteOptions {
   /** 由 service 从 runtime driver 暴露的会话终端流访问器。 */
@@ -647,16 +657,24 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       if (requestedFile !== webRoot && !requestedFile.startsWith(`${webRoot}${sep}`)) return reply.code(404).send();
 
       let file = requestedFile;
-      let body: Buffer;
-      try { body = await readFile(file); }
+      let body: Buffer | undefined;
+      let size: number | undefined;
+      try {
+        if (request.method === 'HEAD') size = await webFileSize(file);
+        else body = await readFile(file);
+      }
       catch {
         if (extname(pathname)) return reply.code(404).send();
         file = indexFile;
-        try { body = await readFile(file); }
+        try {
+          if (request.method === 'HEAD') size = await webFileSize(file);
+          else body = await readFile(file);
+        }
         catch { return reply.code(404).send({ error: { code: 'WEB_UI_NOT_FOUND', message: 'Web UI is not installed' } }); }
       }
       const type = contentTypes[extname(file).toLowerCase()] ?? 'application/octet-stream';
       if (pathname.startsWith('/assets/')) reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+      if (request.method === 'HEAD') reply.header('Content-Length', size);
       return reply.type(type).send(request.method === 'HEAD' ? undefined : body);
     });
   }

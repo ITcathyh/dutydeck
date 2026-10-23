@@ -548,12 +548,25 @@ export class TmuxBackend implements SessionBackend {
     }
   }
 
-  private async getPidAsync(): Promise<number | null> {
+  private async probePaneAsync(): Promise<{ probe: SessionProbe; pid: number | null }> {
     try {
-      const stdout = await runCommand('tmux', ['display-message', '-p', '-t', this.sessionName, '#{pane_pid}'], { env: tmuxClientEnv(), timeout: 2000 });
-      const pid = Number(stdout.trim());
-      return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
-    } catch { return null; }
+      const stdout = await runCommand('tmux', [
+        'has-session', '-t', this.sessionName, ';',
+        'display-message', '-p', 'dutydeck-session-exists', ';',
+        'display-message', '-p', '-t', this.sessionName, '#{pane_pid}',
+      ], { env: tmuxClientEnv(), timeout: 3000 });
+      const pid = Number(stdout.trim().split('\n').slice(1).join('\n').trim());
+      return { probe: 'exists', pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null };
+    } catch (error) {
+      const failure = error as { signal?: string; status?: number; stderr?: string; stdout?: string };
+      const stderr = failure.stderr ?? '';
+      // A pane/display failure after successful has-session is inconclusive.
+      // Only a clean answer proving the session/server absent counts as exit.
+      const missing = !failure.stdout?.includes('dutydeck-session-exists')
+        && !failure.signal && typeof failure.status === 'number'
+        && (isSocketMissingErrorText(stderr) || /no server running|can't find session:/i.test(stderr));
+      return { probe: missing ? 'missing' : 'unknown', pid: null };
+    }
   }
 
   /** Kill a named tmux session (no-op if it doesn't exist). */
@@ -731,11 +744,10 @@ export class TmuxBackend implements SessionBackend {
       if (this.exited || checking) return;
       checking = true;
       void (async () => {
-        const probe = await TmuxBackend.probeSessionAsync(this.sessionName);
+        const { probe, pid } = await this.probePaneAsync();
         let failed = probe === 'missing';
         // An unknown server answer must not be combined with a stale pane PID.
         if (probe === 'exists') {
-          const pid = await this.getPidAsync();
           if (pid !== null) {
             try { process.kill(pid, 0); }
             catch (e) { failed = (e as NodeJS.ErrnoException).code === 'ESRCH'; }

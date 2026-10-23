@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { get as httpGet, type IncomingMessage } from 'node:http';
@@ -8,6 +9,8 @@ import { createRepositories } from '@dutydeck/storage';
 import { larkBotsConfigKey } from './lark/config.js';
 import { LoginLinkStore, signSessionShareToken } from './auth/auth.js';
 import { RuntimeError } from '@dutydeck/shared';
+
+vi.mock('node:fs/promises', async importOriginal => ({ ...await importOriginal<typeof import('node:fs/promises')>() }));
 
 const apps: any[] = [];
 const tempDirectories: string[] = [];
@@ -486,6 +489,83 @@ describe('HTTP API boundary', () => {
     expect((await app.inject({ method: 'GET', url: '/sessions/s1' })).body).toContain('Dutydeck UI');
     const api = await app.inject({ method: 'GET', url: '/api/not-real' });
     expect(api.statusCode).toBe(404); expect(api.json().error.code).toBe('NOT_FOUND');
+  });
+
+  it('serves static HEAD metadata without reading bodies or changing GET encoding behavior', async () => {
+    const webRoot = await mkdtemp(join(tmpdir(), 'dutydeck-web-')); tempDirectories.push(webRoot);
+    await mkdir(join(webRoot, 'assets'));
+    const source = '/* static asset 中文 */'.repeat(4096);
+    await writeFile(join(webRoot, 'index.html'), '<main>UI</main>');
+    await writeFile(join(webRoot, 'assets/app.js'), source);
+    await writeFile(join(webRoot, 'assets/app.js.gz'), 'unused sidecar');
+    const app = await buildApp({} as any, { webRoot }); apps.push(app);
+    const read = vi.spyOn(fs, 'readFile'); const open = vi.spyOn(fs, 'open');
+    try {
+      for (const url of ['/assets/app.js', '/', '/sessions/s1']) {
+        for (const encoding of [undefined, 'gzip', 'gzip;q=0', '*;q=0', 'br, identity;q=0']) {
+          const headers = encoding === undefined ? {} : { 'accept-encoding': encoding };
+          read.mockClear(); open.mockClear();
+          const get = await app.inject({ method: 'GET', url, headers });
+          expect(get.statusCode).toBe(200);
+          expect(get.body).toBe(url.startsWith('/assets/') ? source : '<main>UI</main>');
+          expect(get.headers['content-encoding']).toBeUndefined(); expect(get.headers.vary).toBeUndefined();
+          expect(open).not.toHaveBeenCalled();
+          if (url.startsWith('/assets/')) expect(read).toHaveBeenCalledOnce();
+          read.mockClear(); open.mockClear();
+          const head = await app.inject({ method: 'HEAD', url, headers });
+          expect(head.statusCode).toBe(200); expect(head.rawPayload.length).toBe(0);
+          for (const name of ['content-type', 'content-length', 'cache-control', 'content-encoding', 'vary']) expect(head.headers[name]).toBe(get.headers[name]);
+          expect(Number(head.headers['content-length'])).toBe(Buffer.byteLength(get.body));
+          expect(read).not.toHaveBeenCalled();
+          expect(open.mock.calls.every(([file]) => !String(file).endsWith('.gz'))).toBe(true);
+        }
+      }
+    } finally { read.mockRestore(); open.mockRestore(); }
+  });
+
+  it('preserves static HEAD symlinks, directory rejection, SPA errors, and path boundaries', async () => {
+    const webRoot = await mkdtemp(join(tmpdir(), 'dutydeck-web-')); tempDirectories.push(webRoot);
+    await mkdir(join(webRoot, 'assets'));
+    await writeFile(join(webRoot, 'index.html'), '<main>UI</main>');
+    await writeFile(join(webRoot, 'assets/app.js'), 'asset');
+    await symlink(join(webRoot, 'assets/app.js'), join(webRoot, 'assets/link.js'));
+    await mkdir(join(webRoot, 'assets/directory.js'));
+    const app = await buildApp({} as any, { webRoot }); apps.push(app);
+    for (const method of ['GET', 'HEAD'] as const) {
+      const link = await app.inject({ method, url: '/assets/link.js' });
+      expect(link.statusCode).toBe(200); expect(link.headers['content-length']).toBe('5');
+      expect(link.body).toBe(method === 'GET' ? 'asset' : '');
+      for (const url of ['/assets/directory.js', '/assets/missing.js', '/api/not-real', '/%2e%2e%2fsecret']) expect((await app.inject({ method, url })).statusCode).toBe(404);
+      expect((await app.inject({ method, url: '/%zz' })).statusCode).toBe(400);
+    }
+    expect((await app.inject({ method: 'POST', url: '/sessions/s1' })).statusCode).toBe(404);
+    await rm(join(webRoot, 'index.html'));
+    for (const method of ['GET', 'HEAD'] as const) {
+      const missing = await app.inject({ method, url: '/sessions/s1' });
+      expect(missing.statusCode).toBe(404);
+      if (method === 'GET') expect(missing.json().error.code).toBe('WEB_UI_NOT_FOUND');
+    }
+  });
+
+  it('keeps unreadable originals unavailable and closes HEAD handles when metadata fails', async () => {
+    const webRoot = await mkdtemp(join(tmpdir(), 'dutydeck-web-')); tempDirectories.push(webRoot);
+    await mkdir(join(webRoot, 'assets'));
+    const original = join(webRoot, 'assets/app.js');
+    await writeFile(original, 'asset');
+    const app = await buildApp({} as any, { webRoot }); apps.push(app);
+    const realOpen = fs.open; const realRead = fs.readFile;
+    const denied = Object.assign(new Error('Permission denied'), { code: 'EACCES' });
+    const open = vi.spyOn(fs, 'open'); const read = vi.spyOn(fs, 'readFile');
+    try {
+      open.mockImplementation(((path: string, ...args: any[]) => path === original ? Promise.reject(denied) : (realOpen as any)(path, ...args)) as any);
+      read.mockImplementation(((path: string, ...args: any[]) => path === original ? Promise.reject(denied) : (realRead as any)(path, ...args)) as any);
+      for (const method of ['GET', 'HEAD'] as const) expect((await app.inject({ method, url: '/assets/app.js' })).statusCode).toBe(404);
+      const close = vi.fn(async () => {});
+      open.mockResolvedValueOnce({ stat: async () => { throw new Error('metadata failure'); }, close } as any);
+      read.mockClear();
+      expect((await app.inject({ method: 'HEAD', url: '/assets/app.js' })).statusCode).toBe(404);
+      expect(read).not.toHaveBeenCalled(); expect(close).toHaveBeenCalledOnce();
+    } finally { open.mockRestore(); read.mockRestore(); }
   });
 
   it('中央豁免名单：静态壳、自鉴权 agent-tools 与 relay capability 放行，其余 /api/* 要 token', async () => {

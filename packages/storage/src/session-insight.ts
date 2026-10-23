@@ -387,11 +387,11 @@ export function createSessionInsightRepository(
   const enforceRetention = (maxPayloadBytes: number): { pruned: number; freed: number; retained: number; total: number } => {
     let pruned = 0;
     let freed = 0;
-    const tombstone = (snapshotId: string): void => {
+    const tombstone = (snapshotId: string): number => {
       const row = db
         .prepare('SELECT payload_bytes FROM insight_snapshots WHERE snapshot_id = ? AND tombstoned = 0')
         .get(snapshotId) as { payload_bytes: number } | undefined;
-      if (!row) return;
+      if (!row) return 0;
       // 与指针清空原子完成；事件随快照淘汰物理删除。
       db.prepare('DELETE FROM insight_events WHERE snapshot_id = ?').run(snapshotId);
       db.prepare(
@@ -405,6 +405,7 @@ export function createSessionInsightRepository(
       );
       pruned += 1;
       freed += row.payload_bytes;
+      return row.payload_bytes;
     };
 
     // 第一阶段：每 session 保留当前指针快照 + 最近 1 份旧快照。当前指针无条件保留：
@@ -433,7 +434,7 @@ export function createSessionInsightRepository(
     // 若仅各 session 的 current 总和仍超预算，则继续按最久发布淘汰其它 session 的 current——
     // 与清空该 session 指针原子完成，被淘汰的固定 snapshot 请求随后得到 410。
     // 预算是硬上限，不能因为“都是当前”就放任总量超限。
-    const totalNow = (): number =>
+    let total =
       (db
         .prepare('SELECT COALESCE(SUM(payload_bytes), 0) AS total FROM insight_snapshots WHERE tombstoned = 0')
         .get() as { total: number }).total;
@@ -452,14 +453,14 @@ export function createSessionInsightRepository(
         )
         .all() as Array<{ snapshot_id: string }>;
       for (const candidate of rows) {
-        if (totalNow() <= maxPayloadBytes) break;
-        tombstone(candidate.snapshot_id);
+        if (total <= maxPayloadBytes) break;
+        total -= tombstone(candidate.snapshot_id);
       }
     };
 
-    if (totalNow() > maxPayloadBytes) {
+    if (total > maxPayloadBytes) {
       evictOldest(true); // 先清非 current
-      if (totalNow() > maxPayloadBytes) evictOldest(false); // 仍超限则连最旧 current 一起淘汰
+      if (total > maxPayloadBytes) evictOldest(false); // 仍超限则连最旧 current 一起淘汰
     }
 
     const after = db
