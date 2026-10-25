@@ -542,6 +542,8 @@ dutydeck schedule delete schedule_xxx --session ses_xxx
 
 Dutydeck 默认优先用终端适配器运行本机已安装的 CLI Agent，新会话的终端后端默认是 `tmux`；同一入口同时支持终端与 ACP 时优先终端。没有可用终端适配器或其命令不可用时，仍按原规则发现 ACP（Agent Client Protocol）入口。已配置的 Herdr 后端、已有会话的协议和权限保持不变；`DUTYDECK_AGENTS_JSON` 显式指定的协议、命令和权限优先。
 
+内置 CodeM（`codem`）终端适配器使用显式 `--session` / `--resume` 会话标识，不使用“最近会话”猜测；需要本机已安装 `codem` 命令，权限为 `full-trust` 时追加 `--yolo`。
+
 内置 Codex 的 `codex`、`codex-cli` 终端入口及「Codex (ACP)」（`codex-acp`）在发现探测和启动执行进程时，优先遵循显式设置的 `CODEX_PATH`，支持指向 `PATH` 之外的可执行程序；未显式设置时使用 Dutydeck 进程 `PATH` 中的 Codex，沿用用户的登录和配置；升级用户安装的 Codex 后，新启动的进程自动使用新版本。找不到用户安装或显式指定路径的 Codex 时会报错，不使用 ACP 适配器缓存中的版本。
 
 ### 1. 自定义 Agent (`DUTYDECK_AGENTS_JSON`)

@@ -28,6 +28,7 @@ import { createRelayAdapter } from './adapters/relay.js';
 import { createAidenAdapter } from './adapters/aiden.js';
 import { createGeniusAdapter } from './adapters/genius.js';
 import { createCodexAppAdapter } from './adapters/codex-app.js';
+import { createCodemAdapter } from './adapters/codem.js';
 
 /**
  * 已知 CLI id 全集。**从 `factories` 的键派生**，而不是手写第二份清单：
@@ -64,6 +65,7 @@ const factories = {
   aiden: createAidenAdapter,
   genius: createGeniusAdapter,
   'codex-app': createCodexAppAdapter,
+  codem: createCodemAdapter,
 } satisfies Record<string, () => CliAdapter>;
 
 export type CliId = keyof typeof factories;

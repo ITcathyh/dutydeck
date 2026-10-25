@@ -359,6 +359,8 @@ After reaching the user's stopping condition, a recurring task can request disab
 
 Dutydeck prefers terminal adapters for installed CLI agents, with `tmux` as the default backend for new sessions. When both terminal and ACP entries share an ID, the terminal entry wins. Agents without an available terminal adapter or executable are still discovered through ACP (Agent Client Protocol). Existing Herdr settings, session protocols and permissions are preserved. Explicit protocols, commands and permissions in `DUTYDECK_AGENTS_JSON` take priority.
 
+The built-in CodeM (`codem`) terminal adapter uses explicit `--session` / `--resume` identifiers and never guesses the latest session. It requires the local `codem` command and adds `--yolo` for `full-trust` sessions.
+
 The built-in `codex` and `codex-cli` terminal entries and “Codex (ACP)” (`codex-acp`) give an explicit `CODEX_PATH` priority for discovery, version detection and launch, including executables outside `PATH`. Without that override, each new execution process resolves Codex from the Dutydeck process `PATH`, using the user's login and configuration. New processes use user-installed upgrades automatically. If the user-installed or explicitly configured Codex is missing, startup fails instead of using the ACP adapter's cached version.
 
 ### 1. Custom agents (`DUTYDECK_AGENTS_JSON`)
