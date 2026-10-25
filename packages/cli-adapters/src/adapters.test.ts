@@ -20,16 +20,16 @@ import type { PtyLike } from './types.js';
 const SID = '11111111-2222-3333-4444-555555555555';
 const FULL_TRUST = { permissionMode: 'full-trust' as const };
 
-/** 全部 29 个适配器 id。手写一份「期望清单」与 ALL_CLI_IDS 对拍——
+/** 全部 30 个适配器 id。手写一份「期望清单」与 ALL_CLI_IDS 对拍——
  *  ALL_CLI_IDS 现在从 factories 的键派生，只能防「注册了但没进清单」，
  *  防不住「整个适配器忘了注册」。这份清单就是那道人工闸门。 */
 const EXPECTED_IDS = [
   // 8 个 MVP
   'claude-code', 'codex', 'gemini', 'opencode', 'grok', 'cursor', 'kimi', 'traex',
-  // 21 个 M2 移植
+  // 22 个 M2 移植
   'antigravity', 'coco', 'opencode2', 'mtr', 'hermes', 'mira', 'mir', 'pi', 'oh-my-pi',
   'copilot', 'kiro-cli', 'riff', 'reasonix', 'dsh', 'dsh-tui', 'mojo', 'seed', 'relay',
-  'aiden', 'genius', 'codex-app',
+  'aiden', 'genius', 'codex-app', 'codem',
 ] as const;
 
 /**
@@ -956,6 +956,14 @@ describe('参数复杂的适配器：buildArgs 快照', () => {
     expect(adapter.buildArgs({ sessionId: SID, resume: true })).not.toContain('--continue');
     expect(adapter.buildArgs({ sessionId: SID, resume: true, resumeSessionId: 'conv-1', ...FULL_TRUST }))
       .toEqual(['--dangerously-skip-permissions', '--conversation', 'conv-1']);
+  });
+
+  it('CodeM uses an explicit session and strict native resume', () => {
+    const adapter = createCliAdapter('codem');
+    expect(adapter.buildArgs({ sessionId: SID, model: 'coder', permissionMode: 'full-trust' })).toEqual(['--yolo', '--model', 'coder', '--session', SID]);
+    expect(adapter.buildArgs({ sessionId: SID, resume: true, resumeSessionId: 'codem-native', permissionMode: 'ask' })).toEqual(['--resume', 'codem-native']);
+    expect(adapter.buildResumeCommand?.(`ses_${SID}`)).toBeNull();
+    expect(adapter.buildResumeCommand?.('codem-native')).toEqual(['--resume', 'codem-native']);
   });
 
   it('copilot / reasonix：无精确 id 时新起会话，绝不 --continue（防串兄弟会话）', () => {

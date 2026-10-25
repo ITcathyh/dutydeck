@@ -317,7 +317,7 @@ export class TmuxBackend implements SessionBackend {
       // not linger in tmux. The script unlinks itself before exec.
       const launch = await writeLaunchScript(bin, args, opts.programStatus);
       try {
-        (await runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', opts.cwd, launch.path]));
+        (await runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', opts.cwd, '/bin/sh', launch.path]));
       } catch (error) {
         await rm(launch.directory, { recursive: true, force: true });
         throw error;

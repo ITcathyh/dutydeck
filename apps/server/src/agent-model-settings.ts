@@ -121,7 +121,17 @@ export class AgentModelSettings {
     return this.resolve(agent);
   }
   async defaultsForBoot(agents: AgentConfig[]) {
-    return Promise.all(agents.map(async agent => ({ ...agent, model: (await this.read(agent.id)).model || agent.model })));
+    return Promise.all(agents.map(async agent => {
+      const [settings, storedAgent] = await Promise.all([this.read(agent.id), this.repos.agents.get(agent.id)]);
+      return {
+        ...agent,
+        model: settings.model || agent.model,
+        // Agent-level configuration is stored in the repository so a restart
+        // must carry it back into the source-of-truth config before initialize
+        // rewrites the configured agent list.
+        codexProfile: storedAgent?.codexProfile || agent.codexProfile
+      };
+    }));
   }
   async resolve(agent: AgentConfig, appId?: string): Promise<AgentConfig> {
     if (!isClaudeCode(agent)) return agent;

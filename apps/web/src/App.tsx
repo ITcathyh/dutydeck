@@ -518,7 +518,12 @@ export default function App() {
 
   const paletteActions: CommandAction[] = [
     { id: 'create-task', label: '创建任务', hint: agents.data?.length ? '描述目标后立即开始执行' : undefined, group: '任务', keywords: 'new task 新建 创建', shortcut: 'N', disabled: agents.isLoading, disabledReason: agents.isLoading ? '正在检测可用 Agent，稍候即可创建' : undefined, run: openCreateTask },
+    { id: 'open-agent-settings', label: '打开 Agent 设置', hint: '配置执行者、模型和权限', group: 'Agent 与设置', keywords: 'agent model profile 配置 模型', run: () => openSettings('agents') },
+    { id: 'open-plugin-skills', label: '打开插件与 Skills', hint: '管理已安装插件和可用技能', group: 'Agent 与设置', keywords: 'plugin plugins skill skills 插件 技能', run: () => openSettings('plugins') },
+    { id: 'open-automation-settings', label: '打开自动化设置', hint: '查看任务计划与自动化入口', group: 'Agent 与设置', keywords: 'automation schedule cron 自动化 计划', run: () => openSettings('automation') },
     { id: 'go-task-center', label: '回到任务中心', hint: '查看待你处理、进行中与最近的任务', group: '导航', keywords: 'home overview 总览 首页', run: () => selectSession(undefined) },
+    { id: 'open-usage', label: '查看用量与上下文', hint: '查看 token、上下文占用和费用', group: '导航', keywords: 'usage context token cost 用量 上下文 token 费用', run: () => openOverlay({ kind: 'usage', view: 'insight' }) },
+    { id: 'open-decision-board', label: '打开群决策看板', hint: '进入群管理查看决策与批量回放', group: '导航', keywords: 'decision board replay 决策 看板 回放 群', run: () => { setPrimaryNav('groups'); } },
     { id: 'open-settings', label: '打开设置与接入', hint: '管理 Agent、飞书 Bot 与自动化', group: '导航', keywords: 'settings agent 设置', run: () => openSettings('agents') },
     { id: 'open-lark', label: '绑定或管理飞书 Bot', hint: '在飞书中下达任务并接收结果', group: '导航', keywords: 'lark feishu 飞书 bot', run: openLarkSetup },
     { id: 'toggle-help', label: '查看键盘快捷键', group: '帮助', keywords: 'help shortcut 快捷键 帮助', shortcut: '?', run: openHelp },

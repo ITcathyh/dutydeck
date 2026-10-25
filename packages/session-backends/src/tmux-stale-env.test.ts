@@ -148,7 +148,7 @@ describe('TmuxBackend stale global environment scrubbing (unit)', () => {
       cwd: tmpdir(), cols: 80, rows: 24, env: { PATH: '/usr/bin:/bin' }
     });
     const respawn = recordedCommands.find(command => command[0] === 'respawn-pane');
-    expect(respawn).toEqual(['respawn-pane', '-k', '-t', 'test-session-private-launch', '-c', tmpdir(), expect.any(String)]);
+    expect(respawn).toEqual(['respawn-pane', '-k', '-t', 'test-session-private-launch', '-c', tmpdir(), '/bin/sh', expect.any(String)]);
     expect(respawn?.join(' ')).not.toContain('m'.repeat(100));
     const scriptPath = respawn?.at(-1)!;
     const script = await readFile(scriptPath, 'utf8');

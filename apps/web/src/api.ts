@@ -1018,6 +1018,11 @@ export const insightApi = {
 
 export type AgentModelSettings = { agentId: string; appId?: string; model: string; baseUrl: string; authMode: 'bearer' | 'api-key'; hasApiKey: boolean; apiKeyAvailable: boolean; appliesTo: 'next_process' };
 export type AgentModelSettingsPatch = { model?: string; baseUrl?: string; authMode?: 'bearer' | 'api-key'; apiKey?: string; clearApiKey?: boolean };
+export type AgentConfigSettings = { id: string; codexProfile: string };
+export const agentConfigApi = {
+  get: (id: string) => json<AgentConfigSettings>(`/api/agents/${encodeURIComponent(id)}/config`, { cache: 'no-store' }),
+  set: (id: string, codexProfile: string | null) => json<Agent>(`/api/agents/${encodeURIComponent(id)}/config`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ codexProfile }) })
+};
 const modelSettingsUrl = (id: string, appId?: string) => `${botAgentPath(id, appId)}/model-settings`;
 export const agentModelSettingsApi = {
   get: (id: string, appId?: string) => json<AgentModelSettings>(modelSettingsUrl(id, appId), { cache: 'no-store' }),

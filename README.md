@@ -446,6 +446,15 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 
 `bearer` 使用 Authorization Bearer，`api-key` 使用 X-Api-Key。配置按机器人和 Agent 独立保存；不带 `--app` 修改的是共享 Agent 配置。URL 需配置该作用域的 API Key 才启用；清除机器人密钥后恢复共享 Agent / CLI 连接配置。密钥保存在本机私有密钥文件中，不在 API 和 CLI 输出里回显。模型用机器人 `defaultModel`，会话明确选择的模型优先；这些设置不改变其他机器人的模型。网关设置在下次启动 Agent 进程时生效，正在运行的会话用 `/new` 重新创建。
 
+#### Codex profile
+
+Codex 终端 Agent 可从本机 `config.toml` 选择命名 profile；Dashboard 只读取并展示 profile 名称，模型和凭据不会返回。profile 只对新建会话生效，也可用 CLI 设置共享 Agent：
+
+```bash
+dutydeck settings agent set codex codexProfile=review.safe
+dutydeck settings agent show codex
+```
+
 
 ---
 
@@ -453,6 +462,7 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 
 ### 1. 工作台、全部任务与任务详情
 - **工作台**集中展示需要决定、需要恢复和正在推进的任务；**全部任务**用于搜索和项目筛选，列表筛选不隐藏侧栏中的当前任务；**自动化**管理真实任务计划。暖白和深色主题使用同一套状态语义，侧栏可收起并调整宽度。
+- **命令面板**：按 `Ctrl-K` 打开可搜索入口，可直接进入 Agent、插件与 Skills、自动化、用量和群决策看板。
 - **输入草稿**按实例和任务保存在当前浏览器，包含正文、文件 / Skill 引用、发送方式与先出计划选项，切任务、打开设置和刷新后可恢复；存储不可用时仅保留在当前页面内。发送失败保留草稿，成功回执只清除被确认的发送版本，期间继续编辑的新内容会保留；不会自动重发。新建任务表单关闭后也保留填写内容和失败重试状态，但这份创建草稿只在当前页面生命周期内保留，刷新清除。
 - **任务内容**分为「对话」「改动」与仅 PTY 连接可用的「终端」；「结果检视」展示改动、验证证据、PR 与投递记录，执行环境和任务自动化折叠在下方。完成本轮、验证通过和 PR 状态分别展示。
 - **阅读连续性**：每项任务的阅读位置、跟随最新状态以及过程 / 工具展开选择，按实例和任务保存在当前标签页的 `sessionStorage`；切任务、设置和刷新后恢复。主题、侧栏布局、任务标签与检视偏好保存在当前浏览器，均不跨设备同步。
@@ -484,6 +494,7 @@ dutydeck settings agent set claude --app cli_xxx clearApiKey=true
 
 ### 4. 用量与成本
 Web 侧栏「用量与成本」有「费用」「明细」「会话分析」三个标签；飞书里 `/status` 显示本月用量。
+- 会话用量浮层在服务端同时提供未缓存输入和缓存读 token 时显示缓存命中率；缺少任一项时不显示推算值。
 
 - **会话洞察分析器**：随 npm 包内置，构建服务时自动生成；使用 Dutydeck 当前的 Node.js 运行时，在隔离子进程中本地分析，无需 Go 编译器、外部分析器二进制或单独构建引擎。源码开发使用工作区的 `tsx` loader。指标版本升级为 `v2`：旧快照仍可读取，不同指标版本不混算差值或分组汇总；重新分析可统一版本。Codex 同一原生输入只计一轮；fork 继承历史不计入独立会话汇总；已计价记录的金额和时间保留在洞察与导出中。刷新生成修正后的快照，已有快照保持不变。洞察刷新不会修改任务用量与计费记录。
 
@@ -530,6 +541,8 @@ dutydeck schedule delete schedule_xxx --session ses_xxx
 ## Agent 配置与权限姿态 <a id="agent-config"></a>
 
 Dutydeck 默认优先用终端适配器运行本机已安装的 CLI Agent，新会话的终端后端默认是 `tmux`；同一入口同时支持终端与 ACP 时优先终端。没有可用终端适配器或其命令不可用时，仍按原规则发现 ACP（Agent Client Protocol）入口。已配置的 Herdr 后端、已有会话的协议和权限保持不变；`DUTYDECK_AGENTS_JSON` 显式指定的协议、命令和权限优先。
+
+内置 CodeM（`codem`）终端适配器使用显式 `--session` / `--resume` 会话标识，不使用“最近会话”猜测；需要本机已安装 `codem` 命令，权限为 `full-trust` 时追加 `--yolo`。
 
 内置 Codex 的 `codex`、`codex-cli` 终端入口及「Codex (ACP)」（`codex-acp`）在发现探测和启动执行进程时，优先遵循显式设置的 `CODEX_PATH`，支持指向 `PATH` 之外的可执行程序；未显式设置时使用 Dutydeck 进程 `PATH` 中的 Codex，沿用用户的登录和配置；升级用户安装的 Codex 后，新启动的进程自动使用新版本。找不到用户安装或显式指定路径的 Codex 时会报错，不使用 ACP 适配器缓存中的版本。
 

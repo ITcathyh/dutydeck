@@ -53,6 +53,7 @@ type BotField = Exclude<keyof SaveLarkConfigRequest,
 export const pluginBindingFields = { enabled: 'boolean', config: 'json', secrets: 'json', skills: 'list' } satisfies Record<Exclude<keyof SavePluginBinding, 'plugin' | 'botAppId' | 'chatId' | 'workspaceRoot' | 'expectedRevision'>, FieldKind>;
 
 export const agentFields = { model: 'string', baseUrl: 'string', authMode: ['bearer', 'api-key'], clearApiKey: 'boolean' } satisfies Record<Exclude<keyof AgentModelSettingsPatch, 'apiKey'>, FieldKind>;
+export const agentConfigFields = { codexProfile: 'string|null' } satisfies Record<string, FieldKind>;
 
 export const channelBotFields = {
   externalAppId: 'string', displayName: 'string', brand: ['feishu', 'lark'],
@@ -204,6 +205,7 @@ const path = encodeURIComponent;
 const agentSettingsPath = (input: SettingsCliInput) => input.appId
   ? `/api/lark/bots/${path(required(input.appId, 'App ID'))}/agents/${path(required(input.agentId, 'Agent ID'))}/model-settings`
   : `/api/agents/${path(required(input.agentId, 'Agent ID'))}/model-settings`;
+const agentConfigPath = (input: SettingsCliInput) => `/api/agents/${path(required(input.agentId, 'Agent ID'))}/config`;
 
 async function findBot(request: Request, appId: string) {
   const config = await request('GET', '/api/lark/config') as { bots?: PublicBot[] };
@@ -332,11 +334,29 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
     }
     case 'instances': return request('GET', '/api/instances');
     case 'agents': return { agents: await request('GET', '/api/agents') };
-    case 'agent-show': return request('GET', agentSettingsPath(input));
+    case 'agent-show': {
+      const settings = await request('GET', agentSettingsPath(input)) as Record<string, unknown>;
+      if (input.appId) return settings;
+      const agents = await request('GET', '/api/agents') as Array<{ id: string; protocol?: string; codexProfile?: string }>;
+      const agent = agents.find(item => item.id === required(input.agentId, 'Agent ID'));
+      if (agent?.protocol !== 'pty-cli' || !['codex', 'codex-cli'].includes(agent.id)) return settings;
+      const config = await request('GET', agentConfigPath(input)) as Record<string, unknown>;
+      return { ...settings, ...(typeof config.codexProfile === 'string' && config.codexProfile ? { codexProfile: config.codexProfile } : {}) };
+    }
     case 'agent-set': {
-      const values = parsePairs(input.pairs ?? [], agentFields, 'dutydeck settings agent set --help');
-      if (!Object.keys(values).length && input.apiKey === undefined) throw new SettingsCliError('SETTINGS_ARGUMENT_REQUIRED', 'Pass at least one key=value or --api-key-fd');
-      return request('PUT', agentSettingsPath(input), { ...values, ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}) });
+      const pairs = input.pairs ?? [];
+      const configNames = new Set(Object.keys(agentConfigFields));
+      const configPairs = pairs.filter(pair => configNames.has(pair.slice(0, pair.indexOf('='))));
+      const modelPairs = pairs.filter(pair => !configNames.has(pair.slice(0, pair.indexOf('='))));
+      if (input.appId && configPairs.length) throw new SettingsCliError('SETTINGS_KEYS_CONFLICT', 'codexProfile= is shared Agent configuration and cannot be combined with --app');
+      const configValues = parsePairs(configPairs, agentConfigFields, 'dutydeck settings agent set --help');
+      const values = parsePairs(modelPairs, agentFields, 'dutydeck settings agent set --help');
+      if (!Object.keys(values).length && !Object.keys(configValues).length && input.apiKey === undefined) throw new SettingsCliError('SETTINGS_ARGUMENT_REQUIRED', 'Pass at least one key=value or --api-key-fd');
+      const result: Record<string, unknown> = {};
+      if (Object.keys(configValues).length) result.agent = await request('PATCH', agentConfigPath(input), configValues);
+      if (Object.keys(values).length || input.apiKey !== undefined) result.settings = await request('PUT', agentSettingsPath(input), { ...values, ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}) });
+      if (result.agent && result.settings) return result;
+      return (result.agent ?? result.settings) as Record<string, unknown>;
     }
     case 'channel-bot-list': return { bots: await channelBots(request) };
     case 'channel-bot-show': return { bot: await findChannelBot(request, required(input.channelBotId, 'Channel bot ID')) };

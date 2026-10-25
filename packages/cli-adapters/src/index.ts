@@ -45,3 +45,4 @@ export { createRelayAdapter } from './adapters/relay.js';
 export { createAidenAdapter } from './adapters/aiden.js';
 export { createGeniusAdapter } from './adapters/genius.js';
 export { createCodexAppAdapter } from './adapters/codex-app.js';
+export { createCodemAdapter } from './adapters/codem.js';

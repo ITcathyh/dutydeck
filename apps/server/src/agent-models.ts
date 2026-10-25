@@ -1,9 +1,8 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { homedir } from 'node:os';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { promisify } from 'node:util';
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpRuntime, type AcpRuntimeEnsureInput, type AcpRuntimeHandle, type AcpRuntimeStatus } from 'acpx/runtime';
@@ -13,19 +12,8 @@ import type { AgentConfig } from '@dutydeck/shared';
 const run = promisify(execFile);
 const ACP_MODEL_PROBE_TIMEOUT_MS = 30_000;
 export interface AgentModel { id: string; name: string }
-export interface AgentModelsResult { models: AgentModel[]; profiles?: AgentModel[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent'; protocol?: 'acp' }
-
-async function discoverCodexProfiles(agent: AgentConfig): Promise<AgentModel[]> {
-  if (!/codex/i.test(agent.id) && !/codex/i.test(agent.adapterId ?? '') && !/codex/i.test(agent.command)) return [];
-  const root = agent.env.CODEX_HOME?.trim() || join(homedir(), '.codex');
-  try {
-    const text = await readFile(join(root, 'config.toml'), 'utf8');
-    return [...text.matchAll(/^\s*\[profiles\.([^\]]+)\]\s*$/gm)]
-      .map(match => match[1]!.trim().replace(/^(["'])(.*)\1$/, '$2'))
-      .filter(Boolean)
-      .map(id => ({ id, name: id }));
-  } catch { return []; }
-}
+export interface AgentProfile { id: string; name: string }
+export interface AgentModelsResult { models: AgentModel[]; profiles?: AgentProfile[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent'; protocol?: 'acp' }
 
 export class AgentModelProbeTimeoutError extends Error {
   constructor(readonly phase: 'ensureSession' | 'getStatus' | 'close', readonly timeoutMs: number) {
@@ -61,6 +49,27 @@ const cliCommands: Record<string, { command: string; args: string[]; parse(outpu
     })
   }
 };
+
+/** Read only profile headers from Codex config.toml; values and credentials stay private. */
+async function discoverCodexProfiles(agent: AgentConfig): Promise<AgentProfile[]> {
+  // Profiles are a terminal Codex CLI concept. ACP sessions receive their
+  // configuration through ACPX session options and currently have no profile
+  // field, so do not advertise a setting that that path would ignore.
+  if (agent.protocol !== 'pty-cli' || !['codex', 'codex-cli'].includes(agent.id)) return [];
+  const root = agent.env.CODEX_HOME?.trim() || process.env.CODEX_HOME?.trim() || join(homedir(), '.codex');
+  try {
+    const source = await readFile(join(root, 'config.toml'), 'utf8');
+    const profiles = new Set<string>();
+    for (const line of source.split(/\r?\n/)) {
+      const match = line.trim().match(/^\[profiles\.([^\]]+)\]/);
+      if (!match?.[1]) continue;
+      const raw = match[1].trim();
+      const id = ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) ? raw.slice(1, -1).trim() : raw;
+      if (/^[A-Za-z0-9_.-]{1,128}$/.test(id)) profiles.add(id);
+    }
+    return [...profiles].sort((a, b) => a.localeCompare(b)).map(id => ({ id, name: id }));
+  } catch { return []; }
+}
 
 function parseModelIds(output: string): AgentModel[] {
   return output.split(/\r?\n/).map(line => line.trim()).filter(line => line && !/\s/.test(line) && !line.startsWith('[')).map(id => ({ id, name: id }));
@@ -168,6 +177,7 @@ export function computeAgentModelProbeKey(agent: AgentConfig, requestedModel?: s
     version: agent.version ?? '',
     adapterId: agent.adapterId ?? '',
     defaultModel: agent.model ?? '',
+    codexProfile: agent.codexProfile ?? '',
     requestedModel: requestedModel ?? '',
     env: envEntries
   });
@@ -221,10 +231,11 @@ export async function discoverAgentModels(agent: AgentConfig, model?: string, fo
         }
       }
       if (value && !value.defaultModel && !value.models.length && agent.model) value = { ...value, defaultModel: agent.model };
-      value ??= { models: [], ...(agent.model ? { defaultModel: agent.model, source: 'agent' as const } : {}), reasoningEfforts: [] };
+      const profiles = await discoverCodexProfiles(agent);
+      value = { ...(value ?? { models: [], ...(agent.model ? { defaultModel: agent.model, source: 'agent' as const } : {}), reasoningEfforts: [] }), ...(profiles.length ? { profiles } : {}) };
 
       // 仅成功探测到可用模型时才按 TTL 缓存；探测失败或没有可用模型的 fallback 不缓存，以便后续正常请求能及时重试。
-      if (value.models.length > 0) {
+      if (value.models.length > 0 || (value.profiles?.length ?? 0) > 0) {
         cache.set(cacheKey, { expiresAt: Date.now() + AGENT_MODEL_CACHE_TTL_MS, value });
       }
       return value;

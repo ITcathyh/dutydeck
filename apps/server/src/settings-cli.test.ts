@@ -705,6 +705,7 @@ it('passes a bot scope and a secret descriptor for Claude service settings witho
   await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'agent', 'show', 'claude', '--app', 'cli_a']);
   expect(settings).toHaveBeenLastCalledWith('agent-show', expect.objectContaining({ agentId: 'claude', appId: 'cli_a' }));
   await expect(runSettingsCli('agent-set', { ...target, agentId: 'claude', appId: 'cli_a', pairs: ['apiKey=ARGV_SECRET'] }, { fetcher: vi.fn(), readToken })).rejects.toMatchObject({ code: 'SETTINGS_KEY_UNKNOWN' });
+  await expect(runSettingsCli('agent-set', { ...target, agentId: 'codex', appId: 'cli_a', pairs: ['codexProfile=review.safe'] }, { fetcher: vi.fn(), readToken })).rejects.toMatchObject({ code: 'SETTINGS_KEYS_CONFLICT' });
 });
 
 describe('plugin bindings management parity', () => {

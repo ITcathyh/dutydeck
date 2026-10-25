@@ -59,7 +59,7 @@ export const publicAgentSchema = z.object({
   name: z.string().min(1),
   version: z.string().optional(),
   model: z.string().optional(),
-  codexProfile: z.string().optional(),
+  codexProfile: z.string().trim().min(1).max(128).optional(),
   protocol: z.enum(protocols),
   permissionMode: z.enum(permissionModes),
   /** 工具确认能否在飞书逐项审批（见 supportsRemoteApproval）；不能时飞书机器人只能以完全信任运行。toPublicAgent 总会给出。 */
