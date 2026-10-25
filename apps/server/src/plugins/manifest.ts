@@ -13,6 +13,7 @@ import {
   type AgentConfig,
   type PluginHooksFile,
   type PluginManifest,
+  type PluginService,
   type PluginTrigger,
   type ScenarioPack
 } from '@dutydeck/shared';
@@ -48,6 +49,7 @@ export interface LoadedPlugin {
   triggers: Map<string, PluginTrigger>;
   hooks: PluginHooksFile;
   providersEntry?: string;
+  service?: { spec: PluginService; entry: string };
   /** 通过静态校验的场景包；provider 引用要到信任确认之后加载时才解析。 */
   scenarios: Array<{ file: string; pack: ScenarioPack }>;
   /** 没通过静态校验的场景包的问题：只跳过那个包，插件其余部分照常加载。 */
@@ -115,11 +117,12 @@ export function parseCommandMarkdown(markdown: string): { frontmatter: Record<st
 }
 
 /** agents 也要确认：Agent 定义就是要执行的命令（启动时还会跑 `--version`），并且可以自带 full-trust 权限模式。 */
-export function pluginCapabilities(hooks: PluginHooksFile, providersEntry: string | undefined, agents: AgentConfig[] = []): string[] {
+export function pluginCapabilities(hooks: PluginHooksFile, providersEntry: string | undefined, agents: AgentConfig[] = [], service?: LoadedPlugin['service']): string[] {
   return [
     ...(agents.length ? ['agents'] : []),
     ...pluginHookEvents.filter(event => hooks[event]?.length).map(event => `hooks:${event}`),
-    ...(providersEntry ? ['providers'] : [])
+    ...(providersEntry ? ['providers'] : []),
+    ...(service ? ['service'] : [])
   ];
 }
 
@@ -189,6 +192,8 @@ export async function loadPluginDirectory(rootInput: string, options: { reserved
   }
 
   const providersEntry = manifest.providers ? await componentPath(root, realRoot, manifest.providers, manifest.providers, 'providers', 'file', issues) : undefined;
+  const serviceEntry = manifest.service ? await componentPath(root, realRoot, manifest.service.entry, manifest.service.entry, 'service.entry', 'file', issues) : undefined;
+  const service = serviceEntry && manifest.service ? { spec: manifest.service, entry: serviceEntry } : undefined;
 
   const scenarios: LoadedPlugin['scenarios'] = [];
   const scenarioIssues: PluginIssue[] = [];
@@ -219,7 +224,8 @@ export async function loadPluginDirectory(rootInput: string, options: { reserved
     root, manifest, commands, agents, triggers, hooks, scenarios, scenarioIssues, scenarioWarnings,
     ...(skillsDir ? { skillsDir } : {}),
     ...(providersEntry ? { providersEntry } : {}),
-    capabilities: pluginCapabilities(hooks, providersEntry, agents)
+    ...(service ? { service } : {}),
+    capabilities: pluginCapabilities(hooks, providersEntry, agents, service)
   };
 }
 

@@ -15,6 +15,22 @@ export const HOOK_STDOUT_LIMIT = 64 * 1024;
 const HOOK_STDERR_LIMIT = 8 * 1024;
 const IN_PROCESS_DEFAULT_TIMEOUT_MS = 10_000;
 
+/**
+ * Hooks are untrusted child processes. Keep only variables needed to resolve
+ * the command and produce ordinary terminal output; plugin metadata/config is
+ * added explicitly by the host below. This prevents daemon credentials that
+ * do not follow a known naming convention from crossing the process boundary.
+ */
+const inheritedHookEnvironment = (inherited: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
+  const allowed = new Set(['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ']);
+  if (process.platform === 'win32') for (const key of ['SystemRoot', 'ComSpec', 'PATHEXT']) allowed.add(key);
+  return Object.fromEntries(Object.entries(inherited).filter(([key, value]) => allowed.has(key) && typeof value === 'string'));
+};
+
+/** Build the environment visible to a command hook. */
+export const pluginHookEnvironment = (explicit: Record<string, string>): NodeJS.ProcessEnv =>
+  childEnvironment(inheritedHookEnvironment(process.env), explicit);
+
 export interface CommandHookResult {
   exitCode: number | null;
   stdout: string;
@@ -160,7 +176,7 @@ export class PluginHookBus {
     const { spec } = registration;
     const run = await runCommandHook(spec.command, input, {
       cwd: registration.cwd,
-      env: childEnvironment(process.env, { ...registration.env, DUTYDECK_HOOK_EVENT: input.event }),
+      env: pluginHookEnvironment({ ...registration.env, DUTYDECK_HOOK_EVENT: input.event }),
       timeout: spec.timeout
     });
     const detail = { exitCode: run.exitCode, ...(run.timedOut ? { timedOut: true } : {}), ...(run.stdoutTruncated ? { stdoutTruncated: true } : {}) };

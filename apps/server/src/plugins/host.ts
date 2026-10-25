@@ -17,6 +17,7 @@ import { scenarioPackDigest, ScenarioRegistry, type RegisteredScenarioPack } fro
 import { scopeApplies } from './scope.js';
 import type { ScopedPluginTrigger } from './triggers.js';
 import { pluginSecretKey, PluginStore, type PluginLockEntry } from './store.js';
+import { PluginServiceSupervisor } from './service-supervisor.js';
 
 export interface PluginDiagnostic { plugin: string; scenario?: string; message: string }
 /** 内置插件的条目只在内存里：免信任确认，作用域恒为 global。 */
@@ -55,6 +56,7 @@ export class PluginHost {
   readonly ciProviders = new CiProviderRegistry();
   readonly resultTools = new PluginResultToolRegistry();
   readonly businessTools = new PluginBusinessToolRegistry();
+  readonly services = new PluginServiceSupervisor(this.log);
   /** 场景注册表总是存在，只有内置包时也一样。 */
   readonly scenarios = new ScenarioRegistry();
   commands = new PluginCommandRegistry([]);
@@ -62,7 +64,10 @@ export class PluginHost {
   /** 有外部插件，或内置插件带了场景包以外的东西（命令、agents、skills、触发器、hooks、CI 提供方）时才需要接到 daemon。 */
   needsWiring = false;
   private releaseHost: (() => Promise<void>) | undefined;
-  async dispose(): Promise<void> { const release = this.releaseHost; this.releaseHost = undefined; await release?.(); }
+  async dispose(): Promise<void> {
+    await this.services.stopAll();
+    const release = this.releaseHost; this.releaseHost = undefined; await release?.();
+  }
   readonly bindings: PluginBindings;
   private constructor(readonly store: PluginStore, private readonly builtinRoot: string, private readonly log?: PluginHostOptions['log']) {
     this.bindings = new PluginBindings(store.dataDir, reference => {
@@ -163,7 +168,7 @@ export class PluginHost {
         const businessTools: Array<{ kind: 'query' | 'action'; tool: import('@dutydeck/shared').PluginQuery | import('@dutydeck/shared').PluginAction }> = [];
         const env = {
           DUTYDECK_PLUGIN_NAME: entry.name, DUTYDECK_PLUGIN_ROOT: plugin.root, DUTYDECK_PLUGIN_DATA: dataDir,
-          ...Object.fromEntries(Object.entries(config).map(([key, value]) => [configEnvName(key), value]))
+          ...Object.fromEntries(Object.entries(config).filter(([key]) => !plugin.manifest.userConfig?.[key]?.sensitive).map(([key, value]) => [configEnvName(key), value]))
         };
         for (const event of pluginHookEvents) for (const spec of plugin.hooks[event] ?? []) {
           pluginRegistrations.push({ kind: 'command', plugin: entry.name, scope: entry.scope, event, spec, cwd: plugin.root, env, ...(spec.matcher ? { matcher: new RegExp(spec.matcher) } : {}) });
@@ -222,7 +227,12 @@ export class PluginHost {
         this.scenarios.add(scenarios);
         registrations.push(...pluginRegistrations);
         this.active.push({ entry, plugin, config: Object.freeze({ ...config }), builtin });
-        if (!builtin || plugin.commands.length || plugin.agents.length || plugin.skillsDir || plugin.triggers.size || pluginRegistrations.length || providers.length || resultTools.length || businessTools.length) this.needsWiring = true;
+        if (plugin.service) {
+          const serviceConfig = Object.fromEntries(Object.entries(config).filter(([key]) => !plugin.manifest.userConfig?.[key]?.sensitive));
+          this.services.register({ plugin: entry.name, root: plugin.root, entry: plugin.service.entry, dataDir, mode: plugin.service.spec.mode, args: plugin.service.spec.args, config: serviceConfig });
+          if (plugin.service.spec.mode === 'auto') await this.services.start(entry.name);
+        }
+        if (!builtin || plugin.commands.length || plugin.agents.length || plugin.skillsDir || plugin.triggers.size || pluginRegistrations.length || providers.length || resultTools.length || businessTools.length || plugin.service) this.needsWiring = true;
       } catch (error) {
         // Provider exceptions may include installation secrets or other private input.
         // Keep the package and registration stage, never its arbitrary error text.

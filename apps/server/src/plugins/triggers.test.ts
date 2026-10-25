@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { pluginTriggerSchema, type PluginTrigger } from '@dutydeck/shared';
 import { PluginCommandRegistry } from './commands.js';
 import { isPluginTriggerRequest, registerPluginRoutes } from './routes.js';
-import { PluginTriggerService, renderTriggerTemplate, TRIGGER_BODY_LIMIT, verifyTriggerAuth, type TriggerDispatch } from './triggers.js';
+import { hmacTriggerSignaturePayload, PluginTriggerService, renderTriggerTemplate, TRIGGER_BODY_LIMIT, verifyTriggerAuth, type TriggerDispatch } from './triggers.js';
 
 const tokenTrigger = pluginTriggerSchema.parse({
   auth: { type: 'token' }, target: { botAppId: 'cli_a', chatId: 'oc_b' },
@@ -34,10 +34,15 @@ describe('trigger auth', () => {
 
   it('verifies hmac-sha256 over the raw body', () => {
     const raw = body({ a: 1 });
-    const signature = createHmac('sha256', 'secret-token').update(raw).digest('hex');
-    expect(verifyTriggerAuth(hmacTrigger.auth, 'secret-token', { rawBody: raw, headers: { 'x-hub-signature-256': `sha256=${signature}` } })).toBe(true);
-    expect(verifyTriggerAuth(hmacTrigger.auth, 'secret-token', { rawBody: body({ a: 2 }), headers: { 'x-hub-signature-256': `sha256=${signature}` } })).toBe(false);
-    expect(verifyTriggerAuth(hmacTrigger.auth, 'other', { rawBody: raw, headers: { 'x-hub-signature-256': signature } })).toBe(false);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const nonce = 'nonce-123456';
+    const signature = createHmac('sha256', 'secret-token').update(hmacTriggerSignaturePayload(timestamp, nonce, raw)).digest('hex');
+    const headers = { 'x-hub-signature-256': `sha256=${signature}`, 'x-dutydeck-timestamp': timestamp, 'x-dutydeck-nonce': nonce };
+    expect(verifyTriggerAuth(hmacTrigger.auth, 'secret-token', { rawBody: raw, headers })).toBe(true);
+    expect(verifyTriggerAuth(hmacTrigger.auth, 'secret-token', { rawBody: body({ a: 2 }), headers })).toBe(false);
+    expect(verifyTriggerAuth(hmacTrigger.auth, 'other', { rawBody: raw, headers })).toBe(false);
+    expect(verifyTriggerAuth(hmacTrigger.auth, 'secret-token', { rawBody: raw, headers: { ...headers, 'x-dutydeck-timestamp': String(Number(timestamp) - 301) } })).toBe(false);
+    expect(verifyTriggerAuth(hmacTrigger.auth, 'secret-token', { rawBody: raw, headers: { 'x-hub-signature-256': `sha256=${signature}` } })).toBe(false);
   });
 });
 
@@ -72,6 +77,24 @@ describe('PluginTriggerService', () => {
     expect((await triggers.receive(request(body({ log: 'no id' })))).statusCode).toBe(202);
     expect((await triggers.receive(request(body({ log: 'no id' })))).statusCode).toBe(200);
     expect(deliver).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects an HMAC nonce replay even when the body changes', async () => {
+    let now = 1_700_000_000_000;
+    const trigger = pluginTriggerSchema.parse({ ...hmacTrigger, maxConcurrent: 8 });
+    const deliver = vi.fn(async (_request: TriggerDispatch) => ({ sessionId: 's1', taskId: `t${deliver.mock.calls.length}` }));
+    const triggers = new PluginTriggerService({ lookup: () => ({ ...trigger, scope: 'global' }), token: () => 'secret-token', deliver, now: () => now });
+    const send = (payload: unknown, nonce = 'nonce-replay') => {
+      const raw = body(payload);
+      const timestamp = String(Math.floor(now / 1000));
+      const signature = createHmac('sha256', 'secret-token').update(hmacTriggerSignaturePayload(timestamp, nonce, raw)).digest('hex');
+      return triggers.receive(request(raw, { 'x-hub-signature-256': `sha256=${signature}`, 'x-dutydeck-timestamp': timestamp, 'x-dutydeck-nonce': nonce }));
+    };
+    expect((await send({ value: 1 })).statusCode).toBe(202);
+    expect(await send({ value: 2 })).toEqual({ statusCode: 401, body: { error: { code: 'PLUGIN_TRIGGER_REPLAYED', message: '触发器请求已被使用' } } });
+    now += 301_000;
+    expect((await send({ value: 2 }, 'nonce-new')).statusCode).toBe(202);
+    expect(deliver).toHaveBeenCalledTimes(2);
   });
 
   it('enforces maxConcurrent until the task settles, and lets a failed delivery be retried', async () => {
@@ -154,8 +177,10 @@ describe('plugin routes', () => {
     const app = Fastify();
     await registerPluginRoutes(app, { triggers, commands: new PluginCommandRegistry([{ name: 'ci', scope: 'global', commands: [{ name: 'triage', description: '分诊', template: 't' }] }]) });
     const payload = '{"x":1}';
-    const signature = createHmac('sha256', 'secret-token').update(payload).digest('hex');
-    const accepted = await app.inject({ method: 'POST', url: '/api/plugins/ci/triggers/build', payload, headers: { 'content-type': 'text/plain', 'x-hub-signature-256': `sha256=${signature}` } });
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const nonce = 'nonce-route-123';
+    const signature = createHmac('sha256', 'secret-token').update(hmacTriggerSignaturePayload(timestamp, nonce, Buffer.from(payload))).digest('hex');
+    const accepted = await app.inject({ method: 'POST', url: '/api/plugins/ci/triggers/build', payload, headers: { 'content-type': 'text/plain', 'x-hub-signature-256': `sha256=${signature}`, 'x-dutydeck-timestamp': timestamp, 'x-dutydeck-nonce': nonce } });
     expect(accepted.statusCode).toBe(202);
     expect(deliver.mock.calls[0]![0].prompt).toContain('"x": 1');
     const tooLarge = await app.inject({ method: 'POST', url: '/api/plugins/ci/triggers/build', payload: 'x'.repeat(TRIGGER_BODY_LIMIT + 10), headers: { 'content-type': 'application/json' } });

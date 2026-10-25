@@ -589,7 +589,7 @@ These guarantees cover the controlled host API path. Trusted plugins run as in-p
 
 ### External triggers
 
-`POST /api/plugins/<plugin>/triggers/<id>`, no Web login, authenticated by the trigger's own `token` header or `hmac-sha256` of the raw body. Responses: `202 {sessionId, taskId}`, `200 {duplicate:true}`, `400` not JSON, `401` bad token/signature, `404` unknown trigger or disabled plugin, `413` body over 1 MiB, `429` over `maxConcurrent` (default 4, 1 to 32), `502` delivery failed (the dedupe record is revoked, so retry). Dedupe lasts 24 hours and survives restarts. Template values in the prompt are wrapped as untrusted data; templates cannot read auth headers, `authorization` or `cookie`. See `examples/plugins/hello`:
+`POST /api/plugins/<plugin>/triggers/<id>`, no Web login, authenticated by the trigger's own `token` header or `hmac-sha256`. HMAC requests must include a timestamp header (default `x-dutydeck-timestamp`, Unix seconds), a one-time nonce header (default `x-dutydeck-nonce`) and the signature header; the signature is `HMAC-SHA256(secret, timestamp + "\\n" + nonce + "\\n" + SHA256(rawBody))`, in hex with an optional `sha256=` prefix. Timestamps are accepted within 300 seconds by default and a nonce can be used once. Responses: `202 {sessionId, taskId}`, `200 {duplicate:true}`, `400` not JSON, `401` bad token/signature/timestamp or reused nonce, `404` unknown trigger or disabled plugin, `413` body over 1 MiB, `429` over `maxConcurrent` (default 4, 1 to 32), `502` delivery failed (the dedupe record is revoked, so retry). Dedupe lasts 24 hours and survives restarts. Template values in the prompt are wrapped as untrusted data; templates cannot read auth headers, `authorization` or `cookie`. See `examples/plugins/hello`:
 
 Use `dutydeck plugin trigger-token <plugin>/<id>` to read a token or add `--rotate` to replace it immediately. Concurrent creation or rotation of tokens for different triggers preserves each successful change.
 
@@ -636,7 +636,7 @@ On errors a pack abstains rather than guessing. A pack that fails validation is 
 
 **Upgrading from env-based CI.** `DUTYDECK_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` and `DUTYDECK_CODEBASE_WEBHOOK_SECRET` no longer work. Install the plugin, set `github.token` / `github.webhook_secret` / `codebase.webhook_secret` with `--value-fd 0`, and `dutydeck restart`. Otherwise old waits and `github_new_failure` schedules stop working, the Web shows "no CI plugin installed", and `/api/hooks/codebase` returns 404. There is no automatic migration.
 
-**Security.** Only install plugins you trust; agents, hooks and providers run on your machine. Hook processes inherit the daemon's environment. **Expose trigger URLs only over HTTPS or an internal network**: token/HMAC auth carries no timestamp, so a captured request can be replayed after the 24-hour dedupe window. Untrusted wrapping reduces prompt-injection risk but does not eliminate it; don't point an external trigger at a `full-trust` bot.
+**Security.** Only install plugins you trust; agents, hooks and providers run on your machine. Hook processes inherit the daemon's environment. **Expose trigger URLs only over HTTPS or an internal network**: HMAC requests use a short-lived timestamp and one-time nonce; token requests still rely on transport protection. Untrusted wrapping reduces prompt-injection risk but does not eliminate it; don't point an external trigger at a `full-trust` bot.
 
 ---
 

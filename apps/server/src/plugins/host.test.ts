@@ -75,6 +75,36 @@ describe('PluginHost', () => {
     expect((await host.hooks.run('task.received', { payload: { prompt: 'hi' } })).additionalContext).toEqual(['ci-gitlab:hi']);
   });
 
+  it('passes non-sensitive hook config without exposing sensitive userConfig', async () => {
+    const marker = join(temp, 'hook-env.json');
+    await writePlugin(join(temp, 'hook-env'), {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'hook-env', userConfig: { project: { description: 'project' }, token: { description: 'token', sensitive: true } }, hooks: 'hooks.json' }),
+      'hooks.json': JSON.stringify({ 'task.received': [{ command: ['node', '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify({project:process.env.DUTYDECK_PLUGIN_CONFIG_PROJECT,token:process.env.DUTYDECK_PLUGIN_CONFIG_TOKEN}))`], timeout: 2_000 }] })
+    });
+    await store.install(join(temp, 'hook-env'), { yes: true });
+    await store.setConfig('hook-env', 'project', Buffer.from('demo'));
+    await store.setConfig('hook-env', 'token', Buffer.from('private'));
+    const host = await PluginHost.load({ dataDir, builtinRoot: join(temp, 'empty') });
+    await host.hooks.run('task.received', { payload: {} });
+    expect(JSON.parse(await readFile(marker, 'utf8'))).toEqual({ project: 'demo' });
+    await host.dispose();
+  });
+
+  it('starts auto services from the active artifact and stops them with the host', async () => {
+    const marker = join(temp, 'service-started');
+    await writePlugin(join(temp, 'service'), {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'service', service: { entry: 'service.mjs', mode: 'auto' } }),
+      'service.mjs': `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'started'); setInterval(() => {}, 1000);`
+    });
+    await store.install(join(temp, 'service'), { yes: true });
+    const host = await PluginHost.load({ dataDir, builtinRoot: join(temp, 'empty') });
+    try {
+      await vi.waitFor(() => expect(existsSync(marker)).toBe(true));
+      expect(host.services.status('service')).toMatchObject({ status: 'running', root: host.active.find(item => item.entry.name === 'service')?.plugin.root });
+    } finally { await host.dispose(); }
+    expect(host.services.status('service')).toMatchObject({ status: 'stopped' });
+  });
+
   it('skips a plugin whose providers clash, without leaving part of it registered', async () => {
     const provider = (id: string) => `{ id: '${id}', displayName: '${id}', matchRepository: () => ({ owner: 'o', name: 'r', slug: 'o/r' }), getPipelineStatus: async () => ({ state: 'unknown', runs: [] }), getFailureLogs: async () => [] }`;
     await writePlugin(join(temp, 'a'), { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'a-ci', providers: 'index.mjs' }), 'index.mjs': `export default api => { api.registerCiProvider(${provider('shared')}); }` });

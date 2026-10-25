@@ -782,9 +782,9 @@ dutydeck plugin uninstall <名字>
 ```
 
 - 地址：`POST /api/plugins/<插件>/triggers/<id>`，免 Web 登录，靠触发器自己的令牌或签名鉴权。
-- 鉴权：`token`（请求头里带令牌，可带 `Bearer ` 前缀）或 `hmac-sha256`（`header` 必填，对原始请求体算 HMAC，十六进制，可带 `sha256=` 前缀）。令牌用 `dutydeck plugin trigger-token <插件>/<id>` 查看或 `--rotate` 轮换，轮换立即生效。并发创建或轮换不同触发器的令牌时，各次成功操作都会保留。
+- 鉴权：`token`（请求头里带令牌，可带 `Bearer ` 前缀）或 `hmac-sha256`。HMAC 触发器还必须带时间戳头（默认 `x-dutydeck-timestamp`，Unix 秒）、一次性 nonce 头（默认 `x-dutydeck-nonce`）和签名头；签名是 `HMAC-SHA256(secret, timestamp + "\\n" + nonce + "\\n" + SHA256(rawBody))`，十六进制，可带 `sha256=` 前缀。时间戳默认允许前后 300 秒，nonce 只能使用一次。令牌用 `dutydeck plugin trigger-token <插件>/<id>` 查看或 `--rotate` 轮换，轮换立即生效。并发创建或轮换不同触发器的令牌时，各次成功操作都会保留。
 - `target` 的值可以写 `{{config.<键>}}`，引用插件配置；配置没填齐时触发器不可用。`session` 为 `new`（每次新会话）或 `reuse`。
-- 返回码：`202 {sessionId, taskId}` 已接受；`200 {duplicate:true}` 重复事件；`400` 请求体不是 JSON；`401` 令牌或签名不对（不区分原因）；`404` 触发器不存在或插件未启用；`413` 请求体超过 1 MiB；`429` 达到 `maxConcurrent`；`502` 投递失败（同时撤销去重记录，可重试）。
+- 返回码：`202 {sessionId, taskId}` 已接受；`200 {duplicate:true}` 重复事件；`400` 请求体不是 JSON；`401` 令牌、签名、时间戳无效或 nonce 已使用；`404` 触发器不存在或插件未启用；`413` 请求体超过 1 MiB；`429` 达到 `maxConcurrent`；`502` 投递失败（同时撤销去重记录，可重试）。
 - 去重 24 小时，重启后仍有效；去重键是 `dedupeKey` 渲染结果，没写就用整个请求体。`maxConcurrent` 默认 4，范围 1 到 32。
 - 模板里 `{{payload.a.b}}` 取请求体字段，`{{payload}}` 取整个请求体。进入 prompt 的每个取值都被当作**不可信数据**包裹（带随机边界，单个取值最多 2 万字符）。模板读不到鉴权头、`authorization` 和 `cookie`。
 - 任务结果以文本发回目标群，最多 8000 字符。
@@ -1030,7 +1030,7 @@ dutydeck restart
 
 - 只装可信来源的插件。agents、hooks、providers 会在你的机器上执行命令，安装时的确认不是形式。
 - hook 子进程继承 daemon 的全部环境变量，可能包含飞书 App Secret、GitHub token 等。
-- **触发器地址只走 HTTPS 或内网。** token / HMAC 鉴权不带时间戳，被截获的请求在 24 小时去重过期后可以重放。
+- **触发器地址只走 HTTPS 或内网。** HMAC 请求带短时有效的时间戳和一次性 nonce；token 请求仍依赖传输层保护。外部材料会被包成不可信数据，但这不能消除提示词注入风险；不要把外部触发器指向 `full-trust` 机器人。
 - 触发器的 prompt 模板把外部数据当不可信内容包裹，但这只降低提示词注入的风险，不能保证 Agent 不被诱导。触发出来的会话沿用机器人的权限模式，别给面向外部的触发器配 `full-trust` 机器人。
 - git 来源用提交 SHA 固定；`plugin update` 新增能力会重新确认。
 - 触发出来的会话若机器人是 `ask` 模式，审批卡可能只在 Web 上出现，飞书侧不一定有（未验证）。

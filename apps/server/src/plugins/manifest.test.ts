@@ -90,6 +90,16 @@ describe('loadPluginDirectory', () => {
     expect((await loadPluginDirectory(root)).capabilities).toEqual(['hooks:permission.request', 'hooks:notify', 'providers']);
   });
 
+  it('loads an isolated service entrypoint and marks it as trusted code', async () => {
+    await writePlugin(root, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'service', service: { entry: 'service.mjs', mode: 'auto' } }),
+      'service.mjs': 'setInterval(() => {}, 1000);'
+    });
+    const plugin = await loadPluginDirectory(root);
+    expect(plugin.service).toEqual({ spec: { entry: 'service.mjs', mode: 'auto' }, entry: join(root, 'service.mjs') });
+    expect(plugin.capabilities).toEqual(['service']);
+  });
+
   it('parses command frontmatter', () => {
     expect(parseCommandMarkdown('---\ndescription: \'说明\'\nargument-hint: <x>\n---\n\nbody\n')).toEqual({ frontmatter: { description: '说明', 'argument-hint': '<x>' }, body: 'body' });
     expect(parseCommandMarkdown('no frontmatter')).toEqual({ frontmatter: {}, body: 'no frontmatter' });

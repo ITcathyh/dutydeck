@@ -18,6 +18,13 @@ export const pluginTriggerIdPattern = /^[a-z][a-z0-9_-]*$/;
 
 const relativePath = z.string().min(1).refine(value => !value.startsWith('/') && !value.split(/[\\/]/).includes('..'), '必须是插件根目录内的相对路径');
 
+export const pluginServiceSchema = z.object({
+  entry: relativePath,
+  mode: z.enum(['manual', 'auto']).default('manual'),
+  args: z.array(z.string().min(1).max(512)).max(32).optional()
+}).strict();
+export type PluginService = z.infer<typeof pluginServiceSchema>;
+
 export const pluginUserConfigEntrySchema = z.object({
   description: z.string().min(1),
   sensitive: z.boolean().optional()
@@ -37,6 +44,8 @@ export const pluginManifestSchema = z.object({
   triggers: relativePath.optional(),
   hooks: relativePath.optional(),
   providers: relativePath.optional(),
+  /** 独立进程服务入口；宿主只使用活动 artifact 的路径启动。 */
+  service: pluginServiceSchema.optional(),
   /** 场景包目录：每个 `<id>.json` 一个包（见 scenarios.ts）。只有声明式包的插件不需要信任确认。 */
   scenarios: relativePath.optional(),
   userConfig: z.record(z.string().regex(/^[a-z][a-z0-9_]*$/, '配置键必须是 snake_case'), pluginUserConfigEntrySchema).optional()
@@ -73,7 +82,13 @@ export type PluginHooksFile = Partial<Record<PluginHookEvent, PluginHookSpec[]>>
 export const pluginTriggerSchema = z.object({
   auth: z.discriminatedUnion('type', [
     z.object({ type: z.literal('token'), header: z.string().min(1).max(128).default('x-dutydeck-token') }).strict(),
-    z.object({ type: z.literal('hmac-sha256'), header: z.string().min(1).max(128) }).strict()
+    z.object({
+      type: z.literal('hmac-sha256'),
+      header: z.string().min(1).max(128),
+      timestampHeader: z.string().min(1).max(128).default('x-dutydeck-timestamp'),
+      nonceHeader: z.string().min(1).max(128).default('x-dutydeck-nonce'),
+      maxAgeSeconds: z.number().int().min(1).max(900).default(300)
+    }).strict()
   ]),
   target: z.object({
     botAppId: z.string().min(1),

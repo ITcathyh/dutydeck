@@ -58,15 +58,34 @@ export function constantTimeEqual(left: string, right: string): boolean {
 }
 
 const header = (headers: TriggerRequest['headers'], name: string) => {
-  const value = headers[name.toLowerCase()];
+  const value = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
   return Array.isArray(value) ? value[0] : value;
 };
 
-export function verifyTriggerAuth(auth: PluginTrigger['auth'], secret: string, request: Pick<TriggerRequest, 'rawBody' | 'headers'>): boolean {
+const bodyDigest = (rawBody: Buffer) => createHash('sha256').update(rawBody).digest('hex');
+
+export function hmacTriggerTimestampHeader(auth: Extract<PluginTrigger['auth'], { type: 'hmac-sha256' }>): string {
+  return auth.timestampHeader;
+}
+
+export function hmacTriggerNonceHeader(auth: Extract<PluginTrigger['auth'], { type: 'hmac-sha256' }>): string {
+  return auth.nonceHeader;
+}
+
+export function hmacTriggerSignaturePayload(timestamp: string, nonce: string, rawBody: Buffer): string {
+  return `${timestamp}\n${nonce}\n${bodyDigest(rawBody)}`;
+}
+
+export function verifyTriggerAuth(auth: PluginTrigger['auth'], secret: string, request: Pick<TriggerRequest, 'rawBody' | 'headers'>, now = Date.now()): boolean {
   const presented = header(request.headers, auth.header)?.trim();
   if (!presented) return false;
   if (auth.type === 'token') return constantTimeEqual(presented.replace(/^Bearer\s+/i, ''), secret);
-  const expected = createHmac('sha256', secret).update(request.rawBody).digest('hex');
+  const timestamp = header(request.headers, auth.timestampHeader)?.trim();
+  const nonce = header(request.headers, auth.nonceHeader)?.trim();
+  if (!timestamp || !nonce || !/^[0-9]{1,15}$/.test(timestamp) || !/^[\x21-\x7e]{8,200}$/.test(nonce)) return false;
+  const timestampSeconds = Number(timestamp);
+  if (!Number.isSafeInteger(timestampSeconds) || Math.abs(Math.floor(now / 1000) - timestampSeconds) > auth.maxAgeSeconds) return false;
+  const expected = createHmac('sha256', secret).update(hmacTriggerSignaturePayload(timestamp, nonce, request.rawBody)).digest('hex');
   return constantTimeEqual(presented.replace(/^sha256=/i, '').toLowerCase(), expected);
 }
 
@@ -107,22 +126,28 @@ export class PluginTriggerService {
     const trigger = this.options.lookup(request.plugin, request.triggerId);
     if (!trigger) return { statusCode: 404, body: { error: { code: 'PLUGIN_TRIGGER_NOT_FOUND', message: '没有这个触发器，或插件未启用' } } };
     if (request.rawBody.length > TRIGGER_BODY_LIMIT) return { statusCode: 413, body: { error: { code: 'PLUGIN_TRIGGER_BODY_TOO_LARGE', message: `请求体超过 ${TRIGGER_BODY_LIMIT} 字节` } } };
+    const now = this.options.now?.() ?? Date.now();
     const secret = this.options.token(request.plugin, request.triggerId);
-    if (!secret || !verifyTriggerAuth(trigger.auth, secret, request)) {
+    if (!secret || !verifyTriggerAuth(trigger.auth, secret, request, now)) {
       return { statusCode: 401, body: { error: { code: 'PLUGIN_TRIGGER_UNAUTHORIZED', message: '触发器令牌或签名无效' } } };
+    }
+    const id = `${request.plugin}/${request.triggerId}`;
+    if (trigger.auth.type === 'hmac-sha256') {
+      const nonce = header(request.headers, hmacTriggerNonceHeader(trigger.auth))!.trim();
+      const nonceKey = `plugin-trigger-nonce:${id}:${nonce}`;
+      const nonceExpiresAt = now + trigger.auth.maxAgeSeconds * 1000;
+      if (!this.dedupe.claim(nonceKey, now, nonceExpiresAt)) return { statusCode: 401, body: { error: { code: 'PLUGIN_TRIGGER_REPLAYED', message: '触发器请求已被使用' } } };
     }
     let payload: unknown;
     try { payload = JSON.parse(request.rawBody.toString('utf8')); }
     catch { return { statusCode: 400, body: { error: { code: 'PLUGIN_TRIGGER_INVALID_JSON', message: '请求体必须是 JSON' } } }; }
 
-    const id = `${request.plugin}/${request.triggerId}`;
     // 模板取不到令牌、签名和 cookie。
     const hidden = new Set([trigger.auth.header.toLowerCase(), 'authorization', 'cookie']);
     const headers = Object.fromEntries(Object.entries(request.headers).filter(([name]) => !hidden.has(name.toLowerCase())));
     const rawKey = trigger.dedupeKey ? renderTriggerTemplate(trigger.dedupeKey, { payload, headers }) : '';
     const digest = createHash('sha256').update(rawKey.trim() ? `key\n${rawKey}` : `body\n${request.rawBody.toString('base64')}`).digest('hex');
     const dedupeKey = `plugin-trigger:${id}:${digest}`;
-    const now = this.options.now?.() ?? Date.now();
     const expiresAt = now + DEDUPE_TTL_MS;
     if (!this.dedupe.claim(dedupeKey, now, expiresAt)) return { statusCode: 200, body: { accepted: false, duplicate: true } };
 
