@@ -2393,6 +2393,7 @@ export class DutydeckRuntime {
       throw new RuntimeError('DRIVER_STOP_UNVERIFIED', reason, 409);
     }
     await this.mutations.write(id, async () => this.localResources.gone(driver));
+    this.localResources.retire(driver);
     for (const [operationId, reply] of this.steeringReplies) if (reply.driver === driver) this.steeringReplies.delete(operationId);
     await this.clearStopBlock(id);
     if (this.drivers.get(id) === driver) this.drivers.delete(id);

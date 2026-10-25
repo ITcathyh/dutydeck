@@ -433,7 +433,7 @@ export class LarkWorkbench {
   }
 
   private async send(item: WorkItem, target: Target, config: StoredLarkConfig, key: string, requests: WorkItemRequest[] = []) {
-    const result = await sendLarkResult(this.client(config), target, { ...(await this.cardInput(item, config, requests)), idempotencyKey: key }, this.options.log);
+    const result = await sendLarkResult(this.client(config), target, { ...(await this.cardInput(item, config, requests)), idempotencyKey: key }, this.options.log, this.repos.config, undefined, { allowConcurrent: true });
     this.assertOpen();
     await this.saveWorkMapping(config.appId, result.messageId, item, target.chatId);
   }
@@ -640,7 +640,7 @@ export class LarkWorkbench {
     } else throw new RuntimeError('WORK_ITEM_COMMAND_INVALID', '用法：/work；/work consult [--agents A,B] -- <问题>；/work research 目标；/work plan 用分号分隔的多个步骤；/work show 编号；/work templates；/work run 流程编号 版本 目标；/work save 目标编号 名称；/work answer 目标编号 步骤编号 回答', 400);
     if (text) {
       await sendLarkResult(this.client(config), target, { state: 'completed', readOnly: true, retryable: false, taskId: event.messageId, taskName: 'Dutydeck 工作台',
-        elements: [{ tag: 'markdown', element_id: 'final_output', content: text }], idempotencyKey: `work_${digest(event.messageId).slice(0, 40)}` }, this.options.log);
+        elements: [{ tag: 'markdown', element_id: 'final_output', content: text }], idempotencyKey: `work_${digest(event.messageId).slice(0, 40)}` }, this.options.log, this.repos.config);
     } else if (item) {
       const current = item;
       // 没抢到说明 notify 已经把同一张待确认卡推进话题，这里不再重复推送；

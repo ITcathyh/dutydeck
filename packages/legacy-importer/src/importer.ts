@@ -29,6 +29,8 @@ import type {
 import { LegacyImportError } from './types.js';
 
 const PARSER_VERSION = 'botmux-read-only-v1';
+export const LEGACY_MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
+export const LEGACY_MAX_ARCHIVE_FILES = 1024;
 const VALID_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 const HANDLED_BOT_FIELDS = new Set([
@@ -395,6 +397,7 @@ export async function discoverLegacySource(options: DiscoverLegacyOptions): Prom
   const integrityParts: Array<{ artifact_ref: string; digest: string }> = [];
   const archiveParts: Array<{ artifact_ref: string; digest: string }> = [];
   let unknownConfigFields = 0;
+  let archiveBytes = 0;
 
   const readArtifact = async (
     path: string,
@@ -416,7 +419,11 @@ export async function discoverLegacySource(options: DiscoverLegacyOptions): Prom
       integrityParts.push({ artifact_ref: artifactRef, digest: hmacSha256(key, snapshot.bytes) });
     }
     if (descriptor.archive_eligible) {
+      if (archiveFiles.length >= LEGACY_MAX_ARCHIVE_FILES || archiveBytes + snapshot.bytes.byteLength > LEGACY_MAX_ARCHIVE_BYTES) {
+        throw new LegacyImportError('ARCHIVE_TOO_LARGE', 'Botmux private archive exceeds its size or file-count limit', artifactRef);
+      }
       archiveFiles.push({ artifact_ref: artifactRef, kind: descriptor.kind, bytes: snapshot.bytes });
+      archiveBytes += snapshot.bytes.byteLength;
       archiveParts.push({ artifact_ref: artifactRef, digest: hmacSha256(key, snapshot.bytes) });
     }
     return artifact;

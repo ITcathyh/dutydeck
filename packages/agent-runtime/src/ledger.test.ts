@@ -46,6 +46,14 @@ describe('driver local resource ownership', () => {
     fault.mockRestore(); local.settled(original); local.gone(original);
     expect(local.reusableIds(fence.sessionId).size).toBe(0);
   });
+  it('retires in-memory handle only after durable gone evidence', () => {
+    const { repos, local, fence } = ledger(); const original = driver();
+    local.returned(local.begin(fence, { permissionMode: 'ask' }), original); local.settled(original); local.ready(original); local.gone(original);
+    expect(local.get(original)).toBeDefined();
+    local.retire(original);
+    expect(local.get(original)).toBeUndefined();
+    expect(repos.execution.getResources(fence.sessionId).find(row => row.kind === 'local_only')?.observations.at(-1)?.state).toBe('gone');
+  });
   it('leaves live local_only blocked for a newly attached controller', () => {
     const { repos, claim, local, fence } = ledger(); const original = driver();
     local.returned(local.begin(fence, { permissionMode: 'ask' }), original); local.settled(original); local.ready(original);

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { it, expect } from 'vitest';
 
-it('installs the public SDK tarball outside the workspace and compiles query/action authors without private packages', async () => {
+it('installs the public SDK tarball outside the workspace and compiles every provider author contract without private packages', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-sdk-consumer-'));
   try {
     const sdk = resolve(import.meta.dirname, '../../../../packages/plugin-sdk');
@@ -18,6 +18,8 @@ const resource = (_input: unknown, binding: PluginBindingContext) => String(bind
 export default definePlugin(api => {
  api.registerQuery({ name:'read', description:'Read', version:'1', inputSchema:{type:'object',properties:{},additionalProperties:false}, resource, async execute(input, context) { return {binding:context.binding.bindingId}; } });
  api.registerAction({ name:'write', description:'Write', version:'1', inputSchema:{type:'object',properties:{},additionalProperties:false}, resource, async execute(input, context) { return {receipt:context.actionId}; }, async reconcile(context) { return {status:'succeeded',receipt:context.original.id}; } });
+ api.registerCiProvider({ id:'ci', displayName:'CI', matchRepository:() => undefined });
+ api.registerResultTool({ name:'export', description:'Export', inputSchema:{ parse(input: unknown) { return input; } }, async execute() { return {files:[]}; } });
  api.registerScenarioProvider({ id:'docs', async context({binding}) { return {items:[],missing:[String(binding?.revision)]}; } });
 });
 if (PLUGIN_API_VERSION !== 1) throw new Error('unsupported');\n`);

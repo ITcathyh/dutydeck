@@ -76,6 +76,28 @@ describe('public business tools', () => {
     expect(['sending', 'unknown']).toContain(second.status); release(); await first;
     expect(h.execute).toHaveBeenCalledTimes(1);
   });
+  it('does not execute after losing the durable sender claim race', async () => {
+    const h = await harness();
+    const originalClaim = h.ledger.claimExecution.bind(h.ledger);
+    const releases: Array<() => void> = [];
+    let claims = 0;
+    vi.spyOn(h.ledger, 'claimExecution').mockImplementation(async (action, owner) => {
+      const index = claims++;
+      await new Promise<void>(resolve => { releases[index] = resolve; });
+      return originalClaim(action, owner);
+    });
+    const second = new PluginBusinessToolService(h.host, h.grants, h.ledger, h.authorities, 25);
+    const firstRun = h.service.call('tickets/close', { ticket: 'T-1' }, 'race-call');
+    const secondRun = second.call('tickets/close', { ticket: 'T-1' }, 'race-call');
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[0]!();
+    const first = await firstRun;
+    releases[1]!();
+    const duplicate = await secondRun;
+    expect(h.execute).toHaveBeenCalledOnce();
+    expect(first.status).toBe('succeeded');
+    expect(duplicate.status).toBe('succeeded');
+  });
   it('unknown requires explicit reconciliation and original plus current permissions', async () => {
     const h = await harness(); h.execute.mockRejectedValue(new Error('PRIVATE_ERROR_CANARY'));
     const action = await h.service.call('tickets/close', { ticket: 'T-1' }, 'call') as any;
@@ -116,8 +138,26 @@ describe('public business tools', () => {
     const h = await harness(); let signal!: AbortSignal; let release!: (value: { receipt: string }) => void;
     h.execute.mockImplementation((...args: any[]) => { signal = args[1].signal; return new Promise(r => { release = r; }); });
     const action = await h.service.call('tickets/close', { ticket: 'T-1' }, 'call') as any;
-    expect(signal.aborted).toBe(true); expect(action.status).toBe('unknown'); release({ receipt: 'late' }); await Promise.resolve();
+    expect(signal.aborted).toBe(true); expect(action.status).toBe('unknown');
+    await expect(h.service.reconcile(action.actionId)).rejects.toMatchObject({ code: 'PLUGIN_TOOL_ACTION_BUSY' });
+    release({ receipt: 'late' }); await Promise.resolve();
     expect((await h.ledger.get(action.actionId))?.status).toBe('unknown');
+  });
+  it('uses the durable reconciliation lease across service instances', async () => {
+    const h = await harness(); h.execute.mockRejectedValue(new Error('response lost'));
+    const action = await h.service.call('tickets/close', { ticket: 'T-1' }, 'lease-call') as any;
+    let release!: () => void;
+    h.reconcile.mockImplementation(async () => { await new Promise<void>(resolve => { release = resolve; }); return { status: 'succeeded' as const, receipt: 'confirmed' }; });
+    const second = new PluginBusinessToolService(h.host, h.grants, new PluginToolLedger(h.repos.config), h.authorities, 25);
+    const firstRun = h.service.reconcile(action.actionId);
+    const secondRun = second.reconcile(action.actionId);
+    const resultsPromise = Promise.allSettled([firstRun, secondRun]);
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    release();
+    const results = await resultsPromise;
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.find(result => result.status === 'rejected')).toMatchObject({ reason: expect.objectContaining({ code: 'PLUGIN_TOOL_ACTION_BUSY' }) });
+    expect(h.reconcile).toHaveBeenCalledOnce();
   });
   it('query schema is serialized and outputs are JSON-bounded; private export registry is not exposed', async () => {
     const h = await harness();

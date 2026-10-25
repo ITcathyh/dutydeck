@@ -199,6 +199,13 @@ export class ControlledDriverResources {
     const pending=[...this.permits.values()].filter(e=>this.row(e).stage==='pending');
     if(pending.length)throw new RuntimeError('DRIVER_CREATION_PENDING','Original creation tails are still pending',409);
   }
+  /** Release in-memory permit/child references after durable stop evidence exists. */
+  dispose(){
+    this.permits.clear();
+    this.nativeRef = undefined;
+    this.nativeProof = undefined;
+    this.nativeCreation = undefined;
+  }
 }
 
 export function localOnlyDriverContext(fence:SessionFence,driverInstanceId:string):DriverContext {

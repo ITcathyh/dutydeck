@@ -844,7 +844,7 @@ dutydeck settings plugin-binding set my-plugin --app cli_bot --chat oc_a 'secret
 
 插件安装只解包产物，不运行 npm install。作者若运行时 import `definePlugin` 或第三方库，须在发布前将依赖 bundle 到 provider 入口（例如 `esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs`），并把 `dist` 和 `.dutydeck-plugin` 纳入 npm files；不要把 `@dutydeck/plugin-sdk` 标记为 external。只使用 `import type` 时无需 SDK 运行依赖。验收另覆盖独立安装 SDK、bundle、打包、删除作者目录，再由真实 Host 加载和调用。
 
-作者可使用独立发布包 `@dutydeck/plugin-sdk`，其中 `definePlugin`、`PluginBindingContext`、场景及 query/action 作者类型不依赖 server 或私有 shared 包。仓库验收会将 SDK tarball 安装进空目录，用 TypeScript 编译第三方示例并实际 import。`plugins/team-faq` 是可独立 `npm pack` 的双群示例；打包包含清单、provider、场景、SOP 与引用文本，移除源目录后仍可安装运行。详见 [team-faq 用法](plugins/team-faq/README.md)。
+作者可使用独立发布包 `@dutydeck/plugin-sdk`，其中 `definePlugin`、`PluginBindingContext`、场景、query/action、CI provider 及受控结果工具的作者类型不依赖 server 或私有 shared 包。仓库验收会将 SDK tarball 安装进空目录，用 TypeScript 编译第三方示例并实际 import。`plugins/team-faq` 是可独立 `npm pack` 的双群示例；打包包含清单、provider、场景、SOP 与引用文本，移除源目录后仍可安装运行。详见 [team-faq 用法](plugins/team-faq/README.md)。
 
 ### 受控插件结果
 

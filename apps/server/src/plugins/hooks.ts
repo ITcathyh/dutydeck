@@ -8,6 +8,7 @@ import {
   type PluginHookSpec
 } from '@dutydeck/shared';
 import { scopeApplies, type PluginScopeContext } from './scope.js';
+import { childEnvironment } from '@dutydeck/shared/child-environment';
 
 /** stdout 超过此长度截断；截断后的 JSON 必然解析失败，按「没有输出」处理。 */
 export const HOOK_STDOUT_LIMIT = 64 * 1024;
@@ -157,7 +158,11 @@ export class PluginHookBus {
       }
     }
     const { spec } = registration;
-    const run = await runCommandHook(spec.command, input, { cwd: registration.cwd, env: { ...process.env, ...registration.env, DUTYDECK_HOOK_EVENT: input.event }, timeout: spec.timeout });
+    const run = await runCommandHook(spec.command, input, {
+      cwd: registration.cwd,
+      env: childEnvironment(process.env, { ...registration.env, DUTYDECK_HOOK_EVENT: input.event }),
+      timeout: spec.timeout
+    });
     const detail = { exitCode: run.exitCode, ...(run.timedOut ? { timedOut: true } : {}), ...(run.stdoutTruncated ? { stdoutTruncated: true } : {}) };
     if (!run.timedOut && run.exitCode === 0) {
       const output = run.stdoutTruncated ? undefined : parseOutput(run.stdout);

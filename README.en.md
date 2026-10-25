@@ -539,7 +539,7 @@ Skills use stable `package/skill-directory` references and standard YAML multili
 
 The host inlines required SOPs and bounded text declared in `skillResources`, including readonly tasks: 128 KiB per skill, 64 KiB per resource (16 KiB default), 512 KiB total. Escaping links and non-text resources are rejected. After `task.beforeRun`, removed legacy content is marked `replaced`; removing required SOPs rejects the task. Historical records without a status remain unverified. Freezing text does not freeze scripts, provider processes or all executable code.
 
-The independent `@dutydeck/plugin-sdk` exports `definePlugin`, binding/scenario types and query/action author contracts without server or private shared dependencies. Packaging tests install its tarball into an empty directory, compile a third-party TypeScript plugin and import it at runtime. `plugins/team-faq` is a real `npm pack` sample containing its manifest, provider, scenarios, SOP and references; tests remove the source directory and exercise two group bindings through the installed tarball. See [team-faq usage](plugins/team-faq/README.md).
+The independent `@dutydeck/plugin-sdk` exports `definePlugin`, binding/scenario types, query/action contracts, CI provider types and controlled result-tool types without server or private shared dependencies. Packaging tests install its tarball into an empty directory, compile a third-party TypeScript plugin and import it at runtime. `plugins/team-faq` is a real `npm pack` sample containing its manifest, provider, scenarios, SOP and references; tests remove the source directory and exercise two group bindings through the installed tarball. See [team-faq usage](plugins/team-faq/README.md).
 
 ### Controlled plugin results
 

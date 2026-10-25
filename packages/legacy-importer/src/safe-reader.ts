@@ -2,6 +2,8 @@ import { constants } from 'node:fs';
 import { lstat, open, readdir, realpath, stat } from 'node:fs/promises';
 import { LegacyImportError } from './types.js';
 
+export const LEGACY_MAX_SINGLE_FILE_BYTES = 64 * 1024 * 1024;
+
 export interface StableFileSnapshot {
   bytes: Uint8Array;
   mode: number;
@@ -58,6 +60,9 @@ export async function stableReadFile(
     }
     if (options.secret && (mode & 0o077) !== 0) {
       throw new LegacyImportError('SOURCE_SECRET_MODE_UNSAFE', 'Credential-bearing Botmux source artifact must be private', artifactRef);
+    }
+    if (before.size > BigInt(LEGACY_MAX_SINGLE_FILE_BYTES)) {
+      throw new LegacyImportError('SOURCE_FILE_TOO_LARGE', 'Botmux source artifact exceeds the size limit', artifactRef);
     }
     const bytes = await handle.readFile();
     const after = await handle.stat({ bigint: true });

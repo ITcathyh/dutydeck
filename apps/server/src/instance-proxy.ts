@@ -77,6 +77,7 @@ const DROPPED_REQUEST_HEADERS = new Set([...HOP_BY_HOP, ...PRIVATE_REQUEST_HEADE
 const DROPPED_UPGRADE_HEADERS = new Set(PRIVATE_REQUEST_HEADERS);
 // 对方的 Set-Cookie 会覆盖主服务同名的登录 cookie。
 const DROPPED_RESPONSE_HEADERS = new Set([...HOP_BY_HOP, 'set-cookie']);
+const UPSTREAM_TIMEOUT_MS = 30_000;
 
 const withoutHeaders = (headers: IncomingHttpHeaders, dropped: Set<string>) =>
   Object.fromEntries(Object.entries(headers).filter(([name, value]) => value !== undefined && !dropped.has(name)));
@@ -139,6 +140,7 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
       reply.raw.once('finish', () => forwards.delete(close));
       request.raw.once('aborted', close);
       body?.once('error', close);
+      upstream.setTimeout(UPSTREAM_TIMEOUT_MS, close);
       upstream.on('response', response => {
         upstreamResponse = response;
         if (closed) { response.destroy(); return; }
@@ -153,7 +155,7 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
       upstream.on('error', error => {
         if (reply.raw.headersSent || reply.raw.destroyed) { reply.raw.destroy(); return; }
         reply.raw.writeHead(502, { 'content-type': 'application/json; charset=utf-8' });
-        reply.raw.end(JSON.stringify({ error: { code: 'INSTANCE_UNAVAILABLE', message: `${peer.name} 无法连接：${error.message}` } }));
+        reply.raw.end(JSON.stringify({ error: { code: 'INSTANCE_UNAVAILABLE', message: `${peer.name} 无法连接` } }));
       });
       if (body) body.pipe(upstream);
       else upstream.end();
@@ -183,12 +185,17 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
       socket.on('error', close).once('close', close);
       try {
         upstream = httpRequest(upstreamTarget!.url, { method: 'GET', headers: withoutHeaders(request.headers, DROPPED_UPGRADE_HEADERS) });
+        upstream.setTimeout(UPSTREAM_TIMEOUT_MS, close);
       } catch {
         rejectUpgrade(socket, 502, 'Bad Gateway', 'instance unavailable');
         close();
         return;
       }
       upstream.on('upgrade', (response, upgradedSocket, peerHead) => {
+        // The timeout only covers the HTTP upgrade handshake; healthy idle
+        // WebSockets must not be destroyed by the handshake deadline.
+        upstream.setTimeout(0);
+        upgradedSocket.setTimeout(0);
         peerSocket = upgradedSocket;
         peerSocket.on('error', close).once('close', close);
         if (closing || closed || socket.destroyed) { peerSocket.destroy(); close(); return; }

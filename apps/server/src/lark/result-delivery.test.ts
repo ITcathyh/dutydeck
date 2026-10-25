@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentEvent } from '@dutydeck/shared';
 import { loadLarkTaskEvents, renderLarkProcessElements, renderLarkResultElements } from './card-renderer.js';
-import { deliverLarkStatusReaction, larkResultKey, patchLarkCard, sendLarkFile, sendLarkResult } from './result-delivery.js';
+import { deliverLarkStatusReaction, larkResultKey, patchLarkCard, sendLarkDeliveryText, sendLarkFile, sendLarkResult } from './result-delivery.js';
 import { COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI, reactionDedupeKey } from './reaction-records.js';
 import { buildLarkCard, LarkCardService, LarkServiceError } from './service.js';
 import { sendTaskCard } from './coordinator-core.js';
@@ -346,6 +346,22 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
 describe('durable multi-message result delivery', () => {
+  it('keeps concurrent durable text delivery single-flight', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dutydeck-result-flight-'));
+    const repos = createRepositories(join(dir, 'state.db'));
+    cleanups.push(async () => { repos.close(); await rm(dir, { recursive: true, force: true }); });
+    let release!: () => void;
+    const sendText = vi.fn(async () => { await new Promise<void>(resolve => { release = resolve; }); return { messageId: 'om_text' }; });
+    const service = { sendText, replyText: vi.fn() };
+    const target = { chatId: 'oc_group' };
+    const first = sendLarkDeliveryText(service, target, { text: 'hello', idempotencyKey: 'flight' }, repos.config);
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    const second = sendLarkDeliveryText(service, target, { text: 'hello', idempotencyKey: 'flight' }, repos.config);
+    release();
+    await expect(Promise.all([first, second])).resolves.toEqual([{ messageId: 'om_text' }, { messageId: 'om_text' }]);
+    expect(sendText).toHaveBeenCalledOnce();
+  });
+
   it('reopens SQLite after summary failure and sends only the missing summary, then replays both receipts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dutydeck-result-restart-'));
     let repos = createRepositories(join(dir, 'state.db'));
@@ -392,12 +408,31 @@ describe('原消息上的状态表情', () => {
     return { repos, service, react };
   };
 
+  it('并发贴同一枚表情只触发一次 provider side effect', async () => {
+    const h = await setup(); let release!: () => void;
+    h.service.addReaction.mockImplementationOnce(async (messageId: string, emojiType: string) => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return { messageId, emojiType, reactionId: 'r_single' };
+    });
+    const first = h.react(true); await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    const second = h.react(true); release();
+    await Promise.all([first, second]);
+    expect(h.service.addReaction).toHaveBeenCalledOnce();
+  });
+
   it('完成贴对勾、失败贴叉号，对账重入不重复贴', async () => {
     const h = await setup();
     expect(await h.react(false)).toBe(true);
     expect(await h.react(false)).toBe(true);
     expect(h.service.addReaction.mock.calls).toEqual([['om_req', FAILURE_REACTION_EMOJI]]);
     expect(h.service.deleteReaction).not.toHaveBeenCalled();
+  });
+  it('ignores a malformed previous reaction receipt and still adds the new state', async () => {
+    const h = await setup();
+    await h.repos.config.set(reactionDedupeKey('cli_app', 'om_req', FAILURE_REACTION_EMOJI), 'not-json');
+    expect(await h.react(true)).toBe(true);
+    expect(h.service.addReaction).toHaveBeenCalledOnce();
+    expect(h.service.addReaction.mock.calls[0]?.[1]).toBe(COMPLETION_REACTION_EMOJI);
   });
 
   it('同一条消息之后又有新终态：先撤旧的再贴新的，来回切换始终只留一枚', async () => {
