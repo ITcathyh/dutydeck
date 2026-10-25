@@ -176,6 +176,7 @@ describe('task execution ledger',()=>{
     const e=ready();const a=claimed(e.x);accepted(e.x,'two');
     expect(()=>e.x.claimNext(f)).toThrow(/SESSION_EXECUTION_BUSY/);
     const suspended=e.x.suspendUnsubmitted(af(a));expect(suspended.task!.status).toBe('queued');
+    expect(suspended.attempt).toMatchObject({ interruption: { kind: 'daemon_shutdown', reason: 'not_submitted', interruptedAt: expect.any(String) } });
     expect(()=>e.x.replaceSessionRun(f,'new',[])).toThrow(/SESSION_PENDING_ATTEMPTS/);
     e.claim!.release();const claim=e.repos.control.attachRuntime('next');opened.find(v=>v.repos===e.repos)!.claim=claim;
     const next=e.repos.execution.bind(claim).claimNext(f)!;expect(next.attempt!.attemptId).toBe(a.attemptId);expect(next.attempt!.number).toBe(1);

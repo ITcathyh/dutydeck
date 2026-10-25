@@ -867,7 +867,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         suspendUnsubmitted(f) { return write(owner => {
           const {t,a}=currentAttempt(f,owner);
           if(a.state!=='preparing' || a.submissionState!=='not_submitted') fail('ATTEMPT_NOT_PREPARING');
-          a.state='suspended';t.status='queued';touch(t,a);return transitions(f,t,a);
+          a.state='suspended';
+          a.interruption=taskExecutionSchemas.interruption.parse({ kind:'daemon_shutdown', reason:'not_submitted', interruptedAt:timestamp() });
+          t.status='queued';touch(t,a);return transitions(f,t,a);
         }); },
         cancelQueued(rawFence,taskId,expectedTaskRevision,rawDecision) { return write(() => {
           const f=readFence(rawFence);const decision=parse(decisionSchema,rawDecision);
