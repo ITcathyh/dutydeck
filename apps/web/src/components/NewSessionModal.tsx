@@ -67,7 +67,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
   const [fullTrustConfirmed, setFullTrustConfirmed] = useState(Boolean(draft?.createdSession));
   const [goal, setGoal] = useState(draft?.goal ?? '');
   const [createdSession, setCreatedSession] = useState<Session | undefined>(draft?.createdSession);
-  const latestDraft = useRef({ agentId, cwd, workspaceMode, model, reasoningEffort, permissionMode, goal, createdSession });
+  const latestDraft = useRef({ agentId, cwd, workspaceMode, model, codexProfile, reasoningEffort, permissionMode, goal, createdSession });
   latestDraft.current = { agentId, cwd, workspaceMode, model, codexProfile, reasoningEffort, permissionMode, goal, createdSession };
   useEffect(() => () => {
     if (!completed.current) newSessionDrafts.set(draftKey, latestDraft.current);
@@ -82,7 +82,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
     const fallback = agents.find(agent => !isLegacyPtyAgent(agent)) ?? agents[0];
     setAgentId(fallback.id);
     setPermissionMode(initialPermissionMode(fallback));
-    setModel(''); setReasoningEffort('');
+    setModel(''); setCodexProfile(''); setReasoningEffort('');
     setFullTrustConfirmed(false);
   }, [agents, agentId]);
   const create = useMutation({
