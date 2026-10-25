@@ -16,6 +16,10 @@ export function registerPluginBusinessToolRoutes(app: FastifyInstance, options: 
     try { return await work(request); } catch (error) { const e = error instanceof z.ZodError ? { code: 'PLUGIN_TOOL_INVALID_INPUT', status: 400 } : safeError(error); return reply.code(e.status).send({ error: { code: e.code } }); }
   };
   app.get('/api/plugin-tools/list', { logLevel: 'silent' }, handle(request => options.service.list(...credentials(request))));
+  app.get('/api/plugin-tools/revision', { logLevel: 'silent' }, handle(async request => {
+    const listed = await options.service.list(...credentials(request));
+    return { revision: listed.revision, registryRevision: listed.registryRevision, toolCount: listed.tools.length };
+  }));
   app.post('/api/plugin-tools/call', { logLevel: 'silent' }, handle(request => { const body = callSchema.parse(request.body); return options.service.call(body.tool, body.input, body.callId, ...credentials(request)); }));
   app.post('/api/plugin-tools/reconcile', { logLevel: 'silent' }, handle(request => options.service.reconcile(reconcileSchema.parse(request.body).actionId, ...credentials(request))));
   const management = (work: (request: FastifyRequest) => Promise<unknown>) => handle(async request => {
@@ -27,6 +31,14 @@ export function registerPluginBusinessToolRoutes(app: FastifyInstance, options: 
   app.delete('/api/plugins/tool-grants/:id', management(request => options.grants.revoke((request.params as { id: string }).id)));
 
   const protocolVersions = ['2025-11-25', '2025-06-18', '2025-03-26'];
+  const seenRevisions = new Map<string, string>();
+  const recordRevision = (key: string, revision: string) => {
+    const previous = seenRevisions.get(key);
+    seenRevisions.delete(key);
+    seenRevisions.set(key, revision);
+    while (seenRevisions.size > 512) { const oldest = seenRevisions.keys().next().value; if (oldest !== undefined) seenRevisions.delete(oldest); }
+    return previous !== undefined && previous !== revision;
+  };
   const authenticate = async (request: FastifyRequest) => {
     if (request.headers.origin && request.headers.origin !== options.origin) throw new RuntimeError('PLUGIN_TOOL_ORIGIN_DENIED', 'Invalid MCP origin', 403);
     await options.service.authorities.resolve(...credentials(request));
@@ -46,16 +58,30 @@ export function registerPluginBusinessToolRoutes(app: FastifyInstance, options: 
     const { id, method, params = {} } = rpc.data;
     if (id === undefined) return reply.code(202).send();
     const response = (result: unknown) => ({ jsonrpc: '2.0', id, result });
-    if (method === 'initialize') return response({ protocolVersion: protocolVersions.includes(String(params.protocolVersion)) ? params.protocolVersion : protocolVersions[0], capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'dutydeck-plugin-tools', version: '1.0.0' } });
-    if (method === 'ping') return response({});
+    if (method === 'initialize') return response({ protocolVersion: protocolVersions.includes(String(params.protocolVersion)) ? params.protocolVersion : protocolVersions[0], capabilities: { tools: { listChanged: true } }, serverInfo: { name: 'dutydeck-plugin-tools', version: '1.0.0' } });
+    const [token, turn] = credentials(request);
+    const callerKey = `${token ?? ''}:${turn ?? ''}`;
+    if (method === 'ping') {
+      if (seenRevisions.has(callerKey)) {
+        const listed = await options.service.list(token, turn);
+        if (recordRevision(callerKey, listed.revision)) {
+          return [{ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }, response({ _meta: { revision: listed.revision, registryRevision: listed.registryRevision, listChanged: true } })];
+        }
+      }
+      return response({});
+    }
     try {
       if (method === 'tools/list') {
-        const listed = await options.service.list(...credentials(request));
-        return response({ tools: [...listed.tools.map(tool => ({
-          name: tool.id.replace('/', '__'), description: tool.description,
-          inputSchema: { type: 'object', properties: { input: tool.inputSchema, callId: { type: 'string', description: 'Stable invocation ID; preserve on retry.' } }, required: ['input', 'callId'], additionalProperties: false },
-          annotations: { readOnlyHint: tool.effect === 'read', destructiveHint: tool.effect === 'write', idempotentHint: true, openWorldHint: true }
-        })), { name: 'dutydeck_reconcile', description: 'Reconcile an unknown action; requires original and current operator grants.', inputSchema: { type: 'object', properties: { actionId: { type: 'string' } }, required: ['actionId'], additionalProperties: false } }] });
+        const listed = await options.service.list(token, turn);
+        const listChanged = recordRevision(callerKey, listed.revision);
+        return response({
+          tools: [...listed.tools.map(tool => ({
+            name: tool.id.replace('/', '__'), description: tool.description,
+            inputSchema: { type: 'object', properties: { input: tool.inputSchema, callId: { type: 'string', description: 'Stable invocation ID; preserve on retry.' } }, required: ['input', 'callId'], additionalProperties: false },
+            annotations: { readOnlyHint: tool.effect === 'read', destructiveHint: tool.effect === 'write', idempotentHint: true, openWorldHint: true }
+          })), { name: 'dutydeck_reconcile', description: 'Reconcile an unknown action; requires original and current operator grants.', inputSchema: { type: 'object', properties: { actionId: { type: 'string' } }, required: ['actionId'], additionalProperties: false } }],
+          _meta: { revision: listed.revision, registryRevision: listed.registryRevision, listChanged }
+        });
       }
       if (method === 'tools/call') {
         const call = z.object({ name: z.string(), arguments: z.unknown(), _meta: z.record(z.unknown()).optional() }).strict().parse(params);

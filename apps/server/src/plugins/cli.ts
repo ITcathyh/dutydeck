@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { dirname, join, resolve } from 'node:path';
 import { pluginNamePattern } from '@dutydeck/shared';
@@ -8,15 +9,17 @@ import { createCliUi, type CliUi } from '../cli-ui.js';
 import { readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
 import { readSecretValue } from '../secret-cli.js';
 import { listBuiltinPlugins } from './builtin.js';
-import { loadPluginDirectory, PluginValidationError, type LoadedPlugin } from './manifest.js';
-import { PluginStore, PluginStoreError, type PluginLockEntry, type PluginTrustPrompt } from './store.js';
+import { PluginHost } from './host.js';
+import { loadPluginDirectory, pluginDeclaredCapabilities, pluginPermissionFootprint, PluginValidationError, strictPluginIssues, type LoadedPlugin } from './manifest.js';
+import { PluginStore, PluginStoreError, treeDigest, withPluginSourceRoot, type PluginLockEntry, type PluginTrustPrompt } from './store.js';
 
-export type PluginCliAction = 'install' | 'uninstall' | 'enable' | 'disable' | 'list' | 'update' | 'activate' | 'rollback' | 'status' | 'validate' | 'init' | 'trigger-token' | 'config';
+export type PluginCliAction = 'install' | 'uninstall' | 'enable' | 'disable' | 'list' | 'update' | 'activate' | 'rollback' | 'status' | 'validate' | 'inspect' | 'test' | 'init' | 'trigger-token' | 'config';
 
 export interface PluginCliOptions {
   scope?: string;
   yes?: boolean;
   json?: boolean;
+  strict?: boolean;
   rotate?: boolean;
   database?: string;
   dir?: string;
@@ -54,14 +57,20 @@ function summarize(plugin: LoadedPlugin) {
   return {
     name: plugin.manifest.name,
     ...(plugin.manifest.version ? { version: plugin.manifest.version } : {}),
+    apiVersion: plugin.manifest.apiVersion ?? 'legacy',
+    ...(plugin.manifest.host ? { host: plugin.manifest.host } : {}),
+    ...(plugin.manifest.dependencies ? { dependencies: plugin.manifest.dependencies } : {}),
     commands: plugin.commands.map(command => command.name),
     agents: plugin.agents.map(agent => agent.id),
     skills: Boolean(plugin.skillsDir),
     triggers: [...plugin.triggers.keys()],
     hooks: Object.entries(plugin.hooks).filter(([, specs]) => specs?.length).map(([event]) => event),
     providers: Boolean(plugin.providersEntry),
+    service: plugin.service ? { entry: plugin.manifest.service?.entry, mode: plugin.service.spec.mode } : undefined,
+    slots: plugin.slots.map(slot => ({ id: slot.id, slot: slot.slot, elementCount: slot.elements.length })),
+    permissions: pluginPermissionFootprint(plugin.manifest),
     scenarios: plugin.scenarios.map(({ pack }) => ({ id: pack.id, version: pack.version, mode: pack.mode })),
-    capabilities: plugin.capabilities
+    capabilities: pluginDeclaredCapabilities(plugin)
   };
 }
 
@@ -78,10 +87,43 @@ export async function runPluginCli(action: PluginCliAction, args: string[], opti
   const confirm = io.confirm ?? (process.stdin.isTTY && process.stderr.isTTY ? confirmOnTerminal : undefined);
   const emit = (value: Record<string, unknown>) => { if (json) ui.json({ ok: true, ...value }); };
 
+  if (action === 'inspect' || action === 'test') {
+    const source = args[0];
+    if (!source) throw new PluginStoreError('PLUGIN_SOURCE_INVALID', '缺少插件来源');
+    return withPluginSourceRoot(source, io.cwd ?? process.cwd(), async context => {
+      if (action === 'inspect') {
+        try {
+          const plugin = await loadPluginDirectory(context.root);
+          const strictIssues = options.strict ? await strictPluginIssues(plugin) : [];
+          const result = { source: context.source, digest: await treeDigest(context.root), plugin: summarize(plugin), strictIssues };
+          if (json) emit(result);
+          else {
+            ui.status(strictIssues.length ? 'warn' : 'ok', `插件 ${plugin.manifest.name} 检查完成`, plugin.manifest.version);
+            ui.keyValues([['来源摘要', result.digest], ['能力', result.plugin.capabilities.join('、') || '无'], ['权限足迹', JSON.stringify(result.plugin.permissions)], ['Web 插槽', result.plugin.slots.map(slot => `${slot.slot}:${slot.id}`).join('、') || '无']]);
+            for (const issue of strictIssues) ui.hint(`严格检查：${describeIssue(issue)}`);
+          }
+          return { ok: strictIssues.length === 0 };
+        } catch (error) {
+          if (error instanceof PluginValidationError) { if (json) ui.json({ ok: false, error: { code: 'PLUGIN_INVALID', message: error.message, issues: error.issues } }); else { ui.status('fail', '插件检查失败', error.root); for (const issue of error.issues) ui.hint(describeIssue(issue)); } return { ok: false }; }
+          throw error;
+        }
+      }
+      const dataDir = await mkdtemp(join(tmpdir(), 'dutydeck-plugin-test-'));
+      try {
+        const result = await PluginHost.testPlugin({ root: context.root, dataDir, strict: options.strict });
+        if (json) emit({ source: context.source, digest: await treeDigest(context.root), ...result });
+        else { ui.status(result.ok ? 'ok' : 'fail', `插件 ${result.ok ? '测试通过' : '测试失败'}`, context.root); for (const issue of result.issues) ui.hint(describeIssue(issue)); for (const diagnostic of result.diagnostics) ui.hint(`诊断：${diagnostic.plugin}：${diagnostic.message}`); }
+        return { ok: result.ok };
+      } finally { await rm(dataDir, { recursive: true, force: true }); }
+    });
+  }
+
   if (action === 'validate') {
     try {
       const plugin = await loadPluginDirectory(resolve(io.cwd ?? process.cwd(), args[0]!));
       if (plugin.scenarioIssues.length) throw new PluginValidationError(plugin.root, plugin.scenarioIssues);
+      const strictIssues = options.strict ? await strictPluginIssues(plugin) : [];
+      if (strictIssues.length) throw new PluginValidationError(plugin.root, strictIssues);
       const summary = summarize(plugin);
       if (json) { emit({ plugin: summary }); return { ok: true }; }
       ui.status('ok', `插件 ${summary.name} 校验通过`, summary.version);

@@ -1030,7 +1030,7 @@ export const agentModelSettingsApi = {
 };
 
 export const pluginBindingsApi = {
-  list: () => json<{ bindings: PluginBinding[]; packages: Array<{ name: string; version?: string; scope: string; apiVersion: number | string; configSchema: PluginConfigSchema; requiredSkills: string[]; legacyGlobal: string[] }>; diagnostics: Array<{ plugin: string; message: string }> }>('/api/plugin-bindings'),
+  list: () => json<{ bindings: PluginBinding[]; packages: Array<{ name: string; version?: string; scope: string; apiVersion: number | string; configSchema: PluginConfigSchema; requiredSkills: string[]; legacyGlobal: string[]; capabilities?: string[]; permissions?: { secrets: string[]; network: string[]; filesystem: string[]; effects: string[] }; slots?: Array<{ id: string; slot: string; title: string }>; service?: { mode: string; status: { status: string } } }>; diagnostics: Array<{ plugin: string; message: string }> }>('/api/plugin-bindings'),
   save: (body: SavePluginBinding) => json<{ binding: PluginBinding }>('/api/plugin-bindings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   explain: (body: PluginBindingScope & { plugin: string }) => json<Record<string, unknown>>('/api/plugin-bindings/explain', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
 };

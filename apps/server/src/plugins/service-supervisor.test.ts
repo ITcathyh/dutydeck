@@ -21,6 +21,7 @@ describe('PluginServiceSupervisor', () => {
     roots.push(file.replace(/\/env\.json$/, ''));
     const f = await fixture(`import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(file)}, JSON.stringify(process.env)); setInterval(() => {}, 1000);`);
     process.env.DUTYDECK_PLUGIN_TEST_SECRET = 'ambient-secret';
+    process.env.DUTYDECK_DATABASE_URL = 'ambient-database';
     try {
       const supervisor = new PluginServiceSupervisor(undefined, 1_000);
       supervisor.register({ plugin: 'sample', root: f.root, entry: f.entry, dataDir: f.dataDir, config: { project: 'demo', token: 'should-not-pass' } });
@@ -34,10 +35,11 @@ describe('PluginServiceSupervisor', () => {
       expect(env.DUTYDECK_PLUGIN_CONFIG_PROJECT).toBe('demo');
       expect(env.DUTYDECK_PLUGIN_CONFIG_TOKEN).toBeUndefined();
       expect(env.DUTYDECK_PLUGIN_TEST_SECRET).toBeUndefined();
+      expect(env.DUTYDECK_DATABASE_URL).toBeUndefined();
       await supervisor.stop('sample');
       expect(supervisor.status('sample')).toMatchObject({ status: 'stopped', root: f.root, entry: f.entry });
       await supervisor.stopAll();
-    } finally { delete process.env.DUTYDECK_PLUGIN_TEST_SECRET; }
+    } finally { delete process.env.DUTYDECK_PLUGIN_TEST_SECRET; delete process.env.DUTYDECK_DATABASE_URL; }
   });
 
   it('isolates a crash and allows an explicit restart with the same active artifact', async () => {

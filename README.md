@@ -762,7 +762,7 @@ dutydeck plugin uninstall <名字>
 - `plugin update` 只准备不可变候选包；活动 Host 的 provider、hook 和技能路径始终指向原包，重启也不会自动激活候选。若候选包被修改，排空并停止服务后再次 `plugin update` 可从相同来源修复，再执行激活；活动或上一版本的损坏目录不会被原地覆盖。包内相对符号链接受支持；包外、绝对或无法解析的链接会拒绝安装和更新。内容摘要能识别不改版本号的变化；没有内容变化时不重复产生候选。多进程修改通过存储锁串行提交；启动时无法获取插件存储锁或租约会报错停止，待并发操作结束后重试，不会静默略过全部外部插件。
 - `plugin status` 区分选定包、候选、上一版本、实际加载的 Host 和切换阻塞。激活/回退使用离线检查：先在当前版本完成或取消未完成任务，并核对该插件未决动作；运行 `dutydeck stop`，systemd 托管实例用 `systemctl --user stop <unit>` 停止共用插件目录的所有实例，再执行 `plugin activate` 或 `plugin rollback`，成功后 `dutydeck start` / `systemctl --user start <unit>`。存在存活 Host、待恢复任务或该插件 unknown 操作时拒绝切换；租约会识别已退出进程，但 daemon 退出不代表 tmux 任务已完成。缺少插件依赖信息的未完成旧任务会保守阻塞，已终态历史和无关插件动作不阻塞。
 - 激活会在可终止的独立 Node 进程里验证已信任 provider 的导入/注册，使用临时数据目录和最小环境；这不是恶意代码沙箱。原活动版本保留供回退，不承诺按会话运行多版 provider，也不自动回退插件私有数据。安装与启停仍需重新启动 Host；卸载同样要求没有活动消费者。
-- `plugin validate` 也校验场景包（格式、模板变量、正则、参数），出错报文件和字段；`install`、`update` 不因场景包的问题失败，但会列出不会加载的包和原因。
+- `plugin validate` 也校验场景包（格式、模板变量、正则、参数），出错报文件和字段；`plugin validate --strict` 进一步检查宿主兼容范围、权限声明、技能引用和资源边界。`plugin inspect <目录|tarball|来源> --json` 输出能力、权限足迹和 digest；`plugin test <目录|tarball|来源>` 在隔离 Host fixture 中验证注册结果。`install`、`update` 不因场景包的问题失败，但会列出不会加载的包和原因。
 - 数据放在数据库所在目录的 `plugins/` 下：`plugins.lock.json`（来源、固定版本、作用域、已确认能力）、`.artifacts/<名字>/<内容摘要>/`（不可变安装副本）、`.hosts/`（Host 代际及数据库记录；旧 `<名字>/` 布局保留兼容）、`.data/<名字>/`（插件自己的可写目录）。`.trigger-tokens.json` 和 `.config.json` 权限 0600；敏感配置存在本机密钥存储里。
 
 ### 外部触发器
@@ -784,7 +784,7 @@ dutydeck plugin uninstall <名字>
 - 地址：`POST /api/plugins/<插件>/triggers/<id>`，免 Web 登录，靠触发器自己的令牌或签名鉴权。
 - 鉴权：`token`（请求头里带令牌，可带 `Bearer ` 前缀）或 `hmac-sha256`。HMAC 触发器还必须带时间戳头（默认 `x-dutydeck-timestamp`，Unix 秒）、一次性 nonce 头（默认 `x-dutydeck-nonce`）和签名头；签名是 `HMAC-SHA256(secret, timestamp + "\\n" + nonce + "\\n" + SHA256(rawBody))`，十六进制，可带 `sha256=` 前缀。时间戳默认允许前后 300 秒，nonce 只能使用一次。令牌用 `dutydeck plugin trigger-token <插件>/<id>` 查看或 `--rotate` 轮换，轮换立即生效。并发创建或轮换不同触发器的令牌时，各次成功操作都会保留。
 - `target` 的值可以写 `{{config.<键>}}`，引用插件配置；配置没填齐时触发器不可用。`session` 为 `new`（每次新会话）或 `reuse`。
-- 返回码：`202 {sessionId, taskId}` 已接受；`200 {duplicate:true}` 重复事件；`400` 请求体不是 JSON；`401` 令牌、签名、时间戳无效或 nonce 已使用；`404` 触发器不存在或插件未启用；`413` 请求体超过 1 MiB；`429` 达到 `maxConcurrent`；`502` 投递失败（同时撤销去重记录，可重试）。
+- 返回码：`202 {runId, sessionId, taskId, statusUrl}` 已接受；`200 {duplicate:true, runId}` 重复事件；`400` 请求体不是 JSON；`401` 令牌、签名、时间戳无效或 nonce 已使用；`404` 触发器不存在或插件未启用；`413` 请求体超过 1 MiB；`429` 达到 `maxConcurrent`；`502` 投递失败（同时撤销去重记录，可重试）。可用相同鉴权请求 `GET .../runs/<runId>` 查询状态，并对仍在队列、尚未提交给 Agent 的运行 `POST .../cancel`；HMAC 查询和取消也要为零请求体生成新 nonce 和签名，nonce 只用一次；已开始执行的运行保持 running，取消不会撤回已发出的外部副作用。
 - 去重 24 小时，重启后仍有效；去重键是 `dedupeKey` 渲染结果，没写就用整个请求体。`maxConcurrent` 默认 4，范围 1 到 32。
 - 模板里 `{{payload.a.b}}` 取请求体字段，`{{payload}}` 取整个请求体。进入 prompt 的每个取值都被当作**不可信数据**包裹（带随机边界，单个取值最多 2 万字符）。模板读不到鉴权头、`authorization` 和 `cookie`。
 - 任务结果以文本发回目标群，最多 8000 字符。
@@ -843,7 +843,7 @@ dutydeck settings plugin-binding set team-faq --app cli_bot --chat oc_a enabled=
 
 群绑定完整覆盖 Bot 默认绑定，未填字段只取清单默认值。Web 按规范化后的项目根目录精确匹配；CLI 编辑时由目标服务器解析工作区别名（包括符号链接），并保留已有配置和版本；停用绑定也可重新启用。托管 worktree 使用可信会话的原项目目录。带 Bot/群的请求不回退到工作区绑定。绑定更新使用版本比较，下一次受控调用重新解析；旧调用的秘密访问器发现版本变化或停用会拒绝。新管理接口只接受安装管理员，任务凭据不能改绑定。
 
-清单可声明 `apiVersion: 1`（不支持的版本拒绝加载）、`bindingConfig`（`string`、`number`、`integer`、`boolean`、`string_list`、`secret`，支持 `required/default/enum/min/max` 中适用的字段）。普通配置与秘密引用分开保存，值、默认值和枚举类型不匹配时拒绝。秘密只能通过本地隐藏输入或文件描述符创建：
+清单可声明 `apiVersion: 1`（不支持的版本拒绝加载）、`host`/`dependencies`、`permissions`（`secrets/network/filesystem/effects` 只做可审计声明）和声明式 Web `slots`（`settings`、`command_palette`、`task_panel`、`result_card`，元素只能是文本、状态、表格或指向已注册命令/工具的动作）。`bindingConfig` 支持 `string`、`number`、`integer`、`boolean`、`string_list`、`secret`，以及适用的 `required/default/enum/min/max`。普通配置与秘密引用分开保存，值、默认值和枚举类型不匹配时拒绝。秘密只能通过本地隐藏输入或文件描述符创建：
 
 ```bash
 dutydeck settings plugin-binding secret-set my-plugin group-a --value-fd 0
@@ -906,8 +906,8 @@ dutydeck plugin-tool call private-export/export-report --json '{"reportId":"week
 ```
 
 - `command`：字符串走 `/bin/sh -c`，数组直接执行；工作目录是插件根目录。`timeout` 必填，100 到 600000 毫秒。`onFailure` 为 `ignore`（默认）或 `block`。`matcher` 是可选正则（匹配对象见下表），安装时会检查不会灾难性回溯。
-- **输入**：stdin 收到一份 JSON：`{ event, plugin, botAppId?, chatId?, sessionId?, taskId?, cwd?, payload }`。
-- **环境变量**：继承 daemon 的全部环境变量（可能含飞书 App Secret、令牌等，写 hook 时要注意），另加 `DUTYDECK_PLUGIN_NAME`、`DUTYDECK_PLUGIN_ROOT`、`DUTYDECK_PLUGIN_DATA`、`DUTYDECK_PLUGIN_CONFIG_<KEY>`（含敏感值）、`DUTYDECK_HOOK_EVENT`。
+- **输入**：stdin 收到一份 JSON：`{ event, plugin, botAppId?, chatId?, sessionId?, taskId?, attemptId?, cwd?, payload }`。
+- **环境变量**：只继承 `PATH`、`HOME`、临时目录、locale、时区等基础变量，另加 `DUTYDECK_PLUGIN_NAME`、`DUTYDECK_PLUGIN_ROOT`、`DUTYDECK_PLUGIN_DATA`、非敏感的 `DUTYDECK_PLUGIN_CONFIG_<KEY>` 和 `DUTYDECK_HOOK_EVENT`；秘密只能经 binding accessor 读取。
 - **输出**：exit 0 放行，stdout 可以是 JSON：`decision`（`allow` / `deny` / `ask`）、`reason`、`additionalContext`、`updatedPrompt`。exit 2 阻断，stderr 作为原因。其他非零退出码或超时是非阻断错误；`onFailure: block` 时改为阻断。超时会杀掉整个进程组并立即返回。stdout 上限 64 KiB，超出按“没有输出”处理；stderr 上限 8 KiB。
 - **顺序**：按插件名排序，再按声明顺序。`deny` 立即生效并结束；其余按 `ask` 优于 `allow` 合并。
 
@@ -915,10 +915,12 @@ dutydeck plugin-tool call private-export/export-report --json '{"reportId":"week
 |---|---|---|---|---|
 | `task.received` | 任务进入（Web、飞书、自动化、触发器都经过） | source, namespace, key, prompt, mode, actor | 会话 source | `deny` 拒收任务（403 `PLUGIN_HOOK_DENIED`） |
 | `task.beforeRun` | 任务开始前，skills 处理之后、prompt 冻结之前 | source, prompt, skills | 会话 source | `deny` 拒收；`additionalContext` 追加；`updatedPrompt` 替换 |
+| `tool.beforeCall` | 业务工具授权通过、实际调用前 | tool, input, resource, actor | 工具名 | `deny` 阻断；身份由宿主盖章 |
 | `permission.request` | 审批发出之前 | 完整的权限请求 | 请求标题 | `allow` / `deny` 直接代为决定、不再出人工审批；其他结果照常走人工审批 |
 | `task.completed` | 任务结算后，异步 | status, prompt, source；顶层带 taskId | status | 无 |
 | `verification.completed` | 验证跑完后，异步 | 验证结果，加 source | status | 无 |
 | `notify` | CI 通知和触发器结果发出之前 | `ci_notice`（title, text, failed）或 `trigger_result`（taskId, status, text） | kind | `deny` 时不发 |
+| `delivery.completed` | 业务工具调用完成后（成功、失败、未知或被 gate 拒绝） | tool, status, actionId（如有） | kind | 仅异步观察 |
 
 群协作的判定、回复生成和记忆整理这三类后台会话也经过 `task.received` 和 `task.beforeRun`，输入带所属机器人的 `botAppId`，`bot:<appId>` 作用域的 hook 对它们生效；记忆整理会话不带 `chatId`。对这三类会话，`task.beforeRun` 只认 `deny`，`additionalContext` 和 `updatedPrompt` 会被忽略并记一条警告日志；`permission.request` 也只认 `deny`，`allow` 会被忽略并记警告日志，审批照常走原流程（不论插件作用域）。这三类会话结算时的 `task.completed`（以及适用时的 `verification.completed`）同样带 `botAppId`，bot 作用域的 hook 也会收到，可以用 payload 里的 `source`（`lark-decision`、`lark-response`、`lark-memory`）区分。
 
@@ -1029,7 +1031,7 @@ dutydeck restart
 ### 安全说明
 
 - 只装可信来源的插件。agents、hooks、providers 会在你的机器上执行命令，安装时的确认不是形式。
-- hook 子进程继承 daemon 的全部环境变量，可能包含飞书 App Secret、GitHub token 等。
+- hook 子进程只继承基础环境变量；插件秘密通过 binding accessor 提供，不进入 hook 环境。
 - **触发器地址只走 HTTPS 或内网。** HMAC 请求带短时有效的时间戳和一次性 nonce；token 请求仍依赖传输层保护。外部材料会被包成不可信数据，但这不能消除提示词注入风险；不要把外部触发器指向 `full-trust` 机器人。
 - 触发器的 prompt 模板把外部数据当不可信内容包裹，但这只降低提示词注入的风险，不能保证 Agent 不被诱导。触发出来的会话沿用机器人的权限模式，别给面向外部的触发器配 `full-trust` 机器人。
 - git 来源用提交 SHA 固定；`plugin update` 新增能力会重新确认。

@@ -10,4 +10,5 @@ export class PluginResultToolRegistry {
   }
   get(id: string, context: PluginScopeContext) { const entry = this.entries.get(id); return entry && scopeApplies(entry.scope, context) ? entry : undefined; }
   list(context: PluginScopeContext) { return [...this.entries.entries()].filter(([, entry]) => scopeApplies(entry.scope, context)).map(([id, entry]) => ({ id, description: entry.tool.description })); }
+  listForPlugin(plugin: string) { return [...this.entries.entries()].filter(([, entry]) => entry.plugin === plugin).map(([id, entry]) => ({ id, name: entry.tool.name, scope: entry.scope, description: entry.tool.description })); }
 }

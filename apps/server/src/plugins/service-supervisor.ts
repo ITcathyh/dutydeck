@@ -10,7 +10,7 @@ export interface PluginServiceSpec {
   entry: string;
   dataDir: string;
   mode?: 'manual' | 'auto';
-  args?: string[];
+  args?: readonly string[];
   /** Only non-sensitive user configuration is allowed here. */
   config?: Readonly<Record<string, string>>;
 }
@@ -51,7 +51,9 @@ export class PluginServiceSupervisor {
     record.status = 'starting';
     record.lastError = undefined;
     const safeConfig = Object.fromEntries(Object.entries(record.spec.config ?? {}).filter(([key]) => !/(?:token|secret|password|credential|auth|key)/i.test(key)));
-    const env = childEnvironment(process.env, {
+    const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+      ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'NODE_PATH'].includes(key) || key.startsWith('LC_')));
+    const env = childEnvironment(inherited, {
       DUTYDECK_PLUGIN_NAME: record.spec.plugin,
       DUTYDECK_PLUGIN_ROOT: record.spec.root,
       DUTYDECK_PLUGIN_DATA: record.spec.dataDir,
@@ -103,6 +105,11 @@ export class PluginServiceSupervisor {
     record.child = undefined;
     record.status = 'stopped';
     return snapshot(record);
+  }
+
+  async restart(plugin: string): Promise<PluginServiceSnapshot> {
+    await this.stop(plugin);
+    return this.start(plugin);
   }
 
   status(plugin?: string): PluginServiceSnapshot | PluginServiceSnapshot[] {

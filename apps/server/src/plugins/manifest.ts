@@ -15,11 +15,12 @@ import {
   type PluginManifest,
   type PluginService,
   type PluginTrigger,
+  type PluginWebSlotDeclaration,
   type ScenarioPack
 } from '@dutydeck/shared';
 import type { ZodError } from 'zod';
 import { larkCommandRegistry } from '../lark/commands.js';
-import { isPathInside } from '../skill-catalog.js';
+import { isPathInside, skillFrontmatter } from '../skill-catalog.js';
 import { scenarioRegexRunner } from './scenario-regex.js';
 
 export const PLUGIN_MANIFEST_PATH = '.dutydeck-plugin/plugin.json';
@@ -56,8 +57,17 @@ export interface LoadedPlugin {
   scenarioIssues: PluginIssue[];
   /** 不影响加载的提示（例如 safe-regex2 认为可能回溯的正则）。 */
   scenarioWarnings: PluginIssue[];
+  /** 经 schema 与静态命令/入口引用检查的受限声明式 Web 插槽。 */
+  slots: PluginWebSlotDeclaration[];
   /** 需要安装时确认的能力：agents、hooks:<event>、providers。为空即声明式插件。 */
   capabilities: string[];
+}
+
+export interface PluginPermissionFootprint {
+  secrets: string[];
+  network: string[];
+  filesystem: string[];
+  effects: string[];
 }
 
 /**
@@ -124,6 +134,90 @@ export function pluginCapabilities(hooks: PluginHooksFile, providersEntry: strin
     ...(providersEntry ? ['providers'] : []),
     ...(service ? ['service'] : [])
   ];
+}
+
+export function pluginDeclaredCapabilities(plugin: LoadedPlugin, tools: Array<{ kind: 'query' | 'action' }> = [], hasResultTools = false, hasCiProviders = false): string[] {
+  const kinds = new Set(tools.map(tool => `tools.${tool.kind}`));
+  if (hasResultTools) kinds.add('tools.result');
+  if (hasCiProviders) kinds.add('ci');
+  return [
+    ...(plugin.commands.length ? ['commands'] : []),
+    ...(plugin.skillsDir ? ['skills'] : []),
+    ...(plugin.triggers.size ? ['triggers'] : []),
+    ...(plugin.scenarios.length ? ['scenarios'] : []),
+    ...[...new Set(plugin.slots.map(slot => `slots:${slot.slot}`))],
+    ...plugin.capabilities,
+    ...kinds
+  ];
+}
+
+export function pluginPermissionFootprint(manifest: PluginManifest, tools: Array<{ effect: 'read' | 'write' }> = []): PluginPermissionFootprint {
+  const bindingSecrets = Object.entries(manifest.bindingConfig ?? {}).filter(([, field]) => field.type === 'secret').map(([key]) => key);
+  const userSecrets = Object.entries(manifest.userConfig ?? {}).filter(([, entry]) => entry.sensitive).map(([key]) => key);
+  return {
+    secrets: [...new Set([...(manifest.permissions?.secrets ?? []), ...bindingSecrets, ...userSecrets])].sort(),
+    network: [...new Set(manifest.permissions?.network ?? [])].sort(),
+    filesystem: [...new Set(manifest.permissions?.filesystem ?? [])].sort(),
+    effects: [...new Set([...(manifest.permissions?.effects ?? []), ...tools.map(tool => tool.effect)])].sort()
+  };
+}
+
+const parseSemver = (value: string): [number, number, number] | undefined => {
+  const match = value.trim().match(/^v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?(?:[-+].*)?$/i);
+  if (!match) return undefined;
+  return [Number(match[1]), match[2] && !/[x*]/i.test(match[2]) ? Number(match[2]) : 0, match[3] && !/[x*]/i.test(match[3]) ? Number(match[3]) : 0];
+};
+const compareSemver = (a: [number, number, number], b: [number, number, number]): number =>
+  a[0] !== b[0] ? a[0] - b[0] : a[1] !== b[1] ? a[1] - b[1] : a[2] - b[2];
+
+export function isValidVersionRange(range: string): boolean {
+  const trimmed = range.trim();
+  if (!trimmed) return false;
+  if (trimmed === '*') return true;
+  return trimmed.split(/\s*\|\|\s*/).every(branch => {
+    const tokens = branch.trim().split(/\s+/).filter(Boolean);
+    return tokens.length > 0 && tokens.every(token => token === '*' || /^(>=|<=|>|<|=|\^|~)?v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?(?:[-+][0-9A-Za-z.-]+)?$/i.test(token));
+  });
+}
+
+export function satisfiesVersionRange(version: string | undefined, range: string): boolean {
+  const trimmed = range.trim();
+  if (!trimmed) return false;
+  if (trimmed === '*') return Boolean(version);
+  if (!version) return false;
+  const ver = parseSemver(version);
+  if (!ver) return version.trim() === trimmed;
+  return trimmed.split(/\s*\|\|\s*/).some(branch => {
+    const tokens = branch.trim().split(/\s+/).filter(Boolean);
+    return tokens.length > 0 && tokens.every(token => {
+      if (token === '*') return true;
+      const opMatch = token.match(/^(>=|<=|>|<|=|\^|~)?v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?(?:[-+].*)?$/i);
+      if (!opMatch) return false;
+      const [, op = '=', majStr, minStr, patStr] = opMatch;
+      const maj = Number(majStr);
+      const minWild = !minStr || /[x*]/i.test(minStr);
+      const patWild = !patStr || /[x*]/i.test(patStr);
+      const min = minWild ? 0 : Number(minStr);
+      const pat = patWild ? 0 : Number(patStr);
+      const target: [number, number, number] = [maj, min, pat];
+      if (op === '^') {
+        if (compareSemver(ver, target) < 0) return false;
+        return maj > 0 ? ver[0] === maj : minWild ? ver[0] === 0 : ver[0] === 0 && ver[1] === min;
+      }
+      if (op === '~') return compareSemver(ver, target) >= 0 && ver[0] === maj && (minWild || ver[1] === min);
+      if (op === '>=') return compareSemver(ver, target) >= 0;
+      if (op === '>') return compareSemver(ver, minWild ? [maj + 1, 0, 0] : patWild ? [maj, min + 1, 0] : [maj, min, pat + 1]) >= 0;
+      if (op === '<=') return compareSemver(ver, minWild ? [maj, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER] : patWild ? [maj, min, Number.MAX_SAFE_INTEGER] : target) <= 0;
+      if (op === '<') return compareSemver(ver, target) < 0;
+      if (minWild) return ver[0] === maj;
+      if (patWild) return ver[0] === maj && ver[1] === min;
+      return compareSemver(ver, target) === 0;
+    });
+  });
+}
+
+export function isHostApiCompatible(apiRange: string): boolean {
+  return satisfiesVersionRange('1.0.0', apiRange);
 }
 
 /** 读取并校验一个插件目录；所有问题一次性收集，带文件名和字段名抛出。 */
@@ -219,14 +313,79 @@ export async function loadPluginDirectory(rootInput: string, options: { reserved
     else scenarios.push({ file, pack });
   }
 
+  const slots: PluginWebSlotDeclaration[] = manifest.slots ?? [];
+  for (const [slotIndex, slot] of slots.entries()) {
+    for (const [elemIndex, element] of slot.elements.entries()) {
+      if (element.kind !== 'action') continue;
+      if (element.target.kind === 'command') {
+        const command = element.target.command;
+        if (!commands.some(item => item.name === command)) issues.push({ file: PLUGIN_MANIFEST_PATH, field: `slots.${slotIndex}.elements.${elemIndex}.target.command`, message: `引用了未在 commands 中声明的命令 ${command}` });
+      } else if (!manifest.providers) {
+        issues.push({ file: PLUGIN_MANIFEST_PATH, field: `slots.${slotIndex}.elements.${elemIndex}.target.tool`, message: `引用了工具 ${element.target.tool}，但清单没有声明 providers 入口` });
+      }
+    }
+  }
+
   if (issues.length) throw new PluginValidationError(root, issues);
   return {
-    root, manifest, commands, agents, triggers, hooks, scenarios, scenarioIssues, scenarioWarnings,
+    root, manifest, commands, agents, triggers, hooks, scenarios, scenarioIssues, scenarioWarnings, slots,
     ...(skillsDir ? { skillsDir } : {}),
     ...(providersEntry ? { providersEntry } : {}),
     ...(service ? { service } : {}),
     capabilities: pluginCapabilities(hooks, providersEntry, agents, service)
   };
+}
+
+/** `--strict` 附加检查：不放行任何静态隐患、重复 Agent、缺失的必需技能或引用文件、以及未纳入 permissions.secrets 的敏感项。 */
+export async function strictPluginIssues(plugin: LoadedPlugin): Promise<PluginIssue[]> {
+  const issues: PluginIssue[] = [...plugin.scenarioIssues, ...plugin.scenarioWarnings];
+  const realRoot = await realpath(plugin.root);
+  const agentIds = new Set<string>();
+  for (const agent of plugin.agents) {
+    if (agentIds.has(agent.id)) issues.push({ file: plugin.manifest.agents ?? 'agents', field: 'id', message: `Agent id ${agent.id} 重复` });
+    agentIds.add(agent.id);
+  }
+  const declaredSecrets = new Set(plugin.manifest.permissions?.secrets ?? []);
+  for (const [key, field] of Object.entries(plugin.manifest.bindingConfig ?? {})) {
+    if (field.type === 'secret' && !declaredSecrets.has(key)) issues.push({ file: PLUGIN_MANIFEST_PATH, field: 'permissions.secrets', message: `bindingConfig 秘密项 ${key} 未在 permissions.secrets 声明` });
+  }
+  for (const [key, entry] of Object.entries(plugin.manifest.userConfig ?? {})) {
+    if (entry.sensitive && !declaredSecrets.has(key)) issues.push({ file: PLUGIN_MANIFEST_PATH, field: 'permissions.secrets', message: `userConfig 敏感项 ${key} 未在 permissions.secrets 声明` });
+  }
+  if (plugin.manifest.host && !isHostApiCompatible(plugin.manifest.host.api)) {
+    issues.push({ file: PLUGIN_MANIFEST_PATH, field: 'host.api', message: `当前宿主 API 为 1，兼容范围 ${plugin.manifest.host.api} 未覆盖` });
+  }
+  for (const [dep, range] of Object.entries(plugin.manifest.dependencies ?? {})) {
+    if (dep === plugin.manifest.name) issues.push({ file: PLUGIN_MANIFEST_PATH, field: `dependencies.${dep}`, message: `插件不能依赖自身 ${dep}` });
+    else if (!isValidVersionRange(range)) issues.push({ file: PLUGIN_MANIFEST_PATH, field: `dependencies.${dep}`, message: `依赖版本范围 ${range} 格式无效` });
+  }
+  const checkSkill = async (skillId: string, field: string) => {
+    if (!plugin.skillsDir) { issues.push({ file: PLUGIN_MANIFEST_PATH, field, message: `引用了技能 ${skillId}，但插件没有 skills 目录` }); return; }
+    const skillPath = join(plugin.skillsDir, skillId, 'SKILL.md');
+    const info = await stat(skillPath).catch(() => undefined);
+    const real = info?.isFile() ? await realpath(skillPath).catch(() => undefined) : undefined;
+    if (!real || !isPathInside(real, realRoot)) { issues.push({ file: PLUGIN_MANIFEST_PATH, field, message: `技能 ${skillId} 的 SKILL.md 不存在或越出插件目录` }); return; }
+    try { skillFrontmatter(await readFile(real, 'utf8')); }
+    catch (error) { issues.push({ file: `${plugin.manifest.skills ?? 'skills'}/${skillId}/SKILL.md`, message: error instanceof Error ? error.message : String(error) }); }
+  };
+  for (const [index, ref] of (plugin.manifest.requiredSkills ?? []).entries()) {
+    const prefix = `${plugin.manifest.name}/`;
+    if (!ref.startsWith(prefix)) { issues.push({ file: PLUGIN_MANIFEST_PATH, field: `requiredSkills.${index}`, message: `requiredSkills 只能引用本插件技能 ${prefix}<技能目录>` }); continue; }
+    await checkSkill(ref.slice(prefix.length), `requiredSkills.${index}`);
+  }
+  for (const [skillId, resources] of Object.entries(plugin.manifest.skillResources ?? {})) {
+    await checkSkill(skillId, `skillResources.${skillId}`);
+    for (const [index, resource] of resources.entries()) {
+      const target = resolve(plugin.root, resource.path);
+      const info = await stat(target).catch(() => undefined);
+      const real = info?.isFile() ? await realpath(target).catch(() => undefined) : undefined;
+      if (!real || !isPathInside(real, realRoot)) { issues.push({ file: PLUGIN_MANIFEST_PATH, field: `skillResources.${skillId}.${index}.path`, message: `引用文件 ${resource.path} 不存在或越出插件目录` }); continue; }
+      if (info!.size > resource.maxBytes) issues.push({ file: PLUGIN_MANIFEST_PATH, field: `skillResources.${skillId}.${index}.maxBytes`, message: `引用文件 ${resource.path} 大小 ${info!.size} 超过上限 ${resource.maxBytes}` });
+      const bytes = await readFile(real);
+      if (bytes.includes(0)) issues.push({ file: PLUGIN_MANIFEST_PATH, field: `skillResources.${skillId}.${index}.path`, message: `引用文件 ${resource.path} 不是纯文本` });
+    }
+  }
+  return issues;
 }
 
 /** 短语示例要能被包里的正则匹配：在宿主的隔离线程里跑，执行的是包里的正则，不是插件代码。 */

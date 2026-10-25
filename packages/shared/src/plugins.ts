@@ -4,6 +4,18 @@ import safeRegex from 'safe-regex2';
 import { z } from 'zod';
 import type { ScenarioProvider } from './scenarios.js';
 import { PLUGIN_API_VERSION, pluginConfigSchema, pluginSkillRefSchema, pluginTextResourceSchema, pluginConfigValueSchema } from './plugin-bindings.js';
+export type {
+  PluginPermissionEffect,
+  PluginFilesystemPermission,
+  PluginHostDeclaration,
+  PluginDependencies,
+  PluginPermissionsDeclaration,
+  PluginWebSlotKind,
+  PluginWebSlotTarget,
+  PluginWebSlotElement,
+  PluginWebSlotDeclaration
+} from '@dutydeck/plugin-sdk';
+
 
 /**
  * Dutydeck 插件契约（v1）：清单、hooks、触发器的 schema，hook 子进程协议，
@@ -30,14 +42,54 @@ export const pluginUserConfigEntrySchema = z.object({
   sensitive: z.boolean().optional()
 }).strict();
 
+export const pluginPermissionEffects = ['read', 'write', 'external_write'] as const;
+export const pluginFilesystemPermissions = ['workspace_read', 'workspace_write', 'plugin_data'] as const;
+export const pluginPermissionsSchema = z.object({
+  secrets: z.array(z.string().regex(/^[a-z][a-z0-9_]*$/, '秘密键必须是 snake_case')).max(32).optional(),
+  network: z.array(z.string().min(1).max(255).regex(/^[a-z0-9.-]+(?::\d{1,5})?$/i, '网络目标必须是主机名或 host:port')).max(32).optional(),
+  filesystem: z.array(z.enum(pluginFilesystemPermissions)).max(8).optional(),
+  effects: z.array(z.enum(pluginPermissionEffects)).max(8).optional()
+}).strict();
+
+export const pluginHostSchema = z.object({
+  api: z.string().min(1).max(64),
+  channels: z.array(z.enum(['web', 'lark', 'cli', 'mcp'])).max(8).optional()
+}).strict();
+export const pluginDependenciesSchema = z.record(z.string().regex(pluginNamePattern), z.string().min(1).max(64));
+
+export const pluginWebSlotKinds = ['settings', 'command_palette', 'task_panel', 'result_card'] as const;
+export const pluginWebSlotTargetSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('command'), command: z.string().max(32).regex(pluginCommandNamePattern, '命令名只能用小写字母、数字、- 和 _，以字母开头') }).strict(),
+  z.object({ kind: z.literal('tool'), tool: z.string().max(64).regex(/^[a-z][a-z0-9_-]{0,63}$/, '工具名只能用小写字母、数字、- 和 _，以字母开头') }).strict()
+]);
+export const pluginWebSlotElementSchema = z.union([
+  z.object({ kind: z.literal('text'), label: z.string().min(1).max(80).optional(), text: z.string().min(1).max(1_000) }).strict(),
+  z.object({ kind: z.literal('status'), label: z.string().min(1).max(80), tone: z.enum(['neutral', 'accent', 'warning', 'danger']).optional(), value: z.string().min(1).max(200) }).strict(),
+  z.object({ kind: z.literal('table'), columns: z.array(z.string().min(1).max(80)).min(1).max(8), rows: z.array(z.array(z.string().max(200)).min(1).max(8)).max(20) }).strict().superRefine((table, ctx) => {
+    if (table.rows.some(row => row.length !== table.columns.length)) ctx.addIssue({ code: 'custom', path: ['rows'], message: '表格每行列数必须与 columns 一致' });
+  }),
+  z.object({ kind: z.literal('action'), label: z.string().min(1).max(80), target: pluginWebSlotTargetSchema }).strict()
+]);
+export const pluginWebSlotDeclarationSchema = z.object({
+  id: z.string().max(64).regex(pluginTriggerIdPattern, '插槽 id 只能用小写字母、数字、- 和 _，以字母开头'),
+  slot: z.enum(pluginWebSlotKinds),
+  title: z.string().min(1).max(120),
+  description: z.string().min(1).max(500).optional(),
+  elements: z.array(pluginWebSlotElementSchema).min(1).max(16)
+}).strict();
+
 export const pluginManifestSchema = z.object({
   name: z.string().max(64).regex(pluginNamePattern, '必须是 kebab-case，例如 my-plugin'),
   version: z.string().min(1).max(64).optional(),
   description: z.string().max(1_000).optional(),
   apiVersion: z.literal(PLUGIN_API_VERSION).optional(),
+  host: pluginHostSchema.optional(),
+  dependencies: pluginDependenciesSchema.optional(),
   bindingConfig: pluginConfigSchema.optional(),
   requiredSkills: z.array(pluginSkillRefSchema).max(16).optional(),
   skillResources: z.record(z.string(), z.array(pluginTextResourceSchema).max(16)).optional(),
+  permissions: pluginPermissionsSchema.optional(),
+  slots: z.array(pluginWebSlotDeclarationSchema).max(16).optional(),
   commands: relativePath.optional(),
   agents: relativePath.optional(),
   skills: relativePath.optional(),
@@ -57,10 +109,15 @@ export const pluginManifestSchema = z.object({
     }
     if (field.default !== undefined && !pluginConfigValueSchema(field).safeParse(field.default).success) context.addIssue({ code: 'custom', path: ['bindingConfig', key, 'default'], message: 'Default does not match the field schema' });
   }
+  const slotIds = new Set<string>();
+  for (const [index, slot] of (manifest.slots ?? []).entries()) {
+    if (slotIds.has(slot.id)) context.addIssue({ code: 'custom', path: ['slots', index, 'id'], message: `插槽 id ${slot.id} 重复` });
+    slotIds.add(slot.id);
+  }
 });
 export type PluginManifest = z.infer<typeof pluginManifestSchema>;
 
-export const pluginHookEvents = ['task.received', 'task.beforeRun', 'permission.request', 'task.completed', 'verification.completed', 'notify'] as const;
+export const pluginHookEvents = ['task.received', 'task.beforeRun', 'tool.beforeCall', 'permission.request', 'task.completed', 'verification.completed', 'delivery.completed', 'notify'] as const;
 export type PluginHookEvent = (typeof pluginHookEvents)[number];
 
 const hookMatcher = z.string().min(1).max(512).superRefine((value, context) => {
@@ -109,6 +166,7 @@ export interface PluginHookInput {
   chatId?: string;
   sessionId?: string;
   taskId?: string;
+  attemptId?: string;
   cwd?: string;
   payload: Record<string, unknown>;
 }

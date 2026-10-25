@@ -8,8 +8,10 @@ export interface PluginRouteOptions {
 }
 
 const triggerPath = /^\/api\/plugins\/[^/]+\/triggers\/[^/]+$/;
+const triggerRunPath = /^\/api\/plugins\/[^/]+\/triggers\/[^/]+\/runs\/[^/]+$/;
+const triggerCancelPath = /^\/api\/plugins\/[^/]+\/triggers\/[^/]+\/runs\/[^/]+\/cancel$/;
 /** 触发器路由不走 Web 登录态，由触发器自己的令牌或签名鉴权。 */
-export const isPluginTriggerRequest = (method: string, pathname: string) => method === 'POST' && triggerPath.test(pathname);
+export const isPluginTriggerRequest = (method: string, pathname: string) => (method === 'POST' && (triggerPath.test(pathname) || triggerCancelPath.test(pathname))) || (method === 'GET' && triggerRunPath.test(pathname));
 
 export async function registerPluginRoutes(app: FastifyInstance, options: PluginRouteOptions) {
   app.get<{ Querystring: { cwd?: string } }>('/api/plugins/commands', async request => ({
@@ -39,6 +41,16 @@ export async function registerPluginRoutes(app: FastifyInstance, options: Plugin
         headers: request.headers
       });
       return reply.code(result.statusCode).send(result.body);
+    });
+    scope.get<{ Params: { plugin: string; id: string; runId: string } }>('/api/plugins/:plugin/triggers/:id/runs/:runId', async (request, reply) => {
+      if (!options.triggers.authorize(request.params.plugin, request.params.id, request.headers)) return reply.code(401).send({ error: { code: 'PLUGIN_TRIGGER_UNAUTHORIZED' } });
+      const run = options.triggers.getRun(request.params.plugin, request.params.id, request.params.runId);
+      return run ? reply.send(run) : reply.code(404).send({ error: { code: 'PLUGIN_TRIGGER_RUN_NOT_FOUND' } });
+    });
+    scope.post<{ Params: { plugin: string; id: string; runId: string } }>('/api/plugins/:plugin/triggers/:id/runs/:runId/cancel', async (request, reply) => {
+      if (!options.triggers.authorize(request.params.plugin, request.params.id, request.headers)) return reply.code(401).send({ error: { code: 'PLUGIN_TRIGGER_UNAUTHORIZED' } });
+      const run = await options.triggers.cancelRun(request.params.plugin, request.params.id, request.params.runId);
+      return run ? reply.send(run) : reply.code(404).send({ error: { code: 'PLUGIN_TRIGGER_RUN_NOT_FOUND' } });
     });
   });
 }

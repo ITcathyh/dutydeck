@@ -228,4 +228,14 @@ describe('dutydeck plugin CLI', () => {
     expect(result.ok).toBe(false);
     expect(result.out).toContain('.dutydeck-plugin/plugin.json');
   });
+
+  it('inspects and tests a plugin source without installing it', async () => {
+    await writePlugin(join(temp, 'inspectable'), declarative('inspectable'));
+    const inspected = JSON.parse((await cli('inspect', ['inspectable'], { json: true })).out);
+    expect(inspected.plugin).toMatchObject({ name: 'inspectable', capabilities: ['commands', 'triggers'] });
+    expect(inspected.digest).toMatch(/^[0-9a-f]{64}$/);
+    const tested = JSON.parse((await cli('test', ['inspectable'], { json: true })).out);
+    expect(tested).toMatchObject({ ok: true, active: true, summary: { commands: ['inspectable:summary'] } });
+    expect(JSON.parse((await cli('list', [], { json: true })).out).plugins).toEqual([]);
+  });
 });

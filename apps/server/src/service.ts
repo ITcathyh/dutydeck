@@ -523,7 +523,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     insightService = undefined;
   }
   const businessToolGrants = new PluginToolGrants(repos.config);
-  const businessTools = pluginHost ? new PluginBusinessToolService(pluginHost, businessToolGrants, new PluginToolLedger(repos.config), new TaskPluginToolIdentity(repos, relayCapabilities, capabilities, runtime)) : undefined;
+  const businessTools = pluginHost ? new PluginBusinessToolService(pluginHost, businessToolGrants, new PluginToolLedger(repos.config), new TaskPluginToolIdentity(repos, relayCapabilities, capabilities, runtime), 30_000, pluginWiring?.hooks) : undefined;
   const pluginResultIdentity = new LarkPluginResultIdentity(repos.config, options.pluginResultIdentity);
   const pluginResultRegistry = pluginHost?.resultTools ?? new PluginResultToolRegistry();
   const pluginResultAdapter = new LarkPluginResultAdapter({ repositories: repos, capabilities, runtime, groupManager,

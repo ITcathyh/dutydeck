@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { cp, mkdir, mkdtemp, readdir, readFile, readlink, realpath, lstat, rename, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { cp, mkdir, mkdtemp, readdir, readFile, readlink, realpath, lstat, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
@@ -246,39 +246,7 @@ export class PluginStore {
 
   private async stage(source: PluginSource): Promise<Staged> {
     await mkdir(join(this.pluginsDir, STAGING_DIR), { recursive: true });
-    const work = await mkdtemp(join(this.pluginsDir, STAGING_DIR, 'install-'));
-    const cleanup = () => rm(work, { recursive: true, force: true });
-    try {
-      const root = join(work, 'plugin');
-      let resolved: PluginLockEntry['resolved'] = {};
-      if (source.kind === 'local') {
-        if (!existsSync(source.spec)) throw new PluginStoreError('PLUGIN_SOURCE_MISSING', `目录不存在：${source.spec}`);
-        await copyTree(source.spec, root);
-      } else if (source.kind === 'git') {
-        const checkout = join(work, 'checkout');
-        await git(['clone', '--quiet', source.spec, checkout], work);
-        if (source.ref) await git(['checkout', '--quiet', source.ref], checkout);
-        resolved = { sha: (await git(['rev-parse', 'HEAD'], checkout)).trim() };
-        await copyTree(checkout, root);
-      } else {
-        // --ignore-scripts：git 来源的 npm 包会在打包时跑 prepare，信任确认之前不能执行插件代码。
-        const packed = await run('npm', ['pack', source.spec, '--json', '--ignore-scripts', '--pack-destination', work], { cwd: work, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 })
-          .catch(error => { throw new PluginStoreError('PLUGIN_FETCH_FAILED', `npm pack ${source.spec} 失败：${(error as { stderr?: string }).stderr?.trim() || (error as Error).message}`); });
-        const info = (JSON.parse(packed.stdout) as Array<{ filename: string; version?: string }>)[0];
-        if (!info) throw new PluginStoreError('PLUGIN_FETCH_FAILED', `npm pack ${source.spec} 没有产出包`);
-        const extracted = join(work, 'extracted');
-        await mkdir(extracted);
-        await run('tar', ['-xzf', join(work, basename(info.filename)), '-C', extracted], { timeout: 120_000 });
-        await rename(join(extracted, 'package'), root);
-        resolved = { ...(info.version ? { version: info.version } : {}) };
-      }
-      const plugin = await loadPluginDirectory(root);
-      if (!resolved.version && plugin.manifest.version) resolved = { ...resolved, version: plugin.manifest.version };
-      return { root, plugin, resolved, cleanup };
-    } catch (error) {
-      await cleanup();
-      throw error;
-    }
+    return stagePluginSource(source, join(this.pluginsDir, STAGING_DIR));
   }
 
   /** 需要新信任的能力：声明式插件为空；update 时只问新增的。 */
@@ -501,8 +469,69 @@ async function copyTree(from: string, to: string) {
   await cp(from, to, { recursive: true, verbatimSymlinks: true, filter: source => basename(source) !== '.git' });
 }
 
+async function extractTarball(tarballPath: string, root: string, work: string) {
+  const extracted = join(work, 'extracted');
+  await mkdir(extracted);
+  await run('tar', ['-xzf', tarballPath, '-C', extracted], { timeout: 120_000 });
+  const packageDir = join(extracted, 'package');
+  await rename(existsSync(packageDir) ? packageDir : extracted, root);
+}
+
+async function stagePluginSource(source: PluginSource, parentDir = tmpdir()): Promise<Staged> {
+  const work = await mkdtemp(join(parentDir, 'install-'));
+  const cleanup = () => rm(work, { recursive: true, force: true });
+  try {
+    const root = join(work, 'plugin');
+    let resolved: PluginLockEntry['resolved'] = {};
+    if (source.kind === 'local') {
+      if (!existsSync(source.spec)) throw new PluginStoreError('PLUGIN_SOURCE_MISSING', `目录不存在：${source.spec}`);
+      const info = await stat(source.spec);
+      if (info.isFile() && /\.(?:tgz|tar\.gz)$/i.test(source.spec)) await extractTarball(source.spec, root, work);
+      else await copyTree(source.spec, root);
+    } else if (source.kind === 'git') {
+      const checkout = join(work, 'checkout');
+      await git(['clone', '--quiet', source.spec, checkout], work);
+      if (source.ref) await git(['checkout', '--quiet', source.ref], checkout);
+      resolved = { sha: (await git(['rev-parse', 'HEAD'], checkout)).trim() };
+      await copyTree(checkout, root);
+    } else {
+      // --ignore-scripts：git 来源的 npm 包会在打包时跑 prepare，信任确认之前不能执行插件代码。
+      const packed = await run('npm', ['pack', source.spec, '--json', '--ignore-scripts', '--pack-destination', work], { cwd: work, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 })
+        .catch(error => { throw new PluginStoreError('PLUGIN_FETCH_FAILED', `npm pack ${source.spec} 失败：${(error as { stderr?: string }).stderr?.trim() || (error as Error).message}`); });
+      const info = (JSON.parse(packed.stdout) as Array<{ filename: string; version?: string }>)[0];
+      if (!info) throw new PluginStoreError('PLUGIN_FETCH_FAILED', `npm pack ${source.spec} 没有产出包`);
+      await extractTarball(join(work, basename(info.filename)), root, work);
+      resolved = { ...(info.version ? { version: info.version } : {}) };
+    }
+    const plugin = await loadPluginDirectory(root);
+    if (!resolved.version && plugin.manifest.version) resolved = { ...resolved, version: plugin.manifest.version };
+    return { root, plugin, resolved, cleanup };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
+/** 支持对目录、独立 tarball 或远程来源执行只读操作；本地目录直接就地读取以保留原路径诊断。 */
+export async function withPluginSourceRoot<T>(spec: string, cwd: string, action: (context: { root: string; source: PluginSource; resolved: PluginLockEntry['resolved'] }) => Promise<T>): Promise<T> {
+  const candidatePath = resolve(cwd, spec);
+  const info = await stat(candidatePath).catch(() => undefined);
+  if (info?.isDirectory()) {
+    return action({ root: candidatePath, source: { kind: 'local', spec: candidatePath }, resolved: {} });
+  }
+  const source = info?.isFile() && /\.(?:tgz|tar\.gz)$/i.test(candidatePath)
+    ? { kind: 'local' as const, spec: candidatePath }
+    : parsePluginSource(spec, cwd);
+  const staged = await stagePluginSource(source, tmpdir());
+  try {
+    return await action({ root: staged.root, source, resolved: staged.resolved });
+  } finally {
+    await staged.cleanup();
+  }
+}
+
 /** Content identity includes relative names, executable mode and symlink targets. */
-async function treeDigest(root: string): Promise<string> {
+export async function treeDigest(root: string): Promise<string> {
   const hash = createHash('sha256');
   const canonicalRoot = await realpath(root);
   const inside = (path: string) => { const value = relative(canonicalRoot, path); return value !== '..' && !value.startsWith(`..${sep}`) && !isAbsolute(value); };

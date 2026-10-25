@@ -2,7 +2,7 @@ import { mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { loadPluginDirectory, parseCommandMarkdown, PluginValidationError } from './manifest.js';
+import { isHostApiCompatible, loadPluginDirectory, parseCommandMarkdown, PluginValidationError, satisfiesVersionRange } from './manifest.js';
 import { directPack, providerPack, writePlugin } from './scenario-fixtures.test-helpers.js';
 
 const examplePlugin = resolve(import.meta.dirname, '../../../../examples/plugins/hello');
@@ -103,6 +103,16 @@ describe('loadPluginDirectory', () => {
   it('parses command frontmatter', () => {
     expect(parseCommandMarkdown('---\ndescription: \'说明\'\nargument-hint: <x>\n---\n\nbody\n')).toEqual({ frontmatter: { description: '说明', 'argument-hint': '<x>' }, body: 'body' });
     expect(parseCommandMarkdown('no frontmatter')).toEqual({ frontmatter: {}, body: 'no frontmatter' });
+  });
+});
+
+describe('plugin host compatibility', () => {
+  it('accepts common semver ranges for the current host API and rejects incompatible ones', () => {
+    expect(isHostApiCompatible('^1.0.0')).toBe(true);
+    expect(isHostApiCompatible('>=1 <2')).toBe(true);
+    expect(isHostApiCompatible('^2.0.0')).toBe(false);
+    expect(satisfiesVersionRange('1.4.2', '~1.4')).toBe(true);
+    expect(satisfiesVersionRange('2.0.0', '^1.0.0')).toBe(false);
   });
 });
 

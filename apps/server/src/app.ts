@@ -182,7 +182,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         || (pathname === '/api/auth/link' && (method === 'GET' || method === 'HEAD' || method === 'POST'))
         || pathname === '/api/auth/logout'
         || (options.pluginResults !== undefined && pathname.startsWith('/api/plugin-results/'))
-        || (options.pluginBusinessTools !== undefined && ['/api/plugin-tools/list', '/api/plugin-tools/call', '/api/plugin-tools/reconcile', '/api/plugin-tools/mcp'].includes(pathname))
+        || (options.pluginBusinessTools !== undefined && ['/api/plugin-tools/list', '/api/plugin-tools/revision', '/api/plugin-tools/call', '/api/plugin-tools/reconcile', '/api/plugin-tools/mcp'].includes(pathname))
         || pathname.startsWith('/api/lark/agent-tools/')
         || isRelayCapabilityRequest(method, pathname)
         || pathname.startsWith('/api/hooks/')

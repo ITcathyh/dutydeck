@@ -36,6 +36,18 @@ describe('PluginRuntimeHooks', () => {
     expect(await new PluginRuntimeHooks(new PluginHookBus([handler('permission.request', { decision: 'allow' })])).reviewPermission(session, { id: 'x' } as never)).toBe('allow');
   });
 
+  it('gates tool calls with host supplied identity and observes completion', async () => {
+    const seen = vi.fn<PluginHookHandler>(() => ({}));
+    const hooks = new PluginRuntimeHooks(new PluginHookBus([
+      handler('tool.beforeCall', { decision: 'allow' }),
+      handler('delivery.completed', seen)
+    ]));
+    const identity = { sessionId: 's1', taskId: 't1', attemptId: 'a1', runId: 'r1', actor: { kind: 'installation_owner', id: 'installation_owner' } as const, channel: 'web' as const, cwd: '/repo', workspaceRoot: '/repo' };
+    expect(await hooks.toolBeforeCall(identity, { tool: 'tickets/get', resource: 'ticket:T-1' })).toBe('allow');
+    await hooks.deliveryCompleted(identity, { kind: 'tool', tool: 'tickets/get', status: 'succeeded' });
+    expect(seen).toHaveBeenCalledWith(expect.objectContaining({ event: 'delivery.completed', attemptId: 'a1' }));
+  });
+
   it('derives bot and chat for bot-scoped sessions only', () => {
     expect(sessionHookContext(session)).toEqual({ sessionId: 's1', cwd: '/repo', botAppId: 'cli_a', chatId: 'oc_b' });
     expect(sessionHookContext({ ...session, source: PLUGIN_TRIGGER_SOURCE, sourceId: 'cli_a:oc_b:plugin:hello:ping' })).toEqual({ sessionId: 's1', cwd: '/repo', botAppId: 'cli_a', chatId: 'oc_b' });

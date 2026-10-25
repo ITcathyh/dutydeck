@@ -5,13 +5,14 @@ import { PluginResultToolRegistry } from './result-tools.js';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { pluginHookEvents, scenarioProviderIdPattern, scenarioProviderRefs, type AgentConfig, type CiProvider, type PluginApi, type PluginHookEvent, type PluginTrigger, type ScenarioProvider } from '@dutydeck/shared';
+import { pluginHookEvents, scenarioProviderIdPattern, scenarioProviderRefs, type AgentConfig, type CiProvider, type PluginApi, type PluginHookEvent, type PluginTrigger, type PluginWebSlotDeclaration, type PluginWebSlotKind, type ScenarioProvider } from '@dutydeck/shared';
 import { CiProviderRegistry } from '../ci-providers.js';
 import { LocalFilePluginSecretResolver } from '@dutydeck/secret-provider';
+import { prepareSkillPrompt } from '../skill-delivery.js';
 import { defaultBuiltinPluginRoot, listBuiltinPlugins, reservedBuiltinScenarioIds } from './builtin.js';
 import { PluginCommandRegistry } from './commands.js';
 import { inProcessHookTimeout, PluginHookBus, withTimeout, type HookRegistration } from './hooks.js';
-import { loadPluginDirectory, type LoadedPlugin } from './manifest.js';
+import { isHostApiCompatible, loadPluginDirectory, satisfiesVersionRange, strictPluginIssues, type LoadedPlugin, type PluginIssue } from './manifest.js';
 import { ScenarioProviderCaller } from './scenario-providers.js';
 import { scenarioPackDigest, ScenarioRegistry, type RegisteredScenarioPack } from './scenario-registry.js';
 import { scopeApplies } from './scope.js';
@@ -22,7 +23,7 @@ import { PluginServiceSupervisor } from './service-supervisor.js';
 export interface PluginDiagnostic { plugin: string; scenario?: string; message: string }
 /** 内置插件的条目只在内存里：免信任确认，作用域恒为 global。 */
 export interface BuiltinPluginEntry { name: string; version?: string; source: { kind: 'builtin'; spec: string }; scope: 'global'; enabled: true; trustedCapabilities: string[] }
-export interface ActivePlugin { entry: PluginLockEntry | BuiltinPluginEntry; plugin: LoadedPlugin; config: Readonly<Record<string, string>>; builtin: boolean }
+export interface ActivePlugin { entry: PluginLockEntry | BuiltinPluginEntry; plugin: LoadedPlugin; config: Readonly<Record<string, string>>; builtin: boolean; slots: PluginWebSlotDeclaration[] }
 
 const configPlaceholder = /\{\{\s*config\.([a-z][a-z0-9_]*)\s*\}\}/g;
 /** 触发器目标里的 `{{config.<键>}}` 换成 userConfig 取值；有键没设置时返回 undefined（触发器不可用）。 */
@@ -56,7 +57,7 @@ export class PluginHost {
   readonly ciProviders = new CiProviderRegistry();
   readonly resultTools = new PluginResultToolRegistry();
   readonly businessTools = new PluginBusinessToolRegistry();
-  readonly services = new PluginServiceSupervisor(this.log);
+  readonly services: PluginServiceSupervisor;
   /** 场景注册表总是存在，只有内置包时也一样。 */
   readonly scenarios = new ScenarioRegistry();
   commands = new PluginCommandRegistry([]);
@@ -70,6 +71,7 @@ export class PluginHost {
   }
   readonly bindings: PluginBindings;
   private constructor(readonly store: PluginStore, private readonly builtinRoot: string, private readonly log?: PluginHostOptions['log']) {
+    this.services = new PluginServiceSupervisor(this.log);
     this.bindings = new PluginBindings(store.dataDir, reference => {
       const provider = store.secretProvider(false);
       return provider ? new LocalFilePluginSecretResolver(provider).read(reference) : undefined;
@@ -130,6 +132,46 @@ export class PluginHost {
     return host.active.length === 1 && host.diagnostics.length === 0;
   }
 
+  /** 使用真实 Host 注册表、命令展开和技能投递管线执行作者自检，不写正式插件库。 */
+  static async testPlugin(input: { root: string; dataDir: string; strict?: boolean }) {
+    const plugin = await loadPluginDirectory(input.root);
+    const issues: PluginIssue[] = input.strict ? await strictPluginIssues(plugin) : [];
+    const config = Object.fromEntries(Object.keys(plugin.manifest.userConfig ?? {}).map(key => [key, `test_${key}`]));
+    const now = new Date().toISOString();
+    const entry: PluginLockEntry = {
+      name: plugin.manifest.name,
+      ...(plugin.manifest.version ? { version: plugin.manifest.version } : {}),
+      source: { kind: 'local', spec: input.root },
+      resolved: { ...(plugin.manifest.version ? { version: plugin.manifest.version } : {}) },
+      scope: 'global', enabled: true, trustedCapabilities: plugin.capabilities, installedAt: now, updatedAt: now
+    };
+    const builtinRoot = join(input.dataDir, 'no-builtins');
+    const host = new PluginHost(new PluginStore(input.dataDir, builtinRoot), builtinRoot);
+    await host.initialize([entry], { root: input.root, config });
+    for (const command of plugin.commands) {
+      const expanded = host.commands.expand(`/${plugin.manifest.name}:${command.name} test-arg`, {});
+      if (!expanded?.trim()) issues.push({ file: `${plugin.manifest.commands ?? 'commands'}/${command.name}.md`, message: '命令模板在 Host 中未能展开' });
+    }
+    if (plugin.skillsDir && plugin.manifest.requiredSkills?.length) {
+      try {
+        await prepareSkillPrompt(input.root, 'test', [], { pluginRoots: [{ path: plugin.skillsDir, plugin: plugin.manifest.name, root: plugin.root, resources: plugin.manifest.skillResources }], requiredSkills: plugin.manifest.requiredSkills.map(ref => ({ ref })) });
+      } catch (error) { issues.push({ file: '.dutydeck-plugin/plugin.json', field: 'requiredSkills', message: error instanceof Error ? error.message : String(error) }); }
+    }
+    await host.dispose();
+    return {
+      ok: issues.length === 0 && host.active.length === 1 && host.diagnostics.length === 0,
+      issues, diagnostics: host.diagnostics, active: host.active.length === 1,
+      summary: {
+        name: plugin.manifest.name, ...(plugin.manifest.version ? { version: plugin.manifest.version } : {}),
+        commands: host.commands.commands.map(command => command.qualifiedName),
+        tools: host.businessTools.listForPlugin(plugin.manifest.name).map(tool => tool.id),
+        scenarios: host.scenarios.list().map(item => item.pack.id),
+        slots: host.slotsForPlugin(plugin.manifest.name).map(slot => `${slot.slot}:${slot.id}`),
+        hooks: plugin.capabilities.filter(capability => capability.startsWith('hooks:'))
+      }
+    };
+  }
+
   private async initialize(entries: PluginLockEntry[], validation?: { root: string; config: Record<string, string> }) {
     const builtins = listBuiltinPlugins(this.builtinRoot);
     const builtinNames = new Set(builtins.map(item => item.name));
@@ -138,6 +180,7 @@ export class PluginHost {
       ...builtins.map(item => ({ entry: { name: item.name, source: { kind: 'builtin', spec: item.root }, scope: 'global', enabled: true, trustedCapabilities: [] } as BuiltinPluginEntry, root: item.root, builtin: true })),
       ...entries.filter(item => item.enabled).sort((left, right) => left.name.localeCompare(right.name)).map(entry => ({ entry, root: validation?.root ?? this.store.pluginDir(entry.name, entry), builtin: false }))
     ];
+    const available = new Map(candidates.map(candidate => [candidate.entry.name, candidate.entry]));
     const registrations: HookRegistration[] = [];
     let secrets: LocalFilePluginSecretResolver | undefined;
     for (const { entry: candidate, root, builtin } of candidates) {
@@ -147,6 +190,12 @@ export class PluginHost {
         if (!builtin && builtinNames.has(entry.name)) throw new Error(`和内置插件 ${entry.name} 同名，没有加载；卸载后改名重新安装`);
         const plugin = await loadPluginDirectory(root);
         if (plugin.manifest.name !== entry.name) throw new Error(builtin ? `内置插件目录 ${entry.name} 里的插件名是 ${plugin.manifest.name}，两者必须一致` : `目录里的插件名是 ${plugin.manifest.name}，与锁文件记录的 ${entry.name} 不一致`);
+        if (plugin.manifest.host?.api && !isHostApiCompatible(plugin.manifest.host.api)) throw new Error(`宿主 API ${plugin.manifest.host.api} 不兼容当前版本`);
+        for (const [dependency, range] of Object.entries(plugin.manifest.dependencies ?? {})) {
+          const installed = available.get(dependency);
+          if (!installed) throw new Error(`依赖插件 ${dependency} 未安装或未启用`);
+          if (installed.version && !satisfiesVersionRange(installed.version, range)) throw new Error(`依赖插件 ${dependency} 的版本 ${installed.version} 不满足 ${range}`);
+        }
         if (builtin) entry = { ...entry as BuiltinPluginEntry, ...(plugin.manifest.version ? { version: plugin.manifest.version } : {}), trustedCapabilities: plugin.capabilities };
         const untrusted = plugin.capabilities.filter(capability => !entry.trustedCapabilities.includes(capability));
         if (untrusted.length) throw new Error(`能力未经确认：${untrusted.join('、')}；运行 dutydeck plugin update ${entry.name} 确认后重启`);
@@ -225,14 +274,15 @@ export class PluginHost {
         for (const tool of resultTools) this.resultTools.register(entry.name, entry.scope, tool);
         for (const { kind, tool } of businessTools) this.businessTools.register(entry.name, entry.scope, plugin.manifest.version ?? 'unversioned', kind, tool);
         this.scenarios.add(scenarios);
+        const slots = this.resolveSlots(entry.name, plugin, businessTools);
         registrations.push(...pluginRegistrations);
-        this.active.push({ entry, plugin, config: Object.freeze({ ...config }), builtin });
+        this.active.push({ entry, plugin, config: Object.freeze({ ...config }), builtin, slots });
         if (plugin.service) {
           const serviceConfig = Object.fromEntries(Object.entries(config).filter(([key]) => !plugin.manifest.userConfig?.[key]?.sensitive));
           this.services.register({ plugin: entry.name, root: plugin.root, entry: plugin.service.entry, dataDir, mode: plugin.service.spec.mode, args: plugin.service.spec.args, config: serviceConfig });
           if (plugin.service.spec.mode === 'auto') await this.services.start(entry.name);
         }
-        if (!builtin || plugin.commands.length || plugin.agents.length || plugin.skillsDir || plugin.triggers.size || pluginRegistrations.length || providers.length || resultTools.length || businessTools.length || plugin.service) this.needsWiring = true;
+        if (!builtin || plugin.commands.length || plugin.agents.length || plugin.skillsDir || plugin.triggers.size || pluginRegistrations.length || providers.length || resultTools.length || businessTools.length || plugin.service || slots.length) this.needsWiring = true;
       } catch (error) {
         // Provider exceptions may include installation secrets or other private input.
         // Keep the package and registration stage, never its arbitrary error text.
@@ -241,6 +291,34 @@ export class PluginHost {
     }
     this.commands = new PluginCommandRegistry(this.active.map(({ entry, plugin }) => ({ name: entry.name, scope: entry.scope, commands: plugin.commands })));
     this.hooks = new PluginHookBus(registrations, this.log);
+  }
+
+  private resolveSlots(plugin: string, loaded: LoadedPlugin, businessTools: Array<{ tool: { name: string } }>): PluginWebSlotDeclaration[] {
+    const registeredTools = new Set(businessTools.map(item => item.tool.name));
+    const registeredCommands = new Set(loaded.commands.map(item => item.name));
+    const resolved: PluginWebSlotDeclaration[] = [];
+    for (const slot of loaded.slots) {
+      const problems: string[] = [];
+      for (const element of slot.elements) {
+        if (element.kind !== 'action') continue;
+        if (element.target.kind === 'command' && !registeredCommands.has(element.target.command)) problems.push(`动作引用了未注册命令 ${element.target.command}`);
+        else if (element.target.kind === 'tool' && !registeredTools.has(element.target.tool)) problems.push(`动作引用的工具 ${element.target.tool} 未在 providers 中注册`);
+      }
+      if (problems.length) {
+        const message = `Web 插槽 ${slot.id} 已跳过：${problems.join('；')}`;
+        this.diagnostics.push({ plugin, message });
+        this.log?.warn({ plugin, slot: slot.id, problems }, 'Web 插槽已跳过');
+        continue;
+      }
+      resolved.push(slot);
+    }
+    return resolved;
+  }
+
+  slotsForPlugin(pluginName: string, slot?: PluginWebSlotKind): PluginWebSlotDeclaration[] {
+    const active = this.active.find(item => item.entry.name === pluginName);
+    if (!active) return [];
+    return slot ? active.slots.filter(item => item.slot === slot) : [...active.slots];
   }
 
   /** 可信阶段：把包里引用的 provider 解析到本插件注册的对象。解析不到、包 id 已被别的插件占用或保留给内置插件时只跳过那个包。 */

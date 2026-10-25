@@ -3,6 +3,7 @@ import { prepareSkillPrompt } from '../skill-delivery.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RuntimeError, savePluginBindingSchema, type PluginBindingScope } from '@dutydeck/shared';
 import type { PluginHost } from './host.js';
+import { pluginDeclaredCapabilities, pluginPermissionFootprint } from './manifest.js';
 import { hasPluginTaskCredentials } from './management-auth.js';
 import { scopeApplies } from './scope.js';
 
@@ -21,9 +22,48 @@ export function registerPluginBindingRoutes(app: FastifyInstance, options?: Plug
     if (!query.success) throw new RuntimeError('PLUGIN_BINDING_INVALID', 'Workspace lookup requires a package and workspaceRoot', 400);
     // Management lookup also returns disabled bindings; resolution for invocation would reject them.
     const selection = 'workspaceRoot' in query.data ? { selected: host.bindings.select(query.data.plugin, { cwd: query.data.workspaceRoot }) ?? null } : {};
-    return { ...selection, bindings: host.bindings.list(), packages: host.active.map(({ entry, plugin }) => ({ name: entry.name, version: plugin.manifest.version, scope: entry.scope,
+    return { ...selection, bindings: host.bindings.list(), packages: host.active.map(({ entry, plugin }) => { const tools = host.businessTools.listForPlugin(entry.name); return { name: entry.name, version: plugin.manifest.version, scope: entry.scope,
       apiVersion: plugin.manifest.apiVersion ?? 'legacy', configSchema: plugin.manifest.bindingConfig ?? {}, requiredSkills: plugin.manifest.requiredSkills ?? [],
-      legacyGlobal: [...(plugin.agents.length ? ['agents'] : []), ...(host.ciProviders.list().some(item => item.plugin === entry.name) ? ['ci'] : [])] })), diagnostics: host.diagnostics };
+      legacyGlobal: [...(plugin.agents.length ? ['agents'] : []), ...(host.ciProviders.list().some(item => item.plugin === entry.name) ? ['ci'] : [])],
+      capabilities: pluginDeclaredCapabilities(plugin, tools.map(tool => ({ kind: tool.kind })), host.resultTools.listForPlugin(entry.name).length > 0, host.ciProviders.list().some(item => item.plugin === entry.name)), permissions: pluginPermissionFootprint(plugin.manifest, tools.map(tool => ({ effect: tool.effect }))), slots: host.slotsForPlugin(entry.name),
+      service: plugin.service ? { mode: plugin.service.spec.mode, status: host.services.status(entry.name) } : undefined }; } ), diagnostics: host.diagnostics };
+  });
+  app.get('/api/plugins', async request => {
+    const host = await authorized(request);
+    return { plugins: host.active.map(({ entry, plugin, builtin }) => { const tools = host.businessTools.listForPlugin(entry.name); return {
+      name: entry.name, version: plugin.manifest.version, scope: entry.scope, builtin,
+      enabled: builtin || host.store.get(entry.name).enabled,
+      capabilities: pluginDeclaredCapabilities(plugin, tools.map(tool => ({ kind: tool.kind })), host.resultTools.listForPlugin(entry.name).length > 0, host.ciProviders.list().some(item => item.plugin === entry.name)),
+      permissions: pluginPermissionFootprint(plugin.manifest, tools.map(tool => ({ effect: tool.effect }))),
+      slots: host.slotsForPlugin(entry.name),
+      service: plugin.service ? { mode: plugin.service.spec.mode, status: host.services.status(entry.name) } : undefined,
+      diagnostics: host.diagnostics.filter(item => item.plugin === entry.name)
+    }; }) };
+  });
+  app.get<{ Params: { plugin: string } }>('/api/plugins/:plugin/capabilities', async request => {
+    const host = await authorized(request);
+    const active = host.active.find(item => item.entry.name === request.params.plugin);
+    if (!active) throw new RuntimeError('PLUGIN_UNAVAILABLE', 'Plugin is not active in this scope', 404);
+    const tools = host.businessTools.listForPlugin(active.entry.name);
+    return { plugin: active.entry.name, capabilities: pluginDeclaredCapabilities(active.plugin, tools.map(tool => ({ kind: tool.kind })), host.resultTools.listForPlugin(active.entry.name).length > 0, host.ciProviders.list().some(item => item.plugin === active.entry.name)), permissions: pluginPermissionFootprint(active.plugin.manifest, tools.map(tool => ({ effect: tool.effect }))), slots: host.slotsForPlugin(active.entry.name) };
+  });
+  app.get<{ Params: { plugin: string } }>('/api/plugins/:plugin/diagnostics', async request => {
+    const host = await authorized(request);
+    return { plugin: request.params.plugin, diagnostics: host.diagnostics.filter(item => item.plugin === request.params.plugin) };
+  });
+  app.get<{ Params: { plugin: string } }>('/api/plugins/:plugin/service', async request => {
+    const host = await authorized(request);
+    const active = host.active.find(item => item.entry.name === request.params.plugin);
+    if (!active?.plugin.service) throw new RuntimeError('PLUGIN_SERVICE_NOT_FOUND', 'Plugin has no service entrypoint', 404);
+    return host.services.status(request.params.plugin);
+  });
+  app.post<{ Params: { plugin: string; action: 'start' | 'stop' | 'restart' } }>('/api/plugins/:plugin/service/:action', async request => {
+    const host = await authorized(request);
+    const active = host.active.find(item => item.entry.name === request.params.plugin);
+    if (!active?.plugin.service) throw new RuntimeError('PLUGIN_SERVICE_NOT_FOUND', 'Plugin has no service entrypoint', 404);
+    if (request.params.action === 'start') return host.services.start(request.params.plugin);
+    if (request.params.action === 'stop') return host.services.stop(request.params.plugin);
+    return host.services.restart(request.params.plugin);
   });
   app.put('/api/plugin-bindings', async request => {
     const host = await authorized(request);

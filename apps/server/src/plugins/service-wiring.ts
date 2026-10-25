@@ -1,6 +1,6 @@
 import { dirname } from 'node:path';
 import { resolveDatabaseUrl } from '@dutydeck/config';
-import type { CiWebhookRepository, ExecutionRepository, PublicTaskRecord, Session } from '@dutydeck/shared';
+import { installationOwnerTaskActor, type CiWebhookRepository, type ExecutionRepository, type PublicTaskRecord, type Session } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { readTaskAttemptResult } from '../task-results.js';
 import { setPluginSkillRoots } from '../skill-catalog.js';
@@ -48,8 +48,12 @@ export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
   const triggers = new PluginTriggerService({
     lookup: (plugin, id) => host.trigger(plugin, id),
     token: (plugin, id) => host.triggerToken(plugin, id),
-    deliver: createTriggerDispatcher({ runtime: { start: input => deps.runtime().start(input), dispatch: (...args) => deps.runtime().dispatch(...args), listSessions: () => deps.runtime().listSessions() },
+    deliver: createTriggerDispatcher({ runtime: { start: input => deps.runtime().start(input), dispatch: (...args) => deps.runtime().dispatch(...args), listSessions: () => deps.runtime().listSessions(), cancelQueued: (...args) => deps.runtime().cancelQueued(...args) },
       readBot: deps.readBot, fallbackAgentId: deps.fallbackAgentId }),
+    cancel: async (sessionId, taskId) => {
+      try { await deps.runtime().cancelQueued(sessionId, taskId, installationOwnerTaskActor); return true; }
+      catch { return false; }
+    },
     isSettled: taskId => {
       const status = deps.repositories.execution.getTaskExecution(taskId)?.task.status;
       return !status || ['completed', 'failed', 'interrupted', 'cancelled'].includes(status);
@@ -71,7 +75,7 @@ export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
   const runtimeOptions = {
     ...(hooks.has('permission.request') ? { reviewPermission: (session: Session, request: Parameters<PluginRuntimeHooks['reviewPermission']>[1]) => hooks.reviewPermission(session, request) } : {}),
     onTaskSettled: async (session: Session, task: PublicTaskRecord) => {
-      triggers.settled(task.id);
+      triggers.settled(task.id, task.status === 'completed' ? 'succeeded' : task.status === 'failed' ? 'failed' : task.status === 'cancelled' || task.status === 'interrupted' ? 'cancelled' : 'unknown');
       await hooks.taskCompleted(session, task).catch(error => deps.log.warn({ error: String(error) }, '插件 task.completed hook 失败'));
       if (session.source === PLUGIN_TRIGGER_SOURCE) await deliverTriggerResult(session, task).catch(error => deps.log.warn({ taskId: task.id, error: error instanceof Error ? error.message : String(error) }, '插件触发器结果回投失败'));
     },

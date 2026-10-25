@@ -1,4 +1,4 @@
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { wrapUntrusted, type PluginTrigger } from '@dutydeck/shared';
 
 /** 触发器请求体上限，路由层与服务层同一个值。 */
@@ -12,6 +12,8 @@ export interface TriggerRequest {
   headers: Record<string, string | string[] | undefined>;
 }
 export interface TriggerResponse { statusCode: number; body: Record<string, unknown> }
+export type TriggerRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'unknown' | 'cancelled';
+export interface TriggerRun { runId: string; plugin: string; triggerId: string; sessionId?: string; taskId?: string; status: TriggerRunStatus; createdAt: number; updatedAt: number }
 
 export type ScopedPluginTrigger = PluginTrigger & { scope: string };
 
@@ -29,6 +31,8 @@ export interface TriggerServiceOptions {
   lookup(plugin: string, triggerId: string): ScopedPluginTrigger | undefined;
   token(plugin: string, triggerId: string): string | undefined;
   deliver(request: TriggerDispatch): Promise<{ sessionId: string; taskId: string }>;
+  /** Cancel a task that has not been submitted to the agent yet. */
+  cancel?(sessionId: string, taskId: string): Promise<boolean>;
   dedupe?: TriggerDedupe;
   /** 任务是否已结束。取消排队任务、停止会话不触发结算通知，名额靠它回收。 */
   isSettled?(taskId: string): boolean;
@@ -119,6 +123,8 @@ export function renderTriggerTemplate(template: string, data: { payload: unknown
  */
 export class PluginTriggerService {
   private readonly inFlight = new Map<string, Set<string>>();
+  private readonly runs = new Map<string, TriggerRun>();
+  private readonly runKeys = new Map<string, { runId: string; expiresAt: number }>();
   private readonly dedupe: TriggerDedupe;
   constructor(private readonly options: TriggerServiceOptions) { this.dedupe = options.dedupe ?? new MemoryTriggerDedupe(); }
 
@@ -149,7 +155,22 @@ export class PluginTriggerService {
     const digest = createHash('sha256').update(rawKey.trim() ? `key\n${rawKey}` : `body\n${request.rawBody.toString('base64')}`).digest('hex');
     const dedupeKey = `plugin-trigger:${id}:${digest}`;
     const expiresAt = now + DEDUPE_TTL_MS;
-    if (!this.dedupe.claim(dedupeKey, now, expiresAt)) return { statusCode: 200, body: { accepted: false, duplicate: true } };
+    for (const [key, value] of this.runKeys) if (value.expiresAt <= now) {
+      this.runKeys.delete(key);
+      const run = this.runs.get(value.runId);
+      if (run && !['queued', 'running'].includes(run.status)) this.runs.delete(value.runId);
+    }
+    const existingRun = this.runKeys.get(dedupeKey);
+    if (!this.dedupe.claim(dedupeKey, now, expiresAt)) {
+      const runId = existingRun?.runId ?? `tr_${digest.slice(0, 32)}`;
+      return { statusCode: 200, body: { accepted: false, duplicate: true, runId } };
+    }
+    if (existingRun) {
+      const previous = this.runs.get(existingRun.runId);
+      if (previous && !['queued', 'running'].includes(previous.status)) this.runs.delete(existingRun.runId);
+    }
+    const runId = `tr_${randomUUID().replaceAll('-', '')}`;
+    this.runKeys.set(dedupeKey, { runId, expiresAt });
 
     const running = this.inFlight.get(id) ?? new Set<string>();
     for (const entry of running) if (!entry.startsWith('pending:') && this.options.isSettled?.(entry)) running.delete(entry);
@@ -163,21 +184,56 @@ export class PluginTriggerService {
     const placeholder = `pending:${dedupeKey}`;
     running.add(placeholder);
     this.inFlight.set(id, running);
+    this.runs.set(runId, { runId, plugin: request.plugin, triggerId: request.triggerId, status: 'queued', createdAt: now, updatedAt: now });
     try {
       const accepted = await this.options.deliver({ scope: trigger.scope, plugin: request.plugin, triggerId: request.triggerId, target: trigger.target, prompt, key: `${id}:${digest.slice(0, 32)}:${expiresAt}` });
       running.add(accepted.taskId);
       this.release(id, placeholder);
-      return { statusCode: 202, body: { accepted: true, sessionId: accepted.sessionId, taskId: accepted.taskId } };
+      this.runs.set(runId, { ...this.runs.get(runId)!, sessionId: accepted.sessionId, taskId: accepted.taskId, status: 'running', updatedAt: this.options.now?.() ?? Date.now() });
+      return { statusCode: 202, body: { accepted: true, runId, sessionId: accepted.sessionId, taskId: accepted.taskId, statusUrl: `/api/plugins/${request.plugin}/triggers/${request.triggerId}/runs/${runId}` } };
     } catch (error) {
       this.release(id, placeholder);
       this.dedupe.release(dedupeKey, expiresAt);
+      this.runs.set(runId, { ...this.runs.get(runId)!, status: 'failed', updatedAt: this.options.now?.() ?? Date.now() });
       return { statusCode: 502, body: { error: { code: 'PLUGIN_TRIGGER_DELIVERY_FAILED', message: error instanceof Error ? error.message : String(error) } } };
     }
   }
 
   /** 任务结算后释放并发名额。 */
-  settled(taskId: string): void {
+  settled(taskId: string, status: Exclude<TriggerRunStatus, 'queued' | 'running'> = 'succeeded'): void {
+    for (const run of this.runs.values()) if (run.taskId === taskId && (run.status === 'queued' || run.status === 'running')) this.runs.set(run.runId, { ...run, status, updatedAt: this.options.now?.() ?? Date.now() });
     for (const id of this.inFlight.keys()) this.release(id, taskId);
+  }
+
+  getRun(plugin: string, triggerId: string, runId: string): TriggerRun | undefined {
+    const run = this.runs.get(runId);
+    return run && run.plugin === plugin && run.triggerId === triggerId ? { ...run } : undefined;
+  }
+
+  async cancelRun(plugin: string, triggerId: string, runId: string): Promise<TriggerRun | undefined> {
+    const run = this.getRun(plugin, triggerId, runId);
+    if (!run || !['queued', 'running'].includes(run.status)) return run;
+    if (!run.taskId || !this.options.cancel) return run;
+    const cancelled = await this.options.cancel(run.sessionId!, run.taskId);
+    if (!cancelled) return this.getRun(plugin, triggerId, runId);
+    const next = { ...run, status: 'cancelled' as const, updatedAt: this.options.now?.() ?? Date.now() };
+    this.runs.set(runId, next);
+    for (const id of this.inFlight.keys()) this.release(id, run.taskId);
+    return next;
+  }
+
+  authorize(plugin: string, triggerId: string, headers: TriggerRequest['headers']): boolean {
+    const trigger = this.options.lookup(plugin, triggerId);
+    const secret = this.options.token(plugin, triggerId);
+    const now = this.options.now?.() ?? Date.now();
+    if (!trigger || !secret || !verifyTriggerAuth(trigger.auth, secret, { rawBody: Buffer.alloc(0), headers }, now)) return false;
+    if (trigger.auth.type === 'hmac-sha256') {
+      const nonce = header(headers, trigger.auth.nonceHeader)?.trim();
+      if (!nonce) return false;
+      const id = `${plugin}/${triggerId}`;
+      return this.dedupe.claim(`plugin-trigger-nonce:${id}:${nonce}`, now, now + trigger.auth.maxAgeSeconds * 1000);
+    }
+    return true;
   }
 
   private release(id: string, entry: string) {

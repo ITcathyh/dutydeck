@@ -16,6 +16,7 @@ import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { assemblePrompt } from '../prompt-context.js';
 import type { PrepareSkillPromptResult } from '../skill-delivery.js';
 import type { PluginHookBus } from './hooks.js';
+import type { PluginToolIdentity } from '@dutydeck/shared';
 import type { TriggerDispatch } from './triggers.js';
 import { scopeApplies } from './scope.js';
 
@@ -108,6 +109,26 @@ export class PluginRuntimeHooks {
     const result = await this.hooks.run('notify', { ...context, payload: { kind, ...payload } }, kind);
     return result.decision !== 'deny';
   }
+
+  /** Synchronous tool gate. Identity is supplied by the host authority and never read from plugin output. */
+  async toolBeforeCall(identity: PluginToolIdentity, payload: Record<string, unknown>): Promise<'allow' | 'deny' | undefined> {
+    if (!this.hooks.has('tool.beforeCall')) return undefined;
+    const result = await this.hooks.run('tool.beforeCall', {
+      sessionId: identity.sessionId, taskId: identity.taskId, attemptId: identity.attemptId, cwd: identity.cwd,
+      ...(identity.botAppId ? { botAppId: identity.botAppId } : {}), ...(identity.chatId ? { chatId: identity.chatId } : {}),
+      payload: { actor: identity.actor, channel: identity.channel, ...payload }
+    }, String(payload.tool ?? ''));
+    return result.decision === 'deny' ? 'deny' : result.decision === 'allow' ? 'allow' : undefined;
+  }
+
+  async deliveryCompleted(identity: PluginToolIdentity, payload: Record<string, unknown>): Promise<void> {
+    if (!this.hooks.has('delivery.completed')) return;
+    await this.hooks.run('delivery.completed', {
+      sessionId: identity.sessionId, taskId: identity.taskId, attemptId: identity.attemptId, cwd: identity.cwd,
+      ...(identity.botAppId ? { botAppId: identity.botAppId } : {}), ...(identity.chatId ? { chatId: identity.chatId } : {}),
+      payload: { actor: identity.actor, channel: identity.channel, ...payload }
+    }, String(payload.kind ?? ''));
+  }
 }
 
 export interface TriggerBot { appId: string; workspace?: string; defaultAgentId?: string; permissionMode?: 'ask' | 'approve-reads' | 'full-trust'; fullTrustConfirmed?: boolean }
@@ -118,7 +139,7 @@ export interface TriggerBot { appId: string; workspace?: string; defaultAgentId?
  * 触发器会话与群里人发起的会话互不复用。
  */
 export function createTriggerDispatcher(deps: {
-  runtime: Pick<DutydeckRuntime, 'start' | 'dispatch' | 'listSessions'>;
+  runtime: Pick<DutydeckRuntime, 'start' | 'dispatch' | 'listSessions'> & Partial<Pick<DutydeckRuntime, 'cancelQueued'>>;
   readBot(appId: string): Promise<TriggerBot | undefined>;
   fallbackAgentId(): string | undefined;
 }) {

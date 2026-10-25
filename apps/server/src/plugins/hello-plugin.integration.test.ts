@@ -89,7 +89,7 @@ describe('hello example plugin end to end', () => {
     const accepted = await post({ 'x-dutydeck-token': triggerToken }, payload);
     expect(accepted.status).toBe(202);
     const { sessionId, taskId } = await accepted.json() as { sessionId: string; taskId: string };
-    expect(await (await post({ 'x-dutydeck-token': triggerToken }, payload)).json()).toEqual({ accepted: false, duplicate: true });
+    expect(await (await post({ 'x-dutydeck-token': triggerToken }, payload)).json()).toMatchObject({ accepted: false, duplicate: true, runId: expect.stringMatching(/^tr_[0-9a-f]{32}$/) });
 
     await vi.waitFor(async () => expect((await server.runtime.getTasks(sessionId)).find(task => task.id === taskId)?.status).toBe('completed'), { timeout: 15_000, interval: 50 });
     const [prompt] = (await prompts()).filter(text => text.includes('外部系统发来一条 ping'));

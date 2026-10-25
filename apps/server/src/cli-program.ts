@@ -1010,8 +1010,14 @@ Examples:
     .option('--json', 'Print the result as a single line of JSON')
     .action((name, options, command) => handlers.plugin?.(action, [name], pluginOptions(options, command)));
   plugin.command('validate <path>').description('Check a plugin directory and report every problem with its file and field')
+    .option('--strict', 'Run author checks for compatibility, permissions, paths and referenced skills')
     .option('--json', 'Print the result as a single line of JSON')
     .action((path, options, command) => handlers.plugin?.('validate', [path], pluginOptions(options, command)));
+  for (const action of ['inspect', 'test'] as const) plugin.command(`${action} <source>`)
+    .description(action === 'inspect' ? 'Inspect a plugin directory, tarball or remote source without installing it' : 'Run the plugin fixture checks against a directory, tarball or remote source')
+    .option('--strict', 'Include strict compatibility and permission checks')
+    .option('--json', 'Print the result as a single line of JSON')
+    .action((source, options, command) => handlers.plugin?.(action, [source], pluginOptions(options, command)));
   plugin.command('init <name>').description('Create a plugin template')
     .option('--dir <path>', 'Target directory (default: ./<name>)')
     .option('--json', 'Print the result as a single line of JSON')

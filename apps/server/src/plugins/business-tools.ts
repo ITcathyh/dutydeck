@@ -48,18 +48,55 @@ export function validateToolInput(schema: PluginToolSchema, input: unknown, dept
 }
 export type BusinessToolEntry = { plugin: string; scope: string; packageVersion: string; kind: 'query'; effect: 'read'; tool: PluginQuery }
   | { plugin: string; scope: string; packageVersion: string; kind: 'action'; effect: 'write'; tool: PluginAction };
+export interface PublicPluginBusinessTool {
+  id: string;
+  plugin: string;
+  name: string;
+  kind: 'query' | 'action';
+  effect: 'read' | 'write';
+  version: string;
+  packageVersion: string;
+  scope: string;
+  description: string;
+}
 export class PluginBusinessToolRegistry {
   private readonly entries = new Map<string, BusinessToolEntry>();
+  private currentRevision = 0;
+  get revision(): number { return this.currentRevision; }
   register(plugin: string, scope: string, packageVersion: string, kind: 'query' | 'action', tool: PluginQuery | PluginAction) {
     if (!tool || !/^[a-z][a-z0-9_-]{0,63}$/.test(tool.name) || !tool.description?.trim() || tool.description.length > 1000 || !tool.version?.trim() || tool.version.length > 64 || typeof tool.execute !== 'function' || typeof tool.resource !== 'function' || tool.inputSchema?.type !== 'object') throw new Error('PLUGIN_TOOL_INVALID');
     validateToolSchema(tool.inputSchema);
     const id = `${plugin}/${tool.name}`;
     if (this.entries.has(id)) throw new Error('PLUGIN_TOOL_DUPLICATE');
     this.entries.set(id, { plugin, scope, packageVersion, kind, effect: kind === 'query' ? 'read' : 'write', tool } as BusinessToolEntry);
+    this.currentRevision += 1;
+  }
+  unregister(plugin: string): number {
+    let removed = 0;
+    for (const [id, entry] of this.entries) {
+      if (entry.plugin === plugin) { this.entries.delete(id); removed += 1; }
+    }
+    if (removed > 0) this.currentRevision += 1;
+    return removed;
   }
   get(id: string, context: PluginScopeContext) {
     const entry = this.entries.get(id);
     return entry && scopeApplies(entry.scope, context) ? entry : undefined;
   }
   list(context: PluginScopeContext) { return [...this.entries].filter(([, entry]) => scopeApplies(entry.scope, context)); }
+  listForPlugin(plugin: string): PublicPluginBusinessTool[] {
+    return [...this.entries]
+      .filter(([, entry]) => entry.plugin === plugin)
+      .map(([id, entry]) => ({
+        id,
+        plugin: entry.plugin,
+        name: entry.tool.name,
+        kind: entry.kind,
+        effect: entry.effect,
+        version: entry.tool.version,
+        packageVersion: entry.packageVersion,
+        scope: entry.scope,
+        description: entry.tool.description
+      }));
+  }
 }

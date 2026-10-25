@@ -22,9 +22,9 @@ export interface ScenarioProvider {
   context?(input: { binding?: PluginBindingContext; scope: { appId: string; chatId: string }; message: ScenarioMessage; params: Readonly<Record<string, unknown>>; maxChars: number; signal: AbortSignal }): Promise<ScenarioContextResult>;
   correlationKey?(input: { entries: Array<{ label: string; lines: string[] }> }): Record<string, string> | undefined;
 }
-export type PluginHookEvent = 'task.received' | 'task.beforeRun' | 'permission.request' | 'task.completed' | 'verification.completed' | 'notify';
+export type PluginHookEvent = 'task.received' | 'task.beforeRun' | 'tool.beforeCall' | 'permission.request' | 'task.completed' | 'verification.completed' | 'delivery.completed' | 'notify';
 export interface PluginHookInput {
-  event: PluginHookEvent; plugin: string; botAppId?: string; chatId?: string; sessionId?: string; taskId?: string; cwd?: string; payload: Record<string, unknown>;
+  event: PluginHookEvent; plugin: string; botAppId?: string; chatId?: string; sessionId?: string; taskId?: string; attemptId?: string; cwd?: string; payload: Record<string, unknown>;
 }
 export interface PluginHookOutput { decision?: 'allow' | 'deny' | 'ask'; reason?: string; additionalContext?: string; updatedPrompt?: string }
 export interface PluginApi {
@@ -134,4 +134,32 @@ export interface PluginToolAction {
   /** Host-owned lease proving that the original execute call is no longer active. */
   executionLease?: { owner: string; expiresAt: number };
   createdAt: string; updatedAt: string;
+}
+
+export type PluginPermissionEffect = 'read' | 'write' | 'external_write';
+export type PluginFilesystemPermission = 'workspace_read' | 'workspace_write' | 'plugin_data';
+export interface PluginHostDeclaration { api: string; channels?: Array<'web' | 'lark' | 'cli' | 'mcp'> }
+export type PluginDependencies = Readonly<Record<string, string>>;
+export interface PluginPermissionsDeclaration {
+  secrets?: string[];
+  network?: string[];
+  filesystem?: PluginFilesystemPermission[];
+  effects?: PluginPermissionEffect[];
+}
+
+export type PluginWebSlotKind = 'settings' | 'command_palette' | 'task_panel' | 'result_card';
+export type PluginWebSlotTarget =
+  | { kind: 'command'; command: string }
+  | { kind: 'tool'; tool: string };
+export type PluginWebSlotElement =
+  | { kind: 'text'; label?: string; text: string }
+  | { kind: 'status'; label: string; tone?: 'neutral' | 'accent' | 'warning' | 'danger'; value: string }
+  | { kind: 'table'; columns: string[]; rows: string[][] }
+  | { kind: 'action'; label: string; target: PluginWebSlotTarget };
+export interface PluginWebSlotDeclaration {
+  id: string;
+  slot: PluginWebSlotKind;
+  title: string;
+  description?: string;
+  elements: PluginWebSlotElement[];
 }
