@@ -9,6 +9,8 @@ export interface AdapterSessionContext {
   nativeForkSessionId?: string;
   initialPrompt?: string;
   model?: string;
+  /** Named Codex config profile selected for this Agent. */
+  codexProfile?: string;
   reasoningEffort?: string;
   /**
    * 由 AgentConfig/Session 传入的权限姿态。缺省按非 full-trust 处理，

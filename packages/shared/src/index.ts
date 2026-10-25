@@ -28,6 +28,8 @@ export const agentConfigSchema = z.object({
   /** CLI behavior to reuse for a custom pty-cli command; defaults to id. */
   adapterId: z.string().min(1).optional(),
   model: z.string().optional(),
+  /** Named Codex config profile, applied only by the Codex CLI adapter. */
+  codexProfile: z.string().trim().min(1).max(128).optional(),
   reasoningEffort: z.string().optional(),
   version: z.string().optional(),
   cwd: z.string().optional(),

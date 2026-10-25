@@ -28,8 +28,11 @@ import { programStatusCommand } from './program-status-launch.js';
 import { runCommand } from './command.js';
 import { OutputHandoff } from './output-handoff.js';
 import { TmuxCapture, cleanAbandonedTmuxCapture } from './tmux-capture.js';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { SessionBackend, SessionProbe, SpawnOptions } from './types.js';
 
 // ─── Typed errors ──────────────────────────────────────────────────────────
@@ -123,6 +126,23 @@ function isTimeoutError(err: unknown): boolean {
 /** Single-quote-escape a string for /bin/sh (replaces ' with '\'' ). */
 function shellescape(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Keep the command passed to tmux short.  Even though tmux accepts argv, the
+ * command is transported through its control socket and large prompts,
+ * hooks, or provider arguments can exceed that message budget.  A private
+ * executable script lets the pane open the complete argv without putting it
+ * in the tmux command itself.  The script removes itself before exec so the
+ * launch directory never accumulates credentials or stale arguments.
+ */
+async function writeLaunchScript(bin: string, args: string[], programStatus?: boolean): Promise<{ path: string; directory: string }> {
+  const directory = await mkdtemp(join(tmpdir(), 'dutydeck-tmux-launch-'));
+  const path = join(directory, 'launch.sh');
+  const command = ['exec', ...programStatusCommand(bin, args, programStatus)].map(shellescape).join(' ');
+  await writeFile(path, `#!/bin/sh\nrm -f -- "$0"\nrmdir -- "$(dirname -- "$0")" 2>/dev/null || true\n${command}\n`, { mode: 0o700 });
+  await chmod(path, 0o700);
+  return { path, directory };
 }
 
 /**
@@ -290,15 +310,18 @@ export class TmuxBackend implements SessionBackend {
       await this.startCapture();
       check();
 
-      // 4. Replace the bootstrap shell instead of typing a potentially huge
-      // launch line into it. tmux forks the pane with a snapshot of the
-      // session environment before respawn-pane returns; clear the staged
-      // values immediately afterwards so secrets do not linger in tmux.
-      // tmux preserves the bootstrap pane's PATH across respawn (even with
-      // set-environment/-e). Override it after shell startup to prevent old
-      // session identity wrappers from returning to the CLI's search path.
-      const launchLine = `${childEnvironment.PATH === undefined ? '' : `PATH=${shellescape(childEnvironment.PATH)} `}${['exec', ...programStatusCommand(bin, args, opts.programStatus)].map(shellescape).join(' ')}`;
-      (await runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', opts.cwd, launchLine]));
+      // 4. Replace the bootstrap shell through a private script instead of
+      // sending the complete argv in the tmux control message. tmux forks the
+      // pane with a snapshot of the session environment before respawn-pane
+      // returns; clear the staged values immediately afterwards so secrets do
+      // not linger in tmux. The script unlinks itself before exec.
+      const launch = await writeLaunchScript(bin, args, opts.programStatus);
+      try {
+        (await runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', opts.cwd, launch.path]));
+      } catch (error) {
+        await rm(launch.directory, { recursive: true, force: true });
+        throw error;
+      }
       await this.clearSessionEnvironment(Object.keys(childEnvironment));
       check();
 

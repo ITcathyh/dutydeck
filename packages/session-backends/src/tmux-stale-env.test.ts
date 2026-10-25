@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { tmpdir } from 'node:os';
+import { readFile, rm } from 'node:fs/promises';
 import { runCommand } from './command.js';
 import { TmuxBackend } from './tmux-backend.js';
 
@@ -138,5 +139,22 @@ describe('TmuxBackend stale global environment scrubbing (unit)', () => {
     expect(removedKeys).not.toContain('SHARED_GLOBAL_VAR');
     // 全局中存在的其他陈旧变量依然要发 -r
     expect(removedKeys).toContain('STALE_ROUTE');
+  });
+
+  it('passes long launch argv through a private script instead of the tmux command message', async () => {
+    backend = new TmuxBackend('test-session-private-launch');
+    const args = ['--model', 'm'.repeat(20_000), '--system', "quoted 'value'"];
+    await backend.spawn('/opt/provider/agent', args, {
+      cwd: tmpdir(), cols: 80, rows: 24, env: { PATH: '/usr/bin:/bin' }
+    });
+    const respawn = recordedCommands.find(command => command[0] === 'respawn-pane');
+    expect(respawn).toEqual(['respawn-pane', '-k', '-t', 'test-session-private-launch', '-c', tmpdir(), expect.any(String)]);
+    expect(respawn?.join(' ')).not.toContain('m'.repeat(100));
+    const scriptPath = respawn?.at(-1)!;
+    const script = await readFile(scriptPath, 'utf8');
+    expect(script).toContain('rm -f -- "$0"');
+    expect(script).toContain("'/opt/provider/agent'");
+    expect(script).toContain("'quoted '\\\''value'");
+    await rm(scriptPath.replace(/\/launch\.sh$/, ''), { recursive: true, force: true });
   });
 });

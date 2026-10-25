@@ -4,6 +4,7 @@ import { homedir, userInfo } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { checkSqliteDriver, describeSqliteDriverFailure, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
 import { SUPERVISOR_ENV, SYSTEMD_UNIT_ENV, daemonPaths, defaultDaemonDir, resolveDaemonDir } from '../daemon/daemon.js';
+import { rotateLogFileSync } from '../resource-retention.js';
 
 /**
  * Dutydeck 开机自启（boot hook）注册。
@@ -586,6 +587,8 @@ async function enableDarwin(config: ResolvedAutostart): Promise<AutostartResult>
   const unitPath = config.unitPath!;
   const loadedBefore = await launchdLoaded(config);
   mkdirSync(config.logDir, { recursive: true });
+  rotateLogFileSync(join(config.logDir, 'autostart-out.log'));
+  rotateLogFileSync(join(config.logDir, 'autostart-err.log'));
   const changed = writeIfChanged(unitPath, renderPlist(config));
   const notices = [
     changed ? `已写入 LaunchAgent: ${unitPath}` : `LaunchAgent 已是最新，无需改动: ${unitPath}`,
@@ -648,6 +651,7 @@ async function enableLinux(config: ResolvedAutostart): Promise<AutostartResult> 
   }
   // StandardOutput=append: 不会替我们建目录，目录不在 unit 会直接起不来。
   mkdirSync(dirname(unitLogFile(config)), { recursive: true });
+  rotateLogFileSync(unitLogFile(config));
   const written = writeIfChanged(unitPath, desired);
   const notices = [written ? `已写入 systemd unit: ${unitPath}` : `systemd unit 已是最新，无需改动: ${unitPath}`];
 
