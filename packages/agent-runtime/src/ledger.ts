@@ -108,6 +108,13 @@ export class LocalDriverLedger {
     if (parent.stage === 'pending') this.execution().creationFinished(record.fence, parent.resourceId, parent.revision, 'created');
     this.execution().observed(record.fence, child.resourceId, child.revision, { observationId: makeId('observation'), identityId: record.identityId, state: 'gone', evidenceRef, observedAt: now() });
   }
+  /** Retire only after physical stop and durable gone evidence have both been confirmed. */
+  retire(driver: AgentDriver) {
+    const record = this.records.get(driver);
+    if (!record) return;
+    record.controlled?.dispose();
+    this.records.delete(driver);
+  }
   refs(driver: AgentDriver): ResourceRef[] {
     const record = this.records.get(driver);
     if (!record) throw new RuntimeError('DRIVER_RESOURCE_MISSING', 'Driver has no creation record', 409);

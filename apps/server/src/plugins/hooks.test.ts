@@ -40,6 +40,16 @@ describe('runCommandHook', () => {
 });
 
 describe('PluginHookBus protocol', () => {
+  it('does not expose daemon secret environment to command hooks', async () => {
+    const previous = process.env.DUTYDECK_HOOK_SECRET; process.env.DUTYDECK_HOOK_SECRET = 'synthetic-secret';
+    try {
+      const output = join(cwd, 'env.txt');
+      const bus = new PluginHookBus([command('secret', `printf '%s' \"$DUTYDECK_HOOK_SECRET\" > ${output}`)]);
+      await bus.run('task.received', input);
+      expect(await readFile(output, 'utf8')).toBe('');
+    } finally { if (previous === undefined) delete process.env.DUTYDECK_HOOK_SECRET; else process.env.DUTYDECK_HOOK_SECRET = previous; }
+  });
+
   it('exit 0 allows and stdout JSON carries decision, context and prompt rewrite', async () => {
     const bus = new PluginHookBus([
       command('a', `cat > ${join(cwd, 'stdin.json')}; echo '{"additionalContext":"ctx-a","updatedPrompt":"rewritten"}'`),

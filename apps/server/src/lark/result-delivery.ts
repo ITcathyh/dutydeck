@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI, reactionDedupeKey, type ReactionRecord } from './reaction-records.js';
 import { isLarkReplyTargetUnavailable, larkFailureKind } from './api-gate.js';
@@ -16,9 +16,60 @@ export const larkResultKey = (processMessageId: string) =>
 export const larkSilentResultAnchor = (taskId: string, turn: number | undefined) => `silent:${taskId}:${turn ?? 0}`;
 
 const saveReactionRecord = async (store: ConfigRepository | undefined, key: string, expected: string | undefined, record: ReactionRecord) => {
-  if (store?.compareAndSet) await store.compareAndSet(key, expected, JSON.stringify(record));
-  else await store?.set(key, JSON.stringify(record));
+  if (store?.compareAndSet) return store.compareAndSet(key, expected, JSON.stringify(record));
+  if (store) { await store.set(key, JSON.stringify(record)); return true; }
+  return true;
 };
+
+// ConfigRepository implementations without a compare-and-set primitive still
+// need same-process single-flight to prevent concurrent provider side effects.
+const deliveryFlights = new Map<string, Promise<unknown>>();
+const reactionFlights = new Map<string, Promise<boolean>>();
+const reactionFlightStates = new Map<string, boolean>();
+const DELIVERY_CLAIM_LEASE_MS = 120_000;
+const DELIVERY_CLAIM_WAIT_MS = 250;
+export type DeliveryConcurrencyOptions = { allowConcurrent?: boolean };
+
+type DeliveryClaim = { owner: string; expiresAt: number };
+
+/** Claim a provider side effect before invoking it. A confirmed receipt wins
+ * immediately; a live claim is waited on briefly, while an expired claim can
+ * be recovered after a crashed sender. */
+async function claimDelivery(store: ConfigRepository, key: string, validate?: (value: unknown) => boolean, claimNamespace = key) {
+  if (!store.compareAndSet) return;
+  const claimKey = claimNamespace.startsWith('lark.delivery.')
+    ? `lark.delivery_claim.${claimNamespace.slice('lark.delivery.'.length)}`
+    : claimNamespace.startsWith('lark.reaction.')
+      ? `lark.reaction_claim.${claimNamespace.slice('lark.reaction.'.length)}`
+      : `${claimNamespace}.claim`;
+  const owner = randomUUID();
+  const deadline = Date.now() + DELIVERY_CLAIM_WAIT_MS;
+  for (;;) {
+    const confirmed = await store.get(key);
+    if (confirmed) {
+      try {
+        const parsed = JSON.parse(confirmed);
+        if (!validate || validate(parsed)) return { confirmed: parsed };
+      } catch { /* Retry malformed receipts under the same provider UUID. */ }
+    }
+    const current = await store.get(claimKey);
+    let live: DeliveryClaim | undefined;
+    try { live = current ? JSON.parse(current) as DeliveryClaim : undefined; } catch { /* Replace malformed claims. */ }
+    const now = Date.now();
+    if (!live || live.expiresAt <= now) {
+      const claim: DeliveryClaim = { owner, expiresAt: now + DELIVERY_CLAIM_LEASE_MS };
+      if (await store.compareAndSet(claimKey, current, JSON.stringify(claim))) return { claimKey, claimRaw: JSON.stringify(claim) };
+    }
+    if (Date.now() >= deadline) throw new Error('LARK_DELIVERY_BUSY');
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
+
+async function releaseDeliveryClaim(store: ConfigRepository | undefined, claim: Awaited<ReturnType<typeof claimDelivery>>) {
+  if (store?.compareAndSet && claim && 'claimKey' in claim && typeof claim.claimRaw === 'string') {
+    await store.compareAndSet(claim.claimKey, claim.claimRaw, '');
+  }
+}
 
 /**
  * 一轮结束时在原始请求消息上贴状态表情：完成贴对勾，失败或中断贴叉号。
@@ -35,15 +86,49 @@ export async function deliverLarkStatusReaction(
   log: DeliveryLog,
   store?: ConfigRepository
 ): Promise<boolean> {
+  // Serialize both terminal states for one message so a completion/failure race
+  // cannot leave two reactions after each independently reads an empty record.
+  const flightKey = `${input.appId}:${input.messageId}`;
+  const existing = reactionFlights.get(flightKey);
+  if (existing) {
+    if (reactionFlightStates.get(flightKey) === input.completed) return existing;
+    await existing;
+    if (reactionFlightStates.get(flightKey) === input.completed) return true;
+  }
+  const flight = deliverLarkStatusReactionOnce(service, input, log, store);
+  reactionFlights.set(flightKey, flight);
+  reactionFlightStates.set(flightKey, input.completed);
+  try { return await flight; } finally { if (reactionFlights.get(flightKey) === flight) reactionFlights.delete(flightKey); }
+}
+
+async function deliverLarkStatusReactionOnce(
+  service: Pick<LarkCardService, 'addReaction' | 'deleteReaction'>,
+  input: { appId: string; messageId: string; completed: boolean },
+  log: DeliveryLog,
+  store?: ConfigRepository
+): Promise<boolean> {
   const [emojiType, previousEmoji] = input.completed
     ? [COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI] : [FAILURE_REACTION_EMOJI, COMPLETION_REACTION_EMOJI];
   const key = reactionDedupeKey(input.appId, input.messageId, emojiType);
+  let claim: Awaited<ReturnType<typeof claimDelivery>>;
   try {
     const saved = await store?.get(key);
-    if (saved && !(JSON.parse(saved) as ReactionRecord).removedAt) return true;
+    if (saved) {
+      try { if (!(JSON.parse(saved) as ReactionRecord).removedAt) return true; }
+      catch { /* Malformed receipts are repaired by the claim path below. */ }
+    }
+    claim = store ? await claimDelivery(store, key, value => {
+      const record = value as Partial<ReactionRecord>;
+      return typeof record.messageId === 'string' && typeof record.reactionId === 'string' && !record.removedAt;
+    }, `lark.reaction.${input.appId}.${input.messageId}`) : undefined;
+    if (claim?.confirmed !== undefined) return true;
     const previousKey = reactionDedupeKey(input.appId, input.messageId, previousEmoji);
     const previousRaw = await store?.get(previousKey);
-    const previous = previousRaw ? JSON.parse(previousRaw) as ReactionRecord : undefined;
+    let previous: ReactionRecord | undefined;
+    if (previousRaw) {
+      try { previous = JSON.parse(previousRaw) as ReactionRecord; }
+      catch { /* A malformed old receipt cannot identify a reaction to remove. */ }
+    }
     if (previous && !previous.removedAt) {
       // 撤不掉也照贴新的：两枚并存总比停在过时的那一枚好。
       try {
@@ -52,11 +137,17 @@ export async function deliverLarkStatusReaction(
       } catch (error) { log.warn({ error, key: previousKey }, '撤掉上一枚状态表情失败'); }
     }
     const result = await service.addReaction(input.messageId, emojiType);
-    await saveReactionRecord(store, key, saved, {
+    const persisted = await saveReactionRecord(store, key, saved, {
       messageId: result.messageId, emojiType, reactionId: result.reactionId, createdAt: new Date().toISOString()
     });
+    if (!persisted && store) {
+      const winner = await store.get(key);
+      if (!winner) return false;
+    }
+    await releaseDeliveryClaim(store, claim);
     return true;
   } catch (error) {
+    await releaseDeliveryClaim(store, claim);
     log.warn({ error, key }, '状态表情写入失败');
     return false;
   }
@@ -67,25 +158,54 @@ type DeliveryLog = { warn: (...args: any[]) => void };
 
 // Save only successful provider responses. Each leg has its own UUID and durable
 // receipt, so a restart after the file send retries only the missing summary.
-async function delivered<T>(store: ConfigRepository | undefined, key: string, send: () => Promise<T>, validate?: (result: T) => boolean): Promise<T> {
+async function delivered<T>(store: ConfigRepository | undefined, key: string, send: () => Promise<T>, validate?: (result: T) => boolean,
+  options: DeliveryConcurrencyOptions = {}): Promise<T> {
+  const existing = deliveryFlights.get(key);
+  if (existing) {
+    // A caller that explicitly owns an expired work-item lease may retry with
+    // the same provider UUID. This escape hatch is only safe with a durable
+    // CAS store; ordinary callers retain strict same-process single-flight.
+    if (!options.allowConcurrent || !store?.compareAndSet) return existing as Promise<T>;
+    return deliveredOnce(store, key, send, validate, true);
+  }
+  const flight = deliveredOnce(store, key, send, validate);
+  deliveryFlights.set(key, flight);
+  try { return await flight; } finally { if (deliveryFlights.get(key) === flight) deliveryFlights.delete(key); }
+}
+
+async function deliveredOnce<T>(store: ConfigRepository | undefined, key: string, send: () => Promise<T>, validate?: (result: T) => boolean, skipClaim = false): Promise<T> {
   const saved = await store?.get(key);
   if (saved) {
-    if (!validate) return JSON.parse(saved) as T;
     try {
       const parsed = JSON.parse(saved) as T;
-      if (validate(parsed)) return parsed;
+      if (!validate || validate(parsed)) return parsed;
     } catch { /* Strict delivery retries malformed cache entries with the same provider UUID. */ }
   }
-  const result = await send();
-  if (validate && !validate(result)) throw new Error(`Provider returned an invalid delivery receipt: ${key}`);
-  if (store?.compareAndSet) {
-    if (!await store.compareAndSet(key, validate ? saved : undefined, JSON.stringify(result))) {
-      const winner = JSON.parse((await store.get(key))!) as T;
-      if (validate && !validate(winner)) throw new Error(`Invalid delivery receipt: ${key}`);
-      return winner;
-    }
-  } else if (store) await store.set(key, JSON.stringify(result));
-  return result;
+  const claim = store && !skipClaim ? await claimDelivery(store, key, validate as ((value: unknown) => boolean) | undefined) : undefined;
+  if (claim?.confirmed !== undefined) return claim.confirmed as T;
+  let result: T;
+  try { result = await send(); }
+  catch (error) {
+    // Preserve the existing retry contract for provider failures. A failed
+    // request has no confirmed receipt, so a later reconciliation may retry
+    // the same provider UUID; concurrent callers were still serialized by the
+    // claim while this attempt was in flight.
+    await releaseDeliveryClaim(store, claim);
+    throw error;
+  }
+  try {
+    if (validate && !validate(result)) throw new Error(`Provider returned an invalid delivery receipt: ${key}`);
+    if (store?.compareAndSet) {
+      if (!await store.compareAndSet(key, validate ? saved : undefined, JSON.stringify(result))) {
+        const winner = JSON.parse((await store.get(key))!) as T;
+        if (validate && !validate(winner)) throw new Error(`Invalid delivery receipt: ${key}`);
+        return winner;
+      }
+    } else if (store) await store.set(key, JSON.stringify(result));
+    return result;
+  } finally {
+    await releaseDeliveryClaim(store, claim);
+  }
 }
 
 /** A fixed host delivery-status receipt; it never contains the result body or changes its target. */
@@ -102,9 +222,11 @@ export async function sendLarkDeliveryText(service: Pick<LarkCardService, 'sendT
 export async function sendLarkFile(
   service: LarkCardService, target: DeliveryTarget,
   input: { data: Uint8Array; filename: string; idempotencyKey: string },
-  log: DeliveryLog, store?: ConfigRepository, beforeSend?: LarkWriteGuard
+  log: DeliveryLog, store?: ConfigRepository, beforeSend?: LarkWriteGuard, options: DeliveryConcurrencyOptions = {}
 ) {
   const prefix = `lark.delivery.${input.idempotencyKey}`;
+  // Uploads have no provider idempotency UUID; keep this leg strictly
+  // single-flight even when the summary message is explicitly retried.
   const fileKey = await delivered(store, `${prefix}.upload`, async () => { await beforeSend?.(); return service.uploadFile({ ...input, ...(beforeSend ? { beforeSend } : {}) }); });
   return delivered(store, `${prefix}.message`, async () => {
     if (target.replyMessageId) {
@@ -124,7 +246,7 @@ export async function sendLarkFile(
     }
     await beforeSend?.();
     return service.sendFile({ ...(beforeSend ? { beforeSend } : {}), chatId: target.chatId, fileKey, idempotencyKey: input.idempotencyKey });
-  }, target.allowReplyFallback === false ? result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim()) : undefined);
+  }, target.allowReplyFallback === false ? result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim()) : undefined, options);
 }
 
 const downgradedResultKey = (key: string) => `result_d_${createHash('sha256').update(key).digest('hex').slice(0, 40)}`;
@@ -173,7 +295,8 @@ export async function prepareLarkResult(
   log: DeliveryLog,
   store?: ConfigRepository,
   beforeSend?: LarkWriteGuard,
-  forceAttachment = false
+  forceAttachment = false,
+  options: DeliveryConcurrencyOptions = {}
 ): Promise<{ input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string }; attachmentMessageId?: string }> {
   beforeSend ??= input.beforeSend;
   if (input.cardBody && forceAttachment) throw new LarkServiceError('INVALID_FINAL_CARD', '自定义卡片被平台拒收，请修正静态卡片内容后重新提交。', 400);
@@ -256,7 +379,7 @@ export async function recordLarkResultAuditRejection(service: LarkCardService, t
 export async function sendLarkResult(
   service: LarkCardService, target: DeliveryTarget,
   input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string },
-  log: DeliveryLog, store?: ConfigRepository, beforeSend?: LarkWriteGuard
+  log: DeliveryLog, store?: ConfigRepository, beforeSend?: LarkWriteGuard, options: DeliveryConcurrencyOptions = {}
 ): Promise<{ messageId: string; elements: Array<Record<string, any>>; attachmentMessageId?: string }> {
   beforeSend ??= input.beforeSend;
   const auditKey = `lark.delivery.${input.idempotencyKey}.audit_rejected`;
@@ -266,13 +389,13 @@ export async function sendLarkResult(
     throw new LarkServiceError('LARK_OPENAPI_ERROR', '最终结果已被飞书内容审核拒收。', 502, { upstreamCode: Number(previous), upstreamHttpStatus: 400 });
   }
   try {
-    const prepared = await prepareLarkResult(service, target, input, log, store, beforeSend);
-    try { return await sendPreparedLarkResult(service, target, prepared, log, store, beforeSend); }
+    const prepared = await prepareLarkResult(service, target, input, log, store, beforeSend, false, options);
+    try { return await sendPreparedLarkResult(service, target, prepared, log, store, beforeSend, options); }
     catch (error) {
       const output = input.elements.find(element => element.element_id === 'final_output')?.content;
       if (prepared.attachmentMessageId || typeof output !== 'string' || !output || !isLarkResultCardRejected(error)) throw error;
       log.warn({ error, idempotencyKey: input.idempotencyKey }, '结果卡被飞书拒收，改为正文节选加附件发送');
-      return await sendPreparedLarkResult(service, target, await prepareLarkResult(service, target, input, log, store, beforeSend, true), log, store, beforeSend);
+      return await sendPreparedLarkResult(service, target, await prepareLarkResult(service, target, input, log, store, beforeSend, true, options), log, store, beforeSend, options);
     }
   } catch (error) {
     if (isLarkFinalContentAuditRejected(error)) {
@@ -313,7 +436,7 @@ export async function readConfirmedLarkResult(
 
 async function sendPreparedLarkResult(
   service: LarkCardService, target: DeliveryTarget, prepared: Awaited<ReturnType<typeof prepareLarkResult>>,
-  log: DeliveryLog, store?: ConfigRepository, beforeSend?: LarkWriteGuard
+  log: DeliveryLog, store?: ConfigRepository, beforeSend?: LarkWriteGuard, options: DeliveryConcurrencyOptions = {}
 ): Promise<{ messageId: string; elements: Array<Record<string, any>>; attachmentMessageId?: string }> {
   const { input: resultInput, attachmentMessageId } = prepared;
   const elements = resultInput.elements;
@@ -336,7 +459,7 @@ async function sendPreparedLarkResult(
     await beforeSend?.();
     return { ...await service.send({ ...resultInput, ...(beforeSend ? { beforeSend } : {}), chatId: target.chatId }), elements };
   }, target.allowReplyFallback === false ? result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim())
-    && JSON.stringify(result.elements) === JSON.stringify(elements) : undefined);
+    && JSON.stringify(result.elements) === JSON.stringify(elements) : undefined, options);
   return { ...sent, ...(attachmentMessageId ? { attachmentMessageId } : {}) };
 }
 

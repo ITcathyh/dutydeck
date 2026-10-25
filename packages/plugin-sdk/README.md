@@ -18,4 +18,6 @@ Declare `apiVersion: 1`, `providers: "dist/index.mjs"` and typed `bindingConfig`
 
 Action authors return a durable receipt and keep execution/reconciliation semantics stable within their declared `version`. `actionId` comes from the host; reconciliation preserves the original identity, binding and handler contract.
 
+Provider authors can also use the independent `CiProvider` and `PluginResultTool` contracts with `api.registerCiProvider` and `api.registerResultTool`. These types are defined in this package so provider entrypoints do not need a server or private shared dependency.
+
 Plugin installation unpacks the package without installing npm dependencies. Bundle runtime imports (including `definePlugin`) into your provider before publishing, e.g. `esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs`. Include the bundle and manifest in npm files and do not externalize this SDK. Type-only imports require no SDK runtime dependency.

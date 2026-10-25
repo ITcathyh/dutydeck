@@ -31,6 +31,8 @@ export interface PluginApi {
   plugin: { name: string; version?: string; root: string; dataDir: string };
   /** Legacy installation configuration. New integrations use input.binding instead. */
   config: Readonly<Record<string, string>>;
+  registerCiProvider(provider: CiProvider): void;
+  registerResultTool(tool: PluginResultTool): void;
   registerQuery(query: PluginQuery): void;
   registerAction(action: PluginAction): void;
   registerScenarioProvider(provider: ScenarioProvider): void;
@@ -79,10 +81,57 @@ export interface PluginAction extends ToolDefinition {
   reconcile?(context: PluginToolContext & { original: Readonly<PluginToolAction>; actionId: string }): Promise<{ status: 'succeeded' | 'failed' | 'unknown'; receipt?: string }>;
 }
 
+export interface CiRepository { owner: string; name: string; slug: string }
+export interface CiRun {
+  id: number; name: string; attempt: number; headSha: string;
+  status: 'queued' | 'running' | 'completed';
+  result?: 'success' | 'failed' | 'cancelled' | 'skipped' | 'neutral';
+  conclusion?: string; url: string;
+}
+export interface CiPipelineQuery { repository: CiRepository; sha: string; workflow?: string; completedOnly?: boolean }
+export interface CiPipelineStatus { state: 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'unknown'; runs: CiRun[] }
+export interface CiFailureLog { job?: string; stage?: string; reason?: string; log?: string }
+export interface CiPullRequestInput { title: string; body?: string; head: string; base: string; draft?: boolean }
+export interface CiReviewComment {
+  id: string; author?: string; body: string; path?: string; line?: number; url?: string; createdAt?: string;
+  trusted?: boolean; isBot?: boolean; authorAssociation?: string;
+}
+export interface CiWebhookRequest { rawBody: Uint8Array; headers: Record<string, string | string[] | undefined>; query?: Record<string, string | undefined> }
+export type CiWebhookVerification = boolean | { ok: true; signedAt?: number } | { ok: false; statusCode?: 400 | 401; code?: string; message?: string };
+export interface CiWebhookEvent {
+  kind: 'pipeline' | 'pull_request' | 'review' | 'other'; repository: string; branch?: string;
+  pullRequest?: number; headSha?: string; state: string; runId?: string; url?: string; operator?: string;
+  failures?: CiFailureLog[]; eventId?: string; occurredAt?: number; timeIsAdvisory?: boolean;
+}
+export interface CiProvider {
+  id: string; displayName: string; changeRequestLabel?(number: number): string;
+  matchRepository(remoteUrl: string): CiRepository | undefined;
+  getPipelineStatus?(query: CiPipelineQuery): Promise<CiPipelineStatus>;
+  getFailureLogs?(repository: CiRepository, runId: string): Promise<CiFailureLog[]>;
+  createPullRequest?(repository: CiRepository, input: CiPullRequestInput): Promise<{ id: string; number: number; url: string }>;
+  listReviewComments?(repository: CiRepository, pullRequest: number): Promise<CiReviewComment[]>;
+  getPullRequest?(repository: CiRepository, pullRequest: number): Promise<{ state: 'open' | 'closed' | 'merged'; headSha?: string }>;
+  postComment?(repository: CiRepository, pullRequest: number, body: string): Promise<{ id: string; url?: string }>;
+  webhook?: {
+    verify(request: CiWebhookRequest): CiWebhookVerification | Promise<CiWebhookVerification>;
+    parse(request: CiWebhookRequest): CiWebhookEvent | undefined | Promise<CiWebhookEvent | undefined>;
+  };
+}
+
+export interface PluginResultTool {
+  name: string; description: string;
+  inputSchema: { parse(input: unknown): unknown };
+  execute(input: unknown, context: { invocationId: string; requester: Readonly<{ provider: string; tenant: string; subject: string }>; signal: AbortSignal }): Promise<{ files: Array<{ name: string; data: Uint8Array }> }>;
+}
+
 export interface PluginToolAction {
   id: string; plugin: string; tool: string; handlerVersion: string;
   bindingId: string; bindingRevision: number; scopeKey: string;
   original: PluginToolIdentity; input: JsonValue; inputDigest: string; resource: string;
   status: 'intent' | 'sending' | 'succeeded' | 'failed' | 'unknown' | 'suppressed'; revision: number; receipt?: string; error?: string;
+  /** Host-owned lease used while reconciling an unknown external action. */
+  reconcileLease?: { owner: string; expiresAt: number };
+  /** Host-owned lease proving that the original execute call is no longer active. */
+  executionLease?: { owner: string; expiresAt: number };
   createdAt: string; updatedAt: string;
 }
