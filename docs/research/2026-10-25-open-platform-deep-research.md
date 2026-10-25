@@ -16,7 +16,7 @@ Dutydeck 的插件基础已经超过“只能放几份 Skill”的阶段：公�
 2. 宿主服务层：需要网络、长驻进程或较高权限的 provider 运行在独立进程，通过宿主注入的身份、绑定和预算访问 Dutydeck。
 3. 可信进程内层：只给内置插件或明确批准的高信任插件，保留低延迟的 provider/hook 能力。
 
-第一优先级是修复四个会限制生态的断点：活动包更新的一致性、hook 环境泄漏、触发器重放保护、以及插件能力在 Web/MCP/CLI 中不可见。它们会直接影响外部作者是否敢安装、调试和长期维护插件。
+第一优先级是巩固一个需要持续回归的版本边界，并修复三个仍会限制生态的断点：活动包切换的一致性要持续验证；hook 环境泄漏、触发器重放保护、以及插件能力在 Web/MCP/CLI 中不可见仍需补齐。它们会直接影响外部作者是否敢安装、调试和长期维护插件。
 
 ## 当前基线：已经开放的能力与实际边界
 
@@ -29,7 +29,7 @@ Dutydeck 的插件基础已经超过“只能放几份 Skill”的阶段：公�
 | 外部触发 | token/HMAC 触发器，带目标 Bot/群、会话模式、去重键和并发限制 | 能用，但没有统一的异步状态、取消、时间戳/nonce 语义 |
 | Web 和 MCP | Web 能编辑绑定和技能；工具有 HTTP/MCP/CLI；MCP 目前只有 initialize、ping、tools/list、tools/call，`tools/listChanged=false` | 宿主可管理面不足，插件不能声明自己的 Web 面板 |
 | 运行隔离 | provider 在 daemon 进程内加载；hook 子进程继承 daemon 全部环境变量；安装信任按 `agents`、`hooks:<event>`、`providers` 粗粒度确认 | 适合自用和可信插件，不适合默认承诺不可信第三方隔离 |
-| 更新和诊断 | 有 install/update、candidate/activate/rollback、validate、doctor；provider 需要重启生效 | 已有治理骨架，但活动 provider、hook、Skill 路径必须统一固定到同一版本 |
+| 更新和诊断 | 有 install/update、candidate/activate/rollback、validate、doctor；活动 Host 从 active artifact 加载，provider 需要重启生效 | 版本根已固定，仍需持续回归更新、激活和回滚边界 |
 
 关键代码证据：[`packages/plugin-sdk/src/index.ts`](/data00/home/huangyuhang.edu/ai/dutydeck/packages/plugin-sdk/src/index.ts:1)、[`packages/shared/src/plugins.ts`](/data00/home/huangyuhang.edu/ai/dutydeck/packages/shared/src/plugins.ts:26)、[`apps/server/src/plugins/host.ts`](/data00/home/huangyuhang.edu/ai/dutydeck/apps/server/src/plugins/host.ts:1)、[`apps/server/src/plugins/tool-service.ts`](/data00/home/huangyuhang.edu/ai/dutydeck/apps/server/src/plugins/tool-service.ts:1)。已有的 10 月 22 日开放能力评估补充了绑定、技能投递和工具授权的历史问题：[2026-10-22-extensibility-review.md](/data00/home/huangyuhang.edu/ai/dutydeck/docs/research/2026-10-22-extensibility-review.md)。
 
@@ -49,7 +49,7 @@ Botmux 的公开插件指南把一个 npm 包拆成固定贡献点：Skill、每
 
 Botmux 当前的局限同样有参考价值：插件依赖主要按 ID 管理，市场兼容性元数据尚未强制校验；npm lifecycle 可能执行；新增 CLI adapter 仍需改核心源码。开放入口增加后，治理和兼容性必须同步增加。
 
-来源：[Botmux plugins](https://deepcoldy.github.io/botmux/en/plugins)、[hooks](https://deepcoldy.github.io/botmux/en/hooks)、[task trigger API](https://deepcoldy.github.io/botmux/en/api-task-trigger)、[companion API](https://deepcoldy.github.io/botmux/en/companion-api)、[card-action gateway 设计](https://github.com/deepcoldy/botmux/blob/master/docs/design/2026-09-02-card-action-plugin-gateway.md)、[Host Service supervisor 设计](https://deepcoldy.github.io/botmux/en/plugin-service-supervisor)。
+来源：[Botmux plugins](https://deepcoldy.github.io/botmux/en/plugins)、[hooks](https://deepcoldy.github.io/botmux/en/hooks)、[task trigger API](https://deepcoldy.github.io/botmux/en/api-task-trigger)、[companion API](https://deepcoldy.github.io/botmux/en/companion-api)、[card-action gateway 设计](https://github.com/deepcoldy/botmux/blob/master/docs/design/2026-09-02-card-action-plugin-gateway.md)、[Host Service supervisor 设计](https://github.com/deepcoldy/botmux/blob/master/docs/plugin-service-supervisor.md)。
 
 ### Claude Code Mods：把事件、UI 和插件包统一成 middleware 生态
 
@@ -63,7 +63,7 @@ Claude Code 的开放性有一个必须同时学习的反例：Mods 在 Claude C
 
 生态侧的 `claude-code-mods` 用一个 marketplace 管理多个独立 mod，支持预览、勾选、排序、按项目安装、dry-run 和 fork；`awesome-claude-code-mods` 自动扫描 GitHub，记录事件、访问能力和 `claude plugin validate` 结果，并允许按 capability 过滤。官方 `plugin-evals` 还支持 with/without plugin 对照、MCP mock/replay、tool order、file existence、LLM grader 和成本上限。
 
-来源：[插件概览](https://code.claude.com/docs/en/plugins/overview)、[组件](https://code.claude.com/docs/en/plugins/components)、[Mods 概览](https://code.claude.com/docs/en/plugins/mods/overview)、[Mods events](https://code.claude.com/docs/en/plugins/mods/events)、[Mods API](https://code.claude.com/docs/en/plugins/mods/api)、[依赖](https://code.claude.com/docs/en/plugins/dependencies)、[plugin evals](https://code.claude.com/docs/en/plugins/plugin-evals)、[claude-code-mods](https://github.com/hamzafer/claude-code-mods)、[awesome catalog](https://github.com/karanb192/awesome-claude-code-mods)。
+来源：[插件概览](https://code.claude.com/docs/en/plugins/overview)、[组件](https://code.claude.com/docs/en/plugins/components)、[Mods 概览](https://code.claude.com/docs/en/plugins/mods/overview)、[Mods events](https://code.claude.com/docs/en/plugins/mods/events)、[Mods API](https://code.claude.com/docs/en/plugins/mods/api)、[依赖](https://code.claude.com/docs/en/plugins/dependencies)、[plugin evals](https://code.claude.com/docs/en/plugin-evals)、[claude-code-mods](https://github.com/hamzafer/claude-code-mods)、[awesome catalog](https://github.com/karanb192/awesome-claude-code-mods)。
 
 ## 对照结论
 
@@ -168,7 +168,7 @@ Web API 先提供 `GET /api/plugins/:id/capabilities`、`GET /api/plugins/:id/di
 
 | 优先级 | 改动 | 完成判据 |
 |---|---|---|
-| P0 | 修复 active/candidate 混版；活动 Host 固定同一 artifact root；更新时 drain/切换/回滚一致 | 更新或回滚后 provider、hook、skills、commands 来自同一 digest；重启和失败恢复都有测试 |
+| P0 | 为现有 active/candidate 隔离增加回归保护；更新时继续验证 drain/切换/回滚一致 | 更新或回滚后 provider、hook、skills、commands 来自同一 digest；重启和失败恢复都有测试 |
 | P0 | Hook 最小环境；秘密只经声明的 binding accessor；触发器增加 timestamp/nonce/body hash；宿主盖章 caller identity | hook 无法读取 daemon 未声明秘密；重放请求被拒绝；伪造 actor/binding 被拒绝；审计日志能关联 eventId |
 | P0 | Web 暴露插件状态、capability footprint、诊断、工具授权入口 | 管理员不进 CLI 也能看到插件为何未加载、需要哪些权限、哪些绑定生效 |
 | P1 | `service` entrypoint + supervisor；可信 provider 继续兼容 | 杀掉插件服务不影响 daemon；服务重启不丢 action ledger；更新前能 drain，未知动作可 reconcile |
@@ -206,5 +206,5 @@ P0 先让插件版本、身份、秘密和诊断可被可靠解释；P1 再扩�
 
 - Dutydeck：[`packages/plugin-sdk/src/index.ts`](/data00/home/huangyuhang.edu/ai/dutydeck/packages/plugin-sdk/src/index.ts:1)、[`packages/shared/src/plugins.ts`](/data00/home/huangyuhang.edu/ai/dutydeck/packages/shared/src/plugins.ts:26)、[`apps/server/src/plugins/host.ts`](/data00/home/huangyuhang.edu/ai/dutydeck/apps/server/src/plugins/host.ts:1)、[`apps/server/src/plugins/tool-service.ts`](/data00/home/huangyuhang.edu/ai/dutydeck/apps/server/src/plugins/tool-service.ts:1)、[`README.md` 插件章节](/data00/home/huangyuhang.edu/ai/dutydeck/README.md:780)、[既有开放能力评估](/data00/home/huangyuhang.edu/ai/dutydeck/docs/research/2026-10-22-extensibility-review.md)。
 - Botmux：[`deepcoldy/botmux`](https://github.com/deepcoldy/botmux)、[plugins](https://deepcoldy.github.io/botmux/en/plugins)、[hooks](https://deepcoldy.github.io/botmux/en/hooks)、[task trigger API](https://deepcoldy.github.io/botmux/en/api-task-trigger)、[companion API](https://deepcoldy.github.io/botmux/en/companion-api)。
-- Claude Code： [plugins overview](https://code.claude.com/docs/en/plugins/overview)、[components](https://code.claude.com/docs/en/plugins/components)、[mods overview](https://code.claude.com/docs/en/plugins/mods/overview)、[mods events](https://code.claude.com/docs/en/plugins/mods/events)、[mods API](https://code.claude.com/docs/en/plugins/mods/api)、[dependencies](https://code.claude.com/docs/en/plugins/dependencies)、[plugin evals](https://code.claude.com/docs/en/plugins/plugin-evals)。
+- Claude Code： [plugins overview](https://code.claude.com/docs/en/plugins/overview)、[components](https://code.claude.com/docs/en/plugins/components)、[mods overview](https://code.claude.com/docs/en/plugins/mods/overview)、[mods events](https://code.claude.com/docs/en/plugins/mods/events)、[mods API](https://code.claude.com/docs/en/plugins/mods/api)、[dependencies](https://code.claude.com/docs/en/plugins/dependencies)、[plugin evals](https://code.claude.com/docs/en/plugin-evals)。
 - 社区生态：[claude-code-mods](https://github.com/hamzafer/claude-code-mods)、[awesome-claude-code-mods](https://github.com/karanb192/awesome-claude-code-mods)。
