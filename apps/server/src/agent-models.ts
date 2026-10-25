@@ -20,7 +20,10 @@ async function discoverCodexProfiles(agent: AgentConfig): Promise<AgentModel[]> 
   const root = agent.env.CODEX_HOME?.trim() || join(homedir(), '.codex');
   try {
     const text = await readFile(join(root, 'config.toml'), 'utf8');
-    return [...text.matchAll(/^\s*\[profiles\.([^\]]+)\]\s*$/gm)].map(match => match[1]!.trim()).filter(Boolean).map(id => ({ id, name: id }));
+    return [...text.matchAll(/^\s*\[profiles\.([^\]]+)\]\s*$/gm)]
+      .map(match => match[1]!.trim().replace(/^(["'])(.*)\1$/, '$2'))
+      .filter(Boolean)
+      .map(id => ({ id, name: id }));
   } catch { return []; }
 }
 

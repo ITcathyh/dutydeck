@@ -50,6 +50,19 @@ describe('ACP-first Agent model discovery', () => {
     expect((await discoverAgentModels({ ...agent, model: 'second-model' })).defaultModel).toBe('second-model');
   });
 
+  it('discovers named Codex profiles from the configured CODEX_HOME without launching the CLI', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-codex-profiles-'));
+    writeFileSync(join(root, 'config.toml'), '[profiles.work]\nmodel = "gpt-5"\n[profiles."review"]\nmodel = "gpt-5-mini"\n');
+    const agent = agentConfigSchema.parse({ id: 'codex', name: 'Codex', command: process.execPath,
+      protocol: 'pty-cli', adapterId: 'codex', env: { CODEX_HOME: root } });
+    try {
+      await expect(discoverAgentModels(agent, undefined, true)).resolves.toMatchObject({
+        profiles: [{ id: 'work', name: 'work' }, { id: 'review', name: 'review' }],
+        source: 'agent'
+      });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('never executes a custom wrapper when refreshing its model metadata', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-pty-models-'));
     const marker = join(root, 'executed');
