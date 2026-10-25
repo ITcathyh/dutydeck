@@ -107,10 +107,8 @@ export class PersistentEventPublisher {
       this.wakeSubscription(sub);
     }
 
-    let unsubscribed = false;
     return () => {
-      if (unsubscribed) return;
-      unsubscribed = true;
+      if (!sub.active) return;
       sub.active = false;
       this.removeSubscription(sub);
     };

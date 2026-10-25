@@ -111,9 +111,8 @@ export function TurnDiffContent({ sessionId, taskId, shared, embedded = false, r
                 const target = targetOf(file.path, line);
                 const draft = drafts.find(item => sameTarget(item, target));
                 const open = editing && sameTarget(editing, target);
-                const code = hunk.lines.slice(Math.max(0, lineIndex - 2), lineIndex + 1).map(item => `${linePrefix[item.kind]}${item.text}`).join('\n');
                 return <Fragment key={lineIndex}>
-                  <button type="button" disabled={readOnly} aria-label={`评论 ${file.path} 第 ${target.line} 行${sideLabel(target.side)}`} onClick={() => startComment(target, code)}
+                  <button type="button" disabled={readOnly} aria-label={`评论 ${file.path} 第 ${target.line} 行${sideLabel(target.side)}`} onClick={() => startComment(target, hunk.lines.slice(Math.max(0, lineIndex - 2), lineIndex + 1).map(item => `${linePrefix[item.kind]}${item.text}`).join('\n'))}
                     className={`flex w-full items-start text-left hover:bg-hover ${lineTone[line.kind]}`}>
                     <span className="w-10 shrink-0 select-none px-1 text-right text-subtle">{line.oldLine ?? ''}</span>
                     <span className="w-10 shrink-0 select-none px-1 text-right text-subtle">{line.newLine ?? ''}</span>

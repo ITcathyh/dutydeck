@@ -1,10 +1,6 @@
 /** Controlled result tools return bytes to the host, never model-visible output. */
+export type { PluginResultTool } from '@dutydeck/plugin-sdk';
 export interface ResultPrincipal { provider: string; tenant: string; subject: string }
-export interface PluginResultTool {
-  name: string; description: string;
-  inputSchema: { parse(input: unknown): unknown };
-  execute(input: unknown, context: { invocationId: string; requester: Readonly<ResultPrincipal>; signal: AbortSignal }): Promise<{ files: Array<{ name: string; data: Uint8Array }> }>;
-}
 export interface PluginResultReceipt { deliveryId: string; status: 'delivered' | 'pending' | 'unknown' | 'failed'; fileCount: number }
 export type PluginResultStatus = 'executing' | 'execution_unknown' | 'ready' | 'sending' | 'delivered' | 'failed' | 'expired' | 'revoked' | 'delivery_unknown';
 export interface PluginResultTarget { [key: string]: string | number | boolean }

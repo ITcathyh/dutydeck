@@ -1286,6 +1286,51 @@ describe('session insight cache-hit revision CAS and cursor robustness', () => {
 });
 
 describe('session insight synchronous host evidence raw reader', () => {
+  it('reads task requests and attempts in one query without changing missing, scalar or ordered rows', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'session-insight-task-rows-'));
+    const filename = join(directory, 'state.sqlite');
+    const repos = createRepositories(filename, { newDatabaseAuthority: 'ledger_v1' });
+    const claim = repos.control.attachRuntime('controller');
+    const writer = new Database(filename);
+    const at = '2026-10-03T00:00:00.000Z';
+    try {
+      repos.execution.bind(claim).createSession({ id: 'session', runId: 'run', agentId: 'fixture', cwd: '/tmp', state: 'idle', createdAt: at, updatedAt: at });
+      expect(repos.insight.readHostEvidenceRaw('session').tasks).toEqual([]);
+      writer.pragma('foreign_keys = ON');
+      const insertTask = writer.prepare('INSERT INTO tasks(id,session_id,prompt,status,created_at,updated_at,current_attempt_id,execution_context) VALUES (?,?,?,?,?,?,?,?)');
+      for (const [id, attemptId, context] of [
+        ['z', 'attempt-object', 'false'], ['a', null, null], ['empty', '', null],
+        ['missing', 'absent', null], ['scalar', 'attempt-scalar', null], ['null', 'attempt-null', 'null']
+      ]) insertTask.run(id, 'session', `prompt ${id}`, 'completed', at, at, attemptId, context);
+      const insertRequest = writer.prepare('INSERT INTO task_requests(task_id,namespace,session_id,request_key,request_digest,request_json) VALUES (?,?,?,?,?,?)');
+      for (const [id, json] of [['z', '{"prompt":"accepted"}'], ['empty', null], ['missing', 'null'], ['scalar', '"request"'], ['null', '0']]) {
+        insertRequest.run(id, 'runtime', 'session', id, 'digest', json);
+      }
+      const insertAttempt = writer.prepare('INSERT INTO task_attempts(id,task_id,session_id,run_id,number,revision,state,submission_state,json) VALUES (?,?,?,?,?,1,\'settled\',\'not_submitted\',?)');
+      // current_attempt_id is the lookup key even when legacy rows refer to a different task.
+      for (const [index, [id, json]] of [['attempt-object', '{"id":"attempt-object"}'], ['', 'false'], ['attempt-scalar', 'false'], ['attempt-null', 'null']].entries()) {
+        insertAttempt.run(id, 'z', 'session', 'run', index + 1, json);
+      }
+      const expected = [
+        { id: 'z', executionContext: false, acceptedRequest: { prompt: 'accepted' }, currentAttempt: { id: 'attempt-object' } },
+        { id: 'a', acceptedRequest: null, currentAttempt: null },
+        { id: 'empty', acceptedRequest: null, currentAttempt: null },
+        { id: 'missing', acceptedRequest: null, currentAttempt: null },
+        { id: 'scalar', acceptedRequest: 'request', currentAttempt: false },
+        { id: 'null', executionContext: null, acceptedRequest: 0, currentAttempt: null }
+      ].map(task => ({ ...task, prompt: `prompt ${task.id}`, status: 'completed', createdAt: at }));
+      const prepare = vi.spyOn(Database.prototype, 'prepare');
+      const taskReads = () => prepare.mock.calls.filter(([sql]) => /^\s*SELECT\b/i.test(sql) && /\b(?:tasks|task_requests|task_attempts)\b/.test(sql));
+      try {
+        expect(repos.insight.readHostEvidenceRaw('session').tasks).toEqual(expected);
+        expect(taskReads()).toHaveLength(1);
+        prepare.mockClear();
+        expect(repos.insight.listSummaryRows().rows[0]!.tasks).toEqual(expected);
+        expect(taskReads()).toHaveLength(1);
+      } finally { prepare.mockRestore(); }
+    } finally { writer.close(); claim.release(); repos.close(); rmSync(directory, { recursive: true, force: true }); }
+  });
+
   it('freezes authoritative task/verification/steering/usage rows in one synchronous read', () => {
     const directory = mkdtempSync(join(tmpdir(), 'session-insight-evidence-'));
     const filename = join(directory, 'state.sqlite');

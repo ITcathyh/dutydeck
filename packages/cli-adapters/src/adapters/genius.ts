@@ -1,6 +1,7 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 import { delay } from './input-settle.js';
+import { pushClaudeFamilyBypassArgs } from './claude-family.js';
 
 export function createGeniusAdapter(): CliAdapter {
   return {
@@ -19,16 +20,7 @@ export function createGeniusAdapter(): CliAdapter {
         args.push('--session-id', uuid);
       }
       if (model && model.trim()) args.push('--model', model.trim());
-      if (permissionMode === 'full-trust') {
-        args.push('--dangerously-skip-permissions');
-        args.push(
-          '--settings',
-          JSON.stringify({
-            skipDangerousModePermissionPrompt: true,
-            permissions: { defaultMode: 'bypassPermissions' },
-          }),
-        );
-      }
+      pushClaudeFamilyBypassArgs(args, permissionMode);
       return args;
     },
 

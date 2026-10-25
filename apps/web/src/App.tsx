@@ -99,7 +99,8 @@ export default function App() {
   const qc = useQueryClient();
   const { activeSessionId, setActive, rawVisible, toggleRaw } = useDockStore();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [mobile, setMobile] = useState(() => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && !window.matchMedia('(min-width: 768px)').matches);
+  const matchesDesktop = useMediaQuery('(min-width: 768px)');
+  const mobile = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && !matchesDesktop;
   const [newOpen, setNewOpen] = useState(false);
   const [newAgentId, setNewAgentId] = useState<string>();
   const rawSideBySide = useMediaQuery('(min-width: 1536px)');
@@ -277,12 +278,8 @@ export default function App() {
   const openRenameSession = (target: Session) => { captureDialogOpener(); setRenameSession(target); };
 
   useEffect(() => {
-    if (typeof window.matchMedia !== 'function') return;
-    const media = window.matchMedia('(min-width: 768px)');
-    const update = () => { setMobile(!media.matches); if (media.matches) setSidebarOpen(false); };
-    update(); media.addEventListener('change', update);
-    return () => media.removeEventListener('change', update);
-  }, []);
+    if (matchesDesktop) setSidebarOpen(false);
+  }, [matchesDesktop]);
 
   useEffect(() => {
     if (!mobileNavigationOpen) return;

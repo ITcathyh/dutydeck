@@ -587,8 +587,12 @@ export function createSessionInsightRepository(
   const loadRawTaskRows = (sessionId: string): SessionInsightRawTaskRow[] => {
     const taskRows = db
       .prepare(
-        `SELECT id, prompt, status, created_at, execution_context, current_attempt_id
-           FROM tasks WHERE session_id = ? ORDER BY created_at ASC, rowid ASC`
+        `SELECT t.id, t.prompt, t.status, t.created_at, t.execution_context, t.current_attempt_id,
+                r.request_json, a.json AS attempt_json
+           FROM tasks t
+           LEFT JOIN task_requests r ON r.task_id = t.id
+           LEFT JOIN task_attempts a ON a.id = t.current_attempt_id
+           WHERE t.session_id = ? ORDER BY t.created_at ASC, t.rowid ASC`
       )
       .all(sessionId) as Array<{
       id: string;
@@ -597,24 +601,17 @@ export function createSessionInsightRepository(
       created_at: string;
       execution_context: string | null;
       current_attempt_id: string | null;
+      request_json: string | null;
+      attempt_json: string | null;
     }>;
-    const selectRequest = db.prepare('SELECT request_json FROM task_requests WHERE task_id = ?');
-    const selectAttempt = db.prepare('SELECT json FROM task_attempts WHERE id = ?');
     return taskRows.map(task => ({
       id: task.id,
       prompt: task.prompt,
       status: task.status,
       createdAt: task.created_at,
       ...(task.execution_context ? { executionContext: JSON.parse(task.execution_context) } : {}),
-      acceptedRequest: (() => {
-        const requestRow = selectRequest.get(task.id) as { request_json: string | null } | undefined;
-        return requestRow?.request_json ? JSON.parse(requestRow.request_json) : null;
-      })(),
-      currentAttempt: (() => {
-        if (!task.current_attempt_id) return null;
-        const attemptRow = selectAttempt.get(task.current_attempt_id) as { json: string } | undefined;
-        return attemptRow ? JSON.parse(attemptRow.json) : null;
-      })()
+      acceptedRequest: task.request_json ? JSON.parse(task.request_json) : null,
+      currentAttempt: task.current_attempt_id && task.attempt_json !== null ? JSON.parse(task.attempt_json) : null
     }));
   };
 

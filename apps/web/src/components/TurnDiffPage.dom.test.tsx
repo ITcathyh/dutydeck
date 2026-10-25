@@ -85,6 +85,25 @@ describe('TurnDiffPage', () => {
     expect(await screen.findByText('评论已作为新一轮请求发回当前任务。')).toBeTruthy();
   });
 
+  it('保存所点击行的至多三行上下文，保留增删前缀和换行', async () => {
+    vi.spyOn(api, 'turnDiff').mockResolvedValue(diff);
+    renderPage();
+    const targets = ['第 1 行', '第 2 行（改动前）', '第 2 行', '第 3 行'];
+    for (const [index, target] of targets.entries()) {
+      fireEvent.click(await screen.findByRole('button', { name: `评论 src/app.ts ${target}` }));
+      fireEvent.change(screen.getByRole('textbox'), { target: { value: `comment ${index}` } });
+      fireEvent.click(screen.getByRole('button', { name: '添加评论' }));
+    }
+    const changedLine = diff.files[0]!.hunks[0]!.lines[2]!.text;
+    const drafts = JSON.parse(sessionStorage.getItem('dutydeck:diff-review:@local:ses_1:task_1')!);
+    expect(drafts).toEqual([
+      { path: 'src/app.ts', side: 'new', line: 1, body: 'comment 0', code: ' export const a = 1;' },
+      { path: 'src/app.ts', side: 'old', line: 2, body: 'comment 1', code: ' export const a = 1;\n-export const b = 2;' },
+      { path: 'src/app.ts', side: 'new', line: 2, body: 'comment 2', code: ` export const a = 1;\n-export const b = 2;\n+${changedLine}` },
+      { path: 'src/app.ts', side: 'new', line: 3, body: 'comment 3', code: `-export const b = 2;\n+${changedLine}\n export const c = 3;` }
+    ]);
+  });
+
   it('链接无效或过期时只给提示', async () => {
     vi.spyOn(api, 'turnDiff').mockRejectedValue(new ApiError('Authentication required', 'UNAUTHORIZED', 401));
     renderPage();

@@ -828,7 +828,7 @@ describe('决策回放与人工纠正', () => {
     });
 
     renderPanel();
-    await user.click(await screen.findByRole('tab', { name: /决策与回放/ }));
+    await user.click(await screen.findByRole('tab', { name: '决策看板 (1)' }));
     await user.click(screen.getByRole('button', { name: '回放全部决策' }));
 
     expect(await screen.findByText('缺失 1')).toBeTruthy();
@@ -854,7 +854,7 @@ describe('决策回放与人工纠正', () => {
       }));
 
     renderPanel();
-    await user.click(await screen.findByRole('tab', { name: /决策与回放/ }));
+    await user.click(await screen.findByRole('tab', { name: '决策看板 (1)' }));
     await user.click(screen.getByRole('button', { name: '人工纠正' }));
 
     await user.type(screen.getByLabelText(/纠正说明/), '这里不该回复');

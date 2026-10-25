@@ -223,6 +223,41 @@ describe('App 批量清理', () => {
 });
 
 describe('App mobile navigation accessibility', () => {
+  it('closes the drawer after crossing 768px and keeps it closed on returning to mobile', async () => {
+    let width = 767.5;
+    const listeners = new Set<() => void>();
+    vi.stubGlobal('matchMedia', vi.fn((query: string) => ({
+      get matches() { const min = /min-width: (\d+)px/.exec(query)?.[1]; return min !== undefined && width >= Number(min); },
+      addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener)
+    })));
+    mockAppApi();
+    const { container } = renderApp();
+    const trigger = await screen.findByRole('button', { name: '打开工作台导航' });
+    const main = container.querySelector('main')!;
+    await userEvent.click(trigger);
+    expect(main.hasAttribute('inert')).toBe(true);
+    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
+    act(() => { width = 768; for (const listener of listeners) listener(); });
+    expect(main.hasAttribute('inert')).toBe(false);
+    act(() => { width = 767.5; for (const listener of listeners) listener(); });
+    expect(main.hasAttribute('inert')).toBe(false);
+    expect(navigation.getAttribute('aria-hidden')).toBe('true');
+    await userEvent.click(screen.getByRole('button', { name: '打开工作台导航' }));
+    expect(main.hasAttribute('inert')).toBe(true);
+  });
+
+  it('keeps desktop navigation behavior when matchMedia is unavailable', async () => {
+    vi.stubGlobal('matchMedia', undefined);
+    mockAppApi();
+    const { container } = renderApp();
+    await screen.findByRole('heading', { level: 1, name: '工作台' });
+    expect(screen.getByRole('button', { name: '收起侧栏' })).toBeTruthy();
+    await userEvent.keyboard('{Control>}b{/Control}');
+    expect(screen.getByRole('button', { name: '展开侧栏' })).toBeTruthy();
+    expect(container.querySelector('main')!.hasAttribute('inert')).toBe(false);
+  });
+
   it('makes the background inert, moves focus into navigation, and restores focus on Escape', async () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
     vi.spyOn(api, 'agents').mockResolvedValue([]);
