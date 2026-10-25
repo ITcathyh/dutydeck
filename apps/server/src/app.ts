@@ -329,7 +329,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     }));
     return respond(summaries.filter(Boolean));
   });
-  app.post<{ Body: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: 'shared' | 'worktree' } }>('/api/sessions', async request => {
+  app.post<{ Body: { agentId: string; cwd?: string; model?: string; codexProfile?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: 'shared' | 'worktree' } }>('/api/sessions', async request => {
     if (request.body.permissionMode !== undefined && !permissionModes.includes(request.body.permissionMode)) throw new RuntimeError('INVALID_PERMISSION_MODE', `Unknown permission mode: ${String(request.body.permissionMode)}`, 400);
     return runtime.start(request.body);
   });

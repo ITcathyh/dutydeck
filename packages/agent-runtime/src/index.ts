@@ -39,7 +39,7 @@ function executionOptionsOf(options: ExecutionOptions): ExecutionOptions {
 }
 
 function sessionConfigOf(agent: AgentConfig, input: StartSessionInput) {
-  return { cwd: input.cwd ?? agent.cwd ?? process.cwd(), model: input.model ?? agent.model, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode };
+  return { cwd: input.cwd ?? agent.cwd ?? process.cwd(), model: input.model ?? agent.model, codexProfile: input.codexProfile ?? agent.codexProfile, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode };
 }
 
 /** 启动期（资源尚未 ready）driver transcript source 观察的有界缓冲上限。 */
@@ -540,6 +540,7 @@ export class DutydeckRuntime {
       ...agent,
       cwd: session.cwd,
       model: session.model ?? agent.model,
+      codexProfile: session.codexProfile ?? agent.codexProfile,
       reasoningEffort: session.reasoningEffort ?? agent.reasoningEffort,
       systemPrompt: session.systemPrompt ?? agent.systemPrompt,
       permissionMode: session.permissionMode ?? agent.permissionMode,
@@ -1998,7 +1999,7 @@ export class DutydeckRuntime {
       throw new RuntimeError('FORK_UNSUPPORTED', 'This Agent does not support native session copying', 422);
     }
     const terminalBackend = capability.protocol === 'pty-cli' ? await this.options.terminalBackend?.() ?? 'tmux' : undefined;
-    const session: Session = { terminalBackend, id: owned?.id ?? makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
+    const session: Session = { terminalBackend, id: owned?.id ?? makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, codexProfile: initialConfigured.codexProfile, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
     return this.scoped(session.id, async () => {
     await this.mutations.write(session.id, async () => this.bound().createSession(eventJson(session) as unknown as Session));
 

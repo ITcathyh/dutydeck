@@ -59,6 +59,7 @@ export const publicAgentSchema = z.object({
   name: z.string().min(1),
   version: z.string().optional(),
   model: z.string().optional(),
+  codexProfile: z.string().optional(),
   protocol: z.enum(protocols),
   permissionMode: z.enum(permissionModes),
   /** 工具确认能否在飞书逐项审批（见 supportsRemoteApproval）；不能时飞书机器人只能以完全信任运行。toPublicAgent 总会给出。 */
@@ -73,6 +74,7 @@ export function toPublicAgent(agent: AgentConfig): PublicAgent {
     name: agent.name,
     version: agent.version,
     model: agent.model,
+    codexProfile: agent.codexProfile,
     protocol: agent.protocol,
     permissionMode: agent.permissionMode,
     remoteApproval: supportsRemoteApproval(agent),
@@ -275,6 +277,7 @@ export interface Session {
   state: SessionState;
   cwd: string;
   model?: string;
+  codexProfile?: string;
   reasoningEffort?: string;
   permissionMode?: PermissionMode;
   source?: string;
@@ -302,7 +305,7 @@ export interface SessionSourceContext {
   originAvailable: boolean;
 }
 
-export interface StartSessionInput { nativeForkSessionId?: string; agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; workspaceMode?: import('./workspace.js').WorkspaceMode }
+export interface StartSessionInput { nativeForkSessionId?: string; agentId: string; cwd?: string; model?: string; codexProfile?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; workspaceMode?: import('./workspace.js').WorkspaceMode }
 export interface SendInput { prompt: string }
 export interface AgentCapabilities { protocol: Exclude<Protocol, 'auto'>; available: boolean; detail?: string; pause: boolean; resume: boolean }
 

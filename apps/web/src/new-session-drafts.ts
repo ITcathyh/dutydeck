@@ -5,6 +5,7 @@ type NewSessionDraft = {
   cwd: string;
   workspaceMode: 'shared' | 'worktree';
   model: string;
+  codexProfile: string;
   reasoningEffort: string;
   permissionMode: PermissionMode;
   goal: string;

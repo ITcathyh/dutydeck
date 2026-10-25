@@ -59,6 +59,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
   const [cwd, setCwd] = useState(draft?.cwd ?? '');
   const [workspaceMode, setWorkspaceMode] = useState<'shared' | 'worktree'>(draft?.workspaceMode ?? 'worktree');
   const [model, setModel] = useState(draft?.model ?? '');
+  const [codexProfile, setCodexProfile] = useState(draft?.codexProfile ?? '');
   const [reasoningEffort, setReasoningEffort] = useState(draft?.reasoningEffort ?? '');
   const selectedAgent = agents.find(agent => agent.id === agentId);
   const legacyPtyUnsupported = isLegacyPtyAgent(selectedAgent);
@@ -67,7 +68,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
   const [goal, setGoal] = useState(draft?.goal ?? '');
   const [createdSession, setCreatedSession] = useState<Session | undefined>(draft?.createdSession);
   const latestDraft = useRef({ agentId, cwd, workspaceMode, model, reasoningEffort, permissionMode, goal, createdSession });
-  latestDraft.current = { agentId, cwd, workspaceMode, model, reasoningEffort, permissionMode, goal, createdSession };
+  latestDraft.current = { agentId, cwd, workspaceMode, model, codexProfile, reasoningEffort, permissionMode, goal, createdSession };
   useEffect(() => () => {
     if (!completed.current) newSessionDrafts.set(draftKey, latestDraft.current);
   }, [draftKey]);
@@ -86,7 +87,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
   }, [agents, agentId]);
   const create = useMutation({
     mutationFn: async () => {
-      const session = createdSession ?? await api.create({ agentId, permissionMode, workspaceMode, ...(cwd ? { cwd } : {}), ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) });
+      const session = createdSession ?? await api.create({ agentId, permissionMode, workspaceMode, ...(cwd ? { cwd } : {}), ...(model ? { model } : {}), ...(codexProfile ? { codexProfile } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) });
       if (!createdSession) setCreatedSession(session);
       if (mode === 'schedule') return { session, task: undefined };
       const result = await api.send(session.id, goal.trim(), 'queue');
@@ -145,7 +146,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
               <CompactSelect value={workspaceMode} options={[{ value: 'worktree', label: '独立 Git 工作目录', meta: '从当前提交创建分支；后续追问复用，不带入未提交改动' }, { value: 'shared', label: '直接使用所选目录', meta: '适用于非 Git 目录，或需要使用现有未提交改动' }]} onChange={value => setWorkspaceMode(value as 'shared' | 'worktree')} placeholder="选择工作目录方式" disabledText=""/>
             </SelectField>
             <SelectField label="执行任务的 Agent">
-              <AgentSelect agents={agents} value={agentId} onChange={value => { const nextAgent = agents.find(agent => agent.id === value); setAgentId(value); setPermissionMode(initialPermissionMode(nextAgent)); setFullTrustConfirmed(false); setModel(''); setReasoningEffort(''); }}/>
+              <AgentSelect agents={agents} value={agentId} onChange={value => { const nextAgent = agents.find(agent => agent.id === value); setAgentId(value); setPermissionMode(initialPermissionMode(nextAgent)); setFullTrustConfirmed(false); setModel(''); setCodexProfile(''); setReasoningEffort(''); }}/>
             </SelectField>
             <div>
               {!legacyPtyUnsupported && <SelectField label="操作权限">
@@ -165,6 +166,9 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
                     ? <div className="mt-1.5 flex h-10 items-center rounded-md border border-default bg-surface px-3"><Spinner label="正在读取可用模型"/></div>
                     : <CompactSelect options={[{ value: '', label: agentModels.data?.defaultModel ? `使用 Agent 默认模型 (${agentModels.data.defaultModel})` : '使用 Agent 默认模型' }, ...(agentModels.data?.models ?? []).map(item => ({ value: item.id, label: item.name, meta: item.name === item.id ? undefined : item.id }))]} value={model} placeholder="选择模型" disabledText="使用 Agent 默认模型" onChange={value => { setModel(value); setReasoningEffort(''); }}/>}
                 </SelectField>
+                {(agentModels.data?.profiles?.length ?? 0) > 0 && <SelectField label="Codex profile">
+                  <CompactSelect options={[{ value: '', label: '使用 Agent 默认 profile' }, ...(agentModels.data?.profiles ?? []).map(item => ({ value: item.id, label: item.name }))]} value={codexProfile} placeholder="选择 profile" disabledText="使用 Agent 默认 profile" onChange={setCodexProfile}/>
+                </SelectField>}
                 {agentModels.data?.source === 'acp' && agentModels.data.reasoningEfforts.length > 0 && <SelectField label="推理强度">
                   <CompactSelect options={[{ value: '', label: agentModels.data.defaultReasoningEffort ? `使用模型默认强度 (${agentModels.data.defaultReasoningEffort})` : '使用模型默认强度' }, ...agentModels.data.reasoningEfforts.map(item => ({ value: item.id, label: item.name }))]} value={reasoningEffort} placeholder="选择推理强度" disabledText="" onChange={setReasoningEffort}/>
                 </SelectField>}

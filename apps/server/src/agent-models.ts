@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { homedir } from 'node:os';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { promisify } from 'node:util';
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpRuntime, type AcpRuntimeEnsureInput, type AcpRuntimeHandle, type AcpRuntimeStatus } from 'acpx/runtime';
@@ -12,7 +13,16 @@ import type { AgentConfig } from '@dutydeck/shared';
 const run = promisify(execFile);
 const ACP_MODEL_PROBE_TIMEOUT_MS = 30_000;
 export interface AgentModel { id: string; name: string }
-export interface AgentModelsResult { models: AgentModel[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent'; protocol?: 'acp' }
+export interface AgentModelsResult { models: AgentModel[]; profiles?: AgentModel[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent'; protocol?: 'acp' }
+
+async function discoverCodexProfiles(agent: AgentConfig): Promise<AgentModel[]> {
+  if (!/codex/i.test(agent.id) && !/codex/i.test(agent.adapterId ?? '') && !/codex/i.test(agent.command)) return [];
+  const root = agent.env.CODEX_HOME?.trim() || join(homedir(), '.codex');
+  try {
+    const text = await readFile(join(root, 'config.toml'), 'utf8');
+    return [...text.matchAll(/^\s*\[profiles\.([^\]]+)\]\s*$/gm)].map(match => match[1]!.trim()).filter(Boolean).map(id => ({ id, name: id }));
+  } catch { return []; }
+}
 
 export class AgentModelProbeTimeoutError extends Error {
   constructor(readonly phase: 'ensureSession' | 'getStatus' | 'close', readonly timeoutMs: number) {
@@ -174,7 +184,8 @@ export async function discoverAgentModels(agent: AgentConfig, model?: string, fo
   // Interactive wrappers may have startup side effects and do not speak ACP.
   // Their configured default is enough to launch; do not start them to probe it.
   if (agent.protocol === 'pty-cli' && agent.adapterId) {
-    return { models: [], ...(agent.model ? { defaultModel: agent.model } : {}), reasoningEfforts: [], source: 'agent' };
+    const profiles = await discoverCodexProfiles(agent);
+    return { models: [], ...(profiles.length ? { profiles } : {}), ...(agent.model ? { defaultModel: agent.model } : {}), reasoningEfforts: [], source: 'agent' };
   }
   const cacheKey = computeAgentModelProbeKey(agent, model);
   if (!forceRefresh) {
