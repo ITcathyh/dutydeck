@@ -51,6 +51,11 @@ const TRAEX_ACCESS_FOOTER = /(?:\s+☢ Full Access \(shift\+tab to cycle\) · �
 // TraeX 0.210.1 renders these controls on their own row below model/path.
 const TRAEX_CONTROLS_FOOTER = /^☢ Full Access \(shift\+tab to cycle\) · \? for shortcuts · ← for agents$/;
 const CODEX_WARNING_FOOTER = /(?:\s+⚠ \d+ warnings? · f2 to view)?/;
+// Codex 0.164.0 can omit both context usage and the workspace from its footer.
+const CODEX_WEEKLY_FOOTER = new RegExp(
+  '^[^\\s·]+(?: [^\\s·]+)? · weekly \\d+% left' + CODEX_WARNING_FOOTER.source + '$',
+  'i',
+);
 
 const CONTEXT_FOOTER = new RegExp(
   '^(?:[^\\s·]+(?: [^\\s·]+)? · (?:(?:\\/|~|…)[^\\s·]* · )?)?' +
@@ -97,8 +102,8 @@ export function isTrustPrompt(screen: string, cli: 'Codex' | 'TraeX'): boolean {
   return hasHeading && hasMenu;
 }
 
-function isInitializedFooter(line: string): boolean {
-  return CONTEXT_FOOTER.test(line) || PATH_FOOTER.test(line);
+function isInitializedFooter(line: string, cli: 'Codex' | 'TraeX'): boolean {
+  return CONTEXT_FOOTER.test(line) || PATH_FOOTER.test(line) || (cli === 'Codex' && CODEX_WEEKLY_FOOTER.test(line));
 }
 
 /** readScreen is a rendered viewport, not a raw PTY transcript. */
@@ -114,9 +119,9 @@ export function isInputReady(screen: string, cli: 'Codex' | 'TraeX', busyPattern
   while (prompt >= 0 && !/^[›»❯](?:\s|$)/.test(composerRows[prompt]!)) prompt--;
   if (prompt < 0 || !(cli === 'Codex' ? CODEX_COMPOSER : TRAEX_COMPOSER).test(composerRows[prompt]!.trimEnd())) return false;
   const footer = composerRows.slice(prompt + 1).map(line => line.trim()).filter(Boolean);
-  if (footer.some(line => !isInitializedFooter(line) && !(cli === 'TraeX' && TRAEX_CONTROLS_FOOTER.test(line)) && !DECORATION.test(line))) return false;
+  if (footer.some(line => !isInitializedFooter(line, cli) && !(cli === 'TraeX' && TRAEX_CONTROLS_FOOTER.test(line)) && !DECORATION.test(line))) return false;
   const banner = composerRows.slice(0, prompt).map(line => line.trim());
-  return footer.some(isInitializedFooter) || LOADED_BANNER.test(banner.join('\n'))
+  return footer.some(line => isInitializedFooter(line, cli)) || LOADED_BANNER.test(banner.join('\n'))
     || banner.some(line => (cli === 'Codex' ? CODEX_BANNER : TRAEX_BANNER).test(line));
 }
 

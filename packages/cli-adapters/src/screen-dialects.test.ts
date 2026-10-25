@@ -80,6 +80,31 @@ it('accepts Codex Ultra » on both startup and adapter readiness, with full foot
   expect(isInputReady('Working (esc to interrupt)\n' + ready, 'Codex')).toBe(false);
 });
 
+// Captured Codex 0.164.0 viewport; only the workspace path is anonymized.
+const codexWeeklyScreen = readFileSync(new URL('./fixtures/codex-startup/0.164.0-weekly-footer.txt', import.meta.url), 'utf8');
+
+it('accepts the captured Codex weekly-only footer without treating it as TraeX readiness', async () => {
+  expect(isInputReady(codexWeeklyScreen, 'Codex')).toBe(true);
+  expect(isInputReady(codexWeeklyScreen.replace('Ask Codex to do anything', 'Ask TraeCode CLI'), 'TraeX')).toBe(false);
+  expect(isInputReady(codexWeeklyScreen.replace(/\s+⚠ 3 warnings · f2 to view/, ''), 'Codex')).toBe(true);
+  const write = vi.fn(), sendSpecialKeys = vi.fn();
+  await createCodexAdapter().prepareInput!({ readScreen: () => codexWeeklyScreen, write, sendSpecialKeys }, { sessionId: 'fixture' });
+  expect(write).not.toHaveBeenCalled(); expect(sendSpecialKeys).not.toHaveBeenCalled();
+});
+
+it('keeps menu, draft, busy and unknown-footer guards with the Codex weekly-only footer', () => {
+  for (const prompt of ['› 1. Trust and continue', '» 1. Update now', '› unsent draft']) {
+    expect(isInputReady(codexWeeklyScreen.replace('› Ask Codex to do anything', prompt), 'Codex'), prompt).toBe(false);
+  }
+  for (const pending of ['Review hooks', 'Select permissions', 'Resuming session…', 'Working (esc to interrupt)', 'Queued for capacity']) {
+    expect(isInputReady(pending + '\n' + codexWeeklyScreen, 'Codex'), pending).toBe(false);
+  }
+  for (const footer of ['weekly 68% left', 'GPT-6-Astra xhigh · uninitialized', 'GPT-6-Astra xhigh · weekly 68% left · Approval']) {
+    expect(isInputReady(codexWeeklyScreen.replace(/^.*GPT-6-Astra xhigh.*$/m, footer), 'Codex'), footer).toBe(false);
+  }
+  expect(isInputReady(codexWeeklyScreen + 'Unknown control\n', 'Codex')).toBe(false);
+});
+
 it.each(['raw', 'keyed'] as const)('Cursor %s submits once and preserves multi-line soft newlines and the first-write settle', async mode => {
   vi.useFakeTimers();
   try {
