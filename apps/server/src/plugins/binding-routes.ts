@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { prepareSkillPrompt } from '../skill-delivery.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { RuntimeError, savePluginBindingSchema, type PluginBindingScope } from '@dutydeck/shared';
+import { RuntimeError, savePluginBindingSchema, type PluginBindingScope, pluginWebSlotKinds } from '@dutydeck/shared';
 import type { PluginHost } from './host.js';
 import { pluginDeclaredCapabilities, pluginPermissionFootprint } from './manifest.js';
 import { hasPluginTaskCredentials } from './management-auth.js';
@@ -50,6 +50,13 @@ export function registerPluginBindingRoutes(app: FastifyInstance, options?: Plug
   app.get<{ Params: { plugin: string } }>('/api/plugins/:plugin/diagnostics', async request => {
     const host = await authorized(request);
     return { plugin: request.params.plugin, diagnostics: host.diagnostics.filter(item => item.plugin === request.params.plugin) };
+  });
+  app.get<{ Params: { plugin: string; slot: string } }>('/api/plugins/:plugin/slots/:slot', async request => {
+    const host = await authorized(request);
+    const slot = z.enum(pluginWebSlotKinds).safeParse(request.params.slot);
+    if (!slot.success) throw new RuntimeError('PLUGIN_SLOT_INVALID', 'Unknown plugin Web slot', 400);
+    if (!host.active.some(item => item.entry.name === request.params.plugin)) throw new RuntimeError('PLUGIN_UNAVAILABLE', 'Plugin is not active in this scope', 404);
+    return { plugin: request.params.plugin, slot: slot.data, declarations: host.slotsForPlugin(request.params.plugin, slot.data) };
   });
   app.get<{ Params: { plugin: string } }>('/api/plugins/:plugin/service', async request => {
     const host = await authorized(request);

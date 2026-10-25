@@ -5,6 +5,32 @@ import { pluginBindingsApi } from '../api';
 import { Banner, Button, Card, Field, Input, Select, Spinner } from './primitives';
 
 const empty = (): SavePluginBinding => ({ plugin: '', botAppId: '', enabled: true, config: {}, secrets: {}, skills: [], expectedRevision: 0 });
+
+function PluginSlotPreview({ slot }: { slot: { id: string; slot: string; title: string; description?: string; elements: Array<Record<string, unknown>> } }) {
+  return <section className="mt-3 rounded border border-default p-3" aria-label={`${slot.title}（${slot.slot}）`}>
+    <div className="font-medium">{slot.title}</div>
+    {slot.description && <p className="text-caption text-secondary">{slot.description}</p>}
+    <div className="mt-2 space-y-2">
+      {slot.elements.map((element, index) => {
+        const kind = typeof element.kind === 'string' ? element.kind : 'unknown';
+        if (kind === 'text') return <p key={index} className="text-caption">{typeof element.label === 'string' && <strong>{element.label}： </strong>}{typeof element.text === 'string' ? element.text : ''}</p>;
+        if (kind === 'status') return <p key={index} role="status" className="text-caption"><strong>{typeof element.label === 'string' ? element.label : '状态'}： </strong>{typeof element.value === 'string' ? element.value : ''}</p>;
+        if (kind === 'table') {
+          const columns = Array.isArray(element.columns) ? element.columns.filter((value): value is string => typeof value === 'string') : [];
+          const rows = Array.isArray(element.rows) ? element.rows.filter((row): row is string[] => Array.isArray(row) && row.every(value => typeof value === 'string')) : [];
+          return <table key={index} className="w-full text-caption"><thead><tr>{columns.map(column => <th key={column} className="px-2 py-1 text-left">{column}</th>)}</tr></thead><tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((value, valueIndex) => <td key={valueIndex} className="border-t border-default px-2 py-1">{value}</td>)}</tr>)}</tbody></table>;
+        }
+        if (kind === 'action') {
+          const target = element.target && typeof element.target === 'object' ? element.target as Record<string, unknown> : {};
+          const targetText = target.kind === 'command' && typeof target.command === 'string' ? `命令：${target.command}` : target.kind === 'tool' && typeof target.tool === 'string' ? `工具：${target.tool}` : '目标未声明';
+          return <div key={index} className="flex items-center gap-2"><Button type="button" disabled title="插件动作需要在任务上下文中执行">{typeof element.label === 'string' ? element.label : '插件动作'}</Button><span className="text-caption text-secondary">{targetText} · 受限预览</span></div>;
+        }
+        return null;
+      })}
+    </div>
+  </section>;
+}
+
 export function PluginBindingsPanel() {
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ['plugin-bindings'], queryFn: pluginBindingsApi.list });
@@ -25,7 +51,7 @@ export function PluginBindingsPanel() {
     <h2 className="text-title font-semibold">插件与技能</h2>
     <p className="text-caption text-secondary">同一插件可供多个群或项目使用。群绑定优先于 Bot；Web 任务按原项目目录匹配。凭据只填写已有秘密引用，不填写密钥正文。</p>
     {!query.data?.packages.length && <Banner tone="info">尚无已激活的插件。安装并激活插件后可配置绑定。</Banner>}
-    {query.data?.packages.map(item => <Card key={item.name} className="p-3"><strong>{item.name}</strong> · {item.version ?? '未声明版本'} · {item.scope}<p className="text-caption">API {item.apiVersion}{item.legacyGlobal.length ? ` · 全局兼容能力：${item.legacyGlobal.join(', ')}` : ''}</p>{item.capabilities?.length ? <p className="text-caption">能力：{item.capabilities.join('、')}</p> : null}{item.permissions && <p className="text-caption">权限足迹：{[...item.permissions.effects, ...item.permissions.network.map(value => `network:${value}`), ...item.permissions.filesystem.map(value => `fs:${value}`)].join('、') || '无'}</p>}{item.slots?.length ? <p className="text-caption">Web：{item.slots.map(slot => `${slot.slot}:${slot.id}`).join('、')}</p> : null}{item.service && <p className="text-caption">服务：{item.service.mode} · {item.service.status.status}</p>}</Card>)}
+    {query.data?.packages.map(item => <Card key={item.name} className="p-3"><strong>{item.name}</strong> · {item.version ?? '未声明版本'} · {item.scope}<p className="text-caption">API {item.apiVersion}{item.legacyGlobal.length ? ` · 全局兼容能力：${item.legacyGlobal.join(', ')}` : ''}</p>{item.capabilities?.length ? <p className="text-caption">能力：{item.capabilities.join('、')}</p> : null}{item.permissions && <p className="text-caption">权限足迹：{[...item.permissions.effects, ...item.permissions.network.map(value => `network:${value}`), ...item.permissions.filesystem.map(value => `fs:${value}`)].join('、') || '无'}</p>}{item.slots?.length ? <><p className="text-caption">Web 插槽（受限预览）：{item.slots.map(slot => `${slot.slot}:${slot.id}`).join('、')}</p>{item.slots.map(slot => <PluginSlotPreview key={`${slot.slot}:${slot.id}`} slot={slot}/>)}</> : null}{item.service && <p className="text-caption">服务：{item.service.mode} · {item.service.status.status}</p>}</Card>)}
     {query.data?.diagnostics.map((item, index) => <Banner key={index} tone="danger">{item.plugin}: {item.message}</Banner>)}
     <div className="flex flex-wrap gap-2">{query.data?.bindings.map(binding => <Button key={binding.id} onClick={() => edit(binding)}>{binding.plugin} · {binding.chatId ?? binding.botAppId ?? binding.workspaceRoot} · r{binding.revision}{binding.enabled ? '' : '（停用）'}</Button>)}<Button onClick={() => { setDraft(empty()); setTarget('bot'); preview.reset(); }}>新建绑定</Button></div>
     <form className="space-y-3" onSubmit={event => { event.preventDefault(); save.mutate(); }}>

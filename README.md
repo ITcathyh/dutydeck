@@ -785,6 +785,7 @@ dutydeck plugin uninstall <名字>
 - 鉴权：`token`（请求头里带令牌，可带 `Bearer ` 前缀）或 `hmac-sha256`。HMAC 触发器还必须带时间戳头（默认 `x-dutydeck-timestamp`，Unix 秒）、一次性 nonce 头（默认 `x-dutydeck-nonce`）和签名头；签名是 `HMAC-SHA256(secret, timestamp + "\\n" + nonce + "\\n" + SHA256(rawBody))`，十六进制，可带 `sha256=` 前缀。时间戳默认允许前后 300 秒，nonce 只能使用一次。令牌用 `dutydeck plugin trigger-token <插件>/<id>` 查看或 `--rotate` 轮换，轮换立即生效。并发创建或轮换不同触发器的令牌时，各次成功操作都会保留。
 - `target` 的值可以写 `{{config.<键>}}`，引用插件配置；配置没填齐时触发器不可用。`session` 为 `new`（每次新会话）或 `reuse`。
 - 返回码：`202 {runId, sessionId, taskId, statusUrl}` 已接受；`200 {duplicate:true, runId}` 重复事件；`400` 请求体不是 JSON；`401` 令牌、签名、时间戳无效或 nonce 已使用；`404` 触发器不存在或插件未启用；`413` 请求体超过 1 MiB；`429` 达到 `maxConcurrent`；`502` 投递失败（同时撤销去重记录，可重试）。可用相同鉴权请求 `GET .../runs/<runId>` 查询状态，并对仍在队列、尚未提交给 Agent 的运行 `POST .../cancel`；HMAC 查询和取消也要为零请求体生成新 nonce 和签名，nonce 只用一次；已开始执行的运行保持 running，取消不会撤回已发出的外部副作用。
+- 也可使用统一任务入口 `POST /api/plugin-triggers/v1/runs?plugin=<插件>&triggerId=<触发器>`，状态和取消地址分别是 `/api/plugin-triggers/v1/runs/<runId>` 与 `/cancel`（查询参数带回 `plugin`、`triggerId`）。请求头 `Idempotency-Key` 与清单中的 `idempotencyKey` 模板都会参与 24 小时去重；`dryRun=true` 只校验鉴权和模板，不启动任务。
 - 去重 24 小时，重启后仍有效；去重键是 `dedupeKey` 渲染结果，没写就用整个请求体。`maxConcurrent` 默认 4，范围 1 到 32。
 - 模板里 `{{payload.a.b}}` 取请求体字段，`{{payload}}` 取整个请求体。进入 prompt 的每个取值都被当作**不可信数据**包裹（带随机边界，单个取值最多 2 万字符）。模板读不到鉴权头、`authorization` 和 `cookie`。
 - 任务结果以文本发回目标群，最多 8000 字符。
@@ -843,7 +844,7 @@ dutydeck settings plugin-binding set team-faq --app cli_bot --chat oc_a enabled=
 
 群绑定完整覆盖 Bot 默认绑定，未填字段只取清单默认值。Web 按规范化后的项目根目录精确匹配；CLI 编辑时由目标服务器解析工作区别名（包括符号链接），并保留已有配置和版本；停用绑定也可重新启用。托管 worktree 使用可信会话的原项目目录。带 Bot/群的请求不回退到工作区绑定。绑定更新使用版本比较，下一次受控调用重新解析；旧调用的秘密访问器发现版本变化或停用会拒绝。新管理接口只接受安装管理员，任务凭据不能改绑定。
 
-清单可声明 `apiVersion: 1`（不支持的版本拒绝加载）、`host`/`dependencies`、`permissions`（`secrets/network/filesystem/effects` 只做可审计声明）和声明式 Web `slots`（`settings`、`command_palette`、`task_panel`、`result_card`，元素只能是文本、状态、表格或指向已注册命令/工具的动作）。`bindingConfig` 支持 `string`、`number`、`integer`、`boolean`、`string_list`、`secret`，以及适用的 `required/default/enum/min/max`。普通配置与秘密引用分开保存，值、默认值和枚举类型不匹配时拒绝。秘密只能通过本地隐藏输入或文件描述符创建：
+清单可声明 `apiVersion: 1`（不支持的版本拒绝加载）、`host`/`dependencies`、`permissions`（`secrets/network/filesystem/effects` 只做可审计声明）和声明式 Web `slots`（`settings`、`command_palette`、`task_panel`、`result_card`，元素只能是文本、状态、表格或指向已注册命令/工具的动作）。绑定管理页会渲染这些元素作为受限预览；动作在缺少任务上下文时保持禁用，不执行插件自带脚本或任意 URL。`bindingConfig` 支持 `string`、`number`、`integer`、`boolean`、`string_list`、`secret`，以及适用的 `required/default/enum/min/max`。普通配置与秘密引用分开保存，值、默认值和枚举类型不匹配时拒绝。秘密只能通过本地隐藏输入或文件描述符创建：
 
 ```bash
 dutydeck settings plugin-binding secret-set my-plugin group-a --value-fd 0
@@ -906,7 +907,7 @@ dutydeck plugin-tool call private-export/export-report --json '{"reportId":"week
 ```
 
 - `command`：字符串走 `/bin/sh -c`，数组直接执行；工作目录是插件根目录。`timeout` 必填，100 到 600000 毫秒。`onFailure` 为 `ignore`（默认）或 `block`。`matcher` 是可选正则（匹配对象见下表），安装时会检查不会灾难性回溯。
-- **输入**：stdin 收到一份 JSON：`{ event, plugin, botAppId?, chatId?, sessionId?, taskId?, attemptId?, cwd?, payload }`。
+- **输入**：stdin 收到一份 JSON：`{ event, plugin, eventId?, bindingRevision?, actor?, botAppId?, chatId?, sessionId?, taskId?, attemptId?, cwd?, payload }`。`eventId`、`actor` 和 `bindingRevision` 由宿主生成，插件不能覆盖；任务和工具入口能提供的 session/task/attempt 身份也在顶层传递。
 - **环境变量**：只继承 `PATH`、`HOME`、临时目录、locale、时区等基础变量，另加 `DUTYDECK_PLUGIN_NAME`、`DUTYDECK_PLUGIN_ROOT`、`DUTYDECK_PLUGIN_DATA`、非敏感的 `DUTYDECK_PLUGIN_CONFIG_<KEY>` 和 `DUTYDECK_HOOK_EVENT`；秘密只能经 binding accessor 读取。
 - **输出**：exit 0 放行，stdout 可以是 JSON：`decision`（`allow` / `deny` / `ask`）、`reason`、`additionalContext`、`updatedPrompt`。exit 2 阻断，stderr 作为原因。其他非零退出码或超时是非阻断错误；`onFailure: block` 时改为阻断。超时会杀掉整个进程组并立即返回。stdout 上限 64 KiB，超出按“没有输出”处理；stderr 上限 8 KiB。
 - **顺序**：按插件名排序，再按声明顺序。`deny` 立即生效并结束；其余按 `ask` 优于 `allow` 合并。

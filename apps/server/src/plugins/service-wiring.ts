@@ -28,7 +28,7 @@ export async function loadDaemonPlugins(env: NodeJS.ProcessEnv, options: { built
 
 export interface PluginWiringDeps {
   runtime: () => DutydeckRuntime;
-  repositories: { execution: Pick<ExecutionRepository, 'getTaskExecution' | 'getAttemptEvents' | 'getAcceptedTask'>; ciWebhook: Pick<CiWebhookRepository, 'claimEvent' | 'releaseEvent'> };
+  repositories: { execution: Pick<ExecutionRepository, 'getTaskExecution' | 'getAttemptEvents' | 'getAcceptedTask'>; ciWebhook: Pick<CiWebhookRepository, 'claimEvent' | 'releaseEvent' | 'bindTask' | 'listTaskBindings' | 'unbindTask'> };
   readBot(appId: string): Promise<(TriggerBot & { appSecret?: string }) | undefined>;
   fallbackAgentId(): string | undefined;
   sendText(bot: TriggerBot & { appSecret?: string }, input: { chatId: string; text: string; idempotencyKey: string }): Promise<unknown>;
@@ -58,6 +58,12 @@ export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
       const status = deps.repositories.execution.getTaskExecution(taskId)?.task.status;
       return !status || ['completed', 'failed', 'interrupted', 'cancelled'].includes(status);
     },
+    taskStatus: taskId => {
+      const status = deps.repositories.execution.getTaskExecution(taskId)?.task.status;
+      if (!status) return 'unknown';
+      return status === 'completed' ? 'succeeded' : status === 'failed' ? 'failed' : status === 'cancelled' || status === 'interrupted' ? 'cancelled' : 'running';
+    },
+    runBindings: deps.repositories.ciWebhook,
     dedupe: { claim: (key, now, expiresAt) => deps.repositories.ciWebhook.claimEvent(key, now, expiresAt), release: (key, expiresAt) => deps.repositories.ciWebhook.releaseEvent(key, expiresAt) }
   });
 

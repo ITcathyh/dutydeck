@@ -153,6 +153,8 @@ export const pluginTriggerSchema = z.object({
     session: z.enum(['new', 'reuse']).default('new')
   }).strict(),
   prompt: z.string().min(1).max(20_000),
+  /** Stable request key template. `dedupeKey` remains accepted for v1 compatibility. */
+  idempotencyKey: z.string().min(1).max(1_000).optional(),
   dedupeKey: z.string().min(1).max(1_000).optional(),
   maxConcurrent: z.number().int().min(1).max(32).default(4)
 }).strict();
@@ -162,6 +164,12 @@ export type PluginTrigger = z.infer<typeof pluginTriggerSchema>;
 export interface PluginHookInput {
   event: PluginHookEvent;
   plugin: string;
+  /** Host-generated immutable event identity; plugin input cannot override it. */
+  eventId?: string;
+  /** Binding revision used for this event when the event is binding-scoped. */
+  bindingRevision?: number;
+  /** Host-resolved actor for events where the originating task/tool exposes one. */
+  actor?: { kind: 'installation_owner'; id: 'installation_owner' } | { kind: 'channel'; id: string; appId: string } | { kind: 'unspecified' };
   botAppId?: string;
   chatId?: string;
   sessionId?: string;

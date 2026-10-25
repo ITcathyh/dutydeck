@@ -45,7 +45,7 @@ describe('PluginRuntimeHooks', () => {
     const identity = { sessionId: 's1', taskId: 't1', attemptId: 'a1', runId: 'r1', actor: { kind: 'installation_owner', id: 'installation_owner' } as const, channel: 'web' as const, cwd: '/repo', workspaceRoot: '/repo' };
     expect(await hooks.toolBeforeCall(identity, { tool: 'tickets/get', resource: 'ticket:T-1' })).toBe('allow');
     await hooks.deliveryCompleted(identity, { kind: 'tool', tool: 'tickets/get', status: 'succeeded' });
-    expect(seen).toHaveBeenCalledWith(expect.objectContaining({ event: 'delivery.completed', attemptId: 'a1' }));
+    expect(seen).toHaveBeenCalledWith(expect.objectContaining({ event: 'delivery.completed', eventId: expect.stringMatching(/^evt_[0-9a-f]{32}$/), attemptId: 'a1', actor: identity.actor }));
   });
 
   it('derives bot and chat for bot-scoped sessions only', () => {
@@ -105,11 +105,11 @@ describe('plugin hooks on background sessions (decision, response, memory)', () 
     const seen = vi.fn<PluginHookHandler>(() => ({}));
     const hooks = new PluginRuntimeHooks(new PluginHookBus([bound('task.completed', seen), bound('verification.completed', seen)]));
     for (const source of sources) {
-      await hooks.taskCompleted(background(source), { id: `t_${source}`, status: 'completed', prompt: 'p' } as PublicTaskRecord);
-      await hooks.verificationCompleted(background(source), { status: 'passed' } as never);
+      await hooks.taskCompleted(background(source), { id: `t_${source}`, currentAttemptId: `a_${source}`, status: 'completed', prompt: 'p' } as PublicTaskRecord);
+      await hooks.verificationCompleted(background(source), { status: 'passed', taskId: `t_${source}` } as never);
     }
-    expect(seen.mock.calls.map(([input]) => [input.event, input.botAppId, (input.payload as { source?: string }).source])).toEqual(sources.flatMap(source => [
-      ['task.completed', 'cli_a', source], ['verification.completed', 'cli_a', source]
+    expect(seen.mock.calls.map(([input]) => [input.event, input.botAppId, input.taskId, input.attemptId, (input.payload as { source?: string }).source])).toEqual(sources.flatMap(source => [
+      ['task.completed', 'cli_a', `t_${source}`, `a_${source}`, source], ['verification.completed', 'cli_a', `t_${source}`, undefined, source]
     ]));
   });
 

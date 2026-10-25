@@ -41,13 +41,22 @@ export class PluginServiceSupervisor {
   register(spec: PluginServiceSpec): void {
     const existing = this.records.get(spec.plugin);
     if (existing?.child && existing.status !== 'stopped') throw new Error(`PLUGIN_SERVICE_RUNNING: ${spec.plugin}`);
+    if (existing) clearAutoRestart(existing);
     this.records.set(spec.plugin, { spec: freezeSpec(spec), status: 'stopped', restarts: existing?.restarts ?? 0 });
   }
 
   async start(plugin: string): Promise<PluginServiceSnapshot> {
+    return this.startInternal(plugin, false);
+  }
+
+  private async startInternal(plugin: string, automatic: boolean): Promise<PluginServiceSnapshot> {
     const record = this.records.get(plugin);
     if (!record) throw new Error(`PLUGIN_SERVICE_NOT_FOUND: ${plugin}`);
     if (record.child && (record.status === 'starting' || record.status === 'running')) return snapshot(record);
+    if (!automatic) {
+      clearAutoRestart(record);
+      record.autoRestartCount = 0;
+    }
     record.status = 'starting';
     record.lastError = undefined;
     const safeConfig = Object.fromEntries(Object.entries(record.spec.config ?? {}).filter(([key]) => !/(?:token|secret|password|credential|auth|key)/i.test(key)));
@@ -72,37 +81,56 @@ export class PluginServiceSupervisor {
     child.stderr?.on('data', chunk => this.log?.warn({ plugin, stderr: String(chunk).slice(0, 8_192) }, '插件服务输出错误流'));
     child.once('error', error => {
       if (record.child !== child) return;
-      record.status = 'crashed';
-      record.lastError = error.message;
-      record.lastExitCode = child.exitCode;
-      record.child = undefined;
+      this.crash(record, child, error.message, undefined);
       this.log?.warn({ plugin, error: error.message }, '插件服务启动失败');
     });
     child.once('exit', (code, signal) => {
       if (record.child !== child) return;
-      record.child = undefined;
-      record.lastExitCode = code;
-      if (record.status !== 'stopping') {
-        record.status = 'crashed';
-        record.lastError = signal ? `signal:${signal}` : undefined;
-        record.restarts += 1;
-        this.log?.warn({ plugin, code, signal }, '插件服务异常退出');
-      } else record.status = 'stopped';
+      if (record.status === 'stopping') {
+        record.child = undefined;
+        record.lastExitCode = code;
+        record.status = 'stopped';
+        return;
+      }
+      this.crash(record, child, signal ? `signal:${signal}` : undefined, code);
+      this.log?.warn({ plugin, code, signal }, '插件服务异常退出');
     });
     return snapshot(record);
+  }
+
+  private crash(record: RecordState, child: ChildProcess, error: string | undefined, code: number | null | undefined): void {
+    if (record.child !== child) return;
+    record.child = undefined;
+    record.status = 'crashed';
+    record.lastError = error;
+    record.lastExitCode = code ?? child.exitCode;
+    record.restarts += 1;
+    if (record.spec.mode !== 'auto' || (record.autoRestartCount ?? 0) >= AUTO_RESTART_LIMIT) return;
+    const attempt = (record.autoRestartCount ?? 0) + 1;
+    record.autoRestartCount = attempt;
+    record.autoRestartTimer = setTimeout(() => {
+      record.autoRestartTimer = undefined;
+      if (record.status !== 'crashed' || record.child) return;
+      void this.startInternal(record.spec.plugin, true).catch(startError => {
+        record.status = 'crashed';
+        record.lastError = startError instanceof Error ? startError.message : String(startError);
+      });
+    }, AUTO_RESTART_BASE_DELAY_MS * 2 ** (attempt - 1));
   }
 
   async stop(plugin: string): Promise<PluginServiceSnapshot> {
     const record = this.records.get(plugin);
     if (!record) throw new Error(`PLUGIN_SERVICE_NOT_FOUND: ${plugin}`);
     const child = record.child;
-    if (!child) { record.status = 'stopped'; return snapshot(record); }
+    if (!child) { clearAutoRestart(record); record.status = 'stopped'; return snapshot(record); }
     record.status = 'stopping';
     kill(child, 'SIGTERM');
-    await waitForExit(child, this.stopTimeoutMs).catch(() => {
+    await waitForExit(child, this.stopTimeoutMs).catch(async () => {
       kill(child, 'SIGKILL');
+      await waitForExit(child, this.stopTimeoutMs).catch(() => undefined);
     });
-    record.child = undefined;
+    clearAutoRestart(record);
+    if (record.child === child) record.child = undefined;
     record.status = 'stopped';
     return snapshot(record);
   }
@@ -133,6 +161,16 @@ interface RecordState {
   restarts: number;
   lastExitCode?: number | null;
   lastError?: string;
+  autoRestartCount?: number;
+  autoRestartTimer?: ReturnType<typeof setTimeout>;
+}
+
+const AUTO_RESTART_LIMIT = 3;
+const AUTO_RESTART_BASE_DELAY_MS = 50;
+
+function clearAutoRestart(record: RecordState): void {
+  if (record.autoRestartTimer) clearTimeout(record.autoRestartTimer);
+  record.autoRestartTimer = undefined;
 }
 
 function freezeSpec(spec: PluginServiceSpec): PluginServiceSpec {

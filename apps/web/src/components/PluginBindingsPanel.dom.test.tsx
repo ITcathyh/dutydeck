@@ -49,3 +49,16 @@ it('deletes cleared non-string values and secret references while saving an empt
   fireEvent.click(screen.getByRole('button',{name:'保存绑定'}));
   await waitFor(()=>expect(save).toHaveBeenCalledWith(expect.objectContaining({config:{note:''},secrets:{},expectedRevision:2})));
 });
+
+it('renders declarative Web slot elements as a bounded preview', async()=>{
+  vi.spyOn(pluginBindingsApi,'list').mockResolvedValue({bindings:[],diagnostics:[],packages:[{name:'sample',scope:'global',apiVersion:1,requiredSkills:[],legacyGlobal:[],configSchema:{},slots:[{id:'overview',slot:'task_panel',title:'任务概览',description:'插件提供的只读信息',elements:[{kind:'text',label:'说明',text:'已连接'},{kind:'status',label:'状态',tone:'accent',value:'正常'},{kind:'table',columns:['键','值'],rows:[['版本','1.0']]},{kind:'action',label:'打开详情',target:{kind:'command',command:'details'}}]}]}]});
+  const client=new QueryClient({defaultOptions:{queries:{retry:false},mutations:{retry:false}}});
+  render(<QueryClientProvider client={client}><PluginBindingsPanel/></QueryClientProvider>);
+  expect(await screen.findByText('任务概览')).toBeTruthy();
+  expect(screen.getByText('已连接')).toBeTruthy();
+  expect(screen.getByRole('status').textContent).toContain('正常');
+  expect(screen.getByRole('columnheader',{name:'键'})).toBeTruthy();
+  const action=screen.getByRole('button',{name:'打开详情'});
+  expect(action.hasAttribute('disabled')).toBe(true);
+  expect(screen.getByText(/命令：details · 受限预览/)).toBeTruthy();
+});

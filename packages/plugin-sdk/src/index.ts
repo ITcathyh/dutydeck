@@ -24,7 +24,10 @@ export interface ScenarioProvider {
 }
 export type PluginHookEvent = 'task.received' | 'task.beforeRun' | 'tool.beforeCall' | 'permission.request' | 'task.completed' | 'verification.completed' | 'delivery.completed' | 'notify';
 export interface PluginHookInput {
-  event: PluginHookEvent; plugin: string; botAppId?: string; chatId?: string; sessionId?: string; taskId?: string; attemptId?: string; cwd?: string; payload: Record<string, unknown>;
+  event: PluginHookEvent; plugin: string; eventId?: string; bindingRevision?: number;
+  /** Host-resolved actor for events where the originating task/tool exposes one. */
+  actor?: { kind: 'installation_owner'; id: 'installation_owner' } | { kind: 'channel'; id: string; appId: string } | { kind: 'unspecified' };
+  botAppId?: string; chatId?: string; sessionId?: string; taskId?: string; attemptId?: string; cwd?: string; payload: Record<string, unknown>;
 }
 export interface PluginHookOutput { decision?: 'allow' | 'deny' | 'ask'; reason?: string; additionalContext?: string; updatedPrompt?: string }
 export interface PluginApi {

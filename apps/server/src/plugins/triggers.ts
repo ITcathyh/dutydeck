@@ -10,6 +10,9 @@ export interface TriggerRequest {
   triggerId: string;
   rawBody: Buffer;
   headers: Record<string, string | string[] | undefined>;
+  /** Versioned task API can provide a stable status URL without changing the trigger identity. */
+  statusUrl?: (runId: string) => string;
+  dryRun?: boolean;
 }
 export interface TriggerResponse { statusCode: number; body: Record<string, unknown> }
 export type TriggerRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'unknown' | 'cancelled';
@@ -36,6 +39,13 @@ export interface TriggerServiceOptions {
   dedupe?: TriggerDedupe;
   /** 任务是否已结束。取消排队任务、停止会话不触发结算通知，名额靠它回收。 */
   isSettled?(taskId: string): boolean;
+  /** Optional durable task binding used to recover status after a daemon restart. */
+  runBindings?: {
+    bindTask(taskId: string, subscriptionId: string, createdAt: number): void;
+    listTaskBindings(): Array<{ taskId: string; subscriptionId: string; createdAt: number }>;
+    unbindTask(taskId: string): void;
+  };
+  taskStatus?(taskId: string): TriggerRunStatus | undefined;
   now?: () => number;
 }
 
@@ -126,13 +136,30 @@ export class PluginTriggerService {
   private readonly runs = new Map<string, TriggerRun>();
   private readonly runKeys = new Map<string, { runId: string; expiresAt: number }>();
   private readonly dedupe: TriggerDedupe;
-  constructor(private readonly options: TriggerServiceOptions) { this.dedupe = options.dedupe ?? new MemoryTriggerDedupe(); }
+  constructor(private readonly options: TriggerServiceOptions) {
+    this.dedupe = options.dedupe ?? new MemoryTriggerDedupe();
+    for (const binding of options.runBindings?.listTaskBindings() ?? []) {
+      if (!binding.subscriptionId.startsWith('dutydeck-plugin-trigger:')) continue;
+      if (binding.createdAt + DEDUPE_TTL_MS <= (options.now?.() ?? Date.now())) { options.runBindings?.unbindTask(binding.taskId); continue; }
+      const decoded = decodeRunBinding(binding.subscriptionId);
+      if (!decoded) continue;
+      const status = options.taskStatus?.(binding.taskId) ?? 'running';
+      this.runs.set(decoded.runId, { runId: decoded.runId, plugin: decoded.plugin, triggerId: decoded.triggerId, sessionId: decoded.sessionId, taskId: binding.taskId, status, createdAt: binding.createdAt, updatedAt: binding.createdAt });
+      if (status === 'queued' || status === 'running') {
+        const key = `${decoded.plugin}/${decoded.triggerId}`;
+        const tasks = this.inFlight.get(key) ?? new Set<string>();
+        tasks.add(binding.taskId);
+        this.inFlight.set(key, tasks);
+      }
+    }
+  }
 
   async receive(request: TriggerRequest): Promise<TriggerResponse> {
     const trigger = this.options.lookup(request.plugin, request.triggerId);
     if (!trigger) return { statusCode: 404, body: { error: { code: 'PLUGIN_TRIGGER_NOT_FOUND', message: '没有这个触发器，或插件未启用' } } };
     if (request.rawBody.length > TRIGGER_BODY_LIMIT) return { statusCode: 413, body: { error: { code: 'PLUGIN_TRIGGER_BODY_TOO_LARGE', message: `请求体超过 ${TRIGGER_BODY_LIMIT} 字节` } } };
     const now = this.options.now?.() ?? Date.now();
+    for (const binding of this.options.runBindings?.listTaskBindings() ?? []) if (binding.subscriptionId.startsWith('dutydeck-plugin-trigger:') && binding.createdAt + DEDUPE_TTL_MS <= now) this.options.runBindings?.unbindTask(binding.taskId);
     const secret = this.options.token(request.plugin, request.triggerId);
     if (!secret || !verifyTriggerAuth(trigger.auth, secret, request, now)) {
       return { statusCode: 401, body: { error: { code: 'PLUGIN_TRIGGER_UNAUTHORIZED', message: '触发器令牌或签名无效' } } };
@@ -149,9 +176,12 @@ export class PluginTriggerService {
     catch { return { statusCode: 400, body: { error: { code: 'PLUGIN_TRIGGER_INVALID_JSON', message: '请求体必须是 JSON' } } }; }
 
     // 模板取不到令牌、签名和 cookie。
-    const hidden = new Set([trigger.auth.header.toLowerCase(), 'authorization', 'cookie']);
+    const hidden = new Set([trigger.auth.header.toLowerCase(), 'authorization', 'cookie', 'idempotency-key']);
     const headers = Object.fromEntries(Object.entries(request.headers).filter(([name]) => !hidden.has(name.toLowerCase())));
-    const rawKey = trigger.dedupeKey ? renderTriggerTemplate(trigger.dedupeKey, { payload, headers }) : '';
+    const requestIdempotencyKey = header(request.headers, 'idempotency-key')?.trim();
+    if (requestIdempotencyKey && requestIdempotencyKey.length > 1_000) return { statusCode: 400, body: { error: { code: 'PLUGIN_TRIGGER_INVALID_IDEMPOTENCY_KEY', message: 'Idempotency-Key 不能超过 1000 个字符' } } };
+    const keyTemplate = trigger.idempotencyKey ?? trigger.dedupeKey;
+    const rawKey = requestIdempotencyKey || (keyTemplate ? renderTriggerTemplate(keyTemplate, { payload, headers }) : '');
     const digest = createHash('sha256').update(rawKey.trim() ? `key\n${rawKey}` : `body\n${request.rawBody.toString('base64')}`).digest('hex');
     const dedupeKey = `plugin-trigger:${id}:${digest}`;
     const expiresAt = now + DEDUPE_TTL_MS;
@@ -162,7 +192,8 @@ export class PluginTriggerService {
     }
     const existingRun = this.runKeys.get(dedupeKey);
     if (!this.dedupe.claim(dedupeKey, now, expiresAt)) {
-      const runId = existingRun?.runId ?? `tr_${digest.slice(0, 32)}`;
+      const persisted = this.findDurableRunByDigest(request.plugin, request.triggerId, digest);
+      const runId = existingRun?.runId ?? persisted?.runId ?? `tr_${digest.slice(0, 32)}`;
       return { statusCode: 200, body: { accepted: false, duplicate: true, runId } };
     }
     if (existingRun) {
@@ -180,6 +211,11 @@ export class PluginTriggerService {
     }
     const source = `plugin:${request.plugin}/trigger:${request.triggerId}`;
     const prompt = renderTriggerTemplate(trigger.prompt, { payload, headers }, text => wrapUntrusted(source, text));
+    if (request.dryRun) {
+      this.runKeys.delete(dedupeKey);
+      this.dedupe.release(dedupeKey, expiresAt);
+      return { statusCode: 200, body: { accepted: false, dryRun: true, plugin: request.plugin, triggerId: request.triggerId } };
+    }
     // 投递要等，先占名额，并发请求不会一起越过上限；拿到任务 id 后换成它。
     const placeholder = `pending:${dedupeKey}`;
     running.add(placeholder);
@@ -190,7 +226,8 @@ export class PluginTriggerService {
       running.add(accepted.taskId);
       this.release(id, placeholder);
       this.runs.set(runId, { ...this.runs.get(runId)!, sessionId: accepted.sessionId, taskId: accepted.taskId, status: 'running', updatedAt: this.options.now?.() ?? Date.now() });
-      return { statusCode: 202, body: { accepted: true, runId, sessionId: accepted.sessionId, taskId: accepted.taskId, statusUrl: `/api/plugins/${request.plugin}/triggers/${request.triggerId}/runs/${runId}` } };
+      try { this.options.runBindings?.bindTask(accepted.taskId, encodeRunBinding({ runId, plugin: request.plugin, triggerId: request.triggerId, sessionId: accepted.sessionId, dedupeDigest: digest }), now); } catch { /* status recovery is best effort; the accepted task remains authoritative */ }
+      return { statusCode: 202, body: { accepted: true, runId, sessionId: accepted.sessionId, taskId: accepted.taskId, statusUrl: request.statusUrl?.(runId) ?? `/api/plugins/${request.plugin}/triggers/${request.triggerId}/runs/${runId}` } };
     } catch (error) {
       this.release(id, placeholder);
       this.dedupe.release(dedupeKey, expiresAt);
@@ -207,7 +244,21 @@ export class PluginTriggerService {
 
   getRun(plugin: string, triggerId: string, runId: string): TriggerRun | undefined {
     const run = this.runs.get(runId);
-    return run && run.plugin === plugin && run.triggerId === triggerId ? { ...run } : undefined;
+    if (run && run.plugin === plugin && run.triggerId === triggerId) return { ...run };
+    const binding = this.options.runBindings?.listTaskBindings().find(item => {
+      if (!item.subscriptionId.startsWith('dutydeck-plugin-trigger:')) return false;
+      if (item.createdAt + DEDUPE_TTL_MS <= (this.options.now?.() ?? Date.now())) {
+        this.options.runBindings?.unbindTask(item.taskId);
+        return false;
+      }
+      const decoded = decodeRunBinding(item.subscriptionId);
+      return decoded?.runId === runId && decoded.plugin === plugin && decoded.triggerId === triggerId;
+    });
+    if (!binding) return undefined;
+    const decoded = decodeRunBinding(binding.subscriptionId);
+    if (!decoded) return undefined;
+    const status = this.options.taskStatus?.(binding.taskId) ?? 'unknown';
+    return { runId, plugin, triggerId, sessionId: decoded.sessionId, taskId: binding.taskId, status, createdAt: binding.createdAt, updatedAt: binding.createdAt };
   }
 
   async cancelRun(plugin: string, triggerId: string, runId: string): Promise<TriggerRun | undefined> {
@@ -242,4 +293,27 @@ export class PluginTriggerService {
   }
 
   inFlightCount(plugin: string, triggerId: string): number { return this.inFlight.get(`${plugin}/${triggerId}`)?.size ?? 0; }
+
+  private findDurableRunByDigest(plugin: string, triggerId: string, digest: string): { runId: string } | undefined {
+    for (const binding of this.options.runBindings?.listTaskBindings() ?? []) {
+      if (!binding.subscriptionId.startsWith('dutydeck-plugin-trigger:')) continue;
+      if (binding.createdAt + DEDUPE_TTL_MS <= (this.options.now?.() ?? Date.now())) { this.options.runBindings?.unbindTask(binding.taskId); continue; }
+      const decoded = decodeRunBinding(binding.subscriptionId);
+      if (decoded?.plugin === plugin && decoded.triggerId === triggerId && decoded.dedupeDigest === digest) return { runId: decoded.runId };
+    }
+    return undefined;
+  }
+}
+
+function encodeRunBinding(binding: { runId: string; plugin: string; triggerId: string; sessionId: string; dedupeDigest: string }): string {
+  return `dutydeck-plugin-trigger:${Buffer.from(JSON.stringify(binding), 'utf8').toString('base64url')}`;
+}
+
+function decodeRunBinding(value: string): { runId: string; plugin: string; triggerId: string; sessionId: string; dedupeDigest?: string } | undefined {
+  if (!value.startsWith('dutydeck-plugin-trigger:')) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(value.slice('dutydeck-plugin-trigger:'.length), 'base64url').toString('utf8')) as Record<string, unknown>;
+    return typeof parsed.runId === 'string' && typeof parsed.plugin === 'string' && typeof parsed.triggerId === 'string' && typeof parsed.sessionId === 'string'
+      ? { runId: parsed.runId, plugin: parsed.plugin, triggerId: parsed.triggerId, sessionId: parsed.sessionId, ...(typeof parsed.dedupeDigest === 'string' ? { dedupeDigest: parsed.dedupeDigest } : {}) } : undefined;
+  } catch { return undefined; }
 }

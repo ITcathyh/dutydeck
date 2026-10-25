@@ -25,8 +25,8 @@ export class PluginBusinessToolService {
   private readonly executionOwner = randomUUID();
   private readonly reconcileOwner = randomUUID();
   constructor(readonly host: PluginToolHost, readonly grants: PluginToolGrants, readonly ledger: PluginToolLedger, readonly authorities: PluginToolAuthorityResolver, private readonly timeoutMs = 30_000, private readonly runtimeHooks?: PluginRuntimeHooks) {}
-  private async toolCompleted(identity: PluginToolIdentity, payload: Record<string, unknown>) {
-    try { await this.runtimeHooks?.deliveryCompleted(identity, payload); } catch { /* hooks are observers and cannot alter the tool result */ }
+  private async toolCompleted(identity: PluginToolIdentity, payload: Record<string, unknown>, bindingRevision: number) {
+    try { await this.runtimeHooks?.deliveryCompleted(identity, payload, bindingRevision); } catch { /* hooks are observers and cannot alter the tool result */ }
   }
   async list(token?: string, turn?: string) {
     const authority = await this.authorities.resolve(token, turn);
@@ -88,8 +88,8 @@ export class PluginBusinessToolService {
     try { resource = entry.tool.resource(frozenInput, binding); } catch { throw new RuntimeError('PLUGIN_TOOL_INVALID_RESOURCE', 'Tool resource could not be resolved', 400); }
     if (typeof resource !== 'string' || !resource || resource.length > 1000) throw new RuntimeError('PLUGIN_TOOL_INVALID_RESOURCE', 'Invalid resource', 400);
     await this.guard(authority, id, entry, binding, resource, 'invoke');
-    if (await this.runtimeHooks?.toolBeforeCall(authority.identity, { tool: id, input: frozenInput, resource, effect: entry.effect }) === 'deny') {
-      await this.toolCompleted(authority.identity, { kind: 'tool', tool: id, status: 'denied' });
+    if (await this.runtimeHooks?.toolBeforeCall(authority.identity, { tool: id, input: frozenInput, resource, effect: entry.effect }, binding.revision) === 'deny') {
+      await this.toolCompleted(authority.identity, { kind: 'tool', tool: id, status: 'denied' }, binding.revision);
       throw new RuntimeError('PLUGIN_TOOL_DENIED', 'Plugin hook denied this tool call', 403);
     }
     if (entry.kind === 'query') {
@@ -100,11 +100,11 @@ export class PluginBusinessToolService {
         if (value.length > 64_000) throw new Error();
         output = JSON.parse(value) as JsonValue;
       } catch {
-        await this.toolCompleted(authority.identity, { kind: 'tool', tool: id, status: 'failed' });
+        await this.toolCompleted(authority.identity, { kind: 'tool', tool: id, status: 'failed' }, binding.revision);
         throw new RuntimeError('PLUGIN_TOOL_QUERY_FAILED', 'Query failed or exceeded its output/time budget', 502);
       }
       await this.guard(authority, id, entry, binding, resource, 'invoke');
-      await this.toolCompleted(authority.identity, { kind: 'tool', tool: id, status: 'succeeded' });
+      await this.toolCompleted(authority.identity, { kind: 'tool', tool: id, status: 'succeeded' }, binding.revision);
       return { output };
     }
     const actionId = `pt_${digest({ tool: id, sessionId: authority.identity.sessionId, taskId: authority.identity.taskId, callId })}`;
@@ -135,7 +135,7 @@ export class PluginBusinessToolService {
         action = await this.ledger.transition(action, 'unknown', undefined, 'PLUGIN_TOOL_EXECUTION_UNKNOWN');
         if (settled) await this.ledger.releaseExecution(actionId, this.executionOwner).catch(() => false);
         else void underlyingSettled.then(() => this.ledger.releaseExecution(actionId, this.executionOwner).catch(() => undefined));
-        await this.toolCompleted(authority.identity, { kind: 'tool', tool: id, status: action.status, actionId: action.id });
+        await this.toolCompleted(authority.identity, { kind: 'tool', tool: id, status: action.status, actionId: action.id }, binding.revision);
         return receipt(action);
       }
       action = await this.ledger.transition(action, 'succeeded', result.receipt);
@@ -143,7 +143,7 @@ export class PluginBusinessToolService {
       await this.ledger.releaseExecution(actionId, this.executionOwner).catch(() => false);
       // An operation may have completed while authority was revoked; do not expose its receipt then.
       await this.guard(authority, id, entry, binding, resource, 'invoke');
-      await this.toolCompleted(authority.identity, { kind: 'tool', tool: id, status: action.status, actionId: action.id });
+      await this.toolCompleted(authority.identity, { kind: 'tool', tool: id, status: action.status, actionId: action.id }, binding.revision);
       return receipt(action);
     } finally { /* Keep inFlight until the underlying executor settles, including after timeout. */ }
   }

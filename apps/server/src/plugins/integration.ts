@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import {
   botAppIdOfSession,
@@ -33,6 +33,17 @@ export function sessionHookContext(session: Pick<Session, 'id' | 'cwd' | 'source
   return { sessionId: session.id, ...(session.cwd ? { cwd: session.cwd } : {}), ...(appId ? { botAppId: appId } : {}), ...(chatId ? { chatId } : {}) };
 }
 
+function bindingRevisionOf(deliveries: Array<{ binding?: { revision: number } }> | undefined): number | undefined {
+  const revisions = [...new Set((deliveries ?? []).map(item => item.binding?.revision).filter((value): value is number => value !== undefined))];
+  return revisions.length === 1 ? revisions[0] : undefined;
+}
+
+function actorOfSession(session: Pick<Session, 'id' | 'cwd' | 'source' | 'sourceId'>): { kind: 'installation_owner'; id: 'installation_owner' } | { kind: 'channel'; id: string; appId: string } | { kind: 'unspecified' } {
+  if (session.source === PLUGIN_TRIGGER_SOURCE) return { kind: 'installation_owner', id: 'installation_owner' };
+  const context = sessionHookContext(session);
+  return context.botAppId && context.chatId ? { kind: 'channel', id: context.chatId, appId: context.botAppId } : { kind: 'unspecified' };
+}
+
 const denied = (reason: string | undefined) => new RuntimeError('PLUGIN_HOOK_DENIED', reason ?? '插件 hook 拒绝了这次操作', 403);
 
 /**
@@ -48,9 +59,11 @@ export class PluginRuntimeHooks {
 
   has(event: Parameters<PluginHookBus['has']>[0]) { return this.hooks.has(event); }
 
+  private eventId() { return `evt_${randomUUID().replaceAll('-', '')}`; }
+
   async taskReceived(session: Session, request: TaskRequestV1): Promise<void> {
     if (!this.hooks.has('task.received')) return;
-    const result = await this.hooks.run('task.received', { ...sessionHookContext(session), payload: {
+    const result = await this.hooks.run('task.received', { eventId: this.eventId(), actor: request.actor, ...sessionHookContext(session), payload: {
       source: session.source ?? 'web', namespace: request.namespace, key: request.key, prompt: request.prompt, mode: request.mode, actor: request.actor.kind
     } }, session.source ?? 'web');
     if (result.decision === 'deny') throw denied(result.reason);
@@ -58,7 +71,8 @@ export class PluginRuntimeHooks {
 
   async beforeRun(session: Session, prepared: PrepareSkillPromptResult, policyVersion?: 'legacy-v1' | 'optimized-v1'): Promise<PrepareSkillPromptResult> {
     if (!this.hooks.has('task.beforeRun')) return prepared;
-    const result = await this.hooks.run('task.beforeRun', { ...sessionHookContext(session), payload: {
+    const beforeRunRevision = bindingRevisionOf(prepared.skillDeliveries);
+    const result = await this.hooks.run('task.beforeRun', { eventId: this.eventId(), actor: actorOfSession(session), ...(beforeRunRevision === undefined ? {} : { bindingRevision: beforeRunRevision }), ...sessionHookContext(session), payload: {
       source: session.source ?? 'web', prompt: prepared.agentPrompt, skills: prepared.skillDeliveries.map(skill => skill.name)
     } }, session.source ?? 'web');
     if (result.decision === 'deny') throw denied(result.reason);
@@ -85,7 +99,7 @@ export class PluginRuntimeHooks {
   }
 
   async reviewPermission(session: Session, request: PermissionRequestData): Promise<'allow' | 'deny' | undefined> {
-    const result = await this.hooks.run('permission.request', { ...sessionHookContext(session), payload: { ...request } }, request.title ?? '');
+    const result = await this.hooks.run('permission.request', { eventId: this.eventId(), actor: actorOfSession(session), ...sessionHookContext(session), payload: { ...request } }, request.title ?? '');
     if (result.decision === 'allow' && backgroundSources.has(session.source ?? '')) {
       this.log?.warn({ sessionId: session.id, source: session.source, plugins: result.outcomes.map(outcome => outcome.plugin) }, '插件对后台会话的批准已忽略');
       return undefined;
@@ -95,38 +109,39 @@ export class PluginRuntimeHooks {
 
   async taskCompleted(session: Session, task: PublicTaskRecord): Promise<void> {
     if (!this.hooks.has('task.completed')) return;
-    await this.hooks.run('task.completed', { ...sessionHookContext(session), taskId: task.id, payload: { status: task.status, prompt: task.prompt, source: session.source ?? 'web' } }, task.status);
+    const completedRevision = bindingRevisionOf(task.skillDeliveries);
+    await this.hooks.run('task.completed', { eventId: this.eventId(), actor: actorOfSession(session), ...(completedRevision === undefined ? {} : { bindingRevision: completedRevision }), ...sessionHookContext(session), taskId: task.id, ...(task.currentAttemptId ? { attemptId: task.currentAttemptId } : {}), payload: { status: task.status, prompt: task.prompt, source: session.source ?? 'web' } }, task.status);
   }
 
   async verificationCompleted(session: Session, result: VerificationResponse): Promise<void> {
     if (!this.hooks.has('verification.completed')) return;
-    await this.hooks.run('verification.completed', { ...sessionHookContext(session), payload: { ...result, source: session.source ?? 'web' } as Record<string, unknown> }, String((result as { status?: unknown }).status ?? ''));
+    await this.hooks.run('verification.completed', { eventId: this.eventId(), actor: actorOfSession(session), ...sessionHookContext(session), ...(result.taskId ? { taskId: result.taskId } : {}), payload: { ...result, source: session.source ?? 'web' } as Record<string, unknown> }, String((result as { status?: unknown }).status ?? ''));
   }
 
   /** 返回 false 表示有插件拒绝这次推送。 */
   async notify(context: { sessionId?: string; botAppId?: string; chatId?: string; cwd?: string }, kind: string, payload: Record<string, unknown>): Promise<boolean> {
     if (!this.hooks.has('notify')) return true;
-    const result = await this.hooks.run('notify', { ...context, payload: { kind, ...payload } }, kind);
+    const result = await this.hooks.run('notify', { eventId: this.eventId(), actor: { kind: 'unspecified' }, ...context, payload: { kind, ...payload } }, kind);
     return result.decision !== 'deny';
   }
 
   /** Synchronous tool gate. Identity is supplied by the host authority and never read from plugin output. */
-  async toolBeforeCall(identity: PluginToolIdentity, payload: Record<string, unknown>): Promise<'allow' | 'deny' | undefined> {
+  async toolBeforeCall(identity: PluginToolIdentity, payload: Record<string, unknown>, bindingRevision?: number): Promise<'allow' | 'deny' | undefined> {
     if (!this.hooks.has('tool.beforeCall')) return undefined;
     const result = await this.hooks.run('tool.beforeCall', {
-      sessionId: identity.sessionId, taskId: identity.taskId, attemptId: identity.attemptId, cwd: identity.cwd,
+      eventId: this.eventId(), ...(bindingRevision === undefined ? {} : { bindingRevision }), sessionId: identity.sessionId, taskId: identity.taskId, attemptId: identity.attemptId, cwd: identity.cwd,
       ...(identity.botAppId ? { botAppId: identity.botAppId } : {}), ...(identity.chatId ? { chatId: identity.chatId } : {}),
-      payload: { actor: identity.actor, channel: identity.channel, ...payload }
+      actor: identity.actor, payload: { actor: identity.actor, channel: identity.channel, ...payload }
     }, String(payload.tool ?? ''));
     return result.decision === 'deny' ? 'deny' : result.decision === 'allow' ? 'allow' : undefined;
   }
 
-  async deliveryCompleted(identity: PluginToolIdentity, payload: Record<string, unknown>): Promise<void> {
+  async deliveryCompleted(identity: PluginToolIdentity, payload: Record<string, unknown>, bindingRevision?: number): Promise<void> {
     if (!this.hooks.has('delivery.completed')) return;
     await this.hooks.run('delivery.completed', {
-      sessionId: identity.sessionId, taskId: identity.taskId, attemptId: identity.attemptId, cwd: identity.cwd,
+      eventId: this.eventId(), ...(bindingRevision === undefined ? {} : { bindingRevision }), sessionId: identity.sessionId, taskId: identity.taskId, attemptId: identity.attemptId, cwd: identity.cwd,
       ...(identity.botAppId ? { botAppId: identity.botAppId } : {}), ...(identity.chatId ? { chatId: identity.chatId } : {}),
-      payload: { actor: identity.actor, channel: identity.channel, ...payload }
+      actor: identity.actor, payload: { actor: identity.actor, channel: identity.channel, ...payload }
     }, String(payload.kind ?? ''));
   }
 }

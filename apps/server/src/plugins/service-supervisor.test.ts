@@ -53,6 +53,34 @@ describe('PluginServiceSupervisor', () => {
     await supervisor.stop('crash');
   });
 
+  it('automatically restarts auto services with a bounded retry budget', async () => {
+    const f = await fixture(`import { existsSync, readFileSync, writeFileSync } from 'node:fs'; const file = process.env.DUTYDECK_PLUGIN_ROOT + '/count'; const count = existsSync(file) ? Number(readFileSync(file, 'utf8')) + 1 : 1; writeFileSync(file, String(count)); if (count < 3) process.exit(7); setInterval(() => {}, 1000);`);
+    const supervisor = new PluginServiceSupervisor(undefined, 1_000);
+    supervisor.register({ plugin: 'auto', root: f.root, entry: f.entry, dataDir: f.dataDir, mode: 'auto' });
+    await supervisor.start('auto');
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const status = supervisor.status('auto');
+      if (status.status === 'running' && status.restarts >= 2) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(supervisor.status('auto')).toMatchObject({ status: 'running', restarts: 2 });
+    await supervisor.stop('auto');
+  });
+
+  it('stops retrying an auto service after the finite crash budget', async () => {
+    const f = await fixture('process.exit(9);');
+    const supervisor = new PluginServiceSupervisor(undefined, 1_000);
+    supervisor.register({ plugin: 'loop', root: f.root, entry: f.entry, dataDir: f.dataDir, mode: 'auto' });
+    await supervisor.start('loop');
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const status = supervisor.status('loop');
+      if (status.status === 'crashed' && status.restarts >= 4) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(supervisor.status('loop')).toMatchObject({ status: 'crashed', restarts: 4, lastExitCode: 9 });
+    await supervisor.stop('loop');
+  });
+
   it('refuses to replace a running service spec', async () => {
     const f = await fixture(`setInterval(() => {}, 1000);`);
     const supervisor = new PluginServiceSupervisor(undefined, 1_000);

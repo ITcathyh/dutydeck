@@ -83,6 +83,35 @@ describe('PluginTriggerService', () => {
     expect(deliver).toHaveBeenCalledTimes(3);
   });
 
+  it('supports a request Idempotency-Key and the manifest idempotencyKey alias', async () => {
+    const trigger = pluginTriggerSchema.parse({ ...tokenTrigger, idempotencyKey: '{{payload.build.id}}', dedupeKey: undefined, maxConcurrent: 8 });
+    const { triggers, deliver } = service(trigger);
+    const first = await triggers.receive(request(body({ build: { id: 7 }, log: 'first' }), { 'x-dutydeck-token': 'secret-token', 'idempotency-key': 'deploy-7' }));
+    const duplicate = await triggers.receive(request(body({ build: { id: 7 }, log: 'second' }), { 'x-dutydeck-token': 'secret-token', 'idempotency-key': 'deploy-7' }));
+    expect(first.statusCode).toBe(202);
+    expect(duplicate).toMatchObject({ statusCode: 200, body: { accepted: false, duplicate: true, runId: expect.stringMatching(/^tr_[0-9a-f]{32}$/) } });
+    expect(deliver).toHaveBeenCalledOnce();
+    const byManifest = await triggers.receive(request(body({ build: { id: 8 }, log: 'manifest' })));
+    expect(byManifest.statusCode).toBe(202);
+    expect(deliver).toHaveBeenCalledTimes(2);
+  });
+
+  it('recovers an in-flight run from the durable task binding after a service restart', async () => {
+    const rows: Array<{ taskId: string; subscriptionId: string; createdAt: number }> = [];
+    const runBindings = {
+      bindTask: (taskId: string, subscriptionId: string, createdAt: number) => rows.push({ taskId, subscriptionId, createdAt }),
+      listTaskBindings: () => rows,
+      unbindTask: (taskId: string) => { const index = rows.findIndex(row => row.taskId === taskId); if (index >= 0) rows.splice(index, 1); }
+    };
+    const deliver = vi.fn(async () => ({ sessionId: 's1', taskId: 'durable-task' }));
+    const options = { lookup: () => ({ ...tokenTrigger, scope: 'global' }), token: () => 'secret-token', deliver, runBindings, now: () => 10_000 };
+    const first = new PluginTriggerService(options);
+    const accepted = await first.receive(request(body({ build: { id: 99 } })));
+    const runId = (accepted.body as { runId: string }).runId;
+    const restarted = new PluginTriggerService({ ...options, taskStatus: () => undefined });
+    expect(restarted.getRun('ci', 'build', runId)).toMatchObject({ runId, taskId: 'durable-task', status: 'running', sessionId: 's1' });
+  });
+
   it('rejects an HMAC nonce replay even when the body changes', async () => {
     let now = 1_700_000_000_000;
     const trigger = pluginTriggerSchema.parse({ ...hmacTrigger, maxConcurrent: 8 });
@@ -186,6 +215,9 @@ describe('PluginTriggerService', () => {
 describe('plugin routes', () => {
   it('only exempts trigger POSTs from web auth', () => {
     expect(isPluginTriggerRequest('POST', '/api/plugins/ci/triggers/build')).toBe(true);
+    expect(isPluginTriggerRequest('POST', '/api/plugin-triggers/v1/runs')).toBe(true);
+    expect(isPluginTriggerRequest('GET', '/api/plugin-triggers/v1/runs/tr_1')).toBe(true);
+    expect(isPluginTriggerRequest('POST', '/api/plugin-triggers/v1/runs/tr_1/cancel')).toBe(true);
     expect(isPluginTriggerRequest('GET', '/api/plugins/ci/triggers/build')).toBe(false);
     expect(isPluginTriggerRequest('POST', '/api/plugins/commands')).toBe(false);
     expect(isPluginTriggerRequest('POST', '/api/plugins/ci/triggers/build/x')).toBe(false);
@@ -203,6 +235,13 @@ describe('plugin routes', () => {
     const accepted = await app.inject({ method: 'POST', url: '/api/plugins/ci/triggers/build', payload, headers: { 'content-type': 'text/plain', 'x-hub-signature-256': `sha256=${signature}`, 'x-dutydeck-timestamp': timestamp, 'x-dutydeck-nonce': nonce } });
     expect(accepted.statusCode).toBe(202);
     expect(deliver.mock.calls[0]![0].prompt).toContain('"x": 1');
+    const versioned = await app.inject({ method: 'POST', url: '/api/plugin-triggers/v1/runs?plugin=ci&triggerId=build', payload: '{"x":2}', headers: { 'content-type': 'application/json', 'x-hub-signature-256': `sha256=${createHmac('sha256', 'secret-token').update(hmacTriggerSignaturePayload(timestamp, 'nonce-route-456', Buffer.from('{"x":2}'))).digest('hex')}`, 'x-dutydeck-timestamp': timestamp, 'x-dutydeck-nonce': 'nonce-route-456' } });
+    expect(versioned.statusCode).toBe(202);
+    const versionedRun = versioned.json() as { runId: string; statusUrl: string };
+    expect(versionedRun.statusUrl).toContain(`/api/plugin-triggers/v1/runs/${versionedRun.runId}`);
+    const statusNonce = 'nonce-status-456';
+    const statusHeaders = { 'x-hub-signature-256': `sha256=${createHmac('sha256', 'secret-token').update(hmacTriggerSignaturePayload(timestamp, statusNonce, Buffer.alloc(0))).digest('hex')}`, 'x-dutydeck-timestamp': timestamp, 'x-dutydeck-nonce': statusNonce };
+    expect((await app.inject({ method: 'GET', url: `${versionedRun.statusUrl}`, headers: statusHeaders })).statusCode).toBe(200);
     const tooLarge = await app.inject({ method: 'POST', url: '/api/plugins/ci/triggers/build', payload: 'x'.repeat(TRIGGER_BODY_LIMIT + 10), headers: { 'content-type': 'application/json' } });
     expect(tooLarge.statusCode).toBe(413);
     expect(tooLarge.json()).toMatchObject({ error: { code: 'PLUGIN_TRIGGER_BODY_TOO_LARGE' } });
