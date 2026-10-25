@@ -1,0 +1,10 @@
+>_ OpenAI Codex (v0.164.0)
+     /tmp/fixture/workspace
+  permissions: YOLO mode
+
+  Tip: For models with adjustable reasoning, press alt+. to increase reasoning effort or alt+, to decrease it.
+
+
+› Ask Codex to do anything
+
+  GPT-6-Astra xhigh · weekly 68% left                                                         ⚠ 3 warnings · f2 to view
