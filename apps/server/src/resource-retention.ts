@@ -52,4 +52,3 @@ export async function pruneLarkResourceDirectories(root: string, options: Resour
 export function larkResourceRoot(tmpRoot: string): string {
   return join(tmpRoot, 'dutydeck', 'lark-resources');
 }
-
