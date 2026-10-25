@@ -207,6 +207,15 @@ describe('codex', () => {
     expect(fresh.includes('resume')).toBe(false);
   });
 
+  it('Codex profile is passed before the resume subcommand', () => {
+    const args = adapter.buildArgs({ sessionId: SID, codexProfile: 'work', resume: true, resumeSessionId: 'codex-sid' });
+    const profileIndex = args.indexOf('--profile');
+    expect(args.slice(profileIndex, profileIndex + 2)).toEqual(['--profile', 'work']);
+    expect(profileIndex).toBeGreaterThan(0);
+    expect(profileIndex).toBeLessThan(args.indexOf('resume'));
+    expect(args.slice(-1)).toEqual(['codex-sid']);
+  });
+
   it('model / reasoningEffort / cwd 传入', () => {
     const args = adapter.buildArgs({ sessionId: SID, model: 'gpt-5.5', reasoningEffort: 'high', cwd: '/tmp/ws' });
     expect(args).toContain('--model');

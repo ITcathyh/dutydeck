@@ -1,6 +1,7 @@
 import { PluginBindingsPanel } from './PluginBindingsPanel';
 import { ConfirmDialog } from './ConfirmDialog';
 import { AgentModelSettings } from './AgentModelSettings';
+import { CodexProfileSettings } from './CodexProfileSettings';
 import { supportsModelServiceSettings } from '../agent-model-support';
 import { currentInstance } from '../instance';
 import type { LarkSetupTarget } from '../app-route';
@@ -278,6 +279,7 @@ function AgentSection({ agents, legacyBots, modelReset, onModelDirtyChange, onCr
         {/* 「已绑定」不是「已连接」：这里只数了 defaultAgentId 指向本 Agent 的 Bot，没有读任何监听状态。 */}
         <div className="mt-3 grid grid-cols-2 gap-2 text-caption text-secondary"><div className="rounded-md bg-muted p-2">默认权限<br/><strong className="text-primary">{permissionLabel(agent.permissionMode)}</strong></div><div className="rounded-md bg-muted p-2">飞书 Bot<br/><strong className="text-primary">{boundBots.length ? `${boundBots.length} 个已绑定` : '尚未绑定'}</strong></div></div>
         {supportsModelServiceSettings(agent) && <AgentModelSettings key={`${agent.id}:${modelReset}`} agentId={agent.id} onDirtyChange={onModelDirtyChange[agent.id]}/>}
+        <CodexProfileSettings key={`${agent.id}:${modelReset}:codex-profile`} agent={agent} onDirtyChange={onModelDirtyChange[agent.id]}/>
         <div className="mt-3 flex gap-2"><Button variant="primary" className="flex-1" onClick={() => onCreateTask(agent.id)}>用它创建任务</Button><Button variant="secondary" onClick={() => onOpenLarkSetup()}>{boundBots.length ? '管理 Bot' : '连接 Bot'}</Button></div>
       </Card>;
     })}</div>}

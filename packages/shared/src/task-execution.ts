@@ -146,6 +146,8 @@ export interface TaskAttempt extends AttemptRef, SessionFence {
   controller: ExecutionController; recoveryControllers: Array<{ controller: ExecutionController; evidence: RecoveryEvidence }>;
   submissionController?: ExecutionController; submission?: SubmissionIntent; receipt?: SubmissionReceipt;
   settlementId?: string; outcome?: AttemptOutcome; settlement?: SettlementEvidence; reconcileReason?: ReconcileReason;
+  /** Durable explanation for input that was held during daemon shutdown before CLI submission. */
+  interruption?: { kind: 'daemon_shutdown'; reason: 'not_submitted'; interruptedAt: string };
   legacy?: JsonValue; createdAt: string; updatedAt: string;
   automaticRetry?: { reason: 'codex_capacity'; causeAttemptId: string; ordinal: number; dueAt: string; inputDigest: string };
 }
@@ -363,6 +365,7 @@ export const taskExecutionSchemas = {
   checksSchema: resourceChecksSchema, decisionSchema,
   identitySchema: z.object({ identityId: id, kind: z.enum(physicalKinds), locator: executionJsonSchema }).strict(),
   observationSchema: z.object({ observationId: id, state: z.enum(['live', 'gone', 'unknown']), identityId: id.optional(), evidenceRef: id, observedAt: z.string().datetime() }).strict(),
+  interruption: z.object({ kind: z.literal('daemon_shutdown'), reason: z.literal('not_submitted'), interruptedAt: z.string().datetime() }).strict(),
   intentSchema: z.object({ submissionId: id, inputDigest: executionDigestSchema, resourceRefs: z.array(z.object({ resourceId: id, identityId: id }).strict()), recovery: recoverySchema.optional(), authorizationRefs: z.array(id), nativeContextRef:nativeContextRefSchema.optional(),contextProofId:id.optional(),driverInstanceId:id.optional() }).strict(),
   sessionSchema: z.object({ id, agentId: id, state: z.enum(['created','starting','idle','thinking','running_tool','waiting_for_permission','interrupting','interrupted','completed','failed','stopped']), cwd: id, runId: id, createdAt: z.string().datetime(), updatedAt: z.string().datetime(), model: z.string().optional(), reasoningEffort: z.string().optional(), systemPrompt: z.string().optional(), permissionMode: z.enum(permissionModes).optional(), source: id.optional(), sourceId: id.optional(), archivedAt: z.string().optional(), protocol: z.enum(['acp','jsonl','pipe','pty','pty-cli']).optional(), terminalBackend: z.enum(['tmux','herdr']).optional(), error: z.string().optional(), workspaceMode: z.enum(['shared','worktree']).optional(), workspaceSourceCwd: id.optional() }).strict(),
   driverResult: z.object({ kind:z.literal('driver_result'), submissionId:id, outcome:z.enum(['completed','failed','interrupted','cancelled']), outputDigest:executionDigestSchema, stopReason:id, complete:z.literal(true) }).strict(),

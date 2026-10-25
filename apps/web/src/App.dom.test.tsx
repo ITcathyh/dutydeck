@@ -526,6 +526,9 @@ describe('App 搜索、快捷键与通知接线', () => {
 
     await user.keyboard('{Control>}k{/Control}');
     const palette = await screen.findByRole('dialog', { name: '搜索任务与命令' });
+    expect(within(palette).getByRole('option', { name: /打开 Agent 设置/ })).toBeTruthy();
+    expect(within(palette).getByRole('option', { name: /打开插件与 Skills/ })).toBeTruthy();
+    expect(within(palette).getByRole('option', { name: /查看用量与上下文/ })).toBeTruthy();
     const results = within(palette).getByRole('listbox', { name: '搜索结果' });
     await user.type(within(palette).getByRole('combobox'), '回归');
     // 检索命中的是另一条任务，说明搜索真的过滤了，而不是把全部任务列出来。

@@ -5,7 +5,7 @@ import type { RecoveryCliOptions, RecoveryOperation } from './recovery-cli.js';
 import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
 import type { SessionNamesAction } from './session-names-cli.js';
 import type { ScheduleCliAction, ScheduleCliInput, ScheduleRequestCliInput } from './schedule-cli.js';
-import { pluginBindingFields, agentFields, botFields, channelBotFields, fieldsHelp, groupFields, groupBindingFields, groupBindingCreateFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
+import { pluginBindingFields, agentFields, agentConfigFields, botFields, channelBotFields, fieldsHelp, groupFields, groupBindingFields, groupBindingCreateFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { agentCommandHelp } from './lark/agent-command.js';
 import { addAgentCommands } from './agent-cli.js';
 import { Option, Command } from 'commander';
@@ -790,7 +790,7 @@ Examples:
   withTarget(agentSettings.command('set <agent-id> [key=value...]').description('Apply when the next Agent process starts; recreate running sessions for immediate use. Empty model/baseUrl restores CLI defaults')
     .option('--api-key-fd <fd>', 'Replace API Key from this file descriptor (0 = stdin); omitted keeps it')
     .option('--app <app-id>', 'Configure only this bot; set its model with settings bot set <app-id> defaultModel=...'))
-    .addHelpText('after', fieldsHelp(agentFields))
+    .addHelpText('after', `${fieldsHelp(agentFields)}${fieldsHelp(agentConfigFields)}`)
     .action((agentId, pairs, options, command) => runSettings('agent-set', command, { agentId, appId: options.app, pairs, apiKeyFd: options.apiKeyFd }));
 
   const botSettings = settings.command('bot').description('Bot settings (dashboard: 机器人)');

@@ -797,7 +797,7 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
             id: 'actions',
             label: `动作核对${unknownActions.length > 0 ? ` (${unknownActions.length})` : ''}`
           },
-          { id: 'decisions', label: `决策与回放 (${decisions.length})` }
+          { id: 'decisions', label: `决策看板 (${decisions.length})` }
         ]}
       />
 
@@ -1747,9 +1747,9 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
         <div className="space-y-4 pt-1">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h4 className="text-body font-semibold text-primary">决策记录与回放</h4>
+              <h4 className="text-body font-semibold text-primary">决策看板</h4>
               <p className="text-caption text-subtle">
-                审查协作判定，提交人工纠正；回放为只读判断，不会触发外部动作。
+                当前群的协作判定、人工纠正和批量回放集中在这里；回放为只读判断，不会触发外部动作。
               </p>
             </div>
             {decisions.length > 0 && (

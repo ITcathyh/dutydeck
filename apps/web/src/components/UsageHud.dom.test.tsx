@@ -80,3 +80,9 @@ it('stays out of the way when the session has no usage readings at all', () => {
   rerender(<UsageHud usage={{ own: empty, subSteps: empty }} loading/>);
   expect(screen.getByRole('region', { name: '任务用量' })).toBeTruthy();
 });
+
+it('shows cache hit telemetry when input and cache-read tokens are available', () => {
+  render(<UsageHud usage={{ own: { ...empty, entries: 1, tokenEntries: 1, inputTokens: 25, cacheReadTokens: 75 }, subSteps: empty }} />);
+  const reading = screen.getByText('缓存命中').parentElement;
+  expect(reading?.textContent).toContain('75%');
+});

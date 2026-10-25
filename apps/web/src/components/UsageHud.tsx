@@ -50,6 +50,9 @@ export function UsageHud({ usage, context, loading, error }: { usage?: SessionUs
   const missing = entries - tokenEntries;
   const partial = (own?.partialTokenEntries ?? 0) + (subSteps?.partialTokenEntries ?? 0);
   const sum = (key: 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens') => (own?.[key] ?? 0) + (subSteps?.[key] ?? 0);
+  const cacheRead = sum('cacheReadTokens');
+  const uncachedInput = sum('inputTokens');
+  const cacheHitRate = cacheRead + uncachedInput > 0 ? cacheRead / (cacheRead + uncachedInput) * 100 : undefined;
   const total = sum('inputTokens') + sum('outputTokens') + sum('cacheReadTokens') + sum('cacheWriteTokens');
   const hasTokens = entries > missing && entries > 0;
   const native = snapshot?.nativeTokens;
@@ -66,6 +69,7 @@ export function UsageHud({ usage, context, loading, error }: { usage?: SessionUs
           <Reading label="上下文" value={percent !== undefined ? percentage(percent) : used !== undefined ? `${tokens(used)} token` : pending}><Meter label="上下文已用" value={percent}/></Reading>
           <QuotaReading label="5h" window={snapshot?.rateLimits?.fiveHour} pending={pending}/>
           <QuotaReading label="7天" window={snapshot?.rateLimits?.sevenDay} pending={pending}/>
+          {cacheHitRate !== undefined && <Reading label="缓存命中" hint="缓存读 token ÷（缓存读 token + 未缓存输入 token）" value={percentage(cacheHitRate)}/>}
           <Reading label={useNative ? '会话 token' : '累计 token'} hint={useNative ? '当前原生会话累计 token，读自 Agent 日志，不含子步骤' : '本任务账本累计 token'} value={useNative ? `${nativePartial ? '≥ ' : ''}${tokens(nativeTotal)}` : hasTokens ? `${missing || partial ? '≥ ' : ''}${tokens(total)}` : usage ? '暂无数据' : pending}/>
         </div>
         <span className="flex w-14 shrink-0 items-center justify-end gap-0.5 text-subtle group-hover:text-primary">明细<ChevronDown size={13} className="transition-transform duration-fast group-open:rotate-180"/></span>

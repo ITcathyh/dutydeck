@@ -33,6 +33,7 @@ import { createPtyRetirementControl } from './pty-recovery.js';
 import { COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, RuntimeError, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { larkResourceRoot, pruneLarkResourceDirectories } from './resource-retention.js';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
 import { parsePeerInstances } from './instance-proxy.js';
@@ -579,6 +580,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   };
   let automationTimer: NodeJS.Timeout | undefined;
   let collaborationTimer: NodeJS.Timeout | undefined;
+  let resourceRetentionTimer: NodeJS.Timeout | undefined;
   // Reattach surviving idle terminals after a daemon restart, without starting a task.
   const terminalProvider: TerminalStreamProvider = {
     async lookupTerminalStream(sessionId) {
@@ -624,6 +626,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       disposeTurnDiffSigner();
       if (automationTimer) clearInterval(automationTimer);
       if (collaborationTimer) clearInterval(collaborationTimer);
+      if (resourceRetentionTimer) clearInterval(resourceRetentionTimer);
       const errors: unknown[] = [...insightCloseErrors];
       const settle = async (operations: Array<() => unknown>) => {
         const results = await Promise.allSettled(operations.map(operation => Promise.resolve().then(operation)));
@@ -783,6 +786,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     pluginResultTimer = setInterval(() => { void sweepPluginResults(); }, 30_000);
     pluginResultTimer.unref();
     void sweepPluginResults();
+    const resourceRoot = larkResourceRoot(tmpdir());
+    const sweepResources = () => { void pruneLarkResourceDirectories(resourceRoot).catch(error => app?.log.warn({ error }, '飞书附件临时目录清理失败')); };
+    resourceRetentionTimer = setInterval(sweepResources, 60 * 60_000);
+    resourceRetentionTimer.unref();
+    sweepResources();
     workItems.start();
     void delegations.start().catch(error => app?.log.warn({ error }, '分层协作规划恢复失败'));
     const tick = () => {

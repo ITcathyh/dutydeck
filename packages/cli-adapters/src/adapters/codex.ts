@@ -13,7 +13,7 @@ export function createCodexAdapter(): CliAdapter {
     id: 'codex',
     capabilities: { resume: true, nativeInputReceipt: true },
 
-    buildArgs({ resume, resumeSessionId, nativeForkSessionId, cwd, model, reasoningEffort, permissionMode }: AdapterSessionContext): string[] {
+    buildArgs({ resume, resumeSessionId, nativeForkSessionId, cwd, model, codexProfile, reasoningEffort, permissionMode }: AdapterSessionContext): string[] {
       const usable = usableResumeId(nativeForkSessionId ?? resumeSessionId);
       const isRealResume = Boolean((resume || nativeForkSessionId) && usable);
 
@@ -38,6 +38,7 @@ export function createCodexAdapter(): CliAdapter {
           args.push('-c', `hooks.PreToolUse=[{matcher=${JSON.stringify(secretGuardToolMatcher)},hooks=[{type="command",command=${JSON.stringify(secretGuardHookCommand({ policyRoot: cwd }))},timeout=10}]}]`);
         }
       }
+      if (codexProfile?.trim()) args.push('--profile', codexProfile.trim());
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }
@@ -56,7 +57,7 @@ export function createCodexAdapter(): CliAdapter {
         const subcommandArgs: string[] = [];
         for (let i = 0; i < args.length; i++) {
           const arg = args[i]!;
-          if (arg === '-c') {
+          if (arg === '-c' || arg === '--profile') {
             rootConfigArgs.push(arg, args[++i]!);
           } else {
             subcommandArgs.push(arg);

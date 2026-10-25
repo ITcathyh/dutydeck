@@ -289,6 +289,29 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     });
   }
   app.get('/api/agents', async () => (await runtime.listAgents()).map(toPublicAgent));
+  const agentConfigPatchSchema = z.object({ codexProfile: z.string().trim().min(1).max(128).nullable() }).strict();
+  app.get<{ Params: { id: string } }>('/api/agents/:id/config', async request => {
+    if (!options.sessionNames || !await options.sessionNames.authorize(request)) throw new RuntimeError('AGENT_SETTINGS_OWNER_REQUIRED', 'Installation owner authorization is required', 403);
+    const agent = (await runtime.listAgents()).find(item => item.id === request.params.id);
+    if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Unknown agent', 404);
+    if (agent.protocol !== 'pty-cli' || !['codex', 'codex-cli'].includes(agent.id)) throw new RuntimeError('AGENT_CONFIG_UNSUPPORTED', 'Only terminal Codex agents support this configuration', 400);
+    return { id: agent.id, codexProfile: agent.codexProfile ?? '' };
+  });
+  app.patch<{ Params: { id: string }; Body: unknown }>('/api/agents/:id/config', async request => {
+    if (!options.sessionNames || !await options.sessionNames.authorize(request)) throw new RuntimeError('AGENT_SETTINGS_OWNER_REQUIRED', 'Installation owner authorization is required', 403);
+    const agents = options.lark?.agents;
+    if (!agents) throw new RuntimeError('AGENT_CONFIG_UNAVAILABLE', 'Agent configuration persistence is unavailable', 503);
+    const agent = await agents.get(request.params.id);
+    if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Unknown agent', 404);
+    if (agent.protocol !== 'pty-cli' || !['codex', 'codex-cli'].includes(agent.id)) throw new RuntimeError('AGENT_CONFIG_UNSUPPORTED', 'Only terminal Codex agents support this configuration', 400);
+    const patch = agentConfigPatchSchema.parse(request.body);
+    if (patch.codexProfile) {
+      const discovered = await discoverAgentModels(agent, undefined, true);
+      if (!discovered.profiles?.some(profile => profile.id === patch.codexProfile)) throw new RuntimeError('AGENT_PROFILE_NOT_FOUND', `Codex profile not found: ${patch.codexProfile}`, 400);
+    }
+    await agents.save({ ...agent, ...(patch.codexProfile ? { codexProfile: patch.codexProfile } : { codexProfile: undefined }) });
+    return toPublicAgent((await agents.get(request.params.id))!);
+  });
   app.get<{ Params: { id: string }; Querystring: { model?: string; refresh?: string } }>('/api/agents/:id/models', async request => {
     const agent = (await runtime.listAgents()).find(item => item.id === request.params.id);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${request.params.id}`, 404);

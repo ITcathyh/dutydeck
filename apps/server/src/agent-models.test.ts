@@ -50,6 +50,26 @@ describe('ACP-first Agent model discovery', () => {
     expect((await discoverAgentModels({ ...agent, model: 'second-model' })).defaultModel).toBe('second-model');
   });
 
+  it('lists Codex profile names without exposing config values', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-codex-profiles-'));
+    writeFileSync(join(root, 'config.toml'), '[profiles.fast]\nmodel = "secret-model"\n[profiles."review.safe"]\nmodel = "other"\n[profiles.\'single.safe\']\nmodel = "third"\n[not_a_profile]\n');
+    try {
+      const agent = agentConfigSchema.parse({ id: 'codex', name: 'Codex', command: 'codex', protocol: 'pty-cli', adapterId: 'codex', env: { CODEX_HOME: root } });
+      await expect(discoverAgentModels(agent, undefined, true)).resolves.toMatchObject({ profiles: [{ id: 'fast', name: 'fast' }, { id: 'review.safe', name: 'review.safe' }, { id: 'single.safe', name: 'single.safe' }] });
+      await expect(discoverAgentModels(agent, undefined, true)).resolves.not.toHaveProperty('secret-model');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('uses the daemon CODEX_HOME when the Agent does not override it', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-codex-home-'));
+    writeFileSync(join(root, 'config.toml'), '[profiles.daemon-home]\nmodel = "hidden"\n');
+    vi.stubEnv('CODEX_HOME', root);
+    try {
+      const agent = agentConfigSchema.parse({ id: 'codex', name: 'Codex', command: 'codex', protocol: 'pty-cli', adapterId: 'codex', env: {} });
+      await expect(discoverAgentModels(agent, undefined, true)).resolves.toMatchObject({ profiles: [{ id: 'daemon-home' }] });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('never executes a custom wrapper when refreshing its model metadata', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-pty-models-'));
     const marker = join(root, 'executed');

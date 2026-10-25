@@ -28,6 +28,8 @@ export const agentConfigSchema = z.object({
   /** CLI behavior to reuse for a custom pty-cli command; defaults to id. */
   adapterId: z.string().min(1).optional(),
   model: z.string().optional(),
+  /** Named Codex config profile, applied only by the Codex CLI adapter. */
+  codexProfile: z.string().trim().min(1).max(128).optional(),
   reasoningEffort: z.string().optional(),
   version: z.string().optional(),
   cwd: z.string().optional(),
@@ -57,6 +59,7 @@ export const publicAgentSchema = z.object({
   name: z.string().min(1),
   version: z.string().optional(),
   model: z.string().optional(),
+  codexProfile: z.string().trim().min(1).max(128).optional(),
   protocol: z.enum(protocols),
   permissionMode: z.enum(permissionModes),
   /** 工具确认能否在飞书逐项审批（见 supportsRemoteApproval）；不能时飞书机器人只能以完全信任运行。toPublicAgent 总会给出。 */
@@ -71,6 +74,7 @@ export function toPublicAgent(agent: AgentConfig): PublicAgent {
     name: agent.name,
     version: agent.version,
     model: agent.model,
+    codexProfile: agent.codexProfile,
     protocol: agent.protocol,
     permissionMode: agent.permissionMode,
     remoteApproval: supportsRemoteApproval(agent),

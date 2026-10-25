@@ -52,6 +52,13 @@ it('persists defaults and private credentials, retains blank/omitted keys, rotat
   expect(provider.inspect(stored.referenceKey).availability).toBe('missing');
 });
 
+it('restores a persisted Codex profile before runtime initialization rewrites agents', async () => {
+  const { repos, settings, agent } = await fixture();
+  await repos.agents.save({ ...agent, id: 'codex', adapterId: 'codex', codexProfile: 'review.safe' });
+  const configured = { ...agent, id: 'codex', adapterId: 'codex', codexProfile: undefined };
+  expect((await settings.defaultsForBoot([configured]))[0].codexProfile).toBe('review.safe');
+});
+
 it('validates service addresses, auth modes and mutually exclusive key actions before writing', async () => {
   const { repos, settings } = await fixture();
   for (const patch of [{ baseUrl: 'file:///tmp' }, { baseUrl: 'https://name:password@example.com' }, { baseUrl: 'https://example.com?key=secret' }, { authMode: 'unknown' }, { apiKey: 'key', clearApiKey: true }, { apiKey: '' }, { apiKey: 'secret\0value' }, { apiKey: 'secret\nvalue' }, { apiKey: 'secret value' }]) await expect(settings.set('claude', patch)).rejects.toThrow();
@@ -79,6 +86,27 @@ it('CLI saves through the real authorized routes and every read stays redacted',
   const forbidden = await buildApp({} as any, { agentModelSettings: settings }); cleanups.push(() => forbidden.close());
   expect((await forbidden.inject('/api/agents/claude/model-settings')).statusCode).toBe(403);
   expect((await forbidden.inject({ method: 'PUT', url: '/api/agents/claude/model-settings', payload: { apiKey: 'denied' } })).statusCode).toBe(403);
+});
+
+it('persists and returns the Codex profile through the owner-only agent config route', async () => {
+  const { repos, settings, agent } = await fixture();
+  const profileRoot = await mkdtemp(join('/tmp', 'dutydeck-codex-profile-route-'));
+  cleanups.push(() => rm(profileRoot, { recursive: true, force: true }));
+  await writeFile(join(profileRoot, 'config.toml'), '[profiles.review.safe]\nmodel = "hidden"\n');
+  const codex = agentConfigSchema.parse({ ...agent, id: 'codex', name: 'Codex', adapterId: 'codex', protocol: 'pty-cli', env: { CODEX_HOME: profileRoot }, codexProfile: undefined });
+  await repos.agents.save(codex);
+  const runtime = { listAgents: () => repos.agents.list() } as any;
+  const app = await buildApp(runtime, { agentModelSettings: settings, lark: { agents: repos.agents, listeningDisabled: true }, sessionNames: { authorize: async () => true } });
+  cleanups.push(() => app.close());
+  const saved = await app.inject({ method: 'PATCH', url: '/api/agents/codex/config', payload: { codexProfile: 'review.safe' } });
+  expect(saved.statusCode).toBe(200);
+  expect(saved.json().codexProfile).toBe('review.safe');
+  expect((await app.inject('/api/agents/codex/config')).json()).toEqual({ id: 'codex', codexProfile: 'review.safe' });
+  expect((await app.inject('/api/agents')).body).toContain('review.safe');
+  const unknown = await app.inject({ method: 'PATCH', url: '/api/agents/codex/config', payload: { codexProfile: 'missing' } });
+  expect(unknown.statusCode).toBe(400);
+  const unsupported = await app.inject({ method: 'PATCH', url: '/api/agents/claude/config', payload: { codexProfile: 'bad' } });
+  expect(unsupported.statusCode).toBe(400);
 });
 
 it.each(['bearer', 'api-key'] as const)('injects %s credentials using a real AcpxAdapter and persistent session key without persisting vendor values', async authMode => {

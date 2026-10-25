@@ -29,7 +29,7 @@ export type { PermissionMode };
 export type { WorkspaceMode };
 export type Agent = PublicAgent;
 export type AgentModel = { id: string; name: string };
-export type AgentModelsResult = { models: AgentModel[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent'; protocol?: 'acp' };
+export type AgentModelsResult = { models: AgentModel[]; profiles?: AgentModel[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent'; protocol?: 'acp' };
 export type SessionCapabilities = { observedAt: string; protocol?: string; structuredApproval: string; terminal: string; turnRecovery: string; verification: string; localFileDelivery: string };
 export type SkillReference = { ref?: string; name: string; description: string; path: string; source: 'workspace' | 'user' | 'plugin' };
 export type LarkAllowedUser = { openId: string; name: string };
@@ -1018,6 +1018,11 @@ export const insightApi = {
 
 export type AgentModelSettings = { agentId: string; appId?: string; model: string; baseUrl: string; authMode: 'bearer' | 'api-key'; hasApiKey: boolean; apiKeyAvailable: boolean; appliesTo: 'next_process' };
 export type AgentModelSettingsPatch = { model?: string; baseUrl?: string; authMode?: 'bearer' | 'api-key'; apiKey?: string; clearApiKey?: boolean };
+export type AgentConfigSettings = { id: string; codexProfile: string };
+export const agentConfigApi = {
+  get: (id: string) => json<AgentConfigSettings>(`/api/agents/${encodeURIComponent(id)}/config`, { cache: 'no-store' }),
+  set: (id: string, codexProfile: string | null) => json<Agent>(`/api/agents/${encodeURIComponent(id)}/config`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ codexProfile }) })
+};
 const modelSettingsUrl = (id: string, appId?: string) => `${botAgentPath(id, appId)}/model-settings`;
 export const agentModelSettingsApi = {
   get: (id: string, appId?: string) => json<AgentModelSettings>(modelSettingsUrl(id, appId), { cache: 'no-store' }),

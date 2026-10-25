@@ -342,7 +342,10 @@ describe('persistent task recovery across a reopened database', () => {
     expect(stored.task.status).toBe('queued');
     // The Attempt was claimed (preparing) but never submitted, so shutdown
     // suspends it rather than dropping or re-sending the prompt.
-    expect(stored.currentAttempt).toMatchObject({ state: 'suspended', submissionState: 'not_submitted' });
+    expect(stored.currentAttempt).toMatchObject({
+      state: 'suspended', submissionState: 'not_submitted',
+      interruption: { kind: 'daemon_shutdown', reason: 'not_submitted', interruptedAt: expect.any(String) }
+    });
   });
 
   it('does not resend when the original backend cannot be confirmed, and leaves the submitted Attempt reconcile_required', async () => {
