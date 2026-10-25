@@ -1,5 +1,5 @@
 import { readdir, rm, stat } from 'node:fs/promises';
-import { existsSync, renameSync, statSync } from 'node:fs';
+import { existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 export const DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024;
@@ -12,6 +12,7 @@ export function rotateLogFileSync(path: string, maxBytes = DEFAULT_LOG_MAX_BYTES
   let size: number;
   try { size = statSync(path).size; } catch { return false; }
   if (size <= maxBytes) return false;
+  try { rmSync(`${path}.${backups}`, { force: true }); } catch { /* best effort; keep the active log */ }
   for (let index = backups - 1; index >= 1; index--) {
     const source = `${path}.${index}`;
     const target = `${path}.${index + 1}`;

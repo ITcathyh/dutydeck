@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdir, rm, utimes, writeFile } from 'node:fs/promises';
-import { mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pruneLarkResourceDirectories, rotateLogFileSync } from './resource-retention.js';
@@ -17,6 +17,18 @@ describe('resource retention', () => {
     expect(readFileSync(`${path}.1`, 'utf8')).toBe('current');
     expect(() => statSync(path)).toThrow();
     expect(rotateLogFileSync(path, 1, 2)).toBe(false);
+  });
+
+  it('drops the oldest backup instead of growing an unbounded suffix chain', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-log-retention-chain-')); roots.push(root);
+    const path = join(root, 'autostart-out.log');
+    for (const value of ['one', 'two', 'three', 'four']) {
+      await writeFile(path, value);
+      expect(rotateLogFileSync(path, 1, 2)).toBe(true);
+    }
+    expect(readFileSync(`${path}.1`, 'utf8')).toBe('four');
+    expect(readFileSync(`${path}.2`, 'utf8')).toBe('three');
+    expect(existsSync(`${path}.3`)).toBe(false);
   });
 
   it('removes expired attachment directories but preserves recent downloads', async () => {
