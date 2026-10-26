@@ -1256,6 +1256,7 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
       repos = createRepositories(database, { mode: 'runtime', upgrade: 'never' });
       let emitEvent!: (event: import('@dutydeck/shared').NormalizedDriverEvent) => void;
       const driver: AgentDriver = {
+        isIdle: () => true, hasBackgroundWork: () => false,
         start: vi.fn(async () => {}),
         send: vi.fn(async () => { emitEvent({ type: 'text', data: { text: '新结果' } }); emitEvent({ type: 'completed', data: { stopReason: 'end_turn' } }); }),
         interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {})

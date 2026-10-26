@@ -32,6 +32,7 @@ async function harness() {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
       const driver: AgentDriver = {
+        isIdle: () => true, hasBackgroundWork: () => false,
         start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
         send: async prompt => {
           prompts.push(prompt);

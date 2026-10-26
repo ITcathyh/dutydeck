@@ -18,6 +18,7 @@ async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars
   let reply = (_prompt: string) => ({ actions: [{ op: 'noop' }] });
   let duringSend = async () => {};
   let duringInterrupt = () => {};
+  let stopConfirmed = true;
   let outputText: string | undefined;
   // 这些会话的 driver 一启动就报启动器版本变化，模拟部署后旧 ACP 会话起不来。
   const staleSessions = new Set<string>();
@@ -25,16 +26,20 @@ async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars
     cleanupIntervalMs: 0, workspaceRoot: join(dir, 'work'),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, sessionId) => {
-      let interrupted = false;
+      let interrupted = false, busy = false;
       return {
-        start: async () => { if (staleSessions.has(sessionId!)) throw new Error('ACP_LAUNCHER_VERSION_CHANGED: 旧会话启动器版本变化'); }, stop: async () => {}, isStopped: async () => true,
+        isIdle: () => !busy, hasBackgroundWork: () => false,
+        start: async () => { if (staleSessions.has(sessionId!)) throw new Error('ACP_LAUNCHER_VERSION_CHANGED: 旧会话启动器版本变化'); }, stop: async () => {}, isStopped: async () => stopConfirmed,
         interrupt: async () => { interrupted = true; duringInterrupt(); },
         send: async prompt => {
-          interrupted = false;
-          prompts.push(prompt);
-          await duringSend();
-          emit({ type: 'text', data: { text: outputText ?? '```json\n' + JSON.stringify(reply(prompt)) + '\n```' } });
-          emit({ type: 'completed', data: { stopReason: interrupted ? 'cancelled' : 'end_turn' } });
+          busy = true;
+          try {
+            interrupted = false;
+            prompts.push(prompt);
+            await duringSend();
+            emit({ type: 'text', data: { text: outputText ?? '```json\n' + JSON.stringify(reply(prompt)) + '\n```' } });
+            emit({ type: 'completed', data: { stopReason: interrupted ? 'cancelled' : 'end_turn' } });
+          } finally { busy = false; }
         }
       };
     }
@@ -58,7 +63,7 @@ async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars
     cleanups.unshift(() => next.shutdown());
     return { runtime: next, pipeline: createPipeline(undefined, next) };
   };
-  return { repos, runtime, store, projection, pipeline, createPipeline, restart, staleSessions, prompts, setOutputText: (value?: string) => { outputText = value; }, setReply: (value: typeof reply) => { reply = value; }, setDuringSend: (value: typeof duringSend) => { duringSend = value; }, setDuringInterrupt: (value: typeof duringInterrupt) => { duringInterrupt = value; } };
+  return { repos, runtime, store, projection, pipeline, setStopConfirmed: (value: boolean) => { stopConfirmed = value; }, createPipeline, restart, staleSessions, prompts, setOutputText: (value?: string) => { outputText = value; }, setReply: (value: typeof reply) => { reply = value; }, setDuringSend: (value: typeof duringSend) => { duringSend = value; }, setDuringInterrupt: (value: typeof duringInterrupt) => { duringInterrupt = value; } };
 }
 it('consumes verified blank completed turns so the next extraction reaches useful material', async () => {
   const h = await harness();
@@ -426,4 +431,85 @@ it('keeps a timed out preparation job and resumes its stable session without a s
     expect(jobs[0]).toMatchObject({ id: job!.id, sessionId: job!.sessionId, state: 'settled', receipt: { result: { lastRun: { ok: true } } } });
     expect(h.prompts).toHaveLength(1);
   } finally { release(); }
+});
+
+
+it('treats foreign workspace occupancy as admission waiting without replaying completed memory history', async () => {
+  const h = await harness('legacy');
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+  const [first] = await h.repos.memoryJobs.listScope(scope);
+  const memorySession = (await h.runtime.getSession(first!.sessionId))!;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  h.setDuringSend(() => gate);
+  const foreign = await h.runtime.start({ agentId: 'agent', cwd: memorySession.cwd });
+  const foreignRun = h.runtime.send(foreign.id, 'foreign active turn');
+  await vi.waitFor(() => expect(h.prompts).toHaveLength(2));
+  const pending = h.pipeline.runConsolidation(scope);
+  try {
+    await vi.waitFor(async () => expect((await h.repos.memoryJobs.listScope(scope)).filter(job => job.requests.length)).toHaveLength(2));
+    const second = (await h.repos.memoryJobs.listScope(scope)).find(job => job.id !== first!.id)!;
+    const accepted = h.runtime.lookupAcceptedTask(second.requests[0]!)!;
+    expect((await h.runtime.getTasks(second.sessionId)).find(task => task.id === accepted.task.id)?.status).toBe('queued');
+    expect(h.prompts).toHaveLength(2);
+    expect((await h.runtime.getTasks(first!.sessionId)).find(task => task.id !== accepted.task.id)?.status).toBe('completed');
+    release();
+    await foreignRun;
+    expect(await pending).toMatchObject({ ok: true });
+    expect(h.prompts).toHaveLength(3);
+    expect(await h.repos.memoryJobs.listScope(scope)).toHaveLength(2);
+  } finally { release(); await foreignRun; await pending; }
+});
+
+it.each(['DRIVER_RESOURCE_UNSAFE', 'STOP_RESULT_UNKNOWN', 'WORKSPACE_RESOURCE_UNVERIFIABLE'])('keeps a completed memory session with unverified own resources blocked: %s', async code => {
+  const h = await harness('legacy');
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+  const [job] = await h.repos.memoryJobs.listScope(scope);
+  const [task] = await h.runtime.getTasks(job!.sessionId);
+  vi.spyOn(h.runtime, 'getSessionTaskRecovery').mockResolvedValue([{ taskId: task!.id, status: 'completed', resolvedUnknown: false, blockers: [{ code }] }]);
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });
+  expect(h.prompts).toHaveLength(1);
+  expect(await h.repos.memoryJobs.listScope(scope)).toHaveLength(1);
+});
+
+
+it('keeps a new memory request queued behind a foreign unconfirmed stop until real recovery releases it', async () => {
+  const h = await harness('legacy');
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+  const [first] = await h.repos.memoryJobs.listScope(scope);
+  const memorySession = (await h.runtime.getSession(first!.sessionId))!;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  h.setDuringSend(async () => { await gate; throw new Error('foreign response lost'); });
+  const foreign = await h.runtime.start({ agentId: 'agent', cwd: memorySession.cwd });
+  const foreignRun = h.runtime.send(foreign.id, 'foreign unknown turn');
+  await vi.waitFor(() => expect(h.prompts).toHaveLength(2));
+  h.setStopConfirmed(false);
+  release();
+  expect((await foreignRun).status).toBe('reconcile_required');
+  h.setDuringSend(async () => {});
+  await h.runtime.stop(foreign.id, { kind: 'installation_owner', id: 'installation_owner' }).catch(() => {});
+  const recovery = await h.runtime.getSessionTaskRecovery(first!.sessionId);
+  expect(recovery.flatMap(item => item.blockers)).toContainEqual({ code: 'DRIVER_STOP_BLOCKED', external: true });
+  const pending = h.pipeline.runConsolidation(scope);
+  try {
+    await vi.waitFor(async () => expect((await h.repos.memoryJobs.listScope(scope)).filter(job => job.requests.length)).toHaveLength(2));
+    const second = (await h.repos.memoryJobs.listScope(scope)).find(job => job.id !== first!.id)!;
+    expect((await h.runtime.getTasks(second.sessionId)).filter(task => task.status === 'queued')).toHaveLength(1);
+    expect(h.prompts).toHaveLength(2);
+    release();
+    await foreignRun;
+    h.setStopConfirmed(true);
+    await h.runtime.stop(foreign.id, { kind: 'installation_owner', id: 'installation_owner' });
+    const snapshot = await h.runtime.inspectExecutionRecovery(foreign.id, { kind: 'installation_owner', id: 'installation_owner' });
+    const old = snapshot.tasks.find(task => task.attempt?.state === 'reconcile_required')!;
+    expect(old).toBeDefined();
+    await h.runtime.confirmExecutionRecovery(foreign.id, {
+      runId: snapshot.runId, taskId: old.taskId, attemptId: old.attempt!.attemptId, expectedRevision: old.attempt!.revision,
+      decisionId: 'memory-foreign-stop-reviewed', action: 'confirm_result', outcome: 'unknown',
+      evidenceRefs: ['operator:foreign-stop-confirmed'], resourceChecks: snapshot.resourceChecks
+    }, { kind: 'installation_owner', id: 'installation_owner' });
+    expect(await pending).toMatchObject({ ok: true });
+    expect(h.prompts).toHaveLength(3);
+  } finally { release(); h.setStopConfirmed(true); await foreignRun; }
 });

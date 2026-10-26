@@ -52,9 +52,28 @@ export function inspect(db: DatabaseSync, database: string) {
   const shards = ['web', ...apps];
   const sessions = rows(db, 'sessions');
   const owners = new Map<string, string>();
+  const sessionById = new Map(sessions.map(s => [s.id, s]));
+  const resolving = new Set<string>();
+  function sessionOwner(id: string): string | undefined {
+    if (owners.has(id)) return owners.get(id);
+    const s = sessionById.get(id);
+    if (!s || resolving.has(id)) return undefined;
+    resolving.add(id);
+    let owner = s.source == null && s.source_id == null ? 'web' : ['lark', 'lark-memory'].includes(s.source) ? s.source_id?.split(':')[0] : undefined;
+    if (s.source === 'schedule' && typeof s.source_id === 'string') {
+      const schedule = parse(config.get(`session_automation/schedule/${s.source_id}`) ?? '');
+      // A dedicated execution session belongs to its frozen origin, never the Web fallback.
+      if (schedule?.schemaVersion === 1 && schedule.id === s.source_id && schedule.mode === 'independent'
+          && schedule.executionSessionId === id && id === `ses_schedule_${createHash('sha256').update(s.source_id).digest('hex')}`) {
+        owner = sessionOwner(schedule.sessionId);
+      }
+    }
+    resolving.delete(id);
+    if (owner && shards.includes(owner)) owners.set(id, owner);
+    return owners.get(id);
+  }
   for (const s of sessions) {
-    const owner = s.source == null && s.source_id == null ? 'web' : ['lark', 'lark-memory'].includes(s.source) ? s.source_id?.split(':')[0] : undefined;
-    if (!owner || !shards.includes(owner)) block(`SESSION_OWNERSHIP_UNKNOWN:${s.id}`); else owners.set(s.id, owner);
+    if (!sessionOwner(s.id)) block(`SESSION_OWNERSHIP_UNKNOWN:${s.id}`);
     if (['starting', 'running', 'stopping'].includes(s.state)) block(`SESSION_ACTIVE:${s.id}`);
   }
   const botOwner = new Map(structured.map(b => [b.id, apps.includes(b.external_app_id) ? b.external_app_id : 'retained_source']));
@@ -94,10 +113,48 @@ export function inspect(db: DatabaseSync, database: string) {
     const k = r.key as string, value = parse(r.value);
     if (sharedConfigs.has(k)) return shards;
     if (k === 'lark.bots') return shards;
-    const sessionMatch = k.match(/^(?:runtime_(?:workspace|native_context|driver_stop_block|driver_configuration|pty_retirement|verification):|legacy_retirement:|lark\.(?:run-context|memory\.turns)\.)([^:.]+)/);
+    const sessionMatch = k.match(/^(?:runtime_(?:workspace|execution_workspace|native_context|driver_stop_block|driver_configuration|pty_retirement|verification):|legacy_retirement:|lark\.(?:run-context|memory\.turns)\.)([^:.]+)/);
     if (sessionMatch) {
       const owner = ownerForSession(sessionMatch[1]!);
       if (value?.sessionId && value.sessionId !== sessionMatch[1] || value?.appId && appOwner(value.appId) !== owner) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
+      return [owner];
+    }
+    const automation = k.match(/^session_automation\/(schedule|occurrence|ci|task|stop_request)\/(.+)$/);
+    if (automation && value && typeof value.sessionId === 'string') {
+      const [, kind, id] = automation;
+      const owner = ownerForSession(value.sessionId);
+      const mismatch = () => block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
+      if (kind === 'stop_request' ? value.version !== 1 : kind === 'schedule' ? value.schemaVersion !== 1 : ![1, 2].includes(value.schemaVersion)) mismatch();
+      if (kind === 'task' && !['schedule', 'ci'].includes(value.kind)) mismatch();
+      if (['schedule', 'occurrence', 'ci'].includes(kind!) && value.id !== id
+          || ['task', 'stop_request'].includes(kind!) && value.taskId && value.taskId !== id) mismatch();
+      const checkSession = (sessionId: string) => { if (ownerForSession(sessionId) !== owner) mismatch(); };
+      for (const sessionId of [value.executionSessionId, value.admission?.request?.sessionId]) if (sessionId) checkSession(sessionId);
+      for (const actor of [value.actor, value.pendingOccurrence?.actor, value.admission?.request?.actor]) {
+        if (actor?.kind === 'channel' && appOwner(actor.appId) !== owner) mismatch();
+      }
+      const checkRecord = (prefix: string, recordId: string) => {
+        const record = parse(config.get(`session_automation/${prefix}/${recordId}`) ?? '');
+        if (!record || record.id !== recordId || typeof record.sessionId !== 'string') mismatch();
+        else checkSession(record.sessionId);
+      };
+      if (kind === 'occurrence' || kind === 'stop_request' || value.scheduleId) checkRecord('schedule', value.scheduleId);
+      if (kind === 'task' && value.kind === 'schedule' || kind === 'stop_request' || value.occurrenceId) checkRecord('occurrence', value.occurrenceId);
+      if (kind === 'task' && value.kind === 'ci' || value.subscriptionId) checkRecord('ci', value.subscriptionId);
+      for (const taskId of [kind === 'task' || kind === 'stop_request' ? id : undefined, value.taskId, value.admission?.taskId, value.result?.taskId]) {
+        const taskSession = references.get('tasks')?.get(taskId);
+        if (taskSession) checkSession(taskSession);
+      }
+      for (const attemptId of [value.runtimeAttemptId, value.attemptId, value.result?.attemptId]) {
+        const attemptSession = references.get('task_attempts')?.get(attemptId);
+        if (attemptSession) checkSession(attemptSession);
+      }
+      return [owner];
+    }
+    if (k.startsWith('automation.delivery-target.') && value?.appId) {
+      const id = k.slice('automation.delivery-target.'.length), owner = appOwner(value.appId);
+      const records = ['schedule', 'ci'].map(kind => parse(config.get(`session_automation/${kind}/${id}`) ?? '')).filter(Boolean);
+      if (records.length !== 1 || records[0].id !== id || ownerForSession(records[0].sessionId) !== owner) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
       return [owner];
     }
     const appMatch = k.match(/^lark\.(?:inbox|context|interaction|reaction|live-owner|memory(?:\.state)?|verification_suggestion|welcomed)\.(cli_[a-z0-9]+)(?:\.|$)/);

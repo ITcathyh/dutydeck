@@ -15,8 +15,8 @@ async function fixture() {
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' }); opened.push(repos);
   const claim = repos.control.attachRuntime('automation-integration-test'); claims.push(claim);
   const at = new Date().toISOString();
-  const session = { id: 's1', agentId: 'a', source: 'lark', sourceId: 'cli_a:oc_chat:group:thread:om_root', cwd: '/project', state: 'completed', runId: 'r', createdAt: at, updatedAt: at };
-  repos.execution.bind(claim).createSession({ id: 's1', runId: 'r', agentId: 'a', cwd: '/project', state: 'idle', source: 'lark', sourceId: 'cli_a:oc_chat:group:thread:om_root', permissionMode: 'ask', createdAt: at, updatedAt: at });
+  const session = { id: 's1', agentId: 'a', source: 'lark', sourceId: 'cli_a:oc_chat:group:thread:om_root', cwd: process.cwd(), state: 'completed', runId: 'r', createdAt: at, updatedAt: at };
+  repos.execution.bind(claim).createSession({ id: 's1', runId: 'r', agentId: 'a', cwd: process.cwd(), state: 'idle', source: 'lark', sourceId: 'cli_a:oc_chat:group:thread:om_root', permissionMode: 'ask', createdAt: at, updatedAt: at });
   let bot = { appId: 'cli_a', appSecret: 'secret-canary', listening: true, fullTrustConfirmed: true, allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }], allowedEmails: [] };
   const setBot = async (patch: object) => { bot = { ...bot, ...patch }; await repos.config.set('lark.bots', JSON.stringify([bot])); };
   await setBot({});
@@ -113,12 +113,12 @@ describe('automation service integration', () => {
     expect(JSON.parse((await f.repos.config.get('session_automation/occurrence/occ1'))!).runtimeAttemptId).toBe(source.runtimeAttemptId);
   });
 
-  it('rejects a completed manual retry presented as the original admission result', async () => {
+  it('delivers an audited manual successor while preserving the first admission', async () => {
     const f = await fixture();
     const result = f.settleTask('completed', 'manual retry output', 'occ1', 'automation1', 'manual');
     await f.repos.config.set('automation.delivery-target.automation1', JSON.stringify({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_original', replyInThread: true }));
-    await expect(f.deliver('s1', result, 'occ1', 'automation1')).rejects.toMatchObject({ code: 'AUTOMATION_RESULT_NOT_READY' });
-    expect(f.client.reply).not.toHaveBeenCalled();
+    await f.deliver('s1', result, 'occ1', 'automation1');
+    expect(f.client.reply).toHaveBeenCalledOnce();
     expect(f.client.send).not.toHaveBeenCalled();
   });
 
@@ -243,11 +243,11 @@ describe('automation service integration', () => {
     expect(f.client.reply).not.toHaveBeenCalled();
   });
 
-  it('notifies delivery target when schedule is disabled due to inactive session, and silently ignores missing target', async () => {
+  it('fails before send when a notice target is missing and reports to the frozen target after recovery', async () => {
     const f = await fixture();
-    const schedule: any = { id: 'sch_1', sessionId: 's1', name: '每日数据巡检', generation: 2 };
+    const schedule: any = { id: 'sch_1', sessionId: 's1', name: '每日数据巡检', generation: 2, actorId: 'ou_alice', disabledReason: 'Session is no longer active' };
     // 1. 无 delivery-target 时静默跳过
-    await expect(f.onScheduleDisabled!(schedule, 'Session is no longer active')).resolves.toBeUndefined();
+    await expect(f.onScheduleDisabled!(schedule, 'Session is no longer active')).rejects.toMatchObject({ code: 'AUTOMATION_DESTINATION_MISSING' });
     expect(f.client.reply).not.toHaveBeenCalled();
 
     // 2. 有 delivery-target 时向原位置发送通知卡片
@@ -257,7 +257,7 @@ describe('automation service integration', () => {
     const sent = f.client.reply.mock.calls[0]![0] as any;
     expect(sent.messageId).toBe('om_target_thread');
     expect(sent.taskName).toBe('每日数据巡检');
-    expect(JSON.stringify(sent.elements)).toContain('定时计划『每日数据巡检』已停用：它绑定的会话已结束。如需继续，请在新会话里重新设置。');
+    expect(JSON.stringify(sent.elements)).toContain('定时计划『每日数据巡检』已停用：Session is no longer active');
   });
 
   it('sets result card taskName to schedule name and adds disable button for schedule deliveries', async () => {
@@ -386,4 +386,35 @@ it('freezes an explicit busy message origin and rejects cross-chat or conflictin
   expect(JSON.parse((await f.repos.config.get('automation.delivery-target.busy_schedule'))!)).toEqual({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_busy_now', replyInThread: false });
   await expect(f.prepareMessageDelivery('s1', { ...origin, chatId: 'oc_other' }, 'wrong_chat')).rejects.toMatchObject({ code: 'AUTOMATION_DESTINATION_MISSING' });
   await expect(f.prepareMessageDelivery('s1', { ...origin, messageId: 'om_changed' }, 'busy_schedule')).rejects.toMatchObject({ code: 'AUTOMATION_DESTINATION_CHANGED' });
+});
+
+it('delivers an independent execution to its frozen origin and rejects revoked origin authority', async () => {
+  const f = await fixture();
+  const result = f.settleTask('completed', 'independent result');
+  const raw = JSON.parse((await f.repos.config.get('session_automation/occurrence/occ1'))!);
+  await f.repos.config.set('session_automation/occurrence/occ1', JSON.stringify({ ...raw, sessionId: 'origin', executionSessionId: 's1' }));
+  f.session.id = 'origin';
+  await f.repos.config.set('automation.delivery-target.automation1', JSON.stringify({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_original', replyInThread: true }));
+  await f.deliver('origin', result, 'occ1', 'automation1');
+  expect(f.client.reply).toHaveBeenCalledOnce();
+  await f.setBot({ allowedUsers: [{ openId: 'ou_other', name: 'Other' }] });
+  await expect(f.deliver('origin', result, 'occ1', 'automation1')).rejects.toMatchObject({ code: 'AUTOMATION_DELIVERY_REVOKED' });
+  expect(f.client.reply).toHaveBeenCalledOnce();
+});
+
+it('reconciles a persisted disabled notice receipt without another send and refuses missing evidence', async () => {
+  const f = await fixture();
+  const schedule: any = { id: 'notice', sessionId: 's1', name: 'Frozen name', actorId: 'ou_alice', disabledAt: '2026-10-26T00:00:00.000Z', disabledReason: 'Session is no longer active' };
+  await f.repos.config.set('automation.delivery-target.notice', JSON.stringify({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_original', replyInThread: true }));
+  expect(await f.reconcileDisabledNotification(schedule)).toBe(false);
+  expect(f.client.reply).not.toHaveBeenCalled();
+  const guard = vi.fn(async () => {});
+  await f.onScheduleDisabled(schedule, schedule.disabledReason, guard);
+  expect(guard).toHaveBeenCalled();
+  expect(await f.reconcileDisabledNotification(schedule)).toBe(true);
+  expect(f.client.reply).toHaveBeenCalledOnce();
+  f.session.source = 'schedule';
+  expect(await f.authorize('s1', installationOwnerTaskActor)).toBe(false);
+  f.session.source = 'web';
+  expect(await f.onScheduleDisabled(schedule, schedule.disabledReason)).toBe('not_requested');
 });

@@ -10,6 +10,7 @@ import {
 } from '@dutydeck/shared';
 import type { OpenControl } from './database-control.js';
 import { currentProcessIdentity, observeProcess } from './process-identity.js';
+import { resolveExecutionWorkspace, type ExecutionWorkspaceIdentity } from './execution-workspace.js';
 
 const { id, revision, fenceSchema, attemptFenceSchema, checksSchema, decisionSchema, identitySchema, observationSchema, intentSchema, sessionSchema } = taskExecutionSchemas;
 function fail(code: string, detail = code): never { throw new RuntimeError(code, detail, 409); }
@@ -78,6 +79,11 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   const steeringOperation = (operationId: string) => rowJson<SteeringOperation>(db.prepare('SELECT json FROM task_steering_operations WHERE id=?').get(operationId));
   const taskSteering = (taskId: string) => rowJson<SteeringOperation>(db.prepare('SELECT json FROM task_steering_operations WHERE task_id=? ORDER BY rowid DESC LIMIT 1').get(taskId));
   const steeringBlockers = (sessionId: string): ExecutionBlocker[] => (db.prepare("SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')").all(sessionId) as Array<{task_id:string}>).map(row => ({code:'STEERING_DELIVERY_UNKNOWN',sessionId,taskId:row.task_id}));
+  // A manual settlement can deliberately retain an unknown outcome while releasing
+  // admission. Only unresolved attempts (or missing ledger evidence) still hold it.
+  const unresolvedUnknownTask = (sessionId: string) => db.prepare(`SELECT t.id FROM tasks t
+    LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id
+    WHERE t.session_id=? AND t.status='reconcile_required' AND (a.id IS NULL OR a.state!='settled') LIMIT 1`).get(sessionId) as {id:string}|undefined;
   const saveSteering = (value: SteeringOperation) => db.prepare('UPDATE task_steering_operations SET state=?,revision=?,json=? WHERE id=?').run(value.state,value.revision,json(value),value.operationId);
   const sameController = (a: ExecutionController, b: ExecutionController) => a.accessId === b.accessId && a.instanceId === b.instanceId && a.generation === b.generation;
   const resourceSafe = (r: DriverResource, owner?: ExecutionController): boolean => {
@@ -97,7 +103,11 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         const v = JSON.parse(row.value);
         if (row.key.startsWith('runtime_driver_stop_block:')) result.push({ sessionId, code: 'DRIVER_STOP_BLOCKED' });
         else if (row.key.startsWith('runtime_workspace:') && ['preparing', 'cleaning', 'failed'].includes(v.state)) result.push({ sessionId, code: 'WORKSPACE_RECOVERY_REQUIRED' });
-        else if (row.key.startsWith('runtime_verification:') && v.sessionId === sessionId && v.status === 'running') result.push({ sessionId, code: 'VERIFICATION_RESOURCE_UNKNOWN' });
+        else if (row.key.startsWith('runtime_verification:')) {
+          if (!v || v.sessionId !== sessionId || !['running', 'passed', 'failed', 'timed_out', 'interrupted', 'unverified'].includes(v.status)) {
+            result.push({ sessionId, code: 'RESOURCE_EVIDENCE_INVALID', detail: row.key });
+          } else if (v.status === 'running') result.push({ sessionId, code: 'VERIFICATION_RESOURCE_UNKNOWN' });
+        }
       } catch { result.push({ sessionId, code: 'RESOURCE_EVIDENCE_INVALID', detail: row.key }); }
     }
     return result;
@@ -107,6 +117,91 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     ...externalBlockers(sessionId),
     ...(db.prepare("SELECT 1 FROM task_attempts WHERE session_id=? AND state='legacy_unresolved' LIMIT 1").get(sessionId) ? [{ sessionId, code: 'LEGACY_MULTIPLE_EXECUTIONS' }] : [])
   ];
+  const workspaceIdentity = (sessionId: string, freeze = false): ExecutionWorkspaceIdentity => {
+    const current = resolveExecutionWorkspace(session(sessionId).cwd);
+    const key = `runtime_execution_workspace:${sessionId}`;
+    const stored = db.prepare('SELECT value FROM configs WHERE key=?').get(key) as { value: string } | undefined;
+    if (stored && !same(JSON.parse(stored.value), current)) fail('WORKSPACE_RESOURCE_IDENTITY_CHANGED');
+    const workspace = db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_workspace:${sessionId}`) as { value: string } | undefined;
+    if (workspace) {
+      const value = JSON.parse(workspace.value);
+      if (value.gitCommonDir && current.key !== `git:${value.gitCommonDir}`) fail('WORKSPACE_RESOURCE_IDENTITY_CHANGED');
+    }
+    if (!stored && freeze) db.prepare('INSERT INTO configs(key,value) VALUES(?,?)').run(key,json(current));
+    return current;
+  };
+  const idleResourceSafe = (r: DriverResource, checks: ResourceCheckRef[], owner?: ExecutionController): boolean => {
+    const check = checks.find(value => value.resourceId === r.resourceId);
+    if (!owner || !check || r.revision !== check.expectedRevision || r.observations.at(-1)?.observationId !== check.observationId
+      || r.observations.at(-1)?.state !== 'live' || r.stage !== 'created' || !r.identity || !sameController(r.holder ?? r.controller, owner)) return false;
+    if (r.kind === 'local_only') return true;
+    if (r.kind !== 'process') return false;
+    const parent = r.parentResourceId ? resource(r.parentResourceId) : undefined;
+    return Boolean(parent?.kind === 'operation' && parent.stage === 'created'
+      && ['lifecycle','strict-context-restore'].includes(parent.operationScope?.kind ?? ''));
+  };
+  const retiredLegacyResourceSafe = (r: DriverResource): boolean => {
+    if (r.kind !== 'legacy' || r.resourceId !== legacyResourceId(r.sessionId) || r.stage !== 'unknown'
+      || r.controller.instanceId !== 'legacy_unverified' || r.controller.generation !== 0) return false;
+    try {
+      const receipt = readRetirementReceipt(r.sessionId);
+      if (!receipt) return false;
+      const { receiptId, ...content } = receipt, s = session(r.sessionId);
+      if (receipt.evidence.kind === 'pty_tmux_absent') {
+        const readable = s.id.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 48) || 'session';
+        if (receipt.protocol !== 'pty-cli' || receipt.evidence.owner !== `dutydeck:${s.id}`
+          || receipt.evidence.targetName !== `dutydeck-${readable}-${hash(s.id).slice(0, 16)}`
+          || receipt.evidence.outcome === 'stopped_owned' && !receipt.evidence.targetId
+          || receipt.evidence.outcome === 'already_missing' && (receipt.evidence.targetId || receipt.evidence.paneProcesses.length)) return false;
+      } else if (receipt.protocol !== 'acp' || receipt.evidence.acpxRecordId !== s.id
+        || !receipt.evidence.recordPath.endsWith(`/sessions/${encodeURIComponent(s.id)}.json`)) return false;
+      const entity = (db.prepare('SELECT entity FROM dutydeck_control WHERE id=1').get() as {entity:string}).entity;
+      return receiptId === `legacy_retirement_${hash(stable(content))}` && receipt.sessionId === r.sessionId
+        && receipt.runId === r.runId && s.runId === receipt.runId && receipt.databaseEntity === entity
+        && s.protocol === receipt.protocol && s.state === 'stopped' && s.archivedAt === receipt.archivedAt
+        && Boolean(s.error?.includes(LEGACY_RETIREMENT_NOTICE));
+    } catch { return false; }
+  };
+  const workspaceBlockers = (sessionId: string, checks: ResourceCheckRef[] = [], owner?: ExecutionController, freeze = false): ExecutionBlocker[] => {
+    let identity: ExecutionWorkspaceIdentity;
+    try { identity = workspaceIdentity(sessionId, freeze); }
+    catch { return [{ code: 'WORKSPACE_RESOURCE_UNVERIFIABLE', sessionId }]; }
+    const result: ExecutionBlocker[] = [];
+    const admissionExternal = (id: string): ExecutionBlocker[] => {
+      const configuration = db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${id}`) as {value:string}|undefined;
+      return [...externalBlockers(id),...(configuration?.value ? [{code:'DRIVER_CONFIGURATION_UNKNOWN',sessionId:id}] : [])];
+    };
+    const candidates = db.prepare(`SELECT DISTINCT session_id FROM task_attempts WHERE state IN ('preparing','active','reconcile_required','legacy_unresolved')
+      UNION SELECT session_id FROM tasks WHERE status='reconcile_required'
+      UNION SELECT session_id FROM task_steering_operations WHERE state IN ('pending','unknown')
+      UNION SELECT session_id FROM driver_resources
+      UNION SELECT substr(key,length('runtime_workspace:')+1) AS session_id FROM configs WHERE key LIKE 'runtime_workspace:%'
+      UNION SELECT substr(key,length('runtime_driver_configuration:')+1) AS session_id FROM configs WHERE key LIKE 'runtime_driver_configuration:%' AND value!=''
+      UNION SELECT id AS session_id FROM sessions WHERE id IN (SELECT substr(key,length('runtime_driver_stop_block:')+1) FROM configs WHERE key LIKE 'runtime_driver_stop_block:%' AND value!='')
+      UNION SELECT id AS session_id FROM sessions s WHERE EXISTS (SELECT 1 FROM configs WHERE key>=('runtime_verification:'||s.id||':') AND key<('runtime_verification:'||s.id||';'))`).all() as Array<{session_id:string}>;
+    for (const {session_id: otherId} of candidates) {
+      if (otherId === sessionId) continue;
+      const unresolved = db.prepare(`SELECT task_id AS taskId,id AS attemptId FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') LIMIT 1`).get(otherId) as {taskId:string;attemptId:string}|undefined;
+      const unknown = unresolvedUnknownTask(otherId);
+      const steering = steeringBlockers(otherId);
+      const unsafe = resources(otherId).filter(r => !resourceSafe(r) && !retiredLegacyResourceSafe(r) && !idleResourceSafe(r,checks,owner));
+      const external = admissionExternal(otherId);
+      if (!unresolved && !unknown && !steering.length && !unsafe.length && !external.length) continue;
+      let other: ExecutionWorkspaceIdentity;
+      try { other = workspaceIdentity(otherId, freeze); }
+      catch {
+        const frozen = db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_execution_workspace:${otherId}`) as {value:string}|undefined;
+        let knownKey: string | undefined;
+        try { knownKey = frozen ? JSON.parse(frozen.value).key : undefined; } catch { /* Corrupt identity remains unknown. */ }
+        if (knownKey && knownKey !== identity.key) continue;
+        result.push({code:'WORKSPACE_RESOURCE_UNVERIFIABLE',sessionId:otherId});continue;
+      }
+      if (other.key !== identity.key) continue;
+      if (unresolved || unknown || steering.length) result.push({code:'WORKSPACE_EXECUTION_BUSY',sessionId:otherId,...(unresolved ? {taskId:unresolved.taskId,attemptId:unresolved.attemptId} : unknown ? {taskId:unknown.id} : {taskId:steering[0]!.taskId})});
+      result.push(...unsafe.map(r => ({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE',sessionId:otherId,resourceId:r.resourceId})),...external);
+    }
+    return result;
+  };
   const readInput = (raw: string): AcceptedTaskInput => {
     const input = parse(acceptedTaskInputSchema, JSON.parse(raw));
     const { digest, ...content } = input;
@@ -194,7 +289,29 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     db.prepare('INSERT INTO configs(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(nativeKey(sessionId), stable(selection));
   };
   const actorId = (actor: TaskRequestV1['actor']) => actor.kind === 'unspecified' ? undefined : actor.id;
+  const scheduleScope = (s: Session): { origin: Session; actorId: string } => {
+    if (!s.sourceId || !/^ses_schedule_[a-f0-9]{64}$/.test(s.id)) fail('SCHEDULE_EXECUTION_SCOPE_INVALID');
+    const row = db.prepare('SELECT value FROM configs WHERE key=?').get(`session_automation/schedule/${s.sourceId}`) as {value:string}|undefined;
+    let value: {schemaVersion?:unknown;id?:unknown;sessionId?:unknown;executionSessionId?:unknown;mode?:unknown;actorId?:unknown};
+    try { value = JSON.parse(row?.value ?? 'null'); } catch { fail('SCHEDULE_EXECUTION_SCOPE_INVALID'); }
+    if (!value || value.schemaVersion !== 1 || value.id !== s.sourceId || value.mode !== 'independent' || value.executionSessionId !== s.id
+      || typeof value.sessionId !== 'string' || value.sessionId === s.id || typeof value.actorId !== 'string' || !value.actorId) fail('SCHEDULE_EXECUTION_SCOPE_INVALID');
+    const origin = session(value.sessionId);
+    if (origin.source === 'schedule') fail('SCHEDULE_EXECUTION_SCOPE_INVALID');
+    return {origin,actorId:value.actorId};
+  };
   const validateActor = (r: Pick<TaskRequestV1, 'actor' | 'namespace' | 'sessionId'>, s: Session, accepted?: AcceptedTaskInput) => {
+    if (s.source === 'schedule') {
+      const scope = scheduleScope(s);
+      if (r.namespace === 'lark' || r.namespace === 'work_item') fail('TASK_REQUEST_SCOPE_CONFLICT');
+      if (r.actor.kind === 'unspecified') fail('ACTOR_REQUIRED');
+      if (r.actor.kind === 'channel') {
+        if (scope.origin.source !== 'lark') fail('TASK_ACTOR_CONFLICT');
+        if (r.actor.appId !== parseLarkSourceId(scope.origin.sourceId).appId) fail('TASK_ACTOR_CONFLICT');
+      }
+      if (r.sessionId !== s.id || accepted && accepted.executionContext.actorId !== actorId(r.actor)) fail('TASK_ACTOR_CONFLICT');
+      return;
+    }
     if (r.actor.kind === 'unspecified' && (r.namespace !== 'runtime' || ['lark', 'work_item', 'foundation_group_binding'].includes(s.source ?? ''))) fail('ACTOR_REQUIRED');
     if (r.actor.kind === 'channel' && !['lark', 'work_item'].includes(s.source ?? '')) fail('TASK_ACTOR_CONFLICT');
     if (r.namespace === 'work_item' && s.source !== 'work_item') fail('TASK_REQUEST_SCOPE_CONFLICT');
@@ -228,7 +345,12 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       if (accepted?.task.sessionId !== f.sessionId || original?.kind !== 'channel' || original.appId !== actor.appId) fail('TASK_ACTOR_CONFLICT');
     }
   };
-  const validateRequest = (raw: TaskRequestV1) => { const r = parse(taskRequestV1Schema, raw); validateActor(r, session(r.sessionId)); return r; };
+  const validateRequest = (raw: TaskRequestV1) => {
+    const r = parse(taskRequestV1Schema, raw), s = session(r.sessionId);
+    validateActor(r,s);
+    if (s.source === 'schedule' && actorId(r.actor) !== scheduleScope(s).actorId) fail('TASK_ACTOR_CONFLICT');
+    return r;
+  };
   const getAcceptedTask = (taskId: string): AcceptedTask | undefined => {
     id.parse(taskId);
     if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
@@ -510,12 +632,20 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   return {
     authority, upgradeLegacy, beginLegacyRetirement, lookupAccepted: lookup, getAcceptedTask,
     getResources: resources,
+    getRecoveryDecision(decisionId) {
+      id.parse(decisionId);
+      const content = rowJson<{sessionId:string;runId:string;attemptId:string|null;evidence:unknown}>(db.prepare('SELECT json FROM recovery_decisions WHERE id=?').get(decisionId));
+      if (!content) return;
+      const decision = decisionSchema.safeParse(content.evidence);
+      if (!decision.success) return;
+      return {sessionId:content.sessionId,runId:content.runId,...(content.attemptId?{attemptId:content.attemptId}:{}),decision:decision.data};
+    },
     getNativeContext(sessionId) { const selection = nativeSelection(sessionId); return selection ? {selection,resource:nativeResource(sessionId,selection.context)} : undefined; },
     getSessionResourceBlockers: sessionId => blockers(sessionId),
     getTaskExecution(taskId) {
       const t = task(taskId); if (!t) return;
       if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
-      return { task: t, currentAttempt: t.currentAttemptId ? attempt(t.currentAttemptId) : undefined, attempts: taskAttempts(t.id), steering: taskSteering(t.id), blockers: [...blockers(t.sessionId), ...steeringBlockers(t.sessionId), ...inputBlockers(t)] };
+      return { task: t, currentAttempt: t.currentAttemptId ? attempt(t.currentAttemptId) : undefined, attempts: taskAttempts(t.id), steering: taskSteering(t.id), blockers: [...blockers(t.sessionId), ...steeringBlockers(t.sessionId), ...workspaceBlockers(t.sessionId), ...inputBlockers(t)] };
     },
     getAttempt(ref) {
       if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
@@ -530,7 +660,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       }
       const bySteeringTask = new Map<string,SteeringOperation>();
       for (const row of db.prepare('SELECT json FROM task_steering_operations WHERE session_id=? ORDER BY rowid').all(sessionId)) { const value=rowJson<SteeringOperation>(row)!; bySteeringTask.set(value.taskId,value); }
-      const sharedBlockers = [...blockers(sessionId), ...steeringBlockers(sessionId)];
+      const sharedBlockers = [...blockers(sessionId), ...steeringBlockers(sessionId), ...workspaceBlockers(sessionId)];
       return (db.prepare('SELECT * FROM tasks WHERE session_id=? ORDER BY created_at,id').all(sessionId) as Record<string, any>[]).map(row => {
         const t = decodeTask(row)!;
         const values = byTask.get(t.id) ?? [];
@@ -638,6 +768,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           const replay = lookup(request);
           if (replay) return { ...result(f, replay.task, replay.task.currentAttemptId ? attempt(replay.task.currentAttemptId) : undefined, [], true), accepted: replay };
           const s = session(f.sessionId);
+          try { workspaceIdentity(f.sessionId,true); } catch {
+            db.prepare('INSERT OR IGNORE INTO configs(key,value) VALUES(?,?)').run(`runtime_execution_workspace:${f.sessionId}`,json({version:1,unverifiable:true}));
+          }
           if (s.archivedAt || s.state === 'stopped') fail('SESSION_NOT_ACCEPTING');
           taskExecutionSchemas.position.parse(position);
           const input = parse(acceptedTaskInputV2Schema, rawInput);
@@ -658,15 +791,19 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           if (request.mode === 'interrupt') queueAction(f,t,'accept',{ operationId: `accept_interrupt:${t.id}`, actor: request.actor, interrupt: true });
           return { ...result(f,t,undefined,[...cancelled.flatMap(item => item.events), ...events]), accepted: lookup(request)! };
         }); },
-        claimNext(rawFence) { return write(owner => {
+        claimNext(rawFence, idleResources = []) { return write(owner => {
           const f = readFence(rawFence); const s = session(f.sessionId);
           if (s.archivedAt || s.state === 'stopped') fail('SESSION_NOT_ACCEPTING');
           assertResources(f, undefined, owner);
           if (steeringBlockers(f.sessionId).length) fail('STEERING_DELIVERY_UNKNOWN');
           if (db.prepare("SELECT 1 FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required') LIMIT 1").get(f.sessionId)) fail('SESSION_EXECUTION_BUSY');
+          if (unresolvedUnknownTask(f.sessionId)) fail('SESSION_EXECUTION_BUSY');
           const row = db.prepare("SELECT id FROM tasks WHERE session_id=? AND status='queued' ORDER BY COALESCE(queue_position,0),created_at,rowid LIMIT 1").get(f.sessionId) as { id: string } | undefined;
           if (!row) return;
           const t = task(row.id)!;
+          parse(checksSchema,idleResources);
+          const admission = workspaceBlockers(f.sessionId,idleResources,owner,true);
+          if (admission.length) fail('WORKSPACE_RESOURCE_BLOCKED',json(admission));
           requireInputOptions(t.id);
           let a = t.currentAttemptId ? attempt(t.currentAttemptId) : undefined;
           if (a?.automaticRetry) {
@@ -701,7 +838,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             return result(f,t,t.currentAttemptId ? attempt(t.currentAttemptId) : undefined,[event]);
           });
         }); },
-        beginQueuedSteering(rawFence, taskId, expectedTaskRevision, rawInput) { return write(owner => {
+        beginQueuedSteering(rawFence, taskId, expectedTaskRevision, rawInput, idleResources = []) { return write(owner => {
           const f = readFence(rawFence);
           const input = parse(taskExecutionSchemas.steeringOperation,rawInput);
           validateManagementActor(f,taskId,input.actor);
@@ -710,6 +847,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             const {t,a} = queuedTask(f,taskId,expectedTaskRevision);
             if(a) fail('STEERING_TASK_HAS_ATTEMPT');
             if(getAcceptedTask(taskId)?.request?.namespace!==steerableTaskNamespace) fail('STEERING_TASK_OWNED');
+            parse(checksSchema,idleResources);
+            const admission=workspaceBlockers(f.sessionId,idleResources,owner,true);
+            if(admission.length)fail('WORKSPACE_RESOURCE_BLOCKED',json(admission));
             const target=attempt(input.target.attemptId);
             if(!target || target.taskId!==input.target.taskId || target.sessionId!==f.sessionId || target.runId!==f.runId || target.state!=='active' || target.submissionState==='not_submitted') fail('STEERING_TARGET_CONFLICT');
             const value: SteeringOperation = {...f,...input,taskId,controller:owner,state:'pending',revision:1,createdAt:timestamp(),updatedAt:timestamp()};
@@ -786,6 +926,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             const {t,a}=currentAttempt(f,owner);
             if(a.state!=='preparing' || a.submissionState!=='not_submitted') fail('ATTEMPT_NOT_PREPARING');
             requireInputOptions(t.id);
+            workspaceIdentity(f.sessionId,true);
             assertResources(f,undefined,owner);
             for(const ref of input.resourceRefs) {
               const r=resource(ref.resourceId);
@@ -948,7 +1089,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
               a.settlement={kind:'manual',outcome:'unknown',decision};
               t.status='reconcile_required';touch(t,a);priorEvents=transitions(f,t,a,true).events;
             }
-            const next:TaskAttempt={sessionId:f.sessionId,runId:f.runId,taskId:t.id,attemptId:`attempt_${randomUUID()}`,number:a.number+1,revision:1,state:'suspended',submissionState:'not_submitted',controller:owner,recoveryControllers:[],createdAt:timestamp(),updatedAt:timestamp()};
+            const next:TaskAttempt={sessionId:f.sessionId,runId:f.runId,taskId:t.id,attemptId:`attempt_${randomUUID()}`,number:a.number+1,revision:1,state:'suspended',submissionState:'not_submitted',controller:owner,recoveryControllers:[],manualRetry:{causeAttemptId:a.attemptId,decisionId:decision.decisionId,inputDigest:requireInputOptions(t.id).digest},createdAt:timestamp(),updatedAt:timestamp()};
             t.currentAttemptId=next.attemptId;t.status='queued';t.queuePosition=nextPosition(f.sessionId,'back');t.revision++;t.updatedAt=timestamp();
             const committed=transitions(f,t,next);committed.events=[...priorEvents,...committed.events];return committed;
           });

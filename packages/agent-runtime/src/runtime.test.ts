@@ -522,15 +522,15 @@ describe('runtime lifecycle acceptance', () => {
     try {
       await h.runtime.initialize([agent]);
       const session = await h.runtime.start({ agentId: 'mock', cwd: invalidCwd });
-      await rm(invalidCwd, { recursive: true });
-      await writeFile(invalidCwd, 'file blocks nested security directory');
+      const securityPath = join(invalidCwd, '.dutydeck');
+      await rm(securityPath, { recursive: true, force: true });
+      await writeFile(securityPath, 'file blocks nested security directory');
       const failed = await h.runtime.dispatch(session.id, 'guarded work', 'queue', 'guarded agent prompt', policy);
       await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(task => task.id === failed.id)?.status).toBe('failed'));
       expect(h.driver.setRiskPolicy).toHaveBeenCalledWith(policy);
       expect(h.driver.send).not.toHaveBeenCalled();
 
-      await rm(invalidCwd, { force: true });
-      await mkdir(invalidCwd);
+      await rm(securityPath, { force: true });
       await h.runtime.dispatch(session.id, 'safe retry');
       await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(task => task.prompt === 'safe retry')?.status).toBe('completed'));
       expect(h.driver.send).toHaveBeenCalledWith('safe retry');

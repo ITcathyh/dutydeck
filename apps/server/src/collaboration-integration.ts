@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, participationLevelFields, resolveParticipation, RuntimeError, type CollaborationRepository, type CollaborationScope, type ScheduleDelivery, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { CollaborationService, type CollaborationAuthorization } from './collaboration-service.js';
-import { ScheduleExecutor } from './schedule-executor.js';
+import { ScheduleExecutor, type ScheduleExecutionInput } from './schedule-executor.js';
+import { readConfirmedLarkBoundMessage } from './lark/result-delivery.js';
 import { CollaborationBackground } from './collaboration-background.js';
 import { CollaborationExtensions } from './collaboration-extensions.js';
 import { CollaborationEvaluation } from './collaboration-evaluation.js';
@@ -205,19 +206,44 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   const mandateCards = new MandateCards({ service, config: repos.config, onChange, log: options.log,
     client: async scope => { const config = await readLarkConfig(repos.config, scope.appId); if (!config) throw new RuntimeError('COLLABORATION_GROUP_REQUIRED', '请先同步并配置此群。', 403); return client(config); },
     canOperate: async (scope, operatorId) => operatorId === installationOwnerTaskActor || policy(scope, operatorId, 'run.interrupt').catch(() => false) });
+  const deliveryReceipt = (input: ScheduleExecutionInput) => {
+    const { action, occurrence, schedule, mandate, scope } = input;
+    if (action.kind !== 'schedule_delivery' || action.id !== input.actionId || action.id !== `collaboration_delivery_${occurrence.idempotencyKey}`
+      || action.scope.appId !== scope.appId || action.scope.chatId !== scope.chatId || action.mandateId !== mandate.id
+      || action.requesterId !== input.actorId || action.scheduleGeneration !== occurrence.generation
+      || occurrence.scheduleDefinitionId !== schedule.id || mandate.scheduleDefinitionId !== schedule.id
+      || schedule.sourceNamespace !== 'collaboration' || schedule.sourceOwnership !== 'dutydeck'
+      || typeof action.payload.text !== 'string' || !action.payload.delivery || typeof action.payload.delivery !== 'object'
+      || schedule.delivery.chatRef !== scope.chatId || canonicalExecutionJson(action.payload.delivery) !== canonicalExecutionJson(JSON.parse(JSON.stringify(schedule.delivery)))
+      || createHash('sha256').update(canonicalExecutionJson(action.payload)).digest('hex') !== action.inputDigest) return;
+    return {
+      idempotencyKey: createHash('sha256').update(input.actionId).digest('hex').slice(0, 32), chatId: scope.chatId,
+      identity: canonicalExecutionJson({ source: 'collaboration', scope, actionId: action.id, inputDigest: action.inputDigest,
+        mandateId: action.mandateId, mandateRevision: action.mandateRevision, requesterId: action.requesterId,
+        scheduleId: schedule.id, channelBotId: schedule.channelBotId, identityRef: schedule.identityRef ?? null, secretRef: schedule.secretRef ?? null,
+        occurrenceId: occurrence.id, occurrenceKey: occurrence.idempotencyKey, generation: occurrence.generation, delivery: action.payload.delivery })
+    };
+  };
   const scheduler = new ScheduleExecutor({ repositories: repos, service, authorize: scheduleAuthorize,
     executeAgent: input => background.execute(input), cancelAgent: input => background.cancel(input),
     deliver: async input => {
       const { config } = await live(input.scope, false, true);
       const delivery = input.schedule.delivery;
+      const receipt = deliveryReceipt(input);
+      if (!receipt) throw new RuntimeError('COLLABORATION_DESTINATION_CONFLICT', '结果投递身份与原定时轮次不符。', 403);
       if (!await validateDelivery(input.scope, delivery, true)) throw new RuntimeError('COLLABORATION_DESTINATION_CONFLICT', '当前结果投递位置不属于授权群。', 403);
       return deliveries.run(input.scope, input.actionId, async () => {
       await input.claimDispatch();
-      const idempotencyKey = createHash('sha256').update(input.actionId).digest('hex').slice(0, 32);
       // 产出是带暂停/停止按钮的卡片，用户在消息上就能管这个委托。
-      const messageId = await mandateCards.deliver({ client: client(config), scope: input.scope, delivery, mandate: input.mandate, text: input.text, idempotencyKey });
+      const messageId = await mandateCards.deliver({ client: client(config), scope: input.scope, delivery, mandate: input.mandate, text: input.text, idempotencyKey: receipt.idempotencyKey, receiptIdentity: receipt.identity });
       return { receipt: messageId };
       });
+    },
+    reconcile: async input => {
+      const receipt = deliveryReceipt(input);
+      if (!receipt || !await scheduleAuthorize(input.scope, input.actorId, 'deliver')) return { status: 'unknown' };
+      const confirmed = await readConfirmedLarkBoundMessage(repos.config, receipt);
+      return confirmed ? { status: 'succeeded', receipt: confirmed.messageId } : { status: 'unknown' };
     }
   });
   const extensions = new CollaborationExtensions({ repository: repos.collaboration,

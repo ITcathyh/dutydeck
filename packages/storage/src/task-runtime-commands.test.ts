@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as shared from '@dutydeck/shared';
@@ -15,12 +15,15 @@ const at = '2026-09-14T00:00:00.000Z';
 const f = { sessionId: 'session', runId: 'run' };
 const hash = (value: unknown) => createHash('sha256').update(shared.canonicalExecutionJson(value)).digest('hex');
 const rawHash = (value: string) => createHash('sha256').update(value).digest('hex');
-const session = () => ({ id: f.sessionId, runId: f.runId, agentId: 'agent', cwd: '/source', state: 'created' as const, createdAt: at, updatedAt: at });
+const sourceDirectory = () => join(directories.at(-1)!, 'source');
+const preparedDirectory = () => join(directories.at(-1)!, 'prepared');
+const session = () => ({ id: f.sessionId, runId: f.runId, agentId: 'agent', cwd: sourceDirectory(), state: 'created' as const, createdAt: at, updatedAt: at });
 const request = (key = 'one', options: TaskRequestV1['options'] = {}): TaskRequestV1 => ({ version: 1, namespace: 'runtime', key, sessionId: f.sessionId, actor: { kind: 'unspecified' }, prompt: 'hello', mode: 'queue', skills: [], options, sources: [], sourcePayload: null });
 const input = (options = { permissionMode: 'ask' }, version = 2): any => { const content = { version, prompt: 'hello', executionContext: { agentPrompt: 'hello' }, contentSources: [], ...(version === 2 ? { executionOptions: options } : {}) }; return { ...content, digest: hash(content) }; };
 const af = (a: TaskAttempt) => ({ ...f, taskId: a.taskId, attemptId: a.attemptId, expectedRevision: a.revision });
 function open(legacy = false) {
   const dir = mkdtempSync(join(tmpdir(), 'task-runtime-commands-')); directories.push(dir);
+  mkdirSync(sourceDirectory());mkdirSync(preparedDirectory());
   const path = join(dir, 'test.sqlite'); const repos = storage.createRepositories(path); const db = new Database(path);
   if (!legacy) repos.execution.upgradeLegacy();
   const e = { repos, db, claim: legacy ? undefined : repos.control.attachRuntime('commands') }; opened.push(e);
@@ -30,10 +33,10 @@ function open(legacy = false) {
 }
 function queued(x: any, key = 'one') { return x.acceptTask(f, request(key), input(), 'back').task; }
 function active(x: any) { queued(x); return x.claimNext(f).attempt as TaskAttempt; }
-function workspace(db: Database.Database, cwd = '/prepared', patch: Record<string, unknown> = {}) {
-  const record = { schemaVersion: 1, revision: 2, sessionId: f.sessionId, state: 'ready', mode: 'worktree', sourceCwd: '/source', cwd, createdAt: at, updatedAt: at, ...patch };
+function workspace(db: Database.Database, cwd = preparedDirectory(), patch: Record<string, unknown> = {}) {
+  const record = { schemaVersion: 1, revision: 2, sessionId: f.sessionId, state: 'ready', mode: 'worktree', sourceCwd: sourceDirectory(), cwd, createdAt: at, updatedAt: at, ...patch };
   const raw = JSON.stringify(record); db.prepare('INSERT INTO configs(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(`runtime_workspace:${f.sessionId}`, raw);
-  return { expectedCwd: '/source', workspaceRevision: 2, workspaceDigest: rawHash(raw) };
+  return { expectedCwd: sourceDirectory(), workspaceRevision: 2, workspaceDigest: rawHash(raw) };
 }
 function snapshot(db: Database.Database) { return JSON.stringify(['sessions', 'tasks', 'task_attempts', 'task_queue_actions', 'events', 'task_execution_commands', 'configs'].map(table => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all())); }
 function allTables(db: Database.Database) { return JSON.stringify((db.prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name").all() as {name:string}[]).map(({name}) => [name, db.prepare(`SELECT * FROM "${name.replaceAll('"','""')}"`).all()])); }
@@ -87,7 +90,7 @@ describe('Runtime ledger commands', () => {
 
   it('finalizes matching raw workspace evidence atomically and handles lost responses without rewriting history', () => {
     const { x, repos, db } = open(); const proof = workspace(db);
-    const ready = x.finalizeSessionWorkspace(f, proof); expect(ready.cwd).toBe('/prepared'); expect(ready.runId).toBe(f.runId);
+    const ready = x.finalizeSessionWorkspace(f, proof); expect(ready.cwd).toBe(preparedDirectory()); expect(ready.runId).toBe(f.runId);
     const a = active(x); x.settleAttempt(af(a), 'done', { kind: 'not_submitted', outcome: 'cancelled', reason: 'done' });
     const before = snapshot(db); expect(x.finalizeSessionWorkspace(f, proof).cwd).toBe(ready.cwd); expect(snapshot(db)).toBe(before);
     expect(x.replaceSessionRun(f, 'next-run', []).runId).toBe('next-run');
@@ -99,7 +102,7 @@ describe('Runtime ledger commands', () => {
     const { x, db } = open(); const proof = workspace(db); const before = snapshot(db);
     for (const patch of [{ expectedCwd: '/wrong' }, { workspaceRevision: 3 }, { workspaceDigest: hash('other') }]) expect(() => x.finalizeSessionWorkspace(f, { ...proof, ...patch })).toThrow();
     expect(snapshot(db)).toBe(before);
-    for (const patch of [{ state: 'preparing' }, { sessionId: 'other' }]) { const changed = workspace(db, '/prepared', patch); expect(() => x.finalizeSessionWorkspace(f, changed)).toThrow(); }
+    for (const patch of [{ state: 'preparing' }, { sessionId: 'other' }]) { const changed = workspace(db, preparedDirectory(), patch); expect(() => x.finalizeSessionWorkspace(f, changed)).toThrow(); }
     workspace(db); const raw = db.prepare('SELECT value FROM configs').pluck().get() as string; db.prepare('UPDATE configs SET value=?').run(raw+' ');
     expect(() => x.finalizeSessionWorkspace(f, proof)).toThrow(/WORKSPACE_PROOF_CONFLICT/);
   });
@@ -107,7 +110,7 @@ describe('Runtime ledger commands', () => {
   it('blocks cwd changes for history, archive and unsafe resources but keeps same-cwd proof as a true no-op', () => {
     const { x, repos, db } = open(); const r = x.beforeCreate(f, { resourceId: 'pending', kind: 'operation' }); const proof = workspace(db);
     expect(() => x.finalizeSessionWorkspace(f, proof)).toThrow(expect.objectContaining({code:'SESSION_RESOURCE_BLOCKED'}));
-    const same = workspace(db, '/source'); const before = snapshot(db); expect(x.finalizeSessionWorkspace(f, same).cwd).toBe('/source'); expect(snapshot(db)).toBe(before);
+    const same = workspace(db, sourceDirectory()); const before = snapshot(db); expect(x.finalizeSessionWorkspace(f, same).cwd).toBe(sourceDirectory()); expect(snapshot(db)).toBe(before);
     expect(repos.execution.getSessionResourceBlockers(f.sessionId).some(b => b.resourceId === r.resourceId)).toBe(true);
     x.creationFinished(f, r.resourceId, r.revision, 'not_created'); const a = active(x); x.settleAttempt(af(a), 'done', { kind: 'not_submitted', outcome: 'cancelled', reason: 'done' });
     x.patchSession(f, { state: 'failed' }); const historyProof = workspace(db); expect(() => x.finalizeSessionWorkspace(f, historyProof)).toThrow(/SESSION_WORKSPACE_HISTORY/);
@@ -197,7 +200,7 @@ describe('Runtime ledger commands', () => {
   it('refuses archive/history cwd changes and never clears archived or stopped same-cwd facts', () => {
     const {x,db}=open();x.patchSession(f,{archivedAt:at});let proof=workspace(db);
     expect(()=>x.finalizeSessionWorkspace(f,proof)).toThrow(/SESSION_WORKSPACE_STATE_CONFLICT/);
-    proof=workspace(db,'/source');const before=snapshot(db);expect(x.finalizeSessionWorkspace(f,proof).archivedAt).toBe(at);expect(snapshot(db)).toBe(before);
+    proof=workspace(db,sourceDirectory());const before=snapshot(db);expect(x.finalizeSessionWorkspace(f,proof).archivedAt).toBe(at);expect(snapshot(db)).toBe(before);
   });
 
   it('permits healthy owned resources for idle but refuses live-resource stopped and unknown Attempt lifecycle writes', () => {

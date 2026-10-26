@@ -220,30 +220,28 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     expect(h.prompts).toHaveLength(2);
   });
 
-  it('原会话续不上（旧一轮记不成结果未知）时改在本话题的新会话里重投，说明改为之前的动作可能已经生效', async () => {
+  it('旧一轮核对失败时保留可操作状态，人工重试核对后在原会话执行一次', async () => {
     const h = await interruptedTopic();
     const { sessionId, saved: before } = await h.mapping();
     const oldCardId = before.card_message_id!;
     h.agentState.hang = false;
-
-    await h.restart(async daemon => { vi.spyOn(daemon.runtime, 'confirmExecutionRecovery').mockRejectedValueOnce(new Error('EXECUTION_REVISION_CONFLICT')); });
-    await until(() => h.prompts.length === 2);
-    const replay = h.prompts[1]!;
-    expect(replay.sessionId).not.toBe(sessionId);
-    for (const phrase of ['[Dutydeck 重启恢复 · 系统说明]', '原会话无法恢复', '之前的动作可能已经生效', '整理本周报警并回复群里']) {
-      expect(replay.prompt).toContain(phrase);
-    }
-    expect(replay.prompt).not.toContain('请从中断处继续');
-    expect(await h.inbox()).toMatchObject({ turn: 2, sessionId: replay.sessionId, redispatch: { count: 1, resumed: false, auto: true } });
+    const daemon = await h.restart(async daemon => { vi.spyOn(daemon.runtime, 'confirmExecutionRecovery').mockRejectedValueOnce(new Error('EXECUTION_REVISION_CONFLICT')); });
+    await daemon.coordinator.reconcile(h.config);
     await until(() => h.lastUpdate(oldCardId)?.statusLabel === '结果未知');
-    expect(h.lastUpdate(oldCardId).markdown).toContain('服务更新中断，已自动继续（第 1/2 次）');
-    expect(h.lastUpdate(oldCardId).markdown).toContain('原对话无法恢复，已在本话题的新会话中重新执行');
-    expect(callbackButtonCount(h.lastUpdate(oldCardId))).toBe(0);
-    expect((await h.mapping()).sessionId).toBe(replay.sessionId);
-    // 旧一轮没记上，原样留给管理员核对；新会话这一轮照常跑完，之后不再重投。
-    expect(await h.current().runtime.getTaskRecovery(sessionId, before.runtime_task_id!)).toMatchObject({ status: 'reconcile_required', resolvedUnknown: false });
-    await h.current().coordinator.reconcile(h.config);
-    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(h.prompts).toHaveLength(1);
+    expect(await daemon.runtime.listSessions()).toHaveLength(1);
+    expect((await h.mapping()).sessionId).toBe(sessionId);
+    expect(await daemon.runtime.getTaskRecovery(sessionId, before.runtime_task_id!)).toMatchObject({ status: 'reconcile_required', resolvedUnknown: false });
+    expect(JSON.parse(await daemon.repos.config.get('lark.redispatch.app.om_first.1') ?? '{}')).toMatchObject({ phase: 'held', redispatch: { count: 0 } });
+    expect(JSON.stringify(await daemon.runtime.getEvents(sessionId))).toContain('旧任务尚未完成核对，没有重新执行');
+    const value = callbackValueOf(h.lastUpdate(oldCardId), 'replay_turn');
+    expect(value).toBeDefined();
+    expect(await daemon.coordinator.handleAction(value, 'ou_alice', { messageId: oldCardId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
+    await until(() => h.prompts.length === 2);
+    expect(h.prompts[1]).toMatchObject({ sessionId, prompt: expect.stringContaining('请从中断处继续') });
+    expect(await h.inbox()).toMatchObject({ turn: 2, sessionId, redispatch: { count: 1, resumed: true, auto: false } });
+    expect(await daemon.runtime.getTaskRecovery(sessionId, before.runtime_task_id!)).toMatchObject({ status: 'reconcile_required', resolvedUnknown: true });
+    await daemon.coordinator.reconcile(h.config);
     expect(h.prompts).toHaveLength(2);
   });
 

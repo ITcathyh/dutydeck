@@ -46,6 +46,21 @@ export async function registerSessionAutomationRoutes(app: FastifyInstance, opti
     );
   };
 
+  app.get('/api/automation/schedules', async request => {
+    const query = parse(z.object({
+      offset: z.coerce.number().int().min(0).default(0),
+      limit: z.coerce.number().int().min(1).max(100).default(20),
+      name: z.string().max(200).optional(), sessionId: z.string().optional(), agentId: z.string().optional(),
+      enabled: z.enum(['true', 'false']).transform(value => value === 'true').optional(),
+      health: z.enum(['blocked', 'queued', 'running', 'delivery', 'disabled', 'ready', 'error']).optional(),
+      sort: z.enum(['attention', 'due', 'name']).optional()
+    }).strict(), request.query);
+    return options.service.listSchedules(query, async sessionId => {
+      try { return { actorId: await authorize(request, sessionId, 'task.view_result') }; }
+      catch (error) { if (error instanceof RuntimeError && error.statusCode === 403) return false; throw error; }
+    });
+  });
+
   app.get<{ Params: { sessionId: string } }>('/api/sessions/:sessionId/automation', async request => {
     const actorId = await authorize(request, request.params.sessionId, 'task.view_result');
     return options.service.listBySession(request.params.sessionId, actorId);
@@ -75,7 +90,19 @@ export async function registerSessionAutomationRoutes(app: FastifyInstance, opti
 
   app.get<{ Params: { sessionId: string; id: string } }>('/api/sessions/:sessionId/automation/schedules/:id/history', async request => {
     const actorId = await authorize(request, request.params.sessionId, 'task.view_result');
-    return { occurrences: await options.service.getScheduleHistory(request.params.sessionId, request.params.id, actorId) };
+    const query = parse(z.object({
+      offset: z.coerce.number().int().min(0).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional()
+    }).strict(), request.query);
+    if (query.offset === undefined && query.limit === undefined) {
+      return { occurrences: await options.service.getScheduleHistory(request.params.sessionId, request.params.id, actorId) };
+    }
+    return options.service.getScheduleHistoryPage(request.params.sessionId, request.params.id, query.offset ?? 0, query.limit ?? 20, actorId);
+  });
+
+  app.get<{ Params: { sessionId: string; id: string; occurrenceId: string } }>('/api/sessions/:sessionId/automation/schedules/:id/runs/:occurrenceId', async request => {
+    const actorId = await authorize(request, request.params.sessionId, 'task.view_result');
+    return options.service.getScheduleRun(request.params.sessionId, request.params.id, request.params.occurrenceId, actorId);
   });
 
   app.delete<{ Params: { sessionId: string; id: string } }>('/api/sessions/:sessionId/automation/schedules/:id', async request => {

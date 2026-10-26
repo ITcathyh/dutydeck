@@ -27,29 +27,32 @@ async function fixture(mode: 'capacity' | 'exhausted' | 'unknown' = 'unknown', w
     authorizeControl: async (id, actor) => { await service.authorizeControl(id, actor); },
     authorizeTask: (session, task, phase) => service.authorizeTask(session, task, phase),
     driverFactory: (_agent, _protocol, emit) => {
-      let stopped = false;
+      let stopped = false, busy = false;
       return {
         start: async () => {}, resume: async () => {}, interrupt: async () => {},
-        stop: async () => { stopped = true; }, isStopped: async () => stopped, isIdle: () => true,
+        stop: async () => { stopped = true; }, isStopped: async () => stopped, isIdle: () => !busy, hasBackgroundWork: () => false,
         send: async input => {
-          const prompt = typeof input === 'string' ? input : input.prompt;
-          prompts.push(prompt);
-          const id = prompt.match(/Step: (\w+)/)?.[1] ?? 'unknown';
-          counts[id] = (counts[id] ?? 0) + 1;
-          if (mode === 'unknown' && id !== 'a' && counts[id] === 1) {
-            emit({ type: 'text', data: { text: `partial ${id}` } });
-            await failureGate;
-            throw new Error('fixture response lost');
-          }
-          if (id === 'a' && (mode === 'exhausted' || mode === 'capacity' && counts[id] === 1)) {
-            const turn = new NativeTurn(true); turn.arm(new AbortController().signal);
-            const turnId = `capacity-${counts[id]}`;
-            turn.observe({ type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } });
-            turn.bind({ type: 'event_msg', payload: { type: 'user_message', turn_id: turnId, message: prompt } });
-            turn.observe({ type: 'event_msg', payload: { type: 'task_complete', turn_id: turnId, error: { codex_error_info: 'ServerOverloaded' } } });
-            emit(turn.takeError()!);
-          } else emit({ type: 'text', data: { text: `answer ${id}` } });
-          emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+          busy = true;
+          try {
+            const prompt = typeof input === 'string' ? input : input.prompt;
+            prompts.push(prompt);
+            const id = prompt.match(/Step: (\w+)/)?.[1] ?? 'unknown';
+            counts[id] = (counts[id] ?? 0) + 1;
+            if (mode === 'unknown' && id !== 'a' && counts[id] === 1) {
+              emit({ type: 'text', data: { text: `partial ${id}` } });
+              await failureGate;
+              throw new Error('fixture response lost');
+            }
+            if (id === 'a' && (mode === 'exhausted' || mode === 'capacity' && counts[id] === 1)) {
+              const turn = new NativeTurn(true); turn.arm(new AbortController().signal);
+              const turnId = `capacity-${counts[id]}`;
+              turn.observe({ type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } });
+              turn.bind({ type: 'event_msg', payload: { type: 'user_message', turn_id: turnId, message: prompt } });
+              turn.observe({ type: 'event_msg', payload: { type: 'task_complete', turn_id: turnId, error: { codex_error_info: 'ServerOverloaded' } } });
+              emit(turn.takeError()!);
+            } else emit({ type: 'text', data: { text: `answer ${id}` } });
+            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+          } finally { busy = false; }
         }
       };
     }
@@ -187,21 +190,63 @@ describe('WorkItem capacity and confirmed recovery with real Runtime and SQLite'
     expect(stored.steps[2].attempts).toHaveLength(0); expect(f.counts).toEqual({ a: 1, b: 1 }); expect(f.deliveries).not.toHaveBeenCalled();
   });
 
-  it('requires every blocked parallel step to be confirmed before progressing', async () => {
+  it.each(['admission', 'stop proof', 'cancel', 'authorization', 'agent authorization'] as const)('does not restart an unsubmitted sibling after %s fails', async guard => {
+    const parallel = plan(['a', 'b', 'c']);
+    parallel.steps[1]!.dependsOn = []; parallel.steps[2]!.dependsOn = [];
+    parallel.steps.push({ id: 'd', title: 'd', kind: 'agent', agentId: 'codex', instruction: 'Execute d', dependsOn: ['a', 'b', 'c'] });
+    parallel.outputStepId = 'd';
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const f = await fixture('unknown', parallel, gate);
+    cleanup.push(async () => release());
+    await f.wait(() => f.counts.b === 1);
+    const record = await f.raw(), sibling = record.item.steps.find((step: { id: string }) => step.id === 'c').attempts[0];
+    if (guard === 'admission') {
+      record.admissions[sibling.id].request.prompt = 'different frozen request';
+      await f.repos.config.set('work_item:' + f.item.id, JSON.stringify(record));
+    } else if (guard === 'stop proof') {
+      const stop = f.runtime.stopWorkItemSession.bind(f.runtime);
+      vi.spyOn(f.runtime, 'stopWorkItemSession').mockImplementation((id, actor) => id === sibling.sessionId ? Promise.resolve(false) : stop(id, actor));
+    }
+    release();
+    await f.wait(async () => (await f.get()).status === 'blocked');
+    await f.confirm('b');
+    if (guard === 'cancel') {
+      const item = await f.get(); await f.service.cancel(f.parent.id, item.id, item.revision, owner.id);
+    } else if (guard === 'authorization') f.revoke();
+    else if (guard === 'agent authorization') f.revokeAgent();
+    await f.service.tick(); await f.service.tick();
+    const stored = (await f.raw()).item;
+    expect(stored.status).toBe(guard === 'cancel' ? 'cancelled' : 'blocked');
+    expect(stored.steps.find((step: { id: string }) => step.id === 'c').attempts).toHaveLength(1);
+    expect(f.counts).toEqual({ a: 1, b: 1 });
+    expect(f.deliveries).not.toHaveBeenCalled();
+  });
+
+  it('serializes same-workspace branches and requires each unknown result confirmed before progressing', async () => {
     const parallel = plan(['a', 'b', 'c']); parallel.steps[1]!.dependsOn = []; parallel.steps[2]!.dependsOn = [];
     parallel.steps.push({ id: 'd', title: 'd', kind: 'agent', agentId: 'codex', instruction: 'Execute d', dependsOn: ['a', 'b', 'c'] }); parallel.outputStepId = 'd';
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const f = await fixture('unknown', parallel, gate);
     cleanup.push(async () => { release(); });
-    await f.wait(() => f.counts.b === 1 && f.counts.c === 1);
+    await f.wait(() => f.counts.b === 1);
+    expect(f.counts.c).toBeUndefined();
     release();
-    await f.wait(async () => (await f.get()).steps.filter(step => step.id === 'b' || step.id === 'c').every(step => {
-      const attempt = step.attempts[0]; return attempt && f.repos.execution.getTaskExecution(attempt.taskId!)?.currentAttempt?.state === 'reconcile_required';
-    }), false);
-    await f.wait(async () => (await f.get()).steps.filter(step => step.status === 'blocked').length === 2);
-    await f.confirm('b'); await f.service.tick();
-    expect((await f.get()).steps.find(step => step.id === 'b')!.status).toBe('blocked'); expect(f.counts.d).toBeUndefined();
+    await f.wait(async () => (await f.get()).steps.find(step => step.id === 'b')!.status === 'blocked');
+    expect(f.counts.c).toBeUndefined(); expect(f.counts.d).toBeUndefined();
+    const cancelled = (await f.get()).steps.find(step => step.id === 'c')!.attempts[0]!;
+    expect(cancelled.status).toBe('cancelled');
+    expect(f.repos.execution.getTaskExecution(cancelled.taskId!)!).toMatchObject({ task: { status: 'cancelled' }, attempts: [] });
+    await f.confirm('b');
+    await f.wait(() => f.counts.c === 1);
+    const retried = (await f.get()).steps.find(step => step.id === 'c')!;
+    expect(retried.attempts).toHaveLength(2);
+    expect(retried.attempts[1]!.number).toBe(2);
+    expect(retried.attempts[1]!.taskId).not.toBe(cancelled.taskId);
+    expect(f.repos.execution.getTaskExecution(cancelled.taskId!)!).toMatchObject({ task: { status: 'cancelled' }, attempts: [] });
+    await f.wait(async () => (await f.get()).steps.find(step => step.id === 'c')!.status === 'blocked');
+    expect((await f.get()).steps.find(step => step.id === 'b')!.status).toBe('completed'); expect(f.counts.d).toBeUndefined();
     await f.confirm('c');
     await f.wait(async () => (await f.get()).steps.find(step => step.id === 'd')!.status === 'blocked');
     expect(f.counts).toEqual({ a: 1, b: 1, c: 1, d: 1 });

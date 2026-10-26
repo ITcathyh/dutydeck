@@ -430,7 +430,7 @@ export interface ConfigRepository {
   /** Optional synchronous lookup for consumers whose live read contract is synchronous. */
   getSync?(key: string): string | undefined;
   /** Indexed JSON discriminator lookup; source rows remain authoritative. */
-  listByJsonField?(prefix: string, filter: { field: 'status' | 'runStatus' | 'delivery.status'; values: string[]; scheduleId?: string }): Promise<Array<{ key: string; value: string }>>;
+  listByJsonField?(prefix: string, filter: { field: 'status' | 'runStatus' | 'delivery.status' | 'sessionId' | 'scheduleId'; values: string[]; scheduleId?: string; sessionId?: string }): Promise<Array<{ key: string; value: string }>>;
   get(key: string): Promise<string | undefined>;
   set(key: string, value: string): Promise<void>;
   compareAndSet?(key: string, expected: string | undefined, value: string): Promise<boolean>;

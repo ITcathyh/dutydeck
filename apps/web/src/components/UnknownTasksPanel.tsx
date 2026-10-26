@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { unknownTaskActionLabels, unknownTaskRetryWarning, type UnknownTaskAction } from '@dutydeck/shared';
 import { api, ApiError, type Session, type Task, type UnknownTask } from '../api';
+import { currentInstance } from '../instance';
 import { toastStore } from '../useToasts';
 import { Button } from './primitives';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -11,12 +12,13 @@ const done: Record<UnknownTaskAction, string> = {
 };
 
 /** 结果未知的那几轮：与飞书提醒卡同样的事实摘要和三个操作。重新执行要在确认框里再确认一次。 */
-export function UnknownTasksPanel({ session, tasks }: { session: Session; tasks: Task[] }) {
+export function UnknownTasksPanel({ session, tasks, taskId }: { session: Session; tasks: Task[]; taskId?: string }) {
   const qc = useQueryClient();
+  const focusTaskId = taskId ?? new URLSearchParams(window.location.search).get('reconcileTask') ?? undefined;
   const [confirming, setConfirming] = useState<UnknownTask>();
   const pending = tasks.filter(task => task.status === 'reconcile_required').map(task => task.id).join(',');
-  const unknown = useQuery({ queryKey: ['unknown-tasks', session.id, pending], queryFn: () => api.unknownTasks(session.id), enabled: Boolean(pending) && !session.archivedAt, retry: false });
-  const refresh = () => Promise.all([qc.invalidateQueries({ queryKey: ['tasks', session.id] }), qc.invalidateQueries({ queryKey: ['unknown-tasks', session.id] })]);
+  const unknown = useQuery({ queryKey: ['unknown-tasks', currentInstance() ?? null, session.id, pending], queryFn: () => api.unknownTasks(session.id), enabled: Boolean(pending) && !session.archivedAt, retry: false });
+  const refresh = () => Promise.all([qc.invalidateQueries({ queryKey: ['unknown-tasks'] }), qc.invalidateQueries({ queryKey: ['tasks'] }), qc.invalidateQueries({ queryKey: ['automation'] }), qc.invalidateQueries({ queryKey: ['automation-schedules'] }), qc.invalidateQueries({ queryKey: ['automation-history'] }), qc.invalidateQueries({ queryKey: ['automation-run'] })]);
   const resolve = useMutation({
     mutationFn: ({ task, action }: { task: UnknownTask; action: UnknownTaskAction }) =>
       api.resolveUnknownTask(session.id, task.taskId, { target: task.target, action, ...(action === 'retry' ? { allowDuplicateEffects: true as const } : {}) }),
@@ -32,13 +34,16 @@ export function UnknownTasksPanel({ session, tasks }: { session: Session; tasks:
       void refresh();
     }
   });
-  if (!pending || session.archivedAt) return null;
-  if (unknown.isError) return unknown.error instanceof ApiError && unknown.error.status === 403 ? null : <p className="my-3 text-caption text-subtle">结果未知的任务读取失败：{unknown.error.message}</p>;
-  const items = unknown.data ?? [];
-  if (!items.length) return null;
+  useEffect(() => {
+    if (focusTaskId && unknown.data?.some(task => task.taskId === focusTaskId)) document.getElementById(`unknown-task-${focusTaskId}`)?.scrollIntoView?.({ block: 'center' });
+  }, [focusTaskId, unknown.data]);
+  if (!pending || session.archivedAt) return focusTaskId ? <p className="my-3 text-caption text-secondary">指定执行当前没有可操作的核对记录；它可能已被处置或所属任务已归档。未切换到其他执行。</p> : null;
+  if (unknown.isError) return unknown.error instanceof ApiError && unknown.error.status === 403 ? (focusTaskId ? <p className="my-3 text-caption text-secondary">没有权限查看或处置此执行的核对记录。</p> : null) : <p className="my-3 text-caption text-subtle">结果未知的任务读取失败：{unknown.error.message}</p>;
+  const items = (unknown.data ?? []).filter(task => !focusTaskId || task.taskId === focusTaskId);
+  if (!items.length) return focusTaskId && unknown.isSuccess ? <p className="my-3 text-caption text-secondary">指定执行当前没有可操作的核对记录，未切换到其他执行。</p> : null;
   const busy = (task: UnknownTask, action: UnknownTaskAction) => resolve.isPending && resolve.variables?.task.taskId === task.taskId && resolve.variables.action === action;
   return <>
-    {items.map(task => <section key={`${task.taskId}:${task.target}`} aria-label={`结果未知：${task.prompt}`} className="my-3 rounded-md border border-warning-border bg-warning-soft p-3 text-caption">
+    {items.map(task => <section id={`unknown-task-${task.taskId}`} key={`${task.taskId}:${task.target}`} aria-label={`结果未知：${task.prompt}`} className="my-3 rounded-md border border-warning-border bg-warning-soft p-3 text-caption">
       <h3 className="font-semibold text-warning">这一轮的结果未知，需要你决定怎么处理</h3>
       <p className="mt-1 line-clamp-2 break-words text-secondary">{task.prompt}</p>
       <ul className="mt-2 space-y-0.5 text-secondary">{task.factLines.map(line => <li key={line}>{line}</li>)}</ul>

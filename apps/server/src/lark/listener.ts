@@ -50,7 +50,7 @@ export interface LarkRuntime {
   getPendingPermissions?(id: string): PermissionRequestData[] | Promise<PermissionRequestData[]>;
   resolvePermission?(id: string, requestId: string, approved: boolean, reason?: string): Promise<unknown>;
   getTasks?(id: string): Promise<TaskRecord[]>;
-  getTaskRecovery?(id: string, taskId: string): Promise<{ status: string; blockers: Array<{ code: string }>; activeTaskId?: string; resolvedUnknown?: boolean; verifiedOutput?: { eventId: string; digest: string } }>;
+  getTaskRecovery?(id: string, taskId: string): Promise<{ status: string; blockers: Array<{ code: string; external?: boolean }>; activeTaskId?: string; resolvedUnknown?: boolean; verifiedOutput?: { eventId: string; digest: string } }>;
   getEvents?(id: string, afterSequence?: number): Promise<AgentEvent[]>;
   getLatestPermissionRequest?(id: string, taskId: string, nativeId: string): Promise<AgentEvent | undefined>;
   getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]>;

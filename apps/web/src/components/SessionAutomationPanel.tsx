@@ -1,20 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { AutomationDeliveryTarget, CreateSessionScheduleInput, PublicSessionSchedule as SessionSchedule } from '@dutydeck/shared';
+import { previewSessionSchedule, type AutomationDeliveryTarget, type CreateSessionScheduleInput, type UpdateSessionScheduleInput, type PublicSessionSchedule as SessionSchedule } from '@dutydeck/shared';
 import { api, ApiError, type Session } from '../api';
-import { sessionPath } from '../app-route';
+import { currentInstance } from '../instance';
+import { PlanHistory, automationTime } from './AutomationHistory';
 import { ConfirmDialog } from './ConfirmDialog';
 import { sessionDisplayName } from '../run-summary';
 import { Banner, Button, Field, Input, Select, Spinner, Textarea, Dialog } from './primitives';
 
 const ciLabels: Record<string, string> = { waiting: '等待构建', dispatching: '提交续作中', accepted: '已提交续作', completed: '续作已结束', cancelled: '已取消', expired: '已过期', stale_head: '提交已变化，等待停止', session_inactive: '会话已结束', revoked: '权限已撤销', error: '查询失败' };
-export const runLabels: Record<string, string> = { pending: '等待执行', accepted: '已接收', completed: '已完成', failed: '执行失败', interrupted: '已中断', skipped: '已跳过', error: '执行出错', invalidated: '已失效', blocked: '执行受阻' };
-const conditionLabels: Record<string, string> = { pending: '待检查', passed: '条件满足', skipped: '条件不满足，已跳过', error: '条件检查失败', invalidated: '已失效' };
+import { runLabels } from './automation-display';
+export { runLabels } from './automation-display';
 
 export function scheduleNextExecution(item: SessionSchedule): string {
   if (!item.enabled) return '未启用，暂无下一次执行';
   if (!item.nextDueAt) return '无下一次执行';
-  return `下一次执行：${new Date(item.nextDueAt).toLocaleString('zh-CN', { timeZone: item.timezone, hour12: false })} · ${item.timezone}`;
+  return `${new Date(item.nextDueAt).getTime() < Date.now() ? '原定执行（已逾期，等待处理）' : '下一次执行'}：${new Date(item.nextDueAt).toLocaleString('zh-CN', { timeZone: item.timezone, hour12: false })} · ${item.timezone}`;
 }
 
 export function scheduleRule(item: SessionSchedule): string {
@@ -47,9 +48,9 @@ export function scheduleDelivery(target: AutomationDeliveryTarget | undefined, s
 
 export function SessionAutomationPanel({ session, initialScheduleId, openCreateForm = false, taskTitle }: { session: Session; initialScheduleId?: string; openCreateForm?: boolean; taskTitle?: string }) {
   const qc = useQueryClient();
-  const queryKey = ['automation', session.id];
+  const queryKey = ['automation', currentInstance() ?? null, session.id];
   const records = useQuery({ queryKey, queryFn: () => api.automation(session.id), retry: false, refetchInterval: query => query.state.error ? false : 10_000 });
-  const providers = useQuery({ queryKey: ['ci-providers', session.id], queryFn: () => api.ciProviders(session.id), retry: false });
+  const providers = useQuery({ queryKey: ['ci-providers', currentInstance() ?? null, session.id], queryFn: () => api.ciProviders(session.id), retry: false });
   const [workflow, setWorkflow] = useState('');
   const [ciPrompt, setCiPrompt] = useState('');
   const [ttlHours, setTtlHours] = useState(24);
@@ -66,6 +67,10 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
   const [timezone, setTimezone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
   const [condition, setCondition] = useState<'always' | 'ci_new_failure'>('always');
   const [conditionWorkflow, setConditionWorkflow] = useState('');
+  const [mode, setMode] = useState<'session' | 'independent'>('session');
+  const [misfirePolicy, setMisfirePolicy] = useState<'skip' | 'coalesce'>('coalesce');
+  const [latenessMinutes, setLatenessMinutes] = useState('');
+
   const [notice, setNotice] = useState('');
   const [enabling, setEnabling] = useState<SessionSchedule>();
   const [deleting, setDeleting] = useState<SessionSchedule>();
@@ -73,7 +78,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
   const data = records.isError ? undefined : records.data;
   const enablingTarget = enabling ? data?.deliveryTargets?.[enabling.id] : undefined;
   const readOnly = !data || Boolean(session.archivedAt) || ['stopped', 'failed'].includes(session.state);
-  const refresh = () => qc.invalidateQueries({ queryKey });
+  const refresh = () => Promise.all([qc.invalidateQueries({ queryKey }), qc.invalidateQueries({ queryKey: ['automation-schedules'] }), qc.invalidateQueries({ queryKey: ['automation-history'] })]);
   // 只有能主动查询构建状态的 CI 插件支持在 Web 上等待构建；webhook 型的从飞书 /ci 发起。
   const pollingProviders = providers.data?.providers.filter(item => item.polling) ?? [];
   const providerName = (id?: string) => providers.data?.providers.find(item => item.id === id)?.displayName ?? id ?? 'CI';
@@ -88,7 +93,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
     if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408) { runRequests.current.delete(item.id); void refresh(); }
   } });
   const remove = useMutation({ mutationFn: (item: SessionSchedule) => api.deleteSchedule(session.id, item.id, item.revision), onSuccess: async (_result, item) => { if (editing?.id === item.id) setEditing(undefined); setDeleting(undefined); await refresh(); setNotice('计划已删除，触发记录已保留；正在运行的任务会继续。'); }, onError: refresh });
-  const save = useMutation({ mutationFn: () => {
+  const buildInput = (): CreateSessionScheduleInput => {
     const [hour, minute] = time.split(':').map(Number);
     const trigger: CreateSessionScheduleInput['trigger'] = kind === 'daily' || kind === 'weekly'
       ? { kind: 'cron', expression: `${minute} ${hour} * * ${kind === 'daily' ? '*' : weekday}` }
@@ -96,14 +101,28 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
         ? editing?.trigger.kind === 'interval' && editing.trigger.everySeconds === minutes * 60 ? editing.trigger : { kind, everySeconds: minutes * 60, anchorAt: new Date().toISOString() }
         : kind === 'cron' ? { kind, expression: cron } : { kind, localDateTime: at };
     const input: CreateSessionScheduleInput = {
-      name: name.trim(), prompt: prompt.trim(), timezone,
+      name: name.trim(), prompt: prompt.trim(), timezone, mode, misfirePolicy, ...(latenessMinutes ? { maxLatenessSeconds: Number(latenessMinutes) * 60 } : {}),
       trigger,
       dstPolicy: editing?.dstPolicy ?? { gap: 'skip', overlap: 'first' },
       condition: condition === 'always' ? { kind: 'always' } : { kind: 'ci_new_failure', ...(conditionWorkflow.trim() ? { workflow: conditionWorkflow.trim() } : {}) }
     };
-    return editing ? api.updateSchedule(session.id, editing.id, { ...input, expectedRevision: editing.revision }) : api.createSchedule(session.id, input);
+    return input;
+  };
+  const save = useMutation({ mutationFn: () => {
+    const input = buildInput();
+    if (!editing) return api.createSchedule(session.id, input);
+    const patch: UpdateSessionScheduleInput = { expectedRevision: editing.revision };
+    if (input.name !== editing.name) patch.name = input.name;
+    if (input.prompt !== editing.prompt) patch.prompt = input.prompt;
+    if (input.timezone !== editing.timezone) patch.timezone = input.timezone;
+    if (JSON.stringify(input.trigger) !== JSON.stringify(editing.trigger)) patch.trigger = input.trigger;
+    if (condition !== editing.condition.kind || condition === 'ci_new_failure' && conditionWorkflow.trim() !== (editing.condition.kind === 'ci_new_failure' ? editing.condition.workflow ?? '' : '')) patch.condition = input.condition;
+    if (misfirePolicy !== (editing.misfirePolicy ?? 'coalesce')) patch.misfirePolicy = misfirePolicy;
+    if (input.maxLatenessSeconds !== editing.maxLatenessSeconds) patch.maxLatenessSeconds = input.maxLatenessSeconds ?? null;
+    return Object.keys(patch).length === 1 ? Promise.resolve({ schedule: editing }) : api.updateSchedule(session.id, editing.id, patch);
   }, onSuccess: async () => { await refresh(); setNotice(editing ? '计划已更新。' : '计划已保存，点击「启用」后才会运行。'); setEditing(undefined); setName(''); setPrompt(''); }, onError: refresh });
   const edit = (item: SessionSchedule) => {
+    setMode(item.mode ?? 'session'); setMisfirePolicy(item.misfirePolicy ?? 'coalesce'); setLatenessMinutes(item.maxLatenessSeconds ? String(item.maxLatenessSeconds / 60) : '');
     setEditing(item); setName(item.name); setPrompt(item.prompt); setTimezone(item.timezone); setKind(item.trigger.kind); setCondition(item.condition.kind);
     if (item.trigger.kind === 'interval') setMinutes(item.trigger.everySeconds / 60);
     if (item.trigger.kind === 'cron') setCron(item.trigger.expression);
@@ -115,11 +134,13 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
     const item = data?.schedules.find(item => item.id === initialScheduleId);
     if (item) { edit(item); openedSchedule.current = initialScheduleId; }
   }, [initialScheduleId, data]);
+  let preview = '';
+  try { const input = buildInput(); const next = previewSessionSchedule({ ...input, id: editing?.id ?? 'preview' }, new Date()); preview = next ? automationTime(next.scheduledForUtc, timezone) : '没有后续时点'; } catch { preview = '填写完整有效的时间规则后显示预览'; }
   const error = records.error ?? subscribe.error ?? cancel.error ?? toggle.error ?? save.error ?? run.error;
 
   return <section className="space-y-3">
     <h3 className="text-body font-semibold">任务自动化</h3>
-    <p className="text-caption text-secondary">自动任务排入本任务，沿用当前目录和上下文。CI 的仓库与提交从此目录读取；每分钟检查一次。</p>
+    <p className="text-caption text-secondary">会话模式沿用当前任务，独立模式使用专用执行任务。CI 的仓库与提交从当前目录读取；每分钟检查一次。</p>
     <p className="break-all text-caption text-secondary">所属任务：{sessionDisplayName(session, taskTitle, `${session.agentId} · ${session.cwd}`)} · 目录：{session.cwd}</p>
     <p className="text-caption text-secondary">{automationSource(session)}</p>
     {records.isLoading && <Spinner label="读取自动任务"/>}
@@ -143,9 +164,12 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
       {item.error && <p className="text-danger">{item.error}</p>}
       {item.delivery.status === 'error' && <p className="text-warning">结果通知失败，正在重试通知：{item.delivery.error}</p>}
     </div>)}
-    {!readOnly && <details open={editing || openCreateForm ? true : undefined} className="rounded-lg border border-default p-3">
+    {data && (!readOnly || editing?.mode === 'independent') && <details open={editing || openCreateForm ? true : undefined} className="rounded-lg border border-default p-3">
       <summary className="cursor-pointer text-caption font-semibold">{editing ? '编辑计划' : '为此任务创建计划'}</summary>
       <form className="mt-3 space-y-3" onSubmit={event => { event.preventDefault(); save.mutate(); }}>
+        <Field label="运行模式"><Select value={mode} disabled={Boolean(editing)} onChange={event => setMode(event.target.value as typeof mode)}><option value="session">沿用当前任务：共享聊天上下文和生命周期</option><option value="independent">独立计划：专用稳定任务与受管工作区</option></Select></Field>
+        <p className="text-caption text-secondary">{mode === 'independent' ? '只使用下方显式指令，不读取来源聊天的新消息。创建时冻结执行身份、模型、权限和交付位置；Git 仓库创建专用受管 worktree，失败则拒绝创建。资源协调仅覆盖当前实例数据库，其他实例和外部工具不受此约束。' : '沿用当前任务目录和聊天上下文；任务停止或归档后计划停用。'}{editing && '运行模式保存后不能在这里切换；需要其他模式时创建新计划。'}</p>
+        <p className="break-all text-caption text-subtle">执行身份：{editing?.executionContext?.agentId ?? session.agentId} · 模型 {editing?.executionContext?.model ?? session.model ?? 'Agent 默认模型'} · 权限 {editing?.executionContext?.permissionMode ?? session.permissionMode ?? '当前任务权限'} · 目录 {editing?.executionContext?.cwd ?? session.cwd}</p>
         <Field label="计划名称"><Input required value={name} maxLength={200} onChange={event => setName(event.target.value)}/></Field>
         <Field label="执行指令"><Textarea required rows={2} value={prompt} maxLength={20000} onChange={event => setPrompt(event.target.value)}/></Field>
         <Field label="触发方式"><Select value={kind} onChange={event => setKind(event.target.value as typeof kind)}><option value="at">一次</option><option value="daily">每天</option><option value="weekly">每周</option><option value="interval">固定间隔</option><option value="cron">高级 Cron</option></Select></Field>
@@ -153,41 +177,43 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
         {kind === 'weekly' && <Field label="星期"><Select value={weekday} onChange={event => setWeekday(event.target.value)}>{['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'].map((label, index) => <option key={index} value={index}>{label}</option>)}</Select></Field>}
         {kind === 'daily' || kind === 'weekly' ? null : kind === 'interval' ? <Field label="间隔分钟数"><Input type="number" min={1} required value={minutes} onChange={event => setMinutes(Number(event.target.value))}/></Field> : kind === 'cron' ? <Field label="Cron 表达式"><Input required value={cron} onChange={event => setCron(event.target.value)}/></Field> : <Field label="指定时区的本地时间"><Input type="datetime-local" required value={at} onChange={event => setAt(event.target.value)}/></Field>}
         <Field label="时区"><Input required value={timezone} onChange={event => setTimezone(event.target.value)} placeholder="Asia/Shanghai"/></Field>
-        <p className="text-caption text-subtle">夏令时不存在的时间{editing?.dstPolicy.gap === 'shift_forward' ? '顺延' : '跳过'}；重复时间执行{editing?.dstPolicy.overlap === 'second' ? '第二次' : '第一次'}。服务离线后最多补一次，同一计划不重叠执行。</p>
+        <p className="text-caption text-subtle">夏令时不存在的时间{editing?.dstPolicy.gap === 'shift_forward' ? '顺延' : '跳过'}；重复时间执行{editing?.dstPolicy.overlap === 'second' ? '第二次' : '第一次'}。同一计划不重叠执行，结果未知时优先等待核对。</p>
+        <Field label="错过执行时间后"><Select value={misfirePolicy} onChange={event => setMisfirePolicy(event.target.value as typeof misfirePolicy)}><option value="coalesce">恢复后合并补一次，之后回到正常时间</option><option value="skip">跳过错过的时点，等待下个正常时间</option></Select></Field>
+        {misfirePolicy === 'coalesce' && <Field label="补跑有效期（分钟，可选）" hint="留空则不限制；超过有效期的工作跳过"><Input type="number" min={1} step={1} value={latenessMinutes} onChange={event => setLatenessMinutes(event.target.value)}/></Field>}
+        <p className="text-caption text-secondary">保存预览：{preview} · {misfirePolicy === 'skip' ? '错过就跳过' : latenessMinutes ? `只在 ${latenessMinutes} 分钟内合并补一次` : '恢复后最多补一次'}</p>
         <Field label="执行条件"><Select value={condition} onChange={event => setCondition(event.target.value as typeof condition)}><option value="always">每次到期执行</option><option value="ci_new_failure" disabled={providers.isSuccess && !pollingProviders.length && condition !== 'ci_new_failure'}>CI 出现新的失败构建时执行{providers.isSuccess && !pollingProviders.length ? '（未安装 CI 插件）' : ''}</option></Select></Field>
         {condition === 'ci_new_failure' && <Field label="检查的工作流（可选）"><Input value={conditionWorkflow} onChange={event => setConditionWorkflow(event.target.value)}/></Field>}
         <div className="flex gap-2"><Button type="submit" variant="primary" loading={save.isPending}>保存计划</Button>{editing && <Button onClick={() => setEditing(undefined)}>取消编辑</Button>}</div>
       </form>
     </details>}
     {data?.schedules.map(item => <div key={item.id} className="rounded-lg border border-default p-3 text-caption">
-      <div className="flex flex-wrap items-center justify-between gap-2"><strong>{item.name} · {item.enabled ? '已启用' : '已停用'}</strong>{!readOnly && <div className="flex flex-wrap gap-2"><Button disabled={run.isPending} onClick={() => run.mutate(item)}>立即执行</Button><Button onClick={() => edit(item)}>编辑</Button><Button disabled={toggle.isPending} onClick={() => { toggle.reset(); if (item.enabled) toggle.mutate(item); else setEnabling(item); }}>{item.enabled ? '停用' : '启用'}</Button><Button variant="danger" onClick={() => { remove.reset(); setDeleting(item); }}>删除</Button></div>}</div>
-      <p className="mt-2 whitespace-pre-wrap break-words text-body text-secondary">{item.prompt}</p>
+      <div className="flex flex-wrap items-center justify-between gap-2"><strong>{item.name} · {item.enabled ? '已启用' : '已停用'}</strong>{data && <div className="flex flex-wrap gap-2">{(!readOnly || item.mode === 'independent') && <><Button disabled={run.isPending} onClick={() => run.mutate(item)}>立即执行</Button><Button onClick={() => edit(item)}>编辑</Button></>}<Button disabled={toggle.isPending || (readOnly && !item.enabled && item.mode !== 'independent')} onClick={() => { toggle.reset(); if (item.enabled) toggle.mutate(item); else setEnabling(item); }}>{item.enabled ? '停用' : '启用'}</Button><Button variant="danger" onClick={() => { remove.reset(); setDeleting(item); }}>删除</Button></div>}</div>
+      <details className="mt-2"><summary className="cursor-pointer">执行指令与上下文</summary><p className="whitespace-pre-wrap break-words text-body text-secondary">{item.prompt}</p><p className="break-all text-subtle">{item.mode === 'independent' ? `独立计划 · 仅显式指令 · ${item.executionContext?.agentId ?? session.agentId} · ${item.executionContext?.cwd ?? '目录待核实'} · 协调范围：当前实例数据库` : `沿用任务上下文 · ${session.cwd}`}</p></details>
       <p className="mt-2 text-secondary">{scheduleRule(item)}</p>
       <details className="mt-1 text-subtle"><summary className="cursor-pointer">精确规则与执行条件</summary><p className="mt-1 break-all">{item.trigger.kind === 'cron' ? item.trigger.expression : item.trigger.kind === 'interval' ? `每 ${item.trigger.everySeconds} 秒，自 ${item.trigger.anchorAt} 起` : item.trigger.localDateTime}</p><p>{item.condition.kind === 'always' ? '每次到期执行' : `CI 新失败 · ${item.condition.provider}${item.condition.workflow ? ` · ${item.condition.workflow}` : ''}`}</p></details>
       <p className="text-secondary">{scheduleNextExecution(item)}</p>
-      <p className="text-subtle">{item.timezone} · 沿用任务上下文 · {session.cwd}</p>
+      <p className="text-subtle">{item.timezone} · {item.misfirePolicy === 'skip' ? '错过就跳过' : item.maxLatenessSeconds ? `错过后 ${item.maxLatenessSeconds / 60} 分钟内合并补一次` : '错过后最多补一次'}</p>
+      {item.disabledReason && <p className="text-warning">停用原因：{item.disabledReason === 'Session is no longer active' ? '来源任务已结束或归档' : item.disabledReason === 'Schedule authorization is no longer available' ? '计划执行权限已失效' : item.disabledReason} · {automationTime(item.disabledAt, item.timezone)}</p>}
+      {item.disableNotification && <p className="text-caption text-secondary">停用告知：{({ not_requested: '无需对外告知', pending: '等待发送', sending: '发送中', delivered: '已确认发送', error: '未发送成功，等待重试', unknown: '发送结果未知，等待核对' })[item.disableNotification.status]}{item.disableNotification.error ? ` · ${item.disableNotification.error}` : ''}</p>}
       <p className="break-all text-secondary">投递位置：{scheduleDelivery(data.deliveryTargets?.[item.id], session)}</p>
       <p className="mt-1 text-secondary">最近结果：{(() => { const latest = data.occurrences.filter(occurrence => occurrence.scheduleId === item.id).sort((a, b) => b.scheduledForUtc.localeCompare(a.scheduledForUtc))[0]; return latest ? `${runLabels[latest.runStatus] ?? latest.runStatus} · ${new Date(latest.scheduledForUtc).toLocaleString('zh-CN', { timeZone: item.timezone, hour12: false })} · ${item.timezone}` : '尚无触发记录'; })()}</p>
+      <PlanHistory sessionId={session.id} scheduleId={item.id} timezone={item.timezone}/>
       {item.trigger.kind === 'at' && <p className="text-subtle">一次计划仅自动触发一次；是否执行成功请查看触发记录。</p>}
     </div>)}
-    {!!data?.occurrences.length && <details><summary className="cursor-pointer text-caption">最近触发记录</summary><div className="mt-2 space-y-2">{data.occurrences.slice(-20).reverse().map(item => <div key={item.id} className="text-caption">
-      <p>{data.schedules.find(schedule => schedule.id === item.scheduleId)?.name ?? `历史计划 ${item.scheduleId}`} · {new Date(item.scheduledForUtc).toLocaleString()} · {runLabels[item.runStatus] ?? item.runStatus} · {conditionLabels[item.conditionStatus] ?? item.conditionStatus}</p>
-      {item.taskId && <a className="text-link underline" href={sessionPath(session.id)}>查看执行任务 · {item.taskId}</a>}
-      {item.error && <p className="text-danger">{item.error}</p>}
-      {item.delivery.status === 'error' && <p className="text-warning">通知失败，等待重试</p>}
-    </div>)}</div></details>}
-    <Dialog open={Boolean(enabling) && !readOnly} onClose={() => setEnabling(undefined)} label="确认启用计划" size="md" role="alertdialog" closeOnEscape={!toggle.isPending} closeOnScrim={!toggle.isPending}>
+    {data && [...new Set(data.occurrences.filter(item => !data.schedules.some(schedule => schedule.id === item.scheduleId)).map(item => item.scheduleId))].map(id => <PlanHistory key={id} sessionId={session.id} scheduleId={id} timezone="UTC" label={`历史计划 ${id} 的运行记录（UTC）`}/>)}
+    <Dialog open={Boolean(data) && Boolean(enabling) && (!readOnly || enabling?.mode === 'independent')} onClose={() => setEnabling(undefined)} label="确认启用计划" size="md" role="alertdialog" closeOnEscape={!toggle.isPending} closeOnScrim={!toggle.isPending}>
       <Dialog.Header><h3 className="text-title font-semibold">确认启用计划</h3></Dialog.Header>
       {enabling && <Dialog.Body className="space-y-3">
         <h4 className="text-body font-semibold">{enabling.name}</h4>
         <p className="whitespace-pre-wrap break-words text-body">{enabling.prompt}</p>
         <dl className="space-y-2 text-caption text-secondary">
-          <div><dt className="font-semibold">何时运行</dt><dd>{scheduleRule(enabling)}</dd></div>
+          <div><dt className="font-semibold">运行模式与补跑</dt><dd>{enabling.mode === 'independent' ? '独立计划，仅显式指令，协调范围为当前实例数据库' : '沿用任务上下文'} · {enabling.misfirePolicy === 'skip' ? '错过就跳过' : '恢复后最多补一次'}{enabling.maxLatenessSeconds ? `，有效期 ${enabling.maxLatenessSeconds / 60} 分钟` : ''}</dd></div><div><dt className="font-semibold">何时运行</dt><dd>{scheduleRule(enabling)}</dd></div>
           <div><dt className="font-semibold">执行条件</dt><dd>{enabling.condition.kind === 'always' ? '每次到期执行' : `CI 出现新的失败构建时执行 · ${enabling.condition.workflow ?? '所有工作流'}`}</dd></div>
-          <div><dt className="font-semibold">所属任务与目录</dt><dd className="break-all">{sessionDisplayName(session, taskTitle, session.id)} · {session.cwd}</dd></div>
+          <div><dt className="font-semibold">所属任务与目录</dt><dd className="break-all">{sessionDisplayName(session, taskTitle, session.id)} · {enabling.executionContext?.cwd ?? session.cwd}</dd></div>
+          <div><dt className="font-semibold">冻结的执行身份</dt><dd>{enabling.executionContext?.agentId ?? session.agentId} · 模型 {enabling.executionContext?.model ?? session.model ?? 'Agent 默认模型'} · 权限 {enabling.executionContext?.permissionMode ?? session.permissionMode ?? '当前任务权限'}</dd></div>
           <div><dt className="font-semibold">保存的投递位置</dt><dd className="break-all">{scheduleDelivery(enablingTarget, session)}</dd></div>
         </dl>
-        <p className="text-caption text-secondary">启用后按规则排入本任务执行。停用会保留计划和历史，正在运行的任务会继续。</p>
+        <p className="text-caption text-secondary">{enabling.mode === 'independent' ? '启用后按规则排入专用执行任务，仅使用保存的指令与工作区。' : '启用后按规则排入本任务执行。'}停用会保留计划和历史，正在运行的任务会继续。</p>
         {data?.schedules.find(item => item.id === enabling.id)?.revision !== enabling.revision && <Banner tone="warning">计划已更新，请取消并重新检查最新计划后启用。</Banner>}
         {toggle.error && <Banner tone="danger">{toggle.error.message}</Banner>}
       </Dialog.Body>}

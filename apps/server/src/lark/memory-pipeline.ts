@@ -95,8 +95,8 @@ export interface LarkMemoryPipelineRuntime {
   dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt', agentPrompt: string, riskPolicy?: undefined, actorId?: string, idempotencyKey?: string, skillRequests?: string[], request?: TaskRequestV1): Promise<{ id: string; status: string }>;
   dispatchRequest(request: TaskRequestV1, material?: { agentPrompt?: string }): Promise<{ id: string; status: string }>;
   getTasks(id: string): Promise<TaskRecord[]>;
-  getSessionTaskRecovery?(id: string): Promise<Array<{ taskId: string; status: string; blockers: Array<{ code: string }>; resolvedUnknown?: boolean }>>;
-  getTaskRecovery?(id: string, taskId: string): Promise<{ status: string; blockers: Array<{ code: string }>; resolvedUnknown?: boolean }>;
+  getSessionTaskRecovery?(id: string): Promise<Array<{ taskId: string; status: string; blockers: Array<{ code: string; external?: boolean }>; resolvedUnknown?: boolean }>>;
+  getTaskRecovery?(id: string, taskId: string): Promise<{ status: string; blockers: Array<{ code: string; external?: boolean }>; resolvedUnknown?: boolean }>;
   cancelQueued?(id: string, taskId: string, actorId?: string, expectedRevision?: number): Promise<unknown>;
   /** 隔离作业结算后归档会话，任务账本保留；只读决策器也使用此能力。 */
   archive?(id: string, actor?: ExecutionActor): Promise<unknown>;
@@ -813,9 +813,11 @@ export class LarkMemoryPipeline {
 
   private async assertMemorySessionReady(session: Session) {
     const runtime = this.options.runtime;
+    // Foreign occupancy gates the next admission; it does not invalidate historical results.
+    // The runtime marks a blocker external only with a known different session identity.
     if (runtime.getSessionTaskRecovery) {
       for (const recovery of await runtime.getSessionTaskRecovery(session.id)) {
-        if ((!terminalTaskStatuses.includes(recovery.status) && !recovery.resolvedUnknown) || recovery.blockers.length) throw this.recoveryRequired(session.id, recovery.taskId);
+        if ((!terminalTaskStatuses.includes(recovery.status) && !recovery.resolvedUnknown) || recovery.blockers.some(block => block.external !== true)) throw this.recoveryRequired(session.id, recovery.taskId);
       }
       return;
     }
@@ -823,7 +825,7 @@ export class LarkMemoryPipeline {
     const tasks = await runtime.getTasks(session.id);
     for (const task of tasks) {
       const recovery = await runtime.getTaskRecovery(session.id, task.id);
-      if ((!terminalTaskStatuses.includes(recovery.status) && !recovery.resolvedUnknown) || recovery.blockers.length) {
+      if ((!terminalTaskStatuses.includes(recovery.status) && !recovery.resolvedUnknown) || recovery.blockers.some(block => block.external !== true)) {
         throw this.recoveryRequired(session.id, task.id);
       }
     }

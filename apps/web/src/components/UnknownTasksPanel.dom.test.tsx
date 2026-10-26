@@ -14,11 +14,11 @@ const unknown: UnknownTask = {
   reasonCode: 'PREVIOUS_RUNTIME_RESULT_UNKNOWN', prompt: '整理本周报警并回复群里',
   factLines: ['最后状态：结果未知，服务重启切断了这一轮', '是否已提交给 Agent：已提交，Agent 已开始执行并有输出', '最后输出：2026/10/13 08:00:00（北京时间）']
 };
-function mount(tasks: Task[], load: () => Promise<UnknownTask[]> = async () => [unknown]) {
+function mount(tasks: Task[], load: () => Promise<UnknownTask[]> = async () => [unknown], taskId?: string) {
   const list = vi.spyOn(api, 'unknownTasks').mockImplementation(load);
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const view = render(<QueryClientProvider client={qc}><UnknownTasksPanel session={session} tasks={tasks}/></QueryClientProvider>);
-  return { list, view };
+  const view = render(<QueryClientProvider client={qc}><UnknownTasksPanel session={session} tasks={tasks} taskId={taskId}/></QueryClientProvider>);
+  return { list, view, qc };
 }
 
 describe('result-unknown tasks in the task detail', () => {
@@ -80,5 +80,27 @@ describe('result-unknown tasks in the task detail', () => {
     cleanup();
     mount([task('reconcile_required')], async () => { throw new ApiError('boom', 'INTERNAL_ERROR', 500); });
     await screen.findByText('结果未知的任务读取失败：boom');
+  });
+});
+
+describe('targeted automation recovery', () => {
+  it('filters to the exact task anchor and refreshes automation relationships after a decision', async () => {
+    const other = { ...unknown, taskId: 'other', prompt: 'other unknown', target: 'other-attempt' };
+    const { qc } = mount([task('reconcile_required'), { ...task('reconcile_required'), id: 'other' }], async () => [unknown, other], 'task_1');
+    const invalidate = vi.spyOn(qc, 'invalidateQueries');
+    const resolve = vi.spyOn(api, 'resolveUnknownTask').mockResolvedValue({ replayed: false, status: 'completed', decisionId: 'decision' });
+    const panel = await screen.findByRole('region', { name: '结果未知：整理本周报警并回复群里' });
+    expect(panel.id).toBe('unknown-task-task_1');
+    expect(screen.queryByRole('region', { name: '结果未知：other unknown' })).toBeNull();
+    expect(resolve).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: '标为已完成' }));
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['automation-run'] }));
+    for (const key of ['automation', 'automation-schedules', 'automation-history', 'tasks']) expect(invalidate).toHaveBeenCalledWith({ queryKey: [key] });
+  });
+
+  it('explains a missing target without substituting another unknown task', async () => {
+    mount([task('reconcile_required')], async () => [unknown], 'missing');
+    await screen.findByText('指定执行当前没有可操作的核对记录，未切换到其他执行。');
+    expect(screen.queryByRole('button', { name: '重新执行' })).toBeNull();
   });
 });

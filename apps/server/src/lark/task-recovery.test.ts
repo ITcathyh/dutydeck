@@ -192,3 +192,24 @@ describe('结果未知提醒卡的 @ 与加急', () => {
     } finally { repos.close(); }
   });
 });
+
+
+it('offers no redundant replacement for foreign-only occupancy but retains actions for own or unscoped blockers', async () => {
+  const foreign = { code: 'DRIVER_STOP_BLOCKED', external: true };
+  const runtime = (blockers: Array<{ code: string; external?: boolean }>) => ({
+    getTaskRecovery: async () => ({ status: 'queued', blockers })
+  }) as any;
+  expect(await describeLarkTaskRecovery(runtime([foreign]), 'session', 'task', 'queued', undefined, { relaunch: true }))
+    .toMatchObject({ blocked: true, relaunch: false });
+  for (const own of [{ code: 'DRIVER_STOP_BLOCKED' }, { code: 'DRIVER_STOP_BLOCKED', external: false }]) {
+    expect(await describeLarkTaskRecovery(runtime([foreign, own]), 'session', 'task', 'queued', undefined, { relaunch: true }))
+      .toMatchObject({ blocked: true, relaunch: true });
+  }
+});
+
+
+it.each(['reconcile_required', 'legacy_unresolved'])('retains original unknown recovery actions despite foreign-only occupancy: %s', async status => {
+  const runtime = { getTaskRecovery: async () => ({ status, blockers: [{ code: 'WORKSPACE_EXECUTION_BUSY', external: true }] }) } as any;
+  expect(await describeLarkTaskRecovery(runtime, 'session', 'task', status, undefined, { relaunch: true }))
+    .toMatchObject({ blocked: true, label: '需要核对', relaunch: true });
+});

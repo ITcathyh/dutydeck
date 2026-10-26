@@ -239,6 +239,7 @@ export class DutydeckRuntime {
   private readonly attemptTools = new Map<string, AttemptTools>();
   private readonly sendWaiters = new Set<() => void>();
   private readonly queueBlocked = new Set<string>();
+  private readonly resourceQueueBlocked = new Set<string>();
   /** 按 Agent 记的不可用标记（没登录、凭据失效），只在进程内；见 checkAgentAvailability。 */
   private readonly agentUnavailable = new Map<string, AgentUnavailable>();
   private readonly agentChecks = new Map<string, Promise<AgentUnavailable | undefined>>();
@@ -316,7 +317,11 @@ export class DutydeckRuntime {
   }
 
   private bound() { this.assertBinding(); return this.execution!; }
-  private wake<T extends CommitResult>(result: T): T { this.publisher.wake(result.session.id); return result; }
+  private wake<T extends CommitResult>(result: T): T { this.publisher.wake(result.session.id); this.wakeResourceQueues(); return result; }
+  private wakeResourceQueues() {
+    const waiting = [...this.resourceQueueBlocked]; this.resourceQueueBlocked.clear();
+    if (waiting.length) queueMicrotask(() => { if (!this.shuttingDown && this.binding) for (const id of waiting) this.mutations.run(undefined, () => this.scheduleQueue(id)); });
+  }
   private fence(session: Session): SessionFence { return { sessionId: session.id, runId: session.runId }; }
   private attemptFence(ref: AttemptRef & SessionFence): AttemptFence {
     const attempt = this.repos.execution.getAttempt(ref);
@@ -469,7 +474,7 @@ export class DutydeckRuntime {
       if (this.mutations.valid(token) && this.sessionGenerations.get(session.id) === generation && !this.driverEventErrors.has(session.id)) this.driverEventErrors.set(session.id, error);
     });
     this.driverEventChains.set(session.id, next);
-    void next.finally(() => { if (this.driverEventChains.get(session.id) === next) this.driverEventChains.delete(session.id); });
+    void next.finally(() => { if (this.driverEventChains.get(session.id) === next) this.driverEventChains.delete(session.id); if (event.type === 'status' || event.type === 'completed') this.wakeResourceQueues(); });
   }
   private async recordUsage(session: Session, ref: AttemptRef, event: NormalizedDriverEvent) {
     const usage = event.type === 'status' && event.data?.state === 'turn_usage';
@@ -1184,7 +1189,10 @@ export class DutydeckRuntime {
     const blockers = projection.blockers.filter(block => !(block.code === 'DRIVER_RESOURCE_UNSAFE' && block.resourceId && reusable.has(block.resourceId)));
     if (active && active.status !== 'running') blockers.push({ code: 'PREVIOUS_RESULT_UNKNOWN', sessionId: id });
     if (projection.task.status === 'queued' && this.queueBlocked.has(id)) blockers.push({ code: 'QUEUE_START_CHECK_FAILED', sessionId: id });
-    return { status: projection.task.status, resolvedUnknown: projection.currentAttempt?.state === 'settled' && projection.currentAttempt.outcome === 'unknown', blockers: [...new Set(blockers.map(block => block.code))].map(code => ({ code })),
+    return { status: projection.task.status, resolvedUnknown: projection.currentAttempt?.state === 'settled' && projection.currentAttempt.outcome === 'unknown', blockers: [...new Map(blockers.map(block => {
+      const external = Boolean(block.sessionId && block.sessionId !== id);
+      return [JSON.stringify([block.code, external]), { code: block.code, ...(external ? { external: true } : {}) }];
+    })).values()],
       ...(projection.currentAttempt?.state === 'settled' && projection.currentAttempt.outcome === 'completed' && projection.currentAttempt.settlement?.kind === 'manual' && projection.currentAttempt.settlement.verifiedOutput ? { verifiedOutput: projection.currentAttempt.settlement.verifiedOutput } : {}),
       ...(active ? { activeTaskId: active.id } : {}) };
   }
@@ -1824,6 +1832,7 @@ export class DutydeckRuntime {
 
   async start(input: StartSessionInput): Promise<Session> {
     this.assertReady();
+    if (input?.source === 'schedule') throw new RuntimeError('INVALID_SCHEDULE_SESSION', 'Schedule sessions require the internal admission API', 403);
     if (input?.source === 'work_item') throw new RuntimeError('INVALID_WORK_SESSION', 'Work-item sessions require the internal admission API', 403);
     return this.startSession(input);
   }
@@ -1912,6 +1921,34 @@ export class DutydeckRuntime {
     // Recheck after the asynchronous reads before reserving the stable identity.
     const raced = this.backgroundStarts.get(stableSessionId);
     if (raced) { await raced; return this.startMemorySession(input, stableSessionId, beforeStart); }
+    const start = this.startSession(input, { id: stableSessionId, beforeStart });
+    this.backgroundStarts.set(stableSessionId, start);
+    try { return await start; } finally { if (this.backgroundStarts.get(stableSessionId) === start) this.backgroundStarts.delete(stableSessionId); }
+  }
+
+  /** The schedule admission and frozen configuration must be durable before session birth. */
+  async startScheduleSession(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session> {
+    this.assertReady();
+    if (input.source !== 'schedule' || !input.sourceId || !/^ses_schedule_[a-f0-9]{64}$/.test(stableSessionId) || input.workspaceMode !== 'worktree') {
+      throw new RuntimeError('INVALID_SCHEDULE_SESSION', 'Schedule sessions require a stable identity and managed worktree', 400);
+    }
+    await beforeStart();
+    const pending = this.backgroundStarts.get(stableSessionId);
+    if (pending) { await pending; return this.startScheduleSession(input, stableSessionId, beforeStart); }
+    const agent = await this.repos.agents.get(input.agentId);
+    if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Schedule Agent not found', 404);
+    const existing = await this.repos.sessions.get(stableSessionId);
+    if (existing) {
+      const current = await this.withSessionMetadata(existing);
+      const { capability } = this.sessionCapability(agent, input);
+      const { cwd, ...configured } = sessionConfigOf(agent, input);
+      const expected = { protocol: capability.protocol, workspaceMode: 'worktree', source: input.source, sourceId: input.sourceId, agentId: input.agentId, ...configured, systemPrompt: agent.systemPrompt };
+      if (current.workspaceSourceCwd !== cwd || Object.entries(expected).some(([key, value]) => (current[key as keyof Session] ?? undefined) !== (value ?? undefined))) throw new RuntimeError('SCHEDULE_SESSION_CONFLICT', 'Schedule session immutable configuration changed', 409);
+      await beforeStart();
+      return current;
+    }
+    const raced = this.backgroundStarts.get(stableSessionId);
+    if (raced) { await raced; return this.startScheduleSession(input, stableSessionId, beforeStart); }
     const start = this.startSession(input, { id: stableSessionId, beforeStart });
     this.backgroundStarts.set(stableSessionId, start);
     try { return await start; } finally { if (this.backgroundStarts.get(stableSessionId) === start) this.backgroundStarts.delete(stableSessionId); }
@@ -2377,7 +2414,21 @@ export class DutydeckRuntime {
     );
   }
 
+  private readonly driverStops = new WeakMap<AgentDriver, Promise<void>>();
+  private readonly retiringDrivers = new Set<string>();
   private async stopDriver(id: string, driver: AgentDriver, discardSession = false, shutdown = false) {
+    const pending = this.driverStops.get(driver);
+    if (pending) return pending;
+    this.retiringDrivers.add(id);
+    const stopping = this.stopDriverOnce(id,driver,discardSession,shutdown);
+    this.driverStops.set(driver,stopping);
+    try { await stopping; } finally {
+      if (this.driverStops.get(driver) === stopping) this.driverStops.delete(driver);
+      this.retiringDrivers.delete(id); this.wakeResourceQueues();
+      if (!this.shuttingDown && this.binding) this.mutations.run(undefined, () => this.scheduleQueue(id));
+    }
+  }
+  private async stopDriverOnce(id: string, driver: AgentDriver, discardSession = false, shutdown = false) {
     this.localResources.get(driver)?.controlled?.revoke();
     this.unsubscribeInsightSources(driver);
     let stopError: unknown;
@@ -2398,7 +2449,7 @@ export class DutydeckRuntime {
     for (const [operationId, reply] of this.steeringReplies) if (reply.driver === driver) this.steeringReplies.delete(operationId);
     await this.clearStopBlock(id);
     if (this.drivers.get(id) === driver) this.drivers.delete(id);
-    this.blockedDrivers.delete(id);
+    this.blockedDrivers.delete(id); this.wakeResourceQueues();
   }
   private async applyRiskPolicy(session: Session, driver: AgentDriver | undefined, policy?: ToolRiskPolicy) {
     if (this.options.resolveRiskPolicy) policy = await this.mutations.wait(() => this.options.resolveRiskPolicy!(session.id, policy));
@@ -2635,7 +2686,7 @@ export class DutydeckRuntime {
         token.revoke(); this.touch(id);
       }
       this.completedTurns.delete(ref.attemptId); this.driverStopReasons.delete(ref.attemptId); this.turnErrors.delete(ref.attemptId);
-      this.attemptTools.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId);
+      this.attemptTools.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId); this.wakeResourceQueues();
     }
     const settled = this.publicTask(this.repos.execution.getTaskExecution(task.id)?.task ?? task);
     if (this.options.onTaskSettled && settledSession && ['completed', 'failed', 'interrupted', 'cancelled'].includes(settled.status)) {
@@ -2781,7 +2832,7 @@ export class DutydeckRuntime {
       if (current?.task.status === 'queued' && current.currentAttempt?.automaticRetry && Date.parse(current.currentAttempt.automaticRetry.dueAt) > Date.now()) return;
       clearTimeout(delayed.timer); this.capacityTimers.delete(id);
     }
-    if (this.ptyRetirements.has(id) || this.shuttingDown || this.queueHeld || this.initializationFailed || this.queueBlocked.has(id) || this.stopRuns.has(id) || this.stopBlocks.has(id) || this.blockedDrivers.has(id) || !this.mutations.valid(this.lifecycle(id)) || this.drains.has(id) || this.attempts.has(id) || this.verifyingSessions.has(id) || this.steeringSessions.has(id)
+    if (this.ptyRetirements.has(id) || this.shuttingDown || this.queueHeld || this.initializationFailed || this.queueBlocked.has(id) || this.resourceQueueBlocked.has(id) || this.retiringDrivers.has(id) || this.stopRuns.has(id) || this.stopBlocks.has(id) || this.blockedDrivers.has(id) || !this.mutations.valid(this.lifecycle(id)) || this.drains.has(id) || this.attempts.has(id) || this.verifyingSessions.has(id) || this.steeringSessions.has(id)
       || this.blockedVerificationSessions.has(id) || !(this.queues.get(id)?.length)) return;
     const token = owner(id, this.lifecycle(id)); this.drains.set(id, token);
     const run = this.mutations.run(token, () => this.drainQueue(id)); this.queueRuns.set(id, run);
@@ -2793,8 +2844,59 @@ export class DutydeckRuntime {
     };
     void run.then(finish, finish);
   }
+  /** Ephemeral proof from the original adapters; no idle evidence survives a runtime restart. */
+  private idleResourceChecks(): ResourceCheckRef[] {
+    const checks: ResourceCheckRef[] = [];
+    for (const [id, driver] of this.drivers) {
+      if (this.attempts.has(id) || this.activeTurns.has(id) || this.steeringSessions.has(id) || this.verifyingSessions.has(id)
+        || this.stopBlocks.has(id) || this.blockedDrivers.has(id) || this.stopRuns.has(id) || this.retiringDrivers.has(id)
+        || this.blockedVerificationSessions.has(id) || this.driverOperations.get(driver)?.size
+        || this.permissionsForSession(id).length || driver.isDetachedForShutdown?.() || driver.hasBackgroundWork?.() !== false) continue;
+      if (driver.isIdle?.() !== true) {
+        const original = this.localResources.get(driver);
+        // A new control channel may not have a screen snapshot yet. Preserve its native
+        // context only if this original ready driver has never received any submission.
+        if (!original?.creationSettled || this.attachedTerminals.has(driver) || original.context.mode === 'attach'
+          || this.repos.execution.getSessionExecutions(id).some(value => value.steering
+            || value.task.status === 'reconcile_required' || value.attempts.some(attempt => attempt.submissionState !== 'not_submitted'))) continue;
+      }
+      const reusable = this.localResources.reusableIds(id);
+      for (const r of this.repos.execution.getResources(id)) {
+        const last = r.observations.at(-1);
+        if (reusable.has(r.resourceId) && last?.state === 'live') checks.push({resourceId:r.resourceId,expectedRevision:r.revision,observationId:last.observationId});
+      }
+    }
+    return checks;
+  }
+  private async closeUnprovenIdleCompetitors(id: string, taskId: string, allowProofRetry: boolean): Promise<boolean> {
+    const blockers = this.repos.execution.getTaskExecution(taskId)?.blockers ?? [];
+    let closed = false;
+    for (const otherId of new Set(blockers.filter(value => value.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE').map(value => value.sessionId))) {
+      if (otherId === id || this.repos.execution.getUnresolvedTasks(otherId).length || this.attempts.has(otherId)
+        || this.activeTurns.has(otherId) || this.verifyingSessions.has(otherId) || this.blockedVerificationSessions.has(otherId)
+        || this.steeringSessions.has(otherId) || this.stopRuns.has(otherId) || this.retiringDrivers.has(otherId)
+        || this.stopBlocks.has(otherId) || this.blockedDrivers.has(otherId)
+        || blockers.some(value => value.sessionId === otherId && value.code !== 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE')) continue;
+      const driver = this.drivers.get(otherId);
+      if (!driver || driver.hasBackgroundWork?.() === true || this.driverOperations.get(driver)?.size || this.permissionsForSession(otherId).length) continue;
+      const fresh = this.idleResourceChecks();
+      const resources = this.repos.execution.getResources(otherId);
+      const disputed = blockers.filter(value => value.sessionId === otherId && value.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE');
+      if (disputed.every(block => {
+        const r = resources.find(value => value.resourceId === block.resourceId);
+        const parent = resources.find(value => value.resourceId === r?.parentResourceId);
+        return r && fresh.some(check => check.resourceId === r.resourceId)
+          && (r.kind === 'local_only' || r.kind === 'process' && parent?.stage === 'created' && ['lifecycle','strict-context-restore'].includes(parent.operationScope?.kind ?? ''));
+      })) { if (allowProofRetry) closed = true; continue; }
+      // Adapters without a reliable background-empty proof must prove physical stop on contention.
+      try { await this.mutations.run(undefined, () => this.stopDriver(otherId,driver)); closed = true; }
+      catch { /* Stop failure remains a durable blocker; accepted requests stay queued. */ }
+    }
+    return closed;
+  }
   private async drainQueue(id: string) {
-    while (this.mutations.valid() && !this.shuttingDown && !this.queueHeld && !this.attempts.has(id) && !this.verifyingSessions.has(id) && !this.steeringSessions.has(id)) {
+    let admissionRechecked = false;
+    while (this.mutations.valid() && !this.shuttingDown && !this.queueHeld && !this.retiringDrivers.has(id) && !this.attempts.has(id) && !this.verifyingSessions.has(id) && !this.steeringSessions.has(id)) {
       const session = await this.mutations.wait(() => this.repos.sessions.get(id));
       if (!session) return;
       let next: TaskRecord | undefined;
@@ -2813,15 +2915,23 @@ export class DutydeckRuntime {
       let token: Owner | undefined;
       try {
         await this.mutations.write(id, async () => {
-          claimed = this.wakeOptional(this.bound().claimNext(this.fence(session)));
+          if (this.retiringDrivers.has(id)) throw new RuntimeError('WORKSPACE_RESOURCE_BLOCKED', 'The original idle driver is still closing', 409);
+          claimed = this.wakeOptional(this.bound().claimNext(this.fence(session),this.idleResourceChecks()));
           if (claimed?.task && claimed.attempt) {
             token = owner(id, this.lifecycle(id));
             this.attemptRefs.set(token, { sessionId: id, runId: claimed.attempt.runId, taskId: claimed.task.id, attemptId: claimed.attempt.attemptId });
             this.attempts.set(id, token); this.activeTasks.set(id, claimed.task);
           }
         });
-      } catch { this.queueBlocked.add(id); return; }
+      } catch (error) {
+        if (error instanceof RuntimeError && error.code === 'WORKSPACE_RESOURCE_BLOCKED') {
+          if (next && await this.closeUnprovenIdleCompetitors(id,next.id,!admissionRechecked)) { admissionRechecked = true; continue; }
+          this.resourceQueueBlocked.add(id); return;
+        }
+        this.queueBlocked.add(id); return;
+      }
       if (!claimed?.task || !claimed.attempt || !token) { this.queues.delete(id); return; }
+      admissionRechecked = false;
       // No await separates claiming the durable activity slot from registering its local owner.
       const running = this.runTask(id, claimed.task, claimed.attempt, token);
       await this.mutations.wait(() => running);
@@ -2943,7 +3053,7 @@ export class DutydeckRuntime {
         await this.mutations.wait(() => this.options.authorizeTask?.(session,task,'submit') ?? Promise.resolve());
         if (this.queueHeld || running()?.ref.attemptId !== target.ref.attemptId) return skipped('promptRequired');
         const reserved = await this.mutations.write(id, async () => this.wake(this.bound().beginQueuedSteering(this.fence(session),taskId,task.revision,
-          {operationId,actor:this.actor(session,actorId),target:{taskId:target.ref.taskId,attemptId:target.ref.attemptId}})));
+          {operationId,actor:this.actor(session,actorId),target:{taskId:target.ref.taskId,attemptId:target.ref.attemptId}},this.idleResourceChecks())));
         operation = this.repos.execution.getTaskExecution(taskId)!.steering!;
         if (reserved.replayed) return skipped(operation.outcome ?? 'failed');
         await this.projectQueue(id);

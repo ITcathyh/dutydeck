@@ -52,6 +52,7 @@ async function harness(options: { native?: boolean; answer?: boolean; managedGro
       const driver: AgentDriver = {
         start: async () => {}, resume: async () => {},
         isStopped: async () => true,
+        hasBackgroundWork: () => false,
         stop: async () => cancel(), interrupt: async () => cancel(),
         send: async prompt => {
           prompts.push(prompt);
@@ -640,7 +641,7 @@ describe('恢复已关闭会话与并行分身', () => {
   });
 
   it.each([undefined, 'om_prior_confirmation'])('ACP 分身用交接，保留原会话正在执行的任务和排队内容（原锚点=%s）', async replyMessageId => {
-    const h = await harness();
+    const h = await harness({ reportIdle: true, answer: true });
     await h.dispatch('om_task', '第一条任务'); await h.waitRunning('第一条任务');
     await h.dispatch('om_queue', '排队任务');
     const id = await h.sessionId(); const before = await h.runtime.getTasks(id); const source = await h.runtime.getSession(id);
@@ -654,7 +655,11 @@ describe('恢复已关闭会话与并行分身', () => {
     const child = (await h.runtime.listSessions()).find(s => s.id !== id)!;
     expect(child.sourceId).toContain(':thread:om_card_');
     expect(child.agentId).toBe(source!.agentId);
-    await vi.waitFor(async () => expect((await h.runtime.getTasks(child.id))[0]?.status).toBe('running'));
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(child.id))[0]?.status).toBe('queued'));
+    expect(h.prompts.some(prompt => prompt.includes('会话交接'))).toBe(false);
+    h.release();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(id)).every(task => task.status === 'completed')).toBe(true));
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(child.id))[0]?.status).toBe('completed'));
     await vi.waitFor(() => expect(h.prompts).toEqual(expect.arrayContaining([expect.stringContaining('会话交接')])));
     expect(h.service.sendText.mock.calls[0]![0].text).toContain('最近结果');
     const childMapping = (await h.repos.channelMappings.list(`lark-card:${h.config.appId}`)).find(item => item.sessionId === child.id)!;

@@ -30,6 +30,7 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
   const cards: Array<{ messageId: string; input: any }> = [];
   const prompts: Array<{ sessionId: string; prompt: string }> = [];
   const releases = new Map<string, () => void>();
+  const busy = new Set<string>();
   const permissionCalls = vi.fn();
   const terminalWrites = vi.fn();
   const approval = vi.fn(async () => true);
@@ -44,7 +45,9 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
     sessionPrompt: (session, prompt) => tools.promptForSession(session, prompt),
     driverFactory: (_config, _protocol, emit, _exit, sessionId) => ({
       start: async () => {}, resume: async () => {}, interrupt: async () => releases.get(sessionId)?.(), stop: async () => releases.get(sessionId)?.(),
+      isIdle: () => !busy.has(sessionId), hasBackgroundWork: () => false,
       send: async promptOrSubmission => {
+        busy.add(sessionId);
         const prompt = typeof promptOrSubmission === 'string' ? promptOrSubmission : promptOrSubmission.prompt;
         prompts.push({ sessionId, prompt });
         if (mode === 'held' || mode === 'permission' || mode === 'terminal') {
@@ -60,6 +63,7 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
               ? 'Agent B 调查结果：方案 B 存在替代方案。'
               : '独立结果及来源。';
         emit({ type: 'text', data: { text } });
+        busy.delete(sessionId);
         emit({ type: 'completed', data: { stopReason: 'end_turn' } });
       },
       createTerminalStream: () => ({ onData: (_data, snapshot) => snapshot?.({ data: '\x1b[31mAllow tool? [y/n]\x1b[0m', cols: 80, rows: 24 }), write: terminalWrites, resize: () => {}, dispose: () => {} }),
@@ -96,8 +100,9 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
   cleanup.push(async () => { coordinator.stop(); workbench.close(); await work.close(); broker.close(); for (const release of releases.values()) release(); await app.close(); await runtime.shutdown(); capabilities.close(); repos.close(); await rm(directory, { recursive: true, force: true }); });
   const parent = async () => (await runtime.listSessions()).find(session => session.source === 'lark')!;
   const item = async () => (await work.listBySession((await parent()).id, 'ou_alice'))[0]!;
+  const childTasks = async () => (await Promise.all((await runtime.listSessions()).filter(session => session.source === 'work_item').map(session => runtime.getTasks(session.id)))).flat();
   const settle = async () => { await vi.waitFor(async () => { const children = (await runtime.listSessions()).filter(session => session.source === 'work_item'); const tasks = (await Promise.all(children.map(s => runtime.getTasks(s.id)))).flat(); expect(tasks.length).toBeGreaterThan(0); expect(tasks.every(t => ['completed','failed','cancelled','interrupted'].includes(t.status))).toBe(true); }); };
-  return { directory, repos, runtime, work, broker, approval, terminalWrites, tools, capabilities, interactions, workbench, coordinator, app, client, config, cards, prompts, permissionCalls, releases, parent, item, settle };
+  return { directory, repos, runtime, work, broker, approval, terminalWrites, tools, capabilities, interactions, workbench, coordinator, app, client, config, cards, prompts, permissionCalls, releases, parent, item, childTasks, settle };
 }
 
 describe('亮屏指纹与卡片元素（纯函数）', () => {
@@ -225,7 +230,12 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect((await f.coordinator.handleAction(value, 'ou_alice', { messageId: card.messageId, chatId: 'oc_group' })).type).toBe('success');
     expect((await f.work.get(parent.id, created.id, 'ou_alice')).status).toBe('running');
     await f.work.tick();
-    await vi.waitFor(() => expect(f.prompts.length).toBeGreaterThan(1));
+    expect(f.prompts).toHaveLength(1);
+    expect(await f.childTasks()).toHaveLength(2);
+    expect((await f.childTasks()).every(task => task.status === 'queued')).toBe(true);
+    f.releases.get(parent.id)!();
+    await vi.waitFor(() => expect(f.runtime.getActiveTaskContext(parent.id)).toBeUndefined());
+    await vi.waitFor(() => expect(f.prompts).toHaveLength(2));
   });
 
   it('人可以自己起一次编排：/work plan 拼出计划、先出一张待确认卡，确认后才执行', async () => {
@@ -397,7 +407,9 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     const f = await fixture('permission');
     await f.coordinator.handle(message('om_goal', '/work research 比较'), f.config);
     await f.work.tick();
-    await vi.waitFor(async () => expect((await f.interactions.list((await f.parent()).id, (await f.item()).id, 'ou_alice')).length).toBe(2));
+    await vi.waitFor(async () => expect((await f.interactions.list((await f.parent()).id, (await f.item()).id, 'ou_alice')).length).toBe(1));
+    expect((await f.childTasks()).map(task => task.status).sort()).toEqual(['queued', 'running']);
+    expect(f.prompts).toHaveLength(1);
     await f.work.tick();
     await vi.waitFor(() => expect(f.cards.some(card => card.input.elements?.some((value: any) => value.behaviors?.[0]?.value?.answer === 'approve'))).toBe(true));
     const card = f.cards.find(card => card.input.elements?.some((value: any) => value.behaviors?.[0]?.value?.answer === 'approve'))!;
@@ -408,8 +420,14 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect(f.permissionCalls).not.toHaveBeenCalled();
     expect((await f.coordinator.handleAction(action, 'ou_alice', { messageId: card.messageId, chatId: 'oc_group' })).type).toBe('success');
     expect(f.permissionCalls).toHaveBeenCalledTimes(1);
-    expect((await f.coordinator.handleAction(action, 'ou_alice', { messageId: card.messageId, chatId: 'oc_group' })).type).toBe('error');
+    await vi.waitFor(() => expect(f.prompts).toHaveLength(2));
+    // 旧版卡片只刷新；使用当前卡片版本重放旧请求，仍须在权限层拒绝重复决定。
+    const refreshed = await f.repos.channelMappings.get(`lark-work-card:${f.config.appId}`, card.messageId);
+    const replay = { ...action, revision: JSON.parse(refreshed!.extra!).revision };
+    expect((await f.coordinator.handleAction(replay, 'ou_alice', { messageId: card.messageId, chatId: 'oc_group' })).type).toBe('error');
     expect(f.permissionCalls).toHaveBeenCalledTimes(1);
+    const item = await f.item();
+    await vi.waitFor(async () => expect((await f.interactions.list(item.parentSessionId, item.id, 'ou_alice')).map(request => request.sessionId)).toEqual([f.prompts[1]!.sessionId]));
   });
 
   it('rechecks approval permission after a native request has already arrived', async () => {
@@ -417,7 +435,8 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     await f.coordinator.handle(message('om_goal', '/work research 比较'), f.config);
     await f.work.tick();
     const item = await f.item();
-    await vi.waitFor(async () => expect((await f.interactions.list(item.parentSessionId, item.id, 'ou_alice')).length).toBe(2));
+    await vi.waitFor(async () => expect((await f.interactions.list(item.parentSessionId, item.id, 'ou_alice')).length).toBe(1));
+    expect((await f.childTasks()).map(task => task.status).sort()).toEqual(['queued', 'running']);
     const request = (await f.interactions.list(item.parentSessionId, item.id, 'ou_alice'))[0]!;
     f.approval.mockResolvedValue(false);
     const { sessionId: _session, text: _text, ...input } = request;
@@ -425,6 +444,8 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect(f.permissionCalls).not.toHaveBeenCalled();
     await f.interactions.respond(item.parentSessionId, item.id, { ...input, answer: 'reject' }, 'ou_alice');
     expect(f.permissionCalls).toHaveBeenCalledWith(`permit_${request.sessionId}`, false);
+    await vi.waitFor(() => expect(f.prompts).toHaveLength(2));
+    await vi.waitFor(async () => expect((await f.interactions.list(item.parentSessionId, item.id, 'ou_alice')).map(next => next.sessionId)).toEqual([f.prompts[1]!.sessionId]));
   });
 
   it('keeps legacy relay answers closed for managed children and rejects answers after cancellation', async () => {
@@ -814,7 +835,7 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     });
 
     describe('生成的计划结构', () => {
-      it('生成 a、b 并行且 merge 依赖两者的三步计划，且符合 workPlanSchema', () => {
+      it('生成 a、b 无前置依赖且 merge 依赖两者的三步计划，且符合 workPlanSchema', () => {
         const plan = consultWorkPlan(['alpha', 'beta']);
         expect(plan.title).toBe('多 Agent 会诊');
         expect(plan.outputStepId).toBe('merge');
@@ -903,8 +924,8 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
       });
     });
 
-    it('从飞书接收 /work consult，人手发起直接进入 running，两 Agent 并行独立调查，最终只交付 merge 输出', async () => {
-      const f = await fixture();
+    it('从飞书接收 /work consult，人手发起直接进入 running，同目录两 Agent 串行独立调查，最终只交付 merge 输出', async () => {
+      const f = await fixture('held');
       await f.coordinator.handle(message('om_consult', '/work consult 调查两个方案的分歧'), f.config);
 
       const item = await f.item();
@@ -919,14 +940,21 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
       // 人手发起无需确认闸门，直接开跑
       expect(item.status).toBe('running');
 
-      // 推进第一轮并行步骤 a 和 b
+      // 两份独立调查共享目录：a 未结束时 b 必须排队，merge 也不能提前提交。
       await f.work.tick();
-      await f.settle();
-      expect(f.prompts).toHaveLength(2);
+      await vi.waitFor(() => expect(f.prompts).toHaveLength(1));
+      expect((await f.childTasks()).map(task => task.status).sort()).toEqual(['queued', 'running']);
+      f.releases.get(f.prompts[0]!.sessionId)!();
+      await vi.waitFor(() => expect(f.prompts).toHaveLength(2));
       expect(new Set(f.prompts.map(p => p.sessionId)).size).toBe(2);
+      expect((await f.runtime.getTasks(f.prompts[0]!.sessionId))[0]!.status).toBe('completed');
+      f.releases.get(f.prompts[1]!.sessionId)!();
+      await f.settle();
 
-      // 推进 merge 步骤
+      // 两份结果都落库后才推进 merge。
       await f.work.tick();
+      await vi.waitFor(() => expect(f.prompts).toHaveLength(3));
+      f.releases.get(f.prompts[2]!.sessionId)!();
       await f.settle();
       await f.work.tick();
 

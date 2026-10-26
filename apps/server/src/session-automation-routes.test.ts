@@ -149,3 +149,27 @@ it.each(['2026-02-30T09:00', '2026-02-28T25:00'])('rejects invalid local calenda
   expect(target.createSchedule).not.toHaveBeenCalled();
   expect(target.updateSchedule).not.toHaveBeenCalled();
 });
+
+it('passes each list authorization actor into the service and does not grant a denied source', async () => {
+  const app = Fastify(); apps.push(app);
+  const checks: unknown[] = [];
+  const target = Object.assign(service(), { listSchedules: vi.fn(async (_query, canRead) => {
+    checks.push(await canRead('allowed'), await canRead('forbidden'));
+    return { engine: 'session', counts: {}, items: [], total: 0, offset: 0, limit: 20 };
+  }) });
+  await registerSessionAutomationRoutes(app, { service: target, authorize: async (_request, id) => ({ allowed: id === 'allowed', actorId: 'ou_viewer' }) });
+  const response = await app.inject({ method: 'GET', url: '/api/automation/schedules?limit=20' });
+  expect(response.statusCode).toBe(200);
+  expect(checks).toEqual([{ actorId: 'ou_viewer' }, false]);
+});
+
+it('validates stable history pagination and scopes the run endpoint to all three path identities', async () => {
+  const app = Fastify(); apps.push(app);
+  const target = Object.assign(service(), { getScheduleHistoryPage: vi.fn(async () => ({ occurrences: [], total: 0, offset: 20, limit: 20 })), getScheduleRun: vi.fn(async () => ({})) });
+  await registerSessionAutomationRoutes(app, { service: target, authorize: async () => ({ allowed: true, actorId: 'viewer' }) });
+  expect((await app.inject('/api/sessions/source/automation/schedules/plan/history?offset=20&limit=20')).statusCode).toBe(200);
+  expect(target.getScheduleHistoryPage).toHaveBeenCalledWith('source', 'plan', 20, 20, 'viewer');
+  expect((await app.inject('/api/sessions/source/automation/schedules/plan/history?limit=101')).statusCode).toBe(400);
+  expect((await app.inject('/api/sessions/source/automation/schedules/plan/runs/occurrence')).statusCode).toBe(200);
+  expect(target.getScheduleRun).toHaveBeenCalledWith('source', 'plan', 'occurrence', 'viewer');
+});

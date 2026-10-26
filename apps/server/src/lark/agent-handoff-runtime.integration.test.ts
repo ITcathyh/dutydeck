@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
@@ -25,6 +25,7 @@ const human = (id: string, target: string, text: string): LarkMessageEvent => ({
 
 async function harness() {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-agent-handoff-'));
+  await Promise.all(['a', 'b'].map(id => mkdir(join(directory, id))));
   const repos = createRepositories(join(directory, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const sends: Array<{ agentId: string; prompt: string; release: () => void }> = [];
   const runtime = new DutydeckRuntime(repos, {
@@ -39,11 +40,11 @@ async function harness() {
     } satisfies AgentDriver)
   });
   const agents: AgentConfig[] = ['a', 'b'].map(id => ({ id, name: `Agent ${id.toUpperCase()}`, command: process.execPath,
-    args: [], protocol: 'acp', cwd: directory, env: {}, permissionMode: 'ask', timeout: 10,
+    args: [], protocol: 'acp', cwd: join(directory, id), env: {}, permissionMode: 'ask', timeout: 10,
     capabilities: { pause: false, resume: true }, builtin: false }));
   await runtime.initialize(agents);
   const configs: StoredLarkConfig[] = ['a', 'b'].map(id => ({
-    appId: `cli_${id}`, name: `Bot ${id.toUpperCase()}`, appSecret: 'fake', workspace: directory, defaultAgentId: id,
+    appId: `cli_${id}`, name: `Bot ${id.toUpperCase()}`, appSecret: 'fake', workspace: join(directory, id), defaultAgentId: id,
     permissionMode: 'ask', listening: true, fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false,
     groupCardMention: false, groupToolsEnabled: true, groupToolsAllowSend: true, pushIntervalMs: 1000,
     hideTraceOnComplete: false, allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }], allowedEmails: [],

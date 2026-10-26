@@ -430,6 +430,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       if (actor.kind !== 'installation_owner' && actor.kind !== 'unspecified') await groupManager.prepareTurn(sessionId, actor.id);
     },
     authorizeExecution: async (sessionId, actorId) => {
+      if (await automation.authorizeExecutionSession(sessionId, actorId)) return;
       if (await collaboration?.background.authorizeExecution(sessionId, actorId)) return;
       // work item 授权先行判断并自行短路；其余会话把 prepareTurn 返回的可选本地提交
       // 交回 Runtime，由其短写序列在归属校验后执行（prepare 不写运行身份）。
@@ -437,6 +438,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return groupManager.prepareTurn(sessionId, actorId);
     },
     resolveRiskPolicy: async (sessionId, fallback) => {
+      const scheduleSource = await automation.sourceSessionId(sessionId);
+      if (scheduleSource) return groupManager.riskPolicy(scheduleSource, fallback);
       const background = await collaboration?.riskPolicy(sessionId, fallback);
       if (background) return background.policy;
       const binding = await workItems.parentForSession(sessionId) ?? await delegations.parentForSession(sessionId);

@@ -75,8 +75,9 @@ async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confir
         start: async () => { if (sessionId.startsWith('ses_work_')) await Promise.race([beforeStart?.() ?? Promise.resolve(), startupKilled()]); }, resume: async () => {}, interrupt: async () => { current?.(); },
         stop: async () => { stopped.push(sessionId); killStartup?.(new Error('driver stopped during startup')); current?.(); },
         ...(stopProof === 'missing' ? {} : { isStopped: async () => stopProof === 'confirmed' && stopped.includes(sessionId) }),
+        isIdle: () => !current, hasBackgroundWork: () => false,
         send: (prompt: string) => new Promise<void>(resolve => {
-          current = () => { onEvent({ type: 'completed', data: { stopReason: 'cancelled' } }); resolve(); };
+          current = () => { current = undefined; onEvent({ type: 'completed', data: { stopReason: 'cancelled' } }); resolve(); };
           calls.push({ sessionId, prompt, finish(text, failed) {
             if (failed) onEvent({ type: 'error', data: { message: 'Synthetic failure' } });
             if (Array.isArray(text)) {
@@ -145,12 +146,16 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     await f.finish(child, 'full artifact'); await f.tick();
     expect((await f.get(item.id)).status).toBe('completed');
   });
-  it('runs independent branches concurrently and synthesizes full frozen results exactly once', async () => {
+  it('serializes branches sharing a workspace and synthesizes full frozen results exactly once', async () => {
     const f = await fixture(); const item = await f.create();
-    await f.tick(); await eventually(async () => f.calls.length === 2);
-    expect(new Set(f.calls.map(call => call.sessionId)).size).toBe(2);
-    for (const call of f.calls) expect(await f.service.parentForSession(call.sessionId)).toMatchObject({ parentSessionId: f.parent.id, actorId: 'ou_owner', workId: item.id });
-    await f.finish(f.calls[0]!, 'First result'); await f.finish(f.calls[1]!, 'Second result');
+    await f.tick(); await eventually(async () => f.calls.length === 1);
+    const admitted = (await f.get(item.id)).steps.slice(0, 2).map(step => step.attempts[0]!);
+    expect(new Set(admitted.map(attempt => attempt.sessionId)).size).toBe(2);
+    expect((await Promise.all(admitted.map(attempt => f.repos.tasks.listBySession(attempt.sessionId!)))).flat().map(task => task.status).sort()).toEqual(['queued', 'running']);
+    for (const attempt of admitted) expect(await f.service.parentForSession(attempt.sessionId!)).toMatchObject({ parentSessionId: f.parent.id, actorId: 'ou_owner', workId: item.id });
+    await f.finish(f.calls[0]!, 'First result');
+    await eventually(async () => f.calls.length === 2);
+    await f.finish(f.calls[1]!, 'Second result');
     await f.tick(); await eventually(async () => f.calls.length === 3);
     expect(f.calls[2]!.prompt).toContain('First result'); expect(f.calls[2]!.prompt).toContain('Second result');
     await f.finish(f.calls[2]!, 'Complete comparison'); await f.tick();
@@ -159,6 +164,30 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     expect(done.delivery.status).toBe('delivered');
     await f.tick(); expect(f.deliveries).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(done)).not.toContain('ou_owner');
+  });
+
+  it('runs work items in different Git repositories concurrently', async () => {
+    const f = await fixture('confirmed', true);
+    const otherCwd = await mkdtemp(join(tmpdir(), 'dutydeck-work-other-repo-'));
+    cleanup.push(async () => { await rm(otherCwd, { recursive: true, force: true }); });
+    const run = promisify(execFile);
+    await run('git', ['init', otherCwd]);
+    await writeFile(join(otherCwd, 'seed.txt'), 'other repository');
+    await run('git', ['-C', otherCwd, 'add', 'seed.txt']);
+    await run('git', ['-C', otherCwd, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture']);
+    const otherParent = await f.runtime.start({ agentId: 'alpha', cwd: otherCwd, source: 'lark', sourceId: 'cli_app:ou_owner:other_root', permissionMode: 'ask' });
+    const single = { ...plan, steps: [plan.steps[0]!], outputStepId: 'a' };
+    const first = await f.create(single);
+    const second = await f.service.create(otherParent.id, { goal: 'Other repository', plan: single, idempotencyKey: 'other-work' }, 'ou_owner');
+    await f.tick(); await eventually(async () => f.calls.length === 2);
+    const tasks = (await Promise.all(f.calls.map(call => f.repos.tasks.listBySession(call.sessionId)))).flat();
+    expect(tasks.map(task => task.status)).toEqual(['running', 'running']);
+    expect(new Set((await Promise.all(f.calls.map(call => f.repos.sessions.get(call.sessionId)))).map(session => session!.cwd))).toEqual(new Set([f.directory, otherCwd]));
+    await f.finish(f.calls[0]!, 'First repository complete'); await f.finish(f.calls[1]!, 'Other repository complete');
+    await f.tick();
+    expect((await f.get(first.id)).status).toBe('completed');
+    expect((await f.service.get(otherParent.id, second.id, 'ou_owner')).status).toBe('completed');
+    expect(f.deliveries).toHaveBeenCalledTimes(2);
   });
 
   it('holds a gated plan until a human confirms and dispatches nothing before that, across a restart', async () => {
@@ -178,7 +207,8 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     await f.tick(); expect(f.calls).toHaveLength(0);
     expect((await f.service.confirm(f.parent.id, item.id, pending.revision, 'ou_owner')).status).toBe('running');
     await expect(f.service.confirm(f.parent.id, item.id, pending.revision + 1, 'ou_owner')).rejects.toMatchObject({ statusCode: 409 });
-    await f.tick(); await eventually(async () => f.calls.length === 2);
+    await f.tick(); await eventually(async () => f.calls.length === 1);
+    expect((await f.get(item.id)).steps.slice(0, 2).every(step => step.attempts.length === 1)).toBe(true);
   });
 
   it('refuses to turn an unconfirmed plan into a reusable template', async () => {
@@ -211,14 +241,20 @@ describe('WorkItemService with real Runtime and SQLite', () => {
 
   it('persists cancellation, stops only owned children and rejects late success and joins', async () => {
     const f = await fixture(); const item = await f.create(); const unrelated = await f.runtime.start({ agentId: 'alpha', cwd: f.parent.cwd });
-    await f.tick(); await eventually(async () => f.calls.length === 2);
+    await f.tick(); await eventually(async () => f.calls.length === 1);
     const current = await f.get(item.id);
     await f.service.cancel(f.parent.id, item.id, current.revision, 'ou_owner');
     expect((await f.get(item.id)).status).toBe('cancelled');
+    for (const step of current.steps.slice(0, 2)) {
+      expect(f.stopped).toContain(step.attempts[0]!.sessionId);
+      const execution = f.repos.execution.getSessionExecutions(step.attempts[0]!.sessionId!)[0]!;
+      expect(execution.task.status).toBe(step.attempts[0]!.sessionId === f.calls[0]!.sessionId ? 'reconcile_required' : 'cancelled');
+      if (execution.currentAttempt) expect(execution.currentAttempt.reconcileReason?.code).toBe('STOP_RESULT_UNKNOWN');
+    }
     expect(f.stopped).not.toContain(unrelated.id);
     f.calls[0]!.finish('Late result'); await f.tick();
-    expect((await f.get(item.id)).output).toBeUndefined(); expect(f.calls).toHaveLength(2); expect(f.deliveries).not.toHaveBeenCalled();
-    await f.reboot(); await f.tick(); expect((await f.get(item.id)).status).toBe('cancelled'); expect(f.calls).toHaveLength(2);
+    expect((await f.get(item.id)).output).toBeUndefined(); expect(f.calls).toHaveLength(1); expect(f.deliveries).not.toHaveBeenCalled();
+    await f.reboot(); await f.tick(); expect((await f.get(item.id)).status).toBe('cancelled'); expect(f.calls).toHaveLength(1);
   });
 
   it('keeps waits durable and rejects unauthorized, stale and duplicate answers', async () => {
@@ -243,7 +279,7 @@ describe('WorkItemService with real Runtime and SQLite', () => {
 
   it('denies a foreign actor or App when stopping an owned child after execution revocation', async () => {
     const f = await fixture(); const item = await f.create(); await f.tick();
-    await eventually(async () => f.calls.length === 2);
+    await eventually(async () => f.calls.length === 1);
     const child = f.calls[0]!.sessionId;
     await expect(f.runtime.stopWorkItemSession(child, { kind: 'channel', id: 'ou_other', appId: 'cli_app' })).rejects.toMatchObject({ code: 'WORK_ITEM_FORBIDDEN' });
     await expect(f.runtime.stopWorkItemSession(child, { kind: 'channel', id: 'ou_owner', appId: 'other_app' })).rejects.toMatchObject({ code: 'TASK_ACTOR_CONFLICT' });
@@ -255,8 +291,8 @@ describe('WorkItemService with real Runtime and SQLite', () => {
   });
 
   it('only retries the failed branch and preserves succeeded siblings', async () => {
-    const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 2);
-    await f.finish(f.calls[0]!, 'Kept result'); await f.finish(f.calls[1]!, '', true); await f.tick();
+    const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 1);
+    await f.finish(f.calls[0]!, 'Kept result'); await eventually(async () => f.calls.length === 2); await f.finish(f.calls[1]!, '', true); await f.tick();
     const failed = await f.get(item.id); expect(failed.status).toBe('failed');
     await f.service.retryStep(f.parent.id, item.id, 'b', failed.revision, 'ou_owner'); await f.tick();
     await eventually(async () => f.calls.length === 3);
@@ -266,9 +302,10 @@ describe('WorkItemService with real Runtime and SQLite', () => {
   });
 
   it('stops each child once its result is saved and retries in a fresh child', async () => {
-    const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 2);
+    const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 1);
+    await f.finish(f.calls[0]!, 'Kept result'); await eventually(async () => f.calls.length === 2);
     const [kept, failed] = f.calls.map(call => call.sessionId);
-    await f.finish(f.calls[0]!, 'Kept result'); await f.finish(f.calls[1]!, '', true); await f.tick();
+    await f.finish(f.calls[1]!, '', true); await f.tick();
     const { revision } = await f.get(item.id);
     // 停止在 tick 之外进行且不写记录：卡片刚拿到的版本号仍然有效，可以立刻重试。
     await eventually(async () => [kept, failed].every(id => f.stopped.includes(id)));
@@ -417,14 +454,17 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     const f = await fixture();
     const branches = ['a', 'b', 'c', 'd'].map(id => ({ ...plan.steps[0]!, id }));
     const item = await f.create({ title: 'Bounded', steps: [...branches, { ...plan.steps[2]!, dependsOn: branches.map(step => step.id) }], outputStepId: 'join' });
-    await f.tick(); await eventually(async () => f.calls.length === 3); await f.tick(); expect(f.calls).toHaveLength(3);
-    await f.finish(f.calls[0]!, 'Done'); await f.tick(); await eventually(async () => f.calls.length === 4);
+    await f.tick(); await eventually(async () => f.calls.length === 1); await f.tick(); expect(f.calls).toHaveLength(1);
+    expect((await f.get(item.id)).steps.filter(step => step.status === 'running')).toHaveLength(3);
+    expect((await f.get(item.id)).steps.find(step => step.id === 'd')?.attempts).toHaveLength(0);
+    await f.finish(f.calls[0]!, 'Done'); await f.tick(); await eventually(async () => f.calls.length === 2);
+    expect((await f.get(item.id)).steps.find(step => step.id === 'd')?.attempts).toHaveLength(1);
     expect((await f.get(item.id)).steps.filter(step => step.status === 'running')).toHaveLength(3);
     await expect(f.runtime.start({ agentId: 'alpha', source: 'work_item', sourceId: 'forged' })).rejects.toMatchObject({ code: 'INVALID_WORK_SESSION' });
   });
 
   it.each(['stop', 'archive', 'revoke'] as const)('stops active children when parent authority becomes %s', async mode => {
-    const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 2);
+    const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 1);
     if (mode === 'stop') await f.runtime.stop(f.parent.id); else if (mode === 'archive') await f.runtime.archive(f.parent.id); else f.deny();
     await f.tick(); f.allow();
     const blocked = await f.get(item.id); expect(blocked.status).toBe('blocked');
@@ -534,8 +574,9 @@ const reviewVerdict = (call: Call, decision: 'accept' | 'rework' | 'stop', feedb
 });
 async function reachReview(f: Awaited<ReturnType<typeof fixture>>, custom = reviewPlan()) {
   const item = await f.create(custom);
-  await f.tick(); await eventually(async () => f.calls.length === 2);
-  await f.finish(f.calls[0]!, 'Context evidence'); await f.finish(f.calls[1]!, 'Implementation version 1');
+  await f.tick(); await eventually(async () => f.calls.length === 1);
+  await f.finish(f.calls[0]!, 'Context evidence'); await eventually(async () => f.calls.length === 2);
+  await f.finish(f.calls[1]!, 'Implementation version 1');
   await f.tick(); await eventually(async () => f.calls.length === 3);
   return item;
 }
@@ -554,11 +595,12 @@ describe('Bounded independent review with real Runtime and SQLite', () => {
     const f = await fixture('confirmed', true);
     const custom = reviewPlan(); custom.steps = custom.steps.map(step => step.id === 'b' ? { ...step, workspaceMode: 'worktree' } : step);
     const item = await f.create(custom);
-    await f.tick(); await eventually(async () => f.calls.length === 2);
+    await f.tick(); await eventually(async () => f.calls.length === 1);
+    await f.finish(f.calls[0]!, 'Context evidence'); await eventually(async () => f.calls.length === 2);
     const firstWorkspace = (await f.runtime.getWorkspace(f.calls[1]!.sessionId))!;
     expect(firstWorkspace.mode).toBe('worktree'); expect(firstWorkspace.cwd).not.toBe(f.parent.cwd);
     await writeFile(join(firstWorkspace.cwd, 'feature.txt'), 'version one');
-    await f.finish(f.calls[0]!, 'Context evidence'); await f.finish(f.calls[1]!, 'Implementation version 1');
+    await f.finish(f.calls[1]!, 'Implementation version 1');
     await f.tick(); await eventually(async () => f.calls.length === 3);
     expect(reviewedInputs(f.calls[2]!).find(input => input.stepId === 'b')!.workspace.cwd).toBe(firstWorkspace.cwd);
     expect(await readFile(join(firstWorkspace.cwd, 'feature.txt'), 'utf8')).toBe('version one');

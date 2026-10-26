@@ -99,9 +99,9 @@ test('creates a paused plan globally without sending a prompt, runs it explicitl
     expect(afterRun.schedules[0].nextDueAt).toBe(schedule.nextDueAt);
     expect(afterRun.occurrences).toHaveLength(1);
     expect(afterRun.occurrences[0]).toMatchObject({ taskId: task.id, runStatus: 'completed' });
-    await automation.getByText('最近触发记录', { exact: true }).click();
-    const resultLink = automation.getByRole('link', { name: `查看执行任务 · ${task.id}`, exact: true });
-    await expect(resultLink).toHaveAttribute('href', `/sessions/${session.id}`);
+    await automation.getByText('此计划的运行历史', { exact: true }).click();
+    const resultLink = automation.getByRole('link', { name: /查看本次运行/ });
+    await expect(resultLink).toHaveAttribute('href', `/?nav=automation&automationSession=${session.id}&schedule=${schedule.id}&run=${occurrence.id}`);
 
     await automation.getByRole('button', { name: '删除', exact: true }).click();
     const deleteDialog = page.getByRole('alertdialog', { name: '删除定时计划', exact: true });
@@ -112,7 +112,9 @@ test('creates a paused plan globally without sending a prompt, runs it explicitl
     const deletedSchedule = (await deleted.json()).schedule;
     await expect(deleteDialog).toBeHidden();
     await expect(automation.getByText(`${name} · 已停用`, { exact: true })).toHaveCount(0);
-    await expect(automation.getByText(new RegExp(`历史计划 ${schedule.id}`))).toBeVisible();
+    const retainedHistory = automation.getByText(new RegExp(`历史计划 ${schedule.id}`));
+    await expect(retainedHistory).toBeVisible();
+    await retainedHistory.click();
     await expect(resultLink).toBeVisible();
     const rejectedRun = await instance.request('POST', runPath, { expectedRevision: deletedSchedule.revision, idempotencyKey: 'deleted-browser-plan' });
     expect(rejectedRun.status).toBe(409);
@@ -124,8 +126,8 @@ test('creates a paused plan globally without sending a prompt, runs it explicitl
     expect((await instance.request('GET', tasksPath)).json).toHaveLength(1);
 
     await resultLink.click();
-    await page.waitForURL(url => url.pathname === `/sessions/${session.id}`);
-    await expect(page.getByRole('main').getByRole('article', { name: /最终输出/ })).toHaveText(expectedOutput);
+    await page.waitForURL(url => url.searchParams.get('run') === occurrence.id && url.searchParams.get('schedule') === schedule.id);
+    await expect(page.getByRole('region', { name: '单次运行详情' }).locator('.markdown')).toHaveText(expectedOutput);
   } finally {
     await instance.cleanup();
   }

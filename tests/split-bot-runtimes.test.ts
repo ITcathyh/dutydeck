@@ -10,12 +10,13 @@ import { createRepositories } from '../packages/storage/src/index.js';
 import { currentProcessIdentity } from '../packages/storage/src/process-identity.js';
 import { DutydeckRuntime } from '../packages/agent-runtime/src/index.js';
 import { deliverLarkStatusReaction, larkResultKey, sendLarkFile } from '../apps/server/src/lark/result-delivery.js';
+import { canonicalExecutionJson } from '@dutydeck/shared';
 import { split } from '../scripts/split-bot-runtimes.mts';
 
 const dirs: string[] = [];
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 const use = <T>(file: string, f: (db: DatabaseSync) => T) => { const db = new DatabaseSync(file); try { return f(db); } finally { db.close(); } };
-async function fixture() {
+async function fixture(memory = true) {
   const dir = mkdtempSync(join(tmpdir(), 'bot-split-')); dirs.push(dir);
   const database = join(dir, 'source.db'), output = join(dir, 'split');
   const repos = createRepositories(database);
@@ -26,7 +27,7 @@ async function fixture() {
     await repos.channelBots.create({ id: `bot_${name}`, channel: 'lark', externalAppId: `cli_${name}`, displayName: name, brand: 'feishu', credentialRef: `secret_${name}`, state: 'staged' });
   }
   const time = '2026-01-01T00:00:00.000Z';
-  for (const [id, source, sourceId] of [['a', 'lark', 'cli_aaa:chat:thread'], ['b', 'lark-memory', 'cli_bbb:chat:memory'], ['w', undefined, undefined]] as const) {
+  for (const [id, source, sourceId] of [['a', 'lark', 'cli_aaa:chat:thread'], ['b', memory ? 'lark-memory' : 'lark', 'cli_bbb:chat:memory'], ['w', undefined, undefined]] as const) {
     await repos.sessions.save({ id, agentId: 'agent', state: 'idle', cwd: '/tmp', source, sourceId, runId: `run_${id}`, createdAt: time, updatedAt: time });
     await repos.tasks.save({ id: `t_${id}`, sessionId: id, prompt: `history ${id}`, status: id === 'b' ? 'queued' : 'completed', createdAt: time, updatedAt: time });
 
@@ -41,7 +42,79 @@ async function fixture() {
   return { database, output, cliFile: process.execPath, peers: [] };
 }
 
+async function independentSchedules(f: Awaited<ReturnType<typeof fixture>>) {
+  const repos=createRepositories(f.database),claim=repos.control.attachRuntime('partition-schedules'),x=repos.execution.bind(claim);
+  const records: Array<{origin:string;executionId:string;scheduleId:string;taskId:string;owner:string;keys:string[]}>=[];
+  try {
+    for(const [origin,owner] of [['a','cli_aaa'],['b','cli_bbb'],['w','web']] as const){
+      const scheduleId='partition-'+origin,executionId='ses_schedule_'+createHash('sha256').update(scheduleId).digest('hex'),time='2026-10-26T00:00:00.000Z';
+      const actor=owner==='web'?{kind:'installation_owner' as const,id:'installation_owner' as const}:{kind:'channel' as const,id:'ou_'+origin,appId:owner};
+      const schedule={schemaVersion:1,id:scheduleId,revision:1,generation:1,sessionId:origin,actorId:actor.id,mode:'independent',
+        executionSessionId:executionId,executionContext:{cwd:'/tmp',sourceCwd:'/tmp',agentId:'agent',permissionMode:'ask',contextMode:'prompt_only'},
+        name:'Scheduled '+origin,prompt:'Frozen '+origin,trigger:{kind:'interval',everySeconds:3600,anchorAt:time},timezone:'UTC',dstPolicy:{gap:'skip',overlap:'first'},condition:{kind:'always'},
+        enabled:false,createdAt:time,updatedAt:time};
+      await repos.config.set('session_automation/schedule/'+scheduleId,JSON.stringify(schedule));
+      x.createSession({id:executionId,runId:'run-'+origin,agentId:'agent',cwd:'/tmp',state:'idle',source:'schedule',sourceId:scheduleId,workspaceMode:'worktree',createdAt:time,updatedAt:time});
+      const request={version:1 as const,namespace:'automation' as const,sessionId:executionId,key:'occurrence-'+origin,prompt:schedule.prompt,mode:'queue' as const,actor,skills:[],options:{},sources:[],sourcePayload:null};
+      const content={version:2 as const,prompt:request.prompt,executionOptions:{permissionMode:'ask' as const},executionContext:{agentPrompt:request.prompt,actorId:actor.id},contentSources:[]};
+      const task=x.acceptTask({sessionId:executionId,runId:'run-'+origin},request,{...content,digest:createHash('sha256').update(canonicalExecutionJson(content)).digest('hex')},'back').task!;
+      const occurrenceId='occ-'+origin;
+      await repos.config.set('session_automation/occurrence/'+occurrenceId,JSON.stringify({schemaVersion:2,id:occurrenceId,revision:1,generation:1,sessionId:origin,executionSessionId:executionId,scheduleId,actor,
+        scheduledForUtc:time,conditionStatus:'passed',runStatus:'accepted',taskId:task.id,admission:{version:1,kind:'canonical',taskIdVersion:'v1',taskId:task.id,request},
+        delivery:{status:'not_requested',attempts:0,updatedAt:time},createdAt:time,updatedAt:time}));
+      await repos.config.set('session_automation/task/'+task.id,JSON.stringify({schemaVersion:2,kind:'schedule',sessionId:executionId,occurrenceId,scheduleId,taskId:task.id,taskIdVersion:'v1',generation:1}));
+      await repos.config.set('session_automation/stop_request/'+task.id,JSON.stringify({version:1,sessionId:origin,taskId:task.id,attemptId:'attempt-'+origin,
+        occurrenceId,scheduleId,generation:1,actorId:actor.id,status:'applied'}));
+      await repos.config.set('session_automation/ci/ci-'+origin,JSON.stringify({schemaVersion:2,id:'ci-'+origin,revision:1,sessionId:origin,actorId:actor.id,actor,
+        provider:'github',repository:{owner:'org',name:'repo',slug:'org/repo'},headSha:'a'.repeat(40),prompt:'Watch CI',status:'waiting',
+        expiresAt:'2026-10-27T00:00:00.000Z',delivery:{status:'not_requested',attempts:0,updatedAt:time},createdAt:time,updatedAt:time}));
+      if(owner!=='web') await repos.config.set('automation.delivery-target.'+scheduleId,JSON.stringify({appId:owner,chatId:'oc_'+origin,replyMessageId:'om_'+origin,replyInThread:true}));
+      x.patchSession({sessionId:origin,runId:'run_'+origin},{state:'stopped'});
+      const keys=['session_automation/schedule/'+scheduleId,'session_automation/occurrence/'+occurrenceId,'session_automation/task/'+task.id,'runtime_execution_workspace:'+executionId,'session_automation/stop_request/'+task.id,'session_automation/ci/ci-'+origin,
+        ...(owner==='web'?[]:['automation.delivery-target.'+scheduleId])];
+      records.push({origin,executionId,scheduleId,taskId:task.id,owner,keys});
+    }
+  } finally {claim.release();repos.close();}
+  return records;
+}
+
 describe('offline bot partitions', () => {
+  it('partitions real execution workspace identities and independent schedule state with their frozen origins', async()=>{
+    const f=await fixture(false),records=await independentSchedules(f);
+    const originals=use(f.database,db=>new Map(db.prepare('SELECT key,value FROM configs').all().map(row=>[row.key,row.value])));
+    expect(split(f).blockers).toEqual([]);
+    split({...f,apply:true});
+    for(const shard of ['cli_aaa','cli_bbb','web'])use(join(f.output,shard,'dutydeck.db'),db=>{
+      for(const record of records){
+        expect(Boolean(db.prepare('SELECT id FROM sessions WHERE id=?').get(record.executionId))).toBe(record.owner===shard);
+        expect(Boolean(db.prepare('SELECT id FROM tasks WHERE id=?').get(record.taskId))).toBe(record.owner===shard);
+        for(const key of record.keys)expect(db.prepare('SELECT value FROM configs WHERE key=?').get(key)?.value).toBe(record.owner===shard?originals.get(key):undefined);
+      }
+    });
+  });
+
+  it.each(['missing-origin-map','wrong-execution','cross-bot-actor','cross-bot-delivery','cross-bot-task-reference','cross-bot-workspace','cyclic-origin'])('refuses ambiguous independent schedule partition evidence: %s',async mode=>{
+    const f=await fixture(false),records=await independentSchedules(f),record=records[0]!;
+    use(f.database,db=>{
+      const key=mode==='cross-bot-actor'?'session_automation/occurrence/occ-a':mode==='cross-bot-delivery'?'automation.delivery-target.'+record.scheduleId
+        :mode==='cross-bot-task-reference'?'session_automation/task/'+record.taskId:mode==='cross-bot-workspace'?'runtime_execution_workspace:'+record.executionId:'session_automation/schedule/'+record.scheduleId;
+      if(mode==='missing-origin-map'){db.prepare('DELETE FROM configs WHERE key=?').run(key);return;}
+      const value=JSON.parse(db.prepare('SELECT value FROM configs WHERE key=?').get(key)!.value as string);
+      if(mode==='wrong-execution')value.executionSessionId=records[1]!.executionId;
+      if(mode==='cross-bot-actor')value.admission.request.actor.appId='cli_bbb';
+      if(mode==='cross-bot-delivery')value.appId='cli_bbb';
+      if(mode==='cross-bot-task-reference')value.occurrenceId='occ-b';
+      if(mode==='cross-bot-workspace')value.sessionId=records[1]!.executionId;
+      if(mode==='cyclic-origin')value.sessionId=record.executionId;
+      db.prepare('UPDATE configs SET value=? WHERE key=?').run(JSON.stringify(value),key);
+    });
+    const blockers=split(f).blockers;
+    expect(blockers.some(blocker=>blocker.startsWith(['missing-origin-map','wrong-execution','cyclic-origin'].includes(mode)
+      ?'SESSION_OWNERSHIP_UNKNOWN:':'CONFIG_CROSS_SHARD_REFERENCE:'))).toBe(true);
+    expect(()=>split({...f,apply:true})).toThrow('MIGRATION_BLOCKED');
+    expect(existsSync(f.output)).toBe(false);
+  });
+
   it('preserves automatic task admissions in only the owning bot partition', async () => {
     const f = await fixture();
     use(f.database, db => {

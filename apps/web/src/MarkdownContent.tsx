@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Check, Copy } from 'lucide-react';
 import { Highlight, Prism, themes } from 'prism-react-renderer';
 
@@ -24,7 +25,7 @@ export function isBlockCode(className: string | undefined, children: ReactNode) 
 
 // 优先 Clipboard API；API 缺失或 writeText 被拒（权限/非安全上下文）时退回 textarea + execCommand。
 // 两路都不引入 window.prompt 之类的原生弹窗——Dutydeck 使用自定义 portal 弹窗。
-async function copyToClipboard(code: string): Promise<boolean> {
+export async function copyToClipboard(code: string): Promise<boolean> {
   if (navigator.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(code);
@@ -116,9 +117,10 @@ const markdownComponents: Components = {
     if (isBlockCode(className, children)) return <CodeBlock className={className} code={String(children).replace(/\n$/, '')}/>;
     return <code className="rounded-sm bg-code-inline-bg px-[.32rem] py-[.12rem] font-mono text-[.86em] text-code-inline-text ring-1 ring-inset ring-code-inline-border">{children}</code>;
   },
-  pre({ children }) { return <>{children}</>; }
+  pre({ children }) { return <>{children}</>; },
+  table({ children }) { return <div className="markdown-table-scroll" role="region" aria-label="表格，可横向滚动" tabIndex={0}><table>{children}</table></div>; }
 };
 
 export const MarkdownContent = memo(function MarkdownContent({ children }: { children: string }) {
-  return <ReactMarkdown components={markdownComponents}>{children}</ReactMarkdown>;
+  return <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{children}</ReactMarkdown>;
 });

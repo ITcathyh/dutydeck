@@ -1,3 +1,4 @@
+import type { AutomationSchedulePage, AutomationRunDetail } from '@dutydeck/shared';
 import type { PluginBinding, SavePluginBinding, PluginConfigSchema, PluginBindingScope } from '@dutydeck/shared';
 import type { AgentWeight, LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
 import type {
@@ -323,7 +324,7 @@ export const withShareToken = (url: string) => shareToken ? `${url}${url.include
 export class ApiError extends Error {
   constructor(message: string, public readonly code: string, public readonly status: number, public readonly current?: unknown) { super(message); this.name = 'ApiError'; }
 }
-const json = async <T,>(url: string, init?: RequestInit): Promise<T> => { const response = await fetch(withShareToken(instanceApiUrl(url)), { credentials: 'same-origin', ...init }); const data = await response.json(); if (!response.ok) { if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT)); throw new ApiError(data.error?.message ?? response.statusText, data.error?.code ?? 'REQUEST_FAILED', response.status, data.current); } return data; };
+const json = async <T,>(url: string, init?: RequestInit, instance?: string | null): Promise<T> => { const targetUrl = instance === undefined ? instanceApiUrl(url) : instance === null ? url : `/api/instances/${encodeURIComponent(instance)}${url.slice(4)}`; const response = await fetch(withShareToken(targetUrl), { credentials: 'same-origin', ...init }); const data = await response.json(); if (!response.ok) { if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT)); throw new ApiError(data.error?.message ?? response.statusText, data.error?.code ?? 'REQUEST_FAILED', response.status, data.current); } return data; };
 const botAgentPath = (id: string, appId?: string) => appId
   ? `/api/lark/bots/${encodeURIComponent(appId)}/agents/${encodeURIComponent(id)}`
   : `/api/agents/${encodeURIComponent(id)}`;
@@ -356,6 +357,13 @@ export const api = {
   answerWorkStep: (sessionId: string, id: string, stepId: string, answer: string, expectedRevision: number) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ stepId, answer, expectedRevision }) }),
   saveWorkTemplate: (sessionId: string, id: string, name: string) => json<WorkTemplate>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/template`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }),
   runWorkTemplate: (sessionId: string, id: string, input: { version: number; goal: string; idempotencyKey: string }) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-templates/${encodeURIComponent(id)}/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  automationSchedules: async (params: URLSearchParams, instance?: string | null) => {
+    const page = await json<AutomationSchedulePage>(`/api/automation/schedules?${params}`, undefined, instance);
+    if (!Array.isArray(page.items) || !page.counts || typeof page.total !== 'number') throw new ApiError('此实例不支持当前计划总览，请升级后重试', 'AUTOMATION_OVERVIEW_UNSUPPORTED', 404);
+    return page;
+  },
+  automationHistory: (sessionId: string, scheduleId: string, offset = 0, limit = 20) => json<{ occurrences: PublicSessionScheduleOccurrence[]; total: number; offset: number; limit: number }>(`/api/sessions/${encodeURIComponent(sessionId)}/automation/schedules/${encodeURIComponent(scheduleId)}/history?offset=${offset}&limit=${limit}`),
+  automationRun: (sessionId: string, scheduleId: string, occurrenceId: string) => json<AutomationRunDetail>(`/api/sessions/${encodeURIComponent(sessionId)}/automation/schedules/${encodeURIComponent(scheduleId)}/runs/${encodeURIComponent(occurrenceId)}`),
   automation: (id: string) => json<SessionAutomationList>(`/api/sessions/${id}/automation`),
   createSchedule: (id: string, input: CreateSessionScheduleInput) => json<{ schedule: SessionSchedule }>(`/api/sessions/${id}/automation/schedules`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   updateSchedule: (id: string, scheduleId: string, input: UpdateSessionScheduleInput) => json<{ schedule: SessionSchedule }>(`/api/sessions/${id}/automation/schedules/${scheduleId}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),

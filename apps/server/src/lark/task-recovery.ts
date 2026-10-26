@@ -12,6 +12,9 @@ import type { LarkRuntime } from './listener.js';
 const explanations: Record<string, string> = {
   DRIVER_RESOURCE_UNSAFE: '上一轮的 Agent 还没确认停下',
   DRIVER_STOP_BLOCKED: '上次停止 Agent 没有成功',
+  WORKSPACE_EXECUTION_BUSY: '同一工作目录有正在执行或待核对的任务',
+  WORKSPACE_PHYSICAL_RESOURCE_UNSAFE: '同一工作目录的执行资源尚未确认安全结束',
+  WORKSPACE_RESOURCE_UNVERIFIABLE: '工作目录的真实身份无法核实',
   WORKSPACE_RECOVERY_REQUIRED: '工作目录需要先检查',
   VERIFICATION_RESOURCE_UNKNOWN: '验证命令还没确认停下',
   LEGACY_MULTIPLE_EXECUTIONS: '旧版本留下的执行记录需要核对',
@@ -97,7 +100,9 @@ export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: 
   const stall = status === 'queued' && !blocked && recovery?.activeTaskId ? await runtime.getTurnStall?.(sessionId).catch(() => undefined) : undefined;
   const stalled = stall !== undefined && stall.taskId === recovery?.activeTaskId;
   const label = needsReview ? '需要核对' : blocked ? '排队受阻' : stalled ? '可能卡住' : resolvedUnknown ? '已核对，结果未确认' : '排队中';
-  const relaunch = options.relaunch === true && (blocked || stalled) && ['queued', 'reconcile_required', 'legacy_unresolved'].includes(status);
+  const workspaceBlocked = blockers.some(block => block.code.startsWith('WORKSPACE_'));
+  const workspaceOnly = status === 'queued' && blockers.length > 0 && blockers.every(block => block.external === true);
+  const relaunch = !workspaceOnly && options.relaunch === true && (blocked || stalled) && ['queued', 'reconcile_required', 'legacy_unresolved'].includes(status);
   // 排在结果未知那一轮后面：可以把那一轮按没做完处理，这条接着在原对话里执行。
   const continueInPlace = options.continueInPlace === true && status === 'queued' && blockers.some(block => block.code === 'PREVIOUS_RESULT_UNKNOWN');
   const continueHint = continueInPlace ? `也可以点「${larkReplayLabels.continue_in_place}」：上一轮按没做完处理，这条消息接着在原对话里执行。` : '';
@@ -106,8 +111,9 @@ export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: 
     : `可以点「${larkRelaunchLabels.rerun_in_new_session}」在新会话里重新执行原请求。原执行结果未确认，重新执行可能把已经做过的操作再做一次。`;
   // 升级排空期间新消息照常入队、暂不开始：写明会自动执行，免得成员以为卡住了反复重发。
   const held = status === 'queued' && runtime.isQueueHeld?.() === true;
+  const workspaceHint = workspaceBlocked ? '换新会话也不能绕过这个等待。先等待占用任务结束；若其结果未知或停止未确认，请从原任务卡的详情或由管理员使用 `dutydeck recovery` 核对，确认后此请求会继续排队执行。' : '';
   const detail = blocked
-    ? `${reasons.join('；') || '这一轮还不确定是否做完'}，为避免重复执行，不会自动开始。${relaunchHint}${continueHint}${larkRecoveryRetainedNote(options.webBaseUrl)}`
+    ? `${reasons.join('；') || '这一轮还不确定是否做完'}，为避免重复执行，不会自动开始。${workspaceHint}${relaunchHint}${continueHint}${larkRecoveryRetainedNote(options.webBaseUrl)}`
     : stalled ? `前面正在执行的那一轮长时间没有新的输出${stall.cpu === 'inactive' ? '，进程也没有在占用 CPU' : ''}，可能卡住了；Dutydeck 不会自动中断它。${relaunchHint}也可以在正在执行的那张卡上点「中断」。`
     : resolvedUnknown ? '这一轮已按不确定是否做完处理，不会自动重做；可以直接发新消息继续。'
     : held ? '服务正在升级，完成后会自动执行，无需重发。'

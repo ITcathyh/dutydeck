@@ -16,7 +16,7 @@ async function harness(agent: Partial<AgentConfig> = {}) {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (config, _protocol, emit) => {
       let mode = config.permissionMode;
-      const driver: AgentDriver = { start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {}, setPermissionMode: next => { mode = next; },
+      const driver: AgentDriver = { isIdle: () => true, hasBackgroundWork: () => false, start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {}, setPermissionMode: next => { mode = next; },
         send: async prompt => { turns.push({ prompt, mode }); emit({ type: 'text', data: { text: mode === 'deny-all' ? '计划：1. 改文案' : '已执行' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); } };
       return driver;
     }

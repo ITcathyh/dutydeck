@@ -161,3 +161,10 @@ it('retains both DOM and DOW step filters after their first intersection', () =>
   expect(previewNextSchedule(base({ kind: 'cron', expression: '0 9 */2 * */2' }, { timezone: 'UTC' }), new Date('2026-10-17T09:00:00Z'))?.scheduledForUtc).toBe('2026-10-25T09:00:00.000Z');
   expect(previewNextSchedule(base({ kind: 'cron', expression: '0 9 */2 * 1-5' }, { timezone: 'UTC' }), new Date('2026-10-19T09:00:00Z'))?.scheduledForUtc).toBe('2026-10-21T09:00:00.000Z');
 });
+
+it.each(['0/5/2 * * * *', '1-2-3 * * * *', '0,,5 * * * *', ',1 * * * *', '1, * * * *', '1e1 * * * *', '+1 * * * *', '1/ * * * *', '*/0 * * * *', '1.5 * * * *'])('rejects complete malformed cron syntax %s', expression => {
+  expect(scheduleTriggerSchema.safeParse({ kind: 'cron', expression }).success).toBe(false);
+});
+it.each(['*/5 * * * *', '1-20/3 * * * *', '0,5,10 * * * *', '0 9 * * 1-5'])('preserves valid cron syntax %s', expression => {
+  expect(scheduleTriggerSchema.safeParse({ kind: 'cron', expression }).success).toBe(true);
+});

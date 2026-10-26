@@ -237,7 +237,8 @@ describe('persistent task recovery across a reopened database', () => {
     const factory: DriverFactory = (...args) => (args[1] === 'acp' ? acp : pty).factory(...args);
     const h = open(database(), factory, { probe: candidate => ({ available: true, protocol: candidate.protocol ?? 'acp', pause: false, resume: true }) });
     await h.runtime.initialize([agent, { ...agent, id: 'acp', protocol: 'acp' }]);
-    const terminal = await h.runtime.start({ agentId: agent.id }), other = await h.runtime.start({ agentId: 'acp' });
+    const independentCwd = mkdtempSync(join(tmpdir(), 'restart-independent-'));directories.push(independentCwd);
+    const terminal = await h.runtime.start({ agentId: agent.id }), other = await h.runtime.start({ agentId: 'acp', cwd: independentCwd });
     await h.runtime.dispatch(terminal.id, 'terminal input');
     await h.runtime.dispatch(other.id, 'ACP input');
     await vi.waitFor(() => expect(acp.prompts).toHaveLength(1));

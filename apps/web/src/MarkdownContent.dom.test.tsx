@@ -2,6 +2,7 @@
 import { act, StrictMode } from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import redactedAutomationReport from './fixtures/automation-report.redacted.md?raw';
 import { CodeBlock, MarkdownContent } from './MarkdownContent';
 
 // vitest 未开 globals，React 的 act 需要这个全局标志，否则每次 await act 都会告警。
@@ -264,5 +265,41 @@ describe('CodeBlock 复制按钮', () => {
 
     expect(writeText).toHaveBeenCalledWith('const a = 1');
     expect(screen.getByRole('button', { name: '代码已复制' })).toBeTruthy();
+  });
+});
+
+describe('GFM reports', () => {
+  it('renders semantic headers and local table scrolling alongside code, lists and safe links', () => {
+    const report = '| 阶段 | 解释 |\n| --- | --- |\n| 到期至任务开始 | 同会话排队和启动 |\n\n- 检查结果\n\n[证据](https://example.com/report)\n\n`inline`\n\n```text\n长代码保留\n```';
+    const { container } = render(<div className="markdown"><MarkdownContent>{report}</MarkdownContent></div>);
+    const table = screen.getByRole('table');
+    expect(table.querySelectorAll('thead th')).toHaveLength(2);
+    expect(table.querySelector('tbody td')?.textContent).toBe('到期至任务开始');
+    expect(table.parentElement?.className).toBe('markdown-table-scroll');
+    expect(screen.getByRole('region', { name: '表格，可横向滚动' }).getAttribute('tabindex')).toBe('0');
+    expect(container.querySelector('ul li')?.textContent).toBe('检查结果');
+    expect(screen.getByRole('link', { name: '证据' }).getAttribute('href')).toBe('https://example.com/report');
+    expect(screen.getByRole('button', { name: '复制代码' })).toBeTruthy();
+  });
+
+  it('keeps raw HTML disabled and dangerous links inert with GFM enabled', () => {
+    const { container } = render(<MarkdownContent>{'| 列 |\n| --- |\n| <img src=x onerror=alert(1)> |\n\n<script>alert(1)</script>\n\n[危险](javascript:alert(1))'}</MarkdownContent>);
+    expect(container.querySelector('script')).toBeNull();
+    expect(container.querySelector('img')).toBeNull();
+    expect(screen.getByText('危险').getAttribute('href')).not.toMatch(/^javascript:/);
+  });
+});
+
+// 来自 2026-10-26 只读采样中真实计划最终输出的结构；全部项目名、路径、版本、正文已替换。
+// 这里只验证该脱敏结构的渲染，不声称是线上原文端到端验收。
+describe('redacted real automation report structure', () => {
+  it('keeps its two-column, five-row table and inline code semantic', () => {
+    const { container } = render(<div className="markdown"><MarkdownContent>{redactedAutomationReport}</MarkdownContent></div>);
+    const table = screen.getByRole('table');
+    expect(table.querySelectorAll('thead th')).toHaveLength(2);
+    expect(table.querySelectorAll('tbody tr')).toHaveLength(5);
+    expect(table.querySelectorAll('tbody td')).toHaveLength(10);
+    expect(table.querySelectorAll('code')).toHaveLength(6);
+    expect(container.textContent).toContain('/workspace/example-project');
   });
 });

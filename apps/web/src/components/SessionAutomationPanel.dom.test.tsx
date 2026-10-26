@@ -12,12 +12,17 @@ const schedule: PublicSessionSchedule = { schemaVersion: 1, id: 'plan1', revisio
 const clients: QueryClient[] = [];
 afterEach(() => { setInstance(undefined); cleanup(); clients.forEach(client => client.clear()); clients.length = 0; vi.restoreAllMocks(); });
 const testCi: PublicCiProvider = { id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false };
-function mount(schedules: PublicSessionSchedule[] = [], providers: PublicCiProvider[] = [testCi], subscriptions: PublicCiSubscription[] = []) {
+function mount(schedules: PublicSessionSchedule[] = [], providers: PublicCiProvider[] = [testCi], subscriptions: PublicCiSubscription[] = [], currentSession = session) {
   const read = vi.spyOn(api, 'automation').mockResolvedValue({ schedules, subscriptions, occurrences: [], deliveryTargets: Object.fromEntries(schedules.map(item => [item.id, { kind: 'task' as const, sessionId: session.id }])) });
+  vi.spyOn(api, 'automationHistory').mockImplementation(async (_sessionId, scheduleId, offset = 0, limit = 20) => {
+    const data = await read.mock.results.at(-1)?.value;
+    const occurrences = (data?.occurrences ?? []).filter((item: PublicSessionScheduleOccurrence) => item.scheduleId === scheduleId).slice().reverse();
+    return { occurrences: occurrences.slice(offset, offset + limit), total: occurrences.length, offset, limit };
+  });
   vi.spyOn(api, 'ciProviders').mockResolvedValue({ providers });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   clients.push(client);
-  render(<QueryClientProvider client={client}><SessionAutomationPanel session={session}/></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><SessionAutomationPanel session={currentSession}/></QueryClientProvider>);
   return read;
 }
 async function fill(kind: string) {
@@ -45,9 +50,9 @@ describe('session automation schedules', () => {
     await screen.findByText('已提交立即执行，可在最近触发记录中查看结果；原计划时间保持不变。');
     expect(run.mock.calls[0]![2]).toEqual(run.mock.calls[1]![2]);
     expect(run.mock.calls[0]![2]).toEqual({ expectedRevision: 3, idempotencyKey: expect.any(String) });
-    await user.click(screen.getByText('最近触发记录'));
-    expect(screen.getByText(/已完成 · 条件满足/)).toBeTruthy();
-    expect(screen.getByRole('link', { name: '查看执行任务 · t1' }).getAttribute('href')).toBe('/sessions/s1');
+    await user.click(screen.getByText('此计划的运行历史'));
+    await screen.findByRole('link', { name: /查看本次运行/ });
+    expect(screen.getByRole('link', { name: /查看本次运行/ }).getAttribute('href')).toBe('/?nav=automation&automationSession=s1&schedule=plan1&run=o1');
     await user.click(screen.getByRole('button', { name: '立即执行' }));
     await waitFor(() => expect(run).toHaveBeenCalledTimes(3));
     expect(run.mock.calls[2]![2].idempotencyKey).not.toBe(run.mock.calls[1]![2].idempotencyKey);
@@ -76,14 +81,18 @@ describe('session automation schedules', () => {
     await screen.findByText('巡检 · 已停用');
     const occurrences = Array.from({ length: 25 }, (_, index): PublicSessionScheduleOccurrence => ({ schemaVersion: 2, id: `o${index}`, revision: 1, scheduleId: schedule.id, sessionId: session.id, generation: 1, scheduledForUtc: session.createdAt, conditionStatus: 'passed', runStatus: 'completed', taskId: `t${index}`, delivery: { status: 'not_requested', attempts: 0, updatedAt: session.createdAt }, createdAt: session.createdAt, updatedAt: session.updatedAt }));
     read.mockResolvedValue({ schedules: [schedule], subscriptions: [], occurrences });
-    await clients[0]!.invalidateQueries({ queryKey: ['automation', session.id] });
-    await userEvent.click(await screen.findByText('最近触发记录'));
-    const links = screen.getAllByRole('link', { name: /查看执行任务/ });
+    await clients[0]!.invalidateQueries({ queryKey: ['automation', 'bot-1', session.id] });
+    await userEvent.click(await screen.findByText('此计划的运行历史'));
+    await screen.findAllByRole('link', { name: /查看本次运行/ });
+    const links = screen.getAllByRole('link', { name: /查看本次运行/ });
     expect(links).toHaveLength(20);
-    expect(links[0]!.textContent).toBe('查看执行任务 · t24');
-    expect(links[19]!.textContent).toBe('查看执行任务 · t5');
-    expect(links[0]!.getAttribute('href')).toBe('/instances/bot-1/sessions/s1');
-    expect(screen.queryByRole('link', { name: '查看执行任务 · t0' })).toBeNull();
+    expect(links[0]!.getAttribute('href')).toContain('run=o24');
+    expect(links[19]!.getAttribute('href')).toContain('run=o5');
+    expect(links[0]!.getAttribute('href')).toBe('/instances/bot-1/?nav=automation&automationSession=s1&schedule=plan1&run=o24');
+    expect(links.some(link => link.getAttribute('href')?.endsWith('run=o0'))).toBe(false);
+    await userEvent.click(screen.getByRole('button', { name: '较早记录' }));
+    await waitFor(() => expect(screen.getAllByRole('link', { name: /查看本次运行/ })).toHaveLength(5));
+    expect(screen.getAllByRole('link', { name: /查看本次运行/ })[4]!.getAttribute('href')).toContain('run=o0');
   });
 
   it('confirms deletion, retains execution history, and reports delete failures for retry', async () => {
@@ -106,10 +115,11 @@ describe('session automation schedules', () => {
     await screen.findByText('计划已删除，触发记录已保留；正在运行的任务会继续。');
     expect(remove).toHaveBeenLastCalledWith('s1', 'plan1', 4);
     expect(screen.queryByRole('button', { name: '立即执行' })).toBeNull();
-    await user.click(screen.getByText('最近触发记录'));
-    expect(screen.getByText(/历史计划 plan1.*执行失败/)).toBeTruthy();
+    await user.click(screen.getByText('历史计划 plan1 的运行记录（UTC）'));
+    await screen.findByRole('link', { name: /查看本次运行/ });
+    expect(screen.getByText(/执行失败/)).toBeTruthy();
     expect(screen.getByText('执行退出')).toBeTruthy();
-    expect(screen.getByRole('link', { name: '查看执行任务 · t1' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: /查看本次运行/ })).toBeTruthy();
   });
 
   it.each([['daily', '35 8 * * *'], ['weekly', '35 8 * * 5']])('creates %s using the selected timezone and existing Cron contract', async (kind, expression) => {
@@ -142,7 +152,7 @@ describe('session automation schedules', () => {
     if (old.trigger.kind === 'cron') expect((screen.getByLabelText('Cron 表达式') as HTMLInputElement).value).toBe(old.trigger.expression);
     await user.type(screen.getByLabelText('计划名称'), '修改');
     await user.click(screen.getByRole('button', { name: '保存计划' }));
-    await waitFor(() => expect(update).toHaveBeenCalledWith('s1', 'plan1', expect.objectContaining({ expectedRevision: 3, trigger: old.trigger, timezone: old.timezone, dstPolicy: old.dstPolicy })));
+    await waitFor(() => expect(update).toHaveBeenCalledWith('s1', 'plan1', { expectedRevision: 3, name: '巡检修改' }));
   });
 
   it('rereads enable and disable state and formats next execution in the plan timezone', async () => {
@@ -157,7 +167,7 @@ describe('session automation schedules', () => {
     expect(screen.getByRole('alertdialog', { name: '确认启用计划' })).toBeTruthy();
     await user.click(screen.getByRole('button', { name: '确认启用' }));
     await screen.findByText('巡检 · 已启用');
-    expect(await screen.findByText('下一次执行：2026/9/13 09:00:00 · America/New_York')).toBeTruthy();
+    expect(await screen.findByText('原定执行（已逾期，等待处理）：2026/9/13 09:00:00 · America/New_York')).toBeTruthy();
     await waitFor(() => expect((screen.getByRole('button', { name: '停用' }) as HTMLButtonElement).disabled).toBe(false));
     read.mockResolvedValue({ schedules: [{ ...schedule, revision: 5 }], subscriptions: [], occurrences: [] });
     await user.click(screen.getByRole('button', { name: '停用' }));
@@ -169,7 +179,7 @@ describe('session automation schedules', () => {
     const read = mount([schedule]);
     await screen.findByText('巡检 · 已停用');
     read.mockRejectedValue(new ApiError('无权限', 'FORBIDDEN', 403));
-    await clients[0]!.invalidateQueries({ queryKey: ['automation', session.id] });
+    await clients[0]!.invalidateQueries({ queryKey: ['automation', null, session.id] });
     expect(await screen.findByRole('alert')).toBeTruthy();
     expect(screen.queryByText('巡检 · 已停用')).toBeNull();
     expect(screen.queryByText('为此任务创建计划')).toBeNull();
@@ -247,7 +257,7 @@ describe('automation enable confirmation', () => {
     const update = vi.spyOn(api, 'updateSchedule').mockResolvedValue({ schedule });
     await screen.findByText('巡检 · 已停用');
     read.mockResolvedValue({ schedules: [schedule], subscriptions: [], occurrences: [], deliveryTargets: { plan1: { kind: 'lark', appId: 'cli_saved', chatId: 'oc_saved', replyMessageId: 'om_saved_topic', replyInThread: true } } });
-    await clients[0]!.invalidateQueries({ queryKey: ['automation', session.id] });
+    await clients[0]!.invalidateQueries({ queryKey: ['automation', null, session.id] });
     await userEvent.click(screen.getByRole('button', { name: '启用' }));
     const dialog = screen.getByRole('alertdialog', { name: '确认启用计划' });
     expect(dialog.textContent).toContain('检查构建');
@@ -269,7 +279,7 @@ describe('automation enable confirmation', () => {
     const update = vi.spyOn(api, 'updateSchedule');
     await screen.findByText('巡检 · 已停用');
     read.mockResolvedValue({ schedules: [schedule], subscriptions: [], occurrences: [] });
-    await clients[0]!.invalidateQueries({ queryKey: ['automation', session.id] });
+    await clients[0]!.invalidateQueries({ queryKey: ['automation', null, session.id] });
     await userEvent.click(screen.getByRole('button', { name: '启用' }));
     expect((screen.getByRole('button', { name: '确认启用' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByRole('alertdialog').textContent).toContain('未能核实保存的投递位置');
@@ -279,5 +289,49 @@ describe('automation enable confirmation', () => {
   it('translates ordinary calendar rules while preserving advanced Cron expressions', () => {
     expect(scheduleRule({ ...schedule, trigger: { kind: 'cron', expression: '30 18 * * 1-5' } })).toBe('每个工作日 18:30 · America/New_York');
     expect(scheduleRule(schedule)).toContain('Cron */17 3-9 * 2,7 1-5');
+  });
+});
+
+describe('schedule management and execution policy', () => {
+  it.each(['stopped', 'failed', 'archived'])('retains safe disable and delete controls for %s source tasks', async state => {
+    const inactive = { ...session, state: state === 'archived' ? 'completed' : state, ...(state === 'archived' ? { archivedAt: session.updatedAt } : {}) };
+    mount([{ ...schedule, enabled: true, disabledReason: '来源任务已结束', disableNotification: { status: 'unknown', attempts: 1, updatedAt: session.updatedAt } }], [testCi], [], inactive);
+    const update = vi.spyOn(api, 'updateSchedule').mockResolvedValue({ schedule });
+    await screen.findByText('巡检 · 已启用');
+    expect(screen.queryByRole('button', { name: '立即执行' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '编辑' })).toBeNull();
+    expect(screen.getByRole('button', { name: '删除' })).toBeTruthy();
+    expect(screen.getByText(/发送结果未知，等待核对/)).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: '停用' }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith('s1', 'plan1', { expectedRevision: 3, enabled: false }));
+  });
+
+  it('sends explicit independent mode and bounded coalescing without enabling on save', async () => {
+    mount();
+    const create = vi.spyOn(api, 'createSchedule').mockResolvedValue({ schedule });
+    const user = await fill('daily');
+    await user.selectOptions(screen.getByLabelText('运行模式'), 'independent');
+    await user.type(screen.getByLabelText('补跑有效期（分钟，可选）'), '30');
+    expect(screen.getByText(/资源协调仅覆盖当前实例数据库/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '保存计划' }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith('s1', expect.objectContaining({ mode: 'independent', misfirePolicy: 'coalesce', maxLatenessSeconds: 1800 })));
+    expect(create.mock.calls[0]![1]).not.toHaveProperty('enabled');
+  });
+
+  it('keeps independent schedules manageable and executable after the source task stops', async () => {
+    mount([{ ...schedule, mode: 'independent', executionContext: { cwd: '/managed/plan', agentId: 'frozen-agent', contextMode: 'prompt_only' } }], [testCi], [], { ...session, state: 'stopped' });
+    await userEvent.click(await screen.findByRole('button', { name: '编辑' }));
+    expect((screen.getByLabelText('运行模式') as HTMLSelectElement).disabled).toBe(true);
+    expect(screen.getByText(/目录 \/managed\/plan/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: '立即执行' })).toBeTruthy();
+  });
+
+  it('sends only the changed execution field and preserves the default policy on existing plans', async () => {
+    mount([schedule]);
+    const update = vi.spyOn(api, 'updateSchedule').mockResolvedValue({ schedule });
+    await userEvent.click(await screen.findByRole('button', { name: '编辑' }));
+    await userEvent.type(screen.getByLabelText('执行指令'), '新的要求');
+    await userEvent.click(screen.getByRole('button', { name: '保存计划' }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith('s1', 'plan1', { expectedRevision: 3, prompt: '检查构建新的要求' }));
   });
 });

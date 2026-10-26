@@ -275,7 +275,11 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     if (await this.workflowOptions.store!.get(relaunchRetainedKey(appId, sessionId))) return true;
     const tasks = await this.runtime.getTasks!(sessionId);
     for (const task of [tasks[0], ...tasks.filter(item => ['reconcile_required', 'legacy_unresolved'].includes(item.status))]) {
-      if (task && (await describeLarkTaskRecovery(this.runtime, sessionId, task.id, task.status)).blocked) return true;
+      if (!task) continue;
+      const recovery = await this.runtime.getTaskRecovery?.(sessionId, task.id);
+      // A new session waiting for another session's workspace can be reused; another replacement would wait too.
+      if (!['reconcile_required', 'legacy_unresolved'].includes(task.status) && recovery?.blockers.length && recovery.blockers.every(block => block.external === true)) continue;
+      if ((await describeLarkTaskRecovery(this.runtime, sessionId, task.id, task.status)).blocked) return true;
     }
     return false;
   }
@@ -307,7 +311,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         if (claim.phase === 'claimed') return { type: 'warning', content: '正在转到新会话，请勿重复点击' };
         // 旧卡上次没能更新时，由这次点击收尾。
         void this.markRelaunchedCard(config, claim).catch(error => this.log.warn({ error, taskId }, '旧任务卡未能更新为已转到新会话'));
-        return { type: 'success', content: '已在新会话中执行，进度见话题里的新任务卡' };
+        return { type: 'success', content: '已转到新会话队列，进度见话题里的新任务卡' };
       }
       // 与渲染端同一个判定：卡上画不出按钮的任务，这里也不受理。
       const source = await this.relaunchSource(appId, taskId, turn);
@@ -490,9 +494,9 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   private async markRelaunchedCard(config: StoredLarkConfig, claim: LarkRelaunchClaim) {
     if (!claim.cardMessageId) return;
     const rerun = claim.action === 'rerun_in_new_session';
-    const label = claim.phase === 'abandoned' ? '已放弃' : claim.redispatch ? '结果未知' : rerun ? '已在新会话中重新执行' : '已在新会话中执行';
+    const label = claim.phase === 'abandoned' ? '已放弃' : claim.redispatch ? '结果未知' : '已转到新会话队列';
     const detail = rerun
-      ? '原任务的执行结果仍未确认；原请求已在本话题的新会话中重新执行'
+      ? '原任务的执行结果仍未确认；原请求已转到本话题的新会话队列'
       : '这条请求没有在原会话执行：排队任务已取消，原文已在本话题的新会话中提交';
     const webBaseUrl = config.webBaseUrl?.trim().replace(/\/$/, '');
     await this.service.update({
@@ -506,7 +510,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
       markdown: claim.phase === 'abandoned' ? `**${label}**\n\n这一轮不再执行，执行结果仍未知。\n\n${larkRecoveryRetainedNote(config.webBaseUrl)}`
         : claim.redispatch ? larkRedispatchedCardMarkdown(claim.redispatch, larkRecoveryRetainedNote(config.webBaseUrl))
-        : `**${label}**\n\n${detail}，进度见新的任务卡；之后本话题的消息也进入新会话。\n\n${larkRecoveryRetainedNote(config.webBaseUrl)}`
+        : `**${label}**\n\n${detail}，进度见新的任务卡；同一工作目录有未确认结束的执行时，须先在原任务详情核对，换新会话不会绕过等待。之后本话题的消息也进入新会话。\n\n${larkRecoveryRetainedNote(config.webBaseUrl)}`
     });
   }
 
@@ -632,15 +636,18 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     return true;
   }
 
-  /** 在原会话续做先把旧一轮记为结果未知（记不上就改开新会话），然后交给转交流程从入站记录重投。 */
+  /** 先持久核对旧一轮；核对失败保留可操作的原任务，不能改开新会话绕过。 */
   private async continueRedispatch(config: StoredLarkConfig, key: string, claim: LarkRelaunchClaim, saved: PersistedLarkCardTask, inbox: LarkInboxRecord) {
     let current = claim;
     if (claim.redispatch!.resumed) {
       try { await this.settleInterruptedAttempt(claim.sessionId, claim.runtimeTaskId, `lark_redispatch:${claim.taskId}:${claim.turn}`, 'lark_restart_redispatch'); }
       catch (error) {
-        this.log.warn({ error, taskId: claim.taskId }, '旧一轮未能记为结果未知，改在新会话中重投');
-        current = { ...claim, redispatch: { ...claim.redispatch!, resumed: false } };
-        if (!await this.workflowOptions.store!.compareAndSet!(key, JSON.stringify(claim), JSON.stringify(current))) return;
+        this.log.warn({ error, taskId: claim.taskId }, '旧一轮未能核对，保留原任务等待人工恢复');
+        current = { ...claim, phase: 'held', redispatch: { ...claim.redispatch!, count: Math.max(0, claim.redispatch!.count - 1) } };
+        if (await this.workflowOptions.store!.compareAndSet!(key, JSON.stringify(claim), JSON.stringify(current))) {
+          await this.publishRedispatchNote(claim.sessionId, '**Dutydeck 恢复待核对**：旧任务尚未完成核对，没有重新执行。请在原任务卡选择继续、重新执行或放弃；资源未确认安全时须先由管理员核对。');
+        }
+        return;
       }
     }
     const chatType = saved.chat_type ?? 'group';

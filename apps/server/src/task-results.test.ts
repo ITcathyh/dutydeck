@@ -29,7 +29,7 @@ function open() {
   repos.execution.upgradeLegacy();
   const claim = repos.control.attachRuntime('results-test');
   const x: BoundExecutionRepository = repos.execution.bind(claim);
-  x.createSession({ id: fence.sessionId, runId: fence.runId, agentId: 'agent', cwd: '/source', state: 'created', source: 'work_item', createdAt: at, updatedAt: at });
+  x.createSession({ id: fence.sessionId, runId: fence.runId, agentId: 'agent', cwd: dir, state: 'created', source: 'work_item', createdAt: at, updatedAt: at });
   opened.push({ repos, claim, path });
   return { repos, x, path };
 }
@@ -93,7 +93,7 @@ describe('readAttemptResult against the real execution ledger', () => {
     } else expect(thrown(() => readWorkAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId))).toMatchObject({ code: 'TASK_RESULT_RETRY_CONFLICT' });
   });
 
-  it('keeps an unknown automatic successor blocked after a later human retry completes', () => {
+  it('follows an audited manual retry after an unknown automatic successor without changing its unknown fact', () => {
     const { repos, x, path } = open();
     const first = claimed(repos, x);
     capacityRetry(repos, x, path, first);
@@ -103,8 +103,9 @@ describe('readAttemptResult against the real execution ledger', () => {
     const third = x.claimNext(fence)!.attempt!;
     textEvents(x, third, ['unrelated replacement']);
     settleDriver(repos, x, third.taskId, utf8Digest('unrelated replacement'));
-    expect(readWorkAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toEqual({ status: 'blocked', reason: 'reconcile_required' });
-    expect(readTaskAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toEqual({ status: 'blocked', reason: 'reconcile_required' });
+    expect(readWorkAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toMatchObject({ status: 'settled', result: { attemptId: third.attemptId, output: { text: 'unrelated replacement' } } });
+    expect(readTaskAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toMatchObject({ status: 'settled', result: { attemptId: third.attemptId, output: { text: 'unrelated replacement' } } });
+    expect(repos.execution.getTaskExecution(first.taskId)!.attempts.find(item => item.attemptId === second.attemptId)?.outcome).toBe('unknown');
   });
   it('atomically preserves old events and returns only verified manual output, with audited idempotency', async () => {
     const { repos, x, path } = open();
@@ -304,4 +305,26 @@ describe('readAttemptResult against the real execution ledger', () => {
     } finally { db4.close(); }
     expect(thrown(() => readAttemptResult({ execution: repos.execution }, fence.sessionId, settled.taskId, settled.attemptId))).toMatchObject({ code: 'TASK_RESULT_EVENT_ORDER' });
   });
+});
+
+it.each(['decision', 'input', 'permission', 'attempt', 'run', 'actor'] as const)('rejects corrupted manual successor %s without using currentAttempt', field => {
+  const { repos, x, path } = open();
+  const first = claimed(repos, x);
+  x.settleAttempt(af(first), 'unknown', { kind: 'manual', outcome: 'unknown', decision: { decisionId: 'unknown', actor: ownerActor, action: 'confirm_result', resourceChecks: [], evidenceRefs: ['review'] } });
+  x.retryAttempt(af(current(repos, first.taskId)), { decisionId: 'manual-next', actor: ownerActor, action: 'retry', allowDuplicateEffects: true, resourceChecks: [], evidenceRefs: ['confirmed-risk'] }, []);
+  const next = x.claimNext(fence)!.attempt!;
+  textEvents(x, next, ['verified successor']); settleDriver(repos, x, next.taskId, utf8Digest('verified successor'));
+  const read = () => readTaskAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId);
+  expect(read()).toMatchObject({ status: 'settled', result: { attemptId: next.attemptId } });
+  const sql = new Database(path);
+  try {
+    if (field === 'decision') sql.prepare('DELETE FROM recovery_decisions WHERE id=?').run('manual-next');
+    else if (field === 'input') sql.prepare("UPDATE task_attempts SET json=json_set(json,'$.manualRetry.inputDigest','wrong') WHERE id=?").run(next.attemptId);
+    else if (field === 'permission') sql.prepare("UPDATE recovery_decisions SET json=json_set(json,'$.evidence.allowDuplicateEffects',json('false')) WHERE id=?").run('manual-next');
+    else if (field === 'attempt') sql.prepare("UPDATE recovery_decisions SET json=json_set(json,'$.attemptId','unrelated') WHERE id=?").run('manual-next');
+    else if (field === 'run') sql.prepare("UPDATE recovery_decisions SET json=json_set(json,'$.runId','unrelated') WHERE id=?").run('manual-next');
+    else sql.prepare("UPDATE recovery_decisions SET json=json_set(json,'$.evidence.actor',json(?)) WHERE id=?").run(JSON.stringify({ kind: 'channel', id: 'outsider', appId: 'other' }), 'manual-next');
+  } finally { sql.close(); }
+  expect(thrown(read)).toMatchObject({ code: 'TASK_RESULT_RETRY_CONFLICT' });
+  expect(readAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId)).toEqual({ status: 'blocked', reason: 'reconcile_required' });
 });

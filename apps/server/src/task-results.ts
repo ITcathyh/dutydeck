@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { RuntimeError, attemptResultV1Schema, type AgentEvent, type AttemptResultV1, type ExecutionRepository, type TaskAttempt } from '@dutydeck/shared';
+import { RuntimeError, canonicalExecutionJson, attemptResultV1Schema, type AgentEvent, type AttemptResultV1, type ExecutionRepository, type TaskAttempt } from '@dutydeck/shared';
 
 export const TASK_RESULT_OUTPUT_BYTES = 512 * 1024;
 const EVENT_PAGE_LIMIT = 200;
@@ -23,9 +23,9 @@ export function readAttemptResult(repositories: AttemptResultRepositories, sessi
   return readResult(repositories, sessionId, taskId, attemptId);
 }
 
-export type TaskResultRepositories = AttemptResultRepositories & { execution: Pick<ExecutionRepository, 'getAcceptedTask'> };
+export type TaskResultRepositories = AttemptResultRepositories & { execution: (Pick<ExecutionRepository, 'getAcceptedTask'> & Partial<Pick<ExecutionRepository, 'getRecoveryDecision'>>) };
 
-/** The admission stays pinned to its first attempt; only verified automatic capacity successors supply its result. */
+/** The admission stays pinned to its first attempt; verified automatic capacity or explicitly audited manual successors supply its result. */
 export function readTaskAttemptResult(repositories: TaskResultRepositories, sessionId: string, taskId: string, attemptId: string): AttemptResultRead {
   return readResult(repositories, sessionId, taskId, attemptId, repositories.execution);
 }
@@ -39,7 +39,7 @@ export function resolveTaskResultAttemptId(repositories: TaskResultRepositories,
   return resolveResultAttempt(repositories, sessionId, taskId, attemptId, repositories.execution)?.attemptId;
 }
 
-function resolveResultAttempt(repositories: AttemptResultRepositories, sessionId: string, taskId: string, attemptId: string, retryInput?: Pick<ExecutionRepository, 'getAcceptedTask'>): TaskAttempt | undefined {
+function resolveResultAttempt(repositories: AttemptResultRepositories, sessionId: string, taskId: string, attemptId: string, retryInput?: (Pick<ExecutionRepository, 'getAcceptedTask'> & Partial<Pick<ExecutionRepository, 'getRecoveryDecision'>>)): TaskAttempt | undefined {
   const execution = repositories.execution;
   const projection = execution.getTaskExecution(taskId);
   if (!projection) return undefined;
@@ -49,11 +49,29 @@ function resolveResultAttempt(repositories: AttemptResultRepositories, sessionId
   if (attempt.taskId !== taskId || attempt.sessionId !== sessionId) fail('TASK_RESULT_SCOPE_CONFLICT', 'Attempt identity does not match the fixed task and session');
   if (attempt.number !== 1) fail('TASK_RESULT_ATTEMPT_CONFLICT', 'Only the number=1 attempt is a valid source result');
   while (retryInput) {
-    const successors = projection.attempts.filter(item => item.automaticRetry?.causeAttemptId === attempt!.attemptId);
+    const successors = projection.attempts.filter(item => item.automaticRetry?.causeAttemptId === attempt!.attemptId || item.manualRetry?.causeAttemptId === attempt!.attemptId);
     if (!successors.length) break;
     const next = successors[0]!;
-    const retry = next.automaticRetry!;
     const accepted = retryInput.getAcceptedTask(taskId);
+    if (next.manualRetry) {
+      const retry = next.manualRetry;
+      const audit = retryInput.getRecoveryDecision?.(retry.decisionId);
+      const decision = audit?.decision;
+      if (successors.length !== 1 || next.automaticRetry || next.taskId !== taskId || next.sessionId !== sessionId
+        || next.runId !== attempt.runId || next.number !== attempt.number + 1 || attempt.state !== 'settled'
+        || !['unknown', 'failed', 'interrupted', 'cancelled'].includes(attempt.outcome ?? '')
+        || accepted?.input?.version !== 2 || retry.inputDigest !== accepted.input.digest || !accepted.request
+        || accepted.request.actor.kind === 'unspecified' || audit?.sessionId !== sessionId || audit.runId !== attempt.runId
+        || audit.attemptId !== attempt.attemptId || decision?.decisionId !== retry.decisionId
+        || decision.action !== 'retry' || decision.allowDuplicateEffects !== true || !decision.evidenceRefs.length
+        || decision.actor.kind === 'unspecified'
+        || decision.actor.kind !== 'installation_owner' && canonicalExecutionJson(decision.actor) !== canonicalExecutionJson(accepted.request.actor)) {
+        fail('TASK_RESULT_RETRY_CONFLICT', 'Manual retry does not preserve the audited decision and frozen task input');
+      }
+      attempt = next;
+      continue;
+    }
+    const retry = next.automaticRetry!;
     if (successors.length !== 1 || next.taskId !== taskId || next.sessionId !== sessionId || next.runId !== attempt.runId
       || next.number !== attempt.number + 1 || retry.reason !== 'codex_capacity' || retry.ordinal !== next.number - 1 || retry.ordinal > 2
       || accepted?.input?.version !== 2 || accepted.input.digest !== retry.inputDigest || !accepted.request || accepted.request.actor.kind === 'unspecified'
@@ -66,7 +84,7 @@ function resolveResultAttempt(repositories: AttemptResultRepositories, sessionId
   return attempt;
 }
 
-function readResult(repositories: AttemptResultRepositories, sessionId: string, taskId: string, attemptId: string, retryInput?: Pick<ExecutionRepository, 'getAcceptedTask'>): AttemptResultRead {
+function readResult(repositories: AttemptResultRepositories, sessionId: string, taskId: string, attemptId: string, retryInput?: (Pick<ExecutionRepository, 'getAcceptedTask'> & Partial<Pick<ExecutionRepository, 'getRecoveryDecision'>>)): AttemptResultRead {
   const execution = repositories.execution;
   const attempt = resolveResultAttempt(repositories, sessionId, taskId, attemptId, retryInput);
   if (!attempt) return { status: 'blocked', reason: 'admission_conflict' };

@@ -19,7 +19,7 @@ import type { LarkGroupManager } from './lark/group-management.js';
 import { createLarkCardService, type LarkCardService } from './lark/service.js';
 import type { PersistedLarkCardTask } from './lark/coordinator.js';
 import { renderLarkResultTextElements } from './lark/card-renderer.js';
-import { sendLarkResult } from './lark/result-delivery.js';
+import { sendLarkResult, readConfirmedLarkResult } from './lark/result-delivery.js';
 import { scheduleRequestCard } from './lark/schedule-command.js';
 import { readTaskAttemptResult } from './task-results.js';
 import type { CiNotice } from './ci-webhook.js';
@@ -36,7 +36,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     context?.signal.throwIfAborted();
     const session = await runtime.getSession(sessionId);
     if (!session || !actorId) return false;
-    if (session.source !== 'lark') return session.source !== 'foundation_group_binding' && actorId === installationOwnerTaskActor;
+    if (session.source !== 'lark') return session.source !== 'foundation_group_binding' && session.source !== 'schedule' && actorId === installationOwnerTaskActor;
     const { appId, chatId, chatType } = parseLarkSourceId(session.sourceId);
     if (!appId || !chatId) return false;
     const config = await readLarkConfig(repos.config, appId, { readOnly });
@@ -148,6 +148,8 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     let frozenActor: ExecutionActor;
     let frozenResult: AttemptResultV1;
     let frozenRequestKey: string;
+    let executionSessionId = sessionId;
+    let frozenRequest: import('@dutydeck/shared').TaskRequestV1;
 
     const occRaw = await repos.config.get(`session_automation/occurrence/${occurrenceId}`);
     if (occRaw && occurrenceId !== sourceId) {
@@ -158,11 +160,13 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       if (!record.admission || !record.actor || !record.admission.request || !record.runtimeAttemptId || !record.result) {
         throw new RuntimeError('AUTOMATION_RESULT_NOT_READY', 'Schedule 来源缺少冻结 admission/actor/request/result', 409);
       }
+      executionSessionId = record.executionSessionId ?? sessionId;
       frozenTaskId = record.admission.taskId;
       frozenAttemptId = record.runtimeAttemptId;
       frozenActor = record.actor;
       frozenResult = record.result;
       frozenRequestKey = record.admission.request.key;
+      frozenRequest = record.admission.request;
     } else {
       const ciRaw = await repos.config.get(`session_automation/ci/${sourceId}`);
       if (!ciRaw) throw new RuntimeError('AUTOMATION_RESULT_NOT_READY', '自动任务来源记录不存在', 409);
@@ -178,6 +182,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       frozenActor = record.actor;
       frozenResult = record.result;
       frozenRequestKey = record.admission.request.key;
+      frozenRequest = record.admission.request;
     }
 
     // 请求 key 必须与来源冻结一致：Schedule/CI 各自固定 namespace+key。
@@ -206,9 +211,10 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     if (!accepted || !accepted.request) {
       throw new RuntimeError('AUTOMATION_RESULT_NOT_READY', '真实已接受任务不存在或缺少请求事实', 409);
     }
-    if (accepted.task.sessionId !== sessionId || accepted.task.id !== result.taskId) {
+    if (accepted.task.sessionId !== executionSessionId || accepted.task.id !== result.taskId) {
       throw new RuntimeError('AUTOMATION_RESULT_NOT_READY', '真实任务归属与当前会话不匹配', 409);
     }
+    if (canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(frozenRequest)) throw new RuntimeError('AUTOMATION_RESULT_NOT_READY', '真实接受请求与冻结来源不匹配', 409);
     if (accepted.request.namespace !== expectedNamespace || accepted.request.key !== expectedKey) {
       throw new RuntimeError('AUTOMATION_RESULT_NOT_READY', '真实已接受请求 key 与来源期望不匹配', 409);
     }
@@ -219,7 +225,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     // 3. 从冻结 number=1 admission 验证安全自动后继及其结算、throughSequence/全文/digest
     let read;
     try {
-      read = readTaskAttemptResult({ execution: repos.execution }, sessionId, result.taskId, frozenAttemptId);
+      read = readTaskAttemptResult({ execution: repos.execution }, executionSessionId, result.taskId, frozenAttemptId);
     } catch (cause) {
       throw new RuntimeError('AUTOMATION_RESULT_NOT_READY', `结果验证失败: ${cause instanceof Error ? cause.message : String(cause)}`, 409);
     }
@@ -307,30 +313,35 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       }, options.log, repos.config, beforeSend);
     } finally { context?.signal.removeEventListener('abort', abort); }
   };
-  /** 定时计划失效通知：因会话结束被停用时，向原回报位置发送通知。找不到投递位置时静默跳过。 */
-  const onScheduleDisabled = async (schedule: SessionSchedule, reason: string) => {
+  const disabledNotice = async (schedule: SessionSchedule) => {
     const session = await runtime.getSession(schedule.sessionId);
-    if (!session || session.source !== 'lark') return;
+    if (!session) throw new RuntimeError('AUTOMATION_SESSION_MISSING', '自动任务的会话不存在', 404);
+    if (session.source !== 'lark') return;
     const { appId, chatId } = parseLarkSourceId(session.sourceId);
     const target = JSON.parse(await repos.config.get(`automation.delivery-target.${schedule.id}`) ?? 'null') as { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean } | null;
     const config = appId ? await readLarkConfig(repos.config, appId) : undefined;
-    if (!target || !config || target.appId !== appId || target.chatId !== chatId) return;
-    const content = `定时计划『${schedule.name}』已停用：它绑定的会话已结束。如需继续，请在新会话里重新设置。`;
-    const elements: Array<Record<string, unknown>> = [
-      { tag: 'markdown', element_id: 'schedule_disabled_notice', content }
-    ];
-    await sendLarkResult(client(config), target, {
-      state: 'failed',
-      readOnly: true,
-      retryable: false,
-      taskName: schedule.name,
-      taskId: schedule.id,
-      sessionId: schedule.sessionId,
-      workspace: session.cwd,
-      webBaseUrl: config.webBaseUrl,
-      elements,
-      idempotencyKey: `schedule_disabled_${createHash('sha256').update(`${schedule.id}_${schedule.generation}`).digest('hex').slice(0, 40)}`
-    }, options.log, repos.config);
+    if (!target || !config || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '停用告知缺少冻结回报位置', 409);
+    const name = schedule.disableNotification?.name ?? schedule.name;
+    return { config, target, input: {
+      state: 'failed' as const, readOnly: true, retryable: false, taskName: name,
+      taskId: schedule.id, sessionId: schedule.sessionId, workspace: session.cwd, webBaseUrl: config.webBaseUrl,
+      elements: [{ tag: 'markdown', element_id: 'schedule_disabled_notice', content: `定时计划『${name}』已停用：${schedule.disabledReason ?? 'Session is no longer active'}` }],
+      idempotencyKey: `schedule_disabled_${createHash('sha256').update(`${schedule.id}_${schedule.disabledAt ?? schedule.generation}`).digest('hex').slice(0, 40)}`
+    } };
+  };
+  const onScheduleDisabled = async (schedule: SessionSchedule, _reason: string, beforeSend?: () => Promise<void>) => {
+    const notice = await disabledNotice(schedule);
+    if (!notice) return 'not_requested' as const;
+    const guard = async () => {
+      if (!await authorize(schedule.sessionId, schedule.actorId)) throw new RuntimeError('AUTOMATION_DELIVERY_REVOKED', '停用告知的交付权限已撤销', 403);
+      await beforeSend?.();
+    };
+    await sendLarkResult(client(notice.config), { ...notice.target, allowReplyFallback: false }, notice.input, options.log, repos.config, guard);
+  };
+  const reconcileDisabledNotification = async (schedule: SessionSchedule) => {
+    const notice = await disabledNotice(schedule);
+    if (!notice) return true;
+    return Boolean(await readConfirmedLarkResult(client(notice.config), notice.target, notice.input, options.log, repos.config));
   };
   /** CI webhook 通知：发到订阅时冻结的回报位置，非飞书会话不发；返回卡片消息 ID，按钮回调据此核对来源。 */
   const notify = async (sessionId: string, sourceId: string, notice: CiNotice) => {
@@ -362,5 +373,5 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     }, options.log, repos.config);
     return sent.messageId;
   };
-  return { authorize, previewAuthorize: (sessionId: string, actorId?: string) => authorize(sessionId, actorId, undefined, true), prepareDelivery, prepareTaskDelivery, prepareMessageDelivery, sendScheduleRequest, deliver, notify, onScheduleDisabled };
+  return { authorize, previewAuthorize: (sessionId: string, actorId?: string) => authorize(sessionId, actorId, undefined, true), prepareDelivery, prepareTaskDelivery, prepareMessageDelivery, sendScheduleRequest, deliver, notify, onScheduleDisabled, reconcileDisabledNotification };
 }

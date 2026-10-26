@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { agentConfigSchema, installationOwnerTaskActor, RuntimeError, type AgentDriver } from '@dutydeck/shared';
+import { agentConfigSchema, canonicalExecutionJson, installationOwnerTaskActor, RuntimeError, type AgentDriver } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type RuntimeOptions } from '@dutydeck/runtime';
 import { createAutomationIntegration } from './automation-integration.js';
@@ -1387,4 +1387,89 @@ it.each(['sending', 'unknown'] as const)('does not resubmit a %s child without d
     expect(dispatch).toHaveBeenCalledOnce(); expect(f.calls).toHaveLength(0); expect(f.client.send).not.toHaveBeenCalled();
     expect(await f.repos.collaboration.getAction(scope, child.id)).toEqual(child);
   } finally { await successor.close(); dispatch.mockRestore(); outcome.mockRestore(); }
+});
+
+async function uncertainScheduleDelivery(options: { responseLost?: boolean; thread?: boolean; sending?: boolean } = {}) {
+  const f = await fixture();
+  const { mandate } = await f.collaboration.service.createMandate(scope, 'ou_alice', { id: 'receipt-recovery', goal: 'Notify', mode: 'notify', prompt: 'Frozen notification',
+    ...(options.thread ? { delivery: { mode: 'thread', chatRef: scope.chatId, rootMessageRef: 'om_root', continuation: 'same_thread' } } : {}),
+    trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.collaboration.scheduler.options.now!().toISOString() }, timezone: 'UTC' });
+  const repository = f.collaboration.service.repositories.collaboration, update = repository.updateAction.bind(repository);
+  const outcome = vi.spyOn(repository, 'updateAction').mockImplementation(async (...args) => {
+    if (args[1].startsWith('collaboration_delivery_') && (args[2].status === 'succeeded' || options.sending && args[2].status === 'unknown')) throw new Error('crash before outer delivery settlement');
+    return update(...args);
+  });
+  if (options.responseLost) f.client.send.mockRejectedValueOnce(new Error('provider response lost'));
+  f.advance(600_000);
+  try {
+    if (options.sending) await expect(f.collaboration.scheduler.tick()).rejects.toThrow('crash before outer delivery settlement');
+    else await f.collaboration.scheduler.tick();
+  } finally { outcome.mockRestore(); }
+  const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'schedule_delivery')!;
+  expect(action.status).toBe(options.sending ? 'sending' : 'unknown');
+  const sent = (options.thread ? f.client.reply : f.client.send).mock.calls[0]![0] as { idempotencyKey: string };
+  const key = `lark.delivery.${sent.idempotencyKey}.message`;
+  // A new integration constructs the real reconciliation callback after losing its process state.
+  await f.collaboration.scheduler.close(); f.advance(61_000);
+  const restored = createCollaborationIntegration({ repositories: f.repos, runtime: f.runtime, groups: f.groups, workspaceRoot: '.', client: () => f.client as any });
+  restored.scheduler.options.now = f.collaboration.scheduler.options.now;
+  restored.service.options.now = f.collaboration.service.options.now;
+  cleanups.push(() => restored.close());
+  return { ...f, mandate, action, key, restored };
+}
+
+it.each([false, true])('recovers a durable bound result receipt through a fresh integration without sending twice (thread=%s)', async thread => {
+  const f = await uncertainScheduleDelivery({ thread, sending: true });
+  const saved = JSON.parse((await f.repos.config.get(f.key))!);
+  expect(saved).toMatchObject({ messageId: thread ? 'om_card_reply' : 'om_result', chatId: scope.chatId });
+  expect(JSON.parse(saved.identity)).toMatchObject({ scope, actionId: f.action.id, inputDigest: f.action.inputDigest, scheduleId: f.mandate.scheduleDefinitionId,
+    occurrenceId: (await f.repos.scheduleOccurrences.listByDefinition(f.mandate.scheduleDefinitionId))[0]!.id, delivery: f.action.payload.delivery });
+  await f.restored.scheduler.tick(); await f.restored.scheduler.tick();
+  expect(await f.repos.collaboration.getAction(scope, f.action.id)).toMatchObject({ status: 'succeeded', receipt: saved.messageId });
+  expect((await f.repos.scheduleOccurrences.listByDefinition(f.mandate.scheduleDefinitionId))[0]).toMatchObject({ state: 'settled' });
+  expect(f.client.send).toHaveBeenCalledTimes(thread ? 0 : 1); expect(f.client.reply).toHaveBeenCalledTimes(thread ? 1 : 0);
+  expect(f.client.listMessages).not.toHaveBeenCalled(); expect(f.client.listChatMessages).not.toHaveBeenCalled();
+});
+
+it.each(['missing', 'malformed', 'occurrenceId', 'inputDigest', 'delivery', 'scope', 'actionId', 'scheduleId', 'messageChat'] as const)('keeps a %s delivery receipt unknown without sending again', async mismatch => {
+  const f = await uncertainScheduleDelivery();
+  const saved = JSON.parse((await f.repos.config.get(f.key))!);
+  if (mismatch === 'missing') await f.repos.config.set(f.key, '');
+  else if (mismatch === 'malformed') await f.repos.config.set(f.key, '{');
+  else {
+    const identity = JSON.parse(saved.identity);
+    if (mismatch === 'messageChat') saved.chatId = 'oc_other';
+    else {
+      identity[mismatch] = mismatch === 'delivery' ? { ...identity.delivery, rootMessageRef: 'om_other' }
+        : mismatch === 'scope' ? { ...scope, appId: 'cli_other' } : 'wrong_identity';
+      saved.identity = canonicalExecutionJson(identity);
+    }
+    await f.repos.config.set(f.key, JSON.stringify(saved));
+  }
+  await f.restored.scheduler.tick(); await f.restored.scheduler.tick();
+  expect(await f.repos.collaboration.getAction(scope, f.action.id)).toMatchObject({ status: 'unknown' });
+  expect((await f.repos.scheduleOccurrences.listByDefinition(f.mandate.scheduleDefinitionId))[0]).toMatchObject({ state: 'unknown' });
+  expect(f.client.send).toHaveBeenCalledOnce(); expect(f.client.reply).not.toHaveBeenCalled();
+  expect(f.client.listMessages).not.toHaveBeenCalled(); expect(f.client.listChatMessages).not.toHaveBeenCalled();
+});
+
+it('keeps a lost provider response unknown through a fresh integration', async () => {
+  const f = await uncertainScheduleDelivery({ responseLost: true });
+  expect(await f.repos.config.get(f.key)).toBeUndefined();
+  await f.restored.scheduler.tick(); await f.restored.scheduler.tick();
+  expect(await f.repos.collaboration.getAction(scope, f.action.id)).toMatchObject({ status: 'unknown' });
+  expect(f.client.send).toHaveBeenCalledOnce();
+});
+
+it('does not use a durable receipt to bypass revoked delivery authorization', async () => {
+  const f = await uncertainScheduleDelivery();
+  const allowed = vi.spyOn(f.groups, 'authorize').mockResolvedValue(undefined);
+  try {
+    await f.restored.scheduler.tick(); await f.restored.scheduler.tick();
+    expect(await f.repos.collaboration.getAction(scope, f.action.id)).toMatchObject({ status: 'unknown' });
+    expect(f.client.send).toHaveBeenCalledOnce();
+  } finally { allowed.mockRestore(); }
+  await f.restored.scheduler.tick();
+  expect(await f.repos.collaboration.getAction(scope, f.action.id)).toMatchObject({ status: 'succeeded' });
+  expect(f.client.send).toHaveBeenCalledOnce();
 });

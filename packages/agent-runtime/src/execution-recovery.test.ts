@@ -39,6 +39,26 @@ async function fixture(options: RuntimeOptions = {}, isStopped = true, deferFail
     reopen: async () => { await runtime.shutdown(); fail = false; runtime = new DutydeckRuntime(repos, { ...options, driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
 }
 describe('owner execution recovery', () => {
+  it('keeps own and foreign blockers with the same code distinct without exposing foreign session IDs', async () => {
+    const h = await fixture();
+    const original = h.repos.execution.getTaskExecution(h.first.id)!;
+    const read = vi.spyOn(h.repos.execution, 'getTaskExecution').mockReturnValue({ ...original, blockers: [
+      { code: 'DRIVER_STOP_BLOCKED', sessionId: h.session.id },
+      { code: 'DRIVER_STOP_BLOCKED', sessionId: 'other-private-session' },
+      { code: 'DRIVER_STOP_BLOCKED', sessionId: 'other-private-session' },
+      { code: 'WORKSPACE_RESOURCE_UNVERIFIABLE' }
+    ] });
+    try {
+      const recovery = await h.runtime.getTaskRecovery(h.session.id, h.first.id);
+      expect(recovery.blockers).toEqual([
+        { code: 'DRIVER_STOP_BLOCKED' },
+        { code: 'DRIVER_STOP_BLOCKED', external: true },
+        { code: 'WORKSPACE_RESOURCE_UNVERIFIABLE' }
+      ]);
+      expect(JSON.stringify(recovery)).not.toContain('other-private-session');
+    } finally { read.mockRestore(); }
+  });
+
   it('matches per-task recovery with one session snapshot and no repeated history projections', async () => {
     const h = await fixture();
     const expected = await Promise.all([h.first, h.second].map(async task => ({ taskId: task.id, ...await h.runtime.getTaskRecovery(h.session.id, task.id) })));

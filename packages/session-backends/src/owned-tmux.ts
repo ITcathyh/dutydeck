@@ -158,8 +158,11 @@ export async function verifyOwnedTmuxExit(proof: OwnedTmuxExitProof, probe: Proc
   try {
     scopeCheck(proof.scope, probe);
     if (!proof.identities.length || !proof.identities.every(item => probe.observe(item) === 'dead')) return false;
-    if (!socketCheck(proof.scope, proof.socket, true)) return probe.observe(proof.server) === 'dead';
-    // An existing bound socket may have become stale after its server exited.
+    const server = probe.observe(proof.server);
+    // A replacement server may reuse the path while the last old session is
+    // closing. Exact old process identities prove exit without touching it.
+    if (server === 'dead') return true;
+    if (server !== 'alive' || !socketCheck(proof.scope, proof.socket, true)) return false;
     return (await target(proof.scope)) === undefined;
   } catch { return false; }
 }

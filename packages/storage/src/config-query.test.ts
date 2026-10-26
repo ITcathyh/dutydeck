@@ -38,3 +38,17 @@ it('backfills JSON indexes without rewriting sources, selects matching legacy/cu
     expect(reader.config.getSync!(occurrence + 'pending')).toBe(await writer.config.get(occurrence + 'pending'));
   } finally { db.close(); reader.close(); writer.close(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+it('filters plans and same-id history by source session before decoding unrelated malformed rows', async () => {
+  const repos = createRepositories(':memory:');
+  try {
+    for (const sessionId of ['public', 'private']) {
+      await repos.config.set('session_automation/schedule/' + sessionId, JSON.stringify({ sessionId }));
+      await repos.config.set('session_automation/occurrence/' + sessionId, JSON.stringify({ sessionId, scheduleId: 'same-plan' }));
+    }
+    await repos.config.set('session_automation/occurrence/broken', '{invalid');
+    expect((await repos.config.listByJsonField!('session_automation/schedule/', { field: 'sessionId', values: ['public'] })).map(row => row.key)).toEqual(['session_automation/schedule/public']);
+    expect((await repos.config.listByJsonField!('session_automation/occurrence/', { field: 'scheduleId', values: ['same-plan'], sessionId: 'public' })).map(row => row.key)).toEqual(['session_automation/occurrence/public']);
+    expect(await repos.config.listByJsonField!('session_automation/schedule/', { field: 'sessionId', values: [] })).toEqual([]);
+  } finally { repos.close(); }
+});

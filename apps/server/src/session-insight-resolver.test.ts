@@ -165,12 +165,13 @@ function setupClaudeHome(root: string, files: Record<string, string>): string {
   return home;
 }
 
-function setupCodexHome(root: string, files: Array<{ name: string; source: string; mtimeMs?: number }>): string {
+function setupCodexHome(root: string, files: Array<{ name: string; source: string; mtimeMs?: number }>, cwd?: string): string {
   const home = join(root, '.codex');
   const dayDir = join(home, 'sessions', '2026', '10', '03');
   mkdirSync(dayDir, { recursive: true });
   for (const file of files) {
-    cpSync(file.source, join(dayDir, file.name));
+    if (cwd) writeFileSync(join(dayDir, file.name), readFileSync(file.source, 'utf8').replaceAll(FIXTURE_CWD, cwd));
+    else cpSync(file.source, join(dayDir, file.name));
     if (file.mtimeMs !== undefined) utimesSync(join(dayDir, file.name), file.mtimeMs / 1000, file.mtimeMs / 1000);
   }
   return home;
@@ -922,13 +923,13 @@ describe('session insight resolver — ACP / PTY checkpoint / 不支持驱动', 
     const sessionId = 'ses_acp';
     const runId = `run_${sessionId}`;
     await saveAgent(h, { id: 'codex', protocol: 'acp' });
-    createSession(h, sessionId, 'codex', FIXTURE_CWD, runId);
+    createSession(h, sessionId, 'codex', h.root, runId);
     const root = h.x.beforeControlledOperation({ sessionId, runId }, { resourceId: 'factory', driverInstanceId: 'driver-1' });
     const reserved = h.x.reserveNativeContext({ sessionId, runId }, {
-      resourceId: 'native', parentResourceId: root.resourceId, expected: nativeExpected,
+      resourceId: 'native', parentResourceId: root.resourceId, expected: { ...nativeExpected, cwd: h.root },
     });
     const selected = h.x.confirmNativeContext(
-      { sessionId, runId }, reserved.resourceId, reserved.revision, nativeIdentity
+      { sessionId, runId }, reserved.resourceId, reserved.revision, { ...nativeIdentity, cwd: h.root }
     );
     h.x.creationFinished({ sessionId, runId }, root.resourceId, root.revision, 'created');
     const f = claimTask(h, sessionId, runId);
@@ -939,7 +940,7 @@ describe('session insight resolver — ACP / PTY checkpoint / 不支持驱动', 
     const home = setupCodexHome(h.root, [{
       name: `rollout-acp-${CODEX_NATIVE_ID}.jsonl`,
       source: CODEX_FIXTURE,
-    }]);
+    }], h.root);
 
     const result = await h.resolve(sessionId, { configuredRoots: [{ client: 'codex', path: home }] });
     const main = result.sources.find(s => s.expectedStream.kind === 'main')!;
@@ -955,14 +956,14 @@ describe('session insight resolver — ACP / PTY checkpoint / 不支持驱动', 
     const sessionId = 'ses_acp_weak';
     const runId = `run_${sessionId}`;
     await saveAgent(h, { id: 'codex', protocol: 'acp' });
-    createSession(h, sessionId, 'codex', FIXTURE_CWD, runId);
+    createSession(h, sessionId, 'codex', h.root, runId);
     const root = h.x.beforeControlledOperation({ sessionId, runId }, { resourceId: 'factory', driverInstanceId: 'driver-1' });
     const reserved = h.x.reserveNativeContext({ sessionId, runId }, {
-      resourceId: 'native', parentResourceId: root.resourceId, expected: nativeExpected,
+      resourceId: 'native', parentResourceId: root.resourceId, expected: { ...nativeExpected, cwd: h.root },
     });
     // strict schema 下，无 agentSessionId 时对象不能带 agentSessionId: undefined
     const { agentSessionId: _omitted, ...rest } = nativeIdentity;
-    const weakIdentity: NativeContextIdentity = { ...rest, defaults: {} };
+    const weakIdentity: NativeContextIdentity = { ...rest, cwd: h.root, defaults: {} };
     const selected = h.x.confirmNativeContext(
       { sessionId, runId }, reserved.resourceId, reserved.revision, weakIdentity
     );
@@ -987,7 +988,7 @@ describe('session insight resolver — ACP / PTY checkpoint / 不支持驱动', 
     const sessionId = 'ses_checkpoint';
     const runId = `run_${sessionId}`;
     await saveAgent(h, { id: 'codex' });
-    createSession(h, sessionId, 'codex', FIXTURE_CWD, runId);
+    createSession(h, sessionId, 'codex', h.root, runId);
     lifecycleDriver(h, sessionId, runId);
     h.x.acceptTask({ sessionId, runId }, codexRequest(sessionId), codexContent(), 'back');
     const attempt = h.x.claimNext({ sessionId, runId }).attempt as TaskAttempt;
@@ -1004,7 +1005,7 @@ describe('session insight resolver — ACP / PTY checkpoint / 不支持驱动', 
     const home = setupCodexHome(h.root, [{
       name: `rollout-ckpt-${CODEX_NATIVE_ID}.jsonl`,
       source: CODEX_FIXTURE,
-    }]);
+    }], h.root);
     const checkpointPath = join(home, 'sessions/2026/10/03', `rollout-ckpt-${CODEX_NATIVE_ID}.jsonl`);
     const recovery = { kind: 'pty-jsonl-v1' as const, turnId: 'original-turn', transcript: { offset: 0, path: checkpointPath } };
     const submitted = h.x.markSubmissionPending(fence, {

@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import type { ConfigRepository } from '@dutydeck/shared';
 
 const patterns = {
+  'session_automation/schedule/': 'session_automation/schedule/*',
   'session_automation/occurrence/': 'session_automation/occurrence/*',
   'session_automation/ci/': 'session_automation/ci/*',
   'relay.ask.': 'relay.ask.*'
@@ -32,6 +33,7 @@ export function listConfigByJsonField(db: Database.Database, prefix: string, fil
   const field = expression(filter.field);
   params.push(...filter.values);
   let where = `${scope} AND ${field} IN (${filter.values.map(() => '?').join(',')})`;
+  if (filter.sessionId !== undefined) { where += ` AND ${expression('sessionId')}=?`; params.push(filter.sessionId); }
   if (filter.scheduleId !== undefined) { where += ` AND ${expression('scheduleId')}=?`; params.push(filter.scheduleId); }
   return db.prepare(`SELECT key,value FROM configs WHERE ${where} ORDER BY key`).all(...params) as Array<{ key: string; value: string }>;
 }

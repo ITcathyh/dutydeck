@@ -23,10 +23,13 @@ export function parseAgentScheduleRequest(raw: unknown) {
   const { dryRun, ...body } = parsed.data;
   const trigger = body.every !== undefined ? { kind: 'interval' as const, everySeconds: body.every * 60, anchorAt: new Date().toISOString() }
     : body.cron !== undefined ? { kind: 'cron' as const, expression: body.cron } : { kind: 'at' as const, localDateTime: body.at! };
-  const input = createSessionScheduleInputSchema.parse({ name: body.name ?? body.prompt.slice(0, 100), prompt: body.prompt, trigger,
-    timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' } });
+  let input: ReturnType<typeof createSessionScheduleInputSchema.parse>;
   let next: ReturnType<typeof previewSessionSchedule>;
-  try { next = previewSessionSchedule({ id: 'preview', ...input }, new Date()); }
+  try {
+    input = createSessionScheduleInputSchema.parse({ name: body.name ?? body.prompt.slice(0, 100), prompt: body.prompt, trigger,
+      timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' } });
+    next = previewSessionSchedule({ id: 'preview', ...input }, new Date());
+  }
   catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new AgentCommandParamError('SCHEDULE_REQUEST_INVALID', message, [{ name: scheduleParam(body.every !== undefined ? 'every' : body.cron !== undefined ? 'cron' : 'at'), reason: message }]);

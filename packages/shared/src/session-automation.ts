@@ -58,6 +58,23 @@ const scheduleConditionInputSchema = z.preprocess(legacyCondition, z.discriminat
   z.object({ kind: z.literal('ci_new_failure'), provider: providerId.optional(), workflow: z.string().trim().min(1).max(255).optional() }).strict()
 ]));
 
+const scheduleMisfireSchema = z.object({
+  policy: z.enum(['skip', 'coalesce']), from: timestamp, to: timestamp, reason: z.string()
+}).strict();
+
+const executionContextSchema = z.object({
+  cwd: z.string().min(1), sourceCwd: z.string().min(1).optional(), agentId: z.string().min(1), model: z.string().optional(),
+  codexProfile: z.string().optional(), reasoningEffort: z.string().optional(),
+  permissionMode: z.enum(['ask', 'approve-reads', 'full-trust', 'deny-all']).optional(),
+  contextMode: z.literal('prompt_only')
+}).strict();
+const disableNotificationSchema = z.object({
+  status: z.enum(['pending', 'sending', 'delivered', 'error', 'unknown', 'not_requested']),
+  attempts: z.number().int().nonnegative(), updatedAt: timestamp,
+  name: z.string().optional(),
+  nextAttemptAt: timestamp.optional(), owner: z.string().optional(), error: z.string().optional()
+}).strict();
+
 export const sessionScheduleSchema = z.object({
   schemaVersion: z.literal(1),
   id: z.string().min(1),
@@ -65,6 +82,14 @@ export const sessionScheduleSchema = z.object({
   generation: z.number().int().positive(),
   sessionId: z.string().min(1),
   actorId: z.string().min(1).optional(),
+  mode: z.enum(['session', 'independent']).optional(),
+  misfirePolicy: z.enum(['skip', 'coalesce']).optional(),
+  maxLatenessSeconds: z.number().int().positive().optional(),
+  executionSessionId: z.string().min(1).optional(),
+  executionContext: executionContextSchema.optional(),
+  disabledReason: z.string().optional(),
+  disabledAt: timestamp.optional(),
+  disableNotification: disableNotificationSchema.optional(),
   name: z.string().trim().min(1).max(200),
   prompt: z.string().trim().min(1).max(20_000),
   trigger: scheduleTriggerSchema,
@@ -80,7 +105,8 @@ export const sessionScheduleSchema = z.object({
   /** Durable single execution slot, written before the occurrence itself. */
   pendingOccurrence: z.object({
     id: z.string().min(1), generation: z.number().int().positive(), scheduledForUtc: timestamp,
-    triggerSource: z.literal('manual').optional(), actor: executionActorSchema.optional()
+    triggerSource: z.literal('manual').optional(), actor: executionActorSchema.optional(),
+    misfireDecision: z.object({ action: z.enum(['skip', 'run']), misfire: scheduleMisfireSchema.optional() }).strict().optional()
   }).strict().optional(),
   createdAt: timestamp,
   updatedAt: timestamp
@@ -101,7 +127,10 @@ export const createSessionScheduleInputSchema = z.object({
   trigger: scheduleTriggerSchema,
   timezone: z.string().min(1).max(100),
   dstPolicy: z.object({ gap: z.enum(scheduleDstGapPolicies), overlap: z.enum(scheduleDstOverlapPolicies) }).strict(),
-  condition: scheduleConditionInputSchema
+  condition: scheduleConditionInputSchema,
+  mode: z.enum(['session', 'independent']).optional(),
+  misfirePolicy: z.enum(['skip', 'coalesce']).optional(),
+  maxLatenessSeconds: z.number().int().positive().optional()
 }).strict();
 export type CreateSessionScheduleInput = z.infer<typeof createSessionScheduleInputSchema>;
 
@@ -113,7 +142,9 @@ export const updateSessionScheduleInputSchema = z.object({
   timezone: z.string().min(1).max(100).optional(),
   dstPolicy: z.object({ gap: z.enum(scheduleDstGapPolicies), overlap: z.enum(scheduleDstOverlapPolicies) }).strict().optional(),
   condition: scheduleConditionInputSchema.optional(),
-  enabled: z.boolean().optional()
+  enabled: z.boolean().optional(),
+  misfirePolicy: z.enum(['skip', 'coalesce']).optional(),
+  maxLatenessSeconds: z.number().int().positive().nullable().optional()
 }).strict().refine(value => Object.keys(value).some(key => key !== 'expectedRevision'), { message: 'At least one field must be updated' });
 export type UpdateSessionScheduleInput = z.infer<typeof updateSessionScheduleInputSchema>;
 
@@ -168,6 +199,9 @@ export const sessionScheduleOccurrenceV2Schema = z.object({
   leaseExpiresAt: timestamp.optional(),
   admission: taskAdmissionV1Schema.optional(),
   runtimeAttemptId: z.string().optional(),
+  executionSessionId: z.string().optional(),
+  acceptedAt: timestamp.optional(),
+  misfire: scheduleMisfireSchema.optional(),
   result: attemptResultV1Schema.optional(),
   resultBoundary: z.enum(['verified', 'legacy_output_unresolved']).optional(),
   blockReason: z.enum(automationBlockReasons).optional(),
@@ -310,6 +344,38 @@ export interface SessionAutomationList {
   schedules: PublicSessionSchedule[];
   subscriptions: PublicCiSubscription[];
   occurrences: PublicSessionScheduleOccurrence[];
+}
+
+export type AutomationScheduleHealth = 'blocked' | 'queued' | 'running' | 'delivery' | 'disabled' | 'ready' | 'error';
+export interface AutomationScheduleSummary {
+  engine: 'session';
+  schedule: PublicSessionSchedule;
+  session: { id: string; title: string; agentId: string; state: string; archivedAt?: string };
+  health: AutomationScheduleHealth;
+  latestOccurrence?: PublicSessionScheduleOccurrence;
+  blocker?: { sessionId?: string; taskId?: string; attemptId?: string; status: string; waitingSince: string; restricted?: boolean };
+  overdue?: { from: string; to: string };
+  deliveryTarget?: AutomationDeliveryTarget;
+}
+export interface AutomationSchedulePage { engine: 'session'; counts: Record<AutomationScheduleHealth, number>; items: AutomationScheduleSummary[]; total: number; offset: number; limit: number }
+export interface AutomationScheduleQuery {
+  offset?: number; limit?: number; name?: string; sessionId?: string; agentId?: string;
+  enabled?: boolean; health?: AutomationScheduleHealth; sort?: 'attention' | 'due' | 'name';
+}
+export interface AutomationHistoryPage { occurrences: PublicSessionScheduleOccurrence[]; total: number; offset: number; limit: number }
+export interface AutomationRunDetail {
+  schedule: PublicSessionSchedule;
+  occurrence: PublicSessionScheduleOccurrence;
+  input?: { prompt: string; cwd?: string; agentId?: string; model?: string; permissionMode?: string };
+  attempts: Array<{
+    attemptId: string; taskId: string; number: number; state: string; outcome?: string; createdAt: string; updatedAt: string;
+    manualRetry?: { causeAttemptId: string; decisionId: string };
+    automaticRetry?: { causeAttemptId: string; reason: string };
+    decision?: { decisionId: string; actor: ExecutionActor; action: string; evidenceRefs: string[] };
+  }>;
+  times: { scheduledForUtc: string; discoveredAt: string; acceptedAt?: string; startedAt?: string; settledAt?: string; deliveryUpdatedAt: string };
+  executionSessionId: string;
+  sourceSessionId: string;
 }
 
 function asPreviewDefinition(schedule: Pick<SessionSchedule, 'id' | 'name' | 'trigger' | 'timezone' | 'dstPolicy'>): ScheduleDefinition {

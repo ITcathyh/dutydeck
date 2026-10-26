@@ -208,6 +208,51 @@ async function deliveredOnce<T>(store: ConfigRepository | undefined, key: string
   }
 }
 
+/** A successful message response bound to the caller's frozen operation and destination. */
+export interface LarkBoundDelivery {
+  idempotencyKey: string;
+  identity: string;
+  chatId: string;
+}
+interface LarkBoundReceipt { messageId: string; chatId: string; identity: string }
+const boundDeliveryKey = (input: LarkBoundDelivery) => `lark.delivery.${input.idempotencyKey}.message`;
+const matchesBoundReceipt = (value: unknown, input: LarkBoundDelivery): value is LarkBoundReceipt => {
+  const receipt = value as Partial<LarkBoundReceipt> | null;
+  return Boolean(receipt && typeof receipt.messageId === 'string' && receipt.messageId.trim()
+    && receipt.chatId === input.chatId && receipt.identity === input.identity);
+};
+
+/** Read local proof only; a missing or conflicting receipt never invokes the provider. */
+export async function readConfirmedLarkBoundMessage(store: ConfigRepository, input: LarkBoundDelivery): Promise<LarkBoundReceipt | undefined> {
+  const saved = await store.get(boundDeliveryKey(input));
+  if (!saved) return;
+  try { const receipt: unknown = JSON.parse(saved); if (matchesBoundReceipt(receipt, input)) return receipt; }
+  catch { /* Invalid proof remains unknown. */ }
+}
+
+export async function sendLarkBoundMessage(store: ConfigRepository, input: LarkBoundDelivery,
+  send: () => Promise<{ messageId: string; chatId?: string }>): Promise<LarkBoundReceipt> {
+  // Do not repair a conflicting receipt by sending to a potentially different destination.
+  if (await store.get(boundDeliveryKey(input))) {
+    const confirmed = await readConfirmedLarkBoundMessage(store, input);
+    if (!confirmed) throw new Error('Lark delivery receipt identity conflict');
+    return confirmed;
+  }
+  const receipt = await delivered(store, boundDeliveryKey(input), async () => {
+    // Another process may have persisted a conflicting proof while this caller waited for its claim.
+    if (await store.get(boundDeliveryKey(input))) {
+      const confirmed = await readConfirmedLarkBoundMessage(store, input);
+      if (!confirmed) throw new Error('Lark delivery receipt identity conflict');
+      return confirmed;
+    }
+    const result = await send();
+    if (result.chatId !== undefined && result.chatId !== input.chatId) throw new Error('Lark delivery response destination conflict');
+    return { messageId: result.messageId, chatId: input.chatId, identity: input.identity };
+  }, result => matchesBoundReceipt(result, input));
+  if (!matchesBoundReceipt(receipt, input)) throw new Error('Lark delivery receipt identity conflict');
+  return receipt;
+}
+
 /** A fixed host delivery-status receipt; it never contains the result body or changes its target. */
 export async function sendLarkDeliveryText(service: Pick<LarkCardService, 'sendText' | 'replyText'>, target: DeliveryTarget,
   input: { text: string; idempotencyKey: string }, store: ConfigRepository, beforeSend?: LarkWriteGuard) {

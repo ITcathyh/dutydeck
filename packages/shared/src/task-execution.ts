@@ -149,12 +149,13 @@ export interface TaskAttempt extends AttemptRef, SessionFence {
   /** Durable explanation for input that was held during daemon shutdown before CLI submission. */
   interruption?: { kind: 'daemon_shutdown'; reason: 'not_submitted'; interruptedAt: string };
   legacy?: JsonValue; createdAt: string; updatedAt: string;
+  manualRetry?: { causeAttemptId: string; decisionId: string; inputDigest: string };
   automaticRetry?: { reason: 'codex_capacity'; causeAttemptId: string; ordinal: number; dueAt: string; inputDigest: string };
 }
 export interface ExecutionTask extends Omit<TaskRecord, 'status' | 'revision' | 'digestVersion'> {
   status: TaskStatus; revision: number; digestVersion: 'v1' | 'legacy_unverifiable'; currentAttemptId?: string;
 }
-export interface ExecutionBlocker { code: string; sessionId: string; taskId?: string; resourceId?: string; detail?: string }
+export interface ExecutionBlocker { code: string; sessionId: string; taskId?: string; attemptId?: string; resourceId?: string; detail?: string }
 export interface AcceptedTask { task: ExecutionTask; input?: AcceptedTaskInput; request?: TaskRequestV1; requestDigest?: string; replayValidation: 'complete' | 'legacy_partial' }
 export interface CommitResult {
   task?: ExecutionTask; attempt?: TaskAttempt; session: Session; events: AgentEvent[]; replayed: boolean; blockers: ExecutionBlocker[];
@@ -208,9 +209,9 @@ export interface TaskExecutionProjection { task: ExecutionTask; currentAttempt?:
 export interface BoundExecutionRepository {
   lookupAccepted(request: TaskRequestV1): AcceptedTask | undefined;
   acceptTask(f: SessionFence, request: TaskRequestV1, input: AcceptedTaskInputV2, position: 'front' | 'back'): CommitResult;
-  claimNext(f: SessionFence): CommitResult | undefined;
+  claimNext(f: SessionFence, idleResources?: ResourceCheckRef[]): CommitResult | undefined;
   promoteQueued(f: SessionFence, taskId: string, expectedTaskRevision: number, operation: QueueOperationInput): CommitResult;
-  beginQueuedSteering(f: SessionFence, taskId: string, expectedTaskRevision: number, input: SteeringOperationInput): CommitResult;
+  beginQueuedSteering(f: SessionFence, taskId: string, expectedTaskRevision: number, input: SteeringOperationInput, idleResources?: ResourceCheckRef[]): CommitResult;
   resolveQueuedSteering(f: SessionFence, operationId: string, controller: ExecutionController, outcome: 'injected' | 'startedNewTurn' | 'promptRequired' | 'unsupported' | 'unknown'): CommitResult;
   /** reuseOwned：资源核对按本运行时持有的驱动可复用处理（与 claimNext 开下一轮同一口径），由运行时先确认驱动空闲。 */
   confirmSteeringRecovery(f: SessionFence, input: import('./execution-recovery.js').SteeringRecoveryDecision, actor: ExecutionActor, reuseOwned?: boolean): CommitResult;
@@ -307,6 +308,7 @@ export interface ExecutionRepository {
   bind(claim: RuntimeControlClaim): BoundExecutionRepository;
   lookupAccepted(request: TaskRequestV1): AcceptedTask | undefined;
   getAcceptedTask(taskId: string): AcceptedTask | undefined;
+  getRecoveryDecision(decisionId: string): (SessionFence & { attemptId?: string; decision: RecoveryDecisionInput }) | undefined;
   getTaskExecution(taskId: string): TaskExecutionProjection | undefined;
   getAttempt(ref: AttemptRef & SessionFence): TaskAttempt | undefined;
   getSessionExecutions(sessionId: string): TaskExecutionProjection[];

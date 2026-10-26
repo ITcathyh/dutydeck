@@ -4,6 +4,7 @@ import type { CollaborationService } from './collaboration-service.js';
 import type { LarkCardService } from './lark/service.js';
 import { renderLarkResultTextElements } from './lark/card-renderer.js';
 import { markdownElement } from './lark/card-elements.js';
+import { sendLarkBoundMessage } from './lark/result-delivery.js';
 
 // Agent 通过自然语言创建的定时委托不立即生效：先发确认卡，用户点「确认」才创建。
 // 每次定时产出的卡片带暂停/恢复/停止按钮。两类卡片的按钮回调都走 dutydeck_mandate 命名空间。
@@ -89,12 +90,13 @@ export class MandateCards {
   }
 
   /** 定时产出：发一张带按钮的结果卡，并记下正文，之后暂停/停止时原位重绘。 */
-  async deliver(input: { client: CardClient; scope: CollaborationScope; delivery: ScheduleDelivery; mandate: Pick<CollaborationMandate, 'id' | 'goal'>; text: string; idempotencyKey: string }): Promise<string> {
+  async deliver(input: { client: CardClient; scope: CollaborationScope; delivery: ScheduleDelivery; mandate: Pick<CollaborationMandate, 'id' | 'goal'>; text: string; idempotencyKey: string; receiptIdentity: string }): Promise<string> {
     const card = { cardKind: 'result' as const, taskId: input.mandate.id, taskName: input.mandate.goal, state: 'completed' as const, readOnly: true, retryable: false,
       elements: deliveredElements(input.text, input.mandate.id, 'active'), idempotencyKey: input.idempotencyKey };
-    const sent = input.delivery.mode === 'thread' && input.delivery.rootMessageRef
-      ? await input.client.reply({ messageId: input.delivery.rootMessageRef, replyInThread: true, ...card })
-      : await input.client.send({ chatId: input.scope.chatId, ...card });
+    const sent = await sendLarkBoundMessage(this.options.config, { idempotencyKey: input.idempotencyKey, identity: input.receiptIdentity, chatId: input.scope.chatId }, () =>
+      input.delivery.mode === 'thread' && input.delivery.rootMessageRef
+        ? input.client.reply({ messageId: input.delivery.rootMessageRef, replyInThread: true, ...card })
+        : input.client.send({ chatId: input.scope.chatId, ...card }));
     await this.options.config.set(this.cardKey(input.scope, sent.messageId), input.text.slice(0, 20_000)).catch(error => this.warn(error, '定时产出正文未能保存，卡片按钮将无法原位重绘'));
     return sent.messageId;
   }

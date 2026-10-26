@@ -451,7 +451,10 @@ describe('controlled resources and fixed submission protocol', () => {
 
   it('real send rejects tampering, altered refs, and another driver, but accepts original and same-scope nested once', async () => {
     const h = await setup('jsonl');
-    const other = await h.runtime.start({ agentId: h.agent.id });
+    // 独立目录保留活着的第二个驱动，避免同目录资源门禁先将它停止而遮住作用域校验。
+    const otherCwd = join(h.dir, 'other-workspace');
+    await mkdir(otherCwd);
+    const other = await h.runtime.start({ agentId: h.agent.id, cwd: otherCwd });
     const a = h.runtime.getDriver(h.session.id) as any;
     const b = h.runtime.getDriver(other.id) as any;
     const send = a.send.bind(a);
@@ -471,6 +474,7 @@ describe('controlled resources and fixed submission protocol', () => {
       // 5. resourceRefs 篡改 -> SUBMISSION_REFERENCES_CONFLICT
       await expect(send({ ...s, resourceRefs: [] })).rejects.toMatchObject({ code: 'SUBMISSION_REFERENCES_CONFLICT' });
       // 6. 跨 driver 调用 -> RESOURCE_PERMIT_INVALID
+      expect(await b.isStopped()).toBe(false);
       await expect(b.send(s)).rejects.toMatchObject({ code: 'RESOURCE_PERMIT_INVALID' });
 
       // 7. 同 submission 作用域的合法 nested operation 属于允许正例

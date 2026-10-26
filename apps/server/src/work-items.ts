@@ -848,6 +848,29 @@ export class WorkItemService {
         stopped = await bounded(this.options.runtime.stopWorkItemSession(attempt.sessionId!, state.value.actor), 10_000);
       } catch { /* A failed stop is explicitly unresolved. */ }
       if (stopped) state.value.stoppedAttempts.push(attempt.id);
+      // Stopping a blocked work also cancels siblings that never reached an execution attempt.
+      // Preserve that cancelled task; only a fully verified, unsubmitted sibling may become pending again.
+      if (stopped && step.status === 'running' && !attempt.blockReason && !attempt.result && !attempt.output && !attempt.runtimeAttemptId && !state.value.cancellationActor) {
+        const admission = state.value.admissions?.[attempt.id];
+        const accepted = admission && this.repos.execution.getAcceptedTask(admission.taskId);
+        const projection = admission && this.repos.execution.getTaskExecution(admission.taskId);
+        const session = attempt.sessionId && await this.repos.sessions.get(attempt.sessionId);
+        const resources = attempt.sessionId ? this.repos.execution.getResources(attempt.sessionId) : [];
+        let authorized = false;
+        try { await this.assertExecution(state.value, true); authorized = true; } catch { /* Revoked parents remain blocked. */ }
+        if (authorized && admission?.kind === 'canonical' && admission.request && attempt.taskId === admission.taskId
+          && accepted?.input?.version === 2 && accepted.request && this.readAccepted(admission) === true
+          && canonicalExecutionJson(accepted.request.actor) === canonicalExecutionJson(state.value.actor)
+          && session && session.source === 'work_item' && session.sourceId === attempt.id && accepted.task.sessionId === session.id && admission.request.sessionId === session.id
+          && projection?.task.status === 'cancelled' && !projection.task.currentAttemptId && !projection.attempts.length && !projection.steering
+          && resources.every(resource => resource.stage === 'not_created'
+            || resource.kind === 'operation' && resource.stage === 'created'
+            || resource.purpose === 'acp_native_context' && resource.stage === 'created'
+            || resource.observations.at(-1)?.state === 'gone')) {
+          attempt.status = 'cancelled'; attempt.updatedAt = time(); step.status = 'pending';
+          continue;
+        }
+      }
       step.status = 'blocked'; attempt.status = 'blocked'; attempt.updatedAt = time();
       // 已带具体 blockReason 的尝试（如结果超限/摘要冲突）保留原始错误，只补停止事实。
       if (!attempt.blockReason) {

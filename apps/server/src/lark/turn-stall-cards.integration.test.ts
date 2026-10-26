@@ -50,6 +50,7 @@ async function harness() {
           await new Promise<void>(done => { finish = done; });
           onEvent({ type: 'completed', data: { stopReason: 'cancelled' } });
         },
+        isIdle: () => !finish, hasBackgroundWork: () => false,
         processIds: () => [idle.pid!]
       };
       return driver;
@@ -161,9 +162,22 @@ describe.runIf(existsSync('/proc/self/stat'))('飞书卡上的「可能卡住」
     await h.waitLatest('om_2', card => expect(h.buttonsOf(card)).toContain('在新会话中执行'));
     expect(await h.coordinator.handleAction({ action: 'run_in_new_session', task_id: 'om_2', turn: '1' }, 'ou_alice', { messageId: await h.cardMessageId('om_2'), chatId: 'oc_group' }))
       .toMatchObject({ type: 'success' });
-    await vi.waitFor(() => expect(h.prompts.at(-1)).toContain('第二件事'));
+    await h.waitLatest('om_2', card => expect(card.statusLabel).toBe('排队受阻'));
+    expect(h.prompts).toHaveLength(1);
     expect(h.interrupt).not.toHaveBeenCalled();
-    expect((await h.runtimeTask('第一件事'))?.status).toBe('running');
+    const original = (await h.runtimeTask('第一件事'))!;
+    expect(original.status).toBe('running');
+    // Explicitly stop and reconcile the original attempt, then the already accepted replacement can run.
+    await h.runtime.stop(original.sessionId, { kind: 'installation_owner', id: 'installation_owner' });
+    const inspection = await h.runtime.inspectExecutionRecovery(original.sessionId, { kind: 'installation_owner', id: 'installation_owner' });
+    const attempt = inspection.tasks.find(task => task.taskId === original.id)!.attempt!;
+    await h.runtime.confirmExecutionRecovery(original.sessionId, { runId: inspection.runId, taskId: original.id,
+      attemptId: attempt.attemptId, expectedRevision: attempt.revision, decisionId: 'confirmed-stall-stop',
+      action: 'confirm_result', outcome: 'unknown', evidenceRefs: ['fixture:stopped-original'], resourceChecks: inspection.resourceChecks },
+      { kind: 'installation_owner', id: 'installation_owner' });
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(2));
+    expect(h.prompts[1]).toContain('第二件事');
+    expect((await h.runtime.getTasks(original.sessionId)).find(task => task.id === original.id)?.status).toBe('reconcile_required');
   }, 30_000);
 
   it('这一轮在等人回答时两张卡都不标可能卡住，回答后仍然静默才提示', async () => {

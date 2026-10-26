@@ -18,14 +18,14 @@ export const scheduleDstOverlapPolicies = ['first', 'second'] as const;
 export const scheduleTriggerSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('at'), localDateTime }).strict(),
   z.object({ kind: z.literal('interval'), everySeconds: z.number().int().min(60), anchorAt: utcTimestamp }).strict(),
-  z.object({ kind: z.literal('cron'), expression: z.string().trim().min(9).max(256) }).strict()
+  z.object({ kind: z.literal('cron'), expression: z.string().trim().min(9).max(256).refine(value => { try { parseCron(value); return true; } catch { return false; } }, 'Invalid five-field cron expression') }).strict()
 ]);
 export type ScheduleTrigger = z.infer<typeof scheduleTriggerSchema>;
 
 /** Read-only compatibility for pre-validation records; callers must disable invalid triggers. */
 export const storedScheduleTriggerSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('at'), localDateTime: localDateTimeFormat }).strict(),
-  scheduleTriggerSchema.options[1], scheduleTriggerSchema.options[2]
+  scheduleTriggerSchema.options[1], z.object({ kind: z.literal('cron'), expression: z.string().trim().min(9).max(256) }).strict()
 ]);
 
 export const scheduleDeliverySchema = z.object({
@@ -362,6 +362,7 @@ interface CronMatcher { minute: Set<number>; hour: Set<number>; day: Set<number>
 function cronField(raw: string, minimum: number, maximum: number, sunday = false): Set<number> {
   const values = new Set<number>();
   for (const item of raw.split(',')) {
+    if (!/^(?:\*|\d+(?:-\d+)?)(?:\/\d+)?$/.test(item)) throw new Error('Invalid cron field');
     const [rangeRaw = '', stepRaw] = item.split('/');
     const step = stepRaw === undefined ? 1 : Number(stepRaw);
     if (!Number.isSafeInteger(step) || step < 1) throw new Error('Invalid cron step');

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
@@ -46,6 +46,44 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
     for (let tries = 0; !(await verifyOwnedTmuxExit(proof, probe)) && tries < 100; tries++) await new Promise(resolve => setTimeout(resolve, 20));
     expect((await verifyOwnedTmuxExit(proof, probe))).toBe(true);
     expect((await verifyOwnedTmuxExit(await stopOwnedTmux(identity, probe), probe))).toBe(true);
+  });
+  it('keeps an exact old exit proof valid after a new live server reuses the socket, without touching the replacement', async () => {
+    create();
+    const original = (await captureOwnedTmuxIdentity(scope(), probe))!;
+    const proof = await stopOwnedTmux(original, probe);
+    await vi.waitFor(() => expect(observeProcess(original.server)).toBe('dead'));
+    create();
+    const replacement = (await captureOwnedTmuxIdentity(scope(), probe))!;
+    expect(observeProcess(replacement.server)).toBe('alive');
+    expect(replacement.server).not.toEqual(original.server);
+    expect(await verifyOwnedTmuxExit(proof, probe)).toBe(true);
+    for (const state of ['alive', 'unknown'] as const) {
+      const targetUncertain: ProcessProbe = { ...probe, observe: value => value.pid === proof.identities[0]!.pid ? state : probe.observe(value) };
+      expect(await verifyOwnedTmuxExit(proof, targetUncertain)).toBe(false);
+      const serverUncertain: ProcessProbe = { ...probe, observe: value => value.pid === proof.server.pid ? state : probe.observe(value) };
+      expect(await verifyOwnedTmuxExit(proof, serverUncertain)).toBe(false);
+    }
+    expect(await verifyOwnedTmuxExit({ ...proof, identities: [] }, probe)).toBe(false);
+    expect(await verifyOwnedTmuxExit({ ...proof, server: { ...proof.server, start: '' } }, probe)).toBe(false);
+    // Repeated cleanup of the old identity cannot signal or query the replacement target.
+    expect(await stopOwnedTmux(original, probe)).toMatchObject({ server: original.server, targetId: original.targetId });
+    expect(tmux('has-session', '-t', '=owned')).toBe('');
+    expect(observeProcess(replacement.server)).toBe('alive');
+    expect(replacement.identities.every(value => observeProcess(value) === 'alive')).toBe(true);
+  });
+  it('does not release an old live server merely because another server replaces its unlinked socket', async () => {
+    create(); create('other');
+    const original = (await captureOwnedTmuxIdentity(scope(), probe))!;
+    const proof = await stopOwnedTmux(original, probe);
+    rmSync(socket);
+    try {
+      create('replacement');
+      expect(observeProcess(original.server)).toBe('alive');
+      expect(await verifyOwnedTmuxExit(proof, probe)).toBe(false);
+      expect(tmux('has-session', '-t', '=replacement')).toBe('');
+    } finally {
+      if (observeProcess(original.server) === 'alive') process.kill(original.server.pid, 'SIGTERM');
+    }
   });
   it('rejects owner mutation between capture and stop without killing the target', async () => {
     create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;

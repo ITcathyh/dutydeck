@@ -26,15 +26,22 @@ async function harness(options: { output?: string; gate?: Promise<void>; fail?: 
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
-    driverFactory: (_config, _protocol, emit) => ({
-      start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
-      send: async prompt => {
-        await options.gate;
-        if (options.fail) { emit({ type: 'error', data: { message: 'fixture failure' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); return; }
-        emit({ type: 'text', data: { text: options.output ?? (prompt.includes('长回答') ? longAnswer : `回答：${prompt.split('\n').at(-1)}`) } });
-        emit({ type: 'completed', data: { stopReason: 'end_turn' } });
-      }
-    } satisfies AgentDriver)
+    driverFactory: (_config, _protocol, emit) => {
+      let busy = false;
+      return {
+        isIdle: () => !busy, hasBackgroundWork: () => false,
+        start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
+        send: async prompt => {
+          busy = true;
+          try {
+            await options.gate;
+            if (options.fail) { emit({ type: 'error', data: { message: 'fixture failure' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); return; }
+            emit({ type: 'text', data: { text: options.output ?? (prompt.includes('长回答') ? longAnswer : `回答：${prompt.split('\n').at(-1)}`) } });
+            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+          } finally { busy = false; }
+        }
+      } satisfies AgentDriver;
+    }
   });
   const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
   await runtime.initialize([agent]);
@@ -280,11 +287,17 @@ describe('history answers delivered with group send --final', () => {
     expect((await h.tools.history(h.plainToken, { query: '短信验证码' })).tasks.map(item => item.taskId)).toEqual([h.finalTaskId]);
   });
 
-  it('does not adopt an explicit final from an unrelated manual retry', async () => {
+  it('adopts an explicit final only from the audited manual retry of the original request', async () => {
     const h = await explicitFinalHarness({ manual: true });
     const attempts = h.repos.execution.getTaskExecution(h.finalTaskId)!.attempts;
     expect(attempts.map(attempt => attempt.outcome)).toEqual(['failed', 'completed']);
     expect(attempts[1]!.automaticRetry).toBeUndefined();
+    expect(attempts[1]!.manualRetry).toMatchObject({ causeAttemptId: attempts[0]!.attemptId, decisionId: 'manual-retry' });
+    expect(await h.tools.historyTask(h.plainToken, { taskId: h.finalTaskId, field: 'answer' })).toMatchObject({ text: finalAnswer, source: 'explicit_final', complete: true });
+    expect((await h.tools.history(h.plainToken, { query: '短信验证码' })).tasks.map(item => item.taskId)).toEqual([h.finalTaskId]);
+    const sql = new Database(h.database);
+    try { sql.prepare("UPDATE task_attempts SET json=json_remove(json, '$.manualRetry') WHERE id=?").run(h.finalAttemptId); }
+    finally { sql.close(); }
     expect(await h.tools.historyTask(h.plainToken, { taskId: h.finalTaskId, field: 'answer' })).toMatchObject({ readStatus: 'missing', source: 'attempt', complete: false });
     expect((await h.tools.history(h.plainToken, { query: '短信验证码' })).tasks).toEqual([]);
   });

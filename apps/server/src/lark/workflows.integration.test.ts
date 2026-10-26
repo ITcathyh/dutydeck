@@ -34,6 +34,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
     driverFactory: (_config, _protocol, emit, _exit, sessionId) => {
       let currentRelease: (() => void) | undefined;
       let currentCancelled = false;
+      let busy = false; let stopped = false;
       const cancelCurrent = () => {
         if (kind === 'permission') emit({ type: 'permission_request', data: { id: 'native_permission', title: '修改文件', status: 'rejected', options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } });
         currentCancelled = true;
@@ -42,39 +43,43 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
         currentRelease = undefined;
       };
       const driver: AgentDriver = {
-        start: async () => {}, resume: async () => {}, stop: async () => cancelCurrent(), interrupt: async () => cancelCurrent(),
+        start: async () => {}, resume: async () => {}, stop: async () => { stopped = true; cancelCurrent(); }, interrupt: async () => cancelCurrent(),
         ...(options.compactGate ? { compact: async () => {
           compact(); emit({ type: 'status', data: { state: 'compaction', phase: 'start', proactive: true } });
           await options.compactGate; emit({ type: 'status', data: { state: 'compaction', phase: 'completed', proactive: true } });
           return 'completed' as const;
         } } : {}),
+        isIdle: () => !busy, hasBackgroundWork: () => false, isStopped: async () => stopped,
         send: async prompt => {
-          try { send(prompt); } catch (error) { emit({ type: 'error', data: { message: String(error) } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); return; }
-          currentCancelled = false;
-          if (kind === 'ask') {
-            const result = await broker.register({ sessionId: sessionId!, question: '选择哪一种实现？', timeoutMs: options.askTimeoutMs, ...(options.askChoices ? { choices: options.askChoices } : {}) });
-            if (result.status === 'answered') {
-              emit({ type: 'text', data: { text: `已收到：${result.answer}` } });
+          busy = true;
+          try {
+            try { send(prompt); } catch (error) { emit({ type: 'error', data: { message: String(error) } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); return; }
+            currentCancelled = false;
+            if (kind === 'ask') {
+              const result = await broker.register({ sessionId: sessionId!, question: '选择哪一种实现？', timeoutMs: options.askTimeoutMs, ...(options.askChoices ? { choices: options.askChoices } : {}) });
+              if (result.status === 'answered') {
+                emit({ type: 'text', data: { text: `已收到：${result.answer}` } });
+              }
+              emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+            } else if (kind === 'permission') {
+              emit({ type: 'permission_request', data: { id: 'native_permission', title: '修改文件', status: 'pending', ...(options.permissionOperation ? { operation: options.permissionOperation } : {}), options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } });
+              await new Promise<void>(done => { currentRelease = done; });
+              if (currentCancelled) return;
+              currentRelease = undefined;
+              emit({ type: 'text', data: { text: '审批处理完成' } });
+              emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+            } else if (options.answerChunks) {
+              emit({ type: 'text', data: { text: '正在检查执行结果' } });
+              emit({ type: 'tool_call', data: { id: 'tool_check', name: 'Bash', input: { command: 'pnpm test' }, status: 'running' } });
+              emit({ type: 'tool_result', data: { id: 'tool_check', output: '125 passed', status: 'completed' } });
+              for (const item of options.traceEvents ?? []) emit(item);
+              for (const text of options.answerChunks) emit({ type: 'text', data: { text } });
+              emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+            } else {
+              emit({ type: 'text', data: { text: '工作已完成' } });
+              emit({ type: 'completed', data: { stopReason: 'end_turn' } });
             }
-            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
-          } else if (kind === 'permission') {
-            emit({ type: 'permission_request', data: { id: 'native_permission', title: '修改文件', status: 'pending', ...(options.permissionOperation ? { operation: options.permissionOperation } : {}), options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } });
-            await new Promise<void>(done => { currentRelease = done; });
-            if (currentCancelled) return;
-            currentRelease = undefined;
-            emit({ type: 'text', data: { text: '审批处理完成' } });
-            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
-          } else if (options.answerChunks) {
-            emit({ type: 'text', data: { text: '正在检查执行结果' } });
-            emit({ type: 'tool_call', data: { id: 'tool_check', name: 'Bash', input: { command: 'pnpm test' }, status: 'running' } });
-            emit({ type: 'tool_result', data: { id: 'tool_check', output: '125 passed', status: 'completed' } });
-            for (const item of options.traceEvents ?? []) emit(item);
-            for (const text of options.answerChunks) emit({ type: 'text', data: { text } });
-            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
-          } else {
-            emit({ type: 'text', data: { text: '工作已完成' } });
-            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
-          }
+          } finally { busy = false; }
         },
         resolvePermission: async (id, approved) => { resolvePermission(id, approved); emit({ type: 'permission_request', data: { id, title: '修改文件', status: approved ? 'approved' : 'rejected', options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } }); currentRelease?.(); currentRelease = undefined; return true; }
       };
@@ -459,8 +464,10 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     const h = await harness();
     for (let index = 0; index < 11; index++) {
       await h.coordinator.handle(event(index === 0 ? 'om_task' : `om_task_${index}`, `目标 ${index}`, { threadId: `omt_${index}`, rootId: `om_root_${index}` }), h.config);
+      await vi.waitFor(async () => expect((await h.repos.channelMappings.list(`lark-card:${h.config.appId}`))
+        .filter(mapping => JSON.parse(mapping.extra ?? '{}').final_delivery_state === 'delivered')).toHaveLength(index + 1));
     }
-    // 11 个任务的终态投递在全量套件并行负载下接近 1s 默认等待的边界，放宽等待时间；断言条件不变。
+    // 同目录任务逐个完成后验证全部 11 条结果；分页与重启仍使用同一批真实记录。
     await vi.waitFor(async () => expect((await h.repos.channelMappings.list(`lark-card:${h.config.appId}`))
       .filter(mapping => JSON.parse(mapping.extra ?? '{}').final_delivery_state === 'delivered')).toHaveLength(11), { timeout: 5_000 });
     await h.coordinator.handle(event('om_dashboard', '/tasks', { chatType: 'p2p', chatId: 'oc_dm' }), h.config);
@@ -776,6 +783,10 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await h.groupManager!.save(h.config.appId, 'oc_group', { expectedRevision: (await h.groupManager!.groupAccess(h.config.appId, 'oc_group'))!.revision, patch: {},
       roleChanges: [{ kind: 'create', principalId: bob!, role: 'can_operate', operateScope: 'group_runs', actionGates: { terminalWrite: false, highRisk: true, groupToolsSend: false } }] });
     await h.coordinator.handle(event('om_task_2', '再修改一次', { rootId: 'om_root_2', threadId: 'omt_topic_2' }), h.config);
+    expect((await h.interactions()).filter(item => item.kind === 'permission')).toHaveLength(1);
+    expect(h.resolvePermission).not.toHaveBeenCalled();
+    // 同一目录的第二个请求等待第一条 Web 审批结束；拒绝后才释放执行资源。
+    await h.runtime.resolvePermission(first.sessionId, first.nativeId, false, 'Rejected through Web');
     await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'permission' && item.id !== first.id)?.cardId).toBeTruthy());
     const second = (await h.interactions()).find(item => item.kind === 'permission' && item.id !== first.id)!;
     const bobCard = h.cards.get(second.cardId!);
@@ -784,7 +795,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     expect(JSON.stringify(bobCard)).not.toContain('需要在 Web 上处理');
     expect(await h.coordinator.handleAction({ dutydeck_workflow: 'approve', request_id: second.id, generation: second.boot }, 'ou_bob', { messageId: second.cardId, chatId: 'oc_group' }))
       .toMatchObject({ type: 'success', content: '执行端已接受本次批准。' });
-    expect(h.resolvePermission).toHaveBeenCalledExactlyOnceWith('native_permission', true);
+    expect(h.resolvePermission.mock.calls).toEqual([['native_permission', false], ['native_permission', true]]);
     await vi.waitFor(() => expect(JSON.stringify(h.cards.get(second.cardId!))).toMatch(/已允许 · <at id=ou_bob><\/at> · \d{2}:\d{2}/), { timeout: 2_000 });
   });
 

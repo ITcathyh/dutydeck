@@ -16,7 +16,11 @@ button:not(:disabled) { cursor: pointer; }
 ::selection { background: var(--action-soft); color: var(--text-primary); }
 * { scrollbar-color: var(--scrollbar-thumb) transparent; scrollbar-width: thin; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.markdown { overflow-wrap: anywhere; }
+.markdown { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.markdown-table-scroll { max-width: 100%; overflow-x: auto; margin: .8rem 0; }
+.markdown table { width: max-content; min-width: 100%; border-collapse: collapse; }
+.markdown th, .markdown td { max-width: 32rem; border: 1px solid var(--border-default); padding: .5rem .75rem; text-align: left; overflow-wrap: anywhere; }
+.markdown th { background: var(--surface-muted); font-weight: 650; }
 .markdown > :first-child { margin-top: 0; }
 .markdown > :last-child { margin-bottom: 0; }
 .markdown p { margin: .65rem 0; }

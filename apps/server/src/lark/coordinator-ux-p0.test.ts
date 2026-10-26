@@ -66,6 +66,7 @@ async function harness(
       // 不短路后续新任务（与真实 transport 收到取消后事件驱动结算一致）。
       let currentRelease: (() => void) | undefined;
       let currentCancelled = false;
+      let stopped = false;
       const cancelCurrent = () => {
         // 中断后真实 CLI 会把待决审批回成非 pending（这里 resolved/rejected），
         // Runtime 据此清掉 pending permission；否则下一轮因旧审批未决无法申领 driver。
@@ -76,9 +77,10 @@ async function harness(
         currentRelease = undefined;
       };
       const driver: AgentDriver = {
-        start: async () => {},
-        resume: async () => {},
-        stop: async () => cancelCurrent(),
+        start: async () => { stopped = false; },
+        resume: async () => { stopped = false; },
+        stop: async () => { cancelCurrent(); stopped = true; },
+        isStopped: async () => stopped,
         interrupt: async () => cancelCurrent(),
         send: async prompt => {
           send(prompt);

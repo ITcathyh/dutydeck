@@ -48,21 +48,26 @@ async function harness(options: { now?: () => Date; timeoutMs?: number; agentMod
   const runtime = new DutydeckRuntime(repos, {
     probe: configured => ({ protocol: configured.id === 'memory' ? options.protocol ?? 'acp' : 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _onExit, sessionId) => {
+      let busy = false;
       const driver: AgentDriver = {
+        isIdle: () => !busy, hasBackgroundWork: () => false,
         start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
         send: async prompt => {
-          const session = await repos.sessions.get(sessionId);
-          if (session?.source === 'lark-memory') {
-            memoryPrompts.push(prompt);
-            const reply = respond(prompt);
-            if (reply.delayMs) await new Promise(resolve => setTimeout(resolve, reply.delayMs));
-            emit({ type: 'text', data: { text: reply.text } });
+          busy = true;
+          try {
+            const session = await repos.sessions.get(sessionId);
+            if (session?.source === 'lark-memory') {
+              memoryPrompts.push(prompt);
+              const reply = respond(prompt);
+              if (reply.delayMs) await new Promise(resolve => setTimeout(resolve, reply.delayMs));
+              emit({ type: 'text', data: { text: reply.text } });
+              emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+              return;
+            }
+            prompts.push(prompt);
+            emit({ type: 'text', data: { text: options.userAnswer ?? '工作已完成' } });
             emit({ type: 'completed', data: { stopReason: 'end_turn' } });
-            return;
-          }
-          prompts.push(prompt);
-          emit({ type: 'text', data: { text: options.userAnswer ?? '工作已完成' } });
-          emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+          } finally { busy = false; }
         }
       };
       return driver;

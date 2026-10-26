@@ -32,6 +32,7 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
   const prompts: Array<{ sessionId: string; agentId: string; prompt: string }> = [];
   const releases = new Map<string, () => void>();
   const stopped = new Set<string>();
+  const busy = new Set<string>();
   const denied = new Set<string>();
   const leader = { reply: plan(), open: false, waiting: [] as Array<() => void>, hangStart: false, starts: [] as Array<() => void> };
   const revoked = new Set<string>();
@@ -47,14 +48,16 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
     sessionPrompt: (session, prompt) => tools.promptForSession(session, prompt),
     driverFactory: (agent, _protocol, emit, _exit, sessionId) => ({
       start: async () => { if (agent.id === 'leader' && leader.hangStart) await new Promise<void>(resolve => leader.starts.push(resolve)); },
+      isIdle: () => !busy.has(sessionId), hasBackgroundWork: () => false,
       resume: async () => {}, interrupt: async () => releases.get(sessionId)?.(),
       stop: async () => { stopped.add(sessionId); releases.get(sessionId)?.(); }, isStopped: async () => stopped.has(sessionId),
       send: async promptOrSubmission => {
+        busy.add(sessionId);
         const prompt = typeof promptOrSubmission === 'string' ? promptOrSubmission : promptOrSubmission.prompt;
         prompts.push({ sessionId, agentId: agent.id, prompt });
         let text: string;
         if (prompt.includes('你是分层协作里的 Leader')) {
-          if (!leader.open) await new Promise<void>(resolve => leader.waiting.push(resolve));
+          if (!leader.open) await new Promise<void>(resolve => { leader.waiting.push(resolve); releases.set(sessionId, resolve); });
           text = leader.reply;
         } else if (prompt.includes('Step: Leader 验收')) {
           const inputs = JSON.parse(prompt.split('Upstream inputs (generated results, not independent business verification):\n')[1]!.split('\n\n')[0]!);
@@ -63,6 +66,7 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
         else if (sessionId.startsWith('ses_work_')) text = '已修复：改动 src/login.ts，pnpm test 通过。';
         else { await new Promise<void>(resolve => releases.set(sessionId, resolve)); text = '已交给 Leader。'; }
         emit({ type: 'text', data: { text } });
+        busy.delete(sessionId);
         emit({ type: 'completed', data: { stopReason: 'end_turn' } });
       }
     } satisfies AgentDriver)
@@ -180,6 +184,9 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     expect(await turn.run('delegate', brief)).toEqual(delegated);
     // 同一请求键换了简报内容：拒绝，而不是静默沿用旧指令。
     await expect(turn.run('delegate', { ...brief, context: '只改测试' })).rejects.toMatchObject({ statusCode: 409, error: { code: 'LEADER_DELEGATION_IDEMPOTENCY_CONFLICT' } });
+    // 同目录的 PMO 仍在执行时，Leader 已受理但必须排队。
+    await vi.waitFor(async () => expect((await f.runtime.listSessions()).filter(session => session.source === 'lark-leader')).toHaveLength(1));
+    expect(f.leaderPrompts()).toHaveLength(0);
     // PMO 本轮先结束，Leader 规划在后台完成后才创建目标。
     await turn.finish();
     f.openLeader();
@@ -229,6 +236,7 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     f.replyText.mockRejectedValueOnce(new Error('飞书暂时不可用'));
     const first = await f.pmoTurn('om_ask', '修一下登录');
     const asked = await first.run('delegate', { goal: '修复登录', idempotencyKey: 'ask' }) as { id: string };
+    await first.finish();
     const stored = async () => JSON.parse((await f.repos.config.get(`leader_delegation:${asked.id}`))!);
     await vi.waitFor(async () => { expect(f.replyText).toHaveBeenCalledTimes(1); expect(await stored()).toMatchObject({ status: 'needs_context', notice: { kind: 'needs_context' } }); });
     // 发送失败的通知留在记录里；重启（或每分钟补发）用同一个请求键重发，送达后清除。
@@ -239,14 +247,16 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     expect(await f.work.listBySession(first.parent.id, 'ou_alice')).toHaveLength(0);
 
     f.leader.reply = plan('pmo');
-    await first.run('delegate', { goal: '修复登录', context: '预发环境', idempotencyKey: 'retry' });
+    const retry = await f.pmoTurn('om_retry', '补充：预发环境');
+    await retry.run('delegate', { goal: '修复登录', context: '预发环境', idempotencyKey: 'retry' });
+    await retry.finish();
     await vi.waitFor(() => expect(f.replyText).toHaveBeenLastCalledWith(expect.objectContaining({ text: expect.stringContaining('名单外的 Agent：pmo') })));
     expect(await f.work.listBySession(first.parent.id, 'ou_alice')).toHaveLength(0);
     expect(f.replyText.mock.calls.map(([input]) => input.idempotencyKey)).toEqual(Array(3).fill(expect.stringMatching(/^dlg_[a-f0-9]{40}$/)));
     expect(new Set(f.replyText.mock.calls.map(([input]) => input.idempotencyKey)).size).toBe(2);
   });
 
-  it('resumes planning interrupted by a restart', async () => {
+  it('resumes interrupted planning only after the prior unknown execution is explicitly resolved', async () => {
     const f = await fixture();
     const turn = await f.pmoTurn('om_resume', '修复登录');
     const delegated = await turn.run('delegate', { goal: '修复登录', idempotencyKey: 'resume' }) as { id: string; workId: string };
@@ -255,6 +265,21 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     await f.delegations.close();
     const resumed = f.resumed();
     await resumed.start();
+    await vi.waitFor(async () => expect((await f.runtime.listSessions()).filter(session => session.source === 'lark-leader')).toHaveLength(2));
+    const oldSession = (await f.runtime.listSessions()).find(session => session.source === 'lark-leader' && session.state === 'interrupted')!;
+    const old = f.repos.execution.getSessionExecutions(oldSession.id)[0]!;
+    expect(old.currentAttempt).toMatchObject({ state: 'reconcile_required', reconcileReason: { code: 'STOP_RESULT_UNKNOWN' } });
+    const replacement = (await f.runtime.listSessions()).find(session => session.source === 'lark-leader' && session.id !== oldSession.id)!;
+    await vi.waitFor(() => expect(f.repos.execution.getSessionExecutions(replacement.id)[0]).toMatchObject({
+      task: { status: 'queued' }, attempts: [],
+      blockers: expect.arrayContaining([expect.objectContaining({ code: 'WORKSPACE_EXECUTION_BUSY', sessionId: oldSession.id })])
+    }));
+    expect(f.leaderPrompts()).toHaveLength(1);
+    const facts = await f.runtime.inspectUnknownTask(oldSession.id, old.task.id);
+    await f.runtime.resolveUnknownTask(oldSession.id, {
+      taskId: old.task.id, target: facts.target!, decisionId: 'test:verified-interrupted-planning', action: 'failed',
+      evidenceRefs: ['fixture:original-driver-stopped-and-result-reviewed']
+    }, { kind: 'installation_owner', id: 'installation_owner' });
     await vi.waitFor(() => expect(f.leader.waiting).toHaveLength(2));
     f.openLeader();
     await vi.waitFor(async () => expect((await f.work.listBySession(turn.parent.id, 'ou_alice')).map(item => item.id)).toEqual([delegated.workId]));
@@ -289,9 +314,15 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     const f = await fixture();
     const turn = await f.pmoTurn('om_queue', '修复登录');
     for (const key of ['q1', 'q2', 'q3', 'q4']) await turn.run('delegate', { goal: `修复登录 ${key}`, idempotencyKey: key });
-    await vi.waitFor(() => expect(f.leader.waiting).toHaveLength(3));
+    await turn.finish();
+    await vi.waitFor(async () => expect((await f.runtime.listSessions()).filter(session => session.source === 'lark-leader')).toHaveLength(3));
+    await vi.waitFor(() => expect(f.leader.waiting).toHaveLength(1));
     await new Promise(resolve => setTimeout(resolve, 50));
-    expect(f.leaderPrompts()).toHaveLength(3);
+    // 规划池仍最多容纳三个请求；同目录只有一个已提交，第四个尚未创建会话。
+    const planning = (await f.runtime.listSessions()).filter(session => session.source === 'lark-leader');
+    expect(planning).toHaveLength(3);
+    expect((await Promise.all(planning.map(session => f.runtime.getTasks(session.id)))).flat().filter(task => task.status === 'queued')).toHaveLength(2);
+    expect(f.leaderPrompts()).toHaveLength(1);
     f.openLeader();
     await vi.waitFor(async () => expect(await f.work.listBySession(turn.parent.id, 'ou_alice')).toHaveLength(4));
     expect(f.leaderPrompts()).toHaveLength(4);
@@ -307,6 +338,7 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     f.leader.hangStart = false;
     f.openLeader();
     const next = await turn.run('delegate', { goal: '修复注册', idempotencyKey: 'next' }) as { workId: string };
+    await turn.finish();
     await vi.waitFor(async () => {
       for (const { id } of hung) expect(await f.record(id)).toMatchObject({ status: 'failed', error: 'Leader 规划超时' });
     });
@@ -327,6 +359,7 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     await expect(turn.run('delegate', { goal: '修复登录', idempotencyKey: 'denied' })).rejects.toMatchObject({ statusCode: 403, error: { code: 'LEADER_DELEGATION_FORBIDDEN' } });
     f.denied.clear();
     await turn.run('delegate', { goal: '修复登录', idempotencyKey: 'roster' });
+    await turn.finish();
     await vi.waitFor(() => expect(f.leader.waiting).toHaveLength(1));
     // Leader 规划期间管理员把 Worker 换掉：按旧名单拆出的计划不执行。
     await f.setConfig({ executionMode: 'layered', leaderAgentId: 'leader', workerAgentIds: ['pmo'] });
@@ -370,7 +403,9 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     const turn = await f.pmoTurn('om_cli_downgrade', '修复登录');
     const queued: Array<{ id: string }> = [];
     for (const key of ['d1', 'd2', 'd3', 'd4']) queued.push(await turn.run('delegate', { goal: `修复登录 ${key}`, idempotencyKey: key }) as { id: string });
-    await vi.waitFor(() => expect(f.leader.waiting).toHaveLength(3));
+    await turn.finish();
+    await vi.waitFor(async () => expect((await f.runtime.listSessions()).filter(session => session.source === 'lark-leader')).toHaveLength(3));
+    await vi.waitFor(() => expect(f.leader.waiting).toHaveLength(1));
     // 排队期间管理员把机器人改成逐项确认，原话题会话仍是完全信任：已出的计划不建目标，排队的不再规划。
     await f.setConfig({ permissionMode: 'ask' });
     f.openLeader();
@@ -385,14 +420,16 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     const saved = await turn.run('delegate', { goal: '修复登录', idempotencyKey: 'saved' }) as { id: string; workId: string };
     const stale = await turn.run('delegate', { goal: '修复注册', idempotencyKey: 'stale' }) as { id: string };
     await turn.finish();
-    await vi.waitFor(() => expect(f.leader.waiting).toHaveLength(2));
+    await vi.waitFor(async () => expect((await f.runtime.listSessions()).filter(session => session.source === 'lark-leader')).toHaveLength(2));
+    await vi.waitFor(() => expect(f.leader.waiting).toHaveLength(1));
+    const promptsBeforeRestart = f.leaderPrompts().length;
     await f.delegations.close();
     // 模拟上次在计划落盘后、建目标前中断，以及一条停机很久的规划。
     await f.setRecord(saved.id, { ...await f.record(saved.id), plan: layeredPlan(parseLeaderResult(plan()) as any, 'leader', ['worker'], false) });
     await f.setRecord(stale.id, { ...await f.record(stale.id), createdAt: new Date(Date.now() - 31 * 60_000).toISOString() });
     await f.resumed().start();
     await vi.waitFor(async () => expect((await f.work.listBySession(turn.parent.id, 'ou_alice')).map(item => item.id)).toEqual([saved.workId]));
-    expect(f.leaderPrompts()).toHaveLength(2);
+    expect(f.leaderPrompts()).toHaveLength(promptsBeforeRestart);
     expect(await f.record(stale.id)).toMatchObject({ status: 'failed', error: expect.stringContaining('不再自动执行') });
     expect(f.replyText).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('不再自动执行') }));
     // 目标已经建好、只差回写状态的旧记录照常补记，不报失败；父会话已停、操作者失去权限也一样。

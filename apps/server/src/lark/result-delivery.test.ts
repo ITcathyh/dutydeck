@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentEvent } from '@dutydeck/shared';
 import { loadLarkTaskEvents, renderLarkProcessElements, renderLarkResultElements } from './card-renderer.js';
-import { deliverLarkStatusReaction, larkResultKey, patchLarkCard, sendLarkDeliveryText, sendLarkFile, sendLarkResult } from './result-delivery.js';
+import { deliverLarkStatusReaction, larkResultKey, patchLarkCard, sendLarkDeliveryText, sendLarkFile, sendLarkResult, sendLarkBoundMessage, readConfirmedLarkBoundMessage } from './result-delivery.js';
 import { COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI, reactionDedupeKey } from './reaction-records.js';
 import { buildLarkCard, LarkCardService, LarkServiceError } from './service.js';
 import { sendTaskCard } from './coordinator-core.js';
@@ -459,4 +459,61 @@ describe('原消息上的状态表情', () => {
     expect(await h.react(false)).toBe(true);
     expect(h.service.addReaction.mock.calls.at(-1)).toEqual(['om_req', FAILURE_REACTION_EMOJI]);
   });
+});
+
+it('does not adopt a concurrent bound receipt belonging to another operation', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dutydeck-bound-flight-'));
+  const repos = createRepositories(join(dir, 'test.db'));
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), waiting = new Promise<void>(resolve => { release = resolve; });
+  const first = { idempotencyKey: 'bound-flight', chatId: 'oc_group', identity: 'original-operation' };
+  const send = vi.fn(async () => { enter(); await waiting; return { messageId: 'om_original', chatId: first.chatId }; });
+  try {
+    const original = sendLarkBoundMessage(repos.config, first, send); await entered;
+    const otherSend = vi.fn(async () => ({ messageId: 'om_other', chatId: first.chatId }));
+    const conflict = expect(sendLarkBoundMessage(repos.config, { ...first, identity: 'another-operation' }, otherSend)).rejects.toThrow('identity conflict');
+    release(); await original; await conflict;
+    expect(otherSend).not.toHaveBeenCalled();
+    expect(await readConfirmedLarkBoundMessage(repos.config, first)).toMatchObject({ messageId: 'om_original' });
+    expect(await readConfirmedLarkBoundMessage(repos.config, { ...first, identity: 'another-operation' })).toBeUndefined();
+    await expect(sendLarkBoundMessage(repos.config, { ...first, identity: 'another-operation' }, otherSend)).rejects.toThrow('identity conflict');
+    expect(otherSend).not.toHaveBeenCalled();
+  } finally { release(); repos.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+it('does not persist a successful response for a different delivery chat', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dutydeck-bound-target-'));
+  const repos = createRepositories(join(dir, 'test.db'));
+  const input = { idempotencyKey: 'bound-target', chatId: 'oc_group', identity: 'original-operation' };
+  try {
+    await expect(sendLarkBoundMessage(repos.config, input, async () => ({ messageId: 'om_other', chatId: 'oc_other' }))).rejects.toThrow('destination conflict');
+    expect(await readConfirmedLarkBoundMessage(repos.config, input)).toBeUndefined();
+    expect(await repos.config.get('lark.delivery.bound-target.message')).toBeUndefined();
+  } finally { repos.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+it('rejects a conflicting durable receipt written while an independent sender waits for its claim', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dutydeck-bound-cross-process-'));
+  const repos = createRepositories(join(dir, 'test.db'));
+  // Independent module instances have separate deliveryFlights, like independent server processes.
+  vi.resetModules();
+  const independent = await import('./result-delivery.js');
+  let enter!: () => void, release!: () => void, waitingForClaim!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; }), waiting = new Promise<void>(resolve => { release = resolve; });
+  const claimRead = new Promise<void>(resolve => { waitingForClaim = resolve; });
+  const first = { idempotencyKey: 'bound-cross-process', chatId: 'oc_group', identity: 'original-operation' };
+  const secondStore = { ...repos.config, get: async (key: string) => {
+    const value = await repos.config.get(key);
+    if (key === 'lark.delivery_claim.bound-cross-process.message' && value) waitingForClaim();
+    return value;
+  } };
+  const firstSend = vi.fn(async () => { enter(); await waiting; return { messageId: 'om_original', chatId: first.chatId }; });
+  const secondSend = vi.fn(async () => ({ messageId: 'om_other', chatId: first.chatId }));
+  try {
+    const original = sendLarkBoundMessage(repos.config, first, firstSend); await entered;
+    const conflict = expect(independent.sendLarkBoundMessage(secondStore, { ...first, identity: 'other-operation' }, secondSend)).rejects.toThrow();
+    await claimRead; release(); await original; await conflict;
+    expect(firstSend).toHaveBeenCalledOnce(); expect(secondSend).not.toHaveBeenCalled();
+    expect(await readConfirmedLarkBoundMessage(repos.config, first)).toMatchObject({ messageId: 'om_original', identity: first.identity });
+  } finally { release(); repos.close(); await rm(dir, { recursive: true, force: true }); }
 });

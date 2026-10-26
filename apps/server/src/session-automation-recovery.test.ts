@@ -535,7 +535,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
       }
       return cas(k, e, v);
     });
-    await expect(h.service.tick()).rejects.toThrow('cutpoint-after-admission-before-binding');
+    await expect(h.service.tick()).resolves.toBeUndefined();
     expect(reached).toBe(true);
     const sourceKey = (await h.repositories.config.list!('session_automation/occurrence/'))[0]!.key;
     const before = JSON.parse((await h.repositories.config.get(sourceKey))!);
@@ -601,7 +601,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
       }
       return cas(k, e, v);
     });
-    await expect(h.service.tick()).rejects.toThrow('cutpoint-after-admission-before-binding');
+    await expect(h.service.tick()).resolves.toBeUndefined();
     expect(reached).toBe(true);
     const sourceKey = (await h.repositories.config.list!('session_automation/ci/'))[0]!.key;
     const before = JSON.parse((await h.repositories.config.get(sourceKey))!);
@@ -954,7 +954,7 @@ describe('SessionAutomation historical capacity-result recovery', () => {
   it.each((['schedule', 'ci'] as const).flatMap(kind => [
     'manual_successor', 'input_conflict', 'scope_conflict', 'missing_boundary', 'unknown_then_manual_retry',
     'admission_conflict', 'unrelated_block', 'missing_frozen_attempt', 'wrong_frozen_attempt', 'already_delivered'
-  ].map(scenario => ({ kind, scenario }))))('keeps historical $kind unchanged for $scenario after SQLite reopen', async ({ kind, scenario }) => {
+  ].map(scenario => ({ kind, scenario }))))('reconciles historical $kind only with verified successor lineage for $scenario after SQLite reopen', async ({ kind, scenario }) => {
     const { h, delivered, taskId, successor, key, blocked } = await historical(kind);
     if (scenario === 'unknown_then_manual_retry') {
       const x = bound(h.repositories);
@@ -968,7 +968,7 @@ describe('SessionAutomation historical capacity-result recovery', () => {
       x.retryAttempt(fence(), { decisionId: 'human-retry', actor: { kind: 'installation_owner', id: 'installation_owner' },
         action: 'retry', allowDuplicateEffects: true, evidenceRefs: ['test'], resourceChecks: [] }, []);
     }
-    h.settleTask(taskId, 'completed', 'must not deliver this result');
+    h.settleTask(taskId, 'completed', scenario === 'unknown_then_manual_retry' ? 'audited retry result' : 'must not deliver this result');
     const sql = new Database(h.database);
     try {
       if (scenario === 'manual_successor') sql.prepare("UPDATE task_attempts SET json=json_remove(json, '$.automaticRetry') WHERE id=?").run(successor.attemptId);
@@ -985,8 +985,19 @@ describe('SessionAutomation historical capacity-result recovery', () => {
     const fresh = await reopen(h, delivered);
     await fresh.service.tick();
     await fresh.service.tick();
-    expect(JSON.parse((await fresh.repositories.config.get(key))!)).toEqual(blocked);
-    expect(delivered).not.toHaveBeenCalled();
+    if (scenario === 'unknown_then_manual_retry') {
+      const recovered = JSON.parse((await fresh.repositories.config.get(key))!);
+      expect(kind === 'schedule' ? recovered.runStatus : recovered.status).toBe('completed');
+      expect(recovered.runtimeAttemptId).toBe(blocked.runtimeAttemptId);
+      expect(recovered.admission).toEqual(blocked.admission);
+      expect(recovered.delivery.status).toBe('delivered');
+      expect(delivered).toHaveBeenCalledTimes(1);
+      expect(fresh.repositories.execution.getTaskExecution(taskId)!.attempts.find(attempt => attempt.attemptId === successor.attemptId)?.settlement?.outcome).toBe('unknown');
+      expect(await fresh.repositories.tasks.listBySession(h.session.id)).toHaveLength(1);
+    } else {
+      expect(JSON.parse((await fresh.repositories.config.get(key))!)).toEqual(blocked);
+      expect(delivered).not.toHaveBeenCalled();
+    }
     expect(fresh.runtime.dispatches).toHaveLength(0);
   });
 

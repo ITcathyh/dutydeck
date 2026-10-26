@@ -163,7 +163,7 @@ async function blockedTopic({ thread = true, web = false } = {}) {
 }
 
 describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite）', () => {
-  it('排队受阻的请求：取消原排队、在新会话执行原文，旧会话原样保留，重复点击与重启后的重复回调都只执行一次', async () => {
+  it('排队受阻的请求：取消原排队、将原文转入新会话队列，旧会话原样保留，重复点击与重启后都只受理一次', async () => {
     const h = await blockedTopic();
     const [firstTask, queuedTask] = await h.tasks(h.oldSessionId);
     expect([firstTask!.status, queuedTask!.status]).toEqual(['reconcile_required', 'queued']);
@@ -191,40 +191,48 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     // 同一张卡被连点三次：只有一次被受理。
     const results = await Promise.all([1, 2, 3].map(() => coordinator.handleAction(value, 'ou_alice', context)));
     expect(results.filter(result => result?.type === 'success')).toHaveLength(1);
-    await until(() => h.submissions.some(item => item.sessionId !== h.oldSessionId));
+    await until(async () => (await h.sessions()).some(session => session.id !== h.oldSessionId)
+      && (await Promise.all((await h.sessions()).filter(session => session.id !== h.oldSessionId).map(session => h.tasks(session.id)))).flat().length > 0);
+    expect(h.submissions.filter(item => item.sessionId !== h.oldSessionId)).toHaveLength(0);
 
     const all = await h.sessions();
     expect(all).toHaveLength(2);
     const fresh = all.find(item => item.id !== h.oldSessionId)!;
     expect(fresh.sourceId).toBe(all.find(item => item.id === h.oldSessionId)!.sourceId);
     const freshSubmissions = h.submissions.filter(item => item.sessionId === fresh.id);
-    expect(freshSubmissions).toHaveLength(1);
-    expect(freshSubmissions[0]!.prompt).toContain('看不懂');
+    expect(freshSubmissions).toHaveLength(0);
+    expect((await h.tasks(fresh.id))[0]!.status).toBe('queued');
     expect((await h.tasks(fresh.id)).map(task => task.prompt)).toEqual(['看不懂']);
+    await coordinator.reconcile(h.config);
+    const waitingCard = (await h.mapping('om_queued')).saved.card_message_id!;
+    await until(() => h.lastUpdate(service, waitingCard)?.statusLabel === '排队受阻');
+    expect(h.lastUpdate(service, waitingCard).markdown).toContain('换新会话也不能绕过');
+    expect(h.lastUpdate(service, waitingCard).markdown).toContain('原任务卡的详情');
+    expect(h.lastUpdate(service, waitingCard).capabilities?.canRelaunch).not.toBe(true);
     // 旧会话：阻塞原样、需要核对的任务原样，只有从未执行过的排队请求被取消。
     expect((await h.tasks(h.oldSessionId)).map(task => task.status)).toEqual(['reconcile_required', 'cancelled']);
     expect(h.blockers()).toEqual(blockersBefore);
     // 新进度卡回复在原话题里；卡片映射转到新会话。
     await until(async () => (await h.mapping('om_queued')).sessionId === fresh.id);
     expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_queued', replyInThread: true, taskName: '看不懂' }));
-    // 旧卡收尾为「已在新会话中执行」并去掉按钮；旧轮次没有补发「已取消」结果卡。
-    await until(() => h.lastUpdate(service, queuedCardId)?.statusLabel === '已在新会话中执行');
+    // 旧卡收尾为「已转到新会话队列」并去掉按钮；旧轮次没有补发「已取消」结果卡。
+    await until(() => h.lastUpdate(service, queuedCardId)?.statusLabel === '已转到新会话队列');
     const retiredCard = h.lastUpdate(service, queuedCardId);
     expect(retiredCard).toMatchObject({ readOnly: true, sessionId: h.oldSessionId });
     expect(callbackButtonCount(retiredCard)).toBe(0);
     expect(service.reply).not.toHaveBeenCalledWith(expect.objectContaining({ cardKind: 'result', state: 'cancelled' }));
     await coordinator.reconcile(h.config);
-    expect(h.lastUpdate(service, queuedCardId)?.statusLabel).toBe('已在新会话中执行');
+    expect(h.lastUpdate(service, queuedCardId)?.statusLabel).toBe('已转到新会话队列');
 
     // 回调重复投递：只回执。
-    expect(await coordinator.handleAction(value, 'ou_alice', context)).toMatchObject({ type: 'success', content: expect.stringContaining('已在新会话中执行') });
+    expect(await coordinator.handleAction(value, 'ou_alice', context)).toMatchObject({ type: 'success', content: expect.stringContaining('已转到新会话队列') });
 
     // 服务重启后收到重复回调：同样只回执，不新建会话、不再提交。
     const restarted = await h.start('p3');
-    expect(await restarted.coordinator.handleAction(value, 'ou_alice', context)).toMatchObject({ type: 'success', content: expect.stringContaining('已在新会话中执行') });
+    expect(await restarted.coordinator.handleAction(value, 'ou_alice', context)).toMatchObject({ type: 'success', content: expect.stringContaining('已转到新会话队列') });
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(await h.sessions()).toHaveLength(2);
-    expect(h.submissions.filter(item => item.sessionId === fresh.id)).toHaveLength(1);
+    expect(h.submissions.filter(item => item.sessionId === fresh.id)).toHaveLength(0);
     expect(await h.tasks(fresh.id)).toHaveLength(1);
 
     // 重启后的话题续聊进入新会话，旧会话不再收到任何请求。
@@ -234,7 +242,7 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     expect(await h.tasks(h.oldSessionId)).toHaveLength(2);
   });
 
-  it('需要核对的任务：在新会话中重新执行原请求，旧任务状态与阻塞不变，续聊进入新会话', async () => {
+  it('需要核对的任务：将原请求转入新会话队列，旧任务状态与阻塞不变，续聊进入新会话', async () => {
     const h = await blockedTopic();
     const blockersBefore = h.blockers();
     const { coordinator, service } = await h.start('p2');
@@ -250,14 +258,16 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     expect(value).toEqual({ action: 'rerun_in_new_session', task_id: 'om_first', turn: '1' });
 
     expect(await coordinator.handleAction(value, 'ou_alice', { messageId: firstCardId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
-    await until(() => h.submissions.some(item => item.sessionId !== h.oldSessionId));
+    await until(async () => (await h.sessions()).some(session => session.id !== h.oldSessionId)
+      && (await Promise.all((await h.sessions()).filter(session => session.id !== h.oldSessionId).map(session => h.tasks(session.id)))).flat().length > 0);
+    expect(h.submissions.filter(item => item.sessionId !== h.oldSessionId)).toHaveLength(0);
     const fresh = (await h.sessions()).find(item => item.id !== h.oldSessionId)!;
-    expect(h.submissions.filter(item => item.sessionId === fresh.id).map(item => item.prompt).join('')).toContain('详细排查下报警');
+    expect((await h.tasks(fresh.id))[0]!.status).toBe('queued');
     expect((await h.tasks(fresh.id)).map(task => task.prompt)).toEqual(['详细排查下报警']);
     // 原任务仍待核对，排队请求也没被动过（它有自己的卡和按钮），阻塞原样。
     expect((await h.tasks(h.oldSessionId)).map(task => task.status)).toEqual(['reconcile_required', 'queued']);
     expect(h.blockers()).toEqual(blockersBefore);
-    await until(() => h.lastUpdate(service, firstCardId)?.statusLabel === '已在新会话中重新执行');
+    await until(() => h.lastUpdate(service, firstCardId)?.statusLabel === '已转到新会话队列');
     expect(callbackButtonCount(h.lastUpdate(service, firstCardId))).toBe(0);
 
     // 同一进程内的话题续聊进入新会话。
@@ -272,7 +282,9 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     const first = await h.start('p2');
     const rerun = await h.relaunchButton(first.service, 'om_first', 'rerun_in_new_session');
     expect(await first.coordinator.handleAction(rerun.value, 'ou_alice', rerun.context)).toMatchObject({ type: 'success' });
-    await until(() => h.submissions.some(item => item.sessionId !== h.oldSessionId));
+    await until(async () => (await h.sessions()).some(session => session.id !== h.oldSessionId)
+      && (await Promise.all((await h.sessions()).filter(session => session.id !== h.oldSessionId).map(session => h.tasks(session.id)))).flat().length > 0);
+    expect(h.submissions.filter(item => item.sessionId !== h.oldSessionId)).toHaveLength(0);
     const fresh = (await h.sessions()).find(item => item.id !== h.oldSessionId)!;
     // 重启：内存里的话题绑定与作废集合都没了，第二次转交只能按账本判断哪个会话卡住。
     const restarted = await h.start('p3');
@@ -280,8 +292,8 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     expect(await restarted.coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });
     await until(async () => (await h.tasks(fresh.id)).length === 2);
     expect(await h.sessions()).toHaveLength(2);
-    expect((await h.tasks(fresh.id)).map(task => [task.prompt, task.status])).toEqual([['详细排查下报警', 'running'], ['看不懂', 'queued']]);
-    expect(h.submissions.filter(item => item.sessionId === fresh.id)).toHaveLength(1);
+    expect((await h.tasks(fresh.id)).map(task => [task.prompt, task.status])).toEqual([['详细排查下报警', 'queued'], ['看不懂', 'queued']]);
+    expect(h.submissions.filter(item => item.sessionId === fresh.id)).toHaveLength(0);
     expect((await h.tasks(h.oldSessionId)).map(task => task.status)).toEqual(['reconcile_required', 'cancelled']);
     await restarted.coordinator.handle(message('om_followup', '继续'), h.config);
     await until(async () => (await h.tasks(fresh.id)).length === 3);
@@ -300,7 +312,9 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     expect((await h.tasks(h.oldSessionId)).map(task => task.status)).toEqual(['reconcile_required', 'queued']);
     expect(await h.sessions()).toHaveLength(1);
     expect(await coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });
-    await until(() => h.submissions.some(item => item.sessionId !== h.oldSessionId));
+    await until(async () => (await h.sessions()).some(session => session.id !== h.oldSessionId)
+      && (await Promise.all((await h.sessions()).filter(session => session.id !== h.oldSessionId).map(session => h.tasks(session.id)))).flat().length > 0);
+    expect(h.submissions.filter(item => item.sessionId !== h.oldSessionId)).toHaveLength(0);
   });
 
   it('共享话题里他人发起的任务：与取消、重试他人任务一样再点一次才执行，执行身份是点击人', async () => {
@@ -312,7 +326,9 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     expect((await h.tasks(h.oldSessionId)).map(task => task.status)).toEqual(['reconcile_required', 'queued']);
     expect(await h.sessions()).toHaveLength(1);
     expect(await coordinator.handleAction(run.value, 'ou_bob', run.context)).toMatchObject({ type: 'success' });
-    await until(() => h.submissions.some(item => item.sessionId !== h.oldSessionId));
+    await until(async () => (await h.sessions()).some(session => session.id !== h.oldSessionId)
+      && (await Promise.all((await h.sessions()).filter(session => session.id !== h.oldSessionId).map(session => h.tasks(session.id)))).flat().length > 0);
+    expect(h.submissions.filter(item => item.sessionId !== h.oldSessionId)).toHaveLength(0);
     expect(JSON.parse((await h.repos.config.get('lark.inbox.app.om_queued'))!).event.senderOpenId).toBe('ou_bob');
   });
 
@@ -342,7 +358,9 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     const first = await h.start('p2');
     const rerun = await h.relaunchButton(first.service, 'om_first', 'rerun_in_new_session');
     expect(await first.coordinator.handleAction(rerun.value, 'ou_alice', rerun.context)).toMatchObject({ type: 'success' });
-    await until(() => h.submissions.some(item => item.sessionId !== h.oldSessionId));
+    await until(async () => (await h.sessions()).some(session => session.id !== h.oldSessionId)
+      && (await Promise.all((await h.sessions()).filter(session => session.id !== h.oldSessionId).map(session => h.tasks(session.id)))).flat().length > 0);
+    expect(h.submissions.filter(item => item.sessionId !== h.oldSessionId)).toHaveLength(0);
     const fresh = (await h.sessions()).find(item => item.id !== h.oldSessionId)!;
     // 重启后内存里的作废记录没了，只能靠持久化的保留标记认出旧会话。
     const restarted = await h.start('p3');
@@ -368,7 +386,7 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     const { coordinator, service } = await h.start('p2');
     const run = await h.relaunchButton(service, 'om_queued', 'run_in_new_session');
     expect(await coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });
-    await until(() => h.lastUpdate(service, run.cardId)?.statusLabel === '已在新会话中执行');
+    await until(() => h.lastUpdate(service, run.cardId)?.statusLabel === '已转到新会话队列');
     const retired = h.lastUpdate(service, run.cardId);
     expect(callbackButtonCount(retired)).toBe(1);
     const detail = callbackValueOf(retired, 'detail');
@@ -382,7 +400,7 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     const { coordinator, service } = await h.start('p2');
     const run = await h.relaunchButton(service, 'om_queued', 'run_in_new_session');
     expect(await coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });
-    await until(() => h.lastUpdate(service, run.cardId)?.statusLabel === '已在新会话中执行');
+    await until(() => h.lastUpdate(service, run.cardId)?.statusLabel === '已转到新会话队列');
     const fresh = (await h.sessions()).find(item => item.id !== h.oldSessionId)!;
     // 回调值取旧卡页脚按钮上的，context 是旧卡本身。
     const detail = callbackValueOf(h.lastUpdate(service, run.cardId), 'detail');
@@ -448,7 +466,7 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     expect(await h.tasks(h.oldSessionId)).toHaveLength(2);
   });
 
-  it('原排队请求已取消、但交给新会话失败：失败卡说明可再点一次，旧卡按钮保留，再点一次接着做完且只执行一次', async () => {
+  it('原排队请求已取消、但交给新会话失败：失败卡说明可再点一次，旧卡按钮保留，再点一次接着受理且只排队一次', async () => {
     const h = await blockedTopic();
     const { coordinator, service } = await h.start('p2');
     const run = await h.relaunchButton(service, 'om_queued', 'run_in_new_session');
@@ -473,12 +491,15 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     expect(service.reply).not.toHaveBeenCalledWith(expect.objectContaining({ cardKind: 'result', state: 'cancelled' }));
 
     expect(await coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });
-    await until(() => h.submissions.some(item => item.sessionId !== h.oldSessionId));
-    await until(() => h.lastUpdate(service, run.cardId)?.statusLabel === '已在新会话中执行');
+    await until(async () => (await h.sessions()).some(session => session.id !== h.oldSessionId)
+      && (await Promise.all((await h.sessions()).filter(session => session.id !== h.oldSessionId).map(session => h.tasks(session.id)))).flat().length > 0);
+    expect(h.submissions.filter(item => item.sessionId !== h.oldSessionId)).toHaveLength(0);
+    await until(() => h.lastUpdate(service, run.cardId)?.statusLabel === '已转到新会话队列');
     const all = await h.sessions();
     expect(all).toHaveLength(2);
     const fresh = all.find(item => item.id !== h.oldSessionId)!;
-    expect(h.submissions.filter(item => item.sessionId === fresh.id).map(item => item.prompt)).toEqual([expect.stringContaining('看不懂')]);
+    expect(h.submissions.filter(item => item.sessionId === fresh.id)).toHaveLength(0);
+    expect((await h.tasks(fresh.id))[0]!.status).toBe('queued');
     expect((await h.tasks(fresh.id)).map(task => task.prompt)).toEqual(['看不懂']);
   });
 });

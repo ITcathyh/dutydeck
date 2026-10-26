@@ -367,7 +367,7 @@ it.each(['topic', 'top'] as const)('%s 启动器失败后复用过程卡换新�
   expect(final.body.elements.some((el: any) => el.content === LARK_LAUNCHER_RECOVERY_NOTE)).toBe(true);
 });
 
-it('旧会话进程未确认停止时保留原记录，自动换新且原请求只提交一次', async () => {
+it('旧会话未确认停止时阻挡新会话，确认停止后原请求只提交一次', async () => {
   let count = 0;
   const stopBlock = (sessionId: string) => JSON.stringify({ sessionId, runId: 'old-run', reason: 'old process stop unconfirmed' });
   const h = await setup(async sessionId => {
@@ -381,9 +381,12 @@ it('旧会话进程未确认停止时保留原记录，自动换新且原请求�
   const oldRecord = await h.repos.tasks.get!(old.task.id);
   const oldAttempts = h.repos.execution.getTaskExecution(old.task.id)!.attempts;
   const stop = vi.spyOn(h.runtime, 'stop');
-  const { task, resultInput } = await h.runTurn('om_retained_launcher');
-  expect(task.status).toBe('completed');
-  expect(resultInput.sessionId).not.toBe(old.sessionId);
+  const replacementRun = h.runTurn('om_retained_launcher');
+  await h.until(async () => (await h.runtime.listSessions()).some(session => session.id !== old.sessionId));
+  const replacementSession = (await h.runtime.listSessions()).find(session => session.id !== old.sessionId)!;
+  await h.until(async () => (await h.runtime.getTasks(replacementSession.id))[0]?.status === 'queued');
+  expect(h.sent.filter(item => item.sessionId === replacementSession.id)).toEqual([]);
+  expect(h.issued.filter(input => input.cardKind === 'result' && input.taskId === 'om_retained_launcher')).toEqual([]);
   expect(stop).not.toHaveBeenCalled();
   expect((await h.runtime.getSession(old.sessionId))?.state).not.toBe('stopped');
   expect(await h.repos.tasks.get!(old.task.id)).toEqual(oldRecord);
@@ -392,6 +395,12 @@ it('旧会话进程未确认停止时保留原记录，自动换新且原请求�
   expect((await h.runtime.getTaskRecovery(old.sessionId, old.task.id)).blockers).toContainEqual({ code: 'DRIVER_STOP_BLOCKED' });
   expect(JSON.parse((await h.repos.config.get(`lark.relaunch_retained.app.${old.sessionId}`))!)).toEqual({ message_id: 'om_retained_launcher' });
   expect(h.log.info).toHaveBeenCalledWith(expect.objectContaining({ reason: 'session_retained', taskId: 'om_retained_launcher', sessionId: old.sessionId }), '旧启动器会话已保留未停止，继续自动换新');
+  // 管理员通过真实 stop 路径取得原驱动停止证明，不能直接删除数据库阻塞。
+  await h.runtime.stop(old.sessionId, { kind: 'installation_owner', id: 'installation_owner' });
+  const { task, resultInput } = await replacementRun;
+  expect(task.status).toBe('completed'); expect(resultInput.sessionId).toBe(replacementSession.id);
+  expect(await h.repos.tasks.get!(old.task.id)).toEqual(oldRecord);
+  expect(h.repos.execution.getTaskExecution(old.task.id)!.attempts).toEqual(oldAttempts);
   expect(h.prepared).toEqual([old.sessionId, old.sessionId, resultInput.sessionId]);
   expect(await h.runtime.getTasks(resultInput.sessionId)).toHaveLength(1);
   expect(h.sent.filter(item => item.sessionId === resultInput.sessionId)).toEqual([{ sessionId: resultInput.sessionId, prompt: expect.stringContaining('跑一下任务') }]);

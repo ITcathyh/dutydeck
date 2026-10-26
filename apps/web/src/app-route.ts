@@ -166,3 +166,7 @@ export const appLocationPath = ({ route, nav, appId, chatId, overlay }: AppLocat
   const query = params.toString();
   return query ? `${base}?${query}` : base;
 };
+
+/** 单次执行地址同时保存计划、来源任务和运行标识，刷新不会落到最新聊天。 */
+export const automationRunPath = (sessionId: string, scheduleId: string, occurrenceId: string) =>
+  instancePagePath('/?'+new URLSearchParams({ nav: 'automation', automationSession: sessionId, schedule: scheduleId, run: occurrenceId }));
