@@ -162,9 +162,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         && Boolean(s.error?.includes(LEGACY_RETIREMENT_NOTICE));
     } catch { return false; }
   };
-  const workspaceBlockers = (sessionId: string, checks: ResourceCheckRef[] = [], owner?: ExecutionController, freeze = false): ExecutionBlocker[] => {
+  const workspaceBlockers = (sessionId: string, checks: ResourceCheckRef[] = [], owner?: ExecutionController, freeze = false, preparation?: ExecutionWorkspaceIdentity): ExecutionBlocker[] => {
     let identity: ExecutionWorkspaceIdentity;
-    try { identity = workspaceIdentity(sessionId, freeze); }
+    try { identity = preparation ?? workspaceIdentity(sessionId, freeze); }
     catch { return [{ code: 'WORKSPACE_RESOURCE_UNVERIFIABLE', sessionId }]; }
     const result: ExecutionBlocker[] = [];
     const admissionExternal = (id: string): ExecutionBlocker[] => {
@@ -173,6 +173,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     };
     const candidates = db.prepare(`SELECT DISTINCT session_id FROM task_attempts WHERE state IN ('preparing','active','reconcile_required','legacy_unresolved')
       UNION SELECT session_id FROM tasks WHERE status='reconcile_required'
+      ${preparation ? "UNION SELECT session_id FROM tasks WHERE status='queued'" : ''}
       UNION SELECT session_id FROM task_steering_operations WHERE state IN ('pending','unknown')
       UNION SELECT session_id FROM driver_resources
       UNION SELECT substr(key,length('runtime_workspace:')+1) AS session_id FROM configs WHERE key LIKE 'runtime_workspace:%'
@@ -182,11 +183,12 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     for (const {session_id: otherId} of candidates) {
       if (otherId === sessionId) continue;
       const unresolved = db.prepare(`SELECT task_id AS taskId,id AS attemptId FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') LIMIT 1`).get(otherId) as {taskId:string;attemptId:string}|undefined;
+      const queued = preparation && db.prepare("SELECT id FROM tasks WHERE session_id=? AND status='queued' LIMIT 1").get(otherId) as {id:string}|undefined;
       const unknown = unresolvedUnknownTask(otherId);
       const steering = steeringBlockers(otherId);
       const unsafe = resources(otherId).filter(r => !resourceSafe(r) && !retiredLegacyResourceSafe(r) && !idleResourceSafe(r,checks,owner));
       const external = admissionExternal(otherId);
-      if (!unresolved && !unknown && !steering.length && !unsafe.length && !external.length) continue;
+      if (!unresolved && !queued && !unknown && !steering.length && !unsafe.length && !external.length) continue;
       let other: ExecutionWorkspaceIdentity;
       try { other = workspaceIdentity(otherId, freeze); }
       catch {
@@ -197,10 +199,28 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         result.push({code:'WORKSPACE_RESOURCE_UNVERIFIABLE',sessionId:otherId});continue;
       }
       if (other.key !== identity.key) continue;
-      if (unresolved || unknown || steering.length) result.push({code:'WORKSPACE_EXECUTION_BUSY',sessionId:otherId,...(unresolved ? {taskId:unresolved.taskId,attemptId:unresolved.attemptId} : unknown ? {taskId:unknown.id} : {taskId:steering[0]!.taskId})});
+      if (unresolved || queued || unknown || steering.length) result.push({code:'WORKSPACE_EXECUTION_BUSY',sessionId:otherId,...(unresolved ? {taskId:unresolved.taskId,attemptId:unresolved.attemptId} : unknown ? {taskId:unknown.id} : queued ? {taskId:queued.id} : {taskId:steering[0]!.taskId})});
       result.push(...unsafe.map(r => ({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE',sessionId:otherId,resourceId:r.resourceId})),...external);
     }
     return result;
+  };
+  // Count actual claims and unresolved execution resources, never pure accepted queues.
+  const assertWorkItemCapacity = (sessionId: string, checks: ResourceCheckRef[], owner: ExecutionController) => {
+    if (session(sessionId).source !== 'work_item') return;
+    const binding = db.prepare('SELECT config_key FROM work_item_sessions WHERE session_id=? ORDER BY config_key LIMIT 1').get(sessionId) as {config_key:string}|undefined;
+    const candidates = db.prepare(`SELECT DISTINCT s.id,w.config_key FROM sessions s
+      LEFT JOIN work_item_sessions w ON w.session_id=s.id
+      WHERE s.source='work_item' AND s.id!=? AND (
+        EXISTS (SELECT 1 FROM task_attempts a WHERE a.session_id=s.id AND a.state IN ('preparing','active','reconcile_required','legacy_unresolved'))
+        OR EXISTS (SELECT 1 FROM tasks t LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id
+          WHERE t.session_id=s.id AND t.status='reconcile_required' AND (a.id IS NULL OR a.state!='settled'))
+        OR EXISTS (SELECT 1 FROM task_steering_operations o WHERE o.session_id=s.id AND o.state IN ('pending','unknown'))
+        OR EXISTS (SELECT 1 FROM driver_resources r WHERE r.session_id=s.id)
+        OR EXISTS (SELECT 1 FROM configs c WHERE c.key='runtime_driver_stop_block:'||s.id AND c.value!=''))`).all(sessionId) as Array<{id:string;config_key:string|null}>;
+    const occupied = candidates.filter(row => attempts(row.id).some(attempt => ['preparing','active','reconcile_required','legacy_unresolved'].includes(attempt.state))
+      || unresolvedUnknownTask(row.id) || steeringBlockers(row.id).length || externalBlockers(row.id).length
+      || resources(row.id).some(resource => !resourceSafe(resource) && !retiredLegacyResourceSafe(resource) && !idleResourceSafe(resource,checks,owner)));
+    if (new Set(occupied.map(row => row.id)).size >= 6 || binding && new Set(occupied.filter(row => row.config_key === binding.config_key).map(row => row.id)).size >= 3) fail('WORK_ITEM_CAPACITY_BLOCKED');
   };
   const readInput = (raw: string): AcceptedTaskInput => {
     const input = parse(acceptedTaskInputSchema, JSON.parse(raw));
@@ -791,6 +811,12 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           if (request.mode === 'interrupt') queueAction(f,t,'accept',{ operationId: `accept_interrupt:${t.id}`, actor: request.actor, interrupt: true });
           return { ...result(f,t,undefined,[...cancelled.flatMap(item => item.events), ...events]), accepted: lookup(request)! };
         }); },
+        canPrepareWorkspace(cwd, idleResources = []) { return write(owner => {
+          id.parse(cwd); parse(checksSchema,idleResources);
+          const identity = resolveExecutionWorkspace(cwd);
+          // Idle adapters without reliable background proof are retired by claimNext's caller.
+          return workspaceBlockers('',idleResources,owner,false,identity).every(block => block.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE');
+        }); },
         claimNext(rawFence, idleResources = []) { return write(owner => {
           const f = readFence(rawFence); const s = session(f.sessionId);
           if (s.archivedAt || s.state === 'stopped') fail('SESSION_NOT_ACCEPTING');
@@ -804,6 +830,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           parse(checksSchema,idleResources);
           const admission = workspaceBlockers(f.sessionId,idleResources,owner,true);
           if (admission.length) fail('WORKSPACE_RESOURCE_BLOCKED',json(admission));
+          assertWorkItemCapacity(f.sessionId,idleResources,owner);
           requireInputOptions(t.id);
           let a = t.currentAttemptId ? attempt(t.currentAttemptId) : undefined;
           if (a?.automaticRetry) {

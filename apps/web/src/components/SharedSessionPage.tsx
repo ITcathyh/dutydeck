@@ -11,6 +11,7 @@ import { useTheme } from '../useTheme';
 import { busyStates, DutydeckIcon, effectiveStatus, stateTone } from './ui';
 import { Badge, Banner, Card, EmptyState, Spinner } from './primitives';
 import { TimelineView } from './TimelineView';
+import { connectionLabel } from './RunHeader';
 
 /**
  * 飞书卡片「查看详情」打开的只读分享页：只有这一个任务的状态、执行记录和结果。
@@ -28,7 +29,9 @@ export function SharedSessionPage({ sessionId }: { sessionId: string }) {
   const streamStatus = useSessionStream(session ? sessionId : undefined, session?.runId, events.isSuccess);
   const eventList = events.data?.events ?? [];
   const projectTimeline = useMemo(() => createTimelineProjector(), [sessionId]);
-  const { timeline, timelineSections } = useMemo(() => projectTimeline(eventList, tasks.data, events.data?.hasOlder, events.data), [projectTimeline, eventList, tasks.data, events.data?.hasOlder]);
+  const historyTurns = events.data?.outline?.turns;
+  const visibleTasks = useMemo(() => { const summarized = new Set(historyTurns?.map(turn => turn.taskId)); return tasks.data?.filter(task => !summarized.has(task.id)); }, [tasks.data, historyTurns]);
+  const { timeline, timelineSections } = useMemo(() => projectTimeline(eventList, visibleTasks, events.data?.hasOlder, events.data), [projectTimeline, eventList, visibleTasks, events.data?.hasOlder]);
   const latestUserIndex = useMemo(() => {
     for (let index = timeline.length - 1; index >= 0; index--) if (timeline[index].type === 'text' && timeline[index].data.role === 'user') return index;
     return -1;
@@ -53,7 +56,7 @@ export function SharedSessionPage({ sessionId }: { sessionId: string }) {
   const status = effectiveStatus(session);
   const queued = tasks.data?.filter(task => task.status === 'queued').length ?? 0;
   const errorSummary = sessionErrorSummary(session.error);
-  const connection = streamStatus === 'open' ? '实时同步' : streamStatus === 'reconnecting' ? '正在重连' : '正在连接';
+  const connection = connectionLabel(streamStatus);
   return <div className="flex h-[100dvh] min-h-[100dvh] flex-col overflow-hidden bg-canvas font-sans text-primary">
     <header className="shrink-0 border-b border-default bg-surface">
       <div className="flex min-h-14 items-center gap-2.5 px-3 pt-1 sm:px-5">
@@ -69,7 +72,7 @@ export function SharedSessionPage({ sessionId }: { sessionId: string }) {
           <strong className="text-caption font-semibold text-primary">{status.label}</strong>
         </span>
         {queued > 0 && <Badge tone="queued">待执行指令 {queued} 条</Badge>}
-        <span className="ml-auto shrink-0 text-meta text-subtle">{connection}</span>
+        <span className="ml-auto shrink-0 text-meta text-subtle">{connection}{streamStatus.content === 'failed' && !streamStatus.retrying && <button className="ml-2 text-info" onClick={streamStatus.retry}>重试同步</button>}</span>
       </div>
       {session.sourceContext && <dl aria-label="会话来源" className="grid gap-2 border-t border-default px-3 py-2.5 text-caption sm:grid-cols-3 sm:px-5">
         <div className="min-w-0">
@@ -92,7 +95,7 @@ export function SharedSessionPage({ sessionId }: { sessionId: string }) {
       {errorSummary && <div className="px-3 pb-3 sm:px-5"><Banner tone="danger" title="失败详情">{errorSummary}</Banner></div>}
     </header>
     {events.isError && <div className="shrink-0 px-4 py-2"><Banner tone="danger">执行记录加载失败：{events.error.message}<button className="ml-2 underline" onClick={() => void events.refetch()}>重试加载记录</button></Banner></div>}
-    <TimelineView key={sessionId} hasOlder={events.data?.hasOlder} loadedEventCount={events.data?.events.length} loadOlder={events.loadOlder} olderError={events.olderError} activeSessionId={sessionId} eventsLoading={events.isLoading} timeline={timeline} timelineSections={timelineSections}
+    <TimelineView sourceEvents={eventList} historyTurns={historyTurns} key={sessionId} hasOlder={events.data?.hasOlder} loadedEventCount={events.data?.events.length} activeSessionId={sessionId} eventsLoading={events.isLoading} timeline={timeline} timelineSections={timelineSections}
       awaitingAnswer={awaitingAnswer} hasOngoingActivity={hasOngoingActivity} latestUserIndex={latestUserIndex} activeOutputLabel={session.model ?? session.agentId}
       renderProgress={emptyState => emptyState ? <p className="py-10 text-center text-caption text-subtle">这个任务还没有执行记录。</p> : null}/>
   </div>;

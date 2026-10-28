@@ -1,5 +1,5 @@
 import { ArrowDown, MessageSquare } from 'lucide-react';
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, useContext, type ReactNode } from 'react';
 import type { TimelineEvent, TimelineSection } from '../timeline';
 import { isNearScrollBottom, useTimelineAutoScroll } from '../useTimelineAutoScroll';
 import { Button, EmptyState, Skeleton } from './primitives';
@@ -7,9 +7,17 @@ import { ActivityPanel } from './ActivityPanel';
 import { TimelineDisclosureContext } from '../timeline-disclosure';
 import { getTimelineReadingState, saveTimelineReadingState, type TimelineReadingAnchor } from '../timeline-reading-state';
 import { TimelineItem } from './TimelineItem';
+import { useQuery } from '@tanstack/react-query';
+import { api, type DockEvent, type HistoryTurnSummary } from '../api';
+import { loadTurnHistory } from '../event-history';
+import { buildTimelineSections, createTimelineProjector } from '../timeline';
+import { useTimelineDisclosure } from '../timeline-disclosure';
+import { MarkdownContent } from '../MarkdownContent';
 
 export type TimelineViewProps = {
   activeSessionId?: string;
+  historyTurns?: HistoryTurnSummary[];
+  sourceEvents?: DockEvent[];
   readingScopeKey?: string;
   visible?: boolean;
   hasOlder?: boolean;
@@ -85,10 +93,10 @@ const TimelineBody = memo(function TimelineBody({ timelineSections, activeOutput
   && (!a.awaitingAnswer || a.timeline[a.latestUserIndex]?.timestamp === b.timeline[b.latestUserIndex]?.timestamp)
   && a.timelineSections.length === b.timelineSections.length && a.timelineSections.every((section, index) => section === b.timelineSections[index]));
 
-type TimelineTurn = { id: string; sections: TimelineSection[] };
+type TimelineTurn = { id: string; sections: TimelineSection[]; summary?: HistoryTurnSummary };
 type TimelineRow = TimelineTurn & { top: number; height: number };
 
-export function TimelineView({ activeSessionId, readingScopeKey = activeSessionId ?? 'empty', visible: isVisible = true, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress, hasOlder, loadedEventCount, olderError, loadOlder }: TimelineViewProps) {
+export function TimelineView({ historyTurns, sourceEvents, activeSessionId, readingScopeKey = activeSessionId ?? 'empty', visible: isVisible = true, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress, hasOlder, loadedEventCount, olderError, loadOlder }: TimelineViewProps) {
   const reading = useMemo(() => getTimelineReadingState(readingScopeKey), [readingScopeKey]);
   const disclosures = reading.disclosures;
   const progressRef = useRef<HTMLDivElement>(null);
@@ -96,6 +104,8 @@ export function TimelineView({ activeSessionId, readingScopeKey = activeSessionI
   const heights = reading.heights;
   const [measureVersion, setMeasureVersion] = useState(0);
   const [viewport, setViewport] = useState({ top: reading.following ? Infinity : reading.scrollTop, height: 960 });
+  const [requestedSource, setRequestedSource] = useState<HistorySource>();
+  const sourceRequestId = useRef(0);
   const anchor = useRef<TimelineReadingAnchor | undefined>(reading.anchor);
   useLayoutEffect(() => {
     anchor.current = reading.anchor;
@@ -111,6 +121,7 @@ export function TimelineView({ activeSessionId, readingScopeKey = activeSessionI
   }
   const turnCache = useMemo(() => new WeakMap<TimelineSection, TimelineTurn>(), [readingScopeKey]);
   const rowCache = useMemo(() => new WeakMap<TimelineTurn, TimelineRow>(), [readingScopeKey]);
+  const summaryTurns = useMemo(() => (historyTurns ?? []).map(summary => ({ id: summary.id, sections: [], summary })), [historyTurns]);
   const turns = useMemo(() => {
     const result: TimelineTurn[] = [];
     let start = 0;
@@ -143,8 +154,8 @@ export function TimelineView({ activeSessionId, readingScopeKey = activeSessionI
     for (const turn of result) turn.id = turnAliases.current.get(turn.id) ?? turn.id;
     const first = result[0];
     previousFirst.current = first ? { id: first.id, events: new Set(eventIds(first)) } : undefined;
-    return result;
-  }, [timelineSections, turnCache]);
+    return [...summaryTurns, ...result];
+  }, [timelineSections, turnCache, summaryTurns]);
   const layout = useMemo(() => {
     let top = 0;
     const rows = turns.map(turn => {
@@ -214,6 +225,35 @@ export function TimelineView({ activeSessionId, readingScopeKey = activeSessionI
     const container = timelineScroll.containerRef.current;
     if (container) reading.following = isNearScrollBottom(container);
   };
+  const jumpToRow = (id: string) => {
+    const row = layout.rows.find(row => row.id === id);
+    const container = timelineScroll.containerRef.current;
+    if (!row || !container) return;
+    reading.following = false; anchor.current = { id: row.id, offset: 0, eventId: row.id, screenOffset: 0 };
+    container.scrollTop = row.top; programmedScrollTop.current = undefined;
+    timelineScroll.onScroll(); syncViewport(false);
+  };
+  useEffect(() => {
+    const showSource = (event: Event) => {
+      const source = (event as CustomEvent<HistorySource>).detail;
+      if (!source || !Number.isSafeInteger(source.sequence)) return;
+      const row = layout.rows.find(row => containsSource(row, source.sequence));
+      if (row) setRequestedSource({ ...source, requestId: ++sourceRequestId.current });
+    };
+    window.addEventListener('dutydeck:show-history-turn', showSource);
+    return () => window.removeEventListener('dutydeck:show-history-turn', showSource);
+  }, [layout, readingScopeKey]);
+  const sourceTarget = useMemo(() => requestedSource ? revealSource(timelineSections, requestedSource, sourceEvents ?? [], disclosures) : undefined, [requestedSource, timelineSections, sourceEvents, disclosures]);
+  useEffect(() => {
+    if (!sourceTarget || !isVisible) return;
+    const frame = requestAnimationFrame(() => findSourceElement(sourceTarget)?.scrollIntoView({ block: 'center' }));
+    return () => cancelAnimationFrame(frame);
+  }, [sourceTarget, requestedSource, isVisible]);
+  useLayoutEffect(() => {
+    if (!requestedSource || !isVisible) return;
+    const row = layout.rows.find(row => containsSource(row, requestedSource.sequence));
+    if (row) jumpToRow(row.id);
+  }, [requestedSource, isVisible]);
   useEffect(() => {
     const progress = progressRef.current;
     if (!isVisible || !progress || !timelineScroll.isFollowing || typeof ResizeObserver === 'undefined') return;
@@ -223,32 +263,33 @@ export function TimelineView({ activeSessionId, readingScopeKey = activeSessionI
   }, [readingScopeKey, timelineScroll.isFollowing, isVisible]);
   return <TimelineDisclosureContext.Provider value={disclosures}><div className="relative min-h-0 flex-1 bg-canvas">
     <div ref={timelineScroll.containerRef} onScroll={onScroll}
-      style={{ overflowAnchor: 'none' }} data-timeline-scroll="true" data-history-start={timeline[0]?.sequence} data-history-loaded={loadedEventCount} data-history-complete={hasOlder === false} className="absolute inset-0 overscroll-contain overflow-y-auto">
+      style={{ overflowAnchor: 'none' }} data-timeline-scroll="true" data-history-start={historyTurns?.[0]?.firstSequence ?? timeline[0]?.sequence} data-history-loaded={loadedEventCount} data-history-complete={hasOlder === false} className="absolute inset-0 overscroll-contain overflow-y-auto">
       <div className="mx-auto w-full max-w-[880px] px-5 py-8 sm:px-8 sm:py-10">
         {eventsLoading
           ? <TimelineSkeleton/>
-          : timeline.length
+          : turns.length
             ? <>
+                {turns.length > 1 && <label className="mb-4 flex items-center gap-2 text-caption text-subtle">跳到轮次<select aria-label="跳到轮次" defaultValue="" onChange={event => { jumpToRow(event.target.value); event.target.value = ''; }} className="max-w-64 rounded border border-default bg-surface px-2 py-1"><option value="" disabled>选择历史轮次</option>{turns.map((turn, index) => <option key={turn.id} value={turn.id}>第 {index + 1} 轮{turn.summary ? ` · ${turn.summary.prompt.text.slice(0, 40)}` : ' · 当前记录'}</option>)}</select></label>}
                 <div aria-hidden="true" style={{ height: visible[0]?.top ?? 0 }}/>
                 {visible.map(row => <MeasuredTurn key={row.id} id={row.id} onMeasure={height => {
                   if (heights.get(row.id) === height) return;
                   heights.set(row.id, height); setMeasureVersion(version => version + 1);
-                }}><TimelineBody
+                }}>{row.summary && activeSessionId ? <HistoryTurn sessionId={activeSessionId} summary={row.summary} activeOutputLabel={activeOutputLabel} requestedSource={requestedSource}/> : <TimelineBody key={requestedSource && containsSource(row, requestedSource.sequence) ? requestedSource.requestId : undefined}
                   timelineSections={row.sections} activeOutputLabel={activeOutputLabel}
                   onResolvePermission={onResolvePermission} resolvingPermissionId={resolvingPermissionId}
                   awaitingAnswer={awaitingAnswer && row.id === turns.at(-1)?.id}
                   hasOngoingActivity={hasOngoingActivity} timeline={timeline} latestUserIndex={latestUserIndex}
-                /></MeasuredTurn>)}
+                />}</MeasuredTurn>)}
                 <div aria-hidden="true" style={{ height: Math.max(0, layout.height - ((visible.at(-1)?.top ?? 0) + (visible.at(-1)?.height ?? 0))) }}/>
               </>
             : !renderProgress && !hasOlder && <TimelineEmptyState/>}
-        {renderProgress && <div ref={progressRef}>{renderProgress(!eventsLoading && !timeline.length && !hasOlder ? <TimelineEmptyState/> : null)}</div>}
-        {!eventsLoading && timeline.length > 0 && footer}
+        {renderProgress && <div ref={progressRef}>{renderProgress(!eventsLoading && !turns.length && !hasOlder ? <TimelineEmptyState/> : null)}</div>}
+        {!eventsLoading && turns.length > 0 && footer}
       </div>
     </div>
     {/* 历史全部加载完后这行提示只留给读屏，不再压在第一条消息上。 */}
     {!eventsLoading && loadedEventCount !== undefined && <div className={olderError || hasOlder ? 'absolute left-5 top-1 z-sticky rounded bg-canvas px-2 py-1 text-meta text-subtle' : 'sr-only'}>
-      <span role="status">{olderError ? `已加载 ${loadedEventCount} 条，历史加载中断` : hasOlder ? `已加载 ${loadedEventCount} 条，正在加载全部历史…` : `已加载全部 ${loadedEventCount} 条记录`}</span>
+      <span role="status">{olderError ? `已加载 ${loadedEventCount} 条，历史加载中断` : hasOlder ? `已加载 ${loadedEventCount} 条，正在加载全部历史…` : `已加载 ${historyTurns?.length ?? 0} 轮摘要、${loadedEventCount} 条原始记录`}</span>
       {olderError && <button onClick={() => void loadOlder?.()} className="ml-2 text-caption text-danger" title={olderError}>重试加载历史</button>}
     </div>}
     {!timelineScroll.isFollowing && <ScrollToBottomButton onClick={() => { reading.following = true; reading.anchor = undefined; anchor.current = undefined; timelineScroll.scrollToBottom(); saveTimelineReadingState(); }}/>}
@@ -269,4 +310,62 @@ function MeasuredTurn({ id, onMeasure, children }: { id: string; onMeasure(heigh
   }, []);
   // Virtual rows remount during navigation; replaying translation moves the reading anchor.
   return <div ref={ref} data-timeline-turn={id} className="[&_.ui-timeline-item]:animate-none" style={{ display: 'flow-root' }}>{children}</div>;
+}
+
+function HistoryTurn({ sessionId, summary, activeOutputLabel, requestedSource }: { sessionId: string; summary: HistoryTurnSummary; activeOutputLabel: string; requestedSource?: HistorySource }) {
+  const [open, setOpen] = useTimelineDisclosure(`history:${summary.id}`, false);
+  const requested = requestedSource && requestedSource.sequence >= summary.firstSequence && requestedSource.sequence <= summary.lastSequence;
+  useEffect(() => { if (requested) setOpen(true); }, [requestedSource]);
+  const detail = useQuery({ queryKey: ['history-detail', sessionId, summary.firstSequence, summary.lastSequence],
+    queryFn: ({ signal }) => loadTurnHistory(sessionId, summary, signal), enabled: open, staleTime: Infinity });
+  const projector = useMemo(() => createTimelineProjector(), [summary.id]);
+  const tasks = useQuery({ queryKey: ['tasks', sessionId], queryFn: () => api.tasks(sessionId), enabled: open, staleTime: Infinity });
+  const { timeline } = useMemo(() => projector(detail.data ?? [], []), [projector, detail.data]);
+  const timelineSections = useMemo(() => buildTimelineSections(timeline, tasks.data ?? [], false), [timeline, tasks.data]);
+  const disclosures = useContext(TimelineDisclosureContext);
+  const target = useMemo(() => requested && requestedSource ? revealSource(timelineSections, requestedSource, detail.data ?? [], disclosures) : undefined, [timelineSections, requestedSource, detail.data, disclosures]);
+  useEffect(() => {
+    if (!requested || !detail.isSuccess || !target) return;
+    const frame = requestAnimationFrame(() => {
+      findSourceElement(target)?.scrollIntoView({ block: 'center' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [requestedSource, detail.isSuccess, target]);
+  const labels: Record<string, string> = { completed: '已完成', failed: '已失败', cancelled: '已取消', interrupted: '已中断', unverified: '结果未确认' };
+  return <section data-history-summary={summary.id} className="my-4 border-b border-default pb-4">
+    <div data-timeline-event={summary.id}>
+      <div className="mb-2 whitespace-pre-wrap text-body text-primary">{summary.prompt.text || '历史执行记录'}{summary.prompt.truncated && <span className="text-caption text-subtle">（指令已截断，展开读取完整记录）</span>}</div>
+      <div className="mb-3 text-meta text-subtle">{labels[summary.status] ?? summary.status} · {summary.toolCount} 次工具调用 · 事件 {summary.firstSequence}–{summary.lastSequence}{summary.artifactReferences.length > 0 && ` · ${summary.artifactReferences.length} 个产物引用`}{summary.artifactReferencesTruncated && '（引用清单已截断，展开查看全部）'}</div>
+      {(!open || !detail.isSuccess) && summary.output.text && <MarkdownContent>{summary.output.text}</MarkdownContent>}
+      {(!open || !detail.isSuccess) && summary.output.truncated && <p className="text-caption text-subtle">最终输出已截断；展开可读取完整内容。</p>}
+    </div>
+    <button className="my-2 min-h-10 text-caption text-info" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? '收起完整记录' : '展开完整记录'}</button>
+    {open && (detail.isPending ? <p role="status">正在读取完整记录…</p> : detail.isError ? <p role="alert">记录读取失败：{detail.error.message}<button onClick={() => void detail.refetch()} className="ml-2 text-info">重试</button></p> : <TimelineBody key={requested ? requestedSource?.requestId : undefined} timelineSections={timelineSections} timeline={timeline} latestUserIndex={-1} activeOutputLabel={activeOutputLabel} awaitingAnswer={false} hasOngoingActivity={false}/>)}
+  </section>;
+}
+
+type HistorySource = { eventId?: string; sequence: number; requestId?: number };
+function containsSource(row: TimelineTurn, sequence: number) {
+  if (row.summary) return sequence >= row.summary.firstSequence && sequence <= row.summary.lastSequence;
+  const sequences = row.sections.flatMap(section => section.kind === 'event' ? [section.event.sequence] : section.groups.flatMap(group => group.events.map(event => event.sequence))).filter(sequence => sequence > 0);
+  const range = sequences.reduce((range, value) => ({ first: Math.min(range.first, value), last: Math.max(range.last, value) }), { first: Infinity, last: -Infinity });
+  return sequence >= range.first && sequence <= range.last;
+}
+function findSourceElement(id: string) {
+  return [...document.querySelectorAll<HTMLElement>('[data-timeline-event]')].find(element => element.dataset.timelineEvent === id);
+}
+function revealSource(sections: TimelineSection[], source: HistorySource, canonical: DockEvent[], choices?: Map<string, boolean>) {
+  const original = canonical.find(event => event.sequence === source.sequence);
+  const all = sections.flatMap(section => section.kind === 'event' ? [section.event] : section.groups.flatMap(group => group.events));
+  const target = all.find(event => event.id === source.eventId)
+    ?? (original?.type === 'tool_result' && original.data.id ? all.find(event => (event.type === 'tool_call' || event.type === 'tool_result') && event.data.id === original.data.id) : undefined)
+    ?? all.filter(event => event.sequence >= source.sequence).sort((left, right) => left.sequence - right.sequence)[0];
+  if (!target) return;
+  for (const section of sections) if (section.kind === 'activity') for (const group of section.groups) if (group.events.includes(target)) {
+    choices?.set(`activity:${section.groups[0]?.id ?? section.startedAt}:${section.hasAnswer}`, true);
+    choices?.set(`group:${group.id}`, true);
+    choices?.set(`tool:${target.id}`, true);
+    choices?.set(`batch:${group.events[0]?.id}`, true);
+  }
+  return target.id;
 }

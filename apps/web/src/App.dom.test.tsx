@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -1133,37 +1133,34 @@ describe('App 完整历史记录', () => {
     data: index === 0 ? { role: 'user', text: '最早的历史内容' } : { role: 'assistant', text: '最新的历史内容' }
   }));
 
-  it('首屏显示尾页后无需操作自动读完历史，刷新保留已读内容', async () => {
+  it('首屏只读摘要，展开跨页完整读取并在刷新后保留已读详情', async () => {
     window.history.replaceState(null, '', '/sessions/s1');
     mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '任务一')] });
-    let release!: () => void;
-    const olderReady = new Promise<void>(resolve => { release = resolve; });
-    vi.mocked(api.events).mockImplementation(async (_id, query) => {
-      if (query?.before !== undefined) await olderReady;
-      return history.filter(event => query?.before === undefined || event.sequence < query.before).slice(-query!.limit!);
-    });
+    vi.mocked(api.sessionHistory).mockResolvedValue({ turns: [{ id: 'history-1', firstSequence: 1, lastSequence: 1205, timestamp: '', status: 'completed', prompt: { text: '最早的历史内容', truncated: false }, output: { text: '最新的历史内容', truncated: false }, toolCount: 0, artifactReferences: [] }], highWaterMark: 1205, liveAfter: 1205 });
+    vi.mocked(api.events).mockImplementation(async (_id, query) => history.filter(event => event.sequence > query!.after! && (!query?.before || event.sequence < query.before)).slice(0, query!.limit));
     const { client } = renderApp();
-    expect(await screen.findByText('已加载 200 条，正在加载全部历史…')).toBeTruthy();
-    expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toHaveLength(200);
-    expect(api.events).toHaveBeenNthCalledWith(1, 's1', { limit: 200, direction: 'backward' }, expect.any(AbortSignal));
-    await act(async () => release());
-    expect(await screen.findByText('已加载全部 1205 条记录')).toBeTruthy();
-    expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toEqual(history);
-    expect(api.events).toHaveBeenCalledTimes(7);
+    expect(await screen.findByText('最早的历史内容')).toBeTruthy();
+    expect(screen.getByText('最新的历史内容')).toBeTruthy();
+    expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toEqual([]);
+    expect(api.events).toHaveBeenCalledTimes(1);
+    await userEvent.setup().click(screen.getByRole('button', { name: '展开完整记录' }));
+    await screen.findByRole('button', { name: '收起完整记录' });
+    await waitFor(() => expect(client.getQueryData(['history-detail', 's1', 1, 1205])).toEqual(history));
+    expect(api.events).toHaveBeenCalledTimes(8);
     expect(screen.queryByRole('button', { name: '加载更早记录' })).toBeNull();
     await act(() => client.invalidateQueries({ queryKey: ['events', 's1'] }));
-    expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toEqual(history);
+    expect(client.getQueryData(['history-detail', 's1', 1, 1205])).toEqual(history);
   });
 
-  it('历史请求失败时显示错误，重试后加载尾页', async () => {
+  it('历史请求失败时显示错误，重试后加载活动记录', async () => {
     window.history.replaceState(null, '', '/sessions/s1');
     mockAppApi({ sessions: [session('s1')] });
     vi.mocked(api.events).mockRejectedValueOnce(new Error('连接中断'));
     renderApp();
     expect(await screen.findByText('历史记录加载失败：连接中断')).toBeTruthy();
-    vi.mocked(api.events).mockImplementation(async (_id, query) => history.filter(event => query?.before === undefined || event.sequence < query.before).slice(-query!.limit!));
+    vi.mocked(api.events).mockImplementation(async (_id, query) => history.filter(event => event.sequence > query!.after!).slice(0, query!.limit!));
     await userEvent.setup().click(screen.getByRole('button', { name: '重试加载记录' }));
-    await waitFor(() => expect(vi.mocked(api.events)).toHaveBeenLastCalledWith('s1', { limit: 200, direction: 'backward' }, expect.any(AbortSignal)));
+    await waitFor(() => expect(vi.mocked(api.events)).toHaveBeenLastCalledWith('s1', { after: 1200, limit: 200, direction: 'forward' }, expect.any(AbortSignal)));
     expect(screen.queryByText('历史记录加载失败：连接中断')).toBeNull();
   });
 
@@ -1694,9 +1691,9 @@ it.each([false, true])('preserves detailed usage and restores the evidence opene
   vi.stubGlobal('matchMedia', vi.fn((query: string) => ({ matches: query === '(min-width: 768px)' || query === '(min-width: 1280px)' && wide, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   window.history.replaceState(null, '', '/sessions/s1');
   const events: DockEvent[] = [
-    { id: 'usage-user', sequence: 0, timestamp: '2026-10-21T00:00:00Z', type: 'text', data: { role: 'user', text: 'show current usage' } },
-    { id: 'usage-before', sequence: 1, timestamp: '2026-10-21T00:00:01Z', type: 'status', data: { state: 'usage', used: 600, size: 1000 } },
-    { id: 'usage-after', sequence: 2, timestamp: '2026-10-21T00:00:02Z', type: 'status', data: { state: 'usage', used: 300, size: 1000 } }
+    { id: 'usage-user', sequence: 1, timestamp: '2026-10-21T00:00:00Z', type: 'text', data: { role: 'user', text: 'show current usage' } },
+    { id: 'usage-before', sequence: 2, timestamp: '2026-10-21T00:00:01Z', type: 'status', data: { state: 'usage', used: 600, size: 1000 } },
+    { id: 'usage-after', sequence: 3, timestamp: '2026-10-21T00:00:02Z', type: 'status', data: { state: 'usage', used: 300, size: 1000 } }
   ];
   mockAppApi({ sessions: [session('s1')], events });
   vi.spyOn(api, 'workspace').mockResolvedValue({ schemaVersion: 1, revision: 1, sessionId: 's1', mode: 'shared', sourceCwd: '/repo/s1', cwd: '/repo/s1', state: 'ready', createdAt: session('s1').createdAt, updatedAt: session('s1').updatedAt });
@@ -1893,3 +1890,7 @@ describe('App plan creation channels', () => {
     second.client.clear();
   });
 });
+
+beforeEach(() => { vi.spyOn(api, 'sessionHistory').mockResolvedValue({ turns: [], highWaterMark: 0, liveAfter: 0 }); });
+
+vi.mock('./skill-catalog-api', async () => { const { api } = await import('./api'); return { fetchSkillCatalog: async (...args: Parameters<typeof api.skills>) => ({ skills: await api.skills(...args), diagnostics: [], partial: false }) }; });

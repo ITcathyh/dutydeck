@@ -1,36 +1,49 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api, type DockEvent } from './api';
-import { createEventWindow, loadEventHistory, mergeLiveEvent, newestSequence } from './event-history';
+import { createEventWindow, loadHistoryRange, loadProjectedHistory, mergeLiveEvent, newestSequence } from './event-history';
 
 const event = (sequence: number, text = String(sequence)): DockEvent => ({ id: `e-${sequence}`, sequence, type: 'text', timestamp: '', data: { text } });
 
 afterEach(() => vi.restoreAllMocks());
 
-describe('progressive event history', () => {
-  it.each([0, 37, 1_205, 2_000])('loads the tail of %i events in one request', async count => {
+describe('projected event history', () => {
+  it.each([0, 37, 1_205, 2_000])('loads only the canonical active suffix after the completed boundary for %i records', async count => {
     const history = Array.from({ length: count }, (_, index) => event(index + 1));
-    const loader = vi.spyOn(api, 'events').mockImplementation(async (_id, query) => history.filter(item => query?.before === undefined || item.sequence < query.before).slice(-query!.limit!));
-    const result = await loadEventHistory('s1');
-    expect(result.events).toEqual(history.slice(-200));
-    expect(result.hasOlder).toBe(count >= 200);
+    const completed = Math.max(0, count - 37);
+    const loader = vi.spyOn(api, 'events').mockImplementation(async (_id, query) => history.filter(item => item.sequence > query!.after!).slice(0, query!.limit!));
+    const result = await loadProjectedHistory('s1', { turns: [], highWaterMark: count, liveAfter: completed });
+    expect(result.events).toEqual(history.slice(completed));
+    expect(result.highWaterMark).toBe(count);
+    expect(result.hasOlder).toBe(false);
     expect(loader).toHaveBeenCalledTimes(1);
-    expect(loader).toHaveBeenNthCalledWith(1, 's1', { limit: 200, direction: 'backward' }, undefined);
+    expect(loader).toHaveBeenNthCalledWith(1, 's1', { after: completed, limit: 200, direction: 'forward' }, undefined);
   });
 
-  it('rejects a failed tail request', async () => {
+  it('rejects a failed active suffix instead of treating it as a complete empty history', async () => {
     vi.spyOn(api, 'events').mockRejectedValueOnce(new Error('offline'));
-    await expect(loadEventHistory('s1')).rejects.toThrow('offline');
+    await expect(loadProjectedHistory('s1', { turns: [], liveAfter: 10, highWaterMark: 11 })).rejects.toThrow('offline');
   });
 
-  it('stops loading the old session when its query is cancelled', async () => {
+  it('does not mark a short suffix complete below the known server watermark', async () => {
+    vi.spyOn(api, 'events').mockResolvedValue([event(11)]);
+    await expect(loadProjectedHistory('s1', { turns: [], liveAfter: 10, highWaterMark: 13 })).rejects.toThrow('尚未追平');
+  });
+
+  it('stops reading when its session query is cancelled', async () => {
     const controller = new AbortController();
-    const loader = vi.spyOn(api, 'events').mockImplementationOnce(async () => {
-      controller.abort();
-      return Array.from({ length: 1_000 }, (_, index) => event(index + 201));
-    });
-    await expect(loadEventHistory('s1', controller.signal)).rejects.toThrow();
+    const loader = vi.spyOn(api, 'events').mockImplementationOnce(async () => { controller.abort(); return [event(1)]; });
+    await expect(loadHistoryRange('s1', 0, 1, controller.signal)).rejects.toThrow();
     expect(loader).toHaveBeenCalledTimes(1);
     expect(loader.mock.calls[0]?.[2]).toBe(controller.signal);
+  });
+
+  it('reads a complete cross-page range and refuses sparse canonical details', async () => {
+    const history = Array.from({ length: 405 }, (_, index) => event(index + 1));
+    const loader = vi.spyOn(api, 'events').mockImplementation(async (_id, query) => history.filter(item => item.sequence > query!.after! && item.sequence < query!.before!).slice(0, query!.limit!));
+    expect(await loadHistoryRange('s1', 0, 405)).toEqual(history);
+    expect(loader.mock.calls.map(call => call[1]?.after)).toEqual([0, 200, 400]);
+    loader.mockResolvedValue([event(1), event(3)]);
+    await expect(loadHistoryRange('s1', 0, 3)).rejects.toThrow('记录不连续');
   });
 
   it('retains history beyond 800 events, sorts and deduplicates by sequence', () => {

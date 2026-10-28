@@ -183,7 +183,7 @@ function ReferenceChips({ references, onChange }: { references: ComposerReferenc
   </span>)}</div>;
 }
 
-export function Composer({ planFirst = false, onPlanFirstChange, state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, injectingTaskId, steerable, blockingPermissionId, rejectingPermission, onRejectPermission, skills, models, reasoningEfforts, currentModel, currentReasoningEffort, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onSteerQueued, onInjectQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp }: {
+export function Composer({ planFirst = false, onPlanFirstChange, state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, injectingTaskId, steerable, blockingPermissionId, rejectingPermission, onRejectPermission, skills, skillCatalogStatus, models, reasoningEfforts, currentModel, currentReasoningEffort, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onSteerQueued, onInjectQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp }: {
   state: string; session?: Pick<Session, 'state' | 'archivedAt' | 'source'>; value: string; references: ComposerReference[]; sending: boolean; mode: SendMode; queuedTasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string;
   /** 先出计划：打开时这条消息让 Agent 只调研出计划，批准后才执行。未传 onPlanFirstChange 时不显示开关。 */
   planFirst?: boolean; onPlanFirstChange?(value: boolean): void;
@@ -191,6 +191,7 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
   injectingTaskId?: string; steerable?: boolean; onInjectQueued?(taskId: string): void;
   /** 当前一轮停在这条审批上：排队指令标为被审批阻塞，并可直接拒绝它。 */
   blockingPermissionId?: string; rejectingPermission?: boolean; onRejectPermission?(permissionId: string): void;
+  skillCatalogStatus?: { partial: boolean; diagnostics: Array<{ path: string; code: string; message: string }> };
   skills: SkillReference[]; models: AgentModel[]; reasoningEfforts: AgentModel[]; currentModel?: string; currentReasoningEffort?: string; advertisedCommands: Array<{ name: string; description: string }>; filePicker: boolean; modelReadiness: ModelReadiness; switchingModel: boolean; switchingReasoningEffort: boolean; refreshingModels: boolean;
   onChange(value: string): void; onReferencesChange(value: ComposerReference[]): void; onModeChange(mode: SendMode): void; onSubmit(): void; onInterrupt(): void; onCancelQueued(taskId: string): void; onSteerQueued(taskId: string): void; onPickFile(): Promise<string | undefined>; onModelChange(model: string): void; onReasoningEffortChange(reasoningEffort: string): void; onRefreshModels(): void;
   // 命令注册表驱动的动作。未传时对应命令不出现在面板里（见 commands 的 filter）。
@@ -303,6 +304,10 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
         输入框壳里，各自手写 z-index），并统一拿到外部点击关闭 + Escape 关闭 + 焦点归还。
       */}
       <Popover open={commandPanel} onClose={closePanel} anchor={shell} placement="top-start" width="anchor">
+        {skillCatalogStatus && (skillCatalogStatus.partial || skillCatalogStatus.diagnostics.length > 0) && <div role="status" className="max-h-32 overflow-y-auto px-3 py-2 text-caption text-warning">
+          {skillCatalogStatus.partial ? 'Skill 清单未完整，名称查找不可用；可指定完整路径。' : '部分 Skill 不可用，其他条目仍可选择。'}
+          {skillCatalogStatus.diagnostics.map((item, index) => <div key={`${item.path}:${index}`}>{item.path}：{item.message}</div>)}
+        </div>}
         <CommandPanel
           commands={visibleCommands}
           skills={visibleSkills}

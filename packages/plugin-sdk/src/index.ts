@@ -166,3 +166,8 @@ export interface PluginWebSlotDeclaration {
   description?: string;
   elements: PluginWebSlotElement[];
 }
+
+/** Optional reference text, never included in required skillResources or task snapshots. */
+export interface PluginToolManual { description: string; path: string; maxBytes: number }
+/** Manifest toolManuals: tool name -> logical manual ID -> bounded package text. */
+export type PluginToolManuals = Record<string, Record<string, PluginToolManual>>;

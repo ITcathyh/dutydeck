@@ -2,6 +2,25 @@ diff --git a/dist/runtime.js b/dist/runtime.js
 index 3fb25ae4124cea292546e1dda95465b3ae15577e..9d34b4d2a67d27b2fae290b14d8b2da1155867d2 100644
 --- a/dist/runtime.js
 +++ b/dist/runtime.js
+@@ -112,11 +112,7 @@
+-	if (isRecord(contentRaw)) {
+-		const contentType = asTrimmedString(contentRaw.type);
+-		if (contentType && contentType !== "text") return null;
+-		const text = asString(contentRaw.text);
+-		if (text && text.length > 0) return {
+-			type: "text_delta",
+-			text,
+-			stream: params.stream,
+-			tag: params.tag
+-		};
+-	}
++	if (isRecord(contentRaw)) return {
++		type: "text_delta",
++		text: contentRaw.type === "text" ? asString(contentRaw.text) ?? "" : "",
++		content: contentRaw,
++		stream: params.stream,
++		tag: params.tag
++	};
 @@ -346,11 +346,26 @@
  		used,
  		size,

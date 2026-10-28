@@ -198,6 +198,8 @@ describe('WorkItem capacity and confirmed recovery with real Runtime and SQLite'
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const f = await fixture('unknown', parallel, gate);
+    // Preserve an already accepted sibling queue, as may also survive a restart.
+    vi.spyOn(f.runtime, 'canPrepareWorkItemWorkspace').mockReturnValue(true);
     cleanup.push(async () => release());
     await f.wait(() => f.counts.b === 1);
     const record = await f.raw(), sibling = record.item.steps.find((step: { id: string }) => step.id === 'c').attempts[0];
@@ -229,6 +231,8 @@ describe('WorkItem capacity and confirmed recovery with real Runtime and SQLite'
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const f = await fixture('unknown', parallel, gate);
+    // Preserve an already accepted sibling queue, as may also survive a restart.
+    vi.spyOn(f.runtime, 'canPrepareWorkItemWorkspace').mockReturnValue(true);
     cleanup.push(async () => { release(); });
     await f.wait(() => f.counts.b === 1);
     expect(f.counts.c).toBeUndefined();

@@ -144,3 +144,27 @@ describe('DUTYDECK_INSTANCES_JSON', () => {
     expect(() => parsePeerInstances('[{"id":"Tag/x","name":"Tag","url":"http://127.0.0.1:4311"}]')).toThrow();
   });
 });
+
+it('proxies history summaries only after the peer validates the matching share and current task policy', async () => {
+  const { signSessionShareToken } = await import('./auth/auth.js');
+  let secret = 'peer-share-secret', allowed = true;
+  const getHistoryOutline = vi.fn(async () => ({ turns: [], highWaterMark: 0, liveAfter: 0 }));
+  const peer = await buildApp({ getHistoryOutline } as any, {
+    auth: { mode: 'token', getToken: async () => 'peer-admin', localOnly: false, getShareSecret: async () => secret },
+    executionPolicy: { authorize: async (_request, _sessionId, _boundary, action) => ({ allowed, action, code: 'forbidden', reason: 'current task actor policy', source: 'integration' }) }
+  });
+  await peer.listen({ host: '127.0.0.1', port: 0 }); closers.push(() => peer.close());
+  const port = (peer.server.address() as AddressInfo).port;
+  const main = await buildApp({} as any, { instances: [{ id: 'peer', name: 'Peer', url: `http://127.0.0.1:${port}` }], auth: { mode: 'token', localOnly: false, getToken: async () => 'main-admin' } }); closers.push(() => main.close());
+  const token = signSessionShareToken(secret, 'ses_1');
+  const read = (sessionId: string, share = token) => main.inject({ method: 'GET', url: `/api/instances/peer/sessions/${sessionId}/history?share=${share}`, remoteAddress: '203.0.113.8' });
+  expect((await read('ses_1')).statusCode).toBe(200);
+  expect(getHistoryOutline).toHaveBeenCalledExactlyOnceWith('ses_1');
+  expect((await read('ses_2')).statusCode).toBe(401);
+  expect((await read('ses_1', 'forged')).statusCode).toBe(401);
+  secret = 'rotated'; expect((await read('ses_1')).statusCode).toBe(401);
+  const current = signSessionShareToken(secret, 'ses_1');
+  allowed = false; expect((await read('ses_1', current)).statusCode).toBe(403);
+  expect(getHistoryOutline).toHaveBeenCalledTimes(1);
+  expect((await main.inject({ method: 'GET', url: '/api/instances/peer/sessions/ses_1/history', remoteAddress: '203.0.113.8' })).statusCode).toBe(401);
+});

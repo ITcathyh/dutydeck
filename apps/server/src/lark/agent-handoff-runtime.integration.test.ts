@@ -23,13 +23,16 @@ const human = (id: string, target: string, text: string): LarkMessageEvent => ({
   content: JSON.stringify({ text }), mentions: mention(target)
 });
 
-async function harness() {
+async function harness(options: { beforeSubmit?: (agentId: string) => Promise<void> } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-agent-handoff-'));
   await Promise.all(['a', 'b'].map(id => mkdir(join(directory, id))));
   const repos = createRepositories(join(directory, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const sends: Array<{ agentId: string; prompt: string; release: () => void }> = [];
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
+    authorizeTask: async (session, _task, phase) => {
+      if (phase === 'submit') await options.beforeSubmit?.(session.agentId);
+    },
     driverFactory: (agent, _protocol, emit) => ({
       start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
       send: async prompt => {
@@ -139,12 +142,26 @@ async function harness() {
 
 describe('Agent handoff A → B → A through Runtime, SQLite and both Lark coordinators', () => {
   it('queues a duplicate-safe handoff, returns the result in-thread and stops the acknowledgement loop', async () => {
-    const h = await harness();
+    let enteredB!: () => void, releaseB!: () => void;
+    const preparingB = new Promise<void>(resolve => { enteredB = resolve; });
+    const submitB = new Promise<void>(resolve => { releaseB = resolve; });
+    let gatedB = false;
+    const h = await harness({ beforeSubmit: async agentId => {
+      if (agentId === 'b' && !gatedB) { gatedB = true; enteredB(); await submitB; }
+    } });
+    cleanups.push(async () => { releaseB(); });
     const [a, b] = h.configs;
     await h.coordinators[0]!.handle(human('om_alice_a', 'ou_a', '请检查需求'), a!);
     const firstA = await h.ready(a!.appId, 'om_alice_a');
+    await vi.waitFor(() => expect(h.sends.filter(send => send.agentId === 'a')).toHaveLength(1));
     await h.coordinators[1]!.handle(human('om_alice_b', 'ou_b', '先处理我这项工作'), b!);
+    await preparingB;
     const firstB = await h.ready(b!.appId, 'om_alice_b');
+    // A running task owns a claim; submission authorization may still be pending.
+    expect(h.repos.execution.getTaskExecution(firstB.active.taskId)).toMatchObject({
+      task: { status: 'running' }, currentAttempt: { attemptId: firstB.active.attemptId, state: 'preparing', submissionState: 'not_submitted' }
+    });
+    expect(h.sends.filter(send => send.agentId === 'b')).toHaveLength(0);
     const handoff = await h.tools.handoff(firstA.token, { to: b!.appId, content: '核对登录需求中的权限边界', turn: firstA.turn });
     const sentAB = h.emitted.at(-1)!;
     expect(handoff.messageId).toBe(sentAB.id);
@@ -158,6 +175,8 @@ describe('Agent handoff A → B → A through Runtime, SQLite and both Lark coor
     await h.coordinators[1]!.handle(bEvent, b!);
     await vi.waitFor(async () => expect((await h.repos.config.get(`lark.inbox.${b!.appId}.${sentAB.id}`))).toContain('accepted'));
     await vi.waitFor(async () => expect((await h.runtime.getTasks(firstB.session.id)).filter(task => task.status === 'queued')).toHaveLength(1));
+    releaseB();
+    await vi.waitFor(() => expect(h.sends.filter(send => send.agentId === 'b')).toHaveLength(1));
     expect(h.sends.filter(send => send.agentId === 'b')).toHaveLength(1);
     h.sends.find(send => send.agentId === 'b')!.release();
     const secondB = await h.ready(b!.appId, sentAB.id);

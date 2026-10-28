@@ -34,7 +34,7 @@ describe('useSessionStream reconciliation', () => {
     function Harness() {
       useQuery({ queryKey: ['tasks', 's1'], queryFn: taskLoader });
       useQuery({ queryKey: ['sessions'], queryFn: sessionLoader });
-      return <span>{useSessionStream('s1', 'r1', true)}</span>;
+      return <span>{useSessionStream('s1', 'r1', true).transport}</span>;
     }
     render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
     await waitFor(() => expect(MockEventSource.instances).toHaveLength(1));
@@ -764,5 +764,89 @@ it.each(['unmount', 'switch'])('discards queued task refreshes on %s', async act
     await waitFor(() => expect(client.isFetching()).toBe(0));
     expect(loader.mock.calls.filter(([id]) => id === 's1')).toHaveLength(1);
     if (action === 'switch') expect(client.getQueryData(['tasks', 's2'])).toEqual([]);
+  } finally { view.unmount(); client.clear(); }
+});
+
+it('does not report ready until pages and both authoritative snapshots have been applied', async () => {
+  let releaseEvents!: (events: DockEvent[]) => void, releaseTasks!: (tasks: Task[]) => void, releaseSessions!: (sessions: Session[]) => void;
+  vi.spyOn(api, 'events').mockImplementationOnce(() => new Promise(resolve => { releaseEvents = resolve; }));
+  const taskLoader = vi.fn().mockResolvedValueOnce([]).mockImplementationOnce(() => new Promise<Task[]>(resolve => { releaseTasks = resolve; }));
+  const sessionLoader = vi.fn().mockResolvedValueOnce([session]).mockImplementationOnce(() => new Promise<Session[]>(resolve => { releaseSessions = resolve; }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['events', 's1'], createEventWindow([event(10)]));
+  function Harness() { useQuery({ queryKey: ['tasks', 's1'], queryFn: taskLoader }); useQuery({ queryKey: ['sessions'], queryFn: sessionLoader }); const state = useSessionStream('s1', 'r1', true); return <span>{state.transport}:{state.content}</span>; }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  act(() => MockEventSource.instances[0]!.onopen?.(new Event('open')));
+  await screen.findByText('open:catching_up');
+  await act(async () => releaseEvents([event(11)]));
+  expect(screen.getByText('open:catching_up')).toBeTruthy();
+  await act(async () => releaseTasks([]));
+  expect(screen.getByText('open:catching_up')).toBeTruthy();
+  await act(async () => releaseSessions([session]));
+  await screen.findByText('open:ready');
+  view.unmount(); client.clear();
+});
+
+it('retries without a new SSE event, bounds automatic attempts and lets the user retry the preserved cursor', async () => {
+  vi.useFakeTimers();
+  const loader = vi.spyOn(api, 'events').mockRejectedValue(new Error('offline'));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['events', 's1'], createEventWindow([event(10)]));
+  function Harness() { const state = useSessionStream('s1', 'r1', true); return <button onClick={state.retry}>{state.transport}:{state.content}:{String(state.retrying)}</button>; }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  try {
+    await act(async () => { MockEventSource.instances[0]!.onopen?.(new Event('open')); await vi.advanceTimersByTimeAsync(0); });
+    expect(loader).toHaveBeenCalledTimes(1);
+    for (const delay of [1000, 2000, 4000, 8000, 16000]) await act(async () => { await vi.advanceTimersByTimeAsync(delay); });
+    expect(loader).toHaveBeenCalledTimes(6);
+    expect(screen.getByText('open:failed:false')).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(loader).toHaveBeenCalledTimes(6);
+    loader.mockResolvedValue([event(11)]);
+    await act(async () => screen.getByRole('button').click());
+    expect(loader).toHaveBeenLastCalledWith('s1', { after: 10, limit: 200, direction: 'forward' }, expect.any(AbortSignal));
+    expect(screen.getByText('open:ready:false')).toBeTruthy();
+    expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.map(item => item.sequence)).toEqual([10, 11]);
+  } finally { view.unmount(); client.clear(); vi.useRealTimers(); }
+});
+
+it('keeps a gap unready when a sparse response reaches the maximum but skips a required sequence', async () => {
+  vi.useFakeTimers();
+  const loader = vi.spyOn(api, 'events').mockResolvedValue([event(11), event(13)]);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['events', 's1'], createEventWindow([event(10)]));
+  function Harness() { const state = useSessionStream('s1', 'r1', true); return <span>{state.content}</span>; }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  try {
+    await act(async () => { MockEventSource.instances[0]!.emit('text', event(13)); await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText('failed')).toBeTruthy();
+    expect(loader).toHaveBeenCalledTimes(1);
+    loader.mockResolvedValue([event(11), event(12), event(13)]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(screen.getByText('ready')).toBeTruthy();
+    expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.map(item => item.sequence)).toEqual([10, 11, 12, 13]);
+  } finally { view.unmount(); client.clear(); vi.useRealTimers(); }
+});
+
+it('discards a hidden generation response before applying the foreground calibration', async () => {
+  let hidden = false;
+  vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+  let release!: (events: DockEvent[]) => void;
+  const loader = vi.spyOn(api, 'events').mockImplementationOnce(() => new Promise(resolve => { release = resolve; })).mockResolvedValue([event(2)]);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['events', 's1'], createEventWindow([event(1)]));
+  function Harness() { const state = useSessionStream('s1', 'r1', true); return <span>{state.content}</span>; }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  try {
+    act(() => MockEventSource.instances[0]!.onopen?.(new Event('open')));
+    await waitFor(() => expect(loader).toHaveBeenCalledTimes(1));
+    act(() => { hidden = true; document.dispatchEvent(new Event('visibilitychange')); });
+    expect(loader.mock.calls[0]?.[2]?.aborted).toBe(true);
+    act(() => { hidden = false; document.dispatchEvent(new Event('visibilitychange')); });
+    await act(async () => release([event(2), event(3)]));
+    await screen.findByText('ready');
+    expect(loader).toHaveBeenCalledTimes(2);
+    expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.map(item => item.sequence)).toEqual([1, 2]);
   } finally { view.unmount(); client.clear(); }
 });

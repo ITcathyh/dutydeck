@@ -9,7 +9,7 @@ import type { LarkInboxAdoption, LarkInboxRecord } from './task-inbox.js';
 import { isLarkFirstCardUndelivered } from './task-inbox.js';
 import { larkForkWorkspaceMode, larkNativeForkId, larkResumeUnavailable } from './session-branches.js';
 import { parseLarkNewSession } from './new-session.js';
-import { formatLarkHandoff, larkHandoffAck, larkHandoffTitle } from './handoff.js';
+import { formatLarkHandoff, larkHandoffAck, larkHandoffTitle, larkHandoffEventLimit, larkHandoffIndexLimit } from './handoff.js';
 import { explicitFinalContext, readExplicitFinal } from './explicit-final.js';
 import { redactTraceText } from './secret-redaction.js';
 import { readGitSnapshot } from './git-status.js';
@@ -1714,7 +1714,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           workspaceMode, ...explicit,
           ...(nativeForkSessionId ? { nativeForkSessionId } : {}) };
         const handoff = await this.newSessionHandoff(config, event, source.id, tasks, '', Boolean(nativeForkSessionId));
-        const context = nativeForkSessionId ? 'Agent 原生复制的会话上下文，以及最近结果和 git 状态交接' : '最近结果、git 状态和备注交接（此 Agent/接入方式不支持原生复制，或源上下文尚未落盘）';
+        const context = nativeForkSessionId ? 'Agent 原生复制的会话上下文，以及来源与权限提示' : '最近结果、git 状态和备注交接（此 Agent/接入方式不支持原生复制，或源上下文尚未落盘）';
         const workspaceNote = launchOptions.workspaceMode === 'worktree' ? '分身使用独立 worktree，不含原会话未提交的改动；这些改动只列在 git 状态交接中。' : '分身与原会话共享目录，同时修改同一文件可能冲突。';
         const seed = await this.service.sendText({ chatId: event.chatId, text: `从会话 ${source.id} 分出的新话题。\n携带：${context}。\n${workspaceNote}\n任务：${escapeLarkPromptEcho(larkCommandEcho(request.prompt || '继续原会话的任务', 160))}`, idempotencyKey: `fork_${event.messageId}`.slice(0, 50) });
         const goal = request.prompt || '请先阅读继承的上下文，简短确认已接手并等待我的下一条任务。';
@@ -1816,46 +1816,65 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     return candidates;
   }
 
-  /**
-   * `/new --handoff` 的交接前缀：最近 3 轮已结束任务的标题与结果摘录（已交付的显式最终答复优先，否则与结果卡同一口径；已脱敏）、
-   * 旧会话链接、工作目录 git 快照和备注。只读执行记录，不调用模型；读不到的部分缺省，不让 /new 失败。
-   */
+  /** 从当前聊天有权读取的记录冻结交接，不调用模型，不扩展到无界事件历史。 */
   protected async newSessionHandoff(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, tasks: TaskRecord[], note: string, nativeContextCopied = false) {
-    const recent = tasks.filter(task => terminalTaskStates.has(task.status))
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt)).slice(-3);
-    const window = sessionId && recent.length && (this.runtime.getRecentEvents || this.runtime.getEvents)
-      ? await loadLarkTaskWindow(this.runtime, sessionId, recent[0]!.id, 500).catch(() => []) : [];
+    const session = sessionId ? await this.runtime.getSession(sessionId) : undefined;
+    if (sessionId) {
+      const source = session?.sourceId ? parseLarkSourceId(session.sourceId) : undefined;
+      if (session?.source !== 'lark' || source?.appId !== config.appId || source.chatId !== event.chatId || source.chatType !== event.chatType)
+        throw new Error('无法核实交接来源属于当前机器人和聊天，未读取历史。');
+    }
+    const sessionUrl = sessionId && config.webBaseUrl ? safeLarkWebUrl(`${config.webBaseUrl.replace(/\/$/, '')}/sessions/${encodeURIComponent(sessionId)}`) : undefined;
+    const source = { ...(sessionId ? { sessionId } : {}), ...(sessionUrl ? { sessionUrl } : {}) };
+    const cwd = session?.cwd ?? config.workspace;
+    if (nativeContextCopied) return formatLarkHandoff({ ...source, turns: [], note: '', nativeContextCopied: true, ...(cwd ? { cwd, git: await readGitSnapshot(cwd) } : {}) });
+    const ordered = tasks.filter(task => task.sessionId === sessionId).sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const visible: TaskRecord[] = [];
+    for (const task of ordered) {
+      if (await this.isTaskOperatorAllowed(config, event, task, 'task.view_result')) visible.push(task);
+    }
+    const recent = visible.filter(task => terminalTaskStates.has(task.status)).slice(-3);
+    const other = visible.filter(task => !recent.includes(task));
+    const important = (task: TaskRecord) => ['failed', 'interrupted', 'reconcile_required'].includes(task.status) ? 0 : 1;
+    const indexed = [...other].sort((left, right) => important(left) - important(right) || left.createdAt.localeCompare(right.createdAt)).slice(0, larkHandoffIndexLimit);
+    const window = sessionId && recent.length && this.runtime.getRecentEvents
+      ? await this.runtime.getRecentEvents(sessionId, larkHandoffEventLimit).catch(() => []) : [];
     const store = this.workflowOptions.store;
     const cards = store && sessionId && recent.length ? await this.cardMappings?.list(larkCardChannel(config.appId)).catch(() => undefined) : undefined;
-    // 用 group send --final 交付过答复的轮次，结论在那条记录里，助手文本往往只剩一句确认。
-    // 取法同 agent-tools 的 taskAnswer：本聊天里唯一对得上的卡片映射还原 scope，只认已交付的记录。
     const explicitFinal = async (task: TaskRecord) => {
       const matches = (cards ?? []).flatMap(row => {
         try {
           const saved = parseCardTask(row.extra ?? '{}');
-          return row.sessionId === sessionId && saved.runtime_task_id === task.id && saved.chat_id === event.chatId ? [{ row, saved }] : [];
+          return row.sessionId === sessionId && saved.app_id === config.appId && saved.runtime_task_id === task.id && saved.chat_id === event.chatId && saved.chat_type === event.chatType ? [{ row, saved }] : [];
         } catch { return []; }
       });
       const context = matches.length === 1 ? explicitFinalContext(matches[0]!.row, matches[0]!.saved, task.currentAttemptId) : undefined;
       const content = store && context ? (await readExplicitFinal(store, context).catch(() => undefined))?.trim() : undefined;
       return content ? redactTraceText(content) : undefined;
     };
+    const title = async (task: TaskRecord) => (await this.larkTaskOrigin(config, event.chatId, task).catch(() => undefined))?.title ?? larkTaskTitle(task.prompt, config.name);
     const turns = await Promise.all(recent.map(async task => {
-      const title = (await this.larkTaskOrigin(config, event.chatId, { id: task.id, sessionId: sessionId! }).catch(() => undefined))?.title
-        ?? larkTaskTitle(task.prompt, config.name);
-      // 窗口里没有这一轮的起点时 eventsForRuntimeTask 会退回整段窗口，那不是这一轮的结果。
-      const started = window.some(item => item.type === 'text' && (item.data as any)?.role === 'user' && (item.data as any)?.taskId === task.id);
-      const elements = started ? renderLarkResultElements(eventsForRuntimeTask(window, task.id)) : [];
-      const result = await explicitFinal(task)
-        ?? elements.find(element => element.element_id === 'final_output')?.content
+      // A missing boundary must not attribute a neighbouring turn's output to this task.
+      let start = -1;
+      for (let index = 0; index < window.length; index++) {
+        const item = window[index]!;
+        if (item.type === 'text' && (item.data as any)?.role === 'user' && (item.data as any)?.taskId === task.id
+          && (!task.currentAttemptId || !item.attemptId || item.attemptId === task.currentAttemptId)) start = index;
+      }
+      const next = start >= 0 ? window.findIndex((item, index) => index > start && item.type === 'text' && (item.data as any)?.role === 'user' && (item.data as any)?.taskId !== task.id) : -1;
+      const events = start >= 0 ? eventsForRuntimeTask(window.slice(start, next < 0 ? undefined : next), task.id)
+        .filter(item => (!item.taskId || item.taskId === task.id) && (!task.currentAttemptId || !item.attemptId || item.attemptId === task.currentAttemptId)) : [];
+      const elements = renderLarkResultElements(events);
+      const explicit = await explicitFinal(task);
+      const result = explicit ?? elements.find(element => element.element_id === 'final_output')?.content
         ?? elements.find(element => String(element.element_id ?? '').startsWith('execution_alert_'))?.content;
-      return { title, status: task.status, ...(typeof result === 'string' ? { result } : {}) };
+      return { title: await title(task), status: task.status, taskId: task.id, attemptId: task.currentAttemptId, events,
+        ...(typeof result === 'string' ? { result, resultSource: explicit ? 'explicit_final' as const : elements.some(element => element.element_id === 'final_output') ? 'agent_text' as const : 'execution_alert' as const } : {}) };
     }));
-    const cwd = (sessionId ? (await this.runtime.getSession(sessionId).catch(() => undefined))?.cwd : undefined) ?? config.workspace;
-    return formatLarkHandoff({
-      ...(sessionId ? { sessionId, ...(config.webBaseUrl ? { sessionUrl: `${config.webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` } : {}) } : {}),
-      turns, note, nativeContextCopied, ...(cwd ? { cwd, git: await readGitSnapshot(cwd) } : {})
-    });
+    const index = await Promise.all(indexed.map(async task => ({ title: await title(task), status: task.status, taskId: task.id, attemptId: task.currentAttemptId })));
+    return formatLarkHandoff({ ...source, turns, index, taskTotal: visible.length, goal: visible[0]?.prompt, goalSource: visible[0] ? { taskId: visible[0].id, attemptId: visible[0].currentAttemptId } : undefined, note,
+      eventsIncomplete: window.length >= larkHandoffEventLimit || turns.some(turn => !turn.events.length),
+      ...(cwd ? { cwd, git: await readGitSnapshot(cwd) } : {}) });
   }
 
   /**

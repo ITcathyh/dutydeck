@@ -2,7 +2,8 @@ import { useTimelineDisclosure } from '../timeline-disclosure';
 import { memo } from 'react';
 import { BookOpen, BrainCircuit, ChevronDown, ChevronRight, Database, FilePenLine, FlaskConical, GitBranch, Globe2, LoaderCircle, Search, Terminal, Users, Wrench } from 'lucide-react';
 import type { TimelineActivityGroup, TimelineEvent } from '../timeline';
-import { CodeBlock, MarkdownContent } from '../MarkdownContent';
+import { CodeBlock } from '../MarkdownContent';
+import { EventContent } from './EventContent';
 import { elapsedMilliseconds, formatElapsed, groupToolActivityRows, toolActionLabel, toolDescription, toolPresentation, type ToolKind } from '../tool-presentation';
 
 /*
@@ -26,7 +27,7 @@ export function ToolKindIcon({ kind, size = 14 }: { kind: ToolKind; size?: numbe
 
 export const ToolCard = memo(function ToolCard({ event, ongoing = false, preferDescription = true }: { event: TimelineEvent; ongoing?: boolean; preferDescription?: boolean }) {
   const data = event.data; const done = data.status === 'completed'; const failed = data.status === 'failed'; const terminal = done || failed;
-  const [open, setOpen] = useTimelineDisclosure(`tool:${event.id}`, ongoing && !terminal); const hasDetails = data.input !== undefined || data.output !== undefined;
+  const [open, setOpen] = useTimelineDisclosure(`tool:${event.id}`, ongoing && !terminal); const hasDetails = data.input !== undefined || data.output !== undefined || data.parts?.length > 0;
   const presentation = toolPresentation(data);
   const elapsed = formatElapsed(elapsedMilliseconds(data.startedAt ?? event.timestamp, terminal ? data.completedAt ?? event.timestamp : undefined));
   const statusLabel = failed ? '失败' : done ? '已完成' : '执行中'; const actionLabel = preferDescription ? toolDescription(data) ?? toolActionLabel(presentation, terminal) : toolActionLabel(presentation, terminal);
@@ -38,7 +39,7 @@ export const ToolCard = memo(function ToolCard({ event, ongoing = false, preferD
       <span className={`grid h-5 w-5 shrink-0 place-items-center ${tone}`}><ToolKindIcon kind={presentation.kind} size={13}/></span><span className="min-w-0 flex-1 truncate text-caption text-subtle"><span className="font-medium text-secondary">{actionLabel}</span>{presentation.detail && <span title={presentation.detail} className="ml-1.5 font-mono text-subtle">{presentation.detail}</span>}</span>
       <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-caption tabular-nums text-subtle">{elapsed && <span>{elapsed}</span>}{!terminal ? <LoaderCircle size={11} className="animate-spin text-info-solid"/> : <span className={`h-1.5 w-1.5 rounded-full ${failed ? 'bg-danger-solid' : 'bg-success-solid'}`}/>}<span className={tone}>{statusLabel}</span>{hasDetails && (open ? <ChevronDown size={12}/> : <ChevronRight size={12}/>)}</span>
     </button>
-    {open && hasDetails && <div className="mb-2 ml-7 border-l border-default pl-3"><CodeBlock className="language-json" code={detailJson}/></div>}
+    {open && hasDetails && <div className="mb-2 ml-7 border-l border-default pl-3">{(data.input !== undefined || data.output !== undefined) && <CodeBlock className="language-json" code={detailJson}/>}<EventContent data={{ parts: data.parts }}/></div>}
   </div>;
 }, (previous, next) => previous.event === next.event
   && previous.ongoing === next.ongoing && previous.preferDescription === next.preferDescription
@@ -69,9 +70,9 @@ export function ToolBatch({ description, events, ongoing = false }: { descriptio
 export function ActivityContent({ events, ongoing = false }: { events: TimelineEvent[]; ongoing?: boolean }) {
   const rows = groupToolActivityRows(events);
   return <div className="space-y-1">
-    {rows.map(row => row.kind === 'batch' ? <ToolBatch key={row.id} description={row.description} events={row.events} ongoing={ongoing}/> : row.event.type === 'text' ? null : row.event.type === 'thinking' ? <div key={row.event.id} className="py-1.5">
+    {rows.map(row => row.kind === 'batch' ? <ToolBatch key={row.id} description={row.description} events={row.events} ongoing={ongoing}/> : row.event.type === 'text' ? row.event.data.parts?.some((part: { type: string }) => part.type !== 'text') ? <EventContent key={row.event.id} data={row.event.data}/> : null : row.event.type === 'thinking' ? <div key={row.event.id} className="py-1.5">
       <div className="mb-1 flex items-center gap-2 text-caption font-medium text-secondary"><BrainCircuit size={13}/><span>思考过程</span></div>
-      <div className="markdown pl-5 text-caption text-subtle"><MarkdownContent>{row.event.data.text ?? ''}</MarkdownContent></div>
+      <div className="markdown pl-5 text-caption text-subtle"><EventContent data={row.event.data}/></div>
     </div> : <ToolCard key={row.event.id} event={row.event} ongoing={ongoing}/>) }
   </div>;
 }

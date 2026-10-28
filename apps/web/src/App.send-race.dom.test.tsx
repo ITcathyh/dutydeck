@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -189,3 +189,7 @@ it.each(['queue', 'steer'] as const)('shows a new %s acknowledgement immediately
   await waitFor(() => expect(client!.isFetching()).toBe(0));
   expect(screen.getByRole('button', { name: `取消排队：${queued.prompt}` })).toBeTruthy();
 });
+
+beforeEach(() => { vi.spyOn(api, 'sessionHistory').mockResolvedValue({ turns: [], highWaterMark: 0, liveAfter: 0 }); });
+
+vi.mock('./skill-catalog-api', async () => { const { api } = await import('./api'); return { fetchSkillCatalog: async (...args: Parameters<typeof api.skills>) => ({ skills: await api.skills(...args), diagnostics: [], partial: false }) }; });

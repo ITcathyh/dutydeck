@@ -31,7 +31,11 @@
     "src/release-path.ts",
     "dist/release-path.js",
     "dist/release-path.js.map",
-    "dist/release-path.d.ts"
+    "dist/release-path.d.ts",
+    "src/transcript-source.ts",
+    "dist/transcript-source.js",
+    "dist/transcript-source.js.map",
+    "dist/transcript-source.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

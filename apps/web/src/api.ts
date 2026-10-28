@@ -1,3 +1,5 @@
+import type { HistoryOutline } from '@dutydeck/shared';
+export type { HistoryOutline, HistoryTurnSummary } from '@dutydeck/shared';
 import type { AutomationSchedulePage, AutomationRunDetail } from '@dutydeck/shared';
 import type { PluginBinding, SavePluginBinding, PluginConfigSchema, PluginBindingScope } from '@dutydeck/shared';
 import type { AgentWeight, LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
@@ -267,7 +269,7 @@ export type LarkOpenPlatformSetupJob = {
 };
 export type { LarkAppCreationJob };
 export type Session = { id: string; agentId: string; state: string; cwd: string; name?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; sourceContext?: SessionSourceContext; archivedAt?: string; runId: string; createdAt: string; updatedAt: string; error?: string; systemPrompt?: string; workspaceMode?: WorkspaceMode; workspaceSourceCwd?: string };
-export type DockEvent = { taskId?: string; id: string; sequence: number; type: string; timestamp: string; data: any; raw?: string };
+export type DockEvent = { taskId?: string; attemptId?: string; id: string; sequence: number; type: string; timestamp: string; data: any; raw?: string };
 export type Task = { skillDeliveries?: SkillDeliveryMetadata[]; id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string };
 /** 结果未知、现在可以由人处理的一轮：已知事实与三行摘要（服务端生成，与飞书提醒卡同一份文字）。 */
 export type UnknownTask = UnknownTaskFacts & { target: string; prompt: string; factLines: string[] };
@@ -390,6 +392,7 @@ export const api = {
   passwordLogin: (password: string) => json<BrowserAuthState>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password }) }),
   logout: () => json<BrowserAuthState>('/api/auth/logout', { method: 'POST' }),
   instances: () => json<{ instances: PeerInstance[] }>('/api/instances', { cache: 'no-store' }),
+  sessionHistory: (id: string, signal?: AbortSignal) => json<HistoryOutline>(`/api/sessions/${encodeURIComponent(id)}/history`, { signal }),
   agents: () => json<Agent[]>('/api/agents'), agentModels: (id: string, model?: string, refresh = false, appId?: string) => json<AgentModelsResult>(agentModelsUrl(id, model, refresh, appId)), sessions: (signal?: AbortSignal) => json<Session[]>('/api/sessions', { signal }), session: (id: string) => json<Session>(`/api/sessions/${encodeURIComponent(id)}`), events: (id: string, query?: EventWindowQuery, signal?: AbortSignal) => json<DockEvent[]>(eventsUrl(id, query), { signal }), tasks: (id: string) => json<Task[]>(`/api/sessions/${id}/tasks`),
   // 跨任务标题的最小只读契约；服务端接入前 UI 仅使用当前已加载 tasks 的真实 prompt，不伪造摘要。
   runSummaries: () => json<RunSummary[]>(RUN_SUMMARY_ENDPOINT),

@@ -182,7 +182,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         || (pathname === '/api/auth/link' && (method === 'GET' || method === 'HEAD' || method === 'POST'))
         || pathname === '/api/auth/logout'
         || (options.pluginResults !== undefined && pathname.startsWith('/api/plugin-results/'))
-        || (options.pluginBusinessTools !== undefined && ['/api/plugin-tools/list', '/api/plugin-tools/revision', '/api/plugin-tools/call', '/api/plugin-tools/reconcile', '/api/plugin-tools/mcp'].includes(pathname))
+        || (options.pluginBusinessTools !== undefined && ['/api/plugin-tools/list', '/api/plugin-tools/summary', '/api/plugin-tools/describe', '/api/plugin-tools/manual', '/api/plugin-tools/revision', '/api/plugin-tools/call', '/api/plugin-tools/reconcile', '/api/plugin-tools/mcp'].includes(pathname))
         || pathname.startsWith('/api/lark/agent-tools/')
         || isRelayCapabilityRequest(method, pathname)
         || pathname.startsWith('/api/hooks/')
@@ -489,6 +489,10 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     if (parsed !== undefined && (parsed < 1 || parsed > 1_000)) throw new RuntimeError('INVALID_EVENT_LIMIT', 'limit must be an integer between 1 and 1000', 400);
     return parsed;
   };
+  app.get<{ Params: { id: string } }>('/api/sessions/:id/history', async request => {
+    await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
+    return runtime.getHistoryOutline(request.params.id);
+  });
   app.get<{ Params: { id: string }; Querystring: { after?: string; before?: string; limit?: string; direction?: string } }>('/api/sessions/:id/events', async request => {
     await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
     const { after, before, limit, direction } = request.query;

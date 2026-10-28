@@ -34,8 +34,8 @@ const sessionRoutesSchema = z.object({ version: z.literal(1), routes: z.record(z
  * 「查看改动」页读 diff 和提交评论（评论只会变成飞书确认卡，见 turn-diff-routes.ts）。
  */
 const SHARED_PROXY_SUFFIX: Record<string, RegExp> = {
-  GET: /^(?:\/(?:events|tasks|stream|tasks\/[A-Za-z0-9_-]+\/diff))?$/,
-  HEAD: /^(?:\/(?:events|tasks|stream|tasks\/[A-Za-z0-9_-]+\/diff))?$/,
+  GET: /^(?:\/(?:history|events|tasks|stream|tasks\/[A-Za-z0-9_-]+\/diff))?$/,
+  HEAD: /^(?:\/(?:history|events|tasks|stream|tasks\/[A-Za-z0-9_-]+\/diff))?$/,
   POST: /^\/tasks\/[A-Za-z0-9_-]+\/diff\/comments$/
 };
 const sharedProxyPath = (method: string | undefined, pathname: string, prefix: string) => {

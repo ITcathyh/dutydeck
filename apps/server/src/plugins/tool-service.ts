@@ -3,12 +3,15 @@ import { canonicalExecutionJson, RuntimeError, type JsonValue, type PluginToolAc
 import { PluginBusinessToolRegistry, validateToolInput, type BusinessToolEntry } from './business-tools.js';
 import { PluginToolGrants } from './tool-grants.js';
 import { PluginToolLedger } from './tool-ledger.js';
+import type { PluginToolManuals } from '@dutydeck/shared';
+import { readPluginManual } from './tool-manuals.js';
 import type { PluginRuntimeHooks } from './integration.js';
 
 export interface PluginToolAuthority { identity: PluginToolIdentity; assertCurrent(): Promise<void> }
 export interface PluginToolAuthorityResolver { resolve(token?: string, turn?: string): Promise<PluginToolAuthority> }
 export interface PluginToolHost {
   businessTools: PluginBusinessToolRegistry;
+  toolManuals?(plugin: string): { root: string; version: string; manuals: PluginToolManuals } | undefined;
   resolveBinding(plugin: string, context: { botAppId?: string; chatId?: string; cwd?: string }): Promise<PluginToolBinding | undefined>;
 }
 const freezeJson = <T>(value: T): T => {
@@ -32,6 +35,7 @@ export class PluginBusinessToolService {
     const authority = await this.authorities.resolve(token, turn);
     const tools = [];
     const snapshot = [];
+    const visible: Array<{ id: string; entry: BusinessToolEntry; binding: PluginToolBinding }> = [];
     for (const [id, entry] of this.host.businessTools.list({ botAppId: authority.identity.botAppId, cwd: authority.identity.workspaceRoot })) {
       let binding: PluginToolBinding | undefined;
       try { binding = await this.host.resolveBinding(entry.plugin, { ...authority.identity, cwd: authority.identity.workspaceRoot }); }
@@ -40,14 +44,55 @@ export class PluginBusinessToolService {
         throw error;
       }
       if (binding && await this.grants.permits(authority.identity, id, binding.bindingId, entry.effect, 'invoke')) {
+        visible.push({ id, entry, binding });
         tools.push({ id, description: entry.tool.description, inputSchema: entry.tool.inputSchema, effect: entry.effect, version: entry.tool.version });
         snapshot.push({ id, version: entry.tool.version, packageVersion: entry.packageVersion, effect: entry.effect, bindingId: binding.bindingId, bindingRevision: binding.revision });
       }
     }
+    for (const item of visible) await this.discoveryGuard(authority, item.id, item.entry, item.binding);
     await authority.assertCurrent();
     const registryRevision = this.host.businessTools.revision;
     const revision = digest({ registryRevision, tools: snapshot });
     return { tools, revision, registryRevision };
+  }
+  async summary(token?: string, turn?: string) {
+    const listed = await this.list(token, turn);
+    return { ...listed, tools: listed.tools.map(({ inputSchema: _schema, ...tool }) => tool) };
+  }
+  private async discoveryGuard(authority: PluginToolAuthority, id: string, entry: BusinessToolEntry, binding: PluginToolBinding) {
+    await authority.assertCurrent();
+    const current = await this.select(id, authority);
+    if (current.entry !== entry || current.binding.bindingId !== binding.bindingId || current.binding.revision !== binding.revision) throw new RuntimeError('PLUGIN_TOOL_BINDING_CHANGED', 'Tool or binding changed; repeat discovery', 409);
+    if (!await this.grants.permits(authority.identity, id, binding.bindingId, entry.effect, 'invoke')) throw new RuntimeError('PLUGIN_TOOL_FORBIDDEN', 'Tool is not authorized', 403);
+    await authority.assertCurrent();
+  }
+  async describe(id: string, token?: string, turn?: string) {
+    const authority = await this.authorities.resolve(token, turn);
+    const { entry, binding } = await this.select(id, authority);
+    await this.discoveryGuard(authority, id, entry, binding);
+    const artifact = this.host.toolManuals?.(entry.plugin);
+    if (artifact && artifact.version !== entry.packageVersion) throw new RuntimeError('PLUGIN_TOOL_BINDING_CHANGED', 'Plugin package changed; repeat discovery', 409);
+    const contract = digest(artifact ?? null);
+    const declared = artifact && Object.hasOwn(artifact.manuals, entry.tool.name) ? artifact.manuals[entry.tool.name] : undefined;
+    const manuals = Object.entries(declared ?? {}).map(([id, manual]) => ({ id, description: manual.description, maxBytes: manual.maxBytes }));
+    const tool = { id, description: entry.tool.description, inputSchema: entry.tool.inputSchema, effect: entry.effect, version: entry.tool.version, packageVersion: entry.packageVersion, manuals };
+    await this.discoveryGuard(authority, id, entry, binding);
+    if (digest(this.host.toolManuals?.(entry.plugin) ?? null) !== contract) throw new RuntimeError('PLUGIN_TOOL_BINDING_CHANGED', 'Plugin package changed; repeat discovery', 409);
+    return { tool, digest: digest(tool), truncated: false };
+  }
+  async manual(id: string, manualId: string, token?: string, turn?: string) {
+    const authority = await this.authorities.resolve(token, turn);
+    const { entry, binding } = await this.select(id, authority);
+    await this.discoveryGuard(authority, id, entry, binding);
+    const artifact = this.host.toolManuals?.(entry.plugin);
+    const declared = artifact && Object.hasOwn(artifact.manuals, entry.tool.name) ? artifact.manuals[entry.tool.name] : undefined;
+    const manual = declared && Object.hasOwn(declared, manualId) ? declared[manualId] : undefined;
+    if (!artifact || !manual || artifact.version !== entry.packageVersion) throw new RuntimeError('PLUGIN_TOOL_MANUAL_NOT_FOUND', 'Optional manual not available', 404);
+    const contract = digest(artifact);
+    const result = await readPluginManual(artifact.root, manual);
+    await this.discoveryGuard(authority, id, entry, binding);
+    if (digest(this.host.toolManuals?.(entry.plugin) ?? null) !== contract) throw new RuntimeError('PLUGIN_TOOL_BINDING_CHANGED', 'Plugin package changed; repeat discovery', 409);
+    return { tool: id, id: manualId, version: entry.tool.version, packageVersion: entry.packageVersion, ...result, truncated: false };
   }
   private async select(id: string, authority: PluginToolAuthority) {
     const entry = this.host.businessTools.get(id, { botAppId: authority.identity.botAppId, cwd: authority.identity.workspaceRoot });

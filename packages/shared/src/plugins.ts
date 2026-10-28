@@ -5,6 +5,8 @@ import { z } from 'zod';
 import type { ScenarioProvider } from './scenarios.js';
 import { PLUGIN_API_VERSION, pluginConfigSchema, pluginSkillRefSchema, pluginTextResourceSchema, pluginConfigValueSchema } from './plugin-bindings.js';
 export type {
+  PluginToolManual,
+  PluginToolManuals,
   PluginPermissionEffect,
   PluginFilesystemPermission,
   PluginHostDeclaration,
@@ -88,6 +90,7 @@ export const pluginManifestSchema = z.object({
   bindingConfig: pluginConfigSchema.optional(),
   requiredSkills: z.array(pluginSkillRefSchema).max(16).optional(),
   skillResources: z.record(z.string(), z.array(pluginTextResourceSchema).max(16)).optional(),
+  toolManuals: z.record(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/), z.record(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/), pluginTextResourceSchema.extend({ description: z.string().min(1).max(500) })).refine(value => Object.keys(value).length <= 16, 'Maximum 16 optional manuals per tool')).refine(value => Object.keys(value).length <= 64, 'Maximum 64 tool manual groups').optional(),
   permissions: pluginPermissionsSchema.optional(),
   slots: z.array(pluginWebSlotDeclarationSchema).max(16).optional(),
   commands: relativePath.optional(),

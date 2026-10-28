@@ -348,7 +348,7 @@ export class LoginThrottle {
 }
 
 /** 分享页能读的接口：单个会话的详情、事件、任务和实时流，只读 */
-const SHARED_SESSION_READ_ROUTES = new Set(['/api/sessions/:id', '/api/sessions/:id/events', '/api/sessions/:id/tasks', '/api/sessions/:id/stream']);
+const SHARED_SESSION_READ_ROUTES = new Set(['/api/sessions/:id', '/api/sessions/:id/events', '/api/sessions/:id/history', '/api/sessions/:id/tasks', '/api/sessions/:id/stream']);
 
 /** 「查看改动」页能用的接口：这一轮 diff 的只读视图，和把行评论转成飞书确认卡（不直接给 Agent 下指令）。 */
 const SHARED_TURN_DIFF_ROUTES = new Map([['/api/sessions/:id/tasks/:taskId/diff', ['GET', 'HEAD']], ['/api/sessions/:id/tasks/:taskId/diff/comments', ['POST']]]);

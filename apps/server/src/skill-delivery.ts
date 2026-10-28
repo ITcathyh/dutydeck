@@ -1,10 +1,12 @@
+import { constants } from 'node:fs';
+import { readBoundedBytes } from './bounded-file.js';
 import { open, realpath, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { RuntimeError, type PromptPart } from '@dutydeck/shared';
 import { assemblePrompt } from './prompt-context.js';
-import { discoverSkills, isPathInside, skillRoots, type SkillReference } from './skill-catalog.js';
+import { discoverSkillCatalog, isPathInside, skillAtPath, skillFrontmatter, skillRoots, type SkillReference } from './skill-catalog.js';
 
 export interface SkillDelivery {
   name: string;
@@ -122,7 +124,9 @@ export async function prepareSkillPrompt(
     await Promise.all(roots.map(root => realpath(root.path).catch(() => null)))
   ).filter((r): r is string => Boolean(r));
 
-  const catalog = await discoverSkills(workspaceRoot, { homeDirectory: homeRoot, pluginRoots: options?.pluginRoots, pluginWorkspaceRoot: options?.pluginWorkspaceRoot, chatId: options?.chatId, ...(options?.botAppId ? { botAppId: options.botAppId } : {}) });
+  const discovered = await discoverSkillCatalog(workspaceRoot, { homeDirectory: homeRoot, pluginRoots: options?.pluginRoots, pluginWorkspaceRoot: options?.pluginWorkspaceRoot, chatId: options?.chatId, ...(options?.botAppId ? { botAppId: options.botAppId } : {}) });
+
+  const catalog = discovered.skills;
 
   const matchedFromRequests: SkillReference[] = [];
   if (hasExplicitRequests) {
@@ -130,11 +134,18 @@ export async function prepareSkillPrompt(
       const resolvedReq = resolve(reqPath);
       const realReq = await realpath(resolvedReq).catch(() => null);
 
-      const matched = catalog.find(
+      let matched = catalog.find(
         s => s.ref === reqPath || s.path === reqPath || s.path === resolvedReq || (realReq !== null && s.path === realReq)
       );
 
       if (!matched) {
+        const diagnostic = discovered.diagnostics.find(item => item.ref === reqPath || item.path === reqPath || item.path === resolvedReq || item.path === realReq);
+        if (diagnostic) throw new RuntimeError(diagnostic.code, diagnostic.message, diagnostic.code === 'SKILL_SECURITY_VIOLATION' ? 403 : 400);
+        matched = await skillAtPath(resolvedReq, roots);
+      }
+      if (discovered.partial && matched?.ref && reqPath === matched.ref) throw new RuntimeError('SKILL_CATALOG_INCOMPLETE', 'Skill reference uniqueness could not be verified; choose an explicit path', 409);
+      if (!matched) {
+        if (discovered.partial) throw new RuntimeError('SKILL_CATALOG_INCOMPLETE', 'Skill catalog is incomplete; choose an explicit eligible path', 409);
         throw new RuntimeError(
           'SKILL_NOT_FOUND',
           `Skill request "${reqPath}" does not match any discovered eligible skill in catalog`,
@@ -148,6 +159,7 @@ export async function prepareSkillPrompt(
   const matchedFromLegacy: SkillReference[] = [];
   if (hasLegacyRequests) {
     for (const name of legacySkillNames) {
+      if (discovered.partial) throw new RuntimeError('SKILL_CATALOG_INCOMPLETE', 'Name lookup requires a complete catalog; choose an explicit path', 409);
       const matches = catalog.filter(s => s.name === name);
       if (matches.length === 0) {
         throw new RuntimeError(
@@ -182,7 +194,7 @@ export async function prepareSkillPrompt(
   for (const skill of deduplicatedSkills) {
     let handle;
     try {
-      handle = await open(skill.path, 'r');
+      handle = await open(skill.path, constants.O_RDONLY | constants.O_NONBLOCK);
     } catch (err: any) {
       throw new RuntimeError(
         'SKILL_READ_ERROR',
@@ -240,7 +252,7 @@ export async function prepareSkillPrompt(
         );
       }
 
-      const buffer = await handle.readFile();
+      const buffer = await readBoundedBytes(handle, MAX_SKILL_SIZE + 1);
       if (buffer.length > MAX_SKILL_SIZE) {
         throw new RuntimeError(
           'SKILL_SIZE_EXCEEDED',
@@ -259,20 +271,21 @@ export async function prepareSkillPrompt(
 
       const digest = createHash('sha256').update(buffer).digest('hex').toLowerCase();
       let content = buffer.toString('utf8');
+      skillFrontmatter(content);
       const resources: Array<{ path: string; digest: string }> = [];
       for (const resource of skill.resources ?? []) {
         if (!skill.root) throw new RuntimeError('SKILL_RESOURCE_INVALID', 'Resource root is missing', 400);
         const root = await realpath(skill.root);
         const path = await realpath(resolve(root, resource.path)).catch(() => { throw new RuntimeError('SKILL_RESOURCE_INVALID', `Required text resource ${resource.path} is unavailable`, 400); });
         if (!isPathInside(path, root)) throw new RuntimeError('SKILL_RESOURCE_INVALID', 'Resource escapes package', 403);
-        const file = await open(path, 'r');
+        const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
         try {
           const actual = await realpath(`/proc/self/fd/${file.fd}`).catch(() => realpath(path));
           const info = await file.stat();
           const disk = await stat(path);
           if (disk.ino !== info.ino || disk.dev !== info.dev) throw new RuntimeError('SKILL_RESOURCE_INVALID', 'Resource changed while opening', 400);
           if (!isPathInside(actual, root) || !info.isFile() || info.size > resource.maxBytes) throw new RuntimeError('SKILL_RESOURCE_INVALID', 'Resource is outside the package or exceeds its limit', 400);
-          const bytes = await file.readFile();
+          const bytes = await readBoundedBytes(file, Math.min(resource.maxBytes, MAX_TOTAL_SKILL_SIZE - totalBytes) + 1);
           totalBytes += bytes.length;
           if (bytes.length > resource.maxBytes || totalBytes > MAX_TOTAL_SKILL_SIZE || bytes.includes(0)) throw new RuntimeError('SKILL_RESOURCE_INVALID', 'Resource is not bounded text', 400);
           let text: string;

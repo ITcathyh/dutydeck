@@ -1,3 +1,4 @@
+import { readHistoryOutline } from './event-history.js';
 import { listConfigByJsonField } from './config-query.js';
 import { createPluginResultRepository } from './plugin-results.js';
 import { createMemoryJobRepository } from './memory-jobs.js';
@@ -340,6 +341,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       }
     },
     events: {
+      async listHistoryOutline(sessionId) { return readHistoryOutline(sqlite, sessionId); },
       highWaterMark(sessionId) { return (sqlite.prepare('SELECT COALESCE(MAX(sequence),0) AS sequence FROM events WHERE session_id=?').get(sessionId) as { sequence: number }).sequence; },
       async append(e) { legacyWrite(() => db.insert(events).values({ ...e, data: JSON.stringify(e.data) }).run()); },
       async list(sessionId, afterSequence = 0) { return db.select().from(events).where(and(eq(events.sessionId, sessionId), gt(events.sequence, afterSequence))).orderBy(asc(events.sequence)).all().map(decodeEvent); },

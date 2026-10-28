@@ -9,6 +9,8 @@ const PREFIX = 'work_item:';
 const TEMPLATES = 'work_template:';
 const TIMEOUT_MS = 60 * 60_000;
 const PREPARE_TIMEOUT_MS = 60_000;
+// Prepared Drivers and accepted queues are bounded separately from the ledger's six execution permits.
+const MAX_PREPARED_STEPS = 12;
 async function bounded<T>(operation: Promise<T>, milliseconds: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -170,7 +172,7 @@ export class WorkItemService {
     }
     const { value } = await this.read(binding.workId);
     const step = value.item.steps.find(step => step.id === binding.stepId)!;
-    if ((actorId !== value.actorId && actorId !== installationOwnerTaskActor) || last(step)?.sessionId !== sessionId || step.status !== 'running' || this.closed || Date.now() - Date.parse(last(step)!.createdAt) >= TIMEOUT_MS) throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Work attempt is no longer active', 403);
+    if ((actorId !== value.actorId && actorId !== installationOwnerTaskActor) || last(step)?.sessionId !== sessionId || step.status !== 'running' || this.closed || this.executionExpired(step)) throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Work attempt is no longer active', 403);
     try {
       await this.assertExecution(value);
       const session = await this.repos.sessions.get(sessionId);
@@ -186,6 +188,11 @@ export class WorkItemService {
     }
     catch (error) { throw new RuntimeError('WORK_ITEM_TASK_REVOKED', errorText(error), 403); }
     return true;
+  }
+  private executionExpired(step: WorkStep): boolean {
+    const source = last(step);
+    const first = source?.taskId ? this.repos.execution.getTaskExecution(source.taskId)?.attempts.find(attempt => attempt.number === 1) : undefined;
+    return Boolean(first && Date.now() - Date.parse(first.createdAt) >= TIMEOUT_MS);
   }
   /** This only authorizes stopping a durably owned child, never starting or resuming it. */
   async authorizeControl(sessionId: string, actor: ExecutionActor): Promise<boolean> {
@@ -558,8 +565,10 @@ export class WorkItemService {
         step.status = 'skipped'; await this.write(state); continue;
       }
       if (definition.kind === 'wait') { step.status = 'waiting'; await this.write(state); continue; }
-      const globalActive = await this.repos.workItems.countActiveSteps();
-      if (record.item.steps.filter(step => step.status === 'running').length >= 3 || globalActive >= 6) break;
+      const preparedSteps = await this.repos.workItems.countActiveSteps();
+      if (record.item.steps.filter(step => step.status === 'running' || step.status === 'blocked' && last(step)?.sessionId && !record.stoppedAttempts.includes(last(step)!.id)).length >= 3 || preparedSteps >= MAX_PREPARED_STEPS) break;
+      const reused = await this.reworkWorkspace(record, step.id);
+      if (!this.options.runtime.canPrepareWorkItemWorkspace(reused?.cwd ?? record.cwd)) continue;
       const number = step.attempts.length + 1;
       const attemptId = `${id}:${step.id}:${number}`;
       const sessionId = 'ses_work_' + hash(attemptId);
@@ -674,7 +683,7 @@ export class WorkItemService {
         const sourcePayload = request.sourcePayload as { agentPrompt?: unknown };
         const agentPrompt = typeof sourcePayload.agentPrompt === 'string' ? sourcePayload.agentPrompt : request.prompt;
         return this.options.runtime.dispatchRequest(request, { agentPrompt, riskPolicy: record.riskPolicy });
-      })(), Math.min(PREPARE_TIMEOUT_MS, TIMEOUT_MS - (Date.now() - Date.parse(attempt.createdAt))));
+      })(), PREPARE_TIMEOUT_MS);
       if (accepted.id !== admission.taskId) throw new RuntimeError('WORK_ITEM_ADMISSION_CONFLICT', 'Runtime task identity did not match the fixed admission', 409);
       attempt.taskId = admission.taskId; attempt.status = 'accepted'; attempt.updatedAt = time(); await this.write(state);
     } catch (error) {
@@ -790,7 +799,7 @@ export class WorkItemService {
     }
     if (read.status === 'pending') {
       if (attempt.status !== 'accepted') { attempt.status = 'accepted'; attempt.updatedAt = time(); await this.write(state); }
-      if (Date.now() - Date.parse(attempt.createdAt) > TIMEOUT_MS) {
+      if (this.executionExpired(step)) {
         if (!record.actor) { await this.blockAttempt(state, step, 'reconcile_required', 'Execution timed out and its actor cannot be verified'); return; }
         try { if (await bounded(this.options.runtime.stopWorkItemSession(attempt.sessionId!, record.actor), 10_000)) record.stoppedAttempts.push(attempt.id); } catch { /* Preserve uncertainty. */ }
         attempt.status = 'blocked'; step.status = 'blocked';

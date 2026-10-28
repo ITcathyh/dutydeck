@@ -604,7 +604,7 @@ describe('HTTP API boundary', () => {
 
   it('分享 token 只能读绑定会话的详情、事件和任务，其他会话和写接口仍要登录', async () => {
     const runtime: any = {
-      getSession: vi.fn(async (id: string) => ({ id })), getEventWindow: vi.fn(async () => []), getTasks: vi.fn(async () => []),
+      getSession: vi.fn(async (id: string) => ({ id })), getHistoryOutline: vi.fn(async () => ({ turns: [], highWaterMark: 0, liveAfter: 0 })), getEventWindow: vi.fn(async () => []), getTasks: vi.fn(async () => []),
       send: vi.fn(), archive: vi.fn(), listSessions: vi.fn(async () => [])
     };
     const app = await buildApp(runtime, {
@@ -612,11 +612,12 @@ describe('HTTP API boundary', () => {
     }); apps.push(app);
     const remote = { remoteAddress: '8.8.8.8' } as const;
     const share = signSessionShareToken('share-secret', 'ses_1');
-    for (const url of ['/api/sessions/ses_1', '/api/sessions/ses_1/events', '/api/sessions/ses_1/tasks']) {
+    for (const url of ['/api/sessions/ses_1', '/api/sessions/ses_1/history', '/api/sessions/ses_1/events', '/api/sessions/ses_1/tasks']) {
       expect((await app.inject({ method: 'GET', url: `${url}?share=${share}`, ...remote })).statusCode, url).toBe(200);
     }
     for (const request of [
       { method: 'GET', url: `/api/sessions/ses_2?share=${share}` },
+      { method: 'GET', url: `/api/sessions/ses_2/history?share=${share}` },
       { method: 'GET', url: `/api/sessions?share=${share}` },
       { method: 'GET', url: `/api/sessions/ses_1/workspace?share=${share}` },
       { method: 'POST', url: `/api/sessions/ses_1/send?share=${share}`, payload: { prompt: 'hi' } },

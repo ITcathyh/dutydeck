@@ -1,3 +1,5 @@
+export * from './history.js';
+export * from './event-content.js';
 export * from './plugin-results.js';
 import { z } from 'zod';
 import {
@@ -231,6 +233,7 @@ export interface ToolCallData {
   name: string;
   input?: unknown;
   output?: unknown;
+  parts?: import('./event-content.js').EventContentPart[];
   status: 'pending' | 'running' | 'completed' | 'failed';
   startedAt: string;
   completedAt?: string;
@@ -416,6 +419,7 @@ export interface EventWindowOptions {
   direction?: 'forward' | 'backward';
 }
 export interface EventRepository {
+  listHistoryOutline?(sessionId: string): Promise<import('./history.js').HistoryOutline>;
   highWaterMark(sessionId: string): number;
   append(event: AgentEvent): Promise<void>;
   list(sessionId: string, afterSequence?: number): Promise<AgentEvent[]>;
@@ -584,3 +588,5 @@ export * from './scenarios.js';
 export * from './plugin-tools.js';
 export * from './action-transition.js';
 export * from './plugin-bindings.js';
+
+export * from './event-content.js';

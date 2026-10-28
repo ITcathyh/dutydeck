@@ -85,3 +85,19 @@ describe('server directory browser', () => {
     expect((await app.inject({ method: 'GET', url: url(root) })).statusCode).toBe(403);
   });
 });
+
+it('exposes item diagnostics and completeness separately while preserving the legacy skill array', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'dutydeck-system-skills-'));
+  const app = await buildApp({} as any);
+  try {
+    for (const [name, body] of [['good', '---\nname: catalog-good\n---\nbody'], ['bad', '---\nname: bad\nname: duplicate\n---\nbody']]) {
+      await mkdir(join(temp, '.agents/skills', name!), { recursive: true }); await writeFile(join(temp, '.agents/skills', name!, 'SKILL.md'), body!);
+    }
+    const query = `?cwd=${encodeURIComponent(temp)}`;
+    const response = await app.inject({ method: 'GET', url: `/api/system/skill-catalog${query}` });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ skills: expect.arrayContaining([expect.objectContaining({ name: 'catalog-good' })]), partial: expect.any(Boolean), diagnostics: expect.arrayContaining([expect.objectContaining({ path: join(temp, '.agents/skills/bad/SKILL.md'), code: 'SKILL_METADATA_INVALID' })]) });
+    const legacy = (await app.inject({ method: 'GET', url: `/api/system/skills${query}` })).json();
+    expect(Array.isArray(legacy)).toBe(true); expect(legacy.some((skill: any) => skill.name === 'catalog-good')).toBe(true);
+  } finally { await app.close(); await rm(temp, { recursive: true, force: true }); }
+});

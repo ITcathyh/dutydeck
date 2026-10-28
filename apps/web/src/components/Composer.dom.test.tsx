@@ -500,3 +500,12 @@ describe('Composer 先出计划开关', () => {
     expect(screen.getByLabelText('消息').getAttribute('placeholder')).toContain('先出计划');
   });
 });
+
+it('shows incomplete Skill discovery and per-item diagnostics without disabling ordinary submission', async () => {
+  const user = userEvent.setup(); const onSubmit = vi.fn();
+  const { rerender } = render(<Composer {...baseProps} value="/" skillCatalogStatus={{ partial: true, diagnostics: [{ path: '/skills/bad/SKILL.md', code: 'SKILL_METADATA_INVALID', message: 'Invalid skill YAML frontmatter' }] }} onSubmit={onSubmit}/>);
+  expect(screen.getByRole('status').textContent).toContain('Skill 清单未完整');
+  expect(screen.getByRole('status').textContent).toContain('/skills/bad/SKILL.md');
+  rerender(<Composer {...baseProps} value="ordinary request" skillCatalogStatus={{ partial: true, diagnostics: [] }} onSubmit={onSubmit}/>);
+  await user.click(screen.getByRole('button', { name: '发送消息' })); expect(onSubmit).toHaveBeenCalledTimes(1);
+});

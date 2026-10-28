@@ -23,6 +23,10 @@ export type DriverTranscriptSourceObservation = Readonly<
  * 实现方注意：
  *  - 事件必须按发生顺序回调；运行时按 session 串行化消费，不要求实现方自己排队。
  *  - 一轮任务结束时必须且只能发一次 `completed` 事件（stopReason 见下）。
+ *  - Pure text/thinking messages keep their original data.text without duplicate parts.
+ *    Mixed/tool content retains EventContentPart[]; only non-text payloads use
+ *    eventContentLimits. Unknown/oversized non-text becomes a visible placeholder.
+ *  - A resource URI is only recorded evidence; it grants no file or remote read.
  *  - 任何无法解析的输出一律发 `raw_terminal`，绝不丢数据。
  *  - driver 崩溃/未处理的实例级子进程退出时调 onExit；运行时据此把会话置 failed 并取消后续队列。
  *    注意：轮次内执行失败通过所属 send 报告，驱动内部回收或迟到的非当前进程退出不调用 onExit。

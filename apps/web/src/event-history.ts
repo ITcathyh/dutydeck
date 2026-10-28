@@ -1,8 +1,10 @@
-import { api, type DockEvent } from './api';
+import { api, type DockEvent, type HistoryOutline, type HistoryTurnSummary } from './api';
 
 export const EVENT_PAGE_SIZE = 200;
 export type EventWindow = {
   events: DockEvent[];
+  outline?: HistoryOutline;
+  highWaterMark?: number;
   hasOlder?: boolean;
   previousEvents?: DockEvent[];
   changes?: DockEvent[];
@@ -13,14 +15,6 @@ export function createEventWindow(events: DockEvent[], hasOlder = false): EventW
   for (const event of events) bySequence.set(event.sequence, event);
   const sorted = [...bySequence.values()].sort((left, right) => left.sequence - right.sequence);
   return { events: sorted, hasOlder };
-}
-
-/** First paint only needs the tail. The history hook then loads earlier pages automatically. */
-export async function loadEventHistory(sessionId: string, signal?: AbortSignal): Promise<EventWindow> {
-  signal?.throwIfAborted();
-  const page = await api.events(sessionId, { limit: EVENT_PAGE_SIZE, direction: 'backward' }, signal);
-  signal?.throwIfAborted();
-  return createEventWindow(page, page.length === EVENT_PAGE_SIZE);
 }
 
 export function mergeLiveEvent(current: EventWindow | undefined, event: DockEvent): EventWindow {
@@ -50,4 +44,33 @@ export function mergeReconciledEvents(current: EventWindow | undefined, incoming
   return { ...current, events, previousEvents: current.events, changes: page };
 }
 
-export const newestSequence = (window: EventWindow | undefined) => window?.events.at(-1)?.sequence ?? 0;
+export const newestSequence = (window: EventWindow | undefined) => Math.max(window?.highWaterMark ?? 0, window?.events.at(-1)?.sequence ?? 0);
+
+/** Details are canonical, bounded requests; summaries never enter this event array. */
+export async function loadHistoryRange(sessionId: string, after: number, through?: number, signal?: AbortSignal): Promise<DockEvent[]> {
+  const events: DockEvent[] = [];
+  let cursor = after;
+  while (true) {
+    signal?.throwIfAborted();
+    const page = await api.events(sessionId, { after: cursor, ...(through !== undefined ? { before: through + 1 } : {}), limit: EVENT_PAGE_SIZE, direction: 'forward' }, signal);
+    signal?.throwIfAborted();
+    if (!page.length) break;
+    for (const event of page) {
+      if (event.sequence !== cursor + 1) throw new Error('记录不连续，请重试读取');
+      events.push(event); cursor = event.sequence;
+    }
+    if (through !== undefined && cursor >= through) break;
+    if (page.length < EVENT_PAGE_SIZE) break;
+  }
+  if (through !== undefined && cursor < through) throw new Error('记录尚未读取完整，请重试');
+  return events;
+}
+
+export const loadTurnHistory = (sessionId: string, turn: HistoryTurnSummary, signal?: AbortSignal) =>
+  loadHistoryRange(sessionId, turn.firstSequence - 1, turn.lastSequence, signal);
+
+export async function loadProjectedHistory(sessionId: string, outline: HistoryOutline, signal?: AbortSignal): Promise<EventWindow> {
+  const events = await loadHistoryRange(sessionId, outline.liveAfter, undefined, signal);
+  if ((events.at(-1)?.sequence ?? outline.liveAfter) < outline.highWaterMark) throw new Error('活动记录尚未追平历史水位，请重试');
+  return { ...createEventWindow(events), outline, highWaterMark: Math.max(outline.highWaterMark, events.at(-1)?.sequence ?? 0) };
+}

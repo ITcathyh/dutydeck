@@ -55,6 +55,27 @@ it('queues all session kinds behind a same-repository turn and wakes them withou
   expect(h.sent).toEqual(['interactive','scheduled']);expect(h.stopped).toEqual([]);
   expect(h.repos.execution.getResources(one.id).some(r=>r.kind==='local_only'&&r.observations.at(-1)?.state==='live')).toBe(true);
 });
+it('rechecks a workspace release that arrives while the rejected claim awaits competitor inspection',async()=>{
+  const h=await fixture(),one=await h.runtime.start({agentId:'fixture',cwd:h.cwd}),two=await h.runtime.start({agentId:'fixture',cwd:h.cwd});
+  const running=deferred(),inspected=deferred(),releaseInspection=deferred();
+  h.gates.set('original-workspace-turn',running);
+  const first=h.runtime.send(one.id,'original-workspace-turn');
+  await vi.waitFor(()=>expect(h.sent).toEqual(['original-workspace-turn']));
+  const runtime=h.runtime as any,inspect=runtime.closeUnprovenIdleCompetitors.bind(runtime);
+  vi.spyOn(runtime,'closeUnprovenIdleCompetitors').mockImplementationOnce(async(...args:unknown[])=>{
+    const closed=await inspect(...args);
+    inspected.resolve();await releaseInspection.promise;return closed;
+  });
+  cleanups.push(async()=>releaseInspection.resolve());
+  const queued=await h.runtime.dispatch(two.id,'after-workspace-release');
+  await inspected.promise;
+  running.resolve();expect((await first).status).toBe('completed');
+  await vi.waitFor(()=>expect(h.runtime.getActiveTaskContext(one.id)).toBeUndefined());
+  releaseInspection.resolve();
+  await vi.waitFor(()=>expect(h.repos.execution.getTaskExecution(queued.id)?.task.status).toBe('completed'));
+  expect(h.repos.execution.getTaskExecution(queued.id)?.attempts).toHaveLength(1);
+  expect(h.sent).toEqual(['original-workspace-turn','after-workspace-release']);expect(h.stopped).toEqual([]);
+});
 it('keeps a known idle driver with background work blocking and only safely stops an idle adapter lacking background proof on contention', async()=>{
   const h=await fixture(),one=await h.runtime.start({agentId:'fixture',cwd:h.cwd}),two=await h.runtime.start({agentId:'fixture',cwd:h.cwd});
   h.background.add(one.id);

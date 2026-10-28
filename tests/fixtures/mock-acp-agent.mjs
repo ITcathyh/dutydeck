@@ -48,6 +48,19 @@ rl.on('line', async line => {
       send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `Bridged: ${process.env.MOCK_VENDOR_TOKEN ?? 'missing'}` } } } });
       return send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });
     }
+    if (prompt.includes('large plain content fixture')) {
+      send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Large start ' + '字'.repeat(100_000) + ' Large end' } } } });
+      return send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });
+    }
+    if (prompt.includes('structured content fixture')) {
+      const update = update => send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update } });
+      update({ sessionUpdate: 'tool_call', toolCallId: 'structured-tool', title: 'Create report', status: 'in_progress', content: [] });
+      update({ sessionUpdate: 'tool_call_update', toolCallId: 'structured-tool', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'Report body' } }, { type: 'content', content: { type: 'resource_link', uri: 'file:///work/report.html', name: 'Report', mimeType: 'text/html' } }] });
+      update({ sessionUpdate: 'agent_message_chunk', content: { type: 'image', mimeType: 'image/png', data: 'YWJj' } });
+      update({ sessionUpdate: 'agent_message_chunk', content: { type: 'resource', resource: { uri: 'file:///work/report.html', mimeType: 'text/html', text: '<h1>Report</h1>' } } });
+      update({ sessionUpdate: 'agent_message_chunk', content: { type: 'resource_link', uri: 'https://example.test/report', name: 'Report' } });
+      return send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });
+    }
     if (prompt.includes('crash')) process.exit(17);
     if (prompt.includes('wait for steering')) {
       send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'waiting for steering' } } } });

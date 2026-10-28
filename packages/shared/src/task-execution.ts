@@ -209,6 +209,8 @@ export interface TaskExecutionProjection { task: ExecutionTask; currentAttempt?:
 export interface BoundExecutionRepository {
   lookupAccepted(request: TaskRequestV1): AcceptedTask | undefined;
   acceptTask(f: SessionFence, request: TaskRequestV1, input: AcceptedTaskInputV2, position: 'front' | 'back'): CommitResult;
+  /** Preparation hint only; claimNext remains the atomic execution authority. */
+  canPrepareWorkspace(cwd: string, idleResources?: ResourceCheckRef[]): boolean;
   claimNext(f: SessionFence, idleResources?: ResourceCheckRef[]): CommitResult | undefined;
   promoteQueued(f: SessionFence, taskId: string, expectedTaskRevision: number, operation: QueueOperationInput): CommitResult;
   beginQueuedSteering(f: SessionFence, taskId: string, expectedTaskRevision: number, input: SteeringOperationInput, idleResources?: ResourceCheckRef[]): CommitResult;

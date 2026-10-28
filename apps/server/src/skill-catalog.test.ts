@@ -7,7 +7,7 @@ import { discoverSkills, isPathInside } from './skill-catalog.js';
 
 vi.mock('node:fs/promises', async original => {
   const actual = await original<typeof import('node:fs/promises')>();
-  return { ...actual, readFile: vi.fn(actual.readFile) };
+  return { ...actual, open: vi.fn(actual.open) };
 });
 
 describe('skill-catalog', () => {
@@ -174,7 +174,7 @@ describe('skill-catalog', () => {
       const skills = await discoverSkills(workspaceDir, { homeDirectory: userHomeDir });
       expect(skills).toHaveLength(1);
       expect(skills[0]?.path).toBe(join(claudeDir, 'SKILL.md'));
-      expect(vi.mocked(fs.readFile).mock.calls.filter(([path]) => path === join(claudeDir, 'SKILL.md'))).toHaveLength(1);
+      expect(vi.mocked(fs.open).mock.calls.filter(([path]) => path === join(claudeDir, 'SKILL.md'))).toHaveLength(1);
     });
 
     it('reads shared canonical paths once and keeps workspace source ahead of user roots', async () => {
@@ -187,7 +187,7 @@ describe('skill-catalog', () => {
 
       const skills = await discoverSkills(workspaceDir, { homeDirectory: userHomeDir });
       expect(skills).toEqual([{ name: 'shared', description: 'Shared content', path: skillFile, source: 'workspace' }]);
-      expect(vi.mocked(fs.readFile).mock.calls.filter(([path]) => path === skillFile)).toHaveLength(1);
+      expect(vi.mocked(fs.open).mock.calls.filter(([path]) => path === skillFile)).toHaveLength(1);
     });
 
     it('does not crawl symlink directories pointing outside registered root', async () => {
@@ -273,4 +273,81 @@ describe('skill-catalog', () => {
       expect(skills).toEqual([]);
     });
   });
+});
+
+describe('bounded skill catalog', () => {
+  let root: string;
+  beforeEach(async () => { root = await mkdtemp(join(tmpdir(), 'dutydeck-catalog-budget-')); });
+  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+  const add = async (root: string, name: string, body: string) => { const path = join(root, '.agents/skills', name, 'SKILL.md'); await mkdir(join(root, '.agents/skills', name), { recursive: true }); await writeFile(path, body); return path; };
+
+  it('diagnoses bad optional YAML separately and never includes it as a valid unnamed skill', async () => {
+    const bad = await add(root, 'bad', '---\nname: bad\nname: duplicate\n---\nbody');
+    await add(root, 'good', '---\nname: good\n---\nbody');
+    const { discoverSkillCatalog } = await import('./skill-catalog.js');
+    const catalog = await discoverSkillCatalog(root, { homeDirectory: root });
+    expect(catalog.skills.map(skill => skill.name)).toEqual(['good']);
+    expect(catalog.partial).toBe(false);
+    expect(catalog.diagnostics).toEqual([expect.objectContaining({ path: bad, code: 'SKILL_METADATA_INVALID' })]);
+  });
+
+  it('bounds enumeration and candidate counts, reporting truncation explicitly', async () => {
+    await add(root, 'first', '# first'); await add(root, 'second', '# second');
+    const { discoverSkillCatalog } = await import('./skill-catalog.js');
+    for (const limits of [{ entries: 1 }, { candidates: 1 }]) {
+      const catalog = await discoverSkillCatalog(root, { homeDirectory: root, limits });
+      expect(catalog.partial).toBe(true);
+      expect(catalog.budget.entries).toBeLessThanOrEqual(limits.entries ?? 8192);
+      expect(catalog.budget.candidates).toBeLessThanOrEqual(limits.candidates ?? 512);
+      expect(catalog.diagnostics.some(item => item.code === 'SKILL_CATALOG_BUDGET_EXCEEDED')).toBe(true);
+    }
+  });
+
+  it('never reads a huge body in discovery and rejects an incomplete metadata prefix', async () => {
+    await add(root, 'huge-body', `---\nname: huge\n---\n${'x'.repeat(2 * 1024 * 1024)}`);
+    const bad = await add(root, 'huge-header', `---\ndescription: ${'x'.repeat(64 * 1024)}\n---\nbody`);
+    const { discoverSkillCatalog } = await import('./skill-catalog.js');
+    const catalog = await discoverSkillCatalog(root, { homeDirectory: root });
+    expect(catalog.skills.map(skill => skill.name)).toEqual(['huge']);
+    expect(catalog.diagnostics).toEqual([expect.objectContaining({ path: bad, code: 'SKILL_METADATA_SIZE_EXCEEDED' })]);
+    expect(catalog.budget.bytes).toBeLessThanOrEqual(32 * 1024);
+    expect(catalog.budget.concurrentReads).toBe(1);
+  });
+
+  it('enforces the shared total read budget even when malformed candidates fail parsing', async () => {
+    for (const name of ['a', 'b', 'c']) await add(root, name, `---\nname: a\nname: b\n---\n${'x'.repeat(100)}`);
+    const { discoverSkillCatalog } = await import('./skill-catalog.js');
+    const catalog = await discoverSkillCatalog(root, { homeDirectory: root, limits: { metadataBytes: 40, totalBytes: 65 } });
+    expect(catalog.budget.bytes).toBeLessThanOrEqual(65);
+    expect(catalog.partial).toBe(true);
+    expect(catalog.skills).toEqual([]);
+  });
+
+  it('keeps duplicate plugin references fatal even when one candidate has invalid metadata', async () => {
+    const paths = [];
+    for (const parent of ['a', 'b']) { const path = join(root, parent, 'same'); await mkdir(path, { recursive: true }); await writeFile(join(path, 'SKILL.md'), parent === 'a' ? '---\nname: a\nname: b\n---' : '# valid'); paths.push(join(root, parent)); }
+    const { discoverSkillCatalog } = await import('./skill-catalog.js');
+    await expect(discoverSkillCatalog(root, { homeDirectory: root, pluginRoots: paths.map(path => ({ path, plugin: 'sample' })) })).rejects.toMatchObject({ code: 'SKILL_REF_DUPLICATE' });
+  });
+});
+
+it.skipIf(process.platform === 'win32')('diagnoses named pipes without blocking discovery', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-skill-pipe-'));
+  try {
+    const path = join(root, '.agents/skills/pipe'); await mkdir(path, { recursive: true }); execFileSync('mkfifo', [join(path, 'SKILL.md')]);
+    const { discoverSkillCatalog } = await import('./skill-catalog.js');
+    const catalog = await discoverSkillCatalog(root, { homeDirectory: root });
+    expect(catalog.skills).toEqual([]); expect(catalog.diagnostics).toEqual([expect.objectContaining({ code: 'INVALID_SKILL_FILE' })]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+it('preserves the original depth eligibility without falsely marking an otherwise complete catalog partial', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-skill-depth-'));
+  try {
+    const path = join(root, '.agents/skills', 'a/b/c/d/e/f'); await mkdir(path, { recursive: true }); await writeFile(join(path, 'SKILL.md'), '# too deep');
+    const { discoverSkillCatalog } = await import('./skill-catalog.js');
+    expect(await discoverSkillCatalog(root, { homeDirectory: root })).toMatchObject({ skills: [], diagnostics: [], partial: false });
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

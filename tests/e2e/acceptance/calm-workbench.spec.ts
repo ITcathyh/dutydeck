@@ -276,6 +276,9 @@ test.describe('Calm Workbench browser acceptance', () => {
         const closeInspector = page.getByRole('button', { name: '关闭结果检视', exact: true });
         if (await closeInspector.isVisible()) await closeInspector.click();
         await page.getByRole('tab', { name: '对话', exact: true }).click();
+        const historyToggle = page.getByRole('button', { name: /^(展开|收起)完整记录$/ }).first();
+        await expect(historyToggle).toBeVisible();
+        if (await historyToggle.getAttribute('aria-expanded') === 'false') await historyToggle.click();
         await expect(page.getByRole('article', { name: /最终输出/ }).first()).toBeVisible();
         await page.screenshot({ animations: 'disabled', path: info.outputPath(`conversation-${width}-${theme}.png`) });
         await page.getByRole('tab', { name: '改动', exact: true }).click();

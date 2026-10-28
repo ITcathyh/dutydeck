@@ -12,7 +12,9 @@ export function registerBusinessToolCli(program: Command) {
     if (!response.ok) throw new Error(value.error?.code ?? 'PLUGIN_TOOL_UNAVAILABLE');
     process.stdout.write(JSON.stringify(value) + '\n');
   };
-  root.command('list').requiredOption('--turn <token>', 'Current task attempt token').action(options => request('list', options.turn));
+  root.command('list').option('--summary', 'Return descriptions without parameter schemas').requiredOption('--turn <token>', 'Current task attempt token').action(options => request(options.summary ? 'summary' : 'list', options.turn));
+  root.command('describe <tool>').requiredOption('--turn <token>', 'Current task attempt token').action((tool, options) => request(`describe?tool=${encodeURIComponent(tool)}`, options.turn));
+  root.command('manual <tool> <id>').requiredOption('--turn <token>', 'Current task attempt token').action((tool, id, options) => request(`manual?tool=${encodeURIComponent(tool)}&id=${encodeURIComponent(id)}`, options.turn));
   root.command('call <tool>').requiredOption('--turn <token>', 'Current task attempt token').requiredOption('--call-id <id>', 'Stable invocation ID for retries').requiredOption('--json <input>', 'JSON tool input').action((tool, options) => request('call', options.turn, { tool, input: JSON.parse(options.json), callId: options.callId }));
   root.command('reconcile <action-id>').requiredOption('--turn <token>', 'Current task attempt token').action((actionId, options) => request('reconcile', options.turn, { actionId }));
   const grants = program.command('tool-grant').description('Manage explicit business-tool permissions as installation owner');

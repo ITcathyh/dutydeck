@@ -5,7 +5,7 @@ import { createWorkItemSchema, RuntimeError, toPublicAgent } from '@dutydeck/sha
 import type { LarkAgentToolsService } from './lark/agent-tools.js';
 import { agentGroupToolBearerToken } from './lark/agent-tools.js';
 import { delegationBriefSchema, type LeaderDelegationService } from './leader-delegation.js';
-import { discoverSkills } from './skill-catalog.js';
+import { discoverSkillCatalog } from './skill-catalog.js';
 import type { WorkItemService } from './work-items.js';
 import { runTemplateInput, templateNameInput, workInput } from './work-item-routes.js';
 
@@ -31,7 +31,7 @@ export async function registerWorkItemTools(app: FastifyInstance, options: WorkI
     const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
     await options.work.listBySession(scope.sessionId, scope.actorId);
     const session = await options.runtime.getSession(scope.sessionId);
-    return { skills: await discoverSkills(session!.cwd), delivery: 'prompt snapshot at step acceptance; tool authorization is checked separately' };
+    return { ...(await discoverSkillCatalog(session!.cwd)), delivery: 'prompt snapshot at step acceptance; tool authorization is checked separately' };
   });
   app.get(base, async request => {
     const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);

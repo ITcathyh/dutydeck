@@ -7,6 +7,7 @@ import { turnDiffPath } from '../app-route';
 import { Banner, Button, Dialog, Field, IconButton, Input, Spinner } from './primitives';
 import { PullRequestPanel } from './PullRequestPanel';
 import { SessionAutomationPanel } from './SessionAutomationPanel';
+import { SessionArtifacts } from './SessionArtifacts';
 
 import { verificationLabel } from './verification-presentation';
 import { usageLabel } from './RunHeader';
@@ -67,6 +68,7 @@ export function SessionDeliveryPanel({ session, tasks, onClose, presentation = '
           <p className="text-caption text-secondary">执行状态：{effectiveStatus(session).label}。执行完成与验证通过分别记录。</p>
           <p className="text-caption text-subtle">结果正文保留在对话中；下方检查已记录的改动与交付证据。</p>
         </section>
+        <SessionArtifacts sessionId={session.id}/>
         <section className="space-y-2">
           <h3 className="text-body font-semibold">每轮改动</h3>
           {turnDiffs.error && <Banner tone="danger">{turnDiffs.error.message}</Banner>}

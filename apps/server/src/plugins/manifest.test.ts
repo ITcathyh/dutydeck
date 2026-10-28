@@ -2,7 +2,7 @@ import { mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { isHostApiCompatible, loadPluginDirectory, parseCommandMarkdown, PluginValidationError, satisfiesVersionRange } from './manifest.js';
+import { isHostApiCompatible, loadPluginDirectory, parseCommandMarkdown, PluginValidationError, satisfiesVersionRange, strictPluginIssues } from './manifest.js';
 import { directPack, providerPack, writePlugin } from './scenario-fixtures.test-helpers.js';
 
 const examplePlugin = resolve(import.meta.dirname, '../../../../examples/plugins/hello');
@@ -165,4 +165,23 @@ describe('loadPluginDirectory scenario packs (static stage)', () => {
     await writePlugin(root, { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'packs', scenarios: 'missing' }) });
     expect(await issuesOf(root)).toEqual([expect.objectContaining({ field: 'scenarios', message: expect.stringContaining('不存在') })]);
   });
+});
+
+
+it('validates optional manual declarations and bounds strict checks without adding them to required resources', async () => {
+  const { writeFile } = await import('node:fs/promises');
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-manual-manifest-'));
+  try {
+    const manifest = { name: 'docs', toolManuals: { read: { guide: { description: 'Optional guide', path: 'guide.md', maxBytes: 64 } } } };
+    await writePlugin(root, { '.dutydeck-plugin/plugin.json': JSON.stringify(manifest), 'guide.md': 'guide' });
+    const plugin = await loadPluginDirectory(root);
+    expect(plugin.manifest.requiredSkills).toBeUndefined(); expect(plugin.manifest.skillResources).toBeUndefined();
+    expect(await strictPluginIssues(plugin)).toEqual([]);
+    await writeFile(join(root, 'guide.md'), 'x'.repeat(65));
+    expect(await strictPluginIssues(plugin)).toEqual([expect.objectContaining({ field: 'toolManuals.read.guide' })]);
+    for (const manual of [{ description: 'Bad', path: '../secret', maxBytes: 64 }, { description: 'Bad', path: 'guide.md', maxBytes: 65537 }]) {
+      await writeFile(join(root, '.dutydeck-plugin/plugin.json'), JSON.stringify({ ...manifest, toolManuals: { read: { guide: manual } } }));
+      await expect(loadPluginDirectory(root)).rejects.toBeInstanceOf(PluginValidationError);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

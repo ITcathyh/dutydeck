@@ -29,6 +29,45 @@ const intent=(submissionId='send')=>({submissionId,inputDigest:hash('final'),res
 const complete=(submissionId='send')=>({kind:'driver_result' as const,submissionId,outcome:'completed' as const,outputDigest:hash('done'),stopReason:'end_turn',complete:true as const});
 
 describe('task execution ledger',()=>{
+  it('atomically limits work-item claims to six globally and three per work, retaining unknown and unproven stops', async () => {
+    const {x,repos}=ready();
+    const directory=mkdtempSync(join(tmpdir(),'work-permits-'));dirs.push(directory);
+    const groups=new Map<string,Array<{status:string;attempts:Array<{id:string;sessionId:string}>}>>();
+    const fences:SessionFence[]=[];
+    for(let i=0;i<8;i++) {
+      const sessionId=`worker-${i}`,runId=`run-${i}`,group=i<4?'one':i<7?'two':'three';
+      const cwd=mkdtempSync(join(directory,'workspace-'));
+      const step={status:'running',attempts:[{id:`${group}:${i}:1`,sessionId}]};
+      groups.set(group,[...(groups.get(group)??[]),step]);
+      x.createSession({...session(sessionId,runId),cwd,source:'work_item',sourceId:step.attempts[0]!.id});
+      const fence={sessionId,runId};fences.push(fence);
+      x.acceptTask(fence,request(`request-${i}`,{namespace:'work_item',sessionId,actor:{kind:'installation_owner',id:'installation_owner'}}),input('hello','hello','installation_owner'),'back');
+    }
+    for(const [group,steps] of groups) await repos.config.set(`work_item:${group}`,JSON.stringify({item:{status:'running',steps},stoppedAttempts:[]}));
+    const first=fences.slice(0,3).map(fence=>x.claimNext(fence)!.attempt!);
+    expect(()=>x.claimNext(fences[3]!)).toThrow(expect.objectContaining({code:'WORK_ITEM_CAPACITY_BLOCKED'}));
+    const second=fences.slice(4,7).map(fence=>x.claimNext(fence)!.attempt!);
+    expect(()=>x.claimNext(fences[7]!)).toThrow(expect.objectContaining({code:'WORK_ITEM_CAPACITY_BLOCKED'}));
+    const submitted=x.markSubmissionPending(af(first[0]!),intent('unknown-work-submission')).attempt!;
+    const unknown=x.markReconcileRequired(af(submitted),{reasonId:'lost-receipt',code:'DISCONNECTED',evidenceRefs:[]}).attempt!;
+    expect(unknown.state).toBe('reconcile_required');
+    expect(()=>x.claimNext(fences[7]!)).toThrow(expect.objectContaining({code:'WORK_ITEM_CAPACITY_BLOCKED'}));
+    x.settleAttempt(af(first[1]!),'unsubmitted-stopped',{kind:'not_submitted',outcome:'cancelled',reason:'cancelled before send'});
+    const resource=x.beforeCreate(fences[1]!,{resourceId:'stopped-without-proof',kind:'local_only'});
+    const live=x.spawned(fences[1]!,resource.resourceId,resource.revision,{identityId:'unproven-driver',kind:'local_only',locator:{driver:'fixture'}});
+    // No stop_block is present: the physical resource itself must retain the permit.
+    expect(await repos.config.get(`runtime_driver_stop_block:${first[1]!.sessionId}`)).toBeUndefined();
+    expect(()=>x.claimNext(fences[7]!)).toThrow(expect.objectContaining({code:'WORK_ITEM_CAPACITY_BLOCKED'}));
+    const idle=x.observed(fences[1]!,live.resourceId,live.revision,{observationId:'old-idle',state:'live',identityId:'unproven-driver',observedAt:new Date().toISOString(),evidenceRef:'fixture:old-idle'});
+    const changed=x.observed(fences[1]!,idle.resourceId,idle.revision,{observationId:'changed-resource',state:'unknown',identityId:'unproven-driver',observedAt:new Date().toISOString(),evidenceRef:'fixture:proof-revoked'});
+    expect(()=>x.claimNext(fences[7]!,[{resourceId:idle.resourceId,expectedRevision:idle.revision,observationId:'old-idle'}])).toThrow(expect.objectContaining({code:'WORK_ITEM_CAPACITY_BLOCKED'}));
+    x.observed(fences[1]!,changed.resourceId,changed.revision,{observationId:'confirmed-exit',state:'gone',identityId:'unproven-driver',observedAt:new Date().toISOString(),evidenceRef:'fixture:physical-exit'});
+    const replacement=x.claimNext(fences[7]!)!.attempt!;
+    expect(replacement.number).toBe(1);
+    expect(repos.execution.getTaskExecution(unknown.taskId)!.attempts).toHaveLength(1);
+    expect([...first.slice(0,1),...first.slice(2),...second,replacement]).toHaveLength(6);
+  });
+
   it('persists a steering reservation before dispatch and blocks every replay entry after reopening',()=>{
     const filename=disk();const initial=ready(filename);let a=claimed(initial.x);a=initial.x.markSubmissionPending(af(a),intent()).attempt!;
     const second=accepted(initial.x,'steered').task!;

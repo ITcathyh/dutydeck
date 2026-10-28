@@ -533,3 +533,31 @@ it('retains append guards after invisible frames for replacements, old timestamp
   window = { ...window, hasOlder: false };
   expect(project(window.events, tasks, false, window)).toEqual(createTimelineProjector()(window.events, tasks, false));
 });
+
+it('keeps structured parts in order across deltas without mixing task or attempt identities', () => {
+  const first = { ...event(1, 'text', { text: '**Hel', parts: [{ type: 'text', text: '**Hel' }] }), taskId: 't', attemptId: 'a' };
+  const second = { ...event(2, 'text', { text: 'lo**', parts: [{ type: 'text', text: 'lo**' }, { type: 'image', mimeType: 'image/png', data: 'YWJj' }] }), taskId: 't', attemptId: 'a' };
+  const other = { ...event(3, 'text', { text: 'Other attempt' }), taskId: 't', attemptId: 'b' };
+  const merged = buildTimeline([first, second, other]);
+  expect(merged).toHaveLength(2);
+  expect(merged[0]?.data.parts).toEqual([{ type: 'text', text: '**Hello**' }, { type: 'image', mimeType: 'image/png', data: 'YWJj' }]);
+  expect(merged[1]?.attemptId).toBe('b');
+});
+
+it('retains long streamed text before and after an image beyond the per-event persistence budget', () => {
+  const chunk = '正文'.repeat(512);
+  const image = { type: 'image', mimeType: 'image/png', data: 'YWJj' };
+  const events = Array.from({ length: 160 }, (_, index) => event(index + 1, 'text', { text: chunk, parts: [{ type: 'text', text: chunk }] }));
+  events.splice(80, 0, event(80.5, 'text', { text: '', parts: [image] }));
+  const [pure] = buildTimeline(events.filter(item => item.data.text));
+  expect(pure?.data.parts).toEqual([{ type: 'text', text: chunk.repeat(160) }]);
+  const [merged] = buildTimeline(events);
+  expect(merged?.data.text).toBe(chunk.repeat(160));
+  expect(merged?.data.parts).toEqual([{ type: 'text', text: chunk.repeat(80) }, image, { type: 'text', text: chunk.repeat(80) }]);
+});
+
+it('retains a legacy long data.text message when a later delta first introduces parts', () => {
+  const legacy = 'Legacy '.repeat(30_000);
+  const [merged] = buildTimeline([event(1, 'text', { text: legacy }), event(2, 'text', { text: 'tail', parts: [{ type: 'text', text: 'tail' }] })]);
+  expect(merged?.data.parts).toEqual([{ type: 'text', text: legacy + 'tail' }]);
+});

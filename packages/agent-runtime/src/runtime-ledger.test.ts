@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentDriver, BoundExecutionRepository, NormalizedDriverEvent, Session, TaskExecutionContext, TaskRequestV1 } from '@dutydeck/shared';
-import { DriverRecoveryError } from '@dutydeck/shared';
+import { canonicalExecutionJson, DriverRecoveryError } from '@dutydeck/shared';
 import { DutydeckRuntime, type RuntimeOptions } from './index.js';
 
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
@@ -357,6 +357,41 @@ describe('Runtime uses the execution ledger', () => {
     const events = await h.runtime.getEvents(h.session.id);
     const settled = events.filter(event => event.attemptId === attempt.attemptId && event.settlementId === attempt.settlementId);
     expect(settled.at(-1)).toMatchObject({ type: 'completed', settlementId: attempt.settlementId });
+  });
+  it('keeps a streamed answer complete when its last text delta is only whitespace', async () => {
+    const h = await fixture({}, async emit => {
+      emit({ type: 'text', data: { text: 'Answer' } });
+      emit({ type: 'text', data: { text: '\n' } });
+      emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    const task = await h.runtime.send(h.session.id, 'answer');
+    expect(h.repos.execution.getTaskExecution(task.id)?.currentAttempt?.settlement).toMatchObject({ kind: 'driver_result', outcome: 'completed', outputDigest: createHash('sha256').update('Answer\n', 'utf8').digest('hex') });
+  });
+  it('settles a non-text assistant result against its persisted parts and trusted event identity', async () => {
+    const parts = [{ type: 'image', mimeType: 'image/png', data: 'YWJj' }, { type: 'resource_link', uri: 'file:///work/report.html', name: 'Report' }];
+    const h = await fixture({}, async emit => {
+      emit({ type: 'text', data: { text: '', parts, taskId: 'forged', attemptId: 'forged' } });
+      emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    const task = await h.runtime.send(h.session.id, 'make a report');
+    const attempt = h.repos.execution.getTaskExecution(task.id)!.currentAttempt!;
+    const saved = h.repos.execution.getAttemptEvents(attempt.attemptId, { afterSequence: 0, limit: 200 }).find(event => event.type === 'text' && (event.data as any).role !== 'user')!;
+    expect(saved).toMatchObject({ taskId: task.id, attemptId: attempt.attemptId, data: { text: '', parts } });
+    const expected = canonicalExecutionJson([{ id: saved.id, sequence: saved.sequence, text: '', parts }]);
+    expect(attempt.settlement).toMatchObject({ kind: 'driver_result', outcome: 'completed', outputDigest: createHash('sha256').update(expected, 'utf8').digest('hex') });
+    const reopened = createRepositories(h.path);
+    try { expect(reopened.execution.getAttemptEvents(attempt.attemptId, { afterSequence: 0, limit: 200 }).find(event => event.id === saved.id)).toEqual(saved); } finally { reopened.close(); }
+  });
+  it('keeps an unknown or oversized final content visible without certifying it as a complete answer', async () => {
+    const h = await fixture({}, async emit => {
+      emit({ type: 'text', data: { text: '', parts: [{ type: 'image', mimeType: 'image/png', data: 'a'.repeat(1024 * 1024) }] } });
+      emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    const task = await h.runtime.send(h.session.id, 'oversized response');
+    const attempt = h.repos.execution.getTaskExecution(task.id)!.currentAttempt!;
+    expect(attempt.settlement).toMatchObject({ kind: 'driver_result', outcome: 'failed' });
+    const saved = h.repos.execution.getAttemptEvents(attempt.attemptId, { afterSequence: 0, limit: 200 }).find(event => event.type === 'text' && (event.data as any).role !== 'user')!;
+    expect((saved.data as any).parts).toEqual([{ type: 'unsupported', originalType: 'image', reason: 'content_budget' }]);
   });
   it('does not let an old permission card resolve the next Attempt with the same native ID', async () => {
     const gates = [deferred(), deferred()]; let turn = 0;

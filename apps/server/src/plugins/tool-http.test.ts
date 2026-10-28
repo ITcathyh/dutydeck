@@ -34,7 +34,7 @@ async function harness(mode: 'local' | 'token' = 'token') {
   cleanup.push(() => app.close());
   await app.listen({ host: '127.0.0.1', port: 0 });
   const address = app.server.address() as { port: number }; const url = `http://127.0.0.1:${address.port}`;
-  return { app, url, grants, query, execute, reconcile, sessionToken: new RelayCapabilityRegistry(repos.sessions, url, 'test-signing-secret').tokenFor('s'), turnToken: randomBytes(32).toString('base64url'), lose: () => { lost = true; } };
+  return { app, url, grants, registry, identity, binding, schema, query, execute, reconcile, sessionToken: new RelayCapabilityRegistry(repos.sessions, url, 'test-signing-secret').tokenFor('s'), turnToken: randomBytes(32).toString('base64url'), lose: () => { lost = true; } };
 }
 it.each(['local', 'token'] as const)('actual %s app rejects task credentials for every grant management method', async mode => {
   const h = await harness(mode);
@@ -76,4 +76,42 @@ it('official MCP client over real HTTP initializes, lists, queries, deduplicates
   const checked = await client.callTool({ name: 'dutydeck_reconcile', arguments: { actionId: (unknown.structuredContent as any).actionId } });
   expect(checked.structuredContent).toMatchObject({ status: 'succeeded', receipt: 'verified' }); expect(h.execute).toHaveBeenCalledTimes(2); expect(h.reconcile).toHaveBeenCalledTimes(1);
   const badOrigin = await fetch(`${h.url}/api/plugin-tools/mcp`, { method: 'POST', headers: { authorization: 'Bearer session-capability', 'x-dutydeck-tool-turn': 'attempt-capability', origin: 'https://evil.test', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) }); expect(badOrigin.status).toBe(403);
+});
+
+it('serves authorized summaries and direct descriptions while retaining the full legacy list', async () => {
+  const h = await harness(); const headers = { authorization: 'Bearer session-capability', 'x-dutydeck-tool-turn': 'attempt-capability' };
+  const get = (path: string) => h.app.inject({ method: 'GET', url: `/api/plugin-tools/${path}`, headers });
+  const full = (await get('list')).json(); const summary = (await get('summary')).json();
+  expect(full.tools[0].inputSchema).toBeDefined(); expect(summary.tools[0].inputSchema).toBeUndefined(); expect(summary.tools.map((tool: any) => tool.id)).toEqual(full.tools.map((tool: any) => tool.id));
+  expect((await get('describe?tool=tickets%2Fget')).json()).toMatchObject({ tool: { id: 'tickets/get', inputSchema: full.tools[0].inputSchema }, truncated: false });
+  await h.grants.revoke('get');
+  expect((await get('describe?tool=tickets%2Fget')).statusCode).toBe(403);
+  expect((await get('manual?tool=tickets%2Fget&id=guide')).statusCode).toBe(403);
+  expect((await get('describe?tool=unknown%2Fget')).statusCode).toBe(404);
+  expect((await h.app.inject({ method: 'GET', url: '/api/plugin-tools/summary' })).statusCode).toBe(401);
+});
+
+
+it('measures response characters and HTTP round trips for two tools and 50 complex tools', async () => {
+  const h = await harness(); let requests = 0;
+  const read = async (path: string) => {
+    requests++;
+    const response = await fetch(`${h.url}/api/plugin-tools/${path}`, { headers: { authorization: 'Bearer session-capability', 'x-dutydeck-tool-turn': 'attempt-capability' } });
+    const body = await response.text(); expect(response.status).toBe(200);
+    return { value: JSON.parse(body), chars: body.length };
+  };
+  const small = await read('list'); expect(requests).toBe(1);
+  expect(small.value.tools.map((tool: any) => tool.inputSchema)).toEqual([h.schema, h.schema]);
+  const complex = { type: 'object' as const, properties: Object.fromEntries(Array.from({ length: 30 }, (_, index) => [`field${index}`, { type: 'string' as const, description: `Parameter ${index}: ${'Detailed purpose. '.repeat(8)}`, maxLength: 1000 }])), additionalProperties: false as const };
+  for (let index = 0; index < 48; index++) {
+    const name = `action${index}`;
+    h.registry.register('tickets', 'global', '1', 'action', { name, description: 'Complex action', version: '1', inputSchema: complex, resource: () => '*', execute: async () => ({ receipt: 'unused' }) });
+    await h.grants.set({ id: name, toolId: `tickets/${name}`, bindingId: 'b', actor: h.identity.actor, effects: ['write'], resources: ['*'], operations: ['invoke'] });
+  }
+  requests = 0; const full = await read('list'); expect(requests).toBe(1); expect(full.value.tools).toHaveLength(50);
+  requests = 0; const summary = await read('summary'); expect(requests).toBe(1);
+  const described = await read('describe?tool=tickets%2Faction0'); expect(requests).toBe(2); expect(described.value.tool.inputSchema).toEqual(complex);
+  requests = 0; await read('describe?tool=tickets%2Faction0'); expect(requests).toBe(1);
+  expect(summary.chars).toBeLessThan(full.chars / 4);
+  console.info(`catalog HTTP benchmark synthetic: two tools full=${small.chars} chars/1 request; 50 tools full=${full.chars} chars/1 request, summary=${summary.chars} chars/1 request; summary+describe=2 requests, known-ID describe=1 request`);
 });

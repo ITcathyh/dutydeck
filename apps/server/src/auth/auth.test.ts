@@ -719,7 +719,7 @@ describe('分享 token', () => {
     registerAuthMiddleware(app, { mode: 'token', localOnly: false, getToken: async () => TOKEN, getShareSecret: () => getShareLinkSecret(configs) });
     app.get('/api/sessions', async () => [{ id: 'ses_1' }, { id: 'ses_2' }]);
     app.get('/api/sessions/summaries', async () => []);
-    for (const suffix of ['', '/events', '/tasks', '/stream', '/workspace', '/verifications']) {
+    for (const suffix of ['', '/history', '/events', '/tasks', '/stream', '/workspace', '/verifications']) {
       app.get<{ Params: { id: string } }>(`/api/sessions/:id${suffix}`, async request => ({ id: request.params.id }));
     }
     for (const action of ['send', 'archive', 'interrupt', 'permissions/p1']) app.post(`/api/sessions/:id/${action}`, async () => ({ ok: true }));
@@ -729,7 +729,7 @@ describe('分享 token', () => {
   it('只放行绑定会话的读接口（详情、事件、任务、实时流）', async () => {
     const { app, share } = await shareApp();
     const token = await share('ses_1');
-    for (const suffix of ['', '/events', '/tasks', '/stream']) {
+    for (const suffix of ['', '/history', '/events', '/tasks', '/stream']) {
       const response = await app.inject({ method: 'GET', url: `/api/sessions/ses_1${suffix}?after=0&${SHARE_TOKEN_QUERY_KEY}=${token}`, ...remote });
       expect(response.statusCode, suffix).toBe(200);
       expect(response.json()).toEqual({ id: 'ses_1' });
@@ -744,6 +744,9 @@ describe('分享 token', () => {
     const denied = [
       { method: 'GET', url: `/api/sessions/ses_2?share=${token}` },
       { method: 'GET', url: `/api/sessions/ses_2/events?share=${token}` },
+      { method: 'GET', url: `/api/sessions/ses_2/history?share=${token}` },
+      { method: 'GET', url: '/api/sessions/ses_1/history' },
+      { method: 'GET', url: `/api/sessions/ses_1/history?share=${token}&share=${token}` },
       { method: 'GET', url: `/api/sessions/ses_1?share=${signSessionShareToken('forged-secret', 'ses_1')}` },
       { method: 'GET', url: `/api/sessions/ses_1?share=${token.slice(0, -1)}${token.endsWith('A') ? 'B' : 'A'}` },
       { method: 'GET', url: '/api/sessions/ses_1' },
@@ -767,8 +770,10 @@ describe('分享 token', () => {
     const { app, configs, share } = await shareApp();
     const old = await share('ses_1');
     expect((await app.inject({ method: 'GET', url: `/api/sessions/ses_1?share=${old}`, ...remote })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: `/api/sessions/ses_1/history?share=${old}`, ...remote })).statusCode).toBe(200);
     expect(await runShareKeyRotateCommand(configs)).toEqual({ rotated: true });
     expect((await app.inject({ method: 'GET', url: `/api/sessions/ses_1?share=${old}`, ...remote })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: `/api/sessions/ses_1/history?share=${old}`, ...remote })).statusCode).toBe(401);
     expect((await app.inject({ method: 'GET', url: `/api/sessions/ses_1?share=${await share('ses_1')}`, ...remote })).statusCode).toBe(200);
     await app.close();
   });

@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -64,6 +64,9 @@ it('keeps the permission callback stable while typing and targets the selected s
   const sessions: Session[] = ['s1', 's2', 'background'].map(id => ({ id, agentId: 'codex', state: 'waiting_permission', cwd: `/tmp/${id}`, runId: `run-${id}`, permissionMode: 'ask', createdAt: '2026-10-23T00:00:00Z', updatedAt: '2026-10-23T00:00:00Z', ...(id === 'background' ? { source: 'work_item' } : {}) }));
   window.history.replaceState(null, '', '/sessions/s1');
   mockAppApi(sessions);
+  const historicalOutline = { turns: [{ id: 'old-summary', taskId: 'old-task', firstSequence: 1, lastSequence: 5, timestamp: '', status: 'completed', prompt: { text: '旧历史指令', truncated: false }, output: { text: '旧历史结果', truncated: false }, toolCount: 0, artifactReferences: [] }], highWaterMark: 6, liveAfter: 5 };
+  vi.mocked(api.sessionHistory).mockImplementation(async id => id === 's1' ? historicalOutline : { turns: [], highWaterMark: 1, liveAfter: 0 });
+  vi.mocked(api.events).mockImplementation(async id => [{ id: 'event-' + id, sequence: id === 's1' ? 6 : 1, type: 'permission_request', timestamp: '2026-10-23T00:00:00Z', data: { id: 'permission-' + id, title: '授权 ' + id, status: 'pending' } }]);
   const permission = vi.spyOn(api, 'permission').mockResolvedValue({});
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><App/></QueryClientProvider>);
@@ -77,6 +80,10 @@ it('keeps the permission callback stable while typing and targets the selected s
   expect(timelineRenders.slice(beforeTyping).every(props => props.onResolvePermission === initialCallback)).toBe(true);
   await userEvent.click(screen.getByRole('button', { name: '允许本次' }));
   await waitFor(() => expect(permission).toHaveBeenCalledWith('s1', 'permission-s1', true));
+  expect(client.getQueryData<EventWindow>(['events', 's1'])?.outline).toEqual(historicalOutline);
+  expect(client.getQueryData<EventWindow>(['events', 's1'])?.highWaterMark).toBe(6);
+  expect(screen.getByText('旧历史指令')).toBeTruthy();
+  expect(screen.getByText('旧历史结果')).toBeTruthy();
 
   const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
   await userEvent.click(within(navigation).getByRole('button', { name: /任务 s2/ }));
@@ -98,7 +105,7 @@ it('keeps the permission callback stable while typing and targets the selected s
 
 it('memoizes event derivations across input and inspection while refreshing live context, commands and sessions', async () => {
   const sessions: Session[] = ['s1', 's2'].map(id => ({ id, agentId: 'codex', state: 'idle', cwd: `/tmp/${id}`, runId: `run-${id}`, permissionMode: 'ask', createdAt: '2026-10-23T00:00:00Z', updatedAt: '2026-10-23T00:00:00Z' }));
-  const event = (sequence: number, data: Record<string, unknown>): DockEvent => ({ id: `usage-${sequence}`, sequence, type: 'status', timestamp: `2026-10-23T00:00:0${sequence}Z`, data });
+  const event = (sequence: number, data: Record<string, unknown>): DockEvent => ({ id: `usage-${sequence}`, sequence: sequence + 1, type: 'status', timestamp: `2026-10-23T00:00:0${sequence}Z`, data });
   const events = [
     { ...event(0, { role: 'user', text: 'show usage' }), type: 'text' },
     event(1, { state: 'usage', used: 600, size: 1000 }),
@@ -107,7 +114,7 @@ it('memoizes event derivations across input and inspection while refreshing live
   ];
   window.history.replaceState(null, '', '/sessions/s1');
   mockAppApi(sessions);
-  vi.mocked(api.events).mockImplementation(async id => id === 's1' ? events : [{ ...event(7, { role: 'user', text: 'second usage' }), type: 'text' }, event(8, { state: 'usage', used: 200, size: 1000 }), event(9, { state: 'commands', availableCommands: [{ name: 'second', description: 'second session command' }] })]);
+  vi.mocked(api.events).mockImplementation(async id => id === 's1' ? events : [{ ...event(0, { role: 'user', text: 'second usage' }), type: 'text' }, event(1, { state: 'usage', used: 200, size: 1000 }), event(2, { state: 'commands', availableCommands: [{ name: 'second', description: 'second session command' }] })]);
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><App/></QueryClientProvider>);
   await screen.findByRole('textbox', { name: '消息' });
@@ -163,4 +170,28 @@ it('memoizes event derivations across input and inspection while refreshing live
   const secondInspector = await screen.findByRole('dialog', { name: '结果检视' });
   await userEvent.click(within(secondInspector).getByText('详细用量与后台状态'));
   expect(within(secondInspector).getByRole('progressbar', { name: '上下文已用' }).getAttribute('aria-valuenow')).toBe('20');
+});
+
+beforeEach(() => { vi.spyOn(api, 'sessionHistory').mockResolvedValue({ turns: [], highWaterMark: 0, liveAfter: 0 }); });
+
+vi.mock('./skill-catalog-api', async () => { const { api } = await import('./api'); return { fetchSkillCatalog: async (...args: Parameters<typeof api.skills>) => ({ skills: await api.skills(...args), diagnostics: [], partial: false }) }; });
+
+it('keeps native commands discoverable from fully summarized history and honors a newer empty live catalog', async () => {
+  const session: Session = { id: 's1', agentId: 'codex', state: 'idle', cwd: '/tmp/native-menu', runId: 'r1', permissionMode: 'ask', createdAt: '', updatedAt: '' };
+  window.history.replaceState(null, '', '/sessions/s1');
+  mockAppApi([session]);
+  vi.mocked(api.events).mockResolvedValue([]);
+  vi.mocked(api.sessionHistory).mockResolvedValue({ turns: [{ id: 'old-native-turn', taskId: 'old-task', firstSequence: 1, lastSequence: 50, timestamp: '', status: 'completed', prompt: { text: 'closed instruction', truncated: false }, output: { text: 'closed result', truncated: false }, toolCount: 0, artifactReferences: [] }], liveAfter: 50, highWaterMark: 50, commandCatalog: { sequence: 1, commands: [{ name: 'compact', description: 'Compact native context' }], truncated: false } });
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><App/></QueryClientProvider>);
+  await screen.findByText('closed result');
+  const input = screen.getByRole('textbox', { name: '消息' });
+  fireEvent.change(input, { target: { value: '/compact' } });
+  expect(await screen.findByRole('button', { name: /\/compact.*Compact native context/ })).toBeTruthy();
+  expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toEqual([]);
+  act(() => client.setQueryData<EventWindow>(['events', 's1'], current => mergeReconciledEvents(current, [{ id: 'empty-native-commands', sequence: 51, type: 'status', timestamp: '', data: { state: 'commands', availableCommands: [] } }])));
+  await waitFor(() => expect(screen.queryByRole('button', { name: /\/compact.*Compact native context/ })).toBeNull());
+  act(() => client.setQueryData<EventWindow>(['events', 's1'], current => mergeReconciledEvents(current, [{ id: 'new-native-commands', sequence: 52, type: 'status', timestamp: '', data: { state: 'commands', availableCommands: [{ name: '/refresh', description: 'Current native command' }] } }])));
+  fireEvent.change(input, { target: { value: '/refresh' } });
+  expect(await screen.findByRole('button', { name: /\/refresh.*Current native command/ })).toBeTruthy();
 });

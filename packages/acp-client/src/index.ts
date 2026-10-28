@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
 import { agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
+import { eventContentText, eventHasContent, normalizeEventContent } from '@dutydeck/shared';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
 import { PROCESS_CPU_MIN_WINDOW_MS, ProcessTreeCpu } from './process-cpu.js';
@@ -173,16 +174,25 @@ export function normalizeAcpxEvent(input: unknown): NormalizedDriverEvent | unde
   if (typeof input === 'string') { try { return normalizeAcpxEvent(JSON.parse(input)); } catch { return { type: 'raw_terminal', data: { text: input }, raw: input }; } }
   if (!input || typeof input !== 'object') return;
   const event = input as Record<string, any>; const update = event.params?.update ?? event.update ?? event.data?.update ?? event; const kind = update.sessionUpdate ?? event.tag ?? event.type;
-  if (kind === 'text_delta') return { type: event.stream === 'thought' ? 'thinking' : 'text', data: { text: event.text ?? '' } };
-  if (kind === 'agent_message_chunk') {
-    const text = update.content?.text ?? event.text ?? event.message ?? '';
-    const phase = compactionPhase(text);
-    if (phase) return { type: 'status', data: { state: 'compaction', phase, ...(phase === 'failed' ? { detail: String(text).slice('\n\nCompacting failed'.length).replace(/^[:\s]+/, '').trim() || undefined } : {}) } };
-    return { type: 'text', data: { text } };
+  if (kind === 'text_delta' || kind === 'agent_message_chunk' || kind === 'text' || kind === 'agent_thought_chunk' || kind === 'thinking') {
+    const content = update.content ?? event.content;
+    const parts = normalizeEventContent(content ?? { type: 'text', text: event.text ?? event.message ?? '' });
+    const text = eventContentText(parts);
+    const phase = parts.every(part => part.type === 'text') ? compactionPhase(text) : undefined;
+    if (phase) return { type: 'status', data: { state: 'compaction', phase, ...(phase === 'failed' ? { detail: text.slice('\n\nCompacting failed'.length).replace(/^[:\s]+/, '').trim() || undefined } : {}) } };
+    return { type: event.stream === 'thought' || kind === 'agent_thought_chunk' || kind === 'thinking' ? 'thinking' : 'text', data: { text, ...(parts.some(part => part.type !== 'text') ? { parts } : {}) } };
   }
-  if (kind === 'text') return { type: 'text', data: { text: update.content?.text ?? event.text ?? event.message ?? '' } };
-  if (kind === 'agent_thought_chunk' || kind === 'thinking') return { type: 'thinking', data: { text: update.content?.text ?? event.text ?? '' } };
-  if (kind === 'tool_call' || kind === 'tool_call_update' || kind === 'tool_result') { const complete = statusMap[update.status] ?? (kind === 'tool_result' ? 'completed' : 'running'); return { type: complete === 'completed' || complete === 'failed' ? 'tool_result' : 'tool_call', data: { id: update.toolCallId ?? event.toolCallId ?? event.id, name: update.title ?? event.title ?? event.name ?? 'tool', input: update.rawInput ?? event.rawInput ?? event.input, output: update.rawOutput ?? event.rawOutput ?? event.output, status: complete } }; }
+  if (kind === 'tool_call' || kind === 'tool_call_update' || kind === 'tool_result') {
+    const complete = statusMap[update.status] ?? (kind === 'tool_result' ? 'completed' : 'running');
+    const content = update.content ?? event.content;
+    const parts = content === undefined ? undefined : normalizeEventContent(content);
+    return { type: complete === 'completed' || complete === 'failed' ? 'tool_result' : 'tool_call', data: {
+      id: update.toolCallId ?? event.toolCallId ?? event.id, name: update.title ?? event.title ?? event.name ?? 'tool',
+      input: update.rawInput ?? event.rawInput ?? event.input,
+      output: update.rawOutput ?? event.rawOutput ?? event.output,
+      ...(parts?.length ? { parts } : {}), status: complete
+    } };
+  }
   if (kind === 'permission_request' || kind === 'permission_escalation') return { type: 'permission_request', data: { id: event.requestId ?? event.id ?? update.toolCallId, toolCallId: update.toolCallId, ...permissionFacts({ ...update, title: update.title ?? event.toolTitle }), options: update.options ?? [], status: 'pending' } };
   if (kind === 'usage_update') {
     const rateLimits = claudeRateLimits(event.rateLimit ?? update._meta?.['_claude/rateLimit'], new Date().toISOString());
@@ -718,7 +728,7 @@ export class AcpxAdapter implements AgentDriver {
               const progress = JSON.stringify(normalized.data);
               if (toolProgress.get(key) !== progress) { toolProgress.set(key, progress); resetIdle(); }
             } else if ((normalized?.type === 'text' || normalized?.type === 'thinking')
-              && typeof normalized.data?.text === 'string' && normalized.data.text.trim()) resetIdle();
+              && eventHasContent(normalized.data)) resetIdle();
             if (!this.stopped && !timedOut && !deliveryError) {
               if (normalized && (!maintenance || normalized.type === 'status' || normalized.type === 'permission_request')) {
                 try { this.options.onEvent(normalized); }

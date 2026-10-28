@@ -227,9 +227,9 @@ describe('Lark /new first-turn launch options', () => {
     await coordinator.handle(dm('om_old', 'old task'), h.config);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
 
-    // The old session's ledger: four finished turns, of which the handoff quotes the last three.
+    // The first failure is older than the three quoted turns; its source must remain locatable.
     const at = (index: number) => new Date(1_700_000_100_000 + index * 1_000).toISOString();
-    const tasks = [1, 2, 3, 4].map(index => ({ id: `task_${index}`, sessionId: 'ses_1', prompt: `第 ${index} 轮任务`, status: index === 3 ? 'failed' : 'completed', createdAt: at(index * 10), updatedAt: at(index * 10 + 5) }));
+    const tasks = [1, 2, 3, 4].map(index => ({ id: `task_${index}`, sessionId: 'ses_1', prompt: `第 ${index} 轮任务`, status: index === 1 || index === 3 ? 'failed' : 'completed', currentAttemptId: `attempt_${index}`, createdAt: at(index * 10), updatedAt: at(index * 10 + 5) }));
     let sequence = 0;
     const events: AgentEvent[] = tasks.flatMap(task => {
       const index = Number(task.id.slice(-1));
@@ -243,6 +243,11 @@ describe('Lark /new first-turn launch options', () => {
     h.runtime.getTasks.mockImplementation(async (id: string) => id === 'ses_1' ? tasks.map(task => ({ ...task })) : []);
     Object.assign(h.runtime, { getRecentEvents: vi.fn(async () => events) });
 
+    const native = await (coordinator as any).newSessionHandoff(h.config, dm('native', ''), 'ses_1', tasks, '', true);
+    expect(native).toContain(`分支 main · HEAD ${head}\n   M app.ts`);
+    expect(native).not.toContain('第 2 轮结论');
+    expect((h.runtime as any).getRecentEvents).not.toHaveBeenCalled();
+
     await coordinator.handle(dm('om_handoff', '/new --handoff 先补 登录重试 的测试'), h.config);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledTimes(2));
     expect(h.runtime.stop).toHaveBeenCalledWith('ses_1', { kind: 'channel', id: 'ou_alice', appId: 'cli_new_session' });
@@ -251,7 +256,12 @@ describe('Lark /new first-turn launch options', () => {
     const firstTurn = String(h.runtime.send.mock.calls[1]?.[2]);
     expect(firstTurn).toContain('[Dutydeck 会话交接]');
     expect(firstTurn).toContain('旧会话：ses_1');
-    expect(firstTurn).not.toContain('第 1 轮');
+    expect(firstTurn).toContain('原目标：第 1 轮任务');
+    expect(firstTurn).toContain('task=task_1 attempt=attempt_1 status=failed · 第 1 轮任务');
+    expect(firstTurn).not.toContain('第 1 轮结论');
+    expect(firstTurn).toContain('来源 task=task_4 attempt=attempt_4');
+    expect(firstTurn).toContain('history show <taskId>');
+    expect((h.runtime as any).getRecentEvents).toHaveBeenCalledWith('ses_1', 1500);
     expect(firstTurn).toContain('1. 第 2 轮任务（已完成）\n   第 2 轮结论');
     expect(firstTurn).toContain('2. 第 3 轮任务（失败）\n   第 3 轮的失败原因');
     expect(firstTurn).toContain('3. 第 4 轮任务（已完成）\n   第 4 轮结论');
@@ -742,4 +752,84 @@ describe('dispatch terminal event isolation', () => {
       coordinator.stop();
     }
   });
+});
+
+describe('handoff evidence boundaries', () => {
+  it.each([
+    { appId: 'other_app', chatId: 'ou_alice', chatType: 'p2p' },
+    { appId: 'cli_new_session', chatId: 'oc_other', chatType: 'group' },
+    { appId: 'cli_new_session', chatId: 'ou_alice', chatType: 'group' }
+  ])('rejects a foreign session before reading any evidence: %j', async origin => {
+    const h = await harness();
+    h.runtime.getSession.mockResolvedValue({ id: 'foreign', source: 'lark', sourceId: `${origin.appId}:${origin.chatId}:${origin.chatType}`, cwd: h.config.workspace } as Session);
+    const getRecentEvents = vi.fn(async () => []);
+    Object.assign(h.runtime, { getRecentEvents });
+    const coordinator = h.createCoordinator();
+    await expect((coordinator as any).newSessionHandoff(h.config, dm('command', ''), 'foreign', [], ''))
+      .rejects.toThrow('无法核实交接来源');
+    expect(getRecentEvents).not.toHaveBeenCalled();
+  });
+
+  it('does not include a task whose result permission is denied', async () => {
+    const h = await harness();
+    const coordinator = h.createCoordinator();
+    await coordinator.handle(dm('old', 'old task'), h.config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    const tasks = [{ id: 'private_task', sessionId: 'ses_1', prompt: 'private task text', status: 'failed', createdAt: '2026-01-01', updatedAt: '2026-01-01' }];
+    const allowed = vi.spyOn(coordinator as any, 'isTaskOperatorAllowed').mockResolvedValue(false);
+    const text = await (coordinator as any).newSessionHandoff(h.config, dm('command', ''), 'ses_1', tasks, '');
+    expect(allowed).toHaveBeenCalledWith(h.config, expect.anything(), tasks[0], 'task.view_result');
+    expect(text).not.toContain('private_task');
+    expect(text).not.toContain('private task text');
+  });
+
+  it('reuses the frozen persisted handoff on retry after coordinator rebuild and changed history', async () => {
+    const h = await harness();
+    const first = h.createCoordinator();
+    await first.handle(dm('old', 'old task'), h.config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    const task = { id: 'retry_task', sessionId: 'ses_1', prompt: 'continue', status: 'failed', currentAttemptId: 'attempt_frozen', createdAt: '2026-01-01', updatedAt: '2026-01-01' };
+    const frozen = await (first as any).newSessionHandoff(h.config, dm('command', ''), 'ses_1', [task], 'frozen note');
+    const material = `${frozen}\n\ncontinue`;
+    const saved: PersistedLarkCardTask = { app_id: h.config.appId, chat_id: 'ou_alice', chat_type: 'p2p', runtime_task_id: task.id,
+      task_name: 'continue', prompt: 'continue', retry_material_prompt: material, state: 'failed', started_at: 1, turn: 1, card_message_id: 'old_card' };
+    await h.repos.channelMappings.save({ id: 'retry_mapping', channel: larkCardChannel(h.config.appId), externalId: 'old_card', sessionId: 'ses_1', extra: JSON.stringify(saved), createdAt: task.createdAt });
+    h.runtime.getTasks.mockResolvedValue([task]);
+    const getRecentEvents = vi.fn(async () => [{ id: 'changed', sessionId: 'ses_1', sequence: 999, timestamp: '2026-10-28', type: 'text', data: { role: 'assistant', text: 'changed result' } }]);
+    Object.assign(h.runtime, { getRecentEvents });
+    const rebuilt = h.createCoordinator();
+    const regenerate = vi.spyOn(rebuilt as any, 'newSessionHandoff');
+    await rebuilt.handle(dm('retry', '/retry'), h.config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledTimes(2));
+    expect(sentPrompt(h.runtime, 1)).toBe('continue');
+    expect(h.runtime.send.mock.calls[1]?.[2]).toContain(material);
+    expect(regenerate).not.toHaveBeenCalled();
+    expect(h.runtime.send.mock.calls[1]?.[2]).not.toContain('changed result');
+    expect(JSON.parse((await h.repos.channelMappings.get(larkCardChannel(h.config.appId), 'old_card'))!.extra!).retry_material_prompt).toBe(material);
+  });
+});
+
+
+it('does not attribute an earlier attempt to the current one, including when the current boundary is missing', async () => {
+  const h = await harness();
+  const coordinator = h.createCoordinator();
+  await coordinator.handle(dm('old', 'old task'), h.config);
+  await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+  const task = { id: 'retried_task', sessionId: 'ses_1', prompt: 'check current result', status: 'completed', currentAttemptId: 'attempt_new', createdAt: '2026-01-01', updatedAt: '2026-01-01' };
+  const events: AgentEvent[] = [];
+  const append = (attemptId: string, type: AgentEvent['type'], data: unknown) => events.push({ id: `evt_${events.length}`, sequence: events.length + 1, sessionId: 'ses_1', taskId: task.id, attemptId, timestamp: '2026-01-01', type, data });
+  append('attempt_old', 'text', { role: 'user', taskId: task.id, text: 'old input' });
+  append('attempt_old', 'text', { role: 'assistant', text: 'old successful claim' });
+  append('attempt_old', 'task', { task: { ...task, status: 'failed', currentAttemptId: 'attempt_old' } });
+  Object.assign(h.runtime, { getRecentEvents: vi.fn(async () => events) });
+  const missing = await (coordinator as any).newSessionHandoff(h.config, dm('handoff', ''), 'ses_1', [task], '');
+  expect(missing).not.toContain('old successful claim');
+  expect(missing).toContain('来源 task=retried_task attempt=attempt_new');
+  expect(missing).toContain('事件窗口不完整或读取失败');
+  append('attempt_new', 'text', { role: 'user', taskId: task.id, text: 'current input' });
+  append('attempt_new', 'text', { role: 'assistant', text: 'current result' });
+  append('attempt_new', 'task', { task });
+  const current = await (coordinator as any).newSessionHandoff(h.config, dm('handoff', ''), 'ses_1', [task], '');
+  expect(current).toContain('current result');
+  expect(current).not.toContain('old successful claim');
 });

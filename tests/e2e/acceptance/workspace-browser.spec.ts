@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Locator } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -8,6 +8,12 @@ test.describe('Managed workspace browser acceptance', () => {
   let instance: TestServerInstance;
   const PROMPT_ALPHA = 'TASK_ALPHA_WORKSPACE_PROMPT';
   const PROMPT_BETA = 'TASK_BETA_WORKSPACE_PROMPT';
+
+  const expandHistory = async (timeline: Locator) => {
+    const toggle = timeline.getByRole('button', { name: /^(展开|收起)完整记录$/ }).first();
+    await expect(toggle).toBeVisible();
+    if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
+  };
 
   let sessionA: { id: string; cwd: string; branch: string; prompt: string };
   let sessionB: { id: string; cwd: string; branch: string; prompt: string };
@@ -128,6 +134,7 @@ test.describe('Managed workspace browser acceptance', () => {
 
     // 核对主区执行记录：用户消息与最终输出 article
     const timelineA = main.getByRole('tabpanel', { name: '对话', exact: true });
+    await expandHistory(timelineA);
     await expect(timelineA.locator('.ui-timeline-item.justify-end').getByText(PROMPT_ALPHA, { exact: true })).toBeVisible();
 
     const outputArticleA = timelineA.getByRole('article', { name: /最终输出/ });
@@ -160,6 +167,7 @@ test.describe('Managed workspace browser acceptance', () => {
 
     // 核对主区执行记录：用户消息与最终输出 article
     const timelineB = main.getByRole('tabpanel', { name: '对话', exact: true });
+    await expandHistory(timelineB);
     await expect(timelineB.locator('.ui-timeline-item.justify-end').getByText(PROMPT_BETA, { exact: true })).toBeVisible();
 
     const outputArticleB = timelineB.getByRole('article', { name: /最终输出/ });
@@ -185,6 +193,7 @@ test.describe('Managed workspace browser acceptance', () => {
     await page.goto(`${instance.baseUrl}/sessions/${sessionA.id}`, { waitUntil: 'domcontentloaded' });
     const main = page.getByRole('main');
     const timeline = main.getByRole('tabpanel', { name: '对话', exact: true });
+    await expandHistory(timeline);
     await expect(timeline.getByRole('article', { name: /最终输出/ })).toBeVisible({ timeout: 20_000 });
 
     // 1. UI 点击“归档任务”并在 alertdialog 确认
@@ -332,6 +341,7 @@ test.describe('Managed workspace browser acceptance', () => {
     await page.reload();
     const reloadedMain = page.getByRole('main');
     const reloadedTimeline = reloadedMain.getByRole('tabpanel', { name: '对话', exact: true });
+    await expandHistory(reloadedTimeline);
 
     await expect(reloadedTimeline.locator('.ui-timeline-item.justify-end').getByText(PROMPT_ALPHA, { exact: true })).toBeVisible({ timeout: 15_000 });
     const reloadedOutputArticle = reloadedTimeline.getByRole('article', { name: /最终输出/ });

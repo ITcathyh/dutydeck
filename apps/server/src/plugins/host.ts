@@ -89,6 +89,11 @@ export class PluginHost {
     } }) : undefined;
   }
 
+  toolManuals(pluginName: string) {
+    const active = this.active.find(item => item.entry.name === pluginName);
+    return active ? { root: active.plugin.root, version: active.plugin.manifest.version ?? 'unversioned', manuals: active.plugin.manifest.toolManuals ?? {} } : undefined;
+  }
+
   async requiredSkillRequests(context: PluginBindingScope) {
     const requests: Array<{ ref: string; binding: { id: string; revision: number } }> = [];
     for (const name of new Set(this.bindings.list().map(binding => binding.plugin))) {

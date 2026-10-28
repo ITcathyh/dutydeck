@@ -1,3 +1,4 @@
+import { readPluginManual } from './tool-manuals.js';
 import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import {
@@ -383,6 +384,12 @@ export async function strictPluginIssues(plugin: LoadedPlugin): Promise<PluginIs
       if (info!.size > resource.maxBytes) issues.push({ file: PLUGIN_MANIFEST_PATH, field: `skillResources.${skillId}.${index}.maxBytes`, message: `引用文件 ${resource.path} 大小 ${info!.size} 超过上限 ${resource.maxBytes}` });
       const bytes = await readFile(real);
       if (bytes.includes(0)) issues.push({ file: PLUGIN_MANIFEST_PATH, field: `skillResources.${skillId}.${index}.path`, message: `引用文件 ${resource.path} 不是纯文本` });
+    }
+  }
+  for (const [tool, manuals] of Object.entries(plugin.manifest.toolManuals ?? {})) {
+    for (const [id, manual] of Object.entries(manuals)) {
+      try { await readPluginManual(plugin.root, manual); }
+      catch { issues.push({ file: PLUGIN_MANIFEST_PATH, field: `toolManuals.${tool}.${id}`, message: '可选手册必须是包内有界 UTF-8 文本' }); }
     }
   }
   return issues;

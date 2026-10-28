@@ -400,3 +400,32 @@ describe('skill-delivery', () => {
     });
   });
 });
+
+it('isolates an unselected bad YAML but rejects the same item when explicitly or necessarily selected', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-skill-isolation-'));
+  try {
+    const plugin = join(root, 'plugin');
+    for (const [name, body] of [['good', '---\nname: good\n---\nInstructions'], ['bad', '---\nname: bad\nname: duplicate\n---\nInstructions']]) {
+      await mkdir(join(plugin, name!), { recursive: true }); await writeFile(join(plugin, name!, 'SKILL.md'), body!);
+    }
+    const options = { homeDirectory: root, pluginRoots: [{ path: plugin, plugin: 'sample' }] };
+    expect((await prepareSkillPrompt(root, 'run', ['sample/good'], options)).skillDeliveries).toHaveLength(1);
+    await expect(prepareSkillPrompt(root, 'run', ['sample/bad'], options)).rejects.toMatchObject({ code: 'SKILL_METADATA_INVALID' });
+    await expect(prepareSkillPrompt(root, 'run', [], { ...options, requiredSkills: [{ ref: 'sample/bad' }] })).rejects.toMatchObject({ code: 'SKILL_METADATA_INVALID' });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it('allows eligible explicit paths after catalog truncation and refuses incomplete name lookup', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-skill-truncation-'));
+  try {
+    for (let index = 0; index < 514; index++) {
+      const path = join(root, '.agents/skills', String(index)); await mkdir(path, { recursive: true }); await writeFile(join(path, 'SKILL.md'), `---\nname: skill-${index}\n---\nInstructions`);
+    }
+    const { discoverSkillCatalog } = await import('./skill-catalog.js');
+    const catalog = await discoverSkillCatalog(root, { homeDirectory: root });
+    expect(catalog.partial).toBe(true);
+    const missing = Array.from({ length: 514 }, (_, index) => join(root, '.agents/skills', String(index), 'SKILL.md')).find(path => !catalog.skills.some(skill => skill.path === path))!;
+    expect((await prepareSkillPrompt(root, 'run', [missing], { homeDirectory: root })).skillDeliveries[0]?.path).toBe(missing);
+    await expect(prepareSkillPrompt(root, `/skills ${catalog.skills[0]!.name}\nrun`, [], { homeDirectory: root })).rejects.toMatchObject({ code: 'SKILL_CATALOG_INCOMPLETE' });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
@@ -229,4 +229,16 @@ it('只为具备终端能力的任务提供终端标签', () => {
   render(<RunDetailTabs value="timeline" onChange={() => {}} terminalAvailable={false}/>);
   expect(screen.getByRole('tab', { name: '改动' })).toBeTruthy();
   expect(screen.queryByRole('tab', { name: '终端' })).toBeNull();
+});
+
+it('distinguishes transport open from calibrated content and offers retry after the automatic budget', () => {
+  const retry = vi.fn();
+  const props = { session, agent, queuedTasks: [], rawVisible: false, rawAvailable: false, restarting: false, onInterrupt() {}, onRestart() {}, onOpenPrompt() {}, onArchive() {}, onToggleRaw() {}, onOpenInsight() {} };
+  const view = render(<RunHeader {...props} streamStatus={{ transport: 'open', content: 'catching_up' }}/>);
+  expect(screen.getByText('已连接，正在补齐记录')).toBeTruthy();
+  expect(screen.queryByText('实时同步')).toBeNull();
+  view.rerender(<RunHeader {...props} streamStatus={{ transport: 'open', content: 'failed', retrying: false, retry }}/>);
+  fireEvent.click(screen.getByRole('button', { name: '重试同步' })); expect(retry).toHaveBeenCalledTimes(1);
+  view.rerender(<RunHeader {...props} streamStatus={{ transport: 'open', content: 'ready', lastCalibratedAt: 1 }}/>);
+  expect(screen.getByText('实时同步')).toBeTruthy();
 });

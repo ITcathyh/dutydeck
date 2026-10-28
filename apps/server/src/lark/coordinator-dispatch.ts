@@ -836,7 +836,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     if (await this.currentTurnInterruptDenial(config, event, session.id)) return false;
     if (this.stopped || task.interruptRequested || task.epoch !== (group.epoch ?? 0) || group.sessionId !== session.id) return false;
     task.fallbackAttempted = true;
-    const handoff = await this.newSessionHandoff(config, event, session.id, tasks.filter(item => item.status === 'completed'),
+    const handoff = await this.newSessionHandoff(config, event, session.id, tasks,
       '主 Agent 不可用，自动切换兜底 Agent；只作为上下文，继续处理当前请求。');
     if (this.stopped || task.interruptRequested || task.epoch !== (group.epoch ?? 0) || group.sessionId !== session.id) return false;
     const pending = await this.runtime.getTasks?.(session.id);
@@ -846,7 +846,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     // From the final scope/queue check through retirement, keep this transition synchronous.
     const previous = { ...task };
     try {
-      task.fallbackNote = `Agent ${session.agentId} 不可用，已切换到兜底 Agent ${fallback}（${redactTraceText(reason).slice(0, 200)}）。使用新会话，仅带最近完成结果，原生对话历史未迁移。`;
+      task.fallbackNote = `Agent ${session.agentId} 不可用，已切换到兜底 Agent ${fallback}（${redactTraceText(reason).slice(0, 200)}）。使用新会话，携带有来源的结果摘录和任务索引，原生对话历史未迁移。`;
       task.retryMaterialPrompt = `${handoff}\n\n${task.retryMaterialPrompt ?? task.prompt}`;
       task.launchOptions = { agentId: fallback, cwd: session.cwd, ...(config.fallbackModel ? { model: config.fallbackModel } : {}), useAgentDefaults: true, automaticFallback: true };
       (group.retiredSessionIds ??= new Set()).add(session.id);

@@ -1,3 +1,4 @@
+import { appendEventContent } from '@dutydeck/shared';
 import type { DockEvent, Task } from './api';
 
 export type TimelineEvent = DockEvent & { data: DockEvent['data'] & { role?: 'user' | 'assistant' } };
@@ -92,8 +93,8 @@ function appendTimeline(timeline: TimelineEvent[], source: DockEvent[], toolInde
     // 插话并入正在执行的那一轮：不切断这一轮里的工具调用，也不和前后的消息拼成一条。
     if (current.type === 'text' && current.data.role === 'user' && !current.data.steering) toolIndexes.clear();
 
-    if ((current.type === 'text' || current.type === 'thinking') && previous?.type === current.type && (previous.data.role ?? 'assistant') === role && !current.data.steering && !previous.data.steering) {
-      timeline[timeline.length - 1] = { ...previous, data: { ...previous.data, text: `${previous.data.text ?? ''}${current.data.text ?? ''}` }, sequence: current.sequence, timestamp: current.timestamp };
+    if ((current.type === 'text' || current.type === 'thinking') && previous?.type === current.type && (previous.data.role ?? 'assistant') === role && !current.data.steering && !previous.data.steering && current.taskId === previous.taskId && current.attemptId === previous.attemptId) {
+      timeline[timeline.length - 1] = { ...previous, data: { ...previous.data, text: `${previous.data.text ?? ''}${current.data.text ?? ''}`, ...((previous.data.parts || current.data.parts) ? { parts: appendEventContent(previous.data.parts ?? [{ type: 'text', text: previous.data.text ?? '' }], current.data.parts ?? [{ type: 'text', text: current.data.text ?? '' }]) } : {}) }, sequence: current.sequence, timestamp: current.timestamp };
       continue;
     }
 

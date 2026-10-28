@@ -579,6 +579,13 @@ describe('Bot Agent fallback with real Runtime and SQLite', () => {
     expect(JSON.stringify((await h.resultCard())?.card)).toContain('兜底 Agent spare');
     const inbox = JSON.parse((await h.repos.config.get('lark.inbox.app.om_first'))!);
     expect(inbox).toMatchObject({ sessionId: first.sessionId, taskId: first.saved.runtime_task_id, state: 'accepted' });
+    const originSessionId = h.prompts[0]!.sessionId;
+    const originTask = (await h.runtime.getTasks(originSessionId))[0]!;
+    expect(inbox.request.materialPrompt).toContain(`来源 session=${originSessionId}`);
+    expect(inbox.request.materialPrompt).toContain(`来源 task=${originTask.id} attempt=${originTask.currentAttemptId}`);
+    expect(inbox.request.materialPrompt).toContain('原目标：完成原任务');
+    expect(inbox.request.materialPrompt).toContain('不授予操作权限');
+    expect(h.prompts[1]!.prompt).toContain(inbox.request.materialPrompt);
     await h.restart();
     await h.send('om_second', '继续处理下一项');
     await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_second')) && (await h.tasks('om_second')).some(task => task.status === 'completed'));
@@ -683,4 +690,28 @@ it('does not fallback for a user-selected Agent or an ordinary task failure', as
   await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_explicit')) && (await h.resultCard('om_explicit'))?.card.state === 'failed');
   expect(h.prompts).toHaveLength(2);
   expect((await h.runtime.listSessions()).some(session => session.agentId === 'spare')).toBe(false);
+});
+
+
+describe('handoff of persisted legacy Lark source IDs', () => {
+  // These source shapes are retained by larkSourceId and session-resolver continuity fixtures.
+  it.each([
+    ['app:oc_group:group', 'oc_group', 'group'],
+    ['app:oc_group:group:user:ou_alice', 'oc_group', 'group'],
+    ['app:oc_group:group:thread:om_task', 'oc_group', 'group'],
+    ['app:ou_alice:p2p', 'ou_alice', 'p2p']
+  ])('reads a real Runtime/SQLite session with %s', async (sourceId, chatId, chatType) => {
+    const h = await topic();
+    const session = await h.runtime.start({ agentId: 'reliability-fixture', cwd: h.config.workspace, permissionMode: 'full-trust', source: 'lark', sourceId });
+    await h.runtime.send(session.id, 'legacy goal', undefined, undefined, 'ou_alice');
+    const persisted = await h.repos.sessions.get(session.id);
+    expect(persisted?.sourceId).toBe(sourceId);
+    const tasks = await h.runtime.getTasks(session.id);
+    const text = await (h.coordinator as any).newSessionHandoff(h.config, { ...message('handoff', ''), chatId, chatType }, session.id, tasks, 'legacy note');
+    expect(text).toContain(`来源 session=${session.id}`);
+    expect(text).toContain(`来源 task=${tasks[0]!.id} attempt=${tasks[0]!.currentAttemptId}`);
+    expect(text).toContain('原目标：legacy goal');
+    expect(text).toContain('用户备注：legacy note');
+    expect(text).toContain('outputDigest=unknown（未读取账本结果）');
+  });
 });

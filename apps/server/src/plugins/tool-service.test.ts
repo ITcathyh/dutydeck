@@ -168,3 +168,65 @@ describe('public business tools', () => {
     await expect(h.service.call('private-export/export-report', {}, 'export')).rejects.toMatchObject({ code: 'PLUGIN_TOOL_NOT_FOUND' });
   });
 });
+
+it('summarizes only granted tools and describes a known ID without listing the registry', async () => {
+  const h = await harness();
+  h.registry.register('hidden', 'global', '1', 'action', h.definition);
+  const summary = await h.service.summary();
+  expect(summary.tools).toEqual([{ id: 'tickets/close', description: 'Close', effect: 'write', version: '1' }]);
+  const list = vi.spyOn(h.registry, 'list');
+  const described = await h.service.describe('tickets/close');
+  expect(described).toMatchObject({ tool: { id: 'tickets/close', inputSchema: schema, packageVersion: '1.0', manuals: [] }, truncated: false, digest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  expect(list).not.toHaveBeenCalled();
+  await expect(h.service.describe('hidden/close')).rejects.toMatchObject({ code: 'PLUGIN_TOOL_FORBIDDEN' });
+  await h.grants.revoke('alice');
+  expect((await h.service.summary()).tools).toEqual([]);
+  await expect(h.service.describe('tickets/close')).rejects.toMatchObject({ code: 'PLUGIN_TOOL_FORBIDDEN' });
+});
+
+it('measures complex 50-tool schemas and keeps the original two-tool list in one request', async () => {
+  const h = await harness();
+  const complex = { type: 'object' as const, properties: Object.fromEntries(Array.from({ length: 30 }, (_, index) => [`field${index}`, { type: 'string' as const, description: `Parameter ${index}: ${'Detailed purpose. '.repeat(8)}`, maxLength: 1000 }])), additionalProperties: false as const };
+  for (let index = 0; index < 49; index++) {
+    h.registry.register('tickets', 'global', '1.0', 'action', { ...h.definition, name: `action${index}`, inputSchema: complex });
+    await h.grants.set({ ...h.grant, id: `grant${index}`, toolId: `tickets/action${index}` });
+  }
+  const full = await h.service.list(); const summary = await h.service.summary();
+  const fullChars = JSON.stringify(full).length; const summaryChars = JSON.stringify(summary).length;
+  expect(full.tools).toHaveLength(50); expect(summary.tools).toHaveLength(50);
+  expect(summaryChars).toBeLessThan(fullChars / 4);
+  console.info(`catalog benchmark synthetic: 50 tools full=${fullChars} chars summary=${summaryChars} chars`);
+  const small = await harness(); small.registry.register('tickets', 'global', '1.0', 'action', { ...small.definition, name: 'second' }); await small.grants.set({ ...small.grant, id: 'second', toolId: 'tickets/second' });
+  expect((await small.service.list()).tools.map(tool => tool.inputSchema)).toEqual([schema, schema]);
+});
+
+it('reads only optional logical manuals, rechecks grants and binding versions, and never executes the action', async () => {
+  const { mkdtemp, writeFile, rm, symlink } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-manual-'));
+  try {
+    const h = await harness();
+    await writeFile(join(root, 'guide.md'), 'Long optional guide');
+    let artifact = { root, version: '1.0', manuals: { close: { guide: { description: 'Optional guide', path: 'guide.md', maxBytes: 1024 } } } };
+    Object.assign(h.host, { toolManuals: () => artifact });
+    const description = await h.service.describe('tickets/close');
+    expect(description.tool.manuals).toEqual([{ id: 'guide', description: 'Optional guide', maxBytes: 1024 }]);
+    expect(JSON.stringify(description)).not.toContain('guide.md');
+    expect(await h.service.manual('tickets/close', 'guide')).toMatchObject({ text: 'Long optional guide', version: '1', packageVersion: '1.0', truncated: false, bytes: 19, digest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(h.execute).not.toHaveBeenCalled(); expect(await h.repos.config.list?.('plugin.tools.action.')).toEqual([]);
+    await expect(h.service.manual('tickets/close', '../guide.md')).rejects.toMatchObject({ code: 'PLUGIN_TOOL_MANUAL_NOT_FOUND' });
+    await writeFile(join(root, 'guide.md'), 'x'.repeat(1025));
+    await expect(h.service.manual('tickets/close', 'guide')).rejects.toMatchObject({ code: 'PLUGIN_TOOL_MANUAL_INVALID' });
+    await rm(join(root, 'guide.md')); await symlink('/etc/passwd', join(root, 'guide.md'));
+    await expect(h.service.manual('tickets/close', 'guide')).rejects.toMatchObject({ code: 'PLUGIN_TOOL_MANUAL_INVALID' });
+    await rm(join(root, 'guide.md')); await writeFile(join(root, 'guide.md'), 'guide');
+    h.assertCurrent.mockClear();
+    h.assertCurrent.mockImplementation(async () => { if (h.assertCurrent.mock.calls.length === 3) await h.grants.revoke('alice'); });
+    await expect(h.service.manual('tickets/close', 'guide')).rejects.toMatchObject({ code: 'PLUGIN_TOOL_FORBIDDEN' });
+    await h.grants.set(h.grant); h.assertCurrent.mockReset();
+    h.assertCurrent.mockImplementation(async () => { if (h.assertCurrent.mock.calls.length === 3) artifact = { ...artifact, version: '2.0' }; });
+    await expect(h.service.manual('tickets/close', 'guide')).rejects.toMatchObject({ code: 'PLUGIN_TOOL_BINDING_CHANGED' });
+    h.host.resolveBinding.mockRejectedValue(new RuntimeError('PLUGIN_DISABLED', 'disabled', 403));
+    await expect(h.service.manual('tickets/close', 'guide')).rejects.toMatchObject({ code: 'PLUGIN_DISABLED' });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

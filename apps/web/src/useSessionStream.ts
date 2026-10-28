@@ -1,33 +1,37 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, type Session } from './api';
 import { EVENT_PAGE_SIZE, mergeReconciledEvents, newestSequence, type EventWindow } from './event-history';
-import { SessionStream, applyStatusEvent, type StreamStatus } from './sse';
+import { Backoff, SessionStream, applyStatusEvent, type StreamStatus } from './sse';
 import { recordSessionStatusUpdates } from './sessions-query';
+
+export type SessionSyncState = { transport: StreamStatus; content: 'catching_up' | 'ready' | 'failed'; lastCalibratedAt?: number; retrying?: boolean; retry?(): void };
+export const SYNC_RETRY_LIMIT = 5;
 
 // 订阅当前任务的 SSE 事件流，把事件 merge 进 TanStack Query 缓存；
 // 断线时由 SessionStream 按指数退避自动重连（原生 EventSource 重连会自动带 Last-Event-ID header）
-export function useSessionStream(sessionId: string | undefined, runId: string | undefined, enabled: boolean): StreamStatus {
+export function useSessionStream(sessionId: string | undefined, runId: string | undefined, enabled: boolean): SessionSyncState {
   const qc = useQueryClient();
-  const [status, setStatus] = useState<StreamStatus>('connecting');
+  const [status, setStatus] = useState<SessionSyncState>({ transport: 'connecting', content: 'catching_up' });
+  const retryRef = useRef<(() => void) | undefined>(undefined);
+  const retry = useCallback(() => retryRef.current?.(), []);
   const recoveryCursors = useRef(new Map<string, number>());
 
   useEffect(() => {
     if (!sessionId || !enabled) return;
-    setStatus('connecting');
+    setStatus({ transport: 'connecting', content: 'catching_up' });
     const controller = new AbortController();
     let frame: number | undefined;
     let pending: import('./api').DockEvent[] = [];
     let received = newestSequence(qc.getQueryData<EventWindow>(['events', sessionId]));
-    let refreshingTasks = false;
+    let refreshingTasks: Promise<void> | undefined;
     let tasksRefreshPending = false;
     let tasksInvalidated = false;
     const refreshTasks = (invalidate = false) => {
       tasksRefreshPending = true;
       tasksInvalidated ||= invalidate;
-      if (refreshingTasks) return;
-      refreshingTasks = true;
-      void (async () => {
+      if (refreshingTasks) return refreshingTasks;
+      refreshingTasks = (async () => {
         try {
           const filters = { queryKey: ['tasks', sessionId], exact: true };
           // Query deduplicates a cold GET even when invalidated. Wait for that
@@ -40,11 +44,13 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
             const invalidate = tasksInvalidated;
             tasksInvalidated = false;
             await (invalidate ? qc.invalidateQueries(filters, { cancelRefetch: false }) : qc.refetchQueries(filters, { cancelRefetch: false }));
+            if (qc.getQueryState(filters.queryKey)?.status === 'error') throw new Error('Task snapshot refresh failed');
           }
         } finally {
-          refreshingTasks = false;
+          refreshingTasks = undefined;
         }
       })();
+      return refreshingTasks;
     };
     const applyEvents = (batch: import('./api').DockEvent[]) => {
       if (!batch.length) return;
@@ -64,7 +70,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
         recordSessionStatusUpdates(qc, updated, statuses);
         return updated;
       }));
-      if (newTask) refreshTasks(true);
+      if (newTask) void refreshTasks(true).catch(() => retryCalibration());
     };
     const flush = () => {
       frame = undefined;
@@ -72,63 +78,126 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
       applyEvents(batch);
     };
     let reconciling = false;
-    let desiredTarget: number | undefined;
+    let desiredTarget = 0;
     let recoveryVersion = 0;
+    let epoch = 0;
+    let snapshotsRequired = false;
+    let wasHidden = document.hidden;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let calibrationController: AbortController | undefined;
+    const backoff = new Backoff();
+    const alive = (generation: number) => !controller.signal.aborted && generation === epoch && !document.hidden;
+    const retryCalibration = () => {
+      if (controller.signal.aborted || document.hidden || retryTimer !== undefined) return;
+      const retrying = backoff.attempt < SYNC_RETRY_LIMIT;
+      setStatus(current => ({ ...current, content: 'failed', retrying }));
+      if (!retrying) return;
+      retryTimer = setTimeout(() => { retryTimer = undefined; calibrate(); }, backoff.next());
+    };
     const reconcileEvents = (after: number, target?: number) => {
       recoveryCursors.current.set(sessionId, Math.min(recoveryCursors.current.get(sessionId) ?? after, after));
-      if (target !== undefined) desiredTarget = Math.max(desiredTarget ?? 0, target);
+      desiredTarget = Math.max(desiredTarget, target ?? 0);
+      if (backoff.attempt < SYNC_RETRY_LIMIT) calibrate(false);
+    };
+    const calibrate = (refreshSnapshots = true) => {
+      snapshotsRequired ||= refreshSnapshots;
       recoveryVersion += 1;
-      if (reconciling) return;
+      if (controller.signal.aborted || document.hidden || reconciling) return;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      retryTimer = undefined;
       reconciling = true;
+      const generation = epoch;
+      calibrationController = new AbortController();
+      const signal = AbortSignal.any([controller.signal, calibrationController.signal]);
+      setStatus(current => ({ ...current, content: 'catching_up' }));
+      // The cursor describes a contiguous required suffix. Collapsed historical
+      // ranges precede it and are intentionally absent from the canonical cache.
+      let cursor = recoveryCursors.current.get(sessionId) ?? newestSequence(qc.getQueryData<EventWindow>(['events', sessionId]));
+      recoveryCursors.current.set(sessionId, cursor);
       void (async () => {
-        let cursor = recoveryCursors.current.get(sessionId)!;
-        while (true) {
-          const requestVersion = recoveryVersion;
-          const missed = await api.events(sessionId, { after: cursor, limit: EVENT_PAGE_SIZE, direction: 'forward' }, controller.signal);
-          if (controller.signal.aborted) return;
-          applyEvents(missed);
-          const nextCursor = missed.at(-1)?.sequence ?? cursor;
-          if (!missed.length || nextCursor <= cursor) {
-            if (desiredTarget === undefined && requestVersion === recoveryVersion) recoveryCursors.current.delete(sessionId);
-            break;
+        while (alive(generation)) {
+          let requestVersion = recoveryVersion;
+          const takeSnapshots = snapshotsRequired; snapshotsRequired = false;
+          const snapshots = takeSnapshots ? Promise.all([
+            refreshTasks(),
+            qc.refetchQueries({ queryKey: ['sessions'], exact: true }, { throwOnError: true })
+          ]) : Promise.resolve();
+          // Attach a handler immediately while pages are being read.
+          void snapshots.catch(() => {});
+          do {
+            const pageVersion = recoveryVersion;
+            const beforePage = cursor;
+            const missed = await api.events(sessionId, { after: cursor, limit: EVENT_PAGE_SIZE, direction: 'forward' }, signal);
+            if (!alive(generation)) return;
+            let next = cursor;
+            for (const event of missed) {
+              if (event.sequence !== next + 1) throw new Error('Event history is not contiguous');
+              next = event.sequence;
+            }
+            applyEvents(missed);
+            cursor = next;
+            recoveryCursors.current.set(sessionId, cursor);
+            if (missed.length < EVENT_PAGE_SIZE) {
+              if (cursor < desiredTarget) {
+                if (cursor > beforePage && pageVersion !== recoveryVersion) continue;
+                throw new Error('Event history has not reached the live watermark');
+              }
+              requestVersion = recoveryVersion;
+              break;
+            }
+          } while (alive(generation));
+          await snapshots;
+          await refreshingTasks;
+          if (!alive(generation)) return;
+          for (const key of [['tasks', sessionId], ['sessions']]) {
+            if (qc.getQueryState(key)?.status === 'error') throw new Error('Snapshot refresh failed');
           }
-          cursor = nextCursor;
-          recoveryCursors.current.set(sessionId, cursor);
-          // A short response only exhausts the demand that existed when its request began.
-          if (requestVersion === recoveryVersion && (missed.length < EVENT_PAGE_SIZE || (desiredTarget !== undefined && cursor >= desiredTarget - 1))) {
-            if (desiredTarget === undefined || cursor >= desiredTarget - 1) recoveryCursors.current.delete(sessionId);
-            break;
-          }
+          if (requestVersion !== recoveryVersion) continue;
+          recoveryCursors.current.delete(sessionId);
+          desiredTarget = 0;
+          backoff.reset();
+          setStatus(current => ({ ...current, content: 'ready', retrying: false, lastCalibratedAt: Date.now() }));
+          return;
         }
-      })().catch(() => { /* 下一次 open / gap 会再次校准 */ }).finally(() => { reconciling = false; desiredTarget = undefined; });
+      })().catch(() => { if (alive(generation)) retryCalibration(); }).finally(() => {
+        reconciling = false;
+        if (!controller.signal.aborted && generation !== epoch && !document.hidden) calibrate();
+      });
     };
-    const calibrate = () => {
-      reconcileEvents(newestSequence(qc.getQueryData<EventWindow>(['events', sessionId])));
-      refreshTasks();
-      void qc.refetchQueries({ queryKey: ['sessions'], exact: true });
+    const onVisibility = () => {
+      if (wasHidden === document.hidden) return;
+      wasHidden = document.hidden;
+      epoch += 1;
+      calibrationController?.abort();
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      retryTimer = undefined;
+      setStatus(current => ({ ...current, content: 'catching_up' }));
+      // SessionStream owns the single foreground calibration trigger.
     };
+    document.addEventListener('visibilitychange', onVisibility);
+    retryRef.current = () => { backoff.reset(); calibrate(); };
     const stream = new SessionStream({
-      onReconnect: calibrate,
+      onReconnect: () => { backoff.reset(); calibrate(); },
       sessionId,
       getAfter: () => recoveryCursors.current.get(sessionId) ?? newestSequence(qc.getQueryData<EventWindow>(['events', sessionId])),
       onEvent: event => {
         const current = qc.getQueryData<EventWindow>(['events', sessionId]);
         const newest = Math.max(received, newestSequence(current));
         received = Math.max(received, event.sequence);
-        if (newest > 0 && event.sequence > newest + 1) reconcileEvents(newest, event.sequence);
+        if (event.sequence > newest + 1) reconcileEvents(newest, event.sequence);
         pending.push(event);
         if (pending.length >= 1_000) { if (frame !== undefined) cancelAnimationFrame(frame); flush(); }
         else if (frame === undefined) frame = requestAnimationFrame(flush);
       },
       onStatus: next => {
-        setStatus(next);
+        setStatus(current => ({ ...current, transport: next, ...(next !== 'open' ? { content: 'catching_up' as const } : {}) }));
         if (next !== 'open') return;
-        calibrate();
+        backoff.reset(); calibrate();
       }
     });
     stream.start();
-    return () => { if (frame !== undefined) cancelAnimationFrame(frame); pending = []; controller.abort(); stream.close(); };
+    return () => { if (frame !== undefined) cancelAnimationFrame(frame); pending = []; retryRef.current = undefined; controller.abort(); calibrationController?.abort(); if (retryTimer !== undefined) clearTimeout(retryTimer); document.removeEventListener('visibilitychange', onVisibility); stream.close(); };
   }, [sessionId, runId, enabled, qc]);
 
-  return sessionId && enabled ? status : 'connecting';
+  return sessionId && enabled ? { ...status, retry } : { transport: 'connecting', content: 'catching_up', retry };
 }

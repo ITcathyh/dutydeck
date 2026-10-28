@@ -4,6 +4,7 @@ import type { TimelineEvent } from '../timeline';
 import { MarkdownContent } from '../MarkdownContent';
 import { Banner } from './primitives';
 import { ToolCard } from './ToolCard';
+import { EventContent } from './EventContent';
 import { PermissionCard } from './PermissionCard';
 
 /*
@@ -52,6 +53,6 @@ export function TimelineItem({ event, final = false, assistantLabel = 'Agent', o
   if (event.type === 'thinking') return null;
   const user = event.data.role === 'user';
   if (user) return <UserMessage id={event.id} text={event.data.text ?? ''} steered={Boolean(event.data.steering)}/>;
-  if (final) return <article aria-label={`${assistantLabel} 最终输出`} className="assistant-output markdown ui-timeline-item my-4 max-w-[78ch] text-body text-primary"><MarkdownContent>{event.data.text ?? ''}</MarkdownContent></article>;
-  return <article className="assistant-output markdown ui-timeline-item my-5 max-w-[78ch] text-body text-primary"><MarkdownContent>{event.data.text ?? ''}</MarkdownContent></article>;
+  if (final) return <article aria-label={`${assistantLabel} 最终输出`} className="assistant-output markdown ui-timeline-item my-4 max-w-[78ch] text-body text-primary"><EventContent data={event.data}/></article>;
+  return <article className="assistant-output markdown ui-timeline-item my-5 max-w-[78ch] text-body text-primary"><EventContent data={event.data}/></article>;
 }

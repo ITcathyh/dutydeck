@@ -108,7 +108,7 @@ async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confir
     deny() { allowed = false; }, allow() { allowed = true; }, denyAgent(id: string) { deniedAgents.add(id); }, holdSubmit(action: () => Promise<void>) { beforeSubmit = action; },
     gate(on = true) { gated = on; },
     async recreateService() { await service.close(); service = makeService(); },
-    async reboot() { await service.close(); await runtime.shutdown(); runtime = makeRuntime(); service = makeService(); await runtime.initialize(agents); },
+    async reboot(holdQueue = false) { await service.close(); await runtime.shutdown(); runtime = makeRuntime(); runtime.setQueueHeld(holdQueue); service = makeService(); await runtime.initialize(agents); },
     create: (custom = plan, key = 'request-1') => service.create(parent.id, { goal: 'Compare evidence', plan: custom, idempotencyKey: key }, 'ou_owner'),
     get: (id: string) => service.get(parent.id, id, 'ou_owner'),
     async tick() { await service.tick(); await new Promise(resolve => setTimeout(resolve, 10)); },
@@ -125,6 +125,122 @@ describe('Work plan validation', () => {
     expect(() => workPlanSchema.parse({ ...plan, outputStepId: 'a' })).toThrow();
     expect(() => workPlanSchema.parse({ ...plan, steps: [{ ...plan.steps[0], agentId: undefined }], outputStepId: 'a' })).toThrow();
     expect(() => workPlanSchema.parse({ ...plan, steps: plan.steps.map(step => step.id === 'join' ? { ...step, when: { stepId: 'a', equals: 'yes' } } : step) })).toThrow();
+  });
+});
+
+async function otherParent(f: Awaited<ReturnType<typeof fixture>>, key: string) {
+  const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-work-admission-'));
+  cleanup.push(async () => { await rm(cwd, { recursive: true, force: true }); });
+  return f.runtime.start({ agentId: 'alpha', cwd, source: 'lark', sourceId: `cli_app:ou_owner:${key}`, permissionMode: 'ask' });
+}
+const singlePlan: WorkPlan = { ...plan, steps: [plan.steps[0]!], outputStepId: 'a' };
+const crowdedPlan: WorkPlan = { title: 'Crowded', steps: [
+  ...['a', 'b', 'c'].map(id => ({ ...plan.steps[0]!, id })),
+  { ...plan.steps[2]!, dependsOn: ['a', 'b', 'c'] }
+], outputStepId: 'join' };
+
+describe('Work-item queue admission and execution deadlines', () => {
+  it('defers shared-workspace preparation and lets an independent directory start', async () => {
+    const f = await fixture();
+    const first = await f.create(crowdedPlan, 'crowded-one');
+    const second = await f.create(crowdedPlan, 'crowded-two');
+    await f.tick(); await eventually(async () => f.calls.length === 1);
+    const crowded = [...(await f.get(first.id)).steps, ...(await f.get(second.id)).steps];
+    expect(crowded.flatMap(step => step.attempts)).toHaveLength(1);
+    expect(await f.repos.workItems.countActiveSteps()).toBe(1);
+    const parent = await otherParent(f, 'independent');
+    const item = await f.service.create(parent.id, { goal: 'Independent', plan: singlePlan, idempotencyKey: 'independent' }, 'ou_owner');
+    await f.tick(); await eventually(async () => f.calls.length === 2);
+    const child = (await f.service.get(parent.id, item.id, 'ou_owner')).steps[0]!.attempts[0]!;
+    expect(f.calls.filter(call => call.sessionId === child.sessionId)).toHaveLength(1);
+    expect(await f.repos.workItems.countActiveSteps()).toBe(2);
+  });
+
+  it('admits an independent directory beside six previously accepted queues after restart', async () => {
+    const f = await fixture(); f.runtime.setQueueHeld(true);
+    const preflight = vi.spyOn(f.runtime, 'canPrepareWorkItemWorkspace').mockReturnValue(true);
+    const one = await f.create(crowdedPlan, 'old-one'); await f.create(crowdedPlan, 'old-two');
+    await f.tick(); expect(await f.repos.workItems.countActiveSteps()).toBe(6);
+    expect(f.calls).toHaveLength(0); preflight.mockRestore();
+    await f.reboot(true);
+    const parent = await otherParent(f, 'independent-old-queue');
+    const item = await f.service.create(parent.id, { goal: 'Independent', plan: singlePlan, idempotencyKey: 'independent-old-queue' }, 'ou_owner');
+    await f.tick(); expect(await f.repos.workItems.countActiveSteps()).toBe(7);
+    expect((await f.get(one.id)).steps.slice(0, 3).every(step => f.repos.execution.getTaskExecution(step.attempts[0]!.taskId!)?.task.status === 'queued')).toBe(true);
+    f.runtime.setQueueHeld(false); await eventually(async () => f.calls.length === 2);
+    const child = (await f.service.get(parent.id, item.id, 'ou_owner')).steps[0]!.attempts[0]!;
+    expect(f.calls.filter(call => call.sessionId === child.sessionId)).toHaveLength(1);
+    const running = await Promise.all(f.calls.map(call => f.repos.sessions.get(call.sessionId)));
+    expect(running.filter(session => session!.cwd === f.directory)).toHaveLength(1);
+  });
+
+  it('keeps 61-minute-old accepted sources runnable and submits each once after restart', async () => {
+    const f = await fixture(); f.runtime.setQueueHeld(true);
+    vi.spyOn(f.runtime, 'canPrepareWorkItemWorkspace').mockReturnValue(true);
+    const item = await f.create(); await f.tick();
+    const record = JSON.parse((await f.repos.config.get('work_item:' + item.id))!);
+    const createdAt = new Date(Date.now() - 61 * 60_000).toISOString();
+    for (const step of record.item.steps.slice(0, 2)) step.attempts[0].createdAt = createdAt;
+    await f.repos.config.set('work_item:' + item.id, JSON.stringify(record));
+    const db = new Database(join(f.directory, 'test.db'));
+    try { for (const step of record.item.steps.slice(0, 2)) db.prepare('UPDATE tasks SET created_at=? WHERE id=?').run(createdAt, step.attempts[0].taskId); }
+    finally { db.close(); }
+    await f.reboot(true); await f.tick();
+    for (const step of record.item.steps.slice(0, 2)) expect(await f.service.authorizeExecution(step.attempts[0].sessionId, 'ou_owner')).toBe(true);
+    f.runtime.setQueueHeld(false); await eventually(async () => f.calls.length === 1);
+    await f.finish(f.calls[0]!, 'First result'); await eventually(async () => f.calls.length === 2);
+    await f.finish(f.calls[1]!, 'Second result'); await f.tick(); await eventually(async () => f.calls.length === 3);
+    for (const step of (await f.get(item.id)).steps.slice(0, 2)) {
+      const source = step.attempts[0]!;
+      const projection = f.repos.execution.getTaskExecution(source.taskId!)!;
+      expect(source.createdAt).toBe(createdAt); expect(projection.attempts).toHaveLength(1);
+      expect(projection.task.createdAt).toBe(createdAt);
+      expect(Date.parse(projection.attempts[0]!.createdAt)).toBeGreaterThan(Date.parse(createdAt) + 60 * 60_000);
+      expect(f.calls.filter(call => call.sessionId === source.sessionId)).toHaveLength(1);
+    }
+  });
+
+  it('still expires actual execution one hour after the first Runtime attempt starts', async () => {
+    const f = await fixture(); const item = await f.create(singlePlan); await f.tick(); await eventually(async () => f.calls.length === 1);
+    const source = (await f.get(item.id)).steps[0]!.attempts[0]!;
+    const startedAt = f.repos.execution.getTaskExecution(source.taskId!)!.attempts[0]!.createdAt;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.parse(startedAt) + 60 * 60_000);
+      await expect(f.service.authorizeExecution(source.sessionId!, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_ITEM_TASK_REVOKED' });
+      await f.service.tick();
+      expect((await f.get(item.id)).steps[0]).toMatchObject({ status: 'blocked', attempts: [expect.objectContaining({ error: expect.stringContaining('one-hour limit') })] });
+      expect(f.stopped).toContain(source.sessionId);
+      f.calls[0]!.finish('Late result'); await f.service.tick();
+      expect((await f.get(item.id)).output).toBeUndefined(); expect(f.calls).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('bounds prepared queues at twelve and concurrent wakeups at six actual executions', async () => {
+    const f = await fixture(); f.runtime.setQueueHeld(true);
+    for (let i = 0; i < 14; i++) {
+      const parent = await otherParent(f, 'capacity-' + i);
+      await f.service.create(parent.id, { goal: 'Independent', plan: singlePlan, idempotencyKey: 'capacity-' + i }, 'ou_owner');
+    }
+    await f.tick(); expect(await f.repos.workItems.countActiveSteps()).toBe(12);
+    expect((await f.runtime.listSessions()).filter(session => session.source === 'work_item')).toHaveLength(12);
+    expect(f.calls).toHaveLength(0);
+    f.runtime.setQueueHeld(false); await vi.waitFor(() => expect(f.calls).toHaveLength(6), { timeout: 10_000 });
+    await f.tick(); expect(f.calls).toHaveLength(6);
+    await f.finish(f.calls[0]!, 'Permit released'); await vi.waitFor(() => expect(f.calls).toHaveLength(7), { timeout: 10_000 });
+    await f.tick(); expect(f.calls).toHaveLength(7);
+    const tasks = (await Promise.all((await f.runtime.listSessions()).filter(session => session.source === 'work_item').map(session => f.repos.tasks.listBySession(session.id)))).flat();
+    expect(tasks.filter(task => task.status === 'running')).toHaveLength(6);
+  }, 20_000);
+
+  it.each(['cancel', 'revoke'] as const)('rechecks authority for an old accepted queue after %s', async action => {
+    const f = await fixture(); f.runtime.setQueueHeld(true);
+    const item = await f.create(singlePlan); await f.tick(); const source = (await f.get(item.id)).steps[0]!.attempts[0]!;
+    if (action === 'cancel') await f.service.cancel(f.parent.id, item.id, (await f.get(item.id)).revision, 'ou_owner'); else f.deny();
+    f.runtime.setQueueHeld(false);
+    await eventually(async () => f.repos.execution.getTaskExecution(source.taskId!)!.task.status === 'cancelled');
+    expect(f.calls).toHaveLength(0); expect(f.repos.execution.getTaskExecution(source.taskId!)!.attempts.every(attempt => attempt.submissionState === 'not_submitted')).toBe(true);
+    f.allow();
   });
 });
 
@@ -147,7 +263,9 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     expect((await f.get(item.id)).status).toBe('completed');
   });
   it('serializes branches sharing a workspace and synthesizes full frozen results exactly once', async () => {
-    const f = await fixture(); const item = await f.create();
+    const f = await fixture();
+    // Simulate a preflight race or an already accepted queue; ledger checks must still hold.
+    vi.spyOn(f.runtime, 'canPrepareWorkItemWorkspace').mockReturnValue(true); const item = await f.create();
     await f.tick(); await eventually(async () => f.calls.length === 1);
     const admitted = (await f.get(item.id)).steps.slice(0, 2).map(step => step.attempts[0]!);
     expect(new Set(admitted.map(attempt => attempt.sessionId)).size).toBe(2);
@@ -208,7 +326,7 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     expect((await f.service.confirm(f.parent.id, item.id, pending.revision, 'ou_owner')).status).toBe('running');
     await expect(f.service.confirm(f.parent.id, item.id, pending.revision + 1, 'ou_owner')).rejects.toMatchObject({ statusCode: 409 });
     await f.tick(); await eventually(async () => f.calls.length === 1);
-    expect((await f.get(item.id)).steps.slice(0, 2).every(step => step.attempts.length === 1)).toBe(true);
+    expect((await f.get(item.id)).steps.slice(0, 2).map(step => [step.status, step.attempts.length])).toEqual([['running', 1], ['pending', 0]]);
   });
 
   it('refuses to turn an unconfirmed plan into a reusable template', async () => {
@@ -240,7 +358,9 @@ describe('WorkItemService with real Runtime and SQLite', () => {
   });
 
   it('persists cancellation, stops only owned children and rejects late success and joins', async () => {
-    const f = await fixture(); const item = await f.create(); const unrelated = await f.runtime.start({ agentId: 'alpha', cwd: f.parent.cwd });
+    const f = await fixture();
+    // Simulate a preflight race or an already accepted queue; ledger checks must still hold.
+    vi.spyOn(f.runtime, 'canPrepareWorkItemWorkspace').mockReturnValue(true); const item = await f.create(); const unrelated = await f.runtime.start({ agentId: 'alpha', cwd: f.parent.cwd });
     await f.tick(); await eventually(async () => f.calls.length === 1);
     const current = await f.get(item.id);
     await f.service.cancel(f.parent.id, item.id, current.revision, 'ou_owner');
@@ -292,7 +412,7 @@ describe('WorkItemService with real Runtime and SQLite', () => {
 
   it('only retries the failed branch and preserves succeeded siblings', async () => {
     const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 1);
-    await f.finish(f.calls[0]!, 'Kept result'); await eventually(async () => f.calls.length === 2); await f.finish(f.calls[1]!, '', true); await f.tick();
+    await f.finish(f.calls[0]!, 'Kept result'); await f.tick(); await eventually(async () => f.calls.length === 2); await f.finish(f.calls[1]!, '', true); await f.tick();
     const failed = await f.get(item.id); expect(failed.status).toBe('failed');
     await f.service.retryStep(f.parent.id, item.id, 'b', failed.revision, 'ou_owner'); await f.tick();
     await eventually(async () => f.calls.length === 3);
@@ -303,7 +423,7 @@ describe('WorkItemService with real Runtime and SQLite', () => {
 
   it('stops each child once its result is saved and retries in a fresh child', async () => {
     const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 1);
-    await f.finish(f.calls[0]!, 'Kept result'); await eventually(async () => f.calls.length === 2);
+    await f.finish(f.calls[0]!, 'Kept result'); await f.tick(); await eventually(async () => f.calls.length === 2);
     const [kept, failed] = f.calls.map(call => call.sessionId);
     await f.finish(f.calls[1]!, '', true); await f.tick();
     const { revision } = await f.get(item.id);
@@ -450,8 +570,10 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     expect((await f.get(item.id)).id).toBe(item.id);
   });
 
-  it('caps a work at three active branches and requires a trusted stable-session entry', async () => {
+  it('caps a work at three prepared branches and requires a trusted stable-session entry', async () => {
     const f = await fixture();
+    // Simulate a preflight race or an already accepted queue; ledger checks must still hold.
+    vi.spyOn(f.runtime, 'canPrepareWorkItemWorkspace').mockReturnValue(true);
     const branches = ['a', 'b', 'c', 'd'].map(id => ({ ...plan.steps[0]!, id }));
     const item = await f.create({ title: 'Bounded', steps: [...branches, { ...plan.steps[2]!, dependsOn: branches.map(step => step.id) }], outputStepId: 'join' });
     await f.tick(); await eventually(async () => f.calls.length === 1); await f.tick(); expect(f.calls).toHaveLength(1);
@@ -464,7 +586,7 @@ describe('WorkItemService with real Runtime and SQLite', () => {
   });
 
   it.each(['stop', 'archive', 'revoke'] as const)('stops active children when parent authority becomes %s', async mode => {
-    const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 1);
+    const f = await fixture(); vi.spyOn(f.runtime, 'canPrepareWorkItemWorkspace').mockReturnValue(true); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 1);
     if (mode === 'stop') await f.runtime.stop(f.parent.id); else if (mode === 'archive') await f.runtime.archive(f.parent.id); else f.deny();
     await f.tick(); f.allow();
     const blocked = await f.get(item.id); expect(blocked.status).toBe('blocked');
@@ -575,7 +697,7 @@ const reviewVerdict = (call: Call, decision: 'accept' | 'rework' | 'stop', feedb
 async function reachReview(f: Awaited<ReturnType<typeof fixture>>, custom = reviewPlan()) {
   const item = await f.create(custom);
   await f.tick(); await eventually(async () => f.calls.length === 1);
-  await f.finish(f.calls[0]!, 'Context evidence'); await eventually(async () => f.calls.length === 2);
+  await f.finish(f.calls[0]!, 'Context evidence'); await f.tick(); await eventually(async () => f.calls.length === 2);
   await f.finish(f.calls[1]!, 'Implementation version 1');
   await f.tick(); await eventually(async () => f.calls.length === 3);
   return item;
@@ -596,7 +718,7 @@ describe('Bounded independent review with real Runtime and SQLite', () => {
     const custom = reviewPlan(); custom.steps = custom.steps.map(step => step.id === 'b' ? { ...step, workspaceMode: 'worktree' } : step);
     const item = await f.create(custom);
     await f.tick(); await eventually(async () => f.calls.length === 1);
-    await f.finish(f.calls[0]!, 'Context evidence'); await eventually(async () => f.calls.length === 2);
+    await f.finish(f.calls[0]!, 'Context evidence'); await f.tick(); await eventually(async () => f.calls.length === 2);
     const firstWorkspace = (await f.runtime.getWorkspace(f.calls[1]!.sessionId))!;
     expect(firstWorkspace.mode).toBe('worktree'); expect(firstWorkspace.cwd).not.toBe(f.parent.cwd);
     await writeFile(join(firstWorkspace.cwd, 'feature.txt'), 'version one');

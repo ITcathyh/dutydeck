@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { SessionDeliveryPanel } from './SessionDeliveryPanel';
-import type { Session, Task } from '../api';
+import type { HistoryOutline, Session, Task } from '../api';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const session: Session = { id: 's1', agentId: 'a', cwd: '/project/worktree', state: 'completed', runId: 'r', createdAt: '2026-09-12T00:00:00Z', updatedAt: '2026-09-12T00:00:00Z' };
@@ -19,6 +19,8 @@ function mount(state = session.state, options: {
   presentation?: 'dialog' | 'inspector';
   tasks?: Task[];
   turnDiffs?: unknown[];
+  history?: HistoryOutline;
+  historyFailure?: boolean;
 } = {}) {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
@@ -29,11 +31,12 @@ function mount(state = session.state, options: {
       : strUrl.endsWith('/workspace') ? (options.workspace ?? { cwd: session.cwd, mode: 'worktree', state: 'ready', branch: 'dutydeck/session/s1' })
       : strUrl.endsWith('/automation') ? { schedules: [], subscriptions: [], occurrences: [] }
       : strUrl.endsWith('/diffs') ? (options.turnDiffs ?? [])
+      : strUrl.endsWith('/history') ? options.historyFailure ? { error: { code: 'HISTORY_UNAVAILABLE', message: 'History unavailable' } } : (options.history ?? { turns: [], highWaterMark: 0, liveAfter: 0 })
       : strUrl.endsWith('/pull-requests') ? { available: false, hint: '没有安装支持开 PR 的 CI 插件。', items: [] }
       : strUrl.endsWith('/automation/ci-providers') ? { providers: [{ id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false }] }
       : strUrl.endsWith('/verifications') ? init?.method === 'POST' ? { id: 'v2', status: 'passed' } : [{ id: 'v1', command: 'pnpm test', status: 'passed', stale: true, staleReason: options.missingFingerprint ? 'current_fingerprint_unavailable' : 'code_changed', exitCode: 0, beforeFingerprint: 'code-version-1', afterFingerprint: 'code-version-1', taskId: 't1', output: 'old evidence', startedAt: session.createdAt, completedAt: '2026-09-12T00:00:03Z' }]
       : { subscription: { id: 'ci1', status: 'waiting', provider: 'test-ci' } };
-    return new Response(JSON.stringify(body), { status: options.evidenceFailure && strUrl.endsWith('/verifications') ? 503 : 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify(body), { status: (options.evidenceFailure && strUrl.endsWith('/verifications') || options.historyFailure && strUrl.endsWith('/history')) ? 503 : 200, headers: { 'content-type': 'application/json' } });
   });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(<QueryClientProvider client={qc}><SessionDeliveryPanel session={{ ...session, state, ...(options.archivedAt ? { archivedAt: options.archivedAt } : {}), ...options.sessionOverrides }} tasks={options.tasks ?? []} onClose={() => {}} presentation={options.presentation}/></QueryClientProvider>);
@@ -50,6 +53,37 @@ describe('work item delivery panel', () => {
       ['/diff/s1/task_2', '加测试改动 1 个文件 +4 −0 · 查看改动'],
       ['/diff/s1/task_1', '修登录页改动 2 个文件 +10 −3 · 查看改动']
     ]);
+  });
+
+  it('reads per-turn artifact evidence through the panel and opens its recorded source without a file download link', async () => {
+    const reference = { taskId: 'current-task', attemptId: 'current-attempt', eventId: 'current-event', sequence: 20, partIndex: 0, uri: 'file:///project/report.html', name: 'Current report', revision: 'event:current-event:20:0', status: 'recorded' as const, source: 'structured_tool_result' as const };
+    const current = { id: 'current-turn', taskId: reference.taskId, attemptId: reference.attemptId, firstSequence: 18, lastSequence: 22, timestamp: session.updatedAt, status: 'completed', prompt: { text: 'Generate report', truncated: false }, output: { text: '', truncated: false }, toolCount: 1,
+      artifactReferences: [reference, { ...reference, eventId: 'delivery-event', sequence: 21, partIndex: -1, uri: 'dutydeck-result:private', name: 'Private delivery', revision: 'event:delivery-event:21:receipt', status: 'delivered' as const, source: 'attachment_receipt' as const }], artifactReferencesTruncated: true };
+    const requests = mount('completed', { history: { turns: [{ ...current, id: 'old-turn', taskId: 'old-task', attemptId: 'old-attempt', firstSequence: 1, lastSequence: 5, prompt: { text: 'Earlier report', truncated: false }, artifactReferencesTruncated: false, artifactReferences: [{ ...reference, taskId: 'old-task', attemptId: 'old-attempt', eventId: 'old-event', sequence: 4, name: 'Earlier report', revision: 'event:old-event:4:0' }] }, current], highWaterMark: 22, liveAfter: 22 } });
+    const user = userEvent.setup();
+    const source = vi.fn(); window.addEventListener('dutydeck:show-history-turn', source);
+    try {
+      await user.click(await screen.findByText('Generate report · 2 项'));
+      const artifacts = within(screen.getByRole('region', { name: '每轮产物引用' }));
+      expect(artifacts.getByText('Current report · 已记录引用')).toBeTruthy();
+      expect(artifacts.getByText('Private delivery · 交付回执已确认')).toBeTruthy();
+      expect(artifacts.getByText(/版本 event:current-event:20:0/)).toBeTruthy();
+      expect(artifacts.getByText(/版本 event:old-event:4:0/)).toBeTruthy();
+      expect(artifacts.getByText('这里只列出部分产物引用；查看来源记录可读取这一轮的完整事件。')).toBeTruthy();
+      expect(artifacts.queryByRole('link')).toBeNull();
+      await user.click(artifacts.getAllByRole('button', { name: '查看来源记录' })[0]!);
+      expect(source).toHaveBeenCalledOnce();
+      expect((source.mock.calls[0]![0] as CustomEvent).detail).toEqual({ taskId: reference.taskId, attemptId: reference.attemptId, eventId: reference.eventId, sequence: reference.sequence });
+      expect(requests.some(request => request.url === '/api/sessions/s1/history')).toBe(true);
+      expect(await screen.findByText('验证通过 · 代码已变化')).toBeTruthy();
+    } finally { window.removeEventListener('dutydeck:show-history-turn', source); }
+  });
+
+  it('reports an unavailable artifact history without hiding existing verification evidence', async () => {
+    mount('completed', { historyFailure: true });
+    expect(await screen.findByText('产物引用读取失败：History unavailable')).toBeTruthy();
+    expect(screen.queryByText('尚无已记录的结构化产物；普通文本中的文件名不作为交付证据。')).toBeNull();
+    expect(await screen.findByText('验证通过 · 代码已变化')).toBeTruthy();
   });
 
   it('shows stale evidence separately from task completion and sends explicit verification and CI requests', async () => {

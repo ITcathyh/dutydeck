@@ -6,7 +6,7 @@ import { constants } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { RuntimeError } from '@dutydeck/shared';
-import { discoverSkills, isPathInside } from './skill-catalog.js';
+import { discoverSkillCatalog, discoverSkills, isPathInside } from './skill-catalog.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -79,6 +79,7 @@ export async function registerSystemRoutes(app: FastifyInstance, options: System
     }
   });
   app.get<{ Querystring: { cwd?: string; botAppId?: string; chatId?: string; pluginWorkspaceRoot?: string } }>('/api/system/skills', async request => (options.discoverSkills ?? discoverSkills)(request.query.cwd, { botAppId: request.query.botAppId, chatId: request.query.chatId, pluginWorkspaceRoot: request.query.pluginWorkspaceRoot }));
+  app.get<{ Querystring: { cwd?: string; botAppId?: string; chatId?: string; pluginWorkspaceRoot?: string } }>('/api/system/skill-catalog', async request => discoverSkillCatalog(request.query.cwd, { botAppId: request.query.botAppId, chatId: request.query.chatId, pluginWorkspaceRoot: request.query.pluginWorkspaceRoot }));
   app.post('/api/system/select-directory', async (_request, reply) => {
     if (!supported) return reply.code(501).send({ error: { code: 'DIRECTORY_PICKER_UNSUPPORTED', message: 'The native directory picker is currently available on macOS only' } });
     try {

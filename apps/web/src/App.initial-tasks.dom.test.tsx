@@ -25,6 +25,8 @@ const taskEvent: DockEvent = { id: 'e11', sequence: 11, type: 'task', timestamp:
 const statusEvent: DockEvent = { id: 'e12', sequence: 12, type: 'status', timestamp: taskEvent.timestamp, data: { state: 'interrupted' } };
 const response = (data: unknown) => ({ ok: true, json: async () => data }) as Response;
 
+vi.mock('./skill-catalog-api', async () => { const { api } = await import('./api'); return { fetchSkillCatalog: async (...args: Parameters<typeof api.skills>) => ({ skills: await api.skills(...args), diagnostics: [], partial: false }) }; });
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -55,7 +57,8 @@ it.each(['completed', 'reconcile_required'])('refreshes the full %s task after i
   vi.spyOn(api, 'agents').mockResolvedValue([{ id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'full-trust' }]);
   vi.spyOn(api, 'sessions').mockImplementation(async () => [currentSession]);
   vi.spyOn(api, 'runSummaries').mockImplementation(async () => [{ sessionId: 's1', taskId: 't1', prompt: task.prompt, status: currentTasks[0]!.status, queuedCount: 0, updatedAt: currentTasks[0]!.updatedAt }]);
-  const events = vi.spyOn(api, 'events').mockImplementation((_id, query) => query?.direction === 'backward' ? new Promise(resolve => { releaseHistory = resolve; }) : Promise.resolve([]));
+  vi.spyOn(api, 'sessionHistory').mockResolvedValue({ turns: [], highWaterMark: 10, liveAfter: 0 });
+  const events = vi.spyOn(api, 'events').mockImplementation((_id, query) => query?.after === 0 ? new Promise(resolve => { releaseHistory = resolve; }) : Promise.resolve([]));
   vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
   vi.spyOn(api, 'skills').mockResolvedValue([]);
   vi.spyOn(api, 'pluginCommands').mockResolvedValue([]);
@@ -77,8 +80,8 @@ it.each(['completed', 'reconcile_required'])('refreshes the full %s task after i
     await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
     expect(client.getQueryData(['tasks', 's1'])).toBeUndefined();
     expect(EventSourceStub.instances).toHaveLength(0);
-    expect(events.mock.calls.some(([, query]) => query?.direction === 'backward')).toBe(true);
-    await act(async () => releaseHistory([historical]));
+    expect(events.mock.calls.some(([, query]) => query?.direction === 'forward' && query.after === 0)).toBe(true);
+    await act(async () => releaseHistory([...Array.from({ length: 9 }, (_, index): DockEvent => ({ id: 'prefix-' + index, sequence: index + 1, type: 'status', timestamp: task.createdAt, data: {} })), historical]));
     await waitFor(() => expect(EventSourceStub.instances).toHaveLength(1));
     const stream = EventSourceStub.instances[0]!;
     expect(stream.url).toContain('after=10');

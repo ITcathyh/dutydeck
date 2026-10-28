@@ -2,16 +2,23 @@ import { Archive, BookOpen, ChevronRight, FileDiff, LineChart, MessageSquare, Pa
 import type { ReactNode } from 'react';
 import type { Agent, Session, SessionUsage, Task } from '../api';
 import type { StreamStatus } from '../sse';
+import type { SessionSyncState } from '../useSessionStream';
 import { sessionDisplayName } from '../run-summary';
 import { nextActionForState, sessionErrorSummary, sessionWorkspaceName } from '../workspace-model';
 import { Badge, Banner, Button, IconButton, Tabs } from './primitives';
 import { effectiveStatus, permissionLabels, stateTone } from './ui';
 import { usd } from './usageFormat';
 
-function ConnectionState({ status }: { status: StreamStatus }) {
-  const label = status === 'open' ? '实时同步' : status === 'reconnecting' ? '正在重连' : '正在连接';
-  // 圆点是真正的正圆，rounded-full 在这里合法（契约 §3 只禁止把它用在矩形上）。
-  return <span title={label} className="inline-flex shrink-0 items-center gap-1.5 text-meta text-subtle"><span className={`h-1.5 w-1.5 rounded-full ${status === 'open' ? 'bg-action' : status === 'reconnecting' ? 'ui-status-pulse bg-warning-solid' : 'bg-neutral-solid'}`}/><span className="hidden sm:inline">{label}</span></span>;
+export function connectionLabel(status: SessionSyncState | StreamStatus) {
+  if (typeof status === 'string') return status === 'open' ? '实时同步' : status === 'reconnecting' ? '正在重连' : '正在连接';
+  if (status.transport !== 'open') return status.transport === 'reconnecting' ? '正在重连' : '正在连接';
+  return status.content === 'ready' ? '实时同步' : status.content === 'failed' ? status.retrying ? '记录同步失败，正在重试' : '记录同步失败' : '已连接，正在补齐记录';
+}
+function ConnectionState({ status }: { status: SessionSyncState | StreamStatus }) {
+  const label = connectionLabel(status);
+  const ready = typeof status === 'string' ? status === 'open' : status.transport === 'open' && status.content === 'ready';
+  const calibrated = typeof status !== 'string' && status.lastCalibratedAt ? `；最近校准 ${new Date(status.lastCalibratedAt).toLocaleTimeString()}` : '';
+  return <span title={label + calibrated} className="inline-flex shrink-0 items-center gap-1.5 text-meta text-subtle"><span className={`h-1.5 w-1.5 rounded-full ${ready ? 'bg-action' : 'ui-status-pulse bg-warning-solid'}`}/><span className="hidden sm:inline">{label}</span>{typeof status !== 'string' && status.content === 'failed' && !status.retrying && <button className="text-info" onClick={status.retry}>重试同步</button>}</span>;
 }
 
 export type RunDetailTab = 'timeline' | 'changes' | 'terminal';
@@ -43,7 +50,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   session: Session;
   agent?: Agent;
   taskPrompt?: string;
-  streamStatus: StreamStatus;
+  streamStatus: SessionSyncState | StreamStatus;
   queuedTasks: Task[];
   usage?: SessionUsage;
   /** 目标、工作目录等面板入口，排在「分析」前面。 */

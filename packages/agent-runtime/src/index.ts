@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, redactCredentialText } from '@dutydeck/shared';
+import { eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, redactCredentialText } from '@dutydeck/shared';
 import { listAcpxBuiltinAgents, AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
@@ -240,6 +240,7 @@ export class DutydeckRuntime {
   private readonly sendWaiters = new Set<() => void>();
   private readonly queueBlocked = new Set<string>();
   private readonly resourceQueueBlocked = new Set<string>();
+  private resourceQueueRevision = 0;
   /** 按 Agent 记的不可用标记（没登录、凭据失效），只在进程内；见 checkAgentAvailability。 */
   private readonly agentUnavailable = new Map<string, AgentUnavailable>();
   private readonly agentChecks = new Map<string, Promise<AgentUnavailable | undefined>>();
@@ -319,6 +320,7 @@ export class DutydeckRuntime {
   private bound() { this.assertBinding(); return this.execution!; }
   private wake<T extends CommitResult>(result: T): T { this.publisher.wake(result.session.id); this.wakeResourceQueues(); return result; }
   private wakeResourceQueues() {
+    this.resourceQueueRevision++;
     const waiting = [...this.resourceQueueBlocked]; this.resourceQueueBlocked.clear();
     if (waiting.length) queueMicrotask(() => { if (!this.shuttingDown && this.binding) for (const id of waiting) this.mutations.run(undefined, () => this.scheduleQueue(id)); });
   }
@@ -506,15 +508,24 @@ export class DutydeckRuntime {
       if (page.length < 200) break;
       afterSequence = page.at(-1)!.sequence;
     }
-    const finalActivity = [...events].reverse().find(event => ['text', 'thinking', 'tool_call', 'tool_result'].includes(event.type) && !(event.type === 'text' && (event.data as { role?: string })?.role === 'user'));
+    let finalContent = false;
+    for (let index = events.length - 1; index >= 0; index--) {
+      const event = events[index]!;
+      if (['thinking', 'tool_call', 'tool_result'].includes(event.type)) break;
+      if (event.type === 'text' && (event.data as { role?: string })?.role !== 'user' && eventHasContent(event.data as { text?: unknown; parts?: unknown })) finalContent = true;
+    }
     const confirmation = deferredConfirmationId(events, ref.taskId);
     const stopReason = confirmation ? `deferred:${confirmation}` : this.driverStopReasons.get(ref.attemptId) ?? 'end_turn';
     const error = this.turnErrors.get(ref.attemptId);
     const status = confirmation ? 'cancelled' : stopReason === 'cancelled' ? 'interrupted'
-      : error || DutydeckRuntime.isTruncatedStopReason(stopReason) || finalActivity?.type !== 'text' ? 'failed' : 'completed';
+      : error || DutydeckRuntime.isTruncatedStopReason(stopReason) || !finalContent ? 'failed' : 'completed';
     const text = events.filter(event => event.type === 'text').map(event => event.data as { role?: string; text?: unknown })
       .filter(data => data.role !== 'user' && typeof data.text === 'string').map(data => data.text).join('');
-    return { status, stopReason, confirmation, outputDigest: createHash('sha256').update(text, 'utf8').digest('hex') } as const;
+    const messages = events.filter(event => event.type === 'text' && (event.data as { role?: string })?.role !== 'user');
+    const structured = messages.some(event => normalizeEventContent((event.data as { parts?: unknown })?.parts).some(part => part.type !== 'text'));
+    // Keep legacy text receipts stable; structured receipts cover the persisted content and its trusted event identity.
+    const output = structured ? canonicalExecutionJson(messages.map(event => ({ id: event.id, sequence: event.sequence, text: (event.data as { text?: unknown }).text ?? '', parts: normalizeEventContent((event.data as { parts?: unknown }).parts) }))) : text;
+    return { status, stopReason, confirmation, outputDigest: createHash('sha256').update(output, 'utf8').digest('hex') } as const;
   }
   private nextSessionGeneration(sessionId: string) {
     const generation = (this.sessionGenerations.get(sessionId) ?? 0) + 1;
@@ -871,6 +882,11 @@ export class DutydeckRuntime {
       return workspace;
     });
   }
+  /** Avoid preparing redundant children; the later ledger claim still owns all execution limits. */
+  canPrepareWorkItemWorkspace(cwd: string): boolean {
+    this.assertReady();
+    return this.bound().canPrepareWorkspace(cwd, this.idleResourceChecks());
+  }
   getWorkspaceCleanupPreview(sessionId: string): Promise<WorkspaceCleanupPreview> {
     return this.readWorkspace(sessionId, () => this.workspaceCleanupPreview(sessionId));
   }
@@ -1167,6 +1183,10 @@ export class DutydeckRuntime {
   getEvents(id: string, after = 0) { return this.repos.events.list(id, after); }
   getLatestPermissionRequest(id: string, taskId: string, nativeId: string) { return this.repos.events.getLatestPermissionRequest(id, taskId, nativeId); }
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }
+  getHistoryOutline(id: string) {
+    if (!this.repos.events.listHistoryOutline) throw new RuntimeError('HISTORY_OUTLINE_UNSUPPORTED', 'History summaries are unavailable', 501);
+    return this.repos.events.listHistoryOutline(id);
+  }
   getEventWindow(id: string, options?: EventWindowOptions) { return this.repos.events.listWindow(id, options); }
   async getTasks(id: string) { return (await this.repos.tasks.listBySession(id)).map(task => this.publicTask(task)); }
   async getTaskRecovery(id: string, taskId: string) {
@@ -1658,6 +1678,7 @@ export class DutydeckRuntime {
       return;
     }
     let data = event.data;
+    if (data && Array.isArray(data.parts)) data = { ...data, parts: normalizeEventContent(data.parts) };
     const scopedId = (nativeId: string) => scope && isAttemptRef(scope) ? `turn_${digest([scope.taskId, scope.attemptId, nativeId])}` : nativeId;
     if (event.type === 'permission_request' || event.type === 'tool_call' || event.type === 'tool_result') {
       data = { ...data, id: scopedId(String(data.id)), ...(data.toolCallId ? { toolCallId: scopedId(String(data.toolCallId)) } : {}) };
@@ -2913,6 +2934,7 @@ export class DutydeckRuntime {
       }
       let claimed: CommitResult | undefined;
       let token: Owner | undefined;
+      const resourceRevision = this.resourceQueueRevision;
       try {
         await this.mutations.write(id, async () => {
           if (this.retiringDrivers.has(id)) throw new RuntimeError('WORKSPACE_RESOURCE_BLOCKED', 'The original idle driver is still closing', 409);
@@ -2924,9 +2946,15 @@ export class DutydeckRuntime {
           }
         });
       } catch (error) {
+        if (error instanceof RuntimeError && error.code === 'WORK_ITEM_CAPACITY_BLOCKED') {
+          // A release may race the rejected claim's promise continuation. Recheck that wake once.
+          if (resourceRevision === this.resourceQueueRevision) this.resourceQueueBlocked.add(id);
+          return;
+        }
         if (error instanceof RuntimeError && error.code === 'WORKSPACE_RESOURCE_BLOCKED') {
           if (next && await this.closeUnprovenIdleCompetitors(id,next.id,!admissionRechecked)) { admissionRechecked = true; continue; }
-          this.resourceQueueBlocked.add(id); return;
+          if (resourceRevision === this.resourceQueueRevision) this.resourceQueueBlocked.add(id);
+          return;
         }
         this.queueBlocked.add(id); return;
       }

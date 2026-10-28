@@ -16,6 +16,9 @@ export function registerPluginBusinessToolRoutes(app: FastifyInstance, options: 
     try { return await work(request); } catch (error) { const e = error instanceof z.ZodError ? { code: 'PLUGIN_TOOL_INVALID_INPUT', status: 400 } : safeError(error); return reply.code(e.status).send({ error: { code: e.code } }); }
   };
   app.get('/api/plugin-tools/list', { logLevel: 'silent' }, handle(request => options.service.list(...credentials(request))));
+  app.get('/api/plugin-tools/summary', { logLevel: 'silent' }, handle(request => options.service.summary(...credentials(request))));
+  app.get('/api/plugin-tools/describe', { logLevel: 'silent' }, handle(request => options.service.describe(z.object({ tool: z.string().min(1).max(129) }).strict().parse(request.query).tool, ...credentials(request))));
+  app.get('/api/plugin-tools/manual', { logLevel: 'silent' }, handle(request => { const query = z.object({ tool: z.string().min(1).max(129), id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/) }).strict().parse(request.query); return options.service.manual(query.tool, query.id, ...credentials(request)); }));
   app.get('/api/plugin-tools/revision', { logLevel: 'silent' }, handle(async request => {
     const listed = await options.service.list(...credentials(request));
     return { revision: listed.revision, registryRevision: listed.registryRevision, toolCount: listed.tools.length };

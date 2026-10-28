@@ -24,6 +24,38 @@ describe('acpx ACP boundary', () => {
     await adapter.stop();
   });
 
+  it('preserves structured ACP protocol content through real runtime and a persistent session key', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-acp-content-')); dirs.push(cwd);
+    const config = { ...agentConfig(), cwd, command: process.execPath, args: [resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs')] };
+    const sessionKey = 'structured-content-persistent';
+    const runs: any[][] = [];
+    for (let run = 0; run < 2; run++) {
+      const events: any[] = []; runs.push(events);
+      const adapter = new AcpxAdapter(config, { sessionKey, onEvent: event => events.push(event) });
+      try { await adapter.start(); await adapter.send('structured content fixture'); } finally { await adapter.stop(); }
+    }
+    const contents = runs.map(events => events.filter(event => event.type === 'text' || event.type === 'tool_result').map(event => event.data.parts));
+    expect(contents[1]).toEqual(contents[0]);
+    expect(contents[0]).toEqual([
+      [{ type: 'text', text: 'Report body' }, { type: 'resource_link', uri: 'file:///work/report.html', name: 'Report', mimeType: 'text/html' }],
+      [{ type: 'image', mimeType: 'image/png', data: 'YWJj' }],
+      [{ type: 'resource', resource: { uri: 'file:///work/report.html', mimeType: 'text/html', text: '<h1>Report</h1>' } }],
+      [{ type: 'resource_link', uri: 'https://example.test/report', name: 'Report' }]
+    ]);
+    const record = await createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') }).load(sessionKey);
+    expect(record?.name).toBe(sessionKey);
+    expect(runs.every(events => events.at(-1)?.type === 'completed')).toBe(true);
+  });
+
+  it('retains a single large pure text event without a duplicate parts payload', () => {
+    const text = '字'.repeat(100_000);
+    expect(normalizeAcpxEvent({ type: 'text_delta', text })).toEqual({ type: 'text', data: { text } });
+    expect(normalizeAcpxEvent({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })).toEqual({ type: 'text', data: { text } });
+    expect(normalizeAcpxEvent({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text } })).toEqual({ type: 'thinking', data: { text } });
+    const mixed = normalizeAcpxEvent({ sessionUpdate: 'tool_call_update', toolCallId: 'mixed', status: 'completed', content: [{ type: 'content', content: { type: 'text', text } }, { type: 'content', content: { type: 'image', mimeType: 'image/png', data: 'a'.repeat(1024 * 1024) } }] });
+    expect(mixed?.data.parts).toEqual([{ type: 'text', text }, { type: 'unsupported', originalType: 'image', reason: 'content_budget' }]);
+  });
+
   it('reports the latest per-request tokens and cumulative cost from the ACPX record before each completion', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-acp-usage-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
