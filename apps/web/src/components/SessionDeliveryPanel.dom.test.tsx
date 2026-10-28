@@ -31,6 +31,7 @@ function mount(state = session.state, options: {
       : strUrl.endsWith('/workspace') ? (options.workspace ?? { cwd: session.cwd, mode: 'worktree', state: 'ready', branch: 'dutydeck/session/s1' })
       : strUrl.endsWith('/automation') ? { schedules: [], subscriptions: [], occurrences: [] }
       : strUrl.endsWith('/diffs') ? (options.turnDiffs ?? [])
+      : strUrl.endsWith('/artifact-snapshots') ? { snapshots: [] }
       : strUrl.endsWith('/history') ? options.historyFailure ? { error: { code: 'HISTORY_UNAVAILABLE', message: 'History unavailable' } } : (options.history ?? { turns: [], highWaterMark: 0, liveAfter: 0 })
       : strUrl.endsWith('/pull-requests') ? { available: false, hint: '没有安装支持开 PR 的 CI 插件。', items: [] }
       : strUrl.endsWith('/automation/ci-providers') ? { providers: [{ id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false }] }

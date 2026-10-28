@@ -95,6 +95,7 @@ Claude Code 终端会话优先使用 OSC 7501 状态信号判断忙碌、等待�
 - **范围**：私聊各自独立。群聊默认同一机器人的所有群共享一个记忆池；把 `groupMemoryScope` 设为 `per-group` 后，各群记忆互不可见（Web「群记忆范围」，或 `dutydeck settings bot set <appId> groupMemoryScope=per-group`）。切换不迁移也不删除：`per-group` 下原共享池保留但不读取，切回共享即恢复。
 - **记录与提取**：`/remember` 手动记录；后台每 3 轮提取环境事实与偏好，每 8 轮合并去重。
 - **注入**：新任务注入精简记忆索引（`MEMORY.md`，≤ 3000 字符），执行中 Agent 可检索完整细节。
+- **管理**：任务详情的「管理记忆」可搜索、修订和删除实际记忆池；普通 Web 会话可显式创建和绑定项目记忆，目录相同不自动共享。见[配置来源与记忆管理](#configuration-and-memory)。
 
 ### 5. 群聊协作与定时委托
 - **参与强度**：只在 @ 时 / 话题内免 @ / 按需 / 积极（见下文）。
@@ -464,6 +465,7 @@ dutydeck settings agent show codex
 
 ACP 的图片和资源等结构化内容会保留并展示；支持的内嵌图片可预览，未知或超限的非文本内容显示占位。非文本内容有大小和数量预算；旧的长纯文本保持完整，不额外复制保存为 parts。结果面板按轮列出有来源的产物引用；引用本身不授予下载权限，也不会自动读取 URI 指向的文件或网页。
 
+在「结果检视 → 每轮产物引用」展开轮次后，可对已登记的本地文件点击「保存当前文件快照」，再「查看快照文本」或「下载已保存快照」。快照保存的是点击时的内容，显示时间、大小和 SHA-256，不证明原轮次当时的文件内容；后续修改源文件不会改变旧快照。只接受当前会话工作目录内的普通文件（最多 20 MiB），凭据、实例内部数据、符号链接、硬链接和特殊文件被拒绝，不获取远程 URL。安全校验目前仅支持 Linux。文本预览最多 16,384 字符，HTML/SVG 也只显示转义文本。列表、保存、预览和下载均需安装管理员及原会话查看权限，分享链接和任务工具凭据不授予此权限。
 
 ### 1. 工作台、全部任务与任务详情
 - **工作台**集中展示需要决定、需要恢复和正在推进的任务；**全部任务**用于搜索和项目筛选，列表筛选不隐藏侧栏中的当前任务；**自动化**管理真实任务计划。暖白和深色主题使用同一套状态语义，侧栏可收起并调整宽度。
@@ -485,6 +487,28 @@ ACP 的图片和资源等结构化内容会保留并展示；支持的内嵌图�
 - 会话流会自动恢复静默断流；标签页进入后台 60 秒后释放连接，回到前台重新连接并校准事件、任务和会话状态。已观测到批量缓冲的连接不按静默判死；这些行为不需要新设置。
 - `/sessions/<会话 ID>?panel=workspace` 可直接打开既有工作目录面板，包括归档会话；沿用登录门禁，链接本身不触发清理预检或删除。
 - 飞书卡片打开的只读任务详情显示来源话题、来源群聊（私聊显示来源聊天）和最初发起人，可跳回已知话题或聊天；未记录的话题和缺失的历史来源记录会明确标注，名称读取失败时显示已有 ID。
+
+#### 配置来源与记忆管理 <a id="configuration-and-memory"></a>
+
+任务详情的「配置来源」只读显示已保存的 Agent / 机器人默认、群解析结果和当前会话；选择「历史任务」「执行尝试」可查看任务接受时的执行选项、技能交付摘要和已有插件动作账本。新保存的模型不会被用来补历史。没有留存的字段显示 `unknown`，原生 CLI 自行加载的 MCP / Skills / 私有配置显示 `unverified`；不扫描秘密文件，不展示环境变量、密钥或工具正文。插件设置中的「解释已保存配置」按字段展示来源；工具仍在每次调用时重新解析绑定和授权。
+
+「管理记忆」在飞书会话中对应实际机器人共享群池、当前群或当前私聊，可搜索、替换式修订和删除；修订冲突会保留草稿并要求重新加载。来源会话不可访问时只显示受限说明。已保存与已注入分开展示：最多保留最近 20 轮关联、100 个删除记录，Web 最多显示 10 轮，不能还原历史完整提示词。
+
+普通 Web 会话可在同一入口创建项目记忆，选择项目后点击「绑定所选项目」，其他会话须逐个显式绑定同一项目 ID 才共享。目录、视觉分组、同路径新会话或 worktree 都不自动继承；飞书和受管工作事项会话不能加入。管理需安装管理员权限，绑定还需该会话权限。每个新轮次重新读取项目开关和绑定，按 3000 字符条目预算注入；关闭或解绑从下一轮停止提供，已发送的上下文无法撤回。项目最多 200 个有效条目、12 个主题、100 个删除记录，单条 1000 字符，凭据和注入指令拒绝保存；不自动提取项目记忆，也不提供 Agent 写入接口。
+
+```bash
+dutydeck settings explain --session ses_xxx --task task_xxx --attempt attempt_xxx
+dutydeck memory manage pool-list --session ses_lark --query '部署'
+dutydeck memory manage pool-revise mem_xxx --session ses_lark --content '修正后的事实' --expected-fingerprint <读取时的fingerprint>
+dutydeck memory manage project-create --name '项目名称'
+dutydeck memory manage project-show --project proj_xxx
+dutydeck memory manage project-add --project proj_xxx --content '项目事实' --expected-fingerprint <读取时的fingerprint>
+dutydeck memory manage project-bind --session ses_web --project proj_xxx
+dutydeck memory manage project-enable --project proj_xxx --enabled false
+dutydeck memory manage project-unbind --session ses_web
+```
+
+这些是管理员管理命令。`settings explain` 沿用 `settings --instance` 选实例；显式指定本机地址时，这些命令均须同时提供 `--url http://127.0.0.1:<port> --database /path/to/dutydeck.db`。`--attempt` 必须与 `--task` 一起使用；记忆修订与添加使用读取时返回的 fingerprint 拒绝过期修改。
 
 ### 2. 验证与返修
 - 验证门禁目前只对**飞书任务**生效，需要先给机器人配验证命令（`pnpm test`、`go test ./...` 等）。
@@ -1121,6 +1145,20 @@ dutydeck deploy prune --releases /path/to/releases
 - **单 Bot 独立进程**：`dutydeck start --foreground --database /path/to/bot.db --bot-app-id cli_xxx`。
 - **systemd 服务与数据库解析**：对直接以 `node cli.js` 启动的 unit，管理命令（`restart`、`status`、`deploy` 等）按 ExecStart 显式参数 > unit 环境变量 > `WorkingDirectory/.env` 解析目标数据库和监听地址；相对工作目录以 `WorkingDirectory` 为基准。缺少 `.env` 可继续，不可读或关键配置无效时拒绝操作；数据库未配置时回落到 `<cwd>/.dutydeck/dutydeck.db`。部署备份和 schema 回滚检查使用同一实际数据库。`start --foreground` 仍读取守护状态，`deploy --runtime` 显式元数据继续优先。
 
+#### 离线备份与隔离恢复
+
+```bash
+dutydeck backup create --database /path/to/runtime/dutydeck.db --data-dir /path/to/runtime --output /path/to/backups/snapshot-1
+dutydeck backup inspect --archive /path/to/backups/snapshot-1
+dutydeck backup restore --archive /path/to/backups/snapshot-1 --target /path/to/restored-runtime
+```
+
+三条命令均输出 JSON，必须显式提供路径，不从 `.env` 或 daemon 记录猜测源实例。源数据库须直接位于数据目录中且已升级到当前 schema；有活跃使用者时拒绝备份。输出和恢复目标目录必须不存在、父目录必须存在；备份放在源数据目录之外，恢复不覆盖已有目录。
+
+备份包含 SQLite 主数据、插件非秘密配置 / 绑定 / 锁文件、引用的不可变插件包，以及冻结数据库引用的产物快照。持有数据库和插件写锁期间复制，并检查组件哈希、快照大小、schema、SQLite 完整性和外键；缺少引用的产物快照或内容不一致会失败。清单列出缺失及排除项。备份目录为 0700、文件为 0600；完整数据库可能含仍可用于源实例的认证令牌、分享签名密钥及敏感正文；归档没有额外加密，不是无密钥备份。
+
+只排除外部凭据文件（如 `.env`、secret-provider 文件及私钥文件），数据库内的凭据完整保留。原生 CLI 会话、外部工作目录 / worktree、外部服务和插件运行数据等不默认打包；缺失、旧式可变或包含符号链接的不可变插件整包不复制，列为缺失依赖。预检与恢复均报告 `status: quarantined`，不代表完整可运行的实例。恢复副本保留任务的未知结果与提交事实，禁止启动服务和附加运行时，不自动重放任务；本命令不补凭据或解除隔离，后续启用须单独核对依赖并授权。
+
 ### 3. 开机自启 (`autostart`)
 
 ```bash
@@ -1144,6 +1182,7 @@ Web 控制台里的机器人设置、群聊策略和用量上限，都可以用�
 | 月度用量上限 | `dutydeck settings usage show / set-cap / remove-cap` |
 | 主终端后端 | `dutydeck settings terminal-backend [tmux\|herdr]` |
 | 工作区分组 | `dutydeck workspace-groups` |
+| 只读配置来源 | `dutydeck settings explain --session <session-id>` |
 
 ```bash
 dutydeck settings bot show cli_xxx                           # 查看机器人全部配置

@@ -459,6 +459,17 @@ export class LarkMemoryStore {
     return removed;
   }
 
+  /** 人工纠错：用所读池的指纹原子替换；后台冻结版本随后失效。 */
+  async revise(scope: LarkMemoryScope, id: string, input: { content: string; topic?: string; expectedFingerprint: string; actor: string }): Promise<LarkMemoryEntry> {
+    if (!this.configs.compareAndSet) throw new LarkMemoryError('MEMORY_CAS_REQUIRED', '记忆修订需要支持并发校验的存储。', 503);
+    if (!input.expectedFingerprint) throw new LarkMemoryError('MEMORY_VERSION_REQUIRED', '请先读取记忆版本再修改。', 400);
+    const original = (await this.list(scope)).find(entry => entry.id === id);
+    const result = await this.applyBatch(scope, [{ op: 'add', input: {
+      content: input.content, topic: input.topic ?? original?.topic, source: 'user', createdBy: input.actor, supersedes: [id]
+    } }], { expectedFingerprint: input.expectedFingerprint });
+    return result.added[0]!;
+  }
+
   /** 修改条目的主题。不存在或已删除时返回 undefined。 */
   async retopic(scope: LarkMemoryScope, id: string, topic: string): Promise<LarkMemoryEntry | undefined> {
     let updated: LarkMemoryEntry | undefined;

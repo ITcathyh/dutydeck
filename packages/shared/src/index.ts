@@ -590,3 +590,6 @@ export * from './action-transition.js';
 export * from './plugin-bindings.js';
 
 export * from './event-content.js';
+
+export type { ConfigurationField, ConfigurationSection, ConfigurationExplanation } from './configuration-explanation.js';
+export type { ArtifactSnapshot, ArtifactSnapshotReference, ArtifactSnapshotPreview } from './history.js';

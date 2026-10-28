@@ -15,6 +15,7 @@ export class SettingsCliError extends Error {
 
 export type SettingsAction =
   | 'plugin-binding-list' | 'plugin-binding-set' | 'plugin-binding-explain'
+  | 'configuration-explain'
   | 'instances' | 'agents' | 'agent-show' | 'agent-set'
   | 'bot-list' | 'bot-show' | 'bot-add' | 'bot-set' | 'bot-remove' | 'bot-install-hook'
   | 'channel-bot-list' | 'channel-bot-show' | 'channel-bot-set'
@@ -23,6 +24,9 @@ export type SettingsAction =
   | 'usage-show' | 'usage-set-cap' | 'usage-remove-cap';
 
 export interface SettingsCliInput {
+  sessionId?: string;
+  taskId?: string;
+  attemptId?: string;
   /** 经目标运行时转发到同机的另一个实例，与 dashboard 切换实例相同。 */
   instance?: string;
   url?: string;
@@ -322,6 +326,11 @@ function capTarget(input: SettingsCliInput): Record<string, string> {
 export async function runSettingsCli(action: SettingsAction, input: SettingsCliInput, dependencies: LocalRuntimeRequestDependencies = {}): Promise<Record<string, unknown>> {
   const request = runtimeRequest(input, dependencies);
   switch (action) {
+    case 'configuration-explain': {
+      if (input.attemptId && !input.taskId) throw new SettingsCliError('SETTINGS_ARGUMENT_REQUIRED', '--attempt requires --task');
+      const query = new URLSearchParams({ ...(input.taskId ? { taskId: input.taskId } : {}), ...(input.attemptId ? { attemptId: input.attemptId } : {}) });
+      return request('GET', `/api/sessions/${path(required(input.sessionId, '--session'))}/configuration${query.size ? `?${query}` : ''}`);
+    }
     case 'plugin-binding-list': return request('GET', '/api/plugin-bindings');
     case 'plugin-binding-explain': return request('POST', '/api/plugin-bindings/explain', { plugin: required(input.pluginName, 'Package'), botAppId: input.appId, chatId: input.chatId, cwd: input.workspaceRoot });
     case 'plugin-binding-set': {

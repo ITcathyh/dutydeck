@@ -22,3 +22,27 @@ export interface HistoryOutline {
   /** Canonical events after this point belong to the still-active suffix. */
   liveAfter: number;
 }
+
+/** A user-requested capture of current bytes, never proof of the event-time file contents. */
+export interface ArtifactSnapshot {
+  version: 1;
+  id: string;
+  sessionId: string;
+  taskId: string;
+  attemptId: string;
+  eventId: string;
+  sequence: number;
+  partIndex: number;
+  revision: string;
+  size: number;
+  sha256: string;
+  capturedAt: string;
+  mimeType: 'text/plain' | 'application/octet-stream';
+  name: string;
+}
+export type ArtifactSnapshotReference = Pick<ArtifactSnapshot, 'taskId' | 'attemptId' | 'eventId' | 'sequence' | 'partIndex' | 'revision'>;
+export interface ArtifactSnapshotPreview {
+  snapshot: ArtifactSnapshot;
+  text?: string;
+  truncated: boolean;
+}

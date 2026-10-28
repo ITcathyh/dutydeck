@@ -1,3 +1,4 @@
+import { backupSqlite } from '@dutydeck/storage';
 import { checkSqliteDriver, childProcessIdentity, describeSqliteDriverFailure, observeProcess, type ProcessIdentity } from '@dutydeck/storage';
 import Database from 'better-sqlite3';
 import { spawnSync } from 'node:child_process';
@@ -299,16 +300,6 @@ function pointCurrent(releases: string, release: string): void {
   renameSync(temp, join(releases, 'current'));
 }
 
-async function backupSqlite(source: string, target: string): Promise<void> {
-  const db = new Database(source, { readonly: true, fileMustExist: true });
-  try {
-    // 固定读取快照，避免其他连接的持续写入让分批在线备份反复从头开始；WAL 写入仍可继续。
-    db.exec('BEGIN');
-    db.prepare('SELECT rootpage FROM main.sqlite_schema LIMIT 1').get();
-    await db.backup(target);
-  } finally { db.close(); }
-  chmodSync(target, 0o600);
-}
 
 const sha256 = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
 

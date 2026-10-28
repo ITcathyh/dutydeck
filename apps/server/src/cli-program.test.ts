@@ -428,3 +428,17 @@ it('parses history verbatim ranges and continuation cursor', async () => {
   await createCliProgram('0.0.6', { historyShow }).parseAsync(['node', 'dutydeck', 'history', 'show', 'task_1', '--cursor', 'next']);
   expect(historyShow).toHaveBeenLastCalledWith('task_1', { cursor: 'next' });
 });
+
+
+it('requires an explicit backup database and forwards isolated backup destinations', async () => {
+  const backup = vi.fn();
+  const program = () => createCliProgram('0.0.8', { backup });
+  expect(program().commands.find(command => command.name() === 'backup')!.description()).toContain('full database may contain authentication tokens, signing keys and private content');
+  await program().parseAsync(['node', 'dutydeck', 'backup', 'create', '--database', '/tmp/source.db', '--data-dir', '/tmp/data', '--output', '/tmp/archive']);
+  expect(backup).toHaveBeenCalledWith('create', { database: '/tmp/source.db', dataDir: '/tmp/data', output: '/tmp/archive' });
+  await expect(program().parseAsync(['node', 'dutydeck', 'backup', 'create', '--data-dir', '/tmp/data', '--output', '/tmp/archive'])).rejects.toThrow('--database option is required');
+  await program().parseAsync(['node', 'dutydeck', 'backup', 'inspect', '--archive', '/tmp/archive']);
+  expect(backup).toHaveBeenLastCalledWith('inspect', { archive: '/tmp/archive' });
+  await program().parseAsync(['node', 'dutydeck', 'backup', 'restore', '--archive', '/tmp/archive', '--target', '/tmp/new']);
+  expect(backup).toHaveBeenLastCalledWith('restore', { archive: '/tmp/archive', target: '/tmp/new' });
+});

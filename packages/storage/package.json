@@ -100,7 +100,11 @@
     "src/event-history.ts",
     "dist/event-history.js",
     "dist/event-history.js.map",
-    "dist/event-history.d.ts"
+    "dist/event-history.d.ts",
+    "src/offline-backup.ts",
+    "dist/offline-backup.js",
+    "dist/offline-backup.js.map",
+    "dist/offline-backup.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

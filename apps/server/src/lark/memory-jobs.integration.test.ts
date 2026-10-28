@@ -1,10 +1,11 @@
+import { createHash } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
-import { agentConfigSchema } from '@dutydeck/shared';
+import { agentConfigSchema, canonicalExecutionJson, type BoundExecutionRepository } from '@dutydeck/shared';
 import { LarkMemoryStore } from './memory.js';
 import { LarkMemoryProjection } from './memory-view.js';
 import { LarkMemoryPipeline } from './memory-pipeline.js';
@@ -15,6 +16,9 @@ async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars
   const dir = await mkdtemp(join(tmpdir(), 'memory-jobs-'));
   const repos = createRepositories(join(dir, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
+  let execution!: BoundExecutionRepository;
+  const bind = repos.execution.bind.bind(repos.execution);
+  vi.spyOn(repos.execution, 'bind').mockImplementation(claim => { execution = bind(claim); return execution; });
   let reply = (_prompt: string) => ({ actions: [{ op: 'noop' }] });
   let duringSend = async () => {};
   let duringInterrupt = () => {};
@@ -63,19 +67,33 @@ async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars
     cleanups.unshift(() => next.shutdown());
     return { runtime: next, pipeline: createPipeline(undefined, next) };
   };
-  return { repos, runtime, store, projection, pipeline, setStopConfirmed: (value: boolean) => { stopConfirmed = value; }, createPipeline, restart, staleSessions, prompts, setOutputText: (value?: string) => { outputText = value; }, setReply: (value: typeof reply) => { reply = value; }, setDuringSend: (value: typeof duringSend) => { duringSend = value; }, setDuringInterrupt: (value: typeof duringInterrupt) => { duringInterrupt = value; } };
+  return { repos, runtime, store, projection, pipeline, execution: () => execution, setStopConfirmed: (value: boolean) => { stopConfirmed = value; }, createPipeline, restart, staleSessions, prompts, setOutputText: (value?: string) => { outputText = value; }, setReply: (value: typeof reply) => { reply = value; }, setDuringSend: (value: typeof duringSend) => { duringSend = value; }, setDuringInterrupt: (value: typeof duringInterrupt) => { duringInterrupt = value; } };
 }
 it('consumes verified blank completed turns so the next extraction reaches useful material', async () => {
   const h = await harness();
   const session = await h.runtime.start({ agentId: 'agent' });
   const taskIds: string[] = [];
-  h.setOutputText(' \n ');
+  // Seed already-confirmed historical receipts through the real ledger. Current
+  // Runtime intentionally rejects new turns with only whitespace as failed.
+  const x = h.execution();
+  const historical = { id: 'historical-blank', runId: 'historical-run', agentId: 'agent', cwd: join(session.cwd, 'historical'), state: 'idle' as const, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  await mkdir(historical.cwd);
+  x.createSession(historical);
+  const fence = { sessionId: historical.id, runId: historical.runId };
+  const digest = (value: string) => createHash('sha256').update(value).digest('hex');
   for (let i = 0; i < 12; i++) {
-    const task = await h.runtime.send(session.id, `blank-${i}`);
-    expect(task.status).toBe('completed'); taskIds.push(task.id);
-    await h.pipeline.onTurnCompleted(scope, { sessionId: session.id, taskId: task.id, senderKind: 'human' });
+    const prompt = `historical-blank-${i}`;
+    const input = { version: 2 as const, prompt, executionContext: { agentPrompt: prompt }, contentSources: [], executionOptions: { permissionMode: 'ask' as const } };
+    const task = x.acceptTask(fence, { version: 1, namespace: 'runtime', key: String(i), sessionId: historical.id, actor: { kind: 'unspecified' }, prompt, mode: 'queue', skills: [], options: {}, sources: [], sourcePayload: null }, { ...input, digest: digest(canonicalExecutionJson(input)) }, 'back').task!;
+    let attempt = x.claimNext(fence)!.attempt!;
+    const af = () => ({ ...fence, taskId: task.id, attemptId: attempt.attemptId, expectedRevision: attempt.revision });
+    const submissionId = `historical-submission-${i}`;
+    attempt = x.markSubmissionPending(af(), { submissionId, inputDigest: digest(prompt), resourceRefs: [], authorizationRefs: [] }).attempt!;
+    x.appendEvent(af(), { id: `historical-output-${i}`, type: 'text', data: { text: ' \n ' } });
+    x.settleAttempt(af(), `historical-settlement-${i}`, { kind: 'driver_result', submissionId, outcome: 'completed', outputDigest: digest(' \n '), stopReason: 'end_turn', complete: true });
+    expect(h.repos.execution.getTaskExecution(task.id)?.task.status).toBe('completed'); taskIds.push(task.id);
+    await h.pipeline.onTurnCompleted(scope, { sessionId: historical.id, taskId: task.id, senderKind: 'human' });
   }
-  h.setOutputText();
   const useful = await h.runtime.send(session.id, 'Useful material');
   await h.pipeline.onTurnCompleted(scope, { sessionId: session.id, taskId: useful.id, senderKind: 'human' });
   h.setReply(() => ({ facts: [] } as any));

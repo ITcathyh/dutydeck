@@ -1,3 +1,5 @@
+import type { ConfigurationExplanation } from '@dutydeck/shared';
+import type { ArtifactSnapshot, ArtifactSnapshotReference, ArtifactSnapshotPreview } from '@dutydeck/shared';
 import type { HistoryOutline } from '@dutydeck/shared';
 export type { HistoryOutline, HistoryTurnSummary } from '@dutydeck/shared';
 import type { AutomationSchedulePage, AutomationRunDetail } from '@dutydeck/shared';
@@ -321,6 +323,7 @@ export const UNAUTHORIZED_EVENT = 'dutydeck:unauthorized';
  * 放查询串而不是请求头，是因为 EventSource 带不了自定义请求头。
  */
 let shareToken: string | undefined;
+export const hasShareToken = () => Boolean(shareToken || typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('share'));
 export const setShareToken = (token: string | undefined) => { shareToken = token; };
 export const withShareToken = (url: string) => shareToken ? `${url}${url.includes('?') ? '&' : '?'}share=${encodeURIComponent(shareToken)}` : url;
 export class ApiError extends Error {
@@ -513,6 +516,17 @@ export const api = {
   larkMemoryStatus: (appId: string) => json<LarkMemoryStatusResult>(`/api/lark/bots/${encodeURIComponent(appId)}/memory/status`, { cache: 'no-store' }),
   unknownTasks: (sessionId: string) => json<UnknownTask[]>(`/api/sessions/${encodeURIComponent(sessionId)}/unknown-tasks`, { cache: 'no-store' }),
   resolveUnknownTask: (sessionId: string, taskId: string, input: { target: string; action: UnknownTaskAction; allowDuplicateEffects?: true }) => json<{ replayed: boolean; status: string; decisionId: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/unknown-tasks/${encodeURIComponent(taskId)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  memoryPool: (sessionId: string, q = '') => json<MemoryPoolView>(`/api/sessions/${encodeURIComponent(sessionId)}/memory-pool${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+  reviseMemoryPool: (sessionId: string, entryId: string, body: MemoryWrite) => json(`/api/sessions/${encodeURIComponent(sessionId)}/memory-pool/${encodeURIComponent(entryId)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  removeMemoryPool: (sessionId: string, entryId: string) => json(`/api/sessions/${encodeURIComponent(sessionId)}/memory-pool/${encodeURIComponent(entryId)}`, { method: 'DELETE' }),
+  projectMemories: () => json<{ projects: ProjectMemorySummary[] }>('/api/project-memory'),
+  createProjectMemory: (name: string) => json<{ project: ProjectMemorySummary }>('/api/project-memory', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }),
+  projectMemory: (id: string, q = '') => json<MemoryPoolView & ProjectMemorySummary>(`/api/project-memory/${encodeURIComponent(id)}${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+  setProjectMemoryEnabled: (id: string, enabled: boolean) => json(`/api/project-memory/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled }) }),
+  writeProjectMemory: (id: string, body: MemoryWrite, entryId?: string) => json(`/api/project-memory/${encodeURIComponent(id)}/entries${entryId ? `/${encodeURIComponent(entryId)}` : ''}`, { method: entryId ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  removeProjectMemory: (id: string, entryId: string) => json(`/api/project-memory/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}`, { method: 'DELETE' }),
+  projectMemoryBinding: (sessionId: string) => json<{ projectId: string | null }>(`/api/sessions/${encodeURIComponent(sessionId)}/project-memory`),
+  bindProjectMemory: (sessionId: string, projectId: string | null) => json(`/api/sessions/${encodeURIComponent(sessionId)}/project-memory`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId }) }),
   sessionMemory: (sessionId: string) => json<{ turns: LarkTurnMemory[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/memory`, { cache: 'no-store' }),
   forgetSessionMemory: (sessionId: string, taskId: string, memoryId: string) => json<{ removed: { id: string } }>(`/api/sessions/${encodeURIComponent(sessionId)}/memory/${encodeURIComponent(taskId)}/entries/${encodeURIComponent(memoryId)}`, { method: 'DELETE' }),
   installLarkHook: (appId: string, highRiskPattern: string, expectedRevision?: number, draft?: LarkHookDraft) => json<LarkHookStatus & { configRevision?: number }>('/api/lark/hooks/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, highRiskPattern, expectedRevision, ...(draft ? { draft } : {}) }) }),
@@ -1045,4 +1059,32 @@ export const pluginBindingsApi = {
   save: (body: SavePluginBinding) => json<{ binding: PluginBinding }>('/api/plugin-bindings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   explain: (body: PluginBindingScope & { plugin: string }) => json<Record<string, unknown>>('/api/plugin-bindings/explain', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   slot: (plugin: string, slot: string) => json<{ plugin: string; slot: string; declarations: Array<{ id: string; slot: string; title: string; description?: string; elements: Array<Record<string, unknown>> }> }>(`/api/plugins/${encodeURIComponent(plugin)}/slots/${encodeURIComponent(slot)}`)
+};
+
+export const configurationApi = {
+  explain: (sessionId: string, taskId?: string, attemptId?: string) => {
+    const query = new URLSearchParams({ ...(taskId ? { taskId } : {}), ...(attemptId ? { attemptId } : {}) });
+    return json<ConfigurationExplanation>(`/api/sessions/${encodeURIComponent(sessionId)}/configuration${query.size ? `?${query}` : ''}`);
+  }
+};
+export interface MemoryManagementEntry extends LarkTurnMemoryEntry {
+  supersedes?: string[];
+  supersededBy?: string;
+  origin?: { label: string; sessionId?: string; taskId?: string };
+}
+export interface MemoryPoolView { scope?: string; entries: MemoryManagementEntry[]; fingerprint: string; historyNotice: string }
+export interface MemoryWrite { content: string; topic?: string; expectedFingerprint: string }
+export interface ProjectMemorySummary { id: string; name: string; enabled: boolean; count?: number }
+export const artifactSnapshotsApi = {
+  list: (sessionId: string) => json<{ snapshots: ArtifactSnapshot[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/artifact-snapshots`),
+  capture: (sessionId: string, ref: ArtifactSnapshotReference) => json<ArtifactSnapshot>(`/api/sessions/${encodeURIComponent(sessionId)}/artifact-snapshots`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(ref) }),
+  preview: (sessionId: string, id: string) => json<ArtifactSnapshotPreview>(`/api/sessions/${encodeURIComponent(sessionId)}/artifact-snapshots/${encodeURIComponent(id)}/preview`),
+  download: async (sessionId: string, id: string): Promise<Blob> => {
+    const response = await fetch(withShareToken(instanceApiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/artifact-snapshots/${encodeURIComponent(id)}/download`)), { credentials: 'same-origin' });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: { message?: string; code?: string } };
+      throw new ApiError(body.error?.message ?? '快照下载失败', body.error?.code ?? 'REQUEST_FAILED', response.status);
+    }
+    return response.blob();
+  }
 };

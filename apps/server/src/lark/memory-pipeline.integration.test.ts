@@ -241,6 +241,21 @@ describe('Lark memory pipeline through the coordinator', () => {
     expect(h.prompts.at(-1)).toContain('部署脚本在 scripts/deploy.sh');
   });
 
+  it('fresh extraction does not restore retained deleted or manually superseded text', async () => {
+    const h = await harness(); const manual = await h.setConfig({ memoryAutoExtract: false });
+    const deleted = await h.store.add(scope, { content: '已删除的旧说明', source: 'extraction' });
+    const corrected = await h.store.add(scope, { content: '被修订的旧说明', source: 'extraction' });
+    await h.store.remove(scope, deleted.id, 'owner');
+    await h.store.revise(scope, corrected.id, { content: '人工确认的新说明', expectedFingerprint: larkMemoryFingerprint(await h.store.list(scope)), actor: 'owner' });
+    h.setResponder(prompt => {
+      const evidence = prompt.match(/轮次 (task_[A-Za-z0-9_-]+)/)?.[1];
+      return { text: jsonBlock({ facts: ['已删除的旧说明', '被修订的旧说明', '可保存的新事实'].map(content => ({ content, topic: 'general', evidence, kind: 'convention' })) }) };
+    });
+    await h.runTurns(1, manual);
+    await h.pipeline.runExtraction(scope); await h.waitIdle();
+    expect((await h.store.list(scope)).map(entry => entry.content)).toEqual(['人工确认的新说明', '可保存的新事实']);
+  });
+
   it('records human provenance and excludes bot turns from automatic fact extraction', async () => {
     const h = await harness();
     const manual = await h.setConfig({ memoryAutoExtract: false });
@@ -350,6 +365,37 @@ describe('Lark memory pipeline through the coordinator', () => {
     expect(state.turnsSinceConsolidation).toBe(0);
     expect(state.lastConsolidationAt).toBeTruthy();
     await h.waitIdle();
+  });
+
+  it.each([
+    ['delete', 'update'], ['delete', 'merge'], ['revise', 'update'], ['revise', 'merge']
+  ] as const)('fresh consolidation after %s cannot %s retained original text through a reused compatible session', async (change, op) => {
+    const h = await harness(); await h.setConfig({ memoryAutoExtract: false });
+    const original = await h.store.add(scope, { content: '部署使用旧地址', source: 'extraction' });
+    const first = await h.store.add(scope, { content: '部署说明需要整理', source: 'extraction' });
+    const second = await h.store.add(scope, { content: '部署说明还有补充', source: 'extraction' });
+    // The compatible native session sees the old text before the human edit.
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true }); await h.waitIdle();
+    expect(h.startCalls).toHaveLength(1);
+    const initialJob = (await h.repos.memoryJobs.listScope(scope))[0]!;
+    expect(initialJob.mode).toBe('compatible');
+    if (change === 'delete') await h.store.remove(scope, original.id, 'installation_owner');
+    else await h.store.revise(scope, original.id, { content: '人工确认的新地址', expectedFingerprint: larkMemoryFingerprint(await h.store.list(scope)), actor: 'installation_owner' });
+    const before = await h.store.listAll(scope);
+    const action = op === 'merge' ? { op, ids: [first.id, second.id] } : { op, id: first.id };
+    h.setResponder(() => ({ text: jsonBlock({ actions: [{ ...action, content: '部署 使用旧地址' }] }) }));
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: false, error: 'MEMORY_GATE_REJECTED' }); await h.waitIdle();
+    expect(await h.store.listAll(scope)).toEqual(before);
+    expect(h.startCalls).toHaveLength(1);
+    const failed = (await h.repos.memoryJobs.listScope(scope)).find(job => job.error === 'MEMORY_GATE_REJECTED')!;
+    expect(failed).toMatchObject({ mode: 'compatible', sessionId: initialJob.sessionId, input: { retiredContents: [original.content] } });
+    expect(failed.id).not.toBe(initialJob.id);
+    h.setResponder(() => ({ text: jsonBlock({ actions: [{ ...action, content: '合法整理后的部署说明' }] }) }));
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true, added: 1 }); await h.waitIdle();
+    const contents = (await h.store.list(scope)).map(entry => entry.content);
+    expect(contents).toContain('合法整理后的部署说明'); expect(contents).not.toContain(original.content);
+    expect(h.startCalls).toHaveLength(1);
+    if (change === 'revise') expect(contents).toContain('人工确认的新地址');
   });
 
   it('门禁拒绝改写用户条目：重试一次仍违规则整轮不写入', async () => {

@@ -75,6 +75,7 @@ A local daemon connects the coding agents on your machine or dev server (Claude 
 - **Git Worktree (optional)**: edits happen in a worktree derived from HEAD. Web defaults to a worktree, **Lark defaults to `shared`** (the selected directory). In Lark, use `/new --workspace worktree`.
 - **Verification gate**: set a bot's `verificationCommand` (e.g. `pnpm test`); after a Lark task changes code, the server runs it on the host and records the result. On failure the output goes back to the agent for up to 2 repair rounds. Web sessions do not trigger it.
 - **Memory**: **off by default** (`memoryEnabled` unset means on only when the default group participation is selective or eager). Private chats are independent. In groups all groups of one bot share a pool by default; set `groupMemoryScope=per-group` (Web "Group memory scope", or `dutydeck settings bot set <appId> groupMemoryScope=per-group`) to isolate groups. Switching does not migrate or delete anything.
+- **Memory management**: use **管理记忆** in task details to search, revise and delete the actual Lark pool. Ordinary Web sessions can explicitly create and bind project memory; matching directories do not share it automatically. See [Configuration sources and memory management](#configuration-and-memory).
 - **Group participation**: four levels (mention only / no @ inside owned topics / selective / eager); natural-language schedules in groups and private chats (say "every 15 minutes, check whether this topic has a conclusion"; the Agent posts a card saying what, when and where, and it starts after you click 启用, no command needed); Leader-Worker collaboration.
   - Confirmation cards preserve the task text and its line breaks instead of clipping it to 200 characters. If the confirmation card cannot be delivered, the schedule stays saved and disabled. The Agent receives its ID and recovery instructions: retry with the same parameters in the current turn to resend the card, or have the user send `/schedule enable <ID>` in the current chat.
 - **Open PRs and follow up**: `/pr [title]` in Lark, or "Open PR" in the Web task's "Results inspector"; confirm first, then Dutydeck pushes a new `dutydeck/` branch, opens the PR and follows up on CI failures and review comments. Needs a CI plugin that can create PRs (the bundled `plugins/github`).
@@ -310,6 +311,8 @@ Connection and record catch-up have separate statuses: a connected stream may st
 
 ACP structured images and resources are retained and displayed; supported embedded images can be previewed, while unknown or oversized non-text content has a visible placeholder. Non-text content has size and count budgets; old long plain text remains complete without a duplicate parts copy. The Results inspector lists per-turn artifact references with their source. A reference does not grant download access or automatically read the URI's file or webpage.
 
+In **Results inspector → 每轮产物引用** (per-turn artifact references), expand a turn and choose **保存当前文件快照** to save a registered local file. Saved snapshots show capture time, size and SHA-256, with text preview and download controls. They capture click-time bytes, not proof of the original turn's file contents; later source changes leave old snapshots intact. Only ordinary files inside the session's working directory are eligible, up to 20 MiB. Credentials, instance internals, symlinks, hardlinks and special files are rejected; remote URLs are not fetched. Safety checks currently require Linux. Preview is limited to 16,384 characters, with HTML/SVG displayed as escaped text. Listing, capture, preview and download require installation administrator and original-session access; share links and task capabilities do not grant these rights.
+
 - **Navigation**: Workbench highlights decisions, recovery and active work; All tasks provides search and project filters without hiding the current task in the sidebar; Automation manages real task schedules. Warm light and dark themes share status meanings. The sidebar can be collapsed and resized.
 - **Command palette**: Press `Ctrl-K` to open Agent, plugin / Skill, automation, usage and group decision-board destinations from one searchable menu.
 - **Drafts**: task text, file / Skill references, send mode and plan-first selection are stored per instance and task in this browser and survive task switches, settings and refresh. If browser storage is unavailable, they remain in memory for the current page only. Failed sends retain the draft; a successful acknowledgment clears only the submitted revision, preserving edits made while sending. Messages are never automatically replayed. The new-task form also survives closing, including a created session whose first message failed to send; this creation draft lasts only for the current page and is cleared by refresh.
@@ -370,6 +373,28 @@ API: `GET /api/automation/schedules` accepts `offset/limit/name/sessionId/agentI
 Scheduled tasks keep the selected permission posture; `ask` can wait for human approval, so choose permissions explicitly for unattended work. Each runtime database owns its schedules and execution history and permits one runtime executor. Switch instances to reach the Web or bot runtime that owns the task.
 
 After reaching the user's stopping condition, a recurring task can request disabling its own schedule with `dutydeck agent --turn "$TURN" schedule stop-self`. No schedule ID is accepted. Only the active host-triggered scheduled occurrence qualifies; manual runs and one-off schedules cannot use it. The host waits for successful execution and confirmed result delivery, then rechecks the original actor and that the schedule is still the same version before disabling it and retaining history. Failure, unknown delivery, revoked permission or a user edit prevents self-disabling.
+
+### Configuration sources and memory management <a id="configuration-and-memory"></a>
+
+Open **配置来源** in task details for saved Agent/Bot defaults, group resolver results and the current session. Select a historical task and attempt to inspect accepted execution options, recorded skill delivery metadata and existing plugin action evidence. New settings never fill gaps in historical records: missing fields remain `unknown`, and native CLI-owned MCP/Skills/private configuration remains `unverified`. Secret files are not scanned; environment values, secret bodies and tool bodies are excluded. Plugin settings also show readable sources under **解释已保存配置**. Tools still resolve bindings and authorization for every call.
+
+**管理记忆** searches, replaces and deletes entries in the Lark session's actual bot-shared, per-group or private pool. A stale revision preserves the draft and asks for a reload. Source links require separate source-session access. Saved and injected entries remain distinct: up to 20 turn associations and 100 tombstones are retained, Web shows up to 10 turns, and full historical prompts cannot be reconstructed.
+
+In ordinary Web sessions, create a project, select it and choose **绑定所选项目**. Each other session must explicitly bind the same stable project ID to share memory. Paths, visual groups, reused directories and worktrees never infer a binding; Lark and managed work-item sessions cannot join. Management requires installation administrator access; binding also requires session access. Every new turn rereads the enabled state and binding with a 3000-character entry budget. Disabling or unbinding stops next-turn injection; previously delivered context cannot be revoked. Limits are 200 live entries, 12 topics, 100 tombstones and 1000 characters per entry. Credentials and injection instructions are rejected. There is no automatic project extraction or Agent write interface.
+
+```bash
+dutydeck settings explain --session ses_xxx --task task_xxx --attempt attempt_xxx
+dutydeck memory manage pool-list --session ses_lark --query 'deployment'
+dutydeck memory manage pool-revise mem_xxx --session ses_lark --content 'Corrected fact' --expected-fingerprint <read-fingerprint>
+dutydeck memory manage project-create --name 'Project name'
+dutydeck memory manage project-show --project proj_xxx
+dutydeck memory manage project-add --project proj_xxx --content 'Project fact' --expected-fingerprint <read-fingerprint>
+dutydeck memory manage project-bind --session ses_web --project proj_xxx
+dutydeck memory manage project-enable --project proj_xxx --enabled false
+dutydeck memory manage project-unbind --session ses_web
+```
+
+These are administrator management commands. `settings explain` supports the existing `settings --instance` selector. For an explicit local runtime address, all commands above require both `--url http://127.0.0.1:<port>` and `--database /path/to/dutydeck.db`. `--attempt` requires `--task`. Memory additions and revisions use the fingerprint returned by the read to reject stale writes.
 
 ---
 
@@ -798,6 +823,20 @@ Old clients ignore the additional decision field. Corrupt legacy forwarding stil
   - Codex workspace hooks (including `codex-acp`) are ready only when native Codex loads and enables the generated hook and trusts its current content hash. A `hooks.json` file alone is insufficient. Enforced saves and session starts check `config/read` and `hooks/list` without a model turn; unsupported RPCs, errors and a 5-second timeout refuse execution. Using the Agent's `CODEX_PATH` / `CODEX_HOME`, confirm trust for the target workspace, review only the Dutydeck PreToolUse hook in `/hooks`, then choose **重新检查 Hook** in the Web. Dutydeck never trusts a project or other hooks automatically.
   - For Claude Code terminal agents (including custom agents whose adapter is `claude-code`, such as ccflash) and ACP Claude launched by Dutydeck, the same check also enforces the high-risk pattern, so enforced mode needs no workspace hook. A custom ACP Claude must launch with the released `dist/agents/claude-acp.mjs`; an old copy made elsewhere does not include the check.
   - In every mode, Lark cards, results and group tool messages replace common secret formats (such as `sk-ant-`, `ghp_`, JWTs) and secret values from the service and agent environments with `[REDACTED]`.
+
+### Offline backups and quarantined restore
+
+```bash
+dutydeck backup create --database /path/to/runtime/dutydeck.db --data-dir /path/to/runtime --output /path/to/backups/snapshot-1
+dutydeck backup inspect --archive /path/to/backups/snapshot-1
+dutydeck backup restore --archive /path/to/backups/snapshot-1 --target /path/to/restored-runtime
+```
+
+All three commands emit JSON and require explicit paths, without inferring the source from `.env` or daemon records. The source database must be directly inside the data directory and use the current schema; active users block backup. Output and restore directories must not exist, and their parents must exist. Keep backups outside the source data directory. Restore never overwrites an existing target.
+
+Backups include SQLite primary data, non-secret plugin configuration/bindings/lock files, referenced immutable plugin packages and database-referenced artifact snapshots. Database and plugin write locks span copying. Component hashes, artifact size, schema, SQLite integrity and foreign keys are checked; missing or inconsistent referenced snapshots fail. The manifest lists missing and excluded dependencies. Backup directories use 0700 and files 0600. The full database may contain authentication tokens and share signing keys still valid against the source instance, as well as private content. This format adds no encryption and is not secret-free.
+
+Only external credential files, such as `.env`, local secret-provider files and private-key files, are excluded; credentials inside SQLite are preserved intact. Native CLI sessions, external working directories/worktrees, external services and plugin runtime data are excluded. Missing packages, legacy mutable packages and immutable packages containing symlinks are omitted as whole packages and reported as missing dependencies. Inspection and restore report `status: quarantined`, not a ready-to-run complete instance. Restored data preserves unknown execution outcomes and submission facts; service startup and runtime attachment are blocked, and tasks are never replayed automatically. These commands do not reconnect credentials or remove quarantine. Enabling a restored instance requires separately verified dependencies and authorization.
 
 ### Agent CLI (`dutydeck agent`)
 

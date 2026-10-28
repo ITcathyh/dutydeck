@@ -1,3 +1,7 @@
+import { assertDatabaseNotQuarantined } from '@dutydeck/storage';
+import { ProjectMemoryService } from './project-memory.js';
+import { larkAgentSessionBinding } from './lark/agent-tools.js';
+import { ArtifactSnapshots } from './artifact-snapshots.js';
 import { PluginBusinessToolService } from './plugins/tool-service.js';
 import { PluginToolLedger } from './plugins/tool-ledger.js';
 import { PluginToolGrants } from './plugins/tool-grants.js';
@@ -26,7 +30,7 @@ import type { CollaborationExtensions } from './collaboration-extensions.js';
 import { LarkGroupManager } from './lark/group-management.js';
 import { larkMemoryEnabled, readLarkConfigs } from './lark/config.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
-import { loadConfigWithDiagnostics, type AppConfig } from '@dutydeck/config';
+import { loadConfigWithDiagnostics, resolveDatabaseUrl, type AppConfig } from '@dutydeck/config';
 import { logDroppedAgents } from './agent-config-log.js';
 import { assertBotProcessStartup, childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
 import { createPtyRetirementControl } from './pty-recovery.js';
@@ -216,7 +220,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   // pty-cli agent 发现：PTY_AGENT_CONTRIBUTIONS 经 loadConfig 合并进 config.agents
   // （builtinAgents 内部按 commandExists 过滤，只暴露本机已安装的 CLI；可用的终端适配器优先，同 id 覆盖 ACPX）。
   // 插件在加载配置之前加载：插件 agents 要与 DUTYDECK_AGENTS_JSON 一起合并。没有启用的插件（或只有内置场景包）时为 undefined，下面不接线。
-  const { host: pluginHost, scenarios } = await loadDaemonPlugins(options.env ?? process.env);
+  const startupEnvironment = options.env ?? process.env;
+  assertDatabaseNotQuarantined(resolveDatabaseUrl(startupEnvironment));
+  const { host: pluginHost, scenarios } = await loadDaemonPlugins(startupEnvironment);
   const { config, droppedAgents, repos } = await (async () => {
     try {
       const { config, droppedAgents } = loadConfigWithDiagnostics(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS, pluginHost?.agents);
@@ -335,6 +341,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null),
     getPasswordHash: () => getPasswordHash(repos.config),
   });
+  const authorizeMemoryManagement = createPluginManagementAuthorizer({
+    authEnabled: config.authEnabled, mode,
+    getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null),
+    getPasswordHash: () => getPasswordHash(repos.config),
+  });
   const foundationManagementAuthorizer = createFoundationManagementAuthorizer(resolveInstallationPrincipal);
   const foundationExecution = createFoundationExecutionAuthorizer(repos, resolveInstallationPrincipal);
   const legacyExecutionPolicy = {
@@ -415,6 +426,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     },
     log: { warn: (details, message) => app?.log.warn(details, message) }
   });
+  const projectMemory = new ProjectMemoryService(repos.config, async id => {
+    const session = await repos.sessions.get(id);
+    if (!session) throw new RuntimeError('SESSION_NOT_FOUND', '会话不存在。', 404);
+    return session;
+  });
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
     configureAgent: (agent, session) => agentModelSettings.resolveForSession(agent, session, async id => await workItems.parentForSession(id) ?? await delegations.parentForSession(id)),
     ptyRetirement: createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }, session => primaryHerdrBackend(session.id)),
@@ -477,12 +493,14 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       const resultPrompt = session.source === 'lark' && active?.actorId && active.attemptId && !isAutomatedTask(active.taskId) && resultTools.length ? `受控插件结果工具：只返回回执，正文仅原请求者登录下载。调用 dutydeck plugin-tool call <工具> --json '<参数>' --call-id <稳定调用ID> --turn ${capabilities.finalTurnToken(session.id, active.taskId, active.attemptId)}；重试保持 call-id。可用工具：${resultTools.map(t => `${t.id}：${t.description}`).join('；')}\n\n` : '';
       const businessPrompt = pluginHost?.businessTools.list({ botAppId: session.sourceId?.split(':')[0], cwd: session.workspaceSourceCwd ?? session.cwd }).length && active?.attemptId && !isAutomatedTask(active.taskId)
         ? `业务工具：使用本轮凭证执行 ${options.groupToolsCommand ?? 'dutydeck'} tool list --turn ${capabilities.workbenchTurnToken(session.id, active.taskId, active.attemptId)}。大目录可用 ${options.groupToolsCommand ?? 'dutydeck'} tool list --summary --turn <本轮凭证>；已知工具可直接 ${options.groupToolsCommand ?? 'dutydeck'} tool describe <工具> --turn <本轮凭证>。详情中的可选手册按逻辑 ID 用 ${options.groupToolsCommand ?? 'dutydeck'} tool manual <工具> <ID> --turn <本轮凭证> 读取；必需 SOP 仍完整冻结。按返回 schema 调用 ${options.groupToolsCommand ?? 'dutydeck'} tool call <工具> --json '<参数>' --call-id <稳定ID> --turn <本轮凭证>。同次重试保留 call-id；unknown 仅用 tool reconcile 核对，不新建写操作。MCP tools 端点为 /api/plugin-tools/mcp，使用会话 relay Bearer 与 x-dutydeck-tool-turn；身份由宿主决定。\n\n` : '';
+      const projectPrompt = await projectMemory.prompt(session);
       const prefix = toolsPrompt.slice(0, toolsPrompt.length - prompt.length) + resultPrompt + businessPrompt;
       // 飞书会话的工具块已经定义了 dutydeck 简写，Herdr 入口排在它后面并沿用简写。
       const herdrPrompt = session.terminalBackend === 'herdr' ? '你正在 Herdr 的真实主终端 pane 内运行；HERDR_* 由 Herdr 注入，使用 herdr pane current 核实自身上下文，可用 --current 管理本 pane。不要伪造身份或操作用户 default session。侧边任务可继续使用本会话的 dutydeck session herdr 专属入口。' : herdr.prompt(prefix ? 'dutydeck' : undefined);
-      const legacyPrompt = `${prefix}${herdrPrompt ? `${herdrPrompt}\n\n` : ''}${prompt}`;
+      const legacyPrompt = `${prefix}${projectPrompt}${herdrPrompt ? `${herdrPrompt}\n\n` : ''}${prompt}`;
       const parts = [
         ...(prefix ? [{ kind: 'dynamic_context' as const, trustScope: 'host:current_authority', content: prefix }] : []),
+        ...(projectPrompt ? [{ kind: 'dynamic_context' as const, trustScope: 'memory:data', content: projectPrompt }] : []),
         ...(herdrPrompt ? [{ kind: 'host_rules' as const, sourceId: 'dutydeck:herdr', version, digest: promptDigest(herdrPrompt), trustScope: 'host', complete: true, content: herdrPrompt, suffix: '\n\n' }] : []),
         ...(context?.promptParts ?? [{ kind: 'user_request' as const, trustScope: 'user_request', content: prompt }])
       ];
@@ -695,8 +713,16 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return !bot || !larkMemoryEnabled(bot) ? '' : renderMemoryIndex(await memoryStore.list(memoryScope), await memoryStore.getState(memoryScope), { currentChatId: scope.chatId }).text;
     };
     app = await buildApp(runtime, {
+      artifactSnapshots: { service: new ArtifactSnapshots(repos, config.databaseUrl), authorize: async (request, sessionId) => {
+        const administrator = createPluginManagementAuthorizer({ authEnabled: config.authEnabled, mode, getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null), getPasswordHash: () => getPasswordHash(repos.config) });
+        return await administrator(request) && (await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result')).allowed;
+      } },
       pluginBindings: { host: pluginHost ?? PluginHost.empty(dirname(config.databaseUrl)), authorize: createPluginManagementAuthorizer({ authEnabled: config.authEnabled, mode, getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null), getPasswordHash: () => getPasswordHash(repos.config) }) },
     terminalSettings,
+    configurationExplanation: { repositories: repos, groups: groupManager, host: pluginHost, authorize: async (request, sessionId) => {
+      const administrator = createPluginManagementAuthorizer({ authEnabled: config.authEnabled, mode, getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null), getPasswordHash: () => getPasswordHash(repos.config) });
+      return await administrator(request) && (await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result')).allowed;
+    } },
     agentModelSettings,
       ...(insightService
         ? { insight: { service: insightService, authorize: async request => Boolean(await resolveInstallationPrincipal(request)) } }
@@ -763,6 +789,32 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       agentRequests: { runtime, tools: agentTools, automation, automatedTask: isAutomatedTask, prepareDelivery: automationIntegration.prepareTaskDelivery, sendConfirmation: automationIntegration.sendScheduleRequest },
       // 与 coordinator 的记忆存储同一个 configs 仓库（listener 的 workflowStore 就是 repos.config）。
       memoryTools: { tools: agentTools, store: memoryStore, runtime },
+      memoryManagement: {
+        store: memoryStore,
+        scope: async sessionId => {
+          const session = await runtime.getSession(sessionId);
+          const binding = session && larkAgentSessionBinding(session);
+          if (!binding) throw new RuntimeError('MEMORY_SCOPE_INVALID', '此会话没有飞书记忆池。', 400);
+          const bot = (await readLarkConfigs(repos.config)).find(item => item.appId === binding.appId);
+          if (!bot) throw new RuntimeError('MEMORY_SCOPE_INVALID', '机器人已不存在。', 404);
+          return larkMemoryScope(binding.appId, binding.chatId, binding.chatType, bot.groupMemoryScope);
+        },
+        authorize: async (request, sessionId) => {
+          if (!await authorizeMemoryManagement(request)) throw new RuntimeError('MEMORY_OWNER_REQUIRED', '管理记忆需要安装管理员权限。', 403);
+          const decision = await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result');
+          if (!decision.allowed) throw new RuntimeError(decision.code, decision.reason, 403);
+        },
+        sourceSession: async entry => entry.taskId ? repos.execution.getTaskExecution(entry.taskId)?.task.sessionId : ['extraction', 'consolidation'].includes(entry.source) ? undefined : entry.sessionId,
+        canViewSource: async (request, sessionId) => Boolean(await runtime.getSession(sessionId)) && (await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result')).allowed,
+      },
+      projectMemory: {
+        service: projectMemory,
+        authorize: authorizeMemoryManagement,
+        authorizeSession: async (request, sessionId) => {
+          const decision = await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result');
+          if (!decision.allowed) throw new RuntimeError(decision.code, decision.reason, 403);
+        },
+      },
       ...(businessTools ? { pluginBusinessTools: { service: businessTools, grants: businessToolGrants, origin: new URL(localApiBaseUrl(config)).origin, authorize: createPluginManagementAuthorizer({ authEnabled: config.authEnabled, mode, getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null), getPasswordHash: () => getPasswordHash(repos.config) }) } } : {}),
       pluginResults: { service: pluginResultService, viewer: { repository: repos.pluginResults, identity: pluginResultIdentity, authorize: async delivery => { if (!pluginResultRegistry.get(`${delivery.plugin}/${delivery.tool}`, { botAppId: delivery.requester.tenant, cwd: String(delivery.target.cwd ?? '') })) throw new PluginResultError('RESULT_TOOL_UNAVAILABLE'); await pluginResultAdapter.assertDeliveryAuthorized(delivery); } } },
       workItems: { service: workItems, interactions: workInteractions, authorize: async (request, sessionId, action) => {
