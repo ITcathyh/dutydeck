@@ -4,7 +4,7 @@ import { useDialogFocus } from '../../useDialogFocus';
 import { useEscapeKey } from '../../useEscapeKey';
 import { cn } from './cn';
 
-export type DialogSize = 'sm' | 'md' | 'lg' | 'xl';
+export type DialogSize = 'sm' | 'md' | 'lg' | 'xl' | 'trace';
 
 export type DialogProps = {
   open: boolean;
@@ -22,7 +22,8 @@ const sizeClass: Record<DialogSize, string> = {
   sm: 'max-w-[420px]',
   md: 'max-w-[640px]',
   lg: 'max-w-[960px]',
-  xl: 'max-w-[1152px]'
+  xl: 'max-w-[1152px]',
+  trace: 'max-w-[1800px]'
 };
 
 /*

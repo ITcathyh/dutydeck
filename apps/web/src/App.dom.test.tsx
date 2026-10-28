@@ -1243,6 +1243,37 @@ describe('App 插话结果反馈', () => {
   });
 });
 
+describe('App 会话追踪入口', () => {
+  it('opens from the real header, reads older events and follows live cache updates', async () => {
+    window.history.replaceState(null, '', '/sessions/s1');
+    const old: DockEvent = { id: 'e1', sequence: 1, type: 'text', timestamp: '2026-10-28T00:00:01Z', data: { role: 'user', taskId: 't1', text: 'older trace input' } };
+    const current: DockEvent = { id: 'e2', sequence: 2, type: 'text', timestamp: '2026-10-28T00:00:02Z', data: { text: 'current trace answer' } };
+    mockAppApi({ sessions: [session('s1', 'thinking')], summaries: [summary('s1', '追踪测试')] });
+    const action = vi.spyOn(api, 'action').mockResolvedValue({ ok: true } as any);
+    vi.mocked(api.sessionHistory).mockResolvedValue({ turns: [], highWaterMark: 2, liveAfter: 1 });
+    vi.mocked(api.events).mockImplementation(async (_id, query) => [old, current].filter(event => event.sequence > (query?.after ?? 0)));
+    const { client } = renderApp();
+    const opener = await screen.findByRole('button', { name: '会话追踪' });
+    await userEvent.click(opener);
+    const dialog = await screen.findByRole('dialog', { name: '会话追踪' });
+    await within(dialog).findByText('older trace input');
+    expect(within(dialog).getByText('已加载序列 1–2')).toBeTruthy();
+    within(dialog).getByRole('button', { name: '关闭会话追踪' }).focus();
+    await userEvent.keyboard('.{Control>}k{/Control}ne');
+    expect(action).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: '命令面板' })).toBeNull();
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(api.events).toHaveBeenCalledWith('s1', { after: 0, before: 3, limit: 200, direction: 'forward' }, expect.any(AbortSignal));
+    await act(async () => client.setQueryData<EventWindow>(['events', 's1'], current => ({ ...current, events: [...(current?.events ?? []), { ...old, id: 'e3', sequence: 3, type: 'error', data: { message: 'live trace canary' } }] })));
+    expect(await within(dialog).findByText('live trace canary')).toBeTruthy();
+    await userEvent.click(within(dialog).getByRole('button', { name: '关闭会话追踪' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '会话追踪' })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(opener));
+    expect(screen.getByRole('button', { name: '会话分析' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '原始日志' })).toBeTruthy();
+  });
+});
+
 describe('App 会话分析深链与导航', () => {
   const insightDetails = (sessionId: string, state: SessionInsightDetailsResponse['status']['refreshState'] = 'idle', snapshotId: string | null = null): SessionInsightDetailsResponse => ({
     status: { sessionId, refreshState: state, availability: snapshotId ? 'complete' : 'none', freshness: snapshotId ? 'current' : 'unknown', currentSnapshotId: snapshotId, requestId: null, errorCode: null },
