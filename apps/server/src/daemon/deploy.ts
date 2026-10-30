@@ -733,8 +733,10 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
   manifest.previous_pid = previousPid ?? null;
   let drain: DrainResult = { ok: true };
   if (previousPid !== undefined) {
-    info('排空：新消息照常入队，等正在执行的任务结束…');
-    drain = await drainRuntime(target.endpoint, options, deps);
+    // 与 restart 同一套保留策略：已验证可恢复的 tmux 任务留在原 CLI 里，新版本启动后接回原轮。
+    const keepRecoverable = (deps.service ? deps.service.killMode : target.service?.killMode) === 'process';
+    info(keepRecoverable ? '排空：新消息照常入队，等不可跨重启保留的任务结束…' : '排空：新消息照常入队，等正在执行的任务结束…');
+    drain = await drainRuntime(target.endpoint, options, deps, keepRecoverable);
     if (!drain.ok) return finish('failed', { error: drain.error });
   }
   const stopRenewing = keepDraining(drain, previousPid);

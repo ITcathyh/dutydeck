@@ -1,3 +1,4 @@
+import { createServer } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
 import { createCliProgram } from '../cli-program.js';
 import { AgentGroupToolCliError, runAgentCommand, runGroupHandoff, runGroupMembers, runGroupMessages, runGroupReplyAgent, runGroupSend, runGroupSendFile, runGroupTeamSearch, runHistoryList, runHistoryShow } from './agent-tools-cli.js';
@@ -9,6 +10,33 @@ describe('Agent group tool CLI client', () => {
     let caught: AgentGroupToolCliError | undefined;
     try { void runGroupMessages({}, { env: {} }); } catch (error) { caught = error as AgentGroupToolCliError; }
     expect(caught).toMatchObject({ error: { code: 'GROUP_TOOL_CONTEXT_REQUIRED' } });
+  });
+
+  it('waits out a restarting service when the connection is refused, but never retries a request that may have arrived', async () => {
+    const env = { dutydeck_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dutydeck_group_tools_token: 'capability-token' };
+    const refused = () => Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+    const sleep = vi.fn(async () => {});
+    const restarting = vi.fn().mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused()).mockResolvedValue(response({ messageId: 'om_sent' }));
+    await expect(runGroupSend('hi', {}, { env, fetcher: restarting as typeof fetch, sleep })).resolves.toMatchObject({ messageId: 'om_sent' });
+    expect(restarting).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+
+    const reset = vi.fn().mockRejectedValue(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }));
+    await expect(runGroupSend('hi', {}, { env, fetcher: reset as typeof fetch, sleep })).rejects.toMatchObject({ error: { code: 'GROUP_TOOL_UNAVAILABLE' } });
+    expect(reset).toHaveBeenCalledTimes(1);
+
+    const down = vi.fn().mockRejectedValue(refused());
+    await expect(runGroupMembers({ env, fetcher: down as typeof fetch, sleep: async () => {} })).rejects.toMatchObject({ error: { code: 'GROUP_TOOL_UNAVAILABLE' } });
+    expect(down).toHaveBeenCalledTimes(91);
+  });
+
+  it('recognizes the connection-refused error Node fetch actually raises', async () => {
+    const server = await new Promise<import('node:net').Server>(resolve => { const s = createServer().listen(0, '127.0.0.1', () => resolve(s)); });
+    const port = (server.address() as import('node:net').AddressInfo).port;
+    await new Promise(resolve => server.close(resolve));
+    const sleep = vi.fn(async () => { throw new Error('retried'); });
+    await expect(runGroupMembers({ env: { dutydeck_group_tools_url: `http://127.0.0.1:${port}/api/lark/agent-tools`, dutydeck_group_tools_token: 't' }, sleep })).rejects.toMatchObject({ error: { code: 'GROUP_TOOL_UNAVAILABLE' } });
+    expect(sleep).toHaveBeenCalledTimes(1);
   });
 
   it('calls the scoped endpoint without reading or transmitting Lark credentials', async () => {

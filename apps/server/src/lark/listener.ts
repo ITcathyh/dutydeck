@@ -552,14 +552,14 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
       }
     }
     const failures: unknown[] = [];
-    for (const [appId, config] of enabled) {
+    await Promise.all([...enabled].map(async ([appId, config]) => {
       try {
         await this.startListener(appId, config);
       } catch (error) {
         failures.push(error);
         this.scheduleRetry(appId, 1, error);
       }
-    }
+    }));
     await this.publishStatus();
     if (failures.length) throw failures[0];
   }

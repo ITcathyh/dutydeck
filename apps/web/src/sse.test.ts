@@ -6,11 +6,12 @@ const makeEvent = (sequence: number, type = 'text', data: unknown = {}): DockEve
 const makeSession = (overrides: Partial<Session> = {}): Session => ({ id: 's1', agentId: 'a1', state: 'idle', cwd: '/tmp', runId: 'r1', createdAt: '', updatedAt: '', ...overrides });
 
 describe('nextBackoffDelay', () => {
-  it('按 1000 * 2^attempt 增长并封顶 30000', () => {
+  it('按 1000 * 2^attempt 增长并封顶 5000', () => {
     expect(nextBackoffDelay(0)).toBe(1000);
     expect(nextBackoffDelay(1)).toBe(2000);
-    expect(nextBackoffDelay(3)).toBe(8000);
-    expect(nextBackoffDelay(6)).toBe(30000);
+    expect(nextBackoffDelay(2)).toBe(4000);
+    expect(nextBackoffDelay(3)).toBe(5000);
+    expect(nextBackoffDelay(6)).toBe(5000);
   });
 
   it('支持自定义 base / max', () => {
