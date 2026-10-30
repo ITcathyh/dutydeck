@@ -1,5 +1,6 @@
 import type { DockEvent } from './api';
 import { stateLabels } from './components/ui';
+import { createEventWindow } from './event-history';
 
 export const TRACE_PAGE_SIZE = 100;
 export const traceCategories = ['all', 'system', 'user', 'assistant', 'context', 'tool', 'error'] as const;
@@ -21,7 +22,7 @@ export type TraceRow = {
 
 const record = (value: unknown): Record<string, any> => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 const string = (value: unknown) => typeof value === 'string' && value ? value : undefined;
-export const traceTime = (value: unknown) => {
+const traceTime = (value: unknown) => {
   const parsed = typeof value === 'string' && value.trim() ? Date.parse(value) : NaN;
   return Number.isFinite(parsed) ? parsed : undefined;
 };
@@ -55,7 +56,7 @@ function describe(event: DockEvent): Pick<TraceRow, 'category' | 'label' | 'summ
 /** Keep persisted events intact. Only pair tool IDs inside the same task/attempt;
  * names and neighbouring events provide no evidence of execution duration. */
 export function buildTraceRows(events: DockEvent[]): TraceRow[] {
-  const source = [...new Map(events.map(event => [event.sequence, event])).values()].sort((a, b) => a.sequence - b.sequence);
+  const source = createEventWindow(events).events;
   const calls = new Map<string, TraceRow>();
   let currentTurn = 'unassigned';
   return source.map(event => {
@@ -85,9 +86,11 @@ export function buildTraceRows(events: DockEvent[]): TraceRow[] {
   });
 }
 
+export const matchesTraceCategory = (row: TraceRow, category: TraceCategory) => category === 'all' || (category === 'error' ? row.failed : row.category === category);
+
 export function filterTraceRows(rows: TraceRow[], category: TraceCategory, query: string, newest: boolean): TraceRow[] {
   const needle = query.trim().toLocaleLowerCase();
-  const filtered = rows.filter(row => (category === 'all' || (category === 'error' ? row.failed : row.category === category))
+  const filtered = rows.filter(row => matchesTraceCategory(row, category)
     && (!needle || [row.summary, row.label, row.event.type, row.turn, row.event.id, row.event.attemptId, row.event.sequence, record(row.event.data).id].join(' ').toLocaleLowerCase().includes(needle)));
   return newest ? filtered.reverse() : filtered;
 }

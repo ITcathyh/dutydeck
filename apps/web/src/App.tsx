@@ -158,7 +158,6 @@ export default function App() {
   const [runSummaries, setRunSummaries] = useState<Record<string, RunSummary>>({});
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [traceSessionId, setTraceSessionId] = useState<string>();
   const [workspaceGroupsOpen, setWorkspaceGroupsOpen] = useState(false);
   const [renameSession, setRenameSession] = useState<Session | null>(null);
   const theme = useTheme();
@@ -174,7 +173,6 @@ export default function App() {
     if (useDockStore.getState().activeSessionId === id) return;
     setActive(id);
     setWorkItemPanel(null);
-    setTraceSessionId(undefined);
     setActionError(undefined);
   }, [setActive]);
 
@@ -385,7 +383,7 @@ export default function App() {
     handle.addEventListener('pointerup', stop);
     handle.addEventListener('pointercancel', stop);
   };
-  const traceOpen = Boolean(active && traceSessionId === active.id && primaryNav === 'tasks');
+  const traceOpen = Boolean(overlay?.kind === 'trace' && route.kind === 'session' && active);
   const events = useEventHistory(activeSessionId, Boolean(active));
   const tasks = useQuery({ queryKey: ['tasks', activeSessionId], queryFn: () => api.tasks(activeSessionId!), enabled: Boolean(active) });
   const sessionUsage = useQuery({ queryKey: ['session-usage', activeSessionId], queryFn: () => api.sessionUsage(activeSessionId!), enabled: Boolean(active), retry: false, refetchInterval: 15_000, refetchIntervalInBackground: false });
@@ -419,7 +417,8 @@ export default function App() {
     return contiguous;
   }, [events.rawEvents, eventList]);
   const raw = useMemo(() => projectRaw(completeRawEvents ?? eventList), [projectRaw, completeRawEvents, eventList]);
-  useEffect(() => { if (rawVisible || traceOpen) void events.loadAll(); else events.releaseRaw(); }, [rawVisible, traceOpen, activeSessionId, events.loadAll, events.releaseRaw]);
+  const fullHistoryNeeded = rawVisible || traceOpen;
+  useEffect(() => { if (fullHistoryNeeded) void events.loadAll(); else events.releaseRaw(); }, [fullHistoryNeeded, activeSessionId, events.loadAll, events.releaseRaw]);
   useEffect(() => {
     const showSource = () => { setDetailTab('timeline'); if (inspectorOpen) closeInspector(); };
     window.addEventListener('dutydeck:show-history-turn', showSource);
@@ -502,7 +501,7 @@ export default function App() {
   const act = async (action: string) => { try { setActionError(undefined); await api.action(activeSessionId!, action); } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); } };
 
   // 有浮层占用键盘时整套快捷键停用，避免和弹窗内的按键语义打架。
-  const overlayOpen = traceOpen || Boolean(overlay && !(overlay.kind === 'workspace' && inspectorSideBySide)) || newOpen || archiveConfirm || bulkArchiveIds.length > 0 || systemPromptOpen || paletteOpen || helpOpen || Boolean(renameSession) || (rawVisible && !rawSideBySide) || (inspectorOpen && !inspectorSideBySide);
+  const overlayOpen = Boolean(overlay && !(overlay.kind === 'workspace' && inspectorSideBySide)) || newOpen || archiveConfirm || bulkArchiveIds.length > 0 || systemPromptOpen || paletteOpen || helpOpen || Boolean(renameSession) || (rawVisible && !rawSideBySide) || (inspectorOpen && !inspectorSideBySide);
   useEscapeKey(inspectorOpen && inspectorSideBySide && !overlayOpen, closeInspector);
   const shortcutHandlers = useMemo(() => ({
     'command-palette': openPalette,
@@ -611,7 +610,7 @@ export default function App() {
       : primaryNav === 'groups' ? <Suspense fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开群聊管理…"/></div>}><GroupManagement selectedChatId={selectedChatId} selectedAppId={selectedAppId} onSelectGroup={selectGroup} onNavigateToBot={selectBot} agents={agents.data ?? []}/></Suspense>
       : primaryNav === 'automation' ? <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6"><h1 className="mb-5 text-display font-semibold">自动化</h1><Suspense fallback={<Spinner label="正在读取任务自动化…"/>}><AutomationOverview agents={agents.data ?? []} capabilities={systemCapabilities.data} onOpenAgentSetup={() => openSettings('agents')} sessions={visibleSessions} summaries={runSummaries} onSelectSession={selectSession}/></Suspense></div>
       : route.kind === 'not-found' ? renderNotFound('page') : blockingMainQueryFailures.length ? renderBlockingFailure() : route.kind === 'session' && sessions.isPending ? <div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在加载任务…"/></div> : missingActiveSession ? renderNotFound('session') : active ? <>
-        <RunHeader session={active} agent={activeAgent} taskPrompt={runSummaries[active.id]?.prompt} streamStatus={streamStatus} queuedTasks={queuedTasks} usage={sessionUsage.data} rawVisible={rawVisible} rawAvailable={Boolean(events.data?.highWaterMark || raw)} restarting={restart.isPending} onInterrupt={() => void act('interrupt')} onRestart={() => restart.mutate(active.id)} onOpenPrompt={() => setSystemPromptOpen(true)} onArchive={() => { archive.reset(); setArchiveConfirm(true); }} onToggleRaw={toggleRawPanel} onRename={() => openRenameSession(active)} onOpenInsight={() => openOverlay({ kind: 'insight' })} onOpenTrace={() => { captureDialogOpener(); setTraceSessionId(active.id); }} tools={<>{active.source !== 'work_item' && <WorkItemsPanel session={active} agents={agents.data ?? []} onSelectSession={selectSession} control={{ open: workItemPanel?.sessionId === active.id, selectedId: workItemPanel?.sessionId === active.id ? workItemPanel.itemId : '', onOpenChange: open => setWorkItemPanel(open ? { sessionId: active.id, itemId: '' } : null), onSelectItem: itemId => setWorkItemPanel(current => current?.sessionId === active.id ? { sessionId: active.id, itemId } : current) }}/>}<ToolbarButton label="工作目录、验证与自动化" text="工作目录" icon={<FolderCog size={14}/>} onClick={openInspector}/></>}/>
+        <RunHeader session={active} agent={activeAgent} taskPrompt={runSummaries[active.id]?.prompt} streamStatus={streamStatus} queuedTasks={queuedTasks} usage={sessionUsage.data} rawVisible={rawVisible} rawAvailable={Boolean(events.data?.highWaterMark || raw)} restarting={restart.isPending} onInterrupt={() => void act('interrupt')} onRestart={() => restart.mutate(active.id)} onOpenPrompt={() => setSystemPromptOpen(true)} onArchive={() => { archive.reset(); setArchiveConfirm(true); }} onToggleRaw={toggleRawPanel} onRename={() => openRenameSession(active)} onOpenInsight={() => openOverlay({ kind: 'insight' })} onOpenTrace={() => openOverlay({ kind: 'trace' })} tools={<>{active.source !== 'work_item' && <WorkItemsPanel session={active} agents={agents.data ?? []} onSelectSession={selectSession} control={{ open: workItemPanel?.sessionId === active.id, selectedId: workItemPanel?.sessionId === active.id ? workItemPanel.itemId : '', onOpenChange: open => setWorkItemPanel(open ? { sessionId: active.id, itemId: '' } : null), onSelectItem: itemId => setWorkItemPanel(current => current?.sessionId === active.id ? { sessionId: active.id, itemId } : current) }}/>}<ToolbarButton label="工作目录、验证与自动化" text="工作目录" icon={<FolderCog size={14}/>} onClick={openInspector}/></>}/>
         <MemoryManagementPanel key={active.id} session={active}/>
 
         <div className="flex shrink-0 items-center border-b border-default bg-surface px-3 sm:px-5"><div className="min-w-0 flex-1"><RunDetailTabs value={!isPtyCli && detailTab === 'terminal' ? 'timeline' : detailTab} onChange={setDetailTab} terminalAvailable={Boolean(isPtyCli)}/></div><Button variant="ghost" aria-label="结果检视" data-result-inspector-trigger icon={<PanelRightOpen size={15}/>} onClick={inspectorOpen ? closeInspector : openInspector}>结果检视</Button></div>
@@ -666,7 +665,7 @@ export default function App() {
         }}
       /></Suspense></Dialog.Body>
     </Dialog>}
-    {traceOpen && active && <SessionTraceView key={active.id} session={active} agent={activeAgent} events={completeRawEvents ?? eventList} loading={events.loadingRaw || events.isPending} error={events.rawError ?? (events.error instanceof Error ? events.error.message : undefined)} historyLoaded={Boolean(completeRawEvents)} streamStatus={streamStatus} onRetry={() => void events.loadAll()} onClose={() => setTraceSessionId(undefined)}/>}
+    {traceOpen && active && <SessionTraceView session={active} agent={activeAgent} events={completeRawEvents ?? eventList} loading={events.loadingRaw || events.isPending} error={events.rawError ?? (events.error instanceof Error ? events.error.message : undefined)} historyLoaded={Boolean(completeRawEvents)} streamStatus={streamStatus} onRetry={() => void events.loadAll()} onClose={closeOverlay}/>}
     {overlay?.kind === 'insight' && route.kind === 'session' && <Suspense fallback={overlayFallback('正在打开会话分析…')}>
       <SessionInsightPanel
         sessionId={route.sessionId}

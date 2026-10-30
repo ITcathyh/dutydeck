@@ -3,7 +3,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { Agent, DockEvent, Session } from '../api';
 import type { StreamStatus } from '../sse';
 import type { SessionSyncState } from '../useSessionStream';
-import { buildTraceRows, filterTraceRows, groupTraceRows, TRACE_PAGE_SIZE, traceCategories, traceDuration, traceLabels, type TraceCategory, type TraceRow } from '../trace-view';
+import { buildTraceRows, filterTraceRows, groupTraceRows, matchesTraceCategory, TRACE_PAGE_SIZE, traceCategories, traceDuration, traceLabels, type TraceCategory, type TraceRow } from '../trace-view';
 import { connectionLabel } from './RunHeader';
 import { Banner, Button, Dialog, EmptyState, IconButton, Input, Spinner, StatusBadge } from './primitives';
 
@@ -12,8 +12,9 @@ const dotClass: Record<Exclude<TraceCategory, 'all'>, string> = { system: 'bg-ne
 const date = (at: number | undefined) => at === undefined || !Number.isFinite(at) ? '—' : new Date(at).toLocaleString();
 const turnLabel = (id: string) => id === 'unassigned' ? '未关联轮次' : id.startsWith('input:') ? `输入 #${id.slice(6)} 起的轮次` : `轮次 ${id.slice(5)}`;
 
+const tracks: { label: string; categories: TraceRow['category'][] }[] = [{ label: '输入', categories: ['user'] }, { label: '模型', categories: ['assistant'] }, { label: '工具', categories: ['tool'] }, { label: '系统 / 上下文', categories: ['system', 'context', 'error'] }];
+
 function TraceTimeline({ rows, range, selected, onSelect }: { rows: TraceRow[]; range?: [number, number]; selected?: number; onSelect(sequence: number): void }) {
-  const tracks = [{ label: '输入', categories: ['user'] }, { label: '模型', categories: ['assistant'] }, { label: '工具', categories: ['tool'] }, { label: '系统 / 上下文', categories: ['system', 'context', 'error'] }];
   const span = range ? range[1] - range[0] : 0;
   return <section aria-label="事件时间轴" className="rounded-md bg-muted px-3 py-2">
     <div className="mb-2 flex flex-wrap items-center justify-between gap-1 text-caption text-subtle"><span>时间轴 · 当前页事件</span><span>点为事件时间 · 条为工具观测区间</span></div>
@@ -23,7 +24,7 @@ function TraceTimeline({ rows, range, selected, onSelect }: { rows: TraceRow[]; 
         <span className="w-20 shrink-0 text-caption text-secondary">{track.label}</span>
         <div className="relative h-11 min-w-0 flex-1 border-b border-default sm:h-5">
           {rows.filter(row => track.categories.includes(row.category) && (row.at !== undefined || row.start !== undefined)).map(row => {
-            const interval = row.duration !== undefined && row.start !== undefined && row.end !== undefined;
+            const interval = row.duration !== undefined;
             const start = interval ? row.start! : row.at ?? row.start!;
             const left = span ? Math.max(0, Math.min(100, (start - range[0]) / span * 100)) : 0;
             const width = interval && span ? Math.min(100 - left, row.duration! / span * 100) : 0;
@@ -40,7 +41,7 @@ function TraceTimeline({ rows, range, selected, onSelect }: { rows: TraceRow[]; 
 }
 
 function TraceDetails({ row }: { row: TraceRow }) {
-  const data = JSON.stringify(row.event.data, null, 2) ?? 'null';
+  const data = useMemo(() => JSON.stringify(row.event.data, null, 2) ?? 'null', [row.event.data]);
   const limit = 20_000;
   return <div className="space-y-2 p-3 text-caption text-secondary">
     <dl className="grid gap-x-4 gap-y-1 sm:grid-cols-2">
@@ -81,7 +82,7 @@ export function SessionTraceView({ session, agent, events, loading, error, histo
   const currentPage = Math.min(page, lastPage);
   const visible = filtered.slice(currentPage * TRACE_PAGE_SIZE, (currentPage + 1) * TRACE_PAGE_SIZE);
   const groups = groupTraceRows(visible, grouped);
-  const counts = useMemo(() => Object.fromEntries(traceCategories.map(kind => [kind, kind === 'all' ? rows.length : kind === 'error' ? rows.filter(row => row.failed).length : rows.filter(row => row.category === kind).length])) as Record<TraceCategory, number>, [rows]);
+  const counts = useMemo(() => Object.fromEntries(traceCategories.map(kind => [kind, rows.filter(row => matchesTraceCategory(row, kind)).length])) as Record<TraceCategory, number>, [rows]);
   const range = useMemo<[number, number] | undefined>(() => {
     let first = Infinity, last = -Infinity;
     for (const row of rows) for (const at of [row.at, row.start, row.end]) if (at !== undefined) { first = Math.min(first, at); last = Math.max(last, at); }
@@ -89,10 +90,11 @@ export function SessionTraceView({ session, agent, events, loading, error, histo
   }, [rows]);
   const toolCount = useMemo(() => new Set(rows.flatMap(row => row.toolKey ? [row.toolKey] : [])).size, [rows]);
   useEffect(() => { selectedRow.current?.scrollIntoView?.({ block: 'nearest' }); }, [expanded]);
-  const reset = () => { setPage(0); setExpanded(undefined); };
+  const goToPage = (next: number) => { setPage(next); setExpanded(undefined); };
+  const reset = () => goToPage(0);
   const locate = (sequence: number) => { setCollapsed(new Set()); setExpanded(sequence); };
   const sequenceRange = rows.length ? `${rows[0]!.event.sequence}–${rows.at(-1)!.event.sequence}` : '—';
-  return <Dialog open onClose={onClose} label="会话追踪" size="trace">
+  return <Dialog open onClose={onClose} label="会话追踪" size="2xl">
     <Dialog.Header className="flex-wrap items-center gap-2 py-3">
       <Activity size={18} className="shrink-0 text-action"/><h2 className="text-title font-semibold text-primary">追踪</h2>
       <span className="max-w-48 truncate text-body text-secondary" title={session.name}>{session.name ?? agent?.name ?? session.agentId}</span><StatusBadge session={session}/>
@@ -138,7 +140,7 @@ export function SessionTraceView({ session, agent, events, loading, error, histo
     </Dialog.Body>
     <Dialog.Footer className="flex-wrap justify-between gap-2">
       <span className="text-caption text-subtle">匹配 {filtered.length.toLocaleString()} / 已加载 {rows.length.toLocaleString()} 条 · 每页 {TRACE_PAGE_SIZE} 条</span>
-      <div className="flex items-center gap-2"><Button size="sm" disabled={currentPage === 0} onClick={() => { setPage(currentPage - 1); setExpanded(undefined); }}>上一页</Button><span className="text-caption tabular-nums text-secondary">{currentPage + 1} / {lastPage + 1}</span><Button size="sm" disabled={currentPage === lastPage} onClick={() => { setPage(currentPage + 1); setExpanded(undefined); }}>下一页</Button></div>
+      <div className="flex items-center gap-2"><Button size="sm" disabled={currentPage === 0} onClick={() => goToPage(currentPage - 1)}>上一页</Button><span className="text-caption tabular-nums text-secondary">{currentPage + 1} / {lastPage + 1}</span><Button size="sm" disabled={currentPage === lastPage} onClick={() => goToPage(currentPage + 1)}>下一页</Button></div>
     </Dialog.Footer>
   </Dialog>;
 }
