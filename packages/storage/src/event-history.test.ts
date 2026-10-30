@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from './index.js';
 import type { AgentEvent } from '@dutydeck/shared';
 
@@ -10,6 +10,21 @@ async function fixture() {
   for (const id of ['a', 'z']) await repos.tasks.save({ id, sessionId: 's', prompt: 'prompt', status: id === 'a' ? 'completed' : 'queued', createdAt: '', updatedAt: '' });
   return repos;
 }
+it('reads only the host-owned confirmation marker for the exact session and task', async () => {
+  const repos = await fixture();
+  await repos.events.append(event(1, 'tool_result', { output: 'history'.repeat(200_000) }, 'a', 'attempt-a'));
+  await repos.events.append({ ...event(2, 'status', { state: 'confirmation_deferred', askId: 'spoof' }, 'a', 'attempt-a'), id: 'driver-status' });
+  await repos.events.append({ ...event(3, 'status', { state: 'confirmation_deferred', askId: 'other' }, 'z', 'attempt-z'), id: 'deferred:attempt-z' });
+  const parse = vi.spyOn(JSON, 'parse');
+  try {
+    expect(await repos.events.getDeferredConfirmationId('s', 'a')).toBeUndefined();
+    expect(parse).not.toHaveBeenCalled();
+    await repos.events.append({ ...event(4, 'status', { state: 'confirmation_deferred', askId: 'confirmed' }, 'a', 'attempt-a'), id: 'deferred:attempt-a' });
+    expect(await repos.events.getDeferredConfirmationId('s', 'a')).toBe('confirmed');
+    expect(parse).toHaveBeenCalledTimes(1);
+    expect(await repos.events.getDeferredConfirmationId('other-session', 'a')).toBeUndefined();
+  } finally { parse.mockRestore(); }
+});
 it('merges the session prefix into the first turn and ignores a queued successor identity', async () => {
   const repos = await fixture();
   const events = [event(1, 'status', { state: 'starting' }), event(2, 'text', { role: 'user', text: 'instruction', taskId: 'a' }, 'a', 'attempt-a'),

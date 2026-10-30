@@ -192,7 +192,7 @@ export class WorkItemService {
   }
   private executionExpired(step: WorkStep): boolean {
     const source = last(step);
-    const first = source?.taskId ? this.repos.execution.getTaskExecution(source.taskId)?.attempts.find(attempt => attempt.number === 1) : undefined;
+    const first = source?.taskId ? this.repos.execution.getTaskExecutionState(source.taskId)?.attempts.find(attempt => attempt.number === 1) : undefined;
     return Boolean(first && Date.now() - Date.parse(first.createdAt) >= TIMEOUT_MS);
   }
   /** This only authorizes stopping a durably owned child, never starting or resuming it. */
@@ -726,7 +726,7 @@ export class WorkItemService {
         || canonicalExecutionJson(accepted.request.actor) !== canonicalExecutionJson(record.actor)) return false;
       const session = await this.repos.sessions.get(attempt.sessionId);
       if (session?.source !== 'work_item' || session.sourceId !== attempt.id) return false;
-      const projection = this.repos.execution.getTaskExecution(admission.taskId);
+      const projection = this.repos.execution.getTaskExecutionState(admission.taskId);
       if (projection?.attempts.find(value => value.number === 1)?.attemptId !== attempt.runtimeAttemptId) return false;
       const read = readWorkAttemptResult({ execution: this.repos.execution }, attempt.sessionId, admission.taskId, attempt.runtimeAttemptId);
       if (read.status !== 'settled' || !['completed', 'failed'].includes(read.result.outcome) || projection.task.currentAttemptId !== read.result.attemptId) return false;
@@ -752,7 +752,7 @@ export class WorkItemService {
     const admission = record.admissions?.[attempt.id];
     if (!admission) { await this.blockAttempt(state, step, 'admission_conflict', 'Work attempt has no fixed task admission'); return; }
     if (attempt.taskId !== admission.taskId) { await this.blockAttempt(state, step, 'admission_conflict', 'Attempt task id no longer matches its admission'); return; }
-    const projection = this.repos.execution.getTaskExecution(admission.taskId);
+    const projection = this.repos.execution.getTaskExecutionState(admission.taskId);
     if (!projection) {
       if (attempt.status === 'accepted') await this.blockAttempt(state, step, 'admission_conflict', 'Accepted work task is missing from the execution ledger');
       return;
@@ -863,7 +863,7 @@ export class WorkItemService {
       if (stopped && step.status === 'running' && !attempt.blockReason && !attempt.result && !attempt.output && !attempt.runtimeAttemptId && !state.value.cancellationActor) {
         const admission = state.value.admissions?.[attempt.id];
         const accepted = admission && this.repos.execution.getAcceptedTask(admission.taskId);
-        const projection = admission && this.repos.execution.getTaskExecution(admission.taskId);
+        const projection = admission && this.repos.execution.getTaskExecutionState(admission.taskId);
         const session = attempt.sessionId && await this.repos.sessions.get(attempt.sessionId);
         const resources = attempt.sessionId ? this.repos.execution.getResources(attempt.sessionId) : [];
         let authorized = false;

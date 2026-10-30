@@ -311,6 +311,8 @@ export interface ExecutionRepository {
   lookupAccepted(request: TaskRequestV1): AcceptedTask | undefined;
   getAcceptedTask(taskId: string): AcceptedTask | undefined;
   getRecoveryDecision(decisionId: string): (SessionFence & { attemptId?: string; decision: RecoveryDecisionInput }) | undefined;
+  /** Durable task facts only; execution admission must use the full blocker projection. */
+  getTaskExecutionState(taskId: string): Omit<TaskExecutionProjection, 'blockers'> | undefined;
   getTaskExecution(taskId: string): TaskExecutionProjection | undefined;
   getAttempt(ref: AttemptRef & SessionFence): TaskAttempt | undefined;
   getSessionExecutions(sessionId: string): TaskExecutionProjection[];

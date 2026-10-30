@@ -52,6 +52,7 @@ export interface LarkRuntime {
   getTasks?(id: string): Promise<TaskRecord[]>;
   getTaskRecovery?(id: string, taskId: string): Promise<{ status: string; blockers: Array<{ code: string; external?: boolean }>; activeTaskId?: string; resolvedUnknown?: boolean; verifiedOutput?: { eventId: string; digest: string } }>;
   getEvents?(id: string, afterSequence?: number): Promise<AgentEvent[]>;
+  getDeferredConfirmationId?(id: string, taskId: string): Promise<string | undefined>;
   getLatestPermissionRequest?(id: string, taskId: string, nativeId: string): Promise<AgentEvent | undefined>;
   getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]>;
   interrupt(id: string, expectedTaskId?: string, actor?: string): Promise<unknown>;

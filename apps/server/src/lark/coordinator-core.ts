@@ -273,6 +273,7 @@ export abstract class LarkCoordinatorCore {
     const appId = this.reconcileConfig?.appId;
     if (appId && (await this.workflows?.list(appId))?.some(record => record.kind === 'ask' && record.durable
       && record.sessionId === sessionId && record.taskId === taskId)) return true;
+    if (this.runtime.getDeferredConfirmationId) return Boolean(await this.runtime.getDeferredConfirmationId(sessionId, taskId));
     if (!this.runtime.getEvents && !this.runtime.getRecentEvents) return false;
     return Boolean(deferredConfirmationId(await loadLarkTaskEvents(this.runtime, sessionId, taskId, 500), taskId));
   }

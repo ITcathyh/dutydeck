@@ -1130,6 +1130,24 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
 });
 
 describe('恢复异常通知与人工核验结果', () => {
+  it.each([undefined, 'ask-1'])('checks confirmation ownership with a precise read (%s) while preserving unresolved tracking', async confirmation => {
+    const task = { id: 'recovery-task', sessionId: 'session', status: 'reconcile_required', prompt: 'prompt', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as TaskRecord;
+    const mapping = createMapping('recovery-map', 'om_request', 'session', { runtime_task_id: task.id, progress_frozen: true });
+    const runtime = { getTasks: vi.fn(async () => [task]), getEvents: vi.fn(async () => { throw new Error('history must not be read'); }),
+      getRecentEvents: vi.fn(async () => { throw new Error('history must not be read'); }),
+      getDeferredConfirmationId: vi.fn(async () => confirmation) };
+    const interruptedTurn = vi.fn(async () => ({ kind: 'handled' as const }));
+    const service = { send: vi.fn(), update: vi.fn() };
+    expect(await performLarkCardReconcile({ runtime: runtime as any, service: service as any,
+      cardMappings: createMemoryChannelMappingRepo([mapping]), log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      config, channel: 'lark-card:cli_test', interruptedTurn })).toBe(1);
+    expect(runtime.getDeferredConfirmationId).toHaveBeenCalledWith('session', task.id);
+    expect(interruptedTurn).toHaveBeenCalledTimes(confirmation ? 0 : 1);
+    expect(runtime.getEvents).not.toHaveBeenCalled();
+    expect(runtime.getRecentEvents).not.toHaveBeenCalled();
+    expect(service.send).not.toHaveBeenCalled();
+    expect(service.update).not.toHaveBeenCalled();
+  });
   it.each(['silent', 'frozen', 'missing', 'unupdatable', 'writable'])('%s process card delivers only the required recovery notice and never a business final', async mode => {
     const repos = createRepositories(':memory:');
     try {

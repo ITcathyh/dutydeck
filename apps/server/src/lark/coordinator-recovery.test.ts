@@ -37,6 +37,20 @@ const config: StoredLarkConfig = {
   highRiskPattern: 'rm\\b', riskControlMode: 'off'
 };
 
+it('checks durable confirmation ownership without reading the historical task window', async () => {
+  const runtime = {
+    getDeferredConfirmationId: vi.fn(async (_sessionId: string, taskId: string) => taskId === 'deferred' ? 'ask-1' : undefined),
+    getEvents: vi.fn(async () => { throw new Error('historical events must not be read'); }),
+    getRecentEvents: vi.fn(async () => { throw new Error('historical events must not be read'); })
+  };
+  const coordinator = new LarkMessageCoordinator(runtime as any, {} as any, { warn: vi.fn(), info: vi.fn(), error: vi.fn() });
+  expect(await (coordinator as any).isDeferredTask('session', 'deferred')).toBe(true);
+  expect(await (coordinator as any).isDeferredTask('session', 'queued')).toBe(false);
+  expect(runtime.getDeferredConfirmationId.mock.calls).toEqual([['session', 'deferred'], ['session', 'queued']]);
+  expect(runtime.getEvents).not.toHaveBeenCalled();
+  expect(runtime.getRecentEvents).not.toHaveBeenCalled();
+});
+
 const hookWorkspaces: string[] = [];
 afterEach(async () => { for (const path of hookWorkspaces.splice(0)) await rm(path, { recursive: true, force: true }); });
 const readyHookWorkspace = async () => {

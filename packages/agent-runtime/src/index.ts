@@ -1183,6 +1183,7 @@ export class DutydeckRuntime {
     await this.mutations.write(id, async () => this.localResources.gone(driver, 'terminal-attach-found-no-pane'));
   }
   getEvents(id: string, after = 0) { return this.repos.events.list(id, after); }
+  getDeferredConfirmationId(id: string, taskId: string) { return this.repos.events.getDeferredConfirmationId(id, taskId); }
   getLatestPermissionRequest(id: string, taskId: string, nativeId: string) { return this.repos.events.getLatestPermissionRequest(id, taskId, nativeId); }
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }
   getHistoryOutline(id: string) {
@@ -1269,7 +1270,7 @@ export class DutydeckRuntime {
     this.assertReady(); this.requireRecoveryOwner(actor);
     const session = await this.repos.sessions.get(id);
     if (!session) throw new RuntimeError('SESSION_NOT_FOUND', 'Session not found', 404);
-    const tasks = (await this.repos.tasks.listBySession(id)).map(task => this.repos.execution.getTaskExecution(task.id)!).filter(Boolean);
+    const tasks = (await this.repos.tasks.listBySession(id)).map(task => this.repos.execution.getTaskExecutionState(task.id)!).filter(Boolean);
     const resources = this.repos.execution.getResources(id);
     return { sessionId: id, runId: session.runId, state: session.state,
       tasks: tasks.map(({ task, currentAttempt, steering }) => ({ steering, taskId: task.id, status: task.status, revision: task.revision,

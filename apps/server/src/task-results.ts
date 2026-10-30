@@ -10,7 +10,7 @@ export type SettledAttemptResult = { status: 'settled'; result: AttemptResultV1 
 export type AttemptResultRead = PendingAttemptResult | BlockedAttemptResult | SettledAttemptResult;
 
 export interface AttemptResultRepositories {
-  execution: Pick<ExecutionRepository, 'getTaskExecution' | 'getAttemptEvents'>;
+  execution: Pick<ExecutionRepository, 'getTaskExecution' | 'getAttemptEvents'> & Partial<Pick<ExecutionRepository, 'getTaskExecutionState'>>;
 }
 
 function fail(code: string, message: string): never { throw new RuntimeError(code, message, 409); }
@@ -41,7 +41,7 @@ export function resolveTaskResultAttemptId(repositories: TaskResultRepositories,
 
 function resolveResultAttempt(repositories: AttemptResultRepositories, sessionId: string, taskId: string, attemptId: string, retryInput?: (Pick<ExecutionRepository, 'getAcceptedTask'> & Partial<Pick<ExecutionRepository, 'getRecoveryDecision'>>)): TaskAttempt | undefined {
   const execution = repositories.execution;
-  const projection = execution.getTaskExecution(taskId);
+  const projection = execution.getTaskExecutionState ? execution.getTaskExecutionState(taskId) : execution.getTaskExecution(taskId);
   if (!projection) return undefined;
   if (projection.task.sessionId !== sessionId) fail('TASK_RESULT_SCOPE_CONFLICT', `Task ${taskId} does not belong to session ${sessionId}`);
   let attempt = projection.attempts.find(item => item.attemptId === attemptId);
@@ -112,7 +112,8 @@ function readResult(repositories: AttemptResultRepositories, sessionId: string, 
 /** Best-effort final task text, including verified automatic retries; invalid or unavailable results have no output. */
 export function readTaskOutput(repositories: TaskResultRepositories, sessionId: string, taskId: string): string | undefined {
   try {
-    const first = repositories.execution.getTaskExecution(taskId)?.attempts.find(attempt => attempt.number === 1);
+    const execution = repositories.execution;
+    const first = (execution.getTaskExecutionState ? execution.getTaskExecutionState(taskId) : execution.getTaskExecution(taskId))?.attempts.find(attempt => attempt.number === 1);
     if (!first) return undefined;
     const read = readTaskAttemptResult(repositories, sessionId, taskId, first.attemptId);
     return read.status === 'settled' ? read.result.output.text : undefined;

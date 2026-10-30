@@ -55,6 +55,11 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   };
   const attempt = (attemptId: string) => rowJson<TaskAttempt>(db.prepare('SELECT json FROM task_attempts WHERE id=?').get(attemptId));
   const taskAttempts = (taskId: string) => db.prepare('SELECT json FROM task_attempts WHERE task_id=? ORDER BY number,id').all(taskId).map(row => rowJson<TaskAttempt>(row)!);
+  const getTaskExecutionState: ExecutionRepository['getTaskExecutionState'] = taskId => {
+    const t = task(taskId); if (!t) return;
+    if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+    return { task: t, currentAttempt: t.currentAttemptId ? attempt(t.currentAttemptId) : undefined, attempts: taskAttempts(t.id), steering: taskSteering(t.id) };
+  };
   const attempts = (sessionId: string) => db.prepare('SELECT json FROM task_attempts WHERE session_id=? ORDER BY number,id').all(sessionId).map(row => rowJson<TaskAttempt>(row)!);
   const readResource = (row: unknown): DriverResource | undefined => {
     if (!row) return;
@@ -662,10 +667,11 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     },
     getNativeContext(sessionId) { const selection = nativeSelection(sessionId); return selection ? {selection,resource:nativeResource(sessionId,selection.context)} : undefined; },
     getSessionResourceBlockers: sessionId => blockers(sessionId),
+    getTaskExecutionState,
     getTaskExecution(taskId) {
-      const t = task(taskId); if (!t) return;
-      if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
-      return { task: t, currentAttempt: t.currentAttemptId ? attempt(t.currentAttemptId) : undefined, attempts: taskAttempts(t.id), steering: taskSteering(t.id), blockers: [...blockers(t.sessionId), ...steeringBlockers(t.sessionId), ...workspaceBlockers(t.sessionId), ...inputBlockers(t)] };
+      const state = getTaskExecutionState(taskId); if (!state) return;
+      const t = state.task;
+      return { ...state, blockers: [...blockers(t.sessionId), ...steeringBlockers(t.sessionId), ...workspaceBlockers(t.sessionId), ...inputBlockers(t)] };
     },
     getAttempt(ref) {
       if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');

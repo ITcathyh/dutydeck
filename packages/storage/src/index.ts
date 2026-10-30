@@ -14,7 +14,7 @@ import { chmodSync, closeSync, constants, existsSync, mkdirSync, openSync } from
 import { basename, dirname } from 'node:path';
 import type { AgentConfig, AgentEvent, RepositoryBundle, RepositoryOpenOptions, Session, TaskRecord } from '@dutydeck/shared';
 import { agentConfigs, channelMappings, configs, errors, events, machines, permissionRequests, projects, sessions, tasks, toolCalls } from './schema.js';
-import { RuntimeError } from '@dutydeck/shared';
+import { deferredConfirmationId, RuntimeError } from '@dutydeck/shared';
 import { createTaskExecutionRepository } from './task-execution.js';
 import { needsMigration, runMigrations, withMigrationTransaction } from './migrations.js';
 import { createFoundationRepositories } from './foundation.js';
@@ -347,6 +347,12 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       highWaterMark(sessionId) { return (sqlite.prepare('SELECT COALESCE(MAX(sequence),0) AS sequence FROM events WHERE session_id=?').get(sessionId) as { sequence: number }).sequence; },
       async append(e) { legacyWrite(() => db.insert(events).values({ ...e, data: JSON.stringify(e.data) }).run()); },
       async list(sessionId, afterSequence = 0) { return db.select().from(events).where(and(eq(events.sessionId, sessionId), gt(events.sequence, afterSequence))).orderBy(asc(events.sequence)).all().map(decodeEvent); },
+      async getDeferredConfirmationId(sessionId, taskId) {
+        const row = db.select().from(events).where(and(eq(events.sessionId, sessionId), eq(events.taskId, taskId),
+          eq(events.type, 'status'), sql`${events.id} = ('deferred:' || ${events.attemptId})`))
+          .orderBy(asc(events.sequence)).limit(1).get();
+        return deferredConfirmationId(row ? [decodeEvent(row)] : [], taskId);
+      },
       async getLatestPermissionRequest(sessionId, taskId, nativeId) {
         const row = db.select().from(events).where(and(eq(events.sessionId, sessionId), eq(events.taskId, taskId),
           sql`${events.type} = 'permission_request'`,

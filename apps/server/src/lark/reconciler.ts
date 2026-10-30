@@ -233,10 +233,12 @@ export async function performLarkCardReconcile(input: {
       const registeredConfirmation = await input.deferredTask?.(mapping.sessionId, runtimeTask.id);
       if (registeredConfirmation && !terminalTaskStates.has(runtimeTask.status)) { unresolved++; continue; }
       if (runtimeTask.status === 'reconcile_required') {
-        const window = await loadLarkTaskWindow(runtime, mapping.sessionId, runtimeTask.id, 500);
         // A registered confirmation is never an interrupted request to redispatch.
         // Unknown termination remains blocked until recovery proves the driver stopped.
-        if (deferredConfirmationId(eventsForRuntimeTask(window, runtimeTask.id), runtimeTask.id)) { unresolved++; continue; }
+        const confirmation = runtime.getDeferredConfirmationId
+          ? await runtime.getDeferredConfirmationId(mapping.sessionId, runtimeTask.id)
+          : deferredConfirmationId(eventsForRuntimeTask(await loadLarkTaskWindow(runtime, mapping.sessionId, runtimeTask.id, 500), runtimeTask.id), runtimeTask.id);
+        if (confirmation) { unresolved++; continue; }
       }
       if (!terminalTaskStates.has(runtimeTask.status)) {
         unresolved++;

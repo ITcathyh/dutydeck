@@ -10,6 +10,7 @@ import { canonicalExecutionJson, type AcceptedTaskInput, type RepositoryBundle, 
 import { childProcessIdentity } from './process-identity.js';
 import { createRepositories } from './index.js';
 import { normalizeAcpxEvent } from '../../acp-client/src/index.js';
+import * as executionWorkspace from './execution-workspace.js';
 
 const dirs:string[]=[];const opened:Array<{repos:RepositoryBundle;claim?:RuntimeControlClaim}>=[];
 afterEach(()=>{for(const item of opened.reverse()){try{item.claim?.release();}catch{}item.repos.close();}opened.length=0;for(const dir of dirs)rmSync(dir,{recursive:true,force:true});dirs.length=0;});
@@ -29,6 +30,23 @@ const intent=(submissionId='send')=>({submissionId,inputDigest:hash('final'),res
 const complete=(submissionId='send')=>({kind:'driver_result' as const,submissionId,outcome:'completed' as const,outputDigest:hash('done'),stopReason:'end_turn',complete:true as const});
 
 describe('task execution ledger',()=>{
+  it('reads current task facts without filesystem admission checks, retaining full checks for execution projections', () => {
+    const {x,repos}=ready();
+    const a=claimed(x);
+    const resolveWorkspace=vi.spyOn(executionWorkspace,'resolveExecutionWorkspace');
+    try {
+      const state=repos.execution.getTaskExecutionState(a.taskId)!;
+      expect(state).toMatchObject({task:{id:a.taskId,status:'running'},currentAttempt:a,attempts:[a]});
+      expect(state).not.toHaveProperty('blockers');
+      expect(resolveWorkspace).not.toHaveBeenCalled();
+      const full=repos.execution.getTaskExecution(a.taskId)!;
+      expect(resolveWorkspace).toHaveBeenCalled();
+      const {blockers,...facts}=full;
+      expect(facts).toEqual(state);
+      expect(blockers).toEqual([]);
+      expect(repos.execution.getTaskExecutionState('missing')).toBeUndefined();
+    } finally {resolveWorkspace.mockRestore();}
+  });
   it('atomically limits work-item claims to six globally and three per work, retaining unknown and unproven stops', async () => {
     const {x,repos}=ready();
     const directory=mkdtempSync(join(tmpdir(),'work-permits-'));dirs.push(directory);
