@@ -1888,6 +1888,97 @@ describe('fresh-session schedules', () => {
     expect(fresh.runtime.archive).not.toHaveBeenCalled();
   });
 
+  it('keeps a previous fresh session with unfinished user work and archives it on a later occurrence', async () => {
+    const h = await fixture();
+    const fresh = freshRuntime(h);
+    const service = new SessionAutomationService({ repositories: h.repositories, runtime: fresh.runtime, authorize: async () => true, clock: () => h.now.value });
+    cleanups.push(() => service.close());
+    const created = await service.createSchedule(h.session.id, { ...scheduleInput, mode: 'fresh' }, 'ou_owner');
+    await service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await service.tick();
+    const [first] = fresh.created;
+    const firstTask = fresh.dispatches()[0]!;
+    fresh.settle(firstTask.id);
+    // 用户在上一次的会话里追加了一轮对话，还在排队。
+    const scheduled = h.repositories.execution.getAcceptedTask(firstTask.id)!.request;
+    const userTask = await fresh.workers.get(first!)!.dispatchRequest({ ...scheduled, namespace: 'runtime', key: 'user-follow-up', prompt: 'Explain the result', sources: [], sourcePayload: {} });
+    expect(userTask.status).toBe('queued');
+    await service.tick();
+
+    h.now.value = new Date('2026-09-12T00:02:01.000Z');
+    await service.tick();
+    expect(fresh.created).toHaveLength(2);
+    expect(fresh.runtime.archive).not.toHaveBeenCalled();
+    expect((await h.repositories.sessions.get(first!))?.archivedAt).toBeFalsy();
+
+    fresh.settle(userTask.id);
+    fresh.settle(fresh.workers.get(fresh.created[1]!)!.dispatches[0]!.id);
+    await service.tick();
+    h.now.value = new Date('2026-09-12T00:03:01.000Z');
+    await service.tick();
+    expect(fresh.created).toHaveLength(3);
+    expect(fresh.runtime.archive.mock.calls.map(call => call[0]).sort()).toEqual([first, fresh.created[1]].sort());
+    expect((await h.repositories.sessions.get(first!))?.archivedAt).toBeTruthy();
+    expect((await h.repositories.sessions.get(fresh.created[2]!))?.archivedAt).toBeFalsy();
+  });
+
+  it('archives the previous fresh session when a reservation is recovered after a restart', async () => {
+    const h = await fixture();
+    const fresh = freshRuntime(h);
+    // 模拟进程在“预留写入成功”之后、归档上一会话之前退出。
+    let crashOnReservation = false;
+    const config = new Proxy(h.repositories.config, { get(target, property, receiver) {
+      if (property !== 'compareAndSet') return Reflect.get(target, property, receiver);
+      return async (key: string, expected: string | null, next: string) => {
+        const written = await target.compareAndSet!(key, expected, next);
+        const reserved = JSON.parse(next).pendingOccurrence?.id;
+        if (written && crashOnReservation && key.startsWith('session_automation/schedule/') && reserved && reserved !== JSON.parse(expected ?? '{}').pendingOccurrence?.id) {
+          crashOnReservation = false;
+          throw new Error('process exited after reservation');
+        }
+        return written;
+      };
+    } });
+    const crashing = new SessionAutomationService({ repositories: { ...h.repositories, config }, runtime: fresh.runtime, authorize: async () => true, clock: () => h.now.value });
+    cleanups.push(() => crashing.close());
+    const created = await crashing.createSchedule(h.session.id, { ...scheduleInput, mode: 'fresh' }, 'ou_owner');
+    await crashing.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await crashing.tick();
+    const [first] = fresh.created;
+    fresh.settle(fresh.dispatches()[0]!.id);
+    await crashing.tick();
+
+    // 手动执行：预留后崩溃，用同一幂等键重试走恢复分支。
+    crashOnReservation = true;
+    const latest = await crashing.getScheduleDefinition(h.session.id, created.id);
+    const manual = { expectedRevision: latest.revision, idempotencyKey: 'manual-after-restart' };
+    await expect(crashing.runSchedule(h.session.id, created.id, manual, 'ou_owner')).rejects.toThrow('process exited after reservation');
+    expect(fresh.created).toHaveLength(1);
+    const reopened = new SessionAutomationService({ repositories: h.repositories, runtime: fresh.runtime, authorize: async () => true, clock: () => h.now.value });
+    cleanups.push(() => reopened.close());
+    await reopened.runSchedule(h.session.id, created.id, manual, 'ou_owner');
+    expect(fresh.created).toHaveLength(2);
+    expect(fresh.runtime.archive).toHaveBeenCalledWith(first);
+    expect((await h.repositories.sessions.get(first!))?.archivedAt).toBeTruthy();
+
+    // 定时触发：预留后崩溃，下一次 tick 从预留恢复。
+    fresh.settle(fresh.dispatches()[1]!.id);
+    await reopened.tick();
+    const second = fresh.created[1]!;
+    crashOnReservation = true;
+    h.now.value = new Date('2026-09-12T00:02:01.000Z');
+    await crashing.tick();
+    expect(crashOnReservation).toBe(false);
+    expect(fresh.created).toHaveLength(2);
+    expect((await h.repositories.sessions.get(second))?.archivedAt).toBeFalsy();
+    await reopened.tick();
+    expect(fresh.created).toHaveLength(3);
+    expect(fresh.runtime.archive).toHaveBeenCalledWith(second);
+    expect((await h.repositories.sessions.get(second))?.archivedAt).toBeTruthy();
+  });
+
   it('keeps the default and legacy records in the origin session', async () => {
     const h = await fixture();
     const startScheduleSession = vi.fn();

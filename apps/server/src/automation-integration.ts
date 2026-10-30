@@ -118,7 +118,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
   };
 
   /** Agent 代建计划的确认卡：发到计划冻结的回报位置，同一计划只发一张；点「启用」「停用」后由卡片回调原位重绘。 */
-  const sendScheduleRequest = async (schedule: PublicSessionSchedule, notice?: string) => {
+  const sendScheduleRequest = async (schedule: PublicSessionSchedule, notice?: string, requestId?: string) => {
     const session = await runtime.getSession(schedule.sessionId);
     if (!session || session.source !== 'lark') throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '只能在飞书会话里代设定时任务', 409);
     const { appId, chatId } = parseLarkSourceId(session.sourceId);
@@ -131,8 +131,8 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       sessionId: schedule.sessionId,
       workspace: session.cwd,
       webBaseUrl: config.webBaseUrl,
-      // 同一计划只发一张；更新同名计划后按新修订再发一张，否则会被首张卡的幂等键吞掉。
-      idempotencyKey: `schedule_request_${createHash('sha256').update(schedule.revision > 1 ? `${schedule.id}:${schedule.revision}` : schedule.id).digest('hex').slice(0, 40)}`
+      // 同一计划只发一张；更新同名计划后按新修订再发一张，否则会被首张卡的幂等键吞掉。带请求编号时为该请求补发一张。
+      idempotencyKey: `schedule_request_${createHash('sha256').update(`${schedule.revision > 1 ? `${schedule.id}:${schedule.revision}` : schedule.id}${requestId ? `:${requestId}` : ''}`).digest('hex').slice(0, 40)}`
     }, options.log, repos.config);
   };
 

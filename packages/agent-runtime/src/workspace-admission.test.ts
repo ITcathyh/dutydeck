@@ -119,6 +119,22 @@ it('starts a fresh schedule session in the origin shared directory, reuses it pe
   expect(next.id).toBe(second);expect(next.cwd).toBe(origin.cwd);
 });
 
+it('queues a fresh schedule turn behind a running turn of its origin session in the same directory',async()=>{
+  const h=await fixture(),origin=await h.runtime.start({agentId:'fixture',cwd:h.cwd}),id='ses_schedule_'+'e'.repeat(64);
+  await h.repos.config.set('session_automation/schedule/fresh-busy',JSON.stringify({schemaVersion:1,id:'fresh-busy',sessionId:origin.id,executionSessionId:id,mode:'fresh',actorId:'installation_owner'}));
+  const fresh=await h.runtime.startScheduleSession({agentId:'fixture',cwd:origin.cwd,workspaceMode:'shared',source:'schedule',sourceId:'fresh-busy',permissionMode:'ask'},id,async()=>{});
+  expect(fresh.cwd).toBe(origin.cwd);
+  const gate=deferred();h.gates.set('origin-turn',gate);
+  const running=h.runtime.send(origin.id,'origin-turn');
+  await vi.waitFor(()=>expect(h.sent).toEqual(['origin-turn']));
+  const accepted=await h.runtime.dispatchRequest({version:1,namespace:'schedule',sessionId:id,key:'occurrence-1',prompt:'scheduled',mode:'queue',actor:{kind:'installation_owner',id:'installation_owner'},options:{},skills:[],sources:[],sourcePayload:null});
+  await vi.waitFor(()=>expect(h.repos.execution.getTaskExecution(accepted.id)?.blockers).toContainEqual(expect.objectContaining({code:'WORKSPACE_EXECUTION_BUSY',sessionId:origin.id})));
+  expect(h.repos.execution.getTaskExecution(accepted.id)).toMatchObject({task:{status:'queued'},attempts:[]});
+  expect(h.sent).toEqual(['origin-turn']);
+  gate.resolve();expect((await running).status).toBe('completed');
+  await vi.waitFor(()=>expect(h.repos.execution.getTaskExecution(accepted.id)?.task.status).toBe('completed'));
+  expect(h.sent).toEqual(['origin-turn','scheduled']);expect(h.stopped).toEqual([]);
+});
 it('rejects a stale idle proof if resource evidence changes at the claim boundary and rechecks after an idle event',async()=>{
   const h=await fixture(),one=await h.runtime.start({agentId:'fixture',cwd:h.cwd}),two=await h.runtime.start({agentId:'fixture',cwd:h.cwd});
   h.onClaim(()=>{

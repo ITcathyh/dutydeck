@@ -83,6 +83,7 @@ const DEFAULT_POLL_MS = 60_000;
 const runStatuses = new Set(['queued', 'running', 'completed']);
 /** 未决/阻塞来源持续挡下一次触发；其余 runStatus 为终态。 */
 const openRunStatuses = new Set(['pending', 'accepted', 'blocked']);
+const settledTaskStatuses = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
 /** CI 定义本身没有代际字段；binding 中的 generation 仅用于严格记录结构，取固定值。 */
 const CI_BINDING_GENERATION = 1;
 
@@ -975,7 +976,7 @@ export class SessionAutomationService {
       nextDueAt: executionChanged ? candidate.enabled ? previewSessionSchedule(candidate, now)?.scheduledForUtc : undefined : stored.value.nextDueAt
     });
     if (!await this.replace(scheduleKey(id), stored.raw, schedule)) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
-    if (modeChanged) await this.retireFreshSession(stored.value);
+    if (modeChanged) await this.retireFreshSessions(schedule);
     return publicSchedule(schedule);
   }
 
@@ -1028,7 +1029,6 @@ export class SessionAutomationService {
       if (latest?.value.pendingOccurrence?.id === manualId) return this.runReservedOccurrence(latest.value);
       throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule changed while reserving execution', 409);
     }
-    await this.retireFreshSession(stored.value);
     return this.runReservedOccurrence(reserved);
   }
 
@@ -1411,16 +1411,23 @@ export class SessionAutomationService {
     return schedule.mode === 'fresh' ? { executionSessionId: freshSessionId(schedule.id, occurrence) } : {};
   }
 
-  /** 换到下一次触发后归档上一次 fresh 会话（只读保留历史）；失败只告警，进程仍由空闲清理回收。 */
-  private async retireFreshSession(previous: SessionSchedule) {
-    const sessionId = previous.mode === 'fresh' ? previous.executionSessionId : undefined;
-    if (!sessionId) return;
-    this.subscriptions.get(sessionId)?.();
-    this.subscriptions.delete(sessionId);
-    const session = await this.options.runtime.getSession(sessionId);
-    if (!session || session.archivedAt || session.source !== 'schedule' || session.sourceId !== previous.id || !this.options.runtime.archive) return;
-    try { await this.options.runtime.archive(sessionId); }
-    catch (error) { console.warn('SESSION_AUTOMATION_FRESH_ARCHIVE_FAILED', error instanceof RuntimeError ? error.code : 'UNEXPECTED_ERROR'); }
+  /**
+   * 归档本计划不再使用的 fresh 会话（只读保留历史），保留当前执行会话。
+   * 会话里还有排队、执行中或未结算的任务（例如用户在里面追加的对话）时不归档，等下一次触发或恢复时再试；失败只告警。
+   */
+  private async retireFreshSessions(schedule: SessionSchedule) {
+    if (!this.options.runtime.archive) return;
+    const keep = schedule.mode === 'fresh' ? schedule.executionSessionId : undefined;
+    const sessions = (await this.options.repositories.sessions.list())
+      .filter(item => item.source === 'schedule' && item.sourceId === schedule.id && !item.archivedAt && item.id !== keep);
+    for (const session of sessions) {
+      const tasks = await this.options.repositories.tasks.listBySession(session.id);
+      if (tasks.some(task => !settledTaskStatuses.has(task.status) || this.execution.getTaskExecution(task.id)?.attempts.some(attempt => attempt.state !== 'settled'))) continue;
+      this.subscriptions.get(session.id)?.();
+      this.subscriptions.delete(session.id);
+      try { await this.options.runtime.archive(session.id); }
+      catch (error) { console.warn('SESSION_AUTOMATION_FRESH_ARCHIVE_FAILED', error instanceof RuntimeError ? error.code : 'UNEXPECTED_ERROR'); }
+    }
   }
 
   /** 同一会话里未删除的计划按名称唯一；停用的也算，避免同名计划并存。 */
@@ -1449,6 +1456,8 @@ export class SessionAutomationService {
     const reservation = schedule.pendingOccurrence!;
     const existing = await this.getRecord(occurrenceKey(reservation.id), value => sessionScheduleOccurrenceSchema.parse(value));
     if (existing) return { ...existing, created: false };
+    // 新执行会话已随预留写入；在建出这次触发的记录前收尾旧会话，重启后从预留恢复时也会走到这里。
+    if (schedule.mode === 'fresh') await this.retireFreshSessions(schedule);
     const now = this.clock();
     const { misfireDecision, ...identity } = reservation;
     const skipped = misfireDecision?.action === 'skip';
@@ -1509,7 +1518,6 @@ export class SessionAutomationService {
       misfireDecision: { action: skip ? 'skip' : 'run', ...(misfire ? { misfire } : {}) }
     } });
     if (!await this.replace(scheduleKey(schedule.id), stored.raw, schedule)) return;
-    await this.retireFreshSession(stored.value);
     const occurrence = await this.materializeOccurrence(schedule);
     if (occurrence.created && occurrence.value.runStatus === 'pending') await this.processOccurrence(occurrence);
     if (!openRunStatuses.has(occurrence.value.runStatus)) await this.advanceSchedule(schedule, schedule.nextDueAt!);
