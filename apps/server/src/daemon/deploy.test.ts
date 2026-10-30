@@ -785,6 +785,24 @@ describe('dutydeck deploy', () => {
     expect(service.ran).toEqual([first.release]);
   }, 60_000);
 
+  it('KillMode=process 时与 restart 一样只等不可恢复的任务，其他 KillMode 全量等待', async () => {
+    await runDeploy({ source, runtime: bot }, deps());
+    const activityQueries = async (killMode?: string) => {
+      nextCommit(source);
+      const queries: string[] = [];
+      const fetcher = (async (url, init) => {
+        const parsed = new URL(String(url));
+        if (parsed.pathname === '/api/system/activity') queries.push(parsed.search);
+        return await fetch(url, init);
+      }) as typeof fetch;
+      const result = await runDeploy({ source, runtime: bot }, deps({ service: { ...service, killMode }, fetch: fetcher }));
+      expect(result, result.error).toMatchObject({ ok: true, status: 'deployed' });
+      return queries;
+    };
+    expect(await activityQueries('process')).toEqual(['?restart=true']);
+    expect(await activityQueries('control-group')).toEqual(['']);
+  }, 60_000);
+
   it('排空时查询任务数失败则不切换、不重启', async () => {
     const first = await runDeploy({ source, runtime: bot }, deps());
     // 让正在运行的旧版本换成一个任务数查询会失败的进程

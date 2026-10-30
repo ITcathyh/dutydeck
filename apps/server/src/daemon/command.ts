@@ -891,6 +891,8 @@ export interface ServiceControl {
   stop(): Promise<string | undefined>;
   /** 清掉失败计数（systemd 的 start-limit）；回滚前用，免得刚才的崩溃循环挡住回滚。 */
   resetFailed?(): Promise<void>;
+  /** systemd KillMode；为 process 时停服务不会带走 tmux，部署才保留可恢复任务。 */
+  killMode?: string;
 }
 
 export function systemdServiceControl(unit: string, deps: DaemonCommandDeps): ServiceControl {
