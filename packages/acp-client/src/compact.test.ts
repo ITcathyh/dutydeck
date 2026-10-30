@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AcpxAdapter } from './index.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -76,5 +76,22 @@ describe('native ACP compaction', () => {
     expect(await pending).toBe('cancelled');
     expect(await h.prompts()).toEqual(['/compact']);
     expect(h.events.some(event => event.type === 'completed')).toBe(false);
+  });
+});
+
+describe('turn_usage model report', () => {
+  const models = { currentModelId: 'gpt-6-astra[xhigh]', availableModelIds: [] };
+  it('carries the model the agent reports for the session, with or without token usage', async () => {
+    const h = await fixture('usage');
+    const runtime = (h.adapter as any).runtime;
+    const getStatus = runtime.getStatus.bind(runtime);
+    vi.spyOn(runtime, 'getStatus').mockImplementation(async (input: unknown) => ({ ...await getStatus(input), models }));
+    await h.adapter.send('first');
+    expect(h.events.filter(event => event.data?.state === 'turn_usage').at(-1).data).toMatchObject({ runtimeModel: 'gpt-6-astra[xhigh]', breakdown: expect.any(Object) });
+    h.events.length = 0;
+    vi.spyOn(runtime, 'getStatus').mockResolvedValue({ models });
+    await h.adapter.send('second');
+    expect(h.events.filter(event => event.data?.state === 'turn_usage')).toMatchObject([{ data: { state: 'turn_usage', runtimeModel: 'gpt-6-astra[xhigh]' } }]);
+    expect(h.events.find(event => event.data?.state === 'turn_usage').data).not.toHaveProperty('breakdown');
   });
 });

@@ -15,7 +15,7 @@ import { redactTraceText } from './secret-redaction.js';
 import { readGitSnapshot } from './git-status.js';
 import { buildLarkTaskDashboard, pageLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { isLarkGroupChatMemoryPool, isLarkGroupMemoryPool, isLarkPerGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
-import { deferredConfirmationId, describeScheduleTrigger, parseLarkSourceId, resolveParticipation, RuntimeError, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
+import { deferredConfirmationId, describeScheduleTrigger, parseLarkSourceId, resolveParticipation, RuntimeError, timeLoop, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-decision.js';
 import { directScenarioPrompt } from './scenario-direct.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
@@ -508,7 +508,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     this.taskAgentTimer = setTimeout(() => {
       this.taskAgentTimer = undefined;
       if (this.stopped) return;
-      void this.pollLarkTaskDispatches(config)
+      void timeLoop('lark.task-agent-poll', this.log, () => this.pollLarkTaskDispatches(config))
         .catch(error => this.log.warn({ error, appId: config.appId }, '飞书任务智能体通道轮询失败，下一轮重试'))
         .finally(() => this.scheduleTaskAgentPoll(config));
     }, this.taskAgentIntervalMs);

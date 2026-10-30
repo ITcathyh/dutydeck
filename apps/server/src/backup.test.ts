@@ -138,15 +138,15 @@ describe('offline portable backup', () => {
   });
 
   it('holds both real plugin locks throughout the actual database backup', async () => {
-    const f = fixture(), original = Database.prototype.backup;
-    const spy = vi.spyOn(Database.prototype, 'backup').mockImplementation(function (this: Database.Database, ...args) {
-      for (const name of ['.config-lock.sqlite', '.binding-lock.sqlite']) {
+    const f = fixture(), original = Database.prototype.exec;
+    const spy = vi.spyOn(Database.prototype, 'exec').mockImplementation(function (this: Database.Database, sql: string) {
+      if (sql.startsWith('VACUUM INTO')) for (const name of ['.config-lock.sqlite', '.binding-lock.sqlite']) {
         const competitor = new Database(join(f.dataDir, 'plugins', name), { timeout: 0 });
         try { expect(() => competitor.exec('BEGIN IMMEDIATE')).toThrow(/locked/); } finally { competitor.close(); }
       }
-      return original.apply(this, args);
+      return original.call(this, sql);
     });
-    try { await createBackup(f); expect(spy).toHaveBeenCalledOnce(); } finally { spy.mockRestore(); }
+    try { await createBackup(f); expect(spy.mock.calls.filter(([sql]) => sql.startsWith('VACUUM INTO'))).toHaveLength(1); } finally { spy.mockRestore(); }
   });
 
   it('preserves immutable artifact identity and excludes secret files', async () => {

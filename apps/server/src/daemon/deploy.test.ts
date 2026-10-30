@@ -344,7 +344,7 @@ describe('dutydeck deploy', () => {
     expect(version.stdout.trim()).toBe('0.0.3');
   }, 60_000);
 
-  it.each([false, true])('持续 WAL 写入时备份使用固定快照，结束后释放读事务（中途失败：%s）', async fail => {
+  it.each([false, true])('WAL 库备份不阻塞写入者，快照含已提交写入，结束后释放读连接（中途失败：%s）', async fail => {
     const writer = new Database(database, { timeout: 0 });
     writer.pragma('journal_mode = WAL');
     writer.pragma('wal_autocheckpoint = 0');
@@ -353,24 +353,21 @@ describe('dutydeck deploy', () => {
     writer.transaction(() => { for (let i = 0; i < 2048; i++) insert.run(); })();
     writer.pragma('wal_checkpoint(TRUNCATE)');
     const update = writer.prepare("UPDATE configs SET value = ? WHERE key = 'stamp'");
-    const originalBackup = Database.prototype.backup;
+    const originalExec = Database.prototype.exec;
     let reader: Database.Database | undefined;
     let writes = 0;
-    const spy = vi.spyOn(Database.prototype, 'backup').mockImplementation(function (this: Database.Database, target, options) {
+    const spy = vi.spyOn(Database.prototype, 'exec').mockImplementation(function (this: Database.Database, sql: string) {
+      if (!sql.startsWith('VACUUM INTO')) return originalExec.call(this, sql);
       reader = this;
-      // 首批备份前也提交一次，验证 BEGIN 后已经实际建立读取快照。
+      // 只读备份连接已打开时，写入者仍能提交（timeout 0：被锁住会直接抛错）。
       update.run(String(++writes));
-      return originalBackup.call(this, target, { ...options, progress: () => {
-        update.run(String(++writes));
-        if (fail && writes === 3) throw new Error('injected backup failure');
-        if (writes === 100) throw new Error('backup repeatedly restarted by concurrent writes');
-      } });
+      if (fail) throw new Error('injected backup failure');
+      return originalExec.call(this, sql);
     });
     try {
       const result = await runDeploy({ source, runtime: bot }, deps());
       expect(reader?.open).toBe(false);
-      expect(writes).toBeGreaterThan(2);
-      expect(writes).toBeLessThan(100);
+      expect(writes).toBe(1);
       if (fail) {
         expect(result).toMatchObject({ ok: false, status: 'failed' });
         expect(result.error).toContain('injected backup failure');
@@ -382,7 +379,7 @@ describe('dutydeck deploy', () => {
         try {
           expect(backup.pragma('integrity_check', { simple: true })).toBe('ok');
           expect(backup.prepare('SELECT COUNT(*) FROM payload').pluck().get()).toBe(2048);
-          expect(backup.prepare("SELECT value FROM configs WHERE key = 'stamp'").pluck().get()).toBe('0');
+          expect(backup.prepare("SELECT value FROM configs WHERE key = 'stamp'").pluck().get()).toBe('1');
         } finally { backup.close(); }
       }
       expect(writer.prepare("SELECT value FROM configs WHERE key = 'stamp'").pluck().get()).toBe(String(writes));

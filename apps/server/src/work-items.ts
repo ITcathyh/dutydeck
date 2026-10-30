@@ -1,6 +1,6 @@
 import { promptDigest } from './prompt-context.js';
 import { createHash } from 'node:crypto';
-import { canonicalExecutionJson, createWorkItemSchema, executionActorSchema, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
+import { canonicalExecutionJson, createWorkItemSchema, executionActorSchema, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, timeLoop, type LoopTimingLog, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { readWorkAttemptResult } from './task-results.js';
@@ -70,6 +70,7 @@ export interface WorkItemServiceOptions {
   prepareDelivery?: (parentSessionId: string, workId: string, idempotencyKey: string) => Promise<void>;
   deliver?: (item: WorkItem) => Promise<void>;
   notify?: (item: WorkItem, actorId: string) => Promise<void>;
+  log?: LoopTimingLog;
 }
 
 /** One daemon owns graph progression; Config CAS also fences stale continuations. */
@@ -85,7 +86,7 @@ export class WorkItemService {
   /** Start only after Runtime recovery and application wiring are ready. */
   start() {
     if (this.closed || this.timer) return;
-    this.timer = setInterval(() => { void this.tick().catch(() => {}); }, 1000);
+    this.timer = setInterval(() => { void timeLoop('work-items.tick', this.options.log, () => this.tick()).catch(() => {}); }, 1000);
     this.timer.unref();
   }
   private get repos() {

@@ -1,6 +1,6 @@
 import { larkMessageAnchor } from './message-anchor.js';
 import { describeLarkTaskRecovery } from './task-recovery.js';
-import { permissionDisplayText } from '@dutydeck/shared';
+import { permissionDisplayText, timeLoop } from '@dutydeck/shared';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentEvent, ConfigRepository, PermissionRequestData, PolicyAction } from '@dutydeck/shared';
 import type { RelayAskBroker, RelayAskChoice, RelayDeferredAsk } from '@dutydeck/relay';
@@ -10,7 +10,7 @@ import type { LarkCardService } from './service.js';
 import { safeLarkWebUrl } from './card-actions.js';
 import { countCardComponents } from './card-elements.js';
 import { isBotSenderType, isGroupChat, renderGroupMention } from './card-mentions.js';
-import type { LarkCardElement } from './card-renderer.js';
+import { isLarkMessageUnupdatable, type LarkCardElement } from './card-renderer.js';
 import { sendLarkFile } from './result-delivery.js';
 import { renderQuestionMarkdown } from './ask-markdown.js';
 import { LarkUrgentManager, type LarkUrgentCheckResult } from './workflow-urgent.js';
@@ -471,6 +471,15 @@ export class LarkWorkflowInteractions {
       this.closedCards.add(key);
       return true;
     } catch (error) {
+      if (isLarkMessageUnupdatable(error)) {
+        // 230031 等是永久错误（消息超过可更新期限/已删除），重试不会成功：
+        // 落 cardClosedAt 让重启和后续对账都不再尝试，并按“已处理”返回。
+        this.log?.warn({ cardId: record.cardId, requestId: record.id, code: error.details?.upstreamCode },
+          '飞书交互卡已过期或不可更新，放弃关闭卡片且不再重试');
+        await this.annotate(record, { cardClosedAt: new Date().toISOString() }).catch(() => undefined);
+        this.closedCards.add(key);
+        return true;
+      }
       this.log?.warn({ error, cardId: record.cardId, requestId: record.id, attempt: record.closeAttempts,
         code: error instanceof LarkServiceError ? error.details?.upstreamCode ?? error.code : undefined,
         message: error instanceof Error ? error.message : String(error) }, '飞书交互卡关闭失败，等待有界重试');
@@ -1073,7 +1082,7 @@ export class LarkWorkflowInteractions {
     if (!due.length) return;
     const timer = setTimeout(() => {
       this.planTimers.delete(appId);
-      void this.reconcile(appId).catch(() => this.schedulePlanCheck(appId));
+      void timeLoop('lark.interaction-plan-check', this.log, () => this.reconcile(appId)).catch(() => this.schedulePlanCheck(appId));
     }, Math.min(...due) - now + 1_000);
     timer.unref();
     this.planTimers.set(appId, timer);

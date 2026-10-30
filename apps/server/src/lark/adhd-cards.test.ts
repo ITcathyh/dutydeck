@@ -190,6 +190,25 @@ describe('closed card recovery for every bot', () => {
     expect(h.update).toHaveBeenCalledTimes(2);
   });
 
+  it('does not retry a permanently unupdatable card (230031), including after restart', async () => {
+    vi.useFakeTimers({ now: fixedTime });
+    const h = await harness(false);
+    h.update.mockRejectedValue(new LarkServiceError('LARK_OPENAPI_ERROR', 'Message can only be updated within fourteen days', 502, { upstreamCode: 230031 }));
+    expect(await h.respond()).not.toContain('卡片状态更新失败');
+    h.cancel();
+    expect(h.update).toHaveBeenCalledTimes(1);
+    expect(h.warn).toHaveBeenCalledTimes(1);
+    expect(h.warn).toHaveBeenCalledWith(expect.objectContaining({ cardId: 'om_question', code: 230031 }), expect.stringContaining('不再重试'));
+    expect((await h.workflow.list(ctx.appId))[0]).toMatchObject({ state: 'answered', closeAttempts: 1, cardClosedAt: expect.any(String) });
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(await h.workflow.reconcile(ctx.appId)).toBe(0);
+    await h.restart();
+    expect(await h.workflow.reconcile(ctx.appId)).toBe(0);
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(h.update).toHaveBeenCalledTimes(1);
+    expect(h.warn).toHaveBeenCalledTimes(1);
+  });
+
   it('caps attempts and warnings at five, including after restart', async () => {
     vi.useFakeTimers({ now: fixedTime });
     const h = await harness(false);

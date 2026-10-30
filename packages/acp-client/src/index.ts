@@ -797,10 +797,15 @@ export class AcpxAdapter implements AgentDriver {
    */
   private async turnUsage(handle: AcpRuntimeHandle, includeMaintenance = true): Promise<NormalizedDriverEvent | undefined> {
     let usage: AcpRuntimeStatus['usage'];
-    try { usage = (await this.runtime.getStatus?.({ handle }))?.usage; } catch { return; }
+    let runtimeModel: string | undefined;
+    try {
+      const status = await this.runtime.getStatus?.({ handle });
+      usage = status?.usage;
+      runtimeModel = status?.models?.currentModelId?.trim() || undefined;
+    } catch { return; }
     const latest = Object.entries(usage?.perRequest ?? {}).at(-1);
     const cost = usage?.cost?.amount;
-    if (!latest && cost === undefined) return;
+    if (!latest && cost === undefined && !runtimeModel) return;
     const breakdown = latest ? { ...latest[1] } : undefined;
     const maintenance = includeMaintenance ? this.maintenanceUsage?.data : undefined;
     if (breakdown && maintenance?.breakdown && maintenance.usageRef !== latest?.[0]) {
@@ -810,7 +815,7 @@ export class AcpxAdapter implements AgentDriver {
       }
     }
     if (includeMaintenance) this.maintenanceUsage = undefined;
-    return { type: 'status', data: { state: 'turn_usage', ...(latest ? { usageRef: latest[0], breakdown } : {}), ...(cost !== undefined ? { cost: usage!.cost } : {}) } };
+    return { type: 'status', data: { state: 'turn_usage', ...(latest ? { usageRef: latest[0], breakdown } : {}), ...(cost !== undefined ? { cost: usage!.cost } : {}), ...(runtimeModel ? { runtimeModel } : {}) } };
   }
   async send(input: string|DriverSubmission) {
     const submission=typeof input==='string'?undefined:input;

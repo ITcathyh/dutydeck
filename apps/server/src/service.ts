@@ -34,7 +34,7 @@ import { loadConfigWithDiagnostics, resolveDatabaseUrl, type AppConfig } from '@
 import { logDroppedAgents } from './agent-config-log.js';
 import { assertBotProcessStartup, childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
 import { createPtyRetirementControl } from './pty-recovery.js';
-import { COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, RuntimeError, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import { COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, RuntimeError, timeLoop, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { larkResourceRoot, pruneLarkResourceDirectories } from './resource-retention.js';
@@ -553,11 +553,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const pluginResultService = new PluginResultService(repos.pluginResults, pluginResultRegistry, pluginResultAdapter);
   let pluginResultSweep: Promise<void> | undefined;
   let pluginResultTimer: ReturnType<typeof setInterval> | undefined;
-  const sweepPluginResults = () => pluginResultSweep ??= (async () => {
+  const loopLog = { warn: (details: Record<string, unknown>, message: string) => app?.log.warn(details, message) };
+  const sweepPluginResults = () => pluginResultSweep ??= timeLoop('plugin-result-sweep', loopLog, async () => {
     try { await pluginResultService.sweep(env.DUTYDECK_DISABLE_LARK_LISTENER === 'true' ? [] : env.DUTYDECK_BOT_APP_ID ? [env.DUTYDECK_BOT_APP_ID] : (await readLarkConfigs(repos.config)).filter(bot => bot.listening).map(bot => bot.appId)); }
     catch { app?.log.warn({ code: 'RESULT_RECOVERY_FAILED' }, '受控结果恢复失败'); }
     finally { pluginResultSweep = undefined; }
-  })();
+  });
   const closePluginResults = async () => { if (pluginResultTimer) clearInterval(pluginResultTimer); await pluginResultSweep; };
   setupCleanup.push(closePluginResults);
   const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, client: config => createLarkCardService(env, workbenchHttp.fetch, config), log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
@@ -583,7 +584,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const workbench = new LarkWorkbench(repos, runtime, () => workItems, () => workInteractions, automationIntegration.authorize, { env, authorizeAgent: authorizeWorkAgent, log: { warn: (...args: any[]) => app?.log.warn(...args as [unknown, string]) } });
   setupCleanup.push(() => workbench.close());
   const workItems: WorkItemService = new WorkItemService({ repositories: repos, runtime, authorize: automationIntegration.authorize, authorizeAgent: authorizeWorkAgent,
-    requireConfirmation: workPlanConfirmationRequired,
+    requireConfirmation: workPlanConfirmationRequired, log: loopLog,
     prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), deliver: item => workbench.deliver(item), notify: (item, actorId) => workbench.notify(item, actorId) });
   setupCleanup.push(() => workItems.close());
   const delegations = new LeaderDelegationService({ repositories: repos, runtime, work: workItems, authorizeAgent: authorizeWorkAgent,
@@ -849,17 +850,17 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     workItems.start();
     void delegations.start().catch(error => app?.log.warn({ error }, '分层协作规划恢复失败'));
     const tick = () => {
-      void automation.tick().catch(error => app?.log.warn({ error }, '自动任务轮询失败'));
-      void ciWebhook?.tick().catch(error => app?.log.warn({ error }, 'CI webhook 续作轮询失败'));
-      void pullRequests.tick().catch(error => app?.log.warn({ error }, 'PR 跟进轮询失败'));
+      void timeLoop('automation.tick', loopLog, () => automation.tick()).catch(error => app?.log.warn({ error }, '自动任务轮询失败'));
+      if (ciWebhook) void timeLoop('ci-webhook.tick', loopLog, () => ciWebhook.tick()).catch(error => app?.log.warn({ error }, 'CI webhook 续作轮询失败'));
+      void timeLoop('pull-requests.tick', loopLog, () => pullRequests.tick()).catch(error => app?.log.warn({ error }, 'PR 跟进轮询失败'));
     };
     automationTimer = setInterval(tick, 60_000);
     automationTimer.unref();
     tick();
     let lastCollaborationPrune = 0;
     const tickCollaboration = () => {
-      if (Date.now() - lastCollaborationPrune > 3_600_000) { lastCollaborationPrune = Date.now(); void collaboration!.prune().catch(error => app?.log.warn({ error }, '群上下文保留期清理失败')); }
-      void collaboration!.scheduler.tick().catch(error => app?.log.warn({ error }, '群委托轮询失败')); };
+      if (Date.now() - lastCollaborationPrune > 3_600_000) { lastCollaborationPrune = Date.now(); void timeLoop('collaboration.prune', loopLog, () => collaboration!.prune()).catch(error => app?.log.warn({ error }, '群上下文保留期清理失败')); }
+      void timeLoop('collaboration.tick', loopLog, () => collaboration!.scheduler.tick()).catch(error => app?.log.warn({ error }, '群委托轮询失败')); };
     collaborationTimer = setInterval(tickCollaboration, 5_000);
     collaborationTimer.unref(); tickCollaboration();
   return { config, runtime, close: closeResources };

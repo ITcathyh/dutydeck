@@ -96,7 +96,10 @@ export function cumulativeDelta(previous: number | undefined, current: number): 
 const finite = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 /** ACP 驱动 turn_usage 事件的读数：usageRef/breakdown 是本轮 token（增量），cost 是会话累计成本。 */
 export interface UsageReading {
-  provider?: unknown; model?: unknown; usageRef?: unknown; breakdown?: Record<string, unknown>; cost?: { amount?: unknown; currency?: unknown };
+  provider?: unknown; model?: unknown;
+  /** ACP Agent 自己报告的当前型号（会话状态里的 currentModelId，如 codex 的 gpt-x[xhigh]）；任务、会话、Agent 都没配型号时才采用。 */
+  runtimeModel?: unknown;
+  usageRef?: unknown; breakdown?: Record<string, unknown>; cost?: { amount?: unknown; currency?: unknown };
   /** 终端模式 Claude：一轮里有多个型号时，breakdown 总量按型号的拆分（每个型号按自己的单价估算）；model 缺省的组用任务型号。 */
   byModel?: Array<{ model?: unknown; breakdown?: Record<string, unknown> }>;
   /** 终端模式 Claude：本轮有部分用量读不到（子代理文件读失败或格式不认识），已读到的 token 只是下限，费用记为未知。 */
@@ -282,8 +285,11 @@ export class UsageLedger {
       const accepted = this.repos.execution.getAcceptedTask(attempt.taskId);
       const frozenModel = accepted?.input?.version === 2 ? accepted.input.executionOptions.model : undefined;
       const reportedModel = typeof reading?.model === 'string' && reading.model.trim() ? reading.model.trim() : undefined;
-      const model = reportedModel ?? frozenModel ?? current.model ?? (await this.repos.agents.get(current.agentId))?.model;
-      const modelSource: UsageLedgerEntry['modelSource'] = reportedModel ? 'reading' : frozenModel ? 'task' : current.model ? 'session' : model ? 'agent' : 'unknown';
+      const configuredModel = reportedModel ?? frozenModel ?? current.model ?? (await this.repos.agents.get(current.agentId))?.model;
+      // 去掉 [推理强度] 之类的后缀，同一型号不因强度分成多组。
+      const runtimeModel = typeof reading?.runtimeModel === 'string' ? reading.runtimeModel.replace(/\[[^\]]*\]$/, '').trim() || undefined : undefined;
+      const model = configuredModel ?? runtimeModel;
+      const modelSource: UsageLedgerEntry['modelSource'] = reportedModel ? 'reading' : frozenModel ? 'task' : current.model ? 'session' : configuredModel ? 'agent' : runtimeModel ? 'runtime' : 'unknown';
       const provider = typeof reading?.provider === 'string' && reading.provider.trim() ? reading.provider.trim() : 'unknown';
       const usageRef = typeof reading?.usageRef === 'string' ? reading.usageRef : undefined;
       const freshTokens = usageRef ? !await usage.hasUsageRef(current.id, usageRef) : false;
