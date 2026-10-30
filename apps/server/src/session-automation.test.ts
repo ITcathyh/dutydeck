@@ -322,7 +322,7 @@ describe('recurring schedule watermark recovery', () => {
 
 async function completedSchedules(h: Awaited<ReturnType<typeof fixture>>, count = 1) {
   for (let index = 0; index < count; index++) {
-    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, trigger: { kind: 'at', localDateTime: '2026-09-12T08:01:00' } }, 'ou_owner');
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: `${scheduleInput.name} ${index}`, trigger: { kind: 'at', localDateTime: '2026-09-12T08:01:00' } }, 'ou_owner');
     await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
   }
   h.now.value = new Date('2026-09-12T00:01:01.000Z');
@@ -392,7 +392,7 @@ describe('SessionAutomationService schedules', () => {
     await h.service.updateSchedule(h.session.id, first.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
     h.now.value = new Date('2026-09-12T00:01:01.000Z');
     await h.service.tick(); h.settleTask(h.dispatches[0]!.id);
-    const second = await h.service.createSchedule(h.session.id, { ...scheduleInput, trigger: { kind: 'at', localDateTime: '2026-09-12T08:02:00' } }, 'ou_owner');
+    const second = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Second', trigger: { kind: 'at', localDateTime: '2026-09-12T08:02:00' } }, 'ou_owner');
     await h.service.updateSchedule(h.session.id, second.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
     h.now.value = new Date('2026-09-12T00:02:01.000Z');
     const ticking = h.service.tick();
@@ -1214,7 +1214,7 @@ describe('manual schedule execution and deletion', () => {
     h.settleTask(h.dispatches[0]!.id);
     await h.service.tick();
     expect((await h.service.listBySession(h.session.id)).schedules[0]).toEqual(enabled);
-    const conditional = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' } }, 'ou_owner');
+    const conditional = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Conditional', condition: { kind: 'ci_new_failure' } }, 'ou_owner');
     const skipped = await h.service.runSchedule(h.session.id, conditional.id, { expectedRevision: 1, idempotencyKey: 'conditional' }, 'ou_owner');
     expect(skipped).toMatchObject({ conditionStatus: 'skipped', runStatus: 'skipped' });
     expect((await h.service.listBySession(h.session.id)).schedules.find(item => item.id === conditional.id)).toEqual(conditional);
@@ -1355,7 +1355,7 @@ describe('schedule calendar validation and legacy reads', () => {
     const good = await h.service.createSchedule(h.session.id, { ...scheduleInput, timezone: 'UTC', trigger: { kind: 'cron', expression: '0 9 */1 * 1-5' } }, 'ou_owner');
     const enabled = await h.service.updateSchedule(h.session.id, good.id, { expectedRevision: good.revision, enabled: true }, 'ou_owner');
     expect(enabled.nextDueAt).toBe('2026-10-19T09:00:00.000Z');
-    const bad = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    const bad = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Bad calendar' }, 'ou_owner');
     const key = `session_automation/schedule/${bad.id}`;
     const raw = JSON.parse((await h.repositories.config.get(key))!);
     raw.trigger = { kind: 'at', localDateTime: '2026-02-30T09:00' };
@@ -1492,7 +1492,7 @@ describe('schedule management and recovery contracts', () => {
   it('paginates one plan with stable equal-time ordering and scopes run details', async () => {
     const h = await fixture();
     const first = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
-    const second = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    const second = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Second' }, 'ou_owner');
     const at = h.now.value.toISOString();
     for (const schedule of [first, second]) for (let i = 0; i < 25; i++) {
       const id = schedule.id + '-' + String(i).padStart(2, '0');
@@ -1769,4 +1769,248 @@ it('keeps explicit manual execution independent of automatic misfire expiry', as
   expect(occurrence.runStatus).toBe('accepted');
   expect(h.dispatches).toHaveLength(1);
   expect(occurrence.misfire).toBeUndefined();
+});
+
+describe('fresh-session schedules', () => {
+  /** 模拟 Runtime 的稳定 schedule 会话入口：同一编号只建一次，每个会话独立账本 worker。 */
+  function freshRuntime(h: Awaited<ReturnType<typeof fixture>>) {
+    const workers = new Map<string, BoundRuntime>();
+    const created: string[] = [];
+    const runtime = {
+      getSession: (id: string) => h.repositories.sessions.get(id),
+      startScheduleSession: vi.fn(async (input: Parameters<NonNullable<SessionAutomationRuntime['startScheduleSession']>>[0], id: string, beforeStart: () => Promise<void>) => {
+        await beforeStart();
+        const existing = await h.repositories.sessions.get(id);
+        if (existing) return existing;
+        const session: Session = { ...h.session, id, runId: `run_${created.length}`, source: 'schedule', sourceId: input.sourceId, cwd: input.cwd!, workspaceMode: input.workspaceMode,
+          agentId: input.agentId, permissionMode: input.permissionMode };
+        bound(h.repositories).createSession(session);
+        workers.set(id, ledgerRuntime(h.repositories, session));
+        created.push(id);
+        return session;
+      }),
+      archive: vi.fn(async (id: string) => {
+        const session = (await h.repositories.sessions.get(id))!;
+        bound(h.repositories).patchSession({ sessionId: id, runId: session.runId }, { archivedAt: h.now.value.toISOString() });
+      }),
+      dispatchRequest: (request: TaskRequestV1) => workers.get(request.sessionId)!.dispatchRequest(request)
+    } satisfies SessionAutomationRuntime;
+    const settle = (taskId: string, text?: string) => {
+      const sessionId = h.repositories.execution.getTaskExecution(taskId)!.task.sessionId;
+      workers.get(sessionId)!.settleTask(taskId, 'completed', text);
+    };
+    return { runtime, created, workers, settle, dispatches: () => [...workers.values()].flatMap(worker => worker.dispatches) };
+  }
+  const occurrences = async (h: Awaited<ReturnType<typeof fixture>>, scheduleId: string) =>
+    (await h.repositories.config.list('session_automation/occurrence/')).map(row => JSON.parse(row.value)).filter(item => item.scheduleId === scheduleId)
+      .sort((a, b) => a.scheduledForUtc.localeCompare(b.scheduledForUtc));
+
+  it('runs every occurrence in its own new session with the origin configuration, delivers to the origin, and archives the previous session', async () => {
+    const h = await fixture();
+    const fresh = freshRuntime(h);
+    const deliver = vi.fn(async () => {});
+    const service = new SessionAutomationService({ repositories: h.repositories, runtime: fresh.runtime, authorize: async () => true, clock: () => h.now.value, deliver });
+    cleanups.push(() => service.close());
+    const created = await service.createSchedule(h.session.id, { ...scheduleInput, mode: 'fresh' }, 'ou_owner');
+    expect(created).toMatchObject({ mode: 'fresh', executionContext: { cwd: h.cwd, agentId: 'codex', permissionMode: 'ask', contextMode: 'prompt_only' } });
+    expect(created.executionSessionId).toBeUndefined();
+    expect(fresh.runtime.startScheduleSession).not.toHaveBeenCalled();
+    await service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await service.tick();
+    expect(fresh.created).toHaveLength(1);
+    const [first] = fresh.created;
+    expect(first).toMatch(/^ses_schedule_[a-f0-9]{64}$/);
+    expect(fresh.runtime.startScheduleSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ agentId: 'codex', cwd: h.cwd, permissionMode: 'ask', source: 'schedule', sourceId: created.id, workspaceMode: 'shared' }), first, expect.any(Function));
+    const task = fresh.dispatches()[0]!;
+    expect(task.sessionId).toBe(first);
+    expect(h.repositories.execution.getAcceptedTask(task.id)?.request).toMatchObject({ sessionId: first, prompt: scheduleInput.prompt, actor: { kind: 'channel', id: 'ou_owner', appId: 'cli_app' } });
+    expect(h.dispatches).toHaveLength(0);
+    const [occurrence] = await occurrences(h, created.id);
+    expect(occurrence).toMatchObject({ sessionId: h.session.id, executionSessionId: first });
+    await expect(service.authorizeExecutionSession(first!, 'ou_owner')).resolves.toBe(true);
+    await expect(service.sourceSessionId(first!)).resolves.toBe(h.session.id);
+
+    fresh.settle(task.id, 'fresh result');
+    await service.tick();
+    await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+    expect(deliver).toHaveBeenCalledWith(h.session.id, expect.objectContaining({ taskId: task.id, output: expect.objectContaining({ text: 'fresh result' }) }), occurrence.id, created.id, expect.anything());
+
+    h.now.value = new Date('2026-09-12T00:02:01.000Z');
+    await service.tick();
+    expect(fresh.created).toHaveLength(2);
+    const second = fresh.created[1]!;
+    expect(second).not.toBe(first);
+    expect(fresh.dispatches()[1]!.sessionId).toBe(second);
+    expect(fresh.runtime.archive).toHaveBeenCalledWith(first);
+    expect((await h.repositories.sessions.get(first!))?.archivedAt).toBeTruthy();
+    expect((await h.repositories.sessions.get(second))?.archivedAt).toBeFalsy();
+    await expect(service.authorizeExecutionSession(first!, 'ou_owner')).rejects.toMatchObject({ code: 'INDEPENDENT_SCHEDULE_REVOKED' });
+    await expect(service.authorizeExecutionSession(second, 'ou_owner')).resolves.toBe(true);
+    expect((await occurrences(h, created.id)).map(item => item.executionSessionId)).toEqual([first, second]);
+  });
+
+  it('reuses the same derived session when an occurrence is retried after a crash before acceptance', async () => {
+    const h = await fixture();
+    const fresh = freshRuntime(h);
+    let crashed = false;
+    let service!: SessionAutomationService;
+    const crashing = { ...fresh.runtime, dispatchRequest: async (request: TaskRequestV1) => {
+      if (!crashed) { crashed = true; (service as unknown as { closed: boolean }).closed = true; throw new Error('process exited before acceptance'); }
+      return fresh.runtime.dispatchRequest(request);
+    } };
+    service = new SessionAutomationService({ repositories: h.repositories, runtime: crashing, authorize: async () => true, clock: () => h.now.value });
+    cleanups.push(() => service.close());
+    const created = await service.createSchedule(h.session.id, { ...scheduleInput, mode: 'fresh' }, 'ou_owner');
+    await service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await service.tick();
+    expect(fresh.created).toHaveLength(1);
+    expect(fresh.dispatches()).toHaveLength(0);
+    const [pending] = await occurrences(h, created.id);
+    expect(pending).toMatchObject({ runStatus: 'pending', executionSessionId: fresh.created[0] });
+
+    // 重启后的新实例在租约过期后接手同一次触发：不再开第二个会话，任务落在同一会话。
+    const reopened = new SessionAutomationService({ repositories: h.repositories, runtime: crashing, authorize: async () => true, clock: () => h.now.value });
+    cleanups.push(() => reopened.close());
+    h.now.value = new Date('2026-09-12T00:01:40.000Z');
+    await reopened.tick();
+    expect(fresh.created).toHaveLength(1);
+    expect(fresh.runtime.startScheduleSession).toHaveBeenCalledTimes(2);
+    expect(fresh.runtime.startScheduleSession.mock.calls.map(call => call[1])).toEqual([fresh.created[0], fresh.created[0]]);
+    expect(fresh.dispatches()).toHaveLength(1);
+    expect(fresh.dispatches()[0]!.sessionId).toBe(fresh.created[0]);
+    const after = await occurrences(h, created.id);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ id: pending.id, runStatus: 'accepted', executionSessionId: fresh.created[0] });
+    expect(fresh.runtime.archive).not.toHaveBeenCalled();
+  });
+
+  it('keeps the default and legacy records in the origin session', async () => {
+    const h = await fixture();
+    const startScheduleSession = vi.fn();
+    const service = new SessionAutomationService({ repositories: h.repositories, runtime: { ...h, startScheduleSession }, authorize: async () => true, clock: () => h.now.value });
+    cleanups.push(() => service.close());
+    const created = await service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    expect(created.mode).toBe('session');
+    expect(created.executionContext).toBeUndefined();
+    // 旧版本写下的记录没有 mode 字段：照常读取，按沿用来源会话执行。
+    const key = `session_automation/schedule/${created.id}`;
+    const { mode: _mode, ...legacy } = JSON.parse((await h.repositories.config.get(key))!);
+    await h.repositories.config.set(key, JSON.stringify(legacy));
+    expect((await service.getScheduleDefinition(h.session.id, created.id)).mode).toBeUndefined();
+    await service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await service.tick();
+    expect(h.dispatches).toHaveLength(1);
+    expect(h.dispatches[0]!.sessionId).toBe(h.session.id);
+    expect(startScheduleSession).not.toHaveBeenCalled();
+  });
+
+  it('switches between session and fresh only when no occurrence is unfinished', async () => {
+    const h = await fixture();
+    const fresh = freshRuntime(h);
+    const service = new SessionAutomationService({ repositories: h.repositories, runtime: { ...fresh.runtime, dispatchRequest: request => request.sessionId === h.session.id ? h.dispatchRequest(request) : fresh.runtime.dispatchRequest(request) },
+      authorize: async () => true, clock: () => h.now.value });
+    cleanups.push(() => service.close());
+    const created = await service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    const switched = await service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, mode: 'fresh', enabled: true }, 'ou_owner');
+    expect(switched).toMatchObject({ mode: 'fresh', generation: 2, executionContext: { cwd: h.cwd, agentId: 'codex' } });
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await service.tick();
+    const freshTask = fresh.dispatches()[0]!;
+    await expect(service.updateSchedule(h.session.id, created.id, { expectedRevision: switched.revision, mode: 'session' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_BUSY' });
+    fresh.settle(freshTask.id);
+    await service.tick();
+    const latest = await service.getScheduleDefinition(h.session.id, created.id);
+    const back = await service.updateSchedule(h.session.id, created.id, { expectedRevision: latest.revision, mode: 'session' }, 'ou_owner');
+    expect(back.mode).toBe('session');
+    expect(back.executionSessionId).toBeUndefined();
+    expect(back.executionContext).toBeUndefined();
+    expect(fresh.runtime.archive).toHaveBeenCalledWith(freshTask.sessionId);
+    h.now.value = new Date('2026-09-12T00:03:01.000Z');
+    await service.tick();
+    expect(h.dispatches.at(-1)!.sessionId).toBe(h.session.id);
+  });
+
+  it('refuses an independent schedule switching mode', async () => {
+    const h = await fixture();
+    const service = new SessionAutomationService({ repositories: h.repositories, runtime: { ...h, startScheduleSession: vi.fn() }, authorize: async () => true, clock: () => h.now.value });
+    cleanups.push(() => service.close());
+    const created = await service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    const key = `session_automation/schedule/${created.id}`;
+    await h.repositories.config.set(key, JSON.stringify({ ...JSON.parse((await h.repositories.config.get(key))!), mode: 'independent' }));
+    await expect(service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, mode: 'fresh' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_MODE_IMMUTABLE' });
+  });
+});
+
+describe('schedule names are unique within a session', () => {
+  it('rejects creating or renaming into a live or disabled same-name schedule, but not a deleted one or another session', async () => {
+    const h = await fixture();
+    const first = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    expect(first.enabled).toBe(false);
+    await expect(h.service.createSchedule(h.session.id, { ...scheduleInput, prompt: 'Slightly different' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_NAME_CONFLICT', statusCode: 409, message: expect.stringContaining(first.id) });
+    await h.service.updateSchedule(h.session.id, first.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    await expect(h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_NAME_CONFLICT' });
+    const other = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Other' }, 'ou_owner');
+    await expect(h.service.updateSchedule(h.session.id, other.id, { expectedRevision: 1, name: scheduleInput.name }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_NAME_CONFLICT' });
+    await expect(h.service.updateSchedule(h.session.id, other.id, { expectedRevision: 1, name: 'Other', prompt: 'Same name kept' }, 'ou_owner')).resolves.toMatchObject({ name: 'Other' });
+    const current = await h.service.getScheduleDefinition(h.session.id, first.id);
+    await h.service.deleteSchedule(h.session.id, first.id, { expectedRevision: current.revision }, 'ou_owner');
+    await expect(h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner')).resolves.toMatchObject({ name: scheduleInput.name });
+  });
+
+  it('turns an Agent request for an existing name into an update that waits for confirmation again', async () => {
+    const fixtureState = await fixture();
+    const service = new SessionAutomationService({ repositories: fixtureState.repositories, runtime: { ...fixtureState, startScheduleSession: vi.fn() }, authorize: async () => true, clock: () => fixtureState.now.value });
+    cleanups.push(() => service.close());
+    const h = { ...fixtureState, service };
+    const receipt = (key: string) => ({ key, prepareDelivery: vi.fn(async () => {}) });
+    const original = await h.service.requestSchedule(h.session.id, scheduleInput, 'ou_owner', receipt('turn-1'));
+    expect(original.updated).toBeUndefined();
+    await h.service.updateSchedule(h.session.id, original.schedule.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+
+    // 同一请求重试：拿回自己建的那条，不算更新。
+    const retried = await h.service.requestSchedule(h.session.id, scheduleInput, 'ou_owner', receipt('turn-1'));
+    expect(retried.schedule.id).toBe(original.schedule.id);
+    expect(retried.updated).toBeUndefined();
+    // 间隔相同、只是锚点不同：没有改动，保持启用。
+    const unchanged = await h.service.requestSchedule(h.session.id, { ...scheduleInput, trigger: { ...scheduleInput.trigger, anchorAt: '2026-09-12T00:00:30.000Z' } }, 'ou_owner', receipt('turn-2'));
+    expect(unchanged).toMatchObject({ schedule: { id: original.schedule.id, enabled: true, revision: 2 }, updated: { changed: false, wasEnabled: true } });
+
+    const changedReceipt = receipt('turn-3');
+    const changed = await h.service.requestSchedule(h.session.id, { ...scheduleInput, prompt: 'Rebase and deploy', trigger: { kind: 'cron', expression: '0 2 * * *' }, mode: 'fresh' }, 'ou_owner', changedReceipt);
+    expect(changed).toMatchObject({ schedule: { id: original.schedule.id, enabled: false, prompt: 'Rebase and deploy', trigger: { kind: 'cron', expression: '0 2 * * *' }, mode: 'fresh' }, updated: { changed: true, wasEnabled: true } });
+    expect(changedReceipt.prepareDelivery).not.toHaveBeenCalled();
+    expect((await h.service.listBySession(h.session.id)).schedules).toHaveLength(1);
+
+    // 已停用的同名计划同样更新，不新建。
+    const disabled = await h.service.requestSchedule(h.session.id, { ...scheduleInput, prompt: 'Rebase only', trigger: { kind: 'cron', expression: '0 2 * * *' } }, 'ou_owner', receipt('turn-4'));
+    expect(disabled).toMatchObject({ schedule: { id: original.schedule.id, enabled: false, prompt: 'Rebase only', mode: 'fresh' }, updated: { changed: true, wasEnabled: false } });
+    expect((await h.service.listBySession(h.session.id)).schedules).toHaveLength(1);
+
+    // 删除后的同名请求重新新建。
+    const latest = await h.service.getScheduleDefinition(h.session.id, original.schedule.id);
+    await h.service.deleteSchedule(h.session.id, original.schedule.id, { expectedRevision: latest.revision }, 'ou_owner');
+    const recreated = await h.service.requestSchedule(h.session.id, scheduleInput, 'ou_owner', receipt('turn-5'));
+    expect(recreated.updated).toBeUndefined();
+    expect(recreated.schedule.id).not.toBe(original.schedule.id);
+  });
+
+  it('updates the enabled one first when legacy data already holds duplicates', async () => {
+    const h = await fixture();
+    const kept = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Old copy' }, 'ou_owner');
+    const live = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Live copy' }, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, live.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    // 旧版本留下的两条同名计划。
+    for (const id of [kept.id, live.id]) {
+      const key = `session_automation/schedule/${id}`;
+      await h.repositories.config.set(key, JSON.stringify({ ...JSON.parse((await h.repositories.config.get(key))!), name: 'rebase-agent-context-mac' }));
+    }
+    const result = await h.service.requestSchedule(h.session.id, { ...scheduleInput, name: 'rebase-agent-context-mac', prompt: 'New prompt' }, 'ou_owner', { key: 'turn-dup' });
+    expect(result).toMatchObject({ schedule: { id: live.id, prompt: 'New prompt' }, updated: { changed: true, wasEnabled: true } });
+    expect((await h.service.getScheduleDefinition(h.session.id, kept.id)).prompt).toBe(scheduleInput.prompt);
+  });
 });

@@ -67,7 +67,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
   const [timezone, setTimezone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
   const [condition, setCondition] = useState<'always' | 'ci_new_failure'>('always');
   const [conditionWorkflow, setConditionWorkflow] = useState('');
-  const [mode, setMode] = useState<'session' | 'independent'>('session');
+  const [mode, setMode] = useState<'session' | 'independent' | 'fresh'>('session');
   const [misfirePolicy, setMisfirePolicy] = useState<'skip' | 'coalesce'>('coalesce');
   const [latenessMinutes, setLatenessMinutes] = useState('');
 
@@ -119,6 +119,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
     if (condition !== editing.condition.kind || condition === 'ci_new_failure' && conditionWorkflow.trim() !== (editing.condition.kind === 'ci_new_failure' ? editing.condition.workflow ?? '' : '')) patch.condition = input.condition;
     if (misfirePolicy !== (editing.misfirePolicy ?? 'coalesce')) patch.misfirePolicy = misfirePolicy;
     if (input.maxLatenessSeconds !== editing.maxLatenessSeconds) patch.maxLatenessSeconds = input.maxLatenessSeconds ?? null;
+    if (mode !== (editing.mode ?? 'session') && mode !== 'independent') patch.mode = mode;
     return Object.keys(patch).length === 1 ? Promise.resolve({ schedule: editing }) : api.updateSchedule(session.id, editing.id, patch);
   }, onSuccess: async () => { await refresh(); setNotice(editing ? '计划已更新。' : '计划已保存，点击「启用」后才会运行。'); setEditing(undefined); setName(''); setPrompt(''); }, onError: refresh });
   const edit = (item: SessionSchedule) => {
@@ -167,8 +168,8 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
     {data && (!readOnly || editing?.mode === 'independent') && <details open={editing || openCreateForm ? true : undefined} className="rounded-lg border border-default p-3">
       <summary className="cursor-pointer text-caption font-semibold">{editing ? '编辑计划' : '为此任务创建计划'}</summary>
       <form className="mt-3 space-y-3" onSubmit={event => { event.preventDefault(); save.mutate(); }}>
-        <Field label="运行模式"><Select value={mode} disabled={Boolean(editing)} onChange={event => setMode(event.target.value as typeof mode)}><option value="session">沿用当前任务：共享聊天上下文和生命周期</option><option value="independent">独立计划：专用稳定任务与受管工作区</option></Select></Field>
-        <p className="text-caption text-secondary">{mode === 'independent' ? '只使用下方显式指令，不读取来源聊天的新消息。创建时冻结执行身份、模型、权限和交付位置；Git 仓库创建专用受管 worktree，失败则拒绝创建。资源协调仅覆盖当前实例数据库，其他实例和外部工具不受此约束。' : '沿用当前任务目录和聊天上下文；任务停止或归档后计划停用。'}{editing && '运行模式保存后不能在这里切换；需要其他模式时创建新计划。'}</p>
+        <Field label="运行模式"><Select value={mode} disabled={editing?.mode === 'independent'} onChange={event => setMode(event.target.value as typeof mode)}><option value="session">沿用当前任务：共享聊天上下文和生命周期</option><option value="fresh">每次新会话：不带聊天历史，结果仍发回这里</option>{(!editing || editing.mode === 'independent') && <option value="independent">独立计划：专用稳定任务与受管工作区</option>}</Select></Field>
+        <p className="text-caption text-secondary">{mode === 'independent' ? '只使用下方显式指令，不读取来源聊天的新消息。创建时冻结执行身份、模型、权限和交付位置；Git 仓库创建专用受管 worktree，失败则拒绝创建。资源协调仅覆盖当前实例数据库，其他实例和外部工具不受此约束。' : mode === 'fresh' ? '每次触发在一个新会话里只执行下方指令，不带聊天历史，适合固定的更新、部署、巡检。保存时冻结当前任务的 Agent、目录、模型和权限；上一次的执行会话在下一次触发时归档。任务停止或归档后计划停用。' : '沿用当前任务目录和聊天上下文；任务停止或归档后计划停用。'}{editing?.mode === 'independent' && '独立计划保存后不能切换模式；需要其他模式时创建新计划。'}</p>
         <p className="break-all text-caption text-subtle">执行身份：{editing?.executionContext?.agentId ?? session.agentId} · 模型 {editing?.executionContext?.model ?? session.model ?? 'Agent 默认模型'} · 权限 {editing?.executionContext?.permissionMode ?? session.permissionMode ?? '当前任务权限'} · 目录 {editing?.executionContext?.cwd ?? session.cwd}</p>
         <Field label="计划名称"><Input required value={name} maxLength={200} onChange={event => setName(event.target.value)}/></Field>
         <Field label="执行指令"><Textarea required rows={2} value={prompt} maxLength={20000} onChange={event => setPrompt(event.target.value)}/></Field>
@@ -188,7 +189,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
     </details>}
     {data?.schedules.map(item => <div key={item.id} className="rounded-lg border border-default p-3 text-caption">
       <div className="flex flex-wrap items-center justify-between gap-2"><strong>{item.name} · {item.enabled ? '已启用' : '已停用'}</strong>{data && <div className="flex flex-wrap gap-2">{(!readOnly || item.mode === 'independent') && <><Button disabled={run.isPending} onClick={() => run.mutate(item)}>立即执行</Button><Button onClick={() => edit(item)}>编辑</Button></>}<Button disabled={toggle.isPending || (readOnly && !item.enabled && item.mode !== 'independent')} onClick={() => { toggle.reset(); if (item.enabled) toggle.mutate(item); else setEnabling(item); }}>{item.enabled ? '停用' : '启用'}</Button><Button variant="danger" onClick={() => { remove.reset(); setDeleting(item); }}>删除</Button></div>}</div>
-      <details className="mt-2"><summary className="cursor-pointer">执行指令与上下文</summary><p className="whitespace-pre-wrap break-words text-body text-secondary">{item.prompt}</p><p className="break-all text-subtle">{item.mode === 'independent' ? `独立计划 · 仅显式指令 · ${item.executionContext?.agentId ?? session.agentId} · ${item.executionContext?.cwd ?? '目录待核实'} · 协调范围：当前实例数据库` : `沿用任务上下文 · ${session.cwd}`}</p></details>
+      <details className="mt-2"><summary className="cursor-pointer">执行指令与上下文</summary><p className="whitespace-pre-wrap break-words text-body text-secondary">{item.prompt}</p><p className="break-all text-subtle">{item.mode === 'independent' ? `独立计划 · 仅显式指令 · ${item.executionContext?.agentId ?? session.agentId} · ${item.executionContext?.cwd ?? '目录待核实'} · 协调范围：当前实例数据库` : item.mode === 'fresh' ? `每次新会话 · 不带聊天历史 · ${item.executionContext?.agentId ?? session.agentId} · ${item.executionContext?.cwd ?? session.cwd}` : `沿用任务上下文 · ${session.cwd}`}</p></details>
       <p className="mt-2 text-secondary">{scheduleRule(item)}</p>
       <details className="mt-1 text-subtle"><summary className="cursor-pointer">精确规则与执行条件</summary><p className="mt-1 break-all">{item.trigger.kind === 'cron' ? item.trigger.expression : item.trigger.kind === 'interval' ? `每 ${item.trigger.everySeconds} 秒，自 ${item.trigger.anchorAt} 起` : item.trigger.localDateTime}</p><p>{item.condition.kind === 'always' ? '每次到期执行' : `CI 新失败 · ${item.condition.provider}${item.condition.workflow ? ` · ${item.condition.workflow}` : ''}`}</p></details>
       <p className="text-secondary">{scheduleNextExecution(item)}</p>
@@ -207,13 +208,13 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
         <h4 className="text-body font-semibold">{enabling.name}</h4>
         <p className="whitespace-pre-wrap break-words text-body">{enabling.prompt}</p>
         <dl className="space-y-2 text-caption text-secondary">
-          <div><dt className="font-semibold">运行模式与补跑</dt><dd>{enabling.mode === 'independent' ? '独立计划，仅显式指令，协调范围为当前实例数据库' : '沿用任务上下文'} · {enabling.misfirePolicy === 'skip' ? '错过就跳过' : '恢复后最多补一次'}{enabling.maxLatenessSeconds ? `，有效期 ${enabling.maxLatenessSeconds / 60} 分钟` : ''}</dd></div><div><dt className="font-semibold">何时运行</dt><dd>{scheduleRule(enabling)}</dd></div>
+          <div><dt className="font-semibold">运行模式与补跑</dt><dd>{enabling.mode === 'independent' ? '独立计划，仅显式指令，协调范围为当前实例数据库' : enabling.mode === 'fresh' ? '每次新会话，不带聊天历史' : '沿用任务上下文'} · {enabling.misfirePolicy === 'skip' ? '错过就跳过' : '恢复后最多补一次'}{enabling.maxLatenessSeconds ? `，有效期 ${enabling.maxLatenessSeconds / 60} 分钟` : ''}</dd></div><div><dt className="font-semibold">何时运行</dt><dd>{scheduleRule(enabling)}</dd></div>
           <div><dt className="font-semibold">执行条件</dt><dd>{enabling.condition.kind === 'always' ? '每次到期执行' : `CI 出现新的失败构建时执行 · ${enabling.condition.workflow ?? '所有工作流'}`}</dd></div>
           <div><dt className="font-semibold">所属任务与目录</dt><dd className="break-all">{sessionDisplayName(session, taskTitle, session.id)} · {enabling.executionContext?.cwd ?? session.cwd}</dd></div>
           <div><dt className="font-semibold">冻结的执行身份</dt><dd>{enabling.executionContext?.agentId ?? session.agentId} · 模型 {enabling.executionContext?.model ?? session.model ?? 'Agent 默认模型'} · 权限 {enabling.executionContext?.permissionMode ?? session.permissionMode ?? '当前任务权限'}</dd></div>
           <div><dt className="font-semibold">保存的投递位置</dt><dd className="break-all">{scheduleDelivery(enablingTarget, session)}</dd></div>
         </dl>
-        <p className="text-caption text-secondary">{enabling.mode === 'independent' ? '启用后按规则排入专用执行任务，仅使用保存的指令与工作区。' : '启用后按规则排入本任务执行。'}停用会保留计划和历史，正在运行的任务会继续。</p>
+        <p className="text-caption text-secondary">{enabling.mode === 'independent' ? '启用后按规则排入专用执行任务，仅使用保存的指令与工作区。' : enabling.mode === 'fresh' ? '启用后每次触发新开一个会话执行保存的指令，结果发回这里。' : '启用后按规则排入本任务执行。'}停用会保留计划和历史，正在运行的任务会继续。</p>
         {data?.schedules.find(item => item.id === enabling.id)?.revision !== enabling.revision && <Banner tone="warning">计划已更新，请取消并重新检查最新计划后启用。</Banner>}
         {toggle.error && <Banner tone="danger">{toggle.error.message}</Banner>}
       </Dialog.Body>}

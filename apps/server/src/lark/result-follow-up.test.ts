@@ -330,6 +330,31 @@ describe('重复请求时提议每天自动执行', () => {
     expect(followUpLabels(h.card(second.final_message_id!))).toEqual(['给我对外回复', '再详细点']);
   });
 
+  it('已有同名（内容不同、已停用）的计划时：不新建不更新，toast 和结果卡下的回复用中文说明', async () => {
+    const h = await harness({ automation: true });
+    await h.run(event('om_1', '详细总结下今天的聊天内容'));
+    const second = await h.run(event('om_2', '详细总结下今天的聊天内容'));
+    const value = callbackOf(h.card(second.final_message_id!), 'schedule_daily');
+    const existing = await h.automation!.createSchedule(second.sessionId, { name: '详细总结下今天的聊天内容', prompt: '只总结报警相关的讨论',
+      trigger: { kind: 'cron', expression: '0 18 * * *' }, timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' } }, 'ou_alice');
+
+    const toast = await h.click(value, 'ou_alice', second);
+    expect(toast).toMatchObject({ type: 'info', content: expect.stringContaining('本对话已有同名定时任务，未重复创建') });
+    expect(JSON.stringify(toast)).not.toMatch(/already has a schedule/);
+    const notice = await vi.waitFor(() => {
+      const found = h.service.reply.mock.calls.map(([input]: any[]) => input).find((input: any) => input.taskName === '定时任务');
+      expect(found).toBeDefined();
+      return found;
+    });
+    expect(notice).toMatchObject({ messageId: second.final_message_id });
+    expect(notice.markdown).toContain('本对话已有同名定时任务「详细总结下今天的聊天内容」（状态：已停用），未重复创建；如需修改请编辑该任务。');
+    expect(notice.markdown).toContain(`/schedule enable ${existing.id}`);
+    const schedules = (await h.automation!.listBySession(second.sessionId, 'ou_alice')).schedules;
+    expect(schedules).toHaveLength(1);
+    expect(schedules[0]).toMatchObject({ id: existing.id, prompt: '只总结报警相关的讨论', enabled: false, revision: existing.revision });
+    expect(h.prompts).toHaveLength(2);
+  });
+
   it('点击后建出每天的 cron 计划、回报到原话题，卡上改为「已设为…」，重复点击不重复建', async () => {
     const h = await harness({ automation: true, config: { allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }] } });
     await h.run(event('om_1', '详细总结下今天的聊天内容'));

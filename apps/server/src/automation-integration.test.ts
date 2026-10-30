@@ -334,6 +334,43 @@ describe('Agent schedule request delivery', () => {
     } finally { service.close(); }
   });
 
+  it('updates a same-name schedule from a later chat request and says so on a new confirmation card', async () => {
+    const f = await fixture();
+    const bodies: any[] = [];
+    const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes('tenant_access_token')) return response({ code: 0, tenant_access_token: 'token', expire: 7200 });
+      if (String(url).endsWith('/images')) return response({ code: 0, data: { image_key: 'img_test' } });
+      bodies.push(JSON.parse(String(init?.body)));
+      return response({ code: 0, data: { message_id: `om_confirmation_${bodies.length}` } });
+    });
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_a', LARK_APP_SECRET: 'test-secret' }, fetcher as typeof fetch);
+    try {
+      const integration = createAutomationIntegration(f.repos, f.runtime as any, f.groups as any, { client: () => service, log: { warn: vi.fn() } });
+      const automation = new SessionAutomationService({ repositories: f.repos, runtime: f.runtime as any, authorize: integration.authorize, prepareDelivery: integration.prepareDelivery });
+      const request = (requestId: string, prompt: string) => runAgentScheduleRequest({ automation,
+        prepareDelivery: id => integration.prepareMessageDelivery('s1', { appId: 'cli_a', chatId: 'oc_chat', messageId: `om_${requestId}`, replyInThread: true }, id),
+        sendConfirmation: integration.sendScheduleRequest
+      }, { sessionId: 's1', requestId, actorId: 'ou_alice' }, { cron: '0 2 * * *', name: '更新并部署 Open Lark', prompt });
+      const created = await request('task_1', '拉取最新代码并部署');
+      expect(created).toMatchObject({ pendingConfirmation: true, message: expect.stringContaining('已发确认卡') });
+      expect(created).not.toHaveProperty('updated');
+      const updated = await request('task_2', '拉取最新代码、跑测试后部署');
+      expect(updated).toMatchObject({ pendingConfirmation: true, updated: true, scheduleId: created.scheduleId, message: expect.stringContaining('已更新同名的现有任务') });
+      expect(await f.repos.config.list('session_automation/schedule/')).toHaveLength(1);
+      expect(JSON.parse((await f.repos.config.get(`session_automation/schedule/${created.scheduleId}`))!)).toMatchObject({ prompt: '拉取最新代码、跑测试后部署', enabled: false });
+      expect(bodies).toHaveLength(2);
+      expect(bodies[1].uuid).not.toBe(bodies[0].uuid);
+      const notice = JSON.stringify(JSON.parse(bodies[1].content));
+      expect(notice).toContain('已更新本对话里同名的现有任务「更新并部署 Open Lark」，没有新建');
+      expect(notice).toContain('dutydeck_schedule_enable');
+      expect(JSON.stringify(JSON.parse(bodies[0].content))).not.toContain('已更新');
+      // 同一条更新请求重试：没有新改动，不再发卡。
+      await request('task_2', '拉取最新代码、跑测试后部署');
+      expect(bodies).toHaveLength(2);
+    } finally { service.close(); }
+  });
+
   it('reports to the message of the requesting turn, even when a later message in the session is newer', async () => {
     const f = await fixture();
     await f.repos.channelMappings.save(mapping('om_request', 'task_now', '2026-10-16T09:00:00.000Z'));

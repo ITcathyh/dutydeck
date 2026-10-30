@@ -1950,8 +1950,9 @@ export class DutydeckRuntime {
   /** The schedule admission and frozen configuration must be durable before session birth. */
   async startScheduleSession(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session> {
     this.assertReady();
-    if (input.source !== 'schedule' || !input.sourceId || !/^ses_schedule_[a-f0-9]{64}$/.test(stableSessionId) || input.workspaceMode !== 'worktree') {
-      throw new RuntimeError('INVALID_SCHEDULE_SESSION', 'Schedule sessions require a stable identity and managed worktree', 400);
+    // independent 计划用受管 worktree；fresh 计划每次触发一个新会话，沿用来源会话的共享目录。
+    if (input.source !== 'schedule' || !input.sourceId || !/^ses_schedule_[a-f0-9]{64}$/.test(stableSessionId) || (input.workspaceMode !== 'worktree' && input.workspaceMode !== 'shared')) {
+      throw new RuntimeError('INVALID_SCHEDULE_SESSION', 'Schedule sessions require a stable identity and an explicit workspace mode', 400);
     }
     await beforeStart();
     const pending = this.backgroundStarts.get(stableSessionId);
@@ -1963,8 +1964,8 @@ export class DutydeckRuntime {
       const current = await this.withSessionMetadata(existing);
       const { capability } = this.sessionCapability(agent, input);
       const { cwd, ...configured } = sessionConfigOf(agent, input);
-      const expected = { protocol: capability.protocol, workspaceMode: 'worktree', source: input.source, sourceId: input.sourceId, agentId: input.agentId, ...configured, systemPrompt: agent.systemPrompt };
-      if (current.workspaceSourceCwd !== cwd || Object.entries(expected).some(([key, value]) => (current[key as keyof Session] ?? undefined) !== (value ?? undefined))) throw new RuntimeError('SCHEDULE_SESSION_CONFLICT', 'Schedule session immutable configuration changed', 409);
+      const expected = { protocol: capability.protocol, workspaceMode: input.workspaceMode, source: input.source, sourceId: input.sourceId, agentId: input.agentId, ...configured, systemPrompt: agent.systemPrompt };
+      if (current.workspaceSourceCwd !== cwd || Object.entries(expected).some(([key, value]) => ((key === 'workspaceMode' ? current.workspaceMode ?? 'shared' : current[key as keyof Session]) ?? undefined) !== (value ?? undefined))) throw new RuntimeError('SCHEDULE_SESSION_CONFLICT', 'Schedule session immutable configuration changed', 409);
       await beforeStart();
       return current;
     }

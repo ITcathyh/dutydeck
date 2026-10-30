@@ -99,6 +99,26 @@ it('coalesces stable schedule session creation and verifies immutable worktree s
   await expect(h.runtime.start(input)).rejects.toMatchObject({code:'INVALID_SCHEDULE_SESSION'});
 });
 
+it('starts a fresh schedule session in the origin shared directory, reuses it per occurrence, and rejects it once the schedule moves on',async()=>{
+  const h=await fixture(),origin=await h.runtime.start({agentId:'fixture',cwd:h.cwd}),authorize=vi.fn(async()=>{});
+  const first='ses_schedule_'+'c'.repeat(64),second='ses_schedule_'+'d'.repeat(64),key='session_automation/schedule/fresh-one';
+  const record=(executionSessionId:string)=>JSON.stringify({schemaVersion:1,id:'fresh-one',sessionId:origin.id,executionSessionId,mode:'fresh',actorId:'installation_owner'});
+  await h.repos.config.set(key,record(first));
+  const input={agentId:'fixture',cwd:origin.cwd,workspaceMode:'shared' as const,source:'schedule',sourceId:'fresh-one',permissionMode:'ask' as const};
+  const [one,two]=await Promise.all([h.runtime.startScheduleSession(input,first,authorize),h.runtime.startScheduleSession(input,first,authorize)]);
+  expect(one.id).toBe(first);expect(two.id).toBe(first);expect(one.cwd).toBe(origin.cwd);expect(one.workspaceMode).toBe('shared');
+  await expect(h.runtime.startScheduleSession({...input,model:'other'},first,authorize)).rejects.toMatchObject({code:'SCHEDULE_SESSION_CONFLICT'});
+  const request=(sessionId:string,key:string)=>({version:1 as const,namespace:'schedule' as const,sessionId,key,prompt:'scheduled',mode:'queue' as const,actor:{kind:'installation_owner' as const,id:'installation_owner'},options:{},skills:[],sources:[],sourcePayload:null});
+  const accepted=await h.runtime.dispatchRequest(request(first,'occurrence-1'));
+  await vi.waitFor(()=>expect(h.repos.execution.getTaskExecution(accepted.id)?.task.status).toBe('completed'));
+  // 下一次触发换上新会话后，上一次的会话不能再接收计划任务；归档只读保留。
+  await h.repos.config.set(key,record(second));
+  await expect(h.runtime.dispatchRequest(request(first,'occurrence-late'))).rejects.toMatchObject({code:'SCHEDULE_EXECUTION_SCOPE_INVALID'});
+  expect((await h.runtime.archive(first)).archivedAt).toBeTruthy();
+  const next=await h.runtime.startScheduleSession(input,second,authorize);
+  expect(next.id).toBe(second);expect(next.cwd).toBe(origin.cwd);
+});
+
 it('rejects a stale idle proof if resource evidence changes at the claim boundary and rechecks after an idle event',async()=>{
   const h=await fixture(),one=await h.runtime.start({agentId:'fixture',cwd:h.cwd}),two=await h.runtime.start({agentId:'fixture',cwd:h.cwd});
   h.onClaim(()=>{

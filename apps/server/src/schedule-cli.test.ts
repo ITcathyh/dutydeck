@@ -31,6 +31,21 @@ describe('schedule CLI', () => {
     ]);
   });
 
+  it('sends the execution mode on create and update and validates it before any request', async () => {
+    const f = fixture();
+    await f.run('create', { session: 'ses_1', name: 'Deploy', prompt: 'Update and deploy', cron: '0 2 * * *', timezone: 'UTC', mode: 'fresh' });
+    expect(f.requests.at(-1)).toMatchObject({ path: '/api/sessions/ses_1/automation/schedules', method: 'POST', body: { name: 'Deploy', mode: 'fresh' } });
+    await f.run('update', { session: 'ses_1', mode: 'session' }, 'schedule_1');
+    expect(f.requests.at(-1)).toMatchObject({ method: 'PATCH', body: { expectedRevision: 4, mode: 'session' } });
+    const count = f.requests.length;
+    await expect(f.run('create', { session: 'ses_1', name: 'Bad', prompt: 'x', every: '5', mode: 'reuse' })).rejects.toThrow();
+    await expect(f.run('update', { session: 'ses_1', mode: 'independent' }, 'schedule_1')).rejects.toThrow();
+    expect(f.requests).toHaveLength(count);
+    const handler = vi.fn();
+    await createCliProgram('test', { schedule: handler }).parseAsync(['node', 'dutydeck', 'schedule', 'update', 'schedule_1', '--mode', 'fresh']);
+    expect(handler).toHaveBeenCalledWith('update', 'schedule_1', expect.objectContaining({ mode: 'fresh' }));
+  });
+
   it('validates input before requests and preserves the created session ID on a partial failure', async () => {
     const f = fixture();
     for (const input of [
@@ -104,5 +119,7 @@ describe('schedule CLI', () => {
     const handler = vi.fn();
     await createCliProgram('test', { scheduleRequest: handler }).parseAsync(['node', 'dutydeck', 'schedule', 'request', '--turn', 'turn-1', '--cron', '0 9 * * *', '--prompt', '汇总告警']);
     expect(handler).toHaveBeenCalledWith(expect.objectContaining({ turn: 'turn-1', cron: '0 9 * * *', prompt: '汇总告警' }));
+    await runScheduleRequest({ turn: 'turn-1', cron: '0 2 * * *', prompt: '部署', mode: 'fresh', env, fetcher });
+    expect(JSON.parse(String(calls.at(-1)!.init.body))).toEqual({ prompt: '部署', cron: '0 2 * * *', mode: 'fresh' });
   });
 });

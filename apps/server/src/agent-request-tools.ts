@@ -27,7 +27,7 @@ export interface AgentRequestToolsOptions {
   /** 定时或自动续作触发的一轮不能再代办，免得每次到点又建一个计划、又发一条命令。 */
   automatedTask(taskId: string): boolean;
   tools: Pick<LarkAgentToolsService, 'requestContext' | 'assertWorkbenchTurn' | 'commands'>;
-  automation: Pick<SessionAutomationService, 'createSchedule'> & Partial<Pick<SessionAutomationService, 'requestScheduleStop'>>;
+  automation: Pick<SessionAutomationService, 'requestSchedule'> & Partial<Pick<SessionAutomationService, 'requestScheduleStop'>>;
   /** 回报位置定为这一轮请求的那条消息，和用户在那里发 /schedule 一样。 */
   prepareDelivery(sessionId: string, taskId: string, scheduleId: string): Promise<void>;
   /** 把确认卡发到计划的回报位置；同一计划重复调用只发一张。 */

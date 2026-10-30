@@ -7,7 +7,7 @@ import { AgentGroupToolHttpClient } from './lark/agent-tools-cli.js';
 export type ScheduleCliAction = 'create' | 'list' | 'show' | 'update' | 'enable' | 'disable' | 'run' | 'delete' | 'history';
 export interface ScheduleCliInput {
   session?: string; agent?: string; cwd?: string; model?: string; permissionMode?: string; workspace?: string;
-  name?: string; prompt?: string; cron?: string; every?: string; at?: string; timezone?: string;
+  name?: string; prompt?: string; cron?: string; every?: string; at?: string; timezone?: string; mode?: string;
   input?: string; file?: string; expectedRevision?: string; idempotencyKey?: string;
   instance?: string; url?: string; database?: string;
 }
@@ -32,7 +32,7 @@ async function configuration(input: ScheduleCliInput, create: boolean) {
   if (input.cron !== undefined) values.trigger = { kind: 'cron', expression: input.cron };
   if (input.at !== undefined) values.trigger = { kind: 'at', localDateTime: input.at };
   if (input.every !== undefined) values.trigger = { kind: 'interval', everySeconds: Number(input.every) * 60, anchorAt: new Date().toISOString() };
-  for (const key of ['name', 'prompt', 'timezone'] as const) if (input[key] !== undefined) values[key] = input[key];
+  for (const key of ['name', 'prompt', 'timezone', 'mode'] as const) if (input[key] !== undefined) values[key] = input[key];
   if (create) {
     const parsed = createSessionScheduleInputSchema.parse({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }, ...values });
     previewSessionSchedule({ id: 'preview', ...parsed }, new Date());
@@ -87,7 +87,7 @@ export async function runScheduleCli(action: ScheduleCliAction, id: string | und
   return request('PATCH', endpoint, { ...config, expectedRevision });
 }
 
-export interface ScheduleRequestCliInput { turn?: string; prompt?: string; name?: string; every?: string; cron?: string; at?: string; env?: NodeJS.ProcessEnv; fetcher?: typeof fetch }
+export interface ScheduleRequestCliInput { turn?: string; prompt?: string; name?: string; every?: string; cron?: string; at?: string; mode?: string; env?: NodeJS.ProcessEnv; fetcher?: typeof fetch }
 /** 飞书会话里的 Agent 替这一轮发起人设置定时任务：宿主发确认卡，对方点「启用」才开始（见 agent-request-tools.ts）。 */
 export async function runScheduleRequest(input: ScheduleRequestCliInput): Promise<Record<string, unknown>> {
   const every = input.every === undefined ? undefined : Number(input.every);
@@ -95,6 +95,6 @@ export async function runScheduleRequest(input: ScheduleRequestCliInput): Promis
   return new AgentGroupToolHttpClient(input).request('/schedules', {
     method: 'POST',
     headers: { 'x-dutydeck-work-turn': input.turn ?? '' },
-    body: JSON.stringify({ prompt: input.prompt, name: input.name, every, cron: input.cron, at: input.at })
+    body: JSON.stringify({ prompt: input.prompt, name: input.name, every, cron: input.cron, at: input.at, mode: input.mode })
   });
 }

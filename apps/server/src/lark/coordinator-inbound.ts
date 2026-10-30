@@ -919,7 +919,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       if (!automation || !requests) return;
       const messageOrigin = { appId: config.appId, chatId: event.chatId, messageId: larkMessageAnchor(event), replyInThread: Boolean(event.threadId?.trim()) };
       const result = await runAgentScheduleRequest({ automation, prepareDelivery: id => requests.prepareDelivery(sessionId, messageOrigin, id),
-        sendConfirmation: schedule => requests.sendConfirmation(schedule, '按控制操作处理。')
+        sendConfirmation: (schedule, notice) => requests.sendConfirmation(schedule, notice ? `按控制操作处理。\n\n${notice}` : '按控制操作处理。')
       }, { sessionId, requestId: event.messageId, actorId: event.senderOpenId }, decision.params);
       if (result.confirmationDelivery === 'failed') return;
       return 'handled';

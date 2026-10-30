@@ -6,6 +6,22 @@ import type { LarkMessageEvent } from './listener.js';
 import type { StoredLarkConfig } from './config.js';
 import type { LarkCardInput } from './service.js';
 import { collapsiblePanel, escapeCardInline } from './card-elements.js';
+import { safeLarkWebUrl } from './card-actions.js';
+
+/**
+ * 飞书里面向人的建计划入口撞上同名计划时的中文说明：不新建，也不自动更新。
+ * 不是同名冲突时返回 undefined，由调用方按原错误处理。
+ */
+export async function scheduleNameConflictNotice(error: unknown, automation: Pick<SessionAutomationService, 'listBySession'>, sessionId: string, actorId: string | undefined, name: string, config: Pick<StoredLarkConfig, 'webBaseUrl'>) {
+  if (!(error instanceof RuntimeError) || error.code !== 'SESSION_AUTOMATION_SCHEDULE_NAME_CONFLICT') return undefined;
+  const existing = (await automation.listBySession(sessionId, actorId).catch(() => undefined))?.schedules.find(item => item.name === name.trim());
+  if (!existing) return `本对话已有同名定时任务「${escapeCardInline(name.trim())}」，未重复创建；如需修改请编辑该任务。`;
+  const base = config.webBaseUrl?.trim().replace(/\/$/, '');
+  const link = base ? safeLarkWebUrl(`${base}/?nav=automation&automationSession=${encodeURIComponent(sessionId)}&schedule=${encodeURIComponent(existing.id)}`) : undefined;
+  return `本对话已有同名定时任务「${escapeCardInline(existing.name)}」（状态：${existing.enabled ? '启用' : '已停用'}），未重复创建；如需修改请编辑该任务。`
+    + `\n\n${existing.enabled ? '停用' : '启用'}：\`/schedule ${existing.enabled ? 'disable' : 'enable'} ${existing.id}\``
+    + (link ? `\n\n[在 Web 中编辑](${link})` : '');
+}
 
 /**
  * Agent 代建计划的确认卡，发出和点按钮后原位重绘共用：做什么、什么时候、发到哪。
@@ -47,14 +63,20 @@ export async function executeScheduleCommand(automation: SessionAutomationServic
     const minutes = Number(id);
     if (!Number.isInteger(minutes) || minutes < 1 || minutes > 525600) throw new RuntimeError('SCHEDULE_INTERVAL_INVALID', '分钟数须为 1 到 525600 的整数', 400);
     const prompt = rest.join(' ');
-    schedule = await automation.createSchedule(sessionId, { name: prompt.slice(0, 100), prompt,
-      trigger: { kind: 'interval', everySeconds: minutes * 60, anchorAt: '1970-01-01T00:00:00.000Z' }, timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' } }, event.senderOpenId, {
-      key: `${config.appId}:${event.messageId}`,
-      prepareDelivery: async automationId => {
-        if (!store?.compareAndSet) throw new RuntimeError('SCHEDULE_ORIGIN_UNAVAILABLE', '无法持久保存此话题的回报位置', 503);
-        await store.compareAndSet(`automation.delivery-target.${automationId}`, undefined, JSON.stringify({ appId: config.appId, chatId: event.chatId, replyMessageId: larkMessageAnchor(event), replyInThread: event.chatType === 'group' }));
-      }
-    });
+    try {
+      schedule = await automation.createSchedule(sessionId, { name: prompt.slice(0, 100), prompt,
+        trigger: { kind: 'interval', everySeconds: minutes * 60, anchorAt: '1970-01-01T00:00:00.000Z' }, timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' } }, event.senderOpenId, {
+        key: `${config.appId}:${event.messageId}`,
+        prepareDelivery: async automationId => {
+          if (!store?.compareAndSet) throw new RuntimeError('SCHEDULE_ORIGIN_UNAVAILABLE', '无法持久保存此话题的回报位置', 503);
+          await store.compareAndSet(`automation.delivery-target.${automationId}`, undefined, JSON.stringify({ appId: config.appId, chatId: event.chatId, replyMessageId: larkMessageAnchor(event), replyInThread: event.chatType === 'group' }));
+        }
+      });
+    } catch (error) {
+      const notice = await scheduleNameConflictNotice(error, automation, sessionId, event.senderOpenId, prompt.slice(0, 100), config);
+      if (notice) return notice;
+      throw error;
+    }
     return `已保存「${schedule.name}」，每 ${minutes} 分钟执行一次，当前停用。\n\n执行内容：${schedule.prompt}\n\n启用：\`/schedule enable ${schedule.id}\``;
   }
   if (['enable', 'disable'].includes(action) && id && !rest.length) {

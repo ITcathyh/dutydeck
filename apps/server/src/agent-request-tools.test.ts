@@ -30,7 +30,7 @@ async function setup() {
   let active: { taskId: string; actorId?: string; attemptId?: string } | undefined = { taskId: 'task_1', actorId: 'ou_alice', attemptId: 'attempt_1' };
   const automated = new Set<string>();
   const saved = new Map<string, PublicSessionSchedule>();
-  const createSchedule = vi.fn<AgentRequestToolsOptions['automation']['createSchedule']>(async (sessionId, input, actorId, receipt) => {
+  const requestSchedule = vi.fn<AgentRequestToolsOptions['automation']['requestSchedule']>(async (sessionId, input, actorId, receipt) => {
     const id = `schedule_${receipt!.key}`;
     if (!saved.has(id)) {
       await receipt!.prepareDelivery!(id);
@@ -38,7 +38,7 @@ async function setup() {
         dstPolicy: input.dstPolicy, condition: { kind: 'always' }, enabled: false, createdAt: '', updatedAt: '' } as PublicSessionSchedule);
     }
     expect(actorId).toBe('ou_alice');
-    return saved.get(id)!;
+    return { schedule: saved.get(id)! };
   });
   const prepareDelivery = vi.fn(async () => {});
   const sendConfirmation = vi.fn(async () => {});
@@ -51,7 +51,7 @@ async function setup() {
     return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   });
   const requestScheduleStop = vi.fn(async () => ({ pendingDelivery: true, scheduleId: 'host_bound' }));
-  await registerAgentRequestTools(app, { runtime: { getActiveTaskContext: () => active }, automatedTask: taskId => automated.has(taskId), tools, automation: { createSchedule, requestScheduleStop }, prepareDelivery, sendConfirmation });
+  await registerAgentRequestTools(app, { runtime: { getActiveTaskContext: () => active }, automatedTask: taskId => automated.has(taskId), tools, automation: { requestSchedule, requestScheduleStop }, prepareDelivery, sendConfirmation });
   const request = (target: Session, payload: object, turn = capabilities.workbenchTurnToken(target.id, active?.taskId ?? '', active?.attemptId ?? ''), path = 'schedules') => app.inject({
     method: 'POST', url: `/api/lark/agent-tools/${path}`, payload,
     headers: { authorization: `Bearer ${capabilities.environmentFor(target).dutydeck_group_tools_token}`, 'x-dutydeck-work-turn': turn }
@@ -63,7 +63,7 @@ async function setup() {
     headers: { authorization: `Bearer ${capabilities.environmentFor(group).dutydeck_group_tools_token}`, ...(turn ? { 'x-dutydeck-work-turn': turn } : {}) }
   });
   const currentTurn = () => capabilities.workbenchTurnToken(group.id, active?.taskId ?? '', active?.attemptId ?? '');
-  return { group, p2p, request, command, agent, requestScheduleStop, currentTurn, tools, createSchedule, prepareDelivery, sendConfirmation, saved, automated, setActive: (value: typeof active) => { active = value; } };
+  return { group, p2p, request, command, agent, requestScheduleStop, currentTurn, tools, requestSchedule, prepareDelivery, sendConfirmation, saved, automated, setActive: (value: typeof active) => { active = value; } };
 }
 
 describe('Agent schedule requests', () => {
@@ -81,7 +81,7 @@ describe('Agent schedule requests', () => {
     const first = await f.request(f.group, { every: 15, prompt: '看看这个话题有没有排查结论', name: '盯结论' });
     expect(first.statusCode).toBe(200);
     expect(first.json()).toMatchObject({ pendingConfirmation: true, scheduleId: expect.stringMatching(/^schedule_agent-request:/) });
-    const input = f.createSchedule.mock.calls[0]![1];
+    const input = f.requestSchedule.mock.calls[0]![1];
     expect(input).toMatchObject({ name: '盯结论', prompt: '看看这个话题有没有排查结论', trigger: { kind: 'interval', everySeconds: 900 }, timezone: 'Asia/Shanghai', condition: { kind: 'always' } });
     expect(f.prepareDelivery).toHaveBeenCalledWith('ses_group', 'task_1', first.json().scheduleId);
     expect(f.sendConfirmation).toHaveBeenCalledTimes(1);
@@ -92,7 +92,7 @@ describe('Agent schedule requests', () => {
     expect(f.saved.size).toBe(1);
     const other = await f.request(f.group, { cron: '0 9 * * *', prompt: '汇总昨天的告警' });
     expect(other.json().scheduleId).not.toBe(first.json().scheduleId);
-    expect(f.createSchedule.mock.calls[2]![1]).toMatchObject({ name: '汇总昨天的告警', trigger: { kind: 'cron', expression: '0 9 * * *' } });
+    expect(f.requestSchedule.mock.calls[2]![1]).toMatchObject({ name: '汇总昨天的告警', trigger: { kind: 'cron', expression: '0 9 * * *' } });
 
     // 用户已经点过「启用」：不再发确认卡。
     f.saved.get(first.json().scheduleId)!.enabled = true;
@@ -101,12 +101,20 @@ describe('Agent schedule requests', () => {
     expect(f.sendConfirmation).not.toHaveBeenCalled();
   });
 
+  it('passes the fresh-session mode through and rejects unknown modes', async () => {
+    const f = await setup();
+    expect((await f.request(f.group, { cron: '0 2 * * *', prompt: '更新并部署', name: '部署', mode: 'fresh' })).statusCode).toBe(200);
+    expect(f.requestSchedule.mock.calls[0]![1]).toMatchObject({ name: '部署', mode: 'fresh' });
+    expect((await f.request(f.group, { cron: '0 2 * * *', prompt: '更新并部署', mode: 'independent' })).statusCode).toBe(400);
+    expect(f.requestSchedule).toHaveBeenCalledTimes(1);
+  });
+
   it('works in p2p chats and for one-off times', async () => {
     const f = await setup();
     const response = await f.request(f.p2p, { at: '2026-10-17T10:00', prompt: '提醒我看发布结果' });
     expect(response.statusCode).toBe(200);
-    expect(f.createSchedule.mock.calls[0]![0]).toBe('ses_p2p');
-    expect(f.createSchedule.mock.calls[0]![1].trigger).toEqual({ kind: 'at', localDateTime: '2026-10-17T10:00' });
+    expect(f.requestSchedule.mock.calls[0]![0]).toBe('ses_p2p');
+    expect(f.requestSchedule.mock.calls[0]![1].trigger).toEqual({ kind: 'at', localDateTime: '2026-10-17T10:00' });
   });
 
   it('reports a saved, disabled schedule when confirmation delivery fails and retries the same schedule', async () => {
@@ -153,7 +161,7 @@ describe('Agent schedule requests', () => {
     expect((await f.request(f.group, { every: 15, prompt: 'x' })).json().error.code).toBe('AGENT_REQUEST_ACTOR_REQUIRED');
     f.setActive(undefined);
     expect((await f.request(f.group, { every: 15, prompt: 'x' })).statusCode).toBe(403);
-    expect(f.createSchedule).not.toHaveBeenCalled();
+    expect(f.requestSchedule).not.toHaveBeenCalled();
     expect(f.sendConfirmation).not.toHaveBeenCalled();
   });
 
@@ -163,7 +171,7 @@ describe('Agent schedule requests', () => {
     expect(preview.statusCode).toBe(200);
     expect(preview.json()).toMatchObject({ dryRun: true, needsConfirmation: true, schedule: { name: '汇总昨天的告警', prompt: '汇总昨天的告警', when: expect.any(String), nextRunAt: expect.any(String) },
       confirmCard: { body: expect.stringContaining('汇总昨天的告警') }, effect: expect.stringContaining('启用') });
-    expect(f.createSchedule).not.toHaveBeenCalled();
+    expect(f.requestSchedule).not.toHaveBeenCalled();
     expect(f.prepareDelivery).not.toHaveBeenCalled();
     expect(f.sendConfirmation).not.toHaveBeenCalled();
     const both = await f.request(f.group, { every: 15, cron: '0 9 * * *', prompt: 'x' });
@@ -294,5 +302,5 @@ it('does not accept a client-provided schedule origin or actor', async () => {
   for (const extra of [{ replyMessageId: 'om_forged' }, { actorId: 'ou_admin' }, { origin: { appId: 'cli_bot', chatId: 'oc_other', messageId: 'om_forged' } }]) {
     expect((await h.agent('POST', 'schedules', { prompt: '看 CI', cron: '0 9 * * *', ...extra })).statusCode).toBe(400);
   }
-  expect(h.createSchedule).not.toHaveBeenCalled(); expect(h.prepareDelivery).not.toHaveBeenCalled(); expect(h.sendConfirmation).not.toHaveBeenCalled();
+  expect(h.requestSchedule).not.toHaveBeenCalled(); expect(h.prepareDelivery).not.toHaveBeenCalled(); expect(h.sendConfirmation).not.toHaveBeenCalled();
 });

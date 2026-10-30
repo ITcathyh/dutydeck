@@ -62,6 +62,13 @@ const scheduleMisfireSchema = z.object({
   policy: z.enum(['skip', 'coalesce']), from: timestamp, to: timestamp, reason: z.string()
 }).strict();
 
+/**
+ * 计划在哪执行：`session` 在来源会话里接着跑（带历史）；`independent` 用一个专用受管 worktree 会话；
+ * `fresh` 每次触发开一个新会话（继承来源会话的 Agent、目录、模型和权限，不带历史），结果仍发回来源。缺省为 `session`。
+ */
+export const sessionScheduleModes = ['session', 'independent', 'fresh'] as const;
+export type SessionScheduleMode = (typeof sessionScheduleModes)[number];
+
 const executionContextSchema = z.object({
   cwd: z.string().min(1), sourceCwd: z.string().min(1).optional(), agentId: z.string().min(1), model: z.string().optional(),
   codexProfile: z.string().optional(), reasoningEffort: z.string().optional(),
@@ -82,7 +89,7 @@ export const sessionScheduleSchema = z.object({
   generation: z.number().int().positive(),
   sessionId: z.string().min(1),
   actorId: z.string().min(1).optional(),
-  mode: z.enum(['session', 'independent']).optional(),
+  mode: z.enum(sessionScheduleModes).optional(),
   misfirePolicy: z.enum(['skip', 'coalesce']).optional(),
   maxLatenessSeconds: z.number().int().positive().optional(),
   executionSessionId: z.string().min(1).optional(),
@@ -128,7 +135,7 @@ export const createSessionScheduleInputSchema = z.object({
   timezone: z.string().min(1).max(100),
   dstPolicy: z.object({ gap: z.enum(scheduleDstGapPolicies), overlap: z.enum(scheduleDstOverlapPolicies) }).strict(),
   condition: scheduleConditionInputSchema,
-  mode: z.enum(['session', 'independent']).optional(),
+  mode: z.enum(sessionScheduleModes).optional(),
   misfirePolicy: z.enum(['skip', 'coalesce']).optional(),
   maxLatenessSeconds: z.number().int().positive().optional()
 }).strict();
@@ -143,6 +150,8 @@ export const updateSessionScheduleInputSchema = z.object({
   dstPolicy: z.object({ gap: z.enum(scheduleDstGapPolicies), overlap: z.enum(scheduleDstOverlapPolicies) }).strict().optional(),
   condition: scheduleConditionInputSchema.optional(),
   enabled: z.boolean().optional(),
+  /** 只能在 `session` 与 `fresh` 之间切换；`independent` 创建后不可切换。 */
+  mode: z.enum(['session', 'fresh']).optional(),
   misfirePolicy: z.enum(['skip', 'coalesce']).optional(),
   maxLatenessSeconds: z.number().int().positive().nullable().optional()
 }).strict().refine(value => Object.keys(value).some(key => key !== 'expectedRevision'), { message: 'At least one field must be updated' });

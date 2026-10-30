@@ -754,6 +754,9 @@ Examples:
       .option('--every <minutes>', 'Fixed interval in minutes (minimum 1)')
       .option('--at <local-time>', 'Run once at YYYY-MM-DDTHH:mm[:ss] in --timezone')
       .option('--timezone <iana-zone>', 'IANA timezone; creation defaults to this computer’s timezone')
+      .option('--mode <mode>', action === 'create'
+        ? 'session (default): run in the session with its history; fresh: a new session each time, results still go back here; independent: one dedicated worktree session'
+        : 'Switch between session and fresh; independent schedules cannot switch')
       .option('--input <json>', 'Complete create input or update patch as JSON')
       .option('--file <path>', 'Read the JSON input from this file');
     if (action === 'create') command
@@ -776,6 +779,7 @@ Examples:
     .option('--every <minutes>', 'Fixed interval in whole minutes')
     .option('--cron <expression>', 'Five-field cron expression, Asia/Shanghai time')
     .option('--at <local-time>', 'Run once at YYYY-MM-DDTHH:mm, Asia/Shanghai time')
+    .option('--mode <mode>', 'session (default) or fresh: run each time in a new conversation without this chat history')
     .action(options => handlers.scheduleRequest?.(options));
   withTarget(settings.command('explain').description('Explain saved configuration, current session and recorded task/attempt evidence (read-only)'))
     .requiredOption('--session <id>', 'Session to explain')

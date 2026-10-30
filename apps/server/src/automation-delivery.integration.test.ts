@@ -73,7 +73,7 @@ async function fixture() {
   const schedule = async (output: string) => {
     state.output = output;
     const at = new Date(now.value.getTime() + 1000);
-    const created = await active.automation.createSchedule(session.id, { name: 'HTTP result', prompt: 'run', trigger: { kind: 'at', localDateTime: at.toISOString().slice(0, 19) },
+    const created = await active.automation.createSchedule(session.id, { name: `HTTP result ${output.slice(0, 20)}`, prompt: 'run', trigger: { kind: 'at', localDateTime: at.toISOString().slice(0, 19) },
       timezone: 'UTC', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' } }, 'ou_alice');
     await active.automation.updateSchedule(session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_alice');
     now.value = new Date(at.getTime() + 1);
