@@ -1,4 +1,4 @@
-import type { AgentEvent } from '@dutydeck/shared';
+import { timeLoop, type AgentEvent, type LoopTimingLog } from '@dutydeck/shared';
 
 export interface PersistentEventSource {
   highWaterMark(sessionId: string): number;
@@ -53,7 +53,8 @@ export class PersistentEventPublisher {
 
   constructor(
     private readonly source: PersistentEventSource,
-    private readonly onError?: ErrorHandler
+    private readonly onError?: ErrorHandler,
+    private readonly log?: LoopTimingLog
   ) {}
 
   subscribe(
@@ -150,7 +151,13 @@ export class PersistentEventPublisher {
     if (this.pollTimer !== undefined || this.closed || this.subscriptionsBySession.size === 0) {
       return;
     }
-    this.pollTimer = setInterval(() => this.pollActiveSessions(), POLL_INTERVAL_MS);
+    this.pollTimer = setInterval(() => {
+      // One cycle = waking every session and the drains that wake started.
+      void timeLoop('persistent-event-publisher.poll', this.log, async () => {
+        this.pollActiveSessions();
+        await Promise.allSettled([...this.inFlightDrains]);
+      });
+    }, POLL_INTERVAL_MS);
     this.pollTimer.unref();
   }
 

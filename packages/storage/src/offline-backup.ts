@@ -1,19 +1,29 @@
 import Database from 'better-sqlite3';
-import { chmodSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { chmodSync, closeSync, openSync, renameSync, rmSync } from 'node:fs';
 import { canonicalDatabase, openDatabaseControl } from './database-control.js';
 import { migrations } from './migrations.js';
 
 export const BACKUP_SCHEMA_VERSION = migrations.at(-1)!.version;
 
-/** Pin the committed WAL snapshot so continuous writers cannot restart backup. */
+/**
+ * Write a compact, transactionally consistent copy (WAL included) of the source.
+ * VACUUM INTO skips free pages that page-wise db.backup() would copy, and runs
+ * on a read-only connection so live writers are not blocked.
+ */
 export async function backupSqlite(source: string, target: string): Promise<void> {
+  // VACUUM INTO accepts only a missing or empty file; build in a private temp file, then replace.
+  const staging = `${target}.${process.pid}.${randomUUID()}.tmp`;
   const db = new Database(source, { readonly: true, fileMustExist: true });
   try {
-    db.exec('BEGIN');
-    db.prepare('SELECT rootpage FROM main.sqlite_schema LIMIT 1').get();
-    await db.backup(target);
+    closeSync(openSync(staging, 'wx', 0o600));
+    db.exec(`VACUUM INTO '${staging.replaceAll("'", "''")}'`);
+    chmodSync(staging, 0o600);
+    renameSync(staging, target);
+  } catch (error) {
+    rmSync(staging, { force: true });
+    throw error;
   } finally { db.close(); }
-  chmodSync(target, 0o600);
 }
 
 /** Existing access leases exclude live runtimes; the write lock also excludes raw SQLite writers. */

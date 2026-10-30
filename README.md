@@ -530,6 +530,7 @@ Web 侧栏「用量与成本」有「费用」「明细」「会话分析」三�
 
 - **月度上限**：美元，按机器人或按群设置。Web，或 `dutydeck settings usage set-cap <月度美元> --app <appId> [--chat <chatId>]`。
 - **价格表**：内置表含 OpenAI 和 Claude 型号，按模型名最长前缀匹配；匹配不到的型号记为“未定价”，不会套默认价。用 `DUTYDECK_USAGE_PRICING_JSON` 可整表覆盖。Claude 型号只认日期后缀（`-YYYYMMDD`）和 `-latest`，所以 `claude-opus-5-6` 不会落到 `claude-opus-5` 的价格上。
+- **用量型号**：依次取 Agent 读数、任务、会话、Agent 配置里的型号；都没有时采用 ACP Agent 自己报告的当前型号（去掉 `[推理强度]` 后缀，如 Codex），来源记为 `runtime`。
 - **用量来源**：ACP Agent 报多少算多少，不报成本的按价格表估算。终端模式 Claude 的用量来自 transcript，是估算；子代理用量来自 `<session>/subagents/` 下的文件。同一轮多个型号时各自按自己的单价算，任一型号没有单价，整轮记为未定价。Codex、Traex 终端模式没有用量。
 - **“部分用量未知，上限可能不准”**：任一轮的用量读不到时出现，位置是 Web 上限卡片、拒绝说明和告警。什么算未知：子代理文件读不到或格式不认识、daemon 重启后恢复的那一轮、未定价的型号。
 - **没有计入的加价项**：美国境内推理 1.1 倍、快速模式、Batch、1 小时缓存写、Haiku 5.5 的分档价（Haiku 5.5 记为未定价）。所以估算偏低，不是账单。

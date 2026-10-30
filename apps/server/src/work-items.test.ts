@@ -25,6 +25,22 @@ it('does not read historical completed result blobs during idle ticks, including
     expect(list.mock.calls.filter(([prefix]) => prefix === 'work_item:')).toEqual([]);
   } finally { await service.close(); repos.close(); await rm(directory, { recursive: true, force: true }); }
 });
+it.each([[800, 1], [20, 0]])('the 1s tick taking %sms logs %s slow-loop warning(s)', async (tickMs, warnings) => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  let now = 0;
+  const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+  const directory = await mkdtemp(join(tmpdir(), 'work-tick-timing-'));
+  const repos = createRepositories(join(directory, 'timing.db'));
+  const warn = vi.fn();
+  const service = new WorkItemService({ repositories: repos, runtime: {} as DutydeckRuntime, authorize: async () => true, log: { warn } });
+  try {
+    vi.spyOn(repos.workItems, 'listScheduledIds').mockImplementation(() => { now += tickMs; return Promise.resolve([]); });
+    service.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(warn).toHaveBeenCalledTimes(warnings);
+    if (warnings) expect(warn).toHaveBeenCalledWith(expect.objectContaining({ loop: 'work-items.tick', durationMs: tickMs }), expect.any(String));
+  } finally { await service.close(); repos.close(); clock.mockRestore(); vi.useRealTimers(); await rm(directory, { recursive: true, force: true }); }
+});
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); });
 async function eventually(check: () => Promise<boolean>) {
   for (let i = 0; i < 100; i++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }

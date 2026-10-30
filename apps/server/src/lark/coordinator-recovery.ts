@@ -7,7 +7,7 @@ import { larkNotice } from './notify-tier.js';
 import { describeUnknownTaskResolution, resolveUnknownTask, type UnknownTaskRuntime } from '../task-resolution.js';
 import type { LarkInboxRecord } from './task-inbox.js';
 import type { LarkLaunchOptions } from './new-session.js';
-import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, RuntimeError, unknownTaskActionLabels, unknownTaskRetryWarning, type AgentEvent, type ChannelMapping, type Session, type TaskRecord, type UnknownTaskAction, type UnknownTaskFacts } from '@dutydeck/shared';
+import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, RuntimeError, unknownTaskActionLabels, unknownTaskRetryWarning, timeLoop, type AgentEvent, type ChannelMapping, type Session, type TaskRecord, type UnknownTaskAction, type UnknownTaskFacts } from '@dutydeck/shared';
 import { larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
 import { larkPendingVerificationKey, parseLarkPendingVerifications } from './auto-verification.js';
 import { LarkServiceError } from './service.js';
@@ -58,11 +58,12 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   }
 
   private async performReconcile(config: StoredLarkConfig) {
-    if (!this.cardMappings) return 0;
-    let unresolved = await performLarkCardReconcile({
+    const cardMappings = this.cardMappings;
+    if (!cardMappings) return 0;
+    let unresolved = await timeLoop('lark.reconcile.cards', this.log, () => performLarkCardReconcile({
       runtime: this.runtime,
       service: this.service,
-      cardMappings: this.cardMappings,
+      cardMappings,
       log: this.log,
       config,
       channel: larkCardChannel(config.appId),
@@ -110,8 +111,8 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
           cardInput: { ...(effective.adhdMode === true ? { adhdMode: true } : {}), capabilities: { ...this.capabilitiesForTask(restored), ...verification.capabilities, ...await this.resultActionCapabilities(restored, effective, saved.state),
             ...cause ? { canContinueInPlace: true } : {} } } };
       }
-    });
-    unresolved += await this.workflows?.reconcile(config.appId) ?? 0;
+    }));
+    unresolved += await timeLoop('lark.reconcile.interactions', this.log, async () => await this.workflows?.reconcile(config.appId) ?? 0);
     let textReceiptReader: Awaited<ReturnType<typeof explicitFinalTextReceiptReader>> | undefined;
     for (const record of await this.workflows?.list(config.appId) ?? []) {
       if (record.kind !== 'result' || !['accepted', 'needs_changes'].includes(record.state)) continue;
@@ -127,7 +128,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   reconcile(config: StoredLarkConfig) {
     this.reconcileConfig = config;
     if (this.reconcileRun) return this.reconcileRun;
-    const run = this.performReconcile(config).finally(() => {
+    const run = timeLoop('lark.reconcile', this.log, () => this.performReconcile(config)).finally(() => {
       if (this.reconcileRun === run) this.reconcileRun = undefined;
     });
     this.reconcileRun = run;

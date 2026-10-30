@@ -27,7 +27,7 @@ export interface UsageLedgerEntry {
   model?: string;
   /** 实际服务商只采用读数明确提供的证据；不能从 Agent 名称推断。 */
   provider?: string;
-  modelSource?: 'reading' | 'task' | 'session' | 'agent' | 'unknown' | 'legacy_unknown';
+  modelSource?: 'reading' | 'task' | 'session' | 'agent' | 'runtime' | 'unknown' | 'legacy_unknown';
   pricingSource?: 'reported' | 'builtin_model' | 'custom_model' | 'custom_default' | 'unmatched' | 'none' | 'legacy_unknown';
   pricingVersion?: string;
   pricingMatch?: string;

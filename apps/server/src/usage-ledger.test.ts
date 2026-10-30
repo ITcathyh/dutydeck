@@ -73,7 +73,7 @@ describe('claude pricing', () => {
 
   it('never falls back to another model, another family or another vendor for unknown names', () => {
     // 未来的 5.6、没录入的 Haiku 5.5（按请求提示长度分档，账本分不了档）、别家模型、代理别名、Claude Code 的模型别名，一律未定价。
-    for (const name of ['claude-opus-5-6', 'claude-opus-5-5-fast', 'claude-haiku-5-5', 'claude-sonnet-4', 'claude-opus-4-1', 'opus', 'default', 'gemini-3.8-flash', 'auto_model/alwaysday1_max', 'claude', '']) {
+    for (const name of ['claude-opus-5-6', 'claude-opus-5-5-fast', 'claude-haiku-5-5', 'claude-sonnet-4', 'claude-opus-4-1', 'opus', 'default', 'gemini-3.8-flash', 'gemini-3.8-flash-n', 'auto_model/alwaysday1_max', 'claude', '']) {
       expect(perMTok(name, { inputTokens: 1000 }), name).toBeUndefined();
       expect(measureUsage({ reading: { usageRef: 'r', breakdown: { inputTokens: 1000 } }, freshTokens: true, model: name, pricing: defaultUsagePricing }), name)
         .toMatchObject({ dataStatus: 'unpriced', unpricedReason: 'unknown_model', pricingSource: 'unmatched', inputTokens: 1000 });
@@ -378,6 +378,32 @@ describe('complete pricing and provenance', () => {
     await h.ledger.record(current, { taskId: 't', attemptId: 'reported-provider' }, { provider: 'actual-service', model: 'actual-model', usageRef: 'two', cost: { amount: 0.1, currency: 'USD' } });
     expect(append.mock.calls[1]![0]).toMatchObject({ provider: 'actual-service', model: 'actual-model', modelSource: 'reading', pricingSource: 'reported' });
     h.repos.close();
+  });
+});
+
+describe('model reported by the ACP runtime', () => {
+  const codex = session('ses_codex', undefined, undefined, 'codex');
+  it('fills a missing model without the effort suffix and marks its source; configured models win', async () => {
+    const h = harness();
+    await h.repos.sessions.save(codex);
+    const append = vi.spyOn(h.repos.usage, 'append');
+    await h.ledger.record(codex, { taskId: 't', attemptId: 'with-tokens' }, { state: 'turn_usage', runtimeModel: 'gpt-5-mini[high]', usageRef: 'u1', breakdown: { inputTokens: 1_000_000 } });
+    expect(append.mock.calls[0]![0]).toMatchObject({ model: 'gpt-5-mini', modelSource: 'runtime', dataStatus: 'estimated', pricingMatch: 'gpt-5-mini' });
+    await h.ledger.record(codex, { taskId: 't', attemptId: 'no-tokens' }, { state: 'turn_usage', runtimeModel: 'gpt-6-astra[xhigh]' });
+    await h.ledger.record(codex, { taskId: 't', attemptId: 'no-tokens' });
+    expect(append).toHaveBeenCalledTimes(2); // the completed event after a reading adds no second row
+    expect(append.mock.calls[1]![0]).toMatchObject({ model: 'gpt-6-astra', modelSource: 'runtime', dataStatus: 'unavailable' });
+    expect((await h.repos.usage.totals({ sessionId: codex.id })).entries).toBe(2);
+    const configured = { ...codex, model: 'gpt-5-nano' };
+    await h.repos.sessions.save(configured);
+    await h.ledger.record(configured, { taskId: 't', attemptId: 'configured' }, { state: 'turn_usage', runtimeModel: 'gpt-5-mini[high]', usageRef: 'u2', breakdown: { inputTokens: 1 } });
+    expect(append.mock.calls.at(-1)![0]).toMatchObject({ model: 'gpt-5-nano', modelSource: 'session' });
+    h.repos.close();
+  });
+
+  it('keeps an unpriced runtime model unpriced instead of guessing a price', () => {
+    expect(measureUsage({ reading: { usageRef: 'r', breakdown: { inputTokens: 1000 } }, freshTokens: true, model: 'gpt-6-astra', pricing: defaultUsagePricing }))
+      .toMatchObject({ dataStatus: 'unpriced', unpricedReason: 'unknown_model' });
   });
 });
 

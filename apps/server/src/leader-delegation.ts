@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { z } from 'zod';
-import { parseLarkSourceId, RuntimeError, workPlanSchema, type AgentConfig, type RepositoryBundle, type WorkPlan } from '@dutydeck/shared';
+import { parseLarkSourceId, RuntimeError, timeLoop, workPlanSchema, type AgentConfig, type RepositoryBundle, type WorkPlan } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { larkPermissionMode, readLarkConfig } from './lark/config.js';
 import { runReadonlyPrompt } from './lark/readonly-decider.js';
@@ -159,7 +159,7 @@ export class LeaderDelegationService {
       if (Date.now() - Date.parse(record.createdAt) <= RESUME_LIMIT_MS || record.plan && await this.options.work.exists(record.workId)) this.schedule(record.id);
       else await this.fail(record, '服务重启前没来得及开始，已超过 30 分钟，不再自动执行').catch(error => this.options.log?.warn({ error, delegationId: record.id }, 'Leader 规划记录更新失败'));
     }
-    this.timer = setInterval(() => { void this.flushPending().catch(() => {}); }, 60_000);
+    this.timer = setInterval(() => { void timeLoop('leader-delegation.flush', this.options.log, () => this.flushPending()).catch(() => {}); }, 60_000);
     this.timer.unref();
     await this.flushPending();
   }

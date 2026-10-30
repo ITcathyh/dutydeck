@@ -1,6 +1,7 @@
 export * from './history.js';
 export * from './event-content.js';
 export * from './plugin-results.js';
+export * from './loop-timing.js';
 import { z } from 'zod';
 import {
   channelBotBrands,

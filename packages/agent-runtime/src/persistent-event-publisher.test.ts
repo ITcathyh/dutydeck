@@ -909,4 +909,25 @@ describe('PersistentEventPublisher', () => {
 
     await publisher.close();
   });
+
+  it.each([[700, 1], [10, 0]])('补查周期耗时 %sms 时慢周期告警 %s 次', async (cycleMs, warnings) => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    let now = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const warn = vi.fn();
+    const publisher = new PersistentEventPublisher({
+      highWaterMark: () => 0,
+      listWindow: async () => { now += cycleMs; return []; }
+    }, undefined, { warn });
+    try {
+      publisher.subscribe('ses_slow_poll', () => {});
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(warn).toHaveBeenCalledTimes(warnings);
+      if (warnings) expect(warn).toHaveBeenCalledWith(expect.objectContaining({ loop: 'persistent-event-publisher.poll', durationMs: cycleMs }), expect.any(String));
+    } finally {
+      await publisher.close();
+      clock.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });
