@@ -314,7 +314,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     const row = db.prepare('SELECT value FROM configs WHERE key=?').get(`session_automation/schedule/${s.sourceId}`) as {value:string}|undefined;
     let value: {schemaVersion?:unknown;id?:unknown;sessionId?:unknown;executionSessionId?:unknown;mode?:unknown;actorId?:unknown};
     try { value = JSON.parse(row?.value ?? 'null'); } catch { fail('SCHEDULE_EXECUTION_SCOPE_INVALID'); }
-    if (!value || value.schemaVersion !== 1 || value.id !== s.sourceId || value.mode !== 'independent' || value.executionSessionId !== s.id
+    if (!value || value.schemaVersion !== 1 || value.id !== s.sourceId || (value.mode !== 'independent' && value.mode !== 'fresh') || value.executionSessionId !== s.id
       || typeof value.sessionId !== 'string' || value.sessionId === s.id || typeof value.actorId !== 'string' || !value.actorId) fail('SCHEDULE_EXECUTION_SCOPE_INVALID');
     const origin = session(value.sessionId);
     if (origin.source === 'schedule') fail('SCHEDULE_EXECUTION_SCOPE_INVALID');

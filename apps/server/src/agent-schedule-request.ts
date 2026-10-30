@@ -10,6 +10,8 @@ const requestSchema = z.object({
   every: z.number().int().min(1).max(525_600).optional(),
   cron: z.string().trim().min(1).optional(),
   at: z.string().trim().min(1).optional(),
+  /** fresh：每次在新会话里执行，不带本对话历史；缺省沿用本对话。 */
+  mode: z.enum(['session', 'fresh']).optional(),
   dryRun: z.boolean().optional()
 }).strict().refine(input => [input.every, input.cron, input.at].filter(value => value !== undefined).length === 1, { message: '--every、--cron、--at 只选一个', path: ['trigger'] });
 const scheduleParam = (key: string) => key === 'trigger' ? '--every/--cron/--at' : `--${key}`;
@@ -27,7 +29,7 @@ export function parseAgentScheduleRequest(raw: unknown) {
   let next: ReturnType<typeof previewSessionSchedule>;
   try {
     input = createSessionScheduleInputSchema.parse({ name: body.name ?? body.prompt.slice(0, 100), prompt: body.prompt, trigger,
-      timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' } });
+      timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }, ...(body.mode ? { mode: body.mode } : {}) });
     next = previewSessionSchedule({ id: 'preview', ...input }, new Date());
   }
   catch (error) {
@@ -44,26 +46,33 @@ export interface LarkScheduleRequests {
 }
 
 export async function runAgentScheduleRequest(options: {
-  automation: Pick<SessionAutomationService, 'createSchedule'>;
+  automation: Pick<SessionAutomationService, 'requestSchedule'>;
   prepareDelivery(scheduleId: string): Promise<void>;
-  sendConfirmation(schedule: PublicSessionSchedule): Promise<void>;
+  sendConfirmation(schedule: PublicSessionSchedule, notice?: string): Promise<void>;
 }, origin: { sessionId: string; requestId: string; actorId: string }, raw: unknown) {
   const { sessionId, requestId, actorId } = origin;
   const { body, dryRun, input, next } = parseAgentScheduleRequest(raw);
   if (dryRun) return { dryRun: true, needsConfirmation: true, schedule: { name: input.name, prompt: input.prompt, when: describeScheduleTrigger(input.trigger, input.timezone), timezone: input.timezone, ...(next ? { nextRunAt: next.localLabel } : {}) },
     confirmCard: { title: '定时任务', body: `**做什么**：${input.prompt}\n**什么时候**：${describeScheduleTrigger(input.trigger, input.timezone)}\n点「启用」后开始，不点不会执行。` },
-    effect: '在本轮请求消息下发启用卡；计划先建成停用状态，用户点「启用」后才开始，结果发回当前对话。' };
-  // 同一条消息里同样的请求重试时拿回同一个计划，不会再建一个、再发一张卡。
-  const schedule = await options.automation.createSchedule(sessionId, input, actorId, {
+    effect: `在本轮请求消息下发启用卡；计划先建成停用状态，用户点「启用」后才开始，结果发回当前对话。本对话已有同名计划时改为更新它，不新建。${input.mode === 'fresh' ? '每次在新会话里执行，不带本对话历史。' : ''}` };
+  // 同一条消息里同样的请求重试时拿回同一个计划，不会再建一个、再发一张卡；同名计划改为更新。
+  const { schedule, updated } = await options.automation.requestSchedule(sessionId, input, actorId, {
     key: `agent-request:${createHash('sha256').update(JSON.stringify([requestId, body])).digest('hex')}`,
     prepareDelivery: id => options.prepareDelivery(id)
   });
+  if (updated && !updated.changed && schedule.enabled) {
+    return { pendingConfirmation: false, updated: true, scheduleId: schedule.id, message: '本对话已有同名定时任务，设置相同且仍在启用，没有改动。' };
+  }
   if (schedule.enabled) return { pendingConfirmation: false, scheduleId: schedule.id, message: '用户已经启用了这个定时任务。' };
-  try { await options.sendConfirmation(schedule); }
+  const notice = updated
+    ? `已更新本对话里同名的现有任务「${schedule.name}」，没有新建。${updated.changed && updated.wasEnabled ? '原任务已暂停，' : ''}点「确认启用」后按下面的设置执行。`
+    : undefined;
+  try { await options.sendConfirmation(schedule, notice); }
   catch (error) {
     return { saved: true, pendingConfirmation: true, scheduleId: schedule.id, confirmationDelivery: 'failed' as const,
       warning: { code: 'SCHEDULE_CONFIRMATION_DELIVERY_FAILED', message: error instanceof Error ? error.message : String(error) },
       message: `计划已保存但确认卡未送达，当前停用，不会执行。可在本轮用相同参数重试补发确认卡，不要修改参数重复创建；也可告诉用户在当前对话发送 /schedule enable ${schedule.id} 手动启用。` };
   }
+  if (updated) return { pendingConfirmation: true, updated: true, scheduleId: schedule.id, message: '已更新同名的现有任务并发确认卡，用户点「启用」后按新设置执行。只回一句已更新现有任务并发卡，不要说新建了任务，也不要让用户发命令。' };
   return { pendingConfirmation: true, scheduleId: schedule.id, message: '已发确认卡，用户点「启用」后才开始。只回一句已发卡，不要说已设置，也不要让用户发命令。' };
 }

@@ -94,6 +94,8 @@ export interface SessionAutomationRuntime {
   getSession(id: string): Promise<Session | undefined>;
   dispatchRequest(request: TaskRequestV1): Promise<{ id: string; status: string }>;
   startScheduleSession?(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session>;
+  /** 归档上一次 fresh 执行用过的会话；缺省时只靠空闲进程清理。 */
+  archive?(sessionId: string): Promise<unknown>;
   subscribe?(sessionId: string, listener: (event: AgentEvent) => void): () => void;
 }
 
@@ -140,6 +142,25 @@ function iso(date: Date) { return date.toISOString(); }
 function plus(date: Date, milliseconds: number) { return new Date(date.getTime() + milliseconds).toISOString(); }
 function occurrenceId(schedule: SessionSchedule, scheduledForUtc: string) {
   return `occ_${createHash('sha256').update(`${schedule.id}\0${schedule.generation}\0${scheduledForUtc}`).digest('hex')}`;
+}
+function receiptScheduleId(sessionId: string, actorId: string | undefined, key: string) {
+  return `schedule_${createHash('sha256').update(JSON.stringify([sessionId, actorId, key])).digest('hex')}`;
+}
+/** fresh 计划每次触发的执行会话：由触发编号派生，同一次触发重试拿回同一个会话。 */
+function freshSessionId(scheduleId: string, occurrence: string) {
+  return `ses_schedule_${createHash('sha256').update(`fresh\0${scheduleId}\0${occurrence}`).digest('hex')}`;
+}
+/** 冻结来源会话的执行配置；fresh 沿用来源会话的目录（共享工作区），不另建 worktree。 */
+function freshExecutionContext(session: Session): NonNullable<SessionSchedule['executionContext']> {
+  return { cwd: session.cwd, agentId: session.agentId,
+    ...(session.model ? { model: session.model } : {}), ...(session.codexProfile ? { codexProfile: session.codexProfile } : {}),
+    ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
+    ...(session.permissionMode ? { permissionMode: session.permissionMode } : {}), contextMode: 'prompt_only' };
+}
+/** 间隔触发按间隔比较：代建请求每次带新的锚点，不能据此判为改动。 */
+function sameTrigger(left: SessionSchedule['trigger'], right: SessionSchedule['trigger']) {
+  if (left.kind === 'interval' && right.kind === 'interval') return left.everySeconds === right.everySeconds;
+  return canonicalExecutionJson(left) === canonicalExecutionJson(right);
 }
 export const scheduleRequestKey = (occurrenceIdValue: string) => `session-automation:schedule:${occurrenceIdValue}`;
 export const ciRequestKey = (subscriptionId: string) => `session-automation:ci:${subscriptionId}`;
@@ -598,12 +619,14 @@ export class SessionAutomationService {
     const session = await this.requireSession(sessionId);
     if (!isSessionRunnable(session)) throw new RuntimeError('SESSION_NOT_ACTIVE', 'Session is not active', 409);
     const input = createSessionScheduleInputSchema.parse(rawInput);
-    const id = receipt ? `schedule_${createHash('sha256').update(JSON.stringify([sessionId, actorId, receipt.key])).digest('hex')}` : `schedule_${randomUUID()}`;
+    const id = receipt ? receiptScheduleId(sessionId, actorId, receipt.key) : `schedule_${randomUUID()}`;
     const existing = receipt ? await this.getRecord(scheduleKey(id), readStoredSessionSchedule) : undefined;
     if (existing) return publicSchedule(existing.value);
+    await this.assertNameAvailable(sessionId, input.name);
     const now = iso(this.clock());
     const condition = input.condition.kind === 'always' ? input.condition : await this.ciCondition(session, input.condition);
     await receipt?.prepareDelivery?.(id);
+    if (input.mode === 'fresh' && !this.options.runtime.startScheduleSession) throw new RuntimeError('FRESH_SCHEDULE_UNAVAILABLE', 'Fresh-session schedules are unavailable on this instance', 503);
     if (input.mode === 'independent') {
       if (!this.options.runtime.startScheduleSession) throw new RuntimeError('INDEPENDENT_SCHEDULE_UNAVAILABLE', 'Independent schedules are unavailable on this instance', 503);
       try { await promisify(execFile)('git', ['-C', session.cwd, 'rev-parse', '--git-common-dir']); }
@@ -633,6 +656,7 @@ export class SessionAutomationService {
           ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
           ...(session.permissionMode ? { permissionMode: session.permissionMode } : {}), contextMode: 'prompt_only' }
       } : {}),
+      ...(input.mode === 'fresh' ? { executionContext: freshExecutionContext(session) } : {}),
       enabled: false,
       createdAt: now,
       updatedAt: now
@@ -654,16 +678,47 @@ export class SessionAutomationService {
     return publicSchedule(schedule);
   }
 
+  /**
+   * 聊天里代建计划：同一会话已有同名计划（含已停用，不含已删除）时改为更新它，不再新建第二条。
+   * 有实际改动时一并停用，等用户在确认卡上重新启用；没有改动时原样返回。同一请求重试拿回同一结果。
+   */
+  async requestSchedule(sessionId: string, rawInput: CreateSessionScheduleInput, actorId: string, receipt: { key: string; prepareDelivery?: (id: string) => Promise<void> }): Promise<{ schedule: PublicSessionSchedule; updated?: { changed: boolean; wasEnabled: boolean } }> {
+    await this.requireAuthorized(sessionId, actorId);
+    const input = createSessionScheduleInputSchema.parse(rawInput);
+    const own = await this.getRecord(scheduleKey(receiptScheduleId(sessionId, actorId, receipt.key)), readStoredSessionSchedule);
+    if (own) return { schedule: publicSchedule(own.value) };
+    // 旧数据里可能已有多条同名：先改仍在启用的那条，其次最近改过的。
+    const [existing] = (await this.sameNameSchedules(sessionId, input.name))
+      .sort((a, b) => Number(b.enabled) - Number(a.enabled) || b.updatedAt.localeCompare(a.updatedAt));
+    if (!existing) return { schedule: await this.createSchedule(sessionId, input, actorId, receipt) };
+    if (input.mode === 'independent' && existing.mode !== 'independent') throw new RuntimeError('SESSION_AUTOMATION_MODE_IMMUTABLE', 'An existing schedule cannot switch to independent mode', 409);
+    const mode = input.mode === 'independent' ? undefined : input.mode;
+    const patch: Omit<UpdateSessionScheduleInput, 'expectedRevision'> = {
+      ...(input.prompt !== existing.prompt ? { prompt: input.prompt } : {}),
+      ...(!sameTrigger(input.trigger, existing.trigger) ? { trigger: input.trigger } : {}),
+      ...(input.timezone !== existing.timezone ? { timezone: input.timezone } : {}),
+      ...(canonicalExecutionJson(input.dstPolicy) !== canonicalExecutionJson(existing.dstPolicy) ? { dstPolicy: input.dstPolicy } : {}),
+      ...(input.condition.kind !== existing.condition.kind ? { condition: input.condition } : {}),
+      ...(mode && mode !== (existing.mode ?? 'session') ? { mode } : {})
+    };
+    const changed = Object.keys(patch).length > 0;
+    const schedule = changed
+      ? await this.updateSchedule(sessionId, existing.id, { expectedRevision: existing.revision, ...patch, enabled: false }, actorId)
+      : publicSchedule(existing);
+    return { schedule, updated: { changed, wasEnabled: existing.enabled } };
+  }
+
   private async executionSession(schedule: SessionSchedule): Promise<Session> {
-    if (schedule.mode !== 'independent') return this.requireSession(schedule.sessionId);
+    if (schedule.mode !== 'independent' && schedule.mode !== 'fresh') return this.requireSession(schedule.sessionId);
     if (!schedule.executionSessionId || !schedule.executionContext || !this.options.runtime.startScheduleSession) {
       throw new RuntimeError('INDEPENDENT_SCHEDULE_UNAVAILABLE', 'Independent execution context is unavailable', 409);
     }
     const context = schedule.executionContext;
+    const fresh = schedule.mode === 'fresh';
     const session = await this.options.runtime.startScheduleSession({
-      agentId: context.agentId, cwd: context.sourceCwd ?? context.cwd,
+      agentId: context.agentId, cwd: fresh ? context.cwd : context.sourceCwd ?? context.cwd,
       model: context.model, codexProfile: context.codexProfile, reasoningEffort: context.reasoningEffort,
-      permissionMode: context.permissionMode, source: 'schedule', sourceId: schedule.id, workspaceMode: 'worktree'
+      permissionMode: context.permissionMode, source: 'schedule', sourceId: schedule.id, workspaceMode: fresh ? 'shared' : 'worktree'
     }, schedule.executionSessionId, async () => {
       await this.requireAuthorized(schedule.sessionId, schedule.actorId);
       const current = await this.getRecord(scheduleKey(schedule.id), readStoredSessionSchedule);
@@ -672,6 +727,7 @@ export class SessionAutomationService {
       }
     });
     this.watchSession(session.id);
+    if (fresh) return session;
     if (context.cwd !== session.cwd) {
       const stored = await this.getRecord(scheduleKey(schedule.id), readStoredSessionSchedule);
       if (stored && context.cwd === context.sourceCwd) {
@@ -690,7 +746,7 @@ export class SessionAutomationService {
     const session = await this.options.runtime.getSession(sessionId);
     if (session?.source !== 'schedule') return false;
     const schedule = session.sourceId ? await this.getRecord(scheduleKey(session.sourceId), readStoredSessionSchedule) : undefined;
-    if (!schedule || schedule.value.mode !== 'independent' || schedule.value.executionSessionId !== sessionId || schedule.value.actorId !== actorId) {
+    if (!schedule || (schedule.value.mode !== 'independent' && schedule.value.mode !== 'fresh') || schedule.value.executionSessionId !== sessionId || schedule.value.actorId !== actorId) {
       throw new RuntimeError('INDEPENDENT_SCHEDULE_REVOKED', 'Independent schedule execution authority is unavailable', 403);
     }
     await this.requireAuthorized(schedule.value.sessionId, actorId);
@@ -884,6 +940,15 @@ export class SessionAutomationService {
     if (stored.value.deletedAt) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_DELETED', 'Session schedule was deleted', 409);
     if (stored.value.revision !== input.expectedRevision) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
     if (input.enabled === true && stored.value.mode !== 'independent' && !isSessionRunnable(session)) throw new RuntimeError('SESSION_NOT_ACTIVE', 'Session is not active', 409);
+    if (input.name !== undefined && input.name !== stored.value.name) await this.assertNameAvailable(sessionId, input.name, id);
+    const currentMode = stored.value.mode ?? 'session';
+    const modeChanged = input.mode !== undefined && input.mode !== currentMode;
+    if (modeChanged) {
+      if (currentMode === 'independent') throw new RuntimeError('SESSION_AUTOMATION_MODE_IMMUTABLE', 'Independent schedules cannot switch mode; create a new schedule instead', 409);
+      if (input.mode === 'fresh' && !this.options.runtime.startScheduleSession) throw new RuntimeError('FRESH_SCHEDULE_UNAVAILABLE', 'Fresh-session schedules are unavailable on this instance', 503);
+      // 正在执行的那次仍归属原会话；等它结束再切换，避免它的回执失去归属。
+      if (await this.hasPendingOccurrence(stored.value)) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_BUSY', 'This schedule already has unfinished work', 409);
+    }
     let condition = stored.value.condition;
     if (input.condition) condition = input.condition.kind === 'always' ? input.condition : await this.ciCondition(session, input.condition);
     const now = this.clock();
@@ -897,6 +962,7 @@ export class SessionAutomationService {
       ...(input.dstPolicy !== undefined ? { dstPolicy: input.dstPolicy } : {}),
       condition,
       ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+      ...(modeChanged ? { mode: input.mode, executionSessionId: undefined, executionContext: input.mode === 'fresh' ? freshExecutionContext(session) : undefined } : {}),
       revision: stored.value.revision + 1,
       generation: stored.value.generation + (executionChanged ? 1 : 0),
       ...(executionChanged && actorId && stored.value.mode !== 'independent' ? { actorId } : {}),
@@ -909,6 +975,7 @@ export class SessionAutomationService {
       nextDueAt: executionChanged ? candidate.enabled ? previewSessionSchedule(candidate, now)?.scheduledForUtc : undefined : stored.value.nextDueAt
     });
     if (!await this.replace(scheduleKey(id), stored.raw, schedule)) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
+    if (modeChanged) await this.retireFreshSession(stored.value);
     return publicSchedule(schedule);
   }
 
@@ -951,14 +1018,17 @@ export class SessionAutomationService {
     if (stored.value.revision !== input.expectedRevision) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
     if (stored.value.mode !== 'independent' && !isSessionRunnable(session)) throw new RuntimeError('SESSION_NOT_ACTIVE', 'Session is not active', 409);
     if (await this.hasPendingOccurrence(stored.value)) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_BUSY', 'This schedule already has unfinished work', 409);
-    const actor = resolveAutomationActor(session, stored.value.mode === 'independent' ? stored.value.actorId : actorId);
+    // 专用执行会话的任务只接受计划冻结的 actor（账本按计划核对），手动执行也以它的身份运行。
+    const actor = resolveAutomationActor(session, stored.value.mode === 'independent' || stored.value.mode === 'fresh' ? stored.value.actorId : actorId);
     if (!actor) throw new RuntimeError('SESSION_AUTOMATION_FORBIDDEN', 'Schedule actor domain cannot be verified', 403);
-    const reserved = sessionScheduleSchema.parse({ ...stored.value, pendingOccurrence: { id: manualId, generation: stored.value.generation, scheduledForUtc: iso(this.clock()), triggerSource: 'manual', actor } });
+    const reserved = sessionScheduleSchema.parse({ ...stored.value, ...this.freshReservation(stored.value, manualId),
+      pendingOccurrence: { id: manualId, generation: stored.value.generation, scheduledForUtc: iso(this.clock()), triggerSource: 'manual', actor } });
     if (!await this.replace(scheduleKey(id), stored.raw, reserved)) {
       const latest = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
       if (latest?.value.pendingOccurrence?.id === manualId) return this.runReservedOccurrence(latest.value);
       throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule changed while reserving execution', 409);
     }
+    await this.retireFreshSession(stored.value);
     return this.runReservedOccurrence(reserved);
   }
 
@@ -1336,6 +1406,34 @@ export class SessionAutomationService {
     await this.startPendingDeliveries(parsed);
   }
 
+  /** fresh 计划每次占用执行槽时同一次 CAS 换上这次触发的会话编号；槽是独占的，上一次已结束。 */
+  private freshReservation(schedule: SessionSchedule, occurrence: string) {
+    return schedule.mode === 'fresh' ? { executionSessionId: freshSessionId(schedule.id, occurrence) } : {};
+  }
+
+  /** 换到下一次触发后归档上一次 fresh 会话（只读保留历史）；失败只告警，进程仍由空闲清理回收。 */
+  private async retireFreshSession(previous: SessionSchedule) {
+    const sessionId = previous.mode === 'fresh' ? previous.executionSessionId : undefined;
+    if (!sessionId) return;
+    this.subscriptions.get(sessionId)?.();
+    this.subscriptions.delete(sessionId);
+    const session = await this.options.runtime.getSession(sessionId);
+    if (!session || session.archivedAt || session.source !== 'schedule' || session.sourceId !== previous.id || !this.options.runtime.archive) return;
+    try { await this.options.runtime.archive(sessionId); }
+    catch (error) { console.warn('SESSION_AUTOMATION_FRESH_ARCHIVE_FAILED', error instanceof RuntimeError ? error.code : 'UNEXPECTED_ERROR'); }
+  }
+
+  /** 同一会话里未删除的计划按名称唯一；停用的也算，避免同名计划并存。 */
+  private async sameNameSchedules(sessionId: string, name: string, exceptId?: string) {
+    const records = await this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule, undefined, { field: 'sessionId', values: [sessionId] });
+    return records.map(item => item.value).filter(item => item.sessionId === sessionId && !item.deletedAt && item.name === name.trim() && item.id !== exceptId);
+  }
+
+  private async assertNameAvailable(sessionId: string, name: string, exceptId?: string) {
+    const [existing] = await this.sameNameSchedules(sessionId, name, exceptId);
+    if (existing) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_NAME_CONFLICT', `This session already has a schedule named "${existing.name}" (${existing.id}); update that schedule instead`, 409);
+  }
+
   private async hasPendingOccurrence(schedule: SessionSchedule) {
     if (this.quarantinedSchedules.has(schedule.id)) return true;
     if (schedule.pendingOccurrence) {
@@ -1406,11 +1504,12 @@ export class SessionAutomationService {
       from: schedule.nextDueAt, to: iso(this.clock()),
       reason: skip ? schedule.maxLatenessSeconds !== undefined && lateBy > schedule.maxLatenessSeconds * 1000 ? 'lateness_window_expired' : 'missed_time_skipped' : 'missed_times_coalesced'
     } : undefined;
-    schedule = sessionScheduleSchema.parse({ ...schedule, pendingOccurrence: {
+    schedule = sessionScheduleSchema.parse({ ...schedule, ...this.freshReservation(schedule, id), pendingOccurrence: {
       id, generation: schedule.generation, scheduledForUtc: schedule.nextDueAt,
       misfireDecision: { action: skip ? 'skip' : 'run', ...(misfire ? { misfire } : {}) }
     } });
     if (!await this.replace(scheduleKey(schedule.id), stored.raw, schedule)) return;
+    await this.retireFreshSession(stored.value);
     const occurrence = await this.materializeOccurrence(schedule);
     if (occurrence.created && occurrence.value.runStatus === 'pending') await this.processOccurrence(occurrence);
     if (!openRunStatuses.has(occurrence.value.runStatus)) await this.advanceSchedule(schedule, schedule.nextDueAt!);
@@ -1433,14 +1532,15 @@ export class SessionAutomationService {
   private async processOccurrence(stored: { raw: string; value: SessionScheduleOccurrence }) {
     const occurrence = migrateOccurrence(stored.value);
     const scheduleStored = await this.getRecord(scheduleKey(occurrence.scheduleId), readStoredSessionSchedule);
-    if (!scheduleStored || !scheduleTriggerSchema.safeParse(scheduleStored.value.trigger).success || scheduleStored.value.generation !== occurrence.generation || scheduleStored.value.deletedAt || !scheduleStored.value.enabled && occurrence.triggerSource !== 'manual') {
+    if (!scheduleStored || !scheduleTriggerSchema.safeParse(scheduleStored.value.trigger).success || scheduleStored.value.generation !== occurrence.generation || scheduleStored.value.deletedAt || !scheduleStored.value.enabled && occurrence.triggerSource !== 'manual'
+      || scheduleStored.value.mode === 'fresh' && occurrence.executionSessionId !== scheduleStored.value.executionSessionId) {
       await this.finishOccurrence({ raw: stored.raw, value: occurrence }, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule generation changed before dispatch' });
       return;
     }
     let schedule = scheduleStored.value;
     const origin = await this.options.runtime.getSession(schedule.sessionId);
     let sessionMaybe: Session | undefined;
-    try { sessionMaybe = schedule.mode === 'independent' ? await this.executionSession(schedule) : origin; }
+    try { sessionMaybe = schedule.mode === 'independent' || schedule.mode === 'fresh' ? await this.executionSession(schedule) : origin; }
     catch (error) {
       await this.disableSchedule(scheduleStored, errorMessage(error));
       const accepted = occurrence.admission && this.execution.getAcceptedTask(occurrence.admission.taskId);

@@ -13,6 +13,7 @@ import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import { buildRepairConfirmCard } from './repair.js';
 import { SessionAutomationService } from '../session-automation.js';
+import { executeScheduleCommand } from './schedule-command.js';
 
 // mock 开放平台发布会话，避免触网
 vi.mock('./open-platform-session.js', () => ({ connectLarkOpenPlatformSession: vi.fn() }));
@@ -262,6 +263,32 @@ describe('F2-14: 没配白名单时禁止执行 /repair', () => {
     await h.coordinator.handle(event('msg_repair_alice', '/repair', { senderOpenId: 'ou_alice' }), h.config);
     const aliceReply = h.service.reply.mock.calls.at(-1)![0] as any;
     expect(JSON.stringify(aliceReply)).toContain('dutydeck_repair');
+  });
+});
+
+describe('/schedule every 遇到同名计划', () => {
+  it('不新建也不更新，回复中文说明、当前状态、启停命令和 Web 编辑入口', async () => {
+    const h = await testHarness({ configPatch: { allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }] } });
+    const session = await h.runtime.startSession({ agentId: 'mock', cwd: h.cwd, source: 'lark', sourceId: `${h.config.appId}:oc_group:group` });
+    const config = { ...h.config, webBaseUrl: 'https://dutydeck.example.com/' };
+    const run = (id: string, text: string) => executeScheduleCommand(h.automation, h.repos.config, session.id, text, event(id, `/schedule ${text}`), config);
+    expect(await run('om_first', 'every 30 巡检构建')).toContain('已保存「巡检构建」');
+    const [created] = (await h.automation.listBySession(session.id, 'ou_alice')).schedules;
+    const link = `https://dutydeck.example.com/?nav=automation&automationSession=${encodeURIComponent(session.id)}&schedule=${created!.id}`;
+
+    const disabled = await run('om_second', 'every 60 巡检构建');
+    expect(disabled).toContain('本对话已有同名定时任务「巡检构建」（状态：已停用），未重复创建；如需修改请编辑该任务。');
+    expect(disabled).toContain(`/schedule enable ${created!.id}`);
+    expect(disabled).toContain(`[在 Web 中编辑](${link})`);
+    expect(disabled).not.toMatch(/already has a schedule/);
+
+    await h.automation.updateSchedule(session.id, created!.id, { expectedRevision: created!.revision, enabled: true }, 'ou_alice');
+    const enabled = await run('om_third', 'every 15 巡检构建');
+    expect(enabled).toContain('（状态：启用）');
+    expect(enabled).toContain(`/schedule disable ${created!.id}`);
+    const schedules = (await h.automation.listBySession(session.id, 'ou_alice')).schedules;
+    expect(schedules).toHaveLength(1);
+    expect(schedules[0]).toMatchObject({ id: created!.id, enabled: true, trigger: { kind: 'interval', everySeconds: 1800 } });
   });
 });
 

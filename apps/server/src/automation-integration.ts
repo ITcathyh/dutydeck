@@ -131,7 +131,8 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       sessionId: schedule.sessionId,
       workspace: session.cwd,
       webBaseUrl: config.webBaseUrl,
-      idempotencyKey: `schedule_request_${createHash('sha256').update(schedule.id).digest('hex').slice(0, 40)}`
+      // 同一计划只发一张；更新同名计划后按新修订再发一张，否则会被首张卡的幂等键吞掉。
+      idempotencyKey: `schedule_request_${createHash('sha256').update(schedule.revision > 1 ? `${schedule.id}:${schedule.revision}` : schedule.id).digest('hex').slice(0, 40)}`
     }, options.log, repos.config);
   };
 

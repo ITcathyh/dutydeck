@@ -318,6 +318,24 @@ describe('schedule management and execution policy', () => {
     expect(create.mock.calls[0]![1]).not.toHaveProperty('enabled');
   });
 
+  it('creates a fresh-session schedule and switches an existing plan between session and fresh', async () => {
+    mount([schedule]);
+    const create = vi.spyOn(api, 'createSchedule').mockResolvedValue({ schedule });
+    const update = vi.spyOn(api, 'updateSchedule').mockResolvedValue({ schedule });
+    const user = await fill('daily');
+    await user.selectOptions(screen.getByLabelText('运行模式'), 'fresh');
+    expect(screen.getByText(/不带聊天历史，适合固定的更新、部署、巡检/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '保存计划' }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith('s1', expect.objectContaining({ mode: 'fresh' })));
+    await user.click(await screen.findByRole('button', { name: '编辑' }));
+    const select = screen.getByLabelText('运行模式') as HTMLSelectElement;
+    expect(select.disabled).toBe(false);
+    expect([...select.options].map(option => option.value)).toEqual(['session', 'fresh']);
+    await user.selectOptions(select, 'fresh');
+    await user.click(screen.getByRole('button', { name: '保存计划' }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith('s1', 'plan1', { expectedRevision: 3, mode: 'fresh' }));
+  });
+
   it('keeps independent schedules manageable and executable after the source task stops', async () => {
     mount([{ ...schedule, mode: 'independent', executionContext: { cwd: '/managed/plan', agentId: 'frozen-agent', contextMode: 'prompt_only' } }], [testCi], [], { ...session, state: 'stopped' });
     await userEvent.click(await screen.findByRole('button', { name: '编辑' }));

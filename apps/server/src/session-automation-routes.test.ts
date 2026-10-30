@@ -38,6 +38,19 @@ describe('session automation routes', () => {
     expect(target.createSchedule).not.toHaveBeenCalled();
   });
 
+  it('accepts the fresh-session mode on create and update, and only session/fresh on update', async () => {
+    const app = Fastify(); apps.push(app);
+    const target = service();
+    await registerSessionAutomationRoutes(app, { service: target, authorize: async () => ({ allowed: true, actorId: 'installation_owner' }) });
+    const body = { name: 'Deploy', prompt: 'Update and deploy', trigger: { kind: 'cron', expression: '0 2 * * *' }, timezone: 'UTC', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }, mode: 'fresh' };
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/ses_1/automation/schedules', payload: body })).statusCode).toBe(200);
+    expect(target.createSchedule).toHaveBeenCalledWith('ses_1', expect.objectContaining({ mode: 'fresh' }), 'installation_owner');
+    expect((await app.inject({ method: 'PATCH', url: '/api/sessions/ses_1/automation/schedules/plan', payload: { expectedRevision: 2, mode: 'fresh' } })).statusCode).toBe(200);
+    expect(target.updateSchedule).toHaveBeenCalledWith('ses_1', 'plan', { expectedRevision: 2, mode: 'fresh' }, 'installation_owner');
+    expect((await app.inject({ method: 'PATCH', url: '/api/sessions/ses_1/automation/schedules/plan', payload: { expectedRevision: 2, mode: 'independent' } })).statusCode).toBe(400);
+    expect(target.updateSchedule).toHaveBeenCalledTimes(1);
+  });
+
   it('passes the trusted actor from route authorization into the service', async () => {
     const app = Fastify(); apps.push(app);
     const target = service();

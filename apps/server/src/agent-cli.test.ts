@@ -68,6 +68,7 @@ describe('dutydeck agent', () => {
     expect(await agent(['schedule', 'enable', 'sch_1'])).toMatchObject({ url: '/actions/schedule.enable', body: { id: 'sch_1' } });
     expect(await agent(['schedule', 'disable', 'sch_1'])).toMatchObject({ url: '/actions/schedule.disable', body: { id: 'sch_1' } });
     expect(await agent(['schedule', 'create', '--cron', '0 9 * * *', '--prompt', '汇总告警', '--dry-run'])).toMatchObject({ url: '/schedules', body: { cron: '0 9 * * *', prompt: '汇总告警', dryRun: true } });
+    expect(await agent(['schedule', 'create', '--cron', '0 2 * * *', '--prompt', '更新并部署', '--name', '部署', '--mode', 'fresh'])).toMatchObject({ url: '/schedules', body: { cron: '0 2 * * *', name: '部署', mode: 'fresh' } });
     expect(await agent(['access', 'grant', '--member', 'Bob', '--member', 'Carol'])).toMatchObject({ url: '/actions/access.grant', body: { members: ['Bob', 'Carol'] } });
     expect(await agent(['access', 'revoke'])).toMatchObject({ url: '/actions/access.revoke', body: {} });
     expect(await agent(['pr', 'open', '--title', '修复'])).toMatchObject({ url: '/actions/pr.open', body: { title: '修复' } });

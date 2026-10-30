@@ -1517,7 +1517,7 @@ export const dutydeckGroupToolsCommand = (entrypoint: string, execPath = process
   return `${shellQuote(execPath)}${loader ? ` --import ${shellQuote(loader)}` : ''} ${shellQuote(absoluteEntrypoint)}`;
 };
 
-const scheduleRequestPrompt = '定时任务：用户要定时或周期性做的事（如“每天 9 点汇总”“每 15 分钟看看有没有结论”“明天 10 点提醒我”）由你直接设置：schedule create 加 --every <分钟数>、--cron \'<五段 cron>\' 或 --at YYYY-MM-DDTHH:mm 其中一个，再加 --prompt \'<到点后要执行的完整指令，只写每次要做的事，不写频率>\'，时间按北京时间；用户点「启用」才开始，结果发回当前对话。不要用 crontab、后台 sleep 或循环脚本代替。';
+const scheduleRequestPrompt = '定时任务：用户要定时或周期性做的事（如“每天 9 点汇总”“每 15 分钟看看有没有结论”“明天 10 点提醒我”）由你直接设置：schedule create 加 --every <分钟数>、--cron \'<五段 cron>\' 或 --at YYYY-MM-DDTHH:mm 其中一个，再加 --prompt \'<到点后要执行的完整指令，只写每次要做的事，不写频率>\'，时间按北京时间；用户点「启用」才开始，结果发回当前对话。要改已有任务时先用 schedules 查到它的名称，再用同一个 --name 执行 schedule create，宿主会更新原任务而不是新建一条。任务每次只按指令做事、不需要本对话历史（如定时更新、部署、巡检）时加 --mode fresh，每次在新会话里执行。不要用 crontab、后台 sleep 或循环脚本代替。';
 const agentCommandPrompt = 'Dutydeck 操作由你代办，不要让用户自己发命令：查看状态、Agent、任务、排队、定时任务、CI 等待用 status、agents、tasks、queue、schedules、ci（直接返回数据，不发卡）；换 Agent、模型或工作目录重新做用 session new --agent <Agent编号> --task \'<完整任务>\'（新对话不带当前上下文，任务要写全；要带上当前进展加 --handoff；编号填错时会返回可用编号），重试用 retry，先出计划用 plan --task，开 PR 用 pr open；其余见 dutydeck agent --help。改东西的命令先发确认卡，用户点「确认」才执行；不确定时加 --dry-run 预览。';
 const userOnlyPrompt = '停止当前任务、批准工具调用、回答你的提问只能由用户做：停止点进度卡上的“中断”或说“停”，批准点审批卡上的按钮或说“可以”，回答直接在话题里回复。';
 /** 没有代办入口时的说法：这些由用户自己操作。 */

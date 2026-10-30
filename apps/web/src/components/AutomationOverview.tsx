@@ -103,7 +103,7 @@ export function AutomationOverview({ sessions, summaries = {}, onSelectSession, 
             {!query.data.total && <EmptyState title="没有符合条件的会话定时计划" description="可调整筛选，或在当前实例创建计划。"/>}
             {query.data.items.map(item => <Card as="article" padding="sm" key={item.schedule.id} className="min-w-0 space-y-1">
               <div className="flex flex-wrap items-center justify-between gap-2"><strong className="break-words text-body">{item.schedule.name} · {item.schedule.enabled ? '已启用' : '已停用'}</strong><Button onClick={() => openPlan(source.id, item.session.id, item.schedule.id)}>查看 / 管理计划</Button></div>
-              <p className="break-all text-caption text-subtle">{item.session.title || item.session.id} · {item.session.agentId} · {item.schedule.mode === 'independent' ? '独立计划，仅显式指令' : '沿用任务上下文'}</p>
+              <p className="break-all text-caption text-subtle">{item.session.title || item.session.id} · {item.session.agentId} · {item.schedule.mode === 'independent' ? '独立计划，仅显式指令' : item.schedule.mode === 'fresh' ? '每次新会话，不带聊天历史' : '沿用任务上下文'}</p>
               <p className="text-caption text-secondary">{scheduleRule(item.schedule)}</p>
               <PlanState item={item} instanceId={source.id}/>
               <p className="text-caption text-secondary">{scheduleNextExecution(item.schedule)}</p>

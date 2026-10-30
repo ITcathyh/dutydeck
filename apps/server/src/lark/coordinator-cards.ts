@@ -18,6 +18,7 @@ import type { LarkMessageEvent } from './listener.js';
 import type { LarkTaskState, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
 import { larkCardChannel, withoutLeadingBotMention, larkScopeContinuesFor, sendTaskCard } from './coordinator-core.js';
+import { scheduleNameConflictNotice } from './schedule-command.js';
 import { LarkCoordinatorCore } from './coordinator-core.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 import { planFollowUpEvent } from './plan-flow.js';
@@ -673,6 +674,16 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
         await store.set(key, JSON.stringify({ ...claim, phase: 'created', schedule_id: schedule.id } satisfies LarkDailyScheduleRecord));
       } catch (error) {
         await store.compareAndSet!(key, JSON.stringify(claim), JSON.stringify({ ...claim, phase: 'failed' } satisfies LarkDailyScheduleRecord)).catch(() => undefined);
+        const prompt = withoutLeadingBotMention(saved.prompt, config.name);
+        const notice = await scheduleNameConflictNotice(error, automation, mapping.sessionId, operator, prompt.slice(0, 100), config);
+        if (notice) {
+          // 回调只能弹一句短提示；完整说明（含启停命令和 Web 链接）回复到结果卡下。
+          void sendTaskCard(this.service, { ...task.event, messageId: target.resultMessageId, replyMessageId: target.resultMessageId }, {
+            state: 'completed', readOnly: true, retryable: false, taskId: task.id, taskName: '定时任务', markdown: notice,
+            idempotencyKey: `daily_conflict_${digest}`
+          }, this.log).catch(sendError => this.log.warn({ error: sendError, taskId: task.id }, '同名定时任务说明发送失败'));
+          return { type: 'info', content: '本对话已有同名定时任务，未重复创建；说明已回复在结果卡下。' };
+        }
         this.log.warn({ error, taskId: task.id }, '设置每天自动执行失败');
         return { type: 'error', content: `设置失败：${error instanceof Error ? error.message : String(error)}` };
       }
