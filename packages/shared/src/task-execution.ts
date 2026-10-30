@@ -206,6 +206,8 @@ export interface SessionWorkspaceProof { expectedCwd: string; workspaceRevision:
 export type SessionStatePatch = Pick<Session, 'state'> & { error?: string | null };
 export interface ExecutionEventInput { id: string; type: AgentEvent['type']; data: JsonValue; sourceId?: string; timestamp?: string; raw?: string }
 export interface TaskExecutionProjection { task: ExecutionTask; currentAttempt?: TaskAttempt; attempts: TaskAttempt[]; blockers: ExecutionBlocker[]; steering?: SteeringOperation }
+/** Ephemeral adapter proof; the repository validates its current controller and resource evidence. */
+export interface TaskExecutionReadContext { claim: RuntimeControlClaim; idleResources: ResourceCheckRef[] }
 export interface BoundExecutionRepository {
   lookupAccepted(request: TaskRequestV1): AcceptedTask | undefined;
   acceptTask(f: SessionFence, request: TaskRequestV1, input: AcceptedTaskInputV2, position: 'front' | 'back'): CommitResult;
@@ -311,9 +313,9 @@ export interface ExecutionRepository {
   lookupAccepted(request: TaskRequestV1): AcceptedTask | undefined;
   getAcceptedTask(taskId: string): AcceptedTask | undefined;
   getRecoveryDecision(decisionId: string): (SessionFence & { attemptId?: string; decision: RecoveryDecisionInput }) | undefined;
-  getTaskExecution(taskId: string): TaskExecutionProjection | undefined;
+  getTaskExecution(taskId: string, context?: TaskExecutionReadContext): TaskExecutionProjection | undefined;
   getAttempt(ref: AttemptRef & SessionFence): TaskAttempt | undefined;
-  getSessionExecutions(sessionId: string): TaskExecutionProjection[];
+  getSessionExecutions(sessionId: string, context?: TaskExecutionReadContext): TaskExecutionProjection[];
   getUnresolvedTasks(sessionId: string): Array<{ id: string; status: ExecutionTask['status'] }>;
   getAttemptEvents(attemptId: string, window?: EventWindowOptions): AgentEvent[];
   getSessionResourceBlockers(sessionId: string): ExecutionBlocker[];

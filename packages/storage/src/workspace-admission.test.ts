@@ -85,10 +85,27 @@ it('retains unsafe physical resources after settlement and checks ephemeral idle
   r=h.x.observed(origin,r.resourceId,r.revision,{observationId:'ready',state:'live',identityId:'original-object',evidenceRef:'fixture:ready',observedAt:new Date().toISOString()});
   h.x.settleAttempt(af(a),'final',{kind:'not_submitted',outcome:'cancelled',reason:'fixture'});
   const proof={resourceId:r.resourceId,expectedRevision:r.revision,observationId:'ready'};
+  const task=h.repos.execution.getSessionExecutions(target.sessionId)[0]!.task;
+  const context={claim:h.claim,idleResources:[proof]};
+  expect(h.repos.execution.getTaskExecution(task.id,context)?.blockers).toEqual([]);
+  expect(h.repos.execution.getSessionExecutions(target.sessionId,context)[0]?.blockers).toEqual([]);
+  for(const stale of [{...proof,expectedRevision:proof.expectedRevision-1},{...proof,observationId:'older-observation'}]) {
+    const invalid={claim:h.claim,idleResources:[stale]};
+    expect(h.repos.execution.getTaskExecution(task.id,invalid)?.blockers).toContainEqual(expect.objectContaining({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE'}));
+    expect(h.repos.execution.getSessionExecutions(target.sessionId,invalid)[0]?.blockers).toContainEqual(expect.objectContaining({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE'}));
+  }
   expect(()=>h.x.claimNext(target,[{...proof,expectedRevision:proof.expectedRevision-1}])).toThrow(expect.objectContaining({code:'WORKSPACE_RESOURCE_BLOCKED'}));
   expect(h.x.claimNext(target,[proof])!.attempt).toBeDefined();
   // The proof permits a known idle control channel, never fabricates physical exit.
   expect(h.repos.execution.getResources(origin.sessionId)[0]?.observations.at(-1)?.state).toBe('live');
+  const later=h.session('later',cwd),queued=h.accept(later);
+  h.claim.release();const next=h.repos.control.attachRuntime('next');cleanup.push(()=>next.release());
+  expect(()=>h.repos.execution.getTaskExecution(queued.id,context)).toThrow(expect.objectContaining({code:'DATABASE_RUNTIME_CLAIM_REVOKED'}));
+  expect(()=>h.repos.execution.getSessionExecutions(later.sessionId,context)).toThrow(expect.objectContaining({code:'DATABASE_RUNTIME_CLAIM_REVOKED'}));
+  const replacement={claim:next,idleResources:[proof]};
+  const unsafe=expect.objectContaining({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE',resourceId:r.resourceId});
+  expect(h.repos.execution.getTaskExecution(queued.id,replacement)?.blockers).toContainEqual(unsafe);
+  expect(h.repos.execution.getSessionExecutions(later.sessionId,replacement)[0]?.blockers).toContainEqual(unsafe);
 });
 it('never grants idle-channel exceptions to submission child processes or across runtime generations', () => {
   const h=fixture(),cwd=h.repo('repo'),origin=h.session('origin',cwd),target=h.session('target',cwd);
@@ -103,8 +120,12 @@ it('never grants idle-channel exceptions to submission child processes or across
   h.x.settleAttempt(af(a),'turn-completed',{kind:'driver_result',submissionId:'send',outcome:'completed',outputDigest:digest('done'),stopReason:'end_turn',complete:true});
   h.x.creationFinished(origin,operation.resourceId,operation.revision,'created');
   const proof={resourceId:r.resourceId,expectedRevision:r.revision,observationId:'live-child'};
+  const task=h.repos.execution.getSessionExecutions(target.sessionId)[0]!.task;
+  expect(h.repos.execution.getTaskExecution(task.id,{claim:h.claim,idleResources:[proof]})?.blockers).toContainEqual(expect.objectContaining({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE'}));
   expect(()=>h.x.claimNext(target,[proof])).toThrow(expect.objectContaining({code:'WORKSPACE_RESOURCE_BLOCKED'}));
   h.claim.release();const next=h.repos.control.attachRuntime('next');cleanup.push(()=>next.release());
+  expect(()=>h.repos.execution.getTaskExecution(task.id,{claim:h.claim,idleResources:[proof]})).toThrow(expect.objectContaining({code:'DATABASE_RUNTIME_CLAIM_REVOKED'}));
+  expect(h.repos.execution.getTaskExecution(task.id,{claim:next,idleResources:[proof]})?.blockers).toContainEqual(expect.objectContaining({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE'}));
   expect(()=>h.repos.execution.bind(next).claimNext(target,[proof])).toThrow(expect.objectContaining({code:'WORKSPACE_RESOURCE_BLOCKED'}));
   h.repos.execution.bind(next).observed(origin,r.resourceId,r.revision,{observationId:'child-gone',state:'gone',identityId:'child-id',evidenceRef:'fixture:closed',observedAt:new Date().toISOString()});
   expect(h.repos.execution.bind(next).claimNext(target)!.attempt).toBeDefined();

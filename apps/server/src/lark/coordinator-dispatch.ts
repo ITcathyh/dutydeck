@@ -1212,23 +1212,33 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           { relaunch: await this.relaunchReady(config.appId, task.id, state, task.turn), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             continueInPlace: this.continuableScope(task) }) : undefined;
       const notifyRecovery = async () => {
-        // 结果未知的一轮由对账发带按钮的提醒卡（见 notifyUnknownTask），这里不再发没有按钮的那张。
-        if (state === 'reconcile_required' && this.runtime.inspectUnknownTask && this.runtime.resolveUnknownTask) return undefined;
-        if (!recovery?.blocked || !task.sessionId || !task.runtimeTaskId) return undefined;
-        // 提醒卡上没有按钮也没有详情链接，正文按不提这两者重新生成。
-        const notice = recovery.relaunch || config.webBaseUrl
-          ? await describeLarkTaskRecovery(this.runtime, task.sessionId, task.runtimeTaskId, state) : recovery;
+        if (!task.sessionId || !task.runtimeTaskId) return;
+        const noticeTaskId = task.runtimeTaskId;
         const recoveryMention = larkNotice('task_recovery_notice', config, event).mention;
-        return notifyLarkTaskRecovery({
-          service: this.service, store: this.workflowOptions.store, log: this.log, appId: config.appId,
-          sessionId: task.sessionId, taskId: task.runtimeTaskId, turn: task.turn, recovery: notice,
-          ...(recoveryMention ? { mention: recoveryMention } : {}),
-          target: { chatId: event.chatId, ...(event.chatType === 'group'
-            ? { replyMessageId: larkMessageAnchor(event), replyInThread: Boolean(event.threadId?.trim()) } : {}) }
-        });
+        // 带按钮的结果未知提醒仍归原链路；已发出的恢复提醒在任何状态都原地收敛。
+        const create = (!task.cardMessageId || silentProgress || task.progressFrozen)
+          && !(state === 'reconcile_required' && this.runtime.inspectUnknownTask && this.runtime.resolveUnknownTask);
+        try {
+          return await notifyLarkTaskRecovery({
+            runtime: this.runtime, status: state, create,
+            service: this.service, store: this.workflowOptions.store, log: this.log, appId: config.appId,
+            sessionId: task.sessionId, taskId: noticeTaskId, turn: currentTurn,
+            beforeSend: async () => {
+              if (this.stopped || task.turn !== currentTurn || task.sessionId !== session.id || task.runtimeTaskId !== noticeTaskId) {
+                throw new LarkServiceError('LARK_WRITE_OBSOLETE', '恢复提醒已失去当前轮次归属。', 409);
+              }
+            },
+            ...(recoveryMention ? { mention: recoveryMention } : {}),
+            target: { chatId: event.chatId, ...(event.chatType === 'group'
+              ? { replyMessageId: larkMessageAnchor(event), replyInThread: Boolean(event.threadId?.trim()) } : {}) }
+          });
+        } catch (error) {
+          this.log.warn({ error, taskId: task.id }, '恢复提醒更新失败，等待对账');
+          this.scheduleReconcile();
+        }
       };
+      await notifyRecovery();
       if (!task.cardMessageId || (!terminal && (silentProgress || task.progressFrozen))) {
-        await notifyRecovery();
         return { delivered: false } as CardUpdateOutcome;
       }
       if (timer) { clearTimeout(timer); timer = undefined; }

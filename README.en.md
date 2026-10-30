@@ -175,6 +175,8 @@ The summary is required but need not repeat all card data. Bodies are limited to
 
 **Unknown outcomes.** After a restart or disconnect a turn may have an unknown result. The original Lark topic gets a card with "Run again / Mark done / Mark failed" and a details link. The initiator and admins can act; "Run again" needs a second click within 60 seconds. The Web session page has the same three actions. Who did what and when is shown on the card and recorded in the execution ledger. Tasks older than 24 hours get no Lark card and can only be handled on the Web. API: `GET /api/sessions/:id/unknown-tasks`, `POST /api/sessions/:id/unknown-tasks/:taskId` with `{target, action, allowDuplicateEffects?}`.
 
+Recovery reminders update in place when a block clears, execution starts or the turn ends, including with silent progress and after restart reconciliation. Old sessions confirmed idle with no background tasks are no longer falsely reported as blockers; tasks that have started no longer show workspace queue blockers.
+
 **Notification tiers** (bot settings, effective only when the group-card @ switch is on):
 
 | Tier | Includes | @ | Urgent push |
