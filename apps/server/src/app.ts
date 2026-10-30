@@ -21,7 +21,7 @@ import Fastify, { type FastifyRequest } from 'fastify';
 import { open, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { extname, resolve, sep } from 'node:path';
-import { installationOwnerTaskActor, permissionModes, RuntimeError, toPublicAgent, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import { installationOwnerTaskActor, permissionModes, RuntimeError, toPublicAgent, type ExecutionActor, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
@@ -47,6 +47,7 @@ import { registerSessionInsightRoutes, type SessionInsightRouteOptions } from '.
 import { isPluginTriggerRequest, registerPluginRoutes, type PluginRouteOptions } from './plugins/routes.js';
 import { registerTurnDiffRoutes, type TurnDiffRouteOptions } from './turn-diff-routes.js';
 
+const installationOwnerActor: ExecutionActor = { kind: 'installation_owner', id: installationOwnerTaskActor };
 const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
   '.gif': 'image/gif',
@@ -461,12 +462,12 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     throw new RuntimeError('INVALID_SESSION_CONFIG', 'Model or reasoning effort is required', 400);
   });
   app.delete<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/queue/:taskId', async request => {
-    await requireSessionExecution(request, request.params.id, 'session', 'queue.cancel');
-    return runtime.cancelQueued(request.params.id, request.params.taskId);
+    const decision = await requireSessionExecution(request, request.params.id, 'session', 'queue.cancel');
+    return runtime.cancelQueued(request.params.id, request.params.taskId, decision?.source === 'owner' ? installationOwnerTaskActor : undefined);
   });
   app.post<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/queue/:taskId/steer', async request => {
-    await requireSessionExecution(request, request.params.id, 'session', 'queue.promote');
-    return runtime.steerQueued(request.params.id, request.params.taskId);
+    const decision = await requireSessionExecution(request, request.params.id, 'session', 'queue.promote');
+    return runtime.steerQueued(request.params.id, request.params.taskId, decision?.source === 'owner' ? installationOwnerTaskActor : undefined);
   });
   app.post<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/queue/:taskId/inject', async request => {
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'queue.promote');
@@ -477,14 +478,19 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   };
   for (const action of ['interrupt', 'pause', 'resume', 'stop', 'restart'] as const) {
     app.post<{ Params: { id: string } }>(`/api/sessions/:id/${action}`, async request => {
-      await requireSessionExecution(request, request.params.id, 'session', sessionActionPolicy[action]);
-      const result = await runtime[action](request.params.id);
+      const decision = await requireSessionExecution(request, request.params.id, 'session', sessionActionPolicy[action]);
+      // 账本里的管理操作要有具名操作者；本机所有者以安装者身份记录，其余请求维持原样。
+      const owner = decision?.source === 'owner';
+      const result = action === 'interrupt' ? await runtime.interrupt(request.params.id, undefined, owner ? installationOwnerTaskActor : undefined)
+        : action === 'pause' ? await runtime.pause(request.params.id, owner ? installationOwnerTaskActor : undefined)
+        : action === 'resume' ? await runtime.resume(request.params.id)
+        : await runtime[action](request.params.id, owner ? installationOwnerActor : undefined);
       return result ?? { ok: true };
     });
   }
   app.post<{ Params: { id: string } }>('/api/sessions/:id/archive', async request => {
-    await requireSessionExecution(request, request.params.id, 'session', 'run.interrupt');
-    return runtime.archive(request.params.id);
+    const decision = await requireSessionExecution(request, request.params.id, 'session', 'run.interrupt');
+    return runtime.archive(request.params.id, decision?.source === 'owner' ? installationOwnerActor : undefined);
   });
   app.post<{ Params: { id: string; permissionId: string }; Body: { approved: boolean } }>('/api/sessions/:id/permissions/:permissionId', async request => {
     await requireSessionExecution(request, request.params.id, 'high_risk', 'high_risk.execute');

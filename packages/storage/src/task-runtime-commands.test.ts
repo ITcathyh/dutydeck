@@ -157,6 +157,23 @@ describe('Runtime ledger commands', () => {
     expect(() => x.patchSessionState(f, 'undefined', { state: 'idle', error: undefined })).toThrow(/EXECUTION_INVALID_INPUT/);
   });
 
+  it('skips unchanged state patches and keeps no result snapshot for state patches', () => {
+    const { x, db } = open();
+    const count = (sql: string) => db.prepare(sql).pluck().get() as number;
+    const rows = () => [count('SELECT COUNT(*) FROM events'), count('SELECT COUNT(*) FROM task_execution_commands')];
+    x.patchSessionState(f, 'failed-1', { state: 'failed', error: 'boom' });
+    let before = rows();
+    const same = x.patchSessionState(f, 'failed-2', { state: 'failed', error: 'boom' });
+    expect(same.events).toEqual([]); expect(same.session).toMatchObject({ state: 'failed', error: 'boom' }); expect(rows()).toEqual(before);
+    expect(x.patchSessionState(f, 'failed-3', { state: 'failed' }).events).toEqual([]); expect(rows()).toEqual(before);
+    expect(x.patchSessionState(f, 'failed-4', { state: 'failed', error: 'other' }).events[0].data).toEqual({ state: 'failed', error: 'other' });
+    const a = active(x);
+    x.patchSessionState(af(a), 'tool-1', { state: 'running_tool' }); before = rows();
+    expect(x.patchSessionState(af(a), 'tool-2', { state: 'running_tool' }).events).toEqual([]); expect(rows()).toEqual(before);
+    expect(x.patchSessionState(af(a), 'think', { state: 'thinking' }).events).toHaveLength(1);
+    expect(count("SELECT COUNT(*) FROM task_execution_commands WHERE id LIKE 'session_state:%'")).toBe(0);
+  });
+
   it('fences lifecycle and Attempt state transitions, preserving suspended work and refusing unsafe stopped', () => {
     const { x, db } = open(); const a = active(x);
     expect(() => x.patchSessionState(f, 'lifecycle', { state: 'failed' })).toThrow(/SESSION_EXECUTION_BUSY/);

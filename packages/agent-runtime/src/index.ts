@@ -621,7 +621,9 @@ export class DutydeckRuntime {
             await this.mutations.write(session.id, async () => this.wake(this.bound().resolveQueuedSteering(this.fence(session), operation.operationId, operation.controller, 'unknown')));
           }
           const current = projection?.currentAttempt;
-          if (current && (!current.reconcileReason || ['PREVIOUS_RUNTIME_RESULT_UNKNOWN', 'DAEMON_SHUTDOWN'].includes(current.reconcileReason.code)) && current.submissionState !== 'not_submitted' && ['preparing', 'active', 'reconcile_required'].includes(current.state)
+          // An attempt still waiting on an earlier runtime's orphan record has no new evidence; re-recording it each restart only grows the ledger.
+          const alreadyOrphaned = current?.state === 'reconcile_required' && current.reconcileReason?.reasonId.startsWith(`orphan:${current.attemptId}:`);
+          if (current && !alreadyOrphaned && (!current.reconcileReason || ['PREVIOUS_RUNTIME_RESULT_UNKNOWN', 'DAEMON_SHUTDOWN'].includes(current.reconcileReason.code)) && current.submissionState !== 'not_submitted' && ['preparing', 'active', 'reconcile_required'].includes(current.state)
             && (current.controller.accessId !== this.repos.control.accessId || current.controller.instanceId !== this.runtimeInstanceId || current.controller.generation !== this.binding!.generation)) {
             await this.mutations.write(session.id, async () => this.wake(this.bound().markOrphanedAttempt(this.attemptFence(current), { reasonId: `orphan:${current.attemptId}:${this.binding!.generation}`, code: current.reconcileReason?.code ?? 'PREVIOUS_RUNTIME_RESULT_UNKNOWN', evidenceRefs: [] })));
           }
@@ -3198,13 +3200,13 @@ export class DutydeckRuntime {
     return this.withSessionMetadata(session);
     });
   }
-  async pause(id: string) {
+  async pause(id: string, actorId?: string) {
     return this.scoped(id, async () => {
       const { session } = await this.active(id);
       const agent = await this.mutations.wait(() => this.repos.agents.get(session.agentId));
       if (!agent || !this.agentForSessionProtocol(agent, session).capabilities.pause) throw new RuntimeError('UNSUPPORTED_CAPABILITY', 'Agent does not support pause', 422);
       this.mutations.check();
-      return this.interrupt(id);
+      return this.interrupt(id, undefined, actorId);
     });
   }
   async resume(id: string) {

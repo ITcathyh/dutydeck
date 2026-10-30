@@ -1176,26 +1176,33 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         }); },
         patchSessionState(rawFence, operationId, rawPatch) { return write(owner => {
           id.parse(operationId); const patch = parse(taskExecutionSchemas.statePatch, rawPatch);
-          const apply = () => {
-            let pair: {t: ExecutionTask; a: TaskAttempt} | undefined;
-            if ('attemptId' in rawFence) {
-              pair = currentAttempt(rawFence,owner);
-              if (!['preparing','active'].includes(pair.a.state) || !['thinking','running_tool','waiting_for_permission','interrupting'].includes(patch.state)) fail('ATTEMPT_STATE_PATCH_INVALID');
-            } else {
-              if (attempts(rawFence.sessionId).some(a => ['preparing','active','reconcile_required','legacy_unresolved'].includes(a.state))) fail('SESSION_EXECUTION_BUSY');
-              if (!['created','starting','idle','failed','stopped','interrupted'].includes(patch.state)) fail('SESSION_STATE_PATCH_INVALID');
-              if (patch.state === 'stopped') assertResources(rawFence);
-              if (patch.state === 'starting' || patch.state === 'idle') assertResources(rawFence,undefined,owner);
-            }
-            if ('error' in patch) db.prepare('UPDATE sessions SET state=?,error=?,updated_at=? WHERE id=?').run(patch.state,patch.error,timestamp(),rawFence.sessionId);
-            else db.prepare('UPDATE sessions SET state=?,updated_at=? WHERE id=?').run(patch.state,timestamp(),rawFence.sessionId);
-            const current = session(rawFence.sessionId);
-            const event = append(rawFence,{id:`session_state:${operationId}`,type:'status',data:{state:current.state,error:current.error ?? null}},pair?.a);
-            return result(rawFence,pair?.t,pair?.a,[event]);
-          };
-          if ('attemptId' in rawFence) return attemptCommand(rawFence,`session_state:${operationId}`,patch,apply);
-          const f = readFence(rawFence);
-          return command(`session_state:${operationId}`,{...f,patch},apply);
+          // Callers mint a fresh operationId per patch; replay reads the patch's own event instead of a stored result snapshot.
+          const scope = 'attemptId' in rawFence ? attemptScope(rawFence) : undefined;
+          if (!scope) readFence(rawFence);
+          const replay = db.prepare('SELECT * FROM events WHERE id=?').get(`session_state:${operationId}`) as any;
+          if (replay) {
+            const data = JSON.parse(replay.data);
+            if (replay.session_id !== rawFence.sessionId || replay.attempt_id !== (scope?.a.attemptId ?? null) || data.state !== patch.state || 'error' in patch && data.error !== patch.error) fail('EXECUTION_OPERATION_CONFLICT');
+            return result(rawFence, scope?.t, scope?.a, [decodeEvent(replay)], true);
+          }
+          let pair: {t: ExecutionTask; a: TaskAttempt} | undefined;
+          if ('attemptId' in rawFence) {
+            pair = currentAttempt(rawFence,owner);
+            if (!['preparing','active'].includes(pair.a.state) || !['thinking','running_tool','waiting_for_permission','interrupting'].includes(patch.state)) fail('ATTEMPT_STATE_PATCH_INVALID');
+          } else {
+            if (attempts(rawFence.sessionId).some(a => ['preparing','active','reconcile_required','legacy_unresolved'].includes(a.state))) fail('SESSION_EXECUTION_BUSY');
+            if (!['created','starting','idle','failed','stopped','interrupted'].includes(patch.state)) fail('SESSION_STATE_PATCH_INVALID');
+            if (patch.state === 'stopped') assertResources(rawFence);
+            if (patch.state === 'starting' || patch.state === 'idle') assertResources(rawFence,undefined,owner);
+          }
+          // An unchanged state and error is not a transition: no session write and no status event.
+          const before = session(rawFence.sessionId);
+          if (before.state === patch.state && (!('error' in patch) || (before.error ?? null) === patch.error)) return result(rawFence,pair?.t,pair?.a,[]);
+          if ('error' in patch) db.prepare('UPDATE sessions SET state=?,error=?,updated_at=? WHERE id=?').run(patch.state,patch.error,timestamp(),rawFence.sessionId);
+          else db.prepare('UPDATE sessions SET state=?,updated_at=? WHERE id=?').run(patch.state,timestamp(),rawFence.sessionId);
+          const current = session(rawFence.sessionId);
+          const event = append(rawFence,{id:`session_state:${operationId}`,type:'status',data:{state:current.state,error:current.error ?? null}},pair?.a);
+          return result(rawFence,pair?.t,pair?.a,[event]);
         }); },
         patchSession(rawFence,rawPatch) { return write(() => {
           const f=readFence(rawFence);const patch=parse(taskExecutionSchemas.sessionPatch,rawPatch);

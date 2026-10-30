@@ -203,6 +203,26 @@ describe('memory recovery and timeout boundaries', () => {
     expect(await h.pipelineOptions.jobs.listScope(scope)).toEqual([]);
   });
 
+  it('names the unresolved task, not the first completed task carrying the same session-level blocker', async () => {
+    const h = await harness('failed'); h.setTasks([h.task('completed', 'task_done'), h.task('reconcile_required', 'task_stuck')]);
+    (h.runtime as any).getSessionTaskRecovery = vi.fn(async () => [
+      { taskId: 'task_done', status: 'completed', blockers: [{ code: 'PREVIOUS_RESULT_UNKNOWN' }], resolvedUnknown: false },
+      { taskId: 'task_stuck', status: 'reconcile_required', blockers: [], resolvedUnknown: false }]);
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });
+    expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ sessionId: h.session.id, taskId: 'task_stuck' }), expect.stringContaining('task_stuck'));
+    expect(h.log.warn).not.toHaveBeenCalledWith(expect.objectContaining({ taskId: 'task_done' }), expect.anything());
+    expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
+  });
+
+  it('reports the unsafe resource when only resource blockers remain', async () => {
+    const h = await harness('failed'); h.setTasks([h.task('completed', 'task_done')]);
+    h.runtime.getTaskRecovery.mockResolvedValue({ status: 'completed', blockers: [{ code: 'DRIVER_RESOURCE_UNSAFE' }], resolvedUnknown: false });
+    vi.spyOn(h.pipelineOptions.repos.execution, 'getSessionResourceBlockers').mockReturnValue([{ code: 'DRIVER_RESOURCE_UNSAFE', sessionId: h.session.id, resourceId: 'driver_resource_old' }]);
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });
+    expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ sessionId: h.session.id, taskId: undefined, blockers: ['DRIVER_RESOURCE_UNSAFE'], resourceIds: ['driver_resource_old'] }), expect.stringContaining('driver_resource_old'));
+    expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
+  });
+
   it('does not use archive availability to bypass an unknown execution', async () => {
     const h = await harness('failed', 30, { archive: false }); h.setTasks([h.task('reconcile_required')]);
     expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });

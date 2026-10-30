@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
 import { createRepositories } from '@dutydeck/storage';
 import { type AgentConfig, type AgentDriver, type DriverFactory, type NormalizedDriverEvent } from '@dutydeck/shared';
 import { DutydeckRuntime } from './index.js';
@@ -178,6 +179,44 @@ describe('persistent task recovery across a reopened database', () => {
     expect(events.filter(event => event.type === 'text' && (event.data as any).text === 'before restart')).toHaveLength(1);
     expect(events.some(event => (event.data as any)?.text === 'offline text')).toBe(false);
     expect(events.filter(event => event.type === 'completed')).toHaveLength(0);
+  });
+
+  it('records an orphaned Attempt once across repeated restarts and still lets a person end it without resending', async () => {
+    const file = database(); const backend = persistentTurn();
+    const first = open(file, backend.factory);
+    await first.runtime.initialize([agent]);
+    const session = await first.runtime.start({ agentId: agent.id });
+    const task = await first.runtime.dispatch(session.id, 'original prompt');
+    await vi.waitFor(() => expect(backend.prompts).toEqual(['original prompt']));
+    await close(first);
+    const orphanRows = () => {
+      const db = new (createRequire(import.meta.url)('better-sqlite3'))(file, { readonly: true });
+      try {
+        return { commands: db.prepare("SELECT COUNT(*) FROM task_execution_commands WHERE id LIKE 'orphaned:%'").pluck().get(),
+          events: db.prepare("SELECT COUNT(*) FROM events WHERE id LIKE 'orphaned:%'").pluck().get(),
+          revision: db.prepare('SELECT revision FROM task_attempts WHERE task_id=?').pluck().get(task.id) };
+      } finally { db.close(); }
+    };
+    let handle = open(file, backend.factory);
+    await handle.runtime.initialize([agent]);
+    await vi.waitFor(async () => expect((await handle.runtime.getTasks(session.id))[0]?.status).toBe('reconcile_required'));
+    const once = orphanRows();
+    expect(once).toMatchObject({ commands: 1, events: 1 });
+    for (let restart = 0; restart < 3; restart++) {
+      await close(handle);
+      handle = open(file, backend.factory);
+      await handle.runtime.initialize([agent]);
+    }
+    expect(orphanRows()).toEqual(once);
+    expect(handle.repos.execution.getTaskExecution(task.id)!.currentAttempt).toMatchObject({ state: 'reconcile_required', reconcileReason: { reasonId: expect.stringMatching(/^orphan:/) } });
+    expect((await handle.runtime.getSession(session.id))?.state).toBe('interrupted');
+    const facts = await handle.runtime.inspectUnknownTask(session.id, task.id);
+    expect(facts).toMatchObject({ actionable: true, kind: 'attempt' });
+    const owner = { kind: 'installation_owner', id: 'installation_owner' } as const;
+    await handle.runtime.resolveUnknownTask(session.id, { taskId: task.id, target: facts.target!, decisionId: 'manual:failed:web:owner', action: 'failed', evidenceRefs: ['operator:test'] }, owner);
+    expect((await handle.runtime.getTasks(session.id))[0]?.status).toBe('failed');
+    expect(backend.prompts).toEqual(['original prompt']);
+    expect(backend.startedAfter(1)).toBe(0);
   });
 
   it('leaves queued work pending across shutdown and does not claim it behind an unconfirmed Attempt', async () => {

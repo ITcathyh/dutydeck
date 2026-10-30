@@ -23,7 +23,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { currentProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { readTaskAttemptResult, type TaskResultRepositories } from '../task-results.js';
-import { installationOwnerTaskActor, RuntimeError, type AgentCapabilities, type AcceptedTask, type ConfigRepository, type MemoryJob, type MemoryJobRepository, type StartSessionInput, type TaskRequestV1, type AgentConfig, type AgentEvent, type ExecutionActor, type PermissionMode, type Session, type TaskRecord } from '@dutydeck/shared';
+import { installationOwnerTaskActor, RuntimeError, type AgentCapabilities, type AcceptedTask, type ConfigRepository, type ExecutionRepository, type MemoryJob, type MemoryJobRepository, type StartSessionInput, type TaskRequestV1, type AgentConfig, type AgentEvent, type ExecutionActor, type PermissionMode, type Session, type TaskRecord } from '@dutydeck/shared';
 import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
 import {
   isLarkGroupChatMemoryPool,
@@ -114,7 +114,8 @@ export interface LarkMemoryPipelineOptions {
   runtime: LarkMemoryPipelineRuntime;
   jobs: MemoryJobRepository;
   policyConfig: ConfigRepository;
-  repos: TaskResultRepositories;
+  /** getSessionResourceBlockers 只用于在恢复报错里写出具体资源。 */
+  repos: TaskResultRepositories & { execution: Partial<Pick<ExecutionRepository, 'getSessionResourceBlockers'>> };
   /** 服务装配提供已授权的后台控制身份，管线不推断用户或安装者。 */
   controlActorId?: string;
   store: LarkMemoryStore;
@@ -810,29 +811,30 @@ export class LarkMemoryPipeline {
     return agent;
   }
 
-  private recoveryRequired(sessionId: string, taskId?: string, detail = '记忆会话需要恢复检查，未继续提交任务。') {
-    this.options.log.warn({ sessionId, taskId }, detail);
+  private recoveryRequired(sessionId: string, taskId?: string, detail = '记忆会话需要恢复检查，未继续提交任务。', context: Record<string, unknown> = {}) {
+    this.options.log.warn({ sessionId, taskId, ...context }, detail);
     return new LarkMemoryError('MEMORY_RECOVERY_REQUIRED', detail, 409);
   }
 
   private async assertMemorySessionReady(session: Session) {
     const runtime = this.options.runtime;
+    let recoveries: Array<{ taskId: string; status: string; blockers: Array<{ code: string; external?: boolean }>; resolvedUnknown?: boolean }>;
+    if (runtime.getSessionTaskRecovery) recoveries = await runtime.getSessionTaskRecovery(session.id);
+    else if (runtime.getTaskRecovery) {
+      recoveries = [];
+      for (const task of await runtime.getTasks(session.id)) recoveries.push({ taskId: task.id, ...await runtime.getTaskRecovery(session.id, task.id) });
+    } else throw this.recoveryRequired(session.id, undefined, '运行时缺少记忆会话恢复检查能力。');
+    // Session-level blockers are repeated on every task, so name the unresolved task first rather than the first task listed.
+    const open = recoveries.find(recovery => !terminalTaskStatuses.includes(recovery.status) && !recovery.resolvedUnknown);
+    if (open) throw this.recoveryRequired(session.id, open.taskId, `记忆会话里的任务 ${open.taskId} 尚未结束（${open.status}），未继续提交任务。`);
     // Foreign occupancy gates the next admission; it does not invalidate historical results.
     // The runtime marks a blocker external only with a known different session identity.
-    if (runtime.getSessionTaskRecovery) {
-      for (const recovery of await runtime.getSessionTaskRecovery(session.id)) {
-        if ((!terminalTaskStatuses.includes(recovery.status) && !recovery.resolvedUnknown) || recovery.blockers.some(block => block.external !== true)) throw this.recoveryRequired(session.id, recovery.taskId);
-      }
-      return;
-    }
-    if (!runtime.getTaskRecovery) throw this.recoveryRequired(session.id, undefined, '运行时缺少记忆会话恢复检查能力。');
-    const tasks = await runtime.getTasks(session.id);
-    for (const task of tasks) {
-      const recovery = await runtime.getTaskRecovery(session.id, task.id);
-      if ((!terminalTaskStatuses.includes(recovery.status) && !recovery.resolvedUnknown) || recovery.blockers.some(block => block.external !== true)) {
-        throw this.recoveryRequired(session.id, task.id);
-      }
-    }
+    const codes = [...new Set(recoveries.flatMap(recovery => recovery.blockers.filter(block => block.external !== true).map(block => block.code)))];
+    if (!codes.length) return;
+    let resourceIds: string[] = [];
+    try { resourceIds = (this.options.repos.execution.getSessionResourceBlockers?.(session.id) ?? []).flatMap(block => block.resourceId ? [block.resourceId] : []); }
+    catch { /* Resource IDs only enrich the report. */ }
+    throw this.recoveryRequired(session.id, undefined, `记忆会话的执行资源未确认安全（${codes.join(', ')}${resourceIds.length ? `；资源 ${resourceIds.join(', ')}` : ''}），未继续提交任务。`, { blockers: codes, resourceIds });
   }
 
   private async expireRun(session: Session, taskId: string): Promise<string> {

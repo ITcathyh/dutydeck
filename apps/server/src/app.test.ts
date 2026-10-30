@@ -214,7 +214,7 @@ describe('HTTP API boundary', () => {
     for (const action of ['interrupt', 'pause', 'resume', 'stop', 'restart']) expect((await app.inject({ method: 'POST', url: `/api/sessions/s1/${action}` })).statusCode).toBe(200);
     expect((await app.inject({ method: 'POST', url: '/api/sessions/s1/archive' })).statusCode).toBe(200);
     expect((await app.inject({ method: 'PUT', url: '/api/sessions/s1/permission-mode', payload: { mode: 'ask' } })).statusCode).toBe(404);
-    expect(runtime.start).toHaveBeenCalledWith({ agentId: 'mock', model: 'model-selected-in-web', reasoningEffort: 'high' }); expect(runtime.dispatch).toHaveBeenCalledWith('s1', 'hello', 'queue', 'hello', undefined, undefined, undefined, undefined); expect(runtime.setModel).toHaveBeenCalledWith('s1', 'model-b'); expect(runtime.setReasoningEffort).toHaveBeenCalledWith('s1', 'high'); expect(runtime.cancelQueued).toHaveBeenCalledWith('s1', 't1'); expect(runtime.steerQueued).toHaveBeenCalledWith('s1', 't1'); expect(runtime.stop).toHaveBeenCalledOnce();
+    expect(runtime.start).toHaveBeenCalledWith({ agentId: 'mock', model: 'model-selected-in-web', reasoningEffort: 'high' }); expect(runtime.dispatch).toHaveBeenCalledWith('s1', 'hello', 'queue', 'hello', undefined, undefined, undefined, undefined); expect(runtime.setModel).toHaveBeenCalledWith('s1', 'model-b'); expect(runtime.setReasoningEffort).toHaveBeenCalledWith('s1', 'high'); expect(runtime.cancelQueued).toHaveBeenCalledWith('s1', 't1', undefined); expect(runtime.steerQueued).toHaveBeenCalledWith('s1', 't1', undefined); expect(runtime.stop).toHaveBeenCalledOnce();
   });
 
   it('accepts a steer-mode send as a queued Task, then tries to inject it and reports what happened', async () => {
