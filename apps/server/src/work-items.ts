@@ -398,7 +398,8 @@ export class WorkItemService {
           if (!record || typeof record !== 'object' || Array.isArray(record) || !record.item || typeof record.item !== 'object' || Array.isArray(record.item)) continue;
           if (['cancelling', 'cancelled', 'completed'].includes(record.item.status)) continue;
           record.item.status = 'blocked'; record.item.error = errorText(error);
-          await this.haltBlocked(state); await this.write(state);
+          await this.haltBlocked(state);
+          if (JSON.stringify(state.value) !== state.raw) await this.write(state);
         } catch { continue; } // Preserve corrupt records and failed repairs without blocking other work.
       }
       if (this.closed) break;
@@ -716,6 +717,17 @@ export class WorkItemService {
       || record.item.delivery.status === 'not_requested' && record.item.error?.startsWith('Cancellation')) return false;
     const blocked = record.item.steps.filter(step => step.status === 'blocked');
     if (!blocked.length) return false;
+    // Local drift already forbids recovery; still use the normal blocked-child stop path.
+    // Do not repeat live membership checks until the frozen configuration can match.
+    const parent = await this.repos.sessions.get(record.item.parentSessionId);
+    if (parent && parent.source !== 'work_item') {
+      if (parent.archivedAt || ['stopped', 'failed'].includes(parent.state)) throw new RuntimeError('WORK_ITEM_PARENT_INACTIVE', 'Parent session is not runnable', 409);
+      if (this.parentFingerprint(parent) !== record.parentFingerprint) throw new RuntimeError('WORK_ITEM_CONFIG_DRIFT', 'Parent configuration changed; this work item is blocked', 409);
+      for (const [agentId, frozen] of Object.entries(record.agents)) {
+        const agent = await this.repos.agents.get(agentId);
+        if (!agent || fingerprint(agent) !== frozen.fingerprint) throw new RuntimeError('WORK_ITEM_CONFIG_DRIFT', 'Agent configuration changed; this work item is blocked', 409);
+      }
+    }
     await this.assertExecution(record, true);
     for (const step of blocked) {
       const attempt = last(step)!;
@@ -849,7 +861,8 @@ export class WorkItemService {
       const attempt = last(step);
       if (!attempt || state.value.stoppedAttempts.includes(attempt.id)) continue;
       if (!state.value.actor) {
-        step.status = 'blocked'; attempt.status = 'blocked'; attempt.updatedAt = time();
+        if (step.status !== 'blocked' || attempt.status !== 'blocked' || !attempt.blockReason || !attempt.error) attempt.updatedAt = time();
+        step.status = 'blocked'; attempt.status = 'blocked';
         attempt.blockReason ??= 'reconcile_required'; attempt.error ??= 'Parent work is blocked; the creating actor cannot be verified';
         continue;
       }
@@ -881,7 +894,8 @@ export class WorkItemService {
           continue;
         }
       }
-      step.status = 'blocked'; attempt.status = 'blocked'; attempt.updatedAt = time();
+      if (step.status !== 'blocked' || attempt.status !== 'blocked' || !attempt.blockReason) attempt.updatedAt = time();
+      step.status = 'blocked'; attempt.status = 'blocked';
       // 已带具体 blockReason 的尝试（如结果超限/摘要冲突）保留原始错误，只补停止事实。
       if (!attempt.blockReason) {
         attempt.blockReason = 'reconcile_required';

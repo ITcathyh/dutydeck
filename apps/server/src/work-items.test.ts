@@ -466,6 +466,39 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     await expect(f.service.get(f.parent.id, item.id, 'ou_other')).rejects.toMatchObject({ statusCode: 403 });
   });
 
+  it('rejects blocked configuration drift locally, retries the authorized stop, and rechecks live access after repair', async () => {
+    const f = await fixture('unproven');
+    const item = await f.create({ ...plan, steps: [plan.steps[0]!], outputStepId: 'a' });
+    await f.tick(); await eventually(async () => f.calls.length === 1);
+    await f.repos.agents.save({ ...f.agents[0]!, model: 'changed' });
+    await f.tick();
+    const saved = () => f.repos.config.get(`work_item:${item.id}`).then(raw => JSON.parse(raw!));
+    expect((await saved()).item).toMatchObject({ status: 'blocked', steps: [{ status: 'blocked' }] });
+    const blocked = await saved();
+    const authorize = vi.spyOn((f.service as any).options, 'authorize').mockResolvedValue(false);
+    const stop = vi.spyOn(f.runtime, 'stopWorkItemSession');
+    try {
+      const notices = f.notifications.mock.calls.length;
+      f.notifications.mockRejectedValueOnce(new Error('temporary delivery failure'));
+      await f.service.tick(); await f.service.tick();
+      expect(authorize).not.toHaveBeenCalled();
+      expect(stop).toHaveBeenCalledTimes(2);
+      expect(stop).toHaveBeenCalledWith(f.calls[0]!.sessionId, { kind: 'channel', appId: 'cli_app', id: 'ou_owner' });
+      expect(await saved()).toEqual(blocked);
+      expect(f.notifications).toHaveBeenCalledTimes(notices + 2);
+      expect(f.calls).toHaveLength(1);
+      stop.mockResolvedValueOnce(true);
+      await f.service.tick();
+      expect((await saved()).stoppedAttempts).toContain(blocked.item.steps[0].attempts[0].id);
+      expect((await saved()).item.revision).toBe(blocked.item.revision + 1);
+      await f.repos.agents.save(f.agents[0]!);
+      await f.service.tick();
+      expect(authorize).toHaveBeenCalled();
+      expect((await saved()).item).toMatchObject({ status: 'blocked', error: 'Work-item access denied' });
+      expect(f.calls).toHaveLength(1);
+    } finally { authorize.mockRestore(); stop.mockRestore(); }
+  });
+
   it('keeps immutable template versions and detects conflicting request keys', async () => {
     const f = await fixture(); const item = await f.create();
     expect((await f.create()).id).toBe(item.id);
