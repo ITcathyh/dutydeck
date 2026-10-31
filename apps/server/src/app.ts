@@ -163,10 +163,14 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   };
   app.addHook('preClose', async () => { for (const stream of streams) stream.end(); streams.clear(); });
 
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     if (error instanceof ZodError) return reply.code(400).send({ error: { code: 'INVALID_INPUT', message: error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ') } });
     if (error instanceof AgentGroupToolError || error instanceof AgentCommandParamError) return reply.code(error.statusCode).send(error.response());
-    if (error instanceof RuntimeError || error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+    if (error instanceof RuntimeError || error instanceof LarkServiceError) {
+      if (error.statusCode >= 500 || error.code === 'NATIVE_CONFIGURATION_RESTORE_FAILED') app.log.error({ err: error, code: error.code, requestId: request.id }, 'Request failed');
+      return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+    }
+    app.log.error({ err: error, code: 'INTERNAL_ERROR', requestId: request.id }, 'Unhandled request error');
     reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   });
 

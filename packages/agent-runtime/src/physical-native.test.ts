@@ -7,18 +7,18 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { AcpxAdapter } from '@dutydeck/acp-client';
 import { createRuntimeStore } from 'acpx/runtime';
-import { agentConfigSchema, type BoundExecutionRepository, type TaskRequestV1, type DriverFactory, type DriverContext } from '@dutydeck/shared';
+import { agentConfigSchema, type BoundExecutionRepository, type TaskRequestV1, type DriverFactory, type DriverContext, type StartSessionInput } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from './index.js';
 const cleanup:Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const run of cleanup.splice(0).reverse())await run();vi.restoreAllMocks();});
-async function setup(env:Record<string,string>={},observeBound?: (bound:BoundExecutionRepository)=>void,expectedStartError?:string) {
+async function setup(env:Record<string,string>={},observeBound?: (bound:BoundExecutionRepository)=>void,expectedStartError?:string,input:Partial<StartSessionInput>={}) {
  const dir=await mkdtemp(join(tmpdir(),'dutydeck-physical-native-'));cleanup.push(()=>rm(dir,{recursive:true,force:true}));
  const agent=agentConfigSchema.parse({id:'strict',name:'Strict',protocol:'acp',command:process.execPath,args:[resolve('tests/fixtures/acp-strict-native-agent.mjs')],cwd:dir,env:{native_directory:dir,...env},permissionMode:'full-trust',timeout:10,capabilities:{pause:false,resume:true}});
  const repos=createRepositories(join(dir,'db'),{newDatabaseAuthority:'ledger_v1'});const bind=repos.execution.bind.bind(repos.execution);vi.spyOn(repos.execution,'bind').mockImplementation(claim=>{const result=bind(claim);observeBound?.(result);return result;});const runtime=new DutydeckRuntime(repos,{cleanupIntervalMs:0});
- cleanup.push(async()=>{await rm(join(dir,'hold-config'),{force:true});await rm(join(dir,'hold-new'),{force:true});await runtime.shutdown();repos.close();});
+ cleanup.push(async()=>{await rm(join(dir,'hold-config'),{force:true});await rm(join(dir,'hold-new'),{force:true});await rm(join(dir,'hold-load'),{force:true});await runtime.shutdown();repos.close();});
  await runtime.initialize([agent]);
- const session=await runtime.start({agentId:agent.id}).catch(async(error:unknown)=>{if(!expectedStartError)throw error;expect(error).toBeInstanceOf(Error);expect((error as Error).message).toContain(expectedStartError);const value=(await repos.sessions.list())[0];if(!value)throw error;return value;});
+ const session=await runtime.start({agentId:agent.id,...input}).catch(async(error:unknown)=>{if(!expectedStartError)throw error;expect(error).toBeInstanceOf(Error);expect((error as Error).message).toContain(expectedStartError);const value=(await repos.sessions.list())[0];if(!value)throw error;return value;});
  const calls=async()=> (await readFile(join(dir,'native-calls.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line) as {method:string;params?:Record<string,unknown>;env?:string});
  return {dir,agent,repos,runtime,session,calls,store:createRuntimeStore({stateDir:join(dir,'.dutydeck','acpx')})};
 }
@@ -97,6 +97,71 @@ describe('controlled physical resources and strict native context',()=>{
   expect((await h.calls()).filter(c=>c.method==='session/prompt')).toHaveLength(0);
   expect((await h.runtime.send(h.session.id,'after repair')).status).toBe('completed');
   expect(JSON.parse(await readFile(join(h.dir,'native-state.json'),'utf8'))).toMatchObject({model:'A',effort:'low'});
+ });
+ it.each(['failed','starting'] as const)('rejects a stale taskless deny-all ACP configuration restore from %s without a stuck startup or new context',async state=>{
+  let bound!:BoundExecutionRepository;
+  const h=await setup({},value=>{bound=value;},undefined,{permissionMode:'deny-all',source:'lark-decision',sourceId:'decision'});
+  await writeFile(join(h.dir,'fail-config'),'1');await expect(h.runtime.setModel(h.session.id,'B')).rejects.toThrow();
+  await rm(join(h.dir,'fail-config'));await h.runtime.shutdown();
+  const runtime=new DutydeckRuntime(h.repos,{cleanupIntervalMs:0});cleanup.push(()=>runtime.shutdown());await runtime.initialize([h.agent]);
+  bound.patchSessionState({sessionId:h.session.id,runId:h.session.runId!},'before-repair',{state,error:'original failure'});
+  const before=await h.repos.sessions.get(h.session.id),native=h.repos.execution.getNativeContext(h.session.id)!.selection.context;
+  const blocker=await h.repos.config.get(`runtime_driver_configuration:${h.session.id}`);
+  await writeFile(join(h.dir,'fail-load'),'Internal error');
+  await expect(runtime.restoreNativeConfiguration(h.session.id,{kind:'installation_owner',id:'installation_owner'},h.session.runId)).rejects.toMatchObject({code:'NATIVE_CONFIGURATION_RESTORE_FAILED',statusCode:409,message:expect.stringContaining('Internal error')});
+  expect(await h.repos.sessions.get(h.session.id)).toMatchObject({state:state==='starting'?'failed':before!.state,error:state==='starting'?expect.stringContaining('Internal error'):before!.error,runId:before!.runId});
+  expect(h.repos.execution.getSessionResourceBlockers(h.session.id)).toEqual([]);
+  expect(await h.repos.config.get(`runtime_driver_configuration:${h.session.id}`)).toBe(blocker);
+  expect(await h.repos.tasks.listBySession(h.session.id)).toEqual([]);
+  expect(h.repos.execution.getNativeContext(h.session.id)?.selection.context).toEqual(native);
+  await rm(join(h.dir,'fail-load'));
+  await runtime.restoreNativeConfiguration(h.session.id,{kind:'installation_owner',id:'installation_owner'},h.session.runId);
+  expect(await h.repos.sessions.get(h.session.id)).toMatchObject({state:'idle',error:null});
+  expect(await h.repos.config.get(`runtime_driver_configuration:${h.session.id}`)).toBe('');
+  const calls=await h.calls();expect(calls.filter(c=>c.method==='session/new')).toHaveLength(1);expect(calls.filter(c=>c.method==='session/load')).toHaveLength(2);expect(calls.filter(c=>c.method==='session/prompt')).toHaveLength(0);
+ });
+ it('retains the previous state and configuration blocker when repair configuration ACK fails',async()=>{
+  const h=await setup();await writeFile(join(h.dir,'fail-config'),'1');await expect(h.runtime.setModel(h.session.id,'B')).rejects.toThrow();
+  const before=await h.repos.sessions.get(h.session.id);
+  await expect(h.runtime.restoreNativeConfiguration(h.session.id,{kind:'installation_owner',id:'installation_owner'},h.session.runId)).rejects.toMatchObject({code:'NATIVE_CONFIGURATION_RESTORE_FAILED',statusCode:409});
+  expect(await h.repos.sessions.get(h.session.id)).toMatchObject({state:before!.state,error:before!.error});
+  expect(await h.repos.config.get(`runtime_driver_configuration:${h.session.id}`)).toContain('unknown');
+  expect(h.repos.execution.getSessionResourceBlockers(h.session.id)).toEqual([]);
+  expect((await h.calls()).filter(c=>c.method==='session/prompt')).toHaveLength(0);
+ });
+ it('restores the prior state after an unexpected startup exception and preserves its stack',async()=>{
+  const h=await setup();await writeFile(join(h.dir,'fail-config'),'1');await expect(h.runtime.setModel(h.session.id,'B')).rejects.toThrow();await rm(join(h.dir,'fail-config'));
+  const before=await h.repos.sessions.get(h.session.id),failure=new Error('unexpected native startup');
+  vi.spyOn(AcpxAdapter.prototype,'start').mockRejectedValueOnce(failure);
+  await expect(h.runtime.restoreNativeConfiguration(h.session.id,{kind:'installation_owner',id:'installation_owner'},h.session.runId)).rejects.toBe(failure);
+  expect(await h.repos.sessions.get(h.session.id)).toMatchObject({state:before!.state,error:before!.error});
+  expect(h.repos.execution.getSessionResourceBlockers(h.session.id)).toEqual([]);
+  expect(await h.repos.config.get(`runtime_driver_configuration:${h.session.id}`)).toContain('unknown');
+ });
+ it('does not roll back a later stop when configuration restore is interrupted during native load',async()=>{
+  const h=await setup();await writeFile(join(h.dir,'fail-config'),'1');await expect(h.runtime.setModel(h.session.id,'B')).rejects.toThrow();await rm(join(h.dir,'fail-config'));
+  await writeFile(join(h.dir,'hold-load'),'1');
+  const restoring=h.runtime.restoreNativeConfiguration(h.session.id,{kind:'installation_owner',id:'installation_owner'},h.session.runId).catch(error=>error);
+  await expect.poll(()=>existsSync(join(h.dir,'load-entered'))).toBe(true);
+  const stopping=h.runtime.stop(h.session.id);
+  // Stop fences the owner immediately, then waits for the actual load RPC tail.
+  await rm(join(h.dir,'hold-load'));await stopping;
+  expect(await restoring).toMatchObject({code:'OPERATION_REVOKED'});
+  expect(await h.repos.sessions.get(h.session.id)).toMatchObject({state:'stopped'});
+  expect(await h.repos.config.get(`runtime_driver_configuration:${h.session.id}`)).toContain('unknown');
+  expect((await h.calls()).filter(c=>c.method==='session/prompt')).toHaveLength(0);
+ });
+ it('requires explicit replacement when a taskless deny-all native context cannot load',async()=>{
+  const h=await setup({},undefined,undefined,{permissionMode:'deny-all',source:'lark-decision',sourceId:'decision'});
+  await writeFile(join(h.dir,'fail-config'),'1');await expect(h.runtime.setModel(h.session.id,'B')).rejects.toThrow();await rm(join(h.dir,'fail-config'));
+  await writeFile(join(h.dir,'fail-load'),'Internal error');
+  await expect(h.runtime.restoreNativeConfiguration(h.session.id,{kind:'installation_owner',id:'installation_owner'},h.session.runId)).rejects.toMatchObject({code:'NATIVE_CONFIGURATION_RESTORE_FAILED'});
+  const native=h.repos.execution.getNativeContext(h.session.id)!;
+  await h.runtime.replaceNativeContext(h.session.id,{kind:'installation_owner',id:'installation_owner'},native.resource.resourceId,native.resource.revision,'reviewed-missing-native',h.session.runId);
+  expect(h.repos.execution.getNativeContext(h.session.id)?.selection.context).not.toEqual(native.selection.context);
+  expect(await h.repos.config.get(`runtime_driver_configuration:${h.session.id}`)).toBe('');
+  expect(await h.repos.tasks.listBySession(h.session.id)).toEqual([]);
+  expect((await h.calls()).filter(c=>c.method==='session/new')).toHaveLength(2);expect((await h.calls()).filter(c=>c.method==='session/prompt')).toHaveLength(0);
  });
  it('keeps messages and metadata when scoped startup credentials change, and persists only snake_case keys',async()=>{
   const h=await setup({dutydeck_group_tools_token:'old',UPPER_VENDOR_TOKEN:'vendor'});

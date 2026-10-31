@@ -3,6 +3,7 @@ import Fastify from 'fastify';
 import { ZodError } from 'zod';
 import { RuntimeError } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
+import { buildApp } from './app.js';
 import { registerRecoveryRoutes } from './recovery-routes.js';
 import { unknownTaskRuntime } from './task-resolution.test-helpers.js';
 
@@ -47,6 +48,22 @@ describe('execution recovery owner routes', () => {
       expect(response.statusCode).toBe(200); expect(response.json()).toEqual({ runId: 'run', blockers: [] });
       expect(runtime.restoreNativeConfiguration).toHaveBeenCalledWith('session', { kind: 'installation_owner', id: 'installation_owner' }, 'run');
     } finally { await app.close(); }
+  });
+  it('returns native restore conflicts and logs unexpected restore failures with code and stack', async () => {
+    const failure = new RuntimeError('NATIVE_CONFIGURATION_RESTORE_FAILED', 'Original native context could not be loaded: Internal error', 409);
+    const runtime = { restoreNativeConfiguration: vi.fn().mockRejectedValue(failure), inspectExecutionRecovery: vi.fn() };
+    const app = await buildApp(runtime as unknown as DutydeckRuntime, { recovery: { authorize: request => request.headers.authorization === 'Bearer owner' } });
+    const log = vi.spyOn(app.log, 'error');
+    const request = { method: 'POST' as const, url: '/api/sessions/session/recovery/restore-configuration', headers: { authorization: 'Bearer owner' }, payload: { runId: 'run' } };
+    try {
+      const rejected = await app.inject(request);
+      expect(rejected.statusCode).toBe(409);expect(rejected.json()).toEqual({ error: { code: failure.code, message: failure.message } });
+      expect(runtime.inspectExecutionRecovery).not.toHaveBeenCalled();
+      const unexpected = new Error('unexpected restore failure');runtime.restoreNativeConfiguration.mockRejectedValue(unexpected);
+      expect((await app.inject(request)).statusCode).toBe(500);
+      expect(log).toHaveBeenCalledWith(expect.objectContaining({ err: unexpected, code: 'INTERNAL_ERROR' }), expect.any(String));
+      expect(unexpected.stack).toContain('unexpected restore failure');
+    } finally { log.mockRestore();await app.close(); }
   });
   it('validates steering recovery and supplies only the server-resolved owner to runtime', async () => {
     const runtime = { confirmSteeringRecovery: vi.fn().mockResolvedValue({ replayed: false }) };

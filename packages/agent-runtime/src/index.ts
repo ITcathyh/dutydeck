@@ -2271,6 +2271,7 @@ export class DutydeckRuntime {
     if(expectedRunId!==undefined&&original.runId!==expectedRunId)throw new RuntimeError('SESSION_RUN_CONFLICT','Session run changed',409);
     this.bound().authorizeNativeContextControl(this.fence(original),actor);await this.authorize(id,actor.kind==='unspecified'?undefined:actor.id);
     if(!replacement&&!await this.repos.config.get(`runtime_driver_configuration:${id}`))throw new RuntimeError('DRIVER_CONFIGURATION_REPAIR_NOT_REQUIRED','No configuration blocker exists',409);
+    if(!replacement&&!this.repos.execution.getNativeContext(id))throw new RuntimeError('NATIVE_CONTEXT_PROOF_REQUIRED','The original native context is required',409);
     if(expectedRunId!==undefined&&(await this.repos.sessions.get(id))?.runId!==expectedRunId)throw new RuntimeError('SESSION_RUN_CONFLICT','Session run changed',409);
     // Retain queued requests and unknown submitted Attempts. This operation never prompts.
     try{await this.revokeSession(id,false,'stopped');}catch(error){
@@ -2305,12 +2306,28 @@ export class DutydeckRuntime {
           if(this.drivers.get(id)!==driver||proof.driverInstanceId!==owned.identityId||proof.operationId!==operation!.operationId||canonicalExecutionJson(proof.target)!==canonicalExecutionJson(nativeTarget)||canonicalExecutionJson(proof.context)!==canonicalExecutionJson(this.repos.execution.getNativeContext(id)?.selection.context))throw new RuntimeError('DRIVER_CONFIGURATION_UNKNOWN','Native configuration proof no longer belongs to this operation',409);
           owned.options={...target};await this.configurations.finish(operation!,true);
         });
-        if(!unresolved)await this.saveState(session,'idle');return session;
+        if(!unresolved)Object.assign(session,await this.patchSession(id,{state:'idle',error:undefined}));return session;
       } catch(error) {
         if(operation)await this.mutations.run(undefined,()=>this.mutations.write(id,()=>this.configurations.finish(operation!,false))).catch(()=>{});
         if(driver)await this.mutations.run(undefined,()=>this.stopDriver(id,driver!)).catch(()=>{});
+        const code=(error as {code?:unknown}|null)?.code;
+        if(!replacement&&session.protocol==='acp'&&error instanceof Error&&!(error instanceof RuntimeError)
+          &&(typeof code==='number'||/^(ACP_NATIVE_CONTEXT_|ACP_LAUNCHER_VERSION_CHANGED:|NATIVE_CONTEXT_PROTOCOL_UNSUPPORTED)/.test(error.message))) {
+          const failure=new RuntimeError('NATIVE_CONFIGURATION_RESTORE_FAILED',`Original native configuration could not be verified (${code ?? 'ACP'}): ${error.message}. Configuration remains unknown; restore the original native context or inspect recovery and explicitly replace it. No prompt was sent.`,409);
+          throw Object.assign(failure,{cause:error});
+        }
         throw error;
       }
+    }).catch(async error=>{
+      // Do not overwrite a later stop/restart or an unresolved task's state.
+      if(!replacement&&this.mutations.valid(lifecycle))await this.mutations.run(lifecycle,()=>this.mutations.write(id,async()=>{
+        const current=await this.repos.sessions.get(id);
+        if(current?.runId===original.runId&&!current.archivedAt&&!this.repos.execution.getUnresolvedTasks(id).length) {
+          await this.patchSession(id,{state:original.state==='starting'?'failed':original.state,
+            error:original.state==='starting'?(error instanceof Error?error.message:String(error)):original.error});
+        }
+      }));
+      throw error;
     });
   }
 
@@ -2381,6 +2398,8 @@ export class DutydeckRuntime {
         const reason = 'Driver startup is unresolved; original resource cleanup must finish before replacement';
         this.blockedDrivers.set(session.id, { driver, reason }); await this.retainStopBlock(session.id, reason);
       }
+      // reconnect may reject before its caller receives the original driver handle.
+      if(repairConfiguration)await this.mutations.run(undefined,()=>this.stopDriver(session.id,driver)).catch(()=>{});
       throw error;
     }
   }

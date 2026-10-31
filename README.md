@@ -272,7 +272,7 @@ dutydeck agent --turn "$TURN" group send '可检索摘要' --final --card-file /
 管理员可用 `dutydeck recovery`（只连本机 runtime）处理阻塞：
 - `inspect <会话 ID>` 查看阻塞项和运行 ID。
 - `retire-pty <会话 ID> --file <决定>` 回收残留终端。原 tmux 名称及其所有者标记对应的会话均不存在、且记录它的旧服务进程已退出时，记为已消失；会话改名后不算消失。socket 文件缺失时，仅在 Linux 核实没有服务仍绑定该路径后回收，查不准则保留待核对。服务启动时也会自动回收这类记录。
-- `restore-configuration <会话 ID> --run-id <运行 ID>`：模型或权限修改结果不明（`DRIVER_CONFIGURATION_UNKNOWN`）时，用原生会话重新下发并核实当前配置，不发送任何 prompt。接口 `POST /api/sessions/:id/recovery/restore-configuration`，body 为 `{runId}`。
+- `restore-configuration <会话 ID> --run-id <运行 ID>`：模型或权限修改结果不明（`DRIVER_CONFIGURATION_UNKNOWN`）时，用原生会话重新下发并核实当前配置，不发送任何 prompt。接口 `POST /api/sessions/:id/recovery/restore-configuration`，body 为 `{runId}`。原生加载或配置回执失败返回 `409 NATIVE_CONFIGURATION_RESTORE_FAILED`，保留配置阻塞和调用前状态；旧版本遗留的 `starting` 在失败后变为 `failed`。原生记录已丢失时，须先检查恢复证据，再显式 `replace-native`；不会自动创建新原生会话。
 
 恢复提醒会随解除阻塞、开始执行和本轮结束原地更新；静默进展与重启对账也会同步。已确认空闲且没有后台任务的旧会话不会被误报为阻塞；已开始的任务不再显示工作区排队阻塞。
 

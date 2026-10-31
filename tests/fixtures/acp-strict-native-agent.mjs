@@ -22,6 +22,8 @@ readline.createInterface({input:process.stdin}).on('line',async line=>{
   return reply(id,{sessionId:s.id,configOptions:config(s)});
  }
  if(method==='session/load') {
+  writeFileSync(join(dir,'load-entered'),'1');while(existsSync(join(dir,'hold-load')))await new Promise(r=>setTimeout(r,5));
+  if(existsSync(join(dir,'fail-load')))return error(id,readFileSync(join(dir,'fail-load'),'utf8'));
   if(process.env.native_load_fail==='1'||!existsSync(path)||params.sessionId!==state().id)return error(id,'resource not found');
   return reply(id,process.env.native_load_no_config==='1'?{}:{configOptions:config(state())});
  }
