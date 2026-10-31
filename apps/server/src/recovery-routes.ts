@@ -37,6 +37,13 @@ export function registerRecoveryRoutes(app: FastifyInstance, runtime: DutydeckRu
     await authorize(request);
     return runtime.retirePtyExecution(request.params.id, ptyRetirementRecoverySchema.parse(request.body), owner);
   });
+  // 配置结果不明（模型或权限改到一半）：用原生会话重新下发当前配置并核实，成功后解除阻塞；不发任何 prompt。
+  app.post<{ Params: { id: string } }>('/api/sessions/:id/recovery/restore-configuration', async request => {
+    await authorize(request);
+    const { runId } = z.object({ runId: z.string().min(1) }).strict().parse(request.body);
+    await runtime.restoreNativeConfiguration(request.params.id, owner, runId);
+    return runtime.inspectExecutionRecovery(request.params.id, owner);
+  });
   app.post<{ Params: { id: string } }>('/api/sessions/:id/recovery/replace-native', async request => {
     await authorize(request);
     const input = nativeReplacementRecoverySchema.parse(request.body);

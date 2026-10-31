@@ -89,7 +89,9 @@ describe('controlled physical resources and strict native context',()=>{
   const h=await setup();await writeFile(join(h.dir,'fail-config'),'1');
   await expect(h.runtime.setModel(h.session.id,'B')).rejects.toThrow();await rm(join(h.dir,'fail-config'));
   const before=h.repos.execution.getNativeContext(h.session.id)!.selection.context;
-  await h.runtime.restoreNativeConfiguration(h.session.id,{kind:'installation_owner',id:'installation_owner'});
+  await expect(h.runtime.restoreNativeConfiguration(h.session.id,{kind:'installation_owner',id:'installation_owner'},'stale-run')).rejects.toMatchObject({code:'SESSION_RUN_CONFLICT'});
+  await expect(h.runtime.restoreNativeConfiguration(h.session.id,{kind:'channel',id:'actor',appId:'app'},h.session.runId)).rejects.toMatchObject({code:'RECOVERY_OWNER_REQUIRED'});
+  await h.runtime.restoreNativeConfiguration(h.session.id,{kind:'installation_owner',id:'installation_owner'},h.session.runId);
   expect(await h.repos.config.get(`runtime_driver_configuration:${h.session.id}`)).toBe('');
   expect(h.repos.execution.getNativeContext(h.session.id)?.selection.context).toEqual(before);
   expect((await h.calls()).filter(c=>c.method==='session/prompt')).toHaveLength(0);

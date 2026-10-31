@@ -88,4 +88,15 @@ describe('owner recovery CLI', () => {
     await createCliProgram('test', { recovery }).parseAsync(['node', 'dutydeck', '--database', '/child/db', 'recovery', 'probe', 'session', '--url', 'http://127.0.0.1:4311', '--run-id', 'run']);
     expect(recovery).toHaveBeenCalledWith('probe', 'session', expect.objectContaining({ database: '/child/db', url: 'http://127.0.0.1:4311', runId: 'run' }));
   });
+  it('restores an unknown configuration only with the exact run id', async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    const deps = { fetcher, readToken: () => 'owner' }, options = { url: 'http://127.0.0.1:4311', database: '/db' };
+    await expect(runRecoveryCli('restore-configuration', 'session', options, deps)).rejects.toMatchObject({ code: 'RECOVERY_RUN_REQUIRED' });
+    await runRecoveryCli('restore-configuration', 'session', { ...options, runId: 'run' }, deps);
+    expect(fetcher.mock.calls[0]![0].pathname).toBe('/api/sessions/session/recovery/restore-configuration');
+    expect(JSON.parse(fetcher.mock.calls[0]![1].body)).toEqual({ runId: 'run' });
+    const recovery = vi.fn();
+    await createCliProgram('test', { recovery }).parseAsync(['node', 'dutydeck', 'recovery', 'restore-configuration', 'session', '--url', options.url, '--database', '/db', '--run-id', 'run']);
+    expect(recovery).toHaveBeenCalledWith('restore-configuration', 'session', expect.objectContaining({ ...options, runId: 'run' }));
+  });
 });

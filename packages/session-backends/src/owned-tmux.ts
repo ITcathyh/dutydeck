@@ -22,6 +22,8 @@ export interface OwnedTmuxIdentity {
   identities: PhysicalProcessIdentity[];
 }
 export interface OwnedTmuxExitProof extends OwnedTmuxIdentity { stoppedAt: string }
+/** 在这台机器、这个用户的 tmux socket 上，按名字找不到这个会话的证据。 */
+export interface OwnedTmuxAbsence { absent: true; scope: OwnedTmuxScope; socket: { dev: string; ino: string }; observedAt: string }
 
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
 async function tmux(path: string, args: string[]): Promise<string> {
@@ -164,5 +166,28 @@ export async function verifyOwnedTmuxExit(proof: OwnedTmuxExitProof, probe: Proc
     if (server === 'dead') return true;
     if (server !== 'alive' || !socketCheck(proof.scope, proof.socket, true)) return false;
     return (await target(proof.scope)) === undefined;
+  } catch { return false; }
+}
+
+/**
+ * 目标会话在已核实的 socket 上不存在时返回证据，存在时返回 undefined；socket 或 tmux 查不准就抛错。
+ * 只凭它不能证明原进程已退出，调用方还要证明原所有者已退出。
+ */
+export async function captureOwnedTmuxAbsence(scope: OwnedTmuxScope, probe: ProcessProbe): Promise<OwnedTmuxAbsence | undefined> {
+  scopeCheck(scope, probe);
+  socketCheck(scope);
+  const stat = statSync(scope.socketPath, { bigint: true });
+  const socket = { dev: String(stat.dev), ino: String(stat.ino) };
+  if ((await target(scope)) !== undefined) return undefined;
+  socketCheck(scope, socket);
+  return { absent: true, scope: { ...scope }, socket, observedAt: new Date().toISOString() };
+}
+
+/** 写账本前复查：目标仍不存在（socket 已不在说明那个 tmux 服务已退出，同样算不存在）。 */
+export async function verifyOwnedTmuxAbsence(absence: OwnedTmuxAbsence, probe: ProcessProbe): Promise<boolean> {
+  try {
+    scopeCheck(absence.scope, probe);
+    if (!socketCheck(absence.scope, undefined, true)) return true;
+    return (await target(absence.scope)) === undefined;
   } catch { return false; }
 }

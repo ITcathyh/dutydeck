@@ -26,6 +26,12 @@ describe('TimelineItem 事件分发', () => {
     expect(screen.getByText('失败')).toBeTruthy();
   });
 
+  it('status=notice → 运行时提醒横幅，显示提醒正文', () => {
+    render(<TimelineItem event={event('status', { state: 'notice', kind: 'workspace_blocked', message: '这条消息还没开始执行：同一仓库里有未结的任务。' })}/>);
+    expect(screen.getByText('Dutydeck 提醒')).toBeTruthy();
+    expect(screen.getByText('这条消息还没开始执行：同一仓库里有未结的任务。')).toBeTruthy();
+  });
+
   it('permission_request → PermissionCard，展示审批提示与标题', () => {
     render(<TimelineItem event={event('permission_request', { title: '写入 /etc/hosts', status: 'pending' })}/>);
     expect(screen.getByText('需要操作授权')).toBeTruthy();

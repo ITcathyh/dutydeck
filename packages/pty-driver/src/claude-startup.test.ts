@@ -6,7 +6,7 @@ import { mkdirSync, realpathSync } from 'node:fs';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { createClaudeCodeAdapter } from '../../cli-adapters/src/adapters/claude-code.js';
 import type { CliAdapter } from '../../cli-adapters/src/types.js';
-import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
+import { PROMPT_NOT_WRITTEN, type AgentConfig, type NormalizedDriverEvent } from '@dutydeck/shared';
 import { PtyBackend, type SessionBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 
@@ -167,6 +167,34 @@ describe('PtyCliDriver Claude startup preparation', () => {
     expect(interrupts).toBe(1);
     expect(writes).toBe(0);
     await driver.stop();
+  });
+
+  it('reports a failed startup preparation as a prompt that was never written, unlike a failed write', async () => {
+    let writes = 0;
+    const backend = (): SessionBackend => ({
+      kind: 'pty', sessionName: undefined, spawn() {}, write() { writes++; return true; },
+      resize() {}, interrupt() {}, kill() {}, onData() {}, onExit() {},
+    });
+    const notReady: CliAdapter = {
+      id: 'preparing-cli', capabilities: {}, buildArgs: () => [],
+      prepareInput: async () => { throw new Error('Codex 启动尚未就绪，请打开终端检查启动状态后再发送任务。'); },
+      writeInput: target => { target.write('prompt'); },
+    };
+    const driver = new PtyCliDriver({ agent: agentConfig(fixture, dir), adapter: notReady, backend: backend(), onEvent: () => {}, onExit: () => {}, sessionId: 'prepare-failed' });
+    await driver.start();
+    await expect(driver.send('must not be written')).rejects.toMatchObject({ code: PROMPT_NOT_WRITTEN, message: expect.stringContaining('启动尚未就绪') });
+    expect(writes).toBe(0);
+    await driver.stop();
+    const writeFailed: CliAdapter = {
+      id: 'writing-cli', capabilities: {}, buildArgs: () => [],
+      writeInput: () => { throw new Error('write failed midway'); },
+    };
+    const second = new PtyCliDriver({ agent: agentConfig(fixture, dir), adapter: writeFailed, backend: backend(), onEvent: () => {}, onExit: () => {}, sessionId: 'write-failed' });
+    await second.start();
+    const error = await second.send('maybe written').catch(failure => failure as { code?: string; message: string });
+    expect(error.message).toContain('write failed midway');
+    expect(error.code).not.toBe(PROMPT_NOT_WRITTEN);
+    await second.stop();
   });
 
   it('stops a real Claude trust preparation before its retry can write a prompt', async () => {

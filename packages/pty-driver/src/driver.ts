@@ -4,6 +4,7 @@ import {
   AGENT_LOGIN_REQUIRED,
   DriverDetachedError,
   DriverRecoveryError,
+  PromptNotWrittenError,
   remoteApprovalCliAdapterIds,
   RuntimeError,
   type AgentConfig,
@@ -499,7 +500,10 @@ export class PtyCliDriver implements AgentDriver {
       // must never be mistaken for an idle, completed agent response.
       if (!this.inputPrepared) {
         if (this.adapter.prepareInput) {
-          await Promise.race([this.adapter.prepareInput(this.submissionBackend(submission), this.sessionContext()), writeCancelled]);
+          // 启动确认还没写 prompt：它自己失败（没就绪、停在目录信任页）按未写入报给运行时；打断与生命周期取消仍是原错误。
+          const prepared = Promise.resolve().then(() => this.adapter.prepareInput!(this.submissionBackend(submission), this.sessionContext()))
+            .catch(error => { throw new PromptNotWrittenError(error instanceof Error ? error.message : String(error)); });
+          await Promise.race([prepared, writeCancelled]);
         }
         check();
         this.inputPrepared = true;

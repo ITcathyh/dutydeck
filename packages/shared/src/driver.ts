@@ -79,6 +79,13 @@ export class DriverRecoveryError extends Error {
   constructor(message: string, readonly code?: string) { super(message); this.name = 'DriverRecoveryError'; }
 }
 
+/** 驱动确认 prompt 一个字都还没写入就失败了（启动没就绪、停在目录信任页）：运行时按未提交结算为失败、可重试，不记结果未知。 */
+export const PROMPT_NOT_WRITTEN = 'PROMPT_NOT_WRITTEN';
+export class PromptNotWrittenError extends Error {
+  readonly code = PROMPT_NOT_WRITTEN;
+  constructor(message: string) { super(message); this.name = 'PromptNotWrittenError'; }
+}
+
 /**
  * 无进展超时：一轮连续这么久没有实质输出，驱动停下了它（ACP 取消，PTY 不再等待）。不是用户中断。
  * 驱动发一条 error 事件，data 为 AgentIdleTimeoutData；取消没确认时轮次进入 reconcile_required，原因码也是它。

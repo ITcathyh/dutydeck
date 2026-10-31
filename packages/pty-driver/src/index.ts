@@ -21,8 +21,8 @@ export {
   type SessionIdLookupContext,
 } from './session-id/index.js';
 export {
-  captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit,
-  type OwnedTmuxScope, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type ProcessProbe,
+  captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit, captureOwnedTmuxAbsence, verifyOwnedTmuxAbsence,
+  type OwnedTmuxScope, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence, type ProcessProbe,
 } from '@dutydeck/session-backends';
 
 export { readCodexSessionUsage } from './transcript/codex.js';

@@ -22,6 +22,11 @@ describe('conversation timeline', () => {
     expect(timeline[1].data.text).toBe('你好');
   });
 
+  it('shows runtime notices but keeps other status events hidden', () => {
+    const timeline = buildTimeline([event(1, 'status', { state: 'thinking' }), event(2, 'status', { state: 'notice', kind: 'workspace_blocked', message: '这条消息还没开始执行' }), event(3, 'status', { state: 'idle' })]);
+    expect(timeline.map(item => item.id)).toEqual(['e2']);
+  });
+
   it('does not merge user and assistant messages', () => {
     const timeline = buildTimeline([event(1, 'text', { text: 'Hello', role: 'user' }), event(2, 'text', { text: 'Hi', role: 'assistant' })]);
     expect(timeline.map(item => item.data.text)).toEqual(['Hello', 'Hi']);

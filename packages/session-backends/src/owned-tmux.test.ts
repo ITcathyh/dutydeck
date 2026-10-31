@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync } from '
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { childProcessIdentity, observeProcess } from '../../storage/src/process-identity.js';
-import { captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit, type OwnedTmuxScope, type ProcessProbe } from './owned-tmux.js';
+import { captureOwnedTmuxAbsence, captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxAbsence, verifyOwnedTmuxExit, type OwnedTmuxScope, type ProcessProbe } from './owned-tmux.js';
 
 const probe: ProcessProbe = { identify: childProcessIdentity, observe: observeProcess };
 let root: string;
@@ -20,6 +20,19 @@ beforeEach(() => { root = realpathSync(mkdtempSync(join(tmpdir(), 'dd-owned-tmux
 afterEach(() => { try { tmux('kill-server'); } catch {} rmSync(root, { recursive: true, force: true }); });
 
 describe('owned tmux physical exit proofs (real isolated server and process identity)', () => {
+  it('proves absence only on a verified live socket and rechecks it before use', async () => {
+    await expect(captureOwnedTmuxAbsence(scope(), probe)).rejects.toThrow('PATH_UNAVAILABLE');
+    create('other');
+    const absence = (await captureOwnedTmuxAbsence(scope(), probe))!;
+    expect(absence).toMatchObject({ absent: true, scope: scope() });
+    expect(await verifyOwnedTmuxAbsence(absence, probe)).toBe(true);
+    create();
+    expect(await captureOwnedTmuxAbsence(scope(), probe)).toBeUndefined();
+    expect(await verifyOwnedTmuxAbsence(absence, probe)).toBe(false);
+    tmux('kill-server');
+    rmSync(socket, { force: true });
+    expect(await verifyOwnedTmuxAbsence(absence, probe)).toBe(true);
+  });
   it('stops only exact owned target, verifies proof again, and admits a later task', async () => {
     create(); create('other');
     const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;

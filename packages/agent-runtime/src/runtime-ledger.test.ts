@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentDriver, BoundExecutionRepository, NormalizedDriverEvent, Session, TaskExecutionContext, TaskRequestV1 } from '@dutydeck/shared';
-import { canonicalExecutionJson, DriverRecoveryError } from '@dutydeck/shared';
+import { canonicalExecutionJson, DriverRecoveryError, PromptNotWrittenError } from '@dutydeck/shared';
 import { DutydeckRuntime, type RuntimeOptions } from './index.js';
 
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
@@ -79,6 +79,21 @@ describe('Runtime uses the execution ledger', () => {
     expect(h.repos.execution.getTaskExecution(task.id)?.currentAttempt).toMatchObject({
       state: 'reconcile_required', submissionState: 'intent_recorded', reconcileReason: { code: 'DRIVER_RESULT_UNKNOWN' },
     });
+  });
+
+  it('settles a recorded intent as an unsubmitted failure when the driver proves the prompt was never written', async () => {
+    const h = await fixture({}, async (emit, prompt) => {
+      if (prompt.includes('not ready')) throw new PromptNotWrittenError('Codex 启动尚未就绪，请打开终端检查启动状态后再发送任务。');
+      emit({ type: 'text', sourceId: 'provider-text', data: { text: prompt } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    const task = await h.runtime.send(h.session.id, 'not ready');
+    expect(task.status).toBe('failed');
+    const attempt = h.repos.execution.getTaskExecution(task.id)!.currentAttempt!;
+    expect(attempt).toMatchObject({ state: 'settled', outcome: 'failed', submissionState: 'intent_recorded',
+      settlement: { kind: 'not_submitted', outcome: 'failed', submissionId: attempt.submission!.submissionId } });
+    expect((await h.repos.events.list(h.session.id)).some(event => event.type === 'error' && String((event.data as { message?: unknown }).message).includes('启动尚未就绪'))).toBe(true);
+    // Nothing is left unknown, so the session keeps accepting work.
+    expect((await h.runtime.send(h.session.id, 'next')).status).toBe('completed');
   });
 
   it.each([false, true])('redacts credential canaries from newly logged driver diagnostics (Error=%s)', async asError => {

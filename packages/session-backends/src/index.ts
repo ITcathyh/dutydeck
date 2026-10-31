@@ -12,8 +12,8 @@ export {
   type TmuxDutydeckMetadataKey,
 } from './tmux-backend.js';
 export {
-  captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit,
-  type OwnedTmuxScope, type OwnedTmuxIdentity, type OwnedTmuxExitProof,
+  captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit, captureOwnedTmuxAbsence, verifyOwnedTmuxAbsence,
+  type OwnedTmuxScope, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence,
   type PhysicalProcessIdentity, type ProcessProbe,
 } from './owned-tmux.js';
 

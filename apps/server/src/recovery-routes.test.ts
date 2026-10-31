@@ -32,6 +32,22 @@ describe('execution recovery owner routes', () => {
       expect((await app.inject({ method: 'POST', url: '/api/sessions/session/recovery/probe', headers, payload: { runId: 'run', gone: true } })).statusCode).toBe(400);
     } finally { await app.close(); }
   });
+  it('restores an unknown native configuration for the exact run as the installation owner', async () => {
+    const runtime = { restoreNativeConfiguration: vi.fn().mockResolvedValue({}), inspectExecutionRecovery: vi.fn().mockResolvedValue({ runId: 'run', blockers: [] }) };
+    const app = Fastify();
+    app.setErrorHandler((error, _request, reply) => reply.code(error instanceof ZodError ? 400 : error instanceof RuntimeError ? error.statusCode : 500).send({ error: error.message }));
+    registerRecoveryRoutes(app, runtime as unknown as DutydeckRuntime, { authorize: request => request.headers.authorization === 'Bearer owner' });
+    try {
+      const url = '/api/sessions/session/recovery/restore-configuration', headers = { authorization: 'Bearer owner' };
+      expect((await app.inject({ method: 'POST', url, payload: { runId: 'run' } })).statusCode).toBe(403);
+      expect((await app.inject({ method: 'POST', url, headers, payload: {} })).statusCode).toBe(400);
+      expect((await app.inject({ method: 'POST', url, headers, payload: { runId: 'run', actor: 'forged' } })).statusCode).toBe(400);
+      expect(runtime.restoreNativeConfiguration).not.toHaveBeenCalled();
+      const response = await app.inject({ method: 'POST', url, headers, payload: { runId: 'run' } });
+      expect(response.statusCode).toBe(200); expect(response.json()).toEqual({ runId: 'run', blockers: [] });
+      expect(runtime.restoreNativeConfiguration).toHaveBeenCalledWith('session', { kind: 'installation_owner', id: 'installation_owner' }, 'run');
+    } finally { await app.close(); }
+  });
   it('validates steering recovery and supplies only the server-resolved owner to runtime', async () => {
     const runtime = { confirmSteeringRecovery: vi.fn().mockResolvedValue({ replayed: false }) };
     const app = Fastify();

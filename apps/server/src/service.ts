@@ -46,6 +46,7 @@ import { WorkItemService } from './work-items.js';
 import { WorkItemInteractions } from './work-item-interactions.js';
 import { LarkWorkbench } from './lark/workbench.js';
 import { createLarkCardService } from './lark/service.js';
+import { deliverLarkSessionNotice } from './lark/session-notice.js';
 import { createWorkbenchFetch } from './workbench-fetch.js';
 import { authorizeWorkItemAgent, authorizeWorkItemInteraction, workItemRiskPolicy } from './work-item-policy.js';
 import { SessionAutomationService } from './session-automation.js';
@@ -521,6 +522,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return result;
     },
     awaitingAnswer: sessionId => relayBroker.listPending(sessionId).length > 0,
+    onSessionNotice: (session, notice) => deliverLarkSessionNotice(repos, bot => createLarkCardService(env, workbenchHttp.fetch, bot), session, notice),
     log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]), info: (data, message) => app?.log.info(data, message) },
     ...pluginWiring?.runtimeOptions
   });

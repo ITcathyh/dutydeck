@@ -13,7 +13,8 @@ const isChildDiagnostic = (data: TimelineEvent['data']) => data.diagnostic === d
   && typeof data.activityId === 'string' && typeof data.parentTurnId === 'string' && typeof data.childTurnId === 'string'
   && typeof data.parentThreadId === 'string' && typeof data.childThreadId === 'string'
   && (data.state === 'child_quota' && data.code === 'usage_limit_exceeded' || data.state === 'child_rate_limit' && data.code === 'rate_limit');
-const isInvisible = (event: DockEvent) => event.type === 'status' ? !isChildDiagnostic(event.data)
+// 运行时留在会话里的提醒（state=notice）在时间线上显示，其余状态事件不显示。
+const isInvisible = (event: DockEvent) => event.type === 'status' ? !isChildDiagnostic(event.data) && event.data?.state !== 'notice'
   : event.type === 'task' || event.type === 'completed' || event.type === 'raw_terminal';
 const warningPrefix = /^warning:\s*/i;
 

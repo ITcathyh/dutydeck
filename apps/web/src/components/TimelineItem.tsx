@@ -44,6 +44,11 @@ export function TimelineItem({ event, final = false, assistantLabel = 'Agent', o
       <MarkdownContent>{event.data.text ?? ''}</MarkdownContent>
     </Banner>
   </div>;
+  if (event.type === 'status' && event.data.state === 'notice') return <div className="ui-timeline-item my-4">
+    <Banner tone="warning" title="Dutydeck 提醒">
+      <MarkdownContent>{event.data.message ?? ''}</MarkdownContent>
+    </Banner>
+  </div>;
   if (event.type === 'error') return <div className="ui-timeline-item my-4">
     <Banner tone="danger" title="Agent 错误">
       <MarkdownContent>{event.data.message ?? 'Agent 运行失败'}</MarkdownContent>

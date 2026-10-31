@@ -2,14 +2,14 @@ import { readFile } from 'node:fs/promises';
 import { executionRecoveryDecisionSchema, steeringRecoveryDecisionSchema, ptyRetirementRecoverySchema, nativeReplacementRecoverySchema } from '@dutydeck/shared';
 import { executeLocalRuntimeRequest, type LocalRuntimeRequestDependencies } from './local-runtime-request.js';
 
-export type RecoveryOperation = 'inspect' | 'probe' | 'confirm' | 'steering' | 'retire-pty' | 'replace-native';
+export type RecoveryOperation = 'inspect' | 'probe' | 'confirm' | 'steering' | 'retire-pty' | 'replace-native' | 'restore-configuration';
 export interface RecoveryCliOptions { file?: string; runId?: string; url?: string; database?: string }
 export class RecoveryCliError extends Error {
   constructor(public readonly code: string, message: string) { super(message); this.name = 'RecoveryCliError'; }
 }
 export async function runRecoveryCli(operation: RecoveryOperation, sessionId: string, options: RecoveryCliOptions = {}, dependencies: LocalRuntimeRequestDependencies = {}) {
   let body: unknown;
-  if (operation === 'probe') {
+  if (operation === 'probe' || operation === 'restore-configuration') {
     if (!options.runId) throw new RecoveryCliError('RECOVERY_RUN_REQUIRED', 'Inspect first, then supply the exact --run-id');
     body = { runId: options.runId };
   } else if (operation === 'confirm' || operation === 'steering' || operation === 'retire-pty' || operation === 'replace-native') {

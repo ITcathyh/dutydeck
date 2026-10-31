@@ -1,12 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { timeLoop, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, redactCredentialText } from '@dutydeck/shared';
+import { timeLoop, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, redactCredentialText, PROMPT_NOT_WRITTEN, unknownTaskActionLabels } from '@dutydeck/shared';
 import { listAcpxBuiltinAgents, AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
-import type { UnknownTaskFacts, UnknownTaskResolution, SteeringRecoveryDecision, SteeringOperation, PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverSteeringOutcome, ExecutionActor, ResourceCheckRef, SessionFence, TaskAttempt, TaskExecutionProjection, TaskRequestV1 } from '@dutydeck/shared';
+import type { UnknownTaskFacts, UnknownTaskResolution, SteeringRecoveryDecision, SteeringOperation, PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverSteeringOutcome, ExecutionActor, ExecutionBlocker, ResourceCheckRef, SessionFence, TaskAttempt, TaskExecutionProjection, TaskRequestV1 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import { PersistentEventPublisher, type SubscribeOptions, type EventListener } from './persistent-event-publisher.js';
 import { digest, eventJson, DriverConfigurationLedger, LocalDriverLedger, type ExecutionOptions } from './ledger.js';
@@ -100,6 +100,11 @@ export interface PtyRetirementControl {
   capture(session: Session): unknown | Promise<unknown>;
   stop(session: Session, snapshot: unknown, beforeKill: (snapshot: unknown) => Promise<void>): Promise<unknown>;
   verify(session: Session, snapshot: unknown): boolean | Promise<boolean>;
+  /**
+   * 原终端已不存在时给出可复核的不存在证明（verify 能复查），终端还在时返回 undefined。只凭它不算退出证明：
+   * 运行时还要求终端记录的所有者运行时已退出（见 retireDetachedPty）。
+   */
+  captureAbsence?(session: Session): Promise<unknown | undefined>;
 }
 export interface TaskRequestMaterial {
   agentPrompt?: string;
@@ -168,7 +173,37 @@ export interface RuntimeOptions {
   onTaskSettled?: (session: Session, task: PublicTaskRecord) => void | Promise<void>;
   /** 一次验证跑完后通知宿主；不影响验证结果，异常忽略。 */
   onVerificationCompleted?: (session: Session, result: VerificationResponse) => void | Promise<void>;
+  /** 会话提醒（排队受阻、结果未知久未处理或已自动结案）已写进会话后交给宿主投递，比如转到飞书原话题；同一提醒只调一次，异常只记日志。 */
+  onSessionNotice?: (session: Session, notice: SessionNotice) => void | Promise<void>;
 }
+
+/** 运行时留在会话里的提醒（status 事件 state=notice）。id 稳定：同一件事只提醒一次，宿主可直接当幂等键。 */
+export interface SessionNotice {
+  id: string;
+  kind: 'workspace_blocked' | 'unknown_task_overdue' | 'unknown_task_abandoned' | 'queue_expired';
+  taskId: string;
+  /** 结果未知提醒对应的执行，用于沿用宿主已有的提醒。 */
+  attemptId?: string;
+  /** 给人看的纯文本，段落之间空一行。 */
+  message: string;
+  /** 能处理这件事的会话（Web 详情入口）。 */
+  sessionIds: string[];
+}
+/** 结果未知的一轮开始超过这么久还没人处理，在原话题提醒一次怎么处理。 */
+const UNKNOWN_TASK_REMIND_MS = 24 * 60 * 60_000;
+/** 超过这么久仍没人处理、且能证明执行进程已退出时，自动按「结果未知、已放弃」结案。 */
+const UNKNOWN_TASK_ABANDON_MS = 7 * 24 * 60 * 60_000;
+/** 排队超过这么久仍未开始的消息，轮到它时不再执行，改为取消。 */
+const QUEUED_TASK_EXPIRE_MS = 24 * 60 * 60_000;
+/** 同会话上一条任务由 Agent 跑完不到这么久，视为按顺序轮到排头，不按过期处理。 */
+const QUEUE_HANDOFF_MS = 15 * 60_000;
+const workspaceBlockerStates: Record<string, string> = {
+  WORKSPACE_PHYSICAL_RESOURCE_UNSAFE: '它的终端或执行进程还没确认已退出（残留终端）',
+  DRIVER_STOP_BLOCKED: '它上次停止时没能确认进程已退出（残留终端）',
+  WORKSPACE_RESOURCE_UNVERIFIABLE: '它的工作目录身份无法核实',
+  DRIVER_CONFIGURATION_UNKNOWN: '它上次改模型或权限的结果不明，需要恢复配置',
+};
+const recoveryOwner: ExecutionActor = { kind: 'installation_owner', id: 'installation_owner' };
 
 /** 已确认投递的任务完成；明确未投递才回队列，failed 保留未知状态等待恢复。 */
 export type SteeringOutcome = DriverSteeringOutcome | 'incompatible' | 'failed';
@@ -241,6 +276,12 @@ export class DutydeckRuntime {
   private readonly queueBlocked = new Set<string>();
   private readonly resourceQueueBlocked = new Set<string>();
   private resourceQueueRevision = 0;
+  /** 受阻期：排头任务被同仓库挡住后记下，认领成功或队列清空时删掉；noticed 表示这一期已留过会话提醒。 */
+  private readonly workspaceBlocks = new Map<string, { taskId: string; noticed: boolean }>();
+  /** 自动结案没做成的结果未知执行，每个进程只记一次日志。 */
+  private readonly unknownTaskFailures = new Set<string>();
+  /** 自动结案条件还不满足（进程没证明退出、有排队）的执行，下次再核对的时间；只在进程内，避免每轮维护都去探测终端。 */
+  private readonly unknownTaskRecheckAt = new Map<string, number>();
   /** 按 Agent 记的不可用标记（没登录、凭据失效），只在进程内；见 checkAgentAvailability。 */
   private readonly agentUnavailable = new Map<string, AgentUnavailable>();
   private readonly agentChecks = new Map<string, Promise<AgentUnavailable | undefined>>();
@@ -311,7 +352,8 @@ export class DutydeckRuntime {
       return new JsonlTransport(agent, { onEvent, onExit, context });
     });
     if (!options.driverFactory) this.factory.controlledResources = protocol => protocol === 'acp' || protocol === 'jsonl' || protocol === 'pipe';
-    if ((options.driverIdleTimeoutMs ?? 6 * 60 * 60_000) > 0 && interval > 0) {
+    // 空闲驱动回收（driverIdleTimeoutMs 为 0 时跳过）和结果未知任务的提醒、老化结案共用这个维护循环。
+    if (interval > 0) {
       this.cleanupTimer = setInterval(() => { if (this.initialized && !this.shuttingDown) void timeLoop('runtime.cleanup-idle-drivers', options.log, () => this.cleanupIdleDrivers()).catch(() => {}); }, interval);
       this.cleanupTimer.unref();
     }
@@ -631,6 +673,7 @@ export class DutydeckRuntime {
           }
         }
         await this.observeAbandonedResources(session);
+        await this.retireDetachedPty(session);
         await this.clearVerifiedStopBlock(session);
         try { await this.mutations.wait(() => this.configurations.assertClear(session.id)); }
         catch (error) {
@@ -1338,7 +1381,7 @@ export class DutydeckRuntime {
       if (session.runId !== input.runId) throw new RuntimeError('SESSION_RUN_CONFLICT', 'Session run changed', 409);
       const key = `runtime_pty_retirement:${id}:${input.decisionId}`;
       const observationId = `pty_retirement_${digest({ sessionId: id, ...input })}`;
-      type Receipt = { input: PtyRetirementRecovery; actor: ExecutionActor; identity: unknown; snapshot: unknown };
+      type Receipt = { input: PtyRetirementRecovery; actor: ExecutionActor; identity: unknown; snapshot: unknown; absent?: true };
       let receipt: Receipt | undefined;
       let replayed = false, reserved = false;
       const checkScope = async () => {
@@ -1376,15 +1419,17 @@ export class DutydeckRuntime {
       try {
         if (!replayed) {
           if (!receipt) {
-            const snapshot = await this.mutations.wait(() => Promise.resolve(control.capture(session)));
+            // 原终端已不存在时改用不存在证明；它只在所有者运行时已退出时才被账本接受（observeDetachedLocalResource）。
+            const absence = control.captureAbsence ? await this.mutations.wait(() => control.captureAbsence!(session)) : undefined;
+            const snapshot = absence ?? await this.mutations.wait(() => Promise.resolve(control.capture(session)));
             canonicalExecutionJson(snapshot);
             await this.mutations.write(id, async () => {
               await checkScope(); const { resource } = checkResource();
-              receipt = { input, actor, identity: resource.identity!, snapshot };
+              receipt = { input, actor, identity: resource.identity!, snapshot, ...(absence !== undefined ? { absent: true as const } : {}) };
               await this.repos.config.set(key, canonicalExecutionJson(receipt));
             });
           }
-          if (!await this.mutations.wait(() => Promise.resolve(control.verify(session, receipt!.snapshot)))) {
+          if (!receipt!.absent && !await this.mutations.wait(() => Promise.resolve(control.verify(session, receipt!.snapshot)))) {
             const proof = await this.mutations.wait(() => control.stop(session, receipt!.snapshot, async snapshot => {
               canonicalExecutionJson(snapshot);
               await this.mutations.write(id, async () => {
@@ -1401,7 +1446,9 @@ export class DutydeckRuntime {
           await this.mutations.write(id, async () => {
             await checkScope(); const { resource } = checkResource();
             if (!await this.mutations.wait(() => Promise.resolve(control.verify(session, receipt!.snapshot)))) throw new RuntimeError('PTY_EXIT_UNVERIFIED', 'Original PTY processes have not all been proven gone', 409);
-            this.bound().observed(this.fence(session), resource.resourceId, input.expectedRevision, { observationId, state: 'gone', identityId: resource.identity!.identityId, observedAt: now(), evidenceRef: `pty-retirement:${digest(receipt)}` });
+            const observation = { observationId, state: 'gone' as const, identityId: resource.identity!.identityId, observedAt: now(), evidenceRef: `pty-retirement:${digest(receipt)}` };
+            if (receipt!.absent) this.bound().observeDetachedLocalResource(this.fence(session), resource.resourceId, input.expectedRevision, observation);
+            else this.bound().observed(this.fence(session), resource.resourceId, input.expectedRevision, observation);
           });
         }
       } finally { this.ptyRetirements.delete(id); }
@@ -2140,6 +2187,34 @@ export class DutydeckRuntime {
       if(identity){try{this.bound().confirmRecoveredNativeContext(f,resource.resourceId,resource.revision,identity);}catch(error){if(!(error instanceof RuntimeError&&error.code==='SESSION_RESOURCE_BLOCKED'))throw error;}}
     }
   }
+  /**
+   * 上一个运行时留下、仍标为存活的 PTY 终端记录：宿主核实这个会话的 tmux 会话已不存在，且记录的所有者运行时已退出时，
+   * 记为已消失（不存在证明写进账本），不结束任何进程。终端还在、查不准或所有者还在，都原样保留。返回写入的证据引用。
+   */
+  private async retireDetachedPty(session: Session): Promise<string[]> {
+    const control = this.options.ptyRetirement, id = session.id;
+    if (!control?.captureAbsence || session.protocol !== 'pty-cli' || this.drivers.has(id) || this.blockedDrivers.has(id) || this.recoveryInFlight(id)) return [];
+    const candidates = this.repos.execution.getResources(id).filter(r => r.runId === session.runId && r.kind === 'local_only' && r.stage === 'created'
+      && r.identity && r.observations.at(-1)?.state !== 'gone');
+    if (!candidates.length) return [];
+    let absence: unknown;
+    try { absence = await this.mutations.wait(() => control.captureAbsence!(session)); }
+    catch (error) { if (error instanceof RevokedOperation) throw error; return []; }
+    if (absence === undefined) return [];
+    const evidenceRef = `pty-absent:${digest(absence)}`, refs: string[] = [];
+    for (const r of candidates) await this.mutations.write(id, async () => {
+      if (!await this.mutations.wait(() => Promise.resolve(control.verify(session, absence)))) return;
+      try {
+        this.bound().observeDetachedLocalResource(this.fence(session), r.resourceId, r.revision, { observationId: `pty_absent_${digest([r.resourceId, r.revision, evidenceRef])}`,
+          state: 'gone', identityId: r.identity!.identityId, observedAt: now(), evidenceRef });
+        refs.push(`${evidenceRef}:${r.resourceId}`);
+      } catch (error) {
+        if (!(error instanceof RuntimeError && ['RESOURCE_OWNER_NOT_PROVEN_EXITED', 'RESOURCE_OBSERVATION_CONFLICT', 'RESOURCE_SCOPE_CONFLICT'].includes(error.code))) throw error;
+      }
+    });
+    if (refs.length) this.options.log?.info?.({ sessionId: id, resources: refs }, 'Retired PTY records whose terminal and owner runtime are gone');
+    return refs;
+  }
   async probeNativeResources(id:string,actor:ExecutionActor) {
     this.assertReady();
     if(this.lifecycle(id).revoked){this.mutations.run(undefined,()=>this.assertReplaceable(id));this.lifecycles.set(id,owner(id,this.transition(id)));}
@@ -2149,7 +2224,11 @@ export class DutydeckRuntime {
     if(expectedRunId!==undefined)this.requireRecoveryOwner(actor);
     return this.prepareNativeContext(id,actor,{resourceId,expectedRevision,decisionId},expectedRunId);
   }
-  async restoreNativeConfiguration(id:string,actor:ExecutionActor) { return this.prepareNativeContext(id,actor); }
+  /** 配置结果不明（DRIVER_CONFIGURATION_UNKNOWN）时，用原生会话重新下发并核实当前配置；给了 expectedRunId 即管理员恢复入口。 */
+  async restoreNativeConfiguration(id:string,actor:ExecutionActor,expectedRunId?:string) {
+    if(expectedRunId!==undefined)this.requireRecoveryOwner(actor);
+    return this.prepareNativeContext(id,actor,undefined,expectedRunId);
+  }
   private async prepareNativeContext(id:string,actor:ExecutionActor,replacement?:{resourceId:string;expectedRevision:number;decisionId:string},expectedRunId?:string) {
     this.assertReady();
     const original=await this.repos.sessions.get(id);if(!original)throw new RuntimeError('SESSION_NOT_FOUND','Unknown Session',404);
@@ -2704,13 +2783,16 @@ export class DutydeckRuntime {
           ...(error instanceof Error && error.stack ? { stack: redactCredentialText(error.stack) } : {}),
           ...(typeof failureCode === 'string' && /^[A-Z0-9_]+$/.test(failureCode) ? { code: failureCode } : {}),
         }, 'Agent task execution failed');
-        if (unsubmitted && unsubmitted.state !== 'settled' && unsubmitted.submissionState === 'not_submitted' && !isTaskFenceRevocation(error)) {
+        // 驱动确认 prompt 没写入（PROMPT_NOT_WRITTEN）时，记过的提交意图不算提交：同样按未提交、可重试结算。
+        const notWritten = failureCode === PROMPT_NOT_WRITTEN;
+        if (unsubmitted && unsubmitted.state !== 'settled' && (unsubmitted.submissionState === 'not_submitted' || notWritten && unsubmitted.submissionState === 'intent_recorded') && !isTaskFenceRevocation(error)) {
           await this.emit(id, 'error', { message: error instanceof Error ? error.message : String(error) }).catch(() => {});
         }
         await this.mutations.write(id, async () => {
           const attempt = this.repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.attemptId === ref.attemptId);
           if (!attempt || attempt.state === 'settled') return;
           if (attempt.submissionState === 'not_submitted') this.wake(this.bound().settleAttempt(this.attemptFence(ref), `preparation:${ref.attemptId}`, { kind: 'not_submitted', outcome: isTaskFenceRevocation(error) ? 'cancelled' : 'failed', reason: error instanceof Error ? error.message : String(error) }));
+          else if (notWritten && attempt.submissionState === 'intent_recorded' && attempt.submission) this.wake(this.bound().settleAttempt(this.attemptFence(ref), `preparation:${ref.attemptId}`, { kind: 'not_submitted', outcome: 'failed', reason: error instanceof Error ? error.message : String(error), submissionId: attempt.submission.submissionId }));
           else this.wake(this.bound().markReconcileRequired(this.attemptFence(ref), { reasonId: `unknown:${ref.attemptId}`, code: error instanceof RuntimeError || error instanceof Error && 'code' in error && typeof error.code === 'string' && /^[A-Z0-9_]+$/.test(error.code) ? String(error.code) : 'DRIVER_RESULT_UNKNOWN', evidenceRefs: [] }));
         });
       }
@@ -2946,6 +3028,14 @@ export class DutydeckRuntime {
         }, Math.min(2_147_483_647, Date.parse(retry.dueAt) - Date.now()));
         timer.unref(); this.capacityTimers.set(id, { taskId: next.id, timer }); return;
       }
+      let expired = false;
+      try { expired = !!next && await this.expireStaleQueued(session, next); }
+      catch (error) {
+        // 取消没成功也不能把旧消息交给 Agent。
+        this.options.log?.warn({ sessionId: id, taskId: next!.id, error: String(error) }, 'Expiring a stale queued task failed');
+        this.queueBlocked.add(id); return;
+      }
+      if (expired) continue;
       let claimed: CommitResult | undefined;
       let token: Owner | undefined;
       const resourceRevision = this.resourceQueueRevision;
@@ -2967,11 +3057,14 @@ export class DutydeckRuntime {
         }
         if (error instanceof RuntimeError && error.code === 'WORKSPACE_RESOURCE_BLOCKED') {
           if (next && await this.closeUnprovenIdleCompetitors(id,next.id,!admissionRechecked)) { admissionRechecked = true; continue; }
+          if (next) await this.noteWorkspaceBlocked(session, next.id, error.message)
+            .catch(noteError => this.options.log?.warn({ sessionId: id, taskId: next.id, error: String(noteError) }, 'Workspace blocked notice failed'));
           if (resourceRevision === this.resourceQueueRevision) this.resourceQueueBlocked.add(id);
           return;
         }
         this.queueBlocked.add(id); return;
       }
+      this.workspaceBlocks.delete(id);
       if (!claimed?.task || !claimed.attempt || !token) { this.queues.delete(id); return; }
       admissionRechecked = false;
       // No await separates claiming the durable activity slot from registering its local owner.
@@ -2982,6 +3075,81 @@ export class DutydeckRuntime {
     }
   }
   private wakeOptional(result: CommitResult | undefined) { return result ? this.wake(result) : undefined; }
+  /**
+   * 排头任务从未开始、已排队超过 24 小时，又不是同会话上一条任务刚由 Agent 跑完、按顺序轮到它：多半是被挡了很久的旧消息，
+   * 现在执行会出乎发送者意料。以安装所有者身份取消，并提醒需要时重发。
+   */
+  private async expireStaleQueued(session: Session, task: TaskRecord) {
+    // 记忆管线管理自己的超时与重试；通用取消会被它当作失败并重新建作业。
+    if (session.source === 'lark-memory') return false;
+    const now = Date.now();
+    if (now - Date.parse(task.createdAt) <= QUEUED_TASK_EXPIRE_MS) return false;
+    const current = this.repos.execution.getTaskExecution(task.id);
+    const attempt = current?.currentAttempt;
+    if (!current || attempt && (attempt.submissionState !== 'not_submitted' || attempt.automaticRetry || attempt.manualRetry)) return false;
+    const handedOff = (await this.repos.tasks.listBySession(session.id)).some(item => now - Date.parse(item.updatedAt) < QUEUE_HANDOFF_MS
+      && this.repos.execution.getTaskExecution(item.id)?.currentAttempt?.settlement?.kind === 'driver_result');
+    if (handedOff) return false;
+    await this.mutations.write(session.id, async () => this.wake(this.bound().cancelQueued(this.fence(session), task.id, current.task.revision,
+      { decisionId: `queue_expired:${task.id}`, actor: recoveryOwner, action: 'cancel', evidenceRefs: ['runtime:queue-expired', `task_created:${task.createdAt}`], resourceChecks: [] })));
+    await this.projectQueue(session.id);
+    this.options.log?.warn({ sessionId: session.id, taskId: task.id, createdAt: task.createdAt }, 'Cancelled a queued task that waited over 24 hours without starting');
+    await this.sessionNotice(session, { id: `notice_${digest(['queue_expired', task.id])}`, kind: 'queue_expired', taskId: task.id, sessionIds: [session.id],
+      message: '排队超过 24 小时仍未开始，已取消、不会执行；需要的话请重发。' });
+    return true;
+  }
+  /**
+   * 排头任务被同一仓库里别的会话挡住。每个受阻期（同一条排头任务）只写一次告警日志；挡它的会话里没有正在跑、
+   * 会自己结束的任务时，再在会话里留一条提醒，说明被谁挡住、怎么处理、处理后会自动继续。
+   */
+  private async noteWorkspaceBlocked(session: Session, taskId: string, detail: string) {
+    const current = this.workspaceBlocks.get(session.id);
+    if (current?.taskId === taskId && current.noticed) return;
+    let blockers: ExecutionBlocker[];
+    try { blockers = JSON.parse(detail); } catch { return; }
+    if (!Array.isArray(blockers) || !blockers.length) return;
+    if (current?.taskId !== taskId) this.options.log?.warn({ sessionId: session.id, taskId, code: 'WORKSPACE_RESOURCE_BLOCKED',
+      blockers: blockers.map(block => ({ code: block.code, sessionId: block.sessionId, ...(block.taskId ? { taskId: block.taskId } : {}), ...(block.resourceId ? { resourceId: block.resourceId } : {}) })) },
+      'Queued task is blocked by another session in the same workspace');
+    const status = (block: ExecutionBlocker) => block.taskId ? this.repos.execution.getTaskExecution(block.taskId)?.task.status : undefined;
+    // 正在跑或排在前面的任务会自己结束，属于正常排队，不提醒。
+    const busy = new Set(blockers.filter(block => ['running', 'queued'].includes(status(block) ?? '') || this.attempts.has(block.sessionId)).map(block => block.sessionId));
+    const stuck = new Map<string, string>();
+    const kinds = new Set<string>();
+    for (const block of blockers) {
+      if (busy.has(block.sessionId) || stuck.has(block.sessionId)) continue;
+      const unknown = status(block) === 'reconcile_required';
+      // 还连着、没卡在停止上的 Agent，它的终端会随空闲证明或停止释放，不算残留。
+      if (!unknown && block.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE' && this.drivers.has(block.sessionId)
+        && !this.stopBlocks.has(block.sessionId) && !this.blockedDrivers.has(block.sessionId)) continue;
+      kinds.add(unknown ? 'unknown' : block.code);
+      const state = unknown ? '这一轮结果未知，需要有人确认' : workspaceBlockerStates[block.code] ?? '它的执行环境需要恢复检查';
+      stuck.set(block.sessionId, `- 会话 ${block.sessionId}${block.taskId ? ` 里的任务 ${block.taskId}` : ''}：${state}`);
+    }
+    this.workspaceBlocks.set(session.id, { taskId, noticed: stuck.size > 0 });
+    if (!stuck.size) return;
+    const labels = unknownTaskActionLabels;
+    const steps = [
+      ...(kinds.has('unknown') ? [`结果未知的任务：在 Web 打开那个会话，在执行记录下方选「${labels.retry}」「${labels.completed}」或「${labels.failed}」；它的原话题里如果有「结果未知」提醒卡，也可以直接点。`] : []),
+      ...(['WORKSPACE_PHYSICAL_RESOURCE_UNSAFE', 'DRIVER_STOP_BLOCKED'].some(code => kinds.has(code)) ? ['残留终端：用 `dutydeck recovery inspect <会话 ID>` 查看；确认进程已退出后用 `dutydeck recovery retire-pty` 回收。'] : []),
+      ...(kinds.has('DRIVER_CONFIGURATION_UNKNOWN') ? ['配置结果不明：用 `dutydeck recovery restore-configuration <会话 ID> --run-id <运行 ID>` 恢复配置。'] : []),
+    ];
+    await this.sessionNotice(session, { id: `notice_${digest(['workspace_blocked', session.id, taskId])}`, kind: 'workspace_blocked', taskId, sessionIds: [...stuck.keys()],
+      message: [`这条消息还没开始执行：同一仓库里有未结的任务或残留终端，为避免两边同时改同一份代码，要等它处理完。挡住它的是：\n${[...stuck.values()].join('\n')}`,
+        ...steps, '处理完之后这里会自动继续，不用重发；但排队超过 24 小时仍未开始的消息，到时会取消、不再执行。'].join('\n\n') }, { key: `runtime_notice:workspace_blocked:${session.id}`, value: taskId });
+  }
+  /**
+   * 会话提醒：once.key 已记成 once.value 就不再提醒（重启后也不重发）。先在会话里写一条 status=notice 事件
+   * （Web 时间线显示），再交给宿主投递（飞书会话转到原话题）；投递失败只记日志。
+   */
+  private async sessionNotice(session: Session, notice: SessionNotice, once?: { key: string; value: string }) {
+    if (once && await this.mutations.wait(() => this.repos.config.get(once.key)) === once.value) return;
+    await this.emit(session.id, 'status', { state: 'notice', kind: notice.kind, taskId: notice.taskId, message: notice.message }, undefined, `evt_${notice.id}`);
+    if (once) await this.mutations.wait(() => this.repos.config.set(once.key, once.value));
+    const deliver = this.options.onSessionNotice;
+    if (deliver) void Promise.resolve().then(() => deliver(session, notice))
+      .catch(error => this.options.log?.warn({ sessionId: session.id, taskId: notice.taskId, kind: notice.kind, error: String(error) }, 'Session notice delivery failed'));
+  }
   private async applyQueueActions(session: Session) {
     for (const action of this.bound().getPendingQueueActions(this.fence(session))) {
       const target = action.target;
@@ -3459,8 +3627,7 @@ export class DutydeckRuntime {
 
   private async cleanupIdleDriversOnce(at: number) {
     const timeout = this.options.driverIdleTimeoutMs ?? 6 * 60 * 60_000;
-    if (timeout <= 0) return;
-    for (const [sessionId, driver] of this.drivers) {
+    if (timeout > 0) for (const [sessionId, driver] of this.drivers) {
       if (this.attempts.has(sessionId) || at - (this.lastActivity.get(sessionId) ?? at) < timeout) continue;
       const lifecycle = this.lifecycle(sessionId);
       const session = await this.repos.sessions.get(sessionId);
@@ -3474,6 +3641,70 @@ export class DutydeckRuntime {
       }
       catch { /* Retain the resource block for an explicit stop retry. */ }
     }
+    await this.reviewUnknownTasks(at);
+  }
+
+  /**
+   * 结果未知、没人处理的执行：开始超过 24 小时在原话题提醒一次怎么处理；超过 7 天且能证明执行进程已退出时，
+   * 按「结果未知、已放弃」结案（不重试、不算成功，决定和证据记进账本），再提醒一次。结案不了的留给人处理，每个进程只记一次日志。
+   */
+  private async reviewUnknownTasks(at: number) {
+    for (const attempt of this.repos.execution.getReconcileRequiredAttempts()) {
+      if (this.shuttingDown) return;
+      const age = at - Date.parse(attempt.createdAt);
+      if (!(age >= UNKNOWN_TASK_REMIND_MS)) continue;
+      const session = await this.repos.sessions.get(attempt.sessionId);
+      if (!session || session.archivedAt) continue;
+      try {
+        await this.mutations.run(undefined, async () => {
+          const due = age >= UNKNOWN_TASK_ABANDON_MS && (this.unknownTaskRecheckAt.get(attempt.attemptId) ?? 0) <= at;
+          const abandoned = due && await this.abandonUnknownAttempt(session, attempt);
+          if (due && !abandoned) this.unknownTaskRecheckAt.set(attempt.attemptId, at + 60 * 60_000);
+          if (abandoned) {
+            await this.sessionNotice(session, { id: `notice_${digest(['unknown_task_abandoned', attempt.attemptId])}`, kind: 'unknown_task_abandoned', taskId: attempt.taskId, attemptId: attempt.attemptId, sessionIds: [session.id],
+              message: '这一轮的结果未知，超过 7 天没人处理，执行它的进程也已确认退出。Dutydeck 已按「结果未知、已放弃」结案：没有重做，也不算完成，不再挡住同一仓库的其他任务。\n\n还需要做的话，请重新发一条消息。' },
+              { key: `runtime_notice:unknown_task_abandoned:${attempt.attemptId}`, value: 'sent' });
+            return;
+          }
+          const labels = unknownTaskActionLabels;
+          await this.sessionNotice(session, { id: `notice_${digest(['unknown_task_overdue', attempt.attemptId])}`, kind: 'unknown_task_overdue', taskId: attempt.taskId, attemptId: attempt.attemptId, sessionIds: [session.id],
+            message: ['这一轮的结果未知，已经超过 24 小时没人处理。它会挡住这个会话后面的消息，也会挡住同一仓库里其他会话的任务。',
+              `处理方法：在 Web 打开这个会话，在执行记录下方选「${labels.retry}」「${labels.completed}」或「${labels.failed}」；原话题里如果有「结果未知」提醒卡，也可以直接点。`,
+              '超过 7 天仍没人处理、且确认执行它的进程已退出时，Dutydeck 会自动按「结果未知、已放弃」结案，不会重做。'].join('\n\n') },
+            { key: `runtime_notice:unknown_task_overdue:${attempt.attemptId}`, value: 'sent' });
+        });
+      } catch (error) {
+        this.unknownTaskRecheckAt.set(attempt.attemptId, at + 60 * 60_000);
+        if (this.unknownTaskFailures.has(attempt.attemptId)) continue;
+        this.unknownTaskFailures.add(attempt.attemptId);
+        this.options.log?.warn({ sessionId: attempt.sessionId, taskId: attempt.taskId, attemptId: attempt.attemptId, error: String(error) }, 'Result-unknown task review failed');
+      }
+    }
+  }
+  /**
+   * 按「结果未知、已放弃」结案，走人工核对同一组账本原语。只在执行进程已证明退出时做：这个进程里没有连着的驱动，
+   * 上一个进程留下的进程资源经观测已退出，PTY 终端记录按 retireDetachedPty 的判据回收，最后没有任何未证明退出的资源。
+   * 会话还有排队的消息时不结案（结案后它们会马上开始执行），留给人决定。
+   */
+  private async abandonUnknownAttempt(session: Session, attempt: TaskAttempt) {
+    const id = session.id;
+    if (this.drivers.has(id) || this.blockedDrivers.has(id) || this.recoveryInFlight(id) || (await this.queuedTasks(id)).length) return false;
+    const retired = await this.mutations.run(this.ownerOf(id), async () => {
+      const { session: current } = await this.active(id);
+      if (current.runId !== attempt.runId) return undefined;
+      await this.observeAbandonedResources(current);
+      const refs = await this.retireDetachedPty(current);
+      await this.clearVerifiedStopBlock(current);
+      return refs;
+    });
+    if (!retired) return false;
+    const inspection = await this.inspectExecutionRecovery(id, recoveryOwner);
+    const current = inspection.tasks.find(task => task.taskId === attempt.taskId)?.attempt;
+    if (current?.attemptId !== attempt.attemptId || current.state !== 'reconcile_required' || inspection.blockers.length || inspection.stopBlock) return false;
+    await this.confirmExecutionRecovery(id, { runId: inspection.runId, taskId: attempt.taskId, attemptId: attempt.attemptId, expectedRevision: current.revision,
+      decisionId: `unknown_task_expired:${attempt.attemptId}`, action: 'confirm_result', outcome: 'unknown',
+      evidenceRefs: [`unknown_task_started:${attempt.createdAt}`, 'unknown_task_unattended:7d', ...retired], resourceChecks: inspection.resourceChecks }, recoveryOwner);
+    return true;
   }
 
   async cleanupIdleDrivers(at = Date.now()) {

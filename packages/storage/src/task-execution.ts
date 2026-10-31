@@ -185,6 +185,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     try { identity = preparation ?? workspaceIdentity(sessionId, freeze); }
     catch { return [{ code: 'WORKSPACE_RESOURCE_UNVERIFIABLE', sessionId }]; }
     const result: ExecutionBlocker[] = [];
+    // 飞书记忆作业只写自己的记忆目录：不参与仓库互斥，只和在同一目录里执行的会话（包括其他记忆作业）互斥。
+    const memory = (id: string) => (db.prepare('SELECT source FROM sessions WHERE id=?').get(id) as {source:string|null}|undefined)?.source === 'lark-memory';
+    const selfMemory = memory(sessionId);
     const admissionExternal = (id: string): ExecutionBlocker[] => {
       const configuration = db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${id}`) as {value:string}|undefined;
       return [...externalBlockers(id),...(configuration?.value ? [{code:'DRIVER_CONFIGURATION_UNKNOWN',sessionId:id}] : [])];
@@ -200,6 +203,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       UNION SELECT id AS session_id FROM sessions s WHERE EXISTS (SELECT 1 FROM configs WHERE key>=('runtime_verification:'||s.id||':') AND key<('runtime_verification:'||s.id||';'))`).all() as Array<{session_id:string}>;
     for (const {session_id: otherId} of candidates) {
       if (otherId === sessionId) continue;
+      const directoryOnly = selfMemory || memory(otherId);
       const unresolved = db.prepare(`SELECT task_id AS taskId,id AS attemptId FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') LIMIT 1`).get(otherId) as {taskId:string;attemptId:string}|undefined;
       const queued = preparation && db.prepare("SELECT id FROM tasks WHERE session_id=? AND status='queued' LIMIT 1").get(otherId) as {id:string}|undefined;
       const unknown = unresolvedUnknownTask(otherId);
@@ -211,12 +215,12 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       try { other = workspaceIdentity(otherId, freeze); }
       catch {
         const frozen = db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_execution_workspace:${otherId}`) as {value:string}|undefined;
-        let knownKey: string | undefined;
-        try { knownKey = frozen ? JSON.parse(frozen.value).key : undefined; } catch { /* Corrupt identity remains unknown. */ }
-        if (knownKey && knownKey !== identity.key) continue;
+        let knownKey: string | undefined, knownPath: string | undefined;
+        try { const known = frozen ? JSON.parse(frozen.value) : undefined; knownKey = known?.key; knownPath = known?.cwd?.path; } catch { /* Corrupt identity remains unknown. */ }
+        if (directoryOnly ? knownPath && knownPath !== identity.cwd.path : knownKey && knownKey !== identity.key) continue;
         result.push({code:'WORKSPACE_RESOURCE_UNVERIFIABLE',sessionId:otherId});continue;
       }
-      if (other.key !== identity.key) continue;
+      if (directoryOnly ? other.cwd.path !== identity.cwd.path : other.key !== identity.key) continue;
       if (unresolved || queued || unknown || steering.length) result.push({code:'WORKSPACE_EXECUTION_BUSY',sessionId:otherId,...(unresolved ? {taskId:unresolved.taskId,attemptId:unresolved.attemptId} : unknown ? {taskId:unknown.id} : queued ? {taskId:queued.id} : {taskId:steering[0]!.taskId})});
       result.push(...unsafe.map(r => ({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE',sessionId:otherId,resourceId:r.resourceId})),...external);
     }
@@ -714,6 +718,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       return db.prepare("SELECT t.id,t.status FROM (SELECT task_id FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') UNION SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')) unresolved JOIN tasks t ON t.id=unresolved.task_id ORDER BY t.created_at,t.id")
         .all(sessionId,sessionId) as Array<{ id: string; status: ExecutionTask['status'] }>;
     },
+    getReconcileRequiredAttempts() {
+      if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+      return db.prepare("SELECT a.json FROM tasks t JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id WHERE t.status='reconcile_required' AND a.state='reconcile_required' ORDER BY a.rowid").all().map(row => rowJson<TaskAttempt>(row)!);
+    },
     getAttemptEvents(attemptId, window = {}) {
       id.parse(attemptId);
       const limit = Math.max(1, Math.min(1000, Math.trunc(window.limit ?? 200)));
@@ -788,7 +796,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           if (!a.submission || a.submission.submissionId !== evidence.submissionId || a.submissionState === 'not_submitted') fail('SUBMISSION_SCOPE_CONFLICT');
         } else if (evidence.kind === 'not_submitted') {
           parse(taskExecutionSchemas.notSubmitted, evidence);
-          if (a.submissionState !== 'not_submitted') fail('SUBMISSION_NOT_UNSUBMITTED');
+          // 记过提交意图的，只有驱动确认 prompt 没写入（evidence 指明那次意图、没有收到回执）才能按未提交结算。
+          if (evidence.submissionId === undefined ? a.submissionState !== 'not_submitted'
+            : a.submissionState !== 'intent_recorded' || a.receipt || a.submission?.submissionId !== evidence.submissionId) fail('SUBMISSION_NOT_UNSUBMITTED');
         } else {
           parse(taskExecutionSchemas.manual, evidence);
           if (evidence.decision.action !== 'confirm_result' || evidence.decision.actor.kind === 'unspecified') fail('RECOVERY_DECISION_REQUIRED');
@@ -1502,6 +1512,20 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           // Physical/idle proof is rechecked by the runtime immediately before this
           // transaction. Preserve immutable creation ownership; transfer only holder.
           r.observations.push(observation); r.holder=owner; r.revision++; saveResource(r); return r;
+        }); },
+        observeDetachedLocalResource(rawFence,resourceId,expectedRevision,rawObservation) { return write(owner => {
+          const f=readFence(rawFence);const observation=parse(observationSchema,rawObservation);
+          return command(`observation:${observation.observationId}`,{...f,resourceId,observation},()=>{
+            const r=resource(resourceId);
+            if(!r || r.sessionId!==f.sessionId || r.runId!==f.runId || r.kind!=='local_only' || r.stage!=='created' || !r.identity) fail('RESOURCE_SCOPE_CONFLICT');
+            if(r.revision!==expectedRevision || r.identity.identityId!==observation.identityId || observation.state!=='gone' || r.observations.at(-1)?.state==='gone') fail('RESOURCE_OBSERVATION_CONFLICT');
+            const holder=r.holder??r.controller;
+            // 访问记录只在进程正常关闭或被观测到已退出时删除；同一进程里的旧实例要先释放认领，新实例才能接上。
+            const registered=holder.accessId!==owner.accessId && Boolean(db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='dutydeck_access'").get())
+              && Boolean(db.prepare('SELECT 1 FROM dutydeck_access WHERE id=?').get(holder.accessId));
+            if(sameController(holder,owner) || registered) fail('RESOURCE_OWNER_NOT_PROVEN_EXITED');
+            r.observations.push(observation);r.revision++;saveResource(r);return r;
+          });
         }); },
         observed(rawFence,resourceId,expectedRevision,rawObservation) { return write(() => {
           const f=readFence(rawFence);const observation=parse(observationSchema,rawObservation);

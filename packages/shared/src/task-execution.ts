@@ -135,7 +135,8 @@ export interface RecoveryDecisionInput {
 }
 export type SettlementEvidence =
   | { kind: 'driver_result'; submissionId: string; outcome: 'completed' | 'failed' | 'interrupted' | 'cancelled'; outputDigest: string; stopReason: string; complete: true }
-  | { kind: 'not_submitted'; outcome: 'failed' | 'cancelled'; reason: string }
+  /** submissionId：记过提交意图、但驱动确认 prompt 没写入（PROMPT_NOT_WRITTEN）时指向那次意图。 */
+  | { kind: 'not_submitted'; outcome: 'failed' | 'cancelled'; reason: string; submissionId?: string }
   | { kind: 'manual'; outcome: AttemptOutcome; decision: RecoveryDecisionInput; verifiedOutput?: { eventId: string; digest: string } };
 export interface ReconcileReason { reasonId: string; code: string; evidenceRefs: string[] }
 export type RecoveryEvidence =
@@ -259,6 +260,11 @@ export interface BoundExecutionRepository {
   /** Internal runtime adoption after revalidating an idle tmux receipt retained for an unconfirmed Claude source. */
   adoptIdleTmux(f: SessionFence, resourceId: string, expectedRevision: number, receipt: string, observation: ResourceObservation): DriverResource;
   observed(f: SessionFence, resourceId: string, expectedRevision: number, observation: ResourceObservation): DriverResource;
+  /**
+   * 进程内终端句柄（local_only）记为已消失：宿主已证明物理终端不存在，这里再核对记录的所有者运行时已退出
+   * （不是当前认领者，且同进程的旧实例已释放、或其他进程的访问记录已因退出被清除）。所有者仍在时拒绝。
+   */
+  observeDetachedLocalResource(f: SessionFence, resourceId: string, expectedRevision: number, observation: ResourceObservation): DriverResource;
 }
 export interface ExecutionUpgradeCounts {
   tasks: number;
@@ -321,6 +327,8 @@ export interface ExecutionRepository {
   getAttempt(ref: AttemptRef & SessionFence): TaskAttempt | undefined;
   getSessionExecutions(sessionId: string, context?: TaskExecutionReadContext): TaskExecutionProjection[];
   getUnresolvedTasks(sessionId: string): Array<{ id: string; status: ExecutionTask['status'] }>;
+  /** 所有会话里停在结果未知、等人处理的当前执行（任务与执行都是 reconcile_required）。 */
+  getReconcileRequiredAttempts(): TaskAttempt[];
   getAttemptEvents(attemptId: string, window?: EventWindowOptions): AgentEvent[];
   getSessionResourceBlockers(sessionId: string): ExecutionBlocker[];
   getResources(sessionId: string): DriverResource[];
@@ -379,7 +387,7 @@ export const taskExecutionSchemas = {
   intentSchema: z.object({ submissionId: id, inputDigest: executionDigestSchema, resourceRefs: z.array(z.object({ resourceId: id, identityId: id }).strict()), recovery: recoverySchema.optional(), authorizationRefs: z.array(id), nativeContextRef:nativeContextRefSchema.optional(),contextProofId:id.optional(),driverInstanceId:id.optional() }).strict(),
   sessionSchema: z.object({ id, agentId: id, state: z.enum(['created','starting','idle','thinking','running_tool','waiting_for_permission','interrupting','interrupted','completed','failed','stopped']), cwd: id, runId: id, createdAt: z.string().datetime(), updatedAt: z.string().datetime(), model: z.string().optional(), codexProfile: z.string().optional(), reasoningEffort: z.string().optional(), systemPrompt: z.string().optional(), permissionMode: z.enum(permissionModes).optional(), source: id.optional(), sourceId: id.optional(), archivedAt: z.string().optional(), protocol: z.enum(['acp','jsonl','pipe','pty','pty-cli']).optional(), terminalBackend: z.enum(['tmux','herdr']).optional(), error: z.string().optional(), workspaceMode: z.enum(['shared','worktree']).optional(), workspaceSourceCwd: id.optional() }).strict(),
   driverResult: z.object({ kind:z.literal('driver_result'), submissionId:id, outcome:z.enum(['completed','failed','interrupted','cancelled']), outputDigest:executionDigestSchema, stopReason:id, complete:z.literal(true) }).strict(),
-  notSubmitted: z.object({ kind:z.literal('not_submitted'), outcome:z.enum(['failed','cancelled']), reason:id }).strict(),
+  notSubmitted: z.object({ kind:z.literal('not_submitted'), outcome:z.enum(['failed','cancelled']), reason:id, submissionId:id.optional() }).strict(),
   manual: z.object({ kind:z.literal('manual'), outcome:z.enum(['completed','failed','interrupted','cancelled','unknown']), decision:decisionSchema, verifiedOutput:z.object({eventId:id,digest:executionDigestSchema}).strict().optional() }).strict(),
   position: z.enum(['front','back']),
   queueOperation: z.object({ operationId:id, actor:executionActorSchema, interrupt:z.boolean() }).strict(),
