@@ -394,6 +394,7 @@ dutydeck agent --turn "$TURN" group send '可检索摘要' --final --card-file /
   - **接话人**（多机器人群和单机器人群都能指定）：按需档的接话人没配负责范围时，群里没有明确对象、需要有机器人处理的求助（如「有人知道今天的发布单在哪看吗」）也由它接；闲聊、群友之间的问答、@ 别人和进度播报仍不接。
   - **负责范围**（Web「机器人管理」的「负责范围」，或 `dutydeck settings bot set <appId> roleScope=...`，对这个机器人所在的所有群生效）：按需档配了以后，没 @ 的消息里属于范围内的事由它判断后接，不受接话人限制；多个机器人的范围重叠时可能都接。按需档没配、它也不是接话人时，在有多个真人的群里，没明确叫它的泛问和普通告警不接。积极档和单真人群配了负责范围后也改为按范围判断，接的会变少。
   - 没接话时 @ 它问「刚才为什么没回」，它会说明原因和怎么改；`/status` 显示参与强度、接话人和负责范围。
+- **机器人互聊门禁**（`botLoopGuard`）默认关闭。在机器人设置里打开，或执行 `dutydeck settings bot set <appId> botLoopGuard=true`；开启后同一话题连续 3 轮由机器人触发时，在真人发言前不再响应。关闭后不计数、不拦截机器人回合。
 - **告警初筛**（内置场景包 `alarm`，见[内置插件](#builtin-plugins)）：
   - @ 机器人说「告警来了先帮我看看」或「告警来了先帮我初筛，只看 P0」，它发一张确认卡，写明来源机器人（默认取最近在群里发言最多的机器人）、级别、去重窗口和每小时上限。点确认的人是确认人，初筛任务以他的名义发起。说「关闭告警初筛」并确认即可关闭，设置会保留。
   - 开启后，来源机器人发的告警不经参与判定：机器人在告警下开话题起初筛任务。同一条告警在去重窗口内只分析一次，超过每小时上限的跳过；在跳过的告警下 @ 它问「刚才为什么没回」能查到原因。多机器人群里只由接话人做。`/status` 显示订阅和今天分析、跳过的条数。
@@ -1114,7 +1115,7 @@ dutydeck restart
 
 包的 JSON 校验不过时跳过这个包，插件其余部分照常加载，`plugin list` 和 `doctor` 会列出原因；引用的 provider 没注册、包 id 冲突时也跳过这个包，原因写在 daemon 日志里。运行时正则或 provider 出错、超时，这条消息这个包弃权：`direct` 记一条弃权记录，不起任务；`model` 的上下文 provider 超时、出错、返回格式不对，或者一条材料都没有而 `missing` 不为空时，这条消息按没有这个包重新判定，判定记录里记下原因，`/status` 计入「取材料失败」，「为什么没回」会说明。同一条消息命中多个 `direct` 包时，按包 id 排序只处理第一个。
 
-#`dutydeck agent --turn "$TURN" settings show` 只读查看机器人常用设置；`dutydeck agent --turn "$TURN" settings set defaultAgentId=codex notifyQuietHours=22:00-08:00` 先发确认卡，机器人管理员点确认才保存。用户可以直接说「以后默认用 codex」「晚上十点到早上八点别推送」，让 Agent 代办。可改的只有默认 Agent、模型、推理强度、私聊模式（`p2pMode`）、群回复模式（`groupReplyMode`）、免打扰（`notifyQuietHours`）、两档通知 @（`notifyMentionAction` / `notifyMentionDone`）和忙时判断（`busyTriage`）；权限、白名单和凭据不开放。免打扰留空可清除。群回复选择「自动」（或设置 `groupReplyMode=auto`）会清除已保存的显式覆盖，恢复默认自动路由；更新时省略的字段保持原值。群有单独覆盖时，`show` 仍返回机器人默认值；群回复模式为 `null` 表示尚未显式设置，沿用旧路由。
+#`dutydeck agent --turn "$TURN" settings show` 只读查看机器人常用设置；`dutydeck agent --turn "$TURN" settings set defaultAgentId=codex notifyQuietHours=22:00-08:00` 先发确认卡，机器人管理员点确认才保存。用户可以直接说「以后默认用 codex」「晚上十点到早上八点别推送」，让 Agent 代办。可改的只有默认 Agent、模型、推理强度、私聊模式（`p2pMode`）、群回复模式（`groupReplyMode`）、免打扰（`notifyQuietHours`）、两档通知 @（`notifyMentionAction` / `notifyMentionDone`）、忙时判断（`busyTriage`）和机器人互聊门禁（`botLoopGuard`）；权限、白名单和凭据不开放。免打扰留空可清除。群回复选择「自动」（或设置 `groupReplyMode=auto`）会清除已保存的显式覆盖，恢复默认自动路由；更新时省略的字段保持原值。群有单独覆盖时，`show` 仍返回机器人默认值；群回复模式为 `null` 表示尚未显式设置，沿用旧路由。
 
 确认权限与管理机器人设置的入口一致：托管群需要机器人管理权限（`channel_bot.update`），只有高风险操作授权不能确认；未托管时，需要明确的部署成员或邮箱名单，名单为空不能确认。确认卡绑定发卡时的配置版本；期间 Web 改过设置，旧卡会拒绝覆盖，需要重新提出变更。
 

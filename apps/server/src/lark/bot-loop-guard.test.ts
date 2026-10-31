@@ -1,8 +1,8 @@
-// 多 bot 互相 @ 的硬门禁回归。
+// 多 bot 互相 @ 的回合门禁回归。
 //
 // 真实事故形态：两个机器人互相 @，几千条消息把群刷爆，把它们移出群再拉回来还会复发。
 // 唤醒判据里的 mentionsBot 分支不受 `!botSender` 约束，访问控制在没配成员名单时又对
-// 任何机器人一律放行，群参与判定默认 off——三道闸一道都不封口，所以门禁必须自成一层。
+// 任何机器人一律放行，群参与判定默认 off——三道闸一道都不封口，所以开启这项能力时必须自成一层。
 //
 // 这里用真实 SQLite 协作仓 + 真实 coordinator 接线，service 与 runtime 为 mock：
 // 门禁的两条硬约束（门禁记录按小时分桶、被挡下不发群消息）
@@ -37,6 +37,7 @@ const scope = { appId: 'cli_guard', chatId: 'oc_guard' };
 const config: StoredLarkConfig = {
   appId: scope.appId, appSecret: 'test', listening: true, defaultAgentId: 'codex', workspace: '/tmp', fullTrustConfirmed: true,
   permissionMode: 'ask', preInjectPrompt: '', groupToolsEnabled: false, groupToolsAllowSend: false, structuredAskCards: false,
+  botLoopGuard: true,
   groupCardMention: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
   allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: true,
   highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'danger', riskControlMode: 'off'
@@ -218,7 +219,17 @@ describe('Tag托管群与引用工作流的机器人边界', () => {
   });
 });
 
-describe('多 bot 互相 @ 的硬门禁', () => {
+describe('多 bot 互相 @ 的可选门禁', () => {
+  it('默认关闭时不记录或拦截连续机器人回合', async () => {
+    const h = harness();
+    const disabled = { ...config, botLoopGuard: false };
+    for (let index = 0; index < BOT_LOOP_DEPTH_LIMIT + 2; index++) {
+      expect(await h.participation.guardBotTurn(botMessage(`om_disabled_${index}`, { threadId: 'omt_disabled' }), disabled, { botOpenId: 'ou_bot' })).toBeUndefined();
+    }
+    expect(await gateRecords(h)).toHaveLength(0);
+    expect(await turnRecords(h)).toHaveLength(0);
+  });
+
   it('同一话题内连续机器人往返达到上限后停止响应', async () => {
     const h = harness();
     for (let index = 0; index < BOT_LOOP_DEPTH_LIMIT; index++) {

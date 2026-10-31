@@ -723,8 +723,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (this.handledMessages.has(event.messageId)) return;
     const wake = decideWake(wakeFacts, participation);
     if (!wake.wake) return;
-    // 机器人互相 @ 的硬门禁。legacyWake 的 mentionsBot / quotedWorkflow 两支都不受 !botSender
-    // 约束，访问控制在没配成员名单时又对机器人一律放行，所以刷屏回路只能在这里封口。
+    // 可选的机器人互相 @ 门禁。legacyWake 的 mentionsBot / quotedWorkflow 两支都不受 !botSender
+    // 约束，访问控制在没配成员名单时又对机器人一律放行，所以开启 botLoopGuard 时由这里封口。
     // 判定失败按挡下处理：门禁读不到状态时放行等于把回路重新打开。
     // 被挡下的回合只留门禁记录，绝不向群里发消息——那本身就是噪音。
     if (wake.guardBotTurn && this.workflowOptions.participation) {

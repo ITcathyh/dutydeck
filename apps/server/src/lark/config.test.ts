@@ -1026,6 +1026,18 @@ describe('busy triage bot setting', () => {
   });
 });
 
+describe('bot loop guard setting', () => {
+  it('normalizes to off by default, persists changes, and rejects non-boolean API input', async () => {
+    const repository = seedBots([{ appId: 'cli_loop', appSecret: 'secret', listening: false }]);
+    expect(publicLarkConfig((await readLarkConfigs(repository))[0]!)).toMatchObject({ botLoopGuard: false });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_loop', botLoopGuard: true });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ botLoopGuard: true });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_loop', preInjectPrompt: 'keep setting' });
+    expect(publicLarkConfig((await readLarkConfigs(repository))[0]!)).toMatchObject({ botLoopGuard: true });
+    await expect(saveLarkConfig(repository, undefined, { originalAppId: 'cli_loop', botLoopGuard: 'true' as any })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+  });
+});
+
 
 describe('per-bot fallback model', () => {
   it('normalizes, serializes and projects the model without changing other bots', async () => {

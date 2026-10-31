@@ -4,7 +4,7 @@ import { agentSettingsKeys, parseAgentSettings, showAgentSettings } from './agen
 
 describe('agent settings whitelist and shared value parser', () => {
   it('uses the settings CLI key types for the same values', () => {
-    const pairs = ['defaultAgentId=codex', 'defaultModel=custom', 'defaultReasoningEffort=custom', 'p2pMode=thread', 'groupReplyMode=shared', 'notifyQuietHours=22:00-08:00', 'notifyMentionAction=false', 'notifyMentionDone=true', 'busyTriage=true'];
+    const pairs = ['defaultAgentId=codex', 'defaultModel=custom', 'defaultReasoningEffort=custom', 'p2pMode=thread', 'groupReplyMode=shared', 'notifyQuietHours=22:00-08:00', 'notifyMentionAction=false', 'notifyMentionDone=true', 'busyTriage=true', 'botLoopGuard=true'];
     expect(parseAgentSettings(pairs)).toEqual(parsePairs(pairs, botFields, 'help'));
     expect(Object.keys(showAgentSettings({ appSecret: 'secret', permissionMode: 'full-trust' } as any)).sort()).toEqual([...agentSettingsKeys].sort());
   });

@@ -55,6 +55,7 @@ export const botSettingFields = {
   groupToolsEnabled: {label: '启用 Agent 群协作工具', step: 2, anchor: 'lark-switch-group-tools'},
   groupToolsAllowSend: {label: '允许 Agent 发消息与 @交接', step: 2, anchor: 'lark-switch-group-send', parent: 'groupToolsEnabled'},
   busyTriage: {label: '忙时先判断', step: 2, anchor: 'lark-switch-busy-triage'},
+  botLoopGuard: {label: '机器人互聊门禁（默认关闭）', step: 2, anchor: 'lark-switch-bot-loop-guard'},
   memoryEnabled: {label: '启用会话记忆', step: 2, anchor: 'lark-switch-memory'},
   memoryAutoExtract: {label: '自动提取与整理', step: 2, anchor: 'lark-switch-memory-auto', parent: 'memoryEnabled'},
   workspaceAliases: {label: '工作区别名（可选）', step: 1, anchor: 'bot-setting-workspaceAliases'},

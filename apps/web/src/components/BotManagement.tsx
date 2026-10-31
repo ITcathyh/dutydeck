@@ -76,6 +76,7 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     decisionAgentId: bot.decisionAgentId ?? '',
     decisionModel: bot.decisionModel ?? '',
     busyTriage: bot.busyTriage === true,
+    botLoopGuard: bot.botLoopGuard === true,
     responseAgentId: bot.responseAgentId ?? '',
     responseModel: bot.responseModel ?? '',
     executionMode: bot.executionMode ?? 'single',
@@ -289,6 +290,7 @@ export function BotManagement({
       decisionAgentId: draft.decisionAgentId,
       decisionModel: draft.decisionModel,
       busyTriage: draft.busyTriage,
+      botLoopGuard: draft.botLoopGuard,
       responseAgentId: draft.responseAgentId,
       responseModel: draft.responseModel,
       executionMode: draft.executionMode,
@@ -873,6 +875,8 @@ export function BotManagement({
                   </label>
                   <label className="flex items-center gap-2"><input type="checkbox" checked={currentDraft.busyTriage} onChange={e => updateCurrentDraft({ busyTriage: e.target.checked })}/>忙时先判断</label>
                   <p className="text-xs text-muted">执行中先用群判定模型分辨进度、补充与控制操作；默认关闭。</p>
+                  <label className="flex items-center gap-2"><input type="checkbox" checked={currentDraft.botLoopGuard} onChange={e => updateCurrentDraft({ botLoopGuard: e.target.checked })}/>机器人互聊门禁</label>
+                  <p className="text-xs text-muted">同一话题连续 3 轮由机器人触发后，等真人发言才继续响应；默认关闭。</p>
                   <OptionalModelOverrides key={activeAppId} initiallyExpanded={Boolean(currentDraft.decisionAgentId || currentDraft.decisionModel || currentDraft.responseAgentId || currentDraft.responseModel || activeBot.decisionAgentId || activeBot.decisionModel || activeBot.responseAgentId || activeBot.responseModel)}>
                   <div className="grid gap-4 sm:grid-cols-2">
                     <Field label="群判定 Agent" hint="留空沿用记忆 Agent，再回落默认 Agent。">

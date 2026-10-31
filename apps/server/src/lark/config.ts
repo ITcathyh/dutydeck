@@ -104,6 +104,8 @@ export interface StoredLarkConfig {
   decisionAgentId?: string;
   decisionModel?: string;
   busyTriage?: boolean;
+  /** 防止机器人互相对话的回合门禁，默认关闭。 */
+  botLoopGuard?: boolean;
   /** 群回复独立选型；缺省沿用 memory，再回落 default。 */
   responseAgentId?: string;
   responseModel?: string;
@@ -247,6 +249,8 @@ export interface SaveLarkConfigInput {
   decisionAgentId?: string;
   decisionModel?: string;
   busyTriage?: boolean;
+  /** 防止机器人互相对话的回合门禁，默认关闭。 */
+  botLoopGuard?: boolean;
   responseAgentId?: string;
   responseModel?: string;
   executionMode?: StoredLarkConfig['executionMode'];
@@ -352,6 +356,7 @@ export interface PublicLarkConfig {
   decisionAgentId?: string;
   decisionModel?: string;
   busyTriage?: boolean;
+  botLoopGuard: boolean;
   responseAgentId?: string;
   responseModel?: string;
   executionMode: NonNullable<StoredLarkConfig['executionMode']>;
@@ -633,6 +638,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     memoryEnabled: larkMemoryEnabled(parsed),
     memoryAutoExtract: parsed.memoryAutoExtract !== false,
     busyTriage: parsed.busyTriage === true,
+    botLoopGuard: parsed.botLoopGuard === true,
     groupMemoryScope: normalizeLarkGroupMemoryScope(parsed.groupMemoryScope),
     ...(parsed.memoryAgentId?.trim() ? { memoryAgentId: parsed.memoryAgentId.trim() } : {}),
     ...(parsed.memoryModel?.trim() ? { memoryModel: parsed.memoryModel.trim() } : {}),
@@ -760,6 +766,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   memoryEnabled: larkMemoryEnabled(config),
   memoryAutoExtract: config.memoryAutoExtract !== false,
   busyTriage: config.busyTriage === true,
+  botLoopGuard: config.botLoopGuard === true,
   groupMemoryScope: normalizeLarkGroupMemoryScope(config.groupMemoryScope),
   ...(config.memoryAgentId ? { memoryAgentId: config.memoryAgentId } : {}),
   ...(config.memoryModel ? { memoryModel: config.memoryModel } : {}),
@@ -822,6 +829,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const cardActionForwarding = input.cardActionForwarding === undefined ? current?.cardActionForwarding : submittedForwarding;
   validateLarkEventConfiguration({ eventHandlers, cardActionForwarding });
   if (input.busyTriage !== undefined && typeof input.busyTriage !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'busyTriage 必须为布尔值。', 400);
+  if (input.botLoopGuard !== undefined && typeof input.botLoopGuard !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'botLoopGuard 必须为布尔值。', 400);
   if (input.showAgentName !== undefined && typeof input.showAgentName !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'showAgentName 必须为布尔值。', 400);
   if (input.welcomeEnabled !== undefined && typeof input.welcomeEnabled !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'welcomeEnabled 必须为布尔值。', 400);
   if (input.expectedRevision !== undefined && input.expectedRevision !== (current ? current.revision ?? 1 : 0)) {
@@ -880,6 +888,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const groupToolsAllowSend = groupToolsEnabled && (input.groupToolsAllowSend ?? current?.groupToolsAllowSend ?? false);
   const memoryEnabled = input.memoryEnabled ?? current?.memoryEnabled ?? (input.defaultGroupParticipation === 'selective' || input.defaultGroupParticipation === 'eager');
   const memoryAutoExtract = input.memoryAutoExtract ?? current?.memoryAutoExtract ?? true;
+  const botLoopGuard = input.botLoopGuard ?? current?.botLoopGuard ?? false;
   const groupMemoryScope = isLarkGroupMemoryScope(input.groupMemoryScope) ? input.groupMemoryScope : normalizeLarkGroupMemoryScope(current?.groupMemoryScope);
   const memoryAgentId = input.memoryAgentId === undefined ? current?.memoryAgentId : input.memoryAgentId.trim() || undefined;
   const memoryModel = input.memoryModel === undefined ? current?.memoryModel : input.memoryModel.trim() || undefined;
@@ -1012,6 +1021,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     memoryEnabled,
     memoryAutoExtract,
     busyTriage: input.busyTriage ?? current?.busyTriage ?? false,
+    botLoopGuard,
     groupMemoryScope,
     ...(memoryAgentId ? { memoryAgentId } : {}),
     ...(memoryModel ? { memoryModel } : {}),

@@ -559,12 +559,13 @@ export class LarkGroupParticipation {
     return used >= limit ? `判定预算已用尽：本小时 ${used}/${limit}` : undefined;
   }
   /**
-   * 机器人互相 @ 的硬门禁，与 participation 设置无关。
+   * 可选的机器人互相 @ 回合门禁，与 participation 设置无关。
    *
    * 唤醒判据里的 mentionsBot 分支不受 `!botSender` 约束，访问控制在没配成员名单时
-   * 又对任何机器人一律放行——两个机器人互相 @ 就能无限往返。这里是唯一封口的地方。
-   * 它只读自己的状态，不看 participation 开关：participation 默认 off，而事故恰好
-   * 发生在默认配置上。（真实接线见 service.ts，participation 实例始终存在。）
+   * 又对任何机器人一律放行——两个机器人互相 @ 就能无限往返。开启 `botLoopGuard` 时，
+   * 这里是唯一封口的地方；默认关闭时完全不记录或拦截机器人回合。
+   * 它只读自己的状态，不看 participation 开关。（真实接线见 service.ts，participation
+   * 实例始终存在。）
    *
    * 按群串行执行：coordinator.handle 由长连接 fire-and-forget 调起，同一 tick 到达的
    * 多条机器人消息会并发进来。不串行的话它们会读到同一份深度后一起放行——
@@ -587,6 +588,7 @@ export class LarkGroupParticipation {
     const chatKey = keyFor(scope);
     const topicKey = `${chatKey}::${event.threadId ?? ''}`;
     const bot = event.senderType === 'app' || event.senderType === 'bot' || Boolean(input.botOpenId && event.senderOpenId === input.botOpenId);
+    if (config.botLoopGuard !== true) { this.botTurnDepth.delete(topicKey); return undefined; }
     if (!bot) { this.botTurnDepth.delete(topicKey); return undefined; }
     const depth = (this.botTurnDepth.get(topicKey) ?? 0) + 1;
     if (depth > BOT_LOOP_DEPTH_LIMIT) {

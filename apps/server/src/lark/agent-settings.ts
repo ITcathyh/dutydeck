@@ -7,7 +7,7 @@ import { parseLarkQuietHours } from './notify-tier.js';
 export const agentSettingsRequestSchema = z.object({ pairs: z.array(z.string()).min(1), dryRun: z.boolean().optional() }).strict();
 
 export const agentSettingsKeys = ['defaultAgentId', 'defaultModel', 'defaultReasoningEffort', 'p2pMode', 'groupReplyMode',
-  'notifyQuietHours', 'notifyMentionAction', 'notifyMentionDone', 'busyTriage'] as const;
+  'notifyQuietHours', 'notifyMentionAction', 'notifyMentionDone', 'busyTriage', 'botLoopGuard'] as const;
 const fields = Object.fromEntries(agentSettingsKeys.map(key => [key, botFields[key]]));
 
 export function parseAgentSettings(pairs: string[]): SaveLarkConfigInput {
@@ -21,6 +21,6 @@ export function parseAgentSettings(pairs: string[]): SaveLarkConfigInput {
 
 export function showAgentSettings(config: StoredLarkConfig): Record<string, unknown> {
   return Object.fromEntries(agentSettingsKeys.map(key => [key, config[key] ?? (key === 'p2pMode' ? 'chat'
-    : key === 'groupReplyMode' ? null : key === 'busyTriage' ? false : key === 'notifyMentionAction' || key === 'notifyMentionDone' ? true : '')]));
+    : key === 'groupReplyMode' ? null : key === 'busyTriage' || key === 'botLoopGuard' ? false : key === 'notifyMentionAction' || key === 'notifyMentionDone' ? true : '')]));
 }
 export const agentSettingsConfirmKind = (appId: string) => `agent_settings.${appId}`;

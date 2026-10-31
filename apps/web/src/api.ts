@@ -77,6 +77,8 @@ export type LarkBotConfig = {
   decisionAgentId?: string;
   decisionModel?: string;
   busyTriage?: boolean;
+  /** 防止机器人互相对话的回合门禁；旧服务端缺省按关闭处理。 */
+  botLoopGuard?: boolean;
   responseAgentId?: string;
   responseModel?: string;
   /** 执行方式；旧服务端缺省按 single 处理。 */
@@ -457,6 +459,7 @@ export const api = {
     decisionAgentId?: string;
     decisionModel?: string;
     busyTriage?: boolean;
+    botLoopGuard?: boolean;
     responseAgentId?: string;
     responseModel?: string;
     executionMode?: 'single' | 'layered';

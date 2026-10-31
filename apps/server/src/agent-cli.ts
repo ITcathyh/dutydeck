@@ -321,7 +321,7 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
   const settings = group(agent, 'settings', 'Show or propose common bot defaults and notification settings; changes need a bot admin confirmation');
   sub(settings, 'show', 'Show only common bot settings', 'settings.show', 'read', ['settings show']);
   sub(settings, 'set <key=value...>', 'Propose bot settings; only a bot admin can confirm', 'settings.set', 'write-confirm', ['settings set defaultAgentId=codex', 'settings set notifyQuietHours=22:00-08:00 busyTriage=true'],
-    'Keys: defaultAgentId, defaultModel, defaultReasoningEffort, p2pMode, groupReplyMode, notifyQuietHours, notifyMentionAction, notifyMentionDone, busyTriage. Booleans: true/false; use an empty value to clear model, effort or quiet hours.');
+    'Keys: defaultAgentId, defaultModel, defaultReasoningEffort, p2pMode, groupReplyMode, notifyQuietHours, notifyMentionAction, notifyMentionDone, busyTriage, botLoopGuard. Booleans: true/false; use an empty value to clear model, effort or quiet hours.');
 
   const chat = group(agent, 'group', 'Read and send messages in the current Lark chat', groupToolsHelp(true, 'dutydeck agent'));
   sub(chat, 'self', 'Show the current bot and scoped chat', 'group.self', 'read', ['group self']);

@@ -290,6 +290,15 @@ describe('settings CLI against the real bot routes', () => {
     await expect(run('bot-set', { appId: 'cli_a', pairs: ['busyTriage=maybe'] })).rejects.toThrow();
   });
 
+  it('defaults bot loop guard off and saves typed values through the bot route', async () => {
+    const { repos, run } = await botRuntime();
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ botLoopGuard: false });
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['botLoopGuard=true'] })).bot).toMatchObject({ botLoopGuard: true });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ botLoopGuard: true });
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['botLoopGuard=false'] })).bot).toMatchObject({ botLoopGuard: false });
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['botLoopGuard=maybe'] })).rejects.toThrow();
+  });
+
   it('persists card forwarding through CLI/API updates and redacts its token from all public results', async () => {
     const { repos, run } = await botRuntime();
     const forwarding = { owner: 'sample-service', url: 'http://127.0.0.1:14432/cards', token: 'private-forward-token', legacyActions: ['ack'] };
