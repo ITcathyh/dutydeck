@@ -61,7 +61,7 @@ import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGro
 import { larkMemoryScope, LarkMemoryStore } from './lark/memory.js';
 import { LarkMemoryProjection } from './lark/memory-view.js';
 import { LarkMemoryPipeline } from './lark/memory-pipeline.js';
-import { getAuthToken, getPasswordHash, getShareLinkSecret, loadOrCreateAuthToken, loadOrCreateShareLinkSecret, signSessionShareToken, signTurnDiffToken, tokensEqual, verifyBrowserSession } from './auth/auth.js';
+import { getAuthToken, getPasswordHash, getShareLinkSecret, loadOrCreateAuthToken, loadOrCreateShareLinkSecret, SHARE_TOKEN_QUERY_KEY, signSessionShareToken, signTurnDiffToken, tokensEqual, verifyBrowserSession } from './auth/auth.js';
 import { setLarkSessionShareSigner, setLarkTurnDiffSigner } from './lark/detail-link.js';
 import { createTurnDiffObserver, TURN_DIFF_LINK_TTL_MS } from './turn-diff.js';
 import { requestLarkTurnDiffReview } from './lark/turn-diff.js';
@@ -341,7 +341,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null),
     getPasswordHash: () => getPasswordHash(repos.config),
   });
-  const authorizeMemoryManagement = createPluginManagementAuthorizer({
+  const authorizeInstallationManagement = createPluginManagementAuthorizer({
     authEnabled: config.authEnabled, mode,
     getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null),
     getPasswordHash: () => getPasswordHash(repos.config),
@@ -598,7 +598,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       if (!binding || !['task.view_result', 'terminal.read'].includes(action)) return { allowed: false, action, code: 'WORK_ITEM_MANAGED_SESSION', reason: '此会话由目标编排管理，请在目标中操作步骤', source: 'integration' };
       sessionId = binding.parentSessionId;
     }
-    return await groupManager.authorizeSession(sessionId, action, true) ?? foundationExecution.authorizeSessionId(sessionId, { boundary, action, request });
+    const decision = await groupManager.authorizeSession(sessionId, action, true) ?? await foundationExecution.authorizeSessionId(sessionId, { boundary, action, request });
+    if (!decision.allowed) return decision;
+    // A policy's origin does not authenticate the HTTP caller, including legacy integrations.
+    const owner = !new URL(request.url ?? '', 'http://dutydeck.local').searchParams.has(SHARE_TOKEN_QUERY_KEY)
+      && await authorizeInstallationManagement(request);
+    return { ...decision, source: owner ? 'owner' : decision.source === 'owner' ? 'integration' : decision.source };
   };
   let automationTimer: NodeJS.Timeout | undefined;
   let collaborationTimer: NodeJS.Timeout | undefined;
@@ -801,7 +806,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
           return larkMemoryScope(binding.appId, binding.chatId, binding.chatType, bot.groupMemoryScope);
         },
         authorize: async (request, sessionId) => {
-          if (!await authorizeMemoryManagement(request)) throw new RuntimeError('MEMORY_OWNER_REQUIRED', '管理记忆需要安装管理员权限。', 403);
+          if (!await authorizeInstallationManagement(request)) throw new RuntimeError('MEMORY_OWNER_REQUIRED', '管理记忆需要安装管理员权限。', 403);
           const decision = await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result');
           if (!decision.allowed) throw new RuntimeError(decision.code, decision.reason, 403);
         },
@@ -810,7 +815,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       },
       projectMemory: {
         service: projectMemory,
-        authorize: authorizeMemoryManagement,
+        authorize: authorizeInstallationManagement,
         authorizeSession: async (request, sessionId) => {
           const decision = await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result');
           if (!decision.allowed) throw new RuntimeError(decision.code, decision.reason, 403);
