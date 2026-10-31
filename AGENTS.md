@@ -59,7 +59,7 @@ E2E 需要 `git`、`tmux` 和 Playwright Chromium；命令、场景及产物位�
 
 - **先定位实例**：`systemctl --user list-units 'dutydeck*' --all`；用 `systemctl --user show <unit> --property=WorkingDirectory,ExecStart,KillMode,LoadState` 核对目标，必要时查看 unit 配置中的数据库和端口。默认 `dutydeck.service` 可能已 mask；不假定只有一个实例或所有实例共享发布目录。不要输出整份 `.env` 或含密钥的环境配置。
 - **诊断**：在核实目标目录与环境后用 `dutydeck status`、`dutydeck doctor`，日志看 `journalctl --user -u <unit>`。`status` 没有 `--unit`，不能靠这个参数选择实例。CLI 不在 PATH 时，用目标 unit `ExecStart` 中的 node 和 CLI 入口。
-- **重启**：用 `dutydeck restart --unit <unit>`，不用 `systemctl --user restart`。仅当当前 `KillMode=process` 时，它才保留已验证可恢复、无权限等待或未授权高危门禁的 `full-trust` tmux 任务；其余任务等待结束，当前 Agent 自己那一轮自动排除。部署仍等待所有正在执行的任务及原生后台任务，不沿用重启的保留策略。
+- **重启**：用 `dutydeck restart --unit <unit>`，不用 `systemctl --user restart`。仅当当前 `KillMode=process` 时，它才保留已验证可恢复、无权限等待或未授权高危门禁的 `full-trust` tmux 任务；其余任务等待结束，当前 Agent 自己那一轮自动排除。部署沿用同一保留策略，其余任务及原生后台任务仍等待结束。
 - **部署**：改动合入主检出并提交后，在主检出跑 `pnpm install --frozen-lockfile && pnpm build`，再 `dutydeck deploy --source <主检出> --unit <unit>`。按 unit 实际引用的 `<releases>/current` 分组，同组所有目标依次部署；只更新部分会让其余 unit 在下次重启时换版本，同一发布根的部署与清理不能并发。
 - **部署验收**：每个 unit 都检查 `<releases>/../deployments/<时间>-<sha>/manifest.json` 的 `status=deployed`，并核对运行状态与启动日志；`staged` 只表示版本已准备。健康检查失败只在 schema 兼容时自动回滚代码，不恢复旧数据库快照。
 - **需用户授权的操作**：`--force`（不等任务结束）、`deploy --now`（越过部署窗口）；修改 systemd unit、`.env`、机器人凭据或权限模式；删除或覆盖 `.dutydeck/` 下的数据库、发布目录和部署记录。清理旧版本先跑 `dutydeck deploy prune --unit <unit> --dry-run`，核对范围再执行；它也会删除旧部署记录中的数据库备份。

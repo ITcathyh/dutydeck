@@ -137,7 +137,8 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     return service;
   };
 
-  if (!listeningDisabled) await syncListeners();
+  // 不等长连接握手：服务先开始监听 HTTP，重启/部署的不可用窗口不随机器人数量拉长。
+  if (!listeningDisabled) void syncListeners();
   app.addHook('onClose', async () => listener.stop());
   await registerLarkAgentToolRoutes(app, options.agentTools);
   await registerLarkGroupManagementRoutes(app, options.groupManager);

@@ -1,3 +1,5 @@
+import { registerConfigurationExplanationRoutes, type ConfigurationExplanationOptions } from './configuration-explanation.js';
+import { registerArtifactSnapshotRoutes, type ArtifactSnapshotRouteOptions } from './artifact-snapshot-routes.js';
 import { registerPluginBusinessToolRoutes, type PluginBusinessToolRoutes } from './plugins/tool-routes.js';
 import { registerPluginBindingRoutes, type PluginBindingRoutes } from './plugins/binding-routes.js';
 import { registerPluginResultRoutes, type PluginResultRoutes } from './plugins/result-routes.js';
@@ -33,6 +35,8 @@ import { registerScheduleManagementRoutes, type ScheduleManagementOptions } from
 import { registerWorkItemTools, type WorkItemToolsOptions } from './work-item-tools.js';
 import { registerAgentRequestTools, type AgentRequestToolsOptions } from './agent-request-tools.js';
 import { registerLarkMemoryTools, type LarkMemoryToolsOptions } from './lark/memory-tools.js';
+import { registerMemoryManagementRoutes, type MemoryManagementOptions } from './memory-management-routes.js';
+import { registerProjectMemoryRoutes, type ProjectMemoryRouteOptions } from './project-memory-routes.js';
 import { registerLarkMemoryTurnRoutes } from './lark/memory-turn-routes.js';
 import { registerWorkItemRoutes, type WorkItemRouteOptions } from './work-item-routes.js';
 import { registerSessionAutomationRoutes, type SessionAutomationRouteOptions } from './session-automation-routes.js';
@@ -85,9 +89,11 @@ export interface SessionExecutionPolicy {
 }
 
 export interface BuildAppOptions {
+  artifactSnapshots?: ArtifactSnapshotRouteOptions;
   pluginBindings?: PluginBindingRoutes;
   pluginResults?: PluginResultRoutes;
   pluginBusinessTools?: PluginBusinessToolRoutes;
+  configurationExplanation?: ConfigurationExplanationOptions;
   agentModelSettings?: AgentModelSettings;
   terminalSettings?: TerminalSettings;
   recovery?: RecoveryRouteOptions;
@@ -107,6 +113,8 @@ export interface BuildAppOptions {
   workItemTools?: WorkItemToolsOptions;
   agentRequests?: AgentRequestToolsOptions;
   memoryTools?: LarkMemoryToolsOptions;
+  memoryManagement?: MemoryManagementOptions;
+  projectMemory?: ProjectMemoryRouteOptions;
   automation?: SessionAutomationRouteOptions;
   /** CI webhook 入口 `POST /api/hooks/<provider>`；没有配置 webhook 的 CI 插件时一律 404。 */
   ciHooks?: CiHookRouteOptions;
@@ -191,6 +199,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     });
   }
   if (options.lark?.agentTools) registerLarkAgentToolTurnGuard(app, options.lark.agentTools);
+  registerConfigurationExplanationRoutes(app, options.configurationExplanation);
+  registerArtifactSnapshotRoutes(app, options.artifactSnapshots);
   registerPluginBindingRoutes(app, options.pluginBindings);
   if (options.pluginResults) registerPluginResultRoutes(app, options.pluginResults);
   if (options.pluginBusinessTools) registerPluginBusinessToolRoutes(app, options.pluginBusinessTools);
@@ -214,6 +224,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.memoryTools) await registerLarkMemoryTools(app, options.memoryTools);
   if (options.memoryTools) await registerLarkMemoryTurnRoutes(app, { store: options.memoryTools.store,
     authorize: (request, sessionId) => requireSessionExecution(request, sessionId, 'session', 'task.view_result') });
+  if (options.memoryManagement) registerMemoryManagementRoutes(app, options.memoryManagement);
+  if (options.projectMemory) registerProjectMemoryRoutes(app, options.projectMemory);
   if (options.collaboration) await registerCollaborationRoutes(app, options.collaboration);
   if (options.usage) registerUsageRoutes(app, options.usage, (request, sessionId) => requireSessionExecution(request, sessionId, 'session', 'task.view_result'));
   // 无论是否提供 insight 选项都注册：缺 authorize/service 时由路由层 fail-closed，

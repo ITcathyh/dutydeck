@@ -169,7 +169,7 @@ export interface LarkMemoryRejectedFact {
  * shared：群聊记忆池（各群共享或按群独立，多人可写），另挡疑似注入指令；ignoreRules：本池的「不许记」规则，命中任何一条即拒。
  */
 export function gateExtractionFacts(
-  input: { facts: unknown[]; evidenceTaskIds: string[]; shared?: boolean; ignoreRules?: LarkMemoryIgnoreRule[] },
+  input: { facts: unknown[]; evidenceTaskIds: string[]; shared?: boolean; ignoreRules?: LarkMemoryIgnoreRule[]; retiredContents?: string[] },
   existing: LarkMemoryEntry[],
   limits: typeof larkMemoryLimits = larkMemoryLimits
 ): { accepted: LarkMemoryAcceptedFact[]; rejected: LarkMemoryRejectedFact[] } {
@@ -177,7 +177,7 @@ export function gateExtractionFacts(
   const rejected: LarkMemoryRejectedFact[] = [];
   const evidence = new Set(input.evidenceTaskIds);
   const topics = new Set(existing.map(entry => entry.topic));
-  const seen = new Set(existing.map(entry => larkMemoryDedupeKey(entry.content)));
+  const seen = new Set([...existing.map(entry => larkMemoryDedupeKey(entry.content)), ...(input.retiredContents ?? []).map(larkMemoryDedupeKey)]);
   let live = existing.length;
 
   for (const fact of input.facts) {
@@ -234,12 +234,13 @@ export function gateExtractionFacts(
 export const indexOverBudgetViolation = 'INDEX_OVER_BUDGET';
 
 export function gateConsolidationActions(
-  input: { actions: unknown[]; sessionId?: string; state?: LarkMemoryState; now?: Date; shared?: boolean },
+  input: { actions: unknown[]; sessionId?: string; state?: LarkMemoryState; now?: Date; shared?: boolean; retiredContents?: string[] },
   existing: LarkMemoryEntry[],
   limits: typeof larkMemoryLimits = larkMemoryLimits
 ): { ok: true; plan: LarkMemoryBatchStep[] } | { ok: false; violations: string[] } {
   const violations: string[] = [];
   const live = new Map(existing.map(entry => [entry.id, entry]));
+  const retired = new Set((input.retiredContents ?? []).map(larkMemoryDedupeKey));
   const touched = new Set<string>();
   const adds: LarkMemoryBatchStep[] = [];
   const tail: LarkMemoryBatchStep[] = [];
@@ -271,6 +272,7 @@ export function gateConsolidationActions(
     catch (error) { violations.push(`${label} 的内容不合法：${error instanceof Error ? error.message : '未知原因'}`); return undefined; }
     if (looksLikeLarkMemoryCredential(content)) { violations.push(`${label} 的内容疑似包含凭据`); return undefined; }
     if (input.shared && looksLikeLarkMemoryInjection(content)) { violations.push(`${label} 的内容疑似包含注入指令`); return undefined; }
+    if (retired.has(larkMemoryDedupeKey(content))) { violations.push(`${label} 的内容与已删除或替换的记忆相同`); return undefined; }
     return content;
   };
 
@@ -650,7 +652,9 @@ export class LarkMemoryPipeline {
         const sessions = (await this.options.runtime.listSessions()).filter(session => session.source === 'lark-memory' && [`${scope.appId}:${scope.pool}`, `${scope.appId}:${scope.pool}:memory`].includes(session.sourceId ?? ''));
         for (const session of sessions) await this.assertMemorySessionReady(session);
         const versions = await this.options.store.jobVersions(scope);
-        const entries = await this.options.store.list(scope);
+        const allEntries = await this.options.store.listAll(scope);
+        const entries = allEntries.filter(entry => !entry.deletedAt);
+        const retiredContents = allEntries.filter(entry => entry.deletedAt).map(entry => entry.content);
         const state = await this.options.store.getState(scope);
         const ignoreRules = await this.options.store.listIgnoreRules(scope);
         const turns = kind === 'extraction' ? (state.pendingTurns ?? []).slice(0, larkMemoryPipelineRules.turnsPerExtraction) : [];
@@ -680,7 +684,7 @@ export class LarkMemoryPipeline {
         const prompt = isolated ? fullPrompt : kind === 'extraction' ? buildExtractionPrompt(index.text, materials, { shared, ignoreRules }) : buildConsolidationPrompt(entries, index.text, [], new Date(now));
         const confirmedVersions = await this.options.store.jobVersions(scope);
         if (JSON.stringify(versions) !== JSON.stringify(confirmedVersions)) throw new LarkMemoryError('MEMORY_CONCURRENT_CHANGE', '冻结输入期间记忆或规则已改变。', 409);
-        const input = { entries, state, ignoreRules, turns, materials, now, prompt, promptPolicyVersion: policy.mode === 'optimized' ? 'optimized-v1' : 'legacy-v1', actorId, agentDigest: createHash('sha256').update(JSON.stringify(agent)).digest('hex'), verifiedMaxInputChars: isolated ? profile!.maxInputChars : undefined, skip: Boolean(skip) };
+        const input = { entries, retiredContents, state, ignoreRules, turns, materials, now, prompt, promptPolicyVersion: policy.mode === 'optimized' ? 'optimized-v1' : 'legacy-v1', actorId, agentDigest: createHash('sha256').update(JSON.stringify(agent)).digest('hex'), verifiedMaxInputChars: isolated ? profile!.maxInputChars : undefined, skip: Boolean(skip) };
         const inputDigest = createHash('sha256').update(JSON.stringify(input)).digest('hex');
         const id = `memory_${createHash('sha256').update(`${scope.appId}:${scope.pool}:${kind}:${token}`).digest('hex')}`;
         // 兼容模式只续用本进程建的会话：每次部署启动器路径都会变，上一个进程的 ACP 会话再也起不来
@@ -690,7 +694,7 @@ export class LarkMemoryPipeline {
         await jobs.create(job);
         this.options.log.info({ jobId: id, mode, compatibilityReason, inputChars: prompt.length }, '记忆作业输入已冻结');
       }
-      const input = job.input as unknown as { entries: LarkMemoryEntry[]; state: LarkMemoryState; ignoreRules: LarkMemoryIgnoreRule[]; turns: LarkMemoryPendingTurn[]; materials: LarkMemoryTurnMaterial[]; now: string; prompt: string; verifiedMaxInputChars?: number; promptPolicyVersion?: 'legacy-v1' | 'optimized-v1'; actorId?: string; agentDigest: string; skip: boolean };
+      const input = job.input as unknown as { entries: LarkMemoryEntry[]; retiredContents?: string[]; state: LarkMemoryState; ignoreRules: LarkMemoryIgnoreRule[]; turns: LarkMemoryPendingTurn[]; materials: LarkMemoryTurnMaterial[]; now: string; prompt: string; verifiedMaxInputChars?: number; promptPolicyVersion?: 'legacy-v1' | 'optimized-v1'; actorId?: string; agentDigest: string; skip: boolean };
       kind = job.kind;
       let plan: LarkMemoryBatchStep[] = [];
       let rejected = 0;
@@ -726,14 +730,14 @@ export class LarkMemoryPipeline {
           const parsed = parseLastJsonBlock(await this.runTurn(session, request.prompt, request)) as { facts?: unknown[]; actions?: unknown[] };
           if (kind === 'extraction') {
             if (!Array.isArray(parsed.facts)) throw new LarkMemoryError('MEMORY_AGENT_OUTPUT_INVALID', '输出缺少 facts。', 422);
-            const gate = gateExtractionFacts({ facts: parsed.facts, evidenceTaskIds: input.materials.map(turn => turn.taskId), shared: isLarkGroupChatMemoryPool(scope), ignoreRules: input.ignoreRules }, input.entries);
+            const gate = gateExtractionFacts({ facts: parsed.facts, evidenceTaskIds: input.materials.map(turn => turn.taskId), shared: isLarkGroupChatMemoryPool(scope), ignoreRules: input.ignoreRules, retiredContents: input.retiredContents }, input.entries);
             rejected = gate.rejected.length;
             plan = gate.accepted.map(fact => ({ op: 'add', input: { content: fact.content, topic: fact.topic, source: 'extraction', taskId: fact.evidence, sessionId: session.id, chatId: input.materials.find(turn => turn.taskId === fact.evidence)?.chatId, ...(input.actorId ? { createdBy: input.actorId } : {}) } }));
             break;
           }
           if (!Array.isArray(parsed.actions)) throw new LarkMemoryError('MEMORY_AGENT_OUTPUT_INVALID', '输出缺少 actions。', 422);
           candidate = parsed.actions;
-          const gate = gateConsolidationActions({ actions: candidate, sessionId: session.id, state: input.state, now: new Date(input.now), shared: isLarkGroupChatMemoryPool(scope) }, input.entries);
+          const gate = gateConsolidationActions({ actions: candidate, sessionId: session.id, state: input.state, now: new Date(input.now), shared: isLarkGroupChatMemoryPool(scope), retiredContents: input.retiredContents }, input.entries);
           if (gate.ok) { plan = gate.plan; break; }
           violations = gate.violations;
           if (attempt === attempts - 1) throw new LarkMemoryError(violations.some(item => item.includes(indexOverBudgetViolation)) ? indexOverBudgetViolation : 'MEMORY_GATE_REJECTED', '两轮整理均未通过门禁。', 422);

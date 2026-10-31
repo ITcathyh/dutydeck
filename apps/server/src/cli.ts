@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { createBackup, inspectBackup, restoreBackup } from './backup.js';
+import { runMemoryManagementCli } from './memory-management-cli.js';
 import { runTerminalSettingsCli, TerminalSettingsCliError } from './terminal-settings-cli.js';
 import { runHerdrCli } from './herdr-cli.js';
 import { RecoveryCliError, runRecoveryCli } from './recovery-cli.js';
@@ -51,17 +53,18 @@ import { runPluginCli } from './plugins/cli.js';
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { name: string; version: string };
 
 // 文件不存在是正常的（没有 .env）；存在却读不了/解析失败不能静默，否则配置悄悄失效。
-try { loadEnvFile(); } catch (error) {
+const isolatedBackupCommand = process.argv[2] === 'backup';
+try { if (!isolatedBackupCommand) loadEnvFile(); } catch (error) {
   if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`警告：无法读取 ${process.cwd()}/.env，其中的配置没有生效：${error instanceof Error ? error.message : String(error)}\n`);
 }
 
 // 先把旧状态目录就位，再接管环境变量——否则无从判断变量里改写后的路径是否真的存在。
-const legacyState = migrateLegacyBrandDirs();
+const legacyState = isolatedBackupCommand ? { migrated: [], skipped: [] } : migrateLegacyBrandDirs();
 for (const dir of legacyState.migrated) process.stderr.write(`已接管 dockmux 时期的状态目录：${dir}\n`);
 for (const dir of legacyState.skipped) {
   process.stderr.write(`未接管 ${dir}：同级已有 .dutydeck，两份状态都留着，请自行确认用哪一份。\n`);
 }
-adoptLegacyEnv();
+if (!isolatedBackupCommand) adoptLegacyEnv();
 
 async function serve(options: CliOptions, onReady?: () => void) {
   const { startLocalServer } = await import('./service.js');
@@ -377,6 +380,11 @@ async function main() {
         restart: (entrypoint, restartOptions) => restartWithInstalledCli(entrypoint, restartOptions)
       }));
     },
+    backup: async (operation, options) => {
+      if (operation === 'create') output(await createBackup({ database: options.database!, dataDir: options.dataDir!, output: options.output! }));
+      else if (operation === 'inspect') { const result = inspectBackup(options.archive!); output({ status: result.status, schema: result.manifest.schema, components: result.manifest.entries.length, missing: result.missing }); }
+      else output(restoreBackup({ archive: options.archive!, target: options.target! }));
+    },
     deploy: async options => {
       const result = await runDeploy(options);
       renderDeployResult(result, options.json === true);
@@ -464,6 +472,7 @@ async function main() {
     groupTeamSearch: async query => { output(await runGroupTeamSearch(query, { turn: program.opts().agentTurn })); },
     historyList: async options => { output(await runHistoryList(options, { turn: program.opts().agentTurn })); },
     historyShow: async (taskId, options) => { output(await runHistoryShow(taskId, { turn: program.opts().agentTurn }, options)); },
+    memoryManagement: async (operation, id, input) => { output(await runMemoryManagementCli(operation, id, input)); },
     memoryList: async options => { output(await runMemoryList({ ...options, turn: program.opts().agentTurn })); },
     memoryShow: async topic => { output(await runMemoryShow(topic, { turn: program.opts().agentTurn })); },
     memorySearch: async (query, options) => {

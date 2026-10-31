@@ -9,8 +9,9 @@ export type StreamStatus = 'connecting' | 'open' | 'reconnecting';
 
 const validSessionStates = new Set<string>(sessionStates);
 
-// 指数退避延迟：baseMs * 2^attempt，封顶 maxMs
-export function nextBackoffDelay(attempt: number, baseMs = 1000, maxMs = 30000): number {
+// 指数退避延迟：baseMs * 2^attempt，封顶 maxMs。封顶取 5 秒：服务重启或部署通常几秒内恢复，
+// 封顶过长会让页面在服务已就绪后仍停在「正在重连」。
+export function nextBackoffDelay(attempt: number, baseMs = 1000, maxMs = 5000): number {
   return Math.min(baseMs * 2 ** attempt, maxMs);
 }
 

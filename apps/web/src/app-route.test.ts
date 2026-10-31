@@ -58,6 +58,11 @@ describe('浮层的 URL 表示', () => {
     expect(parseAppLocation('/', '?panel=insight').overlay).toBeUndefined();
   });
 
+  it('trace 只在会话详情上打开', () => {
+    expect(parseAppLocation('/sessions/s1', '?panel=trace').overlay).toEqual({ kind: 'trace' });
+    expect(parseAppLocation('/', '?panel=trace').overlay).toBeUndefined();
+  });
+
   it('usage 面板支持 view=insight 恢复会话分析 tab；无 view 时是费用 tab', () => {
     expect(parseAppLocation('/', '?panel=usage').overlay).toEqual({ kind: 'usage' });
     expect(parseAppLocation('/', '?panel=usage&view=insight').overlay).toEqual({ kind: 'usage', view: 'insight' });
@@ -120,7 +125,8 @@ describe('反向序列化', () => {
       { route: { kind: 'overview' }, overlay: { kind: 'usage' } },
       { route: { kind: 'overview' }, overlay: { kind: 'usage', view: 'insight' } },
       { route: { kind: 'session', sessionId: 's1' }, overlay: { kind: 'insight' } },
-      { route: { kind: 'session', sessionId: 's1' }, overlay: { kind: 'insight', compare: 's2' } }
+      { route: { kind: 'session', sessionId: 's1' }, overlay: { kind: 'insight', compare: 's2' } },
+      { route: { kind: 'session', sessionId: 's1' }, overlay: { kind: 'trace' } }
     ];
     for (const location of cases) {
       const path = appLocationPath(location);

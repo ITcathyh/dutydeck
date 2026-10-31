@@ -172,6 +172,12 @@ export class LarkGroupManager {
       ...(!applied && binding ? { error: validity !== 'valid' ? '群身份或凭据校验已失效，请重新同步群聊。' : '群配置已停用或 Bot 尚未确认运行权限。' } : {}) };
   }
 
+  async explain(appId: string, chatId: string) {
+    const config = await readLarkConfig(this.repos.config, appId, { readOnly: true });
+    const owner = config ? await this.owner(appId) : undefined;
+    return config && owner ? this.detail(config, owner, chatId) : undefined;
+  }
+
   async groups(): Promise<{ groups: ManagedGroup[] }> {
     const groups = new Map<string, ManagedGroup>();
     for (const config of await readLarkConfigs(this.repos.config)) {

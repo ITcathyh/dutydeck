@@ -1,3 +1,4 @@
+import { backupSqlite } from '@dutydeck/storage';
 import { checkSqliteDriver, childProcessIdentity, describeSqliteDriverFailure, observeProcess, type ProcessIdentity } from '@dutydeck/storage';
 import Database from 'better-sqlite3';
 import { spawnSync } from 'node:child_process';
@@ -299,16 +300,6 @@ function pointCurrent(releases: string, release: string): void {
   renameSync(temp, join(releases, 'current'));
 }
 
-async function backupSqlite(source: string, target: string): Promise<void> {
-  const db = new Database(source, { readonly: true, fileMustExist: true });
-  try {
-    // 固定读取快照，避免其他连接的持续写入让分批在线备份反复从头开始；WAL 写入仍可继续。
-    db.exec('BEGIN');
-    db.prepare('SELECT rootpage FROM main.sqlite_schema LIMIT 1').get();
-    await db.backup(target);
-  } finally { db.close(); }
-  chmodSync(target, 0o600);
-}
 
 const sha256 = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
 
@@ -742,8 +733,10 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
   manifest.previous_pid = previousPid ?? null;
   let drain: DrainResult = { ok: true };
   if (previousPid !== undefined) {
-    info('排空：新消息照常入队，等正在执行的任务结束…');
-    drain = await drainRuntime(target.endpoint, options, deps);
+    // 与 restart 同一套保留策略：已验证可恢复的 tmux 任务留在原 CLI 里，新版本启动后接回原轮。
+    const keepRecoverable = (deps.service ? deps.service.killMode : target.service?.killMode) === 'process';
+    info(keepRecoverable ? '排空：新消息照常入队，等不可跨重启保留的任务结束…' : '排空：新消息照常入队，等正在执行的任务结束…');
+    drain = await drainRuntime(target.endpoint, options, deps, keepRecoverable);
     if (!drain.ok) return finish('failed', { error: drain.error });
   }
   const stopRenewing = keepDraining(drain, previousPid);

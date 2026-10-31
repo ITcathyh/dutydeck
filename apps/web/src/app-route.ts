@@ -41,7 +41,8 @@ export type OverlayRoute =
   | { kind: 'automation' }
   | { kind: 'usage'; view?: 'cost' | 'insight' }
   | { kind: 'insight'; compare?: string }
-  | { kind: 'workspace' };
+  | { kind: 'workspace' }
+  | { kind: 'trace' };
 
 export type AppLocation = {
   route: AppRoute;
@@ -84,6 +85,7 @@ const overlayFromSearch = (search: string, isSessionRoute: boolean): OverlayRout
     case 'automation': return { kind: 'automation' };
     case 'usage': return { kind: 'usage', ...(params.get('view') === 'insight' ? { view: 'insight' as const } : {}) };
     case 'workspace': return isSessionRoute ? { kind: 'workspace' } : undefined;
+    case 'trace': return isSessionRoute ? { kind: 'trace' } : undefined;
     // insight 只在会话详情上有意义；非会话路由（如任务中心深链）不打开。
     case 'insight': return isSessionRoute ? { kind: 'insight', ...(params.get('compare') ? { compare: params.get('compare')! } : {}) } : undefined;
     default: return undefined;

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PluginBinding, SavePluginBinding } from '@dutydeck/shared';
 import { pluginBindingsApi } from '../api';
+import { ConfigurationSources } from './ConfigurationExplanationPanel';
 import { Banner, Button, Card, Field, Input, Select, Spinner } from './primitives';
 
 const empty = (): SavePluginBinding => ({ plugin: '', botAppId: '', enabled: true, config: {}, secrets: {}, skills: [], expectedRevision: 0 });
@@ -81,6 +82,15 @@ export function PluginBindingsPanel() {
       <div className="flex gap-2"><Button type="submit" disabled={(!selected && draft.enabled) || save.isPending}>保存绑定</Button><Button type="button" disabled={!selected || preview.isPending} onClick={() => preview.mutate()}>解释已保存配置</Button></div>
     </form>
     {preview.error && <Banner tone="danger">{preview.error.message}</Banner>}
-    {preview.data && <pre className="overflow-auto rounded border border-default p-3 text-caption">{JSON.stringify(preview.data, null, 2)}</pre>}
+    {preview.data && <ConfigurationSources explanation={{ sessionId: '', observedAt: '', tasks: [], sections: [{ phase: 'saved', title: '已保存插件配置来源', note: '查询时预览；每次工具调用重新解析并授权。完整会话与历史证据见任务详情的“配置来源”。配置和密钥正文不展示。', fields: (() => {
+      const binding = preview.data.binding as { id: string; revision: number; config: Record<string, unknown>; secretKeys: string[] } | null;
+      return binding ? [
+        { key: 'binding', label: '选中的绑定', value: binding.id, status: 'recorded' as const, source: '原插件绑定解析器', revision: binding.revision },
+        { key: 'config', label: '已解析配置字段', value: Object.keys(binding.config).join('、') || '无', status: 'recorded' as const, source: '原插件绑定解析器' },
+        { key: 'secrets', label: '密钥字段', value: binding.secretKeys.join('、') || '无', status: 'recorded' as const, source: '秘密引用（正文不展示）' },
+        { key: 'skills', label: '必需技能请求', value: ((preview.data.skills ?? []) as Array<{ ref: string }>).map(item => item.ref).join('、') || '无', status: 'recorded' as const, source: '绑定与插件声明（不等于已注入）' }
+      ] : [{ key: 'binding', label: '选中的绑定', status: 'unset' as const, source: '原插件绑定解析器' }];
+    })() }] }}/>}
+
   </div>;
 }

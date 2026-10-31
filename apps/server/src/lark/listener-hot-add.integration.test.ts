@@ -41,7 +41,8 @@ it('starts a new ask-mode bot through HTTP without restarting the server or exis
   const app = Fastify();
   try {
     await registerLarkRoutes(app, { config, fetcher, env: {} });
-    expect(sockets.map(socket => socket.appId)).toEqual(['cli_existing']);
+    // 启动时在后台建立长连接，路由注册不等握手。
+    await vi.waitFor(() => expect(sockets.map(socket => socket.appId)).toEqual(['cli_existing']));
     const existing = sockets[0]!;
 
     // The same two-stage save used by the UI: credentials, then Agent binding.

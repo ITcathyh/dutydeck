@@ -1,10 +1,18 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
-import { realpathSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { RuntimeError } from '@dutydeck/shared';
 import type { DatabaseControl, RepositoryOpenOptions, RuntimeControlClaim } from '@dutydeck/shared';
 import { needsMigration } from './migrations.js';
 import { currentProcessIdentity, observeProcess, type ProcessIdentity } from './process-identity.js';
+
+export const restoreQuarantinePath = (database: string) => `${database}.restore-quarantine.json`;
+export function assertDatabaseNotQuarantined(database: string): void {
+  if (database !== ':memory:' && existsSync(database)) database = realpathSync(database);
+  if (database !== ':memory:' && existsSync(restoreQuarantinePath(database))) {
+    throw new RuntimeError('DATABASE_RESTORE_QUARANTINED', 'Restored database is quarantined; runtime execution is disabled. Validate external dependencies before a separately authorized activation.', 409);
+  }
+}
 
 const PROTOCOL_VERSION = 1;
 interface State { version: number; protocol: number; phase: string; maintenance: string | null; runtime: string | null; instance: string | null; generation: number; entity: string }
@@ -63,6 +71,7 @@ export function openDatabaseControl(filename: string, options: RepositoryOpenOpt
       close() { this.assertClosable(); closed = true; }
     };
   }
+  if (options.mode === 'runtime') assertDatabaseNotQuarantined(filename);
   const identity = currentProcessIdentity(); // Never inspect /proc while holding a SQLite write transaction.
   const stat = statSync(filename);
   const entity = `${stat.dev}:${stat.ino}`;
@@ -160,6 +169,7 @@ export function openDatabaseControl(filename: string, options: RepositoryOpenOpt
       return { databaseEntity: entity, creator: { ...identity } };
     },
     attachRuntime(instanceId): RuntimeControlClaim {
+      assertDatabaseNotQuarantined(filename);
       const generation = mutate(next => {
         if (next.phase !== 'idle') fail('DATABASE_MAINTENANCE');
         if (next.runtime && next.runtime !== accessId) fail('DATABASE_RUNTIME_BUSY');

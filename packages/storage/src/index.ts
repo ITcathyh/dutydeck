@@ -1,3 +1,5 @@
+export { assertDatabaseNotQuarantined, restoreQuarantinePath } from './database-control.js';
+export { backupSqlite, withOfflineDatabase, BACKUP_SCHEMA_VERSION } from './offline-backup.js';
 import { readHistoryOutline } from './event-history.js';
 import { listConfigByJsonField } from './config-query.js';
 import { createPluginResultRepository } from './plugin-results.js';

@@ -21,13 +21,21 @@ interface GroupToolClientOptions {
   turn?: string;
   env?: NodeJS.ProcessEnv;
   fetcher?: typeof globalThis.fetch;
+  sleep?: (ms: number) => Promise<void>;
 }
+
+/** 服务重启或部署期间端口暂时没人监听；与部署健康检查的上限一致。 */
+const UNAVAILABLE_RETRY_MS = 90_000;
+const UNAVAILABLE_RETRY_INTERVAL_MS = 1_000;
+// 只有连接被拒能证明请求没送达服务端，重试不会重复执行；其他网络错误照常报错。
+const connectionRefused = (error: unknown) => (error as { cause?: { code?: unknown } } | undefined)?.cause?.code === 'ECONNREFUSED';
 
 export class AgentGroupToolHttpClient {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly turn?: string;
   private readonly fetcher: typeof globalThis.fetch;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(options: GroupToolClientOptions = {}) {
     const env = options.env ?? process.env;
@@ -35,6 +43,7 @@ export class AgentGroupToolHttpClient {
     this.token = (env.dutydeck_group_tools_token ?? env.DUTYDECK_GROUP_TOOLS_TOKEN)?.trim() ?? '';
     this.turn = options.turn;
     this.fetcher = options.fetcher ?? globalThis.fetch;
+    this.sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
     if (!this.baseUrl || !this.token) {
       throw new AgentGroupToolCliError({
         code: 'GROUP_TOOL_CONTEXT_REQUIRED',
@@ -50,10 +59,15 @@ export class AgentGroupToolHttpClient {
       headers.set('authorization', `Bearer ${this.token}`);
       if (this.turn && !headers.has('x-dutydeck-work-turn')) headers.set('x-dutydeck-work-turn', this.turn);
       if (init.body !== undefined) headers.set('content-type', 'application/json; charset=utf-8');
-      response = await this.fetcher(`${this.baseUrl}${path}`, {
-        ...init,
-        headers
-      });
+      for (let waited = 0; ; waited += UNAVAILABLE_RETRY_INTERVAL_MS) {
+        try {
+          response = await this.fetcher(`${this.baseUrl}${path}`, { ...init, headers });
+          break;
+        } catch (error) {
+          if (!connectionRefused(error) || waited >= UNAVAILABLE_RETRY_MS) throw error;
+          await this.sleep(UNAVAILABLE_RETRY_INTERVAL_MS);
+        }
+      }
     } catch (error) {
       throw new AgentGroupToolCliError({
         code: 'GROUP_TOOL_UNAVAILABLE',

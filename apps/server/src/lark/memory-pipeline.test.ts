@@ -84,6 +84,12 @@ describe('gateExtractionFacts', () => {
     expect(batch.rejected).toHaveLength(1);
   });
 
+  it('不重新提取已删除或被人工替换的原文，墓碑不计入当前条数和主题上限', () => {
+    const result = gateExtractionFacts({ facts: [fact(), fact({ content: '新的有效事实' })], evidenceTaskIds: ['task_1'], retiredContents: ['项目统一用 pnpm'] }, []);
+    expect(result.accepted.map(item => item.content)).toEqual(['新的有效事实']);
+    expect(result.rejected).toHaveLength(1);
+  });
+
   it('凭据赋值与 40 位以上连续 base64/hex 都拒绝', () => {
     const result = gate([
       fact({ content: 'api_key = sk-live-1234' }),
@@ -235,6 +241,17 @@ describe('buildExtractionPrompt', () => {
 });
 
 describe('gateConsolidationActions', () => {
+  it.each(['merge', 'update'])('rejects %s text matching retained tombstones without echoing it', op => {
+    const existing = [entry({ id: 'mem_00000001', content: '事实一' }), entry({ id: 'mem_00000002', content: '事实二' })];
+    const action = op === 'merge' ? { op, ids: existing.map(item => item.id) } : { op, id: existing[0]!.id };
+    const rejected = gateConsolidationActions({ actions: [{ ...action, content: 'old\naddress' }], retiredContents: [' Old Address '] }, existing);
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) return;
+    expect(rejected.violations.join(' ')).toContain('已删除或替换');
+    expect(rejected.violations.join(' ')).not.toContain('address');
+    expect(gateConsolidationActions({ actions: [{ ...action, content: '合法的新内容' }], retiredContents: [' Old Address '] }, existing).ok).toBe(true);
+  });
+
   const base = [
     entry({ id: 'mem_a1', content: '后端用 Go', topic: 'stack' }),
     entry({ id: 'mem_a2', content: '后端服务是 Go 写的', topic: 'stack' }),

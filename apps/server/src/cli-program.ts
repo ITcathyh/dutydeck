@@ -1,3 +1,4 @@
+import type { MemoryManagementCliInput } from './memory-management-cli.js';
 import { registerBusinessToolCli } from './plugins/tool-cli.js';
 import { registerPluginResultCli } from './plugins/result-cli.js';
 import { workbenchHelp, layeredWorkbenchHelp, collaborationHelp, groupToolsHelp, memoryToolsHelp, herdrHelp } from './agent-tool-help.js';
@@ -210,6 +211,7 @@ export interface SessionNamesCommandOptions {
 export type SettingsCommandInput = Omit<SettingsCliInput, 'appSecret' | 'apiKey'> & { appSecretFd?: string; apiKeyFd?: string };
 
 export interface CliHandlers {
+  backup?(operation: 'create' | 'inspect' | 'restore', options: { database?: string; dataDir?: string; output?: string; archive?: string; target?: string }): void | Promise<void>;
   plugin?(action: PluginCliAction, args: string[], options: PluginCliOptions): void | Promise<void>;
   recovery?(operation: RecoveryOperation, sessionId: string, options: RecoveryCliOptions): void | Promise<void>;
   collaborate?(operation: string, id: string | undefined, options: { json?: string; file?: string; turn?: string }): void | Promise<void>;
@@ -259,6 +261,7 @@ export interface CliHandlers {
   groupTeamSearch?(query: string): void | Promise<void>;
   historyList?(options: AgentGroupCliOptions): void | Promise<void>;
   historyShow?(taskId: string, options?: HistoryShowCliOptions): void | Promise<void>;
+  memoryManagement?(operation: string, id: string | undefined, input: MemoryManagementCliInput): void | Promise<void>;
   memoryList?(options?: { topic?: string }): void | Promise<void>;
   memoryShow?(topic: string): void | Promise<void>;
   memorySearch?(query: string, options?: { topic?: string; limit?: string }): void | Promise<void>;
@@ -673,7 +676,20 @@ Routing guidance:
     .addHelpText('after', `\nCommands:\n${agentCommandHelp()}`)
     .action((command, options) => handlers.agentCommand?.(command, options));
 
-  const memory = program.command('memory').description('Read and maintain the long-term memory of the current Lark chat').addHelpText('after', memoryToolsHelp());
+  const memory = program.command('memory').description('Read chat memory or explicitly manage chat and project memory').addHelpText('after', memoryToolsHelp());
+  memory.command('manage <operation> [id]')
+    .description('Installation admin: pool-list/revise/remove and project-list/create/show/enable/binding/bind/unbind/add/revise/remove (prefix pool- or project-)')
+    .option('--session <id>', 'Explicit session ID; never inferred from cwd')
+    .option('--project <id>', 'Explicit project memory ID')
+    .option('--name <name>', 'Project name')
+    .option('--content <text>', 'Replacement or new memory text')
+    .option('--topic <slug>', 'Memory topic')
+    .option('--expected-fingerprint <hash>', 'Fingerprint returned by pool-list or project-show')
+    .option('--query <text>', 'Search within the selected scope')
+    .option('--enabled <boolean>', 'true or false; affects subsequent turns')
+    .option('--url <url>', 'Exact local runtime URL (requires --database)')
+    .option('--database <path>', 'Exact runtime database identity')
+    .action((operation, id, options, command) => handlers.memoryManagement?.(operation, id, { ...options, ...localRuntimeOptionsFrom(options, command) }));
   memory.command('list')
     .description('List the memories saved for this chat, with their ids')
     .option('--topic <slug>', 'Filter memories by topic slug')
@@ -761,6 +777,11 @@ Examples:
     .option('--cron <expression>', 'Five-field cron expression, Asia/Shanghai time')
     .option('--at <local-time>', 'Run once at YYYY-MM-DDTHH:mm, Asia/Shanghai time')
     .action(options => handlers.scheduleRequest?.(options));
+  withTarget(settings.command('explain').description('Explain saved configuration, current session and recorded task/attempt evidence (read-only)'))
+    .requiredOption('--session <id>', 'Session to explain')
+    .option('--task <id>', 'Accepted task snapshot and tool action evidence')
+    .option('--attempt <id>', 'Specific attempt of --task; defaults to its current attempt')
+    .action((_options, command) => { const options = command.optsWithGlobals(); return runSettings('configuration-explain', command, { sessionId: options.session, taskId: options.task, attemptId: options.attempt }); });
   withTarget(settings.command('instances').description('List peer instances that --instance can reach'))
     .action((_options, command) => runSettings('instances', command));
   withTarget(settings.command('agents').description('List the Agents that bot and group settings can select'))
@@ -1038,6 +1059,20 @@ Examples:
     .option('--force', 'Skip waiting for running tasks and restart immediately')
     .option('--drain-timeout <seconds>', 'Maximum seconds to wait for running tasks before aborting restart (default: 900)')
     .action(options => handlers.update?.(options));
+
+  const backup = program.command('backup').description('Offline portable backups and quarantined restore into a new directory; external credential files are excluded; the full database may contain authentication tokens, signing keys and private content');
+  backup.command('create').description('Require stopped database users; snapshot database and locked plugin files')
+    .option('--database <file>', 'Explicit source SQLite database; required, no environment or daemon lookup')
+    .requiredOption('--data-dir <directory>', 'Explicit source data directory containing this database')
+    .requiredOption('--output <directory>', 'New private backup directory outside the source')
+    .action((options, command) => handlers.backup?.('create', { ...options, ...databaseOptionsFrom(options, command) }));
+  backup.command('inspect').description('Read-only format, hash, schema and SQLite checks; list missing external dependencies')
+    .requiredOption('--archive <directory>', 'Backup directory')
+    .action(options => handlers.backup?.('inspect', options));
+  backup.command('restore').description('Validate in staging and restore to a new quarantined directory; never starts tasks')
+    .requiredOption('--archive <directory>', 'Backup directory')
+    .requiredOption('--target <directory>', 'New target directory; existing targets are rejected')
+    .action(options => handlers.backup?.('restore', options));
 
   const deploy = program.command('deploy')
     .description('Deploy a built checkout as a versioned release: drain, switch releases/current, restart, health-check, and roll back only if the database schema is unchanged (never restore an old database snapshot)')
