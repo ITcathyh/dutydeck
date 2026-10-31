@@ -63,15 +63,19 @@ tmuxDescribe('restart drain with native background work in isolated tmux', () =>
     await runtime.initialize([agent]);
     const session = await runtime.start({ agentId: agent.id });
     if (process.platform === 'linux') {
-      // Match the real Claude PID-state contract: only a birth-verified, durably recorded native source permits idle retirement.
-      const pid = Number(execFileSync('tmux', ['display-message', '-p', '-t', name, '#{pane_pid}'], { encoding: 'utf8' }).trim());
+      // Idle retirement on Linux needs the CLI's native PID state; the managed shell stands in for Claude with its real identity.
+      const pid = driver.processIds()[0]!, nativeSessionId = pinnedSessionUuid(session.id);
       mkdirSync(join(cwd, 'sessions'), { recursive: true });
-      writeFileSync(join(cwd, 'sessions', `${pid}.json`), JSON.stringify({ pid, procStart: childProcessIdentity(pid).start, sessionId: pinnedSessionUuid(session.id), cwd: realpathSync(cwd) }));
+      writeFileSync(join(cwd, 'sessions', `${pid}.json`), JSON.stringify({ pid, procStart: childProcessIdentity(pid).start, sessionId: nativeSessionId, cwd: realpathSync(cwd) }));
+      // The real gate passes only after the runtime has persisted and confirmed this native source.
+      await vi.waitFor(async () => expect(await driver.prepareForIdleRetirement()).toBe(true), { timeout: 10_000 });
+      expect(repos.insight.listSources(session.id).some(source => source.proofKind === 'launch_observed'
+        && source.nativeSessionId === nativeSessionId && source.identityProof?.startsWith('pty-claude-process-v1:'))).toBe(true);
     }
     const task = await runtime.dispatch(session.id, 'Launch independent background work');
-    await vi.waitFor(() => expect(existsSync(pidPath)).toBe(true));
-    return { runtime, session, task, prompts, driver, name,
-      pid: Number(readFileSync(pidPath, 'utf8').trim()),
+    await vi.waitFor(() => expect(Number(readFileSync(pidPath, 'utf8').trim())).toBeGreaterThan(0));
+    const backgroundPid = Number(readFileSync(pidPath, 'utf8').trim()), backgroundIdentity = childProcessIdentity(backgroundPid);
+    return { runtime, session, task, prompts, driver, name, pid: backgroundPid,
       async completeMain() {
         append([{ type: 'assistant', uuid: 'answer', message: { role: 'assistant', content: [{ type: 'text', text: 'launched' }], stop_reason: 'end_turn' } },
           { type: 'system', subtype: 'turn_duration', uuid: 'terminal' }]);
@@ -83,12 +87,12 @@ tmuxDescribe('restart drain with native background work in isolated tmux', () =>
       async completeBackground() {
         writeFileSync(finish, 'done');
         await vi.waitFor(() => expect(existsSync(finished)).toBe(true));
+        // The shell writes finished before it exits; Claude reports completion only after the process has exited.
+        // The idle pane shell reaps it only at its next prompt, so a zombie has exited too.
+        await vi.waitFor(() => expect(observeProcess(backgroundIdentity) === 'dead'
+          || execFileSync('ps', ['-o', 'stat=', '-p', String(backgroundPid)], { encoding: 'utf8' }).trim().startsWith('Z')).toBe(true));
         append([{ type: 'queue-operation', operation: 'enqueue', content: '<task-notification>\n<task-id>background-task</task-id>\n<tool-use-id>background-call</tool-use-id>\n<status>completed</status>\n</task-notification>' }]);
         await vi.waitFor(() => expect(driver.hasBackgroundWork()).toBe(false));
-        if (process.platform === 'linux') await vi.waitFor(() => {
-          expect(repos.insight.listSources(session.id).some(source => source.nativeSessionId === pinnedSessionUuid(session.id)
-            && source.identityProof?.startsWith('pty-claude-process-v1:'))).toBe(true);
-        }, { timeout: 7_000 });
       },
     };
   }

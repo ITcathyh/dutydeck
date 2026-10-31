@@ -700,6 +700,58 @@ describe('dutydeck deploy', () => {
     ]);
   }, 60_000);
 
+  it.each([
+    ['复核发现备份期间开始的任务', 1, false],
+    ['重叠的定时续租失败', 0, true]
+  ] as const)('定时续租与复核续租重叠（%s）：两次续租都返回后才退出排空，之后不再续租', async (_case, runningTasks, timerFails) => {
+    const first = await runDeploy({ source, runtime: bot }, deps());
+    nextCommit(source);
+    let phase = 'drain';
+    const events: string[] = [];
+    // 备份末尾到点的定时续租慢 200 ms；备份随即结束，复核续租立即返回，两次续租重叠。
+    const fetcher = (async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      if (path === '/api/system/activity') {
+        events.push(`activity ${phase}`);
+        return Response.json({ runningTasks: phase === 'after-backup' ? runningTasks : 0 });
+      }
+      if (path !== '/api/system/drain') return await fetch(url, init);
+      const draining = JSON.parse(String(init?.body)).draining;
+      const kind = !draining ? 'release' : phase === 'drain' ? 'hold' : phase === 'backup' ? 'timer' : 'renew';
+      events.push(`send ${kind}`);
+      if (kind === 'timer') await new Promise(resolve => setTimeout(resolve, 200));
+      events.push(`done ${kind}`);
+      return kind === 'timer' && timerFails ? new Response('renewal unavailable', { status: 503 }) : Response.json({ draining });
+    }) as typeof fetch;
+    let settled: string[] = [];
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const result = await runDeploy({ source, runtime: bot }, deps({
+        fetch: fetcher,
+        backupDatabase: async () => {
+          phase = 'backup';
+          vi.advanceTimersByTime(DRAIN_INTERVAL_MS);
+          await new Promise(resolve => setTimeout(resolve, 20));
+          phase = 'after-backup';
+        }
+      }));
+      expect(result).toMatchObject({ ok: false, status: 'failed' });
+      expect(result.error).toContain(timerFails ? '续租' : '1 个任务');
+      settled = [...events];
+      vi.advanceTimersByTime(3 * DRAIN_INTERVAL_MS);
+      await new Promise(resolve => setTimeout(resolve, 250));
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(realpathSync(join(releases, 'current'))).toBe(first.release);
+    expect(service.ran).toEqual([first.release]);
+    expect(settled).toEqual([
+      'send hold', 'done hold', 'activity drain', 'send timer', 'send renew', 'done renew', 'done timer',
+      ...(timerFails ? [] : ['activity after-backup']), 'send release', 'done release'
+    ]);
+    expect(events).toEqual(settled);
+  }, 60_000);
+
   it('新版本执行排队任务并迁移后健康失败：保留执行事实、停止服务且不切回旧版', async () => {
     const initial = new Database(database);
     initial.exec("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT);");

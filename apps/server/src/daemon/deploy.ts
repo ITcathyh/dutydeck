@@ -584,23 +584,33 @@ function updateDeploymentFile(target: DeployTarget, release: string, commit: str
  * 排空成功后每 DRAIN_INTERVAL_MS 续一次租约，直到旧进程退出或调用返回的 stop：备份（Tag 库备份可能超过
  * 60 秒的租约）、切换、重启期间旧进程都不会开始执行排队的任务。旧进程一退出就不再续，免得续到新进程上。
  * failure 返回第一次续租失败的原因：租约可能已到期、旧进程已恢复执行排队任务，调用方据此放弃重启。
+ * renew 立即续一次，等所有已发出的续租（含与它重叠的定时续租）返回后返回 failure。
+ * stop 之后不再发起续租，并等所有已发出的续租返回：调用方随后退出排空，迟到的续租不会把旧服务重新暂停。
  */
-function keepDraining(drain: DrainResult, pid: number | undefined): { stop: () => Promise<void>; failure: () => string | undefined } {
+function keepDraining(drain: DrainResult, pid: number | undefined): { stop: () => Promise<void>; failure: () => string | undefined; renew: () => Promise<string | undefined> } {
   const renew = drain.ok ? drain.renew : undefined;
-  if (!renew || pid === undefined) return { stop: async () => {}, failure: () => undefined };
-  let renewal: Promise<void> | undefined;
+  if (!renew || pid === undefined) return { stop: async () => {}, failure: () => undefined, renew: async () => undefined };
+  const renewals = new Set<Promise<void>>();
+  let stopped = false;
   let failure: string | undefined;
+  const renewNow = () => {
+    if (stopped) return;
+    const renewal = renew().then(error => { failure ??= error; }).finally(() => renewals.delete(renewal));
+    renewals.add(renewal);
+  };
   const timer = setInterval(() => {
-    if (pidAlive(pid)) renewal = renew().then(error => { failure ??= error; });
+    if (pidAlive(pid)) renewNow();
     else clearInterval(timer);
   }, DRAIN_INTERVAL_MS);
   timer.unref();
   return {
     stop: async () => {
+      stopped = true;
       clearInterval(timer);
-      await renewal;
+      await Promise.all(renewals);
     },
-    failure: () => failure
+    failure: () => failure,
+    renew: async () => { renewNow(); await Promise.all(renewals); return failure; }
   };
 }
 
@@ -608,9 +618,9 @@ function keepDraining(drain: DrainResult, pid: number | undefined): { stop: () =
  * 备份等步骤结束、停旧进程前复核排空：期间续租失败过就不重启；否则再续一次，确保此刻起不会开始新任务，
  * 再按排空时的口径查任务数，仍有任务（例如租约失效期间开始的）也不重启。返回不能重启的原因。
  */
-async function confirmDrained(drain: DrainResult, renewing: { failure: () => string | undefined }): Promise<string | undefined> {
+async function confirmDrained(drain: DrainResult, renewing: ReturnType<typeof keepDraining>): Promise<string | undefined> {
   if (!drain.ok) return undefined;
-  const failure = renewing.failure() ?? await drain.renew?.();
+  const failure = renewing.failure() ?? await renewing.renew();
   if (failure) return `排空续租失败（${failure}），旧服务可能已在租约到期后开始执行排队任务，没有切换版本，旧服务继续运行；确认服务正常后重新部署。`;
   const current = await drain.queryRunningTasks?.();
   if (!current) return undefined;
@@ -754,7 +764,7 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
 
   // 部署被 Ctrl-C、kill 或 ssh 断开打断时：写失败清单、停续租并退出排空，旧进程立即恢复接单，不等租约到期。
   let drain: DrainResult = { ok: true };
-  let stopRenewing = async () => {};
+  let renewing: ReturnType<typeof keepDraining> = { stop: async () => {}, failure: () => undefined, renew: async () => undefined };
   let released = false;
   const releaseDrain = async () => {
     if (released || !drain.ok) return;
@@ -765,7 +775,7 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
   let abortedBy: NodeJS.Signals | undefined;
   let aborting: Promise<never> | undefined;
   const exitAborted = (signal: NodeJS.Signals): Promise<never> => aborting ??= (async () => {
-    await stopRenewing();
+    await renewing.stop();
     await releaseDrain();
     process.exit(128 + osConstants.signals[signal]);
   })();
@@ -817,8 +827,7 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
       await haltIfAborted();
       if (!drain.ok) return finish('failed', { error: drain.error });
     }
-    const renewing = keepDraining(drain, previousPid);
-    stopRenewing = renewing.stop;
+    renewing = keepDraining(drain, previousPid);
     const database = target.endpoint.database;
     if (database && existsSync(database)) {
       const backup = join(record, basename(database));
@@ -830,21 +839,22 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
         manifest.schema_version_before = schema?.version ?? null;
         manifest.schema_fingerprint_before = schema?.fingerprint ?? null;
       } catch (error) {
-        await stopRenewing();
+        await renewing.stop();
         await releaseDrain();
         return finish('failed', { error: `备份数据库失败，没有切换版本：${message(error)}` });
       }
     }
 
     if (await service.mainPid() !== previousPid) {
-      await stopRenewing();
+      await renewing.stop();
       await releaseDrain();
       return finish('failed', { error: '排空或备份期间目标主进程已变化，没有切换版本；重新执行部署以核实它的运行版本。' });
     }
+    // 备份期间被打断的，不再复核续租：退出排空后又续上，旧服务就得等租约到期才恢复接单。
     await haltIfAborted();
     const notDrained = await confirmDrained(drain, renewing);
     if (notDrained) {
-      await stopRenewing();
+      await renewing.stop();
       await releaseDrain();
       return finish('failed', { error: notDrained });
     }
@@ -854,7 +864,7 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
     info(`切换 current → ${id}，重启 ${target.unit}`);
     pointCurrent(target.releases, release);
     const started = await restartAndCheck(service, previousPid, target.endpoint.address, deps);
-    await stopRenewing();
+    await renewing.stop();
     if (started.ok) {
       info(`健康检查通过（pid ${started.pid}）`);
       updateDeploymentFile(target, release, build.commit, manifestPath, now());
@@ -901,7 +911,7 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
   } finally {
     for (const signal of ABORT_SIGNALS) process.off(signal, onSignal);
     if (!abortedBy && manifest.status !== 'deployed') {
-      await stopRenewing();
+      await renewing.stop();
       await releaseDrain();
     }
   }

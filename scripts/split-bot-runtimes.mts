@@ -113,6 +113,32 @@ export function inspect(db: DatabaseSync, database: string) {
     const k = r.key as string, value = parse(r.value);
     if (sharedConfigs.has(k)) return shards;
     if (k === 'lark.bots') return shards;
+    const idleTerminal = k.match(/^runtime_idle_terminal:([^:/]+)$/);
+    if (idleTerminal && value && typeof value.runId === 'string' && typeof value.resourceId === 'string' && typeof value.identityId === 'string'
+        && value.options && typeof value.options === 'object' && !Array.isArray(value.options) && value.identity && typeof value.identity === 'object' && !Array.isArray(value.identity)) {
+      const owner = ownerForSession(idleTerminal[1]!);
+      if (references.get('driver_resources')?.get(value.resourceId) !== idleTerminal[1]) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
+      return [owner];
+    }
+    const workspaceNotice = k.match(/^runtime_notice:workspace_blocked:([^:/]+)$/);
+    if (workspaceNotice) {
+      const owner = ownerForSession(workspaceNotice[1]!);
+      if (references.get('tasks')?.get(r.value) !== workspaceNotice[1]) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
+      return [owner];
+    }
+    const attemptNotice = k.match(/^runtime_notice:unknown_task_(?:overdue|abandoned):([^:/]+)$/);
+    if (attemptNotice && r.value === 'sent') {
+      const sessionId = references.get('task_attempts')?.get(attemptNotice[1]!);
+      if (sessionId) return [ownerForSession(sessionId)];
+    }
+    const overdue = k.match(/^session_automation\/overdue\/([^/]+)$/);
+    if (overdue && value?.version === 1 && ['sending', 'sent', 'error'].includes(value.status) && Number.isInteger(value.attempts) && value.attempts > 0
+        && typeof value.updatedAt === 'string' && (value.nextAttemptAt === undefined || typeof value.nextAttemptAt === 'string')
+        && Object.keys(value).every(key => ['version', 'status', 'attempts', 'updatedAt', 'nextAttemptAt'].includes(key))) {
+      const key = `session_automation/occurrence/${overdue[1]}`;
+      // The notice has no session ID; reuse the occurrence's full ownership checks.
+      if (config.has(key)) return resolveConfig({ key, value: config.get(key) });
+    }
     const sessionMatch = k.match(/^(?:runtime_(?:workspace|execution_workspace|native_context|driver_stop_block|driver_configuration|pty_retirement|verification):|legacy_retirement:|lark\.(?:run-context|memory\.turns)\.)([^:.]+)/);
     if (sessionMatch) {
       const owner = ownerForSession(sessionMatch[1]!);

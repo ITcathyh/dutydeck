@@ -3,9 +3,9 @@ import { parseEnv } from 'node:util';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, readFileSync, rmSync, existsSync, statSync, readdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createRepositories } from '../packages/storage/src/index.js';
 import { currentProcessIdentity } from '../packages/storage/src/process-identity.js';
 import { DutydeckRuntime } from '../packages/agent-runtime/src/index.js';
@@ -78,7 +78,111 @@ async function independentSchedules(f: Awaited<ReturnType<typeof fixture>>) {
   return records;
 }
 
+/** Runtime and schedule notices in the formats written by packages/agent-runtime/src/index.ts and apps/server/src/session-automation.ts. */
+async function upstreamNotices(f: Awaited<ReturnType<typeof fixture>>) {
+  const repos=createRepositories(f.database),time='2026-10-26T00:00:00.000Z';
+  let claim=repos.control.attachRuntime('upstream-notices'),x=repos.execution.bind(claim);
+  const states:Array<{sessionId:string;runId:string;owner:string;attemptId:string;queuedTaskId:string;resourceId:string;revision:number;identityId:string}>=[];
+  try {
+    for(const [origin,owner] of [['a','cli_aaa'],['b','cli_bbb']] as const){
+      const fence={sessionId:'term_'+origin,runId:'run_term_'+origin},cwd=join(dirname(f.database),'repo_'+origin);mkdirSync(cwd);
+      x.createSession({id:fence.sessionId,runId:fence.runId,agentId:'agent',state:'idle',cwd,source:'lark',sourceId:owner+':chat:term',createdAt:time,updatedAt:time});
+      const accept=(key:string)=>{
+        const request={version:1 as const,namespace:'runtime' as const,sessionId:fence.sessionId,key,prompt:key,mode:'queue' as const,actor:{kind:'channel' as const,id:'ou_'+origin,appId:owner},skills:[],options:{},sources:[],sourcePayload:null};
+        const content={version:2 as const,prompt:key,executionOptions:{permissionMode:'ask' as const},executionContext:{agentPrompt:key,actorId:'ou_'+origin},contentSources:[]};
+        return x.acceptTask(fence,request,{...content,digest:createHash('sha256').update(canonicalExecutionJson(content)).digest('hex')},'back').task!;
+      };
+      accept('settled-'+origin);
+      const attempt=x.claimNext(fence)!.attempt!;
+      x.settleAttempt({...fence,taskId:attempt.taskId,attemptId:attempt.attemptId,expectedRevision:attempt.revision},'settle-'+origin,{kind:'not_submitted',outcome:'failed',reason:'fixture'});
+      const queued=accept('queued-'+origin),identityId='pty_identity_'+origin;
+      let r=x.beforeCreate(fence,{resourceId:'pty_'+origin,kind:'local_only'});
+      r=x.spawned(fence,r.resourceId,r.revision,{identityId,kind:'local_only',locator:{owner:'runtime-adapter'}});
+      r=x.creationFinished(fence,r.resourceId,r.revision,'created');
+      await repos.config.set('runtime_idle_terminal:'+fence.sessionId,canonicalExecutionJson({runId:fence.runId,resourceId:r.resourceId,identityId,
+        options:{permissionMode:'full-trust'},identity:{kind:'tmux',socket:'/tmp/tmux-'+origin,session:'dd-'+origin,pane:'%1'}}));
+      await repos.config.set('runtime_notice:workspace_blocked:'+fence.sessionId,queued.id);
+      for(const kind of ['overdue','abandoned']) await repos.config.set('runtime_notice:unknown_task_'+kind+':'+attempt.attemptId,'sent');
+      states.push({...fence,owner,attemptId:attempt.attemptId,queuedTaskId:queued.id,resourceId:r.resourceId,revision:r.revision,identityId});
+    }
+    // The terminal later exits; its idle receipt has no delete path and stays behind.
+    claim.release();claim=repos.control.attachRuntime('upstream-observer');x=repos.execution.bind(claim);
+    for(const state of states)x.observeDetachedLocalResource({sessionId:state.sessionId,runId:state.runId},state.resourceId,state.revision,{observationId:'gone-'+state.sessionId,state:'gone',identityId:state.identityId,evidenceRef:'pty-absent:fixture',observedAt:time});
+  } finally {claim.release();repos.close();}
+  return states;
+}
+
 describe('offline bot partitions', () => {
+  it('preserves terminal receipts and task and schedule notices only in their entity owner partition', async () => {
+    const f=await fixture(false),states=await upstreamNotices(f),schedules=await independentSchedules(f);
+    use(f.database,db=>{
+      for(const [index,record] of schedules.entries()) db.prepare('INSERT INTO configs VALUES (?,?)').run('session_automation/overdue/occ-'+record.origin,
+        JSON.stringify({version:1,status:['sending','sent','error'][index],attempts:index+1,updatedAt:'2026-10-26T00:00:00.000Z',...(index===2?{nextAttemptAt:'2026-10-26T00:01:00.000Z'}:{})}));
+    });
+    const repos=createRepositories(f.database),claim=repos.control.attachRuntime('notice-name-collision'),x=repos.execution.bind(claim);
+    try {
+      for(const state of states)for(const id of [state.attemptId,'occ-'+(state.owner==='cli_aaa'?'a':'b')])
+        x.createSession({id,runId:'collision_'+id,agentId:'agent',cwd:'/tmp',state:'idle',source:'lark',sourceId:(state.owner==='cli_aaa'?'cli_bbb':'cli_aaa')+':chat:collision',createdAt:'2026-10-26T00:00:00.000Z',updatedAt:'2026-10-26T00:00:00.000Z'});
+    } finally {claim.release();repos.close();}
+    const snapshot=()=>use(f.database,db=>Object.fromEntries(['sessions','tasks','task_attempts','driver_resources','configs'].map(table=>[table,
+      db.prepare('SELECT * FROM '+table+(table==='configs'?" WHERE key!='dutydeck.bot_process_migration'":'')+' ORDER BY 1').all()])));
+    const original=snapshot(),hash=createHash('sha256').update(readFileSync(f.database)).digest('hex');
+    const keys=new Map<string,string>();
+    for(const state of states){
+      keys.set('runtime_idle_terminal:'+state.sessionId,state.owner);
+      keys.set('runtime_notice:workspace_blocked:'+state.sessionId,state.owner);
+      for(const kind of ['overdue','abandoned']) keys.set('runtime_notice:unknown_task_'+kind+':'+state.attemptId,state.owner);
+    }
+    for(const record of schedules)keys.set('session_automation/overdue/occ-'+record.origin,record.owner);
+    expect(split(f).blockers).toEqual([]);
+    expect(createHash('sha256').update(readFileSync(f.database)).digest('hex')).toBe(hash);
+    expect(existsSync(f.output)).toBe(false);
+    expect(split({...f,apply:true}).blockers).toEqual([]);
+    expect(snapshot()).toEqual(original);
+    for(const shard of ['cli_aaa','cli_bbb','web'])use(join(f.output,shard,'dutydeck.db'),db=>{
+      for(const [key,owner] of keys)expect(db.prepare('SELECT value FROM configs WHERE key=?').get(key)?.value)
+        .toBe(owner===shard?(original.configs as Array<{key:string;value:string}>).find(row=>row.key===key)!.value:undefined);
+      expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    });
+  });
+
+  it.each(['idle-orphan','idle-malformed','idle-cross-bot-resource','workspace-orphan','workspace-cross-bot-task','workspace-malformed',
+    'attempt-orphan','attempt-malformed','attempt-unknown-kind','attempt-extra-suffix','overdue-orphan','overdue-malformed','overdue-extra-suffix','overdue-cross-bot'])
+  ('refuses malformed, orphan or contradictory upstream notice evidence: %s',async mode=>{
+    const f=await fixture(false),states=await upstreamNotices(f);await independentSchedules(f);
+    expect(split(f).blockers).toEqual([]);
+    use(f.database,db=>{
+      let key='',value='';
+      const first=states[0]!,other=states[1]!;
+      if(mode.startsWith('idle')){
+        key='runtime_idle_terminal:'+(mode==='idle-orphan'?'missing':first.sessionId);
+        const receipt=JSON.parse(db.prepare('SELECT value FROM configs WHERE key=?').get('runtime_idle_terminal:'+first.sessionId)!.value as string);
+        if(mode==='idle-cross-bot-resource')receipt.resourceId=other.resourceId;
+        value=mode==='idle-malformed'?'{}':JSON.stringify(receipt);
+      } else if(mode.startsWith('workspace')){
+        key='runtime_notice:workspace_blocked:'+(mode==='workspace-orphan'?'missing':first.sessionId);
+        value=mode==='workspace-cross-bot-task'?other.queuedTaskId:mode==='workspace-malformed'?'{}':first.queuedTaskId;
+      } else if(mode.startsWith('attempt')){
+        key='runtime_notice:unknown_task_'+(mode==='attempt-unknown-kind'?'future':'overdue')+':'+(mode==='attempt-orphan'?'missing':first.attemptId)+(mode==='attempt-extra-suffix'?':extra':'');
+        value=mode==='attempt-malformed'?'{}':'sent';
+      } else {
+        key='session_automation/overdue/'+(mode==='overdue-orphan'?'missing':'occ-a')+(mode==='overdue-extra-suffix'?'/extra':'');
+        value=JSON.stringify(mode==='overdue-malformed'?{version:1,status:'future',attempts:1,updatedAt:'now'}:{version:1,status:'sent',attempts:1,updatedAt:'2026-10-26T00:00:00.000Z'});
+        if(mode==='overdue-cross-bot'){
+          const occurrence=JSON.parse(db.prepare("SELECT value FROM configs WHERE key='session_automation/occurrence/occ-a'").get()!.value as string);
+          occurrence.sessionId='b';
+          db.prepare("UPDATE configs SET value=? WHERE key='session_automation/occurrence/occ-a'").run(JSON.stringify(occurrence));
+        }
+      }
+      db.prepare('INSERT OR REPLACE INTO configs VALUES (?,?)').run(key,value);
+    });
+    const hash=createHash('sha256').update(readFileSync(f.database)).digest('hex');
+    expect(split(f).blockers.length).toBeGreaterThan(0);
+    expect(()=>split({...f,apply:true})).toThrow('MIGRATION_BLOCKED');
+    expect(existsSync(f.output)).toBe(false);
+    expect(createHash('sha256').update(readFileSync(f.database)).digest('hex')).toBe(hash);
+  });
+
   it('partitions real execution workspace identities and independent schedule state with their frozen origins', async()=>{
     const f=await fixture(false),records=await independentSchedules(f);
     const originals=use(f.database,db=>new Map(db.prepare('SELECT key,value FROM configs').all().map(row=>[row.key,row.value])));
