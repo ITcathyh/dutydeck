@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode, type RefObject } from 'react';
+import { useEffect, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { useDialogFocus } from '../../useDialogFocus';
 import { useEscapeKey } from '../../useEscapeKey';
@@ -43,7 +43,6 @@ const sizeClass: Record<DialogSize, string> = {
 */
 export function Dialog({ open, onClose, label, size = 'md', role = 'dialog', closeOnEscape = true, closeOnScrim = true, initialFocus, children }: DialogProps) {
   const setDialogNode = useDialogFocus(open);
-  const panel = useRef<HTMLDivElement | null>(null);
   useEscapeKey(open && closeOnEscape, onClose);
 
   useEffect(() => {
@@ -64,7 +63,7 @@ export function Dialog({ open, onClose, label, size = 'md', role = 'dialog', clo
       onMouseDown={event => { if (closeOnScrim && event.target === event.currentTarget) onClose(); }}
     >
       <div
-        ref={node => { panel.current = node; setDialogNode(node); }}
+        ref={setDialogNode}
         role={role}
         aria-modal="true"
         aria-label={label}
