@@ -847,6 +847,20 @@ Backups include SQLite primary data, non-secret plugin configuration/bindings/lo
 
 Only external credential files, such as `.env`, local secret-provider files and private-key files, are excluded; credentials inside SQLite are preserved intact. Native CLI sessions, external working directories/worktrees, external services and plugin runtime data are excluded. Missing packages, legacy mutable packages and immutable packages containing symlinks are omitted as whole packages and reported as missing dependencies. Inspection and restore report `status: quarantined`, not a ready-to-run complete instance. Restored data preserves unknown execution outcomes and submission facts; service startup and runtime attachment are blocked, and tasks are never replayed automatically. These commands do not reconnect credentials or remove quarantine. Enabling a restored instance requires separately verified dependencies and authorization.
 
+#### Prune old terminal output (repository maintenance tool)
+
+Run from the repository root after installing dependencies and running `pnpm build:packages`. The default is a read-only preview; the tool does not read `.env` or discover an instance. It does not change database content, schema or application access leases; SQLite may create an empty WAL and shared coordination file:
+
+```bash
+pnpm exec tsx scripts/prune-terminal-events.mts --database /path/to/runtime/dutydeck.db --before 2026-10-01T00:00:00.000Z
+# Review the preview, set COUNT and BYTES to eligibleEvents and eligibleContentBytes, back up and stop the target instance safely:
+pnpm exec tsx scripts/prune-terminal-events.mts --database /path/to/runtime/dutydeck.db --before 2026-10-01T00:00:00.000Z --apply --expect-count "$COUNT" --expect-bytes "$BYTES"
+```
+
+Only `raw_terminal` events older than the fixed cutoff with recorded task and attempt ownership qualify. Sessions must be idle or ended (idle, stopped, interrupted, failed), all tasks and attempts settled, and execution resources safe. Queued work, unresolved steering or queue actions, unverified resources, missing ownership, event references and native deduplication keys protect the affected records. Every session's highest sequence event and all structured events are retained. Pruning makes old terminal logs and screen fallback history incomplete; task results, artifact source events and native CLI transcripts are preserved.
+
+`--apply` rejects active database users and rechecks the preview numbers inside an exclusive maintenance transaction. Failure rolls back; repeating an already pruned range returns zero. The tool never stops or starts services, schedules periodic cleanup or runs `VACUUM`. Reported bytes are event content bytes, not an immediate reduction in database file size.
+
 ### Agent CLI (`dutydeck agent`)
 
 Agents in Lark sessions use `dutydeck agent` for general operations. Every turn, the host supplies a complete command prefix bound to that execution: `<absolute path> agent --turn <credential>`, plus available capabilities. Reuse that prefix without looking up or guessing the current task. Examples below use `$TURN` for the host-provided credential. Controlled exports use the separate `plugin-tool` entry; see [Controlled plugin results](#controlled-plugin-results).

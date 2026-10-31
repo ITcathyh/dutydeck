@@ -5,12 +5,54 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { backupSqlite } from './offline-backup.js';
+import { backupSqlite, withOfflineDatabase } from './offline-backup.js';
+import { createRepositories } from './index.js';
 
 const sqliteModule = createRequire(import.meta.url).resolve('better-sqlite3');
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
 const scratch = () => { const directory = mkdtempSync(join(tmpdir(), "dutydeck-o'backup-")); directories.push(directory); return directory; };
+
+describe('withOfflineDatabase', () => {
+  const source = () => {
+    const path = join(scratch(), 'maintenance.db');
+    createRepositories(path).close();
+    return path;
+  };
+  it('commits callback writes, rolls back a thrown callback, and releases maintenance after both', async () => {
+    const path = source();
+    await withOfflineDatabase(path, async database => { database.prepare('INSERT INTO configs VALUES (?,?)').run('saved', 'yes'); });
+    await expect(withOfflineDatabase(path, async database => {
+      database.prepare('INSERT INTO configs VALUES (?,?)').run('rollback', 'yes');
+      throw new Error('callback failed');
+    })).rejects.toThrow('callback failed');
+    const repos = createRepositories(path);
+    try {
+      expect(await repos.config.get('saved')).toBe('yes');
+      expect(await repos.config.get('rollback')).toBeUndefined();
+      const claim = repos.control.attachRuntime('after-maintenance');
+      claim.release();
+    } finally { repos.close(); }
+  });
+  it('refuses a live runtime, another accessor and an independent SQLite writer', async () => {
+    const path = source();
+    const repos = createRepositories(path);
+    const claim = repos.control.attachRuntime('live-runtime');
+    let called = false;
+    const callback = async () => { called = true; };
+    try {
+      await expect(withOfflineDatabase(path, callback)).rejects.toThrow('DATABASE_RUNTIME_STILL_ATTACHED');
+      claim.release();
+      await expect(withOfflineDatabase(path, callback)).rejects.toThrow('DATABASE_UPGRADE_BUSY');
+    } finally { repos.close(); }
+    const writer = new Database(path);
+    writer.exec('BEGIN IMMEDIATE');
+    try { await expect(withOfflineDatabase(path, callback)).rejects.toThrow(/locked|busy/i); }
+    finally { writer.exec('ROLLBACK'); writer.close(); }
+    expect(called).toBe(false);
+    await withOfflineDatabase(path, async database => { expect(database.pragma('foreign_keys', { simple: true })).toBe(1); });
+  });
+});
 
 describe('backupSqlite', () => {
   it('writes a compact private snapshot that keeps committed WAL data and does not block writers', async () => {
