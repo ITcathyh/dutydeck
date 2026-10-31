@@ -76,6 +76,54 @@ it('rechecks a workspace release that arrives while the rejected claim awaits co
   expect(h.repos.execution.getTaskExecution(queued.id)?.attempts).toHaveLength(1);
   expect(h.sent).toEqual(['original-workspace-turn','after-workspace-release']);expect(h.stopped).toEqual([]);
 });
+it('reports a proven idle sibling consistently with admission in task and session recovery',async()=>{
+  const h=await fixture(),one=await h.runtime.start({agentId:'fixture',cwd:h.cwd});
+  expect((await h.runtime.send(one.id,'completed-sibling')).status).toBe('completed');
+  const two=await h.runtime.start({agentId:'fixture',cwd:h.cwd});
+  h.runtime.setQueueHeld(true);
+  const task=await h.runtime.dispatch(two.id,'after-idle-sibling');
+  expect(await h.runtime.getTaskRecovery(two.id,task.id)).toMatchObject({status:'queued',blockers:[]});
+  expect(await h.runtime.getSessionTaskRecovery(two.id)).toEqual([{taskId:task.id,...await h.runtime.getTaskRecovery(two.id,task.id)}]);
+  expect(h.repos.execution.getTaskExecution(task.id)?.blockers).toContainEqual(expect.objectContaining({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE',sessionId:one.id}));
+  h.runtime.setQueueHeld(false);
+  await vi.waitFor(()=>expect(h.repos.execution.getTaskExecution(task.id)?.task.status).toBe('completed'));
+  expect(h.sent).toEqual(['completed-sibling','after-idle-sibling']);expect(h.stopped).toEqual([]);
+  expect(h.repos.execution.getTaskExecution(task.id)?.attempts).toHaveLength(1);
+});
+it('keeps busy, background and unverified-stop siblings blocked in recovery',async()=>{
+  const h=await fixture(),one=await h.runtime.start({agentId:'fixture',cwd:h.cwd}),two=await h.runtime.start({agentId:'fixture',cwd:h.cwd});
+  const gate=deferred();h.gates.set('busy-sibling',gate);
+  const first=h.runtime.send(one.id,'busy-sibling');
+  await vi.waitFor(()=>expect(h.sent).toEqual(['busy-sibling']));
+  h.runtime.setQueueHeld(true);
+  const task=await h.runtime.dispatch(two.id,'waiting-for-proof');
+  expect((await h.runtime.getTaskRecovery(two.id,task.id)).blockers).toContainEqual({code:'WORKSPACE_EXECUTION_BUSY',external:true});
+  gate.resolve();expect((await first).status).toBe('completed');
+  h.background.add(one.id);
+  expect((await h.runtime.getTaskRecovery(two.id,task.id)).blockers).toContainEqual({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE',external:true});
+  h.background.delete(one.id);
+  h.unproveBackground();
+  expect((await h.runtime.getTaskRecovery(two.id,task.id)).blockers).toContainEqual({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE',external:true});
+  await h.repos.config.set('runtime_driver_stop_block:'+one.id,JSON.stringify({state:'unverified'}));
+  expect((await h.runtime.getTaskRecovery(two.id,task.id)).blockers).toContainEqual({code:'DRIVER_STOP_BLOCKED',external:true});
+  expect((await h.runtime.getSessionTaskRecovery(two.id))[0]?.blockers).toContainEqual({code:'DRIVER_STOP_BLOCKED',external:true});
+  expect(h.sent).toEqual(['busy-sibling']);
+});
+it('does not report later workspace contention as a running or settled task admission blocker',async()=>{
+  const h=await fixture(),one=await h.runtime.start({agentId:'fixture',cwd:h.cwd}),two=await h.runtime.start({agentId:'fixture',cwd:h.cwd});
+  const gate=deferred();h.gates.set('already-admitted',gate);
+  const task=await h.runtime.dispatch(two.id,'already-admitted');
+  await vi.waitFor(()=>expect(h.sent).toEqual(['already-admitted']));
+  h.background.add(one.id);
+  expect(await h.runtime.getTaskRecovery(two.id,task.id)).toMatchObject({status:'running',blockers:[]});
+  gate.resolve();
+  await vi.waitFor(()=>expect(h.repos.execution.getTaskExecution(task.id)?.task.status).toBe('completed'));
+  expect(await h.runtime.getTaskRecovery(two.id,task.id)).toMatchObject({status:'completed',blockers:[]});
+  expect(await h.runtime.getSessionTaskRecovery(two.id)).toEqual([{taskId:task.id,...await h.runtime.getTaskRecovery(two.id,task.id)}]);
+  await h.repos.config.set('runtime_driver_stop_block:'+two.id,JSON.stringify({state:'unverified'}));
+  expect((await h.runtime.getTaskRecovery(two.id,task.id)).blockers).toContainEqual({code:'DRIVER_STOP_BLOCKED'});
+  expect((await h.runtime.getSessionTaskRecovery(two.id))[0]?.blockers).toContainEqual({code:'DRIVER_STOP_BLOCKED'});
+});
 it('keeps a known idle driver with background work blocking and only safely stops an idle adapter lacking background proof on contention', async()=>{
   const h=await fixture(),one=await h.runtime.start({agentId:'fixture',cwd:h.cwd}),two=await h.runtime.start({agentId:'fixture',cwd:h.cwd});
   h.background.add(one.id);

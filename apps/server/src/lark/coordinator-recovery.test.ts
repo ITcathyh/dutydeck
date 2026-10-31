@@ -1314,6 +1314,53 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
 });
 
 describe('实时静默轮次仍交付恢复异常', () => {
+  it.each(['running', 'completed'] as const)('updates the same notice when a silent queued turn becomes %s during its send', async nextStatus => {
+    const repos = createRepositories(':memory:');
+    const h = persistentRuntime();
+    let listener: ((event: any) => void) | undefined;
+    const runtime = {
+      ...h.runtime,
+      getEvents: vi.fn(async () => []),
+      getTaskRecovery: vi.fn(async (id: string) => {
+        const task = h.tasks.get(id)?.[0];
+        return { status: task?.status, blockers: task?.status === 'queued' ? [{ code: 'DRIVER_STOP_BLOCKED' }] : [] };
+      }),
+      subscribe: vi.fn((_id: string, callback: (event: any) => void) => { listener = callback; return () => { listener = undefined; }; }),
+      dispatch: vi.fn(async (id: string) => {
+        const task = runtimeTask({ id: 'blocked_task', sessionId: id, status: 'queued' });
+        h.tasks.set(id, [task]);
+        return { ...task, queuedAhead: 0 };
+      })
+    };
+    const service = cardService();
+    service.send.mockImplementation(async input => {
+      if (input.taskName === '任务恢复提醒') {
+        const task = h.tasks.get('ses_1')![0]!;
+        task.status = nextStatus;
+        listener?.({ type: 'task', data: { task: { ...task } } });
+        return { messageId: 'om_notice' };
+      }
+      return { messageId: 'om_result' };
+    });
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot',
+      undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
+    try {
+      const silentConfig = { ...config, silentProgress: true };
+      await repos.config.set(larkBotsConfigKey, JSON.stringify([silentConfig]));
+      await coordinator.handle(dm('om_live_race', '执行任务'), silentConfig);
+      await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_notice', state: nextStatus })), { timeout: 3000 });
+      expect(service.send.mock.calls.filter(([input]) => input.taskName === '任务恢复提醒')).toHaveLength(1);
+      expect(service.send.mock.calls.filter(([input]) => input.cardKind === 'process')).toHaveLength(0);
+      expect(JSON.stringify(service.update.mock.calls)).not.toContain('不会自动开始');
+      const mapping = (await repos.channelMappings.list('lark-card:cli_test'))[0]!;
+      expect(JSON.parse(mapping.extra!)).not.toHaveProperty('card_message_id');
+      if (nextStatus === 'completed') await vi.waitFor(async () => {
+        const saved = (await repos.channelMappings.list('lark-card:cli_test'))[0]!;
+        expect(JSON.parse(saved.extra!)).toMatchObject({ state: 'completed', final_message_id: 'om_result', final_delivery_state: 'delivered' });
+      });
+    } finally { coordinator.stop(); repos.close(); }
+  });
+
   it('uses a separate durable receipt for buffered recovery events without marking final delivery', async () => {
     const repos = createRepositories(':memory:');
     const h = persistentRuntime();

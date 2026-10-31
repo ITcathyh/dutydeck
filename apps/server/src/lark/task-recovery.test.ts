@@ -6,6 +6,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { describeLarkTaskRecovery, notifyLarkTaskRecovery, notifyLarkUnknownTask, urgeLarkUnknownTask, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import { LarkUrgentManager } from './workflow-urgent.js';
+import { createLarkCardService } from './service.js';
+
+const recoveryRuntime = (status = 'reconcile_required', code = 'DRIVER_RESOURCE_UNSAFE') => ({
+  getTaskRecovery: vi.fn(async () => ({ status, blockers: code ? [{ code }] : [] }))
+}) as any;
 
 describe('durable task recovery notices', () => {
   it('retries a lost reply acknowledgement after reopening SQLite using the same destination, UUID and frozen payload', async () => {
@@ -19,19 +24,21 @@ describe('durable task recovery notices', () => {
       if (loseAcknowledgement) { loseAcknowledgement = false; throw new Error('lost acknowledgement'); }
       return { messageId: accepted.get(input.idempotencyKey)! };
     });
-    const service = { reply, send: vi.fn() } as any;
-    const input = { service, log: { warn: vi.fn() }, appId: 'app', sessionId: 'session', taskId: 'task', turn: 1,
-      target: { chatId: 'chat', replyMessageId: 'om_original', replyInThread: true },
-      recovery: { blocked: true, label: '需要核对', markdown: '原进程状态待核对' } };
+    const service = { reply, send: vi.fn(), update: vi.fn(async () => ({ messageId: 'om_recovery' })) } as any;
+    const runtime = recoveryRuntime();
+    const input = { runtime, status: 'reconcile_required', service, log: { warn: vi.fn() }, appId: 'app', sessionId: 'session', taskId: 'task', turn: 1,
+      target: { chatId: 'chat', replyMessageId: 'om_original', replyInThread: true } };
     try {
       await expect(notifyLarkTaskRecovery({ ...input, store: repos.config })).rejects.toThrow('lost acknowledgement');
       expect(service.send).not.toHaveBeenCalled();
       repos.close(); repos = createRepositories(filename);
-      await Promise.all([1, 2, 3].map(() => notifyLarkTaskRecovery({ ...input, store: repos.config,
-        recovery: { ...input.recovery, markdown: '检查状态已变化' } })));
+      runtime.getTaskRecovery.mockResolvedValue({ status: 'reconcile_required', blockers: [{ code: 'DRIVER_STOP_BLOCKED' }] });
+      await Promise.all([1, 2, 3].map(() => notifyLarkTaskRecovery({ ...input, store: repos.config })));
       expect(reply).toHaveBeenCalledTimes(2);
       expect(accepted.size).toBe(1);
-      expect(reply.mock.calls[1]![0]).toEqual(reply.mock.calls[0]![0]);
+      const { beforeSend: _firstGuard, ...first } = reply.mock.calls[0]![0];
+      const { beforeSend: _retryGuard, ...retry } = reply.mock.calls[1]![0];
+      expect(retry).toEqual(first);
       expect(reply.mock.calls[1]![0]).toMatchObject({ messageId: 'om_original', replyInThread: true, readOnly: true });
       const rows = await repos.config.list('lark.');
       expect(rows.filter(row => row.key.startsWith('lark.recovery.'))).toHaveLength(1);
@@ -45,14 +52,139 @@ describe('durable task recovery notices', () => {
     const repos = createRepositories(':memory:');
     try {
       const service = { reply: vi.fn(async () => ({ messageId: '' })), send: vi.fn() } as any;
-      const input = { service, store: repos.config, log: { warn: vi.fn() }, appId: 'app', sessionId: 'session', taskId: 'task',
-        target: { chatId: 'chat', replyMessageId: 'om_original' }, recovery: { blocked: true, label: '需要核对', markdown: '待检查' } };
+      const input = { runtime: recoveryRuntime(), status: 'reconcile_required', service, store: repos.config, log: { warn: vi.fn() }, appId: 'app', sessionId: 'session', taskId: 'task',
+        target: { chatId: 'chat', replyMessageId: 'om_original' } };
       await expect(notifyLarkTaskRecovery(input)).rejects.toThrow('invalid delivery receipt');
       expect(service.send).not.toHaveBeenCalled();
       expect(await repos.config.list('lark.delivery.')).toHaveLength(0);
-      await notifyLarkTaskRecovery({ ...input, recovery: { ...input.recovery, blocked: false } });
+      await notifyLarkTaskRecovery({ ...input, taskId: 'unblocked-task', runtime: recoveryRuntime('running') });
       expect(service.reply).toHaveBeenCalledOnce();
     } finally { repos.close(); }
+  });
+
+  it.each(['running', 'completed', 'failed', 'cancelled'])('does not send a stale blocked snapshot when the task is now %s', async status => {
+    const repos = createRepositories(':memory:');
+    try {
+      const service = { reply: vi.fn(async () => ({ messageId: 'om_notice' })), send: vi.fn(async () => ({ messageId: 'om_notice' })), update: vi.fn() } as any;
+      const runtime = { getTaskRecovery: async () => ({ status, blockers: [{ code: 'DRIVER_RESOURCE_UNSAFE' }] }) } as any;
+      await notifyLarkTaskRecovery({ runtime, status: 'queued', service, store: repos.config, log: { warn: vi.fn() },
+        appId: 'app', sessionId: 'session', taskId: 'task', target: { chatId: 'chat' } });
+      expect(service.send).not.toHaveBeenCalled();
+      expect(service.reply).not.toHaveBeenCalled();
+    } finally { repos.close(); }
+  });
+
+  it('rechecks before the provider write and closes a notice if execution starts while sending', async () => {
+    const repos = createRepositories(':memory:');
+    let status = 'queued';
+    const runtime = { getTaskRecovery: async () => ({ status, blockers: status === 'queued' ? [{ code: 'DRIVER_STOP_BLOCKED' }] : [] }) } as any;
+    try {
+      const service = { send: vi.fn(async () => { status = 'completed'; return { messageId: 'om_notice' }; }),
+        update: vi.fn(async () => ({ messageId: 'om_notice' })) } as any;
+      await notifyLarkTaskRecovery({ runtime, status: 'queued', service, store: repos.config, log: { warn: vi.fn() },
+        appId: 'app', sessionId: 'session', taskId: 'task', target: { chatId: 'chat' } });
+      expect(service.send).toHaveBeenCalledOnce();
+      expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_notice', state: 'completed', readOnly: true }));
+      expect(JSON.stringify(service.update.mock.calls)).not.toContain('不会自动开始');
+    } finally { repos.close(); }
+  });
+
+  it('keeps an ambiguous provider attempt recoverable when the real API gate retries after task completion', async () => {
+    const repos = createRepositories(':memory:');
+    let status = 'queued';
+    const runtime = { getTaskRecovery: async () => ({ status, blockers: status === 'queued' ? [{ code: 'DRIVER_STOP_BLOCKED' }] : [] }) } as any;
+    const sends: string[] = [];
+    const patches: string[] = [];
+    const response = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes('tenant_access_token')) return response({ code: 0, tenant_access_token: 'token', expire: 7200 });
+      if (init?.method === 'PATCH') patches.push(String(init.body));
+      else {
+        sends.push(String(init?.body));
+        if (sends.length === 1) { status = 'completed'; throw new Error('accepted but acknowledgement lost'); }
+      }
+      return response({ code: 0, data: { message_id: 'om_notice' } });
+    });
+    const service = createLarkCardService({ LARK_APP_ID: 'recovery_retry', LARK_APP_SECRET: 'test',
+      LARK_API_RETRY_BASE_MS: '1', LARK_API_RETRY_MAX_MS: '1', LARK_API_RETRY_MAX_ATTEMPTS: '1' }, fetcher as typeof fetch);
+    try {
+      const input = { runtime, status: 'queued', service, store: repos.config, log: { warn: vi.fn() },
+        appId: 'recovery_retry', sessionId: 'session', taskId: 'task', target: { chatId: 'oc_test' }, beforeSend: vi.fn() };
+      await notifyLarkTaskRecovery(input);
+      expect(sends).toHaveLength(2);
+      expect(sends[1]).toBe(sends[0]);
+      expect(patches).toHaveLength(1);
+      expect(patches[0]).toContain('本轮执行已结束');
+      expect(patches[0]).not.toContain('不会自动开始');
+      await notifyLarkTaskRecovery(input);
+      expect(sends).toHaveLength(2);
+      expect(await repos.config.list('lark.delivery.')).toHaveLength(1);
+      expect(JSON.parse((await repos.config.list('lark.recovery.'))[0]!.value)).toHaveProperty('status_key');
+    } finally { service.close(); repos.close(); }
+  });
+
+  it('cancels a new send when execution starts between the initial read and provider guard', async () => {
+    const repos = createRepositories(':memory:');
+    const getTaskRecovery = vi.fn().mockResolvedValueOnce({ status: 'queued', blockers: [{ code: 'DRIVER_STOP_BLOCKED' }] })
+      .mockResolvedValue({ status: 'running', blockers: [] });
+    const service = { send: vi.fn(), update: vi.fn() } as any;
+    const input = { runtime: { getTaskRecovery } as any, status: 'queued', service, store: repos.config,
+      log: { warn: vi.fn() }, appId: 'app', sessionId: 'session', taskId: 'task', target: { chatId: 'chat' } };
+    try {
+      await notifyLarkTaskRecovery(input);
+      await notifyLarkTaskRecovery(input);
+      expect(service.send).not.toHaveBeenCalled();
+      expect(service.update).not.toHaveBeenCalled();
+      expect(await repos.config.list('lark.delivery.')).toHaveLength(0);
+    } finally { repos.close(); }
+  });
+
+  it('retries a transient PATCH, but stops after an unupdatable receipt without sending another notice', async () => {
+    const repos = createRepositories(':memory:');
+    const runtime = recoveryRuntime('queued', 'DRIVER_STOP_BLOCKED');
+    const { LarkServiceError } = await import('./service.js');
+    const service = { send: vi.fn(async () => ({ messageId: 'om_notice' })), update: vi.fn()
+      .mockRejectedValueOnce(new Error('network'))
+      .mockRejectedValueOnce(new LarkServiceError('LARK_OPENAPI_ERROR', 'expired', 502, { upstreamCode: 230031 })) } as any;
+    const input = { runtime, status: 'queued', service, store: repos.config, log: { warn: vi.fn() },
+      appId: 'app', sessionId: 'session', taskId: 'task', target: { chatId: 'chat' } };
+    try {
+      await notifyLarkTaskRecovery(input);
+      runtime.getTaskRecovery.mockResolvedValue({ status: 'completed', blockers: [] });
+      await expect(notifyLarkTaskRecovery(input)).rejects.toThrow('network');
+      await notifyLarkTaskRecovery(input);
+      await notifyLarkTaskRecovery(input);
+      expect(service.send).toHaveBeenCalledOnce();
+      expect(service.update).toHaveBeenCalledTimes(2);
+    } finally { repos.close(); }
+  });
+
+  it('reopens SQLite and updates the confirmed original notice through unblocked, running and completed without resending', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lark-recovery-update-'));
+    const filename = join(directory, 'state.db');
+    let repos = createRepositories(filename);
+    let status = 'queued';
+    let blocked = true;
+    const runtime = { getTaskRecovery: async () => ({ status, blockers: blocked ? [{ code: 'DRIVER_STOP_BLOCKED' }] : [] }) } as any;
+    const service = { send: vi.fn(async () => ({ messageId: 'om_notice' })), update: vi.fn(async () => ({ messageId: 'om_notice' })) } as any;
+    const input = { runtime, status: 'queued', service, log: { warn: vi.fn() }, appId: 'app', sessionId: 'session', taskId: 'task', turn: 1,
+      target: { chatId: 'chat' } };
+    try {
+      await notifyLarkTaskRecovery({ ...input, store: repos.config });
+      expect(JSON.stringify(service.send.mock.calls)).toContain('不会自动开始');
+      repos.close(); repos = createRepositories(filename);
+      blocked = false;
+      await notifyLarkTaskRecovery({ ...input, store: repos.config });
+      expect(service.update.mock.calls.at(-1)![0]).toMatchObject({ messageId: 'om_notice', state: 'queued', statusLabel: '排队中' });
+      status = 'running';
+      await notifyLarkTaskRecovery({ ...input, store: repos.config });
+      status = 'completed';
+      await Promise.all([1, 2, 3].map(() => notifyLarkTaskRecovery({ ...input, store: repos.config })));
+      expect(service.send).toHaveBeenCalledOnce();
+      expect(service.update).toHaveBeenCalledTimes(3);
+      expect(service.update.mock.calls.at(-1)![0]).toMatchObject({ messageId: 'om_notice', state: 'completed' });
+      expect(JSON.stringify(service.update.mock.calls)).not.toContain('不会自动开始');
+    } finally { repos.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
   it('distinguishes settled unknown outcomes from unresolved resources', async () => {
@@ -140,8 +272,8 @@ describe('结果未知提醒卡的 @ 与加急', () => {
     const repos = createRepositories(':memory:');
     try {
       const reply = vi.fn().mockResolvedValue({ messageId: 'om_recovery' });
-      await notifyLarkTaskRecovery({ service: { reply, send: vi.fn() } as any, store: repos.config, log: { warn: vi.fn() }, appId: 'app', sessionId: 'session',
-        taskId: 'task', turn: 1, target: { chatId: 'oc_group', replyMessageId: 'om_original' }, recovery: { blocked: true, label: '需要核对', markdown: '待检查' },
+      await notifyLarkTaskRecovery({ runtime: recoveryRuntime(), status: 'reconcile_required', service: { reply, send: vi.fn() } as any, store: repos.config, log: { warn: vi.fn() }, appId: 'app', sessionId: 'session',
+        taskId: 'task', turn: 1, target: { chatId: 'oc_group', replyMessageId: 'om_original' },
         mention: '<at id=ou_alice></at>' });
       expect((reply.mock.calls[0]![0].elements as Array<{ element_id: string }>).map(element => element.element_id)).toEqual(['group_mention', 'task_recovery_notice']);
     } finally { repos.close(); }

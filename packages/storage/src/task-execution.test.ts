@@ -82,16 +82,16 @@ describe('task execution ledger',()=>{
       expect(getter).not.toHaveBeenCalled();
     } finally {sql.close();}
   });
-  it('reads current task facts without filesystem admission checks, retaining full checks for execution projections', () => {
+  it('reads current task facts without filesystem admission checks, retaining full admission checks for queued execution projections', () => {
     const {x,repos}=ready();
-    const a=claimed(x);
+    const task=accepted(x).task!;
     const resolveWorkspace=vi.spyOn(executionWorkspace,'resolveExecutionWorkspace');
     try {
-      const state=repos.execution.getTaskExecutionState(a.taskId)!;
-      expect(state).toMatchObject({task:{id:a.taskId,status:'running'},currentAttempt:a,attempts:[a]});
+      const state=repos.execution.getTaskExecutionState(task.id)!;
+      expect(state).toMatchObject({task:{id:task.id,status:'queued'},attempts:[]});
       expect(state).not.toHaveProperty('blockers');
       expect(resolveWorkspace).not.toHaveBeenCalled();
-      const full=repos.execution.getTaskExecution(a.taskId)!;
+      const full=repos.execution.getTaskExecution(task.id)!;
       expect(resolveWorkspace).toHaveBeenCalled();
       const {blockers,...facts}=full;
       expect(facts).toEqual(state);

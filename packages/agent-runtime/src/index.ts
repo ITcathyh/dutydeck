@@ -1193,7 +1193,7 @@ export class DutydeckRuntime {
   getEventWindow(id: string, options?: EventWindowOptions) { return this.repos.events.listWindow(id, options); }
   async getTasks(id: string) { return (await this.repos.tasks.listBySession(id)).map(task => this.publicTask(task)); }
   async getTaskRecovery(id: string, taskId: string) {
-    const projection = this.repos.execution.getTaskExecution(taskId);
+    const projection = this.repos.execution.getTaskExecution(taskId, this.binding ? { claim: this.binding, idleResources: this.idleResourceChecks() } : undefined);
     if (!projection || projection.task.sessionId !== id) throw new RuntimeError('TASK_NOT_FOUND', 'Task not found in this session', 404);
     const active = this.repos.execution.getUnresolvedTasks(id).find(task => task.id !== taskId);
     return this.taskRecovery(id, projection, active, this.localResources.reusableIds(id));
@@ -1201,7 +1201,7 @@ export class DutydeckRuntime {
 
   /** One consistent traversal for callers checking every task in a session. */
   async getSessionTaskRecovery(id: string) {
-    const projections = this.repos.execution.getSessionExecutions(id);
+    const projections = this.repos.execution.getSessionExecutions(id, this.binding ? { claim: this.binding, idleResources: this.idleResourceChecks() } : undefined);
     const reusable = this.localResources.reusableIds(id);
     const unresolved = projections.filter(value => value.steering && ['pending','unknown'].includes(value.steering.state) || value.attempts.some(attempt => ['preparing', 'active', 'reconcile_required', 'legacy_unresolved'].includes(attempt.state))).map(value => value.task);
     return projections.map(projection => ({ taskId: projection.task.id,

@@ -6,7 +6,7 @@ import {
   type CommitResult, type DriverResource, type ExecutionBlocker, type ExecutionController, type ExecutionRepository,
   type ExecutionTask, type ExecutionUpgradeCounts, type ExecutionUpgradeSnapshot, type QueueAction, type RecoveryDecisionInput, type ResourceCheckRef, type Session,
   type SessionFence, type TaskAttempt, type TaskRequestV1, type NativeContextSelection, type NativeContextRef, type NativeContextBinding,
-  type SteeringOperation, type LegacyRetirementCandidate, type LegacyRetirementReceipt, type LegacyRetirementResult
+  type SteeringOperation, type LegacyRetirementCandidate, type LegacyRetirementReceipt, type LegacyRetirementResult, type TaskExecutionReadContext
 } from '@dutydeck/shared';
 import type { OpenControl } from './database-control.js';
 import { currentProcessIdentity, observeProcess } from './process-identity.js';
@@ -150,6 +150,12 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     const parent = r.parentResourceId ? resource(r.parentResourceId) : undefined;
     return Boolean(parent?.kind === 'operation' && parent.stage === 'created'
       && ['lifecycle','strict-context-restore'].includes(parent.operationScope?.kind ?? ''));
+  };
+  const readController = (context?: TaskExecutionReadContext) => {
+    if (!context) return;
+    const owner = control.validateClaim(db, context.claim);
+    parse(checksSchema, context.idleResources);
+    return owner;
   };
   const retiredLegacyResourceSafe = (r: DriverResource): boolean => {
     if (r.kind !== 'legacy' || r.resourceId !== legacyResourceId(r.sessionId) || r.stage !== 'unknown'
@@ -674,17 +680,19 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     getNativeContext(sessionId) { const selection = nativeSelection(sessionId); return selection ? {selection,resource:nativeResource(sessionId,selection.context)} : undefined; },
     getSessionResourceBlockers: sessionId => blockers(sessionId),
     getTaskExecutionState,
-    getTaskExecution(taskId) {
+    getTaskExecution(taskId, context) { return db.transaction(() => {
+      const owner = readController(context);
       const state = getTaskExecutionState(taskId); if (!state) return;
       const t = state.task;
-      return { ...state, blockers: [...blockers(t.sessionId), ...steeringBlockers(t.sessionId), ...workspaceBlockers(t.sessionId), ...inputBlockers(t)] };
-    },
+      return { ...state, blockers: [...blockers(t.sessionId), ...steeringBlockers(t.sessionId), ...(t.status === 'queued' ? workspaceBlockers(t.sessionId,context?.idleResources,owner) : []), ...inputBlockers(t)] };
+    }).deferred(); },
     getAttempt(ref) {
       if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
       const value = attempt(ref.attemptId);
       if (value?.taskId === ref.taskId && value.sessionId === ref.sessionId && value.runId === ref.runId) return value;
     },
-    getSessionExecutions(sessionId) {
+    getSessionExecutions(sessionId, context) { return db.transaction(() => {
+      const owner = readController(context);
       if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
       const byTask = new Map<string, TaskAttempt[]>();
       for (const value of attempts(sessionId)) {
@@ -692,13 +700,14 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       }
       const bySteeringTask = new Map<string,SteeringOperation>();
       for (const row of db.prepare('SELECT json FROM task_steering_operations WHERE session_id=? ORDER BY rowid').all(sessionId)) { const value=rowJson<SteeringOperation>(row)!; bySteeringTask.set(value.taskId,value); }
-      const sharedBlockers = [...blockers(sessionId), ...steeringBlockers(sessionId), ...workspaceBlockers(sessionId)];
-      return (db.prepare('SELECT * FROM tasks WHERE session_id=? ORDER BY created_at,id').all(sessionId) as Record<string, any>[]).map(row => {
-        const t = decodeTask(row)!;
+      const sharedBlockers = [...blockers(sessionId), ...steeringBlockers(sessionId)];
+      const tasks = (db.prepare('SELECT * FROM tasks WHERE session_id=? ORDER BY created_at,id').all(sessionId) as Record<string, any>[]).map(row => decodeTask(row)!);
+      const admission = tasks.some(t => t.status === 'queued') ? workspaceBlockers(sessionId,context?.idleResources,owner) : [];
+      return tasks.map(t => {
         const values = byTask.get(t.id) ?? [];
-        return { task: t, currentAttempt: values.find(a => a.attemptId === t.currentAttemptId), attempts: values, steering: bySteeringTask.get(t.id), blockers: [...sharedBlockers, ...inputBlockers(t)] };
+        return { task: t, currentAttempt: values.find(a => a.attemptId === t.currentAttemptId), attempts: values, steering: bySteeringTask.get(t.id), blockers: [...sharedBlockers, ...(t.status === 'queued' ? admission : []), ...inputBlockers(t)] };
       });
-    },
+    }).deferred(); },
     getUnresolvedTasks(sessionId) {
       if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
       return db.prepare("SELECT t.id,t.status FROM (SELECT task_id FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') UNION SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')) unresolved JOIN tasks t ON t.id=unresolved.task_id ORDER BY t.created_at,t.id")

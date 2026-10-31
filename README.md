@@ -260,6 +260,8 @@ dutydeck agent --turn "$TURN" group send '可检索摘要' --final --card-file /
 - 超过 24 小时的旧任务不发飞书卡，只能在 Web 上处理。
 - 接口：`GET /api/sessions/:id/unknown-tasks`、`POST /api/sessions/:id/unknown-tasks/:taskId`，body 为 `{target, action, allowDuplicateEffects?}`。
 
+恢复提醒会随解除阻塞、开始执行和本轮结束原地更新；静默进展与重启对账也会同步。已确认空闲且没有后台任务的旧会话不会被误报为阻塞；已开始的任务不再显示工作区排队阻塞。
+
 ### 推送分级
 
 群里的 @ 和加急按事情的轻重分三档，由三项机器人设置控制（Web 高级设置，或 `dutydeck settings bot set <appId> ...`）。三项都在“群卡片 @”总开关打开时才生效。

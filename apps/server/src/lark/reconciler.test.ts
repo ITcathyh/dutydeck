@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { notifyLarkTaskRecovery } from './task-recovery.js';
 import type { ChannelMapping, TaskRecord } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import type { StoredLarkConfig } from './config.js';
@@ -1148,6 +1152,39 @@ describe('恢复异常通知与人工核验结果', () => {
     expect(service.send).not.toHaveBeenCalled();
     expect(service.update).not.toHaveBeenCalled();
   });
+  it('reopens SQLite and converges a stale silent-progress notice even after final delivery was recorded', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lark-notice-reconcile-'));
+    const filename = join(directory, 'state.db');
+    let repos = createRepositories(filename);
+    const task = { id: 'task', sessionId: 'session', status: 'queued', prompt: 'prompt',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as TaskRecord;
+    const runtime = { getTasks: async () => [task], getEvents: async () => [],
+      getTaskRecovery: async () => ({ status: task.status, blockers: task.status === 'queued' ? [{ code: 'DRIVER_STOP_BLOCKED' }] : [] }) } as any;
+    const service = { send: vi.fn(), reply: vi.fn(async () => ({ messageId: 'om_notice' })),
+      update: vi.fn(async () => ({ messageId: 'om_notice' })) } as any;
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    try {
+      await notifyLarkTaskRecovery({ runtime, status: 'queued', service, store: repos.config, log, appId: config.appId,
+        sessionId: 'session', taskId: task.id, turn: 2, target: { chatId: 'oc_test_chat', replyMessageId: 'om_request' } });
+      const mapping = createMapping('silent-notice', 'om_request', 'session', { runtime_task_id: task.id, turn: 2,
+        card_message_id: undefined, state: 'completed', final_message_id: 'om_result', final_delivery_state: 'delivered', progress_frozen: true });
+      await repos.channelMappings.save(mapping);
+      repos.close(); repos = createRepositories(filename);
+      task.status = 'completed';
+      const reconcile = () => performLarkCardReconcile({ runtime, service, cardMappings: repos.channelMappings, deliveryStore: repos.config,
+        log, config: { ...config, silentProgress: true }, channel: 'lark-card:cli_test', staleTurn: async () => true });
+      expect(await reconcile()).toBe(0);
+      expect(await reconcile()).toBe(0);
+      expect(service.reply).toHaveBeenCalledOnce();
+      expect(service.send).not.toHaveBeenCalled();
+      expect(service.update).toHaveBeenCalledOnce();
+      expect(service.update.mock.calls[0]![0]).toMatchObject({ messageId: 'om_notice', state: 'completed' });
+      expect(JSON.stringify(service.update.mock.calls)).not.toContain('不会自动开始');
+      expect(JSON.parse((await repos.channelMappings.get(mapping.channel, mapping.externalId))!.extra!))
+        .toMatchObject({ final_message_id: 'om_result', final_delivery_state: 'delivered', turn: 2 });
+    } finally { repos.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   it.each(['silent', 'frozen', 'missing', 'unupdatable', 'writable'])('%s process card delivers only the required recovery notice and never a business final', async mode => {
     const repos = createRepositories(':memory:');
     try {
@@ -1238,7 +1275,9 @@ describe('恢复异常通知与人工核验结果', () => {
       await performLarkCardReconcile(input);
       await performLarkCardReconcile(input);
       expect(service.reply).toHaveBeenCalledTimes(2);
-      expect(service.reply.mock.calls[0]).toEqual(service.reply.mock.calls[1]);
+      const { beforeSend: _firstGuard, ...first } = service.reply.mock.calls[0]![0] as any;
+      const { beforeSend: _retryGuard, ...retry } = service.reply.mock.calls[1]![0] as any;
+      expect(retry).toEqual(first);
       expect(service.update).not.toHaveBeenCalled(); expect(service.send).not.toHaveBeenCalled();
     } finally { repos.close(); }
   });

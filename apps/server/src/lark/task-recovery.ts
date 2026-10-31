@@ -5,7 +5,8 @@ import { withExplicitFinalLock } from './explicit-final.js';
 import { sendLarkResult, type DeliveryTarget } from './result-delivery.js';
 import { larkRelaunchLabels, larkReplayLabels } from './card-actions.js';
 import { isRestartInterruption, larkHeldReason, larkInterruptionSummary, type LarkHeldCause } from './turn-redispatch.js';
-import type { LarkCardService } from './service.js';
+import type { LarkCardInput, LarkCardService, LarkWriteGuard } from './service.js';
+import { isLarkMessageUnupdatable } from './card-renderer.js';
 import type { LarkUrgentManager } from './workflow-urgent.js';
 import type { LarkRuntime } from './listener.js';
 
@@ -83,6 +84,14 @@ export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: 
   options: { relaunch?: boolean; webBaseUrl?: string; interrupted?: LarkHeldCause & { buttons?: boolean }; continueInPlace?: boolean } = {}) {
   const recovery = await runtime.getTaskRecovery?.(sessionId, taskId);
   status = recovery?.status ?? status;
+  // 已开始或结束的任务不再用排队门禁解释；底层资源仍由 runtime 负责核对。
+  if (status === 'running' || ['completed', 'failed', 'interrupted', 'cancelled'].includes(status)) {
+    const label = status === 'running' ? '执行中' : status === 'completed' ? '本轮已结束' : status === 'failed' ? '执行失败' : status === 'cancelled' ? '已取消' : '已中断';
+    const detail = status === 'running' ? '之前的恢复等待已结束，任务已开始执行。'
+      : status === 'completed' ? '本轮执行已结束，具体结果以本轮结果消息或 Web 执行记录为准。'
+      : '本轮已停止，具体原因以本轮结果消息或执行记录为准。';
+    return { status, blocked: false, label, relaunch: false, continueInPlace: false, markdown: `**${label}**\n\n${detail}\n\n发送 \`/status\` 查看最新状态。` };
+  }
   const resolvedUnknown = recovery?.resolvedUnknown === true;
   const needsReview = !resolvedUnknown && (status === 'reconcile_required' || status === 'legacy_unresolved');
   const blockers = recovery?.blockers ?? [];
@@ -94,7 +103,7 @@ export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: 
   if (needsReview && options.interrupted) {
     const cause = options.interrupted;
     const choose = cause.buttons ? `可以点「${larkReplayLabels.continue_in_place}」让 Agent 接着做；确认再做一遍不会重复造成影响，可以点「${larkReplayLabels.replay_turn}」；不需要了就点「${larkReplayLabels.abandon_turn}」。` : '';
-    return { blocked, label: '结果未知', relaunch: false, continueInPlace: false,
+    return { status, blocked, label: '结果未知', relaunch: false, continueInPlace: false,
       markdown: `**结果未知**\n\n${larkInterruptionSummary(cause.code, cause.agent)}${larkHeldReason(cause)}${choose}\n\n发送 \`/status\` 查看最新状态。` };
   }
   const stall = status === 'queued' && !blocked && recovery?.activeTaskId ? await runtime.getTurnStall?.(sessionId).catch(() => undefined) : undefined;
@@ -122,42 +131,79 @@ export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: 
     : recovery?.activeTaskId ? '要等当前这一轮结束才会处理，不会传给它。' : '已进入执行队列，等待 Agent 开始。';
   const action = resolvedUnknown && !blocked ? '发送 `/status` 查看最新状态。' : status === 'queued' ? '此请求尚未执行，可点击取消，或回原话题发送 `/cancel`；发送 `/status` 查看最新状态。'
     : '发送 `/status` 查看最新状态。';
-  return { blocked, stalled, label, relaunch, continueInPlace, markdown: `**${label}**\n\n${detail}\n\n${action}` };
+  return { status, blocked, stalled, label, relaunch, continueInPlace, markdown: `**${label}**\n\n${detail}\n\n${action}` };
 }
 
-/** One durable exception notice per accepted task/turn, independent of business-final delivery. */
+/** One durable exception notice per accepted task/turn, updated independently of business-final delivery. */
 export async function notifyLarkTaskRecovery(input: {
+  runtime: LarkRuntime; status: string;
   service: LarkCardService; store?: ConfigRepository; log: { warn: (...args: any[]) => void };
   appId: string; sessionId: string; taskId: string; turn?: number; target: DeliveryTarget;
-  recovery: Pick<Awaited<ReturnType<typeof describeLarkTaskRecovery>>, 'blocked' | 'label' | 'markdown'>;
-  /** @ 发起人的卡内标签（见 notify-tier）；和正文一起在第一次落库时冻结，重放不因配置变化而改变内容。 */
+  /** 只收敛已有提醒，不为可正常更新的过程卡另发消息。 */
+  create?: boolean;
+  interrupted?: LarkHeldCause;
+  beforeSend?: LarkWriteGuard;
+  /** @ 发起人的标签随首次发送冻结；状态更新仍使用原标签。 */
   mention?: string;
 }) {
-  if (!input.recovery.blocked) return;
-  if (!input.store?.compareAndSet) throw new Error('Recovery notification requires persistent CAS');
+  if (!input.store?.compareAndSet) {
+    if (input.create === false) return;
+    throw new Error('Recovery notification requires persistent CAS');
+  }
   const store = input.store;
   const key = `recovery_${createHash('sha256').update(JSON.stringify([input.appId, input.sessionId, input.taskId, input.turn ?? 0])).digest('hex').slice(0, 40)}`;
   return withExplicitFinalLock(store, key, async () => {
-    // Freeze the first notice before contacting the provider. Retry after a lost
-    // response uses the same UUID and payload even when recovery facts change.
     const recordKey = `lark.recovery.${key}`;
     let saved = await store.get(recordKey);
+    if (!saved && input.create === false) return;
+    const currentRecovery = async () => {
+      const task = (await input.runtime.getTasks?.(input.sessionId))?.find(item => item.id === input.taskId);
+      return describeLarkTaskRecovery(input.runtime, input.sessionId, input.taskId, task?.status ?? input.status, undefined,
+        input.interrupted ? { interrupted: input.interrupted } : {});
+    };
+    const recovery = await currentRecovery();
+    let created = false;
     if (!saved) {
-      const record = JSON.stringify({ target: input.target, markdown: input.recovery.markdown, label: input.recovery.label, ...(input.mention ? { mention: input.mention } : {}) });
-      await store.compareAndSet!(recordKey, saved, record);
+      if (!recovery.blocked) return;
+      await input.beforeSend?.();
+      // Freeze the first payload for an ambiguous send retry under the same UUID.
+      const record = JSON.stringify({ target: input.target, markdown: recovery.markdown, label: recovery.label, ...(input.mention ? { mention: input.mention } : {}) });
+      created = await store.compareAndSet!(recordKey, saved, record);
       saved = await store.get(recordKey);
     }
     if (!saved) throw new Error('Recovery notification record was not saved');
-    const record = JSON.parse(saved) as { target: DeliveryTarget; markdown: string; label: string; mention?: string };
+    const record = JSON.parse(saved) as { target: DeliveryTarget; markdown: string; label: string; mention?: string; status_key?: string; unupdatable?: boolean };
+    if (record.unupdatable) return;
+    const elements = (markdown: string) => [...(record.mention ? [{ tag: 'markdown', element_id: 'group_mention', content: record.mention }] : []),
+      { tag: 'markdown', element_id: 'task_recovery_notice', content: markdown }];
+    const card = { taskId: input.taskId, taskName: '任务恢复提醒', sessionId: input.sessionId, turn: input.turn, readOnly: true,
+      capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false } };
+    // Only cancel before entering the provider: its internal retries may follow
+    // an accepted request with a lost response and must retain the same UUID/payload.
+    if (created && !(await currentRecovery()).blocked) {
+      await store.compareAndSet!(recordKey, saved, '');
+      return;
+    }
     const sent = await sendLarkResult(input.service, { ...record.target, allowReplyFallback: false }, {
-      taskId: input.taskId, taskName: '任务恢复提醒', sessionId: input.sessionId, turn: input.turn,
-      state: 'reconcile_required', statusLabel: record.label, readOnly: true,
-      capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false },
-      elements: [...(record.mention ? [{ tag: 'markdown', element_id: 'group_mention', content: record.mention }] : []),
-        { tag: 'markdown', element_id: 'task_recovery_notice', content: record.markdown }],
-      idempotencyKey: key
-    }, input.log, store);
-    return { messageId: sent.messageId, fingerprint: createHash('sha256').update(saved).digest('hex') };
+      ...card, state: 'reconcile_required', statusLabel: record.label, elements: elements(record.markdown), idempotencyKey: key
+    }, input.log, store, input.beforeSend);
+    // The task can start or finish while the provider request is in flight.
+    // Read inside the per-notice lock so a late queued frame cannot overwrite its terminal state.
+    const latest = await currentRecovery();
+    const statusKey = JSON.stringify([latest.status, latest.label, latest.markdown]);
+    const original = latest.blocked && latest.label === record.label && latest.markdown === record.markdown;
+    if (record.status_key === statusKey || !record.status_key && original) return { messageId: sent.messageId };
+    try {
+      await input.beforeSend?.();
+      await input.service.update({ ...card, beforeSend: input.beforeSend, messageId: sent.messageId,
+        state: latest.status as LarkCardInput['state'], statusLabel: latest.label, elements: elements(latest.markdown) });
+      await store.compareAndSet!(recordKey, saved, JSON.stringify({ ...record, status_key: statusKey }));
+    } catch (error) {
+      if (!isLarkMessageUnupdatable(error)) throw error;
+      await store.compareAndSet!(recordKey, saved, JSON.stringify({ ...record, unupdatable: true }));
+      input.log.warn({ error, messageId: sent.messageId }, '恢复提醒已不可更新，停止重试');
+    }
+    return { messageId: sent.messageId };
   });
 }
 

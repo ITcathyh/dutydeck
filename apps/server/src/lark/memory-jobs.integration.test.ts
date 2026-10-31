@@ -507,13 +507,13 @@ it('keeps a new memory request queued behind a foreign unconfirmed stop until re
   expect((await foreignRun).status).toBe('reconcile_required');
   h.setDuringSend(async () => {});
   await h.runtime.stop(foreign.id, { kind: 'installation_owner', id: 'installation_owner' }).catch(() => {});
-  const recovery = await h.runtime.getSessionTaskRecovery(first!.sessionId);
-  expect(recovery.flatMap(item => item.blockers)).toContainEqual({ code: 'DRIVER_STOP_BLOCKED', external: true });
   const pending = h.pipeline.runConsolidation(scope);
   try {
     await vi.waitFor(async () => expect((await h.repos.memoryJobs.listScope(scope)).filter(job => job.requests.length)).toHaveLength(2));
     const second = (await h.repos.memoryJobs.listScope(scope)).find(job => job.id !== first!.id)!;
-    expect((await h.runtime.getTasks(second.sessionId)).filter(task => task.status === 'queued')).toHaveLength(1);
+    const queued = (await h.runtime.getTasks(second.sessionId)).filter(task => task.status === 'queued');
+    expect(queued).toHaveLength(1);
+    expect((await h.runtime.getTaskRecovery(second.sessionId, queued[0]!.id)).blockers).toContainEqual({ code: 'DRIVER_STOP_BLOCKED', external: true });
     expect(h.prompts).toHaveLength(2);
     release();
     await foreignRun;

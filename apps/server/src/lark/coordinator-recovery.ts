@@ -280,7 +280,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       const recovery = await this.runtime.getTaskRecovery?.(sessionId, task.id);
       // A new session waiting for another session's workspace can be reused; another replacement would wait too.
       if (!['reconcile_required', 'legacy_unresolved'].includes(task.status) && recovery?.blockers.length && recovery.blockers.every(block => block.external === true)) continue;
-      if ((await describeLarkTaskRecovery(this.runtime, sessionId, task.id, task.status)).blocked) return true;
+      if (recovery?.blockers.length || (await describeLarkTaskRecovery(this.runtime, sessionId, task.id, task.status)).blocked) return true;
     }
     return false;
   }

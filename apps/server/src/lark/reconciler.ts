@@ -153,6 +153,16 @@ export async function performLarkCardReconcile(input: {
       };
       // 这一轮正在转到新会话：旧卡由转交流程收尾，对账既不补发它的终态也不重绘。
       if (persisted.relaunch_pending || input.skipTask?.(mapping.externalId, mapping.sessionId, persisted.turn ?? 0)) continue;
+      // 独立提醒不依赖过程卡或结果投递状态；静默轮次、已交付结果和旧提醒都要收敛。
+      if (persisted.runtime_task_id) try {
+        await notifyLarkTaskRecovery({ runtime, status: persisted.state, create: false,
+          service, store: input.deliveryStore, log, appId: persisted.app_id, sessionId: mapping.sessionId,
+          taskId: persisted.runtime_task_id, turn: persisted.turn, beforeSend: beforeProcessSend,
+          target: { chatId: persisted.chat_id } });
+      } catch (error) {
+        unresolved++;
+        log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '恢复提醒收敛失败，稍后重试');
+      }
       // 结果卡已判定投递失败，或还在这条映射自己的退避期内：这一轮不再打平台。过程卡也已收敛时整条跳过；
       // 退避中的仍算未解决，让对账循环继续跑到下一次重发。
       // 瞬时失败已持续超过重试窗口：不再打平台，走下面的写回记为失败。
@@ -272,15 +282,12 @@ export async function performLarkCardReconcile(input: {
         const statusKey = JSON.stringify([state, recovery?.markdown, canCancel]);
         const notifyRecovery = async () => {
           if (unknownNotice || !recovery?.blocked || await input.staleTurn?.(mapping.sessionId, runtimeTask)) return undefined;
-          // 提醒卡上没有按钮也没有详情链接，正文按不提这两者重新生成。
-          const notice = canRelaunch || canReplay || config.webBaseUrl
-            ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status, undefined,
-              hold ? { interrupted: hold } : {}) : recovery;
           const recoveryMention = larkNotice('task_recovery_notice', effective,
             { chatType: persisted.chat_type, senderOpenId: persisted.sender_open_id, senderType: persisted.sender_type }).mention;
           return notifyLarkTaskRecovery({
+            runtime, status: runtimeTask.status, ...(hold ? { interrupted: hold } : {}), beforeSend: beforeProcessSend,
             service, store: input.deliveryStore, log, appId: persisted.app_id,
-            sessionId: mapping.sessionId, taskId: runtimeTask.id, turn: persisted.turn, recovery: notice,
+            sessionId: mapping.sessionId, taskId: runtimeTask.id, turn: persisted.turn,
             ...(recoveryMention ? { mention: recoveryMention } : {}),
             target: { chatId: persisted.chat_id,
               replyMessageId: persisted.reply_message_id?.trim()
