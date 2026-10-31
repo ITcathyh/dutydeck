@@ -65,7 +65,7 @@ export async function executeScheduleCommand(automation: SessionAutomationServic
     const prompt = rest.join(' ');
     try {
       schedule = await automation.createSchedule(sessionId, { name: prompt.slice(0, 100), prompt,
-        trigger: { kind: 'interval', everySeconds: minutes * 60, anchorAt: '1970-01-01T00:00:00.000Z' }, timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' } }, event.senderOpenId, {
+        trigger: { kind: 'interval', everySeconds: minutes * 60, anchorAt: '1970-01-01T00:00:00.000Z' }, timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }, mode: 'fresh' }, event.senderOpenId, {
         key: `${config.appId}:${event.messageId}`,
         prepareDelivery: async automationId => {
           if (!store?.compareAndSet) throw new RuntimeError('SCHEDULE_ORIGIN_UNAVAILABLE', '无法持久保存此话题的回报位置', 503);
@@ -77,7 +77,7 @@ export async function executeScheduleCommand(automation: SessionAutomationServic
       if (notice) return notice;
       throw error;
     }
-    return `已保存「${schedule.name}」，每 ${minutes} 分钟执行一次，当前停用。\n\n执行内容：${schedule.prompt}\n\n启用：\`/schedule enable ${schedule.id}\``;
+    return `已保存「${schedule.name}」，每 ${minutes} 分钟在新会话里执行一次，当前停用。\n\n执行内容：${schedule.prompt}\n\n启用：\`/schedule enable ${schedule.id}\``;
   }
   if (['enable', 'disable'].includes(action) && id && !rest.length) {
     const items = await automation.listBySession(sessionId, event.senderOpenId);

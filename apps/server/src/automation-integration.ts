@@ -314,14 +314,21 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       }, options.log, repos.config, beforeSend);
     } finally { context?.signal.removeEventListener('abort', abort); }
   };
-  const disabledNotice = async (schedule: SessionSchedule) => {
+  /** 计划的冻结回报位置；非飞书会话没有回报位置，返回 undefined。 */
+  const scheduleNoticeTarget = async (schedule: SessionSchedule, missing: string) => {
     const session = await runtime.getSession(schedule.sessionId);
     if (!session) throw new RuntimeError('AUTOMATION_SESSION_MISSING', '自动任务的会话不存在', 404);
     if (session.source !== 'lark') return;
     const { appId, chatId } = parseLarkSourceId(session.sourceId);
     const target = JSON.parse(await repos.config.get(`automation.delivery-target.${schedule.id}`) ?? 'null') as { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean } | null;
     const config = appId ? await readLarkConfig(repos.config, appId) : undefined;
-    if (!target || !config || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '停用告知缺少冻结回报位置', 409);
+    if (!target || !config || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', missing, 409);
+    return { session, config, target };
+  };
+  const disabledNotice = async (schedule: SessionSchedule) => {
+    const destination = await scheduleNoticeTarget(schedule, '停用告知缺少冻结回报位置');
+    if (!destination) return;
+    const { session, config, target } = destination;
     const name = schedule.disableNotification?.name ?? schedule.name;
     return { config, target, input: {
       state: 'failed' as const, readOnly: true, retryable: false, taskName: name,
@@ -338,6 +345,20 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       await beforeSend?.();
     };
     await sendLarkResult(client(notice.config), { ...notice.target, allowReplyFallback: false }, notice.input, options.log, repos.config, guard);
+  };
+  /** 某次触发超过一个周期还没开始或没结束：在计划的原话题提醒一次，说明卡点。 */
+  const onScheduleOverdue = async (schedule: SessionSchedule, notice: { occurrenceId: string; scheduledForUtc: string; reason: string }) => {
+    const destination = await scheduleNoticeTarget(schedule, '逾期提醒缺少冻结回报位置');
+    if (!destination) return 'not_requested' as const;
+    const { session, config, target } = destination;
+    if (!await authorize(schedule.sessionId, schedule.actorId)) throw new RuntimeError('AUTOMATION_DELIVERY_REVOKED', '逾期提醒的交付权限已撤销', 403);
+    const scheduledAt = new Date(notice.scheduledForUtc).toLocaleString('zh-CN', { timeZone: schedule.timezone, hour12: false });
+    await sendLarkResult(client(config), { ...target, allowReplyFallback: false }, {
+      state: 'failed', readOnly: true, retryable: false, taskName: schedule.name,
+      taskId: schedule.id, sessionId: schedule.sessionId, workspace: session.cwd, webBaseUrl: config.webBaseUrl,
+      elements: [{ tag: 'markdown', element_id: 'schedule_overdue_notice', content: `定时计划『${schedule.name}』${scheduledAt} 的那次触发超过一个周期还没结束：${notice.reason}。\n\n它结束或被处理之前，这个计划不会再生成新的触发。` }],
+      idempotencyKey: `schedule_overdue_${createHash('sha256').update(notice.occurrenceId).digest('hex').slice(0, 40)}`
+    }, options.log, repos.config);
   };
   const reconcileDisabledNotification = async (schedule: SessionSchedule) => {
     const notice = await disabledNotice(schedule);
@@ -374,5 +395,5 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     }, options.log, repos.config);
     return sent.messageId;
   };
-  return { authorize, previewAuthorize: (sessionId: string, actorId?: string) => authorize(sessionId, actorId, undefined, true), prepareDelivery, prepareTaskDelivery, prepareMessageDelivery, sendScheduleRequest, deliver, notify, onScheduleDisabled, reconcileDisabledNotification };
+  return { authorize, previewAuthorize: (sessionId: string, actorId?: string) => authorize(sessionId, actorId, undefined, true), prepareDelivery, prepareTaskDelivery, prepareMessageDelivery, sendScheduleRequest, deliver, notify, onScheduleDisabled, onScheduleOverdue, reconcileDisabledNotification };
 }

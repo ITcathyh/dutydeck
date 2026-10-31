@@ -109,6 +109,21 @@ describe('Agent schedule requests', () => {
     expect(f.requestSchedule).toHaveBeenCalledTimes(1);
   });
 
+  it('defaults new recurring schedules to fresh sessions unless the user asked to continue the chat', async () => {
+    const f = await setup();
+    await f.request(f.group, { every: 15, prompt: '盯结论', name: 'A' });
+    await f.request(f.group, { cron: '0 9 * * *', prompt: '汇总', name: 'B', mode: 'session' });
+    await f.request(f.group, { at: '2026-10-17T10:00', prompt: '提醒我', name: 'C' });
+    const [fresh, session, once] = f.requestSchedule.mock.calls;
+    expect(fresh![1].mode).toBeUndefined();
+    expect(fresh![3]).toMatchObject({ newMode: 'fresh' });
+    expect(session![1].mode).toBe('session');
+    expect(session![3].newMode).toBeUndefined();
+    expect(once![3].newMode).toBeUndefined();
+    const dryRun = await f.request(f.group, { every: 15, prompt: '盯结论', dryRun: true });
+    expect(dryRun.json().effect).toContain('每次在新会话里执行');
+  });
+
   it('works in p2p chats and for one-off times', async () => {
     const f = await setup();
     const response = await f.request(f.p2p, { at: '2026-10-17T10:00', prompt: '提醒我看发布结果' });

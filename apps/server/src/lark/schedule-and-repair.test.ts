@@ -272,8 +272,9 @@ describe('/schedule every 遇到同名计划', () => {
     const session = await h.runtime.startSession({ agentId: 'mock', cwd: h.cwd, source: 'lark', sourceId: `${h.config.appId}:oc_group:group` });
     const config = { ...h.config, webBaseUrl: 'https://dutydeck.example.com/' };
     const run = (id: string, text: string) => executeScheduleCommand(h.automation, h.repos.config, session.id, text, event(id, `/schedule ${text}`), config);
-    expect(await run('om_first', 'every 30 巡检构建')).toContain('已保存「巡检构建」');
+    expect(await run('om_first', 'every 30 巡检构建')).toContain('已保存「巡检构建」，每 30 分钟在新会话里执行一次');
     const [created] = (await h.automation.listBySession(session.id, 'ou_alice')).schedules;
+    expect(created).toMatchObject({ mode: 'fresh' });
     const link = `https://dutydeck.example.com/?nav=automation&automationSession=${encodeURIComponent(session.id)}&schedule=${created!.id}`;
 
     const disabled = await run('om_second', 'every 60 巡检构建');

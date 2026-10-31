@@ -779,7 +779,7 @@ Examples:
     .option('--every <minutes>', 'Fixed interval in whole minutes')
     .option('--cron <expression>', 'Five-field cron expression, Asia/Shanghai time')
     .option('--at <local-time>', 'Run once at YYYY-MM-DDTHH:mm, Asia/Shanghai time')
-    .option('--mode <mode>', 'session (default) or fresh: run each time in a new conversation without this chat history')
+    .option('--mode <mode>', 'fresh (default for --every/--cron): run each time in a new conversation without this chat history; session (default for --at): continue in this conversation, only when the user asks for it')
     .action(options => handlers.scheduleRequest?.(options));
   withTarget(settings.command('explain').description('Explain saved configuration, current session and recorded task/attempt evidence (read-only)'))
     .requiredOption('--session <id>', 'Session to explain')

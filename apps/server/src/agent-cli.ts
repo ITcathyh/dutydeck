@@ -269,13 +269,13 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
   const schedule = group(agent, 'schedule', 'Create, enable or disable schedules of this conversation');
   sub(schedule, 'create', 'Set up a schedule for the requester; it is created disabled and starts after they click 启用 on the card', 'schedule.create', 'write-confirm',
     ["schedule create --every 15 --prompt '看看这个话题有没有排查结论'", "schedule create --cron '0 9 * * 1-5' --prompt '汇总昨天的告警' --name 晨报", "schedule create --at 2026-10-17T10:00 --prompt '提醒我看发布结果'"],
-    '时间按北京时间；--every、--cron、--at 只选一个。--prompt 只写每次要做的事，不写频率。本对话已有同名任务时更新它而不是新建；改已有任务就用它的 --name。不需要本对话历史的任务加 --mode fresh。不要用 crontab、后台 sleep 或循环脚本代替。')
+    '时间按北京时间；--every、--cron、--at 只选一个。--prompt 只写每次要做的事，不写频率。本对话已有同名任务时更新它而不是新建；改已有任务就用它的 --name。循环任务默认每次在新会话里执行；只有用户明确要求接着上次的对话做时才加 --mode session。需要试跑就在本轮直接执行一次，不要建“测试任务”。不要用 crontab、后台 sleep 或循环脚本代替。')
     .requiredOption('--prompt <text>', 'Complete instructions to execute each time')
     .option('--name <name>', 'Short schedule name; an existing schedule with this name in the conversation is updated instead')
     .option('--every <minutes>', 'Fixed interval in whole minutes', integer(1, 525_600))
     .option('--cron <expression>', 'Five-field cron expression, Asia/Shanghai time')
     .option('--at <local-time>', 'Run once at YYYY-MM-DDTHH:mm, Asia/Shanghai time')
-    .addOption(new Option('--mode <mode>', 'session: run in this conversation with its history (default); fresh: run each time in a new conversation without it').choices(['session', 'fresh']));
+    .addOption(new Option('--mode <mode>', 'fresh (default for --every/--cron): run each time in a new conversation without this conversation\'s history; session (default for --at): run in this conversation with its history, only when the user asks to continue from the previous conversation').choices(['session', 'fresh']));
   sub(schedule, 'stop-self', 'Request disabling this scheduled task after its successful result is delivered', 'schedule.stop-self', 'write', ['schedule stop-self']);
   sub(schedule, 'enable', 'Enable a schedule', 'schedule.enable', 'write-confirm', ['schedule enable <编号>']).argument('<id>', 'Schedule id shown by schedules');
   sub(schedule, 'disable', 'Disable a schedule', 'schedule.disable', 'write-confirm', ['schedule disable <编号>']).argument('<id>', 'Schedule id shown by schedules');

@@ -144,7 +144,7 @@ function ledgerRuntime(repos: Repos, harnessSession: HarnessSession, options: { 
   return runtime;
 }
 
-async function fixture(options: { database?: string; clock?: Date; status?: StatusMock; providerId?: string; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void>; onScheduleDisabled?: (schedule: any, reason: string) => Promise<void> } = {}) {
+async function fixture(options: { database?: string; clock?: Date; status?: StatusMock; providerId?: string; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void>; onScheduleDisabled?: (schedule: any, reason: string) => Promise<void>; onScheduleOverdue?: (schedule: any, notice: any) => Promise<void | 'not_requested'> } = {}) {
   const directory = options.database ? undefined : await mkdtemp(join(tmpdir(), 'dutydeck-automation-db-'));
   if (directory) cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const database = options.database ?? join(directory!, 'dutydeck.db');
@@ -167,7 +167,8 @@ async function fixture(options: { database?: string; clock?: Date; status?: Stat
     ciProviders: ciProviders(options.status ?? (vi.fn(async () => ciStatus((await run('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout.trim())) as StatusMock), options.providerId),
     clock: () => new Date(now.value),
     deliver: options.deliver,
-    onScheduleDisabled: options.onScheduleDisabled
+    onScheduleDisabled: options.onScheduleDisabled,
+    onScheduleOverdue: options.onScheduleOverdue
   });
   cleanups.push(() => service.close());
   return { database, repositories, cwd, session, now, allowed, service, ...mocked };
@@ -2090,6 +2091,23 @@ describe('schedule names are unique within a session', () => {
     expect(recreated.schedule.id).not.toBe(original.schedule.id);
   });
 
+  it('applies the requested default mode only to a new schedule and never switches an existing one', async () => {
+    const fixtureState = await fixture();
+    const service = new SessionAutomationService({ repositories: fixtureState.repositories, runtime: { ...fixtureState, startScheduleSession: vi.fn() }, authorize: async () => true, clock: () => fixtureState.now.value });
+    cleanups.push(() => service.close());
+    const receipt = (key: string, newMode?: 'fresh') => ({ key, newMode, prepareDelivery: vi.fn(async () => {}) });
+    const fresh = await service.requestSchedule(fixtureState.session.id, { ...scheduleInput, name: 'New one' }, 'ou_owner', receipt('turn-1', 'fresh'));
+    expect(fresh.schedule.mode).toBe('fresh');
+    const asked = await service.requestSchedule(fixtureState.session.id, { ...scheduleInput, name: 'Continue chat', mode: 'session' }, 'ou_owner', receipt('turn-2', 'fresh'));
+    expect(asked.schedule.mode).toBe('session');
+    const plain = await service.requestSchedule(fixtureState.session.id, { ...scheduleInput, name: 'Plain' }, 'ou_owner', receipt('turn-3'));
+    expect(plain.schedule.mode).toBe('session');
+
+    // 同名更新：原来是 session 的计划不会被缺省改成 fresh，只更新写明的内容。
+    const updated = await service.requestSchedule(fixtureState.session.id, { ...scheduleInput, name: 'Continue chat', prompt: 'Changed prompt' }, 'ou_owner', receipt('turn-4', 'fresh'));
+    expect(updated).toMatchObject({ schedule: { id: asked.schedule.id, prompt: 'Changed prompt', mode: 'session' }, updated: { changed: true } });
+  });
+
   it('updates the enabled one first when legacy data already holds duplicates', async () => {
     const h = await fixture();
     const kept = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Old copy' }, 'ou_owner');
@@ -2103,5 +2121,138 @@ describe('schedule names are unique within a session', () => {
     const result = await h.service.requestSchedule(h.session.id, { ...scheduleInput, name: 'rebase-agent-context-mac', prompt: 'New prompt' }, 'ou_owner', { key: 'turn-dup' });
     expect(result).toMatchObject({ schedule: { id: live.id, prompt: 'New prompt' }, updated: { changed: true, wasEnabled: true } });
     expect((await h.service.getScheduleDefinition(h.session.id, kept.id)).prompt).toBe(scheduleInput.prompt);
+  });
+});
+
+describe('overdue schedule reminders', () => {
+  const slow = { ...scheduleInput, name: 'Half hourly', trigger: { kind: 'interval' as const, everySeconds: 1800, anchorAt: '2026-09-12T00:00:00.000Z' } };
+  const at = (h: Awaited<ReturnType<typeof fixture>>, time: string) => { h.now.value = new Date(`2026-09-12T${time}.000Z`); };
+  async function enable(h: Awaited<ReturnType<typeof fixture>>, input: typeof scheduleInput = slow) {
+    const created = await h.service.createSchedule(h.session.id, input, 'ou_owner');
+    return h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+  }
+
+  it('reminds once, with the reason, when a run is still queued after one period, and not again after a restart', async () => {
+    const onScheduleOverdue = vi.fn(async () => {});
+    const h = await fixture({ onScheduleOverdue });
+    const schedule = await enable(h);
+    at(h, '00:30:01');
+    await h.service.tick();
+    const [task] = await h.repositories.tasks.listBySession(h.session.id);
+    expect(task).toMatchObject({ status: 'queued' });
+    at(h, '00:59:00');
+    await h.service.tick();
+    expect(onScheduleOverdue).not.toHaveBeenCalled();
+
+    at(h, '01:00:02');
+    await h.service.tick();
+    expect(onScheduleOverdue).toHaveBeenCalledTimes(1);
+    const [overdueSchedule, notice] = onScheduleOverdue.mock.calls[0] as unknown as [{ id: string }, { occurrenceId: string; scheduledForUtc: string; reason: string }];
+    expect(overdueSchedule.id).toBe(schedule.id);
+    expect(notice).toMatchObject({ scheduledForUtc: '2026-09-12T00:30:00.000Z', reason: expect.stringContaining('排队') });
+    expect((await h.service.listBySession(h.session.id)).occurrences.map(item => item.id)).toContain(notice.occurrenceId);
+
+    at(h, '01:10:00');
+    await h.service.tick();
+    const restarted = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, clock: () => new Date(h.now.value), onScheduleOverdue });
+    cleanups.push(() => restarted.close());
+    await restarted.tick();
+    expect(onScheduleOverdue).toHaveBeenCalledTimes(1);
+    // 防重叠规则仍在：卡住期间没有新的触发。
+    expect(await h.repositories.tasks.listBySession(h.session.id)).toHaveLength(1);
+  });
+
+  it('names the unknown-result block, and a finished run is never reminded', async () => {
+    const onScheduleOverdue = vi.fn(async () => {});
+    const h = await fixture({ onScheduleOverdue });
+    await enable(h);
+    at(h, '00:30:01');
+    await h.service.tick();
+    const [task] = await h.repositories.tasks.listBySession(h.session.id);
+    h.settleAttempt1UnknownThenAttempt2Completes(task!.id, 'unused', false);
+    at(h, '01:00:02');
+    await h.service.tick();
+    expect(onScheduleOverdue).toHaveBeenCalledTimes(1);
+    expect((onScheduleOverdue.mock.calls[0] as unknown as [unknown, { reason: string }])[1].reason).toContain('结果未知');
+
+    const doneNotice = vi.fn(async () => {});
+    const done = await fixture({ onScheduleOverdue: doneNotice });
+    await enable(done);
+    at(done, '00:30:01');
+    await done.service.tick();
+    done.settleTask((await done.repositories.tasks.listBySession(done.session.id))[0]!.id);
+    at(done, '01:00:02');
+    await done.service.tick();
+    at(done, '01:20:00');
+    await done.service.tick();
+    expect(doneNotice).not.toHaveBeenCalled();
+  });
+
+  it('never reminds sooner than ten minutes for short periods, and skips one-off and disabled schedules', async () => {
+    const onScheduleOverdue = vi.fn(async () => {});
+    const h = await fixture({ onScheduleOverdue });
+    await enable(h, scheduleInput);
+    at(h, '00:01:01');
+    await h.service.tick();
+    at(h, '00:09:00');
+    await h.service.tick();
+    expect(onScheduleOverdue).not.toHaveBeenCalled();
+    at(h, '00:11:30');
+    await h.service.tick();
+    expect(onScheduleOverdue).toHaveBeenCalledTimes(1);
+
+    const onceNotice = vi.fn(async () => {});
+    const once = await fixture({ onScheduleOverdue: onceNotice });
+    await enable(once, { ...scheduleInput, name: 'Once', trigger: { kind: 'at' as any, localDateTime: '2026-09-12T08:01' } as any });
+    at(once, '00:01:01');
+    await once.service.tick();
+    at(once, '03:00:00');
+    await once.service.tick();
+    expect((await once.repositories.tasks.listBySession(once.session.id))).toHaveLength(1);
+    expect(onceNotice).not.toHaveBeenCalled();
+
+    const disabledNotice = vi.fn(async () => {});
+    const disabled = await fixture({ onScheduleOverdue: disabledNotice });
+    const running = await enable(disabled);
+    at(disabled, '00:30:01');
+    await disabled.service.tick();
+    await disabled.service.updateSchedule(disabled.session.id, running.id, { expectedRevision: running.revision, enabled: false }, 'ou_owner');
+    at(disabled, '02:00:00');
+    await disabled.service.tick();
+    expect(disabledNotice).not.toHaveBeenCalled();
+  });
+
+  it('retries a failed reminder with backoff up to three attempts, and treats no reporting location as sent', async () => {
+    const onScheduleOverdue = vi.fn(async () => { throw new Error('send failed'); });
+    const h = await fixture({ onScheduleOverdue });
+    await enable(h);
+    at(h, '00:30:01');
+    await h.service.tick();
+    at(h, '01:00:02');
+    await h.service.tick();
+    expect(onScheduleOverdue).toHaveBeenCalledTimes(1);
+    at(h, '01:00:30');
+    await h.service.tick();
+    expect(onScheduleOverdue).toHaveBeenCalledTimes(1);
+    at(h, '01:01:10');
+    await h.service.tick();
+    expect(onScheduleOverdue).toHaveBeenCalledTimes(2);
+    at(h, '01:05:00');
+    await h.service.tick();
+    expect(onScheduleOverdue).toHaveBeenCalledTimes(3);
+    at(h, '02:00:00');
+    await h.service.tick();
+    expect(onScheduleOverdue).toHaveBeenCalledTimes(3);
+
+    const quiet = vi.fn(async () => 'not_requested' as const);
+    const web = await fixture({ onScheduleOverdue: quiet });
+    await enable(web);
+    at(web, '00:30:01');
+    await web.service.tick();
+    at(web, '01:00:02');
+    await web.service.tick();
+    at(web, '03:00:00');
+    await web.service.tick();
+    expect(quiet).toHaveBeenCalledTimes(1);
   });
 });

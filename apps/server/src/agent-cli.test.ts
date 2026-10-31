@@ -138,6 +138,13 @@ it('routes common settings commands and lists their risk and whitelist in help',
   expect(quickstart.join('')).toContain('dutydeck agent 提供下列飞书会话操作');
   expect(quickstart.join('')).toContain('agent --turn 命令前缀');
   expect(quickstart.join('')).not.toContain('能用的全部操作');
+  const create = root.commands.find(command => command.name() === 'schedule')!.commands.find(command => command.name() === 'create')!;
+  const createOut: string[] = [];
+  create.configureOutput({ writeOut: text => { createOut.push(text); } });
+  create.outputHelp();
+  const createHelp = createOut.join('').replace(/\s+/g, '');
+  expect(createHelp).toContain('需要试跑就在本轮直接执行一次，不要建“测试任务”');
+  expect(createHelp).toContain('fresh(defaultfor--every/--cron)');
   const settings = root.commands.find(command => command.name() === 'settings')!;
   const set = settings.commands.find(command => command.name() === 'set')!;
   const output: string[] = [];

@@ -659,7 +659,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
           ? (await automation.listBySession(mapping.sessionId, operator)).schedules.find(item => item.id === claim.schedule_id) : undefined;
         schedule = started ?? await automation.createSchedule(mapping.sessionId, {
           name: prompt.slice(0, 100), prompt, trigger: { kind: 'cron', expression: `${minute} ${hour} * * *` },
-          timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }
+          timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }, mode: 'fresh'
         }, operator, {
           key: `${config.appId}:${task.id}:${task.turn}:daily`,
           prepareDelivery: async automationId => {

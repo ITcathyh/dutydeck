@@ -71,6 +71,14 @@ const OCCURRENCE_PREFIX = 'session_automation/occurrence/';
 const CI_PREFIX = 'session_automation/ci/';
 const TASK_BINDING_PREFIX = 'session_automation/task/';
 const STOP_REQUEST_PREFIX = 'session_automation/stop_request/';
+const OVERDUE_PREFIX = 'session_automation/overdue/';
+/** 一次触发卡住后的提醒进度：每次卡住（按触发编号）只提醒一次，发送失败最多重试到 OVERDUE_MAX_ATTEMPTS 次。 */
+const overdueNoticeSchema = z.object({
+  version: z.literal(1), status: z.enum(['sending', 'sent', 'error']), attempts: z.number().int().positive(),
+  nextAttemptAt: z.string().optional(), updatedAt: z.string()
+}).strict();
+const OVERDUE_MIN_MS = 10 * 60_000;
+const OVERDUE_MAX_ATTEMPTS = 3;
 const stopRequestSchema = z.object({
   version: z.literal(1), taskId: z.string().min(1), attemptId: z.string().min(1), sessionId: z.string().min(1),
   occurrenceId: z.string().min(1), scheduleId: z.string().min(1), generation: z.number().int().positive(), actorId: z.string().min(1),
@@ -100,6 +108,9 @@ export interface SessionAutomationRuntime {
   subscribe?(sessionId: string, listener: (event: AgentEvent) => void): () => void;
 }
 
+/** 某次触发超过一个周期还没开始或没结束；reason 是能取到的卡点说明。 */
+export interface ScheduleOverdueNotice { occurrenceId: string; scheduledForUtc: string; reason: string }
+
 export interface AutomationDeliveryContext {
   signal: AbortSignal;
   /** Recheck the exact source and lease before each outbound delivery step. */
@@ -120,6 +131,8 @@ export interface SessionAutomationServiceOptions {
   deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void>;
   onScheduleDisabled?: (schedule: SessionSchedule, reason: string, beforeSend?: () => Promise<void>) => Promise<void | 'not_requested'>;
   reconcileDisabledNotification?: (schedule: SessionSchedule) => Promise<boolean>;
+  /** 在计划的回报位置提醒一次某次触发卡住了；返回 `not_requested` 表示没有回报位置，不再重试。 */
+  onScheduleOverdue?: (schedule: SessionSchedule, notice: ScheduleOverdueNotice) => Promise<void | 'not_requested'>;
   /** 已加载插件注册的 CI 提供方；没有 CI 插件时为空，CI 等待与「出现新的失败构建」不可用。 */
   ciProviders?: CiProviderRegistry;
   /** webhook 驱动的 CI 续作与修复；没有配置 webhook 的提供方时不注入。 */
@@ -137,6 +150,7 @@ function errorMessage(error: unknown): string {
 
 function scheduleKey(id: string) { return `${SCHEDULE_PREFIX}${id}`; }
 function occurrenceKey(id: string) { return `${OCCURRENCE_PREFIX}${id}`; }
+function overdueKey(occurrenceId: string) { return `${OVERDUE_PREFIX}${occurrenceId}`; }
 function ciKey(id: string) { return `${CI_PREFIX}${id}`; }
 function taskBindingKey(taskId: string) { return `${TASK_BINDING_PREFIX}${taskId}`; }
 function iso(date: Date) { return date.toISOString(); }
@@ -682,8 +696,9 @@ export class SessionAutomationService {
   /**
    * 聊天里代建计划：同一会话已有同名计划（含已停用，不含已删除）时改为更新它，不再新建第二条。
    * 有实际改动时一并停用，等用户在确认卡上重新启用；没有改动时原样返回。同一请求重试拿回同一结果。
+   * `newMode` 只在新建、请求没写模式、且本实例能开新会话时作为缺省；更新同名计划时不改它的模式。
    */
-  async requestSchedule(sessionId: string, rawInput: CreateSessionScheduleInput, actorId: string, receipt: { key: string; prepareDelivery?: (id: string) => Promise<void> }): Promise<{ schedule: PublicSessionSchedule; updated?: { changed: boolean; wasEnabled: boolean } }> {
+  async requestSchedule(sessionId: string, rawInput: CreateSessionScheduleInput, actorId: string, receipt: { key: string; newMode?: 'fresh'; prepareDelivery?: (id: string) => Promise<void> }): Promise<{ schedule: PublicSessionSchedule; updated?: { changed: boolean; wasEnabled: boolean } }> {
     await this.requireAuthorized(sessionId, actorId);
     const input = createSessionScheduleInputSchema.parse(rawInput);
     const own = await this.getRecord(scheduleKey(receiptScheduleId(sessionId, actorId, receipt.key)), readStoredSessionSchedule);
@@ -691,7 +706,7 @@ export class SessionAutomationService {
     // 旧数据里可能已有多条同名：先改仍在启用的那条，其次最近改过的。
     const [existing] = (await this.sameNameSchedules(sessionId, input.name))
       .sort((a, b) => Number(b.enabled) - Number(a.enabled) || b.updatedAt.localeCompare(a.updatedAt));
-    if (!existing) return { schedule: await this.createSchedule(sessionId, input, actorId, receipt) };
+    if (!existing) return { schedule: await this.createSchedule(sessionId, input.mode || !receipt.newMode || !this.options.runtime.startScheduleSession ? input : { ...input, mode: receipt.newMode }, actorId, receipt) };
     if (input.mode === 'independent' && existing.mode !== 'independent') throw new RuntimeError('SESSION_AUTOMATION_MODE_IMMUTABLE', 'An existing schedule cannot switch to independent mode', 409);
     const mode = input.mode === 'independent' ? undefined : input.mode;
     const patch: Omit<UpdateSessionScheduleInput, 'expectedRevision'> = {
@@ -1390,6 +1405,7 @@ export class SessionAutomationService {
       if (item.value.executionSessionId) this.watchSession(item.value.executionSessionId);
       await this.isolate(() => this.synchronizeLifecycle(item));
       await this.isolate(() => this.planSchedule(item.value));
+      await this.isolate(() => this.remindOverdue(item.value));
     }
     for (const item of subscriptions) {
       if (this.closed) return;
@@ -1404,6 +1420,50 @@ export class SessionAutomationService {
       });
     }
     await this.startPendingDeliveries(parsed);
+  }
+
+  /**
+   * 防重叠规则下，一次触发卡住（一直排队不开始，或一直不结束）就不再生成后续触发，而且不会有任何动静。
+   * 它超过一个周期（至少 10 分钟，从这次触发建出算起）仍未结束时，在计划的回报位置提醒一次；周期按计划自己的触发规则算，一次性计划没有周期，不提醒。
+   */
+  private async remindOverdue(schedule: SessionSchedule) {
+    const pending = schedule.pendingOccurrence;
+    if (!this.options.onScheduleOverdue || !pending || !schedule.enabled || schedule.deletedAt) return;
+    let next: string | undefined;
+    try { next = previewSessionSchedule(schedule, new Date(pending.scheduledForUtc))?.scheduledForUtc; }
+    catch { return; }
+    if (!next) return;
+    const now = this.clock();
+    const period = Math.max(new Date(next).getTime() - new Date(pending.scheduledForUtc).getTime(), OVERDUE_MIN_MS);
+    // 触发建出不会早于计划时间：没到这个点的不必读记录。
+    if (now.getTime() < new Date(pending.scheduledForUtc).getTime() + period) return;
+    const occurrence = await this.getRecord(occurrenceKey(pending.id), value => sessionScheduleOccurrenceSchema.parse(value));
+    if (!occurrence || !openRunStatuses.has(occurrence.value.runStatus)) return;
+    if (now.getTime() < new Date(occurrence.value.createdAt).getTime() + period) return;
+    const key = overdueKey(pending.id);
+    const prior = await this.getRecord(key, value => overdueNoticeSchema.parse(value));
+    if (prior && (prior.value.status !== 'error' || prior.value.attempts >= OVERDUE_MAX_ATTEMPTS || prior.value.nextAttemptAt && prior.value.nextAttemptAt > iso(now))) return;
+    const attempts = (prior?.value.attempts ?? 0) + 1;
+    const sending = { version: 1, status: 'sending', attempts, updatedAt: iso(now) };
+    if (!await (prior ? this.replace(key, prior.raw, sending) : this.createRecord(key, sending))) return;
+    let failed = false;
+    try { await this.options.onScheduleOverdue(schedule, { occurrenceId: pending.id, scheduledForUtc: pending.scheduledForUtc, reason: await this.overdueReason(migrateOccurrence(occurrence.value)) }); }
+    catch { failed = true; }
+    await this.replace(key, JSON.stringify(sending), overdueNoticeSchema.parse({
+      version: 1, status: failed ? 'error' : 'sent', attempts, updatedAt: iso(this.clock()),
+      ...(failed ? { nextAttemptAt: plus(this.clock(), 60_000 * attempts) } : {})
+    }));
+  }
+
+  /** 从触发记录和任务状态取卡点；取不到就只说还没开始或还没结束。 */
+  private async overdueReason(occurrence: SessionScheduleOccurrenceV2) {
+    const unknown = '上一轮结果未知，等人确认处理';
+    if (occurrence.runStatus === 'blocked') return occurrence.blockReason === 'admission_conflict' ? '任务受理冲突，等人处理' : unknown;
+    const task = occurrence.taskId ? await this.options.repositories.tasks.get?.(occurrence.taskId) : undefined;
+    if (occurrence.taskId && this.execution.getTaskExecution(occurrence.taskId)?.attempts.some(attempt => attempt.state === 'reconcile_required' || attempt.state === 'legacy_unresolved')) return unknown;
+    if (task?.status === 'queued') return '任务一直在排队，还没开始（可能被同一工作区里未结束的任务挡住）';
+    if (occurrence.runStatus === 'pending') return `还没开始${occurrence.error ? `：${occurrence.error.slice(0, 120)}` : ''}`;
+    return task?.status === 'running' ? '任务还在执行，还没结束' : '还没结束';
   }
 
   /** fresh 计划每次占用执行槽时同一次 CAS 换上这次触发的会话编号；槽是独占的，上一次已结束。 */

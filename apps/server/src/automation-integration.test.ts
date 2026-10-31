@@ -473,6 +473,27 @@ it('delivers an independent execution to its frozen origin and rejects revoked o
   expect(f.client.reply).toHaveBeenCalledOnce();
 });
 
+it('posts a Chinese overdue reminder with the reason to the frozen topic, once per run key, and skips non-Lark sessions', async () => {
+  const f = await fixture();
+  const schedule: any = { id: 'sch_slow', sessionId: 's1', name: '每日部署', timezone: 'Asia/Shanghai', actorId: 'ou_alice' };
+  const notice = { occurrenceId: 'occ_stuck', scheduledForUtc: '2026-10-28T16:00:00.000Z', reason: '任务一直在排队，还没开始' };
+  await expect(f.onScheduleOverdue(schedule, notice)).rejects.toMatchObject({ code: 'AUTOMATION_DESTINATION_MISSING' });
+  expect(f.client.reply).not.toHaveBeenCalled();
+
+  await f.repos.config.set('automation.delivery-target.sch_slow', JSON.stringify({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_original', replyInThread: true }));
+  await f.onScheduleOverdue(schedule, notice);
+  expect(f.client.reply).toHaveBeenCalledOnce();
+  const sent = f.client.reply.mock.calls[0]![0] as any;
+  expect(sent).toMatchObject({ messageId: 'om_original', taskName: '每日部署' });
+  const text = JSON.stringify(sent.elements);
+  expect(text).toContain('定时计划『每日部署』2026/10/29 00:00:00 的那次触发超过一个周期还没结束：任务一直在排队，还没开始');
+  expect(text).toContain('不会再生成新的触发');
+
+  f.session.source = 'web';
+  expect(await f.onScheduleOverdue(schedule, notice)).toBe('not_requested');
+  expect(f.client.reply).toHaveBeenCalledOnce();
+});
+
 it('reconciles a persisted disabled notice receipt without another send and refuses missing evidence', async () => {
   const f = await fixture();
   const schedule: any = { id: 'notice', sessionId: 's1', name: 'Frozen name', actorId: 'ou_alice', disabledAt: '2026-10-26T00:00:00.000Z', disabledReason: 'Session is no longer active' };

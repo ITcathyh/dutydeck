@@ -354,6 +354,9 @@ describe('Agent group collaboration domain service', () => {
     });
     const prompt = await tools.promptForSession(f.activeSession, '这个群聊有结论了私发我');
     expect(prompt).toContain('schedule create 加 --every <分钟数>');
+    expect(prompt).toContain('循环任务默认每次在新会话里执行');
+    expect(prompt).toContain('加 --mode session');
+    expect(prompt).toContain('需要试跑就在本轮直接执行一次，不要建“测试任务”');
     expect(prompt).toContain(f.capabilities.workbenchTurnToken(f.activeSession.id, 'task-one', 'attempt-one'));
     expect(prompt).toContain('用户点「启用」才开始');
     expect(prompt).not.toContain('定时任务用 /schedule');
