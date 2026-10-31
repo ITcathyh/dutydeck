@@ -14,7 +14,7 @@ import { createCliUi, symbolFor } from '../cli-ui.js';
 import type { DetectedAgent } from './detect.js';
 import { saveBot as saveRealBot, type ExistingBot, type SaveBotInput, type SaveBotResult } from './bot-store.js';
 import { readLarkConfig } from '../lark/config.js';
-import type { WriteEnvResult } from './env-file.js';
+import { readExistingConfig, type WriteEnvResult } from './env-file.js';
 import type { LarkBindOptions, LarkBindResult } from './lark-bind.js';
 import { PromptUnavailableError, type AskOptions, type Prompter } from './prompts.js';
 import { runSetup, type SetupDependencies } from './setup.js';
@@ -208,6 +208,40 @@ describe('runSetup', () => {
     const stdout = out.read();
     expect(stdout).not.toContain(secret);
     expect(() => JSON.parse(stdout.trim())).not.toThrow();
+  });
+
+  it('重跑时只回显向导管理的非机密项：.env 里嵌套的 Agent 令牌和旧版凭据在文本与 --json 输出里都不出现', async () => {
+    const dir = await makeTempDir();
+    const envFile = join(dir, '.env');
+    const secrets = [
+      'synthetic-lark-secret-0001', 'synthetic-legacy-github-0002', 'synthetic-legacy-webhook-0003',
+      'synthetic-nested-agent-token-0004', 'synthetic-api-key-0005'
+    ];
+    writeFileSync(envFile, [
+      `DUTYDECK_DEFAULT_CWD=${dir}`,
+      'DUTYDECK_PORT=4310',
+      'LARK_APP_ID=cli_synthetic',
+      `LARK_APP_SECRET=${secrets[0]}`,
+      `GITHUB_TOKEN=${secrets[1]}`,
+      `DUTYDECK_CODEBASE_WEBHOOK_SECRET=${secrets[2]}`,
+      `DUTYDECK_AGENTS_JSON='${JSON.stringify([{ id: 'proxy', command: 'claude', env: { ANTHROPIC_AUTH_TOKEN: secrets[3] } }])}'`,
+      `ANTHROPIC_API_KEY=${secrets[4]}`
+    ].join('\n') + '\n', { mode: 0o600 });
+
+    for (const json of [false, true]) {
+      const { deps, out, err } = harness({ cwd: dir });
+      const result = await runSetup({ json, skipLark: true, yes: true, envFile }, { ...deps, readExisting: readExistingConfig });
+      expect(result).toMatchObject({ ok: true, mode: 'update' });
+      const printed = out.read() + err.read();
+      for (const secret of secrets) expect(printed).not.toContain(secret);
+      if (json) continue;
+      // 其余键只列键名；向导管理的非机密项照常显示，飞书 Secret 仍按末 4 位打码。
+      expect(printed).toMatch(/GITHUB_TOKEN +\(内容不回显\)/);
+      expect(printed).toMatch(/DUTYDECK_AGENTS_JSON +\(内容不回显\)/);
+      expect(printed).toMatch(/LARK_APP_ID +cli_synthetic/);
+      expect(printed).toMatch(/DUTYDECK_PORT +4310/);
+      expect(printed).toMatch(/LARK_APP_SECRET +\*\*\*\*0001/);
+    }
   });
 
   it('fails in non-interactive mode naming the flag that would unblock it', async () => {

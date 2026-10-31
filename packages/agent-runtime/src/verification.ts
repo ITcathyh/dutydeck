@@ -66,7 +66,14 @@ async function fingerprintRepository(cwd: string, seenRoots: Set<string>): Promi
   if (seenRoots.has(canonicalRoot)) throw new RuntimeError('VERIFICATION_FINGERPRINT_FAILED', `Recursive Git repository detected: ${canonicalRoot}`, 409);
   seenRoots.add(canonicalRoot);
   const head = (await git(canonicalRoot, ['rev-parse', '--verify', 'HEAD^{commit}'])).trim();
-  const tracked = (await git(canonicalRoot, ['ls-files', '-z'])).split('\0').filter(Boolean);
+  const gitlinks = new Map<string, string>();
+  const tracked = (await git(canonicalRoot, ['ls-files', '-s', '-z'])).split('\0').filter(Boolean).map(entry => {
+    const separator = entry.indexOf('\t');
+    const [mode, object] = entry.slice(0, separator).split(' ');
+    const path = entry.slice(separator + 1);
+    if (mode === '160000') gitlinks.set(path, object!);
+    return path;
+  });
   const untracked = (await git(canonicalRoot, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean);
   const paths = [...new Set([...tracked, ...untracked].filter(included))].sort();
   const hash = createHash('sha256').update('dutydeck-code-v1\0').update(head).update('\0');
@@ -85,9 +92,13 @@ async function fingerprintRepository(cwd: string, seenRoots: Set<string>): Promi
     if (info.isSymbolicLink()) hash.update('link\0').update(await readlink(absolute));
     else if (info.isFile()) hash.update('file\0').update(await readFile(absolute));
     else if (info.isDirectory()) {
+      const commit = gitlinks.get(path);
+      // An empty gitlink directory is an uninitialized submodule (plain clone
+      // or new worktree); its recorded commit is its whole code state.
+      if (commit && (await readdir(absolute)).length === 0) hash.update('gitlink-uninitialized\0').update(commit);
       // A tracked directory is a submodule. Recurse so dirty tracked and
       // untracked submodule content cannot retain a false-current fingerprint.
-      hash.update('gitlink\0').update(await fingerprintRepository(absolute, seenRoots));
+      else hash.update('gitlink\0').update(await fingerprintRepository(absolute, seenRoots));
     } else throw new RuntimeError('VERIFICATION_FINGERPRINT_FAILED', `Unsupported repository entry: ${path}`, 409);
     hash.update('\0');
   }
@@ -175,10 +186,10 @@ export class VerificationManager {
       });
   }
 
-  run(sessionId: string, cwd: string, input: VerificationCommandInput, actorId?: string, taskId?: string, beforeCommand?: () => Promise<void>): Promise<VerificationResponse> {
+  run(sessionId: string, cwd: string, input: VerificationCommandInput, actorId?: string, taskId?: string, beforeCommand?: () => Promise<void>, admitHeld?: () => Promise<void>): Promise<VerificationResponse> {
     const controller = new AbortController();
     this.controllers.set(controller, sessionId);
-    const run = this.execute(sessionId, cwd, input, actorId, taskId, controller.signal, beforeCommand);
+    const run = this.execute(sessionId, cwd, input, actorId, taskId, controller.signal, beforeCommand, admitHeld);
     this.runs.set(run, sessionId);
     const cleanup = () => { this.controllers.delete(controller); this.runs.delete(run); };
     void run.then(cleanup, cleanup);
@@ -195,7 +206,7 @@ export class VerificationManager {
     await Promise.allSettled([...this.runs].filter(([, id]) => id === sessionId).map(([run]) => run));
   }
 
-  private async execute(sessionId: string, cwd: string, input: VerificationCommandInput, actorId: string | undefined, taskId: string | undefined, signal: AbortSignal, beforeCommand?: () => Promise<void>): Promise<VerificationResponse> {
+  private async execute(sessionId: string, cwd: string, input: VerificationCommandInput, actorId: string | undefined, taskId: string | undefined, signal: AbortSignal, beforeCommand?: () => Promise<void>, admitHeld?: () => Promise<void>): Promise<VerificationResponse> {
     if (!input || typeof input !== 'object' || typeof input.command !== 'string') {
       throw new RuntimeError('VERIFICATION_COMMAND_REQUIRED', 'Verification command must be a string', 400);
     }
@@ -218,6 +229,12 @@ export class VerificationManager {
       outputTruncated: false, beforeFingerprint, processStage: 'awaiting_process'
     };
     await this.replace(active);
+    // The running record now holds the workspace against new task claims; recheck work admitted before it.
+    try { await admitHeld?.(); }
+    catch (error) {
+      await this.replace({ ...active, revision: active.revision + 1, status: 'interrupted', completedAt: now(), error: error instanceof Error ? error.message : String(error) }, active);
+      throw error;
+    }
 
     let result: CommandResult;
     try {

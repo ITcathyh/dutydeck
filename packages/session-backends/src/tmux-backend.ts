@@ -135,12 +135,18 @@ function shellescape(s: string): string {
  * executable script lets the pane open the complete argv without putting it
  * in the tmux command itself.  The script removes itself before exec so the
  * launch directory never accumulates credentials or stale arguments.
+ *
+ * respawn-pane replaces the staged session PATH (and any `-e PATH=`) with
+ * the management client's PATH, so the child's own PATH, including an empty
+ * one, is restored after the cleanup commands and before exec. As with
+ * PtyBackend, a bare `bin` is then resolved through that PATH.
  */
-async function writeLaunchScript(bin: string, args: string[], programStatus?: boolean): Promise<{ path: string; directory: string }> {
+async function writeLaunchScript(bin: string, args: string[], childPath: string | undefined, programStatus?: boolean): Promise<{ path: string; directory: string }> {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-tmux-launch-'));
   const path = join(directory, 'launch.sh');
+  const searchPath = childPath === undefined ? '' : `PATH=${shellescape(childPath)}; export PATH\n`;
   const command = ['exec', ...programStatusCommand(bin, args, programStatus)].map(shellescape).join(' ');
-  await writeFile(path, `#!/bin/sh\nrm -f -- "$0"\nrmdir -- "$(dirname -- "$0")" 2>/dev/null || true\n${command}\n`, { mode: 0o700 });
+  await writeFile(path, `#!/bin/sh\nrm -f -- "$0"\nrmdir -- "$(dirname -- "$0")" 2>/dev/null || true\n${searchPath}${command}\n`, { mode: 0o700 });
   await chmod(path, 0o700);
   return { path, directory };
 }
@@ -315,7 +321,7 @@ export class TmuxBackend implements SessionBackend {
       // pane with a snapshot of the session environment before respawn-pane
       // returns; clear the staged values immediately afterwards so secrets do
       // not linger in tmux. The script unlinks itself before exec.
-      const launch = await writeLaunchScript(bin, args, opts.programStatus);
+      const launch = await writeLaunchScript(bin, args, childEnvironment.PATH, opts.programStatus);
       try {
         (await runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', opts.cwd, '/bin/sh', launch.path]));
       } catch (error) {

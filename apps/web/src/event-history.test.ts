@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api, type DockEvent } from './api';
-import { createEventWindow, loadHistoryRange, loadProjectedHistory, mergeLiveEvent, newestSequence } from './event-history';
+import { completeEventHistory, createEventWindow, loadHistoryRange, loadProjectedHistory, mergeLiveEvent, newestSequence } from './event-history';
 
 const event = (sequence: number, text = String(sequence)): DockEvent => ({ id: `e-${sequence}`, sequence, type: 'text', timestamp: '', data: { text } });
 
@@ -37,13 +37,46 @@ describe('projected event history', () => {
     expect(loader.mock.calls[0]?.[2]).toBe(controller.signal);
   });
 
-  it('reads a complete cross-page range and refuses sparse canonical details', async () => {
+  it('reads a complete cross-page range', async () => {
     const history = Array.from({ length: 405 }, (_, index) => event(index + 1));
     const loader = vi.spyOn(api, 'events').mockImplementation(async (_id, query) => history.filter(item => item.sequence > query!.after! && item.sequence < query!.before!).slice(0, query!.limit!));
     expect(await loadHistoryRange('s1', 0, 405)).toEqual(history);
     expect(loader.mock.calls.map(call => call[1]?.after)).toEqual([0, 200, 400]);
-    loader.mockResolvedValue([event(1), event(3)]);
-    await expect(loadHistoryRange('s1', 0, 3)).rejects.toThrow('记录不连续');
+  });
+
+  it('continues after pruned holes, including across page boundaries', async () => {
+    // Pruned raw terminal output leaves holes; everything still stored is returned in order.
+    const history = Array.from({ length: 450 }, (_, index) => event(index + 1)).filter(item => item.sequence % 3 !== 0 && item.sequence !== 301);
+    const loader = vi.spyOn(api, 'events').mockImplementation(async (_id, query) => history.filter(item => item.sequence > query!.after! && (query!.before === undefined || item.sequence < query!.before)).slice(0, query!.limit!));
+    expect(await loadHistoryRange('s1', 0, 449)).toEqual(history);
+    expect(loader.mock.calls.map(call => call[1]?.after)).toEqual([0, history[199]!.sequence]);
+    expect(await loadHistoryRange('s1', 2, 7)).toEqual([event(4), event(5), event(7)]);
+    expect((await loadProjectedHistory('s1', { turns: [], liveAfter: 440, highWaterMark: 449 })).events.map(item => item.sequence)).toEqual([442, 443, 445, 446, 448, 449]);
+  });
+
+  it.each([
+    ['a page that does not move past the cursor', [event(4)]],
+    ['records out of order', [event(6), event(5)]],
+    ['a repeated record', [event(5), event(5)]],
+    ['a record beyond the requested end', [event(5), event(9)]]
+  ])('rejects %s instead of treating it as a pruned hole', async (_name, page) => {
+    vi.spyOn(api, 'events').mockResolvedValue(page);
+    await expect(loadHistoryRange('s1', 4, 8)).rejects.toThrow('分页结果异常');
+  });
+
+  it('rejects a read that stops before the requested end or the known watermark', async () => {
+    vi.spyOn(api, 'events').mockResolvedValue([event(2), event(4)]);
+    await expect(loadHistoryRange('s1', 0, 6)).rejects.toThrow('记录尚未读取完整');
+    await expect(loadProjectedHistory('s1', { turns: [], liveAfter: 0, highWaterMark: 6 })).rejects.toThrow('尚未追平');
+  });
+
+  it('keeps a complete read with pruned holes and only the live events that continue it', () => {
+    const complete = [event(1), event(3), event(6)];
+    expect(completeEventHistory(complete, [event(6, 'live'), event(7), event(8)])?.map(item => [item.sequence, item.data.text])).toEqual([[1, '1'], [3, '3'], [6, 'live'], [7, '7'], [8, '8']]);
+    // A live hole after the complete read is still a gap the stream has not recovered yet.
+    expect(completeEventHistory(complete, [event(7), event(9)])?.map(item => item.sequence)).toEqual([1, 3, 6, 7]);
+    expect(completeEventHistory([], [event(1), event(3)])?.map(item => item.sequence)).toEqual([1]);
+    expect(completeEventHistory(undefined, [event(1)])).toBeUndefined();
   });
 
   it('retains history beyond 800 events, sorts and deduplicates by sequence', () => {

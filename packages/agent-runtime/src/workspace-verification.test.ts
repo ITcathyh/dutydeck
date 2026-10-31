@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -9,6 +9,7 @@ import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentDriver, DriverFactory, Session, TaskRequestV1, VerificationRecord } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
 import { DutydeckRuntime, type RuntimeOptions } from './index.js';
+import { repositoryFingerprint } from './verification.js';
 import { WorkspaceManager } from './workspace.js';
 
 const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
@@ -371,6 +372,38 @@ process.stdout.write(marker.slice(4));
     expect(evidence.find(item => item.id === deletion.id)?.stale).toBe(true);
   });
 
+  it('verifies checkouts with uninitialized submodules by their recorded commit and still rejects real recursion', async () => {
+    const source = repository(); const child = repository();
+    git(source, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', child, 'deps/child');
+    git(source, 'commit', '-qam', 'add submodule');
+    const clone = join(temporary('dutydeck-clone-'), 'clone');
+    execFileSync('git', ['clone', '-q', source, clone]);
+    const deinit = join(temporary('dutydeck-deinit-'), 'deinit');
+    execFileSync('git', ['-c', 'protocol.file.allow=always', 'clone', '-q', '--recurse-submodules', source, deinit]);
+    git(deinit, 'submodule', '--quiet', 'deinit', '-f', 'deps/child');
+    const h = open(':memory:', { workspaceRoot: temporary('dutydeck-workspaces-') }); await h.runtime.initialize([agent]);
+    const worktree = await h.runtime.start({ agentId: agent.id, cwd: source, workspaceMode: 'worktree' });
+    for (const cwd of [clone, deinit, worktree.cwd]) {
+      expect(readdirSync(join(cwd, 'deps/child'))).toEqual([]);
+      expect(git(cwd, 'status', '--porcelain')).toBe('');
+      const session = cwd === worktree.cwd ? worktree : await h.runtime.start({ agentId: agent.id, cwd });
+      expect(await h.runtime.runVerification(session.id, { command: 'true' })).toMatchObject({ status: 'passed', stale: false });
+    }
+
+    // The parent's recorded gitlink commit is the uninitialized submodule's code state.
+    const before = await h.runtime.getCodeFingerprint((await h.runtime.start({ agentId: agent.id, cwd: clone })).id);
+    git(clone, 'update-index', '--cacheinfo', `160000,${git(source, 'rev-parse', 'HEAD')},deps/child`);
+    expect(await repositoryFingerprint(clone)).not.toBe(before);
+
+    // Content Git cannot see and a gitlink whose worktree loops back stay unverifiable.
+    writeFileSync(join(deinit, 'deps/child/unmanaged.txt'), 'hidden\n');
+    await expect(repositoryFingerprint(deinit)).rejects.toMatchObject({ code: 'VERIFICATION_FINGERPRINT_FAILED', message: expect.stringContaining('Recursive Git repository detected') });
+    const loop = temporary('dutydeck-loop-');
+    git(loop, 'init', '-q'); git(loop, 'config', 'core.worktree', clone);
+    writeFileSync(join(clone, 'deps/child/.git'), `gitdir: ${join(loop, '.git')}\n`);
+    await expect(repositoryFingerprint(clone)).rejects.toMatchObject({ code: 'VERIFICATION_FINGERPRINT_FAILED', message: expect.stringContaining('Recursive Git repository detected') });
+  });
+
   it('returns 400 for malformed verification and workspace inputs', async () => {
     const source = repository(); const h = open(':memory:'); await h.runtime.initialize([agent]);
     const session = await h.runtime.start({ agentId: agent.id, cwd: source });
@@ -430,6 +463,145 @@ process.stdout.write(marker.slice(4));
     expect(evidence.taskId).not.toBe(accepted.id);
     await vi.waitFor(() => expect(sent).toEqual(['accepted behind verification']));
     expect((await h.runtime.getTasks(session.id)).find(task => task.id === accepted.id)?.status).toBe('completed');
+  });
+
+  function admissionRuntime(options: RuntimeOptions = {}) {
+    const sent: string[] = [], gates = new Map<string, () => void>(), lost = new Set<string>(), background = new Set<string>();
+    const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+    const runtime = new DutydeckRuntime(repos, {
+      driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), ...options,
+      driverFactory: (_agent, _protocol, emit, _exit, sessionId) => ({
+        start: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true,
+        stop: async () => { gates.get(sessionId!)?.(); }, hasBackgroundWork: () => background.has(sessionId!),
+        send: async prompt => {
+          sent.push(prompt);
+          if (lost.has(sessionId!)) throw new Error('remote reply lost');
+          if (prompt.startsWith('hold')) await new Promise<void>(resolve => gates.set(sessionId!, resolve));
+          if (prompt.startsWith('background')) background.add(sessionId!);
+          emit({ type: 'text', data: { text: 'done' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+        }
+      })
+    });
+    repositories.push(repos); runtimes.push(runtime);
+    return { repos, runtime, sent, gates, lost, background };
+  }
+  /** A command that records its own start outside the repository, then waits for an optional release file. */
+  function marked(marker: string, release?: string, exitCode = 0) {
+    return `touch ${marker}${release ? `; while [ ! -f ${release} ]; do sleep 0.05; done` : ''}; exit ${exitCode}`;
+  }
+
+  it('rejects verification while the Session has an unknown execution result, without running the command', async () => {
+    const source = repository(); const h = admissionRuntime(); await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: agent.id, cwd: source });
+    h.lost.add(session.id);
+    expect((await h.runtime.send(session.id, 'reply lost')).status).toBe('reconcile_required');
+    await expect(h.runtime.runVerification(session.id, { command: 'touch executed' })).rejects.toMatchObject({ code: 'SESSION_BUSY' });
+    expect(existsSync(join(source, 'executed'))).toBe(false);
+    expect(await h.runtime.getVerifications(session.id)).toEqual([]);
+  });
+
+  it.each(['passed', 'failed', 'stopped'] as const)('keeps verification and other Sessions in the same directory from overlapping (verification %s)', async ending => {
+    const source = repository(); const h = admissionRuntime({ driverIdleTimeoutMs: 1 }); await h.runtime.initialize([agent]);
+    const a = await h.runtime.start({ agentId: agent.id, cwd: source }), b = await h.runtime.start({ agentId: agent.id, cwd: join(source, '.') });
+    const running = await h.runtime.dispatch(a.id, 'hold A');
+    await vi.waitFor(() => expect(h.gates.has(a.id)).toBe(true));
+    await expect(h.runtime.runVerification(b.id, { command: 'touch overlapped' })).rejects.toMatchObject({ code: 'SESSION_BUSY' });
+    expect(existsSync(join(source, 'overlapped'))).toBe(false);
+    const elsewhere = await h.runtime.start({ agentId: agent.id, cwd: repository() });
+    expect(await h.runtime.runVerification(elsewhere.id, { command: 'true' })).toMatchObject({ status: 'passed' });
+    h.gates.get(a.id)!();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(a.id)).find(task => task.id === running.id)?.status).toBe('completed'));
+
+    // A running verification holds the directory until it ends, whatever the ending, even without a live verifier driver.
+    await h.runtime.cleanupIdleDrivers(Date.now() + 1_000);
+    expect(h.runtime.getDriver(b.id)).toBeUndefined();
+    const release = join(temporary('dutydeck-release-'), 'release');
+    const verifying = h.runtime.runVerification(b.id, { command: `while [ ! -f ${release} ]; do sleep 0.05; done; exit ${ending === 'failed' ? 1 : 0}` });
+    await vi.waitFor(async () => expect((await h.runtime.getVerifications(b.id))[0]?.status).toBe('running'));
+    const waiting = await h.runtime.dispatch(a.id, 'A after verification');
+    await new Promise(resolve => setTimeout(resolve, 200));
+    expect(h.sent).not.toContain('A after verification');
+    expect((await h.runtime.getTasks(a.id)).find(task => task.id === waiting.id)?.status).toBe('queued');
+    if (ending === 'stopped') await h.runtime.stop(b.id); else writeFileSync(release, '');
+    expect(await verifying).toMatchObject({ status: ending === 'stopped' ? 'interrupted' : ending });
+    await vi.waitFor(() => expect(h.sent).toContain('A after verification'));
+  });
+
+  it('rechecks other Sessions after its record holds the directory and never runs over admitted work', async () => {
+    const source = repository(); let other = '';
+    const h = admissionRuntime({ driverIdleTimeoutMs: 1, authorizeExecution: async sessionId => {
+      // The second verification authorization runs after fingerprinting, just before the record is written.
+      if (sessionId === verifier && ++verificationChecks === 2) {
+        await h.runtime.dispatch(other, 'hold A');
+        await vi.waitFor(() => expect(h.gates.has(other)).toBe(true));
+      }
+    } });
+    let verifier = '', verificationChecks = 0;
+    await h.runtime.initialize([agent]);
+    other = (await h.runtime.start({ agentId: agent.id, cwd: source })).id;
+    verifier = (await h.runtime.start({ agentId: agent.id, cwd: source })).id;
+    // Without a live verifier driver only durable admission facts can hold the directory.
+    await h.runtime.cleanupIdleDrivers(Date.now() + 1_000);
+    expect(h.runtime.getDriver(verifier)).toBeUndefined();
+    await expect(h.runtime.runVerification(verifier, { command: 'touch overlapped' })).rejects.toMatchObject({ code: 'SESSION_BUSY' });
+    expect(existsSync(join(source, 'overlapped'))).toBe(false);
+    expect((await h.runtime.getVerifications(verifier)).map(record => record.status)).toEqual(['interrupted']);
+    h.gates.get(other)!();
+  });
+
+  it.each(['own', 'other'] as const)('refuses verification while %s native background work holds the directory and admits it afterwards', async holder => {
+    const source = repository(); const h = admissionRuntime(); await h.runtime.initialize([agent]);
+    const other = await h.runtime.start({ agentId: agent.id, cwd: source }), verifier = await h.runtime.start({ agentId: agent.id, cwd: source });
+    const working = holder === 'own' ? verifier : other;
+    expect((await h.runtime.send(working.id, 'background watcher')).status).toBe('completed');
+    expect(h.runtime.getRunningTaskCount()).toBe(1);
+    const marker = join(temporary('dutydeck-marker-'), 'ran');
+    await expect(h.runtime.runVerification(verifier.id, { command: marked(marker) })).rejects.toMatchObject({ code: 'SESSION_BUSY' });
+    expect(existsSync(marker)).toBe(false);
+    expect(await h.runtime.getVerifications(verifier.id)).toEqual([]);
+    h.background.delete(working.id);
+    expect(await h.runtime.runVerification(verifier.id, { command: marked(marker) })).toMatchObject({ status: 'passed' });
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  it.each(['passed', 'failed', 'timed_out', 'stopped'] as const)('admits only one of two concurrent verifications in a directory and lets the other retry after it %s', async ending => {
+    const source = repository(); const h = admissionRuntime(); await h.runtime.initialize([agent]);
+    const sessions = [await h.runtime.start({ agentId: agent.id, cwd: source }), await h.runtime.start({ agentId: agent.id, cwd: join(source, '.') })];
+    const scratch = temporary('dutydeck-marker-'), release = join(scratch, 'release');
+    const markers = sessions.map(session => join(scratch, session.id));
+    const refused: number[] = [];
+    const runs = sessions.map((session, index) => h.runtime.runVerification(session.id, { command: marked(markers[index]!, release, ending === 'failed' ? 1 : 0), timeoutSeconds: ending === 'timed_out' ? 2 : 30 }));
+    runs.forEach((run, index) => run.catch(error => { expect(error).toMatchObject({ code: 'SESSION_BUSY' }); refused.push(index); }));
+    await vi.waitFor(() => expect(refused.length + markers.filter(marker => existsSync(marker)).length).toBe(2));
+    expect(refused).toHaveLength(1);
+    const settled = refused[0]!, loser = sessions[settled]!, winner = sessions[1 - settled]!;
+    expect(existsSync(markers[1 - settled]!)).toBe(true);
+    expect(existsSync(markers[settled]!)).toBe(false);
+    // A later request is refused for as long as the admitted verification holds the directory.
+    await expect(h.runtime.runVerification(loser.id, { command: marked(markers[settled]!) })).rejects.toMatchObject({ code: 'SESSION_BUSY' });
+    expect(existsSync(markers[settled]!)).toBe(false);
+    if (ending === 'stopped') await h.runtime.stop(winner.id); else if (ending !== 'timed_out') writeFileSync(release, '');
+    expect(await runs[1 - settled]).toMatchObject({ status: ending === 'stopped' ? 'interrupted' : ending });
+    expect(await h.runtime.runVerification(loser.id, { command: marked(markers[settled]!) })).toMatchObject({ status: 'passed' });
+    expect(existsSync(markers[settled]!)).toBe(true);
+  });
+
+  it('holds the directory between saving its running record and starting the command', async () => {
+    const source = repository(); const h = admissionRuntime(); await h.runtime.initialize([agent]);
+    const first = await h.runtime.start({ agentId: agent.id, cwd: source }), second = await h.runtime.start({ agentId: agent.id, cwd: source });
+    const scratch = temporary('dutydeck-marker-');
+    // Pause the first verification in its admission recheck, which runs after the record is saved.
+    let lists = 0; let resume!: () => void; const paused = new Promise<void>(resolve => { resume = resolve; });
+    const list = h.repos.sessions.list.bind(h.repos.sessions);
+    vi.spyOn(h.repos.sessions, 'list').mockImplementation(async () => { if (++lists === 2) await paused; return list(); });
+    const running = h.runtime.runVerification(first.id, { command: marked(join(scratch, 'first')) });
+    await vi.waitFor(async () => expect((await h.runtime.getVerifications(first.id))[0]?.status).toBe('running'));
+    expect(existsSync(join(scratch, 'first'))).toBe(false);
+    await expect(h.runtime.runVerification(second.id, { command: marked(join(scratch, 'second')) })).rejects.toMatchObject({ code: 'SESSION_BUSY' });
+    expect(existsSync(join(scratch, 'second'))).toBe(false);
+    resume();
+    expect(await running).toMatchObject({ status: 'passed' });
+    expect(existsSync(join(scratch, 'first'))).toBe(true);
   });
 
   it('turns a persisted running verification into interrupted evidence on restart', async () => {

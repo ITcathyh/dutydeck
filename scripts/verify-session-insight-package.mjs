@@ -49,7 +49,7 @@ export function verifyPackageDirectory(packageRoot, options = {}) {
       execFileSync(process.execPath, [entrypoint, 'version', '--json'], runOptions)
     ));
     assert.equal(versions.engineVersion, 'dutydeck-ts-v1');
-    assert.equal(versions.parserVersion, 'ts-v1');
+    assert.equal(versions.parserVersion, 'ts-v2');
     assert.equal(versions.metricVersion, 'v2');
     const content = options.fixture ? readFileSync(options.fixture, 'utf8') : sample;
     assert.ok(content.trim(), 'Analysis fixture is empty.');

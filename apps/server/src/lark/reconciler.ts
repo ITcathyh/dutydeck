@@ -20,7 +20,7 @@ import {
   steeringOutcomeText,
   terminalTaskStates
 } from './card-renderer.js';
-import { deliverLarkStatusReaction, larkResultKey, larkSilentResultAnchor, readConfirmedLarkResult, sendLarkResult } from './result-delivery.js';
+import { deliverLarkStatusReaction, larkCompletionReactionOnly, larkResultKey, larkSilentResultAnchor, readConfirmedLarkResult, sendLarkResult } from './result-delivery.js';
 import { RECOVERY_TRACKING_NOTE } from './recovery-notes.js';
 import { isLarkDeterministicFailure } from './api-gate.js';
 import { redactTraceText } from './secret-redaction.js';
@@ -94,7 +94,11 @@ export async function performLarkCardReconcile(input: {
   /** Registered confirmations own the original request, including crashes before its host marker. */
   deferredTask?(sessionId: string, taskId: string): Promise<boolean>;
   authorizeFinalRelay?: (scope: import('./explicit-final.js').ExplicitFinalScope, actorId: string) => Promise<void>;
-  resultElements?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, cardId: string) => Promise<Array<Record<string, any>>>;
+  /**
+   * 结果卡上的交互元素（cardId 为空时是发卡前取元素，否则是发卡后绑定）。补发前取元素时给出 created：本轮自己的结果正文
+   * （插话、显式回传的轮次没有）和群 @ 开关，计划轮的计划记录还没建时据此补建。
+   */
+  resultElements?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, cardId: string, created?: { finalOutput?: string; groupMention: boolean }) => Promise<Array<Record<string, any>>>;
   terminalDecoration?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, config: StoredLarkConfig) => Promise<{ elements: Array<Record<string, any>>; cardInput: LarkCardInput }>;
   /** 按记录所属会话解析生效配置（群级呈现覆盖）。缺省时全部按 Bot 级配置补发。 */
   resolveConfig?: (saved: PersistedLarkCardTask) => Promise<StoredLarkConfig>;
@@ -364,8 +368,10 @@ export async function performLarkCardReconcile(input: {
       const currentElements = boundLarkCardElements([...quietNote ? [{ tag: 'markdown', element_id: 'recovery_note', content: quietNote }] : [],
         ...renderLarkProcessElements(events, config, true),
         ...(persisted.launcher_recovery_note ? [{ tag: 'markdown', element_id: 'launcher_recovery_note', content: LARK_LAUNCHER_RECOVERY_NOTE }] : [])]);
-      // 回执上的「结果见下条」：只贴表情的模式下这次对账不会补发结果消息。
-      const resultFollows = completed && effective.completionReactionOnly !== true;
+      // 只贴表情与实时链路同一判断：计划轮和任务通道仍补发结果卡。
+      const reactionOnly = completed && larkCompletionReactionOnly(effective, persisted.prompt, mapping.externalId);
+      // 回执上的「结果见下条」：只贴表情的轮次这次对账不会补发结果消息。
+      const resultFollows = completed && !reactionOnly;
       let deliveredElements = persisted.last_successful_elements;
       const updateProcessCard = (messageId: string, elements: Array<Record<string, any>>) => service.update({
         beforeSend: beforeProcessSend,
@@ -431,7 +437,7 @@ export async function performLarkCardReconcile(input: {
         try {
           // 完成时只贴表情：重启补发同样不发结果卡，只补那一枚表情。
           // 失败/中断/取消照旧补发结果卡——重启不是把失败藏起来的理由。
-          if (!explicit && completed && effective.completionReactionOnly === true) {
+          if (!explicit && reactionOnly) {
             reactionDelivered = await deliverLarkStatusReaction(
               service, { appId: persisted.app_id, messageId: mapping.externalId, completed: true }, log, input.deliveryStore);
           } else if ((resultDue || receiptOnly) && !quietNote) {
@@ -442,10 +448,12 @@ export async function performLarkCardReconcile(input: {
           const mention = larkNotice('result', effective, {
             chatType: persisted.chat_type, senderOpenId: persisted.sender_open_id, senderType: persisted.sender_type }).mention;
           const decoration = !receiptOnly ? await input.terminalDecoration?.(mapping, { ...persisted, runtime_task_id: runtimeTask.id, state }, effective) : undefined;
+          const resultBody = explicit ? [] : steered ? [{ tag: 'markdown', element_id: 'steer_note', content: steeringOutcomeText(steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : events);
+          const finalOutput = explicit || steered ? undefined : String(resultBody.find(element => element.element_id === 'final_output')?.content ?? '');
           const elements = [
-            ...(explicit ? [] : steered ? [{ tag: 'markdown', element_id: 'steer_note', content: steeringOutcomeText(steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : events)),
+            ...resultBody,
             ...(decoration?.elements ?? []),
-            ...(!receiptOnly && completed && input.resultElements ? await input.resultElements(mapping, persisted, '') : []),
+            ...(!receiptOnly && completed && input.resultElements ? await input.resultElements(mapping, persisted, '', { finalOutput, groupMention: Boolean(mention) }) : []),
             ...(mention ? [{ tag: 'markdown', element_id: 'group_mention', content: mention }] : [])];
           finalCardInput = {
             ...cardContext, permissionMode: larkPermissionMode(config), state, cardKind: 'result',

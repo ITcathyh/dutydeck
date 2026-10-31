@@ -20,7 +20,7 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
 });
 
 /** 计划轮、执行轮都经过真实 Runtime 与持久化存储；Agent 驱动记录每一轮实际收到的权限模式和 prompt。 */
-async function harness(agentId = 'claude') {
+async function harness(agentId = 'claude', options: { completionReactionOnly?: boolean; holdFirstTurn?: Promise<void> } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-plan-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const turns: Array<{ prompt: string; mode: PermissionMode }> = [];
@@ -33,6 +33,7 @@ async function harness(agentId = 'claude') {
         setPermissionMode: next => { mode = next; },
         send: async prompt => {
           turns.push({ prompt, mode });
+          if (turns.length === 1) await options.holdFirstTurn;
           emit({ type: 'text', data: { text: mode === 'deny-all' ? `## 计划 ${turns.length}\n1. 修改 src/login.ts 的报错文案\n2. 运行 pnpm test 验证` : '已按计划完成修改。' } });
           emit({ type: 'completed', data: { stopReason: 'end_turn' } });
         }
@@ -44,7 +45,8 @@ async function harness(agentId = 'claude') {
   await runtime.initialize([agent]);
   const config: StoredLarkConfig = { appId: 'cli_plan', appSecret: 'fake-secret', workspace: cwd, defaultAgentId: agentId, permissionMode: 'ask', listening: true,
     fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
-    compactTrace: false, allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [{ openId: 'ou_carol', name: 'Carol' }], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off' };
+    compactTrace: false, allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [{ openId: 'ou_carol', name: 'Carol' }], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off',
+    ...(options.completionReactionOnly ? { completionReactionOnly: true } : {}) };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
   let nextCard = 0;
   const cards = new Map<string, any>();
@@ -59,10 +61,20 @@ async function harness(agentId = 'claude') {
     getMessageItems: vi.fn(async () => [])
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config });
+  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config });
+  let current = createCoordinator();
+  const coordinator = current;
   await coordinator.initializeWorkflows(config);
   await coordinator.startReconciliation(config);
-  cleanups.push(async () => { coordinator.stop(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
+  cleanups.push(async () => { current.stop(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
+  /** 进程重启：旧协调器停下，新协调器只凭持久化记录恢复并对账。 */
+  const restart = async () => {
+    current.stop();
+    current = createCoordinator();
+    await current.initializeWorkflows(config);
+    await current.startReconciliation(config);
+    return current;
+  };
   const plans = async () => (await repos.config.list!(`lark.interaction.${config.appId}.`)).map(row => JSON.parse(row.value) as LarkInteraction).filter(item => item.kind === 'plan');
   const tasks = async () => (await Promise.all((await runtime.listSessions()).map(session => runtime.getTasks(session.id)))).flat();
   const settled = (count: number) => vi.waitFor(async () => {
@@ -79,8 +91,8 @@ async function harness(agentId = 'claude') {
     return { record, card: cards.get(record.cardId!) };
   };
   const click = (record: LarkInteraction, action: string, actor = 'ou_alice', extra: Record<string, unknown> = {}) =>
-    coordinator.handleAction({ dutydeck_workflow: action, request_id: record.id, generation: record.boot, ...extra }, actor, { messageId: record.cardId, chatId: 'oc_group' });
-  return { repos, runtime, config, coordinator, service, cards, turns, plans, tasks, settled, planCard, click };
+    current.handleAction({ dutydeck_workflow: action, request_id: record.id, generation: record.boot, ...extra }, actor, { messageId: record.cardId, chatId: 'oc_group' });
+  return { repos, runtime, config, coordinator, service, cards, turns, plans, tasks, settled, planCard, click, restart };
 }
 
 const elementIds = (card: any) => (card.elements as any[]).flatMap(element => [element.element_id, ...(element.elements ?? []).map((child: any) => child.element_id)]);
@@ -174,6 +186,57 @@ describe('/plan in Feishu', () => {
     expect(await h.click(record, 'plan_approve')).toMatchObject({ type: 'error', content: expect.stringContaining('更新的任务') });
     expect((await h.plans())[0]!.state).toBe('expired');
     expect(h.turns).toHaveLength(2);
+  });
+
+  // 计划轮跑完、结果卡发出前进程退出：重启补发必须送达计划正文和可用的批准按钮，开了「完成时只贴表情」也一样。
+  it.each([false, true])('delivers the plan card with approval after a restart before the result was sent (completionReactionOnly: %s)', async completionReactionOnly => {
+    let finishPlan!: () => void;
+    const h = await harness('claude', { completionReactionOnly, holdFirstTurn: new Promise<void>(resolve => { finishPlan = resolve; }) });
+    await h.coordinator.handle(event('om_plan', '/plan 把登录页的报错改成中文'), h.config);
+    await vi.waitFor(() => expect(h.turns).toHaveLength(1), { timeout: 10_000 });
+    h.coordinator.stop();
+    finishPlan();
+    await h.settled(1);
+    expect([...h.cards.values()].some(card => card.cardKind === 'result')).toBe(false);
+    expect(await h.plans()).toEqual([]);
+
+    const restored = await h.restart();
+    const { record, card } = await h.planCard();
+    expect(record).toMatchObject({ state: 'pending', question: expect.stringContaining('修改 src/login.ts') });
+    expect(card).toMatchObject({ cardKind: 'result', state: 'completed' });
+    expect(elementIds(card)).toEqual(expect.arrayContaining(['final_output', 'workflow_plan_status', 'workflow_plan_approve', 'workflow_plan_cancel']));
+    const [mapping] = await h.repos.channelMappings.list(`lark-card:${h.config.appId}`);
+    expect(JSON.parse(mapping!.extra!)).toMatchObject({ final_delivery_state: 'delivered', final_message_id: record.cardId });
+
+    // 对账再跑不重复发卡，也不另建计划。
+    await restored.reconcile(h.config);
+    expect([...h.cards.values()].filter(item => item.cardKind === 'result')).toHaveLength(1);
+    expect(await h.plans()).toHaveLength(1);
+
+    // 补发的批准按钮仍只认发起人，批准后执行一次。
+    expect(await h.click(record, 'plan_approve', 'ou_bob')).toMatchObject({ type: 'error', content: '当前账号无权操作此任务。' });
+    expect(await h.click(record, 'plan_approve')).toMatchObject({ type: 'success', content: expect.stringContaining('已批准') });
+    await h.settled(2);
+    expect(h.turns[1]).toMatchObject({ mode: 'ask', prompt: expect.stringContaining(planApprovedPrompt) });
+    expect(await h.click(record, 'plan_approve')).toMatchObject({ type: 'error' });
+    await new Promise(resolve => setTimeout(resolve, 200));
+    expect(h.turns).toHaveLength(2);
+  });
+
+  it('does not create plan actions when restart recovery delivers an ordinary turn', async () => {
+    let finishTurn!: () => void;
+    const h = await harness('claude', { holdFirstTurn: new Promise<void>(resolve => { finishTurn = resolve; }) });
+    await h.coordinator.handle(event('om_plain', '把登录页的报错改成中文'), h.config);
+    await vi.waitFor(() => expect(h.turns).toHaveLength(1), { timeout: 10_000 });
+    h.coordinator.stop();
+    finishTurn();
+    await h.settled(1);
+    await h.restart();
+    await vi.waitFor(() => expect([...h.cards.values()].filter(card => card.cardKind === 'result')).toHaveLength(1), { timeout: 10_000 });
+    const card = [...h.cards.values()].find(item => item.cardKind === 'result');
+    expect(elementIds(card)).toContain('final_output');
+    expect(elementIds(card).filter((id: string | undefined) => id?.startsWith('workflow_plan_'))).toEqual([]);
+    expect(await h.plans()).toEqual([]);
   });
 
   it('refuses /plan on an Agent that cannot block writes instead of running it', async () => {

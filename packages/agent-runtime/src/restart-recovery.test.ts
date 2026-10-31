@@ -428,6 +428,58 @@ describe('persistent task recovery across a reopened database', () => {
     expect(backend.prompts).toEqual(['first']);
     expect(backend.recoveredAfter(1)).toBe(0);
   });
+
+  it('notifies task settlement exactly once for a recovered turn despite late events and repeated restarts', async () => {
+    const file = database(), backend = persistentTurn(true), onTaskSettled = vi.fn();
+    const first = open(file, backend.factory, { onTaskSettled });
+    await first.runtime.initialize([agent]);
+    const session = await first.runtime.start({ agentId: agent.id });
+    const task = await first.runtime.dispatch(session.id, 'first');
+    await vi.waitFor(() => expect(backend.prompts).toEqual(['first']));
+    await close(first);
+    expect(onTaskSettled).not.toHaveBeenCalled();
+
+    const second = open(file, backend.factory, { onTaskSettled });
+    await second.runtime.initialize([agent]);
+    backend.publish('recovered answer'); backend.complete();
+    await vi.waitFor(() => expect(onTaskSettled).toHaveBeenCalledOnce());
+    expect(onTaskSettled).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), expect.objectContaining({ id: task.id, status: 'completed' }));
+    // A late duplicate completion from the retained driver is not a second settlement.
+    backend.complete();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await close(second);
+
+    const third = open(file, backend.factory, { onTaskSettled });
+    await third.runtime.initialize([agent]);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(backend.recoveredAfter(2)).toBe(0);
+    expect(onTaskSettled).toHaveBeenCalledOnce();
+  });
+
+  it('does not notify task settlement when a recovered turn is stopped, matching an ordinary stopped turn', async () => {
+    const file = database(), backend = persistentTurn(true), onTaskSettled = vi.fn();
+    const first = open(file, backend.factory, { onTaskSettled });
+    await first.runtime.initialize([agent]);
+    const ordinaryCwd = mkdtempSync(join(tmpdir(), 'restart-ordinary-')); directories.push(ordinaryCwd);
+    const ordinary = await first.runtime.start({ agentId: agent.id, cwd: ordinaryCwd });
+    const ordinaryTask = await first.runtime.dispatch(ordinary.id, 'ordinary');
+    await vi.waitFor(() => expect(backend.prompts).toEqual(['ordinary']));
+    await first.runtime.stop(ordinary.id);
+    await vi.waitFor(async () => expect((await first.runtime.getTasks(ordinary.id)).find(item => item.id === ordinaryTask.id)?.status).toBe('reconcile_required'));
+    expect(onTaskSettled).not.toHaveBeenCalled();
+    const session = await first.runtime.start({ agentId: agent.id });
+    const task = await first.runtime.dispatch(session.id, 'recovered');
+    await vi.waitFor(() => expect(backend.prompts).toEqual(['ordinary', 'recovered']));
+    await close(first);
+
+    const second = open(file, backend.factory, { onTaskSettled });
+    await second.runtime.initialize([agent]);
+    expect(second.runtime.getRunningTaskCount()).toBe(1);
+    await second.runtime.stop(session.id);
+    expect((await second.runtime.getTasks(session.id)).find(item => item.id === task.id)?.status).toBe('reconcile_required');
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(onTaskSettled).not.toHaveBeenCalled();
+  });
 });
 
 it('attaches a completed terminal once via getTerminalDriver without starting or changing the task', async () => {

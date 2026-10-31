@@ -15,7 +15,11 @@ if (process.env.DUTYDECK_TEST_HERDR === 'true') cases.push(['herdr', false]);
 it.each(cases)('isolates real %s children, including stale tmux server values (empty PATH: %s)', async (kind, emptyPath) => {
   const cwd = mkdtempSync(join(tmpdir(), 'dd-child-pty-'));
   const herdrSession = `dutydeck-${randomBytes(16).toString('hex')}`;
+  vi.stubEnv('HOME', cwd);
   vi.stubEnv('TMUX_TMPDIR', cwd);
+  // An inherited TMUX would point this test's own tmux calls at the host server.
+  vi.stubEnv('TMUX', undefined);
+  vi.stubEnv('TMUX_PANE', undefined);
   const identityBin = join(cwd, 'cli-identity', 'old.bin');
   const inherited = {
     BOTMUX_SESSION_ID: 'sentinel-old-session', BOTMUX_OWNER_OPEN_ID: 'sentinel-owner',

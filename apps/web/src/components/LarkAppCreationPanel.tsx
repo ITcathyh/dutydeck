@@ -1,35 +1,39 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ExternalLink, QrCode } from 'lucide-react';
-import { api, type LarkAppCreationJob } from '../api';
+import { api, ApiError, type LarkAppCreationJob } from '../api';
+import { currentInstance, instanceHomePath } from '../instance';
+import { requestId } from '../request-id';
 import { Banner, Button, Field, Input, Spinner } from './primitives';
 
-const pendingKey = 'dutydeck:lark-app-creation';
+// Older pages kept one record for every instance in the tab, so such a record may belong to any of them.
+const legacyKey = 'dutydeck:lark-app-creation';
+// A request ID only exists on the instance that started it; never resume or resubmit it elsewhere.
+const pendingKey = () => `${legacyKey}:${instanceHomePath(currentInstance())}`;
 type CreationRequest = { requestId: string; name: string; forceLogin?: boolean };
+type PendingRequest = CreationRequest & { legacy?: boolean };
 const terminal = (job?: LarkAppCreationJob) => Boolean(job && ['completed', 'pending_review', 'failed', 'cancelled'].includes(job.status));
 
-function readPending(): CreationRequest | undefined {
+function readPending(key: string): CreationRequest | undefined {
   try {
-    const value = JSON.parse(sessionStorage.getItem(pendingKey) ?? 'null');
+    const value = JSON.parse(sessionStorage.getItem(key) ?? 'null');
     if (typeof value?.requestId === 'string' && typeof value?.name === 'string') return value;
   } catch { /* Storage can be unavailable in a private browser session. */ }
   return undefined;
 }
 
-function remember(request?: CreationRequest) {
+function remember(key: string, request?: CreationRequest) {
   try {
-    if (request) sessionStorage.setItem(pendingKey, JSON.stringify(request));
-    else sessionStorage.removeItem(pendingKey);
+    if (request) sessionStorage.setItem(key, JSON.stringify(request));
+    else sessionStorage.removeItem(key);
   } catch { /* The current view still retains its request ID. */ }
 }
 
-// randomUUID is unavailable on plain HTTP LAN addresses; getRandomValues works there.
-function requestId(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
-  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
-  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+function initialRequest(): PendingRequest | undefined {
+  const own = readPending(pendingKey());
+  if (own) return own;
+  const legacy = readPending(legacyKey);
+  return legacy && { ...legacy, legacy: true };
 }
 
 export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
@@ -37,7 +41,7 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
   onBusyChange(busy: boolean): void;
 }) {
   const qc = useQueryClient();
-  const [request, setRequest] = useState(readPending);
+  const [request, setRequest] = useState(initialRequest);
   const [name, setName] = useState(request?.name ?? 'Dutydeck 助手');
   const [forceLogin, setForceLogin] = useState(false);
   const completedId = useRef('');
@@ -63,12 +67,19 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
     mutationFn: async (appId: string) => {
       if (job.data?.status === 'pending_review') await onCreated(appId, true, true);
       else await onCreated(appId, job.data?.status === 'completed', false, job.data?.slashCommands);
-      remember();
+      forget();
     },
   });
   const state = job.data;
-  const busy = start.isPending || action.isPending || finish.isPending || Boolean(request && !terminal(state));
+  const missing = job.error instanceof ApiError && job.error.status === 404;
+  // An old shared record is not this instance's until this instance reports the job.
+  const busy = start.isPending || action.isPending || finish.isPending || Boolean(request && (!request.legacy || state) && !terminal(state));
   useEffect(() => { onBusyChange(busy); }, [busy, onBusyChange]);
+  useEffect(() => {
+    if (!request?.legacy || !state) return;
+    const { legacy: _legacy, ...own } = request;
+    remember(pendingKey(), own); remember(legacyKey); setRequest(own);
+  }, [request, state]);
   useEffect(() => () => onBusyChange(false), [onBusyChange]);
   const complete = finish.mutate;
   useEffect(() => {
@@ -77,14 +88,15 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
     complete(state.appId);
   }, [state, complete]);
 
-  const create = () => {
-    const next = request ?? { requestId: requestId(), name: name.trim(), forceLogin };
-    remember(next);
+  const submit = (next: CreationRequest) => {
+    remember(pendingKey(), next);
     setRequest(next);
     start.mutate(next);
   };
+  const create = () => submit({ requestId: requestId(), name: name.trim(), forceLogin });
+  const forget = () => { remember(pendingKey()); if (request?.legacy) remember(legacyKey); };
   const reset = () => {
-    remember(); setRequest(undefined); completedId.current = '';
+    forget(); setRequest(undefined); completedId.current = '';
     start.reset(); action.reset(); finish.reset();
   };
   const error = action.error ?? finish.error;
@@ -100,7 +112,7 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
       <Button variant="primary" icon={<QrCode size={15}/>} disabled={!name.trim()} onClick={create}>创建机器人</Button>
     </> : <>
       <p className="text-caption font-medium text-primary">{request.name}{state?.tenantName && ` · ${state.tenantName}`}{state?.accountName && ` · ${state.accountName}`}</p>
-      {(!state || state.status === 'preparing') && <Spinner label="正在连接飞书开放平台…"/>}
+      {(!state && !job.error || state?.status === 'preparing') && <Spinner label="正在连接飞书开放平台…"/>}
       {state?.status === 'waiting_for_scan' && <div className="flex flex-wrap items-center gap-4">
         {state.qrDataUrl && <img src={state.qrDataUrl} alt="创建机器人：飞书登录二维码" className="h-40 w-40 rounded-md bg-surface"/>}
         <div className="space-y-2 text-caption text-secondary"><p role="status">{state.scanConfirmed ? '已扫码，请在飞书中确认账号和企业' : '请用飞书扫码，确认账号和企业'}</p><p>确认后开始创建，无需手动复制 App ID 或 App Secret。</p></div>
@@ -111,7 +123,11 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
       {state?.status === 'pending_review' && <Banner tone="warning">应用已完成配置并提交发布，正在等待飞书管理员审核。可以继续选择 Agent，审核通过后生效。</Banner>}
       {state?.status === 'failed' && <Banner tone="danger">{state.error ?? '创建未完成'}{state.appId && <div className="mt-1">应用 {state.appId} 已创建，可继续处理这个应用。</div>}</Banner>}
       {state?.status === 'cancelled' && <p role="status" className="text-caption text-secondary">已取消创建，尚未创建飞书应用。</p>}
-      {(job.error || start.error) && !state && <Banner tone="warning">暂时无法获取创建进度。重新连接会继续查询本次创建。<Button variant="ghost" loading={start.isPending} onClick={create}>重新连接</Button></Banner>}
+      {job.error && !state && (!missing
+        ? <Banner tone="warning">暂时无法获取创建进度，创建可能仍在进行。重新连接只查询本次创建，不会重新发起。<Button variant="ghost" loading={job.isFetching} onClick={() => void job.refetch()}>重新连接</Button></Banner>
+        : request.legacy
+          ? <Banner tone="warning">这条未完成的创建记录来自旧版页面，当前实例查不到它，可能是在其他实例发起的，请到发起它的实例查看进度。放弃只清除本页记录，不会取消或重新发起创建。<Button variant="ghost" onClick={reset}>放弃此记录</Button></Banner>
+          : <Banner tone="warning">当前实例没有这次创建的记录，请求可能没有送达。可以用同一请求重新提交，或放弃此记录后重新创建。<Button variant="ghost" loading={start.isPending} onClick={() => submit(request)}>重新提交本次创建</Button><Button variant="ghost" onClick={reset}>放弃此记录</Button></Banner>)}
       {job.error && state && !terminal(state) && <Banner tone="warning">读取进度失败，正在重新连接；创建任务可能仍在进行。</Banner>}
       {error && <Banner tone="danger">{error.message}</Banner>}
       <div className="flex flex-wrap gap-2">

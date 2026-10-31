@@ -4,6 +4,9 @@ import { COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI, reactionDedupeKey, t
 import { isLarkReplyTargetUnavailable, larkFailureKind } from './api-gate.js';
 import { isLarkMessageUnupdatable } from './card-renderer.js';
 import { buildLarkCard, larkCardFinalOutputText, larkCardShownResult, LarkServiceError, type LarkCardInput, type LarkCardService, type LarkWriteGuard } from './service.js';
+import type { StoredLarkConfig } from './config.js';
+import { larkTaskAgentGuid } from './task-agent.js';
+import { planTaskOf } from '../plan-mode.js';
 
 // Live delivery and restart reconciliation share one provider UUID per process card.
 export const larkResultKey = (processMessageId: string) =>
@@ -70,6 +73,13 @@ async function releaseDeliveryClaim(store: ConfigRepository | undefined, claim: 
     await store.compareAndSet(claim.claimKey, claim.claimRaw, '');
   }
 }
+
+/**
+ * 「完成时只贴表情」能否代替这一轮的结果卡。计划轮的计划正文和批准按钮都在结果卡上，任务通道的合成事件
+ * 没有可贴的原消息：这两类照常发结果卡。实时交付与重启补发共用这一判断。
+ */
+export const larkCompletionReactionOnly = (config: Pick<StoredLarkConfig, 'completionReactionOnly'>, prompt: string, messageId: string) =>
+  config.completionReactionOnly === true && planTaskOf(prompt) === undefined && !larkTaskAgentGuid(messageId);
 
 /**
  * 一轮结束时在原始请求消息上贴状态表情：完成贴对勾，失败或中断贴叉号。

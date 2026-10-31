@@ -60,6 +60,26 @@ describe('session automation schedules', () => {
     expect(screen.getByText('巡检 · 已停用')).toBeTruthy();
   });
 
+  it('runs immediately on a plain HTTP LAN page without crypto.randomUUID and keeps the key for a retry', async () => {
+    const original = Object.getOwnPropertyDescriptor(crypto, 'randomUUID');
+    Object.defineProperty(crypto, 'randomUUID', { configurable: true, value: undefined });
+    try {
+      mount([schedule]);
+      const run = vi.spyOn(api, 'runSchedule').mockRejectedValueOnce(new Error('网络断开')).mockResolvedValue({ occurrence: {} as PublicSessionScheduleOccurrence });
+      const user = userEvent.setup();
+      await user.click(await screen.findByRole('button', { name: '立即执行' }));
+      await screen.findByText('网络断开');
+      expect(screen.queryByText(/randomUUID/)).toBeNull();
+      await user.click(screen.getByRole('button', { name: '立即执行' }));
+      await screen.findByText('已提交立即执行，可在最近触发记录中查看结果；原计划时间保持不变。');
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(run.mock.calls[0]![2]).toEqual({ expectedRevision: 3, idempotencyKey: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/) });
+      expect(run.mock.calls[1]![2]).toEqual(run.mock.calls[0]![2]);
+    } finally {
+      if (original) Object.defineProperty(crypto, 'randomUUID', original); else delete (crypto as { randomUUID?: unknown }).randomUUID;
+    }
+  });
+
   it('refreshes a definitive revision conflict before a fresh immediate-execution request', async () => {
     const read = mount([schedule]);
     const run = vi.spyOn(api, 'runSchedule').mockRejectedValueOnce(new ApiError('计划已更新，请重试', 'CONFLICT', 409)).mockResolvedValue({ occurrence: {} as PublicSessionScheduleOccurrence });

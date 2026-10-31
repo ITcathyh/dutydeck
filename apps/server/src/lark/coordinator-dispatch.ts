@@ -35,7 +35,7 @@ import {
   renderLarkResultElements,
   type LarkCardElement
 } from './card-renderer.js';
-import { deliverLarkStatusReaction, isLarkFinalContentAuditRejected, larkResultKey, larkSilentResultAnchor, sendLarkResult } from './result-delivery.js';
+import { deliverLarkStatusReaction, isLarkFinalContentAuditRejected, larkCompletionReactionOnly, larkResultKey, larkSilentResultAnchor, sendLarkResult } from './result-delivery.js';
 import { larkRedispatchAgentNote, larkRedispatchCardNote } from './turn-redispatch.js';
 import { larkCommandEcho, parseSlashCommand } from './commands.js';
 import { escapeLarkPromptEcho, renderQueueSummaryElement, QUEUE_SUMMARY_ELEMENT_ID } from './queue-summary.js';
@@ -1395,7 +1395,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 只对成功终态生效——失败/中断/取消仍必须发结果卡，一个表情等于把失败藏起来。
         // 任务通道的合成事件没有可贴的原消息，只能照常发结果卡，否则用户什么也收不到。
         // 计划轮必须发结果卡：计划和批准按钮都在卡上。
-        if (!explicit && !task.fallbackNote && completionReactionOnly && state === 'completed' && planTask === undefined && !larkTaskAgentGuid(event.messageId)) {
+        if (!explicit && !task.fallbackNote && state === 'completed' && larkCompletionReactionOnly(config, prompt, event.messageId)) {
           const reacted = await deliverLarkStatusReaction(this.service, { appId: config.appId, messageId: larkMessageAnchor(event), completed: true }, this.log, this.workflowOptions.store);
           if (this.stopped || task.turn !== currentTurn) return;
           // 贴失败就不记「已交付」：这枚表情是用户唯一能看到的完成信号，交给对账重试。

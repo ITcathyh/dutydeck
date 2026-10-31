@@ -18,7 +18,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createCliUi, type CliUi } from '../cli-ui.js';
 import { createPrompter, PromptAbortedError, PromptUnavailableError, type Prompter } from './prompts.js';
 import { detectAgents, validateWorkingDirectory, type DetectedAgent } from './detect.js';
-import { isSecretKey, maskSecret, readExistingConfig, writeEnvFile, type WriteEnvResult } from './env-file.js';
+import { isSecretKey, MANAGED_KEYS, maskSecret, readExistingConfig, writeEnvFile, type WriteEnvResult } from './env-file.js';
 import { bindLarkApp, renderLarkBindResult, type LarkBindResult } from './lark-bind.js';
 import { isValidLarkAppId } from '../lark/open-platform-configurator.js';
 import { readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
@@ -118,9 +118,13 @@ async function readSecretFromFd(fd: string): Promise<string> {
   }
 }
 
-/** 掩码后的配置快照，用于回显与 JSON——机密永不原样出现。 */
+/**
+ * 掩码后的配置快照，用于回显——机密永不原样出现。只有向导管理的非机密项显示原值；
+ * 其余键（Agent 配置 JSON、升级前留下的令牌等）可能嵌着凭据，只列键名。
+ */
 function maskedView(entries: Map<string, string>): Array<[string, string]> {
-  return [...entries.entries()].map(([key, value]) => [key, isSecretKey(key) ? maskSecret(value) : value]);
+  const shown = new Set<string>(MANAGED_KEYS);
+  return [...entries.entries()].map(([key, value]) => [key, isSecretKey(key) ? maskSecret(value) : shown.has(key) ? value : '(内容不回显)']);
 }
 
 export async function runSetup(options: SetupCliOptions = {}, dependencies: SetupDependencies = {}): Promise<SetupResult> {

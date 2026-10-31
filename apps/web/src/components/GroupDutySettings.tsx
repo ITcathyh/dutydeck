@@ -9,6 +9,8 @@ type Responder = 'none' | 'self' | 'other';
 /** 一个场景包的草稿：参数按输入框里的文字存，提交时再按类型转换。 */
 type PackDraft = { enabled: boolean; params: Record<string, string> };
 type Draft = { responder: Responder; packs: Record<string, PackDraft> };
+/** 编辑中的草稿：记下开始编辑时的版本和原值，后台刷新不改它们，保存时据此判断改了什么、核对冲突。 */
+type Editing = { revision: number; base: Draft; value: Draft };
 
 /** 列表参数只按逗号（中英文）和换行分隔：路径和关键字里可以有空格。 */
 const listItems = (text: string) => [...new Set(text.split(/[,，\n]+/).map(item => item.trim()).filter(Boolean))];
@@ -50,23 +52,26 @@ const missingSourceParams = (scenario: CollaborationScenario, pack: PackDraft) =
 /** 群设置里的分工：接话人和各场景包的开关与参数。只提交改动的那几项。 */
 export function GroupDutySettings({ appId, chatId, botName, duty, scenarios, onSaved }: { appId: string; chatId: string; botName?: string; duty: CollaborationDuty; scenarios: CollaborationScenario[]; onSaved(): Promise<unknown> }) {
   const saved = draftOf(duty, scenarios, appId);
-  const [draft, setDraft] = useState<Draft | null>(null);
+  const [draft, setDraft] = useState<Editing | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: 'success' | 'warning'; text: string } | null>(null);
-  const value = draft ?? saved;
-  const update = (patch: Partial<Draft>) => { setDraft({ ...value, ...patch }); setNotice(null); };
+  const base = draft?.base ?? saved;
+  const value = draft?.value ?? saved;
+  const update = (patch: Partial<Draft>) => { setDraft({ revision: draft?.revision ?? duty.revision, base, value: { ...value, ...patch } }); setNotice(null); };
   // 编辑中概览新增了包时，草稿里还没有它，用已保存的值。
-  const packOf = (id: string) => value.packs[id] ?? saved.packs[id]!;
+  const basePack = (id: string) => base.packs[id] ?? saved.packs[id]!;
+  const packOf = (id: string) => value.packs[id] ?? basePack(id);
   const updatePack = (id: string, patch: Partial<PackDraft>) => update({ packs: { ...value.packs, [id]: { ...packOf(id), ...patch } } });
-  const responderChanged = value.responder !== saved.responder;
-  const changedParams = (id: string) => Object.keys(packOf(id).params).filter(name => packOf(id).params[name] !== saved.packs[id]!.params[name]);
-  const changedPacks = scenarios.filter(scenario => packOf(scenario.id).enabled !== saved.packs[scenario.id]!.enabled || changedParams(scenario.id).length);
+  const responderChanged = value.responder !== base.responder;
+  const changedParams = (id: string) => Object.keys(packOf(id).params).filter(name => packOf(id).params[name] !== basePack(id).params[name]);
+  const changedPacks = scenarios.filter(scenario => packOf(scenario.id).enabled !== basePack(scenario.id).enabled || changedParams(scenario.id).length);
   const blocked = changedPacks.some(scenario => missingSourceParams(scenario, packOf(scenario.id)).length);
   const other = duty.responder && duty.responder.appId !== appId ? duty.responder : undefined;
 
   const save = useMutation({
     mutationFn: () => {
-      const body: UpdateCollaborationDutyInput = { expectedRevision: duty.revision };
+      // 用开始编辑时的版本核对：期间别人改过就冲突，不拿刷新后的版本替旧草稿放行。
+      const body: UpdateCollaborationDutyInput = { expectedRevision: draft?.revision ?? duty.revision };
       if (responderChanged) body.responder = value.responder === 'self' ? 'self' : null;
       // 参数只给改动的键，服务端按包默认 → 已有绑定 → 这次的值合并。
       if (changedPacks.length) body.scenarios = Object.fromEntries(changedPacks.map(scenario => {

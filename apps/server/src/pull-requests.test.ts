@@ -8,6 +8,7 @@ import { createRepositories, executionTaskId } from '@dutydeck/storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CiProviderRegistry } from './ci-providers.js';
 import type { CiNotice } from './ci-webhook.js';
+import { buildPullRequestConfirmCard } from './lark/pull-request-card.js';
 import { assertPushTarget, redactGitOutput } from './pull-request-git.js';
 import { PR_COMMENT_MARKER, PullRequestService, parseReviewVerdicts, snapshotFailure } from './pull-requests.js';
 import { createTurnDiffObserver } from './turn-diff.js';
@@ -63,7 +64,7 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
   };
   const provider: CiProvider = {
     id: 'fake', displayName: 'Fake Git', changeRequestLabel: number => `PR #${number}`,
-    matchRepository: url => url === remote ? { owner: 'group', name: 'repo', slug: 'group/repo' } : undefined,
+    matchRepository: url => url === remote || url === `file://${remote}` ? { owner: 'group', name: 'repo', slug: 'group/repo' } : undefined,
     getPipelineStatus: vi.fn(async () => state.pipeline),
     getFailureLogs: vi.fn(async () => [{ job: 'test', stage: 'test', reason: 'failed', log: state.log }]),
     ...(options.withoutPullRequests ? {} : {
@@ -271,8 +272,164 @@ describe('开 PR：本地提交', () => {
   });
 });
 
+describe('开 PR：推送目标', () => {
+  const branchesOf = async (gitDir: string) => (await run('git', ['--git-dir', gitDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads'])).stdout.trim();
+  const otherRepository = async (f: Awaited<ReturnType<typeof fixture>>) => {
+    const other = join(f.root, 'other.git');
+    await run('git', ['init', '-q', '--bare', '-b', 'main', other]);
+    return other;
+  };
+
+  it('推送地址是同一仓库的另一种写法时照常推到这个地址，确认卡写的仓库就是收到分支的仓库', async () => {
+    const f = await fixture();
+    await f.git('remote', 'set-url', '--push', 'origin', `file://${f.remote}`);
+    await f.turn('task_user_1', () => f.write('app.ts', 'export const a = 2;\n'));
+    const proposal = await f.service.prepare(f.session.id, { title: 'push url' }, 'ou_owner');
+    expect(buildPullRequestConfirmCard(proposal).markdown).toContain(`推送到 ${proposal.repository}`);
+    await f.service.confirm(proposal.id, 'ou_owner');
+    await f.service.idle();
+    expect(await f.service.get(proposal.id)).toMatchObject({ status: 'open', pushUrl: `file://${f.remote}` });
+    expect(await f.remoteBranches()).toEqual([proposal.branch, 'main'].sort());
+  });
+
+  it('推送地址指向别的仓库、或配了多个推送地址时不生成确认清单', async () => {
+    const f = await fixture();
+    const other = await otherRepository(f);
+    await f.git('remote', 'set-url', '--push', 'origin', other);
+    await f.turn('task_user_1', () => f.write('app.ts', 'export const privateData = 42;\n'));
+    await expect(f.service.prepare(f.session.id, {}, 'ou_owner')).rejects.toMatchObject({ code: 'PR_PUSH_URL_MISMATCH', message: expect.stringContaining('group/repo') });
+    await f.git('remote', 'set-url', '--push', 'origin', 'https://dutydeck:secret-token@git.example.com/other/repo.git');
+    const error = await f.service.prepare(f.session.id, {}, 'ou_owner').catch((caught: Error) => caught);
+    expect(error).toMatchObject({ code: 'PR_PUSH_URL_MISMATCH', message: expect.stringContaining('https://git.example.com/other/repo.git') });
+    expect((error as Error).message).not.toContain('secret-token');
+
+    await f.git('config', '--unset-all', 'remote.origin.pushurl');
+    await f.git('remote', 'set-url', '--add', '--push', 'origin', f.remote);
+    await f.git('remote', 'set-url', '--add', '--push', 'origin', other);
+    await expect(f.service.prepare(f.session.id, {}, 'ou_owner')).rejects.toMatchObject({ code: 'PR_PUSH_URL_UNSUPPORTED' });
+    expect(await branchesOf(other)).toBe('');
+    expect(await f.remoteBranches()).toEqual(['main']);
+  });
+
+  it.each([['origin 整个改到别的仓库', ['set-url']], ['只把推送地址改到别的仓库', ['set-url', '--push']]] as const)('确认前%s时不推送，提示重新发起', async (_case, command) => {
+    const f = await fixture();
+    const other = await otherRepository(f);
+    await f.turn('task_user_1', () => f.write('app.ts', 'export const privateData = 42;\n'));
+    const proposal = await f.service.prepare(f.session.id, { title: 'private fix' }, 'ou_owner');
+    await f.git('remote', ...command, 'origin', other);
+    await f.service.confirm(proposal.id, 'ou_owner');
+    await f.service.idle();
+    expect(await f.service.get(proposal.id)).toMatchObject({ status: 'failed', reason: expect.stringMatching(/推送地址.*没有推送。请重新发起。/) });
+    expect(await branchesOf(other)).toBe('');
+    expect(await f.remoteBranches()).toEqual(['main']);
+    expect(f.provider.createPullRequest).not.toHaveBeenCalled();
+  });
+
+  it.each(['显式 pushurl 加 pushInsteadOf', 'pushInsteadOf 把拉取地址换成另一种写法'] as const)('有地址改写规则时推到的就是 git push origin 推到的仓库（%s）', async mode => {
+    const f = await fixture();
+    const other = await otherRepository(f);
+    if (mode === '显式 pushurl 加 pushInsteadOf') {
+      // 显式 pushurl 不套 pushInsteadOf，git push origin 推到 remote；直接 git push <这个地址> 会被改写到 other。
+      await f.git('remote', 'set-url', '--push', 'origin', f.remote);
+      await f.git('config', `url.${other}.pushInsteadOf`, f.remote);
+    } else {
+      // 常见的“HTTPS 拉、SSH 推”写法：拉取地址 file://…，推送时换成路径写法，仍是同一个仓库。
+      await f.git('remote', 'set-url', 'origin', `file://${f.remote}`);
+      await f.git('config', `url.${f.root}/.pushInsteadOf`, `file://${f.root}/`);
+    }
+    await f.turn('task_user_1', () => f.write('app.ts', 'export const a = 2;\n'));
+    const proposal = await f.service.prepare(f.session.id, {}, 'ou_owner');
+    await f.service.confirm(proposal.id, 'ou_owner');
+    await f.service.idle();
+    expect(await f.service.get(proposal.id)).toMatchObject({ status: 'open', pushUrl: f.remote });
+    expect(await f.remoteBranches()).toEqual([proposal.branch, 'main'].sort());
+    expect(await branchesOf(other)).toBe('');
+  });
+
+  it('推送地址会被 insteadOf 再改写到别处时不生成清单；确认前才加上这种改写也不推送，提示里没有账号口令', async () => {
+    const f = await fixture();
+    const other = await otherRepository(f);
+    // origin 写成别名，insteadOf 把别名换成 remote。再加一条把 remote 换成 other 的 insteadOf 后，
+    // git push origin 仍推到 remote（只改写一次），直接推 remote 这个地址却会到 other。
+    await f.git('remote', 'set-url', 'origin', 'synthetic-alias:repo');
+    await f.git('config', `url.${f.remote}.insteadOf`, 'synthetic-alias:repo');
+    await f.turn('task_user_1', () => f.write('app.ts', 'export const privateData = 42;\n'));
+    const proposal = await f.service.prepare(f.session.id, {}, 'ou_owner');
+    await f.git('config', `url.${other}.insteadOf`, f.remote);
+    await expect(f.service.prepare(f.session.id, {}, 'ou_owner')).rejects.toMatchObject({ code: 'PR_PUSH_URL_UNSUPPORTED', message: expect.stringContaining('insteadOf') });
+    await f.service.confirm(proposal.id, 'ou_owner');
+    await f.service.idle();
+    expect(await f.service.get(proposal.id)).toMatchObject({ status: 'failed', reason: expect.stringMatching(/insteadOf.*请重新发起。/) });
+    expect(await branchesOf(other)).toBe('');
+    expect(await f.remoteBranches()).toEqual(['main']);
+
+    const secret = 'https://dutydeck:secret-token@git.example.com/x.git';
+    await f.git('remote', 'set-url', '--push', 'origin', 'push-alias:x');
+    await f.git('config', `url.${secret}.insteadOf`, 'push-alias:x');
+    await f.git('config', `url.${other}.insteadOf`, 'https://dutydeck:secret-token@git.example.com/');
+    const error = await f.service.prepare(f.session.id, {}, 'ou_owner').catch((caught: Error) => caught);
+    expect(error).toMatchObject({ code: 'PR_PUSH_URL_UNSUPPORTED', message: expect.stringContaining('https://git.example.com/x.git') });
+    expect((error as Error).message).not.toContain('secret-token');
+  });
+
+  it('升级前生成、没有记下推送地址的确认清单要重新发起，不推送', async () => {
+    const f = await fixture();
+    await f.turn('task_user_1', () => f.write('app.ts', 'export const a = 2;\n'));
+    const proposal = await f.service.prepare(f.session.id, {}, 'ou_owner');
+    const key = `pull_request/record/${proposal.id}`;
+    const { pushUrl: _pushUrl, ...legacy } = JSON.parse((await f.config.get(key))!);
+    await f.config.set(key, JSON.stringify(legacy));
+    await f.service.confirm(proposal.id, 'ou_owner');
+    await f.service.idle();
+    expect(await f.service.get(proposal.id)).toMatchObject({ status: 'failed', reason: expect.stringMatching(/没有记下推送地址.*请重新发起/) });
+    expect(await f.remoteBranches()).toEqual(['main']);
+  });
+});
+
 describe('PR 跟进：CI 失败', () => {
   const failed = (sha: string): CiPipelineStatus => ({ state: 'failed', runs: [{ id: 11, name: 'test', attempt: 1, headSha: sha, status: 'completed', result: 'failed', url: 'https://ci.example.com/11' }] });
+
+  it.each(['pushurl', 'rewrite', 'legacy'] as const)('修复轮推送前推送地址和确认时不一致（%s）就不推送，停止跟进', async variant => {
+    const f = await fixture();
+    if (variant === 'rewrite') {
+      await f.git('remote', 'set-url', 'origin', 'synthetic-alias:repo');
+      await f.git('config', `url.${f.remote}.insteadOf`, 'synthetic-alias:repo');
+    }
+    const pr = await f.open();
+    const other = join(f.root, 'other.git');
+    await run('git', ['init', '-q', '--bare', '-b', 'main', other]);
+    if (variant === 'pushurl') await f.git('remote', 'set-url', '--push', 'origin', other);
+    // origin 的推送地址仍是 remote，但直接推这个地址会被改写到 other。
+    else if (variant === 'rewrite') await f.git('config', `url.${other}.insteadOf`, f.remote);
+    else {
+      const key = `pull_request/record/${pr.id}`;
+      const { pushUrl: _pushUrl, ...legacy } = JSON.parse((await f.config.get(key))!);
+      await f.config.set(key, JSON.stringify(legacy));
+    }
+    f.state.pipeline = failed(pr.headSha!);
+    await f.poll();
+    await f.finishLatest(() => f.write('app.ts', 'export const a = 11;\n'));
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'stopped', reason: expect.stringMatching({ pushurl: /推送地址.*没有推送/, rewrite: /insteadOf.*已停止自动跟进/, legacy: /没有记下推送地址.*没有推送/ }[variant]) });
+    expect((await run('git', ['--git-dir', other, 'for-each-ref', 'refs/heads'])).stdout).toBe('');
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+  });
+
+  it('修复轮推送：origin 显式 pushurl 加 pushInsteadOf 时仍推回 PR 所在的仓库', async () => {
+    const f = await fixture();
+    const pr = await f.open();
+    const other = join(f.root, 'other.git');
+    await run('git', ['init', '-q', '--bare', '-b', 'main', other]);
+    // git push origin 推到 remote；直接 git push <remote 地址> 会被 pushInsteadOf 改写到 other。
+    await f.git('remote', 'set-url', '--push', 'origin', f.remote);
+    await f.git('config', `url.${other}.pushInsteadOf`, f.remote);
+    f.state.pipeline = failed(pr.headSha!);
+    await f.poll();
+    await f.finishLatest(() => f.write('app.ts', 'export const a = 11;\n'));
+    const after = (await f.service.get(pr.id))!;
+    expect(after).toMatchObject({ status: 'open', ciRounds: 1 });
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(after.headSha);
+    expect((await run('git', ['--git-dir', other, 'for-each-ref', 'refs/heads'])).stdout).toBe('');
+  });
 
   it('CI 失败交给 Agent 修，改动提交后快进推到同一分支；达到 3 轮上限停止', async () => {
     const f = await fixture();

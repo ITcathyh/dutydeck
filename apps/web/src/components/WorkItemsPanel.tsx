@@ -6,6 +6,7 @@ import { api, type Agent, type Session, type WorkItemRequest } from '../api';
 import { Banner, Button, Dialog, Field, IconButton, Input, Select, Spinner, Textarea } from './primitives';
 import { ToolbarButton } from './ui';
 import { sessionPath } from '../app-route';
+import { requestId } from '../request-id';
 
 import { useWorkItems, useWorkItemRequests, workStatusLabels as statusLabels } from './workItemQueries';
 
@@ -107,6 +108,7 @@ function CreateGoal({ agents, templates, disabled, onSubmit, submission }: { sub
   const [mode, setMode] = useState('research');
   const [goal, setGoal] = useState('');
   const [agentIds, setAgentIds] = useState(['', '', '']);
+  const [error, setError] = useState('');
   const template = templates.find(item => `${item.id}:${item.version}` === mode);
   const selectedAgents = agentIds.map((id, index) => id || agents[Math.min(index, agents.length - 1)]?.id || '');
   const valid = goal.trim() && (mode === 'research' ? selectedAgents.every(id => agents.some(agent => agent.id === id)) : template);
@@ -118,7 +120,7 @@ function CreateGoal({ agents, templates, disabled, onSubmit, submission }: { sub
       { id: 'summary', title: '汇总完整报告', kind: 'agent', agentId: selectedAgents[2], instruction: '读取两份分析产物，核对冲突与证据，形成回应用户目标的完整报告，保留引用与未核实事项。', dependsOn: ['analysis_1', 'analysis_2'], workspaceMode: 'shared' }
     ], outputStepId: 'summary' };
     const signature = JSON.stringify({ mode, goal: goal.trim(), ...(template ? { version: template.version } : { plan }) });
-    if (submission.current?.signature !== signature) submission.current = { signature, key: crypto.randomUUID() };
+    if (submission.current?.signature !== signature) submission.current = { signature, key: requestId() };
     const key = submission.current.key;
     try {
       await onSubmit(template ? { kind: 'run', template, goal: goal.trim(), idempotencyKey: key } : { kind: 'create', input: { goal: goal.trim(), plan, idempotencyKey: key } });
@@ -128,7 +130,9 @@ function CreateGoal({ agents, templates, disabled, onSubmit, submission }: { sub
   };
   return <details className="rounded-lg border border-default p-3">
     <summary className="cursor-pointer text-caption font-semibold">新建目标或复用模板</summary>
-    <form className="mt-3 space-y-3" onSubmit={event => { event.preventDefault(); void submit(); }}>
+    {/* Request failures show in the panel banner; this covers failures before any request is sent. */}
+    <form className="mt-3 space-y-3" onSubmit={event => { event.preventDefault(); setError(''); submit().catch(failure => setError(failure instanceof Error ? failure.message : String(failure))); }}>
+      {error && <Banner tone="danger">目标未提交：{error}</Banner>}
       <fieldset className="space-y-3" disabled={disabled}>
         <Field label="执行流程"><Select value={mode} onChange={event => setMode(event.target.value)}><option value="research">研究：两份独立分析 → 汇总</option>{templates.map(item => <option key={`${item.id}:${item.version}`} value={`${item.id}:${item.version}`}>{item.name} · 版本 {item.version}</option>)}</Select></Field>
         <Field label="本次目标"><Textarea required rows={3} maxLength={32000} value={goal} onChange={event => setGoal(event.target.value)} placeholder="描述问题、材料链接和期望成果"/></Field>

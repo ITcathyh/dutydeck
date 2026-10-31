@@ -46,7 +46,11 @@ export function mergeReconciledEvents(current: EventWindow | undefined, incoming
 
 export const newestSequence = (window: EventWindow | undefined) => Math.max(window?.highWaterMark ?? 0, window?.events.at(-1)?.sequence ?? 0);
 
-/** Details are canonical, bounded requests; summaries never enter this event array. */
+/**
+ * Details are canonical, bounded requests; summaries never enter this event array.
+ * Each page is every stored record after the cursor, so a short page ends the range. Holes
+ * left by pruned raw terminal output are kept as holes; completeness is checked at the end.
+ */
 export async function loadHistoryRange(sessionId: string, after: number, through?: number, signal?: AbortSignal): Promise<DockEvent[]> {
   const events: DockEvent[] = [];
   let cursor = after;
@@ -56,13 +60,25 @@ export async function loadHistoryRange(sessionId: string, after: number, through
     signal?.throwIfAborted();
     if (!page.length) break;
     for (const event of page) {
-      if (event.sequence !== cursor + 1) throw new Error('记录不连续，请重试读取');
+      if (!(event.sequence > cursor && (through === undefined || event.sequence <= through))) throw new Error('分页结果异常，请重试读取');
       events.push(event); cursor = event.sequence;
     }
     if (through !== undefined && cursor >= through) break;
     if (page.length < EVENT_PAGE_SIZE) break;
   }
   if (through !== undefined && cursor < through) throw new Error('记录尚未读取完整，请重试');
+  return events;
+}
+
+/** A complete read vouches for its own range, pruned holes included; live events after it must continue without a hole. */
+export function completeEventHistory(complete: DockEvent[] | undefined, live: DockEvent[]): DockEvent[] | undefined {
+  if (!complete) return undefined;
+  const through = complete.at(-1)?.sequence ?? 0;
+  const events: DockEvent[] = [];
+  for (const event of mergeReconciledEvents(createEventWindow(complete), live).events) {
+    if (event.sequence > through && event.sequence !== (events.at(-1)?.sequence ?? 0) + 1) break;
+    events.push(event);
+  }
   return events;
 }
 

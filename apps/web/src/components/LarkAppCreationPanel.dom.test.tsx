@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, type LarkAppCreationJob } from '../api';
+import { api, ApiError, type LarkAppCreationJob } from '../api';
+import { setInstance } from '../instance';
 import { LarkAppCreationPanel } from './LarkAppCreationPanel';
 
-const pendingKey = 'dutydeck:lark-app-creation';
+const legacyKey = 'dutydeck:lark-app-creation';
+const pendingKey = `${legacyKey}:/`;
+const missing = () => new ApiError('创建任务不存在', 'LARK_APP_CREATION_FAILED', 404);
 const id = '10000000-0000-4000-8000-000000000001';
 const waiting = (requestId = id): LarkAppCreationJob => ({
   id: requestId, name: '研发助手', status: 'waiting_for_scan',
@@ -19,7 +22,7 @@ function renderPanel(onCreated = vi.fn(async (_appId: string) => {})) {
   const rendered = render(<QueryClientProvider client={client}><LarkAppCreationPanel onCreated={onCreated} onBusyChange={busy}/></QueryClientProvider>);
   return { ...rendered, client, onCreated, busy };
 }
-afterEach(() => { cleanup(); sessionStorage.clear(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); sessionStorage.clear(); setInstance(undefined); vi.restoreAllMocks(); });
 
 describe('one-click Lark app creation', () => {
   it('waits for Chinese input composition to finish before treating Enter as create', async () => {
@@ -56,16 +59,32 @@ describe('one-click Lark app creation', () => {
     expect(document.body.textContent).not.toContain('appSecret');
   });
 
-  it('reconnects with the same request ID when the start response was lost', async () => {
+  it('reconnects by querying only, and resubmits the same request ID only after this instance reports it missing', async () => {
     const user = userEvent.setup();
     const start = vi.spyOn(api, 'createLarkApp').mockRejectedValueOnce(new Error('response lost')).mockImplementation(async input => waiting(input.requestId));
-    vi.spyOn(api, 'larkAppCreationJob').mockRejectedValue(new Error('temporarily unavailable'));
+    const poll = vi.spyOn(api, 'larkAppCreationJob').mockRejectedValueOnce(new Error('temporarily unavailable')).mockRejectedValueOnce(missing()).mockImplementation(async requestId => waiting(requestId));
     renderPanel();
     await user.click(screen.getByRole('button', { name: '创建机器人' }));
     await user.click(await screen.findByRole('button', { name: '重新连接' }));
+    await screen.findByRole('button', { name: '重新提交本次创建' });
+    expect(poll).toHaveBeenCalledTimes(2);
+    expect(start).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole('button', { name: '重新提交本次创建' }));
     await screen.findByAltText('创建机器人：飞书登录二维码');
     expect(start).toHaveBeenCalledTimes(2);
     expect(start.mock.calls[1]![0]).toEqual(start.mock.calls[0]![0]);
+  });
+
+  it('lets a request this instance does not know be abandoned locally without creating anything', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem(pendingKey, JSON.stringify({ requestId: id, name: '研发助手' }));
+    const start = vi.spyOn(api, 'createLarkApp');
+    vi.spyOn(api, 'larkAppCreationJob').mockRejectedValue(missing());
+    renderPanel();
+    await user.click(await screen.findByRole('button', { name: '放弃此记录' }));
+    expect(screen.getByLabelText('新机器人名称')).toBeTruthy();
+    expect(sessionStorage.getItem(pendingKey)).toBeNull();
+    expect(start).not.toHaveBeenCalled();
   });
 
   it('restores polling after reopening without submitting another create or cancelling the job', async () => {
@@ -145,13 +164,13 @@ describe('one-click Lark app creation', () => {
   });
 });
 
-it('allows choosing another account before creation and keeps that choice on reconnect', async () => {
+it('allows choosing another account before creation and keeps that choice when resubmitting', async () => {
   const start = vi.spyOn(api, 'createLarkApp').mockRejectedValueOnce(new Error('response lost')).mockImplementation(async input => waiting(input.requestId));
-  vi.spyOn(api, 'larkAppCreationJob').mockRejectedValue(new Error('temporarily unavailable'));
+  vi.spyOn(api, 'larkAppCreationJob').mockRejectedValue(missing());
   renderPanel();
   fireEvent.click(screen.getByRole('checkbox', { name: '使用其他账号，重新扫码登录' }));
   fireEvent.click(screen.getByRole('button', { name: '创建机器人' }));
-  fireEvent.click(await screen.findByRole('button', { name: '重新连接' }));
+  fireEvent.click(await screen.findByRole('button', { name: '重新提交本次创建' }));
   await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
   expect(start.mock.calls[0]![0]).toMatchObject({ forceLogin: true });
   expect(start.mock.calls[1]![0]).toEqual(start.mock.calls[0]![0]);
@@ -166,4 +185,63 @@ it('can request a fresh scan only for a safe retry of the same job', async () =>
   fireEvent.click(await screen.findByRole('button', { name: '重新扫码后重试' }));
   await waitFor(() => expect(retry).toHaveBeenCalledWith(id, true));
   expect(start).not.toHaveBeenCalled();
+});
+
+describe('pending creation records belong to one instance', () => {
+  it('does not show, query or lock another instance with a pending creation, and resumes it in its own instance', async () => {
+    const user = userEvent.setup();
+    const start = vi.spyOn(api, 'createLarkApp').mockImplementation(async input => waiting(input.requestId));
+    const poll = vi.spyOn(api, 'larkAppCreationJob').mockImplementation(async requestId => waiting(requestId));
+    setInstance('a');
+    const first = renderPanel();
+    await user.click(screen.getByRole('button', { name: '创建机器人' }));
+    await screen.findByAltText('创建机器人：飞书登录二维码');
+    const request = start.mock.calls[0]![0];
+    expect(JSON.parse(sessionStorage.getItem(`${legacyKey}:/instances/a/`)!)).toEqual(request);
+    first.unmount();
+    poll.mockClear();
+
+    setInstance('b');
+    const other = renderPanel();
+    expect(screen.getByLabelText('新机器人名称')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '重新连接' })).toBeNull();
+    await waitFor(() => expect(other.busy).toHaveBeenLastCalledWith(false));
+    expect(poll).not.toHaveBeenCalled();
+    other.unmount();
+
+    setInstance('a');
+    renderPanel();
+    await screen.findByAltText('创建机器人：飞书登录二维码');
+    expect(poll).toHaveBeenCalledWith(request.requestId);
+    expect(start).toHaveBeenCalledOnce();
+  });
+
+  it('adopts an old shared record only after the current instance confirms the job', async () => {
+    sessionStorage.setItem(legacyKey, JSON.stringify({ requestId: id, name: '研发助手' }));
+    const start = vi.spyOn(api, 'createLarkApp');
+    vi.spyOn(api, 'larkAppCreationJob').mockResolvedValue(waiting());
+    renderPanel();
+    await screen.findByAltText('创建机器人：飞书登录二维码');
+    await waitFor(() => expect(sessionStorage.getItem(legacyKey)).toBeNull());
+    expect(JSON.parse(sessionStorage.getItem(pendingKey)!)).toEqual({ requestId: id, name: '研发助手' });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('never creates from an old shared record the current instance does not know, and lets it be abandoned', async () => {
+    const user = userEvent.setup();
+    setInstance('b');
+    sessionStorage.setItem(legacyKey, JSON.stringify({ requestId: id, name: 'A bot' }));
+    const start = vi.spyOn(api, 'createLarkApp');
+    vi.spyOn(api, 'larkAppCreationJob').mockRejectedValue(missing());
+    const { busy } = renderPanel();
+    const section = screen.getByRole('region', { name: '一键创建飞书机器人' });
+    await within(section).findByText(/可能是在其他实例发起的/);
+    expect(within(section).getAllByRole('button').map(button => button.textContent)).toEqual(['放弃此记录']);
+    await waitFor(() => expect(busy).toHaveBeenLastCalledWith(false));
+    await user.click(screen.getByRole('button', { name: '放弃此记录' }));
+    expect(screen.getByLabelText('新机器人名称')).toBeTruthy();
+    expect(sessionStorage.getItem(legacyKey)).toBeNull();
+    expect(sessionStorage.getItem(`${legacyKey}:/instances/b/`)).toBeNull();
+    expect(start).not.toHaveBeenCalled();
+  });
 });

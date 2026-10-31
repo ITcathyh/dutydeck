@@ -117,9 +117,25 @@ process.stdout.write('ready\\n'); process.on('SIGTERM', () => { clearInterval(ti
     } finally { child.kill('SIGTERM'); await new Promise(resolve => child.once('exit', resolve)); }
   });
 
+  it('keeps the event loop free while VACUUM INTO runs, so lease renewal timers still fire', async () => {
+    const directory = scratch();
+    const source = join(directory, 'source.db');
+    const seed = new Database(source);
+    seed.exec('CREATE TABLE padding (payload BLOB NOT NULL); INSERT INTO padding SELECT randomblob(32 * 1024 * 1024)');
+    seed.close();
+    let ticks = 0;
+    const timer = setInterval(() => { ticks++; }, 1);
+    try { await backupSqlite(source, join(directory, 'backup.db')); }
+    finally { clearInterval(timer); }
+    expect(ticks).toBeGreaterThan(0);
+    const copy = new Database(join(directory, 'backup.db'), { readonly: true });
+    try { expect(copy.prepare('SELECT length(payload) FROM padding').pluck().get()).toBe(32 * 1024 * 1024); }
+    finally { copy.close(); }
+  });
+
   it('leaves no partial target or temp file when the source cannot be read', async () => {
     const directory = scratch();
-    await expect(backupSqlite(join(directory, 'missing.db'), join(directory, 'backup.db'))).rejects.toThrow();
+    await expect(backupSqlite(join(directory, 'missing.db'), join(directory, 'backup.db'))).rejects.toThrow(/unable to open database/);
     expect(readdirSync(directory)).toEqual([]);
   });
 });

@@ -273,6 +273,8 @@ export class DutydeckRuntime {
   private readonly workspaces: WorkspaceManager;
   private readonly verifications: VerificationManager;
   private readonly verifyingSessions = new Set<string>();
+  /** Canonical directory each admitted verification holds until its command has ended. */
+  private readonly verificationHolds = new Map<string, string>();
   /** A steering request is in flight (session -> Task): the queue must not claim, and cancel must not retract, the Task being injected. */
   private readonly steeringSessions = new Map<string, string>();
   private readonly steeringReplies = new Map<string, {sessionId: string; driver: AgentDriver}>();
@@ -773,6 +775,7 @@ export class DutydeckRuntime {
     this.subscribeInsightSources(session, driver, generation, token, resource.resourceId);
     let notifyAttached!: () => void;
     const ready = new Promise<void>(resolve => { notifyAttached = resolve; });
+    let settledHere = false;
     const running = this.mutations.run(token, async () => {
       try {
         await this.applyRiskPolicy(session, driver, task.executionContext?.riskPolicy);
@@ -821,6 +824,7 @@ export class DutydeckRuntime {
           kind: 'driver_result', submissionId: submission.submissionId, outcome: result.status,
           outputDigest: result.outputDigest, stopReason: result.stopReason, complete: true,
         })));
+        settledHere = true;
       } catch (error) {
         if (attached && this.mutations.valid(token)) await this.mutations.write(session.id, async () => this.wake(this.bound().markReconcileRequired(this.attemptFence(ref), {
           reasonId: `recovery_failed:${attempt.attemptId}:${this.binding!.generation}`, code: 'DRIVER_RECOVERY_UNKNOWN', evidenceRefs: [],
@@ -840,6 +844,8 @@ export class DutydeckRuntime {
           await this.projectQueue(session.id); this.queueBlocked.delete(session.id); this.scheduleQueue(session.id);
         });
       }
+      // Only the run that durably settled this attempt notifies; stop, failed handshakes and later restarts do not.
+      if (settledHere) this.notifyTaskSettled(session, this.publicTask(this.repos.execution.getTaskExecution(task.id)?.task ?? task));
     });
     this.taskRuns.add(running);
     void running.finally(() => this.taskRuns.delete(running)).catch(() => {});
@@ -1563,13 +1569,15 @@ export class DutydeckRuntime {
         || eligibleTasks.some(task => task.status === 'running' || task.status === 'queued')) {
         throw new RuntimeError('SESSION_BUSY', 'Wait for Agent execution and its queue to finish before verification', 409);
       }
+      await this.assertVerificationAdmission(session);
       const workspace = await this.mutations.wait(() => this.workspaces.get(id));
       if (workspace) await this.mutations.wait(() => this.workspaces.validate(workspace));
       const token = this.mutations.current();
       this.mutations.check();
       const result = await this.mutations.run(undefined, () => this.verifications.run(
         id, session.cwd, input, actorId, eligibleTasks.at(-1)?.id,
-        () => this.mutations.run(token, () => this.authorize(id, actorId))
+        () => this.mutations.run(token, () => this.authorize(id, actorId)),
+        () => this.mutations.run(token, () => this.assertVerificationAdmission(session))
       ));
       if (this.options.onVerificationCompleted) void Promise.resolve().then(() => this.options.onVerificationCompleted!(session, result)).catch(() => {});
       return result;
@@ -1578,11 +1586,39 @@ export class DutydeckRuntime {
       throw error;
     } finally {
       if (this.verificationDeferredTasks.get(id) === deferredTasks) {
-        this.verifyingSessions.delete(id); this.verificationDeferredTasks.delete(id);
+        this.verifyingSessions.delete(id); this.verificationDeferredTasks.delete(id); this.verificationHolds.delete(id);
         this.mutations.run(undefined, () => this.scheduleQueue(id));
+        // Other Sessions in this directory waited on the running record; it has settled now.
+        this.wakeResourceQueues();
       }
     }
     });
+  }
+  /** Verification admission follows task admission: unknown results, Agent work including native background work, and other verifications hold the directory. */
+  private async assertVerificationAdmission(session: Session) {
+    const root = await this.mutations.wait(() => realpath(session.cwd).catch(() => session.cwd));
+    const shared: string[] = [];
+    for (const other of await this.mutations.wait(() => this.repos.sessions.list())) {
+      if (other.id === session.id) continue;
+      const otherRoot = await this.mutations.wait(() => realpath(other.cwd).catch(() => other.cwd));
+      if (isSameOrIntersectingPath(root, otherRoot)) shared.push(other.id);
+    }
+    // No await below: the checks and taking the hold are one step against a concurrent verification.
+    if (this.repos.execution.getUnresolvedTasks(session.id).length) {
+      throw new RuntimeError('SESSION_BUSY', 'The previous Agent execution result is unknown; resolve it before verification', 409);
+    }
+    if (this.drivers.get(session.id)?.hasBackgroundWork?.()) {
+      throw new RuntimeError('SESSION_BUSY', 'Native background work of this Session is still running; wait for it before verification', 409);
+    }
+    const verifying = (id: string) => new RuntimeError('SESSION_BUSY', `Another verification is running in this workspace: ${id}`, 409);
+    for (const id of shared) {
+      if (this.repos.execution.getUnresolvedTasks(id).length || this.drivers.get(id)?.hasBackgroundWork?.()) {
+        throw new RuntimeError('SESSION_BUSY', `Another Session is executing in this workspace: ${id}`, 409);
+      }
+      if (this.blockedVerificationSessions.has(id)) throw verifying(id);
+    }
+    for (const [id, held] of this.verificationHolds) if (id !== session.id && isSameOrIntersectingPath(root, held)) throw verifying(id);
+    this.verificationHolds.set(session.id, root);
   }
 
   /** Persist descriptive out-of-band events through the same authoritative ledger. */
@@ -2714,11 +2750,13 @@ export class DutydeckRuntime {
       this.attemptTools.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId); this.wakeResourceQueues();
     }
     const settled = this.publicTask(this.repos.execution.getTaskExecution(task.id)?.task ?? task);
-    if (this.options.onTaskSettled && settledSession && ['completed', 'failed', 'interrupted', 'cancelled'].includes(settled.status)) {
-      const notified = settledSession;
-      void Promise.resolve().then(() => this.options.onTaskSettled!(notified, settled)).catch(() => {});
-    }
+    if (settledSession) this.notifyTaskSettled(settledSession, settled);
     return settled;
+  }
+  private notifyTaskSettled(session: Session, settled: PublicTaskRecord) {
+    if (this.options.onTaskSettled && ['completed', 'failed', 'interrupted', 'cancelled'].includes(settled.status)) {
+      void Promise.resolve().then(() => this.options.onTaskSettled!(session, settled)).catch(() => {});
+    }
   }
 
   lookupAcceptedTask(request: TaskRequestV1): AcceptedTask | undefined {
@@ -3451,10 +3489,11 @@ export class DutydeckRuntime {
     const timeout = this.options.driverIdleTimeoutMs ?? 6 * 60 * 60_000;
     if (timeout <= 0) return;
     for (const [sessionId, driver] of this.drivers) {
-      if (this.attempts.has(sessionId) || at - (this.lastActivity.get(sessionId) ?? at) < timeout) continue;
+      // Native background work counts as running for the restart drain too; it may stay silent past the timeout.
+      if (this.attempts.has(sessionId) || driver.hasBackgroundWork?.() || at - (this.lastActivity.get(sessionId) ?? at) < timeout) continue;
       const lifecycle = this.lifecycle(sessionId);
       const session = await this.repos.sessions.get(sessionId);
-      if (!session || this.drivers.get(sessionId) !== driver || this.lifecycle(sessionId) !== lifecycle || this.attempts.has(sessionId) || !['idle', 'completed', 'interrupted'].includes(session.state)) continue;
+      if (!session || this.drivers.get(sessionId) !== driver || this.lifecycle(sessionId) !== lifecycle || this.attempts.has(sessionId) || driver.hasBackgroundWork?.() || !['idle', 'completed', 'interrupted'].includes(session.state)) continue;
       const transition = this.transition(sessionId);
       try {
         await this.revokeSession(sessionId, false, 'interrupted');

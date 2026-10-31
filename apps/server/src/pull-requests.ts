@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { changeRequestLabel, resolveCiHead, type CiProviderRegistry } from './ci-providers.js';
 import { ciFixLimits, failureFingerprint, type CiNotice } from './ci-webhook.js';
 import {
-  assertPushTarget, buildCommit, defaultBranch, diffTrees, git, localCommits, pushBranch, remoteBranchSha, sameEntry, treeEntries,
+  assertPushTarget, buildCommit, defaultBranch, diffTrees, git, localCommits, originPushUrl, pushBranch, remoteBranchSha, remoteUrlLabel, sameEntry, treeEntries,
   type PathContent, type TreeEntry
 } from './pull-request-git.js';
 import { readTaskOutput } from './task-results.js';
@@ -50,6 +50,8 @@ const recordSchema = z.object({
   confirmedBy: z.string().min(1).optional(),
   provider: z.string().min(1),
   repository: z.object({ owner: z.string(), name: z.string(), slug: z.string().min(1) }).strict(),
+  /** 生成清单时 origin 的推送地址（去掉账号口令），已核对属于 repository；每次推送前核对没变。旧记录没有，不推送。 */
+  pushUrl: z.string().min(1).optional(),
   status: z.enum(['proposed', 'pushing', 'open', 'merged', 'closed', 'stopped', 'cancelled', 'expired', 'failed']),
   title: z.string().min(1).max(200),
   body: z.string().max(20_000),
@@ -262,6 +264,11 @@ export class PullRequestService {
       throw error;
     });
     const cwd = session.cwd;
+    // 确认卡上写的是 repository，代码实际推到 origin 的推送地址，两者必须是同一个仓库。
+    const pushUrl = remoteUrlLabel(await originPushUrl(cwd));
+    if (this.options.providers.match(pushUrl, provider => provider.id === head.provider.id)?.repository.slug.toLowerCase() !== head.repository.slug.toLowerCase()) {
+      throw new RuntimeError('PR_PUSH_URL_MISMATCH', `origin 的推送地址 ${pushUrl} 不是 ${head.repository.slug}，代码会推到确认卡上没写的仓库，不能开 PR。请让 origin 的推送地址指向 ${head.repository.slug} 后再试。`, 409);
+    }
     const target = await defaultBranch(cwd);
     if (!target) throw new RuntimeError('PR_TARGET_UNKNOWN', '无法确定目标分支：origin 没有默认分支。可以先执行 git remote set-head origin --auto。', 409);
     const commonDir = (await git({ cwd }, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
@@ -312,7 +319,7 @@ export class PullRequestService {
     const now = this.clock().getTime();
     await this.options.prepareDelivery?.(sessionId, id);
     const record = recordSchema.parse({
-      schemaVersion: 1, id, revision: 1, sessionId, ...(actorId ? { actorId } : {}), provider: head.provider.id, repository: head.repository,
+      schemaVersion: 1, id, revision: 1, sessionId, ...(actorId ? { actorId } : {}), provider: head.provider.id, repository: head.repository, pushUrl,
       status: 'proposed', title, body, branch, target, baseSha: head.headSha, files, excluded, commits: local.commits,
       ...(local.unverified ? { commitsUnverified: true } : {}), contents, paths: contents.map(item => item.path),
       ciRounds: 0, reviewRounds: 0, fingerprints: {}, handledComments: [], ownComments: [], questions: [],
@@ -396,9 +403,10 @@ export class PullRequestService {
         if (changed.length) throw new Error(`确认清单生成后这些文件又被改动：${changed.slice(0, 5).map(item => item.path).join('、')}${changed.length > 5 ? ' 等' : ''}，没有推送。请重新发起。`);
       }
       assertPushTarget(value.branch, value.target);
-      if (await remoteBranchSha(cwd, value.branch)) throw new Error(`远端已有分支 ${value.branch}，没有推送。`);
+      const remote = await confirmedPushUrl(cwd, value).catch(error => { throw new Error(`${errorMessage(error)}。请重新发起。`); });
+      if (await remoteBranchSha(cwd, remote, value.branch)) throw new Error(`远端已有分支 ${value.branch}，没有推送。`);
       const commit = await buildCommit(cwd, value.baseSha, value.contents, `${value.title}\n\n由 DutyDeck 会话 ${value.sessionId} 生成。\n`);
-      await pushBranch(cwd, commit, value.branch, value.target);
+      await pushBranch(cwd, remote, commit, value.branch, value.target);
       const provider = this.options.providers.get(value.provider);
       if (!provider?.createPullRequest) throw new Error(`分支 ${value.branch} 已推送，但 CI 插件已不可用，没有开 PR。`);
       let created: { id: string; number: number; url: string };
@@ -742,10 +750,10 @@ export class PullRequestService {
         return;
       }
       try {
-        const remote = await remoteBranchSha(session.cwd, value.branch);
-        if (remote !== headSha) throw new Error(`远端 ${value.branch} 已不是 DutyDeck 推送的 ${short(headSha)}（有人推送过或分支已删除），没有推送`);
+        const remote = await confirmedPushUrl(session.cwd, value);
+        if (await remoteBranchSha(session.cwd, remote, value.branch) !== headSha) throw new Error(`远端 ${value.branch} 已不是 DutyDeck 推送的 ${short(headSha)}（有人推送过或分支已删除），没有推送`);
         headSha = await buildCommit(session.cwd, headSha, changes.contents, `${current.kind === 'ci' ? 'Fix CI' : 'Address review comments'} (DutyDeck round ${current.round})\n`);
-        await pushBranch(session.cwd, headSha, value.branch, value.target);
+        await pushBranch(session.cwd, remote, headSha, value.branch, value.target);
       } catch (error) { await this.fail(value.id, `${name}的改动推送失败：${errorMessage(error)}，已停止自动跟进。`, ['open']); return; }
     }
     const ownComments: string[] = [];
@@ -801,6 +809,14 @@ export class PullRequestService {
       if (messageId) await this.update(value.id, latest => ({ ...latest, questions: latest.questions.map(question => question.commentId === item.id && !question.cardMessageId ? { ...question, cardMessageId: messageId } : question) }));
     }
   }
+}
+
+/** 现在 origin 的推送地址必须还是生成清单时记下的那个；返回要推送的地址（带本机配置的账号口令，不记进记录）。 */
+async function confirmedPushUrl(cwd: string, value: PullRequestRecord) {
+  if (!value.pushUrl) throw new Error('这条记录生成时没有记下推送地址，无法确认代码会推到哪个仓库，没有推送');
+  const url = await originPushUrl(cwd);
+  if (remoteUrlLabel(url) !== value.pushUrl) throw new Error(`origin 的推送地址从确认时的 ${value.pushUrl} 变成了 ${remoteUrlLabel(url)}，没有推送`);
+  return url;
 }
 
 /** 拍工作区快照；拍不了时抛出带原因和处理办法的错误。 */
