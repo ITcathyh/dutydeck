@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noEmit": true,
+    "baseUrl": "../..",
+    "paths": { "@dutydeck/plugin-sdk": ["packages/plugin-sdk/src/index.ts"] }
+  },
+  "include": ["index.mjs"],
+  "exclude": []
+}
