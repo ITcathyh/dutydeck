@@ -1,6 +1,6 @@
 import { runCommand } from './command.js';
 import { descendantPids } from './descendant-pids.js';
-import { lstatSync, realpathSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { isAbsolute } from 'node:path';
 
@@ -22,8 +22,8 @@ export interface OwnedTmuxIdentity {
   identities: PhysicalProcessIdentity[];
 }
 export interface OwnedTmuxExitProof extends OwnedTmuxIdentity { stoppedAt: string }
-/** 在这台机器、这个用户的 tmux socket 上，按名字找不到这个会话的证据。 */
-export interface OwnedTmuxAbsence { absent: true; scope: OwnedTmuxScope; socket: { dev: string; ino: string }; observedAt: string }
+/** 原名称及所有者标记都未匹配到会话的证据；socket 缺失时没有 inode。 */
+export interface OwnedTmuxAbsence { absent: true; scope: OwnedTmuxScope; socket?: { dev: string; ino: string }; observedAt: string }
 
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
 async function tmux(path: string, args: string[]): Promise<string> {
@@ -169,25 +169,58 @@ export async function verifyOwnedTmuxExit(proof: OwnedTmuxExitProof, probe: Proc
   } catch { return false; }
 }
 
+function requireUnboundSocket(path: string): void {
+  if (process.platform !== 'linux') fail('LEGACY_TMUX_SOCKET_STATE_UNKNOWN');
+  const [header, ...lines] = readFileSync('/proc/net/unix', 'utf8').split('\n');
+  if (header?.trim().split(/\s+/).join(' ') !== 'Num RefCount Protocol Flags Type St Inode Path') fail('LEGACY_TMUX_SOCKET_STATE_UNKNOWN');
+  for (const line of lines) {
+    if (!line) continue;
+    const match = /^[0-9a-f]+:\s+(?:[0-9a-f]+\s+){5}\d+(?:[ \t]+(.*))?$/i.exec(line);
+    if (!match) fail('LEGACY_TMUX_SOCKET_STATE_UNKNOWN');
+    if (match[1] === path) fail('LEGACY_TMUX_SOCKET_STILL_BOUND');
+  }
+}
+
+async function tmuxAbsence(scope: OwnedTmuxScope): Promise<{ socket?: OwnedTmuxIdentity['socket'] } | undefined> {
+  if (!socketCheck(scope, undefined, true)) {
+    requireUnboundSocket(scope.socketPath);
+    if (socketCheck(scope, undefined, true)) fail('LEGACY_TMUX_SOCKET_CHANGED');
+    return {};
+  }
+  const stat = statSync(scope.socketPath, { bigint: true });
+  const socket = { dev: String(stat.dev), ino: String(stat.ino) };
+  let sessions: string;
+  try { sessions = await tmux(scope.socketPath, ['list-sessions', '-F', '#{session_name}|#{@dutydeck_owner_id}']); }
+  catch (error) {
+    const e = error as { status?: number; signal?: string; stderr?: Buffer };
+    if (e.status !== 1 || e.signal || String(e.stderr ?? '').trim() !== `no server running on ${scope.socketPath}`) throw error;
+    requireUnboundSocket(scope.socketPath);
+    sessions = '';
+  }
+  for (const line of sessions ? sessions.split('\n') : []) {
+    const separator = line.lastIndexOf('|');
+    if (separator <= 0) fail('LEGACY_TMUX_PROBE_UNKNOWN');
+    if (line.slice(0, separator) === scope.sessionName || line.slice(separator + 1) === scope.ownerId) return undefined;
+  }
+  socketCheck(scope, socket);
+  return { socket };
+}
+
 /**
- * 目标会话在已核实的 socket 上不存在时返回证据，存在时返回 undefined；socket 或 tmux 查不准就抛错。
+ * 原名称及所有者对应的会话都不存在时返回证据；socket 缺失还须核实内核没有路径绑定。
  * 只凭它不能证明原进程已退出，调用方还要证明原所有者已退出。
  */
 export async function captureOwnedTmuxAbsence(scope: OwnedTmuxScope, probe: ProcessProbe): Promise<OwnedTmuxAbsence | undefined> {
   scopeCheck(scope, probe);
-  socketCheck(scope);
-  const stat = statSync(scope.socketPath, { bigint: true });
-  const socket = { dev: String(stat.dev), ino: String(stat.ino) };
-  if ((await target(scope)) !== undefined) return undefined;
-  socketCheck(scope, socket);
-  return { absent: true, scope: { ...scope }, socket, observedAt: new Date().toISOString() };
+  const absence = await tmuxAbsence(scope);
+  if (!absence) return undefined;
+  return { absent: true, scope: { ...scope }, ...absence, observedAt: new Date().toISOString() };
 }
 
-/** 写账本前复查：目标仍不存在（socket 已不在说明那个 tmux 服务已退出，同样算不存在）。 */
+/** 写账本前复查，使用与捕获相同的会话和 socket 判据。 */
 export async function verifyOwnedTmuxAbsence(absence: OwnedTmuxAbsence, probe: ProcessProbe): Promise<boolean> {
   try {
     scopeCheck(absence.scope, probe);
-    if (!socketCheck(absence.scope, undefined, true)) return true;
-    return (await target(absence.scope)) === undefined;
+    return (await tmuxAbsence(absence.scope)) !== undefined;
   } catch { return false; }
 }

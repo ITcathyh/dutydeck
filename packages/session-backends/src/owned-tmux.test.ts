@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync, readFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { childProcessIdentity, observeProcess } from '../../storage/src/process-identity.js';
@@ -20,8 +20,64 @@ beforeEach(() => { root = realpathSync(mkdtempSync(join(tmpdir(), 'dd-owned-tmux
 afterEach(() => { try { tmux('kill-server'); } catch {} rmSync(root, { recursive: true, force: true }); });
 
 describe('owned tmux physical exit proofs (real isolated server and process identity)', () => {
-  it('proves absence only on a verified live socket and rechecks it before use', async () => {
-    await expect(captureOwnedTmuxAbsence(scope(), probe)).rejects.toThrow('PATH_UNAVAILABLE');
+  it.skipIf(process.platform !== 'linux')('proves absence from a stale socket file after the server was killed', async () => {
+    create('other');
+    const server = childProcessIdentity(Number(tmux('display-message', '-p', '-t', 'other', '#{pid}')));
+    const stat = statSync(socket, { bigint: true });
+    process.kill(server.pid, 'SIGKILL');
+    await vi.waitFor(() => expect(readFileSync('/proc/net/unix', 'utf8').split('\n').some(line => line.endsWith(` ${socket}`))).toBe(false));
+    expect(statSync(socket).isSocket()).toBe(true);
+    const absence = (await captureOwnedTmuxAbsence(scope(), probe))!;
+    expect(absence).toMatchObject({ absent: true, socket: { dev: String(stat.dev), ino: String(stat.ino) } });
+    expect(await verifyOwnedTmuxAbsence(absence, probe)).toBe(true);
+  });
+  it('handles session names containing a separator without hiding a matching owner', async () => {
+    create('unrelated|session');
+    tmux('set-option', '-t', 'unrelated|session', '@dutydeck_owner_id', 'dutydeck:other');
+    const absence = (await captureOwnedTmuxAbsence(scope(), probe))!;
+    expect(absence).toMatchObject({ absent: true });
+    expect(await verifyOwnedTmuxAbsence(absence, probe)).toBe(true);
+    create(); tmux('rename-session', '-t', 'owned', 'renamed|session');
+    expect(await captureOwnedTmuxAbsence(scope(), probe)).toBeUndefined();
+    expect(await verifyOwnedTmuxAbsence(absence, probe)).toBe(false);
+  });
+  it.skipIf(process.getuid?.() === 0)('rejects an unrecognized tmux connection error instead of declaring absence', async () => {
+    create('other');
+    const absence = (await captureOwnedTmuxAbsence(scope(), probe))!;
+    const mode = statSync(socket).mode & 0o7777;
+    try {
+      chmodSync(socket, 0);
+      await expect(captureOwnedTmuxAbsence(scope(), probe)).rejects.toThrow();
+      expect(await verifyOwnedTmuxAbsence(absence, probe)).toBe(false);
+    } finally { chmodSync(socket, mode); }
+  });
+  it('does not prove absence when the owned session was renamed', async () => {
+    create('other');
+    const absence = (await captureOwnedTmuxAbsence(scope(), probe))!;
+    create(); tmux('rename-session', '-t', 'owned', 'renamed');
+    expect(tmux('show-options', '-v', '-t', 'renamed', '@dutydeck_owner_id')).toBe(scope().ownerId);
+    expect(await captureOwnedTmuxAbsence(scope(), probe)).toBeUndefined();
+    expect(await verifyOwnedTmuxAbsence(absence, probe)).toBe(false);
+  });
+  it.skipIf(process.platform !== 'linux')('proves absence for an initially absent socket only when no kernel binding remains', async () => {
+    const absence = (await captureOwnedTmuxAbsence(scope(), probe))!;
+    expect(absence).toMatchObject({ absent: true, scope: scope() });
+    expect(await verifyOwnedTmuxAbsence(absence, probe)).toBe(true);
+  });
+  it.skipIf(process.platform !== 'linux')('does not prove absence for an absent socket still bound by a live server', async () => {
+    create('other');
+    const absence = (await captureOwnedTmuxAbsence(scope(), probe))!;
+    const server = childProcessIdentity(Number(tmux('display-message', '-p', '-t', 'other', '#{pid}')));
+    try {
+      rmSync(socket);
+      await expect(captureOwnedTmuxAbsence(scope(), probe)).rejects.toThrow('SOCKET_STILL_BOUND');
+      expect(await verifyOwnedTmuxAbsence(absence, probe)).toBe(false);
+    } finally {
+      if (observeProcess(server) === 'alive') process.kill(server.pid, 'SIGTERM');
+      await vi.waitFor(() => expect(readFileSync('/proc/net/unix', 'utf8').split('\n').some(line => line.endsWith(` ${socket}`))).toBe(false));
+    }
+  });
+  it('proves absence on a verified live socket and rechecks it before use', async () => {
     create('other');
     const absence = (await captureOwnedTmuxAbsence(scope(), probe))!;
     expect(absence).toMatchObject({ absent: true, scope: scope() });
@@ -31,7 +87,7 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
     expect(await verifyOwnedTmuxAbsence(absence, probe)).toBe(false);
     tmux('kill-server');
     rmSync(socket, { force: true });
-    expect(await verifyOwnedTmuxAbsence(absence, probe)).toBe(true);
+    await vi.waitFor(async () => expect(await verifyOwnedTmuxAbsence(absence, probe)).toBe(process.platform === 'linux'));
   });
   it('stops only exact owned target, verifies proof again, and admits a later task', async () => {
     create(); create('other');

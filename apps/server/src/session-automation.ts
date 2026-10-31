@@ -79,6 +79,7 @@ const overdueNoticeSchema = z.object({
 }).strict();
 const OVERDUE_MIN_MS = 10 * 60_000;
 const OVERDUE_MAX_ATTEMPTS = 3;
+const OVERDUE_SENDING_TIMEOUT_MS = 10 * 60_000;
 const stopRequestSchema = z.object({
   version: z.literal(1), taskId: z.string().min(1), attemptId: z.string().min(1), sessionId: z.string().min(1),
   occurrenceId: z.string().min(1), scheduleId: z.string().min(1), generation: z.number().int().positive(), actorId: z.string().min(1),
@@ -1442,7 +1443,8 @@ export class SessionAutomationService {
     if (now.getTime() < new Date(occurrence.value.createdAt).getTime() + period) return;
     const key = overdueKey(pending.id);
     const prior = await this.getRecord(key, value => overdueNoticeSchema.parse(value));
-    if (prior && (prior.value.status !== 'error' || prior.value.attempts >= OVERDUE_MAX_ATTEMPTS || prior.value.nextAttemptAt && prior.value.nextAttemptAt > iso(now))) return;
+    const staleSending = prior?.value.status === 'sending' && now.getTime() - Date.parse(prior.value.updatedAt) >= OVERDUE_SENDING_TIMEOUT_MS;
+    if (prior && (prior.value.status !== 'error' && !staleSending || prior.value.attempts >= OVERDUE_MAX_ATTEMPTS || prior.value.nextAttemptAt && prior.value.nextAttemptAt > iso(now))) return;
     const attempts = (prior?.value.attempts ?? 0) + 1;
     const sending = { version: 1, status: 'sending', attempts, updatedAt: iso(now) };
     if (!await (prior ? this.replace(key, prior.raw, sending) : this.createRecord(key, sending))) return;

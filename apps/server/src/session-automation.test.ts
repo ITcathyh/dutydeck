@@ -2125,6 +2125,42 @@ describe('schedule names are unique within a session', () => {
 });
 
 describe('overdue schedule reminders', () => {
+  it('recovers interrupted sending after ten minutes across restarts without exceeding the attempt limit', async () => {
+    const onScheduleOverdue = vi.fn(async () => {});
+    const h = await fixture({ onScheduleOverdue });
+    await enable(h);
+    at(h, '00:30:01'); await h.service.tick();
+    const [occurrence] = (await h.service.listBySession(h.session.id)).occurrences;
+    const key = `session_automation/overdue/${occurrence!.id}`;
+    const sending = (attempts: number, time: string) => h.repositories.config.set(key, JSON.stringify({
+      version: 1, status: 'sending', attempts, updatedAt: `2026-09-12T${time}.000Z`
+    }));
+    let current = h.service;
+    const reopen = async () => {
+      await current.close();
+      const reopened = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true,
+        clock: () => new Date(h.now.value), onScheduleOverdue });
+      current = reopened; cleanups.push(() => reopened.close());
+    };
+    at(h, '01:00:02'); await sending(1, '01:00:02'); await reopen();
+    at(h, '01:09:59'); await current.tick();
+    expect(onScheduleOverdue).not.toHaveBeenCalled();
+    at(h, '01:10:03'); await current.tick();
+    expect(onScheduleOverdue).toHaveBeenCalledTimes(1);
+    expect(JSON.parse((await h.repositories.config.get(key))!)).toMatchObject({ status: 'sent', attempts: 2 });
+    at(h, '01:11:00'); await current.tick();
+    expect(onScheduleOverdue).toHaveBeenCalledTimes(1);
+    await sending(2, '01:10:03'); await reopen();
+    at(h, '01:20:04'); await current.tick();
+    expect(onScheduleOverdue).toHaveBeenCalledTimes(2);
+    expect(onScheduleOverdue).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ occurrenceId: occurrence!.id }));
+    expect(JSON.parse((await h.repositories.config.get(key))!)).toMatchObject({ status: 'sent', attempts: 3 });
+    await sending(3, '01:20:04'); await reopen();
+    at(h, '03:00:00'); await current.tick();
+    expect(onScheduleOverdue).toHaveBeenCalledTimes(2);
+    expect(JSON.parse((await h.repositories.config.get(key))!)).toMatchObject({ status: 'sending', attempts: 3 });
+  });
+
   const slow = { ...scheduleInput, name: 'Half hourly', trigger: { kind: 'interval' as const, everySeconds: 1800, anchorAt: '2026-09-12T00:00:00.000Z' } };
   const at = (h: Awaited<ReturnType<typeof fixture>>, time: string) => { h.now.value = new Date(`2026-09-12T${time}.000Z`); };
   async function enable(h: Awaited<ReturnType<typeof fixture>>, input: typeof scheduleInput = slow) {
