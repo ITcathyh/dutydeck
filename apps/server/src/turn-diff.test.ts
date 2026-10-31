@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -284,13 +284,65 @@ describe('turn diff snapshots', () => {
     const foreign = join(dir, '.git', 'objects', 'pack', 'tmp_pack_foreign');
     await mkdir(join(dir, '.git', 'objects', 'pack'), { recursive: true });
     await writeFile(foreign, 'other process');
+    const before = await objectFiles(dir);
     const reasons: string[] = [];
     for (const timeout of [150, 300, 600]) {
       expect(await snapshotWorkingTree(dir, timeout, { onSkip: reason => reasons.push(reason) })).toBeUndefined();
       expect((await objectFiles(dir)).files.filter(file => /\/tmp_/.test(file))).toEqual([foreign]);
+      expect(await objectFiles(dir)).toEqual(before);
     }
     expect(reasons.length).toBe(3);
     expect(reasons.every(reason => reason.includes('时限'))).toBe(true);
+  });
+
+  it('leaves temporary files that other git processes create while a snapshot fails, so a concurrent fetch still completes', async () => {
+    const { dir, git } = await repo();
+    await writeFile(join(dir, 'base.bin'), randomBytes(1024 * 1024));
+    await git('add', 'base.bin'); await git('commit', '-m', 'base');
+    const pack = execFileSync('git', ['pack-objects', '--stdout', '--all'], { cwd: dir, maxBuffer: 8 * 1024 * 1024 });
+    const objects = join(dir, '.git', 'objects');
+    const ready = join(dir, '.git', 'filter-ready');
+    const looseTemp = join(objects, 'ab', 'tmp_obj_other');
+    // 快照的 git add 卡在过滤器里然后失败；这期间别的 git 进程写了松散对象的临时文件，还有下面真实的 index-pack 在写包。
+    await writeFile(join(dir, '.gitattributes'), 'slow.txt filter=slow\n');
+    await writeFile(join(dir, 'slow.txt'), 'modified\n');
+    await git('config', 'filter.slow.clean', `mkdir -p '${join(objects, 'ab')}' && echo other > '${looseTemp}' && touch '${ready}' && sleep 1; exit 1`);
+    await git('config', 'filter.slow.required', 'true');
+    const reasons: string[] = [];
+    const snapshot = snapshotWorkingTree(dir, 4_000, { onSkip: reason => reasons.push(reason) });
+    const waitFor = async <T>(probe: () => Promise<T | undefined>) => {
+      for (let attempt = 0; attempt < 300; attempt++) { const value = await probe(); if (value) return value; await new Promise(resolve => setTimeout(resolve, 10)); }
+      throw new Error('timed out waiting');
+    };
+    await waitFor(() => stat(ready).then(() => true, () => undefined));
+    const indexPack = spawn('git', ['index-pack', '--stdin'], { cwd: dir, stdio: ['pipe', 'ignore', 'pipe'] });
+    let stderr = '';
+    indexPack.stderr.on('data', chunk => { stderr += chunk; });
+    const exited = new Promise<number | null>(resolve => indexPack.on('close', resolve));
+    indexPack.stdin.write(pack.subarray(0, 4096));
+    const packTemp = await waitFor(async () => { const names = (await readdir(join(objects, 'pack'))).filter(name => name.startsWith('tmp_')); return names.length ? names : undefined; });
+
+    expect(await snapshot).toBeUndefined();
+    expect(reasons).toEqual([expect.stringContaining('写入快照失败')]);
+    expect((await readdir(join(objects, 'pack'))).filter(name => name.startsWith('tmp_'))).toEqual(packTemp);
+    expect(await readFile(looseTemp, 'utf8')).toBe('other\n');
+    indexPack.stdin.end(pack.subarray(4096));
+    expect({ exit: await exited, stderr }).toEqual({ exit: 0, stderr: '' });
+  });
+
+  it('puts the objects of a snapshot into the repository, including big files git writes as a pack', async () => {
+    const { dir, git } = await repo();
+    await git('config', 'core.bigFileThreshold', '1k');
+    const before = await snapshotWorkingTree(dir);
+    await writeFile(join(dir, 'big.bin'), randomBytes(64 * 1024));
+    await writeFile(join(dir, 'small.txt'), 'small\n');
+    const after = await snapshotWorkingTree(dir);
+    const diff = await readTurnDiff(after!.gitDir, before!.tree, after!.tree);
+    expect(diff.files.map(file => [file.path, file.status])).toEqual([['big.bin', 'added'], ['small.txt', 'added']]);
+    expect((await readdir(join(dir, '.git', 'objects', 'pack'))).filter(name => name.endsWith('.idx'))).toHaveLength(1);
+    expect((await git('cat-file', '-s', `${after!.tree}:big.bin`)).stdout.trim()).toBe(String(64 * 1024));
+    expect((await objectFiles(dir)).files.filter(file => /\/tmp_/.test(file))).toEqual([]);
+    await git('fsck', '--full');
   });
 
   it('shows binary and oversized files as placeholders and cuts the page at the total limit', async () => {

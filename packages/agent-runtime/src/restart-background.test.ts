@@ -62,6 +62,12 @@ tmuxDescribe('restart drain with native background work in isolated tmux', () =>
     cleanup.push(async () => { await runtime.shutdown(); repos.close(); });
     await runtime.initialize([agent]);
     const session = await runtime.start({ agentId: agent.id });
+    if (process.platform === 'linux') {
+      // Match the real Claude PID-state contract: only a birth-verified, durably recorded native source permits idle retirement.
+      const pid = Number(execFileSync('tmux', ['display-message', '-p', '-t', name, '#{pane_pid}'], { encoding: 'utf8' }).trim());
+      mkdirSync(join(cwd, 'sessions'), { recursive: true });
+      writeFileSync(join(cwd, 'sessions', `${pid}.json`), JSON.stringify({ pid, procStart: childProcessIdentity(pid).start, sessionId: pinnedSessionUuid(session.id), cwd: realpathSync(cwd) }));
+    }
     const task = await runtime.dispatch(session.id, 'Launch independent background work');
     await vi.waitFor(() => expect(existsSync(pidPath)).toBe(true));
     return { runtime, session, task, prompts, driver, name,
@@ -79,6 +85,10 @@ tmuxDescribe('restart drain with native background work in isolated tmux', () =>
         await vi.waitFor(() => expect(existsSync(finished)).toBe(true));
         append([{ type: 'queue-operation', operation: 'enqueue', content: '<task-notification>\n<task-id>background-task</task-id>\n<tool-use-id>background-call</tool-use-id>\n<status>completed</status>\n</task-notification>' }]);
         await vi.waitFor(() => expect(driver.hasBackgroundWork()).toBe(false));
+        if (process.platform === 'linux') await vi.waitFor(() => {
+          expect(repos.insight.listSources(session.id).some(source => source.nativeSessionId === pinnedSessionUuid(session.id)
+            && source.identityProof?.startsWith('pty-claude-process-v1:'))).toBe(true);
+        }, { timeout: 7_000 });
       },
     };
   }

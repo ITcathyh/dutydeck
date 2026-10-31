@@ -158,6 +158,50 @@ describe('WorkItemsPanel', () => {
     expect(bodies[0].plan.outputStepId).toBe('summary');
   });
 
+  it('starts a goal on a plain HTTP LAN page without crypto.randomUUID and keeps the key for a retry', async () => {
+    const original = Object.getOwnPropertyDescriptor(crypto, 'randomUUID');
+    Object.defineProperty(crypto, 'randomUUID', { configurable: true, value: undefined });
+    try {
+      const bodies: any[] = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+        if (!init?.method) return response({ items: [], templates: [] });
+        bodies.push(JSON.parse(String(init.body)));
+        if (bodies.length === 1) throw new Error('连接中断');
+        return response(item({ status: 'running' }));
+      });
+      const view = mount(); await view.open();
+      await screen.findByText(/当前会话还没有工作项目标/);
+      await userEvent.click(screen.getByText('新建目标或复用模板'));
+      await userEvent.type(screen.getByLabelText('本次目标'), '研究数据库方案');
+      await userEvent.click(screen.getByRole('button', { name: '开始目标' }));
+      await screen.findByText(/连接中断/);
+      await waitFor(() => expect(screen.getByRole('button', { name: '开始目标' }).hasAttribute('disabled')).toBe(false));
+      await userEvent.click(screen.getByRole('button', { name: '开始目标' }));
+      await screen.findByText('目标已接收。');
+      expect(bodies).toHaveLength(2);
+      expect(bodies[0].idempotencyKey).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(bodies[1]).toEqual(bodies[0]);
+    } finally {
+      if (original) Object.defineProperty(crypto, 'randomUUID', original); else delete (crypto as { randomUUID?: unknown }).randomUUID;
+    }
+  });
+
+  it('shows a goal start failure that happens before any request is sent', async () => {
+    const posts: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (init?.method) posts.push(String(url));
+      return response({ items: [], templates: [] });
+    });
+    vi.spyOn(crypto, 'getRandomValues').mockImplementation(() => { throw new Error('浏览器不提供随机数'); });
+    const view = mount(); await view.open();
+    await screen.findByText(/当前会话还没有工作项目标/);
+    await userEvent.click(screen.getByText('新建目标或复用模板'));
+    await userEvent.type(screen.getByLabelText('本次目标'), '研究数据库方案');
+    await userEvent.click(screen.getByRole('button', { name: '开始目标' }));
+    expect(await screen.findByText(/目标未提交：浏览器不提供随机数/)).toBeTruthy();
+    expect(posts).toEqual([]);
+  });
+
   it('saves a template and runs a selected version with a new goal', async () => {
     const template: WorkTemplate = { id: 't1', parentSessionId: 's1', name: '研究模板', version: 3, plan: item().plan, createdAt: time };
     const requests = requestsMock(item(), [template]);

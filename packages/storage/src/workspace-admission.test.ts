@@ -226,6 +226,55 @@ it('preserves the independent schedule channel actor through its durable origin 
   expect(()=>h.x.lookupAccepted(request)).toThrow(expect.objectContaining({code:'SESSION_NOT_FOUND'}));
 });
 
+it('treats a retained fresh schedule session like the current one only while its own occurrence record proves it', async () => {
+  const h=fixture(),cwd=h.repo('repo'),at=new Date().toISOString(),scheduleId='fresh-schedule',origin='lark-origin';
+  const freshId=(occurrenceId:string)=>'ses_schedule_'+createHash('sha256').update(`fresh\0${scheduleId}\0${occurrenceId}`).digest('hex');
+  const previous=freshId('occ-1'),current=freshId('occ-2'),forged='ses_schedule_'+'f'.repeat(64);
+  h.x.createSession({id:origin,runId:'origin-run',agentId:'fixture',cwd,state:'idle',source:'lark',sourceId:'cli_app:oc_chat:group',createdAt:at,updatedAt:at});
+  for(const id of [previous,current,forged])h.x.createSession({id,runId:'run-'+id,agentId:'fixture',cwd,state:'idle',source:'schedule',sourceId:scheduleId,createdAt:at,updatedAt:at});
+  const scheduleKey='session_automation/schedule/'+scheduleId,mapping={schemaVersion:1,id:scheduleId,sessionId:origin,executionSessionId:current,mode:'fresh',actorId:'ou_owner'};
+  const occurrence=(id:string,patch:Record<string,unknown>={})=>h.repos.config.set('session_automation/occurrence/'+id,JSON.stringify({schemaVersion:2,id,scheduleId,sessionId:origin,executionSessionId:freshId(id),...patch}));
+  await h.repos.config.set(scheduleKey,JSON.stringify(mapping));await occurrence('occ-1');await occurrence('occ-2');
+  const request=(sessionId:string,key:string,patch:Partial<TaskRequestV1>={}):TaskRequestV1=>({version:1,namespace:'runtime',key,sessionId,actor:{kind:'channel',id:'ou_owner',appId:'cli_app'},prompt:key,mode:'queue',skills:[],options:{},sources:[],sourcePayload:null,...patch});
+  const accept=(sessionId:string,key:string)=>{
+    const content={version:2 as const,prompt:key,executionOptions:{permissionMode:'ask' as const},executionContext:{agentPrompt:key,actorId:'ou_owner'},contentSources:[]};
+    return h.x.acceptTask({sessionId,runId:'run-'+sessionId},request(sessionId,key),{...content,digest:digest(content)},'back').task!;
+  };
+  const cancel=(sessionId:string,task:{id:string;revision:number})=>h.x.cancelQueued({sessionId,runId:'run-'+sessionId},task.id,task.revision,{decisionId:'cancel-'+task.id,actor,action:'cancel',evidenceRefs:['fixture'],resourceChecks:[]});
+  const invalid=expect.objectContaining({code:'SCHEDULE_EXECUTION_SCOPE_INVALID'});
+  // 计划已换到下一次触发的会话；上一次的会话被保留时，计划身份可以继续提交，排队任务可以插队、取消。
+  const kept=accept(previous,'user-new'),dropped=accept(previous,'user-dropped');
+  expect(h.x.lookupAccepted(request(previous,'user-new'))?.task.id).toBe(kept.id);
+  expect(h.x.promoteQueued({sessionId:previous,runId:'run-'+previous},kept.id,kept.revision,{operationId:'promote-kept',actor,interrupt:false}).task?.status).toBe('queued');
+  expect(cancel(previous,dropped).task?.status).toBe('cancelled');
+  expect(accept(current,'current-user').status).toBe('queued');
+  // 身份、App、命名空间照旧核对；计划触发的任务只进当前会话。
+  for(const other of [{kind:'channel',id:'ou_other',appId:'cli_app'},{kind:'channel',id:'ou_owner',appId:'other_app'},{kind:'installation_owner',id:'installation_owner'}] as const)expect(()=>h.x.lookupAccepted(request(previous,'user-new',{actor:other}))).toThrow(expect.objectContaining({code:'TASK_ACTOR_CONFLICT'}));
+  for(const namespace of ['lark','work_item'] as const)expect(()=>h.x.lookupAccepted(request(previous,'scoped',{namespace}))).toThrow(expect.objectContaining({code:'TASK_REQUEST_SCOPE_CONFLICT'}));
+  expect(()=>h.x.lookupAccepted(request(previous,'occurrence-late',{namespace:'schedule'}))).toThrow(invalid);
+  expect(h.x.lookupAccepted(request(current,'occurrence-2',{namespace:'schedule'}))).toBeUndefined();
+  // 只带同一计划标记的会话没有触发记录证明，接单和管理都被拒；记录编号对不上也一样。
+  expect(()=>h.x.lookupAccepted(request(forged,'user-new'))).toThrow(invalid);
+  await occurrence('occ-forged',{executionSessionId:forged});
+  expect(()=>h.x.lookupAccepted(request(forged,'user-new'))).toThrow(invalid);
+  // 触发记录属于别的计划、别的来源任务或指向别的会话时，不能证明这个旧会话。
+  for(const patch of [{scheduleId:'other-schedule'},{sessionId:'other-origin'},{executionSessionId:current}]){
+    await occurrence('occ-1',patch);
+    expect(()=>h.x.lookupAccepted(request(previous,'user-new'))).toThrow(invalid);
+    expect(()=>cancel(previous,h.repos.execution.getTaskExecution(kept.id)!.task)).toThrow(invalid);
+  }
+  await occurrence('occ-1');
+  // 计划删除或旧会话归档后，两种操作都被拒。
+  await h.repos.config.set(scheduleKey,JSON.stringify({...mapping,deletedAt:at}));
+  expect(()=>h.x.lookupAccepted(request(previous,'user-new'))).toThrow(invalid);
+  expect(()=>cancel(previous,h.repos.execution.getTaskExecution(kept.id)!.task)).toThrow(invalid);
+  await h.repos.config.set(scheduleKey,JSON.stringify(mapping));
+  expect(h.x.lookupAccepted(request(previous,'user-new'))?.task.id).toBe(kept.id);
+  h.x.patchSession({sessionId:previous,runId:'run-'+previous},{archivedAt:at});
+  expect(()=>h.x.lookupAccepted(request(previous,'user-new'))).toThrow(invalid);
+  expect(()=>cancel(previous,h.repos.execution.getTaskExecution(kept.id)!.task)).toThrow(invalid);
+});
+
 it('keeps malformed verification evidence scoped to its actual repository instead of skipping it or blocking unrelated work',async()=>{
   const h=fixture(),cwd=h.repo('repo'),origin=h.session('origin',cwd),target=h.session('target',cwd),unrelated=h.session('other',h.repo('other-repo'));
   h.accept(target);h.accept(unrelated);

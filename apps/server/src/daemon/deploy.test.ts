@@ -1,4 +1,4 @@
-import { createRepositories, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
+import { backupSqlite, createRepositories, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
 import Database from 'better-sqlite3';
@@ -9,10 +9,55 @@ import { createServer } from 'node:net';
 import { constants as osConstants, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import type { Worker, WorkerOptions } from 'node:worker_threads';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AutostartCommandOutput } from '../autostart/autostart.js';
 import { DRAIN_INTERVAL_MS } from './command.js';
 import { parseDeployWindows, runDeploy, runDeployPrune, shanghaiMinuteOfDay, withinDeployWindow, type DeployDeps, type DeployResult } from './deploy.js';
+
+/** 装上后，下一个创建的工作线程（即数据库备份线程）改用 workerData 加载探针驱动；用一次就卸下。 */
+const backupProbe = vi.hoisted(() => ({ next: undefined as undefined | { workerData(original: any): unknown; attach(worker: Worker): void } }));
+vi.mock('node:worker_threads', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:worker_threads')>();
+  class ProbedWorker extends actual.Worker {
+    constructor(script: string | URL, options?: WorkerOptions) {
+      const probe = backupProbe.next;
+      backupProbe.next = undefined;
+      super(script, probe ? { ...options, workerData: probe.workerData(options?.workerData) } : options);
+      probe?.attach(this);
+    }
+  }
+  return { ...actual, Worker: ProbedWorker };
+});
+
+/**
+ * 备份线程加载的探针：包住真实 better-sqlite3。只读连接执行 VACUUM INTO 前通知主线程并停在共享内存闸门上，
+ * 主线程在这条连接打开期间写完再放行；共享计数依次是：闸门、打开次数、写入后仍打开的次数、关闭次数。
+ */
+const BACKUP_PROBE_DRIVER = `const { parentPort, workerData } = require('node:worker_threads');
+const Database = require(workerData.probe.driver);
+const state = new Int32Array(workerData.probe.state);
+const { exec, close } = Database.prototype;
+Database.prototype.exec = function (sql) {
+  if (sql.startsWith('VACUUM INTO')) {
+    parentPort.postMessage({ open: this.open, readonly: this.readonly });
+    if (Atomics.wait(state, 0, 0, 10000) === 'timed-out') throw new Error('backup probe gate was never released');
+    if (this.open) Atomics.add(state, 2, 1);
+    if (workerData.probe.fail) throw new Error('injected backup failure');
+  }
+  return exec.call(this, sql);
+};
+Database.prototype.close = function () {
+  const result = close.call(this);
+  Atomics.add(state, 3, 1);
+  return result;
+};
+module.exports = function ProbedDatabase(...args) {
+  const db = new Database(...args);
+  Atomics.add(state, 1, 1);
+  return db;
+};
+`;
 
 const passingSqlite = (options?: SqliteDriverCheckOptions): SqliteDriverCheck => ({ ok: true, execPath: options?.execPath ?? process.execPath });
 
@@ -399,34 +444,50 @@ describe('dutydeck deploy', () => {
     expect(version.stdout.trim()).toBe('0.0.3');
   }, 60_000);
 
-  it.each([false, true])('WAL 库备份不阻塞写入者，快照含已提交写入，结束后释放读连接（中途失败：%s）', async fail => {
+  it.each(['none', 'injected', 'locked'] as const)('WAL 库备份不阻塞写入者，快照含已提交写入，结束后释放读连接（中途失败：%s）', async failure => {
     const writer = new Database(database, { timeout: 0 });
     writer.pragma('journal_mode = WAL');
     writer.pragma('wal_autocheckpoint = 0');
-    writer.exec("CREATE TABLE payload (data BLOB); INSERT INTO configs VALUES ('stamp', '0');");
+    writer.exec("CREATE TABLE payload (data BLOB); INSERT INTO configs VALUES ('stamp', '0'), ('during', '0');");
     const insert = writer.prepare('INSERT INTO payload VALUES (zeroblob(4096))');
     writer.transaction(() => { for (let i = 0; i < 2048; i++) insert.run(); })();
     writer.pragma('wal_checkpoint(TRUNCATE)');
-    const update = writer.prepare("UPDATE configs SET value = ? WHERE key = 'stamp'");
-    const originalExec = Database.prototype.exec;
-    let reader: Database.Database | undefined;
+    // 已提交、只在 WAL 里的写入；locked 时写入者改持排他锁，备份连接一开始读就真实失败。
+    if (failure === 'locked') writer.pragma('locking_mode = EXCLUSIVE');
+    writer.prepare("UPDATE configs SET value = '1' WHERE key = 'stamp'").run();
+    const during = writer.prepare("UPDATE configs SET value = ? WHERE key = 'during'");
+    const driver = join(tmp, 'backup-probe-driver.cjs');
+    writeFileSync(driver, BACKUP_PROBE_DRIVER);
+    const state = new Int32Array(new SharedArrayBuffer(16));
+    const events: string[] = [];
     let writes = 0;
-    const spy = vi.spyOn(Database.prototype, 'exec').mockImplementation(function (this: Database.Database, sql: string) {
-      if (!sql.startsWith('VACUUM INTO')) return originalExec.call(this, sql);
-      reader = this;
-      // 只读备份连接已打开时，写入者仍能提交（timeout 0：被锁住会直接抛错）。
-      update.run(String(++writes));
-      if (fail) throw new Error('injected backup failure');
-      return originalExec.call(this, sql);
-    });
+    let exitCode: number | undefined;
+    backupProbe.next = {
+      workerData: original => ({ ...original, driver, probe: { driver: original?.driver, state: state.buffer, fail: failure === 'injected' } }),
+      attach: worker => {
+        worker.on('message', (reader: { open: boolean; readonly: boolean }) => {
+          // 备份线程的只读连接已打开、停在 VACUUM INTO 之前：写入者（timeout 0，被锁住会直接抛错）此刻必须能提交。
+          events.push(`reader ${reader.open ? 'open' : 'closed'}${reader.readonly ? ' readonly' : ''}`);
+          try { during.run(String(++writes)); events.push('writer committed'); }
+          catch (error) { events.push(`writer blocked: ${error}`); }
+          finally { Atomics.store(state, 0, 1); Atomics.notify(state, 0); }
+        });
+        worker.once('exit', code => { exitCode = code; });
+      }
+    };
     try {
       const result = await runDeploy({ source, runtime: bot }, deps());
-      expect(reader?.open).toBe(false);
-      expect(writes).toBe(1);
-      if (fail) {
+      expect(backupProbe.next).toBeUndefined();
+      expect(events).toEqual(['reader open readonly', 'writer committed']);
+      // 线程已退出；连接只打开一次，写入后仍打开，随后关闭；没有残留临时文件。
+      expect(exitCode).toBe(failure === 'none' ? 0 : 1);
+      expect([...state.subarray(1)]).toEqual([1, 1, 1]);
+      expect(readdirSync(dirname(result.manifest!)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+      if (failure !== 'none') {
         expect(result).toMatchObject({ ok: false, status: 'failed' });
-        expect(result.error).toContain('injected backup failure');
+        expect(result.error).toContain(failure === 'injected' ? 'injected backup failure' : 'database is locked');
         expect(existsSync(join(releases, 'current'))).toBe(false);
+        if (failure === 'locked') writer.pragma('locking_mode = NORMAL');
       } else {
         expect(result, result.error).toMatchObject({ ok: true, status: 'deployed' });
         const manifest = JSON.parse(readFileSync(result.manifest!, 'utf8'));
@@ -434,13 +495,16 @@ describe('dutydeck deploy', () => {
         try {
           expect(backup.pragma('integrity_check', { simple: true })).toBe('ok');
           expect(backup.prepare('SELECT COUNT(*) FROM payload').pluck().get()).toBe(2048);
+          // 只在 WAL 里的提交和备份连接打开期间的提交都在快照里。
           expect(backup.prepare("SELECT value FROM configs WHERE key = 'stamp'").pluck().get()).toBe('1');
+          expect(backup.prepare("SELECT value FROM configs WHERE key = 'during'").pluck().get()).toBe('1');
         } finally { backup.close(); }
       }
-      expect(writer.prepare("SELECT value FROM configs WHERE key = 'stamp'").pluck().get()).toBe(String(writes));
+      expect(writer.prepare("SELECT value FROM configs WHERE key = 'stamp'").pluck().get()).toBe('1');
+      expect(writer.prepare("SELECT value FROM configs WHERE key = 'during'").pluck().get()).toBe(String(writes));
       expect(writer.pragma('wal_checkpoint(TRUNCATE)')).toEqual([{ busy: 0, log: 0, checkpointed: 0 }]);
     } finally {
-      spy.mockRestore();
+      backupProbe.next = undefined;
       writer.close();
     }
   });
@@ -508,7 +572,8 @@ describe('dutydeck deploy', () => {
     } finally {
       vi.useRealTimers();
     }
-    expect(requests.calls.filter(call => call === 'backup /api/system/drain true')).toHaveLength(3);
+    // 备份期间 3 次定时续租，加上切换前复核时的 1 次。
+    expect(requests.calls.filter(call => call === 'backup /api/system/drain true')).toHaveLength(4);
     expect(requests.calls.filter(call => call === 'restart /api/system/drain true')).toHaveLength(1);
     expect(requests.calls.filter(call => call.startsWith('after-restart /api/system/drain'))).toEqual([]);
   }, 60_000);
@@ -538,6 +603,100 @@ describe('dutydeck deploy', () => {
     }
     expect(requests.calls.filter(call => call.includes('/api/system/drain'))).toEqual([
       'drain /api/system/drain true', 'drain /api/system/drain true', 'drain /api/system/drain true', 'drain /api/system/drain false'
+    ]);
+  }, 60_000);
+
+  it('真实数据库备份不占住主线程：慢备份期间照常续租，结束后再续一次并复核任务数才重启', async () => {
+    const seed = new Database(database);
+    seed.exec('CREATE TABLE padding (payload BLOB NOT NULL); INSERT INTO padding SELECT randomblob(16 * 1024 * 1024)');
+    seed.close();
+    await runDeploy({ source, runtime: bot }, deps());
+    nextCommit(source);
+    const requests = recordRequests();
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const result = await runDeploy({ source, runtime: bot }, deps({
+        fetch: requests.fetch,
+        backupDatabase: async (from, to) => {
+          requests.phase = 'backup';
+          let done = false;
+          const backup = backupSqlite(from, to).finally(() => { done = true; });
+          // 真实时间每过几毫秒推进一个续租周期：只有备份不阻塞主线程，这些周期才会在备份完成前触发。
+          while (!done) {
+            await new Promise(resolve => setTimeout(resolve, 5));
+            if (!done) vi.advanceTimersByTime(DRAIN_INTERVAL_MS);
+          }
+          await backup;
+          await new Promise(resolve => setTimeout(resolve, 100));
+          requests.phase = 'after-backup';
+        }
+      }));
+      expect(result, result.error).toMatchObject({ ok: true, status: 'deployed' });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(requests.calls.filter(call => call === 'backup /api/system/drain true').length).toBeGreaterThan(0);
+    expect(requests.calls.filter(call => call.startsWith('after-backup /api/system/'))).toEqual([
+      'after-backup /api/system/drain true', 'after-backup /api/system/activity'
+    ]);
+  }, 60_000);
+
+  it.each([13, 0])('续租失败（备份跨 %i 个续租周期）时不切换、不重启，退出排空', async intervals => {
+    const first = await runDeploy({ source, runtime: bot }, deps());
+    nextCommit(source);
+    const requests = recordRequests();
+    let holds = 0;
+    // 首次进入排空成功，之后的续租都失败：服务端租约到期会自己恢复执行排队任务。
+    const fetcher = (async (url, init) => {
+      if (new URL(String(url)).pathname === '/api/system/drain' && JSON.parse(String(init?.body)).draining && ++holds > 1) {
+        requests.calls.push(`${requests.phase} renew 503`);
+        return new Response('renewal unavailable', { status: 503 });
+      }
+      return await requests.fetch(url, init);
+    }) as typeof fetch;
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const result = await runDeploy({ source, runtime: bot }, deps({
+        fetch: fetcher,
+        backupDatabase: async () => {
+          requests.phase = 'backup';
+          vi.advanceTimersByTime(intervals * DRAIN_INTERVAL_MS); // 13 个周期约 65 秒，超过 60 秒租约
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }));
+      expect(result).toMatchObject({ ok: false, status: 'failed' });
+      expect(result.error).toContain('续租');
+      expect(JSON.parse(readFileSync(result.manifest!, 'utf8'))).toMatchObject({ status: 'failed' });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(realpathSync(join(releases, 'current'))).toBe(first.release);
+    expect(service.ran).toEqual([first.release]);
+    expect(requests.calls.filter(call => call === 'backup renew 503')).toHaveLength(intervals || 1);
+    expect(requests.calls.at(-1)).toBe('backup /api/system/drain false');
+  }, 60_000);
+
+  it('备份期间有任务开始执行时不切换、不重启，退出排空', async () => {
+    const first = await runDeploy({ source, runtime: bot }, deps());
+    nextCommit(source);
+    const requests = recordRequests();
+    const fetcher = (async (url, init) => {
+      if (requests.phase === 'backup' && new URL(String(url)).pathname === '/api/system/activity') {
+        requests.calls.push('backup activity 1');
+        return Response.json({ runningTasks: 1 });
+      }
+      return await requests.fetch(url, init);
+    }) as typeof fetch;
+    const result = await runDeploy({ source, runtime: bot }, deps({
+      fetch: fetcher,
+      backupDatabase: async () => { requests.phase = 'backup'; }
+    }));
+    expect(result).toMatchObject({ ok: false, status: 'failed' });
+    expect(result.error).toContain('1 个任务');
+    expect(realpathSync(join(releases, 'current'))).toBe(first.release);
+    expect(service.ran).toEqual([first.release]);
+    expect(requests.calls.filter(call => call.startsWith('backup '))).toEqual([
+      'backup /api/system/drain true', 'backup activity 1', 'backup /api/system/drain false'
     ]);
   }, 60_000);
 
@@ -851,8 +1010,9 @@ describe('dutydeck deploy', () => {
       expect(result, result.error).toMatchObject({ ok: true, status: 'deployed' });
       return queries;
     };
-    expect(await activityQueries('process')).toEqual(['?restart=true']);
-    expect(await activityQueries('control-group')).toEqual(['']);
+    // 排空时查一次，切换前按同一口径复核一次。
+    expect(await activityQueries('process')).toEqual(['?restart=true', '?restart=true']);
+    expect(await activityQueries('control-group')).toEqual(['', '']);
   }, 60_000);
 
   it('排空时查询任务数失败则不切换、不重启', async () => {

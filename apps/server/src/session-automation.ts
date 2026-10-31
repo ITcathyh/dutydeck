@@ -758,12 +758,25 @@ export class SessionAutomationService {
     return session;
   }
 
+  /**
+   * 计划仍在用的执行会话，或 fresh 计划之前触发留下、因有未结束任务而未归档的会话。
+   * 后者须由某次触发的持久记录证明是这个计划按触发编号建出的；计划删除或会话归档后不再算。
+   * 存储层接单与队列管理（scheduleScope）按同一条件判定，两层不能各认各的。
+   */
+  private async ownsExecutionSession(schedule: SessionSchedule, session: Session) {
+    if (schedule.executionSessionId === session.id) return true;
+    if (schedule.mode !== 'fresh' || schedule.deletedAt || session.archivedAt) return false;
+    const occurrences = await this.listRecords(OCCURRENCE_PREFIX, value => migrateOccurrence(sessionScheduleOccurrenceSchema.parse(value)), undefined, { field: 'scheduleId', values: [schedule.id], sessionId: schedule.sessionId });
+    return occurrences.some(({ value }) => value.scheduleId === schedule.id && value.sessionId === schedule.sessionId
+      && value.executionSessionId === session.id && freshSessionId(schedule.id, value.id) === session.id);
+  }
+
   /** Map internal schedule execution back to its frozen source authority. */
   async authorizeExecutionSession(sessionId: string, actorId?: string): Promise<boolean> {
     const session = await this.options.runtime.getSession(sessionId);
     if (session?.source !== 'schedule') return false;
     const schedule = session.sourceId ? await this.getRecord(scheduleKey(session.sourceId), readStoredSessionSchedule) : undefined;
-    if (!schedule || (schedule.value.mode !== 'independent' && schedule.value.mode !== 'fresh') || schedule.value.executionSessionId !== sessionId || schedule.value.actorId !== actorId) {
+    if (!schedule || (schedule.value.mode !== 'independent' && schedule.value.mode !== 'fresh') || schedule.value.actorId !== actorId || !await this.ownsExecutionSession(schedule.value, session)) {
       throw new RuntimeError('INDEPENDENT_SCHEDULE_REVOKED', 'Independent schedule execution authority is unavailable', 403);
     }
     await this.requireAuthorized(schedule.value.sessionId, actorId);
@@ -774,7 +787,7 @@ export class SessionAutomationService {
     const session = await this.options.runtime.getSession(sessionId);
     if (session?.source !== 'schedule' || !session.sourceId) return undefined;
     const record = await this.getRecord(scheduleKey(session.sourceId), readStoredSessionSchedule);
-    return record?.value.executionSessionId === sessionId ? record.value.sessionId : undefined;
+    return record && await this.ownsExecutionSession(record.value, session) ? record.value.sessionId : undefined;
   }
 
   static async getSchedule(store: Pick<import('@dutydeck/shared').ConfigRepository, 'get'>, scheduleId: string): Promise<Pick<SessionSchedule, 'id' | 'name' | 'sessionId'> | undefined> {

@@ -146,9 +146,15 @@ export type RuntimeEndpoint = Pick<DaemonState, 'address' | 'database' | 'authEn
 
 /**
  * 等待成功时 release 退出排空；调用方在随后的重启失败、旧进程还在跑时用它恢复执行。
- * renew 把排空租约再续一个 DRAIN_LEASE_SECONDS：停旧进程前还有耗时步骤（如备份数据库）时定期调用。
+ * renew 把排空租约再续一个 DRAIN_LEASE_SECONDS：停旧进程前还有耗时步骤（如备份数据库）时定期调用；续租失败返回原因。
+ * queryRunningTasks 按同一口径再查一次任务数，供这些步骤结束、真正停旧进程前复核。
  */
-export type DrainResult = { ok: true; release?: () => Promise<void>; renew?: () => Promise<void> } | { ok: false; error: string; runningTasks: number };
+export type DrainResult = {
+  ok: true;
+  release?: () => Promise<void>;
+  renew?: () => Promise<string | undefined>;
+  queryRunningTasks?: () => Promise<{ ok: true; runningTasks: number } | { ok: false; error: string }>;
+} | { ok: false; error: string; runningTasks: number };
 
 const invalidDrainTimeout = (options: Pick<CliOptions, 'drainTimeout'>): DrainResult => ({
   ok: false, runningTasks: 0,
@@ -285,7 +291,11 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
     warn(hold.status === 404 ? '当前服务版本不支持排空，等待期间仍可能开始新的任务。' : `进入排空失败（${hold.error}），等待期间仍可能开始新的任务。`);
   }
   const release = hold.ok ? async () => { await setDrain(false); } : undefined;
-  const renew = hold.ok ? async () => { await setDrain(true); } : undefined;
+  const renew = hold.ok ? async () => {
+    const renewed = await setDrain(true);
+    if (!renewed.ok) return renewed.error;
+    return renewed.data?.draining === true ? undefined : '服务没有确认排空';
+  } : undefined;
   const refuse = async (error: string, runningTasks: number): Promise<DrainResult> => {
     await release?.();
     return { ok: false, error, runningTasks };
@@ -293,7 +303,7 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
 
   const initial = await queryRunningTasks();
   if (!initial.ok) return await refuse(refuseWithoutStatus(`查询正在执行的任务数失败（${initial.error}）`), 0);
-  if (initial.runningTasks === 0) return { ok: true, release, renew };
+  if (initial.runningTasks === 0) return { ok: true, release, renew, queryRunningTasks };
 
   info(`有 ${initial.runningTasks} 个任务正在执行，等它们结束后再重启（最长 ${timeoutSeconds} 秒；加 --force 立即重启）${hold.ok ? '。等待期间新消息照常排队，重启后由新进程执行' : ''}`);
 
@@ -326,7 +336,7 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
     process.off('SIGTERM', onSignal);
     process.off('SIGHUP', onSignal);
   }
-  return { ok: true, release, renew };
+  return { ok: true, release, renew, queryRunningTasks };
 }
 
 export interface DaemonCommandHandlers extends DaemonCommandDeps {

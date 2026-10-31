@@ -9,6 +9,7 @@ import {
   type SteeringOperation, type LegacyRetirementCandidate, type LegacyRetirementReceipt, type LegacyRetirementResult, type TaskExecutionReadContext
 } from '@dutydeck/shared';
 import type { OpenControl } from './database-control.js';
+import { listConfigByJsonField } from './config-query.js';
 import { currentProcessIdentity, observeProcess } from './process-identity.js';
 import { resolveExecutionWorkspace, type ExecutionWorkspaceIdentity } from './execution-workspace.js';
 import { compactTerminalScreens } from './retention.js';
@@ -331,21 +332,33 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     db.prepare('INSERT INTO configs(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(nativeKey(sessionId), stable(selection));
   };
   const actorId = (actor: TaskRequestV1['actor']) => actor.kind === 'unspecified' ? undefined : actor.id;
-  const scheduleScope = (s: Session): { origin: Session; actorId: string } => {
+  /** fresh 计划之前触发留下的会话：须有本计划某次触发的记录，且会话编号由该触发编号派生（与计划服务的 freshSessionId 同一算法）。 */
+  const retainedFreshSession = (s: Session, scheduleId: string, originId: string) => listConfigByJsonField(db, 'session_automation/occurrence/', { field: 'scheduleId', values: [scheduleId], sessionId: originId }).some(row => {
+    let occurrence: {id?:unknown;scheduleId?:unknown;sessionId?:unknown;executionSessionId?:unknown};
+    try { occurrence = JSON.parse(row.value); } catch { return false; }
+    return typeof occurrence?.id === 'string' && occurrence.scheduleId === scheduleId && occurrence.sessionId === originId
+      && occurrence.executionSessionId === s.id && `ses_schedule_${hash(`fresh\0${scheduleId}\0${occurrence.id}`)}` === s.id;
+  });
+  /** current=false 表示计划已换到新会话、这个旧 fresh 会话因未结束的工作被保留（未归档、计划未删除）。 */
+  const scheduleScope = (s: Session): { origin: Session; actorId: string; current: boolean } => {
     if (!s.sourceId || !/^ses_schedule_[a-f0-9]{64}$/.test(s.id)) fail('SCHEDULE_EXECUTION_SCOPE_INVALID');
     const row = db.prepare('SELECT value FROM configs WHERE key=?').get(`session_automation/schedule/${s.sourceId}`) as {value:string}|undefined;
-    let value: {schemaVersion?:unknown;id?:unknown;sessionId?:unknown;executionSessionId?:unknown;mode?:unknown;actorId?:unknown};
+    let value: {schemaVersion?:unknown;id?:unknown;sessionId?:unknown;executionSessionId?:unknown;mode?:unknown;actorId?:unknown;deletedAt?:unknown};
     try { value = JSON.parse(row?.value ?? 'null'); } catch { fail('SCHEDULE_EXECUTION_SCOPE_INVALID'); }
-    if (!value || value.schemaVersion !== 1 || value.id !== s.sourceId || (value.mode !== 'independent' && value.mode !== 'fresh') || value.executionSessionId !== s.id
+    if (!value || value.schemaVersion !== 1 || value.id !== s.sourceId || (value.mode !== 'independent' && value.mode !== 'fresh')
       || typeof value.sessionId !== 'string' || value.sessionId === s.id || typeof value.actorId !== 'string' || !value.actorId) fail('SCHEDULE_EXECUTION_SCOPE_INVALID');
+    const current = value.executionSessionId === s.id;
+    if (!current && (value.mode !== 'fresh' || value.deletedAt || s.archivedAt || !retainedFreshSession(s, s.sourceId, value.sessionId))) fail('SCHEDULE_EXECUTION_SCOPE_INVALID');
     const origin = session(value.sessionId);
     if (origin.source === 'schedule') fail('SCHEDULE_EXECUTION_SCOPE_INVALID');
-    return {origin,actorId:value.actorId};
+    return {origin,actorId:value.actorId,current};
   };
   const validateActor = (r: Pick<TaskRequestV1, 'actor' | 'namespace' | 'sessionId'>, s: Session, accepted?: AcceptedTaskInput) => {
     if (s.source === 'schedule') {
       const scope = scheduleScope(s);
       if (r.namespace === 'lark' || r.namespace === 'work_item') fail('TASK_REQUEST_SCOPE_CONFLICT');
+      // 计划触发的任务只进计划当前的执行会话；保留的旧会话只承接用户自己的工作。
+      if (!scope.current && r.namespace === 'schedule') fail('SCHEDULE_EXECUTION_SCOPE_INVALID');
       if (r.actor.kind === 'unspecified') fail('ACTOR_REQUIRED');
       if (r.actor.kind === 'channel') {
         if (scope.origin.source !== 'lark') fail('TASK_ACTOR_CONFLICT');

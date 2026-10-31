@@ -655,6 +655,43 @@ describe('runtime lifecycle acceptance', () => {
     expect(h.driver.start).toHaveBeenCalledTimes(2); expect(h.driver.send).toHaveBeenCalledTimes(2); await h.runtime.shutdown(); h.repos.close();
   });
 
+  it('keeps timed-out drivers with an active main turn or native background work and releases them once truly idle', async () => {
+    const h = harness({ driverIdleTimeoutMs: 10 }); let background = false; const gate = deferred();
+    h.driver.hasBackgroundWork = vi.fn(() => background);
+    h.driver.send = vi.fn(async () => { await gate.promise; background = true; h.emit({ type: 'text', data: { text: 'started' } }); h.emit({ type: 'completed', data: { stopReason: 'end_turn' } }); });
+    await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: 'mock' });
+    const task = await h.runtime.dispatch(session.id, 'launch background');
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledOnce());
+    await h.runtime.cleanupIdleDrivers(Date.now() + 100);
+    expect(h.driver.stop).not.toHaveBeenCalled();
+
+    gate.resolve();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(item => item.id === task.id)?.status).toBe('completed'));
+    expect(h.runtime.getRunningTaskCount()).toBe(1);
+    await h.runtime.cleanupIdleDrivers(Date.now() + 100);
+    expect(h.driver.stop).not.toHaveBeenCalled();
+
+    // Background work reported while the Session row is read is rechecked.
+    background = false;
+    const read = h.repos.sessions.get.bind(h.repos.sessions);
+    const reading = vi.spyOn(h.repos.sessions, 'get').mockImplementation(async id => { background = true; return read(id); });
+    await h.runtime.cleanupIdleDrivers(Date.now() + 100);
+    reading.mockRestore();
+    expect(h.driver.stop).not.toHaveBeenCalled();
+
+    // Native identity refresh also awaits transcript I/O; background work discovered there still prevents retirement.
+    background = false;
+    h.driver.prepareForIdleRetirement = vi.fn(async () => { background = true; return true; });
+    await h.runtime.cleanupIdleDrivers(Date.now() + 100);
+    expect(h.driver.stop).not.toHaveBeenCalled();
+
+    h.driver.prepareForIdleRetirement = vi.fn(async () => true);
+    background = false;
+    await h.runtime.cleanupIdleDrivers(Date.now() + 100);
+    expect(h.driver.stop).toHaveBeenCalledOnce();
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
   it('interrupt signals the active turn and records the interrupt intent on the task', async () => {
     const gate = deferred();
     const h = harness();

@@ -45,7 +45,7 @@ import {
 import { expandLarkPluginCommand, larkPluginCommandHelp, resolveLarkPluginQuery, callLarkPluginQuery, pluginQueryReplyText } from './plugin-commands.js';
 import { escapeLarkPromptEcho, renderQueueSummary, QUEUE_SUMMARY_MAX_ITEMS } from './queue-summary.js';
 import { larkNotice } from './notify-tier.js';
-import { claimLarkTaskDispatches, larkTaskAgentGuid, releaseLarkTaskClaim } from './task-agent.js';
+import { claimLarkTaskDispatches, larkTaskAgentAllowlistConfigured, larkTaskAgentGuid, releaseLarkTaskClaim } from './task-agent.js';
 import { buildRepairConfirmCard, parseRepairCardActionValue, renderRepairResultCard, runOpenPlatformRepair } from './repair.js';
 import { buildPullRequestConfirmCard } from './pull-request-card.js';
 import { connectLarkOpenPlatformSession } from './open-platform-session.js';
@@ -526,8 +526,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (this.stopped || !store) return 0;
     if (this.taskAgentRun) return this.taskAgentRun;
     const run = (async () => {
+      // 定时器和事件带的可能是启动时的旧配置：监听开关与白名单门按当前保存的配置判断，与 handle 同口径。
+      const current = await readLarkConfig(store, config.appId);
+      if (!current?.listening) return 0;
       const intake = await claimLarkTaskDispatches({
-        appId: config.appId, client: this.service, store, botConfig: config, log: this.log,
+        appId: config.appId, client: this.service, store, botConfig: current, log: this.log,
         hasHandoff: dispatch => store.get(`lark.inbox.${config.appId}.${dispatch.event.messageId}`).then(Boolean)
       });
       if (intake.status !== 'ready') return 0;
@@ -674,6 +677,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (this.workflowOptions.store) {
       const current = await readLarkConfig(this.workflowOptions.store, config.appId);
       if (!current?.listening) return;
+      // 任务通道的认领可能早于名单被清空：按这份配置快照再判一次，不落进普通私聊「空名单对所有人开放」。
+      // 不建入站记录直接返回，认领由轮询退回，通道重新开放后再派。
+      if (larkTaskAgentGuid(event.messageId) && !larkTaskAgentAllowlistConfigured(current)) return;
       config = current;
     }
     const quotedWorkflow = await this.workflows?.quoted(config.appId, event);

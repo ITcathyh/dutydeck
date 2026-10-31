@@ -28,6 +28,7 @@ import {
 } from './turn-redispatch.js';
 import { isLarkCardActionAvailable, larkRelaunchLabels, larkReplayLabels, type LarkCardActionState } from './card-actions.js';
 import { larkGroupKey, listPersistedLarkSessions, resolveLarkSession } from './session-resolver.js';
+import { planTaskOf } from '../plan-mode.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
@@ -47,14 +48,16 @@ type LarkContinueCause = { code?: string; agent?: string; minutes?: number; sett
 const larkRecoveryOwner = { kind: 'installation_owner', id: 'installation_owner' } as const;
 
 export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
-  private async reconciledResult(mapping: { externalId: string; sessionId: string }, saved: PersistedLarkCardTask, cardId: string) {
+  private async reconciledResult(mapping: { externalId: string; sessionId: string }, saved: PersistedLarkCardTask, cardId: string, created?: { finalOutput?: string; groupMention: boolean }) {
     if (!this.workflows || !saved.sender_open_id || !saved.runtime_task_id || !saved.turn) return [];
     const context = { appId: saved.app_id, sessionId: mapping.sessionId, taskId: saved.runtime_task_id, turn: saved.turn,
       event: { messageId: mapping.externalId, ...(saved.reply_message_id && saved.reply_message_id !== mapping.externalId ? { replyMessageId: saved.reply_message_id } : {}), chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', senderOpenId: saved.sender_open_id,
         threadId: saved.thread_id, messageType: 'text', content: JSON.stringify({ text: saved.prompt }), mentions: [] } };
     const related = saved.final_attachment_message_id ? [saved.final_attachment_message_id] : undefined;
-    // 计划轮的结果卡补发时带回计划操作（计划记录在首次交付时已建）。
-    return [...await this.workflows.result(context, cardId, related), ...await this.workflows.plan(context, cardId, undefined, { relatedCardIds: related })];
+    // 计划轮的结果卡补发时带回计划操作。重启早于首次交付时计划记录还没建，按本轮结果正文补建（同实时链路）。
+    const planText = created?.finalOutput !== undefined && planTaskOf(saved.prompt) !== undefined ? created.finalOutput : undefined;
+    return [...await this.workflows.result(context, cardId, related),
+      ...await this.workflows.plan(context, cardId, planText, { relatedCardIds: related, ...(created?.groupMention ? { groupMention: true } : {}) })];
   }
 
   private async performReconcile(config: StoredLarkConfig) {
@@ -97,7 +100,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
           return config;
         }
       },
-      resultElements: (mapping, saved, cardId) => this.reconciledResult(mapping, saved, cardId),
+      resultElements: (mapping, saved, cardId, created) => this.reconciledResult(mapping, saved, cardId, created),
       terminalDecoration: async (mapping, saved, effective) => {
         const restored = this.restoredCardTask(effective, mapping, saved);
         const verification = await this.verificationView(restored, effective, saved.state as LarkCardActionState);

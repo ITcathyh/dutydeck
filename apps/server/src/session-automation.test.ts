@@ -1912,6 +1912,9 @@ describe('fresh-session schedules', () => {
     expect(fresh.created).toHaveLength(2);
     expect(fresh.runtime.archive).not.toHaveBeenCalled();
     expect((await h.repositories.sessions.get(first!))?.archivedAt).toBeFalsy();
+    // 保留下来的旧会话仍按计划身份执行排队的工作，风险策略也仍取自来源任务。
+    await expect(service.authorizeExecutionSession(first!, 'ou_owner')).resolves.toBe(true);
+    await expect(service.sourceSessionId(first!)).resolves.toBe(h.session.id);
 
     fresh.settle(userTask.id);
     fresh.settle(fresh.workers.get(fresh.created[1]!)!.dispatches[0]!.id);
@@ -1922,6 +1925,48 @@ describe('fresh-session schedules', () => {
     expect(fresh.runtime.archive.mock.calls.map(call => call[0]).sort()).toEqual([first, fresh.created[1]].sort());
     expect((await h.repositories.sessions.get(first!))?.archivedAt).toBeTruthy();
     expect((await h.repositories.sessions.get(fresh.created[2]!))?.archivedAt).toBeFalsy();
+    await expect(service.authorizeExecutionSession(first!, 'ou_owner')).rejects.toMatchObject({ code: 'INDEPENDENT_SCHEDULE_REVOKED' });
+    await expect(service.sourceSessionId(first!)).resolves.toBeUndefined();
+  });
+
+  it('limits a retained fresh session to its recorded occurrence, the schedule actor and current owner access', async () => {
+    const h = await fixture();
+    const fresh = freshRuntime(h);
+    const service = new SessionAutomationService({ repositories: h.repositories, runtime: fresh.runtime, authorize: async () => h.allowed.value, clock: () => h.now.value });
+    cleanups.push(() => service.close());
+    const created = await service.createSchedule(h.session.id, { ...scheduleInput, mode: 'fresh' }, 'ou_owner');
+    await service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await service.tick();
+    const [first] = fresh.created;
+    const firstTask = fresh.dispatches()[0]!;
+    fresh.settle(firstTask.id);
+    const scheduled = h.repositories.execution.getAcceptedTask(firstTask.id)!.request;
+    await fresh.workers.get(first!)!.dispatchRequest({ ...scheduled, namespace: 'runtime', key: 'user-follow-up', prompt: 'Explain the result', sources: [], sourcePayload: {} });
+    await service.tick();
+    h.now.value = new Date('2026-09-12T00:02:01.000Z');
+    await service.tick();
+    expect(fresh.created).toHaveLength(2);
+    const second = fresh.created[1]!;
+
+    // 带同一计划标记、但没有触发记录证明由该计划建出的会话，不能借用计划授权。
+    const forged = `ses_schedule_${'f'.repeat(64)}`;
+    bound(h.repositories).createSession({ ...h.session, id: forged, runId: 'run_forged', source: 'schedule', sourceId: created.id, workspaceMode: 'shared' });
+    await expect(service.authorizeExecutionSession(forged, 'ou_owner')).rejects.toMatchObject({ code: 'INDEPENDENT_SCHEDULE_REVOKED' });
+    await expect(service.sourceSessionId(forged)).resolves.toBeUndefined();
+    // 计划身份以外的执行者仍被拒绝。
+    await expect(service.authorizeExecutionSession(first!, 'installation_owner')).rejects.toMatchObject({ code: 'INDEPENDENT_SCHEDULE_REVOKED' });
+    // 发起人失去来源任务权限时，新旧会话都不能执行；恢复后旧会话随之恢复。
+    h.allowed.value = false;
+    await expect(service.authorizeExecutionSession(first!, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_FORBIDDEN' });
+    await expect(service.authorizeExecutionSession(second, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_FORBIDDEN' });
+    h.allowed.value = true;
+    await expect(service.authorizeExecutionSession(first!, 'ou_owner')).resolves.toBe(true);
+    // 删除计划后，保留的旧会话不再有授权。
+    const latest = await service.getScheduleDefinition(h.session.id, created.id, 'ou_owner');
+    await service.deleteSchedule(h.session.id, created.id, { expectedRevision: latest.revision }, 'ou_owner');
+    await expect(service.authorizeExecutionSession(first!, 'ou_owner')).rejects.toMatchObject({ code: 'INDEPENDENT_SCHEDULE_REVOKED' });
+    await expect(service.sourceSessionId(first!)).resolves.toBeUndefined();
   });
 
   it('archives the previous fresh session when a reservation is recovered after a restart', async () => {

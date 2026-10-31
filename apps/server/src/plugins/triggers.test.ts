@@ -1,7 +1,8 @@
 import { createHmac } from 'node:crypto';
 import Fastify from 'fastify';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { pluginTriggerSchema, type PluginTrigger } from '@dutydeck/shared';
+import { createRepositories } from '@dutydeck/storage';
 import { PluginCommandRegistry } from './commands.js';
 import { isPluginTriggerRequest, registerPluginRoutes } from './routes.js';
 import { hmacTriggerSignaturePayload, PluginTriggerService, renderTriggerTemplate, TRIGGER_BODY_LIMIT, verifyTriggerAuth, type TriggerDispatch } from './triggers.js';
@@ -246,6 +247,95 @@ describe('plugin routes', () => {
     expect(tooLarge.statusCode).toBe(413);
     expect(tooLarge.json()).toMatchObject({ error: { code: 'PLUGIN_TRIGGER_BODY_TOO_LARGE' } });
     expect((await app.inject({ method: 'GET', url: '/api/plugins/commands' })).json()).toEqual({ commands: [{ name: 'triage', description: '分诊（插件 ci）', usage: '/triage', plugin: 'ci' }] });
+    await app.close();
+  });
+});
+
+describe('HMAC nonce lifetime with the SQLite dedupe store', () => {
+  // 服务端按整秒比对时间戳、前后各放宽 maxAge 秒；重放者原样重发，只换不受签名保护的 Idempotency-Key。
+  const second = 1_700_000_000;
+  const cases = ([1, undefined, 900] as const).flatMap(maxAgeSeconds => {
+    const maxAge = maxAgeSeconds ?? 300;
+    return [-maxAge, 0, maxAge].flatMap(skew => [0, 999].map(phase => ({ maxAgeSeconds, maxAge, skew, phase })));
+  });
+  const closes: Array<() => void> = [];
+  afterEach(() => { for (const close of closes.splice(0)) close(); });
+
+  function sqliteTriggers(maxAgeSeconds?: number) {
+    const repositories = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+    closes.push(() => repositories.close());
+    const trigger = pluginTriggerSchema.parse({ auth: { type: 'hmac-sha256', header: 'x-signature', ...(maxAgeSeconds ? { maxAgeSeconds } : {}) }, target: { botAppId: 'cli_a', chatId: 'oc_b' }, prompt: '{{payload}}', idempotencyKey: '{{payload.id}}', maxConcurrent: 32 });
+    const clock = { now: 0 };
+    const deliver = vi.fn(async (_request: TriggerDispatch) => ({ sessionId: 's1', taskId: `t${deliver.mock.calls.length}` }));
+    const triggers = new PluginTriggerService({
+      lookup: () => ({ ...trigger, scope: 'global' }), token: () => 'secret-token', deliver, now: () => clock.now,
+      dedupe: { claim: (key, now, expiresAt) => repositories.ciWebhook.claimEvent(key, now, expiresAt), release: (key, expiresAt) => repositories.ciWebhook.releaseEvent(key, expiresAt) }
+    });
+    return { trigger, triggers, deliver, clock };
+  }
+  const signed = (timestamp: number, nonce: string, raw: Buffer) => ({ 'x-signature': createHmac('sha256', 'secret-token').update(hmacTriggerSignaturePayload(String(timestamp), nonce, raw)).digest('hex'), 'x-dutydeck-timestamp': String(timestamp), 'x-dutydeck-nonce': nonce });
+  /** 原请求之后签名仍有效的每一整秒，加上最后一个有效毫秒；旧算法的 nonce 到期时刻 arrival + k×maxAge 秒都在其中。 */
+  function window({ skew, phase, maxAge }: { skew: number; phase: number; maxAge: number }) {
+    const timestamp = second + skew, arrival = second * 1000 + phase, lastValid = (timestamp + maxAge + 1) * 1000 - 1;
+    const probes = [...new Set([...Array.from({ length: Math.floor((lastValid - arrival) / 1000) }, (_, index) => arrival + (index + 1) * 1000), lastValid])];
+    return { timestamp, arrival, lastValid, probes };
+  }
+
+  it.each(cases)('accepts a trigger once while its signature is valid (maxAge $maxAge s, sender skew $skew s, arrival at $phase ms of the second)', async ({ maxAgeSeconds, ...current }) => {
+    const { trigger, triggers, deliver, clock } = sqliteTriggers(maxAgeSeconds);
+    expect(trigger.auth).toMatchObject({ maxAgeSeconds: current.maxAge });
+    const { timestamp, arrival, lastValid, probes } = window(current);
+    const raw = body({ id: 'evt-1' });
+    const captured = signed(timestamp, 'nonce-captured', raw);
+    const send = async (at: number, headers: Record<string, string>) => {
+      clock.now = at;
+      const response = await triggers.receive(request(raw, headers));
+      return { afterMs: at - arrival, statusCode: response.statusCode, code: (response.body.error as { code?: string } | undefined)?.code };
+    };
+    expect((await send(arrival, captured)).statusCode).toBe(202);
+    const replays = [];
+    for (const at of probes) replays.push(await send(at, { ...captured, 'idempotency-key': `replay-${at}` }));
+    expect(replays.filter(replay => replay.code !== 'PLUGIN_TRIGGER_REPLAYED')).toEqual([]);
+    // 对照：同一毫秒换新 nonce 仍被接受，挡住重放的是 nonce 记录而不是签名过期。
+    expect((await send(lastValid, { ...signed(timestamp, 'nonce-fresh', raw), 'idempotency-key': 'control' })).statusCode).toBe(202);
+    expect((await send(lastValid + 1, { ...captured, 'idempotency-key': 'replay-expired' })).code).toBe('PLUGIN_TRIGGER_UNAUTHORIZED');
+    expect(deliver).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(cases)('accepts a status or cancel signature once while it is valid (maxAge $maxAge s, sender skew $skew s, arrival at $phase ms of the second)', ({ maxAgeSeconds, ...current }) => {
+    const { triggers, clock } = sqliteTriggers(maxAgeSeconds);
+    const { timestamp, arrival, lastValid, probes } = window(current);
+    const captured = signed(timestamp, 'nonce-status', Buffer.alloc(0));
+    const authorize = (at: number, headers = captured) => { clock.now = at; return triggers.authorize('ci', 'build', headers); };
+    expect(authorize(arrival)).toBe(true);
+    expect(probes.filter(at => authorize(at)).map(at => at - arrival)).toEqual([]);
+    expect(authorize(lastValid, signed(timestamp, 'nonce-status-fresh', Buffer.alloc(0)))).toBe(true);
+    expect(authorize(lastValid + 1)).toBe(false);
+  });
+
+  it('rejects a replayed status or cancel request on every run endpoint after the old nonce expiry', async () => {
+    const { triggers, clock } = sqliteTriggers();
+    const app = Fastify();
+    await registerPluginRoutes(app, { triggers, commands: new PluginCommandRegistry([]) });
+    const arrival = second * 1000 + 100;
+    clock.now = arrival;
+    const raw = body({ id: 'evt-run' });
+    const runId = String((await triggers.receive(request(raw, signed(second, 'nonce-run', raw)))).body.runId);
+    const endpoints = [
+      { method: 'GET', url: `/api/plugins/ci/triggers/build/runs/${runId}` },
+      { method: 'POST', url: `/api/plugins/ci/triggers/build/runs/${runId}/cancel` },
+      { method: 'GET', url: `/api/plugin-triggers/v1/runs/${runId}?plugin=ci&triggerId=build` },
+      { method: 'POST', url: `/api/plugin-triggers/v1/runs/${runId}/cancel?plugin=ci&triggerId=build` }
+    ] as const;
+    const statuses = async (at: number, nonce: (index: number) => string) => {
+      clock.now = at;
+      const codes = [];
+      for (const [index, endpoint] of endpoints.entries()) codes.push((await app.inject({ ...endpoint, headers: signed(second, nonce(index), Buffer.alloc(0)) })).statusCode);
+      return codes;
+    };
+    expect(await statuses(arrival, index => `nonce-endpoint-${index}`)).toEqual([200, 200, 200, 200]);
+    expect(await statuses(arrival + 300_000, index => `nonce-endpoint-${index}`)).toEqual([401, 401, 401, 401]);
+    expect(await statuses(arrival + 300_000, index => `nonce-endpoint-fresh-${index}`)).toEqual([200, 200, 200, 200]);
     await app.close();
   });
 });

@@ -103,6 +103,12 @@ export function verifyTriggerAuth(auth: PluginTrigger['auth'], secret: string, r
   return constantTimeEqual(presented.replace(/^sha256=/i, '').toLowerCase(), expected);
 }
 
+/** 时间戳按整秒比对、前后各放宽 maxAge 秒；nonce 记录要留到签名失效之后，否则换个 Idempotency-Key 就能重放。 */
+function hmacNonceExpiresAt(auth: Extract<PluginTrigger['auth'], { type: 'hmac-sha256' }>, headers: TriggerRequest['headers'], now: number): number {
+  const timestampSeconds = Number(header(headers, auth.timestampHeader)!.trim());
+  return Math.max(now + auth.maxAgeSeconds * 1000, (timestampSeconds + auth.maxAgeSeconds + 1) * 1000);
+}
+
 const lookupPath = (root: unknown, path: string[]): unknown => {
   let value = root;
   for (const segment of path) {
@@ -168,7 +174,7 @@ export class PluginTriggerService {
     if (trigger.auth.type === 'hmac-sha256') {
       const nonce = header(request.headers, hmacTriggerNonceHeader(trigger.auth))!.trim();
       const nonceKey = `plugin-trigger-nonce:${id}:${nonce}`;
-      const nonceExpiresAt = now + trigger.auth.maxAgeSeconds * 1000;
+      const nonceExpiresAt = hmacNonceExpiresAt(trigger.auth, request.headers, now);
       if (!this.dedupe.claim(nonceKey, now, nonceExpiresAt)) return { statusCode: 401, body: { error: { code: 'PLUGIN_TRIGGER_REPLAYED', message: '触发器请求已被使用' } } };
     }
     let payload: unknown;
@@ -282,7 +288,7 @@ export class PluginTriggerService {
       const nonce = header(headers, trigger.auth.nonceHeader)?.trim();
       if (!nonce) return false;
       const id = `${plugin}/${triggerId}`;
-      return this.dedupe.claim(`plugin-trigger-nonce:${id}:${nonce}`, now, now + trigger.auth.maxAgeSeconds * 1000);
+      return this.dedupe.claim(`plugin-trigger-nonce:${id}:${nonce}`, now, hmacNonceExpiresAt(trigger.auth, headers, now));
     }
     return true;
   }

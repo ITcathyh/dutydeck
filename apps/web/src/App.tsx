@@ -36,7 +36,7 @@ import { loadSessions } from './sessions-query';
 import { buildPrompt, commandsFromEvents, currentContextStats, getModelReadiness } from './composer-utils';
 import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from './model-cache';
 import { useEventHistory } from './useEventHistory';
-import { createEventWindow, mergeReconciledEvents, type EventWindow } from './event-history';
+import { completeEventHistory, type EventWindow } from './event-history';
 import { summaryFromTasks } from './run-summary';
 import { nextActionForState, sessionWorkspaceName, type WorkbenchView } from './workspace-model';
 import { appLocationPath, OVERLAY_HISTORY_MARK, parseAppLocation, sessionPath, type AppLocation, type AppRoute, type OverlayRoute, type PrimaryNav, type LarkSetupTarget } from './app-route';
@@ -410,13 +410,7 @@ export default function App() {
   const visibleTasks = useMemo(() => { const summarized = new Set(historyTurns?.map(turn => turn.taskId)); return tasks.data?.filter(task => !summarized.has(task.id)); }, [tasks.data, historyTurns]);
   const { timeline, timelineSections } = useMemo(() => projectTimeline(eventList, visibleTasks, events.data?.hasOlder, events.data), [projectTimeline, eventList, visibleTasks, events.data?.hasOlder]);
   const projectRaw = useMemo(() => createRawLogProjector(), [activeSessionId]);
-  const completeRawEvents = useMemo(() => {
-    if (!events.rawEvents) return undefined;
-    const merged = mergeReconciledEvents(createEventWindow(events.rawEvents), eventList).events;
-    const contiguous: typeof merged = [];
-    for (const event of merged) { if (event.sequence !== contiguous.length + 1) break; contiguous.push(event); }
-    return contiguous;
-  }, [events.rawEvents, eventList]);
+  const completeRawEvents = useMemo(() => completeEventHistory(events.rawEvents, eventList), [events.rawEvents, eventList]);
   const raw = useMemo(() => projectRaw(completeRawEvents ?? eventList), [projectRaw, completeRawEvents, eventList]);
   const fullHistoryNeeded = rawVisible || traceOpen;
   useEffect(() => { if (fullHistoryNeeded) void events.loadAll(); else events.releaseRaw(); }, [fullHistoryNeeded, activeSessionId, events.loadAll, events.releaseRaw]);

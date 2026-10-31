@@ -157,6 +157,14 @@ export function inspect(db: DatabaseSync, database: string) {
       if (records.length !== 1 || records[0].id !== id || ownerForSession(records[0].sessionId) !== owner) block(`CONFIG_CROSS_SHARD_REFERENCE:${k}`);
       return [owner];
     }
+    const claim = k.match(/^lark\.(delivery|reaction)_claim\.(.+)$/);
+    if (claim) {
+      // Senders empty a claim on release; any other value may still guard a provider call whose outcome is unknown.
+      if (r.value !== '') { block(`DELIVERY_CLAIM_UNRELEASED:${k}`); return ['unknown']; }
+      // A released claim follows the receipt or bot namespace it guarded.
+      const guarded = `lark.${claim[1]}.${claim[2]}`;
+      return resolveConfig({ key: guarded, value: config.get(guarded) ?? '' });
+    }
     const appMatch = k.match(/^lark\.(?:inbox|context|interaction|reaction|live-owner|memory(?:\.state)?|verification_suggestion|welcomed)\.(cli_[a-z0-9]+)(?:\.|$)/);
     if (appMatch) {
       const owner = appOwner(appMatch[1]!);

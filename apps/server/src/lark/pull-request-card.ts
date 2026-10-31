@@ -10,7 +10,7 @@ export function buildPullRequestConfirmCard(proposal: PublicPullRequest): { titl
   const additions = proposal.files.reduce((sum, file) => sum + file.additions, 0);
   const deletions = proposal.files.reduce((sum, file) => sum + file.deletions, 0);
   const markdown = [
-    `**确认后才会推送并开 PR**（${proposal.providerName}，${proposal.repository}）`,
+    `**确认后才会把分支推送到 ${proposal.repository} 并开 PR**（${proposal.providerName}）`,
     '',
     `- 源分支：\`${proposal.branch}\`（新建，不会改动你当前检出的分支）`,
     `- 目标分支：\`${proposal.target}\``,

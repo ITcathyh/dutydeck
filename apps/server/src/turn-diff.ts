@@ -1,5 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
-import { copyFile, lstat, mkdtemp, readdir, rm, stat, utimes } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigRepository, Session } from '@dutydeck/shared';
@@ -76,14 +78,29 @@ async function untrackedOverLimit(top: string, timeout: number, limits: typeof T
   return undefined;
 }
 
-/** git 写对象时的临时文件：松散对象在 objects/xx/tmp_obj_*，大文件直接成包时在 objects/pack/tmp_pack_*、tmp_idx_*。 */
-async function tempObjectFiles(objects: string): Promise<Set<string>> {
-  const found = new Set<string>();
-  const dirs = (await readdir(objects).catch(() => [] as string[])).filter(name => /^[0-9a-f]{2}$/.test(name) || name === 'pack');
-  for (const dir of ['.', ...dirs]) {
-    for (const name of await readdir(join(objects, dir)).catch(() => [] as string[])) if (name.startsWith('tmp_')) found.add(join(objects, dir, name));
+/**
+ * 把快照写在私有对象库里的对象放进仓库对象库：松散对象在 xx/ 下，大文件直接成包时在 pack/ 下，包先放 .pack 再放 .idx。
+ * 每个文件先复制成自己起名的临时文件再改名，别的进程看不到写了一半的对象；对象按内容寻址，同名文件内容相同。
+ */
+async function adoptObjects(from: string, to: string) {
+  for (const dir of await readdir(from)) {
+    if (!/^[0-9a-f]{2}$/.test(dir) && dir !== 'pack') continue;
+    const names = (await readdir(join(from, dir))).filter(name => !name.startsWith('tmp_'))
+      .sort((left, right) => Number(left.endsWith('.idx')) - Number(right.endsWith('.idx')));
+    const target = join(to, dir);
+    // 新建的目录沿用 git 在私有对象库里建目录的权限（core.sharedRepository 时组可写）。
+    if (await mkdir(target, { recursive: true })) await chmod(target, (await stat(join(from, dir))).mode & 0o7777);
+    for (const name of names) {
+      const temp = join(target, `tmp_obj_dutydeck_${randomUUID()}`);
+      try {
+        await copyFile(join(from, dir, name), temp, constants.COPYFILE_EXCL);
+        await rename(temp, join(target, name));
+      } catch (error) {
+        await rm(temp, { force: true }).catch(() => {});
+        throw error;
+      }
+    }
   }
-  return found;
 }
 
 /**
@@ -112,19 +129,19 @@ export async function snapshotWorkingTree(cwd: string, timeoutMs = TURN_SNAPSHOT
     // 拷贝变新后，同一秒内改动且大小不变的文件会被当成没改。
     const copied = await copyFile(index, tempIndex).then(() => true, error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return false; });
     if (copied) { const original = await stat(index); await utimes(tempIndex, original.atime, original.mtime); }
-    const env = { ...process.env, GIT_INDEX_FILE: tempIndex, GIT_OPTIONAL_LOCKS: '0' };
-    stage = '写入快照';
+    // 新对象先写进临时目录里的私有对象库，仓库对象库只作为 alternates 提供已有对象：被时限杀掉的 git 留下的临时文件随临时目录删掉，
+    // 不用到仓库对象库里猜哪些临时文件是这次的，也就不会删掉别的 git 进程正在写的文件。
     const objects = join(gitDir, 'objects');
-    const existingTemp = await tempObjectFiles(objects);
-    try {
-      await git(['add', '-A', ...snapshotPathspec], { cwd: top, env, timeout: remaining() });
-    } catch (error) {
-      // 被时限杀掉的 git 来不及收尾，留下的临时对象文件要等 gc 才清。只删这次新出现的，原来就有的不碰。
-      for (const file of await tempObjectFiles(objects)) if (!existingTemp.has(file)) await rm(file, { force: true }).catch(() => {});
-      throw error;
-    }
+    const ownObjects = join(scratch, 'objects');
+    await mkdir(join(ownObjects, 'info'), { recursive: true });
+    await writeFile(join(ownObjects, 'info', 'alternates'), `${objects}\n`);
+    const env = { ...process.env, GIT_INDEX_FILE: tempIndex, GIT_OBJECT_DIRECTORY: ownObjects, GIT_OPTIONAL_LOCKS: '0' };
+    stage = '写入快照';
+    await git(['add', '-A', ...snapshotPathspec], { cwd: top, env, timeout: remaining() });
     const tree = (await git(['write-tree'], { cwd: top, env, timeout: remaining() })).trim();
-    return /^[0-9a-f]{40,64}$/.test(tree) ? { gitDir, tree } : undefined;
+    if (!/^[0-9a-f]{40,64}$/.test(tree)) return undefined;
+    await adoptObjects(ownObjects, objects);
+    return { gitDir, tree };
   } catch (error) {
     // 不是 git 仓库不算异常，不记。
     if (stage !== '定位仓库') options.onSkip?.(`${stage}失败：${Date.now() >= deadline ? `超过 ${timeoutMs} 毫秒时限` : error instanceof Error ? error.message.split('\n')[0] : String(error)}`);

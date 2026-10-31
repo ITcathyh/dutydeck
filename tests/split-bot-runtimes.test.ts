@@ -216,6 +216,45 @@ describe('offline bot partitions', () => {
     expect(use(join(f.output, 'web/dutydeck.db'), db => db.prepare("SELECT COUNT(*) AS n FROM configs WHERE key LIKE 'lark.delivery.%' OR key LIKE 'lark.reaction.%'").get()?.n)).toBe(0);
   });
 
+  it('keeps unreleased, expired and unattributable delivery claims blocked', async () => {
+    const f = await fixture(), repos = createRepositories(f.database);
+    const fileId = `result_file_${createHash('sha256').update(larkResultKey('om_pending_process')).digest('hex').slice(0, 36)}`;
+    const uploadClaim = `lark.delivery_claim.${fileId}.upload`, reactionClaim = 'lark.reaction_claim.cli_bbb.om_pending_root';
+    try {
+      await repos.channelMappings.save({ id: 'pending_a', channel: 'lark-card:cli_aaa', externalId: 'om_pending_root', sessionId: 'a', createdAt: '2026-01-01T00:00:00.000Z', extra: JSON.stringify({ card_message_id: 'om_pending_process', turn: 1 }) });
+      // Provider calls that never return leave the claims persisted by the real senders, as after a crash mid-send.
+      let uploading!: () => void, reacting!: () => void;
+      const started = [new Promise<void>(r => { uploading = r; }), new Promise<void>(r => { reacting = r; })];
+      const service = { uploadFile: () => { uploading(); return new Promise<never>(() => {}); }, addReaction: () => { reacting(); return new Promise<never>(() => {}); }, deleteReaction: async () => {} };
+      void sendLarkFile(service as any, { chatId: 'oc_pending' }, { data: Buffer.from('pending'), filename: 'result.md', idempotencyKey: fileId }, { warn: vi.fn() }, repos.config);
+      void deliverLarkStatusReaction(service, { appId: 'cli_bbb', messageId: 'om_pending_root', completed: true }, { warn: vi.fn() }, repos.config);
+      await Promise.all(started);
+    } finally { repos.close(); }
+    const unreleased = [`DELIVERY_CLAIM_UNRELEASED:${uploadClaim}`, `DELIVERY_CLAIM_UNRELEASED:${reactionClaim}`];
+    expect(split(f).blockers.sort()).toEqual(unreleased);
+    // An expired lease proves only that the sender stopped, not whether the provider call took effect.
+    use(f.database, db => db.prepare("UPDATE configs SET value=? WHERE key GLOB 'lark.*_claim.*'").run(JSON.stringify({ owner: 'crashed', expiresAt: 0 })));
+    expect(split(f).blockers.sort()).toEqual(unreleased);
+    // Released claims still need an attributable delivery or bot.
+    const shared = `result_file_${createHash('sha256').update(larkResultKey('om_shared_old_process')).digest('hex').slice(0, 36)}`, orphan = `result_file_${'0'.repeat(36)}`;
+    use(f.database, db => {
+      db.prepare("UPDATE configs SET value='' WHERE key GLOB 'lark.*_claim.*'").run();
+      const mapping = db.prepare('INSERT INTO channel_mappings(id,channel,external_id,session_id,extra,created_at) VALUES (?,?,?,?,?,?)');
+      for (const [app, session] of [['cli_aaa', 'a'], ['cli_bbb', 'b']]) mapping.run(`earlier_${session}`, `lark-card:${app}`, `om_earlier_${session}`, session!, JSON.stringify({ card_message_id: `om_now_${session}`, earlier_message_ids: ['om_shared_old_process'] }), '2026-01-01T00:00:00.000Z');
+      for (const key of [`lark.delivery_claim.${shared}.upload`, `lark.delivery_claim.${orphan}.message`, 'lark.reaction_claim.cli_zzz.om_unknown']) db.prepare('INSERT INTO configs VALUES (?,?)').run(key, '');
+    });
+    expect(split(f).blockers.sort()).toEqual([`CONFIG_OWNERSHIP_UNKNOWN:lark.delivery.${orphan}.message`, `DELIVERY_OWNERSHIP_AMBIGUOUS:${shared}`, 'UNKNOWN_APP_REFERENCE:cli_zzz']);
+    expect(() => split({ ...f, apply: true })).toThrow('MIGRATION_BLOCKED');
+    expect(existsSync(f.output)).toBe(false);
+    expect(use(f.database, db => db.prepare("SELECT value FROM configs WHERE key='dutydeck.bot_process_migration'").get())).toBeUndefined();
+    // Once only attributable released claims remain, each follows the delivery or bot it guarded.
+    use(f.database, db => db.prepare('DELETE FROM configs WHERE key IN (?,?,?)').run(`lark.delivery_claim.${shared}.upload`, `lark.delivery_claim.${orphan}.message`, 'lark.reaction_claim.cli_zzz.om_unknown'));
+    expect(split(f).blockers).toEqual([]); split({ ...f, apply: true });
+    for (const [shard, expected] of [['cli_aaa', [uploadClaim]], ['web', []], ['cli_bbb', [reactionClaim]]] as const) {
+      expect(use(join(f.output, shard, 'dutydeck.db'), db => db.prepare("SELECT key, value FROM configs WHERE key GLOB 'lark.*_claim.*'").all())).toEqual(expected.map(key => ({ key, value: '' })));
+    }
+  });
+
   it('rejects trace exports and ambiguous previous-turn attachment ownership', async () => {
     const f = await fixture(), shared = larkResultKey('om_shared_old_process');
     const fileKey = `lark.delivery.result_file_${createHash('sha256').update(shared).digest('hex').slice(0, 36)}.upload`;

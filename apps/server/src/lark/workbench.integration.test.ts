@@ -171,9 +171,14 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect((await f.item()).plan.steps).toHaveLength(3);
     // 人手输入的固定模板不过闸门：本人即发起人，直接开跑。
     expect((await f.item()).status).toBe('running');
+    // 三步共用工作区，同一目录同时只准备一步：两个独立步骤逐轮各开始一步，汇总等两步都完成后才开始。
+    await f.work.tick(); await f.settle();
+    expect(f.prompts).toHaveLength(1);
+    expect((await f.item()).steps.map(step => step.attempts.length)).toEqual([1, 0, 0]);
     await f.work.tick(); await f.settle();
     expect(f.prompts).toHaveLength(2);
     expect(new Set(f.prompts.map(value => value.sessionId)).size).toBe(2);
+    expect((await f.item()).steps.map(step => step.attempts.length)).toEqual([1, 1, 0]);
     await f.work.tick(); await f.settle(); await f.work.tick();
     const item = await f.item();
     expect(item.status).toBe('completed');
@@ -231,11 +236,14 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect((await f.work.get(parent.id, created.id, 'ou_alice')).status).toBe('running');
     await f.work.tick();
     expect(f.prompts).toHaveLength(1);
-    expect(await f.childTasks()).toHaveLength(2);
-    expect((await f.childTasks()).every(task => task.status === 'queued')).toBe(true);
+    // 父任务仍占着同一工作区：确认后的步骤先不准备，父任务结束后由下一轮调度开始第一步。
+    expect(await f.childTasks()).toHaveLength(0);
+    expect((await f.work.get(parent.id, created.id, 'ou_alice')).steps.every(step => step.status === 'pending' && !step.attempts.length)).toBe(true);
     f.releases.get(parent.id)!();
     await vi.waitFor(() => expect(f.runtime.getActiveTaskContext(parent.id)).toBeUndefined());
+    await f.work.tick();
     await vi.waitFor(() => expect(f.prompts).toHaveLength(2));
+    expect((await f.childTasks()).map(task => task.sessionId)).toEqual([f.prompts[1]!.sessionId]);
   });
 
   it('人可以自己起一次编排：/work plan 拼出计划、先出一张待确认卡，确认后才执行', async () => {
@@ -257,8 +265,12 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect(preview()).toHaveLength(1);
     const value = confirmCards[0]!.input.elements.find((element: any) => element.behaviors?.[0]?.value?.dutydeck_work_item === 'confirm').behaviors[0].value;
     expect((await f.coordinator.handleAction(value, 'ou_alice', { messageId: confirmCards[0]!.messageId, chatId: 'oc_group' })).type).toBe('success');
+    // 两个分头步骤共用工作区：确认后逐轮各开始一步。
+    await f.work.tick(); await f.settle();
+    expect(f.prompts).toHaveLength(1);
     await f.work.tick(); await f.settle();
     expect(f.prompts).toHaveLength(2);
+    expect(new Set(f.prompts.map(value => value.sessionId)).size).toBe(2);
     await expect(f.workbench.command(item.parentSessionId, `plan 只有一步`, message('om_plan_bad', ''), f.config)).rejects.toMatchObject({ code: 'WORK_ITEM_PLAN_STEPS_REQUIRED' });
     // 超长分段要给出可读报错，而不是把 zod 的校验 JSON 贴到卡上。
     await expect(f.workbench.command(item.parentSessionId, `plan ${'很'.repeat(30_001)}；第二步`, message('om_plan_long', ''), f.config)).rejects.toMatchObject({ code: 'WORK_ITEM_PLAN_STEP_TOO_LONG' });
@@ -408,7 +420,9 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     await f.coordinator.handle(message('om_goal', '/work research 比较'), f.config);
     await f.work.tick();
     await vi.waitFor(async () => expect((await f.interactions.list((await f.parent()).id, (await f.item()).id, 'ou_alice')).length).toBe(1));
-    expect((await f.childTasks()).map(task => task.status).sort()).toEqual(['queued', 'running']);
+    // 同目录的第二步不预先排队：第一步等审批期间只有它一个子任务。
+    expect((await f.childTasks()).map(task => task.status)).toEqual(['running']);
+    expect((await f.item()).steps[1]!.attempts).toHaveLength(0);
     expect(f.prompts).toHaveLength(1);
     await f.work.tick();
     await vi.waitFor(() => expect(f.cards.some(card => card.input.elements?.some((value: any) => value.behaviors?.[0]?.value?.answer === 'approve'))).toBe(true));
@@ -420,6 +434,9 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect(f.permissionCalls).not.toHaveBeenCalled();
     expect((await f.coordinator.handleAction(action, 'ou_alice', { messageId: card.messageId, chatId: 'oc_group' })).type).toBe('success');
     expect(f.permissionCalls).toHaveBeenCalledTimes(1);
+    // 批准后第一步跑完，下一轮调度才开始第二步。
+    await vi.waitFor(async () => expect((await f.childTasks()).map(task => task.status)).toEqual(['completed']));
+    await f.work.tick();
     await vi.waitFor(() => expect(f.prompts).toHaveLength(2));
     // 旧版卡片只刷新；使用当前卡片版本重放旧请求，仍须在权限层拒绝重复决定。
     const refreshed = await f.repos.channelMappings.get(`lark-work-card:${f.config.appId}`, card.messageId);
@@ -436,7 +453,8 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     await f.work.tick();
     const item = await f.item();
     await vi.waitFor(async () => expect((await f.interactions.list(item.parentSessionId, item.id, 'ou_alice')).length).toBe(1));
-    expect((await f.childTasks()).map(task => task.status).sort()).toEqual(['queued', 'running']);
+    expect((await f.childTasks()).map(task => task.status)).toEqual(['running']);
+    expect((await f.item()).steps[1]!.attempts).toHaveLength(0);
     const request = (await f.interactions.list(item.parentSessionId, item.id, 'ou_alice'))[0]!;
     f.approval.mockResolvedValue(false);
     const { sessionId: _session, text: _text, ...input } = request;
@@ -444,6 +462,8 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect(f.permissionCalls).not.toHaveBeenCalled();
     await f.interactions.respond(item.parentSessionId, item.id, { ...input, answer: 'reject' }, 'ou_alice');
     expect(f.permissionCalls).toHaveBeenCalledWith(`permit_${request.sessionId}`, false);
+    await vi.waitFor(async () => expect((await f.childTasks()).map(task => task.status)).toEqual(['completed']));
+    await f.work.tick();
     await vi.waitFor(() => expect(f.prompts).toHaveLength(2));
     await vi.waitFor(async () => expect((await f.interactions.list(item.parentSessionId, item.id, 'ou_alice')).map(next => next.sessionId)).toEqual([f.prompts[1]!.sessionId]));
   });
@@ -940,11 +960,16 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
       // 人手发起无需确认闸门，直接开跑
       expect(item.status).toBe('running');
 
-      // 两份独立调查共享目录：a 未结束时 b 必须排队，merge 也不能提前提交。
+      // 两份独立调查共享目录：a 未结束时 b 不准备，merge 也不能提前提交。
       await f.work.tick();
       await vi.waitFor(() => expect(f.prompts).toHaveLength(1));
-      expect((await f.childTasks()).map(task => task.status).sort()).toEqual(['queued', 'running']);
+      expect((await f.childTasks()).map(task => task.status)).toEqual(['running']);
+      expect((await f.item()).steps.map(step => step.attempts.length)).toEqual([1, 0, 0]);
+      await f.work.tick();
+      expect(f.prompts).toHaveLength(1);
       f.releases.get(f.prompts[0]!.sessionId)!();
+      await vi.waitFor(async () => expect((await f.runtime.getTasks(f.prompts[0]!.sessionId))[0]!.status).toBe('completed'));
+      await f.work.tick();
       await vi.waitFor(() => expect(f.prompts).toHaveLength(2));
       expect(new Set(f.prompts.map(p => p.sessionId)).size).toBe(2);
       expect((await f.runtime.getTasks(f.prompts[0]!.sessionId))[0]!.status).toBe('completed');

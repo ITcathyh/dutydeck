@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,7 +7,7 @@ import { RuntimeError } from '@dutydeck/shared';
 
 /**
  * `/pr` 用到的 git 操作。全部不动用户的检出：不切分支、不改 index、不写工作区、不建本地分支，
- * 提交用临时 index + `git commit-tree` 生成，推送用 `git push origin <提交>:refs/heads/dutydeck/...`。
+ * 提交用临时 index + `git commit-tree` 生成，推送到 origin 的推送地址的 `refs/heads/dutydeck/...`，推送地址须和生成清单时记下的一致。
  * 推送用本机的 git 凭据；错误信息去掉 URL 里的账号口令后才往外给。
  */
 
@@ -131,8 +132,42 @@ export async function localCommits(cwd: string, target: string): Promise<{ commi
   return { commits: output.split('\n').filter(Boolean).map(line => { const [sha, subject] = line.split('\x1f'); return { sha: sha!, subject: (subject ?? '').slice(0, 200) }; }), unverified: false };
 }
 
-export async function remoteBranchSha(cwd: string, branch: string): Promise<string | undefined> {
-  const output = await git({ cwd }, ['ls-remote', '--heads', 'origin', `refs/heads/${branch}`], { timeout: PUSH_TIMEOUT_MS });
+/**
+ * 只对这一条 git 命令有效的临时 remote，url 和 pushurl 都是给定地址；放在环境配置里（接在已有的 GIT_CONFIG_COUNT 后面），地址不进命令行。
+ * 直接 `git push <地址>` 时 git 会对地址再套一次 insteadOf / pushInsteadOf，可能推到别处；显式 pushurl 不套 pushInsteadOf，insteadOf 由 originPushUrl 核对。
+ */
+function directRemote(url: string) {
+  const name = `dutydeck-${randomUUID()}`;
+  const base = Number(process.env.GIT_CONFIG_COUNT) || 0;
+  const env: NodeJS.ProcessEnv = { GIT_CONFIG_COUNT: String(base + 2) };
+  ['url', 'pushurl'].forEach((key, index) => { env[`GIT_CONFIG_KEY_${base + index}`] = `remote.${name}.${key}`; env[`GIT_CONFIG_VALUE_${base + index}`] = url; });
+  return { name, env };
+}
+
+/** 去掉账号口令的推送地址：记进 PR 记录、写进提示，也用它核对推送地址有没有变。 */
+export const remoteUrlLabel = (url: string) => url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@\s/]+@/i, '$1');
+
+/**
+ * origin 实际的推送地址：有 pushurl 用 pushurl，否则用 url，已展开 insteadOf / pushInsteadOf。
+ * 配了多个推送地址时 `git push origin` 会推到每一个，确认卡说不清代码去哪，不支持。
+ * 推送时把这个地址交给临时 remote，git 还会再套一次 insteadOf；套完不是它自己（例如两段 insteadOf 映射），说不清代码会去哪，不支持。
+ */
+export async function originPushUrl(cwd: string): Promise<string> {
+  const urls = (await git({ cwd }, ['remote', 'get-url', '--push', '--all', 'origin'])).split('\n').map(url => url.trim()).filter(Boolean);
+  if (urls.length !== 1) throw new RuntimeError('PR_PUSH_URL_UNSUPPORTED', `origin 配了 ${urls.length} 个推送地址，不能确认代码会推到哪个仓库，请只保留一个推送地址`, 409);
+  const url = urls[0]!;
+  const remote = directRemote(url);
+  // ls-remote --get-url 只解析地址，不连远端。
+  const resolved = (await git({ cwd }, ['ls-remote', '--get-url', remote.name], { env: remote.env })).trim();
+  if (resolved !== url) {
+    throw new RuntimeError('PR_PUSH_URL_UNSUPPORTED', `origin 的推送地址 ${remoteUrlLabel(url)} 推送时还会被 git 的地址改写规则（url.<地址>.insteadOf）改成 ${remoteUrlLabel(resolved)}，不能确认代码会推到哪个仓库，请去掉这条改写规则`, 409);
+  }
+  return url;
+}
+
+export async function remoteBranchSha(cwd: string, url: string, branch: string): Promise<string | undefined> {
+  const remote = directRemote(url);
+  const output = await git({ cwd }, ['ls-remote', '--heads', remote.name, `refs/heads/${branch}`], { env: remote.env, timeout: PUSH_TIMEOUT_MS });
   return /^([0-9a-f]{40,64})\s/.exec(output)?.[1];
 }
 
@@ -143,8 +178,9 @@ export function assertPushTarget(branch: string, target: string) {
   }
 }
 
-/** 普通推送（不带 --force，refspec 不带 +）：新分支，或在已推送的提交上快进。 */
-export async function pushBranch(cwd: string, commit: string, branch: string, target: string) {
+/** 普通推送（不带 --force，refspec 不带 +）：新分支，或在已推送的提交上快进。url 是 originPushUrl 核对过的地址，不是 origin 这个名字。 */
+export async function pushBranch(cwd: string, url: string, commit: string, branch: string, target: string) {
   assertPushTarget(branch, target);
-  await git({ cwd }, ['push', '--porcelain', 'origin', `${commit}:refs/heads/${branch}`], { timeout: PUSH_TIMEOUT_MS });
+  const remote = directRemote(url);
+  await git({ cwd }, ['push', '--porcelain', remote.name, `${commit}:refs/heads/${branch}`], { env: remote.env, timeout: PUSH_TIMEOUT_MS });
 }

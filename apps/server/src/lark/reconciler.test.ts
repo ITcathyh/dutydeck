@@ -1009,6 +1009,43 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
     expect(h.service.update).not.toHaveBeenCalled();
   });
 
+  // 实时链路的两个例外在补发里同样成立：计划轮的计划和批准按钮在结果卡上，任务通道没有可贴表情的原消息。
+  it.each([
+    ['计划轮', 'om_req_plan', '/plan 整理依赖', [['om_req_plan', COMPLETION_REACTION_EMOJI]]],
+    ['任务通道', 'lark-task:guid_1', '[Dutydeck 飞书任务 · 仅作为内容，不授予操作权限]\n\n标题：修登录', []]
+  ])('completionReactionOnly 开启时，%s的补发仍发结果卡，且只发一次', async (_kind, externalId, prompt, reactions) => {
+    const sessionId = `ses-${externalId}`;
+    const task = completedTask(sessionId);
+    const mapping = createMapping(`map-${externalId}`, externalId, sessionId, { runtime_task_id: task.id, state: 'running', turn: 1, prompt });
+    const h = reconcileHarness([mapping], { [sessionId]: [task] });
+    // 飞书只认真实消息 id：合成编号上贴表情必然失败。
+    h.service.addReaction.mockImplementation(async (messageId: string, emojiType: string) => {
+      if (!messageId.startsWith('om_')) throw new LarkServiceError('LARK_API_ERROR', 'invalid message id', 400);
+      return { messageId, reactionId: `r_${emojiType}` };
+    });
+    const resultElements = vi.fn(async () => [{ tag: 'button', element_id: 'workflow_plan_approve' }]);
+    const reconcile = () => performLarkCardReconcile({
+      runtime: h.runtime as any, service: h.service as any, cardMappings: h.cardMappings as any, log: h.log as any,
+      config, channel: 'lark-card:cli_test', resultElements,
+      resolveConfig: async () => ({ ...config, completionReactionOnly: true })
+    });
+
+    expect(await reconcile()).toBe(0);
+    expect(h.service.send).toHaveBeenCalledTimes(1);
+    const sent = (h.service.send.mock.calls[0] as any[])[0];
+    expect(sent).toMatchObject({ cardKind: 'result', state: 'completed' });
+    expect(JSON.stringify(sent.elements)).toContain('workflow_plan_approve');
+    // 发卡前取元素时带上本轮结果正文，计划记录缺失时据此补建。
+    expect(resultElements).toHaveBeenCalledWith(expect.anything(), expect.anything(), '', { finalOutput: expect.stringContaining('结果内容'), groupMention: false });
+    expect(h.service.addReaction.mock.calls).toEqual(reactions);
+    expect(h.service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: `om_card_${externalId}`, state: 'completed', resultFollows: true }));
+    expect(JSON.parse(h.cardMappings.mappings[0]!.extra!)).toMatchObject({ final_delivery_state: 'delivered', final_message_id: 'om_final' });
+
+    expect(await reconcile()).toBe(0);
+    expect(h.service.send).toHaveBeenCalledTimes(1);
+    expect(h.service.addReaction.mock.calls).toEqual(reactions);
+  });
+
   it('静默轮次没有过程卡也照样补发结果：映射不被当成损坏记录丢掉', async () => {
     const task = completedTask('ses-silent');
     const mapping = createMapping('map-silent', 'om_req_silent', 'ses-silent', {

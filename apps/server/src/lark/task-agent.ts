@@ -142,7 +142,7 @@ export function resolveLarkTaskAgentConfig(env: NodeJS.ProcessEnv = process.env)
  * 发起人白名单是否已配置。口径与 coordinator.ts:1424 的 accessRestricted 完全一致
  * （allowedUsers / allowedEmails 任一非空），不另造身份体系。
  */
-const allowlistConfigured = (config: Pick<StoredLarkConfig, 'allowedUsers' | 'allowedEmails'>) =>
+export const larkTaskAgentAllowlistConfigured = (config: Pick<StoredLarkConfig, 'allowedUsers' | 'allowedEmails'>) =>
   (config.allowedUsers ?? []).length > 0 || (config.allowedEmails ?? []).length > 0;
 
 /** 配置齐了却没生效时的解释文案；通道被显式关闭不需要解释。 */
@@ -306,7 +306,7 @@ export async function claimLarkTaskDispatches(input: {
   const config = input.config ?? resolveLarkTaskAgentConfig(input.env);
   if (!config.enabled) return disabled(input.appId, 'not_enabled', input.log);
   if (!config.chatId) return disabled(input.appId, 'chat_not_configured', input.log);
-  if (!allowlistConfigured(input.botConfig)) return disabled(input.appId, 'allowlist_not_configured', input.log);
+  if (!larkTaskAgentAllowlistConfigured(input.botConfig)) return disabled(input.appId, 'allowlist_not_configured', input.log);
   if (!input.store.compareAndSet) throw new Error('Lark task agent channel requires persistent CAS');
 
   const now = input.now ?? Date.now;

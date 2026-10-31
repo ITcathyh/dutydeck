@@ -1342,7 +1342,7 @@ const verificationTime = (value: string | undefined): string => {
 const autoVerificationNotes: Record<LarkAutoVerificationNote['phase'], (note: LarkAutoVerificationNote) => string> = {
   running: () => '',
   interrupted: () => '',
-  skipped: () => '本轮改了代码，但会话里还有任务在执行，自动验证已跳过。',
+  skipped: () => '本轮改了代码，但当前工作目录还有任务未结束，或上轮执行结果需要核对，自动验证已跳过。',
   repairing: note => `已把失败输出发回 Agent 返修（第 ${note.round}/${maxLarkVerificationRepairRounds} 轮），修好后会重新验证。`,
   exhausted: () => `已自动返修 ${maxLarkVerificationRepairRounds} 轮仍未通过，需要人工处理。`,
   infrastructure: () => '这是验证工具本身的问题，没有发回 Agent 返修。'

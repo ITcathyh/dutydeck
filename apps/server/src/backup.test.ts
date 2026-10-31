@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { createRepositories, restoreQuarantinePath, withOfflineDatabase } from '@dutydeck/storage';
 import { createBackup, inspectBackup, restoreBackup } from './backup.js';
 import { PluginBindings } from './plugins/bindings.js';
@@ -138,15 +139,23 @@ describe('offline portable backup', () => {
   });
 
   it('holds both real plugin locks throughout the actual database backup', async () => {
-    const f = fixture(), original = Database.prototype.exec;
-    const spy = vi.spyOn(Database.prototype, 'exec').mockImplementation(function (this: Database.Database, sql: string) {
-      if (sql.startsWith('VACUUM INTO')) for (const name of ['.config-lock.sqlite', '.binding-lock.sqlite']) {
+    // VACUUM INTO runs in a worker thread: probe the locks when it starts and when it exits, before createBackup resumes.
+    const f = fixture(), original = Worker.prototype.emit, probes: string[] = [];
+    const spy = vi.spyOn(Worker.prototype, 'emit').mockImplementation(function (this: Worker, event: string | symbol, ...args: unknown[]) {
+      if (event === 'online' || event === 'exit') for (const name of ['.config-lock.sqlite', '.binding-lock.sqlite']) {
         const competitor = new Database(join(f.dataDir, 'plugins', name), { timeout: 0 });
-        try { expect(() => competitor.exec('BEGIN IMMEDIATE')).toThrow(/locked/); } finally { competitor.close(); }
+        try { competitor.exec('BEGIN IMMEDIATE'); probes.push(`${String(event)} ${name} unlocked`); }
+        catch (error) { probes.push(`${String(event)} ${name} ${/locked/.test(String(error)) ? 'locked' : String(error)}`); }
+        finally { competitor.close(); }
       }
-      return original.call(this, sql);
+      if (event === 'exit') probes.push(`exit ${args[0]}`);
+      return original.call(this, event, ...args);
     });
-    try { await createBackup(f); expect(spy.mock.calls.filter(([sql]) => sql.startsWith('VACUUM INTO'))).toHaveLength(1); } finally { spy.mockRestore(); }
+    try { await createBackup(f); } finally { spy.mockRestore(); }
+    expect(probes).toEqual([
+      'online .config-lock.sqlite locked', 'online .binding-lock.sqlite locked',
+      'exit .config-lock.sqlite locked', 'exit .binding-lock.sqlite locked', 'exit 0'
+    ]);
   });
 
   it('preserves immutable artifact identity and excludes secret files', async () => {

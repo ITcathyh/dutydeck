@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { previewSessionSchedule, type AutomationDeliveryTarget, type CreateSessionScheduleInput, type UpdateSessionScheduleInput, type PublicSessionSchedule as SessionSchedule } from '@dutydeck/shared';
 import { api, ApiError, type Session } from '../api';
 import { currentInstance } from '../instance';
+import { requestId } from '../request-id';
 import { PlanHistory, automationTime } from './AutomationHistory';
 import { ConfirmDialog } from './ConfirmDialog';
 import { sessionDisplayName } from '../run-summary';
@@ -87,7 +88,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
   const toggle = useMutation({ mutationFn: (item: SessionSchedule) => api.updateSchedule(session.id, item.id, { expectedRevision: item.revision, enabled: !item.enabled }), onSuccess: async (_result, item) => { await refresh(); setEnabling(undefined); setNotice(item.enabled ? '计划已停用，已保留内容与触发记录，可随时重新启用。' : '计划已启用。'); }, onError: refresh });
   const run = useMutation({ mutationFn: (item: SessionSchedule) => {
     let request = runRequests.current.get(item.id);
-    if (!request) { request = { expectedRevision: item.revision, idempotencyKey: crypto.randomUUID() }; runRequests.current.set(item.id, request); }
+    if (!request) { request = { expectedRevision: item.revision, idempotencyKey: requestId() }; runRequests.current.set(item.id, request); }
     return api.runSchedule(session.id, item.id, request);
   }, onSuccess: async (_result, item) => { runRequests.current.delete(item.id); await refresh(); setNotice('已提交立即执行，可在最近触发记录中查看结果；原计划时间保持不变。'); }, onError: (error, item) => {
     if (error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408) { runRequests.current.delete(item.id); void refresh(); }
