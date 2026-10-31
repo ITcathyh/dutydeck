@@ -437,6 +437,7 @@ export function createWp1aRepositories(sqlite: Database.Database): Wp1aRepositor
     },
     remoteChatFacts: {
       async listByChannelBot(id, limit) { return (sqlite.prepare('SELECT * FROM remote_chat_facts WHERE channel_bot_id = ? ORDER BY observed_at DESC, id LIMIT ?').all(id, boundedLimit(limit)) as RemoteChatFactRow[]).map(decodeRemoteChatFact); },
+      async listMembersByChannelBot(id) { return (sqlite.prepare("SELECT * FROM remote_chat_facts WHERE channel_bot_id = ? AND membership_state = 'member' ORDER BY id").all(id) as RemoteChatFactRow[]).map(decodeRemoteChatFact); },
       async get(id) { return getFact(id); }, async getByNaturalKey(botId, chatId) { return getFactByNaturalKey(botId, chatId); },
       async getCurrentByNaturalKey(botId, chatId, now) { return getCurrentFactByNaturalKey(botId, chatId, now); },
       async create(input) { return transact(repositories => repositories.remoteChatFacts.create(input)); },

@@ -2417,6 +2417,44 @@ describe('Lark message coordinator', () => {
     coordinator.stop();
   });
 
+  it('过程卡没有新事件时不随心跳重绘，有新事件照常刷新，空闲满 10 秒再刷新一次用时', async () => {
+    let subscriber: ((event: AgentEvent) => void) | undefined;
+    let resolveSend: (() => void) | undefined;
+    const runtime = {
+      start: vi.fn(async () => session),
+      getSession: vi.fn(async () => session),
+      subscribe: vi.fn((_id: string, listener: (event: AgentEvent) => void) => { subscriber = listener; return vi.fn(); }),
+      send: vi.fn(async () => new Promise<void>(resolve => { resolveSend = resolve; })),
+      interrupt: vi.fn(async () => {})
+    };
+    const service = {
+      addReaction: vi.fn(async () => ({})), deleteReaction: vi.fn(async () => {}),
+      send: vi.fn(async () => ({ messageId: 'om_card_idle' })),
+      update: vi.fn(async (input: any) => ({ messageId: input.messageId }))
+    };
+    const mappings = { list: vi.fn(async () => []), get: vi.fn(), save: vi.fn(async () => {}) };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, mappings as any);
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    try {
+      coordinator.handle({ messageId: 'om_msg_idle', chatId: 'oc_group', chatType: 'p2p', messageType: 'text', content: '{"text":"跑一个长任务"}', mentions: [] }, { ...config, pushIntervalMs: 50 });
+      await vi.waitFor(() => expect(service.send).toHaveBeenCalledTimes(1));
+      subscriber?.(agentEvent(1, 'text', { text: '步骤 1' }));
+      await vi.waitFor(() => expect(JSON.stringify(service.update.mock.calls.at(-1)?.[0]?.elements)).toContain('步骤 1'));
+      await sleep(100);
+      const idle = service.update.mock.calls.length;
+      await sleep(400);
+      expect(service.update).toHaveBeenCalledTimes(idle);
+      subscriber?.(agentEvent(2, 'text', { text: '步骤 2' }));
+      await vi.waitFor(() => expect(JSON.stringify(service.update.mock.calls.at(-1)?.[0]?.elements)).toContain('步骤 2'));
+      await sleep(100);
+      const quiet = service.update.mock.calls.length;
+      const later = Date.now() + 11_000;
+      const clock = vi.spyOn(Date, 'now').mockImplementation(() => later);
+      try { await vi.waitFor(() => expect(service.update.mock.calls.length).toBeGreaterThan(quiet)); }
+      finally { clock.mockRestore(); }
+    } finally { resolveSend?.(); coordinator.stop(); }
+  });
+
   it('迟到的旧轮次/旧卡 230031 不可更新错误不冻结新轮次/新卡', async () => {
     let rejectFirstUpdate!: (err: unknown) => void;
     const firstUpdateDeferred = new Promise<any>((_, reject) => { rejectFirstUpdate = reject; });
@@ -2509,13 +2547,14 @@ describe('Lark long connection listener 欢迎语', () => {
       return jsonResponse({});
     });
     const kv = memoryKv(options.records);
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const listener = new LarkLongConnectionListener(
-      { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      log,
       { fetcher: fetcher as any, welcomeStore: kv as any, chatModeResolver: async () => 'group',
         ...options.listenerOptions, ...(options.runtime ? { runtime: options.runtime } : {}) }
     );
     await listener.start({ ...config, ...options.configPatch });
-    return { listener, handlers: larkSdkHarness.handlers, posts, kv };
+    return { listener, handlers: larkSdkHarness.handlers, posts, kv, log };
   };
 
   const welcomeTitles = (posts: Array<{ body: any }>) => posts
@@ -2651,6 +2690,20 @@ describe('Lark long connection listener 欢迎语', () => {
       await handlers['im.message.receive_v1']!({ ...dm, message: { ...dm.message, chat_id: 'oc_other_dm' } });
       await new Promise(resolve => setImmediate(resolve));
       expect(posts).toHaveLength(2); expect(larkSdkHarness.wsStart).toHaveBeenCalledOnce();
+    } finally { listener.stop(); receive.mockRestore(); }
+  });
+
+  it('logs the event type and ID of each inbound message event, and handles member joins without SDK warnings', async () => {
+    const receive = vi.spyOn(LarkMessageCoordinator.prototype, 'receive').mockResolvedValue();
+    const runtime = { getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()), listSessions: vi.fn(async () => []) };
+    const { listener, handlers, log } = await startHarness({ runtime, configPatch: { welcomeEnabled: false } });
+    const dm = { event_id: 'ev_message', event_type: 'im.message.receive_v1', sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      message: { message_id: 'om_dm', chat_id: 'oc_dm', chat_type: 'p2p', message_type: 'text', content: '{"text":"hello"}', mentions: [] } };
+    try {
+      await handlers['im.message.receive_v1']!(dm);
+      expect(log.info).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_dm', eventType: 'im.message.receive_v1', eventId: 'ev_message' }), '收到飞书消息事件');
+      expect(handlers['im.chat.member.user.added_v1']).toBeTypeOf('function');
+      expect(await handlers['im.chat.member.user.added_v1']!({ event_id: 'ev_join', chat_id: 'oc_group' })).toBeUndefined();
     } finally { listener.stop(); receive.mockRestore(); }
   });
 

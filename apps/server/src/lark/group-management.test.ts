@@ -213,6 +213,36 @@ describe('live group configuration', () => {
     expect(roles).toHaveBeenCalledExactlyOnceWith(owner.channelBotId, 500);
   });
 
+  it('re-syncing unchanged group names writes no fact versions; a rename writes one', async () => {
+    const versions = () => {
+      const db = new Database(join(dir, 'state.sqlite'), { readonly: true });
+      try { return (db.prepare("SELECT COUNT(*) AS count FROM wp1a_entity_versions WHERE entity_kind = 'remote_chat_fact'").get() as { count: number }).count; }
+      finally { db.close(); }
+    };
+    const before = versions();
+    time = new Date(time.getTime() + 60_000);
+    await manager.sync('cli_one');
+    expect(versions()).toBe(before);
+    const owner = (await manager.owner('cli_one'))!;
+    expect((await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_one'))!.observedAt).toBe(time.toISOString());
+    listChats.mockResolvedValueOnce({ items: [{ chatId: 'oc_one', name: '项目群（新）', external: false }, { chatId: 'oc_two', name: '值班群', external: false }], hasMore: false });
+    await manager.sync('cli_one');
+    expect(versions()).toBe(before + 1);
+    expect((await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_one'))!.displayName).toBe('项目群（新）');
+  });
+
+  it('marks every group the Bot left, beyond the first 500', async () => {
+    const chats = Array.from({ length: 600 }, (_, index) => ({ chatId: `oc_many_${index.toString().padStart(3, '0')}`, name: `Group ${index}`, external: false }));
+    listChats.mockResolvedValueOnce({ items: chats, hasMore: false });
+    await manager.sync('cli_one');
+    listChats.mockResolvedValueOnce({ items: [chats[0]!], hasMore: false });
+    await manager.sync('cli_one');
+    const owner = (await manager.owner('cli_one'))!;
+    const states = await Promise.all(chats.map(async chat => (await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, chat.chatId))!.membershipState));
+    expect(states[0]).toBe('member');
+    expect(states.slice(1).every(state => state === 'not_member')).toBe(true);
+  });
+
   it('rejects read context in an unbound participation-off group without activating or syncing it', async () => {
     await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', listening: true, defaultGroupParticipation: 'off' });
     const before = await manager.owner('cli_one');

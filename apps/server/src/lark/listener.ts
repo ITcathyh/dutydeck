@@ -301,7 +301,9 @@ export class LarkLongConnectionListener implements LarkListener {
         const result = await runLarkEventPipeline(this.config ?? config, 'im.message.receive_v1', event, http.fetch, this.log);
         if (result.decision === 'stop') return;
         const message = event.message;
-        this.log.info({ messageId: message.message_id, chatId: message.chat_id, chatType: message.chat_type }, '收到飞书消息事件');
+        // 事件 ID 区分平台重投（同一 ID）与另一条事件（不同 ID）。
+        this.log.info({ messageId: message.message_id, chatId: message.chat_id, chatType: message.chat_type,
+          eventType: event.event_type ?? 'im.message.receive_v1', eventId: event.event_id }, '收到飞书消息事件');
         await coordinator?.receive({
           messageId: message.message_id,
           chatId: message.chat_id,
@@ -358,6 +360,8 @@ export class LarkLongConnectionListener implements LarkListener {
       // reaction 在本产品里只是「请求已接入」的单向回执，不是可交互的控制面。
       'im.message.reaction.created_v1': () => undefined,
       'im.message.reaction.deleted_v1': () => undefined,
+      // 有人入群：本产品不处理，但应用订阅了它时 SDK 会对未登记的事件逐条告警。
+      'im.chat.member.user.added_v1': () => undefined,
       // 飞书任务指派人变更：立即触发一次与定时轮询相同的认领，重复事件由认领账本 CAS 去重。
       // 仅响应 task_assignees_update；任务标题/完成状态等其它变更与「是否该接单」无关。
       // 该事件订阅本身需在飞书开发者后台开启（task.task.update_user_access_v2，scope task:task:read）。

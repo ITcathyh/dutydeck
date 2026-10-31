@@ -651,6 +651,8 @@ export interface ChannelBotGroupPolicyRepository {
 }
 export interface RemoteChatFactRepository {
   listByChannelBot(channelBotId: string, limit?: number): Promise<RemoteChatFact[]>;
+  /** 仍记为在群的全部事实，不分页：群同步据此找出已退的群。 */
+  listMembersByChannelBot(channelBotId: string): Promise<RemoteChatFact[]>;
   get(id: string): Promise<RemoteChatFact | undefined>;
   getByNaturalKey(channelBotId: string, externalChatId: string): Promise<RemoteChatFact | undefined>;
   getCurrentByNaturalKey(channelBotId: string, externalChatId: string, now?: string): Promise<RemoteChatFact | undefined>;

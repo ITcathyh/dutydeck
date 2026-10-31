@@ -229,7 +229,8 @@ export class LarkGroupManager {
     if (owner.fingerprint !== fingerprint(config)) secret = await this.repos.secretRefs.update(secret.id, { expectedRevision: secret.revision, status: 'configured' });
     const at = this.now().toISOString();
     const expiresAt = new Date(this.now().getTime() + 60 * 60_000).toISOString();
-    const previousFacts = await this.repos.remoteChatFacts.listByChannelBot(owner.channelBotId, 500);
+    // 退群比对要看全部在群的事实：按条数截断会漏掉超出部分的退群。
+    const previousFacts = await this.repos.remoteChatFacts.listMembersByChannelBot(owner.channelBotId);
     await this.repos.groupPolicy.transact(tx => {
       const liveConfig = parse<StoredLarkConfig[]>(tx.config.get('lark.bots'))?.find(bot => bot.appId === appId);
       if (!liveConfig || fingerprint(liveConfig) !== fingerprint(config)) throw new RuntimeError('LARK_CREDENTIAL_CHANGED', '同步期间凭据已变更，请重试。', 409);
@@ -246,7 +247,8 @@ export class LarkGroupManager {
         const fact = tx.remoteChatFacts.upsert({ id: beforeChat?.id ?? `live_chat_${hash(`${appId}\0${chat.chatId}`)}`, expectedRevision: beforeChat?.revision ?? 0, channelBotId: owner.channelBotId, externalChatId: chat.chatId,
           membershipState: 'member', chatType: chat.chatMode === 'topic' ? 'topic_group' : 'group', observedAt: at, lastSuccessAt: at,
           credentialRefId: secret.id, credentialRevision: secret.revision, credentialFingerprint: fingerprint(config), identityFactId: identity.id, identityRevision: identity.revision, expiresAt });
-        tx.remoteChatFacts.update(fact.id, { expectedRevision: fact.revision, displayName: chat.name });
+        // 群名没变就不改：update 每次都写一条带完整旧实体的版本记录。观测与过期时间由上面的 upsert 刷新，它不记版本。
+        if (fact.displayName !== chat.name) tx.remoteChatFacts.update(fact.id, { expectedRevision: fact.revision, displayName: chat.name });
       }
       for (const previous of previousFacts) {
         if (previous.membershipState !== 'member' || currentChatIds.has(previous.externalChatId)) continue;

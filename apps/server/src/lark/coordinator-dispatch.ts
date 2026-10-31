@@ -66,6 +66,8 @@ import { LarkCoordinatorRecovery } from './coordinator-recovery.js';
 
 /** 空 @ 沿用同一用户上一条请求的时间窗：超过它就不再假定两条消息是同一次求助。 */
 const ownRequestAdoptionWindowMs = 10 * 60 * 1000;
+/** 过程卡没有新事件时只为刷新用时重绘，间隔放宽到这么久；有新事件仍按推送间隔刷新。 */
+const larkIdleProgressRefreshMs = 10_000;
 
 /** 去掉首尾空白与标点：「先停一下！」「可以。」这类短句按字面判断，不看标点。 */
 const trimPunctuation = (text: string) => text.replace(/^[\s\p{P}\p{S}]+|[\s\p{P}\p{S}]+$/gu, '');
@@ -1204,9 +1206,15 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
 
     let timer: NodeJS.Timeout | undefined;
     let heartbeatActive = false;
+    // 心跳据此判断上一帧送达之后会话里有没有新事件：流式文本并进上一条时条数不变，所以另记一个计数；
+    // 同会话其他请求的事件也算，卡上的排队摘要跟着它们变。
+    let eventRevision = 0;
+    let renderedRevision: number | undefined;
+    let renderedAt = 0;
     const processCard = task.cardMessageId ? this.processCard(task) : undefined;
     const update = async (state: Exclude<LarkTaskState, 'interrupting'>) => {
       if (this.stopped || task.turn !== currentTurn) return { delivered: false } as CardUpdateOutcome;
+      const revision = eventRevision;
       // Runtime running is monotonic for a turn. Late dispatch/cancel bookkeeping may
       // still report queued, but must never repaint an executing card backwards.
       if (state === 'queued' && task.state === 'running') return Promise.resolve({ delivered: false } as CardUpdateOutcome);
@@ -1350,6 +1358,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
         elements
       });
+      if (outcome.delivered) { renderedRevision = revision; renderedAt = Date.now(); }
       if (task.progressFrozen) await notifyRecovery();
       return outcome;
     };
@@ -1535,6 +1544,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           // 跑够长才置顶：短任务不该改写群成员的会话列表。失败已在管理器内兜底。
           void this.pinLongRunningCard(task);
         }
+        if (renderedRevision === eventRevision && Date.now() - renderedAt < larkIdleProgressRefreshMs) { scheduleHeartbeat(); return; }
         void update('running').finally(scheduleHeartbeat);
       }, config.pushIntervalMs);
     };
@@ -1843,6 +1853,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         if (!settling) scheduleHeartbeat();
       };
       unsubscribe = this.runtime.subscribe(session.id, agentEvent => {
+        eventRevision++;
         if (!runtimeTaskId) buffered.push(agentEvent);
         else receive(agentEvent);
       });
@@ -1937,6 +1948,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
 
     const unsubscribe = this.runtime.subscribe(session.id, agentEvent => {
       if (this.stopped || task.turn !== currentTurn) return;
+      eventRevision++;
       appendEvent(agentEvent);
       scheduleHeartbeat();
     });
