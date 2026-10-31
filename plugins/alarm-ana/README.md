@@ -86,12 +86,12 @@ dutydeck settings plugin-binding list --database "$dutydeck_database" --url "$du
 
 ## 工具授权
 
-只给测试请求人、测试群绑定授权；不要把安装级信任误当作该授权。授权资源 `*` 的查询可以读取绑定的整个 alarm_ana 数据范围，不按群过滤，所以必须确认请求人有该读取权限。
+只给测试请求人、测试群绑定授权；不要把安装级信任误当作该授权。`tool-grant` 不带 `--database`/`--url`，自动连接本机已就绪的实例；0.0.8（`4d4f5e1`）上带这两个参数会报 `PLUGIN_TOOL_DATABASE_REQUIRED`。授权资源 `*` 的查询可以读取绑定的整个 alarm_ana 数据范围，不按群过滤，所以必须确认请求人有该读取权限。
 
 ```sh
 binding_id='<上一步实际绑定id>'
 for tool in alarm_trace known_issues ops_health; do
-  dutydeck tool-grant set --database "$dutydeck_database" --url "$dutydeck_url" --json \
+  dutydeck tool-grant set --json \
     "{\"id\":\"alarm-ana-test-$tool\",\"toolId\":\"alarm-ana/$tool\",\"bindingId\":\"$binding_id\",\"actor\":{\"kind\":\"channel\",\"id\":\"$requester_open_id\",\"appId\":\"$bot_app_id\"},\"effects\":[\"read\"],\"resources\":[\"*\"],\"operations\":[\"invoke\"],\"enabled\":true}"
 done
 ```
@@ -102,10 +102,10 @@ done
 source_key='<已确认的数据源>'
 record_id='<已确认的源内报警id>'
 for tool in ack silence comment; do
-  dutydeck tool-grant set --database "$dutydeck_database" --url "$dutydeck_url" --json \
+  dutydeck tool-grant set --json \
     "{\"id\":\"alarm-ana-test-$tool\",\"toolId\":\"alarm-ana/$tool\",\"bindingId\":\"$binding_id\",\"actor\":{\"kind\":\"channel\",\"id\":\"$requester_open_id\",\"appId\":\"$bot_app_id\"},\"effects\":[\"write\"],\"resources\":[\"http://127.0.0.1:8765/alarm/$source_key/$record_id\"],\"operations\":[\"invoke\"],\"enabled\":true}"
 done
-dutydeck tool-grant list --database "$dutydeck_database" --url "$dutydeck_url"
+dutydeck tool-grant list
 ```
 
 ## 测试群验收与演练记账
@@ -143,7 +143,7 @@ dutydeck tool-grant list --database "$dutydeck_database" --url "$dutydeck_url"
 
 ```sh
 for tool in ack silence comment alarm_trace known_issues ops_health; do
-  dutydeck tool-grant revoke "alarm-ana-test-$tool" --database "$dutydeck_database" --url "$dutydeck_url"
+  dutydeck tool-grant revoke "alarm-ana-test-$tool"
 done
 dutydeck settings plugin-binding set alarm-ana --database "$dutydeck_database" --url "$dutydeck_url" \
   --app "$bot_app_id" --chat "$test_chat_id" enabled=false
