@@ -99,6 +99,88 @@ describe('alarm-ana business tools', () => {
     expect(JSON.stringify(result)).not.toMatch(/private|raw_prompt|runtime_root/);
   });
 
+  it('preserves legacy followup conclusion objects without exposing hidden fields', async () => {
+    // alarm_ana tests/test_alarm_trace.py preserves {root_cause: '限流'} from the ledger.
+    mockResponse({ found: true, stages: { feedback: { oncall_followup: [
+      { status: 'done', conclusion: { root_cause: '限流' } },
+      { status: 'done', conclusion: { summary: '主备切换后恢复', root_cause: '机器故障', evidence: { chat_id: 'oc_hidden' }, private: 'hidden-value' } },
+      { status: 'done', conclusion: '已恢复' }
+    ] } } });
+    const result = await query('alarm_trace', { mode: 'identity', source_key: 'main', record_id: 'rec1' });
+    expect(result).toMatchObject({ stages: { feedback: { oncall_followup: [
+      { conclusion: { root_cause: '限流' } },
+      { conclusion: { summary: '主备切换后恢复', root_cause: '机器故障' } },
+      { conclusion: '已恢复' }
+    ] } } });
+    expect(JSON.stringify(result)).not.toMatch(/hidden-value|oc_hidden|evidence|private/);
+    expect(result).toMatchObject({ truncated: true });
+  });
+
+  it('marks omitted unsupported conclusion content as incomplete projection', async () => {
+    mockResponse({ found: true, stages: { feedback: { oncall_followup: [
+      { conclusion: { diagnosis: '未知旧结构', root_cause: { text: '不接受任意嵌套对象', private: 'hidden-value' } } }
+    ] } } });
+    const result = await query('alarm_trace', { mode: 'identity', source_key: 'main', record_id: 'rec1' });
+    expect(result).toMatchObject({ truncated: true, stages: { feedback: { oncall_followup: [{ conclusion: {} }] } } });
+    expect(JSON.stringify(result)).not.toMatch(/未知旧结构|hidden-value|任意嵌套/);
+  });
+
+  it.each([
+    'https://applink.feishu.cn/client/message/open?message_id=om_fixture',
+    '[报警原消息](https://applink.feishu.cn/client/message/open?message_id=om_fixture)',
+    '[报警原消息](http://example.test/alarms/123?region=cn)'
+  ])('retains a safe raw or Markdown message link %s', async link => {
+    const target = link.startsWith('[') ? link.slice(link.indexOf('](') + 2, -1) : link;
+    mockResponse({ found: true, stages: { grading: { row: { message_link: link } } } });
+    expect(await query('alarm_trace', { mode: 'identity', source_key: 'main', record_id: 'rec1' })).toMatchObject({ stages: { grading: { row: { message_link: target } } } });
+    mockResponse({ verdict: 'none', query: { message_link: link } });
+    expect(await query('known_issues', { alarm_id: '123' })).toMatchObject({ query: { message_link: target } });
+  });
+
+  it.each([
+    '[原消息](javascript:alert(1))', '[原消息](file:///srv/runtime/private.json)',
+    '[原消息](https://user:password@example.test/alarms/123)',
+    'https://user:password@example.test/alarms/123', '[原消息](//example.test/alarms/123)',
+    '前缀[原消息](https://example.test/alarms/123)后缀'
+  ])('rejects unsafe or partial Markdown message links %s', async link => {
+    mockResponse({ found: true, stages: { grading: { row: { message_link: link } } } });
+    expect(await query('alarm_trace', { mode: 'identity', source_key: 'main', record_id: 'rec1' })).toMatchObject({ stages: { grading: { row: { message_link: '' } } } });
+  });
+
+  it('redacts the backend results_missing health summary path while preserving its diagnosis', async () => {
+    // ops_health.py emits exactly this summary when the classification file is absent.
+    mockResponse({ available: true, report: { alerts: [{ code: 'results_missing', severity: 'high',
+      summary: '分类结果文件不存在：/srv/alarm/runtime/classification_results.ndjson' }] } });
+    const result = await query('ops_health', {});
+    expect(result).toMatchObject({ report: { alerts: [{ code: 'results_missing', severity: 'high', summary: '分类结果文件不存在：[已省略路径]' }] } });
+    expect(JSON.stringify(result)).not.toContain('/srv/alarm');
+  });
+
+  it.each([
+    ['读取失败:/srv/alarm/runtime/data.json', '读取失败:[已省略路径]'],
+    ['读取失败："/srv/alarm/runtime data/data.json"', '读取失败："[已省略路径]"'],
+    [String.raw`读取失败：C:\alarm\runtime\data.json`, '读取失败：[已省略路径]']
+  ])('redacts diagnostic paths in %s', async (error, expected) => {
+    mockResponse({ outcome: 'unknown', error });
+    expect(await action('ack', { source_key: 'main', record_id: 'rec1' })).toMatchObject({ outcome: 'unknown', error: expected });
+  });
+
+  it('redacts quoted paths and exception diagnostics without breaking HTTP evidence', async () => {
+    const url = 'https://example.test/alarms/123?region=cn';
+    const error = `FileNotFoundError: [Errno 2] No such file or directory: '/srv/alarm/runtime/missing.json'; 状态 unknown；证据 ${url}`;
+    mockResponse({ outcome: 'unknown', error });
+    const receipt = await action('ack', { source_key: 'main', record_id: 'rec1' });
+    expect(receipt).toMatchObject({ outcome: 'unknown', error: `FileNotFoundError: [Errno 2] No such file or directory: '[已省略路径]'; 状态 unknown；证据 ${url}` });
+    mockResponse({ found: true, stages: { feedback: { oncall_followup: [{
+      comment_error: '无法读取 "/srv/alarm/runtime/card.json"', last_error: `写入失败：/srv/alarm/runtime/state.json，参考 ${url}`
+    }] } } });
+    const trace = await query('alarm_trace', { mode: 'identity', source_key: 'main', record_id: 'rec1' });
+    expect(trace).toMatchObject({ stages: { feedback: { oncall_followup: [{
+      comment_error: '无法读取 "[已省略路径]"', last_error: `写入失败：[已省略路径]，参考 ${url}`
+    }] } } });
+    expect(JSON.stringify([receipt, trace])).not.toContain('/srv/alarm');
+  });
+
   it('retains safety and incomplete flags when historical details exhaust the budget', async () => {
     mockResponse({ query: { record_id: 'rec1' }, verdict: 'suspected_known',
       matches: Array.from({ length: 10 }, () => ({ text: 'x'.repeat(1000), todos: Array.from({ length: 20 }, () => ({ text: 'x'.repeat(1000) })) })),

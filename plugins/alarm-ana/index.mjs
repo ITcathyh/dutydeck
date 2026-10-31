@@ -110,17 +110,24 @@ async function request(path, params, context, body) {
 const traceKeys = new Set(`identity source_key record_id alert_detail_url message_link found stages received grading policy rca card_delivery ack feedback agent_actions status sources file state error bad_lines bad_files send_time ledger_days in_segment segment_acked row origin result_time label source final_source reason rule_id rule_name psm cluster severity strong_condition strong_conditions push_enabled llm_confidence fallback_reason llm_queue_state other_rows recurrence_upgrades ts count_24h verdict skip_rca queue_state queue result disposition stage job_id enqueued_at claimed_at analysis_completed_at sent_at skip_rca_reason delivery_state delivery_sent delivery_attempts delivery_receipt pending_card_message_id pending_card_suppressed retry_count last_error failed_at available_at rca_route category verdict_label verdict_source verdict_reason card_conclusion conclusion candidate_conclusion rca_started_at rca_finished_at duration_ms queue_wait_sec run_sec hint single has_queue_payload direct attempted_at recorded_at error_type message_id root_message_id card_message_id throttle entries value aggregate cards update_count member_count deliveries at kind thread notice groups opened_at expires_at alarm_id history_hit argos_comment argos_comment_at send_started_at send_completed_at latest_observation observation_count auto_ack_attempts intent_id ok acked_at holdout_ratio ack_state acked total_ack first_ack_at first_ack_duration_second ack_by_system ack_by_self system_ack_seen checked_at total_silence current_upgrade_level max_upgrade_level duty_notification_count notification_count count finish start_at end_at comment anomaly_type rca_root_causes auto_ack agent_ack button_feedback action history_conclusion annotated_at hit note channels argos_comment_attempts argos_comment_error oncall_followup last_stage started_at alarm_psm alarm_rule comment_state comment_written comment_error poll_message_count bot_message_count actions action_id task_ref dry_run params minutes intent_at outcome_at outcome paired matches via candidates scanned`.split(' '));
 const knownKeys = new Set(`query source_key record_id original_chat_url handling_chat_url message_link rule_name rule_id psm send_time alarm_id region rca_status rca_conclusion verdict match_basis stats days event_count first_seen last_seen concluded_event_count matches kind type text time handler trigger_name uncertain todos owner due status origin security_sensitive incomplete warnings`.split(' '));
 const healthKeys = new Set(`available generated_at age_minutes report alerts code severity summary`.split(' '));
+const conclusionKeys = new Set(['summary', 'root_cause']);
+const diagnosticKeys = new Set(['summary', 'error', 'last_error', 'comment_error', 'argos_comment_error', 'message']);
 /** @param {unknown} data @param {Set<string>} keys @param {number} budget @returns {Record<string, JsonValue>} */
 function project(data, keys, budget = 24000) {
   let remaining = budget; let truncated = false;
-  /** @param {unknown} value @param {number} depth @param {boolean} link @returns {JsonValue} */
-  const visit = (value, depth = 0, link = false) => {
+  /** @param {unknown} value @param {number} depth @param {string} field @returns {JsonValue} */
+  const visit = (value, depth = 0, field = '') => {
     if (remaining <= 0 || depth > 12) { truncated = true; return null; }
     if (typeof value === 'string') {
       let clean = value.replace(/\b(?:oc|ou)_[A-Za-z0-9]+\b/g, '[已省略身份]');
-      if (link) {
-        try { const url = new URL(value); clean = ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? value : ''; }
+      if (field.endsWith('_url') || field.endsWith('_link')) {
+        const target = /^\[[^\]]*\]\((.*)\)$/.exec(value.trim())?.[1] ?? value.trim();
+        try { const url = new URL(target); clean = ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? target : ''; }
         catch { clean = ''; }
+      } else if (diagnosticKeys.has(field)) {
+        // 先匹配 HTTP 证据链接，避免把链接内的路径当成本机文件；引号路径可以含空格。
+        clean = clean.replace(/https?:\/\/[^\s<>"'`，。；：！？（）]+|(["'])(?:[A-Za-z]:[\\/]|\/)[^\r\n]*?\1|(?:[A-Za-z]:[\\/]|(?<!\w)\/)[^\s<>"'`，。；：！？（）)\]};,]*/gi,
+          match => /^https?:/i.test(match) ? match : /^['"]/.test(match) ? `${match[0]}[已省略路径]${match[0]}` : '[已省略路径]');
       }
       let result = clean.slice(0, 1000);
       if (JSON.stringify(result).length > remaining) result = result.slice(0, Math.max(0, Math.floor((remaining - 2) / 6)));
@@ -142,10 +149,13 @@ function project(data, keys, budget = 24000) {
       const result = {};
       remaining -= 2;
       for (const [key, child] of Object.entries(value)) {
-        if (!keys.has(key)) continue;
+        if (field === 'conclusion') {
+          // 兼容旧 followup 台账，只接受已知业务文本；省略未知结论字段须显式标记。
+          if (!conclusionKeys.has(key) || typeof child !== 'string') { truncated = true; continue; }
+        } else if (!keys.has(key)) continue;
         remaining -= key.length + 4;
         if (remaining <= 0) { truncated = true; break; }
-        result[key] = visit(child, depth + 1, key.endsWith('_url') || key.endsWith('_link'));
+        result[key] = visit(child, depth + 1, key);
       }
       return result;
     }
