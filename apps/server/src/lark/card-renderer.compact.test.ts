@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '@dutydeck/shared';
-import { busyProgressSummary, renderLarkCardElements, renderLarkProcessElements, renderLarkRecordExport, renderLarkResultElements } from './card-renderer.js';
+import { busyProgressSummary, renderLarkCardElements, renderLarkProcessElements, renderLarkRecordExport, renderLarkResultElements, renderLarkTrace } from './card-renderer.js';
 import { buildLarkCard } from './service.js';
 
 // 精简过程卡（compactTrace）：历史阶段与当前阶段都退化为标题行，
@@ -204,4 +204,16 @@ it('summarizes busy progress from the same visible stage and latest tool as proc
   expect(summary.phase).toBe('根据失败信息修复。');
   expect(summary.latest).toContain('pnpm vitest run');
   expect(JSON.stringify(summary)).not.toMatch(/private reasoning|private terminal output|new user message/);
+});
+
+it('skips terminal screens whose content the ledger has already dropped', () => {
+  const compacted = { text: '', screen: true, compacted: true };
+  const events = [
+    event(1, 'raw_terminal', t0, compacted),
+    event(2, 'raw_terminal', t1, compacted),
+    event(3, 'raw_terminal', t2, { text: '$ pnpm test\n1 failed', screen: true })
+  ];
+  const trace = renderLarkTrace(events, {});
+  expect(trace.match(/\*\*终端\*\*/g)).toHaveLength(1);
+  expect(trace).toContain('1 failed');
 });

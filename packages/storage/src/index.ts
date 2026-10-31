@@ -24,6 +24,7 @@ import { createCollaborationRepository } from './collaboration.js';
 import { createCiWebhookRepository } from './ci-webhook.js';
 import { createUsageLedgerRepository } from './usage-ledger.js';
 import { createSessionInsightRepository } from './session-insight.js';
+import { createRetentionRepository } from './retention.js';
 import { canonicalDatabase, openDatabaseControl } from './database-control.js';
 export * from './schema.js';
 export * from './task-execution.js';
@@ -163,6 +164,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     if (migrate) control.beginUpgrade();
     sqlite.pragma('journal_mode = WAL');
     if (migrate) {
+      const started = performance.now();
       backupBeforeV10(sqlite, filename);
       withMigrationTransaction(sqlite, () => {
         control.assertMaintenance(sqlite);
@@ -174,6 +176,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
         }
       });
       control.finishUpgrade();
+      options.onMigrated?.(performance.now() - started);
     }
     if (filename !== ':memory:') restrictDatabaseFiles(filename);
   const db = drizzle(sqlite);
@@ -444,6 +447,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     collaboration,
     ciWebhook,
     usage,
+    retention: createRetentionRepository(sqlite, () => execution.authority()),
     close() {
       control.assertClosable();
       if (filename !== ':memory:') restrictDatabaseFiles(filename);

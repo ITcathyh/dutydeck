@@ -4,6 +4,7 @@ import Database from 'better-sqlite3';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { constants as osConstants } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOSTART_LINUX_UNIT } from '../autostart/autostart.js';
 import type { DeployCliOptions, DeployPruneCliOptions } from '../cli-program.js';
@@ -19,6 +20,8 @@ import { DRAIN_INTERVAL_MS, drainRuntime, systemdServiceControl, unitRuntime, wa
  *   <releases>/<时间>-<sha>/                  dist、public、package.json 与生产依赖
  *   <releases>/current                        指向当前版本的相对符号链接
  *   <releases>/../deployments/<时间>-<sha>/   manifest.json 与重启前的数据库备份
+ *
+ * 部署失败、抛异常或被 Ctrl-C / kill / ssh 断开打断时，都写 status=failed 的 manifest 并退出排空。
  */
 
 export interface DeployDeps extends DaemonCommandDeps {
@@ -62,6 +65,7 @@ const defaultInfo = (message: string) => { process.stderr.write(`${message}\n`);
 const defaultWarn = (message: string) => { process.stderr.write(`警告：${message}\n`); };
 const refused = (error: string): DeployResult => ({ ok: false, status: 'refused', error });
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+const ABORT_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
 
 /** 同一真实 releases 根共用锁；连接关闭或进程退出时释放，不能删除持久锁文件。 */
 function acquireDeployLock(releases: string): Database.Database | { error: string } {
@@ -332,7 +336,13 @@ function databaseSchema(file: string): { version: number; fingerprint: string } 
 export const RELEASES_TO_KEEP = 5;
 /** 写进 manifest.json 的来源标记：只有带它的部署记录才会被自动清理，手工部署留下的记录不动。 */
 export const DEPLOY_RECORD_CREATOR = 'dutydeck deploy';
+/** 数据库备份只留最新这么多份（含本次）：更早的部署记录只删备份文件，manifest 留着。 */
+export const DATABASE_BACKUPS_TO_KEEP = 2;
+/** deploy 建的记录没有 manifest 又超过这么久，就是中途被杀的部署留下的；部署锁保证清理时没有进行中的部署。 */
+const UNFINISHED_RECORD_MS = 24 * 60 * 60 * 1000;
 const RELEASE_NAME = /^\d{8}T\d{6}Z-[0-9a-f]{7}(-dirty)?(-[A-Za-z0-9]{6})?$/;
+/** deploy 用 mkdtemp 建的部署记录名，末尾一定有 6 位随机后缀；手工部署的记录没有。 */
+const DEPLOY_RECORD_NAME = /^\d{8}T\d{6}Z-[0-9a-f]{7}(-dirty)?-[A-Za-z0-9]{6}$/;
 const PARTIAL_NAME = /^\..+\.partial$/;
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -359,7 +369,7 @@ function readProcessPaths(): string[] | undefined {
   return [...paths];
 }
 
-export interface PruneItem { kind: 'release' | 'partial' | 'record'; name: string; bytes: number }
+export interface PruneItem { kind: 'release' | 'partial' | 'record' | 'unfinished' | 'backup'; name: string; bytes: number }
 
 /** 手工清理（`deploy prune`）才用的选项；部署成功后的自动清理不传。 */
 interface PruneOptions {
@@ -437,14 +447,21 @@ function pruneReleases(releases: string, previous: string | undefined, processPa
 /**
  * 删掉更早的部署记录（manifest 与数据库备份）。默认只算 manifest.json 里 created_by 是 DEPLOY_RECORD_CREATOR 的，
  * 按名字保留最新 RELEASES_TO_KEEP 个；本次的记录还没写 manifest，直接算进去，它和上一版的记录总是保留。
+ * 留下的记录里只有最新 DATABASE_BACKUPS_TO_KEEP 份数据库备份（本次的总算一份），更早的只删 manifest 记下的备份文件。
+ * deploy 建的、超过 24 小时仍没有 manifest 的记录是中途被杀的部署，不占保留个数，直接删。
  * `includeUnmarked` 时手工部署留下的记录（名字以日期开头）也参与排序，但只在确认没有进程引用、也不是刚改过时才删。
  */
 function pruneRecords(deployments: string, current: string, previous: string | undefined, opts: PruneOptions = {}, processPaths?: () => string[] | undefined): { removed: string[]; freedBytes: number } {
   const result = { removed: [] as string[], freedBytes: 0 };
-  const marked = (name: string) => {
-    try { return JSON.parse(readFileSync(join(deployments, name, 'manifest.json'), 'utf8')).created_by === DEPLOY_RECORD_CREATOR; } catch { return false; }
+  const readManifest = (name: string): Record<string, unknown> | undefined => {
+    try { return JSON.parse(readFileSync(join(deployments, name, 'manifest.json'), 'utf8')); } catch { return undefined; }
   };
-  const eligible = readdirSync(deployments, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => entry.name)
+  const marked = (name: string) => readManifest(name)?.created_by === DEPLOY_RECORD_CREATOR;
+  const names = readdirSync(deployments, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => entry.name);
+  const unfinished = new Set(names.filter(name => name !== current && DEPLOY_RECORD_NAME.test(name) && !existsSync(join(deployments, name, 'manifest.json'))
+    && (opts.now ?? Date.now()) - statSync(join(deployments, name)).mtimeMs >= UNFINISHED_RECORD_MS));
+  for (const name of unfinished) removeEntry(join(deployments, name), name, 'unfinished', result, opts);
+  const eligible = names.filter(name => !unfinished.has(name))
     .filter(name => name === current || marked(name) || (opts.includeUnmarked === true && RECORD_NAME.test(name)));
   let paths: string[] | undefined;
   let pathsRead = false;
@@ -458,6 +475,16 @@ function pruneRecords(deployments: string, current: string, previous: string | u
       if (!paths || referencedBy(paths, [path, join(realpathSync(deployments), name)])) { opts.report?.skipped.push(name); continue; }
     }
     removeEntry(path, name, 'record', result, opts);
+  }
+  let backups = 0;
+  for (const name of eligible.filter(name => name === current || marked(name)).sort().reverse()) {
+    if (result.removed.includes(name)) continue;
+    const manifest = name === current ? undefined : readManifest(name);
+    const files = [manifest?.database_backup, manifest?.database_before_rollback]
+      .filter((file): file is string => typeof file === 'string' && dirname(resolve(file)) === resolve(deployments, name) && existsSync(file));
+    if (name !== current && files.length === 0) continue;
+    if (++backups <= DATABASE_BACKUPS_TO_KEEP) continue;
+    for (const file of files) removeEntry(file, `${name}/${basename(file)}`, 'backup', result, opts);
   }
   return result;
 }
@@ -705,107 +732,151 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
     }
   };
 
-  info(`复制到发布目录：${release}`);
-  try {
-    mkdirSync(target.releases, { recursive: true });
-    copyRelease(build, release);
-  } catch (error) {
-    return finish('failed', { error: `复制发布目录失败：${message(error)}` });
-  }
-  manifest.new_cli_sha256 = sha256(join(release, 'dist', 'cli.js'));
-  if (previousRelease && existsSync(join(previousRelease, 'dist', 'cli.js'))) manifest.previous_cli_sha256 = sha256(join(previousRelease, 'dist', 'cli.js'));
-
-  info(`试加载：${target.execPath} ${join(release, 'dist', 'cli.js')} --version`);
-  const trial = trialLoad(target.execPath, release, build.version, deps);
-  if (trial) {
-    rmSync(release, { recursive: true, force: true });
-    return finish('failed', { error: trial });
-  }
-
-  if (!restart) {
-    pointCurrent(target.releases, release);
-    info(`已切换 current → ${id}（未重启）`);
-    prune();
-    return finish('staged');
-  }
-
-  if (await service.mainPid() !== previousPid) return finish('failed', { error: '准备发布目录期间目标主进程已变化，没有切换版本；重新执行部署以核实它的运行版本。' });
-  manifest.previous_pid = previousPid ?? null;
+  // 部署被 Ctrl-C、kill 或 ssh 断开打断时：写失败清单、停续租并退出排空，旧进程立即恢复接单，不等租约到期。
   let drain: DrainResult = { ok: true };
-  if (previousPid !== undefined) {
-    // 与 restart 同一套保留策略：已验证可恢复的 tmux 任务留在原 CLI 里，新版本启动后接回原轮。
-    const keepRecoverable = (deps.service ? deps.service.killMode : target.service?.killMode) === 'process';
-    info(keepRecoverable ? '排空：新消息照常入队，等不可跨重启保留的任务结束…' : '排空：新消息照常入队，等正在执行的任务结束…');
-    drain = await drainRuntime(target.endpoint, options, deps, keepRecoverable);
-    if (!drain.ok) return finish('failed', { error: drain.error });
-  }
-  const stopRenewing = keepDraining(drain, previousPid);
-  const database = target.endpoint.database;
-  if (database && existsSync(database)) {
-    const backup = join(record, basename(database));
-    info(`备份数据库：${backup}`);
+  let stopRenewing = async () => {};
+  let released = false;
+  const releaseDrain = async () => {
+    if (released || !drain.ok) return;
+    released = true;
+    await drain.release?.();
+  };
+  let waitingForDrain = false;
+  let abortedBy: NodeJS.Signals | undefined;
+  let aborting: Promise<never> | undefined;
+  const exitAborted = (signal: NodeJS.Signals): Promise<never> => aborting ??= (async () => {
+    await stopRenewing();
+    await releaseDrain();
+    process.exit(128 + osConstants.signals[signal]);
+  })();
+  const onSignal = (signal: NodeJS.Signals) => {
+    if (abortedBy) process.exit(128 + osConstants.signals[signal]);
+    abortedBy = signal;
+    finish('failed', { aborted_by: signal, error: `部署被 ${signal} 中断，中断时 current 指向 ${currentRelease(target.releases) ?? '（无）'}。` });
+    // 排空等待中：drainRuntime 收到 Ctrl-C 会自己退出排空并结束进程，否则它返回后由下面接着退出。
+    if (!waitingForDrain) void exitAborted(signal);
+  };
+  // 被打断后不再切换版本、重启或回滚：停在这里等退出排空后结束进程。
+  const haltIfAborted = async () => { if (abortedBy) await exitAborted(abortedBy); };
+  for (const signal of ABORT_SIGNALS) process.on(signal, onSignal);
+  try {
+    info(`复制到发布目录：${release}`);
     try {
-      await (deps.backupDatabase ?? backupSqlite)(database, backup);
-      manifest.database_backup = backup;
-      const schema = databaseSchema(backup);
-      manifest.schema_version_before = schema?.version ?? null;
-      manifest.schema_fingerprint_before = schema?.fingerprint ?? null;
+      mkdirSync(target.releases, { recursive: true });
+      copyRelease(build, release);
     } catch (error) {
+      return finish('failed', { error: `复制发布目录失败：${message(error)}` });
+    }
+    manifest.new_cli_sha256 = sha256(join(release, 'dist', 'cli.js'));
+    if (previousRelease && existsSync(join(previousRelease, 'dist', 'cli.js'))) manifest.previous_cli_sha256 = sha256(join(previousRelease, 'dist', 'cli.js'));
+
+    info(`试加载：${target.execPath} ${join(release, 'dist', 'cli.js')} --version`);
+    const trial = trialLoad(target.execPath, release, build.version, deps);
+    if (trial) {
+      rmSync(release, { recursive: true, force: true });
+      return finish('failed', { error: trial });
+    }
+
+    if (!restart) {
+      await haltIfAborted();
+      pointCurrent(target.releases, release);
+      info(`已切换 current → ${id}（未重启）`);
+      prune();
+      return finish('staged');
+    }
+
+    if (await service.mainPid() !== previousPid) return finish('failed', { error: '准备发布目录期间目标主进程已变化，没有切换版本；重新执行部署以核实它的运行版本。' });
+    manifest.previous_pid = previousPid ?? null;
+    if (previousPid !== undefined) {
+      // 与 restart 同一套保留策略：已验证可恢复的 tmux 任务留在原 CLI 里，新版本启动后接回原轮。
+      const keepRecoverable = (deps.service ? deps.service.killMode : target.service?.killMode) === 'process';
+      info(keepRecoverable ? '排空：新消息照常入队，等不可跨重启保留的任务结束…' : '排空：新消息照常入队，等正在执行的任务结束…');
+      waitingForDrain = true;
+      drain = await drainRuntime(target.endpoint, options, deps, keepRecoverable);
+      waitingForDrain = false;
+      await haltIfAborted();
+      if (!drain.ok) return finish('failed', { error: drain.error });
+    }
+    stopRenewing = keepDraining(drain, previousPid);
+    const database = target.endpoint.database;
+    if (database && existsSync(database)) {
+      const backup = join(record, basename(database));
+      info(`备份数据库：${backup}`);
+      try {
+        await (deps.backupDatabase ?? backupSqlite)(database, backup);
+        manifest.database_backup = backup;
+        const schema = databaseSchema(backup);
+        manifest.schema_version_before = schema?.version ?? null;
+        manifest.schema_fingerprint_before = schema?.fingerprint ?? null;
+      } catch (error) {
+        await stopRenewing();
+        await releaseDrain();
+        return finish('failed', { error: `备份数据库失败，没有切换版本：${message(error)}` });
+      }
+    }
+
+    if (await service.mainPid() !== previousPid) {
       await stopRenewing();
-      await drain.release?.();
-      return finish('failed', { error: `备份数据库失败，没有切换版本：${message(error)}` });
+      await releaseDrain();
+      return finish('failed', { error: '排空或备份期间目标主进程已变化，没有切换版本；重新执行部署以核实它的运行版本。' });
+    }
+    if (previousPid !== undefined && previousRelease) remember(previousRelease, previousPid);
+
+    await haltIfAborted();
+    info(`切换 current → ${id}，重启 ${target.unit}`);
+    pointCurrent(target.releases, release);
+    const started = await restartAndCheck(service, previousPid, target.endpoint.address, deps);
+    await stopRenewing();
+    if (started.ok) {
+      info(`健康检查通过（pid ${started.pid}）`);
+      updateDeploymentFile(target, release, build.commit, manifestPath, now());
+      remember(release, started.pid);
+      prune();
+      return finish('deployed', { new_pid: started.pid });
+    }
+    manifest.database_restored = false;
+    manifest.rollback_service_stopped = false;
+    const blocked = (reason: string) => finish('rollback_failed', {
+      rollback_blocked_reason: reason,
+      error: `新版本没有通过健康检查：${started.error}自动回滚已停止：${reason}未切回上一版，数据库未恢复旧快照。需要人工恢复；数据库路径：${database ?? '未知'}，部署前备份：${manifest.database_backup ?? '无'}，部署记录：${manifestPath}。`
+    });
+    await haltIfAborted();
+    warn(`新版本没有通过健康检查，先停服务并检查回滚兼容性。原因：${started.error}`);
+    try {
+      const stopped = await service.stop();
+      if (stopped) return blocked(`停服务失败：${stopped}。`);
+      const remainingPid = await service.mainPid();
+      if (remainingPid !== undefined) return blocked(`停服务后仍有主进程 ${remainingPid}。`);
+    } catch (error) {
+      return blocked(`无法确认服务已停止：${message(error)}。`);
+    }
+    manifest.rollback_service_stopped = true;
+    if (!previousRelease) return finish('failed', { error: `新版本没有通过健康检查，服务已停止，也没有上一版可以切回。保留当前数据库，需要人工恢复。原因：${started.error}` });
+
+    const databaseError = database && database !== ':memory:'
+      ? await checkDatabaseForRollback(database, record, manifest, deps)
+      : '无法验证目标数据库路径及其 schema，不能据此认定没有持久数据库。';
+    if (databaseError) return blocked(databaseError);
+
+    await haltIfAborted();
+    info(`服务已停止，数据库 schema 兼容；切回 ${basename(previousRelease)}，使用当前数据库重启。`);
+    pointCurrent(target.releases, previousRelease);
+    await service.resetFailed?.();
+    const back = await restartAndCheck(service, undefined, target.endpoint.address, deps);
+    if (back.ok) remember(previousRelease, back.pid);
+    return back.ok
+      ? finish('rolled_back', { new_pid: back.pid, error: `新版本 ${id} 没有通过健康检查，已切回 ${basename(previousRelease)}，保留当前数据库。原因：${started.error}` })
+      : finish('rollback_failed', { error: `新版本没有通过健康检查，切回 ${basename(previousRelease)} 后仍不健康，数据库未恢复旧快照。新版本：${started.error}上一版：${back.error}` });
+  } catch (error) {
+    if (!abortedBy) finish('failed', { error: `部署中途出错：${message(error)}` });
+    throw error;
+  } finally {
+    for (const signal of ABORT_SIGNALS) process.off(signal, onSignal);
+    if (!abortedBy && manifest.status !== 'deployed') {
+      await stopRenewing();
+      await releaseDrain();
     }
   }
-
-  if (await service.mainPid() !== previousPid) {
-    await stopRenewing();
-    await drain.release?.();
-    return finish('failed', { error: '排空或备份期间目标主进程已变化，没有切换版本；重新执行部署以核实它的运行版本。' });
-  }
-  if (previousPid !== undefined && previousRelease) remember(previousRelease, previousPid);
-
-  info(`切换 current → ${id}，重启 ${target.unit}`);
-  pointCurrent(target.releases, release);
-  const started = await restartAndCheck(service, previousPid, target.endpoint.address, deps);
-  await stopRenewing();
-  if (started.ok) {
-    info(`健康检查通过（pid ${started.pid}）`);
-    updateDeploymentFile(target, release, build.commit, manifestPath, now());
-    remember(release, started.pid);
-    prune();
-    return finish('deployed', { new_pid: started.pid });
-  }
-  manifest.database_restored = false;
-  manifest.rollback_service_stopped = false;
-  const blocked = (reason: string) => finish('rollback_failed', {
-    rollback_blocked_reason: reason,
-    error: `新版本没有通过健康检查：${started.error}自动回滚已停止：${reason}未切回上一版，数据库未恢复旧快照。需要人工恢复；数据库路径：${database ?? '未知'}，部署前备份：${manifest.database_backup ?? '无'}，部署记录：${manifestPath}。`
-  });
-  warn(`新版本没有通过健康检查，先停服务并检查回滚兼容性。原因：${started.error}`);
-  try {
-    const stopped = await service.stop();
-    if (stopped) return blocked(`停服务失败：${stopped}。`);
-    const remainingPid = await service.mainPid();
-    if (remainingPid !== undefined) return blocked(`停服务后仍有主进程 ${remainingPid}。`);
-  } catch (error) {
-    return blocked(`无法确认服务已停止：${message(error)}。`);
-  }
-  manifest.rollback_service_stopped = true;
-  if (!previousRelease) return finish('failed', { error: `新版本没有通过健康检查，服务已停止，也没有上一版可以切回。保留当前数据库，需要人工恢复。原因：${started.error}` });
-
-  const databaseError = database && database !== ':memory:'
-    ? await checkDatabaseForRollback(database, record, manifest, deps)
-    : '无法验证目标数据库路径及其 schema，不能据此认定没有持久数据库。';
-  if (databaseError) return blocked(databaseError);
-
-  info(`服务已停止，数据库 schema 兼容；切回 ${basename(previousRelease)}，使用当前数据库重启。`);
-  pointCurrent(target.releases, previousRelease);
-  await service.resetFailed?.();
-  const back = await restartAndCheck(service, undefined, target.endpoint.address, deps);
-  if (back.ok) remember(previousRelease, back.pid);
-  return back.ok
-    ? finish('rolled_back', { new_pid: back.pid, error: `新版本 ${id} 没有通过健康检查，已切回 ${basename(previousRelease)}，保留当前数据库。原因：${started.error}` })
-    : finish('rollback_failed', { error: `新版本没有通过健康检查，切回 ${basename(previousRelease)} 后仍不健康，数据库未恢复旧快照。新版本：${started.error}上一版：${back.error}` });
 }
 
 // ─── 手工清理 ────────────────────────────────────────────────────────────────

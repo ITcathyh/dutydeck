@@ -11,6 +11,7 @@ import {
 import type { OpenControl } from './database-control.js';
 import { currentProcessIdentity, observeProcess } from './process-identity.js';
 import { resolveExecutionWorkspace, type ExecutionWorkspaceIdentity } from './execution-workspace.js';
+import { compactTerminalScreens } from './retention.js';
 
 const { id, revision, fenceSchema, attemptFenceSchema, checksSchema, decisionSchema, identitySchema, observationSchema, intentSchema, sessionSchema } = taskExecutionSchemas;
 function fail(code: string, detail = code): never { throw new RuntimeError(code, detail, 409); }
@@ -1150,7 +1151,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             const sourceKey=event.sourceId?stable([rawFence.sessionId,['attempt',a.attemptId],event.sourceId]):null;
             const old=db.prepare('SELECT 1 FROM events WHERE id=? OR source_key=?').get(event.id,sourceKey);
             if(!old) { currentAttempt(rawFence,owner);if(a.state==='settled'||a.state==='suspended') fail('ATTEMPT_OUTPUT_CLOSED'); }
-            return append(rawFence,event,a);
+            const stored=append(rawFence,event,a);
+            // A new full-screen snapshot supersedes older ones: keep only the latest few screens' text in this attempt.
+            if(!old&&event.type==='raw_terminal'&&(event.data as {screen?:unknown})?.screen===true) compactTerminalScreens(db,a.attemptId);
+            return stored;
           }
           const f=readFence(rawFence);return append(f,event);
         }); },

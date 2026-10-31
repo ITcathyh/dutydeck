@@ -499,6 +499,9 @@ export interface FoundationRepository {
   rollbackLast(entityKind: FoundationEntityKind, entityId: string, expectedRevision: number): Promise<FoundationRollbackResult>;
 }
 
+/** 一次保留期清理的结果：清空内容的终端帧数，以及删除的状态快照、工具调用镜像和实体修订行数。 */
+export interface HistoryRetentionResult { terminalFrames: number; sessionStateCommands: number; toolCalls: number; entityVersions: number }
+
 export interface RepositoryBundle {
   pluginResults: import('./plugin-results.js').PluginResultRepository;
   workItems: {
@@ -511,6 +514,8 @@ export interface RepositoryBundle {
   collaboration: import('./collaboration.js').CollaborationRepository;
   ciWebhook: import('./ci-webhook.js').CiWebhookRepository;
   usage: import('./usage.js').UsageLedgerRepository;
+  /** 历史数据保留期清理；分批执行，只动已结束任务的数据。 */
+  retention: { prune(options?: { now?: number; signal?: AbortSignal }): Promise<HistoryRetentionResult> };
   control: import('./database-control.js').DatabaseControl;
   execution: import('./task-execution.js').ExecutionRepository;
   agents: AgentRepository;

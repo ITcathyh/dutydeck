@@ -1823,7 +1823,8 @@ export class PtyCliDriver implements AgentDriver {
       const text = this.snapshot?.text() ?? '';
       if (text !== this.lastRawTerminalText) {
         this.lastRawTerminalText = text;
-        this.emitEvent({ type: 'raw_terminal', data: { text } });
+        // screen：整屏快照，新帧取代旧帧；账本只保留每轮最近几帧的内容。
+        this.emitEvent({ type: 'raw_terminal', data: { text, screen: true } });
       }
       this.checkRenderedCompletion();
     }, RAW_TERMINAL_THROTTLE_MS);

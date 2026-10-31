@@ -220,16 +220,26 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   // pty-cli agent 发现：PTY_AGENT_CONTRIBUTIONS 经 loadConfig 合并进 config.agents
   // （builtinAgents 内部按 commandExists 过滤，只暴露本机已安装的 CLI；可用的终端适配器优先，同 id 覆盖 ACPX）。
   // 插件在加载配置之前加载：插件 agents 要与 DUTYDECK_AGENTS_JSON 一起合并。没有启用的插件（或只有内置场景包）时为 undefined，下面不接线。
+  // 启动各阶段耗时（毫秒），开始监听后汇总成一条日志；boot 是进程启动到这里（Node 启动与模块加载）。
+  const startupMs: Record<string, number> = { boot: Math.round(process.uptime() * 1000) };
+  let startupMark = performance.now();
+  const startupPhase = (name: string) => { const now = performance.now(); startupMs[name] = Math.round(now - startupMark); startupMark = now; };
   const startupEnvironment = options.env ?? process.env;
   assertDatabaseNotQuarantined(resolveDatabaseUrl(startupEnvironment));
   const { host: pluginHost, scenarios } = await loadDaemonPlugins(startupEnvironment);
+  startupPhase('plugins');
   const { config, droppedAgents, repos } = await (async () => {
     try {
       const { config, droppedAgents } = loadConfigWithDiagnostics(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS, pluginHost?.agents);
+      startupPhase('config');
       const refusal = unauthenticatedListenRefusal(config, options.env ?? process.env);
       if (refusal) throw new Error(refusal);
       assertBotProcessStartup(config.databaseUrl, (options.env ?? process.env).DUTYDECK_BOT_APP_ID);
-      const repos = createRepositories(config.databaseUrl, { mode: 'runtime', newDatabaseAuthority: 'ledger_v1' });
+      let migrateMs = 0;
+      const repos = createRepositories(config.databaseUrl, { mode: 'runtime', newDatabaseAuthority: 'ledger_v1', onMigrated: ms => { migrateMs = Math.round(ms); } });
+      startupPhase('database');
+      // database 只算打开与校验，迁移单独记。
+      startupMs.migrate = migrateMs; startupMs.database! -= migrateMs;
       return { config, droppedAgents, repos };
     } catch (error) { await pluginHost?.dispose(); throw error; }
   })();
@@ -539,12 +549,14 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       getCurrentFingerprint: async (sessionId) => runtime.getCodeFingerprint(sessionId),
       log: (details, message) => app?.log.warn(details, message)
     });
+    startupPhase('wiring');
     await insightService.initialize();
   } catch {
     // 只记录固定 code，绝不回显 error.message（可能携带私有路径/token）。
     process.stderr.write('[dutydeck] Session insight service disabled: INSIGHT_STARTUP_FAILED\n');
     insightService = undefined;
   }
+  startupPhase('insight');
   const businessToolGrants = new PluginToolGrants(repos.config);
   const businessTools = pluginHost ? new PluginBusinessToolService(pluginHost, businessToolGrants, new PluginToolLedger(repos.config), new TaskPluginToolIdentity(repos, relayCapabilities, capabilities, runtime), 30_000, pluginWiring?.hooks) : undefined;
   const pluginResultIdentity = new LarkPluginResultIdentity(repos.config, options.pluginResultIdentity);
@@ -610,6 +622,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   let automationTimer: NodeJS.Timeout | undefined;
   let collaborationTimer: NodeJS.Timeout | undefined;
   let resourceRetentionTimer: NodeJS.Timeout | undefined;
+  const historyRetention = new AbortController();
+  let historyRetentionRun: Promise<void> | undefined;
   // Reattach surviving idle terminals after a daemon restart, without starting a task.
   const terminalProvider: TerminalStreamProvider = {
     async lookupTerminalStream(sessionId) {
@@ -656,6 +670,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       if (automationTimer) clearInterval(automationTimer);
       if (collaborationTimer) clearInterval(collaborationTimer);
       if (resourceRetentionTimer) clearInterval(resourceRetentionTimer);
+      historyRetention.abort();
+      await historyRetentionRun;
       const errors: unknown[] = [...insightCloseErrors];
       const settle = async (operations: Array<() => unknown>) => {
         const results = await Promise.allSettled(operations.map(operation => Promise.resolve().then(operation)));
@@ -683,8 +699,14 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       log: { warn: (details, message) => app?.log.warn(details, message) } });
     setupCleanup.push(() => collaboration?.close());
     automation.mandateCards = collaboration.mandateCards;
+    startupPhase('integrations');
     await relayBroker.initialize();
-    await runtime.initialize(await agentModelSettings.defaultsForBoot(config.agents));
+    startupPhase('relay');
+    const bootAgents = await agentModelSettings.defaultsForBoot(config.agents);
+    startupPhase('agentDefaults');
+    // agents：绑定账本并登记 Agent；sessions：逐个会话恢复与对账（孤儿记录、资源观察、接回原轮、排队）。
+    await runtime.initialize(bootAgents, () => startupPhase('agents'));
+    startupPhase('sessions');
     const webRoot = options.webRoot ?? fileURLToPath(new URL('../public', import.meta.url));
     const memoryRoot = config.databaseUrl === ':memory:'
       ? join(tmpdir(), 'dutydeck-memory')
@@ -846,12 +868,23 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       turnDiffs: { store: repos.config,
         requestLarkReview: review => requestLarkTurnDiffReview({ configs: repos.config, mappings: repos.channelMappings, confirmations: collaboration?.participation.confirmations }, review) },
     });
+    startupPhase('routes');
     logDroppedAgents(app.log, droppedAgents);
     await app.listen(listenOptions(config));
+    startupPhase('listen');
+    app.log.info({ startupMs: { ...startupMs, total: Math.round(process.uptime() * 1000) } }, '启动各阶段耗时');
     pluginResultTimer = setInterval(() => { void sweepPluginResults(); }, 30_000);
     pluginResultTimer.unref();
     void sweepPluginResults();
-    const sweepResources = () => { void pruneLarkResourceDirectories(resourceRoot, { readProtectedDirectories: () => readLarkResourceReferences(repos.config, repos.tasks) }).catch(error => app?.log.warn({ error }, '飞书附件临时目录清理失败')); };
+    const sweepResources = () => {
+      void pruneLarkResourceDirectories(resourceRoot, { readProtectedDirectories: () => readLarkResourceReferences(repos.config, repos.tasks) }).catch(error => app?.log.warn({ error }, '飞书附件临时目录清理失败'));
+      // 账本保留期清理：分批让出事件循环，关闭时在批间停下；不做 VACUUM，腾出的页留给后续写入复用。
+      historyRetentionRun ??= (async () => {
+        const startedAt = performance.now();
+        const pruned = await repos.retention.prune({ signal: historyRetention.signal });
+        if (Object.values(pruned).some(Boolean)) app?.log.info({ retention: pruned, durationMs: Math.round(performance.now() - startedAt) }, '历史数据保留期清理');
+      })().catch(error => app?.log.warn({ error }, '历史数据保留期清理失败')).finally(() => { historyRetentionRun = undefined; });
+    };
     resourceRetentionTimer = setInterval(sweepResources, 60 * 60_000);
     resourceRetentionTimer.unref();
     sweepResources();

@@ -301,10 +301,11 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
   const timer = deps.now ?? Date.now;
   const deadline = timer() + timeoutSeconds * 1000;
   let currentRunning = initial.runningTasks;
-  // 等待中被 Ctrl-C / kill：先退出排空再退出，别让队列停到租约到期。
+  // 等待中被 Ctrl-C / kill / ssh 断开：先退出排空再退出，别让队列停到租约到期。
   const onSignal = () => { void (release?.() ?? Promise.resolve()).finally(() => process.exit(130)); };
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
+  process.once('SIGHUP', onSignal);
   try {
     while (currentRunning > 0) {
       await sleeper(DRAIN_INTERVAL_MS);
@@ -323,6 +324,7 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
   } finally {
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
+    process.off('SIGHUP', onSignal);
   }
   return { ok: true, release, renew };
 }

@@ -84,6 +84,8 @@ function compactTraceEntries(events: AgentEvent[]): TraceEntry[] {
     if (event.type === 'task' || event.type === 'completed' || event.type === 'status') continue;
     const data = event.data && typeof event.data === 'object' ? event.data as Record<string, any> : { value: event.data };
     if (event.type === 'text' && data.role === 'user') continue;
+    // 账本只留每轮最近几屏的内容，更早的整屏帧只剩空壳（compacted），不是一段空白输出。
+    if (event.type === 'raw_terminal' && data.compacted === true) continue;
     if (event.type === 'raw_terminal' && typeof data.text === 'string') {
       try {
         const raw = JSON.parse(data.text);

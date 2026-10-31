@@ -6,7 +6,7 @@ import { fork, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
-import { tmpdir } from 'node:os';
+import { constants as osConstants, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -212,6 +212,61 @@ describe('dutydeck deploy', () => {
     child.send('start');
     return { child, wait, release: () => child.send('release'), result: async () => { await wait('result'); return messages.find(message => message.type === 'result')!.result!; } };
   }
+
+  const lastDeployment = () => {
+    const deployments = join(bot, '.dutydeck', 'deployments');
+    const latest = readdirSync(deployments).filter(name => name !== 'units').sort().at(-1)!;
+    return JSON.parse(readFileSync(join(deployments, latest, 'manifest.json'), 'utf8'));
+  };
+
+  it.each(['SIGINT', 'SIGTERM', 'SIGHUP'] as const)('排空后被 %s 打断：写失败清单、立即退出排空再退出进程', async signal => {
+    const deploying = await owner('abort');
+    await deploying.wait('locked'); // 已排空，卡在备份里
+    const exited = new Promise<number | null>(resolve => deploying.child.once('exit', code => resolve(code)));
+    deploying.child.kill(signal);
+    expect(await exited).toBe(128 + osConstants.signals[signal]);
+    expect(readFileSync(join(bot, 'drain-calls'), 'utf8').trim().split('\n').at(-1)).toBe('false');
+    expect(lastDeployment()).toMatchObject({
+      created_by: 'dutydeck deploy', status: 'failed', aborted_by: signal, error: expect.stringContaining(signal), completed_at: expect.any(String)
+    });
+    expect(existsSync(join(releases, 'current'))).toBe(false);
+  });
+
+  it('备份收尾时被打断：不再切换版本或重启，退出排空后结束进程', async () => {
+    const deploying = await owner('abort-after-backup');
+    const exited = new Promise<number | null>(resolve => deploying.child.once('exit', code => resolve(code)));
+    expect(await exited).toBe(128 + osConstants.signals.SIGTERM);
+    expect(readFileSync(join(bot, 'drain-calls'), 'utf8').trim().split('\n')).toEqual(['true', 'false']);
+    expect(existsSync(join(bot, 'restart-calls'))).toBe(false);
+    expect(existsSync(join(releases, 'current'))).toBe(false);
+    expect(lastDeployment()).toMatchObject({ status: 'failed', aborted_by: 'SIGTERM' });
+  });
+
+  it('切换后重启抛异常：写失败清单并退出排空，异常照常抛出', async () => {
+    await runDeploy({ source, runtime: bot }, deps());
+    nextCommit(source);
+    const requests = recordRequests();
+    await expect(runDeploy({ source, runtime: bot }, deps({
+      fetch: requests.fetch,
+      service: { ...service, restart: async () => { throw new Error('systemctl 无响应'); } }
+    }))).rejects.toThrow('systemctl 无响应');
+    expect(requests.calls.filter(call => call.includes('/api/system/drain')).at(-1)).toBe('drain /api/system/drain false');
+    expect(lastDeployment()).toMatchObject({ status: 'failed', error: expect.stringContaining('systemctl 无响应') });
+  }, 60_000);
+
+  it('部署记录里只留最新 2 份数据库备份，更早的记录保留 manifest', async () => {
+    const results: DeployResult[] = [];
+    for (let index = 0; index < 3; index++) {
+      if (index) nextCommit(source);
+      const result = await runDeploy({ source, runtime: bot }, deps());
+      expect(result, result.error).toMatchObject({ ok: true, status: 'deployed' });
+      results.push(result);
+    }
+    const backups = results.map(result => JSON.parse(readFileSync(result.manifest!, 'utf8')).database_backup as string);
+    expect(backups.map(file => existsSync(file))).toEqual([false, true, true]);
+    expect(results[2]!.prunedRecords!.removed).toEqual([`${basename(dirname(backups[0]!))}/dutydeck.db`]);
+    expect(existsSync(results[0]!.manifest!)).toBe(true);
+  }, 60_000);
 
   it.each(['read', 'restart', 'health', 'rollback'])('独立进程在 %s 阶段持有同根锁，完成后释放', async stage => {
     const first = await owner(stage);
@@ -1299,6 +1354,49 @@ describe('dutydeck deploy prune', () => {
     expect(all.items.map(item => item.name).sort()).toEqual([own[1], own[2], legacy[1]].sort());
     expect(all.skipped).toEqual([legacy[0]]);
     expect(names(deployments)).toEqual([legacy[0]!, legacy[2]!, legacy[3]!, 'current-deployment-path', 'notes'].sort());
+  });
+
+  it('deploy 建的、超过 24 小时仍没有 manifest 的记录不占保留个数直接清；新的和手工部署的不动', async () => {
+    makeReleases(1);
+    const stale = '20261023T100214Z-0f4ecc6-62ohTW', fresh = '20261029T100214Z-0f4ecc6-AbCdEf', manual = '20250101T000000Z-aaaaaaa';
+    for (const [name, hours] of [[stale, 25], [fresh, 23], [manual, 48]] as const) {
+      write(join(deployments, name, 'dutydeck.db'), 'w'.repeat(8192));
+      hoursAgo(join(deployments, name), hours);
+    }
+
+    const preview = await runDeployPrune({ releases, dryRun: true }, { processPaths: noProcesses });
+    expect(preview.items).toEqual([{ kind: 'unfinished', name: stale, bytes: expect.any(Number) }]);
+    expect(names(deployments)).toEqual([fresh, manual, stale].sort());
+
+    const result = await runDeployPrune({ releases }, { processPaths: noProcesses });
+    expect(result.items.map(item => item.name)).toEqual([stale]);
+    expect(names(deployments)).toEqual([fresh, manual].sort());
+  });
+
+  it('数据库备份只留最新 2 份（current 的算一份），更早的只删 manifest 记下的备份文件', async () => {
+    const rel = makeReleases(4);
+    link(basename(rel[3]!), join(releases, 'current'));
+    const outside = join(tmp, 'elsewhere.db');
+    write(outside, 'keep');
+    for (let index = 1; index <= 4; index++) {
+      const name = releaseName(index);
+      write(join(deployments, name, 'dutydeck.db'), 'b'.repeat(8192));
+      write(join(deployments, name, 'manifest.json'), JSON.stringify({
+        created_by: 'dutydeck deploy', database_backup: join(deployments, name, 'dutydeck.db'),
+        ...(index === 1 ? { database_before_rollback: outside } : {}), ...(index === 2 ? { database_before_rollback: join(deployments, name, 'dutydeck.db.before-rollback') } : {})
+      }));
+    }
+    write(join(deployments, releaseName(2), 'dutydeck.db.before-rollback'), 'r'.repeat(4096));
+
+    const result = await runDeployPrune({ releases }, { processPaths: noProcesses });
+
+    expect(result, result.error).toMatchObject({ ok: true });
+    expect(result.items.map(item => [item.kind, item.name])).toEqual([
+      ['backup', `${releaseName(2)}/dutydeck.db`], ['backup', `${releaseName(2)}/dutydeck.db.before-rollback`], ['backup', `${releaseName(1)}/dutydeck.db`]
+    ]);
+    expect([1, 2, 3, 4].map(index => existsSync(join(deployments, releaseName(index), 'dutydeck.db')))).toEqual([false, false, true, true]);
+    expect([1, 2, 3, 4].every(index => existsSync(join(deployments, releaseName(index), 'manifest.json')))).toBe(true);
+    expect(existsSync(outside)).toBe(true);
   });
 
   it('--include-unmarked 看不了进程时不删手工部署的记录', async () => {

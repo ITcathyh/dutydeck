@@ -13,4 +13,6 @@ export interface RepositoryOpenOptions {
   upgrade?: 'never' | 'if-idle';
   /** Initial authority only when no user schema exists; existing databases are unchanged. */
   newDatabaseAuthority?: 'legacy' | 'ledger_v1';
+  /** Called with the migration duration (ms) when this open ran schema migrations; startup timing only. */
+  onMigrated?: (ms: number) => void;
 }

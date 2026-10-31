@@ -566,7 +566,8 @@ export class DutydeckRuntime {
     };
   }
 
-  initialize(agents: AgentConfig[]) {
+  /** onAgentsRegistered：Agent 登记完、开始逐个恢复会话之前调用，只用于启动耗时日志。 */
+  initialize(agents: AgentConfig[], onAgentsRegistered?: () => void) {
     if (!this.initializationRun) this.initializationRun = Promise.resolve().then(() => {
       if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503);
       if (this.repos.execution.authority() !== 'ledger_v1') {
@@ -578,7 +579,7 @@ export class DutydeckRuntime {
       // 复用刚建立的真实 claim 绑定 insight live 来源写入器；不再 attachRuntime。
       this.insightWriter = this.repos.insight.bindSources(this.binding);
       return this.initializationContext.run(true, () => this.mutations.run(this.initializationOwner, async () => {
-        await this.initializeOnce(agents);
+        await this.initializeOnce(agents, onAgentsRegistered);
         this.mutations.check();
         this.initialized = true;
       }));
@@ -598,7 +599,7 @@ export class DutydeckRuntime {
     });
     return this.initializationRun;
   }
-  private async initializeOnce(agents: AgentConfig[]) {
+  private async initializeOnce(agents: AgentConfig[], onAgentsRegistered?: () => void) {
     await this.ensureInsightInstanceId();
     const blockedVerifications = await this.verifications.interruptRunning();
     this.mutations.check();
@@ -609,6 +610,7 @@ export class DutydeckRuntime {
     const configuredIds = new Set(agents.map(agent => agent.id));
     for (const existing of await this.mutations.wait(() => this.repos.agents.list())) if ((existing.builtin || existing.origin) && !configuredIds.has(existing.id)) await this.mutations.write('runtime_initialize', () => this.repos.agents.delete(existing.id));
     for (const agent of agents) await this.mutations.write('runtime_initialize', () => this.repos.agents.save(agent));
+    onAgentsRegistered?.();
     for (const session of await this.mutations.wait(() => this.repos.sessions.list())) {
       await this.scoped(session.id, async () => {
         await this.loadStopBlock(session.id);

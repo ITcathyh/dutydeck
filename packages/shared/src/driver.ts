@@ -100,7 +100,8 @@ export interface AgentIdleTimeoutData { message: string; code: typeof AGENT_IDLE
  *  error              { message: string, detail?, code?, retryable? }   code 如 AGENT_IDLE_TIMEOUT（见 AgentIdleTimeoutData）
  *  completed          { stopReason?: string }                 一轮结束；'max_tokens'|'truncated' 视为 failed
  *  task               TaskRecord                               任务记录更新（运行时内部使用，driver 不发）
- *  raw_terminal       { text: string }                        未解析的终端输出，兜底通道，永不丢数据
+ *  raw_terminal       { text: string, screen?: true }         未解析的终端输出，兜底通道；screen=true 是整屏快照，
+ *                                                             新帧取代旧帧，每轮只保留最近几帧的内容
  *
  * tool_call 与 tool_result 靠 id 关联（runtime 按 id 合并）。
  */

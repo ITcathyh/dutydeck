@@ -253,10 +253,10 @@ function renderDeployResult(result: DeployResult, json: boolean): void {
   if (result.pid !== undefined) ui.hint(`服务进程：pid ${result.pid}`);
   if (result.pruned?.removed.length) ui.hint(`清理旧发布目录：删除 ${result.pruned.removed.length} 个，腾出 ${Math.round(result.pruned.freedBytes / 1024 / 1024)} MB`);
   if (result.pruned?.inUse.length) ui.hint(`仍被运行中的进程引用，保留：${result.pruned.inUse.join('、')}`);
-  if (result.prunedRecords?.removed.length) ui.hint(`清理旧部署记录（含数据库备份）：删除 ${result.prunedRecords.removed.length} 个，腾出 ${Math.round(result.prunedRecords.freedBytes / 1024 / 1024)} MB`);
+  if (result.prunedRecords?.removed.length) ui.hint(`清理旧部署记录与数据库备份：删除 ${result.prunedRecords.removed.length} 项，腾出 ${Math.round(result.prunedRecords.freedBytes / 1024 / 1024)} MB`);
 }
 
-const PRUNE_KIND_LABELS: Record<DeployPruneResult['items'][number]['kind'], string> = { release: '发布目录', partial: '复制中断的残留', record: '部署记录' };
+const PRUNE_KIND_LABELS: Record<DeployPruneResult['items'][number]['kind'], string> = { release: '发布目录', partial: '复制中断的残留', record: '部署记录', unfinished: '中途中断的部署记录', backup: '旧数据库备份' };
 const formatBytes = (bytes: number) => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 
 function renderDeployPruneResult(result: DeployPruneResult, json: boolean): void {
