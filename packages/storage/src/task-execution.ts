@@ -17,6 +17,10 @@ function fail(code: string, detail = code): never { throw new RuntimeError(code,
 function parse<T>(schema: { parse(value: unknown): T }, value: unknown): T {
   try { canonicalExecutionJson(value); return schema.parse(value); } catch { return fail('EXECUTION_INVALID_INPUT'); }
 }
+// JSON.parse output has no cycles/accessors. Strict schemas still validate every number and locator JSON.
+function parseStored<T>(schema: { parse(value: unknown): T }, value: unknown): T {
+  try { return schema.parse(value); } catch { return fail('EXECUTION_INVALID_INPUT'); }
+}
 function hash(value: string) { return createHash('sha256').update(value).digest('hex'); }
 export function executionTaskId(namespace: TaskRequestV1['namespace'], sessionId: string, key: string): string {
   taskRequestV1Schema.shape.namespace.parse(namespace); id.parse(sessionId); id.parse(key);
@@ -63,7 +67,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   const attempts = (sessionId: string) => db.prepare('SELECT json FROM task_attempts WHERE session_id=? ORDER BY number,id').all(sessionId).map(row => rowJson<TaskAttempt>(row)!);
   const readResource = (row: unknown): DriverResource | undefined => {
     if (!row) return;
-    const r = parse(taskExecutionSchemas.resource, rowJson<unknown>(row));
+    const r = parseStored(taskExecutionSchemas.resource, rowJson<unknown>(row));
     const provenance = r.creationProvenance;
     const closure = r.creationClosure;
     if (provenance && (r.kind !== 'operation' || !same(provenance.controller, r.controller))) fail('RESOURCE_CREATION_PROVENANCE_INVALID');
@@ -73,14 +77,16 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     if (r.purpose && (r.kind !== 'remote' || !r.nativeExpected || !r.driverInstanceId)) fail('NATIVE_CONTEXT_INVALID');
     if (r.nativeReplacement && r.purpose !== 'acp_native_context') fail('NATIVE_CONTEXT_INVALID');
     if(r.purpose==='acp_native_context'&&r.identity) {
-      const identity=parse(taskExecutionSchemas.nativeIdentitySchema,r.identity.locator),{acpxRecordId,backendSessionId,agentSessionId,defaults,...expected}=identity;
+      const identity=parseStored(taskExecutionSchemas.nativeIdentitySchema,r.identity.locator),{acpxRecordId,backendSessionId,agentSessionId,defaults,...expected}=identity;
       if(!same(expected,r.nativeExpected)||r.identity.identityId!==`native_${hash(stable([r.resourceId,identity]))}`)fail('NATIVE_CONTEXT_IDENTITY_CONFLICT');
     }
     if(r.nativeBindings?.some(binding=>r.purpose!=='acp_native_context'||binding.sessionId!==r.sessionId||binding.context.resourceId!==r.resourceId||binding.context.identityId!==r.identity?.identityId||binding.context.originRunId!==r.runId))fail('NATIVE_CONTEXT_BINDING_INVALID');
     return r;
   };
-  const resource = (resourceId: string) => readResource(db.prepare('SELECT json FROM driver_resources WHERE id=?').get(resourceId));
-  const resources = (sessionId: string) => db.prepare('SELECT json FROM driver_resources WHERE session_id=? ORDER BY rowid').all(sessionId).map(row => readResource(row)!);
+  const resourceById = db.prepare('SELECT json FROM driver_resources WHERE id=?');
+  const resourcesBySession = db.prepare('SELECT json FROM driver_resources WHERE session_id=? ORDER BY rowid');
+  const resource = (resourceId: string) => readResource(resourceById.get(resourceId));
+  const resources = (sessionId: string) => resourcesBySession.all(sessionId).map(row => readResource(row)!);
   const steeringOperation = (operationId: string) => rowJson<SteeringOperation>(db.prepare('SELECT json FROM task_steering_operations WHERE id=?').get(operationId));
   const taskSteering = (taskId: string) => rowJson<SteeringOperation>(db.prepare('SELECT json FROM task_steering_operations WHERE task_id=? ORDER BY rowid DESC LIMIT 1').get(taskId));
   const steeringBlockers = (sessionId: string): ExecutionBlocker[] => (db.prepare("SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')").all(sessionId) as Array<{task_id:string}>).map(row => ({code:'STEERING_DELIVERY_UNKNOWN',sessionId,taskId:row.task_id}));

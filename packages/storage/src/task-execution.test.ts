@@ -30,6 +30,58 @@ const intent=(submissionId='send')=>({submissionId,inputDigest:hash('final'),res
 const complete=(submissionId='send')=>({kind:'driver_result' as const,submissionId,outcome:'completed' as const,outputDigest:hash('done'),stopReason:'end_turn',complete:true as const});
 
 describe('task execution ledger',()=>{
+  it('fully revalidates persisted safe resource history, including nonfinite JSON, native identity and provenance', () => {
+    const path=disk(),{x,repos}=ready(path),task=accepted(x).task!;
+    const history={sessionId:'history',runId:'history-run'};
+    x.createSession(session(history.sessionId,history.runId));
+    const root=x.beforeControlledOperation(history,{resourceId:'history-root',driverInstanceId:'driver'});
+    const expected={nativeCreationId:'creation',sessionKey:'native-key',agent:'a',command:['fake'],cwd:'/tmp',executionDomain:'local'};
+    const native=x.reserveNativeContext(history,{resourceId:'history-native',parentResourceId:root.resourceId,expected});
+    x.confirmNativeContext(history,native.resourceId,native.revision,{...expected,acpxRecordId:'native-key',backendSessionId:'context',defaults:{}});
+    x.creationFinished(history,root.resourceId,root.revision,'created');
+    const sql=new Database(path);
+    try {
+      const original=(sql.prepare('SELECT json FROM driver_resources WHERE id=?').get(native.resourceId) as {json:string}).json;
+      const read=()=>repos.execution.getTaskExecution(task.id);
+      expect(read()?.blockers).toEqual([]);
+      const invalid=[
+        {...JSON.parse(original),extra:true},
+        {...JSON.parse(original),revision:'overflow'},
+        {...JSON.parse(original),controller:{...JSON.parse(original).controller,generation:'overflow'}},
+        {...JSON.parse(original),identity:{...JSON.parse(original).identity,locator:{...JSON.parse(original).identity.locator,extra:{nested:['overflow']}}}}
+      ];
+      for(const value of invalid) {
+        const raw=JSON.stringify(value).replaceAll('"overflow"','1e309');
+        expect(sql.prepare('SELECT json_valid(?) AS valid').get(raw)).toEqual({valid:1});
+        sql.prepare('UPDATE driver_resources SET json=? WHERE id=?').run(raw,native.resourceId);
+        expect(read).toThrow(expect.objectContaining({code:'EXECUTION_INVALID_INPUT'}));
+      }
+      const changed=JSON.parse(original);changed.identity.locator.backendSessionId='replacement';
+      sql.prepare('UPDATE driver_resources SET json=? WHERE id=?').run(JSON.stringify(changed),native.resourceId);
+      expect(read).toThrow(expect.objectContaining({code:'NATIVE_CONTEXT_IDENTITY_CONFLICT'}));
+      sql.prepare('UPDATE driver_resources SET json=? WHERE id=?').run(original,native.resourceId);
+      expect(read()?.blockers).toEqual([]);
+      const rootRaw=(sql.prepare('SELECT json FROM driver_resources WHERE id=?').get(root.resourceId) as {json:string}).json;
+      const corrupted=JSON.parse(rootRaw);corrupted.creationProvenance.controller.instanceId='other';
+      sql.prepare('UPDATE driver_resources SET json=? WHERE id=?').run(JSON.stringify(corrupted),root.resourceId);
+      expect(read).toThrow(expect.objectContaining({code:'RESOURCE_CREATION_PROVENANCE_INVALID'}));
+      sql.prepare('UPDATE driver_resources SET json=? WHERE id=?').run(rootRaw,root.resourceId);
+      expect(read()?.blockers).toEqual([]);
+      let physical=x.beforeCreate(history,{resourceId:'physical-locator',kind:'local_only'});
+      physical=x.spawned(history,physical.resourceId,physical.revision,{identityId:'physical',kind:'local_only',locator:{nested:[1]}});
+      physical=x.creationFinished(history,physical.resourceId,physical.revision,'created');
+      x.observed(history,physical.resourceId,physical.revision,{observationId:'physical-gone',state:'gone',identityId:'physical',evidenceRef:'fixture:gone',observedAt:session().createdAt});
+      const physicalRaw=(sql.prepare('SELECT json FROM driver_resources WHERE id=?').get(physical.resourceId) as {json:string}).json;
+      expect(read()?.blockers).toEqual([]);
+      sql.prepare('UPDATE driver_resources SET json=? WHERE id=?').run(physicalRaw.replace('\"nested\":[1]','\"nested\":[1e309]'),physical.resourceId);
+      expect(read).toThrow(expect.objectContaining({code:'EXECUTION_INVALID_INPUT'}));
+      sql.prepare('UPDATE driver_resources SET json=? WHERE id=?').run(physicalRaw,physical.resourceId);
+      const pending=x.beforeCreate(f,{resourceId:'programmatic-input',kind:'local_only'}),getter=vi.fn();
+      const locator=Object.defineProperty({},'value',{enumerable:true,get:getter});
+      expect(()=>x.spawned(f,pending.resourceId,pending.revision,{identityId:'untrusted',kind:'local_only',locator})).toThrow(expect.objectContaining({code:'EXECUTION_INVALID_INPUT'}));
+      expect(getter).not.toHaveBeenCalled();
+    } finally {sql.close();}
+  });
   it('reads current task facts without filesystem admission checks, retaining full checks for execution projections', () => {
     const {x,repos}=ready();
     const a=claimed(x);
