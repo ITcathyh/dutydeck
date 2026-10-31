@@ -1185,20 +1185,6 @@ dutydeck backup restore --archive /path/to/backups/snapshot-1 --target /path/to/
 
 只排除外部凭据文件（如 `.env`、secret-provider 文件及私钥文件），数据库内的凭据完整保留。原生 CLI 会话、外部工作目录 / worktree、外部服务和插件运行数据等不默认打包；缺失、旧式可变或包含符号链接的不可变插件整包不复制，列为缺失依赖。预检与恢复均报告 `status: quarantined`，不代表完整可运行的实例。恢复副本保留任务的未知结果与提交事实，禁止启动服务和附加运行时，不自动重放任务；本命令不补凭据或解除隔离，后续启用须单独核对依赖并授权。
 
-#### 清理旧终端输出（仓库维护工具）
-
-在已安装依赖并运行 `pnpm build:packages` 的仓库根执行。默认只读预览，不读取 `.env` 或自动定位实例；不改数据库内容、schema 或应用访问租约，SQLite 可正常创建空 WAL 与共享协调文件：
-
-```bash
-pnpm exec tsx scripts/prune-terminal-events.mts --database /path/to/runtime/dutydeck.db --before 2026-10-01T00:00:00.000Z
-# 核对预览，将 eligibleEvents 和 eligibleContentBytes 分别填入 COUNT 和 BYTES；备份并受控停止目标实例后执行：
-pnpm exec tsx scripts/prune-terminal-events.mts --database /path/to/runtime/dutydeck.db --before 2026-10-01T00:00:00.000Z --apply --expect-count "$COUNT" --expect-bytes "$BYTES"
-```
-
-只清理固定时间之前、有任务及执行尝试归属的 `raw_terminal` 事件。会话须空闲或已结束（idle、stopped、interrupted、failed），所有任务与尝试均已结算且执行资源安全；排队、未决插话或队列动作、资源未核实、缺少归属、事件引用或原生去重键都会阻止相应清理。保留每个会话的最大序号事件以及所有结构化事件。删除后，旧终端日志和使用屏幕兜底的历史过程记录不再完整；任务结果、产物来源事件及原生 CLI transcript 不删除。
-
-`--apply` 拒绝活跃数据库使用者，在独占维护事务内重新筛选并核对预览数字；失败回滚，重复执行已清理的范围返回零条。工具不停止或启动服务、不自动定期清理、不执行 `VACUUM`；报告的是事件内容字节数，不是数据库文件立即缩小的大小。
-
 ### 3. 开机自启 (`autostart`)
 
 ```bash

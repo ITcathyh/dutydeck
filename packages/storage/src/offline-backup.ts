@@ -27,7 +27,7 @@ export async function backupSqlite(source: string, target: string): Promise<void
 }
 
 /** Existing access leases exclude live runtimes; the write lock also excludes raw SQLite writers. */
-export async function withOfflineDatabase<T>(filename: string, action: (database: Database.Database) => Promise<T>): Promise<T> {
+export async function withOfflineDatabase<T>(filename: string, action: () => Promise<T>): Promise<T> {
   filename = canonicalDatabase(filename);
   const probe = new Database(filename, { readonly: true, fileMustExist: true });
   try {
@@ -39,15 +39,8 @@ export async function withOfflineDatabase<T>(filename: string, action: (database
   let maintenance = false;
   try {
     control.beginUpgrade(); maintenance = true;
-    writer.pragma('foreign_keys = ON');
     writer.exec('BEGIN IMMEDIATE');
-    control.assertMaintenance(writer);
-    const result = await action(writer);
-    writer.exec('COMMIT');
-    return result;
-  } catch (error) {
-    if (writer.inTransaction) writer.exec('ROLLBACK');
-    throw error;
+    return await action();
   } finally {
     writer.close();
     if (maintenance) control.finishUpgrade();
