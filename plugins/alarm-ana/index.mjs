@@ -125,8 +125,8 @@ function project(data, keys, budget = 24000) {
         try { const url = new URL(target); clean = ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? target : ''; }
         catch { clean = ''; }
       } else if (diagnosticKeys.has(field)) {
-        // 先匹配 HTTP 证据链接，避免把链接内的路径当成本机文件；引号路径可以含空格。
-        clean = clean.replace(/https?:\/\/[^\s<>"'`，。；：！？（）]+|(["'])(?:[A-Za-z]:[\\/]|\/)[^\r\n]*?\1|(?:[A-Za-z]:[\\/]|(?<!\w)\/)[^\s<>"'`，。；：！？（）)\]};,]*/gi,
+        // 先保留 HTTP 证据链接；路径须有明确起始边界和非空段，引号路径允许空格。
+        clean = clean.replace(/https?:\/\/[^\s<>"'`，。；：！？（）]+|(["'])(?:[A-Za-z]:[\\/]|~?\/)(?=[^\s\\/"'])[^\r\n]+?\1|(?<=^|[\s"'`=:：(\[{（【])(?:[A-Za-z]:[\\/]|~?\/)[^\s\\/<>"'`，。；：！？（）)\]};,]+(?:[\\/][^\s\\/<>"'`，。；：！？（）)\]};,]+)*/gi,
           match => /^https?:/i.test(match) ? match : /^['"]/.test(match) ? `${match[0]}[已省略路径]${match[0]}` : '[已省略路径]');
       }
       let result = clean.slice(0, 1000);

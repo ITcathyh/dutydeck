@@ -165,6 +165,28 @@ describe('alarm-ana business tools', () => {
     expect(await action('ack', { source_key: 'main', record_id: 'rec1' })).toMatchObject({ outcome: 'unknown', error: expected });
   });
 
+  it.each(['请求失败/超时持续升高', 'LLM / RCA / compare', 'a/b', '/'])('preserves ordinary diagnostic separators in health summaries and action errors: %s', async text => {
+    const url = 'https://example.test/alarms/123?region=cn';
+    const diagnostic = `${text}；证据 ${url}`;
+    mockResponse({ available: true, report: { alerts: [{ code: 'degraded', severity: 'high', summary: diagnostic }] } });
+    expect(await query('ops_health', {})).toEqual({ available: true, report: { alerts: [{ code: 'degraded', severity: 'high', summary: diagnostic }] }, truncated: false });
+    mockResponse({ outcome: 'unknown', error: diagnostic });
+    expect(await action('ack', { source_key: 'main', record_id: 'rec1' })).toEqual({ outcome: 'unknown', task_ref: 'pt_test', error: diagnostic, truncated: false });
+  });
+
+  it.each([
+    ['/data00/home/x/alarm_ana/.state/results.jsonl', '[已省略路径]'],
+    ['~/dutydeck/.dutydeck/dutydeck.db', '[已省略路径]'],
+    ['读取失败=/data00/home/x/alarm_ana/.state/results.jsonl', '读取失败=[已省略路径]'],
+    ['读取失败：~/dutydeck/.dutydeck/dutydeck.db', '读取失败：[已省略路径]']
+  ])('redacts runtime path tokens at real boundaries in both diagnostic surfaces: %s', async (text, expected) => {
+    const url = 'https://example.test/alarms/123?region=cn';
+    mockResponse({ available: true, report: { alerts: [{ code: 'results_missing', severity: 'high', summary: `${text}；证据 ${url}` }] } });
+    expect(await query('ops_health', {})).toMatchObject({ available: true, report: { alerts: [{ code: 'results_missing', severity: 'high', summary: `${expected}；证据 ${url}` }] } });
+    mockResponse({ outcome: 'unknown', error: `${text}；证据 ${url}` });
+    expect(await action('ack', { source_key: 'main', record_id: 'rec1' })).toMatchObject({ outcome: 'unknown', task_ref: 'pt_test', error: `${expected}；证据 ${url}` });
+  });
+
   it('redacts quoted paths and exception diagnostics without breaking HTTP evidence', async () => {
     const url = 'https://example.test/alarms/123?region=cn';
     const error = `FileNotFoundError: [Errno 2] No such file or directory: '/srv/alarm/runtime/missing.json'; 状态 unknown；证据 ${url}`;
