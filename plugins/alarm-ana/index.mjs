@@ -125,8 +125,8 @@ function project(data, keys, budget = 24000) {
         try { const url = new URL(target); clean = ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? target : ''; }
         catch { clean = ''; }
       } else if (diagnosticKeys.has(field)) {
-        // 先保留 HTTP 证据链接；路径须有明确起始边界和非空段，引号路径允许空格。
-        clean = clean.replace(/https?:\/\/[^\s<>"'`，。；：！？（）]+|(["'])(?:[A-Za-z]:[\\/]|~?\/)(?=[^\s\\/"'])[^\r\n]+?\1|(?<=^|[\s"'`=:：(\[{（【])(?:[A-Za-z]:[\\/]|~?\/)[^\s\\/<>"'`，。；：！？（）)\]};,]+(?:[\\/][^\s\\/<>"'`，。；：！？（）)\]};,]+)*/gi,
+        // 先保留 HTTP 证据链接；路径须有明确起始边界（空白、引号、等号、冒号、括号或逗号分号）和非空段，允许连续分隔符，引号路径允许空格。
+        clean = clean.replace(/https?:\/\/[^\s<>"'`，。；：！？（）]+|(["'])(?:[A-Za-z]:[\\/]+|~?\/+)(?=[^\s\\/"'])[^\r\n]+?\1|(?<=^|[\s"'`=:：(\[{（【，,；;、])(?:[A-Za-z]:[\\/]+|~?\/+)[^\s\\/<>"'`，。；：！？（）)\]};,]+(?:[\\/]+[^\s\\/<>"'`，。；：！？（）)\]};,]+)*[\\/]*/gi,
           match => /^https?:/i.test(match) ? match : /^['"]/.test(match) ? `${match[0]}[已省略路径]${match[0]}` : '[已省略路径]');
       }
       let result = clean.slice(0, 1000);

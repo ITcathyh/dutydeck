@@ -178,7 +178,11 @@ describe('alarm-ana business tools', () => {
     ['/data00/home/x/alarm_ana/.state/results.jsonl', '[已省略路径]'],
     ['~/dutydeck/.dutydeck/dutydeck.db', '[已省略路径]'],
     ['读取失败=/data00/home/x/alarm_ana/.state/results.jsonl', '读取失败=[已省略路径]'],
-    ['读取失败：~/dutydeck/.dutydeck/dutydeck.db', '读取失败：[已省略路径]']
+    ['读取失败：~/dutydeck/.dutydeck/dutydeck.db', '读取失败：[已省略路径]'],
+    ['读取失败，/srv/alarm/runtime/results.json', '读取失败，[已省略路径]'],
+    ['读取失败;/srv/alarm/runtime/results.json', '读取失败;[已省略路径]'],
+    ['/srv//alarm/runtime/results.json', '[已省略路径]'],
+    ['//srv/alarm/runtime/results.json', '[已省略路径]']
   ])('redacts runtime path tokens at real boundaries in both diagnostic surfaces: %s', async (text, expected) => {
     const url = 'https://example.test/alarms/123?region=cn';
     mockResponse({ available: true, report: { alerts: [{ code: 'results_missing', severity: 'high', summary: `${text}；证据 ${url}` }] } });
