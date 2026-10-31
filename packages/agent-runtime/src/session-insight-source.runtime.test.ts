@@ -102,6 +102,7 @@ function makeFactory(): { factory: DriverFactory; drivers: CapturedDriver[] } {
         for (const observation of replay) listener(observation);
         return () => { listeners.delete(listener); };
       }),
+      confirmTranscriptSource: vi.fn(),
       emitSource(o) { for (const listener of listeners) listener(o); },
       replayOnSubscribe(observations) { replay = observations; },
       listenerCount() { return listeners.size; }
@@ -243,6 +244,7 @@ describe('runtime transcript source: in-flight realpath stale races', () => {
       releaseRealpath!();
       await new Promise(r => setTimeout(r, 150));
       expect(repos.insight.listSources(session.id).map(r => r.observationId)).not.toContain('inflight-old');
+      expect(drivers[0]!.confirmTranscriptSource).not.toHaveBeenCalled();
 
       // 新 driver 的观察在新 run 正常落库，证明是精确丢弃旧代而非整体失败。
       newDriver.emitSource(rootObs('new-driver'));
@@ -251,6 +253,7 @@ describe('runtime transcript source: in-flight realpath stale races', () => {
           .some(r => r.observationId === 'new-driver' && r.activeRunId === restarted.runId),
         'new driver persists on new run'
       );
+      await vi.waitFor(() => expect(newDriver.confirmTranscriptSource).toHaveBeenCalledWith('new-driver'));
     } finally {
       __setRealpathImplForTest(null);
       await runtime.shutdown(); repos.close();
@@ -275,6 +278,7 @@ describe('runtime transcript source: in-flight realpath stale races', () => {
     releaseRealpath!();
     await new Promise(r => setTimeout(r, 150));
     expect(repos.insight.listSources(session.id).map(r => r.observationId)).not.toContain('inflight-shutdown');
+    expect(drivers.at(-1)!.confirmTranscriptSource).not.toHaveBeenCalled();
     repos.close();
   });
 });

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { installLarkHook } from './security-hooks.js';
 import type { AgentEvent, PromptPart, Session } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
@@ -195,7 +195,9 @@ describe('Lark message coordinator', () => {
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     expect(service.downloadMessageResource).toHaveBeenCalledWith('om_image', 'img_1', 'image', expect.any(AbortSignal));
     expect((service.downloadMessageResource.mock.calls[0] as unknown as [string, string, string, AbortSignal])[3].aborted).toBe(false);
-    expect(runtime.send.mock.calls[0]?.[1]).toContain('/dutydeck/lark-resources/om_image/image-');
+    expect(runtime.send.mock.calls[0]?.[1]).toMatch(/\/dutydeck\/lark-resources\/[^/]+\/om_image-[^/]+\/image-[a-f0-9]+\.png/);
+    const path = String(runtime.send.mock.calls[0]?.[1]).match(/已下载到本地：(.+?)。/)![1]!;
+    hookWorkspaces.push(dirname(path));
     expect(runtime.send.mock.calls[0]?.[1]).toContain('请使用本地文件读取工具查看');
   });
 

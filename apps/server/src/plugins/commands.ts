@@ -24,8 +24,8 @@ export const AGENT_NATIVE_COMMANDS: ReadonlySet<string> = new Set([
 const invocationPattern = /^\/(?:([a-z][a-z0-9]*(?:-[a-z0-9]+)*):)?([a-z][a-z0-9_-]*)(?=\s|$)/i;
 
 /**
- * 插件斜杠命令。只做一件事：把命令换成 prompt 模板（`$ARGUMENTS` 替换为参数原文），
- * 之后照普通请求走授权与派发，不新开执行通道。内置命令名在安装时已拒绝。
+ * 插件斜杠命令注册与冲突处理。prompt 模板按普通任务派发；query 映射由宿主独立授权。
+ * 内置命令名在安装时拒绝，Agent 原生命令保留短名。
  */
 export class PluginCommandRegistry {
   readonly commands: RegisteredPluginCommand[];
@@ -44,20 +44,20 @@ export class PluginCommandRegistry {
     return this.commands.filter(command => scopeApplies(command.scope, context));
   }
 
-  resolve(text: string, context: PluginScopeContext): { command: RegisteredPluginCommand; args: string } | undefined {
+  resolve(text: string, context: PluginScopeContext, includeUnavailable = false): { command: RegisteredPluginCommand; args: string } | undefined {
     const trimmed = text.trim();
     const match = trimmed.match(invocationPattern);
     if (!match) return undefined;
     const plugin = match[1]?.toLowerCase();
     const name = match[2]!.toLowerCase();
-    const command = this.list(context).find(candidate => candidate.name === name && (plugin ? candidate.plugin === plugin : candidate.shortNameAvailable));
+    const command = (includeUnavailable ? this.commands : this.list(context)).find(candidate => candidate.name === name && (plugin ? candidate.plugin === plugin : candidate.shortNameAvailable));
     return command ? { command, args: trimmed.slice(match[0].length).trim() } : undefined;
   }
 
   /** 命中插件命令时返回展开后的 prompt，否则 undefined。 */
   expand(text: string, context: PluginScopeContext): string | undefined {
     const resolved = this.resolve(text, context);
-    return resolved ? expandCommandTemplate(resolved.command.template, resolved.args) : undefined;
+    return resolved && !resolved.command.query ? expandCommandTemplate(resolved.command.template, resolved.args) : undefined;
   }
 }
 

@@ -52,6 +52,8 @@ it('runtime stop retries release the original blocked driver after physical exit
     driverFactory(_agent, _protocol, onEvent, onExit, sessionId) {
       f = fixture({ onEvent, onExit, sessionId: sessionId! });
       vi.spyOn(f.driver, 'start').mockResolvedValue();
+      // Synthetic start creates no native launch identity to persist.
+      vi.spyOn(f.driver, 'persistentTerminalIdentity').mockResolvedValue(undefined);
       f.physicalStop.mockRejectedValueOnce(new Error('transient control timeout'));
       return f.driver;
     },

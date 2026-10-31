@@ -1,6 +1,8 @@
+import { PluginCommandQueryService } from './command-query.js';
+import { PluginToolGrants } from './tool-grants.js';
 import { dirname } from 'node:path';
 import { resolveDatabaseUrl } from '@dutydeck/config';
-import { installationOwnerTaskActor, type CiWebhookRepository, type ExecutionRepository, type PublicTaskRecord, type Session } from '@dutydeck/shared';
+import { installationOwnerTaskActor, type ConfigRepository, type CiWebhookRepository, type ExecutionRepository, type PublicTaskRecord, type Session } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { readTaskAttemptResult } from '../task-results.js';
 import { setPluginSkillRoots } from '../skill-catalog.js';
@@ -28,7 +30,7 @@ export async function loadDaemonPlugins(env: NodeJS.ProcessEnv, options: { built
 
 export interface PluginWiringDeps {
   runtime: () => DutydeckRuntime;
-  repositories: { execution: Pick<ExecutionRepository, 'getTaskExecution' | 'getAttemptEvents' | 'getAcceptedTask'>; ciWebhook: Pick<CiWebhookRepository, 'claimEvent' | 'releaseEvent' | 'bindTask' | 'listTaskBindings' | 'unbindTask'> };
+  repositories: { config: ConfigRepository; execution: Pick<ExecutionRepository, 'getTaskExecution' | 'getAttemptEvents' | 'getAcceptedTask'>; ciWebhook: Pick<CiWebhookRepository, 'claimEvent' | 'releaseEvent' | 'bindTask' | 'listTaskBindings' | 'unbindTask'> };
   readBot(appId: string): Promise<(TriggerBot & { appSecret?: string }) | undefined>;
   fallbackAgentId(): string | undefined;
   sendText(bot: TriggerBot & { appSecret?: string }, input: { chatId: string; text: string; idempotencyKey: string }): Promise<unknown>;
@@ -43,7 +45,7 @@ export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
   const hooks = new PluginRuntimeHooks(host.hooks, deps.log);
   const disposers = [
     setPluginSkillRoots(context => host.skillEntries(context)),
-    setLarkPluginCommands(host.commands)
+    setLarkPluginCommands(host.commands, new PluginCommandQueryService(host, new PluginToolGrants(deps.repositories.config), 30_000, hooks))
   ];
   const triggers = new PluginTriggerService({
     lookup: (plugin, id) => host.trigger(plugin, id),

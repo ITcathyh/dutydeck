@@ -646,7 +646,7 @@ export class DutydeckRuntime {
             }
           }
         }
-        const restoredTerminal = !blockedVerifications.has(session.id) && await this.restoreIdleHerdrTerminal(session);
+        const restoredTerminal = !blockedVerifications.has(session.id) && await this.restoreIdlePersistentTerminal(session);
         // Unverified local_only and legacy resources remain blocked.
         if (this.resourceBlockers(session.id, restoredTerminal).length || blockedVerifications.has(session.id)) return;
         for (const task of tasks) {
@@ -670,7 +670,7 @@ export class DutydeckRuntime {
     }
   }
   private async persistTerminalReceipt(session: Session, driver: AgentDriver): Promise<void> {
-    if (session.terminalBackend !== 'herdr') return;
+    if (!['herdr', 'tmux'].includes(session.terminalBackend ?? '')) return;
     const identity = await driver.persistentTerminalIdentity?.(), record = this.localResources.get(driver);
     const resource = record && this.repos.execution.getResources(session.id).find(row => row.resourceId === record.resourceId);
     if (identity === undefined || !record?.creationSettled || record.controlled || resource?.stage !== 'created'
@@ -678,8 +678,8 @@ export class DutydeckRuntime {
     await this.repos.config.set(`runtime_idle_terminal:${session.id}`, canonicalExecutionJson({ runId: session.runId,
       resourceId: resource.resourceId, identityId: record.identityId, options: record.options, identity }));
   }
-  private async restoreIdleHerdrTerminal(session: Session): Promise<boolean> {
-    if (session.terminalBackend !== 'herdr' || session.protocol !== 'pty-cli' || session.archivedAt
+  private async restoreIdlePersistentTerminal(session: Session): Promise<boolean> {
+    if (!['herdr', 'tmux'].includes(session.terminalBackend ?? '') || session.protocol !== 'pty-cli' || session.archivedAt
       || !['idle', 'completed', 'interrupted'].includes(session.state) || this.stopBlocks.has(session.id) || this.drivers.has(session.id)
       || this.repos.execution.getUnresolvedTasks(session.id).length) return false;
     const raw = await this.mutations.wait(() => this.repos.config.get(`runtime_idle_terminal:${session.id}`));
@@ -712,9 +712,14 @@ export class DutydeckRuntime {
       await this.mutations.write(session.id, async () => {
         const current = this.repos.execution.getResources(session.id).find(row => row.resourceId === resource.resourceId);
         if (!current || current.revision !== resource.revision || current.identity?.identityId !== receipt.identityId) throw new RuntimeError('RESOURCE_IDENTITY_CONFLICT', 'Original idle terminal resource changed', 409);
-        const observed = this.bound().observed(this.fence(session), resource.resourceId, resource.revision, {
-          observationId: makeId('observation'), identityId: receipt.identityId, state: 'live', observedAt: now(), evidenceRef: `idle-terminal:${digest(receipt)}`,
-        });
+        const observation = { observationId: makeId('observation'), identityId: receipt.identityId,
+          state: 'live' as const, observedAt: now(), evidenceRef: `idle-terminal:${digest(receipt)}` };
+        if (session.terminalBackend === 'tmux' && (driver!.isIdle?.() !== true || driver!.hasBackgroundWork?.() !== false || this.permissionsForSession(session.id).length)) {
+          throw new RuntimeError('IDLE_TERMINAL_ADOPTION_UNSAFE', 'Original tmux terminal is no longer idle', 409);
+        }
+        const observed = session.terminalBackend === 'tmux'
+          ? this.bound().adoptIdleTmux(this.fence(session), resource.resourceId, resource.revision, raw, observation)
+          : this.bound().observed(this.fence(session), resource.resourceId, resource.revision, observation);
         this.localResources.adopt(this.fence(session), options, observed, driver!);
         this.drivers.set(session.id, driver!); this.attachedTerminals.add(driver!);
       });
@@ -722,12 +727,12 @@ export class DutydeckRuntime {
       this.flushInsightSources(driver);
       return true;
     } catch (error) {
-      await this.emit(session.id, 'status', { state: 'terminal_recovery_deferred', message: 'Original idle Herdr terminal identity could not be verified; resource remains blocked' });
+      await this.emit(session.id, 'status', { state: 'terminal_recovery_deferred', message: 'Original idle terminal identity could not be verified; resource remains blocked' });
       return false;
     } finally {
       if (driver && this.drivers.get(session.id) !== driver) {
         this.unsubscribeInsightSources(driver);
-        driver.prepareForDaemonShutdown?.(true);
+        await driver.prepareForDaemonShutdown?.(true);
         await driver.stop();
       }
     }
@@ -2385,7 +2390,7 @@ export class DutydeckRuntime {
       );
       // mutations.run(owner) 建立 owner ALS scope 并包裹整个 write Promise；write 把同步事务排进
       // 该 session 的串行尾队。
-      void this.mutations.run(sub.owner, () =>
+      const persisted = await this.mutations.run(sub.owner, () =>
         this.mutations.write(sub.sessionId, async () => {
           // 读当前 ledger session（fence 复查之前允许的唯一 await）：activeRunId 以提交瞬间为准，
           // 不能用回调捕获时可能已过期的 run。
@@ -2410,10 +2415,12 @@ export class DutydeckRuntime {
           };
           // T2 在同一 BEGIN IMMEDIATE 内再 validateClaim 并核对 run / 资源归属 / native identity。
           this.insightWriter!.appendObserved(observation);
+          return true;
         })
       ).catch((error: unknown) => {
         this.logInsightSourceDiagnostic(error, raw.observationId, sub.sessionId);
       });
+      if (persisted && this.insightFenceLive(sub)) sub.driver.confirmTranscriptSource?.(raw.observationId);
     } catch (error) {
       this.logInsightSourceDiagnostic(error, raw.observationId, sub.sessionId);
     }
@@ -2914,6 +2921,7 @@ export class DutydeckRuntime {
           && (r.kind === 'local_only' || r.kind === 'process' && parent?.stage === 'created' && ['lifecycle','strict-context-restore'].includes(parent.operationScope?.kind ?? ''));
       })) { if (allowProofRetry) closed = true; continue; }
       // Adapters without a reliable background-empty proof must prove physical stop on contention.
+      if (driver.prepareForIdleRetirement && !await driver.prepareForIdleRetirement()) continue;
       try { await this.mutations.run(undefined, () => this.stopDriver(otherId,driver)); closed = true; }
       catch { /* Stop failure remains a durable blocker; accepted requests stay queued. */ }
     }
@@ -3455,6 +3463,8 @@ export class DutydeckRuntime {
       const lifecycle = this.lifecycle(sessionId);
       const session = await this.repos.sessions.get(sessionId);
       if (!session || this.drivers.get(sessionId) !== driver || this.lifecycle(sessionId) !== lifecycle || this.attempts.has(sessionId) || !['idle', 'completed', 'interrupted'].includes(session.state)) continue;
+      if (driver.prepareForIdleRetirement && !await driver.prepareForIdleRetirement()) continue;
+      if (this.drivers.get(sessionId) !== driver || this.attempts.has(sessionId) || this.lifecycle(sessionId) !== lifecycle) continue;
       const transition = this.transition(sessionId);
       try {
         await this.revokeSession(sessionId, false, 'interrupted');
@@ -3492,11 +3502,11 @@ export class DutydeckRuntime {
         // Admission is closed and transitions revoked; an unclaimed queue drain cannot start a new turn.
         const preserve = this.drivers.get(id) !== driver || this.recoveryInFlight(id, false) || this.verifyingSessions.has(id) || unresolved || pendingCreation;
         try {
+          await driver.prepareForDaemonShutdown(Boolean(preserve));
           if (!preserve) {
             const session = await this.repos.sessions.get(id);
             if (session) await this.persistTerminalReceipt(session, driver);
           }
-          await driver.prepareForDaemonShutdown(Boolean(preserve));
         }
         catch {
           try { await driver.prepareForDaemonShutdown(true); } catch { /* Stop still must prove physical exit. */ }

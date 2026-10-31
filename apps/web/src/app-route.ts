@@ -35,8 +35,8 @@ export type AppRoute = { kind: 'overview' } | { kind: 'session'; sessionId: stri
 export type LarkSetupTarget = 'new' | { appId: string };
 
 export type OverlayRoute =
-  | { kind: 'settings'; section: ControlCenterSection }
-  | { kind: 'lark-setup'; target?: LarkSetupTarget }
+  | { kind: 'settings'; section: ControlCenterSection; field?: string }
+  | { kind: 'lark-setup'; target?: LarkSetupTarget; field?: string }
   | { kind: 'groups' }
   | { kind: 'automation' }
   | { kind: 'usage'; view?: 'cost' | 'insight' }
@@ -49,6 +49,7 @@ export type AppLocation = {
   nav?: PrimaryNav;
   appId?: string;
   chatId?: string;
+  botField?: string;
   overlay?: OverlayRoute;
 };
 
@@ -72,15 +73,20 @@ export const routeFromPath = (fullPath: string): AppRoute => {
 const overlayFromSearch = (search: string, isSessionRoute: boolean): OverlayRoute | undefined => {
   const params = new URLSearchParams(search);
   const panel = params.get('panel');
+  const rawField = params.get('field') ?? '';
+  const staticField = /^[a-zA-Z][a-zA-Z0-9_-]{0,127}$/.test(rawField);
+  // Model anchors encode the complete Agent ID; custom IDs are not limited to static Bot field names.
+  const modelField = panel === 'settings' && /^model-(?:[A-Za-z0-9_.!~*'()-]|%[0-9A-Fa-f]{2})+-(?:model|baseUrl|authMode|apiKey)$/.test(rawField);
+  const field = staticField || modelField ? rawField : undefined;
   if (!panel) return undefined;
   switch (panel) {
     case 'settings': {
       // section 缺失或写错时回落到 agents，而不是把整个 panel 判为无效：
       // 用户手改 URL 打错一个词，应该看到设置页，不是看到什么都没发生。
       const section = params.get('section');
-      return { kind: 'settings', section: isControlCenterSection(section) ? section : 'agents' };
+      return { kind: 'settings', section: isControlCenterSection(section) ? section : 'agents', ...(field ? { field } : {}) };
     }
-    case 'lark-setup': return { kind: 'lark-setup', ...(params.get('mode') === 'new' ? { target: 'new' as const } : params.get('targetAppId') ? { target: { appId: params.get('targetAppId')! } } : {}) };
+    case 'lark-setup': return { kind: 'lark-setup', ...(field ? { field } : {}), ...(params.get('mode') === 'new' ? { target: 'new' as const } : params.get('targetAppId') ? { target: { appId: params.get('targetAppId')! } } : {}) };
     case 'groups': return { kind: 'groups' };
     case 'automation': return { kind: 'automation' };
     case 'usage': return { kind: 'usage', ...(params.get('view') === 'insight' ? { view: 'insight' as const } : {}) };
@@ -107,6 +113,7 @@ export const parseAppLocation = (pathname: string, search: string): AppLocation 
     ...(nav ? { nav } : {}),
     ...(appId ? { appId } : {}),
     ...(chatId ? { chatId } : {}),
+    ...(nav === 'bots' && /^[a-zA-Z][a-zA-Z0-9_-]{0,127}$/.test(params.get('botField') ?? '') ? { botField: params.get('botField')! } : {}),
     overlay: overlayFromSearch(search, route.kind === 'session')
   };
 };
@@ -146,17 +153,19 @@ export const turnDiffFromLocation = (pathname: string, hash: string): { sessionI
 export const turnDiffPath = (sessionId: string, taskId: string) => instancePagePath(`/diff/${encodeURIComponent(sessionId)}/${encodeURIComponent(taskId)}`);
 
 /** 反向序列化。route 为 not-found 时无法还原原始路径，调用方不应对它做导航。 */
-export const appLocationPath = ({ route, nav, appId, chatId, overlay }: AppLocation): string => {
+export const appLocationPath = ({ route, nav, appId, chatId, botField, overlay }: AppLocation): string => {
   const base = routePath(route);
   const params = new URLSearchParams();
   if (nav && (nav !== (route.kind === 'session' ? 'tasks' : 'home') || appId || chatId)) {
     params.set('nav', nav);
     if (appId) params.set('appId', appId);
     if (chatId) params.set('chatId', chatId);
+    if (nav === 'bots' && botField) params.set('botField', botField);
 
   }
   if (overlay) {
     params.set('panel', overlay.kind);
+    if ((overlay.kind === 'settings' || overlay.kind === 'lark-setup') && overlay.field) params.set('field', overlay.field);
     if (overlay.kind === 'settings') params.set('section', overlay.section);
     if (overlay.kind === 'lark-setup' && overlay.target) {
       if (overlay.target === 'new') params.set('mode', 'new');

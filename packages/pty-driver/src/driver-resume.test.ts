@@ -999,7 +999,7 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     try {
       await original.start();
       path = await waitForAssert(() => readFileSync(dump, 'utf8'));
-      original.prepareForDaemonShutdown();
+      await original.prepareForDaemonShutdown();
       await original.stop();
       // A late exit notification from the detached observer must not remove
       // settings while the persistent CLI pane is still alive.
@@ -1061,7 +1061,7 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
 
     // The service marks every production driver before runtime.shutdown().
     // stop() must detach rather than kill only on that path.
-    first.prepareForDaemonShutdown();
+    await first.prepareForDaemonShutdown();
     await first.stop();
     expect((await TmuxBackend.probeSession(name))).toBe('exists');
 

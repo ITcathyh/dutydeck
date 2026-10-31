@@ -182,6 +182,20 @@ describe('settings CLI default Agent approval', () => {
 });
 
 describe('settings CLI against the real bot routes', () => {
+  it('validates high-risk user IDs submitted through the Agent stage before saving', async () => {
+    const { repos, run } = await botRuntime();
+    const before = await readLarkConfig(repos.config, 'cli_a');
+    // A target-app definitive miss must reach the CLI as the route's identity error.
+    const app = Fastify(); cleanups.push(() => app.close());
+    await registerLarkRoutes(app, { config: repos.config, env: {}, listeningDisabled: true, fetcher: async url => String(url).includes('tenant_access_token')
+      ? json({ code: 0, tenant_access_token: 'fixture-token', expire: 7200 })
+      : json({ code: 99992361, msg: 'foreign app open_id' }) });
+    await expect(runSettingsCli('bot-set', { ...target, appId: 'cli_a', pairs: ['highRiskAllowedUsers=[{"openId":"ou_foreign","name":"Other"}]'] }, { fetcher: bridge(app), readToken }))
+      .rejects.toMatchObject({ code: 'LARK_OWNER_OPENID_CROSS_APP' });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toEqual(before);
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['highRiskAllowedUsers=[]'] })).bot.highRiskAllowedUsers).toEqual([]);
+  });
+
   it('prepares draft fallback hooks without saving or downgrading an enforced bot, then saves normally', async () => {
     const { repos, run } = await botRuntime();
     const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-draft-hook-'));

@@ -11,6 +11,12 @@ export default function register(api) {
   };
   api.registerQuery({ name: 'get', description: 'Read a ticket', version: '1', inputSchema, resource,
     execute: (input, context) => request(`/tickets/${encodeURIComponent(input.ticket)}`, context) });
+  api.registerQuery({ name: 'status', description: 'Read public ticket status in the requesting chat', version: '1', commandOutput: 'chat', inputSchema, resource,
+    async execute(input, context) {
+      const ticket = await request(`/tickets/${encodeURIComponent(input.ticket)}`, context);
+      return { title: String(ticket.title ?? ''), ...(typeof ticket.status === 'string' ? { status: ticket.status } : {}) };
+    }
+  });
   api.registerAction({ name: 'close', description: 'Close a ticket once; unknown results require reconciliation', version: '1', inputSchema, resource,
     async execute(input, context) {
       return request(`/tickets/${encodeURIComponent(input.ticket)}/close`, context, { method: 'POST', headers: { 'idempotency-key': context.actionId } });

@@ -84,9 +84,11 @@ const appendLine = (file, obj) => { fs.mkdirSync(path.dirname(file), { recursive
 const sessionArgIndex = process.argv.indexOf('--session-id');
 const pinnedSessionId = sessionArgIndex >= 0 ? process.argv[sessionArgIndex + 1] : undefined;
 
-// 启动就绪横幅：必须匹配各适配器 pollScreenReady / readyPattern
+// 启动就绪横幅：必须匹配各适配器 pollScreenReady / readyPattern。
+// Claude 同时画完整空 composer（claude-family.test.ts 实采底部结构），
+// 让同目录的后续客户端通过真实 idle 检查，而非依赖杀掉旧 pane。
 if (client === 'claude') {
-  process.stdout.write('Claude Code v2.1.288 (mock)\\r\\n\\u276f ');
+  process.stdout.write('Claude Code v2.1.288 (mock)\\r\\n────────────────────────\\r\\n\\u276f\\r\\n────────────────────────\\r\\n⏵⏵ bypass permissions on (shift to cycle)');
 } else if (client === 'codex') {
   process.stdout.write(
     '\\r\\n│  >_ OpenAI Codex (v0.160.0)  │\\r\\n' +
@@ -135,7 +137,7 @@ function submitPrompt(rawPrompt) {
       appendLine(file, { type: 'assistant', sessionId: pinnedSessionId, cwd: process.cwd(), timestamp: nowIso(), message: { role: 'assistant', content: [{ type: 'text', text: 'CONTROLLED_CLAUDE_TASK_DONE' }] } });
     }
     setTimeout(() => {
-      process.stdout.write('\\r\\nCONTROLLED_CLAUDE_TASK_DONE\\r\\n\\u001b[2J\\u001b[HClaude Code v2.1.288 (mock)\\r\\n\\u2733 Worked for 1s\\r\\n\\u276f ');
+      process.stdout.write('\\r\\nCONTROLLED_CLAUDE_TASK_DONE\\r\\n\\u001b[2J\\u001b[HClaude Code v2.1.288 (mock)\\r\\n\\u2733 Worked for 1s\\r\\n────────────────────────\\r\\n\\u276f\\r\\n────────────────────────\\r\\n⏵⏵ bypass permissions on (shift to cycle)');
     }, 200);
     return;
   }

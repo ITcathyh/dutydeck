@@ -2,7 +2,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import readline from 'node:readline';
 import fs from 'node:fs';
 import path from 'node:path';
-import * as pty from 'node-pty';
+import type * as pty from 'node-pty';
+import { spawnPty } from '@dutydeck/session-backends';
 import type {
   AgentConfig,
   AgentCapabilities,
@@ -763,7 +764,7 @@ export class PtyTransport {
   async start() {
     if (this.child) return;
     const env = Object.fromEntries(Object.entries({ ...process.env, ...this.agent.env }).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
-    this.child = pty.spawn(this.agent.command, this.agent.args, { name: 'xterm-256color', cwd: this.agent.cwd ?? process.cwd(), env });
+    this.child = spawnPty(this.agent.command, this.agent.args, { name: 'xterm-256color', cwd: this.agent.cwd ?? process.cwd(), env });
     this.child.onData(raw => this.options.onEvent({ type: 'raw_terminal', data: { text: raw }, raw }));
     this.child.onExit(({ exitCode }) => { this.child = undefined; this.options.onExit?.(exitCode); });
   }

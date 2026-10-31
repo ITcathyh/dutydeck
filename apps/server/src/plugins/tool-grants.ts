@@ -9,10 +9,10 @@ export class PluginToolGrants {
     if (!raw) throw new RuntimeError('PLUGIN_TOOL_GRANT_NOT_FOUND', 'Grant not found', 404);
     return this.set({ ...JSON.parse(raw), enabled: false });
   }
-  async permits(identity: PluginToolIdentity, toolId: string, bindingId: string, effect: 'read' | 'write', operation: 'invoke' | 'reconcile', resource?: string) {
+  async permits(identity: Pick<PluginToolIdentity, 'actor'>, toolId: string, bindingId: string, effect: 'read' | 'write', operation: 'invoke' | 'reconcile', resource?: string) {
     return (await this.list()).some(grant => grant.enabled && grant.toolId === toolId && grant.bindingId === bindingId && canonicalExecutionJson(grant.actor) === canonicalExecutionJson(identity.actor) && grant.effects.includes(effect) && grant.operations.includes(operation) && (resource === undefined || grant.resources.includes('*') || grant.resources.includes(resource)));
   }
-  async assert(identity: PluginToolIdentity, toolId: string, bindingId: string, effect: 'read' | 'write', operation: 'invoke' | 'reconcile', resource: string) {
+  async assert(identity: Pick<PluginToolIdentity, 'actor'>, toolId: string, bindingId: string, effect: 'read' | 'write', operation: 'invoke' | 'reconcile', resource: string) {
     if (!await this.permits(identity, toolId, bindingId, effect, operation, resource)) throw new RuntimeError('PLUGIN_TOOL_FORBIDDEN', 'Tool, binding, actor, effect or resource is not authorized', 403);
   }
 }

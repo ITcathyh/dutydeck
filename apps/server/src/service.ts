@@ -37,7 +37,7 @@ import { createPtyRetirementControl } from './pty-recovery.js';
 import { COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, RuntimeError, timeLoop, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { larkResourceRoot, pruneLarkResourceDirectories } from './resource-retention.js';
+import { larkResourceRoot, pruneLarkResourceDirectories, readLarkResourceReferences } from './resource-retention.js';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
 import { parsePeerInstances } from './instance-proxy.js';
@@ -397,6 +397,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       sessionId,
       awaitingAnswer: () => relayBroker.listPending(sessionId).length > 0,
       nativeForkSessionId: context.nativeForkSessionId,
+      claudeResumeSource: repos.insight.listSources(sessionId).filter(source => source.client === 'claude'
+        && source.proofKind === 'launch_observed' && source.identityProof?.startsWith('pty-claude-process-v1:')).at(-1),
     });
   };
   const pluginWiring = pluginHost ? wirePlugins(pluginHost, {
@@ -718,6 +720,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       const memoryScope = larkMemoryScope(scope.appId, scope.chatId, 'group', bot?.groupMemoryScope);
       return !bot || !larkMemoryEnabled(bot) ? '' : renderMemoryIndex(await memoryStore.list(memoryScope), await memoryStore.getState(memoryScope), { currentChatId: scope.chatId }).text;
     };
+    const resourceRoot = larkResourceRoot(config.databaseUrl);
     app = await buildApp(runtime, {
       artifactSnapshots: { service: new ArtifactSnapshots(repos, config.databaseUrl), authorize: async (request, sessionId) => {
         const administrator = createPluginManagementAuthorizer({ authEnabled: config.authEnabled, mode, getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null), getPasswordHash: () => getPasswordHash(repos.config) });
@@ -753,6 +756,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         updateDuty: (scope, patch, actorId) => collaboration!.participation.updateDuty(scope, patch, actorId), scenarios: scope => collaboration!.participation.scenarioOverview(scope) },
       system: { directoryRoots: async () => [...config.agents.map(agent => agent.cwd).filter((cwd): cwd is string => Boolean(cwd)), ...(await readLarkConfigs(repos.config)).map(bot => bot.workspace).filter((cwd): cwd is string => Boolean(cwd))] },
       lark: {
+        resourceRoot,
         fetcher: workbenchHttp.fetch,
         participation: collaboration.participation,
         usage: usageLedger,
@@ -847,8 +851,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     pluginResultTimer = setInterval(() => { void sweepPluginResults(); }, 30_000);
     pluginResultTimer.unref();
     void sweepPluginResults();
-    const resourceRoot = larkResourceRoot(tmpdir());
-    const sweepResources = () => { void pruneLarkResourceDirectories(resourceRoot).catch(error => app?.log.warn({ error }, '飞书附件临时目录清理失败')); };
+    const sweepResources = () => { void pruneLarkResourceDirectories(resourceRoot, { readProtectedDirectories: () => readLarkResourceReferences(repos.config, repos.tasks) }).catch(error => app?.log.warn({ error }, '飞书附件临时目录清理失败')); };
     resourceRetentionTimer = setInterval(sweepResources, 60 * 60_000);
     resourceRetentionTimer.unref();
     sweepResources();

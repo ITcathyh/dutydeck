@@ -37,8 +37,9 @@ it('materializes a large file via the real service with bounded streams, exact c
   const total = 100_000_003;
   const h = setup('large', range => range ? valid(range, total) : error());
   const message = `om_range_${Date.now()}`;
-  const directory = join(tmpdir(), 'dutydeck', 'lark-resources', message); cleanups.push(() => rm(directory, { recursive: true, force: true }));
-  const result = await materializeLarkResources(message, 'read file', [{ type: 'file', key: 'file_fake', label: '附件', fileName: 'fixture.bin' }], h.service);
+  const root = await temporary();
+  let directory = '';
+  const result = await materializeLarkResources(message, 'read file', [{ type: 'file', key: 'file_fake', label: '附件', fileName: 'fixture.bin' }], h.service, undefined, { root, retain: async path => { directory = path; } });
   expect(result).toContain('已下载到本地');
   const path = result.match(/已下载到本地：(.+?)。/)![1]!;
   const actual = await readFile(path);

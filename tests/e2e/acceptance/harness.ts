@@ -49,7 +49,8 @@ const file = join(dir, \`\${sessionArg ?? 'mock'}.jsonl\`);
 const write = entry => appendFileSync(file, JSON.stringify(entry) + '\\n');
 appendFileSync(file, '');
 
-process.stdout.write('Claude Code v2.1.267 (mock)' + (resumed ? ' (resumed)' : '') + '\\r\\n\\u276f ');
+// 完整空 composer 沿用 claude-family.test.ts 实采底部结构，供同目录 idle 准入核验。
+process.stdout.write('Claude Code v2.1.267 (mock)' + (resumed ? ' (resumed)' : '') + '\\r\\n────────────────────────\\r\\n\\u276f\\r\\n────────────────────────\\r\\n⏵⏵ bypass permissions on (shift to cycle)');
 
 let buffer = '';
 let composedPrompt = '';
@@ -68,7 +69,7 @@ const submitPrompt = rawPrompt => {
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'mock thinking block' }] } });
     const marker = resumed ? 'MOCK_RESUMED' : currentTurn > 1 ? 'MOCK_CONTINUED' : 'MOCK_REPLY';
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: marker + ': ' + prompt }] } });
-    process.stdout.write('\\u001b[2J\\u001b[HClaude Code v2.1.267 (mock)\\r\\n\\u2733 Worked for 1s\\r\\n\\u276f ');
+    process.stdout.write('\\u001b[2J\\u001b[HClaude Code v2.1.267 (mock)\\r\\n\\u2733 Worked for 1s\\r\\n────────────────────────\\r\\n\\u276f\\r\\n────────────────────────\\r\\n⏵⏵ bypass permissions on (shift to cycle)');
   }, 300);
 };
 

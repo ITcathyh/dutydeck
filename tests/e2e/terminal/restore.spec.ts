@@ -26,7 +26,7 @@ async function setup(page: Page, fullscreen = false) {
   const pane = () => execFileSync('tmux', ['capture-pane', '-p', '-t', name], { encoding: 'utf8' });
   try {
     await expect.poll(pane).toContain(fullscreen ? 'history 000' : 'READY');
-    driver.prepareForDaemonShutdown();
+    await driver.prepareForDaemonShutdown();
     await driver.stop();
     driver = make();
     expect(driver.attachTerminal()).toBe(true);

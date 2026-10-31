@@ -44,6 +44,14 @@ Dutydeck 源码中包含或派生自以下第三方开源项目的代码与资�
   - Claude memory 正文保留行为参考 `1d7dbbfe3`，socket 字节预算与失败清理参考 `ad545ca54`，Codex 容量判别参考 `bbd4b3a23` 的 `src/services/codex-transcript.ts`，模型迁移菜单判定参考 `b1fc8a2b3` 的 `src/utils/codex-model-migration-dialog.ts`。这些实现按 Dutydeck 现有接口独立编写，未复制上游宽泛正文提取、重试调度器或 worker 状态机。菜单测试文字转录自该工具记载的 Codex 0.162.1 原生画面样例（`Meet GPT-6 Sol`、两项模型选项和确认页脚），不是本次真实 Codex 运行采集或复制的上游 fixture 文件。
   - 受控插件结果的产品协议参考 `67e9ac6f3`、`dd97eeac6`，OAuth 字段链另参考 Botmux `src/utils/user-token.ts`。工具注册、SQLite 结果存储、独立 viewer session 与 CLI 按 Dutydeck 既有机制独立实现，未复制上游 MCP/stdio envelope、sandbox、业务 scope 集合或 token 持久化/刷新实现。`examples/plugins/private-export/` 和 `tests/fixtures/private-export-agent.mjs` 是本次构造的合成示例与测试，未复制上游业务数据或凭据。
 
+  2026-10-31 新增派生与协议参考 / additions and protocol references：
+
+  - `packages/session-backends/src/spawn-pty.ts`：Unix PTY 退出补读适配自 Botmux `8c8f232305163bf940bb15f52b1aa5414e4e709e`，由直接终端、pane 中继和兼容 transport 共用，按下列 MIT 许可使用；未移植上游 Bun 读循环。 / The shared Unix exit-drain adapter derives from this MIT-licensed commit; the upstream Bun read loop was not ported.
+  - `packages/pty-driver/src/claude-native-session.ts`：原生 PID 状态与可恢复会话内容协议参考 `f54efb8b889`、`17296ac7fba`；本轮进程出生身份核验、来源归属及执行账本接线按 Dutydeck 接口独立实现。 / Native PID-state and resumable-content contracts reference these commits; the new process-identity proofs, ownership checks and ledger integration are independently implemented for Dutydeck.
+  - `packages/pty-driver/src/fixtures/claude-native-session.mjs`：本仓构造的 Node 子进程与原生协议格式合成夹具，不是官方 Claude 源码、模型输出录像或从真实会话脱敏提取的记录。 / This repository-created Node-process/protocol fixture is synthetic, not official Claude source, recorded model output or a sanitized real-session capture.
+  - 附件持有者与实例隔离设计参考 `66a0b309a`、`61627ff9f`；目标应用身份校验原则参考 `c251c8655`、`ffc70e755`。`apps/server/src/resource-retention.ts`、附件持久引用及配置保存校验按既有 inbox、执行账本和身份 helper 独立适配，未复制上游会话存储结构。 / Attachment ownership/isolation and target-app identity principles reference these commits; retention, durable references and save validation adapt Dutydeck's existing inbox, ledger and identity helpers without copying upstream session storage.
+  - Bot 字段搜索设计参考 `33aef3d50`、`36b27cd4f`，宿主直查命令方向参考 `e7e035516`，均在 Botmux 快照 `313e0166182eaf7beda7e47dd260c53f9a686716` 下对照。搜索定位、公开 SDK 的聊天输出声明、授权及投递按 Dutydeck 既有接口独立实现；fake-ticket 状态示例与新增测试材料为本仓合成，不包含上游业务数据。 / Settings search and host query commands reference these designs at the stated snapshot. Navigation, public SDK chat-output opt-in, authorization and delivery are independently implemented; the fake-ticket status example and new test data are synthetic and contain no upstream business data.
+
 - **版权与许可证全文**:
 
 ```

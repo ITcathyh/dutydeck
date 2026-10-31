@@ -210,7 +210,7 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
     try {
       const proof = h.drivers[0]!.canRecoverTurn(recovery);
       await probing;
-      h.drivers[0]!.prepareForDaemonShutdown(true);
+      await h.drivers[0]!.prepareForDaemonShutdown(true);
       await h.drivers[0]!.stop();
       release();
       expect(await proof).toBe(false);

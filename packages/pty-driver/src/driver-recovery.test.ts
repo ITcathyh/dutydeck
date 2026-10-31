@@ -101,7 +101,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     const sent = first.send('sleep 30').catch(error => error);
     void sent.catch(() => {});
     await waitFor(async () => expect((await backend.getDutydeckMetadata('turn_id'))).toBe(checkpoint.turnId));
-    first.prepareForDaemonShutdown();
+    await first.prepareForDaemonShutdown();
     await first.stop();
     expect(await sent).toBeInstanceOf(DriverDetachedError);
     appendFileSync(f.transcript, assistant('x'.repeat(1024)).repeat(4000));
@@ -112,7 +112,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     const attached = vi.fn(async () => {});
     const recovering = recovered.recover(checkpoint, attached).catch(error => error);
     await waitFor(() => expect((recovered as unknown as { transcript?: unknown }).transcript).toBeDefined());
-    recovered.prepareForDaemonShutdown();
+    await recovered.prepareForDaemonShutdown();
     await recovered.stop();
     expect(await recovering).toEqual(new Error('PTY recovery cancelled by lifecycle change'));
     expect(attached).not.toHaveBeenCalled();
@@ -170,7 +170,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     const sent = first.send('sleep 1; echo SHELL-DONE');
     void sent.catch(() => {});
     await waitFor(async () => expect((await firstBackend.getDutydeckMetadata('turn_id'))).toBe(checkpoint?.turnId));
-    first.prepareForDaemonShutdown();
+    await first.prepareForDaemonShutdown();
     await first.stop();
     expect(await first.isStopped()).toBe(false);
     await expect(sent).rejects.toBeInstanceOf(DriverDetachedError);
@@ -209,7 +209,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     const pending = first.send('sleep 0.2; echo SHELL-DONE');
     void pending.catch(() => {});
     await waitFor(async () => expect((await firstBackend.getDutydeckMetadata('turn_id'))).toBe(checkpoint.turnId));
-    first.prepareForDaemonShutdown();
+    await first.prepareForDaemonShutdown();
     await first.stop();
     await expect(pending).rejects.toBeInstanceOf(DriverDetachedError);
     await new Promise(resolve => setTimeout(resolve, 500));
@@ -297,7 +297,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     } finally { (await unrelated.kill()); }
   }, 45_000);
 
-  it.each(['fresh', 'resumable', 'unresumable', 'empty-native'] as const)('retires runtime-authorized idle %s panes only when native context is recoverable', async kind => {
+  it.each(['fresh', 'resumable', 'unresumable', 'empty-native'] as const)('preserves idle %s panes without native PID proof on Linux', async kind => {
     const f = fixture();
     const seed = new TmuxBackend(f.name, { ownerId: f.ownerId });
     (await seed.spawn('/bin/sh', [], { cwd: f.cwd, cols: 80, rows: 24, env: { PATH: process.env.PATH ?? '' } }));
@@ -307,18 +307,31 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     if (kind === 'resumable') writeFileSync(f.transcript, JSON.stringify({
       type: 'user', sessionId: nativeId, message: { role: 'user', content: buildSessionMarker(sessionId) },
     }) + '\n');
+    const originalPid = await seed.getPid();
+    expect(originalPid).not.toBeNull();
     (await seed.detach());
     const adapter = shellAdapter([]);
-    adapter.buildResumeCommand = () => [];
+    adapter.buildResumeCommand = vi.fn(() => []);
     const driver = new PtyCliDriver({
       agent: config(f.cwd), adapter, backend: new TmuxBackend(f.name, { ownerId: f.ownerId }),
       processProbe: { identify: childProcessIdentity, observe: observeProcess }, onEvent() {}, onExit() {}, sessionId,
     });
     await driver.start();
-    driver.prepareForDaemonShutdown(false);
+    await driver.prepareForDaemonShutdown(false);
     await driver.stop();
-    expect(await driver.isStopped()).toBe(kind === 'fresh' || kind === 'resumable');
-    expect((await TmuxBackend.probeSession(f.name))).toBe(kind === 'unresumable' || kind === 'empty-native' ? 'exists' : 'missing');
+    // This shell fixture writes marker history but never Claude PID state.
+    // Linux cannot infer an old dialect from that missing proof; positive
+    // retirement with a real native source is covered by driver-claude-native-session.
+    const retires = process.platform !== 'linux' && (kind === 'fresh' || kind === 'resumable');
+    expect(await driver.isStopped()).toBe(retires);
+    expect(driver.isDetachedForShutdown()).toBe(!retires);
+    expect((await TmuxBackend.probeSession(f.name))).toBe(retires ? 'missing' : 'exists');
+    if (!retires) {
+      const livePid = Number(execFileSync('tmux', ['display-message', '-p', '-t', f.name, '#{pane_pid}'], { encoding: 'utf8' }).trim());
+      expect(livePid).toBe(originalPid);
+      expect(() => process.kill(livePid, 0)).not.toThrow();
+    }
+    if (process.platform === 'linux') expect(adapter.buildResumeCommand).not.toHaveBeenCalled();
   }, 45_000);
 
   it('detaches a temporary attachment when transcript restore rejects a truncated cursor', async () => {
@@ -333,7 +346,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     const submitted = first.send('echo SHELL-DONE');
     void submitted.catch(() => {});
     await waitFor(async () => expect((await firstBackend.getDutydeckMetadata('turn_id'))).toBe(checkpoint.turnId));
-    first.prepareForDaemonShutdown();
+    await first.prepareForDaemonShutdown();
     await first.stop();
     await submitted.catch(() => {});
 

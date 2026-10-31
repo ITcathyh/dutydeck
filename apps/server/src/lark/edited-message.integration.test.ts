@@ -44,7 +44,7 @@ async function harness() {
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const createCoordinator = () => new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
-    undefined, undefined, async () => 'topic', undefined, undefined, { store: repositories.config });
+    undefined, undefined, async () => 'topic', undefined, undefined, { store: repositories.config, resourceRoot: join(directory, 'attachments') });
   let coordinator = createCoordinator();
   cleanups.push(async () => { coordinator.stop(); repositories.close(); await rm(directory, { recursive: true, force: true }); });
   return {
@@ -122,11 +122,14 @@ describe('edited-message real coordinator and SQLite inbox', () => {
       { tag: 'img', image_key: 'img_edit' }, { tag: 'file', file_key: 'file_edit', file_name: 'evidence.txt' }
     ]] } }) : messageType === 'image' ? '{"image_key":"img_edit"}' : '{"file_key":"file_edit","file_name":"evidence.txt"}';
     const event = await edited({ messageType, rawContent });
-    const resourcesPath = join(tmpdir(), 'dutydeck', 'lark-resources', event.messageId);
-    cleanups.push(() => rm(resourcesPath, { recursive: true, force: true }));
+
     await h.coordinator.handle(event, h.config);
     await vi.waitFor(async () => expect(await h.inbox(event.messageId)).toMatchObject({ state: 'accepted' }));
     expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+    const stored = await h.inbox(event.messageId);
+    expect(stored.resourceDirectories).toHaveLength(1);
+    const resourcesPath = stored.resourceDirectories[0];
+    expect(resourcesPath).toContain(`/attachments/${event.messageId}-`);
     const agentPrompt = String(h.runtime.dispatch.mock.calls[0]?.[3]);
     if (messageType !== 'file') {
       expect(h.service.downloadMessageResource).toHaveBeenCalledWith(event.messageId, 'img_edit', 'image', expect.any(AbortSignal));

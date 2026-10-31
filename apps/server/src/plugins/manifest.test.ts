@@ -43,6 +43,17 @@ describe('loadPluginDirectory', () => {
     expect(withAgent.capabilities).toEqual(['agents']);
   });
 
+  it('loads query frontmatter and rejects mixed prompt/query, missing arguments and reserved names', async () => {
+    await writePlugin(root, { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'tickets' }), 'commands/ticket.md': '---\nquery: get\nargument: ticket\n---\n' });
+    expect((await loadPluginDirectory(root)).commands[0]).toMatchObject({ name: 'ticket', template: '', query: { tool: 'get', argument: 'ticket' } });
+    await writePlugin(root, { 'commands/ticket.md': '---\nquery: get\nargument: ticket\n---\nrun prompt' });
+    await expect(loadPluginDirectory(root)).rejects.toThrow('空正文');
+    await writePlugin(root, { 'commands/ticket.md': '---\nquery: get\n---\n' });
+    await expect(loadPluginDirectory(root)).rejects.toThrow('argument');
+    await writePlugin(root, { 'commands/help.md': '---\nquery: get\nargument: ticket\n---\n' });
+    expect(await issuesOf(root)).toContainEqual(expect.objectContaining({ file: 'commands/help.md', message: expect.stringContaining('内置命令') }));
+  });
+
   it('reports the file and field of every problem at once', async () => {
     await writePlugin(root, {
       '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'bad', agents: 'missing-agents' }),

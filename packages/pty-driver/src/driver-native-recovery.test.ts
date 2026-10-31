@@ -54,7 +54,7 @@ it.each(['cancel', 'error', 'thinking-cancel', 'text-error', 'text-success', 'fo
       }
       const driver = new PtyCliDriver({ agent, adapter, sessionId, backend: new TmuxBackend('native-recovery', { ownerId }),
         onEvent: e => events.push(e), onExit() {} });
-      releases.push(async () => { driver.prepareForDaemonShutdown(); await driver.stop(); });
+      releases.push(async () => { await driver.prepareForDaemonShutdown(); await driver.stop(); });
       return driver;
     };
     const original = make([], true);
@@ -63,7 +63,7 @@ it.each(['cancel', 'error', 'thinking-cancel', 'text-error', 'text-success', 'fo
     expect(checkpoint.transcript.offset).toBeGreaterThan(0); expect(checkpoint.transcript.path).toBe(path);
     const sending = original.send('new task').catch(error => error);
     await vi.waitFor(() => expect(metadata.get('turn_id')).toBe(checkpoint.turnId));
-    original.prepareForDaemonShutdown(); await original.stop();
+    await original.prepareForDaemonShutdown(); await original.stop();
     expect(await sending).toBeInstanceOf(DriverDetachedError);
     if (kind === 'thinking-cancel') appendFileSync(path, line({ type: 'response_item', payload: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'thinking' }] } }));
     if (kind !== 'old') appendFileSync(path, line(event(kind.includes('cancel') ? 'turn_aborted' : 'task_complete', kind === 'foreign' ? 'foreign-turn' : nativeTurn,
@@ -78,7 +78,7 @@ it.each(['cancel', 'error', 'thinking-cancel', 'text-error', 'text-success', 'fo
       await new Promise(resolve => setTimeout(resolve, 700));
       expect(settled).toBe(false);
       expect(events.filter(e => e.type === 'error' || e.type === 'completed' || e.type === 'text')).toEqual([]);
-      restored.prepareForDaemonShutdown(); await restored.stop(); await recovery;
+      await restored.prepareForDaemonShutdown(); await restored.stop(); await recovery;
     } else {
       await vi.waitFor(() => expect(settled).toBe(true), { timeout: 4_500 });
       expect(events.filter(e => e.type === 'completed').map(e => e.data.stopReason)).toEqual([kind.includes('cancel') ? 'cancelled' : 'end_turn']);

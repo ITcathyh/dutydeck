@@ -256,6 +256,8 @@ export interface BoundExecutionRepository {
   closeAbandonedCreation(f: SessionFence, resourceId: string, expectedRevision: number): DriverResource;
   spawned(f: SessionFence, resourceId: string, expectedRevision: number, identity: ResourceIdentity): DriverResource;
   creationFinished(f: SessionFence, resourceId: string, expectedRevision: number, result: 'created' | 'not_created' | 'unknown'): DriverResource;
+  /** Internal runtime adoption after revalidating an idle tmux receipt retained for an unconfirmed Claude source. */
+  adoptIdleTmux(f: SessionFence, resourceId: string, expectedRevision: number, receipt: string, observation: ResourceObservation): DriverResource;
   observed(f: SessionFence, resourceId: string, expectedRevision: number, observation: ResourceObservation): DriverResource;
 }
 export interface ExecutionUpgradeCounts {

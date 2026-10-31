@@ -127,6 +127,7 @@ export interface LarkLongConnectionListenerOptions {
   automation?: SessionAutomationService;
   workbench?: import('./workbench.js').LarkWorkbench;
   workflowStore?: ConfigRepository;
+  resourceRoot?: string;
   relayBroker?: RelayAskBroker;
   groupManager?: LarkGroupManager;
   runtime?: LarkRuntime;
@@ -235,7 +236,7 @@ export class LarkLongConnectionListener implements LarkListener {
       chatModeResolver,
       this.options.executionPolicy,
       this.options.groupManager,
-      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation, usage: this.options.usage, loginLinks: this.options.loginLinks, saveBotConfig: this.options.saveBotConfig, scheduleRequests: this.options.scheduleRequests },
+      { store: this.options.workflowStore, resourceRoot: this.options.resourceRoot, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation, usage: this.options.usage, loginLinks: this.options.loginLinks, saveBotConfig: this.options.saveBotConfig, scheduleRequests: this.options.scheduleRequests },
     ) : undefined;
     this.coordinator = coordinator;
     await coordinator?.initializeWorkflows(config);

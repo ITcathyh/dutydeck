@@ -613,7 +613,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     if (!saved?.scope_id) throw new LarkServiceError('LARK_CONTEXT_MISSING', '原任务上下文不可恢复，请重新发送 /plan。', 409);
     const { event, prompt } = planFollowUpEvent(record, { chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', threadId: saved.thread_id },
       { name: config.name?.trim() || 'Dutydeck', openId: this.botOpenId });
-    if (!await this.inbox.seed(record.appId, event, { prompt, scopeId: saved.scope_id, resources: [] })) return;
+    if (!await this.inbox.seed(record.appId, event, { prompt, scopeId: saved.scope_id, resources: [] }, { workflowRequestId: record.id })) return;
     void this.handle(event, config).catch(error => this.log.error({ error, messageId: event.messageId }, '提交计划的下一轮失败'));
   }
 

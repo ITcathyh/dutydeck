@@ -113,6 +113,8 @@ export interface DriverPermissionDecision { approved: boolean; reason?: string }
 
 export interface AgentDriver {
   /** Runtime chooses whether uncertain execution must remain attached to its persistent session. */
+  /** Refuse automatic idle retirement until the latest native source is durable. */
+  prepareForIdleRetirement?(): Promise<boolean>;
   prepareForDaemonShutdown?(preserveSession: boolean): void | Promise<void>;
   /** 启动/确保会话就绪（ACP ensureSession / PTY spawn CLI）。失败必须抛错。 */
   start(): Promise<void>;
@@ -194,6 +196,8 @@ export interface AgentDriver {
    * 返回取消订阅回调。
    */
   subscribeTranscriptSource?(listener: (observation: DriverTranscriptSourceObservation) => void): () => void;
+  /** Host acknowledgement after the fenced source observation transaction commits. */
+  confirmTranscriptSource?(observationId: string): void;
 }
 
 export interface TerminalScreen {

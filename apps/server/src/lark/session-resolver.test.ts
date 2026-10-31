@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { readFile, rm } from 'node:fs/promises';
 import { createLarkCardService } from './service.js';
 import { tmpdir } from 'node:os';
@@ -11,13 +11,20 @@ import {
   larkReplyContext,
   larkSessionConfigKey,
   larkSourceId,
-  materializeLarkResources,
+  materializeLarkResources as materializeResources,
   parsePrompt,
   resolveLarkSession,
   resolveLarkScopeId,
   type LarkChatModeResolver
 } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
+
+const resourceRoot = join(tmpdir(), `dutydeck-materializer-test-${crypto.randomUUID()}`);
+const directories = new Map<string, string>();
+afterAll(() => rm(resourceRoot, { recursive: true, force: true }));
+const materializeLarkResources = (...args: Parameters<typeof materializeResources>) => materializeResources(args[0], args[1], args[2], args[3], args[4], {
+  root: resourceRoot, retain: async directory => { directories.set(args[0], directory); }
+});
 
 const baseConfig: StoredLarkConfig = {
   appId: 'cli_test', appSecret: 'secret', workspace: '/workspace', defaultAgentId: 'codex', fullTrustConfirmed: true, listening: true,
@@ -63,7 +70,7 @@ it('marks a stalled attachment download missing instead of holding the turn fore
 describe('materializeLarkResources 图片按文件头识别格式', () => {
   // 1x1 GIF。
   const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
-  const directory = join(tmpdir(), 'dutydeck', 'lark-resources', 'om_gif_format');
+
 
   it('扩展名是 .jpg 的 GIF 按真实字节保存为 .gif，并在提示中给出多帧说明', async () => {
     const service = { downloadMessageResourceToFile: vi.fn(), downloadMessageResource: vi.fn(async () => ({ data: gif, contentType: 'image/jpeg' })) };
@@ -71,6 +78,8 @@ describe('materializeLarkResources 图片按文件头识别格式', () => {
       { key: 'img_key', type: 'image', label: '图片「img_key.jpg」', fileName: 'img_key.jpg' }
     ], service);
     const path = result.match(/已下载到本地：(.+?)。/)?.[1] ?? '';
+    const directory = directories.get('om_gif_format')!;
+    expect(directory.startsWith(`${resourceRoot}/om_gif_format-`)).toBe(true);
     expect(path.startsWith(`${directory}/`)).toBe(true);
     expect(path.endsWith('img_key.gif')).toBe(true);
     expect(result).toContain('多帧');
@@ -85,7 +94,6 @@ describe('materializeLarkResources 图片按文件头识别格式', () => {
     const path = result.match(/已下载到本地：(.+?)。/)?.[1] ?? '';
     expect(path.endsWith('x.png')).toBe(true);
     expect(result).not.toContain('多帧');
-    await rm(join(tmpdir(), 'dutydeck', 'lark-resources', 'om_unknown_format'), { recursive: true, force: true });
   });
 });
 
@@ -135,7 +143,6 @@ describe('卡片 Markdown 图片从消息解析到资源读取', () => {
       expect(fetcher.mock.calls.filter(call => String(call[0]).includes('/auth/'))).toHaveLength(1);
     } finally {
       service.close();
-      await rm(join(tmpdir(), 'dutydeck', 'lark-resources', messageId), { recursive: true, force: true });
     }
   });
 });
@@ -492,7 +499,7 @@ describe('materializeLarkResources 卡片图片', () => {
 it.each(['file', 'image'] as const)('propagates turn cancellation during a %s download and removes unpublished attachment data', async type => {
   const controller = new AbortController();
   const messageId = `om_cancelled_${type}_${Date.now()}`;
-  const directory = join(tmpdir(), 'dutydeck', 'lark-resources', messageId);
+
   let started!: () => void;
   const atDownload = new Promise<void>(resolve => { started = resolve; });
   const service = {
@@ -513,6 +520,8 @@ it.each(['file', 'image'] as const)('propagates turn cancellation during a %s do
   await atDownload; controller.abort(); await rejected;
   expect(service.downloadMessageResource.mock.calls.length + service.downloadMessageResourceToFile.mock.calls.length).toBe(1);
   const { readdir } = await import('node:fs/promises');
+  const directory = directories.get(messageId)!;
+  expect(directory.startsWith(`${resourceRoot}/${messageId}-`)).toBe(true);
   expect(await readdir(directory).catch(error => { if (error.code === 'ENOENT') return []; throw error; })).toEqual([]);
   await rm(directory, { recursive: true, force: true });
 });

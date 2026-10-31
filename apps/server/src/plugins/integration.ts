@@ -16,7 +16,7 @@ import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { assemblePrompt } from '../prompt-context.js';
 import type { PrepareSkillPromptResult } from '../skill-delivery.js';
 import type { PluginHookBus } from './hooks.js';
-import type { PluginToolIdentity } from '@dutydeck/shared';
+import type { PluginToolIdentity, PluginCommandIdentity } from '@dutydeck/shared';
 import type { TriggerDispatch } from './triggers.js';
 import { scopeApplies } from './scope.js';
 
@@ -126,10 +126,10 @@ export class PluginRuntimeHooks {
   }
 
   /** Synchronous tool gate. Identity is supplied by the host authority and never read from plugin output. */
-  async toolBeforeCall(identity: PluginToolIdentity, payload: Record<string, unknown>, bindingRevision?: number): Promise<'allow' | 'deny' | undefined> {
+  async toolBeforeCall(identity: PluginToolIdentity | PluginCommandIdentity, payload: Record<string, unknown>, bindingRevision?: number): Promise<'allow' | 'deny' | undefined> {
     if (!this.hooks.has('tool.beforeCall')) return undefined;
     const result = await this.hooks.run('tool.beforeCall', {
-      eventId: this.eventId(), ...(bindingRevision === undefined ? {} : { bindingRevision }), sessionId: identity.sessionId, taskId: identity.taskId, attemptId: identity.attemptId, cwd: identity.cwd,
+      eventId: 'kind' in identity ? identity.eventId : this.eventId(), ...(bindingRevision === undefined ? {} : { bindingRevision }), ...('kind' in identity ? {} : { sessionId: identity.sessionId, taskId: identity.taskId, attemptId: identity.attemptId }), cwd: identity.cwd,
       ...(identity.botAppId ? { botAppId: identity.botAppId } : {}), ...(identity.chatId ? { chatId: identity.chatId } : {}),
       actor: identity.actor, payload: { actor: identity.actor, channel: identity.channel, ...payload }
     }, String(payload.tool ?? ''));

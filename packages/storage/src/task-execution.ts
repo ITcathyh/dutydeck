@@ -1480,6 +1480,25 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             r.stage=finish;r.revision++;saveResource(r);return r;
           });
         }); },
+        adoptIdleTmux(rawFence,resourceId,expectedRevision,receipt,rawObservation) { return write(owner => {
+          const f=readFence(rawFence), s=session(f.sessionId), observation=parse(observationSchema,rawObservation);
+          const stored=db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_idle_terminal:${f.sessionId}`) as {value:string}|undefined;
+          if (!stored || stored.value!==receipt) fail('IDLE_TERMINAL_RECEIPT_CHANGED');
+          const proof=JSON.parse(receipt), r=resource(resourceId), parent=r?.parentResourceId && resource(r.parentResourceId);
+          if (s.protocol!=='pty-cli' || s.terminalBackend!=='tmux' || s.permissionMode!=='full-trust' || s.archivedAt
+            || !['idle','completed','interrupted'].includes(s.state) || proof.runId!==f.runId || proof.resourceId!==resourceId
+            || proof.options?.permissionMode!=='full-trust' || proof.identity?.kind!=='tmux' || proof.identity?.reason!=='unconfirmed_claude_source'
+            || !r || r.sessionId!==f.sessionId || r.runId!==f.runId || r.kind!=='local_only' || r.stage!=='created'
+            || r.revision!==expectedRevision || !r.identity || r.identity.identityId!==proof.identityId || observation.identityId!==r.identity.identityId
+            || r.observations.at(-1)?.state==='gone' || observation.state!=='live' || observation.evidenceRef!==`idle-terminal:${hash(receipt)}`
+            || !parent || parent.kind!=='operation' || parent.stage!=='created' || !sameController(parent.controller,r.controller)
+            || db.prepare("SELECT 1 FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') LIMIT 1").get(f.sessionId)
+            || unresolvedUnknownTask(f.sessionId) || db.prepare("SELECT 1 FROM permission_requests WHERE session_id=? AND status='pending' LIMIT 1").get(f.sessionId)
+            || externalBlockers(f.sessionId).length || steeringBlockers(f.sessionId).length) fail('IDLE_TERMINAL_ADOPTION_UNSAFE');
+          // Physical/idle proof is rechecked by the runtime immediately before this
+          // transaction. Preserve immutable creation ownership; transfer only holder.
+          r.observations.push(observation); r.holder=owner; r.revision++; saveResource(r); return r;
+        }); },
         observed(rawFence,resourceId,expectedRevision,rawObservation) { return write(() => {
           const f=readFence(rawFence);const observation=parse(observationSchema,rawObservation);
           return command(`observation:${observation.observationId}`,{...f,resourceId,observation},()=>{

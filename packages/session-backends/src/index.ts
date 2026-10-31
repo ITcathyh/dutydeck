@@ -20,3 +20,5 @@ export {
 export { HerdrBackend, herdrControlEnvironment, type HerdrBackendOptions } from './herdr-backend.js';
 
 export { ProgramStatusFramingStream, type ProgramStatusEvent } from './program-status-parser.js';
+export { descendantPids } from './descendant-pids.js';
+export { spawnPty } from './spawn-pty.js';

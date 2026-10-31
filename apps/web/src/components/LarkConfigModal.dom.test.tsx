@@ -43,12 +43,12 @@ const collection = (overrides: Partial<LarkBotConfig> = {}): LarkConfig => ({
   listeningDisabled: false
 });
 
-function renderModal(config: LarkConfig = collection(), source: 'acp' | 'cli' | 'agent' | import('../api').AgentModelsResult = 'acp', target?: import('../app-route').LarkSetupTarget) {
+function renderModal(config: LarkConfig = collection(), source: 'acp' | 'cli' | 'agent' | import('../api').AgentModelsResult = 'acp', target?: import('../app-route').LarkSetupTarget, field?: string) {
   vi.spyOn(api, 'larkConfig').mockResolvedValue(config);
   vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
   vi.spyOn(api, 'agentModels').mockResolvedValue(typeof source === 'object' ? source : { models: [], reasoningEfforts: [], source });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} target={target} onClose={() => {}}/></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} target={target} field={field} onClose={() => {}}/></QueryClientProvider>);
   return client;
 }
 
@@ -1325,4 +1325,82 @@ it('saves and clears the fallback model from the setup wizard', async () => {
   await user.click(await screen.findByRole('option', { name: '不启用兜底' }));
   await user.click(screen.getByRole('button', { name: '完成配置' }));
   await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ fallbackAgentId: '', fallbackModel: '' })));
+});
+
+
+it('opens the exact second bot field after delayed configuration, expands disclosure, and preserves disabled prerequisites', async () => {
+  const data = collection({ setupComplete: true });
+  data.bots.push({ ...data.bots[0]!, appId: 'cli_second', name: '同名机器人', tabLabel: '同名机器人', workspace: '/second' });
+  data.bots[0]!.name = '同名机器人';
+  renderModal(data, 'acp', { appId: 'cli_second' }, 'notifyQuietHours');
+  const target = await screen.findByRole('textbox', { name: '免打扰时段（可选）' });
+  await waitFor(() => expect(document.activeElement).toBe(target));
+  expect(target.closest('details')?.open).toBe(true);
+  expect((screen.getByRole('textbox', { name: '默认工作区' }) as HTMLInputElement).value).toBe('/second');
+});
+it('focuses the prerequisite switch without changing its value for a hidden field', async () => {
+  renderModal(collection({ setupComplete: true, memoryEnabled: false }), 'acp', { appId: 'cli_test' }, 'memoryModel');
+  const toggle = await screen.findByRole('switch', { name: '启用会话记忆' });
+  await waitFor(() => expect(document.activeElement).toBe(toggle));
+  expect(toggle.getAttribute('aria-checked')).toBe('false');
+  expect(screen.queryByRole('textbox', { name: '整理模型' })).toBeNull();
+});
+it('protects an edited bot when navigation requests another destination and retains it on cancel', async () => {
+  vi.spyOn(api, 'larkConfig').mockResolvedValue(collection({ setupComplete: true }));
+  vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
+  vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], source: 'acp' });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  let guard: import('./ControlCenterModal').SettingsLeaveGuard | undefined;
+  const register = (value: typeof guard) => { guard = value; };
+  render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} target={{ appId: 'cli_test' }} onLeaveGuardChange={register} onClose={() => {}}/></QueryClientProvider>);
+  const user = userEvent.setup();
+  const input = await screen.findByRole('textbox', { name: '默认工作区' });
+  await user.type(input, '/draft');
+  const leave = vi.fn();
+  act(() => { expect(guard?.(leave)).toBe(false); });
+  expect(leave).not.toHaveBeenCalled();
+  await user.click(screen.getAllByRole('button', { name: '取消' }).at(-1)!);
+  expect((input as HTMLInputElement).value).toBe('/repo/draft');
+  act(() => { guard?.(leave); });
+  await user.click(screen.getByRole('button', { name: '放弃更改并离开' }));
+  expect(leave).toHaveBeenCalledOnce();
+});
+
+it.each(['none', 'workspace', 'secret', 'saved-secret'] as const)('closes through the App navigation guard after saving, retaining the %s first-step draft', async draft => {
+  const data = collection({ revision: 1, setupComplete: true, defaultAgentId: 'codex', permissionMode: 'ask' });
+  vi.spyOn(api, 'larkConfig').mockResolvedValue(data);
+  vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
+  vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], source: 'acp' });
+  const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ ...data.bots[0], revision: 2, preInjectPrompt: 'saved' }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  let guard: import('./ControlCenterModal').SettingsLeaveGuard | undefined;
+  const leave = vi.fn();
+  // App's direct-link closeOverlay routes through the latest registered navigation guard.
+  const onClose = vi.fn(() => guard ? guard(leave) : leave());
+  render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} target={{ appId: 'cli_test' }} field="preInjectPrompt" onLeaveGuardChange={value => { guard = value; }} onClose={onClose}/></QueryClientProvider>);
+  const user = userEvent.setup();
+  await screen.findByRole('textbox', { name: /预注入 Prompt/ });
+  if (draft !== 'none') {
+    await user.click(screen.getByRole('button', { name: /连接飞书应用/ }));
+    await user.type(screen.getByLabelText(draft === 'workspace' ? '默认工作区' : 'App Secret'), draft === 'workspace' ? '/unsaved' : 'new-secret');
+    if (draft === 'saved-secret') {
+      await user.click(screen.getByRole('button', { name: '下一步' }));
+      await waitFor(() => expect(save).toHaveBeenCalledOnce());
+      await screen.findByRole('textbox', { name: /预注入 Prompt/ });
+    } else await user.click(screen.getByRole('button', { name: /选择 Agent 并启用/ }));
+  }
+  await user.type(screen.getByRole('textbox', { name: /预注入 Prompt/ }), 'saved');
+  await user.click(screen.getByRole('button', { name: '完成配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(draft === 'saved-secret' ? 2 : 1));
+  if (draft === 'none' || draft === 'saved-secret') {
+    await waitFor(() => expect(leave).toHaveBeenCalledOnce());
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(screen.queryByText('放弃未保存的机器人配置？')).toBeNull();
+  } else {
+    await screen.findByText('放弃未保存的机器人配置？');
+    expect(leave).not.toHaveBeenCalled();
+    await user.click(screen.getAllByRole('button', { name: '取消' }).at(-1)!);
+    await user.click(screen.getByRole('button', { name: /连接飞书应用/ }));
+    expect((screen.getByLabelText(draft === 'workspace' ? '默认工作区' : 'App Secret') as HTMLInputElement).value).toBe(draft === 'workspace' ? '/repo/unsaved' : 'new-secret');
+  }
 });

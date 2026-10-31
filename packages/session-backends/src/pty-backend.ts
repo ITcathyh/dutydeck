@@ -1,6 +1,7 @@
 import { ProgramStatusFramingStream } from './program-status-parser.js';
 import { writeProbeReplySync } from './program-status-probe-relay.js';
-import * as pty from 'node-pty';
+import type * as pty from 'node-pty';
+import { spawnPty } from './spawn-pty.js';
 import { chmodSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -36,7 +37,7 @@ export class PtyBackend implements SessionBackend {
 
   spawn(bin: string, args: string[], opts: SpawnOptions): void {
     this.programStatus = opts.programStatus === true;
-    this.process = pty.spawn(bin, args, {
+    this.process = spawnPty(bin, args, {
       name: 'xterm-256color',
       cols: opts.cols,
       rows: opts.rows,

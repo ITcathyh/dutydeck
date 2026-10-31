@@ -195,8 +195,9 @@ const write = entry => appendFileSync(file, JSON.stringify(entry) + '\\n');
 // 让 transcript tailer 在发送 prompt 前就能订阅，避免把最终输出错过成 raw-only。
 appendFileSync(file, '');
 
-// 启动检测要求 Claude 版本行和独立的 ❯ 提示符。
-process.stdout.write('Claude Code v2.1.267 (mock)' + (resumed ? ' (resumed)' : '') + '\\r\\n\\u276f ');
+// 完整空 composer 沿用 claude-family.test.ts 的实采 2.1.287 底部结构。
+// 裸 ❯ 仅够启动检测，不能证明原 pane 空闲并允许同目录后续任务。
+process.stdout.write('Claude Code v2.1.267 (mock)' + (resumed ? ' (resumed)' : '') + '\\r\\n────────────────────────\\r\\n\\u276f\\r\\n────────────────────────\\r\\n⏵⏵ bypass permissions on (shift to cycle)');
 
 let buffer = '';
 let composedPrompt = '';
@@ -208,7 +209,7 @@ const bracketedPasteEnd = '\\u001b[201~';
 
 const submitPrompt = rawPrompt => {
   const prompt = rawPrompt.trim();
-  if (!prompt) { process.stdout.write('\\r\\n\\u276f '); return; }
+  if (!prompt) { process.stdout.write('\\r\\n────────────────────────\\r\\n\\u276f\\r\\n────────────────────────\\r\\n⏵⏵ bypass permissions on (shift to cycle)'); return; }
   if (confirmTurn) { if (prompt === 'y') { const finish = confirmTurn; confirmTurn = undefined; finish(); } return; }
   const currentTurn = ++turn;
   write({ type: 'user', sessionId: sessionArg, timestamp: new Date().toISOString(), message: { role: 'user', content: rawPrompt } });
@@ -222,7 +223,7 @@ const submitPrompt = rawPrompt => {
     const marker = resumed ? 'MOCK_RESUMED' : currentTurn > 1 ? 'MOCK_CONTINUED' : 'MOCK_REPLY';
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: marker + ': ' + prompt }] } });
     // completionPattern：✳ Worked for Ns
-    process.stdout.write('\\u001b[2J\\u001b[HClaude Code v2.1.267 (mock)\\r\\n\\u2733 Worked for 1s\\r\\n\\u276f ');
+    process.stdout.write('\\u001b[2J\\u001b[HClaude Code v2.1.267 (mock)\\r\\n\\u2733 Worked for 1s\\r\\n────────────────────────\\r\\n\\u276f\\r\\n────────────────────────\\r\\n⏵⏵ bypass permissions on (shift to cycle)');
   };
   if (prompt.includes('SMOKE_TERMINAL_CONFIRM')) { confirmTurn = finish; process.stdout.write('CONFIRM_WAITING: type y to continue\\r\\n'); }
   else setTimeout(finish, 300);

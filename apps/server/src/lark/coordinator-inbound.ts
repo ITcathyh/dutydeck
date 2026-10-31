@@ -42,7 +42,7 @@ import {
   routeLarkCommand,
   type LarkCommandRoute
 } from './commands.js';
-import { expandLarkPluginCommand, larkPluginCommandHelp } from './plugin-commands.js';
+import { expandLarkPluginCommand, larkPluginCommandHelp, resolveLarkPluginQuery, callLarkPluginQuery, pluginQueryReplyText } from './plugin-commands.js';
 import { escapeLarkPromptEcho, renderQueueSummary, QUEUE_SUMMARY_MAX_ITEMS } from './queue-summary.js';
 import { larkNotice } from './notify-tier.js';
 import { claimLarkTaskDispatches, larkTaskAgentGuid, releaseLarkTaskClaim } from './task-agent.js';
@@ -815,7 +815,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const continued = await this.threadContinuation(event, config, scopeId);
         if (continued && !group.retiredSessionIds?.has(continued.id)) { group.sessionId = continued.id; group.sessionConfigKey = larkSessionConfigKey(config); }
       }
-      if (inbox && !inbox.request && parseSlashCommand(prompt)) await this.inbox!.update(inbox, { state: 'command' });
+      if (inbox && !inbox.request && (parseSlashCommand(prompt) || resolveLarkPluginQuery(prompt, { botAppId: config.appId, cwd: config.workspace }))) await this.inbox!.update(inbox, { state: 'command' });
       let commandRoute = inbox?.request ? undefined : await this.routeChatCommand(event, config, prompt, group, scopeId, acknowledgement);
       // C2：机器人话题里的「继续」「停」「重来」先按控制处理，不适用时照常当普通消息。
       const control = !inbox?.request && commandRoute === undefined ? larkControlPhrase(prompt) : undefined;
@@ -1070,6 +1070,34 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   ): Promise<'handled' | string | LarkCommandPrompt | undefined> {
     // 插件命令展开成 prompt 模板后照普通请求处理（授权与建任务都不变）；内置命令名在安装时已拒绝。
     const pluginScope = { botAppId: config.appId, ...(config.workspace ? { cwd: config.workspace } : {}) };
+    const query = resolveLarkPluginQuery(prompt, pluginScope);
+    if (query) {
+      // A durable command claim already exists before routing. Never fall through to an Agent on failure.
+      try {
+        if (!this.inbox || !this.workflowOptions.store || event.senderType !== 'user' || !event.senderOpenId || event.scenario || larkTaskAgentGuid(event.messageId)) throw new Error('PLUGIN_COMMAND_IDENTITY_REQUIRED');
+        const claim = await this.inbox.lookup(config.appId, event.messageId);
+        if (claim?.state !== 'command' || claim.event.chatId !== event.chatId || claim.event.senderOpenId !== event.senderOpenId) throw new Error('PLUGIN_COMMAND_CLAIM_REQUIRED');
+        const revision = config.revision;
+        const assertCurrent = async () => {
+          const current = await readLarkConfig(this.workflowOptions.store!, config.appId);
+          if (this.stopped || !current?.listening || current.revision !== revision || !await this.currentAccess(current, event.chatId, event.chatType, event.senderOpenId!, 'task.view_result')) throw new Error('PLUGIN_COMMAND_AUTHORITY_CHANGED');
+        };
+        await callLarkPluginQuery(query, { identity: {
+          kind: 'command', eventId: event.messageId, channel: 'lark', botAppId: config.appId, chatId: event.chatId,
+          actor: { kind: 'channel', appId: config.appId, id: event.senderOpenId }, cwd: config.workspace ?? '', workspaceRoot: config.workspace ?? ''
+        }, assertCurrent }, async (output, beforeSend) => {
+          // Render as literal text, never plugin-provided card elements or a redirectable delivery target.
+          const rawText = typeof output === 'string' ? output : JSON.stringify(output, null, 2);
+          // Keep one bounded delivery (including JSON escaping), without partial-result replay.
+          const text = pluginQueryReplyText(rawText);
+          await this.service.sendText({ chatId: event.chatId, text, idempotencyKey: `plugin_query_${createHash('sha256').update(`${config.appId}:${event.messageId}`).digest('hex').slice(0, 32)}`, beforeSend });
+        });
+      } catch {
+        this.log.warn({ messageId: event.messageId, code: 'PLUGIN_COMMAND_FAILED' }, '插件查询未返回结果');
+        if (!this.stopped) await this.workflowReply(event, config, '插件查询未返回结果：请检查查询参数、插件绑定和读取授权。Agent 未启动；本条消息不会自动重试。', { failed: true });
+      }
+      return 'handled';
+    }
     const pluginPrompt = expandLarkPluginCommand(prompt, pluginScope);
     if (pluginPrompt !== undefined) return pluginPrompt;
     if (!parseSlashCommand(prompt)) return undefined;

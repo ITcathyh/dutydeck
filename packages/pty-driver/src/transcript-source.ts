@@ -20,7 +20,7 @@
  *  - Emissions are immutable frozen objects. Late subscribers replay the full
  *    history; unsubscribed listeners never fire again; a throwing listener
  *    cannot affect driver execution.
- *  - tmux/Herdr reattach emits nothing here: a new driver's env says nothing
+ *  - Marker observations on tmux/Herdr reattach emit nothing here: a new driver's env says nothing
  *    about an old process. Such resources are recovered by the resolver.
  */
 import { createHash, randomUUID } from 'node:crypto';
@@ -526,6 +526,8 @@ export class TranscriptSourceTracker {
   private readonly observations: DriverTranscriptSourceObservation[] = [];
   private readonly listeners = new Set<(o: DriverTranscriptSourceObservation) => void>();
   private current: PendingLaunch | undefined;
+  private nativeRetryAt = 0;
+  private nativeRetries = 0;
 
   subscribe(listener: (o: DriverTranscriptSourceObservation) => void): () => void {
     this.listeners.add(listener);
@@ -584,6 +586,34 @@ export class TranscriptSourceTracker {
       verifiedPath: verified.verifiedPath,
       identityProof: verified.identityProof,
       streamIdentity: verified.streamIdentity,
+    });
+  }
+
+  confirmNativeSession(observationId: string): void {
+    if (this.observations.at(-1)?.observationId === observationId) this.nativeRetries = 3;
+  }
+
+  /** Runtime-fenced observation of an owned live Claude process. Empty
+   * rotations carry no resume id, so a cold launch cannot silently go back. */
+  recordNativeSession(source: import('./claude-native-session.js').ClaudeNativeSession): DriverTranscriptSourceObservation {
+    const previous = this.observations.at(-1);
+    const nativeSessionId = source.resumable ? source.nativeSessionId : null;
+    if (previous?.identityProof === source.identityProof && previous.nativeSessionId === nativeSessionId) {
+      // At most three idempotent retries. Failure cannot make stop wait forever
+      // or flood the runtime's diagnostics; the driver preserves its live pane.
+      if (this.nativeRetries < 3 && Date.now() >= this.nativeRetryAt) {
+        this.nativeRetries++; this.nativeRetryAt = Date.now() + 1_000;
+        for (const listener of this.listeners) this.deliver(listener, previous);
+      }
+      return previous;
+    }
+    this.nativeRetryAt = Date.now() + 1_000; this.nativeRetries = 0;
+    return this.publish({
+      observationId: randomUUID(), client: 'claude', launchKind: this.current ? 'created' : 'attached',
+      proofKind: 'launch_observed', capturedAt: new Date().toISOString(),
+      dataRoot: source.dataRoot, cwd: source.cwd, nativeSessionId,
+      verifiedPath: source.resumable ? source.path : null, identityProof: source.identityProof,
+      streamIdentity: { kind: 'main', nativeAgentId: null },
     });
   }
 

@@ -1,7 +1,8 @@
+import { botDetailFields, focusSettingField } from '../settings-search';
 import { AgentModelSettings } from './AgentModelSettings';
 import { OptionalModelOverrides } from './OptionalModelOverrides';
 import type { LarkSetupTarget } from '../app-route';
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { participationLevelBehaviors, participationLevelFields, participationLevelLabels, participationLevels, resolveParticipation, type ParticipationLevel } from '@dutydeck/shared';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -36,6 +37,7 @@ import { supportsModelServiceSettings } from '../agent-model-support';
 
 export type BotManagementProps = {
   selectedAppId?: string;
+  field?: string;
   onSelectBot(appId: string): void;
   onOpenLarkSetup(target?: LarkSetupTarget): void;
   onSelectGroup(chatId: string, appId?: string): void;
@@ -115,6 +117,7 @@ type BotSaveVariables = { appId: string; draft: BotDraft; fullTrustConfirmed: bo
 
 export function BotManagement({
   selectedAppId,
+  field,
   onSelectBot,
   onOpenLarkSetup,
   onSelectGroup,
@@ -122,6 +125,8 @@ export function BotManagement({
   larkListeningDisabled = false
 }: BotManagementProps) {
   const qc = useQueryClient();
+  const root = useRef<HTMLDivElement>(null);
+  const destination = field && Object.hasOwn(botDetailFields, field) ? botDetailFields[field as keyof typeof botDetailFields] : undefined;
   const [filterText, setFilterText] = useState('');
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [deleteConfirmAppId, setDeleteConfirmAppId] = useState<string | null>(null);
@@ -172,6 +177,17 @@ export function BotManagement({
   );
 
   const activeAppId = activeBot?.appId;
+
+  useEffect(() => {
+    if (!activeBot || !destination || !root.current) return;
+    const element = root.current;
+    const focus = () => focusSettingField(element, destination.anchor);
+    if (focus()) return;
+    if ('parent' in destination) focusSettingField(element, botDetailFields[destination.parent].anchor);
+    const observer = new MutationObserver(() => { if (focus()) observer.disconnect(); });
+    observer.observe(element, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [activeBot?.appId, field]);
 
   // 获得当前 activeBot 的 draft
   const currentDraft: BotDraft | undefined = useMemo(() => {
@@ -390,7 +406,8 @@ export function BotManagement({
   }, [activeBot, managedGroups.data]);
 
   return (
-    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-canvas">
+    <div ref={root} className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-canvas">
+      {destination && activeBot && <p role="status" className="px-4 py-2 text-caption text-secondary">定位：{activeBot.name} · {destination.label}{'parent' in destination ? `；若选项不可见，请先检查“${botDetailFields[destination.parent].label}”。` : ''}</p>}
       {/* 顶部标题与主要操作 */}
       <header className="flex shrink-0 items-center justify-between border-b border-subtle bg-surface px-4 py-3 sm:px-6">
         <div>
@@ -631,7 +648,7 @@ export function BotManagement({
                 <div className="grid gap-4 sm:grid-cols-3">
                   <div>
                     <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-p2p-mode">
-                      私聊时
+                      {botDetailFields.p2pMode.label}
                     </label>
                     <Select
                       id="bot-p2p-mode"
@@ -645,7 +662,7 @@ export function BotManagement({
 
                   <div>
                     <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-group-reply">
-                      群里回复到哪
+                      {botDetailFields.groupReplyMode.label}
                     </label>
                     <Select
                       id="bot-group-reply"
@@ -666,7 +683,7 @@ export function BotManagement({
                   */}
                   <div>
                     <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-participation-level">
-                      群里接话方式
+                      {botDetailFields.participationLevel.label}
                     </label>
                     <Select
                       id="bot-participation-level"
@@ -688,16 +705,17 @@ export function BotManagement({
                   <label className="flex items-center gap-2 text-caption">
                     <input
                       type="checkbox"
+                      id={botDetailFields.idleCompactEnabled.anchor}
                       checked={currentDraft.idleCompactEnabled}
                       onChange={e => updateCurrentDraft({ idleCompactEnabled: e.target.checked })}
                       className="rounded border-default text-action focus:ring-action"
                     />
-                    <span>空闲后自动压缩上下文</span>
+                    <span>{botDetailFields.idleCompactEnabled.label}</span>
                   </label>
                   <p className="text-caption text-subtle">
                     会话空闲达到设定时长后，下次收到消息时先压缩历史上下文；仅对支持原生压缩的 Agent 生效。
                   </p>
-                  <Field label="空闲时长（小时）" error={!idleCompactHoursValid ? '请输入至少 1 小时的整数。' : undefined}>
+                  <Field htmlFor={botDetailFields.idleCompactHours.anchor} label={botDetailFields.idleCompactHours.label} error={!idleCompactHoursValid ? '请输入至少 1 小时的整数。' : undefined}>
                     <Input
                       aria-label="空闲时长（小时）"
                       type="number"
@@ -714,7 +732,7 @@ export function BotManagement({
                   <div className="mt-3 grid gap-4 sm:grid-cols-2">
                     <div>
                       <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-mention">
-                        群里怎样才唤醒
+                        {botDetailFields.mentionPolicy.label}
                       </label>
                       <Select
                         id="bot-mention"
@@ -733,7 +751,7 @@ export function BotManagement({
                     </div>
                     <div>
                       <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-default-group-participation">
-                        默认群参与模式
+                        {botDetailFields.defaultGroupParticipation.label}
                       </label>
                       <Select
                         id="bot-default-group-participation"
@@ -762,7 +780,7 @@ export function BotManagement({
                 <div className="space-y-3">
                   <div>
                     <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-execution-mode">
-                      执行方式
+                      {botDetailFields.executionMode.label}
                     </label>
                     <Select
                       id="bot-execution-mode"
@@ -780,7 +798,7 @@ export function BotManagement({
                     <>
                       <div>
                         <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-leader-agent">
-                          Leader Agent
+                          {botDetailFields.leaderAgentId.label}
                         </label>
                         <Select
                           id="bot-leader-agent"
@@ -801,7 +819,7 @@ export function BotManagement({
                         </p>
                       </div>
                       <fieldset>
-                        <legend className="mb-1.5 block text-caption font-medium text-secondary">Worker Agent（最多 8 个）</legend>
+                        <legend id={botDetailFields.workerAgentIds.anchor} tabIndex={-1} className="mb-1.5 block text-caption font-medium text-secondary">{botDetailFields.workerAgentIds.label}</legend>
                         <div className="grid gap-2 sm:grid-cols-2">
                           {/* 已删除的 Worker 也列出来，否则取消不掉，保存一直被拒。 */}
                           {[...agents, ...currentDraft.workerAgentIds.filter(id => !agents.some(agent => agent.id === id)).map(id => ({ id, name: `${id}（已不存在）` }))].map(agent => (
@@ -830,11 +848,12 @@ export function BotManagement({
                   <label className="flex items-center gap-2 text-caption">
                     <input
                       type="checkbox"
+                      id={botDetailFields.adhdMode.anchor}
                       checked={currentDraft.adhdMode}
                       onChange={e => updateCurrentDraft({ adhdMode: e.target.checked })}
                       className="rounded border-default text-action focus:ring-action"
                     />
-                    <span>ADHD 友好输出</span>
+                    <span>{botDetailFields.adhdMode.label}</span>
                   </label>
                   <p className="text-caption text-subtle">
                     回复第一行就给结论或要你做的事，多步骤编号，列表不超过 5 项，结尾只留一个下一步，不写开场白和客套话。规则改编自 i-have-adhd，保存后从下一轮任务开始生效。
@@ -981,7 +1000,7 @@ export function BotManagement({
                   </p>
                 </div>
 
-                <Field label="角色名称" hint="一句话说明机器人的定位。">
+                <Field htmlFor={botDetailFields.roleTitle.anchor} label={botDetailFields.roleTitle.label} hint="一句话说明机器人的定位。">
                   <Input
                     value={currentDraft.roleTitle}
                     onChange={e => updateCurrentDraft({ roleTitle: e.target.value })}
@@ -989,7 +1008,7 @@ export function BotManagement({
                   />
                 </Field>
 
-                <Field label="负责范围" hint="一句话写清它负责哪些事；留空时不按范围接话。">
+                <Field htmlFor={botDetailFields.roleScope.anchor} label={botDetailFields.roleScope.label} hint="一句话写清它负责哪些事；留空时不按范围接话。">
                   <Textarea
                     rows={2}
                     value={currentDraft.roleScope}

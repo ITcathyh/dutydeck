@@ -65,7 +65,7 @@ async function harness(firstCardFailures: number) {
   const coordinators: LarkMessageCoordinator[] = [];
   const createCoordinator = () => {
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
-      undefined, undefined, undefined, undefined, undefined, { store: repositories.config });
+      undefined, undefined, undefined, undefined, undefined, { store: repositories.config, resourceRoot: join(directory, 'attachments') });
     coordinators.push(coordinator);
     return coordinator;
   };
@@ -309,7 +309,6 @@ it('still retries an image request after the same user sends a different image',
   const h = await harness(1);
   const first = `om_image_${randomUUID()}`;
   const second = `om_image_${randomUUID()}`;
-  cleanups.push(async () => { for (const id of [first, second]) await rm(join(tmpdir(), 'dutydeck', 'lark-resources', id), { recursive: true, force: true }); });
   const coordinator = h.createCoordinator();
   // 图片下载后要真实写盘，推进假时钟等不到它，按条件轮询（waitFor 每轮也会推进一点假时钟）。
   const until = (assertion: () => Promise<void> | void) => vi.waitFor(assertion, { timeout: 5_000 });

@@ -327,6 +327,34 @@ async function browserChecks() {
   assert.equal((await bot()).workspace, draftWorkspace);
   assert.deepEqual(errors, []);
   passed('setup wizard saves advanced notification, verification and card settings without losing detail settings');
+
+  const secondBeforeSearch = await readLarkConfig(harness!.repositories.config, 'cli_two');
+  await page.getByRole('button', { name: /搜索/ }).first().click();
+  const search = page.getByRole('combobox', { name: '搜索任务与命令' });
+  await search.fill('开发助手 群里回复到哪');
+  await search.press('Enter');
+  await expect(page).toHaveURL(/botField=groupReplyMode/);
+  await expect(page.locator('#bot-group-reply')).toBeFocused();
+  await page.locator('#bot-group-reply').selectOption('chat');
+  await saveToApi();
+  assert.equal((await bot()).groupReplyMode, 'chat');
+  assert.deepEqual(await readLarkConfig(harness!.repositories.config, 'cli_two'), secondBeforeSearch);
+  await page.goBack();
+  await page.goForward();
+  await expect(page.locator('#bot-group-reply')).toBeFocused();
+  await page.getByRole('button', { name: /搜索/ }).first().click();
+  await page.getByRole('combobox', { name: '搜索任务与命令' }).fill('开发助手 免打扰时段');
+  await page.getByRole('combobox', { name: '搜索任务与命令' }).press('Enter');
+  await expect(page).toHaveURL(/field=notifyQuietHours/);
+  const quiet = page.getByRole('textbox', { name: '免打扰时段（可选）', exact: true });
+  await expect(quiet).toBeFocused();
+  await expect(quiet).toHaveValue('21:00-06:00');
+  await page.goBack();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.goForward();
+  await expect(quiet).toBeFocused();
+  passed('search opens exact bot fields in detail and wizard, saves only that bot, and restores field focus on back/forward');
+
 }
 
 try {

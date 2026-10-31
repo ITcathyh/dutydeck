@@ -89,7 +89,8 @@ export const botFields = {
   highRiskAllowedUsers: 'users', highRiskAllowedUserNames: 'list', highRiskAllowedEmails: 'list',
   highRiskPattern: 'string', riskControlMode: riskControlModes
 } satisfies Record<BotField, FieldKind>;
-// 这些键和 App Secret 走 Lark 校验那一步（按品牌选域、解析姓名、核对 open_id 属于本应用）；其余键要走 Agent 设置那一步的校验（如完全信任确认），不能同一次提交。
+// 这些键和 App Secret 走 Lark 设置步骤；其余键走 Agent 设置步骤（如完全信任确认），不能同一次提交。
+// 服务端在两个步骤都校验最终应用下的身份，stage 只选择设置流程。
 const larkStageFields = ['brand', 'allowedUserNames', 'allowedBotNames', 'allowedUsers', 'allowedEmails', 'allowedBots'];
 
 // 群设置分三处保存：群绑定、群协作、接话分工；一条 set 命令按键分发。

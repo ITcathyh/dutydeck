@@ -41,7 +41,7 @@ describe('resource retention', () => {
     const now = Date.now();
     await utimes(old, new Date(now - 10_000), new Date(now - 10_000));
     await utimes(recent, new Date(now), new Date(now));
-    expect(await pruneLarkResourceDirectories(root, { now, ttlMs: 1_000 })).toBe(1);
+    expect(await pruneLarkResourceDirectories(root, { now, ttlMs: 1_000, readProtectedDirectories: async () => new Set() })).toBe(1);
     expect(() => statSync(join(old, 'attachment.txt'))).toThrow();
     expect(readFileSync(join(recent, 'attachment.txt'), 'utf8')).toBe('recent');
   });

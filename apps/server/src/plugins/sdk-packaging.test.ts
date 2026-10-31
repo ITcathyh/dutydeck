@@ -18,7 +18,8 @@ const manuals: PluginToolManuals = {read:{guide:{description:'Optional guide',pa
 void manuals;
 const resource = (_input: unknown, binding: PluginBindingContext) => String(binding.config.project);
 export default definePlugin(api => {
- api.registerQuery({ name:'read', description:'Read', version:'1', inputSchema:{type:'object',properties:{},additionalProperties:false}, resource, async execute(input, context) { return {binding:context.binding.bindingId}; } });
+ api.registerQuery({ name:'read', description:'Read', version:'1', commandOutput:'chat', inputSchema:{type:'object',properties:{},additionalProperties:false}, resource, async execute(input, context) { return {binding:context.binding.bindingId,origin:'kind' in context.identity ? context.identity.eventId : context.identity.taskId}; } });
+ api.registerQuery({ name:'legacy',description:'Legacy query',version:'1',inputSchema:{type:'object',properties:{},additionalProperties:false},resource,async execute(_input,context){return {task:context.identity.taskId,attempt:context.identity.attemptId};} });
  api.registerAction({ name:'write', description:'Write', version:'1', inputSchema:{type:'object',properties:{},additionalProperties:false}, resource, async execute(input, context) { return {receipt:context.actionId}; }, async reconcile(context) { return {status:'succeeded',receipt:context.original.id}; } });
  api.registerCiProvider({ id:'ci', displayName:'CI', matchRepository:() => undefined });
  api.registerResultTool({ name:'export', description:'Export', inputSchema:{ parse(input: unknown) { return input; } }, async execute() { return {files:[]}; } });

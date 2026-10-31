@@ -407,10 +407,12 @@ export class JsonlTailer implements TranscriptEventSource {
             await this.drain(waterline, generation);
             return;
           }
+          if (previousSize !== undefined) await this.drain(previousSize, generation);
+          if (generation !== this.generation) return;
           this.toolEvents.clear();
           this.resetMapping?.();
           this.currentPath = path;
-          if (this.deduplicateTools) {
+          if (this.deduplicateTools || this.baselineMapping) {
             this.offset = this.completedOffset = this.pendingStartOffset = 0;
             this.pending = []; this.pendingBytes = 0; this.pendingPosition = undefined;
             await this.drain(waterline ?? 0, generation, true);

@@ -272,6 +272,10 @@ export class PluginHost {
         }
         const checkedBusiness = new PluginBusinessToolRegistry();
         for (const { kind, tool } of businessTools) checkedBusiness.register(entry.name, entry.scope, plugin.manifest.version ?? 'unversioned', kind, tool);
+        for (const command of plugin.commands) if (command.query) {
+          const query = checkedBusiness.get(`${entry.name}/${command.query.tool}`, { botAppId: entry.scope.startsWith('bot:') ? entry.scope.slice(4) : undefined, cwd: entry.scope.startsWith('workspace:') ? entry.scope.slice(10) : undefined });
+          if (!query || query.kind !== 'query' || query.tool.commandOutput !== 'chat' || query.tool.inputSchema.properties?.[command.query.argument]?.type !== 'string' || query.tool.inputSchema.required?.some(key => key !== command.query!.argument)) throw new Error(`PLUGIN_COMMAND_QUERY_INVALID: ${command.name}`);
+        }
         const checkedResults = new PluginResultToolRegistry();
         for (const tool of resultTools) checkedResults.register(entry.name, entry.scope, tool);
         const scenarios = this.resolveScenarios(entry.name, entry.scope, builtin, plugin, scenarioProviders, reservedScenarioIds);

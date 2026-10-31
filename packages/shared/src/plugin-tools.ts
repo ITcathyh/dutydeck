@@ -1,5 +1,7 @@
+import type { PluginQuery as TaskPluginQuery, PluginChatQuery } from '@dutydeck/plugin-sdk';
+export type PluginQuery = TaskPluginQuery | PluginChatQuery;
 import { z } from 'zod';
-export type { PluginToolSchema, PluginToolBinding, PluginToolIdentity, PluginToolContext, PluginQuery, PluginAction, PluginToolAction } from '@dutydeck/plugin-sdk';
+export type { PluginToolSchema, PluginToolBinding, PluginToolIdentity, PluginCommandIdentity, PluginToolContext, PluginAction, PluginToolAction } from '@dutydeck/plugin-sdk';
 
 export const pluginToolActionPrefix = 'plugin.tools.action.';
 export const pluginToolGrantSchema = z.object({

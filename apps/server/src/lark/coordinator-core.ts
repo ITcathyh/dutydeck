@@ -150,6 +150,7 @@ export abstract class LarkCoordinatorCore {
       saveBotConfig?(input: import('./config.js').SaveLarkConfigInput): Promise<unknown>;
       usage?: Pick<import('../usage-ledger.js').UsageLedger, 'describe'>;
       store?: ConfigRepository;
+      resourceRoot?: string;
       broker?: RelayAskBroker;
       automation?: import('../session-automation.js').SessionAutomationService;
       workbench?: import('./workbench.js').LarkWorkbench;

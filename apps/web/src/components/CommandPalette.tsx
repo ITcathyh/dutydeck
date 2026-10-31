@@ -14,6 +14,7 @@ export type CommandAction = {
   group: string;
   keywords?: string;
   shortcut?: string;
+  searchOnly?: boolean;
   disabled?: boolean;
   disabledReason?: string;
   run(): void;
@@ -57,7 +58,7 @@ export function CommandPalette({ open, onClose, sessions, summaries, agents, act
 
   const { sections, items, taskCount, actionCount, searching } = useMemo(() => {
     const terms = taskSearchTerms(query);
-    const visibleActions = actions.filter(action => matchAction(action, terms));
+    const visibleActions = actions.filter(action => (!action.searchOnly || terms.length > 0) && matchAction(action, terms));
     const matches = terms.length
       ? searchTasks({ sessions, summaries, agents, query })
       : [...sessions]

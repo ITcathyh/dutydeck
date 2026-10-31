@@ -29,7 +29,7 @@
  * are not model output either: the tailer holds the latest one back as the
  * turn's failure reason (see claudeApiError / takeTurnError).
  */
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
@@ -364,6 +364,10 @@ function claudeUsageUnreadable(entry: any): boolean {
 
 export interface ClaudeTranscriptTailerOptions {
   cwd: string;
+  nativeSessionPath?: string;
+  nativeSession?: () => import('../claude-native-session.js').ClaudeNativeSession | undefined;
+  onNativeSession?: (source: import('../claude-native-session.js').ClaudeNativeSession) => void;
+  onNativeSessionSwitch?: () => void;
   /** Explicit transcript path. When given, directory scanning and file
    *  switching are disabled — handy for tests and for callers that already
    *  resolved the session file. */
@@ -427,23 +431,25 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
 
   constructor(opts: ClaudeTranscriptTailerOptions) {
     const explicit = opts.transcriptPath;
-    /**
-     * Memoise the session-scoped resolution.
-     *
-     * JsonlTailer calls resolvePath on EVERY tick (~300ms) while
-     * watchForSwitch is on. The pinned-id branch is one existsSync, but the
-     * marker fallback reads the head of up to 40 files — repeating that 3×/s
-     * for the life of a session would be a real cost, and it buys nothing:
-     * a session's transcript path does not change once found. So resolve
-     * until it succeeds, then hold the answer.
-     */
-    let resolved: string | undefined;
-    const resolveOnce = () => (resolved ??= resolveClaudeTranscriptPath(opts.cwd, opts.env, opts.sessionId));
-    const resolvePath = explicit
-      ? () => explicit
-      : opts.sessionId
-        ? resolveOnce
-        : () => resolveClaudeTranscriptPath(opts.cwd, opts.env);
+    let resolved: string | undefined = opts.nativeSessionPath;
+    let nativeId: string | undefined;
+    const resolvePath = () => {
+      if (explicit) return explicit;
+      if (!opts.sessionId && !opts.nativeSession) return resolveClaudeTranscriptPath(opts.cwd, opts.env);
+      const source = opts.nativeSession?.();
+      if (source) {
+        let previousPath = resolved;
+        try { if (previousPath) previousPath = realpathSync(previousPath); } catch { /* Missing old files still represent a switch. */ }
+        if ((nativeId && nativeId !== source.nativeSessionId) || (previousPath && previousPath !== source.path)) {
+          // The driver fences the old attempt before any new-source events.
+          opts.onNativeSessionSwitch?.();
+        }
+        nativeId = source.nativeSessionId;
+        resolved = source.path;
+        opts.onNativeSession?.(source);
+      }
+      return resolved ??= resolveClaudeTranscriptPath(opts.cwd, opts.env, opts.sessionId);
+    };
     this.subagents = new ClaudeSubagentReader(resolvePath);
     const memoryRoot = resolve(claudeProjectDir(opts.cwd, opts.env), 'memory') + sep;
     const decorateMemory = (events: NormalizedDriverEvent[] | undefined) => {
@@ -566,22 +572,6 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         this.bindInput(entry);
       },
       pollIntervalMs: opts.pollIntervalMs,
-      /**
-       * Re-resolving each tick is what lets the tailer attach late: the jsonl
-       * does not exist until Claude's first prompt, and a `--session-id`
-       * refusal is only discoverable by the marker scan once that prompt is
-       * recorded. With a sessionId the memo above means each tick is free
-       * once the file has been found.
-       *
-       * Session-scoped resolution can only ever return our own file, so this
-       * cannot drift onto a sibling's. The tradeoff: if the CLI ever rotates
-       * to a NEW transcript mid-session, the memoised file wins and the
-       * rotation is not followed. That is the safe side — staying on our own
-       * file is at worst incomplete, whereas following recency is confirmed
-       * to attach another session's transcript outright. (Whether Claude
-       * rotates at all is unverified; do not read this as evidence that it
-       * does.)
-       */
       watchForSwitch: !explicit,
       resetMapping: () => {
         this.terminalScope = false; this.turnTerminal = false; this.terminalUuids.clear();

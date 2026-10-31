@@ -10,7 +10,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { agentWeightsSchema, validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { createLarkCardService, LarkServiceError, larkConfigurationStatus, type LarkBotConfigInput, type LarkCardService, type LarkSendInput, type LarkUpdateInput } from './service.js';
-import { detectUnusableOwnerEntries, normalizeOwnerEntries, type ContactLookup } from './owner-identity.js';
+import { detectUnusableOwnerEntries, type ContactLookup } from './owner-identity.js';
 import { defaultHighRiskPattern, deleteLarkConfig, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, readLarkConfig, readLarkConfigs, resolveRiskControlModeInput, saveLarkConfig, type SaveLarkConfigInput } from './config.js';
 import { LarkLongConnectionListenerPool, type LarkListenerPool } from './listener.js';
 import { installLarkHook, larkHookStatus } from './security-hooks.js';
@@ -47,6 +47,7 @@ export interface LarkRoutesOptions {
   env?: NodeJS.ProcessEnv;
   service?: LarkCardService;
   config?: ConfigRepository;
+  resourceRoot?: string;
   agents?: AgentRepository;
   cardMappings?: ChannelMappingRepository;
   fetcher?: typeof globalThis.fetch;
@@ -93,6 +94,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     automation: options.automation,
     workbench: options.workbench,
     workflowStore: options.config,
+    resourceRoot: options.resourceRoot,
     relayBroker: options.relayBroker,
     cardMappings: options.cardMappings,
     env,
@@ -296,80 +298,56 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     }
   });
   async function saveBotConfig(input: SaveLarkConfigRequest): Promise<Awaited<ReturnType<typeof publicLarkConfigs>>> {
-    if (input.stage === 'lark') {
-      const existing = input.originalAppId ? await readLarkConfig(options.config, input.originalAppId) : undefined;
-      const appId = input.appId?.trim() || existing?.appId;
-      const appSecret = input.appSecret?.trim() || existing?.appSecret;
-      const bot = createLarkCardService(env, fetcher, { appId, appSecret, brand: input.brand ?? existing?.brand });
-      const info = await bot.getBotInfo();
-      const resolvedAllowedUsers = input.allowedUserNames === undefined ? undefined : await bot.resolveChatUsersByNames(input.allowedUserNames);
-      const resolvedAllowedBots = input.allowedBotNames === undefined ? undefined : await bot.resolveChatUsersByNames(input.allowedBotNames, ['bot']);
-      let allowedUsers = resolvedAllowedUsers ?? input.allowedUsers ?? existing?.allowedUsers ?? [];
-      const allowedEmails = input.allowedEmails ?? existing?.allowedEmails ?? [];
-      // Owner-identity 边界：未走姓名解析（resolvedAllowedUsers === undefined）时，
-      // input.allowedUsers 是调用方直接写入的原始 open_id——典型场景是把 A 应用的
-      // 配置复制到 B 应用。ou_ 是 app-scoped，跨应用复制会让 owner 被锁死，必须先
-      // 通过目标 app 校验再落库。姓名解析路径本身已用目标 app 解析，不受影响。
-      if (resolvedAllowedUsers === undefined && Array.isArray(input.allowedUsers)
-        && input.allowedUsers.some(user => String(user?.openId ?? '').trim().startsWith('ou_'))) {
-        const rawOpenIdEntries = [...new Set(input.allowedUsers
-          .map(user => String(user?.openId ?? '').trim())
-          .filter(openId => openId.startsWith('ou_')))];
-        const lookup: ContactLookup = {
-          getUser: (id, idType) => bot.getContactUser(id, idType),
-          batchGetIdByEmail: email => bot.batchGetIdByEmail(email),
-          batchGetIdByMobile: mobile => bot.batchGetIdByMobile(mobile)
-        };
-        // 新建 bot：没有来源 app 可转换，ou_ 一律拒绝（open_id 仅对签发它的应用有效，
-        // 尚未存在的目标应用无法归属任何已有的 open_id）。
-        if (!existing) {
-          throw new LarkServiceError('LARK_OWNER_OPENID_CROSS_APP',
-            `保存新机器人时不能直接使用 app-scoped open_id（${rawOpenIdEntries.join(', ')}）：open_id 只对签发它的应用有效，新应用还不存在、无法归属任何 open_id。请改用完整邮箱、手机号或 on_ union_id，或先在目标应用下通过姓名解析。`,
-            400);
-        }
-        // 已存在 bot：通过目标 app 校验。明确不可用（跨 app open_id / 目标 app
-        // 无效 id / code:0 无 user）→ 拒绝；网络/scope 错误 → inconclusive 放行。
-        const unusable = await detectUnusableOwnerEntries(rawOpenIdEntries, lookup);
-        if (unusable.length > 0) {
-          throw new LarkServiceError('LARK_OWNER_OPENID_CROSS_APP',
-            `以下白名单 open_id 无法通过目标应用校验，不能保存：${unusable.join(', ')}。open_id 只对签发它的应用有效，跨应用复制会导致 owner 被锁死。请改用完整邮箱、手机号或 on_ union_id，或先在目标应用下通过姓名解析。`,
-            400);
-        }
-        // 归一化：dutydeck 的 allowedUsers 约定只存 ou_（config.ts 归一化过滤非 ou_ 条目，
-        // 运行时按 open_id 匹配），且这些 ou_ 已通过目标 app 校验、就是该 app 自己的
-        // open_id，故以 ou_ 形态保存；on_ 形态待 schema 支持 union_id 白名单后
-        // 再启用。inconclusive 的条目保留原值。
-        const normalizedEntries = await normalizeOwnerEntries(rawOpenIdEntries, lookup);
-        const normalizedByOpenId = new Map(rawOpenIdEntries.map((entry, index) => [entry, normalizedEntries[index] ?? entry]));
-        allowedUsers = allowedUsers.map(user => {
-          const openId = String(user?.openId ?? '').trim();
-          const normalized = normalizedByOpenId.get(openId);
-          return normalized && normalized.startsWith('ou_') ? { ...user, openId: normalized } : user;
-        });
-        input = { ...input, allowedUsers };
-      }
-      if (!allowedUsers.length && allowedEmails.length) await bot.checkIdentityResolution();
-      input = {
-        ...input,
-        ...(resolvedAllowedUsers !== undefined ? { allowedUsers: resolvedAllowedUsers, allowedEmails: [] } : {}),
-        ...(resolvedAllowedBots !== undefined ? { allowedBots: resolvedAllowedBots } : {}),
-        name: info.appName,
-        listening: input.listening ?? existing?.listening ?? false
-      };
-    }
-    if (input.stage === 'agent') {
-      const existing = input.originalAppId ? await readLarkConfig(options.config, input.originalAppId) : undefined;
-      const resolvedHighRiskAllowedUsers = input.highRiskAllowedUserNames === undefined || !existing ? undefined : await createLarkCardService(env, fetcher, existing).resolveChatUsersByNames(input.highRiskAllowedUserNames);
-      const highRiskAllowedUsers = resolvedHighRiskAllowedUsers ?? input.highRiskAllowedUsers ?? existing?.highRiskAllowedUsers ?? [];
-      const highRiskAllowedEmails = input.highRiskAllowedEmails ?? existing?.highRiskAllowedEmails ?? [];
-      const riskControlMode = resolveRiskControlModeInput(input, existing?.riskControlMode ?? 'off');
-      if (riskControlMode !== 'off' && !highRiskAllowedUsers.length && highRiskAllowedEmails.length && existing) {
-        await createLarkCardService(env, fetcher, existing).checkIdentityResolution();
-      }
-      if (resolvedHighRiskAllowedUsers !== undefined) input = { ...input, highRiskAllowedUsers: resolvedHighRiskAllowedUsers, highRiskAllowedEmails: [] };
-    }
+    input = { ...input, originalAppId: input.originalAppId?.trim() };
     const existing = input.originalAppId ? await readLarkConfig(options.config, input.originalAppId) : undefined;
     if (existing && input.expectedRevision !== undefined && input.expectedRevision !== (existing.revision ?? 1)) throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '此 Bot 已被修改，请比较最新配置后再保存。', 409);
+    // Keep identity lookups and the saved inherited values on one revision.
+    if (existing && input.expectedRevision === undefined) input = { ...input, expectedRevision: existing.revision ?? 1 };
+    const appId = input.appId?.trim() || existing?.appId;
+    const appSecret = input.appSecret?.trim() || existing?.appSecret;
+    const appChanged = Boolean(existing && appId !== existing.appId);
+    const bot = createLarkCardService(env, fetcher, { appId, appSecret, brand: input.brand ?? existing?.brand });
+    const resolvedAllowedUsers = input.allowedUserNames === undefined ? undefined : await bot.resolveChatUsersByNames(input.allowedUserNames);
+    const resolvedAllowedBots = input.allowedBotNames === undefined ? undefined : await bot.resolveChatUsersByNames(input.allowedBotNames, ['bot']);
+    const resolvedHighRiskUsers = input.highRiskAllowedUserNames === undefined ? undefined : await bot.resolveChatUsersByNames(input.highRiskAllowedUserNames);
+    const allowedUsers = resolvedAllowedUsers ?? (input.allowedUsers === undefined ? existing?.allowedUsers ?? [] : Array.isArray(input.allowedUsers) ? input.allowedUsers : []);
+    const highRiskUsers = resolvedHighRiskUsers ?? (input.highRiskAllowedUsers === undefined ? existing?.highRiskAllowedUsers ?? [] : Array.isArray(input.highRiskAllowedUsers) ? input.highRiskAllowedUsers : []);
+    const allowedBots = resolvedAllowedBots ?? (input.allowedBots === undefined ? existing?.allowedBots ?? [] : Array.isArray(input.allowedBots) ? input.allowedBots : []);
+    const lookup: ContactLookup = {
+      getUser: (id, idType) => bot.getContactUser(id, idType),
+      batchGetIdByEmail: email => bot.batchGetIdByEmail(email),
+      batchGetIdByMobile: mobile => bot.batchGetIdByMobile(mobile)
+    };
+    // Both stages can change credentials and allowlists. Validate the final target,
+    // including app-scoped entries inherited when switching applications.
+    const ownerEntries = resolvedAllowedUsers === undefined && (appChanged || input.allowedUsers !== undefined) ? allowedUsers : [];
+    const riskEntries = resolvedHighRiskUsers === undefined && (appChanged || input.highRiskAllowedUsers !== undefined) ? highRiskUsers : [];
+    const rawOpenIds = [...new Set([...ownerEntries, ...riskEntries].map(user => String(user?.openId ?? '').trim()).filter(id => id.startsWith('ou_')))];
+    if (!existing && ownerEntries.some(user => String(user?.openId ?? '').trim().startsWith('ou_'))) {
+      throw new LarkServiceError('LARK_OWNER_OPENID_CROSS_APP', '保存新机器人时不能直接使用 app-scoped open_id，请先在目标应用下通过姓名解析。', 400);
+    }
+    const unusable = await detectUnusableOwnerEntries(rawOpenIds, lookup);
+    if (unusable.length) throw new LarkServiceError('LARK_OWNER_OPENID_CROSS_APP', `以下白名单 open_id 无法通过目标应用校验，不能保存：${unusable.join(', ')}。请在目标应用下重新解析成员。`, 400);
+    // Contact user lookup cannot prove a bot's identity. Require target-app
+    // name resolution (or an explicit empty list) before moving peer bots.
+    if (appChanged && resolvedAllowedBots === undefined && allowedBots.some(user => String(user?.openId ?? '').trim().startsWith('ou_'))) {
+      throw new LarkServiceError('LARK_BOT_OPENID_CROSS_APP', '更换应用后，请通过目标应用重新解析允许的机器人，或先清空机器人名单。', 400);
+    }
+    input = {
+      ...input,
+      ...(resolvedAllowedUsers !== undefined ? { allowedUsers: resolvedAllowedUsers, allowedEmails: [] } : {}),
+      ...(resolvedAllowedBots !== undefined ? { allowedBots: resolvedAllowedBots } : {}),
+      ...(resolvedHighRiskUsers !== undefined ? { highRiskAllowedUsers: resolvedHighRiskUsers, highRiskAllowedEmails: [] } : {})
+    };
+    if (input.stage === 'lark') {
+      const info = await bot.getBotInfo();
+      const allowedEmails = input.allowedEmails ?? existing?.allowedEmails ?? [];
+      if (!allowedUsers.length && allowedEmails.length) await bot.checkIdentityResolution();
+      input = { ...input, name: info.appName, listening: input.listening ?? existing?.listening ?? false };
+    }
+    const riskControlMode = resolveRiskControlModeInput(input, existing?.riskControlMode ?? 'off');
+    const highRiskEmails = input.highRiskAllowedEmails ?? existing?.highRiskAllowedEmails ?? [];
+    if ((input.stage === 'agent' || appChanged || input.highRiskAllowedEmails !== undefined) && riskControlMode !== 'off' && !highRiskUsers.length && highRiskEmails.length) await bot.checkIdentityResolution();
     const weightsResult = agentWeightsSchema.safeParse(input.defaultAgentWeights === undefined ? existing?.defaultAgentWeights ?? [] : input.defaultAgentWeights);
     if (!weightsResult.success) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Agent weights must contain distinct Agent IDs and finite positive weights.', 400);
     const fallbackAgentId = input.fallbackAgentId === undefined ? existing?.fallbackAgentId : input.fallbackAgentId.trim();

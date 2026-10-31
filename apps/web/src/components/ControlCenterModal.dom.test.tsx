@@ -410,3 +410,16 @@ it('guards deep-link section changes and clears discarded drafts even when an ex
   expect(screen.queryByRole('alertdialog')).toBeNull();
   expect(screen.getByRole('heading', { name: '实验功能' })).toBeTruthy();
 });
+
+
+it('focuses a global field after the settings query resolves', async () => {
+  mocks();
+  let resolve!: (value: { terminalBackend: 'tmux'; scope: 'pty-cli' }) => void;
+  vi.spyOn(terminalSettingsApi, 'get').mockImplementation(() => new Promise(done => { resolve = done; }));
+  renderModal({ field: 'terminalBackend' });
+  expect(screen.getByRole('dialog', { name: 'Dutydeck 设置与接入' }).getAttribute('aria-modal')).toBe('true');
+  await waitFor(() => expect(resolve).toBeTypeOf('function'));
+  resolve({ terminalBackend: 'tmux', scope: 'pty-cli' });
+  const control = await screen.findByRole('combobox', { name: '主终端后端' });
+  await waitFor(() => expect(document.activeElement).toBe(control));
+});

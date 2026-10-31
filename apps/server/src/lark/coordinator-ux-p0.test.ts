@@ -137,6 +137,7 @@ async function harness(
   const cards = new Map<string, any>();
   const createCard = async ({ beforeSend, ...input }: any) => { await beforeSend?.(); const id = `om_card_${++nextCard}`; cards.set(id, structuredClone(input)); return { messageId: id }; };
   const service = {
+    sendText: vi.fn(async (_input: unknown) => ({ messageId: `om_text_${++nextCard}` })),
     send: vi.fn(createCard), reply: vi.fn(createCard),
     uploadFile: vi.fn(async (input: any) => { await input.beforeSend?.(); return `file_${Math.random()}`; }), replyFile: vi.fn(createCard), sendFile: vi.fn(createCard),
     update: vi.fn(async ({ beforeSend, ...input }: any) => { await beforeSend?.(); cards.set(input.messageId, structuredClone(input)); return { messageId: input.messageId }; }),
@@ -1777,4 +1778,58 @@ it.each([true, false])('keeps the permission card consistent after a Web Runtime
   await h.waitDelivered(1);
   expect((await h.interactions()).find(item => item.id === record.id)).toMatchObject({ state: approved ? 'approved' : 'rejected' });
   expect(JSON.stringify(h.cards.get(record.cardId!))).not.toMatch(/已失效|排队受阻|dutydeck recovery/);
+});
+
+
+describe('插件直接查询入站', () => {
+  it('uses authenticated event identity and exact binding grants, dedupes across restart, never creates an Agent session', async () => {
+    const { PluginCommandRegistry } = await import('../plugins/commands.js');
+    const { PluginBusinessToolRegistry } = await import('../plugins/business-tools.js');
+    const { PluginCommandQueryService } = await import('../plugins/command-query.js');
+    const { PluginToolGrants } = await import('../plugins/tool-grants.js');
+    const { setLarkPluginCommands } = await import('./plugin-commands.js');
+    const h = await harness();
+    const registry = new PluginBusinessToolRegistry();
+    const execute = vi.fn(async (_input: unknown, context: any) => ({ status: 'open', actor: context.identity.actor.id }));
+    registry.register('tickets', 'bot:cli_uxp0', '1', 'query', { name: 'get', description: 'Ticket status', version: '1', commandOutput: 'chat', inputSchema: { type: 'object', properties: { ticket: { type: 'string', minLength: 1 } }, required: ['ticket'], additionalProperties: false }, resource: input => `ticket:${(input as any).ticket}`, execute });
+    let enabled = true;
+    const binding = { plugin: 'tickets', bindingId: 'binding', revision: 1, config: {}, getSecret: async () => undefined };
+    const grants = new PluginToolGrants(h.repos.config);
+    const grant = { id: 'read', toolId: 'tickets/get', bindingId: 'binding', actor: { kind: 'channel', appId: h.config.appId, id: 'ou_alice' }, effects: ['read'], operations: ['invoke'], resources: ['ticket:T-1'] };
+    await grants.set(grant);
+    cleanups.push(setLarkPluginCommands(new PluginCommandRegistry([{ name: 'tickets', scope: 'bot:cli_uxp0', commands: [{ name: 'ticket-status', template: '', query: { tool: 'get', argument: 'ticket' } }] }]), new PluginCommandQueryService({ businessTools: registry, resolveBinding: async (_plugin, context) => enabled && context.chatId === 'oc_group' ? binding : undefined }, grants)));
+    await h.coordinator.handle(event('om_query', '/tickets:ticket-status T-1'), h.config);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]![1].identity).toEqual({ kind: 'command', eventId: 'om_query', actor: grant.actor, channel: 'lark', botAppId: h.config.appId, chatId: 'oc_group', cwd: h.config.workspace, workspaceRoot: h.config.workspace });
+    expect(h.service.sendText).toHaveBeenCalledWith({ chatId: 'oc_group', text: JSON.stringify({ actor: 'ou_alice', status: 'open' }, null, 2), idempotencyKey: `plugin_query_${createHash('sha256').update(`${h.config.appId}:om_query`).digest('hex').slice(0, 32)}`, beforeSend: expect.any(Function) });
+    await h.coordinator.handle(event('om_query', '/tickets:ticket-status T-1'), h.config);
+    const restarted = h.createCoordinator(); cleanups.push(() => restarted.stop());
+    await restarted.initializeWorkflows(h.config);
+    await restarted.handle(event('om_query', '/ticket-status T-1'), h.config);
+    await restarted.handle(event('om_wrong_chat', '/ticket-status T-1', { chatId: 'oc_other' }), h.config);
+    await restarted.handle(event('om_wrong_actor', '/ticket-status T-1', { senderOpenId: 'ou_bob' }), h.config);
+    await restarted.handle(event('om_wrong_resource', '/ticket-status T-2'), h.config);
+    await grants.revoke('read');
+    await restarted.handle(event('om_revoked', '/ticket-status T-1'), h.config);
+    await grants.set(grant); enabled = false;
+    await restarted.handle(event('om_disabled', '/ticket-status T-1'), h.config);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(h.service.sendText).toHaveBeenCalledTimes(1);
+    expect(h.send).not.toHaveBeenCalled();
+    expect(await h.runtime.listSessions()).toEqual([]);
+    expect((await new LarkTaskInbox(h.repos.config).lookup(h.config.appId, 'om_disabled'))?.state).toBe('accepted');
+    const unknown = event('om_unknown_query', '/tickets:ticket-status T-1');
+    await new LarkTaskInbox(h.repos.config).startCommand(h.config.appId, unknown);
+    await restarted.initializeWorkflows(h.config);
+    await restarted.handle(unknown, h.config);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect((await new LarkTaskInbox(h.repos.config).lookup(h.config.appId, unknown.messageId))?.state).toBe('failed');
+    enabled = true;
+    execute.mockImplementationOnce(async () => { await h.saveConfig({ revision: 2, workspace: '/changed' }); return { status: 'sensitive', actor: 'ou_alice' }; });
+    await restarted.handle(event('om_config_changed', '/ticket-status T-1'), h.config);
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(h.service.sendText).toHaveBeenCalledTimes(1);
+    expect(await h.runtime.listSessions()).toEqual([]);
+
+  });
 });

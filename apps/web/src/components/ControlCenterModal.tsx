@@ -1,3 +1,4 @@
+import { globalSettingFields, focusSettingField } from '../settings-search';
 import { PluginBindingsPanel } from './PluginBindingsPanel';
 import { ConfirmDialog } from './ConfirmDialog';
 import { AgentModelSettings } from './AgentModelSettings';
@@ -33,6 +34,7 @@ export type ControlCenterSection = 'agents' | 'lark' | 'groups' | 'automation' |
 type Props = {
   open: boolean;
   initialSection?: ControlCenterSection;
+  field?: string;
   agents: Agent[];
   legacyBots: LarkBotConfig[];
   /** LarkConfig.listeningDisabled：本次启动是否整体禁用监听，影响所有 Bot 的真实可用性。 */
@@ -86,6 +88,7 @@ function permissionLabel(value: Agent['permissionMode']) {
 export function ControlCenterModal({
   open,
   initialSection = 'agents',
+  field,
   agents,
   legacyBots,
   larkListeningDisabled = false,
@@ -140,6 +143,16 @@ export function ControlCenterModal({
     }
   });
 
+  useEffect(() => {
+    if (!open || !field || (field !== 'terminalBackend' && !field.startsWith('model-'))) return;
+    const root = document.querySelector<HTMLElement>('[role="dialog"][aria-modal="true"][aria-label="Dutydeck 设置与接入"]');
+    if (!root) return;
+    const focus = () => focusSettingField(root, field === 'terminalBackend' ? globalSettingFields.terminalBackend.anchor : field);
+    if (focus()) return;
+    const observer = new MutationObserver(() => { if (focus()) observer.disconnect(); });
+    observer.observe(root, { subtree: true, childList: true });
+    return () => observer.disconnect();
+  }, [open, field, section]);
   const requestLeave = useCallback<SettingsLeaveGuard>(action => {
     if (createBot.isPending || modelSaving) return false;
     if (modelDirty) { setPendingLeave(() => action); return false; }
@@ -302,7 +315,7 @@ function TerminalBackendSettings() {
     <h4 className="text-body font-semibold text-primary">主终端后端 · 仅此实例</h4>
     <p className="mt-1 text-caption text-secondary">仅影响此实例新建的终端 CLI（pty-cli）会话。ACP 保持 ACP，已有会话保留原后端。其它 Bot 实例请切换实例后单独设置。</p>
     {query.isLoading ? <Spinner/> : query.isError ? <Banner tone="danger" action={{ label: '重试', onClick: () => void query.refetch() }}>读取主终端配置失败</Banner> : <div className="mt-3 flex items-end gap-3">
-      <Field label="主终端后端"><Select aria-label="主终端后端" value={value} disabled={save.isPending} onChange={event => { setDraft(event.target.value as 'tmux' | 'herdr'); save.reset(); }}><option value="tmux">tmux（默认）</option><option value="herdr">Herdr</option></Select></Field>
+      <Field htmlFor={globalSettingFields.terminalBackend.anchor} label={globalSettingFields.terminalBackend.label}><Select aria-label="主终端后端" value={value} disabled={save.isPending} onChange={event => { setDraft(event.target.value as 'tmux' | 'herdr'); save.reset(); }}><option value="tmux">tmux（默认）</option><option value="herdr">Herdr</option></Select></Field>
       <Button disabled={save.isPending || !draft || draft === query.data?.terminalBackend} onClick={() => { if (draft) save.mutate(draft); }}>{save.isPending ? '保存中…' : '保存终端配置'}</Button>
     </div>}
     {save.error && <div className="mt-2"><Banner tone="danger">{save.error.message}</Banner></div>}

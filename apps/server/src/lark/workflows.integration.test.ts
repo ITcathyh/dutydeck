@@ -143,7 +143,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
     participation = new LarkGroupParticipation({ repository: repos.collaboration, decider: { decide: async () => ({ action: 'silent', reason: '普通材料', evidenceIds: [], updates: [] }), respond: vi.fn() },
       authorize: async () => true, readConfig: async () => config, serviceFor: () => service as any, debounceMs: 10000 });
   }
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, groupManager, { store: repos.config, broker, participation });
+  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, groupManager, { store: repos.config, broker, participation, resourceRoot: join(cwd, 'attachments') });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
   await coordinator.startReconciliation(config);
@@ -1131,7 +1131,6 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
   it('restores a failed task with its original attachment/document material and separate user goal', async () => {
     const h = await harness();
     const fileMessageId = `om_workflow_file_${randomUUID()}`;
-    cleanups.push(() => rm(join(tmpdir(), 'dutydeck', 'lark-resources', fileMessageId), { recursive: true, force: true }));
     h.send.mockImplementationOnce(() => { throw new Error('synthetic execution failure'); });
     h.service.getMessage.mockResolvedValueOnce({ messageId: fileMessageId, chatId: 'oc_group', threadId: 'omt_topic', messageType: 'file',
       rawContent: JSON.stringify({ file_key: 'file_reference', file_name: 'evidence.txt' }), sender: { type: 'user' }, mentions: [] });

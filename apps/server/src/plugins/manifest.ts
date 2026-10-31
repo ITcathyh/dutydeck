@@ -40,6 +40,7 @@ export interface PluginCommand {
   description?: string;
   argumentHint?: string;
   template: string;
+  query?: { tool: string; argument: string };
 }
 
 export interface LoadedPlugin {
@@ -242,9 +243,13 @@ export async function loadPluginDirectory(rootInput: string, options: { reserved
     if (!pluginCommandNamePattern.test(name) || name.length > 32) { issues.push({ file, message: '命令名（文件名）只能用小写字母、数字、- 和 _，以字母开头，最长 32 个字符' }); continue; }
     if (reserved.has(name)) { issues.push({ file, message: `/${name} 是 Dutydeck 内置命令，插件不能重名` }); continue; }
     const { frontmatter, body } = parseCommandMarkdown(await readFile(join(commandsDir, fileName), 'utf8'));
-    if (!body) { issues.push({ file, message: '正文（prompt 模板）为空' }); continue; }
+    const query = frontmatter.query;
+    const argument = frontmatter.argument;
+    if (query && (!/^[a-z][a-z0-9_-]{0,63}$/.test(query) || !argument || !/^[a-z][a-zA-Z0-9_]{0,63}$/.test(argument) || body)) { issues.push({ file, message: '查询命令要求 query、argument 和空正文，不能同时声明 prompt 模板' }); continue; }
+    if (argument && !query) { issues.push({ file, message: 'argument 只能用于查询命令' }); continue; }
+    if (!query && !body) { issues.push({ file, message: '正文（prompt 模板）为空' }); continue; }
     if (body.length > 20_000) { issues.push({ file, message: '正文超过 20000 个字符' }); continue; }
-    commands.push({ name, template: body, ...(frontmatter.description ? { description: frontmatter.description } : {}), ...(frontmatter['argument-hint'] ? { argumentHint: frontmatter['argument-hint'] } : {}) });
+    commands.push({ name, template: body, ...(query ? { query: { tool: query, argument: argument! } } : {}), ...(frontmatter.description ? { description: frontmatter.description } : {}), ...(frontmatter['argument-hint'] ? { argumentHint: frontmatter['argument-hint'] } : {}) });
   }
 
   const agents: AgentConfig[] = [];

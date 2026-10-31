@@ -444,6 +444,9 @@ importers:
       '@dutydeck/acp-client':
         specifier: workspace:*
         version: link:../acp-client
+      '@dutydeck/session-backends':
+        specifier: workspace:*
+        version: link:../session-backends
       '@dutydeck/shared':
         specifier: workspace:*
         version: link:../shared

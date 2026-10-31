@@ -38,7 +38,7 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('real Herdr primary 
       expect(checkpoint).toBeDefined();
       const sent = first.driver.send('sleep 2; echo HERDR-SHELL-DONE').catch(error => error);
       await expect.poll(async () => (await first.backend.getDutydeckMetadata('turn_id'))).toBe(checkpoint.turnId);
-      first.driver.prepareForDaemonShutdown(); await first.driver.stop();
+      await first.driver.prepareForDaemonShutdown(); await first.driver.stop();
       expect(await sent).toBeInstanceOf(DriverDetachedError);
       expect(first.driver.isDetachedForShutdown()).toBe(true);
       expect(await first.driver.isStopped()).toBe(false);
@@ -60,7 +60,7 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('real Herdr primary 
       expect(await recovered.driver.isStopped()).toBe(true);
       console.log(JSON.stringify({ herdr_driver_recovery: { pid, checkpoint: true, original_busy_turn: true, no_resubmit: true, transcript_once: true, stale_recovery_preserved_pane: true, stop_verified: true } }));
     } finally {
-      for (const driver of drivers) { driver.prepareForDaemonShutdown(); await driver.stop(); }
+      for (const driver of drivers) { await driver.prepareForDaemonShutdown(); await driver.stop(); }
       try { execFileSync(binary, ['session', 'stop', name, '--json'], { env: herdrControlEnvironment(process.env), stdio: 'pipe' }); } catch {}
       try { execFileSync(binary, ['session', 'delete', name, '--json'], { env: herdrControlEnvironment(process.env), stdio: 'pipe' }); } catch {}
       rmSync(cwd, { recursive: true, force: true });

@@ -59,6 +59,11 @@ export {
 
 export interface CreateTranscriptTailerOptions {
   cwd: string;
+  /** Verified live Claude process source; never a recency selector. */
+  nativeSessionPath?: string;
+  nativeSession?: import('./claude.js').ClaudeTranscriptTailerOptions['nativeSession'];
+  onNativeSession?: import('./claude.js').ClaudeTranscriptTailerOptions['onNativeSession'];
+  onNativeSessionSwitch?: () => void;
   /** Explicit transcript path (skips directory resolution + switching). */
   transcriptPath?: string;
   /**

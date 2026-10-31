@@ -26,9 +26,11 @@ import { TurnCpu } from './turn-cpu.js';
 import { createTranscriptTailer, type TranscriptEventSource, type TranscriptPosition } from './transcript/index.js';
 import { buildSessionMarker, resolveCliSessionId, hasPinnedClaudeSession, claudeSessionIdLookup } from './session-id/index.js';
 import { hostname } from 'node:os';
+import { isDeepStrictEqual } from 'node:util';
 import { statSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { ClaudeSettings } from './claude-settings.js';
+import { ClaudeNativeSessionResolver, claudeResumeFromObservation } from './claude-native-session.js';
 import { TranscriptSourceTracker, freezeTranscriptSource, verifyLaunchedTranscriptAsync } from './transcript-source.js';
 
 export interface PtyCliDriverOptions {
@@ -48,6 +50,8 @@ export interface PtyCliDriverOptions {
    * 不做磁盘反查——这是最可靠的来源。
    */
   cliSessionId?: string;
+  /** Last runtime-fenced live Claude selection, including an unresumable rotation. */
+  claudeResumeSource?: import('@dutydeck/shared').DriverTranscriptSourceObservation;
   nativeForkSessionId?: string;
   /** Composition root knows whether a relay answer is pending. */
   awaitingAnswer?: () => boolean;
@@ -204,6 +208,11 @@ export class PtyCliDriver implements AgentDriver {
   /** CLI 原生 session id：调用方注入的、或 resume 时从 CLI 落盘记录反查到的。
    *  一旦确定就缓存——反查要扫目录，同一会话不该反复付这个钱。 */
   private cliSessionId: string | undefined;
+  private claudeResumeSource?: import('@dutydeck/shared').DriverTranscriptSourceObservation;
+  private claudeSourceConfirmed = true;
+  private claudeNativeSelectionVerified = false;
+  private idleRetirementArmed = false;
+  private sampleClaudeNativeSession?: (forceDiscovery?: boolean) => import('./claude-native-session.js').ClaudeNativeSession | undefined;
 
   constructor(opts: PtyCliDriverOptions) {
     this.awaitingAnswer = opts.awaitingAnswer;
@@ -227,6 +236,7 @@ export class PtyCliDriver implements AgentDriver {
     // 守卫脚本跟着任务走：上一个驱动留下的（daemon 在计划阶段之后重启）也按本次任务的模式改正。
     if (this.planGuardSupported) this.claudeSettings.setPlanGuard(this.planGuardActive);
     this.cliSessionId = opts.cliSessionId;
+    this.claudeResumeSource = claudeSessionIdLookup.adapterIds.includes(this.adapter.id) ? opts.claudeResumeSource : undefined;
     this.optsNativeForkSessionId = opts.nativeForkSessionId;
     if (remoteApprovalCliAdapterIds.includes(this.adapter.id)) {
       this.requestPermission = request => this.requestHookPermission(request);
@@ -328,6 +338,9 @@ export class PtyCliDriver implements AgentDriver {
     // actual resolver match authorizes automatic resume; never guess an id.
     const persistent = tmuxName !== undefined || this.backend instanceof HerdrBackend;
     const nativeSessionId = persistent ? this.resumableNativeSession() : undefined;
+    if (persistent && this.claudeResumeSource && !nativeSessionId) {
+      throw new DriverRecoveryError('The current Claude session has no verified resumable conversation; refusing to resume an older context');
+    }
     if (persistent && !nativeSessionId && this.hasPinnedNativeSession()) {
       throw new DriverRecoveryError('Pinned Claude session exists without a verified session marker; refusing to reuse its id for a fresh launch');
     }
@@ -437,6 +450,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   async send(prompt: string): Promise<void> {
+    this.idleRetirementArmed = false;
     if (this.stopped) throw new Error('PtyCliDriver: send() called after stop()');
     if (!this.started) await this.start();
     if (this.stopped) throw new Error('Driver stopped');
@@ -491,6 +505,10 @@ export class PtyCliDriver implements AgentDriver {
         this.inputPrepared = true;
       }
       check();
+      if (this.processProbe && claudeSessionIdLookup.adapterIds.includes(this.adapter.id)) {
+        await Promise.race([this.transcript?.flush(), writeCancelled]);
+        check();
+      }
       this.turnActive = true;
       this.interruptPending = false;
       this.turnHasOutput = false;
@@ -935,6 +953,11 @@ export class PtyCliDriver implements AgentDriver {
    *     而 resume 失败绝不该让整个会话不可用。
    */
   private resolveResumeSessionId(): string {
+    if (this.claudeResumeSource) {
+      const id = claudeResumeFromObservation(this.claudeResumeSource, this.cwd, this.spawnEnv());
+      if (!id) throw new DriverRecoveryError('The current Claude session has no verified resumable conversation; original process preserved');
+      return id;
+    }
     if (this.cliSessionId) return this.cliSessionId;
     const found = resolveCliSessionId(this.adapter.id, {
       sessionId: this.sessionId,
@@ -960,10 +983,30 @@ export class PtyCliDriver implements AgentDriver {
    * Runtime shutdown chooses preserve for active/unknown work and permits
    * retirement for verified idle work. Explicit user stop does not set this.
    */
-  prepareForDaemonShutdown(preserveSession = true): void {
+  confirmTranscriptSource(observationId: string): void {
+    if (!this.stopped && observationId === this.claudeResumeSource?.observationId) {
+      this.claudeSourceConfirmed = true;
+      this.transcriptSources.confirmNativeSession(observationId);
+    }
+  }
+
+  async prepareForIdleRetirement(): Promise<boolean> {
+    if (process.platform === 'linux' && this.processProbe && claudeSessionIdLookup.adapterIds.includes(this.adapter.id)) {
+      // Retirement must not inherit the idle discovery backoff. A missing PID
+      // record may be a startup/partial-write window, not a proven old dialect.
+      if (!this.sampleClaudeNativeSession?.(true)) return false;
+      try { await this.transcript?.flush(); } catch { return false; }
+      if (!this.claudeResumeSource || !this.claudeNativeSelectionVerified || !this.claudeSourceConfirmed) return false;
+    }
+    this.idleRetirementArmed = true;
+    return true;
+  }
+
+  async prepareForDaemonShutdown(preserveSession = true): Promise<void> {
+    if (!preserveSession && !await this.prepareForIdleRetirement()) { this.detachOnStop = true; return; }
     // Runtime alone may authorize idle retirement. If native history cannot
     // be resumed with actual on-disk evidence, keep the persistent pane.
-    this.detachOnStop = this.backend instanceof HerdrBackend || preserveSession || ((this.firstPromptSent || this.hasPinnedNativeSession()) && !this.resumableNativeSession());
+    this.detachOnStop = this.backend instanceof HerdrBackend || preserveSession || !this.claudeSourceConfirmed || ((this.firstPromptSent || this.hasPinnedNativeSession()) && !this.resumableNativeSession());
   }
 
   private hasPinnedNativeSession(): boolean {
@@ -973,6 +1016,9 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private resumableNativeSession(): string | undefined {
+    if (this.claudeResumeSource) {
+      return claudeResumeFromObservation(this.claudeResumeSource, this.cwd, this.spawnEnv());
+    }
     if (!this.adapter.buildResumeCommand || (!claudeSessionIdLookup.adapterIds.includes(this.adapter.id) && this.adapter.id !== 'codex')) return undefined;
     const found = resolveCliSessionId(this.adapter.id, {
       sessionId: this.sessionId, cwd: this.cwd, env: this.spawnEnv(), requireMarker: true,
@@ -983,6 +1029,14 @@ export class PtyCliDriver implements AgentDriver {
   stop(options: { discardSession?: boolean } = {}): Promise<void> {
     if (this.stopping) return this.stopping;
     const alreadyStopped = this.stopped;
+    if (!alreadyStopped && this.idleRetirementArmed && this.claudeResumeSource) {
+      // No await before stopped: a native switch during receipt persistence or
+      // shutdown preparation may only upgrade retirement to preservation.
+      const source = this.sampleClaudeNativeSession?.();
+      if (!source || source.identityProof !== this.claudeResumeSource.identityProof
+        || (source.resumable ? source.nativeSessionId : null) !== this.claudeResumeSource.nativeSessionId
+        || !this.claudeSourceConfirmed) this.detachOnStop = true;
+    }
     this.stopped = true;
     this.transcriptVerification?.controller.abort();
     const run = this.stopOnce(options, alreadyStopped);
@@ -1111,6 +1165,7 @@ export class PtyCliDriver implements AgentDriver {
         if (!ready) capture();
       },
       write: async data => {
+        this.idleRetirementArmed = false;
         const backend = this.backend;
         if (this.stopped) throw new DriverDetachedError();
         const result = await backend.write(data);
@@ -1131,7 +1186,20 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   async persistentTerminalIdentity(): Promise<unknown> {
-    return this.backend instanceof HerdrBackend ? await this.backend.captureOwnedIdentity() : undefined;
+    if (this.backend instanceof HerdrBackend) return await this.backend.captureOwnedIdentity();
+    // Only the new unconfirmed-source preservation case opts into idle tmux
+    // adoption. Other tmux restart behavior keeps its existing recovery rules.
+    if (!(this.backend instanceof TmuxBackend) || this.claudeSourceConfirmed || !this.claudeResumeSource
+      || !this.safeIdleTmuxReceipt() || !this.tmuxIdentity || !this.processProbe || !this.backendPid) return undefined;
+    const process = this.processProbe.identify(this.backendPid.pid);
+    if (this.processProbe.observe(process) !== 'alive') return undefined;
+    return { kind: 'tmux', reason: 'unconfirmed_claude_source', tmux: this.tmuxIdentity, process };
+
+  }
+
+  private safeIdleTmuxReceipt(): boolean {
+    return this.spawnPermissionMode === 'full-trust' && !this.planGuardActive && this.isIdle()
+      && !this.hasBackgroundWork() && !this.hookPermissions.size && !this.humanWaits.size && !this.awaitingAnswer?.();
   }
 
   async attachTerminal(identity?: unknown): Promise<boolean> {
@@ -1153,6 +1221,20 @@ export class PtyCliDriver implements AgentDriver {
     if (!name || (await TmuxBackend.probeSession(name)) !== 'exists') return false;
     try {
       (await this.reattachTmux(name, false));
+      if (identity !== undefined) {
+        await this.transcript?.flush();
+        const expected = identity as { kind?: string; tmux?: OwnedTmuxIdentity; process?: ReturnType<ProcessProbe['identify']> };
+        const current = { tmux: this.tmuxIdentity, process: this.backendPid && this.processProbe?.identify(this.backendPid.pid) };
+        // A matching name/owner alone does not authorize adopting a replaced pane.
+        // Socket inode, server birth, target id, and pane process birth must agree.
+        if (expected.kind !== 'tmux' || !expected.tmux || !expected.process || !current?.tmux || !current.process
+          || !isDeepStrictEqual(expected.tmux.scope, current.tmux.scope)
+          || !isDeepStrictEqual(expected.tmux.socket, current.tmux.socket)
+          || expected.tmux.targetId !== current.tmux.targetId
+          || !isDeepStrictEqual(expected.tmux.server, current.tmux.server)
+          || !isDeepStrictEqual(expected.process, current.process)
+          || this.processProbe?.observe(expected.process) !== 'alive' || !this.safeIdleTmuxReceipt()) throw new Error('Persistent tmux identity changed or no longer idle');
+      }
       (await this.markTmuxReattached());
       this.recoveryRejected = false;
       return true;
@@ -1175,6 +1257,13 @@ export class PtyCliDriver implements AgentDriver {
     const check = () => { if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) throw new Error('PTY wiring cancelled by lifecycle change'); };
     const pid = await backend.getPid?.();
     check();
+    // Freeze the owned backend birth identity before any asynchronous startup
+    // can replace its PID. Native state is accepted only from this process tree.
+    let nativeResolver: ClaudeNativeSessionResolver | undefined;
+    let rootIdentity: ReturnType<ProcessProbe['identify']> | undefined;
+    if (pid && this.processProbe && claudeSessionIdLookup.adapterIds.includes(this.adapter.id)) {
+      try { rootIdentity = this.processProbe.identify(pid); } catch { /* Unsupported platform retains marker resolution. */ }
+    }
     this.backendPid = pid ? { backend, pid } : undefined;
     this.tmuxIdentity = undefined;
     this.tmuxExitProof = undefined;
@@ -1365,8 +1454,37 @@ export class PtyCliDriver implements AgentDriver {
     // the daemon's env instead watches a tree the CLI never writes to, and the
     // turn is then reported as "no final output" while the screen shows a
     // perfectly good answer.
+    this.sampleClaudeNativeSession = rootIdentity && this.processProbe ? forceDiscovery => {
+        if (this.stopped || backend !== this.backend || generation !== this.wiringGeneration) return;
+        try {
+          nativeResolver ??= new ClaudeNativeSessionResolver(rootIdentity!, this.cwd, this.spawnEnv(), this.processProbe!);
+          const source = nativeResolver.resolve(forceDiscovery);
+          this.claudeNativeSelectionVerified = !!source;
+          return source;
+        } catch { this.claudeNativeSelectionVerified = false; return undefined; }
+      } : undefined;
     this.transcript = createTranscriptTailer(this.adapter.id, {
       cwd: this.cwd,
+      nativeSessionPath: this.claudeResumeSource && claudeResumeFromObservation(this.claudeResumeSource, this.cwd, this.spawnEnv()) ? this.claudeResumeSource.verifiedPath ?? undefined : undefined,
+      nativeSession: this.sampleClaudeNativeSession,
+      onNativeSession: source => {
+        if (this.stopped || backend !== this.backend || generation !== this.wiringGeneration) return;
+        this.cliSessionId = source.resumable ? source.nativeSessionId : undefined;
+        const observation = this.transcriptSources.recordNativeSession(source);
+        if (observation.observationId !== this.claudeResumeSource?.observationId) this.claudeSourceConfirmed = false;
+        this.claudeResumeSource = observation;
+      },
+      onNativeSessionSwitch: () => {
+        if (this.stopped || backend !== this.backend || generation !== this.wiringGeneration) return;
+        const error = new DriverRecoveryError('Claude changed its native session during this attempt; its outcome remains unknown and input was not resent');
+        if (this.turnActive) {
+          this.cancelActiveSubmission(error); this.turnWriteReject?.(error);
+          this.turnActive = false; this.preparedTurnId = undefined;
+          this.clearTurnDeadline(); this.clearRenderedCompletion(); this.clearBackgroundHold(); this.clearProgramStatusDrain();
+          this.turnReject?.(error); this.turnResolve = null; this.turnReject = null;
+        }
+        this.emitEvent({ type: 'status', data: { state: 'native_session_changed', message: 'Claude switched its native session. The previous attempt was not replayed.' } });
+      },
       env: this.spawnEnv(),
       // Claude keys its transcript directory by cwd ALONE, so two dutydeck
       // sessions in one repo share it. Without the session id the tailer

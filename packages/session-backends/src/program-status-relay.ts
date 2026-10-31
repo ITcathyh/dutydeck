@@ -18,7 +18,8 @@
 import { spawn as spawnChild, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { ProgramStatusProbeRelay, writeProbeReplySync } from './program-status-probe-relay.js';
-import * as pty from 'node-pty';
+import type * as pty from 'node-pty';
+import { spawnPty } from './spawn-pty.js';
 
 /** A lone trailing ESC (or partial probe) is held at most this long. */
 const HELD_FLUSH_MS = 15;
@@ -68,7 +69,7 @@ function signalNumber(sig: NodeJS.Signals): number | undefined {
 
 function spawnInner(): pty.IPty | null {
   try {
-    return pty.spawn(plan.bin, plan.args, {
+    return spawnPty(plan.bin, plan.args, {
       name: process.env.TERM || 'xterm-256color',
       cols: stdout.columns || 80,
       rows: stdout.rows || 24,

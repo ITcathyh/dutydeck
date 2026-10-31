@@ -94,6 +94,13 @@ const approvalSummary = (record: LarkInteraction) => {
 };
 
 export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
+  private resourceRetention(task: LarkTask) {
+    const root = this.workflowOptions.resourceRoot;
+    return root ? { root, retain: async (directory: string) => {
+      if (task.inbox) await this.inbox!.update(task.inbox, { resourceDirectories: [...(task.inbox.resourceDirectories ?? []), directory] });
+    } } : undefined;
+  }
+
   private readonly processCards = new WeakMap<LarkTask, { turn: number; messageId: string; card: OnlineProcessCard }>();
 
   private processCard(task: LarkTask, elements = task.lastSuccessfulElements): OnlineProcessCard {
@@ -915,7 +922,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       return mention ? `${mention}\n\n${markdown}` : markdown;
     };
     if (!this.workflows && task.resources.length) {
-      task.prompt = await materializeLarkResources(larkMessageAnchor(event), task.prompt, task.resources, this.service, task.contextReadAbort.signal);
+      task.prompt = await materializeLarkResources(larkMessageAnchor(event), task.prompt, task.resources, this.service, task.contextReadAbort.signal, this.resourceRetention(task));
       task.resources = [];
     }
     const beforeTurnSend = () => {
@@ -1127,7 +1134,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           task.quoteFailureNote = context.quoteFailureNote;
           try {
             for (const sourceId of new Set(context.resources.map(resource => resource.sourceMessageId))) {
-              materialPrompt = await materializeLarkResources(sourceId, materialPrompt, context.resources.filter(resource => resource.sourceMessageId === sourceId), this.service, task.contextReadAbort?.signal);
+              materialPrompt = await materializeLarkResources(sourceId, materialPrompt, context.resources.filter(resource => resource.sourceMessageId === sourceId), this.service, task.contextReadAbort?.signal, this.resourceRetention(task));
             }
           } catch (error) { await failContextRead(error, session); return; }
           if (this.stopped || task.turn !== currentTurn || await this.supersededTurn(task, session)) return;

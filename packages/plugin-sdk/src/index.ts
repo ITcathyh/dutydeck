@@ -36,7 +36,7 @@ export interface PluginApi {
   config: Readonly<Record<string, string>>;
   registerCiProvider(provider: CiProvider): void;
   registerResultTool(tool: PluginResultTool): void;
-  registerQuery(query: PluginQuery): void;
+  registerQuery(query: PluginQuery | PluginChatQuery): void;
   registerAction(action: PluginAction): void;
   registerScenarioProvider(provider: ScenarioProvider): void;
   registerHookHandler(event: PluginHookEvent, handler: (input: PluginHookInput) => PluginHookOutput | void | Promise<PluginHookOutput | void>, options?: { timeout?: number; matcher?: string }): void;
@@ -64,6 +64,12 @@ export interface PluginToolIdentity {
   actor: { kind: 'installation_owner'; id: 'installation_owner' } | { kind: 'channel'; id: string; appId: string };
   channel: 'web' | 'lark'; botAppId?: string; chatId?: string; cwd: string; workspaceRoot: string;
 }
+/** Authenticated inbound message; never a fabricated task or session. */
+export interface PluginCommandIdentity {
+  kind: 'command'; eventId: string;
+  actor: { kind: 'channel'; id: string; appId: string };
+  channel: 'lark'; botAppId: string; chatId: string; cwd: string; workspaceRoot: string;
+}
 export interface PluginToolContext {
   identity: Readonly<PluginToolIdentity>; binding: PluginToolBinding;
   signal: AbortSignal; actionId?: string;
@@ -77,7 +83,13 @@ interface ToolDefinition {
   resource(input: unknown, binding: PluginToolBinding): string;
 }
 export interface PluginQuery extends ToolDefinition {
+  commandOutput?: never;
   execute(input: unknown, context: PluginToolContext): Promise<JsonValue>;
+}
+export interface PluginChatQuery extends ToolDefinition {
+  /** Explicit consent to expose this query output in the originating chat. Private results must omit this. */
+  commandOutput: 'chat';
+  execute(input: unknown, context: Omit<PluginToolContext, 'identity'> & { identity: Readonly<PluginToolIdentity | PluginCommandIdentity> }): Promise<JsonValue>;
 }
 export interface PluginAction extends ToolDefinition {
   execute(input: unknown, context: PluginToolContext & { actionId: string }): Promise<{ receipt: string }>;
