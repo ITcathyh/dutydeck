@@ -15,7 +15,7 @@ import { chmodSync, closeSync, constants, existsSync, mkdirSync, openSync } from
 import { basename, dirname } from 'node:path';
 import type { AgentConfig, AgentEvent, RepositoryBundle, RepositoryOpenOptions, Session, TaskRecord } from '@dutydeck/shared';
 import { agentConfigs, channelMappings, configs, errors, events, machines, permissionRequests, projects, sessions, tasks, toolCalls } from './schema.js';
-import { deferredConfirmationId, RuntimeError } from '@dutydeck/shared';
+import { deferredConfirmationId, RuntimeError, watchFindingSchema } from '@dutydeck/shared';
 import { createTaskExecutionRepository } from './task-execution.js';
 import { needsMigration, runMigrations, withMigrationTransaction } from './migrations.js';
 import { createFoundationRepositories } from './foundation.js';
@@ -410,8 +410,28 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       async listByJsonField(prefix, filter) { return listConfigByJsonField(sqlite, prefix, filter); },
       async remove(key, expected) {
         const promptPending = key.startsWith('bot_prompt_version/pending/');
-        if (!promptPending && (!key.startsWith('lark.inbox.') || JSON.parse(expected)?.state !== 'ignored')) throw new RuntimeError('CONFIG_DELETE_NOT_SUPPORTED', 'Only ignored Lark inbox receipts and prompt usage preparations can be removed', 409);
-        return sqlite.prepare('DELETE FROM configs WHERE key = ? AND value = ?').run(key, expected).changes === 1;
+        let recovered: ReturnType<typeof watchFindingSchema.parse> | undefined;
+        if (key.startsWith('watch_findings/')) {
+          try {
+            const parsed = watchFindingSchema.safeParse(JSON.parse(expected));
+            if (parsed.success && parsed.data.recoveredAt && !key.endsWith('/notification')
+              && key === `watch_findings/${parsed.data.appId}/${parsed.data.fingerprint}`) recovered = parsed.data;
+          } catch { /* Invalid records cannot authorize deletion. */ }
+        }
+        if (!promptPending && !recovered && (!key.startsWith('lark.inbox.') || JSON.parse(expected)?.state !== 'ignored')) throw new RuntimeError('CONFIG_DELETE_NOT_SUPPORTED', 'Only recovered watch findings, ignored Lark inbox receipts and prompt usage preparations can be removed', 409);
+        return sqlite.transaction(() => {
+          if (recovered) {
+            const row = sqlite.prepare('SELECT value FROM configs WHERE key=?').get(`watch_findings/${recovered.appId}/notification`) as { value: string } | undefined;
+            if (row) {
+              try {
+                const notice = JSON.parse(row.value) as { status?: string; members?: Array<{ fingerprint?: string } | null> } | null;
+                if (!notice || !['pending', 'completed', 'unknown'].includes(notice.status ?? '')
+                  || notice.status === 'pending' && (!Array.isArray(notice.members) || notice.members.some(member => member?.fingerprint === recovered!.fingerprint))) return false;
+              } catch { return false; }
+            }
+          }
+          return sqlite.prepare('DELETE FROM configs WHERE key = ? AND value = ?').run(key, expected).changes === 1;
+        }).immediate();
       },
       async get(key) { return db.select().from(configs).where(eq(configs.key, key)).get()?.value; },
       async set(key, value) { assertBotProcessConfigWrite(sqlite, key, value); if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409); db.insert(configs).values({ key, value }).onConflictDoUpdate({ target: configs.key, set: { value } }).run(); },

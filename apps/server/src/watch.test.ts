@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
-import { DutydeckWatch, WATCH_FIRST_RUN_MS, WATCH_INTERVAL_MS, WATCH_PREFIX, checkWatchFindings, readWatchFindings, startDutydeckWatch, watchFingerprint, watchFindingSchema, type WatchScope, type WatchSignal } from './watch.js';
+import { DutydeckWatch, WATCH_RECOVERED_RETENTION_MS, WATCH_RECOVERED_LIMIT, WATCH_FIRST_RUN_MS, WATCH_INTERVAL_MS, WATCH_PREFIX, checkWatchFindings, readWatchFindings, startDutydeckWatch, watchFingerprint, watchFindingSchema, type WatchScope, type WatchSignal } from './watch.js';
 
 const at = '2026-11-01T02:00:00.000Z';
 const signal = (objectId = 'task_1', kind = 'result_delivery'): WatchSignal => ({ kind, objectId, title: '结果投递未确认成功', since: at, location: 'https://example.test/session/1' });
@@ -8,6 +8,7 @@ function fixture() {
   let clock = at;
   const rows = new Map<string, string>();
   const store: ConfigRepository = { get: async key => rows.get(key), set: async (key, value) => { rows.set(key, value); },
+    remove: async (key, expected) => rows.get(key) === expected && rows.delete(key),
     list: async prefix => [...rows].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value })) };
   let scope: WatchScope = { appId: 'cli_test', ownerId: 'ou_owner', notify: true, signals: [] };
   const send = vi.fn().mockResolvedValue({});
@@ -152,5 +153,96 @@ describe('watch scheduling and CLI', () => {
     h.scope.signals = []; await h.watch.run();
     expect(checkWatchFindings(Object.fromEntries(h.rows)).level).toBe('ok');
     expect(checkWatchFindings({},true).level).toBe('skip');
+  });
+});
+
+
+function seedFinding(h: ReturnType<typeof fixture>, objectId: string, recoveredAt?: string, appId = 'cli_test') {
+  const fingerprint = watchFingerprint('result_delivery', objectId);
+  const finding = { schemaVersion: 1 as const, appId, fingerprint, ...signal(objectId), firstSeenAt: at, lastSeenAt: at, episode: 1,
+    ...(recoveredAt ? { recoveredAt } : {}) };
+  const key = WATCH_PREFIX + appId + '/' + fingerprint;
+  const raw = JSON.stringify(finding, null, 2);
+  h.rows.set(key, raw);
+  return { key, raw, finding };
+}
+const before = (ms: number) => new Date(Date.parse(at) - ms).toISOString();
+const notice = (fingerprints: string[], status = 'pending') => JSON.stringify({ schemaVersion: 1, idempotencyKey: 'watch_frozen',
+  ownerId: 'ou_owner', text: '冻结通知', status, members: fingerprints.map(fingerprint => ({ fingerprint, episode: 1 })) });
+
+describe('watch recovered finding retention', () => {
+  it.each(['web', 'no owner'])('prunes at seven days in a healthy %s scope using the exact original value', async mode => {
+    const h = fixture();
+    if (mode === 'web') h.scope.notify = false; else h.scope.ownerId = undefined;
+    const old = seedFinding(h, 'old', before(WATCH_RECOVERED_RETENTION_MS + 1));
+    const boundary = seedFinding(h, 'boundary', before(WATCH_RECOVERED_RETENTION_MS));
+    const recent = seedFinding(h, 'recent', before(WATCH_RECOVERED_RETENTION_MS - 1));
+    const other = seedFinding(h, 'other', before(WATCH_RECOVERED_RETENTION_MS + 1), 'cli_other');
+    const remove = vi.spyOn(h.store, 'remove');
+    await h.watch.run();
+    expect(remove).toHaveBeenCalledWith(old.key, old.raw);
+    expect(remove).toHaveBeenCalledWith(boundary.key, boundary.raw);
+    expect(h.rows.has(old.key)).toBe(false); expect(h.rows.has(boundary.key)).toBe(false);
+    expect(h.rows.get(recent.key)).toBe(recent.raw); expect(h.rows.get(other.key)).toBe(other.raw);
+    expect(h.send).not.toHaveBeenCalled();
+  });
+  it('keeps the latest 1000 recovered records, active findings and pending notification references', async () => {
+    const h = fixture(); h.scope.notify = false; h.scope.signals = [signal('active')];
+    const active = seedFinding(h, 'active');
+    const protectedRow = seedFinding(h, 'protected', before(WATCH_RECOVERED_RETENTION_MS + 1));
+    const notificationKey = WATCH_PREFIX + 'cli_test/notification';
+    const rawNotice = notice([protectedRow.finding.fingerprint]);
+    h.rows.set(notificationKey, rawNotice);
+    h.rows.set(WATCH_PREFIX + 'cli_test/invalid', '{"recoveredAt":"invalid"}');
+    const recent = Array.from({ length: WATCH_RECOVERED_LIMIT + 5 }, (_, index) => seedFinding(h, 'recent_' + index, before(index + 1)));
+    await h.watch.run();
+    const recovered = h.findings().filter(finding => finding.recoveredAt);
+    expect(recovered).toHaveLength(WATCH_RECOVERED_LIMIT);
+    expect(h.rows.get(protectedRow.key)).toBe(protectedRow.raw);
+    expect(h.rows.has(recent[WATCH_RECOVERED_LIMIT - 2]!.key)).toBe(true);
+    expect(h.rows.has(recent[WATCH_RECOVERED_LIMIT - 1]!.key)).toBe(false);
+    expect(JSON.parse(h.rows.get(active.key)!)).not.toHaveProperty('recoveredAt');
+    expect(h.rows.get(notificationKey)).toBe(rawNotice);
+    expect(h.rows.has(WATCH_PREFIX + 'cli_test/invalid')).toBe(true);
+  });
+  it('allows protected references to exceed the cap rather than deleting pending notification evidence', async () => {
+    const h = fixture(); h.scope.notify = false;
+    const rows = Array.from({ length: WATCH_RECOVERED_LIMIT + 1 }, (_, index) => seedFinding(h, 'protected_' + index, before(WATCH_RECOVERED_RETENTION_MS + 1)));
+    h.rows.set(WATCH_PREFIX + 'cli_test/notification', notice(rows.map(row => row.finding.fingerprint)));
+    await h.watch.run();
+    expect(h.findings()).toHaveLength(WATCH_RECOVERED_LIMIT + 1);
+  });
+  it.each(['list', 'remove'])('only warns when retention %s fails and still reports current problems', async failure => {
+    const h = fixture(); seedFinding(h, 'old', before(WATCH_RECOVERED_RETENTION_MS + 1)); h.scope.signals = [signal('current')];
+    if (failure === 'remove') h.store.remove = vi.fn().mockRejectedValue(new Error('storage unavailable'));
+    else {
+      const list = h.store.list!; let calls = 0;
+      h.store.list = async prefix => { if (++calls === 2) throw new Error('storage unavailable'); return list(prefix); };
+    }
+    await h.watch.run();
+    expect(h.warn).toHaveBeenCalledWith(expect.anything(), '清理已恢复巡检记录失败');
+    expect(h.send).toHaveBeenCalledTimes(1);
+    expect(h.findings().find(finding => finding.objectId === 'current')?.notifiedAt).toBe(at);
+  });
+  it('does not delete a finding that concurrently reappears after the retention snapshot', async () => {
+    const h = fixture(); h.scope.notify = false;
+    const old = seedFinding(h, 'racing', before(WATCH_RECOVERED_RETENTION_MS + 1));
+    const replacement = JSON.stringify({ ...old.finding, recoveredAt: undefined, firstSeenAt: at, episode: 2 });
+    const remove = h.store.remove!;
+    h.store.remove = async (key, expected) => { h.rows.set(key, replacement); return remove(key, expected); };
+    await h.watch.run();
+    expect(h.rows.get(old.key)).toBe(replacement);
+  });
+  it('uses a new notification UUID when a capped record reappears with its episode reset', async () => {
+    const h = fixture(); h.scope.signals = [signal()]; await h.watch.run();
+    const firstKey = h.send.mock.calls[0]![0].idempotencyKey;
+    h.scope.signals = []; h.setNow('2026-11-01T02:00:00.001Z'); await h.watch.run();
+    for (let index = 0; index < WATCH_RECOVERED_LIMIT; index++) seedFinding(h, 'newer_' + index, '2026-11-01T02:00:00.002Z');
+    h.setNow('2026-11-01T02:00:00.003Z'); await h.watch.run();
+    expect(h.findings().some(finding => finding.objectId === 'task_1')).toBe(false);
+    h.setNow('2026-11-01T02:00:00.004Z'); h.scope.signals = [signal()]; await h.watch.run();
+    expect(h.send).toHaveBeenCalledTimes(2);
+    expect(h.findings().find(finding => finding.objectId === 'task_1')?.episode).toBe(1);
+    expect(h.send.mock.calls[1]![0].idempotencyKey).not.toBe(firstKey);
   });
 });

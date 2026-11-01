@@ -42,8 +42,8 @@ export async function collectWatchScopes(repos: RepositoryBundle, bots: StoredLa
     appId: bot.appId, signals: [], ownerId: bot.allowedUsers.find(user => /^(ou_|on_)/.test(user.openId))?.openId,
     notify: !options.listeningDisabled && bot.listening
   }));
-  // The Web process has no bot but still checks its own tasks and schedules.
-  if (!scopes.length) scopes.push({ appId: options.appId ?? 'web', signals: [], notify: false });
+  // Unscoped instances also check Web/CLI sessions when bots share the database.
+  if (!options.appId || !scopes.length) scopes.push({ appId: options.appId ?? 'web', signals: [], notify: false });
   const botsByApp = new Map(selected.map(bot => [bot.appId, bot]));
   const locationOf = (session: Session) => sessionLocation(session, botsByApp.get(botAppIdOfSession(session) ?? options.appId ?? ''));
   const byApp = new Map(scopes.map(scope => [scope.appId, scope]));

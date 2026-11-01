@@ -277,3 +277,24 @@ describe('watch report and intake integration signals', () => {
     expect(h.mutations).not.toHaveBeenCalled();
   });
 });
+
+
+it.each(['web', undefined])('checks unscoped %s problems alongside configured bots without sending a direct message', async source => {
+  const h = fixture(); h.sessions[0] = { ...session, source, sourceId: undefined };
+  h.tasks.push(task('unknown', 'reconcile_required', WATCH_UNKNOWN_MS + 3));
+  h.tasks.push(task('reported', 'completed', WATCH_REPORT_MS + 2));
+  h.values.set('task_report/reported', JSON.stringify({ schemaVersion: 1, taskId: 'reported', sessionId: session.id,
+    status: 'waiting', question: '需要决定', reportedAt: ago(WATCH_REPORT_MS + 1) }));
+  h.values.set('session_automation/schedule/' + schedule.id, JSON.stringify(schedule));
+  const scopes = await h.collect([bot]);
+  expect(scopes.find(scope => scope.appId === 'web')).toMatchObject({ notify: false, signals: [
+    expect.objectContaining({ kind: 'task_report_waiting' }), expect.objectContaining({ kind: 'result_unknown' }), expect.objectContaining({ kind: 'schedule_overdue' })
+  ] });
+  expect(scopes.find(scope => scope.appId === bot.appId)?.signals).toEqual([]);
+  h.repos.config.set = async (key, value) => { h.values.set(key, value); };
+  const send = vi.fn();
+  await new DutydeckWatch({ store: h.repos.config, collect: () => h.collect([bot]), send, warn: vi.fn(), now: () => now }).run();
+  expect(send).not.toHaveBeenCalled();
+  expect([...h.values.keys()].filter(key => key.startsWith('watch_findings/web/'))).toHaveLength(3);
+  expect((await h.collect([bot], { appId: bot.appId })).find(scope => scope.appId === 'web')).toBeUndefined();
+});
