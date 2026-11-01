@@ -1,3 +1,4 @@
+import { InboxDispositions } from './InboxDispositions';
 import { botDetailFields, focusSettingField } from '../settings-search';
 import { AgentModelSettings } from './AgentModelSettings';
 import { OptionalModelOverrides } from './OptionalModelOverrides';
@@ -1032,6 +1033,7 @@ export function BotManagement({
               </Card>
 
               {/* 区块 2：参与的群聊 */}
+              <InboxDispositions appId={activeBot.appId}/>
               <Card padding="lg" className="space-y-4">
                 <div className="flex items-center justify-between">
                   <div>

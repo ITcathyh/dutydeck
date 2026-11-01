@@ -936,6 +936,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const failBeforeRun = async (taskName: string, markdown: string, idempotencyKey: string, options: { inboxReason?: string; readOnly?: true } = {}) => {
       if (launcherRecovery) throw new Error(taskName);
       task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
+      if (task.inbox) await this.inbox!.update(task.inbox, { reason: idempotencyKey.startsWith('fail_acl_') ? 'access_denied' : idempotencyKey.startsWith('context_failed_') ? 'context_failed' : idempotencyKey.startsWith('plan_unsupported_') ? 'plan_unsupported' : 'identity_failed', detail: (options.inboxReason ?? taskName).slice(0, 500) });
       await this.failPendingInbox(task, options.inboxReason ?? taskName);
       const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, ...(options.readOnly ? { readOnly: true } : {}),
         taskId: task.id, taskName, markdown, idempotencyKey: idempotencyKey.slice(0, 50),

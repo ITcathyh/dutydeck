@@ -241,6 +241,7 @@ export interface CliHandlers {
   secretSet?(id: string, options: SecretValueCliOptions): void | Promise<void>;
   secretRotate?(id: string, options: SecretRotateCliOptions): void | Promise<void>;
   secretRemove?(id: string, options: SecretRemoveCliOptions): void | Promise<void>;
+  larkDisposition?(input: { messageId?: string; app?: string; chat?: string; since?: string; database?: string }): void | Promise<void>;
   larkSend?(markdown: string | undefined, options: LarkCliOptions): void | Promise<void>;
   larkCreate?(name: string | undefined, options: LarkCreateCliOptions): void | Promise<void>;
   larkUpdate?(markdown: string | undefined, options: LarkCliOptions): void | Promise<void>;
@@ -510,6 +511,8 @@ Examples:
   $ dutydeck autostart status --json`);
 
   const lark = program.command('lark').description('Create Lark bots and send or update Dutydeck cards');
+  lark.command('why <message_id>').description('查询消息为什么没有处理').option('--app <appId>', '机器人应用 ID').action((messageId, options, command) => handlers.larkDisposition?.({ ...options, messageId, database: command.optsWithGlobals().database }));
+  lark.command('ignored').description('列出群内最近没处理的消息').requiredOption('--chat <chat_id>', '群 ID').option('--app <appId>', '机器人应用 ID').option('--since <duration>', '24h、7d 或 30d', '24h').action((options, command) => handlers.larkDisposition?.({ ...options, database: command.optsWithGlobals().database }));
   lark.command('create')
     .description('Create, configure and submit a new Feishu bot using the local login session')
     .argument('[name]', 'New bot name (1–50 characters); omit when resuming')

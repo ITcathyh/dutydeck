@@ -975,3 +975,5 @@ Confirmation requires bot settings management permission (`channel_bot.update`) 
 ## License
 
 Dutydeck core code is licensed under open-source terms. See [Third-Party Notices](THIRD_PARTY_NOTICES.md) for details.
+
+Message disposition: the bot page lists ignored messages from the last 24 hours, 7 days, or 30 days. Use `dutydeck lark why <message_id> [--app <appId>]` or `dutydeck lark ignored --chat <chat_id> [--since 24h|7d|30d]`. Ignored receipts are retained for 30 days, capped at 5,000 per bot; older records may have no reason.

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runLarkDisposition } from './lark-disposition-cli.js';
 import { createBackup, inspectBackup, restoreBackup } from './backup.js';
 import { runMemoryManagementCli } from './memory-management-cli.js';
 import { runTerminalSettingsCli, TerminalSettingsCliError } from './terminal-settings-cli.js';
@@ -431,6 +432,7 @@ async function main() {
     secretSet: async (id, options) => { output(await withSecretContext(options.database, context => runSecretSet(id, options, context))); },
     secretRotate: async (id, options) => { output(await withSecretContext(options.database, context => runSecretRotate(id, options, context))); },
     secretRemove: async (id, options) => { output(await withSecretContext(options.database, context => runSecretRemove(id, options, context))); },
+    larkDisposition: async input => { output(await runLarkDisposition(input)); },
     larkSend: async (markdown, options) => { output(await runLarkSend(markdown, options)); },
     larkCreate: async (name, options) => {
       const configured = options.database

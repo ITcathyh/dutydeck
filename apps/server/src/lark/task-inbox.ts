@@ -1,3 +1,4 @@
+import { dispositionSchema, type Disposition } from './disposition.js';
 import type { LarkLaunchOptions } from './new-session.js';
 import { randomUUID } from 'node:crypto';
 import type { ConfigRepository, PromptPart } from '@dutydeck/shared';
@@ -8,6 +9,10 @@ import type { LarkRedispatchInfo } from './turn-redispatch.js';
 
 export type LarkInboxAdoption = Pick<LarkMessageEvent, 'senderOpenId' | 'senderType' | 'scenario' | 'rootId' | 'threadId' | 'parentId'>;
 export interface LarkInboxRecord {
+  reason?: Disposition['reason'];
+  detail?: string;
+  disposition?: Disposition;
+  duplicateCount?: number;
   appId: string;
   event: LarkMessageEvent;
   /** 已验证编辑或内部场景派生时保留原始输入；event 用于重新路由或执行。 */
@@ -39,6 +44,7 @@ export interface LarkInboxRecord {
   /** 这条排队消息被并进了哪条消息（取消它之前写下）：恢复时据此确认它是被这次合并取消的。 */
   mergedInto?: string;
 }
+const executionRecord = ({ reason: _reason, detail: _detail, disposition: _disposition, duplicateCount: _duplicates, ...rest }: LarkInboxRecord) => JSON.stringify(rest);
 const prefix = (appId: string) => `lark.inbox.${appId}.`;
 /**
  * 首张进度卡没送达时抛出的错误带这个标记：runtime 还没接到这条任务，
@@ -63,7 +69,13 @@ export class LarkTaskInbox {
     for (;;) {
       const raw = await this.store.get(key);
       const old = raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
-      if (old && (old.state !== 'unrouted' || old.boot === this.boot)) return undefined;
+      if (old && (old.state !== 'unrouted' || old.boot === this.boot)) {
+        {
+          const next = { ...old, duplicateCount: (old.duplicateCount ?? 0) + 1 };
+          if (!await this.store.compareAndSet!(key, raw, JSON.stringify(next))) continue;
+        }
+        return undefined;
+      }
       const next: LarkInboxRecord = { ...(old ?? { appId, event: original, state: 'unrouted', receivedAt: new Date().toISOString(), receiptOrder: ++this.receiptOrder }), boot: this.boot };
       if (await this.store.compareAndSet!(key, raw, JSON.stringify(next))) return next;
     }
@@ -72,9 +84,18 @@ export class LarkTaskInbox {
     const raw = await this.store.get(prefix(appId) + messageId);
     return raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
   }
+  private async mutateClaim(record: LarkInboxRecord, change: (latest: LarkInboxRecord) => LarkInboxRecord): Promise<LarkInboxRecord | undefined> {
+    const key = prefix(record.appId) + record.event.messageId;
+    for (;;) {
+      const raw = await this.store.get(key);
+      const latest = raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
+      if (!latest || executionRecord(latest) !== executionRecord(record)) return;
+      const next = change(latest);
+      if (await this.store.compareAndSet!(key, raw, JSON.stringify(next))) return next;
+    }
+  }
   async ownUnrouted(record: LarkInboxRecord) {
-    const next = { ...record, boot: this.boot };
-    return await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next)) ? next : undefined;
+    return this.mutateClaim(record, latest => ({ ...latest, boot: this.boot }));
   }
   /** 已验证编辑可重开 ignored 或已交还的 unrouted；正在认领/已受理的记录不替换。 */
   async reopenIgnored(appId: string, event: LarkMessageEvent) {
@@ -83,30 +104,32 @@ export class LarkTaskInbox {
     if (!old || (old.state !== 'ignored' && (old.state !== 'unrouted' || old.boot))) return;
     const next: LarkInboxRecord = { appId, event: original, originalEvent: old.originalEvent ?? old.event,
       state: 'unrouted', boot: '', receivedAt: new Date().toISOString(), receiptOrder: ++this.receiptOrder };
-    await this.store.compareAndSet!(prefix(appId) + event.messageId, JSON.stringify(old), JSON.stringify(next));
+    await this.mutateClaim(old, latest => ({ ...next, ...(latest.duplicateCount ? { duplicateCount: latest.duplicateCount } : {}) }));
   }
-  /** 普通群消息只保留短命去重回执；未路由、已受理和命令记录绝不参与清理。 */
+  /** 普通群消息保留 30 天去向记录（最多 5000 条）；未路由、已受理和命令记录绝不参与清理。 */
   async pruneIgnored(appId: string, limit = 5_000) {
     if (!this.store.remove) return;
     const rows = (await this.store.list!(prefix(appId))).map(row => ({ ...row, record: JSON.parse(row.value) as LarkInboxRecord }))
       .filter(row => row.record.state === 'ignored')
       .sort((a, b) => Date.parse(b.record.receivedAt ?? '') - Date.parse(a.record.receivedAt ?? '') || (b.record.receiptOrder ?? 0) - (a.record.receiptOrder ?? 0));
     for (const [index, row] of rows.entries()) {
-      if (index >= limit || Date.now() - Date.parse(row.record.receivedAt ?? '') > 86_400_000) await this.store.remove(row.key, row.value);
+      if (index >= limit || Date.now() - Date.parse(row.record.receivedAt ?? '') > 30 * 86_400_000) await this.store.remove(row.key, row.value);
     }
   }
   async claim(appId: string, event: LarkMessageEvent, allowIgnored = false, adoption?: LarkInboxAdoption): Promise<LarkInboxRecord | undefined> {
     const key = prefix(appId) + event.messageId;
-    const raw = await this.store.get(key);
-    const old = raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
-    if (old && old.state !== 'unrouted' && !(allowIgnored && old.state === 'ignored') && (old.state !== 'received' || old.boot === this.boot)) return undefined;
-    // Always replay the originally persisted request, never replacement event content.
-    const next: LarkInboxRecord = { ...(old ?? { appId, event, receivedAt: new Date().toISOString() }), state: 'received', boot: this.boot };
-    if (adoption) {
-      next.originalEvent = old?.originalEvent ?? old?.event;
-      next.event = { ...next.event, ...adoption };
+    for (;;) {
+      const raw = await this.store.get(key);
+      const old = raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
+      if (old && old.state !== 'unrouted' && !(allowIgnored && old.state === 'ignored') && (old.state !== 'received' || old.boot === this.boot)) return undefined;
+      // Always replay the originally persisted request, never replacement event content.
+      const next: LarkInboxRecord = { ...(old ?? { appId, event, receivedAt: new Date().toISOString() }), state: 'received', boot: this.boot };
+      if (adoption) {
+        next.originalEvent = old?.originalEvent ?? old?.event;
+        next.event = { ...next.event, ...adoption };
+      }
+      if (await this.store.compareAndSet!(key, raw, JSON.stringify(next))) return next;
     }
-    return await this.store.compareAndSet!(key, raw, JSON.stringify(next)) ? next : undefined;
   }
   /**
    * Agent 代发、用户已确认的命令（agent-command.ts）：执行前按确认卡的消息落库为执行中的命令。
@@ -131,8 +154,7 @@ export class LarkTaskInbox {
    */
   async release(record: LarkInboxRecord): Promise<LarkInboxRecord | undefined> {
     if (record.state !== 'received' && record.state !== 'unrouted') return undefined;
-    const next: LarkInboxRecord = { ...record, boot: '' };
-    return await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next)) ? next : undefined;
+    return this.mutateClaim(record, latest => ({ ...latest, boot: '' }));
   }
   /** 这条记录现在落库的版本；已被删除时返回 undefined。 */
   async reload(record: LarkInboxRecord): Promise<LarkInboxRecord | undefined> {
@@ -141,20 +163,18 @@ export class LarkTaskInbox {
   }
   /** 交还之后没被别的路径接手：记录原样还在。 */
   async unclaimed(record: LarkInboxRecord) {
-    return await this.store.get(prefix(record.appId) + record.event.messageId) === JSON.stringify(record);
+    const latest = await this.reload(record);
+    return Boolean(latest && executionRecord(latest) === executionRecord(record));
   }
   async adoptAccepted(record: LarkInboxRecord) {
     if (record.state !== 'accepted') return undefined;
-    const next = { ...record, boot: this.boot };
-    return await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next)) ? next : undefined;
+    return this.mutateClaim(record, latest => ({ ...latest, boot: this.boot }));
   }
-  async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'resourceDirectories' | 'event' | 'workflowRequestId' | 'fallbackNote' | 'fallbackFromSessionId' | 'redispatch' | 'mergeFrom' | 'mergedInto'>>) {
+  async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'resourceDirectories' | 'event' | 'workflowRequestId' | 'fallbackNote' | 'fallbackFromSessionId' | 'redispatch' | 'mergeFrom' | 'mergedInto' | 'reason' | 'detail' | 'disposition'>>) {
     // 同一认领的准备和 /new 可并发更新；串行合并字段，同时保留跨进程 CAS。
     const operation = (this.updates.get(record) ?? Promise.resolve()).then(async () => {
-      const next = { ...record, ...patch };
-      if (!await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next))) {
-        throw new Error('Lark inbox claim was lost');
-      }
+      const next = await this.mutateClaim(record, latest => ({ ...latest, ...patch, ...(patch.taskId ? { reason: undefined, detail: undefined, disposition: undefined } : {}), ...(patch.reason ? { disposition: dispositionSchema.parse({ schemaVersion: 1, reason: patch.reason, ...(patch.detail ? { detail: patch.detail } : {}) }) } : {}) }));
+      if (!next) throw new Error('Lark inbox claim was lost');
       Object.assign(record, next);
     });
     this.updates.set(record, operation.catch(() => {}));

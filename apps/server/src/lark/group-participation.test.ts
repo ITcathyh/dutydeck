@@ -29,7 +29,7 @@ const act = (snapshot: CollaborationSnapshot, evidence = true): ParticipationRes
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { vi.useRealTimers(); for (const clean of cleanups.splice(0).reverse()) await clean(); });
 
-async function harness(mode: 'off' | 'observe' | 'selective' | 'eager' = 'selective', extra: Partial<Pick<GroupParticipationOptions, 'withDelivery' | 'readMemory' | 'readGroupDescription' | 'readTeamContext' | 'authorizeTeamContext' | 'now' | 'usageRefusal' | 'canOperate' | 'applyLevel' | 'readParticipationUsage'>> = {}) {
+async function harness(mode: 'off' | 'observe' | 'selective' | 'eager' = 'selective', extra: Partial<Pick<GroupParticipationOptions, 'inboxStore' | 'withDelivery' | 'readMemory' | 'readGroupDescription' | 'readTeamContext' | 'authorizeTeamContext' | 'now' | 'usageRefusal' | 'canOperate' | 'applyLevel' | 'readParticipationUsage'>> = {}) {
   const db = new Database(':memory:'); createCollaborationSchema(db); allowEagerParticipation(db); addCollaborationScenarios(db);
   const repository = createCollaborationRepository(db);
   if (mode !== 'off') await repository.updateSettings(scope, { expectedRevision: 0, participation: mode }, 'owner');
@@ -1766,4 +1766,28 @@ describe('plugin task.beforeRun deny on background sessions', () => {
     expect(h.service.replyText).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_1', text: '这次回复生成失败，请稍后重试。' }));
     expect((await h.repository.listDecisions(scope))[0]!.status).toBe('failed');
   });
+});
+
+it('records debounced message links and the final silent decision in the inbox', async () => {
+  const values = new Map<string,string>();
+  const inboxStore = { get: async (key: string) => values.get(key), compareAndSet: async (key: string, old: string | undefined, value: string) => { if (values.get(key) !== old) return false; values.set(key,value); return true; } } as any;
+  const h = await harness('selective',{ inboxStore });
+  for (const id of ['om_merge_a','om_merge_b']) values.set(`lark.inbox.${scope.appId}.${id}`,JSON.stringify({appId:scope.appId,event:message(id),state:'ignored',boot:''}));
+  await h.participation.handle(message('om_merge_a'),config,{explicit:false,botOpenId:'ou_bot'});
+  await h.participation.handle(message('om_merge_b'),config,{explicit:false,botOpenId:'ou_bot'});
+  await h.participation.flush(scope);
+  expect(JSON.parse(values.get(`lark.inbox.${scope.appId}.om_merge_a`)!)).toMatchObject({reason:'participation_merged',mergedInto:'om_merge_b'});
+  expect(JSON.parse(values.get(`lark.inbox.${scope.appId}.om_merge_b`)!)).toMatchObject({reason:'participation_silent',disposition:{decisionId:expect.any(String)}});
+});
+
+it.each([false,true])('records proactive reply completion or budget suppression (blocked=%s)', async blocked => {
+ const values = new Map<string,string>();
+ const inboxStore = {get:async(key:string)=>values.get(key),compareAndSet:async(key:string,old:string|undefined,value:string)=>{if(values.get(key)!==old)return false;values.set(key,value);return true;}} as any;
+ const h = await harness('selective',{inboxStore});
+ values.set(`lark.inbox.${scope.appId}.om_1`,JSON.stringify({appId:scope.appId,event:message(),state:'ignored',boot:''}));
+ h.decide.mockImplementation(async (_config,snapshot)=>reply(snapshot));
+ if(blocked) await h.repository.updateSettings(scope,{expectedRevision:1,maxProactivePerHour:0},'owner');
+ await h.coordinator.handle(message(),config); await h.participation.flush(scope);
+ expect(JSON.parse(values.get(`lark.inbox.${scope.appId}.om_1`)!)).toMatchObject({reason:blocked?'participation_reply_budget':'participation_replied',disposition:{decisionId:expect.any(String)}});
+ expect(h.service.replyText).toHaveBeenCalledTimes(blocked?0:1);
 });

@@ -1440,3 +1440,5 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 ## 开源许可证与协议 (License)
 
 Dutydeck 核心代码采用开源授权协议。完整第三方依赖与开源许可证声明请参阅 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。
+
+消息去向：机器人页面的“最近没处理的消息”可查看 24 小时、7 天或 30 天内的原因。用 `dutydeck lark why <message_id> [--app <appId>]` 查询单条消息，或 `dutydeck lark ignored --chat <chat_id> [--since 24h|7d|30d]` 列表查询。忽略记录保留 30 天，每机器人最多 5000 条；旧记录显示未记录原因。
