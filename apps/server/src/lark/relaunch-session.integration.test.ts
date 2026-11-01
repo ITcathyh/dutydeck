@@ -1,3 +1,4 @@
+import { readTaskReport, writeTaskReport } from '@dutydeck/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -254,6 +255,8 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     expect(rendered).toContain('在新会话中重新执行');
     expect(rendered).toContain('重新执行可能把已经做过的操作再做一次');
     for (const phrase of ['请勿直接重试', '请联系管理员']) expect(rendered).not.toContain(phrase);
+    const oldTaskId = (await h.mapping('om_first')).saved.runtime_task_id!;
+    await writeTaskReport(h.repos.config, { schemaVersion: 1, taskId: oldTaskId, sessionId: h.oldSessionId, status: 'waiting', question: '今天发布吗？', reportedAt: new Date().toISOString() });
     const value = callbackValueOf(card, 'rerun_in_new_session');
     expect(value).toEqual({ action: 'rerun_in_new_session', task_id: 'om_first', turn: '1' });
 
@@ -264,6 +267,7 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     const fresh = (await h.sessions()).find(item => item.id !== h.oldSessionId)!;
     expect((await h.tasks(fresh.id))[0]!.status).toBe('queued');
     expect((await h.tasks(fresh.id)).map(task => task.prompt)).toEqual(['详细排查下报警']);
+    expect((await readTaskReport(h.repos.config, oldTaskId))?.clearedAt).toBeTruthy();
     // 原任务仍待核对，排队请求也没被动过（它有自己的卡和按钮），阻塞原样。
     expect((await h.tasks(h.oldSessionId)).map(task => task.status)).toEqual(['reconcile_required', 'queued']);
     expect(h.blockers()).toEqual(blockersBefore);

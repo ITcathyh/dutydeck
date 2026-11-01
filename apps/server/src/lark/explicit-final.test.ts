@@ -929,3 +929,39 @@ it('recovers a confirmed summary receipt after the retry window without resendin
   expect(resultSends(h)).toHaveLength(1);
   expect(await h.persisted()).toMatchObject({ final_delivery_state: 'delivered' });
 });
+
+describe('reported task results', () => {
+  it.each(['waiting', 'blocked'] as const)('shows %s first in normal and explicit result cards and the task list', async status => {
+    for (const explicit of [false, true]) {
+      const h = await harness();
+      await h.runtime.reportCurrentTask(h.session.id, status === 'waiting' ? { status, question: '今天发布吗？' } : { status, summary: '缺少测试账号' }, h.active);
+      if (explicit) await h.sendFinal();
+      h.config.completionReactionOnly = true;
+      h.release(); const saved = await h.resultCard();
+      const result = h.cards.get(saved.final_message_id!);
+      expect(buildLarkCard(result).body.elements[0]).toMatchObject({ element_id: 'task_report', content: status === 'waiting' ? '等你决定：今天发布吗？' : '受阻：缺少测试账号' });
+      expect(result.elements[0]).toMatchObject({ element_id: 'task_report', content: status === 'waiting' ? '等你决定：今天发布吗？' : '受阻：缺少测试账号' });
+      const entries = await (h.coordinator as any).taskDashboardEntries(event('om_tasks'), h.config);
+      expect(entries.find((row: any) => row.taskId === h.active.taskId)?.taskReport?.status).toBe(status);
+    }
+  });
+});
+
+it.each([false, true])('preserves a reported question first after restart (explicit=%s)', async explicit => {
+  const h = await harness({ reaction: true });
+  await h.runtime.reportCurrentTask(h.session.id, { status: 'waiting', question: '今天发布吗？' }, h.active);
+  if (explicit) await h.sendFinal();
+  h.coordinator.stop(); h.release();
+  await vi.waitFor(async () => expect((await h.runtime.getTasks(h.session.id))[0]?.status).toBe('completed'));
+  const restarted = h.createCoordinator();
+  try { await restarted.reconcile(h.config); } finally { restarted.stop(); }
+  const saved = await h.resultCard();
+  expect(h.cards.get(saved.final_message_id!).elements[0]).toMatchObject({ element_id: 'task_report', content: '等你决定：今天发布吗？' });
+});
+it('keeps dropped out of attention and leaves the existing result body first', async () => {
+  const h = await harness();
+  await h.runtime.reportCurrentTask(h.session.id, { status: 'dropped', summary: '已由别人修复' }, h.active);
+  h.release(); const saved = await h.resultCard();
+  expect(h.cards.get(saved.final_message_id!).elements.some((el: any) => el.element_id === 'task_report')).toBe(false);
+  expect((await h.runtime.getTasks(h.session.id))[0]?.status).toBe('completed');
+});

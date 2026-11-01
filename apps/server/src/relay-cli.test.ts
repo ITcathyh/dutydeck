@@ -2,9 +2,9 @@ import { createCliProgram } from './cli-program.js';
 import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayAskBroker, RelayError, relayHintLines, type RelayAskChoice } from '@dutydeck/relay';
-import { askOutput } from './relay-cli.js';
+import { askOutput, runSessionReport } from './relay-cli.js';
 
 const workspace = fileURLToPath(new URL('../../../', import.meta.url));
 const cli = fileURLToPath(new URL('./cli.ts', import.meta.url));
@@ -108,5 +108,18 @@ describe('session ask CLI over HTTP', () => {
   it('preserves timeout and cancelled output contracts', () => {
     expect(askOutput({ status: 'expired', askId: 'ask_1' })).toEqual({ stdout: '', stderr: '提问超时，用户未在期限内回答。\n', exitCode: 124 });
     expect(askOutput({ status: 'cancelled', reason: '会话结束' })).toEqual({ stdout: '', stderr: '会话结束。\n', exitCode: 3 });
+  });
+});
+
+describe('session report CLI', () => {
+  it('parses report arguments and sends them through the current-session transport', async () => {
+    const handler = vi.fn();
+    await createCliProgram('test', { sessionReport: handler }).parseAsync(['node', 'dutydeck', 'session', 'report', '--status', 'waiting', '--question', '今天发布吗？']);
+    expect(handler).toHaveBeenCalledWith({ status: 'waiting', question: '今天发布吗？' });
+    const fetch = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    await runSessionReport({ status: 'blocked', summary: '缺少账号' }, { env: { dutydeck_relay_url: 'http://127.0.0.1:1234/api/relay', dutydeck_relay_token: 'fixture-token' }, fetcher: fetch as typeof globalThis.fetch });
+    expect(fetch.mock.calls[0]?.[0]).toBe('http://127.0.0.1:1234/api/relay/sessions/self/report');
+    expect(JSON.parse(String((fetch.mock.calls[0] as any)[1].body))).toEqual({ status: 'blocked', summary: '缺少账号' });
+    await expect(runSessionReport({ status: 'waiting' })).rejects.toMatchObject({ code: 'TASK_REPORT_INVALID' });
   });
 });

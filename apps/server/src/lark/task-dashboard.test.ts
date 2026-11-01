@@ -439,3 +439,14 @@ describe('任务行的 Agent 与工作区', () => {
     expect(JSON.stringify(result.elements)).not.toContain('Agent');
   });
 });
+
+describe('reported task dashboard', () => {
+  it.each(['waiting', 'blocked'] as const)('puts %s into attention while retaining the host status', status => {
+    const taskReport = { schemaVersion: 1 as const, taskId: 't', sessionId: 's', status, question: '今天发布吗？', summary: '缺少账号', reportedAt: '2026-11-01T00:00:00.000Z' };
+    const { elements } = buildLarkTaskDashboard([entry({ taskReport })]);
+    expect(elements.find(el => el.element_id === 'task_dashboard_group_0')).toBeTruthy();
+    expect(rowText(rows(elements)[0]!)).toContain(status === 'waiting' ? '等你决定' : '受阻');
+    expect(rowText(rows(elements)[0]!)).toContain(status === 'waiting' ? '今天发布吗？' : '缺少账号');
+    expect(buildLarkTaskDashboard([entry({ taskReport: { ...taskReport, clearedAt: taskReport.reportedAt } })]).elements.find(el => el.element_id === 'task_dashboard_group_0')).toBeUndefined();
+  });
+});

@@ -60,6 +60,7 @@ describe('routing block — relay command hints', () => {
     expect(buildDutydeckRoutingBlock(undefined, { ...relayEnv, dutydeck_frozen_materials: 'true' })).toBe('');
     for (const source of ['web', 'terminal', undefined, 'lark']) {
       const block = buildDutydeckRoutingBlock(undefined, { ...relayEnv, dutydeck_session_source: source });
+      expect(block).toContain('session report --status waiting');
       expect(block).toContain('session send');
       expect(block).toContain('session ask');
       if (source === 'lark') expect(block).not.toContain('最终答复直接输出');

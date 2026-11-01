@@ -310,8 +310,8 @@ export async function completeExplicitFinal(store: ConfigRepository | undefined,
   }
   const receipt = await deliver(store, service, record, beforeSend, beforeRelay);
   if (receipt.delivery_mode === 'reply-agent') return receiptFor(receipt);
-  const elements = [...decoration.filter(item => item.element_id === 'group_mention'), ...receipt.elements!,
-    ...decoration.filter(item => item.element_id !== 'group_mention')];
+  const elements = [...decoration.filter(item => item.element_id === 'task_report'), ...decoration.filter(item => item.element_id === 'group_mention'), ...receipt.elements!,
+    ...decoration.filter(item => !['group_mention', 'task_report'].includes(String(item.element_id)))];
   const prepared = await prepareLarkResult(service, targetFor(context.scope), { ...input, beforeSend,
     elements, ...(receipt.card_body ? { cardBody: { ...receipt.card_body, elements } } : {}), idempotencyKey: receipt.provider_uuid }, log, store, beforeSend);
   // Transient failures retry the same card. A permanently unavailable card gets
@@ -320,9 +320,9 @@ export async function completeExplicitFinal(store: ConfigRepository | undefined,
   catch (error) {
     if (!isLarkMessageUnupdatable(error)) throw error;
     const status = await sendLarkResult(service, targetFor(context.scope), { ...input,
-      elements: [ ...decoration.filter(item => item.element_id === 'group_mention'),
+      elements: [ ...decoration.filter(item => item.element_id === 'task_report'), ...decoration.filter(item => item.element_id === 'group_mention'),
         { tag: 'markdown', element_id: 'explicit_final_delivered', content: '正文已交付；原答复卡已无法更新。本卡提供平台执行状态、验证与验收入口。' },
-        ...decoration.filter(item => item.element_id !== 'group_mention') ],
+        ...decoration.filter(item => !['group_mention', 'task_report'].includes(String(item.element_id))) ],
       idempotencyKey: `final_status_${digest(context.scope).slice(0, 32)}`
     }, log, store, beforeSend);
     return { ...status, attachmentMessageId: receipt.attachment_message_id ?? prepared.attachmentMessageId };

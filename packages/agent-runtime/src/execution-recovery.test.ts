@@ -1,3 +1,4 @@
+import { readTaskReport, writeTaskReport } from '@dutydeck/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -126,7 +127,9 @@ describe('owner execution recovery', () => {
     const stale = input.resourceChecks.map(check => ({ ...check, expectedRevision: check.expectedRevision - 1 }));
     await expect(h.runtime.confirmExecutionRecovery(h.session.id, { ...input, resourceChecks: stale }, owner)).rejects.toMatchObject({ code: 'RESOURCE_OBSERVATION_CONFLICT' });
     expect((await h.runtime.getTaskRecovery(h.session.id, h.second.id)).blockers).toContainEqual({ code: 'PREVIOUS_RESULT_UNKNOWN' });
+    await writeTaskReport(h.repos.config, { schemaVersion: 1, sessionId: h.session.id, taskId: input.taskId, status: 'blocked', summary: '需要管理员核对', reportedAt: new Date().toISOString() });
     const first = await h.runtime.confirmExecutionRecovery(h.session.id, input, owner);
+    expect((await readTaskReport(h.repos.config, input.taskId))?.clearedAt).toBeTruthy();
     expect(first.replayed).toBe(false);
     await vi.waitFor(async () => expect((await h.runtime.getTasks(h.session.id)).find(task => task.id === h.second.id)?.status).toBe('completed'));
     const replay = await h.runtime.confirmExecutionRecovery(h.session.id, input, owner);

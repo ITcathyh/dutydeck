@@ -20,7 +20,7 @@ import { runWorkCommand } from './work-item-cli.js';
 import { AgentCliError, agentCliErrorBody, runAgentCli } from './agent-cli.js';
 import { AgentGroupToolCliError, runAgentCommand, runGroupBots, runGroupHandoff, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupReplyAgent, runGroupSelf, runGroupSend, runGroupSendFile, runGroupTeamSearch, runGroupWait, runHistoryList, runHistoryShow } from './lark/agent-tools-cli.js';
 import { runMemoryAdd, runMemoryList, runMemoryRemove, runMemorySearch, runMemoryShow } from './lark/memory-cli.js';
-import { acknowledgeDeferredAsk, askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
+import { acknowledgeDeferredAsk, askOutput, runSessionAsk, runSessionSend, runSessionReport } from './relay-cli.js';
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { runPermissionHook } from './permission-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
@@ -490,6 +490,7 @@ async function main() {
     schedule: async (action, id, input) => { output(await runScheduleCli(action, id, input)); },
     scheduleRequest: async input => { output(await runScheduleRequest(input)); },
     sessionHerdr: async args => { await runHerdrCli(args); },
+    sessionReport: async options => { output(await runSessionReport(options)); },
     sessionSend: async text => { output(await runSessionSend(text)); },
     sessionNativeAsk: async () => {
       const result = await runNativeAskHook(await readNativeAskPayload(process.stdin));

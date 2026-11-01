@@ -75,7 +75,7 @@ import {
 import { claudeDataDir, codexHome, traeHome } from '@dutydeck/pty-driver';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { createCliAdapter } from '@dutydeck/cli-adapters';
-import { RelayAskBroker, RelayCapabilityRegistry, RelayService, loadOrCreateRelaySigningSecret } from '@dutydeck/relay';
+import { RelayAskBroker, RelayCapabilityRegistry, RelayService, taskReportHint, loadOrCreateRelaySigningSecret } from '@dutydeck/relay';
 import { LocalFileSecretProvider, localFileSecretProviderName, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { LarkIdentityPreflightProbe } from './lark/identity-preflight.js';
 import {
@@ -510,9 +510,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       const prefix = toolsPrompt.slice(0, toolsPrompt.length - prompt.length) + resultPrompt + businessPrompt;
       // 飞书会话的工具块已经定义了 dutydeck 简写，Herdr 入口排在它后面并沿用简写。
       const herdrPrompt = session.terminalBackend === 'herdr' ? '你正在 Herdr 的真实主终端 pane 内运行；HERDR_* 由 Herdr 注入，使用 herdr pane current 核实自身上下文，可用 --current 管理本 pane。不要伪造身份或操作用户 default session。侧边任务可继续使用本会话的 dutydeck session herdr 专属入口。' : herdr.prompt(prefix ? 'dutydeck' : undefined);
-      const legacyPrompt = `${prefix}${projectPrompt}${herdrPrompt ? `${herdrPrompt}\n\n` : ''}${prompt}`;
+      const reportPrompt = taskReportHint(options.groupToolsCommand ?? 'dutydeck');
+      const legacyPrompt = `${prefix}${reportPrompt}\n\n${projectPrompt}${herdrPrompt ? `${herdrPrompt}\n\n` : ''}${prompt}`;
       const parts = [
         ...(prefix ? [{ kind: 'dynamic_context' as const, trustScope: 'host:current_authority', content: prefix }] : []),
+        { kind: 'host_rules' as const, sourceId: 'dutydeck:task-report', version, digest: promptDigest(reportPrompt), trustScope: 'host', complete: true, content: reportPrompt, suffix: '\n\n' },
         ...(projectPrompt ? [{ kind: 'dynamic_context' as const, trustScope: 'memory:data', content: projectPrompt }] : []),
         ...(herdrPrompt ? [{ kind: 'host_rules' as const, sourceId: 'dutydeck:herdr', version, digest: promptDigest(herdrPrompt), trustScope: 'host', complete: true, content: herdrPrompt, suffix: '\n\n' }] : []),
         ...(context?.promptParts ?? [{ kind: 'user_request' as const, trustScope: 'user_request', content: prompt }])

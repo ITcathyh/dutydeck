@@ -352,3 +352,19 @@ describe('relay ask — blocking round trip over HTTP', () => {
     broker.close();
   });
 });
+
+describe('session report route', () => {
+  it('uses the relay session capability and rejects another session or caller-selected task', async () => {
+    const h = await remoteHarness({ ses_a: session('ses_a'), ses_b: session('ses_b') });
+    Object.assign(h.runtime, { getActiveTaskContext: () => ({ taskId: 'task_a', attemptId: 'attempt_a' }), reportCurrentTask: vi.fn(async (sessionId, input, owner) => ({ sessionId, ...input, taskId: owner.taskId })) });
+    const headers = { authorization: `Bearer ${h.capabilities.tokenFor('ses_a')}` };
+    const body = { status: 'waiting', question: '今天发布吗？' };
+    expect((await h.app.inject({ method: 'POST', url: '/api/relay/sessions/self/report', headers, payload: body })).json()).toMatchObject({ ok: true, report: { sessionId: 'ses_a', taskId: 'task_a', ...body } });
+    expect((await h.app.inject({ method: 'POST', url: '/api/relay/sessions/ses_b/report', headers, payload: body })).statusCode).toBe(401);
+    expect((await h.app.inject({ method: 'POST', url: '/api/relay/sessions/self/report', headers, payload: { ...body, taskId: 'other' } })).statusCode).toBe(400);
+    expect((await h.app.inject({ method: 'POST', url: '/api/relay/sessions/self/report', headers, payload: { status: 'blocked' } })).statusCode).toBe(400);
+    expect((await h.app.inject({ method: 'POST', url: '/api/relay/sessions/self/report', payload: body })).statusCode).toBe(401);
+    Object.assign(h.runtime, { getActiveTaskContext: () => undefined });
+    expect((await h.app.inject({ method: 'POST', url: '/api/relay/sessions/self/report', headers, payload: body })).statusCode).toBe(409);
+  });
+});

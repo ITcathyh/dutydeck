@@ -101,7 +101,7 @@ function TaskRow({ session, summary, agent, section, onSelect, selection }: {
       <strong className="line-clamp-2 text-body font-medium text-primary sm:line-clamp-none sm:block sm:truncate" title={title}>{title}</strong>
       <span className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-caption text-secondary">
         <span>{sessionWorkspaceName(session)}</span><span aria-hidden="true">·</span><span>{agent?.name ?? session.agentId}</span>
-        {section === 'attention' && <><span aria-hidden="true">·</span><span className="font-medium text-primary"><span>{attention === 'decision' ? '需要决定' : '需要恢复'}</span> · <span>{attentionReasonForSession(session)}</span></span></>}
+        {section === 'attention' && <><span aria-hidden="true">·</span><span className="font-medium text-primary"><span>{attention === 'decision' ? '需要决定' : '需要恢复'}</span> · <span>{attentionReasonForSession(session, summary)}</span></span></>}
         {queuedCommands > 0 && <span className="rounded-sm bg-queued-soft px-1.5 py-0.5 font-medium text-queued">待执行指令 {queuedCommands} 条</span>}
       </span>
     </span>

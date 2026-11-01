@@ -1,6 +1,7 @@
 import type { RunSummary, Session } from './api';
 import type { WorkspaceOrganization } from '@dutydeck/shared';
 import {
+  taskReportAttentionText,
   collectWorkspaceGroups,
   normalizeWorkspacePath,
   sessionWorkspaceDirectory,
@@ -59,6 +60,7 @@ export function sessionWorkspaceName(session: Pick<Session, 'cwd' | 'workspaceSo
 /** 计数、筛选、排序与行内说明共享同一投影；正常空闲不构成待办。 */
 export function sessionAttention(session: Session, summary?: RunSummary): SessionAttention {
   if (session.archivedAt) return 'archived';
+  if (taskReportAttentionText(summary?.taskReport)) return summary!.taskReport!.status === 'waiting' ? 'decision' : 'recovery';
   if (session.state === 'waiting_for_permission' || session.state === 'waiting_for_answer') return 'decision';
   if (recoveryStates.has(session.state) || session.error?.trim()) return 'recovery';
   if (activeStates.has(session.state) || (summary?.queuedCount ?? 0) > 0) return 'active';
@@ -212,7 +214,9 @@ export function sessionErrorSummary(error?: string): string | undefined {
   return characters.length <= errorSummaryLimit ? redacted : `${characters.slice(0, errorSummaryLimit - 1).join('')}…`;
 }
 
-export function attentionReasonForSession(session: Session): string {
+export function attentionReasonForSession(session: Session, summary?: RunSummary): string {
+  const report = taskReportAttentionText(summary?.taskReport);
+  if (report) return report;
   const error = sessionErrorSummary(session.error);
   return error ? `任务异常：${error}；打开详情查看` : nextActionForState(session.state);
 }

@@ -65,6 +65,7 @@ export {
   relayCommandFrom,
   relayEnabled,
   relayHintLines,
+  taskReportHint,
   relayPermissionHookTimeoutSeconds,
   type RelayPromptEnv
 } from './prompt.js';

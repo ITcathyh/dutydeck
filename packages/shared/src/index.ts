@@ -1,5 +1,6 @@
 export * from './history.js';
 export * from './event-content.js';
+export * from './task-report.js';
 export * from './plugin-results.js';
 export * from './loop-timing.js';
 import { z } from 'zod';

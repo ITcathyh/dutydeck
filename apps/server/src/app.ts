@@ -341,7 +341,12 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     return visible.filter(Boolean);
   });
   app.get('/api/sessions/summaries', async (request, reply) => {
-    const respond = (summaries: unknown[]) => {
+    const respond = async (summaries: unknown[]) => {
+      summaries = await Promise.all(summaries.map(async value => {
+        const summary = value as { sessionId: string };
+        const report = await runtime.getSessionTaskReport?.(summary.sessionId);
+        return report ? { ...summary, taskReport: report } : value;
+      }));
       const etag = `"${createHash('sha256').update(JSON.stringify(summaries)).digest('base64url')}"`;
       // Browsers revalidate the private representation every poll. Permission
       // filtering precedes hashing, so revoked/removed entries invalidate it too.

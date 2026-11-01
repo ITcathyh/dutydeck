@@ -1,3 +1,4 @@
+import { taskReportHint } from '@dutydeck/relay';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:net';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -70,14 +71,14 @@ it('composes frozen collaboration prompts without tool, plugin-result or Herdr d
       expect(env.dutydeck_relay_token).toBeTruthy();
     }
     expect(tools).not.toHaveBeenCalled(); expect(herdr).not.toHaveBeenCalled(); expect(active).not.toHaveBeenCalled();
-    for (const patch of [
+    for (const protocol of ['acp', 'pty-cli'] as const) for (const patch of [
       { permissionMode: 'approve-reads' as const }, { permissionMode: 'full-trust' as const },
       { sourceId: 'cli_test:oc_group:group' }, { source: 'web', sourceId: undefined }, { source: 'terminal', sourceId: undefined }
     ]) {
-      const session = { ...base, protocol: 'pty-cli' as const, ...patch };
+      const session = { ...base, protocol, ...patch };
       const result = await options.sessionPrompt!(session, prompt, { promptDiagnostics: { templateVersion: 'legacy-v1', beforeChars: prompt.length, afterChars: prompt.length,
         deduplicatedParts: 0, parts: [], fallbackReason: 'configuration_unavailable' } });
-      expect(typeof result === 'string' ? result : result.prompt).toBe(`TOOLS\n\nHERDR\n\n${prompt}`);
+      expect(typeof result === 'string' ? result : result.prompt).toBe(`TOOLS\n\n${taskReportHint('dutydeck')}\n\nHERDR\n\n${prompt}`);
       expect(result).toMatchObject({ diagnostics: { fallbackReason: 'configuration_unavailable' } });
       expect(options.sessionEnvironment!(session).dutydeck_frozen_materials).toBeUndefined();
     }

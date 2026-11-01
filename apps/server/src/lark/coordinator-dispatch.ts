@@ -1,3 +1,5 @@
+import { readTaskReport } from '@dutydeck/shared';
+import { taskReportCardElements } from './task-report-card.js';
 import { larkAgentUnavailableReason, larkFallbackHasActivity } from './agent-fallback.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import type { PromptPart } from '@dutydeck/shared';
@@ -1406,12 +1408,13 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
             state, started_at: task.startedAt!, turn: currentTurn,
             ...(event.chatType === 'group' ? { reply_message_id: larkMessageAnchor(event), reply_in_thread: Boolean(event.threadId?.trim()) } : {})
           }, runtimeTask?.currentAttemptId) : undefined;
+        const reportElements = taskReportCardElements(task.runtimeTaskId && this.workflowOptions.store ? await readTaskReport(this.workflowOptions.store, task.runtimeTaskId) : undefined);
         const explicit = await hasExplicitFinal(this.workflowOptions.store, finalContext, state);
         // 完成时只贴表情：成功终态改为在原消息上贴一枚表情，不再发结果卡。
         // 只对成功终态生效——失败/中断/取消仍必须发结果卡，一个表情等于把失败藏起来。
         // 任务通道的合成事件没有可贴的原消息，只能照常发结果卡，否则用户什么也收不到。
         // 计划轮必须发结果卡：计划和批准按钮都在卡上。
-        if (!explicit && !task.fallbackNote && state === 'completed' && larkCompletionReactionOnly(config, prompt, event.messageId)) {
+        if (!reportElements.length && !explicit && !task.fallbackNote && state === 'completed' && larkCompletionReactionOnly(config, prompt, event.messageId)) {
           const reacted = await deliverLarkStatusReaction(this.service, { appId: config.appId, messageId: larkMessageAnchor(event), completed: true }, this.log, this.workflowOptions.store);
           if (this.stopped || task.turn !== currentTurn) return;
           // 贴失败就不记「已交付」：这枚表情是用户唯一能看到的完成信号，交给对账重试。
@@ -1441,6 +1444,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         const turnDiff = task.sessionId && task.runtimeTaskId && this.workflowOptions.store
           ? larkTurnDiffElement(await readTurnDiffRecord(this.workflowOptions.store, task.sessionId, task.runtimeTaskId).catch(() => undefined), config.webBaseUrl) : undefined;
         const elements = [
+          ...reportElements,
           ...(task.fallbackNote ? [{ tag: 'markdown', element_id: 'agent_fallback_note', content: task.fallbackNote, text_size: 'notation' }] : []),
           ...(continueCause?.settled ? [{ tag: 'markdown', element_id: 'recovery_note', content: larkQuietSettledNote(continueCause) }] : []),
           ...(explicit ? [] : task.steered ? [{ tag: 'markdown', element_id: 'steer_note', content: task.steerNote ?? steeringOutcomeText(task.steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events, { state, agentName: cardContext.agentName })),

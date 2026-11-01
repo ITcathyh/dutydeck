@@ -382,6 +382,7 @@ export async function prepareLarkResult(
     // An exact excerpt is not a business-outcome summary. Keep it explicitly
     // labelled; never infer success from a finished agent turn.
     resultInput.elements = [
+      ...input.elements.filter(element => element.element_id === 'task_report'),
       // 节选按 Markdown 渲染：卡面不再露出 ---、###、** 这些符号。
       { tag: 'markdown', element_id: 'final_output', text_align: 'left', text_size: 'normal_v2', margin: '0px', content: `**正文开头节选（非完整结论）**\n\n${excerpt}` },
       { tag: 'div', element_id: 'result_attachment', text: { tag: 'plain_text', content: `完整正文已发送为附件「${filename}」。未完成事项与下一步请以全文为准；可引用本卡或附件反馈。` } },

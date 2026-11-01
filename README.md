@@ -26,6 +26,7 @@ Claude Code 终端会话优先使用 OSC 7501 状态信号判断忙碌、等待�
 
 ---
 
+
 ## 项目简介
 
 **Dutydeck** 是面向开发者和工程团队的本地优先（Local-First）AI Agent 研发工作台。
@@ -1141,6 +1142,8 @@ dutydeck restart
 ---
 
 ## CLI 与运维速查 <a id="cli-reference"></a>
+
+收尾需要人查看时，Agent 可在本轮结束前用 `dutydeck session report --status waiting --question "一个具体问题"`，或 `--status blocked --summary "一句原因"`。它们会进入飞书 `/tasks` 和网页「待你处理」，结果卡首行显示问题或原因；原会话开始下一轮或通过已有操作处理后自动清除。`ready` 表示完成（默认无需报告），`dropped` 表示无需处理；需要固定选项并阻塞等待回答时继续用 `session ask --choices`。
 
 ### 1. 守护进程日常管理
 

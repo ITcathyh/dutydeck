@@ -397,3 +397,16 @@ describe('Calm Workbench 注意力分层', () => {
     expect(sessionAttention({ ...session('idle', '/repo', 'idle', ''), error: 'connection lost' })).toBe('recovery');
   });
 });
+
+describe('reported turn attention', () => {
+  it.each(['waiting', 'blocked'] as const)('includes completed sessions reported as %s until cleared', status => {
+    const current = session('s', '/repo', 'completed', '2026-11-01T00:00:00.000Z');
+    const summary: RunSummary = { sessionId: 's', taskId: 't', prompt: 'work', status: 'completed', queuedCount: 0, updatedAt: current.updatedAt,
+      taskReport: { schemaVersion: 1, taskId: 't', sessionId: 's', status, question: '今天发布吗？', summary: '缺少账号', reportedAt: current.updatedAt } };
+    expect(sessionAttention(current, summary)).toBe(status === 'waiting' ? 'decision' : 'recovery');
+    expect(workbenchCounts([current], { s: summary }).attention).toBe(1);
+    expect(attentionReasonForSession(current, summary)).toBe(status === 'waiting' ? '等你决定：今天发布吗？' : '受阻：缺少账号');
+    expect(sessionAttention(current, { ...summary, taskReport: { ...summary.taskReport!, clearedAt: current.updatedAt } })).toBe('completed');
+    for (const reported of ['ready', 'dropped'] as const) expect(needsAttention(current, { ...summary, taskReport: { ...summary.taskReport!, status: reported } })).toBe(false);
+  });
+});

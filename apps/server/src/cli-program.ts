@@ -272,6 +272,7 @@ export interface CliHandlers {
   schedule?(action: ScheduleCliAction, id: string | undefined, input: ScheduleCliInput): void | Promise<void>;
   scheduleRequest?(input: ScheduleRequestCliInput): void | Promise<void>;
   sessionHerdr?(args: string[]): void | Promise<void>;
+  sessionReport?(options: { status: string; question?: string; summary?: string }): void | Promise<void>;
   sessionSend?(text: string): void | Promise<void>;
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
   sessionNativeAsk?(): void | Promise<void>;
@@ -939,6 +940,12 @@ alarm=<JSON> (the old flat alarm subscription) still works for one release and i
     .description('Publish an in-turn progress event; presentation depends on session settings')
     .argument('<text>', 'Message content')
     .action(text => handlers.sessionSend?.(text));
+  session.command('report')
+    .description('报告当前任务的收尾状态；不阻塞等待回答')
+    .requiredOption('--status <status>', 'ready（完成）、waiting（等你决定）、blocked（受阻）、dropped（无需处理）')
+    .option('--question <text>', '等你决定时的一个具体问题，waiting 必填')
+    .option('--summary <text>', '一句话说明，blocked 必填原因')
+    .action(options => handlers.sessionReport?.(options));
   session.command('ask')
     .description('Ask the user a question and block until they answer')
     .argument('<question>', 'Question to ask')

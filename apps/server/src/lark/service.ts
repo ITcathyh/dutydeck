@@ -475,6 +475,7 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
       const fallbackText = String((mainElements.find(element => element.element_id === 'final_output') as any)?.content
         ?? (mainElements.find(element => element.tag === 'markdown' && !meta.includes(element)) as any)?.content ?? '内容过长');
       return [
+        ...mainElements.filter(element => element.element_id === 'task_report'),
         ...meta,
         { tag: 'markdown', element_id: 'final_output', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
         { tag: 'markdown', element_id: 'dutydeck_snapshot_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
@@ -753,6 +754,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
   const arrange = (sourceElements: Array<Record<string, unknown>>) => {
     const waitingForApproval = state === 'running' && hasPendingApproval(sourceElements);
     const mainElements = sourceElements.filter(element => !metaIds.has(String(element.element_id ?? '')));
+    const reportElements = isResultCard ? mainElements.filter(element => element.element_id === 'task_report') : [];
     const finalIds = new Set(['final_output', 'result_missing']);
     const finalElements = mainElements.filter(element => finalIds.has(String(element.element_id ?? '')));
     const traceElements = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
@@ -764,6 +766,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
 
     if (!isProcessCard) {
       const claimed = new Set([
+        ...reportElements,
         ...finalElements,
         ...traceElements,
         ...attentionElements,
@@ -871,6 +874,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
       // 失败的结果卡带上最后没有恢复的失败步骤：过程卡收成一行之后，原因只在这里写。
       const failureBlock = isResultCard && state === 'failed' ? sourceElements.filter(element => element.element_id === 'failure_step') : [];
       return [
+        ...reportElements,
         ...taskHeader,
         ...attentionElements,
         ...failureBlock,
@@ -1129,6 +1133,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
     ?? content ?? '内容过长');
   // 步骤总数和最后失败的步骤都很小，兜底时照样带上：失败卡不能因为记录被收起就改口说「没有失败的步骤」。
   const fallbackCard = assemble([
+    ...sourceMainElements.filter(element => element.element_id === 'task_report'),
     ...sourceMainElements.filter(element => metaIds.has(String(element.element_id ?? ''))),
     { tag: 'markdown', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
     { tag: 'markdown', element_id: 'dutydeck_fallback_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
@@ -1161,6 +1166,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
       body: {
         direction: 'vertical', padding: '10px 12px',
         elements: [
+          ...(isResultCard ? sourceMainElements.filter(element => element.element_id === 'task_report') : []),
           ...(receiptOnly ? [{ tag: 'markdown', element_id: 'task_overview', content: `<font color='${state === 'completed' ? 'green' : state === 'failed' ? 'red' : 'grey'}'>${statusLabel}</font>`, text_size: 'normal', margin: '0px', icon: { tag: 'standard_icon', token: state === 'completed' ? 'done_outlined' : 'close_outlined', color: state === 'completed' ? 'green' : state === 'failed' ? 'red' : 'grey' } }] : []),
           hardFallbackOmission,
           ...(detailButton ? [detailButton] : []),
