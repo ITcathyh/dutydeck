@@ -975,3 +975,5 @@ Confirmation requires bot settings management permission (`channel_bot.update`) 
 ## License
 
 Dutydeck core code is licensed under open-source terms. See [Third-Party Notices](THIRD_PARTY_NOTICES.md) for details.
+
+When group participation infers that a message needs action, Dutydeck sends a confirmation card first. A person with task creation access can confirm; execution uses that person’s identity. Unconfirmed cards expire after 24 hours. Explicit mentions, topic follow-ups, proactive replies, and administrator-configured direct scenarios keep their existing behavior. The result inspector shows each turn’s authorization evidence, confirmer, and decision record.

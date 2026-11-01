@@ -1,3 +1,5 @@
+import type { TaskAuthorization } from '@dutydeck/shared';
+export type { TaskAuthorization } from '@dutydeck/shared';
 import type { ConfigurationExplanation } from '@dutydeck/shared';
 import type { ArtifactSnapshot, ArtifactSnapshotReference, ArtifactSnapshotPreview } from '@dutydeck/shared';
 import type { HistoryOutline } from '@dutydeck/shared';
@@ -517,6 +519,7 @@ export const api = {
     return json<LarkHookStatus>(`/api/lark/hooks/status?${query.toString()}`);
   },
   larkMemoryStatus: (appId: string) => json<LarkMemoryStatusResult>(`/api/lark/bots/${encodeURIComponent(appId)}/memory/status`, { cache: 'no-store' }),
+  taskAuthorizations: (sessionId: string) => json<TaskAuthorization[]>(`/api/sessions/${encodeURIComponent(sessionId)}/task-authorizations`),
   unknownTasks: (sessionId: string) => json<UnknownTask[]>(`/api/sessions/${encodeURIComponent(sessionId)}/unknown-tasks`, { cache: 'no-store' }),
   resolveUnknownTask: (sessionId: string, taskId: string, input: { target: string; action: UnknownTaskAction; allowDuplicateEffects?: true }) => json<{ replayed: boolean; status: string; decisionId: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/unknown-tasks/${encodeURIComponent(taskId)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   memoryPool: (sessionId: string, q = '') => json<MemoryPoolView>(`/api/sessions/${encodeURIComponent(sessionId)}/memory-pool${q ? `?q=${encodeURIComponent(q)}` : ''}`),

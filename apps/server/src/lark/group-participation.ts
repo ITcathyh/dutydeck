@@ -79,6 +79,7 @@ const MEMBER_CACHE_MS = 10 * 60_000;
 /** 场景来源开的话题最多读几页（每页 50 条）看有没有别的机器人接过。 */
 const THREAD_CLAIM_PAGES = 4;
 const LEVEL_CONFIRM_KIND = 'participation_level';
+const ACT_CONFIRM_KIND = 'participation_act';
 /** 场景包开关的确认卡种类：scenario:<包 id>。 */
 const scenarioConfirmKind = (packId: string) => `scenario:${packId}`;
 const RESPONDER_CONFIRM_KIND = 'group_responder';
@@ -147,6 +148,7 @@ export class LarkGroupParticipation {
   private readonly botTurnChain = new Map<string, Promise<unknown>>();
   /** 各 Bot 的 coordinator 在监听启动时登记；act 判定经它走显式 @ 的同一路径。 */
   private readonly dispatchers = new Map<string, ParticipationDispatcher>();
+  private readonly dispatchAuthorizers = new Map<string, (scope: CollaborationScope, actor: string) => Promise<boolean>>();
   private readonly bootstrapper: LarkContextBootstrap;
   /** 群成员缓存：规则层「群里只有一个真人」「多机器人群」和接话人、场景来源的名字要用，按群缓存 10 分钟。 */
   private readonly members = new Map<string, { until: number; value?: Members }>();
@@ -166,6 +168,22 @@ export class LarkGroupParticipation {
         if (!service.reply || !service.update) throw new RuntimeError('LARK_CARD_UNAVAILABLE', '当前连接不能发送卡片', 503);
         return { reply: service.reply.bind(service), update: service.update.bind(service) };
       } });
+    this.confirmations.register(ACT_CONFIRM_KIND, {
+      authorize: async (record, actor) => await this.dispatchAuthorizers.get(record.scope.appId)?.(record.scope, actor)
+        ? true : '你没有此群的任务创建权限。',
+      apply: async (record, actor) => {
+        const dispatch = this.dispatchers.get(record.scope.appId);
+        const config = await this.options.readConfig(record.scope.appId, record.scope.chatId);
+        if (this.closed || !dispatch || !config?.listening) throw new RuntimeError('LARK_CONFIG_NOT_FOUND', '机器人已停用，没有执行。', 409);
+        // Recheck after claiming the card; permissions may have changed while it was pending.
+        if (!await this.dispatchAuthorizers.get(record.scope.appId)?.(record.scope, actor)) throw new RuntimeError('FORBIDDEN', '你没有此群的任务创建权限。', 403);
+        const event = JSON.parse(String(record.payload.event)) as LarkMessageEvent;
+        await dispatch({ ...event, senderOpenId: actor, senderType: 'user', authorization: {
+          ...event.authorization!, strength: 'explicit', via: 'participation_confirmed'
+        } }, config);
+        return '已确认，按你的身份处理，结果会发在原消息下。';
+      }
+    });
     this.confirmations.register(LEVEL_CONFIRM_KIND, {
       authorize: async (record, operator) => await this.options.canOperate?.(record.scope, operator, record.requesterId)
         ? true : '只有发起人本人、本群的操作员或管理员能确认。',
@@ -353,8 +371,10 @@ export class LarkGroupParticipation {
     lines.push(...this.scenarios.statusLines({ appId: scope.appId, ...(config?.workspace ? { workspace: config.workspace } : {}) }, duty, decisionsToday));
     return lines;
   }
-  setDispatcher(appId: string, dispatch: ParticipationDispatcher) {
+  setDispatcher(appId: string, dispatch: ParticipationDispatcher, authorize?: (scope: CollaborationScope, actor: string) => Promise<boolean>) {
     this.dispatchers.set(appId, dispatch);
+    if (authorize) this.dispatchAuthorizers.set(appId, authorize);
+    else this.dispatchAuthorizers.delete(appId);
   }
   refresh(appId: string): Promise<void> {
     if (this.closed) return Promise.resolve();
@@ -408,6 +428,7 @@ export class LarkGroupParticipation {
   }
   closeApp(appId: string) {
     this.dispatchers.delete(appId);
+    this.dispatchAuthorizers.delete(appId);
     for (const [key, slot] of this.slots) {
       if ((JSON.parse(key) as [string, string])[0] !== appId) continue;
       slot.stopped = true; slot.pending = undefined;
@@ -752,7 +773,7 @@ export class LarkGroupParticipation {
     if (!updated) { await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
     snapshot = updated;
     if (result.action !== 'reply') {
-      // act 本身不授权任何工具，只把当前人类消息交回显式执行路径，由 coordinator 按发送者本人重新授权。
+      // 模型 act 只请求人工确认；确认前不交给执行器。
       if (result.action === 'act') await this.dispatch(scope, pending, trigger, snapshot, result.evidenceIds, id, slot, false,
         snapshot.scenario?.status === 'used' ? { mode: 'model', packId: snapshot.scenario.packId, decisionId: id } : undefined);
       return;
@@ -845,8 +866,8 @@ export class LarkGroupParticipation {
     return listWindowIncomplete(actions, since) || used >= limit;
   }
   /**
-   * 把当前人类消息按显式 @ 交给执行路径。addressed 是规则判为「在叫我」：等同对方 @ 了机器人，
-   * 不占主动发言额度，也不受「暂停主动通知」影响；模型给出的 act 仍按主动发言计。
+   * 规则 addressed 直接走显式请求，不占主动额度；模型 act 先发确认卡，计入主动额度。
+   * 没人确认就不执行；确认后以点击人的身份重新鉴权。
    * scenario 是用到了 model 场景包的 act：收养字段只带判定记录 id，执行时 coordinator 按它取冻结的指令和材料。
    */
   private async dispatch(scope: CollaborationScope, pending: Pending, trigger: CollaborationObservation, snapshot: CollaborationSnapshot, evidenceIds: string[], id: string, slot: Slot, addressed = false, scenario?: LarkScenarioAdoption) {
@@ -862,7 +883,18 @@ export class LarkGroupParticipation {
     if (!begun.created) return;
     let action = await repo.updateAction(scope, actionId, { expectedRevision: begun.action.revision, status: 'sending' });
     try {
-      await dispatch(scenario ? { ...pending.event, scenario } : pending.event, pending.config);
+      const event: LarkMessageEvent = { ...pending.event, ...(scenario ? { scenario } : {}), authorization: {
+        strength: addressed ? 'explicit' : 'inferred', via: addressed ? 'addressed' : 'participation_act',
+        decisionId: id, policyVersion: snapshot.settings.policyVersion, evidenceIds
+      } };
+      if (addressed) await dispatch(event, pending.config);
+      else {
+        const card = await this.confirmations.request({ kind: ACT_CONFIRM_KIND, scope, requesterId: pending.event.senderOpenId!,
+          replyTo: { messageId: larkMessageAnchor(pending.event), ...(pending.event.threadId ? { threadId: pending.event.threadId } : {}) },
+          title: '待确认的任务', summary: `我打算处理这条请求：${compactText(trigger.text).slice(0, 200)}`,
+          confirmLabel: '交给我处理', payload: { event: JSON.stringify(event), decisionId: id } });
+        if (!card) throw new Error('确认卡未送达，没有执行');
+      }
       action = await repo.updateAction(scope, actionId, { expectedRevision: action.revision, status: 'succeeded' });
       await repo.updateDecision(scope, id, { status: 'sent' });
     } catch (error) {

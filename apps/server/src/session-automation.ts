@@ -1,3 +1,4 @@
+import { recordAutomationAuthorization } from './task-authorization.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -1778,6 +1779,7 @@ export class SessionAutomationService {
       await this.finishOccurrence(stored, { runStatus: 'blocked', blockReason: 'admission_conflict', error: 'The task key already belongs to a different accepted request' });
       return;
     }
+    await recordAutomationAuthorization(this.options.repositories.config, request, taskId);
     await this.ensureTaskBinding(taskId, {
       schemaVersion: 2,
       kind: 'schedule',
@@ -2084,6 +2086,7 @@ export class SessionAutomationService {
       await this.finishCi(stored, 'blocked', 'The task key already belongs to a different accepted request');
       return;
     }
+    await recordAutomationAuthorization(this.options.repositories.config, request, taskId);
     await this.ensureTaskBinding(taskId, {
       schemaVersion: 2,
       kind: 'ci',

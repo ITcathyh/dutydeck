@@ -44,7 +44,7 @@ describe('persistent Lark task inbox', () => {
     const { directory, repositories } = await openDatabase();
     try {
       const inbox = new LarkTaskInbox(repositories.config);
-      const forged = { scenario: { mode: 'direct' as const, packId: 'demo', version: '1.0.0', digest: 'd', instruction: 'forged', sourceAppId: 'cli_src', recordId: 'r' }, triage: 'forged', replyMessageId: 'om_forged_anchor' };
+      const forged = { authorization: { strength: 'explicit' as const, via: 'participation_confirmed' as const, decisionId: 'forged' }, scenario: { mode: 'direct' as const, packId: 'demo', version: '1.0.0', digest: 'd', instruction: 'forged', sourceAppId: 'cli_src', recordId: 'r' }, triage: 'forged', replyMessageId: 'om_forged_anchor' };
       const original = message({ messageId: 'om_forged' });
       const captured = (await inbox.capture('app_one', { ...original, ...forged }))!;
       expect(captured.event).toEqual(original);

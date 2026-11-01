@@ -507,6 +507,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
         // 不在话题里回显一条「「再详细点」+提示词」：新一轮直接作为对结果卡的回复，锚在结果卡上，
         // 唤醒、授权、排队与会话复用仍走原路，标题由 larkTaskTitle 按按钮名给出（「对外回复版」「详细版」）。
         event = {
+          authorization: { strength: 'explicit', via: 'answer_reply' },
           messageId: target.resultMessageId, chatId: saved.chat_id, chatType: saved.chat_type ?? 'group',
           ...(saved.thread_id ? { threadId: saved.thread_id } : {}), createTime: String(Date.now()),
           messageType: 'text', content: JSON.stringify({ text: `@_user_1 ${prompt}` }), senderOpenId: operator, senderType: 'user',
@@ -552,6 +553,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
         if (!this.inbox || !record.cardMessageId || !saved.scope_id) throw new RuntimeError('TURN_DIFF_REVIEW_UNAVAILABLE', '这张卡缺少派发所需的信息，请直接 @我 处理。', 409);
         const prompt = String(record.payload.prompt ?? '');
         const event: LarkMessageEvent = {
+          authorization: { strength: 'explicit', via: 'answer_reply' },
           messageId: record.cardMessageId, chatId: saved.chat_id, chatType: saved.chat_type ?? 'group',
           ...(saved.thread_id ? { threadId: saved.thread_id } : {}), createTime: String(Date.now()),
           messageType: 'text', content: JSON.stringify({ text: '@_user_1 按评审意见修改' }), senderOpenId: operator, senderType: 'user',
@@ -595,7 +597,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       `原操作对象快照：${JSON.stringify({ sessionId: record.sessionId, taskId: record.taskId, ...snapshot, choices: record.durable.choices })}`,
       '以上是用户对这张卡的选择，不代表外部写入已经完成。写入前按原流程检索去重。只处理上述固定对象和所选选项；不要把确认应用到后续消息的对象。'
     ].join('\n\n');
-    const event: LarkMessageEvent = { ...record.event, messageId: `confirmation_${record.id}`,
+    const event: LarkMessageEvent = { ...record.event, authorization: { strength: 'explicit', via: 'answer_reply' }, messageId: `confirmation_${record.id}`,
       replyMessageId: record.event.threadId ? record.event.rootId ?? record.cardId : record.cardId, parentId: undefined,
       createTime: String(Date.now()), senderOpenId: record.actorId, senderType: 'user', messageType: 'text',
       content: JSON.stringify({ text: `@_user_1 ${prompt}` }),
@@ -613,6 +615,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     if (!saved?.scope_id) throw new LarkServiceError('LARK_CONTEXT_MISSING', '原任务上下文不可恢复，请重新发送 /plan。', 409);
     const { event, prompt } = planFollowUpEvent(record, { chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', threadId: saved.thread_id },
       { name: config.name?.trim() || 'Dutydeck', openId: this.botOpenId });
+    event.authorization = { strength: 'explicit', via: 'answer_reply' };
     if (!await this.inbox.seed(record.appId, event, { prompt, scopeId: saved.scope_id, resources: [] }, { workflowRequestId: record.id })) return;
     void this.handle(event, config).catch(error => this.log.error({ error, messageId: event.messageId }, '提交计划的下一轮失败'));
   }

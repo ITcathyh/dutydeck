@@ -193,6 +193,8 @@ describe('结果卡一键续问', () => {
     const first = await h.run(event('om_1', '查一下登录为什么慢'));
     expect(await h.click(callbackOf(h.card(first.final_message_id!), 'ask_detail'), 'ou_alice', first)).toMatchObject({ type: 'success' });
     const followUp = await h.result(first.final_message_id!);
+    const evidence = (await h.repos.config.list!('task_authorization/')).map(row => JSON.parse(row.value));
+    expect(evidence).toEqual(expect.arrayContaining([expect.objectContaining({ strength: 'explicit', via: 'answer_reply', actorOpenId: 'ou_alice' })]));
     expect(h.cards.get(followUp.final_message_id!)).toMatchObject({ cardKind: 'result', taskName: '详细版' });
     expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: first.final_message_id, cardKind: 'process', taskName: '详细版' }));
   });

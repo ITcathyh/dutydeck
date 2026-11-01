@@ -109,6 +109,8 @@ export interface LarkMessageEvent {
    * 随入站记录持久化，重启恢复时照样按场景请求处理。只有内部 dispatcher 能设置，原始接收和编辑重开时都剥掉。
    */
   scenario?: LarkScenarioAdoption;
+  /** Host-owned evidence, stripped at external capture; never part of the task input. */
+  authorization?: import('@dutydeck/shared').TaskAuthorizationSource;
   /** 升级前的入站记录里的同类字段（放在原文前的指令），只读不写，见 scenario-legacy.ts。 */
   triage?: string;
   /** Agent 代发命令（agent-command.ts）的回执去重键：同一条请求消息下代发的不同命令各回一张卡。只在内部合成。 */
@@ -241,7 +243,7 @@ export class LarkLongConnectionListener implements LarkListener {
     this.coordinator = coordinator;
     await coordinator?.initializeWorkflows(config);
     http.fetch.signal!.throwIfAborted();
-    if (coordinator) this.options.participation?.setDispatcher(config.appId, (event, current) => coordinator.adopt(event, current));
+    if (coordinator) this.options.participation?.setDispatcher(config.appId, (event, current) => coordinator.adopt(event, current), (scope, actor) => coordinator.canConfirmParticipation(scope, actor));
     if (coordinator && this.options.agentCommands) {
       this.agentCommand = request => coordinator.agentCommand(request);
       this.options.agentCommands.set(config.appId, this.agentCommand, request => coordinator.agentView(request), request => coordinator.agentSettings(request));

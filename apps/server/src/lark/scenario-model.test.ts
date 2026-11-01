@@ -228,6 +228,10 @@ describe('H5/H9：回复和执行读冻结内容，投递前再看一次绑定',
     h.decide.mockImplementationOnce(async (_config, _snapshot, triggerId) => ({ action: 'act', reason: '要查系统', evidenceIds: [triggerId!], updates: [] }));
     const decision = await h.ask('om_1', '订单服务 5xx 了，帮忙查下');
     expect(decision).toMatchObject({ action: 'act', status: 'sent' });
+    expect(h.dispatch).not.toHaveBeenCalled();
+    const card = (await h.repository.listActions(scope)).find(item => item.kind === 'confirm.participation_act')!;
+    h.participation.setDispatcher(scope.appId, h.dispatch, async () => true);
+    expect(await h.participation.confirmations.handle(scope.appId, { dutydeck_confirm: 'confirm', confirm_id: card.id, chat_id: scope.chatId }, 'ou_a', { messageId: card.receipt, chatId: scope.chatId })).toMatchObject({ type: 'success' });
     const event = h.dispatch.mock.calls[0]![0];
     expect(event.scenario).toEqual({ mode: 'model', packId: 'team-faq', decisionId: decision!.id });
     expect(event.senderOpenId).toBe('ou_a');

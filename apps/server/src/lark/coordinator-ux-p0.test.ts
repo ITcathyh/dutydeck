@@ -13,6 +13,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import { RelayAskBroker } from '@dutydeck/relay';
 import type { AgentConfig } from '@dutydeck/shared';
+import { readTaskAuthorization } from '../task-authorization.js';
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { LarkMessageCoordinator, larkTaskTitle } from './coordinator.js';
 import { LarkGroupManager } from './group-management.js';
@@ -1312,6 +1313,9 @@ describe('群参与开启时的话题续问与转交执行', () => {
     expect(h.send).toHaveBeenCalledTimes(2);
     expect(h.send.mock.calls[1]?.[0]).toContain('再补充一下兼容旧配置');
     expect(inputFor(handle, 'om_follow')).toMatchObject({ explicit: true });
+    const evidence = (await h.repos.config.list!('task_authorization/')).map(row => JSON.parse(row.value));
+    expect(evidence.map(record => record.via)).toContain('topic_followup');
+    expect(evidence.every(record => record.strength === 'explicit')).toBe(true);
   });
   it('unrouted recovery keeps the live own-request continuation without forcing adoption', async () => {
     const { h, handle } = await start();
@@ -1831,5 +1835,125 @@ describe('插件直接查询入站', () => {
     expect(h.service.sendText).toHaveBeenCalledTimes(1);
     expect(await h.runtime.listSessions()).toEqual([]);
 
+  });
+});
+
+
+describe('群参与模型 act 的人工授权', () => {
+  const scope = { appId: 'cli_uxp0', chatId: 'oc_group' };
+  const start = async () => {
+    let now = new Date();
+    let h!: H;
+    let participation!: LarkGroupParticipation;
+    h = await harness('normal', { managedGroup: true, configPatch: { mentionPolicy: 'always', roleScope: '项目问题处理', riskControlMode: 'guidance', adhdMode: true }, participation: repos => (participation = new LarkGroupParticipation({
+      repository: repos.collaboration,
+      decider: { decide: async (_config, _snapshot, triggerId) => ({ action: 'act', reason: '需要整理项目清单', evidenceIds: [triggerId!], updates: [] }), respond: async () => '' },
+      authorize: async () => true, readConfig: async () => h?.config,
+      serviceFor: () => ({ ...h.service, replyText: async () => ({ messageId: 'om_text' }), listOwnReactions: async () => [],
+        listChatMembers: async () => ({ items: [{ memberId: 'ou_alice', memberType: 'user' }, { memberId: 'ou_bob', memberType: 'user' }, { memberId: scope.appId, memberType: 'bot', appId: scope.appId }], hasMore: false }) }), now: () => now, debounceMs: 10000
+    })) });
+    cleanups.push(() => participation.close());
+    await h.repos.collaboration.updateSettings(scope, { expectedRevision: 0, participation: 'selective' }, 'owner');
+    participation.setDispatcher(scope.appId, (incoming, config) => h.coordinator.adopt(incoming, config), (place, actor) => h.coordinator.canConfirmParticipation(place, actor));
+    const incoming = event('om_inferred', '项目现在需要整理一份改动清单', { mentions: [], threadId: undefined, rootId: undefined });
+    await h.coordinator.receive(incoming, h.config);
+    await vi.waitFor(async () => expect(await new LarkTaskInbox(h.repos.config).lookup(scope.appId, incoming.messageId)).toMatchObject({ state: 'ignored' }));
+    await participation.flush(scope);
+    const pending = (await h.repos.collaboration.listActions(scope)).find(item => item.kind === 'confirm.participation_act');
+    expect(pending).toBeDefined();
+    const value = { dutydeck_confirm: 'confirm', confirm_id: pending!.id, chat_id: scope.chatId };
+    const context = { chatId: scope.chatId, messageId: pending!.receipt };
+    return { h, participation, pending: pending!, value, context, expire: () => { now = new Date(now.getTime() + 24 * 3_600_000 + 1); } };
+  };
+  it('does not create a task before confirmation; rejects outsiders and executes as the clicker once', async () => {
+    const { h, participation, pending, value, context } = await start();
+    expect(h.send).not.toHaveBeenCalled();
+    expect(await h.repos.config.list!('task_authorization/')).toHaveLength(0);
+    expect(JSON.stringify(h.cards.get(pending.receipt!))).toContain('交给我处理');
+    expect(h.cards.get(pending.receipt!)).toMatchObject({ adhdMode: true });
+    expect(callbackValues(buildLarkCard(h.cards.get(pending.receipt!)))).toContainEqual(expect.objectContaining(value));
+    expect(await participation.confirmations.handle(scope.appId, value, 'ou_outsider', context)).toMatchObject({ type: 'warning' });
+    expect(h.send).not.toHaveBeenCalled();
+    const check = vi.spyOn(h.groupManager!, 'authorize');
+    check.mockResolvedValueOnce({ allowed: false, action: 'task.create', code: 'forbidden', reason: '任务权限已撤销', source: 'integration' } as any);
+    expect(await participation.confirmations.handle(scope.appId, value, 'ou_bob', context)).toMatchObject({ type: 'warning' });
+    expect(h.send).not.toHaveBeenCalled();
+    expect(await participation.confirmations.handle(scope.appId, value, 'ou_bob', context)).toMatchObject({ type: 'success' });
+    await h.waitDelivered(1);
+    const records = (await h.repos.config.list!('task_authorization/')).map(row => JSON.parse(row.value));
+    expect(records).toEqual([expect.objectContaining({ strength: 'explicit', via: 'participation_confirmed', actorOpenId: 'ou_bob', decisionId: (pending.payload.payload as { decisionId: string }).decisionId, policyVersion: 'v1' })]);
+    expect(check).toHaveBeenCalledWith(scope.appId, scope.chatId, 'ou_bob', 'task.create', undefined, expect.anything());
+    expect(h.send.mock.calls[0]?.[0]).toContain('当前飞书发送人不是本机器人的管理员');
+    const execution = h.repos.execution.getAcceptedTask(records[0]!.taskId);
+    expect(execution?.request?.actor).toMatchObject({ kind: 'channel', id: 'ou_bob' });
+    expect(await participation.confirmations.handle(scope.appId, value, 'ou_alice', context)).toMatchObject({ type: 'info' });
+    expect(h.send).toHaveBeenCalledOnce();
+  });
+  it('does not execute an expired confirmation', async () => {
+    const { h, participation, value, context, expire } = await start();
+    expire();
+    expect(await participation.confirmations.handle(scope.appId, value, 'ou_bob', context)).toMatchObject({ type: 'warning', content: expect.stringContaining('过期') });
+    expect(h.send).not.toHaveBeenCalled();
+  });
+});
+
+describe('授权依据写入失败后的补记', () => {
+  it.each([false, true])('keeps the accepted execution and repairs evidence (completed before repair: %s)', async completed => {
+    const h = await harness('hang');
+    const original = h.repos.config.compareAndSet!.bind(h.repos.config);
+    let failEvidence = true;
+    vi.spyOn(h.repos.config, 'compareAndSet').mockImplementation(async (key, expected, value) => {
+      if (failEvidence && key.startsWith('task_authorization/')) throw new Error('injected authorization storage failure');
+      return original(key, expected, value);
+    });
+    await h.coordinator.handle(event('om_evidence_retry', '@_user_1 整理清单'), h.config);
+    await vi.waitFor(async () => {
+      expect(h.send).toHaveBeenCalledOnce();
+      expect(await new LarkTaskInbox(h.repos.config).lookup(h.config.appId, 'om_evidence_retry')).toMatchObject({ state: 'accepted' });
+    });
+    expect(await h.repos.config.list!('task_authorization/')).toHaveLength(0);
+    const inbox = (await new LarkTaskInbox(h.repos.config).lookup(h.config.appId, 'om_evidence_retry'))!;
+    expect((await h.runtime.getTasks(inbox.sessionId!)).find(task => task.id === inbox.taskId)?.status).toBe('running');
+    if (completed) { h.releaseGate(); await h.waitDelivered(1); }
+    failEvidence = false;
+    const recovery = h.createCoordinator();
+    cleanups.push(() => recovery.stop());
+    await recovery.reconcile(h.config);
+    expect(await readTaskAuthorization(h.repos.config, inbox.taskId!, inbox.sessionId!)).toMatchObject({ via: 'mention', strength: 'explicit', actorOpenId: 'ou_alice' });
+    if (!completed) { h.releaseGate(); await h.waitDelivered(1); }
+    expect(h.send).toHaveBeenCalledOnce();
+    expect((await h.runtime.getTasks(inbox.sessionId!)).find(task => task.id === inbox.taskId)?.status).toBe('completed');
+  });
+});
+
+describe('飞书任务授权依据', () => {
+  it.each(['mention', 'direct', 'command'] as const)('records %s outside the accepted task input', async via => {
+    const h = await harness('normal');
+    const incoming = event('om_auth', via === 'command' ? '@_user_1 /new 整理清单' : '@_user_1 整理清单', via === 'direct' ? { chatType: 'p2p', mentions: [] } : {});
+    await h.coordinator.handle(incoming, h.config);
+    await h.waitDelivered(1);
+    const records = await h.repos.config.list!('task_authorization/');
+    expect(records).toHaveLength(1);
+    const record = JSON.parse(records[0]!.value);
+    expect(record).toMatchObject({ schemaVersion: 1, via, strength: 'explicit', actorOpenId: 'ou_alice', chatId: incoming.chatId });
+    expect(await readTaskAuthorization(h.repos.config, record.taskId, record.sessionId)).toEqual(record);
+    const accepted = h.repos.execution.getAcceptedTask(record.taskId);
+    expect(JSON.stringify(accepted?.request)).not.toContain('authorization');
+  });
+  it.each(['never', 'ambient'] as const)('records a top-level unmentioned %s message as group policy, not topic continuation', async mentionPolicy => {
+    const h = await harness('normal', { configPatch: { mentionPolicy } });
+    await h.coordinator.handle(event('om_group_rule', '整理项目清单', { mentions: [], threadId: undefined, rootId: undefined, parentId: undefined }), h.config);
+    await h.waitDelivered(1);
+    const records = await h.repos.config.list!('task_authorization/');
+    expect(records).toHaveLength(1);
+    expect(JSON.parse(records[0]!.value)).toMatchObject({ strength: 'inferred', via: 'group_rule', actorOpenId: 'ou_alice' });
+  });
+  it('keeps direct scenario execution inferred and unchanged', async () => {
+    const h = await harness('normal');
+    await h.coordinator.adopt(event('om_scenario_auth', '来源报警', { mentions: [], scenario: { mode: 'direct', packId: 'demo', version: '1.0.0', digest: 'd', instruction: '整理报警', sourceAppId: 'cli_src', recordId: 'decision_direct' } }), h.config);
+    await h.waitDelivered(1);
+    expect(h.send).toHaveBeenCalledOnce();
+    const records = await h.repos.config.list!('task_authorization/');
+    expect(JSON.parse(records[0]!.value)).toMatchObject({ strength: 'inferred', via: 'scenario_direct', decisionId: 'decision_direct', policyVersion: 'scenario:demo@1.0.0' });
   });
 });
