@@ -1,5 +1,7 @@
 import { explicitFinalTextReceiptReader, completeExplicitFinal, readConfirmedExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import { describeLarkTaskRecovery, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
+import { readTaskReport } from '@dutydeck/shared';
+import { taskReportCardElements } from './task-report-card.js';
 import { deferredConfirmationId } from '@dutydeck/shared';
 import type { ChannelMapping, ChannelMappingRepository, ConfigRepository, TaskRecord } from '@dutydeck/shared';
 import { defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
@@ -369,7 +371,8 @@ export async function performLarkCardReconcile(input: {
         ...renderLarkProcessElements(events, config, true),
         ...(persisted.launcher_recovery_note ? [{ tag: 'markdown', element_id: 'launcher_recovery_note', content: LARK_LAUNCHER_RECOVERY_NOTE }] : [])]);
       // 只贴表情与实时链路同一判断：计划轮和任务通道仍补发结果卡。
-      const reactionOnly = completed && larkCompletionReactionOnly(effective, persisted.prompt, mapping.externalId);
+      const reportElements = taskReportCardElements(input.deliveryStore ? await readTaskReport(input.deliveryStore, runtimeTask.id) : undefined);
+      const reactionOnly = !reportElements.length && completed && larkCompletionReactionOnly(effective, persisted.prompt, mapping.externalId);
       // 回执上的「结果见下条」：只贴表情的轮次这次对账不会补发结果消息。
       const resultFollows = completed && !reactionOnly;
       let deliveredElements = persisted.last_successful_elements;
@@ -451,6 +454,7 @@ export async function performLarkCardReconcile(input: {
           const resultBody = explicit ? [] : steered ? [{ tag: 'markdown', element_id: 'steer_note', content: steeringOutcomeText(steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : events);
           const finalOutput = explicit || steered ? undefined : String(resultBody.find(element => element.element_id === 'final_output')?.content ?? '');
           const elements = [
+            ...reportElements,
             ...resultBody,
             ...(decoration?.elements ?? []),
             ...(!receiptOnly && completed && input.resultElements ? await input.resultElements(mapping, persisted, '', { finalOutput, groupMention: Boolean(mention) }) : []),

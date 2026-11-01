@@ -1,5 +1,13 @@
 import { RelayCliError, RelayHttpClient, relayAskExitCodes, type RelayClientOptions } from '@dutydeck/relay';
 
+import { taskReportInputSchema } from '@dutydeck/shared';
+
+export async function runSessionReport(input: { status: string; question?: string; summary?: string }, options: RelayClientOptions = {}) {
+  const parsed = taskReportInputSchema.safeParse(input);
+  if (!parsed.success) throw new RelayCliError(parsed.error.issues.map(issue => issue.message).join('；'), relayAskExitCodes.usage, 'TASK_REPORT_INVALID');
+  return new RelayHttpClient(options).post('/sessions/self/report', parsed.data);
+}
+
 export interface RelaySessionCliOptions {
   timeout?: string;
   json?: boolean;

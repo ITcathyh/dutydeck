@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentEvent } from '@dutydeck/shared';
 import { loadLarkTaskEvents, renderLarkProcessElements, renderLarkResultElements } from './card-renderer.js';
-import { deliverLarkStatusReaction, larkResultKey, patchLarkCard, sendLarkDeliveryText, sendLarkFile, sendLarkResult, sendLarkBoundMessage, readConfirmedLarkBoundMessage } from './result-delivery.js';
+import { prepareLarkResult, deliverLarkStatusReaction, larkResultKey, patchLarkCard, sendLarkDeliveryText, sendLarkFile, sendLarkResult, sendLarkBoundMessage, readConfirmedLarkBoundMessage } from './result-delivery.js';
 import { COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI, reactionDedupeKey } from './reaction-records.js';
 import { buildLarkCard, LarkCardService, LarkServiceError } from './service.js';
 import { sendTaskCard } from './coordinator-core.js';
@@ -516,4 +516,14 @@ it('rejects a conflicting durable receipt written while an independent sender wa
     expect(firstSend).toHaveBeenCalledOnce(); expect(secondSend).not.toHaveBeenCalled();
     expect(await readConfirmedLarkBoundMessage(repos.config, first)).toMatchObject({ messageId: 'om_original', identity: first.identity });
   } finally { release(); repos.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+it('keeps a reported question first when the result is downgraded to an attachment', async () => {
+  const service = { uploadFile: vi.fn(async () => 'file_result'), sendFile: vi.fn(async () => ({ messageId: 'om_file' })) } as unknown as LarkCardService;
+  const report = { tag: 'markdown', element_id: 'task_report', content: '等你决定：今天发布吗？' };
+  const base = input('完整最终结论');
+  const prepared = await prepareLarkResult(service, { chatId: 'oc_group' }, { ...base, elements: [report, ...base.elements] }, log, undefined, undefined, true);
+  expect(prepared.attachmentMessageId).toBe('om_file');
+  expect(prepared.input.elements[0]).toEqual(report);
+  expect(prepared.input.elements[1]?.element_id).toBe('final_output');
 });

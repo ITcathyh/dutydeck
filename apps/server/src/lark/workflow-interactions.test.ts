@@ -1,3 +1,4 @@
+import { readTaskReport, writeTaskReport } from '@dutydeck/shared';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -390,12 +391,14 @@ describe('persistent Lark workflow interactions', () => {
       const secondCard = await workflow.result(ctx, 'om_result_card');
       expect(secondCard).toEqual(firstCard);
       const record = (await workflow.list('app_one'))[0]!;
+      await writeTaskReport(repositories.config, { schemaVersion: 1, taskId: ctx.taskId, sessionId: ctx.sessionId, status: 'waiting', question: '今天发布吗？', reportedAt: new Date().toISOString() });
       const first = workflow.respond(responseInput(record, { action: 'accept', cardId: 'om_result_card' }));
       const second = workflow.respond(responseInput(record, { action: 'accept', cardId: 'om_result_card' }));
       const outcomes = await Promise.allSettled([first, second]);
       expect(outcomes.filter(outcome => outcome.status === 'fulfilled')).toHaveLength(1);
       expect(outcomes.filter(outcome => outcome.status === 'rejected')).toHaveLength(1);
       expect((await workflow.list('app_one'))[0]).toMatchObject({ state: 'accepted', actorId: 'user_one' });
+      expect((await readTaskReport(repositories.config, ctx.taskId))?.clearedAt).toBeTruthy();
       expect(getTasks).not.toHaveBeenCalled();
       expect(resolvePermission).not.toHaveBeenCalled();
     } finally {

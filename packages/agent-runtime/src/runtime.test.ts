@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, Session, ToolRiskPolicy } from '@dutydeck/shared';
-import { RuntimeError } from '@dutydeck/shared';
+import { readTaskReport, RuntimeError } from '@dutydeck/shared';
 import { DutydeckRuntime, type AgentDriver, type DriverFactory } from './index.js';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { mkdtempSync } from 'node:fs';
@@ -28,6 +28,52 @@ function deferred() {
 }
 
 describe('runtime lifecycle acceptance', () => {
+  it('clears a report when the user interrupts that active task', async () => {
+    const gate = deferred(); const h = harness();
+    h.driver.send = vi.fn(async () => { await gate.promise; h.emit({ type: 'text', data: { text: '停止前的结果' } }); h.emit({ type: 'completed', data: { stopReason: 'cancelled' } }); });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: agent.id });
+    try {
+      const sending = h.runtime.send(s.id, 'work');
+      await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledTimes(1));
+      const owner = h.runtime.getActiveTaskContext(s.id)!;
+      await h.runtime.reportCurrentTask(s.id, { status: 'waiting', question: '今天发布吗？' }, owner);
+      await h.runtime.interrupt(s.id, owner.taskId);
+      expect((await readTaskReport(h.repos.config, owner.taskId))?.clearedAt).toBeTruthy();
+      gate.resolve(); await sending;
+    } finally { gate.resolve(); await h.runtime.shutdown(); h.repos.close(); }
+  });
+
+  it('reports only the active task, keeps the ledger status, and clears on the next round and stop', async () => {
+    const gates = [deferred(), deferred()];
+    let round = 0;
+    const h = harness();
+    h.driver.send = vi.fn(async () => { await gates[round++]!.promise; h.emit({ type: 'text', data: { text: '本轮结果' } }); h.emit({ type: 'completed', data: { stopReason: 'end_turn' } }); });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: agent.id });
+    try {
+      const sending = h.runtime.send(s.id, 'first');
+      await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledTimes(1));
+      const owner = h.runtime.getActiveTaskContext(s.id)!;
+      await expect(h.runtime.reportCurrentTask(s.id, { status: 'waiting', question: '今天发布吗？' }, { ...owner, taskId: 'other' })).rejects.toMatchObject({ code: 'TASK_NOT_ACTIVE' });
+      await h.runtime.reportCurrentTask(s.id, { status: 'waiting', question: '今天发布吗？' }, owner);
+      await h.runtime.reportCurrentTask(s.id, { status: 'blocked', summary: '缺少账号' }, owner);
+      expect((await h.runtime.getTasks(s.id))[0]?.status).toBe('running');
+      expect((await h.runtime.getSessionTaskReport(s.id))?.status).toBe('blocked');
+      gates[0]!.resolve(); expect((await sending).status).toBe('completed');
+      expect((await h.runtime.getSessionTaskReport(s.id))?.summary).toBe('缺少账号');
+      await expect(h.runtime.reportCurrentTask(s.id, { status: 'ready' }, owner)).rejects.toMatchObject({ code: 'TASK_NOT_ACTIVE' });
+      const next = h.runtime.send(s.id, 'reply');
+      await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledTimes(2));
+      expect((await readTaskReport(h.repos.config, owner.taskId))?.clearedAt).toBeTruthy();
+      expect(await h.runtime.getSessionTaskReport(s.id)).toBeUndefined();
+      await expect(h.runtime.reportCurrentTask(s.id, { status: 'ready' }, owner)).rejects.toMatchObject({ code: 'TASK_NOT_ACTIVE' });
+      const current = h.runtime.getActiveTaskContext(s.id)!;
+      await h.runtime.reportCurrentTask(s.id, { status: 'waiting', question: '还继续吗？' }, current);
+      gates[1]!.resolve(); await next;
+      await h.runtime.stop(s.id, { kind: 'installation_owner', id: 'installation_owner' });
+      expect((await readTaskReport(h.repos.config, current.taskId))?.clearedAt).toBeTruthy();
+    } finally { gates.forEach(g => g.resolve()); await h.runtime.shutdown(); h.repos.close(); }
+  });
+
   it('rejects a deferred ACK for another attempt of the same task and ignores driver-forged handoff markers', async () => {
     const gate = deferred();
     const h = harness();

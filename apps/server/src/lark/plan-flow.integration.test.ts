@@ -1,3 +1,4 @@
+import { readTaskReport, writeTaskReport } from '@dutydeck/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -144,10 +145,12 @@ describe('/plan in Feishu', () => {
 
     const second = await h.planCard();
     expect(second.record.id).not.toBe(first.record.id);
+    await writeTaskReport(h.repos.config, { schemaVersion: 1, taskId: second.record.taskId, sessionId: second.record.sessionId, status: 'waiting', question: '是否执行计划？', reportedAt: new Date().toISOString() });
     // 引用计划卡回复「取消」与点按钮同一路径。
     await h.coordinator.handle(event('om_cancel_reply', '取消', { parentId: second.record.cardId, mentions: [], content: JSON.stringify({ text: '取消' }) }), h.config);
     await vi.waitFor(async () => expect((await h.plans()).find(item => item.id === second.record.id)?.state).toBe('rejected'));
     expect(h.cards.get(second.record.cardId!)).toMatchObject({ statusLabel: '已取消' });
+    expect((await readTaskReport(h.repos.config, second.record.taskId))?.clearedAt).toBeTruthy();
     await new Promise(resolve => setTimeout(resolve, 200));
     expect(h.turns).toHaveLength(2);
     expect(await h.click(second.record, 'plan_approve')).toMatchObject({ type: 'error' });

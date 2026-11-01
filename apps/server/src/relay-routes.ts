@@ -1,6 +1,6 @@
 import type { HerdrSessions } from './herdr.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { RuntimeError } from '@dutydeck/shared';
+import { taskReportInputSchema, RuntimeError } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import {
   RelayAskBroker,
@@ -25,7 +25,7 @@ export interface RelayRoutesOptions {
 /** Only child-to-host relay calls use the session HMAC as their sole credential. */
 export const isRelayCapabilityRequest = (method: string, pathname: string) =>
   method.toUpperCase() === 'POST'
-  && /^\/api\/relay\/sessions\/[^/]+\/(?:send|ask|deferred-ack|herdr|permission)$/.test(pathname);
+  && /^\/api\/relay\/sessions\/[^/]+\/(?:send|ask|report|deferred-ack|herdr|permission)$/.test(pathname);
 
 /** 会话进入这些状态时，把该会话所有阻塞中的 ask 唤醒 */
 const terminalStates = new Set(['stopped', 'failed']);
@@ -161,6 +161,18 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
       if (request.body?.action === 'prepare') return await options.herdr!.prepare(session);
       if (request.body?.action === 'stop') return await options.herdr!.stop(session.id);
       throw new RelayError('HERDR_INVALID_ACTION', 'Herdr 入口仅支持 prepare 或 stop。', 400);
+    } catch (error) { return handleRelayError(error, reply); }
+  });
+
+  app.post<{ Params: { id: string } }>('/api/relay/sessions/:id/report', async (request, reply) => {
+    try {
+      const capability = service.verifySession(request.headers.authorization, request.params.id);
+      const owner = runtime?.getActiveTaskContext(capability.sessionId);
+      await service.resolveSession(request.headers.authorization, request.params.id);
+      if (!runtime || !owner?.attemptId) throw new RelayError('TASK_NOT_ACTIVE', '没有可报告收尾状态的当前任务。', 409);
+      const input = taskReportInputSchema.safeParse(request.body);
+      if (!input.success) throw new RelayError('TASK_REPORT_INVALID', input.error.issues.map(issue => issue.message).join('；'), 400);
+      return { ok: true, report: await runtime.reportCurrentTask(capability.sessionId, input.data, owner) };
     } catch (error) { return handleRelayError(error, reply); }
   });
 

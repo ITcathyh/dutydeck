@@ -1,5 +1,5 @@
 import { safeLarkWebUrl } from './card-actions.js';
-import { permissionDisplayText } from '@dutydeck/shared';
+import { taskReportAttentionText, type TaskReport, permissionDisplayText } from '@dutydeck/shared';
 import { larkCommandEcho } from './commands.js';
 import { escapeCardInline, markdownElement } from './card-elements.js';
 
@@ -19,6 +19,7 @@ export interface LarkTaskDashboardPendingApproval {
 export interface LarkTaskDashboardEntry {
   /** runtime 任务 id，仅为主控组装/排序使用，渲染层绝不输出到卡片。 */
   taskId: string;
+  taskReport?: TaskReport;
   title: string;
   workspace: string;
   /** Agent 显示名；主控取不到名字时传 agentId，取不到任何信息时不传（行内与表头都不写 Agent）。 */
@@ -278,7 +279,8 @@ const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorksp
   const cmdSummary = approval?.commandSummary ? extractCommandSummary(approval.commandSummary) : undefined;
   const cmdLine = cmdSummary ? `\n命令：${cmdSummary}` : '';
 
-  const summary = `${title}\n${approval ? '待审批' : entry.blocked && entry.status === 'queued' ? '排队受阻' : statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}${executor}${entry.detail ? `\n${entry.detail}` : ''}${cmdLine}`;
+  const reportText = taskReportAttentionText(entry.taskReport);
+  const summary = `${title}\n${approval ? '待审批' : reportText ? entry.taskReport!.status === 'waiting' ? '等你决定' : '受阻' : entry.blocked && entry.status === 'queued' ? '排队受阻' : statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}${executor}${reportText ? `\n${compactText(reportText, 160, '')}` : entry.detail ? `\n${entry.detail}` : ''}${cmdLine}`;
 
   const primary = isDifferentChat ? undefined : primaryRowAction(entry, approval);
   const overflow = isDifferentChat ? rowOverflow(rowIndex, url, undefined) : rowOverflow(rowIndex, url, approval);
@@ -345,7 +347,7 @@ const navigation = (page: number, totalPages: number) => ({
 });
 
 const orderEntries = (entries: LarkTaskDashboardEntry[]) => {
-  const indexed = entries.map((entry, index): IndexedEntry => ({ entry, index, group: validApproval(entry.pendingApproval) || entry.blocked || entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status) }));
+  const indexed = entries.map((entry, index): IndexedEntry => ({ entry, index, group: taskReportAttentionText(entry.taskReport) || validApproval(entry.pendingApproval) || entry.blocked || entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status) }));
   return ([0, 1, 2] as DashboardGroup[]).flatMap(group => indexed
     .filter(item => item.group === group)
     .sort((left, right) => timestamp(right.entry.updatedAt) - timestamp(left.entry.updatedAt)));

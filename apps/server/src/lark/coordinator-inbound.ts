@@ -1,3 +1,4 @@
+import { clearTaskReport } from '@dutydeck/shared';
 import { larkMessageAnchor } from './message-anchor.js';
 import { runAgentScheduleRequest } from '../agent-schedule-request.js';
 import { larkElapsedLabel } from './card-status.js';
@@ -301,6 +302,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const session = await this.runtime.getSession(mapping.sessionId);
       const task = (await this.runtime.getTasks?.(mapping.sessionId))?.find(task => task.id === saved.runtime_task_id);
       if (!session || !task) continue;
+      const taskReport = await this.runtime.getSessionTaskReport?.(mapping.sessionId);
       const pending = interactions.find(item => item.taskId === task.id && item.state === 'pending' && item.kind !== 'result' && item.boot === this.workflows?.boot);
       const result = interactions.find(item => item.taskId === task.id && item.kind === 'result');
       const host = config.brand === 'lark' ? 'applink.larksuite.com' : 'applink.feishu.cn';
@@ -315,7 +317,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const liveTask = this.tasks.get(mapping.externalId);
       const recovery = ['queued', 'reconcile_required', 'legacy_unresolved'].includes(task.status)
         ? await describeLarkTaskRecovery(this.runtime, mapping.sessionId, task.id, task.status) : undefined;
-      entries.push({ taskId: task.id, title: saved.task_name, workspace: session.cwd, agent: agentNames.get(session.agentId) ?? session.agentId, status: pending && task.status === 'running'
+      entries.push({ ...(taskReport?.taskId === task.id ? { taskReport } : {}), taskId: task.id, title: saved.task_name, workspace: session.cwd, agent: agentNames.get(session.agentId) ?? session.agentId, status: pending && task.status === 'running'
         ? pending.kind === 'ask' ? 'waiting_for_answer' : 'waiting_for_permission' : task.status, updatedAt: task.updatedAt, url: url.toString(),
         ...(recovery ? { detail: recovery.markdown, blocked: recovery.blocked } : {}),
         ...(liveTask ? {
@@ -2303,7 +2305,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const entries = await this.taskDashboardEntries(event, config);
       const { page, totalPages, entries: items } = pageLarkTaskDashboard(entries, request.page ?? 1);
       return { page, totalPages, total: entries.length, tasks: items.map(entry => ({ taskId: entry.taskId, title: entry.title, status: entry.status, agent: entry.agent, workspace: entry.workspace,
-        updatedAt: entry.updatedAt, ...(entry.url ? { url: entry.url } : {}), ...(entry.detail ? { detail: entry.detail } : {}), ...(entry.feedback ? { feedback: entry.feedback } : {}),
+        updatedAt: entry.updatedAt, ...(entry.taskReport ? { taskReport: entry.taskReport } : {}), ...(entry.url ? { url: entry.url } : {}), ...(entry.detail ? { detail: entry.detail } : {}), ...(entry.feedback ? { feedback: entry.feedback } : {}),
         ...(entry.pendingApproval ? { pendingApproval: entry.pendingApproval.commandSummary } : {}) })) };
     }
     const receipts: LarkCommandReceipts = { capture: true, cards: [] };
@@ -3096,6 +3098,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         return { type: 'warning', content: error instanceof Error ? error.message : '重试记录保存失败，请稍后重试' };
       }
       if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
+      if (task.runtimeTaskId && this.workflowOptions.store) await clearTaskReport(this.workflowOptions.store, task.runtimeTaskId);
       task.event = retryEvent;
       task.config = effectiveConfig;
       // 生命周期字段在 runTurn 递增 turn 后再重置，避免上一轮在途的

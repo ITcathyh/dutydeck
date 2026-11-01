@@ -1,3 +1,4 @@
+import { clearTaskReport } from '@dutydeck/shared';
 import { randomUUID } from 'node:crypto';
 import { explicitFinalTextReceiptReader } from './explicit-final.js';
 import { describeLarkTaskRecovery, larkContinuePrompt, larkIdleTimeoutMinutes, larkQuietSettledNote, larkRecoveryRetainedNote, larkReliability, larkStaleSettledNote,
@@ -466,6 +467,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       if (!await store.compareAndSet!(claimKey, JSON.stringify(claim), JSON.stringify(moved))) {
         this.log.warn({ taskId: claim.taskId }, '转到新会话的认领记录未能更新，入站记录已接手执行');
       }
+      await clearTaskReport(store, claim.runtimeTaskId);
       await this.markRelaunchedCard(config, moved).catch(error => this.log.warn({ error, taskId: claim.taskId }, '旧任务卡未能更新为已转到新会话，下次点击时收尾'));
       const task: LarkTask = { id: claim.taskId, group, event: inbox.event, prompt: saved.prompt, resources: inbox.request?.resources ?? [], inbox,
         config: effective, state: 'queued', events: [], turn: claim.turn, scopeId, epoch: group.epoch ?? 0,
@@ -923,6 +925,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       }
       const abandoned: LarkRelaunchClaim = { ...record, phase: 'abandoned', operatorOpenId };
       if (!await store.compareAndSet(key, raw, JSON.stringify(abandoned))) return { type: 'warning', content: '这一轮正在处理，请发送 /status 查看最新状态' };
+      await clearTaskReport(store, record.runtimeTaskId);
       // 记为结果未知后原会话照常接后面的消息；执行资源未确认停止时记不上，原任务留给管理员核对。
       await this.settleInterruptedAttempt(mapping.sessionId, record.runtimeTaskId, `lark_abandon:${taskId}:${turn}`, 'lark_abandon')
         .catch(error => this.log.warn({ error, taskId }, '放弃的一轮未能记为结果未知'));

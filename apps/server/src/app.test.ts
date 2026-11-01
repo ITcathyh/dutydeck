@@ -655,3 +655,15 @@ describe('HTTP API boundary', () => {
   });
 
 });
+
+it('includes reported attention in summary polling and changes its ETag after clearing', async () => {
+  const taskReport = { schemaVersion: 1, taskId: 't', sessionId: 's', status: 'waiting', question: '今天发布吗？', reportedAt: '2026-11-01T00:00:00.000Z' };
+  let report: typeof taskReport | undefined = taskReport;
+  const runtime = { listRunSummaries: async () => [{ sessionId: 's', taskId: 't' }], getSessionTaskReport: async () => report };
+  const app = await buildApp(runtime as any); apps.push(app);
+  const response = await app.inject({ method: 'GET', url: '/api/sessions/summaries' });
+  expect(response.json()[0].taskReport).toEqual(taskReport);
+  report = undefined;
+  const cleared = await app.inject({ method: 'GET', url: '/api/sessions/summaries', headers: { 'if-none-match': String(response.headers.etag) } });
+  expect(cleared.statusCode).toBe(200); expect(cleared.json()[0].taskReport).toBeUndefined();
+});

@@ -26,6 +26,7 @@ Claude Code terminal sessions use OSC 7501 signals for busy, approval and comple
 
 ---
 
+
 ## Overview
 
 **Dutydeck** is a local-first workbench for developers and engineering teams.
@@ -741,6 +742,8 @@ On errors a pack abstains rather than guessing. A pack that fails validation is 
 ---
 
 ## CLI Reference <a id="cli-reference"></a>
+
+Before ending a turn, agents can run `dutydeck session report --status waiting --question "一个具体问题"` or `--status blocked --summary "一句原因"`. These reports appear in Lark `/tasks`, the web attention list, and the first line of the result card. Starting the next turn or handling the task through existing actions clears the report. `ready` means done (no report is required by default); `dropped` means no action is needed. Continue using `session ask --choices` for fixed choices that block until answered.
 
 ```bash
 # Daemon
