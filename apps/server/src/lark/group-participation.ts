@@ -218,6 +218,13 @@ export class LarkGroupParticipation {
     if (this.closed) return Promise.resolve('');
     return this.track(() => this.readInstructions(scope));
   }
+  instructionsSnapshot(scope: CollaborationScope): Promise<{ instructions: string; revision: number }> {
+    if (this.closed) return Promise.resolve({ instructions: '', revision: 0 });
+    return this.track(async () => {
+      const settings = await this.options.repository.getSettings(scope);
+      return { instructions: settings.instructions, revision: settings.revision };
+    });
+  }
   private async readInstructions(scope: CollaborationScope): Promise<string> {
     // Called after the coordinator's normal task authorization; off only disables ambient participation.
     return (await this.options.repository.getSettings(scope)).instructions;

@@ -1440,3 +1440,5 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 ## 开源许可证与协议 (License)
 
 Dutydeck 核心代码采用开源授权协议。完整第三方依赖与开源许可证声明请参阅 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。
+
+机器人预注入提示词每次变更都会保存不可变版本，启动时自动回填已有非空提示词。机器人设置中的“历史版本”可查看全文、按行比较和确认回退；回退会新增版本，过期编辑会拒绝保存。CLI 使用 `dutydeck settings bot prompt-history <appId>`、`prompt-show <appId> <version>`、`prompt-diff <appId> <a> <b>`、`prompt-rollback <appId> <version>`。每轮使用的提示词版本和群长期指令修订号保存在任务外的版本使用记录中。启动回填、读取或冻结版本失败只告警，不影响服务启动和新任务派发；未知版本显示为“未记录版本”，成功记录后清理准备快照。

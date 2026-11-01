@@ -84,6 +84,31 @@ it('composes frozen collaboration prompts without tool, plugin-result or Herdr d
   } finally { await service.close(); }
 });
 
+it('starts normally when prompt version backfill encounters a damaged history record', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dutydeck-prompt-backfill-warning-'));
+  temporaryDirectories.push(root);
+  const database = join(root, 'dutydeck.db');
+  const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
+  await seed.config.set('lark.bots', JSON.stringify([{ appId: 'cli_backfill', appSecret: 'synthetic', preInjectPrompt: '当前提示词' }]));
+  await seed.config.set('bot_prompt_version/cli_backfill/1', 'damaged history');
+  seed.close();
+  const stderr = vi.spyOn(process.stderr, 'write');
+  const service = await startLocalServer({ webRoot: root, env: {
+    ...process.env, NODE_ENV: 'test', DUTYDECK_HOST: '127.0.0.1', DUTYDECK_PORT: String(await freePort()),
+    DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_AUTH: 'false',
+    DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]'
+  } });
+  try {
+    const response = await fetch('http://127.0.0.1:' + service.config.port + '/health');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(stderr.mock.calls.some(call => String(call[0]).includes('提示词版本回填失败，继续启动'))).toBe(true);
+    const check = createRepositories(database);
+    try { expect(await check.config.get('bot_prompt_version/cli_backfill/1')).toBe('damaged history'); }
+    finally { check.close(); }
+  } finally { await service.close(); }
+});
+
 describe('server listen options', () => {
   it('turns the default IPv4 wildcard into a dual-stack socket', () => {
     expect(listenOptions({ host: '0.0.0.0', port: 4310 })).toEqual({

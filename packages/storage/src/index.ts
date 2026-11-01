@@ -390,10 +390,25 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       }
     },
     config: {
+      async compareAndSetBatch(checks, writes) {
+        return sqlite.transaction(() => {
+          for (const { key, value } of writes) {
+            assertBotProcessConfigWrite(sqlite, key, value);
+            if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409);
+          }
+          const read = sqlite.prepare('SELECT value FROM configs WHERE key=?');
+          if (checks.some(({ key, expected }) => (read.get(key) as { value: string } | undefined)?.value !== expected)) return false;
+          const put = sqlite.prepare('INSERT INTO configs (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+          for (const { key, value } of writes) put.run(key, value);
+          for (const { key, value } of writes) assertBotProcessConfigWrite(sqlite, key, value);
+          return true;
+        }).immediate();
+      },
       getSync(key) { return (sqlite.prepare('SELECT value FROM configs WHERE key=?').get(key) as { value: string } | undefined)?.value; },
       async listByJsonField(prefix, filter) { return listConfigByJsonField(sqlite, prefix, filter); },
       async remove(key, expected) {
-        if (!key.startsWith('lark.inbox.') || JSON.parse(expected)?.state !== 'ignored') throw new RuntimeError('CONFIG_DELETE_NOT_SUPPORTED', 'Only ignored Lark inbox receipts can be removed', 409);
+        const promptPending = key.startsWith('bot_prompt_version/pending/');
+        if (!promptPending && (!key.startsWith('lark.inbox.') || JSON.parse(expected)?.state !== 'ignored')) throw new RuntimeError('CONFIG_DELETE_NOT_SUPPORTED', 'Only ignored Lark inbox receipts and prompt usage preparations can be removed', 409);
         return sqlite.prepare('DELETE FROM configs WHERE key = ? AND value = ?').run(key, expected).changes === 1;
       },
       async get(key) { return db.select().from(configs).where(eq(configs.key, key)).get()?.value; },

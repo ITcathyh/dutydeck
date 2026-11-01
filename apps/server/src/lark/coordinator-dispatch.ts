@@ -1,3 +1,4 @@
+import { clearPendingPromptUsage, type BotPromptUsage, freezePromptUsage, pendingPromptUsageKey, promptUsageSnapshot, recordPromptUsage } from './prompt-versions.js';
 import { larkAgentUnavailableReason, larkFallbackHasActivity } from './agent-fallback.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import type { PromptPart } from '@dutydeck/shared';
@@ -1560,6 +1561,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     // 顺序：身份 → 群上下文、记忆这类长材料 → 管理者指令和输出规则 → 当前消息 → 用户请求。
     // 规则紧挨着请求，不会被前面上万字的群上下文冲淡。
     let groupInstructions = '';
+    let groupInstructionsRevision: number | undefined;
     // 群上下文按运行时会话增量注入，水位只在确认 prompt 已提交给 Agent 后推进。运行时对外只暴露任务状态：
     // running 在领取时就发，此时可能还在准备、尚未提交；completed / interrupted 只能来自已提交轮次的驱动结果
     // 或人工确认，failed 分不清是否提交过。所以只认这两种终态；其余终态、准备失败或重放旧任务都保留旧水位，
@@ -1594,7 +1596,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
             throw new Error('群上下文水位写回多次冲突');
           };
         }
-        groupInstructions = (await withLarkContextReadTimeout(this.workflowOptions.participation.instructions({ appId: config.appId, chatId: event.chatId }), '群长期指令读取')).trim();
+        if (this.workflowOptions.participation.instructionsSnapshot) {
+          const snapshot = await withLarkContextReadTimeout(this.workflowOptions.participation.instructionsSnapshot({ appId: config.appId, chatId: event.chatId }), '群长期指令读取');
+          groupInstructions = snapshot.instructions.trim();
+          if (groupInstructions) groupInstructionsRevision = snapshot.revision;
+        } else groupInstructions = (await withLarkContextReadTimeout(this.workflowOptions.participation.instructions({ appId: config.appId, chatId: event.chatId }), '群长期指令读取')).trim();
       } catch (error) {
         if (this.stopped || task.turn !== currentTurn || await closeSupersededPreparedTurn()) return;
         this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '执行前读取群上下文失败');
@@ -1693,6 +1699,17 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         injected.push(injection.text);
         knownParts.set(injection.text, injection.parts);
       }
+    }
+    let promptUsage: BotPromptUsage | undefined = this.workflowOptions.store ? {
+      schemaVersion: 1, taskId: task.id, appId: config.appId, groupInstructionsRevision
+    } : undefined;
+    if (this.workflowOptions.store) {
+      try {
+        promptUsage = await promptUsageSnapshot(this.workflowOptions.store, {
+          taskId: task.id, appId: config.appId, configRevision: config.revision, text: config.preInjectPrompt?.trim() ?? '', groupInstructionsRevision
+        });
+      } catch (error) { this.log.warn({ error, taskId: task.id }, '读取提示词历史失败，继续派发'); }
+      if (promptUsage?.botPromptVersion === undefined) this.log.warn({ taskId: task.id }, '本轮未记录版本，继续派发');
     }
     const rolePrompt = formatRolePrompt(config);
     if (rolePrompt) injected.push(rolePrompt);
@@ -1865,6 +1882,17 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         }
         if (this.stopped || task.turn !== currentTurn) { cleanup(); return; }
         if (task.epoch !== (group.epoch ?? 0)) { await closeSupersededPreparedTurn(); cleanup(); return; }
+        const pendingUsageKey = pendingPromptUsageKey(config.appId, event.messageId, currentTurn);
+        let frozenUsage: Awaited<ReturnType<typeof freezePromptUsage>> = undefined;
+        try {
+          if (this.workflowOptions.store) frozenUsage = await freezePromptUsage(this.workflowOptions.store,
+            pendingUsageKey, resumeTask ? undefined : promptUsage);
+        } catch (error) {
+          if (error instanceof LarkServiceError && error.code === 'PROMPT_USAGE_CONFLICT') throw error;
+          this.log.warn({ error, taskId: task.id }, '冻结提示词版本失败，继续派发');
+        }
+        if (this.stopped || task.turn !== currentTurn) { cleanup(); return; }
+        if (task.epoch !== (group.epoch ?? 0)) { await closeSupersededPreparedTurn(); cleanup(); return; }
         task.submissionStarted = true;
         const runtimeTask = resumeTask
           ? { ...((await this.runtime.getTasks!(session.id)).find(item => item.id === resumeTask!.id) ?? resumeTask), replayed: true, queuedAhead: 0 }
@@ -1874,6 +1902,22 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
             config.idleCompactEnabled !== false ? config.idleCompactHours ?? defaultLarkIdleCompactHours : undefined, promptParts,
             planTask !== undefined ? 'deny-all' : undefined);
         runtimeTaskId = runtimeTask.id;
+        // 重放只能补原准备快照；pending 已清理时保留已有 usage，不能拿当前配置补旧轮。
+        const usedPromptUsage = runtimeTask.replayed ? (frozenUsage && !frozenUsage.created ? frozenUsage.usage : undefined) : promptUsage;
+        if (this.workflowOptions.store) {
+          let recorded = false;
+          if (usedPromptUsage) {
+            try {
+              await recordPromptUsage(this.workflowOptions.store, { ...usedPromptUsage, taskId: runtimeTask.id });
+              recorded = true;
+            } catch (error) { this.log.warn({ error, taskId: runtimeTask.id }, '记录本轮提示词版本失败'); }
+          }
+          // 重放时新建的快照不属于原任务，无论旧 usage 是否存在都不能用于补记。
+          if (frozenUsage && (recorded || runtimeTask.replayed && frozenUsage.created)) {
+            await clearPendingPromptUsage(this.workflowOptions.store, pendingUsageKey, frozenUsage.usage)
+              .catch(error => this.log.warn({ error, taskId: runtimeTask.id }, '清理提示词准备快照失败'));
+          }
+        }
         // 重连或按幂等键重放的是早先派发的那条 prompt，本轮新读的群上下文没有交给 Agent。
         if (runtimeTask.replayed) groupContextCommit = undefined;
         // S8：恢复接上的任务只置位一次；之后排队 PATCH 与每一帧非终态心跳都带重启注记。

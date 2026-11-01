@@ -975,3 +975,5 @@ Confirmation requires bot settings management permission (`channel_bot.update`) 
 ## License
 
 Dutydeck core code is licensed under open-source terms. See [Third-Party Notices](THIRD_PARTY_NOTICES.md) for details.
+
+Bot pre-injected prompts now keep immutable versions when the text changes; existing nonempty prompts are backfilled at startup. Open “历史版本” in bot settings to view, compare lines, or confirm a rollback. A rollback creates a new version, and stale configuration edits are rejected. CLI commands under `dutydeck settings bot` are `prompt-history <appId>`, `prompt-show <appId> <version>`, `prompt-diff <appId> <a> <b>`, and `prompt-rollback <appId> <version>`. Each dispatched task records the prompt version and, when present, the group instruction revision outside the task request. Startup backfill, version lookup, or snapshot failures only warn and do not block startup or new tasks; unknown versions appear as “未记录版本”. Preparation snapshots are removed after successful usage recording.

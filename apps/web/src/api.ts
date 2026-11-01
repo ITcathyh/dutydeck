@@ -353,6 +353,12 @@ export const eventsUrl = (id: string, query: EventWindowQuery = {}) => {
 };
 export const RUN_SUMMARY_ENDPOINT = '/api/sessions/summaries';
 export type WorkItemRequest = { stepId: string; sessionId: string; taskId: string; requestId: string; kind: 'permission' | 'question'; text: string };
+export interface BotPromptVersion {
+  schemaVersion: 1; appId: string; version: number; text: string; sha256: string; savedAt: string;
+  source: 'web' | 'cli' | 'agent' | 'backfill' | 'rollback'; savedBy?: string; rollbackFrom?: number;
+}
+export type BotPromptHistory = { revision: number; unrecordedUsages?: Array<{ taskId: string; label: '未记录版本' }>; versions: Array<Omit<BotPromptVersion, 'text'> & { characters: number; current: boolean }> };
+
 export const api = {
   workItemRequests: (sessionId: string, id: string) => json<WorkItemRequest[]>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/requests`, { cache: 'no-store' }),
   respondWorkItemRequest: (sessionId: string, id: string, input: { stepId: string; taskId: string; requestId: string; kind: 'permission' | 'question'; answer: string }) => json<unknown>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/respond`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
@@ -413,6 +419,10 @@ export const api = {
   cancelQueued: (id: string, taskId: string) => json<Task>(`/api/sessions/${id}/queue/${taskId}`, { method: 'DELETE' }),
   steerQueued: (id: string, taskId: string) => json<Task>(`/api/sessions/${id}/queue/${taskId}/steer`, { method: 'POST' }),
   injectQueued: (id: string, taskId: string) => json<SteeringResult & { task: Task }>(`/api/sessions/${id}/queue/${taskId}/inject`, { method: 'POST' }),
+  botPromptHistory: (appId: string) => json<BotPromptHistory>(`/api/lark/bots/${encodeURIComponent(appId)}/prompt-versions`),
+  botPromptShow: (appId: string, version: number) => json<BotPromptVersion>(`/api/lark/bots/${encodeURIComponent(appId)}/prompt-versions/${version}`),
+  botPromptDiff: (appId: string, a: number, b: number) => json<{ diff: string }>(`/api/lark/bots/${encodeURIComponent(appId)}/prompt-versions/diff?a=${a}&b=${b}`),
+  botPromptRollback: (appId: string, version: number, expectedRevision: number) => json<LarkConfig>(`/api/lark/bots/${encodeURIComponent(appId)}/prompt-versions/${version}/rollback`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision }) }),
   larkConfig: () => json<LarkConfig>('/api/lark/config'),
   usageReport: (query: UsageReportQuery) => json<UsageReport>(`/api/usage/report?${usageQuery(query)}`, { cache: 'no-store' }),
   usageTasks: (query: UsageReportQuery & { limit: number; offset: number }) => json<UsageTaskPage>(`/api/usage/tasks?${usageQuery(query)}`, { cache: 'no-store' }),
