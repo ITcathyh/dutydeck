@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
-import { matterRelations, type Session, type TaskRecord } from '@dutydeck/shared';
+import { matterRelations, readSessionTaskReport, writeTaskReport, type Session, type TaskRecord } from '@dutydeck/shared';
 import { MattersService } from './matters.js';
 import { buildApp } from './app.js';
 
@@ -90,5 +90,33 @@ it('reads each matter once per session-list request and returns only local membe
     expect(new Set(result.map((item: any) => item.matter.id)).size).toBe(1);
     for (const item of result) expect(item.matter.sessionIds).toEqual([item.id]);
     expect(result.reduce((count: number, item: any) => count + item.matter.sessionIds.length, 0)).toBe(3);
+  } finally { await app.close(); repos.close(); }
+});
+
+it.each(['waiting', 'blocked'] as const)('keeps a matter open for the latest uncleared %s report, including a superseded source', async status => {
+  const repos = createRepositories(':memory:'); const service = new MattersService(repos);
+  const sessions = [session('source', 'stopped'), session('child', 'completed')];
+  await service.session('source', { title: 'pending matter' });
+  await service.session('child', { sourceSessionId: 'source', relation: 'retry' });
+  const task: TaskRecord = { id: 'source_task', sessionId: 'source', prompt: 'goal', status: 'completed', createdAt: '2026-11-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z' };
+  await repos.tasks.save(task);
+  const report = { schemaVersion: 1 as const, taskId: task.id, sessionId: 'source', status, question: '今天发布吗？', summary: '缺少账号', reportedAt: '2026-11-01T00:00:00.000Z' };
+  const runtime = { listSessions: async () => sessions, getSession: async (id: string) => sessions.find(item => item.id === id), getTasks: (id: string) => repos.tasks.listBySession(id),
+    getSessionTaskReport: async (id: string) => readSessionTaskReport(repos.config, id, await repos.tasks.listBySession(id)) } as any;
+  const app = await buildApp(runtime, { matters: repos.matters });
+  try {
+    const id = service.summary('child')!.id;
+    await writeTaskReport(repos.config, report);
+    expect((await app.inject('/api/sessions')).json().every((item: any) => item.matter.status === 'open')).toBe(true);
+    expect((await app.inject(`/api/matters/${id}`)).json().status).toBe('open');
+    for (const finished of [{ ...report, status: 'ready' as const }, { ...report, status: 'dropped' as const }, { ...report, clearedAt: report.reportedAt }]) {
+      await writeTaskReport(repos.config, finished);
+      expect((await app.inject(`/api/matters/${id}`)).json().status).toBe('done');
+    }
+    await writeTaskReport(repos.config, report);
+    await repos.tasks.save({ ...task, id: 'later_task', createdAt: '2026-11-01T00:01:00Z' });
+    expect(await runtime.getSessionTaskReport('source')).toBeUndefined();
+    expect((await app.inject(`/api/matters/${id}`)).json().status).toBe('done');
+    expect((await app.inject('/api/sessions')).json().every((item: any) => item.matter.status === 'done')).toBe(true);
   } finally { await app.close(); repos.close(); }
 });

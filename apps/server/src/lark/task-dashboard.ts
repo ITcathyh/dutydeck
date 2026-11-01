@@ -355,11 +355,11 @@ export function groupLarkTasksByMatter(entries: LarkTaskDashboardEntry[]): LarkT
     const group = groups.get(key);
     if (group) group.push(entry); else groups.set(key, [entry]);
   }
-  const priority = (entry: LarkTaskDashboardEntry) => entry.matter?.superseded && isSupersededMatterSession({ id: entry.matter.sessionId, state: entry.status }, [entry.matter.sessionId], entry.status) && !entry.blocked && !entry.pendingApproval ? 9 : validApproval(entry.pendingApproval) || entry.blocked || entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status);
+  const priority = (entry: LarkTaskDashboardEntry) => entry.matter?.superseded && isSupersededMatterSession({ id: entry.matter.sessionId, state: entry.status }, [entry.matter.sessionId], entry.status, entry.taskReport) && !entry.blocked && !entry.pendingApproval ? 9 : taskReportAttentionText(entry.taskReport) || validApproval(entry.pendingApproval) || entry.blocked || entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status);
   return [...groups.values()].flatMap(group => {
     const count = new Set(group.map(entry => entry.matter?.sessionId)).size;
     if (!group[0]?.matter || count <= 1) return group;
-    const [entry] = [...group].sort((a, b) => priority(a) - priority(b) || timestamp(b.updatedAt) - timestamp(a.updatedAt));
+    const [entry] = [...group].sort((a, b) => priority(a) - priority(b) || Number(Boolean(taskReportAttentionText(b.taskReport))) - Number(Boolean(taskReportAttentionText(a.taskReport))) || timestamp(b.updatedAt) - timestamp(a.updatedAt));
     return [{ ...entry!, title: entry!.matter!.title, sessionCount: count }];
   });
 }

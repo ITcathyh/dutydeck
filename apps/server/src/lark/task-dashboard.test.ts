@@ -462,3 +462,21 @@ it('groups a matter by the most actionable visible session and preserves a singl
   expect(groupLarkTasksByMatter([replaced, { ...child, status: 'running' }])[0]?.taskId).toBe('b');
   expect(groupLarkTasksByMatter([{ ...replaced, status: 'reconcile_required', blocked: true }, { ...child, status: 'running' }])[0]?.taskId).toBe('a');
 });
+
+it.each(['waiting', 'blocked'] as const)('shows a superseded source with a current %s report as the matter attention row', status => {
+  const taskReport = { schemaVersion: 1 as const, taskId: 'source_task', sessionId: 'source', status, question: '今天发布吗？', summary: '缺少账号', reportedAt: '2026-11-01T00:00:00.000Z' };
+  const source = entry({ taskId: 'source_task', status: 'interrupted', taskReport, matter: { id: 'matter', title: '需要决定的事项', sessionId: 'source', superseded: true } });
+  const child = entry({ taskId: 'child_task', status: 'completed', matter: { id: 'matter', title: '需要决定的事项', sessionId: 'child' } });
+  expect(groupLarkTasksByMatter([source, child])[0]?.taskId).toBe('source_task');
+  const { elements } = buildLarkTaskDashboard([source, child]);
+  expect(elements.find(el => el.element_id === 'task_dashboard_group_0')).toBeTruthy();
+  expect(rows(elements)).toHaveLength(1);
+  expect(rowText(rows(elements)[0]!)).toContain(status === 'waiting' ? '等你决定：今天发布吗？' : '受阻：缺少账号');
+  expect(rowText(rows(elements)[0]!)).toContain('2 个会话');
+  const failedSibling = { ...child, status: 'failed', updatedAt: '2026-11-01T00:01:00Z' };
+  expect(groupLarkTasksByMatter([source, failedSibling])[0]?.taskId).toBe('source_task');
+  expect(rowText(rows(buildLarkTaskDashboard([source, failedSibling]).elements)[0]!)).toContain(status === 'waiting' ? '等你决定：今天发布吗？' : '受阻：缺少账号');
+  for (const report of [{ ...taskReport, status: 'ready' as const }, { ...taskReport, status: 'dropped' as const }, { ...taskReport, clearedAt: taskReport.reportedAt }]) {
+    expect(groupLarkTasksByMatter([{ ...source, taskReport: report }, child])[0]?.taskId).toBe('child_task');
+  }
+});

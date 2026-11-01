@@ -909,6 +909,7 @@ export class LarkGroupParticipation {
           title: '待确认的任务', summary: `我打算处理这条请求：${compactText(trigger.text).slice(0, 200)}`,
           confirmLabel: '交给我处理', payload: { event: JSON.stringify(event), decisionId: id } });
         if (!card) throw new Error('确认卡未送达，没有执行');
+        await this.noteDisposition(scope, pending, 'participation_confirmation', id);
       }
       action = await repo.updateAction(scope, actionId, { expectedRevision: action.revision, status: 'succeeded' });
       await repo.updateDecision(scope, id, { status: 'sent' });

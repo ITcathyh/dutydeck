@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { taskReportAttentionText, type TaskReport } from './task-report.js';
 
 export const matterSchema = z.object({
   id: z.string().min(1), title: z.string().min(1), status: z.enum(['open', 'done', 'cancelled']),
@@ -33,14 +34,15 @@ export interface MatterTracking {
   summary(sessionId: string): MatterSummary | undefined;
 }
 
-export function matterStatusForSessions(sessions: Array<{ state: string; archivedAt?: string }>): Matter['status'] {
+export function matterStatusForSessions(sessions: Array<{ state: string; archivedAt?: string; taskReport?: TaskReport }>): Matter['status'] {
+  if (sessions.some(session => taskReportAttentionText(session.taskReport))) return 'open';
   if (sessions.length && sessions.every(session => session.state === 'completed')) return 'done';
   if (sessions.length && sessions.every(session => session.state === 'stopped')) return 'cancelled';
   return 'open';
 }
 
 /** 只降低已明确交接/重试承接的历史来源；结果未知仍需人处理。 */
-export function isSupersededMatterSession(session: { id: string; state: string }, supersededSessionIds: string[] = [], taskStatus?: string): boolean {
+export function isSupersededMatterSession(session: { id: string; state: string }, supersededSessionIds: string[] = [], taskStatus?: string, taskReport?: TaskReport): boolean {
   return supersededSessionIds.includes(session.id) && ['stopped', 'failed', 'interrupted', 'cancelled'].includes(session.state)
-    && !['reconcile_required', 'legacy_unresolved'].includes(taskStatus ?? '');
+    && !['reconcile_required', 'legacy_unresolved'].includes(taskStatus ?? '') && !taskReportAttentionText(taskReport);
 }

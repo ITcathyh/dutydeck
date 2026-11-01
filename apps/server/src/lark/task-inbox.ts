@@ -175,7 +175,12 @@ export class LarkTaskInbox {
   async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'resourceDirectories' | 'event' | 'workflowRequestId' | 'lineage' | 'fallbackNote' | 'fallbackFromSessionId' | 'redispatch' | 'mergeFrom' | 'mergedInto' | 'reason' | 'detail' | 'disposition'>>) {
     // 同一认领的准备和 /new 可并发更新；串行合并字段，同时保留跨进程 CAS。
     const operation = (this.updates.get(record) ?? Promise.resolve()).then(async () => {
-      const next = await this.mutateClaim(record, latest => ({ ...latest, ...patch, ...(patch.taskId ? { reason: undefined, detail: undefined, disposition: undefined } : {}), ...(patch.reason ? { disposition: dispositionSchema.parse({ schemaVersion: 1, reason: patch.reason, ...(patch.detail ? { detail: patch.detail } : {}) }) } : {}) }));
+      const next = await this.mutateClaim(record, latest => {
+        const confirmed = patch.taskId && latest.event.authorization?.via === 'participation_confirmed';
+        const acceptedDisposition = confirmed ? dispositionSchema.parse({ schemaVersion: 1, reason: 'participation_handled', decisionId: latest.event.authorization?.decisionId }) : undefined;
+        return { ...latest, ...patch, ...(patch.taskId ? { reason: acceptedDisposition?.reason, detail: undefined, disposition: acceptedDisposition } : {}),
+          ...(patch.reason ? { disposition: dispositionSchema.parse({ schemaVersion: 1, reason: patch.reason, ...(patch.detail ? { detail: patch.detail } : {}) }) } : {}) };
+      });
       if (!next) throw new Error('Lark inbox claim was lost');
       Object.assign(record, next);
     });

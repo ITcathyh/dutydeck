@@ -540,3 +540,20 @@ it('opens a grouped matter with its sessions, plans and origin, and keeps member
     expect(read).toHaveBeenCalledWith('m');
   } finally { read.mockRestore(); }
 });
+
+it.each(['waiting', 'blocked'] as const)('renders one matter attention row for a superseded source reported as %s until cleared', status => {
+  const matter = { id: 'matter', title: '需要决定的事项', status: 'open' as const, sessionIds: ['1', '2'], supersededSessionIds: ['1'] };
+  const sessions = [{ ...session('1', '/repo', 'stopped'), matter }, { ...session('2', '/repo', 'completed'), matter }];
+  const taskReport = { schemaVersion: 1 as const, taskId: 'task', sessionId: '1', status, question: '今天发布吗？', summary: '缺少账号', reportedAt: '2026-11-01T00:00:00.000Z' };
+  const summary = { sessionId: '1', taskId: 'task', prompt: 'goal', status: 'completed', queuedCount: 0, updatedAt: taskReport.reportedAt, taskReport };
+  const { rerender } = render(<WorkspaceOverview {...baseProps} mode="tasks" view="attention" sessions={sessions} summaries={{ '1': summary }}/>);
+  expect(screen.getAllByRole('button', { name: /需要决定的事项/ })).toHaveLength(1);
+  expect(screen.getByText(status === 'waiting' ? '等你决定：今天发布吗？' : '受阻：缺少账号')).toBeTruthy();
+  expect(screen.getByText('2 个会话')).toBeTruthy();
+  const newerFailure = [sessions[0]!, { ...sessions[1]!, state: 'failed', updatedAt: '2026-11-01T00:01:00Z' }];
+  rerender(<WorkspaceOverview {...baseProps} mode="tasks" view="attention" sessions={newerFailure} summaries={{ '1': summary }}/>);
+  expect(screen.getAllByRole('button', { name: /需要决定的事项/ })).toHaveLength(1);
+  expect(screen.getByText(status === 'waiting' ? '等你决定：今天发布吗？' : '受阻：缺少账号')).toBeTruthy();
+  rerender(<WorkspaceOverview {...baseProps} mode="tasks" view="attention" sessions={sessions} summaries={{ '1': { ...summary, taskReport: { ...taskReport, clearedAt: taskReport.reportedAt } } }}/>);
+  expect(screen.queryByRole('button', { name: /需要决定的事项/ })).toBeNull();
+});

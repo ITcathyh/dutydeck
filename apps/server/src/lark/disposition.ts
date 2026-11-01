@@ -5,7 +5,7 @@ import type { LarkInboxRecord } from './task-inbox.js';
 export const dispositionReasons = {
   not_addressed: '没有叫本机器人，且不满足免 @ 条件', bot_message: '机器人消息未触发执行',
   access_denied: '发送人没有访问权限', group_unbound: '群配置尚未生效', bot_loop_guard: '机器人回合门禁拦截',
-  command_rejected: '命令被拒绝', participation_handled: '已由群参与直接处理', participation_observes: '等待群参与判断',
+  command_rejected: '命令被拒绝', participation_handled: '已由群参与直接处理', participation_confirmation: '等待你确认是否执行', participation_observes: '等待群参与判断',
   participation_silent: '群参与判断为静默', participation_merged: '合并到另一条消息判断',
   backlog_expired: '积压超过 60 分钟，不再执行', listening_disabled: '机器人已停止监听',
   participation_observe_only: '观察模式只记录判断', participation_stale: '配置、授权或上下文已变化', participation_reply_budget: '主动发言次数已用完', participation_duplicate: '已有相同内容的回复，避免重复投递', participation_replied: '已由群参与直接回复',

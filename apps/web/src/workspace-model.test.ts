@@ -424,3 +424,15 @@ it('groups matters with an actionable representative, preserves single sessions,
   expect(groupSessionsByMatter([{ ...source, matter: { ...matter, supersededSessionIds: [] } }, child])[0]?.id).toBe('source');
   expect(groupSessionsByMatter([source, child], { source: { sessionId: 'source', taskId: 't', prompt: 'unknown', status: 'reconcile_required', queuedCount: 0, updatedAt: '' } })[0]?.id).toBe('source');
 });
+
+it.each(['waiting', 'blocked'] as const)('retains the matter %s report when a newer sibling fails', status => {
+  const matter = { id: 'm', title: 'reported matter', status: 'open' as const, sessionIds: ['source', 'child'] };
+  const source = { ...session('source', '/repo', 'completed', '2026-11-01T00:00:00Z'), matter };
+  const child = { ...session('child', '/repo', 'failed', '2026-11-01T00:01:00Z'), matter };
+  const taskReport = { schemaVersion: 1 as const, taskId: 'task', sessionId: 'source', status, question: '今天发布吗？', summary: '缺少账号', reportedAt: '2026-11-01T00:00:00.000Z' };
+  const summary: RunSummary = { sessionId: 'source', taskId: 'task', prompt: 'goal', status: 'completed', queuedCount: 0, updatedAt: taskReport.reportedAt, taskReport };
+  expect(groupSessionsByMatter([source, child], { source: summary })[0]?.id).toBe('source');
+  for (const report of [{ ...taskReport, status: 'ready' as const }, { ...taskReport, status: 'dropped' as const }, { ...taskReport, clearedAt: taskReport.reportedAt }]) {
+    expect(groupSessionsByMatter([source, child], { source: { ...summary, taskReport: report } })[0]?.id).toBe('child');
+  }
+});

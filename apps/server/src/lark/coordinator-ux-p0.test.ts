@@ -14,6 +14,8 @@ import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import { RelayAskBroker } from '@dutydeck/relay';
 import type { AgentConfig } from '@dutydeck/shared';
 import { readTaskAuthorization } from '../task-authorization.js';
+import { MattersService } from '../matters.js';
+import { queryDispositions } from './disposition.js';
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { LarkMessageCoordinator, larkTaskTitle } from './coordinator.js';
 import { LarkGroupManager } from './group-management.js';
@@ -59,6 +61,7 @@ async function harness(
   const gate = new Promise<void>(done => { release = done; });
   const send = vi.fn(); const resolvePermission = vi.fn(); const interrupt = vi.fn();
   const runtime = new DutydeckRuntime(repos, {
+    matterTracking: new MattersService(repos),
     ...(options.authorizeTask ? { authorizeTask: options.authorizeTask } : {}),
     probe: () => ({ protocol, available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, _sessionId) => {
@@ -1846,7 +1849,7 @@ describe('群参与模型 act 的人工授权', () => {
     let h!: H;
     let participation!: LarkGroupParticipation;
     h = await harness('normal', { managedGroup: true, configPatch: { mentionPolicy: 'always', roleScope: '项目问题处理', riskControlMode: 'guidance', adhdMode: true }, participation: repos => (participation = new LarkGroupParticipation({
-      repository: repos.collaboration,
+      repository: repos.collaboration, inboxStore: repos.config,
       decider: { decide: async (_config, _snapshot, triggerId) => ({ action: 'act', reason: '需要整理项目清单', evidenceIds: [triggerId!], updates: [] }), respond: async () => '' },
       authorize: async () => true, readConfig: async () => h?.config,
       serviceFor: () => ({ ...h.service, replyText: async () => ({ messageId: 'om_text' }), listOwnReactions: async () => [],
@@ -1868,6 +1871,10 @@ describe('群参与模型 act 的人工授权', () => {
   it('does not create a task before confirmation; rejects outsiders and executes as the clicker once', async () => {
     const { h, participation, pending, value, context } = await start();
     expect(h.send).not.toHaveBeenCalled();
+    expect(await h.runtime.listSessions()).toEqual([]);
+    expect(await queryDispositions(h.repos.config, { appId: scope.appId, chatId: scope.chatId })).toContainEqual(expect.objectContaining({
+      messageId: 'om_inferred', state: 'ignored', reason: 'participation_confirmation', decisionId: (pending.payload.payload as { decisionId: string }).decisionId
+    }));
     expect(await h.repos.config.list!('task_authorization/')).toHaveLength(0);
     expect(JSON.stringify(h.cards.get(pending.receipt!))).toContain('交给我处理');
     expect(h.cards.get(pending.receipt!)).toMatchObject({ adhdMode: true });
@@ -1886,6 +1893,15 @@ describe('群参与模型 act 的人工授权', () => {
     expect(h.send.mock.calls[0]?.[0]).toContain('当前飞书发送人不是本机器人的管理员');
     const execution = h.repos.execution.getAcceptedTask(records[0]!.taskId);
     expect(execution?.request?.actor).toMatchObject({ kind: 'channel', id: 'ou_bob' });
+    const matter = h.repos.matters!.find('task', records[0]!.taskId);
+    expect(matter).toBeDefined();
+    expect(h.repos.matters!.links(matter!.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'session', refId: records[0]!.sessionId }), expect.objectContaining({ kind: 'task', refId: records[0]!.taskId })
+    ]));
+    expect(await queryDispositions(h.repos.config, { appId: scope.appId, messageId: 'om_inferred' })).toContainEqual(expect.objectContaining({
+      state: 'accepted', reason: 'participation_handled', taskId: records[0]!.taskId, sessionId: records[0]!.sessionId, decisionId: records[0]!.decisionId
+    }));
+    expect((await queryDispositions(h.repos.config, { appId: scope.appId, chatId: scope.chatId })).some(row => row.messageId === 'om_inferred')).toBe(false);
     expect(await participation.confirmations.handle(scope.appId, value, 'ou_alice', context)).toMatchObject({ type: 'info' });
     expect(h.send).toHaveBeenCalledOnce();
   });

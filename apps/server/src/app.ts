@@ -353,14 +353,15 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     }
     const projections = new Map<string, { id: string; title: string; status: import('@dutydeck/shared').Matter['status']; superseded: Set<string> }>();
     for (const [id, { matter, links, sessions }] of groups) {
+      const reportedSessions = await Promise.all(sessions.map(async session => ({ ...session, taskReport: await runtime.getSessionTaskReport?.(session.id) })));
       const origin = links.find(link => link.kind === 'session' && link.relation === 'origin');
       const superseded = new Set<string>();
       for (const link of links.filter(link => link.kind === 'reply_target' && link.refId.startsWith('session:'))) {
         const sourceId = link.refId.slice(8);
         if (ids.has(sourceId) && !(await runtime.getTasks?.(sourceId) ?? []).some(task => ['reconcile_required', 'legacy_unresolved'].includes(task.status))) superseded.add(sourceId);
       }
-      const current = sessions.filter(session => !isSupersededMatterSession(session, superseded.has(session.id) ? [session.id] : []));
-      projections.set(id, { id, title: !origin || ids.has(origin.refId) ? matter.title : '事项', status: matterStatusForSessions(current.length ? current : sessions), superseded });
+      const current = reportedSessions.filter(session => !isSupersededMatterSession(session, superseded.has(session.id) ? [session.id] : [], undefined, session.taskReport));
+      projections.set(id, { id, title: !origin || ids.has(origin.refId) ? matter.title : '事项', status: matterStatusForSessions(current.length ? current : reportedSessions), superseded });
     }
     return visible.map(session => {
       const id = membership.get(session.id);
@@ -396,7 +397,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const superseded = links.filter(link => link.kind === 'reply_target' && link.refId.startsWith('session:')).map(link => link.refId.slice(8));
     const current = [];
     for (const session of sessions) {
-      if (!isSupersededMatterSession(session, superseded) || (await runtime.getTasks?.(session.id) ?? []).some(task => ['reconcile_required', 'legacy_unresolved'].includes(task.status))) current.push(session);
+      const taskReport = await runtime.getSessionTaskReport?.(session.id);
+      if (!isSupersededMatterSession(session, superseded, undefined, taskReport) || (await runtime.getTasks?.(session.id) ?? []).some(task => ['reconcile_required', 'legacy_unresolved'].includes(task.status))) current.push({ ...session, taskReport });
     }
     return { id: matter.id, title: originVisible ? matter.title : '事项', status: matterStatusForSessions(current.length ? current : sessions), sessions, schedules: [...schedules.values()], ...(originUrl ? { originUrl } : {}) };
   });

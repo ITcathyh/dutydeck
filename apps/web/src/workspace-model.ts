@@ -231,10 +231,10 @@ export function groupSessionsByMatter(sessions: Session[], summaries: Record<str
     if (group) group.push(session); else groups.set(key, [session]);
   }
   const rank: Record<SessionAttention, number> = { decision: 0, recovery: 1, active: 2, continue: 3, completed: 4, archived: 5 };
-  const matterSessionRank = (session: Session) => isSupersededMatterSession(session, session.matter?.supersededSessionIds, summaries[session.id]?.status) ? 6 : rank[sessionAttention(session, summaries[session.id])];
+  const matterSessionRank = (session: Session) => isSupersededMatterSession(session, session.matter?.supersededSessionIds, summaries[session.id]?.status, summaries[session.id]?.taskReport) ? 6 : rank[sessionAttention(session, summaries[session.id])];
   return [...groups.values()].map(group => {
     if (group.length === 1) return group[0]!;
-    const [representative] = [...group].sort((a, b) => matterSessionRank(a) - matterSessionRank(b) || b.updatedAt.localeCompare(a.updatedAt));
+    const [representative] = [...group].sort((a, b) => matterSessionRank(a) - matterSessionRank(b) || Number(Boolean(taskReportAttentionText(summaries[b.id]?.taskReport))) - Number(Boolean(taskReportAttentionText(summaries[a.id]?.taskReport))) || b.updatedAt.localeCompare(a.updatedAt));
     return { ...representative!, name: representative!.matter!.title, matter: { ...representative!.matter!, sessionIds: group.map(session => session.id) } };
   });
 }
