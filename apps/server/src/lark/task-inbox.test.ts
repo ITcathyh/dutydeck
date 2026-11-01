@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { LarkMessageCoordinator } from './coordinator.js';
-import { LarkTaskInbox } from './task-inbox.js';
+import { larkConfirmationInputDigest, LarkTaskInbox } from './task-inbox.js';
 import type { LarkMessageEvent } from './listener.js';
 
 const message = (overrides: Partial<LarkMessageEvent> = {}): LarkMessageEvent => ({
@@ -376,5 +376,35 @@ it('ignores nested JSON object key order while rejecting reordered execution arr
     await repositories.config.set(key, JSON.stringify(changed));
     await expect(inbox.update(record, { taskId: 'must_not_win' })).rejects.toThrow('Lark inbox claim was lost');
     expect((await inbox.lookup('app_one', record.event.messageId))?.event.mentions[0]?.openId).toBe('ou_two');
+  } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+
+it.each(['file key', 'file name', 'routing', 'message version'] as const)('binds an ignored request to frozen %s at the claim CAS', async changed => {
+  const { directory, repositories } = await openDatabase();
+  try {
+    const inbox = new LarkTaskInbox(repositories.config);
+    const original = message({ messageType: 'file', content: JSON.stringify({ file_key: 'old_key', file_name: 'old.txt' }), createTime: '100', rootId: 'om_root', senderOpenId: 'ou_author', senderType: 'user' });
+    const captured = (await inbox.capture('app_one', original))!;
+    await inbox.update(captured, { state: 'ignored' });
+    const edited = { ...original, ...(changed === 'file key' ? { content: JSON.stringify({ file_key: 'new_key', file_name: 'old.txt' }) }
+      : changed === 'file name' ? { content: JSON.stringify({ file_key: 'old_key', file_name: 'new.txt' }) }
+      : changed === 'routing' ? { rootId: 'other_root' } : { createTime: '101' }) };
+    await inbox.reopenIgnored('app_one', edited);
+    expect((await inbox.lookup('app_one', original.messageId))?.originalEvent).toEqual(original);
+    await expect(inbox.claim('app_one', original, true, { senderOpenId: 'ou_confirmer', senderType: 'user', confirmedInputDigest: larkConfirmationInputDigest(original) }))
+      .rejects.toMatchObject({ code: 'LARK_CONFIRMATION_INPUT_CHANGED' });
+    expect((await inbox.lookup('app_one', original.messageId))?.state).toBe('unrouted');
+  } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+});
+it('accepts the frozen request as the confirmer once without persisting the transient guard in its event', async () => {
+  const { directory, repositories } = await openDatabase();
+  try {
+    const inbox = new LarkTaskInbox(repositories.config); const event = message({ senderOpenId: 'ou_author', senderType: 'user' });
+    const captured = (await inbox.capture('app_one', event))!; await inbox.update(captured, { state: 'ignored' });
+    const adoption = { senderOpenId: 'ou_confirmer', senderType: 'user', authorization: { strength: 'explicit' as const, via: 'participation_confirmed' as const }, confirmedInputDigest: larkConfirmationInputDigest(event) };
+    const claimed = await inbox.claim('app_one', event, true, adoption);
+    expect(claimed?.event).toEqual({ ...event, senderOpenId: 'ou_confirmer', authorization: adoption.authorization });
+    expect(await inbox.claim('app_one', event, true, adoption)).toBeUndefined();
   } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
 });

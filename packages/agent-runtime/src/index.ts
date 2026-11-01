@@ -1,4 +1,4 @@
-import { clearTaskReport, readSessionTaskReport, taskReportInputSchema, writeTaskReport, type TaskReportInput } from '@dutydeck/shared';
+import { clearTaskReportSafely, readSessionTaskReportReference, readSessionTaskReport, taskReportInputSchema, writeTaskReport, type TaskReportInput } from '@dutydeck/shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
@@ -1479,7 +1479,7 @@ export class DutydeckRuntime {
       if (!replay && this.recoveryInFlight(id)) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'Original execution still has an in-flight owner', 409);
       const result = await this.mutations.write(id, async () => this.wake(this.bound().confirmSteeringRecovery(this.fence(session), input, actor)));
       if (!result.replayed) {
-        await clearTaskReport(this.repos.config, input.taskId);
+        await clearTaskReportSafely(this.repos.config, input.taskId);
         await this.reopenQueue(id);
       }
       return {replayed: result.replayed, task: this.publicTask(result.task!), recovery: await this.inspectExecutionRecovery(id,actor)};
@@ -1502,7 +1502,7 @@ export class DutydeckRuntime {
         ? this.bound().retryAttempt(f, decision, input.resourceChecks)
         : this.bound().confirmAttemptRecovery(f, `recovery:${input.decisionId}`, { kind: 'manual', outcome: input.outcome, decision }, input.verifiedOutputText)));
       if (!result.replayed) {
-        await clearTaskReport(this.repos.config, input.taskId);
+        await clearTaskReportSafely(this.repos.config, input.taskId);
         await this.reopenQueue(id);
       }
       return { replayed: result.replayed, task: this.publicTask(result.task!), recovery: await this.inspectExecutionRecovery(id, actor) };
@@ -1604,7 +1604,7 @@ export class DutydeckRuntime {
           : this.bound().confirmAttemptRecovery(f, `recovery:${input.decisionId}`, { kind: 'manual', outcome: input.action, decision: { ...evidence, action: 'confirm_result' } },
             input.action === 'completed' ? input.verifiedOutputText : undefined, reuseOwned));
       });
-      if (!result.replayed) { await clearTaskReport(this.repos.config, input.taskId); await this.reopenQueue(id); }
+      if (!result.replayed) { await clearTaskReportSafely(this.repos.config, input.taskId); await this.reopenQueue(id); }
       return { replayed: result.replayed, task: this.publicTask(result.task!) };
     });
   }
@@ -1864,7 +1864,11 @@ export class DutydeckRuntime {
   }
 
   async getSessionTaskReport(sessionId: string) {
-    return readSessionTaskReport(this.repos.config, sessionId, await this.repos.tasks.listBySession(sessionId));
+    try {
+      const tasks = this.repos.tasks.listRecentBySession
+        ? await this.repos.tasks.listRecentBySession(sessionId) : await this.repos.tasks.listBySession(sessionId);
+      return await readSessionTaskReport(this.repos.config, sessionId, tasks);
+    } catch (error) { (this.options.log ?? console).warn({ error, sessionId }, '读取会话收尾报告失败，继续处理'); }
   }
 
   async reportCurrentTask(sessionId: string, input: TaskReportInput, expected: { taskId: string; attemptId?: string }) {
@@ -1889,7 +1893,15 @@ export class DutydeckRuntime {
   }
 
   private async clearSessionTaskReports(sessionId: string) {
-    for (const task of await this.repos.tasks.listBySession(sessionId)) await clearTaskReport(this.repos.config, task.id);
+    try {
+      // The persisted reference also covers an older active turn behind queued receipts.
+      const reference = await readSessionTaskReportReference(this.repos.config, sessionId);
+      const recent = await this.repos.tasks.listRecentBySession?.(sessionId) ?? [];
+      const active = this.activeTasks.get(sessionId)?.id;
+      for (const taskId of new Set([reference, active, ...recent.map(task => task.id)])) {
+        if (taskId) await clearTaskReportSafely(this.repos.config, taskId, this.options.log);
+      }
+    } catch (error) { (this.options.log ?? console).warn({ error, sessionId }, '读取待清理收尾报告失败，继续处理'); }
   }
 
   getActiveTaskContext(sessionId: string): { taskId: string; attemptId?: string; actorId?: string } | undefined {
@@ -3442,7 +3454,7 @@ export class DutydeckRuntime {
       if (expectedTaskId && expectedTaskId !== ref.taskId) throw new RuntimeError('TASK_NOT_ACTIVE', 'The requested task is no longer active', 409);
       await this.mutations.write(id, async () => this.wake(this.bound().recordInterruptIntent(this.attemptFence(ref), { operationId, actor: this.actor(session, actorId) })));
       if (this.attempts.get(id) === token) await this.interruptOwnedAttempt(ref, token!, operationId);
-      await clearTaskReport(this.repos.config, ref.taskId);
+      await clearTaskReportSafely(this.repos.config, ref.taskId);
       return { interrupted: true };
     });
   }

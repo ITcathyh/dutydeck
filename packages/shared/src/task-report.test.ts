@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clearTaskReport, readSessionTaskReport, readTaskReport, taskReportAttentionText, taskReportInputSchema, taskReportSchema, writeTaskReport, type TaskReport } from './task-report.js';
+import { clearTaskReport, readSessionTaskReport, readSessionTaskReportReference, readTaskReport, taskReportAttentionText, taskReportInputSchema, taskReportSchema, writeTaskReport, type TaskReport } from './task-report.js';
 
 const report: TaskReport = { schemaVersion: 1, taskId: 't1', sessionId: 's1', status: 'waiting', question: '今天发布吗？', reportedAt: '2026-11-01T00:00:00.000Z' };
 const store = () => {
@@ -46,4 +46,27 @@ describe('task reports', () => {
     } }, 't1');
     expect(compared).toBe(true); expect((await readTaskReport(kv, 't1'))?.status).toBe('ready');
   });
+});
+
+
+it('writes report and its strict session reference in one atomic batch', async () => {
+  const kv = store(); const batches: unknown[] = [];
+  await writeTaskReport({ ...kv, compareAndSetBatch: async (checks, writes) => {
+    batches.push({ checks, writes });
+    for (const { key, value } of writes) kv.rows.set(key, value);
+    return true;
+  } }, report);
+  expect(batches).toEqual([{ checks: [], writes: [
+    { key: 'task_report/t1', value: JSON.stringify(report) },
+    { key: 'task_report/session/s1', value: JSON.stringify({ schemaVersion: 1, sessionId: 's1', taskId: 't1' }) }
+  ] }]);
+  expect(await readSessionTaskReportReference(kv, 's1')).toBe('t1');
+  for (const invalid of [
+    { schemaVersion: 2, sessionId: 's1', taskId: 't1' },
+    { schemaVersion: 1, sessionId: 'other', taskId: 't1' },
+    { schemaVersion: 1, sessionId: 's1', taskId: 't1', extra: true }
+  ]) {
+    kv.rows.set('task_report/session/s1', JSON.stringify(invalid));
+    expect(await readSessionTaskReportReference(kv, 's1')).toBeUndefined();
+  }
 });

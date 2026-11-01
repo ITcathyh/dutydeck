@@ -1,4 +1,4 @@
-import { readTaskReport } from '@dutydeck/shared';
+import { readTaskReportSafely } from '@dutydeck/shared';
 import { taskReportCardElements } from './task-report-card.js';
 import { clearPendingPromptUsage, type BotPromptUsage, freezePromptUsage, pendingPromptUsageKey, promptUsageSnapshot, recordPromptUsage } from './prompt-versions.js';
 import { larkAgentUnavailableReason, larkFallbackHasActivity } from './agent-fallback.js';
@@ -1427,7 +1427,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
             state, started_at: task.startedAt!, turn: currentTurn,
             ...(event.chatType === 'group' ? { reply_message_id: larkMessageAnchor(event), reply_in_thread: Boolean(event.threadId?.trim()) } : {})
           }, runtimeTask?.currentAttemptId) : undefined;
-        const reportElements = taskReportCardElements(task.runtimeTaskId && this.workflowOptions.store ? await readTaskReport(this.workflowOptions.store, task.runtimeTaskId) : undefined);
+        const reportElements = taskReportCardElements(task.runtimeTaskId && this.workflowOptions.store ? await readTaskReportSafely(this.workflowOptions.store, task.runtimeTaskId) : undefined);
         const explicit = await hasExplicitFinal(this.workflowOptions.store, finalContext, state);
         // 完成时只贴表情：成功终态改为在原消息上贴一枚表情，不再发结果卡。
         // 只对成功终态生效——失败/中断/取消仍必须发结果卡，一个表情等于把失败藏起来。

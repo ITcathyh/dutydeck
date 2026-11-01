@@ -15,6 +15,25 @@ export const taskReportSchema = z.object({
   ...fields, reportedAt: z.string().datetime(), clearedAt: z.string().datetime().optional()
 }).strict().superRefine(validReport);
 export type TaskReport = z.infer<typeof taskReportSchema>;
+const sessionReportReferenceSchema = z.object({ schemaVersion: z.literal(1), sessionId: z.string().min(1), taskId: z.string().min(1) }).strict();
+const sessionReportReferenceKey = (sessionId: string) => taskReportPrefix + 'session/' + encodeURIComponent(sessionId);
+export async function readSessionTaskReportReference(store: Pick<ConfigRepository, 'get'>, sessionId: string): Promise<string | undefined> {
+  const raw = await store.get(sessionReportReferenceKey(sessionId));
+  if (!raw) return;
+  try {
+    const parsed = sessionReportReferenceSchema.safeParse(JSON.parse(raw));
+    return parsed.success && parsed.data.sessionId === sessionId ? parsed.data.taskId : undefined;
+  } catch { return; }
+}
+type ReportLog = { warn(details: Record<string, unknown>, message: string): void };
+export async function readTaskReportSafely(store: Pick<ConfigRepository, 'get'>, taskId: string, log?: ReportLog): Promise<TaskReport | undefined> {
+  try { return await readTaskReport(store, taskId); }
+  catch (error) { (log ?? console).warn({ error, taskId }, '读取收尾报告失败，继续处理'); }
+}
+export async function clearTaskReportSafely(store: ConfigRepository, taskId: string, log?: ReportLog): Promise<void> {
+  try { await clearTaskReport(store, taskId); }
+  catch (error) { (log ?? console).warn({ error, taskId }, '清理收尾报告失败，继续处理'); }
+}
 
 export async function readTaskReport(store: Pick<ConfigRepository, 'get'>, taskId: string): Promise<TaskReport | undefined> {
   const raw = await store.get(taskReportPrefix + taskId);
@@ -24,9 +43,14 @@ export async function readTaskReport(store: Pick<ConfigRepository, 'get'>, taskI
     return parsed.success && parsed.data.taskId === taskId ? parsed.data : undefined;
   } catch { return; }
 }
-export async function writeTaskReport(store: Pick<ConfigRepository, 'set'>, report: TaskReport): Promise<TaskReport> {
+export async function writeTaskReport(store: Pick<ConfigRepository, 'set' | 'compareAndSetBatch'>, report: TaskReport): Promise<TaskReport> {
   const parsed = taskReportSchema.parse(report);
-  await store.set(taskReportPrefix + parsed.taskId, JSON.stringify(parsed));
+  const writes = [
+    { key: taskReportPrefix + parsed.taskId, value: JSON.stringify(parsed) },
+    { key: sessionReportReferenceKey(parsed.sessionId), value: JSON.stringify(sessionReportReferenceSchema.parse({ schemaVersion: 1, sessionId: parsed.sessionId, taskId: parsed.taskId })) }
+  ];
+  if (store.compareAndSetBatch) await store.compareAndSetBatch([], writes);
+  else for (const { key, value } of writes) await store.set(key, value);
   return parsed;
 }
 export async function clearTaskReport(store: ConfigRepository, taskId: string, clearedAt = new Date().toISOString()): Promise<void> {

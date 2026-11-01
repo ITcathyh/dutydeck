@@ -1952,6 +1952,37 @@ describe('群参与模型 act 的人工授权', () => {
     expect(await h.runtime.getTasks(records[0]!.sessionId)).toHaveLength(1);
     expect(h.send).toHaveBeenCalledOnce();
   });
+  it.each(['text', 'attachment', 'claim race'] as const)('rejects an old confirmation when its frozen request changes (%s)', async change => {
+    const { h, participation, pending, value, context } = await start();
+    const original = JSON.parse(String(pending.payload.payload.event)) as LarkMessageEvent;
+    const edited = { ...original,
+      ...(change === 'attachment' ? { messageType: 'file', content: JSON.stringify({ file_key: 'new_file', file_name: 'different.sh' }) }
+        : { content: JSON.stringify({ text: '@_user_1 删除生产数据' }) }) };
+    const authorize = h.groupManager!.authorize.bind(h.groupManager!);
+    vi.spyOn(h.groupManager!, 'authorize').mockImplementation(async (...args) => args[2] === 'ou_alice' && args[3] === 'task.create'
+      ? { allowed: false, action: 'task.create', code: 'forbidden', reason: '原作者没有任务权限', source: 'integration' } as any : authorize(...args));
+    let raced = false;
+    if (change === 'claim race') {
+      const cas = h.repos.config.compareAndSet!.bind(h.repos.config);
+      vi.spyOn(h.repos.config, 'compareAndSet').mockImplementation(async (key, expected, next) => {
+        if (!raced && key === 'lark.inbox.' + scope.appId + '.om_inferred' && JSON.parse(next).state === 'received') {
+          raced = true;
+          await new LarkTaskInbox(h.repos.config).reopenIgnored(scope.appId, edited);
+        }
+        return cas(key, expected, next);
+      });
+    } else await h.coordinator.handleEdited(edited, h.config);
+    const result = await participation.confirmations.handle(scope.appId, value, 'ou_bob', context);
+    expect(result).toMatchObject({ type: 'error', content: expect.stringContaining('原消息已修改，请重新确认') });
+    if (change === 'claim race') expect(raced).toBe(true);
+    expect(h.send).not.toHaveBeenCalled();
+    expect(await h.runtime.listSessions()).toEqual([]);
+    expect(await h.repos.config.list!('bot_prompt_version/usage/')).toEqual([]);
+    expect(await h.repos.config.list!('task_authorization/')).toEqual([]);
+    expect((await queryDispositions(h.repos.config, { appId: scope.appId, messageId: 'om_inferred' }))[0]?.state).not.toBe('accepted');
+    expect((await h.repos.collaboration.getAction(scope, pending.id))?.status).toBe('failed');
+  });
+
   it('does not execute an expired confirmation', async () => {
     const { h, participation, value, context, expire } = await start();
     expire();

@@ -1898,8 +1898,11 @@ export class SessionAutomationService {
     const schedule = stored.value;
     if (schedule.mode === 'independent' || schedule.mode === 'fresh' || !this.options.runtime.startScheduleSession) return stored;
     const origin = await this.options.runtime.getSession(schedule.sessionId);
-    const matter = this.options.repositories.matters?.find('session', schedule.sessionId);
-    const replaced = matter && this.options.repositories.matters!.links(matter.id).some(link => link.kind === 'reply_target' && link.refId === `session:${schedule.sessionId}`);
+    let replaced = false;
+    try {
+      const matter = this.options.repositories.matters?.find('session', schedule.sessionId);
+      replaced = Boolean(matter && this.options.repositories.matters!.links(matter.id).some(link => link.kind === 'reply_target' && link.refId === `session:${schedule.sessionId}`));
+    } catch (error) { console.warn('MATTER_LOOKUP_FAILED', error instanceof RuntimeError ? error.code : 'UNEXPECTED_ERROR'); }
     if (isSessionRunnable(origin) && !replaced) return stored;
     const context = schedule.executionContext ?? (origin ? freshExecutionContext(origin) : undefined);
     if (!context) return stored;

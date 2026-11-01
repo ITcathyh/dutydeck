@@ -1,6 +1,6 @@
 import { explicitFinalTextReceiptReader, completeExplicitFinal, readConfirmedExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import { describeLarkTaskRecovery, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
-import { readTaskReport } from '@dutydeck/shared';
+import { readTaskReportSafely } from '@dutydeck/shared';
 import { taskReportCardElements } from './task-report-card.js';
 import { deferredConfirmationId } from '@dutydeck/shared';
 import type { ChannelMapping, ChannelMappingRepository, ConfigRepository, TaskRecord } from '@dutydeck/shared';
@@ -371,7 +371,7 @@ export async function performLarkCardReconcile(input: {
         ...renderLarkProcessElements(events, config, true),
         ...(persisted.launcher_recovery_note ? [{ tag: 'markdown', element_id: 'launcher_recovery_note', content: LARK_LAUNCHER_RECOVERY_NOTE }] : [])]);
       // 只贴表情与实时链路同一判断：计划轮和任务通道仍补发结果卡。
-      const reportElements = taskReportCardElements(input.deliveryStore ? await readTaskReport(input.deliveryStore, runtimeTask.id) : undefined);
+      const reportElements = taskReportCardElements(input.deliveryStore ? await readTaskReportSafely(input.deliveryStore, runtimeTask.id) : undefined);
       const reactionOnly = !reportElements.length && completed && larkCompletionReactionOnly(effective, persisted.prompt, mapping.externalId);
       // 回执上的「结果见下条」：只贴表情的轮次这次对账不会补发结果消息。
       const resultFollows = completed && !reactionOnly;

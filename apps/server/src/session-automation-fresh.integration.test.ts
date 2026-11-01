@@ -90,7 +90,7 @@ async function fixture(origin: 'lark' | 'web' = 'lark') {
     return { created, firstSession, running, queued, release: () => writeFile(join(gate, 'release'), '1') };
   }
 
-  return { repos, runtime, allowed, owner, hold: () => rm(join(gate, 'release'), { force: true }), release: () => writeFile(join(gate, 'release'), '1'), get service() { return service; }, parent, setClock: (date: Date) => { clock.value = date; }, sent, occurrences, taskStatus, retainFirstSessionWithUserWork };
+  return { repos, runtime, allowed, owner, entered: () => existsSync(join(gate, 'entered')), hold: () => rm(join(gate, 'release'), { force: true }), release: () => writeFile(join(gate, 'release'), '1'), get service() { return service; }, parent, setClock: (date: Date) => { clock.value = date; }, sent, occurrences, taskStatus, retainFirstSessionWithUserWork };
 }
 
 describe('fresh schedule sessions kept for unfinished user work (real runtime and SQLite)', () => {
@@ -266,4 +266,44 @@ it('watch reads a real stopped-origin fallback and its actual running execution 
   expect(await f.repos.config.list!('')).toEqual(before);
   await f.release();
   await vi.waitFor(async () => { await f.service.tick(); expect((await f.occurrences())[0]?.runStatus).toBe('completed'); }, { timeout: 10_000, interval: 20 });
+}, 20_000);
+
+
+it.each(['find', 'links'] as const)('keeps runnable and stopped-origin schedules dispatching when matters.%s fails', async method => {
+  for (const stopped of [false, true]) {
+    const f = await fixture();
+    const created = await f.service.createSchedule(f.parent.id, { ...scheduleInput, mode: 'session' }, f.owner);
+    await f.service.updateSchedule(f.parent.id, created.id, { expectedRevision: created.revision, enabled: true }, f.owner);
+    if (stopped) await f.runtime.stop(f.parent.id, { kind: 'channel', id: f.owner, appId: 'cli_app' });
+    vi.spyOn(f.repos.matters!, method).mockImplementation(() => { throw new Error('injected matter lookup failure'); });
+    f.setClock(new Date('2026-09-12T00:01:30.000Z'));
+    await vi.waitFor(async () => { await f.service.tick(); expect((await f.occurrences())[0]?.runStatus).toBe('completed'); }, { timeout: 10_000, interval: 20 });
+    const [occ] = await f.occurrences();
+    if (stopped) expect(occ.executionSessionId).not.toBe(f.parent.id);
+    else expect(occ.executionSessionId ?? occ.sessionId).toBe(f.parent.id);
+    expect(await f.sent()).toEqual([scheduleInput.prompt]);
+  }
+}, 20_000);
+
+
+it.each(['find', 'links'] as const)('does not reopen or re-dispatch an accepted unknown occurrence when matters.%s fails', async method => {
+  const f = await fixture();
+  const created = await f.service.createSchedule(f.parent.id, { ...scheduleInput, mode: 'session' }, f.owner);
+  await f.service.updateSchedule(f.parent.id, created.id, { expectedRevision: created.revision, enabled: true }, f.owner);
+  await f.hold(); f.setClock(new Date('2026-09-12T00:01:30.000Z'));
+  await vi.waitFor(async () => { await f.service.tick(); const [occ] = await f.occurrences(); expect(occ?.taskId && f.taskStatus(occ.taskId)).toBe('running'); }, { timeout: 10_000, interval: 20 });
+  await vi.waitFor(() => expect(f.entered()).toBe(true), { timeout: 10_000, interval: 20 });
+  await f.service.tick();
+  const [before] = await f.occurrences();
+  await f.runtime.stop(f.parent.id, { kind: 'channel', id: f.owner, appId: 'cli_app' });
+  expect(f.taskStatus(before.taskId)).toBe('reconcile_required');
+  const start = vi.spyOn(f.runtime, 'startScheduleSession');
+  vi.spyOn(f.repos.matters!, method).mockImplementation(() => { throw new Error('injected matter lookup failure'); });
+  await f.service.tick(); await f.service.tick();
+  const [after] = await f.occurrences();
+  expect(after).toMatchObject({ taskId: before.taskId, runStatus: 'blocked', blockReason: 'reconcile_required' });
+  expect(after.admission).toEqual(before.admission);
+  expect(start).not.toHaveBeenCalled();
+  expect(await f.repos.tasks.listBySession(f.parent.id)).toHaveLength(1);
+  expect(await f.sent()).toEqual([scheduleInput.prompt]);
 }, 20_000);

@@ -1,4 +1,4 @@
-import { clearTaskReport } from '@dutydeck/shared';
+import { clearTaskReportSafely } from '@dutydeck/shared';
 import { annotateDisposition, type Disposition } from './disposition.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { runAgentScheduleRequest } from '../agent-schedule-request.js';
@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { describeLarkTaskRecovery, larkContinuePrompt, larkRecoveryRetainedNote, larkReliability, larkSteeringUnknownNote } from './task-recovery.js';
 import { deadlineText, type LarkInteraction } from './workflow-interactions.js';
 import type { LarkInboxAdoption, LarkInboxRecord } from './task-inbox.js';
-import { isLarkFirstCardUndelivered } from './task-inbox.js';
+import { larkConfirmationInputDigest, isLarkFirstCardUndelivered } from './task-inbox.js';
 import { larkForkWorkspaceMode, larkNativeForkId, larkResumeUnavailable } from './session-branches.js';
 import { parseLarkNewSession } from './new-session.js';
 import { formatLarkHandoff, larkHandoffAck, larkHandoffTitle, larkHandoffEventLimit, larkHandoffIndexLimit } from './handoff.js';
@@ -607,7 +607,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     // 只有内部 dispatcher 的场景派生可改变执行身份/话题，正文始终沿用持久原文。
     const adoption: LarkInboxAdoption | undefined = event.scenario || event.authorization ? {
       senderOpenId: event.senderOpenId, senderType: event.senderType, scenario: event.scenario, authorization: event.authorization,
-      rootId: event.rootId, threadId: event.threadId, parentId: event.parentId
+      rootId: event.rootId, threadId: event.threadId, parentId: event.parentId,
+      ...(event.authorization?.via === 'participation_confirmed' ? { confirmedInputDigest: larkConfirmationInputDigest(event) } : {})
     } : undefined;
     return this.handle(event, config, false, true, undefined, undefined, adoption);
   }
@@ -674,14 +675,20 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
 
   /** retrying：首卡重试重新走入站处理时传入原任务，按它触发时的 epoch 判断 /new。 */
   async handle(event: LarkMessageEvent, config: StoredLarkConfig, recovering = false, adopted = false, retrying?: LarkTask, captured?: LarkInboxRecord, adoption?: LarkInboxAdoption) {
-    const note = async (reason: Disposition['reason'], detail?: string) => { if (this.workflowOptions.store) await annotateDisposition(this.workflowOptions.store, config.appId, event.messageId, { schemaVersion: 1, reason, ...(detail ? { detail: detail.slice(0, 500) } : {}) }); };
+    const note = async (reason: Disposition['reason'], detail?: string) => { if (this.workflowOptions.store) await annotateDisposition(this.workflowOptions.store, config.appId, event.messageId, { schemaVersion: 1, reason, ...(detail ? { detail: detail.slice(0, 500) } : {}) }, this.log); };
     const persisted = captured ?? await this.inbox?.lookup(config.appId, event.messageId);
+    if (this.inbox && adoption?.confirmedInputDigest && (!persisted || larkConfirmationInputDigest(persisted.event) !== adoption.confirmedInputDigest)) {
+      throw new RuntimeError('LARK_CONFIRMATION_INPUT_CHANGED', '原消息已修改，请重新确认', 409);
+    }
     if (persisted && !await this.confirmationInputAllowed(persisted)) { await note('input_rejected'); return; }
     if (persisted) {
       if (persisted.state !== 'received' && !((captured || adopted) && persisted.state === 'unrouted') && !(adopted && persisted.state === 'ignored')) return;
       event = persisted.event;
     }
-    if (adoption) event = { ...event, ...adoption };
+    if (adoption) {
+      const { confirmedInputDigest: _expected, ...fields } = adoption;
+      event = { ...event, ...fields };
+    }
     // direct 场景请求的消息已由群参与看过，这里不再观察、不过机器人回合门禁（包自带去重和每小时上限）；
     // 发起人不是这条消息的发送者，要按群成员重新确认。重启恢复时同样按受理处理。
     // model 场景的 act 和普通 act 一样以发消息的人的身份执行，收养字段只影响执行 prompt（见 coordinator-dispatch.ts）。
@@ -3129,7 +3136,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         return { type: 'warning', content: error instanceof Error ? error.message : '重试记录保存失败，请稍后重试' };
       }
       if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
-      if (task.runtimeTaskId && this.workflowOptions.store) await clearTaskReport(this.workflowOptions.store, task.runtimeTaskId);
+      if (task.runtimeTaskId && this.workflowOptions.store) await clearTaskReportSafely(this.workflowOptions.store, task.runtimeTaskId);
       task.event = retryEvent;
       task.config = effectiveConfig;
       // 生命周期字段在 runTurn 递增 turn 后再重置，避免上一轮在途的

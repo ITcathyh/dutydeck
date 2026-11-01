@@ -1,4 +1,4 @@
-import { clearTaskReport } from '@dutydeck/shared';
+import { clearTaskReportSafely } from '@dutydeck/shared';
 import { larkMessageAnchor } from './message-anchor.js';
 import { describeLarkTaskRecovery } from './task-recovery.js';
 import { permissionDisplayText, timeLoop } from '@dutydeck/shared';
@@ -1095,7 +1095,7 @@ export class LarkWorkflowInteractions {
       await this.onPlanDecision(record);
     }
     const closed = await this.move(record, record.decision === 'approve' ? 'approved' : record.decision === 'revise' ? 'needs_changes' : 'rejected');
-    await clearTaskReport(this.store, record.taskId);
+    await clearTaskReportSafely(this.store, record.taskId);
     const actor = isGroupChat(closed.event.chatType) && closed.actorId ? renderGroupMention(closed.actorId) : undefined;
     const outcome = closed.state === 'approved' ? '已批准' : closed.state === 'needs_changes' ? '已提修改意见' : '已取消';
     await this.renderClosed(closed, [[outcome, actor, shanghaiClock(Date.parse(closed.updatedAt))].filter(Boolean).join(' · '), planClosedText(closed)].join('\n\n'));
@@ -1203,7 +1203,7 @@ export class LarkWorkflowInteractions {
     }
     if (record.kind === 'result') {
       record = await this.move(record, input.action === 'accept' ? 'accepted' : 'needs_changes', input.actorId);
-      await clearTaskReport(this.store, record.taskId);
+      await clearTaskReportSafely(this.store, record.taskId);
       return input.action === 'accept' ? '已记录验收通过。' : '已记录需要修改。请回复结果卡片，说明具体修改要求。';
     }
     if (!await this.live(record)) {

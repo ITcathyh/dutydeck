@@ -1,13 +1,19 @@
 import { dispositionSchema, type Disposition } from './disposition.js';
 import type { LarkLaunchOptions } from './new-session.js';
-import { randomUUID } from 'node:crypto';
-import type { ConfigRepository, PromptPart } from '@dutydeck/shared';
+import { createHash, randomUUID } from 'node:crypto';
+import { RuntimeError, type ConfigRepository, type PromptPart } from '@dutydeck/shared';
 import type { LarkMessageResource } from './message-content.js';
 import type { LarkContextCursor } from './task-context.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkRedispatchInfo } from './turn-redispatch.js';
 
-export type LarkInboxAdoption = Pick<LarkMessageEvent, 'senderOpenId' | 'senderType' | 'scenario' | 'authorization' | 'rootId' | 'threadId' | 'parentId'>;
+export type LarkInboxAdoption = Pick<LarkMessageEvent, 'senderOpenId' | 'senderType' | 'scenario' | 'authorization' | 'rootId' | 'threadId' | 'parentId'> & { confirmedInputDigest?: string };
+/** Bind confirmation to content, attachments and routing, independently of its confirmer and host evidence. */
+export function larkConfirmationInputDigest(event: LarkMessageEvent): string {
+  const { senderOpenId: _actor, senderType: _kind, authorization: _authorization, scenario: _scenario, triage: _triage, replyMessageId: _reply, ...input } = event;
+  return createHash('sha256').update(JSON.stringify(input, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)).digest('hex');
+}
 export interface LarkInboxRecord {
   reason?: Disposition['reason'];
   detail?: string;
@@ -123,12 +129,16 @@ export class LarkTaskInbox {
     for (;;) {
       const raw = await this.store.get(key);
       const old = raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
+      if (adoption?.confirmedInputDigest && (!old || larkConfirmationInputDigest(old.event) !== adoption.confirmedInputDigest)) {
+        throw new RuntimeError('LARK_CONFIRMATION_INPUT_CHANGED', '原消息已修改，请重新确认', 409);
+      }
       if (old && old.state !== 'unrouted' && !(allowIgnored && old.state === 'ignored') && (old.state !== 'received' || old.boot === this.boot)) return undefined;
       // Always replay the originally persisted request, never replacement event content.
       const next: LarkInboxRecord = { ...(old ?? { appId, event, receivedAt: new Date().toISOString() }), state: 'received', boot: this.boot };
       if (adoption) {
         next.originalEvent = old?.originalEvent ?? old?.event;
-        next.event = { ...next.event, ...adoption };
+        const { confirmedInputDigest: _expected, ...fields } = adoption;
+        next.event = { ...next.event, ...fields };
       }
       if (await this.store.compareAndSet!(key, raw, JSON.stringify(next))) return next;
     }

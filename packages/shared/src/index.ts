@@ -409,6 +409,8 @@ export interface TaskRepository {
   listRunSummaries?(): Promise<RunSummary[]>;
   save(task: TaskRecord): Promise<void>;
   listBySession(sessionId: string): Promise<TaskRecord[]>;
+  /** Last two receipts, oldest first; same-time receipts retain storage insertion order. */
+  listRecentBySession?(sessionId: string): Promise<TaskRecord[]>;
   get?(id: string): Promise<TaskRecord | undefined>;
   create?(task: TaskRecord): Promise<boolean>;
   enqueue?(task: TaskRecord, position: 'front' | 'back'): Promise<{ task: TaskRecord; created: boolean }>;

@@ -529,7 +529,7 @@ export class LarkGroupParticipation {
     return chosen;
   }
   private async noteDisposition(scope: CollaborationScope, pending: Pick<Pending, 'event'>, reason: Disposition['reason'], decisionId?: string, detail?: string) {
-    if (this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason, ...(decisionId ? { decisionId } : {}), ...(detail ? { detail: detail.slice(0, 500) } : {}) });
+    if (this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason, ...(decisionId ? { decisionId } : {}), ...(detail ? { detail: detail.slice(0, 500) } : {}) }, this.options.log);
   }
   private enqueue(scope: CollaborationScope, pending: Pending) {
     if (this.closed) return;
@@ -537,11 +537,11 @@ export class LarkGroupParticipation {
     let slot = this.slots.get(key);
     if (!slot || slot.stopped && !slot.running) { slot = { stopped: false }; this.slots.set(key, slot); }
     if (slot.stopped) return;
-    if (slot.pending && this.options.inboxStore) void annotateDisposition(this.options.inboxStore, scope.appId, slot.pending.event.messageId, { schemaVersion: 1, reason: 'participation_merged', mergedInto: pending.event.messageId }).catch(error => this.options.log?.warn({ error }, '记录消息合并失败'));
+    if (slot.pending && this.options.inboxStore) void annotateDisposition(this.options.inboxStore, scope.appId, slot.pending.event.messageId, { schemaVersion: 1, reason: 'participation_merged', mergedInto: pending.event.messageId }, this.options.log).catch(error => this.options.log?.warn({ error }, '记录消息合并失败'));
     slot.pending = pending;
     if (slot.timer) clearTimeout(slot.timer);
     if (!slot.running) {
-      slot.timer = setTimeout(() => { slot!.timer = undefined; void this.drain(scope, slot!); }, this.options.debounceMs ?? 500);
+      slot.timer = setTimeout(() => { slot!.timer = undefined; void this.drain(scope, slot!).catch(error => (this.options.log ?? console).warn({ error, scope }, '群参与后台处理失败')); }, this.options.debounceMs ?? 500);
       slot.timer.unref();
     }
   }
@@ -559,7 +559,7 @@ export class LarkGroupParticipation {
         const pending = slot.pending; slot.pending = undefined;
         try { await this.decide(scope, pending, slot); }
         catch (error) {
-          if (this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_failed' });
+          if (this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_failed' }, this.options.log);
           this.options.log?.warn({ error, scope }, '群参与判定失败，保持静默');
         }
       }
@@ -720,7 +720,7 @@ export class LarkGroupParticipation {
     // 成本上限用满后判定也不再跑；群里的说明由用量账本发一次。留痕与预算闸门一样按小时分桶。
     const refusal = await this.options.usageRefusal?.(scope);
     if (refusal) {
-      if (this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_usage_cap', detail: refusal.slice(0, 500) });
+      if (this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_usage_cap', detail: refusal.slice(0, 500) }, this.options.log);
       await repo.recordDecision({ id: `decision_usage_cap_${digest([scope, Math.floor(this.now().getTime() / HOUR_MS)])}`, scope, contextRevision: 0, policyVersion: settings.policyVersion,
         action: 'silent', reason: refusal, evidenceIds: [pending.observation.id], status: 'suppressed', inputSnapshot: { gate: USAGE_CAP_GATE }, createdAt: this.now().toISOString() });
       return true;
@@ -729,7 +729,7 @@ export class LarkGroupParticipation {
     // 否则每条新消息都会先付费再被发言预算挡下。
     const gate = await this.decisionBudget(scope, settings.maxDecisionsPerHour);
     if (gate) {
-      if (this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_budget', detail: gate.slice(0, 500) });
+      if (this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_budget', detail: gate.slice(0, 500) }, this.options.log);
       // 留痕让用量可见，但按小时分桶而不是按 contextRevision：recordDecision 遇到已存在的 id 直接返回，
       // 所以每群每小时最多写一条。否则超限期间每条消息都写一条，闸门记录会把 500 条统计窗口占满。
       const gateId = `decision_gate_${digest([scope, Math.floor(this.now().getTime() / HOUR_MS)])}`;
@@ -778,14 +778,14 @@ export class LarkGroupParticipation {
         inputSnapshot = { ...snapshot, [DECIDER_META_KEY]: meta };
       }
     } catch (error) {
-      if (this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_failed', decisionId: id });
+      if (this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_failed', decisionId: id }, this.options.log);
       await repo.recordDecision({ id, scope, contextRevision: snapshot.contextRevision, policyVersion: snapshot.settings.policyVersion, action: 'silent', reason: `Decision unavailable: ${error instanceof Error ? error.message.slice(0, 1500) : 'unknown'}`, evidenceIds: [trigger.id], status: 'failed', inputSnapshot, createdAt: this.now().toISOString() });
       return;
     }
     const decision: CollaborationDecision = { id, scope, contextRevision: snapshot.contextRevision, policyVersion: snapshot.settings.policyVersion,
       action: result.action, reason: result.reason, evidenceIds: result.evidenceIds, status: 'candidate', inputSnapshot, createdAt: this.now().toISOString() };
     await repo.recordDecision(decision);
-    if (result.action === 'silent' && this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_silent', decisionId: id, detail: result.reason.slice(0, 500) });
+    if (result.action === 'silent' && this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_silent', decisionId: id, detail: result.reason.slice(0, 500) }, this.options.log);
     if (!activeModes.has(snapshot.settings.participation)) { await this.noteDisposition(scope, pending, 'participation_observe_only', id); return; }
     if (!await this.current(scope, snapshot, slot)) { await this.noteDisposition(scope, pending, 'participation_stale', id); await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
     let updated: CollaborationSnapshot | undefined;
@@ -1302,7 +1302,7 @@ export class LarkGroupParticipation {
     await repo.recordDecision({ id, scope, contextRevision: snapshot.contextRevision, policyVersion: snapshot.settings.policyVersion,
       action: verdict.action === 'addressed' ? 'act' : 'silent', reason: verdict.reason, evidenceIds: [trigger.id], status: 'candidate',
       inputSnapshot: { ...snapshot, [DECIDER_META_KEY]: meta }, createdAt: this.now().toISOString() });
-    if (verdict.action !== 'addressed' && this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_silent', decisionId: id, detail: verdict.reason.slice(0, 500) });
+    if (verdict.action !== 'addressed' && this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_silent', decisionId: id, detail: verdict.reason.slice(0, 500) }, this.options.log);
     if (verdict.action === 'addressed' && activeModes.has(snapshot.settings.participation)) await this.dispatch(scope, pending, trigger, snapshot, [trigger.id], id, slot, true);
   }
   /**

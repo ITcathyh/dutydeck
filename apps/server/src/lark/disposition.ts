@@ -17,7 +17,11 @@ export const dispositionReasons = {
 } as const;
 export const dispositionSchema = z.object({ schemaVersion: z.literal(1), reason: z.enum(Object.keys(dispositionReasons) as [keyof typeof dispositionReasons, ...(keyof typeof dispositionReasons)[]]), detail: z.string().max(500).optional(), decisionId: z.string().optional() }).strict();
 export type Disposition = z.infer<typeof dispositionSchema>;
-export async function annotateDisposition(store: ConfigRepository, appId: string, messageId: string, patch: Disposition & { mergedInto?: string }) {
+export async function annotateDisposition(store: ConfigRepository, appId: string, messageId: string, patch: Disposition & { mergedInto?: string }, log?: { warn(details: unknown, message: string): void }) {
+  try { await writeDisposition(store, appId, messageId, patch); }
+  catch (error) { (log ?? console).warn({ error, appId, messageId }, '记录消息去向失败，继续处理'); }
+}
+async function writeDisposition(store: ConfigRepository, appId: string, messageId: string, patch: Disposition & { mergedInto?: string }) {
   const { mergedInto, ...fields } = patch;
   const disposition = dispositionSchema.parse(fields);
   const key = `lark.inbox.${appId}.${messageId}`;

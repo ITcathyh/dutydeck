@@ -255,6 +255,9 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       async listBySession(sessionId) {
         return db.select().from(tasks).where(eq(tasks.sessionId, sessionId)).orderBy(asc(tasks.createdAt)).all().map(decodeTask);
       },
+      async listRecentBySession(sessionId) {
+        return (sqlite.prepare('SELECT * FROM tasks WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 2').all(sessionId) as TaskRowLike[]).map(decodeTask).reverse();
+      },
       async enqueue(task, position) {
         if (task.status !== 'queued') {
           throw new Error(`Cannot enqueue task with status '${task.status}': status must be 'queued'`);
