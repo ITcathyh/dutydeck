@@ -825,6 +825,14 @@ Examples:
     .action((agentId, pairs, options, command) => runSettings('agent-set', command, { agentId, appId: options.app, pairs, apiKeyFd: options.apiKeyFd }));
 
   const botSettings = settings.command('bot').description('Bot settings (dashboard: 机器人)');
+  withTarget(botSettings.command('prompt-history <app-id>').description('查看提示词历史版本'))
+    .action((appId, _options, command) => runSettings('bot-prompt-history', command, { appId }));
+  withTarget(botSettings.command('prompt-show <app-id> <version>').description('查看完整提示词版本'))
+    .action((appId, version, _options, command) => runSettings('bot-prompt-show', command, { appId, version }));
+  withTarget(botSettings.command('prompt-diff <app-id> <a> <b>').description('按行对比两个提示词版本'))
+    .action((appId, version, compareVersion, _options, command) => runSettings('bot-prompt-diff', command, { appId, version, compareVersion }));
+  withTarget(botSettings.command('prompt-rollback <app-id> <version>').description('回退提示词并保存为新版本'))
+    .action((appId, version, _options, command) => runSettings('bot-prompt-rollback', command, { appId, version }));
   withTarget(botSettings.command('list').description('List bots on the runtime'))
     .action((_options, command) => runSettings('bot-list', command));
   withTarget(botSettings.command('show <app-id>').description('Print every setting of a bot; the App Secret is never printed'))

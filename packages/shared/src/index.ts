@@ -442,7 +442,9 @@ export interface ConfigRepository {
   get(key: string): Promise<string | undefined>;
   set(key: string, value: string): Promise<void>;
   compareAndSet?(key: string, expected: string | undefined, value: string): Promise<boolean>;
-  /** CAS 删除 state=ignored 的飞书 Inbox 记录；其他配置键不可使用此清理入口。 */
+  /** Atomically check config values and apply all writes, or change nothing. */
+  compareAndSetBatch?(checks: Array<{ key: string; expected: string | undefined }>, writes: Array<{ key: string; value: string }>): Promise<boolean>;
+  /** CAS 删除 state=ignored 的飞书 Inbox 记录或 bot_prompt_version/pending/ 准备快照；其他配置键不可删除。 */
   remove?(key: string, expected: string): Promise<boolean>;
   list?(prefix: string): Promise<Array<{ key: string; value: string }>>;
 }

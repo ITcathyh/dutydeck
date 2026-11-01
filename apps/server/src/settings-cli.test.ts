@@ -182,6 +182,37 @@ describe('settings CLI default Agent approval', () => {
 });
 
 describe('settings CLI against the real bot routes', () => {
+  it('labels unknown prompt usages in prompt-history without confusing them with empty prompts', async () => {
+    const { repos, run } = await botRuntime();
+    await repos.config.set('bot_prompt_version/usage/unrecorded', JSON.stringify({ schemaVersion: 1, appId: 'cli_a', taskId: 'unrecorded' }));
+    await repos.config.set('bot_prompt_version/usage/empty', JSON.stringify({ schemaVersion: 1, appId: 'cli_a', taskId: 'empty', botPromptVersion: 0 }));
+    await repos.config.set('bot_prompt_version/usage/other', JSON.stringify({ schemaVersion: 1, appId: 'cli_other', taskId: 'other' }));
+    expect(await run('bot-prompt-history', { appId: 'cli_a' })).toMatchObject({
+      unrecordedUsages: [{ taskId: 'unrecorded', label: '未记录版本' }]
+    });
+  });
+
+  it('lists, shows, compares and rolls back immutable prompt versions through the real API', async () => {
+    const { repos, run, fetcher } = await botRuntime();
+    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=第一版'] });
+    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=第二版'] });
+    const history = await run('bot-prompt-history', { appId: 'cli_a' });
+    expect(history.versions).toMatchObject([{ version: 1, source: 'cli', characters: 3, current: false }, { version: 2, source: 'cli', characters: 3, current: true }]);
+    expect(history.versions[0].sha256).toHaveLength(8);
+    expect(await run('bot-prompt-show', { appId: 'cli_a', version: '1' })).toMatchObject({ version: 1, text: '第一版' });
+    expect(await run('bot-prompt-diff', { appId: 'cli_a', version: '1', compareVersion: '2' })).toMatchObject({ diff: expect.stringContaining('-第一版') });
+    await run('bot-prompt-rollback', { appId: 'cli_a', version: '1' });
+    expect((await readLarkConfig(repos.config, 'cli_a'))?.preInjectPrompt).toBe('第一版');
+    expect((await run('bot-prompt-history', { appId: 'cli_a' })).versions.at(-1)).toMatchObject({ version: 3, source: 'rollback', rollbackFrom: 1, current: true });
+    await expect(run('bot-prompt-show', { appId: 'cli_a', version: '999' })).rejects.toMatchObject({ code: 'PROMPT_VERSION_NOT_FOUND' });
+    await expect(run('bot-prompt-diff', { appId: 'cli_a', version: '0', compareVersion: '2' })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    const response = await fetcher(new URL(target.url + '/api/lark/bots/cli_a/prompt-versions/1/rollback'), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: 1 })
+    });
+    expect(response.status).toBe(409);
+    expect((await run('bot-prompt-history', { appId: 'cli_a' })).versions).toHaveLength(3);
+  });
+
   it('validates high-risk user IDs submitted through the Agent stage before saving', async () => {
     const { repos, run } = await botRuntime();
     const before = await readLarkConfig(repos.config, 'cli_a');
@@ -778,4 +809,15 @@ describe('plugin bindings management parity', () => {
     await program.parseAsync(['node', 'dutydeck', 'settings', 'plugin-binding', 'secret-set', 'sample', 'group-a', '--value-fd', '3', '--database', '/tmp/test.db']);
     expect(handler).toHaveBeenCalledWith('sample', 'group-a', expect.objectContaining({ valueFd: '3', database: '/tmp/test.db' }));
   });
+});
+
+it.each([
+  ['prompt-history', [], 'bot-prompt-history', {}],
+  ['prompt-show', ['1'], 'bot-prompt-show', { version: '1' }],
+  ['prompt-diff', ['1', '2'], 'bot-prompt-diff', { version: '1', compareVersion: '2' }],
+  ['prompt-rollback', ['1'], 'bot-prompt-rollback', { version: '1' }]
+] as const)('parses settings bot %s with the runtime target', async (name, args, action, extra) => {
+  const settings = vi.fn();
+  await createCliProgram('test', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'bot', name, 'cli_a', ...args, '--instance', 'tag']);
+  expect(settings).toHaveBeenCalledWith(action, expect.objectContaining({ appId: 'cli_a', instance: 'tag', ...extra }));
 });

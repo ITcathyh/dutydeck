@@ -1,4 +1,5 @@
 import { queryDispositions } from './disposition.js';
+import { unrecordedPromptUsages, promptHistory, promptVersion, promptLineDiff } from './prompt-versions.js';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
@@ -12,7 +13,7 @@ import { agentWeightsSchema, validateHighRiskPattern, type AgentRepository, type
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { createLarkCardService, LarkServiceError, larkConfigurationStatus, type LarkBotConfigInput, type LarkCardService, type LarkSendInput, type LarkUpdateInput } from './service.js';
 import { detectUnusableOwnerEntries, type ContactLookup } from './owner-identity.js';
-import { defaultHighRiskPattern, deleteLarkConfig, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, readLarkConfig, readLarkConfigs, resolveRiskControlModeInput, saveLarkConfig, type SaveLarkConfigInput } from './config.js';
+import { backfillBotPromptVersions, defaultHighRiskPattern, deleteLarkConfig, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, readLarkConfig, readLarkConfigs, resolveRiskControlModeInput, saveLarkConfig, type SaveLarkConfigInput } from './config.js';
 import { LarkLongConnectionListenerPool, type LarkListenerPool } from './listener.js';
 import { installLarkHook, larkHookStatus } from './security-hooks.js';
 import { registerLarkAgentToolRoutes } from './agent-tools-routes.js';
@@ -27,7 +28,7 @@ type LarkSendRequest = LarkSendInput & { bot?: LarkBotConfigInput; botAppId?: st
 type LarkUpdateRequest = LarkUpdateInput & { bot?: LarkBotConfigInput; botAppId?: string };
 const hookDraftSchema = z.object({ workspace: z.string().optional(), defaultAgentId: z.string().optional(), fallbackAgentId: z.string().optional(), defaultAgentWeights: agentWeightsSchema.optional() }).strict();
 export type LarkHookDraft = z.infer<typeof hookDraftSchema>;
-export type SaveLarkConfigRequest = SaveLarkConfigInput & { allowedUserNames?: string[]; allowedBotNames?: string[]; highRiskAllowedUserNames?: string[] };
+export type SaveLarkConfigRequest = SaveLarkConfigInput & { promptSource?: 'cli' | 'agent'; allowedUserNames?: string[]; allowedBotNames?: string[]; highRiskAllowedUserNames?: string[] };
 
 /** LarkServiceError 按其状态码回给调用方，其他错误原样抛出。 */
 const larkError = (reply: FastifyReply, error: unknown) => {
@@ -361,7 +362,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
         if (!hook.supported || !hook.installed || !hook.writable || hook.nativeReady === false) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', `${agentId}: ${hook.reason ?? '请先为当前工作区的默认、兜底和分流 Agent 配置拦截 Hook，再保存强制风控设置。'}`, 409);
       }
     }
-    const saved = await saveLarkConfig(options.config, options.agents, listeningDisabled ? { ...input, listening: undefined } : input);
+    const saved = await saveLarkConfig(options.config, options.agents, listeningDisabled ? { ...input, listening: undefined } : input, { source: input.promptSource === 'cli' || input.promptSource === 'agent' ? input.promptSource : 'web' });
     // Bot 改 appId（跨应用复制配置）后，按 appId 作用域的模型服务设置不会自动跟随记录，
     // 显式搬到新 appId，避免新应用静默回退全局网关凭据。
     const renamedFrom = input.originalAppId?.trim();
@@ -380,6 +381,42 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message }, ...(error.code === 'LARK_CONFIG_REVISION_CONFLICT' ? { current: (await publicLarkConfigs(await readLarkConfigs(options.config))).bots.find(bot => bot.appId === request.body.originalAppId) } : {}) });
       throw error;
     }
+  });
+  const promptBase = '/api/lark/bots/:appId/prompt-versions';
+  app.get<{ Params: { appId: string } }>(promptBase, async (request, reply) => {
+    try {
+      const bot = await readLarkConfig(options.config, request.params.appId);
+      if (!bot || !options.config) throw new LarkServiceError('LARK_BOT_NOT_FOUND', '没有此机器人。', 404);
+      await backfillBotPromptVersions(options.config);
+      const versions = await promptHistory(options.config, bot.appId);
+      return { revision: bot.revision ?? 1, unrecordedUsages: await unrecordedPromptUsages(options.config, bot.appId), versions: versions.map(({ text, ...item }) => ({ ...item, characters: Array.from(text).length,
+        current: item.version === versions.at(-1)?.version && text === bot.preInjectPrompt })) };
+    } catch (error) { return larkError(reply, error); }
+  });
+  app.get<{ Params: { appId: string; version: string } }>(promptBase + '/:version', async (request, reply) => {
+    try {
+      if (!options.config || !await readLarkConfig(options.config, request.params.appId)) throw new LarkServiceError('LARK_BOT_NOT_FOUND', '没有此机器人。', 404);
+      return await promptVersion(options.config, request.params.appId, Number(request.params.version));
+    } catch (error) { return larkError(reply, error); }
+  });
+  app.get<{ Params: { appId: string }; Querystring: { a: string; b: string } }>(promptBase + '/diff', async (request, reply) => {
+    try {
+      if (!options.config || !await readLarkConfig(options.config, request.params.appId)) throw new LarkServiceError('LARK_BOT_NOT_FOUND', '没有此机器人。', 404);
+      const a = await promptVersion(options.config, request.params.appId, Number(request.query.a));
+      const b = await promptVersion(options.config, request.params.appId, Number(request.query.b));
+      return { diff: promptLineDiff(a.text, b.text) };
+    } catch (error) { return larkError(reply, error); }
+  });
+  app.post<{ Params: { appId: string; version: string }; Body: { expectedRevision: number } }>(promptBase + '/:version/rollback', async (request, reply) => {
+    try {
+      if (!options.config || !await readLarkConfig(options.config, request.params.appId)) throw new LarkServiceError('LARK_BOT_NOT_FOUND', '没有此机器人。', 404);
+      if (!Number.isSafeInteger(request.body?.expectedRevision)) throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '请刷新配置后再回退。', 409);
+      const version = await promptVersion(options.config, request.params.appId, Number(request.params.version));
+      const saved = await saveLarkConfig(options.config, options.agents, { originalAppId: version.appId,
+        expectedRevision: request.body.expectedRevision, preInjectPrompt: version.text }, { source: 'rollback', rollbackFrom: version.version });
+      if (!listeningDisabled) await syncListeners();
+      return publicLarkConfigs(saved, { activeAppIds: listener.activeAppIds, listeningDisabled });
+    } catch (error) { return larkError(reply, error); }
   });
   app.delete<{ Params: { appId: string } }>('/api/lark/config/:appId', async (request, reply) => {
     try {

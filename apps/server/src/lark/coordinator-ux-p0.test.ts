@@ -20,7 +20,7 @@ import { createRelayAskStore } from '../relay-ask-store.js';
 import { LarkMessageCoordinator, larkTaskTitle } from './coordinator.js';
 import { LarkGroupManager } from './group-management.js';
 import { LarkGroupParticipation } from './group-participation.js';
-import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
+import { saveLarkConfig, larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import { LarkWorkflowInteractions, type LarkInteraction } from './workflow-interactions.js';
 import { buildLarkCard, larkCardSafeLimits, type LarkChatMessage } from './service.js';
@@ -1531,7 +1531,7 @@ describe('Tag 群上下文按会话增量注入', () => {
 
   it('keeps the watermark when the turn fails before dispatch, so the next turn is full again', async () => {
     const { h, participation, watermarks } = await start();
-    vi.spyOn(participation, 'instructions').mockRejectedValueOnce(new Error('指令读取失败'));
+    vi.spyOn(participation, 'instructionsSnapshot').mockRejectedValueOnce(new Error('指令读取失败'));
     await h.coordinator.handle(event('om_failed', '@_user_1 第一件事'), h.config);
     await vi.waitFor(() => expect(JSON.stringify(h.service.reply.mock.calls)).toContain('上下文读取超时或失败'));
     expect(h.send).not.toHaveBeenCalled();
@@ -1868,14 +1868,39 @@ describe('群参与模型 act 的人工授权', () => {
     const context = { chatId: scope.chatId, messageId: pending!.receipt };
     return { h, participation, pending: pending!, value, context, expire: () => { now = new Date(now.getTime() + 24 * 3_600_000 + 1); } };
   };
-  it('does not create a task before confirmation; rejects outsiders and executes as the clicker once', async () => {
+  it.each(['versioned', 'missing', 'read failure', 'write failure'] as const)('confirms once with authorization, matter, disposition and prompt usage (%s)', async versionState => {
     const { h, participation, pending, value, context } = await start();
+    // Change the prompt while the confirmation is pending: usage must reflect the text actually dispatched.
+    if (versionState === 'versioned' || versionState === 'write failure') {
+      await saveLarkConfig(h.repos.config, undefined, { originalAppId: h.config.appId, preInjectPrompt: '确认前的旧版' });
+      const saved = await saveLarkConfig(h.repos.config, undefined, { originalAppId: h.config.appId, preInjectPrompt: '确认后实际执行的提示词' });
+      Object.assign(h.config, saved.find(bot => bot.appId === h.config.appId)!);
+    } else {
+      h.config.preInjectPrompt = '确认后实际执行的提示词';
+      await h.saveConfig({ preInjectPrompt: h.config.preInjectPrompt });
+    }
+    if (versionState === 'read failure') {
+      const get = h.repos.config.get.bind(h.repos.config);
+      vi.spyOn(h.repos.config, 'get').mockImplementation(key => {
+        if (key.startsWith('bot_prompt_version/' + h.config.appId + '/')) throw new Error('injected prompt history read failure');
+        return get(key);
+      });
+    }
+    if (versionState === 'write failure') {
+      const cas = h.repos.config.compareAndSet!.bind(h.repos.config);
+      vi.spyOn(h.repos.config, 'compareAndSet').mockImplementation((key, expected, candidate) => {
+        if (key.startsWith('bot_prompt_version/')) throw new Error('injected prompt usage write failure');
+        return cas(key, expected, candidate);
+      });
+    }
     expect(h.send).not.toHaveBeenCalled();
     expect(await h.runtime.listSessions()).toEqual([]);
     expect(await queryDispositions(h.repos.config, { appId: scope.appId, chatId: scope.chatId })).toContainEqual(expect.objectContaining({
       messageId: 'om_inferred', state: 'ignored', reason: 'participation_confirmation', decisionId: (pending.payload.payload as { decisionId: string }).decisionId
     }));
     expect(await h.repos.config.list!('task_authorization/')).toHaveLength(0);
+    expect(await h.repos.config.list!('bot_prompt_version/usage/')).toEqual([]);
+    expect(await h.repos.config.list!('bot_prompt_version/pending/')).toEqual([]);
     expect(JSON.stringify(h.cards.get(pending.receipt!))).toContain('交给我处理');
     expect(h.cards.get(pending.receipt!)).toMatchObject({ adhdMode: true });
     expect(callbackValues(buildLarkCard(h.cards.get(pending.receipt!)))).toContainEqual(expect.objectContaining(value));
@@ -1885,12 +1910,31 @@ describe('群参与模型 act 的人工授权', () => {
     check.mockResolvedValueOnce({ allowed: false, action: 'task.create', code: 'forbidden', reason: '任务权限已撤销', source: 'integration' } as any);
     expect(await participation.confirmations.handle(scope.appId, value, 'ou_bob', context)).toMatchObject({ type: 'warning' });
     expect(h.send).not.toHaveBeenCalled();
+    expect(await h.repos.config.list!('bot_prompt_version/usage/')).toEqual([]);
+    expect(await h.repos.config.list!('bot_prompt_version/pending/')).toEqual([]);
     expect(await participation.confirmations.handle(scope.appId, value, 'ou_bob', context)).toMatchObject({ type: 'success' });
     await h.waitDelivered(1);
     const records = (await h.repos.config.list!('task_authorization/')).map(row => JSON.parse(row.value));
     expect(records).toEqual([expect.objectContaining({ strength: 'explicit', via: 'participation_confirmed', actorOpenId: 'ou_bob', decisionId: (pending.payload.payload as { decisionId: string }).decisionId, policyVersion: 'v1' })]);
     expect(check).toHaveBeenCalledWith(scope.appId, scope.chatId, 'ou_bob', 'task.create', undefined, expect.anything());
     expect(h.send.mock.calls[0]?.[0]).toContain('当前飞书发送人不是本机器人的管理员');
+    expect(h.send.mock.calls[0]?.[0]).toContain('确认后实际执行的提示词');
+    expect(h.send.mock.calls[0]?.[0]).not.toContain('确认前的旧版');
+    const usages = (await h.repos.config.list!('bot_prompt_version/usage/')).map(row => JSON.parse(row.value));
+    if (versionState === 'write failure') {
+      expect(usages).toEqual([]);
+      expect(h.log.warn.mock.calls.some(call => String(call[1]).includes('记录本轮提示词版本失败'))).toBe(true);
+    } else {
+      expect(usages).toEqual([{ schemaVersion: 1, taskId: records[0]!.taskId, appId: scope.appId,
+        ...(versionState === 'versioned' ? { botPromptVersion: 2 } : {}) }]);
+    }
+    if (versionState === 'read failure') expect(h.log.warn.mock.calls.some(call => String(call[1]).includes('读取提示词历史失败'))).toBe(true);
+    if (versionState === 'versioned') {
+      const used = JSON.parse((await h.repos.config.get('bot_prompt_version/' + scope.appId + '/' + usages[0]!.botPromptVersion))!);
+      expect(used).toMatchObject({ version: 2, text: '确认后实际执行的提示词' });
+      expect(h.send.mock.calls[0]?.[0]).toContain(used.text);
+    }
+    expect(await h.repos.config.list!('bot_prompt_version/pending/')).toEqual([]);
     const execution = h.repos.execution.getAcceptedTask(records[0]!.taskId);
     expect(execution?.request?.actor).toMatchObject({ kind: 'channel', id: 'ou_bob' });
     const matter = h.repos.matters!.find('task', records[0]!.taskId);
@@ -1902,7 +1946,10 @@ describe('群参与模型 act 的人工授权', () => {
       state: 'accepted', reason: 'participation_handled', taskId: records[0]!.taskId, sessionId: records[0]!.sessionId, decisionId: records[0]!.decisionId
     }));
     expect((await queryDispositions(h.repos.config, { appId: scope.appId, chatId: scope.chatId })).some(row => row.messageId === 'om_inferred')).toBe(false);
+    const usageBeforeReplay = await h.repos.config.list!('bot_prompt_version/usage/');
     expect(await participation.confirmations.handle(scope.appId, value, 'ou_alice', context)).toMatchObject({ type: 'info' });
+    expect(await h.repos.config.list!('bot_prompt_version/usage/')).toEqual(usageBeforeReplay);
+    expect(await h.runtime.getTasks(records[0]!.sessionId)).toHaveLength(1);
     expect(h.send).toHaveBeenCalledOnce();
   });
   it('does not execute an expired confirmation', async () => {

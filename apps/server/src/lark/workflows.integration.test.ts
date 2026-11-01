@@ -11,7 +11,7 @@ import type { AgentConfig, AgentEvent, PermissionRequestData } from '@dutydeck/s
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { LarkGroupManager } from './group-management.js';
-import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
+import { saveLarkConfig, larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 import { LarkServiceError, createLarkCardService } from './service.js';
@@ -178,6 +178,135 @@ async function seedLegacyResult(h: Awaited<ReturnType<typeof harness>>) {
 }
 
 describe('Feishu workflows through coordinator, Runtime and persistent storage', () => {
+  it.each(['missing history', 'unreadable history'] as const)('still dispatches and records an unknown version with %s', async failure => {
+    const h = await harness();
+    h.config.preInjectPrompt = '没有版本记录的提示词';
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+    const get = h.repos.config.get.bind(h.repos.config);
+    if (failure === 'unreadable history') h.repos.config.get = async key => {
+      if (key.startsWith('bot_prompt_version/' + h.config.appId + '/')) throw new Error('history unavailable');
+      return get(key);
+    };
+    try {
+      await h.coordinator.handle(event('om_task', '继续执行'), h.config);
+      await h.completed();
+      const [session] = await h.runtime.listSessions();
+      const [task] = await h.runtime.getTasks(session!.id);
+      const usage = JSON.parse((await get('bot_prompt_version/usage/' + task!.id))!);
+      expect(usage).toMatchObject({ schemaVersion: 1, appId: h.config.appId, taskId: task!.id });
+      expect(usage).not.toHaveProperty('botPromptVersion');
+      expect(h.send).toHaveBeenCalledOnce();
+      expect(h.send.mock.calls[0]?.[0]).toContain('没有版本记录的提示词');
+      expect(h.log.warn.mock.calls.some(call => String(call[1]).includes('未记录版本'))).toBe(true);
+      expect(await h.repos.config.list!('bot_prompt_version/pending/')).toEqual([]);
+    } finally { h.repos.config.get = get; }
+  });
+  it.each(['read', 'write'] as const)('still dispatches when the pending snapshot %s fails', async failure => {
+    const h = await harness();
+    const saved = await saveLarkConfig(h.repos.config, undefined, { originalAppId: h.config.appId, preInjectPrompt: '已记录的提示词' });
+    Object.assign(h.config, saved[0]);
+    const get = h.repos.config.get.bind(h.repos.config);
+    const cas = h.repos.config.compareAndSet!.bind(h.repos.config);
+    h.repos.config.get = async key => {
+      if (failure === 'read' && key.startsWith('bot_prompt_version/pending/')) throw new Error('pending read unavailable');
+      return get(key);
+    };
+    h.repos.config.compareAndSet = async (key, expected, value) => {
+      if (failure === 'write' && key.startsWith('bot_prompt_version/pending/')) throw new Error('pending write unavailable');
+      return cas(key, expected, value);
+    };
+    try {
+      await h.coordinator.handle(event('om_task', '继续执行'), h.config);
+      await h.completed();
+      const [session] = await h.runtime.listSessions();
+      const [task] = await h.runtime.getTasks(session!.id);
+      expect(JSON.parse((await get('bot_prompt_version/usage/' + task!.id))!)).toMatchObject({ botPromptVersion: 1 });
+      expect(h.send).toHaveBeenCalledOnce();
+      expect(h.log.warn.mock.calls.some(call => String(call[1]).includes('冻结提示词版本失败'))).toBe(true);
+    } finally { h.repos.config.get = get; h.repos.config.compareAndSet = cas; }
+  });
+  it('only warns when pending cleanup fails after usage has been recorded', async () => {
+    const h = await harness();
+    const remove = h.repos.config.remove;
+    h.repos.config.remove = async () => { throw new Error('pending cleanup unavailable'); };
+    try {
+      await h.coordinator.handle(event('om_task', '继续执行'), h.config);
+      await h.completed();
+      expect(h.send).toHaveBeenCalledOnce();
+      expect(await h.repos.config.list!('bot_prompt_version/usage/')).toHaveLength(1);
+      expect(await h.repos.config.list!('bot_prompt_version/pending/')).toHaveLength(1);
+      expect(h.log.warn.mock.calls.some(call => String(call[1]).includes('清理提示词准备快照失败'))).toBe(true);
+    } finally { h.repos.config.remove = remove; }
+  });
+  it('preserves the original usage during recovery after its pending snapshot was deleted', async () => {
+    const h = await harness();
+    const saved = await saveLarkConfig(h.repos.config, undefined, { originalAppId: h.config.appId, preInjectPrompt: '原版本' });
+    Object.assign(h.config, saved[0]);
+    const cas = h.repos.config.compareAndSet!.bind(h.repos.config);
+    h.repos.config.compareAndSet = async (key, expected, value) => {
+      if (key.startsWith('lark.inbox.') && JSON.parse(value).state === 'accepted') throw new Error('crash after usage cleanup');
+      return cas(key, expected, value);
+    };
+    await h.coordinator.handle(event('om_task', '只执行一次'), h.config);
+    await h.completed();
+    const original = await h.repos.config.list!('bot_prompt_version/usage/');
+    expect(original).toHaveLength(1);
+    expect(JSON.parse(original[0]!.value)).toMatchObject({ botPromptVersion: 1 });
+    expect(await h.repos.config.list!('bot_prompt_version/pending/')).toEqual([]);
+    h.coordinator.stop(); h.repos.config.compareAndSet = cas;
+    // 新建相同文本的版本，只改变版本号；已接受任务的输入摘要保持原样。
+    const updated = await saveLarkConfig(h.repos.config, undefined, { originalAppId: h.config.appId, preInjectPrompt: '原版本' }, { source: 'rollback', rollbackFrom: 1 });
+    Object.assign(h.config, updated[0]);
+    const restored = h.createCoordinator();
+    try {
+      await restored.initializeWorkflows(h.config);
+      await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get('lark.inbox.cli_workflows.om_task'))!).state).toBe('accepted'));
+      expect(h.send).toHaveBeenCalledOnce();
+      expect(await h.repos.config.list!('bot_prompt_version/usage/')).toEqual(original);
+      expect(await h.repos.config.list!('bot_prompt_version/pending/')).toEqual([]);
+    } finally { restored.stop(); }
+  });
+
+  it('does not dispatch a prepared request superseded by /new while the prompt snapshot is being persisted', async () => {
+    const h = await harness();
+    const get = h.repos.config.get.bind(h.repos.config);
+    let release!: () => void, reached = false;
+    const gate = new Promise<void>(done => { release = done; });
+    h.repos.config.get = async key => {
+      if (key.startsWith('bot_prompt_version/pending/')) { reached = true; await gate; }
+      return get(key);
+    };
+    try {
+      await h.coordinator.handle(event('om_task', '旧轮请求'), h.config);
+      await vi.waitFor(() => expect(reached).toBe(true));
+      await h.coordinator.handle(event('om_new', '/new'), h.config);
+      release();
+      await vi.waitFor(async () => expect((await h.repos.channelMappings.list('lark-card:' + h.config.appId)).some(mapping =>
+        mapping.externalId === 'om_task' && JSON.parse(mapping.extra ?? '{}').state === 'interrupted')).toBe(true));
+      expect(h.send).not.toHaveBeenCalled();
+      expect((await Promise.all((await h.runtime.listSessions()).map(session => h.runtime.getTasks(session.id)))).flat()).toHaveLength(0);
+    } finally { release(); h.repos.config.get = get; }
+  });
+
+  it('records the actual bot prompt version and group instruction revision outside the dispatched task', async () => {
+    const h = await harness('normal', { participationMode: 'off' });
+    const scope = { appId: h.config.appId, chatId: 'oc_group' };
+    await h.repos.collaboration.updateSettings(scope, { expectedRevision: 1, instructions: '群指令示例' }, 'manager');
+    const configs = await saveLarkConfig(h.repos.config, undefined, { originalAppId: h.config.appId, preInjectPrompt: '机器人提示词示例' }, { source: 'web' });
+    Object.assign(h.config, configs.find(bot => bot.appId === h.config.appId));
+    await h.coordinator.handle(event('om_task', '执行示例'), h.config);
+    await h.completed();
+    const [session] = await h.runtime.listSessions();
+    const [task] = await h.runtime.getTasks(session!.id);
+    const raw = await h.repos.config.get('bot_prompt_version/usage/' + task!.id);
+    expect(JSON.parse(raw!)).toEqual({ schemaVersion: 1, taskId: task!.id, appId: h.config.appId, botPromptVersion: 1, groupInstructionsRevision: 2 });
+    expect(h.send.mock.calls[0]?.[0]).toContain('机器人提示词示例');
+    expect(h.send.mock.calls[0]?.[0]).toContain('群指令示例');
+    expect(await h.repos.config.list!('bot_prompt_version/pending/')).toEqual([]);
+    expect(task).not.toHaveProperty('botPromptVersion');
+    expect(task).not.toHaveProperty('groupInstructionsRevision');
+  });
+
   it('updates the running card while compact is still held and clears the label before the real result', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-10-01T00:00:00Z'));
@@ -1028,6 +1157,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     const h = await harness();
     const compareAndSet = h.repos.config.compareAndSet!.bind(h.repos.config);
     h.repos.config.compareAndSet = async (key, expected, value) => {
+      if (key.startsWith('bot_prompt_version/usage/')) throw new Error('crash before usage');
       if (key.includes('lark.inbox.') && JSON.parse(value).state === 'accepted') throw new Error('crash after dispatch');
       if (key.startsWith('lark.context.')) throw new Error('crash before cursor commit');
       return compareAndSet(key, expected, value);
@@ -1035,6 +1165,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await h.coordinator.handle(event('om_task', '执行一次'), h.config);
     await h.completed();
     expect(h.send).toHaveBeenCalledOnce();
+    expect(await h.repos.config.list!('bot_prompt_version/pending/')).toHaveLength(1);
     h.coordinator.stop(); h.repos.config.compareAndSet = compareAndSet;
     h.service.listChatMessages.mockResolvedValue({ items: [{ messageId: 'om_late', chatId: 'oc_group', threadId: 'omt_topic', createTime: '2000',
       messageType: 'text', rawContent: JSON.stringify({ text: '停机期间新增的材料' }), sender: { type: 'user' }, mentions: [] }] as any, hasMore: false });
@@ -1043,6 +1174,10 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
       await restored.initializeWorkflows(h.config);
       await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get('lark.inbox.cli_workflows.om_task'))!).state).toBe('accepted'));
       expect(h.send).toHaveBeenCalledOnce();
+      const usages = await h.repos.config.list!('bot_prompt_version/usage/');
+      expect(usages).toHaveLength(1);
+      expect(await h.repos.config.list!('bot_prompt_version/pending/')).toEqual([]);
+      expect(JSON.parse(usages[0]!.value)).toMatchObject({ botPromptVersion: 0, appId: h.config.appId });
       expect((await h.runtime.listSessions())).toHaveLength(1);
       const [session] = await h.runtime.listSessions();
       expect(await h.repos.config.get(`lark.context.cli_workflows.${session!.id}`)).not.toContain('om_late');

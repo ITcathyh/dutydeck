@@ -31,7 +31,7 @@ import { LeaderDelegationService } from './leader-delegation.js';
 import { renderMemoryIndex } from './lark/memory-view.js';
 import type { CollaborationExtensions } from './collaboration-extensions.js';
 import { LarkGroupManager } from './lark/group-management.js';
-import { larkMemoryEnabled, readLarkConfigs } from './lark/config.js';
+import { backfillBotPromptVersions, larkMemoryEnabled, readLarkConfigs } from './lark/config.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { loadConfigWithDiagnostics, resolveDatabaseUrl, type AppConfig } from '@dutydeck/config';
 import { logDroppedAgents } from './agent-config-log.js';
@@ -241,6 +241,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       assertBotProcessStartup(config.databaseUrl, (options.env ?? process.env).DUTYDECK_BOT_APP_ID);
       let migrateMs = 0;
       const repos = createRepositories(config.databaseUrl, { mode: 'runtime', newDatabaseAuthority: 'ledger_v1', onMigrated: ms => { migrateMs = Math.round(ms); } });
+      try { await backfillBotPromptVersions(repos.config); }
+      catch { process.stderr.write('[dutydeck] 提示词版本回填失败，继续启动；缺少历史的轮次会标为未记录版本。\n'); }
       startupPhase('database');
       // database 只算打开与校验，迁移单独记。
       startupMs.migrate = migrateMs; startupMs.database! -= migrateMs;

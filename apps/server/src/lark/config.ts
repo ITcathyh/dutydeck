@@ -1,3 +1,4 @@
+import { preparePromptVersions, type PromptSaveOrigin } from './prompt-versions.js';
 import { parseLarkEventHandlers, validateLarkEventConfiguration, type LarkEventHandler } from './event-pipeline.js';
 import { parseCardActionForwarding, type CardActionForwarding } from './card-action-forwarding.js';
 import { NEW_BOT_MENTION_POLICY, agentWeightsSchema, type AgentWeight, collaborationParticipationModes, mentionPolicies, resolveParticipation, riskControlModes, supportsRemoteApproval, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type RiskControlMode } from '@dutydeck/shared';
@@ -1076,22 +1077,34 @@ async function deleteLarkConfigUnlocked(repository: ConfigRepository | undefined
 }
 
 const configWrites = new WeakMap<ConfigRepository, Promise<unknown>>();
-async function mutateLarkConfigs(repository: ConfigRepository | undefined, work: (snapshot: ConfigRepository) => Promise<StoredLarkConfig[]>): Promise<StoredLarkConfig[]> {
+async function mutateLarkConfigs(repository: ConfigRepository | undefined, work: (snapshot: ConfigRepository) => Promise<StoredLarkConfig[]>, origin: PromptSaveOrigin = { source: 'agent' }): Promise<StoredLarkConfig[]> {
   if (!repository) throw new LarkServiceError('LARK_CONFIG_STORAGE_UNAVAILABLE', 'Lark configuration storage is unavailable', 503);
   const previous = configWrites.get(repository) ?? Promise.resolve();
   const next = previous.catch(() => {}).then(async () => {
     for (let attempt = 0; attempt < 20; attempt++) {
       const before = await repository.get(larkBotsConfigKey);
+      const legacyBefore = await repository.get(larkCredentialsConfigKey);
       let value = before;
       const snapshot: ConfigRepository = {
-        get: async key => key === larkBotsConfigKey ? value : repository.get(key),
+        get: async key => key === larkBotsConfigKey ? value : key === larkCredentialsConfigKey ? legacyBefore : repository.get(key),
         set: async (key, updated) => { if (key !== larkBotsConfigKey) throw new Error('Unexpected Bot config key'); value = updated; }
       };
       const result = await work(snapshot);
-      if (value === undefined) return result;
-      if (repository.compareAndSet) {
-        if (!await repository.compareAndSet(larkBotsConfigKey, before, value)) continue;
-      } else await repository.set(larkBotsConfigKey, value);
+      if (value === undefined && origin.source !== 'backfill') return result;
+      const prior = await readLarkConfigs({ get: async key => key === larkBotsConfigKey ? before : key === larkCredentialsConfigKey ? legacyBefore : repository.get(key), set: async () => {} }, { readOnly: true });
+      const versions = await preparePromptVersions(repository, prior, result, origin);
+      if (origin.source === 'backfill' && !versions.length) return result;
+      const writes = origin.source === 'backfill' ? versions : [{ key: larkBotsConfigKey, value: value! }, ...versions];
+      if (repository.compareAndSetBatch) {
+        if (!await repository.compareAndSetBatch([{ key: larkBotsConfigKey, expected: before }, { key: larkCredentialsConfigKey, expected: legacyBefore }, ...versions.map(item => ({ key: item.key, expected: undefined }))],
+          writes)) continue;
+      } else if (repository.compareAndSet) {
+        if (versions.length) throw new LarkServiceError('PROMPT_VERSION_STORAGE_UNAVAILABLE', '提示词保存需要支持原子写入的存储。', 503);
+        if (!await repository.compareAndSet(larkBotsConfigKey, before, value!)) continue;
+      } else {
+        // 内存/嵌入式无 CAS 仓储沿用同一对象内的写入串行化；SQLite 使用上面的原子事务。
+        for (const item of writes) await repository.set(item.key, item.value);
+      }
       return result;
     }
     throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '配置正在被其他操作修改，请重试。', 409);
@@ -1100,9 +1113,13 @@ async function mutateLarkConfigs(repository: ConfigRepository | undefined, work:
   try { return await next; } finally { if (configWrites.get(repository) === next) configWrites.delete(repository); }
 }
 
-export async function saveLarkConfig(repository: ConfigRepository | undefined, agents: AgentRepository | undefined, input: SaveLarkConfigInput) {
-  return mutateLarkConfigs(repository, snapshot => saveLarkConfigUnlocked(snapshot, agents, input));
+export async function saveLarkConfig(repository: ConfigRepository | undefined, agents: AgentRepository | undefined, input: SaveLarkConfigInput, origin: PromptSaveOrigin = { source: 'agent' }) {
+  return mutateLarkConfigs(repository, snapshot => saveLarkConfigUnlocked(snapshot, agents, input), { ...origin, appId: input.appId?.trim() || input.originalAppId?.trim() });
 }
 export async function deleteLarkConfig(repository: ConfigRepository | undefined, appId: string) {
   return mutateLarkConfigs(repository, snapshot => deleteLarkConfigUnlocked(snapshot, appId));
+}
+
+export async function backfillBotPromptVersions(repository: ConfigRepository) {
+  return mutateLarkConfigs(repository, snapshot => readLarkConfigs(snapshot, { readOnly: true }), { source: 'backfill' });
 }

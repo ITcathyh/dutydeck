@@ -17,6 +17,7 @@ export type SettingsAction =
   | 'plugin-binding-list' | 'plugin-binding-set' | 'plugin-binding-explain'
   | 'configuration-explain'
   | 'instances' | 'agents' | 'agent-show' | 'agent-set'
+  | 'bot-prompt-history' | 'bot-prompt-show' | 'bot-prompt-diff' | 'bot-prompt-rollback'
   | 'bot-list' | 'bot-show' | 'bot-add' | 'bot-set' | 'bot-remove' | 'bot-install-hook'
   | 'channel-bot-list' | 'channel-bot-show' | 'channel-bot-set'
   | 'group-binding-list' | 'group-binding-show' | 'group-binding-add' | 'group-binding-set'
@@ -32,6 +33,8 @@ export interface SettingsCliInput {
   url?: string;
   database?: string;
   appId?: string;
+  version?: string;
+  compareVersion?: string;
   channelBotId?: string;
   groupBindingId?: string;
   pluginName?: string;
@@ -52,7 +55,7 @@ export interface SettingsCliInput {
 type FieldKind = 'boolean' | 'integer' | 'integer|null' | 'string' | 'string|null' | 'list' | 'users' | 'json' | 'override' | readonly string[];
 
 type BotField = Exclude<keyof SaveLarkConfigRequest,
-  'stage' | 'originalAppId' | 'expectedRevision' | 'appId' | 'appSecret' | 'name' | 'env' | 'startupCommands' | 'gateEnabled' | 'softGateEnabled' | 'hardGateEnabled' | 'hookTrustConfirmed'>;
+  'promptSource' | 'stage' | 'originalAppId' | 'expectedRevision' | 'appId' | 'appSecret' | 'name' | 'env' | 'startupCommands' | 'gateEnabled' | 'softGateEnabled' | 'hardGateEnabled' | 'hookTrustConfirmed'>;
 
 export const pluginBindingFields = { enabled: 'boolean', config: 'json', secrets: 'json', skills: 'list' } satisfies Record<Exclude<keyof SavePluginBinding, 'plugin' | 'botAppId' | 'chatId' | 'workspaceRoot' | 'expectedRevision'>, FieldKind>;
 
@@ -402,6 +405,25 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
         bots: config.bots.map(({ appId, name, displayName, revision, listening, activeListening, defaultAgentId }) => ({ appId, name, displayName, revision, listening, activeListening, defaultAgentId }))
       };
     }
+    case 'bot-prompt-history': {
+      const result = await request('GET', `/api/lark/bots/${path(required(input.appId, 'App ID'))}/prompt-versions`);
+      return { ...result, versions: result.versions.map((item: any) => ({ ...item, sha256: item.sha256.slice(0, 8) })) };
+    }
+    case 'bot-prompt-show':
+    case 'bot-prompt-diff':
+    case 'bot-prompt-rollback': {
+      const appId = required(input.appId, 'App ID');
+      const parseVersion = (value: string | undefined) => {
+        if (!value || !/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) throw new SettingsCliError('SETTINGS_VALUE_INVALID', '版本号必须是正整数。');
+        return value;
+      };
+      const version = parseVersion(input.version);
+      const base = `/api/lark/bots/${path(appId)}/prompt-versions`;
+      if (action === 'bot-prompt-show') return request('GET', `${base}/${version}`);
+      if (action === 'bot-prompt-diff') return request('GET', `${base}/diff?a=${version}&b=${parseVersion(input.compareVersion)}`);
+      const bot = await findBot(request, appId);
+      return request('POST', `${base}/${version}/rollback`, { expectedRevision: bot.revision ?? 1 });
+    }
     case 'bot-show': return { bot: await findBot(request, required(input.appId, 'App ID')) };
     case 'bot-add': {
       const appId = required(input.appId, 'App ID');
@@ -416,7 +438,7 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
       const larkStage = input.appSecret !== undefined || larkStageFields.some(key => key in fields);
       if (larkStage) larkStageOnly(fields, 'a brand, App Secret or member list change');
       const bot = await findBot(request, appId);
-      return saveBot(request, { stage: larkStage ? 'lark' : 'agent', originalAppId: appId, expectedRevision: bot.revision ?? 1, ...fields, ...(input.appSecret ? { appSecret: input.appSecret } : {}) }, appId);
+      return saveBot(request, { ...(fields.preInjectPrompt !== undefined ? { promptSource: 'cli' as const } : {}), stage: larkStage ? 'lark' : 'agent', originalAppId: appId, expectedRevision: bot.revision ?? 1, ...fields, ...(input.appSecret ? { appSecret: input.appSecret } : {}) }, appId);
     }
     case 'bot-remove': {
       const appId = required(input.appId, 'App ID');
