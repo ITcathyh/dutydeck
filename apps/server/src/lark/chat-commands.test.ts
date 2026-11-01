@@ -817,7 +817,15 @@ it('records the source matter when /retry replaces a stopped interrupted session
   const h = await harness({ answer: true, reportIdle: true });
   await h.dispatch('om_retry_source', 'retry this request'); await h.waitRunning('retry this request');
   const parent = await h.sessionId();
-  await h.runtime.stop(parent, { kind: 'channel', id: 'ou_alice', appId: h.config.appId }); h.release();
+  await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+  // Confirm the interruption before closing the session; stopping a submitted turn alone leaves an unknown result.
+  const [original] = await h.runtime.getTasks(parent);
+  await h.runtime.interrupt(parent, original!.id, 'ou_alice');
+  h.release();
+  await vi.waitFor(async () => expect((await h.runtime.getTasks(parent))[0]?.status).toBe('interrupted'));
+  await h.runtime.stop(parent, { kind: 'channel', id: 'ou_alice', appId: h.config.appId });
+  expect((await h.runtime.getSession(parent))?.state).toBe('stopped');
+  expect((await h.runtime.getTasks(parent))[0]?.status).toBe('interrupted');
   const track = vi.spyOn(h.runtime, 'trackMatterSession');
   await h.coordinator.handle(event('om_retry_command', '/retry'), h.config);
   let child = '';
