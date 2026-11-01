@@ -975,3 +975,7 @@ Confirmation requires bot settings management permission (`channel_bot.update`) 
 ## License
 
 Dutydeck core code is licensed under open-source terms. See [Third-Party Notices](THIRD_PARTY_NOTICES.md) for details.
+
+### Automatic read-only checks
+
+Each instance checks health about five minutes after startup and hourly thereafter: Lark connections, unconfirmed result deliveries, blocked queues, unknown results, overdue schedules, and background memory jobs. New findings are summarized in one direct message to the bot owner; an issue is reported once until recovery, with no recovery message. Checks never modify or retry tasks, and Web instances send no direct messages. Notifications with an unknown outcome are not resent after the deduplication window; doctor shows this status. Run `dutydeck doctor` to see unresolved findings and their first observation times.

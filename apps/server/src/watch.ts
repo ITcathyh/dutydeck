@@ -1,0 +1,183 @@
+import { createHash } from 'node:crypto';
+import { z } from 'zod';
+import type { ConfigRepository } from '@dutydeck/shared';
+import type { DoctorCheck } from './doctor/types.js';
+
+export const WATCH_PREFIX = 'watch_findings/';
+export const WATCH_FIRST_RUN_MS = 5 * 60_000;
+export const WATCH_INTERVAL_MS = 60 * 60_000;
+export const WATCH_NOTIFICATION_RETRY_MS = 55 * 60_000;
+export const watchFindingSchema = z.object({
+  schemaVersion: z.literal(1),
+  appId: z.string().min(1),
+  fingerprint: z.string().min(1),
+  kind: z.string().min(1),
+  objectId: z.string().min(1),
+  title: z.string().min(1),
+  since: z.string().datetime(),
+  location: z.string().min(1),
+  firstSeenAt: z.string().datetime(),
+  lastSeenAt: z.string().datetime(),
+  episode: z.number().int().positive(),
+  notifiedAt: z.string().datetime().optional(),
+  notificationUnknownAt: z.string().datetime().optional(),
+  recoveredAt: z.string().datetime().optional()
+}).strict();
+const notificationSchema = z.object({
+  schemaVersion: z.literal(1), idempotencyKey: z.string().min(1), ownerId: z.string().min(1),
+  text: z.string().min(1), status: z.enum(['pending', 'completed', 'unknown']),
+  attemptedAt: z.string().datetime().optional(),
+  members: z.array(z.object({ fingerprint: z.string(), episode: z.number().int().positive() }).strict()).min(1)
+}).strict();
+export type WatchFinding = z.infer<typeof watchFindingSchema>;
+export type WatchSignal = Pick<WatchFinding, 'kind' | 'objectId' | 'title' | 'since' | 'location'>;
+export type WatchScope = { appId: string; signals: WatchSignal[]; ownerId?: string; notify: boolean };
+export const watchFingerprint = (kind: string, objectId: string) =>
+  createHash('sha256').update(JSON.stringify([kind, objectId])).digest('hex');
+const parse = (value: string) => { try { return watchFindingSchema.safeParse(JSON.parse(value)); } catch { return undefined; } };
+
+export function readWatchFindings(rows: Array<{ key: string; value: string }>): WatchFinding[] {
+  return rows.flatMap(row => {
+    const result = parse(row.value);
+    return result?.success && row.key === `${WATCH_PREFIX}${result.data.appId}/${result.data.fingerprint}` ? [result.data] : [];
+  });
+}
+
+export function watchSummary(findings: WatchFinding[]): string {
+  const lines: string[] = [];
+  const grouped = new Map<string, WatchFinding[]>();
+  for (const finding of findings) {
+    if (['queue_blocked', 'result_unknown', 'schedule_overdue'].includes(finding.kind)) {
+      const group = grouped.get(finding.kind) ?? []; group.push(finding); grouped.set(finding.kind, group);
+    } else lines.push(`${finding.title}；自 ${finding.since}；${finding.location}`);
+  }
+  for (const group of grouped.values()) lines.push(`${group[0]!.title} ${group.length} 项；自 ${group.map(f => f.since).sort()[0]}；${[...new Set(group.map(f => f.location))].join('、')}`);
+  return `巡检发现 ${findings.length} 个新问题。\n${lines.join('\n')}`;
+}
+
+/** Each instance has one runner. A stable provider UUID also covers a crash after send but before saving its receipt. */
+export class DutydeckWatch {
+  private running?: Promise<void>;
+  constructor(private readonly options: {
+    store: ConfigRepository;
+    collect(): Promise<WatchScope[]>;
+    send(input: { appId: string; ownerId: string; text: string; idempotencyKey: string }): Promise<unknown>;
+    warn(details: unknown, message: string): void;
+    now?: () => Date;
+  }) {}
+  run(): Promise<void> {
+    if (this.running) return this.running;
+    this.running = this.inspect().finally(() => { this.running = undefined; });
+    return this.running;
+  }
+  private async inspect() {
+    const scopes = await this.options.collect();
+    const at = (this.options.now?.() ?? new Date()).toISOString();
+    for (const scope of scopes) {
+      const prefix = `${WATCH_PREFIX}${scope.appId}/`;
+      const previous = new Map(readWatchFindings(await this.options.store.list?.(prefix) ?? []).map(f => [f.fingerprint, f]));
+      const active = new Set<string>();
+      const pending: WatchFinding[] = [];
+      for (const signal of scope.signals) {
+        const fingerprint = watchFingerprint(signal.kind, signal.objectId);
+        if (active.has(fingerprint)) continue;
+        active.add(fingerprint);
+        const prior = previous.get(fingerprint);
+        const finding: WatchFinding = watchFindingSchema.parse({
+          schemaVersion: 1, appId: scope.appId, fingerprint, ...signal,
+          since: prior && !prior.recoveredAt && prior.since < signal.since ? prior.since : signal.since,
+          firstSeenAt: prior && !prior.recoveredAt ? prior.firstSeenAt : at,
+          lastSeenAt: at, episode: prior ? prior.episode + (prior.recoveredAt ? 1 : 0) : 1,
+          ...(prior && !prior.recoveredAt && prior.notifiedAt ? { notifiedAt: prior.notifiedAt } : {}),
+          ...(prior && !prior.recoveredAt && prior.notificationUnknownAt ? { notificationUnknownAt: prior.notificationUnknownAt } : {})
+        });
+        await this.options.store.set(prefix + fingerprint, JSON.stringify(finding));
+        previous.set(fingerprint, finding);
+        if (!finding.notifiedAt && !finding.notificationUnknownAt) pending.push(finding);
+      }
+      for (const prior of previous.values()) if (!active.has(prior.fingerprint) && !prior.recoveredAt) {
+        const recovered = { ...prior, recoveredAt: at };
+        await this.options.store.set(prefix + prior.fingerprint, JSON.stringify(recovered));
+        previous.set(prior.fingerprint, recovered);
+      }
+      if (!scope.notify) continue;
+      const notificationKey = prefix + 'notification';
+      const rawNotification = await this.options.store.get(notificationKey);
+      const oldNotification = rawNotification ? notificationSchema.parse(JSON.parse(rawNotification)) : undefined;
+      const deliver = async (notification: z.infer<typeof notificationSchema>) => {
+        const live = notification.members.flatMap(member => {
+          const finding = previous.get(member.fingerprint);
+          return finding && finding.episode === member.episode && !finding.recoveredAt && !finding.notifiedAt && !finding.notificationUnknownAt ? [finding] : [];
+        });
+        if (live.length && notification.attemptedAt && Date.parse(at) - Date.parse(notification.attemptedAt) >= WATCH_NOTIFICATION_RETRY_MS) {
+          for (const finding of live) {
+            const unknown = { ...finding, notificationUnknownAt: at };
+            await this.options.store.set(prefix + finding.fingerprint, JSON.stringify(unknown));
+            previous.set(finding.fingerprint, unknown);
+          }
+          await this.options.store.set(notificationKey, JSON.stringify({ ...notification, status: 'unknown' }));
+          return;
+        }
+        if (live.length) {
+          notification = { ...notification, attemptedAt: notification.attemptedAt ?? at };
+          await this.options.store.set(notificationKey, JSON.stringify(notification));
+          await this.options.send({ appId: scope.appId, ownerId: notification.ownerId, text: notification.text, idempotencyKey: notification.idempotencyKey });
+          for (const finding of live) {
+            const notified = { ...finding, notifiedAt: at };
+            await this.options.store.set(prefix + finding.fingerprint, JSON.stringify(notified));
+            previous.set(finding.fingerprint, notified);
+          }
+        }
+        await this.options.store.set(notificationKey, JSON.stringify({ ...notification, status: 'completed' }));
+      };
+      if (!scope.ownerId) {
+        if (pending.length) this.options.warn({ appId: scope.appId, count: pending.length }, '巡检发现问题，但找不到机器人所有者，未发送私信');
+        continue;
+      }
+      try {
+        // Freeze both UUID and payload before any provider write. A partial receipt-save failure
+        // or newly found issue cannot change an uncertain notification's identity.
+        if (oldNotification?.status === 'pending') {
+          if (oldNotification.ownerId === scope.ownerId) await deliver(oldNotification);
+          else await this.options.store.set(notificationKey, JSON.stringify({ ...oldNotification, status: 'completed' }));
+        }
+        const unsent = pending.filter(f => { const current = previous.get(f.fingerprint); return !current?.notifiedAt && !current?.notificationUnknownAt; });
+        if (!unsent.length) continue;
+        const idempotencyKey = 'watch_' + createHash('sha256')
+          .update(JSON.stringify([scope.appId, scope.ownerId, unsent.map(f => [f.fingerprint, f.episode]).sort()])).digest('hex').slice(0, 40);
+        const notification = notificationSchema.parse({ schemaVersion: 1, idempotencyKey,
+          ownerId: scope.ownerId, text: watchSummary(unsent), status: 'pending',
+          members: unsent.map(f => ({ fingerprint: f.fingerprint, episode: f.episode })) });
+        await this.options.store.set(notificationKey, JSON.stringify(notification));
+        await deliver(notification);
+      } catch (error) { this.options.warn({ appId: scope.appId, error }, '巡检私信未确认成功，下轮检查投递状态'); }
+    }
+  }
+}
+
+/** Stop timers first and drain the in-flight read/send before repositories and HTTP clients close. */
+export function startDutydeckWatch(watch: Pick<DutydeckWatch, 'run'>, warn: (error: unknown) => void) {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout>;
+  let running: Promise<void> | undefined;
+  const tick = () => {
+    if (stopped) return;
+    running = watch.run().catch(warn).finally(() => {
+      running = undefined;
+      if (!stopped) { timer = setTimeout(tick, WATCH_INTERVAL_MS); timer.unref(); }
+    });
+  };
+  timer = setTimeout(tick, WATCH_FIRST_RUN_MS); timer.unref();
+  return async () => { stopped = true; clearTimeout(timer); await running; };
+}
+
+export function checkWatchFindings(values: Readonly<Record<string, string | undefined>>, unavailable = false): DoctorCheck {
+  const base = { id: 'watch.findings', label: '巡检发现' };
+  if (unavailable) return { ...base, level: 'skip', detail: '数据库不可读，无法读取巡检发现' };
+  const rows = Object.entries(values).flatMap(([key, value]) => key.startsWith(WATCH_PREFIX) && value ? [{ key, value }] : []);
+  const findings = readWatchFindings(rows).filter(f => !f.recoveredAt).sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt));
+  if (!findings.length) return { ...base, level: 'ok', detail: '没有未恢复的巡检问题（启动约 5 分钟后首次检查）' };
+  return { ...base, level: 'warn', detail: findings.map(f => `${f.title}；首次发现 ${f.firstSeenAt}；${f.location}${f.notificationUnknownAt ? '；巡检通知发送结果未知，不重复私信' : ''}`).join('\n'),
+    remedy: '按每项位置查看会话或守护进程日志，处理后等待下一轮巡检确认恢复。', verify: 'dutydeck doctor --json' };
+}
+

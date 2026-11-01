@@ -1,3 +1,5 @@
+import { DutydeckWatch, startDutydeckWatch } from './watch.js';
+import { collectWatchScopes } from './watch-signals.js';
 import { assertDatabaseNotQuarantined } from '@dutydeck/storage';
 import { ProjectMemoryService } from './project-memory.js';
 import { larkAgentSessionBinding } from './lark/agent-tools.js';
@@ -650,6 +652,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   };
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;
   let closeRun: Promise<void> | undefined;
+  let closeWatch: (() => Promise<void>) | undefined;
   const relayBroker = new RelayAskBroker({
     async publish(sessionId, input) {
       await runtime.publishSessionEvent(sessionId, 'text', {
@@ -679,6 +682,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         const results = await Promise.allSettled(operations.map(operation => Promise.resolve().then(operation)));
         errors.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason));
       };
+      await settle([() => closeWatch?.()]);
       await settle([closePluginResults]);
       await settle([() => workbench.close(), () => workbenchHttp.close(), () => workItems.close(), () => delegations.close(), () => automation.close(), () => ciWebhook?.close(), () => pullRequests.close()]);
       // Wake blocked asks before waiting for HTTP shutdown.
@@ -875,6 +879,23 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     await app.listen(listenOptions(config));
     startupPhase('listen');
     app.log.info({ startupMs: { ...startupMs, total: Math.round(process.uptime() * 1000) } }, '启动各阶段耗时');
+    const watch = new DutydeckWatch({
+      store: repos.config,
+      collect: async () => collectWatchScopes(repos,
+        await readLarkConfigs(repos.config, { readOnly: true }),
+        { listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true', appId: env.DUTYDECK_BOT_APP_ID }),
+      send: async input => {
+        const bots = await readLarkConfigs(repos.config, { readOnly: true });
+        const bot = bots.find(bot => bot.appId === input.appId);
+        if (!bot || !bot.listening || !bot.allowedUsers.some(user => user.openId === input.ownerId)) throw new Error('巡检机器人或所有者已变更');
+        return createLarkCardService(env, workbenchHttp.fetch, bot).send({
+          receiveId: input.ownerId, receiveIdType: input.ownerId.startsWith('on_') ? 'union_id' : 'open_id',
+          markdown: input.text, taskName: '巡检发现', state: 'completed', readOnly: true, idempotencyKey: input.idempotencyKey
+        });
+      },
+      warn: (details, message) => app?.log.warn(details, message)
+    });
+    closeWatch = startDutydeckWatch(watch, error => app?.log.warn({ error }, '只读巡检失败'));
     pluginResultTimer = setInterval(() => { void sweepPluginResults(); }, 30_000);
     pluginResultTimer.unref();
     void sweepPluginResults();

@@ -1440,3 +1440,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 ## 开源许可证与协议 (License)
 
 Dutydeck 核心代码采用开源授权协议。完整第三方依赖与开源许可证声明请参阅 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。
+
+### 自动只读巡检
+
+实例启动约 5 分钟后首次巡检，之后每小时检查长连接、未确认的结果投递、排队受阻、结果未知、逾期计划及后台记忆作业。发现新问题时汇总私信机器人所有者；同一问题恢复前只报一次，恢复时不发消息。巡检不修改或重试任务，Web 实例不发私信。通知发送结果未知且超过去重窗口时不重复私信，可在 doctor 中查看。运行 `dutydeck doctor` 可查看未恢复的问题及首次发现时间。
