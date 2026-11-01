@@ -206,6 +206,38 @@ describe('watch report and intake integration signals', () => {
     expect((await h.collect([{ ...quiet, appId: 'cli_other' }], { appId: 'cli_other' }))[0]?.signals).toEqual([]);
   });
 
+  it('warns on a report read failure and keeps collecting other sessions and signals', async () => {
+    const h = fixture();
+    h.tasks.push(task('unknown', 'reconcile_required', WATCH_UNKNOWN_MS + 2), task('unreadable', 'completed', 1));
+    h.sessions.push({ ...session, id: 'other_session' });
+    h.tasks.push({ ...task('other_report', 'completed', WATCH_REPORT_MS + 2), sessionId: 'other_session' });
+    h.values.set('task_report/other_report', JSON.stringify({ schemaVersion: 1, taskId: 'other_report', sessionId: 'other_session',
+      status: 'blocked', summary: '等待权限', reportedAt: ago(WATCH_REPORT_MS + 1) }));
+    h.values.set('session_automation/schedule/' + schedule.id, JSON.stringify(schedule));
+    const get = h.repos.config.get;
+    h.repos.config.get = async key => {
+      if (key === 'task_report/unreadable') throw new Error('report storage unavailable');
+      return get(key);
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect((await h.collect())[0]?.signals.map(signal => signal.kind)).toEqual(['result_unknown', 'task_report_blocked', 'schedule_overdue']);
+      expect(warn).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'unreadable' }), expect.stringContaining('读取收尾报告失败'));
+      expect(h.mutations).not.toHaveBeenCalled();
+    } finally { warn.mockRestore(); }
+  });
+
+  it('preserves repository order for same-millisecond latest reports and rejects another session report', async () => {
+    const h = fixture();
+    h.tasks.push(task('z_older', 'completed', WATCH_REPORT_MS + 2), task('a_latest', 'completed', WATCH_REPORT_MS + 2));
+    const report = { schemaVersion: 1, taskId: 'a_latest', sessionId: session.id, status: 'waiting',
+      question: '需要决定', reportedAt: ago(WATCH_REPORT_MS + 1) };
+    h.values.set('task_report/a_latest', JSON.stringify(report));
+    expect((await h.collect())[0]?.signals).toEqual([expect.objectContaining({ kind: 'task_report_waiting', objectId: 'a_latest' })]);
+    h.values.set('task_report/a_latest', JSON.stringify({ ...report, sessionId: 'another_session' }));
+    expect((await h.collect())[0]?.signals).toEqual([]);
+  });
+
   it('scans every intake row without a 500-row query cap and excludes terminal, accepted and invalid records', async () => {
     const h = fixture();
     const receipt = (id: string, state: string, extra: Record<string, unknown> = {}, age = WATCH_INBOX_MS + 1) => ({
@@ -276,4 +308,25 @@ describe('watch report and intake integration signals', () => {
     h.tasks[0]!.status = 'completed'; expect((await h.collect())[0]?.signals).toEqual([]);
     expect(h.mutations).not.toHaveBeenCalled();
   });
+});
+
+
+it.each(['web', undefined])('checks unscoped %s problems alongside configured bots without sending a direct message', async source => {
+  const h = fixture(); h.sessions[0] = { ...session, source, sourceId: undefined };
+  h.tasks.push(task('unknown', 'reconcile_required', WATCH_UNKNOWN_MS + 3));
+  h.tasks.push(task('reported', 'completed', WATCH_REPORT_MS + 2));
+  h.values.set('task_report/reported', JSON.stringify({ schemaVersion: 1, taskId: 'reported', sessionId: session.id,
+    status: 'waiting', question: '需要决定', reportedAt: ago(WATCH_REPORT_MS + 1) }));
+  h.values.set('session_automation/schedule/' + schedule.id, JSON.stringify(schedule));
+  const scopes = await h.collect([bot]);
+  expect(scopes.find(scope => scope.appId === 'web')).toMatchObject({ notify: false, signals: [
+    expect.objectContaining({ kind: 'task_report_waiting' }), expect.objectContaining({ kind: 'result_unknown' }), expect.objectContaining({ kind: 'schedule_overdue' })
+  ] });
+  expect(scopes.find(scope => scope.appId === bot.appId)?.signals).toEqual([]);
+  h.repos.config.set = async (key, value) => { h.values.set(key, value); };
+  const send = vi.fn();
+  await new DutydeckWatch({ store: h.repos.config, collect: () => h.collect([bot]), send, warn: vi.fn(), now: () => now }).run();
+  expect(send).not.toHaveBeenCalled();
+  expect([...h.values.keys()].filter(key => key.startsWith('watch_findings/web/'))).toHaveLength(3);
+  expect((await h.collect([bot], { appId: bot.appId })).find(scope => scope.appId === 'web')).toBeUndefined();
 });

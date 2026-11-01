@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { dispositionSchema } from './lark/disposition.js';
 import { larkConfirmActionId } from './lark/confirm-cards.js';
 import { larkMessageAnchor } from './lark/message-anchor.js';
-import { readSessionTaskReport, taskReportAttentionText, botAppIdOfSession, readStoredSessionSchedule, sessionScheduleOccurrenceSchema, type RepositoryBundle, type Session } from '@dutydeck/shared';
+import { readTaskReportSafely, taskReportAttentionText, botAppIdOfSession, readStoredSessionSchedule, sessionScheduleOccurrenceSchema, type RepositoryBundle, type Session } from '@dutydeck/shared';
 import { larkResultDeliveryIssues } from './lark/reconciler.js';
 import { larkListenerStatusKey, type LarkListenerStatus } from './lark/listener-status.js';
 import { larkMemoryEnabled, type StoredLarkConfig } from './lark/config.js';
@@ -42,8 +42,8 @@ export async function collectWatchScopes(repos: RepositoryBundle, bots: StoredLa
     appId: bot.appId, signals: [], ownerId: bot.allowedUsers.find(user => /^(ou_|on_)/.test(user.openId))?.openId,
     notify: !options.listeningDisabled && bot.listening
   }));
-  // The Web process has no bot but still checks its own tasks and schedules.
-  if (!scopes.length) scopes.push({ appId: options.appId ?? 'web', signals: [], notify: false });
+  // Unscoped instances also check Web/CLI sessions when bots share the database.
+  if (!options.appId || !scopes.length) scopes.push({ appId: options.appId ?? 'web', signals: [], notify: false });
   const botsByApp = new Map(selected.map(bot => [bot.appId, bot]));
   const locationOf = (session: Session) => sessionLocation(session, botsByApp.get(botAppIdOfSession(session) ?? options.appId ?? ''));
   const byApp = new Map(scopes.map(scope => [scope.appId, scope]));
@@ -132,7 +132,9 @@ export async function collectWatchScopes(repos: RepositoryBundle, bots: StoredLa
     const scope = scopeOf(session);
     if (!scope) continue;
     const tasks = await repos.tasks.listBySession(session.id);
-    const report = await readSessionTaskReport(repos.config, session.id, tasks);
+    const latest = [...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1);
+    const storedReport = latest ? await readTaskReportSafely(repos.config, latest.id) : undefined;
+    const report = storedReport?.sessionId === session.id && !storedReport.clearedAt ? storedReport : undefined;
     if (report && taskReportAttentionText(report) && now.getTime() - Date.parse(report.reportedAt) > WATCH_REPORT_MS) add(scope, {
       kind: `task_report_${report.status}`, objectId: report.taskId,
       title: report.status === 'waiting' ? '任务等待决定超过 24 小时' : '任务受阻超过 24 小时',

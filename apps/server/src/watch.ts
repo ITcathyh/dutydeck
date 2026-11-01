@@ -1,28 +1,15 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import type { ConfigRepository } from '@dutydeck/shared';
+import { watchFindingSchema, type ConfigRepository } from '@dutydeck/shared';
+export { watchFindingSchema } from '@dutydeck/shared';
 import type { DoctorCheck } from './doctor/types.js';
 
 export const WATCH_PREFIX = 'watch_findings/';
 export const WATCH_FIRST_RUN_MS = 5 * 60_000;
 export const WATCH_INTERVAL_MS = 60 * 60_000;
 export const WATCH_NOTIFICATION_RETRY_MS = 55 * 60_000;
-export const watchFindingSchema = z.object({
-  schemaVersion: z.literal(1),
-  appId: z.string().min(1),
-  fingerprint: z.string().min(1),
-  kind: z.string().min(1),
-  objectId: z.string().min(1),
-  title: z.string().min(1),
-  since: z.string().datetime(),
-  location: z.string().min(1),
-  firstSeenAt: z.string().datetime(),
-  lastSeenAt: z.string().datetime(),
-  episode: z.number().int().positive(),
-  notifiedAt: z.string().datetime().optional(),
-  notificationUnknownAt: z.string().datetime().optional(),
-  recoveredAt: z.string().datetime().optional()
-}).strict();
+export const WATCH_RECOVERED_RETENTION_MS = 7 * 24 * 60 * 60_000;
+export const WATCH_RECOVERED_LIMIT = 1_000;
 const notificationSchema = z.object({
   schemaVersion: z.literal(1), idempotencyKey: z.string().min(1), ownerId: z.string().min(1),
   text: z.string().min(1), status: z.enum(['pending', 'completed', 'unknown']),
@@ -70,6 +57,26 @@ export class DutydeckWatch {
     this.running = this.inspect().finally(() => { this.running = undefined; });
     return this.running;
   }
+  private async pruneRecovered(appId: string, at: string) {
+    if (!this.options.store.remove) return;
+    try {
+      const prefix = `${WATCH_PREFIX}${appId}/`;
+      const raw = await this.options.store.get(prefix + 'notification');
+      const notification = raw ? notificationSchema.parse(JSON.parse(raw)) : undefined;
+      const protectedIds = new Set(notification?.status === 'pending' ? notification.members.map(member => member.fingerprint) : []);
+      const recovered = (await this.options.store.list?.(prefix) ?? []).flatMap(row => {
+        const finding = readWatchFindings([row])[0];
+        return finding?.recoveredAt ? [{ ...row, finding }] : [];
+      }).sort((a, b) => Date.parse(b.finding.recoveredAt!) - Date.parse(a.finding.recoveredAt!) || a.key.localeCompare(b.key));
+      let kept = recovered.filter(row => protectedIds.has(row.finding.fingerprint)).length;
+      for (const row of recovered) {
+        if (protectedIds.has(row.finding.fingerprint)) continue;
+        if (Date.parse(at) - Date.parse(row.finding.recoveredAt!) < WATCH_RECOVERED_RETENTION_MS && kept < WATCH_RECOVERED_LIMIT) { kept++; continue; }
+        try { await this.options.store.remove(row.key, row.value); }
+        catch (error) { this.options.warn({ appId, error }, '清理已恢复巡检记录失败'); }
+      }
+    } catch (error) { this.options.warn({ appId, error }, '清理已恢复巡检记录失败'); }
+  }
   private async inspect() {
     const scopes = await this.options.collect();
     const at = (this.options.now?.() ?? new Date()).toISOString();
@@ -100,6 +107,7 @@ export class DutydeckWatch {
         await this.options.store.set(prefix + prior.fingerprint, JSON.stringify(recovered));
         previous.set(prior.fingerprint, recovered);
       }
+      await this.pruneRecovered(scope.appId, at);
       if (!scope.notify) continue;
       const notificationKey = prefix + 'notification';
       const rawNotification = await this.options.store.get(notificationKey);
@@ -144,7 +152,7 @@ export class DutydeckWatch {
         const unsent = pending.filter(f => { const current = previous.get(f.fingerprint); return !current?.notifiedAt && !current?.notificationUnknownAt; });
         if (!unsent.length) continue;
         const idempotencyKey = 'watch_' + createHash('sha256')
-          .update(JSON.stringify([scope.appId, scope.ownerId, unsent.map(f => [f.fingerprint, f.episode]).sort()])).digest('hex').slice(0, 40);
+          .update(JSON.stringify([scope.appId, scope.ownerId, unsent.map(f => [f.fingerprint, f.episode, f.firstSeenAt]).sort()])).digest('hex').slice(0, 40);
         const notification = notificationSchema.parse({ schemaVersion: 1, idempotencyKey,
           ownerId: scope.ownerId, text: watchSummary(unsent), status: 'pending',
           members: unsent.map(f => ({ fingerprint: f.fingerprint, episode: f.episode })) });

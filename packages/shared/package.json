@@ -21,6 +21,10 @@
     }
   },
   "files": [
+    "src/watch-finding.ts",
+    "dist/watch-finding.js",
+    "dist/watch-finding.js.map",
+    "dist/watch-finding.d.ts",
     "runtime",
     "src/index.ts",
     "src/task-authorization.ts",
