@@ -1445,3 +1445,4 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 Dutydeck 核心代码采用开源授权协议。完整第三方依赖与开源许可证声明请参阅 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。
 
 群参与由模型推断需要主动执行时，会先发送「交给我处理」确认卡；有任务创建权限的人确认后，以确认人的身份执行，24 小时内无人确认就不执行。显式 @、话题续接、主动回复和管理员配置的 direct 场景包保持原行为。网页结果检视可查看各轮授权依据、确认人和判断记录。
+消息去向：机器人页面的“最近没处理的消息”可查看 24 小时、7 天或 30 天内的原因。用 `dutydeck lark why <message_id> [--app <appId>]` 查询单条消息，或 `dutydeck lark ignored --chat <chat_id> [--since 24h|7d|30d]` 列表查询。忽略记录保留 30 天，每机器人最多 5000 条；旧记录显示未记录原因。

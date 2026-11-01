@@ -76,7 +76,7 @@ describe('persistent Lark task inbox', () => {
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
-  it('keeps at most 5000 recent ignored receipts and removes 24-hour-old ignored records without touching received inputs', async () => {
+  it('keeps at most 5000 recent ignored receipts and removes 30-day-old ignored records without touching received inputs', async () => {
     const { directory, repositories } = await openDatabase();
     try {
       const inbox = new LarkTaskInbox(repositories.config);
@@ -86,7 +86,7 @@ describe('persistent Lark task inbox', () => {
         const event = message({ messageId: `ignored_${index}` });
         await repositories.config.set(`lark.inbox.app_one.${event.messageId}`, JSON.stringify({ appId: 'app_one', event, boot: '', state: 'ignored', receivedAt: at, receiptOrder: index }));
       }
-      await repositories.config.set('lark.inbox.app_one.expired', JSON.stringify({ appId: 'app_one', event: message({ messageId: 'expired' }), boot: '', state: 'ignored', receivedAt: new Date(Date.now() - 86_400_001).toISOString() }));
+      await repositories.config.set('lark.inbox.app_one.expired', JSON.stringify({ appId: 'app_one', event: message({ messageId: 'expired' }), boot: '', state: 'ignored', receivedAt: new Date(Date.now() - 30 * 86_400_000 - 1).toISOString() }));
       await inbox.pruneIgnored('app_one');
       const rows = await repositories.config.list!('lark.inbox.app_one.');
       expect(rows).toHaveLength(5001);
@@ -95,6 +95,21 @@ describe('persistent Lark task inbox', () => {
       expect(await inbox.lookup('app_one', 'ignored_0')).toBeUndefined();
       expect(await inbox.lookup('app_one', 'received')).toMatchObject({ state: 'received' });
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('keeps a 29-day ignored receipt, records duplicate deliveries, and preserves accepted state', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const inbox = new LarkTaskInbox(repositories.config);
+      const record = (await inbox.capture('app_one', message()))!;
+      await inbox.update(record,{state:'ignored',reason:'not_addressed'});
+      const key = 'lark.inbox.app_one.om_original';
+      await repositories.config.set(key,JSON.stringify({...record,receivedAt:new Date(Date.now()-29*86400000).toISOString()}));
+      await inbox.pruneIgnored('app_one');
+      expect(await inbox.lookup('app_one','om_original')).toBeDefined();
+      expect(await inbox.capture('app_one',message({content:'replacement'}))).toBeUndefined();
+      expect(await inbox.lookup('app_one','om_original')).toMatchObject({duplicateCount:1,reason:'not_addressed',event:message()});
+    } finally { repositories.close(); await rm(directory,{recursive:true,force:true}); }
   });
 
   it('claims a same-app message once even under concurrent claims, while apps stay isolated', async () => {
@@ -281,4 +296,25 @@ describe('persistent Lark task inbox', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+});
+
+it.each(['update','ownUnrouted','release','adoptAccepted','claim'] as const)('retries metadata written between %s read and CAS', async operation => {
+ const {directory,repositories} = await openDatabase();
+ try {
+  const inbox = new LarkTaskInbox(repositories.config);
+  const record = (await inbox.capture('app_one',message()))!;
+  if (operation === 'adoptAccepted') await inbox.update(record,{state:'accepted'});
+  if (operation === 'release') await inbox.update(record,{state:'received'});
+  const original = repositories.config.compareAndSet!.bind(repositories.config);
+  const key = 'lark.inbox.app_one.om_original';
+  const spy = vi.spyOn(repositories.config,'compareAndSet').mockImplementationOnce(async (target,expected,next) => {
+    const current = JSON.parse((await repositories.config.get(key))!);
+    await repositories.config.set(key,JSON.stringify({...current,duplicateCount:1}));
+    return original(target,expected,next);
+  });
+  const result = operation === 'update' ? await inbox.update(record,{cardId:'card'}) : operation === 'claim' ? await inbox.claim('app_one',message()) : await inbox[operation](record);
+  if (operation !== 'update') expect(result).toBeDefined();
+  expect(await inbox.lookup('app_one','om_original')).toMatchObject({duplicateCount:1,...(operation==='update'?{cardId:'card'}:{})});
+  spy.mockRestore();
+ } finally {repositories.close(); await rm(directory,{recursive:true,force:true});}
 });

@@ -356,6 +356,7 @@ export const eventsUrl = (id: string, query: EventWindowQuery = {}) => {
 export const RUN_SUMMARY_ENDPOINT = '/api/sessions/summaries';
 export type WorkItemRequest = { stepId: string; sessionId: string; taskId: string; requestId: string; kind: 'permission' | 'question'; text: string };
 export const api = {
+  larkInbox: (appId: string, since: string) => json<Array<{ messageId: string; receivedAt?: string; sender: string; snippet: string; reason?: string; detail: string; mergedInto?: string; decisionId?: string }>>(`/api/lark/inbox?${new URLSearchParams({ appId, since })}`),
   workItemRequests: (sessionId: string, id: string) => json<WorkItemRequest[]>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/requests`, { cache: 'no-store' }),
   respondWorkItemRequest: (sessionId: string, id: string, input: { stepId: string; taskId: string; requestId: string; kind: 'permission' | 'question'; answer: string }) => json<unknown>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/respond`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   workItems: (sessionId: string) => json<{ items: WorkItem[]; templates: WorkTemplate[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items`, { cache: 'no-store' }),

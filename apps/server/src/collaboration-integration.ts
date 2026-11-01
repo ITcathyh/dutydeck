@@ -123,6 +123,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   });
   const deliveries = new CollaborationDelivery(repos.collaboration);
   const participation = new LarkGroupParticipation({
+    inboxStore: repos.config,
     withDelivery: (scope, actionId, send) => deliveries.run(scope, actionId, send),
     repository: roleParticipationRepo, decider, readConfig, serviceFor: client, readMemory: options.readMemory, usageRefusal: options.usageRefusal, log: options.log, scenarios: options.scenarios,
     readTeamContext: (scope, query) => teamContext.read(scope, query),

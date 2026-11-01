@@ -1,3 +1,4 @@
+import { queryDispositions } from './disposition.js';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
@@ -71,6 +72,7 @@ export interface LarkRoutesOptions {
 }
 
 export async function registerLarkRoutes(app: FastifyInstance, options: LarkRoutesOptions = {}) {
+  if (options.config) app.get<{ Querystring: { appId?: string; messageId?: string; chatId?: string; since?: string } }>('/api/lark/inbox', request => queryDispositions(options.config!, request.query));
   const env = options.env ?? process.env;
   const http = createWorkbenchFetch(options.fetcher);
   const fetcher = http.fetch;
