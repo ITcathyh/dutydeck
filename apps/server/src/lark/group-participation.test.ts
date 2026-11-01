@@ -622,10 +622,14 @@ describe('group observation and selective participation through the coordinator'
     expect(h.service.replyText).not.toHaveBeenCalled(); expect((await h.repository.listDecisions(scope))[0]!.status).toBe('suppressed');
     expect(h.respond).not.toHaveBeenCalled(); expect(h.service.addReaction).not.toHaveBeenCalled();
   });
-  it('hands an act decision to the explicit execution path once', async () => {
+  it('requests confirmation for act and only hands the confirmed message to execution once', async () => {
     const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => act(snapshot));
-    h.participation.setDispatcher(scope.appId, (event, current) => h.coordinator.adopt(event, current));
+    h.participation.setDispatcher(scope.appId, (event, current) => h.coordinator.adopt(event, current), async () => true);
     await h.coordinator.handle(message('om_1', 'Bot 帮我读下这份文档'), config); await h.participation.flush(scope);
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    const card = (await h.repository.listActions(scope)).find(item => item.kind === 'confirm.participation_act')!;
+    expect(JSON.stringify(h.service.reply.mock.calls)).toContain('交给我处理');
+    expect(await h.participation.confirmations.handle(scope.appId, { dutydeck_confirm: 'confirm', confirm_id: card.id, chat_id: scope.chatId }, 'ou_a', { messageId: card.receipt, chatId: scope.chatId })).toMatchObject({ type: 'success' });
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
     expect(h.runtime.send.mock.calls[0]).toEqual(expect.arrayContaining([expect.stringContaining('帮我读下这份文档')]));
     expect((await h.repository.listDecisions(scope)).find(item => item.action === 'act')).toMatchObject({ status: 'sent' });
@@ -659,7 +663,8 @@ describe('group observation and selective participation through the coordinator'
     h.participation.setDispatcher(scope.appId, (event, current) => h.coordinator.adopt(event, current));
     h.decide.mockImplementationOnce(async (_config, snapshot) => act(snapshot)).mockImplementation(async (_config, snapshot) => reply(snapshot));
     await h.coordinator.handle(message('om_1', 'Bot 帮我读下这份文档'), config); await h.participation.flush(scope);
-    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    expect((await h.repository.listActions(scope)).some(item => item.kind === 'confirm.participation_act')).toBe(true);
     await h.coordinator.handle(message('om_2', 'Bot 现在进展如何'), config); await h.participation.flush(scope);
     expect((await h.repository.listDecisions(scope)).find(item => item.action === 'reply')).toMatchObject({ status: 'suppressed' });
     expect(h.service.replyText).not.toHaveBeenCalled();

@@ -16,7 +16,7 @@ import { redactTraceText } from './secret-redaction.js';
 import { readGitSnapshot } from './git-status.js';
 import { buildLarkTaskDashboard, pageLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { isLarkGroupChatMemoryPool, isLarkGroupMemoryPool, isLarkPerGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
-import { deferredConfirmationId, describeScheduleTrigger, parseLarkSourceId, resolveParticipation, RuntimeError, timeLoop, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
+import { deferredConfirmationId, describeScheduleTrigger, scenarioPolicyVersion, parseLarkSourceId, resolveParticipation, RuntimeError, timeLoop, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-decision.js';
 import { directScenarioPrompt } from './scenario-direct.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
@@ -591,11 +591,20 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (inbox) await this.inbox!.update(inbox, { state: 'failed', error: reason });
   }
 
-  /** 群参与判定为 act、或 direct 场景包起任务时，按发送者本人的显式请求走同一条授权、领取与执行路径。 */
+  /** Confirmation checks the clicker's current task permissions, never the original sender's. */
+  async canConfirmParticipation(scope: { appId: string; chatId: string }, actor: string): Promise<boolean> {
+    let config = await readLarkConfig(this.workflowOptions.store, scope.appId);
+    if (!config?.listening || this.stopped) return false;
+    if (this.groupManager) config = await this.groupManager.resolved(config, scope.chatId);
+    await this.requireExecution('listener', 'task.create');
+    return this.currentAccess(config, scope.chatId, 'group', actor, 'task.create', undefined, actor);
+  }
+
+  /** 内部收养请求仍经过普通入口的授权、领取和执行。 */
   adopt(event: LarkMessageEvent, config: StoredLarkConfig) {
     // 只有内部 dispatcher 的场景派生可改变执行身份/话题，正文始终沿用持久原文。
-    const adoption: LarkInboxAdoption | undefined = event.scenario ? {
-      senderOpenId: event.senderOpenId, senderType: event.senderType, scenario: event.scenario,
+    const adoption: LarkInboxAdoption | undefined = event.scenario || event.authorization ? {
+      senderOpenId: event.senderOpenId, senderType: event.senderType, scenario: event.scenario, authorization: event.authorization,
       rootId: event.rootId, threadId: event.threadId, parentId: event.parentId
     } : undefined;
     return this.handle(event, config, false, true, undefined, undefined, adoption);
@@ -761,6 +770,17 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const inbox = await this.inbox?.claim(config.appId, event, adopted, adoption);
     if (this.inbox && !inbox) return;
     if (inbox) event = inbox.event;
+    const explicitVia = larkTaskAgentGuid(event.messageId) ? 'task_channel' as const
+      : recognizedCommand ? 'command' as const : event.chatType !== 'group' ? 'direct' as const
+      : mentionsBot ? 'mention' as const : quotedWorkflow || pendingAskContinuation ? 'answer_reply' as const
+      : ownedTopic || requestContinuation ? 'topic_followup' as const : undefined;
+    const source = (adoption || persisted?.state === 'received') && event.authorization ? event.authorization
+      : scenario ? { strength: 'inferred' as const, via: 'scenario_direct' as const,
+        ...('recordId' in scenario ? { decisionId: scenario.recordId, policyVersion: scenarioPolicyVersion(scenario.packId, scenario.version) } : {}) }
+      : explicitVia ? { strength: 'explicit' as const, via: explicitVia }
+      : { strength: 'inferred' as const, via: 'group_rule' as const };
+    event = { ...event, authorization: source };
+    if (inbox) await this.inbox!.update(inbox, { event });
     // 原任务还留在 tasks 里，/new 按它作废入站记录：新认领要立刻交给它，否则 CAS 对不上。
     if (retrying && inbox) retrying.inbox = inbox;
     // 先标记已处理，避免异步解析期间同一条消息被重复入队。

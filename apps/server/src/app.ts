@@ -3,6 +3,7 @@ import { registerArtifactSnapshotRoutes, type ArtifactSnapshotRouteOptions } fro
 import { registerPluginBusinessToolRoutes, type PluginBusinessToolRoutes } from './plugins/tool-routes.js';
 import { registerPluginBindingRoutes, type PluginBindingRoutes } from './plugins/binding-routes.js';
 import { registerPluginResultRoutes, type PluginResultRoutes } from './plugins/result-routes.js';
+import { readTaskAuthorization } from './task-authorization.js';
 import { readLarkConfig } from './lark/config.js';
 import { createLarkSessionSourceResolver } from './lark/session-source.js';
 import type { AgentModelSettings } from './agent-model-settings.js';
@@ -530,6 +531,12 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       limit: parseEventLimit(limit),
       direction: (direction ?? (after !== undefined ? 'forward' : 'backward')) as 'forward' | 'backward'
     });
+  });
+  app.get<{ Params: { id: string } }>('/api/sessions/:id/task-authorizations', async request => {
+    const sessionId = request.params.id;
+    await requireSessionExecution(request, sessionId, 'session', 'task.view_result');
+    const records = await Promise.all((await runtime.getTasks(sessionId)).map(task => readTaskAuthorization(options.lark?.config, task.id, sessionId)));
+    return records.filter(record => record !== undefined);
   });
   app.get<{ Params: { id: string } }>('/api/sessions/:id/tasks', async request => {
     await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');

@@ -1443,3 +1443,5 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 ## 开源许可证与协议 (License)
 
 Dutydeck 核心代码采用开源授权协议。完整第三方依赖与开源许可证声明请参阅 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。
+
+群参与由模型推断需要主动执行时，会先发送「交给我处理」确认卡；有任务创建权限的人确认后，以确认人的身份执行，24 小时内无人确认就不执行。显式 @、话题续接、主动回复和管理员配置的 direct 场景包保持原行为。网页结果检视可查看各轮授权依据、确认人和判断记录。

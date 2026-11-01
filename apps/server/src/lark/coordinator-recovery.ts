@@ -1,4 +1,5 @@
 import { clearTaskReport } from '@dutydeck/shared';
+import { readTaskAuthorization, recordTaskAuthorization } from '../task-authorization.js';
 import { randomUUID } from 'node:crypto';
 import { explicitFinalTextReceiptReader } from './explicit-final.js';
 import { describeLarkTaskRecovery, larkContinuePrompt, larkIdleTimeoutMinutes, larkQuietSettledNote, larkRecoveryRetainedNote, larkReliability, larkStaleSettledNote,
@@ -116,6 +117,20 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
             ...cause ? { canContinueInPlace: true } : {} } } };
       }
     }));
+    // Completed tasks need evidence repair too; never infer it from prompts or current settings.
+    if (this.workflowOptions.store && this.inbox) for (const mapping of await cardMappings.list(larkCardChannel(config.appId))) {
+      try {
+        const saved = parseOptionalCardTask(mapping.extra);
+        if (!saved?.runtime_task_id || saved.app_id !== config.appId
+          || await readTaskAuthorization(this.workflowOptions.store, saved.runtime_task_id, mapping.sessionId)) continue;
+        const inbox = await this.inbox.lookup(config.appId, mapping.externalId);
+        if (!inbox?.event.authorization || inbox.sessionId !== mapping.sessionId || inbox.taskId !== saved.runtime_task_id
+          || inbox.event.chatId !== saved.chat_id) continue;
+        await recordTaskAuthorization(this.workflowOptions.store, { schemaVersion: 1, taskId: saved.runtime_task_id, sessionId: mapping.sessionId,
+          ...inbox.event.authorization, ...(inbox.event.senderOpenId ? { actorOpenId: inbox.event.senderOpenId } : {}),
+          chatId: inbox.event.chatId, recordedAt: new Date().toISOString() });
+      } catch (error) { unresolved++; this.log.warn({ error, messageId: mapping.externalId }, '授权依据补记待重试'); }
+    }
     unresolved += await timeLoop('lark.reconcile.interactions', this.log, async () => await this.workflows?.reconcile(config.appId) ?? 0);
     let textReceiptReader: Awaited<ReturnType<typeof explicitFinalTextReceiptReader>> | undefined;
     for (const record of await this.workflows?.list(config.appId) ?? []) {

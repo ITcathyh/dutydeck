@@ -1,3 +1,4 @@
+import { readTaskAuthorization } from './task-authorization.js';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -102,6 +103,7 @@ describe('SessionAutomation ledger integration with real SQLite and local JSONL 
     const listed = await f.service.listBySession(f.parent.id);
     const occurrence = listed.occurrences[0]!;
     expect(occurrence).toMatchObject({ runStatus: 'completed', resultBoundary: 'verified' });
+    expect(await readTaskAuthorization(f.repos.config, occurrence.taskId!, f.parent.id)).toMatchObject({ strength: 'explicit', via: 'schedule', actorOpenId: 'ou_owner' });
     expect(JSON.stringify(occurrence)).not.toContain('admission');
     expect(JSON.stringify(occurrence)).not.toContain('sourcePayload');
   });

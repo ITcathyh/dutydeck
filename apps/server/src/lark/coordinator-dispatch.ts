@@ -1,6 +1,7 @@
 import { readTaskReport } from '@dutydeck/shared';
 import { taskReportCardElements } from './task-report-card.js';
 import { larkAgentUnavailableReason, larkFallbackHasActivity } from './agent-fallback.js';
+import { recordTaskAuthorization } from '../task-authorization.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import type { PromptPart } from '@dutydeck/shared';
 import { promptDigest } from '../prompt-context.js';
@@ -1882,6 +1883,14 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         if (runtimeTask.replayed) groupContextCommit = undefined;
         // S8：恢复接上的任务只置位一次；之后排队 PATCH 与每一帧非终态心跳都带重启注记。
         if (runtimeTask.replayed) task.replayedNote = true;
+        // Evidence belongs to this accepted runtime task even if the visible turn has changed.
+        if (this.workflowOptions.store && event.authorization) await recordTaskAuthorization(this.workflowOptions.store, {
+          schemaVersion: 1, taskId: runtimeTask.id, sessionId: session.id, ...event.authorization,
+          ...(event.senderOpenId ? { actorOpenId: event.senderOpenId } : {}), chatId: event.chatId, recordedAt: new Date().toISOString()
+        }).catch(error => {
+          this.log.warn({ error, taskId: runtimeTask.id }, '任务已接收，授权依据待对账补记');
+          this.scheduleReconcile();
+        });
         // dispatch 期间用户可能已经重试（group.tail 在 dispatch 建立订阅后就 resolve 了）。
         // 旧轮次不得把自己的 runtime task 写成新一轮的，否则 mapping 里的任务归属就错了。
         if (task.turn !== currentTurn) return;
@@ -1965,6 +1974,14 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       else if (riskPolicy) sent = await this.runtime.send(session.id, prompt, agentPrompt, riskPolicy);
       else if (agentPrompt === prompt) sent = await this.runtime.send(session.id, prompt);
       else sent = await this.runtime.send(session.id, prompt, agentPrompt);
+      const sentTaskId = (sent as { id?: string } | undefined)?.id;
+      if (sentTaskId && this.workflowOptions.store && event.authorization) await recordTaskAuthorization(this.workflowOptions.store, {
+        schemaVersion: 1, taskId: sentTaskId, sessionId: session.id, ...event.authorization,
+        ...(event.senderOpenId ? { actorOpenId: event.senderOpenId } : {}), chatId: event.chatId, recordedAt: new Date().toISOString()
+      }).catch(error => {
+        this.log.warn({ error, taskId: sentTaskId }, '任务已完成，授权依据待对账补记');
+        this.scheduleReconcile();
+      });
       // send 在未提交就结束时也会正常返回（status: failed），同样只认结果里的终态。
       await commitGroupContext((sent as { status?: unknown } | undefined)?.status);
       // 若轮次已变（用户在 send 期间点击了重试），本轮不得覆盖新状态。

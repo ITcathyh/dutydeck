@@ -7,6 +7,7 @@ import { turnDiffPath } from '../app-route';
 import { Banner, Button, Dialog, Field, IconButton, Input, Spinner } from './primitives';
 import { PullRequestPanel } from './PullRequestPanel';
 import { SessionAutomationPanel } from './SessionAutomationPanel';
+import { TaskAuthorizationPanel } from './TaskAuthorizationPanel';
 import { SessionArtifacts } from './SessionArtifacts';
 
 import { verificationLabel } from './verification-presentation';
@@ -65,6 +66,7 @@ export function SessionDeliveryPanel({ session, tasks, onClose, presentation = '
         <section className="space-y-2" aria-label="任务结果">
           <h3 className="text-body font-semibold">结果</h3>
           <p className="text-body text-primary">{sessionDisplayName(session, tasks.find(task => task.prompt.trim())?.prompt)}</p>
+          <TaskAuthorizationPanel sessionId={session.id} tasks={tasks}/>
           <p className="text-caption text-secondary">执行状态：{effectiveStatus(session).label}。执行完成与验证通过分别记录。</p>
           <p className="text-caption text-subtle">结果正文保留在对话中；下方检查已记录的改动与交付证据。</p>
         </section>

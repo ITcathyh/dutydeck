@@ -23,6 +23,10 @@
   "files": [
     "runtime",
     "src/index.ts",
+    "src/task-authorization.ts",
+    "dist/task-authorization.js",
+    "dist/task-authorization.js.map",
+    "dist/task-authorization.d.ts",
     "src/group-policy.ts",
     "dist/index.js",
     "dist/index.js.map",

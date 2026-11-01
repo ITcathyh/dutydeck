@@ -1,3 +1,4 @@
+export * from './task-authorization.js';
 export * from './history.js';
 export * from './event-content.js';
 export * from './task-report.js';
