@@ -1,3 +1,4 @@
+import { WATCH_PREFIX } from '../watch.js';
 /**
  * 逐项检查的纯逻辑。
  *
@@ -37,7 +38,7 @@ export const DOCTOR_CONFIG_KEYS = [larkBotsConfigKey, AUTH_TOKEN_CONFIG_KEY, lar
 const larkMemoryStatePrefix = 'lark.memory.state.';
 
 /** 体检按前缀读的键：会话记忆状态按「机器人 + 记忆池」分键，事先不知道有哪些池。 */
-export const DOCTOR_CONFIG_PREFIXES = [larkMemoryStatePrefix] as const;
+export const DOCTOR_CONFIG_PREFIXES = [larkMemoryStatePrefix, WATCH_PREFIX] as const;
 
 // ─── 1. node.version ─────────────────────────────────────────────────────────
 

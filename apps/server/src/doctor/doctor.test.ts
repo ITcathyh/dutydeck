@@ -1,3 +1,4 @@
+import { WATCH_PREFIX, watchFingerprint } from '../watch.js';
 import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, chmodSync, mkdirSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1318,4 +1319,24 @@ describe('.env 定位说明', () => {
     expect(check.level).toBe('info');
     expect(check.detail).toContain('/srv/dutydeck');
   });
+});
+
+
+it('doctor renders unresolved watch findings and reads their prefix without running a check', async () => {
+  const output = ui();
+  const fingerprint = watchFingerprint('result_delivery', 'om_watch');
+  const firstSeenAt = '2026-11-01T02:00:00.000Z';
+  const record = { schemaVersion: 1, appId: 'cli_watch', fingerprint, kind: 'result_delivery', objectId: 'om_watch',
+    title: '结果投递未确认成功', since: firstSeenAt, location: 'https://example.test/sessions/watch',
+    firstSeenAt, lastSeenAt: firstSeenAt, episode: 1 };
+  let requestedPrefixes: readonly string[] = [];
+  await runDoctor({},deps({ ui: output.ui, databaseProbe: (_path,_keys,prefixes) => {
+    requestedPrefixes = prefixes ?? [];
+    return { exists: true, appliedVersion: 14, values: { [WATCH_PREFIX + 'cli_watch/' + fingerprint]:JSON.stringify(record) } };
+  }}));
+  expect(requestedPrefixes).toContain(WATCH_PREFIX);
+  expect(output.stdout.text()).toContain('巡检发现');
+  expect(output.stdout.text()).toContain('结果投递未确认成功');
+  expect(output.stdout.text()).toContain('首次发现 ' + firstSeenAt);
+  expect(output.stdout.text()).toContain('https://example.test/sessions/watch');
 });

@@ -1,3 +1,4 @@
+import { collectWatchScopes } from './watch-signals.js';
 import { MattersService } from './matters.js';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
@@ -89,7 +90,7 @@ async function fixture(origin: 'lark' | 'web' = 'lark') {
     return { created, firstSession, running, queued, release: () => writeFile(join(gate, 'release'), '1') };
   }
 
-  return { repos, runtime, allowed, owner, get service() { return service; }, parent, setClock: (date: Date) => { clock.value = date; }, sent, occurrences, taskStatus, retainFirstSessionWithUserWork };
+  return { repos, runtime, allowed, owner, hold: () => rm(join(gate, 'release'), { force: true }), release: () => writeFile(join(gate, 'release'), '1'), get service() { return service; }, parent, setClock: (date: Date) => { clock.value = date; }, sent, occurrences, taskStatus, retainFirstSessionWithUserWork };
 }
 
 describe('fresh schedule sessions kept for unfinished user work (real runtime and SQLite)', () => {
@@ -226,4 +227,43 @@ it('switches an explicitly replaced but retained source plan to a fresh session'
   expect(occurrence.executionSessionId).not.toBe(f.parent.id);
   expect(await f.runtime.getTasks(f.parent.id)).toEqual([]);
   expect(f.repos.matters!.find('session', occurrence.executionSessionId)?.id).toBe(f.repos.matters!.find('session', f.parent.id)?.id);
+}, 20_000);
+
+it('watch reads a real stopped-origin fallback and its actual running execution task without mutation', async () => {
+  const f = await fixture();
+  const created = await f.service.createSchedule(f.parent.id, { ...scheduleInput, mode: 'session' }, f.owner);
+  await f.service.updateSchedule(f.parent.id, created.id, { expectedRevision: created.revision, enabled: true }, f.owner);
+  await f.runtime.stop(f.parent.id, { kind: 'channel', id: f.owner, appId: 'cli_app' });
+  await f.hold();
+  const watch = () => collectWatchScopes(f.repos, [{ appId: 'cli_app', allowedUsers: [], listening: false, memoryEnabled: false } as any],
+    { now: new Date('2026-09-12T00:12:30.000Z'), appId: 'cli_app' });
+  const dispatch = f.runtime.dispatchRequest.bind(f.runtime);
+  let pendingChecked = false;
+  vi.spyOn(f.runtime, 'dispatchRequest').mockImplementationOnce(async request => {
+    const snapshot = await f.repos.config.list!('');
+    expect((await watch()).flatMap(scope => scope.signals).filter(signal => signal.kind === 'schedule_overdue'))
+      .toEqual([expect.objectContaining({ objectId: created.id })]);
+    expect(await f.repos.config.list!('')).toEqual(snapshot);
+    pendingChecked = true;
+    return dispatch(request);
+  });
+  f.setClock(new Date('2026-09-12T00:01:30.000Z'));
+  await vi.waitFor(async () => { await f.service.tick(); const [occ] = await f.occurrences(); expect(occ?.taskId && f.taskStatus(occ.taskId)).toBe('running'); }, { timeout: 10_000, interval: 20 });
+  await f.service.tick();
+  const [occurrence] = await f.occurrences();
+  const stored = JSON.parse((await f.repos.config.get(`session_automation/schedule/${created.id}`))!);
+  expect(pendingChecked).toBe(true);
+  expect(stored.mode).toBe('fresh');
+  expect(stored.executionContext).toBeTruthy();
+  expect(stored.executionSessionId).toBe(occurrence.executionSessionId);
+  expect(occurrence.executionSessionId).not.toBe(f.parent.id);
+  expect((await f.repos.tasks.get!(occurrence.taskId))?.sessionId).toBe(occurrence.executionSessionId);
+  expect((await f.repos.sessions.get(f.parent.id))?.state).toBe('stopped');
+  const before = await f.repos.config.list!('');
+  const scopes = await collectWatchScopes(f.repos, [{ appId: 'cli_app', allowedUsers: [], listening: false, memoryEnabled: false } as any],
+    { now: new Date('2026-09-12T00:12:30.000Z'), appId: 'cli_app' });
+  expect(scopes.flatMap(scope => scope.signals).filter(signal => signal.kind === 'schedule_overdue')).toEqual([]);
+  expect(await f.repos.config.list!('')).toEqual(before);
+  await f.release();
+  await vi.waitFor(async () => { await f.service.tick(); expect((await f.occurrences())[0]?.runStatus).toBe('completed'); }, { timeout: 10_000, interval: 20 });
 }, 20_000);

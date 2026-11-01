@@ -1,3 +1,4 @@
+import { checkWatchFindings } from '../watch.js';
 /**
  * `dutydeck doctor` —— 本机环境与配置体检。
  *
@@ -302,6 +303,8 @@ export async function runDoctor(
     databaseUnreadable ? { unavailable: true } : { ...(probe.values?.[larkBotsConfigKey] ? { raw: probe.values[larkBotsConfigKey] } : {}), ...(probe.values ? { values: probe.values } : {}) },
     new Date()
   ));
+
+  checks.push(checkWatchFindings(probe.values ?? {}, databaseUnreadable));
 
   // ---- 8. 访问姿态 ----
   const mode = accessMode({ host: config.host, authEnabled: config.authEnabled });

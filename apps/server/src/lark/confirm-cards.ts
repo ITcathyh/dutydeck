@@ -49,6 +49,7 @@ export interface LarkConfirmCardsOptions {
 type Toast = { type: 'success' | 'info' | 'warning' | 'error'; content: string };
 const actionKind = (kind: string) => `confirm.${kind}`;
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export const larkConfirmActionId = (kind: string, scope: CollaborationScope, key: string) => `confirm_${digest([kind, scope, key])}`;
 
 export class LarkConfirmCards {
   private readonly handlers = new Map<string, LarkConfirmHandler>();
@@ -70,7 +71,7 @@ export class LarkConfirmCards {
   async request(input: LarkConfirmRequest): Promise<LarkConfirmRecord | undefined> {
     if (!this.handlers.has(input.kind)) throw new Error(`Unknown confirmation kind: ${input.kind}`);
     const repo = this.options.repository;
-    const id = `confirm_${digest([input.kind, input.scope, input.dedupeKey ?? input.replyTo.messageId])}`;
+    const id = larkConfirmActionId(input.kind, input.scope, input.dedupeKey ?? input.replyTo.messageId);
     // 已经发过：存档里的有效期是当时算的，重新 beginAction 会因 payload 不同被判冲突。
     const existing = await repo.getAction(input.scope, id).catch(() => undefined);
     if (existing) return recordOf(existing);
