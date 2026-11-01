@@ -474,11 +474,11 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     const h = await blockedTopic();
     const { coordinator, service } = await h.start('p2');
     const run = await h.relaunchButton(service, 'om_queued', 'run_in_new_session');
-    // 取消之后、把原请求交给入站记录的那一次写入失败。
+    // 取消之后的实际存储异常；仅返回 false 的 CAS 竞争会按执行快照重试。
     const write = h.repos.config.compareAndSet!.bind(h.repos.config);
     let failed = false;
     vi.spyOn(h.repos.config, 'compareAndSet').mockImplementation(async (key, expected, value) => {
-      if (!failed && key === 'lark.inbox.app.om_queued' && JSON.parse(value).state === 'received') { failed = true; return false; }
+      if (!failed && key === 'lark.inbox.app.om_queued' && JSON.parse(value).state === 'received') { failed = true; throw new Error('injected inbox storage failure'); }
       return write(key, expected, value);
     });
     expect(await coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });

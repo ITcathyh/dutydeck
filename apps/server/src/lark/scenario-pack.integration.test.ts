@@ -254,7 +254,7 @@ const ask = async (h: AlarmHarness, messageId: string, value: string, patch: { c
 };
 
 describe('团队答疑（model 场景包）', () => {
-  it('群 A 开启、群 B 不开：A 里命中关键字的提问带着冻结的 runbook 交给模型，判 act 后执行 prompt 里是冻结的指令和不可信材料块；B 照原有规则', async () => {
+  it('群 A 开启、群 B 不开：A 里命中关键字的提问带着冻结的 runbook 交给模型，判 act 先确认，确认后执行 prompt 里是冻结的指令和不可信材料块；B 照原有规则', async () => {
     let decided: CollaborationScenarioSnapshot | undefined;
     const h = await faqHarness({ decide: async (_config, snapshot, triggerId) => {
       decided = snapshot.scenario;
@@ -270,9 +270,18 @@ describe('团队答疑（model 场景包）', () => {
     expect(scenario).toEqual(decided);
     expect(scenario).toMatchObject({ packId: 'team-faq', version: '0.1.0', status: 'used', context: { sources: [{ id: 'runbook', status: 'complete', missing: [] }] } });
     expect(scenario.context!.observations.map(item => item.text)).toContain('orders.md · 5xx 排查\n## 5xx 排查\n\n订单服务 5xx 先看网关日志，再看下游库存服务的超时。');
-    // 派发：以发消息的人的身份，收养字段只带判定记录 id；coordinator 照常按发送者鉴权。
+    // 模型 act 先等人工确认；确认前不派发、不启动任务。
+    expect(h.dispatched).toEqual([]);
+    expect(h.prompts).toEqual([]);
+    const confirm = (await h.repos.collaboration.listActions(h.scope)).find(item => item.kind === 'confirm.participation_act')!;
+    expect(confirm).toBeDefined();
+    expect(await h.coordinator.handleAction({ dutydeck_confirm: 'confirm', confirm_id: confirm.id, chat_id: h.scope.chatId }, SCENARIO_MEMBER,
+      { messageId: confirm.receipt, chatId: h.scope.chatId })).toMatchObject({ type: 'success' });
+    await h.settle('om_faq_a');
+    // 确认人重新鉴权；冻结的场景指令和材料照常收养。
     expect(h.dispatched.map(event => [event.messageId, event.senderOpenId, event.scenario])).toEqual([['om_faq_a', SCENARIO_MEMBER, { mode: 'model', packId: 'team-faq', decisionId: decision!.id }]]);
     expect(h.authorizations).toContainEqual({ actor: SCENARIO_MEMBER, action: 'task.create', memberObserved: true });
+    expect(h.dispatched[0]?.authorization).toMatchObject({ strength: 'explicit', via: 'participation_confirmed', decisionId: decision!.id });
     // 执行 prompt：冻结的指令，每条材料一个 UNTRUSTED_DATA 块，用户请求仍是原文。
     const prompt = h.prompts.at(-1)!;
     expect(prompt).toContain(`${scenario.execution!.instruction}\n以下是来自 scenario:team-faq:orders.md_0 的外部数据`);

@@ -248,7 +248,7 @@ export async function createAlarmHarness(options: AlarmHarnessOptions = {}) {
     if (dispatchFailure) { const message = dispatchFailure; dispatchFailure = undefined; throw new Error(message); }
     dispatched.push(structuredClone(event));
     return coordinator.adopt(event, current);
-  });
+  }, (scope, actor) => coordinator.canConfirmParticipation(scope, actor));
 
   const inbox = new LarkTaskInbox(repos.config);
   const harness = {
