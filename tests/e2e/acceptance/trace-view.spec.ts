@@ -53,9 +53,14 @@ test.describe('Session trace browser acceptance', () => {
     }, { timeout: 30_000 }).toBeTruthy();
     expect(assistant!.data.text).toContain('trace live second turn canary');
     const replyRow = table.getByRole('row').filter({ has: page.getByRole('button', { name: `事件 #${assistant!.sequence} 消息`, exact: true }) });
-    await expect(replyRow).toContainText('trace live second turn canary');
+    // Rows show a bounded preview; the host prompt may precede the user canary.
+    await expect(replyRow).toBeVisible();
+    await expect(replyRow).toContainText('Mock reply:');
+    await expect(replyRow).toContainText(assistant!.data.text!.slice(0, 40).replace(/\s+/g, ' '));
     await replyRow.getByRole('button', { name: `事件 #${assistant!.sequence} 消息`, exact: true }).click();
     await expect(dialog.getByLabel(`事件 #${assistant!.sequence} 数据`)).toContainText('trace live second turn canary');
+    await expect(dialog.getByText(assistant!.id, { exact: true })).toBeVisible();
+    expect(JSON.parse(await dialog.getByLabel(`事件 #${assistant!.sequence} 数据`).innerText())).toEqual(assistant!.data);
     await expect(dialog.getByRole('button', { name: /^工具 4$/ })).toBeVisible();
     await dialog.getByRole('button', { name: '按轮次分组' }).click();
     await page.evaluate(() => document.documentElement.dataset.theme = 'light');

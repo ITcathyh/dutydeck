@@ -170,7 +170,20 @@ test('independent plans keep a dedicated managed workspace after the origin stop
     const independentPath = pathFor(origin.id, independent.id);
     const enabled = (await api(instance, 'PATCH', independentPath, { expectedRevision: independent.revision, enabled: true })).schedule;
     await api(instance, 'POST', `/api/sessions/${origin.id}/stop`);
-    await expect.poll(async () => (await api(instance, 'GET', dependentPath)).schedule.enabled).toBe(false);
+    await expect.poll(async () => {
+      const schedule = (await api(instance, 'GET', dependentPath)).schedule;
+      return { enabled: schedule.enabled, mode: schedule.mode };
+    }).toEqual({ enabled: true, mode: 'fresh' });
+    const continuedPlan = (await api(instance, 'GET', dependentPath)).schedule;
+    expect(continuedPlan.id).toBe(dependent.id);
+    const continued = await run(instance, origin.id, continuedPlan, 'dependent-origin-stopped');
+    expect(continued.sourceSessionId).toBe(origin.id);
+    expect(continued.executionSessionId).not.toBe(origin.id);
+    expect(continued.occurrence.executionSessionId).toBe(continued.executionSessionId);
+    const listed = await api(instance, 'GET', '/api/sessions');
+    const matterId = listed.find((item: any) => item.id === origin.id)?.matter?.id;
+    expect(matterId).toBeTruthy();
+    expect(listed.find((item: any) => item.id === continued.executionSessionId)?.matter?.id).toBe(matterId);
     const stillEnabled = (await api(instance, 'GET', independentPath)).schedule;
     expect(stillEnabled.enabled).toBe(true);
     expect(stillEnabled.executionSessionId).toBe(enabled.executionSessionId);
