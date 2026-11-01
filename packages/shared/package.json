@@ -190,7 +190,11 @@
     "src/usage.ts",
     "dist/usage.js",
     "dist/usage.js.map",
-    "dist/usage.d.ts"
+    "dist/usage.d.ts",
+    "src/matters.ts",
+    "dist/matters.js",
+    "dist/matters.js.map",
+    "dist/matters.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

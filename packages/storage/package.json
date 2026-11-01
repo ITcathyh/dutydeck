@@ -104,7 +104,11 @@
     "src/offline-backup.ts",
     "dist/offline-backup.js",
     "dist/offline-backup.js.map",
-    "dist/offline-backup.d.ts"
+    "dist/offline-backup.d.ts",
+    "src/matters.ts",
+    "dist/matters.js",
+    "dist/matters.js.map",
+    "dist/matters.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

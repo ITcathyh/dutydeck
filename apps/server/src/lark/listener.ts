@@ -39,6 +39,8 @@ export type ListenerLog = {
 };
 
 export interface LarkRuntime {
+  trackMatterSession?(sessionId: string, input: import('@dutydeck/shared').MatterSessionInput): Promise<void>;
+  getMatter?(sessionId: string): import('@dutydeck/shared').MatterSummary | undefined;
   start(input: { nativeForkSessionId?: string; agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: 'shared' | 'worktree'; source?: string; sourceId?: string }): Promise<Session>;
   listAgents?(): Promise<Array<Pick<AgentConfig, 'id' | 'name'> & Partial<AgentConfig>>>;
   listSessions?(): Promise<Session[]>;

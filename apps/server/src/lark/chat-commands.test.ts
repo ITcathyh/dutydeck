@@ -1,3 +1,4 @@
+import { MattersService } from '../matters.js';
 // 聊天内指挥命令的协调器级回归：/agents、/queue、/steer、/grant、/revoke，
 // 以及 /status 的执行身份说明与 /tasks 行内 Agent。
 //
@@ -44,6 +45,7 @@ async function harness(options: { native?: boolean; answer?: boolean; managedGro
   const prompts: string[] = [];
   const forks: Array<string | undefined> = [];
   const runtime = new DutydeckRuntime(repos, {
+    matterTracking: new MattersService(repos),
     probe: () => ({ protocol: options.native ? 'pty-cli' : 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, _id, context) => {
       forks.push(context.nativeForkSessionId);
@@ -591,9 +593,13 @@ describe('恢复已关闭会话与并行分身', () => {
     await h.coordinator.handle(event('om_list', '/resume list'), h.config);
     const list = h.markdownOf(h.lastReceipt());
     expect(list).toContain('原始任务'); expect(list).toContain('第二个任务'); expect(list).not.toContain(other.id); expect(list).not.toContain(otherThread.id); expect(list).not.toContain(empty.id); expect(list).not.toContain('2099-01-01'); expect(list.indexOf(second)).toBeLessThan(list.indexOf(old));
+    const track = vi.spyOn(h.runtime, 'trackMatterSession');
     await h.coordinator.handle(event('om_resume', '/resume'), h.config);
+    expect(track).toHaveBeenCalledWith(second, expect.objectContaining({ sourceSessionId: second, relation: 'resume' }));
     expect(h.markdownOf(h.lastReceipt())).toContain(`已恢复会话 \`${second}\``);
     expect((await h.runtime.getSession(second))?.state).toBe('idle');
+    expect(h.repos.matters!.find('session', old)?.id).not.toBe(h.repos.matters!.find('session', second)?.id);
+    expect(h.repos.matters!.links(h.repos.matters!.find('session', second)!.id).some(link => link.refId === second)).toBe(true);
     const rebuilt = h.createCoordinator(); await rebuilt.initializeWorkflows(h.config);
     await rebuilt.handle(event('om_after', '恢复后的任务'), h.config);
     await vi.waitFor(async () => expect((await h.runtime.getTasks(second)).some(t => t.prompt.includes('恢复后的任务'))).toBe(true));
@@ -654,6 +660,8 @@ describe('恢复已关闭会话与并行分身', () => {
     await vi.waitFor(async () => expect(await h.runtime.listSessions()).toHaveLength(2));
     const child = (await h.runtime.listSessions()).find(s => s.id !== id)!;
     expect(child.sourceId).toContain(':thread:om_card_');
+    expect(h.repos.matters!.find('session', child.id)?.id).toBe(h.repos.matters!.find('session', id)?.id);
+    expect(h.repos.matters!.links(h.repos.matters!.find('session', id)!.id)).toContainEqual(expect.objectContaining({ kind: 'session', refId: child.id, relation: 'fork' }));
     expect(child.agentId).toBe(source!.agentId);
     await vi.waitFor(async () => expect((await h.runtime.getTasks(child.id))[0]?.status).toBe('queued'));
     expect(h.prompts.some(prompt => prompt.includes('会话交接'))).toBe(false);
@@ -760,4 +768,60 @@ describe('恢复已关闭会话与并行分身', () => {
     expect(h.markdownOf(h.lastReceipt())).toContain('第一条任务发起人');
     expect(h.service.sendText).not.toHaveBeenCalled();
   });
+});
+
+
+it.each([true, false])('persists the /new matter boundary across coordinator restart (handoff=%s)', async handoff => {
+  const h = await harness({ answer: true }); h.release();
+  await h.dispatch('om_matter_first', 'first matter goal');
+  const parent = await h.sessionId();
+  await vi.waitFor(async () => expect((await h.runtime.getTasks(parent))[0]?.status).toBe('completed'));
+  const originalMatter = h.repos.matters!.find('session', parent)!.id;
+  if (handoff) await h.coordinator.handle(event('om_matter_new', '/new --handoff -- continue goal'), h.config);
+  else {
+    await h.coordinator.handle(event('om_matter_new', '/new'), h.config);
+    const rebuilt = h.createCoordinator(); await rebuilt.initializeWorkflows(h.config);
+    await rebuilt.handle(event('om_matter_after', 'unrelated goal'), h.config);
+    cleanups.push(() => rebuilt.stop());
+  }
+  let child = '';
+  await vi.waitFor(async () => {
+    child = (await h.runtime.listSessions()).find(session => session.id !== parent)?.id ?? '';
+    expect(child).not.toBe(''); expect((await h.runtime.getTasks(child)).length).toBeGreaterThan(0);
+  });
+  const nextMatter = h.repos.matters!.find('session', child)!.id;
+  if (handoff) {
+    expect(nextMatter).toBe(originalMatter);
+    expect(h.repos.matters!.links(originalMatter)).toContainEqual(expect.objectContaining({ kind: 'session', refId: child, relation: 'handoff' }));
+  } else expect(nextMatter).not.toBe(originalMatter);
+});
+
+it('inherits the persisted source matter on agent switch after coordinator restart', async () => {
+  const h = await harness({ answer: true }); h.release();
+  await h.dispatch('om_before_switch', 'switchable goal');
+  const parent = await h.sessionId();
+  await vi.waitFor(async () => expect((await h.runtime.getTasks(parent))[0]?.status).toBe('completed'));
+  h.config.defaultAgentId = 'spare';
+  await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+  const rebuilt = h.createCoordinator(); await rebuilt.initializeWorkflows(h.config);
+  cleanups.push(() => rebuilt.stop());
+  await rebuilt.handle(event('om_after_switch', 'continue after switch'), h.config);
+  let child = '';
+  await vi.waitFor(async () => { child = (await h.runtime.listSessions()).find(session => session.id !== parent)?.id ?? ''; expect((await h.runtime.getTasks(child)).length).toBeGreaterThan(0); });
+  expect(h.repos.matters!.find('session', child)?.id).toBe(h.repos.matters!.find('session', parent)?.id);
+  expect(h.repos.matters!.links(h.repos.matters!.find('session', parent)!.id)).toContainEqual(expect.objectContaining({ kind: 'session', refId: child, relation: 'agent_switch' }));
+});
+
+
+it('records the source matter when /retry replaces a stopped interrupted session', async () => {
+  const h = await harness({ answer: true, reportIdle: true });
+  await h.dispatch('om_retry_source', 'retry this request'); await h.waitRunning('retry this request');
+  const parent = await h.sessionId();
+  await h.runtime.stop(parent, { kind: 'channel', id: 'ou_alice', appId: h.config.appId }); h.release();
+  const track = vi.spyOn(h.runtime, 'trackMatterSession');
+  await h.coordinator.handle(event('om_retry_command', '/retry'), h.config);
+  let child = '';
+  await vi.waitFor(async () => { child = (await h.runtime.listSessions()).find(session => session.id !== parent)?.id ?? ''; expect((await h.runtime.getTasks(child)).length).toBeGreaterThan(0); });
+  expect(track).toHaveBeenCalledWith(child, expect.objectContaining({ sourceSessionId: parent, relation: 'retry' }));
+  expect(h.repos.matters!.find('session', child)?.id).toBe(h.repos.matters!.find('session', parent)?.id);
 });

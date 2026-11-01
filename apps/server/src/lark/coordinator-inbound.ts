@@ -315,7 +315,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const liveTask = this.tasks.get(mapping.externalId);
       const recovery = ['queued', 'reconcile_required', 'legacy_unresolved'].includes(task.status)
         ? await describeLarkTaskRecovery(this.runtime, mapping.sessionId, task.id, task.status) : undefined;
-      entries.push({ taskId: task.id, title: saved.task_name, workspace: session.cwd, agent: agentNames.get(session.agentId) ?? session.agentId, status: pending && task.status === 'running'
+      const matter = this.runtime.getMatter?.(session.id);
+      entries.push({ ...(matter ? { matter: { id: matter.id, title: matter.title, sessionId: session.id, superseded: matter.supersededSessionIds?.includes(session.id) } } : {}), taskId: task.id, title: saved.task_name, workspace: session.cwd, agent: agentNames.get(session.agentId) ?? session.agentId, status: pending && task.status === 'running'
         ? pending.kind === 'ask' ? 'waiting_for_answer' : 'waiting_for_permission' : task.status, updatedAt: task.updatedAt, url: url.toString(),
         ...(recovery ? { detail: recovery.markdown, blocked: recovery.blocked } : {}),
         ...(liveTask ? {
@@ -848,6 +849,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       let commandEpoch: number | undefined;
       if (typeof commandRoute === 'string') prompt = commandRoute;
       else if (commandRoute) { prompt = commandRoute.prompt; retryMaterialPrompt = commandRoute.materialPrompt; launchOptions = commandRoute.launchOptions; commandEpoch = commandRoute.epoch; }
+      if (inbox && commandRoute && typeof commandRoute !== 'string' && commandRoute.lineage) await this.inbox!.update(inbox, { lineage: commandRoute.lineage });
       if (inbox && !inbox.request) await this.inbox!.update(inbox, { state: 'received', request: { prompt, scopeId, resources, ...(retryMaterialPrompt ? { materialPrompt: retryMaterialPrompt } : {}), ...(launchOptions ? { launchOptions } : {}) } });
       // 首卡重试从触发到这里有多步异步操作，期间用户可能发了 /new。
       if (retrying && (retrying.epoch !== (group.epoch ?? 0) || (inbox?.sessionId && group.retiredSessionIds?.has(inbox.sessionId)))) {
@@ -856,7 +858,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         return;
       }
       // 空 @ 消息（仅 @ 机器人无文字）仍需创建任务，由 runTurn 拉取聊天记录做兜底意图判断。
-      const task: LarkTask = { id: event.messageId, group, event, prompt, resources, inbox, retryMaterialPrompt, launchOptions, ...(inbox?.cardId ? { cardMessageId: inbox.cardId } : {}), ...(inbox?.redispatch ? { redispatch: inbox.redispatch } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.suggestion ? { commandSuggestion: commandRoute.suggestion } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.steer ? { steer: true } : {}), config, ...(busy ? { busySupplement: busy } : {}), state: 'queued', events: [], restoring: recovering, turn: (inbox?.turn ?? 1) - 1, scopeId, epoch: commandEpoch ?? retrying?.epoch ?? group.epoch ?? 0, acknowledgement };
+      const task: LarkTask = { ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.lineage ? { matterLineage: commandRoute.lineage } : {}), id: event.messageId, group, event, prompt, resources, inbox, retryMaterialPrompt, launchOptions, ...(inbox?.cardId ? { cardMessageId: inbox.cardId } : {}), ...(inbox?.redispatch ? { redispatch: inbox.redispatch } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.suggestion ? { commandSuggestion: commandRoute.suggestion } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.steer ? { steer: true } : {}), config, ...(busy ? { busySupplement: busy } : {}), state: 'queued', events: [], restoring: recovering, turn: (inbox?.turn ?? 1) - 1, scopeId, epoch: commandEpoch ?? retrying?.epoch ?? group.epoch ?? 0, acknowledgement };
       this.tasks.set(task.id, task);
       handedOff = true;
       if (this.tasks.size > 5_000) this.tasks.delete(this.tasks.keys().next().value!);
@@ -1710,6 +1712,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const targetTask = { id: target.firstTaskId, sessionId: current.id };
         if (!(await this.larkTaskOrigin(config, event.chatId, targetTask))?.requester || !await this.isTaskOperatorAllowed(config, event, targetTask, 'run.resume')) throw new Error('当前账号没有恢复此会话的权限。');
         const restored = await this.runtime.resume(current.id);
+        await this.runtime.trackMatterSession?.(restored.id, { sourceSessionId: current.id, relation: 'resume', title: target.title });
         if (resumeEpoch !== group.epoch) { await this.runtime.stop?.(restored.id, { kind: 'channel', id: event.senderOpenId!, appId: config.appId }); throw new Error('恢复期间会话已切换，请重新选择。'); }
         const sourceId = larkSourceId(config, event.chatId, event.chatType, scopeId);
         try {
@@ -1755,7 +1758,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const forkEvent: LarkMessageEvent = { ...event, messageId: seed.messageId, replyMessageId: undefined, rootId: seed.messageId, threadId: seed.messageId, content: JSON.stringify({ text: goal }), messageType: 'text', mentions: [] };
         const forkScope = `thread:${seed.messageId}`;
         const seeded = await this.inbox.seed(config.appId, forkEvent, { prompt: goal, scopeId: forkScope, resources: [], launchOptions,
-          materialPrompt: `${handoff}\n\n${workspaceNote}\n\n${goal}` });
+          materialPrompt: `${handoff}\n\n${workspaceNote}\n\n${goal}` }, { lineage: { sessionId: source.id, relation: 'fork' } });
         if (!seeded) throw new Error('分身话题已存在，请在新话题继续。');
         await this.handle(forkEvent, config, false, true);
         // handle only schedules runTurn. Wait for startup/dispatch, not for the Agent's response.
@@ -1798,7 +1801,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const goal = request.prompt;
         if (handoff) {
           // 交接前缀只进 Agent 的首轮 prompt，卡片标题仍是任务本身；没给任务时首轮只确认接手。
-          return { prompt: goal || larkHandoffTitle, materialPrompt: `${handoff}\n\n${goal || larkHandoffAck}`,
+          return { ...(sessionId ? { lineage: { sessionId, relation: 'handoff' as const } } : {}), prompt: goal || larkHandoffTitle, materialPrompt: `${handoff}\n\n${goal || larkHandoffAck}`,
             ...(request.launchOptions ? { launchOptions: request.launchOptions } : {}), epoch };
         }
         if (goal) {

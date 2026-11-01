@@ -66,6 +66,8 @@ describe('dutydeck agent', () => {
     expect(await agent(['queue', 'cancel', '2'])).toMatchObject({ url: '/actions/queue.cancel', body: { index: 2 } });
     expect(await agent(['queue', 'top', '1', '--dry-run'])).toMatchObject({ url: '/actions/queue.top', body: { index: 1, dryRun: true } });
     expect(await agent(['schedule', 'enable', 'sch_1'])).toMatchObject({ url: '/actions/schedule.enable', body: { id: 'sch_1' } });
+    expect(await agent(['schedule', 'update', 'sch_1', '--every', '30', '--prompt', '新内容'])).toMatchObject({ url: '/schedules/sch_1', body: { every: 30, prompt: '新内容' }, method: 'PATCH' });
+    expect(await agent(['schedule', 'create', '--every', '30', '--prompt', '额外计划', '--additional'])).toMatchObject({ url: '/schedules', body: { additional: true } });
     expect(await agent(['schedule', 'disable', 'sch_1'])).toMatchObject({ url: '/actions/schedule.disable', body: { id: 'sch_1' } });
     expect(await agent(['schedule', 'create', '--cron', '0 9 * * *', '--prompt', '汇总告警', '--dry-run'])).toMatchObject({ url: '/schedules', body: { cron: '0 9 * * *', prompt: '汇总告警', dryRun: true } });
     expect(await agent(['schedule', 'create', '--cron', '0 2 * * *', '--prompt', '更新并部署', '--name', '部署', '--mode', 'fresh'])).toMatchObject({ url: '/schedules', body: { cron: '0 2 * * *', name: '部署', mode: 'fresh' } });

@@ -24,6 +24,7 @@ export interface LarkInboxRecord {
   workflowRequestId?: string;
   fallbackNote?: string;
   fallbackFromSessionId?: string;
+  lineage?: { sessionId: string; relation: import('@dutydeck/shared').MatterRelation };
   request?: { prompt: string; scopeId: string; resources: LarkMessageResource[]; materialPrompt?: string; launchOptions?: LarkLaunchOptions };
   /** Local attachment directories retained until this inbox and its task settle. */
   resourceDirectories?: string[];
@@ -121,7 +122,7 @@ export class LarkTaskInbox {
    * boot 留空，handle 里的 claim 会像认领上个进程留下的记录一样认领它；进程在认领前退出时，
    * 重启后 recoverable 也会把它捞回来重放。返回 false 说明这条消息已经登记过。
    */
-  async seed(appId: string, event: LarkMessageEvent, request: NonNullable<LarkInboxRecord['request']>, target?: Pick<LarkInboxRecord, 'sessionId' | 'workflowRequestId'>): Promise<boolean> {
+  async seed(appId: string, event: LarkMessageEvent, request: NonNullable<LarkInboxRecord['request']>, target?: Pick<LarkInboxRecord, 'sessionId' | 'workflowRequestId' | 'lineage'>): Promise<boolean> {
     const record: LarkInboxRecord = { appId, event, boot: '', state: 'received', receivedAt: new Date().toISOString(), request, ...target };
     return this.store.compareAndSet!(prefix(appId) + event.messageId, undefined, JSON.stringify(record));
   }
@@ -148,7 +149,7 @@ export class LarkTaskInbox {
     const next = { ...record, boot: this.boot };
     return await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next)) ? next : undefined;
   }
-  async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'resourceDirectories' | 'event' | 'workflowRequestId' | 'fallbackNote' | 'fallbackFromSessionId' | 'redispatch' | 'mergeFrom' | 'mergedInto'>>) {
+  async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'resourceDirectories' | 'event' | 'workflowRequestId' | 'lineage' | 'fallbackNote' | 'fallbackFromSessionId' | 'redispatch' | 'mergeFrom' | 'mergedInto'>>) {
     // 同一认领的准备和 /new 可并发更新；串行合并字段，同时保留跨进程 CAS。
     const operation = (this.updates.get(record) ?? Promise.resolve()).then(async () => {
       const next = { ...record, ...patch };

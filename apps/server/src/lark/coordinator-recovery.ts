@@ -410,6 +410,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         const bound = group.sessionId;
         session = resumed ? await this.runtime.getSession(claim.sessionId) : await this.sessionFor(group, effective, saved.chat_id, chatType, scopeId);
         if (!session) throw new Error('原会话已不存在。');
+        await this.runtime.trackMatterSession?.(session.id, { sourceSessionId: claim.sessionId, relation: 'retry', title: saved.prompt });
         if (!resumed && session.id !== bound && !persisted.some(item => item.id === session!.id)) created = session;
         const raw = await store.get(`lark.inbox.${claim.appId}.${claim.taskId}`);
         inbox = raw ? await this.inbox!.adoptAccepted(JSON.parse(raw) as LarkInboxRecord) : undefined;
@@ -425,7 +426,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         const relaunchEvent = claim.redispatch?.auto ? inbox.event : { ...inbox.event, senderOpenId: claim.operatorOpenId, senderType: 'user', senderAppId: undefined };
         materialPrompt = resumed ? saved.retry_material_prompt : undefined;
         await this.inbox!.update(inbox, { event: relaunchEvent, state: 'received', turn: claim.turn + 1, sessionId: session.id,
-          cardId: undefined, taskId: undefined, materials: undefined,
+          cardId: undefined, taskId: undefined, materials: undefined, lineage: { sessionId: claim.sessionId, relation: 'retry' },
           redispatch: claim.redispatch && { count: claim.redispatch.count, resumed, auto: claim.redispatch.auto, ...claim.redispatch.code ? { code: claim.redispatch.code } : {} },
           request: { prompt: saved.prompt, scopeId, resources: inbox.request?.resources ?? [], ...(materialPrompt ? { materialPrompt } : {}) } });
       } catch (error) {
@@ -837,7 +838,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
           const events = runtimeTask.status === 'failed' ? eventsForRuntimeTask(await this.runtime.getEvents?.(mapping.sessionId) ?? [], runtimeTask.id) : [];
           const cause = own ? await this.closeUnresolvedTurn(config, mapping.sessionId, runtimeTask.id)
             : await this.continueCause(appId, taskId, turn, saved.scope_id, runtimeTask.status, events) ?? {};
-          await this.submitContinuation(config, saved, operatorOpenId, context.messageId, `${taskId}:${turn}`, cause);
+          await this.submitContinuation(config, saved, operatorOpenId, context.messageId, `${taskId}:${turn}`, cause, mapping.sessionId);
         }
       } catch (error) {
         await store.compareAndSet(key, claim, JSON.stringify({ phase: 'failed', boot: this.relaunchBoot })).catch(() => undefined);
@@ -855,7 +856,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
    * 代发一句「继续」并交给原会话：与结果卡续问同一条路（代发消息、预登记入站记录、handle），
    * 入站记录里预先写好接续说明（materialPrompt），Agent 不会再读话题上下文，也不会收到原请求。
    */
-  private async submitContinuation(config: StoredLarkConfig, saved: PersistedLarkCardTask, operator: string, anchorMessageId: string, digest: string, cause: LarkContinueCause) {
+  private async submitContinuation(config: StoredLarkConfig, saved: PersistedLarkCardTask, operator: string, anchorMessageId: string, digest: string, cause: LarkContinueCause, sourceSessionId: string) {
     const prompt = '继续';
     const echo = await this.service.replyText({ messageId: anchorMessageId, ...(saved.thread_id ? { replyInThread: true } : {}),
       text: `「${larkReplayLabels.continue_in_place}」${prompt}`, idempotencyKey: `continue_${digest}`.slice(0, 50) });
@@ -865,7 +866,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       messageType: 'text', content: JSON.stringify({ text: `@_user_1 ${prompt}` }), senderOpenId: operator, senderType: 'user',
       mentions: [{ key: '@_user_1', name: config.name?.trim() || 'Dutydeck', ...(this.botOpenId ? { openId: this.botOpenId } : {}), mentionedType: 'bot' }]
     };
-    if (!await this.inbox!.seed(config.appId, event, { prompt, scopeId: saved.scope_id!, resources: [], materialPrompt: larkContinuePrompt(cause) })) return;
+    if (!await this.inbox!.seed(config.appId, event, { prompt, scopeId: saved.scope_id!, resources: [], materialPrompt: larkContinuePrompt(cause) }, { lineage: { sessionId: sourceSessionId, relation: 'retry' } })) return;
     void this.handle(event, config).catch(error => this.log.error({ error, messageId: event.messageId }, '在原对话继续失败'));
   }
 

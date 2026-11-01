@@ -51,6 +51,7 @@ export type LarkTask = {
   displayName?: string;
   resources: LarkMessageResource[];
   inbox?: LarkInboxRecord;
+  matterLineage?: LarkInboxRecord['lineage'];
   resumeTask?: TaskRecord;
   retryMaterialPrompt?: string;
   launchOptions?: LarkLaunchOptions;

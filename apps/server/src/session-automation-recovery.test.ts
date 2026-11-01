@@ -332,7 +332,7 @@ describe('SessionAutomation independent-review regression fixes', () => {
     })).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_TASK_BINDING_CONFLICT' });
   });
 
-  it('B3 legacy: an old-hash accepted task is recovered as legacy_partial with its original id and no duplicate task', async () => {
+  it.each(['idle', 'stopped'] as const)('B3 legacy: preserves the accepted original id without reopening a %s source', async sourceState => {
     const h = await fixture();
     const schedule = await scheduled(h);
     const scheduleKey = `session_automation/schedule/${schedule.id}`;
@@ -381,9 +381,11 @@ describe('SessionAutomation independent-review regression fixes', () => {
     expect(legacyRepos.execution.getAcceptedTask(oldId)).toBeDefined();
 
     const legacyRuntime = ledgerRuntime(legacyRepos, { id: h.session.id, runId: h.session.runId });
+    const startScheduleSession = vi.fn();
+    if (sourceState === 'stopped') bound(legacyRepos).patchSession({ sessionId: h.session.id, runId: h.session.runId }, { state: 'stopped' });
     const restored = new SessionAutomationService({
       repositories: legacyRepos,
-      runtime: legacyRuntime,
+      runtime: { ...legacyRuntime, startScheduleSession },
       authorize: async () => true,
       clock: () => h.now.value
     });
@@ -400,6 +402,8 @@ describe('SessionAutomation independent-review regression fixes', () => {
     // 但持久 blocked/legacy_input_unresolved 挡下一触发（旧代码此处是普通 error 且 taskId 丢失、canonical 指向不存在 Task）。
     expect(source.runStatus).toBe('blocked');
     expect(source.blockReason).toBe('legacy_input_unresolved');
+    expect(startScheduleSession).not.toHaveBeenCalled();
+    expect(legacyRuntime.dispatches).toHaveLength(0);
   });
 
   it('B4 CI: a stale/unreadable HEAD before first submit rejects authorization', async () => {
@@ -1035,4 +1039,33 @@ describe('SessionAutomation historical capacity-result recovery', () => {
     expect(delivered).not.toHaveBeenCalled();
     expect(fresh.runtime.dispatches).toHaveLength(0);
   });
+});
+
+
+it('blocks a source request conflict before fresh fallback when the original task is already accepted', async () => {
+  const h = await fixture();
+  const schedule = await scheduled(h);
+  await h.service.tick();
+  const task = h.dispatches[0]!;
+  expect(task).toBeDefined();
+  const rows = await h.repositories.config.list!('session_automation/occurrence/');
+  const row = rows.find(row => JSON.parse(row.value).scheduleId === schedule.id)!;
+  const old = JSON.parse(row.value);
+  // 历史接受响应丢失：V1 来源没有 taskId/admission，真实账本仍有原始接受事实。
+  await h.repositories.config.set(row.key, JSON.stringify({ schemaVersion: 1, id: old.id, revision: 1, scheduleId: old.scheduleId,
+    sessionId: old.sessionId, generation: old.generation, scheduledForUtc: old.scheduledForUtc, conditionStatus: 'passed', runStatus: 'pending',
+    delivery: { status: 'not_requested', attempts: 0, updatedAt: old.updatedAt }, createdAt: old.createdAt, updatedAt: old.updatedAt }));
+  const key = `session_automation/schedule/${schedule.id}`;
+  const definition = JSON.parse((await h.repositories.config.get(key))!);
+  await h.repositories.config.set(key, JSON.stringify({ ...definition, prompt: 'historically changed source prompt' }));
+  bound(h.repositories).patchSession({ sessionId: h.session.id, runId: h.session.runId }, { state: 'stopped' });
+  const startScheduleSession = vi.fn();
+  const restored = new SessionAutomationService({ repositories: h.repositories, runtime: { ...h, startScheduleSession }, authorize: async () => true, clock: () => h.now.value });
+  cleanups.push(() => restored.close());
+  await restored.tick();
+  const recovered = JSON.parse((await h.repositories.config.get(row.key))!);
+  expect(recovered).toMatchObject({ runStatus: 'blocked', blockReason: 'admission_conflict' });
+  expect(startScheduleSession).not.toHaveBeenCalled();
+  expect(h.dispatches.map(task => task.id)).toEqual([task.id]);
+  expect(await h.repositories.tasks.listBySession(h.session.id)).toHaveLength(1);
 });

@@ -1,3 +1,4 @@
+import { createMatterSchema } from './matters.js';
 import { createConfigReadIndexes } from './config-query.js';
 import { createPluginResultSchema } from './plugin-results-migration.js';
 import { createMemoryConsumedTaskSchema, createMemoryJobSchema } from './memory-jobs.js';
@@ -634,7 +635,8 @@ export const migrations: Migration[] = [
     db.exec(`CREATE INDEX events_permission_request ON events(session_id,task_id,
       CASE WHEN json_valid(data) THEN json_extract(data,'$.id') END,sequence)
       WHERE type='permission_request'`);
-  } }
+  } },
+  { version: 44, name: 'matters', up: createMatterSchema }
 ]
 
 /** v38：collaboration_duties 加 scenarios_json 列，把旧的 alarm_json 转进去。 */

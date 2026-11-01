@@ -27,7 +27,7 @@ export interface AgentRequestToolsOptions {
   /** 定时或自动续作触发的一轮不能再代办，免得每次到点又建一个计划、又发一条命令。 */
   automatedTask(taskId: string): boolean;
   tools: Pick<LarkAgentToolsService, 'requestContext' | 'assertWorkbenchTurn' | 'commands'>;
-  automation: Pick<SessionAutomationService, 'requestSchedule'> & Partial<Pick<SessionAutomationService, 'requestScheduleStop'>>;
+  automation: Pick<SessionAutomationService, 'requestSchedule'> & Partial<Pick<SessionAutomationService, 'requestScheduleStop' | 'listBySession' | 'updateSchedule'>>;
   /** 回报位置定为这一轮请求的那条消息，和用户在那里发 /schedule 一样。 */
   prepareDelivery(sessionId: string, taskId: string, scheduleId: string): Promise<void>;
   /** 把确认卡发到计划的回报位置；同一计划重复调用只发一张。 */
@@ -78,6 +78,25 @@ export async function registerAgentRequestTools(app: FastifyInstance, options: A
     const { appId, ...turn } = await turnContext(request);
     const body = agentSettingsRequestSchema.parse(request.body);
     return options.tools.commands.settings(appId, { ...turn, action: 'set', ...body });
+  });
+  app.patch<{ Params: { id: string } }>('/api/lark/agent-tools/schedules/:id', async request => {
+    const { sessionId, actorId, taskId } = await turnContext(request);
+    const body = z.object({ prompt: z.string().trim().min(1).optional(), name: z.string().trim().min(1).optional(),
+      every: z.number().int().positive().optional(), cron: z.string().min(1).optional(), at: z.string().min(1).optional(),
+      mode: z.enum(['session', 'fresh']).optional(), dryRun: z.boolean().optional() }).strict().parse(request.body);
+    if ([body.every, body.cron, body.at].filter(value => value !== undefined).length > 1) throw new RuntimeError('SCHEDULE_REQUEST_INVALID', '--every、--cron、--at 只选一个。', 400);
+    if (!options.automation.listBySession || !options.automation.updateSchedule) throw new RuntimeError('SESSION_AUTOMATION_UNAVAILABLE', '当前实例不支持更新计划。', 503);
+    const current = (await options.automation.listBySession(sessionId, actorId)).schedules.find(item => item.id === request.params.id);
+    if (!current) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_NOT_FOUND', '本事项没有这个可见的计划。', 404);
+    const { every, cron, at, dryRun, ...fields } = body;
+    const trigger = every !== undefined ? { kind: 'interval' as const, everySeconds: every * 60, anchorAt: new Date().toISOString() }
+      : cron !== undefined ? { kind: 'cron' as const, expression: cron } : at !== undefined ? { kind: 'at' as const, localDateTime: at } : undefined;
+    if (!trigger && Object.values(fields).every(value => value === undefined)) throw new RuntimeError('SCHEDULE_REQUEST_INVALID', '请提供要修改的时间或内容。', 400);
+    const patch = { ...fields, ...(trigger ? { trigger } : {}), expectedRevision: current.revision, enabled: false };
+    if (dryRun) return { dryRun: true, scheduleId: current.id, needsConfirmation: true, effect: '更新原计划并暂停，用户确认启用后执行。' };
+    const schedule = await options.automation.updateSchedule(current.sessionId, current.id, patch, actorId);
+    await options.sendConfirmation(schedule);
+    return { scheduleId: schedule.id, updated: true, pendingConfirmation: true, message: '已更新原计划并发确认卡，用户确认启用后执行。' };
   });
   app.post('/api/lark/agent-tools/schedules', async request => {
     const { sessionId, taskId, actorId } = await turnContext(request);

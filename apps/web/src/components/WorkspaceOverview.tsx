@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
+import { MatterDetails } from './MatterDetails';
+import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Archive, ArrowRight, CheckCircle2, ChevronRight, CircleDot, MessageSquare, Search, Plus, Radio, Settings2 } from 'lucide-react';
 import type { Agent, LarkBotConfig, RunSummary, Session } from '../api';
 import {
   attentionReasonForSession,
+  groupSessionsByMatter,
   formatRelativeTime,
   orderSessionsForWorkbench,
   sessionAttention,
@@ -100,7 +102,7 @@ function TaskRow({ session, summary, agent, section, onSelect, selection }: {
     <span className="min-w-0 flex-1">
       <strong className="line-clamp-2 text-body font-medium text-primary sm:line-clamp-none sm:block sm:truncate" title={title}>{title}</strong>
       <span className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-caption text-secondary">
-        <span>{sessionWorkspaceName(session)}</span><span aria-hidden="true">·</span><span>{agent?.name ?? session.agentId}</span>
+        {session.matter && session.matter.sessionIds.length > 1 && <><span>{session.matter.sessionIds.length} 个会话</span><span aria-hidden="true">·</span></>}<span>{sessionWorkspaceName(session)}</span><span aria-hidden="true">·</span><span>{agent?.name ?? session.agentId}</span>
         {section === 'attention' && <><span aria-hidden="true">·</span><span className="font-medium text-primary"><span>{attention === 'decision' ? '需要决定' : '需要恢复'}</span> · <span>{attentionReasonForSession(session)}</span></span></>}
         {queuedCommands > 0 && <span className="rounded-sm bg-queued-soft px-1.5 py-0.5 font-medium text-queued">待执行指令 {queuedCommands} 条</span>}
       </span>
@@ -174,7 +176,10 @@ function LarkBotsOverview({ bots, agents, loading, agentsLoading, listeningDisab
   </Card>;
 }
 
-export function WorkspaceOverview({ sessions, summaries, agents, loading, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, larkBotsRetrying = false, onRetryLarkBots, view, onViewChange, mode = 'home', filters, onFiltersChange, onOpenChanges, onSelect, onSelectAttention, onBulkArchive, onCreate, onOpenAgentSetup, onOpenLarkSetup, onManageBots = onOpenLarkSetup }: OverviewProps) {
+export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, loading, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, larkBotsRetrying = false, onRetryLarkBots, view, onViewChange, mode = 'home', filters, onFiltersChange, onOpenChanges, onSelect, onSelectAttention, onBulkArchive, onCreate, onOpenAgentSetup, onOpenLarkSetup, onManageBots = onOpenLarkSetup }: OverviewProps) {
+  const sessions = useMemo(() => groupSessionsByMatter(rawSessions, summaries), [rawSessions, summaries]);
+  const rawById = useMemo(() => new Map(rawSessions.map(session => [session.id, session])), [rawSessions]);
+  const [matterId, setMatterId] = useState<string>();
   const [selecting, setSelecting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const home = mode === 'home' && view === 'all';
@@ -192,8 +197,8 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
   const allOrdered = orderSessionsForWorkbench(sessions, view, summaries);
   const search = query.trim().toLocaleLowerCase();
   const ordered = home ? allOrdered : allOrdered.filter(session => {
-    if (project && sessionWorkspaceName(session) !== project) return false;
-    return !search || [sessionDisplayName(session, summaries[session.id]?.prompt), sessionWorkspaceName(session), agents.find(agent => agent.id === session.agentId)?.name ?? session.agentId].join(' ').toLocaleLowerCase().includes(search);
+    const members = session.matter ? session.matter.sessionIds.map(id => rawById.get(id)).filter((item): item is Session => Boolean(item)) : [session];
+    return members.some(member => (!project || sessionWorkspaceName(member) === project) && (!search || [session.matter?.title, sessionDisplayName(member, summaries[member.id]?.prompt), sessionWorkspaceName(member), agents.find(agent => agent.id === member.agentId)?.name ?? member.agentId].join(' ').toLocaleLowerCase().includes(search)));
   });
   const selectable = ordered.filter(session => !session.archivedAt && session.source !== 'work_item');
   const selected = selectable.filter(session => selectedIds.includes(session.id)).map(session => session.id);
@@ -204,7 +209,7 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
   const pending = loading || agentsLoading;
   const canBulkArchive = Boolean(onBulkArchive) && !pending && view !== 'archived' && (selectable.length > 0 || selecting);
   const deliveries = orderSessionsForWorkbench(sessions, 'completed', summaries).slice(0, 3);
-  const projects = [...new Set(sessions.map(sessionWorkspaceName))].sort();
+  const projects = [...new Set(rawSessions.map(sessionWorkspaceName))].sort();
   const botStatusNeedsAttention = larkBotsFailed || (!larkBotsLoading && (larkBots.length === 0 || larkBots.some(bot => projectLarkBotStatus(bot, larkListeningDisabled, false, false).key !== 'listening')));
   const botsOverview = <LarkBotsOverview bots={larkBots} agents={agents} loading={larkBotsLoading} agentsLoading={agentsLoading} listeningDisabled={larkListeningDisabled} failed={larkBotsFailed} retrying={larkBotsRetrying} onRetry={() => onRetryLarkBots?.()} onOpenLarkSetup={onOpenLarkSetup} onOpenAgentSetup={onOpenAgentSetup} onManageBots={onManageBots}/>;
 
@@ -239,10 +244,11 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
       {canBulkArchive && selecting && <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md bg-muted px-2 py-1" aria-label="批量清理任务">
         <label className="flex min-h-10 cursor-pointer items-center gap-2 px-2 text-caption text-secondary"><input type="checkbox" aria-label="全选当前视图" checked={allSelected} disabled={!selectable.length} ref={node => { if (node) node.indeterminate = selected.length > 0 && !allSelected; }} onChange={() => setSelectedIds(allSelected ? [] : selectable.map(session => session.id))} className="h-4 w-4 accent-action"/>全选当前视图</label>
         <span role="status" className="text-caption text-secondary">已选 {selected.length} 个任务</span>
-        <Button variant="danger" disabled={!selected.length} icon={<Archive size={15}/>} onClick={() => onBulkArchive?.(selected)}>清理所选任务</Button>
+        <Button variant="danger" disabled={!selected.length} icon={<Archive size={15}/>} onClick={() => onBulkArchive?.(selected.flatMap(id => sessions.find(session => session.id === id)?.matter?.sessionIds ?? [id]))}>清理所选任务</Button>
         <Button variant="ghost" onClick={() => { setSelecting(false); setSelectedIds([]); }}>退出多选</Button>
       </div>}
 
+      {matterId && <MatterDetails id={matterId} onClose={() => setMatterId(undefined)} onSelect={onSelect}/>}
       <div className={home && !selecting ? 'ui-workbench-grid' : 'mt-5'}>
         <section aria-label="任务列表" className="min-w-0">
           {pending ? <Card><Skeleton variant="block" lines={2}/></Card> : sessions.length === 0 && view === 'all' ? <TaskListEmpty hasAgents={agents.length > 0} createTask={createTask}/> : sections.length ? <div className="space-y-7">{sections.map(section => {
@@ -251,7 +257,7 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
             return <section key={section.id} aria-labelledby={`task-section-${section.id}`}>
               <div className="mb-3 flex items-center gap-2"><span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${sectionDot[section.id]}`}/><h2 id={`task-section-${section.id}`} className="text-title font-semibold text-primary">{sectionCopy[section.id].title}</h2><span className="text-caption tabular-nums text-subtle">{section.sessions.length}</span></div><p className="sr-only">{sectionCopy[section.id].description}</p>
               <div className={section.id === 'attention' ? 'overflow-hidden rounded-lg border border-default bg-surface' : 'border-y border-default'}>
-                {rows.length ? rows.map(session => <TaskRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(agent => agent.id === session.agentId)} section={section.id} onSelect={home && section.id === 'attention' ? onSelectAttention ?? onSelect : onSelect} selection={selecting ? { checked: selected.includes(session.id), disabled: session.source === 'work_item', onChange: () => setSelectedIds(current => current.includes(session.id) ? current.filter(id => id !== session.id) : [...current, session.id]) } : undefined}/>) : <EmptyState tone="positive" title="需要你处理的事项已清空" description="正在进行的任务会继续推进。"/>}
+                {rows.length ? rows.map(session => <TaskRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(agent => agent.id === session.agentId)} section={section.id} onSelect={session.matter && session.matter.sessionIds.length > 1 ? () => setMatterId(session.matter!.id) : home && section.id === 'attention' ? onSelectAttention ?? onSelect : onSelect} selection={selecting ? { checked: selected.includes(session.id), disabled: session.source === 'work_item', onChange: () => setSelectedIds(current => current.includes(session.id) ? current.filter(id => id !== session.id) : [...current, session.id]) } : undefined}/>) : <EmptyState tone="positive" title="需要你处理的事项已清空" description="正在进行的任务会继续推进。"/>}
                 {truncated && <button type="button" onClick={() => onViewChange(sectionView[section.id])} className="flex min-h-10 w-full items-center justify-center gap-2 border-t border-default px-3 py-2 text-caption text-action hover:bg-hover">查看全部 {section.sessions.length} 个{sectionCopy[section.id].title}的任务<ArrowRight aria-hidden="true" size={14}/></button>}
               </div>
             </section>;

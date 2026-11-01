@@ -2,6 +2,7 @@ import type { RunSummary, Session } from './api';
 import type { WorkspaceOrganization } from '@dutydeck/shared';
 import {
   collectWorkspaceGroups,
+  isSupersededMatterSession,
   normalizeWorkspacePath,
   sessionWorkspaceDirectory,
   workspaceName
@@ -215,4 +216,21 @@ export function sessionErrorSummary(error?: string): string | undefined {
 export function attentionReasonForSession(session: Session): string {
   const error = sessionErrorSummary(session.error);
   return error ? `任务异常：${error}；打开详情查看` : nextActionForState(session.state);
+}
+
+/** 先取最需要人处理的会话，再交回原有筛选与排序；旧会话和单会话事项不变。 */
+export function groupSessionsByMatter(sessions: Session[], summaries: Record<string, RunSummary> = {}): Session[] {
+  const groups = new Map<string, Session[]>();
+  for (const session of sessions) {
+    const key = session.matter?.id ?? `session:${session.id}`;
+    const group = groups.get(key);
+    if (group) group.push(session); else groups.set(key, [session]);
+  }
+  const rank: Record<SessionAttention, number> = { decision: 0, recovery: 1, active: 2, continue: 3, completed: 4, archived: 5 };
+  const matterSessionRank = (session: Session) => isSupersededMatterSession(session, session.matter?.supersededSessionIds, summaries[session.id]?.status) ? 6 : rank[sessionAttention(session, summaries[session.id])];
+  return [...groups.values()].map(group => {
+    if (group.length === 1) return group[0]!;
+    const [representative] = [...group].sort((a, b) => matterSessionRank(a) - matterSessionRank(b) || b.updatedAt.localeCompare(a.updatedAt));
+    return { ...representative!, name: representative!.matter!.title, matter: { ...representative!.matter!, sessionIds: group.map(session => session.id) } };
+  });
 }

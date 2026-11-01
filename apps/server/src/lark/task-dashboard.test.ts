@@ -1,3 +1,4 @@
+import { groupLarkTasksByMatter } from './task-dashboard.js';
 import { describe, expect, it } from 'vitest';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { parseLarkCardActionValue } from './card-actions.js';
@@ -438,4 +439,16 @@ describe('任务行的 Agent 与工作区', () => {
     const result = buildLarkTaskDashboard([entry({ taskId: 'a', title: '甲', workspace: '/srv/alpha' })]);
     expect(JSON.stringify(result.elements)).not.toContain('Agent');
   });
+});
+
+
+it('groups a matter by the most actionable visible session and preserves a single session unchanged', () => {
+  const base = { taskId: 'a', title: 'source', workspace: '/tmp', status: 'completed', updatedAt: '2026-11-01T00:00:00Z' };
+  const one = { ...base, matter: { id: 'm', title: 'the matter', sessionId: 'source' } };
+  expect(groupLarkTasksByMatter([one])).toEqual([one]);
+  const child = { ...base, taskId: 'b', status: 'waiting_for_answer', matter: { id: 'm', title: 'the matter', sessionId: 'child' } };
+  expect(groupLarkTasksByMatter([one, child])).toEqual([expect.objectContaining({ taskId: 'b', title: 'the matter', sessionCount: 2 })]);
+  const replaced = { ...one, status: 'interrupted', matter: { ...one.matter, superseded: true } };
+  expect(groupLarkTasksByMatter([replaced, { ...child, status: 'running' }])[0]?.taskId).toBe('b');
+  expect(groupLarkTasksByMatter([{ ...replaced, status: 'reconcile_required', blocked: true }, { ...child, status: 'running' }])[0]?.taskId).toBe('a');
 });

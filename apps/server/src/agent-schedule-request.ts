@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { createSessionScheduleInputSchema, describeScheduleTrigger, previewSessionSchedule, type PublicSessionSchedule } from '@dutydeck/shared';
+import { RuntimeError, createSessionScheduleInputSchema, describeScheduleTrigger, previewSessionSchedule, type PublicSessionSchedule } from '@dutydeck/shared';
 import { AgentCommandParamError, agentParamIssues } from './lark/agent-command.js';
 import type { SessionAutomationService } from './session-automation.js';
 
 const requestSchema = z.object({
+  additional: z.boolean().optional(),
   prompt: z.string().trim().min(1),
   name: z.string().trim().min(1).optional(),
   every: z.number().int().min(1).max(525_600).optional(),
@@ -28,7 +29,7 @@ export function parseAgentScheduleRequest(raw: unknown) {
   let input: ReturnType<typeof createSessionScheduleInputSchema.parse>;
   let next: ReturnType<typeof previewSessionSchedule>;
   try {
-    input = createSessionScheduleInputSchema.parse({ name: body.name ?? body.prompt.slice(0, 100), prompt: body.prompt, trigger,
+    input = createSessionScheduleInputSchema.parse({ ...(body.additional ? { additional: true } : {}), name: body.name ?? body.prompt.slice(0, 100), prompt: body.prompt, trigger,
       timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }, ...(body.mode ? { mode: body.mode } : {}) });
     next = previewSessionSchedule({ id: 'preview', ...input }, new Date());
   }
@@ -46,17 +47,21 @@ export interface LarkScheduleRequests {
 }
 
 export async function runAgentScheduleRequest(options: {
-  automation: Pick<SessionAutomationService, 'requestSchedule'>;
+  automation: Pick<SessionAutomationService, 'requestSchedule'> & Partial<Pick<SessionAutomationService, 'listBySession'>>;
   prepareDelivery(scheduleId: string): Promise<void>;
   sendConfirmation(schedule: PublicSessionSchedule, notice?: string, requestId?: string): Promise<void>;
 }, origin: { sessionId: string; requestId: string; actorId: string }, raw: unknown) {
   const { sessionId, requestId, actorId } = origin;
   const { body, dryRun, input, next } = parseAgentScheduleRequest(raw);
   const newMode = body.mode === undefined && input.trigger.kind !== 'at' ? 'fresh' as const : undefined;
+  if (dryRun && options.automation.listBySession && input.trigger.kind !== 'at' && !input.additional) {
+    const active = (await options.automation.listBySession(sessionId, actorId)).schedules.filter(schedule => schedule.enabled && schedule.trigger.kind !== 'at');
+    if (active.length) throw new RuntimeError('MATTER_SCHEDULE_EXISTS', `本事项已有生效的循环计划：${active.map(schedule => `${schedule.name}（${schedule.id}）`).join('、')}。修改请用 schedule update <编号>；确需再建请加 --additional。`, 409);
+  }
   if (dryRun) return { dryRun: true, needsConfirmation: true, schedule: { name: input.name, prompt: input.prompt, when: describeScheduleTrigger(input.trigger, input.timezone), timezone: input.timezone, ...(next ? { nextRunAt: next.localLabel } : {}) },
     confirmCard: { title: '定时任务', body: `**做什么**：${input.prompt}\n**什么时候**：${describeScheduleTrigger(input.trigger, input.timezone)}\n点「启用」后开始，不点不会执行。` },
-    effect: `在本轮请求消息下发启用卡；计划先建成停用状态，用户点「启用」后才开始，结果发回当前对话。本对话已有同名计划时改为更新它，不新建。${(input.mode ?? newMode) === 'fresh' ? '每次在新会话里执行，不带本对话历史。' : ''}` };
-  // 同一条消息里同样的请求重试时拿回同一个计划，不会再建一个、再发一张卡；同名计划改为更新。
+    effect: `在本轮请求消息下发启用卡；计划先建成停用状态，用户点「启用」后才开始，结果发回当前对话。修改已有计划请用 schedule update <编号>；生效循环计划不会被创建请求改动，已停用同名计划保留兼容更新。${(input.mode ?? newMode) === 'fresh' ? '每次在新会话里执行，不带本对话历史。' : ''}` };
+  // 同一条消息里同样的请求重试时拿回同一个计划，不会再建一个、再发一张卡；已停用同名计划保留兼容更新。
   const { schedule, updated } = await options.automation.requestSchedule(sessionId, input, actorId, {
     key: `agent-request:${createHash('sha256').update(JSON.stringify([requestId, body])).digest('hex')}`, newMode,
     prepareDelivery: id => options.prepareDelivery(id)

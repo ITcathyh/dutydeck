@@ -129,6 +129,7 @@ export function readStoredSessionSchedule(input: unknown): SessionSchedule {
 }
 
 export const createSessionScheduleInputSchema = z.object({
+  additional: z.boolean().optional(),
   name: z.string().trim().min(1).max(200),
   prompt: z.string().trim().min(1).max(20_000),
   trigger: scheduleTriggerSchema,

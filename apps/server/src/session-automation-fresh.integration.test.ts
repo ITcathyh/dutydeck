@@ -1,3 +1,4 @@
+import { MattersService } from './matters.js';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -42,6 +43,7 @@ async function fixture(origin: 'lark' | 'web' = 'lark') {
   const allowed = { value: true };
   let service!: SessionAutomationService;
   const runtime = new DutydeckRuntime(repos, {
+    matterTracking: new MattersService(repos),
     workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
     probe: () => ({ available: true, protocol: 'jsonl', pause: false, resume: true }),
     // 与 service.ts 相同：计划执行会话的执行授权先交给计划服务判断。
@@ -178,3 +180,50 @@ describe('fresh schedule sessions kept for unfinished user work (real runtime an
     expect(await f.sent()).not.toContain('user follow-up new');
   }, 30_000);
 });
+
+
+it.each(['stop', 'archive'] as const)('keeps a matter schedule running in a new session after the source %s', async action => {
+  const f = await fixture();
+  const created = await f.service.createSchedule(f.parent.id, { ...scheduleInput, mode: 'session' }, f.owner);
+  await f.service.updateSchedule(f.parent.id, created.id, { expectedRevision: created.revision, enabled: true }, f.owner);
+  if (action === 'stop') await f.runtime.stop(f.parent.id, { kind: 'channel', id: f.owner, appId: 'cli_app' });
+  else await f.runtime.archive(f.parent.id);
+  f.setClock(new Date('2026-09-12T00:01:30.000Z'));
+  await vi.waitFor(async () => { await f.service.tick(); expect((await f.occurrences())[0]?.runStatus).toBe('completed'); }, { timeout: 10_000, interval: 20 });
+  const [occurrence] = await f.occurrences();
+  expect(occurrence.executionSessionId).not.toBe(f.parent.id);
+  const matter = f.repos.matters!.find('session', f.parent.id)!;
+  expect(f.repos.matters!.find('session', occurrence.executionSessionId)?.id).toBe(matter.id);
+  expect(f.repos.matters!.find('task', occurrence.taskId)?.id).toBe(matter.id);
+  expect((await f.service.getScheduleDefinition(f.parent.id, created.id, f.owner)).enabled).toBe(true);
+  expect(await f.sent()).toEqual([scheduleInput.prompt]);
+}, 20_000);
+
+
+it('runs an archived source schedule manually in a fresh session and replays the same idempotency key', async () => {
+  const f = await fixture('web');
+  const created = await f.service.createSchedule(f.parent.id, { ...scheduleInput, mode: 'session' }, f.owner);
+  await f.runtime.archive(f.parent.id);
+  const run = await f.service.runSchedule(f.parent.id, created.id, { expectedRevision: created.revision, idempotencyKey: 'manual-after-archive' }, f.owner);
+  expect(run.executionSessionId).not.toBe(f.parent.id);
+  const replayed = await f.service.runSchedule(f.parent.id, created.id, { expectedRevision: created.revision, idempotencyKey: 'manual-after-archive' }, f.owner);
+  expect(replayed.id).toBe(run.id);
+  await vi.waitFor(async () => { await f.service.tick(); expect((await f.occurrences())[0]?.runStatus).toBe('completed'); }, { timeout: 10_000, interval: 20 });
+  expect(await f.sent()).toEqual([scheduleInput.prompt]);
+}, 20_000);
+
+
+it('switches an explicitly replaced but retained source plan to a fresh session', async () => {
+  const f = await fixture();
+  const created = await f.service.createSchedule(f.parent.id, { ...scheduleInput, mode: 'session' }, f.owner);
+  await f.service.updateSchedule(f.parent.id, created.id, { expectedRevision: created.revision, enabled: true }, f.owner);
+  const replacement = await f.runtime.start({ agentId: f.parent.agentId, cwd: f.parent.cwd, permissionMode: 'ask' });
+  await new MattersService(f.repos).session(replacement.id, { sourceSessionId: f.parent.id, relation: 'handoff' });
+  expect((await f.runtime.getSession(f.parent.id))?.state).toBe('idle');
+  f.setClock(new Date('2026-09-12T00:01:30.000Z'));
+  await vi.waitFor(async () => { await f.service.tick(); expect((await f.occurrences())[0]?.runStatus).toBe('completed'); }, { timeout: 10_000, interval: 20 });
+  const [occurrence] = await f.occurrences();
+  expect(occurrence.executionSessionId).not.toBe(f.parent.id);
+  expect(await f.runtime.getTasks(f.parent.id)).toEqual([]);
+  expect(f.repos.matters!.find('session', occurrence.executionSessionId)?.id).toBe(f.repos.matters!.find('session', f.parent.id)?.id);
+}, 20_000);
