@@ -1,4 +1,5 @@
 import { recordAutomationAuthorization } from './task-authorization.js';
+import { MattersService } from './matters.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -98,7 +99,7 @@ const settledTaskStatuses = new Set(['completed', 'failed', 'interrupted', 'canc
 const CI_BINDING_GENERATION = 1;
 
 type ExecutionLedger = Pick<RepositoryBundle['execution'], 'getAcceptedTask' | 'getTaskExecution' | 'getAttemptEvents' | 'lookupAccepted'>;
-type AutomationRepositories = Pick<RepositoryBundle, 'config' | 'sessions' | 'tasks'> & { execution: ExecutionLedger };
+type AutomationRepositories = Pick<RepositoryBundle, 'config' | 'sessions' | 'tasks' | 'matters'> & { execution: ExecutionLedger };
 type AuthorizationResult = boolean | PolicyDecision;
 
 export interface SessionAutomationRuntime {
@@ -572,24 +573,36 @@ export class SessionAutomationService {
     return { status: 'settled', result: read.result };
   }
 
+  private async matterSessionIds(sessionId: string, actorId?: string) {
+    const matter = this.options.repositories.matters?.find('session', sessionId);
+    const ids = matter ? this.options.repositories.matters!.links(matter.id).filter(link => link.kind === 'session').map(link => link.refId) : [sessionId];
+    const visible: string[] = [];
+    for (const id of ids) {
+      try { await this.requireAuthorized(id, actorId); visible.push(id); } catch { /* 沿用每个源会话的权限。 */ }
+    }
+    return visible;
+  }
+
   async listBySession(sessionId: string, actorId?: string): Promise<SessionAutomationList> {
     await this.requireAuthorized(sessionId, actorId);
     const session = await this.requireSession(sessionId);
+    const sessionIds = await this.matterSessionIds(sessionId, actorId);
     const [schedules, subscriptions, occurrences] = await Promise.all([
-      this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule, undefined, { field: 'sessionId', values: [sessionId] }),
+      this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule, undefined, { field: 'sessionId', values: sessionIds }),
       this.listRecords(CI_PREFIX, value => ciSubscriptionSchema.parse(value), undefined, { field: 'sessionId', values: [sessionId] }),
-      this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), undefined, { field: 'sessionId', values: [sessionId] })
+      this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), undefined, { field: 'sessionId', values: sessionIds })
     ]);
-    const publicSchedules = schedules.map(item => item.value).filter(item => item.sessionId === sessionId && !item.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-MAX_RECORDS).map(publicSchedule);
+    const publicSchedules = schedules.map(item => item.value).filter(item => sessionIds.includes(item.sessionId) && !item.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-MAX_RECORDS).map(publicSchedule);
     const deliveryTargets: NonNullable<SessionAutomationList['deliveryTargets']> = {};
-    const source = parseLarkSourceId(session.sourceId);
     await Promise.all(publicSchedules.map(async schedule => {
-      if (session.source !== 'lark') { deliveryTargets[schedule.id] = { kind: 'task', sessionId }; return; }
+      const owner = schedule.sessionId === sessionId ? session : await this.options.runtime.getSession(schedule.sessionId);
+      const ownerSource = parseLarkSourceId(owner?.sourceId);
+      if (owner?.source !== 'lark') { deliveryTargets[schedule.id] = { kind: 'task', sessionId: schedule.sessionId }; return; }
       const raw = await this.options.repositories.config.get(`automation.delivery-target.${schedule.id}`);
       let target: unknown;
       try { target = raw ? JSON.parse(raw) : undefined; } catch { target = undefined; }
       const parsed = z.object({ appId: z.string().min(1), chatId: z.string().min(1), replyMessageId: z.string().startsWith('om_'), replyInThread: z.boolean() }).safeParse(target);
-      deliveryTargets[schedule.id] = parsed.success && source.appId === parsed.data.appId && source.chatId === parsed.data.chatId
+      deliveryTargets[schedule.id] = parsed.success && ownerSource.appId === parsed.data.appId && ownerSource.chatId === parsed.data.chatId
         ? { kind: 'lark', ...parsed.data }
         : { kind: 'unavailable' };
     }));
@@ -597,7 +610,7 @@ export class SessionAutomationService {
       deliveryTargets,
       schedules: publicSchedules,
       subscriptions: subscriptions.map(item => item.value).filter(item => item.sessionId === sessionId).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-MAX_RECORDS).map(publicSubscription),
-      occurrences: occurrences.map(item => item.value).filter(item => item.sessionId === sessionId).sort((a, b) => a.scheduledForUtc.localeCompare(b.scheduledForUtc)).slice(-MAX_RECORDS).map(publicOccurrence)
+      occurrences: occurrences.map(item => item.value).filter(item => sessionIds.includes(item.sessionId)).sort((a, b) => a.scheduledForUtc.localeCompare(b.scheduledForUtc)).slice(-MAX_RECORDS).map(publicOccurrence)
     };
   }
 
@@ -631,6 +644,15 @@ export class SessionAutomationService {
     };
   }
 
+  private async assertMatterScheduleAvailable(sessionId: string, input: CreateSessionScheduleInput, actorId?: string) {
+    if (input.trigger.kind !== 'at' && !input.additional) {
+      const ids = await this.matterSessionIds(sessionId, actorId);
+      const records = await this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule, undefined, { field: 'sessionId', values: ids });
+      const active = records.map(item => item.value).filter(item => ids.includes(item.sessionId) && item.enabled && !item.deletedAt && item.trigger.kind !== 'at');
+      if (active.length) throw new RuntimeError('MATTER_SCHEDULE_EXISTS', `本事项已有生效的循环计划：${active.map(item => `${item.name}（${item.id}）`).join('、')}。修改请用 schedule update <编号>；确需再建请加 --additional。`, 409);
+    }
+  }
+
   async createSchedule(sessionId: string, rawInput: CreateSessionScheduleInput, actorId?: string, receipt?: { key: string; prepareDelivery?: (id: string) => Promise<void> }): Promise<PublicSessionSchedule> {
     await this.requireAuthorized(sessionId, actorId);
     const session = await this.requireSession(sessionId);
@@ -639,7 +661,9 @@ export class SessionAutomationService {
     const id = receipt ? receiptScheduleId(sessionId, actorId, receipt.key) : `schedule_${randomUUID()}`;
     const existing = receipt ? await this.getRecord(scheduleKey(id), readStoredSessionSchedule) : undefined;
     if (existing) return publicSchedule(existing.value);
+    await new MattersService(this.options.repositories).session(sessionId, { title: input.prompt });
     await this.assertNameAvailable(sessionId, input.name);
+    await this.assertMatterScheduleAvailable(sessionId, input, actorId);
     const now = iso(this.clock());
     const condition = input.condition.kind === 'always' ? input.condition : await this.ciCondition(session, input.condition);
     await receipt?.prepareDelivery?.(id);
@@ -673,7 +697,7 @@ export class SessionAutomationService {
           ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
           ...(session.permissionMode ? { permissionMode: session.permissionMode } : {}), contextMode: 'prompt_only' }
       } : {}),
-      ...(input.mode === 'fresh' ? { executionContext: freshExecutionContext(session) } : {}),
+      ...(input.mode !== 'independent' ? { executionContext: freshExecutionContext(session) } : {}),
       enabled: false,
       createdAt: now,
       updatedAt: now
@@ -686,6 +710,10 @@ export class SessionAutomationService {
       }
       throw new RuntimeError('SESSION_AUTOMATION_CONFLICT', 'Schedule identifier already exists', 409);
     }
+    try {
+      const matter = this.options.repositories.matters?.find('session', sessionId);
+      if (matter) this.options.repositories.matters!.link({ matterId: matter.id, kind: 'schedule', refId: schedule.id, relation: 'created_in' });
+    } catch { console.warn('MATTER_LINK_FAILED'); }
     this.watchSession(sessionId);
     if (schedule.mode === 'independent') {
       await this.executionSession(schedule);
@@ -696,7 +724,7 @@ export class SessionAutomationService {
   }
 
   /**
-   * 聊天里代建计划：同一会话已有同名计划（含已停用，不含已删除）时改为更新它，不再新建第二条。
+   * 聊天里代建计划：同事项已有生效循环计划时拒绝新建；已停用同名计划保留兼容更新，不新建第二条。
    * 有实际改动时一并停用，等用户在确认卡上重新启用；没有改动时原样返回。同一请求重试拿回同一结果。
    * `newMode` 只在新建、请求没写模式、且本实例能开新会话时作为缺省；更新同名计划时不改它的模式。
    */
@@ -705,10 +733,11 @@ export class SessionAutomationService {
     const input = createSessionScheduleInputSchema.parse(rawInput);
     const own = await this.getRecord(scheduleKey(receiptScheduleId(sessionId, actorId, receipt.key)), readStoredSessionSchedule);
     if (own) return { schedule: publicSchedule(own.value) };
-    // 旧数据里可能已有多条同名：先改仍在启用的那条，其次最近改过的。
-    const [existing] = (await this.sameNameSchedules(sessionId, input.name))
+    await this.assertMatterScheduleAvailable(sessionId, input, actorId);
+    // 兼容旧会话对停用同名计划的请求；修改生效循环计划须显式用 update。
+    const [existing] = (await this.sameNameSchedules(sessionId, input.name, undefined, actorId))
       .sort((a, b) => Number(b.enabled) - Number(a.enabled) || b.updatedAt.localeCompare(a.updatedAt));
-    if (!existing) return { schedule: await this.createSchedule(sessionId, input.mode || !receipt.newMode || !this.options.runtime.startScheduleSession ? input : { ...input, mode: receipt.newMode }, actorId, receipt) };
+    if (!existing || input.additional) return { schedule: await this.createSchedule(sessionId, input.mode || !receipt.newMode || !this.options.runtime.startScheduleSession ? input : { ...input, mode: receipt.newMode }, actorId, receipt) };
     if (input.mode === 'independent' && existing.mode !== 'independent') throw new RuntimeError('SESSION_AUTOMATION_MODE_IMMUTABLE', 'An existing schedule cannot switch to independent mode', 409);
     const mode = input.mode === 'independent' ? undefined : input.mode;
     const patch: Omit<UpdateSessionScheduleInput, 'expectedRevision'> = {
@@ -721,7 +750,7 @@ export class SessionAutomationService {
     };
     const changed = Object.keys(patch).length > 0;
     const schedule = changed
-      ? await this.updateSchedule(sessionId, existing.id, { expectedRevision: existing.revision, ...patch, enabled: false }, actorId)
+      ? await this.updateSchedule(existing.sessionId, existing.id, { expectedRevision: existing.revision, ...patch, enabled: false }, actorId)
       : publicSchedule(existing);
     return { schedule, updated: { changed, wasEnabled: existing.enabled } };
   }
@@ -744,6 +773,7 @@ export class SessionAutomationService {
         throw new RuntimeError('INDEPENDENT_SCHEDULE_REVOKED', 'Independent schedule changed before workspace creation', 403);
       }
     });
+    await new MattersService(this.options.repositories).session(session.id, { sourceSessionId: schedule.sessionId, relation: 'schedule_run', title: schedule.prompt });
     this.watchSession(session.id);
     if (fresh) return session;
     if (context.cwd !== session.cwd) {
@@ -970,7 +1000,7 @@ export class SessionAutomationService {
     if (!stored || stored.value.sessionId !== sessionId) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_NOT_FOUND', 'Session schedule not found', 404);
     if (stored.value.deletedAt) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_DELETED', 'Session schedule was deleted', 409);
     if (stored.value.revision !== input.expectedRevision) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
-    if (input.enabled === true && stored.value.mode !== 'independent' && !isSessionRunnable(session)) throw new RuntimeError('SESSION_NOT_ACTIVE', 'Session is not active', 409);
+    if (input.enabled === true && stored.value.mode !== 'independent' && stored.value.mode !== 'fresh' && !this.options.runtime.startScheduleSession && !isSessionRunnable(session)) throw new RuntimeError('SESSION_NOT_ACTIVE', 'Session is not active', 409);
     if (input.name !== undefined && input.name !== stored.value.name) await this.assertNameAvailable(sessionId, input.name, id);
     const currentMode = stored.value.mode ?? 'session';
     const modeChanged = input.mode !== undefined && input.mode !== currentMode;
@@ -1036,7 +1066,7 @@ export class SessionAutomationService {
     await this.requireAuthorized(sessionId, actorId);
     const session = await this.requireSession(sessionId);
     const input = runSessionScheduleInputSchema.parse(rawInput);
-    const stored = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
+    let stored = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
     if (!stored || stored.value.sessionId !== sessionId) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_NOT_FOUND', 'Session schedule not found', 404);
     const manualId = `occ_${createHash('sha256').update(JSON.stringify([id, 'manual', input.idempotencyKey])).digest('hex')}`;
     const existing = await this.getRecord(occurrenceKey(manualId), value => sessionScheduleOccurrenceSchema.parse(value));
@@ -1047,7 +1077,8 @@ export class SessionAutomationService {
     }
     if (stored.value.deletedAt) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_DELETED', 'Session schedule was deleted', 409);
     if (stored.value.revision !== input.expectedRevision) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
-    if (stored.value.mode !== 'independent' && !isSessionRunnable(session)) throw new RuntimeError('SESSION_NOT_ACTIVE', 'Session is not active', 409);
+    stored = await this.fallbackToFresh(stored);
+    if (stored.value.mode !== 'independent' && stored.value.mode !== 'fresh' && !isSessionRunnable(session)) throw new RuntimeError('SESSION_NOT_ACTIVE', 'Session is not active', 409);
     if (await this.hasPendingOccurrence(stored.value)) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_BUSY', 'This schedule already has unfinished work', 409);
     // 专用执行会话的任务只接受计划冻结的 actor（账本按计划核对），手动执行也以它的身份运行。
     const actor = resolveAutomationActor(session, stored.value.mode === 'independent' || stored.value.mode === 'fresh' ? stored.value.actorId : actorId);
@@ -1507,9 +1538,10 @@ export class SessionAutomationService {
   }
 
   /** 同一会话里未删除的计划按名称唯一；停用的也算，避免同名计划并存。 */
-  private async sameNameSchedules(sessionId: string, name: string, exceptId?: string) {
-    const records = await this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule, undefined, { field: 'sessionId', values: [sessionId] });
-    return records.map(item => item.value).filter(item => item.sessionId === sessionId && !item.deletedAt && item.name === name.trim() && item.id !== exceptId);
+  private async sameNameSchedules(sessionId: string, name: string, exceptId?: string, actorId?: string) {
+    const ids = actorId ? await this.matterSessionIds(sessionId, actorId) : [sessionId];
+    const records = await this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule, undefined, { field: 'sessionId', values: ids });
+    return records.map(item => item.value).filter(item => ids.includes(item.sessionId) && !item.deletedAt && item.name === name.trim() && item.id !== exceptId);
   }
 
   private async assertNameAvailable(sessionId: string, name: string, exceptId?: string) {
@@ -1614,8 +1646,18 @@ export class SessionAutomationService {
   }
 
   private async processOccurrence(stored: { raw: string; value: SessionScheduleOccurrence }) {
-    const occurrence = migrateOccurrence(stored.value);
-    const scheduleStored = await this.getRecord(scheduleKey(occurrence.scheduleId), readStoredSessionSchedule);
+    let occurrence = migrateOccurrence(stored.value);
+    let scheduleStored = await this.getRecord(scheduleKey(occurrence.scheduleId), readStoredSessionSchedule);
+    if (scheduleStored && !occurrence.admission && !occurrence.taskId) {
+      scheduleStored = await this.fallbackToFresh(scheduleStored, occurrence.id);
+      const latestOccurrence = await this.getRecord(occurrenceKey(occurrence.id), value => sessionScheduleOccurrenceSchema.parse(value));
+      if (latestOccurrence?.raw !== stored.raw) return;
+      if (scheduleStored.value.mode === 'fresh' && occurrence.executionSessionId !== scheduleStored.value.executionSessionId) {
+        const next = sessionScheduleOccurrenceV2Schema.parse({ ...occurrence, executionSessionId: scheduleStored.value.executionSessionId, revision: occurrence.revision + 1 });
+        if (!await this.replace(occurrenceKey(occurrence.id), stored.raw, next)) return;
+        occurrence = next; stored = { raw: JSON.stringify(next), value: next };
+      }
+    }
     if (!scheduleStored || !scheduleTriggerSchema.safeParse(scheduleStored.value.trigger).success || scheduleStored.value.generation !== occurrence.generation || scheduleStored.value.deletedAt || !scheduleStored.value.enabled && occurrence.triggerSource !== 'manual'
       || scheduleStored.value.mode === 'fresh' && occurrence.executionSessionId !== scheduleStored.value.executionSessionId) {
       await this.finishOccurrence({ raw: stored.raw, value: occurrence }, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule generation changed before dispatch' });
@@ -1852,10 +1894,35 @@ export class SessionAutomationService {
     await this.replace(scheduleKey(schedule.id), current.raw, updated);
   }
 
+  private async fallbackToFresh(stored: { raw: string; value: SessionSchedule }, occurrenceId?: string) {
+    const schedule = stored.value;
+    if (schedule.mode === 'independent' || schedule.mode === 'fresh' || !this.options.runtime.startScheduleSession) return stored;
+    const origin = await this.options.runtime.getSession(schedule.sessionId);
+    const matter = this.options.repositories.matters?.find('session', schedule.sessionId);
+    const replaced = matter && this.options.repositories.matters!.links(matter.id).some(link => link.kind === 'reply_target' && link.refId === `session:${schedule.sessionId}`);
+    if (isSessionRunnable(origin) && !replaced) return stored;
+    const context = schedule.executionContext ?? (origin ? freshExecutionContext(origin) : undefined);
+    if (!context) return stored;
+    // 已有 admission 的触发归属不可改；结果未知仍占用原执行槽。
+    const pendingId = occurrenceId ?? schedule.pendingOccurrence?.id;
+    if (pendingId) {
+      const pending = await this.getRecord(occurrenceKey(pendingId), value => sessionScheduleOccurrenceSchema.parse(value));
+      if (pending) {
+        const fixed = await this.fixOccurrenceAdmission(pending, new Map([[schedule.id, stored]]));
+        if (fixed?.value.admission || fixed?.value.runStatus === 'blocked' || pending.value.taskId) return stored;
+      }
+    }
+    const next = sessionScheduleSchema.parse({ ...schedule, mode: 'fresh', executionContext: context,
+      ...(occurrenceId ? { executionSessionId: freshSessionId(schedule.id, occurrenceId) } : {}), updatedAt: iso(this.clock()) });
+    if (!await this.replace(scheduleKey(schedule.id), stored.raw, next)) return (await this.getRecord(scheduleKey(schedule.id), readStoredSessionSchedule))!;
+    return { raw: JSON.stringify(next), value: next };
+  }
+
   private async synchronizeLifecycle(snapshot: { raw: string; value: SessionSchedule }) {
     let stored = await this.getRecord(scheduleKey(snapshot.value.id), readStoredSessionSchedule);
     if (!stored) return;
-    if (stored.value.mode !== 'independent' && stored.value.enabled
+    if (stored.value.enabled && !stored.value.pendingOccurrence) stored = await this.fallbackToFresh(stored);
+    if (stored.value.mode !== 'independent' && stored.value.mode !== 'fresh' && stored.value.enabled
       && !isSessionRunnable(await this.options.runtime.getSession(stored.value.sessionId))) {
       await this.disableSchedule(stored, 'Session is no longer active');
       stored = await this.getRecord(scheduleKey(snapshot.value.id), readStoredSessionSchedule);
@@ -2216,7 +2283,13 @@ export class SessionAutomationService {
       if (session && actor) {
         const candidateRequest = this.buildRequest(session, 'schedule', scheduleRequestKey(value.id), scheduleStored.value.prompt, actor);
         let accepted;
-        try { accepted = this.execution.lookupAccepted(candidateRequest); } catch { /* conflict */ }
+        try { accepted = this.execution.lookupAccepted(candidateRequest); }
+        catch (error) {
+          const blocked = sessionScheduleOccurrenceV2Schema.parse({ ...value, revision: value.revision + 1, runStatus: 'blocked', blockReason: 'admission_conflict',
+            error: errorMessage(error), delivery: { status: 'not_requested', attempts: value.delivery.attempts, updatedAt: iso(this.clock()) } });
+          if (!await this.replace(occurrenceKey(value.id), item.raw, blocked)) return undefined;
+          return { raw: JSON.stringify(blocked), value: blocked };
+        }
         if (accepted && accepted.task.sessionId === value.sessionId) {
           // A concurrently edited definition must be reconsidered with its new request on the next tick.
           if (await this.options.repositories.config.get(scheduleKey(value.scheduleId)) !== scheduleStored.raw) return undefined;

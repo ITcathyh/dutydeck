@@ -1,3 +1,4 @@
+import { createMatterRepository } from './matters.js';
 export { assertDatabaseNotQuarantined, restoreQuarantinePath } from './database-control.js';
 export { backupSqlite, withOfflineDatabase, BACKUP_SCHEMA_VERSION } from './offline-backup.js';
 import { readHistoryOutline } from './event-history.js';
@@ -194,6 +195,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
   const insight = createSessionInsightRepository(sqlite, control);
   return {
     control,
+    matters: createMatterRepository(sqlite),
     execution,
     insight,
     agents: {

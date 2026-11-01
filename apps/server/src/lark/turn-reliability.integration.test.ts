@@ -1,3 +1,4 @@
+import { MattersService } from '../matters.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -122,7 +123,7 @@ async function topic(options: { fallback?: boolean; agentStatusCheck?: () => Pro
   const boot = async (first: boolean, age?: (runtime: DutydeckRuntime) => void) => {
     const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
     if (first) await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
-    const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe, driverFactory: factory,
+    const runtime = new DutydeckRuntime(repos, { matterTracking: new MattersService(repos), driverIdleTimeoutMs: 0, probe, driverFactory: factory,
       ...(options.agentStatusCheck ? { agentStatusCheck: options.agentStatusCheck } : {}) } as any);
     await runtime.initialize([agent, ...(options.fallback ? [{ ...agent, id: 'spare', name: 'Spare', model: 'spare-model' }] : [])]);
     age?.(runtime);
@@ -215,6 +216,10 @@ describe('结果未知的一轮不锁住话题（A2）', () => {
     expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: result.messageId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
     await until(() => h.prompts.length === 3);
     expect(h.prompts[2]!.sessionId).toBe(sessionId);
+    const originalMatter = h.repos.matters!.find('session', sessionId)!;
+    expect(h.repos.matters!.find('session', h.prompts[2]!.sessionId)?.id).toBe(originalMatter.id);
+    const continuation = (await h.repos.config.list!('lark.inbox.app.')).map(row => JSON.parse(row.value)).find(row => row.request?.prompt === '继续');
+    expect(continuation.lineage).toEqual({ sessionId, relation: 'retry' });
     expect(h.prompts[2]!.prompt).toContain('[Dutydeck 系统说明]\n上一轮的消息可能没有送到你这里。请先确认上一轮做到了哪一步');
     expect(h.prompts[2]!.prompt).not.toContain('整理本周报警并回复群里');
     expect(h.texts()).toContain('「在原对话继续」继续');

@@ -29,6 +29,7 @@ export interface LarkInboxRecord {
   workflowRequestId?: string;
   fallbackNote?: string;
   fallbackFromSessionId?: string;
+  lineage?: { sessionId: string; relation: import('@dutydeck/shared').MatterRelation };
   request?: { prompt: string; scopeId: string; resources: LarkMessageResource[]; materialPrompt?: string; launchOptions?: LarkLaunchOptions };
   /** Local attachment directories retained until this inbox and its task settle. */
   resourceDirectories?: string[];
@@ -44,7 +45,8 @@ export interface LarkInboxRecord {
   /** 这条排队消息被并进了哪条消息（取消它之前写下）：恢复时据此确认它是被这次合并取消的。 */
   mergedInto?: string;
 }
-const executionRecord = ({ reason: _reason, detail: _detail, disposition: _disposition, duplicateCount: _duplicates, ...rest }: LarkInboxRecord) => JSON.stringify(rest);
+// 清空后重写字段会改变落库键顺序；只比较执行值，数组顺序仍有意义。
+const executionRecord = ({ reason: _reason, detail: _detail, disposition: _disposition, duplicateCount: _duplicates, ...rest }: LarkInboxRecord) => JSON.stringify(rest, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
 const prefix = (appId: string) => `lark.inbox.${appId}.`;
 /**
  * 首张进度卡没送达时抛出的错误带这个标记：runtime 还没接到这条任务，
@@ -144,7 +146,7 @@ export class LarkTaskInbox {
    * boot 留空，handle 里的 claim 会像认领上个进程留下的记录一样认领它；进程在认领前退出时，
    * 重启后 recoverable 也会把它捞回来重放。返回 false 说明这条消息已经登记过。
    */
-  async seed(appId: string, event: LarkMessageEvent, request: NonNullable<LarkInboxRecord['request']>, target?: Pick<LarkInboxRecord, 'sessionId' | 'workflowRequestId'>): Promise<boolean> {
+  async seed(appId: string, event: LarkMessageEvent, request: NonNullable<LarkInboxRecord['request']>, target?: Pick<LarkInboxRecord, 'sessionId' | 'workflowRequestId' | 'lineage'>): Promise<boolean> {
     const record: LarkInboxRecord = { appId, event, boot: '', state: 'received', receivedAt: new Date().toISOString(), request, ...target };
     return this.store.compareAndSet!(prefix(appId) + event.messageId, undefined, JSON.stringify(record));
   }
@@ -170,7 +172,7 @@ export class LarkTaskInbox {
     if (record.state !== 'accepted') return undefined;
     return this.mutateClaim(record, latest => ({ ...latest, boot: this.boot }));
   }
-  async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'resourceDirectories' | 'event' | 'workflowRequestId' | 'fallbackNote' | 'fallbackFromSessionId' | 'redispatch' | 'mergeFrom' | 'mergedInto' | 'reason' | 'detail' | 'disposition'>>) {
+  async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'resourceDirectories' | 'event' | 'workflowRequestId' | 'lineage' | 'fallbackNote' | 'fallbackFromSessionId' | 'redispatch' | 'mergeFrom' | 'mergedInto' | 'reason' | 'detail' | 'disposition'>>) {
     // 同一认领的准备和 /new 可并发更新；串行合并字段，同时保留跨进程 CAS。
     const operation = (this.updates.get(record) ?? Promise.resolve()).then(async () => {
       const next = await this.mutateClaim(record, latest => ({ ...latest, ...patch, ...(patch.taskId ? { reason: undefined, detail: undefined, disposition: undefined } : {}), ...(patch.reason ? { disposition: dispositionSchema.parse({ schemaVersion: 1, reason: patch.reason, ...(patch.detail ? { detail: patch.detail } : {}) }) } : {}) }));

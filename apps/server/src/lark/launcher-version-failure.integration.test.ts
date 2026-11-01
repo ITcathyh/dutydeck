@@ -1,3 +1,4 @@
+import { MattersService } from '../matters.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -116,6 +117,7 @@ async function setup(prepareError: Error | ((sessionId: string) => Promise<void>
   }, sent);
   let groupManager: LarkGroupManager | undefined;
   const runtime = new DutydeckRuntime(repos, {
+    matterTracking: new MattersService(repos),
     driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: factory,
@@ -786,4 +788,19 @@ it('restores administrator-configured fallback for a managed-group member with t
   expect((await h.repos.tasks.get!(task.id))?.executionContext?.actorId).toBe('ou_alice');
   expect(authorize.mock.calls.some(call => ['run.change_agent', 'run.change_cwd'].includes(call[3]))).toBe(false);
   expect(authorize.mock.calls.some(call => call[2] === 'ou_alice' && call[3] === 'task.create')).toBe(true);
+});
+
+
+it('keeps the original matter when replacing an outdated launcher session automatically', async () => {
+  let count = 0;
+  const h = await setup(async () => { if (++count === 1) throw new Error(LAUNCHER_ERROR); });
+  cleanups.push(() => h.teardown());
+  const { task, resultInput } = await h.runTurn('om_launcher_matter');
+  expect(resultInput.state).toBe('completed');
+  const sessions = await h.runtime.listSessions();
+  expect(sessions).toHaveLength(2);
+  const first = h.prepared[0]!;
+  const matter = h.repos.matters!.find('session', first)!;
+  expect(h.repos.matters!.find('session', task.sessionId)?.id).toBe(matter.id);
+  expect(h.repos.matters!.links(matter.id)).toContainEqual(expect.objectContaining({ kind: 'session', refId: task.sessionId, relation: 'retry' }));
 });

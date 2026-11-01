@@ -28,7 +28,7 @@ import { loadLarkTaskEvents } from './card-renderer.js';
 
 // 飞书消息协调器 · 公共层：实例状态与构造、各层共用的权限判定和工具函数。分层说明见 coordinator.ts。
 
-export type LarkCommandPrompt = { prompt: string; suggestion?: string; materialPrompt?: string; launchOptions?: LarkLaunchOptions; epoch?: number; steer?: boolean };
+export type LarkCommandPrompt = { lineage?: import('./task-inbox.js').LarkInboxRecord['lineage']; prompt: string; suggestion?: string; materialPrompt?: string; launchOptions?: LarkLaunchOptions; epoch?: number; steer?: boolean };
 
 export const larkCardChannel = (appId: string) => `lark-card:${appId}`;
 export type LarkRelaunchAction = 'run_in_new_session' | 'rerun_in_new_session';

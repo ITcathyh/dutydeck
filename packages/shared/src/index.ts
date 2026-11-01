@@ -505,6 +505,7 @@ export interface FoundationRepository {
 export interface HistoryRetentionResult { terminalFrames: number; sessionStateCommands: number; toolCalls: number; entityVersions: number }
 
 export interface RepositoryBundle {
+  matters?: import('./matters.js').MatterRepository;
   pluginResults: import('./plugin-results.js').PluginResultRepository;
   workItems: {
     listScheduledIds(): Promise<string[]>;
@@ -602,3 +603,5 @@ export * from './event-content.js';
 
 export type { ConfigurationField, ConfigurationSection, ConfigurationExplanation } from './configuration-explanation.js';
 export type { ArtifactSnapshot, ArtifactSnapshotReference, ArtifactSnapshotPreview } from './history.js';
+
+export * from './matters.js';

@@ -1,3 +1,4 @@
+import { groupSessionsByMatter } from './workspace-model';
 import { describe, expect, it } from 'vitest';
 import type { WorkspaceOrganization } from '@dutydeck/shared';
 import type { RunSummary, Session } from './api';
@@ -409,4 +410,17 @@ describe('reported turn attention', () => {
     expect(sessionAttention(current, { ...summary, taskReport: { ...summary.taskReport!, clearedAt: current.updatedAt } })).toBe('completed');
     for (const reported of ['ready', 'dropped'] as const) expect(needsAttention(current, { ...summary, taskReport: { ...summary.taskReport!, status: reported } })).toBe(false);
   });
+});
+
+it('groups matters with an actionable representative, preserves single sessions, and ignores only explicitly replaced history', () => {
+  const matter = { id: 'm', title: 'original matter', status: 'open' as const, sessionIds: ['source', 'child'], supersededSessionIds: ['source'] };
+  const source = { ...session('source', '/repo/a', 'stopped', '2026-11-01T00:00:00Z'), matter: { ...matter, sessionIds: ['source'] } };
+  const child = { ...session('child', '/repo/b', 'thinking', '2026-11-01T00:01:00Z'), matter: { ...matter, sessionIds: ['child'], supersededSessionIds: [] } };
+  expect(groupSessionsByMatter([source])[0]).toBe(source);
+  expect(groupSessionsByMatter([source, child])).toEqual([expect.objectContaining({ id: 'child', name: 'original matter', matter: expect.objectContaining({ sessionIds: ['source', 'child'] }) })]);
+  expect(groupSessionsByMatter([source, { ...child, state: 'completed' }])[0]?.id).toBe('child');
+  expect(groupSessionsByMatter([{ ...source, state: 'failed' }, child])[0]?.id).toBe('child');
+  expect(groupSessionsByMatter([{ ...source, state: 'failed' }, { ...child, state: 'completed' }])[0]?.id).toBe('child');
+  expect(groupSessionsByMatter([{ ...source, matter: { ...matter, supersededSessionIds: [] } }, child])[0]?.id).toBe('source');
+  expect(groupSessionsByMatter([source, child], { source: { sessionId: 'source', taskId: 't', prompt: 'unknown', status: 'reconcile_required', queuedCount: 0, updatedAt: '' } })[0]?.id).toBe('source');
 });

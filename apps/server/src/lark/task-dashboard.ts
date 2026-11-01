@@ -1,5 +1,5 @@
 import { safeLarkWebUrl } from './card-actions.js';
-import { taskReportAttentionText, type TaskReport, permissionDisplayText } from '@dutydeck/shared';
+import { taskReportAttentionText, type TaskReport, permissionDisplayText, isSupersededMatterSession } from '@dutydeck/shared';
 import { larkCommandEcho } from './commands.js';
 import { escapeCardInline, markdownElement } from './card-elements.js';
 
@@ -17,6 +17,8 @@ export interface LarkTaskDashboardPendingApproval {
 }
 
 export interface LarkTaskDashboardEntry {
+  matter?: { id: string; title: string; sessionId: string; superseded?: boolean };
+  sessionCount?: number;
   /** runtime 任务 id，仅为主控组装/排序使用，渲染层绝不输出到卡片。 */
   taskId: string;
   taskReport?: TaskReport;
@@ -280,7 +282,7 @@ const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorksp
   const cmdLine = cmdSummary ? `\n命令：${cmdSummary}` : '';
 
   const reportText = taskReportAttentionText(entry.taskReport);
-  const summary = `${title}\n${approval ? '待审批' : reportText ? entry.taskReport!.status === 'waiting' ? '等你决定' : '受阻' : entry.blocked && entry.status === 'queued' ? '排队受阻' : statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}${executor}${reportText ? `\n${compactText(reportText, 160, '')}` : entry.detail ? `\n${entry.detail}` : ''}${cmdLine}`;
+  const summary = `${title}${entry.sessionCount && entry.sessionCount > 1 ? ` · ${entry.sessionCount} 个会话` : ''}\n${approval ? '待审批' : reportText ? entry.taskReport!.status === 'waiting' ? '等你决定' : '受阻' : entry.blocked && entry.status === 'queued' ? '排队受阻' : statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}${executor}${reportText ? `\n${compactText(reportText, 160, '')}` : entry.detail ? `\n${entry.detail}` : ''}${cmdLine}`;
 
   const primary = isDifferentChat ? undefined : primaryRowAction(entry, approval);
   const overflow = isDifferentChat ? rowOverflow(rowIndex, url, undefined) : rowOverflow(rowIndex, url, approval);
@@ -346,7 +348,24 @@ const navigation = (page: number, totalPages: number) => ({
   }))
 });
 
-const orderEntries = (entries: LarkTaskDashboardEntry[]) => {
+export function groupLarkTasksByMatter(entries: LarkTaskDashboardEntry[]): LarkTaskDashboardEntry[] {
+  const groups = new Map<string, LarkTaskDashboardEntry[]>();
+  for (const entry of entries) {
+    const key = entry.matter?.id ?? `task:${entry.taskId}`;
+    const group = groups.get(key);
+    if (group) group.push(entry); else groups.set(key, [entry]);
+  }
+  const priority = (entry: LarkTaskDashboardEntry) => entry.matter?.superseded && isSupersededMatterSession({ id: entry.matter.sessionId, state: entry.status }, [entry.matter.sessionId], entry.status) && !entry.blocked && !entry.pendingApproval ? 9 : validApproval(entry.pendingApproval) || entry.blocked || entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status);
+  return [...groups.values()].flatMap(group => {
+    const count = new Set(group.map(entry => entry.matter?.sessionId)).size;
+    if (!group[0]?.matter || count <= 1) return group;
+    const [entry] = [...group].sort((a, b) => priority(a) - priority(b) || timestamp(b.updatedAt) - timestamp(a.updatedAt));
+    return [{ ...entry!, title: entry!.matter!.title, sessionCount: count }];
+  });
+}
+
+const orderEntries = (input: LarkTaskDashboardEntry[]) => {
+  const entries = groupLarkTasksByMatter(input);
   const indexed = entries.map((entry, index): IndexedEntry => ({ entry, index, group: taskReportAttentionText(entry.taskReport) || validApproval(entry.pendingApproval) || entry.blocked || entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status) }));
   return ([0, 1, 2] as DashboardGroup[]).flatMap(group => indexed
     .filter(item => item.group === group)

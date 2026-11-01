@@ -528,3 +528,15 @@ describe('定时委托卡片按钮回调', () => {
     expect(await h.coordinator.handleAction(value, 'ou_bob', context)).toMatchObject({ type: 'error', content: '只有发起人或有操作权限的人能处理这个定时任务。' });
   });
 });
+
+
+it('enables and disables a sibling session plan using its original authorization scope', async () => {
+  const h = await testHarness();
+  const source = await h.runtime.start({ agentId: 'mock', cwd: h.cwd, source: 'lark', sourceId: `${h.config.appId}:oc_group:group:thread:om_root`, permissionMode: 'ask' });
+  const child = await h.runtime.start({ agentId: 'mock', cwd: h.cwd, source: 'lark', sourceId: `${h.config.appId}:oc_group:group:thread:om_child`, permissionMode: 'ask' });
+  const created = await h.automation.createSchedule(source.id, { name: '检查', prompt: '检查构建', trigger: { kind: 'interval', everySeconds: 60, anchorAt: '2026-01-01T00:00:00Z' }, timezone: 'UTC', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' } }, 'ou_alice');
+  h.repos.matters!.ensureSession({ sessionId: child.id, sourceSessionId: source.id, relation: 'handoff', title: '检查' });
+  expect(await executeScheduleCommand(h.automation, h.repos.config, child.id, `enable ${created.id}`, event('om_enable_sibling', ''), h.config)).toContain('已启用');
+  expect((await h.automation.getScheduleDefinition(source.id, created.id, 'ou_alice')).enabled).toBe(true);
+  expect(await executeScheduleCommand(h.automation, h.repos.config, child.id, `disable ${created.id}`, event('om_disable_sibling', ''), h.config)).toContain('已停用');
+});

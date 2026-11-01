@@ -309,12 +309,72 @@ it.each(['update','ownUnrouted','release','adoptAccepted','claim'] as const)('re
   const key = 'lark.inbox.app_one.om_original';
   const spy = vi.spyOn(repositories.config,'compareAndSet').mockImplementationOnce(async (target,expected,next) => {
     const current = JSON.parse((await repositories.config.get(key))!);
-    await repositories.config.set(key,JSON.stringify({...current,duplicateCount:1}));
+    await repositories.config.set(key,JSON.stringify({...current,duplicateCount:1,reason:'participation_silent',detail:'audit only',disposition:{schemaVersion:1,reason:'participation_silent',decisionId:'audit_decision'}}));
     return original(target,expected,next);
   });
   const result = operation === 'update' ? await inbox.update(record,{cardId:'card'}) : operation === 'claim' ? await inbox.claim('app_one',message()) : await inbox[operation](record);
   if (operation !== 'update') expect(result).toBeDefined();
-  expect(await inbox.lookup('app_one','om_original')).toMatchObject({duplicateCount:1,...(operation==='update'?{cardId:'card'}:{})});
+  expect(await inbox.lookup('app_one','om_original')).toMatchObject({duplicateCount:1,reason:'participation_silent',disposition:{decisionId:'audit_decision'},...(operation==='update'?{cardId:'card'}:{})});
   spy.mockRestore();
  } finally {repositories.close(); await rm(directory,{recursive:true,force:true});}
+});
+
+it('keeps its execution snapshot after clearing and rewriting session material', async () => {
+  const { directory, repositories } = await openDatabase();
+  try {
+    const inbox = new LarkTaskInbox(repositories.config);
+    const record = (await inbox.claim('app_one', message()))!;
+    await inbox.update(record, { sessionId: 'old', materials: { prompt: 'old', readMessageIds: [] }, cardId: 'card' });
+    await inbox.update(record, { sessionId: undefined, materials: undefined, lineage: { sessionId: 'old', relation: 'retry' } });
+    await inbox.update(record, { sessionId: 'new', materials: { prompt: 'new', readMessageIds: [] } });
+    await inbox.update(record, { state: 'accepted', taskId: 'new_task' });
+    expect(await inbox.lookup('app_one', record.event.messageId)).toMatchObject({ sessionId: 'new', state: 'accepted', taskId: 'new_task', lineage: { sessionId: 'old', relation: 'retry' } });
+  } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+it.each(['authorization', 'lineage'] as const)('rejects execution drift in %s while retrying audit-only CAS writes', async field => {
+  const { directory, repositories } = await openDatabase();
+  try {
+    const inbox = new LarkTaskInbox(repositories.config);
+    const authorization = { strength: 'explicit' as const, via: 'participation_confirmed' as const, decisionId: 'trusted' };
+    await inbox.capture('app_one', message());
+    const record = (await inbox.claim('app_one', message(), false, { authorization }))!;
+    expect(record.event.authorization).toEqual(authorization);
+    await inbox.update(record, { lineage: { sessionId: 'source', relation: 'retry' } });
+    const key = 'lark.inbox.app_one.om_original';
+    const original = repositories.config.compareAndSet!.bind(repositories.config);
+    vi.spyOn(repositories.config, 'compareAndSet').mockImplementationOnce(async (target, expected, next) => {
+      const current = JSON.parse((await repositories.config.get(key))!);
+      const changed = field === 'authorization' ? { ...current, event: { ...current.event, authorization: { ...authorization, decisionId: 'other' } } }
+        : { ...current, lineage: { sessionId: 'other', relation: 'retry' } };
+      await repositories.config.set(key, JSON.stringify(changed));
+      return original(target, expected, next);
+    });
+    await expect(inbox.update(record, { taskId: 'must_not_win' })).rejects.toThrow('Lark inbox claim was lost');
+    const latest = (await inbox.lookup('app_one', record.event.messageId))!;
+    expect(latest.taskId).toBeUndefined();
+    expect(field === 'authorization' ? latest.event.authorization?.decisionId : latest.lineage?.sessionId).toBe('other');
+  } finally { vi.restoreAllMocks(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+it('ignores nested JSON object key order while rejecting reordered execution arrays', async () => {
+  const { directory, repositories } = await openDatabase();
+  try {
+    const inbox = new LarkTaskInbox(repositories.config);
+    const record = (await inbox.claim('app_one', message({
+      authorization: { strength: 'explicit', via: 'mention' },
+      mentions: [{ key: 'one', name: 'One', openId: 'ou_one' }, { key: 'two', name: 'Two', openId: 'ou_two' }]
+    })))!;
+    const key = 'lark.inbox.app_one.om_original';
+    const current = JSON.parse((await repositories.config.get(key))!);
+    current.event.authorization = Object.fromEntries(Object.entries(current.event.authorization).reverse());
+    current.event = Object.fromEntries(Object.entries(current.event).reverse());
+    await repositories.config.set(key, JSON.stringify(current));
+    await inbox.update(record, { cardId: 'card' });
+    const changed = JSON.parse((await repositories.config.get(key))!);
+    changed.event.mentions.reverse();
+    await repositories.config.set(key, JSON.stringify(changed));
+    await expect(inbox.update(record, { taskId: 'must_not_win' })).rejects.toThrow('Lark inbox claim was lost');
+    expect((await inbox.lookup('app_one', record.event.messageId))?.event.mentions[0]?.openId).toBe('ou_two');
+  } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
 });

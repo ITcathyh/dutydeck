@@ -83,7 +83,7 @@ export async function executeScheduleCommand(automation: SessionAutomationServic
     const items = await automation.listBySession(sessionId, event.senderOpenId);
     const existing = items.schedules.find(item => item.id === id);
     if (!existing) throw new RuntimeError('SCHEDULE_NOT_FOUND', '当前话题没有此计划', 404);
-    schedule = await automation.updateSchedule(sessionId, id, { expectedRevision: existing.revision, enabled: action === 'enable' }, event.senderOpenId);
+    schedule = await automation.updateSchedule(existing.sessionId, id, { expectedRevision: existing.revision, enabled: action === 'enable' }, event.senderOpenId);
     return `「${schedule.name}」${schedule.enabled ? '已启用' : '已停用'}。${schedule.nextDueAt ? `\n下一次：${schedule.nextDueAt}` : ''}`;
   }
   throw new RuntimeError('SCHEDULE_COMMAND_INVALID', '用法：/schedule；/schedule every 分钟 指令；/schedule enable 编号；/schedule disable 编号', 400);

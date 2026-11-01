@@ -373,3 +373,35 @@ describe('schedule management and execution policy', () => {
     await waitFor(() => expect(update).toHaveBeenCalledWith('s1', 'plan1', { expectedRevision: 3, prompt: '检查构建新的要求' }));
   });
 });
+
+
+it('uses the owning session when editing, enabling, running, deleting and opening history for a sibling plan', async () => {
+  const sibling = { ...schedule, sessionId: 'source-session' };
+  mount([sibling]);
+  const update = vi.spyOn(api, 'updateSchedule').mockResolvedValue({ schedule: sibling });
+  const run = vi.spyOn(api, 'runSchedule').mockResolvedValue({ occurrence: {} as PublicSessionScheduleOccurrence });
+  const remove = vi.spyOn(api, 'deleteSchedule').mockResolvedValue({ schedule: sibling });
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole('button', { name: '编辑' }));
+  await user.type(screen.getByLabelText('计划名称'), '改');
+  await user.click(screen.getByRole('button', { name: '保存计划' }));
+  await waitFor(() => expect(update).toHaveBeenCalledWith('source-session', sibling.id, { expectedRevision: sibling.revision, name: '巡检改' }));
+  await user.click(screen.getByRole('button', { name: '启用' }));
+  await user.click(screen.getByRole('button', { name: '确认启用' }));
+  await waitFor(() => expect(update).toHaveBeenCalledWith('source-session', sibling.id, { expectedRevision: sibling.revision, enabled: true }));
+  await user.click(screen.getByRole('button', { name: '立即执行' }));
+  await waitFor(() => expect(run).toHaveBeenCalledWith('source-session', sibling.id, expect.objectContaining({ expectedRevision: sibling.revision })));
+  await user.click(screen.getByText('此计划的运行历史'));
+  await waitFor(() => expect(api.automationHistory).toHaveBeenCalledWith('source-session', sibling.id, 0));
+  await user.click(screen.getByRole('button', { name: '删除' }));
+  await user.click(screen.getByRole('button', { name: '删除计划' }));
+  await waitFor(() => expect(remove).toHaveBeenCalledWith('source-session', sibling.id, sibling.revision));
+});
+
+
+it('allows a frozen matter plan to run after its source is archived', async () => {
+  mount([{ ...schedule, executionContext: { cwd: session.cwd, agentId: session.agentId, contextMode: 'prompt_only' } }], [testCi], [], { ...session, archivedAt: session.updatedAt });
+  const run = vi.spyOn(api, 'runSchedule').mockResolvedValue({ occurrence: {} as PublicSessionScheduleOccurrence });
+  await userEvent.click(await screen.findByRole('button', { name: '立即执行' }));
+  await waitFor(() => expect(run).toHaveBeenCalledWith(session.id, schedule.id, expect.objectContaining({ expectedRevision: schedule.revision })));
+});

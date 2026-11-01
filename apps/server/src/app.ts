@@ -1,3 +1,4 @@
+import { matterStatusForSessions, isSupersededMatterSession } from '@dutydeck/shared';
 import { registerConfigurationExplanationRoutes, type ConfigurationExplanationOptions } from './configuration-explanation.js';
 import { registerArtifactSnapshotRoutes, type ArtifactSnapshotRouteOptions } from './artifact-snapshot-routes.js';
 import { registerPluginBusinessToolRoutes, type PluginBusinessToolRoutes } from './plugins/tool-routes.js';
@@ -91,6 +92,7 @@ export interface SessionExecutionPolicy {
 }
 
 export interface BuildAppOptions {
+  matters?: import('@dutydeck/shared').MatterRepository;
   artifactSnapshots?: ArtifactSnapshotRouteOptions;
   pluginBindings?: PluginBindingRoutes;
   pluginResults?: PluginResultRoutes;
@@ -337,9 +339,66 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   });
   app.get('/api/sessions', async request => {
     const sessions = await runtime.listSessions();
-    if (!options.executionPolicy) return sessions;
-    const visible = await Promise.all(sessions.map(async session => await canViewSession(request, session.id) ? session : undefined));
-    return visible.filter(Boolean);
+    const visible = (await Promise.all(sessions.map(async session => await canViewSession(request, session.id) ? session : undefined))).filter((session): session is typeof sessions[number] => Boolean(session));
+    const ids = new Set(visible.map(session => session.id));
+    const membership = new Map<string, string>();
+    const groups = new Map<string, { matter: import('@dutydeck/shared').Matter; links: import('@dutydeck/shared').MatterLink[]; sessions: typeof visible }>();
+    for (const session of visible) {
+      const matter = options.matters?.find('session', session.id);
+      if (!matter) continue;
+      membership.set(session.id, matter.id);
+      let group = groups.get(matter.id);
+      if (!group) { group = { matter, links: options.matters!.links(matter.id), sessions: [] }; groups.set(matter.id, group); }
+      group.sessions.push(session);
+    }
+    const projections = new Map<string, { id: string; title: string; status: import('@dutydeck/shared').Matter['status']; superseded: Set<string> }>();
+    for (const [id, { matter, links, sessions }] of groups) {
+      const origin = links.find(link => link.kind === 'session' && link.relation === 'origin');
+      const superseded = new Set<string>();
+      for (const link of links.filter(link => link.kind === 'reply_target' && link.refId.startsWith('session:'))) {
+        const sourceId = link.refId.slice(8);
+        if (ids.has(sourceId) && !(await runtime.getTasks?.(sourceId) ?? []).some(task => ['reconcile_required', 'legacy_unresolved'].includes(task.status))) superseded.add(sourceId);
+      }
+      const current = sessions.filter(session => !isSupersededMatterSession(session, superseded.has(session.id) ? [session.id] : []));
+      projections.set(id, { id, title: !origin || ids.has(origin.refId) ? matter.title : '事项', status: matterStatusForSessions(current.length ? current : sessions), superseded });
+    }
+    return visible.map(session => {
+      const id = membership.get(session.id);
+      const matter = id ? projections.get(id) : undefined;
+      return matter ? { ...session, matter: { id: matter.id, title: matter.title, status: matter.status, sessionIds: [session.id], supersededSessionIds: matter.superseded.has(session.id) ? [session.id] : [] } } : session;
+    });
+  });
+  app.get<{ Params: { id: string } }>('/api/matters/:id', async request => {
+    const matter = options.matters?.get(request.params.id);
+    if (!matter) throw new RuntimeError('MATTER_NOT_FOUND', '事项不存在。', 404);
+    const links = options.matters!.links(matter.id);
+    const sessions = [];
+    for (const link of links.filter(link => link.kind === 'session')) {
+      if (!await canViewSession(request, link.refId)) continue;
+      const session = await runtime.getSession(link.refId);
+      if (session) sessions.push(session);
+    }
+    if (!sessions.length) throw new RuntimeError('MATTER_NOT_FOUND', '事项不存在。', 404);
+    const schedules = new Map<string, import('@dutydeck/shared').PublicSessionSchedule>();
+    for (const session of sessions) {
+      if (!options.automation?.authorize) continue;
+      const access = await options.automation.authorize(request, session.id, 'task.view_result');
+      if (access !== true && !(typeof access === 'object' && access.allowed)) continue;
+      const actorId = typeof access === 'object' && 'actorId' in access ? access.actorId : undefined;
+      for (const schedule of (await options.automation.service.listBySession(session.id, actorId)).schedules) {
+        if (sessions.some(item => item.id === schedule.sessionId)) schedules.set(schedule.id, schedule);
+      }
+    }
+    const origin = links.find(link => link.kind === 'session' && link.relation === 'origin');
+    const originVisible = !origin || sessions.some(session => session.id === origin.refId);
+    const originUrl = originVisible && matter.originChatId && matter.originMessageId
+      ? `https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(matter.originChatId)}&messageId=${encodeURIComponent(matter.originMessageId)}` : undefined;
+    const superseded = links.filter(link => link.kind === 'reply_target' && link.refId.startsWith('session:')).map(link => link.refId.slice(8));
+    const current = [];
+    for (const session of sessions) {
+      if (!isSupersededMatterSession(session, superseded) || (await runtime.getTasks?.(session.id) ?? []).some(task => ['reconcile_required', 'legacy_unresolved'].includes(task.status))) current.push(session);
+    }
+    return { id: matter.id, title: originVisible ? matter.title : '事项', status: matterStatusForSessions(current.length ? current : sessions), sessions, schedules: [...schedules.values()], ...(originUrl ? { originUrl } : {}) };
   });
   app.get('/api/sessions/summaries', async (request, reply) => {
     const respond = async (summaries: unknown[]) => {

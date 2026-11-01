@@ -51,19 +51,27 @@ async function setup() {
     return reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   });
   const requestScheduleStop = vi.fn(async () => ({ pendingDelivery: true, scheduleId: 'host_bound' }));
-  await registerAgentRequestTools(app, { runtime: { getActiveTaskContext: () => active }, automatedTask: taskId => automated.has(taskId), tools, automation: { requestSchedule, requestScheduleStop }, prepareDelivery, sendConfirmation });
+  const listBySession = vi.fn(async () => ({ schedules: [...saved.values()], subscriptions: [], occurrences: [] }));
+  const updateSchedule = vi.fn(async (sessionId: string, id: string, patch: any, actorId?: string) => {
+    const old = saved.get(id)!;
+    expect(sessionId).toBe(old.sessionId); expect(actorId).toBe('ou_alice');
+    const { expectedRevision: _revision, ...fields } = patch;
+    const next = { ...old, ...fields, revision: old.revision + 1 };
+    saved.set(id, next); return next;
+  });
+  await registerAgentRequestTools(app, { runtime: { getActiveTaskContext: () => active }, automatedTask: taskId => automated.has(taskId), tools, automation: { requestSchedule, requestScheduleStop, listBySession, updateSchedule }, prepareDelivery, sendConfirmation });
   const request = (target: Session, payload: object, turn = capabilities.workbenchTurnToken(target.id, active?.taskId ?? '', active?.attemptId ?? ''), path = 'schedules') => app.inject({
     method: 'POST', url: `/api/lark/agent-tools/${path}`, payload,
     headers: { authorization: `Bearer ${capabilities.environmentFor(target).dutydeck_group_tools_token}`, 'x-dutydeck-work-turn': turn }
   });
   const command = (payload: object, turn?: string) => request(group, payload, turn, 'commands');
   // 模拟本轮提示提供的不可变 agent --turn 前缀。
-  const agent = (method: 'GET' | 'POST', path: string, payload?: object, turn = capabilities.workbenchTurnToken(group.id, active?.taskId ?? '', active?.attemptId ?? '')) => app.inject({
+  const agent = (method: 'GET' | 'POST' | 'PATCH', path: string, payload?: object, turn = capabilities.workbenchTurnToken(group.id, active?.taskId ?? '', active?.attemptId ?? '')) => app.inject({
     method, url: `/api/lark/agent-tools/${path}`, ...(payload ? { payload } : {}),
     headers: { authorization: `Bearer ${capabilities.environmentFor(group).dutydeck_group_tools_token}`, ...(turn ? { 'x-dutydeck-work-turn': turn } : {}) }
   });
   const currentTurn = () => capabilities.workbenchTurnToken(group.id, active?.taskId ?? '', active?.attemptId ?? '');
-  return { group, p2p, request, command, agent, requestScheduleStop, currentTurn, tools, requestSchedule, prepareDelivery, sendConfirmation, saved, automated, setActive: (value: typeof active) => { active = value; } };
+  return { group, p2p, request, command, agent, requestScheduleStop, listBySession, updateSchedule, currentTurn, tools, requestSchedule, prepareDelivery, sendConfirmation, saved, automated, setActive: (value: typeof active) => { active = value; } };
 }
 
 describe('Agent schedule requests', () => {
@@ -318,4 +326,34 @@ it('does not accept a client-provided schedule origin or actor', async () => {
     expect((await h.agent('POST', 'schedules', { prompt: '看 CI', cron: '0 9 * * *', ...extra })).statusCode).toBe(400);
   }
   expect(h.requestSchedule).not.toHaveBeenCalled(); expect(h.prepareDelivery).not.toHaveBeenCalled(); expect(h.sendConfirmation).not.toHaveBeenCalled();
+});
+
+
+it('updates an existing visible plan by id and preserves the id through the agent tool', async () => {
+  const f = await setup();
+  const created = await f.agent('POST', 'schedules', { prompt: '旧内容', name: '定时检查', every: 15 });
+  expect(created.statusCode).toBe(200);
+  const id = created.json().scheduleId;
+  const updated = await f.agent('PATCH', `schedules/${encodeURIComponent(id)}`, { prompt: '新内容', every: 30 });
+  expect(updated.statusCode).toBe(200);
+  expect(updated.json()).toMatchObject({ scheduleId: id, updated: true, pendingConfirmation: true });
+  expect(f.saved.size).toBe(1);
+  expect(f.saved.get(id)).toMatchObject({ id, prompt: '新内容', trigger: { kind: 'interval', everySeconds: 1800 }, enabled: false });
+  expect(f.updateSchedule).toHaveBeenCalledWith(f.group.id, id, expect.objectContaining({ expectedRevision: 1, enabled: false }), 'ou_alice');
+  expect((await f.agent('PATCH', 'schedules/invisible', { prompt: 'other' })).statusCode).toBe(404);
+  f.automated.add('task_1');
+  expect((await f.agent('PATCH', `schedules/${encodeURIComponent(id)}`, { prompt: 'not permitted' })).statusCode).toBe(403);
+  expect(f.updateSchedule).toHaveBeenCalledTimes(1);
+});
+
+
+it('rejects a dry-run create against an enabled recurring plan without mutating it', async () => {
+  const f = await setup();
+  const created = await f.agent('POST', 'schedules', { prompt: '原内容', name: '巡检', every: 15 });
+  const id = created.json().scheduleId;
+  const original = { ...f.saved.get(id)!, enabled: true };
+  f.saved.set(id, original);
+  const preview = await f.agent('POST', 'schedules', { prompt: '不能自动改动', name: '巡检', every: 30, dryRun: true });
+  expect(preview.statusCode).toBe(409); expect(preview.json().error.code).toBe('MATTER_SCHEDULE_EXISTS');
+  expect(f.saved.get(id)).toEqual(original); expect(f.requestSchedule).toHaveBeenCalledTimes(1);
 });

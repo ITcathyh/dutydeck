@@ -123,3 +123,16 @@ describe('schedule CLI', () => {
     expect(JSON.parse(String(calls.at(-1)!.init.body))).toEqual({ prompt: '部署', cron: '0 2 * * *', mode: 'fresh' });
   });
 });
+
+
+it('deduplicates a matter plan across sessions and uses its owner for history', async () => {
+  const f = fixture();
+  f.fetcher.mockImplementation(async url => {
+    const path = new URL(String(url)).pathname;
+    const body = path.endsWith('/sessions') ? [{ id: 'ses_1' }, { id: 'ses_child' }] : path.endsWith('/history') ? { occurrences: [] } : { schedules: [schedule], subscriptions: [], occurrences: [] };
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  });
+  expect(await f.run('list')).toEqual({ schedules: [schedule] });
+  await f.run('history', { session: 'ses_child' }, schedule.id);
+  expect(String(f.fetcher.mock.calls.at(-1)![0])).toContain(`/api/sessions/${schedule.sessionId}/automation/schedules/${schedule.id}/history`);
+});

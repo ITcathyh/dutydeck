@@ -575,6 +575,15 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       for (const id of targets) if (!stopped.has(id)) retired.delete(id);
       throw error;
     }
+    // /new 的边界要跨重启保留；交接请求另有 inbox.lineage 明确继承源事项。
+    const boundarySession = [...targets][0] ?? persisted.at(-1)?.id;
+    if (boundarySession && this.cardMappings) try {
+      const sourceId = larkSourceId(config, event.chatId, event.chatType, scopeId);
+      const binding = await this.cardMappings.get(`lark-launch:${config.appId}`, sourceId);
+      const extra = binding?.extra ? JSON.parse(binding.extra) : {};
+      await this.cardMappings.save({ id: `lark-launch:${sourceId}`, channel: `lark-launch:${config.appId}`, externalId: sourceId,
+        sessionId: boundarySession, extra: JSON.stringify({ ...extra, matterBoundary: true }), createdAt: new Date().toISOString() });
+    } catch (error) { this.log.warn({ error }, '保存事项边界失败'); }
     return { retired: targets.size > 0, retained: retained.size > 0 };
   }
 
@@ -800,6 +809,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       task.launchOptions = undefined;
       task.launcherRecoveryNote = true;
       task.retryable = undefined;
+      task.matterLineage = { sessionId: previous.sessionId!, relation: 'retry' };
+      if (task.inbox) await this.inbox!.update(task.inbox, { lineage: task.matterLineage }).catch(error => this.log.warn({ error }, '保存启动器更换事项来源失败'));
       await this.runTurn(task, true);
       if (!task.runtimeTaskId || task.runtimeTaskId === previous.runtimeTaskId) {
         notRecovered(this.stopped ? 'coordinator_stopped' : 'replacement_not_dispatched');
@@ -1036,6 +1047,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         task.launchOptions && restoring ? async () => (task.launchOptions = task.launchOptions!.automaticFallback
           ? await this.validateFallbackRecovery(task, config, task.launchOptions!) : await this.validateNewSession(config, event, task.launchOptions!)) : undefined);
       if (!session) throw new LarkServiceError('LARK_SESSION_MISSING', '原任务会话已不存在，请重新发送目标。', 409);
+      const lineage = task.matterLineage ?? task.inbox?.lineage ?? (await this.inbox?.lookup(config.appId, event.messageId))?.lineage;
+      const sourceSessionId = lineage?.sessionId ?? task.inbox?.fallbackFromSessionId ?? task.inbox?.mergeFrom?.sessionId;
+      await this.runtime.trackMatterSession?.(session.id, { ...(sourceSessionId ? { sourceSessionId } : {}), relation: lineage?.relation ?? (task.inbox?.fallbackFromSessionId ? 'agent_switch' : 'handoff'), title: task.prompt,
+        originAppId: config.appId, originChatId: event.chatId, originMessageId: event.messageId });
+
       cardContext.agentName = await this.resolveAgentName(config, session.agentId);
       // 建会话本身也可能卡住（runtime.start 未返回）。回来后再确认一次，
       // 并把这条会话交给 /new 收走，不留下一个游离的新上下文。

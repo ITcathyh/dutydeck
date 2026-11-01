@@ -115,6 +115,7 @@ export interface TaskRequestMaterial {
 }
 
 export interface RuntimeOptions {
+  matterTracking?: import('@dutydeck/shared').MatterTracking;
   ptyRetirement?: PtyRetirementControl;
 
   authorizeExecution?: (sessionId: string, actorId?: string) => Promise<void | (() => Promise<void>)>;
@@ -2962,6 +2963,11 @@ export class DutydeckRuntime {
     return this.dispatchRequest(request, { agentPrompt, riskPolicy, idleCompactHours, promptParts });
   }
 
+  async trackMatterSession(sessionId: string, input: import('@dutydeck/shared').MatterSessionInput) {
+    try { await this.options.matterTracking?.session(sessionId, input); } catch { console.warn('MATTER_LINK_FAILED'); }
+  }
+  getMatter(sessionId: string) { return this.options.matterTracking?.summary(sessionId); }
+
   async dispatchRequest(request: TaskRequestV1, material: TaskRequestMaterial = {}) {
     this.assertReady();
     canonicalExecutionJson(request); taskRequestV1Schema.parse(request);
@@ -2973,6 +2979,7 @@ export class DutydeckRuntime {
     if (!stored) throw new RuntimeError('SESSION_NOT_FOUND', 'Session is missing', 404);
     const existing = this.lookupAcceptedTask(request);
     if (existing) {
+      try { await this.options.matterTracking?.accepted(stored, existing.task); } catch { console.warn('MATTER_LINK_FAILED'); }
       if (this.mutations.valid(this.lifecycle(id)) && !stored.archivedAt && stored.state !== 'stopped') {
         await this.scoped(id, async () => {
           this.rememberQueued(existing.task); this.queueBlocked.delete(id);
@@ -3008,6 +3015,7 @@ export class DutydeckRuntime {
       });
       if (!accepted.task) throw new RuntimeError('TASK_ACCEPTANCE_MISSING', 'The committed task is missing', 500);
       if (!accepted.replayed) await this.clearSessionTaskReports(id);
+      try { await this.options.matterTracking?.accepted(session, accepted.task); } catch { console.warn('MATTER_LINK_FAILED'); }
       this.verificationDeferredTasks.get(id)?.add(accepted.task.id);
       if (!accepted.replayed && accepted.task.id !== executionTaskId(request.namespace, id, request.key)) throw new RuntimeError('TASK_ID_MISMATCH', 'Accepted task identity differs from its request', 500);
       this.queueBlocked.delete(id);

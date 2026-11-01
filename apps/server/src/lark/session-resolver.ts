@@ -420,6 +420,7 @@ export async function resolveLarkSession(
   const binding = await mappings?.get(`lark-launch:${config.appId}`, sourceId);
   const launch = binding?.channel === `lark-launch:${config.appId}` && binding.externalId === sourceId ? binding : undefined;
   const launchConfigKey = launch?.extra ? (JSON.parse(launch.extra) as { baseConfigKey?: string }).baseConfigKey : undefined;
+  const matterBoundary = launch?.extra ? Boolean((JSON.parse(launch.extra) as { matterBoundary?: boolean }).matterBoundary) : false;
   const launchCompatible = (session: Session) => session.id !== launch?.sessionId || launchConfigKey === configKey;
   const saveLaunchBinding = async (session: Session) => {
     if (!launchOptions && !launch && !config.defaultAgentWeights?.length && (!config.fallbackAgentId || session.agentId !== config.fallbackAgentId)) return;
@@ -449,10 +450,11 @@ export async function resolveLarkSession(
 
   // 旧会话没能沿用的原因，新建会话时写进首卡。/new 结束的会话登记在 retiredSessionIds 里，不算意外。
   let replacedReason: string | undefined;
+  let replacedSessionId: string | undefined;
   if (group.sessionId && !group.retiredSessionIds?.has(group.sessionId)) {
     const existing = await runtime.getSession(group.sessionId);
     const reusable = existing && !['failed', 'stopped'].includes(existing.state);
-    if (existing && !reusable) replacedReason = endedSessionReason(existing);
+    if (existing && !reusable) { replacedReason = endedSessionReason(existing); replacedSessionId = existing.id; }
     if (reusable && (config.managedGroup || group.sessionConfigKey === configKey)) {
       if (await compatible(existing) && launchCompatible(existing) && (!launchOptions || matchesRequest(existing))) {
         await saveLaunchBinding(existing);
@@ -460,11 +462,13 @@ export async function resolveLarkSession(
       }
       log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书权限姿态已变更，停止旧 Session 并创建新运行');
       await stopForConfiguration(existing);
+      replacedSessionId = existing.id;
       replacedReason = configChangedReason;
     }
     if (reusable && !config.managedGroup && group.sessionConfigKey !== configKey) {
       log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书 Agent 配置已变更，停止旧 Session 并应用新配置');
       await stopForConfiguration(existing);
+      replacedSessionId = existing.id;
       replacedReason = configChangedReason;
     }
   }
@@ -492,12 +496,14 @@ export async function resolveLarkSession(
       }
       log.info({ sessionId: existing.id, appId: config.appId, chatId }, '持久化飞书 Session 的权限姿态不匹配，停止旧 Session 并创建新运行');
       await stopForConfiguration(existing);
+      replacedSessionId = existing.id;
       replacedReason = configChangedReason;
     }
     // 重启后没有内存绑定：看本 scope 最近一条会话为什么没被选中。还活着却没选中，只能是配置对不上了。
     const previous = [...sessions].reverse().find(item => item.source === 'lark' && item.sourceId === sourceId && !item.archivedAt);
     if (!replacedReason && previous && !group.retiredSessionIds?.has(previous.id)) {
       replacedReason = ['failed', 'stopped'].includes(previous.state) ? endedSessionReason(previous) : configChangedReason;
+      replacedSessionId = previous.id;
     }
   }
   // Revalidate restored first-turn options before choosing an Agent or starting a process.
@@ -556,6 +562,7 @@ export async function resolveLarkSession(
     fallbackNote = `Agent ${primary} 不可用，已切换到兜底 Agent ${agentId}（${redactTraceText(reason).slice(0, 200)}）。使用新会话，原生对话历史未迁移。`;
   }
   await saveLaunchBinding(session);
+  if (replacedSessionId && !matterBoundary && !group.retiredSessionIds?.has(replacedSessionId)) await runtime.trackMatterSession?.(session.id, { sourceSessionId: replacedSessionId, relation: replacedReason === configChangedReason ? 'agent_switch' : 'retry' });
   group.sessionId = session.id;
   group.sessionConfigKey = configKey;
   if (retiredLegacy) group.legacyUpgradeSessionId = session.id;

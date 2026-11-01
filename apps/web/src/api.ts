@@ -274,7 +274,8 @@ export type LarkOpenPlatformSetupJob = {
   error?: string;
 };
 export type { LarkAppCreationJob };
-export type Session = { id: string; agentId: string; state: string; cwd: string; name?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; sourceContext?: SessionSourceContext; archivedAt?: string; runId: string; createdAt: string; updatedAt: string; error?: string; systemPrompt?: string; workspaceMode?: WorkspaceMode; workspaceSourceCwd?: string };
+export type MatterDetail = { id: string; title: string; status: 'open' | 'done' | 'cancelled'; sessions: Session[]; schedules: Array<{ id: string; name: string; enabled: boolean }>; originUrl?: string };
+export type Session = { matter?: import('@dutydeck/shared').MatterSummary; id: string; agentId: string; state: string; cwd: string; name?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; sourceContext?: SessionSourceContext; archivedAt?: string; runId: string; createdAt: string; updatedAt: string; error?: string; systemPrompt?: string; workspaceMode?: WorkspaceMode; workspaceSourceCwd?: string };
 export type DockEvent = { taskId?: string; attemptId?: string; id: string; sequence: number; type: string; timestamp: string; data: any; raw?: string };
 export type Task = { skillDeliveries?: SkillDeliveryMetadata[]; id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string };
 /** 结果未知、现在可以由人处理的一轮：已知事实与三行摘要（服务端生成，与飞书提醒卡同一份文字）。 */
@@ -403,6 +404,7 @@ export const api = {
   sessionHistory: (id: string, signal?: AbortSignal) => json<HistoryOutline>(`/api/sessions/${encodeURIComponent(id)}/history`, { signal }),
   agents: () => json<Agent[]>('/api/agents'), agentModels: (id: string, model?: string, refresh = false, appId?: string) => json<AgentModelsResult>(agentModelsUrl(id, model, refresh, appId)), sessions: (signal?: AbortSignal) => json<Session[]>('/api/sessions', { signal }), session: (id: string) => json<Session>(`/api/sessions/${encodeURIComponent(id)}`), events: (id: string, query?: EventWindowQuery, signal?: AbortSignal) => json<DockEvent[]>(eventsUrl(id, query), { signal }), tasks: (id: string) => json<Task[]>(`/api/sessions/${id}/tasks`),
   // 跨任务标题的最小只读契约；服务端接入前 UI 仅使用当前已加载 tasks 的真实 prompt，不伪造摘要。
+  matter: (id: string) => json<MatterDetail>(`/api/matters/${encodeURIComponent(id)}`),
   runSummaries: () => json<RunSummary[]>(RUN_SUMMARY_ENDPOINT),
   create: (body: { agentId: string; cwd?: string; model?: string; codexProfile?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: WorkspaceMode }) => json<Session>('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   /** 先出计划：Agent 只调研出计划（写操作被拦），批准后才执行。 */

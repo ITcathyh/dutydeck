@@ -1,3 +1,4 @@
+import { api } from '../api';
 import { useState } from 'react';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -513,4 +514,29 @@ it('首页待处理入口使用处理上下文，普通列表和运行中入口�
   await userEvent.click(screen.getByRole('button', { name: /等待批准的真实任务/ }));
   expect(onSelect).toHaveBeenCalledTimes(3);
   expect(onSelect).toHaveBeenLastCalledWith('1');
+});
+
+
+it('opens a grouped matter with its sessions, plans and origin, and keeps member filters usable', async () => {
+  const user = userEvent.setup(); const onSelect = vi.fn();
+  const matter = { id: 'm', title: '跨会话事项', status: 'open' as const, sessionIds: ['1', '2'], supersededSessionIds: ['1'] };
+  const source = { ...session('1', '/repo/alpha', 'stopped'), matter, agentId: 'spare' };
+  const child = { ...session('2', '/repo/beta', 'thinking'), matter };
+  const read = vi.spyOn(api, 'matter').mockResolvedValue({ id: 'm', title: matter.title, status: 'open', sessions: [source, child], schedules: [{ id: 'plan', name: '每日检查', enabled: true }], originUrl: 'https://applink.feishu.cn/client/chat/open?openChatId=oc_origin' });
+  try {
+    render(<WorkspaceOverview {...baseProps} mode="tasks" sessions={[source, child]} agents={[...agents, { ...agents[0]!, id: 'spare', name: 'Spare Agent' }]} onSelect={onSelect}/>);
+    expect(screen.getAllByText('跨会话事项')).toHaveLength(1);
+    expect(screen.getByText('2 个会话')).toBeTruthy();
+    expect(screen.queryByText('需要恢复')).toBeNull();
+    await user.selectOptions(screen.getByRole('combobox', { name: '筛选项目' }), 'alpha');
+    await user.type(screen.getByLabelText('筛选当前任务列表'), 'Spare Agent');
+    expect(screen.getByText('跨会话事项')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /跨会话事项/ }));
+    const dialog = await screen.findByRole('dialog', { name: '事项详情' });
+    expect(await within(dialog).findByText('每日检查 · 已启用')).toBeTruthy();
+    expect(within(dialog).getByRole('link', { name: '打开来源消息' })).toBeTruthy();
+    await user.click(within(dialog).getByRole('button', { name: 'codex · 2' }));
+    expect(onSelect).toHaveBeenCalledWith('2');
+    expect(read).toHaveBeenCalledWith('m');
+  } finally { read.mockRestore(); }
 });

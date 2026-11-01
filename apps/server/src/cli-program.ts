@@ -764,6 +764,7 @@ Examples:
       .option('--input <json>', 'Complete create input or update patch as JSON')
       .option('--file <path>', 'Read the JSON input from this file');
     if (action === 'create') command
+      .option('--additional', '确需在本事项另建一个循环计划')
       .option('--agent <id>', 'Create a new idle session for this Agent; the prompt runs only when triggered')
       .option('--cwd <path>', 'Workspace directory for a new session')
       .option('--workspace <mode>', 'shared (default) or worktree for a new session')
@@ -778,6 +779,7 @@ Examples:
   schedules.command('request')
     .description('Lark Agent only: set up a schedule for this turn\'s requester; it starts after they click 启用 on the posted card')
     .requiredOption('--turn <token>', 'Current task authorization token')
+    .option('--additional', '确需在本事项另建一个循环计划')
     .requiredOption('--prompt <text>', 'Complete instructions to execute each time')
     .option('--name <name>', 'Short schedule name')
     .option('--every <minutes>', 'Fixed interval in whole minutes')

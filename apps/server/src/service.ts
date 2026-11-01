@@ -1,3 +1,4 @@
+import { MattersService } from './matters.js';
 import { assertDatabaseNotQuarantined } from '@dutydeck/storage';
 import { ProjectMemoryService } from './project-memory.js';
 import { larkAgentSessionBinding } from './lark/agent-tools.js';
@@ -444,7 +445,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     if (!session) throw new RuntimeError('SESSION_NOT_FOUND', '会话不存在。', 404);
     return session;
   });
+  const matters = new MattersService(repos);
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
+    matterTracking: matters,
     configureAgent: (agent, session) => agentModelSettings.resolveForSession(agent, session, async id => await workItems.parentForSession(id) ?? await delegations.parentForSession(id)),
     ptyRetirement: createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }, session => primaryHerdrBackend(session.id)),
     admitTask: pluginWiring
@@ -748,6 +751,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     };
     const resourceRoot = larkResourceRoot(config.databaseUrl);
     app = await buildApp(runtime, {
+      matters: repos.matters,
       artifactSnapshots: { service: new ArtifactSnapshots(repos, config.databaseUrl), authorize: async (request, sessionId) => {
         const administrator = createPluginManagementAuthorizer({ authEnabled: config.authEnabled, mode, getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null), getPasswordHash: () => getPasswordHash(repos.config) });
         return await administrator(request) && (await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result')).allowed;

@@ -1215,7 +1215,7 @@ describe('manual schedule execution and deletion', () => {
     h.settleTask(h.dispatches[0]!.id);
     await h.service.tick();
     expect((await h.service.listBySession(h.session.id)).schedules[0]).toEqual(enabled);
-    const conditional = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Conditional', condition: { kind: 'ci_new_failure' } }, 'ou_owner');
+    const conditional = await h.service.createSchedule(h.session.id, { ...scheduleInput, additional: true, name: 'Conditional', condition: { kind: 'ci_new_failure' } }, 'ou_owner');
     const skipped = await h.service.runSchedule(h.session.id, conditional.id, { expectedRevision: 1, idempotencyKey: 'conditional' }, 'ou_owner');
     expect(skipped).toMatchObject({ conditionStatus: 'skipped', runStatus: 'skipped' });
     expect((await h.service.listBySession(h.session.id)).schedules.find(item => item.id === conditional.id)).toEqual(conditional);
@@ -1356,7 +1356,7 @@ describe('schedule calendar validation and legacy reads', () => {
     const good = await h.service.createSchedule(h.session.id, { ...scheduleInput, timezone: 'UTC', trigger: { kind: 'cron', expression: '0 9 */1 * 1-5' } }, 'ou_owner');
     const enabled = await h.service.updateSchedule(h.session.id, good.id, { expectedRevision: good.revision, enabled: true }, 'ou_owner');
     expect(enabled.nextDueAt).toBe('2026-10-19T09:00:00.000Z');
-    const bad = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Bad calendar' }, 'ou_owner');
+    const bad = await h.service.createSchedule(h.session.id, { ...scheduleInput, additional: true, name: 'Bad calendar' }, 'ou_owner');
     const key = `session_automation/schedule/${bad.id}`;
     const raw = JSON.parse((await h.repositories.config.get(key))!);
     raw.trigger = { kind: 'at', localDateTime: '2026-02-30T09:00' };
@@ -2032,7 +2032,7 @@ describe('fresh-session schedules', () => {
     cleanups.push(() => service.close());
     const created = await service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
     expect(created.mode).toBe('session');
-    expect(created.executionContext).toBeUndefined();
+    expect(created.executionContext).toMatchObject({ agentId: h.session.agentId, cwd: h.session.cwd, contextMode: 'prompt_only' });
     // 旧版本写下的记录没有 mode 字段：照常读取，按沿用来源会话执行。
     const key = `session_automation/schedule/${created.id}`;
     const { mode: _mode, ...legacy } = JSON.parse((await h.repositories.config.get(key))!);
@@ -2091,7 +2091,7 @@ describe('schedule names are unique within a session', () => {
     await expect(h.service.createSchedule(h.session.id, { ...scheduleInput, prompt: 'Slightly different' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_NAME_CONFLICT', statusCode: 409, message: expect.stringContaining(first.id) });
     await h.service.updateSchedule(h.session.id, first.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
     await expect(h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_NAME_CONFLICT' });
-    const other = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Other' }, 'ou_owner');
+    const other = await h.service.createSchedule(h.session.id, { ...scheduleInput, additional: true, name: 'Other' }, 'ou_owner');
     await expect(h.service.updateSchedule(h.session.id, other.id, { expectedRevision: 1, name: scheduleInput.name }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_NAME_CONFLICT' });
     await expect(h.service.updateSchedule(h.session.id, other.id, { expectedRevision: 1, name: 'Other', prompt: 'Same name kept' }, 'ou_owner')).resolves.toMatchObject({ name: 'Other' });
     const current = await h.service.getScheduleDefinition(h.session.id, first.id);
@@ -2113,14 +2113,11 @@ describe('schedule names are unique within a session', () => {
     const retried = await h.service.requestSchedule(h.session.id, scheduleInput, 'ou_owner', receipt('turn-1'));
     expect(retried.schedule.id).toBe(original.schedule.id);
     expect(retried.updated).toBeUndefined();
-    // 间隔相同、只是锚点不同：没有改动，保持启用。
-    const unchanged = await h.service.requestSchedule(h.session.id, { ...scheduleInput, trigger: { ...scheduleInput.trigger, anchorAt: '2026-09-12T00:00:30.000Z' } }, 'ou_owner', receipt('turn-2'));
-    expect(unchanged).toMatchObject({ schedule: { id: original.schedule.id, enabled: true, revision: 2 }, updated: { changed: false, wasEnabled: true } });
-
-    const changedReceipt = receipt('turn-3');
-    const changed = await h.service.requestSchedule(h.session.id, { ...scheduleInput, prompt: 'Rebase and deploy', trigger: { kind: 'cron', expression: '0 2 * * *' }, mode: 'fresh' }, 'ou_owner', changedReceipt);
-    expect(changed).toMatchObject({ schedule: { id: original.schedule.id, enabled: false, prompt: 'Rebase and deploy', trigger: { kind: 'cron', expression: '0 2 * * *' }, mode: 'fresh' }, updated: { changed: true, wasEnabled: true } });
-    expect(changedReceipt.prepareDelivery).not.toHaveBeenCalled();
+    // 新的创建请求不得改动生效循环计划；同一 receipt 的重放仍返回原计划。
+    await expect(h.service.requestSchedule(h.session.id, { ...scheduleInput, trigger: { ...scheduleInput.trigger, anchorAt: '2026-09-12T00:00:30.000Z' } }, 'ou_owner', receipt('turn-2'))).rejects.toMatchObject({ code: 'MATTER_SCHEDULE_EXISTS' });
+    expect(await h.service.getScheduleDefinition(h.session.id, original.schedule.id)).toMatchObject({ enabled: true, revision: 2, prompt: scheduleInput.prompt });
+    const changed = await h.service.updateSchedule(h.session.id, original.schedule.id, { expectedRevision: 2, prompt: 'Rebase and deploy', trigger: { kind: 'cron', expression: '0 2 * * *' }, mode: 'fresh', enabled: false }, 'ou_owner');
+    expect(changed).toMatchObject({ id: original.schedule.id, enabled: false, prompt: 'Rebase and deploy', trigger: { kind: 'cron', expression: '0 2 * * *' }, mode: 'fresh' });
     expect((await h.service.listBySession(h.session.id)).schedules).toHaveLength(1);
 
     // 已停用的同名计划同样更新，不新建。
@@ -2153,7 +2150,7 @@ describe('schedule names are unique within a session', () => {
     expect(updated).toMatchObject({ schedule: { id: asked.schedule.id, prompt: 'Changed prompt', mode: 'session' }, updated: { changed: true } });
   });
 
-  it('updates the enabled one first when legacy data already holds duplicates', async () => {
+  it('requires an explicit update when legacy data already holds enabled duplicates', async () => {
     const h = await fixture();
     const kept = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Old copy' }, 'ou_owner');
     const live = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Live copy' }, 'ou_owner');
@@ -2163,8 +2160,10 @@ describe('schedule names are unique within a session', () => {
       const key = `session_automation/schedule/${id}`;
       await h.repositories.config.set(key, JSON.stringify({ ...JSON.parse((await h.repositories.config.get(key))!), name: 'rebase-agent-context-mac' }));
     }
-    const result = await h.service.requestSchedule(h.session.id, { ...scheduleInput, name: 'rebase-agent-context-mac', prompt: 'New prompt' }, 'ou_owner', { key: 'turn-dup' });
-    expect(result).toMatchObject({ schedule: { id: live.id, prompt: 'New prompt' }, updated: { changed: true, wasEnabled: true } });
+    await expect(h.service.requestSchedule(h.session.id, { ...scheduleInput, name: 'rebase-agent-context-mac', prompt: 'New prompt' }, 'ou_owner', { key: 'turn-dup' })).rejects.toMatchObject({ code: 'MATTER_SCHEDULE_EXISTS' });
+    expect(await h.service.getScheduleDefinition(h.session.id, live.id)).toMatchObject({ enabled: true, prompt: scheduleInput.prompt });
+    const result = await h.service.updateSchedule(h.session.id, live.id, { expectedRevision: 2, prompt: 'New prompt', enabled: false }, 'ou_owner');
+    expect(result).toMatchObject({ id: live.id, prompt: 'New prompt', enabled: false });
     expect((await h.service.getScheduleDefinition(h.session.id, kept.id)).prompt).toBe(scheduleInput.prompt);
   });
 });
@@ -2336,4 +2335,41 @@ describe('overdue schedule reminders', () => {
     await web.service.tick();
     expect(quiet).toHaveBeenCalledTimes(1);
   });
+});
+
+
+describe('matter schedules', () => {
+  it('lists authorized sibling plans, rejects duplicate recurring creation and preserves ids on update', async () => {
+    const h = await fixture();
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    const enabled = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: created.revision, enabled: true }, 'ou_owner');
+    const sourceMatter = h.repositories.matters!.find('session', h.session.id)!;
+    const child = { ...h.session, id: 'matter-child', runId: 'matter-child-run' };
+    bound(h.repositories).createSession(child);
+    h.repositories.matters!.ensureSession({ sessionId: child.id, sourceSessionId: h.session.id, relation: 'handoff', title: 'child' });
+    expect((await h.service.listBySession(child.id, 'ou_owner')).schedules.map(item => item.id)).toContain(created.id);
+    await expect(h.service.createSchedule(child.id, { ...scheduleInput, name: 'Duplicate' }, 'ou_owner')).rejects.toMatchObject({ code: 'MATTER_SCHEDULE_EXISTS', message: expect.stringContaining(created.id) });
+    const additional = await h.service.createSchedule(child.id, { ...scheduleInput, name: 'Additional', additional: true }, 'ou_owner');
+    expect(h.repositories.matters!.find('schedule', additional.id)?.id).toBe(sourceMatter.id);
+    const changed = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: enabled.revision, prompt: 'new instructions', trigger: { kind: 'cron', expression: '0 9 * * *' }, enabled: false }, 'ou_owner');
+    expect(changed).toMatchObject({ id: created.id, prompt: 'new instructions', enabled: false });
+    const restricted = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async id => id === child.id });
+    cleanups.push(() => restricted.close());
+    expect((await restricted.listBySession(child.id, 'ou_owner')).schedules.map(item => item.id)).toEqual([additional.id]);
+    await expect(restricted.updateSchedule(h.session.id, created.id, { expectedRevision: changed.revision, enabled: true }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_FORBIDDEN' });
+  });
+});
+
+
+it('rejects an agent create request against an enabled same-name recurring plan without changing it', async () => {
+  const h = await fixture();
+  const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+  const enabled = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+  await expect(h.service.requestSchedule(h.session.id, { ...scheduleInput, prompt: 'must not replace the active plan' }, 'ou_owner', { key: 'new-agent-create' })).rejects.toMatchObject({ code: 'MATTER_SCHEDULE_EXISTS', message: expect.stringContaining('schedule update') });
+  expect(await h.service.getScheduleDefinition(h.session.id, created.id, 'ou_owner')).toEqual(enabled);
+  const receipt = { key: 'receipt-before-enable' };
+  await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: enabled.revision, enabled: false }, 'ou_owner');
+  const own = await h.service.requestSchedule(h.session.id, { ...scheduleInput, name: 'idempotent plan' }, 'ou_owner', receipt);
+  await h.service.updateSchedule(h.session.id, own.schedule.id, { expectedRevision: own.schedule.revision, enabled: true }, 'ou_owner');
+  expect((await h.service.requestSchedule(h.session.id, { ...scheduleInput, name: 'idempotent plan' }, 'ou_owner', receipt)).schedule.id).toBe(own.schedule.id);
 });
