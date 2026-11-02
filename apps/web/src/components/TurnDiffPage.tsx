@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { FileDiff, Link2Off, MessageSquarePlus } from 'lucide-react';
 import { api, ApiError, type TurnDiffCommentInput, type TurnDiffFile, type TurnDiffLine } from '../api';
@@ -54,6 +54,7 @@ export function TurnDiffContent({ sessionId, taskId, shared, embedded = false, r
     mutationFn: (submitted: readonly Draft[]) => api.submitTurnDiffComments(sessionId, taskId, submitted.map(({ code: _code, ...comment }) => comment)),
     onSuccess: (_result, submitted) => setDrafts(current => current.filter(draft => !submitted.includes(draft)))
   });
+  const fileVersions = useMemo(() => diff.data?.files.map(file => JSON.stringify(file)) ?? [], [diff.data?.files]);
 
   if (diff.isPending) return <Main className={`grid ${embedded ? 'min-h-40' : 'min-h-[100dvh]'} place-items-center bg-canvas`}><Spinner size="sm" label="正在打开改动…"/></Main>;
   if (!diff.data) {
@@ -88,14 +89,14 @@ export function TurnDiffContent({ sessionId, taskId, shared, embedded = false, r
       <div className="mx-auto w-full max-w-4xl px-3 pb-2 text-caption text-subtle sm:px-5">本轮快照 · {taskId}{diff.data.finishedAt ? ` · ${new Date(diff.data.finishedAt).toLocaleString()}` : ''} · 已查看标记仅对所示文件版本有效</div>
     </header>
     <div className={embedded ? 'lg:grid lg:grid-cols-[180px_minmax(0,1fr)]' : ''}>
-      {embedded && <nav aria-label="改动文件" className="hidden space-y-1 border-r border-default p-3 lg:block">{files.map((file, index) => <button type="button" key={file.path} className="min-h-11 w-full break-all rounded-md px-2 py-2 text-left font-mono text-caption text-secondary hover:bg-hover" onClick={() => document.getElementById(`diff-${taskId}-${index}`)?.scrollIntoView({ block: 'start', behavior: 'instant' })}>{viewed[file.path] === JSON.stringify(file) ? '✓ ' : ''}{file.path}<span className="block text-meta"><span className="text-success">+{file.additions}</span> <span className="text-danger">−{file.deletions}</span></span></button>)}</nav>}
+      {embedded && <nav aria-label="改动文件" className="hidden space-y-1 border-r border-default p-3 lg:block">{files.map((file, index) => <button type="button" key={file.path} className="min-h-11 w-full break-all rounded-md px-2 py-2 text-left font-mono text-caption text-secondary hover:bg-hover" onClick={() => document.getElementById(`diff-${taskId}-${index}`)?.scrollIntoView({ block: 'start', behavior: 'instant' })}>{viewed[file.path] === fileVersions[index] ? '✓ ' : ''}{file.path}<span className="block text-meta"><span className="text-success">+{file.additions}</span> <span className="text-danger">−{file.deletions}</span></span></button>)}</nav>}
     <Main className="mx-auto w-full min-w-0 max-w-4xl flex-1 space-y-3 px-3 py-3 pb-32 sm:px-5">
       {truncated && <Banner tone="warning">改动太多，只展开了前面的文件，其余文件只列出名字。</Banner>}
       {submit.isSuccess && <Banner tone="success">{submit.data.delivery === 'lark_confirmation' ? '评论已发到飞书话题，等有权限的人确认后交给 Agent 修改。' : '评论已作为新一轮请求发回当前任务。'}</Banner>}
       {submit.isError && <Banner tone="danger">提交失败：{submit.error.message}</Banner>}
       {files.length === 0 && <EmptyState icon={<FileDiff size={22}/>} title="这一轮没有改动文件"/>}
       {files.map((file, fileIndex) => <div key={file.path} id={`diff-${taskId}-${fileIndex}`}>
-      <label className="mb-1 flex min-h-11 items-center justify-end gap-2 text-caption text-subtle"><input type="checkbox" aria-label={`已查看 ${file.path}`} checked={viewed[file.path] === JSON.stringify(file)} onChange={event => setViewed(current => ({ ...current, [file.path]: event.target.checked ? JSON.stringify(file) : '' }))}/>已查看此版本</label>
+      <label className="mb-1 flex min-h-11 items-center justify-end gap-2 text-caption text-subtle"><input type="checkbox" aria-label={`已查看 ${file.path}`} checked={viewed[file.path] === fileVersions[fileIndex]} onChange={event => setViewed(current => ({ ...current, [file.path]: event.target.checked ? fileVersions[fileIndex]! : '' }))}/>已查看此版本</label>
       <details open={files.length <= 8 && !file.placeholder} className="overflow-hidden rounded-md border border-default bg-surface">
         <summary className="flex cursor-pointer items-start gap-2 px-3 py-2 text-caption">
           <span className="shrink-0 rounded-sm bg-muted px-1.5 text-meta text-secondary">{statusLabel[file.status]}</span>

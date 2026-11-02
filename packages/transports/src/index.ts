@@ -117,20 +117,13 @@ class TransportStoppedError extends Error {
 }
 
 interface ActiveTurn {
-  readonly id: number;
-  readonly prompt: string;
   readonly owned: OwnedProcess;
   writeSucceeded: boolean;
   completedReceived: boolean;
   settled: boolean;
-  detached: boolean;
   resolve: () => void;
   reject: (error: Error) => void;
   timer?: NodeJS.Timeout;
-}
-
-interface SendSlot {
-  readonly id: number;
 }
 
 interface OwnedProcess {
@@ -171,9 +164,8 @@ export class JsonlTransport implements AgentDriver {
   private readonly owned = new Set<OwnedProcess>();
   private stopping?: Promise<void>;
 
-  private pendingSendSlot?: SendSlot;
+  private pendingSendSlot?: object;
   private activeTurn?: ActiveTurn;
-  private turnSeq = 0;
   private turnTail?: Promise<void>;
   private preparedOwned?: OwnedProcess;
 
@@ -285,7 +277,7 @@ export class JsonlTransport implements AgentDriver {
       this.options.context!.assertSubmission(submission);
     }
 
-    const slot: SendSlot = { id: ++this.turnSeq };
+    const slot = {};
     this.pendingSendSlot = slot;
 
     try {
@@ -325,13 +317,10 @@ export class JsonlTransport implements AgentDriver {
       });
 
       const turn: ActiveTurn = {
-        id: slot.id,
-        prompt,
         owned,
         writeSucceeded: false,
         completedReceived: false,
         settled: false,
-        detached: false,
         resolve: resolveTurn,
         reject: rejectTurn
       };
@@ -481,7 +470,6 @@ export class JsonlTransport implements AgentDriver {
     if (turn.settled) return;
     if (turn.timer) clearTimeout(turn.timer);
     turn.settled = true;
-    turn.detached = true;
     if (this.activeTurn === turn) this.activeTurn = undefined;
     turn.reject(error);
   }
@@ -633,8 +621,6 @@ export class JsonlTransport implements AgentDriver {
     rlStderr.on('line', line => {
       if (this.stopped || owned.discarded) return;
       if (owned.terminating && (!this.activeTurn || this.activeTurn.owned !== owned)) return;
-      const turn = this.activeTurn;
-      if (turn && turn.owned === owned && turn.detached) return;
       this.options.onEvent({ type: 'raw_terminal', data: { text: line }, raw: line });
     });
     rlStderr.on('error', failOutput);
@@ -667,10 +653,7 @@ export class JsonlTransport implements AgentDriver {
       // completed closes event ownership even if its write acknowledgement is
       // still pending. Subsequent output cannot become another result.
       if (turn.completedReceived) return;
-      // 正在进行的活动轮次：若超时等导致本轮已 detached，切断向 Runtime 的事件投递，只在内部完成收尾核验
-      if (!turn.detached) {
-        this.options.onEvent(normalized);
-      }
+      this.options.onEvent(normalized);
       // 收到 completed 事件：先交付事件，再标记 completedReceived
       if (normalized.type === 'completed') {
         turn.completedReceived = true;

@@ -1,21 +1,11 @@
 import { defineConfig } from 'vitest/config';
 import { fileURLToPath, URL } from 'node:url';
+import { vitestAliases } from './vitest.aliases';
 
 const alias = {
-  '@dutydeck/plugin-sdk': fileURLToPath(new URL('./packages/plugin-sdk/src/index.ts', import.meta.url)),
   '@dutydeck/shared/child-environment': fileURLToPath(new URL('./packages/shared/runtime/child-environment.mjs', import.meta.url)),
   '@dutydeck/shared/secret-guard': fileURLToPath(new URL('./packages/shared/runtime/secret-guard.mjs', import.meta.url)),
-  '@dutydeck/acp-client': fileURLToPath(new URL('./packages/acp-client/src/index.ts', import.meta.url)),
-  '@dutydeck/runtime': fileURLToPath(new URL('./packages/agent-runtime/src/index.ts', import.meta.url)),
-  '@dutydeck/config': fileURLToPath(new URL('./packages/config/src/index.ts', import.meta.url)),
-  '@dutydeck/shared': fileURLToPath(new URL('./packages/shared/src/index.ts', import.meta.url)),
-  '@dutydeck/storage': fileURLToPath(new URL('./packages/storage/src/index.ts', import.meta.url)),
-  '@dutydeck/transports': fileURLToPath(new URL('./packages/transports/src/index.ts', import.meta.url)),
-  '@dutydeck/pty-driver': fileURLToPath(new URL('./packages/pty-driver/src/index.ts', import.meta.url)),
-  '@dutydeck/cli-adapters': fileURLToPath(new URL('./packages/cli-adapters/src/index.ts', import.meta.url)),
-  '@dutydeck/session-backends': fileURLToPath(new URL('./packages/session-backends/src/index.ts', import.meta.url)),
-  '@dutydeck/terminal-renderer': fileURLToPath(new URL('./packages/terminal-renderer/src/index.ts', import.meta.url)),
-  '@dutydeck/relay': fileURLToPath(new URL('./packages/relay/src/index.ts', import.meta.url)),
+  ...vitestAliases,
   '@dutydeck/secret-provider': fileURLToPath(new URL('./packages/secret-provider/src/index.ts', import.meta.url))
 };
 

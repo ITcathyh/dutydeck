@@ -759,14 +759,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     app = await buildApp(runtime, {
       matters: repos.matters,
       artifactSnapshots: { service: new ArtifactSnapshots(repos, config.databaseUrl), authorize: async (request, sessionId) => {
-        const administrator = createPluginManagementAuthorizer({ authEnabled: config.authEnabled, mode, getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null), getPasswordHash: () => getPasswordHash(repos.config) });
-        return await administrator(request) && (await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result')).allowed;
+        return await authorizeInstallationManagement(request) && (await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result')).allowed;
       } },
-      pluginBindings: { host: pluginHost ?? PluginHost.empty(dirname(config.databaseUrl)), authorize: createPluginManagementAuthorizer({ authEnabled: config.authEnabled, mode, getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null), getPasswordHash: () => getPasswordHash(repos.config) }) },
+      pluginBindings: { host: pluginHost ?? PluginHost.empty(dirname(config.databaseUrl)), authorize: authorizeInstallationManagement },
     terminalSettings,
     configurationExplanation: { repositories: repos, groups: groupManager, host: pluginHost, authorize: async (request, sessionId) => {
-      const administrator = createPluginManagementAuthorizer({ authEnabled: config.authEnabled, mode, getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null), getPasswordHash: () => getPasswordHash(repos.config) });
-      return await administrator(request) && (await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result')).allowed;
+      return await authorizeInstallationManagement(request) && (await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result')).allowed;
     } },
     agentModelSettings,
       ...(insightService
@@ -861,7 +859,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
           if (!decision.allowed) throw new RuntimeError(decision.code, decision.reason, 403);
         },
       },
-      ...(businessTools ? { pluginBusinessTools: { service: businessTools, grants: businessToolGrants, origin: new URL(localApiBaseUrl(config)).origin, authorize: createPluginManagementAuthorizer({ authEnabled: config.authEnabled, mode, getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null), getPasswordHash: () => getPasswordHash(repos.config) }) } } : {}),
+      ...(businessTools ? { pluginBusinessTools: { service: businessTools, grants: businessToolGrants, origin: new URL(localApiBaseUrl(config)).origin, authorize: authorizeInstallationManagement } } : {}),
       pluginResults: { service: pluginResultService, viewer: { repository: repos.pluginResults, identity: pluginResultIdentity, authorize: async delivery => { if (!pluginResultRegistry.get(`${delivery.plugin}/${delivery.tool}`, { botAppId: delivery.requester.tenant, cwd: String(delivery.target.cwd ?? '') })) throw new PluginResultError('RESULT_TOOL_UNAVAILABLE'); await pluginResultAdapter.assertDeliveryAuthorized(delivery); } } },
       workItems: { service: workItems, interactions: workInteractions, authorize: async (request, sessionId, action) => {
         if (!await resolveInstallationPrincipal(request)) return false;

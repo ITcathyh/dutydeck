@@ -384,22 +384,14 @@ export const collaborationMandateSchema = z.object({
 }).strict();
 export type CollaborationMandate = z.infer<typeof collaborationMandateSchema>;
 
-export const createMandateInputSchema = z.object({
-  id: z.string().min(1).max(128).optional(),
-  scope: collaborationScopeSchema,
-  goal: z.string().trim().min(1).max(2000),
-  status: z.enum(mandateStatuses).default('active'),
-  requesterId: z.string().min(1).max(128),
-  sourceRefs: z.array(z.string().max(256)).max(100).default([]),
-  followupId: z.string().max(128).optional(),
-  scheduleDefinitionId: z.string().min(1).max(128),
-  mode: z.enum(mandateModes),
-  prompt: z.string().max(8000),
-  condition: z.enum(mandateConditions).default('always'),
-  deliveryPaused: z.boolean().default(false),
-  catchupPolicy: z.enum(catchupPolicies).default('skip'),
-  lastProgressRevision: z.number().int().min(1).optional()
-}).strict();
+export const createMandateInputSchema = collaborationMandateSchema
+  .omit({ revision: true, createdAt: true, updatedAt: true })
+  .extend({
+    id: collaborationMandateSchema.shape.id.optional(),
+    status: collaborationMandateSchema.shape.status.default('active'),
+    condition: collaborationMandateSchema.shape.condition.default('always'),
+    catchupPolicy: collaborationMandateSchema.shape.catchupPolicy.default('skip')
+  });
 export type CreateMandateInput = z.infer<typeof createMandateInputSchema>;
 
 export const updateMandateInputSchema = z.object({

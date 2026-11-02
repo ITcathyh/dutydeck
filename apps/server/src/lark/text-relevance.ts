@@ -4,8 +4,12 @@
  */
 export function relevance(query: string) {
   const words = query.toLowerCase().match(/[a-z0-9_]+|[\p{Script=Han}]+/gu) ?? [];
-  const terms = new Set(words.flatMap(word => /\p{Script=Han}/u.test(word)
+  const terms = [...new Set(words.flatMap(word => /\p{Script=Han}/u.test(word)
     ? [word, ...Array.from({ length: Math.max(0, word.length - 1) }, (_, i) => word.slice(i, i + 2))]
-    : [word]));
-  return (text: string) => [...terms].reduce((score, term) => score + (text.toLowerCase().includes(term) ? term.length : 0), 0);
+    : [word]))];
+  return (text: string) => {
+    if (!terms.length) return 0;
+    const lowerText = text.toLowerCase();
+    return terms.reduce((score, term) => score + (lowerText.includes(term) ? term.length : 0), 0);
+  };
 }

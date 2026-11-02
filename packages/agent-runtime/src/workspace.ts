@@ -12,17 +12,7 @@ const runFile = promisify(execFile);
 const WORKSPACE_KEY_PREFIX = 'runtime_workspace:';
 
 async function git(cwd: string, args: string[], timeoutMs = 15_000): Promise<string> {
-  try {
-    const { stdout } = await runFile('git', ['-C', cwd, ...args], {
-      encoding: 'utf8', maxBuffer: 4 * 1024 * 1024,
-      timeout: timeoutMs,
-      env: { ...minimalToolEnvironment(), GIT_TERMINAL_PROMPT: '0' }
-    });
-    return stdout.trim();
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new RuntimeError('WORKSPACE_GIT_FAILED', detail, 422);
-  }
+  return (await gitRaw(cwd, args, timeoutMs)).trim();
 }
 
 async function gitRaw(cwd: string, args: string[], timeoutMs = 15_000): Promise<string> {
