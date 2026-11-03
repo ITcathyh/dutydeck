@@ -228,6 +228,31 @@ describe('one thread, clean context per run', () => {
     expect((await f.sent())[1]).toMatch(/^上一次运行（2026\/9\/12 00:01:00，完成）的结果摘要/);
   }, 30_000);
 
+  it('keeps an old loop in its source session once the user explicitly sets session mode', async () => {
+    const f = await fixture();
+    const created = await f.enabled(true);
+    expect((await f.schedule(created.id)).mode).toBeUndefined();
+    const current = await f.service.getScheduleDefinition(f.parent.id, created.id, f.owner);
+    await f.service.updateSchedule(f.parent.id, created.id, { expectedRevision: current.revision, mode: 'session' }, f.owner);
+    expect((await f.schedule(created.id)).mode).toBe('session');
+    await f.runMinute(1, 1);
+    const [occurrence] = await f.occurrences();
+    expect(occurrence.runStatus).toBe('completed');
+    expect(occurrence.executionSessionId ?? occurrence.sessionId).toBe(f.parent.id);
+    expect((await f.schedule(created.id)).mode).toBe('session');
+  }, 30_000);
+
+  it('records an explicit session mode when the Agent re-requests an old loop by name', async () => {
+    const f = await fixture();
+    const created = await f.service.createSchedule(f.parent.id, scheduleInput, f.owner);
+    const key = `session_automation/schedule/${created.id}`;
+    const { mode: _mode, ...record } = JSON.parse((await f.repos.config.get(key))!);
+    await f.repos.config.set(key, JSON.stringify(record));
+    // 停用的同名旧计划由代建请求兼容更新；明确要 session 时要记下来，否则启用后会被当成旧计划改成新会话。
+    await f.service.requestSchedule(f.parent.id, { ...scheduleInput, mode: 'session' }, f.owner, { key: 'same-name-session' });
+    expect((await f.schedule(created.id)).mode).toBe('session');
+  }, 30_000);
+
   it('keeps a loop that explicitly chose session mode in its source session', async () => {
     const f = await fixture();
     const created = await f.enabled();

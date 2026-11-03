@@ -790,7 +790,7 @@ export class SessionAutomationService {
       ...(input.timezone !== existing.timezone ? { timezone: input.timezone } : {}),
       ...(canonicalExecutionJson(input.dstPolicy) !== canonicalExecutionJson(existing.dstPolicy) ? { dstPolicy: input.dstPolicy } : {}),
       ...(input.condition.kind !== existing.condition.kind ? { condition: input.condition } : {}),
-      ...(mode && mode !== (existing.mode ?? 'session') ? { mode } : {})
+      ...(mode && mode !== existing.mode ? { mode } : {})
     };
     const changed = Object.keys(patch).length > 0;
     const schedule = changed
@@ -1095,6 +1095,8 @@ export class SessionAutomationService {
       condition,
       ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
       ...(modeChanged ? { mode: input.mode, executionSessionId: undefined, executionContext: input.mode === 'fresh' ? freshExecutionContext(session) : undefined } : {}),
+      // 没存模式的旧计划按 session 执行，但会被自动改成新会话；用户明确选了就记下来，之后不再自动改。
+      ...(input.mode !== undefined && !modeChanged ? { mode: input.mode } : {}),
       revision: stored.value.revision + 1,
       generation: stored.value.generation + (executionChanged ? 1 : 0),
       ...(executionChanged && actorId && stored.value.mode !== 'independent' ? { actorId } : {}),
