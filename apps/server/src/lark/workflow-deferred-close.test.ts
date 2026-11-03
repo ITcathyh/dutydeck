@@ -52,6 +52,18 @@ it.each(['ask', 'permission', 'plan'] as const)('returns the %s Toast with persi
   expect((await h.workflow.list(h.record.appId))[0]!.cardClosedAt).toEqual(expect.any(String));
 });
 
+it('expires a delivered durable confirmation by timer at its deadline instead of keeping reconcile busy', async () => {
+  const h = await harness('ask');
+  expect(await h.workflow.reconcile(h.record.appId)).toBe(0);
+  await vi.advanceTimersByTimeAsync(24 * 3_600_000 - 1_000);
+  expect((await h.workflow.list(h.record.appId))[0]!.state).toBe('pending');
+  await vi.advanceTimersByTimeAsync(2_001);
+  expect((await h.workflow.list(h.record.appId))[0]).toMatchObject({ state: 'expired', timedOutAt: expect.any(String), cardClosedAt: expect.any(String) });
+  expect(h.update).toHaveBeenCalledOnce();
+  expect(h.update.mock.calls[0]![0]).toMatchObject({ statusLabel: '已过期', elements: [{ tag: 'markdown', content: '已过期，未执行' }] });
+  expect(h.seed).not.toHaveBeenCalled();
+});
+
 it('does not release a slow confirmation when a concurrent stale callback finishes first', async () => {
   const h = await harness();
   let release!: () => void;

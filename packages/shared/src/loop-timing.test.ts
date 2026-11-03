@@ -19,6 +19,26 @@ describe('timeLoop', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it('after the first warning, summarizes a loop that stays slow at most hourly, and warns again after it recovers', () => {
+    vi.useFakeTimers({ toFake: ['performance', 'Date'] });
+    try {
+      const warn = vi.fn();
+      const cycle = (ms: number) => { timeLoop('busy', { warn }, () => { vi.advanceTimersByTime(ms); }, 500); vi.advanceTimersByTime(5_000); };
+      cycle(1_500);
+      expect(warn).toHaveBeenCalledOnce();
+      for (let round = 0; round < 600; round++) cycle(round % 2 ? 1_400 : 1_600);
+      expect(warn).toHaveBeenCalledTimes(2);
+      const [summary, message] = warn.mock.calls[1]!;
+      expect(summary).toMatchObject({ loop: 'busy', thresholdMs: 500, p50Ms: expect.any(Number), maxMs: 1_600 });
+      expect(summary.count).toBeGreaterThan(500);
+      expect(message).toContain('busy');
+      cycle(100);
+      cycle(900);
+      expect(warn).toHaveBeenCalledTimes(3);
+      expect(warn.mock.calls[2]![0]).toMatchObject({ loop: 'busy', durationMs: 900 });
+    } finally { vi.useRealTimers(); }
+  });
+
   it('measures a failing cycle and rethrows its error; a throwing log sink does not break the loop', async () => {
     const warn = vi.fn(() => { throw new Error('sink down'); });
     await expect(timeLoop('failing', { warn }, async () => { await sleep(30); throw new Error('boom'); }, 10)).rejects.toThrow('boom');

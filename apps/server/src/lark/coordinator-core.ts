@@ -169,7 +169,7 @@ export abstract class LarkCoordinatorCore {
         (record, actor, action) => this.authorizeInteraction(record, actor, action),
         { log: this.log, approverCandidates: record => this.groupManager?.highRiskOpenIds(record.appId, record.event.chatId) ?? Promise.resolve([]),
           onPlanDecision: record => this.submitPlanDecision(record),
-          onConfirmation: record => this.submitConfirmation(record), confirmationAvailable: record => this.confirmationAvailable(record) });
+          onConfirmation: record => this.submitConfirmation(record), confirmationAvailable: (record, checkAccess) => this.confirmationAvailable(record, checkAccess) });
       const unregister = workflowOptions.broker?.addDeferredHandler((input, context) => this.deferConfirmation(input, context));
       if (unregister) this.turnCleanups.add(unregister);
       // 置顶记录必须持久化：进程崩在长任务中间时，只有账本能让重启后的对账认出僵尸置顶。
@@ -262,11 +262,13 @@ export abstract class LarkCoordinatorCore {
     }
     return allowed;
   }
-  protected async confirmationAvailable(record: LarkInteraction) {
+  /** checkAccess=false 供对账用，只看本地状态；点击和回放前按默认值校验当前群成员与权限。 */
+  protected async confirmationAvailable(record: LarkInteraction, checkAccess = true) {
     const config = await readLarkConfig(this.workflowOptions.store, record.appId);
     const session = await this.runtime.getSession(record.sessionId);
     if (this.stopped || !config?.listening || !session || session.archivedAt || ['stopped', 'failed'].includes(session.state) || !record.event.senderOpenId) return false;
     try { await this.requireExecution('listener', 'task.create'); } catch { return false; }
+    if (!checkAccess) return true;
     return this.currentAccess(config, record.event.chatId, record.event.chatType, record.event.senderOpenId, 'run.interrupt', record.sessionId, record.event.senderOpenId);
   }
   protected async isDeferredTask(sessionId: string, taskId: string) {

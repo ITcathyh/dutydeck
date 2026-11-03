@@ -144,6 +144,12 @@ const mentions = (openIds: string[]) => openIds.map(renderGroupMention).filter(B
 /** 审批与计划卡共用的时限：30 分钟提醒、24 小时上限。 */
 const hasDeadline = (record: LarkInteraction) => record.kind === 'permission' || record.kind === 'plan';
 const pastDeadline = (record: LarkInteraction, now = Date.now()) => hasDeadline(record) && Boolean(record.expiresAt) && Date.parse(record.expiresAt!) <= now;
+/**
+ * 持久确认没人点的截止时间，与审批、计划卡同为 24 小时：第二天回来仍能点，再久原请求多半已过时。
+ * 升级前登记的记录没有 expiresAt，按发卡时间（没有就按最后更新时间）推算。
+ */
+const confirmationDeadline = (record: LarkInteraction) => record.expiresAt ? Date.parse(record.expiresAt)
+  : Date.parse(record.cardCreatedAt ?? record.updatedAt) + larkPermissionTimeoutMs;
 const prefix = (appId: string) => `lark.interaction.${appId}.`;
 const stale = () => new LarkServiceError('LARK_INTERACTION_EXPIRED', '此操作已处理或失效。请发送 `/status` 查看任务状态，不要重复操作旧卡。', 409);
 const button = (record: LarkInteraction, action: string, label: string): LarkCardElement => ({
@@ -211,7 +217,8 @@ export interface LarkWorkflowInteractionsOptions {
   /** 计划卡上批准或提修改意见后，以操作人身份提交下一轮；重复调用必须幂等（重启后会补调） */
   onPlanDecision?: (record: LarkInteraction) => Promise<void>;
   onConfirmation?: (record: LarkInteraction) => Promise<void>;
-  confirmationAvailable?: (record: LarkInteraction) => Promise<boolean>;
+  /** checkAccess=false 时只看本地状态（对账用），不查群成员。 */
+  confirmationAvailable?: (record: LarkInteraction, checkAccess?: boolean) => Promise<boolean>;
   urgentManager?: LarkUrgentManager;
   urgent?: boolean | LarkWorkflowUrgentOptions;
   /** 发起人不能批准时，群里还有谁可能批准（被授予高风险审批的成员）；是否真能批准仍逐个走 authorize */
@@ -241,7 +248,7 @@ export class LarkWorkflowInteractions {
   private readonly autoApproving = new Set<string>();
   private readonly approverCandidates?: (record: LarkInteraction) => Promise<string[]>;
   private readonly onConfirmation?: (record: LarkInteraction) => Promise<void>;
-  private readonly confirmationAvailable?: (record: LarkInteraction) => Promise<boolean>;
+  private readonly confirmationAvailable?: (record: LarkInteraction, checkAccess?: boolean) => Promise<boolean>;
   private readonly confirming = new Set<string>();
   private readonly onPlanDecision?: (record: LarkInteraction) => Promise<void>;
   /** 每个 App 一个计时器，处理计划卡截止/提醒和终态卡关闭重试；无活跃任务时也能恢复。 */
@@ -341,7 +348,7 @@ export class LarkWorkflowInteractions {
     await this.schedulePlanCheck(appId);
   }
   private async expiryMessage(record: LarkInteraction) {
-    if (record.kind === 'ask' && record.adhdMode === true) return '已结束，未执行';
+    if (record.kind === 'ask' && record.adhdMode === true) return record.timedOutAt ? '已过期，未执行' : '已结束，未执行';
     // 超时的时刻就是截止时间：停机期间到期、重启后才补做的，也按截止时间写。
     if (record.timedOutAt && record.expiresAt) return `超时自动拒绝 · ${shanghaiClock(Date.parse(record.expiresAt))}\n\n超过 ${timeoutHours} 小时未处理，这次操作没有执行，不再接受批准；需要的话请重新发起。`;
     if (record.kind === 'plan') return planStaleText;
@@ -360,10 +367,11 @@ export class LarkWorkflowInteractions {
       const receipt = await this.permissionReceipt(record);
       record = await this.refreshPermissionDecision(record, receipt);
       if (record.durable && ['pending', 'resolving'].includes(record.state)) {
-        try { record = await this.reconcileConfirmation(record); if (record.state === 'pending') unresolved++; }
+        // 已发出、等人点的确认不算未收敛：截止时间由 schedulePlanCheck 定时唤醒。
+        try { record = await this.reconcileConfirmation(record); if (record.state === 'pending' && !record.cardId) unresolved++; }
         catch (error) { this.log?.warn({ error, requestId: record.id }, 'Reconciling durable confirmation failed'); unresolved++; continue; }
       }
-      if (record.state === 'pending' && !await this.live(record)) {
+      if (record.state === 'pending' && !await this.live(record, true)) {
         // Runtime hides a permission while its decision is being submitted.
         // A still-running task with a pending receipt has no expiry evidence.
         if (record.kind === 'permission' && record.boot === this.boot && receipt?.status === 'pending'
@@ -983,7 +991,8 @@ export class LarkWorkflowInteractions {
       durable: { choices: input.choices, snapshot } };
     if (!this.withinAskCardBudget(this.confirmationElements(probe))) throw new LarkServiceError('LARK_CONFIRMATION_TOO_LARGE', '问题和选项过长，请拆成一个较短的问题。', 400);
     const record = existing ?? (await this.create(context, 'ask', `deferred_${context.taskId}`, input.question, {
-      adhdMode: true, structured: true, ...(input.multiple ? { multiple: true } : {}), durable: { choices: input.choices, snapshot }
+      adhdMode: true, structured: true, ...(input.multiple ? { multiple: true } : {}), durable: { choices: input.choices, snapshot },
+      expiresAt: new Date(Date.now() + larkPermissionTimeoutMs).toISOString()
     })).record;
     if (record.state === 'pending') await this.deliverConfirmation(record).catch(error => this.log?.warn({ error, requestId: record.id }, 'Delivering durable confirmation failed; reconcile will retry'));
     return { status: 'deferred' as const, askId: record.id, reason: '确认已登记，等待用户点击后另起一轮；本轮结束，不执行依赖该确认的操作。' };
@@ -1013,8 +1022,10 @@ export class LarkWorkflowInteractions {
       await this.schedulePlanCheck(record.appId);
     }
   }
+  /** 对账只看本地状态；群成员和操作人权限留到点击时（respondConfirmation、finishConfirmation）再查。 */
   private async reconcileConfirmation(record: LarkInteraction) {
-    if (!await this.live(record)) {
+    if (record.state === 'pending' && confirmationDeadline(record) <= Date.now()) return this.expireConfirmation(record);
+    if (!await this.live(record, true)) {
       const ended = await this.move(record, 'expired');
       await this.renderClosed(ended, '已结束，未执行');
       return ended;
@@ -1022,6 +1033,12 @@ export class LarkWorkflowInteractions {
     if (record.state === 'resolving') return this.finishConfirmation(record);
     await this.deliverConfirmation(record);
     return this.current(record);
+  }
+  /** 过了截止时间仍没人点：按已过期结案并收卡，不回放原请求。 */
+  private async expireConfirmation(record: LarkInteraction) {
+    const expired = await this.move(record, 'expired', undefined, { timedOutAt: new Date().toISOString() });
+    await this.renderClosed(expired, await this.expiryMessage(expired));
+    return expired;
   }
   private async finishConfirmation(record: LarkInteraction) {
     if (this.confirming.has(record.id)) return record;
@@ -1042,6 +1059,10 @@ export class LarkWorkflowInteractions {
   }
   private async respondConfirmation(record: LarkInteraction, input: { actorId?: string; callback?: boolean; answer?: string; selected?: string[] }) {
     if (!input.callback) throw new LarkServiceError('LARK_CONFIRMATION_CLICK_REQUIRED', '请点击卡片选项。', 400);
+    if (record.state === 'pending' && confirmationDeadline(record) <= Date.now()) {
+      await this.expireConfirmation(record);
+      throw new LarkServiceError('LARK_CONFIRMATION_ENDED', '已过期，未执行', 409);
+    }
     if (!await this.live(record)) {
       if (record.state === 'pending') await this.renderClosed(await this.move(record, 'expired'), '已结束，未执行');
       throw new LarkServiceError('LARK_CONFIRMATION_ENDED', '已结束，未执行', 409);
@@ -1075,6 +1096,7 @@ export class LarkWorkflowInteractions {
     const due = records.filter(record => record.kind === 'plan' && record.state === 'pending' && record.expiresAt && record.cardId)
       .flatMap(record => [Date.parse(record.expiresAt!), ...(record.remindedAt ? [] : [Date.parse(record.expiresAt!) - larkPermissionTimeoutMs + larkPermissionReminderAfterMs])])
       .filter(at => at > now);
+    due.push(...records.filter(record => record.durable && record.state === 'pending' && record.cardId).map(confirmationDeadline).filter(at => at > now));
     due.push(...records.filter(record => record.durable && record.state === 'pending' && !record.cardId && record.deliveryRetryAt && (record.deliveryAttempts ?? 0) < 5).map(record => Math.max(now, record.deliveryRetryAt!)));
     due.push(...records.filter(record => record.kind !== 'result' && !['pending', 'resolving'].includes(record.state)
       && !record.cardClosedAt && record.closeRetryAt && (record.closeAttempts ?? 0) < 5).map(record => Math.max(now, record.closeRetryAt!)));
@@ -1101,8 +1123,9 @@ export class LarkWorkflowInteractions {
     await this.renderClosed(closed, [[outcome, actor, shanghaiClock(Date.parse(closed.updatedAt))].filter(Boolean).join(' · '), planClosedText(closed)].join('\n\n'));
     return closed;
   }
-  private async live(record: LarkInteraction) {
-    if (record.durable) return !this.closed && await this.confirmationAvailable?.(record) === true;
+  /** local：持久确认只核本地状态，不查群成员（对账用）。 */
+  private async live(record: LarkInteraction, local = false) {
+    if (record.durable) return !this.closed && await this.confirmationAvailable?.(record, !local) === true;
     if (record.kind === 'plan') return this.planLive(record);
     if (this.closed || record.boot !== this.boot) return false;
     if (!(await this.runtime.getTasks?.(record.sessionId))?.some(task => task.id === record.taskId && task.status === 'running')) return false;

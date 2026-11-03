@@ -398,7 +398,7 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
   });
   it('has only question/buttons, survives five minutes and later same-session messages, and snapshots the original object', async () => {
     const h = await harness();
-    expect(h.record.expiresAt).toBeUndefined();
+    expect(Date.parse(h.record.expiresAt!) - Date.now()).toBeGreaterThan(23 * 3_600_000);
     expect(h.broker.listPending()).toEqual([]);
     const card = h.service.reply.mock.calls.find(([input]) => input.taskId === h.record.id)![0];
     const json = JSON.stringify(buildLarkCard(card));
@@ -423,6 +423,77 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
     expect((await new LarkTaskInbox(h.repos.config).lookup(h.config.appId, `confirmation_${h.record.id}`))?.sessionId).toBe(h.sessionId);
     expect((await h.repos.sessions.list())).toHaveLength(1);
     expect(h.service.update.mock.calls.some(([input]) => JSON.stringify(input).includes('已确认写入'))).toBe(true);
+  });
+  it('expires an unclicked confirmation after 24 hours into one short line, without replaying it', async () => {
+    const h = await harness();
+    const deadline = Date.parse(h.record.expiresAt!);
+    expect(deadline - Date.now()).toBeGreaterThan(24 * 3_600_000 - 60_000);
+    expect(deadline - Date.now()).toBeLessThanOrEqual(24 * 3_600_000);
+    vi.spyOn(Date, 'now').mockReturnValue(deadline + 1);
+    await h.coordinator.reconcile(h.config);
+    expect((await h.interactions())[0]).toMatchObject({ state: 'expired', timedOutAt: expect.any(String), cardClosedAt: expect.any(String) });
+    const closes = () => h.service.update.mock.calls.map(([input]) => input).filter(input => input.taskId === h.record.id);
+    expect(closes()).toHaveLength(1);
+    expect(closes()[0]).toMatchObject({ statusLabel: '已过期', readOnly: true, elements: [{ tag: 'markdown', content: '已过期，未执行' }] });
+    await h.coordinator.reconcile(h.config);
+    expect(closes()).toHaveLength(1);
+    expect(await (h.coordinator as any).workflows.reconcile(h.config.appId)).toBe(0);
+    expect(await h.repos.config.list!(`lark.inbox.${h.config.appId}.confirmation_`)).toEqual([]);
+    expect(h.sends).toHaveLength(1);
+  });
+  it('rejects a click that arrives after the deadline but before reconcile', async () => {
+    const h = await harness();
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(h.record.expiresAt!) + 1);
+    expect(await h.click()).toMatchObject({ type: 'error', content: '已过期，未执行' });
+    expect((await h.interactions())[0]).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
+    expect(await h.repos.config.list!(`lark.inbox.${h.config.appId}.confirmation_`)).toEqual([]);
+    expect(h.sends).toHaveLength(1);
+  });
+  it.each(['pending', 'ended'] as const)('settles a %s legacy confirmation without expiresAt on the first pass after restart, from local state', async state => {
+    const h = await harness();
+    if (state === 'ended') await h.coordinator.endDurableConfirmations(h.config.appId);
+    const key = `lark.interaction.${h.config.appId}.${h.record.id}`;
+    const legacy = JSON.parse((await h.repos.config.get(key))!) as LarkInteraction;
+    delete legacy.expiresAt;
+    legacy.cardCreatedAt = '2026-10-22T03:38:36.687Z';
+    if (state === 'pending') legacy.updatedAt = legacy.cardCreatedAt;
+    await h.repos.config.set(key, JSON.stringify(legacy));
+    h.service.update.mockClear();
+    h.service.listChatMembers.mockClear();
+    await h.restart();
+    const record = (await h.interactions()).find(item => item.id === h.record.id)!;
+    const closes = h.service.update.mock.calls.map(([input]) => input).filter(input => input.taskId === h.record.id);
+    if (state === 'pending') {
+      expect(record).toMatchObject({ state: 'expired', timedOutAt: expect.any(String), cardClosedAt: expect.any(String) });
+      expect(closes.map(input => input.elements.at(-1).content)).toEqual(['已过期，未执行']);
+    } else {
+      expect(record).toMatchObject({ state: 'expired', closeMessage: '已结束，未执行' });
+      expect(record.timedOutAt).toBeUndefined();
+      expect(closes).toEqual([]);
+    }
+    await h.coordinator.reconcile(h.config);
+    expect(h.service.update.mock.calls.filter(([input]) => input.taskId === h.record.id)).toHaveLength(closes.length);
+    expect(h.service.listChatMembers).not.toHaveBeenCalled();
+    expect(h.sends).toHaveLength(1);
+  });
+  it('reconciles pending confirmations from local state and checks chat membership only when clicked', async () => {
+    const h = await harness();
+    h.service.listChatMembers.mockClear();
+    for (let round = 0; round < 3; round++) await h.coordinator.reconcile(h.config);
+    await h.restart();
+    expect(h.service.listChatMembers).not.toHaveBeenCalled();
+    expect(await (h.coordinator as any).workflows.reconcile(h.config.appId)).toBe(0);
+    await h.save({ highRiskAllowedUsers: [{ openId: 'ou_mallory', name: 'Mallory' }] });
+    expect(await h.click('ou_mallory')).toMatchObject({ type: 'error', content: '当前账号无权确认。' });
+    expect(h.service.listChatMembers).toHaveBeenCalled();
+    expect((await h.interactions())[0]!.state).toBe('pending');
+    h.service.listChatMembers.mockResolvedValue({ items: [{ memberId: 'ou_bob' }, { memberId: 'ou_eve' }], hasMore: false });
+    await h.coordinator.reconcile(h.config);
+    expect((await h.interactions())[0]!.state).toBe('pending');
+    expect(await h.click()).toMatchObject({ type: 'error', content: '已结束，未执行' });
+    expect((await h.interactions())[0]!.state).toBe('expired');
+    expect(await h.repos.config.list!(`lark.inbox.${h.config.appId}.confirmation_`)).toEqual([]);
+    expect(h.sends).toHaveLength(1);
   });
   it('restores pending cards after SQLite reopen and fresh Runtime/broker/coordinator restart without re-creating a waiter', async () => {
     const h = await harness();
