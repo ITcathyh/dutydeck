@@ -3800,27 +3800,33 @@ export class DutydeckRuntime {
     if (this.stopRechecks.get(id)?.since !== since) return;
     this.stopRechecks.delete(id);
     if (this.shuttingDown || this.blockedDrivers.get(id)?.driver !== driver) return;
+    // 每个 await 之后都可能已有显式停止、重启换了 transition、会话锁或驱动；只用探测前取得的 owner，失效就不再动这个会话。
+    const token = this.ownerOf(id), lifecycle = this.lifecycle(id);
+    const current = () => !this.shuttingDown && this.mutations.valid(token) && this.lifecycle(id) === lifecycle
+      && this.blockedDrivers.get(id)?.driver === driver && (this.drivers.get(id) ?? driver) === driver;
     let error: unknown;
-    if (!this.stopRuns.has(id) && await driver.isStopped?.() === true) {
+    if (!this.stopRuns.has(id) && await driver.isStopped?.() === true && current() && !this.stopRuns.has(id)) {
       try {
-        await this.mutations.run(this.ownerOf(id), async () => {
+        const reopened = await this.mutations.run(token, async () => {
           await this.revokeSession(id, false, 'interrupted');
+          if (!this.mutations.valid(token) || this.lifecycle(id) !== lifecycle) return false;
           await this.reopenQueue(id);
+          return true;
         });
-        this.options.log?.info?.({ sessionId: id, blockedSince: since }, 'Idle driver exit verified on recheck; session reopened');
+        if (reopened) this.options.log?.info?.({ sessionId: id, blockedSince: since }, 'Idle driver exit verified on recheck; session reopened');
         return;
       } catch (failure) { error = failure; }
     }
     if (this.shuttingDown || this.blockedDrivers.get(id)?.driver !== driver) return;
-    if (this.lifecycle(id).revoked && !this.stopRuns.has(id)) this.lifecycles.set(id, this.ownerOf(id));
+    if (current() && lifecycle.revoked && !this.stopRuns.has(id)) this.lifecycles.set(id, owner(id, token));
     if (delay === STOP_RECHECK_MS) {
       this.options.log?.warn({ sessionId: id, code: error instanceof RuntimeError ? error.code : 'DRIVER_STOP_UNVERIFIED', blockedSince: since }, 'Idle driver exit is still unverified');
       const session = await this.repos.sessions.get(id);
-      if (session) await this.mutations.run(undefined, () => this.sessionNotice(session, { id: `notice_${digest(['stop_unverified', id, since])}`, kind: 'stop_unverified', taskId: '', sessionIds: [id],
+      if (session && this.blockedDrivers.get(id)?.driver === driver) await this.mutations.run(undefined, () => this.sessionNotice(session, { id: `notice_${digest(['stop_unverified', id, since])}`, kind: 'stop_unverified', taskId: '', sessionIds: [id],
         message: '这个会话闲置关闭时，没能确认它的终端进程已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复。' },
         { key: `runtime_notice:stop_unverified:${id}`, value: since })).catch(() => {});
     }
-    this.scheduleStopRecheck(id, driver, Math.min(delay * 2, STOP_RECHECK_MAX_MS), since);
+    if (!this.shuttingDown && this.blockedDrivers.get(id)?.driver === driver) this.scheduleStopRecheck(id, driver, Math.min(delay * 2, STOP_RECHECK_MAX_MS), since);
   }
 
   /**

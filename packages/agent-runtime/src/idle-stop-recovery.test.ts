@@ -11,7 +11,7 @@ const HOUR = 60 * 60_000;
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { vi.useRealTimers(); for (const close of cleanup.splice(0).reverse()) await close(); });
 
-function runtimeFor(repos: ReturnType<typeof createRepositories>, state = { exited: true, prepared: true }) {
+function runtimeFor(repos: ReturnType<typeof createRepositories>, state: { exited: boolean; prepared: boolean; hold?: Promise<void> } = { exited: true, prepared: true }) {
   const log = { warn: vi.fn(), info: vi.fn() }, notices: SessionNotice[] = [], drivers: AgentDriver[] = [];
   const runtime = new DutydeckRuntime(repos, {
     cleanupIntervalMs: 0, driverIdleTimeoutMs: 10, log, onSessionNotice: (_session, notice) => { notices.push(notice); },
@@ -19,7 +19,7 @@ function runtimeFor(repos: ReturnType<typeof createRepositories>, state = { exit
     driverFactory: (_agent, _protocol, emit) => {
       const driver: AgentDriver = {
         start: vi.fn(async () => {}), resume: vi.fn(async () => {}), interrupt: vi.fn(async () => {}),
-        send: vi.fn(async () => { emit({ type: 'text', data: { text: 'answer' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }),
+        send: vi.fn(async () => { await state.hold; emit({ type: 'text', data: { text: 'answer' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }),
         stop: vi.fn(async () => {}), isStopped: async () => state.exited, prepareForIdleRetirement: async () => state.prepared,
       };
       drivers.push(driver); return driver;
@@ -31,7 +31,7 @@ function runtimeFor(repos: ReturnType<typeof createRepositories>, state = { exit
 async function fixture() {
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   cleanup.push(() => repos.close());
-  const state = { exited: false, prepared: true };
+  const state: { exited: boolean; prepared: boolean; hold?: Promise<void> } = { exited: false, prepared: true };
   const h = runtimeFor(repos, state);
   await h.runtime.initialize([agent]);
   const session = await h.runtime.start({ agentId: agent.id });
@@ -68,6 +68,31 @@ it('rechecks a stop block in the background, notices once while it persists, and
   expect(h.notices).toHaveLength(1);
   expect((await h.runtime.send(h.session.id, 'after recovery')).status).toBe('completed');
   expect(h.drivers).toHaveLength(2);
+});
+
+it('a recheck whose probe outlives an explicit restart leaves the new driver and its task alone', async () => {
+  const h = await fixture();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  await h.runtime.cleanupIdleDrivers(Date.now() + 100);
+  let probing!: () => void, releaseProbe!: () => void, held = false;
+  const entered = new Promise<void>(resolve => { probing = resolve; }), gate = new Promise<void>(resolve => { releaseProbe = resolve; });
+  // The recheck's probe hangs; the restart's own exit proof (a later call) succeeds at once.
+  h.drivers[0]!.isStopped = async () => { if (!held) { held = true; probing(); await gate; } return true; };
+  await vi.advanceTimersByTimeAsync(45_000);
+  await entered;
+  vi.useRealTimers();
+  await h.runtime.restart(h.session.id);
+  let finish!: () => void;
+  h.state.hold = new Promise<void>(resolve => { finish = resolve; });
+  const task = await h.runtime.dispatch(h.session.id, 'after restart');
+  await vi.waitFor(() => expect(h.drivers[1]?.send).toHaveBeenCalled());
+  try {
+    releaseProbe();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(h.drivers[1]!.stop).not.toHaveBeenCalled();
+    expect(h.runtime.getDriver(h.session.id)).toBe(h.drivers[1]);
+  } finally { finish(); }
+  await vi.waitFor(async () => expect((await h.runtime.getTasks(h.session.id)).find(item => item.id === task.id)?.status).toBe('completed'));
 });
 
 it('an explicit stop that proves exit lifts the rejection before the recheck runs', async () => {
