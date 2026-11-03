@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
-import type { AgentConfig, PermissionMode } from '@dutydeck/shared';
+import { PromptNotWrittenError, type AgentConfig, type PermissionMode } from '@dutydeck/shared';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -28,8 +28,8 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
 
 const jsonBlock = (value: unknown) => `分析完成。\n\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\``;
 
-/** 记忆会话的回复计划：文本，外加可选的延迟（用来构造超时与单飞场景）。 */
-type MemoryReply = { text: string; delayMs?: number };
+/** 记忆会话的回复计划：文本，外加可选的延迟（用来构造超时与单飞场景）或启动失败（prompt 没写进去）。 */
+type MemoryReply = { text: string; delayMs?: number; startupError?: string };
 
 /** 记忆会话的 start 入参；用例用它断言权限模式与复用次数。 */
 type StartInput = { agentId: string; cwd?: string; model?: string; permissionMode?: PermissionMode };
@@ -49,9 +49,10 @@ async function harness(options: { now?: () => Date; timeoutMs?: number; agentMod
     probe: configured => ({ protocol: configured.id === 'memory' ? options.protocol ?? 'acp' : 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _onExit, sessionId) => {
       let busy = false;
+      let stopped = false;
       const driver: AgentDriver = {
-        isIdle: () => !busy, hasBackgroundWork: () => false,
-        start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
+        isIdle: () => !busy, hasBackgroundWork: () => false, isStopped: async () => stopped,
+        start: async () => {}, resume: async () => {}, stop: async () => { stopped = true; }, interrupt: async () => {},
         send: async prompt => {
           busy = true;
           try {
@@ -59,6 +60,7 @@ async function harness(options: { now?: () => Date; timeoutMs?: number; agentMod
             if (session?.source === 'lark-memory') {
               memoryPrompts.push(prompt);
               const reply = respond(prompt);
+              if (reply.startupError) throw new PromptNotWrittenError(reply.startupError);
               if (reply.delayMs) await new Promise(resolve => setTimeout(resolve, reply.delayMs));
               emit({ type: 'text', data: { text: reply.text } });
               emit({ type: 'completed', data: { stopReason: 'end_turn' } });
@@ -809,6 +811,23 @@ describe('Lark memory pipeline through the coordinator', () => {
 
     // 8 轮被这次整理消化掉，运行期间新完成的 2 轮必须留下。
     expect((await h.store.getState(scope)).turnsSinceConsolidation).toBe(2);
+  });
+
+  it('记忆会话启动没就绪：作业失败后收掉这个会话，下次换新会话', async () => {
+    const h = await harness();
+    await h.coordinator.handle(event('om_remember', '/remember 这个群的回复统一用中文'), h.config);
+    await vi.waitFor(() => expect(h.lastCardText()).toContain('已记住'));
+    h.setResponder(() => ({ text: '', startupError: 'Claude 启动停在“是否允许导入工作目录外的 CLAUDE.md”确认框，请在终端里选择后再发送任务。' }));
+
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: false, error: 'MEMORY_RUN_FAILED' });
+    const failed = (await h.repos.memoryJobs.listScope(scope)).find(job => job.error === 'MEMORY_RUN_FAILED')!;
+    expect(failed).toMatchObject({ mode: 'compatible', state: 'failed' });
+    expect(await h.runtime.getSession(failed.sessionId)).toMatchObject({ state: 'stopped', archivedAt: expect.any(String) });
+
+    h.setResponder(() => ({ text: jsonBlock({ actions: [{ op: 'noop' }] }) }));
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+    expect(h.startCalls).toHaveLength(2);
+    await h.waitIdle();
   });
 
   it('记忆会话超时但中断未确认：保留原任务、报告恢复所需并清掉管线 running', async () => {

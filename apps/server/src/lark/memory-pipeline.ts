@@ -764,7 +764,8 @@ export class LarkMemoryPipeline {
         const terminal = ['MEMORY_DISABLED','MEMORY_CONCURRENT_CHANGE','MEMORY_GATE_REJECTED',indexOverBudgetViolation,'MEMORY_INPUT_CAPACITY','MEMORY_AGENT_OUTPUT_INVALID','MEMORY_RUN_FAILED','MEMORY_RUN_TIMEOUT'].includes(code);
         if (terminal && !this.runContext.getStore()?.signal.aborted) {
           try {
-            if (job.mode === 'isolated') {
+            // A run that did not finish leaves no reusable context, and its terminal may still hold a startup dialog.
+            if (job.mode === 'isolated' || code === 'MEMORY_RUN_FAILED' || code === 'MEMORY_RUN_TIMEOUT') {
               const session = await this.options.runtime.getSession(job.sessionId);
               if (session && !session.archivedAt) {
                 await this.assertMemorySessionReady(session);

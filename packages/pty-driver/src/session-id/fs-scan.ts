@@ -107,6 +107,7 @@ export function readTail(path: string, maxBytes: number): string {
 export interface ScannedFile {
   path: string;
   mtimeMs: number;
+  size: number;
 }
 
 export interface WalkOptions {
@@ -154,7 +155,7 @@ export function walkFiles(root: string, opts: WalkOptions): ScannedFile[] {
         } else if (entry.isFile() && opts.accept(entry.name)) {
           try {
             const st = statSync(full);
-            if (st.isFile()) out.push({ path: full, mtimeMs: st.mtimeMs });
+            if (st.isFile()) out.push({ path: full, mtimeMs: st.mtimeMs, size: st.size });
           } catch {
             // Vanished between readdir and stat — ignore.
           }

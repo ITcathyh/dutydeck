@@ -48,6 +48,15 @@ import { ClaudeBackgroundTasks } from './claude-background.js';
 const MARKER_HEAD_BYTES = 256 * 1024;
 /** Newest-first cap on candidates scanned in one project dir. */
 const MAX_MARKER_CANDIDATES = 40;
+/** A live tailer whose transcript is missing scans for the marker on every poll for this long after
+ *  start or a new input, then at 1 s doubling to 30 s. Missing means Claude has not taken the prompt
+ *  yet (a startup dialog, say); the pinned file itself is still checked on every poll. */
+const MARKER_SCAN_FAST_MS = 10_000;
+const MARKER_SCAN_FIRST_INTERVAL_MS = 1_000;
+const MARKER_SCAN_MAX_INTERVAL_MS = 30_000;
+
+/** Marker head result per candidate, valid while its mtime and size are unchanged. */
+type MarkerHeads = Map<string, { mtimeMs: number; size: number; match: boolean }>;
 
 /** Newest *.jsonl (by mtime) in a Claude project dir, or undefined.
  *
@@ -124,33 +133,70 @@ export function resolveClaudeTranscriptPath(
 /** The session's own jsonl inside an already-resolved project dir: pinned id
  *  first, marker scan second, undefined when neither identifies it. */
 function resolveClaudeSessionTranscript(projectDir: string, sessionId: string): string | undefined {
-  // Fast path: dutydeck pinned the id via `--session-id <uuid>` (see
-  // cli-adapters/adapters/claude-family.ts buildArgs) and Claude accepted it,
-  // so the filename is the pinned uuid.
-  const pinned = pinnedSessionUuid(sessionId);
-  if (pinned) {
-    const direct = join(projectDir, `${pinned}.jsonl`);
-    if (existsSync(direct)) return direct;
-  }
-  // Scan path: find the transcript whose first user prompt carries our
-  // marker. Newest-first only bounds the work — the marker decides which is
-  // ours. Same contract as the session-id lookup; see marker.ts.
-  return findJsonlByMarker(projectDir, sessionId);
+  // Pinned id first. Scan path: find the transcript whose first user prompt
+  // carries our marker. Newest-first only bounds the work — the marker decides
+  // which is ours. Same contract as the session-id lookup; see marker.ts.
+  return pinnedClaudeTranscript(projectDir, sessionId) ?? findJsonlByMarker(projectDir, sessionId);
 }
 
-/** The jsonl in `dir` whose head carries `marker`, or undefined. */
-function findJsonlByMarker(dir: string, sessionId: string): string | undefined {
+/** Fast path: dutydeck pinned the id via `--session-id <uuid>` (see
+ *  cli-adapters/adapters/claude-family.ts buildArgs) and Claude accepted it,
+ *  so the filename is the pinned uuid. */
+function pinnedClaudeTranscript(projectDir: string, sessionId: string): string | undefined {
+  const pinned = pinnedSessionUuid(sessionId);
+  if (!pinned) return undefined;
+  const direct = join(projectDir, `${pinned}.jsonl`);
+  return existsSync(direct) ? direct : undefined;
+}
+
+/** The jsonl in `dir` whose head carries `marker`, or undefined. With `heads`,
+ *  a candidate whose mtime and size are unchanged is not read again. */
+function findJsonlByMarker(dir: string, sessionId: string, heads?: MarkerHeads): string | undefined {
   if (!isUsableMarker(sessionId)) return undefined;
   const marker = buildSessionMarker(sessionId);
   const candidates = walkFiles(dir, { maxDepth: 0, accept: name => name.endsWith('.jsonl') })
     .sort(byMtimeDesc)
     .slice(0, MAX_MARKER_CANDIDATES);
-  for (const candidate of candidates) {
-    for (const entry of parseJsonlObjects(readHead(candidate.path, MARKER_HEAD_BYTES))) {
-      if (userEntryMentionsMarker(entry, marker)) return candidate.path;
-    }
+  for (const { path, mtimeMs, size } of candidates) {
+    const cached = heads?.get(path);
+    const match = cached && cached.mtimeMs === mtimeMs && cached.size === size ? cached.match
+      : parseJsonlObjects(readHead(path, MARKER_HEAD_BYTES)).some(entry => userEntryMentionsMarker(entry, marker));
+    heads?.set(path, { mtimeMs, size, match });
+    if (match) return path;
   }
   return undefined;
+}
+
+/** resolveClaudeSessionTranscript for one live tailer, which asks on every poll. */
+class ClaudeSessionTranscriptLocator {
+  private readonly heads: MarkerHeads = new Map();
+  private fastUntil = 0;
+  private nextScanAt = 0;
+  private interval = MARKER_SCAN_FIRST_INTERVAL_MS;
+
+  constructor(private readonly cwd: string, private readonly env: CliPathEnv | undefined, private readonly sessionId: string) {
+    this.wake();
+  }
+
+  /** A prompt is about to be written: its transcript record is expected promptly. */
+  wake(): void {
+    this.fastUntil = Date.now() + MARKER_SCAN_FAST_MS;
+    this.nextScanAt = 0;
+    this.interval = MARKER_SCAN_FIRST_INTERVAL_MS;
+  }
+
+  resolve(): string | undefined {
+    const projectDir = claudeProjectDir(this.cwd, this.env);
+    const pinned = pinnedClaudeTranscript(projectDir, this.sessionId);
+    if (pinned) return pinned;
+    const now = Date.now();
+    if (now < this.nextScanAt) return undefined;
+    if (now >= this.fastUntil) {
+      this.nextScanAt = now + this.interval;
+      this.interval = Math.min(this.interval * 2, MARKER_SCAN_MAX_INTERVAL_MS);
+    }
+    return findJsonlByMarker(projectDir, this.sessionId, this.heads);
+  }
 }
 
 /** Flatten a tool_result block's content (string, or array of text blocks)
@@ -389,6 +435,7 @@ export interface ClaudeTranscriptTailerOptions {
 
 export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private readonly tailer: JsonlTailer;
+  private readonly locator?: ClaudeSessionTranscriptLocator;
   private backgroundWork = 0;
   private backgroundReported = false;
   private readonly backgroundTasks = new ClaudeBackgroundTasks();
@@ -433,6 +480,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     const explicit = opts.transcriptPath;
     let resolved: string | undefined = opts.nativeSessionPath;
     let nativeId: string | undefined;
+    const locator = this.locator = opts.sessionId ? new ClaudeSessionTranscriptLocator(opts.cwd, opts.env, opts.sessionId) : undefined;
     const resolvePath = () => {
       if (explicit) return explicit;
       if (!opts.sessionId && !opts.nativeSession) return resolveClaudeTranscriptPath(opts.cwd, opts.env);
@@ -448,7 +496,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         resolved = source.path;
         opts.onNativeSession?.(source);
       }
-      return resolved ??= resolveClaudeTranscriptPath(opts.cwd, opts.env, opts.sessionId);
+      return resolved ??= locator ? locator.resolve() : resolveClaudeTranscriptPath(opts.cwd, opts.env);
     };
     this.subagents = new ClaudeSubagentReader(resolvePath);
     const memoryRoot = resolve(claudeProjectDir(opts.cwd, opts.env), 'memory') + sep;
@@ -662,6 +710,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     this.terminalScope = false; this.turnTerminal = false; this.terminalUuids.clear(); this.restoringTurn = false;
     this.receiptEntry = undefined;
     this.inputUuid = undefined; this.inputEntries.clear(); this.inputError = undefined;
+    this.locator?.wake();
     return this.tailer.waitForInput(prompt, signal);
   }
   pendingBackgroundWork(): number { return Math.max(this.backgroundWork, this.backgroundReported ? this.backgroundTasks.snapshot().count : 0); }

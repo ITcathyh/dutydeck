@@ -11,6 +11,10 @@ const resumedComposer = readFileSync(new URL('../fixtures/claude-resume-ready/sc
 const placeholderComposer = readFileSync(new URL('../fixtures/claude-placeholder-ready/screen.txt', import.meta.url), 'utf8');
 // 2.1.303 resumed pane with a two-line user statusLine; history/model/workspace anonymized.
 const statuslineComposer = readFileSync(new URL('../fixtures/claude-statusline-ready/screen.txt', import.meta.url), 'utf8');
+// Claude 2.1.316 startup dialogs that wait for a person (capture-pane, 120x30). external-imports is the
+// stuck background memory job's pane; only its home directory is anonymized.
+const blockingDialogs = ['external-imports', 'mcp-server', 'mcp-servers', 'bypass-permissions']
+  .map(name => [name, readFileSync(new URL(`../fixtures/claude-blocking-dialogs/${name}.txt`, import.meta.url), 'utf8')] as const);
 const cwd = '/workspace/trusted-project';
 const trustScreen = (selected: 'No, exit' | 'Yes, I trust this folder', path = cwd) => [
   '─'.repeat(120), 'Accessing workspace:', '', path, '',
@@ -185,6 +189,26 @@ describe('Claude family startup trust confirmation', () => {
     }
   });
 
+  it.each(blockingDialogs)('reports the recorded %s dialog at once without answering it', async (_name, screen) => {
+    vi.useFakeTimers();
+    try {
+      const backend = new TrustBackend(screen);
+      let error: unknown;
+      prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd, permissionMode: 'full-trust' }).catch(reason => { error = reason; });
+      await vi.advanceTimersByTimeAsync(200);
+      expect(String(error)).toMatch(/^Error: Claude 启动停在“[^”]+”确认框，请在终端里选择后再发送任务。$/);
+      expect(backend.writes).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('names the external CLAUDE.md import dialog that stopped the memory job', async () => {
+    const backend = new TrustBackend(blockingDialogs[0]![1]);
+    await expect(prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd, permissionMode: 'ask' }))
+      .rejects.toThrow('Claude 启动停在“是否允许导入工作目录外的 CLAUDE.md”确认框，请在终端里选择后再发送任务。');
+  });
+
   it.each([
     ['partial trust page', trustScreen('No, exit').replace('Enter to confirm · Esc to cancel', '')],
     ['unknown setup prompt', 'Unknown setup\n────────\n❯\n────────'],
@@ -243,6 +267,23 @@ describe('Claude family idle screen', () => {
     ['history only', '❯ old request\nPrevious answer'],
   ])('does not treat %s as idle', (_name, screen) => {
     expect(adapter.isIdleScreen!(screen)).toBe(false);
+  });
+});
+
+describe('Claude family background job settings', () => {
+  const sources = (adapter: ReturnType<typeof createClaudeFamilyAdapter>, env?: Record<string, string>) => {
+    const args = adapter.buildArgs({ sessionId: 'ses_1', cwd, env });
+    const index = args.indexOf('--setting-sources');
+    return index < 0 ? undefined : args[index + 1];
+  };
+  it.each(['lark-memory', 'lark-decision', 'lark-response'])('loads only user settings for the %s job', source => {
+    expect(sources(createClaudeFamilyAdapter('claude-code'), { dutydeck_session_source: source })).toBe('user');
+  });
+  it.each([undefined, 'lark', 'schedule', 'lark-leader'])('keeps project settings for %s sessions', source => {
+    expect(sources(createClaudeFamilyAdapter('claude-code'), source ? { dutydeck_session_source: source } : undefined)).toBeUndefined();
+  });
+  it('does not pass the flag to Seed or Relay', () => {
+    for (const id of ['seed', 'relay']) expect(sources(createClaudeFamilyAdapter(id), { dutydeck_session_source: 'lark-memory' })).toBeUndefined();
   });
 });
 

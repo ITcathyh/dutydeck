@@ -19,6 +19,20 @@ const STARTUP_POLL_MS = 100;
 const STARTUP_TIMEOUT_MS = 30_000;
 const TRUST_KEY_RETRY_MS = 1_000;
 
+/**
+ * Dutydeck 自己的后台作业（群记忆、群参与判断与回复生成）只加载用户级设置：它们的目录在 Dutydeck
+ * 数据目录下，可能位于某个代码仓库里，不能继承那个仓库的 CLAUDE.md、项目设置和 .mcp.json，
+ * 也就不会停在导入、MCP 启用这类只有人能回答的确认框上。--settings 仍然生效。
+ */
+const USER_SETTINGS_ONLY_SOURCES = new Set(['lark-memory', 'lark-decision', 'lark-response']);
+
+/** Claude 2.1.316 启动时等人回答、Dutydeck 不代答的确认框：标题行与告诉用户的名称。 */
+const BLOCKING_STARTUP_DIALOGS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^Allow external CLAUDE\.md file imports\?$/, '是否允许导入工作目录外的 CLAUDE.md'],
+  [/^(?:New MCP server found in this project: .+|\d+ new MCP servers found in this project)$/, '是否启用项目里的 MCP 服务'],
+  [/^WARNING: Claude Code running in Bypass Permissions mode$/, '是否接受跳过权限确认模式'],
+];
+
 /** Claude 家族完成标记：`✳ Worked for 12s` 等耗时行。 */
 export const CLAUDE_FAMILY_COMPLETION_RE =
   /[✳✻]\s*(?:Worked|Crunched|Cogitated|Cooked|Churned|Saut[eé]ed|Baked|Brewed) for \d+[smh]/;
@@ -171,6 +185,16 @@ function isComposerScreen(screen: string): boolean {
     && !choiceMenu;
 }
 
+/** 标题之下还要有确认框的操作提示，历史输出里同样的一行字不算。 */
+function blockingStartupDialog(screen: string): string | undefined {
+  const lines = screenLines(screen);
+  for (const [title, name] of BLOCKING_STARTUP_DIALOGS) {
+    const index = lines.findIndex(line => title.test(line));
+    if (index >= 0 && lines.slice(index + 1).some(line => /^(?:Enter to confirm|Space to select) · Esc to /.test(line))) return name;
+  }
+  return undefined;
+}
+
 function trustSelection(screen: string, cwd: string | undefined): 'No, exit' | 'Yes, I trust this folder' | undefined {
   if (!cwd) return undefined;
   const lines = screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
@@ -226,6 +250,8 @@ export async function prepareClaudeFamilyInput(backend: PtyLike, ctx: AdapterSes
     // by an earlier render into a different or partially-rendered dialog.
     if (!trustScreen) {
       if (isComposerScreen(screen)) return;
+      const dialog = blockingStartupDialog(screen);
+      if (dialog) throw new Error(`Claude 启动停在“${dialog}”确认框，请在终端里选择后再发送任务。`);
       await delay(STARTUP_POLL_MS);
       continue;
     }
@@ -296,6 +322,9 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
           }] }) } });
         if (index < 0) args.push('--settings', value);
         else args[index + 1] = value;
+      }
+      if (id === 'claude-code' && USER_SETTINGS_ONLY_SOURCES.has(env?.dutydeck_session_source ?? '')) {
+        args.push('--setting-sources', 'user');
       }
       // PlanMode 的审批 TUI 在 IM 场景无法驱动，直接禁掉。
       args.push('--disallowed-tools', 'EnterPlanMode,ExitPlanMode');
