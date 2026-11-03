@@ -175,14 +175,14 @@ export interface RuntimeOptions {
   onTaskSettled?: (session: Session, task: PublicTaskRecord) => void | Promise<void>;
   /** 一次验证跑完后通知宿主；不影响验证结果，异常忽略。 */
   onVerificationCompleted?: (session: Session, result: VerificationResponse) => void | Promise<void>;
-  /** 会话提醒（排队受阻、结果未知久未处理或已自动结案）已写进会话后交给宿主投递，比如转到飞书原话题；同一提醒只调一次，异常只记日志。 */
+  /** 会话提醒（排队受阻、结果未知久未处理或已自动结案、空闲回收后终端退出未核实）已写进会话后交给宿主投递，比如转到飞书原话题；同一提醒只调一次，异常只记日志。 */
   onSessionNotice?: (session: Session, notice: SessionNotice) => void | Promise<void>;
 }
 
 /** 运行时留在会话里的提醒（status 事件 state=notice）。id 稳定：同一件事只提醒一次，宿主可直接当幂等键。 */
 export interface SessionNotice {
   id: string;
-  kind: 'workspace_blocked' | 'unknown_task_overdue' | 'unknown_task_abandoned' | 'queue_expired';
+  kind: 'workspace_blocked' | 'unknown_task_overdue' | 'unknown_task_abandoned' | 'queue_expired' | 'stop_unverified';
   taskId: string;
   /** 结果未知提醒对应的执行，用于沿用宿主已有的提醒。 */
   attemptId?: string;
@@ -191,6 +191,11 @@ export interface SessionNotice {
   /** 能处理这件事的会话（Web 详情入口）。 */
   sessionIds: string[];
 }
+/** 空闲回收没能核实终端进程已退出时，隔这么久后台复核一次，之后每次加倍，最长隔 30 分钟。 */
+const STOP_RECHECK_MS = 45_000;
+const STOP_RECHECK_MAX_MS = 30 * 60_000;
+/** 空闲回收前确认不了原生会话的终端（比如卡在启动确认框），闲置超过回收时限再加这么久，就不再保留、照常回收。 */
+const IDLE_RETIREMENT_UNPREPARED_MS = 18 * 60 * 60_000;
 /** 结果未知的一轮开始超过这么久还没人处理，在原话题提醒一次怎么处理。 */
 const UNKNOWN_TASK_REMIND_MS = 24 * 60 * 60_000;
 /** 超过这么久仍没人处理、且能证明执行进程已退出时，自动按「结果未知、已放弃」结案。 */
@@ -254,6 +259,8 @@ export class DutydeckRuntime {
   private readonly stopBlocks = new Map<string, { sessionId: string; runId: string; reason: string }>();
   private readonly stopBlockVersions = new Map<string, number>();
   private readonly blockedDrivers = new Map<string, { driver: AgentDriver; reason: string }>();
+  /** 空闲回收退出未核实、等后台复核的会话；since 是这次受阻开始的时间，也是提醒的幂等值。 */
+  private readonly stopRechecks = new Map<string, { timer: ReturnType<typeof setTimeout>; since: string }>();
   private readonly driverOperations = new Map<AgentDriver, Set<Promise<unknown>>>();
   private readonly factoryCleanups = new Map<string, Promise<void>>();
   private readonly attachedTerminals = new WeakSet<AgentDriver>();
@@ -658,6 +665,7 @@ export class DutydeckRuntime {
     for (const agent of agents) await this.mutations.write('runtime_initialize', () => this.repos.agents.save(agent));
     onAgentsRegistered?.();
     for (const session of await this.mutations.wait(() => this.repos.sessions.list())) {
+      try {
       await this.scoped(session.id, async () => {
         await this.loadStopBlock(session.id);
         if (session.archivedAt) return;
@@ -716,6 +724,12 @@ export class DutydeckRuntime {
         await this.projectQueue(session.id);
         if (this.queues.get(session.id)?.length) this.scheduleQueue(session.id);
       });
+      } catch (error) {
+        // 一个会话的工作目录不见了（比如 worktree 被删）只影响它自己：记下来、跳过它，别让整个实例起不来。
+        if (this.shuttingDown || !(error instanceof RuntimeError && error.code === 'WORKSPACE_UNAVAILABLE')) throw error;
+        this.options.log?.warn({ sessionId: session.id, code: error.code, error: error.message }, 'Session startup recovery skipped');
+        await this.emit(session.id, 'error', { code: error.code, message: error.message });
+      }
     }
   }
   private async persistTerminalReceipt(session: Session, driver: AgentDriver): Promise<void> {
@@ -3003,6 +3017,9 @@ export class DutydeckRuntime {
     }
     return this.scoped(id, async () => {
       const { session } = await this.active(id);
+      // 空闲回收没核实进程已退出、正等后台复核：排进队列也要等复核，直接告诉调用方这个会话暂不可用。
+      const stopBlock = this.stopRechecks.has(id) ? this.getDriverStopBlock(id) : undefined;
+      if (stopBlock) throw new RuntimeError('DRIVER_STOP_UNVERIFIED', stopBlock, 409);
       await this.authorize(id, actorId);
       await this.mutations.wait(() => this.options.admitTask?.(session, request) ?? Promise.resolve());
       const agent = await this.mutations.wait(() => this.repos.agents.get(session.agentId));
@@ -3742,20 +3759,68 @@ export class DutydeckRuntime {
     const timeout = this.options.driverIdleTimeoutMs ?? 6 * 60 * 60_000;
     if (timeout > 0) for (const [sessionId, driver] of this.drivers) {
       // Native background work counts as running for the restart drain too; it may stay silent past the timeout.
-      if (this.attempts.has(sessionId) || driver.hasBackgroundWork?.() || at - (this.lastActivity.get(sessionId) ?? at) < timeout) continue;
+      // A stop-blocked driver belongs to its background recheck.
+      if (this.attempts.has(sessionId) || this.blockedDrivers.has(sessionId) || driver.hasBackgroundWork?.() || at - (this.lastActivity.get(sessionId) ?? at) < timeout) continue;
       const lifecycle = this.lifecycle(sessionId);
       const session = await this.repos.sessions.get(sessionId);
       if (!session || this.drivers.get(sessionId) !== driver || this.lifecycle(sessionId) !== lifecycle || this.attempts.has(sessionId) || driver.hasBackgroundWork?.() || !['idle', 'completed', 'interrupted'].includes(session.state)) continue;
-      if (driver.prepareForIdleRetirement && !await driver.prepareForIdleRetirement()) continue;
+      if (driver.prepareForIdleRetirement && !await driver.prepareForIdleRetirement()) {
+        // 一直确认不了原生会话的多半卡在启动阶段，没有可续的上下文；原生记录留在磁盘上，回收只结束进程。
+        const idleMs = at - (this.lastActivity.get(sessionId) ?? at);
+        if (idleMs < timeout + IDLE_RETIREMENT_UNPREPARED_MS) continue;
+        this.options.log?.warn({ sessionId, code: 'IDLE_RETIREMENT_UNPREPARED', idleMs }, 'Retiring an idle driver whose native session could not be confirmed');
+      }
       if (this.drivers.get(sessionId) !== driver || this.attempts.has(sessionId) || driver.hasBackgroundWork?.() || this.lifecycle(sessionId) !== lifecycle) continue;
-      const transition = this.transition(sessionId);
+      const transition = this.transition(sessionId), startedAt = Date.now();
       try {
         await this.revokeSession(sessionId, false, 'interrupted');
         if (!this.shuttingDown && this.mutations.valid(transition) && this.lifecycle(sessionId) === lifecycle) this.lifecycles.set(sessionId, owner(sessionId, transition));
       }
-      catch { /* Retain the resource block for an explicit stop retry. */ }
+      catch (error) {
+        // Retain the resource block, but reopen the session: dispatch then reports DRIVER_STOP_UNVERIFIED instead of OPERATION_REVOKED.
+        if (!this.shuttingDown && this.mutations.valid(transition) && this.lifecycle(sessionId) === lifecycle) this.lifecycles.set(sessionId, owner(sessionId, transition));
+        this.options.log?.warn({ sessionId, code: error instanceof RuntimeError ? error.code : 'IDLE_RETIREMENT_FAILED', reason: error instanceof Error ? error.message : String(error), elapsedMs: Date.now() - startedAt },
+          'Idle driver retirement could not verify process exit');
+        if (!this.shuttingDown && this.blockedDrivers.get(sessionId)?.driver === driver) this.scheduleStopRecheck(sessionId, driver, STOP_RECHECK_MS, new Date().toISOString());
+      }
     }
     await this.reviewUnknownTasks(at);
+  }
+  private scheduleStopRecheck(id: string, driver: AgentDriver, delay: number, since: string) {
+    clearTimeout(this.stopRechecks.get(id)?.timer);
+    const timer = setTimeout(() => { void this.recheckStop(id, driver, delay, since).catch(() => {}); }, delay);
+    timer.unref?.();
+    this.stopRechecks.set(id, { timer, since });
+  }
+  /**
+   * 空闲回收退出未核实的复核：驱动证明原进程都已退出，就沿用停止重试把资源记为已退出、清掉停止受阻，再重开会话；
+   * 否则按退避继续复核。第一次复核仍未通过时在会话里提醒一次。
+   */
+  private async recheckStop(id: string, driver: AgentDriver, delay: number, since: string) {
+    if (this.stopRechecks.get(id)?.since !== since) return;
+    this.stopRechecks.delete(id);
+    if (this.shuttingDown || this.blockedDrivers.get(id)?.driver !== driver) return;
+    let error: unknown;
+    if (!this.stopRuns.has(id) && await driver.isStopped?.() === true) {
+      try {
+        await this.mutations.run(this.ownerOf(id), async () => {
+          await this.revokeSession(id, false, 'interrupted');
+          await this.reopenQueue(id);
+        });
+        this.options.log?.info?.({ sessionId: id, blockedSince: since }, 'Idle driver exit verified on recheck; session reopened');
+        return;
+      } catch (failure) { error = failure; }
+    }
+    if (this.shuttingDown || this.blockedDrivers.get(id)?.driver !== driver) return;
+    if (this.lifecycle(id).revoked && !this.stopRuns.has(id)) this.lifecycles.set(id, this.ownerOf(id));
+    if (delay === STOP_RECHECK_MS) {
+      this.options.log?.warn({ sessionId: id, code: error instanceof RuntimeError ? error.code : 'DRIVER_STOP_UNVERIFIED', blockedSince: since }, 'Idle driver exit is still unverified');
+      const session = await this.repos.sessions.get(id);
+      if (session) await this.mutations.run(undefined, () => this.sessionNotice(session, { id: `notice_${digest(['stop_unverified', id, since])}`, kind: 'stop_unverified', taskId: '', sessionIds: [id],
+        message: '这个会话闲置关闭时，没能确认它的终端进程已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复。' },
+        { key: `runtime_notice:stop_unverified:${id}`, value: since })).catch(() => {});
+    }
+    this.scheduleStopRecheck(id, driver, Math.min(delay * 2, STOP_RECHECK_MAX_MS), since);
   }
 
   /**
@@ -3839,6 +3904,8 @@ export class DutydeckRuntime {
     this.initializationOwner.revoke();
     this.workspaceReaders.revoke();
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
+    for (const recheck of this.stopRechecks.values()) clearTimeout(recheck.timer);
+    this.stopRechecks.clear();
     for (const transition of this.transitions.values()) transition.revoke();
     const ids = new Set([...this.lifecycles.keys(), ...this.drivers.keys()]);
     try {

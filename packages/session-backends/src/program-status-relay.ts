@@ -41,12 +41,14 @@ const stdout = process.stdout;
 void process.stderr;
 const childEnv = process.env;
 const childCwd = process.cwd();
+/** The pane hung up: stdout can never drain again, so its backpressure no longer applies. */
+let paneClosed = false;
 
 function exitWithChildStatus(code: number | null | undefined, signal: number | NodeJS.Signals | null | undefined): void {
   const signo = typeof signal === 'number' ? signal : 0;
   const status = signo > 0 ? 128 + signo : (code ?? 1);
   // Let pending pane output drain before the process (and with it the pane) goes away.
-  if (stdout.writableLength > 0) stdout.once('drain', () => process.exit(status));
+  if (stdout.writableLength > 0 && !paneClosed) stdout.once('drain', () => process.exit(status));
   else process.exit(status);
   setTimeout(() => process.exit(status), 1000).unref();
 }
@@ -111,11 +113,20 @@ function relayThrough(term: pty.IPty): void {
 
   let paused = false;
   function forward(buf: Buffer): void {
+    if (paneClosed) return;
     if (!stdout.write(buf) && !paused) {
       paused = true;
       term.pause();
       stdout.once('drain', () => { paused = false; term.resume(); });
     }
+  }
+  // While the pane lives, a paused inner PTY keeps the CLI's tail bytes (see
+  // spawnPty). Once it is gone nothing can receive them; staying paused would
+  // also defer the CLI's exit until the SIGKILL escalation below.
+  function closePane(): void {
+    if (paneClosed) return;
+    paneClosed = true;
+    if (paused) { paused = false; term.resume(); }
   }
 
   term.onData((data: string | Buffer) => {
@@ -142,8 +153,8 @@ function relayThrough(term: pty.IPty): void {
   });
 
   stdin.on('data', (data: Buffer) => term.write(data));
-  stdin.on('error', () => { /* pane gone; SIGHUP handles teardown */ });
-  stdout.on('error', () => { /* pane gone; SIGHUP handles teardown */ });
+  stdin.on('error', closePane);
+  stdout.on('error', closePane);
 
   process.on('SIGWINCH', () => {
     if (stdout.columns && stdout.rows) {
@@ -154,6 +165,7 @@ function relayThrough(term: pty.IPty): void {
   let escalation: ReturnType<typeof setTimeout> | null = null;
   for (const sig of ['SIGHUP', 'SIGTERM', 'SIGINT', 'SIGQUIT'] as const) {
     process.on(sig, () => {
+      if (sig === 'SIGHUP') closePane();
       try { term.kill(sig); } catch { /* already exited */ }
       if (escalation) return;
       // Never process.exit() while the child lives: node-pty's native waitpid

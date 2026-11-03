@@ -1095,8 +1095,11 @@ export class PtyCliDriver implements AgentDriver {
         tmuxBackend.disposeCapture();
         if (this.tmuxIdentity) this.tmuxExitProof = await stopOwnedTmux(this.tmuxIdentity, this.processProbe);
       } else (await this.backend.kill());
-    } catch {
-      // best effort：后端可能已退出
+    } catch (error) {
+      // best effort：后端可能已退出。已发出 kill、只是退出还没证实时留下待证明据，
+      // isStopped() 每次都重新核验它，之后的复核不必再停一次。
+      const unproven = error as { code?: string; proof?: OwnedTmuxExitProof };
+      if (unproven.code === 'LEGACY_TMUX_EXIT_UNPROVEN' && unproven.proof) this.tmuxExitProof = unproven.proof;
     } finally {
       this.stoppedCallback?.();
     }

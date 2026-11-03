@@ -26,6 +26,16 @@ export interface OwnedTmuxExitProof extends OwnedTmuxIdentity { stoppedAt: strin
 export interface OwnedTmuxAbsence { absent: true; scope: OwnedTmuxScope; socket?: { dev: string; ino: string }; observedAt: string }
 
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
+/**
+ * Exit wait after kill-session. A Claude pane root is the program-status relay,
+ * whose worst case is SIGNAL_EXIT_GRACE_MS (5s) plus FINAL_KILL_MS (2s) when its
+ * CLI ignores SIGHUP; 10s covers that with margin for the CLI's own teardown.
+ */
+const EXIT_PROOF_TIMEOUT_MS = 10_000;
+/** Exit not yet proven: callers may re-verify the attached proof later instead of stopping again. */
+function unproven(proof: OwnedTmuxExitProof): never {
+  throw Object.assign(new Error('LEGACY_TMUX_EXIT_UNPROVEN'), { code: 'LEGACY_TMUX_EXIT_UNPROVEN', proof });
+}
 async function tmux(path: string, args: string[]): Promise<string> {
   const env = { ...process.env, LC_ALL: 'C' };
   delete (env as NodeJS.ProcessEnv).TMUX;
@@ -118,7 +128,7 @@ export async function stopOwnedTmux(identity: OwnedTmuxIdentity, probe: ProcessP
   if (!current) {
     const proof = { ...identity, stoppedAt: new Date().toISOString() };
     if ((await verifyOwnedTmuxExit(proof, probe))) return proof;
-    fail('LEGACY_TMUX_EXIT_UNPROVEN');
+    unproven(proof);
   }
   if (current !== targetId) fail('LEGACY_TMUX_TARGET_CHANGED');
   await ownerCheck(scope, targetId);
@@ -147,12 +157,12 @@ export async function stopOwnedTmux(identity: OwnedTmuxIdentity, probe: ProcessP
   const condition = `#{&&:#{==:#{pid},${server.pid}},#{&&:#{==:#{session_name},${scope.sessionName}},#{==:#{@dutydeck_owner_id},${scope.ownerId}}}}`;
   (await tmux(scope.socketPath, ['if-shell', '-F', '-t', targetId, condition, `kill-session -t ${targetId}`, '']));
   const proof: OwnedTmuxExitProof = { ...identity, identities: [...all.values()], stoppedAt: new Date().toISOString() };
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + EXIT_PROOF_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if ((await verifyOwnedTmuxExit(proof, probe))) return proof;
     await new Promise(resolve => setTimeout(resolve, 50));
   }
-  fail('LEGACY_TMUX_EXIT_UNPROVEN');
+  unproven(proof);
 }
 
 /** Recheck before releasing a runtime resource; a cached successful stop is insufficient. */

@@ -212,6 +212,28 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
     process.kill(identity.server.pid, 'SIGUSR1');
     await new Promise(resolve => setTimeout(resolve, 100));
   });
+  // A Claude pane root (program-status relay) may take 5s+2s to escalate to SIGKILL.
+  function createHupIgnoring() {
+    tmux('new-session', '-d', '-s', 'owned', 'trap "" HUP; exec sleep 600');
+    tmux('set-option', '-t', 'owned', '@dutydeck_owner_id', 'dutydeck:owned');
+    return Number(tmux('display-message', '-p', '-t', 'owned', '#{pane_pid}'));
+  }
+  it('waits past the relay\'s worst-case exit before declaring the stop unproven', async () => {
+    const pane = createHupIgnoring(), identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
+    const exit = setTimeout(() => process.kill(pane, 'SIGKILL'), 7_000);
+    try { expect(await verifyOwnedTmuxExit(await stopOwnedTmux(identity, probe), probe)).toBe(true); }
+    finally { clearTimeout(exit); try { process.kill(pane, 'SIGKILL'); } catch { /* Exited. */ } }
+  }, 20_000);
+  it('attaches a re-verifiable proof when exit stays unproven', async () => {
+    const pane = createHupIgnoring(), identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
+    try {
+      const error = await stopOwnedTmux(identity, probe).then(() => undefined, (failure: { code?: string; proof?: Parameters<typeof verifyOwnedTmuxExit>[0] }) => failure);
+      expect(error?.code).toBe('LEGACY_TMUX_EXIT_UNPROVEN');
+      expect(await verifyOwnedTmuxExit(error!.proof!, probe)).toBe(false);
+      process.kill(pane, 'SIGKILL');
+      await vi.waitFor(async () => expect(await verifyOwnedTmuxExit(error!.proof!, probe)).toBe(true));
+    } finally { try { process.kill(pane, 'SIGKILL'); } catch { /* Exited. */ } }
+  }, 20_000);
   it('does not accept a socket path replaced by an ordinary file', async () => {
     create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     rmSync(socket); writeFileSync(socket, 'replacement');
