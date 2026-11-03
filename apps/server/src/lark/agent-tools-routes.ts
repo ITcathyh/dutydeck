@@ -53,7 +53,7 @@ export function registerLarkAgentToolTurnGuard(app: FastifyInstance, service: La
   app.addHook('onRoute', route => {
     if (!route.url.startsWith('/api/lark/agent-tools/')) return;
     const onRequest = route.onRequest ? (Array.isArray(route.onRequest) ? route.onRequest : [route.onRequest]) : [];
-    route.onRequest = [(request, reply, done) => service.runInRequestScope(done), ...onRequest];
+    route.onRequest = [(_request, _reply, done) => service.runInRequestScope(done), ...onRequest];
     const preHandler = route.preHandler ? (Array.isArray(route.preHandler) ? route.preHandler : [route.preHandler]) : [];
     route.preHandler = [async request => {
       const body = request.body as { turn?: unknown } | undefined;

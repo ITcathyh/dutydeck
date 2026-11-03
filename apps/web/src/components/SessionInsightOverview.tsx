@@ -284,7 +284,6 @@ export function SessionInsightOverview({ onOpenSession, onCompare }: {
             <tbody className="divide-y divide-subtle">
               {rows.map(row => {
                 const rowState = batch[row.sessionId];
-                const canCompare = row.hasSnapshot && row.snapshotId;
                 return <tr key={row.sessionId} className={row.isSharedSource ? 'bg-muted' : undefined}>
                   <td className="px-2 py-1"><input type="checkbox" aria-label={`选择会话 ${row.sessionId}`} checked={selected.has(row.sessionId)} onChange={() => toggleRow(row.sessionId)}/></td>
                   <td className="px-2 py-1">

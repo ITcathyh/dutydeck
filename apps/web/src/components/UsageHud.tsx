@@ -3,8 +3,8 @@ import { ChevronDown } from 'lucide-react';
 import type { RateLimitWindow } from '@dutydeck/shared';
 import type { SessionUsage } from '../api';
 import type { ContextStats } from '../composer-utils';
+import { count } from './usageFormat';
 
-const tokens = (value: number) => value.toLocaleString('zh-CN');
 const percentage = (value: number) => `${Number(value.toFixed(1))}%`;
 const shortTime = (value: string | number) => new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 function Meter({ label, value }: { label: string; value?: number }) {
@@ -59,25 +59,25 @@ export function UsageHud({ usage, context, loading, error }: { usage?: SessionUs
   const useNative = Boolean(native && (!hasTokens || missing > 0 || partial > 0));
   const nativeTotal = native?.totalTokens ?? (native ? (native.inputTokens ?? 0) + (native.outputTokens ?? 0) + (native.cacheReadTokens ?? 0) + (native.cacheWriteTokens ?? 0) : 0);
   const nativePartial = native && (native.partial || native.totalTokens === undefined && [native.inputTokens, native.outputTokens, native.cacheReadTokens, native.cacheWriteTokens].some(value => value === undefined));
-  const reading = (value?: number) => value === undefined ? '未提供' : tokens(value);
+  const reading = (value?: number) => value === undefined ? '未提供' : count(value);
   // 终端类 Agent 通常一条用量都没有，整行「未提供」只是噪音，这时不占位。
   if (!loading && !error && !snapshot?.error && used === undefined && !snapshot?.rateLimits?.fiveHour && !snapshot?.rateLimits?.sevenDay && !entries && !native) return null;
   return <section aria-label="任务用量" className="shrink-0 border-y border-default bg-surface px-3 text-caption sm:px-5">
     <details className="group">
       <summary className="flex min-h-9 cursor-pointer list-none items-center py-1.5 [&::-webkit-details-marker]:hidden">
         <div className="grid min-w-0 flex-1 grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-x-5 gap-y-1">
-          <Reading label="上下文" value={percent !== undefined ? percentage(percent) : used !== undefined ? `${tokens(used)} token` : pending}><Meter label="上下文已用" value={percent}/></Reading>
+          <Reading label="上下文" value={percent !== undefined ? percentage(percent) : used !== undefined ? `${count(used)} token` : pending}><Meter label="上下文已用" value={percent}/></Reading>
           <QuotaReading label="5h" window={snapshot?.rateLimits?.fiveHour} pending={pending}/>
           <QuotaReading label="7天" window={snapshot?.rateLimits?.sevenDay} pending={pending}/>
           {cacheHitRate !== undefined && <Reading label="缓存命中" hint="缓存读 token ÷（缓存读 token + 未缓存输入 token）" value={percentage(cacheHitRate)}/>}
-          <Reading label={useNative ? '会话 token' : '累计 token'} hint={useNative ? '当前原生会话累计 token，读自 Agent 日志，不含子步骤' : '本任务账本累计 token'} value={useNative ? `${nativePartial ? '≥ ' : ''}${tokens(nativeTotal)}` : hasTokens ? `${missing || partial ? '≥ ' : ''}${tokens(total)}` : usage ? '暂无数据' : pending}/>
+          <Reading label={useNative ? '会话 token' : '累计 token'} hint={useNative ? '当前原生会话累计 token，读自 Agent 日志，不含子步骤' : '本任务账本累计 token'} value={useNative ? `${nativePartial ? '≥ ' : ''}${count(nativeTotal)}` : hasTokens ? `${missing || partial ? '≥ ' : ''}${count(total)}` : usage ? '暂无数据' : pending}/>
         </div>
         <span className="flex w-14 shrink-0 items-center justify-end gap-0.5 text-subtle group-hover:text-primary">明细<ChevronDown size={13} className="transition-transform duration-fast group-open:rotate-180"/></span>
       </summary>
       <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-x-5 gap-y-2 pb-2 pr-14 text-subtle">
         <div className="min-w-0">
-          {used !== undefined && <div>{tokens(used)} / {size === undefined ? '容量未提供' : tokens(size)}{size === undefined ? '' : ' token'}</div>}
-          {context?.compacted ? <div>已压缩 {tokens(context.compacted)} token</div> : null}
+          {used !== undefined && <div>{count(used)} / {size === undefined ? '容量未提供' : count(size)}{size === undefined ? '' : ' token'}</div>}
+          {context?.compacted ? <div>已压缩 {count(context.compacted)} token</div> : null}
           {current?.source === 'claude_transcript' && <div>最近请求输入 · 不含本次输出</div>}
           {current?.observedAt && <div>采样于 {shortTime(current.observedAt)}</div>}
         </div>
@@ -89,10 +89,10 @@ export function UsageHud({ usage, context, loading, error }: { usage?: SessionUs
             {nativePartial && <div>日志用量仅部分可读</div>}
             <div>输入 {reading(native.inputTokens)} · 输出 {reading(native.outputTokens)} · 缓存读 {reading(native.cacheReadTokens)} · 缓存写 {reading(native.cacheWriteTokens)}</div>
             <div>{native.source === 'codex_transcript' ? 'Codex' : 'Claude'} 日志 · {shortTime(native.observedAt)}</div>
-            {hasTokens && <div>账本已知累计 ≥ {tokens(total)} token{subSteps?.entries ? ' · 含子步骤' : ''}</div>}
+            {hasTokens && <div>账本已知累计 ≥ {count(total)} token{subSteps?.entries ? ' · 含子步骤' : ''}</div>}
           </>}
-          {hasTokens && !useNative && <div>输入 {tokens(sum('inputTokens'))} · 输出 {tokens(sum('outputTokens'))} · 缓存读 {tokens(sum('cacheReadTokens'))} · 缓存写 {tokens(sum('cacheWriteTokens'))}{(subSteps?.entries ?? 0) > 0 ? ' · 含子步骤' : ''}</div>}
-          {native && !useNative && <div title={`${native.source === 'codex_transcript' ? 'Codex' : 'Claude'} 日志 · ${new Date(native.observedAt).toLocaleString('zh-CN')}`}>当前原生会话 {nativePartial ? '≥ ' : ''}{tokens(nativeTotal)} token · 不含子步骤</div>}
+          {hasTokens && !useNative && <div>输入 {count(sum('inputTokens'))} · 输出 {count(sum('outputTokens'))} · 缓存读 {count(sum('cacheReadTokens'))} · 缓存写 {count(sum('cacheWriteTokens'))}{(subSteps?.entries ?? 0) > 0 ? ' · 含子步骤' : ''}</div>}
+          {native && !useNative && <div title={`${native.source === 'codex_transcript' ? 'Codex' : 'Claude'} 日志 · ${new Date(native.observedAt).toLocaleString('zh-CN')}`}>当前原生会话 {nativePartial ? '≥ ' : ''}{count(nativeTotal)} token · 不含子步骤</div>}
           {missing > 0 && <div>{missing} 次执行无 token 数据</div>}
           {partial > 0 && <div>{partial} 次执行仅有部分 token 数据</div>}
         </div>

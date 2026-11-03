@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { UsageBackgroundBudget, UsageCap, UsageCategory } from '@dutydeck/shared';
-import { api, type LarkBotConfig, type UsageSummaryWindow, type UsageTotalsResponse as UsageTotals, type UsageGroupResponse as UsageGroup } from '../api';
+import { api, type LarkBotConfig, type UsageSummaryWindow, type UsageGroupResponse as UsageGroup } from '../api';
 import { Banner, Button, Card, EmptyState, Field, Input, Select, Spinner, Tabs } from './primitives';
 import { SessionInsightOverview } from './SessionInsightOverview';
 import { count, usageText, usd } from './usageFormat';

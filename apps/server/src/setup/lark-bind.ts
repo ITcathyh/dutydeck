@@ -373,7 +373,6 @@ export async function bindLarkApp(options: LarkBindOptions): Promise<LarkBindRes
   }
 
   let session: ConnectedOpenPlatformSession;
-  let usedForceLogin = forceLogin;
   try {
     session = await connectSession({
       connect, renderQr, ui, json, forceLogin, sessionFilePath, maxWaitMs,
@@ -403,7 +402,6 @@ export async function bindLarkApp(options: LarkBindOptions): Promise<LarkBindRes
       session = await connectSession({
         connect, renderQr, ui, json, forceLogin: true, sessionFilePath, maxWaitMs,
       });
-      usedForceLogin = true;
     } catch (error) {
       return connectFailure(appId, error, warnings);
     }

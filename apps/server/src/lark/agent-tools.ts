@@ -684,7 +684,6 @@ export class LarkAgentToolsService {
   private async peersFor(context: ToolContext) {
     const { members, securityLimited } = await this.allChatMembers(context, ['bot'], 'peers');
     const configs = (await readLarkConfigs(this.configs)).filter(config => config.appId !== context.appId && config.defaultAgentId && config.groupToolsEnabled);
-    const configByAppId = new Map(configs.map(config => [config.appId, config]));
     // 本实例管理但未直接按 appId 匹配到的 bot，需要通过身份解析按 openId 匹配。
     const resolved = await Promise.all(configs.map(async config => {
       const directMember = members.find(member => member.appId === config.appId);

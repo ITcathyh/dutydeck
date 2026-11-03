@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { RuntimeError, type CiFailureLog, type CiProvider, type CiWebhookEvent, type CiWebhookRequest, type CiWebhookVerification, type RepositoryBundle, type Session, type TaskRecord } from '@dutydeck/shared';
+import { RuntimeError, type CiFailureLog, type CiWebhookEvent, type CiWebhookRequest, type CiWebhookVerification, type RepositoryBundle, type Session, type TaskRecord } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import { z } from 'zod';
 import type { DutydeckRuntime } from '@dutydeck/runtime';

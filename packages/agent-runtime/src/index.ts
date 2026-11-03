@@ -3465,7 +3465,7 @@ export class DutydeckRuntime {
   }
   async interrupt(id: string, expectedTaskId?: string, actorId?: string, operationId = makeId('interrupt')) {
     return this.scoped(id, async () => {
-      const { session, driver } = await this.active(id);
+      const { session } = await this.active(id);
       const token = this.attempts.get(id), ref = token && this.attemptRefs.get(token);
       if (!ref) return { interrupted: false, reason: 'no_active_attempt' };
       if (expectedTaskId && expectedTaskId !== ref.taskId) throw new RuntimeError('TASK_NOT_ACTIVE', 'The requested task is no longer active', 409);
@@ -3653,7 +3653,7 @@ export class DutydeckRuntime {
       this.assertReplaceable(id);
       const workspace = await this.mutations.wait(() => this.workspaces.get(id));
       if (workspace) {
-        const prepared = await this.prepareWorkspace(id, workspace.sourceCwd, workspace.mode);
+        await this.prepareWorkspace(id, workspace.sourceCwd, workspace.mode);
         Object.assign(session, await this.finalizeWorkspace(session));
       }
       const resources = this.repos.execution.getResources(id).filter(resource => resource.kind !== 'operation' && resource.purpose !== 'acp_native_context' && resource.stage !== 'not_created');

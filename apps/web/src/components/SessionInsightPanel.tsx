@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { X } from 'lucide-react';
 import type {
-  AnalysisCoverage,
   FileMetrics,
   HostEvidenceSnapshot,
   Metric,

@@ -53,7 +53,6 @@ import {
 import { runInsightProcess } from './session-insight-process.js';
 import {
   resolveSessionInsightEngine,
-  type AvailableEngine,
   type ResolvedEngine
 } from './session-insight-engine.js';
 import { redactAnalyzeResult, type RedactionContext } from './session-insight-redaction.js';

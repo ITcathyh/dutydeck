@@ -4,7 +4,7 @@ import { traceKinds, type TraceEvent } from '@dutydeck/shared';
 import { insightApi, insightQueryKeys, type InsightEventFilters } from '../api';
 import { currentInstance } from '../instance';
 import { Banner, Button, Select, Spinner } from './primitives';
-import { formatTime, metricTitle, metricValueText, traceKindLabels, traceResultLabels } from './SessionInsightShared';
+import { formatTime, metricTitle, traceKindLabels, traceResultLabels } from './SessionInsightShared';
 
 const EVENT_PAGE_LIMIT = 100;
 

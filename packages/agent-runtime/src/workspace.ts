@@ -431,8 +431,6 @@ export class WorkspaceManager {
       blockers.push({ code: 'DIRECTORY_MISSING', message: `工作目录不存在: ${recovered.repoRoot}` });
       return { canClean: false, blockers, fingerprint: '' };
     }
-    const targetRoot = repoRootCanonical;
-
     // 检查是否为真实 linked worktree，不能是 main checkout，也不能注册身份错误
     let sourceRepoRoot: string;
     try {

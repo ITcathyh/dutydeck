@@ -21,8 +21,7 @@
  *   event_msg task_complete.last_agent_message    → text (modern schema,
  *                                                   sole final-answer source)
  */
-import { existsSync, opendirSync, realpathSync, statSync } from 'node:fs';
-import type { Dirent } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { createRequire } from 'node:module';
 import { codexRateLimits, contextUsage, type NormalizedDriverEvent, type SessionUsageSnapshot } from '@dutydeck/shared';
@@ -45,49 +44,18 @@ const MAX_ROLLOUT_CANDIDATES = 60;
  *  undefined. Iterative depth-limited walk; symlinked dirs are not followed.
  *  Shared with the TRAE tailer, whose root is <TRAE_HOME>/cli/sessions. */
 export function resolveNewestRollout(sessionsRoot: string): string | undefined {
-  if (!existsSync(sessionsRoot)) return undefined;
-  let rootStat;
-  try {
-    rootStat = statSync(sessionsRoot);
-  } catch {
-    return undefined;
+  const candidates = walkFiles(sessionsRoot, {
+    maxDepth: SESSION_SCAN_MAX_DEPTH,
+    // The original scan had no entry cap; preserve that behavior while
+    // reusing the shared bounded walker for traversal and stat handling.
+    maxEntries: Number.POSITIVE_INFINITY,
+    accept: name => name.startsWith('rollout-') && name.endsWith('.jsonl')
+  });
+  let latest = candidates[0];
+  for (const candidate of candidates.slice(1)) {
+    if (!latest || candidate.mtimeMs > latest.mtimeMs) latest = candidate;
   }
-  if (!rootStat.isDirectory()) return undefined;
-
-  let latest: string | undefined;
-  let latestMtime = -Infinity;
-  const stack: Array<{ dir: string; depth: number }> = [{ dir: sessionsRoot, depth: 0 }];
-  while (stack.length > 0) {
-    const { dir, depth } = stack.pop()!;
-    let directory: ReturnType<typeof opendirSync>;
-    try {
-      directory = opendirSync(dir);
-    } catch {
-      continue;
-    }
-    try {
-      let entry: Dirent | null;
-      while ((entry = directory.readSync()) !== null) {
-        const full = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          if (depth < SESSION_SCAN_MAX_DEPTH) stack.push({ dir: full, depth: depth + 1 });
-        } else if (entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) {
-          try {
-            const st = statSync(full);
-            if (st.isFile() && st.mtimeMs > latestMtime) {
-              latestMtime = st.mtimeMs;
-              latest = full;
-            }
-          } catch {
-            // Vanished between readdir and stat — ignore.
-          }
-        }
-      }
-    } finally {
-      try { directory.closeSync(); } catch { /* already closed */ }
-    }
-  }
-  return latest;
+  return latest?.path;
 }
 
 /** A generation is accepted only after its complete first record identifies

@@ -70,7 +70,6 @@ import type {
   DatabaseProbeResult,
   DoctorAutostartResult,
   DoctorCheck,
-  AgentProbeResult,
   DoctorConfig,
   DoctorDependencies,
   DoctorOptions,

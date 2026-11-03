@@ -7,7 +7,7 @@ import { sessionDisplayName } from '../run-summary';
 import { nextActionForState, sessionErrorSummary, sessionWorkspaceName } from '../workspace-model';
 import { Badge, Banner, Button, IconButton, Tabs } from './primitives';
 import { effectiveStatus, permissionLabels, stateTone } from './ui';
-import { usd } from './usageFormat';
+import { count, usd } from './usageFormat';
 
 export function connectionLabel(status: SessionSyncState | StreamStatus) {
   if (typeof status === 'string') return status === 'open' ? '实时同步' : status === 'reconnecting' ? '正在重连' : '正在连接';
@@ -42,7 +42,7 @@ export function usageLabel(usage?: SessionUsage) {
   const unknown = (own.unknownCostEntries ?? (own.unpriced ?? 0) + own.unavailable)
     + (subSteps.unknownCostEntries ?? (subSteps.unpriced ?? 0) + subSteps.unavailable);
   const extra = [unknown ? `另有 ${unknown} 次费用未知` : '', subSteps.entries ? `含子步骤 ${usd(subSteps.costUsd)}` : '', estimated > 0 ? `含估算 ${usd(estimated)}` : ''].filter(Boolean).join('，');
-  const tokens = (key: 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens') => (own[key] + subSteps[key]).toLocaleString('zh-CN');
+  const tokens = (key: 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens') => count(own[key] + subSteps[key]);
   return { text: `本任务${unknown ? '已知费用' : '累计'} ${usd(own.costUsd + subSteps.costUsd)}${extra ? `（${extra}）` : ''}`, detail: `输入 ${tokens('inputTokens')} · 输出 ${tokens('outputTokens')} · 缓存读 ${tokens('cacheReadTokens')} · 缓存写 ${tokens('cacheWriteTokens')} token` };
 }
 

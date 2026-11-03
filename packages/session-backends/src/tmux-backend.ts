@@ -446,7 +446,7 @@ export class TmuxBackend implements SessionBackend {
    * session nor launches a CLI: the CLI is already running in the pane.
    * Re-arms output capture (pipe-pane + socket) and the exit watcher only.
    */
-  async attach(opts: { cols: number; rows: number }): Promise<void> {
+  async attach(_opts: { cols: number; rows: number }): Promise<void> {
     const generation = this.lifecycle;
     const check = () => { if (generation !== this.lifecycle) throw new TmuxError('tmux attachment cancelled'); };
     if (this.started) throw new TmuxError('tmux attach() called twice');
