@@ -48,8 +48,21 @@ const continueKey = (appId: string, taskId: string, turn: number) => `lark.conti
 type LarkContinueCause = { code?: string; agent?: string; minutes?: number; settled?: boolean };
 /** 与 `dutydeck recovery` 同一个身份：重投前把旧一轮记为结果未知是安装者级的账本决定。 */
 const larkRecoveryOwner = { kind: 'installation_owner', id: 'installation_owner' } as const;
+/**
+ * 对账没收敛又没有新事件时的最长间隔。剩下的多是等人处理的卡（结果未知、待确认）和结果重发（自身退避到 5 分钟）；
+ * 新事件和状态变化会立刻把间隔拉回基准值，所以 1 分钟只影响「运行时自己变了、却没有事件」的少数情况，最多晚 1 分钟。
+ * 比基准 5 秒少约 12 倍唤醒；再长对省电收益很小，晚关的上限却跟着变长。
+ */
+const larkReconcileMaxIntervalMs = 60_000;
 
 export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
+  /** 连续没收敛又没有新事件的轮数，决定下一轮的间隔。 */
+  private reconcileBackoff = 0;
+  private reconcileDueAt = 0;
+  /** 下一轮读出全部卡片映射；为 false 时只按 ID 读上一轮没收敛的那些。 */
+  private reconcileFullScan = true;
+  private reconcilePending = new Map<string, boolean>();
+  private reconcileAuthorizationRetry = false;
   private async reconciledResult(mapping: { externalId: string; sessionId: string }, saved: PersistedLarkCardTask, cardId: string, created?: { finalOutput?: string; groupMention: boolean }) {
     if (!this.workflows || !saved.sender_open_id || !saved.runtime_task_id || !saved.turn) return [];
     const context = { appId: saved.app_id, sessionId: mapping.sessionId, taskId: saved.runtime_task_id, turn: saved.turn,
@@ -65,7 +78,12 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   private async performReconcile(config: StoredLarkConfig) {
     const cardMappings = this.cardMappings;
     if (!cardMappings) return 0;
+    const fullScan = this.reconcileFullScan;
+    this.reconcileFullScan = false;
+    const pending = new Map<string, boolean>();
     let unresolved = await timeLoop('lark.reconcile.cards', this.log, () => performLarkCardReconcile({
+      ...(fullScan ? {} : { only: new Set(this.reconcilePending.keys()) }),
+      pending,
       runtime: this.runtime,
       service: this.service,
       cardMappings,
@@ -117,8 +135,11 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
             ...cause ? { canContinueInPlace: true } : {} } } };
       }
     }));
+    this.reconcilePending = pending;
     // Completed tasks need evidence repair too; never infer it from prompts or current settings.
-    if (this.workflowOptions.store && this.inbox) for (const mapping of await cardMappings.list(larkCardChannel(config.appId))) {
+    const repairAuthorization = fullScan || this.reconcileAuthorizationRetry;
+    this.reconcileAuthorizationRetry = false;
+    if (repairAuthorization && this.workflowOptions.store && this.inbox) for (const mapping of await cardMappings.list(larkCardChannel(config.appId))) {
       try {
         const saved = parseOptionalCardTask(mapping.extra);
         if (!saved?.runtime_task_id || saved.app_id !== config.appId
@@ -129,7 +150,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         await recordTaskAuthorization(this.workflowOptions.store, { schemaVersion: 1, taskId: saved.runtime_task_id, sessionId: mapping.sessionId,
           ...inbox.event.authorization, ...(inbox.event.senderOpenId ? { actorOpenId: inbox.event.senderOpenId } : {}),
           chatId: inbox.event.chatId, recordedAt: new Date().toISOString() });
-      } catch (error) { unresolved++; this.log.warn({ error, messageId: mapping.externalId }, '授权依据补记待重试'); }
+      } catch (error) { unresolved++; this.reconcileAuthorizationRetry = true; this.log.warn({ error, messageId: mapping.externalId }, '授权依据补记待重试'); }
     }
     unresolved += await timeLoop('lark.reconcile.interactions', this.log, async () => await this.workflows?.reconcile(config.appId) ?? 0);
     let textReceiptReader: Awaited<ReturnType<typeof explicitFinalTextReceiptReader>> | undefined;
@@ -154,19 +175,32 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     return run;
   }
 
-  protected scheduleReconcile() {
-    if (this.stopped || this.reconcileTimer || !this.reconcileConfig) return;
+  /**
+   * 默认（wake）用于新事件或状态变化：间隔回到基准值、下一轮全量读映射，已排着更晚的一轮就提前。
+   * 对账自己续排时：还有排队或执行中的任务（steady）保持基准间隔；只剩等人处理或等重发的（backoff）逐轮翻倍，最长 1 分钟。
+   */
+  protected scheduleReconcile(mode: 'wake' | 'steady' | 'backoff' = 'wake') {
+    if (this.stopped || !this.reconcileConfig) return;
+    if (mode === 'wake') this.reconcileFullScan = true;
+    if (mode === 'backoff') this.reconcileBackoff++;
+    else this.reconcileBackoff = 0;
+    const delay = Math.max(this.reconcileIntervalMs, Math.min(larkReconcileMaxIntervalMs, this.reconcileIntervalMs * 2 ** this.reconcileBackoff));
+    if (this.reconcileTimer) {
+      if (this.reconcileDueAt <= Date.now() + delay) return;
+      clearTimeout(this.reconcileTimer);
+    }
+    this.reconcileDueAt = Date.now() + delay;
     this.reconcileTimer = setTimeout(() => {
       this.reconcileTimer = undefined;
       const config = this.reconcileConfig;
       if (!config || this.stopped) return;
       void this.reconcile(config).then(unresolved => {
-        if (unresolved > 0) this.scheduleReconcile();
+        if (unresolved > 0) this.scheduleReconcile([...this.reconcilePending.values()].some(Boolean) ? 'steady' : 'backoff');
       }).catch(error => {
         this.log.warn({ error, appId: config.appId }, '飞书卡片周期对账失败，稍后重试');
-        this.scheduleReconcile();
+        this.scheduleReconcile('backoff');
       });
-    }, this.reconcileIntervalMs);
+    }, delay);
     this.reconcileTimer.unref();
   }
 
@@ -175,6 +209,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     this.applyReminderSettings(config);
     this.reconcileIntervalMs = Math.max(50, intervalMs);
     if (this.reconcileTimer) { clearTimeout(this.reconcileTimer); this.reconcileTimer = undefined; }
+    this.reconcileFullScan = true;
     // 僵尸置顶的唯一收敛点：崩在长任务中间的置顶卡只有启动对账能撤下来。
     // 与开关无关——把开关关掉的人期待的正是「以前置顶的都撤掉」。
     await this.pins?.reconcile({ appId: config.appId, activeTaskIds: [...this.tasks.keys()] })
@@ -185,7 +220,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     if (agentId) void larkReliability(this.runtime).checkAgentAvailability?.(agentId, { force: true })
       ?.catch(error => this.log.warn({ error, agentId }, 'Agent 登录状态检查失败'));
     const unresolved = await this.reconcile(config);
-    if (unresolved > 0) this.scheduleReconcile();
+    if (unresolved > 0) this.scheduleReconcile('steady');
     return unresolved;
   }
 

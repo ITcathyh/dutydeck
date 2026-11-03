@@ -4,7 +4,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { describe, expect, it, vi } from 'vitest';
 import type { ChannelMapping, MemoryJob, RepositoryBundle, Session, TaskRecord } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './lark/config.js';
-import { collectWatchScopes, WATCH_DISCONNECTED_MS, WATCH_QUEUED_MS, WATCH_UNKNOWN_MS, WATCH_SCHEDULE_OVERDUE_MS, WATCH_REPORT_MS, WATCH_INBOX_MS } from './watch-signals.js';
+import { collectWatchScopes, resolveWatchReceiver, WATCH_DISCONNECTED_MS, WATCH_QUEUED_MS, WATCH_UNKNOWN_MS, WATCH_SCHEDULE_OVERDUE_MS, WATCH_REPORT_MS, WATCH_INBOX_MS, WATCH_SCHEDULE_DISABLED_MS } from './watch-signals.js';
 
 const now = new Date('2026-11-01T02:00:00.000Z');
 const ago = (ms: number) => new Date(now.getTime() - ms).toISOString();
@@ -21,17 +21,24 @@ function fixture() {
   const jobs: MemoryJob[] = [];
   const mutations = vi.fn();
   const blockers = new Map<string,Array<{code:string}>>();
+  const attempts = new Map<string,string>();
+  const resources = new Map<string,unknown[]>();
   const repos = {
     config: { get: async (key: string) => values.get(key), set: mutations,
       list: async (prefix: string) => [...values].filter(([key]) => key.startsWith(prefix)).map(([key,value])=>({key,value})) },
     sessions: { list: async () => sessions, save: mutations },
     tasks: { get: async (id:string) => tasks.find(task=>task.id===id), listBySession: async (id:string) => tasks.filter(task => task.sessionId === id), save: mutations },
     channelMappings: { list: async () => mappings, save: mutations },
-    execution: { getTaskExecution: (id: string) => ({ blockers: blockers.get(id) ?? [] }) },
+    execution: { getTaskExecution: (id: string) => ({ blockers: blockers.get(id) ?? [] }),
+      getTaskExecutionState: (id: string) => {
+        if (attempts.get(id) === 'legacy') throw new Error('EXECUTION_AUTHORITY_LEGACY');
+        return attempts.has(id) ? { currentAttempt: { state: attempts.get(id) } } : undefined;
+      },
+      getResources: (id: string) => resources.get(id) ?? [] },
     memoryJobs: { listScope: async () => jobs, update: mutations }
   } as unknown as RepositoryBundle;
-  return { values, sessions, tasks, mappings, jobs, mutations, blockers, repos,
-    collect: (bots: StoredLarkConfig[] = [bot], options: { listeningDisabled?:boolean; appId?: string } = {}) => collectWatchScopes(repos,bots,{now,...options}) };
+  return { values, sessions, tasks, mappings, jobs, mutations, blockers, attempts, resources, repos,
+    collect: (bots: StoredLarkConfig[] = [bot], options: { listeningDisabled?:boolean; appId?: string; terminalAbsent?: (session: Session) => Promise<boolean> } = {}) => collectWatchScopes(repos,bots,{now,...options}) };
 }
 const task = (id:string,status:string,age:number): TaskRecord => ({id, sessionId:session.id,prompt:'检查',status,createdAt:ago(age),updatedAt:ago(age)});
 const card = (overrides:Record<string,unknown>={}): ChannelMapping => ({id:'map',channel:'lark-card:cli_test',externalId:'om_card',sessionId:session.id,createdAt:ago(3600_000),
@@ -329,4 +336,107 @@ it.each(['web', undefined])('checks unscoped %s problems alongside configured bo
   expect(send).not.toHaveBeenCalled();
   expect([...h.values.keys()].filter(key => key.startsWith('watch_findings/web/'))).toHaveLength(3);
   expect((await h.collect([bot], { appId: bot.appId })).find(scope => scope.appId === 'web')).toBeUndefined();
+});
+
+
+describe('watch accuracy, receivers and runtime signals', () => {
+  it('reports unknown results only while the current execution attempt is unsettled, and recovers settled ones', async () => {
+    const h = fixture();
+    h.tasks.push(task('settled', 'reconcile_required', WATCH_UNKNOWN_MS + 1), task('open', 'reconcile_required', WATCH_UNKNOWN_MS + 1),
+      task('legacy', 'reconcile_required', WATCH_UNKNOWN_MS + 1));
+    h.attempts.set('settled', 'settled'); h.attempts.set('open', 'reconcile_required'); h.attempts.set('legacy', 'legacy');
+    expect((await h.collect())[0]?.signals.map(signal => signal.objectId)).toEqual(['open', 'legacy']);
+    h.repos.config.set = async (key, value) => { h.values.set(key, value); };
+    const watch = new DutydeckWatch({ store: h.repos.config, collect: () => h.collect([{ ...bot, listening: false }]), send: vi.fn(), warn: vi.fn(), now: () => now });
+    await watch.run();
+    h.attempts.set('open', 'settled');
+    await watch.run();
+    const findings = [...h.values].filter(([key]) => key.startsWith('watch_findings/')).map(([, value]) => JSON.parse(value));
+    expect(findings.find(finding => finding.objectId === 'open')).toMatchObject({ kind: 'result_unknown', recoveredAt: now.toISOString() });
+    expect(findings.find(finding => finding.objectId === 'legacy')?.recoveredAt).toBeUndefined();
+  });
+
+  it('does not count bot messages that group participation never judges as intake backlog', async () => {
+    const h = fixture();
+    const save = (id: string, senderType?: string) => h.values.set(`lark.inbox.${bot.appId}.${id}`, JSON.stringify({ appId: bot.appId,
+      event: { messageId: id, chatId: 'oc_test', ...(senderType ? { senderType } : {}) }, state: 'ignored', receivedAt: ago(WATCH_INBOX_MS + 1),
+      disposition: { schemaVersion: 1, reason: 'participation_observes' } }));
+    save('human', 'user'); save('alert_bot', 'bot'); save('observe_only');
+    h.values.set(`lark.inbox.${bot.appId}.observe_only`, JSON.stringify({ appId: bot.appId, event: { messageId: 'observe_only', chatId: 'oc_test' },
+      state: 'ignored', receivedAt: ago(WATCH_INBOX_MS + 1), disposition: { schemaVersion: 1, reason: 'participation_observe_only' } }));
+    expect((await h.collect())[0]?.signals.map(signal => signal.objectId)).toEqual(['human']);
+  });
+
+  it('falls back from the allowlist to the app creator and then the single registered member', async () => {
+    const h = fixture();
+    const open = { ...bot, allowedUsers: [] };
+    expect(await resolveWatchReceiver(h.repos.config, open)).toBeUndefined();
+    h.values.set('lark.principal.p_other_app', JSON.stringify({ appId: 'cli_other', openId: 'ou_elsewhere' }));
+    h.values.set('lark.principal.p_member', JSON.stringify({ appId: bot.appId, openId: 'ou_member' }));
+    expect(await resolveWatchReceiver(h.repos.config, open)).toEqual({ id: 'ou_member', type: 'open_id' });
+    h.values.set('lark.principal.p_second', JSON.stringify({ appId: bot.appId, openId: 'ou_second' }));
+    expect(await resolveWatchReceiver(h.repos.config, open)).toBeUndefined();
+    h.values.set('lark.app_creation.job_other', JSON.stringify({ id: 'job_other', appId: 'cli_other', status: 'completed' }));
+    h.values.set('lark.app_creation_owner.job_other', JSON.stringify({ userId: 'u_other', tenantId: '1' }));
+    h.values.set('lark.app_creation.job', JSON.stringify({ id: 'job', appId: bot.appId, status: 'completed' }));
+    h.values.set('lark.app_creation_owner.job', JSON.stringify({ userId: '6796811306012770306', tenantId: '1' }));
+    expect(await resolveWatchReceiver(h.repos.config, open)).toEqual({ id: '6796811306012770306', type: 'user_id' });
+    expect((await h.collect([open]))[0]).toMatchObject({ ownerId: '6796811306012770306', ownerIdType: 'user_id' });
+    expect((await h.collect())[0]).toMatchObject({ ownerId: 'ou_owner', ownerIdType: 'open_id' });
+    expect(h.mutations).not.toHaveBeenCalled();
+  });
+
+  it('reports the latest schedule trigger error until a later trigger runs', async () => {
+    const h = fixture();
+    h.values.set('session_automation/schedule/' + schedule.id, JSON.stringify({ ...schedule, nextDueAt: new Date(now.getTime() + 3600_000).toISOString() }));
+    const occurrence = (id: string, at: number, runStatus: string, extra: Record<string, unknown> = {}) => h.values.set('session_automation/occurrence/' + id, JSON.stringify({
+      schemaVersion: 2, id, revision: 1, scheduleId: schedule.id, sessionId: session.id, generation: 1, scheduledForUtc: ago(at), conditionStatus: 'passed', runStatus,
+      delivery: { status: 'not_requested', attempts: 0, updatedAt: ago(at) }, createdAt: ago(at), updatedAt: ago(at - 1000), ...extra }));
+    occurrence('older_error', 2 * 86400_000, 'error', { error: 'old' });
+    occurrence('ok', 86400_000, 'completed');
+    expect((await h.collect())[0]?.signals).toEqual([]);
+    occurrence('latest', 3600_000, 'error', { error: 'The session operation was revoked' });
+    expect((await h.collect())[0]?.signals).toEqual([expect.objectContaining({ kind: 'schedule_error', objectId: schedule.id, since: ago(3600_000 - 1000),
+      title: expect.stringContaining('出错') })]);
+    h.values.set('session_automation/schedule/' + schedule.id, JSON.stringify({ ...schedule, enabled: false }));
+    expect((await h.collect())[0]?.signals.some(signal => signal.kind === 'schedule_error')).toBe(false);
+  });
+
+  it('reports schedules that were never enabled 24 hours after creation', async () => {
+    const h = fixture();
+    const key = 'session_automation/schedule/' + schedule.id;
+    const draft = { ...schedule, enabled: false, nextDueAt: undefined, createdAt: ago(WATCH_SCHEDULE_DISABLED_MS + 1) };
+    h.values.set(key, JSON.stringify(draft));
+    expect((await h.collect())[0]?.signals).toEqual([expect.objectContaining({ kind: 'schedule_never_enabled', objectId: schedule.id, since: draft.createdAt })]);
+    for (const change of [{ createdAt: ago(WATCH_SCHEDULE_DISABLED_MS) }, { disabledAt: ago(60_000), disabledReason: 'session_ended' }, { deletedAt: ago(1) }]) {
+      h.values.set(key, JSON.stringify({ ...draft, ...change })); expect((await h.collect())[0]?.signals).toEqual([]);
+    }
+    h.values.set(key, JSON.stringify(draft));
+    h.values.set('session_automation/occurrence/ran', JSON.stringify({ schemaVersion: 2, id: 'ran', revision: 1, scheduleId: schedule.id, sessionId: session.id,
+      generation: 1, scheduledForUtc: ago(86400_000), conditionStatus: 'passed', runStatus: 'completed', delivery: { status: 'not_requested', attempts: 0, updatedAt: ago(1) },
+      createdAt: ago(86400_000), updatedAt: ago(1) }));
+    expect((await h.collect())[0]?.signals).toEqual([]);
+  });
+
+  it('reports stop-blocked sessions and live terminal records whose terminal is gone, using only the read-only probe', async () => {
+    const h = fixture();
+    const terminal = { ...session, id: 'ses_terminal', protocol: 'pty-cli' } as Session;
+    const blocked = { ...session, id: 'ses_blocked', protocol: 'pty-cli' } as Session;
+    h.sessions.push(terminal, blocked);
+    h.values.set('runtime_driver_stop_block:ses_blocked', JSON.stringify({ sessionId: 'ses_blocked', runId: 'run', reason: 'Driver physical resource exit is unverified' }));
+    h.values.set('runtime_driver_stop_block:ses_cleared', '');
+    const live = (sessionId: string, state = 'live') => ({ sessionId, runId: 'run', resourceId: `${sessionId}_pty`, kind: 'local_only', stage: 'created',
+      identity: { identityId: 'id', kind: 'local_only', locator: {} }, observations: [{ observationId: 'o', state, evidenceRef: 'e', observedAt: ago(7200_000) }] });
+    h.resources.set('ses_terminal', [live('ses_terminal')]);
+    h.resources.set('ses_blocked', [live('ses_blocked')]);
+    h.resources.set(session.id, [live(session.id, 'gone')]);
+    const terminalAbsent = vi.fn(async (item: Session) => item.id !== session.id);
+    const signals = (await h.collect([bot], { terminalAbsent }))[0]!.signals;
+    expect(signals.map(signal => [signal.kind, signal.objectId])).toEqual([['terminal_missing', 'ses_terminal'], ['session_stop_blocked', 'ses_blocked']]);
+    expect(terminalAbsent.mock.calls.map(([item]) => item.id)).toEqual(['ses_terminal']);
+    expect((await h.collect([bot]))[0]!.signals.map(signal => signal.kind)).toEqual(['session_stop_blocked']);
+    terminalAbsent.mockRejectedValueOnce(new Error('LEGACY_TMUX_PROBE_UNKNOWN'));
+    expect((await h.collect([bot], { terminalAbsent }))[0]!.signals.map(signal => signal.kind)).toEqual(['session_stop_blocked']);
+    expect(h.mutations).not.toHaveBeenCalled();
+  });
 });

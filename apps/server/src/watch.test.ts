@@ -61,6 +61,26 @@ describe('watch findings and notifications', () => {
     expect(h.findings()).toHaveLength(1); h.scope.ownerId = 'ou_owner'; await h.watch.run();
     expect(h.send).toHaveBeenCalledTimes(1);
   });
+  it('warns about a missing receiver at most once a day, shows it in doctor, and clears it once a receiver exists', async () => {
+    const h = fixture(); h.scope.ownerId = undefined; h.scope.signals = [signal()];
+    await h.watch.run(); h.scope.signals.push(signal('two')); await h.watch.run();
+    expect(h.warn).toHaveBeenCalledTimes(1);
+    expect(h.warn.mock.calls[0]?.[0]).toMatchObject({ appId: 'cli_test', code: 'WATCH_RECEIVER_MISSING' });
+    expect(checkWatchFindings(Object.fromEntries(h.rows)).detail).toContain('巡检无人接收');
+    h.setNow('2026-11-02T01:59:00.000Z'); await h.watch.run(); expect(h.warn).toHaveBeenCalledTimes(1);
+    h.setNow('2026-11-02T02:00:00.000Z'); await h.watch.run(); expect(h.warn).toHaveBeenCalledTimes(2);
+    h.scope.ownerId = '6796811306012770306'; h.scope.ownerIdType = 'user_id'; await h.watch.run();
+    expect(h.send).toHaveBeenCalledTimes(1);
+    expect(h.send.mock.calls[0]?.[0]).toMatchObject({ ownerId: '6796811306012770306', ownerIdType: 'user_id' });
+    expect([...h.rows.keys()].some(key => key.endsWith('/unreachable'))).toBe(false);
+    expect(checkWatchFindings(Object.fromEntries(h.rows)).detail).not.toContain('巡检无人接收');
+  });
+  it('keeps a silent bot without a receiver visible in doctor even when nothing is wrong', async () => {
+    const h = fixture(); h.scope.ownerId = undefined;
+    await h.watch.run();
+    expect(h.warn).not.toHaveBeenCalled();
+    expect(checkWatchFindings(Object.fromEntries(h.rows))).toMatchObject({ level: 'warn', detail: expect.stringContaining('巡检无人接收：cli_test') });
+  });
   it('checks Web instances without direct messages', async () => {
     const h = fixture(); h.scope.appId = 'web'; h.scope.notify = false; h.scope.signals = [signal()];
     await h.watch.run(); expect(h.send).not.toHaveBeenCalled(); expect(h.findings()).toHaveLength(1);

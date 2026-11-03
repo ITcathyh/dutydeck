@@ -1461,3 +1461,59 @@ describe('Agent badge reconciliation', () => {
     expect(service.send.mock.calls[0]![0]).toMatchObject({ showAgentName, agentName: 'CCFlash (Claude Code / CPA)' });
   });
 });
+
+describe('已结算的结果未知卡收敛与按需扫描', () => {
+  const unknownTask = (id: string, status = 'reconcile_required') => ({ id, sessionId: 'session', status, prompt: 'prompt',
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }) as TaskRecord;
+  const quietLog = () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() });
+
+  it.each([true, false])('a settled unknown card converges after one repaint (process card frozen: %s)', async frozen => {
+    const task = unknownTask('unknown-task');
+    const mapping = createMapping('unknown-map', 'om_unknown', 'session', { runtime_task_id: task.id, state: 'reconcile_required', ...(frozen ? { progress_frozen: true } : {}) });
+    const recovery = { status: 'reconcile_required', blockers: [] as Array<{ code: string }>, resolvedUnknown: true };
+    const runtime = { getTasks: vi.fn(async () => [task]), getEvents: vi.fn(async () => []), getTaskRecovery: vi.fn(async () => recovery) };
+    const service = { send: vi.fn(), reply: vi.fn(), update: vi.fn(async () => ({ messageId: 'om_card_om_unknown' })) };
+    const input = { runtime: runtime as any, service: service as any, cardMappings: createMemoryChannelMappingRepo([mapping]) as any,
+      log: quietLog(), config, channel: 'lark-card:cli_test' };
+    expect(await performLarkCardReconcile(input)).toBe(0);
+    expect(await performLarkCardReconcile(input)).toBe(0);
+    expect(service.update).toHaveBeenCalledTimes(frozen ? 0 : 1);
+    if (!frozen) expect(service.update.mock.calls[0]![0]).toMatchObject({ statusLabel: '已核对，结果未确认' });
+    expect(service.send).not.toHaveBeenCalled();
+    recovery.resolvedUnknown = false;
+    expect(await performLarkCardReconcile(input)).toBeGreaterThan(0);
+  });
+
+  it('keeps a settled unknown card pending while its repaint fails transiently', async () => {
+    const task = unknownTask('unknown-task');
+    const mapping = createMapping('unknown-map', 'om_unknown', 'session', { runtime_task_id: task.id, state: 'reconcile_required' });
+    const runtime = { getTasks: vi.fn(async () => [task]), getEvents: vi.fn(async () => []),
+      getTaskRecovery: vi.fn(async () => ({ status: 'reconcile_required', blockers: [], resolvedUnknown: true })) };
+    const service = { send: vi.fn(), update: vi.fn().mockRejectedValueOnce(new Error('network')).mockResolvedValue({ messageId: 'om_card_om_unknown' }) };
+    const input = { runtime: runtime as any, service: service as any, cardMappings: createMemoryChannelMappingRepo([mapping]) as any,
+      log: quietLog(), config, channel: 'lark-card:cli_test' };
+    expect(await performLarkCardReconcile(input)).toBe(1);
+    expect(await performLarkCardReconcile(input)).toBe(0);
+  });
+
+  it('reads only the listed mappings and reports which stayed pending and whether they wait on a live task', async () => {
+    const done = createMapping('done-map', 'om_done', 'session', { state: 'completed', final_delivery_state: 'delivered', final_message_id: 'om_final', progress_frozen: true });
+    const stuck = createMapping('stuck-map', 'om_stuck', 'session', { runtime_task_id: 'stuck', state: 'reconcile_required', progress_frozen: true });
+    const queued = createMapping('queued-map', 'om_queued', 'session', { runtime_task_id: 'queued', state: 'queued', progress_frozen: true });
+    const tasks = [unknownTask('stuck'), unknownTask('queued', 'queued')];
+    const runtime = { getTasks: vi.fn(async () => tasks), getEvents: vi.fn(async () => []),
+      getTaskRecovery: vi.fn(async (_sessionId: string, id: string) => ({ status: id === 'queued' ? 'queued' : 'reconcile_required', blockers: [], resolvedUnknown: false })) };
+    const repo = createMemoryChannelMappingRepo([done, stuck, queued]);
+    const input = { runtime: runtime as any, service: { send: vi.fn(), update: vi.fn(), reply: vi.fn() } as any, cardMappings: repo as any,
+      log: quietLog(), config, channel: 'lark-card:cli_test' };
+    const pending = new Map<string, boolean>();
+    expect(await performLarkCardReconcile({ ...input, pending })).toBeGreaterThan(0);
+    expect([...pending]).toEqual([['om_stuck', false], ['om_queued', true]]);
+    repo.list.mockClear(); repo.get.mockClear();
+    const next = new Map<string, boolean>();
+    expect(await performLarkCardReconcile({ ...input, only: new Set(['om_stuck', 'om_gone']), pending: next })).toBeGreaterThan(0);
+    expect(repo.list).not.toHaveBeenCalled();
+    expect(repo.get.mock.calls.slice(0, 2)).toEqual([['lark-card:cli_test', 'om_stuck'], ['lark-card:cli_test', 'om_gone']]);
+    expect([...next]).toEqual([['om_stuck', false]]);
+  });
+});

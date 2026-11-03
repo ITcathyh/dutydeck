@@ -1,6 +1,6 @@
 import { MattersService } from './matters.js';
-import { DutydeckWatch, startDutydeckWatch } from './watch.js';
-import { collectWatchScopes } from './watch-signals.js';
+import { DutydeckWatch, startDutydeckWatch, watchReceiverType } from './watch.js';
+import { collectWatchScopes, resolveWatchReceiver } from './watch-signals.js';
 import { assertDatabaseNotQuarantined } from '@dutydeck/storage';
 import { ProjectMemoryService } from './project-memory.js';
 import { larkAgentSessionBinding } from './lark/agent-tools.js';
@@ -450,10 +450,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     return session;
   });
   const matters = new MattersService(repos);
+  const ptyRetirement = createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }, session => primaryHerdrBackend(session.id));
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
     matterTracking: matters,
     configureAgent: (agent, session) => agentModelSettings.resolveForSession(agent, session, async id => await workItems.parentForSession(id) ?? await delegations.parentForSession(id)),
-    ptyRetirement: createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }, session => primaryHerdrBackend(session.id)),
+    ptyRetirement,
     admitTask: pluginWiring
       ? async (session, request) => { await usageLedger.admit(session, request); await pluginWiring.hooks.taskReceived(session, request); }
       : (session, request) => usageLedger.admit(session, request),
@@ -892,13 +893,16 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       store: repos.config,
       collect: async () => collectWatchScopes(repos,
         await readLarkConfigs(repos.config, { readOnly: true }),
-        { listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true', appId: env.DUTYDECK_BOT_APP_ID }),
+        { listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true', appId: env.DUTYDECK_BOT_APP_ID,
+          // tmux 查询只读；Herdr 或非终端会话 captureAbsence 不给证据，按终端仍在处理。
+          terminalAbsent: async session => Boolean(await ptyRetirement.captureAbsence?.(session)) }),
       send: async input => {
         const bots = await readLarkConfigs(repos.config, { readOnly: true });
         const bot = bots.find(bot => bot.appId === input.appId);
-        if (!bot || !bot.listening || !bot.allowedUsers.some(user => user.openId === input.ownerId)) throw new Error('巡检机器人或所有者已变更');
+        const receiver = bot ? await resolveWatchReceiver(repos.config, bot) : undefined;
+        if (!bot || !bot.listening || receiver?.id !== input.ownerId || receiver.type !== watchReceiverType(input.ownerId, input.ownerIdType)) throw new Error('巡检机器人或接收人已变更');
         return createLarkCardService(env, workbenchHttp.fetch, bot).send({
-          receiveId: input.ownerId, receiveIdType: input.ownerId.startsWith('on_') ? 'union_id' : 'open_id',
+          receiveId: receiver.id, receiveIdType: receiver.type,
           markdown: input.text, taskName: '巡检发现', state: 'completed', readOnly: true, idempotencyKey: input.idempotencyKey
         });
       },

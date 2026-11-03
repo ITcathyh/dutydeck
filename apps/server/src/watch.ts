@@ -10,15 +10,25 @@ export const WATCH_INTERVAL_MS = 60 * 60_000;
 export const WATCH_NOTIFICATION_RETRY_MS = 55 * 60_000;
 export const WATCH_RECOVERED_RETENTION_MS = 7 * 24 * 60 * 60_000;
 export const WATCH_RECOVERED_LIMIT = 1_000;
+export const WATCH_RECEIVER_WARN_MS = 24 * 60 * 60_000;
+const receiverTypes = ['open_id', 'union_id', 'user_id'] as const;
+/** 机器人没有可私信的接收人：since 起记在这里给 doctor 看，告警每天最多一条。 */
+const unreachableSchema = z.object({ since: z.string().datetime(), warnedAt: z.string().datetime().optional() }).strict();
+const readUnreachable = (raw: string | undefined | null) => {
+  try { const parsed = raw ? unreachableSchema.safeParse(JSON.parse(raw)) : undefined; return parsed?.success ? parsed.data : undefined; } catch { return undefined; }
+};
 const notificationSchema = z.object({
-  schemaVersion: z.literal(1), idempotencyKey: z.string().min(1), ownerId: z.string().min(1),
+  schemaVersion: z.literal(1), idempotencyKey: z.string().min(1), ownerId: z.string().min(1), ownerIdType: z.enum(receiverTypes).optional(),
   text: z.string().min(1), status: z.enum(['pending', 'completed', 'unknown']),
   attemptedAt: z.string().datetime().optional(),
   members: z.array(z.object({ fingerprint: z.string(), episode: z.number().int().positive() }).strict()).min(1)
 }).strict();
 export type WatchFinding = z.infer<typeof watchFindingSchema>;
 export type WatchSignal = Pick<WatchFinding, 'kind' | 'objectId' | 'title' | 'since' | 'location'>;
-export type WatchScope = { appId: string; signals: WatchSignal[]; ownerId?: string; notify: boolean };
+export type WatchReceiver = { id: string; type: (typeof receiverTypes)[number] };
+export type WatchScope = { appId: string; signals: WatchSignal[]; ownerId?: string; ownerIdType?: WatchReceiver['type']; notify: boolean };
+/** 没记类型的旧记录按前缀推断，与改动前的发送方式一致。 */
+export const watchReceiverType = (id: string, type?: WatchReceiver['type']) => type ?? (id.startsWith('on_') ? 'union_id' : 'open_id');
 export const watchFingerprint = (kind: string, objectId: string) =>
   createHash('sha256').update(JSON.stringify([kind, objectId])).digest('hex');
 const parse = (value: string) => { try { return watchFindingSchema.safeParse(JSON.parse(value)); } catch { return undefined; } };
@@ -34,7 +44,8 @@ export function watchSummary(findings: WatchFinding[]): string {
   const lines: string[] = [];
   const grouped = new Map<string, WatchFinding[]>();
   for (const finding of findings) {
-    if (['queue_blocked', 'result_unknown', 'schedule_overdue', 'task_report_waiting', 'task_report_blocked', 'inbox_backlog'].includes(finding.kind)) {
+    if (['queue_blocked', 'result_unknown', 'schedule_overdue', 'schedule_error', 'schedule_never_enabled', 'session_stop_blocked', 'terminal_missing',
+      'task_report_waiting', 'task_report_blocked', 'inbox_backlog'].includes(finding.kind)) {
       const group = grouped.get(finding.kind) ?? []; group.push(finding); grouped.set(finding.kind, group);
     } else lines.push(`${finding.title}；自 ${finding.since}；${finding.location}`);
   }
@@ -48,7 +59,7 @@ export class DutydeckWatch {
   constructor(private readonly options: {
     store: ConfigRepository;
     collect(): Promise<WatchScope[]>;
-    send(input: { appId: string; ownerId: string; text: string; idempotencyKey: string }): Promise<unknown>;
+    send(input: { appId: string; ownerId: string; ownerIdType?: WatchReceiver['type']; text: string; idempotencyKey: string }): Promise<unknown>;
     warn(details: unknown, message: string): void;
     now?: () => Date;
   }) {}
@@ -129,7 +140,8 @@ export class DutydeckWatch {
         if (live.length) {
           notification = { ...notification, attemptedAt: notification.attemptedAt ?? at };
           await this.options.store.set(notificationKey, JSON.stringify(notification));
-          await this.options.send({ appId: scope.appId, ownerId: notification.ownerId, text: notification.text, idempotencyKey: notification.idempotencyKey });
+          await this.options.send({ appId: scope.appId, ownerId: notification.ownerId, ...(notification.ownerIdType ? { ownerIdType: notification.ownerIdType } : {}),
+            text: notification.text, idempotencyKey: notification.idempotencyKey });
           for (const finding of live) {
             const notified = { ...finding, notifiedAt: at };
             await this.options.store.set(prefix + finding.fingerprint, JSON.stringify(notified));
@@ -138,15 +150,22 @@ export class DutydeckWatch {
         }
         await this.options.store.set(notificationKey, JSON.stringify({ ...notification, status: 'completed' }));
       };
+      const unreachableKey = prefix + 'unreachable';
+      const rawUnreachable = await this.options.store.get(unreachableKey);
       if (!scope.ownerId) {
-        if (pending.length) this.options.warn({ appId: scope.appId, count: pending.length }, '巡检发现问题，但找不到机器人所有者，未发送私信');
+        const unreachable = readUnreachable(rawUnreachable) ?? { since: at };
+        const warn = pending.length > 0 && (!unreachable.warnedAt || Date.parse(at) - Date.parse(unreachable.warnedAt) >= WATCH_RECEIVER_WARN_MS);
+        const next = JSON.stringify(warn ? { ...unreachable, warnedAt: at } : unreachable);
+        if (next !== rawUnreachable) await this.options.store.set(unreachableKey, next);
+        if (warn) this.options.warn({ appId: scope.appId, code: 'WATCH_RECEIVER_MISSING', count: pending.length }, '巡检发现问题，但找不到可私信的接收人，未发送私信（每天最多提示一次）');
         continue;
       }
+      if (rawUnreachable) await (this.options.store.remove ? this.options.store.remove(unreachableKey, rawUnreachable) : this.options.store.set(unreachableKey, ''));
       try {
         // Freeze both UUID and payload before any provider write. A partial receipt-save failure
         // or newly found issue cannot change an uncertain notification's identity.
         if (oldNotification?.status === 'pending') {
-          if (oldNotification.ownerId === scope.ownerId) await deliver(oldNotification);
+          if (oldNotification.ownerId === scope.ownerId && watchReceiverType(oldNotification.ownerId, oldNotification.ownerIdType) === watchReceiverType(scope.ownerId, scope.ownerIdType)) await deliver(oldNotification);
           else await this.options.store.set(notificationKey, JSON.stringify({ ...oldNotification, status: 'completed' }));
         }
         const unsent = pending.filter(f => { const current = previous.get(f.fingerprint); return !current?.notifiedAt && !current?.notificationUnknownAt; });
@@ -154,7 +173,7 @@ export class DutydeckWatch {
         const idempotencyKey = 'watch_' + createHash('sha256')
           .update(JSON.stringify([scope.appId, scope.ownerId, unsent.map(f => [f.fingerprint, f.episode, f.firstSeenAt]).sort()])).digest('hex').slice(0, 40);
         const notification = notificationSchema.parse({ schemaVersion: 1, idempotencyKey,
-          ownerId: scope.ownerId, text: watchSummary(unsent), status: 'pending',
+          ownerId: scope.ownerId, ...(scope.ownerIdType ? { ownerIdType: scope.ownerIdType } : {}), text: watchSummary(unsent), status: 'pending',
           members: unsent.map(f => ({ fingerprint: f.fingerprint, episode: f.episode })) });
         await this.options.store.set(notificationKey, JSON.stringify(notification));
         await deliver(notification);
@@ -184,7 +203,12 @@ export function checkWatchFindings(values: Readonly<Record<string, string | unde
   if (unavailable) return { ...base, level: 'skip', detail: '数据库不可读，无法读取巡检发现' };
   const rows = Object.entries(values).flatMap(([key, value]) => key.startsWith(WATCH_PREFIX) && value ? [{ key, value }] : []);
   const findings = readWatchFindings(rows).filter(f => !f.recoveredAt).sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt));
-  if (!findings.length) return { ...base, level: 'ok', detail: '没有未恢复的巡检问题（启动约 5 分钟后首次检查）' };
-  return { ...base, level: 'warn', detail: findings.map(f => `${f.title}；首次发现 ${f.firstSeenAt}；${f.location}${f.notificationUnknownAt ? '；巡检通知发送结果未知，不重复私信' : ''}`).join('\n'),
+  const unreachable = rows.flatMap(row => {
+    const appId = row.key.slice(WATCH_PREFIX.length, -'/unreachable'.length);
+    if (!row.key.endsWith('/unreachable') || !appId || appId.includes('/')) return [];
+    return readUnreachable(row.value) ? [`巡检无人接收：${appId} 没有可私信的接收人（允许名单、应用创建人、唯一登记成员都没有），发现只记在这里`] : [];
+  });
+  if (!findings.length && !unreachable.length) return { ...base, level: 'ok', detail: '没有未恢复的巡检问题（启动约 5 分钟后首次检查）' };
+  return { ...base, level: 'warn', detail: [...unreachable, ...findings.map(f => `${f.title}；首次发现 ${f.firstSeenAt}；${f.location}${f.notificationUnknownAt ? '；巡检通知发送结果未知，不重复私信' : ''}`)].join('\n'),
     remedy: '按每项位置查看会话或守护进程日志，处理后等待下一轮巡检确认恢复。', verify: 'dutydeck doctor --json' };
 }

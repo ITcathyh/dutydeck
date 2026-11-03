@@ -2,13 +2,13 @@ import { z } from 'zod';
 import { dispositionSchema } from './lark/disposition.js';
 import { larkConfirmActionId } from './lark/confirm-cards.js';
 import { larkMessageAnchor } from './lark/message-anchor.js';
-import { readTaskReportSafely, taskReportAttentionText, botAppIdOfSession, readStoredSessionSchedule, sessionScheduleOccurrenceSchema, type RepositoryBundle, type Session } from '@dutydeck/shared';
+import { readTaskReportSafely, taskReportAttentionText, botAppIdOfSession, readStoredSessionSchedule, sessionScheduleOccurrenceSchema, type ConfigRepository, type RepositoryBundle, type SessionScheduleOccurrence, type Session } from '@dutydeck/shared';
 import { larkResultDeliveryIssues } from './lark/reconciler.js';
 import { larkListenerStatusKey, type LarkListenerStatus } from './lark/listener-status.js';
 import { larkMemoryEnabled, type StoredLarkConfig } from './lark/config.js';
 import type { LarkMemoryState } from './lark/memory.js';
 import { checkLarkMemory } from './doctor/checks.js';
-import { readWatchFindings, WATCH_PREFIX, type WatchScope, type WatchSignal } from './watch.js';
+import { readWatchFindings, WATCH_PREFIX, type WatchReceiver, type WatchScope, type WatchSignal } from './watch.js';
 
 export const WATCH_DISCONNECTED_MS = 5 * 60_000;
 export const WATCH_QUEUED_MS = 60 * 60_000;
@@ -16,10 +16,12 @@ export const WATCH_UNKNOWN_MS = 24 * 60 * 60_000;
 export const WATCH_SCHEDULE_OVERDUE_MS = 10 * 60_000;
 export const WATCH_REPORT_MS = 24 * 60 * 60_000;
 export const WATCH_INBOX_MS = 60 * 60_000;
+export const WATCH_SCHEDULE_DISABLED_MS = 24 * 60 * 60_000;
+const STOP_BLOCK_PREFIX = 'runtime_driver_stop_block:';
 // Validate the read projection and strict disposition; leave all other execution fields untouched.
 const inboxProjection = z.object({
   appId: z.string(), state: z.enum(['unrouted', 'received', 'ignored', 'accepted', 'command', 'failed']),
-  event: z.object({ messageId: z.string().min(1), chatId: z.string().min(1), replyMessageId: z.string().optional() }).passthrough(),
+  event: z.object({ messageId: z.string().min(1), chatId: z.string().min(1), replyMessageId: z.string().optional(), senderType: z.string().optional() }).passthrough(),
   receivedAt: z.string().datetime(), taskId: z.string().optional(), disposition: dispositionSchema.optional()
 }).passthrough();
 const decode = <T>(raw: string | null | undefined): T | undefined => { try { return raw ? JSON.parse(raw) as T : undefined; } catch { return undefined; } };
@@ -31,16 +33,39 @@ const sessionLocation = (session: Session, bot?: StoredLarkConfig) => {
   return chatId ? `${chatLink(chatId, bot)}（会话 ${session.id}）` : `工作台会话 ${session.id}；dutydeck doctor`;
 };
 
-/** Read existing state only: no task mutation, probe, recovery, retry, or config migration. */
+/**
+ * 巡检私信的接收人：允许名单第一人 → 创建这个应用的人 → 唯一登记过的成员。登记了多人时分不出谁是部署者，宁可不发。
+ * 发送前用同一个函数复核，接收人变了就不发旧批次。
+ */
+export async function resolveWatchReceiver(config: ConfigRepository, bot: StoredLarkConfig): Promise<WatchReceiver | undefined> {
+  const listed = bot.allowedUsers.find(user => /^(ou_|on_)/.test(user.openId))?.openId;
+  if (listed) return { id: listed, type: listed.startsWith('on_') ? 'union_id' : 'open_id' };
+  for (const row of await config.list?.('lark.app_creation.') ?? []) {
+    const job = decode<{ id?: string; appId?: string }>(row.value);
+    if (job?.appId !== bot.appId || !job.id) continue;
+    const userId = decode<{ userId?: string }>(await config.get(`lark.app_creation_owner.${job.id}`))?.userId;
+    if (userId) return { id: userId, type: 'user_id' };
+  }
+  const members = new Set((await config.list?.('lark.principal.') ?? []).flatMap(row => {
+    const member = decode<{ appId?: string; openId?: string }>(row.value);
+    return member?.appId === bot.appId && member.openId?.startsWith('ou_') ? [member.openId] : [];
+  }));
+  return members.size === 1 ? { id: [...members][0]!, type: 'open_id' } : undefined;
+}
+
+/** Read existing state only: no task mutation, recovery, retry, or config migration; the terminal probe only lists tmux sessions. */
 export async function collectWatchScopes(repos: RepositoryBundle, bots: StoredLarkConfig[], options: {
   now?: Date; listeningDisabled?: boolean; appId?: string;
+  /** 只读确认会话的终端已不存在（不结束任何进程）；没有就不查这一项。 */
+  terminalAbsent?: (session: Session) => Promise<boolean>;
 } = {}): Promise<WatchScope[]> {
   const now = options.now ?? new Date();
   const at = now.toISOString();
   const selected = options.appId ? bots.filter(bot => bot.appId === options.appId) : bots;
-  const scopes: WatchScope[] = selected.map(bot => ({
-    appId: bot.appId, signals: [], ownerId: bot.allowedUsers.find(user => /^(ou_|on_)/.test(user.openId))?.openId,
-    notify: !options.listeningDisabled && bot.listening
+  const scopes: WatchScope[] = await Promise.all(selected.map(async bot => {
+    const receiver = await resolveWatchReceiver(repos.config, bot);
+    return { appId: bot.appId, signals: [], ...(receiver ? { ownerId: receiver.id, ownerIdType: receiver.type } : {}),
+      notify: !options.listeningDisabled && bot.listening };
   }));
   // Unscoped instances also check Web/CLI sessions when bots share the database.
   if (!options.appId || !scopes.length) scopes.push({ appId: options.appId ?? 'web', signals: [], notify: false });
@@ -54,6 +79,10 @@ export async function collectWatchScopes(repos: RepositoryBundle, bots: StoredLa
     return byApp.get('web') ?? (options.appId ? byApp.get(options.appId) : undefined);
   };
   const bySession = new Map(sessions.map(session => [session.id, session]));
+  // 结果未知结案后任务状态不变，只有当前执行记录变成已结算；读不了账本（旧库）时按未结算报告。
+  const unknownSettled = (taskId: string) => {
+    try { return repos.execution.getTaskExecutionState(taskId)?.currentAttempt?.state === 'settled'; } catch { return false; }
+  };
   const add = (scope: WatchScope, signal: WatchSignal) => scope.signals.push(signal);
   const status = decode<LarkListenerStatus>(await repos.config.get(larkListenerStatusKey));
   for (const bot of selected) {
@@ -94,7 +123,8 @@ export async function collectWatchScopes(repos: RepositoryBundle, bots: StoredLa
         || record.taskId || now.getTime() - Date.parse(record.receivedAt) <= WATCH_INBOX_MS) continue;
       const reason = record.disposition?.reason;
       let waiting = record.state === 'unrouted' || record.state === 'received';
-      if (record.state === 'ignored' && reason === 'participation_observes') waiting = true;
+      // 群参与只拿真人消息触发判断，机器人消息停在这里不会再有下文，不算积压。
+      if (record.state === 'ignored' && reason === 'participation_observes' && record.event.senderType !== 'bot') waiting = true;
       if (record.state === 'ignored' && reason === 'participation_confirmation') {
         const place = { appId: bot.appId, chatId: record.event.chatId };
         const action = await repos.collaboration.getAction(place, larkConfirmActionId('participation_act', place, larkMessageAnchor(record.event)));
@@ -128,9 +158,20 @@ export async function collectWatchScopes(repos: RepositoryBundle, bots: StoredLa
       }
     }
   }
+  // 与运行时同一判据：非空即受阻，清除时写回空串。
+  const stopBlocked = new Set((await repos.config.list?.(STOP_BLOCK_PREFIX) ?? []).flatMap(row => row.value ? [row.key.slice(STOP_BLOCK_PREFIX.length)] : []));
   for (const session of sessions) {
     const scope = scopeOf(session);
     if (!scope) continue;
+    const current = !session.archivedAt;
+    if (current && stopBlocked.has(session.id)) add(scope, { kind: 'session_stop_blocked', objectId: session.id, title: '会话停止未核实，发给它的消息会失败',
+      since: at, location: locationOf(session) });
+    else if (current && options.terminalAbsent && session.protocol === 'pty-cli' && repos.execution.getResources(session.id).some(resource => resource.runId === session.runId
+      && resource.kind === 'local_only' && resource.stage === 'created' && resource.identity && resource.observations.at(-1)?.state === 'live')) {
+      // 探测失败（tmux 查不准）不当作终端已不在。
+      if (await options.terminalAbsent(session).catch(() => false)) add(scope, { kind: 'terminal_missing', objectId: session.id,
+        title: '终端已不在，记录仍是运行中', since: at, location: locationOf(session) });
+    }
     const tasks = await repos.tasks.listBySession(session.id);
     const latest = [...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1);
     const storedReport = latest ? await readTaskReportSafely(repos.config, latest.id) : undefined;
@@ -146,11 +187,18 @@ export async function collectWatchScopes(repos: RepositoryBundle, bots: StoredLa
         kind: 'queue_blocked', objectId: task.id, title: '排队超过 1 小时且当前工作目录受阻',
         since: time(task.createdAt, at), location: locationOf(session)
       });
-      if (task.status === 'reconcile_required' && now.getTime() - Date.parse(task.updatedAt) > WATCH_UNKNOWN_MS) add(scope, {
+      if (task.status === 'reconcile_required' && now.getTime() - Date.parse(task.updatedAt) > WATCH_UNKNOWN_MS && !unknownSettled(task.id)) add(scope, {
         kind: 'result_unknown', objectId: task.id, title: '结果未知超过 24 小时',
         since: time(task.updatedAt, at), location: locationOf(session)
       });
     }
+  }
+  const latestOccurrence = new Map<string, SessionScheduleOccurrence>();
+  for (const row of await repos.config.list?.('session_automation/occurrence/') ?? []) {
+    const parsed = sessionScheduleOccurrenceSchema.safeParse(decode<unknown>(row.value));
+    if (!parsed.success) continue;
+    const latest = latestOccurrence.get(parsed.data.scheduleId);
+    if (!latest || parsed.data.scheduledForUtc > latest.scheduledForUtc) latestOccurrence.set(parsed.data.scheduleId, parsed.data);
   }
   for (const row of await repos.config.list?.('session_automation/schedule/') ?? []) {
     const raw = decode<unknown>(row.value);
@@ -158,7 +206,18 @@ export async function collectWatchScopes(repos: RepositoryBundle, bots: StoredLa
     const schedule = readStoredSessionSchedule(raw);
     const session = bySession.get(schedule.sessionId);
     const scope = session ? scopeOf(session) : undefined;
-    if (!scope || !session || !schedule.enabled || schedule.deletedAt) continue;
+    if (!scope || !session || schedule.deletedAt) continue;
+    const latest = latestOccurrence.get(schedule.id);
+    // 建好后从没跑过、也不是被系统停用的：多半是建完忘了启用。
+    if (!schedule.enabled && !schedule.disabledAt && !latest && now.getTime() - Date.parse(schedule.createdAt) > WATCH_SCHEDULE_DISABLED_MS) add(scope, {
+      kind: 'schedule_never_enabled', objectId: schedule.id, title: '定时计划建好超过 24 小时还没启用',
+      since: time(schedule.createdAt, at), location: locationOf(session)
+    });
+    if (!schedule.enabled) continue;
+    if (latest?.runStatus === 'error') add(scope, {
+      kind: 'schedule_error', objectId: schedule.id, title: '定时计划上次触发出错',
+      since: time(latest.updatedAt, at), location: locationOf(session)
+    });
     let due = schedule.nextDueAt;
     if (schedule.pendingOccurrence) {
       const occurrence = decode<unknown>(await repos.config.get('session_automation/occurrence/' + schedule.pendingOccurrence.id));

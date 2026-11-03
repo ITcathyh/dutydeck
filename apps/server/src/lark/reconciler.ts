@@ -127,16 +127,24 @@ export async function performLarkCardReconcile(input: {
    * 给了它，结果未知的一轮就不再发下面那张没有按钮的恢复提醒。
    */
   unknownTaskNotice?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord, effective: StoredLarkConfig) => Promise<unknown>;
+  /** 只核对这些映射（externalId），按 ID 读；缺省读出全部映射。 */
+  only?: ReadonlySet<string>;
+  /** 本轮没收敛的映射记在这里；值为 true 表示在等排队或执行中的任务往前走。 */
+  pending?: Map<string, boolean>;
 }): Promise<number> {
   const { runtime, service, cardMappings, log, config, channel } = input;
   if (!runtime.getTasks || !runtime.getEvents) return 0;
   let agents: Awaited<ReturnType<NonNullable<LarkRuntime['listAgents']>>> | undefined;
   try { agents = await runtime.listAgents?.(); }
   catch (error) { log.warn({ error }, '读取 Agent 展示名失败，使用 Agent ID 对账卡片'); }
-  const mappings = await cardMappings.list(channel);
+  const mappings = input.only
+    ? (await Promise.all([...input.only].map(id => cardMappings.get(channel, id)))).filter((mapping): mapping is ChannelMapping => Boolean(mapping))
+    : await cardMappings.list(channel);
   const isTextReceipt = await explicitFinalTextReceiptReader(input.deliveryStore);
   let unresolved = 0;
   for (const mapping of mappings) {
+    const before = unresolved;
+    let live = false;
     try {
       const persisted = persistedCardTask(mapping.extra);
       if (!persisted) continue;
@@ -257,14 +265,19 @@ export async function performLarkCardReconcile(input: {
         if (confirmation) { unresolved++; continue; }
       }
       if (!terminalTaskStates.has(runtimeTask.status)) {
-        unresolved++;
+        live = runtimeTask.status === 'queued' || runtimeTask.status === 'running';
+        // 执行已结算的结果未知：任务不会再变，卡片画到位就算收敛；只有下面的写入失败才留到下一轮。
+        const settledUnknown = runtimeTask.status === 'reconcile_required'
+          && (await runtime.getTaskRecovery?.(mapping.sessionId, runtimeTask.id))?.resolvedUnknown === true;
+        const retryLater = () => { if (settledUnknown) unresolved++; };
+        if (!settledUnknown) unresolved++;
         const interrupted = runtimeTask.status === 'reconcile_required' ? await input.interruptedTurn?.(mapping, persisted, runtimeTask) : undefined;
         if (interrupted?.kind === 'handled') continue;
         const hold = interrupted?.kind === 'hold' ? interrupted : undefined;
         const unknownNotice = runtimeTask.status === 'reconcile_required' && Boolean(input.unknownTaskNotice);
         if (unknownNotice) {
           await input.unknownTaskNotice!(mapping, persisted, runtimeTask, effective)
-            .catch(error => log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '结果未知提醒卡发送失败，下次对账重试'));
+            .catch(error => { retryLater(); log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '结果未知提醒卡发送失败，下次对账重试'); });
         }
         // 没有过程卡可画时按钮无处可放，说明里也不提。
         const cardless = Boolean(effective.silentProgress || persisted.progress_frozen || !persisted.card_message_id);
@@ -302,8 +315,8 @@ export async function performLarkCardReconcile(input: {
           });
         };
         if (effective.silentProgress || persisted.progress_frozen || !persisted.card_message_id) {
-          await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, state,
-            runtime_task_id: runtimeTask.id, recovery_read_only: true, recovery_status_key: statusKey }));
+          if (!await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, state,
+            runtime_task_id: runtimeTask.id, recovery_read_only: true, recovery_status_key: statusKey }))) retryLater();
           await notifyRecovery();
           continue;
         }
@@ -322,7 +335,7 @@ export async function performLarkCardReconcile(input: {
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             markdown: recovery?.markdown ?? RECOVERY_TRACKING_NOTE
           });
-          await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !actionable, recovery_status_key: statusKey }));
+          if (!await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !actionable, recovery_status_key: statusKey }))) retryLater();
         } catch (error) {
           if (isLarkMessageUnupdatable(error)) {
             const saved = await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({
@@ -331,8 +344,9 @@ export async function performLarkCardReconcile(input: {
             if (saved) {
               await notifyRecovery();
               log.info({ externalId: mapping.externalId, messageId: persisted.card_message_id }, '恢复过程卡已冻结，异常通知按原目的地交付');
-            }
+            } else retryLater();
           } else {
+            retryLater();
             log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '恢复中的飞书卡片刷新失败');
           }
         }
@@ -561,6 +575,8 @@ export async function performLarkCardReconcile(input: {
     } catch (error) {
       unresolved++;
       log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '对账单条卡片映射处理异常，稍后重试');
+    } finally {
+      if (unresolved > before) input.pending?.set(mapping.externalId, live);
     }
   }
   return unresolved;

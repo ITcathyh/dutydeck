@@ -1396,3 +1396,77 @@ describe('实时静默轮次仍交付恢复异常', () => {
     } finally { coordinator.stop(); repos.close(); }
   });
 });
+
+describe('卡片对账的收敛、退避与事件唤醒', () => {
+  afterEach(() => { vi.useRealTimers(); });
+  const IDLE_MS = 10 * 60_000;
+  function idleHarness(recovery: { status: string; blockers: Array<{ code: string }>; resolvedUnknown: boolean }, status = 'reconcile_required') {
+    const task = runtimeTask({ id: 'rt_unknown', sessionId: 'ses_1', status });
+    const mapping: ChannelMapping = { id: 'lark-card:cli_test:om_unknown', channel: 'lark-card:cli_test', externalId: 'om_unknown', sessionId: 'ses_1',
+      createdAt: '2026-01-01T00:00:00.000Z', extra: JSON.stringify(persistedCard({ runtime_task_id: task.id, state: 'reconcile_required', progress_frozen: true })) };
+    const runtime = { getTasks: vi.fn(async () => [{ ...task }]), getEvents: vi.fn(async () => []), getTaskRecovery: vi.fn(async () => ({ ...recovery, status: task.status })),
+      getSession: vi.fn(async () => undefined), subscribe: vi.fn(() => vi.fn()) };
+    const mappings = {
+      list: vi.fn(async () => [{ ...mapping }]),
+      get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? { ...mapping } : undefined),
+      save: vi.fn(async () => {}),
+      compareAndSetExtra: vi.fn(async (_id: string, expected: string | null | undefined, extra: string) => {
+        if ((mapping.extra ?? null) !== (expected ?? null)) return false;
+        mapping.extra = extra; return true;
+      })
+    };
+    const coordinator = coordinatorFor(runtime, cardService(), mappings);
+    const rounds = vi.spyOn(coordinator as any, 'performReconcile');
+    return { task, coordinator, rounds, mappings, runtime };
+  }
+
+  it('一张已结算的结果未知卡空闲 10 分钟只对账一轮（修复前每 5 秒一轮，约 121 轮）', async () => {
+    vi.useFakeTimers();
+    const h = idleHarness({ status: 'reconcile_required', blockers: [], resolvedUnknown: true });
+    try {
+      await expect(h.coordinator.startReconciliation(config)).resolves.toBe(0);
+      await vi.advanceTimersByTimeAsync(IDLE_MS);
+      expect(h.rounds).toHaveBeenCalledTimes(1);
+    } finally { h.coordinator.stop(); }
+  });
+
+  it('需要人处理的卡退避到 1 分钟一轮，之后只按 ID 读这张卡（修复前 10 分钟约 121 轮）', async () => {
+    vi.useFakeTimers();
+    const h = idleHarness({ status: 'reconcile_required', blockers: [], resolvedUnknown: false });
+    try {
+      await expect(h.coordinator.startReconciliation(config)).resolves.toBe(1);
+      await vi.advanceTimersByTimeAsync(IDLE_MS);
+      // 5、10、20、40 秒后各一轮，之后每 60 秒一轮：首轮 + 4 + 8 = 13 轮。
+      expect(h.rounds).toHaveBeenCalledTimes(13);
+      expect(h.mappings.list).toHaveBeenCalledTimes(1);
+    } finally { h.coordinator.stop(); }
+  });
+
+  it('退避中有新事件时 5 秒内重新全量对账，任务结束的卡及时关闭', async () => {
+    vi.useFakeTimers();
+    const h = idleHarness({ status: 'reconcile_required', blockers: [], resolvedUnknown: false });
+    try {
+      await h.coordinator.startReconciliation(config);
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      const before = h.rounds.mock.calls.length;
+      h.task.status = 'completed';
+      (h.coordinator as any).scheduleReconcile();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(h.rounds).toHaveBeenCalledTimes(before + 1);
+      expect(h.mappings.list).toHaveBeenCalledTimes(2);
+      expect(JSON.parse((await h.mappings.get('lark-card:cli_test', 'om_unknown'))!.extra!)).toMatchObject({ state: 'completed' });
+      await vi.advanceTimersByTimeAsync(IDLE_MS);
+      expect(h.rounds).toHaveBeenCalledTimes(before + 1);
+    } finally { h.coordinator.stop(); }
+  });
+
+  it('还在排队或执行的任务保持 5 秒一轮，不退避', async () => {
+    vi.useFakeTimers();
+    const h = idleHarness({ status: 'queued', blockers: [], resolvedUnknown: false }, 'queued');
+    try {
+      await h.coordinator.startReconciliation(config);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.rounds).toHaveBeenCalledTimes(13);
+    } finally { h.coordinator.stop(); }
+  });
+});
