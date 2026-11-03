@@ -13,6 +13,7 @@ import {
   type PolicyDecision,
   type RepositoryBundle,
   parseLarkSourceId,
+  readTaskReport,
   type AcceptedTask,
   type Session,
   type TaskRecord,
@@ -87,6 +88,30 @@ const stopRequestSchema = z.object({
   occurrenceId: z.string().min(1), scheduleId: z.string().min(1), generation: z.number().int().positive(), actorId: z.string().min(1),
   status: z.enum(['pending', 'applied', 'rejected']), reason: z.string().optional()
 }).strict();
+/**
+ * 计划连续没做成的记录：成功一次清零；同一原因（触发出错按错误码，Agent 收尾按「受阻」「等你决定」，执行失败算一类）
+ * 第 2 次起不再发新消息，改上一条为「已连续 N 次」；连续 STREAK_PAUSE 次自动停用。
+ */
+const STREAK_PREFIX = 'session_automation/streak/';
+const streakSchema = z.object({
+  version: z.literal(1), occurrenceId: z.string().min(1).optional(), count: z.number().int().nonnegative(),
+  /** 最近一次触发出错（开会话或派发失败）的错误码；运行记录里的错误原文不变。 */
+  triggerError: z.object({ occurrenceId: z.string().min(1), code: z.string().min(1) }).strict().optional(),
+  reasonKey: z.string().optional(), reason: z.string().optional(), messageId: z.string().optional(),
+  notice: z.object({ occurrenceId: z.string().min(1), status: z.enum(['pending', 'error', 'sent']), attempts: z.number().int().nonnegative(),
+    nextAttemptAt: z.string().optional(), updatedAt: z.string() }).strict().optional(),
+  updatedAt: z.string()
+}).strict();
+type RunStreak = z.infer<typeof streakSchema>;
+const STREAK_PAUSE = 3;
+const NOTICE_MAX_ATTEMPTS = 3;
+/** 会话暂不可用：这次改在干净的新会话里、同一话题重跑一次，不直接判失败。 */
+const SESSION_UNAVAILABLE_CODES = new Set(['OPERATION_REVOKED', 'DRIVER_STOP_UNVERIFIED', 'DRIVER_STOP_BLOCKED', 'SESSION_NOT_ACTIVE', 'SESSION_STOPPING', 'SESSION_RESOURCE_BLOCKED']);
+const RETRY_OCCURRENCE_PREFIX = 'occ_retry_';
+const errorReasons: Record<string, string> = {
+  OPERATION_REVOKED: '执行会话被锁住了', DRIVER_STOP_UNVERIFIED: '执行会话上次没能确认已停下', DRIVER_STOP_BLOCKED: '执行会话上次没能确认已停下',
+  SESSION_NOT_ACTIVE: '执行会话已不可用', SESSION_STOPPING: '执行会话正在停止', SESSION_RESOURCE_BLOCKED: '执行会话的终端还没收干净'
+};
 const MAX_RECORDS = 1_000;
 const CLAIM_TTL_MS = 30_000;
 const MAX_DELIVERIES = 4;
@@ -131,11 +156,15 @@ export interface SessionAutomationServiceOptions {
   runtime: SessionAutomationRuntime;
   authorize?: (sessionId: string, actorId?: string) => AuthorizationResult | Promise<AuthorizationResult>;
   prepareDelivery?: (sessionId: string, automationId: string) => Promise<void>;
-  deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void>;
+  /** 返回送达的消息编号时，计划连续没做成会改这条消息而不是另发。 */
+  deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void | { messageId?: string }>;
   onScheduleDisabled?: (schedule: SessionSchedule, reason: string, beforeSend?: () => Promise<void>) => Promise<void | 'not_requested'>;
   reconcileDisabledNotification?: (schedule: SessionSchedule) => Promise<boolean>;
   /** 在计划的回报位置提醒一次某次触发卡住了；返回 `not_requested` 表示没有回报位置，不再重试。 */
   onScheduleOverdue?: (schedule: SessionSchedule, notice: ScheduleOverdueNotice) => Promise<void | 'not_requested'>;
+  /** 在计划的回报位置说一句这次没做成；给了 messageId 时先改那条消息，改不了再回一条短的。返回实际那条消息的编号。 */
+  onScheduleProblem?: (schedule: SessionSchedule, notice: { occurrenceId: string; text: string; messageId?: string }) => Promise<void | 'not_requested' | { messageId?: string }>;
+  log?: { warn: (details: Record<string, unknown>, message: string) => void };
   /** 已加载插件注册的 CI 提供方；没有 CI 插件时为空，CI 等待与「出现新的失败构建」不可用。 */
   ciProviders?: CiProviderRegistry;
   /** webhook 驱动的 CI 续作与修复；没有配置 webhook 的提供方时不注入。 */
@@ -151,6 +180,12 @@ function errorMessage(error: unknown): string {
   return message.replace(/[\r\n]+/g, ' ').slice(0, 500);
 }
 
+const errorCode = (error: unknown) => error instanceof RuntimeError ? error.code : 'DISPATCH_FAILED';
+function clipTail(text: string, limit: number) {
+  const flat = text.trim();
+  return flat.length > limit ? `…${flat.slice(-limit)}` : flat;
+}
+function streakKey(scheduleId: string) { return `${STREAK_PREFIX}${scheduleId}`; }
 function scheduleKey(id: string) { return `${SCHEDULE_PREFIX}${id}`; }
 function occurrenceKey(id: string) { return `${OCCURRENCE_PREFIX}${id}`; }
 function overdueKey(occurrenceId: string) { return `${OVERDUE_PREFIX}${occurrenceId}`; }
@@ -165,6 +200,10 @@ function receiptScheduleId(sessionId: string, actorId: string | undefined, key: 
   return `schedule_${createHash('sha256').update(JSON.stringify([sessionId, actorId, key])).digest('hex')}`;
 }
 /** fresh 计划每次触发的执行会话：由触发编号派生，同一次触发重试拿回同一个会话。 */
+/** 会话暂不可用时的那次重跑：由原触发编号派生，同一次触发最多重跑一次。 */
+function retryOccurrenceId(original: string) {
+  return `${RETRY_OCCURRENCE_PREFIX}${createHash('sha256').update(original).digest('hex')}`;
+}
 function freshSessionId(scheduleId: string, occurrence: string) {
   return `ses_schedule_${createHash('sha256').update(`fresh\0${scheduleId}\0${occurrence}`).digest('hex')}`;
 }
@@ -392,6 +431,11 @@ export class SessionAutomationService {
         void this.tick().catch(() => { console.warn('SESSION_AUTOMATION_WAKE_FAILED', sessionId); });
       }
     }));
+  }
+
+  private warn(details: Record<string, unknown>, message: string) {
+    if (this.options.log) this.options.log.warn(details, message);
+    else console.warn(message, JSON.stringify(details));
   }
 
   private async isolate(operation: () => Promise<void>) {
@@ -821,6 +865,33 @@ export class SessionAutomationService {
     return record && await this.ownsExecutionSession(record.value, session) ? record.value.sessionId : undefined;
   }
 
+  /**
+   * 计划每次在新会话执行、结果回原话题；这里补上两处衔接，只在这个会话还没用过这份结果时给：
+   * 计划的新会话第一轮带上一次的结果摘要；原话题的会话在那次运行之后第一次接到消息时带最近一次的结果，用户多半是在跟进它。
+   */
+  async resultContext(session: Session): Promise<string | undefined> {
+    const scheduleIds = session.source === 'schedule'
+      ? session.sourceId ? [session.sourceId] : []
+      : (await this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule, undefined, { field: 'sessionId', values: [session.id] }))
+        .map(item => item.value).filter(item => item.sessionId === session.id && item.mode === 'fresh' && !item.deletedAt).map(item => item.id);
+    if (!scheduleIds.length) return undefined;
+    const [latest] = (await this.listRecords(OCCURRENCE_PREFIX, value => migrateOccurrence(sessionScheduleOccurrenceSchema.parse(value)), undefined, { field: 'scheduleId', values: scheduleIds }))
+      .map(item => item.value)
+      // 计划会话认上一次在哪跑的都行（含改成新会话之前在来源会话里跑的）；原话题会话只认在别的会话里跑的，自己跑过的已在上下文里。
+      .filter(item => scheduleIds.includes(item.scheduleId) && item.result && ['completed', 'failed'].includes(item.runStatus)
+        && (session.source === 'schedule' ? (item.executionSessionId ?? item.sessionId) !== session.id : Boolean(item.executionSessionId) && item.executionSessionId !== session.id))
+      .sort((a, b) => b.scheduledForUtc.localeCompare(a.scheduledForUtc) || b.updatedAt.localeCompare(a.updatedAt));
+    if (!latest) return undefined;
+    const settled = (await this.options.repositories.tasks.listBySession(session.id)).filter(task => settledTaskStatuses.has(task.status));
+    if (session.source === 'schedule' ? settled.length : settled.some(task => task.createdAt > latest.updatedAt)) return undefined;
+    const schedule = await this.getRecord(scheduleKey(latest.scheduleId), readStoredSessionSchedule);
+    const when = new Date(latest.scheduledForUtc).toLocaleString('zh-CN', { timeZone: schedule?.value.timezone, hour12: false });
+    const outcome = latest.runStatus === 'completed' ? '完成' : `没做成（${latest.error ?? '执行失败'}）`;
+    return session.source === 'schedule'
+      ? `上一次运行（${when}，${outcome}）的结果摘要，只作参考，这次照计划重新做：\n${clipTail(latest.result!.output.text, 500)}`
+      : `本话题的定时计划『${schedule?.value.name ?? latest.scheduleId}』最近一次（${when}）在单独的会话里运行，${outcome}，结果如下；用户接下来的话可能是在跟进它：\n${clipTail(latest.result!.output.text, 1500)}`;
+  }
+
   static async getSchedule(store: Pick<import('@dutydeck/shared').ConfigRepository, 'get'>, scheduleId: string): Promise<Pick<SessionSchedule, 'id' | 'name' | 'sessionId'> | undefined> {
     const raw = await store.get(scheduleKey(scheduleId));
     if (!raw) return undefined;
@@ -1037,6 +1108,7 @@ export class SessionAutomationService {
     });
     if (!await this.replace(scheduleKey(id), stored.raw, schedule)) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
     if (modeChanged) await this.retireFreshSessions(schedule);
+    if (schedule.enabled && !stored.value.enabled) await this.resetStreak(id);
     return publicSchedule(schedule);
   }
 
@@ -1451,7 +1523,9 @@ export class SessionAutomationService {
       if (item.value.executionSessionId) this.watchSession(item.value.executionSessionId);
       await this.isolate(() => this.synchronizeLifecycle(item));
       await this.isolate(() => this.planSchedule(item.value));
+      await this.isolate(() => this.followUpOccurrence(item.value.id));
       await this.isolate(() => this.remindOverdue(item.value));
+      await this.isolate(() => this.sendRunNotice(item.value));
     }
     for (const item of subscriptions) {
       if (this.closed) return;
@@ -1668,8 +1742,13 @@ export class SessionAutomationService {
     let sessionMaybe: Session | undefined;
     try { sessionMaybe = schedule.mode === 'independent' || schedule.mode === 'fresh' ? await this.executionSession(schedule) : origin; }
     catch (error) {
-      await this.disableSchedule(scheduleStored, errorMessage(error));
       const accepted = occurrence.admission && this.execution.getAcceptedTask(occurrence.admission.taskId);
+      // 新会话暂时开不出来不停用计划：记为触发出错，由 followUpOccurrence 重跑一次或在原话题说明。
+      const unavailable = !accepted && error instanceof RuntimeError && SESSION_UNAVAILABLE_CODES.has(error.code);
+      if (unavailable) {
+        this.warn({ scheduleId: schedule.id, occurrenceId: occurrence.id, sessionId: schedule.executionSessionId, code: error.code }, '定时触发时执行会话暂不可用');
+        await this.noteTriggerError(schedule.id, occurrence.id, error.code);
+      } else await this.disableSchedule(scheduleStored, errorMessage(error));
       await this.finishOccurrence(stored, { conditionStatus: 'error', runStatus: accepted ? 'blocked' : 'error',
         ...(accepted ? { blockReason: 'admission_conflict' as const } : {}), error: errorMessage(error) });
       return;
@@ -1851,6 +1930,8 @@ export class SessionAutomationService {
         await this.finishOccurrence(stored, { runStatus: 'blocked', blockReason: 'admission_conflict', error: 'Accepted task request conflicts with source admission' });
         return;
       }
+      this.warn({ scheduleId: occurrence.scheduleId, occurrenceId: occurrence.id, sessionId: request.sessionId, code: errorCode(error) }, '定时触发派发失败');
+      if (occurrence.triggerSource !== 'manual') await this.noteTriggerError(occurrence.scheduleId, occurrence.id, errorCode(error));
       await this.finishOccurrence(stored, { runStatus: 'error', error: errorMessage(error) });
     }
   }
@@ -1894,16 +1975,21 @@ export class SessionAutomationService {
     await this.replace(scheduleKey(schedule.id), current.raw, updated);
   }
 
-  private async fallbackToFresh(stored: { raw: string; value: SessionSchedule }, occurrenceId?: string) {
+  /**
+   * 计划改成每次新会话：来源会话没了或被替换；飞书会话里没写模式的旧循环计划（每次带着全部历史跑，上下文越积越大；
+   * 结果仍回原话题，衔接见 resultContext）；或 force（来源会话暂不可用，这次要换新会话重跑）。明确选了 session 的不动。
+   */
+  private async fallbackToFresh(stored: { raw: string; value: SessionSchedule }, occurrenceId?: string, force = false) {
     const schedule = stored.value;
     if (schedule.mode === 'independent' || schedule.mode === 'fresh' || !this.options.runtime.startScheduleSession) return stored;
     const origin = await this.options.runtime.getSession(schedule.sessionId);
+    const legacyLoop = schedule.mode === undefined && origin?.source === 'lark' && schedule.trigger.kind !== 'at';
     let replaced = false;
     try {
       const matter = this.options.repositories.matters?.find('session', schedule.sessionId);
       replaced = Boolean(matter && this.options.repositories.matters!.links(matter.id).some(link => link.kind === 'reply_target' && link.refId === `session:${schedule.sessionId}`));
     } catch (error) { console.warn('MATTER_LOOKUP_FAILED', error instanceof RuntimeError ? error.code : 'UNEXPECTED_ERROR'); }
-    if (isSessionRunnable(origin) && !replaced) return stored;
+    if (isSessionRunnable(origin) && !replaced && !legacyLoop && !force) return stored;
     const context = schedule.executionContext ?? (origin ? freshExecutionContext(origin) : undefined);
     if (!context) return stored;
     // 已有 admission 的触发归属不可改；结果未知仍占用原执行槽。
@@ -1919,6 +2005,131 @@ export class SessionAutomationService {
       ...(occurrenceId ? { executionSessionId: freshSessionId(schedule.id, occurrenceId) } : {}), updatedAt: iso(this.clock()) });
     if (!await this.replace(scheduleKey(schedule.id), stored.raw, next)) return (await this.getRecord(scheduleKey(schedule.id), readStoredSessionSchedule))!;
     return { raw: JSON.stringify(next), value: next };
+  }
+
+  /**
+   * 计划最近一次触发出错（开会话或派发就失败，没有任务）之后：会话暂不可用时换新会话、按同一计划时间重跑一次；
+   * 其余情况（含重跑仍失败）记一次没做成，由 sendRunNotice 在原话题说明。手动执行的错误直接回给发起人，不在这里处理。
+   */
+  private async followUpOccurrence(scheduleId: string) {
+    const stored = await this.getRecord(scheduleKey(scheduleId), readStoredSessionSchedule);
+    const pending = stored?.value.pendingOccurrence;
+    if (!stored || !pending || pending.triggerSource === 'manual') return;
+    const streak = await this.readStreak(scheduleId);
+    const code = streak?.value.triggerError?.occurrenceId === pending.id && streak.value.occurrenceId !== pending.id ? streak.value.triggerError.code : undefined;
+    if (!code) return;
+    const occurrenceStored = await this.getRecord(occurrenceKey(pending.id), value => sessionScheduleOccurrenceSchema.parse(value));
+    const occurrence = occurrenceStored && migrateOccurrence(occurrenceStored.value);
+    if (!occurrence || occurrence.runStatus !== 'error' || occurrence.taskId) return;
+    const schedule = stored.value;
+    if (SESSION_UNAVAILABLE_CODES.has(code) && !occurrence.id.startsWith(RETRY_OCCURRENCE_PREFIX) && schedule.mode !== 'independent'
+      && schedule.enabled && !schedule.deletedAt && schedule.generation === occurrence.generation && await this.retryInFreshSession(stored, occurrence)) return;
+    await this.recordOutcome(occurrence, { key: `error:${code}`, kind: 'error', reason: errorReasons[code] ?? (occurrence.error ?? code).slice(0, 160) });
+  }
+
+  /** 记下这次触发出错的错误码，供 followUpOccurrence 判断重跑和是否同因；同一计划只留最近一次。 */
+  private async noteTriggerError(scheduleId: string, occurrenceId: string, code: string) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const prior = await this.readStreak(scheduleId);
+      const next = streakSchema.parse({ ...(prior?.value ?? { version: 1, count: 0 }), triggerError: { occurrenceId, code }, updatedAt: iso(this.clock()) });
+      if (await (prior ? this.replace(streakKey(scheduleId), prior.raw, next) : this.createRecord(streakKey(scheduleId), next))) return;
+    }
+  }
+
+  /** 原触发保留为出错；计划改成每次新会话（与来源会话没了时同理），以派生编号重跑同一个计划时间，结果照常回原话题。 */
+  private async retryInFreshSession(stored: { raw: string; value: SessionSchedule }, original: SessionScheduleOccurrenceV2) {
+    const id = retryOccurrenceId(original.id);
+    const converted = await this.fallbackToFresh(stored, id, true);
+    if (converted.value.mode !== 'fresh' || converted.value.generation !== original.generation || converted.value.pendingOccurrence?.id !== original.id) return false;
+    const reserved = sessionScheduleSchema.parse({ ...converted.value, ...this.freshReservation(converted.value, id),
+      pendingOccurrence: { id, generation: converted.value.generation, scheduledForUtc: original.scheduledForUtc } });
+    if (!await this.replace(scheduleKey(reserved.id), converted.raw, reserved)) return true;
+    this.warn({ scheduleId: reserved.id, occurrenceId: original.id, retryOccurrenceId: id }, '定时触发改在新会话重跑');
+    const occurrence = await this.materializeOccurrence(reserved);
+    if (occurrence.created && occurrence.value.runStatus === 'pending') await this.processOccurrence(occurrence);
+    return true;
+  }
+
+  private async readStreak(scheduleId: string) {
+    try { return await this.getRecord(streakKey(scheduleId), value => streakSchema.parse(value)); }
+    catch { return undefined; }
+  }
+
+  /**
+   * 记一次触发的结果（同一触发只记一次）：成功清零；没做成且原因与上一次相同则累计，否则从 1 开始。
+   * 触发出错或第 2 次起要在原话题说明；连续 STREAK_PAUSE 次停用计划（停用告知照常发）。返回记下的状态。
+   */
+  private async recordOutcome(occurrence: SessionScheduleOccurrenceV2, problem?: { key: string; kind: 'error' | 'result'; reason: string }): Promise<RunStreak | undefined> {
+    const key = streakKey(occurrence.scheduleId);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const prior = await this.readStreak(occurrence.scheduleId);
+      if (prior?.value.occurrenceId === occurrence.id) return prior.value;
+      const same = Boolean(problem && prior?.value.count && prior.value.reasonKey === problem.key);
+      const count = problem ? same ? prior!.value.count + 1 : 1 : 0;
+      const now = iso(this.clock());
+      const next = streakSchema.parse({ version: 1, occurrenceId: occurrence.id, count, updatedAt: now,
+        ...(problem ? { reasonKey: problem.key, reason: problem.reason.trim().replace(/[。.!！;；,，\s]+$/u, '').slice(0, 300) } : {}),
+        ...(same && prior!.value.messageId ? { messageId: prior!.value.messageId } : {}),
+        ...(problem && (problem.kind === 'error' || count > 1) ? { notice: { occurrenceId: occurrence.id, status: 'pending', attempts: 0, updatedAt: now } } : {}) });
+      if (!await (prior ? this.replace(key, prior.raw, next) : this.createRecord(key, next))) continue;
+      if (count >= STREAK_PAUSE) {
+        const schedule = await this.getRecord(scheduleKey(occurrence.scheduleId), readStoredSessionSchedule);
+        if (schedule?.value.generation === occurrence.generation && await this.disableSchedule(schedule, `连续 ${count} 次没做成（${next.reason}）`)) {
+          this.warn({ scheduleId: occurrence.scheduleId, occurrenceId: occurrence.id, reasonKey: problem!.key, count }, '定时计划连续没做成，已自动停用');
+        }
+      }
+      return next;
+    }
+    return undefined;
+  }
+
+  /** 停用后重新启用：之前的连续没做成不再累计。 */
+  private async resetStreak(scheduleId: string) {
+    const stored = await this.readStreak(scheduleId);
+    if (stored?.value.count) await this.replace(streakKey(scheduleId), stored.raw, streakSchema.parse({ version: 1, occurrenceId: stored.value.occurrenceId, count: 0, updatedAt: iso(this.clock()) }));
+  }
+
+  /** 这一串没做成的第一条是结果卡时，记下它的消息编号，之后同因的说明改这条。 */
+  private async noteResultMessage(scheduleId: string, occurrenceId: string, messageId: string) {
+    const stored = await this.readStreak(scheduleId);
+    if (!stored || stored.value.occurrenceId !== occurrenceId || !stored.value.count || stored.value.messageId) return;
+    await this.replace(streakKey(scheduleId), stored.raw, streakSchema.parse({ ...stored.value, messageId, updatedAt: iso(this.clock()) }));
+  }
+
+  private problemText(schedule: SessionSchedule, streak: RunStreak) {
+    const next = schedule.enabled && schedule.nextDueAt
+      ? `下次 ${new Date(schedule.nextDueAt).toLocaleString('zh-CN', { timeZone: schedule.timezone, hour12: false })} 再跑。` : '';
+    return streak.count > 1
+      ? `定时计划『${schedule.name}』已连续 ${streak.count} 次没做成：${streak.reason}。${next}`
+      : `定时计划『${schedule.name}』这次没跑起来：${streak.reason}。${next}`;
+  }
+
+  /** 把计划最近一次没做成的说明发到原话题；有上一条就改它。发送失败按 1、2 分钟退避，最多 NOTICE_MAX_ATTEMPTS 次。 */
+  private async sendRunNotice(snapshot: SessionSchedule) {
+    if (!this.options.onScheduleProblem) return;
+    const stored = await this.readStreak(snapshot.id);
+    const notice = stored?.value.notice;
+    const now = this.clock();
+    if (!stored || !notice || notice.status === 'sent' || notice.attempts >= NOTICE_MAX_ATTEMPTS || notice.nextAttemptAt && notice.nextAttemptAt > iso(now)) return;
+    const attempts = notice.attempts + 1;
+    // 先记成失败再发：中途退出时按退避重发；同一触发的消息有幂等键，改消息本身可重复。
+    const claimed = streakSchema.parse({ ...stored.value, notice: { ...notice, status: 'error', attempts, nextAttemptAt: plus(now, 60_000 * attempts), updatedAt: iso(now) } });
+    if (!await this.replace(streakKey(snapshot.id), stored.raw, claimed)) return;
+    const schedule = await this.getRecord(scheduleKey(snapshot.id), readStoredSessionSchedule);
+    if (!schedule) return;
+    let sent: Awaited<ReturnType<NonNullable<SessionAutomationServiceOptions['onScheduleProblem']>>>;
+    try {
+      sent = await this.options.onScheduleProblem(schedule.value, { occurrenceId: notice.occurrenceId, text: this.problemText(schedule.value, stored.value),
+        ...(stored.value.messageId ? { messageId: stored.value.messageId } : {}) });
+    } catch (error) {
+      this.warn({ scheduleId: snapshot.id, occurrenceId: notice.occurrenceId, attempts, code: error instanceof RuntimeError ? error.code : 'UNEXPECTED_ERROR' }, '定时计划没做成的说明发送失败');
+      return;
+    }
+    const latest = await this.readStreak(snapshot.id);
+    if (latest?.raw !== JSON.stringify(claimed)) return;
+    const messageId = typeof sent === 'object' && sent.messageId ? sent.messageId : stored.value.messageId;
+    await this.replace(streakKey(snapshot.id), latest.raw, streakSchema.parse({ ...claimed, ...(messageId ? { messageId } : {}),
+      notice: { ...notice, status: 'sent', attempts, updatedAt: iso(this.clock()) } }));
   }
 
   private async synchronizeLifecycle(snapshot: { raw: string; value: SessionSchedule }) {
@@ -2429,7 +2640,17 @@ export class SessionAutomationService {
     if (recoverLegacyCapacity && result.attemptId === value.runtimeAttemptId) return;
     const settlingNow = working.value.runStatus === 'accepted' || working.value.runStatus === 'pending' || working.value.runStatus === 'blocked';
     if (settlingNow) {
-      const runStatus = result.outcome === 'completed' ? 'completed' : result.outcome === 'cancelled' ? 'interrupted' : result.outcome === 'interrupted' ? 'interrupted' : 'failed';
+      let runStatus: SessionScheduleOccurrenceV2['runStatus'] = result.outcome === 'completed' ? 'completed' : result.outcome === 'cancelled' ? 'interrupted' : result.outcome === 'interrupted' ? 'interrupted' : 'failed';
+      // Agent 收尾报了受阻或等人决定：执行账本照旧是完成，计划层记这次没做成。
+      let problem: { key: string; kind: 'result'; reason: string } | undefined;
+      if (runStatus === 'completed') {
+        const report = await readTaskReport(this.options.repositories.config, result.taskId).catch(() => undefined);
+        if (report?.status === 'blocked' || report?.status === 'waiting') {
+          runStatus = 'failed';
+          problem = { key: `report:${report.status}`, kind: 'result', reason: report.status === 'waiting' ? `等你决定：${report.question}` : `受阻：${report.summary}` };
+        }
+      } else if (runStatus === 'failed') problem = { key: 'result:failed', kind: 'result', reason: '执行失败' };
+      const streak = runStatus !== 'interrupted' && value.triggerSource !== 'manual' ? await this.recordOutcome(value, problem) : undefined;
       const settled = sessionScheduleOccurrenceV2Schema.parse({
         ...working.value,
         revision: working.value.revision + 1,
@@ -2437,13 +2658,15 @@ export class SessionAutomationService {
         result,
         resultBoundary: 'verified',
         blockReason: undefined,
-        error: undefined,
+        error: problem?.reason,
         // 来源恢复时死 owner 租约必须清除，否则交付租约领取会被未过期租约挡住。
         leaseOwner: undefined,
         leaseExpiresAt: undefined,
         ...(recoverLegacyCapacity && working.value.delivery.status === 'not_requested' && this.options.deliver
           ? { delivery: { status: 'pending', attempts: working.value.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
         ...(result.outcome === 'cancelled' ? { delivery: { status: 'not_requested', attempts: working.value.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
+        // 同因第 2 次起不再另发结果卡，由 sendRunNotice 改上一条。
+        ...(streak && streak.count > 1 && working.value.delivery.status !== 'delivered' ? { delivery: { status: 'not_requested', attempts: working.value.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
         updatedAt: iso(this.clock())
       });
       if (!await this.replace(occurrenceKey(value.id), working.raw, settled)) return;
@@ -2614,9 +2837,10 @@ export class SessionAutomationService {
     }, CLAIM_TTL_MS / 3);
     heartbeat.unref();
     let deliveryError: string | undefined;
+    let sent: void | { messageId?: string } = undefined;
     try {
       await context.assertCurrent();
-      await this.options.deliver!(claimed.sessionId, claimed.result!, claimed.id, 'scheduleId' in claimed ? claimed.scheduleId : claimed.id, context);
+      sent = await this.options.deliver!(claimed.sessionId, claimed.result!, claimed.id, 'scheduleId' in claimed ? claimed.scheduleId : claimed.id, context);
       await context.assertCurrent();
     } catch (cause) { deliveryError = errorMessage(cause); }
     finally { clearInterval(heartbeat); await renewing; }
@@ -2626,7 +2850,9 @@ export class SessionAutomationService {
       delivery: { status: deliveryError ? 'error' as const : 'delivered' as const, attempts: current.value.delivery.attempts + 1,
         ...(deliveryError ? { error: deliveryError } : {}), updatedAt: iso(this.clock()) },
       leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: iso(this.clock()) };
-    if (await this.replace(key, current.raw, updated)) await this.applyScheduleStops();
+    if (!await this.replace(key, current.raw, updated)) return;
+    if (!deliveryError && 'scheduleId' in claimed && sent?.messageId) await this.noteResultMessage(claimed.scheduleId, claimed.id, sent.messageId);
+    await this.applyScheduleStops();
   }
 
 }

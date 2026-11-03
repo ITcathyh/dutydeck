@@ -2025,7 +2025,8 @@ describe('fresh-session schedules', () => {
     expect((await h.repositories.sessions.get(second))?.archivedAt).toBeTruthy();
   });
 
-  it('keeps the default and legacy records in the origin session', async () => {
+  // 没写模式的旧循环计划在飞书会话里改为每次新会话，见 session-automation-run-problems.integration.test.ts。
+  it('keeps the default record in the origin session', async () => {
     const h = await fixture();
     const startScheduleSession = vi.fn();
     const service = new SessionAutomationService({ repositories: h.repositories, runtime: { ...h, startScheduleSession }, authorize: async () => true, clock: () => h.now.value });
@@ -2033,11 +2034,6 @@ describe('fresh-session schedules', () => {
     const created = await service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
     expect(created.mode).toBe('session');
     expect(created.executionContext).toMatchObject({ agentId: h.session.agentId, cwd: h.session.cwd, contextMode: 'prompt_only' });
-    // 旧版本写下的记录没有 mode 字段：照常读取，按沿用来源会话执行。
-    const key = `session_automation/schedule/${created.id}`;
-    const { mode: _mode, ...legacy } = JSON.parse((await h.repositories.config.get(key))!);
-    await h.repositories.config.set(key, JSON.stringify(legacy));
-    expect((await service.getScheduleDefinition(h.session.id, created.id)).mode).toBeUndefined();
     await service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
     h.now.value = new Date('2026-09-12T00:01:01.000Z');
     await service.tick();

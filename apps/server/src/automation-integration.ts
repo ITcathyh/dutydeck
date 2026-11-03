@@ -6,6 +6,7 @@ import {
   ciSubscriptionV2Schema,
   installationOwnerTaskActor,
   parseLarkSourceId,
+  readTaskReportSafely,
   sessionScheduleOccurrenceV2Schema,
   type AttemptResultV1,
   type ExecutionActor,
@@ -21,6 +22,7 @@ import type { PersistedLarkCardTask } from './lark/coordinator.js';
 import { renderLarkResultTextElements } from './lark/card-renderer.js';
 import { sendLarkResult, readConfirmedLarkResult } from './lark/result-delivery.js';
 import { scheduleRequestCard } from './lark/schedule-command.js';
+import { taskReportCardElements } from './lark/task-report-card.js';
 import { readTaskAttemptResult } from './task-results.js';
 import type { CiNotice } from './ci-webhook.js';
 import { SessionAutomationService, type AutomationDeliveryContext } from './session-automation.js';
@@ -276,7 +278,9 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
         taskName = schedule.name.trim();
       }
     }
-    const elements = renderLarkResultTextElements(verifiedResult.output.text);
+    // 计划层记为没做成（收尾报了受阻或等人决定）时，结果卡上写明。
+    const elements = [...(isSchedule ? taskReportCardElements(await readTaskReportSafely(repos.config, verifiedResult.taskId, options.log)) : []),
+      ...renderLarkResultTextElements(verifiedResult.output.text)];
     if (isSchedule) {
       elements.push({
         tag: 'button',
@@ -300,7 +304,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     };
     try {
       await beforeSend();
-      await sendLarkResult(sender, target, {
+      const sent = await sendLarkResult(sender, target, {
         state: verifiedResult.outcome === 'completed' ? 'completed' : ['interrupted', 'cancelled'].includes(verifiedResult.outcome) ? 'interrupted' : 'failed',
         readOnly: true,
         retryable: false,
@@ -312,6 +316,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
         elements,
         idempotencyKey
       }, options.log, repos.config, beforeSend);
+      return { messageId: sent.messageId };
     } finally { context?.signal.removeEventListener('abort', abort); }
   };
   /** 计划的冻结回报位置；非飞书会话没有回报位置，返回 undefined。 */
@@ -360,6 +365,27 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       idempotencyKey: `schedule_overdue_${createHash('sha256').update(notice.occurrenceId).digest('hex').slice(0, 40)}`
     }, options.log, repos.config);
   };
+  /** 计划这次没做成：有上一条就改成最新说明，改不了（或没有）再回一条短的；返回之后要改的那条消息。 */
+  const onScheduleProblem = async (schedule: SessionSchedule, notice: { occurrenceId: string; text: string; messageId?: string }) => {
+    const destination = await scheduleNoticeTarget(schedule, '没做成提醒缺少冻结回报位置');
+    if (!destination) return 'not_requested' as const;
+    const { session, config, target } = destination;
+    if (!await authorize(schedule.sessionId, schedule.actorId)) throw new RuntimeError('AUTOMATION_DELIVERY_REVOKED', '没做成提醒的交付权限已撤销', 403);
+    const card = {
+      state: 'failed' as const, readOnly: true, retryable: false, taskName: schedule.name,
+      taskId: schedule.id, sessionId: schedule.sessionId, workspace: session.cwd, webBaseUrl: config.webBaseUrl,
+      elements: [{ tag: 'markdown', element_id: 'schedule_problem_notice', content: notice.text }]
+    };
+    const sender = client(config);
+    if (notice.messageId) {
+      try { return { messageId: (await sender.update({ ...card, messageId: notice.messageId })).messageId }; }
+      catch (error) { options.log.warn({ error, scheduleId: schedule.id, messageId: notice.messageId }, '改不了上一条定时说明，改为回一条'); }
+    }
+    const sent = await sendLarkResult(sender, { ...target, allowReplyFallback: false }, {
+      ...card, idempotencyKey: `schedule_problem_${createHash('sha256').update(notice.occurrenceId).digest('hex').slice(0, 40)}`
+    }, options.log, repos.config);
+    return { messageId: sent.messageId };
+  };
   const reconcileDisabledNotification = async (schedule: SessionSchedule) => {
     const notice = await disabledNotice(schedule);
     if (!notice) return true;
@@ -395,5 +421,5 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     }, options.log, repos.config);
     return sent.messageId;
   };
-  return { authorize, previewAuthorize: (sessionId: string, actorId?: string) => authorize(sessionId, actorId, undefined, true), prepareDelivery, prepareTaskDelivery, prepareMessageDelivery, sendScheduleRequest, deliver, notify, onScheduleDisabled, onScheduleOverdue, reconcileDisabledNotification };
+  return { authorize, previewAuthorize: (sessionId: string, actorId?: string) => authorize(sessionId, actorId, undefined, true), prepareDelivery, prepareTaskDelivery, prepareMessageDelivery, sendScheduleRequest, deliver, notify, onScheduleDisabled, onScheduleOverdue, onScheduleProblem, reconcileDisabledNotification };
 }
