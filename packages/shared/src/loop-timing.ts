@@ -7,7 +7,7 @@ export const SLOW_LOOP_WARN_MS = 500;
 /** While a loop stays slow, warn again at most this often, as one summary. */
 export const SLOW_LOOP_SUMMARY_MS = 3_600_000;
 
-/** Slow runs since the last warning, per loop name; a fast run ends the streak. */
+/** Slow runs since the last warning, per scope and loop name; a fast run ends the streak. */
 const slowStreaks = new Map<string, { warnedAt: number; durations: number[] }>();
 
 /**
@@ -16,19 +16,23 @@ const slowStreaks = new Map<string, { warnedAt: number; durations: number[] }>()
  * awaits). While the loop stays slow, later slow runs are folded into at most
  * one summary per `SLOW_LOOP_SUMMARY_MS` (count, p50, max); the next fast run
  * resets this. Returns the cycle's own result; sync and async cycles both work.
+ * `scope` separates instances of the same loop in one process (for example one per bot), so they do not reset each other.
  */
-export function timeLoop<T>(name: string, log: LoopTimingLog | undefined, run: () => T, thresholdMs = SLOW_LOOP_WARN_MS): T {
+export function timeLoop<T>(name: string, log: LoopTimingLog | undefined, run: () => T, thresholdMs = SLOW_LOOP_WARN_MS, scope?: string): T {
   const startedAt = performance.now();
+  const key = scope === undefined ? name : `${scope}\0${name}`;
+  const label = scope === undefined ? name : `${name}（${scope}）`;
+  const where = scope === undefined ? {} : { scope };
   const finish = () => {
     const finishedAt = performance.now();
     const durationMs = Math.round(finishedAt - startedAt);
-    if (durationMs < thresholdMs) { slowStreaks.delete(name); return; }
+    if (durationMs < thresholdMs) { slowStreaks.delete(key); return; }
     if (!log) return;
-    const streak = slowStreaks.get(name);
+    const streak = slowStreaks.get(key);
     try {
       if (!streak) {
-        slowStreaks.set(name, { warnedAt: finishedAt, durations: [] });
-        log.warn({ loop: name, durationMs, thresholdMs }, `周期循环 ${name} 单次耗时 ${durationMs}ms，超过 ${thresholdMs}ms`);
+        slowStreaks.set(key, { warnedAt: finishedAt, durations: [] });
+        log.warn({ loop: name, ...where, durationMs, thresholdMs }, `周期循环 ${label} 单次耗时 ${durationMs}ms，超过 ${thresholdMs}ms`);
         return;
       }
       streak.durations.push(durationMs);
@@ -39,8 +43,8 @@ export function timeLoop<T>(name: string, log: LoopTimingLog | undefined, run: (
       const minutes = Math.round((finishedAt - streak.warnedAt) / 60_000);
       streak.warnedAt = finishedAt;
       streak.durations = [];
-      log.warn({ loop: name, count: sorted.length, p50Ms, maxMs, thresholdMs },
-        `周期循环 ${name} 持续偏慢：近 ${minutes} 分钟又有 ${sorted.length} 次超过 ${thresholdMs}ms，p50 ${p50Ms}ms，最长 ${maxMs}ms`);
+      log.warn({ loop: name, ...where, count: sorted.length, p50Ms, maxMs, thresholdMs },
+        `周期循环 ${label} 持续偏慢：近 ${minutes} 分钟又有 ${sorted.length} 次超过 ${thresholdMs}ms，p50 ${p50Ms}ms，最长 ${maxMs}ms`);
     } catch { /* logging must not break the loop */ }
   };
   let result: T;

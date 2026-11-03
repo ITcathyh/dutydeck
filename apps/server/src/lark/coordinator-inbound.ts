@@ -512,7 +512,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     this.taskAgentTimer = setTimeout(() => {
       this.taskAgentTimer = undefined;
       if (this.stopped) return;
-      void timeLoop('lark.task-agent-poll', this.log, () => this.pollLarkTaskDispatches(config))
+      void timeLoop('lark.task-agent-poll', this.log, () => this.pollLarkTaskDispatches(config), undefined, config.appId)
         .catch(error => this.log.warn({ error, appId: config.appId }, '飞书任务智能体通道轮询失败，下一轮重试'))
         .finally(() => this.scheduleTaskAgentPoll(config));
     }, this.taskAgentIntervalMs);

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { dispositionSchema } from './lark/disposition.js';
 import { larkConfirmActionId } from './lark/confirm-cards.js';
@@ -18,6 +19,7 @@ export const WATCH_REPORT_MS = 24 * 60 * 60_000;
 export const WATCH_INBOX_MS = 60 * 60_000;
 export const WATCH_SCHEDULE_DISABLED_MS = 24 * 60 * 60_000;
 const STOP_BLOCK_PREFIX = 'runtime_driver_stop_block:';
+const RETRY_OCCURRENCE_PREFIX = 'occ_retry_';
 // Validate the read projection and strict disposition; leave all other execution fields untouched.
 const inboxProjection = z.object({
   appId: z.string(), state: z.enum(['unrouted', 'received', 'ignored', 'accepted', 'command', 'failed']),
@@ -34,8 +36,8 @@ const sessionLocation = (session: Session, bot?: StoredLarkConfig) => {
 };
 
 /**
- * 巡检私信的接收人：允许名单第一人 → 创建这个应用的人 → 唯一登记过的成员。登记了多人时分不出谁是部署者，宁可不发。
- * 发送前用同一个函数复核，接收人变了就不发旧批次。
+ * 巡检私信的接收人：允许名单第一人 → 创建这个应用的人。只认能管这个机器人的依据；群授权登记的成员（被拒也会登记）不算，
+ * 否则摘要里其他群的链接和会话编号会发给无关的人。发送前用同一个函数复核，接收人变了就不发旧批次。
  */
 export async function resolveWatchReceiver(config: ConfigRepository, bot: StoredLarkConfig): Promise<WatchReceiver | undefined> {
   const listed = bot.allowedUsers.find(user => /^(ou_|on_)/.test(user.openId))?.openId;
@@ -46,11 +48,7 @@ export async function resolveWatchReceiver(config: ConfigRepository, bot: Stored
     const userId = decode<{ userId?: string }>(await config.get(`lark.app_creation_owner.${job.id}`))?.userId;
     if (userId) return { id: userId, type: 'user_id' };
   }
-  const members = new Set((await config.list?.('lark.principal.') ?? []).flatMap(row => {
-    const member = decode<{ appId?: string; openId?: string }>(row.value);
-    return member?.appId === bot.appId && member.openId?.startsWith('ou_') ? [member.openId] : [];
-  }));
-  return members.size === 1 ? { id: [...members][0]!, type: 'open_id' } : undefined;
+  return undefined;
 }
 
 /** Read existing state only: no task mutation, recovery, retry, or config migration; the terminal probe only lists tmux sessions. */
@@ -193,12 +191,17 @@ export async function collectWatchScopes(repos: RepositoryBundle, bots: StoredLa
       });
     }
   }
-  const latestOccurrence = new Map<string, SessionScheduleOccurrence>();
+  const occurrences = new Map<string, SessionScheduleOccurrence>();
   for (const row of await repos.config.list?.('session_automation/occurrence/') ?? []) {
     const parsed = sessionScheduleOccurrenceSchema.safeParse(decode<unknown>(row.value));
-    if (!parsed.success) continue;
-    const latest = latestOccurrence.get(parsed.data.scheduleId);
-    if (!latest || parsed.data.scheduledForUtc > latest.scheduledForUtc) latestOccurrence.set(parsed.data.scheduleId, parsed.data);
+    if (parsed.success) occurrences.set(parsed.data.id, parsed.data);
+  }
+  // 原触发出错后在新会话重跑同一个计划时间（编号规则同 session-automation 的 retryOccurrenceId）：两条算一次运行，以重跑为准。
+  const latestOccurrence = new Map<string, SessionScheduleOccurrence>();
+  for (const occurrence of occurrences.values()) {
+    if (occurrences.has(RETRY_OCCURRENCE_PREFIX + createHash('sha256').update(occurrence.id).digest('hex'))) continue;
+    const latest = latestOccurrence.get(occurrence.scheduleId);
+    if (!latest || occurrence.scheduledForUtc > latest.scheduledForUtc) latestOccurrence.set(occurrence.scheduleId, occurrence);
   }
   for (const row of await repos.config.list?.('session_automation/schedule/') ?? []) {
     const raw = decode<unknown>(row.value);

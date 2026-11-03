@@ -1105,7 +1105,7 @@ export class LarkWorkflowInteractions {
     if (!due.length) return;
     const timer = setTimeout(() => {
       this.planTimers.delete(appId);
-      void timeLoop('lark.interaction-plan-check', this.log, () => this.reconcile(appId)).catch(() => this.schedulePlanCheck(appId));
+      void timeLoop('lark.interaction-plan-check', this.log, () => this.reconcile(appId), undefined, appId).catch(() => this.schedulePlanCheck(appId));
     }, Math.min(...due) - now + 1_000);
     timer.unref();
     this.planTimers.set(appId, timer);

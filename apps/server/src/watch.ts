@@ -206,7 +206,7 @@ export function checkWatchFindings(values: Readonly<Record<string, string | unde
   const unreachable = rows.flatMap(row => {
     const appId = row.key.slice(WATCH_PREFIX.length, -'/unreachable'.length);
     if (!row.key.endsWith('/unreachable') || !appId || appId.includes('/')) return [];
-    return readUnreachable(row.value) ? [`巡检无人接收：${appId} 没有可私信的接收人（允许名单、应用创建人、唯一登记成员都没有），发现只记在这里`] : [];
+    return readUnreachable(row.value) ? [`巡检无人接收：${appId} 没有可私信的接收人（允许名单和应用创建人都没有），发现只记在这里`] : [];
   });
   if (!findings.length && !unreachable.length) return { ...base, level: 'ok', detail: '没有未恢复的巡检问题（启动约 5 分钟后首次检查）' };
   return { ...base, level: 'warn', detail: [...unreachable, ...findings.map(f => `${f.title}；首次发现 ${f.firstSeenAt}；${f.location}${f.notificationUnknownAt ? '；巡检通知发送结果未知，不重复私信' : ''}`)].join('\n'),

@@ -9,7 +9,7 @@ import { larkNotice } from './notify-tier.js';
 import { describeUnknownTaskResolution, resolveUnknownTask, type UnknownTaskRuntime } from '../task-resolution.js';
 import type { LarkInboxRecord } from './task-inbox.js';
 import type { LarkLaunchOptions } from './new-session.js';
-import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, RuntimeError, unknownTaskActionLabels, unknownTaskRetryWarning, timeLoop, type AgentEvent, type ChannelMapping, type Session, type TaskRecord, type UnknownTaskAction, type UnknownTaskFacts } from '@dutydeck/shared';
+import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, RuntimeError, unknownTaskActionLabels, unknownTaskRetryWarning, timeLoop, type AgentEvent, type ChannelMapping, type ChannelMappingRepository, type Session, type TaskRecord, type UnknownTaskAction, type UnknownTaskFacts } from '@dutydeck/shared';
 import { larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
 import { larkPendingVerificationKey, parseLarkPendingVerifications } from './auto-verification.js';
 import { LarkServiceError } from './service.js';
@@ -79,7 +79,13 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     const cardMappings = this.cardMappings;
     if (!cardMappings) return 0;
     const fullScan = this.reconcileFullScan;
+    // 本轮开始就清掉，轮中来的唤醒会重新置上；整轮没跑完（读映射或回执失败）时还原，下一轮照样全量。
     this.reconcileFullScan = false;
+    try { return await this.reconcileRound(config, cardMappings, fullScan); }
+    catch (error) { if (fullScan) this.reconcileFullScan = true; throw error; }
+  }
+
+  private async reconcileRound(config: StoredLarkConfig, cardMappings: ChannelMappingRepository, fullScan: boolean) {
     const pending = new Map<string, boolean>();
     let unresolved = await timeLoop('lark.reconcile.cards', this.log, () => performLarkCardReconcile({
       ...(fullScan ? {} : { only: new Set(this.reconcilePending.keys()) }),
@@ -134,7 +140,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
           cardInput: { ...(effective.adhdMode === true ? { adhdMode: true } : {}), capabilities: { ...this.capabilitiesForTask(restored), ...verification.capabilities, ...await this.resultActionCapabilities(restored, effective, saved.state),
             ...cause ? { canContinueInPlace: true } : {} } } };
       }
-    }));
+    }), undefined, config.appId);
     this.reconcilePending = pending;
     // Completed tasks need evidence repair too; never infer it from prompts or current settings.
     const repairAuthorization = fullScan || this.reconcileAuthorizationRetry;
@@ -152,7 +158,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
           chatId: inbox.event.chatId, recordedAt: new Date().toISOString() });
       } catch (error) { unresolved++; this.reconcileAuthorizationRetry = true; this.log.warn({ error, messageId: mapping.externalId }, '授权依据补记待重试'); }
     }
-    unresolved += await timeLoop('lark.reconcile.interactions', this.log, async () => await this.workflows?.reconcile(config.appId) ?? 0);
+    unresolved += await timeLoop('lark.reconcile.interactions', this.log, async () => await this.workflows?.reconcile(config.appId) ?? 0, undefined, config.appId);
     let textReceiptReader: Awaited<ReturnType<typeof explicitFinalTextReceiptReader>> | undefined;
     for (const record of await this.workflows?.list(config.appId) ?? []) {
       if (record.kind !== 'result' || !['accepted', 'needs_changes'].includes(record.state)) continue;
@@ -168,7 +174,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   reconcile(config: StoredLarkConfig) {
     this.reconcileConfig = config;
     if (this.reconcileRun) return this.reconcileRun;
-    const run = timeLoop('lark.reconcile', this.log, () => this.performReconcile(config)).finally(() => {
+    const run = timeLoop('lark.reconcile', this.log, () => this.performReconcile(config), undefined, config.appId).finally(() => {
       if (this.reconcileRun === run) this.reconcileRun = undefined;
     });
     this.reconcileRun = run;

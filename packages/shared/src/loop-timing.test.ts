@@ -39,6 +39,18 @@ describe('timeLoop', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('keeps a separate slow streak per scope, so another bot running the same loop fast does not reset it', () => {
+    vi.useFakeTimers({ toFake: ['performance', 'Date'] });
+    try {
+      const warn = vi.fn();
+      const cycle = (scope: string, ms: number) => { timeLoop('lark.reconcile', { warn }, () => { vi.advanceTimersByTime(ms); }, 500, scope); vi.advanceTimersByTime(3_000); };
+      for (let round = 0; round < 20; round++) { cycle('cli_slow', 1_500); cycle('cli_fast', 10); }
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0]![0]).toMatchObject({ loop: 'lark.reconcile', scope: 'cli_slow' });
+      expect(warn.mock.calls[0]![1]).toContain('cli_slow');
+    } finally { vi.useRealTimers(); }
+  });
+
   it('measures a failing cycle and rethrows its error; a throwing log sink does not break the loop', async () => {
     const warn = vi.fn(() => { throw new Error('sink down'); });
     await expect(timeLoop('failing', { warn }, async () => { await sleep(30); throw new Error('boom'); }, 10)).rejects.toThrow('boom');

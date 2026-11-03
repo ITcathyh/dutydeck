@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { larkConfirmActionId } from './lark/confirm-cards.js';
 import { DutydeckWatch } from './watch.js';
 import { createRepositories } from '@dutydeck/storage';
@@ -367,15 +368,14 @@ describe('watch accuracy, receivers and runtime signals', () => {
     expect((await h.collect())[0]?.signals.map(signal => signal.objectId)).toEqual(['human']);
   });
 
-  it('falls back from the allowlist to the app creator and then the single registered member', async () => {
+  it('falls back from the allowlist only to the app creator, never to a registered group member', async () => {
     const h = fixture();
     const open = { ...bot, allowedUsers: [] };
     expect(await resolveWatchReceiver(h.repos.config, open)).toBeUndefined();
-    h.values.set('lark.principal.p_other_app', JSON.stringify({ appId: 'cli_other', openId: 'ou_elsewhere' }));
-    h.values.set('lark.principal.p_member', JSON.stringify({ appId: bot.appId, openId: 'ou_member' }));
-    expect(await resolveWatchReceiver(h.repos.config, open)).toEqual({ id: 'ou_member', type: 'open_id' });
-    h.values.set('lark.principal.p_second', JSON.stringify({ appId: bot.appId, openId: 'ou_second' }));
+    // 群授权会先登记发请求的人再判定（被拒也登记），登记不代表能管这个机器人。
+    h.values.set('lark.principal.p_member', JSON.stringify({ appId: bot.appId, openId: 'ou_denied_member', name: 'ou_denied_member' }));
     expect(await resolveWatchReceiver(h.repos.config, open)).toBeUndefined();
+    expect((await h.collect([open]))[0]?.ownerId).toBeUndefined();
     h.values.set('lark.app_creation.job_other', JSON.stringify({ id: 'job_other', appId: 'cli_other', status: 'completed' }));
     h.values.set('lark.app_creation_owner.job_other', JSON.stringify({ userId: 'u_other', tenantId: '1' }));
     h.values.set('lark.app_creation.job', JSON.stringify({ id: 'job', appId: bot.appId, status: 'completed' }));
@@ -400,6 +400,22 @@ describe('watch accuracy, receivers and runtime signals', () => {
       title: expect.stringContaining('出错') })]);
     h.values.set('session_automation/schedule/' + schedule.id, JSON.stringify({ ...schedule, enabled: false }));
     expect((await h.collect())[0]?.signals.some(signal => signal.kind === 'schedule_error')).toBe(false);
+  });
+
+  it('treats a fresh-session retry of the same trigger as the final result of that run', async () => {
+    const h = fixture();
+    h.values.set('session_automation/schedule/' + schedule.id, JSON.stringify({ ...schedule, nextDueAt: new Date(now.getTime() + 3600_000).toISOString() }));
+    const occurrence = (id: string, runStatus: string) => h.values.set('session_automation/occurrence/' + id, JSON.stringify({
+      schemaVersion: 2, id, revision: 1, scheduleId: schedule.id, sessionId: session.id, generation: 1, scheduledForUtc: ago(3600_000), conditionStatus: 'passed', runStatus,
+      delivery: { status: 'not_requested', attempts: 0, updatedAt: ago(1) }, createdAt: ago(3600_000), updatedAt: ago(1) }));
+    const original = 'occ_0000000000000000000000000000000000000000';
+    occurrence(original, 'error');
+    expect((await h.collect())[0]?.signals.map(signal => signal.kind)).toEqual(['schedule_error']);
+    const retry = 'occ_retry_' + createHash('sha256').update(original).digest('hex');
+    occurrence(retry, 'completed');
+    expect((await h.collect())[0]?.signals).toEqual([]);
+    occurrence(retry, 'error');
+    expect((await h.collect())[0]?.signals.map(signal => signal.kind)).toEqual(['schedule_error']);
   });
 
   it('reports schedules that were never enabled 24 hours after creation', async () => {

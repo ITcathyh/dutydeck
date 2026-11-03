@@ -1470,3 +1470,36 @@ describe('卡片对账的收敛、退避与事件唤醒', () => {
     } finally { h.coordinator.stop(); }
   });
 });
+
+it('新卡唤醒的全量对账读映射失败时，退避后的下一轮仍全量扫描，不漏掉新卡', async () => {
+  vi.useFakeTimers();
+  try {
+    const rows: ChannelMapping[] = [];
+    const mappings = {
+      list: vi.fn(async () => rows.map(row => ({ ...row }))),
+      get: vi.fn(async (_channel: string, externalId: string) => rows.find(row => row.externalId === externalId)),
+      save: vi.fn(async () => {}),
+      compareAndSetExtra: vi.fn(async (id: string, expected: string | null | undefined, extra: string) => {
+        const row = rows.find(item => item.id === id);
+        if (!row || (row.extra ?? null) !== (expected ?? null)) return false;
+        row.extra = extra; return true;
+      })
+    };
+    const task = runtimeTask({ id: 'rt_new', sessionId: 'ses_1', status: 'queued' });
+    const runtime = { getTasks: vi.fn(async () => [{ ...task }]), getEvents: vi.fn(async () => []), getTaskRecovery: vi.fn(async () => ({ status: task.status, blockers: [], resolvedUnknown: false })),
+      getSession: vi.fn(async () => undefined), subscribe: vi.fn(() => vi.fn()) };
+    const coordinator = coordinatorFor(runtime, cardService(), mappings);
+    try {
+      await expect(coordinator.startReconciliation(config)).resolves.toBe(0);
+      rows.push({ id: 'lark-card:cli_test:om_new', channel: 'lark-card:cli_test', externalId: 'om_new', sessionId: 'ses_1', createdAt: '2026-01-01T00:00:00.000Z',
+        extra: JSON.stringify(persistedCard({ runtime_task_id: task.id, state: 'queued', progress_frozen: true })) });
+      mappings.list.mockRejectedValueOnce(new Error('database busy'));
+      (coordinator as any).scheduleReconcile();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(mappings.list).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(mappings.list).toHaveBeenCalledTimes(3);
+      expect(runtime.getTasks).toHaveBeenCalled();
+    } finally { coordinator.stop(); }
+  } finally { vi.useRealTimers(); }
+});
